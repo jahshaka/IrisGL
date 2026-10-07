@@ -9,6 +9,7 @@
 #include "HlmsAtom.h"
 #include "EnginePrivate.h"
 #include "photon/voxel/PhotonPassBinding.h"
+#include "SceneLightList.h"
 
 #include <CommandBuffer/OgreCbShaderBuffer.h>
 #include <CommandBuffer/OgreCbTexture.h>
@@ -912,15 +913,13 @@ void HlmsAtom::uploadBucketTable() {
 void HlmsAtom::buildWorldLights(Ogre::SceneManager *sm, WorldLights &out) {
     const std::vector<const Ogre::Light *> &casting = out.casting;
     const Ogre::uint32 cap = out.cap;
-    struct Entry {
-        const Ogre::Light *light = nullptr;
-        float power = 0.0f;
-    };
-    std::vector<Entry> lights;
+    // THE SCENE'S ONE LIGHT LIST (P1C-LIGHT-LIST, SceneLightList.h) in its shared
+    // order — brightest first, the id as the tie — filtered to what this list holds.
+    // No range cull and no budget: a hit can be anywhere in the world, and the
+    // shader takes at most `cap` of the ones whose range contains it.
+    std::vector<const Ogre::Light *> lights;
     const Ogre::uint32 mask = sm->getLightMask();
-    Ogre::SceneManager::MovableObjectIterator it = sm->getMovableObjectIterator(Ogre::LightFactory::FACTORY_TYPE_NAME);
-    while (it.hasMoreElements()) {
-        const Ogre::Light *l = static_cast<const Ogre::Light *>(it.getNext());
+    for (const Ogre::Light *l : sceneLightListOf(sm).byRank(sm)) {
         if (l->getType() != Ogre::Light::LT_POINT && l->getType() != Ogre::Light::LT_SPOTLIGHT) continue;
         if (!l->isAttached() || !l->getVisible() || !(l->getVisibilityFlags() & mask)) continue;
         if (std::find(casting.begin(), casting.end(), l) != casting.end()) continue;
@@ -929,12 +928,8 @@ void HlmsAtom::buildWorldLights(Ogre::SceneManager *sm, WorldLights &out) {
         const float power = std::max(std::max(d.r, d.g), d.b);
         if (!(power > 0.0f) && !(std::max(std::max(sp.r, sp.g), sp.b) > 0.0f)) continue;
         if (!(l->getAttenuationRange() > 0.0f)) continue;
-        lights.push_back({ l, power });
+        lights.push_back(l);
     }
-    std::sort(lights.begin(), lights.end(), [](const Entry &a, const Entry &b) {
-        if (a.power != b.power) return a.power > b.power;
-        return a.light->getId() < b.light->getId();
-    });
     const float invHeightProfiles = Ogre::Root::getSingleton().getLightProfilesInvHeight();
     std::vector<float> &data = out.data;
     data.clear();
@@ -945,8 +940,7 @@ void HlmsAtom::buildWorldLights(Ogre::SceneManager *sm, WorldLights &out) {
     data.push_back(bits(cap));
     data.push_back(0.0f);
     data.push_back(0.0f);
-    for (const Entry &e : lights) {
-        const Ogre::Light *l = e.light;
+    for (const Ogre::Light *l : lights) {
         const Ogre::Vector3 p = l->getParentNode()->_getDerivedPosition();
         data.insert(data.end(), { float(p.x), float(p.y), float(p.z), float(l->getType()) });
         const Ogre::ColourValue d = l->getDiffuseColour() * l->getPowerScale();

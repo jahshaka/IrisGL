@@ -25,6 +25,8 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
     // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
     mGiBinding.lightWriteSerial = &mGiLightWriteSerial;
     mGiBinding.lightsRemoved = &mLightsRemoved;
+    mLightList.bindDirt(&mGiLightWriteSerial, &mLightsRemoved);
+    mGiBinding.lightList = &mLightList;
     registerSceneGiBinding(mSceneMgr, &mGiBinding);
     // WHICH SCENE A SHADOW NODE'S CASTER PASS DRAWS (ATOM-SHADOWS-1): the recorder is
     // handed the pass's scene manager.
@@ -1619,6 +1621,7 @@ void OgreScene::destroy() {
     } JAH_CATCH(mError, );
     FogHlmsListener::unregisterScene(mSceneMgr);
     unregisterSceneGiBinding(mSceneMgr);
+    mLightList.reset();
     atomUnregisterScene(mSceneMgr);
     mSceneMgr = nullptr;
 }
@@ -1913,18 +1916,16 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
 // inside Root's frame, after `updateSceneGraph`, as the first workspace in the
 // manager's list (OgreSurfaceCache.cpp, makeWorkspace — the shadow fix).
 // THE RADIANCE SIGNATURE'S LIGHT HALF (updateSurfaceCache): what a card's LIT
-// radiance depends on, EVERY light's pose and shadow key (the relight lights a
-// card with every lamp, unculled) plus colour, power, reach and cone. A change
+// radiance depends on, EVERY light's pose and shadow key (any lamp may reach a
+// relit card: a superset of the relight's culled list) plus colour, power, reach and cone. A change
 // relights the resident set under the relight's own budget and CAPTURES
 // NOTHING: no light quantity is in a capture (ATOM-S3-CARDCAP — the sun's
 // visibility is traced, SurfaceCache::traceSun, which follows the sun's
 // direction itself). Over `mLightNodes`, the engine's own light index (a hint
 // that is a superset), so this is a handful of quantised folds and not a walk
-// of the node map. `lights` receives the lights themselves, for the relight
-// job: EVERY light node, world space, unculled — the frame's global list is
-// culled against the frame's cameras, and a card lights surfaces off screen.
-unsigned long long OgreScene::walkCardLights(std::vector<Ogre::Light *> &lights) const {
-    lights.clear();
+// of the node map. (The relight's lights themselves are the scene's one light
+// list, SceneLightList.h, selected by the cache.)
+unsigned long long OgreScene::walkCardLights() const {
     unsigned long long radianceSig = 1469598103934665603ull;
     const auto foldInto = [](unsigned long long &sig, unsigned long long v) {
         sig ^= v;
@@ -1966,7 +1967,6 @@ unsigned long long OgreScene::walkCardLights(std::vector<Ogre::Light *> &lights)
         foldR(l->getSpotlightInnerAngle().valueRadians());
         foldR(l->getSpotlightOuterAngle().valueRadians());
         foldR(l->getSpotlightFalloff());
-        lights.push_back(lit->second.light);
     }
     return radianceSig;
 }
@@ -2051,11 +2051,10 @@ void OgreScene::updateSurfaceCache() {
     if (keyMoved || mCardLightKeyMovedLastFrame) {
         std::memcpy(mCardLightKey, lightKey, sizeof lightKey);
         mCardLightFoldValid = true;
-        mCardLightFold = walkCardLights(mCardLights);
+        mCardLightFold = walkCardLights();
     }
     mCardLightKeyMovedLastFrame = keyMoved;
     unsigned long long radianceSig = mCardLightFold;
-    view.lights = mCardLights;
     view.rayFootprintPerMetre = mRayFootprintPerMetre;
     lightStage.reset();
     // THE CLOUD SHADOW (CLOUDS-2D-2): the snapshot the voxels are injected

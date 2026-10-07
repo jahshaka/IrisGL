@@ -3927,8 +3927,12 @@ struct CardCacheStatus {
     unsigned long long indirectRelights = 0ull;
     unsigned long long invalidIndirect = 0ull;
     bool indirectOn = false;
-    /// Lights the relight job could not hold (past its 64) at the last relight;
-    /// the engine log says so once per cache.
+    /// THE RELIGHT'S LIGHTS (P1C-LIGHT-LIST), selected from the scene's one light
+    /// list at the last relight: the directional, point and spot lights whose range
+    /// reaches the box of the cards it relit (`lightsInRange`), and the ones the
+    /// job's 64 could not hold — the dimmest at that box (`lightsDropped`; the
+    /// engine log says so once per cache).
+    unsigned lightsInRange = 0u;
     unsigned lightsDropped = 0u;
     /// THE STILL WORLD'S SUN TERM (ATOM-S3-CARDCAP): one ray per card texel towards
     /// the sun against the still world's shadow casters (`kRayMaskStillCaster`),
@@ -4397,16 +4401,17 @@ struct GiStatus {
         /// capacity is a bound (every instance at its finest level's partition
         /// count), so a non-zero here is a defect, and it is logged critically.
         long long voxelOverflow = 0;
-        /// THE LIGHT SLOTS (V2-P0A, the scale suite's W2 row), as this cascade's
-        /// last light injection read them: the lights whose range reaches its box
-        /// (a directional always does; a point/spot/area light whose range sphere
-        /// misses the box is culled and not counted), how many of those took a slot
-        /// of the injection's light buffer, and the buffer's slot count. The ones
-        /// over the capacity are DROPPED, first come first served: their light
-        /// never enters the voxels, so their bounce is missing from the picture.
+        /// THE CASCADE'S LIGHTS (P1C-LIGHT-LIST), as its last light injection selected
+        /// them from the scene's one light list: the lights whose range reaches its
+        /// box (a directional always does; a point/spot/area light whose range
+        /// sphere misses the box lights nothing in it and is not counted), how many
+        /// of those took a slot, the per-cascade budget (the slots), and the ones
+        /// OVER it — the dimmest at the cascade by the one falloff, whose bounce is
+        /// missing from this cascade's voxels (the engine log says so once a cascade).
         int lightsInRange = 0;
         int lightsInjected = 0;
         int lightCapacity = 0;
+        int lightsOverBudget = 0;
     };
     /// The live cascade chain, innermost first — the voxels of every Vct and
     /// VctPccHybrid scene. Empty while GI is off or the chain waits for a camera

@@ -559,7 +559,6 @@ void SurfaceCache::destroyAll() {
     mBatch.clear();
     mRelight.clear();
     mRelightMode.clear();
-    mLights.clear();
     mMoverLast.clear();
     mMovers.clear();
     mVct = nullptr;
@@ -1187,7 +1186,6 @@ constexpr unsigned kLightFloats = 20u;
 void SurfaceCache::planRelights(const CardSceneView &view) {
     mRelight.clear();
     mRelightMode.clear();
-    mLights = view.lights;
     mVct = view.vct;
     mCloudField = view.cloudField;
     for (int k = 0; k < 4; ++k) { mCloudMap[k] = view.cloudMap[k]; mCloudSun[k] = view.cloudSun[k]; }
@@ -1307,13 +1305,13 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
 }
 
 void SurfaceCache::relightCards() {
-    if (mRelight.empty() || !mRadiance) { mLights.clear(); mVct = nullptr; return; }
+    if (mRelight.empty() || !mRadiance) { mVct = nullptr; return; }
     const auto t0 = std::chrono::steady_clock::now();
     Ogre::Root &root = Ogre::Root::getSingleton();
     Ogre::RenderSystem *rs = root.getRenderSystem();
     Ogre::HlmsCompute *hc = root.getHlmsManager()->getComputeHlms();
     if (!mLightJob) mLightJob = hc ? hc->findComputeJobNoThrow("Jahshaka/CardLight") : nullptr;
-    if (!mLightJob) { mRelight.clear(); mLights.clear(); mVct = nullptr; return; }
+    if (!mLightJob) { mRelight.clear(); mVct = nullptr; return; }
     Ogre::VaoManager *vao = rs->getVaoManager();
 
     // ---- THE RELIGHT LIST: each card's capture frame, as the job unprojects it.
@@ -1334,26 +1332,50 @@ void SurfaceCache::relightCards() {
     }
 
     // ---- THE LIGHTS, in world space, in the pass buffer's layout, from the
-    // SCENE — every light node, handed over by OgreScene::updateSurfaceCache —
-    // and NEVER from the frame's global list: that list is culled against the
-    // frame's visible cameras, and a card lights a surface OFF screen (the
-    // reader is a ray hit), so a lamp no camera sees this frame must still
-    // light it. ONE source, the sun included: the one light whose visibility is
-    // the captured shadow term is the light the capture's shadow node gave its
-    // PSSM maps, which is the frame's rule applied to the same list — the first
-    // visible shadow-casting directional light in creation order
+    // SCENE'S ONE LIGHT LIST (P1C-LIGHT-LIST, SceneLightList.h) — never from the
+    // frame's global list: that list is culled against the frame's visible
+    // cameras, and a card lights a surface OFF screen (the reader is a ray hit),
+    // so a lamp no camera sees this frame must still light it. The list is
+    // range-culled against the box of THIS FRAME'S RELIT CARDS (each card's capture
+    // volume; a light whose range misses every one of them lights no texel the job
+    // writes — the shader's own per-texel range test says the same) and, past the
+    // job's 64, the 64 with the most irradiance at that box (the one falloff,
+    // floored at the largest relit card's texel), the rest COUNTED (lightsDropped).
+    // P2d makes it per card. ONE source, the sun included: the one light whose
+    // visibility is the captured shadow term is the light the capture's shadow
+    // node gave its PSSM maps, which is the frame's rule applied to the same list
+    // — the first visible shadow-casting directional light in creation order
     // (SceneManager::quickSortDirectionalLights: casters first, then by id).
+    // Area lights are not summed (JahCardLight_cs.glsl says so).
     const Ogre::Light *sun = cardSun();
+    SceneLightList::Consumer consumer;
+    consumer.area = false;
+    consumer.budget = kMaxCardLights;
+    {
+        Ogre::Vector3 lo(std::numeric_limits<float>::max()), hi(-std::numeric_limits<float>::max());
+        float texel = 0.0f;
+        for (unsigned idx : mRelight) {
+            const CardRec &c = mCards[idx];
+            const float hd = c.halfDepth + captureMargin(c.halfDepth);
+            const Ogre::Vector3 ext(
+                std::fabs(c.u.x) * c.halfU + std::fabs(c.v.x) * c.halfV + std::fabs(c.d.x) * hd,
+                std::fabs(c.u.y) * c.halfU + std::fabs(c.v.y) * c.halfV + std::fabs(c.d.y) * hd,
+                std::fabs(c.u.z) * c.halfU + std::fabs(c.v.z) * c.halfV + std::fabs(c.d.z) * hd);
+            lo.makeFloor(c.centre - ext);
+            hi.makeCeil(c.centre + ext);
+            texel = std::max(texel, 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size)));
+        }
+        consumer.boxMin = lo;
+        consumer.boxMax = hi;
+        consumer.floorDistance = texel;
+    }
+    SceneLightList::Selection chosen;
+    sceneLightListOf(mSceneMgr).select(mSceneMgr, consumer, chosen);
     mLightCpu.assign(4u + size_t(kMaxCardLights) * kLightFloats, 0.0f);
     unsigned numLights = 0u;
-    unsigned dropped = 0u;
-    for (const Ogre::Light *l : mLights) {
-        if (!l || !l->getVisible()) continue;
+    const unsigned dropped = chosen.overBudget;
+    for (const Ogre::Light *l : chosen.lights) {
         const Ogre::Light::LightTypes type = l->getType();
-        if (type != Ogre::Light::LT_DIRECTIONAL && type != Ogre::Light::LT_POINT &&
-            type != Ogre::Light::LT_SPOTLIGHT)
-            continue;   // area lights: not summed (JahCardLight_cs.glsl says so)
-        if (numLights >= kMaxCardLights) { ++dropped; continue; }
         float *o = &mLightCpu[4u + size_t(numLights) * kLightFloats];
         const Ogre::ColourValue c = l->getDiffuseColour() * l->getPowerScale();
         if (type == Ogre::Light::LT_DIRECTIONAL) {
@@ -1380,12 +1402,14 @@ void SurfaceCache::relightCards() {
         ++numLights;
     }
     // A LIGHT THE JOB CANNOT HOLD is counted every frame and SAID once per cache.
+    mLightsInRange = chosen.inRange;
     mLightsDropped = dropped;
     if (dropped && !mLightsDroppedLogged) {
         mLightsDroppedLogged = true;
         Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka cards: " + std::to_string(dropped) + " light(s) beyond the card relight's " +
-            std::to_string(kMaxCardLights) + " were not summed into the card radiance");
+            "Jahshaka cards: " + std::to_string(dropped) + " of " + std::to_string(chosen.inRange) +
+            " light(s) in range of the relit cards are beyond the card relight's " +
+            std::to_string(kMaxCardLights) + " (the dimmest there) and were not summed into the card radiance");
     }
     const Ogre::uint32 count[4] = { numLights, 0u, 0u, 0u };
     std::memcpy(mLightCpu.data(), count, sizeof(count));
@@ -1612,7 +1636,6 @@ void SurfaceCache::relightCards() {
     }
     mRelight.clear();
     mRelightMode.clear();
-    mLights.clear();
     mVct = nullptr;
     mLightMs = float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
@@ -1726,9 +1749,10 @@ bool shades(const Footprint &caster, const Footprint &card) {
 
 const Ogre::Light *SurfaceCache::cardSun() const {
     const Ogre::Light *sun = nullptr;
-    for (const Ogre::Light *l : mLights) {
-        if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL || !l->getCastShadows() ||
-            !l->getVisible())
+    if (!mSceneMgr) return nullptr;
+    for (const SceneLightList::Entry &e : sceneLightListOf(mSceneMgr).entries(mSceneMgr)) {
+        const Ogre::Light *l = e.light;
+        if (l->getType() != Ogre::Light::LT_DIRECTIONAL || !l->getCastShadows() || !l->getVisible())
             continue;
         if (!sun || l->getId() < sun->getId()) sun = l;
     }
@@ -1745,8 +1769,8 @@ float SurfaceCache::sunLiftOf(const CardRec &c) const {
 }
 
 void SurfaceCache::traceSun() {
-    // THIS FRAME ONLY: `mLights` is the frame's list only when update() planned
-    // this frame (workspacePreUpdate drops a stale plan the same way).
+    // THIS FRAME ONLY: the batch is the frame's only when update() planned this
+    // frame (workspacePreUpdate drops a stale plan the same way).
     // A batch that cannot be traced this frame waits for its still term.
     const auto batchWaits = [this]() {
         for (unsigned idx : mBatch) {
@@ -2304,6 +2328,7 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.relitTexelsLastFrame = mRelitTexelsLastFrame;
     out.relights = mRelights;
     out.invalidRadiance = mInvalidRadiance;
+    out.lightsInRange = mLightsInRange;
     out.lightsDropped = mLightsDropped;
     out.indirectBudgetTexels = mIndirectBudget;
     out.indirectLastFrame = mIndirectLastFrame;

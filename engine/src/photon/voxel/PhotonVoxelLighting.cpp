@@ -33,10 +33,13 @@ THE SOFTWARE.
 #include "photon/voxel/PhotonVoxelizerSourceBase.h"
 #include "photon/voxel/PhotonVoxelVisualizer.h"
 
+#include "SceneLightList.h"
+
 #include "OgreHlmsCompute.h"
 #include "OgreHlmsComputeJob.h"
 #include "OgreHlmsManager.h"
 #include "OgreLight.h"
+#include "OgreLogManager.h"
 #include "OgreLwString.h"
 #include "OgrePixelFormatGpuUtils.h"
 #include "OgreRenderSystem.h"
@@ -148,8 +151,11 @@ namespace Ogre
 
         RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
         VaoManager *vaoManager = renderSystem->getVaoManager();
-        mLightsConstBuffer = vaoManager->createConstBuffer( sizeof( PhotonShaderVoxelLight ) * 16u,
+        // THE PER-CASCADE LIGHT BUDGET (P1C-LIGHT-LIST): the const buffer and the shader's
+        // array (LightInjection_piece_cs's vct_light_budget) hold kLightBudget lights.
+        mLightsConstBuffer = vaoManager->createConstBuffer( sizeof( PhotonShaderVoxelLight ) * kLightBudget,
                                                             BT_DYNAMIC_PERSISTENT, 0, false );
+        mLightInjectionJob->setProperty( "vct_light_budget", static_cast<int32>( kLightBudget ) );
 
         HlmsManager *hlmsManager = mVoxelizer->getHlmsManager();
         HlmsSamplerblock samplerblock;
@@ -229,18 +235,6 @@ namespace Ogre
                 mLightVctBounceInject->setTexture( 2, texSlot, mSamplerblockTrilinear );
             }
         }
-    }
-    //-------------------------------------------------------------------------
-    /// Whether a point or spot light's range sphere touches the box
-    /// [origin, origin + size] (the closest point of the box to the light).
-    static bool rangeTouchesCascade( const Light *light, const Vector3 &origin, const Vector3 &size )
-    {
-        const Vector3 p = light->getParentNode()->_getDerivedPosition();
-        const Real r = light->getAttenuationRange();
-        Vector3 closest = p;
-        closest.makeCeil( origin );
-        closest.makeFloor( origin + size );
-        return closest.squaredDistance( p ) <= r * r;
     }
     //-------------------------------------------------------------------------
     float PhotonVoxelLighting::addLight( PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight, Light *light,
@@ -1240,12 +1234,6 @@ namespace Ogre
     }
     //-------------------------------------------------------------------------
     bool PhotonVoxelLighting::getAllowMultipleBounces() const { return mLightBounce != 0; }
-    uint32 PhotonVoxelLighting::getLightCapacity() const
-    {
-        return mLightsConstBuffer ? static_cast<uint32>( mLightsConstBuffer->getNumElements() /
-                                                         sizeof( PhotonShaderVoxelLight ) )
-                                  : 0u;
-    }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::setBakingMultiplier( float bakingMult ) { mBakingMultiplier = bakingMult; }
     //-------------------------------------------------------------------------
@@ -1347,65 +1335,43 @@ namespace Ogre
 
         PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight = reinterpret_cast<PhotonShaderVoxelLight *>(
             mLightsConstBuffer->map( 0, mLightsConstBuffer->getNumElements() ) );
+        // THE CASCADE'S LIGHTS (P1C-LIGHT-LIST): the scene's one light list
+        // (SceneLightList.h), range-culled against this cascade's box — a point, spot
+        // or area light whose range sphere misses it lights none of its voxels (the
+        // falloff is zero past the range), so it takes no slot and costs no march —
+        // and, when more reach it than the budget holds, the budget's worth with the
+        // most irradiance at the box (the one falloff, floored at a voxel cell),
+        // emitted in the light memory manager's order. The lights over the budget are
+        // counted (getLastLightsOverBudget, GiStatus) and logged, never dropped silently.
+        const Vector3 cellSize = mVoxelizer->getVoxelCellSize();
+        jahshaka::engine::SceneLightList::Consumer consumer;
+        consumer.boxMin = voxelOrigin;
+        consumer.boxMax = voxelOrigin + cascadeSize;
+        consumer.floorDistance = static_cast<float>( std::max( cellSize.x, std::max( cellSize.y, cellSize.z ) ) );
+        consumer.budget = kLightBudget;
+        consumer.lightMask = _lightMask;
+        jahshaka::engine::sceneLightListOf( sceneManager ).select( sceneManager, consumer, mSelection );
+
         uint32 numCollectedLights = 0;
-        uint32 numLightsInRange = 0;
-        const uint32 maxNumLights =
-            static_cast<uint32>( mLightsConstBuffer->getNumElements() / sizeof( PhotonShaderVoxelLight ) );
-
-        const uint32 lightMask = _lightMask & VisibilityFlags::RESERVED_VISIBILITY_FLAGS;
-
-        ObjectMemoryManager &memoryManager = sceneManager->_getLightMemoryManager();
-        const size_t numRenderQueues = memoryManager.getNumRenderQueues();
-
-        for( size_t i = 0; i < numRenderQueues; ++i )
+        for( Light *light : mSelection.lights )
         {
-            ObjectData objData;
-            const size_t totalObjs = memoryManager.getFirstObjectData( objData, i );
-
-            // EVERY LIGHT IS WALKED (V2-P0A): the slots still fill first come first
-            // served and stop at maxNumLights exactly as before, but the walk goes on
-            // so the lights the cap DROPS are counted (getLastLightsInRange).
-            for( size_t j = 0; j < totalObjs; j += ARRAY_PACKED_REALS )
-            {
-                for( size_t k = 0; k < ARRAY_PACKED_REALS; ++k )
-                {
-                    uint32 *RESTRICT_ALIAS visibilityFlags = objData.mVisibilityFlags;
-
-                    if( visibilityFlags[k] & VisibilityFlags::LAYER_VISIBILITY &&
-                        visibilityFlags[k] & lightMask )
-                    {
-                        Light *light = static_cast<Light *>( objData.mOwner[k] );
-                        // THE RANGE CULL (IMAGE-1): a point, spot or area light whose
-                        // range sphere misses this cascade's box lights none of
-                        // its voxels (the falloff is zero past the range), so it
-                        // takes no slot and costs no march.
-                        if( ( light->getType() == Light::LT_POINT ||
-                              light->getType() == Light::LT_SPOTLIGHT ||
-                              light->getType() == Light::LT_AREA_APPROX ||
-                              light->getType() == Light::LT_AREA_LTC ) &&
-                            !rangeTouchesCascade( light, voxelOrigin, cascadeSize ) )
-                        {
-                            continue;
-                        }
-                        if( light->getType() == Light::LT_DIRECTIONAL ||
-                            light->getType() == Light::LT_POINT ||
-                            light->getType() == Light::LT_SPOTLIGHT ||
-                            light->getType() == Light::LT_AREA_APPROX ||
-                            light->getType() == Light::LT_AREA_LTC )
-                        {
-                            ++numLightsInRange;
-                            if( numCollectedLights >= maxNumLights )
-                                continue;   // the cap: counted, never injected
-                            const float maxVal = addLight( vctLight, light, voxelOrigin, invVoxelSize );
-                            autoMultiplierValue = std::max( autoMultiplierValue, maxVal );
-                            ++vctLight;
-                            ++numCollectedLights;
-                        }
-                    }
-                }
-
-                objData.advancePack();
-            }
+            const float maxVal = addLight( vctLight, light, voxelOrigin, invVoxelSize );
+            autoMultiplierValue = std::max( autoMultiplierValue, maxVal );
+            ++vctLight;
+            ++numCollectedLights;
+        }
+        mLastLightsInRange = mSelection.inRange;
+        mLastLightsInjected = numCollectedLights;
+        mLastLightsOverBudget = mSelection.overBudget;
+        if( mSelection.overBudget && !mOverBudgetLogged )
+        {
+            mOverBudgetLogged = true;
+            LogManager::getSingleton().logMessage(
+                "Jahshaka GI: " + StringConverter::toString( mSelection.overBudget ) + " of the " +
+                StringConverter::toString( mSelection.inRange ) +
+                " lights in range of a voxel cascade are over its budget of " +
+                StringConverter::toString( kLightBudget ) +
+                " (the dimmest at the cascade; GiStatus::cascades[].lightsOverBudget)" );
         }
 
         mLightsConstBuffer->unmap( UO_KEEP_PERSISTENT );
@@ -1432,8 +1398,6 @@ namespace Ogre
         const Vector3 voxelCellSize( mVoxelizer->getVoxelCellSize() );
 
         mNumLights->setManualValue( numCollectedLights );
-        mLastLightsInRange = numLightsInRange;
-        mLastLightsInjected = numCollectedLights;
         mBakingMultiplierParam->setManualValue( autoMultiplierValue );
         mVoxelCellSize->setManualValue( voxelCellSize );
         mInvVoxelResolution->setManualValue( invVoxelRes );

@@ -213,9 +213,6 @@ struct CardSceneView {
     unsigned long long radianceSerial = 0ull;
     /// The relight budget, texels a frame (GiQualityFacts::cardLightTexels).
     unsigned lightBudgetTexels = 0u;
-    /// EVERY light of the scene, world space, no culling — the relight job's
-    /// light list and its sun (a card lights surfaces no camera sees).
-    std::vector<Ogre::Light *> lights;
     /// THE INDIRECT HALF: the chain the march reads (the scene's cascade-0
     /// PhotonVoxelLighting — the same object the pixel's pass buffer is filled from;
     /// null when GI is not the voxel arm, and the indirect is then zero), the
@@ -513,8 +510,8 @@ private:
     void traceSun();
     /// The still trace's lift for `card` (kSunLiftFootprints; CardSample::sunLift).
     float sunLiftOf(const CardRec &card) const;
-    /// The first visible shadow-casting directional light of `mLights` (the
-    /// relight's sun, the traces' direction), or null.
+    /// The first visible shadow-casting directional light of the scene's one light
+    /// list (SceneLightList.h; the relight's sun, the traces' direction), or null.
     const Ogre::Light *cardSun() const;
     /// Rebuilds the two GPU tables from `mCards` / `mInstances` and uploads
     /// them. Called only when the ALLOCATION changed — never per capture.
@@ -540,7 +537,6 @@ private:
     /// ...and each entry's mode (JahCardLight_cs.glsl): 1 march the indirect,
     /// 0 read it back, 2 none yet.
     std::vector<unsigned> mRelightMode;
-    std::vector<Ogre::Light *> mLights;      ///< this frame's scene lights (valid inside the frame)
     /// THE CACHED INDIRECT HALF (a UAV, R11G11B10F like the radiance), the
     /// chain's parameter block, and this frame's chain.
     Ogre::TextureGpu *mIndirect = nullptr;
@@ -588,6 +584,7 @@ private:
     unsigned long long mInvalidIndirect = 0ull;
     bool mIndirectOnLastRelight = false;
     /// Lights past kMaxCardLights last relight, and whether the cache has said so.
+    unsigned mLightsInRange = 0u;
     unsigned mLightsDropped = 0u;
     bool mLightsDroppedLogged = false;
     std::vector<float> mRelightCpu, mLightCpu;

@@ -35,6 +35,8 @@ THE SOFTWARE.
 #include "OgreShaderParams.h"
 #include "OgreTextureGpuListener.h"
 
+#include "SceneLightList.h"
+
 #include "OgreHeaderPrefix.h"
 
 namespace Ogre
@@ -162,12 +164,14 @@ namespace Ogre
         FastArray<PhotonVoxelLighting *> mExtraCascades;
 
         ShaderParams::Param *mNumLights;
-        /// THE LIGHT SLOTS' LAST READING (V2-P0A, the scale suite's W2 row): of the
-        /// lights the last update() saw, how many passed the range cull (their range
-        /// sphere touches this cascade's box) and how many of those took one of the
-        /// light buffer's slots — the rest were dropped, first come first served.
+        /// THE LAST INJECTION'S LIGHTS (P1C-LIGHT-LIST): the selection from the scene's
+        /// one light list, and its counts — the lights whose range reaches this
+        /// cascade's box, how many took a slot, how many the budget could not hold.
+        jahshaka::engine::SceneLightList::Selection mSelection;
         uint32 mLastLightsInRange = 0u;
         uint32 mLastLightsInjected = 0u;
+        uint32 mLastLightsOverBudget = 0u;
+        bool   mOverBudgetLogged = false;
         ShaderParams::Param *mBakingMultiplierParam;
         ShaderParams::Param *mVoxelCellSize;
         ShaderParams::Param *mInvVoxelResolution;
@@ -346,11 +350,16 @@ namespace Ogre
         /// is currently in use (beware of floating point accuracy differences)
         float getCurrentBakingMultiplier() const { return 1.0f / mInvBakingMultiplier; }
 
-        /// The last update()'s light reading (see mLastLightsInRange): lights whose
-        /// range reaches this cascade, lights injected, and the slot count (the cap).
+        /// THE PER-CASCADE LIGHT BUDGET (P1C-LIGHT-LIST): the most lights one cascade's
+        /// injection takes (its const buffer and LightInjection_piece_cs's array). The
+        /// lights in range past it are the dimmest at the cascade, counted below.
+        static constexpr uint32 kLightBudget = 16u;
+        /// The last update()'s light reading: lights whose range reaches this cascade,
+        /// lights injected, lights over the budget (inRange - injected), the budget.
         uint32 getLastLightsInRange() const { return mLastLightsInRange; }
         uint32 getLastLightsInjected() const { return mLastLightsInjected; }
-        uint32 getLightCapacity() const;
+        uint32 getLastLightsOverBudget() const { return mLastLightsOverBudget; }
+        uint32 getLightCapacity() const { return kLightBudget; }
 
         /**
         @param sceneManager

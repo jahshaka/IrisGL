@@ -163,7 +163,7 @@
 	@property( syntax != metal )
 		CONST_BUFFER( LightBuf, 0 )
 		{
-			Light lights[16];
+			Light lights[@value( vct_light_budget )];
 		};
 	@end
 

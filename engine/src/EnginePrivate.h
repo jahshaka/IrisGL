@@ -24,6 +24,7 @@
 #include "GpuCull.h"
 #include "GpuScene.h"
 #include "GpuVoxelGather.h"
+#include "SceneLightList.h"
 
 #include <cmath>
 #include <OgreRoot.h>
@@ -3452,6 +3453,10 @@ struct SceneGiBinding {
     /// count of lights destroyed. Point at the owning OgreScene's counters.
     const unsigned long long *lightWriteSerial = nullptr;
     const unsigned long long *lightsRemoved = nullptr;
+    /// THE SCENE'S ONE LIGHT LIST (P1C-LIGHT-LIST, SceneLightList.h): what the voxel
+    /// injection, the card relight and the hit decode select their lights from.
+    /// Points at the owning OgreScene's list (dirtied by the two counters above).
+    const SceneLightList *lightList = nullptr;
 };
 /// The record registered for `sm` — null for a SceneManager that registered none.
 /// What giStatus reports as "bound" is read through this, the same lookup the pass
@@ -7077,14 +7082,12 @@ private:
     unsigned long long mLightsRemoved = 0;
     /// THE CARDS' LIGHT FOLD, kept between frames (SPEED-CPU, perf audit E4):
     /// updateSurfaceCache re-walks the lights only when one of the four counters
-    /// it reads moved, this frame or the last (see there). `mCardLights` is the
-    /// relight job's light list from the same walk.
+    /// it reads moved, this frame or the last (see there).
     unsigned long long mCardLightKey[4] = {};
     bool mCardLightFoldValid = false;
     bool mCardLightKeyMovedLastFrame = false;
     unsigned long long mCardLightFold = 0;
-    std::vector<Ogre::Light *> mCardLights;
-    unsigned long long walkCardLights(std::vector<Ogre::Light *> &lights) const;
+    unsigned long long walkCardLights() const;
     /// The chain's at-rest light ticks that landed an injection (runChainTick) —
     /// folded into the surface cache's indirect signature.
     unsigned long long mGiRestTicks = 0;
@@ -7259,6 +7262,9 @@ private:
     /// at construction; each field is written where the arm is finished and
     /// cleared where it dies — nowhere else.
     SceneGiBinding mGiBinding;
+    /// THE SCENE'S ONE LIGHT LIST (P1C-LIGHT-LIST): dirtied by mGiLightWriteSerial and
+    /// mLightsRemoved, published through mGiBinding.lightList, reset in destroy().
+    SceneLightList mLightList;
     /// The last ambient SH and fog the scene was given, so a host re-push of the
     /// same value (every page return drops the host's own latch) stales nothing.
     float   mLastAmbientSh[27] = {};

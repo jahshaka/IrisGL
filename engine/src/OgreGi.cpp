@@ -1200,9 +1200,10 @@ GiStatus OgreScene::giStatus() const {
             // material-count half of a cascade's bill.
             cs.voxelDispatches = c.voxelizer ? (long long)c.voxelizer->getLastDispatchCount() : 0;
             if (c.lighting) {
-                cs.lightsInRange  = int(c.lighting->getLastLightsInRange());
+                cs.lightsInRange = int(c.lighting->getLastLightsInRange());
                 cs.lightsInjected = int(c.lighting->getLastLightsInjected());
-                cs.lightCapacity  = int(c.lighting->getLightCapacity());
+                cs.lightCapacity = int(c.lighting->getLightCapacity());
+                cs.lightsOverBudget = int(c.lighting->getLastLightsOverBudget());
             }
             st.cascades.push_back(cs);
         }

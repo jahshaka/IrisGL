@@ -50,6 +50,8 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreScreenProbeGather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSurfaceCache.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/SceneLightList.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/SceneLightList.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVrSession.cpp
     # PHOTON'S VOXEL GI, OURS (OWN-GI-1): the voxel cascades, their voxeliser and
     # material store, the irradiance field and the two debug drawables — an owned
