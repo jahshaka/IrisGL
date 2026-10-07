@@ -141,8 +141,15 @@ public:
     /// Null is allowed and means "the world's description, no camera over it".
     /// A CUT — this view's driving camera changing — re-seeds the view's
     /// exposure history, like applyCamera's.
+    ///
+    /// `offscreenChain` (VIDEO-REC-1): the view is an OFFSCREEN view drawn every
+    /// frame for a person — the recorder's 1080p view — and takes the whole
+    /// chain (PostFxDesc::allowOffscreen) in this one push. Setting the flag
+    /// after the call instead would push the description twice a frame with a
+    /// different enable answer each time: two workspace rebuilds per frame.
     void applyViewEnvironment(jahshaka::engine::View *view,
-                              const iris::CameraNodePtr &hostCamera = {});
+                              const iris::CameraNodePtr &hostCamera = {},
+                              bool offscreenChain = false);
 
     /// Forgets what applyEnvironment has already pushed, so the next call pushes
     /// everything again.
@@ -714,7 +721,7 @@ private:
     /// base, and `mSunExposureGain`) — true for the view the host called
     /// applyEnvironment for, false for a second view of the same scene, which
     /// must not overwrite them.
-    void applyViewPostFx(jahshaka::engine::View *view, bool record);
+    void applyViewPostFx(jahshaka::engine::View *view, bool record, bool offscreenChain = false);
     /// Records which camera is driving `view` and answers "did it CHANGE" — the
     /// cut test the exposure re-seed rides on (CAMERA_LENS_SPEC §4). False the
     /// first time a view is seen: an opening frame is not a cut.
