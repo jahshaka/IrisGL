@@ -4364,6 +4364,16 @@ struct GiStatus {
         /// capacity is a bound (every instance at its finest level's partition
         /// count), so a non-zero here is a defect, and it is logged critically.
         long long voxelOverflow = 0;
+        /// THE LIGHT SLOTS (V2-P0A, the scale suite's W2 row), as this cascade's
+        /// last light injection read them: the lights whose range reaches its box
+        /// (a directional always does; a point/spot/area light whose range sphere
+        /// misses the box is culled and not counted), how many of those took a slot
+        /// of the injection's light buffer, and the buffer's slot count. The ones
+        /// over the capacity are DROPPED, first come first served: their light
+        /// never enters the voxels, so their bounce is missing from the picture.
+        int lightsInRange = 0;
+        int lightsInjected = 0;
+        int lightCapacity = 0;
     };
     /// The live cascade chain, innermost first — the voxels of every Vct and
     /// VctPccHybrid scene. Empty while GI is off or the chain waits for a camera

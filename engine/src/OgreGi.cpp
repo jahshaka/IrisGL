@@ -1195,6 +1195,11 @@ GiStatus OgreScene::giStatus() const {
             // only cleared. A dispatch is sized by the whole octant, so this is the
             // material-count half of a cascade's bill.
             cs.voxelDispatches = c.voxelizer ? (long long)c.voxelizer->getLastDispatchCount() : 0;
+            if (c.lighting) {
+                cs.lightsInRange  = int(c.lighting->getLastLightsInRange());
+                cs.lightsInjected = int(c.lighting->getLastLightsInjected());
+                cs.lightCapacity  = int(c.lighting->getLightCapacity());
+            }
             st.cascades.push_back(cs);
         }
         st.cascadesAwaitingCamera = mGiCascadeAwaitingCamera;

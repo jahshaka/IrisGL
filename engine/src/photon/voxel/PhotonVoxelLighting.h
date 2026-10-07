@@ -162,6 +162,12 @@ namespace Ogre
         FastArray<PhotonVoxelLighting *> mExtraCascades;
 
         ShaderParams::Param *mNumLights;
+        /// THE LIGHT SLOTS' LAST READING (V2-P0A, the scale suite's W2 row): of the
+        /// lights the last update() saw, how many passed the range cull (their range
+        /// sphere touches this cascade's box) and how many of those took one of the
+        /// light buffer's slots — the rest were dropped, first come first served.
+        uint32 mLastLightsInRange = 0u;
+        uint32 mLastLightsInjected = 0u;
         ShaderParams::Param *mBakingMultiplierParam;
         ShaderParams::Param *mVoxelCellSize;
         ShaderParams::Param *mInvVoxelResolution;
@@ -339,6 +345,12 @@ namespace Ogre
         /// with autoMultiplier = false, this function returns the baking multiplier that
         /// is currently in use (beware of floating point accuracy differences)
         float getCurrentBakingMultiplier() const { return 1.0f / mInvBakingMultiplier; }
+
+        /// The last update()'s light reading (see mLastLightsInRange): lights whose
+        /// range reaches this cascade, lights injected, and the slot count (the cap).
+        uint32 getLastLightsInRange() const { return mLastLightsInRange; }
+        uint32 getLastLightsInjected() const { return mLastLightsInjected; }
+        uint32 getLightCapacity() const;
 
         /**
         @param sceneManager
