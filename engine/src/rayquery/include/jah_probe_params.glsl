@@ -149,7 +149,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// hit (the arm "gather.decodeHits", SPECKLE-FIX-1); w = 1 runs the hit's
 	/// mover gate (MOVER-OCCLUSION-1).
 	vec4 alpha;
-	/// THE YOUNG HISTORY'S REACH (GATHER-NOISE-1, rq_probe_integrate.comp): x =
+	/// THE YOUNG HISTORY'S REACH (GATHER-NOISE-1, rq_probe_integrate.comp; the
+	/// host converts the shipped 24 px to cells of the stride): x =
 	/// the history length in frames below which a pixel reads a WIDER probe
 	/// neighbourhood (0 = never), y = that reach in probe cells at a history of
 	/// 0 (it narrows linearly to the bilinear 1 at x frames). Never at rest.

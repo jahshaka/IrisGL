@@ -236,6 +236,38 @@ vec3 shEvalAt( uint i, vec3 n, int bands )
 	return max( e, vec3( 0.0 ) );
 }
 
+/// THE WIDE READ'S OCCLUSION TEST (GATHER-NOISE-1's fix round): is the probe at
+/// `probe` reached from the pixel's surface point `x` WITHOUT anything standing
+/// between them? The segment is walked in the eye's own picture, one sample
+/// every 3 pixels of its length on screen (2 to 16): at each, the depth buffer
+/// must not hold a surface NEARER the eye than the segment itself (beyond a 3 %
+/// tolerance: the segment lies on the surface, whose own depth matches it). A
+/// partition, a column or a step between the two is exactly such a nearer
+/// surface — a 0.1 m partition seen from above is a few pixels wide, which a
+/// fixed four samples stepped over (gi.flythrough_noise.Leak).
+bool seenAlongSurface( vec3 x, vec2 xUv, vec3 probe, JahEye e, int eye, vec2 size )
+{
+	vec2 pUv;
+	float pz;
+	if( jahReproject( probe, e.camPos, e.perspective, e.rayTL, e.rayRight, e.rayDown, e.fwd, pUv, pz ) != 0 )
+		return false;
+	const int n = clamp( int( length( ( pUv - xUv ) * size ) / 3.0 ), 2, 16 );
+	for( int i = 1; i < n; ++i )
+	{
+		const vec3 w = mix( x, probe, float( i ) / float( n ) );
+		vec2 uvS;
+		float z;
+		if( jahReproject( w, e.camPos, e.perspective, e.rayTL, e.rayRight, e.rayDown, e.fwd, uvS, z ) != 0 )
+			return false;
+		const float raw = texture( sceneDepth, vec3( uvS, float( eye ) ) ).x;
+		if( raw <= 0.0 || raw >= 1.0 )
+			continue;		// nothing drawn there: the sky stands behind every surface
+		if( jahViewDistance( raw ) < z * 0.97 )
+			return false;
+	}
+	return true;
+}
+
 /// THE DISCS (PHOTON-VIEW-1): the probes of the 3 x 3 cells around the pixel's
 /// own (uniform and adaptive), each projected through the pixel's eye; the nearest
 /// whose disc holds the pixel colours it — E/pi tonemapped (x / (1 + x)), the
@@ -428,10 +460,13 @@ void main()
 		// times its plane weight.
 		// PAST TWO CELLS THE READ STEPS BY TWO (the cost: a reach of 4 is 16 probe
 		// pairs, not 64): the probes it skips are filtered with the ones it reads
-		// (the filter's 17 taps), so they add little that is independent. The
-		// cells read keep the pixel's own cell's parity on each axis.
+		// (the filter's 3 x 3), so they add little that is independent. WHICH
+		// half it reads ALTERNATES per frame on each axis (the view's advancing
+		// counter), so the history averages both sets and no fixed tap set flips
+		// at a cell boundary (an 8-px step pattern, the fix round's audit).
 		const int stepC = reach > 2.0 ? 2 : 1;
-		const ivec2 own = ivec2( floor( g ) );
+		const uint parity = uint( p.knobs6.z );
+		const ivec2 own = ivec2( floor( g ) ) + ivec2( int( parity & 1u ), int( ( parity >> 1u ) & 1u ) );
 		const int x0 = int( floor( g.x - reach ) ) + 1, x1 = int( floor( g.x + reach ) );
 		const int y0 = int( floor( g.y - reach ) ) + 1, y1 = int( floor( g.y + reach ) );
 		const int sx = x0 + ( ( ( own.x - x0 ) % stepC ) + stepC ) % stepC;
@@ -456,8 +491,15 @@ void main()
 					const vec4 posW = records.r[pi].posW;
 					if( posW.w < 0.5 || records.r[pi].irradiance.w < 0.5 )
 						continue;
-					const float w = wt * jahPlaneWeight( posW.xyz, records.r[pi].normalW.xyz, pixelWorld,
-														 pixelNormal, pixelDist );
+					float w = wt * jahPlaneWeight( posW.xyz, records.r[pi].normalW.xyz, pixelWorld,
+												   pixelNormal, pixelDist );
+					// ...AND THE PROBE IS SEEN FROM THE PIXEL ALONG ITS SURFACE: no
+					// LIGHT THROUGH A WALL. A floor that runs on under a thin
+					// partition is one plane on both sides, so the plane test alone
+					// would hand the lit side's probes to the dark side's pixels.
+					if( w > 0.0 && !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye,
+														vec2( float( eyeW ), float( full.y ) ) ) )
+						w = 0.0;
 					if( w <= 0.0 )
 						continue;
 					sum += shEvalAt( pi, pixelNormal, bands ) * w;

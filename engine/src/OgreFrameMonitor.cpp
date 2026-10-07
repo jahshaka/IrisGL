@@ -1055,9 +1055,10 @@ const ArmDef kArms[] = {
       "The rest mean's length in frames (GatherTuning::restFrames): a still view averages this many "
       "rest frames before it holds. 0 = the settle. With gather.restSeed it builds a CONVERGED "
       "reference (gi.flythrough_noise)." },
-    { "gather.restSeed", 0.0, 0.0, 4096.0,
+    { "gather.restSeed", 0.0, 0.0, 255.0,
       "The rest frames' sample-sequence offset (GatherTuning::restSeed): two references of one pose "
-      "at two seeds are independent draws. 0 = the shipped sequence." },
+      "at two seeds are independent draws. 0 = the shipped sequence. At most 255: the frame index "
+      "travels as a float, exact below 2^24." },
     { "gather.ageView", 0.0, 0.0, 64.0,
       "THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument): N > 0 replaces the gather's "
       "answer with magenta where the pixel's reprojected history held fewer than N frames and black "
@@ -1070,9 +1071,10 @@ const ArmDef kArms[] = {
       "THE YOUNG HISTORY'S REACH (GatherTuning::youngFrames): a pixel whose history holds fewer "
       "frames than this reads a wider probe neighbourhood, narrowing to the bilinear four as its "
       "history fills. 0 = the shipped value; 1 with gather.youngReach 1 = off." },
-    { "gather.youngReach", 0.0, 0.0, 4.0,
-      "The young pixel's reach in probe cells at a history of 0 (GatherTuning::youngReach; 1 = the "
-      "bilinear four, i.e. off). 0 = the shipped value." },
+    { "gather.youngReach", 0.0, 0.0, 64.0,
+      "The young pixel's reach in PIXELS at a history of 0 (GatherTuning::youngReach): a tent that "
+      "wide, in probe cells of the view's stride, never under the bilinear's one cell (any reach up "
+      "to the stride = off). 0 = the shipped 24 px." },
     { "gather.validationOff", 0.0, 0.0, 1.0,
       "THE HISTORY'S VALIDATION OFF (GatherTuning::historyValidationOff, a test door): every "
       "reprojected texel on the previous picture is accepted, the distance and normal tests off - "

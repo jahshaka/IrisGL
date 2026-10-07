@@ -3501,7 +3501,7 @@ struct GatherTuning {
     /// offsets the rest frames' sequence so several references of one pose are
     /// independent draws. Measurement doors, never shipped.
     unsigned restFrames = 0u;
-    unsigned restSeed = 0u;
+    unsigned restSeed = 0u;   ///< at most 255 (the sequence's frame travels as a float)
     /// THE HISTORY-AGE VIEW (GATHER-NOISE-1's instrument): N > 0 paints every
     /// pixel whose reprojected history held fewer than N frames magenta and
     /// every other pixel black, in place of the gather's answer. The history
@@ -3509,10 +3509,13 @@ struct GatherTuning {
     unsigned ageView = 0u;
     /// THE YOUNG HISTORY'S REACH (GATHER-NOISE-1): a pixel whose history holds
     /// fewer than `youngFrames` frames reads the probes of a WIDER neighbourhood
-    /// — a tent `youngReach` cells wide at a history of 0, narrowing linearly to
+    /// — a tent `youngReach` PIXELS wide at a history of 0 (in cells of the
+    /// view's probe stride, never under one), narrowing linearly to
     /// the shipped bilinear (1 cell) at `youngFrames` — each weighed by the plane
     /// test as the bilinear four are. 0 = the shipped values; youngFrames 1 with
-    /// youngReach 1 is the reach off (the pre-lane integrate).
+    /// youngReach 1 is the reach off (the pre-lane integrate). In pixels, not
+    /// cells: the blur it trades is a distance on the picture (3 cells at High's
+    /// 16-px stride raised the walls' error +13 % where 3 at Epic's 8 px held it).
     unsigned youngFrames = 0u;
     float    youngReach = 0.0f;
     /// THE RAYS STRATIFIED ACROSS NEIGHBOURING PROBES (GATHER-NOISE-1): each

@@ -1862,7 +1862,7 @@ enum class ArmId : unsigned {
     GatherAgeView,       ///< "gather.ageView" — paint pixels whose history is younger than N frames
     GatherFreezeFrame,   ///< "gather.freezeFrame" — the sample sequence's frame held (the determinism door)
     GatherYoungFrames,   ///< "gather.youngFrames" — the history length below which a pixel reads wider (0 = shipped)
-    GatherYoungReach,    ///< "gather.youngReach" — that reach in probe cells at a history of 0 (0 = shipped)
+    GatherYoungReach,    ///< "gather.youngReach" — that reach in pixels at a history of 0 (0 = shipped)
     GatherValidationOff, ///< "gather.validationOff" — every reprojected history texel accepted (a test door)
     GatherCrossStrata,   ///< "gather.crossStrata" — rays stratified across N x N probes (0 = shipped, 1 = off)
     Count

@@ -31,12 +31,14 @@
 //        emitter by 7-31 % in the lane's A/B. A hit and a miss beside each
 //        other are two surfaces here, never averaged — the noise of a light's
 //        edge is the pixel history's to remove (rq_probe_integrate.comp).
-//    THE REACH (GATHER-NOISE-1, p.knobs4.z): 2 since that lane — the 3 x 3
-//    plus the ring of eight at two cells (17 taps), each under the same two
-//    tests: -23 % of the moving floor's noise on Showroom 2, its mean unmoved
-//    against a converged reference (gi.flythrough_noise). With the trace's
-//    cross-probe strata (rq_probe_gather.comp) the taps of one direction are
-//    stratified samples of the texel, not independent ones.
+//    THE REACH (GATHER-NOISE-1, p.knobs4.z, the arm "gather.filterRadius"): 1,
+//    the 3 x 3. Reach 2 (plus the ring of eight at two cells, 17 taps, each
+//    under the same two tests) is the measuring arm: it cut the moving floor's
+//    noise but BLURRED the walls' lamp gradients — their error against a
+//    converged reference +50 %, their mean +0.7 % (gi.flythrough_noise's walls)
+//    — and costs 0.14-0.32 ms. With the trace's cross-probe strata
+//    (rq_probe_gather.comp) the 3 x 3 taps of one direction are stratified
+//    samples of the texel, not independent ones.
 //    The probe's own texel always weighs 1. An ADAPTIVE probe filters against
 //    its CELL's neighbours (its own cell's uniform probe fails its plane by
 //    construction — that is why it was appended). The nine taps are read in

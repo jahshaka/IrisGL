@@ -221,12 +221,12 @@ unsigned restLengthOf(const GatherTuning &t, unsigned historyFrames) {
 }
 /// The probe-space filter's reach in cells as a tuning runs it (1 = 3 x 3,
 /// 2 = plus the ring at two cells).
-constexpr unsigned kFilterRadius = 2u;
+constexpr unsigned kFilterRadius = 1u;
 /// THE YOUNG HISTORY'S REACH (GATHER-NOISE-1; rq_probe_integrate.comp): the
 /// history length below which a pixel reads wider, and the reach in probe
 /// cells at a history of 0. MEASURED, not chosen: see the lane's evidence.
 constexpr unsigned kYoungFrames = 12u;
-constexpr float kYoungReach = 4.0f;
+constexpr float kYoungReachPixels = 24.0f;   // 3 cells at Epic's 8-px stride, 1.5 at High's 16
 /// THE CROSS-PROBE STRATA (GATHER-NOISE-1; rq_probe_gather.comp): N, the side of
 /// the sub-cell grid a texel is split into across an N x N block of probes.
 constexpr unsigned kCrossStrata = 3u;
@@ -1188,7 +1188,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // rest mean is the same samples whatever came before it (PHOTON-GATHER-1d).
     pp.knobs[2] = in.tuning.freezeFrameIndex
                       ? 0.0f
-                      : float(v.restFrames ? kRestSequenceBase + in.tuning.restSeed * 4096u + v.restFrames
+                      : float(v.restFrames ? kRestSequenceBase + std::min(in.tuning.restSeed, 255u) * 4096u +
+                                                 v.restFrames   // a rest mean holds by 4097: < 2^21, exact
                                            : (v.frame & 0xFFFFu));
     pp.knobs[3] = float(in.cascadeCount);
     pp.knobs2[0] = in.anisotropic ? 1.0f : 0.0f;
@@ -1329,7 +1330,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.stereo[2] = float(in.tuning.ageView);   // THE HISTORY-AGE VIEW (an instrument; 0 = off)
     // THE YOUNG HISTORY'S REACH (GATHER-NOISE-1).
     pp.young[0] = float(in.tuning.youngFrames ? in.tuning.youngFrames : kYoungFrames);
-    pp.young[1] = in.tuning.youngReach > 0.0f ? in.tuning.youngReach : kYoungReach;
+    pp.young[1] = std::max(1.0f, (in.tuning.youngReach > 0.0f ? in.tuning.youngReach : kYoungReachPixels) /
+                                     float(stride));   // pixels -> cells of this view's stride
     // THE RAYS STRATIFIED ACROSS NEIGHBOURING PROBES (GATHER-NOISE-1).
     pp.young[2] = float(in.tuning.crossStrata ? in.tuning.crossStrata : kCrossStrata);
     std::memcpy(pp.camPos2, in.camPos2, sizeof(pp.camPos2));
