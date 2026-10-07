@@ -461,11 +461,14 @@ void main()
 		// PAST TWO CELLS THE READ STEPS BY TWO (the cost: a reach of 4 is 16 probe
 		// pairs, not 64): the probes it skips are filtered with the ones it reads
 		// (the filter's 3 x 3), so they add little that is independent. WHICH
-		// half it reads ALTERNATES per frame on each axis (the view's advancing
-		// counter), so the history averages both sets and no fixed tap set flips
-		// at a cell boundary (an 8-px step pattern, the fix round's audit).
+		// half it reads ALTERNATES frame by frame on each axis, keyed on the
+		// PIXEL'S OWN HISTORY COUNT (one more each frame it is read), so the
+		// history averages both sets and no fixed tap set flips at a cell
+		// boundary (an 8-px step pattern, the fix round's audit) — and a replay
+		// of the same frames reads the same sets (keyed on the view's frame
+		// counter, app.capture_steps' replay moved by 79 px at 1 code).
 		const int stepC = reach > 2.0 ? 2 : 1;
-		const uint parity = uint( p.knobs6.z );
+		const uint parity = prevCount;
 		const ivec2 own = ivec2( floor( g ) ) + ivec2( int( parity & 1u ), int( ( parity >> 1u ) & 1u ) );
 		const int x0 = int( floor( g.x - reach ) ) + 1, x1 = int( floor( g.x + reach ) );
 		const int y0 = int( floor( g.y - reach ) ) + 1, y1 = int( floor( g.y + reach ) );
