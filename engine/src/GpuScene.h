@@ -217,7 +217,20 @@ enum GpuInstanceFlag : uint32_t {
     /// (GpuCull::twoSidedFirst), which the id pass and the caster cut draw with their
     /// no-cull pipeline; the decode lights the facing side.
     kGpuTwoSided = 1u << 11,
+    /// REFLECT-FIX-1: a METAL (its PBS datablock's metalness above kGpuMetalFloor). The
+    /// caches hold a surface's DIFFUSE response and a metal's is ~0, so a REFLECTION
+    /// ray that hits one is the decode's — its specular response with the pass'
+    /// second-bounce environment — never the card's black (jahHitReflectionDecodes).
+    /// The gather's rays ignore it: their records stay diffuse-only (SPECKLE-FIX-1).
+    kGpuMetal = 1u << 12,
 };
+/// The metalness above which a hit is a metal's (kGpuMetal): any metal content at
+/// all — the decode is the exact answer at every metalness, the flag only decides
+/// where the cache's diffuse-only answer is no longer one.
+constexpr float kGpuMetalFloor = 0.01f;
+/// ...and, under a SPECULAR workflow, the F0 above which it is one (a dielectric's F0
+/// is 0.02-0.08 — water to gemstone — and a metal's is its colour, 0.5 and up).
+constexpr float kGpuMetalF0 = 0.2f;
 
 /// The per-(mesh, level) row Atom P3's selection and P4's voxeliser read: the
 /// index range of that level (of submesh 0) AND THE LEVEL'S MEASURED BOUND,

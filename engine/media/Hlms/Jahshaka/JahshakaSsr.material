@@ -113,6 +113,7 @@ fragment_program Jahshaka/SsrResolve_ps_GLSL glsl
 		param_named depthTexture			int 3
 		param_named velocityTexture			int 4
 		param_named fogAerial				int 5
+		param_named prevDepthTexture		int 6
 	}
 }
 
@@ -132,9 +133,9 @@ fragment_program Jahshaka/SsrResolve_ps_VK glslvk
 {
 	source JahSsrResolve_ps.glsl
 	enable_include_header true
-	// SIX textures since PHOTON-I-1 (the air's table for the fog law; REFLECT-MOVERS-1
-	// made it five, the object motion): the
-	// standard prefab layout holds four.
+	// SEVEN textures since REFLECT-FIX-1 (the history's depth; PHOTON-I-1 made it six,
+	// the air's table for the fog law; REFLECT-MOVERS-1 five, the object motion): the
+	// standard prefab layout holds four, high holds eight.
 	root_layout high
 }
 
@@ -213,6 +214,14 @@ material Jahshaka/SsrResolve
 			{
 				tex_address_mode	clamp
 				filtering			bilinear
+			}
+
+			// THE DEPTH THE HISTORY WAS DRAWN AT (REFLECT-FIX-1, jahSsrPrevDepth): the
+			// same-surface test, point-fetched per texel of the footprint.
+			texture_unit prevDepthTexture
+			{
+				tex_address_mode	clamp
+				filtering			none
 			}
 		}
 	}

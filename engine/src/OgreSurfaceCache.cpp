@@ -809,6 +809,9 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     //    offered and its pages come back — no door to remember to knock on.
     for (InstanceRec &inst : mInstances) inst.seen = false;
     bool changed = false;
+    // THE INSTANCES THIS FRAME RE-ALLOCATES BECAUSE THEY MOVED (REFLECT-FIX-1): a
+    // resident object's own re-add, admitted past the fill gate below.
+    std::vector<NodeId> moved;
     for (const CardSceneView::Candidate &cand : view.candidates) {
         auto it = mByNode.find(cand.node);
         if (it == mByNode.end()) continue;
@@ -860,6 +863,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             rescaled) {
             ++mInvalidTransform;
             inst.seen = false;
+            moved.push_back(cand.node);
             continue;
         }
         // THE MATERIAL THE INSTANCE WEARS, re-read every frame — because the
@@ -929,13 +933,24 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     unsigned pagesUsed = 0u;
     for (unsigned char o : mPageOwner) pagesUsed += (o != 0u) ? 1u : 0u;
     mPagesUsed = pagesUsed;
-    if (pagesUsed * 8u >= mPageOwner.size() * 7u) return;   // 7/8 full: take no new work
+    // 7/8 FULL: TAKE NO NEW WORK — but a MOVED instance's re-add is not new work
+    // (REFLECT-FIX-1). A move frees its pages and re-allocates (step 1, "frees and
+    // re-allocates"), and the pages it re-allocates from are the ones it freed a
+    // moment ago, free by definition. Gated with everyone else it lost its cards for
+    // good the first time it moved in a room that fills the atlas (the Mirror Room
+    // alone holds 256 pages): its reflection went voxel-shaded and blotchy at rest
+    // (dark fraction 0.31 -> 0.74, still 0.73 at 20 s; spikes/reflect-tear-audit). So
+    // the gate admits exactly those, and still refuses every newcomer.
+    const bool gateFull = pagesUsed * 8u >= mPageOwner.size() * 7u;
+    if (gateFull && moved.empty()) return;
+    std::sort(moved.begin(), moved.end());
 
     std::vector<const CardSceneView::Candidate *> arriving;
     arriving.reserve(view.candidates.size());
     for (const CardSceneView::Candidate &cand : view.candidates) {
         if (!cand.item || !cand.cards || cand.cards->empty()) continue;
         if (mByNode.find(cand.node) != mByNode.end()) continue;
+        if (gateFull && !std::binary_search(moved.begin(), moved.end(), cand.node)) continue;
         if ((cand.box.mCenter - view.viewerPos).squaredLength() > r2) continue;
         arriving.push_back(&cand);
     }

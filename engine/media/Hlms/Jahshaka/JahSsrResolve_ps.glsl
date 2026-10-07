@@ -119,6 +119,9 @@ vulkan_layout( ogre_t4 ) uniform texture2D velocityTexture;
 // aerial-perspective volume, or a one-texel "no air" volume under any other sky
 // (OgreChain's updateSsr binds it per view).
 vulkan_layout( ogre_t5 ) uniform texture3D fogAerial;
+// THE DEPTH THE HISTORY WAS DRAWN AT (REFLECT-FIX-1; OgreChain's kSsrPrevDepth, a
+// depth copy taken beside the colour copy): what the same-surface test reads.
+vulkan_layout( ogre_t6 ) uniform texture2D prevDepthTexture;
 
 vulkan( layout( ogre_s0 ) uniform sampler pointSampler );
 vulkan( layout( ogre_s2 ) uniform sampler linearSampler );
@@ -232,9 +235,22 @@ vec2 jahShotToTex( vec2 uv )
 	return shotInset.xy + uv * ( vec2( 1.0 ) - shotInset.zw );
 }
 
+vec4 ssrHistorySanitize( vec3 c );
+
 vec4 ssrHistoryTap( vec2 uv )
 {
-	const vec3 c = texture( vkSampler2D( prevFrame, linearSampler ), uv ).xyz;
+	return ssrHistorySanitize( texture( vkSampler2D( prevFrame, linearSampler ), uv ).xyz );
+}
+
+/// ...and one TEXEL of it, point-fetched, through the same verdict (the
+/// same-surface rebuild below weighs the bilinear footprint's texels itself).
+vec4 ssrHistoryTexel( ivec2 at )
+{
+	return ssrHistorySanitize( texelFetch( vkSampler2D( prevFrame, pointSampler ), at, 0 ).xyz );
+}
+
+vec4 ssrHistorySanitize( vec3 c )
+{
 	// PER-CHANNEL, ORDERED COMPARISONS, AND NOT max(). GLSL and SPIR-V leave
 	// `max` with a NaN operand UNDEFINED, and the hardware instruction it maps
 	// to is a maxNum on the platforms we ship (Metal/MoltenVK documents it,
@@ -647,7 +663,94 @@ void main()
 	// The history is a texture of the whole target: read it where the shot's
 	// point lands in it.
 	const vec2 prevTex = jahShotToTex( prevUv );
-	const vec4 centreTap = ssrHistoryTap( prevTex );
+	vec4	   centreTap = ssrHistoryTap( prevTex );
+
+	// ---- THE SAME SURFACE (REFLECT-FIX-1, the owner's teapot tearing) -------
+	//
+	// The reprojection above says where the hit's world point WAS in the last
+	// picture; it cannot say that the last picture SHOWED it there. A floor point
+	// the dragged teapot uncovered this frame was behind the teapot in the last
+	// one, so its texel holds teapot, and the chrome sphere drew a crescent of
+	// teapot-green and outline-cyan where the floor belongs, moving with the
+	// on-screen teapot (~5x the true reflected motion; spikes/reflect-tear-audit).
+	// The velocity path does not reach it: it re-aims hits that land ON a mover,
+	// and the floor is still.
+	//
+	// So the history's own depth is read (kSsrPrevDepth, copied beside the
+	// colour) and compared with the depth the hit's point must have had in that
+	// picture — the reprojection's z, which carries a mover's own depth step too.
+	// A texel drawn at another depth showed ANOTHER SURFACE and carries nothing
+	// about this one. The test runs on the four texels of the bilinear footprint:
+	//   * all four agree (every still pixel off a silhouette, every pixel of a
+	//     static world under camera motion): the fetch is the one it always was;
+	//   * some agree: the colour is rebuilt from those alone, at their bilinear
+	//     weights renormalised — the hit is good, only its neighbours are not;
+	//   * none agree: there is no colour for this point in the last picture, and
+	//     the answer is the one every declined pixel gets — weight zero, handing
+	//     the pixel to the ray where the ray tier runs and to the probe or the
+	//     sky where it does not (the march-only tier must not smear either).
+	//
+	// THE TOLERANCE is the surface's own depth step across the footprint plus a
+	// floor for the copy's rounding and the reprojection's: the slope of THIS
+	// frame's depth at the hit, measured one-sided (the smaller of the two
+	// neighbours per axis, so a silhouette beside the hit does not widen it),
+	// twice over for the up-to-one-texel reach of the footprint and the slope's
+	// own change under a frame of motion, plus kSameSurfaceRel of the depth. The
+	// depth is the render system's reverse-Z value (~ near / distance), so the
+	// relative floor is a relative DISTANCE: 2 mm a metre, against the
+	// centimetres-to-decimetres an occluder stands in front of what it hides.
+	{
+		const float kSameSurfaceRel = 2e-3;
+		const ivec2 dMax = ivec2( prevFrameRes.xy ) - ivec2( 1 );
+		const float dL = texelFetch( vkSampler2D( depthTexture, pointSampler ),
+									 clamp( hitTexel - ivec2( 1, 0 ), ivec2( 0 ), dMax ), 0 ).x;
+		const float dR = texelFetch( vkSampler2D( depthTexture, pointSampler ),
+									 clamp( hitTexel + ivec2( 1, 0 ), ivec2( 0 ), dMax ), 0 ).x;
+		const float dD = texelFetch( vkSampler2D( depthTexture, pointSampler ),
+									 clamp( hitTexel - ivec2( 0, 1 ), ivec2( 0 ), dMax ), 0 ).x;
+		const float dU = texelFetch( vkSampler2D( depthTexture, pointSampler ),
+									 clamp( hitTexel + ivec2( 0, 1 ), ivec2( 0 ), dMax ), 0 ).x;
+		const float slope = min( abs( dR - hitDepth ), abs( hitDepth - dL ) ) +
+							min( abs( dU - hitDepth ), abs( hitDepth - dD ) );
+		const float expected = was.z / was.w;
+		const float tol = 2.0 * slope + kSameSurfaceRel * abs( expected );
+
+		const vec2	at	 = prevTex * prevFrameRes.xy - 0.5;
+		const ivec2 base = ivec2( floor( at ) );
+		const vec2	f	 = at - vec2( base );
+		float wSame = 0.0;
+		float wAll	= 0.0;
+		bool  allSame = true;
+		vec3  sumC	= vec3( 0.0 );
+		bool  rebuiltFinite = true;
+		for( int k = 0; k < 4; ++k )
+		{
+			const ivec2 o	= ivec2( k & 1, k >> 1 );
+			const ivec2 tc	= clamp( base + o, ivec2( 0 ), dMax );
+			const float w	= ( o.x == 1 ? f.x : 1.0 - f.x ) * ( o.y == 1 ? f.y : 1.0 - f.y );
+			const float was0 = texelFetch( vkSampler2D( prevDepthTexture, pointSampler ), tc, 0 ).x;
+			wAll += w;
+			if( abs( was0 - expected ) > tol )
+			{
+				// a zero-weight texel cannot have moved the bilinear fetch
+				allSame = allSame && w <= 0.0;
+				continue;
+			}
+			const vec4 tap = ssrHistoryTexel( tc );
+			rebuiltFinite = rebuiltFinite && tap.w >= 1.0;
+			sumC  += tap.xyz * w;
+			wSame += w;
+		}
+		if( !allSame )
+		{
+			if( wSame <= 0.0 )
+			{
+				fragColour = vec4( 0.0 );
+				return;
+			}
+			centreTap = vec4( sumC / wSame, rebuiltFinite ? 1.0 : 0.0 );
+		}
+	}
 	vec3	   reflected  = centreTap.xyz;
 
 	// THE FIREFLY CLAMP, the second line of defence and the only one that also

@@ -851,6 +851,20 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 constexpr Ogre::uint8 kRefractiveRenderQueue = 200;
 constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
 
+// THE DEPTH-TESTED EDITOR HELPERS (REFLECT-FIX-1) — the selection's outline shells,
+// the depth-tested wires and markers (every `unlit` overlay material that is not
+// on-top: renderQueueFor) at 12, the grid at 14. They are drawn in the SCENE's
+// linear light (tonemapped with it, occluded by it), and that used to mean in the
+// opaque pass — i.e. inside the picture the SSR march's colour history copies, so a
+// selected object's cyan ring showed in the chrome sphere even at rest (143 px) and
+// the grid's lines on every floor a reflection marched onto. A MARCH chain therefore
+// skips both queues in its prepass and opaque pass and draws them in a pass of their
+// own right AFTER the history copy (OgreChain, "Jahshaka scene helpers"): no
+// reflection and no history ever holds a helper. Every other chain draws them in
+// its opaque pass as before (it has no history). Both inside [0,100): v2 FAST.
+constexpr Ogre::uint8 kSceneHelperRenderQueue = 12;
+constexpr Ogre::uint8 kGridRenderQueue        = 14;
+
 // THE VISIBILITY BUFFER'S QUEUE (ATOM S3-DRAW; SPECS/atom/D3_S3_DRAW_DESIGN.md §2.4).
 // The render-queue split's ONE switch (OgreScene::atomRouteFor, at compose time)
 // files an item the id pass can draw and the decode can shade here; everything else
@@ -1806,6 +1820,9 @@ const char *reflectionTextureName();
 /// frame, written at its end — with the exposure history, what a second workspace
 /// of the same chain must be handed to draw the frame the first one drew.
 const char *ssrHistoryTextureName();
+/// ...and the depth that picture was drawn at (jahSsrPrevDepth, REFLECT-FIX-1): the
+/// resolve's same-surface test reads it, so it is handed over with the colour.
+const char *ssrHistoryDepthTextureName();
 
 /// One per View, owned by it, registered through OgreView::addWorkspaceListener
 /// so it survives every workspace rebuild (the planar listener's shape).
@@ -7784,6 +7801,7 @@ public:
     bool readPixels(Image &out) override;
     bool readPixelsHdr(ImageF &out) override;
     bool readReflectionHdr(ImageF &out) override;
+    bool readSsrHistoryHdr(ImageF &out) override;
     /// Downloads one of this view's chain textures (a local of its scene node)
     /// into float: the radiance readback and the reflection readback share it.
     bool readChainTexture(const char *textureName, ImageF &out, const char *who);

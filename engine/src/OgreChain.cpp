@@ -284,6 +284,10 @@ constexpr const char *kSsrRays        = "jahSsrRays";
 constexpr const char *kSsrReflection  = "jahSsrReflection";
 constexpr const char *kSsrPrev        = "jahSsrPrev";
 constexpr const char *kSsrVelocity    = "jahSsrVelocity";
+/// THE HISTORY'S OWN DEPTH (REFLECT-FIX-1): the scene depth copied at the same point
+/// the colour history is, so the resolve can ask whether the texel it reads held the
+/// SURFACE the march hit or something that stood in front of it last frame.
+constexpr const char *kSsrPrevDepth   = "jahSsrPrevDepth";
 // THE HIT LIST (PHOTON-HIT-SHADE-1, ChainDesc::hitDecode): the names the ray
 // tier reads them by (OgreRayQuery.cpp).
 constexpr const char *kHitIds      = "jahHitIds";
@@ -388,6 +392,7 @@ constexpr const char *kLookB = "jahLookB";
 /// the rest of the MSAA scaffolding, CHAIN-MSAA-CRUD.)
 constexpr const char *kRefractOut   = "jahRefractOut";
 constexpr const char *kRefractRtv   = "jahRefractRtv";
+constexpr const char *kSceneHelpersRtv = "jahSceneHelpersRtv";   // REFLECT-FIX-1: the helpers after the SSR history copy
 /// The picture-in-picture inset's background swatch (CAMERAS_SPEC §7.7): a 4x4
 /// texture cleared to ViewPipDesc::background and copied over the inset rect.
 /// It exists because the inset's colour attachment must LOAD (a Vulkan clear is
@@ -1075,6 +1080,13 @@ Ogre::CompositorPassSceneDef *addPhotonViewPasses(Ogre::CompositorNodeDef *n, co
 /// the screen decode (which is what arms the decode — OgreAtomDraw.cpp's listener).
 void skipAtomQueue(Ogre::CompositorPassSceneDef *p) { p->setSkipRenderQueue(kAtomRenderQueue, true); }
 
+/// A MARCH chain's prepass and opaque pass leave the depth-tested helpers to the pass
+/// after the SSR history copy (kSceneHelperRenderQueue's note, EnginePrivate.h).
+void skipSceneHelpers(Ogre::CompositorPassSceneDef *p) {
+    p->setSkipRenderQueue(kSceneHelperRenderQueue, true);
+    p->setSkipRenderQueue(kGridRenderQueue, true);
+}
+
 /// THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1), in front of the scene pass `mainRtv`
 /// serves (the prepass or the opaque pass): the SAME colour attachments over the
 /// MATERIAL DEPTH instead of the scene's, and the render queues of the classifier
@@ -1671,7 +1683,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     //
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
-    n->setNumLocalTextureDefinitions(33);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth + the material depth + the photon view's two + the march's velocity
+    n->setNumLocalTextureDefinitions(34);   // 25 + the letterbox swatch + the HZB + the ids + the atom view's depth + the material depth + the photon view's two + the march's velocity + the history's depth
     // Float under the display encode, as in the passthrough shape (SRGB-ENCODE-1).
     if (desc.letterbox)
         addTex(n, kLetterboxFill, desc.displayEncode ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM, 4u, 4u);
@@ -1950,6 +1962,13 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
                               floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
+        // ...AND THE DEPTH THAT PICTURE WAS DRAWN AT (REFLECT-FIX-1), a depth copy
+        // beside the colour copy: the resolve's surface test (JahSsrResolve_ps.glsl,
+        // "THE SAME SURFACE"). 4 bytes a pixel — 8.3 MB at 1920x1080 — per march chain.
+        if (ssrMarch) {
+            auto *td = addTex(n, kSsrPrevDepth, Ogre::PFG_D32_FLOAT);
+            td->preferDepthTexture = true;
+        }
         }   // if (ssr)
         // THE HIT LIST (PHOTON-HIT-SHADE-1): two UAVs the ray jobs append to and
         // the decode's target, W x kHitListHeightFactor H — see ChainDesc::hitDecode.
@@ -2171,6 +2190,17 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             c->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 1.0f));
             c->mProfilingId = "Jahshaka SSR history seed";
         }
+        // ...and its depth, seeded once with the FAR value of this render system's
+        // convention (REFLECT-FIX-1): no first-frame texel matches a surface, so the
+        // first frame's march hands every pixel to the fallback.
+        if (ssrMarch) {
+            Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrevDepth);
+            t->setNumPasses(1);
+            auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
+            c->mNumInitialPasses = 1;
+            c->mClearDepth = 1.0f;   // Ogre maps 1 to the far plane under reverse depth
+            c->mProfilingId = "Jahshaka SSR history depth seed";
+        }
         // WITHOUT THE MARCH, SOMETHING STILL HAS TO WRITE THE REFLECTION
         // TEXTURE EVERY FRAME, and it is a clear (lane REFLECT-VR-1). The
         // resolve is what wrote every texel of `jahSsrReflection` in a marching
@@ -2229,6 +2259,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
                 p->mLoadActionStencil = Ogre::LoadAction::Load;
                 skipAtomQueue(p);
             }
+            // ...and the helpers: no G-buffer of the march's holds an outline shell's
+            // or the grid's normals either.
+            if (ssrMarch) skipSceneHelpers(p);
             p->mStoreActionColour[0] = Ogre::StoreAction::Store;
             p->mStoreActionColour[1] = Ogre::StoreAction::Store;
             p->mStoreActionDepth     = Ogre::StoreAction::Store;
@@ -2272,6 +2305,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // The hit's own depth: what turns a hit coordinate back into a world
             // point, so the history is read where that point WAS (PAN-SMEAR-1).
             q->addQuadTextureSource(3, kDepth);
+            // ...and the depth the history was drawn at: the same-surface test
+            // (REFLECT-FIX-1).
+            q->addQuadTextureSource(6, kSsrPrevDepth);
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
         }
     }
@@ -2349,6 +2385,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mLoadActionStencil = Ogre::LoadAction::Load;
             skipAtomQueue(p);
         }
+        // THE HELPERS WAIT FOR THE HISTORY COPY on a march chain (the scene helpers
+        // pass below; kSceneHelperRenderQueue's note).
+        if (ssrMarch) skipSceneHelpers(p);
         // Plain Store, at every effect combination: upstream's recipe needs
         // "store_and_resolve" here because its refractive pass renders into a
         // MULTISAMPLE clone while sampling the resolved original, and at 1x
@@ -2536,6 +2575,47 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         q->addQuadTextureSource(0, sceneResult);
         q->mStoreActionColour[0] = Ogre::StoreAction::Store;
         if (desc.letterbox) scissor(handlesOut, q);
+        // THE DEPTH THE PICTURE WAS DRAWN AT, copied at the same point (REFLECT-FIX-1).
+        // The colour alone cannot say WHAT a texel shows: a floor point the teapot
+        // uncovered this frame still holds the teapot in that copy, and a march
+        // that hits the floor there read the teapot's colour onto the chrome sphere
+        // (the owner's tearing; spikes/reflect-tear-audit). With the depth beside it
+        // the resolve compares the hit's reprojected depth to the depth the texel
+        // was drawn at and declines a texel that showed another surface.
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrevDepth);
+        t->setNumPasses(1);
+        auto *c = static_cast<Ogre::CompositorPassDepthCopyDef *>(t->addPass(Ogre::PASS_DEPTHCOPY));
+        c->setDepthTextureCopy(kDepth, kSsrPrevDepth);
+        c->mProfilingId = "Jahshaka SSR history depth";
+    }
+    // THE SCENE HELPERS, after the history copy (REFLECT-FIX-1; kSceneHelperRenderQueue's
+    // note): the outline shells, depth-tested wires and markers, and the grid, into the
+    // scene result over the scene's own depth — still in linear light, so the SSAO
+    // multiply and the tonemap below treat them as they always did, and never in a
+    // picture a reflection reads.
+    if (ssrMarch) {
+        Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kSceneHelpersRtv);
+        Ogre::RenderTargetViewEntry colour0;
+        colour0.textureName = sceneResult;
+        rtv->colourAttachments.push_back(colour0);
+        rtv->depthAttachment.textureName = kDepth;
+        rtv->stencilAttachment.textureName = kDepth;
+        rtv->preferDepthTexture = true;
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kSceneHelpersRtv);
+        t->setNumPasses(1);
+        auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+        p->setAllLoadActions(Ogre::LoadAction::Load);
+        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        p->mStoreActionDepth = Ogre::StoreAction::Store;     // SSAO, the Atom and photon views read it
+        p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        p->mReadOnlyDepth = true;                             // they test, they never write
+        p->mReadOnlyStencil = true;
+        p->mFirstRQ = kSceneHelperRenderQueue;
+        p->mLastRQ  = Ogre::uint8(kGridRenderQueue + 1u);
+        p->mUpdateLodLists = false;                           // the opaque pass chose the levels
+        p->mIncludeOverlays = false;                          // see kIncludeOverlaysNote
+        p->mProfilingId = "Jahshaka scene helpers";
+        if (desc.letterbox) inset(handlesOut, p);
     }
 
     // SSAO: half-res depth downsample -> AO march -> separable blur (which is
@@ -3409,6 +3489,7 @@ Ogre::ColourValue fixedExposureColour(float exposureScale, float exposure) {
 const char *exposureHistoryTextureName() { return kOldLum; }
 const char *reflectionTextureName() { return kSsrReflection; }
 const char *ssrHistoryTextureName() { return kSsrPrev; }
+const char *ssrHistoryDepthTextureName() { return kSsrPrevDepth; }
 
 void destroyPip(Ogre::Root *root, const std::string &workspaceDef,
                 std::vector<std::string> &nodeDefs, PipHandles &handles) {

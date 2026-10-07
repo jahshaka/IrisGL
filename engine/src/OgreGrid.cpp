@@ -22,11 +22,10 @@
 #include <OgreTechnique.h>
 
 namespace jahshaka { namespace engine { namespace detail {
-namespace {
-// After opaque geometry (10), before the particle systems (15): the grid blends
-// over the floor and the particles composite over the grid.
-constexpr Ogre::uint8 kGridRenderQueue = 14u;
-}  // namespace
+// kGridRenderQueue (EnginePrivate.h): after opaque geometry (10), before the
+// particle systems (15) in a chain with no march history — the grid blends over the
+// floor and the particles composite over it; a march chain draws it after the history
+// copy (kSceneHelperRenderQueue's note).
 
 bool OgreScene::setGrid(const GridDesc &desc) {
     JAH_TRY {

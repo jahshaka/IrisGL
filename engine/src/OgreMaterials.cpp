@@ -14,6 +14,9 @@ Ogre::uint8 OgreScene::renderQueueFor(const MaterialRec &m) {
     // pass, at a queue above every other scene range.
     if (m.distortion) return kDistortionRenderQueue;
     if (m.refractive) return kRefractiveRenderQueue;   // the chain's refraction pass
+    // A DEPTH-TESTED HELPER (an overlay material that is not on-top: the outline
+    // shells, wires, markers) is not scene geometry — kSceneHelperRenderQueue's note.
+    if (m.unlit && !m.shadingUnlit) return kSceneHelperRenderQueue;
     return 10u;                                        // Ogre's default for normal items
 }
 

@@ -28,6 +28,7 @@
 #include <Vao/OgreTexBufferPacked.h>
 
 #include <OgreLogManager.h>
+#include <OgreHlmsPbsDatablock.h>
 #include <OgreRenderSystem.h>
 #include <OgreRoot.h>
 #include <OgreMesh2.h>
@@ -751,6 +752,21 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
         }
     }
     if (n.dragMover && n.shown) f |= kGpuDragMover;
+    // A METAL (REFLECT-FIX-1, kGpuMetal): sub-item 0's datablock, the material word's
+    // rule (every mesh this engine builds has one submesh).
+    if (item->getNumSubItems()) {
+        const Ogre::HlmsDatablock *db = item->getSubItem(0)->getDatablock();
+        if (db && db->getCreator() && db->getCreator()->getType() == Ogre::HLMS_PBS) {
+            const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
+            // The metallic workflow says it outright; the two specular workflows say it
+            // through F0: a dielectric's is ~0.02-0.08, a metal's its colour.
+            const Ogre::Vector3 f0 = pbs->getSpecular();
+            const bool metal = pbs->getWorkflow() == Ogre::HlmsPbsDatablock::MetallicWorkflow
+                                   ? pbs->getMetalness() > kGpuMetalFloor
+                                   : std::max(f0.x, std::max(f0.y, f0.z)) > kGpuMetalF0;
+            if (metal) f |= kGpuMetal;
+        }
+    }
     // A PLANAR MIRROR (D3-HIT-SHADE-2): its picture is a reflection, and the caches
     // are a DIFFUSE store (a metal mirror's card and voxels hold its kD = 0: black) —
     // a ray that hits it is the decode's, which shades the mirror's own material with

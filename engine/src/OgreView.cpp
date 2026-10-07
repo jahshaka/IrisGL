@@ -1680,6 +1680,12 @@ bool OgreView::readReflectionHdr(ImageF &out) {
     return readChainTexture(chain::reflectionTextureName(), out, "readReflectionHdr");
 }
 
+bool OgreView::readSsrHistoryHdr(ImageF &out) {
+    if (!mTexture) { mError = "readSsrHistoryHdr: View '" + mName + "' is on-screen"; return false; }
+    if (!mWorkspace) { mError = "readSsrHistoryHdr: View '" + mName + "' has no workspace"; return false; }
+    return readChainTexture(chain::ssrHistoryTextureName(), out, "readSsrHistoryHdr");
+}
+
 bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char *who) {
     JAH_TRY {
         // A LOCAL texture of the chain's scene node: the node that defines it
@@ -2314,7 +2320,8 @@ void OgreView::beginFrameCapture() {
         // VIEW's and is read, never stepped: the ray tier's, the gather's, the Atom
         // cull's, the SSR reprojection — see captureWorkspace's callers.)
         mRoot->getRenderSystem()->endRenderPassDescriptor();
-        for (const char *name : { chain::exposureHistoryTextureName(), chain::ssrHistoryTextureName() }) {
+        for (const char *name : { chain::exposureHistoryTextureName(), chain::ssrHistoryTextureName(),
+                                  chain::ssrHistoryDepthTextureName() }) {
             Ogre::TextureGpu *src = chainLocal(mWorkspace, mWorkspaceDef, name);
             Ogre::TextureGpu *dst = chainLocal(mCaptureWorkspace, mCaptureDef, name);
             if (!src || !dst || src->getWidth() != dst->getWidth() ||
