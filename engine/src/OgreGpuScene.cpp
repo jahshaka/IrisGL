@@ -731,8 +731,11 @@ bool OgreScene::gpuIsMetal(const Ogre::HlmsDatablock *db) {
     // F0 is the FRESNEL term in both specular workflows (applyPbr: setFresnel); the
     // specular COLOUR, kS, is a tint every workflow carries (white by default) and says
     // nothing about metal — reading it flagged every spec-gloss import a metal.
+    // ...and a SCALAR F0 lives in x alone (setFresnel(f0, separate = false); y and z then
+    // hold whatever an earlier value left — measured 0.818 behind a 0.04 F0).
     const Ogre::Vector3 f0 = pbs->getFresnel();
-    return std::max(f0.x, std::max(f0.y, f0.z)) > kGpuMetalF0;
+    const float f0Max = pbs->hasSeparateFresnel() ? std::max(f0.x, std::max(f0.y, f0.z)) : f0.x;
+    return f0Max > kGpuMetalF0;
 }
 
 /// THE ONE PLACE THE PREDICATES ARE COMPUTED (design §3: every duplicate "is
