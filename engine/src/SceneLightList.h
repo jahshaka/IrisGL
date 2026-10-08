@@ -23,7 +23,8 @@
 //     the window over max(d^2, rSrc^2) for a point or spot, the disc form factor
 //     for an area light), with the distance floored at the consumer's own scale
 //     (a voxel cell for a cascade: a cell cannot resolve a lamp closer than its own
-//     size, so every lamp inside a cell ties on power). The lights over the budget
+//     size, so every lamp inside a cell ties on power; a tie goes to the lamp nearest the
+//     box's centre — a cascade's centre is the viewer — then the shared order). The lights over the budget
 //     are COUNTED (Selection::overBudget) and every consumer reports the count —
 //     a named overflow, never a silent drop. A spot's cone is not tested against
 //     the box (a spot aimed away from it still counts as reaching it: conservative).

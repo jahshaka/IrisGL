@@ -133,7 +133,9 @@ void SceneLightList::select(Ogre::SceneManager *sm, const Consumer &c, Selection
     struct Cand {
         std::uint32_t entry;
         float score;
+        float centreD2;   ///< squared distance to the box's centre (the viewer of a cascade)
     };
+    const Ogre::Vector3 centre = (c.boxMin + c.boxMax) * 0.5f;
     std::vector<Cand> cands;
     cands.reserve(mEntries.size());
     const Ogre::uint32 mask = c.lightMask & Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS;
@@ -148,14 +150,20 @@ void SceneLightList::select(Ogre::SceneManager *sm, const Consumer &c, Selection
         bool reaches = true;
         const float score = contribution(l, c, reaches);
         if (!reaches) continue;
-        cands.push_back({ i, score });
+        const float cd2 = l->getType() == Ogre::Light::LT_DIRECTIONAL
+                              ? 0.0f
+                              : float(l->getParentNode()->_getDerivedPosition().squaredDistance(centre));
+        cands.push_back({ i, score, cd2 });
     }
     out.inRange = std::uint32_t(cands.size());
     if (c.budget && cands.size() > c.budget) {
-        // THE BUDGET'S WORTH BY CONTRIBUTION; ties by the shared order.
+        // THE BUDGET'S WORTH BY CONTRIBUTION; ties (every lamp inside the box reads the
+        // floored peak) by the nearest to the box's centre — a cascade's is the viewer —
+        // then the shared order.
         std::nth_element(cands.begin(), cands.begin() + c.budget, cands.end(),
                          [this](const Cand &a, const Cand &b) {
                              if (a.score != b.score) return a.score > b.score;
+                             if (a.centreD2 != b.centreD2) return a.centreD2 < b.centreD2;
                              return mEntries[a.entry].rank < mEntries[b.entry].rank;
                          });
         cands.resize(c.budget);

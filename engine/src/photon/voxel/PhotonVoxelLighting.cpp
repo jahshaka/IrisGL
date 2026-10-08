@@ -151,11 +151,13 @@ namespace Ogre
 
         RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
         VaoManager *vaoManager = renderSystem->getVaoManager();
-        // THE PER-CASCADE LIGHT BUDGET (P1C-LIGHT-LIST): the const buffer and the shader's
-        // array (LightInjection_piece_cs's vct_light_budget) hold kLightBudget lights.
-        mLightsConstBuffer = vaoManager->createConstBuffer( sizeof( PhotonShaderVoxelLight ) * kLightBudget,
+        // THE LIGHT SLOTS (P1C-LIGHT-LIST): the const buffer and the shader's array
+        // (LightInjection_piece_cs's vct_light_budget) hold kLightSlots lights in every
+        // cascade (the job is shared, so the array is one size); a cascade's BUDGET is
+        // how many of them it fills (lightBudgetFor).
+        mLightsConstBuffer = vaoManager->createConstBuffer( sizeof( PhotonShaderVoxelLight ) * kLightSlots,
                                                             BT_DYNAMIC_PERSISTENT, 0, false );
-        mLightInjectionJob->setProperty( "vct_light_budget", static_cast<int32>( kLightBudget ) );
+        mLightInjectionJob->setProperty( "vct_light_budget", static_cast<int32>( kLightSlots ) );
 
         HlmsManager *hlmsManager = mVoxelizer->getHlmsManager();
         HlmsSamplerblock samplerblock;
@@ -1348,7 +1350,9 @@ namespace Ogre
         consumer.boxMin = voxelOrigin;
         consumer.boxMax = voxelOrigin + cascadeSize;
         consumer.floorDistance = static_cast<float>( std::max( cellSize.x, std::max( cellSize.y, cellSize.z ) ) );
-        consumer.budget = kLightBudget;
+        const Vector3 res = mVoxelizer->getVoxelResolution();
+        mLightBudget = lightBudgetFor( static_cast<uint32>( res.x * res.y * res.z ) );
+        consumer.budget = mLightBudget;
         consumer.lightMask = _lightMask;
         jahshaka::engine::sceneLightListOf( sceneManager ).select( sceneManager, consumer, mSelection );
 
@@ -1370,7 +1374,7 @@ namespace Ogre
                 "Jahshaka GI: " + StringConverter::toString( mSelection.overBudget ) + " of the " +
                 StringConverter::toString( mSelection.inRange ) +
                 " lights in range of a voxel cascade are over its budget of " +
-                StringConverter::toString( kLightBudget ) +
+                StringConverter::toString( mLightBudget ) +
                 " (the dimmest at the cascade; GiStatus::cascades[].lightsOverBudget)" );
         }
 

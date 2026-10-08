@@ -315,6 +315,12 @@
 					lightAtten *= jahCloudTransmittance( voxelAabbCenter + jahCloudOrigin.xyz,
 														 jahCloudMap, jahCloudSun );
 			@end
+			// A LIGHT THAT DOES NOT REACH THIS VOXEL (past its range, outside its cone, behind a
+			// full cloud) adds exactly zero below - every term is lightCol times a finite
+			// visibility - so its march is not run (P1C-LIGHT-LIST): a lamp costs the voxels
+			// inside its range, not the whole volume.
+			if( !( lightAtten > 0.0f ) )
+				continue;
 			@property( hlms_lights_area_ltc )
 				bool isLtc = light.lightType == LT_AREA_LTC;
 				bool doubleSidedLtc = light.points[0].w != 0.0f;

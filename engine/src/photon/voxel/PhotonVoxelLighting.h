@@ -35,6 +35,8 @@ THE SOFTWARE.
 #include "OgreShaderParams.h"
 #include "OgreTextureGpuListener.h"
 
+#include <algorithm>
+
 #include "SceneLightList.h"
 
 #include "OgreHeaderPrefix.h"
@@ -171,6 +173,7 @@ namespace Ogre
         uint32 mLastLightsInRange = 0u;
         uint32 mLastLightsInjected = 0u;
         uint32 mLastLightsOverBudget = 0u;
+        uint32 mLightBudget = 16u;   ///< this cascade's budget (lightBudgetFor), set by update()
         bool   mOverBudgetLogged = false;
         ShaderParams::Param *mBakingMultiplierParam;
         ShaderParams::Param *mVoxelCellSize;
@@ -350,16 +353,26 @@ namespace Ogre
         /// is currently in use (beware of floating point accuracy differences)
         float getCurrentBakingMultiplier() const { return 1.0f / mInvBakingMultiplier; }
 
-        /// THE PER-CASCADE LIGHT BUDGET (P1C-LIGHT-LIST): the most lights one cascade's
-        /// injection takes (its const buffer and LightInjection_piece_cs's array). The
-        /// lights in range past it are the dimmest at the cascade, counted below.
-        static constexpr uint32 kLightBudget = 16u;
+        /// THE LIGHT SLOTS (P1C-LIGHT-LIST): the const buffer and LightInjection_piece_cs's
+        /// array (vct_light_budget) hold kLightSlots lights in every cascade.
+        static constexpr uint32 kLightSlots = 128u;
+        /// THE PER-CASCADE LIGHT BUDGET, by measurement (spikes/p1c-light-list): a lamp costs
+        /// the injection its march over the voxels inside its range, ~0.06 ms per million
+        /// voxels at High (RTX 4080 SUPER, Debug). The budget bounds a cascade's worst case — every
+        /// lamp reaching every voxel — at what 16 lamps cost a 128^3 cascade (~2 ms): 16 x 128^3
+        /// voxel-lamps, so 16 at 128^3 and 128 (the slots) at 64^3; never under the old 16.
+        static constexpr uint64 kLightBudgetVoxelLamps = 16ull * 128ull * 128ull * 128ull;
+        static uint32 lightBudgetFor( uint32 voxels )
+        {
+            const uint64 b = voxels ? kLightBudgetVoxelLamps / voxels : kLightSlots;
+            return static_cast<uint32>( std::min<uint64>( kLightSlots, std::max<uint64>( 16u, b ) ) );
+        }
         /// The last update()'s light reading: lights whose range reaches this cascade,
         /// lights injected, lights over the budget (inRange - injected), the budget.
         uint32 getLastLightsInRange() const { return mLastLightsInRange; }
         uint32 getLastLightsInjected() const { return mLastLightsInjected; }
         uint32 getLastLightsOverBudget() const { return mLastLightsOverBudget; }
-        uint32 getLightCapacity() const { return kLightBudget; }
+        uint32 getLightCapacity() const { return mLightBudget; }
 
         /**
         @param sceneManager
