@@ -3096,10 +3096,12 @@ void OgreScene::giDeferrable(const std::function<void()> &work) {
     }
     const unsigned long long before = hc->getNumDeferredDispatches();
     struct Deferral {
-        Ogre::HlmsCompute *hc;
-        bool prev;
-        ~Deferral() { hc->setDeferredDispatch(prev); }
-    } deferral{ hc, hc->getDeferredDispatch() };
+        Ogre::HlmsCompute *hc = nullptr;
+        bool prev = false;
+        ~Deferral() { if (hc) hc->setDeferredDispatch(prev); }
+    } deferral;
+    deferral.hc = hc;
+    deferral.prev = hc->getDeferredDispatch();
     hc->setDeferredDispatch(true);
     work();
     if (hc->getNumDeferredDispatches() != before) {
