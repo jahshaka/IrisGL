@@ -1240,6 +1240,12 @@ namespace Ogre
     }
     //-------------------------------------------------------------------------
     bool PhotonVoxelLighting::getAllowMultipleBounces() const { return mLightBounce != 0; }
+    uint32 PhotonVoxelLighting::getLightCapacity() const
+    {
+        return mLightsConstBuffer ? static_cast<uint32>( mLightsConstBuffer->getNumElements() /
+                                                         sizeof( PhotonShaderVoxelLight ) )
+                                  : 0u;
+    }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::setBakingMultiplier( float bakingMult ) { mBakingMultiplier = bakingMult; }
     //-------------------------------------------------------------------------
@@ -1342,6 +1348,7 @@ namespace Ogre
         PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight = reinterpret_cast<PhotonShaderVoxelLight *>(
             mLightsConstBuffer->map( 0, mLightsConstBuffer->getNumElements() ) );
         uint32 numCollectedLights = 0;
+        uint32 numLightsInRange = 0;
         const uint32 maxNumLights =
             static_cast<uint32>( mLightsConstBuffer->getNumElements() / sizeof( PhotonShaderVoxelLight ) );
 
@@ -1355,10 +1362,12 @@ namespace Ogre
             ObjectData objData;
             const size_t totalObjs = memoryManager.getFirstObjectData( objData, i );
 
-            for( size_t j = 0; j < totalObjs && numCollectedLights < maxNumLights;
-                 j += ARRAY_PACKED_REALS )
+            // EVERY LIGHT IS WALKED (V2-P0A): the slots still fill first come first
+            // served and stop at maxNumLights exactly as before, but the walk goes on
+            // so the lights the cap DROPS are counted (getLastLightsInRange).
+            for( size_t j = 0; j < totalObjs; j += ARRAY_PACKED_REALS )
             {
-                for( size_t k = 0; k < ARRAY_PACKED_REALS && numCollectedLights < maxNumLights; ++k )
+                for( size_t k = 0; k < ARRAY_PACKED_REALS; ++k )
                 {
                     uint32 *RESTRICT_ALIAS visibilityFlags = objData.mVisibilityFlags;
 
@@ -1384,6 +1393,9 @@ namespace Ogre
                             light->getType() == Light::LT_AREA_APPROX ||
                             light->getType() == Light::LT_AREA_LTC )
                         {
+                            ++numLightsInRange;
+                            if( numCollectedLights >= maxNumLights )
+                                continue;   // the cap: counted, never injected
                             const float maxVal = addLight( vctLight, light, voxelOrigin, invVoxelSize );
                             autoMultiplierValue = std::max( autoMultiplierValue, maxVal );
                             ++vctLight;
@@ -1420,6 +1432,8 @@ namespace Ogre
         const Vector3 voxelCellSize( mVoxelizer->getVoxelCellSize() );
 
         mNumLights->setManualValue( numCollectedLights );
+        mLastLightsInRange = numLightsInRange;
+        mLastLightsInjected = numCollectedLights;
         mBakingMultiplierParam->setManualValue( autoMultiplierValue );
         mVoxelCellSize->setManualValue( voxelCellSize );
         mInvVoxelResolution->setManualValue( invVoxelRes );
