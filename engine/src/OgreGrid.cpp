@@ -1,8 +1,8 @@
 // THE SHADER-DRAWN EDITOR GRID (GRID-2; Types.h GridDesc; media JahGrid.material).
 //
 // The sun disc's mechanism, for a helper: one Rectangle2D per scene at render
-// queue 14 — a v2 FAST queue after opaque geometry (10) and before the particles
-// (15), inside the opaque pass's [0, 210) so the overlay pass never sees it —
+// queue 13 — a v2 FAST queue after opaque geometry (10), before the blended surfaces
+// (14, kBlendedRenderQueue) and the particles (15), inside the opaque pass's [0, 210) so the overlay pass never sees it —
 // whose fragment program intersects the camera ray with the grid plane, draws
 // the lines analytically and writes the plane point's own depth (the .glsl has
 // the physics). Visibility kHelperBit: every probe capture, shadow node, planar

@@ -217,19 +217,25 @@ enum GpuInstanceFlag : uint32_t {
     /// (GpuCull::twoSidedFirst), which the id pass and the caster cut draw with their
     /// no-cull pipeline; the decode lights the facing side.
     kGpuTwoSided = 1u << 11,
-    /// REFLECT-FIX-1: a METAL (its PBS datablock's metalness above kGpuMetalFloor). The
-    /// caches hold a surface's DIFFUSE response and a metal's is ~0, so a REFLECTION
-    /// ray that hits one is the decode's — its specular response with the pass'
-    /// second-bounce environment — never the card's black (jahHitReflectionDecodes).
-    /// The gather's rays ignore it: their records stay diffuse-only (SPECKLE-FIX-1).
+    /// REFLECT-FIX-1: a METAL (OgreScene::gpuIsMetal: metalness from kGpuMetalFloor, or
+    /// F0 above kGpuMetalF0 in a specular workflow). The caches hold a surface's DIFFUSE
+    /// response and a metal's is ~0, so a REFLECTION ray never reads a metal's card:
+    /// from a sharp reflector it is decoded, from a glossy one it reads the voxel store
+    /// (jahHitIsMetal and rq_reflect.comp's routing). The gather's rays ignore it: their
+    /// records stay diffuse-only (SPECKLE-FIX-1).
     kGpuMetal = 1u << 12,
 };
-/// The metalness from which a hit is a metal's (kGpuMetal). MEASURED (REFLECT-FIX-1 fix
-/// round, test_reflect_uncover --metal-measure; spikes/reflect-fix-1/round2): a gold
-/// crate of metalness 0.5 / 0.25 / 0.1 read through its CARD is 3.9 / 5.2 / 3.5 display
-/// codes from the full decode in a sharp (r 0.02) chrome sphere and under 2.4 from r 0.1
-/// up — the card's (1 - m) diffuse is most of the picture there — while a metalness-1
-/// crate's card is black. Below 0.5 the card answers; from 0.5 the metal routes.
+/// The metalness from which a hit is a metal's (kGpuMetal). Below it the CARD answers,
+/// from it the metal routes, and the switch is a STEP (REFLECT-FIX-1 fix round,
+/// test_reflect_uncover --metal-measure; spikes/reflect-fix-1/round2/metal-measure.log):
+/// a gold crate of metalness 0.5 in a SHARP (r 0.02) chrome sphere reads 134.2 through
+/// its card against 154.4 decoded — ~20 codes at the floor — and the two routes stay
+/// within ~5 codes of each other from a reflector roughness of 0.30 up. Two truths meet
+/// here and neither is exact: the card holds (1 - m) x the base colour, the voxel store
+/// the base colour with no metalness at all. FILED to ONE_PICTURE_SPEC C2 (a specular
+/// term at every hit, F0 and roughness from a card layer, read per texel), where the
+/// switch becomes a continuum. (A scalar flag: a glTF whose metallicFactor is omitted —
+/// 1 — and whose metalness is a texture is a metal everywhere here; C2 reads per texel.)
 constexpr float kGpuMetalFloor = 0.5f;
 /// ...and, under a SPECULAR workflow, the F0 above which it is one (a dielectric's F0
 /// is 0.02-0.08 — water to gemstone — and a metal's is its colour, 0.5 and up).

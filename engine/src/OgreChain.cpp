@@ -4389,6 +4389,23 @@ void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc) {
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                       unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,
                       OgreScene *scene) {
+    // THE ASPECT THE SCENE PASSES WILL DRAW AT (REFLECT-FIX-1), set FIRST — before
+    // updateSsao, updateSsr or anything else below reads the camera's projection. An
+    // auto-aspect camera is re-aspected by every PASS_SCENE it renders (Viewport::
+    // _setupAspectRatio), so here, before this view's passes, it still carries the aspect
+    // of whichever view drew with it last: measured on the selftest's pose B, whose
+    // 256x256 shot inherited the editor viewport's camera at 4:3 for its first frame —
+    // the march's reprojection was off by 0.3 in the matrix and its colours came from a
+    // horizontally squeezed history (the B2 pillars' reflections); SSAO's projection had
+    // the same fault. Set it as the pass will (the viewport's actual size, in Ogre's own
+    // arithmetic; the letterbox's inner rectangle when there is one).
+    if (camera && camera->getAutoAspectRatio() && viewWidth && viewHeight) {
+        float inner[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+        if (desc.letterbox) letterboxRect(desc.letterboxAspect, float(viewWidth) / float(viewHeight), inner);
+        const int actW = int(float(viewWidth) * inner[2]), actH = std::max(1, int(float(viewHeight) * inner[3]));
+        const Ogre::Real aspect = Ogre::Real(actW) / Ogre::Real(actH);
+        if (camera->getAspectRatio() != aspect) camera->setAspectRatio(aspect);
+    }
     if (desc.hdr) {
         // The tonemap quad's 8-bit write is dithered (fork feab041c6 (was 0079)); this pushes
         // only the diagnostic off switch, and the shader's default is
@@ -4428,21 +4445,6 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
         float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
         if (desc.letterbox && viewHeight)
             letterboxRect(desc.letterboxAspect, float(viewWidth) / float(viewHeight), shot);
-        // THE ASPECT THE SCENE PASSES WILL DRAW AT (REFLECT-FIX-1). An auto-aspect camera
-        // is re-aspected by every PASS_SCENE it renders (Viewport::_setupAspectRatio), so
-        // here — BEFORE this view's passes — it still carries the aspect of whichever
-        // view drew with it last. The reprojection built from it then described a
-        // picture nobody drew: measured on the selftest's pose B, whose 256x256 shot
-        // inherits the editor viewport's camera at 4:3 for its first frame — the
-        // resolve's last-frame read was off by 0.3 in the matrix, its colours fetched
-        // from a horizontally squeezed history (the B2 pillars' reflections). Set it
-        // here exactly as the pass will (the viewport's actual size, in Ogre's own
-        // arithmetic), so the matrix and the picture agree.
-        if (camera && camera->getAutoAspectRatio() && viewWidth && viewHeight) {
-            const int actW = int(float(viewWidth) * shot[2]), actH = std::max(1, int(float(viewHeight) * shot[3]));
-            const Ogre::Real aspect = Ogre::Real(actW) / Ogre::Real(actH);
-            if (camera->getAspectRatio() != aspect) camera->setAspectRatio(aspect);
-        }
         updateSsr(camera, desc, shot, reprojection, scene);
     } else {
         reprojection.have = false;

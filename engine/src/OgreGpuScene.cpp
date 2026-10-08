@@ -720,15 +720,18 @@ static_assert(sizeof(Ogre::Real) == sizeof(float),
               "would need a conversion here");
 
 /// THE METAL ANSWER (kGpuMetal), from a datablock: the metallic workflow says it
-/// outright, the two specular workflows through F0 (a dielectric's is 0.02-0.08, a
-/// metal's its colour). One function, two callers: gpuFlagsFor, and setPbrMaterial's
+/// outright, the two specular workflows through F0 — getFresnel(), never the specular
+/// colour kS — (a dielectric's is 0.02-0.08, a metal's its colour). One function, two callers: gpuFlagsFor, and setPbrMaterial's
 /// in-place edit, which marks the wearers' slots when the answer flips.
 bool OgreScene::gpuIsMetal(const Ogre::HlmsDatablock *db) {
     if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS) return false;
     const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
     if (pbs->getWorkflow() == Ogre::HlmsPbsDatablock::MetallicWorkflow)
         return pbs->getMetalness() >= kGpuMetalFloor;
-    const Ogre::Vector3 f0 = pbs->getSpecular();
+    // F0 is the FRESNEL term in both specular workflows (applyPbr: setFresnel); the
+    // specular COLOUR, kS, is a tint every workflow carries (white by default) and says
+    // nothing about metal — reading it flagged every spec-gloss import a metal.
+    const Ogre::Vector3 f0 = pbs->getFresnel();
     return std::max(f0.x, std::max(f0.y, f0.z)) > kGpuMetalF0;
 }
 

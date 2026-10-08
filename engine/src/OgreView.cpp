@@ -2119,7 +2119,7 @@ Ogre::TextureGpu *OgreView::targetTexture() const { return target(); }
 //   AsyncTextureTicket before swapBuffers — here, at the end of the view's
 //   workspace.
 //
-//   clean (the tile) — the helpers live INSIDE the scene passes (the grid at RQ 14
+//   clean (the tile) — the helpers live INSIDE the scene passes (the grid at RQ 13
 //   and the depth-tested outline shells at RQ 10 are drawn in the opaque pass,
 //   before the post chain and the tonemap; only the gizmo, wires and icons are in
 //   the post-tonemap overlay pass), so there is no copy point in the presented
