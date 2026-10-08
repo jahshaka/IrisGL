@@ -14,6 +14,8 @@
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassScene.h>
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsManager.h>
 #include <OgreViewport.h>
 #include <OgreCamera.h>
 #include <OgreRenderPassDescriptor.h>
@@ -887,7 +889,10 @@ float OgreView::measuredExposureScale() const {
     return measured;
 }
 
-OgreView::~OgreView() { destroy(); }
+OgreView::~OgreView() {
+    if (mAsyncShaders) detail::noteAsyncView(false);
+    destroy();
+}
 
 const std::string &OgreView::name() const { return mName; }
 Scene *OgreView::scene() const { return mScene; }
@@ -1123,6 +1128,11 @@ bool OgreView::attachBlankWorkspace() {
                           overlaysAllowed(), chainDesc().displayEncode, mBlankNodeDefs);
         mBlankWorkspace = mRoot->getCompositorManager2()->addWorkspace(
             sm, t, mBlankCamera, mBlankWorkspaceDef, mEnabled);
+        // THE SCENE-LESS FRAME COMPILES LIKE THE VIEW (ASYNC-SHADERS-1): its overlay pass drew
+        // the HUD's unlit fill and font with a blocking compile while the view was between
+        // scenes in an asynchronous session (measured: 'Jahshaka/OverlayFill', 'Fonts/DebugFont'
+        // built in the frame on the main thread).
+        if (mBlankWorkspace) mBlankWorkspace->setAsyncShaderCompile(mAsyncShaders);
         return mBlankWorkspace != nullptr;
     } JAH_CATCH(mError, false);
 }
@@ -1850,8 +1860,14 @@ void AsyncHoldListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
 
 void AsyncHoldListener::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
     if (!mView || ws != mView->ogreWorkspace()) return;
+    // A HOLE: a draw skipped for a shader still building, a compute dispatch deferred for one
+    // this frame (HlmsCompute's deferred dispatch), or a lighting arm that owes its rebuild.
+    const Ogre::HlmsCompute *hc = mView->computeHlms();
+    const OgreScene *scene = mView->asyncHoldScene();
     const bool hole = mView->asyncShaders() &&
-                      ws->getSceneManager()->getRenderQueue()->getNumPendingSkips() != mSkipsAtStart;
+                      (ws->getSceneManager()->getRenderQueue()->getNumPendingSkips() != mSkipsAtStart ||
+                       (hc && hc->getNumDeferredDispatches() != computeDeferralsAtFrameStart()) ||
+                       (scene && scene->giDeferralPending()));
     // Only once the view has shown something: there is no last picture to hold before that.
     const bool hold = hole && mView->framesPresented() > 0 && mHeldInARow < kMaxHeldFrames;
     if (hold) { ++mHeldInARow; ++mHeldFrames; }
@@ -1865,6 +1881,12 @@ void AsyncHoldListener::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
 }
 
 void OgreView::setAsyncShaders(bool on) {
+    // THE MODE'S EDGES ARE IN THE LOG: a compile that happened while a view compiled in the
+    // background is a defect, and the log is where a failing row finds which side it was on.
+    if (on != mAsyncShaders)
+        Ogre::LogManager::getSingleton().logMessage("Jahshaka view '" + mName + "': shaders compile " +
+                                                    (on ? "in the background" : "blocking (in the frame)"));
+    if (on != mAsyncShaders) detail::noteAsyncView(on);
     mAsyncShaders = on;
     if (mScene) mScene->setAsyncShaders(on);   // its captures follow (SurfaceCache)
     if (on && !mAsyncHold) {
@@ -1874,9 +1896,15 @@ void OgreView::setAsyncShaders(bool on) {
     }
     if (mWorkspace) mWorkspace->setAsyncShaderCompile(on);
     if (mPipWorkspace) mPipWorkspace->setAsyncShaderCompile(on);
+    if (mBlankWorkspace) mBlankWorkspace->setAsyncShaderCompile(on);
 }
 
 bool OgreView::asyncShaders() const { return mAsyncShaders; }
+
+const Ogre::HlmsCompute *OgreView::computeHlms() const {
+    Ogre::HlmsManager *hm = mRoot ? mRoot->getHlmsManager() : nullptr;
+    return hm ? hm->getComputeHlms() : nullptr;
+}
 
 bool OgreView::warmUpShaders() {
     if (!mScene)  { mError = "warmUpShaders: no scene is bound to view '" + mName + "'"; return false; }

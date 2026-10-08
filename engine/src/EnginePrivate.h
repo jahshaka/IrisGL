@@ -121,7 +121,7 @@
 // clear pass that owns the inset's background colour (chain::PipHandles).
 // Forward-declared rather than included so the pass-def headers stay where they
 // belong — inside the .cpp files that build passes.
-namespace Ogre { class PhotonVoxelMaterial;   // A5b §2: the one store a chain shares
+namespace Ogre { class HlmsCompute; class PhotonVoxelMaterial;   // A5b §2: the one store a chain shares
                  class CompositorPassSceneDef; class CompositorPassClearDef;
                  class CompositorPassQuadDef; class CompositorPassDef;
                  // Bone attachments (AVATAR_RIG_PERF_SPEC §4): a Node record
@@ -308,6 +308,13 @@ bool surfaceCardsCapturing();
 Ogre::CompositorWorkspace *surfaceCacheWorkspace(const SurfaceCache *cache);
 /// The placeholder draws / pending skips made inside the cache's own captures (ASYNC-SHADERS-1).
 /// Kept per SceneManager across the cache's rebuilds; `forget` drops the entry (scene teardown).
+/// HlmsCompute's deferred-dispatch count when this frame began (OgreEngine::renderOneFrame):
+/// a frame that deferred a compute permutation is a frame with a hole (AsyncHoldListener).
+unsigned long long computeDeferralsAtFrameStart();
+/// How many views compile in the background right now (OgreView::setAsyncShaders); the shader
+/// cache's counter names any compile made off the background compiler while it is non-zero.
+int asyncViewCount();
+void noteAsyncView(bool on);
 void surfaceCacheAsyncDraws(const Ogre::SceneManager *sm, unsigned long long &placeholders,
                             unsigned long long &skips, bool forget = false);
 
@@ -2709,7 +2716,7 @@ public:
     ShaderCacheStats stats(Ogre::Root *root) const;
     void progress(unsigned &compiled, unsigned &fromCache, unsigned &expected) const;
     /// Of `compiled`, those compiled on the background compiler's threads (ASYNC-SHADERS-1).
-    void backgroundCompiles(unsigned &background) const;
+    void backgroundCompiles(unsigned &background, unsigned &foreground) const;
     /// THE RENDER-LOOP MONITOR'S COMPILE FEED. Ogre exposes no "a shader was
     /// compiled" callback — the counter is a log listener — and with
     /// OGRE_SHADER_COMPILATION_THREADING_MODE=2 it fires on WORKER threads, so
@@ -4177,6 +4184,11 @@ public:
     unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
     std::unique_ptr<SurfaceCache> mSurfaceCache;
     bool mAsyncShaders = false;
+    /// IBL convolutions deferred because a permutation was building (ASYNC-SHADERS-1).
+    unsigned long long mIblDeferrals = 0;
+    /// The lighting arm met a permutation still building (applyPendingGiDeferrable).
+    bool mGiDeferralRetry = false;
+    unsigned long long mGiDeferrals = 0;
     /// The ray rule's footprint per metre of distance, as updateRayLevels last
     /// computed it (the surface cache's still-trace lift, CardSceneView).
     float mRayFootprintPerMetre = 0.0f;
@@ -5463,6 +5475,19 @@ public:
     void addObjectCounts(ObjectCounts &out) const;
     /// Called by Engine::renderOneFrame before rendering.
     void applyPendingGi();
+    /// applyPendingGi as an ASYNCHRONOUS scene runs it (ASYNC-SHADERS-1): the lighting arm's
+    /// compute permutations are never compiled in the frame. Under the fork's deferred
+    /// dispatch a missing one goes to the background compiler and its dispatch is skipped;
+    /// the arm built that frame is then not a result: the frame is HELD (AsyncHoldListener)
+    /// and the arm is rebuilt once the background compiler has drained. A blocking scene
+    /// runs applyPendingGi unchanged.
+    void applyPendingGiDeferrable();
+    /// Runs `work` (a lighting-arm build) under the deferred dispatch when the scene is
+    /// asynchronous; a deferral owes the arm a whole rebuild (giDeferralPending).
+    void giDeferrable(const std::function<void()> &work);
+    /// The arm owes a rebuild because a permutation it dispatched was building: every frame
+    /// until it lands is held.
+    bool giDeferralPending() const { return mGiDeferralRetry; }
     /// The flush proper — what applyPendingGi was before the staged machine.
     void applyPendingGiFlush();
     /// The pace of the frame being rendered (OPEN_COVER_SPEC §2.1):
@@ -7990,6 +8015,7 @@ public:
     Ogre::CompositorWorkspace *ogreWorkspace() const { return mWorkspace; }
     Ogre::CompositorWorkspace *ogrePipWorkspace() const { return mPipWorkspace; }
     OgreScene *asyncHoldScene() const { return mScene; }
+    const Ogre::HlmsCompute *computeHlms() const;
     const AsyncHoldListener *asyncHold() const { return mAsyncHold.get(); }
 private:
     /// Owned; registered the same way while this view's chain traces

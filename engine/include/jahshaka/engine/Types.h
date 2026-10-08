@@ -6002,6 +6002,9 @@ struct AsyncShaderStats {
     /// `shaderBuildProgress`'s `compiled` and what remains is every compile a frame
     /// waited for — the live-compile sentry's number (SHADER-WARM-2).
     unsigned           compiledInBackground = 0;
+    /// Shaders compiled on any OTHER thread (a frame waited): one counter, read in one load
+    /// (the host's live-compile sentry reads this, never compiled - compiledInBackground).
+    unsigned           compiledInForeground = 0;
 };
 
 /// What the persistent shader cache did this run, and what is on disk

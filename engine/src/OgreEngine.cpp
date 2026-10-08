@@ -5,6 +5,7 @@
 // live in EnginePrivate.h, which documents the invariants this backend rests on.
 #include "EnginePrivate.h"
 
+#include <OgreHlmsCompute.h>
 #include <OgreHlmsAsyncCompiler.h>
 #include "AtomPass.h"
 #include "HlmsAtom.h"
@@ -762,7 +763,21 @@ void OgreEngine::setTransformWriteCounter(const std::atomic<unsigned long long> 
     detail::gTransformWriteCounter = counter;
 }
 
+namespace {
+/// The compute dispatches deferred before this frame began (AsyncHoldListener's hole test).
+unsigned long long gComputeDeferralsAtFrameStart = 0;
+}  // namespace
+
+unsigned long long computeDeferralsAtFrameStart() { return gComputeDeferralsAtFrameStart; }
+
+namespace { std::atomic<int> gAsyncViews{0}; }
+int asyncViewCount() { return gAsyncViews.load(std::memory_order_relaxed); }
+void noteAsyncView(bool on) { gAsyncViews.fetch_add(on ? 1 : -1, std::memory_order_relaxed); }
+
 void OgreEngine::renderOneFrame() {
+    if (mRoot && mRoot->getHlmsManager())
+        if (Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms())
+            gComputeDeferralsAtFrameStart = hc->getNumDeferredDispatches();
     // LEGAL AND EMPTY WHEN HEADLESS (Types.h EngineConfig::headless): a
     // headless engine can hold no View, so every loop below iterates nothing
     // and Root::renderOneFrame walks a workspace-less render system. Hosts do
@@ -1103,7 +1118,7 @@ void OgreEngine::renderOneFrame() {
                 // THE CLOUD LAYER'S FRAME (CLOUDS-2D-1): its clock, its scroll
                 // and its capture cadence — before the capture below it may ask for.
                 s->tickCloudClock();
-                s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar();
+                s->applyPendingGiDeferrable(); s->applyPendingIbl(); s->applyPendingPlanar();
                 // THIS SCENE'S IBL CHAIN LENGTH (SceneGiBinding::iblMipmaps), after
                 // the pendings that can change what its env slots hold.
                 s->resolveIblMipmaps();
@@ -2453,8 +2468,10 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
             out.holeyPresented += h->mHoleyPresented;
         }
     unsigned background = 0;
-    mShaderCache.backgroundCompiles(background);
+    unsigned foreground = 0;
+    mShaderCache.backgroundCompiles(background, foreground);
     out.compiledInBackground = background;
+    out.compiledInForeground = foreground;
     return out;
 }
 

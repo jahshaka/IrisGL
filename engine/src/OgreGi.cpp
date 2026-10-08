@@ -26,6 +26,8 @@
 
 #include <OgreHlmsManager.h>
 #include <OgreAsyncTextureTicket.h>
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsAsyncCompiler.h>
 #include <OgreBitwise.h>
 #include <OgrePixelFormatGpuUtils.h>
 
@@ -605,7 +607,7 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
             // back into `mGi`, which must keep comparing equal to what the
             // document pushes or every push under the latch would rebuild.
             mCascadeVoxelLod = p.cascadeVoxelLod;
-            rebuildVct();
+            giDeferrable([this]() { rebuildVct(); });   // ASYNC-SHADERS-1: see applyPendingGiDeferrable
             return true;
         }
     } JAH_CATCH(mError, false);
@@ -688,9 +690,11 @@ void OgreScene::refreshGlobalIllumination(GiRefreshReason reason) {
             // block back, ~700 ms on Grand Showroom 2, for a gesture that ended
             // inside the streaming window. A settle over a staged build marks
             // what it can and lets the stages keep their own pace.
-            if (reason == GiRefreshReason::Explicit)
-                while (mGiBuildStage != GiBuildStage::Idle) stepStagedGiBuild();
-            if (mVctCascades.empty() || !refreshCascadesFast()) rebuildVct();
+            giDeferrable([this, reason]() {   // ASYNC-SHADERS-1: see applyPendingGiDeferrable
+                if (reason == GiRefreshReason::Explicit)
+                    while (mGiBuildStage != GiBuildStage::Idle) stepStagedGiBuild();
+                if (mVctCascades.empty() || !refreshCascadesFast()) rebuildVct();
+            });
         }
     } JAH_CATCH(mError, );
 }
@@ -3057,6 +3061,53 @@ void OgreScene::applyPendingGi() {
         // both selftest hashes untouched.
         if (mFramePace == FramePace::Complete)
             while (mGiBuildStage != GiBuildStage::Idle) stepStagedGiBuild();
+    }
+}
+
+// THE LIGHTING ARM NEVER COMPILES IN THE FRAME OF AN ASYNCHRONOUS SCENE (ASYNC-SHADERS-1).
+// The arm is a burst of compute dispatches (the voxelisers, the anisotropic mips, the bounce
+// injection, the field) and cannot wear a placeholder; its first build after an open runs
+// after the reveal (OPEN_COVER_SPEC: no first-time arm until the world is on screen), staged by
+// the frame's pace, so under load a permutation the session had not built yet compiled on the
+// UI thread (shader.sample_opens_quiet, red 2 of 7 gate runs). Here the arm runs under the
+// fork's deferred dispatch: a missing permutation is requested in the background and its
+// dispatch skipped. The arm that frame is then incomplete, so the frame is HELD (the view's
+// AsyncHoldListener reads giDeferralPending) and, once the compute permutations in flight have
+// landed, the arm is rebuilt whole.
+void OgreScene::applyPendingGiDeferrable() {
+    Ogre::HlmsManager *hm = mRoot->getHlmsManager();
+    Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
+    if (mGiDeferralRetry && mAsyncShaders && hc) {
+        if (hc->getNumAsyncInFlight() != 0u) return;   // still building: the frame stays held
+        mGiDeferralRetry = false;
+        mGiChainShapeDirty = true;   // the partial arm is rebuilt whole
+        mGiCachesDirty = true;
+    }
+    giDeferrable([this]() { applyPendingGi(); });
+}
+
+void OgreScene::giDeferrable(const std::function<void()> &work) {
+    Ogre::HlmsManager *hm = mRoot->getHlmsManager();
+    Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
+    if (!mAsyncShaders || !hc || !hm->getAsyncCompiler()->isRunning()) {
+        mGiDeferralRetry = false;
+        work();
+        return;
+    }
+    const unsigned long long before = hc->getNumDeferredDispatches();
+    struct Deferral {
+        Ogre::HlmsCompute *hc;
+        bool prev;
+        ~Deferral() { hc->setDeferredDispatch(prev); }
+    } deferral{ hc, hc->getDeferredDispatch() };
+    hc->setDeferredDispatch(true);
+    work();
+    if (hc->getNumDeferredDispatches() != before) {
+        mGiDeferralRetry = true;
+        if (mGiDeferrals++ == 0u)
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: the lighting arm met a compute permutation still building - the frame "
+                "is held and the arm rebuilt once it lands");
     }
 }
 
