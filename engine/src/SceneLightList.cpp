@@ -131,9 +131,9 @@ void SceneLightList::select(Ogre::SceneManager *sm, const Consumer &c, Selection
     out.overBudget = 0u;
     refresh(sm);
     struct Cand {
-        std::uint32_t entry;
-        float score;
-        float centreD2;   ///< squared distance to the box's centre (the viewer of a cascade)
+        std::uint32_t entry = 0u;
+        float score = 0.0f;
+        float centreD2 = 0.0f;   ///< squared distance to the box's centre (the viewer of a cascade)
     };
     const Ogre::Vector3 centre = (c.boxMin + c.boxMax) * 0.5f;
     std::vector<Cand> cands;
