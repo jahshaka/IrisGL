@@ -1814,14 +1814,29 @@ void OgreView::applyPendingResizeImpl() {
     } JAH_CATCH(mError, );
 }
 
+// THE VIEW CAMERA'S WORLD POSITION, THIS TICK (GI-SOCKET-CAM-1). The camera's
+// own getPosition() is LOCAL to the node it hangs from: a camera socketed to a
+// node (setCameraNode — the Player's avatar camera) carries an identity local
+// pose and would report the origin forever. getDerivedPosition() folds in the
+// parent, but from the parent's CACHED derived transform, which the scene
+// manager refreshes only inside the render — one tick behind a node moved this
+// tick. So the parent chain is brought up to date first (the same
+// _getDerived*Updated form the scene's other pre-render world reads use).
+// A camera under the root (the editor's, the VR session's — whose head pose is
+// written as the camera's own pose) reads exactly its own position, as before.
+static Ogre::Vector3 cameraWorldPosition(Ogre::Camera *cam) {
+    if (Ogre::Node *parent = cam->getParentNode()) parent->_getDerivedPositionUpdated();
+    return cam->getDerivedPosition();
+}
+
 void OgreView::updateParticles() {
     if (mEnabled && mScene && mCamera)
-        mScene->sceneManager()->getParticleSystemManager2()->setCameraPosition(mCamera->getPosition());
+        mScene->sceneManager()->getParticleSystemManager2()->setCameraPosition(cameraWorldPosition(mCamera));
 }
 
 void OgreView::updateGi() {
     if (mEnabled && mScene && mCamera) {
-        mScene->updateGiTracking(mCamera->getPosition(), mStereo);
+        mScene->updateGiTracking(cameraWorldPosition(mCamera), mStereo);
         // The Forward+ depth-slice range follows the same camera, from the same
         // once-a-frame hook (LIGHTING_FIX fix 8). The scene does the rate
         // limiting and the hysteresis; this is only where the camera is known.
