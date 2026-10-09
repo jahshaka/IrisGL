@@ -8766,6 +8766,7 @@ public:
     MonitorLevel frameMonitor() const override;
     bool setArm(const std::string &name, double value) override;
     std::vector<ArmInfo> arms() const override;
+    ValidationStatus validation() const override;
     const ArmRegistry &armRegistry() const { return mArms; }
     MonitorStatus monitorStatus() const override;
     unsigned takeFrameRecords(std::vector<FrameRecord> &out) override;

@@ -18,6 +18,11 @@
 #include "OgreVulkanRenderSystem.h"
 #endif
 
+#include <cctype>
+#include <dlfcn.h>
+#if defined(__linux__)
+#include <link.h>   // dl_iterate_phdr: the layer libraries a process loaded (validation())
+#endif
 #include <set>
 #include <unistd.h>
 
@@ -3426,6 +3431,50 @@ void OgreEngine::createShadowNode() {
                         std::min(mShadowMapCount, kProbeShadowMaxFocusedMaps),
                         mShadowPerMapClears, probeRes / 2u);
     }
+}
+
+// ---------------------------------------------------------------------------
+// THE VALIDATION LAYER'S PROOF (TESTING-CLEANUP-2 H4; Types.h ValidationStatus). The probe
+// tests/atom ran alone (its validation_probe.h, deleted), generalised: with VK_LAYER_KHRONOS_validation
+// live on a device, that device's own entry points resolve INTO the layer's library (it
+// intercepts vkGetDeviceProcAddr), so where vkCmdDraw resolves is the proof.
+// ---------------------------------------------------------------------------
+namespace {
+#if defined(__linux__)
+int collectLayerLibrary(struct dl_phdr_info *info, size_t, void *data) {
+    if (!info->dlpi_name || !*info->dlpi_name) return 0;
+    const std::string path(info->dlpi_name);
+    const std::string base = path.substr(path.find_last_of('/') + 1);
+    if (base.find("VkLayer_") != std::string::npos)
+        static_cast<std::vector<std::string> *>(data)->push_back(base);
+    return 0;
+}
+#endif
+bool namesValidation(const char *value) {
+    if (!value) return false;
+    std::string v(value);
+    for (char &c : v) c = char(std::tolower(static_cast<unsigned char>(c)));
+    return v.find("validation") != std::string::npos;
+}
+}   // namespace
+
+ValidationStatus OgreEngine::validation() const {
+    ValidationStatus s;
+    s.requested = namesValidation(std::getenv("VK_INSTANCE_LAYERS")) ||
+                  namesValidation(std::getenv("VK_LOADER_LAYERS_ENABLE"));
+#if defined(__linux__)
+    dl_iterate_phdr(collectLayerLibrary, &s.layers);
+#endif
+#if JAH_RAY_QUERY
+    auto *vkRs = mRoot ? dynamic_cast<Ogre::VulkanRenderSystem *>(mRoot->getRenderSystem()) : nullptr;
+    if (vkRs && vkRs->getVulkanDevice() && vkRs->getVulkanDevice()->mDevice) {
+        void *fn = reinterpret_cast<void *>(vkGetDeviceProcAddr(vkRs->getVulkanDevice()->mDevice, "vkCmdDraw"));
+        Dl_info info{};
+        if (fn && dladdr(fn, &info) && info.dli_fname) s.drawEntry = info.dli_fname;
+        s.active = s.drawEntry.find("VkLayer_khronos_validation") != std::string::npos;
+    }
+#endif
+    return s;
 }
 
 }  // namespace detail

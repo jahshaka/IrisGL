@@ -7846,6 +7846,27 @@ struct ArmInfo {
     std::string what;            ///< what the arm changes, and the suite that measures it
 };
 
+/// THE VALIDATION LAYER'S PROOF (TESTING-CLEANUP-2 H4). A row that runs "under the Khronos
+/// validation layer" and greps its log for "Validation Error" proves nothing when the layer never
+/// loaded: no layer, no error, green. Seven rows asked for the layer and four of them could not tell
+/// a layered run from an unlayered one. This is the readout every layered row asserts: whether the
+/// process asked the loader for the layer, whether the DEVICE's own entry points really resolve
+/// into the layer's library (the layer intercepts vkGetDeviceProcAddr when it is active — the
+/// probe tests/atom used alone, generalised), and which layer libraries the process loaded.
+struct ValidationStatus {
+    /// The process environment asks the Vulkan loader for the validation layer
+    /// (VK_INSTANCE_LAYERS or VK_LOADER_LAYERS_ENABLE names it).
+    bool requested = false;
+    /// The device's vkCmdDraw resolves INTO VkLayer_khronos_validation: the layer is live on the
+    /// device this engine draws with. False with no Vulkan device (the NULL render system).
+    bool active = false;
+    /// Every Vulkan layer library loaded in the process (file names, e.g.
+    /// libVkLayer_khronos_validation.so) — what the loader really loaded, whatever was asked.
+    std::vector<std::string> layers;
+    /// The library the device's vkCmdDraw resolves into ("" with no Vulkan device).
+    std::string drawEntry;
+};
+
 /// A discrete thing that happened, with its cause.
 enum class MonitorEventKind {
     GiRebuild,        ///< a GI arm was torn down and rebuilt
