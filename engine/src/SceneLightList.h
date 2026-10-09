@@ -16,18 +16,18 @@
 //   * PER CONSUMER (select): the lights whose range reaches the consumer's box —
 //     a directional light always does; a point, spot or area light whose range
 //     sphere misses the box lights nothing in it (JahBrdf's window is 0 past the
-//     range), so it is CULLED, which drops no light — then, when more of them
-//     reach the box than the consumer's BUDGET holds, the budget's worth with the
-//     highest CONTRIBUTION to the box: the light's peak irradiance at the box's
-//     closest point, through the ONE falloff the shaders take (JahBrdf_piece_all:
-//     the window over max(d^2, rSrc^2) for a point or spot, the disc form factor
-//     for an area light), with the distance floored at the consumer's own scale
-//     (a voxel cell for a cascade: a cell cannot resolve a lamp closer than its own
-//     size, so every lamp inside a cell ties on power; a tie goes to the lamp nearest the
-//     box's centre — a cascade's centre is the viewer — then the shared order). The lights over the budget
-//     are COUNTED (Selection::overBudget) and every consumer reports the count —
-//     a named overflow, never a silent drop. A spot's cone is not tested against
-//     the box (a spot aimed away from it still counts as reaching it: conservative).
+//     range), so it is CULLED, which drops no light (a spot also when its cone,
+//     widened by the box's angular radius, holds none of the box's corners) — then,
+//     when more of them reach the box than the consumer's BUDGET holds, the budget's
+//     worth that deliver the most irradiance TO THE BOX: the ONE falloff the shaders
+//     take (JahBrdf_piece_all: the window over d^2 for a point or spot, the disc form
+//     factor I r^2 / (r^2 + d^2) for an area light, in one unit, so a point and an area
+//     light delivering equal irradiance tie) at d_f = max(d to the box, half the box's
+//     half-extent) — a lamp inside or hugging the box is ranked by what it gives the
+//     box as a whole, never by its near field; a tie goes to the lamp nearest the
+//     box's centre (a cascade's is the viewer), then the shared order. The lights over
+//     the budget are COUNTED (Selection::overBudget) and every consumer reports the
+//     count — a named overflow, never a silent drop.
 //   * THE CHOSEN SET IS EMITTED IN THE LIST'S MEMORY ORDER, so a consumer whose
 //     in-range lights all fit packs exactly the bytes, in exactly the order, the
 //     walk it replaced packed (no picture change where the budget is not reached).
@@ -65,8 +65,6 @@ public:
         /// = no box: nothing is culled by range and the contribution is the power.
         Ogre::Vector3 boxMin = Ogre::Vector3(1.0f, 1.0f, 1.0f);
         Ogre::Vector3 boxMax = Ogre::Vector3(-1.0f, -1.0f, -1.0f);
-        /// The distance the contribution is floored at (see the header).
-        float floorDistance = 0.0f;
         /// The most lights the consumer holds (0 = unbounded).
         std::uint32_t budget = 0u;
         /// The light's visibility flags must share a bit with this mask.

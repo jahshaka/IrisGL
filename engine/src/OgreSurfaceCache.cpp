@@ -1339,8 +1339,8 @@ void SurfaceCache::relightCards() {
     // range-culled against the box of THIS FRAME'S RELIT CARDS (each card's capture
     // volume; a light whose range misses every one of them lights no texel the job
     // writes — the shader's own per-texel range test says the same) and, past the
-    // job's 64, the 64 with the most irradiance at that box (the one falloff,
-    // floored at the largest relit card's texel), the rest COUNTED (lightsDropped).
+    // job's 64, the 64 that deliver the most irradiance to that box (SceneLightList's
+    // rank), the rest COUNTED (lightsDropped).
     // P2d makes it per card. ONE source, the sun included: the one light whose
     // visibility is the captured shadow term is the light the capture's shadow
     // node gave its PSSM maps, which is the frame's rule applied to the same list
@@ -1353,7 +1353,6 @@ void SurfaceCache::relightCards() {
     consumer.budget = kMaxCardLights;
     {
         Ogre::Vector3 lo(std::numeric_limits<float>::max()), hi(-std::numeric_limits<float>::max());
-        float texel = 0.0f;
         for (unsigned idx : mRelight) {
             const CardRec &c = mCards[idx];
             const float hd = c.halfDepth + captureMargin(c.halfDepth);
@@ -1363,11 +1362,9 @@ void SurfaceCache::relightCards() {
                 std::fabs(c.u.z) * c.halfU + std::fabs(c.v.z) * c.halfV + std::fabs(c.d.z) * hd);
             lo.makeFloor(c.centre - ext);
             hi.makeCeil(c.centre + ext);
-            texel = std::max(texel, 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size)));
         }
         consumer.boxMin = lo;
         consumer.boxMax = hi;
-        consumer.floorDistance = texel;
     }
     SceneLightList::Selection chosen;
     sceneLightListOf(mSceneMgr).select(mSceneMgr, consumer, chosen);

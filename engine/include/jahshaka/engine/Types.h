@@ -4405,7 +4405,8 @@ struct GiStatus {
         /// them from the scene's one light list: the lights whose range reaches its
         /// box (a directional always does; a point/spot/area light whose range
         /// sphere misses the box lights nothing in it and is not counted), how many
-        /// of those took a slot, the per-cascade budget (the slots), and the ones
+        /// of those took a slot, `lightCapacity` = THE CASCADE'S BUDGET (<= 128:
+        /// PhotonVoxelLighting::lightBudgetFor, 16 at 128^3, 128 at 64^3), and the ones
         /// OVER it — the dimmest at the cascade by the one falloff, whose bounce is
         /// missing from this cascade's voxels (the engine log says so once a cascade).
         int lightsInRange = 0;

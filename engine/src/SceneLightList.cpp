@@ -111,18 +111,49 @@ float SceneLightList::contribution(const Ogre::Light *l, const Consumer &c, bool
     // THE RANGE CULL (IMAGE-1's, every consumer's now): past its range a light
     // lights nothing (the window is 0), so missing the box drops nothing.
     if (!(d <= range)) { reaches = false; return 0.0f; }
-    const float dFloor = std::max(d, c.floorDistance);
-    if (isArea(t)) {
-        // jahAreaLightAttenuation: the disc of the rectangle's area.
-        const Ogre::Vector2 rect = l->getDerivedRectSize();
-        const float r2 = std::max(float(rect.x * rect.y) / float(Ogre::Math::PI), 0.0f);
-        return power * lightWindow(d, range) * r2 / std::max(r2 + dFloor * dFloor, 1e-8f);
+    // THE CONE CULL (a spot), conservative: a spot whose apex is outside the box and
+    // whose cone — widened by the box's angular radius seen from the apex — holds
+    // none of the box's eight corners lights nothing in it.
+    if (t == Ogre::Light::LT_SPOTLIGHT && d > 0.0f) {
+        const Ogre::Vector3 centre = (c.boxMin + c.boxMax) * 0.5f;
+        const float boxRadius = float((c.boxMax - c.boxMin).length()) * 0.5f;
+        const float toCentre = float(centre.distance(p));
+        const float angRadius = toCentre > boxRadius ? std::asin(boxRadius / toCentre) : float(Ogre::Math::HALF_PI);
+        const float halfAngle = float(l->getSpotlightOuterAngle().valueRadians()) * 0.5f;
+        const float limit = halfAngle + angRadius;
+        if (limit < float(Ogre::Math::PI)) {
+            const float cosLimit = std::cos(limit);
+            const Ogre::Vector3 dir = l->getDerivedDirection().normalisedCopy();
+            bool anyInside = false;
+            for (int k = 0; k < 8 && !anyInside; ++k) {
+                const Ogre::Vector3 corner((k & 1) ? c.boxMax.x : c.boxMin.x, (k & 2) ? c.boxMax.y : c.boxMin.y,
+                                           (k & 4) ? c.boxMax.z : c.boxMin.z);
+                Ogre::Vector3 v = corner - p;
+                const float len = float(v.length());
+                if (len <= 0.0f || float(v.dotProduct(dir)) >= cosLimit * len) anyInside = true;
+            }
+            if (!anyInside) { reaches = false; return 0.0f; }
+        }
     }
-    // jahLightAttenuation: the window over max(d^2, rSrc^2) (attenuation "linear"
-    // carries the source radius, OgreScene's packing).
-    const float rSrc = float(l->getAttenuationLinear());
-    const float denom = std::max(std::max(dFloor * dFloor, rSrc * rSrc), 1e-8f);
-    return power * lightWindow(d, range) / denom;
+    // THE RANK: the irradiance THE BOX receives, in one unit for every type — the
+    // light's falloff at d_f = max(d, the box's half-extent / 2), so every lamp inside
+    // or hugging the box is ranked by the light it delivers to the box as a whole and
+    // not by its near field (a source radius is a near-field detail, not energy).
+    const Ogre::Vector3 half = (c.boxMax - c.boxMin) * 0.5f;
+    const float dF = std::max(d, 0.5f * float(std::max(half.x, std::max(half.y, half.z))));
+    if (isArea(t)) {
+        // JahBrdf_piece_all's jahAreaLightAttenuation, the pixel's own (AreaLights_piece_ps,
+        // AREA-SCALE-1): a Lambertian emitter of radiance I seen on its axis delivers
+        // I r^2 / (r^2 + d^2) times the window, r the disc of the rectangle's area — the
+        // attenuation's "linear" slot (OgreScene packs sqrt(w h / pi) there), in the same
+        // units a point light's I / d^2 is in (both carry the engine's I x pi power scale):
+        // an area and a point light that deliver equal irradiance tie.
+        const float r = float(l->getAttenuationLinear());
+        const float r2 = r * r;
+        return power * lightWindow(d, range) * r2 / std::max(r2 + dF * dF, 1e-8f);
+    }
+    // jahLightAttenuation's far field: the window over d^2.
+    return power * lightWindow(d, range) / std::max(dF * dF, 1e-8f);
 }
 
 void SceneLightList::select(Ogre::SceneManager *sm, const Consumer &c, Selection &out) const {

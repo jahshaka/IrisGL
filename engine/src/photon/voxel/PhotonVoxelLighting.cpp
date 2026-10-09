@@ -1342,14 +1342,12 @@ namespace Ogre
         // or area light whose range sphere misses it lights none of its voxels (the
         // falloff is zero past the range), so it takes no slot and costs no march —
         // and, when more reach it than the budget holds, the budget's worth with the
-        // most irradiance at the box (the one falloff, floored at a voxel cell),
+        // most irradiance delivered to the box (SceneLightList's rank),
         // emitted in the light memory manager's order. The lights over the budget are
         // counted (getLastLightsOverBudget, GiStatus) and logged, never dropped silently.
-        const Vector3 cellSize = mVoxelizer->getVoxelCellSize();
         jahshaka::engine::SceneLightList::Consumer consumer;
         consumer.boxMin = voxelOrigin;
         consumer.boxMax = voxelOrigin + cascadeSize;
-        consumer.floorDistance = static_cast<float>( std::max( cellSize.x, std::max( cellSize.y, cellSize.z ) ) );
         const Vector3 res = mVoxelizer->getVoxelResolution();
         mLightBudget = lightBudgetFor( static_cast<uint32>( res.x * res.y * res.z ) );
         consumer.budget = mLightBudget;
