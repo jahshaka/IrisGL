@@ -425,11 +425,10 @@ void FrameMonitor::endRowSample(Ogre::RenderSystem *rs, const std::string &name)
     if (mOpenRowSamples == 0u) openGap();   // ...and the next one begins
 }
 
-namespace {
 /// Ogre's CURRENT command buffer, as a tag: it changes exactly when the queue
 /// submits (commitAndNextCommandBuffer begins a new one), which is what tells a
 /// gap that crossed a submission from one that did not. 0 = cannot tell.
-std::uintptr_t cmdTag(Ogre::RenderSystem *rs) {
+std::uintptr_t queueSubmissionTag(Ogre::RenderSystem *rs) {
     auto *vk = dynamic_cast<Ogre::VulkanRenderSystem *>(rs);
     if (!vk || !vk->getVulkanDevice()) return 0u;
     try {
@@ -438,7 +437,6 @@ std::uintptr_t cmdTag(Ogre::RenderSystem *rs) {
         return 0u;
     }
 }
-}   // namespace
 
 void FrameMonitor::openGap() {
     if (!mGpu || !mFrameSampleOpen || mGapOpen || mOpenRowSamples != 0u || !mFrameRs) return;
@@ -448,13 +446,13 @@ void FrameMonitor::openGap() {
     try { mFrameRs->beginGPUSampleProfile("gap", &hash); } catch (...) { return; }
     mGapOpen = true;
     mGapId = id;
-    mGapCmd = cmdTag(mFrameRs);
+    mGapCmd = queueSubmissionTag(mFrameRs);
 }
 void FrameMonitor::closeGap() {
     if (!mGapOpen) return;
     mGapOpen = false;
     try { mFrameRs->endGPUSampleProfile("gap"); } catch (...) { return; }
-    const std::uintptr_t now = cmdTag(mFrameRs);
+    const std::uintptr_t now = queueSubmissionTag(mFrameRs);
     mGapSpanned[mGapId] = now != mGapCmd || now == 0u;
     mFrameGaps.push_back(mGapId);
 }

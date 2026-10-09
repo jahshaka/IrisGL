@@ -82,9 +82,14 @@ enum VoxelReadoutWord : uint32_t {
 };
 static constexpr uint32_t kReadHistogramLevels = 16u;
 
-/// What the last HARVESTED readout said. `valid` is false until one has arrived.
+/// What the last LANDED readout said. `valid` is false until one has arrived.
 struct VoxelReading {
     bool valid = false;
+    /// THE GATHER THIS READING DESCRIBES (VoxelFeed::gathers() at that gather). A
+    /// reading lands a few frames after its gather, so `gather < feed.gathers()` is
+    /// "the newest gather's numbers have not landed yet" - a caller that needs them
+    /// renders frames until the two agree; nothing waits on the device.
+    unsigned long long gather = 0;
     unsigned long long indexTotal = 0;
     std::vector<int> histogram;       ///< trailing zeros trimmed
     unsigned instances = 0;
@@ -115,30 +120,37 @@ public:
     uint64_t recordCapacity() const { return mRecordCapacity; }
     uint32_t rangeCapacity() const { return mRangeCapacity; }
 
-    /// The gather wrote a readout nobody has asked the device for yet. NOT requested
-    /// at the gather: Ogre's readRequest COMMITS the command buffer, and a commit in
-    /// the middle of a rebuild left a GPU bubble inside it (measured on Showroom 2:
-    /// +2-4 ms per cascade rebuild on the monitor's GPU pair, +0.3-0.5 ms CPU). It is
-    /// requested at the start of the next frame's GI work (`serviceReadout`), where
-    /// the command buffer holds nothing yet, or on demand by giStatus.
-    void markReadoutOwed() { mReadoutOwed = true; }
+    /// THE READOUT IS A TICKET, A FEW FRAMES LATE, AND NOTHING EVER WAITS FOR IT
+    /// (VOXEL-READOUT-1). The gather wrote a readout nobody has asked the device for
+    /// yet; it is requested at the start of the next frame's GI work
+    /// (`serviceReadout`) as an INACCURATE ticket - the copy is recorded into the
+    /// frame's command buffer, with no fence and no flush (fork: BufferPacked::
+    /// readRequest's accurateTracking = false) - and taken once the frame it was
+    /// recorded in has finished (`harvest`, polled at every frame head). The ACCURATE
+    /// ticket this used to take flushed the queue, and on Vulkan that flush waits
+    /// for EVERYTHING submitted so far: 9.0 s frames on San Miguel's open, on the UI
+    /// thread. `reading()` is always the last LANDED reading; `reading().gather`
+    /// against `gathers()` says whether it is the newest gather's.
+    void markReadoutOwed() { mReadoutOwed = true; mOwedGather = ++mGathers; }
     bool readoutOwed() const { return mReadoutOwed; }
-    /// Frame start: collect a finished readout; issue an owed one.
+    /// Frame start: collect a landed readout; issue an owed one. Never waits.
     void serviceReadout();
-    /// Queues the readout's download (after the gather's dispatches, in the same
-    /// command stream) — NON-blocking, but it commits the command buffer.
-    void requestReadout();
     /// Takes the queued readout if its transfer is done; returns whether it did.
     /// Never waits: a caller that asks too early keeps the previous reading.
     bool harvest();
-    /// Waits for the queued readout (a TEST AND TOOL path only — a stall).
-    bool harvestBlocking();
     /// A build that gathered NOTHING (no geometry, no material, the refusal hook):
     /// the reading is an honest zero now, not the last gather's numbers.
     void noteEmpty();
     const VoxelReading &reading() const { return mReading; }
+    /// Gathers this feed has run (an empty build counts: its reading is immediate).
+    unsigned long long gathers() const { return mGathers; }
+    /// THE SENTRY: readout requests that SUBMITTED the queue (Ogre's current command
+    /// buffer changed across the request) - a submit mid-frame is the drain this
+    /// feed must never cause. 0 is the invariant (gi.readout_async).
+    unsigned long long readoutFlushes() const { return mReadoutFlushes; }
 
 private:
+    void requestReadout();
     void takeTicket();
     Ogre::VaoManager *mVao = nullptr;
     Ogre::UavBufferPacked *mParams = nullptr;
@@ -152,6 +164,10 @@ private:
     uint32_t mMaskCapacity = 0;
     Ogre::AsyncTicketPtr mTicket;
     bool mReadoutOwed = false;
+    unsigned long long mGathers = 0;
+    unsigned long long mOwedGather = 0;     ///< the gather an owed request will describe
+    unsigned long long mTicketGather = 0;   ///< the gather the ticket in flight describes
+    unsigned long long mReadoutFlushes = 0;
     VoxelReading mReading;
 };
 

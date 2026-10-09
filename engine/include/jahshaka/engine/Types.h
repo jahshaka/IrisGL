@@ -4401,6 +4401,19 @@ struct GiStatus {
         /// capacity is a bound (every instance at its finest level's partition
         /// count), so a non-zero here is a defect, and it is logged critically.
         long long voxelOverflow = 0;
+        /// WHEN THE NUMBERS ABOVE WERE TAKEN (VOXEL-READOUT-1). `items`, `attached`,
+        /// `voxelLevels`, `voxelTriangles`, `voxelRecords` and `voxelOverflow` are a
+        /// READ-BACK of the gather, and a read-back lands a few frames after the
+        /// gather it reads (3 frames in flight): nothing waits for the device.
+        /// `voxelGathers` counts the gathers this cascade has run and
+        /// `voxelReadingGather` is the one the numbers describe, so equal = the
+        /// newest; a caller that needs that renders frames until they agree.
+        long long voxelGathers = 0;
+        long long voxelReadingGather = 0;
+        /// THE NO-DRAIN SENTRY: read-back requests that SUBMITTED the queue mid-frame
+        /// (a submit is where a Vulkan read-back used to wait for the whole GPU).
+        /// Cumulative; 0 is the invariant (gi.readout_async).
+        long long voxelReadoutFlushes = 0;
         /// THE CASCADE'S LIGHTS (P1C-LIGHT-LIST), as its last light injection selected
         /// them from the scene's one light list: the lights whose range reaches its
         /// box (a directional always does; a point/spot/area light whose range

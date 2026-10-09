@@ -2378,6 +2378,10 @@ void noteShaderCompiles(unsigned n);
 void noteProbeCaptures(unsigned captures);
 /// One Photon cascade re-voxelisation, counted on the frame that paid for it.
 void noteCascadeRebuild();
+/// Ogre's current command buffer as a tag: it changes exactly when the queue
+/// SUBMITS. 0 = cannot tell (not Vulkan). The frame monitor's gap rows and the
+/// voxel feed's no-drain sentry (VoxelFeed::readoutFlushes) both read it.
+std::uintptr_t queueSubmissionTag(Ogre::RenderSystem *rs);
 void notePlanarRender(unsigned slots);
 
 /// The GI arm's stale reasons and the monitor's are the same vocabulary; this
@@ -5977,9 +5981,8 @@ private:
     /// to it (OgreGpuVoxelGather.cpp).
     bool runVoxelGather(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *voxelizer,
                         const VoxelGatherInputs &in);
-    /// A feed's reading, current: a finished readout is taken, one still in flight
-    /// is waited for (its work is already submitted - the ticket commits). For
-    /// giStatus, a diagnostic; nothing per-frame reads it.
+    /// A feed's LAST LANDED reading - never a request, never a wait (giStatus is
+    /// read from the UI thread between frames). `reading.gather` says which gather.
     static const detail::VoxelReading &currentReading(detail::VoxelFeed *feed);
     void serviceVoxelReadouts();
     /// Destroys a chain that never finished building (nothing is bound yet, so

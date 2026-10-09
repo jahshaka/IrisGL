@@ -368,10 +368,11 @@ bool OgreScene::gatherAndBuild(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *v
 const detail::VoxelReading &OgreScene::currentReading(detail::VoxelFeed *feed) {
     static const detail::VoxelReading kNone;
     if (!feed) return kNone;
-    // ON DEMAND: an owed readout is requested now (the ticket commits the command
-    // buffer and map() waits on its fence - a diagnostic's cost, never a frame's).
-    if (feed->readoutOwed()) { feed->harvest(); feed->requestReadout(); }
-    if (!feed->harvest()) feed->harvestBlocking();
+    // THE LAST LANDED READING, never a request and never a wait (VOXEL-READOUT-1):
+    // giStatus is read from the UI thread between frames (the World panel's timer,
+    // the shader-build gate, the screenshot settle). A caller that needs the newest
+    // gather's numbers renders frames until cascades[i].voxelReadingGather reaches
+    // voxelGathers.
     return feed->reading();
 }
 
@@ -1194,6 +1195,9 @@ GiStatus OgreScene::giStatus() const {
             cs.voxelTriangles = (long long)(rd.indexTotal / 3u);
             cs.voxelRecords   = (long long)rd.records;
             cs.voxelOverflow  = (long long)rd.overflow;
+            cs.voxelGathers        = c.feed ? (long long)c.feed->gathers() : 0;
+            cs.voxelReadingGather  = (long long)rd.gather;
+            cs.voxelReadoutFlushes = c.feed ? (long long)c.feed->readoutFlushes() : 0;
             // WHAT THE REBUILD COST IN DISPATCHES (fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065)): counted by the
             // voxeliser's last build() - one per store bucket per octant, 0 when it
             // only cleared. A dispatch is sized by the whole octant, so this is the

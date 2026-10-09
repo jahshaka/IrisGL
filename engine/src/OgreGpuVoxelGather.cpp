@@ -105,15 +105,22 @@ void VoxelFeed::requestReadout() {
     // THE ORDER IS THE COMMAND STREAM'S: the copy is recorded after the write job, and
     // Ogre's download path charges a UAV source with SHADER_WRITE from every stage
     // before copying (VulkanQueue::prepareForDownload), so the transfer sees what the
-    // job wrote. Nothing is flushed and nothing waits: the ticket is collected once
-    // its transfer is done (harvest), which is a frame later in practice.
-    mTicket = mReadout->readRequest(0, kReadWords);
+    // job wrote. INACCURATE TRACKING: the copy rides the frame's own submission - no
+    // fence, no flush, no wait - and the ticket is done once that frame has finished
+    // on the device (harvest, polled at the frame head: 3 frames in flight).
+    Ogre::RenderSystem *rs =
+        Ogre::Root::getSingletonPtr() ? Ogre::Root::getSingleton().getRenderSystem() : nullptr;
+    const std::uintptr_t before = monitor::queueSubmissionTag(rs);
+    mTicket = mReadout->readRequest(0, kReadWords, /*accurateTracking=*/false);
+    mTicketGather = mOwedGather;
+    if (before && monitor::queueSubmissionTag(rs) != before) ++mReadoutFlushes;
 }
 
 void VoxelFeed::takeTicket() {
     const uint32_t *w = static_cast<const uint32_t *>(mTicket->map());
     VoxelReading r;
     r.valid = true;
+    r.gather = mTicketGather;
     r.indexTotal = w[kReadIndexTotal];
     r.histogram.assign(w + kReadHistogram, w + kReadHistogram + kReadHistogramLevels);
     while (!r.histogram.empty() && r.histogram.back() == 0) r.histogram.pop_back();
@@ -144,12 +151,7 @@ void VoxelFeed::noteEmpty() {
     mReadoutOwed = false;
     mReading = VoxelReading();
     mReading.valid = true;
-}
-
-bool VoxelFeed::harvestBlocking() {
-    if (!mTicket) return false;
-    takeTicket();     // map() waits on the ticket's own fence
-    return true;
+    mReading.gather = ++mGathers;
 }
 
 Ogre::DescriptorSetUav::BufferSlot gatherSlotPublic(Ogre::UavBufferPacked *buffer,
