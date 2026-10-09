@@ -1071,6 +1071,14 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     octRes = std::min(std::max(octRes, 1u), kGatherOctResMax);
 
     View &v = mViews[key];
+    // THE GATHER-HITS HOST COPY GOES WITH THE ARM (FAR-SUN-1): a readback of a frame the arm no
+    // longer covers is no reading (world.gatherHits then answers not ready), held frames included.
+    if (!in.hitsReadback && !v.raysHost.empty()) {
+        v.raysHost.clear();
+        v.raysHost.shrink_to_fit();
+        v.raysHostFrame = 0u;
+        for (unsigned i = 0; i < kFramesInFlight; ++i) v.pending[i].rays = false;
+    }
     // A SCENE BIND IS A NEW VIEW for the histories: nothing in them is this
     // scene's.
     if (v.scene != in.scene) v.age = 0u;
@@ -1161,7 +1169,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // a HELD view dispatches no integrate, and the overlay is the integrate's.
         // The rest restarts; the history is untouched (the rest mean is a function
         // of the rest frames' own sequence, so it settles back to the same answer).
-        const unsigned photon = in.photonOverlay ? in.photonOverlayGeneration : 0u;
+        // ...and WHOSE picture (FAR-SUN-1): the discs and the GatherHits view write different
+        // jobs, so a switch between them with the camera still is a change too.
+        const unsigned photon =
+            in.photonOverlay ? in.photonOverlayGeneration * 2u + (in.photonOverlayGatherHits ? 1u : 0u) : 0u;
         // ...and never while the gather-hits readback runs (FAR-SUN-1): a held view traces
         // nothing, and the instrument reads the trace.
         const bool still = temporal && !in.tuning.restOff && !in.stereo && sameCamera &&
@@ -1455,7 +1466,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (!normals.imageView || !depth.imageView) return;
     // THE GATHER-HITS RECORDS (FAR-SUN-1): one uvec4 per ray of every uniform probe, made on
-    // the first frame the arm asks (and freed with the view's targets).
+    // the first frame the arm asks (and freed with the view's targets) - and the host copy goes
+    // when the arm does: a readback of a frame the arm no longer covers is no reading.
+
     if (in.hitsReadback && !v.rays) {
         std::string rerr;
         if (!mHost.gatherMakeBuffer(v.raysSlotBytes(),
