@@ -1083,6 +1083,41 @@ const ArmDef kArms[] = {
       "THE RAYS STRATIFIED ACROSS NEIGHBOURING PROBES (GatherTuning::crossStrata): a ray's jitter in "
       "its octahedral texel is confined to one of N x N sub-cells, any N x N block of probes covering "
       "all of them once (shifted at random per texel and frame). 1 = off; 0 = the shipped N." },
+    { "gi.cascadeFault", -1.0, -1.0, 15.0,
+      "FAULT INJECTION (a test door, gi.cascades F2): cascade N's rebuild throws after its region "
+      "moved and BEFORE its build - the revert path. -1 = none. Was JAH_GI_CASCADE_FAULT (a "
+      "per-rebuild read)." },
+    { "gi.cascadeFaultPost", -1.0, -1.0, 15.0,
+      "FAULT INJECTION (a test door, gi.cascades round-2 F1): cascade N's rebuild throws AFTER its "
+      "build - the keep-the-placement path. -1 = none. Was JAH_GI_CASCADE_FAULT_POST (a per-rebuild "
+      "read)." },
+    { "gi.rebuildSettle", 1.0, 0.0, 1.0,
+      "The rebuild settle (the chain's owed settle steps after a rebuild). 0 = off: "
+      "gi.chain_converge's paired arm. Was JAHSHAKA_GI_NO_REBUILD_SETTLE (a per-frame read)." },
+    { "gi.fieldRays", 0.0, 0.0, 7.0,
+      "The irradiance field's rays per depth texel at its next build (1-7; 0 = the shipped count). "
+      "gi.field_thin_wall's noise arms. Was JAHSHAKA_GI_FIELD_RAYS (a per-build read)." },
+    { "gi.fieldSamples", 0.0, 0.0, 4096.0,
+      "The irradiance field's sample target per texel at its next build (0 = the shipped "
+      "kIfdTargetSamples). gi.field_thin_wall. Was JAHSHAKA_GI_FIELD_SAMPLES (a per-build read)." },
+    { "gi.fieldStatic", 0.0, 0.0, 1.0,
+      "The irradiance field's ray set NOT rotated per frame at its next build (the fixed-set arm). "
+      "gi.field_thin_wall. Was JAHSHAKA_GI_FIELD_STATIC (a per-build read)." },
+    { "gi.refuseGeometry", 0.0, 0.0, 1.0,
+      "THE REFUSAL HOOK (a test door, gi.voxel_resident case 5): a voxel build runs with NO geometry "
+      "source - the state of a device with no buffer device addresses - and must build an empty "
+      "volume, not crash. Was JAH_VCT_REFUSE_GEOMETRY (a per-build read)." },
+    { "atom.discriminate", 0.0, 0.0, 2.0,
+      "THE DECODE'S DISCRIMINATOR (a test door, ATOM-BLACK-FRAMES-1): 1 = a colour code per failed "
+      "validity term instead of the discard, 2 = also the code chart. 0 = shipped. scale's decode "
+      "rows. Was JAHSHAKA_ATOM_DISCRIMINATE (a per-pass read)." },
+    { "atom.hitWorldLights", 0.0, 0.0, 2.0,
+      "The ray-hit decode's light list: 0 = shipped (the world list where the hit has no cell), "
+      "1 = off (the picture before the list), 2 = all (every hit the world list, no Forward+ cell). "
+      "gi.hit_shade. Was JAHSHAKA_HIT_WORLD_LIGHTS (a per-pass read)." },
+    { "atom.hitVctSpecular", 1.0, 0.0, 1.0,
+      "The VCT specular cone in the ray-hit decode. 0 = compiled out (vct_disable_specular). "
+      "gi.hit_shade. Was JAHSHAKA_HIT_VCT_SPECULAR (a per-pass read)." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

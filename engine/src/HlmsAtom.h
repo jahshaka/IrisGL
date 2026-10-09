@@ -68,6 +68,8 @@ namespace jahshaka {
 namespace engine {
 namespace detail {
 
+class ArmRegistry;   // EnginePrivate.h: the engine's measurement arms
+
 /// THE ONE FUNCTION every PBS-family host is told through (D1 §1; OgreEngine.cpp).
 /// PBS is the source of truth — every engine site tells HlmsPbs — and this copies
 /// what PBS holds onto every other PBS-family host: at registration (`force`) and
@@ -403,7 +405,14 @@ protected:
     unsigned worldLightCount() const { return mWorldLightCount; }
     unsigned worldLightCap() const { return mWorldLightCap; }
 
+public:
+    /// The engine's arm registry (TESTING-CLEANUP-2 H8f): the pass preparations read
+    /// `atom.discriminate`, `atom.hitWorldLights` and `atom.hitVctSpecular` from it —
+    /// they were environment reads per pass. Set by OgreEngine at registration.
+    void setArms(const ArmRegistry *arms) { mArms = arms; }
+
 private:
+    const ArmRegistry *mArms = nullptr;
     void uploadBucketTable();
     /// THE WORLD LIGHT LIST of a hit decode pass (kWorldLightBufSlot): rebuilt on the
     /// CPU per pass from the scene's own light collection (never the camera-culled

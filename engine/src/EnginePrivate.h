@@ -1876,6 +1876,18 @@ enum class ArmId : unsigned {
     GatherYoungReach,    ///< "gather.youngReach" — that reach in pixels at a history of 0 (0 = shipped)
     GatherValidationOff, ///< "gather.validationOff" — every reprojected history texel accepted (a test door)
     GatherCrossStrata,   ///< "gather.crossStrata" — rays stratified across N x N probes (0 = shipped, 1 = off)
+    // TESTING-CLEANUP-2 H8f: the GI and Atom doors that were environment reads in shipped
+    // per-frame / per-pass / per-build code.
+    GiCascadeFault,      ///< "gi.cascadeFault" — cascade N's rebuild throws before its build (-1 = none)
+    GiCascadeFaultPost,  ///< "gi.cascadeFaultPost" — cascade N's rebuild throws after its build (-1 = none)
+    GiRebuildSettle,     ///< "gi.rebuildSettle" — the rebuild settle runs (0: off, the paired arm)
+    GiFieldRays,         ///< "gi.fieldRays" — the field's rays per depth texel (0 = shipped)
+    GiFieldSamples,      ///< "gi.fieldSamples" — the field's sample target (0 = shipped)
+    GiFieldStatic,       ///< "gi.fieldStatic" — the field's rays NOT rotated per frame
+    GiRefuseGeometry,    ///< "gi.refuseGeometry" — a voxel build with no geometry source (the refused device)
+    AtomDiscriminate,    ///< "atom.discriminate" — the decode's failure colour codes (1), the chart (2)
+    AtomHitWorldLights,  ///< "atom.hitWorldLights" — the hit decode's light list: 0 shipped, 1 off, 2 all
+    AtomHitVctSpecular,  ///< "atom.hitVctSpecular" — the hit decode's VCT specular cone (0: compiled out)
     Count
 };
 class ArmRegistry {

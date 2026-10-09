@@ -3041,8 +3041,9 @@ void OgreEngine::ensureHlms() {
     {
         Ogre::ArchiveVec libs;
         for (const auto &p : libPaths) libs.push_back(am.load(mMediaDir + p, "FileSystem", true));
-        mRoot->getHlmsManager()->registerHlms(
-            OGRE_NEW HlmsAtom(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
+        HlmsAtom *atom = OGRE_NEW HlmsAtom(am.load(mMediaDir + mainPath, "FileSystem", true), &libs);
+        atom->setArms(&mArms);
+        mRoot->getHlmsManager()->registerHlms(atom);
     }
     AtomPassProvider::install(mRoot->getCompositorManager2());
     registerAtomIdPass();

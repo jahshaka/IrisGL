@@ -7,6 +7,7 @@
 // fillBuffersForV2 calls PBS's and then binds what is ours. Terra copies the whole of
 // PBS's fillBuffersFor (300 lines); this does not have to.
 #include "HlmsAtom.h"
+#include "EnginePrivate.h"
 #include "photon/voxel/PhotonPassBinding.h"
 
 #include <CommandBuffer/OgreCbShaderBuffer.h>
@@ -1090,9 +1091,10 @@ Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shad
         setProperty(props, Ogre::IdString("atom_classified"), 1);
         // THE DISCRIMINATOR (a TEST DOOR, ATOM-BLACK-FRAMES-1): a colour code per failed
         // validity term instead of the discard (800.Atom_piece_ps.any's AtomDeclDecode);
-        // 2 paints the code chart. Read per pass: a test flips it between frames.
-        if (const char *d = std::getenv("JAHSHAKA_ATOM_DISCRIMINATE")) {
-            const int v = std::atoi(d);
+        // 2 paints the code chart. The registered arm `atom.discriminate`, latched per
+        // frame: a test flips it between frames.
+        {
+            const int v = mArms ? int(mArms->value(ArmId::AtomDiscriminate)) : 0;
             if (v >= 1) setProperty(props, Ogre::IdString("atom_discriminate"), 1);
             if (v >= 2) setProperty(props, Ogre::IdString("atom_discriminate_chart"), 1);
         }
@@ -1123,21 +1125,22 @@ Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shad
     setProperty(props, Ogre::IdString("atom_hit_mode"), 1);
     setProperty(props, Ogre::IdString("hlms_forwardplus_custom_frag_coord"), 1);
     setProperty(props, Ogre::HlmsBaseProp::Fog, 0);
-    // MEASUREMENT DOORS (D3-HIT-SHADE-2's paired arms; read per pass, so one process
-    // flips them between frames — never a product setting):
-    //   JAHSHAKA_HIT_WORLD_LIGHTS=off   the world light list is not read (the
-    //                                   picture before this lane: a hit with no
-    //                                   cell gets no point or spot light);
-    //   JAHSHAKA_HIT_WORLD_LIGHTS=all   EVERY hit takes the world list and no
-    //                                   Forward+ cell (the "one list" arm);
-    //   JAHSHAKA_HIT_VCT_SPECULAR=0     the VCT specular cone compiled out of the
-    //                                   hit decode (vct_disable_specular).
-    if (const char *w = std::getenv("JAHSHAKA_HIT_WORLD_LIGHTS")) {
-        if (std::strcmp(w, "off") == 0) setProperty(props, Ogre::IdString("atom_hit_world_off"), 1);
-        else if (std::strcmp(w, "all") == 0) setProperty(props, Ogre::IdString("atom_hit_world_all"), 1);
+    // MEASUREMENT ARMS (D3-HIT-SHADE-2's paired arms; registered, latched per frame, so
+    // one process flips them between frames — never a product setting):
+    //   atom.hitWorldLights = 1   the world light list is not read (the picture
+    //                             before that lane: a hit with no cell gets no
+    //                             point or spot light);
+    //   atom.hitWorldLights = 2   EVERY hit takes the world list and no Forward+
+    //                             cell (the "one list" arm);
+    //   atom.hitVctSpecular = 0   the VCT specular cone compiled out of the hit
+    //                             decode (vct_disable_specular).
+    if (mArms) {
+        const int w = int(mArms->value(ArmId::AtomHitWorldLights));
+        if (w == 1) setProperty(props, Ogre::IdString("atom_hit_world_off"), 1);
+        else if (w == 2) setProperty(props, Ogre::IdString("atom_hit_world_all"), 1);
+        if (!mArms->on(ArmId::AtomHitVctSpecular))
+            setProperty(props, Ogre::IdString("vct_disable_specular"), 1);
     }
-    if (const char *v = std::getenv("JAHSHAKA_HIT_VCT_SPECULAR"); v && std::strcmp(v, "0") == 0)
-        setProperty(props, Ogre::IdString("vct_disable_specular"), 1);
     PassCache passCache;
     passCache.passPso = ret.pso.pass;
     passCache.properties = props;
