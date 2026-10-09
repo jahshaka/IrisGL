@@ -193,10 +193,28 @@ bool meterJobsPresent() {
            hc->findComputeJobNoThrow(kMeterBuildJob) &&
            hc->findComputeJobNoThrow(kMeterResolveJob);
 }
-/// Bloom ping-pong, at a FIXED 256x256 — the sample's own layout, and the
-/// reason bloom is resolution-independent and nearly free.
-constexpr const char *kBlur0 = "jahBlur0";
-constexpr const char *kBlur1 = "jahBlur1";
+/// THE BLOOM LADDER (BLOOM-1; media/Hlms/Jahshaka/JahBloom.material). Six
+/// levels, each half the one above in BOTH axes, the first at half the view's
+/// size: 960x540 down to 30x17 for a 1080p view. Sized from the VIEW, never a
+/// fixed square, so the filter spreads a highlight by the same number of
+/// pixels across and down at every aspect — the defect it replaced was a
+/// fixed 256x256 target blurred 65 taps across and 11 down, which turned a
+/// point light's hot spot into a full-width band (spikes/light-band-1).
+/// R11G11B10_FLOAT: linear radiance, 32 bits a texel, blendable (the upsample
+/// adds into each level).
+///
+/// LAYER-READY (ONE_PICTURE_SPEC A4): every ladder texture is sized RELATIVE to
+/// the target, so chain::applyStereo would make it a two-layer array like any
+/// other screen-sized picture, and every program samples through JahScreen.glsl,
+/// so its multiview twin reads its own eye. A stereo chain does not build the
+/// ladder yet (bloomLadder below says what is missing).
+constexpr int kBloomLevels = 6;   // JahBloomResolve_ps.glsl's JAH_BLOOM_LEVELS
+constexpr const char *kBloomLevel[kBloomLevels] = {
+    "jahBloom0", "jahBloom1", "jahBloom2", "jahBloom3", "jahBloom4", "jahBloom5" };
+/// What the tonemap quad samples as its bloom input: the resolved ladder at
+/// half the view's size, in the encoding the tonemapper reads (sqrt of the
+/// bloom over 16). With no ladder it is a 4x4 cleared black once.
+constexpr const char *kBloom = "jahBloom";
 /// SSAO: the main pass' second colour attachment, the half-res depth it
 /// marches, and the AO buffer plus its separable blur.
 constexpr const char *kGBufNormals = "jahGBufNormals";
@@ -477,7 +495,7 @@ void syncRtvDepth(Ogre::CompositorNodeDef *n, const char *name,
 /// copies still point at — a read-after-destroy the moment the next pass is added.
 /// So it is called EXACTLY ONCE, with a capacity no chain can exceed, before
 /// the first addTargetPass. Nothing below may call it again.
-constexpr size_t kMaxTargetPasses = 78;   // 50 + up to 14 HZB mip passes, the photon view's 4, the decode passes' 2, and headroom
+constexpr size_t kMaxTargetPasses = 80;   // 52 (the bloom ladder is 11) + up to 14 HZB mip passes, the photon view's 4, the decode passes' 2, and headroom
 
 /// THE STORE ACTION OF THE LAST PASS ANY WORKSPACE OF OURS PUTS ON A TARGET.
 ///
@@ -583,6 +601,20 @@ Ogre::CompositorPassQuadDef *addDisplayEncodeQuad(Ogre::CompositorNodeDef *n, co
 /// @see PostFxDesc::ssrScreenMarch for why a stereo chain never marches.
 bool marchesInScreenSpace(const ChainDesc &d) {
     return d.ssr > 0 && d.ssrScreenMarch && !d.stereo;
+}
+
+/// DOES THIS CHAIN BUILD THE BLOOM LADDER? Read by `build` (the textures and the
+/// passes) and by the per-frame update (the threshold and the amount).
+///
+/// NOT IN STEREO, yet (ONE_PICTURE_SPEC A4): the ladder itself is layer-ready
+/// (screen-sized textures, programs with the JahScreen.glsl arm), but the tonemap
+/// quad's multiview arm (the fork's FinalToneMapping_ps.glsl, JAH_MULTIVIEW)
+/// still reads its bloom input as a plain 2D texture, so a layered ladder would
+/// hand both eyes' composites a texture of the wrong type. The session's policy
+/// (applyVrViewPolicy) turns bloom off in the headset already; this makes the
+/// chain refuse it whatever a host asked.
+bool bloomLadder(const ChainDesc &d) {
+    return d.hdr && d.bloom && !d.stereo;
 }
 
 }   // namespace
@@ -1776,19 +1808,25 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // still CLEARS it, so the Uav flag is added only where it is used.
             if (!desc.tonemapFixed) td->textureFlags |= Ogre::TextureFlags::Uav;
         }
-        // R10G10B10A2 rather than FP16: the pin's own note says FP16 bloom
-        // buffers cost 0.748 ms on an HD 7770 at 1080p for no visible gain.
-        {
-            auto *td = addTex(n, kBlur0, Ogre::PFG_R10G10B10A2_UNORM, 256u, 256u);
-            // With bloom OFF this target is cleared to black ONCE and then only
-            // read (the tonemapper always samples it). A DiscardableContent
-            // texture that nothing writes this frame is Undefined, and the
-            // barrier solver refuses to transition Undefined to a read-only
-            // layout — a black frame with one line in the log. keep_content is
-            // exactly what the message asks for.
-            if (!desc.bloom) td->textureFlags = Ogre::TextureFlags::RenderToTexture;
+        // THE BLOOM LADDER (kBloomLevel): level k at 1 / 2^(k+1) of the view.
+        if (bloomLadder(desc)) {
+            for (int k = 0; k < kBloomLevels; ++k) {
+                const float f = 1.0f / float(2 << k);
+                addTex(n, kBloomLevel[k], Ogre::PFG_R11G11B10_FLOAT, 0u, 0u, f, f);
+            }
+            addTex(n, kBloom, Ogre::PFG_R11G11B10_FLOAT, 0u, 0u, 0.5f, 0.5f);
+        } else {
+            // With no ladder this is cleared to black ONCE and then only read
+            // (the tonemapper always samples it). A DiscardableContent texture
+            // that nothing writes this frame is Undefined, and the barrier
+            // solver refuses to transition Undefined to a read-only layout — a
+            // black frame with one line in the log. keep_content is exactly
+            // what the message asks for. FIXED-size, so a stereo chain keeps it
+            // a plain 2D texture (applyStereo layers only screen-sized ones),
+            // which is what the tonemap's multiview arm reads.
+            auto *td = addTex(n, kBloom, Ogre::PFG_R11G11B10_FLOAT, 4u, 4u);
+            td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
-        addTex(n, kBlur1, Ogre::PFG_R10G10B10A2_UNORM, 256u, 256u);
     }
 
     // A depth texture we can NAME (and therefore sample). depth_pool ids give a
@@ -2629,32 +2667,45 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             addFixedExposureClear(n, kLum, desc.exposureScale, desc.exposure);
       }
         // BLOOM RUNS FOR BOTH EXPOSURE FORMS, and so does its stand-in clear:
-        // HDR/FinalToneMapping samples the bloom buffer unconditionally, so
-        // kBlur0 must be written whichever way the exposure was arrived at.
-        if (desc.bloom) {
+        // HDR/FinalToneMapping samples the bloom input unconditionally, so
+        // kBloom must be written whichever way the exposure was arrived at.
+        if (bloomLadder(desc)) {
+            // DOWN: the scene to level 0 through the prefilter (the exposure,
+            // the soft knee, the Karis average), then each level to the next
+            // through the plain 13-tap downsample.
             {
-                auto *q = addQuad(n, kBlur0, "HDR/BrightPass_Start", "Jahshaka bloom bright pass");
+                auto *q = addQuad(n, kBloomLevel[0], "Jahshaka/Bloom/Prefilter",
+                                  "Jahshaka bloom prefilter");
                 q->addQuadTextureSource(0, sceneResult);
                 q->addQuadTextureSource(1, kLum);
             }
-            // The sample's exact ping-pong: V, H, V, H, then four more H passes.
-            // Reproduced rather than "improved" — the widths are tuned together.
-            struct Blur { const char *target = nullptr, *src = nullptr, *material = nullptr; };
-            const Blur blurs[] = {
-                { kBlur1, kBlur0, "HDR/BoxBlurH" }, { kBlur0, kBlur1, "HDR/BoxBlurV" },
-                { kBlur1, kBlur0, "HDR/BoxBlurH" }, { kBlur0, kBlur1, "HDR/BoxBlurV" },
-                { kBlur1, kBlur0, "HDR/BoxBlurH" }, { kBlur0, kBlur1, "HDR/BoxBlurH" },
-                { kBlur1, kBlur0, "HDR/BoxBlurH" }, { kBlur0, kBlur1, "HDR/BoxBlurH" },
-            };
-            for (const Blur &b : blurs) {
-                auto *q = addQuad(n, b.target, b.material, "Jahshaka bloom blur");
-                q->addQuadTextureSource(0, b.src);
+            for (int k = 1; k < kBloomLevels; ++k) {
+                auto *q = addQuad(n, kBloomLevel[k], "Jahshaka/Bloom/Down", "Jahshaka bloom down");
+                q->addQuadTextureSource(0, kBloomLevel[k - 1]);
+            }
+            // UP: level k+1 tent-filtered and ADDED into level k (the material
+            // blends one + one, so the target's content is LOADED: it holds
+            // level k's own downsample), from the smallest back to level 1.
+            for (int k = kBloomLevels - 2; k >= 1; --k) {
+                auto *q = addQuad(n, kBloomLevel[k], "Jahshaka/Bloom/Up", "Jahshaka bloom up");
+                q->addQuadTextureSource(0, kBloomLevel[k + 1]);
+                q->setAllLoadActions(Ogre::LoadAction::Load);
+                q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            }
+            // RESOLVE: level 0 + the tent of level 1, over the level count, in
+            // the tonemapper's encoding — written to its own target rather than
+            // added into level 0, which saves the extra pass the encode would
+            // otherwise cost.
+            {
+                auto *q = addQuad(n, kBloom, "Jahshaka/Bloom/Resolve", "Jahshaka bloom resolve");
+                q->addQuadTextureSource(0, kBloomLevel[0]);
+                q->addQuadTextureSource(1, kBloomLevel[1]);
             }
         } else {
-            // HDR/FinalToneMapping always samples the bloom buffer; with bloom
-            // off it must read black rather than undefined memory. One clear,
-            // once, is cheaper and far more honest than a second material.
-            Ogre::CompositorTargetDef *t = n->addTargetPass(kBlur0);
+            // HDR/FinalToneMapping always samples the bloom input; with no
+            // ladder it must read black rather than undefined memory. One
+            // clear, once, is cheaper and far more honest than a second material.
+            Ogre::CompositorTargetDef *t = n->addTargetPass(kBloom);
             t->setNumPasses(1);
             auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
             c->mNumInitialPasses = 1;
@@ -2681,7 +2732,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     {
         Ogre::CompositorPassQuadDef *q = nullptr;
         if (desc.hdr) {
-            q = addTonemapQuad(n, ldrTarget, sceneResult, kLum, kBlur0);
+            q = addTonemapQuad(n, ldrTarget, sceneResult, kLum, kBloom);
         } else if (desc.displayEncode) {
             // THE UNGRADED PICTURE, ENCODED ONCE (ChainDesc::displayEncode).
             q = addDisplayEncodeQuad(n, ldrTarget, sceneResult, "Jahshaka composite");
@@ -2692,7 +2743,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
         }
         // The bloom composite lives in this quad (FinalToneMapping samples
-        // kBlur0), so this is also what keeps a bright shot from glowing into
+        // kBloom), so this is also what keeps a bright shot from glowing into
         // the bars. (The luminance and bloom ladders are not scissored: a
         // relative scissor on a 1x1 luminance target truncates to no pixels.)
         if (desc.letterbox) scissor(handlesOut, q);
@@ -3492,7 +3543,7 @@ void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent)
 }
 
 void setBloomThreshold(float minThreshold, float fullColourThreshold) {
-    Ogre::Pass *pass = materialPass("HDR/BrightPass_Start");
+    Ogre::Pass *pass = materialPass("Jahshaka/Bloom/Prefilter");
     if (!pass) return;
     if (fullColourThreshold <= minThreshold) fullColourThreshold = minThreshold + 0.01f;
     pass->getFragmentProgramParameters()->setNamedConstant(
@@ -4242,7 +4293,7 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
         // auto-exposed view somebody else's pattern.
         if (!desc.tonemapFixed)
             setMeter(desc.meterPattern, desc.meterLowPercent, desc.meterHighPercent);
-        if (desc.bloom) {
+        if (bloomLadder(desc)) {
             setBloomThreshold(desc.bloomThreshold,
                               desc.bloomThreshold + std::max(0.01f, desc.bloomKnee));
             // WHICH pixels bloom (above), and HOW MUCH of the result is mixed

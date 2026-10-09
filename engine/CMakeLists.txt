@@ -638,9 +638,13 @@ set(OGRE_NEXT_COMMON_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/Co
 # Ogre's ComputeTools (clearUav — the voxeliser clears its UAV textures through it)
 # and the IBL specular integrator the PCC probe workspace uses (GI_SPEC.md phases
 # 2-3).
-# Post-chain effect media (POST_CHAIN_SPEC.md §4.1): the HDR/tonemap/bloom node's
-# materials and shaders, SSAO's, and SMAA's (which also carries two DDS lookup
-# textures). ~800K together; registered folder-by-folder like the rest.
+# Post-chain effect media (POST_CHAIN_SPEC.md §4.1): the HDR node's tonemap and
+# MSAA resolve (the fork's HDR folder), SSAO's, and SMAA's (which also carries two
+# DDS lookup textures). ~800K together; registered folder-by-folder like the rest.
+# The BLOOM is not the HDR folder's any more (BLOOM-1): its ladder is ours, in
+# media/Hlms/Jahshaka/JahBloom*. The folder's bright pass and box blurs are still
+# declared by its HDR.material (one file with the tonemap), so they stay staged
+# and unused until the fork drops them.
 set(OGRE_NEXT_HDR_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/HDR")
 set(OGRE_NEXT_SSAO_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/Tutorial_SSAO")
 set(OGRE_NEXT_SMAA_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/Tutorial_SMAA")

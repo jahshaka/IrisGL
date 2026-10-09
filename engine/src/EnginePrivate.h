@@ -1188,8 +1188,8 @@ struct ChainDesc {
     ExposureMeterPattern meterPattern = ExposureMeterPattern::CentreWeighted;
     float meterLowPercent = 10.0f;
     float meterHighPercent = 90.0f;
-    bool  bloom = false;            ///< rides the HDR node at ~zero marginal cost
-    float bloomThreshold = 5.0f;    ///< bright-pass start, in the sample's units
+    bool  bloom = false;            ///< the HDR node's mip ladder (chain::bloomLadder; never in stereo yet)
+    float bloomThreshold = 5.0f;    ///< the prefilter's knee start, in the tonemapper's units
     float bloomKnee = 2.0f;         ///< ramp WIDTH above it (A-6); 2.0 = the old hard-coded value
     /// HOW MUCH of the blurred highlight the tonemap quad adds (0..2; 1 is the
     /// picture this engine always drew). A UNIFORM, like the exposure and the
@@ -1443,8 +1443,8 @@ struct ChainDesc {
     /// scene, quad and clear pass into one is multiview — a scene pass also
     /// gets `mInstancedStereo` and the cull camera, a quad its multiview twin.
     /// All of them or none: a pass left single-view would draw one eye only.
-    /// What has no per-layer form (SSAO, SMAA, the SSR march, bloom's fixed
-    /// ladder) is off by the session's policy (applyVrViewPolicy), and the
+    /// What has no per-layer form (SSAO, SMAA, the SSR march, the tonemap's
+    /// bloom read) is off by the session's policy (applyVrViewPolicy), and the
     /// sweep refuses a pass that would read a layered texture into a
     /// single-layer target.
     ///

@@ -1,0 +1,229 @@
+// THE BLOOM LADDER (BLOOM-1): a progressive mip ladder on the chain's scene
+// texture, built by OgreChain.cpp (the bloom block of chain::build) and read by
+// the tonemap quad's bloom input. Six levels from half the view's size down to
+// a sixty-fourth, each a 13-tap filtered downsample (the first with the soft
+// knee, the exposure and the Karis average), then a 3x3 tent upsample added
+// level by level back to the first, and the resolve that writes the
+// tonemapper's encoding. The shaders' headers carry the reasoning; this file
+// only declares them.
+//
+// It replaced Ogre's HDR sample bloom (a bright pass into a fixed 256 x 256
+// target and eight separable box blurs, six of them horizontal and 65 taps
+// wide): its horizontal reach was the whole target and its vertical reach 8
+// percent of it, so a point light's hot spot became a full-width horizontal
+// band at its screen height (spikes/light-band-1).
+//
+// Every program includes JahScreen.glsl and samples its screen-sized inputs
+// through its macros, so the multiview twin (chain::multiviewMaterial) is the
+// same text with JAH_MULTIVIEW; the exposure 1x1 stays a plain 2D texture.
+fragment_program Jahshaka/Bloom/Prefilter_ps_GLSL glsl
+{
+	source JahBloomDown_ps.glsl
+	enable_include_header true
+	preprocessor_defines JAH_BLOOM_PREFILTER=1
+	default_params
+	{
+		param_named sourceTexture int 0
+		param_named lumRt int 1
+	}
+}
+fragment_program Jahshaka/Bloom/Prefilter_ps_VK glslvk
+{
+	source JahBloomDown_ps.glsl
+	enable_include_header true
+	preprocessor_defines JAH_BLOOM_PREFILTER=1
+}
+fragment_program Jahshaka/Bloom/Prefilter_ps unified
+{
+	delegate Jahshaka/Bloom/Prefilter_ps_GLSL
+	delegate Jahshaka/Bloom/Prefilter_ps_VK
+}
+
+fragment_program Jahshaka/Bloom/Down_ps_GLSL glsl
+{
+	source JahBloomDown_ps.glsl
+	enable_include_header true
+	default_params
+	{
+		param_named sourceTexture int 0
+	}
+}
+fragment_program Jahshaka/Bloom/Down_ps_VK glslvk
+{
+	source JahBloomDown_ps.glsl
+	enable_include_header true
+}
+fragment_program Jahshaka/Bloom/Down_ps unified
+{
+	delegate Jahshaka/Bloom/Down_ps_GLSL
+	delegate Jahshaka/Bloom/Down_ps_VK
+}
+
+fragment_program Jahshaka/Bloom/Up_ps_GLSL glsl
+{
+	source JahBloomUp_ps.glsl
+	enable_include_header true
+	default_params
+	{
+		param_named sourceTexture int 0
+	}
+}
+fragment_program Jahshaka/Bloom/Up_ps_VK glslvk
+{
+	source JahBloomUp_ps.glsl
+	enable_include_header true
+}
+fragment_program Jahshaka/Bloom/Up_ps unified
+{
+	delegate Jahshaka/Bloom/Up_ps_GLSL
+	delegate Jahshaka/Bloom/Up_ps_VK
+}
+
+fragment_program Jahshaka/Bloom/Resolve_ps_GLSL glsl
+{
+	source JahBloomResolve_ps.glsl
+	enable_include_header true
+	default_params
+	{
+		param_named firstLevel int 0
+		param_named secondLevel int 1
+	}
+}
+fragment_program Jahshaka/Bloom/Resolve_ps_VK glslvk
+{
+	source JahBloomResolve_ps.glsl
+	enable_include_header true
+}
+fragment_program Jahshaka/Bloom/Resolve_ps unified
+{
+	delegate Jahshaka/Bloom/Resolve_ps_GLSL
+	delegate Jahshaka/Bloom/Resolve_ps_VK
+}
+
+// The first step: the scene's radiance, exposed and kneed, to level 0.
+material Jahshaka/Bloom/Prefilter
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Bloom/Prefilter_ps
+			{
+				// Overwritten per view by chain::setBloomThreshold; the shipped
+				// default (threshold 5, knee 2) is the safe value.
+				param_named brightThreshold float2 5.0 0.5
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+
+			texture_unit lumRt
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+		}
+	}
+}
+
+// Every later step down: level k to level k + 1.
+material Jahshaka/Bloom/Down
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Bloom/Down_ps
+			{
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+		}
+	}
+}
+
+// Up: level k + 1 tent-filtered and ADDED into level k.
+material Jahshaka/Bloom/Up
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+			scene_blend one one
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Bloom/Up_ps
+			{
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+		}
+	}
+}
+
+// The resolve: level 0 + the tent of level 1, over the level count, encoded.
+material Jahshaka/Bloom/Resolve
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Bloom/Resolve_ps
+			{
+			}
+
+			texture_unit firstLevel
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+
+			texture_unit secondLevel
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+		}
+	}
+}

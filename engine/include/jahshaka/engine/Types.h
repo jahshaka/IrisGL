@@ -6280,8 +6280,10 @@ struct PostFxDesc {
     ExposureMeterPattern meterPattern = ExposureMeterPattern::CentreWeighted;
     float meterLowPercent = 10.0f;
     float meterHighPercent = 90.0f;
-    /// Highlight bloom. Rides the HDR node's fixed 256x256 blur chain, so it is
-    /// resolution-independent and nearly free — but it needs `hdr`.
+    /// Highlight bloom: a progressive mip ladder on the scene (six half-size
+    /// levels from half the view down to a sixty-fourth, 13-tap downsamples and
+    /// tent upsamples; BLOOM-1), so a highlight spreads by the same number of
+    /// pixels across and down at every aspect. It needs `hdr`.
     bool  bloom = false;
     /// Where the bright pass starts, in the tonemapper's units. High values read
     /// as highlight bloom; low values as a haze filter.
@@ -6312,10 +6314,10 @@ struct PostFxDesc {
     /// still the way to stop PAYING for it — that is the graph change.
     ///
     /// THE ARITHMETIC IS IN THE PIXEL, NOT IN THE LADDER, deliberately: the
-    /// bright pass writes an R10G10B10A2_UNORM target and the tonemapper reads
-    /// it through a SQUARE (`fromSRGB`), so scaling the bright pass would clip
-    /// at 1.0 and would square the amount. At the composite it is linear in the
-    /// added radiance, which is what "2x the bloom" has to mean.
+    /// ladder's resolve writes the square root of the bloom and the tonemapper
+    /// reads it through a SQUARE (`fromSRGB`), so a scale inside the ladder
+    /// would arrive squared. At the composite it is linear in the added
+    /// radiance, which is what "2x the bloom" has to mean.
     float bloomAmount = 1.0f;
     /// Screen-space ambient occlusion. Adds a normals G-buffer to the main pass.
     /// A REQUEST: the chain refuses it in a view whose scene's GI mode is not Off
@@ -6655,9 +6657,10 @@ struct PostFxDesc {
 ///   * allowOffscreen — the eye pair is offscreen only because the runtime owns
 ///     the display. It is the picture the wearer is standing in, and it keeps
 ///     the chain (PostFxDesc::allowOffscreen).
-///   * bloom — the pin's bloom ladder is ONE fixed 256x256 ping-pong, not a
-///     screen-sized texture, so it holds one picture, not two; a per-eye ladder
-///     (a two-layer ladder and a tonemap reading its own layer) is the work.
+///   * bloom — the ladder is screen-sized and its programs have the multiview
+///     arm (BLOOM-1), but the tonemap quad's multiview arm still reads its bloom
+///     input as one 2D texture; that read, per layer, is the work
+///     (chain::build refuses the ladder in stereo until it is done).
 ///   * ssao, smaaPreset, hzb — their passes and media are not per layer (the
 ///     half-resolution SSAO targets, the SMAA lookup tables' passes, the
 ///     pyramid's compute), and a layered chain refuses a pass that reads a
