@@ -16,6 +16,7 @@
 //  * survive doubt. Every failure path ends in "delete the directory, run cold".
 #include "EnginePrivate.h"
 
+#include <OgreHlmsAsyncCompiler.h>
 #include <mutex>
 // JAHSHAKA_ENGINE_BUILD_ID: a hash of this library's own sources, regenerated
 // on every BUILD (irisgl/cmake/EngineBuildId.cmake) rather than at configure
@@ -46,6 +47,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <execinfo.h>
 #include <algorithm>
 
 namespace jahshaka { namespace engine {
@@ -309,6 +311,15 @@ class ShaderCache::Counter final : public Ogre::LogListener {
 public:
     std::atomic<unsigned> compiled{0};
     std::atomic<unsigned> fromCache{0};
+    /// Of `compiled`, those built on the background compiler's threads (ASYNC-SHADERS-1):
+    /// no frame waited for them.
+    std::atomic<unsigned> background{0};
+    /// ...and those built on any OTHER thread (a frame that waited). Its own counter, not
+    /// compiled - background: two loads of two counters race a service-thread compile that
+    /// lands between them (read compiled, then a compile bumps both, then read background) and
+    /// the difference dips by one and comes back — a phantom "UI-thread compile" the host's
+    /// live-compile sentry counted (shader.sample_opens_quiet, red under load, ASYNC-SHADERS-1).
+    std::atomic<unsigned> foreground{0};
     /// THE MONITOR'S FEED (see ShaderCache::recordCompileNames). Written from
     /// whatever thread compiled (mode 2 = the scene's worker pool), drained on
     /// the UI thread. Bounded: a compile burst must never grow this without
@@ -344,6 +355,19 @@ public:
         if (message.size() >= 8 && message.compare(0, 7, "Shader ") == 0) {
             if (message.find(" compiled successfully") != Ogre::String::npos) {
                 ++compiled;
+                if (Ogre::HlmsAsyncCompiler::isServiceThread()) ++background;
+                else ++foreground;
+                // THE OFFENDER, BY ITS STACK (ASYNC-SHADERS-1): a shader compiled on any thread
+                // but the background compiler's while a view compiles in the background is a
+                // frame waiting for glslang; its call stack names the path (stderr, so a row's
+                // driver prints it with the app's output).
+                if (!Ogre::HlmsAsyncCompiler::isServiceThread() && detail::asyncViewCount() > 0) {
+                    std::fprintf(stderr, "Jahshaka shader cache: OFF-SERVICE COMPILE while a view "
+                                         "compiles in the background: %s\n", message.c_str());
+                    void *frames[48];
+                    const int n = ::backtrace(frames, 48);
+                    ::backtrace_symbols_fd(frames, n, 2);
+                }
                 if (observerThread.load(std::memory_order_relaxed) == std::this_thread::get_id() &&
                     observer)
                     observer();
@@ -524,6 +548,11 @@ void ShaderCache::progress(unsigned &compiled, unsigned &fromCache, unsigned &ex
     compiled  = mCounter ? mCounter->compiled.load()  : 0u;
     fromCache = mCounter ? mCounter->fromCache.load() : 0u;
     expected  = mExpectedShaders;
+}
+
+void ShaderCache::backgroundCompiles(unsigned &background, unsigned &foreground) const {
+    background = mCounter ? mCounter->background.load() : 0u;
+    foreground = mCounter ? mCounter->foreground.load() : 0u;
 }
 
 std::string ShaderCache::path(const std::string &name) const { return mDir + "/" + name; }

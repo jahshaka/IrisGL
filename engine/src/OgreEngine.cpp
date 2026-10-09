@@ -4,6 +4,9 @@
 // engine/src/ is the only directory that includes Ogre; the shared declarations
 // live in EnginePrivate.h, which documents the invariants this backend rests on.
 #include "EnginePrivate.h"
+
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsAsyncCompiler.h>
 #include "AtomPass.h"
 #include "HlmsAtom.h"
 
@@ -76,6 +79,11 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     mMediaDir = cfg.hlmsMediaDir;
     if (!mMediaDir.empty() && mMediaDir.back() != '/') mMediaDir += '/';
     mHeadless = cfg.headless;
+    // THE BACKGROUND SHADER COMPILER (ASYNC-SHADERS-1). JAH_ASYNC_SHADER_THREADS overrides
+    // the host's count (0 = none) for A/B measurement without a rebuild.
+    mAsyncShaderThreads = cfg.asyncShaderThreads;
+    if (const char *forced = std::getenv("JAH_ASYNC_SHADER_THREADS"))
+        mAsyncShaderThreads = unsigned(std::max(0l, std::min(8l, std::strtol(forced, nullptr, 10))));
     // The shader cache's fingerprint hashes the staged Hlms tree, so it is
     // configured as soon as the media directory is known — before Root, long
     // before anything could compile. The LOAD waits for ensureHlms().
@@ -405,6 +413,13 @@ void OgreEngine::destroyScene(Scene *scene) {
     }
     for (auto it = mScenes.begin(); it != mScenes.end(); ++it) {
         if (it->get() != scene) continue;
+        // The background compiler's draw counts outlive the scene (asyncShaderStats).
+        if (Ogre::SceneManager *sm = (*it)->sceneManager()) {
+            unsigned long long capPh = 0, capSkip = 0;
+            surfaceCacheAsyncDraws(sm, capPh, capSkip, /*forget*/ true);
+            mRetiredPlaceholderDraws += sm->getRenderQueue()->getNumPlaceholderDraws() - capPh;
+            mRetiredPendingSkips += sm->getRenderQueue()->getNumPendingSkips() - capSkip;
+        }
         // A SESSION MUST NOT OUTLIVE THE WORLD IT RENDERS (VR-4-FIX finding 1).
         //
         // The session holds a raw `OgreScene *`: it dereferences it every frame
@@ -748,7 +763,21 @@ void OgreEngine::setTransformWriteCounter(const std::atomic<unsigned long long> 
     detail::gTransformWriteCounter = counter;
 }
 
+namespace {
+/// The compute dispatches deferred before this frame began (AsyncHoldListener's hole test).
+unsigned long long gComputeDeferralsAtFrameStart = 0;
+}  // namespace
+
+unsigned long long computeDeferralsAtFrameStart() { return gComputeDeferralsAtFrameStart; }
+
+namespace { std::atomic<int> gAsyncViews{0}; }
+int asyncViewCount() { return gAsyncViews.load(std::memory_order_relaxed); }
+void noteAsyncView(bool on) { gAsyncViews.fetch_add(on ? 1 : -1, std::memory_order_relaxed); }
+
 void OgreEngine::renderOneFrame() {
+    if (mRoot && mRoot->getHlmsManager())
+        if (Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms())
+            gComputeDeferralsAtFrameStart = hc->getNumDeferredDispatches();
     // LEGAL AND EMPTY WHEN HEADLESS (Types.h EngineConfig::headless): a
     // headless engine can hold no View, so every loop below iterates nothing
     // and Root::renderOneFrame walks a workspace-less render system. Hosts do
@@ -1089,7 +1118,7 @@ void OgreEngine::renderOneFrame() {
                 // THE CLOUD LAYER'S FRAME (CLOUDS-2D-1): its clock, its scroll
                 // and its capture cadence — before the capture below it may ask for.
                 s->tickCloudClock();
-                s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar();
+                s->applyPendingGiDeferrable(); s->applyPendingIbl(); s->applyPendingPlanar();
                 // THIS SCENE'S IBL CHAIN LENGTH (SceneGiBinding::iblMipmaps), after
                 // the pendings that can change what its env slots hold.
                 s->resolveIblMipmaps();
@@ -2349,6 +2378,108 @@ bool OgreEngine::shadowMeshOptimization() const { return Ogre::Mesh::msOptimizeF
 // (`View::warmUpShaders`) and the persistent shader cache are what warm this
 // renderer, and neither went anywhere.
 
+// ---------------------------------------------------------------------------
+// THE BACKGROUND SHADER COMPILER (ASYNC-SHADERS-1; the fork's HlmsAsyncCompiler).
+//
+// The service runs from the moment the Hlms exist; WHO uses it is decided per view
+// (View::setAsyncShaders — the editor's view after a project is open). Its threads are
+// niced by 10 so a compile never competes with the frame's SceneManager workers.
+//
+// THE PLACEHOLDER is a neutral grey PBS material, metallic workflow: albedo 0.18
+// (linear; the 18 % card every exposure in this engine is calibrated on —
+// `greyCardFilmInput()` maps it to itself), not metallic, rough 0.8 (a near-
+// Lambertian surface that takes the scene's light and shadow without a highlight
+// that would pretend to be the real material). An object waiting for its shader is
+// drawn with it, its own geometry, lit and shadowed like the scene; its shadow is the
+// placeholder's opaque caster.
+void OgreEngine::startAsyncShaders() {
+    if (!mRoot || mHeadless) return;
+    Ogre::HlmsManager *hm = mRoot->getHlmsManager();
+    if (auto *pbs = static_cast<Ogre::HlmsPbs *>(hm->getHlms(Ogre::HLMS_PBS))) {
+        if (!pbs->getAsyncPlaceholderDatablock()) {
+            const Ogre::String name = "Jahshaka/AsyncPlaceholder";
+            auto *db = static_cast<Ogre::HlmsPbsDatablock *>(pbs->createDatablock(
+                name, name, Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec(),
+                /*visibleToManager*/ false));
+            db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
+            db->setDiffuse(Ogre::Vector3(0.18f));
+            db->setMetalness(0.0f);
+            db->setRoughness(0.8f);
+            pbs->setAsyncPlaceholderDatablock(db);
+        }
+        // The Atom decode's placeholder: the same grey, through its own clone (HlmsAtom::
+        // installAsyncPlaceholder says why a twin cannot simply be pointed at it).
+        if (auto *atom = dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType))) {
+            std::string err;
+            auto *pbsPh = static_cast<Ogre::HlmsPbsDatablock *>(pbs->getAsyncPlaceholderDatablock());
+            if (!atom->installAsyncPlaceholder(pbsPh, err))
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka async shaders: no Atom placeholder (" + err +
+                        ") - a pending decode bucket is a hole the view holds until it lands",
+                    Ogre::LML_CRITICAL);
+        }
+    }
+    // UNLIT HAS NO PLACEHOLDER, ON PURPOSE. Its set is the editor's furniture (the grid, the
+    // gizmos, the wires, the outline, the HUD) plus billboards, and a grey opaque quad would
+    // be a lie for every one of them. It still compiles in the background: a pending unlit
+    // draw is a HOLE, and a frame with a hole is held (AsyncHoldListener) — the last complete
+    // picture stays on screen for the ~0.2 s its permutation takes, so nothing is ever seen
+    // vanishing. (Kept in the frame instead, measured: the Mirror Room and Particles samples
+    // compiled unlit permutations on the UI thread after their opens.)
+    hm->getAsyncCompiler()->setNumThreads(mAsyncShaderThreads, /*nice*/ 10);
+}
+
+void OgreEngine::setAsyncShaderThreads(unsigned threads) {
+    mAsyncShaderThreads = std::min(threads, 8u);
+    if (!mRoot || mHeadless || !mHlmsRegistered) return;
+    mRoot->getHlmsManager()->getAsyncCompiler()->setNumThreads(mAsyncShaderThreads, 10);
+}
+
+void OgreEngine::setAsyncShaderPlaceholdersOnly(bool on) {
+    if (!mRoot || mHeadless || !mHlmsRegistered) return;
+    mRoot->getHlmsManager()->getAsyncCompiler()->setPlaceholdersOnly(on);
+}
+
+AsyncShaderStats OgreEngine::asyncShaderStats() const {
+    AsyncShaderStats out;
+    if (!mRoot) return out;
+    const Ogre::HlmsAsyncCompiler *c = mRoot->getHlmsManager()->getAsyncCompiler();
+    out.running   = c->isRunning();
+    out.threads   = c->getNumThreads();
+    out.pending   = c->getNumOutstanding();
+    out.completed = c->getNumCompleted();
+    out.failed    = c->getNumFailed();
+    out.placeholderDraws = mRetiredPlaceholderDraws;
+    out.pendingSkips     = mRetiredPendingSkips;
+    for (const auto &sc : mScenes) {
+        if (!sc || !sc->sceneManager()) continue;
+        // THE VIEWS' draws: a surface-cache capture compiles in the background too, but a
+        // batch that met a pending shader is discarded and never seen (SurfaceCache).
+        const Ogre::RenderQueue *rq = sc->sceneManager()->getRenderQueue();
+        unsigned long long capPh = 0, capSkip = 0;
+        surfaceCacheAsyncDraws(sc->sceneManager(), capPh, capSkip);
+        out.placeholderDraws += rq->getNumPlaceholderDraws() - capPh;
+        out.pendingSkips     += rq->getNumPendingSkips() - capSkip;
+        out.captureDeferredDraws += capPh + capSkip;
+    }
+    for (const auto &v : mViews)
+        if (const AsyncHoldListener *h = v ? v->asyncHold() : nullptr) {
+            out.heldFrames += h->mHeldFrames;
+            out.holeyPresented += h->mHoleyPresented;
+        }
+    unsigned background = 0;
+    unsigned foreground = 0;
+    mShaderCache.backgroundCompiles(background, foreground);
+    out.compiledInBackground = background;
+    out.compiledInForeground = foreground;
+    return out;
+}
+
+void OgreEngine::waitForAsyncShaders() {
+    if (!mRoot) return;
+    mRoot->getHlmsManager()->getAsyncCompiler()->waitForAll();
+}
+
 ShaderCacheStats OgreEngine::shaderCacheStats() const {
     return mShaderCache.stats(mRoot);
 }
@@ -3060,6 +3191,7 @@ void OgreEngine::ensureHlms() {
     applyShadowFilter();   // replaces Ogre's PCF_3x3 default with ours (Soft = 4x4)
     if (!pixels) return;   // the rest is rendering-only — see the top of this function
     registerCommonMaterials();
+    startAsyncShaders();
     // THE STAGED MEDIA IS THIS BUILD'S, OR THE ENGINE STOPS HERE (FORWARD-ONLY-1
     // D2) — before the blue noise, the overlay and the shadow node, and
     // STICKILY: every later ensureHlms re-reports the same error rather than

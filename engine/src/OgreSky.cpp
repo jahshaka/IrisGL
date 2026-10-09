@@ -1587,7 +1587,7 @@ void OgreScene::convolvePendingIbl() {
     struct FreeSource {
         OgreScene *self = nullptr;
         ~FreeSource() {
-            if (!self->mIblSourceOwned || !self->mIblSourceTex) return;
+            if (!self || !self->mIblSourceOwned || !self->mIblSourceTex) return;
             try {
                 destroyRecycled(self->mRoot->getRenderSystem()->getTextureGpuManager(),
                                 self->mIblSourceTex);
@@ -1619,10 +1619,35 @@ void OgreScene::convolvePendingIbl() {
         ws = cm->addWorkspace(mSceneMgr, externals, mIblCamera,
                               Ogre::IdString(kIblWorkspace), false);
         monitor::watchWorkspace(ws);   // a one-shot workspace: its passes are monitor rows too
+        // AN ASYNCHRONOUS SCENE NEVER COMPILES ITS CONVOLUTION IN THE FRAME (ASYNC-SHADERS-1).
+        // The IBL integration is a compute permutation per mip and source format; a capture
+        // that lands after an open's window (a sky texture still streaming) met one not built
+        // yet and compiled it on the UI thread — shader.sample_opens_quiet, red under load.
+        // Under the fork's deferred dispatch a missing permutation goes to the background
+        // compiler and its mip is skipped; the convolution is then not a result: the previous
+        // reflection stays bound, the source is kept and the convolution is retried next frame.
+        Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms();
+        const unsigned long long deferredBefore = hc ? hc->getNumDeferredDispatches() : 0ull;
+        struct Deferral {
+            Ogre::HlmsCompute *hc = nullptr;
+            bool prev = false;
+            ~Deferral() { if (hc) hc->setDeferredDispatch(prev); }
+        } deferral;
+        if (hc && mAsyncShaders) {
+            deferral.hc = hc;
+            deferral.prev = hc->getDeferredDispatch();
+            hc->setDeferredDispatch(true);
+        }
         ws->_beginUpdate(false);
         ws->_update();
         ws->_endUpdate(false);
         cm->removeWorkspace(ws);
+        if (hc && hc->getNumDeferredDispatches() != deferredBefore) {
+            ++mIblDeferrals;
+            mIblPending = true;      // retried next frame; landEnvironmentIfComplete waits
+            freeSource.self = nullptr;
+            return;
+        }
         // THE CONVOLUTION LEFT IT A UAV, AND EVERY DATABLOCK WILL SAMPLE IT
         // (ENVPROBE-LAYOUT-1): `CompositorPassIblSpecular::analyzeBarriers`
         // resolves the output to `ResourceLayout::Uav` and this workspace has

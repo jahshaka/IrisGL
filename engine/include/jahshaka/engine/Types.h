@@ -5874,6 +5874,11 @@ struct EngineConfig {
     /// Also forces the persistent shader cache OFF: nothing compiles here, and
     /// a cache written under the NULL system must never be read back by a real
     /// one (the fingerprint does not name the render system).
+    /// THE BACKGROUND SHADER COMPILE SERVICE's thread count (ASYNC-SHADERS-1;
+    /// AsyncShaderStats, View::setAsyncShaders). The threads run at a lowered priority
+    /// so a compile never competes with the frame's own workers. 0 = no service: every
+    /// view compiles inside its frame. Ignored headless.
+    unsigned    asyncShaderThreads = 2;
     bool        headless = false;
     /// Directory holding the render-system plugins (RenderSystem_Vulkan.so ...).
     std::string pluginDir;
@@ -5971,6 +5976,45 @@ struct DeviceInfo {
     std::string deviceName;      ///< getDeviceName()
     std::string driverVersion;   ///< getDriverVersion().toString()
     std::string apiVersion;      ///< scraped; empty when the backend never says
+};
+
+/// THE BACKGROUND SHADER COMPILER (ASYNC-SHADERS-1). After a project is open no
+/// compile may freeze the window: a view in asynchronous mode (View::setAsyncShaders)
+/// hands a permutation it has not built yet to the engine's compile service, which
+/// builds it on its own threads OUTSIDE the frame, and draws the object with a neutral
+/// grey placeholder (its own geometry, lit like the scene; shadows too) until it lands.
+/// Everything here is process-wide and cheap (atomic reads and a few sums).
+struct AsyncShaderStats {
+    /// The service is running (EngineConfig / setAsyncShaderThreads) and with how many
+    /// threads. 0 threads = every view compiles inside the frame, as before.
+    bool               running = false;
+    unsigned           threads = 0;
+    /// Permutations submitted and not landed yet (queued + building + built and waiting
+    /// for the next frame to publish them). The status bar's "Compiling shaders (N)".
+    unsigned           pending = 0;
+    /// Running totals for the process: jobs that finished building, jobs that failed
+    /// (the log names the permutation; the object keeps its placeholder).
+    unsigned long long completed = 0;
+    unsigned long long failed = 0;
+    /// Draws made with the placeholder / skipped because not even the placeholder was
+    /// built yet — running totals summed over every scene. A warm selftest reads 0 and 0.
+    unsigned long long placeholderDraws = 0;
+    unsigned long long pendingSkips = 0;
+    /// Draws inside the surface cache's captures that met a shader still building — those
+    /// capture batches are discarded and retried (the atlas never holds a grey card).
+    unsigned long long captureDeferredDraws = 0;
+    /// THE HELD FRAME: frames of an asynchronous view NOT presented because they drew a hole
+    /// (the window kept the last complete picture), and frames with a hole presented anyway
+    /// (a hold longer than its cap, or before the view had shown anything). Summed over views.
+    unsigned long long heldFrames = 0;
+    unsigned long long holeyPresented = 0;
+    /// Shaders compiled ON THE SERVICE'S THREADS (running total). Subtract it from
+    /// `shaderBuildProgress`'s `compiled` and what remains is every compile a frame
+    /// waited for — the live-compile sentry's number (SHADER-WARM-2).
+    unsigned           compiledInBackground = 0;
+    /// Shaders compiled on any OTHER thread (a frame waited): one counter, read in one load
+    /// (the host's live-compile sentry reads this, never compiled - compiledInBackground).
+    unsigned           compiledInForeground = 0;
 };
 
 /// What the persistent shader cache did this run, and what is on disk

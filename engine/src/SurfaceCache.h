@@ -326,6 +326,14 @@ struct PhotonCardQuad {
 
 class SurfaceCache final : public Ogre::CompositorWorkspaceListener {
 public:
+    /// THE CACHE NEVER WAITS FOR A SHADER WHILE ITS SCENE'S VIEWS DO NOT (ASYNC-SHADERS-1;
+    /// View::setAsyncShaders, pushed by the scene every frame). On: the capture workspace
+    /// compiles in the background and a batch that drew a placeholder or skipped a draw is
+    /// DISCARDED, its cards left queued (a card is captured the moment its object appears,
+    /// and a blocking capture waited for a brand-new material's compile on the UI thread —
+    /// measured); the card relight skips while its permutation builds, the cards keeping
+    /// their radiance and staying owed. Off (every offscreen and test scene): as before.
+    void setAsyncShaders(bool on);
     SurfaceCache();
     ~SurfaceCache();
 
@@ -614,6 +622,14 @@ private:
     /// any other frame.
     size_t mBatchFrame = size_t(-1);
     std::chrono::steady_clock::time_point mBatchStart;
+    /// The view's placeholder draws + pending skips when this batch began (ASYNC-SHADERS-1):
+    /// a batch that moved them drew a placeholder or a hole and is discarded.
+    /// See setAsyncShaders.
+    bool mAsyncShaders = false;
+    unsigned long long mBatchPlaceholderAt = 0u;
+    unsigned long long mBatchSkipsAt = 0u;
+    /// Batches discarded because a shader was still being built (ASYNC-SHADERS-1).
+    unsigned long long mCapturesDeferredForShaders = 0u;
     /// The subject's flags and LOD as they were before its pass.
     Ogre::uint32 mSubjectFlags = 0u;
     unsigned char mSubjectLod = 0u;

@@ -121,7 +121,7 @@
 // clear pass that owns the inset's background colour (chain::PipHandles).
 // Forward-declared rather than included so the pass-def headers stay where they
 // belong — inside the .cpp files that build passes.
-namespace Ogre { class PhotonVoxelMaterial;   // A5b §2: the one store a chain shares
+namespace Ogre { class HlmsCompute; class PhotonVoxelMaterial;   // A5b §2: the one store a chain shares
                  class CompositorPassSceneDef; class CompositorPassClearDef;
                  class CompositorPassQuadDef; class CompositorPassDef;
                  // Bone attachments (AVATAR_RIG_PERF_SPEC §4): a Node record
@@ -306,6 +306,17 @@ bool surfaceCardsCapturing();
 /// The card capture's workspace, for the monitor's listener walk. Null until a
 /// scene turns `GiParams::cards` on.
 Ogre::CompositorWorkspace *surfaceCacheWorkspace(const SurfaceCache *cache);
+/// The placeholder draws / pending skips made inside the cache's own captures (ASYNC-SHADERS-1).
+/// Kept per SceneManager across the cache's rebuilds; `forget` drops the entry (scene teardown).
+/// HlmsCompute's deferred-dispatch count when this frame began (OgreEngine::renderOneFrame):
+/// a frame that deferred a compute permutation is a frame with a hole (AsyncHoldListener).
+unsigned long long computeDeferralsAtFrameStart();
+/// How many views compile in the background right now (OgreView::setAsyncShaders); the shader
+/// cache's counter names any compile made off the background compiler while it is non-zero.
+int asyncViewCount();
+void noteAsyncView(bool on);
+void surfaceCacheAsyncDraws(const Ogre::SceneManager *sm, unsigned long long &placeholders,
+                            unsigned long long &skips, bool forget = false);
 
 class OgreView;
 
@@ -2704,6 +2715,8 @@ public:
 
     ShaderCacheStats stats(Ogre::Root *root) const;
     void progress(unsigned &compiled, unsigned &fromCache, unsigned &expected) const;
+    /// Of `compiled`, those compiled on the background compiler's threads (ASYNC-SHADERS-1).
+    void backgroundCompiles(unsigned &background, unsigned &foreground) const;
     /// THE RENDER-LOOP MONITOR'S COMPILE FEED. Ogre exposes no "a shader was
     /// compiled" callback — the counter is a log listener — and with
     /// OGRE_SHADER_COMPILATION_THREADING_MODE=2 it fires on WORKER threads, so
@@ -4116,6 +4129,10 @@ public:
                     NodeId onlyNode = 0) override;
     bool dumpCardAtlas(const std::string &prefix, std::string &err) override;
     const SurfaceCache *surfaceCache() const { return mSurfaceCache.get(); }
+    /// The compile mode the scene's views ask for (View::setAsyncShaders); its own captures
+    /// follow it (ASYNC-SHADERS-1).
+    void setAsyncShaders(bool on) { mAsyncShaders = on; }
+    bool asyncShaders() const { return mAsyncShaders; }
     /// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — the scene's in-frame
     /// answers to the cache (OgreGpuScene.cpp: the traced shadow-casting movers,
     /// the frame's moved set, the still casters a transform write moved) and the
@@ -4166,6 +4183,12 @@ public:
     }
     unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
     std::unique_ptr<SurfaceCache> mSurfaceCache;
+    bool mAsyncShaders = false;
+    /// IBL convolutions deferred because a permutation was building (ASYNC-SHADERS-1).
+    unsigned long long mIblDeferrals = 0;
+    /// The lighting arm met a permutation still building (applyPendingGiDeferrable).
+    bool mGiDeferralRetry = false;
+    unsigned long long mGiDeferrals = 0;
     /// The ray rule's footprint per metre of distance, as updateRayLevels last
     /// computed it (the surface cache's still-trace lift, CardSceneView).
     float mRayFootprintPerMetre = 0.0f;
@@ -5452,6 +5475,19 @@ public:
     void addObjectCounts(ObjectCounts &out) const;
     /// Called by Engine::renderOneFrame before rendering.
     void applyPendingGi();
+    /// applyPendingGi as an ASYNCHRONOUS scene runs it (ASYNC-SHADERS-1): the lighting arm's
+    /// compute permutations are never compiled in the frame. Under the fork's deferred
+    /// dispatch a missing one goes to the background compiler and its dispatch is skipped;
+    /// the arm built that frame is then not a result: the frame is HELD (AsyncHoldListener)
+    /// and the arm is rebuilt once the background compiler has drained. A blocking scene
+    /// runs applyPendingGi unchanged.
+    void applyPendingGiDeferrable();
+    /// Runs `work` (a lighting-arm build) under the deferred dispatch when the scene is
+    /// asynchronous; a deferral owes the arm a whole rebuild (giDeferralPending).
+    void giDeferrable(const std::function<void()> &work);
+    /// The arm owes a rebuild because a permutation it dispatched was building: every frame
+    /// until it lands is held.
+    bool giDeferralPending() const { return mGiDeferralRetry; }
     /// The flush proper — what applyPendingGi was before the staged machine.
     void applyPendingGiFlush();
     /// The pace of the frame being rendered (OPEN_COVER_SPEC §2.1):
@@ -7305,7 +7341,11 @@ class FrameCaptureListener final : public Ogre::CompositorWorkspaceListener {
 public:
     explicit FrameCaptureListener(OgreView *view) : mView(view) {}
     void passPreExecute(Ogre::CompositorPass *pass) override;
+    void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override;
     void workspacePosUpdate(Ogre::CompositorWorkspace *ws) override;
+    /// The RenderQueue's placeholder draws + pending skips when the workspace began
+    /// (ASYNC-SHADERS-1): a capture whose workspace moved them is incomplete and retried.
+    unsigned long long mIncompleteAt = 0;
 private:
     OgreView *mView;
 };
@@ -7349,6 +7389,30 @@ private:
     unsigned long long mArmedTag = 0, mOrder = 0;
     unsigned long long mRecorded = 0, mDelivered = 0, mDropped = 0;
     std::string mError;
+
+/// THE HELD FRAME (ASYNC-SHADERS-1), THE SAFETY NET. The grey placeholder (PBS and the Atom
+/// decode) is what a waiting object draws; the placeholders are pass permutations themselves,
+/// and the startup gate builds them for every tier's pass. A frame of an asynchronous view
+/// that still drew a HOLE — an object with neither its shader nor a placeholder yet (unlit,
+/// or a pass nothing prebuilt) — is not presented: the window keeps the last complete picture
+/// (the fork's CompositorWorkspace::setSuppressSwap) until a frame draws no hole, at most
+/// kMaxHeldFrames in a row. Counted (AsyncShaderStats::heldFrames) and rare: measured 0 for a
+/// cold material apply and a cold tier change, 2 at a project create.
+class OgreView;
+class AsyncHoldListener final : public Ogre::CompositorWorkspaceListener {
+public:
+    /// Then it presents anyway. FRAMES, and generous: a frame that is not presented does not
+    /// wait for the display, so a scripted loop runs several times faster while it holds
+    /// (measured before the placeholders were prebuilt: a cold tier change held 382 frames).
+    static constexpr unsigned kMaxHeldFrames = 1200u;
+    explicit AsyncHoldListener(OgreView *view) : mView(view) {}
+    void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override;
+    void workspacePosUpdate(Ogre::CompositorWorkspace *ws) override;
+    OgreView *mView;
+    unsigned long long mSkipsAtStart = 0;
+    unsigned mHeldInARow = 0;
+    unsigned long long mHeldFrames = 0;       ///< frames held, ever
+    unsigned long long mHoleyPresented = 0;   ///< frames with a hole that were presented anyway
 };
 
 class OgreView final : public View {
@@ -7530,6 +7594,8 @@ public:
     unsigned long long workspaceFramesPresented() const { return mWorkspaceFramesPresented; }
     unsigned long long blankFramesPresented() const override;
     bool warmUpShaders() override;
+    void setAsyncShaders(bool on) override;
+    bool asyncShaders() const override;
     /// Called by OgreEngine::renderOneFrame AFTER Root::renderOneFrame: counts
     /// this frame if the view was actually part of it (enabled + workspace +
     /// scene). The one place mFramesPresented moves up.
@@ -7576,7 +7642,7 @@ public:
     /// Builds (or keeps, within one capture) the capture workspace for the current shape.
     bool ensureCaptureWorkspace();
     /// The capture listener's workspacePosUpdate: records the copy (Armed -> InFlight).
-    void recordFrameCapture(Ogre::CompositorWorkspace *ws);
+    void recordFrameCapture(Ogre::CompositorWorkspace *ws, bool incomplete = false);
     /// Drops whatever capture is pending (ticket, workspace and target destroyed).
     void releaseFrameCapture();
     /// The clean capture's workspace and target, gone (between frames; Ogre defers
@@ -7960,6 +8026,10 @@ private:
     Ogre::TextureGpu          *mTexture;
     Ogre::Camera              *mCamera    = nullptr;
     Ogre::CompositorWorkspace *mWorkspace = nullptr;
+    /// View::setAsyncShaders (ASYNC-SHADERS-1): re-applied to every workspace this view builds.
+    bool mAsyncShaders = false;
+    /// Captures retried because their frame met a shader still building (ASYNC-SHADERS-1).
+    unsigned long long mCaptureRetries = 0;
     OgreScene                 *mScene     = nullptr;
     /// The clear-only workspace, its camera on the engine's blank scene manager
     /// and its definitions (chain::buildBlank). Live exactly while no scene is
@@ -7984,6 +8054,15 @@ private:
     /// (CAMERA_LENS_SPEC §4). Null on a passthrough view — every thumbnail,
     /// preview and pixel suite, by construction.
     std::unique_ptr<chain::ViewGlobalsListener> mGlobalsListener;
+    /// The held frame (AsyncHoldListener); made when the view first turns asynchronous.
+    std::unique_ptr<AsyncHoldListener> mAsyncHold;
+public:
+    Ogre::CompositorWorkspace *ogreWorkspace() const { return mWorkspace; }
+    Ogre::CompositorWorkspace *ogrePipWorkspace() const { return mPipWorkspace; }
+    OgreScene *asyncHoldScene() const { return mScene; }
+    const Ogre::HlmsCompute *computeHlms() const;
+    const AsyncHoldListener *asyncHold() const { return mAsyncHold.get(); }
+private:
     /// Owned; registered the same way while this view's chain traces
     /// reflections (PHOTON_SPEC §7 R5). Null everywhere else — on a machine
     /// without ray queries, with the preference off, or on any view whose chain
@@ -8713,6 +8792,10 @@ public:
     void setCompileObserver(std::function<void()> observer) override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
                              unsigned &expected) const override;
+    void setAsyncShaderThreads(unsigned threads) override;
+    void setAsyncShaderPlaceholdersOnly(bool on) override;
+    AsyncShaderStats asyncShaderStats() const override;
+    void waitForAsyncShaders() override;
 
     ~OgreEngine() override;
 
@@ -8801,6 +8884,14 @@ private:
     /// EngineConfig::headless: the NULL render system is loaded, mNullWindow is
     /// the 1x1 window IT created at boot, and no View can exist.
     bool            mHeadless = false;
+    /// The background shader compiler's thread count (ASYNC-SHADERS-1;
+    /// EngineConfig::asyncShaderThreads, JAH_ASYNC_SHADER_THREADS).
+    unsigned        mAsyncShaderThreads = 2;
+    /// Placeholder draws / pending skips of scenes already destroyed (asyncShaderStats).
+    unsigned long long mRetiredPlaceholderDraws = 0;
+    unsigned long long mRetiredPendingSkips = 0;
+    /// Starts it and installs the placeholder (ensureHlms; see the definition).
+    void startAsyncShaders();
     /// Plugin_ParticleFX2 loaded: the emitter/affector factories exist. False
     /// leaves billboard sets working and setParticleSystem failing cleanly.
     bool            mHasParticleFX2 = false;

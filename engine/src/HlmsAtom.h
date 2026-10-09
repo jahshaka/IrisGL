@@ -221,6 +221,9 @@ public:
     /// Destroys every twin (and the bucket table). Called before the PBS datablocks
     /// they point at can die.
     void destroyDecodeTwins();
+    /// THE ASYNCHRONOUS PLACEHOLDER (ASYNC-SHADERS-1): makes this Hlms' placeholder from the
+    /// PBS one (see the definition). Idempotent; false + `err` when it cannot.
+    bool installAsyncPlaceholder(Ogre::HlmsPbsDatablock *pbsPlaceholder, std::string &err);
     /// A PBS DATABLOCK IS DYING OR CHANGED ITS PERMUTATION: it leaves its bucket
     /// BEFORE it dies — a twin keeps a member's pointer (fillBuffersForV2 binds its
     /// pool) and the maps are keyed by it, so a recycled address would find a stale
@@ -383,6 +386,11 @@ protected:
     void setupRootLayout(Ogre::RootLayout &rootLayout, size_t tid) override;
     /// The classifier's renderable property (atom_classify), beside PBS's own.
     void calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) override;
+    /// THE ATOM PLACEHOLDER IS A TWIN'S (ASYNC-SHADERS-1): it covers a decode twin's bucket
+    /// (fillBuffersForV2), so only a renderable wearing a twin may stand in with it. Anything
+    /// else of this Hlms (the classifier) skips its draw while pending, and its view holds the
+    /// frame — a classification drawn grey would leave every bucket's depth test empty.
+    bool allowsAsyncPlaceholder(const Ogre::Renderable *renderable) const override;
     /// THE CLASSIFIED PASS'S DEPTH RULE (ATOM-DECODE-CLASS-1) — Ogre's own per-pass
     /// macroblock door (Hlms::applyStrongMacroblockRules, OgreHlms.cpp): under the pass
     /// property atom_classified a bucket draw tests its class's depth EQUAL and
@@ -477,6 +485,18 @@ private:
     uint32_t takeClass();
     void releaseClass(uint32_t c);
     Ogre::HlmsPbsDatablock *mClassifyDb = nullptr;
+    /// THE ASYNCHRONOUS PLACEHOLDER (ASYNC-SHADERS-1; installAsyncPlaceholder): the clone the
+    /// fork's RenderQueue draws a pending bucket with, and the PBS placeholder whose pool slot
+    /// its permutation reads.
+    Ogre::HlmsPbsDatablock *mPlaceholderTwin = nullptr;
+    Ogre::HlmsPbsDatablock *mPlaceholderPbs = nullptr;
+    /// A class no bucket and no pixel ever carries: a placeholder draw for a datablock that
+    /// is no twin writes it, so it covers nothing (fillBuffersForV2).
+    static constexpr uint32_t kNoPixelClass = 0xFFFFFFFFu;
+    bool mWarnedPlaceholderNoTwin = false;
+    /// HlmsJson round trip of a PBS datablock into this Hlms under `name` (the twins' copy).
+    Ogre::HlmsPbsDatablock *cloneIntoAtom(Ogre::HlmsPbsDatablock *pbs, const Ogre::String &name,
+                                          std::string &err);
     unsigned long long mTwinEpoch = 0ull;
 
     /// The product's decode draws, per SceneManager: the hit decode's

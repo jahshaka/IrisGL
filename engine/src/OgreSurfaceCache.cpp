@@ -9,6 +9,7 @@
 #include <OgreItem.h>
 #include <OgreLight.h>
 #include <OgreHlmsCompute.h>
+#include <OgreRenderQueue.h>
 #include <OgreHlmsComputeJob.h>
 #include <OgreHlmsManager.h>
 #include <OgreHlmsPbs.h>
@@ -42,6 +43,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+
+// THE CAPTURES' ASYNCHRONOUS DRAWS, per SceneManager (ASYNC-SHADERS-1): a capture batch that met a
+// shader still building is discarded, and the engine leaves its draws out of the views' numbers.
+// Per SceneManager, not per cache: a cache is torn down and rebuilt with the GI while the
+// RenderQueue's running totals it must be subtracted from live on. Main thread only.
+struct CaptureAsyncDraws { unsigned long long placeholders = 0u, skips = 0u; };
+static std::unordered_map<const Ogre::SceneManager *, CaptureAsyncDraws> gCaptureAsyncDraws;
+
 
 namespace jahshaka {
 namespace engine {
@@ -489,6 +498,8 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     mWs = cm->addWorkspace(sm, externals, mCam[0], mWsDef, true, 0);
     if (!mWs) { err = "surface cache: addWorkspace failed"; return false; }
     mWs->setExecutionMask(0u);
+    // THE CAPTURE'S COMPILE MODE is the scene's views' (setAsyncShaders).
+    mWs->setAsyncShaderCompile(mAsyncShaders);
     mWs->addListener(this);
     // ...AND THE MANAGER'S FRAME HEAD, where the capture flag is cleared
     // unconditionally: a capture that threw inside `_update` never reaches its
@@ -989,6 +1000,11 @@ void SurfaceCache::aimCamera(const CardRec &card, unsigned slot) {
 // copies after the last one.
 void SurfaceCache::allWorkspacesBeforeBeginUpdate() { gCapturing = false; }
 
+void SurfaceCache::setAsyncShaders(bool on) {
+    mAsyncShaders = on;
+    if (mWs) mWs->setAsyncShaderCompile(on);
+}
+
 void SurfaceCache::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     if (ws != mWs) return;
     // A BATCH PLANNED FOR ANOTHER FRAME NEVER RUNS. `update()` plans and this
@@ -1003,6 +1019,9 @@ void SurfaceCache::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     if (mBatch.empty()) return;
     gCapturing = true;
     mBatchStart = std::chrono::steady_clock::now();
+    const Ogre::RenderQueue *rq = mWs->getSceneManager()->getRenderQueue();
+    mBatchPlaceholderAt = rq->getNumPlaceholderDraws();
+    mBatchSkipsAt = rq->getNumPendingSkips();
 }
 
 void SurfaceCache::passPreExecute(Ogre::CompositorPass *pass) {
@@ -1049,6 +1068,36 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
         return;
     }
     const auto tB = std::chrono::steady_clock::now();
+    // A BATCH THAT WAITED FOR A SHADER IS NOT A CAPTURE (see makeWorkspace): nothing is
+    // copied, the cards stay queued and the next batch that finds the shaders built takes them.
+    {
+        const Ogre::RenderQueue *rq = mWs->getSceneManager()->getRenderQueue();
+        const unsigned long long placeholders = rq->getNumPlaceholderDraws() - mBatchPlaceholderAt;
+        const unsigned long long skips = rq->getNumPendingSkips() - mBatchSkipsAt;
+        CaptureAsyncDraws &acc = gCaptureAsyncDraws[mWs->getSceneManager()];
+        acc.placeholders += placeholders;
+        acc.skips += skips;
+        if (placeholders || skips) {
+            ++mCapturesDeferredForShaders;
+            // ...NOR IS IT RELIT: planRelights listed this batch's cards as captured this frame
+            // (a capture and its relight are one update). Their texels were never copied — on a
+            // new scene's first batch the atlas layers are not even initialised (Depth and
+            // Emissive, plain copy targets, still UNDEFINED: measured, the relight sampled them
+            // and the validation layer said so on an OPEN while compiles were pending). They
+            // keep their flags and are relit with the batch that captures them.
+            for (size_t r = mRelight.size(); r-- > 0;)
+                if (std::find(mBatch.begin(), mBatch.end(), mRelight[r]) != mBatch.end()) {
+                    mRelight.erase(mRelight.begin() + std::ptrdiff_t(r));
+                    mRelightMode.erase(mRelightMode.begin() + std::ptrdiff_t(r));
+                }
+            mBatch.clear();
+            mWs->setExecutionMask(0u);
+            traceSun();
+            relightCards();
+            syncBuffers();
+            return;
+        }
+    }
     // ...AND INTO THE ATLAS, after the whole batch: five small copies a card,
     // from its own slice of the scratch (the reason the scratch exists at all
     // is in SurfaceCache.h — this pin's render-pass clear is whole-target).
@@ -1075,6 +1124,15 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
         ++mCapturesLastFrame;
         mTexelsLastFrame += card.size * card.size;
     }
+    // THE COPY SESSION CLOSES HERE, with the copies (ASYNC-SHADERS-1, a validation defect on
+    // base: oldLayout-01197 / VUID-vkCmdDraw-None-09600 on cardShadowRough at a scene's first
+    // captures). The copies leave Ogre's copy encoder OPEN with the layers in TRANSFER_DST;
+    // closing it moves them back to their resting layout AND re-asserts that layout in the
+    // barrier solver. Left open, the first reader below (the relight, whenever the still trace
+    // waits and so does not close it) resolves its barrier against the open session, the
+    // closing inside that very barrier then overwrites the solver's record with GENERAL, and
+    // the next reader transitions a SHADER_READ image "from GENERAL".
+    if (!mBatch.empty()) Ogre::Root::getSingleton().getRenderSystem()->endCopyEncoder();
     const auto tC = std::chrono::steady_clock::now();
     mWsMs = float(std::chrono::duration<double, std::milli>(tB - mBatchStart).count());
     mCopyMs = float(std::chrono::duration<double, std::milli>(tC - tB).count());
@@ -1502,7 +1560,15 @@ void SurfaceCache::relightCards() {
     mLightJob->_setUavBuffer(2u, bufSlot(mGiBuffer, Ogre::ResourceAccess::Read));
     mLightJob->setThreadsPerGroup(8u, 8u, 1u);
     mLightJob->setNumThreadGroups(kCardPageSize / 8u, kCardPageSize / 8u, unsigned(mRelight.size()));
-    {
+    // THE RELIGHT NEVER COMPILES IN THE FRAME (ASYNC-SHADERS-1). A permutation this job has
+    // not built (a new environment, the cloud field, another cascade count) is handed to the
+    // engine's background compiler and the relight is SKIPPED: every card keeps the radiance
+    // it has and stays owed (c.relight), so the next frame that finds the shader built
+    // relights exactly these. With no background service the answer is "ready" and the
+    // dispatch compiles as it always did.
+    const bool shaderReady =
+        !mAsyncShaders || hc->requestAsync(mLightJob) != Ogre::HlmsCompute::AsyncPending;
+    if (shaderReady) {
         Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
         mLightJob->analyzeBarriers(rt);
         rs->executeResourceTransition(rt);
@@ -1527,7 +1593,7 @@ void SurfaceCache::relightCards() {
         mLightJob->setNumTexUnits(0u);
     }
 
-    for (size_t i = 0; i < mRelight.size(); ++i) {
+    for (size_t i = 0; shaderReady && i < mRelight.size(); ++i) {
         CardRec &c = mCards[mRelight[i]];
         c.relight = false;
         c.lastRelit = mFrame;
@@ -2494,6 +2560,14 @@ bool SurfaceCache::dump(const std::string &prefix, std::string &err) const {
 // ---------------------------------------------------------------------------
 namespace detail {
 bool surfaceCardsCapturing() { return SurfaceCache::capturing(); }
+void surfaceCacheAsyncDraws(const Ogre::SceneManager *sm, unsigned long long &placeholders,
+                            unsigned long long &skips, bool forget) {
+    const auto it = gCaptureAsyncDraws.find(sm);
+    placeholders = it != gCaptureAsyncDraws.end() ? it->second.placeholders : 0u;
+    skips = it != gCaptureAsyncDraws.end() ? it->second.skips : 0u;
+    if (forget && it != gCaptureAsyncDraws.end()) gCaptureAsyncDraws.erase(it);
+}
+
 Ogre::CompositorWorkspace *surfaceCacheWorkspace(const SurfaceCache *cache) {
     return cache ? cache->workspace() : nullptr;
 }

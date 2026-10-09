@@ -1996,6 +1996,7 @@ void OgreScene::updateSurfaceCache() {
         hooks.readTimes = [this](float &a, float &b) { cardMoverTimes(a, b); };
         mSurfaceCache->setMoverHooks(hooks);
     }
+    mSurfaceCache->setAsyncShaders(mAsyncShaders);
     // A CAMERA-RELATIVE CACHE NEEDS A CAMERA, exactly as the cascade chain
     // does, and waits for one the same way: `mGiCamPos` is the authoritative
     // view's last tracked position and is the ORIGIN until a frame has tracked
