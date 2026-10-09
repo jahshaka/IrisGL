@@ -1888,6 +1888,7 @@ enum class ArmId : unsigned {
     AtomDiscriminate,    ///< "atom.discriminate" — the decode's failure colour codes (1), the chart (2)
     AtomHitWorldLights,  ///< "atom.hitWorldLights" — the hit decode's light list: 0 shipped, 1 off, 2 all
     AtomHitVctSpecular,  ///< "atom.hitVctSpecular" — the hit decode's VCT specular cone (0: compiled out)
+    GatherHitsReadback,  ///< "gather.hitsReadback" — every uniform probe's per-ray record read back (FAR-SUN-1)
     Count
 };
 class ArmRegistry {

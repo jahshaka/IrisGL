@@ -24,6 +24,8 @@
 //                     integrate into the view's overlay (OgreRayQuery.cpp);
 //       Hits          the reflection trace's per-pixel answer class, written by
 //                     the trace into the same overlay;
+//       GatherHits    the gather's per-ray answer class (FAR-SUN-1), written by its
+//                     trace into the same overlay, every probe's cell ray by ray;
 //       Diffuse /     a pass property on the one lighting text
 //       Reflections   (JahPhotonView_piece_ps.any), scoped to the opaque pass.
 //
@@ -73,7 +75,9 @@ namespace {
 bool drawsGeometry(PhotonView v) {
     return v == PhotonView::Voxels || v == PhotonView::Probes || v == PhotonView::Cards;
 }
-bool usesOverlay(PhotonView v) { return v == PhotonView::ScreenProbes || v == PhotonView::Hits; }
+bool usesOverlay(PhotonView v) {
+    return v == PhotonView::ScreenProbes || v == PhotonView::Hits || v == PhotonView::GatherHits;
+}
 int isolationOf(PhotonView v) {
     return v == PhotonView::Diffuse ? 1 : v == PhotonView::Reflections ? 2 : 0;
 }
@@ -297,6 +301,7 @@ std::string OgreScene::photonViewRefusal(PhotonView view) const {
             return "this scene holds no surface cache (the cards row is off: it follows the reflection trace)";
         break;
     case PhotonView::ScreenProbes:
+    case PhotonView::GatherHits:
         if (!gather)
             return "the screen-probe gather is off here (it traces with the ray tier: High and Epic with "
                    "ray tracing on)";

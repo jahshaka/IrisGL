@@ -42,6 +42,7 @@
 #include "jahshaka/engine/Types.h"
 #include "SurfaceCache.h"   // kViewLayers: the card read's view-term layers (PHOTON-CARDS-5)
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -259,6 +260,12 @@ struct GatherInputs {
     /// ...and which one (OgreView::photonOverlayGeneration: a re-created overlay
     /// may recycle the pointer).
     unsigned photonOverlayGeneration = 0u;
+    /// ...and WHOSE picture it is: false = the integrate's ScreenProbes discs, true = the
+    /// trace's GatherHits view (FAR-SUN-1: every probe's cell painted ray by ray).
+    bool photonOverlayGatherHits = false;
+    /// THE GATHER-HITS READBACK (FAR-SUN-1, the arm "gather.hitsReadback"): every uniform
+    /// probe's rays recorded and read back (GatherStatus::rays); the view never holds.
+    bool hitsReadback = false;
 };
 
 /// The Component.
@@ -444,11 +451,31 @@ private:
         void *irrReadbackMapped = nullptr;
         std::vector<float> irrHost;
         unsigned irrHostFrame = 0u;
+        /// THE GATHER-HITS READBACK (FAR-SUN-1): the trace's per-ray records (device, one
+        /// uvec4 per ray of every uniform probe), a host ring of them and of the atlas rows the
+        /// uniform probes occupy (the radiance each ray returned, after the decode's write-back),
+        /// allocated on the first frame the arm asks and freed with the view; the last retired
+        /// copy decoded for GatherStatus::rays.
+        VkBuffer rays = VK_NULL_HANDLE;
+        VkDeviceMemory raysMemory = VK_NULL_HANDLE;
+        VkBuffer raysReadback = VK_NULL_HANDLE;
+        VkDeviceMemory raysReadbackMemory = VK_NULL_HANDLE;
+        void *raysReadbackMapped = nullptr;
+        VkBuffer raysAtlasReadback = VK_NULL_HANDLE;
+        VkDeviceMemory raysAtlasReadbackMemory = VK_NULL_HANDLE;
+        void *raysAtlasReadbackMapped = nullptr;
+        std::vector<GatherRay> raysHost;
+        unsigned raysHostFrame = 0u;
+        /// The bytes of one ring slot of each (the uniform probes' records; their atlas rows).
+        VkDeviceSize raysSlotBytes() const { return VkDeviceSize(uniformProbes) * 64u * 16u; }
+        unsigned raysAtlasRows() const { return ((uniformProbes + atlasCols - 1u) / std::max(atlasCols, 1u)) * 8u; }
+        VkDeviceSize raysAtlasSlotBytes() const { return VkDeviceSize(atlasW) * raysAtlasRows() * 8u; }
 
         struct Pending {
             uint32_t frame = 0u;
             bool live = false;
             bool irradiance = false;     ///< this slot of the readback ring was written
+            bool rays = false;           ///< ...and of the gather-hits ring (FAR-SUN-1)
             unsigned gatherFrame = 0u;   ///< ...by this gather frame
             /// A HELD frame (the rest, PHOTON-GATHER-1d): only the readback was
             /// recorded — no counter copy to read back.

@@ -3555,6 +3555,30 @@ enum class OffscreenContract { Undeclared, StillPicture, Live };
 enum class FrameCaptureState { Idle, Armed, InFlight, Ready };
 
 /// What the gather did on the last drawn frame of this scene.
+/// ONE GATHER RAY, AS THE GATHER-HITS INSTRUMENT READ IT (FAR-SUN-1; GatherStatus::rays).
+struct GatherRay {
+    /// What answered it (GatherRay::Source), and for the voxels the FINEST cascade that did.
+    enum Source : unsigned char { None = 0, Card = 1, Voxel = 2, Sky = 3, Decode = 4, DecodeFar = 5,
+                                  Dropped = 6 };
+    unsigned char source = None;
+    unsigned char cascade = 0;
+    /// Its uniform probe's cell (the probe's screen block is cell x stride) and its octahedral
+    /// texel (y x octRes + x).
+    unsigned short cellX = 0, cellY = 0;
+    unsigned char ray = 0;
+    /// The radiance the ray RETURNED, read from the probe's atlas after the decode's write-back
+    /// (so a decode record's answer is in it; a dropped one reads 0) — the rgb the probe's SH
+    /// is projected from, before any filter.
+    float radiance[3] = { 0.0f, 0.0f, 0.0f };
+    /// The hit: its distance (-1 = the sky), its world point and its geometric normal's y
+    /// (both half precision), and THE SUN'S VISIBILITY THERE — the hit's own sun ray against the
+    /// shadow casters, whatever answered the ray: the truth a source's radiance is held against.
+    float distance = -1.0f;
+    float hitPos[3] = { 0.0f, 0.0f, 0.0f };
+    float hitNormalY = 0.0f;
+    float sunVisibility = 0.0f;
+};
+
 struct GatherStatus {
     /// The scene's row resolved ON: `GiParams::gather` is On and this machine
     /// traces (a ray-capable device, the project's ray row not Off).
@@ -3655,6 +3679,14 @@ struct GatherStatus {
     /// carries this number (GATHER-NOISE-1), so a suite that moves the camera
     /// every frame knows which readback is which pose.
     unsigned frame = 0u;
+    /// THE GATHER-HITS READBACK (FAR-SUN-1; the arm "gather.hitsReadback"): what answered EVERY
+    /// RAY of every uniform probe of the last retired traced frame, row-major over the probe
+    /// grid (probesX x probesY) and, inside a probe, by ray (raysPerProbe each). Empty with the
+    /// arm off and until a frame that traced under it has retired; a view that holds its rest
+    /// traces nothing, so the arm keeps the view tracing.
+    std::vector<GatherRay> rays;
+    /// ...which gather frame it is of (GatherStatus::frame's counter).
+    unsigned raysFrame = 0u;
     /// ...and THE SAME FRAME'S ADAPTIVE TWINS (the readback door too; PHOTON-II-1 F3): per
     /// uniform cell, row-major over the probe grid (probesX x probesY), 1 where the cell got
     /// its second probe that frame. How a suite proves the budget's ranking starves no cell.
@@ -7355,8 +7387,14 @@ enum class AtomView { Off = 0, Triangles, Levels, Buckets, Objects };
 ///   Hits          every traced reflection pixel coloured by what shaded its ray:
 ///                 green = a card, blue = the voxels, cyan = the sky, magenta = the
 ///                 hit list (the decode), red = a dropped record; no ray = dimmed
-enum class PhotonView { Off = 0, Voxels, Probes, Cards, ScreenProbes, Diffuse, Reflections, Hits };
-constexpr int kPhotonViewCount = 8;
+///   GatherHits    the SCREEN-PROBE GATHER's rays (FAR-SUN-1): every probe's cell painted
+///                 ray by ray (one octahedral texel to one block of the cell) in the colour
+///                 of what answered it — green a card, blue the voxels (darker at each
+///                 coarser cascade), cyan the sky, magenta a decode record, orange a FAR
+///                 decode record, red a dropped one; a cell with no probe dimmed. Its
+///                 readback is GatherStatus::rays (the arm "gather.hitsReadback").
+enum class PhotonView { Off = 0, Voxels, Probes, Cards, ScreenProbes, Diffuse, Reflections, Hits, GatherHits };
+constexpr int kPhotonViewCount = 9;
 
 
 /// A CPU-side RGBA8 image, used to read back an offscreen View.

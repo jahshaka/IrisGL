@@ -1664,7 +1664,9 @@ bool RayQueryTier::makeStorageImage(unsigned w, unsigned h, VkFormat fmt, Reflec
     ici.arrayLayers = std::max(layers, 1u);
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // TRANSFER_SRC (FAR-SUN-1): an instrument may copy one out (the gather's atlas for the
+    // gather-hits readback); usage alone moves no byte of any picture.
+    ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (vkCreateImage(mVk, &ici, nullptr, &out.image) != VK_SUCCESS) {
@@ -6399,14 +6401,18 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.height = depthTex->getHeight();
     // THE PHOTON VIEW'S ScreenProbes (PHOTON-VIEW-1): the view's overlay, written
     // by the integrate when the scene's view asks and it is the gather's size.
-    if (scene->photonView() == PhotonView::ScreenProbes) {
+    // ...and its GatherHits (FAR-SUN-1): the same overlay, written by the trace ray by ray.
+    if (scene->photonView() == PhotonView::ScreenProbes || scene->photonView() == PhotonView::GatherHits) {
         Ogre::TextureGpu *o = view->photonOverlay();
         if (o && o->getWidth() == in.width && o->getHeight() == in.height &&
             o->getNumSlices() == depthTex->getNumSlices()) {
             in.photonOverlay = o;
             in.photonOverlayGeneration = view->photonOverlayGeneration();
+            in.photonOverlayGatherHits = scene->photonView() == PhotonView::GatherHits;
         }
     }
+    // THE GATHER-HITS READBACK (FAR-SUN-1): the instrument's arm.
+    in.hitsReadback = arm(ArmId::GatherHitsReadback, false);
     // A STEREO VIEW'S TEXTURES ARE LAYERED, one eye per layer (LAYERED-STEREO-1):
     // `width` is one eye's, and a stereo chain whose depth is not two layers is
     // not a picture the gather can split.

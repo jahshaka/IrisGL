@@ -156,6 +156,10 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// 0 (it narrows linearly to the bilinear 1 at x frames). Never at rest.
 	/// z = THE CROSS-PROBE STRATA N (rq_probe_gather.comp; 1 = off).
 	vec4 young;
+	/// THE GATHER-HITS INSTRUMENT (FAR-SUN-1, rq_probe_gather.comp): x = 1 writes every
+	/// uniform probe's per-ray record (the arm "gather.hitsReadback"; binding 31), y = 1
+	/// paints the GatherHits photon view (binding 32), z = the probe stride in pixels.
+	vec4 hits;
 } p;
 
 /// ONE EYE'S IMAGE — rq_reflect.comp's `EyeImage`: where the eye is and the

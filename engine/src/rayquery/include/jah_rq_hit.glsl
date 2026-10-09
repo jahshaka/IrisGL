@@ -123,9 +123,14 @@ float jahHitIndirectGate = 1.0;
 /// blurred. `ok` is false when no bound cascade holds anything there: the hit
 /// is then a record for the visibility-buffer decode (jah_rq_hit_record.glsl,
 /// PHOTON-HIT-SHADE-1) in both callers.
+/// WHICH CASCADE ANSWERED the last jahVoxelRadiance (the finest that contributed; -1 none) —
+/// the gather-hits instrument's reading (FAR-SUN-1), nothing else reads it.
+int jahVoxelAnswerCascade = -1;
+
 vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out bool ok )
 {
 	ok = false;
+	jahVoxelAnswerCascade = -1;
 	const int count = JAH_VOX_COUNT;
 	// HOW WIDE THE HAND-OVER BAND IS, in cells of the cascade being left. Three
 	// DIRECTIONAL texels (a directional texel is two cells: the anisotropic
@@ -211,6 +216,8 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 #endif
 		acc += rad * ( w * max( origin.w, 0.0 ) );
 		accW += w;
+		if( !ok )
+			jahVoxelAnswerCascade = c;
 		ok = true;
 	}
 	if( !ok )

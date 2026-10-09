@@ -100,14 +100,19 @@ constexpr unsigned kPlaceBindings = 6u;
 /// the voxelizer's normal (23, 24: PHOTON-VOXEL-5); then the card read's VIEW
 /// TERM's five (25-29, PHOTON-CARDS-5: jah_rq_card_bindings.glsl at
 /// JAH_CARD_VIEW_BINDING_BASE 25).
-constexpr unsigned kTraceBindings = 31u;
+constexpr unsigned kTraceBindings = 33u;
 constexpr unsigned kTraceSideBinding = 23u;
 constexpr unsigned kTraceCardViewBinding = 25u;
 /// ...and THE DIRECT TERM's volume per cascade (30, MOVER-OCCLUSION-1: jah_rq_hit.glsl).
 constexpr unsigned kTraceDirectBinding = 30u;
-static_assert(kTraceBindings == kTraceDirectBinding + 1u &&
+/// ...and THE GATHER-HITS INSTRUMENT's two (FAR-SUN-1, rq_probe_gather.comp): the per-ray
+/// records (31) and the photon view's overlay (32).
+constexpr unsigned kTraceRaysBinding = 31u;
+constexpr unsigned kTraceOverlayBinding = 32u;
+static_assert(kTraceRaysBinding == kTraceDirectBinding + 1u && kTraceOverlayBinding == kTraceRaysBinding + 1u &&
+                  kTraceBindings == kTraceOverlayBinding + 1u &&
                   kTraceDirectBinding == kTraceCardViewBinding + SurfaceCache::kViewLayers,
-              "the direct volume follows the card read's view-term layers");
+              "the direct volume follows the card read's view-term layers, the instrument's two follow it");
 constexpr unsigned kFilterBindings = 3u;
 /// The integrate's nine: params, records, normals, depth, the irradiance, the
 /// history's two halves (one packed texel each, PHOTON-GA-VR), the rest mean and
@@ -188,6 +193,9 @@ struct GatherParams {
     /// THE YOUNG HISTORY'S REACH (GATHER-NOISE-1): x = the history length below
     /// which a pixel widens, y = the reach in cells at a history of 0.
     float young[4] = {};
+    /// THE GATHER-HITS INSTRUMENT (FAR-SUN-1): x = 1 the per-ray records, y = 1 the
+    /// GatherHits view, z = the stride in pixels.
+    float hits[4] = {};
 };
 
 /// THE PIXEL HISTORY'S BLEND FLOOR (PHOTON-GATHER-1c item 1): the smallest
@@ -350,6 +358,8 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 28 ...Albedo
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 29 ...Normal
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 30 voxelDirect[] (MOVER-OCCLUSION-1)
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 31 the per-ray records (FAR-SUN-1)
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 32 the photon overlay (GatherHits)
         };
         const unsigned c[kTraceBindings] = { 1u, 1u, 1u, 1u, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
@@ -358,7 +368,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
                                              kGatherMaxCascades, kGatherMaxCascades,
                                              1u, 1u, 1u, 1u,
                                              kGatherMaxCascades, kGatherMaxCascades,
-                                             1u, 1u, 1u, 1u, 1u, kGatherMaxCascades };
+                                             1u, 1u, 1u, 1u, 1u, kGatherMaxCascades, 1u, 1u };
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp
@@ -624,6 +634,14 @@ void ScreenProbeGather::drop(View &v) {
     v.irrReadbackMapped = nullptr;
     v.irrHost.clear();
     v.irrHostFrame = 0u;
+    mHost.gatherRetireBuffer(v.rays, v.raysMemory);
+    mHost.gatherRetireBuffer(v.raysReadback, v.raysReadbackMemory);
+    mHost.gatherRetireBuffer(v.raysAtlasReadback, v.raysAtlasReadbackMemory);
+    v.rays = v.raysReadback = v.raysAtlasReadback = VK_NULL_HANDLE;
+    v.raysMemory = v.raysReadbackMemory = v.raysAtlasReadbackMemory = VK_NULL_HANDLE;
+    v.raysReadbackMapped = v.raysAtlasReadbackMapped = nullptr;
+    v.raysHost.clear();
+    v.raysHostFrame = 0u;
     v.records = v.counter = v.args = v.readback = VK_NULL_HANDLE;
     v.recordsMemory = v.counterMemory = v.argsMemory = v.readbackMemory = VK_NULL_HANDLE;
     v.readbackMapped = nullptr;
@@ -694,6 +712,51 @@ void ScreenProbeGather::readPending(View &v) {
                     }
                 }
             }
+        }
+    }
+    // ...AND THE GATHER-HITS READBACK of a retired traced frame (FAR-SUN-1): the per-ray
+    // records, each with the radiance its atlas texel holds (the decode's write-back in it).
+    if (v.raysReadbackMapped && v.raysAtlasReadbackMapped) {
+        for (unsigned i = 0; i < kFramesInFlight; ++i) {
+            if (!v.pending[i].live || !v.pending[i].rays ||
+                uint32_t(nowAll - v.pending[i].frame) < inFlightAll)
+                continue;
+            v.pending[i].rays = false;
+            const uint32_t *rec = reinterpret_cast<const uint32_t *>(
+                static_cast<const char *>(v.raysReadbackMapped) + size_t(i) * v.raysSlotBytes());
+            const uint16_t *atl = reinterpret_cast<const uint16_t *>(
+                static_cast<const char *>(v.raysAtlasReadbackMapped) + size_t(i) * v.raysAtlasSlotBytes());
+            const unsigned rays = v.octRes * v.octRes;
+            v.raysHost.assign(size_t(v.uniformProbes) * rays, GatherRay());
+            const auto half = [](uint32_t w, int k) {
+                return Ogre::Bitwise::halfToFloat(uint16_t(k ? (w >> 16u) : (w & 0xFFFFu)));
+            };
+            for (unsigned pr = 0; pr < v.uniformProbes; ++pr)
+                for (unsigned r = 0; r < rays; ++r) {
+                    GatherRay &g = v.raysHost[size_t(pr) * rays + r];
+                    g.cellX = (unsigned short)(pr % v.gridW);
+                    g.cellY = (unsigned short)(pr / v.gridW);
+                    g.ray = (unsigned char)r;
+                    const uint32_t *w = rec + (size_t(pr) * 64u + r) * 4u;
+                    if (!(w[0] & (1u << 24u))) continue;   // no probe traced it
+                    g.source = (unsigned char)(w[0] & 0xFu);
+                    g.cascade = (unsigned char)((w[0] >> 4u) & 0xFu);
+                    g.sunVisibility = float((w[0] >> 8u) & 0xFFu) / 255.0f;
+                    g.hitNormalY = float(int8_t(uint8_t((w[0] >> 16u) & 0xFFu))) / 127.0f;
+                    float reweight = 0.0f;
+                    std::memcpy(&reweight, &w[1], sizeof(reweight));
+                    g.hitPos[0] = half(w[2], 0);
+                    g.hitPos[1] = half(w[2], 1);
+                    g.hitPos[2] = half(w[3], 0);
+                    g.distance = half(w[3], 1);
+                    // the ray's texel in the atlas: the probe's 8 x 8 block, the octahedral texel
+                    const unsigned bx = (pr % v.atlasCols) * 8u + r % v.octRes;
+                    const unsigned by = (pr / v.atlasCols) * 8u + r / v.octRes;
+                    const uint16_t *t = atl + (size_t(by) * v.atlasW + bx) * 4u;
+                    for (int k = 0; k < 3; ++k)
+                        g.radiance[k] = reweight > 1e-9f ? Ogre::Bitwise::halfToFloat(t[k]) / reweight : 0.0f;
+                }
+            v.raysHostFrame = v.pending[i].gatherFrame;
         }
     }
     // A retired frame's record is done with (its readbacks were read above).
@@ -870,6 +933,8 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.irradianceFrame = v.irrHostFrame;
     out.frame = v.frame;
     out.adaptiveCells = v.adaptiveHost;
+    out.rays = v.raysHost;
+    out.raysFrame = v.raysHostFrame;
     // THE SETTLED HISTORY (GatherStatus says what and why): every latest view's
     // history N frames past its last RESTART. The rest (and its hold) is
     // reported beside it and is NOT part of the predicate: a scene with a
@@ -1097,8 +1162,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // The rest restarts; the history is untouched (the rest mean is a function
         // of the rest frames' own sequence, so it settles back to the same answer).
         const unsigned photon = in.photonOverlay ? in.photonOverlayGeneration : 0u;
+        // ...and never while the gather-hits readback runs (FAR-SUN-1): a held view traces
+        // nothing, and the instrument reads the trace.
         const bool still = temporal && !in.tuning.restOff && !in.stereo && sameCamera &&
-                           in.restKey == v.restKey && photon == v.photonLast;
+                           in.restKey == v.restKey && photon == v.photonLast && !in.hitsReadback;
         v.photonLast = photon;
         v.restKey = in.restKey;
         // THE SETTLE: a restart zeroes it (the view's birth or an estimator change
@@ -1246,7 +1313,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.knobs4[0] = in.tuning.shBands == 4u ? 4.0f : 9.0f;
     pp.knobs4[1] = kWeightFloor;
     pp.knobs4[2] = in.tuning.filterOff ? 0.0f : float(filterRadiusOf(in.tuning));
-    pp.knobs4[3] = in.photonOverlay ? 1.0f : 0.0f;   // THE PHOTON VIEW's discs (PHOTON-VIEW-1)
+    pp.knobs4[3] = in.photonOverlay && !in.photonOverlayGatherHits ? 1.0f : 0.0f;   // THE PHOTON VIEW's discs (PHOTON-VIEW-1)
+    // THE GATHER-HITS INSTRUMENT (FAR-SUN-1): the records under the arm, the view's picture.
+    pp.hits[0] = in.hitsReadback ? 1.0f : 0.0f;
+    pp.hits[1] = in.photonOverlay && in.photonOverlayGatherHits ? 1.0f : 0.0f;
+    pp.hits[2] = float(v.stride);
     // PHOTON-GATHER-1c: the previous camera, the view's age, the history's floor,
     // the lever.
     std::memcpy(pp.prevCamPos, v.prevCamPos, sizeof(pp.prevCamPos));
@@ -1383,6 +1454,15 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     depth.imageView = mHost.gatherLayerView(in.depth, false);
     depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (!normals.imageView || !depth.imageView) return;
+    // THE GATHER-HITS RECORDS (FAR-SUN-1): one uvec4 per ray of every uniform probe, made on
+    // the first frame the arm asks (and freed with the view's targets).
+    if (in.hitsReadback && !v.rays) {
+        std::string rerr;
+        if (!mHost.gatherMakeBuffer(v.raysSlotBytes(),
+                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false,
+                                    v.rays, v.raysMemory, nullptr, rerr))
+            v.rays = VK_NULL_HANDLE;
+    }
 
     {   // the placement set
         VkWriteDescriptorSet w[kPlaceBindings] = {};
@@ -1539,6 +1619,23 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[kTraceDirectBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[kTraceDirectBinding].descriptorCount = kGatherMaxCascades;
         w[kTraceDirectBinding].pImageInfo = volumes[10];
+        // THE GATHER-HITS INSTRUMENT (31, 32; FAR-SUN-1): the view's records under the arm, or the
+        // stand-in (never written: p.hits.x = 0); the photon overlay under the GatherHits view, or
+        // the irradiance target's own storage view (never written: p.hits.y = 0) — the integrate's
+        // binding-8 rule.
+        VkDescriptorBufferInfo raysInfo{};
+        raysInfo.buffer = (in.hitsReadback && v.rays) ? v.rays : dummyStorage;
+        raysInfo.range = VK_WHOLE_SIZE;
+        w[kTraceRaysBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[kTraceRaysBinding].pBufferInfo = &raysInfo;
+        VkDescriptorImageInfo hitsOverlay{};
+        hitsOverlay.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        hitsOverlay.imageView = mHost.gatherLayerView(v.irradiance, true);
+        if (in.photonOverlay && in.photonOverlayGatherHits)
+            hitsOverlay.imageView = mHost.gatherLayerView(in.photonOverlay, true);
+        if (!hitsOverlay.imageView) return;
+        w[kTraceOverlayBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[kTraceOverlayBinding].pImageInfo = &hitsOverlay;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kTraceBindings, w, 0, nullptr);
     }
 
@@ -1905,9 +2002,56 @@ void ScreenProbeGather::finish(const void *key) {
             readbackThisFrame = true;
         }
     }
+    // THE GATHER-HITS READBACK (FAR-SUN-1): this traced frame's per-ray records and the atlas
+    // rows its uniform probes own — AFTER the decode's write-back, so a record's radiance is in
+    // its texel — copied into this frame's slot of two host rings (readPending decodes them).
+    bool raysThisFrame = false;
+    if (in.hitsReadback && v.rays) {
+        if (!v.raysReadback) {
+            std::string rerr;
+            if (!mHost.gatherMakeBuffer(v.raysSlotBytes() * kFramesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true,
+                                        v.raysReadback, v.raysReadbackMemory, &v.raysReadbackMapped, rerr))
+                v.raysReadback = VK_NULL_HANDLE;
+        }
+        if (!v.raysAtlasReadback) {
+            std::string rerr;
+            if (!mHost.gatherMakeBuffer(v.raysAtlasSlotBytes() * kFramesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                        true, v.raysAtlasReadback, v.raysAtlasReadbackMemory,
+                                        &v.raysAtlasReadbackMapped, rerr))
+                v.raysAtlasReadback = VK_NULL_HANDLE;
+        }
+        if (v.raysReadback && v.raysAtlasReadback) {
+            VkMemoryBarrier toCopy{};
+            toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
+                                 &toCopy, 0, nullptr, 0, nullptr);
+            const unsigned slot = v.frame % kFramesInFlight;
+            VkBufferCopy rc{};
+            rc.dstOffset = VkDeviceSize(slot) * v.raysSlotBytes();
+            rc.size = v.raysSlotBytes();
+            vkCmdCopyBuffer(cmd, v.rays, v.raysReadback, 1, &rc);
+            VkBufferImageCopy region{};
+            region.bufferOffset = VkDeviceSize(slot) * v.raysAtlasSlotBytes();
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = 1u;
+            region.imageExtent = { v.atlasW, std::min(v.raysAtlasRows(), v.atlasH), 1u };
+            vkCmdCopyImageToBuffer(cmd, v.atlas, VK_IMAGE_LAYOUT_GENERAL, v.raysAtlasReadback, 1, &region);
+            VkMemoryBarrier toHost{};
+            toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &toHost, 0,
+                                 nullptr, 0, nullptr);
+            raysThisFrame = true;
+        }
+    }
     {
         // The pending record is what retires this frame's adaptive-count readback.
         View::Pending &pd = v.pending[v.frame % kFramesInFlight];
+        pd.rays = raysThisFrame;
         pd.frame = mHost.gatherFrameNow();
         pd.live = true;
         pd.irradiance = readbackThisFrame;

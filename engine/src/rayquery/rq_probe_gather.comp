@@ -155,6 +155,61 @@ layout( std430, set = 0, binding = 22 ) buffer JahHitBuf { uint jahHitBuf[]; };
 #define JAH_HIT_MOVERS_ON ( p.alpha.w > 0.5 )
 #include "jah_rq_hit_radiance.glsl"
 
+/// THE GATHER-HITS INSTRUMENT (FAR-SUN-1): what answered every ray, as a readback and as a
+/// picture - the gather's counterpart of the reflection trace's Hits view. Nothing in the frame
+/// reads either binding; with both knobs off nothing is written.
+///   31  one uvec4 per ray of every UNIFORM probe (probe x 64 + the ray's lane), written under
+///       p.hits.x (the arm "gather.hitsReadback"): x = the source (bits 0-3: 1 the card, 2 the
+///       voxels, 3 the sky, 4 a decode record, 5 a FAR decode record, 6 a dropped record) | the
+///       answering cascade << 4 (the voxels) | the hit's sun visibility, unorm8 << 8 | the hit
+///       normal's y, snorm8 << 16 | 1 << 24 (the probe traced this ray); y = the ray's
+///       quadrature re-weight (float bits: the atlas texel over it is the radiance returned);
+///       z = packHalf2x16( the hit's x, y ), w = packHalf2x16( the hit's z, the distance ).
+///   32  the photon view's overlay (the GatherHits view, p.hits.y): every uniform probe's cell
+///       painted ray by ray, one octahedral texel to one block of the cell, in its source's
+///       colour (kGatherHitColour).
+layout( std430, set = 0, binding = 31 ) writeonly buffer JahGatherRays { uvec4 jahGatherRays[]; };
+layout( rgba16f, set = 0, binding = 32 ) uniform writeonly image2DArray photonOverlay;
+const uint kGatherSrcCard = 1u, kGatherSrcVoxel = 2u, kGatherSrcSky = 3u, kGatherSrcDecode = 4u,
+		   kGatherSrcDecodeFar = 5u, kGatherSrcDropped = 6u;
+/// THE LEGEND: the card green; the voxels blue, darker at each coarser cascade; the sky cyan; a
+/// decode record magenta, a FAR one orange; a dropped record red; a cell with no probe a veil.
+vec4 kGatherHitColour( uint source, int cascade )
+{
+	if( source == kGatherSrcCard )
+		return vec4( 0.1, 0.9, 0.2, 1.0 );
+	if( source == kGatherSrcVoxel )
+	{
+		const float k = 1.0 - 0.25 * float( clamp( cascade, 0, 3 ) );
+		return vec4( 0.15 * k, 0.35 * k, k, 1.0 );
+	}
+	if( source == kGatherSrcSky )
+		return vec4( 0.2, 0.95, 1.0, 1.0 );
+	if( source == kGatherSrcDecode )
+		return vec4( 1.0, 0.2, 1.0, 1.0 );
+	if( source == kGatherSrcDecodeFar )
+		return vec4( 1.0, 0.6, 0.1, 1.0 );
+	if( source == kGatherSrcDropped )
+		return vec4( 1.0, 0.1, 0.05, 1.0 );
+	return vec4( 0.0, 0.0, 0.0, 0.6 );
+}
+/// Paints ray `texel` of the uniform probe at `cell` (the list's cell: its eye by column).
+void gatherHitPaint( ivec2 cell, ivec2 texel, int octRes, vec4 c )
+{
+	const int stride = max( int( p.hits.z ), 1 );
+	const int eye = jahEyeOfCell( cell.x );
+	const int cx = cell.x - eye * jahEyeGridW();
+	const ivec2 full = ivec2( p.resolution.zw );
+	const int blockPx = max( stride / max( octRes, 1 ), 1 );
+	const ivec2 base = ivec2( cx, cell.y ) * stride;
+	const ivec2 lo = base + texel * blockPx;
+	// the last texel of a row or column covers the cell's remainder (a 6 x 6 map in 16 px)
+	const ivec2 hi = min( mix( lo + blockPx, base + stride, greaterThanEqual( texel, ivec2( octRes - 1 ) ) ), full );
+	for( int y = lo.y; y < hi.y; ++y )
+		for( int x = lo.x; x < hi.x; ++x )
+			imageStore( photonOverlay, ivec3( x, y, eye ), c );
+}
+
 void main()
 {
 	const uint probe = gl_WorkGroupID.x;
@@ -313,6 +368,8 @@ void main()
 		// exactly as a cone march with no cone does.
 		const float spread = sqrt( 2.0 / float( rays ) );
 		vec3 radiance = vec3( 0.0 );
+		uint source = 0u;		// the instrument's (FAR-SUN-1): what answered this ray
+		float hitSun = 0.0;
 		float distance = -1.0;
 		bool ok = false;
 		bool recorded = false;
@@ -330,9 +387,11 @@ void main()
 			const bool decodeAlways = jahHitAlwaysDecodes( hitSlot ) || p.alpha.z > 0.5;
 			// The mover gate's rotation: this probe's cell and ray, this frame.
 			jahHitSeed = cellIndex * 73856093u ^ lane * 19349663u ^ frame * 2654435761u;
+			uint cacheSource = 0u;
 			if( !decodeAlways )
-				radiance = jahHitRadiance( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
-										   max( tHit * spread, 1e-4 ), false, false, ok );
+				radiance = jahHitRadianceSourced( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
+													  max( tHit * spread, 1e-4 ), false, false, ok, cacheSource );
+			source = cacheSource == 1u ? kGatherSrcCard : kGatherSrcVoxel;
 			if( decodeAlways || !ok || !finite3( radiance ) )
 			{
 				const vec3 hitPos = origin + dir * tHit;
@@ -344,18 +403,50 @@ void main()
 				// THE COMPOSITE writes the radiance; a DROPPED record (the list was
 				// full — counted) leaves this ray's texel at zero radiance.
 				radiance = vec3( 0.0 );
+				source = !recorded ? kGatherSrcDropped : far ? kGatherSrcDecodeFar : kGatherSrcDecode;
 			}
+			// THE INSTRUMENT'S SUN (FAR-SUN-1): the hit's own sun ray, whatever answered it - the
+			// truth a source's radiance is held against (one more ray, only under the arm).
+			if( p.hits.x > 0.5 && !adaptive )
+				hitSun = jahHitSunVisibility( origin + dir * tHit, hitN, tHit, far );
 		}
 		else
 		{
 			// ---- THE SKY. Nothing near and nothing far (or the far query off):
 			// the ray escaped the world.
 			radiance = jahSkyRadiance( dir, spread );	// at the ray's own footprint (GA-SKY)
+			source = kGatherSrcSky;
 		}
 		if( !finite3( radiance ) )
 			radiance = vec3( 0.0 );
 		atlasTexel = vec4( min( radiance * reweight, vec3( kMaxRadiance ) ), distance );
+		// ---- THE GATHER-HITS INSTRUMENT (FAR-SUN-1): the uniform probes' rays only (an
+		// adaptive probe is its cell's second, and the readback is the grid's).
+		if( !adaptive && ( p.hits.x > 0.5 || p.hits.y > 0.5 ) )
+		{
+			const int cascade = source == kGatherSrcVoxel ? max( jahVoxelAnswerCascade, 0 ) : 0;
+			if( p.hits.x > 0.5 )
+			{
+				const vec3 hp = hit ? origin + dir * tHit : vec3( 0.0 );
+				const float ny = hit ? clamp( hitN.y, -1.0, 1.0 ) : 0.0;
+				const uint word = ( source & 0xFu ) | ( uint( cascade & 0xF ) << 4u ) |
+								  ( uint( clamp( hitSun, 0.0, 1.0 ) * 255.0 + 0.5 ) << 8u ) |
+								  ( ( uint( int( round( ny * 127.0 ) ) ) & 0xFFu ) << 16u ) | ( 1u << 24u );
+				jahGatherRays[probe * uint( kOctResMax * kOctResMax ) + lane] =
+					uvec4( word, floatBitsToUint( reweight ), packHalf2x16( hp.xy ),
+						   packHalf2x16( vec2( hp.z, distance ) ) );
+			}
+			if( p.hits.y > 0.5 )
+				gatherHitPaint( cell, t, octRes, kGatherHitColour( source, cascade ) );
+		}
 	}
+	else if( !adaptive && lane < rays && p.hits.y > 0.5 )
+		// A CELL WITH NO PROBE (its pixel holds nothing the prepass could place one on): veiled.
+		gatherHitPaint( cell, texel, octRes, kGatherHitColour( 0u, 0 ) );
+	// ...and a ray the readback holds no answer for (no probe, or the padding of a 6 x 6 map):
+	// an empty record, so a stale frame's never reads as this one's.
+	if( p.hits.x > 0.5 && !adaptive && !( onSurface && lane < rays ) )
+		jahGatherRays[probe * uint( kOctResMax * kOctResMax ) + lane] = uvec4( 0u );
 
 	// THE RAY'S TEXEL, from the lanes that own a direction.
 	if( lane < rays )

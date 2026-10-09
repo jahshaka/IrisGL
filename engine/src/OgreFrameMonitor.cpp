@@ -1118,6 +1118,12 @@ const ArmDef kArms[] = {
     { "atom.hitVctSpecular", 1.0, 0.0, 1.0,
       "The VCT specular cone in the ray-hit decode. 0 = compiled out (vct_disable_specular). "
       "gi.hit_shade. Was JAHSHAKA_HIT_VCT_SPECULAR (a per-pass read)." },
+    { "gather.hitsReadback", 0.0, 0.0, 1.0,
+      "THE GATHER-HITS READBACK (FAR-SUN-1, an instrument): every ray of every uniform probe records "
+      "what answered it (the card, the voxels and which cascade, the sky, a decode record, a far one, "
+      "a dropped one), the radiance it returned, its hit and the sun's visibility there - "
+      "GatherStatus::rays, the verb world.gatherHits. One more ray per hit while on, and the view "
+      "never holds its rest (a held view traces nothing). Nothing reads it but the readback." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");
