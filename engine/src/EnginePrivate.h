@@ -7389,6 +7389,7 @@ private:
     unsigned long long mArmedTag = 0, mOrder = 0;
     unsigned long long mRecorded = 0, mDelivered = 0, mDropped = 0;
     std::string mError;
+};
 
 /// THE HELD FRAME (ASYNC-SHADERS-1), THE SAFETY NET. The grey placeholder (PBS and the Atom
 /// decode) is what a waiting object draws; the placeholders are pass permutations themselves,
