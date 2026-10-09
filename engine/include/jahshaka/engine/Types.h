@@ -7857,8 +7857,10 @@ struct ValidationStatus {
     /// The process environment asks the Vulkan loader for the validation layer
     /// (VK_INSTANCE_LAYERS or VK_LOADER_LAYERS_ENABLE names it).
     bool requested = false;
-    /// The device's vkCmdDraw resolves INTO VkLayer_khronos_validation: the layer is live on the
-    /// device this engine draws with. False with no Vulkan device (the NULL render system).
+    /// The layer is LIVE: its library is loaded in the process (the loader maps it only for an
+    /// instance that enables it) and — on a build that reaches the Vulkan device — the device's
+    /// vkCmdDraw resolves INTO VkLayer_khronos_validation. False before the first view (Ogre makes
+    /// the instance and the device with it) and with the NULL render system.
     bool active = false;
     /// Every Vulkan layer library loaded in the process (file names, e.g.
     /// libVkLayer_khronos_validation.so) — what the loader really loaded, whatever was asked.

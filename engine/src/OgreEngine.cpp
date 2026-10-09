@@ -3465,13 +3465,22 @@ ValidationStatus OgreEngine::validation() const {
 #if defined(__linux__)
     dl_iterate_phdr(collectLayerLibrary, &s.layers);
 #endif
+    // THE LAYER IS LOADED: the loader maps VkLayer_khronos_validation only when an instance enables
+    // it — the readout every build has, ray query or not (TESTING-CLEANUP-2 fix round).
+    bool layerLoaded = false;
+    for (const std::string &l : s.layers)
+        if (l.find("VkLayer_khronos_validation") != std::string::npos) layerLoaded = true;
+    s.active = layerLoaded;
 #if JAH_RAY_QUERY
+    // ...AND, where this build reaches the Vulkan device, ON THE DEVICE: its vkCmdDraw resolves
+    // into the layer's library (the stronger proof; a build without the device headers keeps the
+    // first).
     auto *vkRs = mRoot ? dynamic_cast<Ogre::VulkanRenderSystem *>(mRoot->getRenderSystem()) : nullptr;
     if (vkRs && vkRs->getVulkanDevice() && vkRs->getVulkanDevice()->mDevice) {
         void *fn = reinterpret_cast<void *>(vkGetDeviceProcAddr(vkRs->getVulkanDevice()->mDevice, "vkCmdDraw"));
         Dl_info info{};
         if (fn && dladdr(fn, &info) && info.dli_fname) s.drawEntry = info.dli_fname;
-        s.active = s.drawEntry.find("VkLayer_khronos_validation") != std::string::npos;
+        s.active = layerLoaded && s.drawEntry.find("VkLayer_khronos_validation") != std::string::npos;
     }
 #endif
     return s;

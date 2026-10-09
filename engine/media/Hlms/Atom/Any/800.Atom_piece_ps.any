@@ -43,9 +43,9 @@
 
 @piece( AtomDeclDecode )
 	// THE DISCRIMINATOR (ATOM-BLACK-FRAMES-1, a TEST DOOR: the pass property
-	// atom_discriminate, JAHSHAKA_ATOM_DISCRIMINATE in HlmsAtom::preparePassHash): the
+	// atom_discriminate, the arm atom.discriminate in HlmsAtom::preparePassHash): the
 	// FIRST validity term a screen pixel failed, 0 = none, painted as a colour code in
-	// place of the discard. atom_discriminate_chart (the variable's value 2) paints the
+	// place of the discard. atom_discriminate_chart (the arm's value 2) paints the
 	// code chart (the code of the pixel's column band) over every decoded pixel, which
 	// is how a reader learns what each code looks like after the post chain.
 	@property( atom_discriminate )
@@ -621,7 +621,7 @@
 			fwdCustomHasCell = atomOk && atomHitClip.w > 0.0 &&
 							   all( lessThanEqual( abs( atomHitClip.xy ), float2( atomHitClip.w, atomHitClip.w ) ) );
 			@property( atom_hit_world_all )
-				// THE MEASUREMENT DOOR's "one list" arm (JAHSHAKA_HIT_WORLD_LIGHTS=all):
+				// THE MEASUREMENT ARM's "one list" value (atom.hitWorldLights = 2):
 				// no hit takes a cell, every hit takes the world list.
 				fwdCustomHasCell = false;
 			@end
