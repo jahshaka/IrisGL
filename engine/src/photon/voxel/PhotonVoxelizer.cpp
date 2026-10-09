@@ -66,8 +66,8 @@ namespace Ogre
     namespace
     {
         /// THE MERGE ACCUMULATOR'S TEXELS PER VOXEL (VoxelMerge_piece_cs.any, voxelMergeUvw's
-        /// multiplier): the eighteen sums of the merge and the non-casters' area (FAR-SUN-1).
-        constexpr uint32 kMergeAccumTexels = 19u;
+        /// multiplier): the eighteen sums of the merge and the non-casters' coverage per half (FAR-SUN-1).
+        constexpr uint32 kMergeAccumTexels = 20u;
         /// THE MERGE ACCUMULATOR IS SHARED BY SIZE (SPEED-VR-MEM, perf audit M-13). Every
         /// voxeliser used to hold its own for life (W x H x 18D R32_UINT: 18.9 MB at 64^3,
         /// 151 MB at 128^3), yet it is scratch that lives only INSIDE one build(): cleared at
@@ -122,7 +122,7 @@ namespace Ogre
                 GpuPageOutStrategy::Discard, TextureFlags::NotTexture | TextureFlags::Uav,
                 TextureTypes::Type3D );
             // R32_UINT, nineteen texels per voxel interleaved in Z (VoxelMerge_piece_cs.any,
-            // voxelMergeUvw; the nineteenth the non-casters' area, FAR-SUN-1): see the history
+            // voxelMergeUvw; the last two the non-casters' coverage per half, FAR-SUN-1): see the history
             // at the voxeliser's own sizing note.
             e.texture->setPixelFormat( PFG_R32_UINT );
             e.texture->setResolution( width, height, depth * kMergeAccumTexels );
@@ -583,7 +583,7 @@ namespace Ogre
         // interleaved in Z - the shader derives their coordinates from the voxel's own, so a
         // dispatch that covers one OCTANT needs to know nothing about the volume's depth.
         // Jahshaka (SPEED-VR-MEM, M-13): THE MERGE ACCUMULATOR is the one every voxeliser of
-        // this size shares (acquireMergeAccum, above), at this volume's size: nineteen sums
+        // this size shares (acquireMergeAccum, above), at this volume's size: twenty sums
         // per voxel - fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065)'s thirteen,
         // (PHOTON-WRITER-1) the material roughness, (PHOTON-VOXEL-3) the three per-axis
         // coverage sums packed into one, (PHOTON-VOXEL-4) the coverage split by the side a
@@ -1052,7 +1052,7 @@ namespace Ogre
         // two, so the residency round trip never actually saves anything -- it
         // only returns memory the next build immediately asks for again.
         // THE COST is one accumulator per volume SIZE, held while any voxeliser of that
-        // size lives: width * height * depth * 19 * 4 bytes (19.9 MB at 64^3, 159 MB at
+        // size lives: width * height * depth * 20 * 4 bytes (21.0 MB at 64^3, 168 MB at
         // 128^3), shared by every cascade of that size (SPEED-VR-MEM, acquireMergeAccum).
 
         if( mNeedsAlbedoMipmaps || mNeedsAllMipmaps )
