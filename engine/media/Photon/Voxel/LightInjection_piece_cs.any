@@ -80,7 +80,12 @@
 			const float3 cN = OGRE_Load3D( voxelCoverageNTex, iv, 0 ).xyz;
 			if( cP.x + cP.y + cP.z + cN.x + cN.y + cN.z > 0.0f )
 			{
-				const float3 pP = OGRE_Load3D( voxelPositionPTex, iv, 0 ).xyz;
+				const float4 pP4 = OGRE_Load3D( voxelPositionPTex, iv, 0 );
+				const float3 pP = pP4.xyz;
+				// THE CASTER SHARE (FAR-SUN-1; VoxelMerge_piece_cs.any): only the surfaces that
+				// CAST a shadow stop the march - the shadow maps' caster set - while every surface
+				// still bounces. 1 in a voxel of casters: the march is the pre-lane one there.
+				const float casterShare = pP4.w;
 				const float3 pN = OGRE_Load3D( voxelPositionNTex, iv, 0 ).xyz;
 				for( int b = 0; b < 3; ++b )
 				{
@@ -93,7 +98,7 @@
 					const float take =
 						jahInjectPlane( cP[b], pP[b], b, lo, hi, s[b], d[b], vLo, vHi, oAxis, oCoord, oSign ) +
 						jahInjectPlane( cN[b], pN[b], b, lo, hi, s[b], d[b], vLo, vHi, oAxis, oCoord, oSign );
-					occ += min( take, 1.0f );
+					occ += min( take, 1.0f ) * casterShare;
 				}
 			}
 			if( tOut >= tEnd )

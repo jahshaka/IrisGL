@@ -1115,6 +1115,14 @@ void OgreScene::setNodeCastShadow(NodeId id, bool on) {
     // A caster that just appeared or vanished is exactly what the lamp-map
     // cache exists to notice.
     if (changed && it->second.item) markShadowShapeDirty(it->second);
+    // ...AND THE VOXELS (FAR-SUN-1): the light injection's march takes only the casters'
+    // share of a voxel as an occluder (VoxelMerge_piece_cs.any, THE CASTER SHARE), so the
+    // cascades this item reaches re-voxelise and re-inject — the shadow maps' caster set and
+    // the GI's are one set. (The ray tier's caster bit rides the flags word above.)
+    if (changed && it->second.item) {
+        Ogre::Aabb box = it->second.item->getWorldAabbUpdated();
+        invalidateGiCaches(&box);
+    }
 }
 
 bool OgreScene::nodeCastShadow(NodeId id) const {

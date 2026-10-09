@@ -73,7 +73,7 @@ struct Record
 	vec4  worldRow[3];
 	vec4  aabb0;        // xyz world AABB centre
 	vec4  aabb1;        // xyz world AABB half size; w = the material SLOT, bit-cast
-	uvec4 meshData;     // geometry row, first index, index count, unused
+	uvec4 meshData;     // geometry row, first index, index count, 1 = a shadow CASTER (FAR-SUN-1)
 };
 
 layout( std430, ogre_U0 ) readonly restrict buffer paramsLayout { VoxelGatherParams params; };
@@ -90,6 +90,10 @@ layout( std430, ogre_U9 ) readonly restrict buffer maskLayout { uint budgetMask[
 #define JAH_LEVELS_PER_MESH 8u
 #define JAH_NONE 0xFFFFFFFFu
 #define JAH_GI_VISIBLE 8u
+// GpuScene.h kGpuCaster: casts a shadow in a caster channel (castShadow AND the channel) - the
+// set the shadow maps draw, carried to the voxeliser so the light injection's march honours it
+// (FAR-SUN-1, D).
+#define JAH_CASTER 2u
 #define JAH_FLAG_LOD 1u
 #define JAH_FLAG_BUDGETED 2u
 // The readout's word offsets (GpuVoxelGather.h, VoxelReadoutWord).
@@ -224,7 +228,7 @@ void main()
 			rec.worldRow[2] = r2;
 			rec.aabb0 = vec4( wc, 0.0 );
 			rec.aabb1 = vec4( wh, uintBitsToFloat( matSlot ) );
-			rec.meshData = uvec4( L.geomRow, first, num, 0u );
+			rec.meshData = uvec4( L.geomRow, first, num, ( flags & JAH_CASTER ) != 0u ? 1u : 0u );
 			records[ranges[p].x + cursor] = rec;
 			atomicAdd( readout[JAH_READ_RECORDS], 1u );
 			wroteAny = true;

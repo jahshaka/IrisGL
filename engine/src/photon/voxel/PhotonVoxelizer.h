@@ -221,7 +221,7 @@ namespace Ogre
 
         /// Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065) — THE ORDER-INDEPENDENT MERGE'S ACCUMULATOR.
         ///
-        /// PFG_R32_UINT, (mWidth, mHeight, mDepth * 18): eighteen texels per voxel,
+        /// PFG_R32_UINT, (mWidth, mHeight, mDepth * 19): nineteen texels per voxel,
         /// interleaved in Z, in the fixed-point integers VoxelMerge_piece_cs.any defines
         /// (which also says why R32 texels and not RGBA32 ones: MEASURED, VOXMERGE-2).
         /// 72 bytes per voxel, 18.9 MB at 64^3 and 151 MB at 128^3, RESIDENT for life since

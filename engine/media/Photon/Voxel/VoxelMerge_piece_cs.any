@@ -39,14 +39,15 @@
 #define VOXEL_MERGE_SCALE 4096.0f
 #define VOXEL_MERGE_CLAMP 16.0f
 
-	/// ONE VOXEL'S EIGHTEEN ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
-	/// z*18+0..3 (rgba), RAW normal sum at +4..6 (xyz, two's complement),
+	/// ONE VOXEL'S NINETEEN ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
+	/// z*19+0..3 (rgba), RAW normal sum at +4..6 (xyz, two's complement),
 	/// emissive sum at +7..9 (rgb), FOLDED normal sum at +10..12 (xyz), the
 	/// ROUGHNESS sum at +13 (PHOTON-WRITER-1), the PER-HALF-AXIS COVERAGE sums
 	/// packed into +14 (the faces looking +x, +y, +z) and +15 (looking -x, -y, -z)
 	/// (PHOTON-VOXEL-3/-4, THE DIRECTIONAL COVERAGE below) and the matching
 	/// POSITION-WEIGHTED sums into +16 and +17 (PHOTON-VOXEL-4, THE SURFACE POSITION
-	/// below). Eighteen because only eighteen carry anything — a fourth
+	/// below), and the NON-CASTERS' AREA into +18 (FAR-SUN-1, THE CASTER SHARE below):
+	/// nineteen. Nineteen because only nineteen carry anything — a fourth
 	/// channel on the three vectors would be 25 MB read and written for nothing
 	/// at 128^3.
 	/// Interleaved rather than stacked planes so the shader needs no knowledge of
@@ -70,7 +71,21 @@
 	/// more per 64^3 volume, resident.
 	INLINE uint3 voxelMergeUvw( uint3 voxelCel, uint chan )
 	{
-		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 18u + chan );
+		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 19u + chan );
+	}
+
+	/// THE CASTER SHARE (FAR-SUN-1). Every surface is in the store - it bounces light whether
+	/// or not it casts a shadow - but only a shadow CASTER may stop a light's march (the light
+	/// injection's jahInjectVisibility), exactly as only a caster is drawn into the shadow maps
+	/// (GpuScene.h kGpuCaster: castShadow AND a caster channel, the one set both read). Kept as
+	/// the share of the voxel's area that CASTS, 1 - non-casters / all, in both SURFACE POSITION
+	/// halves' alpha (16 bits, otherwise unused; the coverage's alpha is two bits): 1 for an all-caster voxel, which is every voxel of a scene
+	/// whose objects all cast, so that march's arithmetic is the pre-lane one bit for bit. A
+	/// voxel saturating both sums (16 full voxels of area) reads its share from the saturated
+	/// pair - a ceiling only a dense foliage voxel reaches.
+	INLINE float voxelMergeCasterShare( uint nonCaster, uint total )
+	{
+		return total > 0u ? 1.0f - min( float( nonCaster ), float( total ) ) / float( total ) : 1.0f;
 	}
 
 	/// THE TWO NORMAL SUMS, AND WHY THERE ARE TWO.
