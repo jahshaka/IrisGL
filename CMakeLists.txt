@@ -107,6 +107,14 @@ endif()
 if(NOT _assimp_patch_result EQUAL 0)
     message(FATAL_ERROR "assimp patches could not be applied — see above")
 endif()
+# THE PATCH FILES ARE A CONFIGURE INPUT (STAGE-CLOSE-TRIAGE-1 round 6, read 6 I2): the stack is
+# applied by the execute_process above, which only runs at configure — so a pin bump that changes
+# ONLY a patch file (or adds one) must re-run CMake, or a configured tree keeps building the
+# previously applied assimp. CONFIGURE_DEPENDS re-globs the directory at every build (a new or
+# removed patch), and each listed file's edit re-runs the configure.
+file(GLOB _assimp_patch_files CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/assimp-patches/*.patch")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_assimp_patch_files})
 
 add_subdirectory_with_folder("Dependencies/Assimp" thirdparty/assimp)
 
