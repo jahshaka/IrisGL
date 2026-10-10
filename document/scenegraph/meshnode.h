@@ -201,9 +201,14 @@ public:
     /// SkeletonInstance that the engine poses every frame, and a static Item is
     /// not in the per-frame bounds list at all — the character would render at
     /// its bind-pose bounds and be culled wrong. Sockets ride skinned nodes too.
+    /// A node WITHOUT a mesh is never static-eligible (STAGE-CLOSE-TRIAGE-1 P1): there is nothing on
+    /// it to be static about, and a mesh that arrives later — an import's bake landing, a reimport —
+    /// may bring a skeleton, whose skinned Item the engine always builds SCENE_DYNAMIC. A skinned
+    /// mesh is never eligible either (the engine's memory-manager constraint). setMesh re-derives
+    /// the classification when either presence flips.
     bool isStaticEligible() const override
     {
-        return !skeleton && SceneNode::isStaticEligible();
+        return !mesh.isNull() && !skeleton && SceneNode::isStaticEligible();
     }
 
     /// MOBILITY rule 1 for a mesh: a rig WITH A CLIP moves
