@@ -173,12 +173,38 @@ bool MeshNode::setPropertyValue(QString valueName, const QVariant &value)
 // reference the document should store.)
 void MeshNode::setMesh(MeshPtr mesh)
 {
+    const bool hadMesh = !this->mesh.isNull();
+    const bool hadSkeleton = !skeleton.isNull();
     this->mesh = mesh;
     adoptSkeletonFromMesh();
     // CONTENT (DIRTY_SET_MIRROR_SPEC §3.1). Nothing reported a mesh or
     // material swap before the dirty set — the mirror noticed one by comparing
     // the pointers it kept, once per node per frame, forever.
     notifyChanged(NodeChange::Content);
+    // THE CLASSIFICATION FOLLOWS THE CONTENT (STAGE-CLOSE-TRIAGE-1 P1). Static
+    // eligibility depends on the mesh and its skeleton (isStaticEligible), so
+    // when either presence flips the node is re-derived HERE, before the mirror
+    // attaches the new geometry: a node that sat static with no mesh (or with a
+    // static mesh) and now carries a skeleton is DEMOTED — the engine builds a
+    // skinned Item SCENE_DYNAMIC and Ogre's attachObject throws on a static node,
+    // leaving the Item half-attached (an import's bake landing on a placed node,
+    // a reimport that turns a model skinned) — and a node that just became
+    // eligible is classified the way a placement classifies it
+    // (applyStaticDefaults). Only for a node in a scene: a reader building a
+    // subtree classifies the whole load once at its end.
+    // The demotion is a CLASSIFICATION switch (graph::setStatic), not rule 4's
+    // transform-write demotion: it is not counted in graph::staticDemotions, so
+    // it does not arm the mirror's settle — and needs none, because a skinned or
+    // meshless node is never eligible to be promoted back.
+    const bool presenceFlipped =
+        hadMesh != !this->mesh.isNull() || hadSkeleton != !skeleton.isNull();
+    if (presenceFlipped && getScene()) {
+        if (!isStaticEligible()) {
+            if (isStaticInGraph()) _applyStaticHint(false);
+        } else {
+            applyStaticDefaults();
+        }
+    }
 }
 
 // GPU_SKINNING_SPEC §7. The mesh asset's skeleton is the rig template and is

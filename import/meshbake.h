@@ -102,6 +102,7 @@ For more information see the LICENSE file
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <atomic>
 #include <functional>
 #include <memory>
 
@@ -524,16 +525,25 @@ public:
                                 const ImportTransform &xf = ImportTransform());
 
     /// IrisGL-internal form (a complete aiScene needs assimp's headers).
+    ///
+    /// `cancel` (STAGE-CLOSE-TRIAGE-1 F5): when it reads true the bake stops at
+    /// its next cancel point — between meshes, before the stages, before each
+    /// stage task on the pool — and answers an invalid model (logged
+    /// "cancelled"). A cancel point changes no output: a bake that is not
+    /// cancelled is the same bytes.
     static Model buildFromScene(const aiScene *scene, const QString &filePath,
                                 const QString &fingerprint,
                                 const QString &extractDir = QString(),
-                                const ImportTransform &xf = ImportTransform());
+                                const ImportTransform &xf = ImportTransform(),
+                                const std::atomic<bool> *cancel = nullptr);
 
     /// Parse `filePath` and bake it. Used by the lazy re-bake of an existing
-    /// library, where no parse is in flight.
+    /// library, where no parse is in flight. `cancel` also reaches assimp's
+    /// parse (a ProgressHandler whose Update() answers false aborts ReadFile).
     static Model buildFromFile(const QString &filePath, const QString &fingerprint,
                                const QString &extractDir = QString(),
-                               const ImportTransform &xf = ImportTransform());
+                               const ImportTransform &xf = ImportTransform(),
+                               const std::atomic<bool> *cancel = nullptr);
 
     /// Deterministic: the same Model always serializes to the same bytes
     /// (assets.checkConsistency re-derives the object set and compares oids).
@@ -578,7 +588,7 @@ private:
     /// an invalid model (a bake that throws is no bake).
     static Model buildFromSceneUnguarded(const aiScene *scene, const QString &filePath,
                                          const QString &fingerprint, const QString &extractDir,
-                                         const ImportTransform &xf);
+                                         const ImportTransform &xf, const std::atomic<bool> *cancel);
 };
 
 /// A read clip bake, shared (Studio's MeshBakeStore::loadClip).

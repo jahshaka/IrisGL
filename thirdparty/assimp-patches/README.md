@@ -39,11 +39,11 @@ stop. `--fuzz=0` matches git's strictness (patch's default fuzz of 2 would
 apply 0004 onto a rewritten target line). GNU `patch` therefore has to exist on
 a box that builds from a tarball; a git checkout needs only git.
 
-**Reproducibility (proved 2026-09-10):** the nine patches below, applied in
-order to the pristine pin `392a658f9` (v6.0.5), produce the eight patched files
+**Reproducibility (proved 2026-09-10; 0010 added 2026-10-10):** the patches below, applied in
+order to the pristine pin `392a658f9` (v6.0.5), produce the nine patched files
 byte-for-byte — verified by both appliers on a clean clone against a configured
 tree, and by a clean-submodule clone configured and built from scratch. The
-eight `M` lines `git -C irisgl/thirdparty/assimp status` shows in every
+nine `M` lines `git -C irisgl/thirdparty/assimp status` shows in every
 configured tree are this state and nothing else; `git -C irisgl/thirdparty/assimp
 checkout -- .` followed by a reconfigure recreates them exactly.
 
@@ -81,6 +81,7 @@ whether or not we currently carry a patch.
 | 0007 | `0007-obj-word-buffer-stack-overflow.patch` — OBJ `copyNextWord` copied tokens into a fixed 4096-byte member and walked past the buffer end on a trailing `\` | Backport of upstream `0404c875` (PR #6714), source hunks only (see the patch header). |
 | 0008 | `0008-gltf2-embedded-texture-mimetype-null-deref.patch` — glTF2 `ImportEmbeddedTextures` computed `strchr(...) + 1` before its null check | Backport of upstream `24bd7ee6` (PR #6733). |
 | 0009 | `0009-parsingutils-tokenmatchi-past-terminator.patch` — `TokenMatchI` stepped one past the terminator for a token at end of buffer | Backport of upstream `23fac9e7` (PR #6737), source hunk only. |
+| 0010 | `0010-importer-progress-handler-cancel.patch` — `Importer::ReadFile` / `ApplyPostProcessing` honour `ProgressHandler::Update()` answering false (the documented abort contract nothing in the tree read): checked after the format's read and before each post-processing step; the partial scene is freed and the import answers nullptr with the reason. MeshBake's bake cancel at quit/reset (STAGE-CLOSE-TRIAGE-1) | **Ours**, not upstream. Keep across pin bumps unless upstream starts honouring the return value. |
 
 0002–0006 are the five post-pin CVE fixes the 2026-09 deep audit found missing
 (all in importers we compile: FBX, glTF2, OBJ, Collada, PostProcessing);
@@ -94,3 +95,9 @@ Related, and not a patch: `irisgl/CMakeLists.txt` defines `ASSIMP_BUILD_DEBUG`
 for assimp's own objects in Debug builds. Without it every `ai_assert` in the
 library — ~1,900 bounds and invariant checks on parsed file content — expands to
 nothing, which is how CVE-2025-70067's "asserted" `strcpy` was live end to end.
+
+**An EDITED patch in a configured tree.** The patch files (and `cmake/ApplyVendorPatches.cmake`) are
+configure inputs, so changing one re-runs CMake, which re-applies the stack. If the tree still carries
+the patch's OLD version, the new one neither applies nor reverse-applies and the configure stops FATAL
+("assimp patches could not be applied"). The remedy: `git -C thirdparty/assimp checkout .` (drop the
+applied stack), then reconfigure — the whole stack applies fresh.
