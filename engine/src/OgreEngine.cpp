@@ -22,6 +22,8 @@
 #include <dlfcn.h>
 #if defined(__linux__)
 #include <link.h>   // dl_iterate_phdr: the layer libraries a process loaded (validation())
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>   // _dyld_image_count / _dyld_get_image_name: the same walk on the Mac
 #endif
 #include <set>
 #include <unistd.h>
@@ -3464,6 +3466,14 @@ ValidationStatus OgreEngine::validation() const {
                   namesValidation(std::getenv("VK_LOADER_LAYERS_ENABLE"));
 #if defined(__linux__)
     dl_iterate_phdr(collectLayerLibrary, &s.layers);
+#elif defined(__APPLE__)
+    for (uint32_t i = 0, n = _dyld_image_count(); i < n; ++i) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name) continue;
+        const std::string path(name);
+        const std::string base = path.substr(path.find_last_of('/') + 1);
+        if (base.find("VkLayer_") != std::string::npos) s.layers.push_back(base);
+    }
 #endif
     // THE LAYER IS LOADED: the loader maps VkLayer_khronos_validation only when an instance enables
     // it — the readout every build has, ray query or not (TESTING-CLEANUP-2 fix round).
