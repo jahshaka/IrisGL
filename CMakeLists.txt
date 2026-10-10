@@ -114,7 +114,10 @@ endif()
 # removed patch), and each listed file's edit re-runs the configure.
 file(GLOB _assimp_patch_files CONFIGURE_DEPENDS
      "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/assimp-patches/*.patch")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_assimp_patch_files})
+# ...and the script that applies them: it runs through `cmake -P`, so CMake does not see it as an input
+# either (read 7 I2).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_assimp_patch_files}
+             "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyVendorPatches.cmake")
 
 add_subdirectory_with_folder("Dependencies/Assimp" thirdparty/assimp)
 
