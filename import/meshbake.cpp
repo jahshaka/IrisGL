@@ -49,6 +49,7 @@ For more information see the LICENSE file
 #include <QSaveFile>
 
 #include "assimp/Importer.hpp"
+#include "assimp/ProgressHandler.hpp"
 #include "assimp/scene.h"
 
 // ATOM stage 1 (SPECS/NANITE_SPEC.md §7): the LOD chain is built HERE, once, at
@@ -5598,6 +5599,29 @@ MeshBake::Model MeshBake::buildFromScene(const SceneSource &source, const QStrin
 namespace
 {
 
+/// A CANCELLED BAKE (STAGE-CLOSE-TRIAGE-1 F5): thrown at a cancel point, on the caller's thread or on
+/// a pool thread (bakepool rethrows it on the caller), and answered by buildFromScene with an invalid
+/// model. Never thrown when the flag stays false, so an uncancelled bake is unchanged.
+struct BakeCancelled : std::exception
+{
+    const char *what() const noexcept override { return "cancelled"; }
+};
+inline void cancelPoint(const std::atomic<bool> *cancel)
+{
+    if (cancel && cancel->load(std::memory_order_relaxed)) throw BakeCancelled();
+}
+/// The parse's cancel point: assimp calls Update() through ReadFile and its post-processing, and a
+/// false answer aborts the read (ReadFile returns null). The Importer owns and deletes it.
+class CancelProgress : public Assimp::ProgressHandler
+{
+public:
+    explicit CancelProgress(const std::atomic<bool> *cancel) : mCancel(cancel) {}
+    bool Update(float) override { return !(mCancel && mCancel->load(std::memory_order_relaxed)); }
+
+private:
+    const std::atomic<bool> *mCancel;
+};
+
 /// EVERY MESH'S PRODUCTS, CONCURRENTLY (IMPORT-SPEED-1). Per mesh, two chains of
 /// work that share nothing but the mesh's read-only level 0:
 ///
@@ -5619,7 +5643,8 @@ namespace
 /// contain a child's, is the bake correcting its own measurement, and a count that
 /// is suddenly large is the thing to see (shipped content: 0-3 per mesh, 17 spheres
 /// on the dragon).
-void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards)
+void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards,
+                const std::atomic<bool> *cancel)
 {
     using Clock = std::chrono::steady_clock;
     const auto msSince = [](Clock::time_point t0) {
@@ -5639,16 +5664,20 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards)
             const MeshPtr &mesh = model.meshes.at(int(i));
             MeshBake::Model::StageMs &ms = model.stageMs[int(i)];
             if (task < meshes) {
+                cancelPoint(cancel);
                 Clock::time_point t = Clock::now();
                 MeshBake::buildLodChain(mesh);
                 ms.lodChain = msSince(t);
+                cancelPoint(cancel);
                 t = Clock::now();
                 MeshBake::buildCards(mesh, maxCards);
                 ms.cards = msSince(t);
+                cancelPoint(cancel);
                 t = Clock::now();
                 MeshBake::buildSdf(mesh);
                 ms.sdf = msSince(t);
             } else {
+                cancelPoint(cancel);
                 const Clock::time_point t = Clock::now();
                 MeshBake::buildClusterDag(mesh, &dagStats[i]);
                 ms.dag = msSince(t);
@@ -5704,7 +5733,7 @@ QString MeshBake::Model::stageSummary() const
 
 MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &filePath,
                                          const QString &fingerprint, const QString &extractDir,
-                                         const ImportTransform &xf)
+                                         const ImportTransform &xf, const std::atomic<bool> *cancel)
 {
     // A BAKE THAT THROWS IS NO BAKE (IMPORT-SPEED-1 F1): an out-of-memory on a huge
     // asset, or anything a stage throws on a pool thread (rethrown here by
@@ -5712,7 +5741,10 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
     // import keeps its source and the open path parses instead, as for any bake
     // that could not be written. Never an exception out of the import's worker.
     try {
-        return buildFromSceneUnguarded(scene, filePath, fingerprint, extractDir, xf);
+        return buildFromSceneUnguarded(scene, filePath, fingerprint, extractDir, xf, cancel);
+    } catch (const BakeCancelled &) {
+        irisLog(QStringLiteral("mesh bake: %1 cancelled").arg(QFileInfo(filePath).fileName()));
+        return Model();
     } catch (const std::exception &e) {
         irisLog(QStringLiteral("mesh bake: %1 could not be baked (%2); the open path will parse it instead")
                     .arg(QFileInfo(filePath).fileName(), QString::fromLocal8Bit(e.what())));
@@ -5727,7 +5759,7 @@ void MeshBake::failBakeAfterChunksForTest(int chunks) { bakepool::Pool::failAfte
 
 MeshBake::Model MeshBake::buildFromSceneUnguarded(const aiScene *scene, const QString &filePath,
                                                   const QString &fingerprint, const QString &extractDir,
-                                                  const ImportTransform &xf)
+                                                  const ImportTransform &xf, const std::atomic<bool> *cancel)
 {
     Model model;
     if (!scene || scene->mNumMeshes == 0) return model;
@@ -5750,11 +5782,13 @@ MeshBake::Model MeshBake::buildFromSceneUnguarded(const aiScene *scene, const QS
         // geometry; the same two lines are what MeshNode::loadAsSceneFragment
         // does, because the bake and the parse fallback have to agree node for
         // node (tests/meshbake compares the two trees).
+        cancelPoint(cancel);
         auto mesh = MeshPtr(new Mesh(const_cast<aiMesh *>(m), xf.skeleton));
         if (m->HasBones() && xf.skeleton) mesh->setSkeleton(Mesh::extractSkeleton(m, scene));
         model.meshes.append(mesh);
     }
-    bakeStages(model, filePath, xf.maxCards);
+    cancelPoint(cancel);   // between the mesh conversion and the stages
+    bakeStages(model, filePath, xf.maxCards, cancel);
     for (unsigned i = 0; i < scene->mNumMeshes; ++i) {
         const aiMesh *m = scene->mMeshes[i];
         const unsigned aiMatIndex = m->mMaterialIndex;
@@ -5848,19 +5882,25 @@ MeshBake::Model MeshBake::buildFromSceneUnguarded(const aiScene *scene, const QS
 }
 
 MeshBake::Model MeshBake::buildFromFile(const QString &filePath, const QString &fingerprint,
-                                        const QString &extractDir, const ImportTransform &xf)
+                                        const QString &extractDir, const ImportTransform &xf,
+                                        const std::atomic<bool> *cancel)
 {
     Assimp::Importer importer;
+    // THE PARSE'S CANCEL POINT (F5): the importer owns the handler.
+    if (cancel) importer.SetProgressHandler(new CancelProgress(cancel));
     // The lazy re-bake's parse, through the choke point with the ASSET's
     // import transform — the bake IS the transformed geometry, so a re-bake
     // that dropped the transform would quietly un-scale a library
     // (import/scenesource.h).
     const aiScene *scene = readSceneFile(importer, filePath, iris::ImportFlags::Canonical, xf);
     if (!scene) {
-        irisLog("mesh bake: assimp could not read " + filePath);
+        if (cancel && cancel->load())
+            irisLog(QStringLiteral("mesh bake: %1 cancelled during its parse").arg(QFileInfo(filePath).fileName()));
+        else
+            irisLog("mesh bake: assimp could not read " + filePath);
         return Model();
     }
-    return buildFromScene(scene, filePath, fingerprint, extractDir, xf);
+    return buildFromScene(scene, filePath, fingerprint, extractDir, xf, cancel);
 }
 
 // ---- serialize / deserialize ----------------------------------------------
