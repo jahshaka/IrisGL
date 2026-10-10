@@ -352,9 +352,9 @@ bool OgreScene::gatherAndBuild(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *v
     bindGeometrySource(voxelizer);
     // THE REFUSAL HOOK (gi.voxel_resident case 5): the state a device with no buffer
     // device addresses is in for the whole scene - no geometry the voxeliser can
-    // read - which must build (an empty volume) and not crash. Read per build, like
-    // the cascade fault hooks.
-    if (std::getenv("JAH_VCT_REFUSE_GEOMETRY")) {
+    // read - which must build (an empty volume) and not crash. The registered arm
+    // `gi.refuseGeometry`, read per build like the cascade fault arms.
+    if (mEngine && mEngine->armRegistry().on(ArmId::GiRefuseGeometry)) {
         voxelizer->setInstanceSource(nullptr, nullptr);
         feed.noteEmpty();
     } else if (!runVoxelGather(feed, voxelizer, in))
@@ -4905,19 +4905,15 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
     const auto attempt = [&]() -> bool {
         JAH_TRY {
             giUpdateSceneGraph(mSceneMgr);
-            // FAULT INJECTION, for the suite that proves the revert path (F2).
-            // The same shape as JAH_TEXTURE_WAIT_FAULT (OgreEngine.cpp): read
-            // per rebuild rather than cached, because the test arms it between
-            // frames — a getenv against a rebuild that costs milliseconds is
-            // not a cost anyone can measure. The region has already moved at
-            // this point, which is exactly the state a real `build()` throw
-            // leaves behind.
-            if (const char *fault = std::getenv("JAH_GI_CASCADE_FAULT")) {
-                if (std::strtol(fault, nullptr, 10) == (long)idx)
-                    OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
-                                "JAH_GI_CASCADE_FAULT: forced cascade build failure",
-                                "OgreScene::rebuildCascade");
-            }
+            // FAULT INJECTION, for the suite that proves the revert path (F2): the
+            // registered arm `gi.cascadeFault` (the test sets it between frames;
+            // it was an environment read per rebuild). The region has already
+            // moved at this point, which is exactly the state a real `build()`
+            // throw leaves behind.
+            if (mEngine && mEngine->armRegistry().value(ArmId::GiCascadeFault) == double(idx))
+                OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
+                            "gi.cascadeFault: forced cascade build failure",
+                            "OgreScene::rebuildCascade");
             // THE FEED: the gather over the GPU scene, then the build over what it
             // wrote. The readings (items, levels, triangles) are its readout,
             // counted on the device and taken by giStatus.
@@ -4929,12 +4925,10 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
             // throw BEFORE the volumes describe the new placement and everything
             // below it AFTER, and the two failure paths are opposites - one puts
             // the placement back, the other keeps it. Both are proven by the suite.
-            if (const char *fault = std::getenv("JAH_GI_CASCADE_FAULT_POST")) {
-                if (std::strtol(fault, nullptr, 10) == (long)idx)
-                    OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
-                                "JAH_GI_CASCADE_FAULT_POST: forced failure after the build",
-                                "OgreScene::rebuildCascade");
-            }
+            if (mEngine && mEngine->armRegistry().value(ArmId::GiCascadeFaultPost) == double(idx))
+                OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
+                            "gi.cascadeFaultPost: forced failure after the build",
+                            "OgreScene::rebuildCascade");
             // A RE-VOXELISED CASCADE IS A NEW VOXEL STATE, and the one-writer
             // latch is per state: an injection earlier in this writer frame (a
             // from-scratch build the host asked for between frames, at the
@@ -5251,7 +5245,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // the tick's own order (cascades outermost-first), and one sweep IS the
     // fixed point (kAtRestSweeps, EnginePrivate.h; gi.chain_converge).
     //
-    // `JAHSHAKA_GI_NO_REBUILD_SETTLE` stands the rule down for measurement:
+    // the arm `gi.rebuildSettle` (0) stands the rule down for measurement:
     // gi.chain_converge drives it so the suite proves the defect it guards against rather than
     // asserting a number that happens to pass (13.00/255 with it set, 0.00
     // without, measured on that suite's room).
@@ -5277,7 +5271,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         mGiTickOwed = GiTickOwed::None;
         runChainTick(!rest);
     }
-    if (!spent && mGiSettleStepsOwed > 0 && !std::getenv("JAHSHAKA_GI_NO_REBUILD_SETTLE")) {
+    if (!spent && mGiSettleStepsOwed > 0 && (!mEngine || mEngine->armRegistry().on(ArmId::GiRebuildSettle))) {
         bool pending = false;
         for (const VctCascade &c : mVctCascades)
             if (c.pending) { pending = true; break; }
@@ -6287,19 +6281,22 @@ void OgreScene::buildIrradianceField() {
 
     JAH_TRY {
         Ogre::PhotonIrradianceFieldSettings settings;
-        // `JAHSHAKA_GI_FIELD_RAYS` (rays per depth texel), `_SAMPLES` (the target
-        // sample count) and `_STATIC` (no rotation) are MEASUREMENT switches, like
-        // `JAHSHAKA_GI_FIELD_NO_SCROLL`: gi.field_alias drives the arms in one process.
-        if (const char *r = std::getenv("JAHSHAKA_GI_FIELD_RAYS")) {
-            const int n = std::atoi(r);
+        // The registered arms `gi.fieldRays` (rays per depth texel), `gi.fieldSamples`
+        // (the target sample count) and `gi.fieldStatic` (no rotation) are MEASUREMENT
+        // switches, like `gi.fieldScroll`: gi.field_thin_wall drives them in one process.
+        // Read at the build, LATCHED at the top of a frame (a test sets them and steps a
+        // frame before it builds); 0 is the shipped value.
+        const ArmRegistry *arms = mEngine ? &mEngine->armRegistry() : nullptr;
+        if (arms) {
+            const int n = int(arms->value(ArmId::GiFieldRays));
             if (n >= 1 && n <= 7) settings.mNumRaysPerPixel = Ogre::uint16(n);   // <= 1024 rays a probe
         }
         Ogre::uint32 targetSamples = kIfdTargetSamples;
-        if (const char *k = std::getenv("JAHSHAKA_GI_FIELD_SAMPLES")) {
-            const int n = std::atoi(k);
+        if (arms) {
+            const int n = int(arms->value(ArmId::GiFieldSamples));
             if (n >= 1 && n <= 4096) targetSamples = Ogre::uint32(n);
         }
-        const bool rotateRays = std::getenv("JAHSHAKA_GI_FIELD_STATIC") == nullptr;
+        const bool rotateRays = !(arms && arms->on(ArmId::GiFieldStatic));
         // A PAUSED budget integrates nothing progressively, so its target is the one
         // sample every event's own pass writes inline: it owes nothing after it.
         if (mGi.updateBudget <= 0) targetSamples = 1u;

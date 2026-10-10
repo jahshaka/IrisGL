@@ -2781,6 +2781,13 @@ public:
     /// Every registered arm: its name, the value the current frame reads, its
     /// default, its range and what it changes.
     virtual std::vector<ArmInfo> arms() const = 0;
+
+    // ---- THE VALIDATION LAYER'S PROOF (TESTING-CLEANUP-2 H4; Types.h ValidationStatus) ----
+    /// Read now: was the Khronos validation layer asked for, is it live on this engine's
+    /// device, and which layer libraries did the loader load. Every row that runs under the
+    /// layer asserts `requested && active` — a layered row whose layer never loaded is
+    /// otherwise indistinguishable from a clean one.
+    virtual ValidationStatus validation() const = 0;
     /// What the monitor is doing, including the four zero-cost assertions and
     /// the state of both GPU-timing off-switches.
     virtual MonitorStatus monitorStatus() const = 0;
