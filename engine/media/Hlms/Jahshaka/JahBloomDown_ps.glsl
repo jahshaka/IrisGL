@@ -52,13 +52,31 @@ out vec4 fragColour;
 float gInvLum;
 #endif
 
+#ifdef JAH_BLOOM_PREFILTER
+// Finite by the BITS (exponent all ones = NaN or infinity): x == x is no NaN
+// test in our shaders, and max( NaN, 0 ) is undefined in SPIR-V - one NaN
+// scene pixel would poison a whole 1/64-res texel into a black square.
+bool jahFinite( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
+
+// The prefilter's ceiling. R11G11B10_FLOAT tops out at 65024, and the ladder
+// SUMS: the up passes add each level into the one above, so level 1 holds up
+// to five levels' worth and the resolve adds level 0 to that - six levels of
+// one highlight. Every filter on the way is a weighted MEAN (13-tap box,
+// tent), so a tap capped at 65024 / 6 = 10837.3 keeps every stored sum
+// finite: 5 x 10837 = 54185 in level 1, 6 x 10837 = 65022 in the resolve.
+const float kJahBloomCap = 10837.0;
+#endif
+
 vec3 tap( vec2 uv )
 {
 	vec3 c = texture( jahScreenSampler( sourceTexture, bilinearSampler ), jahScreenUv( uv ) ).xyz;
 #ifdef JAH_BLOOM_PREFILTER
-	// Finite and inside the ladder's format (R11G11B10_FLOAT tops out at
-	// 65024): a scene value beyond it would store as infinity and smear.
-	c = min( max( c * gInvLum, vec3( 0.0 ) ), vec3( 65000.0 ) );
+	// Scrub the exposed tap (NaN and infinity to zero, by the bits), then keep
+	// it inside the ladder's format (kJahBloomCap).
+	c *= gInvLum;
+	c = vec3( jahFinite( c.x ) ? c.x : 0.0, jahFinite( c.y ) ? c.y : 0.0,
+			  jahFinite( c.z ) ? c.z : 0.0 );
+	c = min( max( c, vec3( 0.0 ) ), vec3( kJahBloomCap ) );
 	const vec3 w = clamp( ( c - brightThreshold.xxx ) * brightThreshold.yyy, 0.0, 1.0 );
 	c *= w * w * ( 3.0 - 2.0 * w );
 #endif
