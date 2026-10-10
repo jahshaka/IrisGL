@@ -95,3 +95,9 @@ Related, and not a patch: `irisgl/CMakeLists.txt` defines `ASSIMP_BUILD_DEBUG`
 for assimp's own objects in Debug builds. Without it every `ai_assert` in the
 library — ~1,900 bounds and invariant checks on parsed file content — expands to
 nothing, which is how CVE-2025-70067's "asserted" `strcpy` was live end to end.
+
+**An EDITED patch in a configured tree.** The patch files (and `cmake/ApplyVendorPatches.cmake`) are
+configure inputs, so changing one re-runs CMake, which re-applies the stack. If the tree still carries
+the patch's OLD version, the new one neither applies nor reverse-applies and the configure stops FATAL
+("assimp patches could not be applied"). The remedy: `git -C thirdparty/assimp checkout .` (drop the
+applied stack), then reconfigure — the whole stack applies fresh.
