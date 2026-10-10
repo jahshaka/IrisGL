@@ -53,10 +53,13 @@ float gInvLum;
 #endif
 
 #ifdef JAH_BLOOM_PREFILTER
-// Finite by the BITS (exponent all ones = NaN or infinity): x == x is no NaN
-// test in our shaders, and max( NaN, 0 ) is undefined in SPIR-V - one NaN
+// NaN by the BITS (exponent all ones AND a non-zero mantissa): x == x is no
+// NaN test in our shaders, and max( NaN, 0 ) is undefined in SPIR-V - one NaN
 // scene pixel would poison a whole 1/64-res texel into a black square.
-bool jahFinite( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
+// Infinity is NOT scrubbed: the scene target is RGBA16F, so a +inf is an fp16
+// over-range write - saturated light, which must bloom (min() caps it at
+// kJahBloomCap); a -inf goes to 0 through max().
+bool jahIsNan( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) > 0x7F800000u; }
 
 // The prefilter's ceiling. R11G11B10_FLOAT tops out at 65024, and the ladder
 // SUMS: the up passes add each level into the one above, so level 1 holds up
@@ -71,11 +74,11 @@ vec3 tap( vec2 uv )
 {
 	vec3 c = texture( jahScreenSampler( sourceTexture, bilinearSampler ), jahScreenUv( uv ) ).xyz;
 #ifdef JAH_BLOOM_PREFILTER
-	// Scrub the exposed tap (NaN and infinity to zero, by the bits), then keep
-	// it inside the ladder's format (kJahBloomCap).
+	// Scrub the exposed tap (NaN to zero, by the bits), then keep it inside
+	// the ladder's format (kJahBloomCap; +inf lands on the cap).
 	c *= gInvLum;
-	c = vec3( jahFinite( c.x ) ? c.x : 0.0, jahFinite( c.y ) ? c.y : 0.0,
-			  jahFinite( c.z ) ? c.z : 0.0 );
+	c = vec3( jahIsNan( c.x ) ? 0.0 : c.x, jahIsNan( c.y ) ? 0.0 : c.y,
+			  jahIsNan( c.z ) ? 0.0 : c.z );
 	c = min( max( c, vec3( 0.0 ) ), vec3( kJahBloomCap ) );
 	const vec3 w = clamp( ( c - brightThreshold.xxx ) * brightThreshold.yyy, 0.0, 1.0 );
 	c *= w * w * ( 3.0 - 2.0 * w );
