@@ -107,7 +107,7 @@ void VoxelFeed::requestReadout() {
     // before copying (VulkanQueue::prepareForDownload), so the transfer sees what the
     // job wrote. INACCURATE TRACKING: the copy rides the frame's own submission - no
     // fence, no flush, no wait - and the ticket is done once that frame has finished
-    // on the device (harvest, polled at the frame head: 3 frames in flight).
+    // on the device (harvest, polled at the frame head: up to mDynamicBufferMultiplier frames).
     Ogre::RenderSystem *rs =
         Ogre::Root::getSingletonPtr() ? Ogre::Root::getSingleton().getRenderSystem() : nullptr;
     const std::uintptr_t before = monitor::queueSubmissionTag(rs);

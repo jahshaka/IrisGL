@@ -2083,6 +2083,15 @@ public:
     /// process as it does for a loss (no orderly teardown), saying which.
     virtual GpuFault gpuFault() const = 0;
 
+    /// A TEST DOOR (VOXEL-READOUT-1; never a mode): the renderer's CURRENT command
+    /// buffer, as an opaque tag. It changes exactly when the queue SUBMITS (a new
+    /// command buffer begins), and a call that waits for the device on Vulkan has to
+    /// submit first, so a tag unchanged across a call proves the call neither
+    /// submitted nor drained the queue - a structural no-wait test, in no time unit.
+    /// Valid between frames too (Ogre opens the next command buffer at every submit);
+    /// 0 = cannot tell (not the Vulkan renderer, or a lost device).
+    virtual unsigned long long queueSubmissionTag() const = 0;
+
     /// ADVANCES THE RENDERER'S RESOURCE BOOKKEEPING WITHOUT DRAWING ANYTHING
     /// (lane OPEN-FRAMES-1, 2026-09-15).
     ///

@@ -30,7 +30,7 @@
 // THE READOUT (A5b §3). What a rebuild voxelised is counted on the device, as it is
 // written, into a 32-word block, and read back through an AsyncTicket that is
 // REQUESTED AT THE NEXT FRAME'S START (never inside a rebuild: see markReadoutOwed)
-// and harvested when its transfer is done — never waited on, except by giStatus.
+// and harvested when its transfer is done — never waited on (giStatus included).
 // It is the truth the CPU prediction it replaces could only approximate.
 //
 // NO VULKAN HERE (the GPU scene's rule): the buffers are Ogre `UavBufferPacked`s,

@@ -4986,9 +4986,11 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
     monitor::noteCascadeRebuild();     // the frame's own "<= 1 per frame" counter
     // WHAT THIS CASCADE VOXELISED, not what the scene holds (audit D6, round-2
     // F1) - per cascade, so a capture can tell the outer cascade's work from the
-    // inner one's. A READING now, and so ONE REBUILD LATE: the gather's readout is
-    // collected without waiting (never a stall in the rebuild frame), so the row
-    // carries the enclosed count this cascade's PREVIOUS gather wrote.
+    // inner one's. A READING now, and so UP TO mDynamicBufferMultiplier FRAMES LATE:
+    // the gather's readout is collected without waiting (never a stall in the
+    // rebuild frame), so the row carries the enclosed count of the newest gather
+    // whose readout has LANDED - this cascade's previous gather, or an older one
+    // when rebuilds come faster than the frames in flight drain.
     if (c.feed) c.feed->harvest();
     work.setUnits(c.feed ? c.feed->reading().instances : 0u);
     return true;

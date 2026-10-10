@@ -8436,6 +8436,7 @@ public:
     void raiseFrameFault();
     bool deviceLost() const override;
     GpuFault gpuFault() const override;
+    unsigned long long queueSubmissionTag() const override;
     /// The render system's out-of-memory count (VulkanDevice::getOutOfMemoryFailures,
     /// the fork) and the last one's text; 0 / "" without the Vulkan render system.
     unsigned vulkanOomCount() const;

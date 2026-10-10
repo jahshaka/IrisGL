@@ -4404,7 +4404,8 @@ struct GiStatus {
         /// WHEN THE NUMBERS ABOVE WERE TAKEN (VOXEL-READOUT-1). `items`, `attached`,
         /// `voxelLevels`, `voxelTriangles`, `voxelRecords` and `voxelOverflow` are a
         /// READ-BACK of the gather, and a read-back lands a few frames after the
-        /// gather it reads (3 frames in flight): nothing waits for the device.
+        /// gather it reads (up to Ogre's mDynamicBufferMultiplier frames in flight):
+        /// nothing waits for the device.
         /// `voxelGathers` counts the gathers this cascade has run and
         /// `voxelReadingGather` is the one the numbers describe, so equal = the
         /// newest; a caller that needs that renders frames until they agree.

@@ -1665,6 +1665,10 @@ void OgreEngine::raiseFrameFault() {
 // ---------------------------------------------------------------------------
 bool OgreEngine::deviceLost() const { return mDeviceLost; }
 
+unsigned long long OgreEngine::queueSubmissionTag() const {
+    return (unsigned long long)monitor::queueSubmissionTag(mRoot ? mRoot->getRenderSystem() : nullptr);
+}
+
 // THE RESOURCE HALF OF A FRAME, ON ITS OWN (lane OPEN-FRAMES-1, 2026-09-15).
 //
 // WHAT A FRAME DOES THAT NOTHING ELSE DOES. Inside
