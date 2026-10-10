@@ -5614,6 +5614,11 @@ inline void cancelPoint(const std::atomic<bool> *cancel)
 /// honours it only through our patch 0010 (thirdparty/assimp-patches): after the format's read and
 /// before each post-processing step, freeing the partial scene (ReadFile returns null). A cancel
 /// raised DURING a format's read waits for that read to finish. The Importer owns and deletes it.
+/// KNOWN LIMIT (read 6 I1, accepted for STAGE-CLOSE-TRIAGE-1): assimp's format readers have no cancel
+/// point of their own, so a quit while a very large file is being READ (a Bistro-class FBX) waits for
+/// the read; past the shutdown's 20 s bound the forced-exit watchdog ends the process (exit 86). Nothing
+/// is committed in that case — the bake's temp output dies with the process. Closing it needs cancel
+/// checks inside each reader (a further assimp patch), not taken here.
 class CancelProgress : public Assimp::ProgressHandler
 {
 public:
