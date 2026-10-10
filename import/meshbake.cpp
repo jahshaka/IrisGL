@@ -5610,8 +5610,10 @@ inline void cancelPoint(const std::atomic<bool> *cancel)
 {
     if (cancel && cancel->load(std::memory_order_relaxed)) throw BakeCancelled();
 }
-/// The parse's cancel point: assimp calls Update() through ReadFile and its post-processing, and a
-/// false answer aborts the read (ReadFile returns null). The Importer owns and deletes it.
+/// The parse's cancel point: a false answer from Update() aborts the import — the vendored assimp
+/// honours it only through our patch 0010 (thirdparty/assimp-patches): after the format's read and
+/// before each post-processing step, freeing the partial scene (ReadFile returns null). A cancel
+/// raised DURING a format's read waits for that read to finish. The Importer owns and deletes it.
 class CancelProgress : public Assimp::ProgressHandler
 {
 public:

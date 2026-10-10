@@ -1,0 +1,73 @@
+Importer: a ProgressHandler whose Update() answers false cancels the import
+
+Jahshaka's own change (not upstream), STAGE-CLOSE-TRIAGE-1 round 5.
+
+The bug
+-------
+ProgressHandler::Update() documents "return false to abort loading at the next
+possible occasion (loaders and Assimp are generally allowed to perform all
+needed cleanup tasks prior to returning control to the caller)", but nothing in
+the pinned tree reads its return: Importer::ReadFile calls the void
+UpdateFileRead() and ApplyPostProcessing the void UpdatePostProcess(), which
+discard Update()'s answer. A bake cancelled at quit (MeshBake's progress
+handler) therefore waited out the whole parse and every post-processing step;
+past the app's 20 s shutdown bound that is a forced exit.
+
+The fix
+-------
+Two cancel points honouring the documented contract:
+  * ReadFile, once the format's read returned a scene, before any
+    post-processing;
+  * ApplyPostProcessing, before each post-processing step.
+On a false answer the partial scene is freed, the import returns nullptr and
+GetErrorString() names the cancel. A handler that never answers false (the
+default one) changes nothing: one extra Update(-1) call per step.
+
+diff --git a/code/Common/Importer.cpp b/code/Common/Importer.cpp
+index 684419b94..b82e81ce3 100644
+--- a/code/Common/Importer.cpp
++++ b/code/Common/Importer.cpp
+@@ -709,6 +709,18 @@ const aiScene* Importer::ReadFile( const char* _pFile, unsigned int pFlags) {
+         pimpl->mScene = imp->ReadFile( this, pFile, pimpl->mIOHandler);
+         pimpl->mProgressHandler->UpdateFileRead( fileSize, fileSize );
+ 
++        // A PROGRESS HANDLER THAT ANSWERS false CANCELS THE IMPORT (the contract
++        // ProgressHandler::Update documents): checked once the format's read is
++        // done, before any post-processing. The partial scene is freed.
++        bool cancelled = false;
++        if (pimpl->mScene && !pimpl->mProgressHandler->Update(-1.f)) {
++            delete pimpl->mScene;
++            pimpl->mScene = nullptr;
++            pimpl->mErrorString = "import cancelled by the progress handler (after the read)";
++            ASSIMP_LOG_WARN(pimpl->mErrorString);
++            cancelled = true;
++        }
++
+         if (profiler) {
+             profiler->EndRegion("import");
+         }
+@@ -751,7 +763,7 @@ const aiScene* Importer::ReadFile( const char* _pFile, unsigned int pFlags) {
+             ApplyPostProcessing(pFlags & (~aiProcess_ValidateDataStructure));
+         }
+         // if failed, extract the error string
+-        else if( !pimpl->mScene) {
++        else if( !pimpl->mScene && !cancelled) {
+             pimpl->mErrorString = imp->GetErrorText();
+             pimpl->mException = imp->GetException();
+         }
+@@ -834,6 +846,15 @@ const aiScene* Importer::ApplyPostProcessing(unsigned int pFlags) {
+     for( unsigned int a = 0; a < pimpl->mPostProcessingSteps.size(); a++)   {
+         BaseProcess* process = pimpl->mPostProcessingSteps[a];
+         pimpl->mProgressHandler->UpdatePostProcess(static_cast<int>(a), static_cast<int>(pimpl->mPostProcessingSteps.size()) );
++        // A CANCEL BETWEEN POST-PROCESSING STEPS (see ReadFile): the partial
++        // scene is freed and the import answers nullptr with the reason.
++        if (!pimpl->mProgressHandler->Update(-1.f)) {
++            delete pimpl->mScene;
++            pimpl->mScene = nullptr;
++            pimpl->mErrorString = "import cancelled by the progress handler (post-processing)";
++            ASSIMP_LOG_WARN(pimpl->mErrorString);
++            break;
++        }
+         if( process->IsActive( pFlags)) {
+             if (profiler) {
+                 profiler->BeginRegion("postprocess");
