@@ -2085,9 +2085,11 @@ public:
 
     /// A TEST DOOR (VOXEL-READOUT-1; never a mode): the renderer's CURRENT command
     /// buffer, as an opaque tag. It changes exactly when the queue SUBMITS (a new
-    /// command buffer begins), and a call that waits for the device on Vulkan has to
-    /// submit first, so a tag unchanged across a call proves the call neither
-    /// submitted nor drained the queue - a structural no-wait test, in no time unit.
+    /// command buffer begins), so a tag unchanged across a call proves the call
+    /// neither submitted nor committed a command buffer - in no time unit. It does
+    /// NOT prove the call never waited: a blocking map of a ticket whose fence was
+    /// already submitted waits without moving the tag (gi.readout_async covers that
+    /// with its flush sentry and its landed-reading check, not with this tag).
     /// Valid between frames too (Ogre opens the next command buffer at every submit);
     /// 0 = cannot tell (not the Vulkan renderer, or a lost device).
     virtual unsigned long long queueSubmissionTag() const = 0;
