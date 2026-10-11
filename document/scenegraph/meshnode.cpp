@@ -193,9 +193,11 @@ void MeshNode::setMesh(MeshPtr mesh)
     // (applyStaticDefaults). Only for a node in a scene: a reader building a
     // subtree classifies the whole load once at its end.
     // The demotion is a CLASSIFICATION switch (graph::setStatic), not rule 4's
-    // transform-write demotion: it is not counted in graph::staticDemotions, so
-    // it does not arm the mirror's settle — and needs none, because a skinned or
-    // meshless node is never eligible to be promoted back.
+    // transform-write demotion — but _applyStaticHint(false) marks the node
+    // (Flags), so the mirror's settle stamps it and owes ONE rotation
+    // (SceneMirror::noteSettleWrite's cheap kind test passes a Mesh). That
+    // rotation applies the whole rule and leaves the node dynamic: a skinned or
+    // meshless node is never eligible to be promoted back. One walk, no loop.
     const bool presenceFlipped =
         hadMesh != !this->mesh.isNull() || hadSkeleton != !skeleton.isNull();
     if (presenceFlipped && getScene()) {

@@ -316,20 +316,25 @@ public:
     /// statistic (the engine has no wall clock; a node count gives the same
     /// settle on every machine). THE DERIVATION — spikes/mirror-settle-1/
     /// DERIVATION.txt, measured in the timing slot, Debug:
-    ///  * THE BOUND: a settle slice's sync <= 0.5 ms, 3 % of a 16.7 ms frame,
-    ///    at 50k nodes (scenegraph.benchmark's s.settle_slice series asserts
-    ///    it; mirror.settle_incremental reports its percentiles).
-    ///  * THE COST, measured (scenegraph.benchmark s.settle_slice, 50k, in the
-    ///    slot, 2026-10-11): a slice's MEDIAN is the still sync (~0.06 ms) +
-    ///    4.1 us per visited node (medians 0.256 / 0.326 / 0.584 ms at B = 48
-    ///    / 64 / 128), and its WORST is ~2x its median (0.508 / 0.641 ms at
-    ///    48 / 64: the tail of a Debug sync on a shared box, no event in it —
-    ///    the one event, Ogre's static pool growing inside a slice, 2.4 ms, is
-    ///    fixed on the fork: a static twin reserves with its dynamic sibling).
-    ///  * THE BUDGET: worst <= 0.5 ms -> median <= 0.25 ms -> B <= (0.25 -
-    ///    0.06) / 4.1 us = 46; B = 48 measured worst 0.508, so B = 32 (median
-    ///    ~0.19, worst ~0.38 ms predicted). 50,521 nodes settle in ~1,580
-    ///    slices (26 s at 60 Hz), 10k in ~5 s, 1k in ~0.5 s.
+    ///  * THE BOUND: a settle slice's sync costs <= 0.5 ms of the calling
+    ///    thread's CPU time, 3 % of a 16.7 ms frame, at every scale up to 50k
+    ///    (scenegraph.benchmark's s.settle_slice asserts its worst on the
+    ///    THREAD CPU clock and prints the wall series beside it, unasserted;
+    ///    mirror.settle_incremental's percentiles are WALL time, for the reader).
+    ///  * THE COST, measured (scenegraph.benchmark, 50k, in the slot,
+    ///    2026-10-11): a slice's median is the still sync (~0.06 ms) + 4.1 us
+    ///    per visited node (wall medians 0.256 / 0.326 / 0.584 ms at B = 48 /
+    ///    64 / 128). Ogre's static pool growing inside a slice (2.4 ms) was an
+    ///    event, fixed on the fork: a static twin reserves with its dynamic
+    ///    sibling.
+    ///  * THE BUDGET: B = 32 was chosen on WALL-CLOCK worsts (B = 48 read a
+    ///    wall worst of 0.508 ms; the wall worst runs ~2x the median, a tail of
+    ///    preemptions the CPU clock does not count), so it is conservative
+    ///    against the CPU bound: CPU worst at 50k 0.40-0.42 ms in three slot
+    ///    runs. 50,521 nodes settle in ~1,580 slices (26 s at 60 Hz), 10k in
+    ///    ~5 s, 1k in ~0.5 s.
+    ///  * ORDER IN sync(): the slice runs AFTER the walk / consumeDirty, so it
+    ///    only ever sees quiet clocks this sync's writes have already stamped.
     ///  * WHAT NOT SETTLING COSTS (u.unsettled_render vs the settled render,
     ///    50k): 27.4 vs 26.4 ms a frame.
     static constexpr quint32 kStaticSettleNodesPerSync = 32;
@@ -340,8 +345,12 @@ public:
     /// rotation also starts once the owe is this old; it promotes what is quiet
     /// and defers what is not (the deferred node owes the next one). Four
     /// quiet windows: a drag under two seconds owes one rotation after it
-    /// ends; a perpetual writer costs one rotation per two seconds + the walk,
-    /// each at most kStaticSettleNodesPerSync visits a sync.
+    /// ends. A PERPETUAL WRITER costs a CONTINUOUS walk while it lives: its
+    /// deferral re-owes early in each rotation, and a rotation of a big
+    /// document outlasts the wait (50k: ~1,580 syncs > 120), so the next
+    /// rotation starts as the last one ends — at 50k ~0.2 ms of CPU a sync
+    /// (the slice's median; ~0.13 ms over the still sync), kStaticSettleNodes-
+    /// PerSync visits a sync, for as long as the writer writes.
     static constexpr quint32 kStaticSettleMaxWaitSyncs = 4 * kStaticSettleFrames;
     /// Is a settle owed or part-way through the tree? A test drives syncs
     /// until this reads false instead of counting frames.

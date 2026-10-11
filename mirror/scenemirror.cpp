@@ -755,13 +755,7 @@ int SceneMirror::sync()
     // (mCharacterPieces / mSkinnedNodes are NOT reset here any more: they are
     // maintained on each entry's own transition — noteRigCounts — because a
     // still frame runs no walk to recount them. §3.7.)
-    // SCENE_STATIC RE-PROMOTION, ON SETTLE (MIRROR_SCALE lane, 2026-09-13;
-    // per node and incremental since MIRROR-SETTLE-1). Rule 4 (nodegraph.h)
-    // DEMOTES a static subtree on the first transform write, and that is
-    // right: re-running the static pass per frame of a drag is exactly the
-    // cost SCENE_STATIC exists to avoid. The settle is the other half — it puts
-    // a node back once it has stopped being written (runStaticSettle).
-    runStaticSettle();
+    // (SCENE_STATIC RE-PROMOTION runs AFTER the walk below — runStaticSettle.)
     // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2): the
     // simulated seconds the host's frame bought on the document's
     // SimulationClock (advanced before the sync) — whole 1/60 s steps, capped
@@ -876,14 +870,18 @@ int SceneMirror::sync()
         }
         mVerifying = false;
         mVerifyMaterialQuota = 0;
-        // A FULL WALK OWES A SETTLE ROTATION: it is a bind (every node reborn
-        // dynamic in this manager, hints replayed), a re-take, the play edge
-        // (soft mobility cleared) or an overflow — the classification has to be
-        // re-derived once the scene is quiet, whatever the change list said.
-        if (!mVerifyEverything || mFullWalkPending) {
-            for (iris::SceneNode *n : settleWrites) noteSettleWrite(n);
-            oweSettle(mSyncStamp + kStaticSettleFrames);
-        }
+        // THE CHANGE LIST'S WRITES STAMP THEIR QUIET CLOCKS ON EVERY FULL WALK —
+        // JAH_MIRROR_VERIFY=full included, where every sync is a full walk: a
+        // write dropped here would leave a dragged prop dynamic for the session
+        // in the mode that proves the mirror's equivalence (read 2, F1).
+        for (iris::SceneNode *n : settleWrites) noteSettleWrite(n);
+        // ...and a REAL full walk owes a rotation of its own: a bind (every node
+        // reborn dynamic in this manager, hints replayed), a re-take, the play
+        // edge (soft mobility cleared) or an overflow — the classification has
+        // to be re-derived once the scene is quiet, whatever the change list
+        // said. (Not the verification mode's every-sync walk: that would keep
+        // the owe's start in the future for ever.)
+        if (!mVerifyEverything || mFullWalkPending) oweSettle(mSyncStamp + kStaticSettleFrames);
         mFullWalkPending = false;
     } else {
         // EVICTIONS FIRST (§3.4): an address a same-frame insert recycled must
@@ -895,6 +893,18 @@ int SceneMirror::sync()
         consumeDirty();
         }
     }
+    // SCENE_STATIC RE-PROMOTION, ON SETTLE (MIRROR_SCALE lane, 2026-09-13;
+    // per node and incremental since MIRROR-SETTLE-1). Rule 4 (nodegraph.h)
+    // DEMOTES a static subtree on the first transform write, and that is
+    // right: re-running the static pass per frame of a drag is exactly the
+    // cost SCENE_STATIC exists to avoid. The settle is the other half — it puts
+    // a node back once it has stopped being written (runStaticSettle).
+    // AFTER THE WALK (read 2, W1): the walk / consumeDirty stamps THIS sync's
+    // writes first, so a slice only ever sees stamped quiet clocks — run
+    // before it, a node written since the last sync could be promoted inside
+    // its quiet window and then go unstamped (noteSettleWrite skips a node
+    // that is static by then).
+    runStaticSettle();
     // The handful of things that legitimately cost something EVERY frame, all
     // bounded by the scene's light and camera registries rather than by node
     // count — and idempotent, so running them after a full walk costs a latch
