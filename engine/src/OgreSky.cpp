@@ -1064,6 +1064,18 @@ void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
     // the ambient MOVING through a drag (every frame of which would otherwise
     // cancel the read the frame before it issued).
     if (mSkyShTicket) readSkyShTicket(true);
+    // ...AND A READ THAT ALREADY LANDED AT THIS FRAME'S TOP LANDS ITS SET NOW.
+    // pollSkyShRead maps a finished copy at the frame's top, but this capture was
+    // already requested then (mSkyCapturePending), so landEnvironmentIfComplete
+    // refused the swap as "a part is owed" — and the ticket this capture is about
+    // to issue would refuse it again, and the next read would overwrite mSkySh
+    // unswapped. That froze the ambient for a whole drag whenever every copy had
+    // finished by the next frame's top — a slow CPU frame, the ASan build under
+    // load (DEFECT-TEST-ENGINE-ASAN-1) — and dropped one step on a quiet box. The
+    // set the top read completed (its cube convolved in its own capture frame, its
+    // SH just read) is whole; it lands here, exactly where the forced read above
+    // lands it.
+    else if (mSkyShFresh) landEnvironmentIfComplete();
     const bool consecutive = mSkyCaptureIdleFrames <= kSkyCaptureDragFrames;
     mSkyCaptureIdleFrames = 0;
     // A capture the cloud layer's SCROLL asked for (tickCloudClock) is not a
