@@ -290,11 +290,65 @@ public:
     /// a scene's classification hold instead of leaking away.
     quint64 staticNodeCount() const;
     quint64 staticRepromotionCount() const { return mStaticRepromotions; }
-    /// How many consecutive syncs with NO transform write anywhere in the
-    /// document count as "settled". Half a second at 60 Hz: long enough that a
-    /// drag's inter-frame gaps never trip it, short enough that the
-    /// classification is back before the user's next gesture.
+    /// How many syncs a node must go UNWRITTEN before the settle may promote
+    /// it — its own quiet count, not the document's or the process's. Half a
+    /// second at 60 Hz: long enough that a drag's inter-frame gaps never trip
+    /// it, short enough that the classification is back before the user's
+    /// next gesture.
     static constexpr quint32 kStaticSettleFrames = 30;
+    /// THE SETTLE IS INCREMENTAL AND PER NODE (MIRROR-SETTLE-1, 2026-10-10).
+    /// It used to be one whole-tree applyStaticDefaults on one frame, gated on
+    /// the PROCESS's transform-write counter: 2.4 ms at 1k nodes, 31 ms at
+    /// 10k, 392-1115 ms at 50k, one hitch per settle — and any write anywhere
+    /// (a thumbnail tile, a material preview, another document) held it off.
+    ///
+    /// Now: a node of THIS mirror's document that is written while it could be
+    /// static (a rule-4 demotion, a new node, a mobility change) is stamped
+    /// (Entry::lastWriteSync) and owes a settle. The settle is a top-down walk
+    /// over the document, at most kStaticSettleNodesPerSync visits a sync,
+    /// that re-runs the load's rule (SceneNode::_applyStaticDefaultsStep) on
+    /// every node whose own quiet count has reached kStaticSettleFrames, and
+    /// leaves a node still in its quiet window — with its subtree — for the
+    /// next rotation. A write never restarts the walk; nothing outside this
+    /// document touches it; a destroyed node is skipped (weak entries).
+    ///
+    /// A BUDGET IN NODES, derived from the SLICE, not from a benchmark's
+    /// statistic (the engine has no wall clock; a node count gives the same
+    /// settle on every machine). THE DERIVATION — spikes/mirror-settle-1/
+    /// DERIVATION.txt, measured in the timing slot, Debug:
+    ///  * THE BOUND: a settle slice's sync <= 0.5 ms, 3 % of a 16.7 ms frame,
+    ///    at 50k nodes (scenegraph.benchmark's s.settle_slice series asserts
+    ///    it; mirror.settle_incremental reports its percentiles).
+    ///  * THE COST, measured (scenegraph.benchmark s.settle_slice, 50k, in the
+    ///    slot, 2026-10-11): a slice's MEDIAN is the still sync (~0.06 ms) +
+    ///    4.1 us per visited node (medians 0.256 / 0.326 / 0.584 ms at B = 48
+    ///    / 64 / 128), and its WORST is ~2x its median (0.508 / 0.641 ms at
+    ///    48 / 64: the tail of a Debug sync on a shared box, no event in it —
+    ///    the one event, Ogre's static pool growing inside a slice, 2.4 ms, is
+    ///    fixed on the fork: a static twin reserves with its dynamic sibling).
+    ///  * THE BUDGET: worst <= 0.5 ms -> median <= 0.25 ms -> B <= (0.25 -
+    ///    0.06) / 4.1 us = 46; B = 48 measured worst 0.508, so B = 32 (median
+    ///    ~0.19, worst ~0.38 ms predicted). 50,521 nodes settle in ~1,580
+    ///    slices (26 s at 60 Hz), 10k in ~5 s, 1k in ~0.5 s.
+    ///  * WHAT NOT SETTLING COSTS (u.unsettled_render vs the settled render,
+    ///    50k): 27.4 vs 26.4 ms a frame.
+    static constexpr quint32 kStaticSettleNodesPerSync = 32;
+    /// THE LONGEST A SETTLE WAITS (fix round 1). A rotation starts once every
+    /// owed node is quiet — but a node of this document written on EVERY sync
+    /// (a script driving an Auto prop, a socket rider) would keep that moment
+    /// in the future forever and starve every other node's re-promotion. So a
+    /// rotation also starts once the owe is this old; it promotes what is quiet
+    /// and defers what is not (the deferred node owes the next one). Four
+    /// quiet windows: a drag under two seconds owes one rotation after it
+    /// ends; a perpetual writer costs one rotation per two seconds + the walk,
+    /// each at most kStaticSettleNodesPerSync visits a sync.
+    static constexpr quint32 kStaticSettleMaxWaitSyncs = 4 * kStaticSettleFrames;
+    /// Is a settle owed or part-way through the tree? A test drives syncs
+    /// until this reads false instead of counting frames.
+    bool staticSettleInProgress() const { return mSettleOwed || !mSettleWalk.empty(); }
+    /// How many nodes the last sync's settle slice visited (0 on a sync with
+    /// no slice) — never more than kStaticSettleNodesPerSync.
+    quint32 staticSettleVisits() const { return mSettleVisits; }
     /// A NOTE ON THE PAUSED HAND (lead review F4): the settle is driven by the
     /// document, not by the mouse, so a drag the user pauses for half a second
     /// re-promotes under a still hand and the next movement demotes again. That
@@ -774,6 +828,12 @@ private:
         int     faceCullPushed = -1;
         /// The sync() this entry was last reached by. See mSyncStamp.
         quint32 lastSeen = 0;
+        /// THE SETTLE'S QUIET CLOCK: the sync() that last saw this node WRITTEN
+        /// (a Transform, Structure or Flags mark on the document's change list
+        /// — noteSettleWrite). 0 = never. The settle walk promotes a node only
+        /// once kStaticSettleFrames syncs have passed since; until then it
+        /// leaves the node and its subtree for the next rotation.
+        quint32 lastWriteSync = 0;
         bool hasMesh  = false;
         bool hasLight = false;
         bool hasDecal = false;                       // an engine decal is bound
@@ -1099,6 +1159,10 @@ private:
         bool shown = false;      ///< this node's EFFECTIVE visibility
         bool movable = false;    ///< ...and its resolved mobility
         bool descend = true;     ///< false where the old walk returned early
+        /// The node's entry (valid until the next insert/erase of mEntries) —
+        /// so a caller acting on the visit (noteSettleWrite) pays no second
+        /// hash probe. Null where the visit made none.
+        Entry *entry = nullptr;
     };
     /// ONE NODE, given its parent's answers. The body of the old visit() with
     /// the child recursion taken out — the one piece of surgery the dirty set
@@ -1110,7 +1174,7 @@ private:
     /// ONE MARKED NODE. Resolves its parent's answers from the DOCUMENT
     /// (isVisibleInScene / resolvedMobility, both O(depth)) rather than from a
     /// walk, so the order the change list happens to be in cannot matter.
-    void visitDirty(iris::SceneNode *node);
+    VisitResult visitDirty(iris::SceneNode *node);
     /// The parent's effective visibility / resolved mobility, for visitDirty.
     bool parentShownOf(iris::SceneNode *node);
     bool parentMovableOf(iris::SceneNode *node);
@@ -1944,16 +2008,50 @@ private:
     /// materialBuildCount() — reset at the top of every sync, so it reports the
     /// LAST walk rather than a running total.
     quint64 mMaterialBuilds = 0;
-    /// The settle machine behind the static re-promotion (see sync()).
-    unsigned long long mLastTransformWrites = 0;
-    /// ...and the document's demotion count when the settle last ran. A quiet
-    /// spell is only worth a re-derivation if a transform write really took a
-    /// subtree OUT of the static half since the last one; a camera orbit, an
-    /// undo and a scene open all write transforms and demote nothing.
-    unsigned long long mLastStaticDemotions = 0;
-    quint32 mSettleFrames = 0;
-    bool    mStaticSettlePending = false;
+    /// THE SETTLE MACHINE (see sync() and noteSettleWrite).
+    ///  * mSettleOwed: a node of this document was written while it could be
+    ///    static; a rotation of the walk is owed.
+    ///  * mSettleStartAt: the earliest sync a rotation may start — the latest
+    ///    owed node's lastWriteSync + kStaticSettleFrames, so one rotation
+    ///    finds every owed node quiet unless it is written again (bounded by
+    ///    kStaticSettleMaxWaitSyncs from mSettleOwedSince).
+    ///  * mSettleDeferred: the rotation in progress left a node in its quiet
+    ///    window (it owes another rotation when this one ends).
+    bool    mSettleOwed = false;
+    quint32 mSettleStartAt = 0;
+    /// The sync the current owe began (kStaticSettleMaxWaitSyncs counts from it).
+    quint32 mSettleOwedSince = 0;
+    bool    mSettleDeferred = false;
     quint64 mStaticRepromotions = 0;
+    /// THE WALK: the document nodes still to visit in this rotation, a
+    /// top-down (pre-order) stack. Each entry carries what the recursion would
+    /// have threaded down to it — the parent's resolved mobility and whether a
+    /// subtree switch reaches it (SceneNode::_applyStaticDefaultsStep) — and
+    /// the parent it was found under. The node is held WEAKLY (the document
+    /// owns it; an entry whose node died is skipped), and an entry whose node
+    /// has left that parent since (removed, reparented) is skipped too, so a
+    /// walk spread over frames never classifies a node outside the tree it is
+    /// walking. A node moved INTO the tree is written (Structure) and owes its
+    /// own rotation. Empty = no rotation in progress.
+    struct SettleEntry {
+        QWeakPointer<iris::SceneNode> node;
+        iris::SceneNode *parent = nullptr;
+        bool parentMovable = false;
+        bool carry = false;
+    };
+    std::vector<SettleEntry> mSettleWalk;
+    quint32 mSettleVisits = 0;
+    /// Runs one slice of the settle (at most kStaticSettleNodesPerSync visits).
+    /// Returns true when the rotation is complete.
+    bool stepStaticSettle();
+    /// Runs the settle machine for this sync (owed -> start -> slice -> end).
+    void runStaticSettle();
+    /// A node of this document was written (Transform / Structure / Flags):
+    /// stamp its quiet clock, and owe a settle if it is dynamic but the rule
+    /// would make it static.
+    void noteSettleWrite(iris::SceneNode *n, Entry *e = nullptr);
+    /// Owes a rotation that may start at `at` (see kStaticSettleMaxWaitSyncs).
+    void oweSettle(quint32 at);
     /// SKELETON SHARING (syncSkeletonSharing): how many CHARACTER PIECES the
     /// last walk saw — pieces of a multi-piece character, the only things that
     /// can share — and the document's transform-write count when the world
@@ -2035,8 +2133,11 @@ private:
     /// What is left of that budget inside the current verification pass.
     /// Unbounded during verifyAgainstFullWalk: the oracle re-reads everything.
     unsigned mVerifyMaterialQuota = 0;
-    /// Where the rotating verifier got to in mEntries.
+    /// Where the rotating verifier got to in mVerifierOrder.
     quint64 mVerifierCursor = 0;
+    /// The verifier's rotation: every mirrored entry's key (runVerifier says
+    /// how it stays current without a walk of the hash).
+    std::vector<const iris::SceneNode *> mVerifierOrder;
     quint64 mDirtyNodes = 0;
     quint64 mEvictedNodes = 0;
     quint64 mVerifierVisits = 0;

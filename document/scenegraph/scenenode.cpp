@@ -36,7 +36,6 @@ For more information see the LICENSE file
 #include <QDebug>
 #include <QUuid>
 
-#include <atomic>
 
 namespace iris
 {
@@ -493,28 +492,59 @@ void SceneNode::applyStaticDefaults()
     applyStaticDefaultsFrom(parentMovable);
 }
 
+namespace {
+/// THE ONE RULE, recursed: the load's pass is the settle's step applied
+/// top-down in one go (the mirror's settle runs the same step in slices).
+void applyStaticDefaultsRec(SceneNode *node, bool parentMovable, bool carry)
+{
+    bool childCarry = false;
+    const bool movable = node->_applyStaticDefaultsStep(parentMovable, carry, &childCarry);
+    // Descend regardless — a light in the middle of an imported rig does not
+    // stop the props below it from being static, it only stops ITSELF (and,
+    // through canBeStatic, the branch under it, which is the rule).
+    const graph::NodeHandle h = node->graphNode();
+    const std::size_t n = graph::childCount(h);
+    for (std::size_t i = 0; i < n; ++i)
+        if (SceneNode *c = graph::ownerOf(graph::childAt(h, i)))
+            applyStaticDefaultsRec(c, movable, childCarry);
+}
+}
+
 void SceneNode::applyStaticDefaultsFrom(bool parentMovable)
 {
-    // ONE RESOLUTION, TOP-DOWN. The parent's answer is threaded down rather
-    // than re-walked per node, so this is O(nodes) and not O(nodes x depth).
+    applyStaticDefaultsRec(this, parentMovable, false);
+}
+
+bool SceneNode::_applyStaticDefaultsStep(bool parentMovable, bool carry, bool *childCarry)
+{
+    // ONE NODE OF THE RULE. ONE RESOLUTION, TOP-DOWN: the parent's answer is
+    // threaded down rather than re-walked per node, so a walk is O(nodes) and
+    // not O(nodes x depth). The promotion is graph::promoteNode (this node and
+    // its engine-owned children; `carry` = an ancestor's switch would have
+    // reached them, as graph::setStatic's subtree switch does) — the hint
+    // bookkeeping is _applyStaticHint's.
+    *childCarry = false;
     const bool movable = resolveMobility(parentMovable) == Mobility::Movable;
     if (movable) {
         // Movable: out of the static half. `_applyStaticHint`, not setMobility
         // — the POLICY must never leave "the user asked for this" behind (that
-        // would write a derivation into the file on the next save).
+        // would write a derivation into the file on the next save). A demotion
+        // stays the subtree switch (promoteNode's note says why).
         _applyStaticHint(false);
-    } else {
+    } else if (isStaticEligible() && graph::canBeStatic(mGraphNode)) {
         // canBeStatic() first: an ineligible PARENT means this whole branch
         // stays dynamic, and asking anyway would log a refusal per node.
-        if (isStaticEligible() && graph::canBeStatic(mGraphNode)) _applyStaticHint(true);
+        // _applyStaticHint(true)'s early return: hint set AND in the graph.
+        const bool already = mStaticHint && graph::isStatic(mGraphNode);
+        bool switched = false;
+        const bool isStaticNow = graph::promoteNode(mGraphNode, carry, &switched);
+        if (!already) {
+            mStaticHint = true;     // recorded even where the graph refused
+            notifyChanged(NodeChange::Flags);
+        }
+        *childCarry = isStaticNow && (switched || carry);
     }
-    // Descend regardless — a light in the middle of an imported rig does not
-    // stop the props below it from being static, it only stops ITSELF (and,
-    // through canBeStatic, the branch under it, which is the rule).
-    const std::size_t n = graph::childCount(mGraphNode);
-    for (std::size_t i = 0; i < n; ++i)
-        if (SceneNode *c = graph::ownerOf(graph::childAt(mGraphNode, i)))
-            c->applyStaticDefaultsFrom(movable);
+    return movable;
 }
 
 void SceneNode::addAnimation(AnimationPtr anim)

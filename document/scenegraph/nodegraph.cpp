@@ -162,14 +162,6 @@ std::size_t gLiveNodes = 0;
 /// assert that its 80% static population really reached the static manager
 /// rather than reporting a hint nobody applied.
 std::size_t gStaticNodes = 0;
-/// HOW MANY SUBTREES A TRANSFORM WRITE HAS DEMOTED (rule 4). Its only consumer
-/// is the mirror's settle, which re-derives the whole scene's classification
-/// when the document goes quiet: without this it re-derived after EVERY quiet
-/// spell, including the ones nobody dragged anything in — a camera orbit, an
-/// undo, a reparent, a scene open all write transforms and all bought a
-/// whole-tree pass. Relaxed: it is a CHANGE TEST read once per frame, exactly
-/// like gTransformWrites beside it.
-std::atomic<unsigned long long> gStaticDemotions{0};
 
 /// THE WRITE JOURNAL (see graph::writeJournal): the nodes the movement counter
 /// counted since the last close, each once, in first-write order — by Ogre's
@@ -883,9 +875,8 @@ void promoteOnWrite(Ogre::SceneNode *n)
     std::lock_guard<std::recursive_mutex> lock(graphMutex());
     if (SceneNode *owner = ownerById(n->getId())) owner->_clearStaticHint();
     applyStaticSubtree(n, false);
-    // COUNTED, because somebody has to put these back (graph::staticDemotions).
-    // This is the ONLY demoter on the write path, so the counter is exact.
-    gStaticDemotions.fetch_add(1, std::memory_order_relaxed);
+    // _clearStaticHint marks the owner (Flags): that mark is how the mirror of
+    // its document learns a node left the static half and owes a settle.
 }
 
 /// THE ONE HOLE RULE 2 LEAVES, closed. A static node's parent must be static
@@ -907,7 +898,6 @@ void promoteStaticChildren(Ogre::SceneNode *n)
         if (!c->isStatic()) continue;
         if (SceneNode *owner = ownerById(c->getId())) owner->_clearStaticHint();
         applyStaticSubtree(c, false);
-        gStaticDemotions.fetch_add(1, std::memory_order_relaxed);
         any = true;
     }
     if (any)
@@ -1167,12 +1157,42 @@ bool setStatic(NodeHandle n, bool value)
     return applyStaticSubtree(o, value);
 }
 
+bool promoteNode(NodeHandle n, bool carry, bool *switched)
+{
+    if (switched) *switched = false;
+    if (!n || !engineAlive()) return false;
+    std::lock_guard<std::recursive_mutex> lock(graphMutex());
+    Ogre::SceneNode *o = nd(n);
+    bool did = false;
+    if (!o->isStatic()) {
+        if (!eligibleStaticParent(o->getParent())) {
+            qWarning("iris::graph::promoteNode refused: a static node's parent must be static "
+                     "or the document root (SCENEGRAPH_SPEC §6 rule 2).");
+            return false;
+        }
+        if (!eligibleForStatic(o) || !switchOne(o, true)) return false;
+        ++gStaticNodes;
+        did = true;
+    }
+    if (switched) *switched = did;
+    // The ENGINE-OWNED children, exactly where the subtree switch reaches
+    // them: applyStaticSubtree descends from the node it switched through
+    // every eligible node below, already-static ones included, and an engine
+    // node answers eligibleForStatic with yes. So they go when THIS node
+    // switched, or when an ancestor's switch would have walked down to here
+    // (`carry`) — and never on a node nobody switched, which setStatic's
+    // "already there" early return leaves alone too.
+    if (did || carry) {
+        for (std::size_t i = 0; i < o->numChildren(); ++i) {
+            auto *c = static_cast<Ogre::SceneNode *>(o->getChild(i));
+            if (!ownerById(c->getId())) applyStaticSubtree(c, true);
+        }
+    }
+    return true;
+}
+
 std::size_t staticNodeCount() { return gStaticNodes; }
 
-unsigned long long staticDemotions()
-{
-    return gStaticDemotions.load(std::memory_order_relaxed);
-}
 
 std::size_t liveNodeCount() { return gLiveNodes; }
 

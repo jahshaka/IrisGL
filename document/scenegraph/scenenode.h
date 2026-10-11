@@ -902,7 +902,11 @@ public:
     /// checkbox. It is not: the user's setting is what the renderer classifies
     /// on, an editor drag is authoring, and silently clearing it made the
     /// setting impossible to keep. The GRAPH class is all this clears.
-    void _clearStaticHint() { mStaticHint = false; }
+    /// Rule 4's demotion clears the hint (nodegraph promoteOnWrite) and SAYS
+    /// so on the change list: the mirror of this node's document starts the
+    /// node's settle quiet clock from it (SceneMirror::noteSettleWrite) — the
+    /// one per-document signal that a static node went dynamic.
+    void _clearStaticHint() { mStaticHint = false; notifyChanged(NodeChange::Flags); }
     /// DOES A WRITE TO THIS NODE'S TRANSFORM COUNT AS SCENE MOVEMENT?
     /// (nodegraph.h, the transform-write epoch — lane ENGINE-7 item 1.) True
     /// for everything the renderer draws; false for the VIEWER, which is a
@@ -963,6 +967,20 @@ public:
     /// The recursion, for a caller that already knows what the parent resolved
     /// to. `applyStaticDefaults()` is the spelling everything else uses.
     void applyStaticDefaultsFrom(bool parentMovable);
+    /// ONE NODE of applyStaticDefaultsFrom, without the recursion — the unit
+    /// of work of an INCREMENTAL pass (SceneMirror's settle spreads the
+    /// whole-tree re-derivation over frames, kStaticSettleNodesPerSync at a
+    /// time). The caller walks the document top-down and threads two answers
+    /// down to each child: the returned mobility (rule 2, exactly as the
+    /// recursion threads it) and `*childCarry`, whether a subtree switch would
+    /// have reached the children (graph::promoteNode). A promotion here moves
+    /// THIS node only — its document children are promoted on their own
+    /// visits, each under an already-static parent — so the cost of a visit is
+    /// one node's, never its subtree's. Run over a whole tree it lands the
+    /// same static set and the same hints as applyStaticDefaultsFrom
+    /// (mirror.settle_incremental proves it on 50,000 nodes). Returns whether
+    /// this node resolved MOVABLE.
+    bool _applyStaticDefaultsStep(bool parentMovable, bool carry, bool *childCarry);
 
     /// Re-asserts recorded static hints into the GRAPH, top-down, changing no
     /// hint and no override. For after a graph migration (Scene::setGraphScene)
