@@ -329,15 +329,17 @@ public:
     ///    sibling.
     ///  * THE BUDGET: B = 32 was chosen on WALL-CLOCK worsts (B = 48 read a
     ///    wall worst of 0.508 ms; the wall worst runs ~2x the median, a tail of
-    ///    preemptions the CPU clock does not count), so it is conservative
-    ///    against the CPU bound: CPU worst at 50k 0.40-0.42 ms in three slot
-    ///    runs. 50,521 nodes settle in ~1,580 slices (26 s at 60 Hz), 10k in
-    ///    ~5 s, 1k in ~0.5 s.
+    ///    preemptions the CPU clock does not count): CPU worst at 50k 0.40-0.47
+    ///    ms in four slot runs — and 0.557 ms in a fifth, beside a sibling
+    ///    tree's build (a loaded box slows the thread's own instructions too).
+    ///    The lead's rule for a CPU worst over the bound: B = 24, never the bar
+    ///    (fix round 6). 50,521 nodes settle in ~2,100 slices (35 s at 60 Hz),
+    ///    10k in ~7 s, 1k in ~0.7 s.
     ///  * ORDER IN sync(): the slice runs AFTER the walk / consumeDirty, so it
     ///    only ever sees quiet clocks this sync's writes have already stamped.
     ///  * WHAT NOT SETTLING COSTS (u.unsettled_render vs the settled render,
     ///    50k): 27.4 vs 26.4 ms a frame.
-    static constexpr quint32 kStaticSettleNodesPerSync = 32;
+    static constexpr quint32 kStaticSettleNodesPerSync = 24;
     /// THE LONGEST A SETTLE WAITS (fix round 1). A rotation starts once every
     /// owed node is quiet — but a node of this document written on EVERY sync
     /// (a script driving an Auto prop, a socket rider) would keep that moment
@@ -347,7 +349,7 @@ public:
     /// quiet windows: a drag under two seconds owes one rotation after it
     /// ends. A PERPETUAL WRITER costs a CONTINUOUS walk while it lives: its
     /// deferral re-owes early in each rotation, and a rotation of a big
-    /// document outlasts the wait (50k: ~1,580 syncs > 120), so the next
+    /// document outlasts the wait (50k: ~2,100 syncs > 120), so the next
     /// rotation starts as the last one ends — at 50k ~0.2 ms of CPU a sync
     /// (the slice's median; ~0.13 ms over the still sync), kStaticSettleNodes-
     /// PerSync visits a sync, for as long as the writer writes.
