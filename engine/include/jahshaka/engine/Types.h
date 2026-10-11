@@ -7004,6 +7004,7 @@ struct MemoryStats {
     bool               gpuPoolsIncludeTextures = false;
     unsigned           sceneManagers = 0;         ///< walked: every Scene + the document staging manager
     unsigned           simdNodes = 0;             ///< live scene nodes (both roots walked), summed — what the node pools hold
+    unsigned           simdNodeSlots = 0;         ///< the node pools' USED slots, summed: simdNodes + the holes non-LIFO removals left until each level's cleanup
     unsigned           simdObjects = 0;           ///< live objects in the entity + light SoA pools, summed
     unsigned           simdNodeDepths = 0;        ///< node-hierarchy depth pools, summed (one SoA pool each)
     unsigned long long residentBytes = 0;         ///< the process RSS (Linux; 0 elsewhere)

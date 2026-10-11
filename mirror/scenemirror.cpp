@@ -44,6 +44,16 @@
 #include <chrono>
 
 namespace {
+/// The change kinds that start a node's settle quiet clock (noteSettleWrite):
+/// a transform write (rule 4 demotes on it), a structure change (a node
+/// added, moved or reparented) and a flags change (mobility, the hint a
+/// rule-4 demotion clears).
+const quint16 kSettleWriteMask = quint16(iris::nodeChangeBit(iris::NodeChange::Transform)
+                                         | iris::nodeChangeBit(iris::NodeChange::Structure)
+                                         | iris::nodeChangeBit(iris::NodeChange::Flags));
+}
+
+namespace {
 
 /// ONE MIRROR SUB-STAGE, folded into the frame record the engine is building
 /// (RENDER_LOOP_MONITOR_SPEC §4.2). Constructed with a null engine — which is
@@ -460,6 +470,12 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     // below is released, so there is nothing incremental left to be right
     // about. The aggregates the entries carried go with them.
     mFullWalkPending = true;
+    // A settle part-way through the OUTGOING tree stops here, and nothing the
+    // outgoing document owed carries over: the incoming tree's bind is a full
+    // walk, which owes its own rotation.
+    mSettleWalk.clear();
+    mSettleOwed = false;
+    mSettleDeferred = false;
     mMaterialUsers.clear();
     mDirtyScratch.clear();
     mEvictedScratch.clear();
@@ -488,6 +504,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     releaseAllRiders();
     for (Entry &e : mEntries) releaseEntry(e);
     mEntries.clear();
+    mVerifierOrder.clear();
     // The outgoing document leaves the engine's scene manager before anything
     // else is torn down: its nodes live IN that manager (one tree), and the
     // caller is free to destroy the engine scene the moment this returns.
@@ -576,6 +593,10 @@ void SceneMirror::evacuateEngineObjects()
     mAnyRefractive = false;
     mAnyDistortion = false;
     mVerifierCursor = 0;
+    // The walk's entries are this manager's classification of a graph that is
+    // leaving it; the next full walk (a bind) owes a fresh rotation.
+    mSettleWalk.clear();
+    mSettleDeferred = false;
     // Same reason as in setSource: the document's graph is about to migrate out
     // of this scene manager, and a rider hanging off one of its TagPoints would
     // not travel with it.
@@ -586,6 +607,7 @@ void SceneMirror::evacuateEngineObjects()
     // pass reading nodes the migration had already destroyed.)
     for (Entry &e : mEntries) releaseEntry(e);
     mEntries.clear();
+    mVerifierOrder.clear();
     // The derived character rigs are keyed by document node; the document's
     // graph is leaving, so they are worth exactly nothing now. Same for the
     // socket riders: those keys are document nodes too.
@@ -733,62 +755,7 @@ int SceneMirror::sync()
     // (mCharacterPieces / mSkinnedNodes are NOT reset here any more: they are
     // maintained on each entry's own transition — noteRigCounts — because a
     // still frame runs no walk to recount them. §3.7.)
-    // SCENE_STATIC RE-PROMOTION, ON SETTLE (MIRROR_SCALE lane, 2026-09-13).
-    //
-    // Rule 4 (nodegraph.h) DEMOTES a static subtree on the first transform
-    // write, and that is right: re-running the static pass per frame of a drag
-    // is exactly the cost SCENE_STATIC exists to avoid. But nothing ever put
-    // the node back — the demotion lasted the SESSION, so every prop a user
-    // nudged spent the rest of the day in Ogre's per-frame transform and bounds
-    // passes, and a long editing session drained the classification to nothing.
-    //
-    // The missing half is here: when NOTHING in the document has written a
-    // transform for kStaticSettleFrames consecutive syncs, the document's own
-    // static pass runs once and re-derives the whole scene's classification.
-    // It is the same pass a load runs (SceneNode::applyStaticDefaults), so a
-    // settled scene ends up classified exactly as if it had just been opened —
-    // the user's own Static/Movable settings included, because the pass honours
-    // overrides and writes none. A node whose class does not change costs the
-    // walk and nothing else; one that does gets its notifyStaticDirty from
-    // `switchOne`, one per promoted node, on this frame alone.
-    //
-    // THE GATE IS THE DOCUMENT'S TRANSFORM-WRITE COUNTER, which is global and
-    // therefore conservative in the direction that cannot hurt: a physics step,
-    // a playing animation, a drag anywhere in the scene holds the whole scene
-    // dynamic until it stops. That is what "settle" has to mean — a promotion
-    // in the middle of a gesture would migrate a subtree the next write
-    // migrates straight back.
-    if (mSource) {
-        const unsigned long long writes = iris::graph::transformWrites();
-        // ...AND ONLY WHEN SOMETHING WAS DEMOTED (lead review F4). The write
-        // counter alone re-armed the settle on every transform write anywhere —
-        // the end of a camera orbit, an undo, a reparent, a scene open — and
-        // each quiet spell after one of those bought a whole-tree
-        // applyStaticDefaults (a resolveMobility and an isStaticEligible per
-        // node) to re-derive a classification nothing had disturbed. The
-        // document counts its own demotions now, and that is the only thing a
-        // re-promotion has to answer.
-        const unsigned long long demotions = iris::graph::staticDemotions();
-        if (writes != mLastTransformWrites) {
-            mLastTransformWrites = writes;
-            mSettleFrames = 0;
-            if (demotions != mLastStaticDemotions) {
-                mLastStaticDemotions = demotions;
-                mStaticSettlePending = true;
-            }
-        } else if (mStaticSettlePending && ++mSettleFrames >= kStaticSettleFrames) {
-            if (auto root = mSource->getRootNode()) {
-                root->applyStaticDefaults();
-                ++mStaticRepromotions;
-            }
-            mStaticSettlePending = false;
-            // applyStaticDefaults migrates nodes between memory managers; the
-            // migration itself must not read as a write, or a demotion, and
-            // re-arm the settle.
-            mLastTransformWrites = iris::graph::transformWrites();
-            mLastStaticDemotions = iris::graph::staticDemotions();
-        }
-    }
+    // (SCENE_STATIC RE-PROMOTION runs AFTER the walk below — runStaticSettle.)
     // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2): the
     // simulated seconds the host's frame bought on the document's
     // SimulationClock (advanced before the sync) — whole 1/60 s steps, capped
@@ -857,6 +824,7 @@ int SceneMirror::sync()
     if (marks && marks->takeOverflow()) mFullWalkPending = true;
     const bool full = mFullWalkPending || mVerifyEverything;
     mLastWalkWasFull = full;
+    std::vector<iris::SceneNode *> settleWrites;
     if (full) {
         // JAH_MIRROR_VERIFY=full: the walk IS the verification, so every
         // material is re-fingerprinted and every push it makes is a catch.
@@ -872,7 +840,11 @@ int SceneMirror::sync()
         // would throw them away.
         if (marks) {
             marks->takeDirty(mDirtyScratch);
-            for (iris::SceneNode *n : mDirtyScratch) if (n) n->_takeDirtyMask();
+            // The settle's quiet clocks run on the change list even when the
+            // full walk discards it (see noteSettleWrite).
+            settleWrites.clear();
+            for (iris::SceneNode *n : mDirtyScratch)
+                if (n && (n->_takeDirtyMask() & kSettleWriteMask)) settleWrites.push_back(n);
             mDirtyScratch.clear();
             // Evictions are safe to drop here: those nodes are out of the tree,
             // so the walk cannot stamp them and removeMissing releases them.
@@ -898,6 +870,18 @@ int SceneMirror::sync()
         }
         mVerifying = false;
         mVerifyMaterialQuota = 0;
+        // THE CHANGE LIST'S WRITES STAMP THEIR QUIET CLOCKS ON EVERY FULL WALK —
+        // JAH_MIRROR_VERIFY=full included, where every sync is a full walk: a
+        // write dropped here would leave a dragged prop dynamic for the session
+        // in the mode that proves the mirror's equivalence (read 2, F1).
+        for (iris::SceneNode *n : settleWrites) noteSettleWrite(n);
+        // ...and a REAL full walk owes a rotation of its own: a bind (every node
+        // reborn dynamic in this manager, hints replayed), a re-take, the play
+        // edge (soft mobility cleared) or an overflow — the classification has
+        // to be re-derived once the scene is quiet, whatever the change list
+        // said. (Not the verification mode's every-sync walk: that would keep
+        // the owe's start in the future for ever.)
+        if (!mVerifyEverything || mFullWalkPending) oweSettle(mSyncStamp + kStaticSettleFrames);
         mFullWalkPending = false;
     } else {
         // EVICTIONS FIRST (§3.4): an address a same-frame insert recycled must
@@ -909,6 +893,18 @@ int SceneMirror::sync()
         consumeDirty();
         }
     }
+    // SCENE_STATIC RE-PROMOTION, ON SETTLE (MIRROR_SCALE lane, 2026-09-13;
+    // per node and incremental since MIRROR-SETTLE-1). Rule 4 (nodegraph.h)
+    // DEMOTES a static subtree on the first transform write, and that is
+    // right: re-running the static pass per frame of a drag is exactly the
+    // cost SCENE_STATIC exists to avoid. The settle is the other half — it puts
+    // a node back once it has stopped being written (runStaticSettle).
+    // AFTER THE WALK (read 2, W1): the walk / consumeDirty stamps THIS sync's
+    // writes first, so a slice only ever sees stamped quiet clocks — run
+    // before it, a node written since the last sync could be promoted inside
+    // its quiet window and then go unstamped (noteSettleWrite skips a node
+    // that is static by then).
+    runStaticSettle();
     // The handful of things that legitimately cost something EVERY frame, all
     // bounded by the scene's light and camera registries rather than by node
     // count — and idempotent, so running them after a full walk costs a latch
@@ -1041,16 +1037,16 @@ bool SceneMirror::parentMovableOf(iris::SceneNode *node)
 }
 
 /// ONE MARKED NODE.
-void SceneMirror::visitDirty(iris::SceneNode *node)
+SceneMirror::VisitResult SceneMirror::visitDirty(iris::SceneNode *node)
 {
-    if (!node) return;
+    if (!node) return {};
     // THE ROOT IS NOT MIRRORED. The full walk starts at the root's CHILDREN —
     // the World node is the document's container and has no engine object of
     // its own — so a mark on it (addChild fires Structure on the parent as
     // well as on the child) must not adopt it. Its own `visible` flag still
     // reaches its children: setVisible cascades the whole subtree.
-    if (mSource && node == mSource->getRootNode().data()) return;
-    visitNode(node, parentShownOf(node), parentMovableOf(node));
+    if (mSource && node == mSource->getRootNode().data()) return {};
+    return visitNode(node, parentShownOf(node), parentMovableOf(node));
 }
 
 /// Entries whose document nodes have left. This is what replaced
@@ -1115,6 +1111,130 @@ void SceneMirror::markChangedMaterials()
     }
 }
 
+/// THE SETTLE MACHINE, once per sync. Owed -> (its quiet window over) a
+/// rotation starts at the root -> slices of kStaticSettleNodesPerSync visits
+/// -> the rotation ends; a node it found still in its quiet window owes the
+/// next one. Nothing but THIS document's own writes (noteSettleWrite) feeds it:
+/// a write elsewhere in the process, a thumbnail tile, another document, a
+/// destroyed node somewhere — none of them restarts or delays it.
+void SceneMirror::runStaticSettle()
+{
+    mSettleVisits = 0;
+    if (!mSource) return;
+    if (mSettleWalk.empty()) {
+        if (!mSettleOwed) return;
+        // Every owed node quiet — or the owe has waited its longest (a node of
+        // this document written on every sync must not starve the rest).
+        if (qint32(mSyncStamp - mSettleStartAt) < 0
+            && mSyncStamp - mSettleOwedSince < kStaticSettleMaxWaitSyncs)
+            return;
+        const iris::SceneNodePtr root = mSource->getRootNode();
+        mSettleOwed = false;
+        if (!root) return;                         // nothing to classify
+        mSettleDeferred = false;
+        // The document root has no document parent: applyStaticDefaults
+        // starts it with parentMovable = false and no carry.
+        mSettleWalk.push_back({ root.toWeakRef(), nullptr, false, false });
+    }
+    if (stepStaticSettle()) {
+        // A rotation that deferred nothing is a whole re-derivation; one that
+        // deferred a node owes the next (mSettleOwed/mSettleStartAt were set
+        // when it deferred).
+        if (!mSettleDeferred) ++mStaticRepromotions;
+    }
+}
+
+/// A WRITE TO A NODE OF THIS DOCUMENT, seen on its change list.
+void SceneMirror::noteSettleWrite(iris::SceneNode *n, Entry *e)
+{
+    // A node still STATIC was not written in the sense that matters (rule 4
+    // demotes a static node on its first transform write): its mark is the
+    // settle's own promotion, a hint replay, a structure change inside the
+    // static half. No quiet clock, nothing owed.
+    if (n->isStaticInGraph()) return;
+    if (!e) {
+        auto it = mEntries.find(n);
+        if (it == mEntries.end()) return;  // not mirrored (the visit refused it)
+        e = &*it;
+    }
+    e->lastWriteSync = mSyncStamp;
+    // OWED only where the rule could put the node back: a node that resolves
+    // static, of a kind that can be static. A movable node written every frame
+    // (an animation, a user-Movable prop) owes nothing, so the walk does not
+    // run under it. THIS IS ON EVERY WRITTEN NODE'S PATH, so it reads what this
+    // sync's visit already resolved (Entry::movable — every caller runs after
+    // the node's visit) instead of resolvedMobility() (an O(depth) walk up the
+    // document) and isStaticEligible() (component and animation probes): paid
+    // per written node they took mirror.scale's 100%-movers sync from 1.35x
+    // the full walk to 2.2x (2,020 nodes; its bar is 1.5x). The kind test is
+    // the eligibility's cheap half; the rest of it (a collision shape without
+    // a body, a socket rider, an avatar wrapper) is left to the walk, which
+    // applies the whole rule — the worst an ineligible written node costs is
+    // one rotation once the document is quiet. A node the visit did not
+    // classify (-1) asks the document.
+    if (e->movable == 1) return;
+    if (n->sceneNodeType != iris::SceneNodeType::Mesh && n->sceneNodeType != iris::SceneNodeType::Empty)
+        return;
+    if (e->movable < 0 && n->resolvedMobility() != iris::Mobility::Static) return;
+    oweSettle(mSyncStamp + kStaticSettleFrames);
+}
+
+/// THE OWE: the rotation may start at `at` (a node's quiet window over) — the
+/// LATEST such time of everything owed, so a drag owes one rotation after it
+/// ends rather than one per pause — but never later than
+/// kStaticSettleMaxWaitSyncs after the owe began (see the constant).
+void SceneMirror::oweSettle(quint32 at)
+{
+    if (!mSettleOwed) {
+        mSettleOwed = true;
+        mSettleOwedSince = mSyncStamp;
+        mSettleStartAt = at;
+    } else if (qint32(at - mSettleStartAt) > 0) {
+        mSettleStartAt = at;
+    }
+}
+
+bool SceneMirror::stepStaticSettle()
+{
+    // PRE-ORDER, children pushed in reverse so they pop in document order:
+    // the visit order of the recursion it replaces, and the one rule 2 needs —
+    // a node is reached only after its parent has been promoted (or not).
+    quint32 visits = 0;
+    while (!mSettleWalk.empty() && visits < kStaticSettleNodesPerSync) {
+        const SettleEntry e = mSettleWalk.back();
+        mSettleWalk.pop_back();
+        const iris::SceneNodePtr n = e.node.toStrongRef();
+        if (!n) continue;                               // died since it was queued
+        // Left the parent it was found under (removed, reparented) since it was
+        // queued: not part of the tree this walk is classifying any more. (The
+        // root's entry has no parent to compare.)
+        if (e.parent
+            && iris::graph::ownerOf(iris::graph::parentOf(n->graphNode())) != e.parent)
+            continue;
+        ++visits;
+        // ITS OWN QUIET WINDOW. Written within kStaticSettleFrames syncs: left
+        // as it is, with its subtree (rule 2 — nothing under a dynamic node can
+        // be static), for the next rotation, which starts once it is quiet.
+        const auto ent = mEntries.constFind(n.data());
+        if (ent != mEntries.cend() && ent->lastWriteSync != 0
+            && mSyncStamp - ent->lastWriteSync < kStaticSettleFrames) {
+            oweSettle(ent->lastWriteSync + kStaticSettleFrames);
+            mSettleDeferred = true;
+            continue;
+        }
+        bool childCarry = false;
+        const bool movable = n->_applyStaticDefaultsStep(e.parentMovable, e.carry, &childCarry);
+        const iris::graph::NodeHandle h = n->graphNode();
+        const std::size_t count = iris::graph::childCount(h);
+        for (std::size_t i = count; i-- > 0;) {
+            if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(h, i)))
+                mSettleWalk.push_back({ c->sharedFromThis().toWeakRef(), n.data(), movable, childCarry });
+        }
+    }
+    mSettleVisits = visits;
+    return mSettleWalk.empty();
+}
+
 /// Queues a character's skinned pieces for a visit this sync.
 void SceneMirror::markPiecesDirty(const QVector<iris::SceneNode *> &pieces)
 {
@@ -1174,8 +1294,9 @@ void SceneMirror::consumeDirty()
         if (!n) continue;               // tombstoned: the node left the document
         // CLEARED BEFORE THE VISIT, so a write the visit itself makes (the
         // mirror's own soft-mobility promotion) is not lost.
-        (void)n->_takeDirtyMask();
-        visitDirty(n);
+        const quint16 mask = n->_takeDirtyMask();
+        const VisitResult v = visitDirty(n);
+        if (mask & kSettleWriteMask) noteSettleWrite(n, v.entry);
     }
     mConsumingDirty = false;
     mDirtyScratch.clear();
@@ -1215,42 +1336,57 @@ void SceneMirror::syncPerFrameSet()
 }
 
 /// THE AMORTISED VERIFIER (§3.8). `mVerifierBudget` entries a sync on a
-/// rotating cursor: a full pass over an 8,404-node scene every ~2.2 s at 60 Hz,
-/// for about a tenth of a millisecond a frame. Any push it makes is a change
-/// the document did not report — counted, named once, and healed by the push
-/// itself, so the screen catches up within one rotation instead of staying
-/// wrong until something else happens to touch the node.
+/// rotating cursor: a full pass over an 8,404-node scene every ~2.2 s at 60 Hz.
+/// Any push it makes is a change the document did not report — counted, named
+/// once, and healed by the push itself, so the screen catches up within one
+/// rotation instead of staying wrong until something else happens to touch the
+/// node.
+///
+/// THE ROTATION IS A LIST OF KEYS, NOT A WALK OF THE HASH (MIRROR-SETTLE-1,
+/// 2026-10-10). It used to skip `mVerifierCursor` QHash buckets from begin()
+/// on every sync — O(cursor), so a STILL frame's cost climbed with the cursor
+/// and fell back at each wrap: a sawtooth of +0.08 ms per rotation at 1,000
+/// nodes (0.063 -> 0.14 ms over 32 syncs, the whole of scenegraph.benchmark's
+/// b.idle_sync dispersion at 1k), growing with the scene. mVerifierOrder holds
+/// every mirrored key: an insertion appends (visitNode, the one place an entry
+/// is born), a release is noticed here when the key no longer resolves and is
+/// swap-removed. A recycled address can leave a duplicate key (the same entry
+/// verified twice a rotation); the wrap rebuilds the list from the hash if it
+/// ever grows past twice the entry count. Each sync is O(budget).
 void SceneMirror::runVerifier()
 {
     if (!mVerifierBudget || mEntries.isEmpty()) return;
-    const quint64 count = quint64(mEntries.size());
-    if (mVerifierCursor >= count) mVerifierCursor = 0;
-    // THE WALK TO THE CURSOR IS O(cursor), and that is a deliberate choice, not
-    // an oversight (the comment that stood here claimed otherwise — lead review
-    // R2 #8). QHash has no random access and no stable iterator across the
-    // insert/erase this map sees every time a node is adopted or released, so
-    // the alternatives are a stored iterator that has to be invalidated at five
-    // seams and re-found anyway, or this: skip to the cursor and take a
-    // contiguous run. The skip is a pointer-chase per bucket with no work in it
-    // — measured inside `mirror.verify`, which is 0.370 ms for the WHOLE pass
-    // on an 8,404-entry map, budget included. The order is stable between
-    // rehashes, and a rehash costs one rotation's coverage, never correctness:
-    // the cursor wraps and every entry is reached again.
-    quint64 i = 0;
+    if (mVerifierCursor >= mVerifierOrder.size()) {
+        mVerifierCursor = 0;
+        if (mVerifierOrder.size() > 2 * std::size_t(mEntries.size()) + 64) {
+            mVerifierOrder.clear();
+            mVerifierOrder.reserve(std::size_t(mEntries.size()));
+            for (auto it = mEntries.cbegin(); it != mEntries.cend(); ++it)
+                mVerifierOrder.push_back(it.key());
+        }
+    }
     unsigned done = 0;
     mParentState.clear();
     mVerifying = true;
     mVerifyMaterialQuota = mVerifierMaterialBudget;
-    for (auto it = mEntries.begin(); it != mEntries.end() && done < mVerifierBudget; ++it, ++i) {
-        if (i < mVerifierCursor) continue;
-        iris::SceneNode *n = it->docNode;
+    while (done < mVerifierBudget && mVerifierCursor < mVerifierOrder.size()) {
+        const iris::SceneNode *key = mVerifierOrder[std::size_t(mVerifierCursor)];
+        const auto it = mEntries.constFind(key);
+        if (it == mEntries.cend()) {
+            // Released since it joined: out of the rotation (the last key takes
+            // its place and is verified in this slot instead).
+            mVerifierOrder[std::size_t(mVerifierCursor)] = mVerifierOrder.back();
+            mVerifierOrder.pop_back();
+            continue;
+        }
+        ++mVerifierCursor;
         ++done;
+        iris::SceneNode *n = it->docNode;
         if (!n) continue;
         visitNode(n, parentShownOf(n), parentMovableOf(n));
     }
     mVerifying = false;
-    mVerifierCursor += done;
-    if (done < mVerifierBudget) mVerifierCursor = 0;   // wrapped
+    if (mVerifierCursor >= mVerifierOrder.size()) mVerifierCursor = 0;   // wrapped
 }
 
 /// THE ORACLE. Runs the whole walk without consuming the change list and
@@ -3041,7 +3177,12 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
     if (mVerifying) ++mVerifierVisits;
     else            ++mVisited;
 
+    const qsizetype entriesBefore = mEntries.size();
     Entry &e = mEntries[node];
+    out.entry = &e;
+    // A NEW entry joins the verifier's rotation (runVerifier); a released one
+    // leaves it lazily, when the rotation finds its key gone.
+    if (mEntries.size() != entriesBefore) mVerifierOrder.push_back(node);
     e.lastSeen = mSyncStamp;
     // ONE TREE (SPECS/SCENEGRAPH_SPEC.md D2). The engine no longer makes a node
     // for a document node — it ADOPTS the document's own, which is already an

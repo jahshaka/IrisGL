@@ -416,15 +416,37 @@ bool canBeStatic(NodeHandle n);
 /// one static pass on the next frame. Never call it per frame.
 bool setStatic(NodeHandle n, bool value);
 
+/// PROMOTES `n` ALONE — n, its attachments and the ENGINE-OWNED nodes hanging
+/// off it (a light's -Y adapter, a decal box: nodes with no document owner,
+/// which have no opinion and ride their owner) — and leaves every DOCUMENT
+/// child where it is. setStatic(n, true) migrates the whole eligible subtree in
+/// one call, which is the right shape for an authoring edit and the wrong one
+/// for a pass that must spend a bounded amount per frame: one call on a group
+/// over 40,000 props is 40,000 migrations on one frame. Here each document
+/// node is its own unit of work, and a top-down caller (the mirror's
+/// incremental settle, SceneMirror::kStaticSettleNodesPerSync) reaches the
+/// children on their own visits — every one of them with a static parent by
+/// then, so every promotion is legal (rule 2) and a child that must stay
+/// dynamic simply is never moved (Ogre: a dynamic child of a static parent is
+/// valid; it is the opposite that is a bug).
+///
+/// THE ENGINE-OWNED CHILDREN follow setStatic's reach exactly: they go when
+/// `n` itself switches here, or when `carry` says an ancestor's switch would
+/// have walked down to `n` (setStatic's subtree walk descends through nodes
+/// that were already static, too) — so a top-down pass of promoteNode lands
+/// the same static set as one setStatic per switched subtree root. `*switched`
+/// reports whether `n` itself changed class.
+///
+/// Promotion only: a DEMOTION must stay a subtree switch (setStatic(n, false)),
+/// because demoting a parent first would leave its static children under a
+/// dynamic parent between two calls. Returns whether `n` is static afterwards;
+/// false (changing nothing) when the switch is illegal (rule 2) or an
+/// attachment refuses (rule 3).
+bool promoteNode(NodeHandle n, bool carry, bool *switched);
+
 /// How many nodes in this process currently live in a SCENE_STATIC manager.
 /// The benchmark asserts on it; nothing else should need it.
 std::size_t staticNodeCount();
-/// How many subtrees a transform write has DEMOTED out of the static half
-/// (rule 4). The counterpart to `transformWrites()` for anything that wants to
-/// put the classification back: a quiet spell is only worth a re-derivation if
-/// something was actually demoted since the last one, and most quiet spells
-/// follow a camera move, an undo or a scene open rather than a drag.
-unsigned long long staticDemotions();
 
 /// Debug/diagnostic: how many live handles this process has made.
 std::size_t liveNodeCount();

@@ -2653,13 +2653,20 @@ bool OgreEngine::memoryStats(MemoryStats &out) const {
                 Ogre::NodeMemoryManager &nmm = sm->_getNodeMemoryManager(type);
                 const size_t depths = nmm.getNumDepths();
                 out.simdNodeDepths += unsigned(depths);
-                // The node pools' USED slots, per hierarchy depth: getFirstNode
-                // answers the count (the document's nodes are DETACHED roots in
-                // the staging manager — createSceneNode, no parent — so a walk
-                // from the Ogre root would miss every one of them).
+                // The node pools per hierarchy depth, read from the pools rather
+                // than walked (the document's nodes are DETACHED roots in the
+                // staging manager — createSceneNode, no parent — so a walk from
+                // the Ogre root would miss every one of them). simdNodes is the
+                // LIVE count (getNumLiveNodes); the USED slots (getFirstNode's
+                // count) include the holes of non-LIFO removals until a level's
+                // cleanup, so their sum moves with the order of past removals —
+                // it is reported apart, as simdNodeSlots (MIRROR-SETTLE-1 fix 6:
+                // 200 removals took the used sum 469 -> 470 with 468 live both
+                // times).
                 for (size_t depth = 0; depth < depths; ++depth) {
                     Ogre::Transform first;
-                    out.simdNodes += unsigned(nmm.getFirstNode(first, depth));
+                    out.simdNodeSlots += unsigned(nmm.getFirstNode(first, depth));
+                    out.simdNodes += unsigned(nmm.getNumLiveNodes(depth));
                 }
                 out.simdObjects += unsigned(sm->_getEntityMemoryManager(type).getTotalNumObjects());
             }
