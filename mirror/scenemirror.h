@@ -330,10 +330,10 @@ public:
     ///  * THE BUDGET: B = 32 was chosen on WALL-CLOCK worsts (B = 48 read a
     ///    wall worst of 0.508 ms; the wall worst runs ~2x the median, a tail of
     ///    preemptions the CPU clock does not count): CPU worst at 50k 0.40-0.47
-    ///    ms in four slot runs — and 0.557 ms in a fifth, beside a sibling
-    ///    tree's build (a loaded box slows the thread's own instructions too).
-    ///    The lead's rule for a CPU worst over the bound: B = 24, never the bar
-    ///    (fix round 6). 50,521 nodes settle in ~2,100 slices (35 s at 60 Hz),
+    ///    ms in four slot runs — and 0.557 ms in a fifth slot run, 2026-10-11
+    ///    12:31, no sibling build or measuring run found on the box. The rule:
+    ///    B is derived on the worst slot reading, and a CPU worst over the bound
+    ///    takes B to 24, never the bar (fix round 6). 50,521 nodes settle in ~2,100 slices (35 s at 60 Hz),
     ///    10k in ~7 s, 1k in ~0.7 s.
     ///  * ORDER IN sync(): the slice runs AFTER the walk / consumeDirty, so it
     ///    only ever sees quiet clocks this sync's writes have already stamped.
