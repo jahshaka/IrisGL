@@ -121,8 +121,8 @@ namespace Ogre
                     StringConverter::toString( height ) + "x" + StringConverter::toString( depth ),
                 GpuPageOutStrategy::Discard, TextureFlags::NotTexture | TextureFlags::Uav,
                 TextureTypes::Type3D );
-            // R32_UINT, nineteen texels per voxel interleaved in Z (VoxelMerge_piece_cs.any,
-            // voxelMergeUvw; the last two the non-casters' coverage per half, FAR-SUN-1): see the history
+            // R32_UINT, twenty texels per voxel interleaved in Z (VoxelMerge_piece_cs.any,
+            // voxelMergeUvw; the last two the casters' coverage per half, FAR-SUN-1): see the history
             // at the voxeliser's own sizing note.
             e.texture->setPixelFormat( PFG_R32_UINT );
             e.texture->setResolution( width, height, depth * kMergeAccumTexels );

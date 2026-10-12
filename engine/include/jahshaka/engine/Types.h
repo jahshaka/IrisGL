@@ -3554,7 +3554,6 @@ enum class OffscreenContract { Undeclared, StillPicture, Live };
 /// without waiting.
 enum class FrameCaptureState { Idle, Armed, InFlight, Ready };
 
-/// What the gather did on the last drawn frame of this scene.
 /// ONE GATHER RAY, AS THE GATHER-HITS INSTRUMENT READ IT (FAR-SUN-1; GatherStatus::rays).
 struct GatherRay {
     /// What answered it (GatherRay::Source), and for the voxels the FINEST cascade that did.
@@ -3571,7 +3570,7 @@ struct GatherRay {
     /// is projected from, before any filter.
     float radiance[3] = { 0.0f, 0.0f, 0.0f };
     /// The hit: its distance (-1 = the sky), its world point (half precision) and its geometric
-    /// normal (snorm8 per component), and THE SUN'S VISIBILITY THERE — the hit's own sun ray against
+    /// normal (snorm8 per component; ZERO for a far hit, which names no triangle), and THE SUN'S VISIBILITY THERE — the hit's own sun ray against
     /// the shadow casters, whatever answered the ray: with the normal's cosine to the sun, the
     /// truth a source's radiance is held against (a chair's side as much as the street).
     float distance = -1.0f;
@@ -3580,6 +3579,7 @@ struct GatherRay {
     float sunVisibility = 0.0f;
 };
 
+/// What the gather did on the last drawn frame of this scene.
 struct GatherStatus {
     /// The scene's row resolved ON: `GiParams::gather` is On and this machine
     /// traces (a ray-capable device, the project's ray row not Off).

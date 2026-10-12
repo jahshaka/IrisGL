@@ -224,7 +224,7 @@ namespace Ogre
         /// PFG_R32_UINT, (mWidth, mHeight, mDepth * 20): twenty texels per voxel,
         /// interleaved in Z, in the fixed-point integers VoxelMerge_piece_cs.any defines
         /// (which also says why R32 texels and not RGBA32 ones: MEASURED, VOXMERGE-2).
-        /// 72 bytes per voxel, 18.9 MB at 64^3 and 151 MB at 128^3, RESIDENT for life since
+        /// 80 bytes per voxel, 21.0 MB at 64^3 and 168 MB at 128^3, RESIDENT for life since
         /// fork ad452604a+0338ca7f2+c4c80b5f7 (was 0071) (the per-build residency round trip
         /// of an image this size was the second Xid 109 site) - and SHARED by every voxeliser
         /// of the same size since SPEED-VR-MEM (acquireMergeAccum in the .cpp, perf audit

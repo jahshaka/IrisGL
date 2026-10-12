@@ -1074,11 +1074,16 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     View &v = mViews[key];
     // THE GATHER-HITS HOST COPY GOES WITH THE ARM (FAR-SUN-1): a readback of a frame the arm no
     // longer covers is no reading (world.gatherHits then answers not ready), held frames included.
-    if (!in.hitsReadback && !v.raysHost.empty()) {
-        v.raysHost.clear();
-        v.raysHost.shrink_to_fit();
-        v.raysHostFrame = 0u;
+    // The pending frames' records are dropped WHENEVER the arm is off - not only once a host copy
+    // exists: an arm on for fewer frames than the retire latency left them pending, and the first
+    // frame after it decoded one (ready for a frame the arm no longer covered).
+    if (!in.hitsReadback) {
         for (unsigned i = 0; i < kFramesInFlight; ++i) v.pending[i].rays = false;
+        if (!v.raysHost.empty()) {
+            v.raysHost.clear();
+            v.raysHost.shrink_to_fit();
+            v.raysHostFrame = 0u;
+        }
     }
     // A SCENE BIND IS A NEW VIEW for the histories: nothing in them is this
     // scene's.
@@ -1326,8 +1331,19 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.knobs4[1] = kWeightFloor;
     pp.knobs4[2] = in.tuning.filterOff ? 0.0f : float(filterRadiusOf(in.tuning));
     pp.knobs4[3] = in.photonOverlay && !in.photonOverlayGatherHits ? 1.0f : 0.0f;   // THE PHOTON VIEW's discs (PHOTON-VIEW-1)
+    // THE GATHER-HITS RECORDS (FAR-SUN-1): one uvec4 per ray of every uniform probe, made on
+    // the first frame the arm asks (and freed with the view's targets), BEFORE the parameters say
+    // the shader may write them: a failed allocation leaves p.hits.x 0 (the stand-in bound at 31
+    // is 256 bytes, and the records are uniformProbes x 1 KiB - no write may reach it).
+    if (in.hitsReadback && !v.rays) {
+        std::string rerr;
+        if (!mHost.gatherMakeBuffer(v.raysSlotBytes(),
+                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false,
+                                    v.rays, v.raysMemory, nullptr, rerr))
+            v.rays = VK_NULL_HANDLE;
+    }
     // THE GATHER-HITS INSTRUMENT (FAR-SUN-1): the records under the arm, the view's picture.
-    pp.hits[0] = in.hitsReadback ? 1.0f : 0.0f;
+    pp.hits[0] = (in.hitsReadback && v.rays) ? 1.0f : 0.0f;
     pp.hits[1] = in.photonOverlay && in.photonOverlayGatherHits ? 1.0f : 0.0f;
     pp.hits[2] = float(v.stride);
     // PHOTON-GATHER-1c: the previous camera, the view's age, the history's floor,
@@ -1466,17 +1482,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     depth.imageView = mHost.gatherLayerView(in.depth, false);
     depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (!normals.imageView || !depth.imageView) return;
-    // THE GATHER-HITS RECORDS (FAR-SUN-1): one uvec4 per ray of every uniform probe, made on
-    // the first frame the arm asks (and freed with the view's targets) - and the host copy goes
-    // when the arm does: a readback of a frame the arm no longer covers is no reading.
-
-    if (in.hitsReadback && !v.rays) {
-        std::string rerr;
-        if (!mHost.gatherMakeBuffer(v.raysSlotBytes(),
-                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false,
-                                    v.rays, v.raysMemory, nullptr, rerr))
-            v.rays = VK_NULL_HANDLE;
-    }
 
     {   // the placement set
         VkWriteDescriptorSet w[kPlaceBindings] = {};
@@ -1523,6 +1528,13 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     sky.imageView = in.sky ? sampledView(in.sky) : dummyCube;
     sky.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (!sky.imageView) return;
+    // THE IRRADIANCE TARGET'S STORAGE VIEW, made once a frame and bound twice: the integrate writes
+    // it, and the trace's binding 32 stands it in for the photon overlay (never written there)
+    // - one view, not a second one created and retired every traced frame.
+    VkDescriptorImageInfo irradianceStore{};
+    irradianceStore.imageView = mHost.gatherLayerView(v.irradiance, true);
+    irradianceStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!irradianceStore.imageView) return;
     {   // the trace set
         VkWriteDescriptorSet w[kTraceBindings] = {};
         for (unsigned i = 0; i < kTraceBindings; ++i) {
@@ -1644,7 +1656,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[kTraceRaysBinding].pBufferInfo = &raysInfo;
         VkDescriptorImageInfo hitsOverlay{};
         hitsOverlay.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        hitsOverlay.imageView = mHost.gatherLayerView(v.irradiance, true);
+        hitsOverlay.imageView = irradianceStore.imageView;
         if (in.photonOverlay && in.photonOverlayGatherHits)
             hitsOverlay.imageView = mHost.gatherLayerView(in.photonOverlay, true);
         if (!hitsOverlay.imageView) return;
@@ -1673,12 +1685,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         vkUpdateDescriptorSets(mHost.gatherDevice(), kFilterBindings, w, 0, nullptr);
     }
 
-    VkDescriptorImageInfo irradianceStore{};
-    {
-        irradianceStore.imageView = mHost.gatherLayerView(v.irradiance, true);
-        irradianceStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        if (!irradianceStore.imageView) return;
-    }
     {   // the integrate set
         VkWriteDescriptorSet w[kIntegrateBindings] = {};
         for (unsigned i = 0; i < kIntegrateBindings; ++i) {

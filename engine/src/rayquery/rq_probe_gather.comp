@@ -202,11 +202,13 @@ void gatherHitPaint( ivec2 cell, ivec2 texel, int octRes, vec4 c )
 	const int eye = jahEyeOfCell( cell.x );
 	const int cx = cell.x - eye * jahEyeGridW();
 	const ivec2 full = ivec2( p.resolution.zw );
-	const int blockPx = max( stride / max( octRes, 1 ), 1 );
+	// texel t covers [t stride / octRes, (t + 1) stride / octRes) of its cell: the map tiles the cell
+	// exactly (a 6 x 6 map in 16 px), and a stride finer than the map paints some texels nowhere,
+	// never into the neighbouring cell's pixels (a race between two probes' pictures).
+	const int res = max( octRes, 1 );
 	const ivec2 base = ivec2( cx, cell.y ) * stride;
-	const ivec2 lo = base + texel * blockPx;
-	// the last texel of a row or column covers the cell's remainder (a 6 x 6 map in 16 px)
-	const ivec2 hi = min( mix( lo + blockPx, base + stride, greaterThanEqual( texel, ivec2( octRes - 1 ) ) ), full );
+	const ivec2 lo = base + ( texel * stride ) / res;
+	const ivec2 hi = min( base + ( ( texel + 1 ) * stride ) / res, full );
 	for( int y = lo.y; y < hi.y; ++y )
 		for( int x = lo.x; x < hi.x; ++x )
 			imageStore( photonOverlay, ivec3( x, y, eye ), c );
@@ -430,7 +432,9 @@ void main()
 			if( p.hits.x > 0.5 )
 			{
 				const vec3 hp = hit ? origin + dir * tHit : vec3( 0.0 );
-				const vec3 hn = hit ? clamp( hitN, vec3( -1.0 ), vec3( 1.0 ) ) : vec3( 0.0 );
+				// a FAR hit names no triangle (its hitN is the ray's reverse, not a geometric normal):
+				// it records a zero normal, so no reader files it as a surface facing any way
+				const vec3 hn = ( hit && !far ) ? clamp( hitN, vec3( -1.0 ), vec3( 1.0 ) ) : vec3( 0.0 );
 				const uint word = ( source & 0xFu ) | ( uint( cascade & 0xF ) << 4u ) |
 								  ( uint( clamp( hitSun, 0.0, 1.0 ) * 255.0 + 0.5 ) << 8u ) |
 								  ( ( uint( int( round( hn.y * 127.0 ) ) ) & 0xFFu ) << 16u ) | ( 1u << 24u );
