@@ -77,9 +77,12 @@ public:
         return std::max(d, Ogre::Real(0)) * perPixel * meshUnits;
     }
 
+    /// `padding` is the object memory manager's dummy, the owner of every unused slot of
+    /// the range (fork LOD-RACE-1): `lodSet` skips it, so no two SceneManager workers ever
+    /// write the one object their ranges' padding shares.
     void lodUpdateImpl(const size_t numNodes, Ogre::ObjectData objData,
                        const Ogre::Camera *camera, Ogre::Real bias,
-                       Ogre::Real hysteresis) const override
+                       Ogre::Real hysteresis, const Ogre::MovableObject *padding) const override
     {
         OGRE_ALIGNED_DECL(Ogre::Real, lodValues[ARRAY_PACKED_REALS], OGRE_SIMD_ALIGNMENT);
         const Ogre::Real perPixel = worldPerPixel(camera) * camera->_getLodBiasInverse() * bias;
@@ -111,7 +114,7 @@ public:
                     reinterpret_cast<const Ogre::ArrayReal * RESTRICT_ALIAS>(objData.mWorldRadius);
                 const Ogre::ArrayReal v = flat * meshUnitsPerWorldUnit(*localRadius, *worldRadius);
                 CastArrayToReal(lodValues, v);
-                lodSet(objData, lodValues, hysteresis);
+                lodSet(objData, lodValues, hysteresis, padding);
                 objData.advanceLodPack();
                 localRadiusPtr += ARRAY_PACKED_REALS;
             }
@@ -138,7 +141,7 @@ public:
             CastArrayToReal(lodValues, v);
             // The band is THIS PASS'S (fork 5230c9390+8282f6d70 (was 0075)): the value is the same
             // arithmetic for every pass, the band is not.
-            lodSet(objData, lodValues, hysteresis);
+            lodSet(objData, lodValues, hysteresis, padding);
             objData.advanceLodPack();
             localRadiusPtr += ARRAY_PACKED_REALS;
         }
