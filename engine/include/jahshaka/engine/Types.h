@@ -3570,12 +3570,13 @@ struct GatherRay {
     /// (so a decode record's answer is in it; a dropped one reads 0) — the rgb the probe's SH
     /// is projected from, before any filter.
     float radiance[3] = { 0.0f, 0.0f, 0.0f };
-    /// The hit: its distance (-1 = the sky), its world point and its geometric normal's y
-    /// (both half precision), and THE SUN'S VISIBILITY THERE — the hit's own sun ray against the
-    /// shadow casters, whatever answered the ray: the truth a source's radiance is held against.
+    /// The hit: its distance (-1 = the sky), its world point (half precision) and its geometric
+    /// normal (snorm8 per component), and THE SUN'S VISIBILITY THERE — the hit's own sun ray against
+    /// the shadow casters, whatever answered the ray: with the normal's cosine to the sun, the
+    /// truth a source's radiance is held against (a chair's side as much as the street).
     float distance = -1.0f;
     float hitPos[3] = { 0.0f, 0.0f, 0.0f };
-    float hitNormalY = 0.0f;
+    float hitNormal[3] = { 0.0f, 0.0f, 0.0f };
     float sunVisibility = 0.0f;
 };
 

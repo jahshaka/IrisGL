@@ -163,7 +163,9 @@ layout( std430, set = 0, binding = 22 ) buffer JahHitBuf { uint jahHitBuf[]; };
 ///       voxels, 3 the sky, 4 a decode record, 5 a FAR decode record, 6 a dropped record) | the
 ///       answering cascade << 4 (the voxels) | the hit's sun visibility, unorm8 << 8 | the hit
 ///       normal's y, snorm8 << 16 | 1 << 24 (the probe traced this ray); y = the ray's
-///       quadrature re-weight (float bits: the atlas texel over it is the radiance returned);
+///       quadrature re-weight, half precision (the atlas texel over it is the radiance
+///       returned) | the hit normal's x, snorm8 << 16 | its z, snorm8 << 24 (the whole normal:
+///       a hit's truth is its own cosine to the sun, a chair's side as much as the street);
 ///       z = packHalf2x16( the hit's x, y ), w = packHalf2x16( the hit's z, the distance ).
 ///   32  the photon view's overlay (the GatherHits view, p.hits.y): every uniform probe's cell
 ///       painted ray by ray, one octahedral texel to one block of the cell, in its source's
@@ -428,12 +430,15 @@ void main()
 			if( p.hits.x > 0.5 )
 			{
 				const vec3 hp = hit ? origin + dir * tHit : vec3( 0.0 );
-				const float ny = hit ? clamp( hitN.y, -1.0, 1.0 ) : 0.0;
+				const vec3 hn = hit ? clamp( hitN, vec3( -1.0 ), vec3( 1.0 ) ) : vec3( 0.0 );
 				const uint word = ( source & 0xFu ) | ( uint( cascade & 0xF ) << 4u ) |
 								  ( uint( clamp( hitSun, 0.0, 1.0 ) * 255.0 + 0.5 ) << 8u ) |
-								  ( ( uint( int( round( ny * 127.0 ) ) ) & 0xFFu ) << 16u ) | ( 1u << 24u );
+								  ( ( uint( int( round( hn.y * 127.0 ) ) ) & 0xFFu ) << 16u ) | ( 1u << 24u );
+				const uint weightNormal = ( packHalf2x16( vec2( reweight, 0.0 ) ) & 0xFFFFu ) |
+										  ( ( uint( int( round( hn.x * 127.0 ) ) ) & 0xFFu ) << 16u ) |
+										  ( ( uint( int( round( hn.z * 127.0 ) ) ) & 0xFFu ) << 24u );
 				jahGatherRays[probe * uint( kOctResMax * kOctResMax ) + lane] =
-					uvec4( word, floatBitsToUint( reweight ), packHalf2x16( hp.xy ),
+					uvec4( word, weightNormal, packHalf2x16( hp.xy ),
 						   packHalf2x16( vec2( hp.z, distance ) ) );
 			}
 			if( p.hits.y > 0.5 )
