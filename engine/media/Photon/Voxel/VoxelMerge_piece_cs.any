@@ -74,29 +74,6 @@
 		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 20u + chan );
 	}
 
-	/// THE CASTER SHARE, PER HALF-AXIS (FAR-SUN-1). Every surface is in the store - it bounces
-	/// light whether or not it casts a shadow - but only a shadow CASTER may stop a light's march
-	/// (the light injection's jahInjectVisibility), exactly as only a caster is drawn into the
-	/// shadow maps (GpuScene.h kGpuCaster: castShadow AND a caster channel, the one set both read).
-	/// Kept PER HALF-AXIS, beside the coverage it qualifies: the non-casters' coverage of the faces
-	/// looking +a / -a (the coverage's own packing, +18 and +19) over all of it, so a casting wall
-	/// beside an equal area of non-casting floor keeps its whole x occlusion (one share for the
-	/// voxel would halve it and leak sun at the wall's foot). The three shares of a half are packed
-	/// 5 bits each into that half's SURFACE POSITION alpha (16-bit UNORM, otherwise unused; the
-	/// light injection's jahInjectCasterShare unpacks them): 31 = 1.0 exactly, so an all-caster voxel marches as before, bit for bit.
-	INLINE float voxelMergeCasterShare( uint nonCasterPacked, uint coveragePacked )
-	{
-		const float3 nc = float3( voxelMergeAxisUnpack( nonCasterPacked ) );
-		const float3 all = float3( voxelMergeAxisUnpack( coveragePacked ) );
-		uint packed = 0u;
-		for( int a = 0; a < 3; ++a )
-		{
-			const float share = all[a] > 0.0f ? 1.0f - min( nc[a], all[a] ) / all[a] : 1.0f;
-			packed |= uint( share * 31.0f + 0.5f ) << uint( 5 * a );
-		}
-		return float( packed ) / 65535.0f;
-	}
-
 
 	/// THE TWO NORMAL SUMS, AND WHY THERE ARE TWO.
 	///
@@ -269,6 +246,28 @@
 	INLINE uint3 voxelMergeAxisUnpack( uint packed )
 	{
 		return uint3( packed & 0x7FFu, ( packed >> 11u ) & 0x7FFu, packed >> 22u );
+	}
+	/// THE CASTER SHARE, PER HALF-AXIS (FAR-SUN-1). Every surface is in the store - it bounces
+	/// light whether or not it casts a shadow - but only a shadow CASTER may stop a light's march
+	/// (the light injection's jahInjectVisibility), exactly as only a caster is drawn into the
+	/// shadow maps (GpuScene.h kGpuCaster: castShadow AND a caster channel, the one set both read).
+	/// Kept PER HALF-AXIS, beside the coverage it qualifies: the non-casters' coverage of the faces
+	/// looking +a / -a (the coverage's own packing, +18 and +19) over all of it, so a casting wall
+	/// beside an equal area of non-casting floor keeps its whole x occlusion (one share for the
+	/// voxel would halve it and leak sun at the wall's foot). The three shares of a half are packed
+	/// 5 bits each into that half's SURFACE POSITION alpha (16-bit UNORM, otherwise unused; the
+	/// light injection's jahInjectCasterShare unpacks them): 31 = 1.0 exactly, so an all-caster voxel marches as before, bit for bit.
+	INLINE float voxelMergeCasterShare( uint nonCasterPacked, uint coveragePacked )
+	{
+		const float3 nc = float3( voxelMergeAxisUnpack( nonCasterPacked ) );
+		const float3 all = float3( voxelMergeAxisUnpack( coveragePacked ) );
+		uint packed = 0u;
+		for( int a = 0; a < 3; ++a )
+		{
+			const float share = all[a] > 0.0f ? 1.0f - min( nc[a], all[a] ) / all[a] : 1.0f;
+			packed |= uint( share * 31.0f + 0.5f ) << uint( 5 * a );
+		}
+		return float( packed ) / 65535.0f;
 	}
 	INLINE uint voxelMergeAxisAddSat( uint packed, uint3 add )
 	{
