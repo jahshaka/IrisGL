@@ -407,11 +407,11 @@
 	// ceiling wall 0.77 opaque along its own normal.
 	float3 invAxisFaceArea = 1.0f / ( p_voxelCellSize.yzx * p_voxelCellSize.zxy );
 	uint accumWeight = 0u;
-	// Jahshaka (FAR-SUN-1): THE AREA OF THE SURFACES THAT CAST NO SHADOW, on the same grid as
-	// accumWeight - the share of the voxel's coverage the light injection's march must not
-	// count as an occluder (VoxelMerge_piece_cs.any, THE CASTER SHARE).
-	uint3 accNonCasterP = uint3( 0u, 0u, 0u );
-	uint3 accNonCasterN = uint3( 0u, 0u, 0u );
+	// Jahshaka (FAR-SUN-1): THE CASTERS' COVERAGE per half-axis, on the coverage's own grid - the
+	// part of the voxel's coverage the light injection's march may count as an occluder
+	// (VoxelMerge_piece_cs.any, THE CASTER SHARE).
+	uint3 accCasterP = uint3( 0u, 0u, 0u );
+	uint3 accCasterN = uint3( 0u, 0u, 0u );
 	// Jahshaka (PHOTON-VOXEL-3): THE VOXEL'S COVERAGE PER AXIS - the surface's
 	// area inside the voxel PROJECTED onto each axis, over the voxel's face area,
 	// times the material's opacity: sum of w * alpha * |n . axis| on
@@ -565,10 +565,10 @@
 							const float3 contribN = max( -geoN, float3( 0.0f, 0.0f, 0.0f ) ) * axisScale;
 							accAxisP += voxelMergeAxisQuantize( contribP );
 							accAxisN += voxelMergeAxisQuantize( contribN );
-							if( instance.mesh.caster == 0u )
+							if( instance.mesh.caster != 0u )
 							{
-								accNonCasterP += voxelMergeAxisQuantize( contribP );
-								accNonCasterN += voxelMergeAxisQuantize( contribN );
+								accCasterP += voxelMergeAxisQuantize( contribP );
+								accCasterN += voxelMergeAxisQuantize( contribN );
 							}
 							const float3 cellLocal =
 								saturate( ( pieceCentroid - voxelLo ) / p_voxelCellSize );
@@ -624,11 +624,11 @@
 		uint  sumAxisN	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 15u ) ).x;
 		uint  sumPosP	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 16u ) ).x;
 		uint  sumPosN	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 17u ) ).x;
-		// FAR-SUN-1: the non-casters' area (+18), saturating like the others.
-		uint  sumNonCasterP	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 18u ) ).x,
-												accNonCasterP );
-		uint  sumNonCasterN	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 19u ) ).x,
-												accNonCasterN );
+		// FAR-SUN-1: the casters' coverage (+18 looking +a, +19 looking -a), saturating like the others.
+		uint  sumCasterP	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 18u ) ).x,
+												accCasterP );
+		uint  sumCasterN	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 19u ) ).x,
+												accCasterN );
 		@foreach( 4, c )
 			sumAlbedo[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, @c ) ).x;
 		@end
@@ -669,8 +669,8 @@
 		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 15u ), uint4( sumAxisN, 0u, 0u, 0u ) );
 		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 16u ), uint4( sumPosP, 0u, 0u, 0u ) );
 		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 17u ), uint4( sumPosN, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 18u ), uint4( sumNonCasterP, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 19u ), uint4( sumNonCasterN, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 18u ), uint4( sumCasterP, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 19u ), uint4( sumCasterN, 0u, 0u, 0u ) );
 		@foreach( 3, c )
 			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 4u + @c ),
 								uint4( sumNormal[@c], 0u, 0u, 0u ) );
@@ -700,8 +700,8 @@
 			OGRE_imageWrite3D4( voxelCoverageNTex, voxelCelUvw, float4( voxelCoverageN, 0.0f ) );
 			// FAR-SUN-1: THE CASTER SHARE in both position halves' alpha (16 bits; otherwise
 			// unused - VoxelMerge_piece_cs.any).
-			const float casterShareP = voxelMergeCasterShare( sumNonCasterP, sumAxisP );
-			const float casterShareN = voxelMergeCasterShare( sumNonCasterN, sumAxisN );
+			const float casterShareP = voxelMergeCasterShare( sumCasterP, sumAxisP );
+			const float casterShareN = voxelMergeCasterShare( sumCasterN, sumAxisN );
 			// PHOTON-VOXEL-4: the surface position per half-axis, O-premultiplied, absolute.
 			const float3 invRes = float3( 1.0f, 1.0f, 1.0f ) / float3( imageSize( voxelPositionPTex ) );
 			OGRE_imageWrite3D4( voxelPositionPTex, voxelCelUvw,

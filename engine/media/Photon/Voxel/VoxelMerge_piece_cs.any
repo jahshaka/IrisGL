@@ -46,8 +46,8 @@
 	/// packed into +14 (the faces looking +x, +y, +z) and +15 (looking -x, -y, -z)
 	/// (PHOTON-VOXEL-3/-4, THE DIRECTIONAL COVERAGE below) and the matching
 	/// POSITION-WEIGHTED sums into +16 and +17 (PHOTON-VOXEL-4, THE SURFACE POSITION
-	/// below), and the NON-CASTERS' AREA into +18 (FAR-SUN-1, THE CASTER SHARE below):
-	/// nineteen. Nineteen because only nineteen carry anything — a fourth
+	/// below), and the CASTERS' COVERAGE into +18 and +19 (FAR-SUN-1, THE CASTER SHARE
+	/// below): twenty. Twenty because only twenty carry anything — a fourth
 	/// channel on the three vectors would be 25 MB read and written for nothing
 	/// at 128^3.
 	/// Interleaved rather than stacked planes so the shader needs no knowledge of
@@ -251,20 +251,23 @@
 	/// light whether or not it casts a shadow - but only a shadow CASTER may stop a light's march
 	/// (the light injection's jahInjectVisibility), exactly as only a caster is drawn into the
 	/// shadow maps (GpuScene.h kGpuCaster: castShadow AND a caster channel, the one set both read).
-	/// Kept PER HALF-AXIS, beside the coverage it qualifies: the non-casters' coverage of the faces
-	/// looking +a / -a (the coverage's own packing, +18 and +19) over all of it, so a casting wall
-	/// beside an equal area of non-casting floor keeps its whole x occlusion (one share for the
-	/// voxel would halve it and leak sun at the wall's foot). The three shares of a half are packed
-	/// 5 bits each into that half's SURFACE POSITION alpha (16-bit UNORM, otherwise unused; the
-	/// light injection's jahInjectCasterShare unpacks them): 31 = 1.0 exactly, so an all-caster voxel marches as before, bit for bit.
-	INLINE float voxelMergeCasterShare( uint nonCasterPacked, uint coveragePacked )
+	/// The march reads the half's CAPPED coverage o = min( S, 1 ) times this share, so the share is
+	/// min( Sc, 1 ) / min( S, 1 ) - Sc the casters' coverage of the faces looking +a / -a (+18 and
+	/// +19, the coverage's own packing), S all of it - and o x share is min( Sc, 1 ): a casting wall
+	/// beside a non-casting panel in one cell stays opaque (a share of the RAW sums, 1 - S_nc / S,
+	/// scaled the capped coverage and let half the sun through it), and only the casters alone can
+	/// saturate it. The three shares of a half are packed 5 bits each into that half's SURFACE
+	/// POSITION alpha (16-bit UNORM, otherwise unused; the light injection's jahInjectCasterShare
+	/// unpacks them): 31 = 1.0 exactly when every surface casts, so an all-caster voxel marches as
+	/// before, bit for bit.
+	INLINE float voxelMergeCasterShare( uint casterPacked, uint coveragePacked )
 	{
-		const float3 nc = float3( voxelMergeAxisUnpack( nonCasterPacked ) );
-		const float3 all = float3( voxelMergeAxisUnpack( coveragePacked ) );
+		const float3 sc = min( float3( voxelMergeAxisUnpack( casterPacked ) ), float3( 512.0f, 512.0f, 512.0f ) );
+		const float3 all = min( float3( voxelMergeAxisUnpack( coveragePacked ) ), float3( 512.0f, 512.0f, 512.0f ) );
 		uint packed = 0u;
 		for( int a = 0; a < 3; ++a )
 		{
-			const float share = all[a] > 0.0f ? 1.0f - min( nc[a], all[a] ) / all[a] : 1.0f;
+			const float share = all[a] > 0.0f ? min( sc[a], all[a] ) / all[a] : 1.0f;
 			packed |= uint( share * 31.0f + 0.5f ) << uint( 5 * a );
 		}
 		return float( packed ) / 65535.0f;
