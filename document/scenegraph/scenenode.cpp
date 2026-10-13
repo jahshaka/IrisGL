@@ -846,12 +846,18 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
         // R * S^-1, which is R only at scale 1 — and the scale from the column
         // lengths, so reparenting a non-uniformly scaled node rotated it.)
         //
-        // The write below is rule 4's "a transform write demotes" firing on a
-        // node that did not move in any sense the user would name — its world
-        // pose is preserved by construction. Re-assert the graph class after;
-        // _applyStaticHint validates eligibility under the NEW parent itself.
+        // A RE-EXPRESSION, NOT A MOVE (nodegraph.h rule 4, ReexpressScope): the
+        // world pose is preserved by construction, so the write keeps the node's
+        // class — Ogre's static pass re-derives the subtree once. (It used to fire
+        // rule 4's demotion and re-promote right after: 2 x the subtree's nodes in
+        // class switches per reparent.) The hint below still re-asserts the class
+        // for a node attach() had to demote under a dynamic parent — eligibility
+        // is validated under the NEW parent.
         const bool wantedStatic = node->wantsStatic();
-        node->setGlobalTransform(initialGlobalTransform);
+        {
+            graph::ReexpressScope reexpress;
+            node->setGlobalTransform(initialGlobalTransform);
+        }
         // _applyStaticHint, not setMobility: a plain reparent of a
         // policy-derived static node must not stamp a USER decision (which the
         // serializer persists) into the file.

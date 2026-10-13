@@ -250,6 +250,8 @@ bool eligibleStaticParent(Ogre::Node *p)
 
 /// staticSwitchCount(): nodes that changed memory-manager class (switchOne's one Node::setStatic each).
 std::atomic<unsigned long long> gStaticSwitches{0};
+/// ReexpressScope's depth on this thread (graph writes happen on the document's thread).
+thread_local int gReexpressDepth = 0;
 
 /// Switches ONE node, attachments included, without SceneNode::setStatic's
 /// half-way failure mode: that one migrates the node FIRST and only then
@@ -897,7 +899,16 @@ inline void markMoved(Ogre::SceneNode *n)
         gTransformWrites.fetch_add(1, std::memory_order_relaxed);
         journalWrite(n);
     }
-    if (n->isStatic()) { promoteOnWrite(n); return; }
+    if (n->isStatic()) {
+        // A RE-EXPRESSION (ReexpressScope) keeps the world pose: Ogre's static pass re-derives the subtree
+        // once from the new parent, and nothing changes class (rule 4 is for a pose that moved).
+        if (gReexpressDepth > 0) {
+            if (n->getCreator()) n->getCreator()->notifyStaticDirty(n);
+            return;
+        }
+        promoteOnWrite(n);
+        return;
+    }
     // The root-moved case (see promoteStaticChildren). Two loads, and only in a
     // process that has static nodes at all.
     if (gStaticNodes && isDocumentRoot(n)) promoteStaticChildren(n);
@@ -1112,6 +1123,9 @@ unsigned long long staticSwitchCount()
 {
     return gStaticSwitches.load(std::memory_order_relaxed);
 }
+
+ReexpressScope::ReexpressScope() { ++gReexpressDepth; }
+ReexpressScope::~ReexpressScope() { --gReexpressDepth; }
 
 Mat4 localTransform(NodeHandle n)
 {

@@ -427,6 +427,11 @@ bool isStatic(NodeHandle n);
 //     that: since mobility (REALTIME_REFLECTIONS_SPEC §3.3) the user's
 //     Static/Movable setting survives a move, because an editor drag is
 //     authoring and must not silently rewrite the renderer's classification.
+//     A RE-EXPRESSION IS NOT A MOVE (ENGINE-UPGRADE-1 stage 2b): a write inside a
+//     ReexpressScope keeps the node's WORLD pose by construction (a reparent with
+//     keepTransform re-states it in the new parent's space) — it changes no pose,
+//     so it changes no staticness: the static node is marked static-dirty (one
+//     static pass at its depth, Ogre's own path) instead of demoted.
 
 /// True when `n` may legally be static: its parent is static, or its parent is
 /// the DOCUMENT ROOT (a document node whose own parent is the scene manager's
@@ -440,6 +445,17 @@ bool canBeStatic(NodeHandle n);
 /// This is an AUTHORING-TIME call: switching costs a migration per node plus
 /// one static pass on the next frame. Never call it per frame.
 bool setStatic(NodeHandle n, bool value);
+
+/// THE WRITES INSIDE RE-EXPRESS A POSE, THEY DO NOT MOVE IT (rule 4's exception): while one is alive on this
+/// thread, a transform write to a static node notifies Ogre's static pass instead of demoting the subtree.
+/// SceneNode::insertChild's keepTransform write is the one user — before it, reparenting a 500-node static
+/// fragment cost 1,000 class switches (500 demoted by the write, 500 re-promoted by the hint after it).
+struct ReexpressScope {
+    ReexpressScope();
+    ~ReexpressScope();
+    ReexpressScope(const ReexpressScope &) = delete;
+    ReexpressScope &operator=(const ReexpressScope &) = delete;
+};
 
 /// PROMOTES `n` ALONE — n, its attachments and the ENGINE-OWNED nodes hanging
 /// off it (a light's -Y adapter, a decal box: nodes with no document owner,
