@@ -676,8 +676,30 @@ void SceneMirror::onMaterialItemsRebuilt(MaterialId material)
     ++mMaterialItemSerial[material];
 }
 
+void SceneMirror::setAttachBudget(int meshes, std::size_t vertices)
+{
+    mBudgetMeshes = qMax(1, meshes);
+    mBudgetVertices = vertices;
+}
+
 int SceneMirror::sync()
 {
+    // THE BUDGET IS ONE SHOT (setAttachBudget): whatever this sync does, the
+    // next one is unbounded unless its caller asks again.
+    struct BudgetSpend {
+        SceneMirror *m;
+        explicit BudgetSpend(SceneMirror *mirror) : m(mirror)
+        {
+            m->mBuiltMeshes = 0;
+            m->mBuiltVertices = 0;
+            m->mAttachesOwedThisSync = 0;
+        }
+        ~BudgetSpend()
+        {
+            m->mAttachesOwed = m->mAttachesOwedThisSync;
+            m->mBudgetMeshes = -1;
+        }
+    } spend(this);
     if (!mSource || !mSource->getRootNode()) return 0;
     // RE-TAKE the graph if another mirror took this document while we were not
     // looking. NOTHING IN THE TREE DOES THAT ANY MORE (lane PLAYER-1, owner
@@ -3364,6 +3386,18 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
                 e.shadingModelPushed = -1;   // the family is the same; the model may not be
             }
         }
+        // THE ATTACH BUDGET (setAttachBudget, finding 9): a node whose mesh is
+        // not built yet, once this sync has built its share, waits for the next
+        // sync — marked changed, so the change list brings it back — and
+        // nothing of it is created now (its material neither). A rigged node is
+        // never deferred (its engine mesh is keyed by the rig, and characters
+        // are few).
+        if (mesh && !e.hasMesh && e.skeleton.isNull() && attachBudgetSpent() &&
+            !mMeshes.contains(qMakePair(mesh, QString()))) {
+            node->markChanged(iris::NodeChange::Content);
+            ++mAttachesOwedThisSync;
+            ++mAttachesDeferredTotal;
+        } else
         if (mesh && (!e.hasMesh || e.materialPtr != material || e.meshPtr != mesh || rigStale)) {
             // ONE memo probe for the whole branch — materialFor reads the same
             // entry, and the reference stays valid because nothing between here
@@ -4259,6 +4293,8 @@ MeshId SceneMirror::meshFor(iris::Mesh *mesh, const QString &rigId)
         data.blendWeights = bw;
     }
     MeshId id = mTarget->createMesh(data);
+    ++mBuiltMeshes;
+    mBuiltVertices += data.vertexCount();
     if (id) mMeshes.insert(key, id);
     return id;
 }
