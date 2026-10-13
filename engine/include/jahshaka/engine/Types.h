@@ -5133,6 +5133,10 @@ struct GiVoxelVolume {
     /// faces looking +a take the front where n_a > 0, the back where n_a < 0.
     std::vector<float> lightBack;
     std::vector<float> normal;
+    /// THE DIRECT VOLUME (FAR-SUN-2), level 0, premultiplied like `light`: every lamp's direct
+    /// term and the emissive - what a hit's read takes out of the store (jah_rq_hit.glsl's bounce
+    /// share 1 - D / T). Empty where the cascade keeps none (no bounce texture).
+    std::vector<float> direct;
 };
 
 // ---------------------------------------------------------------------------

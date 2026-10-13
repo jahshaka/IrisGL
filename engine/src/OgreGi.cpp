@@ -1605,6 +1605,10 @@ bool OgreScene::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
             Ogre::TextureGpu *nrm = voxelizer->getNormalVox();
             if (!back || !nrm || !grab(back, out.lightBack) || !grab(nrm, out.normal)) return false;
         }
+        // FAR-SUN-2: the DIRECT volume beside the total (level 0; empty where the cascade keeps none)
+        out.direct.clear();
+        if (Ogre::TextureGpu *direct = lighting->getLightDirectTexture())
+            if (direct->getResidencyStatus() == Ogre::GpuResidency::Resident && !grab(direct, out.direct)) return false;
         out.width = int(total->getWidth());
         out.height = int(total->getHeight());
         out.depth = int(total->getDepth());
