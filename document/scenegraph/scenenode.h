@@ -71,6 +71,13 @@ enum class NodeChange {
 
 /// How many NodeChange kinds there are (the width of a node's dirty mask).
 const unsigned kNodeChangeCount = unsigned(NodeChange::Params) + 1u;
+/// A change of what a node HOLDS (NodeDirtySet::contentSerial): its place in
+/// the tree, its mesh / material / skeleton pointer, or a subclass parameter.
+inline bool nodeChangeIsContent(NodeChange what)
+{
+    return what == NodeChange::Structure || what == NodeChange::Content ||
+           what == NodeChange::Params;
+}
 /// The one bit for a kind.
 inline quint16 nodeChangeBit(NodeChange what) { return quint16(1u << unsigned(what)); }
 /// ...and the SECOND bit, "this kind was already cascaded over my subtree".
@@ -511,6 +518,9 @@ public:
     {
         if (mDirtySet == set) return;
         mDirtySet = set;
+        // Joining a scene is a change of what it holds (the serials' readers
+        // rescan; see NodeDirtySet::noteChange).
+        if (mDirtySet) mDirtySet->noteChange(true);
         mDirtyMask = 0;
         mQueued = false;
         mDirtySlot = 0;
@@ -1077,6 +1087,7 @@ protected:
     void notifyChanged(NodeChange what)
     {
         if (!mDirtySet) return;
+        mDirtySet->noteChange(nodeChangeIsContent(what));
         const quint16 bit = nodeChangeBit(what);
         if (mDirtyMask & bit) return;
         mDirtyMask |= bit;

@@ -88,6 +88,8 @@ SceneNode::SceneNode()
 void SceneNode::notifyChangedSubtree(NodeChange what)
 {
     if (!mDirtySet) return;
+    // The serials move on every call, pruned or not (NodeDirtySet::noteChange).
+    mDirtySet->noteChange(nodeChangeIsContent(what));
     // PRUNED ON THE SUBTREE BIT, never on the plain one: this node has already
     // been cascaded for this kind, so its whole subtree carries the mark and a
     // second cascade over the same branch costs one test. (A reader that hides
