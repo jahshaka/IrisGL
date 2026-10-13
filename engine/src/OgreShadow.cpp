@@ -1548,15 +1548,16 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // account for the frame within 5% (`monitor_passes_sum_to_the_frame`),
         // and this work is real CPU inside renderOneFrame that belongs to no
         // compositor pass — unattributed, it read as frame time nobody spent.
-        // THE GPU SCENE, immediately before its first reader and for the same
-        // reason the ray tier runs here: this is the frame's one point where the
-        // scene graph is current and nothing has rendered. `graphIsCurrent` is
-        // what makes the compare a cached read instead of a recompute up every
-        // parent chain (1.0 ms against 3.0 at 8,001 items, measured), and this
-        // is the ONLY caller today — the GI signature walk was deliberately not
-        // converted, because it is read BEFORE the frame where only the
-        // expensive form is correct. It reports its own monitor stage,
-        // `engine.gpuscene`.
+        // THE GPU SCENE'S SUBSTRATE, immediately before its first reader in the
+        // frame and for the same reason the ray tier runs here: this is the frame's
+        // one point where the scene graph is current and nothing has rendered. The
+        // frame's read is a COMPOSE (the frame's walk — the dirty scan, a
+        // UniformScalableTask on the scene's workers — unless a GI build before
+        // the frame already ran it, and every mark since), the RAY LEVELS patching
+        // the mirror, then ONE COMMIT into the frame's copy of the instance table
+        // (GpuSceneSubstrate.h). The commit is recorded before any workspace pass:
+        // the frame's first GPU work after the graph. Its monitor stage is
+        // `engine.gpuscene` (the compose and the commit).
         // THE PBS CHANGE LOG FIRST (ATOM-CPU-WALKS-1): the Items an in-place
         // material edit re-hashed are marked here, so the scan below re-composes
         // them — route, queue, word, flags — in this frame.
@@ -1564,7 +1565,7 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // every reader of an Item's datablock: a flag test for a scene with none.
         for (OgreScene *s : drawn) s->sweepCullTwins();
         drainPbsChanges();
-        for (OgreScene *s : drawn) s->ensureGpuScene(/*graphIsCurrent=*/true);
+        for (OgreScene *s : drawn) s->composeGpuSceneFrame();
         // THE RAY LEVEL (ATOM P3's AT-A8r), immediately after the table it
         // writes into and before the ray tier that will one day read it. The
         // eye and the projection come from the FIRST ENABLED VIEW that draws
@@ -1593,14 +1594,9 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                 break;
             }
         }
-        // THE VISIBILITY BUFFER'S FRAME HALF (ATOM S3-DRAW): the screen decode's
-        // draws follow the words the split's items wear, here, outside the
-        // compositor and after the table the split writes into. ITS OWN MONITOR
-        // STAGE (lane D1-SCALE-FIXTURES, W13: the words walk + sort on a mover).
-        {
-            monitor::Stage wordsStage("engine.atomwords");
-            for (OgreScene *s : drawn) s->updateAtomDraw();
-        }
+        // THE FRAME'S ONE COMMIT: the composed slots and the ray-level patches, in one
+        // staging map, into the frame's copy — before the ray tier reads it.
+        for (OgreScene *s : drawn) s->commitGpuSceneFrame();
         {
             const auto rqStart = std::chrono::steady_clock::now();
             updateRayQuery(drawn);
@@ -1609,10 +1605,13 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                                          std::chrono::duration<double, std::milli>(
                                              std::chrono::steady_clock::now() - rqStart).count());
         }
-        // ...AND AGAIN AFTER THE RAY TIER, whose own witness may have moved a twin
-        // this frame (its hit sync re-derives only the HIT draws): the screen decode
-        // must hold a draw for every atom word before anything renders. Two compares
-        // when nothing moved.
+        // THE VISIBILITY BUFFER'S FRAME HALF (ATOM S3-DRAW), ONCE: the screen
+        // decode's draws follow the words the split's items wear, here, outside the
+        // compositor, after the table the split writes into and after the ray tier
+        // (whose hit sync makes the twins its own words need — it never forgets one:
+        // a twin leaves only at the frame's PBS drain, above, or at a material
+        // seam between frames). ITS OWN MONITOR STAGE (W13: the words walk + sort on
+        // a mover).
         {
             monitor::Stage wordsStage("engine.atomwords");
             for (OgreScene *s : drawn) s->updateAtomDraw();

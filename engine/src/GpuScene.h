@@ -15,10 +15,11 @@
 // instead of 0.6 ms, so converting that reader today would make the slice a
 // smaller win. It waits for ENGINE V2's journal (V2-1).
 //
-// THE INTERFACE IS DELIBERATELY ONE FUNCTION: `update(dirtySlots, epoch)`.
-// Today's caller finds the dirty slots with a per-item compare (OgreScene::
-// updateGpuScene); ENGINE V2's journal (V2-1) will hand the same function the
-// changed subset it already knows, with NO interface change here. That is the
+// THE INTERFACE IS DELIBERATELY ONE FUNCTION: `update(dirtySlots)`.
+// Today's caller — the scene's substrate (GpuSceneSubstrate.h), its one writer —
+// finds the dirty slots with a per-item compare (OgreScene::walkGpuScene); U0's
+// change set will hand the same function the changed subset it already knows,
+// with NO interface change here. That is the
 // whole reason the write path takes a list of slots rather than "scan the
 // scene".
 //
@@ -409,7 +410,7 @@ public:
     /// device can be read and every consumer keeps its CPU path.
     bool create(Ogre::VaoManager *vao, std::string &err);
     void destroy();
-    bool live() const { return mVao != nullptr && mInstanceBuffer != nullptr; }
+    bool live() const { return mVao != nullptr && !mTables.empty(); }
 
     // --- the instance table ------------------------------------------------
     /// Grows the table to hold `count` slots (by DOUBLING, never per frame) and
@@ -448,7 +449,7 @@ public:
     /// closes the previous frame's movers (prevWorld = world for a slot that
     /// moved last frame and not this one, so a mover that stops shows no motion
     /// on the frame after it stopped).
-    void update(const std::vector<uint32_t> &dirtySlots, unsigned long long epoch);
+    void update(const std::vector<uint32_t> &dirtySlots);
 
     /// Slots that MOVED on the last update and have not been closed yet: the
     /// next update owes them `prevWorld = world` even if nothing moved in it, so
@@ -473,11 +474,12 @@ public:
     /// updateRayLevels` runs AFTER the frame's scan, so a re-stage would reach the
     /// device a frame late — and a second stage in the same frame would take this
     /// frame's pose as the previous one. A patch writes `ids[3]` alone into the
-    /// mirror (prevWorld untouched), tells the observers, and queues the slot;
-    /// `flushPatched` copies the queued entries NOW (the ray tier reads the table
-    /// right after), and `update` takes any still queued.
+    /// mirror (prevWorld untouched), tells the observers, and queues the slot; the
+    /// frame's one commit (`update`, right after the ray levels and before the ray
+    /// tier reads the table) copies it with everything else the frame staged.
     void patchRayLevel(uint32_t slot, uint32_t level);
-    void flushPatched();
+    /// Copies owed without a compose: a freed slot's clear, a ray-level patch.
+    bool hasPendingCopies() const { return !mFreedSlots.empty() || !mPatched.empty(); }
     /// The mirror as a raw pointer. The dirty scan reads it once per item, and
     /// in a Debug build (which is the daily driver) an accessor call per item is
     /// a measurable part of the walk.
@@ -571,7 +573,14 @@ public:
     // the mesh and level tables are P3's and P4's selection inputs. They are
     // `UavBufferPacked`s rather than raw Vulkan buffers precisely so an
     // `HlmsComputeJob` can take them with no render-system knowledge.
-    Ogre::UavBufferPacked *instanceBuffer() const { return mInstanceBuffer; }
+    ///
+    /// THE INSTANCE TABLE IS A RING OF COPIES (ENGINE-UPGRADE-2 stage 1): this is
+    /// the LIVE copy — the one this frame's writes went to — and it changes from
+    /// one writing frame to the next. A reader re-reads it immediately before every
+    /// bind (they all do: the TLAS job, the culls, the gather, the decodes, the
+    /// march's motion); a reader that cached it across frames would read a copy a
+    /// later frame rewrites.
+    Ogre::UavBufferPacked *instanceBuffer() const { return mTables.empty() ? nullptr : mTables[mLive]; }
     Ogre::UavBufferPacked *meshBuffer() const { return mMeshBuffer; }
     Ogre::UavBufferPacked *levelBuffer() const { return mLevelBuffer; }
     /// The CPU mirror's (mesh entry, level) row — what the device's level table
@@ -635,14 +644,55 @@ public:
     unsigned lastDirtyCount() const { return mLastDirtyCount; }
     /// Slot changes the change feed has told its consumers, ever (priming excluded).
     unsigned long long notifies() const { return mNotifies; }
-    unsigned long long epoch() const { return mEpoch; }
+
+    // --- the copies in flight (ENGINE-UPGRADE-2 stage 1) --------------------
+    /// The device's frames in flight (VaoManager's dynamic-buffer multiplier).
+    uint32_t framesInFlight() const { return mFramesInFlight; }
+    /// Copies of the instance table: one per frame in flight, plus the one a frame
+    /// writes — a reader may still bind the outgoing copy in the very frame that
+    /// switches away from it (a pre-frame GI reader with nothing to write), so the
+    /// copy a frame rewrites must be one no frame of the last `framesInFlight` read.
+    uint32_t tableCopies() const { return uint32_t(mTables.size()); }
+    uint32_t liveTable() const { return mLive; }
+    /// Frames that wrote a copy, ever — ONE copy per writing frame, however many
+    /// commits it makes.
+    unsigned long long copyWrites() const { return mCopyWrites; }
+    /// Writes into a copy a frame still in flight may read (the rule's breach; 0).
+    unsigned long long inFlightOverwrites() const { return mInFlightOverwrites; }
 
 private:
     void growTo(uint32_t capacity);
     void growMeshTable(uint32_t capacity);
 
     Ogre::VaoManager *mVao = nullptr;
-    Ogre::UavBufferPacked *mInstanceBuffer = nullptr;
+    /// THE INSTANCE TABLE'S COPIES (instanceBuffer, tableCopies). Each is brought
+    /// current by the frame that makes it live: that frame copies its own dirty
+    /// set AND every slot written to the other copies since this one was last
+    /// live (`mOwed`), so a copy is exact the moment it is bound and no frame ever
+    /// writes the copy a frame in flight reads.
+    std::vector<Ogre::UavBufferPacked *> mTables;
+    uint32_t mLive = 0u;
+    uint32_t mFramesInFlight = 1u;
+    /// The VaoManager frame whose writes went to the live copy (0xFFFFFFFF = none
+    /// yet: the next write makes a copy live).
+    uint32_t mLiveFrame = 0xFFFFFFFFu;
+    /// Per copy: the last frame that may have BOUND it (the frame that switched
+    /// away from it — its pre-switch readers bound it), and whether any frame has.
+    std::vector<uint32_t> mReadUntil;
+    std::vector<unsigned char> mEverLive;
+    /// Per copy: the slots written to the other copies since it was last live
+    /// (sorted on use), or "the whole table" once that list outgrew the table.
+    std::vector<std::vector<uint32_t>> mOwed;
+    std::vector<unsigned char> mOwedAll;
+    unsigned long long mCopyWrites = 0ull, mInFlightOverwrites = 0ull;
+    /// Picks the copy this frame writes (the first write of a frame advances the
+    /// ring) and folds what that copy is owed into `mCopySet`. Returns false when
+    /// the copy must be written whole (it is owed more than a list).
+    bool beginTableWrite();
+    /// After a write of `written` to the live copy: every other copy is owed it.
+    void oweOtherCopies(const std::vector<uint32_t> &written);
+    void createTables(uint32_t capacity);
+    void destroyTables();
     Ogre::UavBufferPacked *mMeshBuffer = nullptr;
     Ogre::UavBufferPacked *mLevelBuffer = nullptr;
     Ogre::UavBufferPacked *mGeomBuffer = nullptr;
@@ -723,6 +773,7 @@ private:
     // Scratch kept between updates so a frame allocates nothing: the copy set,
     // its contiguous runs, and the staging destinations those runs become.
     std::vector<uint32_t> mCopySet;
+    std::vector<uint32_t> mWritten;   ///< this commit's own set (what the other copies are owed)
     struct Run {
         uint32_t first = 0, count = 0;
     };
@@ -734,7 +785,6 @@ private:
     /// `prevWorld` before the frame that reads it has rendered.
     uint32_t mLastCloseFrame = 0xFFFFFFFFu;
     unsigned long long mWrites = 0ull, mCopies = 0ull, mUpdates = 0ull, mGrows = 0ull;
-    unsigned long long mEpoch = 0ull;
     double mLastCopyMs = 0.0;
     unsigned mLastDirtyCount = 0u;
     bool mWarnedLevels = false;

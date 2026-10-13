@@ -85,7 +85,7 @@ uint32_t roundUpPow2(uint32_t v, uint32_t floorValue) {
 GpuScene::~GpuScene() { destroy(); }
 
 bool GpuScene::create(Ogre::VaoManager *vao, std::string &err) {
-    if (mInstanceBuffer) return true;
+    if (!mTables.empty()) return true;
     if (!vao) {
         // THE HEADLESS FALLBACK, stated rather than hidden: the NULL render
         // system has no VaoManager, so there are no tables and every consumer
@@ -96,9 +96,13 @@ bool GpuScene::create(Ogre::VaoManager *vao, std::string &err) {
     mVao = vao;
     mSlotCapacity = 0;
     mMeshCapacity = 0;
+    // ONE COPY PER FRAME IN FLIGHT, PLUS THE ONE BEING WRITTEN (tableCopies). The
+    // device's own count: Ogre recycles a resource a frame used only once that
+    // many frames have passed (VulkanVaoManager::flushGpuDelayedBlocks).
+    mFramesInFlight = std::max<uint32_t>(1u, uint32_t(vao->getDynamicBufferMultiplier()));
     growTo(kInitialSlots);
     growMeshTable(kInitialMeshes);
-    return mInstanceBuffer != nullptr;
+    return !mTables.empty();
 }
 
 void GpuScene::destroy() {
@@ -107,7 +111,7 @@ void GpuScene::destroy() {
     for (GpuSceneObserver *o : mObservers) o->gpuSceneReset();
     mPatched.clear();
     if (mVao) {
-        if (mInstanceBuffer) mVao->destroyUavBuffer(mInstanceBuffer);
+        destroyTables();
         if (mMeshBuffer) mVao->destroyUavBuffer(mMeshBuffer);
         if (mLevelBuffer) mVao->destroyUavBuffer(mLevelBuffer);
         if (mGeomBuffer) mVao->destroyUavBuffer(mGeomBuffer);
@@ -121,7 +125,7 @@ void GpuScene::destroy() {
     mGroupMirror.clear();
     mClusterCapacity = mGroupCapacity = mClusterCount = mMaxClustersPerMesh = 0u;
     mClusterDirty = false;
-    mInstanceBuffer = mMeshBuffer = mLevelBuffer = mGeomBuffer = nullptr;
+    mMeshBuffer = mLevelBuffer = mGeomBuffer = nullptr;
     mPartBuffer = nullptr;
     mPartAabbBuffer = nullptr;
     mPartCount = mPartCapacity = 0;
@@ -151,14 +155,94 @@ void GpuScene::growTo(uint32_t capacity) {
     mMirror.resize(want);
     mBorn.resize(want, 0u);
     mStagedAt.resize(want, 0u);
-    if (mInstanceBuffer) {
-        mVao->destroyUavBuffer(mInstanceBuffer);
-        mInstanceBuffer = nullptr;
+    if (!mTables.empty()) {
+        destroyTables();
         ++mGrows;
     }
-    mInstanceBuffer = mVao->createUavBuffer(want, sizeof(GpuInstance), 0, mMirror.data(), false);
+    createTables(want);
     if (atomTraceOn()) atomTrace("instance table grown " + std::to_string(mSlotCapacity) + " -> " + std::to_string(want));
     mSlotCapacity = want;
+}
+
+// ---------------------------------------------------------------------------
+// THE COPIES IN FLIGHT (ENGINE-UPGRADE-2 stage 1). The table was ONE buffer
+// rewritten in place, which is correct on one queue (a frame's copies execute
+// after the previous frame's reads, in submission order, behind Ogre's barriers)
+// and a race the moment anything reads it from a queue that runs beside the
+// frame's (an async-compute pass of frame N still reading while frame N+1's
+// copies land). The ring removes the race by construction: a frame writes only
+// a copy no frame of the last `framesInFlight` bound, and brings it current.
+void GpuScene::createTables(uint32_t capacity) {
+    const uint32_t n = mFramesInFlight + 1u;
+    mTables.assign(n, nullptr);
+    for (uint32_t k = 0; k < n; ++k)
+        mTables[k] = mVao->createUavBuffer(capacity, sizeof(GpuInstance), 0, mMirror.data(), false);
+    // EVERY COPY IS THE MIRROR NOW (each was created from it), so nothing is owed;
+    // and NO FRAME HAS BOUND ANY OF THEM, so the live one is written this frame.
+    mOwed.assign(n, std::vector<uint32_t>());
+    mOwedAll.assign(n, 0u);
+    mReadUntil.assign(n, 0u);
+    mEverLive.assign(n, 0u);
+    mLive = 0u;
+    mLiveFrame = mVao->getFrameCount();
+    mEverLive[0] = 1u;
+    mReadUntil[0] = mLiveFrame;
+}
+
+void GpuScene::destroyTables() {
+    // Ogre's destroy is DELAYED past the frames in flight (a frame still executing
+    // may read any of them): the ring needs nothing more.
+    for (Ogre::UavBufferPacked *t : mTables)
+        if (t) mVao->destroyUavBuffer(t);
+    mTables.clear();
+    mOwed.clear();
+    mOwedAll.clear();
+    mReadUntil.clear();
+    mEverLive.clear();
+    mLive = 0u;
+    mLiveFrame = 0xFFFFFFFFu;
+}
+
+bool GpuScene::beginTableWrite() {
+    const uint32_t frame = mVao->getFrameCount();
+    if (frame == mLiveFrame) return true;   // the frame's later commit: the same copy
+    // THE FIRST WRITE OF THIS FRAME: the next copy becomes live. The outgoing one
+    // may have been bound by THIS frame's readers before the switch, so its last
+    // reader is this frame.
+    mReadUntil[mLive] = frame;
+    const uint32_t next = (mLive + 1u) % uint32_t(mTables.size());
+    if (mEverLive[next] && uint32_t(frame - mReadUntil[next]) < mFramesInFlight) ++mInFlightOverwrites;
+    mLive = next;
+    mLiveFrame = frame;
+    mEverLive[next] = 1u;
+    mReadUntil[next] = frame;
+    ++mCopyWrites;
+    if (mOwedAll[next]) {
+        mOwedAll[next] = 0u;
+        mOwed[next].clear();
+        return false;
+    }
+    if (!mOwed[next].empty()) {
+        mCopySet.insert(mCopySet.end(), mOwed[next].begin(), mOwed[next].end());
+        mOwed[next].clear();
+        std::sort(mCopySet.begin(), mCopySet.end());
+        mCopySet.erase(std::unique(mCopySet.begin(), mCopySet.end()), mCopySet.end());
+        while (!mCopySet.empty() && mCopySet.back() >= mSlotCapacity) mCopySet.pop_back();
+    }
+    return true;
+}
+
+void GpuScene::oweOtherCopies(const std::vector<uint32_t> &written) {
+    for (uint32_t k = 0; k < uint32_t(mTables.size()); ++k) {
+        if (k == mLive || mOwedAll[k]) continue;
+        std::vector<uint32_t> &o = mOwed[k];
+        o.insert(o.end(), written.begin(), written.end());
+        // BOUNDED: past the table's length the list is worth less than the table.
+        if (o.size() > size_t(mSlotCapacity)) {
+            o.clear();
+            mOwedAll[k] = 1u;
+        }
+    }
 }
 
 void GpuScene::growMeshTable(uint32_t capacity) {
@@ -429,16 +513,6 @@ void GpuScene::patchRayLevel(uint32_t slot, uint32_t level) {
     notify(slot, &mMirror[slot]);
 }
 
-void GpuScene::flushPatched() {
-    if (mPatched.empty() || !live()) return;
-    mCopySet.assign(mPatched.begin(), mPatched.end());
-    mPatched.clear();
-    std::sort(mCopySet.begin(), mCopySet.end());
-    mCopySet.erase(std::unique(mCopySet.begin(), mCopySet.end()), mCopySet.end());
-    while (!mCopySet.empty() && mCopySet.back() >= mSlotCapacity) mCopySet.pop_back();
-    copySet();
-}
-
 void GpuScene::onSlotFreed(uint32_t slot) {
     if (slot >= mSlotCapacity) return;
     std::memset(&mMirror[slot], 0, sizeof(GpuInstance));
@@ -461,8 +535,7 @@ void GpuScene::onSlotMoved(uint32_t from, uint32_t to) {
     onSlotFreed(from);       // ...and the tail it came from is cleared and copied
 }
 
-void GpuScene::update(const std::vector<uint32_t> &dirtySlots, unsigned long long epoch) {
-    mEpoch = epoch;
+void GpuScene::update(const std::vector<uint32_t> &dirtySlots) {
     mLastDirtyCount = unsigned(dirtySlots.size());
     if (!live()) return;
 
@@ -556,6 +629,14 @@ void GpuScene::update(const std::vector<uint32_t> &dirtySlots, unsigned long lon
 void GpuScene::copySet() {
     if (mCopySet.empty()) return;
     const auto t0 = std::chrono::steady_clock::now();
+    // THE COPY THIS FRAME WRITES, brought current: this frame's set is what the
+    // OTHER copies are owed afterwards; what the live copy itself was owed joins
+    // the set now (kept sorted and unique: the coalescer below needs runs).
+    mWritten.assign(mCopySet.begin(), mCopySet.end());
+    if (!beginTableWrite()) {
+        mCopySet.resize(mSlotCapacity);
+        for (uint32_t i = 0; i < mSlotCapacity; ++i) mCopySet[i] = i;
+    }
     // THE RUN COALESCER. Sorted slots collapse into contiguous runs, and a run
     // is one copy — a scene whose whole item list moved is ONE copy, a scene
     // with one mover is one copy of 160 bytes.
@@ -577,11 +658,12 @@ void GpuScene::copySet() {
         const size_t len = size_t(r.count) * sizeof(GpuInstance);
         std::memcpy(dst + srcOffset, &mMirror[r.first], len);
         mDests.push_back(Ogre::StagingBuffer::Destination(
-            mInstanceBuffer, size_t(r.first) * sizeof(GpuInstance), srcOffset, len));
+            mTables[mLive], size_t(r.first) * sizeof(GpuInstance), srcOffset, len));
         srcOffset += len;
     }
     sb->unmap(&mDests[0], mDests.size());
     sb->removeReferenceCount();
+    oweOtherCopies(mWritten);
     mCopies += mRuns.size();
     ++mUpdates;
     mLastCopyMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -752,7 +834,9 @@ bool OgreScene::gpuIsMetal(const Ogre::HlmsDatablock *db) {
 /// traces it through its own structure over its skin cache (its posed
 /// vertices), and leaves it out on a frame the cache is not ready — never at the
 /// mesh's bind pose (audit C-5's T-pose, which is what the exclusion was for).
-Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
+Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const { return gpuFlagsFor(n, atomDrawOn()); }
+
+Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n, bool atomDraw) const {
     Ogre::Item *item = n.item;
     if (!item) return 0u;
     const Ogre::uint32 vis = item->getVisibilityFlags();
@@ -789,7 +873,7 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
     // THE RENDER-QUEUE SPLIT (ATOM S3-DRAW): the id pass draws it, the decode
     // shades it (atomRouteFor, OgreAtomDraw.cpp). Here, so the backstop compare
     // below re-composes a slot whose route moved with nothing else.
-    if (atomDrawOn() && atomRouteFor(n, f) == AtomRoute::Atom) {
+    if (atomDraw && atomRouteFor(n, f) == AtomRoute::Atom) {
         f |= kGpuAtom;
         // ...BOTH FACES (ATOM-TWO-SIDED-1): the route admits a no-cull material only
         // with a no-cull caster, so one flag says it for the id pass and the caster cut.
@@ -1104,67 +1188,164 @@ void OgreScene::releaseGpuMesh(const Ogre::Mesh *mesh) {
     if (mGpuScene.live() && mesh) mGpuScene.releaseMesh(mesh);
 }
 
-/// THE DIRTY SCAN — the one CPU walk that remains, and the one the journal
-/// (V2-1) replaces without changing `GpuScene::update`'s signature.
-///
-/// IT IS EPOCH-GATED, so a still scene runs no walk and copies no bytes. When
-/// the epoch HAS moved, each slot is asked two cheap questions — did its 48
-/// bytes of world transform change, and did its flags word change — and only a
-/// slot that answers yes pays for a world AABB. Whoever reads the table first in
-/// a frame pays for the update (the GI signatures read it before the frame, the
-/// ray tier inside it), exactly as `ensureGiWalk` works.
 /// The tables, created the first time this scene needs them — which is the first
 /// mesh ATTACH, not the first frame: an Item that arrives before a frame is drawn
 /// must still get its mesh table entry, or its instance entry would name no mesh.
 void OgreScene::ensureGpuTables() const {
-    if (mGpuScene.live() || mGpuSceneRefused || !mSceneMgr || mDestroying) return;
+    if (mGpuScene.live() || mSubstrate.refused || !mSceneMgr || mDestroying) return;
     Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
     Ogre::VaoManager *vao =
         rs && !(mEngine && mEngine->isHeadless()) ? rs->getVaoManager() : nullptr;
     std::string err;
     if (!mGpuScene.create(vao, err)) {
-        mGpuSceneRefused = true;
+        mSubstrate.refused = true;
         Ogre::LogManager::getSingleton().logMessage("Jahshaka " + err);
     }
 }
 
-void OgreScene::ensureGpuScene(bool graphIsCurrent) const {
+// ===========================================================================
+// THE SUBSTRATE'S COMPOSE AND COMMIT (GpuSceneSubstrate.h has the protocol).
+//
+// THE DIRTY SCAN — the one CPU walk that remains, and the one the journal
+// (U0's change set) replaces without changing `GpuScene::update`'s signature.
+// IT IS EPOCH-GATED, so a still scene runs no walk and copies no bytes. When the
+// epoch HAS moved, each slot is asked two cheap questions — did its 48 bytes of
+// world transform change, and did its flags word change — and only a slot that
+// answers yes pays for a world AABB. AND IT RUNS ONCE A FRAME: the frame's first
+// graph-current call walks (a pre-frame GI build, or the frame's own read), later
+// calls compose their marks only.
+// ===========================================================================
+
+namespace {
+/// THE WALK AS OGRE'S UNIFORM SCALABLE TASK: share `threadId` on worker `threadId`.
+/// The share's body is the scene's own (it reads the scene's private item index).
+template <class Share>
+class GpuSceneWalkTask final : public Ogre::UniformScalableTask {
+public:
+    explicit GpuSceneWalkTask(Share &share) : mShare(share) {}
+    void execute(size_t threadId, size_t) override { mShare(threadId); }
+
+private:
+    Share &mShare;
+};
+/// Below this many slots the walk stays on the frame's thread: a barrier round trip
+/// to the workers costs more than comparing a few hundred slots.
+constexpr size_t kParallelWalkSlots = 512u;
+}  // namespace
+
+void OgreScene::walkGpuScene(bool graphIsCurrent) const {
+    GpuSceneSubstrate &sub = mSubstrate;
+    const size_t n = mItemNodes.size();
+    // THE PREDICATES' SCENE-WIDE INPUT, once per walk instead of once per slot (the
+    // split's switch asks the device for an extension by name).
+    const bool atomDraw = atomDrawOn();
+    const size_t workers = mSceneMgr ? mSceneMgr->getNumWorkerThreads() : 0u;
+    const size_t shares = (n >= kParallelWalkSlots && workers >= 1u) ? workers + 1u : 1u;
+    if (sub.shareDirty.size() != shares) sub.shareDirty.assign(shares, std::vector<uint32_t>());
+    sub.walkShares = unsigned(shares);
+    const detail::GpuInstance *mirror = mGpuScene.mirrorData();
+    // THE COMPARE, one contiguous share of the slots per thread: the slots whose world
+    // transform or flags word differ from the mirror's. Read-only on everything it
+    // touches (the items, their nodes' cached derived transforms, their datablocks, the
+    // mirror, the stamps), so the SceneManager's workers and the frame's thread run it
+    // side by side.
+    auto share = [&](size_t k) {
+        const size_t first = n * k / shares, last = n * (k + 1) / shares;
+        std::vector<uint32_t> &dirty = sub.shareDirty[k];
+        dirty.clear();
+        for (size_t i = first; i < last; ++i) {
+            const Node &node = *mItemNodes[i];
+            Ogre::Item *item = node.item;
+            if (!item) continue;
+            Ogre::Node *pn = item->getParentNode();
+            if (!pn) continue;
+            const detail::GpuInstance &was = mirror[i];
+            // `_getFullTransform` is a cached read and `_getFullTransformUpdated`
+            // RECOMPUTES the derived transform up the parent chain unconditionally
+            // (Ogre-Next keeps no per-node dirty bit): the frame path, which runs AFTER
+            // `updateSceneGraph`, reads the cache (0.7 ms against 2.3-2.5 ms at 8,001
+            // items in Debug, measured).
+            const Ogre::Matrix4 &m = graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
+            bool d = std::memcmp(&m[0][0], was.world, sizeof(was.world)) != 0;
+            if (!d) {
+                // A FLAGS CHANGE THAT MOVED NOTHING. The seams that write an Item's
+                // channels mark their slot by name (markGpuSlotDirty), so this is a
+                // BACKSTOP and not the mechanism, paid on a frame that moved something.
+                Ogre::uint32 wasFlags;
+                std::memcpy(&wasFlags, &was.boundsMax[3], sizeof(wasFlags));
+                d = gpuFlagsFor(node, atomDraw) != wasFlags;
+            }
+            // A slot the marks already staged is skipped at the compose (the stamp).
+            if (d) dirty.push_back(uint32_t(i));
+        }
+    };
+    if (shares == 1u) {
+        share(0u);
+    } else {
+        // THE WORKERS TAKE SHARES 0..workers-1, THE FRAME'S THREAD THE LAST: fired
+        // without blocking, the frame's thread runs its own share, then waits.
+        GpuSceneWalkTask<decltype(share)> task(share);
+        mSceneMgr->executeUserScalableTask(&task, false);
+        share(shares - 1u);
+        mSceneMgr->waitForPendingUserScalableTask();
+    }
+    // THE COMPOSE, IN SLOT ORDER, on the frame's thread: the composer edits Ogre state
+    // (the split's render queue) and queues GI conversions.
+    detail::GpuInstance cand;
+    for (const std::vector<uint32_t> &dirty : sub.shareDirty) {
+        for (uint32_t i : dirty) {
+            if (mGpuScene.stagedThisUpdate(i)) continue;
+            const Node &node = *mItemNodes[i];
+            Ogre::Node *pn = node.item->getParentNode();
+            const Ogre::Matrix4 &m = graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
+            composeGpuInstance(node, m, graphIsCurrent, cand);
+            mGpuScene.stage(i, cand);
+            sub.dirty.push_back(i);
+            ++sub.aabbReads;
+        }
+    }
+    ++sub.walks;
+}
+
+void OgreScene::composeGpuScene(bool graphIsCurrent) const {
     if (!mSceneMgr || mDestroying) return;
     ensureGpuTables();
     if (!mGpuScene.live()) return;
+    GpuSceneSubstrate &sub = mSubstrate;
+    sub.beginCall(mRoot->getRenderSystem()->getVaoManager()->getFrameCount());
     const unsigned long long epoch = shadowEpoch();
-    const bool epochMoved = !mGpuEpochValid || epoch != mGpuEpoch;
-    if (!epochMoved && mGpuForced.empty()) {
-        // NOTHING MOVED — but last frame's movers may still owe their close, and
-        // that is the one thing a still frame is not free for (once).
-        if (mGpuScene.hasOpenMovers()) {
-            mGpuDirty.clear();
-            mGpuScene.update(mGpuDirty, epoch);
-        }
-        return;
+    // THE WALK'S RULE. A reader BEFORE the scene graph (the warm-up) walks on Ogre's
+    // recomputed transforms whenever the epoch moved, and consumes nothing. A
+    // graph-current call is the frame's walk if the frame has not walked; after it,
+    // only a transform written INSIDE the frame (the scene's own epoch moving past
+    // the walk's) earns a second one.
+    const bool moved = !sub.epochValid || epoch != sub.epoch;
+    bool walk;
+    if (!graphIsCurrent) walk = moved;
+    else if (!sub.walkedThisFrame) walk = moved;
+    else walk = epoch != sub.frameWalkEpoch;
+    if (!walk && sub.marks.empty()) return;
+    // THE EPOCH IS ONLY CONSUMED BY A WALK THAT COULD SEE THE TRUTH. A reader BEFORE
+    // the frame runs on derived transforms `updateSceneGraph` has not recomputed; if
+    // it marked the epoch spent, the frame's own walk would skip — and every CHILD of
+    // a moved parent would silently never reach the table (measured: a parent with
+    // 8,000 children staged nothing at all). The epoch is held exactly as the caster
+    // walk holds it: valid only where a host counter makes it meaningful.
+    if (walk && graphIsCurrent) {
+        if (sub.walkedThisFrame) ++sub.extraWalks;
+        sub.walkedThisFrame = true;
+        sub.frameWalkEpoch = epoch;
+        sub.epoch = epoch;
+        sub.epochValid = detail::gTransformWriteCounter != nullptr;
     }
-    const auto tScan = std::chrono::steady_clock::now();
-    // THE EPOCH IS ONLY CONSUMED BY A SCAN THAT COULD SEE THE TRUTH. A reader
-    // BEFORE the frame runs on derived transforms `updateSceneGraph` has not
-    // recomputed yet; if such a pass marked the epoch spent, the frame's own
-    // pass would skip — and every CHILD of a moved parent would silently never
-    // reach the table (measured: a parent with 8,000 children staged nothing at
-    // all). So only the frame's form consumes it, and the epoch is held exactly
-    // as the caster walk holds it: valid only where a host counter makes it
-    // meaningful (OgreGi.cpp's ensureShadowWalk).
-    if (graphIsCurrent) {
-        mGpuEpoch = epoch;
-        mGpuEpochValid = detail::gTransformWriteCounter != nullptr;
-    }
-
+    sub.commitOwed = true;
     mGpuScene.setSlotCount(uint32_t(mItemNodes.size()));
-    mGpuDirty.clear();
-    detail::GpuInstance cand;
     // THE EXPLICIT MARKS FIRST: a seam that changed a flags word without moving
     // anything, and every newborn slot. A slot marked TWICE (seven seams, two of
     // which fire on one attach) is staged once — `stage` drops the second — and
     // must therefore not enter the dirty list twice either.
-    for (uint32_t slot : mGpuForced) {
+    detail::GpuInstance cand;
+    for (uint32_t slot : sub.marks) {
         if (slot >= mItemNodes.size()) continue;
         if (mGpuScene.stagedThisUpdate(slot)) continue;
         const Node &n = *mItemNodes[slot];
@@ -1174,63 +1355,69 @@ void OgreScene::ensureGpuScene(bool graphIsCurrent) const {
             graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
         composeGpuInstance(n, m, graphIsCurrent, cand);
         mGpuScene.stage(slot, cand);
-        mGpuDirty.push_back(slot);
+        sub.dirty.push_back(slot);
     }
-    mGpuForced.clear();
-    if (epochMoved) {
-        const detail::GpuInstance *mirror = mGpuScene.mirrorData();
-        for (size_t i = 0, e = mItemNodes.size(); i < e; ++i) {
-            const Node &n = *mItemNodes[i];
-            Ogre::Item *item = n.item;
-            if (!item) continue;
-            Ogre::Node *pn = item->getParentNode();
-            if (!pn) continue;
-            const detail::GpuInstance &was = mirror[i];
-            // THE COMPARE. `_getFullTransform` is a cached read and
-            // `_getFullTransformUpdated` RECOMPUTES the derived transform up the
-            // parent chain unconditionally (Ogre-Next keeps no per-node dirty
-            // bit — `updateAllTransforms` recomputes the whole graph by depth
-            // level every frame). MEASURED at 8,001 items in Debug: 0.7 ms for
-            // the cached read against 2.3-2.5 ms for the recomputing one. So the
-            // frame path, which runs AFTER `updateSceneGraph`, reads the cache.
-            // The recomputing form exists for a reader BEFORE the frame — the GI
-            // signature walk would be one, and is deliberately NOT converted
-            // today for exactly this three-fold cost (GpuScene.h's header); the
-            // suite measures both forms so the decision stays visible.
-            const Ogre::Matrix4 &m =
-                graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
-            bool dirty = std::memcmp(&m[0][0], was.world, sizeof(was.world)) != 0;
-            if (!dirty) {
-                // A FLAGS CHANGE THAT MOVED NOTHING. The seams that write an
-                // Item's channels mark their slot by name (markGpuSlotDirty), so
-                // this is a BACKSTOP and not the mechanism — measured at 0.17 ms
-                // of the 8,001-item walk, which is worth paying to be immune to
-                // a seam nobody marked.
-                Ogre::uint32 wasFlags;
-                std::memcpy(&wasFlags, &was.boundsMax[3], sizeof(wasFlags));
-                dirty = gpuFlagsFor(n) != wasFlags;
-            }
-            if (!dirty) continue;
-            // THE STAMP, NOT A SEARCH: a slot the marks already staged is
-            // skipped in one load. The linear scan this replaces was O(marks)
-            // per dirty slot.
-            if (mGpuScene.stagedThisUpdate(uint32_t(i))) continue;
-            composeGpuInstance(n, m, graphIsCurrent, cand);
-            mGpuScene.stage(uint32_t(i), cand);
-            mGpuDirty.push_back(uint32_t(i));
-            ++mGpuAabbReads;
-        }
-    }
-    mGpuScene.update(mGpuDirty, epoch);
-    ++mGpuScans;
-    // ALWAYS TIMED, and reported as its own MONITOR STAGE. This is real CPU
-    // inside renderOneFrame that belongs to no compositor pass — 0.6-0.7 ms at
-    // 8,001 items — and unattributed it reads as frame time nobody spent (the
-    // stages are exclusive and must account for the frame within 5 %). A
-    // steady_clock pair against a walk of that size is noise.
-    mGpuScanMicros =
-        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tScan).count();
-    if (monitor::live()) monitor::gMonitor->stage("engine.gpuscene", mGpuScanMicros / 1000.0);
+    sub.marks.clear();
+    if (walk) walkGpuScene(graphIsCurrent);
+    ++sub.composes;
+}
+
+void OgreScene::commitGpuScene() const {
+    if (!mGpuScene.live()) return;
+    GpuSceneSubstrate &sub = mSubstrate;
+    // NOTHING COMPOSED — but last frame's movers may still owe their close, and that
+    // is the one thing a still frame is not free for (once).
+    if (!sub.commitOwed && !mGpuScene.hasOpenMovers() && !mGpuScene.hasPendingCopies()) return;
+    sub.commitOwed = false;
+    const unsigned long long copied = mGpuScene.frames();
+    mGpuScene.update(sub.dirty);
+    sub.dirty.clear();
+    if (mGpuScene.frames() != copied) ++sub.commits;
+}
+
+/// A READER'S CALL (a GI build's gather before the frame, the warm-up): the compose,
+/// and the commit at once — it dispatches before the frame's own commit.
+void OgreScene::ensureGpuScene(bool graphIsCurrent) const {
+    if (!mSceneMgr || mDestroying) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    const unsigned long long walks = mSubstrate.walks;
+    composeGpuScene(graphIsCurrent);
+    if (!mSubstrate.commitOwed && !(mGpuScene.live() && (mGpuScene.hasOpenMovers() || mGpuScene.hasPendingCopies())))
+        return;
+    commitGpuScene();
+    noteGpuSceneStage(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
+                      mSubstrate.walks != walks);
+}
+
+/// ALWAYS TIMED, and reported as its own MONITOR STAGE (`engine.gpuscene`): real CPU
+/// inside the frame that belongs to no compositor pass (the stages are exclusive and
+/// must account for the frame within 5 %). A call that walked keeps its cost as the
+/// last scan's (GpuSceneStatus::lastScanMicros).
+void OgreScene::noteGpuSceneStage(double us, bool walked) const {
+    if (walked) mSubstrate.scanMicros = us;
+    if (monitor::live()) monitor::gMonitor->stage("engine.gpuscene", us / 1000.0);
+}
+
+/// THE FRAME'S OWN READ (OgreShadow.cpp): the compose here; the ray levels patch the
+/// mirror; then the frame's ONE commit. Timed as one stage, without the ray levels.
+void OgreScene::composeGpuSceneFrame() const {
+    const auto t0 = std::chrono::steady_clock::now();
+    mSubstrate.frameComposeWalks = mSubstrate.walks;
+    composeGpuScene(/*graphIsCurrent=*/true);
+    mSubstrate.frameComposeMicros =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+}
+
+void OgreScene::commitGpuSceneFrame() const {
+    const bool walked = mSubstrate.walks != mSubstrate.frameComposeWalks;
+    if (!mSubstrate.commitOwed && !walked &&
+        !(mGpuScene.live() && (mGpuScene.hasOpenMovers() || mGpuScene.hasPendingCopies())))
+        return;
+    const auto t0 = std::chrono::steady_clock::now();
+    commitGpuScene();
+    noteGpuSceneStage(mSubstrate.frameComposeMicros +
+                          std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
+                      walked);
 }
 
 /// The scan with its cost recorded for a caller that wants the number without a
@@ -1283,11 +1470,11 @@ void OgreScene::updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, floa
     // exactly: it is the same float3 the view wrote, not a derived quantity, so
     // "did not move" is a memcmp and not a tolerance.
     const bool eyeMoved = mRayEyeValid == false || eye != mRayEye;
-    const bool tableMoved = mGpuScans != mRayLevelScanSeen;
+    const bool tableMoved = mSubstrate.composes != mRayLevelScanSeen;
     if (!eyeMoved && !tableMoved) return;
     mRayEye = eye;
     mRayEyeValid = true;
-    mRayLevelScanSeen = mGpuScans;
+    mRayLevelScanSeen = mSubstrate.composes;
     ++mRayLevelWalks;
 
     if (mRayEvalDistance.size() < n) mRayEvalDistance.resize(n, -1.0f);
@@ -1340,8 +1527,8 @@ void OgreScene::updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, floa
         // from this table, would have built from the previous level.
         mGpuScene.patchRayLevel(i, want);
     }
-    // ...and on the device before the ray tier reads it, this frame.
-    mGpuScene.flushPatched();
+    // ...and on the device before the ray tier reads it, this frame: with the frame's
+    // own commit, which runs next (OgreShadow.cpp, commitGpuSceneFrame).
 }
 
 // ---------------------------------------------------------------------------
@@ -1413,6 +1600,30 @@ bool OgreScene::gpuSceneDeviceEntries(unsigned first, unsigned count,
 }
 
 }  // namespace detail
+
+/// THE SUBSTRATE'S STATUS (GpuSubstrate.h): counters, read where they live.
+GpuSubstrateStatus gpuSubstrateStatus(const Scene &scene) {
+    GpuSubstrateStatus st;
+    const auto *s = dynamic_cast<const detail::OgreScene *>(&scene);
+    if (!s) return st;
+    const detail::GpuSceneSubstrate &sub = s->mSubstrate;
+    const detail::GpuScene &t = sub.tables;
+    st.live = t.live();
+    st.framesInFlight = t.framesInFlight();
+    st.copies = t.tableCopies();
+    st.liveCopy = t.liveTable();
+    const size_t workers = s->mSceneMgr ? s->mSceneMgr->getNumWorkerThreads() : 0u;
+    st.workers = unsigned(workers + 1u);
+    st.copyWrites = t.copyWrites();
+    st.inFlightOverwrites = t.inFlightOverwrites();
+    st.walks = sub.walks;
+    st.extraWalks = sub.extraWalks;
+    st.laterCalls = sub.laterCalls;
+    st.commits = sub.commits;
+    st.holdsRayStructures = sub.rays != nullptr;
+    return st;
+}
+
 }  // namespace engine
 }  // namespace jahshaka
 

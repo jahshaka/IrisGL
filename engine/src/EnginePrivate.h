@@ -22,7 +22,8 @@
 // nothing of OgreScene's Node, which is what keeps it bindable from an
 // HlmsComputeJob and buildable on a platform with no ray queries.
 #include "GpuCull.h"
-#include "GpuScene.h"
+#include "GpuSceneSubstrate.h"   // the tables' one writer (GpuScene.h inside it)
+#include "jahshaka/engine/GpuSubstrate.h"
 #include "GpuVoxelGather.h"
 #include "SceneLightList.h"
 
@@ -6585,7 +6586,37 @@ private:
     /// datablock in place (PhotonVoxelMaterial::refreshAll) before it gathers.
     bool mVctMaterialRefreshOwed = false;
 
-    mutable detail::GpuScene mGpuScene;
+    /// THE SUBSTRATE — the scene's ONE writer of its GPU description (GpuSceneSubstrate.h,
+    /// ENGINE-UPGRADE-2 stage 1): the tables, the dirty scan and its frame protocol, the
+    /// counters, the ray structures. Mutable because `ensureGpuScene` is const.
+    mutable detail::GpuSceneSubstrate mSubstrate;
+    /// THE NAMES THE REST OF THE ENGINE READS, aliases into the substrate for the parallel
+    /// window (OgreGi.cpp, which names mGpuScene and mGpuForced, is EU-1's until U0 merges;
+    /// stage 4 renames them): the tables, the explicit marks, and the three counters the
+    /// GPU-scene accessors above return.
+    detail::GpuScene &mGpuScene = mSubstrate.tables;
+    std::vector<uint32_t> &mGpuForced = mSubstrate.marks;
+    const unsigned long long &mGpuScans = mSubstrate.walks;
+    const unsigned long long &mGpuAabbReads = mSubstrate.aabbReads;
+    const double &mGpuScanMicros = mSubstrate.scanMicros;
+public:
+    /// THE FRAME'S OWN READ (OgreEngine::applyShadowCacheDirties, after updateSceneGraph):
+    /// the compose (the frame's walk unless a pre-frame reader already ran it, and every
+    /// mark since), then — after the ray levels have patched the mirror — ONE commit.
+    void composeGpuSceneFrame() const;
+    void commitGpuSceneFrame() const;
+    friend GpuSubstrateStatus jahshaka::engine::gpuSubstrateStatus(const Scene &scene);
+private:
+    /// The substrate's steps (OgreGpuScene.cpp): the compose (marks, then the walk —
+    /// the compare over every slot as a UniformScalableTask — staging the changed
+    /// slots), the commit (the device copy), and the stage they file.
+    void composeGpuScene(bool graphIsCurrent) const;
+    void walkGpuScene(bool graphIsCurrent) const;
+    void commitGpuScene() const;
+    void noteGpuSceneStage(double micros, bool walked) const;
+    /// `gpuFlagsFor` with the split's scene-wide switch (atomDrawOn) handed in: the
+    /// walk asks it once, not once per slot.
+    Ogre::uint32 gpuFlagsFor(const Node &n, bool atomDraw) const;
     /// Said once: a mesh with more submeshes than the geometry row table holds
     /// (GpuScene::kSubmeshesPerMesh). Every mesh this engine bakes has one.
     mutable bool mWarnedGeomSubmeshes = false;
@@ -6596,14 +6627,6 @@ private:
     detail::GpuCull mGpuCull;
     detail::GpuCull mCasterCull;   ///< casterCull(): the shadow maps' caster cut (ATOM-SHADOWS-1)
     CasterStats mCasterStats;
-    mutable bool mGpuSceneRefused = false;   ///< create() said no (headless); do not retry
-    mutable std::vector<uint32_t> mGpuDirty;    ///< this update's slots (kept, not reallocated)
-    mutable std::vector<uint32_t> mGpuForced;   ///< explicit marks since the last update
-    mutable unsigned long long mGpuEpoch = 0ull;
-    mutable bool mGpuEpochValid = false;
-    mutable unsigned long long mGpuScans = 0ull;      ///< dirty scans run, ever
-    mutable unsigned long long mGpuAabbReads = 0ull;  ///< world AABBs the scan asked for, ever
-    mutable double mGpuScanMicros = 0.0;
     // --- THE RAY LEVEL (ATOM P3's AT-A8r; OgreGpuScene.cpp) ----------------
     /// The level each slot's bottom-level structure should be built from, and
     /// the DISTANCE that answer was computed at (-1 = never). The second array

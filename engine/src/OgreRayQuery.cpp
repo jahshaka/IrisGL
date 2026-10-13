@@ -359,6 +359,11 @@ public:
     /// error anywhere, it is the fallback picture.
     bool open(Ogre::RenderSystem *rs, std::string &err);
     void close();
+    /// Waits for the device (the shutdown's one wait, before releaseScene).
+    void waitIdle() { if (mVk) vkDeviceWaitIdle(mVk); }
+    /// Destroys a LIVE scene's structures outright, behind an idle device (the tier
+    /// is closing while the scene lives: the no-rays switch, the shutdown).
+    void releaseScene(OgreScene *scene);
     bool isOpen() const { return mVk != VK_NULL_HANDLE; }
 
     /// THE FRAME'S UPDATE for one scene, recorded into `Ogre`'s current command
@@ -372,10 +377,10 @@ public:
     /// is keyed by may already be gone — so the engine, which knows which live,
     /// calls this first.
     void detachFeed(OgreScene *scene) {
-        auto it = mScenes.find(scene);
-        if (it == mScenes.end() || !it->second.feedOn) return;
-        scene->mGpuScene.removeObserver(&it->second.feed);
-        it->second.feedOn = false;
+        SceneAs *sa = asOf(scene);
+        if (!sa || !sa->feedOn) return;
+        scene->mGpuScene.removeObserver(&sa->feed);
+        sa->feedOn = false;
     }
 
     /// THE TOOL/TEST TRACE — the only place in this file that submits its own
@@ -610,7 +615,13 @@ private:
         RayQueryStatus st;
     };
 
-    SceneAs &asFor(OgreScene *scene) { return mScenes[scene]; }
+    /// THE SCENE'S STRUCTURES ARE THE SCENE'S (ENGINE-UPGRADE-2 stage 1): held by its
+    /// GPU-scene substrate (GpuSceneSubstrate.h), so they live and die with it; this
+    /// tier creates them on the scene's first ray frame and releases what they hold
+    /// on the device (forgetScene, releaseScene). Null for a scene that has none yet.
+    static SceneAs *asOf(const OgreScene *scene);
+    static SceneAs &asFor(OgreScene *scene);
+    friend struct RaySceneStructures;
 
     // --- plumbing ---------------------------------------------------------
     uint32_t memoryType(uint32_t bits, VkMemoryPropertyFlags want) const;
@@ -808,7 +819,6 @@ private:
     void drainRetired();
     void evictStaleBlas(SceneAs &sa);
 
-    std::unordered_map<OgreScene *, SceneAs> mScenes;
 
     // ---- R5: RAY-TRACED REFLECTIONS ------------------------------------
     // (PHOTON_SPEC §7 R5.) One compute dispatch per drawn view per frame,
@@ -1364,6 +1374,26 @@ private:
     static void expandEyeToTarget(EyeBasisF &e, const ChainDesc &cd, unsigned fullW,
                                   unsigned fullH);
 };
+
+// ---------------------------------------------------------------------------
+// THE SCENE'S RAY STRUCTURES, held by its substrate (GpuSceneSubstrate.h). The type
+// is the tier's; the object is the scene's. Its device resources are released by the
+// tier (forgetScene through the retire window, releaseScene behind an idle device)
+// before the substrate deletes it — the deleter only frees the bookkeeping.
+struct RaySceneStructures {
+    RayQueryTier::SceneAs as;
+};
+
+void RaySceneStructuresDelete::operator()(RaySceneStructures *p) const { delete p; }
+
+RayQueryTier::SceneAs *RayQueryTier::asOf(const OgreScene *scene) {
+    return scene && scene->mSubstrate.rays ? &scene->mSubstrate.rays->as : nullptr;
+}
+
+RayQueryTier::SceneAs &RayQueryTier::asFor(OgreScene *scene) {
+    if (!scene->mSubstrate.rays) scene->mSubstrate.rays.reset(new RaySceneStructures());
+    return scene->mSubstrate.rays->as;
+}
 
 // ---------------------------------------------------------------------------
 uint32_t RayQueryTier::memoryType(uint32_t bits, VkMemoryPropertyFlags want) const {
@@ -1976,41 +2006,48 @@ bool RayQueryTier::makePipeline(std::string &err) {
     return true;
 }
 
+/// THE TIER IS CLOSING WHILE `scene` LIVES (the no-rays switch, the engine's
+/// shutdown): everything the scene's structures hold on the device dies NOW, behind
+/// the idle device close() waited for. Called for every live scene before close().
+void RayQueryTier::releaseScene(OgreScene *scene) {
+    SceneAs *saP = asOf(scene);
+    if (!mVk || !saP) return;
+    SceneAs &sa = *saP;
+    for (Blas &bl : sa.blas) {
+        if (bl.as) mFn.destroyAccelerationStructure(mVk, bl.as, nullptr);
+        dropBuffer(bl.storage);
+        bl.mesh.reset();
+    }
+    if (sa.tlas) mFn.destroyAccelerationStructure(mVk, sa.tlas, nullptr);
+    dropBuffer(sa.tlasStorage);
+    dropBuffer(sa.tlasScratch);
+    dropBuffer(sa.tlasOut);
+    for (unsigned r = 0; r < kFramesInFlight; ++r) dropBuffer(sa.tlasIn[r]);
+    dropBuffer(sa.alphaTable);
+    for (unsigned r = 0; r < kFramesInFlight; ++r) dropBuffer(sa.hitTable[r]);
+    // THE SKIN CACHES, destroyed outright (the device is idle); the GpuScene
+    // side is not touched — the tables die with the scene, which is closing
+    // the tier or going itself.
+    for (auto &skv : sa.skins) {
+        SceneAs::Skin &sk = skv.second;
+        if (sk.as) mFn.destroyAccelerationStructure(mVk, sk.as, nullptr);
+        sk.as = VK_NULL_HANDLE;
+        dropBuffer(sk.storage);
+        dropBuffer(sk.scratch);
+        destroySkinCacheBuffer(sa.skinVao, sk.buf);
+    }
+    sa.skins.clear();
+    dropSkinBuffers(sa);
+    detail::monitor::forgetGpuOwner(&sa);
+    scene->mSubstrate.rays.reset();
+}
+
 void RayQueryTier::close() {
     if (!mVk) return;
     // EVERY STRUCTURE DIES WHILE THE DEVICE IS STILL ALIVE. This runs from
     // OgreEngine::shutdownRayQuery, before Root is deleted — the same rule the
     // engine's MeshPtrs obey, and for the same reason.
     vkDeviceWaitIdle(mVk);
-    for (auto &kv : mScenes) {
-        SceneAs &sa = kv.second;
-        for (Blas &bl : sa.blas) {
-            if (bl.as) mFn.destroyAccelerationStructure(mVk, bl.as, nullptr);
-            dropBuffer(bl.storage);
-            bl.mesh.reset();
-        }
-        if (sa.tlas) mFn.destroyAccelerationStructure(mVk, sa.tlas, nullptr);
-        dropBuffer(sa.tlasStorage);
-        dropBuffer(sa.tlasScratch);
-        dropBuffer(sa.tlasOut);
-        for (unsigned r = 0; r < kFramesInFlight; ++r) dropBuffer(sa.tlasIn[r]);
-        dropBuffer(sa.alphaTable);
-        for (unsigned r = 0; r < kFramesInFlight; ++r) dropBuffer(sa.hitTable[r]);
-        // THE SKIN CACHES, destroyed outright (the device is idle): the scene the
-        // map is keyed by may already be gone, so the GpuScene side is not
-        // touched — its tables die with it.
-        for (auto &skv : sa.skins) {
-            SceneAs::Skin &sk = skv.second;
-            if (sk.as) mFn.destroyAccelerationStructure(mVk, sk.as, nullptr);
-            sk.as = VK_NULL_HANDLE;
-            dropBuffer(sk.storage);
-            dropBuffer(sk.scratch);
-            destroySkinCacheBuffer(sa.skinVao, sk.buf);
-        }
-        sa.skins.clear();
-        dropSkinBuffers(sa);
-    }
-    mScenes.clear();
     for (auto &kv : mReflects) dropReflect(kv.second);
     mReflects.clear();
     // THE HIT LISTS (PHOTON-HIT-SHADE-1): the counters are Ogre UAV buffers (the
@@ -2201,9 +2238,9 @@ void RayQueryTier::close() {
 /// wait: a scene can be destroyed on any frame, and draining the GPU to free a
 /// thumbnail's structures would be a stall the user feels.
 void RayQueryTier::forgetScene(OgreScene *scene) {
-    auto it = mScenes.find(scene);
-    if (it == mScenes.end()) return;
-    SceneAs &sa = it->second;
+    SceneAs *saP = asOf(scene);
+    if (!saP) return;
+    SceneAs &sa = *saP;
     for (Blas &bl : sa.blas) {
         retire(bl.as, bl.storage);
         // THE MESH HOLD ENDS HERE, AND THAT IS CORRECT (round 3, finding 7).
@@ -2245,7 +2282,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     for (const Blas &bl : sa.blas)
         if (bl.compactState == 1u) mCompactBusy &= ~(uint64_t(1) << bl.compactSlot);
     detail::monitor::forgetGpuOwner(&sa);
-    mScenes.erase(it);
+    scene->mSubstrate.rays.reset();
     forgetCardMovers(scene);
 }
 
@@ -3872,8 +3909,8 @@ void RayQueryTier::updateScene(OgreScene *scene) {
 }
 
 RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
-    auto it = mScenes.find(const_cast<OgreScene *>(scene));
-    if (it == mScenes.end()) {
+    const SceneAs *sa = asOf(scene);
+    if (!sa) {
         // A scene the tier has not seen yet (nothing has drawn it). `enabled`
         // is the SWITCH's answer, not "false because there is no structure":
         // the tier being open at all means the switch is on, and reporting
@@ -3884,11 +3921,11 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
         st.enabled = isOpen();
         return st;
     }
-    RayQueryStatus st = it->second.st;
-    st.feedSlotVisits = it->second.feed.visits;
+    RayQueryStatus st = sa->st;
+    st.feedSlotVisits = sa->feed.visits;
     // THE GPU TIMES are the monitor's rows this scene filed (lane TEST-1): -1
     // outside a capture, and a still scene's last value held, as before.
-    const void *owner = &it->second;
+    const void *owner = sa;
     st.blasMs = monitor::lastGpuMs("rq.blas", owner);
     st.tlasMs = monitor::lastGpuMs("rq.tlas", owner);
     st.skinMs = monitor::lastGpuMs("rq.skin.dispatch", owner);
@@ -3904,12 +3941,12 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
 bool RayQueryTier::readTlasBlocking(OgreScene *scene, TlasReadback &out, std::string &err) {
     out = TlasReadback();
     if (!isOpen()) { err = "rayquery: the tier is not open"; return false; }
-    auto it = mScenes.find(scene);
-    if (it == mScenes.end() || !it->second.tlasOut.buffer) {
+    SceneAs *saP = asOf(scene);
+    if (!saP || !saP->tlasOut.buffer) {
         err = "rayquery: this scene has no instance array yet (render a frame first)";
         return false;
     }
-    SceneAs &sa = it->second;
+    SceneAs &sa = *saP;
     const uint32_t slots = sa.builtSlots;
     out.slots = slots;
     out.instances.assign(size_t(slots) * 2u * sizeof(VkAccelerationStructureInstanceKHR), 0u);
@@ -3992,8 +4029,8 @@ bool RayQueryTier::traceBlocking(OgreScene *scene, const std::vector<float> &ray
                                  std::vector<float> &hits, std::string &err) {
     hits.clear();
     if (!isOpen()) { err = "rayquery: the tier is not open"; return false; }
-    auto it = mScenes.find(scene);
-    if (it == mScenes.end() || !it->second.tlas || it->second.instanceCount == 0u) {
+    SceneAs *saP = asOf(scene);
+    if (!saP || !saP->tlas || saP->instanceCount == 0u) {
         err = "rayquery: this scene has no acceleration structure yet (render a frame first)";
         return false;
     }
@@ -4002,11 +4039,11 @@ bool RayQueryTier::traceBlocking(OgreScene *scene, const std::vector<float> &ray
     // left behind can reference bottom-level structures compaction retired in
     // the same frame. Refusing is the honest answer; tracing it would return
     // confident nonsense, or lose the device.
-    if (!it->second.st.enabled) {
+    if (!saP->st.enabled) {
         err = "rayquery: this scene's structure is stale (the last update failed)";
         return false;
     }
-    SceneAs &sa = it->second;
+    SceneAs &sa = *saP;
     const size_t count = rays.size() / 12u;      // 3 vec4s per ray
     if (!count) { err = "rayquery: an empty ray batch"; return false; }
 
@@ -4235,8 +4272,8 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     cache->viewLayers(cardView);
     // THE TRACED QUESTIONS' INPUTS: the scene's TLAS and the hit-normal tables
     // the reflection binds (the per-slot row copy, the GPU scene's rows).
-    auto sceneIt = mScenes.find(scene);
-    SceneAs *sa = sceneIt != mScenes.end() && sceneIt->second.tlas ? &sceneIt->second : nullptr;
+    SceneAs *sa = asOf(scene);
+    if (sa && !sa->tlas) sa = nullptr;
     detail::GpuScene &gpuScn = scene->gpuScene();
     if (gpuScn.live()) gpuScn.flushGeomRows();
     Ogre::UavBufferPacked *geomRows = gpuScn.live() ? gpuScn.geomBuffer() : nullptr;
@@ -4900,9 +4937,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // THE STRUCTURE. Every one of these is a legitimate "not this frame", and
     // each leaves `jahSsrReflection` holding exactly what the resolve wrote —
     // i.e. today's picture, which is the whole point of the fallback contract.
-    auto sceneIt = mScenes.find(scene);
-    if (sceneIt == mScenes.end()) return;
-    SceneAs &sa = sceneIt->second;
+    SceneAs *saP = asOf(scene);
+    if (!saP) return;
+    SceneAs &sa = *saP;
     if (!sa.tlas || !sa.st.enabled || sa.instanceCount == 0u) return;
 
     if (!mReflectPipeline) {
@@ -6288,8 +6325,8 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
 uint64_t RayQueryTier::hitTableOf(const OgreScene *scene) const {
     // The arm "gi.hitDirect" = 0 (the measuring arm): no table, the hit reads the store whole.
     if (!arm(ArmId::GiHitDirect, true)) return 0u;
-    auto it = mScenes.find(const_cast<OgreScene *>(scene));
-    return it == mScenes.end() ? 0u : uint64_t(it->second.hitTableAddress);
+    const SceneAs *sa = asOf(scene);
+    return sa ? uint64_t(sa->hitTableAddress) : 0u;
 }
 
 RayQueryTier::HitSurfaceInputs RayQueryTier::hitSurfaceInputsOf(const OgreScene *scene) const {
@@ -6307,8 +6344,8 @@ RayQueryTier::HitSurfaceInputs RayQueryTier::hitSurfaceInputsOf(const OgreScene 
 uint64_t RayQueryTier::alphaTableOf(const OgreScene *scene) const {
     // The arm "reflect.alphaTested" = 0 traces every cut-out opaque (the cost arm).
     if (!arm(ArmId::ReflectAlphaTested, true)) return 0u;
-    auto it = mScenes.find(const_cast<OgreScene *>(scene));
-    return it == mScenes.end() ? 0u : uint64_t(it->second.alphaAddress);
+    const SceneAs *sa = asOf(scene);
+    return sa ? uint64_t(sa->alphaAddress) : 0u;
 }
 
 void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
@@ -6397,11 +6434,11 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     Ogre::UavBufferPacked *skinGeomRows = nullptr;
     uint32_t skinGeomSlots = 0u;
     if (mMotionSkinPipeline && arm(ArmId::ReflectPosed, true)) {
-        auto sit = mScenes.find(scene);
+        SceneAs *sit = asOf(scene);
         const uint32_t vaoFrame = mRs->getVaoManager()->getFrameCount();
-        if (sit != mScenes.end() && sit->second.tlas && sit->second.st.enabled &&
-            sit->second.skinPosedFrame != 0xFFFFFFFFu && uint32_t(vaoFrame - sit->second.skinPosedFrame) <= 2u) {
-            skinSa = &sit->second;
+        if (sit && sit->tlas && sit->st.enabled &&
+            sit->skinPosedFrame != 0xFFFFFFFFu && uint32_t(vaoFrame - sit->skinPosedFrame) <= 2u) {
+            skinSa = sit;
             gs.flushGeomRows();
             skinGeomRows = gs.geomBuffer();
             skinGeomSlots = skinGeomRows ? uint32_t(skinSa->geomRowOfSlot.size()) : 0u;
@@ -6597,9 +6634,9 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         if (mGather && mGather->holds(key)) mGather->forget(key);
         return;
     }
-    auto sceneIt = mScenes.find(scene);
-    if (sceneIt == mScenes.end()) return;
-    SceneAs &sa = sceneIt->second;
+    SceneAs *saP = asOf(scene);
+    if (!saP) return;
+    SceneAs &sa = *saP;
     if (!sa.tlas || !sa.st.enabled || sa.instanceCount == 0u) return;
     // TWO EYES, ONE GATHER (PHOTON-GA-VR — the reflection trace's REFLECT-VR-1
     // rule, below where the basis is built): a stereo target is gathered per eye
@@ -7112,9 +7149,9 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     /// status, because a row that silently does nothing is the worst outcome.
     const auto decline = [&sv](const char *why) { sv.reason = why; };
 
-    auto sceneIt = mScenes.find(scene);
-    if (sceneIt == mScenes.end()) { decline("the scene has no ray structures yet"); return; }
-    SceneAs &sa = sceneIt->second;
+    SceneAs *saP = asOf(scene);
+    if (!saP) { decline("the scene has no ray structures yet"); return; }
+    SceneAs &sa = *saP;
     if (!sa.tlas || !sa.st.enabled || sa.instanceCount == 0u) {
         decline("the scene's top-level structure is empty");
         return;
@@ -7482,9 +7519,9 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     if (!isOpen() || !scene || !job.count || !job.records || !job.depth || !job.normal || !job.vis ||
         !job.shadowRough)
         return false;
-    auto sceneIt = mScenes.find(scene);
-    if (sceneIt == mScenes.end()) return false;
-    SceneAs &sa = sceneIt->second;
+    SceneAs *saP = asOf(scene);
+    if (!saP) return false;
+    SceneAs &sa = *saP;
     if (!sa.tlas || !sa.st.enabled || sa.instanceCount == 0u) return false;
     if (mCmFailed) return false;
     if (!mCmPipeline) {
@@ -8103,8 +8140,8 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     }
     out.lift = kHitSunLift;
     {
-        auto sit = mScenes.find(scene);
-        out.farLift = sit != mScenes.end() ? std::max(sit->second.farOverlap, kHitSunLift) : kHitSunLift;
+        const SceneAs *sa = asOf(scene);
+        out.farLift = sa ? std::max(sa->farOverlap, kHitSunLift) : kHitSunLift;
     }
     hv.live = true;
     return true;
@@ -8112,8 +8149,8 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
 
 bool RayQueryTier::decodeTwinsStale(OgreScene *scene) const {
     if (!scene) return false;
-    auto it = mScenes.find(scene);
-    if (it == mScenes.end()) return false;
+    const SceneAs *saP = asOf(scene);
+    if (!saP) return false;
     // THE EDITS SINCE THE FRAME'S DRAIN (ATOM-CPU-WALKS-1): a datablock re-hashed
     // since then (the PBS change log) or holding an edit not hashed yet (the pool's
     // dirty list) whose twin's BUCKET moved, and that this scene's draws serve. The
@@ -8124,7 +8161,7 @@ bool RayQueryTier::decodeTwinsStale(OgreScene *scene) const {
     auto *pbs = hm ? dynamic_cast<ScenePbs *>(hm->getHlms(Ogre::HLMS_PBS)) : nullptr;
     if (!atom || !pbs) return false;
     if (pbs->hashNotesOverflowed()) return true;   // the log lost its detail: assume the worst
-    const std::vector<uint32_t> &words = it->second.decodeWords;
+    const std::vector<uint32_t> &words = saP->decodeWords;
     const auto servedAndMoved = [&](const Ogre::HlmsDatablock *db) {
         uint32_t word = HlmsAtom::kNoMaterialWord;
         if (!atom->decodeTwinMoved(db, word)) return false;
@@ -8735,6 +8772,11 @@ void OgreEngine::shutdownRayQuery() {
     if (!mRayTier) return;
     for (auto &sc : mScenes)
         if (sc) mRayTier->detachFeed(sc.get());
+    // EVERY LIVE SCENE'S STRUCTURES FIRST (they are the scene's, not the tier's):
+    // released behind one idle device, then the tier's own plumbing.
+    mRayTier->waitIdle();
+    for (auto &sc : mScenes)
+        if (sc) mRayTier->releaseScene(sc.get());
     mRayTier->close();
     delete mRayTier;
     mRayTier = nullptr;
@@ -8810,6 +8852,8 @@ void OgreEngine::setRayTracing(bool on) { mRayTracingWanted = on; }
 bool OgreEngine::rayQueryAvailable() const { return false; }
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &) {}
 void OgreEngine::shutdownRayQuery() {}
+struct RaySceneStructures {};
+void RaySceneStructuresDelete::operator()(RaySceneStructures *p) const { delete p; }
 RayQueryStatus OgreScene::rayQueryStatus() const { return RayQueryStatus(); }
 bool OgreScene::traceRays(const std::vector<float> &, std::vector<float> &hits) {
     hits.clear();

@@ -377,8 +377,11 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     // decode samples the maps through its own shader, which applies no scroll,
     // so it would draw the map frozen — it stays on the stock shader, counted
     // with the pieces.
+    // (The two names hashed once, not per slot per walk: this runs in the dirty scan's
+    // backstop for every item of a frame that moved anything.)
+    static const Ogre::IdString kShaderClock("jah_shader_clock"), kUvScroll("jah_uv_scroll");
     for (const Ogre::HlmsDatablock::CustomProperty &cp : db->getCustomProperties())
-        if (cp.keyName == Ogre::IdString("jah_shader_clock") || cp.keyName == Ogre::IdString("jah_uv_scroll"))
+        if (cp.keyName == kShaderClock || cp.keyName == kUvScroll)
             return AtomRoute::CustomPiece;
     const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
     if (rq == kRefractiveRenderQueue || db->getBlendblock()->isAutoTransparent() ||
