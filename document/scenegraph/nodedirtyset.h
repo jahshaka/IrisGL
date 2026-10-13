@@ -89,7 +89,6 @@ public:
     /// The pointer is recorded, never followed.
     void evict(SceneNode *node)
     {
-        noteChange(true);
         if (mEvicted.size() >= kEvictionCap) {
             mEvicted.clear();
             mOverflowed = true;
@@ -105,27 +104,6 @@ public:
     /// True once per overflow; reading it clears it.
     bool takeOverflow() { const bool o = mOverflowed; mOverflowed = false; return o; }
 
-    /// THE CHANGE SERIALS — "did anything change since I last looked", for a
-    /// reader that is NOT the mirror (the list above has one consumer, and it
-    /// swaps the list away every frame). Bumped by EVERY SceneNode::notifyChanged
-    /// call — before the per-frame dedupe, so a second write to a node the mirror
-    /// has not consumed yet still moves them — and by every join and eviction.
-    /// Two of them, because the readers differ in what they care about:
-    /// `changeSerial` moves for any change; `contentSerial` only for a change of
-    /// what a node HOLDS — Structure, Content (a mesh or material swapped),
-    /// Params — never for a transform, a visibility, a flag or a name (an
-    /// animated lantern or a physics body writes every frame, and its first
-    /// write demotes it from static: neither changes a material or a texture,
-    /// and a reader of those must not re-walk 6,000 nodes for them). Monotonic.
-    /// (BISTRO-ENGINE-1 stage 5: the scene-issue scanner walked the whole scene
-    /// once a second at idle — 0.2 s of UI thread per second at 6,000 meshes.)
-    void noteChange(bool content)
-    {
-        ++mChangeSerial;
-        if (content) ++mContentSerial;
-    }
-    unsigned long long changeSerial() const { return mChangeSerial; }
-    unsigned long long contentSerial() const { return mContentSerial; }
     /// Diagnostics only (the document suite asserts on these).
     std::size_t pendingDirty() const { return mDirty.size(); }
     std::size_t pendingEvicted() const { return mEvicted.size(); }
@@ -144,8 +122,6 @@ private:
     std::vector<SceneNode *> mDirty;
     std::vector<SceneNode *> mEvicted;
     bool mOverflowed = false;
-    unsigned long long mChangeSerial = 0;
-    unsigned long long mContentSerial = 0;
 };
 
 }

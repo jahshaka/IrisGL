@@ -291,6 +291,27 @@ unsigned long long transformWrites();
 bool writeJournal(std::vector<NodeHandle> &out);
 unsigned long long writeJournalGeneration();
 void closeWriteJournal();
+/// A TAP ON THE JOURNAL, for a reader on its OWN schedule (the editor's scene
+/// checker runs once a second; the document step closes the journal every
+/// playing frame). A tap receives every write the journal records — a
+/// transform through the one funnel, a reparent, a detach — and every other
+/// DOCUMENT write SceneNode::notifyChanged reports (noteDocumentWrite: a mesh
+/// or material swap, a parameter, a visibility, a flag, a structure change),
+/// each node once, until the reader drains it; the close does not touch it.
+/// No tap open = one relaxed load per write and nothing else.
+int openJournalTap();
+void closeJournalTap(int tap);
+struct TapDrain
+{
+    bool complete = true;   ///< false: an engine-owned node was written — take the full pass
+    int gone = 0;           ///< written nodes destroyed since their write
+};
+/// The document nodes written since this tap's last drain, as live handles,
+/// and the tap emptied: `moved` = a journal write reached the node (its world
+/// pose and its subtree's may have changed), `written` = only the node itself.
+TapDrain drainJournalTap(int tap, std::vector<NodeHandle> &moved, std::vector<NodeHandle> &written);
+/// A document write that is not scene movement, for the taps (see above).
+void noteDocumentWrite(NodeHandle n);
 /// The counter itself, for the host that hands its address to the engine.
 /// Its lifetime is the process's.
 const std::atomic<unsigned long long> &transformWriteCounter();

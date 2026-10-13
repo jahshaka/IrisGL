@@ -179,11 +179,40 @@ std::vector<std::pair<Ogre::IdType, bool>> gJournal;
 std::unordered_set<Ogre::IdType> gJournalSet;
 std::atomic<unsigned long long> gJournalGeneration{0};
 
+/// THE JOURNAL'S TAPS (graph::openJournalTap): readers on their own schedule
+/// that must see every write across any number of closes. Each holds the IDs
+/// written since its last drain — the same record as the journal, delivered to
+/// a reader the frame close would otherwise outrun. Guarded by gJournalMutex;
+/// `gTapsOpen` lets a write with no tap open skip the lock.
+struct JournalTap
+{
+    bool open = false;
+    bool incomplete = false;    ///< an engine-owned node was written (no way back to it)
+    /// id -> MOVED (a journal write: the node's world pose, and so its whole
+    /// subtree's, may have changed) or only WRITTEN (the node itself).
+    std::unordered_map<Ogre::IdType, bool> ids;
+};
+std::vector<JournalTap> gTaps;
+std::atomic<int> gTapsOpen{0};
+
+/// Called with gJournalMutex held.
+inline void tapWriteLocked(Ogre::IdType id, bool owned, bool moved)
+{
+    for (JournalTap &t : gTaps) {
+        if (!t.open) continue;
+        if (!owned) { t.incomplete = true; continue; }
+        bool &m = t.ids[id];
+        m = m || moved;
+    }
+}
+
 inline void journalWrite(Ogre::SceneNode *n)
 {
     const Ogre::IdType id = n->getId();
     std::lock_guard<std::mutex> lock(gJournalMutex);
-    if (gJournalSet.insert(id).second) gJournal.emplace_back(id, ownerById(id) != nullptr);
+    const bool owned = ownerById(id) != nullptr;
+    if (gJournalSet.insert(id).second) gJournal.emplace_back(id, owned);
+    if (gTapsOpen.load(std::memory_order_relaxed)) tapWriteLocked(id, owned, true);
 }
 
 Ogre::SceneNode *rootOf(Ogre::SceneManager *s)
@@ -997,6 +1026,56 @@ bool writeJournal(std::vector<NodeHandle> &out)
 }
 
 unsigned long long writeJournalGeneration() { return gJournalGeneration.load(std::memory_order_relaxed); }
+
+void noteDocumentWrite(NodeHandle n)
+{
+    if (!n || !gTapsOpen.load(std::memory_order_relaxed)) return;
+    const Ogre::IdType id = nd(n)->getId();
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    tapWriteLocked(id, ownerById(id) != nullptr, false);
+}
+
+int openJournalTap()
+{
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    std::size_t slot = 0;
+    while (slot < gTaps.size() && gTaps[slot].open) ++slot;
+    if (slot == gTaps.size()) gTaps.emplace_back();
+    gTaps[slot] = JournalTap();
+    gTaps[slot].open = true;
+    gTapsOpen.fetch_add(1, std::memory_order_relaxed);
+    return int(slot);
+}
+
+void closeJournalTap(int tap)
+{
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    if (tap < 0 || std::size_t(tap) >= gTaps.size() || !gTaps[std::size_t(tap)].open) return;
+    gTaps[std::size_t(tap)] = JournalTap();
+    gTapsOpen.fetch_sub(1, std::memory_order_relaxed);
+}
+
+TapDrain drainJournalTap(int tap, std::vector<NodeHandle> &moved, std::vector<NodeHandle> &written)
+{
+    moved.clear();
+    written.clear();
+    TapDrain d;
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    if (tap < 0 || std::size_t(tap) >= gTaps.size() || !gTaps[std::size_t(tap)].open) {
+        d.complete = false;
+        return d;
+    }
+    JournalTap &t = gTaps[std::size_t(tap)];
+    d.complete = !t.incomplete;
+    for (const auto &entry : t.ids) {
+        SceneNode *owner = ownerById(entry.first);
+        if (!owner || !owner->graphNode()) { ++d.gone; continue; }   // destroyed since its write
+        (entry.second ? moved : written).push_back(owner->graphNode());
+    }
+    t.ids.clear();
+    t.incomplete = false;
+    return d;
+}
 
 void closeWriteJournal()
 {
