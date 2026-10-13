@@ -84,6 +84,14 @@ struct MeshMaterialData
     /// AI_MATKEY_TWOSIDED (CULL-MODE-1): the import writes it onto the MeshNode
     /// as faceCullingMode None — the node's cull is what the mirror pushes.
     bool twoSided = false;
+    /// HOW THE SURFACE COVERS (BISTRO-IMPORT-1) — PbrMaterial's `alphaMode` row
+    /// (0 opaque, 1 masked, 3 glass) and its `alpha` / `alphaCutoff`. Read from the
+    /// SOURCE's own facts by MaterialHelper::extractMaterialData: an FBX/OBJ opacity
+    /// below 1 is glass at that alpha; a bound base-colour map whose own alpha channel
+    /// has texels below the cutoff is a cutout. Every import used to drop both.
+    int alphaMode = 0;
+    float alpha = 1.0f;
+    float alphaCutoff = 0.5f;
     QString baseColorTexture;
     QString metallicTexture;    // split from the packed MR map (blue channel)
     QString roughnessTexture;   // split from the packed MR map (green channel)

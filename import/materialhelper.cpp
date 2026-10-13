@@ -6,6 +6,8 @@
 #include <QFileInfo>
 #include <QDateTime>
 #include <QDebug>
+#include <QHash>
+#include <QImageReader>
 #include <QImageWriter>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -35,6 +37,54 @@ QSet<QString> &MaterialHelper::savedTexturePaths()
     static thread_local QSet<QString> paths;
     return paths;
 }
+
+QStringList &MaterialHelper::missingMapSink()
+{
+    static thread_local QStringList missing;
+    return missing;
+}
+
+QStringList MaterialHelper::takeMissingMaps()
+{
+    QStringList taken;
+    taken.swap(missingMapSink());
+    return taken;
+}
+
+namespace {
+/// A BASE-COLOUR MAP THAT CUTS (BISTRO-IMPORT-1): an image whose OWN alpha channel has
+/// texels below `cutoff` — coverage the cutout would remove. An image fact, read once
+/// per file per parse (the bake and the fragment both extract every material); the
+/// header is read first, so an image without an alpha channel is never decoded.
+bool alphaCutsAt(const QString &path, float cutoff)
+{
+    static thread_local QHash<QString, bool> cache;
+    const QFileInfo info(path);
+    const QString key = path + QLatin1Char('|') + QString::number(info.size()) + QLatin1Char('|')
+                      + QString::number(info.lastModified().toMSecsSinceEpoch());
+    const auto known = cache.constFind(key);
+    if (known != cache.constEnd()) return known.value();
+    bool cuts = false;
+    QImageReader reader(path);
+    const QImage::Format declared = reader.imageFormat();
+    const bool mayHaveAlpha = declared == QImage::Format_Invalid ||
+                              QImage(1, 1, declared).hasAlphaChannel();
+    if (mayHaveAlpha) {
+        const QImage image = reader.read();
+        if (!image.isNull() && image.hasAlphaChannel()) {
+            const QImage a = image.convertToFormat(QImage::Format_Alpha8);
+            const int bar = int(std::lround(qBound(0.0f, cutoff, 1.0f) * 255.0f));
+            for (int y = 0; y < a.height() && !cuts; ++y) {
+                const uchar *row = a.constScanLine(y);
+                for (int x = 0; x < a.width(); ++x)
+                    if (row[x] < bar) { cuts = true; break; }
+            }
+        }
+    }
+    cache.insert(key, cuts);
+    return cuts;
+}
+}   // namespace
 
 namespace {
 /// A containment warning waiting to be withdrawn, and the file that has to
@@ -756,6 +806,8 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
     // ------------------------
     QString specularTex = getAiMaterialTexture(aiMat, aiTextureType_SPECULAR);
     mat.specularTexture = containedTexturePath(specularTex, assetPath);
+    // Where the named map WOULD be: the prepared split pair sits beside it (below).
+    const QString specularNamed = mat.specularTexture;
 
     loadEmbeddedTexture(scene, specularTex, outDir, mat.specularTexture, mat.hasEmbeddedSpecularTexture);
 
@@ -984,6 +1036,92 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
         }
         if (QFileInfo::exists(metalPath)) mat.metallicTexture  = metalPath;
         if (QFileInfo::exists(roughPath)) mat.roughnessTexture = roughPath;
+    }
+
+    aiString matName;
+    aiMat->Get(AI_MATKEY_NAME, matName);
+    const QString materialName = QString::fromUtf8(matName.C_Str());
+
+    // ---- THE PREPARED SPECULAR PAIR (BISTRO-IMPORT-1; the owner's convention) ----
+    // A packed `X_Specular.png` the file names but does not ship, with the split
+    // `X_Specular_roughness.png` + `X_Specular_metallic.png` beside where it would be
+    // (the Bistro's prep step wrote 404 of them): the pair IS the roughness and the
+    // metallic map. Never over a map the file bound itself.
+    bool specularResolved = !specularTex.isEmpty() && QFileInfo(mat.specularTexture).isFile();
+    if (!specularTex.isEmpty() && !specularResolved && !specularNamed.isEmpty() &&
+        !specularNamed.startsWith(QLatin1Char('*'))) {
+        const QFileInfo named(specularNamed);
+        const QString stem = named.absolutePath() + QLatin1Char('/') + named.completeBaseName();
+        const QString rough = stem + QStringLiteral("_roughness.png");
+        const QString metal = stem + QStringLiteral("_metallic.png");
+        const bool haveRough = QFileInfo(rough).isFile(), haveMetal = QFileInfo(metal).isFile();
+        if (haveRough && mat.roughnessTexture.isEmpty()) mat.roughnessTexture = rough;
+        if (haveMetal && mat.metallicTexture.isEmpty()) mat.metallicTexture = metal;
+        if (haveRough || haveMetal) {
+            specularResolved = true;
+            // Half a pair is half a material: the missing half is said like any map.
+            const QString lost = haveRough ? QFileInfo(metal).fileName() : QFileInfo(rough).fileName();
+            if (!(haveRough && haveMetal))
+                missingMapSink().append(QStringLiteral("material \"%1\": metallic/roughness map \"%2\" "
+                                                       "(the split of \"%3\") was not found")
+                                            .arg(materialName, lost, specularTex));
+        }
+    }
+
+    // ---- EVERY MAP THE FILE NAMES AND WE COULD NOT FIND IS SAID ----------------
+    // (never silently: a bound row that is absent renders the default surface and
+    // nothing else tells the user). Checked AFTER the writes were joined, so an
+    // extracted embedded texture counts as found.
+    const auto reportIfMissing = [&](const char *kind, const QString &name, const QString &path) {
+        if (name.isEmpty() || QFileInfo(path).isFile()) return;
+        const QString line = QStringLiteral("material \"%1\": %2 map \"%3\" was not found")
+                                 .arg(materialName, QString::fromLatin1(kind), name);
+        if (!missingMapSink().contains(line)) missingMapSink().append(line);
+    };
+    if (baseTexName.isEmpty()) reportIfMissing("base colour", diffuseTex, mat.diffuseTexture);
+    else reportIfMissing("base colour", baseTexName, mat.baseColorTexture);
+    if (!specularResolved) reportIfMissing("specular", specularTex, mat.specularTexture);
+    reportIfMissing("normal", normalsTex, normalsTex == getAiMaterialTexture(aiMat, aiTextureType_NORMALS)
+                                              ? mat.normalTexture : mat.hightTexture);
+    reportIfMissing("emissive", getAiMaterialTexture(aiMat, aiTextureType_EMISSIVE), mat.emissiveTexture);
+    reportIfMissing("metallic/roughness", mrName, mrPath);
+
+    // ---- THE FILE'S OWN COVERAGE AND COLOUR, for every non-glTF source ----------
+    // (glTF states all of it in its own block and keeps its own reading above.)
+    if (!facts.valid) {
+        // THE DIFFUSE IS THE BASE COLOUR. An FBX/OBJ material has no BASE_COLOR key;
+        // assimp's shininess-derived roughness puts it on the PBR path, where only
+        // BASE_COLOR was read — so every untextured FBX surface imported white (the
+        // Bistro's 228 wine, beer and ice meshes). A bound diffuse texture REPLACES
+        // the colour in the file's own semantics (FBX/Maya), so the factor is white
+        // under a texture that is really there.
+        if (!hasBaseColor && !specGloss) {
+            const bool textured = QFileInfo(mat.baseColorTexture).isFile();
+            mat.baseColorFactor = textured || !mat.diffuseColor.isValid() ? QColor(255, 255, 255)
+                                                                         : mat.diffuseColor;
+        }
+        // OPACITY BELOW 1 IS GLASS: assimp's AI_MATKEY_OPACITY is the file's own
+        // statement (FBX Opacity, or 1 - TransparentColor x TransparencyFactor; OBJ d).
+        // Glass, not blend: FBX/Maya transparency fades the diffuse and keeps the
+        // specular, which is exactly the engine's Glass mode.
+        float opacity = 1.0f;
+        if (aiMat->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS && opacity < 1.0f) {
+            mat.alphaMode = 3;
+            mat.alpha = qBound(0.0f, opacity, 1.0f);
+        } else if (QFileInfo(mat.baseColorTexture).isFile() &&
+                   alphaCutsAt(mat.baseColorTexture, mat.alphaCutoff)) {
+            // A CUTOUT: the bound base-colour map's own alpha has holes. A cut card is
+            // a thin sheet with nothing behind it, so it is seen from both sides.
+            mat.alphaMode = 1;
+            if (faceCulling == FaceCullingImport::File) mat.twoSided = true;
+        }
+        // THE EXPORTER'S TWO-SIDED FLAG. FBX has no two-sided material property; the
+        // Lumberyard/Falcor exporter encodes it as the material-name suffix
+        // `.DoubleSided` — the file's own encoding of the flag, honoured as such (and
+        // nothing else is ever read out of a name).
+        if (faceCulling == FaceCullingImport::File &&
+            materialName.endsWith(QStringLiteral(".DoubleSided")))
+            mat.twoSided = true;
     }
 }
 

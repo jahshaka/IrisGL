@@ -232,7 +232,12 @@ namespace
 // same version for every animation clip file. The container changed, so every
 // .jmb written before today is rejected by this line and every library re-bakes
 // once (BAKEKEY-1).
-constexpr int kFormatVersion = 20;
+// v21 (2026-10-13, BISTRO-IMPORT-1): A BAKED MATERIAL CARRIES ITS COVERAGE — alphaMode,
+// alpha and alphaCutoff (an FBX opacity below 1 is glass; a base-colour map with alpha
+// holes is a cutout, and two-sided), the FBX diffuse is the base colour when the file
+// states no BASE_COLOR, and a prepared `_Specular_{roughness,metallic}.png` pair binds
+// when the named `_Specular.png` is absent. Material bytes change (BAKEKEY-1).
+constexpr int kFormatVersion = 21;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -305,6 +310,7 @@ void writeMaterial(QDataStream &s, const MeshMaterialData &m)
     s << float(m.metallicFactor) << float(m.roughnessFactor);
     s << m.baseColorTexture << m.metallicTexture << m.roughnessTexture << m.emissiveTexture;
     s << qint32(m.twoSided);
+    s << qint32(m.alphaMode) << float(m.alpha) << float(m.alphaCutoff);
 }
 
 MeshMaterialData readMaterial(QDataStream &s)
@@ -330,6 +336,9 @@ MeshMaterialData readMaterial(QDataStream &s)
     qint32 twoSided = 0;
     s >> twoSided;
     m.twoSided = twoSided != 0;
+    qint32 alphaMode = 0;
+    s >> alphaMode >> m.alpha >> m.alphaCutoff;
+    m.alphaMode = alphaMode;
     return m;
 }
 

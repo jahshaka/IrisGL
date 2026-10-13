@@ -94,6 +94,11 @@ public:
     /// Take (and clear) this thread's containment warnings.
     static QStringList takeContainmentWarnings();
 
+    /// Take (and clear) this thread's MISSING MAPS (BISTRO-IMPORT-1): one line per
+    /// map a material named that resolved to no file (embedded extractions count as
+    /// found), recorded by extractMaterialData. Same thread rule as the warnings.
+    static QStringList takeMissingMaps();
+
     /// Registers the withdrawal of `name`'s containment warning, conditional on
     /// `extractedPath` existing when the writes are settled, and applies the
     /// registered withdrawals whose bytes really landed. PUBLIC for the suite
@@ -149,6 +154,8 @@ private:
 
     /// The containment warning sink (thread-local; see takeContainmentWarnings).
     static QStringList& warningSink();
+    /// The missing-map sink (thread-local; see takeMissingMaps).
+    static QStringList &missingMapSink();
 
     /// The two messages containedTexturePath can write, built in ONE place so
     /// a retraction can name the exact string it withdraws.
