@@ -2693,7 +2693,8 @@ public:
     /// hashing the staged Hlms media tree. An empty `dir` leaves the cache off
     /// (but the compile COUNTERS still run — the startup progress display and
     /// the tests need them whether or not anything is persisted).
-    void configure(const std::string &dir, const std::string &mediaDir);
+    void configure(const std::string &dir, const std::string &mediaDir,
+                   unsigned long long maxBytes = 256ull * 1024ull * 1024ull);
 
     /// Starts counting compiles. Call as soon as the log exists (i.e. right
     /// after Root), long before any shader is built.
@@ -2825,6 +2826,7 @@ private:
     std::string path(const std::string &name) const;
 
     std::string mDir, mFingerprint, mMediaDir;
+    unsigned long long mMaxBytes = 256ull * 1024ull * 1024ull;   ///< EngineConfig::shaderCacheMaxBytes
     /// ONE KEY PER LAYER (SPEED-CPU, perf audit CS-1): pipeline, microcode,
     /// Hlms — see configure(). `mFingerprint` is the three composed, for the
     /// status readout only.

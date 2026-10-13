@@ -6013,6 +6013,12 @@ struct EngineConfig {
     /// directory is DERIVED DATA — deleting it costs one slow launch and never
     /// anything a user could miss.
     std::string shaderCacheDir;
+    /// The directory's SIZE CAP: a save that leaves it larger WIPES it (the next launch re-warms; there is
+    /// no eviction — see OgreShaderCache.cpp's save). 256 MiB is the app's, measured against one user's
+    /// projects. The engine test fixtures share ONE union of every family's shaders (ENGINE-UPGRADE-1:
+    /// 220 MB / 1,686 shaders on one tree's night), so their helper raises it (enginetesthelpers.h): a
+    /// cap meant for the app must never wipe the fixtures' union.
+    unsigned long long shaderCacheMaxBytes = 256ull * 1024ull * 1024ull;
 };
 
 /// The device the engine is actually running on (SESSION_LOG_SPEC §4).
@@ -6090,6 +6096,8 @@ struct ShaderCacheStats {
     std::string        fingerprint;
     unsigned long long sizeBytes = 0;
     unsigned           files = 0;
+    /// The cap a save is held to (EngineConfig::shaderCacheMaxBytes).
+    unsigned long long maxBytes = 0;
 
     // ---- what was loaded, per layer ----
     bool     pipelineCacheLoaded = false;   ///< VkPipelineCache blob accepted by the driver

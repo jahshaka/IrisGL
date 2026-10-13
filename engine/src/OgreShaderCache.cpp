@@ -91,10 +91,9 @@ Layer layerOf(const std::string &name) {
 #define JAH_GLSLANG_VERSION_TERM std::string("unknown")
 #endif
 
-/// Directory size cap (§4.3 rule 6). On exceed we wipe and re-warm rather than
-/// evict: the microcode map has no eviction upstream, and an LRU we maintain
-/// ourselves is a correctness risk for a few megabytes of derived data.
-constexpr unsigned long long kMaxCacheBytes = 256ull * 1024ull * 1024ull;
+// Directory size cap (§4.3 rule 6): EngineConfig::shaderCacheMaxBytes, held in mMaxBytes. On exceed we
+// wipe and re-warm rather than evict: the microcode map has no eviction upstream, and an LRU we maintain
+// ourselves is a correctness risk for derived data.
 
 constexpr const char *kManifest = "cache-manifest.txt";
 constexpr const char *kLockFile = "cache.lock";
@@ -408,7 +407,8 @@ ShaderCache::~ShaderCache() {
 }
 
 // ---------------------------------------------------------------------------
-void ShaderCache::configure(const std::string &dir, const std::string &mediaDir) {
+void ShaderCache::configure(const std::string &dir, const std::string &mediaDir, unsigned long long maxBytes) {
+    mMaxBytes = maxBytes;
     mDir = dir;
     mMediaDir = mediaDir;
     mEnabled = !dir.empty();
@@ -1149,7 +1149,7 @@ bool ShaderCache::runWrite(const PendingWrite &job) {
 
     // Size cap: wipe the generation rather than evict (§4.3 rule 6).
     unsigned n = 0;
-    if (dirBytes(mDir, &n) > kMaxCacheBytes) {
+    if (dirBytes(mDir, &n) > mMaxBytes) {
         logLine("cache exceeded the size cap — wiped; the next launch re-warms it");
         wipe();
         return true;
@@ -1257,6 +1257,7 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
     s.dir = mDir;
     s.fingerprint = mEnabled ? hexOf(mFingerprint) : std::string();
     if (mEnabled) s.sizeBytes = dirBytes(mDir, &s.files);
+    s.maxBytes = mMaxBytes;
     s.pipelineCacheLoaded = mPipelineLoaded;
     s.pipelineCacheReason = mPipelineReason;
     s.microcodeLoaded = mMicrocodeLoaded;
