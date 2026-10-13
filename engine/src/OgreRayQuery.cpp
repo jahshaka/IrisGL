@@ -481,8 +481,6 @@ private:
         RawBuffer hitTable;
         VkDeviceAddress hitTableAddress = 0;
         std::vector<uint32_t> hitWords, hitScratch;
-        unsigned long long hitRowSerial = ~0ull;
-        const void *hitStore = nullptr;
         /// THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): the material words they were
         /// last synced for and HlmsAtom's twin epoch at that sync (updateScene).
         std::vector<uint32_t> decodeWords;
