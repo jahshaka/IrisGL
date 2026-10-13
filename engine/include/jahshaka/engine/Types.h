@@ -3577,6 +3577,8 @@ struct GatherRay {
     float hitPos[3] = { 0.0f, 0.0f, 0.0f };
     float hitNormal[3] = { 0.0f, 0.0f, 0.0f };
     float sunVisibility = 0.0f;
+    /// The ray's quadrature re-weight (what the probe's projection weighs its radiance by).
+    float weight = 0.0f;
 };
 
 /// What the gather did on the last drawn frame of this scene.

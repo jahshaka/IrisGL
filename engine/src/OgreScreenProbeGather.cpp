@@ -746,6 +746,7 @@ void ScreenProbeGather::readPending(View &v) {
                     g.hitNormal[1] = float(int8_t(uint8_t((w[0] >> 16u) & 0xFFu))) / 127.0f;
                     g.hitNormal[2] = float(int8_t(uint8_t((w[1] >> 24u) & 0xFFu))) / 127.0f;
                     const float reweight = half(w[1], 0);
+                    g.weight = reweight;
                     g.hitPos[0] = half(w[2], 0);
                     g.hitPos[1] = half(w[2], 1);
                     g.hitPos[2] = half(w[3], 0);
