@@ -3994,6 +3994,10 @@ public:
     bool boneMatrices(NodeId id, float *out, size_t count) const override;
     size_t streamedBoneCount(NodeId id) const override;
     RigStats rigStats() const override;
+    SceneChangeStats changeStats() const override { return mChangeStats; }
+    void beginStructureEdit() override { ++mStructureEditDepth; }
+    void endStructureEdit() override;
+    ShadingModel shadingModelOf(MaterialId id) const override;
 
     // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC; impl in OgreClips.cpp) ----
     bool attachClips(NodeId id, const ClipDesc *clips, size_t count) override;
@@ -7077,6 +7081,14 @@ private:
     /// Lights destroyed (removeLight, removeNode) — the world light list's dirt
     /// beside mGiLightWriteSerial (SceneGiBinding::lightsRemoved).
     unsigned long long mLightsRemoved = 0;
+    /// changeStats(): the structural edits' counts (ENGINE-UPGRADE-1 stage 2).
+    SceneChangeStats mChangeStats;
+    /// beginStructureEdit / endStructureEdit: the open depth, and what the edits inside asked of GI
+    /// (applied once at the outermost end — applyGiInvalidation).
+    int  mStructureEditDepth = 0;
+    bool mGiInvalidationPending = false;
+    bool mGiRestartPending = false;
+    void applyGiInvalidation(bool restartStagedBuild);
     /// THE CARDS' LIGHT FOLD, kept between frames (SPEED-CPU, perf audit E4):
     /// updateSurfaceCache re-walks the lights only when one of the four counters
     /// it reads moved, this frame or the last (see there).

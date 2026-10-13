@@ -303,6 +303,10 @@ public:
     /// from it — silently. Idempotent: setting the model it already has
     /// succeeds and touches nothing.
     virtual bool        setShadingModel(MaterialId, ShadingModel) = 0;
+    /// The family the material is in NOW (Lit for an unknown id). A host that re-asserts a model
+    /// asks this first: setShadingModel succeeds when nothing changes, and that success is not a switch
+    /// (ENGINE-UPGRADE-1 stage 2 — the mirror read it as one and re-queued every user of the material).
+    virtual ShadingModel shadingModelOf(MaterialId) const = 0;
     virtual bool        destroyMaterial(MaterialId) = 0;
     /// Binds a GENERATED shader piece to one material (HLMS_ADOPTION P5).
     /// `path` is an absolute path to a piece file; its directory is registered
@@ -480,6 +484,15 @@ public:
     /// surface the rig-perf bench and its gates read; cheap enough to call per
     /// frame, but nothing on the frame path calls it.
     virtual RigStats    rigStats() const = 0;
+    /// What this scene's structural edits cost so far, in counts (SceneChangeStats).
+    virtual SceneChangeStats changeStats() const = 0;
+    /// ONE STRUCTURAL EDIT, MANY NODES (ENGINE-UPGRADE-1 stage 2). Between begin and end (nestable) the
+    /// GI side of every node removed, attached or re-meshed is COLLECTED: the cascades still get each
+    /// changed box, but the caches are invalidated and a staged probe build rewound ONCE, at end — so a
+    /// host that releases and re-adopts 500 nodes in one sync asks for one rebuild, not 1,000. Nothing
+    /// outside the pair can see the difference: at end the scene is exactly as if each edit had asked.
+    virtual void beginStructureEdit() = 0;
+    virtual void endStructureEdit() = 0;
 
     // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC) ----
     /// Attaches clips to a node that already carries a rig. IDEMPOTENT per clip

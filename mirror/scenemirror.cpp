@@ -849,6 +849,9 @@ int SceneMirror::sync()
     const bool full = mFullWalkPending || mVerifyEverything;
     mLastWalkWasFull = full;
     std::vector<iris::SceneNode *> settleWrites;
+    // ONE STRUCTURAL EDIT for the engine (ENGINE-UPGRADE-1 stage 2): the releases and adoptions below ask
+    // the GI side for one invalidation, not one per node (Scene::beginStructureEdit).
+    mTarget->beginStructureEdit();
     if (full) {
         // JAH_MIRROR_VERIFY=full: the walk IS the verification, so every
         // material is re-fingerprinted and every push it makes is a catch.
@@ -917,6 +920,7 @@ int SceneMirror::sync()
         consumeDirty();
         }
     }
+    mTarget->endStructureEdit();
     // SCENE_STATIC RE-PROMOTION, ON SETTLE (MIRROR_SCALE lane, 2026-09-13;
     // per node and incremental since MIRROR-SETTLE-1). Rule 4 (nodegraph.h)
     // DEMOTES a static subtree on the first transform write, and that is
@@ -3540,7 +3544,12 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
                     // must not be retried every frame. The next real CHANGE
                     // tries again, exactly like the planar-reflector flag.
                     e.shadingModelPushed = wantModel;
-                    if (mTarget->setShadingModel(e.material, ms.pbr.shadingModel)) {
+                    // A SWITCH ONLY WHEN THE FAMILY DIFFERS (ENGINE-UPGRADE-1 stage 2). An attach resets the
+                    // latch, and setShadingModel SUCCEEDS on the model the material already has — which read
+                    // as a switch: every re-adopted node re-queued every other user of its material, a
+                    // 500-node fragment re-attached in a 10k scene visited 4.5 M nodes in one sync.
+                    if (mTarget->shadingModelOf(e.material) != ms.pbr.shadingModel &&
+                        mTarget->setShadingModel(e.material, ms.pbr.shadingModel)) {
                         notePush(node, "shading model");
                         onMaterialItemsRebuilt(e.material);
                         // ...and every OTHER node drawing this material owes a

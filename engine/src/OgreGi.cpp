@@ -2510,6 +2510,29 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
 }
 
 void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged) {
+    // INSIDE A STRUCTURE EDIT (beginStructureEdit) the cache invalidation and the staged build's rewind are
+    // collected and applied once at its end; the changed BOX is noted now, per edit (the cascades each
+    // need their own). Outside one, applied at once — as every caller has always had it.
+    const bool restart = !mInGiStage;
+    if (mStructureEditDepth > 0) {
+        mGiInvalidationPending = true;
+        mGiRestartPending = mGiRestartPending || restart;
+    } else {
+        applyGiInvalidation(restart);
+    }
+    if (geometryVoxelsChanged) noteGiCascadeDirty(where);
+}
+
+void OgreScene::endStructureEdit() {
+    if (mStructureEditDepth == 0 || --mStructureEditDepth > 0) return;
+    if (!mGiInvalidationPending) return;
+    const bool restart = mGiRestartPending && !mInGiStage;
+    mGiInvalidationPending = mGiRestartPending = false;
+    applyGiInvalidation(restart);
+}
+
+void OgreScene::applyGiInvalidation(bool restartStagedBuild) {
+    ++mChangeStats.giInvalidations;
     // EVERY STRUCTURAL CHANGE TO THE SCENE FUNNELS THROUGH HERE — a mesh
     // attached or detached, a node destroyed, a material or texture replaced,
     // a light removed. It deliberately does NOT touch the cached lamp maps any
@@ -2533,12 +2556,11 @@ void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsC
     // the chain. So the machine REWINDS to its first stage and re-photographs
     // the space; it does NOT stop. Never from INSIDE a stage: those legitimately
     // touch the arm they are building.
-    if (!mInGiStage) restartStagedProbeBuild();
+    if (restartStagedBuild) restartStagedProbeBuild();
     // (THE CHAIN'S `itemsStale` IS GONE, ATOM P4b. It closed a window in which a
     // scroll rebuild could dereference a dead `Item*` still attached to a
     // cascade's voxeliser; a voxeliser holds no Item* any more - the gather reads
     // the GPU scene, whose slot for a dead item is gone - so there is no window.)
-    if (geometryVoxelsChanged) noteGiCascadeDirty(where);
 }
 
 // WHERE the scene changed, for the per-cascade dirty path (G1). A cascade is
@@ -2972,6 +2994,7 @@ bool OgreScene::giBuildOwesWork() const { return mGiBuildStage != GiBuildStage::
 // re-fitted by the scout — so the 57 ms chain is not paid again for an edit.
 void OgreScene::restartStagedProbeBuild() {
     if (mGiBuildStage == GiBuildStage::Idle) return;
+    ++mChangeStats.probeBuildRestarts;
     // A grid `buildPccFit` created and `buildPccFinish` never bound is an
     // orphan the moment we rewind past it (item 2).
     destroyProbeGrid();

@@ -979,10 +979,11 @@ void Scene::removeNode(SceneNodePtr node)
     // and moves nothing), so an UNDO of the delete — which re-adds the same
     // guid — puts every rider back on its socket with no second verb.
     unregisterSocketAttachment(node);
-
-    for (const auto &child : node->children()) {
-        removeNode(child);
-    }
+    // ONE NODE, like addNode (ENGINE-UPGRADE-1 stage 2): the subtree's recursion is the caller's —
+    // SceneNode::removeFromScene visits every descendant and calls this for each, as setScene does
+    // for addNode. This used to recurse too, so a node at depth d below the removed root was removed d
+    // times; every repeat missed its guid and paid removeRegistered's reverse scan over the whole
+    // registry — measured, removing a 500-node fragment cost 107 ms in a 1k scene and 959 ms in a 10k one.
 }
 
 void Scene::setCamera(CameraNodePtr cameraNode)

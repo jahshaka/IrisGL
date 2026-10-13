@@ -676,6 +676,18 @@ struct RigStats {
     size_t streamedBones = 0;
 };
 
+/// WHAT THE SCENE'S STRUCTURAL EDITS COST, IN COUNTS (ENGINE-UPGRADE-1 stage 2): running totals
+/// since the scene was created, so a caller reads a delta around the edit it makes. The
+/// reparent of a document subtree out of the scene and back in (the mirror's eviction then
+/// re-adoption) destroys and re-creates one Item per mesh node; the GI side of those edits must
+/// stay O(the edit), never one rebuild request per node (mirror.reparent_local reads these).
+struct SceneChangeStats {
+    unsigned long long itemsCreated = 0;        ///< Items attachMesh created
+    unsigned long long itemsDestroyed = 0;      ///< Items destroyed with their node (removeNode)
+    unsigned long long giInvalidations = 0;     ///< GI cache invalidations requested (invalidateGiCaches)
+    unsigned long long probeBuildRestarts = 0;  ///< staged probe builds rewound to their first stage
+};
+
 /// WHAT THIS SCENE'S MOBILITY LOOKS LIKE (SPECS/REALTIME_REFLECTIONS_SPEC.md
 /// §3.3, lane R1). The host resolves every node's mobility from the document
 /// (drivers, parents, the user's setting) and pushes the answer with

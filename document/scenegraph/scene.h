@@ -1355,7 +1355,8 @@ public:
     void addNode(SceneNodePtr node);
 
     /**
-     *  Removes node from scene. If node is a LightNode then it is removed to a list of lights.
+     *  Removes ONE node from the scene's registries (its children are the caller's:
+     *  SceneNode::removeFromScene walks the subtree, mirroring setScene/addNode).
      * @param node
      */
     void removeNode(SceneNodePtr node);

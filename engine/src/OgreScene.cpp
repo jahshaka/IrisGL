@@ -1778,7 +1778,8 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
         n.gpuMeshSlot = 0xFFFFFFFFu;
     }
     if (n.item)  { noteTwinsLetGo(n.item);   // a twin it wore may be free (CULL-MODE-2)
-                   n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr; }
+                   n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr;
+                   ++mChangeStats.itemsDestroyed; }
     n.meshRef = 0; n.materialRef = 0;
     // The internal light child must go before the reparent loop below would leak it to root.
     if (n.light) {

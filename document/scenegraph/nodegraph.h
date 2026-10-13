@@ -315,6 +315,10 @@ void noteDocumentWrite(NodeHandle n);
 /// The counter itself, for the host that hands its address to the engine.
 /// Its lifetime is the process's.
 const std::atomic<unsigned long long> &transformWriteCounter();
+/// NODES THAT CHANGED MEMORY-MANAGER CLASS (a static <-> dynamic migration, one per node), a process-wide
+/// running total: what a promotion, a demotion or a reparent's rule-4 round trip cost, in counts
+/// (ENGINE-UPGRADE-1 stage 2, mirror.reparent_local).
+unsigned long long staticSwitchCount();
 /// Does a write to this node's transform count as SCENE MOVEMENT (above)?
 /// True for every node by default; a CAMERA says false once, in its
 /// constructor. Not a "static" hint and not a visibility flag: it answers one

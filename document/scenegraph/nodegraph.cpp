@@ -248,6 +248,9 @@ bool eligibleStaticParent(Ogre::Node *p)
     return isDocumentRoot(p);
 }
 
+/// staticSwitchCount(): nodes that changed memory-manager class (switchOne's one Node::setStatic each).
+std::atomic<unsigned long long> gStaticSwitches{0};
+
 /// Switches ONE node, attachments included, without SceneNode::setStatic's
 /// half-way failure mode: that one migrates the node FIRST and only then
 /// throws if an attachment refuses, leaving the node in the new manager and
@@ -274,6 +277,7 @@ bool switchOne(Ogre::SceneNode *n, bool value)
     // Node::setStatic, not SceneNode::setStatic: the attachments are already
     // where they belong, and the override would walk them a second time.
     n->Ogre::Node::setStatic(value);
+    gStaticSwitches.fetch_add(1, std::memory_order_relaxed);
     if (value && n->getCreator()) n->getCreator()->notifyStaticDirty(n);
     return true;
 }
@@ -1102,6 +1106,11 @@ bool countsAsMovement(NodeHandle n)
 const std::atomic<unsigned long long> &transformWriteCounter()
 {
     return gTransformWrites;
+}
+
+unsigned long long staticSwitchCount()
+{
+    return gStaticSwitches.load(std::memory_order_relaxed);
 }
 
 Mat4 localTransform(NodeHandle n)

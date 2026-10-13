@@ -739,6 +739,13 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
 // THE FAMILY SWITCH (HLMS_ADOPTION P4a §6.2). Destroy, recreate in the other
 // family, re-attach — and the MaterialId survives, because the host's scene
 // refers to it from every node.
+ShadingModel OgreScene::shadingModelOf(MaterialId id) const {
+    auto it = mMaterials.find(id);
+    if (it == mMaterials.end()) return ShadingModel::Lit;
+    if (it->second.distortion) return ShadingModel::Distortion;
+    return it->second.shadingUnlit ? ShadingModel::Unlit : ShadingModel::Lit;
+}
+
 bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) { mError = "setShadingModel: unknown material"; return false; }
@@ -1142,6 +1149,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
             return false;
         }
         n.item = mSceneMgr->createItem(mit->second.mesh, cls);
+        ++mChangeStats.itemsCreated;
         wearDatablock(n.item, wornDatablock(n, tit->second));   // the node's cull (CULL-MODE-2)
         // A REBUILT ITEM IS A NEW CASTER SHAPE (lamp-map cache): a mesh or
         // material swap detaches and recreates in this one call, and the
