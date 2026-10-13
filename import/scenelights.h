@@ -30,11 +30,12 @@ class SceneSource;
 ///     scale, a Take that animates it) places it, and the fragment's existing node
 ///     order is untouched (the bake's fragment pairs its children with the blob's by
 ///     index: AssetHelper::updateNodeMaterial);
-///   * the light's colour x intensity is the file's product exactly (assimp folds FBX
-///     Intensity into mColorDiffuse): intensity = the brightest channel, colour = the
-///     rest, both linear -> the document's sRGB colour. The units are the file's DCC
-///     units, which are ours (a light of intensity I lights a facing surface as I x PI;
-///     Maya's directional and its quadratic-decay lamp read the same way);
+///   * the light's colour is the file's (assimp folds FBX Intensity into mColorDiffuse:
+///     intensity = the brightest channel, colour = the rest, linear -> the document's
+///     sRGB colour); its INTENSITY keeps the file's RATIOS but not its unit, which is
+///     the DCC's and no photometric one: the file's brightest directional is anchored
+///     at the engine's sun (1), a lamps-only file's brightest lamp at the editor's new
+///     lamp (lens::kDefaultLampIntensity) — see the .cpp for the Bistro's numbers;
 ///   * a directional light keeps the constructor's forward shading priority 0: it is a
 ///     SUN, and a second sun in the scene it is placed in is the `sun.tie` issue line
 ///     (services/sceneissues.cpp) — the one-sun rule, never a silent demotion;

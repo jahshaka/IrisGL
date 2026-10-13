@@ -14,12 +14,15 @@ For more information see the LICENSE file
 #include "assimp/scene.h"
 #include "core/color.h"
 #include "core/math/quat.h"
+#include "document/scenegraph/cameralens.h"
 #include "document/scenegraph/cameranode.h"
 #include "document/scenegraph/lightnode.h"
 #include "document/scenegraph/scenenode.h"
 #include "import/scenesource.h"
 
 #include <QHash>
+#include <QPair>
+#include <QVector>
 #include <QtMath>
 #include <algorithm>
 #include <cmath>
@@ -120,11 +123,29 @@ AdoptedSceneNodes adoptLightsAndCameras(const SceneSource &source, const SceneNo
     if (!scene || !fragment) return out;
     if (scene->mNumLights == 0 && scene->mNumCameras == 0) return out;
     const auto byName = nodesByName(fragment);
+    QVector<QPair<SceneNodePtr, LightNodePtr>> adopted;
+    float sunPeak = 0.0f, lampPeak = 0.0f;
     for (unsigned i = 0; i < scene->mNumLights; ++i) {
         const auto host = byName.value(QString::fromUtf8(scene->mLights[i]->mName.C_Str()));
         auto light = lightFor(scene->mLights[i]);
         if (!host || !light) continue;
-        host->addChild(light, false);
+        if (light->lightType == LightType::Directional) sunPeak = std::max(sunPeak, light->intensity);
+        else lampPeak = std::max(lampPeak, light->intensity);
+        adopted.append({ host, light });
+    }
+    // THE FILE'S UNIT IS NOT OURS, ITS RATIOS ARE. An FBX light's Intensity is its
+    // DCC's percent-of-a-renderer-unit and carries no photometric unit at all (the
+    // Bistro Exterior's sun is 15000 -> 110 x the engine's sun; the Interior's lamps
+    // 280): taken literally the street rendered 6.8 stops over the default exposure,
+    // a white frame. So the file's lights keep their RATIOS and their colours, and the
+    // file's key light is anchored to the engine's unit: its brightest directional
+    // becomes a sun of 1 (the default sun the exposure is built for); a file with lamps
+    // only anchors its brightest lamp at the editor's new lamp (lens::kDefaultLampIntensity).
+    const float anchor = sunPeak > 0.0f ? 1.0f / sunPeak
+                       : lampPeak > 0.0f ? lens::kDefaultLampIntensity / lampPeak : 1.0f;
+    for (const auto &entry : adopted) {
+        entry.second->intensity *= anchor;
+        entry.first->addChild(entry.second, false);
         ++out.lights;
     }
     for (unsigned i = 0; i < scene->mNumCameras; ++i) {
