@@ -14,6 +14,8 @@ For more information see the LICENSE file
 
 #include "irisglfwd.h"
 
+#include <QString>
+
 namespace iris
 {
 
@@ -48,6 +50,10 @@ struct AdoptedSceneNodes
 {
     int lights = 0;
     int cameras = 0;
+    /// The factor the file's light intensities were multiplied by, and that rule in
+    /// words for the import summary (empty when the file has no light).
+    float anchor = 1.0f;
+    QString anchorNote;
 };
 AdoptedSceneNodes adoptLightsAndCameras(const SceneSource &source, const SceneNodePtr &fragment);
 

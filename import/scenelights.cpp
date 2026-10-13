@@ -143,6 +143,15 @@ AdoptedSceneNodes adoptLightsAndCameras(const SceneSource &source, const SceneNo
     // only anchors its brightest lamp at the editor's new lamp (lens::kDefaultLampIntensity).
     const float anchor = sunPeak > 0.0f ? 1.0f / sunPeak
                        : lampPeak > 0.0f ? lens::kDefaultLampIntensity / lampPeak : 1.0f;
+    out.anchor = anchor;
+    if (!adopted.isEmpty())
+        out.anchorNote = sunPeak > 0.0f
+            ? QStringLiteral("the file's lights keep their ratios and colours; its brightest "
+                             "directional (%1 in the file's own units) is the engine's sun of 1")
+                  .arg(double(sunPeak), 0, 'g', 4)
+            : QStringLiteral("the file's lights keep their ratios and colours; its brightest lamp "
+                             "(%1 in the file's own units) is the editor's new lamp of %2")
+                  .arg(double(lampPeak), 0, 'g', 4).arg(double(lens::kDefaultLampIntensity));
     for (const auto &entry : adopted) {
         entry.second->intensity *= anchor;
         entry.first->addChild(entry.second, false);
