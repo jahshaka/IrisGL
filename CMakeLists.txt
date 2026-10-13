@@ -251,6 +251,7 @@ set(SRCS
     import/importflags.cpp
     import/importsettings.cpp
     import/scenesource.cpp
+    import/scenelights.cpp
     import/modelsceneinfo.cpp
     import/clipfileinfo.cpp
     document/scenegraph/cameranode.cpp
@@ -324,6 +325,7 @@ set (HEADERS
     import/clipnaming.h
     import/importsettings.h
     import/scenesource.h
+    import/scenelights.h
     import/modelsceneinfo.h
     import/clipfileinfo.h
     core/geometry/trimesh.h
