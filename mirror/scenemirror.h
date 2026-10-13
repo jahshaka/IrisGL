@@ -239,6 +239,9 @@ public:
     /// the walk reached every node every frame; since the dirty set it is the
     /// only honest spelling of "is this node still mirrored?".
     quint64 mirroredNodeCount() const { return quint64(mEntries.size()); }
+    /// Full reclaim sweeps run so far (reclaimUnused: O(every entry) each) — a running total; a sync that
+    /// releases and re-adopts the same resources runs none (ENGINE-UPGRADE-1 stage 2b).
+    quint64 reclaimSweepCount() const { return mReclaimSweeps; }
     /// The EFFECTIVE VISIBILITY this mirror last pushed for `node` (1 shown,
     /// 0 hidden, -1 never pushed / not mirrored). The engine has no read-back
     /// for it, and it is the contract the F6 case asserts: since ENGINE-3 the
@@ -1437,6 +1440,7 @@ private:
     /// in one sync (a reparent out of the scene and back) drops and re-takes the same ids: no candidate is left, and
     /// the O(every entry) sweep does not run. mReclaimPending stays the "sweep everything" request of the paths that
     /// do not say what they dropped.
+    quint64                  mReclaimSweeps = 0;
     QSet<jahshaka::engine::MeshId>     mDroppedMeshes;
     QSet<jahshaka::engine::MaterialId> mDroppedMaterials;
     QSet<jahshaka::engine::TextureId>  mDroppedTextures;

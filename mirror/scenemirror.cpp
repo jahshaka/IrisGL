@@ -968,7 +968,7 @@ int SceneMirror::sync()
                              !mDroppedTextures.isEmpty();
     if (reclaimOwed && !(mSource && mSource->materialPreviewDepth > 0)) {
         MirrorStage s(mon, "mirror.reclaim");
-        reclaimUnused(); mReclaimPending = false;
+        reclaimUnused(); mReclaimPending = false; ++mReclaimSweeps;
         mDroppedMeshes.clear(); mDroppedMaterials.clear(); mDroppedTextures.clear();
     }
     // THE EDIT ENDS AFTER THE SWEEP: the meshes and materials it frees are the same structural edit as the
