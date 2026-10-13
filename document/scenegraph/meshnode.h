@@ -224,7 +224,12 @@ public:
     bool hasMobilityDriver(MobilityReason *why = nullptr) const override
     {
         if (SceneNode::hasMobilityDriver(why)) return true;
-        if (!skeleton.isNull() && !mesh.isNull() && mesh->hasSkeletalAnimations()) {
+        // ...and a rig under a clip carried ABOVE it (the shape every multi-node
+        // import arrives in: the file's clips on the fragment root) deforms when any
+        // of that clip's channels moves (BISTRO-IMPORT-1 — the root no longer makes
+        // its subtree movable merely by carrying a clip).
+        if (!skeleton.isNull() && ((!mesh.isNull() && mesh->hasSkeletalAnimations()) ||
+                                   hasMovingClipOver())) {
             if (why) *why = MobilityReason::Skeleton;
             return true;
         }

@@ -869,8 +869,16 @@ public:
     /// walk, which should thread the parent's answer down instead.
     Mobility resolvedMobility(MobilityReason *why = nullptr) const;
     /// Does THIS node carry a hard driver (rule 1)? Virtual so a mesh can add
-    /// its rig's clips. Never looks at the parent, the setting or play state.
+    /// its rig's clips. Never looks at the parent's MOBILITY, the setting or play
+    /// state — but it does read the skeletal clips carried ABOVE it, because a clip
+    /// drives the nodes it names wherever it is carried (isKeyedByClip).
     virtual bool hasMobilityDriver(MobilityReason *why = nullptr) const;
+    /// A skeletal clip on this node or an ancestor has a channel named after this
+    /// node whose keys MOVE (SkeletalAnimation::movesNode; BISTRO-IMPORT-1).
+    bool isKeyedByClip() const;
+    /// Any channel of a skeletal clip on this node or an ancestor moves — a rig's
+    /// skin under that clip deforms (MeshNode::hasMobilityDriver).
+    bool hasMovingClipOver() const;
 
     /// SOFT PROMOTION, set by the host that noticed the movement (SceneMirror)
     /// and cleared for the whole scene when play stops. Runtime only.

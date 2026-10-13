@@ -23,6 +23,12 @@ public:
     }
 
     float getLength();
+
+    /// THE CHANNEL MOVES ITS NODE (BISTRO-IMPORT-1): some key's value differs from the
+    /// first key's, on any of the three tracks. A channel of constant keys — what an
+    /// exporter writes for a node it merely lists — writes the rest pose and moves
+    /// nothing.
+    bool moves() const;
 };
 
 class SkeletalAnimation
@@ -59,6 +65,14 @@ public:
 
     // takes ownership of boneAnim
     void addBoneAnimation(QString boneName,BoneAnimation* boneAnim);
+
+    /// WHAT THIS CLIP ANIMATES (BISTRO-IMPORT-1, the mobility rule): a clip's channels
+    /// are matched to scene nodes BY NAME, so the nodes it moves are exactly those
+    /// named by a channel that moves (BoneAnimation::moves). A default "Take" carries
+    /// a camera's two pivots and nothing else; it moves those and nothing more.
+    bool movesNode(const QString &nodeName) const;
+    /// Any channel at all moves (a rig's skin follows its bones, whichever they are).
+    bool movesAnything() const;
 
     static SkeletalAnimationPtr create()
     {

@@ -294,8 +294,41 @@ namespace {
 /// reports WHY: real property channels are `animation`, a skeletal clip is
 /// `skeleton`.
 bool drivesTransform(const AnimationPtr &a) { return !a.isNull() && !a->properties.isEmpty(); }
-bool drivesSkeleton(const AnimationPtr &a) { return !a.isNull() && !a->skeletalAnimation.isNull(); }
+/// A SKELETAL CLIP DRIVES THE NODES IT NAMES, not the node that carries it
+/// (BISTRO-IMPORT-1). An imported file's clips ride its fragment ROOT and their
+/// channels are matched to scene nodes by name; the root itself moves only if a
+/// channel names it and its keys move. (Before, carrying ANY clip made the carrier
+/// movable — and rule 2 then made the Bistro's 5,942 meshes movable for a Take that
+/// moved one camera.)
+bool clipKeysNode(const AnimationPtr &a, const QString &name)
+{
+    return !a.isNull() && !a->skeletalAnimation.isNull() && a->skeletalAnimation->movesNode(name);
+}
+bool clipMovesAnything(const AnimationPtr &a)
+{
+    return !a.isNull() && !a->skeletalAnimation.isNull() && a->skeletalAnimation->movesAnything();
+}
 } // namespace
+
+bool SceneNode::isKeyedByClip() const
+{
+    for (const SceneNode *n = this; n; n = graph::ownerOf(graph::parentOf(n->mGraphNode))) {
+        if (clipKeysNode(n->animation, name)) return true;
+        for (const AnimationPtr &a : n->animations)
+            if (clipKeysNode(a, name)) return true;
+    }
+    return false;
+}
+
+bool SceneNode::hasMovingClipOver() const
+{
+    for (const SceneNode *n = this; n; n = graph::ownerOf(graph::parentOf(n->mGraphNode))) {
+        if (clipMovesAnything(n->animation)) return true;
+        for (const AnimationPtr &a : n->animations)
+            if (clipMovesAnything(a)) return true;
+    }
+    return false;
+}
 
 bool SceneNode::hasMobilityDriver(MobilityReason *why) const
 {
@@ -333,11 +366,11 @@ bool SceneNode::hasMobilityDriver(MobilityReason *why) const
     if (isSocketAttached()) return yes(MobilityReason::Socket);
     if (sceneNodeType == SceneNodeType::ParticleSystem) return yes(MobilityReason::Particles);
     if (drivesTransform(animation)) return yes(MobilityReason::Animation);
-    if (drivesSkeleton(animation)) return yes(MobilityReason::Skeleton);
-    for (const AnimationPtr &a : animations) {
+    for (const AnimationPtr &a : animations)
         if (drivesTransform(a)) return yes(MobilityReason::Animation);
-        if (drivesSkeleton(a))  return yes(MobilityReason::Skeleton);
-    }
+    // A clip over this node that KEYS it (its own or an ancestor's): an animation
+    // writes this node's transform.
+    if (isKeyedByClip()) return yes(MobilityReason::Animation);
     return false;
 }
 
@@ -413,9 +446,12 @@ bool SceneNode::isStaticEligible() const
     // any attached animation actually HAS something to play — and if one grows
     // channels later, rule 4 (the first transform write demotes the subtree)
     // catches it without a document-side hook.
-    if (drivesTransform(animation) || drivesSkeleton(animation)) return false;
+    // A skeletal clip is the same question (BISTRO-IMPORT-1): it writes the nodes it
+    // KEYS, wherever it is carried, and never its carrier merely for carrying it.
+    if (drivesTransform(animation)) return false;
     for (const AnimationPtr &a : animations)
-        if (drivesTransform(a) || drivesSkeleton(a)) return false;
+        if (drivesTransform(a)) return false;
+    if (isKeyedByClip()) return false;
     return true;
 }
 
