@@ -872,6 +872,9 @@ private:
         quint64 decalSignature = 0;                  // image guid+path+kind set; re-bind on change
         jahshaka::engine::MaterialId material = 0;   // per document material instance
         iris::Material *materialPtr = nullptr;
+        /// This entry's index in mMaterialUsers[materialPtr] (swap-remove, ENGINE-UPGRADE-1 stage 2b); valid only
+        /// while that list holds this node at it — always checked before it is trusted.
+        std::size_t materialUserSlot = std::size_t(-1);
         jahshaka::engine::MeshId mesh = 0;           // shared engine mesh this entry uses
         iris::Mesh *meshPtr = nullptr;
         /// The PBR state last pushed for `material`, and whether anything was.
@@ -1249,7 +1252,7 @@ private:
     /// ...and to the rig counts syncSkeletonSharing / syncClips early-out on.
     void noteRigCounts(Entry &e);
     /// Moves `node` between the two materials' user lists (§3.6).
-    void noteMaterialUser(iris::SceneNode *node, iris::Material *from, iris::Material *to);
+    void noteMaterialUser(Entry &e, iris::SceneNode *node, iris::Material *from, iris::Material *to);
     /// The mobility half of visit(): resolve, push on change, and watch for the
     /// play-time surprise mover. Returns what this node RESOLVED to, which its
     /// children inherit.
@@ -1429,6 +1432,16 @@ private:
     /// Conservative by construction: a missed site delays a free to the next
     /// real change, it never frees something still in use.
     bool                     mReclaimPending = true;
+    /// THE RECLAIM'S CANDIDATES (ENGINE-UPGRADE-1 stage 2b): the engine meshes, materials and textures an entry let go
+    /// of and no entry has taken since — the only ones the sweep could free. An entry released and re-adopted
+    /// in one sync (a reparent out of the scene and back) drops and re-takes the same ids: no candidate is left, and
+    /// the O(every entry) sweep does not run. mReclaimPending stays the "sweep everything" request of the paths that
+    /// do not say what they dropped.
+    QSet<jahshaka::engine::MeshId>     mDroppedMeshes;
+    QSet<jahshaka::engine::MaterialId> mDroppedMaterials;
+    QSet<jahshaka::engine::TextureId>  mDroppedTextures;
+    void noteDropped(const Entry &e);
+    void noteTaken(jahshaka::engine::MeshId mesh, jahshaka::engine::MaterialId material);
     /// MEMO of the two things that depend only on the MATERIAL, not on the
     /// node: its PbrParams and its texture-bind signature. Both used to be
     /// recomputed per MESH per frame — `toPbrParams` runs two dynamic_casts and

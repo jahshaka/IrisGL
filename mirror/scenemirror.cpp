@@ -682,6 +682,20 @@ void SceneMirror::setAttachBudget(std::size_t vertices, std::size_t indices)
     mBudgetVertices = vertices;
     mBudgetIndices = indices;
 }
+namespace {
+/// THE ENGINE'S STRUCTURE EDIT, EXCEPTION-SAFE (Scene::beginStructureEdit): opened for the sync's releases,
+/// adoptions and reclaim sweep, closed by end() — or by the destructor when anything in between throws, so a
+/// throw never leaves the scene's edit depth open (which would defer its GI invalidations for good).
+struct StructureEditScope {
+    jahshaka::engine::Scene *scene;
+    bool open = true;
+    explicit StructureEditScope(jahshaka::engine::Scene *s) : scene(s) { scene->beginStructureEdit(); }
+    void end() { if (open) { open = false; scene->endStructureEdit(); } }
+    ~StructureEditScope() { end(); }
+    StructureEditScope(const StructureEditScope &) = delete;
+    StructureEditScope &operator=(const StructureEditScope &) = delete;
+};
+}   // namespace
 
 int SceneMirror::sync()
 {
@@ -851,7 +865,7 @@ int SceneMirror::sync()
     std::vector<iris::SceneNode *> settleWrites;
     // ONE STRUCTURAL EDIT for the engine (ENGINE-UPGRADE-1 stage 2): the releases and adoptions below ask
     // the GI side for one invalidation, not one per node (Scene::beginStructureEdit).
-    mTarget->beginStructureEdit();
+    StructureEditScope structureEdit(mTarget);
     if (full) {
         // JAH_MIRROR_VERIFY=full: the walk IS the verification, so every
         // material is re-fingerprinted and every push it makes is a catch.
@@ -920,7 +934,6 @@ int SceneMirror::sync()
         consumeDirty();
         }
     }
-    mTarget->endStructureEdit();
     // SCENE_STATIC RE-PROMOTION, ON SETTLE (MIRROR_SCALE lane, 2026-09-13;
     // per node and incremental since MIRROR-SETTLE-1). Rule 4 (nodegraph.h)
     // DEMOTES a static subtree on the first transform write, and that is
@@ -951,10 +964,16 @@ int SceneMirror::sync()
     // back the moment the cursor moves on; reclaiming it in between destroyed
     // and rebuilt a datablock per object crossed. The sweep waits for the
     // gesture to end (materialPreviewDepth is the document's own flag).
-    if (mReclaimPending && !(mSource && mSource->materialPreviewDepth > 0)) {
+    const bool reclaimOwed = mReclaimPending || !mDroppedMeshes.isEmpty() || !mDroppedMaterials.isEmpty() ||
+                             !mDroppedTextures.isEmpty();
+    if (reclaimOwed && !(mSource && mSource->materialPreviewDepth > 0)) {
         MirrorStage s(mon, "mirror.reclaim");
         reclaimUnused(); mReclaimPending = false;
+        mDroppedMeshes.clear(); mDroppedMaterials.clear(); mDroppedTextures.clear();
     }
+    // THE EDIT ENDS AFTER THE SWEEP: the meshes and materials it frees are the same structural edit as the
+    // releases that orphaned them — one invalidation for the lot, not one per freed resource.
+    structureEdit.end();
     // LIVE TEXTURES (ADDENDUM A-1). AFTER the sweep, so a texture the sweep
     // just freed is not uploaded into; before the frame is drawn, because the
     // engine's upload records into the OPEN command buffer and therefore lands
@@ -3385,9 +3404,10 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         if (mesh && e.hasMesh && e.meshPtr == mesh && !rigStale && e.materialPtr != material) {
             pendingSwap = materialFor(material);
             if (pendingSwap) {
-                noteMaterialUser(node, e.materialPtr, material);
+                noteMaterialUser(e, node, e.materialPtr, material);
+                if (e.material) mDroppedMaterials.insert(e.material);   // the old material may now be unreferenced
                 e.material = pendingSwap; e.materialPtr = material;
-                mReclaimPending = true;      // the old material may now be unreferenced
+                noteTaken(0, pendingSwap);
                 e.texturesPushed = false;
                 e.shadingModelPushed = -1;   // the family is the same; the model may not be
             }
@@ -3480,9 +3500,10 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             if (attached) {
                 notePush(node, "mesh attach");
                 ++mMeshAttaches;
-                if (e.materialPtr != material) noteMaterialUser(node, e.materialPtr, material);
+                if (e.materialPtr != material) noteMaterialUser(e, node, e.materialPtr, material);
+                noteDropped(e);           // the old mesh/material may now be unreferenced...
                 e.hasMesh = true; e.material = mat; e.materialPtr = material; e.mesh = m; e.meshPtr = mesh;
-                mReclaimPending = true;   // the old mesh/material may now be unreferenced
+                noteTaken(m, mat);        // ...and the new ones are not
                 e.texturesPushed = false;
                 e.shadingModelPushed = -1;   // a NEW engine material may be in either family
                 e.pickablePushed = -1;   // a NEW Item carries the default query mask
@@ -3499,10 +3520,10 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             // Without this the engine kept drawing the old geometry forever.
             mTarget->detachMesh(e.node);
             notePush(node, "mesh detach");
-            noteMaterialUser(node, e.materialPtr, nullptr);
+            noteMaterialUser(e, node, e.materialPtr, nullptr);
             e.materialPtr = nullptr;
             noteRefractive(e, false, false);
-            mReclaimPending = true;
+            noteDropped(e);
             e.hasMesh = false;
             e.mesh = 0;
             e.meshPtr = nullptr;
@@ -4228,7 +4249,7 @@ void SceneMirror::reclaimUnused()
 /// handle was rebuilt by a migration, so the adopted id names a dead node).
 void SceneMirror::releaseEntry(Entry &e)
 {
-    mReclaimPending = true;
+    noteDropped(e);   // the reclaim's candidates (mDroppedMeshes): what this entry held
     // THE AGGREGATES ARE INCREMENTAL (DIRTY_SET_MIRROR_SPEC §3.7): an entry
     // that goes has to give its contribution back, because nothing re-folds
     // the scene any more.
@@ -4242,7 +4263,7 @@ void SceneMirror::releaseEntry(Entry &e)
         auto it = std::find(mMovableLights.begin(), mMovableLights.end(), e.docNode);
         if (it != mMovableLights.end()) mMovableLights.erase(it);
     }
-    if (e.docNode && e.materialPtr) noteMaterialUser(e.docNode, e.materialPtr, nullptr);
+    if (e.docNode && e.materialPtr) noteMaterialUser(e, e.docNode, e.materialPtr, nullptr);
     if (e.wireNode) mTarget->removeNode(e.wireNode);
     if (e.wireMaterial) mTarget->destroyMaterial(e.wireMaterial);
     // The camera body/frustum mesh belongs to this entry alone (it is derived
@@ -4422,16 +4443,32 @@ void SceneMirror::noteRigCounts(Entry &e)
 /// Which document nodes draw each material (§3.6). A MATERIAL edit moves no
 /// node, so the change list cannot see one — this index is how the edit reaches
 /// the nodes that have to re-push it, without a walk of the scene.
-void SceneMirror::noteMaterialUser(iris::SceneNode *node, iris::Material *from,
+void SceneMirror::noteMaterialUser(Entry &e, iris::SceneNode *node, iris::Material *from,
                                    iris::Material *to)
 {
     if (from == to) return;
+    // O(1) PER CALL, NOT O(the material's users) (ENGINE-UPGRADE-1 stage 2b): the entry knows its slot and the
+    // removal is a swap with the list's tail (the moved node's entry learns its new slot). A find + erase over the
+    // list cost every evicted node a scan of every other node drawing its material — with ONE shared material, of
+    // the whole scene: a 500-node fragment's sync measured 17.8 ms in a 1k scene and 42.0 ms in a 10k one at equal
+    // counts.
     if (from) {
         auto it = mMaterialUsers.find(from);
         if (it != mMaterialUsers.end()) {
             auto &v = it.value();
-            auto at = std::find(v.begin(), v.end(), node);
-            if (at != v.end()) v.erase(at);
+            std::size_t at = e.materialUserSlot;
+            if (at >= v.size() || v[at] != node)   // a slot this list does not vouch for: the one-time search
+                at = std::size_t(std::find(v.begin(), v.end(), node) - v.begin());
+            if (at < v.size()) {
+                iris::SceneNode *last = v.back();
+                v[at] = last;
+                v.pop_back();
+                if (last != node) {
+                    auto moved = mEntries.find(last);
+                    if (moved != mEntries.end()) moved->materialUserSlot = at;
+                }
+            }
+            e.materialUserSlot = std::size_t(-1);
             if (v.empty()) {
                 mMaterialUsers.erase(it);
                 // ...AND THE MEMO WITH IT (lead review R2 #1). Its key is a raw
@@ -4450,7 +4487,10 @@ void SceneMirror::noteMaterialUser(iris::SceneNode *node, iris::Material *from,
     }
     if (to) {
         auto &v = mMaterialUsers[to];
-        if (std::find(v.begin(), v.end(), node) == v.end()) v.push_back(node);
+        if (e.materialUserSlot >= v.size() || v[e.materialUserSlot] != node) {
+            e.materialUserSlot = v.size();
+            v.push_back(node);
+        }
     }
 }
 
@@ -4825,7 +4865,7 @@ void SceneMirror::syncTextures(Entry &e, const MaterialSync &ms)
     notePush(e.docNode, "textures");
     e.textureSignature = signature;
     e.texturesPushed = true;
-    mReclaimPending = true;
+    for (TextureId t : e.boundTextures) mDroppedTextures.insert(t);   // the old binds (re-taken below if kept)
     // Sized from the SLOT ENUM, not from a literal 5 — the detail slots
     // (GAP 2) made a hardcoded count a silent truncation.
     constexpr int kSlotCount = int(PbrTextureSlot::Count);
@@ -4848,6 +4888,21 @@ void SceneMirror::syncTextures(Entry &e, const MaterialSync &ms)
     e.boundTextures.assign(boundIds, boundIds + kSlotCount);
     e.boundTextures.erase(std::remove(e.boundTextures.begin(), e.boundTextures.end(), TextureId(0)),
                           e.boundTextures.end());
+    for (TextureId t : e.boundTextures) mDroppedTextures.remove(t);
+}
+
+void SceneMirror::noteDropped(const Entry &e)
+{
+    if (e.mesh) mDroppedMeshes.insert(e.mesh);
+    if (e.material) mDroppedMaterials.insert(e.material);
+    for (TextureId t : e.boundTextures) mDroppedTextures.insert(t);
+    if (e.particleTexture) mDroppedTextures.insert(e.particleTexture);
+}
+
+void SceneMirror::noteTaken(MeshId mesh, MaterialId material)
+{
+    if (mesh) mDroppedMeshes.remove(mesh);
+    if (material) mDroppedMaterials.remove(material);
 }
 
 bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)

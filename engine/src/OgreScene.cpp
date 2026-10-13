@@ -1739,8 +1739,9 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     // the component tracks by raw pointer dies.
     disarmReflector(id, n);
     mReflectors.erase(id);
-    // Invalidate BEFORE anything dies (IR frees its by-pointer caches inside):
-    // VCT holds the raw Item*, IR caches the mesh's VAO and any node-owned mesh.
+    // The GI side is told about the box the node occupied BEFORE the Item dies (its world AABB is read here).
+    // invalidateGiCaches frees nothing: it notes the box for the cascades now and requests the cache
+    // invalidation — at once, or once at the end of an open Scene::beginStructureEdit (the mirror's sync).
     if (n.mesh || (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit))) {
         // The box it occupied, where there is one (G1) — see detachItem.
         if (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit)) {

@@ -462,7 +462,7 @@ bool OgreScene::destroyMesh(MeshId id) {
     auto it = mMeshes.find(id);
     if (it == mMeshes.end()) return false;
     JAH_TRY {
-        invalidateGiCaches();   // BEFORE the mesh dies: IR frees its by-VAO caches now
+        invalidateGiCaches();   // a request (frees nothing): at once, or once at the end of an open structure edit
         for (auto &kv : mNodes) if (kv.second.meshRef == id) detachItem(kv.first, kv.second);
         if (it->second.mesh) { mMeshIdByOgreMesh.erase(it->second.mesh.get()); mCardsByMesh.erase(it->second.mesh.get()); }
         it->second.mesh.reset();
