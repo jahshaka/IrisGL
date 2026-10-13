@@ -3143,6 +3143,19 @@ void OgreEngine::ensureHlms() {
     // The order INSIDE load() (pipeline blob, then setSaveMicrocodesToCache +
     // microcode, then the Hlms caches) is upstream's, not ours: see
     // OgreHlmsDiskCache.h:74-77 and Samples/2.0/Common/src/GraphicsSystem.cpp:626.
+    //
+    // THE "Jahshaka" RESOURCE GROUP EXISTS BEFORE THE LOAD (ENGINE-UPGRADE-1 stage 1): a
+    // material's custom piece (a project's piece file, a shader graph's emitted piece) is
+    // registered in that group when the material sets it (OgreMaterials.cpp, OgreLights,
+    // OgreParticles, OgreDecals — each still creates it if absent), and the Hlms cache a
+    // session saves NAMES the group. Before, the next boot's load asked for a group nobody had
+    // created yet and the whole cache was thrown away; now a piece whose file is not
+    // registered yet is simply not found, and the fork's HlmsDiskCache::applyTo drops only the
+    // entries that use it.
+    {
+        Ogre::ResourceGroupManager &rgm = Ogre::ResourceGroupManager::getSingleton();
+        if (!rgm.resourceGroupExists("Jahshaka")) rgm.createResourceGroup("Jahshaka", false);
+    }
     mShaderCache.load(mRoot);
     // THE TEXTURE SIDE, in the same breath and for the same reason
     // (THREADING_ADOPTION_SPEC.md P2 items 5 and 6): the render system and its
