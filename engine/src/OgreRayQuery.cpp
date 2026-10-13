@@ -478,8 +478,9 @@ private:
         /// the scene's lights (the one light list, world space, the injection's packing) and
         /// the voxeliser's material rows (PhotonVoxelMaterial::getRowWords, the row
         /// GpuInstance::ids.y names). Re-made only when its words change.
-        RawBuffer hitTable;
-        VkDeviceAddress hitTableAddress = 0;
+        RawBuffer hitTable[kFramesInFlight];        // a frame ring (W1 of the read): written in place
+        uint32_t hitTableCap[kFramesInFlight] = {};  // each slot's capacity in words
+        VkDeviceAddress hitTableAddress = 0;         // the slot published this frame
         std::vector<uint32_t> hitWords, hitScratch;
         /// THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): the material words they were
         /// last synced for and HlmsAtom's twin epoch at that sync (updateScene).
@@ -1994,7 +1995,7 @@ void RayQueryTier::close() {
         dropBuffer(sa.tlasOut);
         for (unsigned r = 0; r < kFramesInFlight; ++r) dropBuffer(sa.tlasIn[r]);
         dropBuffer(sa.alphaTable);
-        dropBuffer(sa.hitTable);
+        for (unsigned r = 0; r < kFramesInFlight; ++r) dropBuffer(sa.hitTable[r]);
         // THE SKIN CACHES, destroyed outright (the device is idle): the scene the
         // map is keyed by may already be gone, so the GpuScene side is not
         // touched — its tables die with it.
@@ -2229,7 +2230,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     }
     retire(sa.alphaTable);
     sa.alphaAddress = 0;
-    retire(sa.hitTable);
+    for (unsigned r = 0; r < kFramesInFlight; ++r) { retire(sa.hitTable[r]); sa.hitTableCap[r] = 0u; }
     sa.hitTableAddress = 0;
     // THE SKIN CACHES (PHOTON-SKIN-1): each hands back its structure, its buffer
     // and its row block, and clears its node's override — the rows stop naming
@@ -6185,11 +6186,16 @@ bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
 /// u[1] = the material rows, u[2] = the first light's word, u[3] = the first row's; a light is
 /// kHitLightWords words (eight vec4, PhotonVoxelLighting::addLight's packing in WORLD space), a
 /// row PhotonVoxelMaterial::kRowWords. THE LIGHTS are the scene's one light list
-/// (SceneLightList) - every visible light, the brightest kHitLights when more exist: a hit
-/// lights itself by every light the store's injection could have used, so the store's direct
-/// part (which the hit's read takes out) is put back by the same lights at the hit.
+/// (SceneLightList), EVERY visible light with the injection's mask and NO budget (the lead's
+/// merge fix of FAR-SUN-2's read, C1): the injection selects per cascade box up to
+/// PhotonVoxelLighting::kLightSlots lights, and a hit may lie in any cascade, so the table
+/// holds the union - every light the store's injection could have used - and the store's direct
+/// part (which the hit's read takes out) is put back by the same lights at the hit. A
+/// scene-wide top-N by raw power (the first version, 32) lost a dim lamp beside the hit that a
+/// cascade had injected. The shader windows each light before its shadow ray, so the cost of
+/// a light out of range is one window test. THE BUFFER IS A FRAME RING written in place (the
+/// tlasIn pattern): a sun the day cycle moves re-writes a slot, never re-makes the buffer.
 namespace {
-constexpr unsigned kHitLights = 32u;
 constexpr unsigned kHitLightWords = 32u;
 }   // namespace
 
@@ -6201,7 +6207,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     uint32_t nLights = 0u;
     if (sm) {
         SceneLightList::Consumer consumer;
-        consumer.budget = kHitLights;
+        consumer.budget = 0u;             // unbounded: the union of every cascade's selection
         SceneLightList::Selection sel;
         sceneLightListOf(sm).select(sm, consumer, sel);
         for (Ogre::Light *light : sel.lights) {
@@ -6253,17 +6259,29 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     w[1] = nRows;
     w[2] = 4u;
     w[3] = lightWords;
-    if (w == sa.hitWords) return;
-    retire(sa.hitTable);
-    sa.hitTableAddress = 0;
-    std::string err;
-    if (makeBuffer(VkDeviceSize(w.size()) * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, true, sa.hitTable, err)) {
-        std::memcpy(sa.hitTable.mapped, w.data(), w.size() * 4u);
-        sa.hitTableAddress = addressOf(sa.hitTable.buffer);
-    } else {
-        Ogre::LogManager::getSingleton().logMessage("rayquery: the hit table: " + err);
-        w.clear();
+    if (w == sa.hitWords && sa.hitTableAddress) return;
+    // THIS FRAME'S RING SLOT (host-visible; the frame kFramesInFlight back has finished reading
+    // it - Ogre's frame fence): re-written in place, re-made only when the words outgrow it.
+    const unsigned ring = frameNow() % kFramesInFlight;
+    RawBuffer &buf = sa.hitTable[ring];
+    const uint32_t words = uint32_t(w.size());
+    if (!buf.buffer || sa.hitTableCap[ring] < words) {
+        retire(buf);
+        uint32_t cap = std::max<uint32_t>(sa.hitTableCap[ring], 1024u);
+        while (cap < words) cap *= 2u;
+        std::string err;
+        if (!makeBuffer(VkDeviceSize(cap) * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, true, buf, err)) {
+            Ogre::LogManager::getSingleton().logMessage("rayquery: the hit table: " + err);
+            sa.hitTableAddress = 0;
+            sa.hitTableCap[ring] = 0u;
+            w.clear();
+            sa.hitWords.swap(w);
+            return;
+        }
+        sa.hitTableCap[ring] = cap;
     }
+    std::memcpy(buf.mapped, w.data(), words * 4u);
+    sa.hitTableAddress = addressOf(buf.buffer);
     sa.hitWords.swap(w);
 }
 
