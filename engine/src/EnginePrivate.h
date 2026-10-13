@@ -1902,6 +1902,7 @@ enum class ArmId : unsigned {
     AtomHitVctSpecular,  ///< "atom.hitVctSpecular" — the hit decode's VCT specular cone (0: compiled out)
     GatherHitsReadback,  ///< "gather.hitsReadback" — every uniform probe's per-ray record read back (FAR-SUN-1)
     ReflectMetalDecode,  ///< "reflect.metalDecode" — the reflector roughness below which a metal hit decodes
+    GiHitDirect,         ///< "gi.hitDirect" — a voxel-answered hit's direct light at the hit (FAR-SUN-2; 0: the store whole)
     Count
 };
 class ArmRegistry {

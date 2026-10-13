@@ -36,13 +36,22 @@
 //     solid angle, 0.177 t at 64 rays and 0.236 t at 36 — still picks the voxel
 //     mip where no card answers.
 //
-// HOW A CALLER BINDS IT: include jah_rq_hit.glsl (the voxel read) and
-// jah_rq_card.glsl (the card read, behind its own macros) first.
+// A VOXEL-ANSWERED HIT'S DIRECT LIGHT IS COMPUTED AT THE HIT (FAR-SUN-2, jah_rq_hit_direct.glsl):
+// every light's direct term at the hit from its own material, its own normal and its own shadow
+// rays, its emissive, and of the store only the bounce part. The caller describes the hit in
+// `jahHitSurf` before asking (a hit it does not describe reads the store whole).
+//
+// HOW A CALLER BINDS IT: include jah_rq_hit.glsl (the voxel read),
+// jah_rq_card.glsl (the card read, behind its own macros), jah_rq_geom.glsl,
+// jah_rq_sun_ray.glsl and jah_rq_hit_record.glsl first, and bind
+// jah_rq_hit_direct.glsl's names.
 //
 // No Hlms directive mark anywhere in this file.
 
 #ifndef JAH_RQ_HIT_RADIANCE_GLSL
 #define JAH_RQ_HIT_RADIANCE_GLSL
+
+#include "jah_rq_hit_direct.glsl"
 
 /// `slot` = the hit instance's item slot (0xFFFFFFFF: no instance the card
 /// tables know — the voxels answer); `hitNormal` = the hit triangle's geometric
@@ -139,6 +148,17 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 	}
 	const vec3 voxel = jahVoxelRadiance( hitPos, dir, footprint, mirror, ok );
 	source = ok ? 2u : 0u;
+	// THE ONE RULE (FAR-SUN-2): the direct light at the hit, the store's bounce part beside it -
+	// gated by the movers above the hit exactly as the store's non-direct share was
+	// (MOVER-OCCLUSION-1: jahHitIndirectGate).
+	vec3 albedo, emissive;
+	float roughness;
+	if( ok && jahHitMaterial( footprint, albedo, emissive, roughness ) )
+	{
+		const vec3 r = jahHitDirect( hitPos, normalize( hitNormal ), albedo, roughness ) + emissive +
+					   jahHitIndirectGate * jahVoxelBounceOut;
+		return finite3( r ) ? clamp( r, vec3( 0.0 ), vec3( kMaxRadiance ) ) : voxel;
+	}
 	return voxel;
 }
 

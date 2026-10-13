@@ -52,6 +52,9 @@
 // (JAH_RAY_QUERY, set by CMake — macOS takes that path, because MoltenVK
 // exposes neither extension: SPECS/research/MOLTENVK_RAY_QUERY_2026-09-14.md).
 #include "EnginePrivate.h"
+#include "SceneLightList.h"
+#include "photon/voxel/PhotonVoxelMaterial.h"
+#include <OgreLight.h>
 
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
@@ -232,7 +235,7 @@ constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 41u;
+constexpr unsigned kReflectBindings = 43u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -283,8 +286,12 @@ constexpr unsigned kReflectFogBinding = kReflectDirectBinding + 1u;
 /// surface is NEARER than the id's (a stock-drawn character in front of a moving
 /// Atom mover) is not taken for the mover (rq_reflect.comp).
 constexpr unsigned kReflectIdDepthBinding = kReflectFogBinding + 1u;
-static_assert(kReflectBindings == kReflectIdDepthBinding + 1u,
-              "the id pass's depth is the reflection set's last binding");
+/// ...and THE HIT'S OWN SURFACE (41, 42; FAR-SUN-2, jah_rq_hit_direct.glsl): the voxeliser's
+/// texture pool and the cloud layer's field.
+constexpr unsigned kReflectPoolBinding = kReflectIdDepthBinding + 1u;
+constexpr unsigned kReflectCloudBinding = kReflectPoolBinding + 1u;
+static_assert(kReflectBindings == kReflectCloudBinding + 1u,
+              "the hit surface's two are the reflection set's last bindings");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's mean and
 /// distance, the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the
@@ -466,6 +473,16 @@ private:
         RawBuffer alphaTable;
         VkDeviceAddress alphaAddress = 0;
         std::vector<uint32_t> alphaWords, alphaScratch;
+        /// THE HIT TABLE (FAR-SUN-2; jah_rq_hit_direct.glsl has the layout): what a
+        /// voxel-answered hit computes its DIRECT light and its emissive from AT THE HIT -
+        /// the scene's lights (the one light list, world space, the injection's packing) and
+        /// the voxeliser's material rows (PhotonVoxelMaterial::getRowWords, the row
+        /// GpuInstance::ids.y names). Re-made only when its words change.
+        RawBuffer hitTable;
+        VkDeviceAddress hitTableAddress = 0;
+        std::vector<uint32_t> hitWords, hitScratch;
+        unsigned long long hitRowSerial = ~0ull;
+        const void *hitStore = nullptr;
         /// THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): the material words they were
         /// last synced for and HlmsAtom's twin epoch at that sync (updateScene).
         std::vector<uint32_t> decodeWords;
@@ -660,6 +677,11 @@ private:
     const ArmRegistry *mArms = nullptr;
     bool arm(ArmId a, bool otherwise) const { return mArms ? mArms->on(a) : otherwise; }
     double armValue(ArmId a) const { return mArms ? mArms->value(a) : 0.0; }
+    /// THE GATHER'S REST KEY with the measuring arm "gi.hitDirect" in it (FAR-SUN-2): a paired
+    /// A/B in one process flips the arm on a still view, and a held view traces nothing.
+    unsigned long long gatherRestKeyArmed(const detail::OgreScene *scene) const {
+        return scene->gatherRestKey() ^ (arm(ArmId::GiHitDirect, true) ? 0ull : 0x9E3779B97F4A7C15ull);
+    }
     /// THE REFIT, off by default. A full TLAS rebuild is NVIDIA's own recommendation
     /// ("consider PREFER_FAST_TRACE and perform only rebuilds") and it measures
     /// 0.21-0.35 ms GPU at 8,001 instances on this rig — inside any budget — while
@@ -952,6 +974,21 @@ private:
     int alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float threshold, unsigned &budget);
     /// Rebuilds `sa`'s alpha table from the feed's alpha-tested slots.
     void updateAlphaTable(OgreScene *scene, SceneAs &sa);
+    /// Rebuilds `sa`'s hit table (FAR-SUN-2) from the scene's lights and material rows.
+    void updateHitTable(OgreScene *scene, SceneAs &sa);
+public:
+    /// The table's address a job hands its shader (0: none - the hit reads the store whole).
+    uint64_t hitTableOf(const OgreScene *scene) const;
+    /// THE VOXELISER'S TEXTURE POOL (the albedo and emissive maps a material row samples) and
+    /// THE CLOUD LAYER'S SHADOW (field + its two parameter vectors) for the ray jobs' hit.
+    struct HitSurfaceInputs {
+        Ogre::TextureGpu *pool = nullptr;
+        Ogre::TextureGpu *cloudField = nullptr;
+        float cloudMap[4] = {};   // 1 / tile, strength, scroll x, scroll z
+        float cloudSun[4] = {};   // sunThrow x, z, altitude, 1 / mu_s
+    };
+    HitSurfaceInputs hitSurfaceInputsOf(const OgreScene *scene) const;
+private:
     /// The table's address a job hands its shader (0: none, or JAH_R6_NO_ALPHA).
     uint64_t alphaTableOf(const OgreScene *scene) const;
     /// MOVER-OCCLUSION-1: does any ray-traced slot carry the mover flag? A hit's mover
@@ -987,6 +1024,11 @@ private:
     VkSampler             mCardParitySampler = VK_NULL_HANDLE;
     VkSampler             mPointSampler = VK_NULL_HANDLE;
     VkSampler             mLinearSampler = VK_NULL_HANDLE;
+    /// FAR-SUN-2: trilinear and WRAPPED - the material maps a hit samples at its own UV (the
+    /// voxeliser's pool) and the cloud field (which tiles).
+    VkSampler             mWrapSampler = VK_NULL_HANDLE;
+    /// FAR-SUN-2: the flat stand-in seen as a one-layer 2D ARRAY (the texture pool's binding).
+    VkImageView           mDummyFlatArrayView = VK_NULL_HANDLE;
     /// The pipeline could not be made on this device; say so ONCE and take the
     /// fallback picture for the rest of the process.
     bool                  mReflectFailed = false;
@@ -1084,6 +1126,8 @@ public:
         return createComputePipeline(cpi, out, name);
     }
     VkSampler gatherLinearSampler() const override { return mLinearSampler; }
+    VkSampler gatherWrapSampler() const override { return mWrapSampler; }
+    VkImageView gatherDummyFlatArray() const override { return mDummyFlatArrayView; }
 
 private:
     /// Made on the first frame a scene gathers, destroyed by close().
@@ -1567,6 +1611,21 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
             return false;
         }
     }
+    {   // FAR-SUN-2: the flat stand-in as a one-layer array (the texture pool's binding).
+        VkImageViewCreateInfo vci{};
+        vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.image = mDummyFlat.image;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        vci.format = fmt;
+        vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.levelCount = 1;
+        vci.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(mVk, &vci, nullptr, &mDummyFlatArrayView) != VK_SUCCESS) {
+            mDummyFlatArrayView = VK_NULL_HANDLE;
+            err = "rayquery: vkCreateImageView (the flat array stand-in) failed";
+            return false;
+        }
+    }
     {   // THE ID IMAGE'S STAND-IN (REFLECT-MOVERS-1): an unsigned image, for a usampler.
         VkImageCreateInfo ici{};
         ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1937,6 +1996,7 @@ void RayQueryTier::close() {
         dropBuffer(sa.tlasOut);
         for (unsigned r = 0; r < kFramesInFlight; ++r) dropBuffer(sa.tlasIn[r]);
         dropBuffer(sa.alphaTable);
+        dropBuffer(sa.hitTable);
         // THE SKIN CACHES, destroyed outright (the device is idle): the scene the
         // map is keyed by may already be gone, so the GpuScene side is not
         // touched — its tables die with it.
@@ -2003,6 +2063,8 @@ void RayQueryTier::close() {
     // (`mDummyArray` — SURFACE-CACHE-0's 1x1x6 stand-in for the card spike's
     // five bindings — went with the spike at SURFACE-CACHE-1b; nothing in the
     // gather or the reflect job binds a 2D ARRAY.)
+    if (mDummyFlatArrayView) vkDestroyImageView(mVk, mDummyFlatArrayView, nullptr);
+    mDummyFlatArrayView = VK_NULL_HANDLE;
     for (ReflectImage *d : { &mDummyCube, &mDummyVolume, &mDummyFlat, &mDummyIds }) {
         if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
         if (d->image) vkDestroyImage(mVk, d->image, nullptr);
@@ -2104,6 +2166,8 @@ void RayQueryTier::close() {
     if (mReflectModule) vkDestroyShaderModule(mVk, mReflectModule, nullptr);
     if (mPointSampler) vkDestroySampler(mVk, mPointSampler, nullptr);
     if (mLinearSampler) vkDestroySampler(mVk, mLinearSampler, nullptr);
+    if (mWrapSampler) vkDestroySampler(mVk, mWrapSampler, nullptr);
+    mWrapSampler = VK_NULL_HANDLE;
     mReflectPool = VK_NULL_HANDLE; mReflectPipeline = VK_NULL_HANDLE;
     mReflectPipeLayout = VK_NULL_HANDLE; mReflectSetLayout = VK_NULL_HANDLE;
     mReflectModule = VK_NULL_HANDLE;
@@ -2167,6 +2231,8 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     }
     retire(sa.alphaTable);
     sa.alphaAddress = 0;
+    retire(sa.hitTable);
+    sa.hitTableAddress = 0;
     // THE SKIN CACHES (PHOTON-SKIN-1): each hands back its structure, its buffer
     // and its row block, and clears its node's override — the rows stop naming
     // a posed copy nobody will update again.
@@ -3584,6 +3650,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // gate: a mask that became ready, or a slot's near level the ray rule moved,
     // changes it with nothing else moving.
     updateAlphaTable(scene, sa);
+    updateHitTable(scene, sa);
     bool compactionPending = false;
     for (const Blas &bl : sa.blas)
         if (bl.compactState == 1u) { compactionPending = true; break; }
@@ -4503,6 +4570,11 @@ struct ReflectParams {
     /// THE METAL HIT'S ROUTE (REFLECT-FIX-1): x = the reflector's perceptual roughness
     /// below which a hit on a metal is decoded (the arm "reflect.metalDecode").
     float metal[4] = {};
+    /// THE HIT'S OWN SURFACE (FAR-SUN-2; rq_reflect.comp's hitTable, cloudMap, cloudSun): the
+    /// gather's three (OgreScreenProbeGather.cpp's GatherParams), the same meaning.
+    float hitTable[4] = {};
+    float cloudMap[4] = {};
+    float cloudSun[4] = {};
 };
 
 
@@ -4524,7 +4596,7 @@ void put3(float *dst, const Ogre::Vector3 &v, float w) {
 // gather-only chain that no longer asks the reflection anything bound a NULL
 // sampler (a driver segfault in vkUpdateDescriptorSets).
 bool RayQueryTier::ensureSamplers(std::string &err) {
-    if (mPointSampler && mLinearSampler) return true;
+    if (mPointSampler && mLinearSampler && mWrapSampler) return true;
     VkSamplerCreateInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     si.magFilter = si.minFilter = VK_FILTER_NEAREST;
@@ -4541,6 +4613,12 @@ bool RayQueryTier::ensureSamplers(std::string &err) {
     if (!mLinearSampler && vkCreateSampler(mVk, &si, nullptr, &mLinearSampler) != VK_SUCCESS) {
         mLinearSampler = VK_NULL_HANDLE;
         err = "rayquery: vkCreateSampler (linear) failed";
+        return false;
+    }
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    if (!mWrapSampler && vkCreateSampler(mVk, &si, nullptr, &mWrapSampler) != VK_SUCCESS) {
+        mWrapSampler = VK_NULL_HANDLE;
+        err = "rayquery: vkCreateSampler (wrap) failed";
         return false;
     }
     return true;
@@ -4590,6 +4668,8 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 38 voxelDirect[] (MOVER-OCCLUSION-1)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 39 the air's table (PHOTON-I-1 fix 5)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 40 the id pass's depth (ID-DEPTH-1)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 41 the texture pool (FAR-SUN-2)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 42 the cloud field (FAR-SUN-2)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -5302,6 +5382,18 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // Hits photon view shows it; the reflection's own arithmetic never reads it.
     pp.alpha[2] = mArms ? float(mArms->value(ArmId::ReflectEdgeClasses)) : 0.0f;
     pp.metal[0] = mArms ? float(mArms->value(ArmId::ReflectMetalDecode)) : float(kReflectMetalDecodeRoughness);
+    // THE HIT'S OWN SURFACE (FAR-SUN-2): the hit table, the texture pool, the cloud shadow.
+    const HitSurfaceInputs hitSurf = hitSurfaceInputsOf(scene);
+    {
+        const uint64_t a = hitTableOf(scene);
+        const uint32_t lo = uint32_t(a & 0xFFFFFFFFu), hi = uint32_t(a >> 32u);
+        std::memcpy(&pp.hitTable[0], &lo, sizeof(lo));
+        std::memcpy(&pp.hitTable[1], &hi, sizeof(hi));
+        pp.hitTable[2] = hitSurf.pool ? 1.0f : 0.0f;
+        pp.hitTable[3] = hitSurf.cloudField ? 1.0f : 0.0f;
+        std::memcpy(pp.cloudMap, hitSurf.cloudMap, sizeof(pp.cloudMap));
+        std::memcpy(pp.cloudSun, hitSurf.cloudSun, sizeof(pp.cloudSun));
+    }
     pp.alpha[3] = rayMoversOf(scene) ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
@@ -5540,6 +5632,20 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!idDepthImg.imageView) { bail("the id depth view is null"); return; }
     w[kReflectIdDepthBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[kReflectIdDepthBinding].pImageInfo = &idDepthImg;
+    // THE HIT'S OWN SURFACE (41, 42; FAR-SUN-2): the texture pool and the cloud field, or the
+    // stand-ins (never read: p.hitTable.z / .w = 0).
+    VkDescriptorImageInfo poolImg{}, cloudImg{};
+    poolImg.sampler = mWrapSampler;
+    poolImg.imageView = hitSurf.pool ? sampledView(hitSurf.pool) : mDummyFlatArrayView;
+    poolImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    cloudImg.sampler = mWrapSampler;
+    cloudImg.imageView = hitSurf.cloudField ? sampledView(hitSurf.cloudField) : mDummyFlat.view;
+    cloudImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!poolImg.imageView || !cloudImg.imageView || !poolImg.sampler) { bail("a hit-surface binding is null"); return; }
+    w[kReflectPoolBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[kReflectPoolBinding].pImageInfo = &poolImg;
+    w[kReflectCloudBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[kReflectCloudBinding].pImageInfo = &cloudImg;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -5591,6 +5697,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         if (fogAerial)
             solver.resolveTransition(trans, fogAerial, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
+        // THE HIT'S OWN SURFACE (FAR-SUN-2): the texture pool and the cloud field, sampled.
+        for (Ogre::TextureGpu *t : { hitSurf.pool, hitSurf.cloudField })
+            if (t)
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
         // THE CARD READ'S INPUTS: the Radiance layer the CardLight job wrote
         // (a UAV) and the Depth layer the capture copied into, read as
         // textures; the two tables syncBuffers uploaded, read as buffers; and
@@ -6072,6 +6183,111 @@ bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
     return false;
 }
 
+/// THE HIT TABLE (FAR-SUN-2; the layout is jah_rq_hit_direct.glsl's): u[0] = the lights,
+/// u[1] = the material rows, u[2] = the first light's word, u[3] = the first row's; a light is
+/// kHitLightWords words (eight vec4, PhotonVoxelLighting::addLight's packing in WORLD space), a
+/// row PhotonVoxelMaterial::kRowWords. THE LIGHTS are the scene's one light list
+/// (SceneLightList) - every visible light, the brightest kHitLights when more exist: a hit
+/// lights itself by every light the store's injection could have used, so the store's direct
+/// part (which the hit's read takes out) is put back by the same lights at the hit.
+namespace {
+constexpr unsigned kHitLights = 32u;
+constexpr unsigned kHitLightWords = 32u;
+}   // namespace
+
+void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
+    std::vector<uint32_t> &w = sa.hitScratch;
+    w.assign(4u, 0u);
+    auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, sizeof u); return u; };
+    Ogre::SceneManager *sm = scene->mSceneMgr;
+    uint32_t nLights = 0u;
+    if (sm) {
+        SceneLightList::Consumer consumer;
+        consumer.budget = kHitLights;
+        SceneLightList::Selection sel;
+        sceneLightListOf(sm).select(sm, consumer, sel);
+        for (Ogre::Light *light : sel.lights) {
+            if (!light || !light->getParentNode()) continue;
+            float L[kHitLightWords] = {};
+            const Ogre::Light::LightTypes srcType = light->getType();
+            const bool punctual = srcType == Ogre::Light::LT_POINT || srcType == Ogre::Light::LT_SPOTLIGHT;
+            const bool area = srcType == Ogre::Light::LT_AREA_APPROX || srcType == Ogre::Light::LT_AREA_LTC;
+            const Ogre::Light::LightTypes type = area ? Ogre::Light::LT_AREA_LTC : srcType;
+            const Ogre::Vector4 p4 = light->getAs4DVector();   // directional: -dir, w 0
+            L[0] = float(p4.x); L[1] = float(p4.y); L[2] = float(p4.z); L[3] = float(type);
+            const Ogre::ColourValue d = light->getDiffuseColour() * light->getPowerScale();
+            L[4] = d.r; L[5] = d.g; L[6] = d.b;
+            L[7] = (punctual || area) ? float(light->getAttenuationRange()) : 0.0f;
+            const Ogre::Quaternion q = light->getParentNode()->_getDerivedOrientation();
+            const Ogre::Vector3 z = q.zAxis();
+            if (type == Ogre::Light::LT_SPOTLIGHT) {
+                L[8] = -float(z.x); L[9] = -float(z.y); L[10] = -float(z.z);
+                const float inner = float(light->getSpotlightInnerAngle().valueRadians());
+                const float outer = float(light->getSpotlightOuterAngle().valueRadians());
+                L[12] = 1.0f / (std::cos(inner * 0.5f) - std::cos(outer * 0.5f));
+                L[13] = std::cos(outer * 0.5f);
+                L[14] = float(light->getSpotlightFalloff());
+            }
+            if (punctual) L[11] = float(light->getAttenuationLinear());   // the source radius
+            L[15] = light->getDoubleSided() ? 1.0f : 0.0f;
+            if (area) {
+                const Ogre::Vector3 c(p4.x, p4.y, p4.z);
+                const Ogre::Vector2 half = light->getDerivedRectSize() * 0.5f;
+                const Ogre::Vector3 x = q.xAxis() * half.x, y = q.yAxis() * half.y;
+                const Ogre::Vector3 r[4] = { c - x - y, c + x - y, c + x + y, c - x + y };
+                for (int k = 0; k < 4; ++k) {
+                    L[16 + 4 * k] = float(r[k].x); L[17 + 4 * k] = float(r[k].y); L[18 + 4 * k] = float(r[k].z);
+                }
+            }
+            for (float f : L) w.push_back(bits(f));
+            ++nLights;
+        }
+    }
+    const Ogre::PhotonVoxelMaterial *store = scene->mVctMaterialStore;
+    const uint32_t lightWords = uint32_t(w.size());
+    uint32_t nRows = 0u;
+    if (store) {
+        const auto &rows = store->getRowWords();
+        nRows = uint32_t(rows.size() / Ogre::PhotonVoxelMaterial::kRowWords);
+        w.insert(w.end(), rows.begin(), rows.end());
+    }
+    w[0] = nLights;
+    w[1] = nRows;
+    w[2] = 4u;
+    w[3] = lightWords;
+    if (w == sa.hitWords) return;
+    retire(sa.hitTable);
+    sa.hitTableAddress = 0;
+    std::string err;
+    if (makeBuffer(VkDeviceSize(w.size()) * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, true, sa.hitTable, err)) {
+        std::memcpy(sa.hitTable.mapped, w.data(), w.size() * 4u);
+        sa.hitTableAddress = addressOf(sa.hitTable.buffer);
+    } else {
+        Ogre::LogManager::getSingleton().logMessage("rayquery: the hit table: " + err);
+        w.clear();
+    }
+    sa.hitWords.swap(w);
+}
+
+uint64_t RayQueryTier::hitTableOf(const OgreScene *scene) const {
+    // The arm "gi.hitDirect" = 0 (the measuring arm): no table, the hit reads the store whole.
+    if (!arm(ArmId::GiHitDirect, true)) return 0u;
+    auto it = mScenes.find(const_cast<OgreScene *>(scene));
+    return it == mScenes.end() ? 0u : uint64_t(it->second.hitTableAddress);
+}
+
+RayQueryTier::HitSurfaceInputs RayQueryTier::hitSurfaceInputsOf(const OgreScene *scene) const {
+    HitSurfaceInputs h;
+    if (scene->mVctMaterialStore) h.pool = scene->mVctMaterialStore->getTexturePool();
+    const FogHlmsListener::CloudShadowState cs = FogHlmsListener::cloudShadow(scene->mSceneMgr);
+    if (cs.field && cs.strength > 0.0f) {
+        h.cloudField = cs.field;
+        h.cloudMap[0] = cs.invTile; h.cloudMap[1] = cs.strength; h.cloudMap[2] = cs.scroll[0]; h.cloudMap[3] = cs.scroll[1];
+        h.cloudSun[0] = cs.sunThrow[0]; h.cloudSun[1] = cs.sunThrow[1]; h.cloudSun[2] = cs.altitude; h.cloudSun[3] = cs.invMuSun;
+    }
+    return h;
+}
+
 uint64_t RayQueryTier::alphaTableOf(const OgreScene *scene) const {
     // The arm "reflect.alphaTested" = 0 traces every cut-out opaque (the cost arm).
     if (!arm(ArmId::ReflectAlphaTested, true)) return 0u;
@@ -6349,7 +6565,7 @@ void RayQueryTier::forgetGather(const ReflectPassListener *key) {
 }
 
 void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) const {
-    if (mGather) mGather->statsInto(scene, scene->gatherRestKey(), scene->gatherRestartKey(), out);
+    if (mGather) mGather->statsInto(scene, gatherRestKeyArmed(scene), scene->gatherRestartKey(), out);
 }
 
 void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
@@ -6452,10 +6668,18 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         if (armValue(ArmId::GatherYoungReach) > 0.0)
             in.tuning.youngReach = float(armValue(ArmId::GatherYoungReach));
     }
-    in.restKey = scene->gatherRestKey();
+    in.restKey = gatherRestKeyArmed(scene);
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
     in.alphaTable = alphaTableOf(scene);
+    in.hitTable = hitTableOf(scene);
+    {
+        const HitSurfaceInputs hs = hitSurfaceInputsOf(scene);
+        in.hitPool = hs.pool;
+        in.cloudField = hs.cloudField;
+        std::memcpy(in.cloudMap, hs.cloudMap, sizeof(hs.cloudMap));
+        std::memcpy(in.cloudSun, hs.cloudSun, sizeof(hs.cloudSun));
+    }
     in.movers = rayMoversOf(scene);
 
     // ---- the voxel cache the hits are shaded from (the reflection's rule) ---

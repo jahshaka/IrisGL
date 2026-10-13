@@ -100,7 +100,7 @@ constexpr unsigned kPlaceBindings = 6u;
 /// the voxelizer's normal (23, 24: PHOTON-VOXEL-5); then the card read's VIEW
 /// TERM's five (25-29, PHOTON-CARDS-5: jah_rq_card_bindings.glsl at
 /// JAH_CARD_VIEW_BINDING_BASE 25).
-constexpr unsigned kTraceBindings = 33u;
+constexpr unsigned kTraceBindings = 35u;
 constexpr unsigned kTraceSideBinding = 23u;
 constexpr unsigned kTraceCardViewBinding = 25u;
 /// ...and THE DIRECT TERM's volume per cascade (30, MOVER-OCCLUSION-1: jah_rq_hit.glsl).
@@ -109,8 +109,13 @@ constexpr unsigned kTraceDirectBinding = 30u;
 /// records (31) and the photon view's overlay (32).
 constexpr unsigned kTraceRaysBinding = 31u;
 constexpr unsigned kTraceOverlayBinding = 32u;
+/// ...and THE HIT'S OWN SURFACE's two (FAR-SUN-2, jah_rq_hit_direct.glsl): the voxeliser's texture
+/// pool (33) and the cloud layer's field (34).
+constexpr unsigned kTracePoolBinding = 33u;
+constexpr unsigned kTraceCloudBinding = 34u;
 static_assert(kTraceRaysBinding == kTraceDirectBinding + 1u && kTraceOverlayBinding == kTraceRaysBinding + 1u &&
-                  kTraceBindings == kTraceOverlayBinding + 1u &&
+                  kTracePoolBinding == kTraceOverlayBinding + 1u && kTraceCloudBinding == kTracePoolBinding + 1u &&
+                  kTraceBindings == kTraceCloudBinding + 1u &&
                   kTraceDirectBinding == kTraceCardViewBinding + SurfaceCache::kViewLayers,
               "the direct volume follows the card read's view-term layers, the instrument's two follow it");
 constexpr unsigned kFilterBindings = 3u;
@@ -196,6 +201,12 @@ struct GatherParams {
     /// THE GATHER-HITS INSTRUMENT (FAR-SUN-1): x = 1 the per-ray records, y = 1 the
     /// GatherHits view, z = the stride in pixels.
     float hits[4] = {};
+    /// THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): x, y = the hit table's
+    /// address (float bits; 0 = none), z = 1 when the texture pool is bound, w = 1 when the
+    /// cloud layer shades the sun; then the cloud shadow's map and sun (jah_cloud_shadow.glsl).
+    float hitTable[4] = {};
+    float cloudMap[4] = {};
+    float cloudSun[4] = {};
 };
 
 /// THE PIXEL HISTORY'S BLEND FLOOR (PHOTON-GATHER-1c item 1): the smallest
@@ -360,6 +371,8 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 30 voxelDirect[] (MOVER-OCCLUSION-1)
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 31 the per-ray records (FAR-SUN-1)
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 32 the photon overlay (GatherHits)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 33 the texture pool (FAR-SUN-2)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 34 the cloud field (FAR-SUN-2)
         };
         const unsigned c[kTraceBindings] = { 1u, 1u, 1u, 1u, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
@@ -368,7 +381,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
                                              kGatherMaxCascades, kGatherMaxCascades,
                                              1u, 1u, 1u, 1u,
                                              kGatherMaxCascades, kGatherMaxCascades,
-                                             1u, 1u, 1u, 1u, 1u, kGatherMaxCascades, 1u, 1u };
+                                             1u, 1u, 1u, 1u, 1u, kGatherMaxCascades, 1u, 1u, 1u, 1u };
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp
@@ -1417,6 +1430,13 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.hitSun2[2] = in.hit.sunRange;
     pp.hitSun2[3] = std::max(in.hit.farLift, in.farOverlap);
     {
+        const uint32_t hlo = uint32_t(in.hitTable & 0xFFFFFFFFu), hhi = uint32_t(in.hitTable >> 32u);
+        std::memcpy(&pp.hitTable[0], &hlo, sizeof(hlo));
+        std::memcpy(&pp.hitTable[1], &hhi, sizeof(hhi));
+        pp.hitTable[2] = in.hitPool ? 1.0f : 0.0f;
+        pp.hitTable[3] = in.cloudField ? 1.0f : 0.0f;
+        std::memcpy(pp.cloudMap, in.cloudMap, sizeof(pp.cloudMap));
+        std::memcpy(pp.cloudSun, in.cloudSun, sizeof(pp.cloudSun));
         const uint32_t lo = uint32_t(in.alphaTable & 0xFFFFFFFFu), hi = uint32_t(in.alphaTable >> 32u);
         std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
         std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
@@ -1663,6 +1683,20 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         if (!hitsOverlay.imageView) return;
         w[kTraceOverlayBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[kTraceOverlayBinding].pImageInfo = &hitsOverlay;
+        // THE HIT'S OWN SURFACE (33, 34; FAR-SUN-2): the voxeliser's texture pool and the cloud
+        // field, or the stand-ins (never read: p.hitTable.z / .w = 0).
+        VkDescriptorImageInfo poolImg{}, cloudImg{};
+        poolImg.sampler = mHost.gatherWrapSampler();
+        poolImg.imageView = in.hitPool ? sampledView(in.hitPool) : mHost.gatherDummyFlatArray();
+        poolImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        cloudImg.sampler = mHost.gatherWrapSampler();
+        cloudImg.imageView = in.cloudField ? sampledView(in.cloudField) : dummyFlat;
+        cloudImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (!poolImg.imageView || !cloudImg.imageView || !poolImg.sampler) return;
+        w[kTracePoolBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[kTracePoolBinding].pImageInfo = &poolImg;
+        w[kTraceCloudBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[kTraceCloudBinding].pImageInfo = &cloudImg;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kTraceBindings, w, 0, nullptr);
     }
 
@@ -1757,6 +1791,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         if (in.sky)
             solver.resolveTransition(trans, in.sky, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
+        // THE HIT'S OWN SURFACE (FAR-SUN-2): the texture pool and the cloud field, sampled.
+        for (Ogre::TextureGpu *t : { in.hitPool, in.cloudField })
+            if (t)
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
         // THE CARD READ'S INPUTS (GA-1e), the reflection's transitions: the
         // Radiance layer the CardLight job wrote and the Depth layer the capture
         // copied into, read as textures; the two tables and the geometry rows,

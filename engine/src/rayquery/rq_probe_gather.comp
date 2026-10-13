@@ -152,6 +152,15 @@ layout( std430, set = 0, binding = 22 ) buffer JahHitBuf { uint jahHitBuf[]; };
 #include "jah_rq_hit_record.glsl"
 // THE HIT'S RADIANCE, after the alpha table (MOVER-OCCLUSION-1: the read traces the
 // movers above the hit, cut-outs honoured).
+// THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): the hit table, the voxeliser's
+// texture pool (binding 33) and the cloud layer's field (34).
+layout( set = 0, binding = 33 ) uniform sampler2DArray jahHitPool;
+layout( set = 0, binding = 34 ) uniform sampler2D jahHitCloud;
+#define JAH_HIT_TABLE       floatBitsToUint( p.hitTable.xy )
+#define JAH_HIT_POOL_ON     ( p.hitTable.z > 0.5 )
+#define JAH_HIT_CLOUD_ON    ( p.hitTable.w > 0.5 )
+#define JAH_HIT_CLOUD_MAP   p.cloudMap
+#define JAH_HIT_CLOUD_SUN   p.cloudSun
 #define JAH_HIT_MOVERS_ON ( p.alpha.w > 0.5 )
 #include "jah_rq_hit_radiance.glsl"
 
@@ -331,14 +340,17 @@ void main()
 		vec2 hitBary = vec2( 0.0 );
 		bool far = false;
 		vec3 hitN = -dir;
+		bool hitNormalKnown = false;
+		uint hitGeom = 0u;
+		mat4x3 hitToWorld = mat4x3( 1.0 );
 		if( hit )
 		{
 			hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
 			hitPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
 			hitBary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
-			jahHitGeometricNormal( hitSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
-								   uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
-								   rayQueryGetIntersectionObjectToWorldEXT( rq, true ), dir, hitN );
+			hitGeom = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
+			hitToWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
+			hitNormalKnown = jahHitGeometricNormal( hitSlot, hitGeom, hitPrim, hitToWorld, dir, hitN );
 		}
 		// THE FAR QUERY, for an escaping ray only: the far copies (kRayMaskFar),
 		// from p.plane.z to the far plane. The same origin and direction; the far
@@ -392,6 +404,11 @@ void main()
 			// The mover gate's rotation: this probe's cell and ray, this frame.
 			jahHitSeed = cellIndex * 73856093u ^ lane * 19349663u ^ frame * 2654435761u;
 			uint cacheSource = 0u;
+			// THE HIT, for its direct light at the hit (FAR-SUN-2): a near hit whose triangle
+			// gave its normal; a FAR copy's names no near row (its normal is the ray's
+			// reverse) and reads the store whole.
+			jahHitSurf = JahHitSurface( hitSlot, hitGeom, hitPrim, hitBary, hitToWorld, tHit, far,
+										!far && hitNormalKnown );
 			if( !decodeAlways )
 				radiance = jahHitRadianceSourced( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
 													  max( tHit * spread, 1e-4 ), false, false, ok, cacheSource );

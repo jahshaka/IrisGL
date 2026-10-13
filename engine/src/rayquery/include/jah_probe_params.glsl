@@ -160,6 +160,12 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// uniform probe's per-ray record (the arm "gather.hitsReadback"; binding 31), y = 1
 	/// paints the GatherHits photon view (binding 32), z = the probe stride in pixels.
 	vec4 hits;
+	/// THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): xy = the hit table's device
+	/// address (float bits; 0 = none), z = 1 the texture pool is bound, w = 1 the cloud layer
+	/// shades the sun; then the cloud shadow's map and sun (jah_cloud_shadow.glsl).
+	vec4 hitTable;
+	vec4 cloudMap;
+	vec4 cloudSun;
 } p;
 
 /// ONE EYE'S IMAGE — rq_reflect.comp's `EyeImage`: where the eye is and the

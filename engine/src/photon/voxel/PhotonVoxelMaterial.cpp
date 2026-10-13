@@ -178,6 +178,16 @@ namespace Ogre
 
         bucket.buffer->upload( &shaderMaterial, slot * sizeof( PhotonShaderVoxelMaterial ),
                                sizeof( PhotonShaderVoxelMaterial ) );
+
+        // THE RAY JOBS' COPY (FAR-SUN-2; getRowWords): the same row, plus its flags.
+        static_assert( sizeof( PhotonShaderVoxelMaterial ) == kRowWords * sizeof( uint32 ),
+                       "a row is kRowWords words" );
+        const size_t at = ( size_t( out.bucketIdx ) * kRowsPerBucket + slot ) * kRowWords;
+        if( mRowWords.size() < at + kRowWords )
+            mRowWords.resize( ( size_t( out.bucketIdx ) + 1u ) * kRowsPerBucket * kRowWords, 0u );
+        shaderMaterial.padding0 = ( diffuseTex ? kRowHasDiffuseTex : 0u ) | ( emissiveTex ? kRowHasEmissiveTex : 0u );
+        memcpy( &mRowWords[at], &shaderMaterial, sizeof( shaderMaterial ) );
+        ++mRowSerial;
     }
     //-------------------------------------------------------------------------
     PhotonVoxelMaterial::DatablockConversionResult PhotonVoxelMaterial::addDatablockToBucket( HlmsDatablock *datablock,

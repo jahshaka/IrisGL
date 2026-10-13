@@ -100,6 +100,9 @@ namespace Ogre
         CompositorWorkspace  *mDownsampleWorkspace2D;
         TextureToPoolEntryMap mTextureToPoolEntry;
 
+        vector<uint32>::type mRowWords;
+        uint64 mRowSerial = 0u;
+
         DatablockConversionResult addDatablockToBucket( HlmsDatablock  *datablock,
                                                         MaterialBucket &bucket );
         /// The one conversion: writes `datablock`'s row at `slot` of `bucket` and fills
@@ -181,6 +184,21 @@ namespace Ogre
         void removeDatablock( const HlmsDatablock *datablock );
 
         TextureGpu *getTexturePool() const { return mTexturePool; }
+
+        /// THE ROWS AS THE RAY JOBS READ THEM (FAR-SUN-2: a voxel-answered hit's direct light is
+        /// computed AT THE HIT from its own material - jah_rq_hit_direct.glsl). A host copy of every
+        /// row this store has written, kRowWords words a row at (bucketIdx * kRowsPerBucket +
+        /// slotIdx) - the index GpuInstance::ids.y names - in the const buffers' own layout
+        /// (bgDiffuse, diffuse, emissive, the two pool slices, the roughness) with word 15 the
+        /// row's FLAGS (bit 0: the albedo samples its pool slice, bit 1: the emissive does - the
+        /// bucket's job variant, which the uploaded row does not carry). `rowSerial` moves on every
+        /// write, so a reader re-uploads only what changed.
+        static constexpr uint32 kRowWords = 16u;
+        static constexpr uint32 kRowsPerBucket = 1024u;
+        static constexpr uint32 kRowHasDiffuseTex = 1u;
+        static constexpr uint32 kRowHasEmissiveTex = 2u;
+        const vector<uint32>::type &getRowWords() const { return mRowWords; }
+        uint64 getRowSerial() const { return mRowSerial; }
 
         /// Are the temp resources up? A store shared by a whole chain is bracketed ONCE
         /// per rebuild by its owner, so a voxelizer's build can assert it rather than

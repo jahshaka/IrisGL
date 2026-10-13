@@ -117,6 +117,14 @@ float jahHitIndirectGate = 1.0;
 /// the gather-hits instrument's reading (FAR-SUN-1), nothing else reads it.
 int jahVoxelAnswerCascade = -1;
 
+/// THE STORE'S BOUNCE PART at the last jahVoxelRadiance's hit (FAR-SUN-2; jah_rq_hit_direct.glsl):
+/// the read times its share that is NOT the direct volume's - 1 - D / T per channel, the
+/// isotropic total T and the direct volume D (every lamp's direct light and the emissive,
+/// LightInjection_piece_cs.any) read at the same texel, level 0 - before the mover gate. With
+/// no bounce and no sky in the store it is exactly 0; where the store holds only bounce, the read.
+/// A hit whose direct light is computed at the hit adds this, and nothing else of the store.
+vec3 jahVoxelBounceOut = vec3( 0.0 );
+
 /// The radiance leaving `hitPos` towards where the ray came from, read out of
 /// the cascade chain's light volumes.
 ///
@@ -131,6 +139,8 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 {
 	ok = false;
 	jahVoxelAnswerCascade = -1;
+	jahVoxelBounceOut = vec3( 0.0 );
+	vec3 accBounce = vec3( 0.0 );
 	const int count = JAH_VOX_COUNT;
 	// HOW WIDE THE HAND-OVER BAND IS, in cells of the cascade being left. Three
 	// DIRECTIONAL texels (a directional texel is two cells: the anisotropic
@@ -202,6 +212,16 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 			continue;
 		vec3 rad = s.xyz / s.w;
 #ifdef JAH_VOX_SAMPLE_DIRECT
+		{
+			// LEVEL 0 of both: the two volumes are written by one injection with one value
+			// at level 0 (T = D where nothing bounced), while their mip chains are not built
+			// alike - a share read at a coarser level was 2 % of the lit floor's light on shaded
+			// faces with no bounce in the store (spikes/far-sun-2/NOTES.md section 10).
+			const vec4 tIso = JAH_VOX_SAMPLE_ISO( c, lsPick, 0.0 );
+			const vec4 dIso = JAH_VOX_SAMPLE_DIRECT( c, lsPick, 0.0 );
+			const vec3 share = clamp( vec3( 1.0 ) - dIso.xyz / max( tIso.xyz, vec3( 1e-8 ) ), vec3( 0.0 ), vec3( 1.0 ) );
+			accBounce += rad * share * ( w * max( origin.w, 0.0 ) );
+		}
 		// MOVER-OCCLUSION-1: THE SHARE A MOVER ABOVE THE HIT OCCLUDES. The store holds the
 		// lamps' direct term (D, its own volume and chain) plus what the sky and the bounce
 		// gave the surface; a mover blocks part of the hemisphere that second share came
@@ -222,6 +242,7 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 	}
 	if( !ok )
 		return vec3( 0.0 );
+	jahVoxelBounceOut = clamp( accBounce / max( accW, 1e-6 ), vec3( 0.0 ), vec3( kMaxRadiance ) );
 	// Whatever weight the chain could actually answer for is the whole answer:
 	// a hit in the last cascade's outermost band has nothing further out to fade
 	// into, and normalising there is "this is all there is", not a hole.

@@ -179,6 +179,12 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// THE METAL HIT'S ROUTE (REFLECT-FIX-1): x = the reflector's perceptual roughness
 	/// below which a hit on a metal is decoded; above it the voxel store answers it.
 	vec4 metal;
+	/// THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): xy = the hit table's device
+	/// address (float bits; 0 = none), z = 1 the texture pool is bound, w = 1 the cloud layer
+	/// shades the sun; then the cloud shadow's map and sun (jah_cloud_shadow.glsl).
+	vec4 hitTable;
+	vec4 cloudMap;
+	vec4 cloudSun;
 } p;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
@@ -529,6 +535,15 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 /// CARD first, the VOXELS where no card answers — ONE function, read by this
 /// trace and by the gather's hits (PHOTON-GATHER-1d, GA-1e), whose header says
 /// what each read does. What this trace hands it is its FOOTPRINT, below.
+// THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): the hit table, the voxeliser's
+// texture pool (binding 41) and the cloud layer's field (42).
+layout( set = 0, binding = 41 ) uniform sampler2DArray jahHitPool;
+layout( set = 0, binding = 42 ) uniform sampler2D jahHitCloud;
+#define JAH_HIT_TABLE       floatBitsToUint( p.hitTable.xy )
+#define JAH_HIT_POOL_ON     ( p.hitTable.z > 0.5 )
+#define JAH_HIT_CLOUD_ON    ( p.hitTable.w > 0.5 )
+#define JAH_HIT_CLOUD_MAP   p.cloudMap
+#define JAH_HIT_CLOUD_SUN   p.cloudSun
 #define JAH_HIT_MOVERS_ON ( p.alpha.w > 0.5 )
 #include "jah_rq_hit_radiance.glsl"
 
@@ -949,8 +964,12 @@ void main()
 		const uint hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
 		const uint hitPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
 		vec3 hitN;
-		jahHitGeometricNormal( hitSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
-							   hitPrim, rayQueryGetIntersectionObjectToWorldEXT( rq, true ), L, hitN );
+		const uint hitGeom = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
+		const mat4x3 hitToWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
+		const bool hitNormalKnown = jahHitGeometricNormal( hitSlot, hitGeom, hitPrim, hitToWorld, L, hitN );
+		// THE HIT, for its direct light at the hit (FAR-SUN-2, jah_rq_hit_direct.glsl).
+		jahHitSurf = JahHitSurface( hitSlot, hitGeom, hitPrim, rayQueryGetIntersectionBarycentricsEXT( rq, true ),
+									hitToWorld, t, false, hitNormalKnown );
 		// A METAL HIT (REFLECT-FIX-1): its card holds its diffuse response — ~0 — so the
 		// card never answers it. A SHARP reflector shows the metal's own reflection and
 		// takes the decode (its specular lobe, the pass' second-bounce cone); a GLOSSY one

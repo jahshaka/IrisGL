@@ -1127,6 +1127,11 @@ const ArmDef kArms[] = {
       "roughness BELOW this value that hits a metal is decoded (its specular lobe, the pass' second-"
       "bounce cone); a glossier reflector takes the metal hit from the voxel store (it blurs it "
       "anyway). 0 = never decoded, 1 = always (the full-decode reference)." },
+    { "gi.hitDirect", 1.0, 0.0, 1.0,
+      "THE HIT'S DIRECT LIGHT AT THE HIT (FAR-SUN-2, jah_rq_hit_direct.glsl): a voxel-answered gather or "
+      "reflection hit sums every light's direct term at the hit (its material, its normal, its own shadow "
+      "rays) plus its emissive and the store's bounce part. 0 = the measuring arm: the hit reads the store "
+      "whole, the cell's light (the paired cost A/B, gi.far_sun_lamp's base)." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

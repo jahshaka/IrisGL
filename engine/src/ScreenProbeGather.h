@@ -135,6 +135,10 @@ public:
     virtual VkResult gatherCreatePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out,
                                           const char *name) = 0;
     virtual VkSampler gatherLinearSampler() const = 0;
+    /// FAR-SUN-2: the wrapped trilinear sampler (a hit's material maps, the cloud field) and
+    /// the flat stand-in as a one-layer 2D array (the texture pool's binding when none).
+    virtual VkSampler gatherWrapSampler() const = 0;
+    virtual VkImageView gatherDummyFlatArray() const = 0;
 };
 
 /// EVERYTHING ONE FRAME OF ONE VIEW NEEDS, gathered by the tier from the scene
@@ -207,6 +211,14 @@ struct GatherInputs {
     /// THE ALPHA TABLE's device address (REFLECT-MOVERS-2, jah_rq_alpha.glsl): the
     /// gather's rays test a cut-out's candidates too; 0 = none.
     uint64_t alphaTable = 0u;
+    /// THE HIT TABLE (FAR-SUN-2, jah_rq_hit_direct.glsl): a voxel-answered hit's lights and
+    /// material rows (0 = none: the hit reads the store whole), the voxeliser's texture pool
+    /// the rows sample, and the cloud layer's shadow (field + map + sun; null = none).
+    uint64_t hitTable = 0u;
+    Ogre::TextureGpu *hitPool = nullptr;
+    Ogre::TextureGpu *cloudField = nullptr;
+    float cloudMap[4] = {};
+    float cloudSun[4] = {};
     /// MOVER-OCCLUSION-1: a ray-traced mover exists (the hit's mover gate runs).
     bool movers = false;
 
