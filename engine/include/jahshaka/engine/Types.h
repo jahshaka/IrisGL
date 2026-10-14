@@ -7851,7 +7851,7 @@ class View;
 /// EVERY FIELD IS OPTIONAL: an absent field leaves the engine's value as it is (a host that only steps the clock
 /// submits a record with `frameDelta` alone). Two submits before one frame MERGE, field by field: every field the
 /// newer record carries wins and one it does not carry keeps the older value — for the frame, each VIEW and each SCENE
-/// (FrameInputStatus::replaced counts a scene part merged into an earlier one).
+/// (FrameInputStatus::scenePartsMerged counts a scene part merged into an earlier one).
 /// At the drain each field is COMPARED with what the engine last applied from a record and applied only when it
 /// differs — so a still document drains to nothing (FrameInputStatus::fieldsApplied == 0). The per-frame fields
 /// (`cause`, `pace`) reset after the drain to their defaults (Driver / Complete), as the verbs they replaced did;
@@ -7917,7 +7917,9 @@ struct FrameInputStatus {
     unsigned long long submitted = 0;     ///< submitFrame calls
     unsigned long long drained = 0;       ///< frames that drained (one per renderOneFrame)
     unsigned long long drainedEmpty = 0;  ///< ...that found no record submitted since the last
-    unsigned long long replaced = 0;      ///< scene parts replaced by a newer submit before their drain
+    /// Scene parts MERGED into an earlier pending part of the same scene (field by field, the newest value wins) —
+    /// every second submit for a scene before one drain counts, the host's several syncs a frame included.
+    unsigned long long scenePartsMerged = 0;
     unsigned           fieldsApplied = 0; ///< fields the LAST drain applied (changed values only)
     unsigned           viewFieldsApplied = 0;   ///< ...of them, the per-view ones
     bool               gestureActive = false;   ///< the last drained gesture

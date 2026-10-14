@@ -408,6 +408,10 @@ Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) 
 // asked for it to be"); what moves is by how many microseconds.
 void OgreEngine::destroyScene(Scene *scene) {
     if (!scene) return;
+    // ITS PART OF THE PENDING RECORD GOES WITH IT (the 3a read, C): a scene re-created at the same address before
+    // the next drain must not receive the dead one's fields.
+    { auto &v = mPendingFrameInput.scenes;
+      v.erase(std::remove_if(v.begin(), v.end(), [&](const FrameInputScene &q) { return q.scene == scene; }), v.end()); }
     if (mInRenderFrame) {
         for (Scene *pending : mPendingSceneDestroy)
             if (pending == scene) return;          // asked for twice in one frame
@@ -687,6 +691,9 @@ OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, u
 
 void OgreEngine::destroyView(View *view) {
     if (!view) return;
+    // ...and the same for a view's part (the 3a read, C).
+    { auto &v = mPendingFrameInput.views;
+      v.erase(std::remove_if(v.begin(), v.end(), [&](const FrameInputView &q) { return q.view == view; }), v.end()); }
     // THE MIRROR'S VIEW CAN DIE WHILE A SESSION RUNS (a page closing, a window
     // rebuilt): the session holds a raw OgreView* and a workspace on that
     // view's target, so it is told before anything is freed.
@@ -820,6 +827,12 @@ void OgreEngine::renderOneFrame() {
     mFrameWorkEnded = false;
     mFrameThrewOom = false;
     JAH_TRY {
+        // THE ONE DRAIN (U0 3a): the frame's input lands before anything of the frame reads it — the cause the
+        // monitor's record opens with just below, the pace each scene is handed, every scene's environment and
+        // every view's camera. BEFORE the VR frame (the 3a read, A): the session notes its own cause (WarmUp) and
+        // writes the head pose onto the session view, and both are the engine's — a host's record (the driver's
+        // Driver cause; the eyes' part carries no pose) must land under them, never over them.
+        drainFrameInput();
         // ---- THE VR FRAME OPENS HERE (SPECS/VR_SPEC.md §4.3) --------------
         // While a session runs this call IS the frame's clock: it polls the
         // runtime's lifecycle events, blocks in xrWaitFrame until the runtime
@@ -836,10 +849,6 @@ void OgreEngine::renderOneFrame() {
         // the VR-ENGINE-2 merge. A NO-OP on every engine without a session,
         // which is every engine outside a headset.
         if (mVrSession) vrSessionBeginFrame(mVrSession);
-        // THE ONE DRAIN (U0 3a): the frame's input lands before anything of the frame reads it — the cause the
-        // monitor's record opens with just below, the pace each scene is handed, every scene's environment and
-        // every view's camera.
-        drainFrameInput();
         // THE RENDER-LOOP MONITOR'S FRAME (RENDER_LOOP_MONITOR_SPEC §4.2).
         // Opened here and closed at the very bottom, so `totalMs` is exactly
         // what one renderOneFrame cost. `mNextFrameCause` is the caller's — the
@@ -2405,7 +2414,7 @@ void OgreEngine::submitFrame(const FrameInput &in) {
         if (sc.shaderTime) it->shaderTime = sc.shaderTime;
         if (sc.grid) it->grid = sc.grid;
         it->reassert = it->reassert || sc.reassert;
-        ++mFrameInputStatus.replaced;
+        ++mFrameInputStatus.scenePartsMerged;
     }
     for (const FrameInputView &v : in.views) {
         auto it = std::find_if(p.views.begin(), p.views.end(),

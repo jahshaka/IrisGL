@@ -1481,6 +1481,13 @@ public:
     virtual bool setCameraNode(NodeId node) = 0;
     /// The node the camera rides, or 0.
     virtual NodeId cameraNode() const = 0;
+    /// ONE WRITER PER FIELD (U0 3a; the 3a read, D): on a view a mirror feeds, the background, the post chain, the
+    /// shadows switch, the sample count and the camera are FrameInput fields, and the drain applies a field only when
+    /// the RECORD's value changes — a host writing one of them here on the spot is no longer corrected next frame.
+    /// So a host writes these directly only where no record carries them: at the view's creation, before its first
+    /// drain (the viewport's shadows, the shader gate's views, the previews' shadows), on a view whose record part
+    /// leaves the field out (the material preview's grade, set at creation), or on a view about to be re-bound (the viewport's
+    /// grey on a world close — the next world's mirror re-asserts, FrameInputScene::reassert).
     /// Clear colour behind the scene (the document's flat sky colour). Cheap to
     /// call with the same value; a change rebuilds the view's compositor workspace.
     virtual void setBackground(const Colour &) = 0;
@@ -1534,9 +1541,9 @@ public:
     /// reports what was asked for, and the chain stays the simple one. That is
     /// what keeps thumbnails, material previews and every pixel suite exact.
     ///
-    /// Cheap to call with an unchanged value (hosts may push per frame). A
+    /// Cheap to call with an unchanged value. A
     /// change to an ENABLE flag rebuilds the workspace; a change to a tuning
-    /// value is a uniform and rebuilds nothing.
+    /// value is a uniform and rebuilds nothing. A RECORD FIELD on a mirrored view (see setBackground: one writer).
     virtual void setPostFx(const PostFxDesc &) = 0;
     virtual const PostFxDesc &postFx() const = 0;
 
