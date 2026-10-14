@@ -24,6 +24,7 @@
 
 namespace jahshaka { namespace engine {
 
+class Engine;
 class Scene;
 class View;
 
@@ -33,6 +34,8 @@ class Scene {
 public:
     virtual ~Scene() = default;
     virtual const std::string &name() const = 0;
+    /// The engine this scene belongs to — where a host submits the scene's part of a frame (Engine::submitFrame).
+    virtual Engine *engine() const = 0;
     /// Ambient light as a hemisphere pair: `upper` is what a surface facing +Y
     /// receives, `lower` what a surface facing -Y receives. Kept as the simple
     /// entry point (previews, thumbnails, tests); it is expressed EXACTLY in the
@@ -1440,6 +1443,9 @@ public:
     /// picture and differ only in whether the EDITOR tells the author that this
     /// machine fell short (SceneIssues, "rays.absent").
     virtual bool           rayTracingResolved() const = 0;
+    /// The same predicate for a state this scene does not hold YET — a host building the frame's input (a view's
+    /// chain reads it) before the drain applies the scene's FrameInputScene::rayTracing.
+    virtual bool           rayTracingResolvedFor(RayTracingMode mode) const = 0;
 };
 
 /// A view onto a Scene, rendering into a native window supplied by the host or

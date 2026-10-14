@@ -1874,11 +1874,15 @@ void OgreScene::addObjectCounts(ObjectCounts &out) const {
 // instead of assumed. `rayQueryAvailable()` is the DEVICE's own answer and
 // nothing in the document can move it — which is the whole point of the row:
 // On does not force hardware, it asks the editor to SAY when there is none.
-bool OgreScene::rayTracingResolved() const {
-    if (mRayTracing == RayTracingMode::Off) return false;
+bool OgreScene::rayTracingResolved() const { return rayTracingResolvedFor(mRayTracing); }
+
+bool OgreScene::rayTracingResolvedFor(RayTracingMode mode) const {
+    if (mode == RayTracingMode::Off) return false;
     if (!mEngine) return false;
     return mEngine->rayTracing() && mEngine->rayQueryAvailable();
 }
+
+Engine *OgreScene::engine() const { return mEngine; }
 
 void OgreScene::setRayTracing(RayTracingMode mode) {
     const bool wasOn = mRayTracing != RayTracingMode::Off;

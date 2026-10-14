@@ -560,7 +560,9 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mCloudWeatherPath.clear();
     mSkySource = SkySource();
     mSkyDesc = SkyDesc();
-    mEnvScalePushed = false;
+    // THE ENGINE'S RECORD OF WHAT IT APPLIED is now stale (the sky and the grid were reset on the spot above): the
+    // next frame's input re-asserts every field (FrameInputScene::reassert).
+    mReassertPending = true;
     mSource = scene;
     // ...and the incoming one moves INTO it. This is the whole of the swap from
     // the mirror's side: after it, the engine reads the very nodes the user
@@ -697,7 +699,7 @@ struct StructureEditScope {
 };
 }   // namespace
 
-int SceneMirror::sync()
+int SceneMirror::sync(const FrameViews &frameViews)
 {
     // THE BUDGET IS ONE SHOT (setAttachBudget): whatever this sync does, the
     // next one is unbounded unless its caller asks again.
@@ -987,10 +989,10 @@ int SceneMirror::sync()
     // SimulationClock's frameSeconds() — the grid steps each host frame bought
     // (no wall clock, trap 7; not time(), which resets at play edges).
     if (mAnyCustomPiece) {
-        if (mShaderTimeOverride >= 0.0f) mTarget->setShaderTime(mShaderTimeOverride);
+        if (mShaderTimeOverride >= 0.0f) mFrameShaderTime = mShaderTimeOverride;
         else {
             if (mSource) mShaderSeconds += mSource->simulationClock().frameSeconds();
-            mTarget->setShaderTime(float(mShaderSeconds));
+            mFrameShaderTime = float(mShaderSeconds);
         }
     }
     // SHARING BEFORE CLIPS (AVATAR_RIG_PERF_SPEC §3.4): a follower carries no
@@ -1028,7 +1030,77 @@ int SceneMirror::sync()
     if (!full) { MirrorStage s(mon, "mirror.verify");
                  runVerifier(); }
 
+    // THE ONE EMIT (ENGINE-UPGRADE-1 U0 3a). The frame's input leaves the mirror here, once: the scene's part (the
+    // shader clock, the grid, and — when the host names a world view — the sky and the environment) and each view's
+    // (its background, post chain and camera), in the order the four apply verbs used to push them on the spot:
+    // the sky, the environment, the further views, the cameras. The engine applies it at the top of the next frame.
+    { MirrorStage s(mon, "mirror.emit");
+    using jahshaka::engine::FrameInput;
+    using jahshaka::engine::FrameInputScene;
+    using jahshaka::engine::FrameInputView;
+    FrameInput in;
+    FrameInputScene scenePart;
+    scenePart.scene = mTarget;
+    scenePart.reassert = mReassertPending;
+    scenePart.shaderTime = mFrameShaderTime;
+    scenePart.grid = mFrameGrid;
+    in.transformEpoch = iris::graph::transformWriteCounter().load(std::memory_order_relaxed);
+    std::vector<FrameInputView> parts(frameViews.views.size());
+    for (size_t i = 0; i < frameViews.views.size(); ++i) {
+        parts[i].view = frameViews.views[i].view;
+        parts[i].reassert = mReassertPending;
+        parts[i].seedExposure = frameViews.views[i].seedExposure;
+    }
+    bool skyBuilt = false;
+    for (size_t i = 0; i < frameViews.views.size(); ++i) {
+        const FrameView &fv = frameViews.views[i];
+        if (!fv.view || !fv.sky) continue;
+        std::optional<Colour> background;
+        if (!skyBuilt) { buildSky(scenePart, background); skyBuilt = true; mFrameSkyBackground = background; }
+        else background = mFrameSkyBackground;
+        if (background) parts[i].background = background;
+    }
+    bool environmentBuilt = false;
+    for (size_t i = 0; i < frameViews.views.size(); ++i) {
+        const FrameView &fv = frameViews.views[i];
+        if (!fv.view || !fv.environment || environmentBuilt) continue;
+        buildEnvironment(in, scenePart, parts[i], fv.view);
+        environmentBuilt = true;
+    }
+    for (size_t i = 0; i < frameViews.views.size(); ++i) {
+        const FrameView &fv = frameViews.views[i];
+        if (!fv.view || !fv.postFx) continue;
+        buildViewEnvironment(parts[i], fv.view, fv.camera, fv.offscreenChain);
+    }
+    for (size_t i = 0; i < frameViews.views.size(); ++i) {
+        const FrameView &fv = frameViews.views[i];
+        if (!fv.view || !fv.camera || !fv.pose) continue;
+        buildCamera(parts[i], fv.camera, fv.view, fv.framingAspect);
+    }
+    for (size_t i = 0; i < frameViews.views.size(); ++i) {
+        const FrameView &fv = frameViews.views[i];
+        if (fv.view && fv.finish) fv.finish(parts[i], fv.view);
+    }
+    in.scenes.push_back(scenePart);
+    for (FrameInputView &p : parts) if (p.view) in.views.push_back(std::move(p));
+    if (jahshaka::engine::Engine *engine = mTarget->engine()) engine->submitFrame(in);
+    mReassertPending = false;
+    mFrameShaderTime.reset();
+    mFrameGrid.reset();
+    }
+
     return mVisited;
+}
+
+jahshaka::engine::RayTracingMode SceneMirror::docRayTracing() const
+{
+    using jahshaka::engine::RayTracingMode;
+    if (!mSource) return RayTracingMode::Auto;
+    switch (mSource->rayTracing) {
+    case iris::RayTracingMode::Off: return RayTracingMode::Off;
+    case iris::RayTracingMode::On:  return RayTracingMode::On;
+    case iris::RayTracingMode::Auto: default: return RayTracingMode::Auto;
+    }
 }
 
 // ---- THE DIRTY SET (SPECS/DIRTY_SET_MIRROR_SPEC.md, owner option A) --------
@@ -1964,7 +2036,7 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
 {
     using jahshaka::engine::Vec3;
     const bool wanted = mCameraBodies && camera->bodyVisible &&
-                        camera != mViewCamera;   // never draws itself — see applyCamera
+                        camera != mViewCamera;   // never draws itself — see buildCamera
     if (!wanted) {
         // LATCHED like the light wires' (MIRROR_SCALE lane): an engine
         // setNodeVisible walks the node's subtree, and this ran every frame for
@@ -2169,7 +2241,7 @@ void SceneMirror::syncGrid()
     desc.majorColour = mGridMajorColour;
     desc.thicknessPx = 1.0f;
     desc.fadeDistance = mGridExtent;
-    mTarget->setGrid(desc);
+    mFrameGrid = desc;   // emitted with the frame's input (sync's end)
 }
 
 // ---- the Ground plane widget (WORLD-MODEL-1) ---------------------------------
@@ -2349,7 +2421,11 @@ void SceneMirror::syncGiVolume()
         return;
     }
     const jahshaka::engine::GiStatus st = mTarget->giStatus();
-    const bool haveLit = st.mode != jahshaka::engine::GiMode::Off &&
+    // THE MODE THIS FRAME'S RECORD CARRIES (U0 3a): the engine applies it at the next frame's head, after this
+    // overlay is placed — reading the engine's would show a GI that the same frame turns off. The box is the
+    // engine's (it follows the volume the renderer reports, a frame behind like every engine readout).
+    const jahshaka::engine::GiMode mode = mFrameGiMode ? *mFrameGiMode : st.mode;
+    const bool haveLit = mode != jahshaka::engine::GiMode::Off &&
                          !degenerateBox(st.boundsMin, st.boundsMax);
     const bool haveProbe = haveLit && !degenerateBox(st.probeRegionMin, st.probeRegionMax);
 
@@ -3697,7 +3773,7 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         // A SKY LIGHT IS NOT AN Ogre::Light (SKY_LIGHT_SPEC.md §2). It has no
         // position, no direction, no range and casts nothing: it is the scene's
         // ambient, its gain pushed once per change through setEnvironmentLight in
-        // applyEnvironment. Nothing about it belongs in the forward light list,
+        // buildEnvironment. Nothing about it belongs in the forward light list,
         // and creating one would cost a light slot per pass for a term the
         // shader already has. The NODE still exists (the icon is pickable and
         // selectable like any other light's) — only the engine light is absent.
@@ -3860,7 +3936,7 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
             ++mMovableNodes;
             // The GI light signature needs this answer per light and cannot
             // derive it (rule 2 is a question about the whole ancestor chain);
-            // applyEnvironment reads the list later in the same frame.
+            // buildEnvironment reads the list later in the same frame.
             if (node->getSceneNodeType() == iris::SceneNodeType::Light)
                 mMovableLights.push_back(node);
         } else {
@@ -3879,7 +3955,7 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
     // has its own machinery (the engine's "items appeared" probe stale and the
     // geometry signature the new item joins), and treating it as a flip would
     // adopt a signature read before the scene graph has its transforms, which
-    // is the trap applyEnvironment's own "adopt AFTER the push" note describes.
+    // is the trap buildEnvironment's own "adopt AFTER the push" note describes.
     const bool known = e.movable >= 0;
     if (e.movable != want) {
         // WHY the intent travels with the value: an AUTHORING change moves the
@@ -5088,7 +5164,7 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
     // this line is the picked colour itself in every other scene; on the sun it
     // makes the picked colour the NOON colour and lets a low sun arrive red and
     // dim. The sun DISC is multiplied by the same value at the same moment
-    // (applySky), so the two cannot disagree.
+    // (buildSky), so the two cannot disagree.
     {
         const iris::LinearColor lc = iris::linearOf(light->color);
         d.colour = Colour(lc.r * sunTint.r, lc.g * sunTint.g, lc.b * sunTint.b, 1.0f);
@@ -6911,20 +6987,15 @@ void SceneMirror::syncClips()
 
 void SceneMirror::invalidateEnvironment()
 {
-    // Only the "already pushed" latches: the LAST-value members stay, so a
-    // re-push that lands on the same values is still cheap where the engine
-    // setter is idempotent, and correct where it is not.
-    mEnvScalePushed = false;
-    mFogPushed = false;
-    // GI IS NOT RE-PUSHED (ENGINE_CACHE_POLICY_SPEC P10): a GI push is a
-    // from-scratch rebuild in the engine — voxels, the whole probe grid, the
-    // irradiance field — and a re-take needs none of it. The arms this scene
-    // built are its own and every pass of it binds them (the engine's per-pass
-    // SceneGiBinding, PHOTON-SCENE-SWITCH-1), so there is nothing to take back.
+    // The next frame's input RE-ASSERTS its scene's and views' fields: the engine forgets what it last applied from
+    // a record and applies every field present again. GI IS NOT RE-PUSHED (ENGINE_CACHE_POLICY_SPEC P10): a GI push is a
+    // from-scratch rebuild in the engine — voxels, the whole probe grid, the irradiance field — and a re-take needs
+    // none of it; the engine's re-assert keeps the GI it applied.
+    mReassertPending = true;
 }
 
-// CAMERA_LENS_SPEC §4/§5. Defined beside applyCamera, where the whole model is
-// written out, and declared here because applyEnvironment builds the post
+// CAMERA_LENS_SPEC §4/§5. Defined beside buildCamera, where the whole model is
+// written out, and declared here because buildEnvironment builds the post
 // description a beat earlier in the frame and must substitute the same values —
 // see the comment at the call site for why doing it in only one of the two
 // places rebuilds the compositor twice a frame.
@@ -6970,11 +7041,11 @@ static std::vector<LookDesc> resolveLooks(const QJsonArray &stack)
 }
 
 // ---------------------------------------------------------------------------
-// THE PER-VIEW HALF OF applyEnvironment (lane EYE-GRADE-1, 2026-09-18).
+// THE PER-VIEW HALF OF buildEnvironment (lane EYE-GRADE-1, 2026-09-18).
 //
 // WHY IT IS ITS OWN FUNCTION. Everything below is a property of a VIEW — the
 // shadow flag, the MSAA count, the whole post description with the driving
-// camera's lens over it — while everything else in applyEnvironment is a
+// camera's lens over it — while everything else in buildEnvironment is a
 // property of the SCENE: the ambient spherical harmonics, the fog, the ray
 // tracing row, the GI configuration and its settle. A scene has one of those
 // and, since the headset, TWO views of it at once: the desktop's and the
@@ -6983,26 +7054,26 @@ static std::vector<LookDesc> resolveLooks(const QJsonArray &stack)
 // owner's "the World panel does nothing in the headset").
 //
 // SO THE SECOND VIEW GETS THIS, AND NOT THE WHOLE FUNCTION. Calling
-// applyEnvironment twice a frame would be wrong rather than merely wasteful:
+// buildEnvironment twice a frame would be wrong rather than merely wasteful:
 // the GI block counts FRAMES of stability (`++mGiStableFrames`) and would reach
 // its window in half the frames it is meant to, so a drag would re-solve the
 // whole chain mid-gesture. One scene half per frame; one call per view.
 //
 // `driving` is the camera the view is drawn through, for the per-camera lens
-// (CAMERA_LENS_SPEC §4/§5). applyEnvironment passes none because it reads the
-// record applyCamera left for its view; a second view's host hands it in,
+// (CAMERA_LENS_SPEC §4/§5). buildEnvironment passes none because it reads the
+// record buildCamera left for its view; a second view's host hands it in,
 // because nothing else knows which camera that view belongs to.
 //
 // `record` is what keeps a SECOND view from overwriting the mirror-level
 // records the FIRST one wrote — `mWorldPostFx` (the picture-in-picture inset's
 // base) and `mSunExposureGain` (the sun's night rule). They describe the view
-// the host calls applyEnvironment for, and only that one.
-void SceneMirror::applyViewEnvironment(View *view, const iris::CameraNodePtr &hostCamera,
+// the host calls buildEnvironment for, and only that one.
+void SceneMirror::buildViewEnvironment(FrameInputView &part, View *view, const iris::CameraNodePtr &hostCamera,
                                        bool offscreenChain)
 {
     if (!mSource || !view) return;
     // THE CAMERA THE SCENE IS RENDERED THROUGH, NOT THE ONE THE HOST HOLDS
-    // (the Fable read's F1). `applyCamera` resolves its host's camera through
+    // (the Fable read's F1). `buildCamera` resolves its host's camera through
     // `Scene::renderCamera` — the three-term active-camera/possession rule —
     // and a host that hands us its own camera instead would grade the eye with
     // a DIFFERENT camera's lens than the desktop the moment the rule picks
@@ -7012,30 +7083,29 @@ void SceneMirror::applyViewEnvironment(View *view, const iris::CameraNodePtr &ho
     // renderCamera, so the wearer would be standing at the shot with somebody
     // else's grade.
     //
-    // Resolved HERE rather than in the two hosts, because applyCamera's own
+    // Resolved HERE rather than in the two hosts, because buildCamera's own
     // note says why: a second copy of a three-term rule is how a wearer ends up
     // somewhere the picture never was. One rule, two callers.
     iris::CameraNodePtr driving = hostCamera;
     if (driving) driving = mSource->renderCamera(driving);
     if (!driving) driving = hostCamera;
     const bool cut = driving ? noteDrivingCamera(view, driving) : false;
-    applyViewPostFx(view, /*record=*/false, offscreenChain);
-    // A CUT IS NOT A LIGHTING CHANGE — applyCamera's rule, which this path used
+    buildViewPostFx(part, view, /*record=*/false, offscreenChain);
+    // A CUT IS NOT A LIGHTING CHANGE — buildCamera's rule, which this path used
     // to drop on the floor. The chain's automatic exposure adapts at ~75 %/s,
     // so a cut to a differently exposed camera fades over one to two seconds in
     // the headset while the desktop re-seeds and starts at the new grade. Two
     // eyes ramping through an exposure the desktop already arrived at is worse
     // than a desktop doing it: it is a whole-field brightness change with no
     // cause the wearer can see. Re-seeded AFTER the description is pushed,
-    // because the seed is derived from it.
-    if (cut) view->resetExposureHistory();
+    // because the seed is derived from it (the drain applies the chain before the re-seed).
+    if (cut) part.resetExposure = true;
 }
 
-void SceneMirror::applyViewPostFx(View *view, bool record, bool offscreenChain)
+void SceneMirror::buildViewPostFx(FrameInputView &part, View *view, bool record, bool offscreenChain)
 {
     // World-panel Enable Shadows (used to be hardcoded on).
-    if (view->shadows() != mSource->shadowEnabled)
-        view->setShadows(mSource->shadowEnabled);
+    part.shadows = mSource->shadowEnabled;
     // World-panel Anti-Aliasing: per-scene MSAA sample count. Safe to push per
     // frame — the engine ignores a repeat of the value already REQUESTED (the
     // achieved count may be clamped lower by the driver, so comparing against
@@ -7048,7 +7118,7 @@ void SceneMirror::applyViewPostFx(View *view, bool record, bool offscreenChain)
     // while scenes defaulted to 1x, and a whole-suite re-baseline the moment a
     // World Mode set 4x.
     if (!view->isOffscreen())
-        view->setSampleCount(unsigned(qBound(1, mSource->antiAliasing, 16)));
+        part.sampleCount = unsigned(qBound(1, mSource->antiAliasing, 16));
     // World panel post-processing chain (POST_CHAIN_SPEC.md §§3-7). Safe to push
     // per frame: the engine ignores a repeat of the value already set, and only
     // a change to an ENABLE flag rebuilds a workspace. Offscreen views (this
@@ -7104,7 +7174,7 @@ void SceneMirror::applyViewPostFx(View *view, bool record, bool offscreenChain)
             }
             const GiQualityFacts facts = giQualityFacts(q);
             const bool traced = mSource->ssrMode > 0 && photonOn && facts.rayReflections &&
-                                mTarget && mTarget->rayTracingResolved();
+                                mTarget && mTarget->rayTracingResolvedFor(docRayTracing());
             fx.ssr = traced ? facts.reflectTrace : mSource->ssrMode;
         }
         fx.ssrMarchPhase  = qBound(0, mSource->ssrMarch, 2);
@@ -7131,19 +7201,19 @@ void SceneMirror::applyViewPostFx(View *view, bool record, bool offscreenChain)
         // THE DRIVING CAMERA'S OWN LOOK, layered over the world's
         // (CAMERA_LENS_SPEC §4/§5 — applyCameraPostFx documents the model).
         //
-        // IT HAS TO HAPPEN HERE AS WELL AS IN applyCamera, and the reason is
-        // performance rather than taste: hosts call applyEnvironment and then
-        // applyCamera every frame, and an enable-flag difference between the
+        // IT HAS TO HAPPEN HERE AS WELL AS IN buildCamera, and the reason is
+        // performance rather than taste: hosts call buildEnvironment and then
+        // buildCamera every frame, and an enable-flag difference between the
         // two descriptions is a WORKSPACE REBUILD. Pushing the world's flags
         // here and the camera's a moment later would rebuild the chain TWICE
         // PER FRAME for as long as a camera with a bloom override was driving.
         // Substituting here makes the steady state one stable description that
         // the engine's own "same value is free" check drops on arrival, and
-        // applyCamera's push then only ever does anything on the frame the
+        // buildCamera's push then only ever does anything on the frame the
         // camera actually changed.
         //
-        // The record is a frame old (applyCamera writes it after this runs), so
-        // a CUT grades one frame late — 16 ms, and applyCamera corrects it in
+        // The record is a frame old (buildCamera writes it after this runs), so
+        // a CUT grades one frame late — 16 ms, and buildCamera corrects it in
         // the same frame anyway. A view seen for the FIRST time has no record
         // at all and gets the world's description, which is exactly right: the
         // camera has not been applied to it yet.
@@ -7152,7 +7222,7 @@ void SceneMirror::applyViewPostFx(View *view, bool record, bool offscreenChain)
         // ends up with: the inset is a DIFFERENT camera's shot, so inheriting
         // the MAIN view's camera grade would hand the pipped camera the driving
         // camera's exposure (applyPip layers the pipped camera over this).
-        if (record) mWorldPostFx = fx;
+        if (record) { mWorldPostFx = fx; mWorldPostFxView = view; mWorldPostFxStamp = mSyncStamp; }
         if (const iris::CameraNodePtr driving = drivingCameraFor(view))
             if (cameraOverridesAnything(driving)) applyCameraPostFx(driving, fx);
         // THE GRADE THE SUN'S NIGHT RULE DECIDES AGAINST (SKY-NIGHT-1), from
@@ -7161,11 +7231,11 @@ void SceneMirror::applyViewPostFx(View *view, bool record, bool offscreenChain)
         // have dropped worth twenty output codes.
         if (record) mSunExposureGain = sunExposureGain(fx);
         fx.allowOffscreen = offscreenChain;
-        view->setPostFx(fx);
+        part.postFx = fx;
     }
 }
 
-void SceneMirror::applyEnvironment(View *view, Engine *engine)
+void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, FrameInputView &part, View *view)
 {
     if (!mSource || !view) return;
     // SHADOWS: ONE per-scene request (ENGINEERING_DEBT_SPEC.md item 4).
@@ -7205,21 +7275,21 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         shadows.resolution = mSource->shadowResolution > 0
                                  ? unsigned(qBound(256, mSource->shadowResolution, 8192))
                                  : (mAnyShadowCaster ? mMaxShadowResolution : 0u);
-        mTarget->setShadowSettings(shadows);
+        scene.shadows = shadows;
     }
         // The particle clock is NOT pushed from here any more: the HOST pushes
         // the document's simulated seconds x particleTimeScale as the engine's
         // frame delta every frame (EngineSceneViewport::syncFrame,
         // EnginePlayerScene::step — ENGINEERING_DEBT_SPEC A4.2), the one clock
         // physics and animation advance on too.
-    if (engine) {
+    {
         // world.refreshShadows(): one re-render of every cached shadow map per
         // bump, the giRefreshSerial shape exactly (a serial, not a bool: two
         // refreshes in one frame are still one re-render, and clearing is the
         // mirror's job rather than the caller's).
         if (mSource->shadowRefreshSerial != mShadowRefreshSerialSeen) {
             mShadowRefreshSerialSeen = mSource->shadowRefreshSerial;
-            engine->refreshShadows();
+            in.refreshShadows = true;
         }
         // Shadow-map BUDGET (SHADOW_TOOLING_SPEC.md §4.1). Unlike the size,
         // there is nothing to derive from the lights here: the engine does that
@@ -7230,8 +7300,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         const unsigned budget = mSource->shadowMapBudget > 0
                                     ? unsigned(qBound(2, mSource->shadowMapBudget, 16))
                                     : 0u;
-        if (budget > 0 && engine->shadowMapBudget() != budget)
-            engine->setShadowMapBudget(budget);
+        if (budget > 0) in.shadowMapBudget = budget;   // the engine compares with its pool
     }
     // (ATOM's LOD dial used to be pushed from here. It is a SESSION dial now
     // and not a document value — inventory row AT-A14: `Scene::lodBias` had no
@@ -7262,18 +7331,13 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             envGain = Colour(tint.r * skyLight->intensity, tint.g * skyLight->intensity,
                              tint.b * skyLight->intensity, 1.0f);
         }
-        if (!mEnvScalePushed || envGain.r != mLastEnvGain.r || envGain.g != mLastEnvGain.g ||
-            envGain.b != mLastEnvGain.b) {
-            mTarget->setEnvironmentLight(envGain);
-            mLastEnvGain = envGain;
-            mEnvScalePushed = true;
-        }
+        scene.environmentLight = envGain;   // the engine's drain compares (the mirror's latch is gone)
     }
     // THE PER-VIEW HALF, which a second view of this scene gets on its own
-    // (applyViewEnvironment, above the definition): shadows, MSAA and the post
+    // (buildViewEnvironment, above the definition): shadows, MSAA and the post
     // chain. The records it writes — the inset's base description and the sun's
     // exposure gain — belong to THIS view, the one the host asked about.
-    applyViewPostFx(view, /*record=*/true);
+    buildViewPostFx(part, view, /*record=*/true);
     // Fog panel: exponential distance fog (+ optional height layer) on lit
     // surfaces; the engine keeps unlit overlays and the sky unfogged, like the
     // legacy renderer. Cheap per-frame push WHILE THE STATE HOLDS — but the
@@ -7292,16 +7356,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         fog.heightLevel = mSource->fogHeightLevel;
         fog.breakMinBrightness = mSource->fogBreakMinBrightness;
         fog.breakFalloff = mSource->fogBreakFalloff;
-        const bool changed =
-            !mFogPushed || mLastFog.enabled != fog.enabled ||
-            mLastFog.colour.r != fog.colour.r || mLastFog.colour.g != fog.colour.g ||
-            mLastFog.colour.b != fog.colour.b || mLastFog.density != fog.density ||
-            mLastFog.heightDensity != fog.heightDensity ||
-            mLastFog.heightFalloff != fog.heightFalloff ||
-            mLastFog.heightLevel != fog.heightLevel ||
-            mLastFog.breakMinBrightness != fog.breakMinBrightness ||
-            mLastFog.breakFalloff != fog.breakFalloff;
-        if (changed) { mTarget->setFog(fog); mLastFog = fog; mFogPushed = true; }
+        scene.fog = fog;
     }
     // THE EXPONENTIAL HEIGHT FOG (SKY-DEFAULTS-1): the document's dials are
     // Unreal's numbers, the renderer's per metre (iris::HeightFog's header).
@@ -7315,7 +7370,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         d.heightFalloff = hf.heightFalloff * iris::HeightFog::kUnrealDialToPerMetre;
         d.baseHeight = hf.baseHeight;
         d.startDistance = hf.startDistance;
-        mTarget->setHeightFog(d);
+        scene.heightFog = d;
     }
     // HARDWARE RAY TRACING (owner, 2026-09-15; ledger §425). The PROJECT's
     // state, which is half of the answer — the machine's own capability is the
@@ -7324,20 +7379,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     // and Auto and On push the same thing on purpose: they render identically,
     // and the difference between them (telling the author this machine falls
     // short) belongs to the editor, not to the renderer.
-    {
-        using jahshaka::engine::RayTracingMode;
-        RayTracingMode rt = RayTracingMode::Auto;
-        switch (mSource->rayTracing) {
-        case iris::RayTracingMode::Off: rt = RayTracingMode::Off; break;
-        case iris::RayTracingMode::On:  rt = RayTracingMode::On;  break;
-        case iris::RayTracingMode::Auto: default: rt = RayTracingMode::Auto; break;
-        }
-        if (!mRayTracingPushed || rt != mLastRayTracing) {
-            mTarget->setRayTracing(rt);
-            mLastRayTracing = rt;
-            mRayTracingPushed = true;
-        }
-    }
+    scene.rayTracing = docRayTracing();
     // HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the project's row, pushed on
     // change. Like the ray row it is only half the answer — the renderer ANDs it
     // with the machine (Scene::sunContactStatus().on) — and it decides nothing
@@ -7357,11 +7399,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         case iris::SunContactResolution::Auto:
         default: sc.resolution = SunContactResolution::Auto; break;
         }
-        if (!mSunContactPushed || sc != mLastSunContact) {
-            mTarget->setSunContact(sc);
-            mLastSunContact = sc;
-            mSunContactPushed = true;
-        }
+        scene.sunContact = sc;
     }
     // Global Illumination panel. setGlobalIllumination re-traces, so like fog it is
     // pushed on CHANGE only (the per-frame compare is the debounce) — and it also
@@ -7480,7 +7518,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 if (l.isNull()) continue;
                 // THE SKY LIGHT IS NOT A VOXEL LIGHT (audit A F3). It never
                 // becomes an Ogre::Light at all: its colour and intensity reach
-                // the renderer as the scene's environment (applyEnvironment ->
+                // the renderer as the scene's environment (buildEnvironment ->
                 // setEnvironmentLight; the engine forms SH x gain), which it hands to
                 // every pass and every cascade's bounce itself — re-settling a
                 // bouncing chain on its own (OgreScene::noteEnvironmentChanged)
@@ -7592,8 +7630,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // writes instead of a teardown plus a re-voxelisation (times N under a
         // cascade chain), and the rest of this block is unchanged: if anything
         // in the CONFIGURATION also moved, the push below rebuilds anyway.
+        // THE CONFIGURATION RIDES THE RECORD (U0 3a): the engine's drain applies a tuning-only change through
+        // setGiTuning and a configuration change through setGlobalIllumination, comparing as this block does. The
+        // mLastGi / mGiPushed bookkeeping below stays for the DEBOUNCE, which reads "a push happened" (3c deletes it).
+        scene.gi = gi;
         if (mGiPushed && !gi.giTuningEqual(mLastGi)) {
-            mTarget->setGiTuning(gi);
             // ONLY THE THREE, and the narrowness is load-bearing: `mLastGi = gi`
             // here would adopt the WHOLE configuration, so a frame in which a
             // tuning float AND a real setting both changed would leave
@@ -7612,7 +7653,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mLastGi.cardResidencyRadius = gi.cardResidencyRadius;
         }
         if (!mGiPushed || gi != mLastGi) {
-            mTarget->setGlobalIllumination(gi);
             mLastGi = gi;
             mGiLightSignature = readEngineSignature();
             mGiMovableLightSignature = movableLightSig;
@@ -7822,15 +7862,18 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         pr.accurateLighting = true;
         // The reflection's clear colour is the view's, so a mirror showing
         // "nothing" shows the same nothing the viewport does.
-        pr.background = view->background();
-        mTarget->setPlanarReflections(pr);
+        // (THIS frame's background when the sky sets one — the record's — else the view's own.)
+        pr.background = part.background ? *part.background : view->background();
+        scene.planar = pr;
     }
     // THE GI VOLUME OVERLAY GOES LAST, and it belongs HERE rather than in
     // sync() (LIGHTING_FIX fix 9): it draws what `Scene::giStatus()` reports,
     // and giStatus only reports this frame's answer after the GI push above.
     // Driven from sync() it was a frame behind — visibly so in gi.overlay,
     // where switching GI off left the box on screen for one more frame.
+    mFrameGiMode = scene.gi ? std::optional<GiMode>(scene.gi->mode) : std::nullopt;
     syncGiVolume();
+    mFrameGiMode.reset();
 }
 
 namespace {
@@ -7908,7 +7951,7 @@ bool SceneMirror::SkySource::operator==(const SkySource &o) const
     return false;
 }
 
-/// The document's sky fields, read into the value applySky compares. A skyless
+/// The document's sky fields, read into the value buildSky compares. A skyless
 /// scene (or a textured one with no texture loaded) reads as Kind::None — which
 /// is also the initial state. A SINGLE_COLOR sky is Kind::Color and a real sky
 /// since SKY_LIGHT_SPEC §2.
@@ -7989,9 +8032,9 @@ SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
 // function's whole job is the sky itself. The Preetham bake is gone with it:
 // the realistic sky is the engine's planet atmosphere (SKY-ATMOSPHERE-1), a few
 // dials and the sun pushed into its tables.
-void SceneMirror::applySky(View *view)
+void SceneMirror::buildSky(FrameInputScene &scene, std::optional<Colour> &background)
 {
-    if (!mSource || !view) return;
+    if (!mSource) return;
     const SkySource src = skySourceOf(*mSource);
     if (src != mSkySource) {
         mSkySource = src;
@@ -8172,7 +8215,9 @@ void SceneMirror::applySky(View *view)
     // A push the engine REFUSED (a malformed cubemap, a missing face id) must
     // not be retried every frame — resync to what is in force so the retry
     // stops until the document changes (code review 2026-09-10).
-    if (!mTarget->setSky(mSkyDesc)) mSkyDesc = mTarget->sky();
+    // (A sky the engine refuses at the drain keeps the engine's last; this mirror's description stands and the next
+    // record that changes it is applied — the refusal is logged by the engine.)
+    scene.sky = mSkyDesc;
     if (mSource->skyType == iris::SkyType::SINGLE_COLOR) {
         // The colour sky draws its own strip now, so this is the FALLBACK the
         // frame shows where no sky pass ran (a failed upload, a headless view,
@@ -8180,12 +8225,12 @@ void SceneMirror::applySky(View *view)
         // colour a user picks (§4), so the fallback matches the sky it stands in
         // for instead of being 2.3x brighter than it.
         const iris::LinearColor c = iris::linearOf(mSource->skyColor);
-        view->setBackground(Colour(c.r, c.g, c.b, 1.0f));
+        background = Colour(c.r, c.g, c.b, 1.0f);
     } else if (mSource->skyType == iris::SkyType::NONE) {
         // NO SKY (SKY-ATMOSPHERE-1): the engine holds SkyMode::NoSky — nothing
         // drawn, nothing captured, no ambient from a sky — and the frame's
         // background is black.
-        view->setBackground(Colour(0.0f, 0.0f, 0.0f, 1.0f));
+        background = Colour(0.0f, 0.0f, 0.0f, 1.0f);
     }
 }
 
@@ -8408,7 +8453,7 @@ TextureId SceneMirror::reflectionCubeFor(const QString &path)
 }
 
 /// Translates a document camera into the engine's CameraDesc — the shared half
-/// of applyCamera and applyPip (CAMERAS_SPEC §7.7). It reads the node and
+/// of buildCamera and applyPip (CAMERAS_SPEC §7.7). It reads the node and
 /// nothing else, so both the main view and the inset see the same lens.
 static CameraDesc toCameraDesc(const iris::CameraNodePtr &camera)
 {
@@ -8443,14 +8488,14 @@ static CameraDesc toCameraDesc(const iris::CameraNodePtr &camera)
 // description the world produced for the view being drawn.
 //
 // IT IS CALLED FROM TWO PLACES, and the pair is deliberate:
-//   * applyEnvironment, where the world's PostFxDesc is built — so the value
+//   * buildEnvironment, where the world's PostFxDesc is built — so the value
 //     the engine receives is already final and STABLE frame to frame. That is
 //     not tidiness: an enable-flag difference is a workspace rebuild, and a
 //     world description followed a moment later by a camera description that
 //     disagreed with it would rebuild the compositor twice every frame;
-//   * applyCamera, right after the active-camera seam has decided which camera
+//   * buildCamera, right after the active-camera seam has decided which camera
 //     is driving — so a CUT, a first frame, or a one-shot screenshot view that
-//     applyEnvironment had no record for still grades correctly, immediately.
+//     buildEnvironment had no record for still grades correctly, immediately.
 // In the steady state the second push is the same value as the first and the
 // engine drops it for free.
 //
@@ -8478,7 +8523,7 @@ bool SceneMirror::noteDrivingCamera(const View *view, const iris::CameraNodePtr 
     // nothing here dereferences one.
     //
     // The CAMERA is held WEAKLY, and that is not caution for its own sake: the
-    // entry is read back a frame later by applyEnvironment, which needs the
+    // entry is read back a frame later by buildEnvironment, which needs the
     // node's fields. A camera deleted between the two calls would otherwise be
     // a read-after-free with a one-frame window — small, real, and exactly the
     // kind of thing that turns up once a month in a crash log.
@@ -8635,7 +8680,7 @@ void SceneMirror::applyPip(iris::CameraNodePtr camera, View *view, const ViewPip
     view->setPip(d);
 }
 
-void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float framingAspect)
+void SceneMirror::buildCamera(FrameInputView &part, iris::CameraNodePtr camera, View *view, float framingAspect)
 {
     if (!camera || !view) return;
 
@@ -8692,13 +8737,13 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float fram
     // player's). Two views showing two different cameras would flip it every
     // frame and read as a cut every frame — which would pin the auto exposure
     // to its seed forever. The answer has to be per view, so it is remembered
-    // per view, and applyEnvironment reads the same record next frame.
+    // per view, and buildEnvironment reads the same record next frame.
     const bool cut = noteDrivingCamera(view, camera);
 
     if (mViewCamera != camera.data()) {
         mViewCamera = camera.data();
         // ...and hide its helpers NOW rather than at the next sync. Hosts call
-        // sync() and applyCamera() in either order (the editor syncs first, the
+        // sync() and buildCamera() in either order (the editor syncs first, the
         // gizmo suite applies first), and a viewport that renders one frame
         // between them would show the camera's own frustum fanning across the
         // whole image. Cheap: one hash lookup on a change only.
@@ -8707,28 +8752,33 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float fram
     }
 
     // THE CAMERA'S OWN LOOK (CAMERA_LENS_SPEC §4/§5) — the second of the two
-    // call sites the model documents; in the steady state applyEnvironment has
+    // call sites the model documents; in the steady state buildEnvironment has
     // already pushed exactly this value and the engine drops the repeat. What
-    // this one is FOR is the frames applyEnvironment could not get right: the
+    // this one is FOR is the frames buildEnvironment could not get right: the
     // cut, the first frame, and a one-shot screenshot view it had no record of.
     // Nothing happens, and nothing is pushed, for a camera that overrides
     // nothing.
     if (cameraOverridesAnything(camera)) {
-        PostFxDesc fx = view->postFx();   // the world's, as applyEnvironment left it
+        // THIS frame's chain for the view: the record's when this sync built it, the world's as THIS host frame's
+        // environment recorded it when the view is the world view (a host that syncs its views separately), else
+        // the view's own (applied by an earlier frame).
+        PostFxDesc fx = part.postFx ? *part.postFx
+                      : (view == mWorldPostFxView && mWorldPostFxStamp + 1 >= mSyncStamp) ? mWorldPostFx
+                                                                                          : view->postFx();   // the world's, as buildEnvironment left it
         applyCameraPostFx(camera, fx);
-        view->setPostFx(fx);
+        part.postFx = fx;
         // A CUT IS NOT A LIGHTING CHANGE. The chain's auto exposure adapts at
         // ~75%/s, so without this a cut to a differently exposed camera fades
         // over one to two seconds — including a MANUAL one, whose clamp pins
         // what is measured but not what the history holds. Re-seeded AFTER the
         // new description is pushed, because the seed is derived from it.
-        if (cut) view->resetExposureHistory();
+        if (cut) part.resetExposure = true;
     } else if (cut) {
         // Cutting AWAY from an overriding camera to one that inherits: the
-        // world's description is already back on the view (applyEnvironment
+        // world's description is already back on the view (buildEnvironment
         // pushes it every frame), but the history still holds the old camera's
         // grade. Same re-seed, same reason.
-        view->resetExposureHistory();
+        part.resetExposure = true;
     }
 
     CameraDesc desc = toCameraDesc(camera);
@@ -8738,7 +8788,7 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float fram
     // it — so it is applied HERE and not inside toCameraDesc, which applyPip
     // also uses and which must never hold an authored camera's inset.
     desc.framingAspect = (camera.data() == hostCamera) ? framingAspect : 0.0f;
-    view->setCamera(desc);
+    part.camera = desc;
 
     // A CAMERA ON A SOCKET RIDES ITS NODE (AVATAR_RIG_PERF_SPEC §4.6, P2b).
     //
@@ -8755,5 +8805,5 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float fram
         const auto it = mEntries.constFind(camera.data());
         if (it != mEntries.constEnd()) ride = it->node;
     }
-    if (view->cameraNode() != ride) view->setCameraNode(ride);
+    part.cameraNode = ride;   // the engine compares with the view's
 }

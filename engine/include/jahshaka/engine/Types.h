@@ -7849,8 +7849,9 @@ class View;
 /// renders it, in one place, in one order.
 ///
 /// EVERY FIELD IS OPTIONAL: an absent field leaves the engine's value as it is (a host that only steps the clock
-/// submits a record with `frameDelta` alone). Two submits before one frame MERGE: the frame fields and each VIEW's
-/// fields take the newest value; a SCENE's part is REPLACED whole by the newest (FrameInputStatus::replaced counts it).
+/// submits a record with `frameDelta` alone). Two submits before one frame MERGE, field by field: every field the
+/// newer record carries wins and one it does not carry keeps the older value — for the frame, each VIEW and each SCENE
+/// (FrameInputStatus::replaced counts a scene part merged into an earlier one).
 /// At the drain each field is COMPARED with what the engine last applied from a record and applied only when it
 /// differs — so a still document drains to nothing (FrameInputStatus::fieldsApplied == 0). The per-frame fields
 /// (`cause`, `pace`) reset after the drain to their defaults (Driver / Complete), as the verbs they replaced did;
@@ -7867,6 +7868,11 @@ struct FrameInputScene {
     std::optional<PlanarReflectionParams> planar;
     std::optional<SkyDesc>                sky;
     std::optional<float>                  shaderTime;
+    std::optional<GridDesc>               grid;
+    /// RE-ASSERT: forget what this scene last applied from a record (GI excepted — a GI push is a from-scratch
+    /// rebuild, ENGINE_CACHE_POLICY_SPEC P10) so every field present applies again. A host retaking the screen asks for
+    /// it: part of what the scene's fields set is process-wide backend state another scene may have changed meanwhile.
+    bool                                  reassert = false;
 };
 struct FrameInputView {
     View *view = nullptr;
@@ -7877,6 +7883,10 @@ struct FrameInputView {
     std::optional<unsigned>   sampleCount;
     std::optional<Colour>     background;
     bool                      resetExposure = false;   ///< a camera cut: the exposure history re-seeds once
+    /// Seed the exposure history with this scale (View::seedExposureHistory) — after the chain lands, since the
+    /// seed is derived from it (a new recorder view starts at the editor's measured exposure).
+    std::optional<float>      seedExposure;
+    bool                      reassert = false;        ///< forget this view's last-applied fields (see the scene's)
 };
 /// The user's GESTURE as the host knows it (a gizmo drag, a viewport drag, a material hover): carried for the
 /// engine's GI scheduler (U0 3c reads it; until then the engine still infers a gesture from motion).

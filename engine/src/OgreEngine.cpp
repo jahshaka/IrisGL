@@ -2391,7 +2391,20 @@ void OgreEngine::submitFrame(const FrameInput &in) {
         auto it = std::find_if(p.scenes.begin(), p.scenes.end(),
                                [&](const FrameInputScene &q) { return q.scene == sc.scene; });
         if (it == p.scenes.end()) { p.scenes.push_back(sc); continue; }
-        *it = sc;   // a scene's part is REPLACED whole by the newest (the plan's rule)
+        // A scene's part is REPLACED by the newest, FIELD BY FIELD: every field the newer record carries wins, and
+        // one it does not carry keeps the older record's value (a sparser second sync never drops the first's).
+        if (sc.shadows) it->shadows = sc.shadows;
+        if (sc.environmentLight) it->environmentLight = sc.environmentLight;
+        if (sc.fog) it->fog = sc.fog;
+        if (sc.heightFog) it->heightFog = sc.heightFog;
+        if (sc.rayTracing) it->rayTracing = sc.rayTracing;
+        if (sc.sunContact) it->sunContact = sc.sunContact;
+        if (sc.gi) it->gi = sc.gi;
+        if (sc.planar) it->planar = sc.planar;
+        if (sc.sky) it->sky = sc.sky;
+        if (sc.shaderTime) it->shaderTime = sc.shaderTime;
+        if (sc.grid) it->grid = sc.grid;
+        it->reassert = it->reassert || sc.reassert;
         ++mFrameInputStatus.replaced;
     }
     for (const FrameInputView &v : in.views) {
@@ -2406,6 +2419,8 @@ void OgreEngine::submitFrame(const FrameInput &in) {
         if (v.sampleCount) it->sampleCount = v.sampleCount;
         if (v.background) it->background = v.background;
         it->resetExposure = it->resetExposure || v.resetExposure;
+        if (v.seedExposure) it->seedExposure = v.seedExposure;
+        it->reassert = it->reassert || v.reassert;
     }
 }
 
@@ -2454,6 +2469,11 @@ void OgreEngine::drainFrameInput() {
         for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
         if (!sc) continue;   // destroyed before its frame
         FrameInputScene &last = sc->mFrameApplied;
+        if (part.reassert) {
+            const std::optional<GiParams> gi = last.gi;   // GI is never re-pushed (P10)
+            last = FrameInputScene();
+            last.gi = gi;
+        }
         applyIfChanged(part.shadows, last.shadows, applied, [&](const ShadowDesc &v) { sc->setShadowSettings(v); });
         applyIfChanged(part.environmentLight, last.environmentLight, applied,
                        [&](const Colour &v) { sc->setEnvironmentLight(v); });
@@ -2483,6 +2503,7 @@ void OgreEngine::drainFrameInput() {
                        [&](const PlanarReflectionParams &v) { sc->setPlanarReflections(v); });
         applyIfChanged(part.sky, last.sky, applied, [&](const SkyDesc &v) { sc->setSky(v); });
         applyIfChanged(part.shaderTime, last.shaderTime, applied, [&](float v) { sc->setShaderTime(v); });
+        applyIfChanged(part.grid, last.grid, applied, [&](const GridDesc &v) { static_cast<Scene *>(sc)->setGrid(v); });
     }
 
     // THE ENGINE-WIDE SHADOW PAIR (after the scenes' shadow settings, as the host pushed them).
@@ -2499,6 +2520,7 @@ void OgreEngine::drainFrameInput() {
         for (auto &q : mViews) if (static_cast<View *>(q.get()) == part.view) { v = q.get(); break; }
         if (!v) continue;
         FrameInputView &last = v->mFrameApplied;
+        if (part.reassert) { last = FrameInputView(); v->mFrameAppliedW = v->mFrameAppliedH = 0; }
         applyIfChanged(part.background, last.background, viewApplied, [&](const Colour &c) { v->setBackground(c); });
         applyIfChanged(part.shadows, last.shadows, viewApplied, [&](bool on) { v->setShadows(on); });
         applyIfChanged(part.sampleCount, last.sampleCount, viewApplied, [&](unsigned n) { v->setSampleCount(n); });
@@ -2517,6 +2539,7 @@ void OgreEngine::drainFrameInput() {
         }
         if (part.cameraNode && v->cameraNode() != *part.cameraNode) { v->setCameraNode(*part.cameraNode); ++viewApplied; }
         if (part.resetExposure) { v->resetExposureHistory(); ++viewApplied; }
+        if (part.seedExposure) { v->seedExposureHistory(*part.seedExposure); ++viewApplied; }
     }
     mFrameInputStatus.viewFieldsApplied = viewApplied;
     mFrameInputStatus.fieldsApplied = applied + viewApplied;

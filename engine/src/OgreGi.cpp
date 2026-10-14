@@ -4159,7 +4159,10 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
 // "20 idle frames cost nothing at all"). An item's own size is a property of the
 // item, so the hash of a still scene is still whatever the volume does.
 unsigned long long OgreScene::giGeometrySignature() const {
-    if (mGi.mode == GiMode::Off) return 0ull;
+    // NOT GATED ON THE MODE (U0 3a): the mirror reads it while it builds a frame's input, i.e. BEFORE the drain
+    // applies that frame's GI mode — on the frame GI turns on it would read 0 and its debounce would see a change
+    // one frame later. The signature is the GI items' geometry, whatever the mode; the caller combines it only
+    // when its own mode needs it.
     // CACHED AGAINST THE MOVEMENT EPOCH: the mirror reads it once a frame and it
     // is a pure function of the GI items' boxes (clean-2 lane, 2026-09-13).
     // ONLY WHERE THE EPOCH CAN SEE THE HOST'S WRITES. Without a counter from the
@@ -4179,7 +4182,7 @@ unsigned long long OgreScene::giGeometrySignature() const {
 // lights get, because nothing a re-inject reads changed (the voxels still hold
 // the old conversion until the re-solve builds fresh ones).
 unsigned long long OgreScene::giMaterialSignature() const {
-    return mGi.mode == GiMode::Off ? 0ull : mGiMaterialGeneration;
+    return mGiMaterialGeneration;   // mode-independent, as giGeometrySignature (read before the frame's mode lands)
 }
 
 // The movement quantum for one item, and the test that uses it. Shared by the

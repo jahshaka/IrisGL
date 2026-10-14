@@ -3994,6 +3994,8 @@ public:
     bool boneMatrices(NodeId id, float *out, size_t count) const override;
     size_t streamedBoneCount(NodeId id) const override;
     RigStats rigStats() const override;
+    Engine *engine() const override;
+    bool rayTracingResolvedFor(RayTracingMode mode) const override;
     SceneChangeStats changeStats() const override { return mChangeStats; }
     void beginStructureEdit() override { ++mStructureEditDepth; }
     void endStructureEdit() override;

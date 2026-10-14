@@ -24,6 +24,8 @@
 #include <QList>
 #include <QImage>
 #include <QSet>
+#include <functional>
+#include <optional>
 #include <utility>
 #include <set>
 #include <vector>
@@ -53,9 +55,42 @@ public:
     void setSource(iris::ScenePtr scene);
     iris::ScenePtr source() const { return mSource; }
 
-    /// Brings the engine scene up to date with the document. Call once per frame
-    /// before Engine::renderOneFrame(). Returns the number of document nodes mirrored.
-    int sync();
+    /// ONE VIEW OF THIS SCENE IN THE FRAME (ENGINE-UPGRADE-1 U0 3a): what sync() puts in the frame's input for it.
+    struct FrameView {
+        jahshaka::engine::View *view = nullptr;
+        /// THE WORLD VIEW: the scene's environment (shadows, fog, GI, planar, ray tracing, ...) and this view's world
+        /// post chain, the one a pip and the sun's exposure gain are graded against. One per frame.
+        bool environment = false;
+        /// The document's sky: the scene's sky and this view's background where the sky is a flat colour.
+        bool sky = false;
+        /// A FURTHER VIEW OF THE SAME WORLD (the headset's eyes, the recorder): its own post chain, shadows and MSAA,
+        /// with the driving camera's lens over it — never a second environment (its GI settle counts frames).
+        bool postFx = false;
+        bool offscreenChain = false;   ///< the recorder's: the whole chain on an offscreen view
+        /// The host's camera for this view (resolved through Scene::renderCamera), or null for none this frame.
+        /// `framingAspect` is the WIDE-ASPECT FRAMING HOLD (CameraDesc::framingAspect): zero leaves the authored
+        /// vertical angle alone; only a host pushing a FREE camera (the explorer, the player's fly camera) passes one.
+        iris::CameraNodePtr camera;
+        float framingAspect = 0.0f;
+        /// Apply the camera's pose and lens to the view (false: the camera only grades a further view — the eyes,
+        /// whose poses the VR rig owns).
+        bool pose = true;
+        /// Seed the view's exposure history once its chain has landed (a new recorder view: the editor's measure).
+        std::optional<float> seedExposure;
+        /// THE HOST'S LAST WORD on this view's part, called once the mirror has built it (a screenshot's grade: its
+        /// opt-in over the world's chain). The part's postFx may be empty (no world view, no camera override): read
+        /// the view's own then.
+        std::function<void(jahshaka::engine::FrameInputView &part, jahshaka::engine::View *view)> finish;
+    };
+    struct FrameViews { std::vector<FrameView> views; };
+
+    /// Brings the engine scene up to date with the document and EMITS THE FRAME'S INPUT ONCE, at its end, through
+    /// Engine::submitFrame (FrameInput): the scene's part (the shader clock, the grid, and — when a view asks — the
+    /// sky and the environment) and each view's part (its background, post chain and camera). Call once per host
+    /// frame before Engine::renderOneFrame(); a second call before the frame replaces the scene's part and merges the
+    /// views'. The engine applies the record at the top of the next frame; nothing frame-wide is pushed on the spot.
+    /// Returns the number of document nodes visited.
+    int sync(const FrameViews &views = FrameViews());
 
     /// THE NEXT sync()'S MESH BUDGET, BY COST (BISTRO-ENGINE-1 stage 5, finding
     /// 9): new engine meshes are built until `vertices` of their vertices or
@@ -91,31 +126,18 @@ public:
     /// pushed to, and nothing outside the mirror knows it.
     jahshaka::engine::MaterialId engineMaterial(const iris::SceneNode *node) const;
 
-    /// Points `view`'s camera where the document camera is looking.
-    ///
-    /// `framingAspect` is the WIDE-ASPECT FRAMING HOLD (owner report
-    /// 2026-09-07, re-scoped 2026-09-08;
-    /// jahshaka::engine::CameraDesc::framingAspect): zero — the default —
-    /// leaves the authored vertical angle alone, which is what every AUTHORED
-    /// camera gets. Only a host that knows it is pushing a FREE camera (the
-    /// editor explorer, the player's fly camera) passes one, and only ABOVE
-    /// that aspect does the vertical angle narrow — to hold the horizontal
-    /// extent the shot has there — instead of letting an ultra-wide window
-    /// fisheye it. At or below it the shot is untouched, bit for bit.
-    void applyCamera(iris::CameraNodePtr camera, jahshaka::engine::View *view,
-                     float framingAspect = 0.0f);
     /// Points `view`'s picture-in-picture inset at a document camera
     /// (CAMERAS_SPEC D3, phase 2c). `desc` carries everything but the camera —
     /// the rect, the inset's background, the offscreen opt-in — and this fills
     /// in `desc.camera` from the document node, the same translation
-    /// applyCamera does for the main view.
+    /// buildCamera does for the main view.
     ///
     /// It also fills in the inset's GRADE — whether the shot is tonemapped and
     /// at what exposure — by laying the PIPPED camera's own exposure and post
     /// overrides over the world's description (CAMERA_LENS_SPEC §4/§5's
-    /// substitution, over the world value applyEnvironment recorded). So a
+    /// substitution, over the world value buildEnvironment recorded). So a
     /// camera's own look appears in its preview and NOWHERE ELSE: nothing here
-    /// touches the view's post description. Call applyEnvironment first (hosts
+    /// touches the view's post description. Sync with a world view first (hosts
     /// already do, every frame) so the world's half is current.
     ///
     /// A null camera or `desc.enabled == false` switches the inset OFF, which
@@ -124,60 +146,11 @@ public:
     void applyPip(iris::CameraNodePtr camera, jahshaka::engine::View *view,
                   const jahshaka::engine::ViewPipDesc &desc);
 
-    /// Pushes the document's sky onto the view. Flat colour skies become the clear
-    /// colour; cubemap/equirect/gradient/realistic skies are a later step and leave
-    /// the view's current background.
-    void applySky(jahshaka::engine::View *view);
 
-    /// Pushes the document's world settings the sky doesn't cover: ambient colour
-    /// (flat, like the legacy uniform), the scene's shadowEnabled toggle, fog, and
-    /// — when `engine` is given — the shadow filter quality. The engine's filter is
-    /// GLOBAL (one per process, Engine::setShadowFilter) while the document stores
-    /// a per-light ShadowMapType, so the policy is: push the strongest (softest)
-    /// quality requested by any shadow-casting light, computed by the last sync().
-    void applyEnvironment(jahshaka::engine::View *view,
-                          jahshaka::engine::Engine *engine = nullptr);
-
-    /// A SECOND VIEW OF THIS SCENE, GRADED LIKE THE FIRST (lane EYE-GRADE-1) —
-    /// applyEnvironment's PER-VIEW half on its own: the shadow flag, the MSAA
-    /// count and the whole post description, with `driving`'s lens over it.
+    /// Asks the next frame's input to RE-ASSERT the scene's and the views' fields (FrameInputScene::reassert).
     ///
-    /// THE VIEW THIS EXISTS FOR is the VR session's eye pair, which the engine
-    /// creates for itself and which therefore used to be the one view in the
-    /// process that no mirror ever reached — it rendered a hand-written
-    /// PostFxDesc, so the World panel's exposure, grade and looks did nothing
-    /// at all in the headset (measured: an exposure sweep that moved the
-    /// desktop 8 -> 255 moved the eye 79 -> 77). A host calls this once per
-    /// frame for `Engine::vrView()` beside its own applyEnvironment call.
-    ///
-    /// NOT applyEnvironment TWICE, deliberately: the scene half of that
-    /// function counts frames of GI stability, so a second call per frame would
-    /// halve the settle window and re-solve the chain in the middle of a drag.
-    ///
-    /// `hostCamera` is the camera the HOST holds, and it is resolved here
-    /// through `Scene::renderCamera` exactly as applyCamera resolves its own —
-    /// so the eye carries the lens of the camera the scene is really rendered
-    /// through (an armed authored camera while playing, a possessed
-    /// character's arm), which is also the camera the VR rig was placed on.
-    /// Null is allowed and means "the world's description, no camera over it".
-    /// A CUT — this view's driving camera changing — re-seeds the view's
-    /// exposure history, like applyCamera's.
-    ///
-    /// `offscreenChain` (VIDEO-REC-1): the view is an OFFSCREEN view drawn every
-    /// frame for a person — the recorder's 1080p view — and takes the whole
-    /// chain (PostFxDesc::allowOffscreen) in this one push. Setting the flag
-    /// after the call instead would push the description twice a frame with a
-    /// different enable answer each time: two workspace rebuilds per frame.
-    void applyViewEnvironment(jahshaka::engine::View *view,
-                              const iris::CameraNodePtr &hostCamera = {},
-                              bool offscreenChain = false);
-
-    /// Forgets what applyEnvironment has already pushed, so the next call pushes
-    /// everything again.
-    ///
-    /// applyEnvironment debounces ambient / fog / GI against the last value it
-    /// sent, which is right while ONE mirror owns the screen — but some of what
-    /// it pushes resolves against process-wide backend state. The editor and the
+    /// The engine applies a record's field only when it differs from what it last applied, which is right while
+    /// ONE mirror owns the screen — but some of what a field sets resolves against process-wide backend state. The editor and the
     /// player are two mirrors over two engine scenes taking turns on screen: the
     /// one coming back would otherwise decide it had already pushed and leave the
     /// other's state in place. Call this whenever a mirror (re)takes the
@@ -188,7 +161,7 @@ public:
     /// own passes whatever else drew (the engine's per-pass SceneGiBinding).
     void invalidateEnvironment();
 
-    /// How many times applyEnvironment has pushed a NEW GI configuration
+    /// How many times buildEnvironment has pushed a NEW GI configuration
     /// (Scene::setGlobalIllumination) and how many times it has asked for a
     /// re-solve of the existing one (Scene::refreshGlobalIllumination).
     ///
@@ -805,19 +778,40 @@ public:
     jahshaka::engine::NodeId groundPlaneNode() const { return mGroundPlaneNode; }
 
 private:
-    /// applyEnvironment's per-view half, shared with applyViewEnvironment.
-    /// `record` writes the mirror-level records (`mWorldPostFx`, the inset's
-    /// base, and `mSunExposureGain`) — true for the view the host called
-    /// applyEnvironment for, false for a second view of the same scene, which
-    /// must not overwrite them.
-    void applyViewPostFx(jahshaka::engine::View *view, bool record, bool offscreenChain = false);
+    // ---- THE FRAME'S INPUT, BUILT (U0 3a): what used to be pushed by the four apply verbs ----
+    /// The sky: the scene's SkyDesc and, for a flat-colour sky, the view's background.
+    void buildSky(jahshaka::engine::FrameInputScene &scene, std::optional<jahshaka::engine::Colour> &background);
+    /// THE WORLD VIEW's environment: the scene's fields and the engine-wide shadow pair, and the view's world post
+    /// chain (recorded as the world's).
+    void buildEnvironment(jahshaka::engine::FrameInput &in, jahshaka::engine::FrameInputScene &scene,
+                          jahshaka::engine::FrameInputView &part, jahshaka::engine::View *view);
+    /// The per-view half, shared by the world view and every further view. `record` writes the mirror-level
+    /// records (`mWorldPostFx`, the inset's base, and `mSunExposureGain`) — true for the world view only.
+    void buildViewPostFx(jahshaka::engine::FrameInputView &part, jahshaka::engine::View *view, bool record,
+                         bool offscreenChain = false);
+    /// A further view: its chain under the driving camera's lens, and an exposure re-seed on a cut.
+    void buildViewEnvironment(jahshaka::engine::FrameInputView &part, jahshaka::engine::View *view,
+                              const iris::CameraNodePtr &hostCamera, bool offscreenChain);
+    /// The view's camera: the driving camera's description, its post overrides, the socket ride.
+    void buildCamera(jahshaka::engine::FrameInputView &part, iris::CameraNodePtr camera,
+                     jahshaka::engine::View *view, float framingAspect);
+    /// The document's ray-tracing mode in the engine's spelling (the scene's field, and what a view's chain asks).
+    jahshaka::engine::RayTracingMode docRayTracing() const;
+    /// Set by invalidateEnvironment: the next record re-asserts its scene's and views' fields.
+    bool mReassertPending = false;
+    /// The frame's shader clock and grid, set during sync and emitted with its record.
+    std::optional<float> mFrameShaderTime;
+    std::optional<jahshaka::engine::GridDesc> mFrameGrid;
+    std::optional<jahshaka::engine::Colour> mFrameSkyBackground;
+    /// The GI mode the record being built carries (the GI volume overlay's switch).
+    std::optional<jahshaka::engine::GiMode> mFrameGiMode;
     /// Records which camera is driving `view` and answers "did it CHANGE" — the
     /// cut test the exposure re-seed rides on (CAMERA_LENS_SPEC §4). False the
     /// first time a view is seen: an opening frame is not a cut.
     bool noteDrivingCamera(const jahshaka::engine::View *view, const iris::CameraNodePtr &camera);
     /// The camera last recorded as driving `view`, or null (never seen, or the
-    /// node has since been deleted). Read by applyEnvironment, which builds the
-    /// view's post description a beat BEFORE applyCamera runs.
+    /// node has since been deleted). Read by buildEnvironment, which builds the
+    /// view's post description a beat BEFORE buildCamera runs.
     iris::CameraNodePtr drivingCameraFor(const jahshaka::engine::View *view) const;
 
     struct Entry {
@@ -1725,9 +1719,9 @@ private:
     jahshaka::engine::MaterialId mDefaultMaterial = 0;
     bool mLightWires = true;
     bool mCameraBodies = true;
-    /// The camera currently DRIVING the view (applyCamera's last one, after the
+    /// The camera currently DRIVING the view (buildCamera's last one, after the
     /// active-camera substitution). Its own body and frustum are suppressed —
-    /// see applyCamera. Raw pointer, compared only for identity; the document
+    /// see buildCamera. Raw pointer, compared only for identity; the document
     /// owns it and a stale value can only ever fail to match.
     const iris::CameraNode *mViewCamera = nullptr;
     /// PER VIEW, which mViewCamera cannot be: one mirror serves the viewport, a
@@ -1741,7 +1735,7 @@ private:
     /// not as a dangling pointer.
     std::vector<std::pair<const jahshaka::engine::View *, QWeakPointer<iris::CameraNode>>>
         mDrivingCameras;
-    /// THE WORLD'S post description as applyEnvironment last built it, BEFORE
+    /// THE WORLD'S post description as buildEnvironment last built it, BEFORE
     /// the driving camera was layered over it. The picture-in-picture inset is
     /// a different camera's shot, so it grades from this and lays the PIPPED
     /// camera over it (applyPip) — inheriting the view's description instead
@@ -1749,7 +1743,10 @@ private:
     /// MAIN view happened to ask for. Scene-level, so one value serves every
     /// view: the fields it carries (hdr, exposure) come from the document.
     jahshaka::engine::PostFxDesc mWorldPostFx;
-    /// WHAT THE VIEW'S CHAIN MULTIPLIES THE FRAME BY, as applyEnvironment last
+    /// The view the world chain was built for, and the sync that built it (buildCamera's base for that view).
+    const jahshaka::engine::View *mWorldPostFxView = nullptr;
+    quint64 mWorldPostFxStamp = 0;
+    /// WHAT THE VIEW'S CHAIN MULTIPLIES THE FRAME BY, as buildEnvironment last
     /// resolved it — the world's post-fx with the driving camera layered over
     /// it (scenemirror.cpp's sunExposureGain). Read by the two places that
     /// decide a sun has gone out: the disc, and the sun's shadow passes.
@@ -1761,7 +1758,7 @@ private:
     /// which is the convention the chain itself follows.
     float mSunExposureGain = 1.0f;
     /// WHAT THE DOCUMENT'S SKY IS MADE OF, as one value — the question "does
-    /// anything have to be BAKED again?" and nothing else. applySky DISPATCHES
+    /// anything have to be BAKED again?" and nothing else. buildSky DISPATCHES
     /// on the kind (and the realistic-bake debounce asks "was the previous sky
     /// also realistic?"); the parameters only ever need an equality test.
     ///
@@ -1773,7 +1770,7 @@ private:
     /// ids, which only exist AFTER the bake this comparison decides to skip.
     ///
     /// The SKY LIGHT is deliberately absent: its intensity and tint scale the
-    /// recorded integral in applyEnvironment, they do not change the integral,
+    /// recorded integral in buildEnvironment, they do not change the integral,
     /// so folding them in here would re-bake the whole sky to answer a question
     /// the bake does not affect.
     struct SkySource {
@@ -1817,7 +1814,7 @@ private:
     static SkySource skySourceOf(const iris::Scene &scene);
     SkySource mSkySource;
     /// The sky description the engine holds (Scene::setSky is idempotent, so
-    /// applySky pushes this every frame and lets the boundary drop it). Built
+    /// buildSky pushes this every frame and lets the boundary drop it). Built
     /// once per SkySource change, beside the bake that produced its textures.
     jahshaka::engine::SkyDesc mSkyDesc;
     /// The equirect sky's texture, taken from the shared cache (unlike the
@@ -1831,14 +1828,9 @@ private:
     /// file it came from — its signature. Owned here, like the sky faces.
     jahshaka::engine::TextureId mCloudWeatherTexture = 0;
     QString mCloudWeatherPath;
-    /// Builds SkyDesc::clouds from the document (applySky, every frame; the
+    /// Builds SkyDesc::clouds from the document (buildSky, every frame; the
     /// engine drops an unchanged description).
     void applyCloudLayer();
-    /// The environment light's gain per channel (the Sky Light's intensity x
-    /// linear tint), pushed on change; the engine forms the ambient SH from it
-    /// (PHOTON-SKY-TRANSIENT-1). Dropped by invalidateEnvironment to re-assert.
-    jahshaka::engine::Colour mLastEnvGain { 0.0f, 0.0f, 0.0f, 1.0f };
-    bool mEnvScalePushed = false;
     // directional, point, spot, area, decal box
     jahshaka::engine::MeshId mWireMeshes[5] = { 0, 0, 0, 0, 0 };
     /// Decal image path + map kind -> pooled atlas slice id. Separate from
@@ -2005,7 +1997,7 @@ private:
     QColor mHighlightColourApplied;                        // what the materials show now
     QColor mHighlightPrimaryColourApplied;                 // ...and the primary's
     // Strongest shadow quality any shadow-casting light asked for, from the last
-    // sync(); pushed engine-wide by applyEnvironment (see comment there).
+    // sync(); pushed engine-wide by buildEnvironment (see comment there).
     jahshaka::engine::ShadowFilter mShadowFilter = jahshaka::engine::ShadowFilter::Hard;
     bool mAnyShadowCaster = false;
     /// Does the scene contain a refractive material right now? Drives the
@@ -2016,24 +2008,13 @@ private:
     /// chain's "Auto" distortion mode (POST_LOOKS_SPEC.md §5.3).
     bool mAnyDistortion = false;
     // Largest shadow-map resolution any shadow-casting light asked for, from the
-    // last sync(); pushed engine-wide by applyEnvironment (the engine's atlas is
+    // last sync(); pushed engine-wide by buildEnvironment (the engine's atlas is
     // global, like the filter — rebuild is expensive, so only on change).
     unsigned mMaxShadowResolution = 0;
     // Global illumination: last pushed state + the driving light's transform, so
-    // applyEnvironment only re-pushes on change and re-traces on light movement.
+    // buildEnvironment only re-pushes on change and re-traces on light movement.
     jahshaka::engine::GiParams mLastGi;
     bool mGiPushed = false;
-    /// HARDWARE RAY TRACING (ledger §425): the project's state as last pushed.
-    /// Pushed on CHANGE only, like fog and GI — the engine stores an enum and
-    /// builds nothing, but a per-frame call for a field nobody moved is still a
-    /// per-frame call.
-    jahshaka::engine::RayTracingMode mLastRayTracing =
-        jahshaka::engine::RayTracingMode::Auto;
-    bool mRayTracingPushed = false;
-    /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the project's row as last
-    /// pushed, on CHANGE only, the ray row's rule.
-    jahshaka::engine::SunContactDesc mLastSunContact;
-    bool mSunContactPushed = false;
     /// The engine's material generation as last adopted (Scene::giMaterialSignature),
     /// and whether the pending settle was armed by lights/geometry — the only
     /// changes the cheap re-inject cadence serves (a material-only edit waits
@@ -2041,9 +2022,9 @@ private:
     quint64 mGiMaterialSignature = 0;
     bool     mGiPendingInject = false;
     /// The GI-driving light transform(s), as a CHANGE KEY rather than a
-    /// matrix — see the signature's derivation in applyEnvironment (audit F8).
+    /// matrix — see the signature's derivation in buildEnvironment (audit F8).
     quint64 mGiLightSignature = 0;
-    /// applyEnvironment's ancestor-signature scratch: the lights of a scene
+    /// buildEnvironment's ancestor-signature scratch: the lights of a scene
     /// share their parent chains, so the chain above each distinct parent is
     /// walked once per call instead of once per light. A member for its
     /// capacity only; it is cleared at the top of every use.
@@ -2123,7 +2104,7 @@ private:
     quint64 mMobilityMisses = 0;
     QString mLastMobilityMiss;
     /// THE LIGHTS THIS WALK RESOLVED AS MOVING, by node pointer, valid for the
-    /// rest of the frame (applyEnvironment runs after sync and the pointers
+    /// rest of the frame (buildEnvironment runs after sync and the pointers
     /// cannot die in between). It exists because the GI light signature has to
     /// ask "does this lamp move?" about each light while the answer is a
     /// property of the node's whole ancestor chain, which only the walk knows.
@@ -2135,7 +2116,7 @@ private:
     /// beats any tree.
     std::vector<const iris::SceneNode *> mMovableLights;
     /// "A node's mobility CHANGED this sync" — set by syncMobility, consumed by
-    /// applyEnvironment's settle gate. A class flip moves the engine's GI
+    /// buildEnvironment's settle gate. A class flip moves the engine's GI
     /// geometry signature (the object enters or leaves it), and that signature
     /// is the settle key: without this flag the frame a character promotes
     /// ARMS a full re-solve, which is the hitch the whole design forbids
@@ -2266,7 +2247,7 @@ private:
     bool mWasPlaying = false;
     // ---- Rebuild coalescing (REFLECTIONS_ADOPTION_SPEC.md §5 / P2) ----
     // A moving light ARMS a refresh instead of performing one; the expensive
-    // rebuild fires when the light has held still. See applyEnvironment for the
+    // rebuild fires when the light has held still. See buildEnvironment for the
     // argument. The constants are deliberately not exposed: they are a debounce,
     // not a preference.
     bool     mGiPendingRefresh = false;
@@ -2299,11 +2280,6 @@ private:
     /// While waiting, run the cheap light-only re-inject this often, so bounced
     /// light follows a light that is being dragged.
     static constexpr int kGiLightOnlyEveryN = 10;
-    // Fog: last pushed state. Enabling/disabling fog creates or destroys the
-    // scene's atmosphere and changes the shader variant, so this one is pushed on
-    // change only, not every frame.
-    jahshaka::engine::FogDesc mLastFog;
-    bool mFogPushed = false;
 };
 
 #endif // SCENEMIRROR_H
