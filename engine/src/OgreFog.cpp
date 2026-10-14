@@ -30,31 +30,21 @@
 
 namespace jahshaka { namespace engine { namespace detail {
 
-std::map<const Ogre::SceneManager *, FogState> FogHlmsListener::sFogState;   // render thread only
-std::map<const Ogre::SceneManager *, float>    FogHlmsListener::sSceneTime;  // render thread only
-std::map<const Ogre::SceneManager *, FogHlmsListener::IfdState> FogHlmsListener::sIfdState;  // render thread only
 unsigned                                       FogHlmsListener::sLightCountMismatches = 0;
 unsigned                                       FogHlmsListener::sMismatchLogged = 0;
 std::vector<const Ogre::CompositorShadowNode *> FogHlmsListener::sAssignmentChanged;  // render thread only
-std::map<const Ogre::SceneManager *, FogHlmsListener::SkyEnvState>
-                                               FogHlmsListener::sSkyEnv;      // render thread only
 FogHlmsListener::PassBinds FogHlmsListener::sPass[Ogre::HLMS_MAX];          // render thread only
 Ogre::HlmsManager            *FogHlmsListener::sSamplerMgr     = nullptr;     // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sEnvSampler     = nullptr;     // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sGatherSampler  = nullptr;     // render thread only
-std::map<const Ogre::SceneManager *, Ogre::TextureGpu *>
-                              FogHlmsListener::sProbeGather;                  // render thread only
-std::map<const Ogre::SceneManager *, FogHlmsListener::CloudShadowState>
-                              FogHlmsListener::sCloudShadow;                  // render thread only
-std::map<const Ogre::SceneManager *, FogHlmsListener::SunContactBind>
-                              FogHlmsListener::sSunContact;                   // render thread only
-std::map<const Ogre::SceneManager *, int>
-                              FogHlmsListener::sPhotonIsolation;              // render thread only
 bool FogHlmsListener::sDiffuseConeSkip  = true;                               // render thread only
 bool FogHlmsListener::sSpecularConeSkip = true;                               // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sCloudSampler = nullptr;       // render thread only
-std::map<const Ogre::SceneManager *, FogHlmsListener::AtmoBind>
-                              FogHlmsListener::sAtmo;                         // render thread only
+
+FogHlmsListener::SceneBinds *FogHlmsListener::bindsOf(const Ogre::SceneManager *sm) {
+    OgreScene *scene = sm ? sceneOfManager(sm) : nullptr;
+    return scene ? &scene->passRecord() : nullptr;
+}
 
 namespace {
 // THE EXTRA PASS TEXTURES, IN THEIR ONE FIXED ORDER (the sky's environment,
@@ -343,51 +333,45 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
 }
 
 void FogHlmsListener::setSkyEnv(const Ogre::SceneManager *sm, const SkyEnvState &state) {
-    if (!sm) return;
+    SceneBinds *b = bindsOf(sm);
+    if (!b) return;
     if (!state.cube || (state.gain[0] <= 0.0f && state.gain[1] <= 0.0f && state.gain[2] <= 0.0f)) {
-        sSkyEnv.erase(sm);
+        b->skyEnv = SkyEnvState();
         return;
     }
-    sSkyEnv[sm] = state;
+    b->skyEnv = state;
 }
 
 FogHlmsListener::SkyEnvState FogHlmsListener::skyEnv(const Ogre::SceneManager *sm) {
-    auto it = sSkyEnv.find(sm);
-    return it == sSkyEnv.end() ? SkyEnvState() : it->second;
+    const SceneBinds *b = bindsOf(sm);
+    return b ? b->skyEnv : SkyEnvState();
 }
 
 // GATHER-0 — the screen-probe gather spike's registration (see the header).
 void FogHlmsListener::setProbeGather(const Ogre::SceneManager *sm, Ogre::TextureGpu *irradiance) {
-    if (!sm) return;
-    if (!irradiance) { sProbeGather.erase(sm); return; }
-    sProbeGather[sm] = irradiance;
+    if (SceneBinds *b = bindsOf(sm)) b->probeGather = irradiance;
 }
-void FogHlmsListener::clearProbeGather() { sProbeGather.clear(); }
 
 // PHOTON-RAYS-1 — the sun contact job's registration (see the header).
 void FogHlmsListener::setSunContact(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility,
                                     unsigned divisor) {
-    if (!sm) return;
-    if (!visibility) { sSunContact.erase(sm); return; }
-    SunContactBind b;
-    b.tex = visibility;
-    b.divisor = divisor ? divisor : 1u;
-    sSunContact[sm] = b;
+    SceneBinds *b = bindsOf(sm);
+    if (!b) return;
+    if (!visibility) { b->sunContact = SunContactBind(); return; }
+    b->sunContact.tex = visibility;
+    b->sunContact.divisor = divisor ? divisor : 1u;
 }
-void FogHlmsListener::clearSunContact() { sSunContact.clear(); }
 // PHOTON-VIEW-1 — the view's isolation, pass-scoped like the gather's registration.
 void FogHlmsListener::setPhotonIsolation(const Ogre::SceneManager *sm, int mode) {
-    if (!sm) return;
-    if (mode <= 0) { sPhotonIsolation.erase(sm); return; }
-    sPhotonIsolation[sm] = mode;
+    if (SceneBinds *b = bindsOf(sm)) b->photonIsolation = mode <= 0 ? 0 : mode;
 }
 void FogHlmsListener::setConeSkipArms(bool diffuseSkip, bool specularSkip) {
     sDiffuseConeSkip = diffuseSkip;
     sSpecularConeSkip = specularSkip;
 }
 Ogre::TextureGpu *FogHlmsListener::probeGather(const Ogre::SceneManager *sm) {
-    auto it = sProbeGather.find(sm);
-    return it == sProbeGather.end() ? nullptr : it->second;
+    const SceneBinds *b = bindsOf(sm);
+    return b ? b->probeGather : nullptr;
 }
 
 void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
@@ -417,12 +401,13 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // undefined descriptor).
     pb.atmoAerial = nullptr;
     pb.atmoSampler = nullptr;
-    if (hlms && !casterPass && sceneManager && !sAtmo.empty() && lookup(sceneManager).atmosphere) {
-        auto it = sAtmo.find(sceneManager);
-        if (it != sAtmo.end() && it->second.aerial) {
+    // THE PASS'S SCENE RECORD (SceneBinds), found once: every per-scene binding below reads it.
+    const SceneBinds *rec = (hlms && !casterPass) ? bindsOf(sceneManager) : nullptr;
+    if (rec && rec->fog.atmosphere) {
+        if (rec->atmo.aerial) {
             const Ogre::HlmsSamplerblock *linear = acquireSampler(hlms->getHlmsManager(), true);
             if (linear) {
-                pb.atmoAerial = it->second.aerial;
+                pb.atmoAerial = rec->atmo.aerial;
                 pb.atmoSampler = linear;
                 hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_atmo_ap", 1);
             }
@@ -477,13 +462,13 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // makes the pixel piece exist and participates in the pass hash), the
     // TEXTURE, and the SAMPLER — set together or not at all.
     //
-    // `sProbeGather` is empty in every build that never arms the spike and on
-    // every frame of one that has disarmed it, so this is one map lookup on a
+    // The record's gather is null in every build that never arms the spike and on
+    // every frame of one that has disarmed it, so this is one pointer test on a
     // colour pass and nothing else changes anywhere.
     pb.probeGather = nullptr;
     pb.probeGatherSampler = nullptr;
-    if (hlms && !casterPass && sceneManager && !sProbeGather.empty()) {
-        Ogre::TextureGpu *gather = probeGather(sceneManager);
+    if (rec && rec->probeGather) {
+        Ogre::TextureGpu *gather = rec->probeGather;
         if (gather) {
             // A POINT sampler: the piece reads the texel under the fragment,
             // never between two of them.
@@ -508,13 +493,13 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
         }
     }
     // THE CLOUD LAYER'S GROUND SHADOW (CLOUDS-2D-1) — the same three decisions
-    // as the two slots above, set together or not at all. `sCloudShadow` is
-    // empty in every scene without a layer, so this is one map test per colour
-    // pass and nothing else anywhere.
+    // as the two slots above, set together or not at all. The record's
+    // field is null in every scene without a layer, so this is one pointer test per
+    // colour pass and nothing else anywhere.
     pb.cloudField = nullptr;
     pb.cloudSampler = nullptr;
-    if (hlms && !casterPass && sceneManager && !sCloudShadow.empty()) {
-        const CloudShadowState cloud = cloudShadow(sceneManager);
+    if (rec) {
+        const CloudShadowState &cloud = rec->cloudShadow;
         if (cloud.field) {
             const Ogre::HlmsSamplerblock *wrap = acquireWrapSampler(hlms->getHlmsManager());
             if (wrap) {
@@ -529,22 +514,21 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // tier registers the texture in front of the PrePassUse pass and takes it
     // away when that pass ends), so the capture, probe and card passes of the
     // same SceneManager never see it. The property's VALUE is the texel
-    // divisor the piece reads the texture at. `sSunContact` is empty in every
-    // scene with the row off: one empty() test per colour pass.
+    // divisor the piece reads the texture at. The record's texture is null in
+    // every scene with the row off: one pointer test per colour pass.
     pb.sunVis = nullptr;
     pb.sunVisSampler = nullptr;
-    if (hlms && !casterPass && sceneManager && !sSunContact.empty()) {
-        auto it = sSunContact.find(sceneManager);
-        if (it != sSunContact.end() && it->second.tex) {
+    if (rec) {
+        if (rec->sunContact.tex) {
             // The gather's POINT sampler, borrowed (one reference per manager —
             // the uint16 refcount rule above); the piece reads with a texel
             // fetch and never filters.
             const Ogre::HlmsSamplerblock *point = acquireSampler(hlms->getHlmsManager(), false);
             if (point) {
-                pb.sunVis = it->second.tex;
+                pb.sunVis = rec->sunContact.tex;
                 pb.sunVisSampler = point;
                 hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_sun_contact",
-                                   Ogre::int32(it->second.divisor));
+                                   Ogre::int32(rec->sunContact.divisor));
             }
         }
     }
@@ -554,11 +538,8 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // Diffuse or Reflections, and set only for the length of the one pass that
     // shades the picture: one empty() test per colour pass otherwise, and every
     // generated shader is the one it was.
-    if (hlms && !casterPass && sceneManager && !sPhotonIsolation.empty()) {
-        auto it = sPhotonIsolation.find(sceneManager);
-        if (it != sPhotonIsolation.end() && it->second > 0)
-            hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_photon_view", Ogre::int32(it->second));
-    }
+    if (rec && rec->photonIsolation > 0)
+        hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_photon_view", Ogre::int32(rec->photonIsolation));
     if (casterPass || !shadowNode || !hlms) return;
     // ONLY WHERE AN ASSIGNMENT CHANGED (clean-2 lane, 2026-09-13). A node can
     // only ENTER the broken state when setLightFixedToShadowMap is called on
@@ -632,65 +613,53 @@ void FogHlmsListener::clearShadowAssignmentChanges() {
 }
 
 void FogHlmsListener::registerScene(const Ogre::SceneManager *sm, const FogState &p) {
-    sFogState[sm] = p;
+    if (SceneBinds *b = bindsOf(sm)) b->fog = p;
 }
 
 void FogHlmsListener::unregisterFog(const Ogre::SceneManager *sm) {
-    sFogState.erase(sm);
+    if (SceneBinds *b = bindsOf(sm)) b->fog = FogState();
 }
 
-void FogHlmsListener::unregisterScene(const Ogre::SceneManager *sm) {
-    sFogState.erase(sm);
-    // The clock table is keyed by SceneManager POINTER, and Ogre recycles those
-    // addresses — a scene destroyed and another created would otherwise inherit
-    // a stale time. Cleared here rather than in setFog's disable branch: this
-    // one is the scene's teardown (OgreScene.cpp), that one is "fog off".
-    sSceneTime.erase(sm);
-    sIfdState.erase(sm);
-    // ...and the sky cube, for the same recycled-pointer reason. The texture it
-    // names dies with the scene.
-    sSkyEnv.erase(sm);
+void FogHlmsListener::unregisterScene(SceneBinds &own) {
+    // The scene's own record (OgreScene::passRecord), reset by the scene's teardown — handed
+    // in, never looked up: its manager is already destroyed when this runs.
+    own = SceneBinds();
     // Every host's pass copy, whole (its textures may name this scene's).
     for (PassBinds &pb : sPass) pb = PassBinds();
-    sCloudShadow.erase(sm);
-    sSunContact.erase(sm);
-    sPhotonIsolation.erase(sm);
-    sAtmo.erase(sm);
 }
 
 void FogHlmsListener::setAtmosphere(const Ogre::SceneManager *sm, const AtmoBind &bind) {
-    if (!sm) return;
-    if (!bind.aerial) { sAtmo.erase(sm); return; }
-    sAtmo[sm] = bind;
+    SceneBinds *b = bindsOf(sm);
+    if (!b) return;
+    b->atmo = bind.aerial ? bind : AtmoBind();
 }
 
 void FogHlmsListener::setCloudShadow(const Ogre::SceneManager *sm, const CloudShadowState &state) {
-    if (!sm) return;
-    if (!state.field || state.strength <= 0.0f) { sCloudShadow.erase(sm); return; }
-    sCloudShadow[sm] = state;
+    SceneBinds *b = bindsOf(sm);
+    if (!b) return;
+    b->cloudShadow = (!state.field || state.strength <= 0.0f) ? CloudShadowState() : state;
 }
 
 FogHlmsListener::CloudShadowState FogHlmsListener::cloudShadow(const Ogre::SceneManager *sm) {
-    auto it = sCloudShadow.find(sm);
-    return it == sCloudShadow.end() ? CloudShadowState() : it->second;
+    const SceneBinds *b = bindsOf(sm);
+    return b ? b->cloudShadow : CloudShadowState();
 }
 
 void FogHlmsListener::setSceneTime(const Ogre::SceneManager *sm, float seconds) {
-    sSceneTime[sm] = seconds;
+    if (SceneBinds *b = bindsOf(sm)) b->sceneTime = seconds;
 }
 
 float FogHlmsListener::sceneTime(const Ogre::SceneManager *sm) {
-    const auto it = sSceneTime.find(sm);
-    return it == sSceneTime.end() ? 0.0f : it->second;
+    const SceneBinds *b = bindsOf(sm);
+    return b ? b->sceneTime : 0.0f;
 }
 
 void FogHlmsListener::setIfdState(const Ogre::SceneManager *sm, const IfdState &state) {
-    sIfdState[sm] = state;
+    if (SceneBinds *b = bindsOf(sm)) b->ifd = state;
 }
 
 FogHlmsListener::IfdState FogHlmsListener::ifdState(const Ogre::SceneManager *sm) {
-    const auto it = sIfdState.find(sm);
-    if (it != sIfdState.end()) return it->second;
+    if (const SceneBinds *b = bindsOf(sm)) return b->ifd;
     // Not zeros: a scene that has a field bound but never pushed state
     // (impossible today — the arm writes it before it binds) must still render
     // at the calibrated brightness rather than at upstream's raw one. GiParams
@@ -701,10 +670,8 @@ FogHlmsListener::IfdState FogHlmsListener::ifdState(const Ogre::SceneManager *sm
 }
 
 FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
-    FogState p;
-    const auto it = sFogState.find(sm);
-    if (it != sFogState.end()) p = it->second;
-    return p;
+    const SceneBinds *b = bindsOf(sm);
+    return b ? b->fog : FogState();
 }
 
 // ONE REFERENCE PER MANAGER, TAKEN ON FIRST USE AND GIVEN BACK BY
@@ -842,7 +809,7 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     // no shader of such a pass declares them.
     {
         const CloudShadowState cloud =
-            sCloudShadow.empty() ? CloudShadowState() : cloudShadow(sceneManager);
+            cloudShadow(sceneManager);
         const Ogre::Camera *cam = sceneManager->getCamerasInProgress().renderingCamera;
         if (cloud.field && cam) {
             // The same view matrix HlmsPbs::preparePassBuffer wrote into

@@ -867,9 +867,9 @@ void ScreenProbeGather::close() {
         drop(v);
     }
     mViews.clear();
-    // Belt and braces: a registration keyed by a manager whose view never came
-    // back through forget() would outlive every texture this object owned.
-    detail::FogHlmsListener::clearProbeGather();
+    // (Every view's registration went in the loop above. The registrations are per
+    // scene now — FogHlmsListener::SceneBinds — so none can outlive its scene, and the old
+    // clear-all belt has nothing left to clear.)
     if (!dev) return;
     if (mPool) vkDestroyDescriptorPool(dev, mPool, nullptr);
     if (mPlacePipeline) vkDestroyPipeline(dev, mPlacePipeline, nullptr);

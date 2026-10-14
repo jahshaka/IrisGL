@@ -2091,8 +2091,7 @@ void RayQueryTier::close() {
         for (unsigned i = 0; i < kReflectRing; ++i) kv.second.sets[i] = VK_NULL_HANDLE;
         dropSunContact(kv.second);
     }
-    mSunContacts.clear();
-    FogHlmsListener::clearSunContact();
+    mSunContacts.clear();   // each one's registration went with it (dropSunContact)
     // THE GATHER'S SHADER REGISTRATION DIES WITH THE TEXTURES IT NAMES
     // (GATHER-0's D1, kept): `ScreenProbeGather::close` frees every atlas and
     // takes every registration away, because `FogHlmsListener`'s map is a plain
@@ -8675,9 +8674,9 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     // nothing to be immune to. NOTE it is NOT the teardown path: the early
     // return above (the no-rays switch) skips it, which is why
     // `RayQueryTier::close()` clears it too (D1).
-    FogHlmsListener::clearProbeGather();
-    // ...and the sun contact's registration, the same backstop (PHOTON-RAYS-1).
-    FogHlmsListener::clearSunContact();
+    // ...and the sun contact's registration, the same backstop (PHOTON-RAYS-1). Each scene
+    // holds its own (FogHlmsListener::SceneBinds), so the backstop visits every scene.
+    for (auto &s : mScenes) FogHlmsListener::clearPassScoped(s->passRecord());
     for (OgreScene *s : drawn) {
         if (!s->rayTracingResolved()) continue;
         mRayTier->updateScene(s);

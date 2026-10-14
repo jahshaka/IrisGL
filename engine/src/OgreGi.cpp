@@ -41,9 +41,6 @@ namespace jahshaka { namespace engine { namespace detail {
 // Render thread only, like every other per-SceneManager pass state
 // (FogHlmsListener's maps).
 // ---------------------------------------------------------------------------
-namespace {
-std::vector<std::pair<const Ogre::SceneManager *, const SceneGiBinding *>> sGiBindings;
-}   // namespace
 
 // THE GI SIDE'S OWN SCENE-GRAPH UPDATES, COUNTED (lane D1-SCALE-FIXTURES, the owed
 // "extra updateSceneGraph calls per frame during a drag" row): the light re-inject
@@ -59,21 +56,12 @@ static void giUpdateSceneGraph(Ogre::SceneManager *sm) {
     sm->updateSceneGraph();
 }
 
-void registerSceneGiBinding(const Ogre::SceneManager *sm, const SceneGiBinding *binding) {
-    for (auto &e : sGiBindings)
-        if (e.first == sm) { e.second = binding; return; }
-    sGiBindings.emplace_back(sm, binding);
-}
-
-void unregisterSceneGiBinding(const Ogre::SceneManager *sm) {
-    for (auto it = sGiBindings.begin(); it != sGiBindings.end(); ++it)
-        if (it->first == sm) { sGiBindings.erase(it); return; }
-}
-
+// THE GI BINDING OF A MANAGER'S SCENE (ENGINE-UPGRADE-2B stage 2): the scene bound on the manager
+// (sceneOfManager) holds it — no process-wide registry, nothing to register or unregister; a
+// manager no scene holds (the blank scene, the document scene) answers null.
 const SceneGiBinding *sceneGiBindingOf(const Ogre::SceneManager *sm) {
-    for (const auto &e : sGiBindings)
-        if (e.first == sm) return e.second;
-    return nullptr;
+    const OgreScene *scene = sm ? sceneOfManager(sm) : nullptr;
+    return scene ? &scene->giBinding() : nullptr;
 }
 
 bool sceneLightDirt(const Ogre::SceneManager *sm, unsigned long long &serial, unsigned long long &removed) {

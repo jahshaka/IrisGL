@@ -2942,8 +2942,9 @@ public:
     static void     registerScene(const Ogre::SceneManager *sm, const FogState &p);
     /// Fog OFF for a scene that still exists (setFog(enabled=false)).
     static void     unregisterFog(const Ogre::SceneManager *sm);
-    /// The scene itself is going away: drops everything keyed by this manager.
-    static void     unregisterScene(const Ogre::SceneManager *sm);
+    struct SceneBinds;   // the scene's pass record (below)
+    /// The scene itself is going away: its record reset, every host's pass copy dropped.
+    static void     unregisterScene(SceneBinds &own);
     static FogState lookup(const Ogre::SceneManager *sm);
 
     /// THE SHADER CLOCK (HLMS_ADOPTION P5), riding the same pass-buffer
@@ -3084,7 +3085,6 @@ public:
     /// it away in that pass's passPosExecute (OgreRayQuery.cpp), so no other
     /// pass — another view's, a mirror's, a probe capture's — ever sees it.
     static void setProbeGather(const Ogre::SceneManager *sm, Ogre::TextureGpu *irradiance);
-    static void clearProbeGather();
     static Ogre::TextureGpu *probeGather(const Ogre::SceneManager *sm);
 
     /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1) — the gather's route, word for
@@ -3096,7 +3096,6 @@ public:
     /// the divisor), the fourth extra slot and one binding.
     static void setSunContact(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility,
                               unsigned divisor);
-    static void clearSunContact();
 
     /// THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): Diffuse (1) or Reflections (2)
     /// for the pass being executed, registered by the view's photon listener in
@@ -3160,21 +3159,35 @@ private:
         const Ogre::HlmsSamplerblock *atmoSampler = nullptr;
     };
     static PassBinds sPass[Ogre::HLMS_MAX];                            // render thread only
-    static std::map<const Ogre::SceneManager *, SkyEnvState> sSkyEnv;  // render thread only
-    /// GATHER-0's registration (the pass's copy of it is PassBinds::probeGather).
-    static std::map<const Ogre::SceneManager *, Ogre::TextureGpu *> sProbeGather;  // render thread
     /// The contact job's registration: the texture and its divisor (the pass's
     /// copy is PassBinds::sunVis; the divisor becomes the property's value).
     struct SunContactBind { Ogre::TextureGpu *tex = nullptr; unsigned divisor = 1u; };
-    static std::map<const Ogre::SceneManager *, SunContactBind> sSunContact;  // render thread
-    static std::map<const Ogre::SceneManager *, int> sPhotonIsolation;  // render thread
     static bool sDiffuseConeSkip, sSpecularConeSkip;                    // render thread
-    /// The cloud field per SceneManager (CLOUDS-2D-1); the pass's copy of it is
-    /// PassBinds::cloudField.
-    static std::map<const Ogre::SceneManager *, CloudShadowState> sCloudShadow;  // render thread
-    /// The atmosphere's tables per SceneManager (SKY-ATMOSPHERE-1); the pass's
-    /// copy is PassBinds::atmoSky / atmoAerial.
-    static std::map<const Ogre::SceneManager *, AtmoBind> sAtmo;          // render thread
+public:
+    /// THE SCENE'S PASS RECORD (ENGINE-UPGRADE-2B stage 2): what one scene's passes bind beyond
+    /// the GI binding — the sky's environment, the gather's and the sun contact's registrations
+    /// (pass-scoped), the photon view's isolation, the cloud shadow, the atmosphere's tables, the
+    /// fog, the shader clock, the field's calibration. HELD BY THE SCENE (OgreScene::passRecord)
+    /// and found through its manager (sceneOfManager), never a process-wide map keyed by manager
+    /// pointers: it dies with its scene, and a recycled manager address can name nothing stale.
+    /// Every field's default is what a lookup used to answer for a manager that had none.
+    struct SceneBinds {
+        SkyEnvState      skyEnv;
+        Ogre::TextureGpu *probeGather = nullptr;   ///< GATHER-0 (the pass's copy: PassBinds::probeGather)
+        SunContactBind   sunContact;               ///< PHOTON-RAYS-1 (the pass's copy: PassBinds::sunVis)
+        int              photonIsolation = 0;      ///< PHOTON-VIEW-1: 1 diffuse, 2 specular, 0 none
+        CloudShadowState cloudShadow;              ///< CLOUDS-2D-1 (the pass's copy: PassBinds::cloudField)
+        AtmoBind         atmo;                     ///< SKY-ATMOSPHERE-1 (PassBinds::atmoAerial)
+        FogState         fog;
+        float            sceneTime = 0.0f;
+        IfdState         ifd;
+    };
+    /// The record of the scene drawn through `sm`, or null (a manager no scene holds).
+    static SceneBinds *bindsOf(const Ogre::SceneManager *sm);
+    /// A scene's PASS-SCOPED registrations (the gather's, the sun contact's), cleared — the
+    /// frame's backstop (OgreEngine::updateRayQuery, every scene).
+    static void clearPassScoped(SceneBinds &b) { b.probeGather = nullptr; b.sunContact = SunContactBind(); }
+private:
     static const Ogre::HlmsSamplerblock *sCloudSampler;                // render thread only
     static Ogre::HlmsManager            *sSamplerMgr;                  // render thread only
     static const Ogre::HlmsSamplerblock *sEnvSampler;                  // render thread only
@@ -3187,9 +3200,6 @@ private:
     /// every frame that assigned nothing, which is every frame of a still
     /// scene.
     static std::vector<const Ogre::CompositorShadowNode *> sAssignmentChanged;  // render thread only
-    static std::map<const Ogre::SceneManager *, FogState> sFogState;   // render thread only
-    static std::map<const Ogre::SceneManager *, float>    sSceneTime;  // render thread only
-    static std::map<const Ogre::SceneManager *, IfdState> sIfdState;   // render thread only
 };
 extern FogHlmsListener gFogListener;
 
@@ -3401,7 +3411,7 @@ void resetSharedTextures();
 //
 // HlmsPbs holds ONE parallax-corrected cubemap pointer (+ its two blend distances)
 // for the whole process. Each scene says what ITS passes read in its own
-// `SceneGiBinding`, registered under its SceneManager, and every PBS-family host
+// `SceneGiBinding`, held by the scene bound on its SceneManager, and every PBS-family host
 // binds the record of the pass's own SceneManager as the pass begins —
 // `ScenePbs::analyzeBarriers` (the first thing a scene pass asks of an Hlms:
 // CompositorPassScene::execute -> analyzeBarriers, before the barriers that must name
@@ -3447,14 +3457,10 @@ struct SceneGiBinding {
     /// Points at the owning OgreScene's list (dirtied by the two counters above).
     const SceneLightList *lightList = nullptr;
 };
-/// The record registered for `sm` — null for a SceneManager that registered none.
+/// The record of the scene bound on `sm` (sceneOfManager) — null for a SceneManager no scene holds.
 /// What giStatus reports as "bound" is read through this, the same lookup the pass
 /// makes (OgreGi.cpp).
 const SceneGiBinding *sceneGiBindingOf(const Ogre::SceneManager *sm);
-/// The record a SceneManager's passes bind; `binding` must outlive the entry
-/// (OgreScene registers its own member at construction, unregisters in destroy()).
-void registerSceneGiBinding(const Ogre::SceneManager *sm, const SceneGiBinding *binding);
-void unregisterSceneGiBinding(const Ogre::SceneManager *sm);
 /// (`bindSceneGi`, the per-pass call every PBS-family host makes, is declared in
 /// HlmsAtom.h beside tellEveryHlms.)
 /// An arm is about to be DELETED: any PBS-family host still holding it (the last
@@ -5730,6 +5736,7 @@ public:
     const std::map<MaterialId, MaterialRec> &materialRecords() const { return mMaterials; }
     const std::map<TextureId, TextureRec> &textureRecords() const { return mTextures; }
     /// The scene's per-pass binding record (SceneGiBinding): the component binds its arms.
+    const SceneGiBinding &giBinding() const { return mGiBinding; }
     void bindGiVct(Ogre::PhotonVoxelLighting *vct);
     void bindGiIfd(Ogre::PhotonIrradianceField *ifd);
     void bindGiPcc(Ogre::ParallaxCorrectedCubemapBase *pcc, float minDist, float maxDist);
@@ -5755,6 +5762,9 @@ public:
     /// The frame's GI walk gate opens (the GI tracking's head, once a frame): the first
     /// consumer of mGiMovedBoxes this frame runs the walk (ensureGiWalk).
     void openGiWalkFrame() { mGiWalkedThisFrame = false; }
+    /// THE SCENE'S PASS RECORD (FogHlmsListener::SceneBinds): what its passes bind, found through
+    /// its manager (sceneOfManager).
+    FogHlmsListener::SceneBinds &passRecord() { return mPassRecord; }
     unsigned long long textureUploadSerial() const { return mTextureUploadSerial; }
     unsigned long long cloudGiSerial() const { return mCloudGiSerial; }
 private:
@@ -6038,6 +6048,7 @@ private:
     /// THE WALK'S GI RECORD and the inputs it was walked with (ensureGiWalk).
     PhotonComponent::WalkRecord mGiWalk;
     PhotonComponent::WalkInputs mGiWalkIn;
+    FogHlmsListener::SceneBinds mPassRecord;
     /// THE CHANGE SET'S ENGINE HALF (U0 3b). The scans re-read only the items NAMED since they last ran — the drained
     /// ChangeSet's subtrees (applyChangeSet) and the engine's own seams (noteSceneTransformWrite(n)) — and nothing on a
     /// frame that named none; a nodeless seam or an incomplete set owes the full pass. `transformEpoch()` = the moves

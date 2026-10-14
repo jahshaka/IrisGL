@@ -28,7 +28,6 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
     mGiBinding.lightsRemoved = &mLightsRemoved;
     mLightList.bindDirt(&mGiLightWriteSerial, &mLightsRemoved);
     mGiBinding.lightList = &mLightList;
-    registerSceneGiBinding(mSceneMgr, &mGiBinding);
     // WHICH SCENE A PASS, A SHADOW NODE OR AN HLMS CALLBACK HANDED THIS MANAGER DRAWS:
     // bound on the manager itself (sceneOfManager), gone with it.
     bindSceneManager(mSceneMgr, this);
@@ -1810,8 +1809,7 @@ void OgreScene::destroy() {
             mParticleDefPool.clear();
         }
     } JAH_CATCH(mError, );
-    FogHlmsListener::unregisterScene(mSceneMgr);
-    unregisterSceneGiBinding(mSceneMgr);
+    FogHlmsListener::unregisterScene(mPassRecord);   // the manager is gone: the scene's own record
     mLightList.reset();
     mSceneMgr = nullptr;
 }
