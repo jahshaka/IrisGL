@@ -14,6 +14,7 @@ const char *const PhotonComponent::kResolvePass = "photon_resolve";
 
 void PhotonComponent::registerPasses(AtomPassProvider *provider) {
     registerPhotonRayPasses(provider);
+    registerPhotonUpdatePass(provider);
 }
 
 void PhotonComponent::volumes(std::vector<Volume> &out) const {

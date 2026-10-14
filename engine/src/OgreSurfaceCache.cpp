@@ -4,6 +4,7 @@
 // mechanism.
 #include "EnginePrivate.h"
 #include "SurfaceCache.h"
+#include "AtomPass.h"
 
 #include <OgreCamera.h>
 #include <OgreItem.h>
@@ -506,6 +507,35 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     // `workspacePosUpdate`, and a flag left set is not a lost capture but a
     // broken process (every later pass would generate the capture permutation).
     cm->addListener(this);
+    // PHOTON_UPDATE'S WORKSPACE (photon/PhotonComponent.h), immediately after the
+    // capture's: one PASS_CUSTOM, on scratch slice 0 (it never draws), recording the
+    // cards' trace and relight every frame. Its listener is this cache (the pass finds
+    // the cache through it).
+    mUpdateNodeDef = processUniqueName("JahPhotonUpdateNode");
+    mUpdateWsDef = processUniqueName("JahPhotonUpdateWs");
+    {
+        Ogre::CompositorNodeDef *un = cm->addNodeDefinition(mUpdateNodeDef);
+        un->addTextureSourceName("scr0", 0, Ogre::TextureDefinitionBase::TEXTURE_INPUT);
+        Ogre::RenderTargetViewDef *rtv = un->addRenderTextureView("photonUpdateRtv");
+        Ogre::RenderTargetViewEntry e;
+        e.textureName = "scr0";
+        e.slice = 0u;
+        rtv->colourAttachments.push_back(e);
+        un->setNumTargetPass(1u);
+        Ogre::CompositorTargetDef *t = un->addTargetPass("photonUpdateRtv");
+        t->setNumPasses(1u);
+        Ogre::CompositorPassDef *p =
+            t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(detail::PhotonComponent::kUpdatePass));
+        p->setAllLoadActions(Ogre::LoadAction::Load);
+        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        p->mProfilingId = "Jahshaka photon update";
+        Ogre::CompositorWorkspaceDef *uwd = cm->addWorkspaceDefinition(mUpdateWsDef);
+        uwd->connectExternal(0, mUpdateNodeDef, 0);
+    }
+    Ogre::CompositorChannelVec updateExternals(1u, mScratch[unsigned(kShaderOrder[0])]);
+    mUpdateWs = cm->addWorkspace(sm, updateExternals, mCam[0], mUpdateWsDef, true, 1);
+    if (!mUpdateWs) { err = "surface cache: the photon_update workspace failed"; return false; }
+    mUpdateWs->addListener(this);
     return true;
 }
 
@@ -534,6 +564,15 @@ void SurfaceCache::destroyAll() {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     if (!root) return;
     Ogre::CompositorManager2 *cm = root->getCompositorManager2();
+    if (mUpdateWs) {
+        cm->removeWorkspace(mUpdateWs);
+        mUpdateWs = nullptr;
+    }
+    if (!mUpdateWsDef.empty() && cm->hasWorkspaceDefinition(mUpdateWsDef)) cm->removeWorkspaceDefinition(mUpdateWsDef);
+    if (!mUpdateNodeDef.empty() && cm->hasNodeDefinition(mUpdateNodeDef)) cm->removeNodeDefinition(mUpdateNodeDef);
+    mUpdateWsDef.clear();
+    mUpdateNodeDef.clear();
+    mPosUpdated = mBatchCopied = false;
     if (mWs) {
         cm->removeListener(this);
         cm->removeWorkspace(mWs);
@@ -1108,14 +1147,9 @@ void SurfaceCache::passPosExecute(Ogre::CompositorPass *pass) {
 void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
     if (ws != mWs) return;
     gCapturing = false;
-    if (mBatch.empty()) {
-        traceSun();
-        relightCards();
-        // A card's flags moved (its indirect half marched): the ray read,
-        // later in this frame, must see it.
-        syncBuffers();
-        return;
-    }
+    // photon_update (the next workspace) traces and relights, whatever happened here.
+    mPosUpdated = true;
+    if (mBatch.empty()) return;
     const auto tB = std::chrono::steady_clock::now();
     // A BATCH THAT WAITED FOR A SHADER IS NOT A CAPTURE (see makeWorkspace): nothing is
     // copied, the cards stay queued and the next batch that finds the shaders built takes them.
@@ -1141,9 +1175,6 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
                 }
             mBatch.clear();
             mWs->setExecutionMask(0u);
-            traceSun();
-            relightCards();
-            syncBuffers();
             return;
         }
     }
@@ -1187,21 +1218,52 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
     mCopyMs = float(std::chrono::duration<double, std::milli>(tC - tB).count());
     mCaptureMs = mWsMs + mCopyMs;
     mStillCpuMs = 0.0f;
+    mBatchCopied = true;   // photon_update traces the batch's term, then closes it
+}
+
+void SurfaceCache::photonUpdate() {
+    if (!mPosUpdated) return;
+    mPosUpdated = false;
     // THE MOVERS' TERM of the cards just captured and of every card a mover's
-    // footprint reaches, traced here — after the copies (the trace reads the
-    // new Depth and Normal) and before the relight that multiplies it in. The
-    // batch's STILL sun term is part of its capture: its CPU is in captureMs.
+    // footprint reaches — after the copies (the trace reads the new Depth and
+    // Normal) and before the relight that multiplies it in. The batch's STILL sun
+    // term is part of its capture: its CPU is in captureMs.
     traceSun();
-    mCaptureMs += mStillCpuMs;
-    mBatch.clear();
-    mWs->setExecutionMask(0u);
-    // ...and the cards just captured are relit from their new texels, in the
-    // same frame, before anything could read them — and the table carries
-    // their flags (captured; indirect stale or marched) before the ray read,
-    // later in this frame, looks.
+    if (mBatchCopied) {
+        mBatchCopied = false;
+        mCaptureMs += mStillCpuMs;
+        mBatch.clear();
+        mWs->setExecutionMask(0u);
+    }
+    // ...and the cards just captured are relit from their new texels, in the same
+    // frame, before anything could read them — and the table carries their flags
+    // (captured; indirect stale or marched) before the ray read, later in this
+    // frame, looks.
     relightCards();
     syncBuffers();
 }
+
+namespace detail {
+/// photon_update's recorder and gate: the pass's cache is the listener of its workspace.
+void registerPhotonUpdatePass(AtomPassProvider *provider) {
+    if (!provider) return;
+    const auto cacheOf = [](const Ogre::CompositorPass *pass) -> SurfaceCache * {
+        const Ogre::CompositorNode *node = pass ? pass->getParentNode() : nullptr;
+        const Ogre::CompositorWorkspace *ws = node ? node->getWorkspace() : nullptr;
+        if (!ws) return nullptr;
+        for (Ogre::CompositorWorkspaceListener *l : ws->getListeners())
+            if (auto *c = dynamic_cast<SurfaceCache *>(l)) return c;
+        return nullptr;
+    };
+    provider->setGate(PhotonComponent::kUpdatePass, [cacheOf](const AtomPassContext &ctx) {
+        const SurfaceCache *c = cacheOf(ctx.pass);
+        return c && c->photonUpdateOwed();
+    });
+    provider->setRecorder(PhotonComponent::kUpdatePass, [cacheOf](AtomPassContext &ctx) {
+        if (SurfaceCache *c = cacheOf(ctx.pass)) c->photonUpdate();
+    });
+}
+}  // namespace detail
 
 // ---------------------------------------------------------------------------
 // THE LIT CARD (PHOTON-CARDS-1, SC-1c) — the sixth layer
@@ -2642,6 +2704,10 @@ void surfaceCacheAsyncDraws(const Ogre::SceneManager *sm, unsigned long long &pl
 
 Ogre::CompositorWorkspace *surfaceCacheWorkspace(const SurfaceCache *cache) {
     return cache ? cache->workspace() : nullptr;
+}
+
+Ogre::CompositorWorkspace *photonUpdateWorkspace(const SurfaceCache *cache) {
+    return cache ? cache->updateWorkspace() : nullptr;
 }
 }   // namespace detail
 

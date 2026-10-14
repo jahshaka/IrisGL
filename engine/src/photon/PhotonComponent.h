@@ -32,6 +32,7 @@
 #include <vector>
 
 namespace Ogre {
+class CompositorWorkspace;
 class PhotonVoxelLighting;
 class PhotonVoxelMaterial;
 class PhotonVoxelizer;
@@ -46,6 +47,10 @@ namespace detail {
 class AtomPassProvider;
 /// The ray passes' recorders (OgreRayQuery.cpp: photon_trace, photon_resolve).
 void registerPhotonRayPasses(AtomPassProvider *provider);
+/// The update pass's recorder (OgreSurfaceCache.cpp: photon_update).
+void registerPhotonUpdatePass(AtomPassProvider *provider);
+/// photon_update's GI workspace (null without a surface cache): the monitor times it.
+Ogre::CompositorWorkspace *photonUpdateWorkspace(const SurfaceCache *cache);
 
 
 class PhotonComponent {

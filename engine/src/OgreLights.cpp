@@ -413,6 +413,11 @@ void OgreScene::monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
         out.push_back(ws);
         if (owners) owners->push_back("cards");
     }
+    // ...and photon_update's, right after it (photon/PhotonComponent.h).
+    if (Ogre::CompositorWorkspace *ws = photonUpdateWorkspace(mSurfaceCache.get())) {
+        out.push_back(ws);
+        if (owners) owners->push_back("photon_update");
+    }
     // UNCONDITIONAL, unlike shadowWorkspaces: the monitor wants every pass a
     // planar mirror or a probe executes, not only the shadowed ones.
     if (mPlanar) {
