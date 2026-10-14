@@ -798,6 +798,15 @@
 				inPs.worldNorm = midf3_c( b.w.x * normalize( mul( midf3_c( n0 ), atomWorldAdj ) ) +
 										  b.w.y * normalize( mul( midf3_c( n1 ), atomWorldAdj ) ) +
 										  b.w.z * normalize( mul( midf3_c( n2 ), atomWorldAdj ) ) );
+				@property( atom_two_sided )
+					// THE RECEIVER OFFSET FOLLOWS THE FACE IT SHADES (BISTRO-FIXES-3): a back face is
+					// shaded with the flipped normal (above), and the shadow's normal-offset bias
+					// pushes along this one - unflipped, a face lit from its back pushed its lookup
+					// INTO the surface and shadowed itself in acne stripes (shadow.two_sided_caster).
+					// The fork's PBS receiver takes the same flip (two_sided_flip_normal).
+					if( atomFacing < 0.0 )
+						inPs.worldNorm = -inPs.worldNorm;
+				@end
 			@end
 		@end
 		@property( hlms_pssm_splits )
