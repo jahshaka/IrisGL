@@ -35,6 +35,8 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreEnvironmentCones.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuScene.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuSceneSubstrate.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/PhotonComponent.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/PhotonComponent.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/SkinCache.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuVoxelGather.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCull.cpp

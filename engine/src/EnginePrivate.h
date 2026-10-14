@@ -23,6 +23,7 @@
 // HlmsComputeJob and buildable on a platform with no ray queries.
 #include "GpuCull.h"
 #include "GpuSceneSubstrate.h"   // the tables' one writer (GpuScene.h inside it)
+#include "photon/PhotonComponent.h"
 #include "jahshaka/engine/GpuSubstrate.h"
 #include "GpuVoxelGather.h"
 #include "SceneLightList.h"
@@ -4322,12 +4323,6 @@ public:
     /// lane changes an input and not a pass.
     bool rayReflectionsWanted() const;
     bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) override;
-    /// The tier reads this scene's PRIVATE caster epoch (shadowEpoch) to decide
-    /// whether the acceleration structure can possibly be out of date — the same
-    /// question, and the same answer, as the caster walk's own gate. A friend
-    /// rather than a new public getter: nothing outside the ray tier has any
-    /// business with that counter, and it lives in the same TU as the walk.
-    friend class RayQueryTier;
     unsigned long long giGeometrySignature() const override;
     unsigned long long giMaterialSignature() const override;
     bool refreshGiLighting(bool inMotion) override;
@@ -6605,8 +6600,32 @@ public:
     /// mark since), then — after the ray levels have patched the mirror — ONE commit.
     void composeGpuSceneFrame() const;
     void commitGpuSceneFrame() const;
-    friend GpuSubstrateStatus jahshaka::engine::gpuSubstrateStatus(const Scene &scene);
+    // ---- THE READ-ONLY GPU-SCENE VIEW (ENGINE-UPGRADE-2 stage 2) -----------------------
+    // What a reader outside the scene (the ray tier) learns about the GPU scene's slots,
+    // without the scene's members: the substrate (the tables it reads; the ray
+    // structures slot it fills), a slot's or a node's item facts, and the one write a
+    // reader may ask for — a slot re-composed (its skin row changed).
+    GpuSceneSubstrate &substrate() const { return mSubstrate; }
+    struct GpuSlotView {
+        uint32_t node = 0;                        ///< the node's id
+        Ogre::Item *item = nullptr;
+        unsigned long long rigGeneration = 0;     ///< moves when the Item is rebuilt
+        /// The pose pushes a skin is keyed on: the node's own and, for a shareSkeleton
+        /// follower, its master's (the caster walk's recipe).
+        unsigned long long poseSerial = 0;
+    };
+    bool gpuSlotView(uint32_t slot, GpuSlotView &out) const;
+    bool gpuNodeView(uint32_t node, GpuSlotView &out) const;
+    /// The node's slot is re-composed by the next compose (no-op for a node with no Item).
+    void markGpuNodeDirty(uint32_t node);
+    /// What the ray structures are current against: the caster epoch (a transform, a
+    /// pose, a caster input) plus the ray levels' refits.
+    unsigned long long rayStructureEpoch() const;
+    /// PHOTON (photon/PhotonComponent.h): the GI's products, read through its interface.
+    const PhotonComponent &photon() const { return mPhoton; }
 private:
+    PhotonComponent::Inputs photonInputs();
+    PhotonComponent mPhoton{ photonInputs() };
     /// The substrate's steps (OgreGpuScene.cpp): the compose (marks, then the walk —
     /// the compare over every slot as a UniformScalableTask — staging the changed
     /// slots), the commit (the device copy), and the stage they file.

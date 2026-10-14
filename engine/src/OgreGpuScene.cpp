@@ -1420,6 +1420,37 @@ void OgreScene::commitGpuSceneFrame() const {
                       walked);
 }
 
+// ---------------------------------------------------------------------------
+// THE READ-ONLY GPU-SCENE VIEW (EnginePrivate.h): a slot's or a node's item facts.
+bool OgreScene::gpuNodeView(uint32_t node, GpuSlotView &out) const {
+    out = GpuSlotView();
+    auto it = mNodes.find(NodeId(node));
+    if (it == mNodes.end()) return false;
+    const Node &n = it->second;
+    out.node = uint32_t(n.selfId);
+    out.item = n.item;
+    out.rigGeneration = n.rigGeneration;
+    out.poseSerial = n.poseEpoch;
+    if (n.shareSource) {
+        auto sit = mNodes.find(n.shareSource);
+        if (sit != mNodes.end()) out.poseSerial = out.poseSerial * 1000003ull + sit->second.poseEpoch;
+    }
+    return true;
+}
+
+bool OgreScene::gpuSlotView(uint32_t slot, GpuSlotView &out) const {
+    out = GpuSlotView();
+    if (slot >= mItemNodes.size() || !mItemNodes[slot]) return false;
+    return gpuNodeView(uint32_t(mItemNodes[slot]->selfId), out);
+}
+
+void OgreScene::markGpuNodeDirty(uint32_t node) {
+    auto it = mNodes.find(NodeId(node));
+    if (it != mNodes.end()) markGpuSlotDirty(it->second);
+}
+
+unsigned long long OgreScene::rayStructureEpoch() const { return shadowEpoch() + rayLevelRefits(); }
+
 /// The scan with its cost recorded for a caller that wants the number without a
 /// frame — the suite's premise table, which needs the PRE-FRAME form's cost and
 /// has nowhere else to take it. `ensureGpuScene` times itself, so this only
@@ -1606,13 +1637,13 @@ GpuSubstrateStatus gpuSubstrateStatus(const Scene &scene) {
     GpuSubstrateStatus st;
     const auto *s = dynamic_cast<const detail::OgreScene *>(&scene);
     if (!s) return st;
-    const detail::GpuSceneSubstrate &sub = s->mSubstrate;
+    const detail::GpuSceneSubstrate &sub = s->substrate();
     const detail::GpuScene &t = sub.tables;
     st.live = t.live();
     st.framesInFlight = t.framesInFlight();
     st.copies = t.tableCopies();
     st.liveCopy = t.liveTable();
-    const size_t workers = s->mSceneMgr ? s->mSceneMgr->getNumWorkerThreads() : 0u;
+    const size_t workers = s->sceneManager() ? s->sceneManager()->getNumWorkerThreads() : 0u;
     st.workers = unsigned(workers + 1u);
     st.copyWrites = t.copyWrites();
     st.inFlightOverwrites = t.inFlightOverwrites();

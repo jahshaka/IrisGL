@@ -379,7 +379,7 @@ public:
     void detachFeed(OgreScene *scene) {
         SceneAs *sa = asOf(scene);
         if (!sa || !sa->feedOn) return;
-        scene->mGpuScene.removeObserver(&sa->feed);
+        scene->gpuScene().removeObserver(&sa->feed);
         sa->feedOn = false;
     }
 
@@ -665,8 +665,6 @@ private:
     /// cleared. `scene` may be null (the tier's close: the GpuScene dies with it).
     void dropSkin(OgreScene *scene, SceneAs &sa, uint32_t node, SceneAs::Skin &sk);
     void dropSkinBuffers(SceneAs &sa);
-    /// The pose serial a cache is keyed on (own + a shared skeleton's master).
-    static unsigned long long skinPoseSerial(const OgreScene *scene, const OgreScene::Node &n);
 
     /// Ogre's frame command buffer, with every encoder closed first: an
     /// acceleration-structure build may not be recorded inside a render pass,
@@ -1387,12 +1385,12 @@ struct RaySceneStructures {
 void RaySceneStructuresDelete::operator()(RaySceneStructures *p) const { delete p; }
 
 RayQueryTier::SceneAs *RayQueryTier::asOf(const OgreScene *scene) {
-    return scene && scene->mSubstrate.rays ? &scene->mSubstrate.rays->as : nullptr;
+    return scene && scene->substrate().rays ? &scene->substrate().rays->as : nullptr;
 }
 
 RayQueryTier::SceneAs &RayQueryTier::asFor(OgreScene *scene) {
-    if (!scene->mSubstrate.rays) scene->mSubstrate.rays.reset(new RaySceneStructures());
-    return scene->mSubstrate.rays->as;
+    if (!scene->substrate().rays) scene->substrate().rays.reset(new RaySceneStructures());
+    return scene->substrate().rays->as;
 }
 
 // ---------------------------------------------------------------------------
@@ -2039,7 +2037,7 @@ void RayQueryTier::releaseScene(OgreScene *scene) {
     sa.skins.clear();
     dropSkinBuffers(sa);
     detail::monitor::forgetGpuOwner(&sa);
-    scene->mSubstrate.rays.reset();
+    scene->substrate().rays.reset();
 }
 
 void RayQueryTier::close() {
@@ -2253,7 +2251,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
         // destruction for its own dynamic-buffer multiplier of frames.
         bl.mesh.reset();
     }
-    if (sa.feedOn) scene->mGpuScene.removeObserver(&sa.feed);
+    if (sa.feedOn) scene->gpuScene().removeObserver(&sa.feed);
     sa.feedOn = false;
     retire(sa.tlas, sa.tlasStorage);
     retire(sa.tlasScratch);
@@ -2282,7 +2280,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     for (const Blas &bl : sa.blas)
         if (bl.compactState == 1u) mCompactBusy &= ~(uint64_t(1) << bl.compactSlot);
     detail::monitor::forgetGpuOwner(&sa);
-    scene->mSubstrate.rays.reset();
+    scene->substrate().rays.reset();
     forgetCardMovers(scene);
 }
 
@@ -2398,7 +2396,7 @@ void RayQueryTier::SceneAs::Feed::gpuSlotChanged(uint32_t slot, const detail::Gp
         std::memcpy(&meshIndex, &now->boundsMin[3], sizeof(meshIndex));
         if (flags & detail::kGpuRayTraced) {
             next.rigged = (flags & detail::kGpuSkinned) != 0u;
-            const Ogre::MeshPtr &mp = scene->mGpuScene.meshAt(meshIndex);
+            const Ogre::MeshPtr &mp = scene->gpuScene().meshAt(meshIndex);
             if (mp && next.rigged) {
                 next.kind = 2u;
             } else if (mp) {
@@ -2458,7 +2456,7 @@ void RayQueryTier::SceneAs::Feed::gpuSceneReset() {
 /// the old writer's "a rigged slot whose cache is not ready is NOT WRITTEN".
 bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skinReady, bool &changed,
                                    std::string &err) {
-    detail::GpuScene &gs = scene->mGpuScene;
+    detail::GpuScene &gs = scene->gpuScene();
     SceneAs::Feed &fd = sa.feed;
     const uint32_t meshes = gs.meshEntryCount();
     std::vector<uint32_t> &w = sa.tlasInScratch;
@@ -2588,7 +2586,7 @@ bool RayQueryTier::makeTlasWritePipeline(std::string &err) {
 }
 
 bool RayQueryTier::dispatchTlasWrite(OgreScene *scene, SceneAs &sa, VkCommandBuffer cmd, std::string &err) {
-    detail::GpuScene &gs = scene->mGpuScene;
+    detail::GpuScene &gs = scene->gpuScene();
     const uint32_t slots = gs.slotCount();
     if (mTwFailed) {
         err = "the instance job is unavailable";
@@ -3153,34 +3151,19 @@ Ogre::DescriptorSetUav::BufferSlot skinSlot(Ogre::UavBufferPacked *buffer,
 constexpr uint32_t kSkinThreadsPerGroup = 64u;   // the job's threads_per_group x
 }  // namespace
 
-/// THE POSE SERIAL a cache is keyed on: the node's own pose pushes AND, for a
-/// shareSkeleton follower (an armour or clothing piece posed by the MASTER's
-/// instance), the master's — the recipe the caster walk uses (OgreGi.cpp,
-/// walkItems). The follower's own poseEpoch never moves when the body's clip
-/// does, so keyed on it alone the piece would be skinned once and frozen.
-unsigned long long RayQueryTier::skinPoseSerial(const OgreScene *scene, const OgreScene::Node &n) {
-    unsigned long long pose = n.poseEpoch;
-    if (n.shareSource) {
-        auto sit = scene->mNodes.find(n.shareSource);
-        if (sit != scene->mNodes.end()) pose = pose * 1000003ull + sit->second.poseEpoch;
-    }
-    return pose;
-}
-
 void RayQueryTier::dropSkin(OgreScene *scene, SceneAs &sa, uint32_t node, SceneAs::Skin &sk) {
     if (sk.as) retire(sk.as, sk.storage);
     retire(sk.scratch);
     sk.address = 0;
     sk.built = false;
     destroySkinCacheBuffer(sa.skinVao, sk.buf);
-    if (scene && scene->mGpuScene.live()) {
-        detail::GpuScene &gs = scene->mGpuScene;
+    if (scene && scene->gpuScene().live()) {
+        detail::GpuScene &gs = scene->gpuScene();
         if (gs.skinRowOf(node) != detail::GpuScene::kNoGeomRow) {
             gs.setSkinRow(node, detail::GpuScene::kNoGeomRow);
             // The override goes with the cache: the node's entry is re-composed
             // (if the node still has an Item) on the next scan.
-            auto nit = scene->mNodes.find(NodeId(node));
-            if (nit != scene->mNodes.end()) scene->markGpuSlotDirty(nit->second);
+            scene->markGpuNodeDirty(node);
         }
         if (sk.rowBlock != 0xFFFFFFFFu) gs.releaseRowBlock(sk.rowBlock);
     }
@@ -3220,20 +3203,23 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
     sa.st.skinLastItems = 0;
     sa.st.skinLastVertices = 0;
     for (auto &kv : sa.skins) kv.second.seen = false;
-    detail::GpuScene &gs = scene->mGpuScene;
+    detail::GpuScene &gs = scene->gpuScene();
     if (!gs.live()) return true;
 
     // 1. THE RIGGED TRACED SET, kept by the change feed (ATOM-CPU-WALKS-1; it used
     //    to be a walk of the GPU scene's mirror every moving frame), ascending by
     //    slot as that walk visited it. The flags word is the one place the
     //    predicates live; kGpuRayTraced no longer excludes a rigged item.
-    struct Want { uint32_t slot = 0; OgreScene::Node *node = nullptr; };
+    // (The slot's item facts through the GPU-scene view: its node, Item, rig
+    // generation and pose serial — the shareSkeleton master's pushes folded in.)
+    struct Want { uint32_t slot = 0; OgreScene::GpuSlotView view; };
     std::vector<Want> wants;
     for (const uint32_t i : sa.feed.rigged) {
-        if (i >= gs.slotCount() || i >= scene->mItemNodes.size()) continue;
-        OgreScene::Node *n = scene->mItemNodes[i];
-        if (!n || !n->item || !n->item->getSkeletonInstance()) continue;
-        wants.push_back({ i, n });
+        Want wt;
+        wt.slot = i;
+        if (i >= gs.slotCount() || !scene->gpuSlotView(i, wt.view)) continue;
+        if (!wt.view.item || !wt.view.item->getSkeletonInstance()) continue;
+        wants.push_back(wt);
     }
     if (wants.empty()) return true;
 
@@ -3258,14 +3244,14 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
     // 2. RECONCILE: a cache per rigged traced item, created on first sight (or
     //    when the Item behind the node was rebuilt), marked seen; the ones not
     //    seen are dropped AFTER the gather (updateScene).
-    struct Dirty { uint32_t node = 0; SceneAs::Skin *sk = nullptr; OgreScene::Node *n = nullptr; };
+    struct Dirty { uint32_t node = 0; SceneAs::Skin *sk = nullptr; unsigned long long poseSerial = 0; };
     std::vector<Dirty> dirty;
     // THE SETTLE LIST (REFLECT-MOVERS-2): caches whose pose stopped last frame —
     // their previous-pose slice is copied level with the posed vertices, no skinning.
     std::vector<SceneAs::Skin *> settle;
     bool rowsStaged = false;
     for (const Want &wt : wants) {
-        const uint32_t node = uint32_t(wt.node->selfId);
+        const uint32_t node = wt.view.node;
         auto it = sa.skins.find(node);
         // THE IDENTITY, AND THE SOURCE IT WAS BUILT OVER (a mismatch in any of them
         // drops the cache and makes a new one this pass): a refit over an index
@@ -3273,14 +3259,14 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
         // than the cache, is a read of freed or foreign memory — an Xid, never a
         // validation error.
         const Ogre::VertexArrayObject *liveVao =
-            (wt.node->item->getMesh() && wt.node->item->getMesh()->getNumSubMeshes() &&
-             !wt.node->item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal].empty())
-                ? wt.node->item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal][0]
+            (wt.view.item->getMesh() && wt.view.item->getMesh()->getNumSubMeshes() &&
+             !wt.view.item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal].empty())
+                ? wt.view.item->getMesh()->getSubMesh(0)->mVao[Ogre::VpNormal][0]
                 : nullptr;
         if (it != sa.skins.end() &&
-            (it->second.item != wt.node->item ||
-             it->second.mesh != wt.node->item->getMesh().get() ||
-             it->second.rigGeneration != wt.node->rigGeneration || !liveVao ||
+            (it->second.item != wt.view.item ||
+             it->second.mesh != wt.view.item->getMesh().get() ||
+             it->second.rigGeneration != wt.view.rigGeneration || !liveVao ||
              liveVao->getIndexBuffer() != it->second.indices ||
              liveVao->getVertexBuffers().empty() ||
              uint32_t(liveVao->getVertexBuffers()[0]->getNumElements()) != it->second.buf.vertexCount)) {
@@ -3290,9 +3276,9 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
         }
         if (it == sa.skins.end()) {
             SceneAs::Skin sk;
-            sk.item = wt.node->item;
-            sk.mesh = wt.node->item->getMesh().get();
-            sk.rigGeneration = wt.node->rigGeneration;
+            sk.item = wt.view.item;
+            sk.mesh = wt.view.item->getMesh().get();
+            sk.rigGeneration = wt.view.rigGeneration;
             sk.indices = liveVao ? liveVao->getIndexBuffer() : nullptr;
             std::string why;
             if (!createSkinCacheBuffer(vao, sk.item, sk.buf, why)) {
@@ -3316,7 +3302,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
                                     rows[l].data());
             sk.row = detail::GpuScene::geomRowIndex(sk.rowBlock, 0u, 0u);
             gs.setSkinRow(node, sk.row);
-            scene->markGpuSlotDirty(*wt.node);
+            scene->markGpuNodeDirty(node);
             rowsStaged = true;
             it = sa.skins.emplace(node, std::move(sk)).first;
         }
@@ -3325,8 +3311,8 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
         // THE POSE SERIAL: bumped by every pose push (clip time, weights, manual
         // bones — OgreScene::noteNodePosed). A walk moves the node, not the pose,
         // and costs nothing here: the cache is in the item's LOCAL space.
-        const unsigned long long serial = skinPoseSerial(scene, *wt.node);
-        if (!sk.skinned || !sk.built || serial != sk.poseSerial) dirty.push_back({ node, &sk, wt.node });
+        const unsigned long long serial = wt.view.poseSerial;
+        if (!sk.skinned || !sk.built || serial != sk.poseSerial) dirty.push_back({ node, &sk, serial });
         else if (sk.prevBehind) settle.push_back(&sk);
     }
     // A row not on the device is a zero address to the job (the ATOM-VOXEL-2 Xid):
@@ -3483,7 +3469,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
                 d.sk->prevBehind = d.sk->skinned;
                 if (d.sk->skinned) sa.skinPosedFrame = vao->getFrameCount();
                 d.sk->skinned = true;
-                d.sk->poseSerial = skinPoseSerial(scene, *d.n);
+                d.sk->poseSerial = d.poseSerial;
                 ++sa.st.skinPasses;
                 ++sa.st.skinLastItems;
                 sa.st.skinLastVertices += d.sk->buf.vertexCount;
@@ -3657,7 +3643,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // (OgreEngine::drainPbsChanges) forgets the twin whose bucket moved — the epoch
     // this compares. Nothing here walks the slots or polls a material.
     {
-        detail::GpuScene &gsc = scene->mGpuScene;
+        detail::GpuScene &gsc = scene->gpuScene();
         Ogre::HlmsManager *hm = Ogre::Root::getSingleton().getHlmsManager();
         auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
         if (gsc.live() && !sa.feedOn) {
@@ -3670,12 +3656,12 @@ void RayQueryTier::updateScene(OgreScene *scene) {
             std::vector<uint32_t> words = sa.feed.words.take();
             if (words != sa.decodeWords || atom->twinEpoch() != sa.decodeEpoch) {
                 sa.decodeWords.swap(words);
-                atom->syncSceneDecodes(scene->mSceneMgr, sa.decodeWords);
+                atom->syncSceneDecodes(scene->sceneManager(), sa.decodeWords);
                 sa.decodeEpoch = atom->twinEpoch();
             }
         }
     }
-    const unsigned long long epoch = scene->shadowEpoch() + scene->rayLevelRefits();
+    const unsigned long long epoch = scene->rayStructureEpoch();
     // ...AND THE SET ITSELF (ATOM-CPU-WALKS-1): a slot that entered or left the
     // traced set, or changed its structures, without anything moving (an alpha
     // test or a route edited in place, a skinned item's rig) is a new set — the
@@ -3755,7 +3741,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // CPU; it used to be the instance walk (3-13 ms at 10k, W8 / W13).
     const Clock::time_point tGather = Clock::now();
     SceneAs::Feed &fd = sa.feed;
-    detail::GpuScene &gs = scene->mGpuScene;
+    detail::GpuScene &gs = scene->gpuScene();
     const uint32_t slots = gs.slotCount();
     {
         // 1. THE STRUCTURES THE SET REFERENCES and nobody built yet, ascending by
@@ -4186,7 +4172,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
                                     std::vector<CardReadPick> &out, std::string &err) {
     out.clear();
     if (!isOpen()) { err = "cardReadParity: the ray tier is not open"; return false; }
-    const SurfaceCache *cache = scene ? scene->mSurfaceCache.get() : nullptr;
+    const SurfaceCache *cache = scene ? scene->photon().surfaceCache() : nullptr;
     if (!cache || !cache->cardBuffer() || !cache->instanceBuffer() || !cache->depthLayer() ||
         !cache->radianceLayer() || !cache->cardRecords()) {
         err = "cardReadParity: the scene holds no built surface cache";
@@ -5076,8 +5062,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         }
         ++voxCount;
     };
-    for (const OgreScene::VctCascade &c : scene->mVctCascades)
-        if (c.built) takeVolume(c.lighting, c.voxelizer);
+    std::vector<PhotonComponent::Volume> builtCascades;
+    scene->photon().volumes(builtCascades);
+    for (const PhotonComponent::Volume &c : builtCascades) takeVolume(c.lighting, c.voxelizer);
     // NO VOXELS IS NOT "NO REFLECTIONS": an escaping ray still reads the sky,
     // and in an open scene that is the whole answer. A HIT with no cache behind
     // it is what the shader declines (see its note) — it hands the pixel back
@@ -5090,7 +5077,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // Its two tables and two atlas layers, when the scene holds a built cache
     // (OgreScene::updateSurfaceCache — the `cards` row); without one the read
     // is bound to the stand-ins with zero slots and every hit reads the voxels.
-    const SurfaceCache *cardCache = scene->mSurfaceCache.get();
+    const SurfaceCache *cardCache = scene->photon().surfaceCache();
     Ogre::UavBufferPacked *cardTable = cardCache ? cardCache->cardBuffer() : nullptr;
     Ogre::UavBufferPacked *cardInstances = cardCache ? cardCache->instanceBuffer() : nullptr;
     Ogre::TextureGpu *cardDepth = cardCache ? cardCache->depthLayer() : nullptr;
@@ -6106,7 +6093,7 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
     std::vector<uint32_t> &w = sa.alphaScratch;
     w.clear();
     const std::set<uint32_t> &slots = sa.feed.alpha;
-    detail::GpuScene &gs = scene->mGpuScene;
+    detail::GpuScene &gs = scene->gpuScene();
     // THE ROWS BY ADDRESS (the fable read's D1): a candidate reads its OWN submesh's
     // row, base + geometry index, from the GPU scene's row buffer — which is
     // re-created when the mesh table grows, so its address rides in the words and a
@@ -6123,9 +6110,9 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
         w[3] = uint32_t(rowsAddress >> 32u);
         unsigned budget = kAlphaMasksPerFrame;
         for (const uint32_t slot : slots) {
-            if (slot >= gs.slotCount() || slot >= scene->mItemNodes.size()) continue;
-            const OgreScene::Node *node = scene->mItemNodes[slot];
-            if (!node || !node->item || !node->item->getNumSubItems()) continue;
+            OgreScene::GpuSlotView node;
+            if (slot >= gs.slotCount() || !scene->gpuSlotView(slot, node)) continue;
+            if (!node.item || !node.item->getNumSubItems()) continue;
             // THE ROW BASES: submesh 0's row of the level each copy was built from (the
             // feed's near row; the mesh's coarsest level for the far copy; a rigged
             // slot's skin row for both — unknown until its first ready frame, and a
@@ -6138,14 +6125,14 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
             // ONE RECORD PER SUBMESH, its own datablock (a tree: the trunk opaque, the
             // leaves cut out). Rows exist for kSubmeshesPerMesh submeshes; a geometry
             // past them reads solid (the header of jah_rq_alpha.glsl).
-            const uint32_t subs = uint32_t(std::min<size_t>(node->item->getNumSubItems(),
+            const uint32_t subs = uint32_t(std::min<size_t>(node.item->getNumSubItems(),
                                                             detail::GpuScene::kSubmeshesPerMesh));
             w[4u + slot] = uint32_t(w.size());
             ++w[1];
             const uint32_t head[4] = { nearRow, farRow, subs, 0u };
             w.insert(w.end(), head, head + 4);
             for (uint32_t g = 0; g < subs; ++g) {
-                const Ogre::HlmsDatablock *db = node->item->getSubItem(g)->getDatablock();
+                const Ogre::HlmsDatablock *db = node.item->getSubItem(g)->getDatablock();
                 uint32_t e[12] = {};
                 uint32_t flags = kAlphaConstant | kAlphaConstantSolid;
                 float uv0[4] = { 1.0f, 1.0f, 0.0f, 0.0f }, uv1[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
@@ -6208,7 +6195,7 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
 /// arms of a paired A/B): no table — every ray query asks opaque, exactly the
 /// pre-lane traversal (a cut-out, still FORCE_NO_OPAQUE, then reads as its quad).
 bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
-    const detail::GpuScene &gs = scene->mGpuScene;
+    const detail::GpuScene &gs = scene->gpuScene();
     const detail::GpuInstance *m = gs.mirrorData();
     if (!m) return false;
     for (uint32_t i = 0; i < gs.slotCount(); ++i) {
@@ -6240,7 +6227,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     std::vector<uint32_t> &w = sa.hitScratch;
     w.assign(4u, 0u);
     auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, sizeof u); return u; };
-    Ogre::SceneManager *sm = scene->mSceneMgr;
+    Ogre::SceneManager *sm = scene->sceneManager();
     uint32_t nLights = 0u;
     if (sm) {
         SceneLightList::Consumer consumer;
@@ -6284,7 +6271,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
             ++nLights;
         }
     }
-    const Ogre::PhotonVoxelMaterial *store = scene->mVctMaterialStore;
+    const Ogre::PhotonVoxelMaterial *store = scene->photon().materials();
     const uint32_t lightWords = uint32_t(w.size());
     uint32_t nRows = 0u;
     if (store) {
@@ -6331,8 +6318,8 @@ uint64_t RayQueryTier::hitTableOf(const OgreScene *scene) const {
 
 RayQueryTier::HitSurfaceInputs RayQueryTier::hitSurfaceInputsOf(const OgreScene *scene) const {
     HitSurfaceInputs h;
-    if (scene->mVctMaterialStore) h.pool = scene->mVctMaterialStore->getTexturePool();
-    const FogHlmsListener::CloudShadowState cs = FogHlmsListener::cloudShadow(scene->mSceneMgr);
+    if (scene->photon().materials()) h.pool = scene->photon().materials()->getTexturePool();
+    const FogHlmsListener::CloudShadowState cs = FogHlmsListener::cloudShadow(scene->sceneManager());
     if (cs.field && cs.strength > 0.0f) {
         h.cloudField = cs.field;
         h.cloudMap[0] = cs.invTile; h.cloudMap[1] = cs.strength; h.cloudMap[2] = cs.scroll[0]; h.cloudMap[3] = cs.scroll[1];
@@ -6666,7 +6653,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
 
     GatherInputs in;
     in.scene = scene;
-    in.sceneMgr = scene->mSceneMgr;
+    in.sceneMgr = scene->sceneManager();
     in.tlas = sa.tlas;
     in.normals = normalTex;
     in.depth = depthTex;
@@ -6696,7 +6683,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     // the scene's GI (every view of it then — the eyes, and the mono control an
     // eye screenshot compares with them — gathers at the headset's density).
     in.facts = giQualityFacts(scene->giParams().quality,
-                              scene->mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
+                              scene->photon().driverStereo() ? GiViewProfile::Vr : GiViewProfile::Desktop)
                    .gather;
     in.tuning = scene->gatherTuning();
     // THE GATHER'S MEASUREMENT ARMS (GATHER-NOISE-1): each one that is set
@@ -6766,8 +6753,9 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
             baking > 1e-6f ? lighting->mMultiplier / baking : lighting->mMultiplier;
         ++in.cascadeCount;
     };
-    for (const OgreScene::VctCascade &c : scene->mVctCascades)
-        if (c.built) takeVolume(c.lighting, c.voxelizer);
+    std::vector<PhotonComponent::Volume> builtCascades;
+    scene->photon().volumes(builtCascades);
+    for (const PhotonComponent::Volume &c : builtCascades) takeVolume(c.lighting, c.voxelizer);
     {
         // THE ONE ENVIRONMENT (PHOTON-ENV-1; OgreScene::rayEnvironment).
         const OgreScene::RayEnvironment rayEnv = scene->rayEnvironment();
@@ -6780,7 +6768,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     // same rule (recordReflect): the scene's built cache, or nothing (the
     // stand-ins are bound and every hit reads the voxels).
     {
-        const SurfaceCache *cache = scene->mSurfaceCache.get();
+        const SurfaceCache *cache = scene->photon().surfaceCache();
         Ogre::UavBufferPacked *table = cache ? cache->cardBuffer() : nullptr;
         Ogre::UavBufferPacked *instances = cache ? cache->instanceBuffer() : nullptr;
         Ogre::TextureGpu *depthLayer = cache ? cache->depthLayer() : nullptr;
@@ -7140,7 +7128,7 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     const auto cpuStart = Clock::now();
     SunContactView &sv = mSunContacts[key];
     sv.scene = scene;
-    sv.sceneMgr = scene->mSceneMgr;
+    sv.sceneMgr = scene->sceneManager();
     sv.ran = false;
     sv.rays = 0;
     /// EVERY EARLY RETURN IS A LEGITIMATE "not this frame": nothing is
@@ -8238,8 +8226,8 @@ void RayQueryTier::beginHitDecode(const ReflectPassListener *key, OgreView *view
     src.hitMode = true;
     src.hitBuf = hv.buf;
     atom->setDecodeSource(src);
-    atom->showSceneDecodes(scene->mSceneMgr, true);
-    hv.armedSm = scene->mSceneMgr;
+    atom->showSceneDecodes(scene->sceneManager(), true);
+    hv.armedSm = scene->sceneManager();
 }
 
 void RayQueryTier::endHitDecode(const ReflectPassListener *key) {
@@ -8309,7 +8297,7 @@ void RayQueryTier::hitStatsInto(const OgreScene *scene, RayQueryStatus &st) cons
         st.hitDropped += kv.second.dropped;
         st.hitCapacity = std::max<unsigned long long>(st.hitCapacity, kv.second.capacity);
     }
-    if (atom && scene) st.hitDecodeDraws = int(atom->sceneDecodeCount(scene->mSceneMgr));
+    if (atom && scene) st.hitDecodeDraws = int(atom->sceneDecodeCount(scene->sceneManager()));
 }
 
 bool RayQueryTier::makeCompositePipeline(std::string &err) {
