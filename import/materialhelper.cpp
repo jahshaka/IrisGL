@@ -1122,6 +1122,20 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
         if (faceCulling == FaceCullingImport::File &&
             materialName.endsWith(QStringLiteral(".DoubleSided")))
             mat.twoSided = true;
+        // A BOUND MAP IS THE VALUE (BISTRO-FIXES-2 stage 1). In the file's own semantics
+        // (FBX/Maya, OBJ) a texture connected to a channel REPLACES the channel's scalar,
+        // exactly as the diffuse map replaces the colour above; the renderer multiplies
+        // factor x map (glTF's rule, kept for glTF), so a scalar left beside a bound map
+        // is applied twice. The Bistro's case: assimp derives roughness 0.5528 from the
+        // Phong ShininessExponent 20 (1 - sqrt(20)/10, FBXConverter) and the prepared
+        // `_Specular_roughness.png` binds as the map, so a 0.737 map rendered at 0.41 —
+        // over-glossy foliage reflecting the sky at grazing as white rims (the shadow
+        // audit, 2026-10-14). The factor is 1 under a map that is really there; with no
+        // map the file's scalar stands. The same rule for metallic.
+        if (mat.workflow == 0) {
+            if (QFileInfo(mat.roughnessTexture).isFile()) mat.roughnessFactor = 1.0f;
+            if (QFileInfo(mat.metallicTexture).isFile()) mat.metallicFactor = 1.0f;
+        }
     }
 }
 
