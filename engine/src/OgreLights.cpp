@@ -409,12 +409,12 @@ void OgreScene::monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
     // (`cards.capture`, `cards.resident`) have a pass to sit beside. Null in
     // every scene whose `GiParams::cards` row is off, which is every scene
     // until phase 4 gives a card a reader.
-    if (Ogre::CompositorWorkspace *ws = surfaceCacheWorkspace(mSurfaceCache.get())) {
+    if (Ogre::CompositorWorkspace *ws = surfaceCacheWorkspace(mPhoton.mSurfaceCache.get())) {
         out.push_back(ws);
         if (owners) owners->push_back("cards");
     }
     // ...and photon_update's, right after it (photon/PhotonComponent.h).
-    if (Ogre::CompositorWorkspace *ws = photonUpdateWorkspace(mSurfaceCache.get())) {
+    if (Ogre::CompositorWorkspace *ws = photonUpdateWorkspace(mPhoton.mSurfaceCache.get())) {
         out.push_back(ws);
         if (owners) owners->push_back("photon_update");
     }

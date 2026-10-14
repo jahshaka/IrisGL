@@ -4166,7 +4166,7 @@ public:
     bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
                     NodeId onlyNode = 0) override;
     bool dumpCardAtlas(const std::string &prefix, std::string &err) override;
-    const SurfaceCache *surfaceCache() const { return mSurfaceCache.get(); }
+    const SurfaceCache *surfaceCache() const { return mPhoton.mSurfaceCache.get(); }
     /// The compile mode the scene's views ask for (View::setAsyncShaders); its own captures
     /// follow it (ASYNC-SHADERS-1).
     void setAsyncShaders(bool on) { mAsyncShaders = on; }
@@ -4220,7 +4220,6 @@ public:
         return rec == mMeshes.end() ? nullptr : &rec->second.lodBounds;
     }
     unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
-    std::unique_ptr<SurfaceCache> mSurfaceCache;
     bool mAsyncShaders = false;
     /// IBL convolutions deferred because a permutation was building (ASYNC-SHADERS-1).
     unsigned long long mIblDeferrals = 0;
@@ -5789,90 +5788,8 @@ private:
         bool  lod = false;          ///< walk the level rule
         const std::vector<uint32_t> *budgetMask = nullptr;   ///< the budget's pick, or none
     };
-    struct VctCascade {
-        Ogre::PhotonVoxelizer *voxelizer = nullptr;   ///< owned, except [0]
-        Ogre::PhotonVoxelLighting  *lighting  = nullptr;   ///< owned, except [0]
-        float        halfSize   = 0.0f;
-        Ogre::uint32 resolution = 64u;
-        float        stepCells  = 4.0f;
-        /// The lattice cell this cascade is centred on (integer coordinates in
-        /// units of `step`), and the world centre that resolves to.
-        long long    latticeX = 0, latticeY = 0, latticeZ = 0;
-        Ogre::Vector3 centre = Ogre::Vector3::ZERO;
-        bool         built   = false;
-        /// THIS CASCADE'S FEED (ATOM P4b): the records a gather writes on the
-        /// device and this cascade's voxeliser reads, the ranges, and the readout
-        /// of what it voxelised. ONE PER CASCADE so a rebuild can never overwrite
-        /// records another cascade's recorded dispatches are about to read. Owned
-        /// by pointer so the vector of cascades can move without copying buffers.
-        /// `itemsAttached`, `itemsStale` and `attachedItems` are GONE: nothing is
-        /// attached any more (the gather re-reads every predicate from the GPU
-        /// scene on every rebuild), so there is no set to hold, stale or compare.
-        std::unique_ptr<detail::VoxelFeed> feed;
-        /// WHAT THIS CASCADE VOXELISED - items, attach set, levels, triangles - is
-        /// no longer a CPU member: it is the feed's READOUT, counted on the device
-        /// as the records were written and read by giStatus (`VoxelFeed::reading`).
-        /// This cascade is BEHIND the camera and owes a rebuild — a flag, not a
-        /// queue: a rebuild always happens at the CURRENT camera, so owing two
-        /// of them is the same as owing one.
-        int          pending = 0;
-        /// WHY it is pending — the reason the monitor row and the event carry.
-        /// `Camera` for an ordinary scroll (E0's B12/D5), the edit's own reason
-        /// when the dirty path marked it (G1), so a capture can separate the
-        /// cost of walking around a scene from the cost of changing it.
-        GiStaleReason pendingReason = GiStaleReason::Camera;
-        /// This cascade's queued rebuild came from the JUMP guard, not from an
-        /// ordinary scroll — i.e. nothing of its old volume was reusable.
-        /// Cleared when the rebuild is serviced, and counted there, so the
-        /// counter is one per cascade per teleport rather than one per frame
-        /// the camera spends far away.
-        bool         jumped  = false;
-        /// Consecutive failed rebuilds. One retry on the next frame, then the
-        /// cascade stands down and waits for the camera to move again (round-2
-        /// review F3) — a cascade that cannot build must not spend the frame's
-        /// whole GI budget for ever and starve the ones that still can.
-        unsigned     failures = 0;
-        unsigned long long rebuilds = 0;
-        /// THIS CASCADE HAS BEEN INJECTED SINCE THE LAST IN-MOTION LIGHT TICK
-        /// (DRAG-1, REFLECT F2). `rebuildCascade` ends with a full-count
-        /// `PhotonVoxelLighting::update`, so a cascade the scheduler rebuilt this frame
-        /// already holds the answer the tick would compute — re-computing it is
-        /// duplicate work, and computing a DIFFERENT one (which is what the
-        /// zero-bounce moving tick did) is the pulse. Set by every rebuild,
-        /// cleared by the tick that skipped on it.
-        bool         injectedSinceTick = false;
-        /// ...AND THE LIGHT STATE IT WAS INJECTED AT (DRAG-1 round 2, F5). The
-        /// latch above says "a rebuild already computed what the tick would
-        /// compute", and that is only true while nothing the INJECTION reads has
-        /// changed since. A lamp that moved or was re-parameterised between the
-        /// rebuild and the tick makes the rebuild's answer stale, and skipping
-        /// on the latch alone would leave that cascade holding the old light
-        /// until its next rebuild — which, for an outer cascade deferred behind
-        /// cascade 0, is the whole drag. The tick skips only when this still
-        /// equals the scene's current light-write serial.
-        unsigned long long injectedAtLightSerial = 0;
-        /// THE ONE-WRITER LATCH (PHOTON-WRITER-1): the writer frame
-        /// (`giWriterFrame()`) this cascade was last injected in. `injectCascade`
-        /// refuses a second injection of one cascade inside one frame. The two
-        /// fields above STAY beside it because they say something a per-frame
-        /// latch cannot: "a rebuild has injected this cascade since the last
-        /// MOVING TICK", and the ticks run every few frames, so that fact spans
-        /// frames.
-        unsigned long long injectedFrame = ~0ull;
-        float        lastCpuMs = -1.0f;
-        /// The camera position this cascade was last BUILT for. The scroll test
-        /// quantises BOTH on an absolute world lattice of `step * (1 -
-        /// kStepHysteresis)` metres and requires the camera to be the band past
-        /// the plane it left (OgreGi.cpp) — the pin's `consistentCascadeSteps`
-        /// reading with the hysteresis added, which is what keeps two cascades
-        /// from stepping on different frames for the same metre AND what stops a
-        /// head swaying on a plane from thrashing the chain. Because the lattice
-        /// is absolute, `step()` is the SUPREMUM of the travel between rebuilds,
-        /// not the distance between them.
-        Ogre::Vector3 builtCam = Ogre::Vector3::ZERO;
-        float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
-        float cell() const { return halfSize * 2.0f / float(resolution); }
-    };
+    /// One voxel cascade of the chain: Photon's type (photon/PhotonComponent.h).
+    using VctCascade = PhotonComponent::VctCascade;
     /// Builds the whole chain around `camPos` from scratch. Returns the item
     /// count (0 = nothing built).
     size_t buildCascadeArm(const Ogre::Vector3 &camPos);
@@ -6375,9 +6292,6 @@ private:
     // SceneManager (probe workspaces and the GI camera live in it).
     Ogre::PhotonVoxelizer               *mVctVoxelizer = nullptr;
     Ogre::PhotonVoxelLighting                *mVctLighting  = nullptr;
-    /// THE PHOTON CASCADE CHAIN, innermost first. Empty when no arm is built.
-    /// [0] mirrors mVctVoxelizer/mVctLighting (NOT owned through here).
-    std::vector<VctCascade> mVctCascades;
     /// The scheduler's counters, reported through GiStatus. CUMULATIVE over the
     /// scene's life, which is what Types.h has always said they are: a rebuild
     /// of the arm (a settle, an edit, an atlas change) must not reset them, or
@@ -6501,10 +6415,6 @@ private:
     int          mIfdFollowOwed = 0;
     GiStaleReason mIfdFollowReason = GiStaleReason::Camera;
     bool mRefractionsActive = false;   // see setRefractionsActive
-    /// Is the view that DRIVES GI a stereo (headset) one? It picks the tier
-    /// table's VR column (GiViewProfile, V1-RIG item 4) and is written by the
-    /// once-a-frame driver hook.
-    bool mGiDriverStereo = false;
     /// The chain's SHAPE (its cascade count and steps) no longer matches the
     /// table it should be built from — the driver's profile changed. The dirty
     /// BOX path cannot express it, so the flush builds the chain again.
@@ -6593,7 +6503,6 @@ private:
     /// not have seen any of them - GI was off, or the store is new).
     void queueAllGiMaterials();
 
-    Ogre::PhotonVoxelMaterial *mVctMaterialStore = nullptr;
     /// Slots whose material word is "none" because the store had not converted their
     /// datablock when the scan composed them (gpuMaterialWordFor). Mutable because the
     /// composer is const; drained by the next GI build, inside its bracket.
@@ -6650,8 +6559,7 @@ public:
     /// PHOTON (photon/PhotonComponent.h): the GI's products, read through its interface.
     const PhotonComponent &photon() const { return mPhoton; }
 private:
-    PhotonComponent::Inputs photonInputs();
-    PhotonComponent mPhoton{ photonInputs() };
+    PhotonComponent mPhoton;
     /// ATOM (atom/AtomComponent.h), on the substrate it reads; its one input from the scene
     /// (the adapter until the frame's record): the datablock a slot's Item wears.
     const Ogre::HlmsDatablock *atomSlotDatablock(uint32_t slot) const;

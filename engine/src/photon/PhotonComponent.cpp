@@ -19,21 +19,13 @@ void PhotonComponent::registerPasses(AtomPassProvider *provider) {
 
 void PhotonComponent::volumes(std::vector<Volume> &out) const {
     out.clear();
-    mIn.builtVolumes(out);
+    for (const VctCascade &c : mVctCascades)
+        if (c.built) out.push_back(Volume{ c.lighting, c.voxelizer });
 }
 
-/// THE ADAPTER (until U0 merges): the component's inputs are today's scene state.
-PhotonComponent::Inputs OgreScene::photonInputs() {
-    PhotonComponent::Inputs in;
-    in.builtVolumes = [this](std::vector<PhotonComponent::Volume> &out) {
-        for (const VctCascade &c : mVctCascades)
-            if (c.built) out.push_back(PhotonComponent::Volume{ c.lighting, c.voxelizer });
-    };
-    in.surfaceCache = [this]() { return mSurfaceCache.get(); };
-    in.materials = [this]() { return mVctMaterialStore; };
-    in.driverStereo = [this]() { return mGiDriverStereo; };
-    return in;
-}
+PhotonComponent::PhotonComponent() = default;
+// Out of line: the cache's and the feeds' types are complete here.
+PhotonComponent::~PhotonComponent() = default;
 
 }  // namespace detail
 }  // namespace engine

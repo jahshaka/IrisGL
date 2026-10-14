@@ -126,8 +126,8 @@ void OgreScene::applyVctEnvironment() {
     applyCascadeEnvironment(mVctLighting);
     // EVERY CASCADE, not just the head (PHOTON_SPEC P0 rule 4): each cascade's
     // bounce job reads its own copy. Cascade 0 is mVctLighting and was just done.
-    for (size_t i = 1; i < mVctCascades.size(); ++i)
-        applyCascadeEnvironment(mVctCascades[i].lighting);
+    for (size_t i = 1; i < mPhoton.mVctCascades.size(); ++i)
+        applyCascadeEnvironment(mPhoton.mVctCascades[i].lighting);
 }
 
 void OgreScene::applyCascadeEnvironment(Ogre::PhotonVoxelLighting *lighting) {
@@ -1721,7 +1721,7 @@ void OgreScene::destroy() {
         // datablocks, so a late teardown took `~HlmsDatablock`'s linked-
         // renderable assert) and the regression case that proved it — the exit
         // code after a passing suite — still guards the order.
-        mSurfaceCache.reset();
+        mPhoton.mSurfaceCache.reset();
         // THE RAY TIER'S STRUCTURES FOR THIS SCENE, FIRST. They are keyed by
         // this object's ADDRESS and they hold MeshPtrs, so leaving them behind
         // would pin this scene's geometry for the process's life and let the
@@ -2171,19 +2171,19 @@ void OgreScene::updateSurfaceCache() {
     // Off refuses it; on (the default) resolves against the rays.
     const bool want = mGi.cards && rayReflectionsWanted();
     if (!want) {
-        if (mSurfaceCache) mSurfaceCache.reset();
+        if (mPhoton.mSurfaceCache) mPhoton.mSurfaceCache.reset();
         return;
     }
     if (!mSceneMgr) return;
-    if (!mSurfaceCache) {
-        mSurfaceCache.reset(new SurfaceCache());
+    if (!mPhoton.mSurfaceCache) {
+        mPhoton.mSurfaceCache.reset(new SurfaceCache());
         std::string err;
-        if (!mSurfaceCache->build(mSceneMgr, err)) {
+        if (!mPhoton.mSurfaceCache->build(mSceneMgr, err)) {
             // A cache that cannot be built is a reported failure and not a
             // crash: the row stays on, the cache stays null, and the status
             // says `built` false.
             if (!err.empty()) mError = err;
-            mSurfaceCache.reset();
+            mPhoton.mSurfaceCache.reset();
             return;
         }
         // THE SUN ON THE CARDS (PHOTON-CARDS-4; ATOM-S3-CARDCAP): the scene's
@@ -2193,9 +2193,9 @@ void OgreScene::updateSurfaceCache() {
         hooks.frame = [this](CardMoverFrame &f) { return cardMoverFrame(f); };
         hooks.trace = [this](const CardMoverTrace &t) { return traceCardMovers(t); };
         hooks.readTimes = [this](float &a, float &b) { cardMoverTimes(a, b); };
-        mSurfaceCache->setMoverHooks(hooks);
+        mPhoton.mSurfaceCache->setMoverHooks(hooks);
     }
-    mSurfaceCache->setAsyncShaders(mAsyncShaders);
+    mPhoton.mSurfaceCache->setAsyncShaders(mAsyncShaders);
     // A CAMERA-RELATIVE CACHE NEEDS A CAMERA, exactly as the cascade chain
     // does, and waits for one the same way: `mGiCamPos` is the authoritative
     // view's last tracked position and is the ORIGIN until a frame has tracked
@@ -2204,7 +2204,7 @@ void OgreScene::updateSurfaceCache() {
     if (!mGiCamPosKnown) return;
 
     const GiQualityFacts facts =
-        giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop);
+        giQualityFacts(mGi.quality, mPhoton.mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop);
     CardSceneView view;
     view.sceneMgr = mSceneMgr;
     view.viewerPos = mGiCamPos;
@@ -2299,7 +2299,7 @@ void OgreScene::updateSurfaceCache() {
                 foldI((unsigned long long)(long long)std::lround(double(mLastAmbientSh[k]) * 1e4));
         }
         foldI((unsigned long long)(uintptr_t)mVctLighting);
-        for (const VctCascade &c : mVctCascades) {
+        for (const VctCascade &c : mPhoton.mVctCascades) {
             foldI((unsigned long long)(uintptr_t)c.lighting);
             foldI(c.rebuilds);
             foldI((unsigned long long)c.latticeX);
@@ -2344,7 +2344,7 @@ void OgreScene::updateSurfaceCache() {
         view.candidates.push_back(c);
     }
     ++mCardFeed.serial;
-    mSurfaceCache->update(view);
+    mPhoton.mSurfaceCache->update(view);
 }
 
 /// THE CANDIDATE PREDICATE, and each clause is the statement the voxel side makes:
@@ -2472,20 +2472,20 @@ void OgreScene::CardFeed::query(const Ogre::Vector3 &centre, float radius, std::
 
 bool OgreScene::readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) {
     out = CardSample();
-    if (!mSurfaceCache) return false;
-    return mSurfaceCache->readTexel(node, card, u, v, out);
+    if (!mPhoton.mSurfaceCache) return false;
+    return mPhoton.mSurfaceCache->readTexel(node, card, u, v, out);
 }
 
 bool OgreScene::readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
                            NodeId onlyNode) {
     out = CardSample();
-    if (!mSurfaceCache) return false;
-    return mSurfaceCache->readAt(toOgre(world), toOgre(normal), out, onlyNode);
+    if (!mPhoton.mSurfaceCache) return false;
+    return mPhoton.mSurfaceCache->readAt(toOgre(world), toOgre(normal), out, onlyNode);
 }
 
 bool OgreScene::dumpCardAtlas(const std::string &prefix, std::string &err) {
-    if (!mSurfaceCache) { err = "the surface cache is not built"; return false; }
-    return mSurfaceCache->dump(prefix, err);
+    if (!mPhoton.mSurfaceCache) { err = "the surface cache is not built"; return false; }
+    return mPhoton.mSurfaceCache->dump(prefix, err);
 }
 
 }}}  // namespace jahshaka::engine::detail

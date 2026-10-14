@@ -939,11 +939,11 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n, bool atomDraw) const {
 /// engine builds has one submesh (buildMeshV2), and the geometry rows the gather
 /// reads are submesh 0's too.
 uint32_t OgreScene::gpuMaterialWordFor(const Node &n, Ogre::uint32 flags) const {
-    if (!n.item || !n.item->getNumSubItems() || !mVctMaterialStore)
+    if (!n.item || !n.item->getNumSubItems() || !mPhoton.mVctMaterialStore)
         return detail::GpuScene::kNoMaterialWord;
     const Ogre::HlmsDatablock *db = n.item->getSubItem(0)->getDatablock();
     if (!db) return detail::GpuScene::kNoMaterialWord;
-    const Ogre::PhotonVoxelMaterial::DatablockConversionResult *r = mVctMaterialStore->lookupDatablock(db);
+    const Ogre::PhotonVoxelMaterial::DatablockConversionResult *r = mPhoton.mVctMaterialStore->lookupDatablock(db);
     if (!r) {
         // Only a GI-visible item is worth converting: nothing else is ever gathered.
         if ((flags & detail::kGpuGiVisible) && n.itemSlot != size_t(-1))

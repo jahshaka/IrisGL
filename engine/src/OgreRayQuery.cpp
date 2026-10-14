@@ -8699,7 +8699,7 @@ bool OgreScene::probeGatherWanted() const {
     default:
         if (mGi.mode == GiMode::Off) return false;
         if (!giQualityFacts(mGi.quality,
-                            mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
+                            mPhoton.mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
                  .gather.on)
             return false;
         break;
@@ -8721,9 +8721,9 @@ unsigned long long OgreScene::gatherRestKey() const {
     };
     fold(giLightingSerial());
     fold(shadowEpoch() + rayLevelRefits());
-    if (mSurfaceCache) {
+    if (mPhoton.mSurfaceCache) {
         CardCacheStatus cs;
-        mSurfaceCache->fillStatus(cs);
+        mPhoton.mSurfaceCache->fillStatus(cs);
         fold(cs.captures);
         fold(cs.stillTraces);
         fold(cs.relights);
@@ -8747,9 +8747,9 @@ unsigned long long OgreScene::gatherRestartKey() const {
     };
     fold(giLightingSerial());
     fold(mCloudGiSerial);
-    if (mSurfaceCache) {
+    if (mPhoton.mSurfaceCache) {
         CardCacheStatus cs;
-        mSurfaceCache->fillStatus(cs);
+        mPhoton.mSurfaceCache->fillStatus(cs);
         fold(cs.invalidMaterial);
         fold(cs.invalidSun);
     }

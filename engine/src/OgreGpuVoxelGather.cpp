@@ -207,7 +207,7 @@ bool OgreScene::runVoxelGather(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *v
     // replaces the ticket, and a reading nobody took would be lost.
     feed.harvest();
 
-    Ogre::PhotonVoxelMaterial *store = mVctMaterialStore;
+    Ogre::PhotonVoxelMaterial *store = mPhoton.mVctMaterialStore;
     const uint32_t numBuckets = store ? uint32_t(store->getNumBuckets()) : 0u;
     const uint32_t numOctants = uint32_t(std::min<size_t>(voxelizer->getNumOctants(), 8u));
     Ogre::UavBufferPacked *partAabbs = mGpuScene.partitionAabbBuffer();

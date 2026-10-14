@@ -297,7 +297,7 @@ std::string OgreScene::photonViewRefusal(PhotonView view) const {
         if (stereo) return stereoRefusal("probe");
         break;
     case PhotonView::Cards:
-        if (!mSurfaceCache || !mSurfaceCache->built())
+        if (!mPhoton.mSurfaceCache || !mPhoton.mSurfaceCache->built())
             return "this scene holds no surface cache (the cards row is off: it follows the reflection trace)";
         break;
     case PhotonView::ScreenProbes:
@@ -319,7 +319,7 @@ std::string OgreScene::photonViewRefusal(PhotonView view) const {
 bool OgreScene::photonVoxelLive() const {
     if (!mPhotonVoxelLighting) return false;
     bool live = mPhotonVoxelLighting == mVctLighting;
-    for (const VctCascade &c : mVctCascades) live = live || c.lighting == mPhotonVoxelLighting;
+    for (const VctCascade &c : mPhoton.mVctCascades) live = live || c.lighting == mPhotonVoxelLighting;
     return live && mPhotonVoxelLighting->getDebugVisualizationMode();
 }
 
@@ -406,10 +406,10 @@ void OgreScene::syncPhotonView() {
     {
         Ogre::PhotonVoxelLighting *want = nullptr;
         if (view == PhotonView::Voxels) {
-            if (mPhotonVoxelCascade >= 0 && !mVctCascades.empty()) {
+            if (mPhotonVoxelCascade >= 0 && !mPhoton.mVctCascades.empty()) {
                 // THE CASCADE ASKED FOR, clamped to the chain.
-                const size_t ci = std::min(size_t(mPhotonVoxelCascade), mVctCascades.size() - 1u);
-                if (mVctCascades[ci].built) want = mVctCascades[ci].lighting;
+                const size_t ci = std::min(size_t(mPhotonVoxelCascade), mPhoton.mVctCascades.size() - 1u);
+                if (mPhoton.mVctCascades[ci].built) want = mPhoton.mVctCascades[ci].lighting;
             } else {
                 // THE FINEST CASCADE THAT HOLDS THE SCENE'S LIT CONTENT (the fitted GI
                 // volume, giStatus().boundsMin/Max) — not the finest that holds the
@@ -421,7 +421,7 @@ void OgreScene::syncPhotonView() {
                 const bool haveLit = h.squaredLength() > 0.0f && std::isfinite(h.x) &&
                                      std::isfinite(h.y) && std::isfinite(h.z);
                 const Ogre::Vector3 lo = mGiLitVolume.getMinimum(), hi = mGiLitVolume.getMaximum();
-                for (const VctCascade &c : mVctCascades) {
+                for (const VctCascade &c : mPhoton.mVctCascades) {
                     if (!c.lighting || !c.built) continue;
                     want = c.lighting;   // the outermost built one, if none holds it
                     if (!haveLit) break;
@@ -476,15 +476,15 @@ void OgreScene::syncPhotonView() {
 
     // ---- CARDS: the cache's table as quads, re-uploaded only when the table moves
     // (SurfaceCache::photonGeneration) or the age ramp's clock ticks.
-    if (view != PhotonView::Cards || !mSurfaceCache || !mSurfaceCache->built()) {
+    if (view != PhotonView::Cards || !mPhoton.mSurfaceCache || !mPhoton.mSurfaceCache->built()) {
         if (mPhotonCards) photonCardsOff();
         return;
     }
-    const unsigned long long gen = mSurfaceCache->photonGeneration(), frame = mSurfaceCache->frame();
+    const unsigned long long gen = mPhoton.mSurfaceCache->photonGeneration(), frame = mPhoton.mSurfaceCache->frame();
     if (mPhotonCards && gen == mPhotonCardGeneration && frame - mPhotonCardFrame < kPhotonCardAgeFrames)
         return;
     std::vector<PhotonCardQuad> quads;
-    mSurfaceCache->photonQuads(quads);
+    mPhoton.mSurfaceCache->photonQuads(quads);
     size_t held = 0u;
     for (const PhotonCardQuad &q : quads) held += q.held ? 1u : 0u;
     const size_t outlined = quads.size() - held;
