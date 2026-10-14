@@ -113,12 +113,13 @@ bool findMeshNodeChain(aiNode *node, unsigned meshIndex, QVector<aiNode *> &chai
 /// FlipWindingOrderProcess). The bitangents are negated with it: handedness is
 /// part of the tangent FRAME, and the inverse transpose does not carry it.
 ///
-/// THE WHOLE CHAIN root..mesh-node is zeroed, not just the mesh node. In a
-/// one-mesh scene that is the only geometry, but a file whose chain also
-/// carries a CAMERA or a LIGHT node would have those moved by it. We import
-/// neither from a model file (every consumer builds a MeshNode and nothing
-/// else), so nothing observes it today — recorded because a future importer
-/// that did read them would inherit a silent bug.
+/// THE WHOLE CHAIN root..mesh-node is zeroed, not just the mesh node. The file's
+/// lights and cameras ARE imported now (scenelights.cpp adopts each under its host
+/// node), but only where the fragment HAS host nodes: a one-mesh, boneless file is
+/// exactly the shortcut above — one MeshNode, no children — so its lights and
+/// cameras find no host and are not adopted, and the zeroing moves nothing anyone
+/// reads. (A one-mesh file's own lights are therefore dropped: a known gap of the
+/// shortcut, not of this fold.)
 void foldSingleMeshTransform(const aiScene *scene)
 {
     if (!scene || scene->mNumMeshes != 1 || !scene->mRootNode) return;

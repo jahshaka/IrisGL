@@ -890,17 +890,30 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
 
     resolveTex(getAiMaterialTexture(aiMat, aiTextureType_EMISSIVE), mat.emissiveTexture);
 
-    QString mrName = getAiMaterialTexture(aiMat, aiTextureType_METALNESS);
-    if (mrName.isEmpty()) mrName = getAiMaterialTexture(aiMat, aiTextureType_DIFFUSE_ROUGHNESS);
-    QString mrPath;
+    // METALNESS and DIFFUSE_ROUGHNESS: ONE packed image or TWO maps of their own. glTF's
+    // metallicRoughnessTexture is packed (metallic = BLUE, roughness = GREEN), and
+    // assimp binds that one texture to BOTH types (glTF2Importer.cpp :264-265) — the
+    // only source that does. OBJ's `map_Pm` / `map_Pr` (ObjFileImporter.cpp :737/:745)
+    // and the Stingray / 3ds Max PBR FBX materials (FBXConverter.cpp :2157-2200) bind
+    // separate single-channel maps: each binds as itself, never split as a pack (which
+    // made a grey roughness map's blue channel the METALLIC map).
+    const QString metalName = getAiMaterialTexture(aiMat, aiTextureType_METALNESS);
+    const QString roughName = getAiMaterialTexture(aiMat, aiTextureType_DIFFUSE_ROUGHNESS);
+    const bool packedMR = !metalName.isEmpty() && metalName == roughName;
+    const QString mrName = packedMR ? metalName : QString();
+    QString mrPath, metalPath, roughPath;
     resolveTex(mrName, mrPath);
+    if (!packedMR) {
+        resolveTex(metalName, metalPath);
+        resolveTex(roughName, roughPath);
+    }
 
     // Any glTF material is a PBR material, whichever workflow it was authored
     // in — including one that states no workflow at all, which lands on the
     // dielectric defaults in MeshMaterialData rather than on the legacy
     // Blinn-Phong conversion.
     mat.hasPbr = facts.valid || specGloss || metalRoughBlock ||
-                 !baseTexName.isEmpty() || !mrName.isEmpty();
+                 !baseTexName.isEmpty() || !metalName.isEmpty() || !roughName.isEmpty();
 
     if (specGloss && !metalRoughBlock) {
         // KHR_materials_pbrSpecularGlossiness. The values come from the file
@@ -1013,9 +1026,9 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
         // Split maps land in the extraction target, never beside the packed
         // source (which may live in a read-only import location).
         const QFileInfo mrInfo(mrPath);
-        const QString metalPath = outDir + "/" + mrInfo.completeBaseName() + "_metallic.png";
-        const QString roughPath = outDir + "/" + mrInfo.completeBaseName() + "_roughness.png";
-        if (!QFileInfo::exists(metalPath) || !QFileInfo::exists(roughPath)) {
+        const QString splitMetal = outDir + "/" + mrInfo.completeBaseName() + "_metallic.png";
+        const QString splitRough = outDir + "/" + mrInfo.completeBaseName() + "_roughness.png";
+        if (!QFileInfo::exists(splitMetal) || !QFileInfo::exists(splitRough)) {
             QDir().mkpath(outDir);
             const QImage mr = QImage(mrPath).convertToFormat(QImage::Format_RGBA8888);
             if (!mr.isNull()) {
@@ -1030,13 +1043,16 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
                         r[x] = src[x * 4 + 1];   // green → roughness
                     }
                 }
-                metal.save(metalPath, "PNG");
-                rough.save(roughPath, "PNG");
+                metal.save(splitMetal, "PNG");
+                rough.save(splitRough, "PNG");
             }
         }
-        if (QFileInfo::exists(metalPath)) mat.metallicTexture  = metalPath;
-        if (QFileInfo::exists(roughPath)) mat.roughnessTexture = roughPath;
+        if (QFileInfo::exists(splitMetal)) mat.metallicTexture  = splitMetal;
+        if (QFileInfo::exists(splitRough)) mat.roughnessTexture = splitRough;
     }
+    // Two maps of their own bind as they are.
+    if (QFileInfo(metalPath).isFile()) mat.metallicTexture = metalPath;
+    if (QFileInfo(roughPath).isFile()) mat.roughnessTexture = roughPath;
 
     aiString matName;
     aiMat->Get(AI_MATKEY_NAME, matName);
@@ -1085,6 +1101,10 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
                                               ? mat.normalTexture : mat.hightTexture);
     reportIfMissing("emissive", getAiMaterialTexture(aiMat, aiTextureType_EMISSIVE), mat.emissiveTexture);
     reportIfMissing("metallic/roughness", mrName, mrPath);
+    if (!packedMR) {
+        reportIfMissing("metallic", metalName, metalPath);
+        reportIfMissing("roughness", roughName, roughPath);
+    }
 
     // ---- THE FILE'S OWN COVERAGE AND COLOUR, for every non-glTF source ----------
     // (glTF states all of it in its own block and keeps its own reading above.)
@@ -1132,7 +1152,8 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
         // over-glossy foliage reflecting the sky at grazing as white rims (the shadow
         // audit, 2026-10-14). The factor is 1 under a map that is really there; with no
         // map the file's scalar stands. The same rule for metallic.
-        if (mat.workflow == 0) {
+        // (A packed glTF map is glTF's own, factor x map, even from a .gltf we failed to parse.)
+        if (mat.workflow == 0 && !packedMR) {
             if (QFileInfo(mat.roughnessTexture).isFile()) mat.roughnessFactor = 1.0f;
             if (QFileInfo(mat.metallicTexture).isFile()) mat.metallicFactor = 1.0f;
         }

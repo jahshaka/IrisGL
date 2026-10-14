@@ -240,7 +240,9 @@ namespace
 // v22 (2026-10-14, BISTRO-FIXES-2): A BOUND MAP IS THE VALUE — a non-glTF material
 // with a roughness (metallic) map that is really there bakes roughnessFactor
 // (metallicFactor) 1, never the file's scalar beside it (the renderer multiplies the
-// two: the Bistro's 0.5528 x 0.737 = 0.41). Material bytes change (BAKEKEY-1).
+// two: the Bistro's 0.5528 x 0.737 = 0.41); and separate METALNESS / DIFFUSE_ROUGHNESS
+// maps (OBJ map_Pm / map_Pr, Stingray/Max FBX) bind as themselves — only glTF's one
+// packed image is split. Material bytes change (BAKEKEY-1).
 constexpr int kFormatVersion = 22;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
