@@ -43,6 +43,10 @@ namespace engine {
 class SurfaceCache;
 namespace detail {
 
+class AtomPassProvider;
+/// The ray passes' recorders (OgreRayQuery.cpp: photon_trace, photon_resolve).
+void registerPhotonRayPasses(AtomPassProvider *provider);
+
 
 class PhotonComponent {
 public:
@@ -77,6 +81,9 @@ public:
     static const char *const kUpdatePass;    ///< "photon_update"
     static const char *const kTracePass;     ///< "photon_trace"
     static const char *const kResolvePass;   ///< "photon_resolve"
+    /// Registers the three passes' recorders and gates on the engine's pass provider
+    /// (AtomPassProvider::install calls it: the provider is Ogre's one per manager).
+    static void registerPasses(AtomPassProvider *provider);
 
 private:
     Inputs mIn;

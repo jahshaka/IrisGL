@@ -51,6 +51,7 @@
 // platform without the Vulkan render system the whole file compiles to nothing
 // (JAH_RAY_QUERY, set by CMake — macOS takes that path, because MoltenVK
 // exposes neither extension: SPECS/research/MOLTENVK_RAY_QUERY_2026-09-14.md).
+#include "AtomPass.h"
 #include "EnginePrivate.h"
 #include "SceneLightList.h"
 #include "photon/voxel/PhotonVoxelMaterial.h"
@@ -1222,17 +1223,29 @@ public:
     // chain's HIT LIST by the trace; the chain's "Jahshaka hit decode" pass draws
     // HlmsAtom's decode over the list (one fragment per record); the write-back
     // (rq_hit_composite.comp) scatters the radiance into the reflection's mean and
-    // the gather's atlas. The ray jobs' recording is split around the decode pass.
-    /// In front of the hit decode pass: the list reset, the TRACES (the sun
-    /// contact, the reflection, the gather) appending to it, HlmsAtom armed.
+    // the gather's atlas. THE RAY JOBS ARE TWO COMPOSITOR PASSES OF PHOTON'S
+    // (photon/PhotonComponent.h; OgreChain.cpp places them): photon_trace in front
+    // of the hit decode pass (or, in a chain with none, in front of photon_resolve),
+    // photon_resolve in front of the first pass that shades with the prepass.
+    /// photon_trace: the TRACES (the sun contact, the reflection, the gather), into
+    /// the hit list when `next` — the pass the trace serves — is the hit decode
+    /// pass, with no list bound otherwise (a hit no cache shades then has no sample
+    /// this frame: the write-back's "unshaded" answer).
+    void traceRayJobs(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *next);
+    /// The hit decode pass's own pre-execute: the camera's auto aspect held, then
+    /// HlmsAtom armed over the list the traces filled.
     void beginHitDecode(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
     /// After it: HlmsAtom disarmed, the decode draws hidden, the camera's aspect
     /// handed back.
     void endHitDecode(const ReflectPassListener *key);
-    /// In front of the opaque pass: the write-back, then every job's second half
-    /// (the filters, the SH and integrate, the registrations). A chain that ran no
-    /// decode pass this frame traces here first, with no list bound.
-    void finishRayJobs(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
+    /// The pass a photon pass of `view`'s chain serves (false = nothing to record:
+    /// the tier is closed, a capture workspace, no next pass).
+    bool photonPassTarget(Ogre::CompositorPass *pass, const ReflectPassListener *key, OgreView *view,
+                          Ogre::CompositorPass *&next) const;
+    /// photon_resolve: the write-back, then every job's second half (the filters,
+    /// the SH and integrate, the pass-scoped registrations for `next`, the first
+    /// pass that reads the answer).
+    void resolveRayJobs(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *next);
     /// THE OPAQUE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) shades with the same
     /// registrations as the opaque pass, which is the pass after it — but between the
     /// two, in the opaque pass's early pre-execute, the planar mirrors render their
@@ -7759,9 +7772,9 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
         return;
     }
     // THE HIT DECODE PASS (PHOTON-HIT-SHADE-1, ChainDesc::hitDecode): every ray
-    // job TRACES in front of it — the sun contact, the reflection, the gather —
-    // because a hit no cache can shade is appended to the hit list this pass
-    // shades; HlmsAtom is armed for its length (endHitDecode disarms it).
+    // job TRACED in front of it (photon_trace) — a hit no cache can shade is
+    // appended to the hit list this pass shades; HlmsAtom is armed for its length
+    // (endHitDecode disarms it).
     if (def->mIdentifier == kHitDecodePassIdentifier) {
         mView->mEngine->mRayTier->beginHitDecode(this, mView, pass);
         return;
@@ -7770,8 +7783,7 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     // word for "this pass shades with a prepass' G-buffers and the ssr texture"
     // — the pass every ray job's answer is read by. The write-back, the
     // reflection's filter, the gather's filter/SH/integrate and every job's
-    // pass-scoped registration run in front of it (and, where no decode pass ran
-    // this frame, the traces first).
+    // pass-scoped registration ran in front of it, in photon_resolve.
     if (def->mPrePassMode != Ogre::PrePassUse) return;
     // THE OPAQUE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) is the first such pass of
     // the frame and the opaque pass the last: the jobs finish once, in front of the
@@ -7781,7 +7793,7 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
         mView->mEngine->mRayTier->resumePassBindings(this);
         return;
     }
-    mView->mEngine->mRayTier->finishRayJobs(this, mView, pass);
+    // THE JOBS FINISHED IN photon_resolve, the pass in front of this one.
     mRayJobsFinished = def->mIdentifier == kScreenDecodePassIdentifier;
 }
 
@@ -8182,16 +8194,7 @@ void RayQueryTier::beginHitDecode(const ReflectPassListener *key, OgreView *view
             hv.pinnedCam->setAutoAspectRatio(false);
         }
     }
-    if (!isOpen()) return;
-    hv.decodeFrame = frameNow();
-    HitListBinding hit;
-    prepareHitList(key, view, pass, hit);
-    // THE TRACES, in front of the decode (their records are what it shades). The
-    // sun contact rides the same hook: it reads the camera before this pass
-    // re-aspects anything, and its registration waits for the opaque pass.
-    recordSunContact(key, view, pass);
-    if (view->chainDesc().rayReflect) recordReflect(key, view, pass, hit);
-    recordGather(key, view, pass, hit);
+    if (!isOpen() || hv.decodeFrame != frameNow()) return;   // photon_trace filled no list
     if (!hv.live) return;
     const bool reflected = mReflects.count(key) && mReflects[key].finishPending;
     const bool gathered = mGather && mGather->tracedAtlas(key) != VK_NULL_HANDLE;
@@ -8245,31 +8248,58 @@ void RayQueryTier::endHitDecode(const ReflectPassListener *key) {
     hv.armedSm = nullptr;
 }
 
-void RayQueryTier::finishRayJobs(const ReflectPassListener *key, OgreView *view,
-                                 Ogre::CompositorPass *pass) {
-    if (!isOpen() || !view || !pass) return;
+void RayQueryTier::traceRayJobs(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *next) {
+    if (!isOpen() || !view || !next) return;
+    HitView &hv = mHits[key];
+    const bool decode = next->getType() == Ogre::PASS_SCENE &&
+                        next->getDefinition()->mIdentifier == kHitDecodePassIdentifier;
+    HitListBinding hit;
+    if (decode) {
+        hv.decodeFrame = frameNow();
+        prepareHitList(key, view, next, hit);
+    } else {
+        hitStandIns(hit);
+        hv.live = false;
+    }
+    // THE TRACES (their records are what the decode shades). The sun contact rides
+    // the same pass: it reads the camera before the next pass re-aspects anything,
+    // and its registration waits for photon_resolve.
+    recordSunContact(key, view, next);
+    if (view->chainDesc().rayReflect) recordReflect(key, view, next, hit);
+    recordGather(key, view, next, hit);
+}
+
+void RayQueryTier::resolveRayJobs(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *next) {
+    if (!isOpen() || !view || !next) return;
     // DISARMED WHATEVER HAPPENED: a decode pass that threw never reaches its
     // passPosExecute, and an armed HlmsAtom would decode every later pass of the
     // frame in hit mode (measured once: the capture passes compiled hit-mode
     // shaders against prepass state).
     endHitDecode(key);
     HitView &hv = mHits[key];
-    if (hv.decodeFrame != frameNow()) {
-        // NO DECODE PASS RAN THIS FRAME (a chain without one): the traces run
-        // here, with no list bound — a hit no cache shades then has no sample
-        // this frame (the write-back's "unshaded" answer).
-        HitListBinding none;
-        hitStandIns(none);
-        hv.live = false;
-        recordSunContact(key, view, pass);
-        if (view->chainDesc().rayReflect) recordReflect(key, view, pass, none);
-        recordGather(key, view, pass, none);
-    }
     if (hv.live) recordHitComposite(key);
     hv.live = false;
     finishReflect(key);
     if (mGather) mGather->finish(key);
     finishSunContact(key);
+}
+
+/// THE PASS IT SERVES: the pass after `pass` in its node — false when there is nothing
+/// to record (the tier closed, a capture workspace: it is handed this frame's products
+/// by bindCapturePass, from the listener).
+bool RayQueryTier::photonPassTarget(Ogre::CompositorPass *pass, const ReflectPassListener *key, OgreView *view,
+                                    Ogre::CompositorPass *&next) const {
+    next = nullptr;
+    if (!pass || !key || !view || !isOpen()) return false;
+    const Ogre::CompositorNode *node = pass->getParentNode();
+    if (!node || view->isCaptureWorkspace(node->getWorkspace())) return false;
+    const Ogre::CompositorPassVec &passes = node->_getPasses();
+    for (size_t i = 0; i + 1 < passes.size(); ++i)
+        if (passes[i] == pass) {
+            next = passes[i + 1];
+            break;
+        }
+    return next != nullptr;
 }
 
 void RayQueryTier::forgetHits(const ReflectPassListener *key) {
@@ -8756,6 +8786,56 @@ SunContactStatus OgreScene::sunContactStatus() const {
     return st;
 }
 
+// ---------------------------------------------------------------------------
+// PHOTON'S RAY PASSES (photon/PhotonComponent.h): photon_trace and photon_resolve,
+// recorded by the tier of the view whose chain holds them. The GATE makes a pass on a
+// view that does not trace (no listener: rays off, a capture workspace) NOTHING — the
+// render pass Ogre has open stays open.
+namespace {
+RayQueryTier *tierOfPass(Ogre::CompositorPass *pass, const ReflectPassListener *&key, OgreView *&view,
+                         Ogre::CompositorPass *&next) {
+    key = nullptr;
+    view = nullptr;
+    next = nullptr;
+    const Ogre::CompositorNode *node = pass ? pass->getParentNode() : nullptr;
+    const Ogre::CompositorWorkspace *ws = node ? node->getWorkspace() : nullptr;
+    if (!ws) return nullptr;
+    for (Ogre::CompositorWorkspaceListener *l : ws->getListeners())
+        if (auto *rl = dynamic_cast<ReflectPassListener *>(l)) {
+            if (!rl->mView || !rl->mView->mEngine) return nullptr;
+            RayQueryTier *tier = rl->mView->mEngine->mRayTier;
+            key = rl;
+            view = rl->mView;
+            return tier && tier->photonPassTarget(pass, key, view, next) ? tier : nullptr;
+        }
+    return nullptr;
+}
+}  // namespace
+
+void registerPhotonRayPasses(AtomPassProvider *provider) {
+    if (!provider) return;
+    const auto gate = [](const AtomPassContext &ctx) {
+        const ReflectPassListener *key;
+        OgreView *view;
+        Ogre::CompositorPass *next;
+        return tierOfPass(ctx.pass, key, view, next) != nullptr;
+    };
+    provider->setGate(PhotonComponent::kTracePass, gate);
+    provider->setGate(PhotonComponent::kResolvePass, gate);
+    provider->setRecorder(PhotonComponent::kTracePass, [](AtomPassContext &ctx) {
+        const ReflectPassListener *key;
+        OgreView *view;
+        Ogre::CompositorPass *next;
+        if (RayQueryTier *tier = tierOfPass(ctx.pass, key, view, next)) tier->traceRayJobs(key, view, next);
+    });
+    provider->setRecorder(PhotonComponent::kResolvePass, [](AtomPassContext &ctx) {
+        const ReflectPassListener *key;
+        OgreView *view;
+        Ogre::CompositorPass *next;
+        if (RayQueryTier *tier = tierOfPass(ctx.pass, key, view, next)) tier->resolveRayJobs(key, view, next);
+    });
+}
+
 void OgreEngine::shutdownRayQuery() {
     if (!mRayTier) return;
     for (auto &sc : mScenes)
@@ -8840,6 +8920,7 @@ void OgreEngine::setRayTracing(bool on) { mRayTracingWanted = on; }
 bool OgreEngine::rayQueryAvailable() const { return false; }
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &) {}
 void OgreEngine::shutdownRayQuery() {}
+void registerPhotonRayPasses(AtomPassProvider *) {}
 struct RaySceneStructures {};
 void RaySceneStructuresDelete::operator()(RaySceneStructures *p) const { delete p; }
 RayQueryStatus OgreScene::rayQueryStatus() const { return RayQueryStatus(); }

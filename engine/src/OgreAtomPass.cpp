@@ -1,5 +1,6 @@
 // See AtomPass.h.
 #include "AtomPass.h"
+#include "photon/PhotonComponent.h"
 
 #include <Compositor/OgreCompositorManager2.h>
 #include <Compositor/OgreCompositorNode.h>
@@ -101,6 +102,8 @@ AtomPassProvider *AtomPassProvider::install(Ogre::CompositorManager2 *cm) {
     if (!cm) return nullptr;
     gProvider = &providerObject();
     cm->setCompositorPassProvider(gProvider);
+    // PHOTON'S PASSES are served by the same provider (Ogre holds one per manager).
+    PhotonComponent::registerPasses(gProvider);
     return gProvider;
 }
 

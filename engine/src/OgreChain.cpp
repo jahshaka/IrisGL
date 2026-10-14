@@ -1093,6 +1093,22 @@ void skipSceneHelpers(Ogre::CompositorPassSceneDef *p) {
     p->mVisibilityMask &= ~kSceneHelperBits;
 }
 
+/// A PHOTON PASS (photon/PhotonComponent.h; ENGINE-UPGRADE-2 stage 2): a PASS_CUSTOM of the
+/// engine's provider, in front of the pass it serves and on that pass's target, which it
+/// never draws into (its recorder records compute and copies; the next pass opens the
+/// render pass). Its gate (OgreRayQuery.cpp) makes it nothing at all on a view that does
+/// not trace.
+void addPhotonPass(Ogre::CompositorNodeDef *n, const char *rtv, const char *customId, const char *profilingId) {
+    Ogre::CompositorTargetDef *t = n->addTargetPass(rtv);
+    t->setNumPasses(1);
+    Ogre::CompositorPassDef *p = t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(customId));
+    p->setAllLoadActions(Ogre::LoadAction::Load);
+    p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+    p->mStoreActionDepth = Ogre::StoreAction::Store;
+    p->mStoreActionStencil = Ogre::StoreAction::Store;
+    p->mProfilingId = profilingId;
+}
+
 /// THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1), in front of the scene pass `mainRtv`
 /// serves (the prepass or the opaque pass): the SAME colour attachments over the
 /// MATERIAL DEPTH instead of the scene's, and the render queues of the classifier
@@ -2338,7 +2354,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 
     // ---- THE HIT DECODE (PHOTON-HIT-SHADE-1; ChainDesc::hitDecode) ----------
     // A ray hit the caches cannot shade is a pixel of a SECOND visibility
-    // buffer: the traces (recorded in this pass' pre-execute, OgreRayQuery.cpp)
+    // buffer: the traces (photon_trace, the pass in front of it, OgreRayQuery.cpp)
     // append it to the hit list, and this pass draws HlmsAtom's decode over the
     // list — the render queue that holds nothing but the decode draws, shown for
     // this pass alone — shading each record with PBS's own lighting pieces. The
@@ -2348,6 +2364,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // hit, the sun's term is the record's shadow ray. No LOD update: the target
     // is the list, not a picture (applyLodHysteresis's invariant stays true).
     if (prepass && desc.hitDecode) {
+        addPhotonPass(n, kHitRadiance, PhotonComponent::kTracePass, "Jahshaka photon trace");
         Ogre::CompositorTargetDef *t = n->addTargetPass(kHitRadiance);
         t->setNumPasses(1);
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
@@ -2381,6 +2398,14 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // black by construction at every stage, which is what a letterbox is.
         if (desc.letterbox)
             addLetterboxPrologue(n, desc, sceneTarget, handlesOut, prepass || desc.atomDraw);
+        // PHOTON'S RAY JOBS in front of the first pass that reads their answer (the
+        // screen decode or this one — both shade with the prepass): the traces here
+        // when no hit decode pass took them, then the resolve.
+        if (prepass) {
+            if (!desc.hitDecode)
+                addPhotonPass(n, sceneTarget, PhotonComponent::kTracePass, "Jahshaka photon trace");
+            addPhotonPass(n, sceneTarget, PhotonComponent::kResolvePass, "Jahshaka photon resolve");
+        }
         // THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) in front: it classifies unless
         // the prepass's decode pass already did this frame.
         Ogre::CompositorPassSceneDef *decode =
