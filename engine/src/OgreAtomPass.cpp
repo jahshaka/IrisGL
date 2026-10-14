@@ -156,7 +156,7 @@ Ogre::CompositorPass *AtomPassProvider::addPass(const Ogre::CompositorPassDef *d
                                                 Ogre::SceneManager *sceneManager) {
     const auto *def = dynamic_cast<const AtomPassDef *>(definition);
     if (!def) return nullptr;
-    return OGRE_NEW AtomPass(def, parentNode, sceneManager, rtvDef);
+    return OGRE_NEW AtomPass(def, parentNode, sceneManager, def->mDrawsNothing ? nullptr : rtvDef);
 }
 
 }  // namespace detail

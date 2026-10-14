@@ -526,8 +526,7 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
         t->setNumPasses(1u);
         Ogre::CompositorPassDef *p =
             t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(detail::PhotonComponent::kUpdatePass));
-        p->setAllLoadActions(Ogre::LoadAction::Load);
-        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        static_cast<detail::AtomPassDef *>(p)->mDrawsNothing = true;
         p->mProfilingId = "Jahshaka photon update";
         Ogre::CompositorWorkspaceDef *uwd = cm->addWorkspaceDefinition(mUpdateWsDef);
         uwd->connectExternal(0, mUpdateNodeDef, 0);

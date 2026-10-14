@@ -78,6 +78,7 @@
 #include <random>
 #include <algorithm>
 #include <cmath>
+#include "AtomPass.h"
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"   // kHitDecodeRenderQueue (PHOTON-HIT-SHADE-1)
 
@@ -1094,18 +1095,17 @@ void skipSceneHelpers(Ogre::CompositorPassSceneDef *p) {
 }
 
 /// A PHOTON PASS (photon/PhotonComponent.h; ENGINE-UPGRADE-2 stage 2): a PASS_CUSTOM of the
-/// engine's provider, in front of the pass it serves and on that pass's target, which it
-/// never draws into (its recorder records compute and copies; the next pass opens the
-/// render pass). Its gate (OgreRayQuery.cpp) makes it nothing at all on a view that does
-/// not trace.
+/// engine's provider, in front of the pass it serves, in that pass's target pass — which
+/// only places it: it records compute and copies and takes NO render pass descriptor
+/// (AtomPassDef::mDrawsNothing; a descriptor over the scene RTV's depth, writable, beside
+/// the prepass-reading passes' read-only one, cost the validation layer's
+/// initialLayout-00900 on the depth). Its gate (OgreRayQuery.cpp) makes it nothing at all
+/// on a view that does not trace.
 void addPhotonPass(Ogre::CompositorNodeDef *n, const char *rtv, const char *customId, const char *profilingId) {
     Ogre::CompositorTargetDef *t = n->addTargetPass(rtv);
     t->setNumPasses(1);
     Ogre::CompositorPassDef *p = t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(customId));
-    p->setAllLoadActions(Ogre::LoadAction::Load);
-    p->mStoreActionColour[0] = Ogre::StoreAction::Store;
-    p->mStoreActionDepth = Ogre::StoreAction::Store;
-    p->mStoreActionStencil = Ogre::StoreAction::Store;
+    static_cast<AtomPassDef *>(p)->mDrawsNothing = true;
     p->mProfilingId = profilingId;
 }
 

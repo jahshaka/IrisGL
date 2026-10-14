@@ -73,6 +73,11 @@ public:
     AtomPassDef(Ogre::CompositorTargetDef *parentTargetDef, Ogre::IdString customId)
         : Ogre::CompositorPassDef(Ogre::PASS_CUSTOM, parentTargetDef), mCustomId(customId) {}
     Ogre::IdString mCustomId;
+    /// A pass that records compute and copies only (Photon's: photon/PhotonComponent.h):
+    /// it takes no render pass descriptor for its target pass's RTV, so it never holds
+    /// that RTV's attachments in any layout — its target names WHERE it sits, not what
+    /// it draws into.
+    bool mDrawsNothing = false;
 };
 
 class AtomPass final : public Ogre::CompositorPass {
