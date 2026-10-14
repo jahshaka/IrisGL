@@ -708,11 +708,20 @@ namespace Ogre
         // done once the device finished that frame.
         mVarianceTicket = mVarianceBuffer->readRequest( 0u, 4u, false );
         mVarianceTicketEpoch = mStopEpoch;
+        mVarianceTicketFrame = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::harvestVarianceReadout()
     {
-        if( !mVarianceTicket || !mVarianceTicket->queryIsTransferDone() )
+        // A FIXED LATENCY IN FRAMES, never "when the device happens to finish": the reading drives the early end
+        // and the gather's rest key, and a frame that depended on the GPU's speed would make the picture of a
+        // given frame differ from run to run (the selftest's mover pose did: two hashes from one tip). Taken
+        // exactly when every frame in flight since the request has been waited on - the transfer is done by
+        // then (Ogre fences the frame before reusing its dynamic buffers), so the map never stalls.
+        if( !mVarianceTicket )
+            return;
+        VaoManager *vaoManager = mRoot->getRenderSystem()->getVaoManager();
+        if( vaoManager->getFrameCount() - mVarianceTicketFrame <= uint32( vaoManager->getDynamicBufferMultiplier() ) )
             return;
         const uint32 *w = static_cast<const uint32 *>( mVarianceTicket->map() );
         const uint32 stops = w[0], unstops = w[1], integrations = w[2];

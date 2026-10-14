@@ -282,6 +282,7 @@ namespace Ogre
         UavBufferPacked *mVarianceBuffer = nullptr;
         AsyncTicketPtr   mVarianceTicket;
         uint32           mVarianceTicketEpoch = 0u;
+        uint32           mVarianceTicketFrame = 0u;   ///< the VaoManager frame it was asked for on
         uint32           mStopEpoch = 0u;
         uint32           mStopMinSamples = 0u;
         float            mStopPrecision = 0.0f;
