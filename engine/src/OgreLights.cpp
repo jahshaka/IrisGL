@@ -396,8 +396,8 @@ void OgreScene::shadowWorkspaces(ShadowNodeKind kind,
         for (size_t i = 0; i < mPlanar->getNumActiveActorSlots(); ++i)
             if (Ogre::CompositorWorkspace *ws = mPlanar->getActiveActorWorkspace(i)) out.push_back(ws);
     } else if (kind == ShadowNodeKind::Probe) {
-        if (!mPhoton.mPcc || !mPhoton.mPccShadowed) return;
-        for (const Ogre::CubemapProbe *p : mPhoton.mPcc->getProbes())
+        if (!mPhoton.pcc() || !mPhoton.pccShadowed()) return;
+        for (const Ogre::CubemapProbe *p : mPhoton.pcc()->getProbes())
             if (Ogre::CompositorWorkspace *ws = p->getWorkspace()) out.push_back(ws);
     }
 }
@@ -409,12 +409,12 @@ void OgreScene::monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
     // (`cards.capture`, `cards.resident`) have a pass to sit beside. Null in
     // every scene whose `GiParams::cards` row is off, which is every scene
     // until phase 4 gives a card a reader.
-    if (Ogre::CompositorWorkspace *ws = surfaceCacheWorkspace(mPhoton.mSurfaceCache.get())) {
+    if (Ogre::CompositorWorkspace *ws = surfaceCacheWorkspace(mPhoton.surfaceCache())) {
         out.push_back(ws);
         if (owners) owners->push_back("cards");
     }
     // ...and photon_update's, right after it (photon/PhotonComponent.h).
-    if (Ogre::CompositorWorkspace *ws = photonUpdateWorkspace(mPhoton.mSurfaceCache.get())) {
+    if (Ogre::CompositorWorkspace *ws = photonUpdateWorkspace(mPhoton.surfaceCache())) {
         out.push_back(ws);
         if (owners) owners->push_back("photon_update");
     }
@@ -427,8 +427,8 @@ void OgreScene::monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
                 if (owners) owners->push_back("planar:" + std::to_string(i));
             }
     }
-    if (mPhoton.mPcc) {
-        const Ogre::CubemapProbeVec &probes = mPhoton.mPcc->getProbes();
+    if (mPhoton.pcc()) {
+        const Ogre::CubemapProbeVec &probes = mPhoton.pcc()->getProbes();
         for (size_t i = 0; i < probes.size(); ++i)
             if (Ogre::CompositorWorkspace *ws = probes[i]->getWorkspace()) {
                 out.push_back(ws);
@@ -438,8 +438,8 @@ void OgreScene::monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
 }
 
 void OgreScene::collectProbeInfo(std::vector<ProbeInfo> &out) const {
-    if (!mPhoton.mPcc) return;
-    const Ogre::CubemapProbeVec &probes = mPhoton.mPcc->getProbes();
+    if (!mPhoton.pcc()) return;
+    const Ogre::CubemapProbeVec &probes = mPhoton.pcc()->getProbes();
     for (size_t i = 0; i < probes.size(); ++i) {
         const Ogre::CubemapProbe *p = probes[i];
         if (!p) continue;

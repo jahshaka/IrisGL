@@ -263,15 +263,15 @@ void OgreView::syncPhotonView() {
 // ---------------------------------------------------------------------------
 // THE SCENE HALF
 // ---------------------------------------------------------------------------
-void OgreScene::notePhotonView(const void *view, bool presents, const PhotonViewShape &shape) {
-    if (presents) mPhoton.mPhotonViews[view] = shape;
-    else mPhoton.mPhotonViews.erase(view);
+void PhotonComponent::notePhotonView(const void *view, bool presents, const PhotonViewShape &shape) {
+    if (presents) mPhotonViews[view] = shape;
+    else mPhotonViews.erase(view);
 }
 
-std::string OgreScene::photonViewRefusal(PhotonView view) const {
+std::string PhotonComponent::photonViewRefusal(PhotonView view) const {
     if (view == PhotonView::Off) return std::string();
     bool passes = false, reflect = false, gather = false, stereo = false;
-    for (const auto &kv : mPhoton.mPhotonViews) {
+    for (const auto &kv : mPhotonViews) {
         if (!kv.second.passes) continue;
         passes = true;
         reflect = reflect || kv.second.rayReflect;
@@ -287,17 +287,17 @@ std::string OgreScene::photonViewRefusal(PhotonView view) const {
     };
     switch (view) {
     case PhotonView::Voxels:
-        if (!mPhoton.mVctLighting)
+        if (!mVctLighting)
             return "this scene holds no voxel lighting (GI off, or a mode that builds no voxels)";
         if (stereo) return stereoRefusal("voxel");
         break;
     case PhotonView::Probes:
-        if (!mPhoton.mIfd)
+        if (!mIfd)
             return "this scene holds no irradiance field (world.gi({ddgi}) is off, or the tier builds none)";
         if (stereo) return stereoRefusal("probe");
         break;
     case PhotonView::Cards:
-        if (!mPhoton.mSurfaceCache || !mPhoton.mSurfaceCache->built())
+        if (!mSurfaceCache || !mSurfaceCache->built())
             return "this scene holds no surface cache (the cards row is off: it follows the reflection trace)";
         break;
     case PhotonView::ScreenProbes:
@@ -316,43 +316,43 @@ std::string OgreScene::photonViewRefusal(PhotonView view) const {
     return std::string();
 }
 
-bool OgreScene::photonVoxelLive() const {
-    if (!mPhoton.mPhotonVoxelLighting) return false;
-    bool live = mPhoton.mPhotonVoxelLighting == mPhoton.mVctLighting;
-    for (const VctCascade &c : mPhoton.mVctCascades) live = live || c.lighting == mPhoton.mPhotonVoxelLighting;
-    return live && mPhoton.mPhotonVoxelLighting->getDebugVisualizationMode();
+bool PhotonComponent::photonVoxelLive() const {
+    if (!mPhotonVoxelLighting) return false;
+    bool live = mPhotonVoxelLighting == mVctLighting;
+    for (const VctCascade &c : mVctCascades) live = live || c.lighting == mPhotonVoxelLighting;
+    return live && mPhotonVoxelLighting->getDebugVisualizationMode();
 }
 
-void OgreScene::photonVoxelsOff() {
+void PhotonComponent::photonVoxelsOff() {
     // A lighting that died took its visualizer with it (~PhotonVoxelLighting switches the
     // picture off); only a LIVE one is asked to.
-    if (photonVoxelLive()) mPhoton.mPhotonVoxelLighting->setDebugVisualization(false, mSceneMgr);
-    mPhoton.mPhotonVoxelLighting = nullptr;
-    mPhoton.mPhotonVoxelSource = nullptr;
-    mPhoton.mPhotonVoxelTex = nullptr;
+    if (photonVoxelLive()) mPhotonVoxelLighting->setDebugVisualization(false, mSceneMgr);
+    mPhotonVoxelLighting = nullptr;
+    mPhotonVoxelSource = nullptr;
+    mPhotonVoxelTex = nullptr;
 }
 
-void OgreScene::photonProbesOff() {
+void PhotonComponent::photonProbesOff() {
     // mPhotonIfd is always the LIVE field or null: teardownIrradianceField
     // forgets it before the field (and Ogre's visualizer with it) is deleted.
-    if (mPhoton.mPhotonIfd && mPhoton.mPhotonIfd == mPhoton.mIfd &&
-        mPhoton.mPhotonIfd->getDebugVisualizationMode() != Ogre::PhotonIrradianceField::DebugVisualizationNone)
-        mPhoton.mPhotonIfd->setDebugVisualization(Ogre::PhotonIrradianceField::DebugVisualizationNone, mSceneMgr,
-                                          mPhoton.mPhotonIfd->getDebugTessellation());
-    mPhoton.mPhotonIfd = nullptr;
+    if (mPhotonIfd && mPhotonIfd == mIfd &&
+        mPhotonIfd->getDebugVisualizationMode() != Ogre::PhotonIrradianceField::DebugVisualizationNone)
+        mPhotonIfd->setDebugVisualization(Ogre::PhotonIrradianceField::DebugVisualizationNone, mSceneMgr,
+                                          mPhotonIfd->getDebugTessellation());
+    mPhotonIfd = nullptr;
 }
 
-void OgreScene::photonCardsOff() {
-    if (mPhoton.mPhotonCards && mSceneMgr) {
-        mPhoton.mPhotonCards->detachFromParent();
-        mSceneMgr->destroyManualObject(mPhoton.mPhotonCards);
+void PhotonComponent::photonCardsOff() {
+    if (mPhotonCards && mSceneMgr) {
+        mPhotonCards->detachFromParent();
+        mSceneMgr->destroyManualObject(mPhotonCards);
     }
-    mPhoton.mPhotonCards = nullptr;
-    mPhoton.mPhotonCardVerts = 0u;
-    mPhoton.mPhotonCardGeneration = ~0ull;
+    mPhotonCards = nullptr;
+    mPhotonCardVerts = 0u;
+    mPhotonCardGeneration = ~0ull;
 }
 
-void OgreScene::releasePhotonView() {
+void PhotonComponent::releasePhotonView() {
     photonVoxelsOff();
     photonProbesOff();
     photonCardsOff();
@@ -398,18 +398,18 @@ Ogre::ColourValue ageColour(unsigned long long age) {
 }
 }   // namespace
 
-void OgreScene::syncPhotonView() {
+void PhotonComponent::syncPhotonView() {
     if (!mSceneMgr) return;
-    const PhotonView view = mPhoton.mPhotonView;
+    const PhotonView view = mPhotonView;
 
     // ---- VOXELS: PhotonVoxelVisualizer on the finest cascade holding the camera.
     {
         Ogre::PhotonVoxelLighting *want = nullptr;
         if (view == PhotonView::Voxels) {
-            if (mPhoton.mPhotonVoxelCascade >= 0 && !mPhoton.mVctCascades.empty()) {
+            if (mPhotonVoxelCascade >= 0 && !mVctCascades.empty()) {
                 // THE CASCADE ASKED FOR, clamped to the chain.
-                const size_t ci = std::min(size_t(mPhoton.mPhotonVoxelCascade), mPhoton.mVctCascades.size() - 1u);
-                if (mPhoton.mVctCascades[ci].built) want = mPhoton.mVctCascades[ci].lighting;
+                const size_t ci = std::min(size_t(mPhotonVoxelCascade), mVctCascades.size() - 1u);
+                if (mVctCascades[ci].built) want = mVctCascades[ci].lighting;
             } else {
                 // THE FINEST CASCADE THAT HOLDS THE SCENE'S LIT CONTENT (the fitted GI
                 // volume, giStatus().boundsMin/Max) — not the finest that holds the
@@ -417,11 +417,11 @@ void OgreScene::syncPhotonView() {
                 // the saved cameras of both the default scene and Showroom 2 its voxels
                 // are out of frame (measured: 0 pixels changed). A scene larger than
                 // every cascade shows the outermost.
-                const Ogre::Vector3 &h = mPhoton.mGiLitVolume.mHalfSize;
+                const Ogre::Vector3 &h = mGiLitVolume.mHalfSize;
                 const bool haveLit = h.squaredLength() > 0.0f && std::isfinite(h.x) &&
                                      std::isfinite(h.y) && std::isfinite(h.z);
-                const Ogre::Vector3 lo = mPhoton.mGiLitVolume.getMinimum(), hi = mPhoton.mGiLitVolume.getMaximum();
-                for (const VctCascade &c : mPhoton.mVctCascades) {
+                const Ogre::Vector3 lo = mGiLitVolume.getMinimum(), hi = mGiLitVolume.getMaximum();
+                for (const VctCascade &c : mVctCascades) {
                     if (!c.lighting || !c.built) continue;
                     want = c.lighting;   // the outermost built one, if none holds it
                     if (!haveLit) break;
@@ -433,15 +433,15 @@ void OgreScene::syncPhotonView() {
                 }
             }
             // A camera outside every cascade: the head of the chain.
-            if (!want) want = mPhoton.mVctLighting;
+            if (!want) want = mVctLighting;
         }
         const void *source = want ? static_cast<const void *>(want->getVoxelizer()) : nullptr;
         Ogre::TextureGpu *tex = want && want->getLightVoxelTextures() ? want->getLightVoxelTextures()[0] : nullptr;
         const Ogre::Vector3 origin =
             want && want->getVoxelizer() ? want->getVoxelizer()->getVoxelOrigin() : Ogre::Vector3::ZERO;
-        const bool same = want == mPhoton.mPhotonVoxelLighting &&
-                          (!want || (source == mPhoton.mPhotonVoxelSource && tex == mPhoton.mPhotonVoxelTex &&
-                                     origin == mPhoton.mPhotonVoxelOrigin && want->getDebugVisualizationMode()));
+        const bool same = want == mPhotonVoxelLighting &&
+                          (!want || (source == mPhotonVoxelSource && tex == mPhotonVoxelTex &&
+                                     origin == mPhotonVoxelOrigin && want->getDebugVisualizationMode()));
         if (!same) {
             photonVoxelsOff();
             if (want && source && tex) {
@@ -449,10 +449,10 @@ void OgreScene::syncPhotonView() {
                 // current (PhotonVoxelLighting::setDebugVisualization / update).
                 want->setDebugVisualization(true, mSceneMgr);
                 toPhotonChannel(want->getDebugVisualizer());
-                mPhoton.mPhotonVoxelLighting = want;
-                mPhoton.mPhotonVoxelSource = source;
-                mPhoton.mPhotonVoxelTex = tex;
-                mPhoton.mPhotonVoxelOrigin = origin;
+                mPhotonVoxelLighting = want;
+                mPhotonVoxelSource = source;
+                mPhotonVoxelTex = tex;
+                mPhotonVoxelOrigin = origin;
             }
         }
     }
@@ -461,30 +461,30 @@ void OgreScene::syncPhotonView() {
     // a re-initialize re-points it, a follow (setFieldVolume / scrollWindow) moves its
     // static node and its window offset (PhotonIrradianceField::placeDebugVisualizer).
     {
-        Ogre::PhotonIrradianceField *want = view == PhotonView::Probes ? mPhoton.mIfd : nullptr;
-        if (want != mPhoton.mPhotonIfd) {
+        Ogre::PhotonIrradianceField *want = view == PhotonView::Probes ? mIfd : nullptr;
+        if (want != mPhotonIfd) {
             photonProbesOff();
             if (want) {
                 // Tessellation 4: a 7 x 16 band sphere, ~110 triangles a probe (8
                 // would be 32,000 — 266 M triangles for a 8,192-probe field).
                 want->setDebugVisualization(Ogre::PhotonIrradianceField::DebugVisualizationColour, mSceneMgr, 4u);
                 toPhotonChannel(want->getDebugVisualizer());
-                mPhoton.mPhotonIfd = want;
+                mPhotonIfd = want;
             }
         }
     }
 
     // ---- CARDS: the cache's table as quads, re-uploaded only when the table moves
     // (SurfaceCache::photonGeneration) or the age ramp's clock ticks.
-    if (view != PhotonView::Cards || !mPhoton.mSurfaceCache || !mPhoton.mSurfaceCache->built()) {
-        if (mPhoton.mPhotonCards) photonCardsOff();
+    if (view != PhotonView::Cards || !mSurfaceCache || !mSurfaceCache->built()) {
+        if (mPhotonCards) photonCardsOff();
         return;
     }
-    const unsigned long long gen = mPhoton.mSurfaceCache->photonGeneration(), frame = mPhoton.mSurfaceCache->frame();
-    if (mPhoton.mPhotonCards && gen == mPhoton.mPhotonCardGeneration && frame - mPhoton.mPhotonCardFrame < kPhotonCardAgeFrames)
+    const unsigned long long gen = mSurfaceCache->photonGeneration(), frame = mSurfaceCache->frame();
+    if (mPhotonCards && gen == mPhotonCardGeneration && frame - mPhotonCardFrame < kPhotonCardAgeFrames)
         return;
     std::vector<PhotonCardQuad> quads;
-    mPhoton.mSurfaceCache->photonQuads(quads);
+    mSurfaceCache->photonQuads(quads);
     size_t held = 0u;
     for (const PhotonCardQuad &q : quads) held += q.held ? 1u : 0u;
     const size_t outlined = quads.size() - held;
@@ -493,30 +493,30 @@ void OgreScene::syncPhotonView() {
     const size_t verts = held * 4u + outlined * 16u;
     const char *db = photonCardsDatablock(mRoot);
     if (!verts || !db) {
-        if (mPhoton.mPhotonCards) photonCardsOff();
+        if (mPhotonCards) photonCardsOff();
         return;
     }
-    const bool rebuild = !mPhoton.mPhotonCards || verts != mPhoton.mPhotonCardVerts;
-    if (!mPhoton.mPhotonCards) {
-        mPhoton.mPhotonCards = mSceneMgr->createManualObject(Ogre::SCENE_DYNAMIC);
-        mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC)->attachObject(mPhoton.mPhotonCards);
-        mPhoton.mPhotonCards->setVisibilityFlags(kPhotonViewBit);
-        mPhoton.mPhotonCards->setCastShadows(false);
+    const bool rebuild = !mPhotonCards || verts != mPhotonCardVerts;
+    if (!mPhotonCards) {
+        mPhotonCards = mSceneMgr->createManualObject(Ogre::SCENE_DYNAMIC);
+        mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC)->attachObject(mPhotonCards);
+        mPhotonCards->setVisibilityFlags(kPhotonViewBit);
+        mPhotonCards->setCastShadows(false);
     }
     if (rebuild) {
-        mPhoton.mPhotonCards->clear();
-        mPhoton.mPhotonCards->begin(db, Ogre::OT_TRIANGLE_LIST);
+        mPhotonCards->clear();
+        mPhotonCards->begin(db, Ogre::OT_TRIANGLE_LIST);
     } else {
-        mPhoton.mPhotonCards->beginUpdate(0);
+        mPhotonCards->beginUpdate(0);
     }
     Ogre::uint32 base = 0u;
     const auto quad = [&](const Ogre::Vector3 &a, const Ogre::Vector3 &b, const Ogre::Vector3 &c,
                           const Ogre::Vector3 &d, const Ogre::ColourValue &col) {
         for (const Ogre::Vector3 *p : { &a, &b, &c, &d }) {
-            mPhoton.mPhotonCards->position(*p);
-            mPhoton.mPhotonCards->colour(col);
+            mPhotonCards->position(*p);
+            mPhotonCards->colour(col);
         }
-        mPhoton.mPhotonCards->quad(base, base + 1u, base + 2u, base + 3u);
+        mPhotonCards->quad(base, base + 1u, base + 2u, base + 3u);
         base += 4u;
     };
     const Ogre::ColourValue waiting(1.0f, 0.9f, 0.1f, 1.0f);
@@ -540,10 +540,10 @@ void OgreScene::syncPhotonView() {
             quad(p10 - du, p10, p11, p11 - du, waiting);
         }
     }
-    mPhoton.mPhotonCards->end();
-    mPhoton.mPhotonCardVerts = verts;
-    mPhoton.mPhotonCardGeneration = gen;
-    mPhoton.mPhotonCardFrame = frame;
+    mPhotonCards->end();
+    mPhotonCardVerts = verts;
+    mPhotonCardGeneration = gen;
+    mPhotonCardFrame = frame;
 }
 
 }   // namespace detail

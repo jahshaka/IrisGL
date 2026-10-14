@@ -122,12 +122,12 @@ void OgreScene::setAmbient(const Colour &upper, const Colour &lower) {
 // filled with. Called before every PhotonVoxelLighting::update, and whenever the
 // environment's cube, gain or coefficients change.
 void OgreScene::applyVctEnvironment() {
-    if (!mPhoton.mVctLighting) return;
-    applyCascadeEnvironment(mPhoton.mVctLighting);
+    if (!mPhoton.voxelLighting()) return;
+    applyCascadeEnvironment(mPhoton.voxelLighting());
     // EVERY CASCADE, not just the head (PHOTON_SPEC P0 rule 4): each cascade's
     // bounce job reads its own copy. Cascade 0 is mVctLighting and was just done.
-    for (size_t i = 1; i < mPhoton.mVctCascades.size(); ++i)
-        applyCascadeEnvironment(mPhoton.mVctCascades[i].lighting);
+    for (size_t i = 1; i < mPhoton.cascadeCount(); ++i)
+        applyCascadeEnvironment(mPhoton.cascadeLighting(i));
 }
 
 void OgreScene::applyCascadeEnvironment(Ogre::PhotonVoxelLighting *lighting) {
@@ -176,8 +176,7 @@ void OgreScene::noteEnvironmentChanged() {
     // bounce count (PhotonVoxelLighting::update's sky pass reads the environment where its
     // cones escape — CONTACT-OCCLUSION-1; with one bounce it used to hold the lamps
     // only, and a sky-lit surface re-emitted nothing).
-    mPhoton.oweChainSettle();
-    if (mPhoton.mIfd) mPhoton.reintegrateFieldAfterInjection();
+    mPhoton.noteEnvironmentChanged();
 }
 
 void OgreScene::setAmbientSh(const float sh[27]) {
@@ -915,7 +914,7 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, Node *rec, bool inherited
                 // ...and a lamp event for the GI scheduler (U0 3c): the lamp rides its -Y adapter, whose parent
                 // is the registered node.
                 if (const Node *owner = rec ? rec : registryNode(sn->getParent())) noteLampChanged(*owner);
-                else mPhoton.mGiPlan.stillLampOwed = true;
+                else mPhoton.noteLampChanged(false);
             }
             else if (dynamic_cast<Ogre::Decal *>(obj)) staleProbeGrid(GiStaleReason::Moved);
         }
@@ -1190,14 +1189,14 @@ void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
     // promoted, they are rebuilt WITHOUT it, and the ghost turns into a hole
     // that a free clearing push would leave for ever. So the clearing push
     // invalidates exactly when that has happened, and the counter says so.
-    const bool healing = !movable && n.mobilitySoft && n.mobilitySoftRebuilds != mPhoton.mGiRebuilds;
+    const bool healing = !movable && n.mobilitySoft && n.mobilitySoftRebuilds != mPhoton.giRebuildCount();
     n.mobilitySoft = movable && change == MobilityChange::Soft;
-    n.mobilitySoftRebuilds = mPhoton.mGiRebuilds;
+    n.mobilitySoftRebuilds = mPhoton.giRebuildCount();
     // A LAMP CHANGING CLASS moves between the scheduler's two gates: both hear of it (U0 3c).
-    if (n.light) mPhoton.mGiPlan.stillLampOwed = mPhoton.mGiPlan.movableLampOwed = true;
+    if (n.light) mPhoton.noteLampsChanged();
     // ...and an item the GI walk has already seen changing class is a FLIP the scheduler adopts (a classification
     // that arrives with the geometry is an arrival, and arrivals arm as they always did).
-    if (n.item && n.scan.giKnown) mPhoton.mGiPlan.mobilityFlipped = true;
+    if (n.item && n.scan.giKnown) mPhoton.noteMobilityFlipped();
     n.movable = movable;
     applyNodeVisibilityFlags(n);
     const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
@@ -1211,8 +1210,7 @@ void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
         // for the question it exists to answer ("is my classification costing
         // me rebuilds?"). `mGiCachesDirty` already true means one is owed for
         // another reason and this change rides it.
-        const bool wouldRebuild =
-            !mPhoton.mGiCachesDirty && (mPhoton.mPcc || mPhoton.mVctVoxelizer || mPhoton.mIfd);
+        const bool wouldRebuild = mPhoton.giArmWouldRebuild();
         invalidateGiCaches();
         if (wouldRebuild) ++mMobilityRebuilds;
     }
@@ -1721,7 +1719,7 @@ void OgreScene::destroy() {
         // datablocks, so a late teardown took `~HlmsDatablock`'s linked-
         // renderable assert) and the regression case that proved it — the exit
         // code after a passing suite — still guards the order.
-        mPhoton.mSurfaceCache.reset();
+        mPhoton.releaseSurfaceCache();
         // THE RAY TIER'S STRUCTURES FOR THIS SCENE, FIRST. They are keyed by
         // this object's ADDRESS and they hold MeshPtrs, so leaving them behind
         // would pin this scene's geometry for the process's life and let the
@@ -2092,7 +2090,7 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
     const bool gridNow = probeGridWanted();
     if (gridWas == gridNow) return;
     if (!gridNow) dropProbeGridByRays();
-    else mPhoton.mGiCachesDirty = true;
+    else mPhoton.markGiCachesDirty();
 }
 
 
@@ -2162,97 +2160,18 @@ unsigned long long OgreScene::walkCardLights() const {
     return radianceSig;
 }
 
-void OgreScene::updateSurfaceCache() {
-    // THE CARDS RUN ONLY WHERE RAYS RUN (PHOTON-CARDS-2; ATOM-S3-CARDCAP): every
-    // reader of a card is a ray job's hit (rq_reflect.comp, the gather,
-    // jah_rq_card.glsl), and a card's sun term is itself TRACED (traceSun) — so
-    // the cache exists exactly where the ray tier does (the World row resolved
-    // against the machine, `rayReflectionsWanted`) and costs nothing elsewhere.
-    // Off refuses it; on (the default) resolves against the rays.
-    const bool want = mPhoton.mGi.cards && rayReflectionsWanted();
-    if (!want) {
-        if (mPhoton.mSurfaceCache) mPhoton.mSurfaceCache.reset();
-        return;
-    }
-    if (!mSceneMgr) return;
-    if (!mPhoton.mSurfaceCache) {
-        mPhoton.mSurfaceCache.reset(new SurfaceCache());
-        std::string err;
-        if (!mPhoton.mSurfaceCache->build(mSceneMgr, err)) {
-            // A cache that cannot be built is a reported failure and not a
-            // crash: the row stays on, the cache stays null, and the status
-            // says `built` false.
-            if (!err.empty()) mError = err;
-            mPhoton.mSurfaceCache.reset();
-            return;
-        }
-        // THE SUN ON THE CARDS (PHOTON-CARDS-4; ATOM-S3-CARDCAP): the scene's
-        // in-frame answers and the ray tier's two traces (the still world's, the
-        // movers').
-        CardMoverHooks hooks;
-        hooks.frame = [this](CardMoverFrame &f) { return cardMoverFrame(f); };
-        hooks.trace = [this](const CardMoverTrace &t) { return traceCardMovers(t); };
-        hooks.readTimes = [this](float &a, float &b) { cardMoverTimes(a, b); };
-        mPhoton.mSurfaceCache->setMoverHooks(hooks);
-    }
-    mPhoton.mSurfaceCache->setAsyncShaders(mAsyncShaders);
-    // A CAMERA-RELATIVE CACHE NEEDS A CAMERA, exactly as the cascade chain
-    // does, and waits for one the same way: `mGiCamPos` is the authoritative
-    // view's last tracked position and is the ORIGIN until a frame has tracked
-    // one. Capturing around the origin and then re-capturing everything on the
-    // first tracked frame is the defect the chain already learned (audit B3).
-    if (!mPhoton.mGiCamPosKnown) return;
+// THE CARDS' SCENE FACTS (PhotonComponent::updateSurfaceCache, OgreGi.cpp — the cache is Photon's,
+// these are the scene's): the light key, the footprint, the cloud field and the ambient SH, the
+// environment's fold, and the candidates the card feed files.
+void OgreScene::cardLightKey(unsigned long long out[4]) const {
+    out[0] = transformEpoch();
+    out[1] = mGiLightWriteSerial;
+    out[2] = mLightsRemoved;
+    out[3] = (unsigned long long)mLightNodes.size();
+}
 
-    const GiQualityFacts facts =
-        giQualityFacts(mPhoton.mGi.quality, mPhoton.mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop);
-    CardSceneView view;
-    view.sceneMgr = mSceneMgr;
-    view.viewerPos = mPhoton.mGiCamPos;
-    view.budgetTexels = mPhoton.mGi.cardBudgetTexels > 0 ? unsigned(mPhoton.mGi.cardBudgetTexels)
-                                                 : facts.cardBudgetTexels;
-    view.radius = mPhoton.mGi.cardResidencyRadius > 0.0f ? mPhoton.mGi.cardResidencyRadius
-                                                 : facts.cardResidencyRadius;
-    // THE RADIANCE SIGNATURE (walkCardLights) — not `mGiLightWriteSerial`,
-    // which bumps on every `setLight` push and every pose write: what a card's
-    // LIT radiance depends on, folded from the lights themselves.
-    // THE LIGHT WALK IS ITS OWN MONITOR STAGE (ATOM-CPU-WALKS-1), and it walks
-    // ONLY WHEN AN INPUT CAN HAVE CHANGED (SPEED-CPU, perf audit E4: 0.42 ms of
-    // every still frame at the world's 500 lamps). Everything the two folds
-    // read moves one of four counters first:
-    //   * a lamp's DERIVED pose — any transform write that can move it: the
-    //     document's (the host's write counter: a write on a light or on any
-    //     node with children counts, nodegraph.h) and the engine's own
-    //     (setNodeTransform, a socket rider, mSceneTransformWrites) — together
-    //     transformEpoch();
-    //   * its parameters, shadow key and shown flag — setLight and the
-    //     visibility push bump mGiLightWriteSerial;
-    //   * a lamp leaving — mLightsRemoved; one arriving — setLight again, and
-    //     mLightNodes' size.
-    // A DERIVED pose is read without an update (`_getDerivedPosition`), so a
-    // write lands in it at the frame's updateSceneGraph, AFTER this fold — the
-    // walk therefore runs on the frame the key moves AND the one after, which
-    // reads the pose the write produced. A frame whose key has stood still for
-    // two frames folds exactly what the last walk folded.
-    std::optional<monitor::Stage> lightStage;
-    lightStage.emplace("engine.cards.lights");
-    const unsigned long long lightKey[4] = { transformEpoch(), mGiLightWriteSerial, mLightsRemoved,
-                                             (unsigned long long)mLightNodes.size() };
-    const bool keyMoved = !mPhoton.mCardLightFoldValid ||
-                          std::memcmp(lightKey, mPhoton.mCardLightKey, sizeof lightKey) != 0;
-    if (keyMoved || mPhoton.mCardLightKeyMovedLastFrame) {
-        std::memcpy(mPhoton.mCardLightKey, lightKey, sizeof lightKey);
-        mPhoton.mCardLightFoldValid = true;
-        mPhoton.mCardLightFold = walkCardLights();
-    }
-    mPhoton.mCardLightKeyMovedLastFrame = keyMoved;
-    unsigned long long radianceSig = mPhoton.mCardLightFold;
+void OgreScene::cardSceneFacts(CardSceneView &view) const {
     view.rayFootprintPerMetre = mRayFootprintPerMetre;
-    lightStage.reset();
-    // THE CLOUD SHADOW (CLOUDS-2D-2): the snapshot the voxels are injected
-    // with, and its serial in the radiance signature — a layer change or a
-    // scroll capture relights the resident cards (and recaptures none).
-    radianceSig ^= mCloudGiSerial;
-    radianceSig *= 1099511628211ull;
     if (mCloudGiState.field) {
         const FogHlmsListener::CloudShadowState &cs = mCloudGiState;
         view.cloudField = cs.field;
@@ -2261,69 +2180,31 @@ void OgreScene::updateSurfaceCache() {
         view.cloudSun[0] = cs.sunThrow[0]; view.cloudSun[1] = cs.sunThrow[1];
         view.cloudSun[2] = cs.altitude;    view.cloudSun[3] = cs.invMuSun;
     }
-    view.radianceSerial = radianceSig;
-    view.lightBudgetTexels = facts.cardLightTexels;
-    // THE INDIRECT HALF: the chain the pixel's cones march (the cascade-0
-    // PhotonVoxelLighting the pass buffer is filled from), and THE RE-INJECTION
-    // SIGNATURE — folded ONLY from what moves when an injection LANDS, never
-    // from the write-time serials (a light write or a material generation
-    // bumps at the WRITE, and a dragged light re-marched the whole resident set
-    // against voxels that had not moved, every frame): the chain's settles, each
-    // cascade's rebuilds and lattice cell, the PhotonVoxelLighting objects themselves,
-    // and the environment the escapes read (below).
-    view.vct = mPhoton.mVctLighting;
-    view.indirectBudgetTexels = facts.cardIndirectTexels;
-    // ...and THE AMBIENT AT GI OFF (PHOTON-CARDS-5): the scene's SH, the engine's
-    // own SH x gain (applySkyAmbient), in the indirect signature below.
     view.ambientSh = mLastAmbientSh;
-    {
-        unsigned long long sig = 1469598103934665603ull;
-        const auto foldI = [&sig](unsigned long long v) {
-            sig ^= v;
-            sig *= 1099511628211ull;
-        };
-        foldI((unsigned long long)mPhoton.mGiChainSettles);
-        foldI(mPhoton.mGiRestTicks);
-        // ...AND THE ENVIRONMENT THE MARCH'S ESCAPES READ, which is not an
-        // injection at all: noteEnvironmentChanged hands the new sky to every
-        // PhotonVoxelLighting at once (applyVctEnvironment) and the pixel reads it the
-        // same frame, so the card's escape must too. The values
-        // applyCascadeEnvironment hands over, quantised.
-        {
-            const Ogre::TextureGpu *cube =
-                (mReflectionTex && mEnvLightScale > 0.0f) ? mReflectionTex : nullptr;
-            foldI((unsigned long long)(uintptr_t)cube);
-            const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
-            for (float g : gain) foldI((unsigned long long)(long long)std::lround(double(g) * 1e4));
-            for (int k = 0; k < 27; ++k)
-                foldI((unsigned long long)(long long)std::lround(double(mLastAmbientSh[k]) * 1e4));
-        }
-        foldI((unsigned long long)(uintptr_t)mPhoton.mVctLighting);
-        for (const VctCascade &c : mPhoton.mVctCascades) {
-            foldI((unsigned long long)(uintptr_t)c.lighting);
-            foldI(c.rebuilds);
-            foldI((unsigned long long)c.latticeX);
-            foldI((unsigned long long)c.latticeY);
-            foldI((unsigned long long)c.latticeZ);
-        }
-        view.indirectSerial = sig;
-    }
+}
 
-    // THE CANDIDATE LIST — handed over rather than reached for, and since
-    // ATOM-CPU-WALKS-1 NOT A WALK: the change feed files every item that can hold
-    // cards (cardEligible, below) by where the table says it is, and the frame
-    // takes the columns the residency sphere reaches. Each offered item's box is
-    // measured NOW (pre-frame, the recomputing read) — the cache's own radius test
-    // and its sort read it from the candidate instead of measuring it again. The
-    // cheap half of the predicate (shown, the GI channel) is re-read here so a hide
-    // this frame is exact; the rest (blend, the card list) changes only through a
-    // re-staged slot (a material edit reaches it through the PBS change log).
-    // THE GESTURE'S HELD NODES (REFLECT-FIX-1): a still the drag channel took off the GI
-    // channel is released by the cache and must come back as itself (mReturning).
-    view.gestureHeld = mPhoton.mDragMovers;
+unsigned long long OgreScene::foldCardEnvironment(unsigned long long sig) const {
+    const auto foldI = [&sig](unsigned long long v) {
+        sig ^= v;
+        sig *= 1099511628211ull;
+    };
+    {
+        const Ogre::TextureGpu *cube =
+            (mReflectionTex && mEnvLightScale > 0.0f) ? mReflectionTex : nullptr;
+        foldI((unsigned long long)(uintptr_t)cube);
+        const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
+        for (float g : gain) foldI((unsigned long long)(long long)std::lround(double(g) * 1e4));
+        for (int k = 0; k < 27; ++k)
+            foldI((unsigned long long)(long long)std::lround(double(mLastAmbientSh[k]) * 1e4));
+    }
+    return sig;
+}
+
+void OgreScene::cardCandidates(const Ogre::Vector3 &centre, float radius, CardSceneView &view) {
+    std::vector<CardSceneView::Candidate> &out = view.candidates;
     mCardQuery.clear();
-    mCardFeed.query(mPhoton.mGiCamPos, view.radius, mCardQuery);
-    view.candidates.reserve(mCardQuery.size());
+    mCardFeed.query(centre, radius, mCardQuery);
+    out.reserve(mCardQuery.size());
     for (const uint32_t slot : mCardQuery) {
         if (slot >= mItemNodes.size()) continue;
         Node *n = mItemNodes[slot];
@@ -2341,10 +2222,9 @@ void OgreScene::updateSurfaceCache() {
         c.lodBounds = mCardFeed.boundsOf[slot];
         const bool fresh = slot < mCardFeed.changedAt.size() && mCardFeed.changedAt[slot] + 1u >= mCardFeed.serial;
         c.box = fresh ? n->item->getWorldAabbUpdated() : n->item->getWorldAabb();
-        view.candidates.push_back(c);
+        out.push_back(c);
     }
     ++mCardFeed.serial;
-    mPhoton.mSurfaceCache->update(view);
 }
 
 /// THE CANDIDATE PREDICATE, and each clause is the statement the voxel side makes:
@@ -2470,22 +2350,22 @@ void OgreScene::CardFeed::query(const Ogre::Vector3 &centre, float radius, std::
     }
 }
 
-bool OgreScene::readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) {
+bool PhotonComponent::readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) {
     out = CardSample();
-    if (!mPhoton.mSurfaceCache) return false;
-    return mPhoton.mSurfaceCache->readTexel(node, card, u, v, out);
+    if (!mSurfaceCache) return false;
+    return mSurfaceCache->readTexel(node, card, u, v, out);
 }
 
-bool OgreScene::readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
+bool PhotonComponent::readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
                            NodeId onlyNode) {
     out = CardSample();
-    if (!mPhoton.mSurfaceCache) return false;
-    return mPhoton.mSurfaceCache->readAt(toOgre(world), toOgre(normal), out, onlyNode);
+    if (!mSurfaceCache) return false;
+    return mSurfaceCache->readAt(toOgre(world), toOgre(normal), out, onlyNode);
 }
 
-bool OgreScene::dumpCardAtlas(const std::string &prefix, std::string &err) {
-    if (!mPhoton.mSurfaceCache) { err = "the surface cache is not built"; return false; }
-    return mPhoton.mSurfaceCache->dump(prefix, err);
+bool PhotonComponent::dumpCardAtlas(const std::string &prefix, std::string &err) {
+    if (!mSurfaceCache) { err = "the surface cache is not built"; return false; }
+    return mSurfaceCache->dump(prefix, err);
 }
 
 }}}  // namespace jahshaka::engine::detail

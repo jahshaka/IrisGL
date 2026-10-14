@@ -8692,19 +8692,19 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
 /// off at Low, the VR column the same (`giQualityFacts(...).gather.on`) — and only
 /// under a GI mode that is on (there is no diffuse GI to estimate otherwise);
 /// the machine answers whether it can trace at all.
-bool OgreScene::probeGatherWanted() const {
-    switch (mPhoton.mGi.gather) {
+bool PhotonComponent::probeGatherWanted() const {
+    switch (mGi.gather) {
     case GiToggle::Off: return false;
     case GiToggle::On:  break;
     default:
-        if (mPhoton.mGi.mode == GiMode::Off) return false;
-        if (!giQualityFacts(mPhoton.mGi.quality,
-                            mPhoton.mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
+        if (mGi.mode == GiMode::Off) return false;
+        if (!giQualityFacts(mGi.quality,
+                            mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
                  .gather.on)
             return false;
         break;
     }
-    return rayTracingResolved();
+    return mScene.rayTracingResolved();
 }
 
 /// THE GATHER'S REST KEY (PHOTON-GATHER-1d): everything the gather's answer
@@ -8713,17 +8713,17 @@ bool OgreScene::probeGatherWanted() const {
 /// movement epoch and the ray rule's refits) and the surface cache the hits read
 /// first (its captures and relights). A frame whose key and camera equal the
 /// last frame's is a REST frame (ScreenProbeGather: the rest mean, the hold).
-unsigned long long OgreScene::gatherRestKey() const {
+unsigned long long PhotonComponent::gatherRestKey() const {
     unsigned long long key = 1469598103934665603ull;
     const auto fold = [&key](unsigned long long v) {
         key ^= v;
         key *= 1099511628211ull;
     };
     fold(giLightingSerial());
-    fold(shadowEpoch() + rayLevelRefits());
-    if (mPhoton.mSurfaceCache) {
+    fold(mScene.shadowEpoch() + mScene.rayLevelRefits());
+    if (mSurfaceCache) {
         CardCacheStatus cs;
-        mPhoton.mSurfaceCache->fillStatus(cs);
+        mSurfaceCache->fillStatus(cs);
         fold(cs.captures);
         fold(cs.stillTraces);
         fold(cs.relights);
@@ -8739,17 +8739,17 @@ unsigned long long OgreScene::gatherRestKey() const {
 /// re-inject moves the lighting serial) and the cloud layer's GI change. NOT
 /// the transform epoch: a mover's per-frame write is followed per pixel by the
 /// reprojection, and a scene with one would otherwise never settle.
-unsigned long long OgreScene::gatherRestartKey() const {
+unsigned long long PhotonComponent::gatherRestartKey() const {
     unsigned long long key = 1469598103934665603ull;
     const auto fold = [&key](unsigned long long v) {
         key ^= v;
         key *= 1099511628211ull;
     };
     fold(giLightingSerial());
-    fold(mCloudGiSerial);
-    if (mPhoton.mSurfaceCache) {
+    fold(mScene.cloudGiSerial());
+    if (mSurfaceCache) {
         CardCacheStatus cs;
-        mPhoton.mSurfaceCache->fillStatus(cs);
+        mSurfaceCache->fillStatus(cs);
         fold(cs.invalidMaterial);
         fold(cs.invalidSun);
     }
@@ -8765,17 +8765,17 @@ void OgreScene::gatherStatusInto(GatherStatus &out) const {
 
 /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the row, held inside its band.
 /// Storing it builds nothing; the view's chain re-checks its shape each frame.
-void OgreScene::setSunContact(const SunContactDesc &d) {
+void PhotonComponent::setSunContact(const SunContactDesc &d) {
     SunContactDesc c = d;
     if (!(c.range >= kSunContactMinRange)) c.range = kSunContactMinRange;   // NaN too
     if (c.range > kSunContactMaxRange) c.range = kSunContactMaxRange;
-    mPhoton.mSunContact = c;
+    mSunContact = c;
 }
 
 /// The row resolved against the machine — `probeGatherWanted`'s shape: the
 /// row says what the scene asks for and the machine answers whether it can.
-bool OgreScene::sunContactWanted() const {
-    return mPhoton.mSunContact.enabled && rayTracingResolved();
+bool PhotonComponent::sunContactWanted() const {
+    return mSunContact.enabled && mScene.rayTracingResolved();
 }
 
 SunContactStatus OgreScene::sunContactStatus() const {
@@ -8934,12 +8934,12 @@ bool OgreScene::readTlasInstances(TlasReadback &, std::string &err) {
     err = "rayquery: not built";
     return false;
 }
-bool OgreScene::probeGatherWanted() const { return false; }
+bool PhotonComponent::probeGatherWanted() const { return false; }
 bool OgreScene::traceCardMovers(const CardMoverTrace &) { return false; }
 void OgreScene::cardMoverTimes(float &, float &) {}
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }
-void OgreScene::setSunContact(const SunContactDesc &d) { mPhoton.mSunContact = d; }
-bool OgreScene::sunContactWanted() const { return false; }
+void PhotonComponent::setSunContact(const SunContactDesc &d) { mSunContact = d; }
+bool PhotonComponent::sunContactWanted() const { return false; }
 SunContactStatus OgreScene::sunContactStatus() const { return SunContactStatus(); }
 bool OgreScene::rayReflectionsWanted() const { return false; }
 void OgreView::dropReflectState() {}

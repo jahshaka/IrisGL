@@ -23,6 +23,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 
 #include <OgreHlmsManager.h>
 #include <OgreAsyncTextureTicket.h>
@@ -1920,9 +1921,37 @@ void PhotonComponent::latchProbeCaptures(bool drawn) {
     mProbeDirtiedThisFrame.clear();
 }
 
-void PhotonComponent::setNodeProbeGridExcluded(NodeId id, bool excluded) {
-    auto it = mScene.nodeRecords().find(id);
-    if (it == mScene.nodeRecords().end()) return;
+// THE GI BINDING's arms (SceneGiBinding: the scene's per-pass record): what the component binds
+// and unbinds, never the record itself.
+void OgreScene::bindGiVct(Ogre::PhotonVoxelLighting *vct) { mGiBinding.vct = vct; }
+void OgreScene::bindGiIfd(Ogre::PhotonIrradianceField *ifd) { mGiBinding.ifd = ifd; }
+void OgreScene::bindGiPcc(Ogre::ParallaxCorrectedCubemapBase *pcc, float minDist, float maxDist) {
+    mGiBinding.pcc = pcc;
+    if (pcc) { mGiBinding.pccMinDist = minDist; mGiBinding.pccMaxDist = maxDist; }
+}
+bool OgreScene::unbindGiPcc(const Ogre::ParallaxCorrectedCubemapBase *pcc) {
+    if (mGiBinding.pcc != pcc) return false;
+    mGiBinding.pcc = nullptr;
+    return true;
+}
+
+/// A dragged still the gesture put on the mover channel comes to rest: the node leaves the channel
+/// (its flags re-applied) and `rest` is the box the walk last saw it in. False when the node is
+/// gone or no longer a mover.
+bool OgreScene::demoteDragMover(NodeId id, Ogre::Aabb &rest) {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end()) return false;
+    Node &n = it->second;
+    if (!n.dragMover) return false;
+    n.dragMover = false;
+    applyNodeVisibilityFlags(n);
+    rest = n.scan.giBox;
+    return true;
+}
+
+void OgreScene::setNodeProbeGridExcluded(NodeId id, bool excluded) {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end()) return;
     if (it->second.probeGridExcluded == excluded) return;
     it->second.probeGridExcluded = excluded;
     // The flag changes where the probe grid is placed, so it is as much of a
@@ -1931,9 +1960,9 @@ void PhotonComponent::setNodeProbeGridExcluded(NodeId id, bool excluded) {
     invalidateGiCaches();
 }
 
-bool PhotonComponent::nodeProbeGridExcluded(NodeId id) const {
-    auto it = mScene.nodeRecords().find(id);
-    return it != mScene.nodeRecords().end() && it->second.probeGridExcluded;
+bool OgreScene::nodeProbeGridExcluded(NodeId id) const {
+    auto it = mNodes.find(id);
+    return it != mNodes.end() && it->second.probeGridExcluded;
 }
 
 // ---- GI internals ----
@@ -2639,10 +2668,26 @@ void PhotonComponent::invalidateGiCaches(const Ogre::Aabb *where, bool geometryV
 
 void OgreScene::endStructureEdit() {
     if (mStructureEditDepth == 0 || --mStructureEditDepth > 0) return;
-    if (!mPhoton.mGiInvalidationPending) return;
-    const bool restart = mPhoton.mGiRestartPending && !mPhoton.mInGiStage;
-    mPhoton.mGiInvalidationPending = mPhoton.mGiRestartPending = false;
-    mPhoton.applyGiInvalidation(restart);
+    mPhoton.structureEditClosed();
+}
+
+// THE WALK, ABSORBED (ENGINE-UPGRADE-2B stage 2): the scene's walk records what it found
+// (PhotonComponent::WalkRecord) and the component folds it into its own state — the flags its
+// consumers clear when they spend them, the promoted movers, the boxes the cascades owe (merged
+// in walk order, as the walk used to merge them itself), the AABB reads it reports.
+void PhotonComponent::absorbWalk(const WalkRecord &w) {
+    if (w.probeOnlyChanged) mProbeOnlyChanged = true;
+    if (w.itemsAppeared) mGiItemsAppeared = true;
+    mGiAabbReads += w.aabbReads;
+    mDragMovers.insert(mDragMovers.end(), w.promoted.begin(), w.promoted.end());
+    for (const Ogre::Aabb &box : w.cascadeDirty) noteGiCascadeDirty(&box);
+}
+
+void PhotonComponent::structureEditClosed() {
+    if (!mGiInvalidationPending) return;
+    const bool restart = mGiRestartPending && !mInGiStage;
+    mGiInvalidationPending = mGiRestartPending = false;
+    applyGiInvalidation(restart);
 }
 
 void PhotonComponent::applyGiInvalidation(bool restartStagedBuild) {
@@ -2815,16 +2860,12 @@ void PhotonComponent::endDragGesture() {
     if (mDragMovers.empty()) return;
     bool anyDemoted = false;
     for (NodeId id : mDragMovers) {
-        auto it = mScene.nodeRecords().find(id);
-        if (it == mScene.nodeRecords().end()) continue;          // gone mid-gesture; nothing owed
-        auto &n = it->second;
-        if (!n.dragMover) continue;
-        n.dragMover = false;
-        mScene.applyNodeVisibilityFlags(n);
-        // The box it came to rest in. `scan.giBox` is where the walk last saw
-        // it, which is that box — the place it LEFT was re-voxelised at the
-        // promotion, so the chain owes only this one.
-        noteGiCascadeDirty(&n.scan.giBox);
+        // The box it came to rest in (the scene demotes the node: gone mid-gesture or no longer a
+        // mover, nothing owed). `scan.giBox` is where the walk last saw it, which is that box —
+        // the place it LEFT was re-voxelised at the promotion, so the chain owes only this one.
+        Ogre::Aabb rest;
+        if (!mScene.demoteDragMover(id, rest)) continue;
+        noteGiCascadeDirty(&rest);
         anyDemoted = true;
     }
     mDragMovers.clear();
@@ -3347,7 +3388,7 @@ void PhotonComponent::updateForwardPlusRanges(const Ogre::Camera *cam) {
         if (!mFwdPlusBoundsValid || mFwdPlusBoundsEpoch != epoch) {
             Ogre::Vector3 bmn(1e30f), bmx(-1e30f);
             size_t found = 0;
-            for (auto &kv : mScene.nodeRecords()) {
+            for (const auto &kv : mScene.nodeRecords()) {
                 Ogre::Item *item = kv.second.item;
                 // Everything the VIEW draws — the still world and the movers
                 // (kMovableBit) — because this is the camera's clustered grid,
@@ -3502,7 +3543,7 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
     // (round-2 F4); this only spends them.
     if (!mVctCascades.empty()) {
         JAH_TRY {
-            mScene.ensureGiWalk();
+            if (mScene.ensureGiWalk(walkInputs())) absorbWalk(mScene.giWalk());
             // A STILL OBJECT THAT IS MOVING RIGHT NOW IS RE-VOXELISED WHILE IT
             // MOVES (smoke rig 2026-09-15, ledger §320) — not left until the
             // settle. THE DEFECT, measured on the monolithic arm: a STILL-
@@ -3641,8 +3682,9 @@ void OgreScene::runItemWalk(bool shadow) {
 // it): whoever consumes mGiMovedBoxes first this frame runs it, and it reads
 // each item's world AABB UPDATED — the GI consumers run before the scene graph
 // does, and a mover has to stale the probes in the frame it moves.
-void OgreScene::ensureGiWalk() {
-    if (mGiWalkedThisFrame) return;
+bool OgreScene::ensureGiWalk(const PhotonComponent::WalkInputs &in) {
+    if (mGiWalkedThisFrame) return false;
+    mGiWalkIn = in;
     mGiWalkedThisFrame = true;
     // NOTHING WROTE A TRANSFORM SINCE THE LAST SCAN, so nothing can have moved
     // (clean-2 lane, 2026-09-13). This walk reads getWorldAabbUpdated() per
@@ -3664,15 +3706,16 @@ void OgreScene::ensureGiWalk() {
         // head), so a skipped frame must publish "nothing moved" rather than
         // last frame's movers — otherwise a single move would stale the grid
         // for ever.
-        mPhoton.mGiMovedBoxes.clear();
+        mGiWalk.clear();
         mGiScanMicros = 0.0;
-        return;
+        return true;
     }
     ++mGiScans;
     const auto t0 = std::chrono::steady_clock::now();
     if (!mGiScannedOnce || mScanFullGi) { ++mGiScansFull; walkItems(true, false, true); }
     else walkItems(true, false, true, &takeScanSubset(mScanPendingGi));
     mGiScanMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+    return true;
 }
 
 /// THE CHANGE SET'S ENGINE HALF (U0 3b; EnginePrivate.h). A pending list is bounded by the scene it names: a scene
@@ -3716,7 +3759,7 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
         }
         if (!any) return 0u;
         ++mGiLightWriteSerial;
-        mPhoton.mGiPlan.stillLampOwed = mPhoton.mGiPlan.movableLampOwed = true;   // it cannot say which lamp moved
+        mPhoton.noteLampsChanged();   // it cannot say which lamp moved
         return 1u;
     }
     if (cs.moved.empty()) return 0u;
@@ -3878,7 +3921,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
     }
     bool firstGi = false;
     if (gi) {
-        mPhoton.mGiMovedBoxes.clear();
+        mGiWalk.clear();
         firstGi = !mGiScannedOnce;
         mGiScannedOnce = true;
     }
@@ -3938,7 +3981,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
         // would let the fresh walk skip the update where nothing moved, exists
         // only in OGRE_DEBUG_MEDIUM builds — an engine-side movement epoch is
         // the way to cut this, and it is a lane of its own.)
-        if (fresh) ++mPhoton.mGiAabbReads;
+        if (fresh) ++mGiWalk.aabbReads;
         const Ogre::Aabb a = fresh ? item->getWorldAabbUpdated() : item->getWorldAabb();
         // Read once per item, both halves use them (each is an SoA read, and
         // this loop is the per-frame cost the whole walk is measured by).
@@ -3972,7 +4015,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
             // dirty list, and its box is tracked only so the settle knows when
             // the drag stopped and what to re-voxelise once at the end.
             if (n.dragMover) {
-                if (mPhoton.giAabbMoved(n.scan.giBox, a)) n.scan.giBox = a;
+                if (PhotonComponent::giAabbMoved(n.scan.giBox, a)) n.scan.giBox = a;
             } else if (!(flags & kGiGeometryBit)) {
                 // PROBE-ONLY geometry (P7): unlit, captured by the probe faces,
                 // never voxelized. Same quantized test, its own record, and a
@@ -3982,10 +4025,10 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                     if (!n.scan.probeKnown) {
                         n.scan.probeKnown = true;
                         n.scan.probeBox = a;
-                        if (!firstGi) mPhoton.mProbeOnlyChanged = true;
-                    } else if (mPhoton.giAabbMoved(n.scan.probeBox, a)) {
+                        if (!firstGi) mGiWalk.probeOnlyChanged = true;
+                    } else if (PhotonComponent::giAabbMoved(n.scan.probeBox, a)) {
                         n.scan.probeBox = a;
-                        mPhoton.mProbeOnlyChanged = true;
+                        mGiWalk.probeOnlyChanged = true;
                     }
                 }
             } else if (!n.scan.giKnown) {
@@ -3993,7 +4036,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                 n.scan.giBox = a;
                 // An ARRIVAL, after the first scan (which sees every item for
                 // the first time and is not news): the probes must capture it (P1).
-                if (!firstGi) mPhoton.mGiItemsAppeared = true;
+                if (!firstGi) mGiWalk.itemsAppeared = true;
                 // ...AND THE CHAIN HAS TO GROW INTO IT (PHOTON_SPEC E2 (2)).
                 //
                 // Without this a NEW GI item that arrived after the chain was
@@ -4008,8 +4051,8 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                 // the newcomer a rebuild to take (no attach set to re-select: the
                 // gather reads membership from the GPU scene at every build). The
                 // scheduler still spends at most one cascade per frame.
-                if (!firstGi && !mPhoton.mVctCascades.empty()) mPhoton.noteGiCascadeDirty(&a);
-            } else if (mPhoton.giAabbMoved(n.scan.giBox, a)) {
+                if (!firstGi && mGiWalkIn.cascades) mGiWalk.cascadeDirty.push_back(a);
+            } else if (PhotonComponent::giAabbMoved(n.scan.giBox, a)) {
                 Ogre::Aabb moved = n.scan.giBox;
                 moved.merge(a);
                 // IS THIS A GESTURE? (MOVER-1.) THE RECORD SAYS (U0 3c): an object the user's gesture moves — the
@@ -4017,7 +4060,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                 // is an edit (a scripted setPosition, a nudge, a paste, physics) and is answered where it happens,
                 // which is what the branch below does. The engine no longer infers a drag from a second move inside
                 // a window of frames: the host has the user's hand and says so.
-                if (mPhoton.mGi.dragMoverChannel && underGesture(n) && !mPhoton.mVctCascades.empty() && !n.movable) {
+                if (mGiWalkIn.dragMoverChannel && underGesture(n) && mGiWalkIn.cascades && !n.movable) {
                     // THE PROMOTION. The object leaves the still world for the
                     // length of the gesture: one re-voxelisation HERE clears
                     // the copy of it the cascades hold at its old pose (the
@@ -4038,16 +4081,16 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                     // is answered once, at the demotion, with reason Mobility.
                     n.scan.giBox = a;
                     n.dragMover = true;
-                    mPhoton.mDragMovers.push_back(n.selfId);
+                    mGiWalk.promoted.push_back(n.selfId);
                     applyNodeVisibilityFlags(n);
-                    mPhoton.noteGiCascadeDirty(&moved);
+                    mGiWalk.cascadeDirty.push_back(moved);
                 } else {
-                    mPhoton.mGiMovedBoxes.push_back(moved);
+                    mGiWalk.movedBoxes.push_back(moved);
                     // ...AND THE CASCADE CHAIN'S OWN RECORD (G1), which unlike
                     // `mGiMovedBoxes` (per frame, by contract) accumulates until the
                     // host's settle asks the chain to answer for it: the frame a
                     // drag is released is not the frame the box moved.
-                    if (!mPhoton.mVctCascades.empty()) mPhoton.noteGiCascadeDirty(&moved);
+                    if (mGiWalkIn.cascades) mGiWalk.cascadeDirty.push_back(moved);
                     n.scan.giBox = a;
                 }
             }
@@ -4107,9 +4150,9 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                 n.scan.decalBox = a;
                 continue;                       // arrival: setDecal staled it already
             }
-            if (mPhoton.giAabbMoved(n.scan.decalBox, a)) {
+            if (PhotonComponent::giAabbMoved(n.scan.decalBox, a)) {
                 n.scan.decalBox = a;
-                mPhoton.mProbeOnlyChanged = true;
+                mGiWalk.probeOnlyChanged = true;
             }
         }
     }
@@ -4181,7 +4224,7 @@ void PhotonComponent::updateProbeBudget(const Ogre::Vector3 &camPos) {
     mProbeUpdatesPerFrame = std::min(budget, int(n));
     if (!n || !budget) return;          // paused: nothing dirtied, nothing scanned
 
-    mScene.ensureGiWalk();
+    if (mScene.ensureGiWalk(walkInputs())) absorbWalk(mScene.giWalk());
 
     // THE INPUTS THIS PASS CAN SEE FOR ITSELF (the rest arrive through the
     // setters: setLight, setPbrMaterial, setSky, attach/detach/visibility ...).
@@ -4195,7 +4238,7 @@ void PhotonComponent::updateProbeBudget(const Ogre::Vector3 &camPos) {
     // it stales the grid exactly the same way. Reading the boxes alone made a
     // dragged image plane look like a STILL scene to the gesture rule below, so
     // it spent a capture on every frame of the drag, which is the whole defect.
-    const bool movedThisFrame = !mGiMovedBoxes.empty() || mProbeOnlyChanged;
+    const bool movedThisFrame = !mScene.giWalk().movedBoxes.empty() || mProbeOnlyChanged;
     if (movedThisFrame || mGiItemsAppeared)
         staleProbeGrid(GiStaleReason::Moved);
     // (An ARRIVAL is not motion and does not arm the gesture: a thing that
@@ -4312,7 +4355,7 @@ void PhotonComponent::updateProbeBudget(const Ogre::Vector3 &camPos) {
         // the region, which is exactly "the space this probe is responsible
         // for", and it is per probe.
         bool covers = false;
-        for (const Ogre::Aabb &b : mGiMovedBoxes)
+        for (const Ogre::Aabb &b : mScene.giWalk().movedBoxes)
             if (probes[i]->getArea().intersects(b)) { covers = true; break; }
         const float score = float(mProbeSlots[i].framesSinceUpdate) * proximity *
                             (covers ? kMovedBoost : 1.0f);
@@ -4518,7 +4561,7 @@ bool PhotonComponent::rebuildVct() {
     }
     if (!itemCount) { teardownVct(); return false; }   // stay armed; next churn re-flags
 
-    mScene.giBinding().vct = mVctLighting;   // this scene's passes read it from now on
+    mScene.bindGiVct(mVctLighting);   // this scene's passes read it from now on
     mGiReusedLastRefresh = false;
 
     // WHAT THE ARM LIT: the OUTERMOST cascade's box, which is what
@@ -5647,8 +5690,7 @@ static void notePlacementPhases(double msScout, double msPlace, double msDrop,
 void PhotonComponent::destroyProbeGrid() {
     if (!mPcc) return;
     forgetGiArms(mRoot->getHlmsManager(), nullptr, nullptr, mPcc);
-    if (mScene.giBinding().pcc == mPcc) {
-        mScene.giBinding().pcc = nullptr;
+    if (mScene.unbindGiPcc(mPcc)) {
         // This scene's datablocks may take their own sky cube back now.
         mScene.applyReflectionToAll();
     }
@@ -6371,9 +6413,7 @@ void PhotonComponent::buildPccFinish() {
     // probes that can see it, and the lights are re-injected on the cheap
     // cadence), and the principled per-probe fix is still upstream's to make.
     if (mGi.updateBudget > 0) minDist = std::max(minDist, diag);
-    mScene.giBinding().pcc = mPcc;
-    mScene.giBinding().pccMinDist = minDist;
-    mScene.giBinding().pccMaxDist = minDist * 2.0f;
+    mScene.bindGiPcc(mPcc, minDist, minDist * 2.0f);
     // ...and THIS scene's datablocks drop their manual cubemap now: its passes
     // make texEnvProbeMap a cube array from here on (OgreSky.cpp, THE ENV-PROBE SLOT HAS ONE OCCUPANT).
     mScene.applyReflectionToAll();
@@ -6618,7 +6658,7 @@ void PhotonComponent::buildIrradianceField() {
         // carry, reach the shader through the pass buffer.
         pushIfdState(settings.mNumProbes);
         // WHOLE, so this scene's passes read it from now on (SceneGiBinding).
-        mScene.giBinding().ifd = mIfd;
+        mScene.bindGiIfd(mIfd);
 
     } JAH_CATCH(mError, );
 }
@@ -6651,7 +6691,7 @@ void PhotonComponent::teardownIrradianceField() {
     // Ogre's visualizer down); the view puts it up again on the next field.
     if (mPhotonIfd == mIfd) mPhotonIfd = nullptr;
     JAH_TRY {
-        mScene.giBinding().ifd = nullptr;
+        mScene.bindGiIfd(nullptr);
         forgetGiArms(mRoot->getHlmsManager(), nullptr, mIfd, nullptr);
         delete mIfd;
     } JAH_CATCH(mError, );
@@ -6968,8 +7008,9 @@ void PhotonComponent::teardownVct() {
     mGiReusedLastRefresh = false;
     // THIS SCENE'S PASSES STOP READING ITS ARMS, and any PBS-family host the
     // last pass left them on lets go before the deletes below.
-    mScene.giBinding().vct = nullptr;
-    mScene.giBinding().pcc = nullptr;
+    mScene.bindGiVct(nullptr);
+    mScene.bindGiPcc(nullptr, 1.0f, 2.0f);   // the dists stay what the last grid bound
+
     forgetGiArms(mRoot->getHlmsManager(), mVctLighting, nullptr, mPcc);
     // Reverse dependency order, all while the SceneManager is still alive:
     // PCC (probe workspaces + cubemap textures) -> PhotonVoxelLighting (reads the
@@ -7085,6 +7126,154 @@ void PhotonComponent::recreateGiAfterShadowRebuild() {
             }
         }
     } JAH_CATCH(mError, );
+}
+
+// THE CARDS' FRAME (the surface cache is Photon's; the scene's facts come through
+// OgreScene::cardLightKey / cardSceneFacts / foldCardEnvironment / cardCandidates).
+void PhotonComponent::updateSurfaceCache() {
+    // THE CARDS RUN ONLY WHERE RAYS RUN (PHOTON-CARDS-2; ATOM-S3-CARDCAP): every
+    // reader of a card is a ray job's hit (rq_reflect.comp, the gather,
+    // jah_rq_card.glsl), and a card's sun term is itself TRACED (traceSun) — so
+    // the cache exists exactly where the ray tier does (the World row resolved
+    // against the machine, `rayReflectionsWanted`) and costs nothing elsewhere.
+    // Off refuses it; on (the default) resolves against the rays.
+    const bool want = mGi.cards && mScene.rayReflectionsWanted();
+    if (!want) {
+        if (mSurfaceCache) mSurfaceCache.reset();
+        return;
+    }
+    if (!mSceneMgr) return;
+    if (!mSurfaceCache) {
+        mSurfaceCache.reset(new SurfaceCache());
+        std::string err;
+        if (!mSurfaceCache->build(mSceneMgr, err)) {
+            // A cache that cannot be built is a reported failure and not a
+            // crash: the row stays on, the cache stays null, and the status
+            // says `built` false.
+            if (!err.empty()) mError = err;
+            mSurfaceCache.reset();
+            return;
+        }
+        // THE SUN ON THE CARDS (PHOTON-CARDS-4; ATOM-S3-CARDCAP): the scene's
+        // in-frame answers and the ray tier's two traces (the still world's, the
+        // movers').
+        CardMoverHooks hooks;
+        hooks.frame = [this](CardMoverFrame &f) { return cardMoverFrame(f); };
+        hooks.trace = [this](const CardMoverTrace &t) { return mScene.traceCardMovers(t); };
+        hooks.readTimes = [this](float &a, float &b) { mScene.cardMoverTimes(a, b); };
+        mSurfaceCache->setMoverHooks(hooks);
+    }
+    mSurfaceCache->setAsyncShaders(mScene.asyncShaders());
+    // A CAMERA-RELATIVE CACHE NEEDS A CAMERA, exactly as the cascade chain
+    // does, and waits for one the same way: `mGiCamPos` is the authoritative
+    // view's last tracked position and is the ORIGIN until a frame has tracked
+    // one. Capturing around the origin and then re-capturing everything on the
+    // first tracked frame is the defect the chain already learned (audit B3).
+    if (!mGiCamPosKnown) return;
+
+    const GiQualityFacts facts =
+        giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop);
+    CardSceneView view;
+    view.sceneMgr = mSceneMgr;
+    view.viewerPos = mGiCamPos;
+    view.budgetTexels = mGi.cardBudgetTexels > 0 ? unsigned(mGi.cardBudgetTexels)
+                                                 : facts.cardBudgetTexels;
+    view.radius = mGi.cardResidencyRadius > 0.0f ? mGi.cardResidencyRadius
+                                                 : facts.cardResidencyRadius;
+    // THE RADIANCE SIGNATURE (walkCardLights) — not `mGiLightWriteSerial`,
+    // which bumps on every `setLight` push and every pose write: what a card's
+    // LIT radiance depends on, folded from the lights themselves.
+    // THE LIGHT WALK IS ITS OWN MONITOR STAGE (ATOM-CPU-WALKS-1), and it walks
+    // ONLY WHEN AN INPUT CAN HAVE CHANGED (SPEED-CPU, perf audit E4: 0.42 ms of
+    // every still frame at the world's 500 lamps). Everything the two folds
+    // read moves one of four counters first:
+    //   * a lamp's DERIVED pose — any transform write that can move it: the
+    //     document's (the host's write counter: a write on a light or on any
+    //     node with children counts, nodegraph.h) and the engine's own
+    //     (setNodeTransform, a socket rider, mSceneTransformWrites) — together
+    //     transformEpoch();
+    //   * its parameters, shadow key and shown flag — setLight and the
+    //     visibility push bump mGiLightWriteSerial;
+    //   * a lamp leaving — mLightsRemoved; one arriving — setLight again, and
+    //     mLightNodes' size.
+    // A DERIVED pose is read without an update (`_getDerivedPosition`), so a
+    // write lands in it at the frame's updateSceneGraph, AFTER this fold — the
+    // walk therefore runs on the frame the key moves AND the one after, which
+    // reads the pose the write produced. A frame whose key has stood still for
+    // two frames folds exactly what the last walk folded.
+    std::optional<monitor::Stage> lightStage;
+    lightStage.emplace("engine.cards.lights");
+    unsigned long long lightKey[4];
+    mScene.cardLightKey(lightKey);
+    const bool keyMoved = !mCardLightFoldValid ||
+                          std::memcmp(lightKey, mCardLightKey, sizeof lightKey) != 0;
+    if (keyMoved || mCardLightKeyMovedLastFrame) {
+        std::memcpy(mCardLightKey, lightKey, sizeof lightKey);
+        mCardLightFoldValid = true;
+        mCardLightFold = mScene.walkCardLights();
+    }
+    mCardLightKeyMovedLastFrame = keyMoved;
+    unsigned long long radianceSig = mCardLightFold;
+    lightStage.reset();
+    // THE CLOUD SHADOW (CLOUDS-2D-2): the snapshot the voxels are injected
+    // with, and its serial in the radiance signature — a layer change or a
+    // scroll capture relights the resident cards (and recaptures none).
+    radianceSig ^= mScene.cloudGiSerial();
+    radianceSig *= 1099511628211ull;
+    mScene.cardSceneFacts(view);   // the footprint rule, the cloud shadow field, the ambient SH
+    view.radianceSerial = radianceSig;
+    view.lightBudgetTexels = facts.cardLightTexels;
+    // THE INDIRECT HALF: the chain the pixel's cones march (the cascade-0
+    // PhotonVoxelLighting the pass buffer is filled from), and THE RE-INJECTION
+    // SIGNATURE — folded ONLY from what moves when an injection LANDS, never
+    // from the write-time serials (a light write or a material generation
+    // bumps at the WRITE, and a dragged light re-marched the whole resident set
+    // against voxels that had not moved, every frame): the chain's settles, each
+    // cascade's rebuilds and lattice cell, the PhotonVoxelLighting objects themselves,
+    // and the environment the escapes read (below).
+    view.vct = mVctLighting;
+    view.indirectBudgetTexels = facts.cardIndirectTexels;
+    // ...and THE AMBIENT AT GI OFF (PHOTON-CARDS-5): the scene's SH, the engine's
+    // own SH x gain (applySkyAmbient), in the indirect signature below.
+    {
+        unsigned long long sig = 1469598103934665603ull;
+        const auto foldI = [&sig](unsigned long long v) {
+            sig ^= v;
+            sig *= 1099511628211ull;
+        };
+        foldI((unsigned long long)mGiChainSettles);
+        foldI(mGiRestTicks);
+        // ...AND THE ENVIRONMENT THE MARCH'S ESCAPES READ, which is not an
+        // injection at all: noteEnvironmentChanged hands the new sky to every
+        // PhotonVoxelLighting at once (applyVctEnvironment) and the pixel reads it the
+        // same frame, so the card's escape must too. The values
+        // applyCascadeEnvironment hands over, quantised.
+        sig = mScene.foldCardEnvironment(sig);   // the sky's reflection cube, its gains, the ambient SH
+        foldI((unsigned long long)(uintptr_t)mVctLighting);
+        for (const VctCascade &c : mVctCascades) {
+            foldI((unsigned long long)(uintptr_t)c.lighting);
+            foldI(c.rebuilds);
+            foldI((unsigned long long)c.latticeX);
+            foldI((unsigned long long)c.latticeY);
+            foldI((unsigned long long)c.latticeZ);
+        }
+        view.indirectSerial = sig;
+    }
+
+    // THE CANDIDATE LIST — handed over rather than reached for, and since
+    // ATOM-CPU-WALKS-1 NOT A WALK: the change feed files every item that can hold
+    // cards (cardEligible, below) by where the table says it is, and the frame
+    // takes the columns the residency sphere reaches. Each offered item's box is
+    // measured NOW (pre-frame, the recomputing read) — the cache's own radius test
+    // and its sort read it from the candidate instead of measuring it again. The
+    // cheap half of the predicate (shown, the GI channel) is re-read here so a hide
+    // this frame is exact; the rest (blend, the card list) changes only through a
+    // re-staged slot (a material edit reaches it through the PBS change log).
+    // THE GESTURE'S HELD NODES (REFLECT-FIX-1): a still the drag channel took off the GI
+    // channel is released by the cache and must come back as itself (mReturning).
+    view.gestureHeld = mDragMovers;
+    mScene.cardCandidates(mGiCamPos, view.radius, view);
+    mSurfaceCache->update(view);
 }
 
 }}}  // namespace jahshaka::engine::detail

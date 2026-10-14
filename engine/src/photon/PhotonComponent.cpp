@@ -30,6 +30,8 @@ PhotonComponent::PhotonComponent(OgreScene &scene, Ogre::Root *const &root,
 // Out of line: the cache's and the feeds' types are complete here.
 PhotonComponent::~PhotonComponent() = default;
 
+void PhotonComponent::releaseSurfaceCache() { mSurfaceCache.reset(); }
+
 }  // namespace detail
 }  // namespace engine
 }  // namespace jahshaka

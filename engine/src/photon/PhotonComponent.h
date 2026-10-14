@@ -36,10 +36,10 @@
 // set's drain, the per-pass binding record, the card feed. The component reaches the scene
 // through ONE back-reference (mScene) — the four facts it reads everywhere (the root, the
 // manager, the engine, the error sink) bound by reference at construction, the rest through
-// the scene's "as Photon reads it" accessors — and the scene's public GI interface forwards
-// to it. The scene is the component's one friend while the orchestration that decides WHAT
-// is rebuilt (the cascade scheduler, the re-voxelisation, the field's update) is still called
-// by name from the scene and the engine; stage 2 moves it into `plan()` / `harvest()`.
+// the scene's "as Photon reads it" seams — and the scene's public GI interface forwards to it.
+// NOTHING OUTSIDE THE COMPONENT TOUCHES ITS STATE (stage 2): the scene and the engine go
+// through THE INTERFACE below (its reads and its events) and its STEPS; the walk hands the
+// component a record (WalkRecord) instead of writing into it; there is no friend.
 #ifndef JAHSHAKA_ENGINE_PHOTONCOMPONENT_H
 #define JAHSHAKA_ENGINE_PHOTONCOMPONENT_H
 
@@ -74,6 +74,7 @@ class TextureGpu;
 namespace jahshaka {
 namespace engine {
 class SurfaceCache;
+struct CardMoverFrame;
 namespace detail {
 
 class OgreEngine;
@@ -164,6 +165,26 @@ public:
     static void registerPasses(AtomPassProvider *provider);
 
     // --- ITS TYPES --------------------------------------------------------------
+    /// THE WALK'S GI RECORD — what one GI walk found (OgreScene::walkItems: the scene's one
+    /// walk for the GI and the shadow scan). The component's input: absorbed right after the
+    /// walk ran (absorbWalk), never written by the walk into the component's state.
+    struct WalkRecord {
+        /// The AABBs that moved (union of each mover's old and new box), world space. Per walk;
+        /// empty when still. Read in place (the probe budget's moved-cover test).
+        std::vector<Ogre::Aabb> movedBoxes;
+        std::vector<Ogre::Aabb> cascadeDirty;   ///< the boxes the cascades owe, in walk order
+        std::vector<NodeId> promoted;           ///< stills the gesture put on the mover channel
+        bool probeOnlyChanged = false;          ///< a probe-only input moved (a non-GI item, a decal)
+        bool itemsAppeared = false;             ///< a GI item seen for the first time
+        unsigned long long aabbReads = 0;       ///< getWorldAabbUpdated calls the walk made
+        void clear() {
+            movedBoxes.clear(); cascadeDirty.clear(); promoted.clear();
+            probeOnlyChanged = itemsAppeared = false; aabbReads = 0;
+        }
+    };
+    /// What the walk asks of the component: the drag-mover channel's switch, and whether a
+    /// cascade chain is built (an edit then owes the chain its box).
+    struct WalkInputs { bool dragMoverChannel = false; bool cascades = false; };
     /// The mover list as last walked, and the slot count it was walked at: the
     /// walk runs only on a frame whose moved set is not empty or whose slot
     /// count changed (or a moved slot now holds another node).
@@ -367,10 +388,284 @@ public:
         float cell() const { return halfSize * 2.0f / float(resolution); }
     };
 
+    // --- THE INTERFACE: what the scene and the engine ask of it (ENGINE-UPGRADE-2B stage 2) ---
+    // The reads (the arms, the parameters, the counters a status or a pass binds) and the
+    // events (a lamp, a mobility flip, a structure edit closed, a material or texture the
+    // scene changed). Nothing outside the component touches its state but through these.
+    const GiParams &giParams() const { return mGi; }
+    Ogre::ParallaxCorrectedCubemapAuto *pcc() const { return mPcc; }
+    bool pccShadowed() const { return mPccShadowed; }
+    Ogre::PhotonVoxelLighting *voxelLighting() const { return mVctLighting; }
+    Ogre::PhotonIrradianceField *irradianceField() const { return mIfd; }
+    size_t cascadeCount() const { return mVctCascades.size(); }
+    Ogre::PhotonVoxelLighting *cascadeLighting(size_t i) const { return mVctCascades[i].lighting; }
+    bool giDeferralPending() const { return mGiDeferralRetry; }
+    /// HOW MUCH of a staged arm build is still owed, and which stage is next
+    /// (OPEN_COVER_SPEC §2.1, lane OPEN-COVER-2b). The public mirror of
+    /// `mGiBuildStage`, which names the stage that will run NEXT — so `Field`
+    /// is one stage from done and `ProbeScout` is four. Read once per frame while
+    /// a world streams in, by the indicator and by the slow-frame line.
+    unsigned giBuildStagesLeft() const {
+        switch (mGiBuildStage) {
+        case GiBuildStage::Idle:        return 0u;
+        case GiBuildStage::ProbeScout:  return 4u;
+        case GiBuildStage::ProbeFit:    return 3u;
+        case GiBuildStage::ProbeFinish: return 2u;
+        case GiBuildStage::Field:       return 1u;
+        }
+        return 0u;
+    }
+    GiArmStage giBuildStage() const {
+        switch (mGiBuildStage) {
+        case GiBuildStage::Idle:        return GiArmStage::None;
+        case GiBuildStage::ProbeScout:  return GiArmStage::ProbeScout;
+        case GiBuildStage::ProbeFit:    return GiArmStage::ProbeFit;
+        case GiBuildStage::ProbeFinish: return GiArmStage::ProbeFinish;
+        case GiBuildStage::Field:       return GiArmStage::Field;
+        }
+        return GiArmStage::None;
+    }
+    unsigned materialsAwaitingTexture() const { return unsigned(mMaterialsAwaitingTexture.size()); }
+    unsigned long long giRebuildCount() const { return mGiRebuilds; }
+    unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
+    SunContactDesc sunContact() const { return mSunContact; }
+    void setPhotonView(PhotonView view) { mPhotonView = view; }
+    PhotonView photonView() const { return mPhotonView; }
+    void setPhotonVoxelCascade(int cascade) { mPhotonVoxelCascade = cascade < 0 ? -1 : cascade; }
+    int photonVoxelCascade() const { return mPhotonVoxelCascade; }
+    /// A lamp event for the GI scheduler (GiPlan): one lamp of the given class, or every lamp
+    /// (an incomplete change set cannot say which one moved).
+    void noteLampChanged(bool movable) { (movable ? mGiPlan.movableLampOwed : mGiPlan.stillLampOwed) = true; }
+    void noteLampsChanged() { mGiPlan.stillLampOwed = mGiPlan.movableLampOwed = true; }
+    /// An item the GI walk has seen changed its mobility class (setNodeMovable).
+    void noteMobilityFlipped() { mGiPlan.mobilityFlipped = true; }
+    /// Would an invalidation now cost a rebuild? (an arm is built and none is owed yet)
+    bool giArmWouldRebuild() const { return !mGiCachesDirty && (mPcc || mVctVoxelizer || mIfd); }
+    void markGiCachesDirty() { mGiCachesDirty = true; }
+    void releaseSurfaceCache();
+    void countProbeGateCrossing() { ++mProbeGateCrossings; }
+    /// A material whose bound texture is still streaming: parked for settleTextureResidency
+    /// (once per material; the voxel half ORs in).
+    void awaitTexture(MaterialId mat, bool voxelInput) {
+        for (auto &e : mMaterialsAwaitingTexture)
+            if (e.first == mat) { e.second = e.second || voxelInput; return; }
+        mMaterialsAwaitingTexture.push_back({ mat, voxelInput });
+    }
+    /// A slot composed before the store converted its datablock: converted by the next build.
+    void queueMaterialSlot(uint32_t slot) const { mVctPendingMaterialSlots.push_back(slot); }
+    /// The scene's outermost structure edit closed: the invalidation it collected, once.
+    void structureEditClosed();
+    /// THE WALK, absorbed: the record of a walk that ran (OgreScene::ensureGiWalk returned true).
+    void absorbWalk(const WalkRecord &w);
+    /// The walk's inputs from the component's state.
+    WalkInputs walkInputs() const { return WalkInputs{ mGi.dragMoverChannel, !mVctCascades.empty() }; }
+    /// The environment moved (the sky, the ambient, the fog): every chain owes a settle and the
+    /// field re-integrates (OgreScene::noteEnvironmentChanged applies the environment first).
+    void noteEnvironmentChanged() {
+        oweChainSettle();
+        if (mIfd) reintegrateFieldAfterInjection();
+    }
+    // --- THE STEPS the scene and the engine call by name (the scene's GI interface forwards to
+    // them; stage 2's plan() / harvest() take over the per-frame ones) ---------------------------
+    // ---- Global illumination (PHOTON_SPEC.md; GI_SPEC.md phases 1-3 is its
+    // ---- earlier spec, history like the Rayon name) ----
+    // Instant Radiosity traces rays from ONE chosen light against the scene's
+    // PBR items and plants point lights (LT_VPL) where the rays bounce.
+    // The VPLs live in THIS SceneManager and ride its Forward+ clustered list —
+    // nothing binds to the process-wide HlmsPbs, so IR never leaks into the
+    // player/asset/preview scenes. (The sample's optional IrradianceVolume WOULD
+    // be such a global binding — deliberately not used.)
+    // VCT voxelizes the scene's PBR items over the GI bounds and cone-traces the
+    // result; the hybrid adds a parallax-corrected cubemap probe grid whose
+    // reflections blend with VCT's by distance (HlmsPbs PccVctMinDistance).
+    // Every scene's arms are its own: the PBS pass of a scene binds that scene's
+    // PhotonVoxelLighting, field and grid, per pass (SceneGiBinding, above).
+    bool setGlobalIllumination(const GiParams &p);
+    bool setGiTuning(const GiParams &p);
+    void refreshGlobalIllumination(GiRefreshReason reason);
+    GiStatus giStatus() const;
+    /// PHOTON-M3's readback: what the voxel lighting volume holds. Blocks on a
+    /// flush and a whole-volume download — a test and tool path (Engine.h).
+    GiVoxelStats giVoxelStats(int cascade);
+    bool giFieldAtlas(GiFieldAtlas &out);
+    bool giVoxelVolume(int cascade, GiVoxelVolume &out);
+    /// AT A RAY TIER THE PROBE GRID IS NOT BUILT (PHOTON-F12-PCC; OgreGi.cpp).
+    /// `probeGridByRays` is the rule — the tier's facts say its reflections
+    /// are traced (GiQualityFacts::rayReflections) AND this scene traces on
+    /// this machine (rayTracingResolved), the gather's own shape — and
+    /// `probeGridWanted` is the one question every grid path asks: the hybrid,
+    /// and not a ray tier.
+    bool probeGridByRays() const;
+    bool probeGridWanted() const;
+    /// One probe's shadow-node bytes when this grid's captures are shadowed, else
+    /// 0 (PCC-BUDGET-2: OgreEngine::probeShadowNodeBytes at the live settings).
+    unsigned long long probeShadowBytes() const;
+    /// ...and the grid such a tier does not build, taken down (OgreGi.cpp).
+    void dropProbeGridByRays();
+    /// THE LIGHTING SERIAL the gather's settled history counts from
+    /// (PHOTON-GATHER-1d, OgreGi.cpp): folded from the light-write serial and
+    /// from what moves when an injection LANDS (the chain's settles, each
+    /// cascade's rebuilds and lattice cell).
+    unsigned long long giLightingSerial() const;
+    bool refreshGiLighting(bool inMotion);
+    /// The SAME contract for the hybrid's reflection-probe arm, and the fix for
+    /// SHADOW_TOOLING_SPEC.md risk R3: when the probe captures are SHADOWED,
+    /// every probe workspace instantiates JahshakaProbeShadowNode too, so deleting
+    /// the definition under them leaves live CompositorShadowNodes pointing at
+    /// freed memory. Reproduced as a SEGV in Hlms::preparePassHashBase
+    /// (tests/shadow, mode r3) before this existed. Returns true when the arm
+    /// was dropped and the caller must call the recreate below.
+    /// THE SHADOW-ATLAS REBUILD'S GI HALF (PHOTON_SPEC G2). Drops exactly the
+    /// WORKSPACES that instantiate the probe shadow node — each PCC probe's —
+    /// and nothing else. The voxels, the cascade chain and
+    /// the probes' own shapes survive: a shadow atlas growing on the 3rd, 5th or
+    /// 9th casting lamp is shadow bookkeeping, not a statement about the scene's
+    /// geometry. Returns false when this scene holds no such workspace.
+    bool dropGiForShadowRebuild();
+    void recreateGiAfterShadowRebuild();
+    /// A TEXTURE THAT ARRIVED LATE IS A LATE PROBE INPUT (clean-2 lane,
+    /// 2026-09-13). `setPbrTexture` stales the grid when the bind happens, but
+    /// a texture is only SCHEDULED there: what the probes captured that frame
+    /// was the stub, and the frame the pixels actually arrive is nobody's
+    /// input. Materials bound to a not-yet-resident texture are parked here and
+    /// re-noted on the frame the last of their textures becomes ready. Called
+    /// once a frame per scene, right after the engine's texture drain; returns
+    /// immediately (one empty() test) when nothing is parked, which is every
+    /// frame after a scene has finished loading.
+    void settleTextureResidency();
+    /// Whether the GI flush should wait for a voxel-input texture that is still
+    /// streaming (BOOTVOX-1). Counts the frames it has waited, so it is not
+    /// const. See the definition in OgreGi.cpp.
+    bool giVoxelTexturesPending();
+    bool giEnvironmentPending();
+    /// The GI arms hold by-pointer state (the material store's conversions, keyed
+    /// on the datablock pointer; Instant Radiosity's caches), so every
+    /// geometry/material/texture destroy path calls this BEFORE the object
+    /// actually dies. The rebuild
+    /// still happens ONCE at frame time (bursty destroys = one rebuild); the
+    /// flush tears the whole arm down and re-voxelizes from the LIVE scene — or,
+    /// under a cascade chain, marks only the cascades the change reaches (G1) —
+    /// so a recycled pointer can never alias.
+    void invalidateGiCaches() { invalidateGiCaches(nullptr, true); }
+    /// ...with the world box the edit touched, where the call site knows it:
+    /// that box is what decides which cascades owe a rebuild (G1). nullptr =
+    /// "somewhere in the scene". A hide or a show (DRAG-1) calls this too: the
+    /// item SET changed and every build's gather reads it off the GPU scene.
+    void invalidateGiCaches(const Ogre::Aabb *where) { invalidateGiCaches(where, true); }
+    /// `geometryVoxelsChanged == false` says NOTHING A VOXEL HOLDS MOVED — a
+    /// LIGHT left the scene. No cascade owes a RE-VOXELISATION: a light is
+    /// answered by a re-injection, which is what the dirty path does when
+    /// nothing geometric is marked (G1).
+    void invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged);
+    /// Called by Engine::renderOneFrame before rendering.
+    void applyPendingGi();
+    /// applyPendingGi as an ASYNCHRONOUS scene runs it (ASYNC-SHADERS-1): the lighting arm's
+    /// compute permutations are never compiled in the frame. Under the fork's deferred
+    /// dispatch a missing one goes to the background compiler and its dispatch is skipped;
+    /// the arm built that frame is then not a result: the frame is HELD (AsyncHoldListener)
+    /// and the arm is rebuilt once the background compiler has drained. A blocking scene
+    /// runs applyPendingGi unchanged.
+    void applyPendingGiDeferrable();
+    /// Runs `work` (a lighting-arm build) under the deferred dispatch when the scene is
+    /// asynchronous; a deferral owes the arm a whole rebuild (giDeferralPending).
+    void giDeferrable(const std::function<void()> &work);
+    /// The flush proper — what applyPendingGi was before the staged machine.
+    void applyPendingGiFlush();
+    /// Does this scene still owe a stage of a staged arm build? Read by
+    /// Engine::framePaceOwesWork.
+    bool giBuildOwesWork() const;
+    /// Called by Engine::renderOneFrame once the frame's GI work is decided and
+    /// before it renders: records how many probes this frame re-captures
+    /// (GiStatus::probeCapturesLastFrame). `drawn` = a View draws this scene
+    /// this frame (an undrawn scene's dirty probes do not render).
+    void latchProbeCaptures(bool drawn);
+    /// Called by OgreView each frame with its camera position: the PCC probe
+    /// blend tracks the viewer. No-op unless the hybrid mode is live.
+    void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo);
+    /// Re-derives the Forward+ clustered depth-slice range from this camera and
+    /// the scene's own extent (LIGHTING_FIX fix 8 / F-F1). Rate-limited AND
+    /// hysteretic — `setForwardClustered` recreates the grid buffers, so it must
+    /// never run per frame.
+    void updateForwardPlusRanges(const Ogre::Camera *cam);
+    /// How many lights this scene holds that Forward+ has to fit into its
+    /// per-cell budget, and the budget itself (F-F2). See RenderStats.
+    void forwardPlusLightCensus(unsigned &lights, unsigned &budget) const;
+    /// Marks every probe of the grid stale — owed a capture the budget will
+    /// spend over the next frames — and records why (P1/P6/P7). Cheap: flags
+    /// only; nothing renders here. A no-op without a probe grid.
+    void staleProbeGrid(GiStaleReason why);
+    /// P7, materials: a visible material changed — stale the probes and, when
+    /// the change reaches the voxelizer's conversion, bump the material
+    /// generation (see mGiMaterialGeneration).
+    void noteMaterialChanged(MaterialId id, bool voxelInputsChanged);
+    /// A DATABLOCK OR TEXTURE THE MATERIAL STORE HOLDS IS DYING. `PhotonVoxelMaterial`
+    /// keys its conversions on the datablock POINTER and a recycled address
+    /// would alias.
+    /// THE BY-POINTER ALIAS GUARD (MATERIAL-SWAP-GI-1, fork ad452604a+0338ca7f2+c4c80b5f7 (was 0081)): PhotonVoxelMaterial
+    /// caches conversions by raw datablock pointer across builds, so a dying
+    /// datablock is EVICTED from every live voxeliser's cache — no volume is
+    /// re-voxelised for a death. With a null pointer (a caller that cannot name
+    /// the datablock) it falls back to marking every cascade's voxels fresh.
+    void noteGiDatablockDied(Ogre::HlmsDatablock *dying = nullptr);
+    /// The movement quantum for one item's world AABB (a 64th of its own
+    /// largest extent), and "did this AABB move by at least that much?". Shared
+    /// by giGeometryKey and walkItems so the GI scheduler and
+    /// the probe round-robin can never disagree about what moved.
+    static float giAabbQuantum(const Ogre::Aabb &a);
+    static bool  giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after);
+    /// Deletes every GI object. Safe to call twice; must run BEFORE the
+    /// SceneManager dies (probe workspaces, GI camera).
+    void teardownGi();
+    /// THE ONE GI SCHEDULER (U0 3c; OgreGi.cpp): run by the drain once per record that carries the scene's GI.
+    void planGi(const FrameInputScene &part, bool pushed);
+    std::string photonViewRefusal(PhotonView view) const;
+    /// ONCE A FRAME PER DRAWN SCENE (renderOneFrame, after updateSurfaceCache):
+    /// the scene half of the view — Ogre's voxel visualizer on the finest cascade
+    /// that holds the camera (Voxels), Ogre's probe visualizer on the field
+    /// (Probes), the cards' quads from the cache's table (Cards) — each put up,
+    /// followed and taken down as the view and the GI arms move. Free when Off
+    /// and nothing is up.
+    void syncPhotonView();
+    /// Every drawable down (the scene's teardown, before the GI arms and the
+    /// SceneManager; idempotent).
+    void releasePhotonView();
+    /// `presents`: a view a person watches — a window, or a headset's eye pair (an
+    /// offscreen target only because the runtime copies it); an editor's shot is
+    /// neither and is forgotten here.
+    /// The cards' frame: the cache built, fed and updated (engine.cards, once a frame).
+    void updateSurfaceCache();
+    void notePhotonView(const void *view, bool presents, const PhotonViewShape &shape);
+    bool readCardTexel(NodeId node, unsigned card, float u, float v,
+                       CardSample &out);
+    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
+                    NodeId onlyNode = 0);
+    bool dumpCardAtlas(const std::string &prefix, std::string &err);
+    /// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — the scene's in-frame
+    /// answers to the cache (OgreGpuScene.cpp: the traced shadow-casting movers,
+    /// the frame's moved set, the still casters a transform write moved) and the
+    /// ray tier's trace and timestamps (OgreRayQuery.cpp).
+    bool cardMoverFrame(CardMoverFrame &out);
+    /// THE SCREEN-PROBE GATHER (GATHER-1a). Both are defined in
+    /// OgreRayQuery.cpp — like the tier's own members, so that not one line
+    /// of the ray tier lives in a TU that does not include Vulkan — and both
+    /// answer for the SCENE, not for a view: the row is the project's and the
+    /// machine's, and every view of the scene that carries a prepass gathers.
+    ///
+    /// With the row off the tier records no dispatch, the Component allocates
+    /// nothing, the Hlms listener sets no property and no pixel moves.
+    bool probeGatherWanted() const;
+    /// ...and the gather's REST KEY (OgreRayQuery.cpp): that serial, the
+    /// geometry's movement epoch and the surface cache's captures and relights.
+    unsigned long long gatherRestKey() const;
+    /// The settle's key: the discontinuities only (OgreRayQuery.cpp).
+    unsigned long long gatherRestartKey() const;
+    /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1). The row is stored here and
+    /// read by the view (the chain's prepass) and the ray tier (the job);
+    /// `sunContactWanted` is the row resolved against the machine, defined in
+    /// OgreRayQuery.cpp beside `probeGatherWanted` for the same reason.
+    void setSunContact(const SunContactDesc &d);
+    bool sunContactWanted() const;
 private:
-    /// The scene's orchestration (OgreGi.cpp) still calls into the component's state and
-    /// steps by name — the stage-1 seam; stage 2's plan()/harvest() replaces it.
-    friend class OgreScene;
     OgreScene &mScene;
     Ogre::Root *const &mRoot;
     Ogre::SceneManager *const &mSceneMgr;
@@ -450,28 +745,6 @@ private:
     /// table's VR column (GiViewProfile, V1-RIG item 4) and is written by the
     /// once-a-frame driver hook.
     bool mGiDriverStereo = false;
-    // ---- Global illumination (PHOTON_SPEC.md; GI_SPEC.md phases 1-3 is its
-    // ---- earlier spec, history like the Rayon name) ----
-    // Instant Radiosity traces rays from ONE chosen light against the scene's
-    // PBR items and plants point lights (LT_VPL) where the rays bounce.
-    // The VPLs live in THIS SceneManager and ride its Forward+ clustered list —
-    // nothing binds to the process-wide HlmsPbs, so IR never leaks into the
-    // player/asset/preview scenes. (The sample's optional IrradianceVolume WOULD
-    // be such a global binding — deliberately not used.)
-    // VCT voxelizes the scene's PBR items over the GI bounds and cone-traces the
-    // result; the hybrid adds a parallax-corrected cubemap probe grid whose
-    // reflections blend with VCT's by distance (HlmsPbs PccVctMinDistance).
-    // Every scene's arms are its own: the PBS pass of a scene binds that scene's
-    // PhotonVoxelLighting, field and grid, per pass (SceneGiBinding, above).
-    bool setGlobalIllumination(const GiParams &p);
-    bool setGiTuning(const GiParams &p);
-    void refreshGlobalIllumination(GiRefreshReason reason);
-    GiStatus giStatus() const;
-    /// PHOTON-M3's readback: what the voxel lighting volume holds. Blocks on a
-    /// flush and a whole-volume download — a test and tool path (Engine.h).
-    GiVoxelStats giVoxelStats(int cascade);
-    bool giFieldAtlas(GiFieldAtlas &out);
-    bool giVoxelVolume(int cascade, GiVoxelVolume &out);
     std::vector<CardMoverRec> mCardMovers;
     uint32_t mCardMoverSlots = 0xFFFFFFFFu;
     std::vector<CardCasterRec> mCardCasters;
@@ -479,61 +752,10 @@ private:
     /// The lighting arm met a permutation still building (applyPendingGiDeferrable).
     bool mGiDeferralRetry = false;
     unsigned long long mGiDeferrals = 0;
-    /// AT A RAY TIER THE PROBE GRID IS NOT BUILT (PHOTON-F12-PCC; OgreGi.cpp).
-    /// `probeGridByRays` is the rule — the tier's facts say its reflections
-    /// are traced (GiQualityFacts::rayReflections) AND this scene traces on
-    /// this machine (rayTracingResolved), the gather's own shape — and
-    /// `probeGridWanted` is the one question every grid path asks: the hybrid,
-    /// and not a ray tier.
-    bool probeGridByRays() const;
-    bool probeGridWanted() const;
-    /// One probe's shadow-node bytes when this grid's captures are shadowed, else
-    /// 0 (PCC-BUDGET-2: OgreEngine::probeShadowNodeBytes at the live settings).
-    unsigned long long probeShadowBytes() const;
-    /// ...and the grid such a tier does not build, taken down (OgreGi.cpp).
-    void dropProbeGridByRays();
-    /// THE LIGHTING SERIAL the gather's settled history counts from
-    /// (PHOTON-GATHER-1d, OgreGi.cpp): folded from the light-write serial and
-    /// from what moves when an injection LANDS (the chain's settles, each
-    /// cascade's rebuilds and lattice cell).
-    unsigned long long giLightingSerial() const;
     SunContactDesc mSunContact;
-    bool refreshGiLighting(bool inMotion);
-    void setNodeProbeGridExcluded(NodeId id, bool excluded);
-    bool nodeProbeGridExcluded(NodeId id) const;
-    /// The SAME contract for the hybrid's reflection-probe arm, and the fix for
-    /// SHADOW_TOOLING_SPEC.md risk R3: when the probe captures are SHADOWED,
-    /// every probe workspace instantiates JahshakaProbeShadowNode too, so deleting
-    /// the definition under them leaves live CompositorShadowNodes pointing at
-    /// freed memory. Reproduced as a SEGV in Hlms::preparePassHashBase
-    /// (tests/shadow, mode r3) before this existed. Returns true when the arm
-    /// was dropped and the caller must call the recreate below.
-    /// THE SHADOW-ATLAS REBUILD'S GI HALF (PHOTON_SPEC G2). Drops exactly the
-    /// WORKSPACES that instantiate the probe shadow node — each PCC probe's —
-    /// and nothing else. The voxels, the cascade chain and
-    /// the probes' own shapes survive: a shadow atlas growing on the 3rd, 5th or
-    /// 9th casting lamp is shadow bookkeeping, not a statement about the scene's
-    /// geometry. Returns false when this scene holds no such workspace.
-    bool dropGiForShadowRebuild();
-    void recreateGiAfterShadowRebuild();
     /// The near/far the probe cameras were placed with — remembered so the
     /// workspaces above can be re-created exactly as they were (G2).
     float mProbeCamNear = 0.5f, mProbeCamFar = 500.0f;
-    /// A TEXTURE THAT ARRIVED LATE IS A LATE PROBE INPUT (clean-2 lane,
-    /// 2026-09-13). `setPbrTexture` stales the grid when the bind happens, but
-    /// a texture is only SCHEDULED there: what the probes captured that frame
-    /// was the stub, and the frame the pixels actually arrive is nobody's
-    /// input. Materials bound to a not-yet-resident texture are parked here and
-    /// re-noted on the frame the last of their textures becomes ready. Called
-    /// once a frame per scene, right after the engine's texture drain; returns
-    /// immediately (one empty() test) when nothing is parked, which is every
-    /// frame after a scene has finished loading.
-    void settleTextureResidency();
-    /// Whether the GI flush should wait for a voxel-input texture that is still
-    /// streaming (BOOTVOX-1). Counts the frames it has waited, so it is not
-    /// const. See the definition in OgreGi.cpp.
-    bool giVoxelTexturesPending();
-    bool giEnvironmentPending();
     // ---- GI internals ----
     /// THE REFLECTION-PROBE GRID'S PLACEMENT REGION (a placement heuristic
     /// pending A9, never a lighting volume): the suite's pinned region, or
@@ -547,58 +769,6 @@ private:
     /// The mean of the CENTRES of the GI items that fit inside `maxEdge` —
     /// "everything that is not scenery". False when the scene is only scenery.
     bool giContentCentre(float maxEdge, Ogre::Vector3 &centre) const;
-    /// The GI arms hold by-pointer state (the material store's conversions, keyed
-    /// on the datablock pointer; Instant Radiosity's caches), so every
-    /// geometry/material/texture destroy path calls this BEFORE the object
-    /// actually dies. The rebuild
-    /// still happens ONCE at frame time (bursty destroys = one rebuild); the
-    /// flush tears the whole arm down and re-voxelizes from the LIVE scene — or,
-    /// under a cascade chain, marks only the cascades the change reaches (G1) —
-    /// so a recycled pointer can never alias.
-    void invalidateGiCaches() { invalidateGiCaches(nullptr, true); }
-    /// ...with the world box the edit touched, where the call site knows it:
-    /// that box is what decides which cascades owe a rebuild (G1). nullptr =
-    /// "somewhere in the scene". A hide or a show (DRAG-1) calls this too: the
-    /// item SET changed and every build's gather reads it off the GPU scene.
-    void invalidateGiCaches(const Ogre::Aabb *where) { invalidateGiCaches(where, true); }
-    /// `geometryVoxelsChanged == false` says NOTHING A VOXEL HOLDS MOVED — a
-    /// LIGHT left the scene. No cascade owes a RE-VOXELISATION: a light is
-    /// answered by a re-injection, which is what the dirty path does when
-    /// nothing geometric is marked (G1).
-    void invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged);
-    /// Called by Engine::renderOneFrame before rendering.
-    void applyPendingGi();
-    /// applyPendingGi as an ASYNCHRONOUS scene runs it (ASYNC-SHADERS-1): the lighting arm's
-    /// compute permutations are never compiled in the frame. Under the fork's deferred
-    /// dispatch a missing one goes to the background compiler and its dispatch is skipped;
-    /// the arm built that frame is then not a result: the frame is HELD (AsyncHoldListener)
-    /// and the arm is rebuilt once the background compiler has drained. A blocking scene
-    /// runs applyPendingGi unchanged.
-    void applyPendingGiDeferrable();
-    /// Runs `work` (a lighting-arm build) under the deferred dispatch when the scene is
-    /// asynchronous; a deferral owes the arm a whole rebuild (giDeferralPending).
-    void giDeferrable(const std::function<void()> &work);
-    /// The flush proper — what applyPendingGi was before the staged machine.
-    void applyPendingGiFlush();
-    /// Does this scene still owe a stage of a staged arm build? Read by
-    /// Engine::framePaceOwesWork.
-    bool giBuildOwesWork() const;
-    /// Called by Engine::renderOneFrame once the frame's GI work is decided and
-    /// before it renders: records how many probes this frame re-captures
-    /// (GiStatus::probeCapturesLastFrame). `drawn` = a View draws this scene
-    /// this frame (an undrawn scene's dirty probes do not render).
-    void latchProbeCaptures(bool drawn);
-    /// Called by OgreView each frame with its camera position: the PCC probe
-    /// blend tracks the viewer. No-op unless the hybrid mode is live.
-    void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo);
-    /// Re-derives the Forward+ clustered depth-slice range from this camera and
-    /// the scene's own extent (LIGHTING_FIX fix 8 / F-F1). Rate-limited AND
-    /// hysteretic — `setForwardClustered` recreates the grid buffers, so it must
-    /// never run per frame.
-    void updateForwardPlusRanges(const Ogre::Camera *cam);
-    /// How many lights this scene holds that Forward+ has to fit into its
-    /// per-cell budget, and the budget itself (F-F2). See RenderStats.
-    void forwardPlusLightCensus(unsigned &lights, unsigned &budget) const;
     /// Builds the camera-centred cascade chain from scratch and binds it to
     /// HlmsPbs (see invalidateGiCaches). Where a probe grid is wanted, also
     /// places it over computeProbeRegion.
@@ -704,20 +874,12 @@ private:
     /// Called from updateGiTracking with the AUTHORITATIVE camera position; a
     /// no-op at budget 0.
     void updateProbeBudget(const Ogre::Vector3 &camPos);
-    /// Marks every probe of the grid stale — owed a capture the budget will
-    /// spend over the next frames — and records why (P1/P6/P7). Cheap: flags
-    /// only; nothing renders here. A no-op without a probe grid.
-    void staleProbeGrid(GiStaleReason why);
     /// P7 hooks: does any item that probes (probeSeesItem) or the voxelizer
     /// (kGiGeometryBit) can see use this material?
     bool materialSeenByGi(MaterialId id, bool &voxelized) const;
     /// A hash of the GI gather's boxes — "is this the same content the current
     /// automatic volume was fitted to?" (OgreGi.cpp, lane ENGINE-7 item 2).
     static unsigned long long giContentSignature(const std::vector<Ogre::Aabb> &boxes);
-    /// P7, materials: a visible material changed — stale the probes and, when
-    /// the change reaches the voxelizer's conversion, bump the material
-    /// generation (see mGiMaterialGeneration).
-    void noteMaterialChanged(MaterialId id, bool voxelInputsChanged);
     /// The rule noteMaterialChanged applies, as a QUESTION — so the batched
     /// settle in settleTextureResidency can ask it per material and act ONCE
     /// (F5: one probe stale and one material-generation bump per frame,
@@ -801,15 +963,6 @@ private:
     /// moved — a light leaving the scene — which is what makes that a
     /// re-injection and nothing else.
     void noteGiCascadeDirty(const Ogre::Aabb *box);
-    /// A DATABLOCK OR TEXTURE THE MATERIAL STORE HOLDS IS DYING. `PhotonVoxelMaterial`
-    /// keys its conversions on the datablock POINTER and a recycled address
-    /// would alias.
-    /// THE BY-POINTER ALIAS GUARD (MATERIAL-SWAP-GI-1, fork ad452604a+0338ca7f2+c4c80b5f7 (was 0081)): PhotonVoxelMaterial
-    /// caches conversions by raw datablock pointer across builds, so a dying
-    /// datablock is EVICTED from every live voxeliser's cache — no volume is
-    /// re-voxelised for a death. With a null pointer (a caller that cannot name
-    /// the datablock) it falls back to marking every cascade's voxels fresh.
-    void noteGiDatablockDied(Ogre::HlmsDatablock *dying = nullptr);
     /// Marks every cascade whose box intersects the recorded dirty region (or
     /// all of them when the region is unknown) `pending`, and clears the region.
     /// `why` is the reason the monitor row will carry. Returns how many cascades
@@ -916,12 +1069,6 @@ private:
     /// progressively over the converged atlas when only the voxels changed.
     /// A no-op with no field, or with the toggle off.
     void          followCascade0Field(GiStaleReason reason);
-    /// The movement quantum for one item's world AABB (a 64th of its own
-    /// largest extent), and "did this AABB move by at least that much?". Shared
-    /// by giGeometryKey and walkItems so the GI scheduler and
-    /// the probe round-robin can never disagree about what moved.
-    static float giAabbQuantum(const Ogre::Aabb &a);
-    static bool  giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after);
     /// The GI items' world AABBs after the exclude flag and the extent-outlier
     /// trimming: the one place that decides which objects place the probe grid.
     std::vector<Ogre::Aabb> giItemBounds() const;
@@ -937,9 +1084,6 @@ private:
     /// PCC, PhotonVoxelLighting and PhotonVoxelizer, in that order. Safe to call twice;
     /// must run BEFORE the SceneManager dies.
     void teardownVct();
-    /// Deletes every GI object. Safe to call twice; must run BEFORE the
-    /// SceneManager dies (probe workspaces, GI camera).
-    void teardownGi();
     /// THE FAR-FIELD PROXY, AS APPLIED (ATOM stage 1): the scene's
     /// `GiParams::cascadeVoxelLod` met with the run-wide diagnostic latch,
     /// resolved once per `setGlobalIllumination` and reported as
@@ -1244,8 +1388,6 @@ private:
     unsigned long long mGiInjectionCountFrame = ~0ull;
     unsigned           mGiInjectionsThisFrame = 0;
     unsigned           mGiInjectionsPeak      = 0;
-    /// THE ONE GI SCHEDULER (U0 3c; OgreGi.cpp): run by the drain once per record that carries the scene's GI.
-    void planGi(const FrameInputScene &part, bool pushed);
     bool mGiInvalidationPending = false;
     bool mGiRestartPending = false;
     void applyGiInvalidation(bool restartStagedBuild);
@@ -1263,10 +1405,8 @@ private:
     /// a from-scratch build. Reported by giStatus; cleared by every such build.
     bool mGiReusedLastRefresh = false;
     /// (The GI items' last-seen world AABBs live on each Node — Node::scan,
-    /// walkItems — no longer in a per-scene map keyed by node.)
-    /// The AABBs that moved on the most recent scan (union of each mover's old
-    /// and new box), in world space. Rebuilt every scan; empty when still.
-    std::vector<Ogre::Aabb> mGiMovedBoxes;
+    /// walkItems — and the boxes that moved on the most recent scan are the walk's
+    /// record: mScene.giWalk().movedBoxes.)
     /// A GI item was seen for the FIRST time by a scan after the first one — a
     /// new object arrived. Not a move, but it is an input the probes must see
     /// (P1): the next budget pass stales the grid with reason Moved and clears
@@ -1372,6 +1512,12 @@ private:
     unsigned           mProbeReplacements = 0;   // GiStatus::probeReplacements
     unsigned long long mProbeCapturesTotal = 0;
     unsigned long long mGiRebuilds = 0;
+    /// The lighting showing the Voxels picture is still one of the chain's and
+    /// still shows it (checked by pointer before any dereference).
+    bool photonVoxelLive() const;
+    void photonVoxelsOff();
+    void photonProbesOff();
+    void photonCardsOff();
 };
 
 }  // namespace detail

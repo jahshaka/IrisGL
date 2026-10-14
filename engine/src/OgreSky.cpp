@@ -1821,8 +1821,8 @@ void OgreScene::resolveIblMipmaps() {
     mIblMipmapsDirty = false;
     unsigned mips = 1u;
     JAH_TRY {
-        if (mPhoton.mPcc && mGiBinding.pcc == mPhoton.mPcc && mPhoton.mPcc->getBindTexture()) {
-            mips = mPhoton.mPcc->getBindTexture()->getNumMipmaps();
+        if (mPhoton.pcc() && mGiBinding.pcc == mPhoton.pcc() && mPhoton.pcc()->getBindTexture()) {
+            mips = mPhoton.pcc()->getBindTexture()->getNumMipmaps();
         } else {
             for (const auto &kv : mMaterials) {
                 if (kv.second.unlit) continue;
@@ -2708,7 +2708,7 @@ void OgreScene::snapshotCloudGi(bool fieldRebaked) {
     // The voxels hold the direct term, so a change re-injects them (the light
     // tick's path: one injection over the voxels already there, or an owed tick
     // under a chain); the field re-integrates from them.
-    if (mPhoton.mVctLighting) refreshGiLighting(false);
+    if (mPhoton.voxelLighting()) refreshGiLighting(false);
 }
 
 void OgreScene::bindCloudInjection(Ogre::PhotonVoxelLighting *lighting) {

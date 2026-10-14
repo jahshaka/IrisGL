@@ -146,6 +146,7 @@ namespace jahshaka { namespace engine {
 class SurfaceCache;
 struct CardMoverTrace;
 struct CardMoverFrame;
+struct CardSceneView;
 // The backend's own namespace: these types and helpers are shared between the
 // TUs under engine/src and by nothing else (they used to live in one anonymous
 // namespace, when the backend was a single translation unit).
@@ -4107,22 +4108,21 @@ public:
     /// signatures this reads) and before Ogre's own workspaces run. It builds
     /// the cache on the first frame `GiParams::cards` is on, tears it down when
     /// the row goes off, and otherwise spends the tier's texel budget.
-    void updateSurfaceCache();
-    bool readCardTexel(NodeId node, unsigned card, float u, float v,
-                       CardSample &out) override;
-    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
-                    NodeId onlyNode = 0) override;
-    bool dumpCardAtlas(const std::string &prefix, std::string &err) override;
-    const SurfaceCache *surfaceCache() const { return mPhoton.mSurfaceCache.get(); }
+    void updateSurfaceCache() { mPhoton.updateSurfaceCache(); }
+    /// THE CARDS' SCENE FACTS (the surface cache is Photon's: PhotonComponent::updateSurfaceCache).
+    void cardLightKey(unsigned long long out[4]) const;
+    void cardSceneFacts(CardSceneView &view) const;
+    unsigned long long foldCardEnvironment(unsigned long long sig) const;
+    void cardCandidates(const Ogre::Vector3 &centre, float radius, CardSceneView &view);   // fills view.candidates
+    bool readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) override { return mPhoton.readCardTexel(node, card, u, v, out); }
+    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out, NodeId onlyNode = 0) override { return mPhoton.readCardAt(world, normal, out, onlyNode); }
+    bool dumpCardAtlas(const std::string &prefix, std::string &err) override { return mPhoton.dumpCardAtlas(prefix, err); }
+    const SurfaceCache *surfaceCache() const { return mPhoton.surfaceCache(); }
     /// The compile mode the scene's views ask for (View::setAsyncShaders); its own captures
     /// follow it (ASYNC-SHADERS-1).
     void setAsyncShaders(bool on) { mAsyncShaders = on; }
     bool asyncShaders() const { return mAsyncShaders; }
-    /// THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) — the scene's in-frame
-    /// answers to the cache (OgreGpuScene.cpp: the traced shadow-casting movers,
-    /// the frame's moved set, the still casters a transform write moved) and the
-    /// ray tier's trace and timestamps (OgreRayQuery.cpp).
-    bool cardMoverFrame(CardMoverFrame &out);
+    bool cardMoverFrame(CardMoverFrame &out) { return mPhoton.cardMoverFrame(out); }
     bool traceCardMovers(const CardMoverTrace &job);
     void cardMoverTimes(float &traceMs, float &stillMs);
     using CardMoverRec = PhotonComponent::CardMoverRec;
@@ -4151,46 +4151,31 @@ public:
         auto rec = mMeshes.find(id->second);
         return rec == mMeshes.end() ? nullptr : &rec->second.lodBounds;
     }
-    unsigned long long giMaterialGeneration() const { return mPhoton.mGiMaterialGeneration; }
+    unsigned long long giMaterialGeneration() const { return mPhoton.giMaterialGeneration(); }
     bool mAsyncShaders = false;
     /// IBL convolutions deferred because a permutation was building (ASYNC-SHADERS-1).
     unsigned long long mIblDeferrals = 0;
     /// The ray rule's footprint per metre of distance, as updateRayLevels last
     /// computed it (the surface cache's still-trace lift, CardSceneView).
     float mRayFootprintPerMetre = 0.0f;
-    /// THE SCREEN-PROBE GATHER (GATHER-1a). Both are defined in
-    /// OgreRayQuery.cpp — like the tier's own members, so that not one line
-    /// of the ray tier lives in a TU that does not include Vulkan — and both
-    /// answer for the SCENE, not for a view: the row is the project's and the
-    /// machine's, and every view of the scene that carries a prepass gathers.
-    ///
-    /// With the row off the tier records no dispatch, the Component allocates
-    /// nothing, the Hlms listener sets no property and no pixel moves.
-    bool probeGatherWanted() const;
+    bool probeGatherWanted() const { return mPhoton.probeGatherWanted(); }
     bool probeGridByRays() const { return mPhoton.probeGridByRays(); }
     bool probeGridWanted() const { return mPhoton.probeGridWanted(); }
     unsigned long long probeShadowBytes() const { return mPhoton.probeShadowBytes(); }
     void dropProbeGridByRays() { return mPhoton.dropProbeGridByRays(); }
     unsigned long long giLightingSerial() const { return mPhoton.giLightingSerial(); }
-    /// ...and the gather's REST KEY (OgreRayQuery.cpp): that serial, the
-    /// geometry's movement epoch and the surface cache's captures and relights.
-    unsigned long long gatherRestKey() const;
-    /// The settle's key: the discontinuities only (OgreRayQuery.cpp).
-    unsigned long long gatherRestartKey() const;
+    unsigned long long gatherRestKey() const { return mPhoton.gatherRestKey(); }
+    unsigned long long gatherRestartKey() const { return mPhoton.gatherRestartKey(); }
     void gatherStatusInto(GatherStatus &out) const;
     /// The test-and-tool knobs (Engine.h's `setGatherTuning`): every zero means
     /// "what the tier derives", so the default is the shipped configuration.
     void setGatherTuning(const GatherTuning &t) override { mGatherTuning = t; }
     const GatherTuning &gatherTuning() const { return mGatherTuning; }
     GatherTuning mGatherTuning;
-    /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1). The row is stored here and
-    /// read by the view (the chain's prepass) and the ray tier (the job);
-    /// `sunContactWanted` is the row resolved against the machine, defined in
-    /// OgreRayQuery.cpp beside `probeGatherWanted` for the same reason.
-    void setSunContact(const SunContactDesc &d) override;
-    SunContactDesc sunContact() const override { return mPhoton.mSunContact; }
+    void setSunContact(const SunContactDesc &d) override { return mPhoton.setSunContact(d); }
+    SunContactDesc sunContact() const override { return mPhoton.sunContact(); }
     SunContactStatus sunContactStatus() const override;
-    bool sunContactWanted() const;
+    bool sunContactWanted() const { return mPhoton.sunContactWanted(); }
     // --- THE GPU SCENE (A3_GPU_SCENE_SLICE_DESIGN.md; GpuScene.h) -----------
     /// Brings the device-side instance and mesh tables up to date for this
     /// frame's movement epoch. Epoch-gated, and the FRAME's pass is the one that
@@ -4239,8 +4224,8 @@ public:
     bool rayReflectionsWanted() const;
     bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) override;
     bool refreshGiLighting(bool inMotion) override { return mPhoton.refreshGiLighting(inMotion); }
-    void setNodeProbeGridExcluded(NodeId id, bool excluded) override { return mPhoton.setNodeProbeGridExcluded(id, excluded); }
-    bool nodeProbeGridExcluded(NodeId id) const override { return mPhoton.nodeProbeGridExcluded(id); }
+    void setNodeProbeGridExcluded(NodeId id, bool excluded) override;
+    bool nodeProbeGridExcluded(NodeId id) const override;
     void setNodeHelper(NodeId id, bool helper) override;
     void setNodeMovable(NodeId id, bool movable, MobilityChange change) override;
     bool nodeMovable(NodeId id) const override;
@@ -4296,7 +4281,7 @@ public:
     Ogre::PlanarReflections *planarReflections() const { return mPlanar; }
     /// The hybrid's reflection-probe arm, or null (the shadow-cache probe in
     /// tests/shadow drives captures through it).
-    Ogre::ParallaxCorrectedCubemapAuto *parallaxCorrectedCubemap() const { return mPhoton.mPcc; }
+    Ogre::ParallaxCorrectedCubemapAuto *parallaxCorrectedCubemap() const { return mPhoton.pcc(); }
     /// Re-derives every actor's world plane from its node's CURRENT transform.
     /// Actors are world-space objects that do NOT follow a SceneNode, so this
     /// has to happen after the host has pushed transforms and before the frame
@@ -4326,10 +4311,10 @@ public:
                            std::vector<std::string> *owners = nullptr) const;
     /// The GI parameters as LAST APPLIED — what was asked for, beside what
     /// giStatus() says it resolved to. The capture snapshot carries both.
-    const GiParams &giParams() const { return mPhoton.mGi; }
+    const GiParams &giParams() const { return mPhoton.giParams(); }
     /// SSAO-DOUBLE-1: the GI carries this scene's occlusion (giCarriesOcclusion on
     /// the mode last applied), so every view that draws it builds without SSAO.
-    bool ssaoRefused() const { return giCarriesOcclusion(mPhoton.mGi.mode); }
+    bool ssaoRefused() const { return giCarriesOcclusion(mPhoton.giParams().mode); }
     /// The planar-reflection arm's parameters, same contract.
     const PlanarReflectionParams &planarParams() const { return mPlanarParams; }
     /// Each live reflection probe's placement and dirty state, for the snapshot.
@@ -4413,7 +4398,10 @@ public:
     /// probe budget) — which is EARLIER in the frame than
     /// any scene graph update, so it reads updated bounds. Same pass, same
     /// per-node records as the caster walk (walkItems).
-    void ensureGiWalk();
+    /// True when THIS call (re)made the walk's GI record (the walk ran, or nothing was named
+    /// and the record says "nothing moved"); false when this frame's record already stands.
+    bool ensureGiWalk(const PhotonComponent::WalkInputs &in);
+    const PhotonComponent::WalkRecord &giWalk() const { return mGiWalk; }
     /// "Does this scene have anything to cache?" — decides the clear strategy
     /// (per-map quads only while some drawn scene holds a cacheable lamp).
     bool hasCacheableShadowLights() const;
@@ -4467,7 +4455,7 @@ public:
     /// The head of the scene's voxel chain (cascade 0's PhotonVoxelLighting, which holds
     /// the extra cascades), or null when no voxel GI is built. For measuring
     /// harnesses (Engine::voxelReaderParity), never for ownership.
-    Ogre::PhotonVoxelLighting *voxelLighting() const { return mPhoton.mVctLighting; }
+    Ogre::PhotonVoxelLighting *voxelLighting() const { return mPhoton.voxelLighting(); }
 
     /// The backend light behind a document node id, and the reverse lookup.
     /// Both exist for the shadow-map work (SHADOW_TOOLING_SPEC.md §4.3): the
@@ -5370,7 +5358,7 @@ public:
     void giDeferrable(const std::function<void()> &work) { return mPhoton.giDeferrable(work); }
     /// The arm owes a rebuild because a permutation it dispatched was building: every frame
     /// until it lands is held.
-    bool giDeferralPending() const { return mPhoton.mGiDeferralRetry; }
+    bool giDeferralPending() const { return mPhoton.giDeferralPending(); }
     void applyPendingGiFlush() { return mPhoton.applyPendingGiFlush(); }
     /// The pace of the frame being rendered (OPEN_COVER_SPEC §2.1):
     /// Engine::renderOneFrame pushes it once per frame, to every scene.
@@ -5382,33 +5370,15 @@ public:
     /// is one stage from done and `ProbeScout` is four. Inline and const: this
     /// is read once per frame while a world streams in, by the indicator and by
     /// the slow-frame line that names what a frame spent.
-    unsigned giBuildStagesLeft() const {
-        switch (mPhoton.mGiBuildStage) {
-        case GiBuildStage::Idle:        return 0u;
-        case GiBuildStage::ProbeScout:  return 4u;
-        case GiBuildStage::ProbeFit:    return 3u;
-        case GiBuildStage::ProbeFinish: return 2u;
-        case GiBuildStage::Field:       return 1u;
-        }
-        return 0u;
-    }
-    GiArmStage giBuildStage() const {
-        switch (mPhoton.mGiBuildStage) {
-        case GiBuildStage::Idle:        return GiArmStage::None;
-        case GiBuildStage::ProbeScout:  return GiArmStage::ProbeScout;
-        case GiBuildStage::ProbeFit:    return GiArmStage::ProbeFit;
-        case GiBuildStage::ProbeFinish: return GiArmStage::ProbeFinish;
-        case GiBuildStage::Field:       return GiArmStage::Field;
-        }
-        return GiArmStage::None;
-    }
+    unsigned giBuildStagesLeft() const { return mPhoton.giBuildStagesLeft(); }
+    GiArmStage giBuildStage() const { return mPhoton.giBuildStage(); }
     /// Materials whose bound texture has not finished streaming — the entries
     /// `settleTextureResidency` spends. The indicator's "textures" term.
     unsigned materialsAwaitingTexture() const {
-        return unsigned(mPhoton.mMaterialsAwaitingTexture.size());
+        return mPhoton.materialsAwaitingTexture();
     }
     /// Whole-arm rebuilds this scene has done — `StreamingWork::giRebuilds`.
-    unsigned long long giRebuildCount() const { return mPhoton.mGiRebuilds; }
+    unsigned long long giRebuildCount() const { return mPhoton.giRebuildCount(); }
     /// Is a deferred read of a texture's PIXELS owed this frame? True while the
     /// sky's IBL convolution is pending — the one piece of per-frame work that
     /// reads texture contents and cannot be asked twice (OPEN_COVER_SPEC §2 E).
@@ -5755,13 +5725,16 @@ public:
     // root, the manager, the engine, the error sink — are bound by reference when the scene
     // constructs it), and calls the scene's walk and GPU-scene seams below by name. Stage 2's
     // plan() takes the frame's record instead of most of them.
-    std::map<NodeId, Node> &nodeRecords() { return mNodes; }
     const std::map<NodeId, Node> &nodeRecords() const { return mNodes; }
     const std::vector<Node *> &itemNodes() const { return mItemNodes; }
     const std::map<MaterialId, MaterialRec> &materialRecords() const { return mMaterials; }
     const std::map<TextureId, TextureRec> &textureRecords() const { return mTextures; }
-    /// The scene's per-pass binding record (SceneGiBinding): Photon writes its arms into it.
-    SceneGiBinding &giBinding() { return mGiBinding; }
+    /// The scene's per-pass binding record (SceneGiBinding): the component binds its arms.
+    void bindGiVct(Ogre::PhotonVoxelLighting *vct);
+    void bindGiIfd(Ogre::PhotonIrradianceField *ifd);
+    void bindGiPcc(Ogre::ParallaxCorrectedCubemapBase *pcc, float minDist, float maxDist);
+    bool unbindGiPcc(const Ogre::ParallaxCorrectedCubemapBase *pcc);   ///< true when it was bound
+    bool demoteDragMover(NodeId id, Ogre::Aabb &rest);
     bool sceneLoading() const { return mSceneLoading; }
     FramePace framePace() const { return mFramePace; }
     bool inStructureEdit() const { return mStructureEditDepth > 0; }
@@ -5782,6 +5755,8 @@ public:
     /// The frame's GI walk gate opens (the GI tracking's head, once a frame): the first
     /// consumer of mGiMovedBoxes this frame runs the walk (ensureGiWalk).
     void openGiWalkFrame() { mGiWalkedThisFrame = false; }
+    unsigned long long textureUploadSerial() const { return mTextureUploadSerial; }
+    unsigned long long cloudGiSerial() const { return mCloudGiSerial; }
 private:
     PhotonComponent mPhoton{ *this, mRoot, mSceneMgr, mEngine, mError };
     /// THE SCENE'S TWO GI SEAMS: every structural edit (an attach, a detach, a material or
@@ -5863,36 +5838,19 @@ public:
     bool atomViewPaintable() const override { return atomDrawOn() && !mAtom.hasPassthroughViews(); }
 
     // ---- THE PHOTON VIEW (PHOTON-VIEW-1, OgrePhotonView.cpp) ----------------
-    void setPhotonView(PhotonView view) override { mPhoton.mPhotonView = view; }
-    PhotonView photonView() const override { return mPhoton.mPhotonView; }
-    std::string photonViewRefusal(PhotonView view) const override;
-    void setPhotonVoxelCascade(int cascade) override { mPhoton.mPhotonVoxelCascade = cascade < 0 ? -1 : cascade; }
-    int photonVoxelCascade() const override { return mPhoton.mPhotonVoxelCascade; }
-    /// ONCE A FRAME PER DRAWN SCENE (renderOneFrame, after updateSurfaceCache):
-    /// the scene half of the view — Ogre's voxel visualizer on the finest cascade
-    /// that holds the camera (Voxels), Ogre's probe visualizer on the field
-    /// (Probes), the cards' quads from the cache's table (Cards) — each put up,
-    /// followed and taken down as the view and the GI arms move. Free when Off
-    /// and nothing is up.
-    void syncPhotonView();
-    /// Every drawable down (the scene's teardown, before the GI arms and the
-    /// SceneManager; idempotent).
-    void releasePhotonView();
+    void setPhotonView(PhotonView view) override { mPhoton.setPhotonView(view); }
+    PhotonView photonView() const override { return mPhoton.photonView(); }
+    std::string photonViewRefusal(PhotonView view) const override { return mPhoton.photonViewRefusal(view); }
+    void setPhotonVoxelCascade(int cascade) override { mPhoton.setPhotonVoxelCascade(cascade); }
+    int photonVoxelCascade() const override { return mPhoton.photonVoxelCascade(); }
+    void syncPhotonView() { return mPhoton.syncPhotonView(); }
+    void releasePhotonView() { return mPhoton.releasePhotonView(); }
     using PhotonViewShape = PhotonComponent::PhotonViewShape;
-    /// `presents`: a view a person watches — a window, or a headset's eye pair (an
-    /// offscreen target only because the runtime copies it); an editor's shot is
-    /// neither and is forgotten here.
-    void notePhotonView(const void *view, bool presents, const PhotonViewShape &shape);
+    void notePhotonView(const void *view, bool presents, const PhotonViewShape &shape) { return mPhoton.notePhotonView(view, presents, shape); }
 private:
     /// Files the node's Item in kAtomRenderQueue (atom) or back where its material
     /// puts it (renderQueueFor). Called by composeGpuInstance.
     void placeAtomQueue(const Node &n, bool atom) const;
-    /// The lighting showing the Voxels picture is still one of the chain's and
-    /// still shows it (checked by pointer before any dereference).
-    bool photonVoxelLive() const;
-    void photonVoxelsOff();
-    void photonProbesOff();
-    void photonCardsOff();
 public:
     /// OgreView::syncAtomDraw's report, every frame (both false on detach).
     void noteAtomPbsView(const void *view, bool stereo, bool passthrough) {
@@ -6077,6 +6035,9 @@ private:
     /// The GI movement scan has run this frame (reset by updateGiTracking, the
     /// once-per-frame entry point): whoever consumes mGiMovedBoxes first runs it.
     bool mGiWalkedThisFrame = false;
+    /// THE WALK'S GI RECORD and the inputs it was walked with (ensureGiWalk).
+    PhotonComponent::WalkRecord mGiWalk;
+    PhotonComponent::WalkInputs mGiWalkIn;
     /// THE CHANGE SET'S ENGINE HALF (U0 3b). The scans re-read only the items NAMED since they last ran — the drained
     /// ChangeSet's subtrees (applyChangeSet) and the engine's own seams (noteSceneTransformWrite(n)) — and nothing on a
     /// frame that named none; a nodeless seam or an incomplete set owes the full pass. `transformEpoch()` = the moves
@@ -6100,7 +6061,9 @@ private:
     /// seams, and each of them now bumps mShadowScanWrites, so the caster half
     /// can ask the same question the GI half asks: could anything I read have
     /// changed since I last looked?
+public:   // (a seam PhotonComponent calls)
     unsigned long long shadowEpoch() const { return transformEpoch() + mShadowScanWrites; }
+private:
     unsigned long long mShadowScanWrites = 0;     ///< pushed caster inputs that move nothing
     unsigned long long mCasterWalkItems = 0;      ///< item visits by the caster half, ever
     unsigned long long mSceneTransformWrites = 0; ///< OUR writes: setNodeTransform, riders
@@ -6149,9 +6112,11 @@ private:
     /// beginStructureEdit / endStructureEdit: the open depth, and what the edits inside asked of GI
     /// (applied once at the outermost end — applyGiInvalidation).
     int  mStructureEditDepth = 0;
+public:   // (a seam PhotonComponent calls)
     unsigned long long walkCardLights() const;
+private:
     /// A lamp event for the scheduler (setLight, removeLight, a shown flip, a pose that moved, a class flip).
-    void noteLampChanged(const Node &n) { (n.movable ? mPhoton.mGiPlan.movableLampOwed : mPhoton.mGiPlan.stillLampOwed) = true; }
+    void noteLampChanged(const Node &n) { mPhoton.noteLampChanged(n.movable); }
     /// The movement scan has run at least once: before that, every item is
     /// seen for the first time and none of them is an arrival.
     bool mGiScannedOnce = false;

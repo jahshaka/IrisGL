@@ -731,7 +731,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         // drift. Only the CHANGE is noted; an ordinary push stays free.
         const Ogre::CompareFunction wasAlphaTest = db->getAlphaTest();
         applyPbr(db, p, mRefractionsActive);
-        if (wasGated != db->hasZeroSpecularResponse()) ++mPhoton.mProbeGateCrossings;
+        if (wasGated != db->hasZeroSpecularResponse()) mPhoton.countProbeGateCrossing();
         // THE METAL ANSWER FLIPPED (REFLECT-FIX-1): the edit is in place — no slot is
         // marked and no epoch moves — so a still scene would keep tracing its wearers
         // with the old kGpuMetal (a crate dragged to metalness 1 stayed black in a
@@ -2199,10 +2199,7 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
                 auto tit = mTextures.find(texId);
                 if (tit != mTextures.end() && tit->second.texture &&
                     !tit->second.texture->isDataReady()) {
-                    bool parked = false;
-                    for (auto &e : mPhoton.mMaterialsAwaitingTexture)
-                        if (e.first == mat) { e.second = e.second || voxelInput; parked = true; break; }
-                    if (!parked) mPhoton.mMaterialsAwaitingTexture.push_back({ mat, voxelInput });
+                    mPhoton.awaitTexture(mat, voxelInput);
                 }
             }
             // A cutout's alpha comes from the albedo map: a new one is a new
