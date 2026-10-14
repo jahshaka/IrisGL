@@ -15,6 +15,7 @@ For more information see the LICENSE file
 
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/scenenode.h"
+#include "core/math/trs.h"
 
 #include <algorithm>
 #include <atomic>
@@ -29,15 +30,12 @@ For more information see the LICENSE file
 
 #include <QDebug>
 
-#include "OgreMatrix4.h"
 #include "OgreMovableObject.h"
 #include "OgreQuaternion.h"
-#include "OgreRay.h"
 #include "OgreRoot.h"
 #include "OgreHlmsManager.h"
 #include "OgreSceneManager.h"
 #include "OgreSceneNode.h"
-#include "OgreSceneQuery.h"
 #include "OgreVector3.h"
 #include "Math/Array/OgreObjectMemoryManager.h"
 
@@ -72,17 +70,6 @@ inline Ogre::Quaternion toOgre(const Quat &q)
     return Ogre::Quaternion(q.scalar(), q.x(), q.y(), q.z());
 }
 inline Quat toIris(const Ogre::Quaternion &q) { return Quat(q.w, q.x, q.y, q.z); }
-
-/// Ogre::Matrix4 is row-major (m[row][col]); iris::Mat4's 16-argument
-/// constructor takes its arguments in the same row-major reading order (it is
-/// QMatrix4x4's constructor, transition for transition — core/math/mat4.h).
-inline Mat4 toIris(const Ogre::Matrix4 &m)
-{
-    return Mat4(m[0][0], m[0][1], m[0][2], m[0][3],
-                m[1][0], m[1][1], m[1][2], m[1][3],
-                m[2][0], m[2][1], m[2][2], m[2][3],
-                m[3][0], m[3][1], m[3][2], m[3][3]);
-}
 
 // ---------------------------------------------------------------------------
 // THE BACK-POINTER TABLE — Ogre node id -> document handle.
@@ -157,7 +144,6 @@ Ogre::SceneManager *gStaging = nullptr;
 /// Did WE create it (the fallback path)? A host-supplied one belongs to the
 /// engine and must not be destroyed here.
 bool gStagingIsOurs = false;
-std::size_t gLiveNodes = 0;
 /// How many live handles sit in a SCENE_STATIC memory manager. Maintained by
 /// applyStaticSubtree and by the destroy/migrate paths, so the benchmark can
 /// assert that its 80% static population really reached the static manager
@@ -232,6 +218,49 @@ Ogre::SceneNode *rootOf(Ogre::SceneManager *s)
 }
 
 inline SceneNode *ownerRaw(Ogre::SceneNode *n) { return ownerById(n->getId()); }
+
+/// Is this Ogre node a document node riding a socket (graph::setSocketRider)? The flag is the store's.
+inline bool isRiderNode(Ogre::SceneNode *n)
+{
+    const SceneNode *o = ownerRaw(n);
+    return o && o->docNode().rider;
+}
+
+/// INVALIDATION (nodegraph.h, the store's caches): `n` and its subtree lose their cached world and box. Stops at a
+/// node already invalid (the invariant: nothing below it is valid) unless `force` — a rider flag flipping changes
+/// where a world comes from, and a rider's subtree is never valid, so the walk must not trust the early stop there.
+/// The import worker invalidates its own fragment's nodes on its own thread; a fragment is handed over whole.
+void invalidateSubtree(const DocNode &n, bool force = false)
+{
+    std::vector<const DocNode *> stack{ &n };
+    while (!stack.empty()) {
+        const DocNode *d = stack.back();
+        stack.pop_back();
+        if (!d->worldValid && !force) continue;
+        d->worldValid = false;
+        d->boxValid = false;
+        if (d->pickTable) d->pickTable->markStale(d->pickSlot);
+        for (const DocNode *c : d->children) stack.push_back(c);
+    }
+}
+
+/// The OGRE HALF of a rotation write: the store's value (canonicalRotation, below — already unit, or normalised
+/// once by Ogre's own formula) goes into the Ogre node BIT-EXACT. Ogre::Node::setOrientation would re-normalise it
+/// unconditionally (OgreNode.cpp:572), and float normalisation is not idempotent, so the two stores would drift by
+/// a normalisation step per write of a node's own value.
+void setOrientationExact(Ogre::Node *o, const Ogre::Quaternion &q)
+{
+    if (std::fabs(q.Norm() - 1.0f) > 1e-5f) {
+        o->setOrientation(q);
+        return;
+    }
+    Ogre::Transform &t = o->_getTransform();
+    t.mOrientation->setFromQuaternion(q, t.mIndex);
+    // The cached full-transform matrix must be re-derived (setOrientation's
+    // CACHED_TRANSFORM_OUT_OF_DATE); the flag is protected, and a position
+    // write of the position's own value raises it without touching the value.
+    o->setPosition(o->getPosition());
+}
 
 // ---- SCENE_STATIC ---------------------------------------------------------
 
@@ -365,61 +394,8 @@ void reconcileStatic(Ogre::SceneNode *n)
 /// a decal's projector box, a light's range wire). Those are not ours to
 /// destroy — the engine's releaseNode still holds raw pointers to them — so
 /// they are re-homed under their scene's root and left for it to clean up.
-/// THE SHADOW PARENTS (AVATAR_RIG_PERF_SPEC §4.3, decision D3 = H1).
-///
-/// A socket rider's REAL Ogre parent is a TagPoint on a bone; its DOCUMENT
-/// parent is whatever the outliner shows. Both are true at once, so both are
-/// stored: Ogre keeps the first, this map keeps the second, and every structural
-/// query below prefers the second.
-///
-/// Keyed by the rider's node; the reverse list keeps `childAt` O(1)-ish and, more
-/// importantly, ORDERED — the outliner is a list, and a list whose order came out
-/// of a hash would reshuffle itself between runs.
-std::unordered_map<Ogre::SceneNode *, Ogre::SceneNode *> gRiderParent;
-std::unordered_map<Ogre::SceneNode *, std::vector<Ogre::SceneNode *>> gParentRiders;
-
-inline Ogre::SceneNode *riderParentOf(Ogre::SceneNode *n)
-{
-    if (gRiderParent.empty()) return nullptr;
-    const auto it = gRiderParent.find(n);
-    return it == gRiderParent.end() ? nullptr : it->second;
-}
-
-inline const std::vector<Ogre::SceneNode *> *ridersOf(Ogre::SceneNode *n)
-{
-    if (gParentRiders.empty()) return nullptr;
-    const auto it = gParentRiders.find(n);
-    return it == gParentRiders.end() ? nullptr : &it->second;
-}
-
-void forgetRider(Ogre::SceneNode *rider)
-{
-    const auto it = gRiderParent.find(rider);
-    if (it == gRiderParent.end()) return;
-    const auto pit = gParentRiders.find(it->second);
-    if (pit != gParentRiders.end()) {
-        auto &list = pit->second;
-        list.erase(std::remove(list.begin(), list.end(), rider), list.end());
-        if (list.empty()) gParentRiders.erase(pit);
-    }
-    gRiderParent.erase(it);
-}
-
-/// A node is going away: it can be a rider, and it can be somebody's shadow
-/// parent — a parent whose riders outlive it would answer parentOf with a dead
-/// pointer.
-void forgetRiderRelations(Ogre::SceneNode *n)
-{
-    forgetRider(n);
-    const auto pit = gParentRiders.find(n);
-    if (pit == gParentRiders.end()) return;
-    for (Ogre::SceneNode *rider : pit->second) gRiderParent.erase(rider);
-    gParentRiders.erase(pit);
-}
-
 void destroyRecursive(Ogre::SceneNode *n)
 {
-    forgetRiderRelations(n);
     Ogre::SceneNode *sceneRoot = rootOf(n->getCreator());
     while (n->numChildren() > 0) {
         Ogre::SceneNode *c = static_cast<Ogre::SceneNode *>(n->getChild(0));
@@ -432,7 +408,6 @@ void destroyRecursive(Ogre::SceneNode *n)
     }
     if (SceneNode *owner = ownerRaw(n)) owner->_setGraphNode(nullptr);
     setOwnerById(n->getId(), nullptr);
-    if (gLiveNodes) --gLiveNodes;
     if (n->isStatic() && gStaticNodes) --gStaticNodes;
     if (n->getParent()) n->getParent()->removeChild(n);
     n->getCreator()->destroySceneNode(n);
@@ -446,8 +421,6 @@ void destroyRecursive(Ogre::SceneNode *n)
 std::atomic<unsigned long long> gTransformWrites{0};
 
 }  // namespace
-
-bool available() { return Ogre::Root::getSingletonPtr() != nullptr; }
 
 void setStagingScene(SceneHandle s)
 {
@@ -513,11 +486,6 @@ void shutdown()
     gStaging = nullptr;
     gStagingRoot = nullptr;
     gStagingIsOurs = false;
-    // The socket riders' shadow parents name nodes of a graph that is going
-    // away with the Root; keeping them would answer parentOf with dead pointers
-    // in the next process life (the suites boot several engines in one).
-    gRiderParent.clear();
-    gParentRiders.clear();
 }
 
 NodeHandle createNode(SceneHandle s, NodeHandle parent, SceneNode *owner)
@@ -533,7 +501,6 @@ NodeHandle createNode(SceneHandle s, NodeHandle parent, SceneNode *owner)
     Ogre::SceneNode *n = parent ? nd(parent)->createChildSceneNode(Ogre::SCENE_DYNAMIC)
                                 : sm(s)->createSceneNode(Ogre::SCENE_DYNAMIC);
     setOwnerById(n->getId(), owner);
-    ++gLiveNodes;
     return wrap(n);
 }
 
@@ -545,69 +512,6 @@ void destroyNode(NodeHandle n)
 }
 
 SceneNode *ownerOf(NodeHandle n) { return (n && engineAlive()) ? ownerRaw(nd(n)) : nullptr; }
-
-NodeHandle parentOf(NodeHandle n)
-{
-    if (!n || !engineAlive()) return nullptr;
-    // A SOCKET RIDER's Ogre parent is a bone's TagPoint, which is not a document
-    // node at all (ownerOf would answer null and the node would look orphaned).
-    // The document's answer is its shadow parent — "socketing is not a
-    // reparent" is a promise this is what keeps.
-    if (Ogre::SceneNode *shadow = riderParentOf(nd(n))) return wrap(shadow);
-    Ogre::Node *p = nd(n)->getParent();
-    return p ? wrap(static_cast<Ogre::SceneNode *>(p)) : nullptr;
-}
-
-std::size_t childCount(NodeHandle n)
-{
-    if (!n || !engineAlive()) return 0;
-    std::size_t count = nd(n)->numChildren();
-    if (const auto *riders = ridersOf(nd(n))) count += riders->size();
-    return count;
-}
-
-NodeHandle childAt(NodeHandle n, std::size_t i)
-{
-    if (!n || !engineAlive()) return nullptr;
-    const std::size_t own = nd(n)->numChildren();
-    if (i < own) return wrap(static_cast<Ogre::SceneNode *>(nd(n)->getChild(i)));
-    // Riders come AFTER the real children, in registration order.
-    const auto *riders = ridersOf(nd(n));
-    if (!riders || i - own >= riders->size()) return nullptr;
-    return wrap((*riders)[i - own]);
-}
-
-int indexInParent(NodeHandle n)
-{
-    if (!n || !engineAlive()) return -1;
-    if (Ogre::SceneNode *shadow = riderParentOf(nd(n))) {
-        // A rider sits after the parent's owned children, in the order it was
-        // registered — the same order childAt lists them in.
-        int owned = 0;
-        for (std::size_t i = 0; i < shadow->numChildren(); ++i)
-            if (ownerRaw(static_cast<Ogre::SceneNode *>(shadow->getChild(i)))) ++owned;
-        const auto *riders = ridersOf(shadow);
-        if (!riders) return -1;
-        for (std::size_t i = 0; i < riders->size(); ++i)
-            if ((*riders)[i] == nd(n)) return owned + int(i);
-        return -1;
-    }
-    Ogre::Node *p = nd(n)->getParent();
-    if (!p) return -1;
-    // The DOCUMENT sibling index — engine-owned children (a light's -Y adapter,
-    // a decal box, a range wire) share the vector and must not be counted.
-    // This is the inverse of attach()'s `index`, which resolves against owned
-    // children too; a raw vector index here would have made the pair disagree
-    // by however many helpers the engine had hung off that parent, silently
-    // reordering the hierarchy panel on every undo of a delete.
-    int owned = 0;
-    for (std::size_t i = 0; i < p->numChildren(); ++i) {
-        Ogre::SceneNode *c = static_cast<Ogre::SceneNode *>(p->getChild(i));
-        if (c == nd(n)) return owned;
-        if (ownerRaw(c)) ++owned;
-    }
-    return -1;
-}
 
 /// AFTER A REPARENT, A STATIC CHILD'S CACHED DERIVED TRANSFORMS ARE STALE (stage 2b's read, item a): Ogre refreshes a
 /// static node only on a static dirty, and neither Node::setParent nor reconcileStatic issues one for a static child
@@ -625,11 +529,11 @@ void attach(NodeHandle parent, NodeHandle child, int index)
     std::lock_guard<std::recursive_mutex> lock(graphMutex());
     Ogre::SceneNode *p = nd(parent);
     Ogre::SceneNode *c = nd(child);
-    // A SOCKET RIDER is not in Ogre's hierarchy to move: re-parenting it in the
-    // DOCUMENT moves its shadow parent and leaves it on its bone. (Taking it off
-    // the socket is a socket operation — Scene::detachFromSocket — not a
-    // reparent, and the reconciler is what performs it.)
-    if (riderParentOf(c)) { setSocketRider(child, parent); return; }
+    // A SOCKET RIDER is not in Ogre's hierarchy to move: its document place is
+    // the store's, and its Ogre node stays on its bone. (Taking it off the
+    // socket is a socket operation — Scene::detachFromSocket — not a reparent,
+    // and the reconciler is what performs it.)
+    if (isRiderNode(c)) return;
     // A REPARENT MOVES THE CHILD unless the caller re-adopts its world pose
     // (clean-2 lane review, F4): the local transform is kept and the parent
     // under it changes, so the whole subtree's world AABBs move without any
@@ -675,6 +579,13 @@ void attach(NodeHandle parent, NodeHandle child, int index)
     settleAttached(c);
 }
 
+void followParent(NodeHandle parent, NodeHandle child)
+{
+    if (!parent || !child || !engineAlive()) return;
+    if (nd(child)->getParent() == nd(parent)) return;
+    attach(parent, child, -1);
+}
+
 NodeHandle detach(NodeHandle child)
 {
     if (!child) return nullptr;
@@ -682,10 +593,9 @@ NodeHandle detach(NodeHandle child)
     std::lock_guard<std::recursive_mutex> lock(graphMutex());
     Ogre::SceneNode *c = nd(child);
     // A rider taken out of the document hierarchy keeps riding its bone until
-    // the reconciler says otherwise; it simply stops being listed under a
-    // parent. (Its Ogre parent is the TagPoint, so the re-home below would tear
-    // it off the socket.)
-    if (riderParentOf(c)) { forgetRider(c); return child; }
+    // the reconciler says otherwise (its Ogre parent is the TagPoint, so the
+    // re-home below would tear it off the socket).
+    if (isRiderNode(c)) return child;
     gTransformWrites.fetch_add(1, std::memory_order_relaxed);   // see attach (F4)
     journalWrite(c);
     // Out of its parent and under its scene manager's root — NOT migrated to
@@ -723,7 +633,7 @@ NodeHandle migrate(NodeHandle n, SceneHandle target, NodeHandle newParent)
         [&](Ogre::SceneNode *s, Ogre::SceneNode *parent) -> Ogre::SceneNode * {
         Ogre::SceneNode *dst = parent->createChildSceneNode(Ogre::SCENE_DYNAMIC);
         dst->setPosition(s->getPosition());
-        dst->setOrientation(s->getOrientation());
+        setOrientationExact(dst, s->getOrientation());   // never Ogre's re-normalise: the store holds these bits
         dst->setScale(s->getScale());
         SceneNode *owner = ownerRaw(s);
         if (owner) {
@@ -733,8 +643,7 @@ NodeHandle migrate(NodeHandle n, SceneHandle target, NodeHandle newParent)
         // Visibility is NOT copied: Ogre's setVisible walks a node's
         // ATTACHMENTS, and a document node in the staging manager has none. The
         // handle's own `visible` flag is the truth and the mirror re-applies it.
-        ++gLiveNodes;
-        // Engine-owned children (no document owner) are NOT copied: they belong
+            // Engine-owned children (no document owner) are NOT copied: they belong
         // to the scene manager that is being left behind, and the engine drops
         // them on its own schedule.
         for (std::size_t i = 0; i < s->numChildren(); ++i) {
@@ -766,8 +675,7 @@ NodeHandle migrate(NodeHandle n, SceneHandle target, NodeHandle newParent)
             }
         }
         setOwnerById(s->getId(), nullptr);
-        if (gLiveNodes) --gLiveNodes;
-        if (s->isStatic() && gStaticNodes) --gStaticNodes;
+            if (s->isStatic() && gStaticNodes) --gStaticNodes;
         if (s->getParent()) s->getParent()->removeChild(s);
         s->getCreator()->destroySceneNode(s);
     };
@@ -778,77 +686,19 @@ NodeHandle migrate(NodeHandle n, SceneHandle target, NodeHandle newParent)
 
 // ---- transforms -----------------------------------------------------------
 
-void setSocketRider(NodeHandle rider, NodeHandle documentParent)
+void setSocketRider(NodeHandle rider, bool on)
 {
     if (!rider || !engineAlive()) return;
-    std::lock_guard<std::recursive_mutex> lock(graphMutex());
-    Ogre::SceneNode *r = nd(rider);
-    if (!documentParent) { forgetRider(r); return; }
-    Ogre::SceneNode *p = nd(documentParent);
-    const auto it = gRiderParent.find(r);
-    if (it != gRiderParent.end()) {
-        if (it->second == p) return;                 // idempotent
-        forgetRider(r);
-    }
-    gRiderParent[r] = p;
-    gParentRiders[p].push_back(r);
-}
-
-void clearSocketRider(NodeHandle rider)
-{
-    if (!rider || !engineAlive()) return;
-    std::lock_guard<std::recursive_mutex> lock(graphMutex());
-    forgetRider(nd(rider));
-}
-
-NodeHandle socketRiderParent(NodeHandle rider)
-{
-    if (!rider || !engineAlive()) return nullptr;
-    Ogre::SceneNode *p = riderParentOf(nd(rider));
-    return p ? wrap(p) : nullptr;
+    SceneNode *o = ownerRaw(nd(rider));
+    if (!o || o->docNode().rider == on) return;
+    o->docNode().rider = on;
+    // A rider's world (and every world under it) changes source: the caches must not answer from before.
+    invalidateSubtree(o->docNode(), true);
 }
 
 bool isSocketRider(NodeHandle rider)
 {
-    return rider && engineAlive() && riderParentOf(nd(rider)) != nullptr;
-}
-
-std::size_t socketRiderCount() { return gRiderParent.size(); }
-
-Vec3 localPos(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getPosition()) : Vec3(); }
-Quat localRot(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getOrientation()) : Quat(); }
-Vec3 localScale(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getScale()) : Vec3(1, 1, 1); }
-
-bool PoseWitness::operator==(const PoseWitness &o) const
-{
-    // BITS, not floats: -0 against +0 and a NaN against itself are differences
-    // a write could make, so `==` on the values would be the wrong question.
-    return parent == o.parent && std::memcmp(values, o.values, sizeof values) == 0;
-}
-
-PoseWitness poseWitness(NodeHandle n)
-{
-    PoseWitness w;
-    if (!n || !engineAlive()) return w;
-    const Ogre::SceneNode *o = nd(n);
-    float *v = w.values;
-    // The parent half: what setGlobalPosRot resolves (the same three Updated
-    // reads, so a parent moved since the last write shows up here).
-    if (Ogre::Node *p = o->getParent()) {
-        w.parent = reinterpret_cast<NodeHandle>(p);
-        const Ogre::Vector3 pp = p->_getDerivedPositionUpdated();
-        const Ogre::Quaternion pr = p->_getDerivedOrientationUpdated();
-        const Ogre::Vector3 ps = p->_getDerivedScaleUpdated();
-        v[0] = pp.x; v[1] = pp.y; v[2] = pp.z;
-        v[3] = pr.w; v[4] = pr.x; v[5] = pr.y; v[6] = pr.z;
-        v[7] = ps.x; v[8] = ps.y; v[9] = ps.z;
-    }
-    // The node half: what setGlobalPosRot writes.
-    const Ogre::Vector3 lp = o->getPosition();
-    const Ogre::Quaternion lr = o->getOrientation();
-    v[10] = lp.x; v[11] = lp.y; v[12] = lp.z;
-    v[13] = lr.w; v[14] = lr.x; v[15] = lr.y; v[16] = lr.z;
-    return w;
+    return rider && engineAlive() && isRiderNode(nd(rider));
 }
 
 namespace
@@ -897,8 +747,8 @@ void promoteStaticChildren(Ogre::SceneNode *n);
 /// shadow scans do not read it (OgreScene::writeIsSceneMovement asks the same
 /// question from the other side), and it moves only because we moved it.
 ///
-/// The loop is reached ONLY for a node that already said it is not scene
-/// movement — a camera — and such a node has zero or one child.
+/// The DOCUMENT children are the store's (DocNode::children): an Ogre child
+/// with no document owner never appears there.
 ///
 /// The flag itself lives on the document node (SceneNode::_countsAsMovement)
 /// and is read through the back-pointer table — two loads, no hashing — rather
@@ -908,10 +758,7 @@ inline bool writeIsSceneMovement(Ogre::SceneNode *n)
 {
     const SceneNode *owner = ownerById(n->getId());
     if (!owner || owner->_countsAsMovement()) return true;
-    const std::size_t kids = n->numChildren();
-    for (std::size_t i = 0; i < kids; ++i)
-        if (ownerById(n->getChild(i)->getId())) return true;   // a DOCUMENT child
-    return false;
+    return !owner->docNode().children.empty();   // a camera carrying DOCUMENT children moves them
 }
 
 inline void markMoved(Ogre::SceneNode *n)
@@ -972,74 +819,6 @@ void promoteStaticChildren(Ogre::SceneNode *n)
 }
 }  // namespace
 
-namespace
-{
-/// Stores `q` BIT-EXACT when it is already unit length (to float precision),
-/// and lets Ogre normalise it only when it genuinely is not.
-///
-/// Ogre::Node::setOrientation re-normalises UNCONDITIONALLY (OgreNode.cpp:572),
-/// and float normalisation is not idempotent: n(q) != q for many unit q, and
-/// n(n(q)) is often q again — the stored quaternion walks between two float
-/// fixed points on every write of its own value. That made a play/stop cycle
-/// change the document by one normalisation step (PlayBack::restoreNodeTransforms
-/// writes back exactly what it saved, and the node kept a DIFFERENT quaternion
-/// than the one it read), which is how the fixed-clock determinism suite found
-/// two IDENTICAL 120-frame physics runs landing tumbling bodies on different
-/// bits: A == C, B == D, A != B — the 2-cycle of the normaliser, amplified by
-/// the contact solve (ENGINEERING_DEBT_SPEC A4.2). A restore, an undo, a
-/// deserialise and the per-step physics write-back all pass through here and
-/// must leave the node holding exactly the value they were given.
-///
-/// The tolerance is on the SQUARED norm: 1e-5 is ~1e3 float ulps around 1 —
-/// far wider than any product of unit quaternions drifts, far narrower than a
-/// quaternion that was never unit (a lossy matrix decomposition of a scaled
-/// transform, hand-authored data). Those still get Ogre's normalise, once,
-/// after which they are unit and pass through exactly.
-void setOrientationExact(Ogre::Node *o, const Ogre::Quaternion &q)
-{
-    if (std::fabs(q.Norm() - 1.0f) > 1e-5f) {
-        o->setOrientation(q);
-        return;
-    }
-    Ogre::Transform &t = o->_getTransform();
-    t.mOrientation->setFromQuaternion(q, t.mIndex);
-    // The cached full-transform matrix must be re-derived (setOrientation's
-    // CACHED_TRANSFORM_OUT_OF_DATE); the flag is protected, and a position
-    // write of the position's own value raises it without touching the value.
-    o->setPosition(o->getPosition());
-}
-}  // namespace
-
-void setLocalPos(NodeHandle n, const Vec3 &v)
-{
-    if (!n || !engineAlive()) return;
-    nd(n)->setPosition(toOgre(v));
-    markMoved(nd(n));
-}
-
-void setLocalRot(NodeHandle n, const Quat &q)
-{
-    if (!n || !engineAlive()) return;
-    setOrientationExact(nd(n), toOgre(q));
-    markMoved(nd(n));
-}
-
-void setLocalScale(NodeHandle n, const Vec3 &v)
-{
-    if (!n || !engineAlive()) return;
-    nd(n)->setScale(toOgre(v));
-    markMoved(nd(n));
-}
-
-void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s)
-{
-    if (!n || !engineAlive()) return;
-    Ogre::SceneNode *o = nd(n);
-    o->setPosition(toOgre(p));
-    setOrientationExact(o, toOgre(r));
-    o->setScale(toOgre(s));
-    markMoved(o);
-}
 
 unsigned long long transformWrites()
 {
@@ -1177,106 +956,449 @@ unsigned long long staticSwitchCount()
 ReexpressScope::ReexpressScope() { ++gReexpressDepth; }
 ReexpressScope::~ReexpressScope() { --gReexpressDepth; }
 
-Mat4 localTransform(NodeHandle n)
+// ---- THE DOCUMENT'S TRANSFORM STORE (nodegraph.h, ENGINE-UPGRADE-U2 stage 1) --------------------------------
+
+namespace
 {
-    if (!n || !engineAlive()) return Mat4();
-    Ogre::Matrix4 m;
-    m.makeTransform(nd(n)->getPosition(), nd(n)->getScale(), nd(n)->getOrientation());
-    return toIris(m);
+// OGRE'S OWN FLOAT MATHS, written out rather than called: the store's answers must not move a bit when stage 2
+// takes Ogre out of this file. The two the WORLD is composed with are the forms Node::updateAllTransforms runs
+// (Math/Array/SSE2/Single/OgreArrayQuaternionSSE2.inl), in the same association. Agreement is to float rounding,
+// not to the bit: Ogre's own two paths (the per-frame batch and the per-node `_get…Updated`) already differ from
+// each other by a few ulps on the same inputs (measured, ENGINE-UPGRADE-U2; mirror.doc_store holds the store to
+// 1e-6 of the engine).
+
+/// ArrayQuaternion * ArrayQuaternion — the Hamilton product, Ogre's grouping.
+inline Quat qmul(const Quat &a, const Quat &b)
+{
+    const float aw = a.scalar(), ax = a.x(), ay = a.y(), az = a.z();
+    const float bw = b.scalar(), bx = b.x(), by = b.y(), bz = b.z();
+    return Quat((aw * bw - ax * bx) - (ay * by + az * bz),
+                (aw * bx + ax * bw) + (ay * bz - az * by),
+                (aw * by + ay * bw) + (az * bx - ax * bz),
+                (aw * bz + az * bw) + (ax * by - ay * bx));
 }
 
-Mat4 globalTransform(NodeHandle n)
+/// ArrayQuaternion * ArrayVector3 — the nVidia SDK form: v + ((q x v) * 2w + (q x (q x v)) * 2).
+inline Vec3 qrot(const Quat &q, const Vec3 &v)
 {
-    if (!n || !engineAlive()) return Mat4();
-    // THE TAG BRANCH (AVATAR_RIG_PERF_SPEC §5.6). `_getFullTransformUpdated`
-    // walks to the root re-deriving as it goes, and a TagPoint cannot be
-    // re-derived on demand: `TagPoint::updateFromParentImpl` is a plain
-    // `assert(false)` (OgreTagPoint2.cpp:108-112). Our Ogre is built
-    // RelWithDebInfo, so today that assert compiles out and the walk silently
-    // returns the cached transform — a Debug-built Ogre would ABORT on the first
-    // `node.info` of a socketed camera. Reading the cache EXPLICITLY makes the
-    // semantics ("the pose the last rendered frame produced") a decision instead
-    // of an accident, and makes a Debug Ogre survivable.
-    if (isSocketRider(n)) return toIris(nd(n)->_getFullTransform());
-    return toIris(nd(n)->_getFullTransformUpdated());
+    const float qx = q.x(), qy = q.y(), qz = q.z(), w2 = q.scalar() + q.scalar();
+    const float vx = v.x(), vy = v.y(), vz = v.z();
+    float ux = qy * vz - qz * vy, uy = qz * vx - qx * vz, uz = qx * vy - qy * vx;      // uv = q x v
+    float uux = qy * uz - qz * uy, uuy = qz * ux - qx * uz, uuz = qx * uy - qy * ux;  // uuv = q x uv
+    ux *= w2; uy *= w2; uz *= w2;
+    uux += uux; uuy += uuy; uuz += uuz;
+    return Vec3(vx + (ux + uux), vy + (uy + uuy), vz + (uz + uuz));
 }
 
-Vec3 globalPos(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->_getDerivedPositionUpdated()) : Vec3(); }
-Quat globalRot(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->_getDerivedOrientationUpdated()) : Quat(); }
-
-void setGlobalPos(NodeHandle n, const Vec3 &v)
+/// Quaternion::Inverse().
+inline Quat qinv(const Quat &q)
 {
-    if (!n || !engineAlive()) return;
-    Ogre::SceneNode *o = nd(n);
-    Ogre::Node *p = o->getParent();
-    if (!p) { o->setPosition(toOgre(v)); markMoved(o); return; }
-    const Ogre::Matrix4 inv = p->_getFullTransformUpdated().inverseAffine();
-    o->setPosition(inv * toOgre(v));
-    markMoved(o);
+    const float w = q.scalar(), x = q.x(), y = q.y(), z = q.z();
+    const float norm = w * w + x * x + y * y + z * z;
+    if (!(norm > 0.0f)) return Quat(0.0f, 0.0f, 0.0f, 0.0f);
+    const float inv = 1.0f / norm;
+    return Quat(w * inv, -x * inv, -y * inv, -z * inv);
 }
 
-void setGlobalRot(NodeHandle n, const Quat &q)
+/// WHAT A ROTATION WRITE STORES: `q` BIT-EXACT when it is already unit length (to float precision), and
+/// Quaternion::normalise() of it only when it genuinely is not.
+///
+/// Ogre::Node::setOrientation re-normalises UNCONDITIONALLY (OgreNode.cpp:572), and float normalisation is not
+/// idempotent: n(q) != q for many unit q, and n(n(q)) is often q again — the stored quaternion walks between two
+/// float fixed points on every write of its own value. That made a play/stop cycle change the document by one
+/// normalisation step (PlayBack::restoreNodeTransforms writes back exactly what it saved), which is how the
+/// fixed-clock determinism suite found two IDENTICAL 120-frame physics runs landing tumbling bodies on different
+/// bits (ENGINEERING_DEBT_SPEC A4.2). A restore, an undo, a deserialise and the per-step physics write-back all
+/// pass through here and must leave the node holding exactly the value they were given.
+///
+/// The tolerance is on the SQUARED norm: 1e-5 is ~1e3 float ulps around 1 — far wider than any product of unit
+/// quaternions drifts, far narrower than a quaternion that was never unit (a lossy matrix decomposition of a
+/// scaled transform, hand-authored data). Those are normalised once, after which they pass through exactly — and
+/// the Ogre half (setOrientationExact) then stores this same value bit for bit.
+inline Quat canonicalRotation(const Quat &q)
 {
-    if (!n || !engineAlive()) return;
-    Ogre::SceneNode *o = nd(n);
-    Ogre::Node *p = o->getParent();
-    if (!p) { setOrientationExact(o, toOgre(q)); markMoved(o); return; }
-    setOrientationExact(o, p->_getDerivedOrientationUpdated().Inverse() * toOgre(q));
-    markMoved(o);
+    const float w = q.scalar(), x = q.x(), y = q.y(), z = q.z();
+    const float norm = w * w + x * x + y * y + z * z;
+    if (std::fabs(norm - 1.0f) <= 1e-5f) return q;
+    const float factor = 1.0f / std::sqrt(norm);
+    return Quat(w * factor, x * factor, y * factor, z * factor);
 }
 
-void setGlobalPosRot(NodeHandle n, const Vec3 &v, const Quat &q)
+/// Matrix4::makeTransform(position, scale, orientation) with Quaternion::ToRotationMatrix inside: scale, then
+/// rotate, then translate. iris::Mat4's 16-argument constructor reads row-major, as Ogre::Matrix4 stores.
+inline Mat4 makeTransform(const Vec3 &p, const Vec3 &s, const Quat &q)
 {
-    if (!n || !engineAlive()) return;
-    Ogre::SceneNode *o = nd(n);
-    Ogre::Node *p = o->getParent();
-    if (!p) {
-        o->setPosition(toOgre(v));
-        setOrientationExact(o, toOgre(q));
-        markMoved(o);
-        return;
+    const float x = q.x(), y = q.y(), z = q.z(), w = q.scalar();
+    const float tx = x + x, ty = y + y, tz = z + z;
+    const float twx = tx * w, twy = ty * w, twz = tz * w;
+    const float txx = tx * x, txy = ty * x, txz = tz * x;
+    const float tyy = ty * y, tyz = tz * y, tzz = tz * z;
+    const float r00 = 1.0f - (tyy + tzz), r01 = txy - twz, r02 = txz + twy;
+    const float r10 = txy + twz, r11 = 1.0f - (txx + tzz), r12 = tyz - twx;
+    const float r20 = txz - twy, r21 = tyz + twx, r22 = 1.0f - (txx + tyy);
+    return Mat4(s.x() * r00, s.y() * r01, s.z() * r02, p.x(),
+                s.x() * r10, s.y() * r11, s.z() * r12, p.y(),
+                s.x() * r20, s.y() * r21, s.z() * r22, p.z(),
+                0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+inline bool isIdentityTrs(const Vec3 &p, const Quat &r, const Vec3 &s)
+{
+    return p.x() == 0.0f && p.y() == 0.0f && p.z() == 0.0f &&
+           r.scalar() == 1.0f && r.x() == 0.0f && r.y() == 0.0f && r.z() == 0.0f &&
+           s.x() == 1.0f && s.y() == 1.0f && s.z() == 1.0f;
+}
+
+
+/// THE WORLD, DERIVED (nodegraph.h): Ogre's composition rule down the store's parent chain, each node cached
+/// until a write invalidates it. Returns whether the answer may be cached — false for a socket rider and everything under one
+/// (their world is the engine's, read from the pose the last rendered frame produced: a TagPoint cannot be
+/// resolved on demand, TagPoint::updateFromParentImpl is a plain assert(false)).
+bool deriveWorld(const DocNode &n, Vec3 &P, Quat &R, Vec3 &S)
+{
+    if (n.rider) {
+        const NodeHandle h = n.owner ? n.owner->graphNode() : nullptr;
+        if (h && engineAlive()) {
+            const Ogre::SceneNode *o = nd(h);
+            P = toIris(o->_getDerivedPosition());
+            R = toIris(o->_getDerivedOrientation());
+            S = toIris(o->_getDerivedScale());
+        } else {
+            P = n.pos; R = n.rot; S = n.scale;
+        }
+        return false;
     }
-    // ONE resolution of the parent, for both halves.
-    const Ogre::Vector3 pPos = p->_getDerivedPositionUpdated();
-    const Ogre::Quaternion pRot = p->_getDerivedOrientationUpdated();
-    const Ogre::Vector3 pScale = p->_getDerivedScaleUpdated();
-    // THE IDENTITY FAST PATH. A physics body's parent is the document root, and
-    // the root is identity by construction (nodegraph.h rule 2's exemption), so
-    // the whole inverse is the identity map. Three compares to find out.
-    if (pPos == Ogre::Vector3::ZERO && pRot == Ogre::Quaternion::IDENTITY
-        && pScale == Ogre::Vector3::UNIT_SCALE) {
-        o->setPosition(toOgre(v));
-        setOrientationExact(o, toOgre(q));
-        markMoved(o);
-        return;
+    if (n.worldValid) {
+        P = n.worldPos; R = n.worldRot; S = n.worldScale;
+        return true;
     }
-    const Ogre::Quaternion invRot = pRot.Inverse();
-    const Ogre::Vector3 invScale(pScale.x != 0.0f ? 1.0f / pScale.x : 0.0f,
-                                 pScale.y != 0.0f ? 1.0f / pScale.y : 0.0f,
-                                 pScale.z != 0.0f ? 1.0f / pScale.z : 0.0f);
-    o->setPosition(invRot * (toOgre(v) - pPos) * invScale);
-    setOrientationExact(o, invRot * toOgre(q));
-    markMoved(o);
+    bool cacheable = true;
+    if (!n.parent) {
+        P = n.pos; R = n.rot; S = n.scale;
+    } else {
+        Vec3 pP, pS;
+        Quat pR;
+        cacheable = deriveWorld(*n.parent, pP, pR, pS);
+        // OgreNode.cpp updateFromParentImpl (OGRE_NODE_INHERIT_TRANSFORM = 0): S = pS*S, R = pR*R,
+        // P = pR*(pS*P) + pP — the scale per axis, never a shear.
+        S = pS * n.scale;
+        R = qmul(pR, n.rot);
+        P = qrot(pR, pS * n.pos) + pP;
+    }
+    if (cacheable) {
+        n.worldPos = P; n.worldRot = R; n.worldScale = S;
+        n.worldValid = true;
+    }
+    return cacheable;
 }
 
-void setGlobalTransform(NodeHandle n, const Mat4 &m)
+/// The parent's world (identity for a root), and whether it IS identity — the fast path every re-expression takes
+/// for a child of the document root, which writes the world values straight through, bit for bit.
+inline bool parentWorld(const DocNode &n, Vec3 &P, Quat &R, Vec3 &S)
 {
-    if (!n || !engineAlive()) return;
-    Ogre::SceneNode *o = nd(n);
-    Ogre::Matrix4 world(m(0, 0), m(0, 1), m(0, 2), m(0, 3),
-                        m(1, 0), m(1, 1), m(1, 2), m(1, 3),
-                        m(2, 0), m(2, 1), m(2, 2), m(2, 3),
-                        m(3, 0), m(3, 1), m(3, 2), m(3, 3));
-    Ogre::Matrix4 local = world;
-    if (Ogre::Node *p = o->getParent())
-        local = p->_getFullTransformUpdated().inverseAffine() * world;
-    Ogre::Vector3 pos, scale;
-    Ogre::Quaternion rot;
-    local.decomposition(pos, scale, rot);
-    o->setPosition(pos);
-    setOrientationExact(o, rot);
-    o->setScale(scale);
-    markMoved(o);
+    if (!n.parent) {
+        P = Vec3(0.0f, 0.0f, 0.0f); R = Quat(); S = Vec3(1.0f, 1.0f, 1.0f);
+        return true;
+    }
+    deriveWorld(*n.parent, P, R, S);
+    return isIdentityTrs(P, R, S);
+}
+
+/// The local position that puts `n` at world `v` under a parent at (pP, pR, pS): (pR^-1 (v - pP)) / pS, an axis of
+/// ZERO parent scale keeping the node's own local value (nodegraph.h, SC1-REEXPRESS-SCALE-1).
+inline Vec3 localPosFrom(const DocNode &n, const Vec3 &v, const Vec3 &pP, const Quat &pRinv, const Vec3 &pS)
+{
+    const Vec3 d = qrot(pRinv, v - pP);
+    return Vec3(pS.x() != 0.0f ? d.x() / pS.x() : n.pos.x(),
+                pS.y() != 0.0f ? d.y() / pS.y() : n.pos.y(),
+                pS.z() != 0.0f ? d.z() / pS.z() : n.pos.z());
+}
+
+/// THE OGRE HALF of a local write (stage 1 only): the node's own Ogre node gets exactly the store's values, then
+/// the movement epoch, the journal and SCENE_STATIC rule 4 (markMoved) as every transform write always paid.
+inline Ogre::SceneNode *ogreHalf(const DocNode &n)
+{
+    const NodeHandle h = n.owner ? n.owner->graphNode() : nullptr;
+    return (h && engineAlive()) ? nd(h) : nullptr;
+}
+}  // namespace
+
+void attachDoc(DocNode &parent, DocNode &child, int index)
+{
+    if (&parent == &child) return;
+    if (child.parent) {
+        auto &old = child.parent->children;
+        old.erase(std::remove(old.begin(), old.end(), &child), old.end());
+    }
+    auto &kids = parent.children;
+    if (index < 0 || std::size_t(index) >= kids.size()) kids.push_back(&child);
+    else kids.insert(kids.begin() + std::ptrdiff_t(index), &child);
+    child.parent = &parent;
+    invalidateSubtree(child);
+}
+
+void detachDoc(DocNode &child)
+{
+    if (!child.parent) return;
+    auto &old = child.parent->children;
+    old.erase(std::remove(old.begin(), old.end(), &child), old.end());
+    child.parent = nullptr;
+    invalidateSubtree(child);
+}
+
+void unlinkDoc(DocNode &n)
+{
+    detachDoc(n);
+    for (DocNode *c : n.children) {
+        c->parent = nullptr;
+        invalidateSubtree(*c);
+    }
+    n.children.clear();
+}
+
+int indexInParent(const DocNode &n)
+{
+    if (!n.parent) return -1;
+    const auto &kids = n.parent->children;
+    const auto it = std::find(kids.begin(), kids.end(), &n);
+    return it == kids.end() ? -1 : int(it - kids.begin());
+}
+
+void setLocalPos(DocNode &n, const Vec3 &v)
+{
+    n.pos = v;
+    invalidateSubtree(n);
+    if (Ogre::SceneNode *o = ogreHalf(n)) {
+        o->setPosition(toOgre(v));
+        markMoved(o);
+    }
+}
+
+void setLocalRot(DocNode &n, const Quat &q)
+{
+    n.rot = canonicalRotation(q);
+    invalidateSubtree(n);
+    if (Ogre::SceneNode *o = ogreHalf(n)) {
+        setOrientationExact(o, toOgre(n.rot));
+        markMoved(o);
+    }
+}
+
+void setLocalScale(DocNode &n, const Vec3 &v)
+{
+    n.scale = v;
+    invalidateSubtree(n);
+    if (Ogre::SceneNode *o = ogreHalf(n)) {
+        o->setScale(toOgre(v));
+        markMoved(o);
+    }
+}
+
+void setLocalTrs(DocNode &n, const Vec3 &p, const Quat &r, const Vec3 &s)
+{
+    n.pos = p;
+    n.rot = canonicalRotation(r);
+    n.scale = s;
+    invalidateSubtree(n);
+    if (Ogre::SceneNode *o = ogreHalf(n)) {
+        o->setPosition(toOgre(p));
+        setOrientationExact(o, toOgre(n.rot));
+        o->setScale(toOgre(s));
+        markMoved(o);
+    }
+}
+
+Mat4 localTransform(const DocNode &n) { return makeTransform(n.pos, n.scale, n.rot); }
+
+Trs world(const DocNode &n)
+{
+    Trs w;
+    deriveWorld(n, w.pos, w.rot, w.scale);
+    return w;
+}
+
+Mat4 globalTransform(const DocNode &n)
+{
+    const Trs w = world(n);
+    return makeTransform(w.pos, w.scale, w.rot);
+}
+
+Trs localFromWorld(const DocNode &n, const Trs &w)
+{
+    Vec3 pP, pS;
+    Quat pR;
+    if (parentWorld(n, pP, pR, pS)) return w;            // under identity: the world IS the local, bit for bit
+    const Quat inv = qinv(pR);
+    Trs l;
+    l.rot = qmul(inv, w.rot);
+    l.pos = localPosFrom(n, w.pos, pP, inv, pS);
+    l.scale = Vec3(pS.x() != 0.0f ? w.scale.x() / pS.x() : n.scale.x(),
+                   pS.y() != 0.0f ? w.scale.y() / pS.y() : n.scale.y(),
+                   pS.z() != 0.0f ? w.scale.z() / pS.z() : n.scale.z());
+    return l;
+}
+
+void setGlobalPos(DocNode &n, const Vec3 &v)
+{
+    Vec3 pP, pS;
+    Quat pR;
+    if (parentWorld(n, pP, pR, pS)) { setLocalPos(n, v); return; }
+    setLocalPos(n, localPosFrom(n, v, pP, qinv(pR), pS));
+}
+
+void setGlobalRot(DocNode &n, const Quat &q)
+{
+    Vec3 pP, pS;
+    Quat pR;
+    if (parentWorld(n, pP, pR, pS)) { setLocalRot(n, q); return; }
+    setLocalRot(n, qmul(qinv(pR), q));
+}
+
+void setGlobalPosRot(DocNode &n, const Vec3 &v, const Quat &q)
+{
+    // ONE resolution of the parent, for both halves — and none of the inverse when the parent is at identity (a
+    // physics body's parent is the document root, identity by construction: nodegraph.h rule 2's exemption).
+    Vec3 pP, pS;
+    Quat pR;
+    if (parentWorld(n, pP, pR, pS)) { setLocalTrs(n, v, q, n.scale); return; }
+    const Quat inv = qinv(pR);
+    setLocalTrs(n, localPosFrom(n, v, pP, inv, pS), qmul(inv, q), n.scale);
+}
+
+void setGlobalTrs(DocNode &n, const Trs &w)
+{
+    const Trs l = localFromWorld(n, w);
+    setLocalTrs(n, l.pos, l.rot, l.scale);
+}
+
+void setGlobalTransform(DocNode &n, const Mat4 &m)
+{
+    Trs w;
+    iris::decomposeTRS(m, w.pos, w.rot, w.scale);
+    setGlobalTrs(n, w);
+}
+
+bool worldBox(const DocNode &n, const Vec3 &lmin, const Vec3 &lmax, float outMin[3], float outMax[3])
+{
+    const float from[6] = { lmin.x(), lmin.y(), lmin.z(), lmax.x(), lmax.y(), lmax.z() };
+    if (!(from[0] <= from[3] && from[1] <= from[4] && from[2] <= from[5])) return false;   // empty
+    // THE HOT PATH (a pick visits every mesh of the scene): plain floats, one compare of the local box.
+    if (n.boxValid && std::memcmp(n.boxFrom, from, sizeof from) == 0) {
+        std::memcpy(outMin, n.box, 3 * sizeof(float));
+        std::memcpy(outMax, n.box + 3, 3 * sizeof(float));
+        return true;
+    }
+    Vec3 P, S;
+    Quat R;
+    const bool cacheable = deriveWorld(n, P, R, S);
+    const Mat4 m = makeTransform(P, S, R);
+    const float c[3] = { (from[0] + from[3]) * 0.5f, (from[1] + from[4]) * 0.5f, (from[2] + from[5]) * 0.5f };
+    const float h[3] = { (from[3] - from[0]) * 0.5f, (from[4] - from[1]) * 0.5f, (from[5] - from[2]) * 0.5f };
+    for (int r = 0; r < 3; ++r) {
+        const float wc = m(r, 0) * c[0] + m(r, 1) * c[1] + m(r, 2) * c[2] + m(r, 3);
+        const float wh = std::fabs(m(r, 0)) * h[0] + std::fabs(m(r, 1)) * h[1] + std::fabs(m(r, 2)) * h[2];
+        // The pad: rounding in the triangle path's own inverse transform is relative to the box's size and to its
+        // distance from the origin, so the pad is too (plus an absolute floor for a box at the origin).
+        const float pad = 1e-5f * (wh + std::fabs(wc)) + 1e-6f;
+        outMin[r] = wc - wh - pad;
+        outMax[r] = wc + wh + pad;
+    }
+    if (cacheable) {
+        std::memcpy(n.boxFrom, from, sizeof from);
+        std::memcpy(n.box, outMin, 3 * sizeof(float));
+        std::memcpy(n.box + 3, outMax, 3 * sizeof(float));
+        n.boxValid = true;
+    }
+    return true;
+}
+
+void invalidatePick(DocNode &n)
+{
+    n.boxValid = false;
+    if (n.pickTable) n.pickTable->markStale(n.pickSlot);
+}
+
+void PickTable::add(SceneNode *meshNode)
+{
+    if (!meshNode) return;
+    DocNode &d = meshNode->docNode();
+    if (d.pickTable == this) return;
+    if (d.pickTable) d.pickTable->remove(meshNode);
+    std::size_t slot;
+    if (!mFree.empty()) {
+        slot = std::size_t(mFree.back());
+        mFree.pop_back();
+    } else {
+        slot = mNode.size();
+        mNode.push_back(nullptr);
+        mState.push_back(Stale);
+        mBox.resize(mBox.size() + 6, 0.0f);
+    }
+    mNode[slot] = meshNode;
+    mState[slot] = Stale;
+    d.pickTable = this;
+    d.pickSlot = int(slot);
+}
+
+void PickTable::remove(SceneNode *meshNode)
+{
+    if (!meshNode) return;
+    DocNode &d = meshNode->docNode();
+    if (d.pickTable != this || d.pickSlot < 0) return;
+    const std::size_t slot = std::size_t(d.pickSlot);
+    mNode[slot] = nullptr;
+    mState[slot] = Stale;
+    mFree.push_back(int(slot));
+    d.pickTable = nullptr;
+    d.pickSlot = -1;
+}
+
+void PickTable::clear()
+{
+    for (SceneNode *n : mNode)
+        if (n) { n->docNode().pickTable = nullptr; n->docNode().pickSlot = -1; }
+    mNode.clear();
+    mState.clear();
+    mBox.clear();
+    mFree.clear();
+}
+
+bool PickTable::refresh(std::size_t slot, const Vec3 &localMin, const Vec3 &localMax)
+{
+    SceneNode *n = mNode[slot];
+    if (!n) return false;
+    float *b = &mBox[6 * slot];
+    if (!worldBox(n->docNode(), localMin, localMax, b, b + 3)) return false;
+    // worldBox cached the box only if the world could be cached; the slot follows it exactly (a rider's box is
+    // recomputed on every pick, as its world is).
+    mState[slot] = n->docNode().boxValid ? Valid : Stale;
+    return true;
+}
+
+bool PoseWitness::operator==(const PoseWitness &o) const
+{
+    // BITS, not floats: -0 against +0 and a NaN against itself are differences
+    // a write could make, so `==` on the values would be the wrong question.
+    return parent == o.parent && std::memcmp(values, o.values, sizeof values) == 0;
+}
+
+PoseWitness poseWitness(const DocNode &n)
+{
+    PoseWitness w;
+    float *v = w.values;
+    // The parent half: what setGlobalPosRot resolves (the store's parent world, so a parent moved since the last
+    // write shows up here).
+    if (n.parent) {
+        w.parent = n.parent;
+        const Trs p = world(*n.parent);
+        v[0] = p.pos.x(); v[1] = p.pos.y(); v[2] = p.pos.z();
+        v[3] = p.rot.scalar(); v[4] = p.rot.x(); v[5] = p.rot.y(); v[6] = p.rot.z();
+        v[7] = p.scale.x(); v[8] = p.scale.y(); v[9] = p.scale.z();
+    }
+    // The node half: what setGlobalPosRot writes.
+    v[10] = n.pos.x(); v[11] = n.pos.y(); v[12] = n.pos.z();
+    v[13] = n.rot.scalar(); v[14] = n.rot.x(); v[15] = n.rot.y(); v[16] = n.rot.z();
+    return w;
 }
 
 // ---- flags ----------------------------------------------------------------
@@ -1346,81 +1468,6 @@ bool promoteNode(NodeHandle n, bool carry, bool *switched)
 std::size_t staticNodeCount() { return gStaticNodes; }
 
 
-std::size_t liveNodeCount() { return gLiveNodes; }
-
-// ---- picking: the broad phase ---------------------------------------------
-
-bool hasQueryableGeometry(SceneHandle s)
-{
-    if (!s || !engineAlive()) return false;
-    Ogre::SceneManager *m = sm(s);
-    return m->_getEntityMemoryManager(Ogre::SCENE_DYNAMIC).getTotalNumObjects() > 0 ||
-           m->_getEntityMemoryManager(Ogre::SCENE_STATIC).getTotalNumObjects() > 0;
-}
-
-namespace
-{
-/// Collects the DISTINCT document nodes a ray sweep hit. Ogre reports one
-/// result per MovableObject and a node may carry several (a mesh Item plus a
-/// wire overlay), so the listener keeps the nearest entry per node.
-class OwnerCollector : public Ogre::RaySceneQueryListener
-{
-public:
-    explicit OwnerCollector(std::vector<RayCandidate> &out) : mOut(out) {}
-
-    bool queryResult(Ogre::MovableObject *obj, Ogre::Real distance) override
-    {
-        Ogre::Node *parent = obj ? obj->getParentNode() : nullptr;
-        if (!parent) return true;
-        SceneNode *owner = ownerById(parent->getId());
-        // An engine-owned node (a light's -Y adapter, a decal box, a wire) has
-        // no document owner: its hits belong to no document node and are
-        // dropped rather than attributed to the nearest one.
-        if (!owner) return true;
-        for (RayCandidate &c : mOut) {
-            if (c.node != owner) continue;
-            if (float(distance) < c.distance) c.distance = float(distance);
-            return true;
-        }
-        mOut.push_back(RayCandidate{ owner, float(distance) });
-        return true;
-    }
-
-    bool queryResult(Ogre::SceneQuery::WorldFragment *, Ogre::Real) override { return true; }
-
-private:
-    std::vector<RayCandidate> &mOut;
-};
-}  // namespace
-
-void rayQuery(SceneHandle s, const Vec3 &origin, const Vec3 &dir, unsigned queryMask,
-              std::vector<RayCandidate> &out)
-{
-    out.clear();
-    if (!s || !engineAlive()) return;
-    Ogre::SceneManager *m = sm(s);
-    // The query object is created and destroyed per call on purpose: it is a
-    // small allocation, and a cached one would have to be invalidated when the
-    // scene manager dies (which happens on every world switch).
-    Ogre::RaySceneQuery *q = m->createRayQuery(
-        Ogre::Ray(toOgre(origin), toOgre(dir).normalisedCopy()), queryMask);
-    OwnerCollector collector(out);
-    try {
-        q->execute(&collector);
-    } catch (const Ogre::Exception &e) {
-        qWarning("iris::graph::rayQuery failed: %s", e.getDescription().c_str());
-    }
-    m->destroyQuery(q);
-}
-
-void setPickable(NodeHandle n, bool pickable)
-{
-    if (!n || !engineAlive()) return;
-    Ogre::SceneNode *o = nd(n);
-    const Ogre::uint32 flags = pickable ? kPickableQueryBit : kUnpickableQueryBit;
-    for (std::size_t i = 0; i < o->numAttachedObjects(); ++i)
-        o->getAttachedObject(i)->setQueryFlags(flags);
-}
 
 }  // namespace graph
 }  // namespace iris

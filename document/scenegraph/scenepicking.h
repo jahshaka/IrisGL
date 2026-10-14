@@ -27,22 +27,20 @@ For more information see the LICENSE file
 // camera / viewer origin spheres, which are editor helpers and have no
 // document geometry to intersect).
 //
-// THE BROAD PHASE IS THE ENGINE'S (SPECS/SCENEGRAPH_SPEC.md §2). Ogre's
-// `RaySceneQuery` sweeps the entity SoA four objects at a time and tests the
-// same world AABBs the renderer culls with — tighter than our sphere, masked
-// inside the sweep, and with no document walk at all. Ogre's queries are
-// AABB-precision and have no triangle path (`IntersectionSceneQuery` throws),
-// so the NARROW PHASE STAYS OURS: TriMesh segment intersection, in the node's
-// local space, reporting the triangle index.
-//
-// THE FALLBACK, stated rather than hidden. The query can only see geometry the
-// ENGINE holds — i.e. meshes a SceneMirror has attached. A document nobody has
-// mirrored (the document-only suites; the `--headless` document paths; a node
-// added since the last sync) has none, and a query there answers nothing. So
-// when the scene manager holds no query-able geometry at all, candidates come
-// from the scene's own MESH REGISTRY instead (a flat hash — not a tree walk)
-// with the bounding-sphere test. One narrow phase, one set of semantics, two
-// candidate sources; the difference is confined to `collectCandidates`.
+// THE BROAD PHASE IS THE DOCUMENT'S (ENGINE-UPGRADE-U2 stage 1). Each mesh
+// node's baked local AABB (`Mesh::aabb`) carried by its WORLD pose from the
+// document's transform store — the exact box of the transformed box, cached
+// per store epoch (graph::worldBox) — and one slab test of the SEGMENT against
+// it, over the scene's flat broad-phase table (graph::PickTable: six floats a
+// mesh, pushed stale by the store's invalidation — no tree walk, no node
+// touched for a valid slot): O(meshes) per pick, never per frame. It was Ogre's `RaySceneQuery` over the engine's world AABBs,
+// which (a) answered from the LAST updateSceneGraph — a node moved since the
+// last frame was tested at its old place — (b) could only see geometry a
+// SceneMirror had attached (a document-only fallback with a bounding sphere
+// stood beside it), and (c) made the UI thread call into Ogre, which a render
+// thread forbids. One path now, exact on the frame it is asked, on any document.
+// The NARROW PHASE IS OURS and stays: TriMesh segment intersection, in the
+// node's local space, reporting the triangle index (Ogre has no triangle path).
 // -----------------------------------------------------------------------------
 
 #include <QList>
@@ -70,15 +68,11 @@ namespace picking
 /// unsorted.
 ///
 /// `pickingMask` is the document's ALL-test (`(node->pickingGroups & mask) ==
-/// mask`), kept exact — Ogre's query mask is an ANY-test and cannot express it,
-/// so it is applied to the candidates, which costs O(hits) instead of
-/// O(scene). `allowUnpickable` ignores the per-node `pickable` flag.
+/// mask`), applied to the candidates with `pickable` and the effective
+/// visibility. `allowUnpickable` ignores the per-node `pickable` flag.
 QList<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
                               uint64_t pickingMask = 0, bool allowUnpickable = false);
 
-/// Did the last raycastMeshes() use the engine's broad phase? Diagnostic, for
-/// the suites that pin both paths against each other.
-bool lastUsedEngineBroadPhase();
 
 }  // namespace picking
 }  // namespace iris

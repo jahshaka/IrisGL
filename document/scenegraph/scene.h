@@ -423,6 +423,9 @@ public:
     /// engine-side budget check walk this rather than the whole tree.
     QHash<QString, DecalNodePtr> decals;
 	QHash<QString, MeshNodePtr> meshes;
+    /// Picking's broad phase: one slot per entry of `meshes`, kept with it (addNode / removeNode). Declared after it,
+    /// so it is torn down first, while the nodes whose slots it resets are still alive (graph::PickTable).
+    graph::PickTable pickTable;
 	QHash<QString, ParticleSystemNodePtr> particleSystems;
     /// Every scene-graph CameraNode, keyed by guid (CAMERAS_SPEC §3). NOT the
     /// editor camera: `camera` above is the viewport's virtual explorer and is
@@ -1341,7 +1344,7 @@ public:
     /// One of the TWO ENTRY POINTS onto iris::picking::raycastMeshes (the other
     /// is Studio's ScenePicker) — audit F13's duplicate walk is gone, and with
     /// it the recursive `->children` descent this used to do. The broad phase
-    /// is Ogre's RaySceneQuery; the triangle test is ours.
+    /// is the document's own bounds (scenepicking.h); the triangle test is ours.
     void rayCast(const iris::Vec3& segStart,
                  const iris::Vec3& segEnd,
                  QList<PickingResult>& hitList,

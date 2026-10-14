@@ -114,6 +114,10 @@ SceneNode::~SceneNode()
     // Deepest-first, through the one sanctioned path. The children's handles
     // are cleared on the way, so the QSharedPointers in mChildRefs (released
     // after this body runs) find nothing left to destroy.
+    // The store first: out of its parent's list (a parent being destroyed is
+    // releasing it anyway) and its children orphaned (they die with their refs).
+    graph::unlinkDoc(mDoc);
+    if (mDoc.pickTable) mDoc.pickTable->remove(this);
     if (mGraphNode) {
         graph::destroyNode(mGraphNode);
         mGraphNode = nullptr;
@@ -157,27 +161,19 @@ qint64 SceneNode::getNodeId()
 
 SceneNodePtr SceneNode::getParent() const
 {
-    SceneNode *p = graph::ownerOf(graph::parentOf(mGraphNode));
-    return p ? p->sharedFromThis() : SceneNodePtr();
+    return mDoc.parent ? mDoc.parent->owner->sharedFromThis() : SceneNodePtr();
 }
 
 bool SceneNode::hasParent() const
 {
-    return graph::ownerOf(graph::parentOf(mGraphNode)) != nullptr;
+    return mDoc.parent != nullptr;
 }
 
 QList<SceneNodePtr> SceneNode::children() const
 {
     QList<SceneNodePtr> out;
-    const std::size_t n = graph::childCount(mGraphNode);
-    out.reserve(int(n));
-    for (std::size_t i = 0; i < n; ++i) {
-        // Engine-owned children (a light's -Y adapter, a decal's projector box,
-        // a range wire) share the tree and have no document owner: they are not
-        // part of the document and never appear here.
-        if (SceneNode *o = graph::ownerOf(graph::childAt(mGraphNode, i)))
-            out.append(o->sharedFromThis());
-    }
+    out.reserve(int(mDoc.children.size()));
+    for (const graph::DocNode *c : mDoc.children) out.append(c->owner->sharedFromThis());
     return out;
 }
 
@@ -189,27 +185,27 @@ void SceneNode::_migrateGraph(graph::SceneHandle target, graph::NodeHandle newPa
 
 void SceneNode::rotate(iris::Quat rot, bool global)
 {
-    const iris::Quat cur = graph::localRot(mGraphNode);
+    const iris::Quat cur = mDoc.rot;
     notifyChanged(NodeChange::Transform);
-    graph::setLocalRot(mGraphNode, global ? cur * rot : rot * cur);
+    graph::setLocalRot(mDoc, global ? cur * rot : rot * cur);
 }
 
 void SceneNode::setLocalPos(iris::Vec3 pos)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setLocalPos(mGraphNode, pos);
+    graph::setLocalPos(mDoc, pos);
 }
 
 void SceneNode::setLocalRot(iris::Quat rot)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setLocalRot(mGraphNode, rot);
+    graph::setLocalRot(mDoc, rot);
 }
 
 void SceneNode::setLocalScale(iris::Vec3 scale)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setLocalScale(mGraphNode, scale);
+    graph::setLocalScale(mDoc, scale);
 }
 
 void SceneNode::setLocalTransform(iris::Mat4 transformMatrix)
@@ -218,7 +214,7 @@ void SceneNode::setLocalTransform(iris::Mat4 transformMatrix)
     iris::Quat r;
     MathHelper::decomposeMatrix(transformMatrix, p, r, s);
     notifyChanged(NodeChange::Transform);
-    graph::setLocalTrs(mGraphNode, p, r, s);
+    graph::setLocalTrs(mDoc, p, r, s);
 }
 
 bool SceneNode::isAttached()
@@ -244,9 +240,9 @@ void SceneNode::setVisible(bool flag)
 
 bool SceneNode::isVisibleInScene() const
 {
-    // Raw handles up the chain — no QSharedPointer per level. parentOf answers
-    // a socket rider with its document (shadow) parent.
-    for (const SceneNode *n = this; n; n = graph::ownerOf(graph::parentOf(n->mGraphNode)))
+    // Raw pointers up the store's chain — no QSharedPointer per level. A socket
+    // rider's parent is its document parent (socketing is not a reparent).
+    for (const SceneNode *n = this; n; n = (n->mDoc.parent ? n->mDoc.parent->owner : nullptr))
         if (!n->visible) return false;
     return true;
 }
@@ -317,7 +313,7 @@ bool clipMovesAnything(const AnimationPtr &a)
 
 bool SceneNode::isKeyedByClip() const
 {
-    for (const SceneNode *n = this; n; n = graph::ownerOf(graph::parentOf(n->mGraphNode))) {
+    for (const SceneNode *n = this; n; n = (n->mDoc.parent ? n->mDoc.parent->owner : nullptr)) {
         if (clipKeysNode(n->animation, name)) return true;
         for (const AnimationPtr &a : n->animations)
             if (clipKeysNode(a, name)) return true;
@@ -327,7 +323,7 @@ bool SceneNode::isKeyedByClip() const
 
 bool SceneNode::hasMovingClipOver() const
 {
-    for (const SceneNode *n = this; n; n = graph::ownerOf(graph::parentOf(n->mGraphNode))) {
+    for (const SceneNode *n = this; n; n = (n->mDoc.parent ? n->mDoc.parent->owner : nullptr)) {
         if (clipMovesAnything(n->animation)) return true;
         for (const AnimationPtr &a : n->animations)
             if (clipMovesAnything(a)) return true;
@@ -402,7 +398,7 @@ Mobility SceneNode::resolvedMobility(MobilityReason *why) const
     // socket rider with its document parent, which is right — a rider is
     // movable through rule 1 anyway.
     bool parentMovable = false;
-    if (const SceneNode *p = graph::ownerOf(graph::parentOf(mGraphNode)))
+    if (const SceneNode *p = mDoc.parent ? mDoc.parent->owner : nullptr)
         parentMovable = p->resolvedMobility(nullptr) == Mobility::Movable;
     return resolveMobility(parentMovable, why);
 }
@@ -528,7 +524,7 @@ void SceneNode::reapplyStaticHints()
 void SceneNode::applyStaticDefaults()
 {
     bool parentMovable = false;
-    if (const SceneNode *p = graph::ownerOf(graph::parentOf(mGraphNode)))
+    if (const SceneNode *p = mDoc.parent ? mDoc.parent->owner : nullptr)
         parentMovable = p->resolvedMobility() == Mobility::Movable;
     applyStaticDefaultsFrom(parentMovable);
 }
@@ -543,11 +539,8 @@ void applyStaticDefaultsRec(SceneNode *node, bool parentMovable, bool carry)
     // Descend regardless — a light in the middle of an imported rig does not
     // stop the props below it from being static, it only stops ITSELF (and,
     // through canBeStatic, the branch under it, which is the rule).
-    const graph::NodeHandle h = node->graphNode();
-    const std::size_t n = graph::childCount(h);
-    for (std::size_t i = 0; i < n; ++i)
-        if (SceneNode *c = graph::ownerOf(graph::childAt(h, i)))
-            applyStaticDefaultsRec(c, movable, childCarry);
+    for (const graph::DocNode *c : node->docNode().children)
+        applyStaticDefaultsRec(c->owner, movable, childCarry);
 }
 }
 
@@ -813,7 +806,10 @@ void SceneNode::addChild(SceneNodePtr node, bool keepTransform)
 void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
 {
     if (!node) return;
-    const iris::Mat4 initialGlobalTransform = node->getGlobalTransform();
+    // The world POSE, not a matrix: the re-expression below inverts Ogre's own
+    // composition rule exactly (graph::setGlobalTrs) — a matrix would be
+    // decomposed again, losing a negative scale's sign convention and any shear.
+    const graph::Trs initialWorld = graph::world(node->mDoc);
 
     // A move inside the same scene keeps its scene membership: tearing the
     // registries down and rebuilding them loses state that only exists at the
@@ -825,10 +821,13 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
     if (auto oldParent = node->getParent())
         oldParent->removeChildInternal(node, false, sameSceneMove);
 
-    // ONE tree: the child moves inside Ogre's hierarchy. A child that lives in
-    // a different scene manager (the staging one, which is where every node is
-    // born) is REBUILT under us — an Ogre::SceneNode belongs to its creator and
-    // cannot be handed to another manager.
+    // THE STORE: the document's hierarchy (graph::DocNode).
+    graph::attachDoc(mDoc, node->mDoc, position);
+    // THE OGRE HALF (stage 1 of ENGINE-UPGRADE-U2): the child's Ogre node moves
+    // with it. A child that lives in a different scene manager (the staging one,
+    // which is where every node is born) is REBUILT under us — an
+    // Ogre::SceneNode belongs to its creator and cannot be handed to another
+    // manager.
     if (graph::sceneOf(node->mGraphNode) != graph::sceneOf(mGraphNode))
         node->_migrateGraph(graph::sceneOf(mGraphNode), mGraphNode);
     graph::attach(mGraphNode, node->mGraphNode, position);
@@ -840,11 +839,11 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
     }
 
     if (keepTransform) {
-        // ONE decomposition, Ogre's: the world transform the node had before
-        // the move is re-expressed in the new parent's space. (The old code
-        // took the rotation from diff.normalMatrix() — the inverse-transpose,
-        // R * S^-1, which is R only at scale 1 — and the scale from the column
-        // lengths, so reparenting a non-uniformly scaled node rotated it.)
+        // The world pose the node had before the move, re-expressed in the new
+        // parent's space by the exact inverse of the composition rule (exact for
+        // any parent chain, a non-uniform or a zero scale included —
+        // SC1-REEXPRESS-SCALE-1: the matrix inverse + decomposition this
+        // replaced was exact only under uniform scale).
         //
         // A RE-EXPRESSION, NOT A MOVE (nodegraph.h rule 4, ReexpressScope): the
         // world pose is preserved by construction, so the write keeps the node's
@@ -856,7 +855,8 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
         const bool wantedStatic = node->wantsStatic();
         {
             graph::ReexpressScope reexpress;
-            node->setGlobalTransform(initialGlobalTransform);
+            node->notifyChanged(NodeChange::Transform);
+            graph::setGlobalTrs(node->mDoc, initialWorld);
         }
         // _applyStaticHint, not setMobility: a plain reparent of a
         // policy-derived static node must not stamp a USER decision (which the
@@ -890,6 +890,7 @@ void SceneNode::removeChildInternal(const SceneNodePtr &node, bool detachGraph,
     // Out of the tree first (this is what makes it stop rendering and stop
     // being reachable), THEN out of the scene registries, THEN drop our
     // ownership — the caller's own SceneNodePtr is what keeps it alive.
+    graph::detachDoc(node->mDoc);
     if (detachGraph) {
         // The scene has to be told BEFORE removeFromScene clears the link: the
         // subtree stays in that scene's scene manager and has to travel with it
@@ -1018,13 +1019,13 @@ qint64 SceneNode::generateNodeId()
 void SceneNode::setGlobalPos(iris::Vec3 pos)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setGlobalPos(mGraphNode, pos);
+    graph::setGlobalPos(mDoc, pos);
 }
 
 void SceneNode::setGlobalRot(iris::Quat rot)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setGlobalRot(mGraphNode, rot);
+    graph::setGlobalRot(mDoc, rot);
 }
 
 void SceneNode::setGlobalPosRot(iris::Vec3 pos, iris::Quat rot)
@@ -1032,13 +1033,13 @@ void SceneNode::setGlobalPosRot(iris::Vec3 pos, iris::Quat rot)
     // ONE notification and ONE parent resolution for a pose that arrives whole
     // — the physics write-back's shape (MIRROR_SCALE lane).
     notifyChanged(NodeChange::Transform);
-    graph::setGlobalPosRot(mGraphNode, pos, rot);
+    graph::setGlobalPosRot(mDoc, pos, rot);
 }
 
 void SceneNode::setGlobalTransform(iris::Mat4 transform)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setGlobalTransform(mGraphNode, transform);
+    graph::setGlobalTransform(mDoc, transform);
 }
 
 SceneNodePtr SceneNode::duplicate()

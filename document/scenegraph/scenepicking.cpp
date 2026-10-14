@@ -11,11 +11,11 @@ For more information see the LICENSE file
 
 #include "document/scenegraph/scenepicking.h"
 
+#include <utility>
 #include <vector>
 
-#include "core/geometry/boundingsphere.h"
+#include "core/geometry/aabb.h"
 #include "core/geometry/trimesh.h"
-#include "core/math/intersectionhelper.h"
 #include "core/math/mat4.h"
 #include "document/assets/mesh.h"
 #include "document/scenegraph/meshnode.h"
@@ -31,87 +31,73 @@ namespace picking
 namespace
 {
 
-bool gLastUsedEngine = false;
-
-/// The exact document semantics, applied once per CANDIDATE. `pickingGroups`
-/// is an ALL-test and Ogre's query mask is an ANY-test (see scenepicking.h), so
-/// this is where groups are really decided — and where `pickable` is decided
-/// too when the fallback path produced the candidates.
+/// The exact document semantics, applied once per CANDIDATE: `pickable`, the
+/// effective visibility and the `pickingGroups` ALL-test.
 inline bool passesFlags(SceneNode *node, uint64_t pickingMask, bool allowUnpickable)
 {
     if (!node->isPickable() && !allowUnpickable) return false;
     // A HIDDEN MESH IS NEVER A HIT, and hidden means EFFECTIVELY hidden — by
     // its own flag or any ancestor's (SceneNode::isVisibleInScene; the rule the
-    // renderer draws by, RENDER_PIPELINE_AUDIT 1.1/1.2). Decided HERE, on the
-    // document, for both broad phases: the fallback has no other test, and
-    // the engine sweep's LAYER_VISIBILITY mask lags the document by a sync —
-    // a script that hides a node and raycasts in the same breath must not hit
-    // it. O(depth) per candidate; candidates are few.
+    // renderer draws by, RENDER_PIPELINE_AUDIT 1.1/1.2). A script that hides a
+    // node and raycasts in the same breath must not hit it. O(depth) per
+    // candidate; candidates are few.
     if (!node->isVisibleInScene()) return false;
     return (node->pickingGroups & pickingMask) == pickingMask;
 }
 
-/// Every mesh node whose bounds the segment could cross. Two sources, one
-/// shape: see the header.
+/// The segment o + t d, t in [0, 1], against the box [mn, mx]: the slab test,
+/// inclusive at the faces (a flat mesh has a zero-thickness box), an axis the
+/// segment runs parallel to decided by the start point alone. Plain floats: this
+/// runs once per mesh of the scene per pick, and the Debug build is the daily one.
+inline bool segmentHitsBox(const float o[3], const float d[3], const float inv[3], const float mn[3],
+                           const float mx[3])
+{
+    float t0 = 0.0f, t1 = 1.0f;
+    for (int i = 0; i < 3; ++i) {
+        if (d[i] == 0.0f) {
+            if (o[i] < mn[i] || o[i] > mx[i]) return false;
+            continue;
+        }
+        float tn = (mn[i] - o[i]) * inv[i], tf = (mx[i] - o[i]) * inv[i];
+        if (tn > tf) std::swap(tn, tf);
+        if (tn > t0) t0 = tn;
+        if (tf < t1) t1 = tf;
+        if (t0 > t1) return false;
+    }
+    return true;
+}
+
+/// THE BROAD PHASE (see the header): every mesh node with a triangle index whose
+/// world box the segment crosses — over the scene's flat table (graph::PickTable):
+/// a valid slot is six floats read in place, and only a stale one (a write or a
+/// content swap reached its node since the last pick) touches the node to refresh.
 void collectCandidates(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
-                       bool allowUnpickable, std::vector<MeshNode *> &out)
+                       std::vector<MeshNode *> &out)
 {
     out.clear();
-    SceneNodePtr root = scene->getRootNode();
-    graph::SceneHandle handle = root ? graph::sceneOf(root->graphNode()) : nullptr;
-
-    gLastUsedEngine = handle && graph::hasQueryableGeometry(handle);
-    if (gLastUsedEngine) {
-        // THE ENGINE'S BROAD PHASE. The mask rejects unpickable geometry inside
-        // the SIMD sweep — that is the bulk rejection, and it is the only part
-        // of the document's picking semantics Ogre's ANY-test mask can express.
-        // `pickable` is re-checked exactly on what comes back all the same: an
-        // Item created since the last sync still carries Ogre's default query
-        // flags (all bits), so it arrives as a candidate whatever the document
-        // says, and the exact test is what decides it.
-        const unsigned mask =
-            allowUnpickable ? (graph::kPickableQueryBit | graph::kUnpickableQueryBit)
-                            : graph::kPickableQueryBit;
-        static std::vector<graph::RayCandidate> hits;
-        const Vec3 dir = segEnd - segStart;
-        graph::rayQuery(handle, segStart, dir, mask, hits);
-        const float segLength = dir.length();
-        out.reserve(hits.size());
-        for (const graph::RayCandidate &c : hits) {
-            // The query's ray is infinite; the document's is a SEGMENT. An AABB
-            // entered beyond the segment's far end cannot hold a hit.
-            if (c.distance > segLength) continue;
-            if (c.node->getSceneNodeType() != SceneNodeType::Mesh) continue;
-            out.push_back(static_cast<MeshNode *>(c.node));
+    const float o[3] = { segStart.x(), segStart.y(), segStart.z() };
+    const float d[3] = { segEnd.x() - o[0], segEnd.y() - o[1], segEnd.z() - o[2] };
+    const float inv[3] = { d[0] != 0.0f ? 1.0f / d[0] : 0.0f, d[1] != 0.0f ? 1.0f / d[1] : 0.0f,
+                           d[2] != 0.0f ? 1.0f / d[2] : 0.0f };
+    graph::PickTable &table = scene->pickTable;
+    const std::size_t count = table.slotCount();
+    for (std::size_t i = 0; i < count; ++i) {
+        graph::PickTable::State st = table.state(i);
+        if (st == graph::PickTable::NoGeometry) continue;
+        SceneNode *n = table.node(i);
+        if (!n) continue;
+        if (st == graph::PickTable::Stale) {
+            MeshNode *mn = static_cast<MeshNode *>(n);
+            Mesh *mesh = mn->mesh.data();   // the member, not getMesh(): no shared-pointer copy
+            if (!mesh || !mesh->getTriMesh()) { table.markNoGeometry(i); continue; }   // nothing to test
+            if (!table.refresh(i, mesh->aabb.getMin(), mesh->aabb.getMax())) continue;
         }
-        return;
-    }
-
-    // THE FALLBACK: no engine geometry for this document. The scene's mesh
-    // registry is a flat hash of every mesh node — no tree walk — and the
-    // bounding sphere is the broad phase, in the node's local space (the same
-    // test both old implementations used).
-    out.reserve(scene->meshes.size());
-    for (const MeshNodePtr &mn : scene->meshes) {
-        if (!mn) continue;
-        // (Visibility is decided per candidate in passesFlags, for both broad
-        // phases alike.)
-        MeshPtr mesh = mn->getMesh();
-        if (!mesh) continue;
-        const Mat4 inv = mn->getGlobalTransform().inverted();
-        const Vec3 a = inv * segStart, b = inv * segEnd;
-        const BoundingSphere sphere = mesh->getBoundingSphere();
-        float t;
-        Vec3 hitPoint;
-        if (IntersectionHelper::raySphereIntersects(a, (b - a).normalized(), sphere.pos,
-                                                    sphere.radius, t, hitPoint))
-            out.push_back(mn.data());
+        const float *b = table.box(i);
+        if (segmentHitsBox(o, d, inv, b, b + 3)) out.push_back(static_cast<MeshNode *>(n));
     }
 }
 
 }  // namespace
-
-bool lastUsedEngineBroadPhase() { return gLastUsedEngine; }
 
 QList<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
                               uint64_t pickingMask, bool allowUnpickable)
@@ -120,7 +106,7 @@ QList<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &se
     if (!scene || !scene->getRootNode()) return out;
 
     std::vector<MeshNode *> candidates;
-    collectCandidates(scene, segStart, segEnd, allowUnpickable, candidates);
+    collectCandidates(scene, segStart, segEnd, candidates);
 
     for (MeshNode *meshNode : candidates) {
         if (!passesFlags(meshNode, pickingMask, allowUnpickable)) continue;

@@ -813,6 +813,7 @@ void Scene::addNode(SceneNodePtr node)
 		if (meshes.contains(node->getGUID()))
 			mesh->setGUID(IrisUtils::generateGUID());
 		meshes.insert(node->getGUID(), mesh);
+		pickTable.add(mesh.data());
     }
 
     if (node->sceneNodeType == SceneNodeType::ParticleSystem) {
@@ -954,6 +955,7 @@ void Scene::removeNode(SceneNodePtr node)
 
     if (node->sceneNodeType == SceneNodeType::Mesh) {
         removeRegistered(meshes, guid, node.staticCast<iris::MeshNode>());
+        pickTable.remove(node.data());
     }
 
     if (node->sceneNodeType == SceneNodeType::ParticleSystem) {
@@ -1199,6 +1201,7 @@ void Scene::cleanup()
 
     lights.clear();
     decals.clear();
+    pickTable.clear();
     meshes.clear();
     particleSystems.clear();
     cameras.clear();

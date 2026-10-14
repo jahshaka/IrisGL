@@ -136,33 +136,29 @@ bool mobilityFromName(const QString &name, Mobility &out);
 const char *mobilityReasonName(MobilityReason r);
 
 // -----------------------------------------------------------------------------
-// iris::SceneNode — a TYPED HANDLE onto one Ogre::SceneNode.
+// iris::SceneNode — a document node: its own transform and hierarchy (the
+// store, mDoc), and — while ENGINE-UPGRADE-U2's stage 1 runs — the Ogre node it
+// writes in parallel for the engine that adopts it.
 //
-// SPECS/SCENEGRAPH_SPEC.md D2. This class kept its name and its whole public
-// API on purpose (the audit counted ~620 transform and ~548 hierarchy call
-// sites), but it no longer OWNS any of the graph. Gone, by construction:
+// SCENEGRAPH_SPEC D2 had made this a typed handle onto an Ogre::SceneNode that
+// forwarded every transform and hierarchy read to Ogre. U2 reverses that
+// (ENGINE_UPGRADE_SPEC §1, Q1): every read — the local and world TRS, the
+// parent, the children, the sibling index — is the store's (nodegraph.h), the
+// world composed by Ogre's own rule in document maths. The ~620 transform and
+// ~548 hierarchy call sites the D2 audit counted kept this class's API and did
+// not move.
 //
-//   pos / rot / scale            -> Ogre's SoA transform
-//   localTransform, globalTransform (the two cached Mat4, 128 bytes a node)
-//   transformDirty / globalDirty / hasDirtyChildren
-//   update()'s transform recursion
-//   getGlobalTransform()'s recompute-and-write-the-cache body (audit F2 — the
-//     non-const "getter" that walked and wrote the whole ancestor chain; it is
-//     now Ogre's own dirty-gated _getFullTransformUpdated())
-//   QList<SceneNodePtr> children as the HIERARCHY
-//
-// What the handle still owns is everything that was never graph structure:
+// What the node also owns is everything that was never graph structure:
 // identity (guid + nodeId), the editor flags, physics, animation clips, the
 // rest pose, asset references and the properties/reflection surface.
 //
-// OWNERSHIP, and why one list survives. Ogre's node holds a RAW back-pointer to
-// this handle (UserObjectBindings), never a QSharedPointer: an Ogre-held strong
-// reference would make `graph::destroyNode` the only way a node could ever die,
-// and the undo stack's contract is the opposite — "the undo stack is what keeps
-// deleted nodes alive" (audit §3.3). So `mChildRefs` below is kept as a pure
-// LIFETIME ANCHOR: it holds the QSharedPointers, it is never read for order,
-// parentage or iteration, and exactly two functions (insertChild / removeChild)
-// touch it. Structure comes from Ogre, always.
+// OWNERSHIP, and why one list survives. The store holds RAW pointers (DocNode::
+// parent / children), never a QSharedPointer: the undo stack's contract is
+// "the undo stack is what keeps deleted nodes alive" (audit §3.3). So
+// `mChildRefs` below is kept as a pure LIFETIME ANCHOR: it holds the
+// QSharedPointers, it is never read for order, parentage or iteration, and
+// exactly two functions (insertChild / removeChild) touch it. Structure comes
+// from the store, always.
 // -----------------------------------------------------------------------------
 class SceneNode : public QEnableSharedFromThis<SceneNode>
 {
@@ -174,6 +170,12 @@ protected:
     /// when no Ogre::Root existed at construction time — a v1 programming
     /// error, reported once and loudly, not a supported mode.
     graph::NodeHandle mGraphNode = nullptr;
+
+    /// THE DOCUMENT'S OWN TRUTH (ENGINE-UPGRADE-U2, nodegraph.h's store): this
+    /// node's local TRS, its parent, its ordered children and its cached world.
+    /// Every read is answered here; mGraphNode is written in parallel for the
+    /// engine that still adopts it (stage 1).
+    graph::DocNode mDoc{this};
 
     /// LIFETIME ANCHOR ONLY — see the class note. Never iterate it; use
     /// children().
@@ -466,6 +468,9 @@ public:
     /// that the engine's Item rides the DOCUMENT's node — which is what makes
     /// the per-frame transform push (audit F1) unnecessary.
     graph::NodeHandle graphNode() const { return mGraphNode; }
+    /// This node's entry in the document's transform store (nodegraph.h).
+    graph::DocNode &docNode() { return mDoc; }
+    const graph::DocNode &docNode() const { return mDoc; }
     /// Called by iris::graph when a migration rebuilds this node in another
     /// scene manager, and by its recursive destroy. Not for general use.
     void _setGraphNode(graph::NodeHandle h) { mGraphNode = h; ++mGraphEpoch; }
@@ -579,13 +584,13 @@ public:
 		return exportable;
 	}
 
-    iris::Vec3 getLocalPos()   { return graph::localPos(mGraphNode); }
-    iris::Quat getLocalRot()   { return graph::localRot(mGraphNode); }
-    iris::Vec3 getLocalScale() { return graph::localScale(mGraphNode); }
+    iris::Vec3 getLocalPos()   { return mDoc.pos; }
+    iris::Quat getLocalRot()   { return mDoc.rot; }
+    iris::Vec3 getLocalScale() { return mDoc.scale; }
 
 	void rotate(iris::Quat rot, bool global = false);
 
-    bool hasChildren() { return graph::childCount(mGraphNode) > 0; }
+    bool hasChildren() { return !mDoc.children.empty(); }
 
     void setLocalPos(iris::Vec3 pos);
     void setLocalRot(iris::Quat rot);
@@ -596,8 +601,8 @@ public:
     bool isAttached();
     void setAttached(bool attached);
 
-	/// The owning parent. Null for a root node and for a detached one. Derived
-	/// from the ONE tree — Ogre's — through the node's back-pointer.
+	/// The owning parent. Null for a root node and for a detached one. The
+	/// store's (graph::DocNode::parent).
 	SceneNodePtr getParent() const;
 
 	/// The scene this node belongs to, locked. Null when the node is detached,
@@ -610,34 +615,31 @@ public:
 	bool hasParent() const;
 	bool hasScene()  const { return !scene.isNull(); }
 
-    /// The children, in order, resolved through Ogre's child vector and the
-    /// back-pointers. Built on demand: this is a QList by value, not a
-    /// reference to a member, because there is no member any more.
+    /// The children, in order, from the store. Built on demand: this is a QList
+    /// by value, not a reference to a member.
     ///
     /// COSTS AN ALLOCATION AND N ATOMIC INCREMENTS. That is fine for a one-shot
     /// (a panel rebuilding a tree, a serializer, an exporter) and it is not
     /// fine inside a walk that runs every frame or over the whole document —
-    /// use childCount()/childAt() there, which read Ogre's child vector and the
-    /// owner back-pointers directly and allocate nothing. The mirror's per-sync
-    /// walk was the biggest single cost in an idle frame until it stopped
-    /// calling this.
+    /// use childCount()/childAt() there, which read the store's child list and
+    /// allocate nothing.
     QList<SceneNodePtr> children() const;
     /// The child count without materialising the list.
-    int childCount() const { return int(graph::childCount(mGraphNode)); }
-    /// The i'th DOCUMENT child, borrowed — null when `i` names one of the
-    /// engine's own children (a light's -Y adapter, a decal box, a wire), which
-    /// share the tree and are not part of the document. Callers that walk
-    /// SKIP nulls; they must not assume childAt(0..childCount()) is dense.
+    int childCount() const { return int(mDoc.children.size()); }
+    /// The i'th child, borrowed (null only out of range). The store holds
+    /// DOCUMENT children only — the engine's own nodes (a light's -Y adapter, a
+    /// decal box, a wire) were never part of it.
     ///
     /// Borrowed, not shared: a walk that only reads has no business bumping a
     /// refcount per node, and the caller's own reference to the root keeps the
     /// subtree alive. Do not store the result.
     SceneNode *childAt(int i) const
     {
-        return graph::ownerOf(graph::childAt(mGraphNode, std::size_t(i)));
+        return (i >= 0 && std::size_t(i) < mDoc.children.size()) ? mDoc.children[std::size_t(i)]->owner
+                                                                 : nullptr;
     }
     /// This node's position among its siblings, or -1. Undo captures it.
-    int siblingIndex() const { return graph::indexInParent(mGraphNode); }
+    int siblingIndex() const { return graph::indexInParent(mDoc); }
 
     void addAnimation(AnimationPtr anim);
     QList<AnimationPtr> getAnimations();
@@ -708,7 +710,7 @@ public:
     /// and the GI Fit button skip what it rejects — while each node's own flag
     /// stays the user's, so showing a parent brings back only the children
     /// that were not hidden themselves. A socket rider answers through its
-    /// DOCUMENT parent (graph::parentOf's shadow parent), not the bone it hangs
+    /// DOCUMENT parent (the store keeps its place), not the bone it hangs
     /// from. O(depth); nothing calls it per node per frame.
     bool isVisibleInScene() const;
 
@@ -718,13 +720,8 @@ public:
 
     void setPickable(bool canPick) {
         pickable = canPick;
-        // Straight through to this node's engine objects as Ogre QUERY FLAGS:
-        // picking's broad phase is a masked RaySceneQuery (SCENEGRAPH_SPEC §2)
-        // and the mask is tested inside the sweep, so a node that stopped being
-        // pickable has to say so before the next pick, not before the next
-        // mirror sync. (The mirror pushes it too — that is the path for an Item
-        // that did not exist yet when the flag was set.)
-        graph::setPickable(mGraphNode, canPick);
+        // A document flag, read by picking on the candidates (the broad phase
+        // is the document's own bounds since ENGINE-UPGRADE-U2: nothing to push).
         notifyChanged(NodeChange::Flags);
     }
 
@@ -1020,10 +1017,12 @@ public:
 
     bool isRootNode();
 
-	iris::Quat getGlobalRotation() { return graph::globalRot(mGraphNode); }
-    iris::Vec3 getGlobalPosition() { return graph::globalPos(mGraphNode); }
-    iris::Mat4 getGlobalTransform() { return graph::globalTransform(mGraphNode); }
-    iris::Mat4 getLocalTransform()  { return graph::localTransform(mGraphNode); }
+    /// The WORLD, from the store: Ogre's composition rule down the parent chain,
+    /// cached per store epoch (nodegraph.h). Never a read of the engine.
+	iris::Quat getGlobalRotation() { return graph::world(mDoc).rot; }
+    iris::Vec3 getGlobalPosition() { return graph::world(mDoc).pos; }
+    iris::Mat4 getGlobalTransform() { return graph::globalTransform(mDoc); }
+    iris::Mat4 getLocalTransform()  { return graph::localTransform(mDoc); }
 
 	void setGlobalPos(iris::Vec3 pos);
 	/// Position AND rotation in one write. Each setter above undoes the
@@ -1078,6 +1077,9 @@ protected:
     /// a load, a test and — at most once per node per frame — a push_back.
     void notifyChanged(NodeChange what)
     {
+        // A CONTENT swap changes the local box picking's broad phase carries (graph::PickTable), whether or not
+        // the node is in a mirrored scene.
+        if (what == NodeChange::Content) graph::invalidatePick(mDoc);
         if (!mDirtySet) return;
         // THE JOURNAL'S WRITTEN HALF (graph::noteDocumentWrite, read by a
         // WriteJournalReader(true)) hears every document write that is not a

@@ -337,11 +337,11 @@ inline void mixFloat(quint64 &h, float f)
 constexpr quint64 kTrsBasis = 1469598103934665603ull;   // FNV-1a 64 offset basis
 
 /// One node's own local TRS, folded into `sig`.
-inline void mixLocalTrs(quint64 &sig, iris::graph::NodeHandle h)
+inline void mixLocalTrs(quint64 &sig, const iris::graph::DocNode &d)
 {
-    const iris::Vec3 p = iris::graph::localPos(h);
-    const iris::Quat r = iris::graph::localRot(h);
-    const iris::Vec3 s = iris::graph::localScale(h);
+    const iris::Vec3 p = d.pos;
+    const iris::Quat r = d.rot;
+    const iris::Vec3 s = d.scale;
     mixFloat(sig, p.x()); mixFloat(sig, p.y()); mixFloat(sig, p.z());
     mixFloat(sig, r.x()); mixFloat(sig, r.y()); mixFloat(sig, r.z()); mixFloat(sig, r.scalar());
     mixFloat(sig, s.x()); mixFloat(sig, s.y()); mixFloat(sig, s.z());
@@ -349,11 +349,8 @@ inline void mixLocalTrs(quint64 &sig, iris::graph::NodeHandle h)
 
 /// A change-key for a node's WORLD transform, WITHOUT computing one.
 ///
-/// `globalTransform()` is `Ogre::Node::_getFullTransformUpdated()`, and that
-/// call recurses to the ROOT unconditionally, running the full transform
-/// recomposition (and a listener call) at every level — every time, whether
-/// anything moved or not. Three per-frame sites only ever wanted to know
-/// whether the answer CHANGED (the GI light signature, the light icon's
+/// A world transform is a composition down the whole parent chain. Three
+/// per-frame sites only ever wanted to know whether the answer CHANGED (the GI light signature, the light icon's
 /// billboard instance and the selection outline's shells), and paid the whole
 /// recomposition per light / per selected mesh per frame to find out (audit
 /// F7 / F8 / F9).
@@ -364,10 +361,10 @@ inline void mixLocalTrs(quint64 &sig, iris::graph::NodeHandle h)
 /// local TRS on the chain did. (A hash is a change test, not a value: the
 /// collision risk is one refusal to notice a move in 2^64, against a whole
 /// matrix chain per frame.)
-quint64 worldTrsSignature(iris::graph::NodeHandle h)
+quint64 worldTrsSignature(const iris::SceneNode *node)
 {
     quint64 sig = kTrsBasis;
-    for (; h; h = iris::graph::parentOf(h)) mixLocalTrs(sig, h);
+    for (const iris::graph::DocNode *d = node ? &node->docNode() : nullptr; d; d = d->parent) mixLocalTrs(sig, *d);
     return sig;
 }
 
@@ -498,7 +495,6 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mTextures.clear();
     mLiveGenerations.clear();   // a key is here only while its engine texture is (code review 2026-09-10)
     mMaterialSync.clear();     // the per-material memo dies with the materials
-    mMaterialItemSerial.clear();
     for (TextureId t : mIconTextures) mTarget->destroyTexture(t);
     mIconTextures.clear();
     // Decal-atlas slices are a FIXED, process-wide budget (32 slices), and this
@@ -596,40 +592,9 @@ MaterialId SceneMirror::engineMaterial(const iris::SceneNode *node) const
     return it == mEntries.constEnd() ? 0 : it->material;
 }
 
-/// A shading-model switch re-creates the RENDERABLES of every node using the
-/// material, behind the mirror's back. Everything attachMesh sets itself
-/// (visibility bits, render queue, static bounds, the reflector plane) is
-/// correct on the new Item — but per-Item state the MIRROR owns is not, and
-/// there is exactly one: the query flags behind `pickable`. A new Item is born
-/// with Ogre's default query mask, so an unpickable object would quietly become
-/// clickable again after a switch. Forgetting one push is why this is a named
-/// function next to the switch and not a line inside it.
 quint64 SceneMirror::staticNodeCount() const
 {
     return quint64(iris::graph::staticNodeCount());
-}
-
-void SceneMirror::onMaterialItemsRebuilt(MaterialId material)
-{
-    if (!material) return;
-    // O(1), NOT O(every entry in the scene) (MIRROR_SCALE lane, 2026-09-13).
-    //
-    // A shading-model switch rebuilds every Item the material draws, and each
-    // new Item is born with the default query mask — so every entry using it
-    // owes one re-push of its `pickable` flag. That was done by walking the
-    // whole entry hash, and the walk ran from visit() the FIRST time each
-    // material was seen (shadingModelPushed starts at -1, and an attach resets
-    // it): on a scene open with N nodes each carrying its own material — which
-    // is exactly what the editor creates, one PbrMaterial per primitive — that
-    // is N walks of N entries. Measured on a 2020-node lattice: 84 ms of
-    // adopting sync against 40 ms for the same nodes sharing one material, and
-    // the gap is quadratic, so an 8000-node scene paid for it sixteenfold.
-    //
-    // Now the material carries a SERIAL and the entry remembers which one it
-    // pushed against. Same statement, no walk: the re-push happens on the
-    // entry's own next visit, which is the frame it would have happened on
-    // anyway (the walk only moved a latch).
-    ++mMaterialItemSerial[material];
 }
 
 void SceneMirror::setAttachBudget(std::size_t vertices, std::size_t indices)
@@ -697,10 +662,10 @@ int SceneMirror::sync(const FrameViews &frameViews)
         // Ogre node under this manager.
         mFullWalkPending = true;
     }
-    // NO transform refresh. There is nothing to refresh: the document's world
-    // transforms ARE Ogre's, resolved by the engine's threaded SIMD pass inside
-    // the frame and, for the readers that need one between frames, on demand
-    // (iris::graph::globalTransform -> Node::_getFullTransformUpdated).
+    // NO transform refresh. There is nothing to refresh: every document write
+    // lands in the document's transform store AND in the Ogre node the engine
+    // adopted (ENGINE-UPGRADE-U2 stage 1), and the document's readers derive
+    // their world transforms from the store (iris::graph::world).
     // Sockets (CAMERAS_SPEC §5) move nodes, so they resolve BEFORE the walk
     // that pushes transforms — a camera on a character's head has to be on the
     // head in the frame that renders it, not in the one after.
@@ -858,11 +823,11 @@ int SceneMirror::sync(const FrameViews &frameViews)
         // RAW children, no QList: SceneNode::children() builds a
         // QList<QSharedPointer> — a heap allocation plus an atomic refcount per
         // child — and this walk runs over the whole document.
-        const std::size_t rootChildren = iris::graph::childCount(root->graphNode());
+        const int rootChildren = root->childCount();
         const bool rootShown = root->isVisible();
         { MirrorStage s(mon, "mirror.walk");
-        for (std::size_t i = 0; i < rootChildren; ++i)
-            if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(root->graphNode(), i)))
+        for (int i = 0; i < rootChildren; ++i)
+            if (iris::SceneNode *c = root->childAt(i))
                 visit(c, rootShown, false);
         }
         { MirrorStage s(mon, "mirror.removeMissing");
@@ -1088,8 +1053,7 @@ static const quint8 kParentShown = 1, kParentMovable = 2, kParentKnown = 4;
 
 quint8 SceneMirror::parentStateOf(iris::SceneNode *node)
 {
-    iris::SceneNode *parent = node ? iris::graph::ownerOf(iris::graph::parentOf(node->graphNode()))
-                                   : nullptr;
+    iris::SceneNode *parent = (node && node->docNode().parent) ? node->docNode().parent->owner : nullptr;
     // A CHILD OF THE ROOT: the walk's own entry conditions — the root's flag is
     // the parentShown it threads down, and the root never resolves movable.
     if (!parent) {
@@ -1290,7 +1254,7 @@ bool SceneMirror::stepStaticSettle()
         // queued: not part of the tree this walk is classifying any more. (The
         // root's entry has no parent to compare.)
         if (e.parent
-            && iris::graph::ownerOf(iris::graph::parentOf(n->graphNode())) != e.parent)
+            && (n->docNode().parent ? n->docNode().parent->owner : nullptr) != e.parent)
             continue;
         ++visits;
         // ITS OWN QUIET WINDOW. Written within kStaticSettleFrames syncs: left
@@ -1305,10 +1269,8 @@ bool SceneMirror::stepStaticSettle()
         }
         bool childCarry = false;
         const bool movable = n->_applyStaticDefaultsStep(e.parentMovable, e.carry, &childCarry);
-        const iris::graph::NodeHandle h = n->graphNode();
-        const std::size_t count = iris::graph::childCount(h);
-        for (std::size_t i = count; i-- > 0;) {
-            if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(h, i)))
+        for (int i = n->childCount(); i-- > 0;) {
+            if (iris::SceneNode *c = n->childAt(i))
                 mSettleWalk.push_back({ c->sharedFromThis().toWeakRef(), n.data(), movable, childCarry });
         }
     }
@@ -1477,12 +1439,12 @@ quint64 SceneMirror::verifyAgainstFullWalk()
     if (!mSource || !mSource->getRootNode()) return 0;
     const quint64 before = mVisitPushes;
     iris::SceneNode *root = mSource->getRootNode().data();
-    const std::size_t n = iris::graph::childCount(root->graphNode());
+    const int n = root->childCount();
     const bool rootShown = root->isVisible();
     mVerifying = true;
     mVerifyMaterialQuota = ~0u;      // the ORACLE re-reads every material
-    for (std::size_t i = 0; i < n; ++i)
-        if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(root->graphNode(), i)))
+    for (int i = 0; i < n; ++i)
+        if (iris::SceneNode *c = root->childAt(i))
             visit(c, rootShown, false);
     mVerifying = false;
     mVerifyMaterialQuota = 0;
@@ -1856,7 +1818,7 @@ void SceneMirror::syncHighlight()
         // shell without moving the node.
         const int width = (mSource && mSource->outlineWidth > 0) ? mSource->outlineWidth : 3;
         Hasher key;
-        key << worldTrsSignature(meshNode->graphNode()) << width << mHighlightWireframe;
+        key << worldTrsSignature(meshNode) << width << mHighlightWireframe;
         if (!s.transformPushed || s.transformKey != key.h) {
             iris::Mat4 t = meshNode->getGlobalTransform();
             if (!mHighlightWireframe) t.scale(1.0f + float(width) / 150.0f);
@@ -3190,7 +3152,7 @@ void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
     // local-TRS-chain signature the outline shells use — never
     // getGlobalPosition(), which is Ogre's full chain recomposition.
     Hasher key;
-    key << worldTrsSignature(light->graphNode()) << light->iconSize;
+    key << worldTrsSignature(light) << light->iconSize;
     if (e.iconPushed && e.iconKey == key.h) return;
     BillboardInstance b;
     const iris::Vec3 p = light->getGlobalPosition();
@@ -3289,7 +3251,6 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         e.graphEpoch = node->graphEpoch();
         if (!e.node) { out.descend = false; return out; }
         e.visiblePushed = -1;      // force one visibility application
-        e.pickablePushed = -1;     // ...and one query-flag application
         e.lightMaskEverPushed = false;   // ...and one lighting-channel application
     }
 
@@ -3544,7 +3505,6 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
                 noteTaken(m, mat);        // ...and the new ones are not
                 e.texturesPushed = false;
                 e.shadingModelPushed = -1;   // a NEW engine material may be in either family
-                e.pickablePushed = -1;   // a NEW Item carries the default query mask
                 syncTextures(e, attachMs);
                 // The refractive/distortion contribution is this entry's from
                 // the frame it attaches, not the frame after: the aggregate is
@@ -3610,12 +3570,6 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
                     if (mTarget->shadingModelOf(e.material) != ms.pbr.shadingModel &&
                         mTarget->setShadingModel(e.material, ms.pbr.shadingModel)) {
                         notePush(node, "shading model");
-                        onMaterialItemsRebuilt(e.material);
-                        // ...and every OTHER node drawing this material owes a
-                        // query-flag re-push (its Items were rebuilt too). The
-                        // walk used to reach them by walking; the change list
-                        // has to be told (§3.6).
-                        markMaterialUsersDirty(material);
                     }
                 }
                 // ONE COMPARE PER MATERIAL, not per node. See PbrPush in the
@@ -3646,32 +3600,6 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         noteRigCounts(e);
     }
 
-    // PICKING'S QUERY FLAGS, AFTER the geometry (DIRTY_SET_MIRROR_SPEC).
-    //
-    // It used to stand above the mesh branch, which was harmless only because
-    // the walk came back next frame: an ATTACH resets `pickablePushed` to -1
-    // (a new Item carries Ogre's default query mask) and a shading-model switch
-    // bumps the material's item serial, and BOTH happen below — so the flag
-    // went out one frame late. With the dirty set there is no next frame: a
-    // node nobody writes again is never visited again, and an unpickable object
-    // stayed clickable for the life of the scene. Ordering it after the branch
-    // that invalidates it is the whole fix.
-    //
-    // Picking's broad phase is Ogre's RaySceneQuery (SCENEGRAPH_SPEC §2) and
-    // its mask is tested inside the SIMD sweep, so `pickable` has to reach the
-    // node's engine objects as QUERY FLAGS. Change-guarded; the document's flag
-    // stays the authority and is re-checked exactly on the candidates.
-    {
-        const int wantPickable = node->isPickable() ? 1 : 0;
-        const quint32 wantItemSerial = e.material ? mMaterialItemSerial.value(e.material, 0) : 0;
-        if (e.pickablePushed != wantPickable || e.materialItemSerial != wantItemSerial) {
-            iris::graph::setPickable(node->graphNode(), wantPickable != 0);
-            e.pickablePushed = wantPickable;
-            e.materialItemSerial = wantItemSerial;
-            notePush(node, "pickable");
-        }
-    }
-
     // THE DEFERRED MATERIAL SWAP (MATERIAL-SWAP-GI-1, see the mesh branch):
     // the params and textures above completed the new material; the Item wears
     // it now. A refusal (a family crossing, a normal map without tangents) is
@@ -3683,7 +3611,6 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
         } else if (e.mesh && mTarget->attachMesh(e.node, e.mesh, pendingSwap)) {
             notePush(node, "mesh attach");
             ++mMeshAttaches;
-            e.pickablePushed = -1;   // a NEW Item carries the default query mask
         }
     }
 
@@ -3827,10 +3754,9 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
     // QHash does not keep value references stable across (read-after-destroy under
     // ASan) — which is why visitNode hands its answers back BY VALUE rather
     // than leaving the caller holding one.
-    const iris::graph::NodeHandle h = node->graphNode();
-    const std::size_t n = iris::graph::childCount(h);
-    for (std::size_t i = 0; i < n; ++i)
-        if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(h, i)))
+    const int n = node->childCount();
+    for (int i = 0; i < n; ++i)
+        if (iris::SceneNode *c = node->childAt(i))
             visit(c, r.shown, r.movable);
 }
 
@@ -3866,9 +3792,9 @@ void SceneMirror::noteWrittenNode(iris::SceneNode *node)
         if (it != mEntries.cend() && it->node) { mFrameChanges.moved.push_back(it->node); continue; }
         // Not mirrored: ours only if it hangs in this document (a descendant of it is, by construction).
         if (n == node && it == mEntries.cend() && n->getScene() != mSource) return;
-        const std::size_t kids = iris::graph::childCount(n->graphNode());
-        for (std::size_t i = 0; i < kids; ++i)
-            if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(n->graphNode(), i))) stack.push_back(c);
+        const int kids = n->childCount();
+        for (int i = 0; i < kids; ++i)
+            if (iris::SceneNode *c = n->childAt(i)) stack.push_back(c);
     }
 }
 
@@ -4244,12 +4170,7 @@ void SceneMirror::reclaimUnused()
     // instead, which is the only moment a key can go stale.
     for (auto it = mMaterials.begin(); it != mMaterials.end();) {
         if (usedMaterials.contains(it.value())) { ++it; continue; }
-        // The two per-material records go WITH the material (lead review F7).
-        // The memo is keyed by the document material and the item-rebuild
-        // serial by the engine one, and this is the one place both die: a
-        // serial whose material is gone can never be read again, and engine
-        // ids only ever increment so a later material cannot inherit it.
-        mMaterialItemSerial.remove(it.value());
+        // The per-material memo goes WITH the material (lead review F7).
         mMaterialSync.remove(it.key());
         mTarget->destroyMaterial(it.value()); it = mMaterials.erase(it);
     }
@@ -6484,16 +6405,13 @@ int SceneMirror::reconcileSockets()
             RiderState &state = mBoneRiders[rider];
             if (!armed) {
                 // The rider keeps its place in the DOCUMENT hierarchy — the
-                // socket API's promise — through the graph layer's shadow
-                // parent, registered BEFORE the tag so no reader ever sees a
-                // TagPoint as a parent.
-                const iris::SceneNodePtr parent = rider->getParent();
-                if (!parent.isNull())
-                    iris::graph::setSocketRider(rider->graphNode(), parent->graphNode());
+                // socket API's promise — by construction (the store owns it);
+                // the flag, set BEFORE the tag, makes its world the engine's.
+                iris::graph::setSocketRider(rider->graphNode(), true);
                 if (!mTarget->attachToBone(riderId, ownerId, socket->boneName.toStdString(),
                                            toVec3(socket->position), toQuat(socket->rotation),
                                            toVec3(socket->scale))) {
-                    iris::graph::clearSocketRider(rider->graphNode());
+                    iris::graph::setSocketRider(rider->graphNode(), false);
                     // THE ROW SURVIVES A FAILED ARM (round-2 review, item 3).
                     // It used to be removed — and with it the AUTHORED OFFSET
                     // this rider must get back when the rig returns. A failed
@@ -6619,6 +6537,11 @@ void SceneMirror::releaseRider(iris::SceneNode *rider)
         }
     }
 
+    // "IT KEEPS THE POSE IT WAS LAST RESOLVED TO": read while it is still a rider,
+    // so the world is the pose the last rendered frame gave it (the store cannot
+    // compose a rider's world — the bone's pose is the engine's; once the flag
+    // is down it would answer with its authored local under its parent).
+    const iris::Mat4 world = rider->getGlobalTransform();
     const auto entry = mEntries.constFind(rider);
     if (entry != mEntries.constEnd() && entry->node) {
         // Off the bone: the engine re-homes the node under whatever parent it
@@ -6630,11 +6553,11 @@ void SceneMirror::releaseRider(iris::SceneNode *rider)
         }
         mTarget->detachFromBone(entry->node, parentId);
     }
-    iris::graph::clearSocketRider(rider->graphNode());
+    iris::graph::setSocketRider(rider->graphNode(), false);
     mBoneRiders.remove(rider);
 
-    // ...AND BACK INTO THE DOCUMENT TREE, in Ogre's hierarchy and not only in
-    // the shadow bookkeeping. The engine can only re-home the node under a node
+    // ...AND BACK UNDER ITS DOCUMENT PARENT IN OGRE'S HIERARCHY (the store never
+    // moved it; the Ogre half must follow). The engine can only re-home the node under a node
     // it has an id for, and the document's ROOT is not mirrored (the walk starts
     // at its children) — so a rider whose parent is the root would be left as a
     // sibling of the document tree instead of inside it. That is invisible until
@@ -6642,10 +6565,8 @@ void SceneMirror::releaseRider(iris::SceneNode *rider)
     // walks the tree from its root: the stray node stays behind in a scene
     // manager the caller is about to destroy, and the document node holding its
     // handle faults at its own destruction. sockets.render's teardown found it.
-    const iris::Mat4 world = rider->getGlobalTransform();
-    if (!parent.isNull() && rider->graphNode() && parent->graphNode() &&
-        iris::graph::parentOf(rider->graphNode()) != parent->graphNode())
-        iris::graph::attach(parent->graphNode(), rider->graphNode(), -1);
+    if (!parent.isNull() && rider->graphNode() && parent->graphNode())
+        iris::graph::followParent(parent->graphNode(), rider->graphNode());
     if (placedByCaller) {
         rider->setLocalPos(callerPos);
         rider->setLocalRot(callerRot);

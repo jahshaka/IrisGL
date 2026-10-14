@@ -15,10 +15,15 @@ For more information see the LICENSE file
 // -----------------------------------------------------------------------------
 // iris::graph — the document's window onto THE scene graph.
 //
-// SPECS/SCENEGRAPH_SPEC.md D2: there is exactly ONE hierarchy in this program
-// and it is Ogre-Next's. `iris::SceneNode` keeps its name and its public API,
-// but it no longer STORES a position, a rotation, a scale, a parent, a child
-// list or a cached matrix: it owns an `Ogre::SceneNode` and forwards.
+// TWO HALVES, while ENGINE-UPGRADE-U2 runs. SCENEGRAPH_SPEC D2 made Ogre-Next's
+// hierarchy the document's (an `iris::SceneNode` owned an `Ogre::SceneNode` and
+// forwarded). U2 reverses it (ENGINE_UPGRADE_SPEC §1, the owner's Q1): the
+// document owns its transforms and its hierarchy again — the STORE below
+// (DocNode: local TRS, parent, ordered children, a cached world by Ogre's own
+// composition rule) — because a render thread cannot share one hierarchy with
+// the document. Stage 1 (DOCSTORE) answers every read from the store and still
+// writes the Ogre node each document node owns, which the engine adopts and
+// draws; stage 2 (EXTRACT) deletes that Ogre half and the engine owns its nodes.
 //
 // THE BOUNDARY, restated for this file. The old law was "OgreEngine.cpp is the
 // only translation unit that includes Ogre". That law is superseded by the
@@ -119,10 +124,6 @@ struct NodeOpaque;
 using SceneHandle = SceneOpaque *;
 using NodeHandle = NodeOpaque *;
 
-/// True once an Ogre::Root exists — i.e. once the engine has booted. Creating a
-/// document node before that is a programming error, not a supported mode.
-bool available();
-
 /// The process-wide scene manager detached handles live in — every node an
 /// importer builds, everything the undo stack holds, every document that has
 /// not met a SceneMirror yet.
@@ -165,17 +166,19 @@ void destroyNode(NodeHandle n);
 /// The document handle that owns `n`, or null for an engine-owned node.
 SceneNode *ownerOf(NodeHandle n);
 
-NodeHandle parentOf(NodeHandle n);
-std::size_t childCount(NodeHandle n);
-NodeHandle childAt(NodeHandle n, std::size_t i);
-/// Position among its parent's children, or -1 when it has no parent. Ogre
-/// keeps children in a vector, so this is the sibling index undo needs.
-int indexInParent(NodeHandle n);
+// ---- THE OGRE HALF of the hierarchy (stage 1 of ENGINE-UPGRADE-U2 keeps it; stage 2 deletes it) --------------
+//
+// The DOCUMENT'S hierarchy is the store below (DocNode::parent / children): every reader asks it. These two keep
+// the Ogre nodes the engine still adopts in step with it, and answer nothing.
 
-/// Re-parents `child` under `parent` at `index` (-1 = append). Both must belong
-/// to the same SceneHandle; use migrate() otherwise. The LOCAL transform is
-/// preserved — the caller decides what to do about the world one.
+/// Re-parents `child`'s Ogre node under `parent`'s at `index` (a DOCUMENT sibling index, -1 = append), keeping
+/// Ogre's child order the store's. Both must belong to the same SceneHandle; use migrate() otherwise. The LOCAL
+/// transform is preserved. A no-op for a socket rider (its Ogre parent is a bone's tag point; its document place is
+/// the store's).
 void attach(NodeHandle parent, NodeHandle child, int index);
+/// The Ogre half catching up with the store after the ENGINE moved a node's Ogre node (a rider released off its
+/// bone, re-homed wherever the engine could name): appended under `parent`'s Ogre node unless it is there already.
+void followParent(NodeHandle parent, NodeHandle child);
 
 /// Removes `child` from its parent and re-homes it in the STAGING scene, so it
 /// stays alive and addressable (the undo stack holds detached subtrees) without
@@ -189,42 +192,163 @@ NodeHandle detach(NodeHandle child);
 /// static flag travel; attachments (which belong to the engine) do not.
 NodeHandle migrate(NodeHandle n, SceneHandle target, NodeHandle newParent);
 
-// ---- socket riders: the SHADOW PARENT (AVATAR_RIG_PERF_SPEC §4.3, D3 = H1) --
+// ---- socket riders (AVATAR_RIG_PERF_SPEC §4.3) ----------------------------------------------------------------
 //
-// A node attached to a socket hangs off an engine TAG POINT on a bone, so its
-// real Ogre parent is neither its document parent nor even a document node. The
-// socket API's contract is explicit that this is NOT a reparent — "it keeps its
-// place in the hierarchy" (node.attachToSocket) — and since the document graph
-// IS Ogre's graph, something has to carry that place. This is it: the graph
-// layer remembers each rider's DOCUMENT parent and answers parentOf/childAt/
-// childCount/indexInParent with it, while Ogre goes on drawing the node under
-// the bone.
-//
-// Riders are listed AFTER a parent's real children, in registration order. The
-// cost is one hash lookup on parentOf and on the child accessors of a parent
-// that HAS riders — scenes without sockets pay a single empty-map test.
+// A node attached to a socket hangs off an engine TAG POINT on a bone, so its real Ogre parent is neither its
+// document parent nor even a document node. The socket API's contract is explicit that this is NOT a reparent — "it
+// keeps its place in the hierarchy" — and since the document owns its hierarchy (the store), it simply does: the
+// store's parent and sibling index never change. What the flag below changes is the rider's WORLD: the store cannot
+// compose it (the bone's pose is the engine's), so a rider's world — and every world under it — is read from the
+// engine's cache, the pose the last rendered frame produced (stage 2: from the frame's output snapshot).
 
-/// Records that `rider` is socket-attached and that the document says it still
-/// belongs under `documentParent`. Idempotent; a null parent clears it.
-void setSocketRider(NodeHandle rider, NodeHandle documentParent);
-/// Forgets the shadow parent (the rider came off its socket).
-void clearSocketRider(NodeHandle rider);
-/// The rider's document parent, or null when this node is not a rider.
-NodeHandle socketRiderParent(NodeHandle rider);
+/// `rider` is socket-attached (true) or came off its socket (false). Idempotent.
+void setSocketRider(NodeHandle rider, bool on);
 bool isSocketRider(NodeHandle rider);
-/// How many riders are registered right now — a suite/diagnostic read.
-std::size_t socketRiderCount();
 
-// ---- transforms -----------------------------------------------------------
+// ---- THE DOCUMENT'S TRANSFORM STORE (ENGINE-UPGRADE-U2 stage 1, DOCSTORE) --------------------------------------
+//
+// SCENEGRAPH_SPEC D2 REVERSED (ENGINE_UPGRADE_SPEC §1, the owner's Q1): the document owns its transforms and its
+// hierarchy again. Each document node carries a DocNode — its LOCAL TRS, its PARENT and its ORDERED CHILDREN — and
+// the WORLD TRS is derived from them on read, by OGRE'S OWN RULE (OgreNode.cpp updateFromParentImpl with
+// OGRE_NODE_INHERIT_TRANSFORM = 0, no inherit flags anywhere in this tree):
+//
+//     S = pS * S_l (per axis),   R = pR * R_l,   P = pP + pR * (pS * P_l)
+//
+// and the world MATRIX is Ogre's makeTransform of that triple — never a matrix product down the chain: a rotated
+// child of a non-uniformly scaled parent acquires a shear in a matrix product that Ogre's rule drops, so the two
+// answers differ by the shear (the first measure of ENGINE-UPGRADE-U2: spikes/engine-upgrade/u2/premises.md).
+//
+// CACHED PER NODE, INVALIDATED BY SUBTREE. A write (a local TRS, a reparent, a detach) invalidates the node and its
+// subtree — stopping at the first node already invalid, so a node written every frame and read every frame costs
+// O(1) each; a read re-derives only the invalid part of the chain. A socket rider's world is the engine's (above) and
+// is never cached, nor is anything under it.
+//
+// STAGE 1 WRITES BOTH STORES: every write lands here AND on the node's Ogre node (which the engine still adopts and
+// draws), so the picture cannot move; every READ is answered here. The one-owner rule ("no second transform store",
+// SCENEGRAPH_SPEC §6a) is suspended for exactly this stage — stage 2 deletes the Ogre half and the engine owns its
+// own nodes, fed by the frame record.
+class PickTable;
 
-Vec3 localPos(NodeHandle n);
-Quat localRot(NodeHandle n);
-Vec3 localScale(NodeHandle n);
-void setLocalPos(NodeHandle n, const Vec3 &v);
-void setLocalRot(NodeHandle n, const Quat &q);
-void setLocalScale(NodeHandle n, const Vec3 &v);
-/// Writes all three at once — one dirty mark instead of three.
-void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s);
+struct DocNode
+{
+    explicit DocNode(SceneNode *o) : owner(o) {}
+    DocNode(const DocNode &) = delete;
+    DocNode &operator=(const DocNode &) = delete;
+
+    SceneNode *const owner;
+    DocNode *parent = nullptr;          ///< the document parent; null = a scene root or a detached subtree
+    std::vector<DocNode *> children;    ///< the document children, in sibling order
+    Vec3 pos = Vec3(0.0f, 0.0f, 0.0f);
+    Quat rot;
+    Vec3 scale = Vec3(1.0f, 1.0f, 1.0f);
+    bool rider = false;                 ///< socket-attached (setSocketRider)
+    PickTable *pickTable = nullptr;     ///< the scene broad-phase table this node has a slot in (PickTable), if any
+    int pickSlot = -1;
+
+    // ---- the caches (nodegraph.cpp) ----
+    // INVARIANT: a node whose world is not valid has no valid world below it (a write invalidates its whole
+    // subtree, stopping at the first node already invalid; a read validates the chain top-down).
+    mutable bool worldValid = false;
+    mutable Vec3 worldPos;
+    mutable Quat worldRot;
+    mutable Vec3 worldScale = Vec3(1.0f, 1.0f, 1.0f);
+    mutable bool boxValid = false;               ///< the world box below, valid with the world
+    mutable float boxFrom[6] = {};               ///< ...derived from this LOCAL box (min xyz, max xyz)
+    mutable float box[6] = {};                   ///< min xyz, max xyz
+};
+
+/// PICKING'S BROAD PHASE, FLAT (a Scene owns one; scenepicking.cpp walks it). Every mesh node of a scene has a slot:
+/// its world box as six contiguous floats and a state byte. A pick reads the floats of the valid slots and touches no
+/// node at all — the boxes are pushed stale by the store's own invalidation (a write reaching the node, a content
+/// swap), never polled: a scan that dereferenced each node to ask was three dependent cache misses a mesh, the whole
+/// cost of a 10k-mesh pick (measured, ENGINE-UPGRADE-U2: spikes/engine-upgrade/u2/premises.md).
+class PickTable
+{
+public:
+    enum State : unsigned char { Stale = 0, Valid = 1, NoGeometry = 2 };
+    PickTable() = default;
+    ~PickTable() { clear(); }
+    PickTable(const PickTable &) = delete;
+    PickTable &operator=(const PickTable &) = delete;
+
+    void add(SceneNode *meshNode);
+    void remove(SceneNode *meshNode);
+    /// Every slot out (the nodes keep living; their slots are reset).
+    void clear();
+    std::size_t slotCount() const { return mNode.size(); }
+    SceneNode *node(std::size_t slot) const { return mNode[slot]; }
+    State state(std::size_t slot) const { return State(mState[slot]); }
+    const float *box(std::size_t slot) const { return &mBox[6 * slot]; }
+    /// The slot's box from the node's world and its LOCAL box (false = an empty box: the slot stays Stale).
+    /// Valid only when the world could be cached (never for a socket rider or anything under one).
+    bool refresh(std::size_t slot, const Vec3 &localMin, const Vec3 &localMax);
+    /// The node carries no triangle geometry until its content changes.
+    void markNoGeometry(std::size_t slot) { mState[slot] = NoGeometry; }
+    void markStale(int slot) { if (slot >= 0) mState[std::size_t(slot)] = Stale; }
+
+private:
+    std::vector<SceneNode *> mNode;     ///< null = a free slot
+    std::vector<unsigned char> mState;
+    std::vector<float> mBox;            ///< 6 per slot: min xyz, max xyz
+    std::vector<int> mFree;
+};
+
+/// A node's CONTENT changed (a mesh or material swapped): its broad-phase slot must re-read the local box.
+void invalidatePick(DocNode &n);
+
+/// A position, a rotation and a scale — a world or a local pose.
+struct Trs
+{
+    Vec3 pos = Vec3(0.0f, 0.0f, 0.0f);
+    Quat rot;
+    Vec3 scale = Vec3(1.0f, 1.0f, 1.0f);
+};
+
+// -- the hierarchy --
+/// `child` under `parent` at the DOCUMENT sibling index `index` (-1 or past the end = append), out of its old parent
+/// first. The LOCAL transform is kept (the caller decides what happens to the world one).
+void attachDoc(DocNode &parent, DocNode &child, int index);
+/// `child` out of its parent (a root of its own afterwards).
+void detachDoc(DocNode &child);
+/// A node is being destroyed: out of its parent, and its children orphaned (they are being released with it).
+void unlinkDoc(DocNode &n);
+/// Position among its parent's children, or -1 when it has no parent.
+int indexInParent(const DocNode &n);
+
+// -- the local TRS: THE write funnel (the store, then the Ogre half, the movement epoch and the journal) --
+void setLocalPos(DocNode &n, const Vec3 &v);
+void setLocalRot(DocNode &n, const Quat &q);
+void setLocalScale(DocNode &n, const Vec3 &v);
+/// All three at once — one dirty mark instead of three.
+void setLocalTrs(DocNode &n, const Vec3 &p, const Quat &r, const Vec3 &s);
+/// The local matrix: makeTransform of the local triple.
+Mat4 localTransform(const DocNode &n);
+
+// -- the world, derived --
+Trs world(const DocNode &n);
+/// The world matrix: makeTransform of world(n).
+Mat4 globalTransform(const DocNode &n);
+
+/// THE RE-EXPRESSION: the local TRS that puts `n` at `world` under its current parent, by the exact inverse of the
+/// composition rule above — R_l = pR^-1 R, S_l = S / pS, P_l = (pR^-1 (P - pP)) / pS, per axis. A parent axis of
+/// ZERO scale has flattened that axis of every world under it; no local can undo that, and dividing by it would
+/// store an infinity or a NaN (SC1-REEXPRESS-SCALE-1), so that axis keeps the node's own local position and scale.
+Trs localFromWorld(const DocNode &n, const Trs &world);
+void setGlobalPos(DocNode &n, const Vec3 &v);
+void setGlobalRot(DocNode &n, const Quat &q);
+/// BOTH AT ONCE, for a caller that has both — the physics write-back, which runs per body per step: one parent
+/// resolution, and none at all when the parent is at identity (what a physics body's parent almost always is).
+void setGlobalPosRot(DocNode &n, const Vec3 &v, const Quat &q);
+/// The whole world pose, re-expressed exactly (a keepTransform reparent hands the old world TRS straight here).
+void setGlobalTrs(DocNode &n, const Trs &world);
+/// A world MATRIX: decomposed (iris::decomposeTRS — a shear in `m` is dropped), then setGlobalTrs.
+void setGlobalTransform(DocNode &n, const Mat4 &m);
+
+/// The world AABB of a LOCAL box `local` (a mesh's baked `Mesh::aabb`) carried by `n`: the exact box of the
+/// transformed box (|M| applied to the half extents — Ogre's Aabb::transformAffine), padded by one part in 1e5 so a
+/// triangle on a face still lies inside it after rounding. Cached with the world, per local box. False for an empty
+/// local box.
+bool worldBox(const DocNode &n, const Vec3 &localMin, const Vec3 &localMax, float outMin[3], float outMax[3]);
 
 /// THE TRANSFORM-WRITE EPOCH — a monotonic counter bumped by every setter
 /// above, and the only way the renderer can learn that NOTHING moved.
@@ -326,56 +450,21 @@ void setCountsAsMovement(NodeHandle n, bool counts);
 /// document node itself, see nodegraph.cpp).
 bool countsAsMovement(NodeHandle n);
 
-Mat4 localTransform(NodeHandle n);
-/// The world transform, RESOLVED via Ogre's `_getFullTransformUpdated()`.
-/// COST MODEL (corrected 2026-09-05, verified at the pin): this is NOT
-/// dirty-gated — `Node::_updateFromParent()` recurses to the root
-/// unconditionally (OgreNode.cpp:283-293) and recomputes the node's whole
-/// 4-lane SIMD block. Fine as a point call; do NOT call it per candidate
-/// inside a loop over the document (cache the matrix for the loop instead).
-/// Still the honest replacement for the old getGlobalTransform()
-/// double-writer (audit F2) — one owner, no second store.
-///
-/// A SOCKET RIDER is the exception, and it has to be: its parent is a TagPoint,
-/// and a tag point cannot be resolved on demand at all —
-/// `TagPoint::updateFromParentImpl` is a plain `assert(false)`
-/// (OgreTagPoint2.cpp:108-112), which our RelWithDebInfo Ogre compiles out into
-/// a silent no-op and a Debug-built Ogre would ABORT on. So a tagged node's
-/// world transform is read from the CACHE: the transform the last rendered
-/// frame produced. That is the same latency the old read-back socket resolver
-/// had for every reader, while the RENDER itself is now exact.
-Mat4 globalTransform(NodeHandle n);
-Vec3 globalPos(NodeHandle n);
-Quat globalRot(NodeHandle n);
-void setGlobalPos(NodeHandle n, const Vec3 &v);
-void setGlobalRot(NodeHandle n, const Quat &q);
-/// BOTH AT ONCE, for a caller that has both — the physics write-back, which
-/// runs per body per step (MIRROR_SCALE lane).
-///
-/// setGlobalPos and setGlobalRot each resolve the PARENT's derived state to
-/// undo it: a full-transform inverse for the position and a derived-orientation
-/// inverse for the rotation. Called back to back that is two resolutions and
-/// two inverses per body per frame for one pose. This resolves the parent once
-/// and, when the parent turns out to be at identity — which is what the
-/// document root is, and what a physics body's parent almost always is —
-/// writes the world values straight through with no inverse at all.
-void setGlobalPosRot(NodeHandle n, const Vec3 &v, const Quat &q);
 /// EVERYTHING setGlobalPosRot READS AND WRITES, bit for bit: the parent's
-/// identity and its derived position, orientation and scale (what the write
-/// undoes), and the node's own local position and orientation (what it
-/// writes). Two equal witnesses of one node mean a setGlobalPosRot of the SAME
-/// world pose would write exactly the locals the node already holds — the
-/// physics write-back's proof that a sleeping body's node needs no write
+/// world position, orientation and scale (what the write undoes) and the node's
+/// own local position and orientation (what it writes), all from the store. Two
+/// equal witnesses of one node mean a setGlobalPosRot of the SAME world pose
+/// would write exactly the locals the node already holds — the physics
+/// write-back's proof that a sleeping body's node needs no write
 /// (Environment::writeBack, SPEED-CPU). A plain value; compare with ==.
 struct PoseWitness
 {
-    NodeHandle parent = nullptr;
+    const DocNode *parent = nullptr;
     float values[17] = {};   ///< parent pos 3, rot 4, scale 3; local pos 3, rot 4
     bool operator==(const PoseWitness &o) const;
     bool operator!=(const PoseWitness &o) const { return !(*this == o); }
 };
-PoseWitness poseWitness(NodeHandle n);
-void setGlobalTransform(NodeHandle n, const Mat4 &m);
+PoseWitness poseWitness(const DocNode &n);
 
 // ---- flags ----------------------------------------------------------------
 
@@ -486,68 +575,7 @@ bool promoteNode(NodeHandle n, bool carry, bool *switched);
 /// The benchmark asserts on it; nothing else should need it.
 std::size_t staticNodeCount();
 
-/// Debug/diagnostic: how many live handles this process has made.
-std::size_t liveNodeCount();
 
-// ---- picking: the broad phase (SPECS/SCENEGRAPH_SPEC.md §2) ----------------
-//
-// Ogre's ray queries are AABB-precision and have no triangle path, so the
-// TRIANGLE NARROW PHASE STAYS OURS (V-snap reads the triangle index back).
-// What moves to the engine is the broad phase: instead of walking the document
-// tree and testing a bounding SPHERE per mesh, `rayQuery` runs
-// `RaySceneQuery` — a 4-wide SIMD sweep of the entity SoA that tests the same
-// WORLD AABBs the renderer culls with, and is masked in the sweep itself.
-//
-// Hits come back as DOCUMENT nodes: every engine object hangs off an
-// `Ogre::SceneNode`, and that node's back-pointer names the handle that owns
-// it (nodegraph.cpp's owner table — the UserObjectBindings role, done as a
-// flat array because Any allocates).
-
-/// One broad-phase candidate: the document node an engine object hangs off,
-/// and the ray parameter at which the ray entered its world AABB.
-struct RayCandidate
-{
-    SceneNode *node = nullptr;
-    float distance = 0.0f;
-};
-
-/// True when `s` holds query-able geometry at all. A document that no mirror
-/// has met yet has NONE — nothing has been attached to its nodes — and picking
-/// there falls back to the document's own bounds walk (see picking.cpp).
-bool hasQueryableGeometry(SceneHandle s);
-
-/// The broad phase. `out` is CLEARED and filled with one entry per distinct
-/// document node whose geometry's world AABB the ray crosses, unsorted.
-///
-/// TWO ENGINE RULES the caller inherits: the sweep also rejects anything whose
-/// LAYER_VISIBILITY bit is clear (an invisible object is not a candidate), and
-/// the AABBs it reads are the ones the last `updateSceneGraph` computed — so a
-/// node moved since the last frame is tested at its previous position.
-void rayQuery(SceneHandle s, const Vec3 &origin, const Vec3 &dir, unsigned queryMask,
-              std::vector<RayCandidate> &out);
-
-/// The query-flag vocabulary — THE one place document picking semantics are
-/// mapped onto Ogre's masks. Only the `pickable` split lives here: Ogre's mask
-/// test is `(flags & mask) != 0` (ANY) while `pickingGroups` is an ALL test
-/// (`(groups & mask) == mask`), so groups cannot be expressed as query flags
-/// and stay an exact test on the CANDIDATES, which costs O(hits), not O(scene).
-/// THE PICKABLE BIT IS OGRE'S OWN DEFAULT, deliberately. An Ogre-Next Item is
-/// born with query flags `SceneManager::QUERY_ENTITY_DEFAULT_MASK` = 0x80000000
-/// (OgreItem.cpp:54 — and note that `MovableObject::msDefaultQueryFlags`, the
-/// 0xFFFFFFFF one every Ogre 1.x tutorial names, is dead code in this pin: no
-/// object ever reads it). Reusing that bit means an Item the mirror has not
-/// pushed a flag onto yet — one created THIS sync — is pickable, which is the
-/// document's default for a new node too. Anything else leaves a window in
-/// which a freshly added object cannot be clicked.
-enum : unsigned {
-    kPickableQueryBit = 0x80000000u,
-    kUnpickableQueryBit = 0x40000000u,
-};
-
-/// Pushes `pickable` onto every engine object attached to `n` as query flags.
-/// Called by the mirror when it attaches geometry and when the flag changes;
-/// a node with no attachments remembers nothing (there is nothing to query).
-void setPickable(NodeHandle n, bool pickable);
 
 }  // namespace graph
 }  // namespace iris

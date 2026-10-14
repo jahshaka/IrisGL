@@ -528,7 +528,7 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 		const btQuaternion rot = t.getRotation();
 		node->setGlobalPosRot(iris::Vec3(pos.x(), pos.y(), pos.z()),
 		                      iris::Quat(rot.w(), rot.x(), rot.y(), rot.z()));
-		rec.witness = graph::poseWitness(node->graphNode());
+		rec.witness = graph::poseWitness(node->docNode());
 		rec.pinned = true;
 		++lastWrites;
 	};
@@ -538,7 +538,7 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 		if (rec.pinned) {
 			const iris::SceneNodePtr node = nodes.value(rec.guid);
 			if (!node) return;
-			if (graph::poseWitness(node->graphNode()) == rec.witness) return;
+			if (graph::poseWitness(node->docNode()) == rec.witness) return;
 		}
 		write(body, rec);
 	};
@@ -572,22 +572,23 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 		for (auto it = bodyRecords.begin(); it != bodyRecords.end(); ++it)
 			recheckBody(const_cast<btRigidBody *>(it.key()), *it);
 	} else if (recheck) {
-		std::vector<graph::NodeHandle> stack(written.begin(), written.end());
+		std::vector<iris::SceneNode *> stack;
+		stack.reserve(written.size());
+		for (graph::NodeHandle h : written)
+			if (iris::SceneNode *owner = graph::ownerOf(h)) stack.push_back(owner);
 		QSet<QString> seen;
 		while (!stack.empty()) {
-			const graph::NodeHandle h = stack.back();
+			iris::SceneNode *owner = stack.back();
 			stack.pop_back();
-			if (const iris::SceneNode *owner = graph::ownerOf(h)) {
-				if (owner->isPhysicsBody && !seen.contains(owner->getGUID())) {
-					seen.insert(owner->getGUID());
-					if (btRigidBody *body = hashBodies.value(owner->getGUID(), nullptr)) {
-						auto it = bodyRecords.find(body);
-						if (it != bodyRecords.end()) recheckBody(body, *it);
-					}
+			if (owner->isPhysicsBody && !seen.contains(owner->getGUID())) {
+				seen.insert(owner->getGUID());
+				if (btRigidBody *body = hashBodies.value(owner->getGUID(), nullptr)) {
+					auto it = bodyRecords.find(body);
+					if (it != bodyRecords.end()) recheckBody(body, *it);
 				}
 			}
-			const std::size_t kids = graph::childCount(h);
-			for (std::size_t i = 0; i < kids; ++i) stack.push_back(graph::childAt(h, i));
+			const int kids = owner->childCount();
+			for (int i = 0; i < kids; ++i) stack.push_back(owner->childAt(i));
 		}
 	}
 	// 3. The nested ones, every frame, parents first: written if Bullet moved

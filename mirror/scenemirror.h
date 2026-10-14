@@ -811,20 +811,8 @@ private:
         /// ancestor's — SceneNode::isVisibleInScene); -1 = never. Pushed on
         /// CHANGE only, and a change of an ANCESTOR is a change here.
         int visiblePushed = -1;
-        /// The `pickable` flag last pushed onto this node's engine objects as
-        /// Ogre QUERY FLAGS; -1 = never. Ogre's RaySceneQuery is the picking
-        /// broad phase now (SCENEGRAPH_SPEC §2), and its mask is tested inside
-        /// the SIMD sweep — so unpickable geometry has to carry the bit that
-        /// keeps it out. Change-guarded like visibility, and re-pushed whenever
-        /// geometry is (re-)attached, because the flags live on the Item and a
-        /// new Item is born with the default mask.
-        int pickablePushed = -1;
-        /// The `mMaterialItemSerial` this entry last pushed query flags
-        /// against. Behind = the material's Items were rebuilt (a shading-model
-        /// switch) and the new ones carry the default mask.
-        quint32 materialItemSerial = 0;
         /// The LIGHTING CHANNEL mask last pushed onto this node's engine
-        /// objects, and whether one ever was. Unlike the query flags above this
+        /// objects, and whether one ever was. This
         /// does NOT need re-pushing when geometry is re-attached: the engine
         /// keeps the mask on its own node record and re-applies it to every
         /// Item it builds (OgreScene::setNodeLightMask's contract), precisely
@@ -1305,9 +1293,6 @@ public:
     static bool toPbrParams(iris::Material *material, jahshaka::engine::PbrParams &out);
     /// Records that this material is refractive, for the chain's Auto mode.
 
-    /// Re-arms the per-Item state the mirror owns after the engine re-created
-    /// the renderables of every node using `material` (a shading-model switch).
-    void onMaterialItemsRebuilt(jahshaka::engine::MaterialId material);
     static jahshaka::engine::LightDesc toLightDesc(iris::LightNode *light);
     /// The same, with the scene's SUN already resolved by the caller —
     /// `sunKnown` says the caller did resolve it (a null `sun` then means "this
@@ -1499,12 +1484,6 @@ private:
     /// hash probe per MESH NODE per frame to do it; the same statement now
     /// lives in the memo above as `pushedTo` + `pushedFingerprint`, in the
     /// entry the walk already has in hand.)
-    /// How many times each engine material has had its Items REBUILT under the
-    /// entries drawing it (a shading-model switch). Bumped by
-    /// onMaterialItemsRebuilt; an entry whose `materialItemSerial` is behind
-    /// re-pushes its query flags on its next visit. See that function for what
-    /// this replaced (an O(entries) walk per material, i.e. O(N^2) per open).
-    QHash<jahshaka::engine::MaterialId, quint32> mMaterialItemSerial;
     const MaterialSync &materialSyncFor(iris::Material *material);
     /// The memo's validity key — see MaterialSync. `pbr` is the resolved cast
     /// (null when the material is not a PbrMaterial), so this never runs one.
