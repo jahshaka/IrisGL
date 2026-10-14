@@ -94,6 +94,10 @@ public:
     unsigned long long extraWalks = 0ull;  ///< walks in a frame that had already walked
     unsigned long long commits = 0ull;     ///< commits that copied anything, ever
     unsigned long long aabbReads = 0ull;   ///< world AABBs the walk's composer asked for, ever
+    /// THE WALK'S WORK (ENGINE-UPGRADE-2B stage 2): slots whose world transform the walk
+    /// compared, and flags words it recomputed (gpuFlagsFor) — ever.
+    unsigned long long slotsCompared = 0ull;
+    unsigned long long flagsRecomputed = 0ull;
     double scanMicros = 0.0;               ///< the last frame's compose + commit (engine.gpuscene)
     /// The split's switch (OgreScene::atomDrawOn) as the running compose asked it once:
     /// 1 / 0 inside a compose, -1 outside (a predicate then asks for itself).
@@ -108,6 +112,25 @@ public:
 
     // ---- the walk's shares (the task's scratch, kept between frames) -------
     std::vector<std::vector<uint32_t>> shareDirty;
+    std::vector<unsigned long long> shareFlags;   ///< per share: the flags words it recomputed
+
+    // ---- THE NAMED WALK (ENGINE-UPGRADE-2B stage 2) -------------------------
+    // The walk compares the slots of the nodes WRITTEN since a walk last consumed the epoch
+    // — the change set's moved subtrees and the engine's own named seams, the same names the
+    // GI and shadow scans take (OgreScene::noteSceneTransformWrite) — never every slot: a
+    // flags word that moves without a transform is marked by its seam (markGpuSlotDirty, the
+    // PBS change log), so the old per-slot flags compare over the whole index (the backstop)
+    // is gone. A nodeless write, an incomplete change set or an overflow owes the whole index
+    // once (`namedFull`, which also makes the first walk whole).
+    std::vector<uint32_t> namedNodes;   ///< NodeIds named since the consuming walk
+    bool namedFull = true;
+    std::vector<uint32_t> namedSlots;   ///< the walk's scratch: the named nodes' slots
+    void nameNode(uint32_t node, size_t cap) {
+        if (namedFull) return;
+        if (namedNodes.size() >= cap) { namedNodes.clear(); namedFull = true; return; }
+        namedNodes.push_back(node);
+    }
+    void nameAll() { namedNodes.clear(); namedFull = true; }
 
     // ---- the ray structures ------------------------------------------------
     /// The scene's TLAS, BLAS set and skin caches; created by the ray tier on the

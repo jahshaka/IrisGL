@@ -3738,6 +3738,7 @@ namespace { constexpr size_t kScanPendingSlack = 64; }
 void OgreScene::noteSceneTransformWrite(const Node &n) {
     ++mSceneTransformWrites;
     const size_t cap = mItemNodes.size() + mDecalNodes.size() + kScanPendingSlack;
+    mSubstrate.nameNode(n.selfId, cap);   // the GPU scene's walk takes the same name
     if (!mScanFullGi) {
         if (mScanPendingGi.size() >= cap) { mScanPendingGi.clear(); mScanFullGi = true; }
         else mScanPendingGi.push_back(n.selfId);
@@ -3757,6 +3758,7 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
         ++mHostMoves;
         mScanFullGi = mScanFullShadow = true;
         mScanPendingGi.clear(); mScanPendingShadow.clear();
+        mSubstrate.nameAll();
         // Every lamp's pose key re-read as it stands now (the set cannot say which moved; the owed flags below say
         // "any", and the next named move compares against this).
         bool any = false;

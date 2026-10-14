@@ -902,8 +902,8 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n, bool atomDraw) const {
     // are a DIFFUSE store (a metal mirror's card and voxels hold its kD = 0: black) —
     // a ray that hits it is the decode's, which shades the mirror's own material with
     // the specular environment the pass holds (jahHitAlwaysDecodes). Ogre's own
-    // per-renderable test (PlanarReflections::hasPlanarReflections); the backstop
-    // compare below re-stages a slot that became a reflector with nothing else.
+    // per-renderable test (PlanarReflections::hasPlanarReflections); the slot is marked
+    // at both edges (armReflector / disarmReflector, OgrePlanar.cpp).
     if (mPlanar && item->getNumSubItems() && mPlanar->hasPlanarReflections(item->getSubItem(0)))
         f |= kGpuPlanar;
     // ...and it must be IN the graph: an Item with no parent node draws nothing
@@ -911,8 +911,8 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n, bool atomDraw) const {
     if ((f & kGpuVisible) && !(f & kGpuOverlay) && item->getMesh() && item->getParentNode())
         f |= kGpuRayTraced;
     // THE RENDER-QUEUE SPLIT (ATOM S3-DRAW): the id pass draws it, the decode
-    // shades it (atomRouteFor, OgreAtomDraw.cpp). Here, so the backstop compare
-    // below re-composes a slot whose route moved with nothing else.
+    // shades it (atomRouteFor, OgreAtomDraw.cpp). A route that moves with nothing else
+    // moved is an in-place datablock edit or a bake, which the PBS change log marks.
     if (atomDraw && atomRouteFor(n, f) == AtomRoute::Atom) {
         f |= kGpuAtom;
         // ...BOTH FACES (ATOM-TWO-SIDED-1): the route admits a no-cull material only
@@ -1275,7 +1275,21 @@ constexpr size_t kParallelWalkSlots = 512u;
 
 void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     GpuSceneSubstrate &sub = mSubstrate;
-    const size_t n = mItemNodes.size();
+    // THE NAMED SLOTS (GpuSceneSubstrate's named walk): the slots of the nodes written since
+    // the last consuming walk, once each, in slot order — or every slot where one is owed.
+    const bool whole = sub.namedFull || (mEngine && mEngine->armRegistry().on(ArmId::GpuWalkWhole));
+    std::vector<uint32_t> &named = sub.namedSlots;
+    named.clear();
+    if (!whole) {
+        for (uint32_t id : sub.namedNodes) {
+            auto it = mNodes.find(id);
+            if (it == mNodes.end() || !it->second.item || it->second.itemSlot == size_t(-1)) continue;
+            named.push_back(uint32_t(it->second.itemSlot));
+        }
+        std::sort(named.begin(), named.end());
+        named.erase(std::unique(named.begin(), named.end()), named.end());
+    }
+    const size_t n = whole ? mItemNodes.size() : named.size();
     // THE PREDICATES' SCENE-WIDE INPUT, once per walk instead of once per slot (the
     // split's switch asks the device for an extension by name).
     const bool atomDraw = sub.atomDraw >= 0 ? sub.atomDraw != 0 : atomDrawOn();
@@ -1286,6 +1300,7 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     const size_t shares =
         (graphIsCurrent && n >= kParallelWalkSlots && workers >= 1u) ? workers + 1u : 1u;
     if (sub.shareDirty.size() != shares) sub.shareDirty.assign(shares, std::vector<uint32_t>());
+    if (sub.shareFlags.size() != shares) sub.shareFlags.assign(shares, 0ull);
     sub.walkShares = unsigned(shares);
     const detail::GpuInstance *mirror = mGpuScene.mirrorData();
     // THE COMPARE, one contiguous share of the slots per thread: the slots whose world
@@ -1297,7 +1312,10 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
         const size_t first = n * k / shares, last = n * (k + 1) / shares;
         std::vector<uint32_t> &dirty = sub.shareDirty[k];
         dirty.clear();
-        for (size_t i = first; i < last; ++i) {
+        unsigned long long &flags = sub.shareFlags[k];
+        flags = 0ull;
+        for (size_t j = first; j < last; ++j) {
+            const size_t i = whole ? j : named[j];
             const Node &node = *mItemNodes[i];
             Ogre::Item *item = node.item;
             if (!item) continue;
@@ -1312,12 +1330,13 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
             const Ogre::Matrix4 &m = graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
             bool d = std::memcmp(&m[0][0], was.world, sizeof(was.world)) != 0;
             if (!d) {
-                // A FLAGS CHANGE THAT MOVED NOTHING. The seams that write an Item's
-                // channels mark their slot by name (markGpuSlotDirty), so this is a
-                // BACKSTOP and not the mechanism, paid on a frame that moved something.
+                // A NAMED SLOT WHOSE TRANSFORM HELD: its flags word, asked once (a named
+                // write can change what the word says — a reparent under a hidden node).
+                // Every other flags change marks its slot by name (markGpuSlotDirty).
                 Ogre::uint32 wasFlags;
                 std::memcpy(&wasFlags, &was.boundsMax[3], sizeof(wasFlags));
                 d = gpuFlagsFor(node, atomDraw) != wasFlags;
+                ++flags;
             }
             // A slot the marks already staged is skipped at the compose (the stamp).
             if (d) dirty.push_back(uint32_t(i));
@@ -1333,6 +1352,11 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
         share(shares - 1u);
         mSceneMgr->waitForPendingUserScalableTask();
     }
+    sub.slotsCompared += n;
+    for (unsigned long long f : sub.shareFlags) sub.flagsRecomputed += f;
+    // A walk on the graph's current transforms consumes the epoch (composeGpuScene), and with
+    // it the names; a reader's walk before the graph (the warm-up) leaves them for the frame's.
+    if (graphIsCurrent) { sub.namedNodes.clear(); sub.namedFull = false; }
     // THE COMPOSE, IN SLOT ORDER, on the frame's thread: the composer edits Ogre state
     // (the split's render queue) and queues GI conversions.
     detail::GpuInstance cand;
@@ -1703,6 +1727,8 @@ GpuSubstrateStatus gpuSubstrateStatus(const Scene &scene) {
     st.extraWalks = sub.extraWalks;
     st.laterCalls = sub.laterCalls;
     st.commits = sub.commits;
+    st.slotsCompared = sub.slotsCompared;
+    st.flagsRecomputed = sub.flagsRecomputed;
     st.holdsRayStructures = sub.rays != nullptr;
     return st;
 }

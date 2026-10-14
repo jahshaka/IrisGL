@@ -1132,6 +1132,11 @@ const ArmDef kArms[] = {
       "reflection hit sums every light's direct term at the hit (its material, its normal, its own shadow "
       "rays) plus its emissive and the store's bounce part. 0 = the measuring arm: the hit reads the store "
       "whole, the cell's light (the paired cost A/B, gi.far_sun_lamp's base)." },
+    { "gpuscene.wholeWalk", 0.0, 0.0, 1.0,
+      "THE DIRTY SCAN'S WHOLE WALK (ENGINE-UPGRADE-2B stage 2, the measuring arm): 1 = every walk "
+      "compares every slot's transform and recomputes every unmoved slot's flags word (the walk before "
+      "the named walk; the paired cost A/B, scale.cpu_walks). 0 = shipped: the walk compares the slots "
+      "the change set and the engine's seams named." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

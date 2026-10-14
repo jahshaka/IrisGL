@@ -1869,6 +1869,7 @@ enum class ArmId : unsigned {
     GatherHitsReadback,  ///< "gather.hitsReadback" — every uniform probe's per-ray record read back (FAR-SUN-1)
     ReflectMetalDecode,  ///< "reflect.metalDecode" — the reflector roughness below which a metal hit decodes
     GiHitDirect,         ///< "gi.hitDirect" — a voxel-answered hit's direct light at the hit (FAR-SUN-2; 0: the store whole)
+    GpuWalkWhole,        ///< "gpuscene.wholeWalk" — the dirty scan walks every slot (the measuring arm; 0: the named slots)
     Count
 };
 class ArmRegistry {
@@ -4447,7 +4448,7 @@ public:
     /// looked?" — and a false yes costs one scan.
     /// NODELESS = scene-wide: every item may have changed, so both scans owe a full pass. A seam that knows its node
     /// NAMES it instead (the overload): only that node's item is re-read (U0 3b, the change set's engine half).
-    void noteSceneTransformWrite() { ++mSceneTransformWrites; mScanFullGi = mScanFullShadow = true; }
+    void noteSceneTransformWrite() { ++mSceneTransformWrites; mScanFullGi = mScanFullShadow = true; mSubstrate.nameAll(); }
     /// AN INPUT TO THE CASTER HALF OF THE WALK CHANGED, and it is not a
     /// transform (ENGINE-4 F5): a rig posed, a caster-shape seam (a mesh or
     /// material swap, a rebuilt Item, a per-object Cast Shadow flag, a

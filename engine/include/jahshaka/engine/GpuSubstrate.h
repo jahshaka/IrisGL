@@ -36,6 +36,12 @@ struct GpuSubstrateStatus {
     unsigned long long laterCalls = 0;
     /// Commits that copied anything, ever (GpuSceneStatus::updates).
     unsigned long long commits = 0;
+    /// THE WALK'S WORK (ENGINE-UPGRADE-2B stage 2), ever: the slots whose world transform a
+    /// walk compared, and the flags words it recomputed. A walk visits the slots the frame's
+    /// change set and the engine's seams NAMED (the whole index only where a nodeless write
+    /// or an incomplete set owes it), so a one-mover frame compares the mover's subtree.
+    unsigned long long slotsCompared = 0;
+    unsigned long long flagsRecomputed = 0;
     /// True while the substrate holds the scene's ray structures (the TLAS, the
     /// BLAS set): they live and die with the scene, not in the ray tier.
     bool holdsRayStructures = false;
