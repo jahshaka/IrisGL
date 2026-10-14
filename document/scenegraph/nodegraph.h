@@ -171,8 +171,8 @@ SceneNode *ownerOf(NodeHandle n);
 // The DOCUMENT'S hierarchy is the store below (DocNode::parent / children): every reader asks it. These two keep
 // the Ogre nodes the engine still adopts in step with it, and answer nothing.
 
-/// Re-parents `child`'s Ogre node under `parent`'s at `index` (a DOCUMENT sibling index, -1 = append), keeping
-/// Ogre's child order the store's. Both must belong to the same SceneHandle; use migrate() otherwise. The LOCAL
+/// Re-parents `child`'s Ogre node under `parent`'s at `index` (a DOCUMENT sibling index, -1 = append). Ogre's child
+/// ORDER is not the document's (its removeChild is swap-and-pop); the store's is. Both must belong to the same SceneHandle; use migrate() otherwise. The LOCAL
 /// transform is preserved. A no-op for a socket rider (its Ogre parent is a bone's tag point; its document place is
 /// the store's).
 void attach(NodeHandle parent, NodeHandle child, int index);

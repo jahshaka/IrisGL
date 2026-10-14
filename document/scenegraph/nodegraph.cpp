@@ -1050,6 +1050,21 @@ inline bool isIdentityTrs(const Vec3 &p, const Quat &r, const Vec3 &s)
 }
 
 
+/// A RIDER'S PARENT IS ITS TAG: the tag point's world as the last rendered frame left it (a TagPoint cannot be
+/// resolved on demand — TagPoint::updateFromParentImpl is a plain assert(false) — so the cache is the answer).
+/// False when the rider has no Ogre parent to read.
+bool riderTagWorld(const DocNode &n, Vec3 &P, Quat &R, Vec3 &S)
+{
+    const NodeHandle h = n.owner ? n.owner->graphNode() : nullptr;
+    if (!h || !engineAlive()) return false;
+    const Ogre::Node *tag = nd(h)->getParent();
+    if (!tag) return false;
+    P = toIris(tag->_getDerivedPosition());
+    R = toIris(tag->_getDerivedOrientation());
+    S = toIris(tag->_getDerivedScale());
+    return true;
+}
+
 /// THE WORLD, DERIVED (nodegraph.h): Ogre's composition rule down the store's parent chain, each node cached
 /// until a write invalidates it. Returns whether the answer may be cached — false for a socket rider and everything under one
 /// (their world is the engine's, read from the pose the last rendered frame produced: a TagPoint cannot be
@@ -1057,12 +1072,14 @@ inline bool isIdentityTrs(const Vec3 &p, const Quat &r, const Vec3 &s)
 bool deriveWorld(const DocNode &n, Vec3 &P, Quat &R, Vec3 &S)
 {
     if (n.rider) {
-        const NodeHandle h = n.owner ? n.owner->graphNode() : nullptr;
-        if (h && engineAlive()) {
-            const Ogre::SceneNode *o = nd(h);
-            P = toIris(o->_getDerivedPosition());
-            R = toIris(o->_getDerivedOrientation());
-            S = toIris(o->_getDerivedScale());
+        // THE TAG IS THE RIDER'S PARENT (W1, the stage 1 read): its world composes the rider's LOCAL by the same rule
+        // as any parent's, so a local write shows at once and a world write re-expresses under the tag (parentWorld).
+        Vec3 tP, tS;
+        Quat tR;
+        if (riderTagWorld(n, tP, tR, tS)) {
+            S = tS * n.scale;
+            R = qmul(tR, n.rot);
+            P = qrot(tR, tS * n.pos) + tP;
         } else {
             P = n.pos; R = n.rot; S = n.scale;
         }
@@ -1096,6 +1113,10 @@ bool deriveWorld(const DocNode &n, Vec3 &P, Quat &R, Vec3 &S)
 /// for a child of the document root, which writes the world values straight through, bit for bit.
 inline bool parentWorld(const DocNode &n, Vec3 &P, Quat &R, Vec3 &S)
 {
+    // A RIDER re-expresses under the TAG it hangs from, never under its document parent (W1): its world composes
+    // under the tag, so a world write must undo the tag's world or the rider lands off by (tag - document parent),
+    // and a gizmo drag adds that again every frame.
+    if (n.rider && riderTagWorld(n, P, R, S)) return isIdentityTrs(P, R, S);
     if (!n.parent) {
         P = Vec3(0.0f, 0.0f, 0.0f); R = Quat(); S = Vec3(1.0f, 1.0f, 1.0f);
         return true;
