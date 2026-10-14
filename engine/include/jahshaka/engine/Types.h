@@ -4299,8 +4299,8 @@ struct GiStatus {
     /// shared scene graph directly — so it walks every item's world AABB to
     /// find out. That walk used to run on EVERY frame of every probe-lit scene,
     /// still or not (392 / 1961 / 4328 us at 1k / 5k / 10k nodes); it now runs
-    /// only on frames where a transform was written
-    /// (`Engine::setTransformWriteCounter`).
+    /// only on frames where a write was NAMED — the frame's ChangeSet or the
+    /// engine's own seams — and re-reads only the named items (U0 3b).
     ///
     /// `giScans` is cumulative and is the assertable half: the delta over N
     /// STILL frames must be 0, and over N frames with something moving, N.
@@ -7053,10 +7053,8 @@ struct ShadowStatus {
     /// the pushed events that change a caster without moving it), so a STILL
     /// frame visits nothing: this number holding still across rendered frames
     /// IS the statement, and it is the one a test or the monitor can read.
-    /// (It needs a host transform counter to be installed —
-    /// Engine::setTransformWriteCounter — exactly like the GI half; without one
-    /// the engine cannot know a host is not writing behind its back and the
-    /// walk runs every frame, as it always did.)
+    /// (Since U0 3b a moving frame visits only the items its ChangeSet and the
+    /// engine's seams named — a mover frame adds the mover, not the scene.)
     unsigned long long casterWalkItems = 0;
 };
 
@@ -7842,8 +7840,8 @@ class Scene;
 class View;
 
 /// ONE FRAME'S INPUT (ENGINE-UPGRADE-1 U0, part 3a UPGRADE-RECORD-1). Everything a host hands the engine FOR A FRAME —
-/// the frame's clock step, why it renders, its pace, the document's transform epoch, the gesture, each scene's
-/// environment and each view's camera and post chain — goes in one of these through Engine::submitFrame, and the
+/// the frame's clock step, why it renders, its pace, the gesture, each scene's environment and CHANGE SET, and each
+/// view's camera and post chain — goes in one of these through Engine::submitFrame, and the
 /// engine applies it ONCE, at the top of the next renderOneFrame (the DRAIN), before anything of that frame runs.
 /// Nothing a frame depends on is written into the engine on the spot any more: a value lands in the frame that
 /// renders it, in one place, in one order.
@@ -7856,8 +7854,26 @@ class View;
 /// differs — so a still document drains to nothing (FrameInputStatus::fieldsApplied == 0). The per-frame fields
 /// (`cause`, `pace`) reset after the drain to their defaults (Driver / Complete), as the verbs they replaced did;
 /// `frameDelta` persists until a record says otherwise (it boots at Engine::kDefaultFrameDelta).
+/// THE FRAME'S CHANGE SET (U0 3b UPGRADE-CHANGESET-1): what the DOCUMENT wrote into the shared scene graph since the
+/// scene's last record, by engine node — the one source of "what moved" the engine has. A document node's transform
+/// is written straight into the Ogre node the engine renders (one hierarchy, until U2), so no engine verb runs when a
+/// box is dragged, carried by a parent or animated; the mirror drains the document's write journal at its emit and
+/// names the written nodes here. The engine's own writes (setNodeTransform, a rider, a decal's box, an Item
+/// arriving) need no entry: each names itself at its seam.
+///
+/// `moved` lists the nodes whose world transform was WRITTEN; each implies its whole subtree (a moved parent moves
+/// every child under it). The engine re-reads exactly those items — the GI movement scan, the caster walk, the
+/// geometry signature — and bumps the light serial once when a light is among them (the re-inject). An empty set
+/// costs nothing anywhere; `complete == false` (the journal could not name every write) costs one full pass.
+struct ChangeSet {
+    bool                complete = true;
+    std::vector<NodeId> moved;
+    bool empty() const { return complete && moved.empty(); }
+};
 struct FrameInputScene {
     Scene *scene = nullptr;
+    /// Never compared at the drain like the fields below: a set is EVENTS, applied once, merged by appending.
+    ChangeSet changes;
     std::optional<ShadowDesc>             shadows;
     std::optional<Colour>                 environmentLight;
     std::optional<FogDesc>                fog;
@@ -7900,7 +7916,6 @@ struct FrameInput {
     std::optional<float>              frameDelta;      ///< seconds every renderOneFrame advances by (persists)
     std::optional<FrameCause>         cause;           ///< why the next frame renders (resets to Driver)
     std::optional<FramePace>          pace;            ///< what the next frame may put off (resets to Complete)
-    std::optional<unsigned long long> transformEpoch;  ///< the document's transform-write counter at emit
     std::optional<FrameInputGesture>  gesture;
     std::optional<unsigned>           shadowMapBudget; ///< engine-wide (the shadow map pool's size)
     bool                              refreshShadows = false;   ///< the document asked for a shadow re-render
@@ -7923,7 +7938,10 @@ struct FrameInputStatus {
     unsigned           fieldsApplied = 0; ///< fields the LAST drain applied (changed values only)
     unsigned           viewFieldsApplied = 0;   ///< ...of them, the per-view ones
     bool               gestureActive = false;   ///< the last drained gesture
-    unsigned long long transformEpoch = 0;      ///< the last drained epoch
+    // ---- the change set (U0 3b) ----
+    unsigned           changesMoved = 0;        ///< `moved` entries the LAST drain applied, over every scene
+    unsigned           changesLights = 0;       ///< ...of whose subtrees held a light (each scene bumps its serial once)
+    unsigned long long changesIncomplete = 0;   ///< incomplete sets drained, ever (each one cost a full pass)
     double             drainMicros = 0.0;       ///< what the LAST drain cost (the record's own overhead)
 };
 

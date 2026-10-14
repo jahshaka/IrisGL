@@ -1172,6 +1172,10 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // PER-OBJECT SHADOW CASTING, re-applied for the same reason: a rebuilt
         // Item is born casting (Scene::setNodeCastShadow).
         applyNodeCasterBit(n);   // castShadow AND a caster channel (SHADOW-FIT-1)
+        // A REBUILT ITEM'S FLAGS WORD IS NEW (U0 3b, the seams that must mark): indexItemNode marks a NEWBORN slot only
+        // (it returns early for an indexed node), so the rebuild's visibility flags, light mask and caster bit above
+        // would reach the GPU table only through a scan noticing. Marked here, at the write.
+        markGpuSlotDirty(n);
         // Render-queue policy (POST_CHAIN_SPEC.md §6): on-top overlays go in the
         // chain's overlay pass, refractive items in its refraction pass, and
         // everything else stays on Ogre's default queue.

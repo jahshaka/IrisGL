@@ -749,12 +749,9 @@ float Scene::advance(float dt)
     // THE WRITE-BACK: the bodies Bullet moved this frame into their nodes,
     // and nothing for a body that slept through every step (Environment::
     // writeBack — a resting pile's frame writes nothing; SPEED-CPU).
+    // (No close of the write journal here any more — U0 3b: each reader holds its own cursor, the write-back's
+    // world included, and skips past its own writes itself. nodegraph.h's WriteJournalReader.)
     environment->writeBack(nodes);
-    // THE DOCUMENT STEP CLOSES THE WRITE JOURNAL (nodegraph.h): its readers —
-    // the write-back above — have read it; the next frame's writes start a new
-    // one.
-    graph::closeWriteJournal();
-    environment->noteWriteJournalClosed();
 
     // POSSESSION, second half: the spring arm follows the pose the steps just
     // produced, so the camera never lags the character by a frame. It writes

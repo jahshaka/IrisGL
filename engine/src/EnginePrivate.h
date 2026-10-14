@@ -176,11 +176,9 @@ float jahLodHysteresis();
 /// once, after Root::initialise and before any mesh or Item exists.
 void installJahLodStrategy();
 
-/// THE HOST'S TRANSFORM-WRITE COUNTER (Engine::setTransformWriteCounter), or
-/// null when no host handed one over — in which case every frame's GI movement
-/// scan runs, the way it always did. Read once a frame per scene, relaxed: it
-/// is a change test, not an ordering. Process-wide because the document's
-/// counter is (one graph, many scenes).
+/// NEVER NULL SINCE U0 3b, and nothing writes through it: the engine learns every document write from the frame's
+/// ChangeSet, so its movement epoch is always trustworthy. Kept ONLY because EU-2's OgreGpuScene.cpp still asks
+/// `!= nullptr` (its one reader); deleted with that line at the window's rebase.
 extern const std::atomic<unsigned long long> *gTransformWriteCounter;
 
 /// Names handed to Ogre must be unique for the life of the process (a destroyed
@@ -3478,7 +3476,7 @@ struct SceneGiBinding {
     /// THE SCENE'S LIGHT DIRT (D3-HIT-SHADE-2): the hit decode's world light list
     /// (HlmsAtom::uploadWorldLights) is rebuilt only when one of these moved —
     /// the light write serial (every setLight push, a light node's pose or
-    /// visibility write, the mirror's noteLightsMoved, the environment) and the
+    /// visibility write, a drained ChangeSet that moved a light, the environment) and the
     /// count of lights destroyed. Point at the owning OgreScene's counters.
     const unsigned long long *lightWriteSerial = nullptr;
     const unsigned long long *lightsRemoved = nullptr;
@@ -4057,10 +4055,6 @@ public:
     // ---- Lights ----
     bool setLight(NodeId id, const LightDesc &d) override;
     bool removeLight(NodeId id) override;
-    /// MIRROR-LAMPSIG-1 — the host's word that a light's WORLD pose moved
-    /// (Engine.h carries the whole reason: an adopted node's transform never
-    /// reaches this interface). One counter bump; safe from any frame.
-    void noteLightsMoved() override { ++mGiLightWriteSerial; }
     unsigned long long lightWriteSerial() const override { return mGiLightWriteSerial; }
 
     // ---- Decals (DECALS_SPEC.md; impl in OgreDecals.cpp) ----
@@ -4321,7 +4315,7 @@ public:
     /// lane changes an input and not a pass.
     bool rayReflectionsWanted() const;
     bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) override;
-    unsigned long long giGeometrySignature() const override;
+    unsigned long long giGeometrySignature(const ChangeSet &pending) const override;
     unsigned long long giMaterialSignature() const override;
     bool refreshGiLighting(bool inMotion) override;
     void setNodeProbeGridExcluded(NodeId id, bool excluded) override;
@@ -4564,14 +4558,16 @@ public:
     /// It is the same counter for both because every reader wants the same
     /// question answered — "could the answer have changed since I last
     /// looked?" — and a false yes costs one scan.
-    void noteSceneTransformWrite() { ++mSceneTransformWrites; }
+    /// NODELESS = scene-wide: every item may have changed, so both scans owe a full pass. A seam that knows its node
+    /// NAMES it instead (the overload): only that node's item is re-read (U0 3b, the change set's engine half).
+    void noteSceneTransformWrite() { ++mSceneTransformWrites; mScanFullGi = mScanFullShadow = true; }
     /// AN INPUT TO THE CASTER HALF OF THE WALK CHANGED, and it is not a
     /// transform (ENGINE-4 F5): a rig posed, a caster-shape seam (a mesh or
     /// material swap, a rebuilt Item, a per-object Cast Shadow flag, a
     /// generated vertex piece), a render-queue refile. The GI half's epoch
     /// cannot carry these — none of them moves anything — so the caster half
     /// adds its own counter on top of it (shadowEpoch below).
-    void noteShadowScanInput() { ++mShadowScanWrites; }
+    void noteShadowScanInput() { ++mShadowScanWrites; mScanFullShadow = true; }
     void recreatePlanarAfterShadowRebuild();
 
     Ogre::SceneManager *sceneManager() const;
@@ -4852,7 +4848,12 @@ private:
     /// raising it and telling the caster walk's still-frame gate about it
     /// cannot come apart. Here rather than beside noteShadowScanInput because
     /// it needs `Node` to be complete.
-    void markShadowShapeDirty(Node &n) { n.shadowShapeDirty = true; noteShadowScanInput(); }
+    void markShadowShapeDirty(Node &n) {   // NAMED for the caster walk (U0 3b), never a full pass
+        n.shadowShapeDirty = true; ++mShadowScanWrites;
+        if (mScanFullShadow) return;
+        if (mScanPendingShadow.size() > mItemNodes.size() + 64u) { mScanPendingShadow.clear(); mScanFullShadow = true; }
+        else mScanPendingShadow.push_back(n.selfId);
+    }
 
     /// A definition's frozen shape. Two systems can share a recycled def only if
     /// every element of this matches, because none of it can be changed after
@@ -6940,24 +6941,26 @@ private:
     /// ONE WALK, TWO CONSUMERS (walkItems, via runItemWalk): the GI movement
     /// records and the frame's caster changes, from the same pass.
     struct ShadowChange { Ogre::Aabb box; Ogre::uint32 channels = 0; };
-    void walkItems(bool gi, bool shadow, bool fresh);
+    void walkItems(bool gi, bool shadow, bool fresh, const std::vector<Node *> *subset = nullptr);
     std::vector<ShadowChange> mShadowChanges;
     std::vector<ShadowChange> mShadowVanished;   ///< casters whose Item died since the last walk
     bool mShadowWalked = false;                  ///< this frame's walk produced mShadowChanges
     /// The GI movement scan has run this frame (reset by updateGiTracking, the
     /// once-per-frame entry point): whoever consumes mGiMovedBoxes first runs it.
     bool mGiWalkedThisFrame = false;
-    /// THE STILL-FRAME SKIP (clean-2 lane, 2026-09-13). The GI scan is the only
-    /// per-frame walk of every item left in a still scene, and it exists solely
-    /// to notice a transform nobody told the engine about. `transformEpoch()` is
-    /// the host's process-wide transform-write counter (Engine::
-    /// setTransformWriteCounter) plus this scene's OWN writes; when it has not
-    /// moved since the last scan, nothing can have moved and the scan is
-    /// skipped. Without a host counter the epoch is unavailable and every frame
-    /// scans, exactly as before.
-    unsigned long long transformEpoch() const;
-    unsigned long long mGiWalkEpoch = 0;          ///< the epoch the last scan ran at
-    bool mGiWalkEpochValid = false;               ///< ...and whether it was ever set
+    /// THE CHANGE SET'S ENGINE HALF (U0 3b). The scans re-read only the items NAMED since they last ran — the drained
+    /// ChangeSet's subtrees (applyChangeSet) and the engine's own seams (noteSceneTransformWrite(n)) — and nothing on a
+    /// frame that named none; a nodeless seam or an incomplete set owes the full pass. `transformEpoch()` = the moves
+    /// drained (mHostMoves) + this scene's own writes: a count that moves exactly when something was written.
+    unsigned long long transformEpoch() const { return mHostMoves + mSceneTransformWrites; }
+    void noteSceneTransformWrite(const Node &n);   ///< NAMED: n's item is re-read by both scans (OgreGi.cpp)
+    /// An ENGINE write that moves a node's subtree (a rider, a decal box, setNodeTransform): named like a drained move.
+    void noteSubtreeWrite(NodeId id) { ChangeSet c; c.moved.push_back(id); applyChangeSet(c, false); }
+    std::vector<NodeId> mScanPendingGi, mScanPendingShadow, mScanTake;
+    std::vector<Node *> mScanSubset;
+    std::vector<Node *> &takeScanSubset(std::vector<NodeId> &pending);
+    bool mScanFullGi = true, mScanFullShadow = true;
+    unsigned long long mHostMoves = 0;
     /// THE SAME SKIP FOR THE CASTER HALF (ENGINE-4 F5). It was left out when
     /// the GI half got its gate because a caster's inputs are not all
     /// transforms — a pose, a material's vertex piece, a rebuilt Item, a Cast
@@ -6968,8 +6971,6 @@ private:
     /// changed since I last looked?
     unsigned long long shadowEpoch() const { return transformEpoch() + mShadowScanWrites; }
     unsigned long long mShadowScanWrites = 0;     ///< pushed caster inputs that move nothing
-    unsigned long long mShadowWalkEpoch = 0;      ///< the epoch the last caster walk ran at
-    bool mShadowWalkEpochValid = false;
     unsigned long long mCasterWalkItems = 0;      ///< item visits by the caster half, ever
     unsigned long long mSceneTransformWrites = 0; ///< OUR writes: setNodeTransform, riders
     unsigned long long mGiScans = 0;              ///< movement scans actually run, ever
@@ -7089,6 +7090,18 @@ private:
 public:
     /// THE FRAME INPUT THIS SCENE LAST APPLIED (U0 3a): the drain's compare (OgreEngine::drainFrameInput).
     FrameInputScene mFrameApplied;
+    /// THE CHANGE SET's two engine entry points (U0 3b): the drain's, which names each moved subtree to the scans
+    /// (returns 1 when a light was among them — the light serial bumped once), and the submit's. A submitted set
+    /// stales the cached geometry signature at once (a read before the drain must see those writes) — unless the
+    /// signature was just computed WITH it (the mirror reads it with the set it is about to submit). A cache still
+    /// valid at the drain therefore read every drained write already (the boxes are live): the drain re-keys it, so
+    /// a still frame after a move reads it for free.
+    unsigned applyChangeSet(const ChangeSet &cs, bool drained = true);   ///< false: an engine write, never a drain
+    void noteSubmittedChanges() {
+        if (!mGeomSigCovers) mGeomSigValid = false;
+        mGeomSigCovers = false;
+    }
+    mutable bool mGeomSigCovers = false;      ///< the last compute read a pending set the next submit carries
 private:
     /// beginStructureEdit / endStructureEdit: the open depth, and what the edits inside asked of GI
     /// (applied once at the outermost end — applyGiInvalidation).
@@ -8442,7 +8455,6 @@ public:
 
     void destroyView(View *view) override;
 
-    void setTransformWriteCounter(const std::atomic<unsigned long long> *counter) override;
     void renderOneFrame() override;
     void submitFrame(const FrameInput &input) override;
     FrameInputStatus frameInputStatus() const override { return mFrameInputStatus; }
@@ -8451,9 +8463,7 @@ public:
     FrameInput       mPendingFrameInput;
     bool             mFrameInputPending = false;
     FrameInputStatus mFrameInputStatus;
-    /// The last drained document transform epoch (FrameInput::transformEpoch) and gesture.
-    unsigned long long mDrainedTransformEpoch = 0;
-    bool               mDrainedTransformEpochValid = false;
+    /// The last drained gesture (FrameInput::gesture; 3c's scheduler reads it).
     FrameInputGesture  mDrainedGesture;
     /// THE FRAME'S CLOSE, RUN FROM renderOneFrame's SCOPE GUARD AND NOWHERE
     /// ELSE (lane FRAME-CATCH-1): the runtime's xrEndFrame, the monitor's

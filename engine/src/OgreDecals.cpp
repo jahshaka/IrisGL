@@ -468,8 +468,8 @@ bool OgreScene::setDecal(NodeId id, const DecalDesc &d)
         // holds — and nothing else was going to say so: the movement scan sees
         // Items, and `setDecal` is the one call that makes this happen. The box
         // write above is an engine transform write, so the scan runs this frame
-        // too (ensureGiWalk's epoch).
-        noteSceneTransformWrite();
+        // too (named: the walk runs and its decal half re-reads the box).
+        noteSceneTransformWrite(it->second);
         staleProbeGrid(GiStaleReason::Moved);
         return true;
     } JAH_CATCH(mError, false);

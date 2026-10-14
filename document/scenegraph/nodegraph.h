@@ -263,34 +263,45 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s);
 /// are not content: counting those would un-exempt every camera the editor
 /// draws a body for.
 ///
-/// The consumer is the ENGINE, which cannot include this header: the host
-/// hands the engine the counter's address once (`Engine::
-/// setTransformWriteCounter` — Studio does it in src/bridge/enginehost.cpp
-/// beside `setStagingScene`, the suites in tests/support/documentgraph.h), and
-/// an engine that was never given one keeps scanning every frame.
+/// THE ENGINE NO LONGER READS IT (U0 3b): the engine learns what moved from the frame's ChangeSet, which each
+/// document's mirror drains from the WRITE JOURNAL below — the same writes, by name. The count stays the physics
+/// write-back's cheap "did anything else write?" test.
 unsigned long long transformWrites();
-/// THE WRITE JOURNAL — the first piece of ENGINE_V2_SPEC V2-1's change journal
-/// (SPEED-CPU, 2026-10-04). The counter above says THAT something moved; the
-/// journal says WHAT: every write the counter counts (a transform setter
-/// through the one funnel, a reparent, a detach) also records its node, once,
-/// until the journal is CLOSED. A reader walks the written nodes' subtrees
-/// instead of the whole document.
+/// THE WRITE JOURNAL — the change record every frame's ChangeSet is drained from (ENGINE-UPGRADE-1 U0 3b; first
+/// built for ENGINE_V2_SPEC V2-1, SPEED-CPU 2026-10-04). The counter above says THAT something moved; the journal
+/// says WHAT: every write the counter counts (a transform setter through the one funnel, a reparent, a detach) also
+/// records its node — exactly the counter's writes, so a reader of the journal sees everything the counter saw.
 ///
-/// THE FRAME CLOSE is the document step's (Scene::advance, after its readers —
-/// today the physics write-back, Environment::writeBack). A reader that runs
-/// on another schedule compares writeJournalGeneration() with the generation it
-/// saw at its own last look: a different value means someone closed in
-/// between, the journal no longer holds every write since that look, and the
-/// reader must fall back to its full pass. V2's walks join as readers before
-/// the close; they extend this, never a second record beside it.
-/// The DOCUMENT nodes written since the close, as live handles (a node destroyed
-/// since its write is gone from the answer; a node migrated to another manager
-/// answers with its new handle). False when a write landed on a node with no
-/// document owner — one a reader cannot walk from — so the reader must take its
-/// full pass.
-bool writeJournal(std::vector<NodeHandle> &out);
-unsigned long long writeJournalGeneration();
-void closeWriteJournal();
+/// ONE LOG, A CURSOR PER READER. The journal is process-wide (a document can be built on a worker against the
+/// staging scene, and every write path touches it), and it has several readers on their own schedules: each
+/// document's mirror at its emit (the ChangeSet, every host frame) and each physics world at its write-back (only
+/// while it simulates). A shared CLOSE cannot serve them — one reader closing would throw away writes another has
+/// not read (the editor's mirror losing a drag to a thumbnail's sync; physics losing its incremental re-check to the
+/// mirror's emit) — so each reader holds a `WriteJournalReader`: `take` answers the writes since that reader's own
+/// last take, and the log keeps an entry only until every live reader has passed it. A node is logged once per
+/// "every reader still owes it", never once per write. With no reader registered nothing is logged at all.
+///
+/// A take is INCOMPLETE (false) when it cannot name every write: the reader's first take (it never saw what came
+/// before it), a write to a node with no document owner (one nobody can walk from), or a reader so far behind that
+/// the log's cap dropped entries it had not read. An incomplete take is the caller's cue for its full pass.
+class WriteJournalReader {
+public:
+    WriteJournalReader();
+    ~WriteJournalReader();
+    WriteJournalReader(const WriteJournalReader &) = delete;
+    WriteJournalReader &operator=(const WriteJournalReader &) = delete;
+    /// The DOCUMENT nodes written since this reader's last take (or skip), each once, as live handles (a node destroyed
+    /// since its write is gone from the answer; a migrated node answers with its new handle). False = incomplete (above).
+    bool take(std::vector<NodeHandle> &out);
+    /// Forget every write so far, unread — a reader whose own writes follow its take (physics' write-back) says so.
+    void skip();
+
+    // ---- the log's own bookkeeping (nodegraph.cpp) ----
+    unsigned long long cursor = 0;   ///< the sequence number of the first write this reader has not read
+    bool               primed = false;
+};
+/// Entries the log holds right now (a running diagnostic for the suites: a log no reader drains stays bounded).
+std::size_t writeJournalSize();
 /// A TAP ON THE JOURNAL, for a reader on its OWN schedule (the editor's scene
 /// checker runs once a second; the document step closes the journal every
 /// playing frame). A tap receives every write the journal records — a
@@ -312,9 +323,6 @@ struct TapDrain
 TapDrain drainJournalTap(int tap, std::vector<NodeHandle> &moved, std::vector<NodeHandle> &written);
 /// A document write that is not scene movement, for the taps (see above).
 void noteDocumentWrite(NodeHandle n);
-/// The counter itself, for the host that hands its address to the engine.
-/// Its lifetime is the process's.
-const std::atomic<unsigned long long> &transformWriteCounter();
 /// NODES THAT CHANGED MEMORY-MANAGER CLASS (a static <-> dynamic migration, one per node), a process-wide
 /// running total: what a promotion, a demotion or a reparent's rule-4 round trip cost, in counts
 /// (ENGINE-UPGRADE-1 stage 2, mirror.reparent_local).

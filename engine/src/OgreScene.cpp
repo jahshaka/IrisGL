@@ -525,8 +525,9 @@ void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, co
             // 9.7 ms a frame while flying and 0.02 ms still, and the four
             // gizmo pushes were the whole of it once the document's camera
             // stopped counting (nodegraph.h's epoch).
-            if (it == mNodes.end() || writeIsSceneMovement(it->second))
-                noteSceneTransformWrite();
+            // NAMED (U0 3b): the scans re-read this node's subtree, nothing else; an unregistered node is scene-wide.
+            if (it == mNodes.end()) noteSceneTransformWrite();
+            else if (writeIsSceneMovement(it->second)) noteSubtreeWrite(id);
             // A MOVABLE LAMP MOVES NOTHING A SCAN CAN SEE (DRAG-1 round 2, F5).
             // It is not GI geometry, so `mGiMovedBoxes` never mentions it and
             // the probe grid is never staled for it — but a light injection
@@ -666,8 +667,8 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
 
 void OgreScene::applyNodeVisibilityFlags(Node &n) {
     // A STRUCTURAL INPUT to the GI scans and the two signatures: which channel
-    // an object is in decides whether they read it at all (clean-2 lane).
-    noteSceneTransformWrite();
+    // an object is in decides whether they read it at all (clean-2 lane). Named: its item is re-read.
+    noteSceneTransformWrite(n);
     // The material's unlit-ness was recorded when the geometry attached, so a
     // lit mesh that is marked helper and then unmarked gets its kGiGeometryBit
     // back. Reading it off the item's CURRENT flags could not do that: a helper
@@ -702,8 +703,13 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
 // (OgreGpuScene.cpp, kGpuCaster).
 void OgreScene::applyNodeCasterBit(Node &n) {
     if (!n.item) return;
-    n.item->setCastShadows(n.castShadow &&
-                           (n.item->getVisibilityFlags() & allShadowCasterChannels()));
+    const bool cast = n.castShadow && (n.item->getVisibilityFlags() & allShadowCasterChannels());
+    if (n.item->getCastShadows() == cast) return;
+    n.item->setCastShadows(cast);
+    // A CHANGE-SET ENTRY AT THE WRITE (U0 3b, the seams that must mark): the GPU table's caster bit and the caster
+    // walk's predicate both read it, so the write names the node to both — never left to a scan to notice.
+    markGpuSlotDirty(n);
+    noteSceneTransformWrite(n);
 }
 
 OgreScene::Node *OgreScene::registryNode(const Ogre::Node *sn) {

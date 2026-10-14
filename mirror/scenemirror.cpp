@@ -371,29 +371,6 @@ quint64 worldTrsSignature(iris::graph::NodeHandle h)
     return sig;
 }
 
-/// worldTrsSignature with the ANCESTOR half memoised — for the one caller that
-/// asks about many nodes at once (the GI light signature). A scene's lights
-/// share their parent chains, so without this the same ancestors are re-read
-/// once per light per frame; with it the chain is walked once per distinct
-/// parent. `memo` is a caller-owned scratch buffer (a linear scan: a scene has
-/// a handful of distinct light parents, and a QHash would allocate).
-quint64 worldTrsSignatureMemo(iris::graph::NodeHandle h,
-                              std::vector<std::pair<iris::graph::NodeHandle, quint64>> &memo)
-{
-    if (!h) return kTrsBasis;
-    const iris::graph::NodeHandle parent = iris::graph::parentOf(h);
-    quint64 sig = kTrsBasis;
-    bool have = false;
-    for (const auto &e : memo)
-        if (e.first == parent) { sig = e.second; have = true; break; }
-    if (!have) {
-        sig = worldTrsSignature(parent);
-        memo.emplace_back(parent, sig);
-    }
-    mixLocalTrs(sig, h);
-    return sig;
-}
-
 /// THE LIGHT'S GI PARAMETERS as a change key (ENGINE_CACHE_POLICY_SPEC P7).
 /// Folded into the GI light signature beside the light's transform: VCT
 /// injects each light's colour x intensity over its reach and cone, so a
@@ -759,6 +736,11 @@ int SceneMirror::sync(const FrameViews &frameViews)
     { MirrorStage s(mon, "mirror.sockets");
     resolveSockets();
     }
+    // THE CHANGE SET, FIRST TAKE (U0 3b): the document's writes since the last emit (this mirror's cursor on the
+    // write journal), before the walk — the soft promotion below asks "was this node written?" of it.
+    { MirrorStage s(mon, "mirror.journal");
+    takeWriteJournal();
+    }
     // THE PLAYER'S FLOOR SWITCH OWES A VISIT (PLAYER-FLOOR-1, the fix round).
     // `setHideDefaultFloor` changed a term the WALK reads, and a still frame
     // runs no walk: it consumes the document's change list and rotates a
@@ -832,11 +814,11 @@ int SceneMirror::sync(const FrameViews &frameViews)
     {
         const bool playing = mSource->isPlaying();
         if (playing != mWasPlaying) {
-            for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
-                it->posed = false;
-                it->mobilityWarned = false;
-            }
+            for (auto it = mEntries.begin(); it != mEntries.end(); ++it) it->mobilityWarned = false;
             mWasPlaying = playing;
+            // THE EDGE'S OWN SYNC PROMOTES NOTHING: the writes the set holds were made BEFORE play started (an edit,
+            // the edge's own restore) — a node has to be written WHILE playing to be a surprise mover.
+            mWrittenThisSync.clear();
             // A FULL-WALK TRIGGER (§3.5). The play edge clears soft mobility
             // tree-wide and re-arms the surprise-mover watch, and a node has to
             // be SEEN STANDING STILL before it can be seen moving — which means
@@ -1044,7 +1026,13 @@ int SceneMirror::sync(const FrameViews &frameViews)
     scenePart.reassert = mReassertPending;
     scenePart.shaderTime = mFrameShaderTime;
     scenePart.grid = mFrameGrid;
-    in.transformEpoch = iris::graph::transformWriteCounter().load(std::memory_order_relaxed);
+    // THE CHANGE SET, SECOND TAKE: the writes made DURING this sync (a socket's fallback placement, a settle's
+    // re-expression) join the set, so the record carries every write up to its emit — the frame that renders a
+    // write is the frame whose scans hear of it.
+    takeWriteJournal();
+    scenePart.changes = std::move(mFrameChanges);
+    mFrameChanges = jahshaka::engine::ChangeSet();
+    mWrittenThisSync.clear();
     std::vector<FrameInputView> parts(frameViews.views.size());
     for (size_t i = 0; i < frameViews.views.size(); ++i) {
         parts[i].view = frameViews.views[i].view;
@@ -3808,6 +3796,20 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             // from the node's transform (the light rides the adopted node and the
             // graph carries position and direction), so skipping an unchanged push
             // cannot freeze a moving light.
+            // ITS GI PARAMETERS, at the seam (U0 3b; was folded into the scene-wide light hash every frame): a lamp
+            // that arrives or changes what the voxel injection reads owes the debounce its answer.
+            {
+                const quint64 gp = lightGiParamSignature(light);
+                if (!e.giLightParamsKnown || gp != e.giLightParams) {
+                    e.giLightParams = gp;
+                    e.giLightParamsKnown = true;
+                    const auto *sn = static_cast<const iris::SceneNode *>(light);
+                    if (std::find(mMovableLights.begin(), mMovableLights.end(), sn) != mMovableLights.end())
+                        mGiMovableLampOwed = true;
+                    else
+                        mGiStillLampOwed = true;
+                }
+            }
             const LightDesc want = toLightDesc(light, mSyncSun, true,
                                                atmosphereTintFor(light, mSyncSun),
                                                mSunExposureGain);
@@ -3871,6 +3873,62 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
             visit(c, r.shown, r.movable);
 }
 
+// THE CHANGE SET, DRAINED FROM THE DOCUMENT'S WRITE JOURNAL (ENGINE-UPGRADE-1 U0 3b). The journal names every write
+// the movement counter counts — a transform setter, a reparent, a detach — and this mirror holds its own cursor on it
+// (graph::WriteJournalReader), so another reader (physics' write-back, a thumbnail's mirror) draining the same
+// process-wide log never costs it a write. Each written node becomes:
+//   * an entry in the record's ChangeSet (its engine node; the engine re-reads that node's SUBTREE and nothing else);
+//   * a member of mWrittenThisSync (the soft promotion's question: was THIS node written while playing?);
+//   * for every lamp at or under it, an owed flag for the GI debounce (a still lamp arms the settle, a moving one the
+//     re-inject cadence) — what the three scene-wide light hashes used to detect by re-hashing every lamp every frame.
+// A written node this mirror has no engine node for (the document root, a node the walk refused or has not adopted
+// yet) passes the move to its mirrored descendants. An incomplete take (the reader's first, a write no document node
+// owns, a cursor the log's cap overtook) makes the set incomplete: the engine takes its full pass once.
+void SceneMirror::takeWriteJournal()
+{
+    const bool complete = mJournal.take(mJournalScratch);
+    if (!complete) {
+        mFrameChanges.complete = false;
+        mGiStillLampOwed = mGiMovableLampOwed = true;   // it cannot say which lamp moved
+    }
+    if (mJournalScratch.empty()) return;
+    const std::size_t before = std::size_t(mWrittenThisSync.size());
+    for (iris::graph::NodeHandle h : mJournalScratch)
+        if (iris::SceneNode *n = iris::graph::ownerOf(h)) noteWrittenNode(n);
+    mJournalScratch.clear();
+    if (std::size_t(mWrittenThisSync.size()) == before || !mSource) return;
+    // THE LAMPS (bounded by the light count): a lamp moved when it, or an ancestor, was written.
+    for (const auto &l : mSource->lights) {
+        if (l.isNull() || l->lightType == iris::LightType::Sky) continue;
+        bool moved = false;
+        for (iris::graph::NodeHandle h = l->graphNode(); h && !moved; h = iris::graph::parentOf(h))
+            if (const iris::SceneNode *o = iris::graph::ownerOf(h)) moved = mWrittenThisSync.contains(o);
+        if (!moved) continue;
+        const auto *n = static_cast<const iris::SceneNode *>(l.data());
+        if (std::find(mMovableLights.begin(), mMovableLights.end(), n) != mMovableLights.end()) mGiMovableLampOwed = true;
+        else mGiStillLampOwed = true;
+    }
+}
+
+void SceneMirror::noteWrittenNode(iris::SceneNode *node)
+{
+    if (mWrittenThisSync.contains(node)) return;   // named once per emit
+    mWrittenThisSync.insert(node);
+    // The node itself, or — when this mirror has no engine node for it — its nearest mirrored descendants.
+    std::vector<iris::SceneNode *> stack{ node };
+    while (!stack.empty()) {
+        iris::SceneNode *n = stack.back();
+        stack.pop_back();
+        const auto it = mEntries.constFind(n);
+        if (it != mEntries.cend() && it->node) { mFrameChanges.moved.push_back(it->node); continue; }
+        // Not mirrored: ours only if it hangs in this document (a descendant of it is, by construction).
+        if (n == node && it == mEntries.cend() && n->getScene() != mSource) return;
+        const std::size_t kids = iris::graph::childCount(n->graphNode());
+        for (std::size_t i = 0; i < kids; ++i)
+            if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(n->graphNode(), i))) stack.push_back(c);
+    }
+}
+
 // ---- mobility -------------------------------------------------------------------
 // SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3. The DOCUMENT decides "does this move?"
 // and the engine is told; lane R1 pushes and counts, lane R2 spends it (movable
@@ -3899,19 +3957,14 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
     // THE SURPRISE MOVER. Only for a node that resolved static with nobody
     // having said so (an explicit `static` is a decision we keep honouring, and
     // its ghost is the author's own choice), and only while playing.
+    // DECIDED BY THE CHANGE SET (U0 3b): a node the document WROTE while playing (this sync's journal take — the
+    // play edge's own sync holds none) is moving; the pose compare that stood here, a movement detector of the
+    // mirror's own, is gone. A write of the same value counts, as it does for every scan — the safe direction.
     if (!movable && mSource && mSource->isPlaying() && node->mobility() == iris::Mobility::Auto) {
-        const iris::Vec3 p = node->getLocalPos();
-        const iris::Quat r = node->getLocalRot();
-        const iris::Vec3 sc = node->getLocalScale();
-        if (!e.posed) {
-            // First play frame that saw it: remember where it stood. A node has
-            // to be seen standing still before it can be seen moving.
-            e.playPos = p; e.playRot = r; e.playScale = sc; e.posed = true;
-        } else if (!(p == e.playPos) || !(r == e.playRot) || !(sc == e.playScale)) {
+        if (mWrittenThisSync.contains(node)) {
             node->_setSoftMovable(true);
             movable = true;
             why = iris::MobilityReason::Play;
-            e.playPos = p; e.playRot = r; e.playScale = sc;
             if (!e.mobilityWarned) {
                 e.mobilityWarned = true;
                 ++mMobilityMisses;
@@ -3936,13 +3989,16 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
             // The GI light signature needs this answer per light and cannot
             // derive it (rule 2 is a question about the whole ancestor chain);
             // buildEnvironment reads the list later in the same frame.
-            if (node->getSceneNodeType() == iris::SceneNodeType::Light)
+            if (node->getSceneNodeType() == iris::SceneNodeType::Light) {
                 mMovableLights.push_back(node);
+                mGiStillLampOwed = mGiMovableLampOwed = true;   // it changed class: both gates hear of it
+            }
         } else {
             if (mMovableNodes) --mMovableNodes;
             if (node->getSceneNodeType() == iris::SceneNodeType::Light) {
                 auto it = std::find(mMovableLights.begin(), mMovableLights.end(), node);
                 if (it != mMovableLights.end()) mMovableLights.erase(it);
+                mGiStillLampOwed = mGiMovableLampOwed = true;
             }
         }
     }
@@ -4332,6 +4388,11 @@ void SceneMirror::releaseEntry(Entry &e)
     e.gpuSkinned = false;
     e.characterHost = nullptr;
     noteRigCounts(e);
+    // A LAMP LEAVING is a GI change like one arriving (U0 3b: the hashes saw the list shrink).
+    if (e.giLightParamsKnown) {
+        if (e.countedMovable) mGiMovableLampOwed = true; else mGiStillLampOwed = true;
+        e.giLightParamsKnown = false;
+    }
     if (e.countedMovable) {
         e.countedMovable = false;
         if (mMovableNodes) --mMovableNodes;
@@ -7473,91 +7534,16 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // whether or not its SSR row asked for one — `ChainDesc::probeGather`),
         // so it rides the change debounce with the rest of the configuration.
         gi.gather = toggle(mSource->giGather);
-        // EVERY LIGHT IS A VOXEL LIGHT. There is one GI arm now (PHOTON_SPEC
-        // E2 (4) deleted Instant Radiosity, which traced from ONE driving light
-        // and therefore hashed only that one): the voxel injection reads every
-        // light in the scene, so any light moving — or appearing, or dying —
-        // goes stale until a re-injection.
-        //
-        // The signature is a HASH of local TRS up each light's parent chain,
-        // not a product of world matrices (audit F8). The old form called
-        // `getGlobalTransform()` — Ogre's `_getFullTransformUpdated`, which
-        // recurses to the root and recomposes the transform at every level,
-        // unconditionally — once per light per frame, and then multiplied the
-        // results into a Mat4. Both halves were pure overhead for a question
-        // that is only ever "is this the same as last frame?".
-        // (It is also STRICTLY more sensitive than what it replaced: a product
-        // of world matrices is blind to two lights swapping pure-translation
-        // transforms, because translation matrices commute. A per-light hash
-        // folded in scene order is not.)
-        // ...and, since ENGINE_CACHE_POLICY_SPEC P7, each light's GI PARAMETERS
-        // beside its transform (lightGiParamSignature says why).
-        //
-        // STILL LAMPS ONLY (REALTIME_REFLECTIONS_SPEC §3.3.4, owner decision
-        // O2). A lamp the document resolved as MOVING — a carried torch, a
-        // swaying pendant, a light on an animated rig — is hashed into its OWN
-        // key below and never into this one, because this one arms the settle:
-        // a lamp that moves every frame would hold the stability window open
-        // for ever and then pay a full re-solve (a teardown, a re-voxelize and
-        // every probe re-captured) the moment it paused. What a moving lamp
-        // gets instead is the CHEAP path on its own cadence — its light
-        // re-injected into the voxels that are already there, about six times a
-        // second — which is measurably free and is what makes its bounce follow
-        // it. The probes hold the still room's lighting, as designed.
-        quint64 lightSig = 0, movableLightSig = 0;
-        const auto movingLamp = [&](const iris::LightNode *l) {
-            const auto *n = static_cast<const iris::SceneNode *>(l);
-            return std::find(mMovableLights.begin(), mMovableLights.end(), n) != mMovableLights.end();
-        };
-        quint64 lightPoseSig = 0;
-        if (gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid) {
-            mGiChainMemo.clear();          // capacity kept; contents are per call
-            Hasher h, m, p;
-            for (const auto &l : mSource->lights) {
-                if (l.isNull()) continue;
-                // THE SKY LIGHT IS NOT A VOXEL LIGHT (audit A F3). It never
-                // becomes an Ogre::Light at all: its colour and intensity reach
-                // the renderer as the scene's environment (buildEnvironment ->
-                // setEnvironmentLight; the engine forms SH x gain), which it hands to
-                // every pass and every cascade's bounce itself — re-settling a
-                // bouncing chain on its own (OgreScene::noteEnvironmentChanged)
-                // — and which stales the probe grid with its own reason. Hashing it here made releasing its intensity slider —
-                // or hiding it, the documented way to switch ambient off — arm
-                // the settle and fire a whole from-scratch GI re-solve (under
-                // Photon's cascades, the whole chain) for a change that was
-                // already applied the cheap way.
-                if (l->lightType == iris::LightType::Sky) continue;
-                const quint64 pose = worldTrsSignatureMemo(l->graphNode(), mGiChainMemo);
-                Hasher &into = movingLamp(l.data()) ? m : h;
-                into << pose << lightGiParamSignature(l.data());
-                // ...AND EVERY LAMP'S POSE, STILL OR MOVING, IN ONE THIRD HASH
-                // (MIRROR-LAMPSIG-1). The two hashes above are POLICY keys —
-                // one arms the settle, the other the mover cadence — and the
-                // split is the whole of decision O2. This one is a FACT: did
-                // any light in this scene move? It is the only thing that can
-                // tell the renderer so, because a document node's transform is
-                // written into the scene graph the renderer itself owns and
-                // never travels through `Scene`'s interface (Engine.h's
-                // noteLightsMoved says it at length).
-                p << pose;
-            }
-            lightSig = h.h;
-            movableLightSig = m.h;
-            lightPoseSig = p.h;
-        }
-        // THE RENDERER IS TOLD, ON THE FRAME IT HAPPENS. Before the GI push
-        // below, so a re-solve or a light tick issued in this same frame is
-        // already looking at the new serial; and only on a real change, so a
-        // still scene costs one 64-bit compare.
-        if (lightPoseSig != mGiLightPoseSignature) {
-            mGiLightPoseSignature = lightPoseSig;
-            mTarget->noteLightsMoved();
-        }
+        // EVERY LIGHT IS A VOXEL LIGHT (PHOTON_SPEC E2 (4)): any light moving — or appearing, or dying, or changing a
+        // GI parameter — goes stale until a re-injection. WHAT TELLS US IS NAMED NOW (U0 3b): the three scene-wide
+        // light hashes that were folded here every frame are DELETED. A lamp's POSE moving is the frame's change set
+        // (the journal's written nodes: the lamp or an ancestor — takeWriteJournal), and the RENDERER hears it from
+        // the same set at the drain (a light under a moved node bumps its light serial: the re-inject's key — what
+        // noteLightsMoved used to say by hand). A lamp's GI PARAMETERS changing is its own visit (lightGiParamSignature
+        // per light, at the seam). Both arrive as the two owed flags: a STILL lamp arms the settle, a MOVING one
+        // (mMovableLights, decision O2) the cheap re-inject cadence and nothing else. The sky light is neither: it is
+        // the environment's (setEnvironmentLight), and a hide or an intensity drag never arms a re-solve.
         const bool vctLike = gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid;
-        // The raw light term is kept so the post-refresh re-read below can
-        // recombine it with a FRESH geometry term rather than re-hashing an
-        // already-combined value (which would never match the next frame's).
-        const quint64 lightSigRaw = lightSig;
         // ---- THE MOVEMENT TERM (FIX WAVE B3) --------------------------------
         //
         // Second term, same shape and the same debounce as the light's: a
@@ -7571,15 +7557,13 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // geometry gets the treatment lights already had: the cheap paths during
         // the gesture, exactly one full re-solve when it stops.
         //
-        // Folded into the SAME signature rather than given its own gate, so that
-        // moving a light and moving a box during one drag still cost one
-        // re-solve between them rather than two.
-        const auto combine = [&](quint64 light, quint64 geometry) {
-            if (!vctLike) return light;
-            Hasher h; h << light << geometry; return h.h;
+        // The SAME gate as the lamps' rather than one of its own, so that moving a light and moving a box during one
+        // drag still cost one re-solve between them rather than two. Read WITH THE FRAME'S PENDING SET (U0 3b):
+        // this host frame's writes, which the record being built here carries and the engine has not drained.
+        const auto readEngineSignature = [&]() -> quint64 {
+            return vctLike ? mTarget->giGeometrySignature(scene.changes) : 0ull;
         };
-        if (vctLike)
-            lightSig = combine(lightSigRaw, mTarget->giGeometrySignature());
+        const quint64 geomSig = readEngineSignature();
         // The engine's half of the signature is read from DERIVED world AABBs,
         // and those are only correct once something has run updateSceneGraph —
         // which, on the very first sync, is the GI build itself. Reading it
@@ -7588,9 +7572,6 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // re-solve, 15 frames after every arm (caught by gi.coalesce's "20 idle
         // frames cost nothing at all"). So the push adopts the signature AFTER
         // it pushes, exactly as the two refresh branches below already do.
-        const auto readEngineSignature = [&]() {
-            return combine(lightSigRaw, mTarget->giGeometrySignature());
-        };
         // THE MATERIAL TERM (ENGINE_CACHE_POLICY_SPEC P7), kept OUT of the
         // signature above on purpose: a material edit arms the same
         // one-re-solve-on-settle debounce but NOT the cheap light re-inject
@@ -7653,8 +7634,8 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         }
         if (!mGiPushed || gi != mLastGi) {
             mLastGi = gi;
-            mGiLightSignature = readEngineSignature();
-            mGiMovableLightSignature = movableLightSig;
+            mGiGeometrySignature = readEngineSignature();
+            mGiStillLampOwed = mGiMovableLampOwed = false;   // a from-scratch push answers every lamp
             mGiMovableLightsMoving = false;
             mGiMovableSettleOwed = false;
             mGiMaterialSignature = readMaterialSignature();
@@ -7690,7 +7671,8 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
             // NUMBER OF GI RE-SOLVES a function of machine speed, which makes
             // the picture a function of machine speed; a headless test that
             // pumps 15 frames instantly still gets its refresh.
-            const bool sigChanged = lightSig != mGiLightSignature;
+            const bool stillLamp = vctLike && mGiStillLampOwed;
+            const bool sigChanged = (vctLike && geomSig != mGiGeometrySignature) || stillLamp;
             // world.refreshGi() / the panel's Refresh button (P1d): an explicit
             // demand, so it does NOT wait for the stability window.
             const bool explicitRefresh = mSource->giRefreshSerial != mGiRefreshSerialSeen;
@@ -7701,8 +7683,8 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
             // frames and not one re-solve. Like the settle gates, it is only
             // tracked while the budget is live ("GI paused" means the mirror is
             // not following the scene at all).
-            if (movableLightSig != mGiMovableLightSignature && mSource->giUpdateBudget > 0) {
-                mGiMovableLightSignature = movableLightSig;
+            if (vctLike && mGiMovableLampOwed && mSource->giUpdateBudget > 0) {
+                mGiMovableLampOwed = false;
                 mGiMovableLightsMoving = true;
             }
             const bool matChanged = matSig != mGiMaterialSignature;
@@ -7726,8 +7708,13 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
             // Anything else that moved in the same frame keeps changing it and
             // re-arms on the next one, so nothing real is swallowed for longer
             // than one frame.
+            // (Adopting = the geometry term taken and the still lamps answered; both only while the budget is live.)
+            const auto adoptGeometryAndLamps = [&]() {
+                mGiGeometrySignature = geomSig;
+                mGiStillLampOwed = false;
+            };
             if (sigChanged && mMobilityChanged) {
-                if (mSource->giUpdateBudget > 0) mGiLightSignature = lightSig;
+                if (mSource->giUpdateBudget > 0) adoptGeometryAndLamps();
             } else if (sigChanged) {
                 if (mSource->giUpdateBudget > 0) {
                     // The remembered signature is only advanced while the budget
@@ -7735,7 +7722,7 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
                     // Refresh was ON: with GI paused the mirror is not tracking
                     // the scene at all, so un-pausing must notice the moves that
                     // happened meanwhile rather than adopting them silently.
-                    mGiLightSignature = lightSig;
+                    adoptGeometryAndLamps();
                     // The gate measures STABILITY, so it restarts on every
                     // change: a drag that keeps changing the signature never
                     // satisfies it, which is the whole point.
@@ -7752,7 +7739,8 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
             // keeps one gesture costing ONE re-solve (the re-solve itself brings
             // the derived world boxes current).
             const auto adoptSignature = [&]() {
-                if (vctLike) mGiLightSignature = readEngineSignature();
+                if (vctLike) mGiGeometrySignature = readEngineSignature();
+                mGiStillLampOwed = false;
                 mGiMaterialSignature = readMaterialSignature();
                 mGiPendingInject = false;
                 // A full re-solve IS the rest frame, at the full bounce count:
@@ -7774,11 +7762,8 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
                 // looking at, and which of the two a screenshot caught depended
                 // on the frame it landed on.
                 //
-                // The signature is ADOPTED rather than the flag simply cleared,
-                // for the reason the light signature above is: the lamp really
-                // did move, and forgetting that would make the NEXT frame raise
-                // the flag again from the same move.
-                mGiMovableLightSignature = movableLightSig;
+                // The owed move is ANSWERED, not merely forgotten: the re-solve has injected the lamp where it is.
+                mGiMovableLampOwed = false;
                 mGiMovableLightsMoving = false;
             };
             if (explicitRefresh) {

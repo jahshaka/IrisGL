@@ -767,15 +767,8 @@ void frameCloseStep(std::string &sink, Step &&step) {
 }
 }   // namespace
 
-const std::atomic<unsigned long long> *gTransformWriteCounter = nullptr;
-
-void OgreEngine::setTransformWriteCounter(const std::atomic<unsigned long long> *counter) {
-    // PROCESS-WIDE, like the counter it names: one document graph feeds every
-    // scene in the process, and a second host handing over the same address
-    // changes nothing. Null clears it and every scene goes back to scanning
-    // every frame — which is correct, not a failure mode.
-    detail::gTransformWriteCounter = counter;
-}
+namespace { const std::atomic<unsigned long long> gNoHostCounter{0}; }
+const std::atomic<unsigned long long> *gTransformWriteCounter = &gNoHostCounter;   // EnginePrivate.h says why
 
 namespace {
 /// The compute dispatches deferred before this frame began (AsyncHoldListener's hole test).
@@ -2392,14 +2385,21 @@ void OgreEngine::submitFrame(const FrameInput &in) {
     if (in.frameDelta) p.frameDelta = in.frameDelta;
     if (in.cause) p.cause = in.cause;
     if (in.pace) p.pace = in.pace;
-    if (in.transformEpoch) p.transformEpoch = in.transformEpoch;
     if (in.gesture) p.gesture = in.gesture;
     if (in.shadowMapBudget) p.shadowMapBudget = in.shadowMapBudget;
     p.refreshShadows = p.refreshShadows || in.refreshShadows;
     for (const FrameInputScene &sc : in.scenes) {
+        // A SUBMITTED SET STALES THE SCENE'S CACHED GEOMETRY SIGNATURE AT ONCE (U0 3b): a host that reads it again
+        // before the drain (a second sync in the same host frame) must see these writes too — the read's own
+        // `pending` argument only carries the set it is building.
+        if (!sc.changes.empty())
+            for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == sc.scene) { q->noteSubmittedChanges(); break; }
         auto it = std::find_if(p.scenes.begin(), p.scenes.end(),
                                [&](const FrameInputScene &q) { return q.scene == sc.scene; });
         if (it == p.scenes.end()) { p.scenes.push_back(sc); continue; }
+        // THE CHANGE SET APPENDS (events, not values): both submits' writes are this frame's.
+        it->changes.complete = it->changes.complete && sc.changes.complete;
+        it->changes.moved.insert(it->changes.moved.end(), sc.changes.moved.begin(), sc.changes.moved.end());
         // A scene's part is REPLACED by the newest, FIELD BY FIELD: every field the newer record carries wins, and
         // one it does not carry keeps the older record's value (a sparser second sync never drops the first's).
         if (sc.shadows) it->shadows = sc.shadows;
@@ -2453,6 +2453,8 @@ void OgreEngine::drainFrameInput() {
     ++mFrameInputStatus.drained;
     mFrameInputStatus.fieldsApplied = 0;
     mFrameInputStatus.viewFieldsApplied = 0;
+    mFrameInputStatus.changesMoved = 0;
+    mFrameInputStatus.changesLights = 0;
     if (!mFrameInputPending) { ++mFrameInputStatus.drainedEmpty; return; }
     FrameInput in = std::move(mPendingFrameInput);
     mPendingFrameInput = FrameInput();
@@ -2464,11 +2466,6 @@ void OgreEngine::drainFrameInput() {
     if (in.frameDelta && *in.frameDelta != fixedFrameDelta()) { applyFrameDelta(*in.frameDelta); ++applied; }
     if (in.cause) mNextFrameCause = *in.cause;
     if (in.pace) mNextFramePace = *in.pace;
-    if (in.transformEpoch) {
-        mDrainedTransformEpoch = *in.transformEpoch;
-        mDrainedTransformEpochValid = true;
-        mFrameInputStatus.transformEpoch = *in.transformEpoch;
-    }
     if (in.gesture) { mDrainedGesture = *in.gesture; mFrameInputStatus.gestureActive = in.gesture->active; }
 
     // EACH SCENE'S ENVIRONMENT, in the order the host used to push it.
@@ -2476,6 +2473,10 @@ void OgreEngine::drainFrameInput() {
         OgreScene *sc = nullptr;
         for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
         if (!sc) continue;   // destroyed before its frame
+        // THE CHANGE SET FIRST (U0 3b): what the document wrote, before anything of the frame reads a box.
+        mFrameInputStatus.changesMoved += unsigned(part.changes.moved.size());
+        if (!part.changes.complete) ++mFrameInputStatus.changesIncomplete;
+        mFrameInputStatus.changesLights += sc->applyChangeSet(part.changes);
         FrameInputScene &last = sc->mFrameApplied;
         if (part.reassert) {
             const std::optional<GiParams> gi = last.gi;   // GI is never re-pushed (P10)

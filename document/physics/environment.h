@@ -174,9 +174,6 @@ public:
 	/// journal's nodes, or all of them when the journal was incomplete) — the
 	/// suite's count of what a write elsewhere costs.
 	int lastWriteBackRechecks() const { return lastRechecks; }
-	/// The write journal's generation right after the document step closed it
-	/// (Scene::advance) — the "was it this world that closed it last?" test.
-	void noteWriteJournalClosed() { journalGenerationSeen = graph::writeJournalGeneration(); }
 
 	void restoreNodeTransformations(iris::SceneNodePtr rootNode);
 	void restoreNodeTransformationsRecursive(const iris::SceneNodePtr &node);
@@ -225,7 +222,10 @@ private:
 	bool writeBackValid = false;           ///< false until a write-back ran over every body
 	int lastWrites = 0;
 	int lastRechecks = 0;
-	unsigned long long journalGenerationSeen = 0;
+	/// THIS WORLD'S CURSOR ON THE WRITE JOURNAL (graph::WriteJournalReader): the writes since its own last
+	/// write-back — taken before step 1, skipped past right after the write-back (its own writes are bodies it
+	/// just wrote). Its own cursor, so a mirror's emit draining the same journal never costs it its re-check.
+	graph::WriteJournalReader writeJournal;
 	void noteActiveBodies();
 	void indexBody(btRigidBody *body, const iris::SceneNodePtr &node);
 	void unindexBody(const btRigidBody *body);

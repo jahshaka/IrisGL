@@ -3227,8 +3227,7 @@ void OgreScene::updateForwardPlusRanges(const Ogre::Camera *cam) {
         // drawn item, and a still scene's answer cannot have changed. Only the
         // CAMERA half below is recomputed on every tick.
         const unsigned long long epoch = transformEpoch();
-        if (!detail::gTransformWriteCounter || !mFwdPlusBoundsValid ||
-            mFwdPlusBoundsEpoch != epoch) {
+        if (!mFwdPlusBoundsValid || mFwdPlusBoundsEpoch != epoch) {
             Ogre::Vector3 bmn(1e30f), bmx(-1e30f);
             size_t found = 0;
             for (auto &kv : mNodes) {
@@ -3462,6 +3461,7 @@ void OgreScene::runItemWalk(bool shadow) {
         // frame is a FRESH slot assignment, which renders every map anyway.
         mShadowScanPrimed = false;
         mShadowVanished.clear();
+        mScanPendingShadow.clear();      // the next primed walk is a full one (firstShadow)
     }
     if (!shadow) return;
     // THE STILL-FRAME GATE (ENGINE-4 F5), the caster half's version of
@@ -3476,8 +3476,8 @@ void OgreScene::runItemWalk(bool shadow) {
     // walk is O(1) instead of O(items).
     //
     // TWO THINGS THE GATE MUST NOT SKIP, and neither is a transform:
-    //   * a caster whose Item DIED (mShadowVanished) — unindexItemNode notes a
-    //     scene transform write, so the epoch moves and the walk runs;
+    //   * a caster whose Item DIED (mShadowVanished) — unindexItemNode NAMES
+    //     the node (noteSceneTransformWrite(n)), so the walk runs;
     //   * a caster whose material moves VERTICES every frame off the shader
     //     clock (a vertex-stage generated piece). Its lamps must re-render
     //     every frame, so it must be re-flagged every frame.
@@ -3490,8 +3490,11 @@ void OgreScene::runItemWalk(bool shadow) {
     // deforming casters (mShadowDeformers, by node id — see its note for why it
     // cannot go stale while the gate holds), and a still frame re-flags those
     // nodes and nothing else.
-    const unsigned long long epoch = shadowEpoch();
-    if (mShadowScanPrimed && mShadowWalkEpochValid && epoch == mShadowWalkEpoch) {
+    //
+    // THE GATE IS THE CHANGE SET (U0 3b): what the drained ChangeSet and the seams NAMED since the last walk (each
+    // item re-read, nothing else), a full pass only where a nodeless input owes one (noteShadowScanInput, a nodeless
+    // write, an incomplete set) — and with nothing named, nothing.
+    if (mShadowScanPrimed && !mScanFullShadow && mScanPendingShadow.empty()) {
         // The changes are per frame by contract (walkItems clears them at its
         // head), and "the walk ran and found nothing" is what the consumer
         // must see — collectShadowCacheFrame walks for itself when the frame's
@@ -3511,10 +3514,9 @@ void OgreScene::runItemWalk(bool shadow) {
         mCasterWalkMicros = 0.0;
         return;
     }
-    mShadowWalkEpoch = epoch;
-    mShadowWalkEpochValid = detail::gTransformWriteCounter != nullptr;
     const auto t0 = std::chrono::steady_clock::now();
-    walkItems(false, true, false);
+    if (!mShadowScanPrimed || mScanFullShadow) walkItems(false, true, false);
+    else walkItems(false, true, false, &takeScanSubset(mScanPendingShadow));
     mShadowWalked = true;
     mCasterWalkMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
 }
@@ -3538,8 +3540,10 @@ void OgreScene::ensureGiWalk() {
     // re-classified all call staleProbeGrid at their own seam (OgreScene.cpp,
     // OgreMaterials.cpp). The scan's unique job is movement, and movement is
     // exactly what the epoch reports.
-    const unsigned long long epoch = transformEpoch();
-    if (mGiScannedOnce && mGiWalkEpochValid && epoch == mGiWalkEpoch) {
+    //
+    // THE GATE IS THE CHANGE SET (U0 3b), as the caster walk's: the items named since the last scan are re-read and
+    // nothing else; nothing named, nothing read (giScanMicros 0).
+    if (mGiScannedOnce && !mScanFullGi && mScanPendingGi.empty()) {
         // The boxes are per frame by contract (walkItems clears them at its
         // head), so a skipped frame must publish "nothing moved" rather than
         // last frame's movers — otherwise a single move would stale the grid
@@ -3551,33 +3555,98 @@ void OgreScene::ensureGiWalk() {
         mGiScanMicros = 0.0;
         return;
     }
-    mGiWalkEpoch = epoch;
-    mGiWalkEpochValid = detail::gTransformWriteCounter != nullptr;
     ++mGiScans;
     const auto t0 = std::chrono::steady_clock::now();
-    walkItems(true, false, true);
+    if (!mGiScannedOnce || mScanFullGi) walkItems(true, false, true);
+    else walkItems(true, false, true, &takeScanSubset(mScanPendingGi));
     mGiScanMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
 }
 
-/// THE MOVEMENT EPOCH: the host's process-wide transform-write counter (the
-/// document writes into the shared scene graph without telling the engine) plus
-/// the writes the ENGINE itself makes to nodes of this scene — Scene::
-/// setNodeTransform, a socket rider's per-frame placement, a decal's projector
-/// box. Both halves are counts of WRITES, so writing the same value again reads
-/// as movement and costs one extra scan; that is the safe direction.
-unsigned long long OgreScene::transformEpoch() const {
-    // (U0 3a carries the counter's value in FrameInput::transformEpoch and the drain keeps it — status only for now:
-    // the mirror's GI debounce reads this BETWEEN frames, and a value one drain behind would move its settle by a
-    // frame. The pointer, its verb and this live read go in 3b, with the debounce's readers.)
-    const unsigned long long host =
-        detail::gTransformWriteCounter
-            ? detail::gTransformWriteCounter->load(std::memory_order_relaxed)
-            : 0ull;
-    return host + mSceneTransformWrites;
+/// THE CHANGE SET'S ENGINE HALF (U0 3b; EnginePrivate.h). A pending list is bounded by the scene it names: a scene
+/// whose scans never run (GI off, no cached lamp) keeps a full pass owed instead of an ever-growing list.
+namespace { constexpr size_t kScanPendingSlack = 64; }
+
+void OgreScene::noteSceneTransformWrite(const Node &n) {
+    ++mSceneTransformWrites;
+    const size_t cap = mItemNodes.size() + mDecalNodes.size() + kScanPendingSlack;
+    if (!mScanFullGi) {
+        if (mScanPendingGi.size() >= cap) { mScanPendingGi.clear(); mScanFullGi = true; }
+        else mScanPendingGi.push_back(n.selfId);
+    }
+    if (!mScanFullShadow) {
+        if (mScanPendingShadow.size() >= cap) { mScanPendingShadow.clear(); mScanFullShadow = true; }
+        else mScanPendingShadow.push_back(n.selfId);
+    }
+}
+
+/// THE DRAIN'S HALF: each moved node's SUBTREE — its Ogre children, registered or not (a light's -Y adapter), and the
+/// riders hanging off its bones (a TagPoint is a bone's child, not the node's) — named for both scans, once per frame;
+/// a light anywhere under them bumps the light serial ONCE (the re-inject's key: injectedAtLightSerial). An incomplete
+/// set owes the full pass and, when the scene has a light, the serial (it cannot say which moved).
+unsigned OgreScene::applyChangeSet(const ChangeSet &cs, bool drained) {
+    if (!cs.complete) {
+        ++mHostMoves;
+        mScanFullGi = mScanFullShadow = true;
+        mScanPendingGi.clear(); mScanPendingShadow.clear();
+        for (const auto &kv : mNodes)
+            if (kv.second.light) { ++mGiLightWriteSerial; return 1u; }
+        return 0u;
+    }
+    if (cs.moved.empty()) return 0u;
+    // A geometry signature still valid here read these writes already (noteSubmittedChanges): when nothing else was
+    // written since it was computed, the drain re-keys it to the epoch this drain leaves.
+    // (An engine write through this path is no drain: it moved boxes nobody has read yet.)
+    const bool rekey = drained && mGeomSigValid && mGeomSigEpoch == transformEpoch();
+    bool light = false;
+    std::vector<Ogre::Node *> stack;
+    for (NodeId id : cs.moved) {
+        auto it = mNodes.find(id);
+        if (it == mNodes.end() || !it->second.node) continue;   // released since the emit
+        ++mHostMoves;
+        stack.push_back(it->second.node);
+    }
+    // Each Ogre node ONCE: a moved parent and its moved child must not walk the child's subtree twice (a whole
+    // document written at once — a load, a paste — is O(nodes), never O(nodes x depth)).
+    std::unordered_set<const Ogre::Node *> seen;
+    while (!stack.empty()) {
+        Ogre::Node *on = stack.back();
+        stack.pop_back();
+        if (!seen.insert(on).second) continue;
+        if (Node *rec = registryNode(on)) {
+            if (rec->item || rec->decal) noteSceneTransformWrite(*rec);
+            if (rec->light) light = true;
+            for (NodeId rider : rec->boneRiders) {
+                auto rit = mNodes.find(rider);
+                if (rit != mNodes.end() && rit->second.node) stack.push_back(rit->second.node);
+            }
+        }
+        for (size_t i = 0, e = on->numChildren(); i < e; ++i) stack.push_back(on->getChild(i));
+    }
+    if (light) ++mGiLightWriteSerial;
+    if (rekey) mGeomSigEpoch = transformEpoch();
+    return light ? 1u : 0u;
+}
+
+/// The pending list as the walk's item subset: each named node once, those that still carry an Item. The list is
+/// TAKEN (cleared) first, so a seam the walk itself fires (a drag promotion's flag write) names its node for the
+/// next frame's walk rather than this one's.
+std::vector<OgreScene::Node *> &OgreScene::takeScanSubset(std::vector<NodeId> &pending) {
+    mScanTake.swap(pending);
+    pending.clear();
+    std::sort(mScanTake.begin(), mScanTake.end());
+    mScanTake.erase(std::unique(mScanTake.begin(), mScanTake.end()), mScanTake.end());
+    mScanSubset.clear();
+    for (NodeId id : mScanTake) {
+        auto it = mNodes.find(id);
+        if (it != mNodes.end() && it->second.item && it->second.itemSlot != size_t(-1))
+            mScanSubset.push_back(&it->second);
+    }
+    mScanTake.clear();
+    return mScanSubset;
 }
 
 void OgreScene::indexItemNode(Node &n) {
-    noteSceneTransformWrite();      // an Item arriving is an input to every scan
+    noteSceneTransformWrite(n);     // an Item arriving is an input to every scan (named: its item is re-read)
     if (n.itemSlot != size_t(-1)) return;
     n.itemSlot = mItemNodes.size();
     mItemNodes.push_back(&n);
@@ -3603,7 +3672,7 @@ void OgreScene::unindexDecalNode(Node &n) {
 }
 
 void OgreScene::unindexItemNode(Node &n) {
-    noteSceneTransformWrite();      // ...and so is one leaving
+    noteSceneTransformWrite(n);     // ...and so is one leaving (the walk runs and reports the departure)
     // A CASTER LEAVING: its last box is what the lamps around it must re-render
     // without it (the scan never sees a node that has no Item).
     if (n.scan.shadowPresent && mShadowScanPrimed)
@@ -3666,8 +3735,14 @@ void OgreScene::unindexItemNode(Node &n) {
 // around it must re-render (old and new for a move, the new one for an arrival
 // or a shape/pose change, the old one for a departure), with the channels the
 // caster renders into.
-void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
+void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<Node *> *subset) {
     if (!gi && !shadow) return;
+    // A FULL WALK answers for everything named so far (U0 3b): its halves' pending lists go, BEFORE the loop, so a
+    // seam the walk itself fires names its node for the next walk. A SUBSET walk's caller took its list already.
+    if (!subset) {
+        if (gi)     { mScanPendingGi.clear();     mScanFullGi = false; }
+        if (shadow) { mScanPendingShadow.clear(); mScanFullShadow = false; }
+    }
     bool firstGi = false;
     if (gi) {
         mGiMovedBoxes.clear();
@@ -3698,9 +3773,28 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
         // The per-item gate's roster, rebuilt by this walk (ON-16): which
         // CASTERS deform, not which materials do. Cleared here and refilled
         // below, so it describes exactly the state this walk saw.
-        mShadowDeformers.clear();
+        //
+        // A SUBSET walk keeps the roster's other members (the walk does not visit them) and re-flags them exactly as
+        // the still-frame gate does — their vertices moved without a write — then drops the visited ones, whose
+        // membership the loop below decides afresh.
+        if (!subset) {
+            mShadowDeformers.clear();
+        } else if (!mShadowDeformers.empty()) {
+            std::vector<NodeId> &keep = mScanTake;
+            keep.clear();
+            for (NodeId id : mShadowDeformers) {
+                auto it = mNodes.find(id);
+                if (it == mNodes.end()) continue;
+                if (std::find(subset->begin(), subset->end(), &it->second) != subset->end()) continue;
+                const Node::ScanRec &r = it->second.scan;
+                if (r.shadowPresent) mShadowChanges.push_back({ r.shadowBox, r.shadowChannels });
+                keep.push_back(id);
+            }
+            mShadowDeformers.swap(keep);
+            keep.clear();
+        }
     }
-    for (Node *np : mItemNodes) {
+    for (Node *np : subset ? *subset : mItemNodes) {
         Node &n = *np;
         Ogre::Item *item = n.item;
         if (!item) continue;
@@ -4158,21 +4252,19 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
 // spent one spurious re-solve immediately after arming (caught by gi.coalesce's
 // "20 idle frames cost nothing at all"). An item's own size is a property of the
 // item, so the hash of a still scene is still whatever the volume does.
-unsigned long long OgreScene::giGeometrySignature() const {
+unsigned long long OgreScene::giGeometrySignature(const ChangeSet &pending) const {
     // NOT GATED ON THE MODE (U0 3a): the mirror reads it while it builds a frame's input, i.e. BEFORE the drain
     // applies that frame's GI mode — on the frame GI turns on it would read 0 and its debounce would see a change
     // one frame later. The signature is the GI items' geometry, whatever the mode; the caller combines it only
     // when its own mode needs it.
-    // CACHED AGAINST THE MOVEMENT EPOCH: the mirror reads it once a frame and it
-    // is a pure function of the GI items' boxes (clean-2 lane, 2026-09-13).
-    // ONLY WHERE THE EPOCH CAN SEE THE HOST'S WRITES. Without a counter from the
-    // host (Engine::setTransformWriteCounter) a document-side move moves nothing
-    // the engine can read, so the cache would answer with a signature from before
-    // the drag (caught by gi.coalesce and gi.budget). No epoch, no skipping.
+    // CACHED AGAINST WHAT HAS BEEN WRITTEN (U0 3b): the drained moves and this scene's own named writes (the
+    // epoch), and the caller's PENDING set — this host frame's writes, which the engine has not drained yet (the
+    // mirror reads this while it builds the very record that will carry them). Nothing in either: the boxes cannot
+    // have moved since the last read and the cache answers.
     const unsigned long long epoch = transformEpoch();
-    if (detail::gTransformWriteCounter &&
-        mGeomSigValid && mGeomSigEpoch == epoch && mGeomSigMode == mGi.mode) return mGeomSig;
+    if (pending.empty() && mGeomSigValid && mGeomSigEpoch == epoch && mGeomSigMode == mGi.mode) return mGeomSig;
     computeGiGeometrySignature();
+    mGeomSigCovers = !pending.empty();
     return mGeomSig;
 }
 

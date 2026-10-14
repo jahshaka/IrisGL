@@ -545,16 +545,15 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 
 	// SOMETHING ELSE MOVED since the last write-back (or this world has bodies
 	// no write-back has seen)? Then the sleeping bodies a write can have moved
-	// are re-checked: those at or under a node in the WRITE JOURNAL
-	// (graph::writeJournal — every write since the document step last closed
-	// it). Only when the journal was closed by someone else since this world's
-	// last look (its generation moved) does the re-check fall back to every body.
+	// are re-checked: those at or under a node in the WRITE JOURNAL (this
+	// world's own cursor on it, graph::WriteJournalReader — every write since its
+	// last write-back). Only when the take is incomplete (the world's first, a
+	// write the journal cannot name, a cursor the log's cap overtook) does the
+	// re-check fall back to every body.
 	// Read BEFORE step 1, whose own writes are bodies this pass writes anyway.
 	const bool recheck = !writeBackValid || graph::transformWrites() != writesAfterWriteBack;
 	std::vector<graph::NodeHandle> written;
-	const bool journalComplete = recheck && writeBackValid &&
-	                             graph::writeJournalGeneration() == journalGenerationSeen &&
-	                             graph::writeJournal(written);
+	const bool journalComplete = recheck && writeBackValid && writeJournal.take(written);
 	lastRechecks = 0;
 
 	// 1. The bodies Bullet moved this frame (top-level and plain-parented).
@@ -606,6 +605,8 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 	}
 	movedBodies.clear();
 	writesAfterWriteBack = graph::transformWrites();
+	// THIS WORLD'S CLOSE (it was the document step's, for every reader at once): its own writes above are past.
+	writeJournal.skip();
 	writeBackValid = true;
 }
 

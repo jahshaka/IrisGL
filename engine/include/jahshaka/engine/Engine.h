@@ -15,7 +15,7 @@
 // ERRORS: no backend exception ever escapes this boundary. A failing call returns
 // null/false and the reason is available from Engine::lastError() until the next
 // failing call overwrites it.
-#include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -777,34 +777,10 @@ public:
     /// KEPT as the explicit counterpart of setLight: a node may stop being a light
     /// without being removed (the document changes a node's type in place).
     virtual bool        removeLight(NodeId) = 0;
-    /// A LIGHT MOVED AND ONLY THE HOST CAN KNOW IT (MIRROR-LAMPSIG-1).
-    ///
-    /// The renderer's voxel light injection reads each light's DERIVED pose at
-    /// the moment it runs, and two of its optimisations are keyed on "have the
-    /// lights changed since the injection I am about to trust?" — the in-motion
-    /// light tick, which skips a cascade a rebuild already injected with the
-    /// same lights, and the incremental settle, which restarts when a light
-    /// moves under it. Both read `lightWriteSerial()`.
-    ///
-    /// That serial can see `setLight` and a transform written THROUGH this
-    /// interface. It cannot see the case that matters most: since the scene
-    /// graph adoption the DOCUMENT's nodes ARE the renderer's nodes
-    /// (SPECS/SCENEGRAPH_SPEC.md D2), so a lamp that moves — dragged, carried
-    /// by a parent, driven by an animation — writes its transform straight into
-    /// the scene graph and this interface is never called at all: the light's
-    /// description did not change, so nothing is pushed, and the renderer's own
-    /// pose is correct while its serial stands still. The injection is then
-    /// skipped, or absorbed by a settle that believes it is finished, and the
-    /// bounce keeps the pose the lamp had at the last rebuild.
-    ///
-    /// So the mirror — the one thing that can see a document pose and a
-    /// renderer at the same time — says it. Idempotent and cheap (one counter);
-    /// call it on any frame in which any light's WORLD transform changed. A
-    /// spurious call costs one extra cascade injection on the next light tick;
-    /// a missing one costs a stale bounce for the length of a gesture.
-    virtual void        noteLightsMoved() = 0;
-    /// The counter `noteLightsMoved` (and every light write through this
-    /// interface) advances: monotonic, only ever compared for equality.
+    /// THE LIGHT SERIAL: every light write through this interface advances it, and so does a frame whose ChangeSet
+    /// moved a light (U0 3b — a lamp dragged, carried by a parent or animated writes no light verb at all; the
+    /// mirror's set names the written node and the drain finds the light under it). Monotonic, only ever compared
+    /// for equality; what the voxel light injection keys "have the lights changed since I injected?" on.
     /// DIAGNOSTIC — the suites assert that a lamp that moved advanced it.
     virtual unsigned long long lightWriteSerial() const = 0;
 
@@ -1130,7 +1106,11 @@ public:
     /// free of side effects. Zero only when GI is off.
     ///
     /// Cheap: one world-AABB read per GI item, no allocation, renders nothing.
-    virtual unsigned long long giGeometrySignature() const = 0;
+    ///
+    /// `pending` (U0 3b) is the change set the caller is about to submit and the engine has not drained yet — the
+    /// writes of THIS host frame. The signature is cached against what the engine has drained; a pending set with
+    /// anything in it re-reads the boxes now, so the answer is this frame's (never one record behind).
+    virtual unsigned long long giGeometrySignature(const ChangeSet &pending) const = 0;
     /// "Has a material GI converted changed?" (ENGINE_CACHE_POLICY_SPEC P7) — a
     /// generation that moves when a parameter the voxelizer (or Instant
     /// Radiosity's trace) reads — albedo, emissive, alpha, workflow, the albedo
@@ -2047,29 +2027,6 @@ public:
     /// tree does it; a host that does may treat the Scene as gone the moment it
     /// has asked, which is why the call is honoured late rather than refused.
     virtual void   destroyScene(Scene *) = 0;
-
-    /// THE HOST'S TRANSFORM-WRITE EPOCH — how the renderer learns that nothing
-    /// moved (clean-2 lane, 2026-09-13).
-    ///
-    /// The document owns the scene graph and writes transforms into it
-    /// directly, so a dragged mesh reaches the engine through no call at all.
-    /// The renderer's only answer was to LOOK: `OgreScene`'s GI movement scan
-    /// reads every item's updated world AABB once a frame in any probe-lit
-    /// scene — 0.4 / 2.0 / 4.3 ms at 1k / 5k / 10k nodes, still or not.
-    ///
-    /// Hand it the address of a counter the host bumps on every transform
-    /// write (`iris::graph::transformWriteCounter()`) and the scan runs only on
-    /// frames where SOMETHING was written: a still scene pays one relaxed
-    /// atomic load. The engine's OWN writes (`Scene::setNodeTransform`, socket
-    /// riders) are counted internally and need no help from the host.
-    ///
-    /// RELAXED BY DESIGN: a count of writes, not of moves, process-wide rather
-    /// than per scene. Every one of those errs towards scanning when nothing
-    /// moved, which costs what the unconditional scan cost. The pointer must
-    /// outlive the engine (a process-lifetime counter); null (the default)
-    /// means "no epoch available" and every frame scans, which is why a host
-    /// that never calls this is simply as slow as before.
-    virtual void setTransformWriteCounter(const std::atomic<unsigned long long> *counter) = 0;
 
     /// Draws every enabled View once. The host owns the loop and calls this.
     ///

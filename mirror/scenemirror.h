@@ -31,6 +31,7 @@
 #include <vector>
 #include "irisgl/irisglfwd.h"
 #include "irisgl/document/animation/clipextractor.h"
+#include "irisgl/document/scenegraph/nodegraph.h"
 #include "irisgl/document/scenegraph/socket.h"
 #include "jahshaka/engine/Engine.h"
 
@@ -966,12 +967,11 @@ private:
         /// free), so putting it back must not pay a from-scratch rebuild
         /// either.
         bool movableSoft = false;
-        // SOFT PROMOTION (§3.3.3, owner decision O3). The pose this node was
-        // last seen at while playing, and whether the author has already been
-        // told about it. `posed` is false until the first play frame sees it —
-        // a node has to be seen standing still before it can be seen moving.
+        // SOFT PROMOTION (§3.3.3, owner decision O3): whether the author has already been told about it. (The pose
+        // this node was last seen at while playing — the mirror's own movement detector — is GONE with U0 3b: a node
+        // WRITTEN while playing is in the frame's change set, which is what syncMobility reads.)
         //
-        // THESE TWO LATCHES ARE PER MIRROR, the flag they set is per DOCUMENT
+        // THIS LATCH IS PER MIRROR, the flag they set is per DOCUMENT
         // (SceneNode::_setSoftMovable). One scene drawn by TWO mirrors — the
         // editor and the player viewport both syncing the same document, which
         // nothing does today because the visible page owns the graph (see
@@ -980,10 +980,12 @@ private:
         // is idempotent and the document clears it). If a second simultaneous
         // mirror ever becomes real, the warn latch belongs on the node beside
         // the flag, not here.
-        iris::Vec3 playPos, playScale;
-        iris::Quat playRot;
-        bool posed = false;
         bool mobilityWarned = false;
+        /// A LIGHT'S GI PARAMETERS as last seen by a visit (lightGiParamSignature) — the per-light change key the
+        /// scene-wide light hashes were folded from. Compared at the light's own visit (a change seam), never per
+        /// frame; a change is a still- or movable-lamp event for the GI debounce (U0 3b).
+        quint64 giLightParams = 0;
+        bool    giLightParamsKnown = false;
         // (hasBillboards/billboardSignature lived here and had no reader or
         // writer anywhere in the tree — deleted with the deep-audit fix wave.)
         // Particles (PARTICLES_FX2_SPEC): the engine simulates, so the mirror
@@ -2021,14 +2023,26 @@ private:
     /// for the settle without it).
     quint64 mGiMaterialSignature = 0;
     bool     mGiPendingInject = false;
-    /// The GI-driving light transform(s), as a CHANGE KEY rather than a
-    /// matrix — see the signature's derivation in buildEnvironment (audit F8).
-    quint64 mGiLightSignature = 0;
-    /// buildEnvironment's ancestor-signature scratch: the lights of a scene
-    /// share their parent chains, so the chain above each distinct parent is
-    /// walked once per call instead of once per light. A member for its
-    /// capacity only; it is cleared at the top of every use.
-    std::vector<std::pair<iris::graph::NodeHandle, quint64>> mGiChainMemo;
+    /// The engine's GI GEOMETRY signature as last adopted (Scene::giGeometrySignature, read with the frame's pending
+    /// change set). The three LIGHT HASHES that stood beside it (still lamps, moving lamps, every lamp's pose) are
+    /// DELETED (U0 3b): what they detected is now named — a lamp's pose by the change set (the journal's written
+    /// nodes, an ancestor of the lamp among them), its parameters by its own visit — and arrives as the two owed
+    /// flags below, which stay set until the debounce has answered them (a paused budget keeps them).
+    quint64 mGiGeometrySignature = 0;
+    bool    mGiStillLampOwed = false;     ///< a still lamp moved, changed, arrived or left: arms the settle
+    bool    mGiMovableLampOwed = false;   ///< a moving lamp did: arms the cheap re-inject cadence only (O2)
+
+    // ---- THE CHANGE SET (ENGINE-UPGRADE-1 U0 3b) ----------------------------
+    /// This mirror's own cursor on the document's write journal (nodegraph.h): taken before the walk (the soft
+    /// promotion reads it) and again at the emit (the sync's own writes), so the record carries every write.
+    iris::graph::WriteJournalReader mJournal;
+    std::vector<iris::graph::NodeHandle> mJournalScratch;
+    /// The DOCUMENT nodes written since the last emit, by node (the soft promotion's question), and the record's set.
+    QSet<const iris::SceneNode *> mWrittenThisSync;
+    jahshaka::engine::ChangeSet mFrameChanges;
+    /// Drain the journal into the two above and the lamp flags (twice a sync: before the walk, at the emit).
+    void takeWriteJournal();
+    void noteWrittenNode(iris::SceneNode *node);
     // Diagnostics behind giPushCount() / giRefreshCount(); never read by the
     // mirror itself, and NOT reset by invalidateEnvironment (a re-take of the
     // screen is a real push, and the gate counts real pushes).
@@ -2210,26 +2224,10 @@ private:
     /// a still frame recomputes none of them.
     quint32 mRefractiveEntries = 0;
     quint32 mDistortionEntries = 0;
-    /// The moving lamps' own change key, kept OUT of mGiLightSignature: a lamp
-    /// that moves must re-inject its light into the voxels (owner decision O2)
-    /// and must NOT arm the settle, or an animated torch would hold the
-    /// stability window open for ever and pay a full re-solve every time it
-    /// paused. `mGiMovableLightsMoving` is what carries the cadence when no
-    /// settle is pending at all.
-    quint64 mGiMovableLightSignature = 0;
+    /// A moving lamp must re-inject its light into the voxels (owner decision O2) and must NOT arm the settle, or an
+    /// animated torch would hold the stability window open for ever and pay a full re-solve every time it paused.
+    /// `mGiMovableLightsMoving` is what carries the cadence when no settle is pending at all.
     bool    mGiMovableLightsMoving = false;
-    /// EVERY LAMP'S WORLD POSE, IN ONE HASH (MIRROR-LAMPSIG-1) — a FACT, not a
-    /// policy key like the two signatures around it: while the two above decide
-    /// what the mirror does, this one decides only whether the RENDERER is told
-    /// that a light moved (Scene::noteLightsMoved). It has to exist separately
-    /// because the renderer cannot find out for itself: a document node's
-    /// transform is written into the scene graph the renderer owns, so no
-    /// engine verb is called at all when a lamp is dragged, carried by a parent
-    /// or animated — the light's DESCRIPTION is unchanged and the mirror
-    /// rightly pushes nothing. Still lamps are in it beside movable ones: a
-    /// still lamp being dragged is re-injected on the same cheap cadence while
-    /// its settle window is open.
-    quint64 mGiLightPoseSignature = 0;
     /// ...AND THE REST FRAME IT OWES (round-2 review F1). A cadence tick taken
     /// while the lamp was moving injects at ONE bounce and the coarse ray march
     /// (Scene::refreshGiLighting's `inMotion`), which is right while it moves
