@@ -3008,6 +3008,7 @@ bool PhotonComponent::stepStagedGiBuild() {
 }
 
 void PhotonComponent::applyPendingGi() {
+    GiRegion region;   // Photon's compute work is made inside the GI region
     // NOTHING OF THIS WORLD IS ON SCREEN YET: spend nothing at all
     // (Scene::setLoading). The ordinary flush below is gated on the same thing
     // inside `rebuildVct`; this is the staged machine's half.
@@ -3049,6 +3050,7 @@ void PhotonComponent::applyPendingGi() {
 // AsyncHoldListener reads giDeferralPending) and, once the compute permutations in flight have
 // landed, the arm is rebuilt whole.
 void PhotonComponent::applyPendingGiDeferrable() {
+    GiRegion region;   // Photon's compute work is made inside the GI region
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
     if (mGiDeferralRetry && mScene.asyncShaders() && hc) {
@@ -3089,6 +3091,7 @@ void PhotonComponent::giDeferrable(const std::function<void()> &work) {
 
 // The flush proper — what `applyPendingGi` was before the staged machine.
 void PhotonComponent::applyPendingGiFlush() {
+    GiRegion region;   // Photon's compute work is made inside the GI region
     if (!mGiCachesDirty) return;
     mGiCachesDirty = false;
     // A STREAMING FRAME BUILDS THE CHAIN AND PARKS (see rebuildVct's tail).
@@ -3380,6 +3383,7 @@ void PhotonComponent::recordFrame(const FrameWork &w) {
 // THE ENGINE'S PER-FRAME GI STEP (the authoritative view, engine.pre): the readouts that
 // landed (harvest), the frame's decisions (planFrame), its work (recordFrame).
 void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) {
+    GiRegion region;   // Photon's compute work is made inside the GI region
     harvest();     // before any of this frame's GI work is recorded
     recordFrame(planFrame(camPos, driverStereo));
 }

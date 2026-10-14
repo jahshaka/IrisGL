@@ -605,6 +605,18 @@ public:
     /// Called by OgreView each frame with its camera position: the PCC probe
     /// blend tracks the viewer. No-op unless the hybrid mode is live.
     void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo);
+    /// THE GI REGION (ENGINE-UPGRADE-2B stage 3): the one span of the frame Photon's compute
+    /// dispatches are made in — the GI step (harvest -> plan -> record) and the arm build at
+    /// engine.pre, and the cards' photon_update pass. photonDispatch counts a dispatch outside it.
+    /// The ASYNC bracket wraps it. A scope type; nesting counts once.
+    static void beginGiRegion();
+    static void endGiRegion();
+    struct GiRegion {
+        GiRegion() { beginGiRegion(); }
+        ~GiRegion() { endGiRegion(); }
+        GiRegion(const GiRegion &) = delete;
+        GiRegion &operator=(const GiRegion &) = delete;
+    };
     /// THE FRAME'S GI, in three parts (ENGINE-UPGRADE-2B stage 2): harvest the readouts that
     /// landed; plan the frame's work (every decision: the driving profile, the camera, the
     /// walk absorbed and the cascades it marked, the field's batch, the cascade step test and

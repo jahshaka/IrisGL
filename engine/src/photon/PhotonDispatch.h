@@ -1,9 +1,10 @@
-// THE ONE RECORDING ENTRY POINT'S WITNESS (ENGINE-UPGRADE-2B stage 3; photon/PhotonComponent.h).
-// Every Photon GPU dispatch — the voxeliser's AABB and voxelise jobs, the gather's, the light
-// injection, the bounce, the anisotropic mips, the irradiance field's generation and its border
-// mirrors, the voxel material store's conversions — notes itself here; one recorded while no
-// photon_update pass is open is counted OUTSIDE (jahshaka/engine/PhotonStatus.h). The ASYNC
-// bracket wraps photon_update, so outside must be 0.
+// THE GI REGION AND ITS ONE DISPATCH DOOR (ENGINE-UPGRADE-2B stage 3; photon/PhotonComponent.h).
+// Photon's frame GPU work runs in ONE named region: the GI step at engine.pre (harvest -> plan ->
+// record: the cascade update, the field, the injections, the mips, the border mirrors) and the arm
+// build after it, each inside PhotonComponent::GiRegion; the cards' photon_update pass is a region
+// of its own. Every Photon compute dispatch goes through photonDispatch (its barriers, the witness,
+// the dispatch); one made outside every region is counted OUTSIDE (jahshaka/engine/PhotonStatus.h)
+// and logged once. The ASYNC bracket wraps the region.
 #ifndef JAHSHAKA_ENGINE_PHOTONDISPATCH_H
 #define JAHSHAKA_ENGINE_PHOTONDISPATCH_H
 
@@ -18,15 +19,11 @@ namespace engine {
 namespace detail {
 
 void notePhotonDispatch();
-unsigned long long photonDispatchesInPass();
-unsigned long long photonDispatchesOutsidePass();
-/// photon_update's recorder holds one for the length of its work (nesting counts once).
-struct PhotonPassScope {
-    PhotonPassScope();
-    ~PhotonPassScope();
-    PhotonPassScope(const PhotonPassScope &) = delete;
-    PhotonPassScope &operator=(const PhotonPassScope &) = delete;
-};
+unsigned long long photonDispatchesInRegion();
+unsigned long long photonDispatchesOutsideRegion();
+/// The region's open depth (nesting counts once): PhotonComponent::beginGiRegion / endGiRegion.
+void photonRegionBegin();
+void photonRegionEnd();
 
 /// THE ONE DISPATCH DOOR: a Photon compute dispatch with its barriers, noted by the witness.
 void photonDispatch(Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job, Ogre::RenderSystem *rs);

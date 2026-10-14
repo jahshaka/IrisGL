@@ -8,6 +8,7 @@
 #include "jahshaka/engine/PhotonStatus.h"
 
 #include <OgreCamera.h>
+#include <OgreLogManager.h>
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsComputeJob.h>
 #include <OgreHlmsManager.h>
@@ -117,31 +118,41 @@ void PhotonComponent::releaseUpdatePass() {
     }
 }
 
-// THE WITNESS (photon/PhotonDispatch.h): process-wide, render thread only.
+// THE WITNESS AND THE DOOR (photon/PhotonDispatch.h): process-wide, render thread only.
 namespace {
-unsigned gPhotonPassDepth = 0u;
-unsigned long long gPhotonInPass = 0ull, gPhotonOutsidePass = 0ull;
+unsigned gPhotonRegionDepth = 0u;
+unsigned long long gPhotonInRegion = 0ull, gPhotonOutsideRegion = 0ull;
 }   // namespace
-void notePhotonDispatch() { ++(gPhotonPassDepth ? gPhotonInPass : gPhotonOutsidePass); }
-PhotonPassScope::PhotonPassScope() { ++gPhotonPassDepth; }
-PhotonPassScope::~PhotonPassScope() { --gPhotonPassDepth; }
-unsigned long long photonDispatchesInPass() { return gPhotonInPass; }
+void notePhotonDispatch() {
+    if (gPhotonRegionDepth) { ++gPhotonInRegion; return; }
+    if (!gPhotonOutsideRegion++)
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka photon: a Photon compute dispatch OUTSIDE the GI region (PhotonComponent::GiRegion) — "
+            "the ASYNC bracket would miss it; PhotonDispatchStatus::outsideRegion counts every one",
+            Ogre::LML_CRITICAL);
+}
+void photonRegionBegin() { ++gPhotonRegionDepth; }
+void photonRegionEnd() { --gPhotonRegionDepth; }
+unsigned long long photonDispatchesInRegion() { return gPhotonInRegion; }
+unsigned long long photonDispatchesOutsideRegion() { return gPhotonOutsideRegion; }
 
-// ---- THE ONE DISPATCH DOOR (photon/PhotonDispatch.h) -------------------------------------------
 void photonDispatch(Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job, Ogre::RenderSystem *rs) {
     Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
     job->analyzeBarriers(rt);
     rs->executeResourceTransition(rt);
     notePhotonDispatch();
     hc->dispatch(job, 0, 0);
-}unsigned long long photonDispatchesOutsidePass() { return gPhotonOutsidePass; }
+}
+
+void PhotonComponent::beginGiRegion() { photonRegionBegin(); }
+void PhotonComponent::endGiRegion() { photonRegionEnd(); }
 
 bool PhotonComponent::updatePassOwed() const {
     return mSurfaceCache && mSurfaceCache->photonUpdateOwed();
 }
 
 void PhotonComponent::recordUpdatePass() {
-    PhotonPassScope pass;
+    GiRegion region;   // the cards' work: its own span of the region
     if (mSurfaceCache) mSurfaceCache->photonUpdate();
 }
 
@@ -160,8 +171,8 @@ void registerPhotonUpdatePass(AtomPassProvider *provider) {
 
 PhotonDispatchStatus photonDispatchStatus() {
     PhotonDispatchStatus s;
-    s.inPass = detail::photonDispatchesInPass();
-    s.outsidePass = detail::photonDispatchesOutsidePass();
+    s.inRegion = detail::photonDispatchesInRegion();
+    s.outsideRegion = detail::photonDispatchesOutsideRegion();
     return s;
 }
 

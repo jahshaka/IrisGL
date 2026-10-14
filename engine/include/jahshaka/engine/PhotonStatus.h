@@ -1,6 +1,6 @@
-// PHOTON'S DISPATCH COUNT — the test door of ENGINE-UPGRADE-2B stage 3 (one recording entry point:
-// every Photon GPU dispatch records inside the photon_update pass). Counters only, process-wide
-// (the dispatch sites are the voxel classes, which know no scene). No Ogre types.
+// PHOTON'S DISPATCH COUNT — the test door of ENGINE-UPGRADE-2B stage 3 (ONE GI REGION: every Photon
+// compute dispatch is made inside PhotonComponent's GI region, the span the ASYNC bracket wraps).
+// Counters only, process-wide (the dispatch sites are the voxel classes, which know no scene).
 #ifndef JAHSHAKA_ENGINE_PHOTONSTATUS_H
 #define JAHSHAKA_ENGINE_PHOTONSTATUS_H
 
@@ -8,10 +8,10 @@ namespace jahshaka {
 namespace engine {
 
 struct PhotonDispatchStatus {
-    /// Photon GPU dispatches recorded inside a photon_update pass, ever.
-    unsigned long long inPass = 0;
-    /// ...and with no photon_update pass open (engine.pre, an arm build, an event): the bar is 0.
-    unsigned long long outsidePass = 0;
+    /// Photon compute dispatches made inside the GI region, ever.
+    unsigned long long inRegion = 0;
+    /// ...and outside every region (an event, a tool, a path the region does not cover): the bar is 0.
+    unsigned long long outsideRegion = 0;
 };
 PhotonDispatchStatus photonDispatchStatus();
 
