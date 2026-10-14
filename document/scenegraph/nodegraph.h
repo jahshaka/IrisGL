@@ -250,6 +250,8 @@ bool worldBox(const DocNode &n, const Vec3 &localMin, const Vec3 &localMax, floa
 unsigned long long transformWrites();
 /// The owner table the journal resolves ids through: SceneNode's constructor and destructor, nothing else.
 void registerNode(SceneNode *n);
+/// The live document node with this SceneNode::getNodeId, or null (destroyed, or never made).
+SceneNode *nodeById(long long id);
 void unregisterNode(SceneNode *n);
 /// THE WRITE JOURNAL — the change record every frame's ChangeSet is drained from (ENGINE-UPGRADE-1 U0 3b; first
 /// built for ENGINE_V2_SPEC V2-1, SPEED-CPU 2026-10-04). The counter above says THAT something moved; the journal

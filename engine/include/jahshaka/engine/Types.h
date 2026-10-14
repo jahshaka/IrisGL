@@ -7968,6 +7968,7 @@ struct FrameInputStatus {
     unsigned long long changesIncomplete = 0;   ///< incomplete sets drained, ever (each one cost a full pass)
     // ---- the extract (ENGINE-UPGRADE-U2) ----
     unsigned           nodeRecords = 0;         ///< NodeRecords the LAST drain applied, over every scene
+    unsigned           nodeTransforms = 0;      ///< ...of them, the ones carrying a transform (the written nodes)
     unsigned long long nodeRecordsTotal = 0;    ///< ...ever
     double             drainMicros = 0.0;       ///< what the LAST drain cost (the record's own overhead)
 };

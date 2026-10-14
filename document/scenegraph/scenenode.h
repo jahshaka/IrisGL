@@ -892,9 +892,9 @@ public:
     /// node's settle quiet clock from it (SceneMirror::noteSettleWrite) — the
     /// one per-document signal that a static node went dynamic.
     void _clearStaticHint() { mStaticHint = false; notifyChanged(NodeChange::Flags); }
-    /// iris::graph switched this node's GRAPH CLASS (a promotion, a demotion, a subtree switch reaching it): its
-    /// mirror owes the engine the new class.
-    void _noteGraphClassChanged() { notifyChanged(NodeChange::Flags); }
+    /// iris::graph switched this node's GRAPH CLASS (a promotion, a demotion, the top of a subtree switch): its mirror
+    /// owes the engine the new class — told on the dirty set's class list, not by a mark (no visit is owed).
+    void _noteGraphClassChanged() { if (mDirtySet) mDirtySet->noteClassChanged(nodeId); }
     /// DOES A WRITE TO THIS NODE'S TRANSFORM COUNT AS SCENE MOVEMENT?
     /// (nodegraph.h, the transform-write epoch — lane ENGINE-7 item 1.) True
     /// for everything the renderer draws; false for the VIEWER, which is a

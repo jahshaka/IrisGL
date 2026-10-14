@@ -101,6 +101,11 @@ public:
     /// a mark raised DURING consumption lands in the fresh list for next frame.
     void takeDirty(std::vector<SceneNode *> &out) { out.clear(); out.swap(mDirty); }
     void takeEvicted(std::vector<SceneNode *> &out) { out.clear(); out.swap(mEvicted); }
+    /// A node's GRAPH CLASS moved (iris::graph, the top of a switched region): its mirror owes the engine the class
+    /// (SceneMirror::noteGraphClass) — and nothing else, so this is no dirty mark and costs no visit. By id: the node
+    /// may die before the list is read (graph::nodeById answers null then).
+    void noteClassChanged(long long nodeId) { mClassChanged.push_back(nodeId); }
+    void takeClassChanged(std::vector<long long> &out) { out.clear(); out.swap(mClassChanged); }
     /// True once per overflow; reading it clears it.
     bool takeOverflow() { const bool o = mOverflowed; mOverflowed = false; return o; }
 
@@ -115,12 +120,14 @@ public:
     {
         mDirty.clear();
         mEvicted.clear();
+        mClassChanged.clear();
         mOverflowed = false;
     }
 
 private:
     std::vector<SceneNode *> mDirty;
     std::vector<SceneNode *> mEvicted;
+    std::vector<long long> mClassChanged;
     bool mOverflowed = false;
 };
 

@@ -1978,6 +1978,7 @@ private:
     void oweNodeRecord(iris::SceneNode *node, quint8 fields);
     /// The graph class's latch: a changed class owes a Static record, for the node and its switched region.
     void noteGraphClass(iris::SceneNode *node);
+    std::vector<long long> mClassScratch;
     /// The extract itself (the emit): FrameInputScene::nodes from the owed set.
     void buildNodeRecords(std::vector<jahshaka::engine::NodeRecord> &out);
     /// The DOCUMENT nodes written since the last emit, by node (the soft promotion's question), and the record's set.

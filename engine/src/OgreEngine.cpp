@@ -2436,6 +2436,7 @@ void OgreEngine::drainFrameInput() {
     mFrameInputStatus.changesMoved = 0;
     mFrameInputStatus.changesLights = 0;
     mFrameInputStatus.nodeRecords = 0;
+    mFrameInputStatus.nodeTransforms = 0;
     if (!mFrameInputPending) { ++mFrameInputStatus.drainedEmpty; return; }
     FrameInput in = std::move(mPendingFrameInput);
     mPendingFrameInput = FrameInput();
@@ -2459,6 +2460,7 @@ void OgreEngine::drainFrameInput() {
             const unsigned n = sc->applyNodeRecords(part.nodes);
             sc->armDeferredReflectors();   // a reflector asked for this frame is measured at its landed pose
             mFrameInputStatus.nodeRecords += n;
+            for (const NodeRecord &r : part.nodes) if (r.fields & NodeRecord::Trs) ++mFrameInputStatus.nodeTransforms;
             mFrameInputStatus.nodeRecordsTotal += n;
         }
         // THE CHANGE SET NEXT (U0 3b): what the document wrote, before anything of the frame reads a box.

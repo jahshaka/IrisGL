@@ -949,6 +949,13 @@ int SceneMirror::sync(const FrameViews &frameViews)
     takeWriteJournal();
     scenePart.changes = std::move(mFrameChanges);
     mFrameChanges = jahshaka::engine::ChangeSet();
+    // THE CLASS CHANGES the document made since the last emit (the dirty set's class list): each owes a Static record.
+    if (mSource) {
+        mSource->dirtySet()->takeClassChanged(mClassScratch);
+        for (long long id : mClassScratch)
+            if (iris::SceneNode *n = iris::graph::nodeById(id)) noteGraphClass(n);
+        mClassScratch.clear();
+    }
     buildNodeRecords(scenePart.nodes);
     mWrittenThisSync.clear();
     std::vector<FrameInputView> parts(frameViews.views.size());
@@ -3224,7 +3231,12 @@ void SceneMirror::noteGraphClass(iris::SceneNode *node)
         auto ce = mEntries.find(n);
         if (ce == mEntries.end() || !ce->node) continue;
         const int c = n->isStaticInGraph() ? 1 : 0;
-        if (ce->staticPushed != c) { ce->staticPushed = c; oweNodeRecord(n, NodeRecord::Static); }
+        // A SWITCHED REGION IS CONNECTED FROM ITS TOP (every switched node's parent switched too, or is the top): a
+        // node whose class did not move has no moved class under it — the walk stops there. A single promotion (the
+        // settle's step) therefore costs its children's compare, never its subtree.
+        if (ce->staticPushed == c) continue;
+        ce->staticPushed = c;
+        oweNodeRecord(n, NodeRecord::Static);
         for (int i = n->childCount(); i-- > 0;) if (iris::SceneNode *k = n->childAt(i)) stack.push_back(k);
     }
 }
