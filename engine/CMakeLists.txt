@@ -37,6 +37,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuSceneSubstrate.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/PhotonComponent.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/PhotonComponent.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/PhotonGi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/atom/AtomComponent.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/atom/AtomComponent.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/SkinCache.h
