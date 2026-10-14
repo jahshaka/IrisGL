@@ -95,6 +95,9 @@ public:
     unsigned long long commits = 0ull;     ///< commits that copied anything, ever
     unsigned long long aabbReads = 0ull;   ///< world AABBs the walk's composer asked for, ever
     double scanMicros = 0.0;               ///< the last frame's compose + commit (engine.gpuscene)
+    /// The split's switch (OgreScene::atomDrawOn) as the running compose asked it once:
+    /// 1 / 0 inside a compose, -1 outside (a predicate then asks for itself).
+    int atomDraw = -1;
     /// A compose staged (or walked) since the last commit: the commit owes an update.
     bool commitOwed = false;
     /// The frame's own read, timed across its compose and its commit.

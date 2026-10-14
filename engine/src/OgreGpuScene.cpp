@@ -834,7 +834,10 @@ bool OgreScene::gpuIsMetal(const Ogre::HlmsDatablock *db) {
 /// traces it through its own structure over its skin cache (its posed
 /// vertices), and leaves it out on a frame the cache is not ready — never at the
 /// mesh's bind pose (audit C-5's T-pose, which is what the exclusion was for).
-Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const { return gpuFlagsFor(n, atomDrawOn()); }
+Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n) const {
+    // Inside a compose the split's switch was asked once (GpuSceneSubstrate::atomDraw).
+    return gpuFlagsFor(n, mSubstrate.atomDraw >= 0 ? mSubstrate.atomDraw != 0 : atomDrawOn());
+}
 
 Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n, bool atomDraw) const {
     Ogre::Item *item = n.item;
@@ -1238,9 +1241,13 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     const size_t n = mItemNodes.size();
     // THE PREDICATES' SCENE-WIDE INPUT, once per walk instead of once per slot (the
     // split's switch asks the device for an extension by name).
-    const bool atomDraw = atomDrawOn();
+    const bool atomDraw = sub.atomDraw >= 0 ? sub.atomDraw != 0 : atomDrawOn();
     const size_t workers = mSceneMgr ? mSceneMgr->getNumWorkerThreads() : 0u;
-    const size_t shares = (n >= kParallelWalkSlots && workers >= 1u) ? workers + 1u : 1u;
+    // ONLY THE CACHED READ IS PARALLEL: `_getFullTransformUpdated` (a reader before the
+    // graph: the warm-up) WRITES every ancestor's derived transform on its way up, and
+    // two shares sharing an ancestor would race on it — that form walks on one thread.
+    const size_t shares =
+        (graphIsCurrent && n >= kParallelWalkSlots && workers >= 1u) ? workers + 1u : 1u;
     if (sub.shareDirty.size() != shares) sub.shareDirty.assign(shares, std::vector<uint32_t>());
     sub.walkShares = unsigned(shares);
     const detail::GpuInstance *mirror = mGpuScene.mirrorData();
@@ -1339,6 +1346,13 @@ void OgreScene::composeGpuScene(bool graphIsCurrent) const {
         sub.epochValid = detail::gTransformWriteCounter != nullptr;
     }
     sub.commitOwed = true;
+    // THE SPLIT'S SWITCH, ONCE PER COMPOSE (an extension lookup by name): every slot this
+    // compose composes, and the walk's compare, read it from here.
+    struct AtomDrawScope {
+        GpuSceneSubstrate &sub;
+        ~AtomDrawScope() { sub.atomDraw = -1; }
+    } atomDrawScope{ sub };
+    sub.atomDraw = atomDrawOn() ? 1 : 0;
     mGpuScene.setSlotCount(uint32_t(mItemNodes.size()));
     // THE EXPLICIT MARKS FIRST: a seam that changed a flags word without moving
     // anything, and every newborn slot. A slot marked TWICE (seven seams, two of
