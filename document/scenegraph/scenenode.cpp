@@ -187,25 +187,25 @@ void SceneNode::rotate(iris::Quat rot, bool global)
 {
     const iris::Quat cur = mDoc.rot;
     notifyChanged(NodeChange::Transform);
-    graph::setLocalRot(mDoc, global ? cur * rot : rot * cur);
+    graph::writeLocalRot(mDoc, global ? cur * rot : rot * cur);
 }
 
 void SceneNode::setLocalPos(iris::Vec3 pos)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setLocalPos(mDoc, pos);
+    graph::writeLocalPos(mDoc, pos);
 }
 
 void SceneNode::setLocalRot(iris::Quat rot)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setLocalRot(mDoc, rot);
+    graph::writeLocalRot(mDoc, rot);
 }
 
 void SceneNode::setLocalScale(iris::Vec3 scale)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setLocalScale(mDoc, scale);
+    graph::writeLocalScale(mDoc, scale);
 }
 
 void SceneNode::setLocalTransform(iris::Mat4 transformMatrix)
@@ -214,7 +214,7 @@ void SceneNode::setLocalTransform(iris::Mat4 transformMatrix)
     iris::Quat r;
     MathHelper::decomposeMatrix(transformMatrix, p, r, s);
     notifyChanged(NodeChange::Transform);
-    graph::setLocalTrs(mDoc, p, r, s);
+    graph::writeLocalTrs(mDoc, p, r, s);
 }
 
 bool SceneNode::isAttached()
@@ -807,7 +807,7 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
 {
     if (!node) return;
     // The world POSE, not a matrix: the re-expression below inverts Ogre's own
-    // composition rule exactly (graph::setGlobalTrs) — a matrix would be
+    // composition rule exactly (graph::writeGlobalTrs) — a matrix would be
     // decomposed again, losing a negative scale's sign convention and any shear.
     const graph::Trs initialWorld = graph::world(node->mDoc);
 
@@ -856,7 +856,7 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
         {
             graph::ReexpressScope reexpress;
             node->notifyChanged(NodeChange::Transform);
-            graph::setGlobalTrs(node->mDoc, initialWorld);
+            graph::writeGlobalTrs(node->mDoc, initialWorld);
         }
         // _applyStaticHint, not setMobility: a plain reparent of a
         // policy-derived static node must not stamp a USER decision (which the
@@ -1019,13 +1019,13 @@ qint64 SceneNode::generateNodeId()
 void SceneNode::setGlobalPos(iris::Vec3 pos)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setGlobalPos(mDoc, pos);
+    graph::writeGlobalPos(mDoc, pos);
 }
 
 void SceneNode::setGlobalRot(iris::Quat rot)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setGlobalRot(mDoc, rot);
+    graph::writeGlobalRot(mDoc, rot);
 }
 
 void SceneNode::setGlobalPosRot(iris::Vec3 pos, iris::Quat rot)
@@ -1033,13 +1033,13 @@ void SceneNode::setGlobalPosRot(iris::Vec3 pos, iris::Quat rot)
     // ONE notification and ONE parent resolution for a pose that arrives whole
     // — the physics write-back's shape (MIRROR_SCALE lane).
     notifyChanged(NodeChange::Transform);
-    graph::setGlobalPosRot(mDoc, pos, rot);
+    graph::writeGlobalPosRot(mDoc, pos, rot);
 }
 
 void SceneNode::setGlobalTransform(iris::Mat4 transform)
 {
     notifyChanged(NodeChange::Transform);
-    graph::setGlobalTransform(mDoc, transform);
+    graph::writeGlobalTransform(mDoc, transform);
 }
 
 SceneNodePtr SceneNode::duplicate()

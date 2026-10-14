@@ -315,12 +315,14 @@ void unlinkDoc(DocNode &n);
 /// Position among its parent's children, or -1 when it has no parent.
 int indexInParent(const DocNode &n);
 
-// -- the local TRS: THE write funnel (the store, then the Ogre half, the movement epoch and the journal) --
-void setLocalPos(DocNode &n, const Vec3 &v);
-void setLocalRot(DocNode &n, const Quat &q);
-void setLocalScale(DocNode &n, const Vec3 &v);
+// -- the local TRS: THE write funnel (the store, then the Ogre half, the movement epoch and the journal). Named
+// write*, not set*: they are not document setters — the SceneNode setter that calls each marks NodeChange::Transform
+// (document.no_silent_setters holds every set* to that). --
+void writeLocalPos(DocNode &n, const Vec3 &v);
+void writeLocalRot(DocNode &n, const Quat &q);
+void writeLocalScale(DocNode &n, const Vec3 &v);
 /// All three at once — one dirty mark instead of three.
-void setLocalTrs(DocNode &n, const Vec3 &p, const Quat &r, const Vec3 &s);
+void writeLocalTrs(DocNode &n, const Vec3 &p, const Quat &r, const Vec3 &s);
 /// The local matrix: makeTransform of the local triple.
 Mat4 localTransform(const DocNode &n);
 
@@ -334,15 +336,15 @@ Mat4 globalTransform(const DocNode &n);
 /// ZERO scale has flattened that axis of every world under it; no local can undo that, and dividing by it would
 /// store an infinity or a NaN (SC1-REEXPRESS-SCALE-1), so that axis keeps the node's own local position and scale.
 Trs localFromWorld(const DocNode &n, const Trs &world);
-void setGlobalPos(DocNode &n, const Vec3 &v);
-void setGlobalRot(DocNode &n, const Quat &q);
+void writeGlobalPos(DocNode &n, const Vec3 &v);
+void writeGlobalRot(DocNode &n, const Quat &q);
 /// BOTH AT ONCE, for a caller that has both — the physics write-back, which runs per body per step: one parent
 /// resolution, and none at all when the parent is at identity (what a physics body's parent almost always is).
-void setGlobalPosRot(DocNode &n, const Vec3 &v, const Quat &q);
+void writeGlobalPosRot(DocNode &n, const Vec3 &v, const Quat &q);
 /// The whole world pose, re-expressed exactly (a keepTransform reparent hands the old world TRS straight here).
-void setGlobalTrs(DocNode &n, const Trs &world);
-/// A world MATRIX: decomposed (iris::decomposeTRS — a shear in `m` is dropped), then setGlobalTrs.
-void setGlobalTransform(DocNode &n, const Mat4 &m);
+void writeGlobalTrs(DocNode &n, const Trs &world);
+/// A world MATRIX: decomposed (iris::decomposeTRS — a shear in `m` is dropped), then writeGlobalTrs.
+void writeGlobalTransform(DocNode &n, const Mat4 &m);
 
 /// The world AABB of a LOCAL box `local` (a mesh's baked `Mesh::aabb`) carried by `n`: the exact box of the
 /// transformed box (|M| applied to the half extents — Ogre's Aabb::transformAffine), padded by one part in 1e5 so a
@@ -450,10 +452,10 @@ void setCountsAsMovement(NodeHandle n, bool counts);
 /// document node itself, see nodegraph.cpp).
 bool countsAsMovement(NodeHandle n);
 
-/// EVERYTHING setGlobalPosRot READS AND WRITES, bit for bit: the parent's
+/// EVERYTHING writeGlobalPosRot READS AND WRITES, bit for bit: the parent's
 /// world position, orientation and scale (what the write undoes) and the node's
 /// own local position and orientation (what it writes), all from the store. Two
-/// equal witnesses of one node mean a setGlobalPosRot of the SAME world pose
+/// equal witnesses of one node mean a writeGlobalPosRot of the SAME world pose
 /// would write exactly the locals the node already holds — the physics
 /// write-back's proof that a sleeping body's node needs no write
 /// (Environment::writeBack, SPEED-CPU). A plain value; compare with ==.

@@ -1164,7 +1164,7 @@ int indexInParent(const DocNode &n)
     return it == kids.end() ? -1 : int(it - kids.begin());
 }
 
-void setLocalPos(DocNode &n, const Vec3 &v)
+void writeLocalPos(DocNode &n, const Vec3 &v)
 {
     n.pos = v;
     invalidateSubtree(n);
@@ -1174,7 +1174,7 @@ void setLocalPos(DocNode &n, const Vec3 &v)
     }
 }
 
-void setLocalRot(DocNode &n, const Quat &q)
+void writeLocalRot(DocNode &n, const Quat &q)
 {
     n.rot = canonicalRotation(q);
     invalidateSubtree(n);
@@ -1184,7 +1184,7 @@ void setLocalRot(DocNode &n, const Quat &q)
     }
 }
 
-void setLocalScale(DocNode &n, const Vec3 &v)
+void writeLocalScale(DocNode &n, const Vec3 &v)
 {
     n.scale = v;
     invalidateSubtree(n);
@@ -1194,7 +1194,7 @@ void setLocalScale(DocNode &n, const Vec3 &v)
     }
 }
 
-void setLocalTrs(DocNode &n, const Vec3 &p, const Quat &r, const Vec3 &s)
+void writeLocalTrs(DocNode &n, const Vec3 &p, const Quat &r, const Vec3 &s)
 {
     n.pos = p;
     n.rot = canonicalRotation(r);
@@ -1238,44 +1238,44 @@ Trs localFromWorld(const DocNode &n, const Trs &w)
     return l;
 }
 
-void setGlobalPos(DocNode &n, const Vec3 &v)
+void writeGlobalPos(DocNode &n, const Vec3 &v)
 {
     Vec3 pP, pS;
     Quat pR;
-    if (parentWorld(n, pP, pR, pS)) { setLocalPos(n, v); return; }
-    setLocalPos(n, localPosFrom(n, v, pP, qinv(pR), pS));
+    if (parentWorld(n, pP, pR, pS)) { writeLocalPos(n, v); return; }
+    writeLocalPos(n, localPosFrom(n, v, pP, qinv(pR), pS));
 }
 
-void setGlobalRot(DocNode &n, const Quat &q)
+void writeGlobalRot(DocNode &n, const Quat &q)
 {
     Vec3 pP, pS;
     Quat pR;
-    if (parentWorld(n, pP, pR, pS)) { setLocalRot(n, q); return; }
-    setLocalRot(n, qmul(qinv(pR), q));
+    if (parentWorld(n, pP, pR, pS)) { writeLocalRot(n, q); return; }
+    writeLocalRot(n, qmul(qinv(pR), q));
 }
 
-void setGlobalPosRot(DocNode &n, const Vec3 &v, const Quat &q)
+void writeGlobalPosRot(DocNode &n, const Vec3 &v, const Quat &q)
 {
     // ONE resolution of the parent, for both halves — and none of the inverse when the parent is at identity (a
     // physics body's parent is the document root, identity by construction: nodegraph.h rule 2's exemption).
     Vec3 pP, pS;
     Quat pR;
-    if (parentWorld(n, pP, pR, pS)) { setLocalTrs(n, v, q, n.scale); return; }
+    if (parentWorld(n, pP, pR, pS)) { writeLocalTrs(n, v, q, n.scale); return; }
     const Quat inv = qinv(pR);
-    setLocalTrs(n, localPosFrom(n, v, pP, inv, pS), qmul(inv, q), n.scale);
+    writeLocalTrs(n, localPosFrom(n, v, pP, inv, pS), qmul(inv, q), n.scale);
 }
 
-void setGlobalTrs(DocNode &n, const Trs &w)
+void writeGlobalTrs(DocNode &n, const Trs &w)
 {
     const Trs l = localFromWorld(n, w);
-    setLocalTrs(n, l.pos, l.rot, l.scale);
+    writeLocalTrs(n, l.pos, l.rot, l.scale);
 }
 
-void setGlobalTransform(DocNode &n, const Mat4 &m)
+void writeGlobalTransform(DocNode &n, const Mat4 &m)
 {
     Trs w;
     iris::decomposeTRS(m, w.pos, w.rot, w.scale);
-    setGlobalTrs(n, w);
+    writeGlobalTrs(n, w);
 }
 
 bool worldBox(const DocNode &n, const Vec3 &lmin, const Vec3 &lmax, float outMin[3], float outMax[3])
@@ -1386,7 +1386,7 @@ PoseWitness poseWitness(const DocNode &n)
 {
     PoseWitness w;
     float *v = w.values;
-    // The parent half: what setGlobalPosRot resolves (the store's parent world, so a parent moved since the last
+    // The parent half: what writeGlobalPosRot resolves (the store's parent world, so a parent moved since the last
     // write shows up here).
     if (n.parent) {
         w.parent = n.parent;
@@ -1395,7 +1395,7 @@ PoseWitness poseWitness(const DocNode &n)
         v[3] = p.rot.scalar(); v[4] = p.rot.x(); v[5] = p.rot.y(); v[6] = p.rot.z();
         v[7] = p.scale.x(); v[8] = p.scale.y(); v[9] = p.scale.z();
     }
-    // The node half: what setGlobalPosRot writes.
+    // The node half: what writeGlobalPosRot writes.
     v[10] = n.pos.x(); v[11] = n.pos.y(); v[12] = n.pos.z();
     v[13] = n.rot.scalar(); v[14] = n.rot.x(); v[15] = n.rot.y(); v[16] = n.rot.z();
     return w;
