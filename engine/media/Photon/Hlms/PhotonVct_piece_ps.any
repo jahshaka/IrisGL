@@ -551,11 +551,13 @@
 			// sky's share (jahGlobalEnvVisibility, the escape) is made at, so the two sum to one
 			// lobe. Read as the diffuse set's light it lit the gap between the two estimates
 			// twice: a plate in a box emitting the sky's radiance read 1.16x the open sky with
-			// one 3 m opening above it (gi.rough_sky_once). Where the diffuse set stopped less
-			// than the query, the stopped radiance is not estimated past its own light (the
-			// ratio held at 1: an estimate from a sliver of occlusion is noise).
+			// one 3 m opening above it (gi.rough_sky_once). The stopped radiance's estimate
+			// (the light over the diffuse set's occlusion) is taken from at least a tenth of the
+			// hemisphere: a sliver of diffuse occlusion is noise, while a query stopped more
+			// than the set (a facade filling the lobe over an open hemisphere) must still be
+			// lit at its own share, never capped at the set's (gi.rough_sky_once's wall arm).
 			pixelData.envColourS += vctDiffuseVoxel *
-									( vctRoughOcclusion / max( vctDiffuseOcclusion, vctRoughOcclusion ) );
+									( vctRoughOcclusion / max( vctDiffuseOcclusion, 0.1f ) );
 		@else
 			float3 jahSkyD = jahEnvIrradiance( jahViewToWorldDir( float3( pixelData.normal ) ) );
 			pixelData.envColourS += max( float3( pixelData.envColourD ) -
