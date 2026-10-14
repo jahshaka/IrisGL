@@ -165,6 +165,23 @@ public:
     static void registerPasses(AtomPassProvider *provider);
 
     // --- ITS TYPES --------------------------------------------------------------
+    /// THE FRAME'S GI WORK (planFrame decides it, recordFrame records it): the field's batch,
+    /// the cascade stage's follow and its one re-voxelisation. The light tick, the settle step
+    /// and the drag settle are decided where they are recorded: each reads what the work
+    /// before it left (an injection this frame, a cascade still pending after the rebuild).
+    struct FrameWork {
+        enum class Field : unsigned char { None, Refine, Integrate };
+        Field field = Field::None;
+        bool fieldReplacing = false;          ///< Integrate: a fresh pass (ifd.replace), else ifd.converge
+        Ogre::uint32 fieldBatch = 0u;
+        Ogre::Vector3 camPos = Ogre::Vector3::ZERO;
+        bool cascades = false;                ///< the cascade stage runs (a built chain, no flush owed)
+        bool follow = false;                  ///< cascade 0's field follow, paid first
+        GiStaleReason followReason = GiStaleReason::Camera;
+        int rebuild = -1;                     ///< the ONE cascade re-voxelised this frame
+        bool spent = false;                   ///< the follow or the rebuild spends the frame
+        bool aborted = false;                 ///< the walk threw: nothing past the field this frame
+    };
     /// THE WALK'S GI RECORD — what one GI walk found (OgreScene::walkItems: the scene's one
     /// walk for the GI and the shadow scan). The component's input: absorbed right after the
     /// walk ran (absorbWalk), never written by the walk into the component's state.
@@ -582,6 +599,13 @@ public:
     /// Called by OgreView each frame with its camera position: the PCC probe
     /// blend tracks the viewer. No-op unless the hybrid mode is live.
     void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo);
+    /// THE FRAME'S GI, in three parts (ENGINE-UPGRADE-2B stage 2): harvest the readouts that
+    /// landed; plan the frame's work (every decision: the driving profile, the camera, the
+    /// walk absorbed and the cascades it marked, the field's batch, the cascade step test and
+    /// the ONE re-voxelisation); record it (stage 3 records it inside photon_update).
+    void harvest();
+    FrameWork planFrame(const Ogre::Vector3 &camPos, bool driverStereo);
+    void recordFrame(const FrameWork &w);
     /// Re-derives the Forward+ clustered depth-slice range from this camera and
     /// the scene's own extent (LIGHTING_FIX fix 8 / F-F1). Rate-limited AND
     /// hysteretic — `setForwardClustered` recreates the grid buffers, so it must
@@ -617,7 +641,7 @@ public:
     /// SceneManager dies (probe workspaces, GI camera).
     void teardownGi();
     /// THE ONE GI SCHEDULER (U0 3c; OgreGi.cpp): run by the drain once per record that carries the scene's GI.
-    void planGi(const FrameInputScene &part, bool pushed);
+    void plan(const FrameInputScene &part, bool pushed);
     std::string photonViewRefusal(PhotonView view) const;
     /// ONCE A FRAME PER DRAWN SCENE (renderOneFrame, after updateSurfaceCache):
     /// the scene half of the view — Ogre's voxel visualizer on the finest cascade
@@ -833,7 +857,9 @@ private:
     /// Spends the frame's convergence budget on an in-flight re-converge.
     /// No-op when the field is converged, when there is no field, or when the
     /// update budget is 0 (paused). Called once a frame from updateGiTracking.
-    void updateIrradianceField();
+    /// THE FIELD'S BATCH, planned and recorded.
+    void planField(FrameWork &w);
+    void recordField(const FrameWork &w);
     void oweCascade0FieldFollow(GiStaleReason reason);
     /// Per-axis PROBE COUNTS for a field over `size`, each a power of two
     /// (upstream only ASSERTS that, and the assert is compiled out of our
@@ -975,7 +1001,9 @@ private:
     /// THE SCHEDULER, called once a frame from updateGiTracking with the
     /// authoritative camera. Re-quantises every cascade, queues the ones that
     /// moved, and spends AT MOST ONE rebuild this frame, innermost first.
-    void updateCascades(const Ogre::Vector3 &camPos);
+    /// THE CASCADE STAGE, planned (the step test, the one re-voxelisation) and recorded.
+    void planCascades(const Ogre::Vector3 &camPos, FrameWork &w);
+    void recordCascades(const FrameWork &w);
     /// Destroys cascades 1..N-1 (cascade 0 is teardownVct's own business).
     void teardownExtraCascades();
     /// THE INSTANCE BUDGET'S PICK (GiParams::cascadeInstanceCap > 0) as a bit per

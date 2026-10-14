@@ -667,7 +667,7 @@ bool PhotonComponent::setGiTuning(const GiParams &p) {
 //  * a mobility FLIP's geometry move is adopted, never armed (MobilityChange::Soft's promise);
 //  * world.refreshGi() re-solves at once;
 //  * a paused budget (updateBudget 0) follows nothing and keeps what it owes for the un-pause.
-void PhotonComponent::planGi(const FrameInputScene &part, bool pushed) {
+void PhotonComponent::plan(const FrameInputScene &part, bool pushed) {
     GiPlan &g = mGiPlan;
     const bool vctLike = mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid;
     const unsigned long long serial = part.giRefreshSerial ? *part.giRefreshSerial : g.refreshSerialSeen;
@@ -3492,8 +3492,8 @@ void PhotonComponent::forwardPlusLightCensus(unsigned &lights, unsigned &budget)
     }
 }
 
-void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) {
-    serviceVoxelReadouts();     // before any of this frame's GI work is recorded
+PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPos, bool driverStereo) {
+    FrameWork w;
     // THE VR CASCADE PROFILE FOLLOWS THE DRIVER (V1-RIG item 4). The view that
     // places the chain is the one that reads it, and in a session that is the
     // headset's — five times the pixels for half the frame. A change of driver
@@ -3525,7 +3525,7 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
     if (firstCamera && mGiCascadeAwaitingCamera &&
         (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid))
         mGiCachesDirty = true;
-    updateIrradianceField();
+    planField(w);   // the field's batch (recorded FIRST, before the cascades, as it always ran)
     // THE CASCADE SCHEDULER (PHOTON_SPEC P0). Before the probe half and
     // unconditionally: it is per SCENE and per FRAME, it costs one quantise
     // and three comparisons per cascade when the camera has not left its step
@@ -3573,16 +3573,41 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
             if (!mScene.gestureActive()) endDragGesture();
             if (!mGiCascadeDirtyBoxes.empty() || mGiCascadeDirtyAll)
                 markDirtyCascadesPending(GiStaleReason::Moved);
-        } JAH_CATCH(mError, );
+        } JAH_CATCH(mError, (w.aborted = true, w));   // an exception ends the frame's GI after the field
     }
-    if (!mGiCachesDirty) updateCascades(camPos);
+    w.camPos = camPos;
+    if (!mGiCachesDirty) planCascades(camPos, w);
+    return w;
+}
+
+// THE FRAME'S GI WORK, RECORDED (ENGINE-UPGRADE-2B stage 2), in the order the frame has always
+// paid it: the field's batch, then the cascade stage (cascade 0's field follow, the ONE
+// re-voxelisation, the owed light tick, the settle step, the drag settle), then the probe
+// budget. What it records is what planFrame decided; the light tick, the settle step and the
+// drag settle are decided where they run because each reads what the work before it left
+// (an injection this frame, a cascade still pending after the rebuild).
+void PhotonComponent::recordFrame(const FrameWork &w) {
+    recordField(w);
+    if (w.aborted) return;
+    if (w.cascades) recordCascades(w);
     if (!mPcc || !mGiCamera) return;
     JAH_TRY {
-        mGiCamera->setPosition(camPos);
+        mGiCamera->setPosition(w.camPos);
         mPcc->setUpdatedTrackedDataFromCamera(mGiCamera);
-        updateProbeBudget(camPos);
+        updateProbeBudget(w.camPos);
     } JAH_CATCH(mError, );
 }
+
+// THE ENGINE'S PER-FRAME GI STEP (the authoritative view, engine.pre): the readouts that
+// landed (harvest), the frame's decisions (planFrame), its work (recordFrame).
+void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) {
+    harvest();     // before any of this frame's GI work is recorded
+    recordFrame(planFrame(camPos, driverStereo));
+}
+
+// THE FRAME'S RESULTS, HARVESTED: the voxel feeds' device readouts that have landed (the
+// cascades' readings giStatus reports), never waited on.
+void PhotonComponent::harvest() { serviceVoxelReadouts(); }
 
 // THE GEOMETRY MOVEMENT SCAN (FIX WAVE B3, engine half).
 //
@@ -5299,21 +5324,12 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
 // (how far the volume is from describing where the camera is), a clock is not.
 static const float kStepHysteresis = 0.1f;
 
-void PhotonComponent::updateCascades(const Ogre::Vector3 &camPos) {
+void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
     if (mVctCascades.size() < 1u || !mVctCascades[0].built) return;
-
-    // ---- 0. A DEFERRED FIELD FOLLOW OWNS THE FRAME'S ONE SLOT -------------
-    // (V1-RIG item 2 / L11.) It is paid before anything reads the field this
-    // frame and it spends the slot, so the frame that pays it rebuilds no
-    // cascade: the two halves of a step never share a frame again.
-    bool followPaid = false;
-    if (mIfdFollowOwed) {
-        followCascade0Field(mIfdFollowReason);
-        mIfdFollowOwed = 0;
-        followPaid = true;
-    }
-
-    // ---- 1. WHO MOVED, AND DID ANYTHING JUMP? ------------------------------
+    w.cascades = true;
+    // CASCADE 0'S FIELD FOLLOW, when owed, is paid first and spends the frame (recordCascades).
+    w.follow = mIfdFollowOwed != 0;
+    w.followReason = mIfdFollowReason;
     for (VctCascade &c : mVctCascades) {
         const float cell = c.cell();
         const float step = c.step();
@@ -5385,6 +5401,24 @@ void PhotonComponent::updateCascades(const Ogre::Vector3 &camPos) {
     // The near field is what the user is looking at, so it is what gets the
     // frame. A cascade that waits keeps showing its old, correctly-lit volume:
     // the picture is never half-built, only slightly behind.
+    // THE ONE RE-VOXELISATION: the innermost pending cascade, unless the follow spent the frame
+    // (every other pending cascade is deferred to a later frame).
+    if (!w.follow)
+        for (size_t i = 0; i < mVctCascades.size(); ++i)
+            if (mVctCascades[i].pending) { w.rebuild = int(i); break; }
+    w.spent = w.follow || w.rebuild >= 0;
+}
+
+void PhotonComponent::recordCascades(const FrameWork &w) {
+    const Ogre::Vector3 &camPos = w.camPos;
+    bool followPaid = false;
+    if (w.follow) {
+        followCascade0Field(w.followReason);
+        mIfdFollowOwed = 0;
+        followPaid = true;
+    }
+
+    // ---- 1. WHO MOVED, AND DID ANYTHING JUMP? ------------------------------
     bool spent = followPaid;
     // ...AND WHETHER A CASCADE REALLY WAS RE-VOXELISED (fix round item 4): a
     // rebuild that threw BEFORE its swap put its placement back and voxelised
@@ -5397,7 +5431,7 @@ void PhotonComponent::updateCascades(const Ogre::Vector3 &camPos) {
     for (size_t i = 0; i < mVctCascades.size(); ++i) {
         VctCascade &c = mVctCascades[i];
         if (!c.pending) continue;
-        if (spent) { ++mCascadeDeferrals; continue; }
+        if (spent || int(i) != w.rebuild) { ++mCascadeDeferrals; continue; }
         // THE PLACEMENT, SAVED BEFORE IT MOVES (audit B4). recentreCascade
         // writes the voxeliser's region, and the shader reads that region live
         // — so if the build then throws, the old voxels would be sampled as if
@@ -6698,7 +6732,7 @@ void PhotonComponent::teardownIrradianceField() {
     mIfd = nullptr;
 }
 
-void PhotonComponent::updateIrradianceField() {
+void PhotonComponent::planField(FrameWork &w) {
     if (!mIfd) return;
     // A DEFERRED FOLLOW IS OWED: nothing integrates until it is paid
     // (mIfdFollowOwed). Cascade 0's rebuild last frame may have re-created the
@@ -6718,32 +6752,33 @@ void PhotonComponent::updateIrradianceField() {
         // (and costs nothing) once none is owed.
         JAH_TRY {
             if (mIfd->isWorkDone() && !mIfd->beginOwedRefinement()) return;   // converged
-            const Ogre::uint32 batch = std::min(mIfdProbesPerFrame, mIfd->getWorkRemaining());
-            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "ifd.refine",
-                                     mRoot->getRenderSystem());
-            mIfd->update(batch);
-            work.setUnits(batch);
+            w.field = FrameWork::Field::Refine;
+            w.fieldBatch = std::min(mIfdProbesPerFrame, mIfd->getWorkRemaining());
         } JAH_CATCH(mError, );
         return;
     }
+    // THE FIELD'S PROGRESSIVE RE-INTEGRATION (ENGINE-5 item 2) — the
+    // budget's turn, one batch of probes a frame, so `Sweep` is its
+    // reason: nothing changed, this is the cache catching up. A
+    // RE-PLACEMENT's slabs (PHOTON-FIELD-ROTATE-1 part 3: the work has no
+    // history) are filed as "ifd.replace", a change's as "ifd.converge".
+    w.field = FrameWork::Field::Integrate;
+    w.fieldReplacing = mIfd->getWorkMode() == Ogre::PhotonIrradianceField::IntegrateFresh;
+    w.fieldBatch = std::min(mIfdProbesPerFrame, mIfdTotalProbes - mIfdProbesDone);
+}
+
+void PhotonComponent::recordField(const FrameWork &w) {
+    if (w.field == FrameWork::Field::None) return;
     JAH_TRY {
-        const Ogre::uint32 remaining = mIfdTotalProbes - mIfdProbesDone;
-        const Ogre::uint32 batch = std::min(mIfdProbesPerFrame, remaining);
+        const char *row = w.field == FrameWork::Field::Refine ? "ifd.refine"
+                        : w.fieldReplacing ? "ifd.replace" : "ifd.converge";
         {
-            // THE FIELD'S PROGRESSIVE RE-INTEGRATION (ENGINE-5 item 2) — the
-            // budget's turn, one batch of probes a frame, so `Sweep` is its
-            // reason: nothing changed, this is the cache catching up. A
-            // RE-PLACEMENT's slabs (PHOTON-FIELD-ROTATE-1 part 3: the work has no
-            // history) are filed as "ifd.replace", a change's as "ifd.converge".
-            const bool replacing =
-                mIfd->getWorkMode() == Ogre::PhotonIrradianceField::IntegrateFresh;
-            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0,
-                                     replacing ? "ifd.replace" : "ifd.converge",
-                                     mRoot->getRenderSystem());
-            mIfd->update(batch);
-            work.setUnits(batch);
+            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, row, mRoot->getRenderSystem());
+            mIfd->update(w.fieldBatch);
+            work.setUnits(w.fieldBatch);
         }
-        mIfdProbesDone = std::min(mIfdTotalProbes, mIfdProbesDone + batch);
+        if (w.field == FrameWork::Field::Integrate)
+            mIfdProbesDone = std::min(mIfdTotalProbes, mIfdProbesDone + w.fieldBatch);
     } JAH_CATCH(mError, );
 }
 

@@ -6105,7 +6105,7 @@ public:
     /// THE CHANGE SET's engine entry point (U0 3b): names each moved subtree to the scans; returns 1 when a light
     /// among them really moved (its pose key changed — the light serial bumped once, the scheduler told).
     unsigned applyChangeSet(const ChangeSet &cs);
-    void planGi(const FrameInputScene &part, bool pushed) { return mPhoton.planGi(part, pushed); }
+    void planGi(const FrameInputScene &part, bool pushed) { return mPhoton.plan(part, pushed); }
     /// The user's gesture, as the scene's last record that carried one said (FrameInputScene::gesture).
     FrameInputGesture mGesture;
 private:
