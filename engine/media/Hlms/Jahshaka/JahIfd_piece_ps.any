@@ -598,7 +598,8 @@
 		const float3 jahConePosLS = jahVctPixelStart( inPs.pos, jahConeBasis, passBuf.vctProbeParams,
 													  jahConeBiasLS, jahConeOriginLS );
 		float3 jahConeVoxelOnly = float3( 0, 0, 0 );
-		jahVctDiffuse( vctDiffuse, jahConeVoxelOnly, jahConePosLS, jahConeOriginLS, jahConeBasis,
+		float jahConeOccOnly = 0.0f;
+		jahVctDiffuse( vctDiffuse, jahConeVoxelOnly, jahConeOccOnly, jahConePosLS, jahConeOriginLS, jahConeBasis,
 					   passBuf.vctProbeParams );
 		pixelData.envColourD.xyz += vctDiffuse.xyz * ifdFallbackAmbient;
 	}
