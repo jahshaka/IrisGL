@@ -312,6 +312,10 @@ public:
         bool mobilityFlipped = false;
         unsigned stableFrames = 0;
         unsigned framesSinceLightOnly = 0;
+        /// The engine frame the scheduler last ran on (giWriterFrame): a frame that drained NO record of the
+        /// scene is an environment frame in which nothing changed, and planFrame runs the scheduler for it
+        /// (ENGINE-UPGRADE-2B stage 4: a screenshot's settle drains none, and its pending re-solve must land).
+        unsigned long long frame = ~0ull;
         unsigned long long geometrySig = 0, materialSig = 0, refreshSerialSeen = 0;
         unsigned long long pushes = 0, resolves = 0, lightTicks = 0, lightTicksAtRest = 0;
         /// HOW LONG IS STILL: 15 environment frames with no change before one re-solve (a 250 ms window at 60 Hz),

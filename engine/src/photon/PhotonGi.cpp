@@ -557,6 +557,7 @@ bool PhotonComponent::setGiTuning(const GiParams &p) {
 //  * a paused budget (updateBudget 0) follows nothing and keeps what it owes for the un-pause.
 void PhotonComponent::plan(const FrameInputScene &part, bool pushed) {
     GiPlan &g = mGiPlan;
+    g.frame = giWriterFrame();
     const bool vctLike = mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid;
     const unsigned long long serial = part.giRefreshSerial ? *part.giRefreshSerial : g.refreshSerialSeen;
     const auto geometryNow = [&]() -> unsigned long long { return vctLike ? giGeometryKey() : 0ull; };
@@ -1138,7 +1139,11 @@ GiStatus PhotonComponent::giStatus() const {
             for (const VctCascade &c : mVctCascades) cascadePending = cascadePending || c.pending > 0;
             const bool rebuildPending = mGiCachesDirty || mGiChainShapeDirty ||
                                         mGiBuildStage != GiBuildStage::Idle || cascadePending;
-            const bool injectionOwed = mGiSettleStepsOwed > 0 || mGiTickOwed != GiTickOwed::None;
+            // ...AND A RE-SOLVE THE SCHEDULER HOLDS PENDING IS NOT REST (ENGINE-UPGRADE-2B stage 4): it fires
+            // once the change has held still for its window, and a picture taken before it is not the scene's
+            // answer. A paused budget follows nothing and keeps what it owes for the un-pause (plan()).
+            const bool injectionOwed = mGiSettleStepsOwed > 0 || mGiTickOwed != GiTickOwed::None ||
+                                       (mGiPlan.pendingRefresh && mGi.updateBudget > 0);
             const bool fieldBusy = mIfd && mIfdTotalProbes > 0u &&
                                    (mIfdFollowOwed != 0 || mIfdProbesDone < mIfdTotalProbes ||
                                     (mIfdProbesPerFrame > 0u && st.ifdRefinesOwed > 0u));
@@ -3300,6 +3305,12 @@ void PhotonComponent::forwardPlusLightCensus(unsigned &lights, unsigned &budget)
 
 PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPos, bool driverStereo) {
     FrameWork w;
+    // A FRAME THAT DRAINED NO RECORD OF THIS SCENE IS STILL (ENGINE-UPGRADE-2B stage 4): nothing the scheduler
+    // reads changed, so it runs once for it as for a record that carries no change - a pending re-solve's
+    // stability window advances and the re-solve lands. A screenshot's settle drains no record (the document's
+    // clock does not move), and its picture at rest used to be taken with the re-solve still pending
+    // (pool.world_sky_b's height_fog: two at-rest shots 0.1 % apart once the field settled faster).
+    if (mGiPlan.pushed && mGiPlan.frame != giWriterFrame()) plan(FrameInputScene(), false);
     // THE VR CASCADE PROFILE FOLLOWS THE DRIVER (V1-RIG item 4). The view that
     // places the chain is the one that reads it, and in a session that is the
     // headset's — five times the pixels for half the frame. A change of driver
