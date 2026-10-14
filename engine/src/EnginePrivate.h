@@ -6605,10 +6605,14 @@ public:
     // without the scene's members: the substrate (the tables it reads; the ray
     // structures slot it fills), a slot's or a node's item facts, and the one write a
     // reader may ask for — a slot re-composed (its skin row changed).
-    GpuSceneSubstrate &substrate() const { return mSubstrate; }
+    const GpuSceneSubstrate &substrate() const { return mSubstrate; }
+    /// THE ONE WRITE a reader makes into the substrate: the ray tier fills and releases
+    /// the scene's ray structures slot (created on the scene's first ray frame, released
+    /// while the device lives — GpuSceneSubstrate::rays). Everything else is read-only.
+    GpuSceneSubstrate::RayStructures &rayStructuresSlot() const { return mSubstrate.rays; }
     struct GpuSlotView {
         uint32_t node = 0;                        ///< the node's id
-        Ogre::Item *item = nullptr;
+        const Ogre::Item *item = nullptr;
         unsigned long long rigGeneration = 0;     ///< moves when the Item is rebuilt
         /// The pose pushes a skin is keyed on: the node's own and, for a shareSkeleton
         /// follower, its master's (the caster walk's recipe).

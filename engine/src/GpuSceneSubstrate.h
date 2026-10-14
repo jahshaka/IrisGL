@@ -113,7 +113,8 @@ public:
     /// The scene's TLAS, BLAS set and skin caches; created by the ray tier on the
     /// scene's first ray frame, released by it (OgreScene::forgetRayQuery, the tier's
     /// close) while the device lives, and only then deleted with the scene.
-    std::unique_ptr<RaySceneStructures, RaySceneStructuresDelete> rays;
+    using RayStructures = std::unique_ptr<RaySceneStructures, RaySceneStructuresDelete>;
+    RayStructures rays;
 };
 
 }  // namespace detail

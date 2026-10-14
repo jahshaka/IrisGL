@@ -556,7 +556,7 @@ private:
             /// attachSkinnedMesh re-attaches IN PLACE (detachItem, then createItem),
             /// so a new Item can land at the old one's address — the pointer alone
             /// would keep a cache sized and addressed for a mesh that may be gone.
-            Ogre::Item *item = nullptr;
+            const Ogre::Item *item = nullptr;
             const Ogre::Mesh *mesh = nullptr;
             unsigned long long rigGeneration = 0ull;
             /// What the cache and its structure were built over, re-checked against
@@ -1402,8 +1402,9 @@ RayQueryTier::SceneAs *RayQueryTier::asOf(const OgreScene *scene) {
 }
 
 RayQueryTier::SceneAs &RayQueryTier::asFor(OgreScene *scene) {
-    if (!scene->substrate().rays) scene->substrate().rays.reset(new RaySceneStructures());
-    return scene->substrate().rays->as;
+    GpuSceneSubstrate::RayStructures &rays = scene->rayStructuresSlot();
+    if (!rays) rays.reset(new RaySceneStructures());
+    return rays->as;
 }
 
 // ---------------------------------------------------------------------------
@@ -2050,7 +2051,7 @@ void RayQueryTier::releaseScene(OgreScene *scene) {
     sa.skins.clear();
     dropSkinBuffers(sa);
     detail::monitor::forgetGpuOwner(&sa);
-    scene->substrate().rays.reset();
+    scene->rayStructuresSlot().reset();
 }
 
 void RayQueryTier::close() {
@@ -2293,7 +2294,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     for (const Blas &bl : sa.blas)
         if (bl.compactState == 1u) mCompactBusy &= ~(uint64_t(1) << bl.compactSlot);
     detail::monitor::forgetGpuOwner(&sa);
-    scene->substrate().rays.reset();
+    scene->rayStructuresSlot().reset();
     forgetCardMovers(scene);
 }
 
@@ -3346,7 +3347,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
         std::vector<SkinJobRecord> jobs;
         uint32_t maxVerts = 0u;
         for (Dirty &d : dirty) {
-            Ogre::Item *item = d.sk->item;
+            const Ogre::Item *item = d.sk->item;
             Ogre::SkeletonInstance *skel = item->getSkeletonInstance();
             const Ogre::SubItem *sub = item->getNumSubItems() ? item->getSubItem(0) : nullptr;
             const Ogre::RenderableAnimated::IndexMap *map =
