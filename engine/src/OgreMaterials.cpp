@@ -423,6 +423,22 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
             db->setBlendblock(bb);
         }
     }
+
+    // THE CASTER OF A CUTOUT CULLS NOTHING (BISTRO-FIXES-3 stage 2). A cutout is a thin card
+    // - a leaf, a fence, a grille - with no inside: whichever face the light sees, the card
+    // stands between it and what lies behind. The caster's macroblock is the colour pass's
+    // copy (HlmsDatablock::setMacroblock overrides it on every set), so a one-sided card
+    // whose front faced away from the sun was culled in the caster pass and cast nothing:
+    // shadow.cutout_two_sided's card turned away left all 397 texels of its shadow lit. The
+    // colour pass keeps its cull; the caster draws both faces. An opaque material keeps the
+    // copy - a one-sided opaque surface is the face of a closed shape, whose other side casts.
+    // LAST in applyPbr: every macroblock set above resets the caster to the copy.
+    {
+        Ogre::HlmsMacroblock caster = *db->getMacroblock();
+        if (p.alphaMode == PbrAlphaMode::Cutout) caster.mCullMode = Ogre::CULL_NONE;
+        const Ogre::HlmsMacroblock *cur = db->getMacroblock(true);
+        if (!cur || *cur != caster) db->setMacroblock(caster, true);
+    }
 }
 
 // The UNLIT shading model (HLMS_ADOPTION P4a). This is the whole of what the
