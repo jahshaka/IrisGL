@@ -50,6 +50,7 @@
 #include <OgreRenderable.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -153,6 +154,21 @@ struct AtomId {
 
 class AtomDecodeRenderable;
 class AtomKeyProbe;
+
+/// THE ATOM PASSES' DEVICE STATE — one per Root, held by Atom's Hlms (the Terra pattern:
+/// the Hlms owns its facility's GPU objects): the id pass's pipelines and the retire
+/// window of the views' stats rings (OgreAtomIdPass.cpp), the caster pass's pipelines
+/// and the retire window of the scenes' caster rings (OgreAtomCasterPass.cpp). Created on
+/// first use; emptied — behind one idle device — by releaseAtomIdPass /
+/// releaseAtomCasterPass, after every view and scene and before Root.
+struct AtomIdDevice;
+struct AtomIdDeviceDelete {
+    void operator()(AtomIdDevice *p) const;       ///< OgreAtomIdPass.cpp
+};
+struct AtomCasterDevice;
+struct AtomCasterDeviceDelete {
+    void operator()(AtomCasterDevice *p) const;   ///< OgreAtomCasterPass.cpp
+};
 
 class HlmsAtom final : public Ogre::HlmsPbs {
 public:
@@ -411,8 +427,18 @@ public:
     /// they were environment reads per pass. Set by OgreEngine at registration.
     void setArms(const ArmRegistry *arms) { mArms = arms; }
 
+    /// THE PASSES' DEVICE STATE (above): created on first use, null before.
+    AtomIdDevice &idDevice();
+    AtomIdDevice *idDeviceIfAny() { return mIdDevice.get(); }
+    AtomCasterDevice &casterDevice();
+    AtomCasterDevice *casterDeviceIfAny() { return mCasterDevice.get(); }
+
 private:
     const ArmRegistry *mArms = nullptr;
+    std::unique_ptr<AtomIdDevice, AtomIdDeviceDelete> mIdDevice;
+    std::unique_ptr<AtomCasterDevice, AtomCasterDeviceDelete> mCasterDevice;
+    /// The datablocks the hit decode could not twin, said once each (syncDraws).
+    std::unordered_map<std::string, bool> mSaidNoTwin;
     void uploadBucketTable();
     /// THE WORLD LIGHT LIST of a hit decode pass (kWorldLightBufSlot): rebuilt on the
     /// CPU per pass from the scene's own light collection (never the camera-culled

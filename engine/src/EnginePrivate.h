@@ -24,6 +24,7 @@
 #include "GpuCull.h"
 #include "GpuSceneSubstrate.h"   // the tables' one writer (GpuScene.h inside it)
 #include "photon/PhotonComponent.h"
+#include "atom/AtomComponent.h"
 #include "jahshaka/engine/GpuSubstrate.h"
 #include "GpuVoxelGather.h"
 #include "SceneLightList.h"
@@ -930,22 +931,29 @@ bool atomIdPassSupported(Ogre::RenderSystem *rs);
 void fillCullFrustum(const Ogre::Camera *cam, float viewportHeight, GpuCullRequest &out);
 void registerAtomIdPass();
 void releaseAtomIdPass();
-/// A view going away: its stats ring (OgreAtomIdPass.cpp) goes with it.
-void atomIdPassForgetView(const OgreView *view);
+/// A VIEW'S ID PASS STATS RING (OgreAtomIdPass.cpp): the view's cull lists' counters read
+/// back a frame or two late. The view owns it; its deleter retires it through the device's
+/// window (HlmsAtom::passDevice), since a copy into it may still be in flight.
+struct AtomIdViewRing;
+struct AtomIdViewRingDelete {
+    void operator()(AtomIdViewRing *p) const;
+};
+using AtomIdViewRingPtr = std::unique_ptr<AtomIdViewRing, AtomIdViewRingDelete>;
 /// OgreAtomCasterPass.cpp — THE CASTER CUT's device half (ATOM-SHADOWS-1): its recorder
-/// on the provider (beside the id pass's), its pipelines destroyed before Root, and a
-/// scene going away takes its stats ring with it.
+/// on the provider (beside the id pass's), its pipelines destroyed before Root. Its
+/// per-scene state is the scene's AtomComponent's (atom/AtomComponent.h).
 class OgreScene;
 class JahAtmosphere;   // Atmosphere.h (SKY-ATMOSPHERE-1)
 void registerAtomCasterPass();
 void releaseAtomCasterPass();
-void atomCasterPassForgetScene(const OgreScene *scene);
-/// Which scene a scene manager renders (the caster recorder is handed a pass and its
-/// scene manager: a shadow node runs in views, probes and cards alike, and only a
-/// view's workspace is in atomViewOf's registry). OgreScene registers itself.
-void atomRegisterScene(const Ogre::SceneManager *sm, OgreScene *scene);
-void atomUnregisterScene(const Ogre::SceneManager *sm);
-OgreScene *atomSceneOf(const Ogre::SceneManager *sm);
+/// WHICH SCENE A SCENE MANAGER RENDERS — bound ON the manager (its root scene node's
+/// UserObjectBindings, Ogre's own idiom for a user object on an Ogre object), so the
+/// binding lives and dies with the manager and no process map holds a pointer that can
+/// dangle. A pass, a shadow node or an Hlms callback handed only a SceneManager (views,
+/// probes, mirrors and cards alike) finds its scene here; null for a manager no
+/// OgreScene owns (the blank world, the document's staging manager). OgreGpuScene.cpp.
+void bindSceneManager(Ogre::SceneManager *sm, OgreScene *scene);
+OgreScene *sceneOfManager(const Ogre::SceneManager *sm);
 /// THE OCCLUSION'S PYRAMID (ATOM-OCCLUSION-1, OgreAtomIdPass.cpp): `hzb`'s every level
 /// rebuilt from `depth` — ONE dispatch of the single-pass build (JahHzbBuild_cs,
 /// farthest), through HlmsCompute with Ogre's barrier solver. False when the job is not
@@ -959,12 +967,12 @@ constexpr Ogre::uint8 kHzbMaxLevels = 16u;
 constexpr Ogre::uint8 kHzbCounterSlot = 16u;
 Ogre::HlmsComputeJob *hzbBuildJob();
 void releaseHzbBuild();
-/// OgreAtomDraw.cpp — which view a workspace with an id pass belongs to (the
-/// recorder is handed a pass, not a view), and the view's listener that arms the
-/// screen decode for the passes that skip the Atom queue.
-void atomRegisterView(const Ogre::CompositorWorkspace *ws, OgreView *view);
-void atomUnregisterView(const Ogre::CompositorWorkspace *ws);
-OgreView *atomViewOf(const Ogre::CompositorWorkspace *ws);
+/// OgreAtomDraw.cpp — the view's listener that arms the screen decode for the passes
+/// that skip the Atom queue; it rides the view's workspace and its capture's, and so is
+/// how a pass of either finds its view (atomViewOfPass: the pass's workspace's
+/// listener — null where the view's chain carries no id pass, or for a workspace no
+/// view owns).
+OgreView *atomViewOfPass(const Ogre::CompositorPass *pass);
 /// The listener's own deleter: CompositorWorkspaceListener has no virtual destructor.
 struct AtomDrawListenerDeleter {
     void operator()(Ogre::CompositorWorkspaceListener *l) const;
@@ -4087,42 +4095,24 @@ public:
     void setAtomDrawEnabled(bool on) override;
     void setAtomOcclusionEnabled(bool on) override;
     void setAtomCutBudgetForTest(unsigned indices) override;
-    bool atomOcclusionEnabled() const override { return mAtomOcclusionEnabled; }
-    void setAtomView(AtomView view) override { mAtomView = view; }
-    AtomView atomView() const override { return mAtomView; }
+    bool atomOcclusionEnabled() const override { return mAtom.occlusionEnabled(); }
+    void setAtomView(AtomView view) override { mAtom.setView(view); }
+    AtomView atomView() const override { return mAtom.view(); }
     /// THE BUCKETS VIEW'S TABLE (OgreAtomDraw.cpp): one R32_UINT texel per GPU
     /// scene slot holding the decode bucket that shades it (0 = none), 1024 slots a
     /// row. Written by updateAtomDraw ONLY while the view is Buckets (a CPU walk of
     /// the slots and an upload when a value moved); null until then.
-    Ogre::TextureGpu *atomViewTable() const { return mAtomViewTable; }
+    Ogre::TextureGpu *atomViewTable() const { return mAtom.viewTable(); }
     GpuSceneStatus gpuSceneStatus() const override;
     /// THE CUT'S INDEX NEED, the scene's high-water mark (ATOM-CLUSTER-CUT F1): the most
     /// indices any view's cut of this scene asked of its stream (the stats ring's
     /// cursor). Every GpuCull sizes its stream from at least this, so a view born into
     /// a heavy scene — a screenshot, a thumbnail — does not start small and overflow.
     void noteCutIndexNeed(uint32_t indices) { mCutIndexNeed = std::max(mCutIndexNeed, indices); }
-    /// THE CASTER CUT'S LIST (ATOM-SHADOWS-1, OgreAtomCasterPass.cpp): ONE per scene,
-    /// reused map after map inside a frame — the recorder serialises the uses (the
-    /// previous draw's reads before the next cull's writes, the id pass's own edge), so a
-    /// scene pays one stream however many maps its views, mirrors and probes render.
-    /// Seeded from the scene's high-water mark like a view's list, grown by its own
-    /// overflows; it never raises the mark (a map's cut is not a view's).
-    detail::GpuCull &casterCull() { return mCasterCull; }
-    /// What the caster recorder read back (AtomDrawStatus's caster fields).
-    struct CasterStats {
-        bool valid = false;
-        unsigned maps = 0, clusters = 0, instances = 0, overflow = 0, missing = 0, indexBudget = 0;
-        unsigned long long triangles = 0ull;
-        unsigned peakMaps = 0;              ///< the most maps one frame recorded (cumulative)
-        unsigned long long unrecorded = 0;  ///< maps rendered but not recorded (cumulative)
-    };
-    void setCasterStats(const CasterStats &s) { mCasterStats = s; }
-    /// True while this scene files any item in the Atom queue (the split's word set is
-    /// not empty): the caster pass's gate.
-    bool hasAtomItems() const { return !mAtomWords.empty(); }
-    /// True while the GPU scene holds an Atom item drawn from both sides (kGpuTwoSided):
-    /// the id pass and the caster cut record their no-cull draw of the two-sided range.
-    bool hasTwoSidedAtomItems() const { return mAtomFeed.twoSidedCount != 0u; }
+    /// ATOM (atom/AtomComponent.h): the scene's split — its doors, the words step, the
+    /// Atom view's table, the caster cut's list and pass state, its share of the status.
+    AtomComponent &atom() { return mAtom; }
+    const AtomComponent &atom() const { return mAtom; }
     /// THE CASTER CUT'S TEST DOOR (shadow.atom_cut; never a mode): arm it for ONE map of
     /// the VIEW kind's shadow node (`map` = the shadow map index, `face` = the cube face of
     /// a point map, 0 otherwise); the next frame that renders that map copies its cut —
@@ -6630,6 +6620,10 @@ public:
 private:
     PhotonComponent::Inputs photonInputs();
     PhotonComponent mPhoton{ photonInputs() };
+    /// ATOM (atom/AtomComponent.h), on the substrate it reads; its one input from the scene
+    /// (the adapter until the frame's record): the datablock a slot's Item wears.
+    const Ogre::HlmsDatablock *atomSlotDatablock(uint32_t slot) const;
+    AtomComponent mAtom{ mRoot, mSceneMgr, mSubstrate, [this](uint32_t slot) { return atomSlotDatablock(slot); } };
     /// The substrate's steps (OgreGpuScene.cpp): the compose (marks, then the walk —
     /// the compare over every slot as a UniformScalableTask — staging the changed
     /// slots), the commit (the device copy), and the stage they file.
@@ -6648,8 +6642,6 @@ private:
     /// tables it reads are owned by; a consumer that wants two culls of one
     /// scene in a frame is stage 3's problem and gets a second instance.
     detail::GpuCull mGpuCull;
-    detail::GpuCull mCasterCull;   ///< casterCull(): the shadow maps' caster cut (ATOM-SHADOWS-1)
-    CasterStats mCasterStats;
     // --- THE RAY LEVEL (ATOM P3's AT-A8r; OgreGpuScene.cpp) ----------------
     /// The level each slot's bottom-level structure should be built from, and
     /// the DISTANCE that answer was computed at (-1 = never). The second array
@@ -6687,16 +6679,15 @@ public:
     bool atomDrawWanted() const;
     /// THE ID PASS'S OCCLUSION IS WANTED here (ChainDesc::atomOcclusion): the split is,
     /// and the occlusion's measuring door is open.
-    bool atomOcclusionWanted() const { return atomDrawWanted() && mAtomOcclusionEnabled; }
-    /// Once per frame after the GPU scene's update (OgreEngine's frame hook): the
-    /// screen decode's draws for the words the atom items wear, and the witness
-    /// that re-routes the items of a material whose permutation moved in place.
-    void updateAtomDraw();
+    bool atomOcclusionWanted() const { return atomDrawWanted() && mAtom.occlusionEnabled(); }
+    /// THE WORDS STEP (AtomComponent::step), once per frame after the GPU scene's commit
+    /// (OgreShadow.cpp's post-graph block) and in the warm-up's second frame.
+    void updateAtomDraw() { mAtom.step(); }
     /// THE ATOM VIEW CAN PAINT in this scene's viewport: the split is live and no
     /// view of the scene draws straight into a window without the id pass (the Low
     /// tier's passthrough viewport — AtomDrawStatus::passthroughViews). A VR eye
     /// pair carries no id pass either, but the desktop view beside it does.
-    bool atomViewPaintable() const override { return atomDrawOn() && mAtomPassthroughViews.empty(); }
+    bool atomViewPaintable() const override { return atomDrawOn() && !mAtom.hasPassthroughViews(); }
 
     // ---- THE PHOTON VIEW (PHOTON-VIEW-1, OgrePhotonView.cpp) ----------------
     void setPhotonView(PhotonView view) override { mPhotonView = view; }
@@ -6732,17 +6723,9 @@ public:
     /// neither and is forgotten here.
     void notePhotonView(const void *view, bool presents, const PhotonViewShape &shape);
 private:
-    /// updateAtomDraw's first half: the split's witness and the screen decode's draws.
-    void updateAtomSplit();
     /// Files the node's Item in kAtomRenderQueue (atom) or back where its material
     /// puts it (renderQueueFor). Called by composeGpuInstance.
     void placeAtomQueue(const Node &n, bool atom) const;
-    /// THE MEASUREMENT DOOR (the cost table's paired arms in one process): false
-    /// routes every item to PBS and every chain builds without the id pass.
-    bool mAtomDrawEnabled = true;
-    /// ...and THE OCCLUSION'S (ATOM-OCCLUSION-1): false builds every chain with the id
-    /// pass frustum-only (no pyramid, no late pass). Not saved; a new scene starts on.
-    bool mAtomOcclusionEnabled = true;
     /// THE PHOTON VIEW (not saved; a new scene starts Off) and what is up for it.
     PhotonView mPhotonView = PhotonView::Off;
     int mPhotonVoxelCascade = -1;
@@ -6770,64 +6753,12 @@ private:
     void photonVoxelsOff();
     void photonProbesOff();
     void photonCardsOff();
-    /// THE ATOM VIEW (not saved; a new scene starts Off).
-    AtomView mAtomView = AtomView::Off;
-    Ogre::TextureGpu *mAtomViewTable = nullptr;
-    std::vector<uint32_t> mAtomViewRows;   ///< what the table holds (its CPU copy)
-    /// The Buckets walk's witness: the GPU scene's slot writes and HlmsAtom's bucket
-    /// generation it last walked at (~0 = walk on the next sync).
-    unsigned long long mAtomViewWrites = ~0ull, mAtomViewBucketGen = ~0ull;
-    void syncAtomViewTable();
-public:
-    /// Destroys the Buckets table (the scene's teardown, before its SceneManager).
-    void releaseAtomViewTable();
-private:
-    /// The views of this scene whose chains carry no id pass while the split is
-    /// live, by reason (AtomDrawStatus::stereoViews / passthroughViews): they draw the
-    /// Atom queue through PBS.
-    std::unordered_set<const void *> mAtomStereoViews, mAtomPassthroughViews;
 public:
     /// OgreView::syncAtomDraw's report, every frame (both false on detach).
     void noteAtomPbsView(const void *view, bool stereo, bool passthrough) {
-        if (stereo) mAtomStereoViews.insert(view); else mAtomStereoViews.erase(view);
-        if (passthrough) mAtomPassthroughViews.insert(view); else mAtomPassthroughViews.erase(view);
+        mAtom.notePbsView(view, stereo, passthrough);
     }
 private:
-    /// updateAtomDraw's memory: HlmsAtom's twin epoch and the words at the last sync.
-    unsigned long long mAtomSyncEpoch = ~0ull;
-    std::vector<uint32_t> mAtomWords;
-    /// THE ATOM ITEMS' WORDS, kept by the GPU scene's change feed (ATOM-CPU-WALKS-1):
-    /// a slot's word is its PBS material word when the table routes it Atom
-    /// (kGpuAtom), none otherwise. What the screen decode's draws follow — the walk
-    /// + sort over every slot this replaces ran on every mover frame, and the
-    /// per-material witness walk beside it on EVERY frame (W13: 18-19 ms at 10k).
-    /// An in-place material edit reaches the table through the PBS change log's
-    /// drain (drainPbsChanges), which re-composes the Items it re-hashed.
-    struct AtomWordFeed final : detail::GpuSceneObserver {
-        detail::WordCounts words;
-        /// THE TWO-SIDED ATOM SLOTS (ATOM-TWO-SIDED-1): kGpuAtom | kGpuTwoSided, per slot
-        /// and counted — what gates the passes' no-cull draw of the two-sided range.
-        std::vector<uint8_t> twoSided;
-        unsigned twoSidedCount = 0u;
-        void gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) override {
-            uint32_t flags = 0u;
-            if (now) std::memcpy(&flags, &now->boundsMax[3], sizeof(flags));
-            words.set(slot, (now && (flags & detail::kGpuAtom)) ? now->raster[0] : detail::WordCounts::kNone);
-            const uint8_t two = (now && (flags & detail::kGpuAtom) && (flags & detail::kGpuTwoSided)) ? 1u : 0u;
-            if (slot >= twoSided.size()) {
-                if (!two) return;
-                twoSided.resize(size_t(slot) + 1u, 0u);
-            }
-            twoSidedCount = twoSidedCount - twoSided[slot] + two;
-            twoSided[slot] = two;
-        }
-        void gpuSceneReset() override {
-            words.reset();
-            twoSided.clear();
-            twoSidedCount = 0u;
-        }
-    };
-    AtomWordFeed mAtomFeed;
     /// THE CARD CANDIDATES, kept by the change feed (ATOM-CPU-WALKS-1). The surface
     /// cache used to be handed EVERY item every frame (a walk of every sub-item's
     /// blend state and the mesh's card list, then a world box recomputed up every
@@ -7966,6 +7897,9 @@ public:
     /// The capture workspace's own list (CLOSE-SHOT-2): its cull must not write the
     /// view's lists, whose count words the view's stats ring and cut budget read back.
     detail::GpuCull &atomCullCapture() { return mAtomCullCapture; }
+    /// The id pass's stats ring of the view's two lists (OgreAtomIdPass.cpp; null before
+    /// the first frame that copies their counters).
+    AtomIdViewRingPtr &atomStatsRing() { return mAtomStatsRing; }
     /// Whether this view's chain carries the two-pass occlusion (ChainDesc::atomOcclusion).
     bool chainAtomOcclusion() const { return mChainAtomOcclusion; }
     /// WHAT THE FIRST CULL TESTS AGAINST (OgreAtomIdPass.cpp): the matrix the pyramid
@@ -8174,6 +8108,9 @@ private:
     unsigned long long mAtomLateTriangles = 0ull;
     unsigned mAtomLateSurvivors = 0u, mAtomOccluded = 0u, mAtomDisoccluded = 0u;
     AtomDrawListenerPtr mAtomListener;
+    /// The id pass's stats ring of THIS view's lists (OgreAtomIdPass.cpp), created on the
+    /// first frame that reads them back; retired with the view.
+    AtomIdViewRingPtr mAtomStatsRing;
     /// PHOTON-VIEW-1: the view's photon listener and the tier's overlay.
     PhotonListenerPtr mPhotonListener;
     /// CLOSE-SHOT-2: the presented frame's capture (requestFrameCapture).

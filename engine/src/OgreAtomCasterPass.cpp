@@ -44,6 +44,7 @@
 #include "AtomPass.h"
 #include "GpuCull.h"
 #include "GpuScene.h"
+#include "HlmsAtom.h"
 
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/OgreCompositorShadowNode.h>
@@ -51,6 +52,7 @@
 #include <Compositor/Pass/PassScene/OgreCompositorPassScene.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <OgreCamera.h>
+#include <OgreHlmsManager.h>
 #include <OgreLight.h>
 #include <OgreLogManager.h>
 #include <OgreRenderPassDescriptor.h>
@@ -125,14 +127,9 @@ struct CasterPipelines {
     std::vector<Entry> entries;
     bool refused = false;   ///< a creation failed; said once, the pass records nothing
 };
-CasterPipelines gC;
+/// Said once per message (the device's lastLog; defined below its type).
+void logOnce(const std::string &what);
 
-void logOnce(const std::string &what) {
-    static std::string sLast;
-    if (what == sLast) return;
-    sLast = what;
-    Ogre::LogManager::getSingleton().logMessage("Jahshaka atom caster pass: " + what, Ogre::LML_CRITICAL);
-}
 
 VkShaderModule makeModule(VkDevice dev, const uint32_t *code, size_t bytes) {
     VkShaderModuleCreateInfo ci{};
@@ -144,25 +141,25 @@ VkShaderModule makeModule(VkDevice dev, const uint32_t *code, size_t bytes) {
     return m;
 }
 
-void destroyPipelines() {
-    if (!gC.dev) return;
-    for (CasterPipelines::Entry &e : gC.entries) {
-        if (e.pipeline) vkDestroyPipeline(gC.dev, e.pipeline, nullptr);
-        if (e.compatible) vkDestroyRenderPass(gC.dev, e.compatible, nullptr);
+void destroyPipelines(CasterPipelines &C) {
+    if (!C.dev) return;
+    for (CasterPipelines::Entry &e : C.entries) {
+        if (e.pipeline) vkDestroyPipeline(C.dev, e.pipeline, nullptr);
+        if (e.compatible) vkDestroyRenderPass(C.dev, e.compatible, nullptr);
     }
-    gC.entries.clear();
+    C.entries.clear();
 }
 
 /// The pipeline for `key` — built on first use.
-VkPipeline pipelineFor(Ogre::VulkanRenderSystem *vkRs, const CasterPipelineKey &key) {
-    if (gC.refused) return VK_NULL_HANDLE;
+VkPipeline pipelineFor(CasterPipelines &C, Ogre::VulkanRenderSystem *vkRs, const CasterPipelineKey &key) {
+    if (C.refused) return VK_NULL_HANDLE;
     Ogre::VulkanDevice *device = vkRs->getVulkanDevice();
-    if (!gC.dev) {
-        gC.dev = device->mDevice;
-        gC.drawIndexedIndirectCount = reinterpret_cast<PFN_vkCmdDrawIndexedIndirectCountKHR>(
-            vkGetDeviceProcAddr(gC.dev, "vkCmdDrawIndexedIndirectCountKHR"));
-        gC.bufferDeviceAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(
-            vkGetDeviceProcAddr(gC.dev, "vkGetBufferDeviceAddressKHR"));
+    if (!C.dev) {
+        C.dev = device->mDevice;
+        C.drawIndexedIndirectCount = reinterpret_cast<PFN_vkCmdDrawIndexedIndirectCountKHR>(
+            vkGetDeviceProcAddr(C.dev, "vkCmdDrawIndexedIndirectCountKHR"));
+        C.bufferDeviceAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(
+            vkGetDeviceProcAddr(C.dev, "vkGetBufferDeviceAddressKHR"));
         VkPushConstantRange pc{};
         pc.stageFlags = kCasterPushStages;
         pc.offset = 0;
@@ -171,15 +168,15 @@ VkPipeline pipelineFor(Ogre::VulkanRenderSystem *vkRs, const CasterPipelineKey &
         pl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pl.pushConstantRangeCount = 1;
         pl.pPushConstantRanges = &pc;
-        if (!gC.drawIndexedIndirectCount || !gC.bufferDeviceAddress ||
-            vkCreatePipelineLayout(gC.dev, &pl, nullptr, &gC.layout) != VK_SUCCESS) {
-            gC.refused = true;
+        if (!C.drawIndexedIndirectCount || !C.bufferDeviceAddress ||
+            vkCreatePipelineLayout(C.dev, &pl, nullptr, &C.layout) != VK_SUCCESS) {
+            C.refused = true;
             logOnce("no vkCmdDrawIndexedIndirectCountKHR / vkGetBufferDeviceAddressKHR, or the layout "
                     "failed: the shadow maps draw no Atom caster");
             return VK_NULL_HANDLE;
         }
     }
-    for (const CasterPipelines::Entry &e : gC.entries)
+    for (const CasterPipelines::Entry &e : C.entries)
         if (e.key == key) return e.pipeline;
 
     CasterPipelines::Entry e;
@@ -223,20 +220,20 @@ VkPipeline pipelineFor(Ogre::VulkanRenderSystem *vkRs, const CasterPipelineKey &
     rp.pAttachments = att;
     rp.subpassCount = 1;
     rp.pSubpasses = &sub;
-    if (vkCreateRenderPass(gC.dev, &rp, nullptr, &e.compatible) != VK_SUCCESS) {
-        gC.refused = true;
+    if (vkCreateRenderPass(C.dev, &rp, nullptr, &e.compatible) != VK_SUCCESS) {
+        C.refused = true;
         logOnce("vkCreateRenderPass (the compatible pass) failed");
         return VK_NULL_HANDLE;
     }
 
-    VkShaderModule vs = makeModule(gC.dev, katomCaster_vertSpv, sizeof(katomCaster_vertSpv));
-    VkShaderModule fs = point ? makeModule(gC.dev, katomCasterPoint_fragSpv, sizeof(katomCasterPoint_fragSpv))
+    VkShaderModule vs = makeModule(C.dev, katomCaster_vertSpv, sizeof(katomCaster_vertSpv));
+    VkShaderModule fs = point ? makeModule(C.dev, katomCasterPoint_fragSpv, sizeof(katomCasterPoint_fragSpv))
                               : VK_NULL_HANDLE;
     if (!vs || (point && !fs)) {
-        if (vs) vkDestroyShaderModule(gC.dev, vs, nullptr);
-        if (fs) vkDestroyShaderModule(gC.dev, fs, nullptr);
-        vkDestroyRenderPass(gC.dev, e.compatible, nullptr);
-        gC.refused = true;
+        if (vs) vkDestroyShaderModule(C.dev, vs, nullptr);
+        if (fs) vkDestroyShaderModule(C.dev, fs, nullptr);
+        vkDestroyRenderPass(C.dev, e.compatible, nullptr);
+        C.refused = true;
         logOnce("vkCreateShaderModule failed");
         return VK_NULL_HANDLE;
     }
@@ -296,16 +293,16 @@ VkPipeline pipelineFor(Ogre::VulkanRenderSystem *vkRs, const CasterPipelineKey &
     gp.pDepthStencilState = &ds;
     gp.pColorBlendState = &cb;
     gp.pDynamicState = &dy;
-    gp.layout = gC.layout;
+    gp.layout = C.layout;
     gp.renderPass = e.compatible;
     gp.subpass = 0;
     const auto t0 = std::chrono::steady_clock::now();
-    const VkResult r = vkCreateGraphicsPipelines(gC.dev, device->mPipelineCache, 1, &gp, nullptr, &e.pipeline);
+    const VkResult r = vkCreateGraphicsPipelines(C.dev, device->mPipelineCache, 1, &gp, nullptr, &e.pipeline);
     const double createMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    vkDestroyShaderModule(gC.dev, vs, nullptr);
-    if (fs) vkDestroyShaderModule(gC.dev, fs, nullptr);
+    vkDestroyShaderModule(C.dev, vs, nullptr);
+    if (fs) vkDestroyShaderModule(C.dev, fs, nullptr);
     if (r != VK_SUCCESS) {
-        vkDestroyRenderPass(gC.dev, e.compatible, nullptr);
+        vkDestroyRenderPass(C.dev, e.compatible, nullptr);
         e.compatible = VK_NULL_HANDLE;
         e.pipeline = VK_NULL_HANDLE;
         if (key.cullNone) {
@@ -314,10 +311,10 @@ VkPipeline pipelineFor(Ogre::VulkanRenderSystem *vkRs, const CasterPipelineKey &
             // a null entry, so it is asked of the device once, never per map.
             logOnce("vkCreateGraphicsPipelines failed for the no-cull (two-sided) caster pipeline: "
                     "two-sided Atom items cast no shadow on this device");
-            gC.entries.push_back(e);
+            C.entries.push_back(e);
             return VK_NULL_HANDLE;
         }
-        gC.refused = true;
+        C.refused = true;
         logOnce("vkCreateGraphicsPipelines failed");
         return VK_NULL_HANDLE;
     }
@@ -326,7 +323,7 @@ VkPipeline pipelineFor(Ogre::VulkanRenderSystem *vkRs, const CasterPipelineKey &
             (key.cullNone ? ", no cull" : key.cullFront ? ", front cull" : ", back cull") + ") created in " +
             std::to_string(createMs) + " ms",
         Ogre::LML_NORMAL);
-    gC.entries.push_back(e);
+    C.entries.push_back(e);
     return e.pipeline;
 }
 
@@ -364,20 +361,19 @@ struct CasterRing {
     /// The triangles each use of the last frame READ drew (the metrics a use adds).
     std::vector<unsigned long long> lastTriangles;
 };
-std::unordered_map<const OgreScene *, CasterRing> gRings;
-std::vector<std::pair<CasterRing, uint32_t>> gGrave;
 
-void destroyRing(CasterRing &r) {
-    if (!gC.dev) return;
+void destroyRing(const CasterPipelines &C, CasterRing &r) {
+    if (!C.dev) return;
     if (r.memory) {
-        vkUnmapMemory(gC.dev, r.memory);
-        vkFreeMemory(gC.dev, r.memory, nullptr);
+        vkUnmapMemory(C.dev, r.memory);
+        vkFreeMemory(C.dev, r.memory, nullptr);
     }
-    if (r.buffer) vkDestroyBuffer(gC.dev, r.buffer, nullptr);
+    if (r.buffer) vkDestroyBuffer(C.dev, r.buffer, nullptr);
     r = CasterRing();
 }
 
-bool ensureRing(Ogre::VulkanDevice *device, CasterRing &r, uint32_t slots, uint32_t columns = kFirstUses) {
+bool ensureRing(const CasterPipelines &C, Ogre::VulkanDevice *device, CasterRing &r, uint32_t slots,
+                uint32_t columns = kFirstUses) {
     if (r.buffer) return true;
     slots = std::min(std::max(slots, 2u), 8u);
     VkBufferCreateInfo bi{};
@@ -386,9 +382,9 @@ bool ensureRing(Ogre::VulkanDevice *device, CasterRing &r, uint32_t slots, uint3
     // TRANSFER_SRC: a growth copies this frame's columns out of it.
     bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateBuffer(gC.dev, &bi, nullptr, &r.buffer) != VK_SUCCESS) return false;
+    if (vkCreateBuffer(C.dev, &bi, nullptr, &r.buffer) != VK_SUCCESS) return false;
     VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(gC.dev, r.buffer, &req);
+    vkGetBufferMemoryRequirements(C.dev, r.buffer, &req);
     VkPhysicalDeviceMemoryProperties props;
     vkGetPhysicalDeviceMemoryProperties(device->mPhysicalDevice, &props);
     const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -400,10 +396,10 @@ bool ensureRing(Ogre::VulkanDevice *device, CasterRing &r, uint32_t slots, uint3
     ai.allocationSize = req.size;
     ai.memoryTypeIndex = type;
     void *p = nullptr;
-    if (type == UINT32_MAX || vkAllocateMemory(gC.dev, &ai, nullptr, &r.memory) != VK_SUCCESS ||
-        vkBindBufferMemory(gC.dev, r.buffer, r.memory, 0) != VK_SUCCESS ||
-        vkMapMemory(gC.dev, r.memory, 0, VK_WHOLE_SIZE, 0, &p) != VK_SUCCESS) {
-        destroyRing(r);
+    if (type == UINT32_MAX || vkAllocateMemory(C.dev, &ai, nullptr, &r.memory) != VK_SUCCESS ||
+        vkBindBufferMemory(C.dev, r.buffer, r.memory, 0) != VK_SUCCESS ||
+        vkMapMemory(C.dev, r.memory, 0, VK_WHOLE_SIZE, 0, &p) != VK_SUCCESS) {
+        destroyRing(C, r);
         return false;
     }
     r.mapped = static_cast<const uint32_t *>(p);
@@ -422,28 +418,62 @@ struct ProbeState {
     const uint32_t *mapped = nullptr;
     OgreScene::CasterProbe info;
 };
-std::unordered_map<const OgreScene *, ProbeState> gProbes;
+}  // namespace
 
-void destroyProbe(ProbeState &p) {
-    if (!gC.dev) return;
-    if (p.memory) {
-        vkUnmapMemory(gC.dev, p.memory);
-        vkFreeMemory(gC.dev, p.memory, nullptr);
+/// THE CASTER PASS'S DEVICE STATE (HlmsAtom.h): the pipelines, the rings of scenes that
+/// went away (and of a ring that doubled) with the frame they left at — destroyed once
+/// that frame has retired, never a device wait — and the last line said.
+struct AtomCasterDevice {
+    CasterPipelines C;
+    std::vector<std::pair<CasterRing, uint32_t>> grave;
+    std::string lastLog;
+};
+/// A SCENE'S caster pass state (atom/AtomComponent.h): its stats ring and its test door.
+struct AtomCasterScene {
+    CasterRing ring;
+    ProbeState probe;
+};
+
+namespace {
+HlmsAtom *atomHlms() {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::HlmsManager *hm = root ? root->getHlmsManager() : nullptr;
+    return hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
+}
+/// The device's caster pass state, or null where Atom's Hlms is not registered.
+AtomCasterDevice *casterDev() {
+    HlmsAtom *a = atomHlms();
+    return a ? &a->casterDevice() : nullptr;
+}
+
+void logOnce(const std::string &what) {
+    if (AtomCasterDevice *d = casterDev()) {
+        if (what == d->lastLog) return;
+        d->lastLog = what;
     }
-    if (p.buffer) vkDestroyBuffer(gC.dev, p.buffer, nullptr);
+    Ogre::LogManager::getSingleton().logMessage("Jahshaka atom caster pass: " + what, Ogre::LML_CRITICAL);
+}
+
+void destroyProbe(const CasterPipelines &C, ProbeState &p) {
+    if (!C.dev) return;
+    if (p.memory) {
+        vkUnmapMemory(C.dev, p.memory);
+        vkFreeMemory(C.dev, p.memory, nullptr);
+    }
+    if (p.buffer) vkDestroyBuffer(C.dev, p.buffer, nullptr);
     p = ProbeState();
 }
 
-bool ensureProbeBuffer(Ogre::VulkanDevice *device, ProbeState &p) {
+bool ensureProbeBuffer(const CasterPipelines &C, Ogre::VulkanDevice *device, ProbeState &p) {
     if (p.buffer) return true;
     VkBufferCreateInfo bi{};
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size = kUseBytes + VkDeviceSize(kProbeRecords) * 16u;
     bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateBuffer(gC.dev, &bi, nullptr, &p.buffer) != VK_SUCCESS) return false;
+    if (vkCreateBuffer(C.dev, &bi, nullptr, &p.buffer) != VK_SUCCESS) return false;
     VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(gC.dev, p.buffer, &req);
+    vkGetBufferMemoryRequirements(C.dev, p.buffer, &req);
     VkPhysicalDeviceMemoryProperties props;
     vkGetPhysicalDeviceMemoryProperties(device->mPhysicalDevice, &props);
     const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -455,11 +485,11 @@ bool ensureProbeBuffer(Ogre::VulkanDevice *device, ProbeState &p) {
     ai.allocationSize = req.size;
     ai.memoryTypeIndex = type;
     void *m = nullptr;
-    if (type == UINT32_MAX || vkAllocateMemory(gC.dev, &ai, nullptr, &p.memory) != VK_SUCCESS ||
-        vkBindBufferMemory(gC.dev, p.buffer, p.memory, 0) != VK_SUCCESS ||
-        vkMapMemory(gC.dev, p.memory, 0, VK_WHOLE_SIZE, 0, &m) != VK_SUCCESS) {
-        if (p.memory) vkFreeMemory(gC.dev, p.memory, nullptr);
-        if (p.buffer) vkDestroyBuffer(gC.dev, p.buffer, nullptr);
+    if (type == UINT32_MAX || vkAllocateMemory(C.dev, &ai, nullptr, &p.memory) != VK_SUCCESS ||
+        vkBindBufferMemory(C.dev, p.buffer, p.memory, 0) != VK_SUCCESS ||
+        vkMapMemory(C.dev, p.memory, 0, VK_WHOLE_SIZE, 0, &m) != VK_SUCCESS) {
+        if (p.memory) vkFreeMemory(C.dev, p.memory, nullptr);
+        if (p.buffer) vkDestroyBuffer(C.dev, p.buffer, nullptr);
         p.buffer = VK_NULL_HANDLE;
         p.memory = VK_NULL_HANDLE;
         return false;
@@ -470,9 +500,10 @@ bool ensureProbeBuffer(Ogre::VulkanDevice *device, ProbeState &p) {
 
 /// The armed map's cut, copied right after it was recorded (the list is reused by the
 /// next map of the frame).
-void captureProbe(Ogre::VulkanDevice *device, ProbeState &p, GpuCull &cull, uint32_t frame) {
-    if (!ensureProbeBuffer(device, p)) return;
-    VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
+void captureProbe(const AtomPassContext &ctx, const CasterPipelines &C, Ogre::VulkanDevice *device, ProbeState &p,
+                  GpuCull &cull, uint32_t frame) {
+    if (!ensureProbeBuffer(C, device, p)) return;
+    VkCommandBuffer cmd = ctx.frameCmd();
     VkMemoryBarrier mb{};
     mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -505,12 +536,12 @@ void captureProbe(Ogre::VulkanDevice *device, ProbeState &p, GpuCull &cull, uint
     p.frame = frame;
 }
 
-void reapGrave(uint32_t frame) {
-    for (size_t i = 0; i < gGrave.size();) {
-        if (frame - gGrave[i].second > 8u) {
-            destroyRing(gGrave[i].first);
-            gGrave[i] = gGrave.back();
-            gGrave.pop_back();
+void reapGrave(AtomCasterDevice &d, uint32_t frame) {
+    for (size_t i = 0; i < d.grave.size();) {
+        if (frame - d.grave[i].second > 8u) {
+            destroyRing(d.C, d.grave[i].first);
+            d.grave[i] = d.grave.back();
+            d.grave.pop_back();
         } else {
             ++i;
         }
@@ -521,12 +552,13 @@ void reapGrave(uint32_t frame) {
 /// frame already wrote are copied into it (in the command buffer, after their own
 /// copies), and the old one goes to the grave. The slots of the frames still in flight
 /// wrote the OLD buffer, so their stats are skipped once rather than read from the new.
-bool growRing(Ogre::VulkanDevice *device, CasterRing &r, uint32_t frame) {
+bool growRing(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanDevice *device, CasterRing &r,
+              uint32_t frame) {
     if (r.columns >= kMaxUses) return false;
     CasterRing bigger;
-    if (!ensureRing(device, bigger, r.slots, std::min(r.columns * 2u, kMaxUses))) return false;
+    if (!ensureRing(d.C, device, bigger, r.slots, std::min(r.columns * 2u, kMaxUses))) return false;
     const uint32_t s = frame % r.slots;
-    VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
+    VkCommandBuffer cmd = ctx.frameCmd();
     if (r.uses[s]) {
         VkMemoryBarrier mb{};
         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -555,7 +587,7 @@ bool growRing(Ogre::VulkanDevice *device, CasterRing &r, uint32_t frame) {
     bigger.lastTriangles = r.lastTriangles;
     bigger.peakUses = r.peakUses;
     bigger.unrecorded = r.unrecorded;
-    gGrave.emplace_back(r, frame);
+    d.grave.emplace_back(r, frame);
     r = bigger;
     return true;
 }
@@ -566,17 +598,18 @@ bool growRing(Ogre::VulkanDevice *device, CasterRing &r, uint32_t frame) {
 /// first cut). Returns the use's column for this frame (growing the ring when the frame
 /// needs one more), or kNoUse when it cannot (past kMaxUses, or no ring: the use then
 /// records no copy and is counted).
-uint32_t beginUse(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreScene *scene, CasterRing &r) {
+uint32_t beginUse(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanDevice *device, Ogre::VaoManager *vao,
+                  AtomComponent &atom, CasterRing &r) {
     const uint32_t frame = vao->getFrameCount();
-    if (!ensureRing(device, r, uint32_t(vao->getDynamicBufferMultiplier()) + 1u)) return kNoUse;
+    if (!ensureRing(d.C, device, r, uint32_t(vao->getDynamicBufferMultiplier()) + 1u)) return kNoUse;
     const uint32_t s = frame % r.slots;
     if (r.frame != frame) {
-        reapGrave(frame);
+        reapGrave(d, frame);
         r.frame = frame;
         r.usesThisFrame = 0u;
         if (r.written[s] && frame - r.writtenAt[s] >= r.slots) {
-            GpuCull &list = scene->casterCull();
-            OgreScene::CasterStats cs;
+            GpuCull &list = atom.casterCull();
+            AtomComponent::CasterStats cs;
             cs.valid = true;
             cs.maps = r.uses[s];
             cs.indexBudget = list.cutIndexBudget();
@@ -596,12 +629,12 @@ uint32_t beginUse(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreScene *
                 r.lastTriangles[u] = w[4];
                 list.noteCutOverflow(w[12] + w[13], w[11], w[8]);
             }
-            scene->setCasterStats(cs);
+            atom.setCasterStats(cs);
             r.written[s] = false;
         }
         r.uses[s] = 0u;
     }
-    if (r.usesThisFrame >= r.columns && !growRing(device, r, frame)) {
+    if (r.usesThisFrame >= r.columns && !growRing(ctx, d, device, r, frame)) {
         ++r.unrecorded;
         return kNoUse;
     }
@@ -610,10 +643,10 @@ uint32_t beginUse(Ogre::VulkanDevice *device, Ogre::VaoManager *vao, OgreScene *
 
 /// After the use's cut: its counters into the ring's column (the next cut's reset is a
 /// transfer write that waits for this read).
-void endUse(Ogre::VulkanDevice *device, CasterRing &r, GpuCull &cull, uint32_t frame, uint32_t use) {
+void endUse(const AtomPassContext &ctx, CasterRing &r, GpuCull &cull, uint32_t frame, uint32_t use) {
     if (use == kNoUse || use >= r.columns || !r.buffer || !cull.count()) return;
     const uint32_t s = frame % r.slots;
-    VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
+    VkCommandBuffer cmd = ctx.frameCmd();
     VkMemoryBarrier mb{};
     mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -666,8 +699,7 @@ Ogre::CompositorPassScene *scenePassBefore(Ogre::CompositorPass *pass) {
 }
 
 bool casterGate(const AtomPassContext &ctx) {
-    OgreScene *scene = atomSceneOf(ctx.sceneManager);
-    return scene && scene->atomDrawOn() && scene->hasAtomItems();
+    return ctx.scene && ctx.scene->atomDrawOn() && ctx.scene->atom().hasItems();
 }
 
 void recordCasterPass(AtomPassContext &ctx) {
@@ -677,13 +709,16 @@ void recordCasterPass(AtomPassContext &ctx) {
     Ogre::TextureGpu *depthTex = rpd->mDepth.texture;
     Ogre::TextureGpu *colourTex = rpd->getNumColourEntries() ? rpd->mColour[0].texture : nullptr;
     Ogre::VulkanRenderSystem *vkRs = atomVulkanOf(ctx.renderSystem);
-    OgreScene *scene = atomSceneOf(ctx.sceneManager);
+    OgreScene *scene = ctx.scene;
+    AtomCasterDevice *D = casterDev();
     // THE PASS'S OWN NODE is the shadow node (the scene manager's current one is set by
     // the pass that updates it, which is the same node — this one does not depend on it).
     const auto *shadowNode = dynamic_cast<const Ogre::CompositorShadowNode *>(pass->getParentNode());
     Ogre::CompositorPassScene *scenePass = scenePassBefore(pass);
     Ogre::Camera *cam = scenePass ? scenePass->getCamera() : nullptr;
-    if (!depthTex || !vkRs || !scene || !shadowNode || !cam) return;
+    if (!depthTex || !vkRs || !scene || !D || !shadowNode || !cam) return;
+    CasterPipelines &C = D->C;
+    AtomComponent &atom = scene->atom();
     GpuScene &gs = scene->gpuScene();
     if (!gs.live()) return;
     const uint32_t mapIdx = pass->getDefinition()->mShadowMapIdx;
@@ -700,7 +735,7 @@ void recordCasterPass(AtomPassContext &ctx) {
     key.depth = Ogre::VulkanMappings::get(depthTex->getPixelFormat());
     key.cullFront = rpd->requiresTextureFlipping();
     key.depthClamp = cam->getNeedsDepthClamp();
-    const VkPipeline pipeline = pipelineFor(vkRs, key);
+    const VkPipeline pipeline = pipelineFor(C, vkRs, key);
     if (!pipeline) return;
     // THE TWO-SIDED RANGE'S PIPELINE (ATOM-TWO-SIDED-1): the same state culling nothing —
     // a CULL_NONE material's stock caster draws both faces too. WARMED with its one-sided
@@ -713,8 +748,8 @@ void recordCasterPass(AtomPassContext &ctx) {
         CasterPipelineKey two = key;
         two.cullFront = false;
         two.cullNone = true;
-        const VkPipeline warmed = pipelineFor(vkRs, two);
-        if (scene->hasTwoSidedAtomItems()) pipelineTwoSided = warmed;
+        const VkPipeline warmed = pipelineFor(C, vkRs, two);
+        if (atom.hasTwoSidedItems()) pipelineTwoSided = warmed;
     }
 
     // THE CUBE FACE: the scene pass turned the camera to its face for its own length and
@@ -768,14 +803,15 @@ void recordCasterPass(AtomPassContext &ctx) {
     shadowNode->getMinMaxDepthRange(mapIdx, nearD, farD);
     if (reorient) cam->setOrientation(oldOrientation);
 
-    GpuCull &cull = scene->casterCull();
+    GpuCull &cull = atom.casterCull();
     Ogre::VaoManager *vao = vkRs->getVaoManager();
-    CasterRing &ring = gRings[scene];
-    const uint32_t use = beginUse(device, vao, scene, ring);
+    AtomCasterScene &state = atom.casterState();
+    CasterRing &ring = state.ring;
+    const uint32_t use = beginUse(ctx, *D, device, vao, atom, ring);
     {
         // (0) THE LIST'S WRITE-AFTER-READ: the previous use's draw (this frame's last
         // map, or the last frame's) read the commands, the stream and the tables.
-        VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
+        VkCommandBuffer cmd = ctx.frameCmd();
         vkCmdPipelineBarrier(cmd,
                              VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
                                  VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
@@ -790,14 +826,12 @@ void recordCasterPass(AtomPassContext &ctx) {
         logOnce("the caster cut did not record (" + err + ")");
         return;
     }
-    endUse(device, ring, cull, vao->getFrameCount(), use);
+    endUse(ctx, ring, cull, vao->getFrameCount(), use);
     // THE TEST DOOR: the armed map of the view kind's node, once.
     {
-        auto pit = gProbes.find(scene);
         const Ogre::uint32 face = reorient ? std::min<Ogre::uint32>(sceneDef->getRtIndex(), 5u) : 0u;
-        if (pit != gProbes.end() && pit->second.armed && pit->second.map == mapIdx && pit->second.face == face &&
-            nodeName == Ogre::IdString(OgreView::kShadowNodeName)) {
-            ProbeState &p = pit->second;
+        ProbeState &p = state.probe;
+        if (p.armed && p.map == mapIdx && p.face == face && nodeName == Ogre::IdString(OgreView::kShadowNodeName)) {
             OgreScene::CasterProbe &info = p.info;
             info = OgreScene::CasterProbe();
             info.map = mapIdx;
@@ -813,12 +847,12 @@ void recordCasterPass(AtomPassContext &ctx) {
             std::memcpy(info.viewProj, req.viewProj, sizeof(info.viewProj));
             std::memcpy(info.planes, req.planes, sizeof(info.planes));
             std::copy(rect, rect + 4, info.rect);
-            captureProbe(device, p, cull, vao->getFrameCount());
+            captureProbe(ctx, C, device, p, cull, vao->getFrameCount());
         }
     }
 
     // ---- (2) THE EDGES THE SOLVER CANNOT EXPRESS -----------------------------------
-    VkCommandBuffer cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
+    VkCommandBuffer cmd = ctx.frameCmd();
     {
         VkMemoryBarrier mb{};
         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -832,7 +866,7 @@ void recordCasterPass(AtomPassContext &ctx) {
 
     // ---- (3) OGRE'S RENDER PASS, OUR PIPELINE ----------------------------------------
     if (!pass->beginRenderPass()) return;
-    cmd = device->mGraphicsQueue.getCurrentCmdBuffer();
+    cmd = ctx.frameCmd();
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     ctx.boundRawState = true;
     {
@@ -861,10 +895,10 @@ void recordCasterPass(AtomPassContext &ctx) {
         pc.depthRange[0] = float(nearD);
         pc.depthRange[1] = float(1.0 / double(farD - nearD));
         pc.depthRange[2] = point ? 1.0f : 0.0f;
-        atomAddressOf(gC.dev, gC.bufferDeviceAddress, gs.instanceBuffer(), pc.instances);
-        atomAddressOf(gC.dev, gC.bufferDeviceAddress, gs.meshBuffer(), pc.meshes);
-        atomAddressOf(gC.dev, gC.bufferDeviceAddress, gs.geomBuffer(), pc.rows);
-        vkCmdPushConstants(cmd, gC.layout, kCasterPushStages, 0, sizeof(pc), &pc);
+        atomAddressOf(C.dev, C.bufferDeviceAddress, gs.instanceBuffer(), pc.instances);
+        atomAddressOf(C.dev, C.bufferDeviceAddress, gs.meshBuffer(), pc.meshes);
+        atomAddressOf(C.dev, C.bufferDeviceAddress, gs.geomBuffer(), pc.rows);
+        vkCmdPushConstants(cmd, C.layout, kCasterPushStages, 0, sizeof(pc), &pc);
     }
     {
         VkBuffer ib = VK_NULL_HANDLE;
@@ -876,11 +910,11 @@ void recordCasterPass(AtomPassContext &ctx) {
         atomBufferOf(cull.draws(), drawBuf, drawOff);
         atomBufferOf(cull.count(), countBuf, countOff);
         const uint32_t maxDraws = std::min(cull.capacity(), gs.slotCount());
-        gC.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff, maxDraws,
+        C.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff, maxDraws,
                                     GpuCull::kDrawWords * sizeof(uint32_t));
         if (pipelineTwoSided) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineTwoSided);
-            gC.drawIndexedIndirectCount(
+            C.drawIndexedIndirectCount(
                 cmd, drawBuf, drawOff + VkDeviceSize(cull.twoSidedFirst()) * GpuCull::kDrawWords * sizeof(uint32_t),
                 countBuf, countOff + GpuCull::kTwoSidedCountOffsetBytes, maxDraws,
                 GpuCull::kDrawWords * sizeof(uint32_t));
@@ -908,47 +942,61 @@ void registerAtomCasterPass() {
     }
 }
 
+/// After every scene (whose rings went to the device's window as each scene died) and
+/// before Root: one idle device, then the window and the pipelines.
 void releaseAtomCasterPass() {
     if (AtomPassProvider *p = AtomPassProvider::instance()) {
         p->setRecorder(kAtomCasterPassId, AtomPassRecorder());
         p->setGate(kAtomCasterPassId, AtomPassGate());
     }
-    if (gC.dev) {
-        vkDeviceWaitIdle(gC.dev);
-        for (auto &kv : gRings) destroyRing(kv.second);
-        gRings.clear();
-        for (auto &g : gGrave) destroyRing(g.first);
-        gGrave.clear();
-        for (auto &kv : gProbes) destroyProbe(kv.second);
-        gProbes.clear();
-        destroyPipelines();
-        if (gC.layout) vkDestroyPipelineLayout(gC.dev, gC.layout, nullptr);
+    AtomCasterDevice *d = casterDev();
+    if (!d) return;
+    CasterPipelines &C = d->C;
+    if (C.dev) {
+        vkDeviceWaitIdle(C.dev);
+        for (auto &g : d->grave) destroyRing(C, g.first);
+        d->grave.clear();
+        destroyPipelines(C);
+        if (C.layout) vkDestroyPipelineLayout(C.dev, C.layout, nullptr);
     }
-    gC = CasterPipelines();
+    C = CasterPipelines();
 }
 
-void atomCasterPassForgetScene(const OgreScene *scene) {
-    {
-        auto pit = gProbes.find(scene);
-        if (pit != gProbes.end()) {
-            if (gC.dev) vkDeviceWaitIdle(gC.dev);   // a test door's buffer: a suite's teardown, never a frame's
-            destroyProbe(pit->second);
-            gProbes.erase(pit);
+void AtomCasterSceneDelete::operator()(AtomCasterScene *p) const {
+    if (!p) return;
+    AtomCasterDevice *d = casterDev();
+    if (d) {
+        // THE TEST DOOR'S BUFFER: a suite's teardown, never a frame's — behind an idle device.
+        if (p->probe.buffer) {
+            if (d->C.dev) vkDeviceWaitIdle(d->C.dev);
+            destroyProbe(d->C, p->probe);
+        }
+        // A copy into the ring may still be in flight: to the device's window, reaped once
+        // its last frame has retired.
+        if (p->ring.buffer) {
+            Ogre::Root *root = Ogre::Root::getSingletonPtr();
+            Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
+            const uint32_t frame = rs && rs->getVaoManager() ? rs->getVaoManager()->getFrameCount() : 0u;
+            d->grave.emplace_back(p->ring, frame);
         }
     }
-    auto it = gRings.find(scene);
-    if (it == gRings.end()) return;
-    // A copy into the ring may still be in flight: to the grave, reaped once its last
-    // frame has retired.
-    Ogre::Root *root = Ogre::Root::getSingletonPtr();
-    Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
-    const uint32_t frame = rs && rs->getVaoManager() ? rs->getVaoManager()->getFrameCount() : 0u;
-    gGrave.emplace_back(it->second, frame);
-    gRings.erase(it);
+    delete p;
+}
+
+void AtomCasterDeviceDelete::operator()(AtomCasterDevice *p) const { delete p; }
+
+AtomCasterDevice &HlmsAtom::casterDevice() {
+    if (!mCasterDevice) mCasterDevice.reset(new AtomCasterDevice());
+    return *mCasterDevice;
+}
+
+AtomCasterScene &AtomComponent::casterState() {
+    if (!mCasterState) mCasterState.reset(new AtomCasterScene());
+    return *mCasterState;
 }
 
 void OgreScene::armCasterProbeForTest(unsigned map, unsigned face) {
-    ProbeState &p = gProbes[this];
+    ProbeState &p = mAtom.casterState().probe;
     p.armed = true;
     p.captured = false;
     p.map = map;
@@ -956,9 +1004,9 @@ void OgreScene::armCasterProbeForTest(unsigned map, unsigned face) {
 }
 
 bool OgreScene::casterProbeForTest(CasterProbe &out) {
-    auto it = gProbes.find(this);
-    if (it == gProbes.end() || !it->second.captured || !it->second.mapped) return false;
-    ProbeState &p = it->second;
+    AtomCasterScene *state = mAtom.casterStateIfAny();
+    if (!state || !state->probe.captured || !state->probe.mapped) return false;
+    ProbeState &p = state->probe;
     Ogre::VaoManager *vao = mRoot && mRoot->getRenderSystem() ? mRoot->getRenderSystem()->getVaoManager() : nullptr;
     if (!vao || vao->getFrameCount() - p.frame <= uint32_t(vao->getDynamicBufferMultiplier()) + 1u) return false;
     out = p.info;
@@ -991,7 +1039,18 @@ void OgreScene::armCasterProbeForTest(unsigned, unsigned) {}
 bool OgreScene::casterProbeForTest(CasterProbe &) { return false; }
 void registerAtomCasterPass() {}
 void releaseAtomCasterPass() {}
-void atomCasterPassForgetScene(const OgreScene *) {}
+struct AtomCasterDevice {};
+struct AtomCasterScene {};
+void AtomCasterSceneDelete::operator()(AtomCasterScene *p) const { delete p; }
+void AtomCasterDeviceDelete::operator()(AtomCasterDevice *p) const { delete p; }
+AtomCasterDevice &HlmsAtom::casterDevice() {
+    if (!mCasterDevice) mCasterDevice.reset(new AtomCasterDevice());
+    return *mCasterDevice;
+}
+AtomCasterScene &AtomComponent::casterState() {
+    if (!mCasterState) mCasterState.reset(new AtomCasterScene());
+    return *mCasterState;
+}
 
 #endif
 

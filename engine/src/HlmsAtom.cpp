@@ -702,11 +702,10 @@ void HlmsAtom::syncDraws(Ogre::SceneManager *sm, SceneDecodes &sd, SceneDecodes:
         if (!twin) {
             // Once per datablock name: a material the decode cannot serve (a
             // per-datablock custom piece) keeps its hits unshaded — stated.
-            static std::unordered_map<std::string, bool> sSaid;
             const Ogre::String *name = it->second->getNameStr();
             const std::string key = name ? *name : std::string("?");
-            if (!sSaid[key]) {
-                sSaid[key] = true;
+            if (!mSaidNoTwin[key]) {
+                mSaidNoTwin[key] = true;
                 Ogre::LogManager::getSingleton().logMessage(
                     "HlmsAtom: no decode twin for '" + key + "' (" + err + ")");
             }

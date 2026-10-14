@@ -54,6 +54,36 @@ namespace jahshaka {
 namespace engine {
 namespace detail {
 
+// ---------------------------------------------------------------------------
+// WHICH SCENE A SCENE MANAGER RENDERS (EnginePrivate.h): the scene is bound on its
+// manager's root scene node — Ogre's UserObjectBindings, the engine's one use of that
+// node's bindings — so the answer lives and dies with the manager.
+// ---------------------------------------------------------------------------
+namespace {
+const Ogre::String &sceneBindingKey() {
+    static const Ogre::String kKey("jahshaka.scene");
+    return kKey;
+}
+}  // namespace
+
+void bindSceneManager(Ogre::SceneManager *sm, OgreScene *scene) {
+    if (!sm) return;
+    Ogre::UserObjectBindings &b = sm->getRootSceneNode(Ogre::SCENE_DYNAMIC)->getUserObjectBindings();
+    if (scene) b.setUserAny(sceneBindingKey(), Ogre::Any(scene));
+    else b.eraseUserAny(sceneBindingKey());
+}
+
+OgreScene *sceneOfManager(const Ogre::SceneManager *sm) {
+    if (!sm) return nullptr;
+    // getRootSceneNode is not const in Ogre; the read changes nothing.
+    const Ogre::UserObjectBindings &b =
+        const_cast<Ogre::SceneManager *>(sm)->getRootSceneNode(Ogre::SCENE_DYNAMIC)->getUserObjectBindings();
+    const Ogre::Any &a = b.getUserAny(sceneBindingKey());
+    if (!a.has_value()) return nullptr;
+    OgreScene *const *p = Ogre::any_cast<OgreScene *>(&a);
+    return p ? *p : nullptr;
+}
+
 bool atomTraceOn() {
     static const bool on = std::getenv("JAHSHAKA_ATOM_TRACE") != nullptr;
     return on;

@@ -1,5 +1,6 @@
 // See AtomPass.h.
 #include "AtomPass.h"
+#include "EnginePrivate.h"
 #include "photon/PhotonComponent.h"
 
 #include <Compositor/OgreCompositorManager2.h>
@@ -10,6 +11,12 @@
 #include <OgreSceneManager.h>
 
 #include <limits>
+
+#if JAH_RAY_QUERY
+#include "AtomVulkan.h"
+#include "OgreVulkanDevice.h"
+#include "OgreVulkanQueue.h"
+#endif
 
 namespace jahshaka {
 namespace engine {
@@ -24,6 +31,15 @@ AtomPassProvider &providerObject() {
     return sProvider;
 }
 }  // namespace
+
+VkCommandBuffer_T *AtomPassContext::frameCmd() const {
+#if JAH_RAY_QUERY
+    Ogre::VulkanRenderSystem *vk = atomVulkanOf(renderSystem);
+    return vk && vk->getVulkanDevice() ? vk->getVulkanDevice()->mGraphicsQueue.getCurrentCmdBuffer() : nullptr;
+#else
+    return nullptr;
+#endif
+}
 
 AtomPass::AtomPass(const AtomPassDef *definition, Ogre::CompositorNode *parentNode,
                    Ogre::SceneManager *sceneManager, const Ogre::RenderTargetViewDef *rtvDef)
@@ -66,6 +82,7 @@ void AtomPass::execute(const Ogre::Camera *lodCamera) {
         probe.pass = this;
         probe.renderSystem = rs;
         probe.sceneManager = mSceneManager;
+        probe.scene = sceneOfManager(mSceneManager);
         probe.lodCamera = lodCamera;
         if (*gate && !(*gate)(probe)) {
             notifyPassPreExecuteListeners();
@@ -86,6 +103,7 @@ void AtomPass::execute(const Ogre::Camera *lodCamera) {
         ctx.pass = this;
         ctx.renderSystem = rs;
         ctx.sceneManager = mSceneManager;
+        ctx.scene = sceneOfManager(mSceneManager);
         ctx.lodCamera = lodCamera;
         (*rec)(ctx);
         if (ctx.boundRawState) {

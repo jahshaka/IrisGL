@@ -47,47 +47,12 @@ namespace {
 /// The queue renderQueueFor gives an ordinary item (Ogre's default).
 constexpr Ogre::uint8 kOpaqueItemQueue = 10u;
 
-/// Which view a workspace belongs to — how the id pass's recorder (a provider
-/// callback that is handed a pass) finds its view.
-std::unordered_map<const Ogre::CompositorWorkspace *, OgreView *> &atomViews() {
-    static std::unordered_map<const Ogre::CompositorWorkspace *, OgreView *> sViews;
-    return sViews;
-}
-
 HlmsAtom *registeredAtom() {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     Ogre::HlmsManager *hm = root ? root->getHlmsManager() : nullptr;
     return hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
 }
 }  // namespace
-
-void atomRegisterView(const Ogre::CompositorWorkspace *ws, OgreView *view) {
-    if (ws && view) atomViews()[ws] = view;
-}
-void atomUnregisterView(const Ogre::CompositorWorkspace *ws) {
-    if (ws) atomViews().erase(ws);
-}
-OgreView *atomViewOf(const Ogre::CompositorWorkspace *ws) {
-    auto it = atomViews().find(ws);
-    return it == atomViews().end() ? nullptr : it->second;
-}
-
-namespace {
-std::unordered_map<const Ogre::SceneManager *, OgreScene *> &atomScenes() {
-    static std::unordered_map<const Ogre::SceneManager *, OgreScene *> sScenes;
-    return sScenes;
-}
-}  // namespace
-void atomRegisterScene(const Ogre::SceneManager *sm, OgreScene *scene) {
-    if (sm && scene) atomScenes()[sm] = scene;
-}
-void atomUnregisterScene(const Ogre::SceneManager *sm) {
-    if (sm) atomScenes().erase(sm);
-}
-OgreScene *atomSceneOf(const Ogre::SceneManager *sm) {
-    auto it = atomScenes().find(sm);
-    return it == atomScenes().end() ? nullptr : it->second;
-}
 
 // ---------------------------------------------------------------------------
 // THE SCREEN DECODE'S ARMING (ATOM S3-DRAW; ATOM-DECODE-CLASS-1). The view's SCREEN
@@ -155,9 +120,8 @@ public:
         try {
             ids = pass->getParentNode()->getDefinedTexture(Ogre::IdString(kAtomIdTexture));
         } catch (Ogre::Exception &) {
-            static bool said = false;
-            if (!said) {
-                said = true;
+            if (!mSaidNoIds) {
+                mSaidNoIds = true;
                 Ogre::LogManager::getSingleton().logMessage(
                     "Jahshaka atom draw: a pass skipping the Atom queue ('" + def->mProfilingId +
                         "', node '" + pass->getParentNode()->getName().getFriendlyText() +
@@ -201,13 +165,24 @@ public:
         mArmedPass = nullptr;
     }
     ~AtomDrawListener() { disarm(); }
+    OgreView *view() const { return mView; }
 
 private:
     OgreView *mView = nullptr;
+    bool mSaidNoIds = false;   ///< the missing id image said once, per view
     Ogre::SceneManager *mArmed = nullptr;
     Ogre::CompositorPass *mArmedPass = nullptr;
 };
 }  // namespace
+
+OgreView *atomViewOfPass(const Ogre::CompositorPass *pass) {
+    const Ogre::CompositorNode *node = pass ? pass->getParentNode() : nullptr;
+    const Ogre::CompositorWorkspace *ws = node ? node->getWorkspace() : nullptr;
+    if (!ws) return nullptr;
+    for (Ogre::CompositorWorkspaceListener *l : ws->getListeners())
+        if (auto *al = dynamic_cast<AtomDrawListener *>(l)) return al->view();
+    return nullptr;
+}
 
 AtomDrawListenerPtr makeAtomDrawListener(OgreView *view) {
     return AtomDrawListenerPtr(new AtomDrawListener(view));
@@ -245,12 +220,12 @@ void OgreView::syncAtomDraw() {
 bool OgreScene::atomDrawOn() const { return mGpuScene.live() && atomDrawWanted(); }
 
 bool OgreScene::atomDrawWanted() const {
-    return mAtomDrawEnabled && mRoot && atomIdPassSupported(mRoot->getRenderSystem());
+    return mAtom.drawEnabled() && mRoot && atomIdPassSupported(mRoot->getRenderSystem());
 }
 
 void OgreScene::setAtomDrawEnabled(bool on) {
-    if (on == mAtomDrawEnabled) return;
-    mAtomDrawEnabled = on;
+    if (on == mAtom.drawEnabled()) return;
+    mAtom.setDrawEnabled(on);
     // Every slot re-composes (its route and its queue follow), and every view of
     // this scene re-derives its chain (the id pass comes or goes) on its next
     // description push — the engine's per-frame view sync compares shapes.
@@ -261,7 +236,7 @@ void OgreScene::setAtomDrawEnabled(bool on) {
 void OgreScene::setAtomOcclusionEnabled(bool on) {
     // A SHAPE CHANGE and nothing else: every view of this scene re-derives its chain
     // (the pyramid and the late pass come or go) on its next sync, as for the split.
-    mAtomOcclusionEnabled = on;
+    mAtom.setOcclusionEnabled(on);
 }
 
 void OgreScene::setAtomCutBudgetForTest(unsigned indices) {
@@ -285,30 +260,6 @@ void OgreScene::placeAtomQueue(const Node &n, bool atom) const {
     auto mit = mMaterials.find(n.materialRef);
     item->setRenderQueueGroup(mit != mMaterials.end() ? renderQueueFor(mit->second)
                                                       : kOpaqueItemQueue);
-}
-
-void OgreScene::updateAtomDraw() {
-    updateAtomSplit();
-    // THE ATOM VIEW'S TABLE follows whatever the split just decided.
-    syncAtomViewTable();
-}
-
-void OgreScene::updateAtomSplit() {
-    HlmsAtom *atom = registeredAtom();
-    if (!atom || !mGpuScene.live()) return;
-    // THE SCREEN DECODE'S DRAWS: one per bucket of the words the atom items wear,
-    // re-derived when that SET moved (the change feed, AtomWordFeed) or a twin died.
-    // An in-place material edit is not polled for here any more: the PBS change log
-    // (ScenePbs::HashNote) hears it at Ogre's own re-hash, and the frame's drain
-    // (OgreEngine::drainPbsChanges) forgets the twin whose bucket moved and
-    // re-composes the Items it re-hashed — before this scene's scan, so the route,
-    // the queue and the word follow in the same frame. A still frame does nothing.
-    if (!mAtomFeed.words.changed() && atom->twinEpoch() == mAtomSyncEpoch) return;
-    std::vector<uint32_t> words = mAtomFeed.words.take();
-    if (words == mAtomWords && atom->twinEpoch() == mAtomSyncEpoch) return;
-    mAtomWords.swap(words);
-    atom->syncScreenDecodes(mSceneMgr, mAtomWords);
-    mAtomSyncEpoch = atom->twinEpoch();
 }
 
 /// THE PBS CHANGE LOG'S DRAIN (EnginePrivate.h's declaration says what and why).
@@ -432,98 +383,18 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     return AtomRoute::Atom;
 }
 
-// ---------------------------------------------------------------------------
-// THE ATOM VIEW'S BUCKETS TABLE (D0-ATOM-VIEW). The bucket is not in the id image
-// (a draw of the decode knows its own, a pixel does not), and a compositor quad
-// binds textures, not the GPU scene's buffers — so the view reads one R32_UINT
-// texel per GPU scene slot: the bucket (HlmsAtom::bucketIdOf) of the datablock the
-// slot's atom item wears, 0 for anything else. The texture exists while the view
-// is on (the quad binds it in every mode) and is freed when it goes Off; its
-// CONTENTS are walked only while the view is Buckets and only when the slot set or
-// a bucket's membership moved, and uploaded only when a value did.
-// ---------------------------------------------------------------------------
-namespace {
-constexpr uint32_t kAtomViewTableWidth = 1024u;
-}
-
-void OgreScene::releaseAtomViewTable() {
-    if (mAtomViewTable && mRoot && mRoot->getRenderSystem())
-        mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mAtomViewTable);
-    mAtomViewTable = nullptr;
-    mAtomViewRows.clear();
-}
-
-void OgreScene::syncAtomViewTable() {
-    // OFF FREES IT (the next view that is not Off creates it again).
-    if (mAtomView == AtomView::Off) {
-        if (mAtomViewTable) releaseAtomViewTable();
-        mAtomViewWrites = mAtomViewBucketGen = ~0ull;
-        return;
-    }
-    Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
-    if (!rs) return;
-    const uint32_t slots = mGpuScene.live() ? uint32_t(mGpuScene.slotCount()) : 0u;
-    const uint32_t rows = std::max(1u, (slots + kAtomViewTableWidth - 1u) / kAtomViewTableWidth);
-    HlmsAtom *atom = registeredAtom();
-    const unsigned long long bucketGen = atom ? atom->bucketGeneration() : 0ull;
-    const bool buckets = mAtomView == AtomView::Buckets;
-    // CHANGE-DRIVEN: the walk runs only in Buckets mode and only when the slot set
-    // (the GPU scene's writes) or a bucket's membership (HlmsAtom's generation)
-    // moved since the last one; any other mode reads no contents at all.
-    if (mAtomViewTable && mAtomViewTable->getHeight() == rows &&
-        (!buckets || (mAtomViewWrites == mGpuScene.writes() && mAtomViewBucketGen == bucketGen)))
-        return;
-    std::vector<uint32_t> table(size_t(rows) * kAtomViewTableWidth, 0u);
-    if (buckets && atom) {
-        const GpuInstance *m = mGpuScene.mirrorData();
-        for (uint32_t i = 0; i < slots && i < mItemNodes.size(); ++i) {
-            uint32_t flags = 0u;
-            std::memcpy(&flags, &m[i].boundsMax[3], sizeof(flags));
-            const Node *nd = mItemNodes[i];
-            if (!(flags & kGpuAtom) || !nd || !nd->item || !nd->item->getNumSubItems()) continue;
-            table[i] = atom->bucketIdOf(nd->item->getSubItem(0)->getDatablock());
-        }
-    }
-    if (buckets) {
-        mAtomViewWrites = mGpuScene.writes();
-        mAtomViewBucketGen = bucketGen;
-    } else {
-        mAtomViewWrites = mAtomViewBucketGen = ~0ull;   // entering Buckets walks
-    }
-    if (mAtomViewTable && mAtomViewTable->getHeight() == rows && table == mAtomViewRows) return;
-    Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
-    if (mAtomViewTable && mAtomViewTable->getHeight() != rows) {
-        tm->destroyTexture(mAtomViewTable);
-        mAtomViewTable = nullptr;
-    }
-    if (!mAtomViewTable) {
-        // A ManualTexture goes Resident by an immediate transition and is never
-        // notifyDataIsReady'd (DOCS/traps/ENGINE.md).
-        mAtomViewTable = tm->createTexture(
-            "jahAtomViewTable/" + std::to_string(reinterpret_cast<uintptr_t>(this)),
-            Ogre::GpuPageOutStrategy::Discard, Ogre::TextureFlags::ManualTexture,
-            Ogre::TextureTypes::Type2D);
-        mAtomViewTable->setResolution(kAtomViewTableWidth, rows);
-        mAtomViewTable->setPixelFormat(Ogre::PFG_R32_UINT);
-        mAtomViewTable->setNumMipmaps(1u);
-        mAtomViewTable->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
-    }
-    Ogre::StagingTexture *st = tm->getStagingTexture(kAtomViewTableWidth, rows, 1u, 1u, Ogre::PFG_R32_UINT);
-    st->startMapRegion();
-    Ogre::TextureBox box = st->mapRegion(kAtomViewTableWidth, rows, 1u, 1u, Ogre::PFG_R32_UINT);
-    for (uint32_t y = 0; y < rows; ++y)
-        std::memcpy(box.at(0, y, 0), &table[size_t(y) * kAtomViewTableWidth],
-                    kAtomViewTableWidth * sizeof(uint32_t));
-    st->stopMapRegion();
-    st->upload(box, mAtomViewTable, 0, nullptr, nullptr, true);
-    tm->removeStagingTexture(st);
-    mAtomViewRows.swap(table);
+const Ogre::HlmsDatablock *OgreScene::atomSlotDatablock(uint32_t slot) const {
+    const Node *nd = slot < mItemNodes.size() ? mItemNodes[slot] : nullptr;
+    if (!nd || !nd->item || !nd->item->getNumSubItems()) return nullptr;
+    return nd->item->getSubItem(0)->getDatablock();
 }
 
 AtomDrawStatus OgreScene::atomDrawStatus() {
     AtomDrawStatus st;
     st.live = mGpuScene.live();
-    st.wordSlotVisits = mAtomFeed.words.visits();
+    // THE COMPONENT'S SHARE: the words, the decode draws and twins, the PBS views, the
+    // caster cut's counters.
+    mAtom.status(st);
     if (mEngine) {
         st.pbsNotes = mEngine->mPbsDrainNotes;
         st.pbsDatablocks = mEngine->mPbsDrainDatablocks;
@@ -566,12 +437,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
     }
     st.materials = unsigned(words.size());
     st.buckets = unsigned(buckets.size());
-    st.twins = atom ? unsigned(atom->decodeTwinCount()) : 0u;
-    st.decodeDraws = atom ? unsigned(atom->sceneDecodeCount(mSceneMgr)) : 0u;
-    st.screenDraws = atom ? unsigned(atom->screenDecodeCount(mSceneMgr)) : 0u;
     st.on = atomDrawOn();
-    st.stereoViews = unsigned(mAtomStereoViews.size());
-    st.passthroughViews = unsigned(mAtomPassthroughViews.size());
     st.viewPaintable = atomViewPaintable();
     if (mRoot && mRoot->getRenderSystem() && mRoot->getRenderSystem()->getVaoManager())
         st.frame = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
@@ -593,17 +459,6 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         st.occlusion = v->atomOcclusionStats(st.occluded, st.disoccluded);
         break;
     }
-    // THE CASTER CUT'S COUNTERS (ATOM-SHADOWS-1): the scene's one caster list.
-    st.casterValid = mCasterStats.valid;
-    st.casterMaps = mCasterStats.maps;
-    st.casterClusters = mCasterStats.clusters;
-    st.casterInstances = mCasterStats.instances;
-    st.casterOverflow = mCasterStats.overflow;
-    st.casterMissing = mCasterStats.missing;
-    st.casterIndexBudget = mCasterStats.indexBudget;
-    st.casterTriangles = mCasterStats.triangles;
-    st.casterMapsPeak = mCasterStats.peakMaps;
-    st.casterUnrecorded = mCasterStats.unrecorded;
     return st;
 }
 

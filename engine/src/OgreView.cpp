@@ -988,8 +988,6 @@ bool OgreView::attachWorkspace() {
         // listener sets the bit, per frame, only while the scene's view is on.
         // ...AND THE PHOTON VIEW'S (kPhotonExecutionBits), by its listener likewise.
         mWorkspace->setExecutionMask(Ogre::uint8(0xFFu & ~kAtomViewExecutionBit & ~kPhotonExecutionBits));
-        // The id pass's recorder is handed a pass, and finds its view here.
-        atomRegisterView(mWorkspace, this);
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
             mWorkspace->addListener(l);
         ++mWorkspaceGeneration;
@@ -1089,7 +1087,6 @@ bool OgreView::detachWorkspace() {
         }
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
             mWorkspace->removeListener(l);
-        atomUnregisterView(mWorkspace);
         mRoot->getCompositorManager2()->removeWorkspace(mWorkspace);
         mWorkspace = nullptr;
         return true;
@@ -2057,7 +2054,7 @@ void OgreView::destroy() {
     mAtomCull.destroy();
     mAtomCullLate.destroy();
     mAtomCullCapture.destroy();
-    atomIdPassForgetView(this);
+    mAtomStatsRing.reset();   // the lists' stats ring retires with them (OgreAtomIdPass.cpp)
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);
         // Same reason as the MSAA recreate: destroying a render window destroys
@@ -2273,7 +2270,6 @@ bool OgreView::ensureCaptureWorkspace() {
     // except on the frame that captures.
     mCaptureWorkspace = cm->addWorkspace(mScene->sceneManager(), mCaptureTarget, mCamera,
                                          mCaptureDef, false);
-    atomRegisterView(mCaptureWorkspace, this);
     for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
         if (capturesWith(l)) mCaptureWorkspace->addListener(l);
     mCaptureShape = shape;
@@ -2501,7 +2497,6 @@ bool OgreView::takeFrameCapture(Image &out, bool wait, Image *presented) {
 void OgreView::destroyCaptureWorkspace() {
     if (mCaptureWorkspace) {
         JAH_TRY {
-            atomUnregisterView(mCaptureWorkspace);
             mRoot->getCompositorManager2()->removeWorkspace(mCaptureWorkspace);
         } JAH_CATCH(mError, );
         mCaptureWorkspace = nullptr;

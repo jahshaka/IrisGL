@@ -36,6 +36,8 @@
 #include <map>
 #include <string>
 
+struct VkCommandBuffer_T;   // Vulkan's dispatchable handle (VkCommandBuffer), opaque here
+
 namespace Ogre {
 class CompositorManager2;
 class RenderSystem;
@@ -46,6 +48,8 @@ namespace jahshaka {
 namespace engine {
 namespace detail {
 
+class OgreScene;
+
 /// What a recorder is handed while its pass executes. Ogre's render pass is already
 /// closed; the recorder records whatever it records; the provider restores Ogre's
 /// state after it returns.
@@ -54,7 +58,15 @@ struct AtomPassContext {
     Ogre::CompositorPass *pass = nullptr;
     Ogre::RenderSystem *renderSystem = nullptr;
     Ogre::SceneManager *sceneManager = nullptr;
+    /// The scene the pass's SceneManager renders (sceneOfManager: bound on the manager),
+    /// or null for a manager no scene owns. Set for the gate too.
+    OgreScene *scene = nullptr;
     const Ogre::Camera *lodCamera = nullptr;
+    /// THE COMMAND BUFFER THE PASS RECORDS INTO, asked at the moment of use (outside every
+    /// encoder once the provider closed Ogre's): the one source a raw recorder takes its
+    /// command buffer from — the ray tier's GatherHost::gatherFrameCmd seam — so where a
+    /// pass records is decided here, never at each vkCmd site. Null without Vulkan.
+    VkCommandBuffer_T *frameCmd() const;
     /// True when the recorder bound state of its own (a pipeline, descriptor sets, an
     /// index buffer): the provider then forgets Ogre's caches. A recorder that only
     /// used Ogre's own calls leaves it false and the caches are kept.

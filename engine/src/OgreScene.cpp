@@ -28,27 +28,16 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
     mLightList.bindDirt(&mGiLightWriteSerial, &mLightsRemoved);
     mGiBinding.lightList = &mLightList;
     registerSceneGiBinding(mSceneMgr, &mGiBinding);
-    // WHICH SCENE A SHADOW NODE'S CASTER PASS DRAWS (ATOM-SHADOWS-1): the recorder is
-    // handed the pass's scene manager.
-    atomRegisterScene(mSceneMgr, this);
-    // THE SELFTEST'S DOORS, a pair: JAHSHAKA_ATOM_DRAW_OFF shuts the split (every item
-    // through PBS) and JAHSHAKA_ATOM_OCCLUSION_OFF the id pass's occlusion (frustum-only,
-    // ATOM-OCCLUSION-1) — the scriptless --engine-selftest has no other way to take its
-    // four hashes' A/B (a whole process one way). Measuring switches, never modes: every
-    // other A/B goes through the verbs (world.setAtomDraw, world.setAtomOcclusion),
-    // paired in one process.
-    if (std::getenv("JAHSHAKA_ATOM_DRAW_OFF")) mAtomDrawEnabled = false;
-    // THE ATOM ITEMS' WORDS follow the table from its first write (ATOM-CPU-WALKS-1).
-    mGpuScene.addObserver(&mAtomFeed);
+    // WHICH SCENE A PASS, A SHADOW NODE OR AN HLMS CALLBACK HANDED THIS MANAGER DRAWS:
+    // bound on the manager itself (sceneOfManager), gone with it.
+    bindSceneManager(mSceneMgr, this);
     mCardFeed.scene = this;
     mGpuScene.addObserver(&mCardFeed);
-    if (std::getenv("JAHSHAKA_ATOM_OCCLUSION_OFF")) mAtomOcclusionEnabled = false;
 }
 
 OgreScene::~OgreScene() {
     destroy();
     // Before the members die: the table's destructor tells its observers.
-    mGpuScene.removeObserver(&mAtomFeed);
     mGpuScene.removeObserver(&mCardFeed);
 }
 
@@ -1544,9 +1533,9 @@ void OgreScene::destroy() {
         // this tree's VaoManager is alive, and the mesh table HOLDS MeshPtrs —
         // and a MeshPtr outliving Root throws in VaoManager (trap 1).
         mGpuScene.destroy();
-        // THE CASTER CUT'S LIST and its stats ring, with the tables it reads.
-        mCasterCull.destroy();
-        atomCasterPassForgetScene(this);
+        // ATOM'S: the caster cut's list and its pass state (the stats ring retires through
+        // the device's window), with the tables they read; the Atom view's Buckets table.
+        mAtom.release();
         // FIRST, before anything else in this scene goes: the overlay system's
         // render-queue listener is registered on THIS SceneManager, and the
         // teardown order the component needs is
@@ -1556,8 +1545,6 @@ void OgreScene::destroy() {
         // THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): HlmsAtom-owned objects in
         // this SceneManager's memory, so they die before it does.
         forgetSceneDecodes(mSceneMgr);
-        // THE ATOM VIEW'S BUCKET TABLE: a texture of this tree's manager.
-        releaseAtomViewTable();
         // THE PHOTON VIEW'S DRAWABLES: Ogre's visualizers switched off on their
         // (still live) GI arms and the cards' quads destroyed, all through this
         // manager — before teardownGi deletes the arms.
@@ -1622,7 +1609,6 @@ void OgreScene::destroy() {
     FogHlmsListener::unregisterScene(mSceneMgr);
     unregisterSceneGiBinding(mSceneMgr);
     mLightList.reset();
-    atomUnregisterScene(mSceneMgr);
     mSceneMgr = nullptr;
 }
 
