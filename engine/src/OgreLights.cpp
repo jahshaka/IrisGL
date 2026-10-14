@@ -414,7 +414,7 @@ void OgreScene::monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
         if (owners) owners->push_back("cards");
     }
     // ...and photon_update's, right after it (photon/PhotonComponent.h).
-    if (Ogre::CompositorWorkspace *ws = photonUpdateWorkspace(mPhoton.surfaceCache())) {
+    if (Ogre::CompositorWorkspace *ws = mPhoton.updateWorkspace()) {
         out.push_back(ws);
         if (owners) owners->push_back("photon_update");
     }

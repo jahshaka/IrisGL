@@ -416,7 +416,6 @@ public:
     void setMoverHooks(const CardMoverHooks &hooks) { mMoverHooks = hooks; }
 
     Ogre::CompositorWorkspace *workspace() const { return mWs; }
-    Ogre::CompositorWorkspace *updateWorkspace() const { return mUpdateWs; }
     /// THE TWO BUFFERS THE RAY JOB'S CARD READ BINDS (rq_reflect.comp through
     /// jah_rq_card.glsl; see `syncBuffers`). `cardBuffer` holds one 80-byte
     /// record per allocated card, in the exact layout the shader reads;
@@ -463,8 +462,8 @@ public:
     void workspacePosUpdate(Ogre::CompositorWorkspace *) override;
     /// PHOTON_UPDATE (photon/PhotonComponent.h): the frame's card work after the capture
     /// workspace — the batch's movers term and the still sun trace (traceSun), the
-    /// batch's close, the relight and the table — as the one pass of the GI workspace
-    /// that follows the capture's (makeWorkspace). Nothing on a frame the capture
+    /// batch's close, the relight and the table — recorded by the component's photon_update
+    /// pass (the GI workspace that follows the capture's). Nothing on a frame the capture
     /// workspace did not finish (a capture that threw).
     void photonUpdate();
     bool photonUpdateOwed() const { return mPosUpdated; }
@@ -646,9 +645,6 @@ private:
     unsigned char mSubjectLod = 0u;
     Ogre::CompositorWorkspace *mWs = nullptr;
     std::string mNodeDef, mWsDef;
-    /// THE GI WORKSPACE OF photon_update, right after the capture's (position 1).
-    Ogre::CompositorWorkspace *mUpdateWs = nullptr;
-    std::string mUpdateNodeDef, mUpdateWsDef;
     /// The capture workspace finished this frame (its workspacePosUpdate ran), and
     /// copied a batch photon_update closes.
     bool mPosUpdated = false;

@@ -507,34 +507,6 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     // `workspacePosUpdate`, and a flag left set is not a lost capture but a
     // broken process (every later pass would generate the capture permutation).
     cm->addListener(this);
-    // PHOTON_UPDATE'S WORKSPACE (photon/PhotonComponent.h), immediately after the
-    // capture's: one PASS_CUSTOM, on scratch slice 0 (it never draws), recording the
-    // cards' trace and relight every frame. Its listener is this cache (the pass finds
-    // the cache through it).
-    mUpdateNodeDef = processUniqueName("JahPhotonUpdateNode");
-    mUpdateWsDef = processUniqueName("JahPhotonUpdateWs");
-    {
-        Ogre::CompositorNodeDef *un = cm->addNodeDefinition(mUpdateNodeDef);
-        un->addTextureSourceName("scr0", 0, Ogre::TextureDefinitionBase::TEXTURE_INPUT);
-        Ogre::RenderTargetViewDef *rtv = un->addRenderTextureView("photonUpdateRtv");
-        Ogre::RenderTargetViewEntry e;
-        e.textureName = "scr0";
-        e.slice = 0u;
-        rtv->colourAttachments.push_back(e);
-        un->setNumTargetPass(1u);
-        Ogre::CompositorTargetDef *t = un->addTargetPass("photonUpdateRtv");
-        t->setNumPasses(1u);
-        Ogre::CompositorPassDef *p =
-            t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(detail::PhotonComponent::kUpdatePass));
-        static_cast<detail::AtomPassDef *>(p)->mDrawsNothing = true;
-        p->mProfilingId = "Jahshaka photon update";
-        Ogre::CompositorWorkspaceDef *uwd = cm->addWorkspaceDefinition(mUpdateWsDef);
-        uwd->connectExternal(0, mUpdateNodeDef, 0);
-    }
-    Ogre::CompositorChannelVec updateExternals(1u, mScratch[unsigned(kShaderOrder[0])]);
-    mUpdateWs = cm->addWorkspace(sm, updateExternals, mCam[0], mUpdateWsDef, true, 1);
-    if (!mUpdateWs) { err = "surface cache: the photon_update workspace failed"; return false; }
-    mUpdateWs->addListener(this);
     return true;
 }
 
@@ -563,14 +535,6 @@ void SurfaceCache::destroyAll() {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     if (!root) return;
     Ogre::CompositorManager2 *cm = root->getCompositorManager2();
-    if (mUpdateWs) {
-        cm->removeWorkspace(mUpdateWs);
-        mUpdateWs = nullptr;
-    }
-    if (!mUpdateWsDef.empty() && cm->hasWorkspaceDefinition(mUpdateWsDef)) cm->removeWorkspaceDefinition(mUpdateWsDef);
-    if (!mUpdateNodeDef.empty() && cm->hasNodeDefinition(mUpdateNodeDef)) cm->removeNodeDefinition(mUpdateNodeDef);
-    mUpdateWsDef.clear();
-    mUpdateNodeDef.clear();
     mPosUpdated = mBatchCopied = false;
     if (mWs) {
         cm->removeListener(this);
@@ -1242,27 +1206,6 @@ void SurfaceCache::photonUpdate() {
     syncBuffers();
 }
 
-namespace detail {
-/// photon_update's recorder and gate: the pass's cache is the listener of its workspace.
-void registerPhotonUpdatePass(AtomPassProvider *provider) {
-    if (!provider) return;
-    const auto cacheOf = [](const Ogre::CompositorPass *pass) -> SurfaceCache * {
-        const Ogre::CompositorNode *node = pass ? pass->getParentNode() : nullptr;
-        const Ogre::CompositorWorkspace *ws = node ? node->getWorkspace() : nullptr;
-        if (!ws) return nullptr;
-        for (Ogre::CompositorWorkspaceListener *l : ws->getListeners())
-            if (auto *c = dynamic_cast<SurfaceCache *>(l)) return c;
-        return nullptr;
-    };
-    provider->setGate(PhotonComponent::kUpdatePass, [cacheOf](const AtomPassContext &ctx) {
-        const SurfaceCache *c = cacheOf(ctx.pass);
-        return c && c->photonUpdateOwed();
-    });
-    provider->setRecorder(PhotonComponent::kUpdatePass, [cacheOf](AtomPassContext &ctx) {
-        if (SurfaceCache *c = cacheOf(ctx.pass)) c->photonUpdate();
-    });
-}
-}  // namespace detail
 
 // ---------------------------------------------------------------------------
 // THE LIT CARD (PHOTON-CARDS-1, SC-1c) — the sixth layer
@@ -2705,9 +2648,6 @@ Ogre::CompositorWorkspace *surfaceCacheWorkspace(const SurfaceCache *cache) {
     return cache ? cache->workspace() : nullptr;
 }
 
-Ogre::CompositorWorkspace *photonUpdateWorkspace(const SurfaceCache *cache) {
-    return cache ? cache->updateWorkspace() : nullptr;
-}
 }   // namespace detail
 
 }   // namespace engine

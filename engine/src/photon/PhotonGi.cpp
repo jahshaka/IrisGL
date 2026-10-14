@@ -6366,6 +6366,14 @@ void PhotonComponent::recreateGiAfterShadowRebuild() {
 // THE CARDS' FRAME (the surface cache is Photon's; the scene's facts come through
 // OgreScene::cardLightKey / cardSceneFacts / foldCardEnvironment / cardCandidates).
 void PhotonComponent::updateSurfaceCache() {
+    bool built = false;
+    updateSurfaceCacheFrame(built);
+    // PHOTON_UPDATE follows: the GI workspace exists whenever the scene runs Photon, right after
+    // a capture workspace built this frame.
+    syncUpdatePass(built);
+}
+
+void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // THE CARDS RUN ONLY WHERE RAYS RUN (PHOTON-CARDS-2; ATOM-S3-CARDCAP): every
     // reader of a card is a ray job's hit (rq_reflect.comp, the gather,
     // jah_rq_card.glsl), and a card's sun term is itself TRACED (traceSun) — so
@@ -6397,6 +6405,7 @@ void PhotonComponent::updateSurfaceCache() {
         hooks.trace = [this](const CardMoverTrace &t) { return mScene.traceCardMovers(t); };
         hooks.readTimes = [this](float &a, float &b) { mScene.cardMoverTimes(a, b); };
         mSurfaceCache->setMoverHooks(hooks);
+        built = true;
     }
     mSurfaceCache->setAsyncShaders(mScene.asyncShaders());
     // A CAMERA-RELATIVE CACHE NEEDS A CAMERA, exactly as the cascade chain

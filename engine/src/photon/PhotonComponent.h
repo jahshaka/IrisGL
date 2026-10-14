@@ -123,10 +123,8 @@ constexpr Ogre::uint32 kCubemapProbeSlotsMax     = 64u;
 class AtomPassProvider;
 /// The ray passes' recorders (OgreRayQuery.cpp: photon_trace, photon_resolve).
 void registerPhotonRayPasses(AtomPassProvider *provider);
-/// The update pass's recorder (OgreSurfaceCache.cpp: photon_update).
+/// The update pass's recorder (photon/PhotonComponent.cpp: photon_update).
 void registerPhotonUpdatePass(AtomPassProvider *provider);
-/// photon_update's GI workspace (null without a surface cache): the monitor times it.
-Ogre::CompositorWorkspace *photonUpdateWorkspace(const SurfaceCache *cache);
 
 
 class PhotonComponent {
@@ -460,6 +458,13 @@ public:
     bool giArmWouldRebuild() const { return !mGiCachesDirty && (mPcc || mVctVoxelizer || mIfd); }
     void markGiCachesDirty() { mGiCachesDirty = true; }
     void releaseSurfaceCache();
+    /// PHOTON_UPDATE'S WORKSPACE (the GI workspace): the component's own, whenever the scene
+    /// runs Photon (a GI mode, or the cards) — right after the card capture's when there is
+    /// one. Null otherwise. The monitor times it.
+    Ogre::CompositorWorkspace *updateWorkspace() const { return mUpdateWs; }
+    /// THE PASS, gated and recorded (registerPhotonUpdatePass): owed when the cards' frame is.
+    bool updatePassOwed() const;
+    void recordUpdatePass();
     void countProbeGateCrossing() { ++mProbeGateCrossings; }
     /// A material whose bound texture is still streaming: parked for settleTextureResidency
     /// (once per material; the voxel half ORs in).
@@ -658,6 +663,7 @@ public:
     /// neither and is forgotten here.
     /// The cards' frame: the cache built, fed and updated (engine.cards, once a frame).
     void updateSurfaceCache();
+    void updateSurfaceCacheFrame(bool &built);
     void notePhotonView(const void *view, bool presents, const PhotonViewShape &shape);
     bool readCardTexel(NodeId node, unsigned card, float u, float v,
                        CardSample &out);
@@ -691,6 +697,15 @@ public:
     bool sunContactWanted() const;
 private:
     OgreScene &mScene;
+    /// photon_update's workspace and what it renders through (it never draws): a 4x4 target,
+    /// the camera addWorkspace asks for, its definitions.
+    Ogre::CompositorWorkspace *mUpdateWs = nullptr;
+    Ogre::TextureGpu *mUpdateTarget = nullptr;
+    Ogre::Camera *mUpdateCamera = nullptr;
+    std::string mUpdateNodeDef, mUpdateWsDef;
+    /// Builds (or rebuilds, right after a fresh capture workspace) / releases it.
+    void syncUpdatePass(bool afterNewCapture);
+    void releaseUpdatePass();
     Ogre::Root *const &mRoot;
     Ogre::SceneManager *const &mSceneMgr;
     OgreEngine *const &mEngine;

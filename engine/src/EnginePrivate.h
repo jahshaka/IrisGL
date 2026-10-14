@@ -5728,6 +5728,8 @@ public:
     unsigned long long rayStructureEpoch() const;
     /// PHOTON (photon/PhotonComponent.h): the GI's products, read through its interface.
     const PhotonComponent &photon() const { return mPhoton; }
+    /// photon_update's recorder (the pass provider's): the component records its frame's GI work.
+    void recordPhotonUpdatePass() { mPhoton.recordUpdatePass(); }
     // ---- THE SCENE AS PHOTON READS IT (ENGINE-UPGRADE-2B stage 1) -----------------------
     // PhotonComponent's back-reference reads these scene facts (the four it reads most — the
     // root, the manager, the engine, the error sink — are bound by reference when the scene
