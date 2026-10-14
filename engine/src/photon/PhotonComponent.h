@@ -11,8 +11,15 @@
 //
 // ITS GPU WORK IS THREE COMPOSITOR PASSES (PASS_CUSTOM, served by the engine's one pass
 // provider, AtomPass.h):
-//   photon_update  — first in the GI workspace (the surface cache's, position 0): the
-//                    cards' sun trace and relight.
+//   photon_update  — the pass of the GI workspace right after the card capture's (the
+//                    surface cache's two workspaces, positions 0 and 1): the cards' sun
+//                    trace, the batch's close, the relight. The voxel cascades' and the
+//                    irradiance field's dispatches are NOT in it yet: OgreGi.cpp's
+//                    orchestration records them BEFORE the frame (engine.pre), each where
+//                    its parameters are written — the voxeliser's compute jobs are shared
+//                    across cascades and re-parameterised per dispatch, the field maps its
+//                    parameter buffer per update — so a dispatch cannot be deferred alone;
+//                    they move into the pass with the orchestration, at stage 4.
 //   photon_trace   — per view, in front of the pass that shades the hits (the hit decode
 //                    pass, or the first pass that reads the ray jobs' answer).
 //   photon_resolve — per view, in front of the first pass that reads the answer: the
