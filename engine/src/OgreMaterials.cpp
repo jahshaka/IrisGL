@@ -1386,8 +1386,8 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
                 // format applies toSRGB, so the file's already-encoded value was
                 // encoded a SECOND time and a grey base-colour map rendered too
                 // bright (8-bit 128 stored as 188). The value is now stored as the
-                // file has it, at 8 and at 16 bits alike; a linear map gets the
-                // same bytes as before.
+                // file has it, at 8 and at 16 bits alike (a FLOAT grey is linear
+                // and is encoded once); a linear map gets the same bytes as before.
                 const Ogre::TextureBox src = probe.getData(0);
                 Ogre::TextureBox dst = rgba.getData(0);
                 for (Ogre::uint32 y = 0; y < h; ++y) {
@@ -1399,9 +1399,14 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
                             d[3] = 255u;
                         }
                     } else {
-                        // 16-bit, float: the source's value, unencoded, rounded to 8 bits.
+                        // 16-bit UNORM: the file's (encoded) value, rounded to 8 bits.
+                        // FLOAT (TIFF/EXR): a linear value — encoded once for an sRGB
+                        // destination, so 0.5 reads 0.5 after the sampler decodes it.
+                        const bool encode = srgb && (Ogre::PixelFormatGpuUtils::isFloat(pf) ||
+                                                     Ogre::PixelFormatGpuUtils::isFloatRare(pf));
                         for (Ogre::uint32 x = 0; x < w; ++x, d += 4) {
-                            const float v = Ogre::Math::saturate(probe.getColourAt(x, y, 0).r);
+                            float v = Ogre::Math::saturate(probe.getColourAt(x, y, 0).r);
+                            if (encode) v = Ogre::PixelFormatGpuUtils::toSRGB(v);
                             d[0] = d[1] = d[2] = Ogre::uint8(std::lround(v * 255.0f));
                             d[3] = 255u;
                         }
