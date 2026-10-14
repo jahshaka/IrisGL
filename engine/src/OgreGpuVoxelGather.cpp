@@ -166,11 +166,7 @@ Ogre::DescriptorSetUav::BufferSlot gatherSlotPublic(Ogre::UavBufferPacked *buffe
 }
 
 static void dispatchGatherImpl(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job) {
-    Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
-    job->analyzeBarriers(rt);
-    rs->executeResourceTransition(rt);
-    jahshaka::engine::detail::notePhotonDispatch();
-    hc->dispatch(job, 0, 0);
+    jahshaka::engine::detail::photonDispatch(hc, job, rs);   // RECORDED: photon_update dispatches it
 }
 
 /// THE JOBS OUTLIVE A GATHER (they live in HlmsCompute) and their descriptor sets

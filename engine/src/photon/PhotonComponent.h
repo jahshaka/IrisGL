@@ -44,6 +44,7 @@
 #define JAHSHAKA_ENGINE_PHOTONCOMPONENT_H
 
 #include "jahshaka/engine/Types.h"
+#include "photon/PhotonDispatch.h"
 
 #include <OgrePixelFormatGpu.h>
 #include <OgrePrerequisites.h>

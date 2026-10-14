@@ -872,10 +872,7 @@ namespace Ogre
                 uavSlot.texture = mLightVoxel[i + 1u];
                 mAnisoGeneratorStep0->_setUavTexture( i, uavSlot );
             }
-            mAnisoGeneratorStep0->analyzeBarriers( mResourceTransitions );
-            renderSystem->executeResourceTransition( mResourceTransitions );
-            jahshaka::engine::detail::notePhotonDispatch();
-            hlmsCompute->dispatch( mAnisoGeneratorStep0, 0, 0 );
+            jahshaka::engine::detail::photonDispatch( hlmsCompute, mAnisoGeneratorStep0, renderSystem );
         }
 
         FastArray<HlmsComputeJob *>::const_iterator itor = mAnisoGeneratorStep1.begin();
@@ -883,10 +880,7 @@ namespace Ogre
 
         while( itor != endt )
         {
-            ( *itor )->analyzeBarriers( mResourceTransitions );
-            renderSystem->executeResourceTransition( mResourceTransitions );
-            jahshaka::engine::detail::notePhotonDispatch();
-            hlmsCompute->dispatch( *itor, 0, 0 );
+            jahshaka::engine::detail::photonDispatch( hlmsCompute, *itor, renderSystem );
             ++itor;
         }
         renderSystem->debugAnnotationPop();
@@ -1021,10 +1015,7 @@ namespace Ogre
         setupBounceTextures( false );
 
         HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
-        mLightVctBounceInject->analyzeBarriers( mResourceTransitions );
-        renderSystem->executeResourceTransition( mResourceTransitions );
-        jahshaka::engine::detail::notePhotonDispatch();
-        hlmsCompute->dispatch( mLightVctBounceInject, 0, 0 );
+        jahshaka::engine::detail::photonDispatch( hlmsCompute, mLightVctBounceInject, renderSystem );
 
         std::swap( mLightVoxel[0], mLightBounce );
 
@@ -1412,10 +1403,7 @@ namespace Ogre
         renderSystem->endCopyEncoder();
 
         HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
-        mLightInjectionJob->analyzeBarriers( mResourceTransitions );
-        renderSystem->executeResourceTransition( mResourceTransitions );
-        jahshaka::engine::detail::notePhotonDispatch();
-        hlmsCompute->dispatch( mLightInjectionJob, 0, 0 );
+        jahshaka::engine::detail::photonDispatch( hlmsCompute, mLightInjectionJob, renderSystem );
 
         if( mAnisotropic )
             generateAnisotropicMips();

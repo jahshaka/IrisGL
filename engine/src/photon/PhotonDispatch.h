@@ -7,6 +7,12 @@
 #ifndef JAHSHAKA_ENGINE_PHOTONDISPATCH_H
 #define JAHSHAKA_ENGINE_PHOTONDISPATCH_H
 
+namespace Ogre {
+class HlmsCompute;
+class HlmsComputeJob;
+class RenderSystem;
+}  // namespace Ogre
+
 namespace jahshaka {
 namespace engine {
 namespace detail {
@@ -21,6 +27,9 @@ struct PhotonPassScope {
     PhotonPassScope(const PhotonPassScope &) = delete;
     PhotonPassScope &operator=(const PhotonPassScope &) = delete;
 };
+
+/// THE ONE DISPATCH DOOR: a Photon compute dispatch with its barriers, noted by the witness.
+void photonDispatch(Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job, Ogre::RenderSystem *rs);
 
 }  // namespace detail
 }  // namespace engine

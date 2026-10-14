@@ -282,7 +282,6 @@ namespace Ogre
         TextureGpu *mIrradianceTex;
         TextureGpu *mDepthVarianceTex;
 
-        CompositorWorkspace *mGenerationWorkspace;
         HlmsComputeJob      *mGenerationJob;
         HlmsComputeJob      *mDepthMirrorBorderJob;
         HlmsComputeJob      *mColourMirrorBorderJob;
@@ -314,6 +313,8 @@ namespace Ogre
 
         void setIrradianceFieldGenParams();
 
+        /// The generation job, then the depth and the colour border mirrors (direct dispatches).
+        void dispatchGeneration();
         void setupBorderMirrorParams( uint32 borderedRes, uint32 fullWidth,
                                       ConstBufferPacked *ifdBorderMirrorParamsBuffer,
                                       HlmsComputeJob    *job );

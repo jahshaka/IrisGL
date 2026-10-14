@@ -34,6 +34,7 @@ THE SOFTWARE.
 #include "photon/voxel/PhotonVoxelizerSourceBase.h"
 
 #include "Compositor/OgreCompositorManager2.h"
+#include "OgreDescriptorSetUav.h"
 #include "Compositor/OgreCompositorWorkspace.h"
 #include "OgreRoot.h"
 
@@ -131,7 +132,6 @@ namespace Ogre
         mVctLighting( 0 ),
         mIrradianceTex( 0 ),
         mDepthVarianceTex( 0 ),
-        mGenerationWorkspace( 0 ),
         mGenerationJob( 0 ),
         mDepthMirrorBorderJob( 0 ),
         mColourMirrorBorderJob( 0 ),
@@ -430,12 +430,6 @@ namespace Ogre
 
         bindChainToGenerationJob();
 
-        CompositorManager2 *compositorManager = mRoot->getCompositorManager2();
-        CompositorChannelVec channels;
-        channels.push_back( mIrradianceTex );
-        channels.push_back( mDepthVarianceTex );
-        mGenerationWorkspace = compositorManager->addWorkspace( mSceneManager, channels, 0,
-                                                                "IrradianceField/Gen/Workspace", false );
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::destroyTextures()
@@ -445,12 +439,6 @@ namespace Ogre
 
         TextureGpuManager *textureManager = mRoot->getRenderSystem()->getTextureGpuManager();
 
-        if( mGenerationWorkspace )
-        {
-            CompositorManager2 *compositorManager = mRoot->getCompositorManager2();
-            compositorManager->removeWorkspace( mGenerationWorkspace );
-            mGenerationWorkspace = 0;
-        }
         if( mIrradianceTex )
         {
             textureManager->destroyTexture( mIrradianceTex );
@@ -640,7 +628,7 @@ namespace Ogre
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::invalidateAllProbes()
     {
-        if( !mIrradianceTex || !mVctLighting || !mGenerationWorkspace )
+        if( !mIrradianceTex || !mVctLighting || !mGenerationJob )
             return;
         // THE GENERATION JOB'S OWN DISPATCH in its Invalidate mode (no rays: every
         // probe's tile to value 0, count 0), not ComputeTools' clear - a clear job
@@ -936,13 +924,34 @@ namespace Ogre
 
         paramsBuffer->unmap( UO_KEEP_PERSISTENT );
 
-        jahshaka::engine::detail::notePhotonDispatch();
-
-        mGenerationWorkspace->_beginUpdate( false );
-        mGenerationWorkspace->_update();
-        mGenerationWorkspace->_endUpdate( false );
+        dispatchGeneration();
 
         mNumProbesProcessed += probesPerFrame;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::dispatchGeneration()
+    {
+        // THE GENERATION AND THE TWO BORDER MIRRORS AS DIRECT DISPATCHES (Jahshaka,
+        // ENGINE-UPGRADE-2B stage 3): what the "IrradianceField/Gen/Workspace" workspace did,
+        // without a nested workspace update (which, inside photon_update's PASS_CUSTOM, would be
+        // a workspace driven from inside another's pass) — the integration reads and writes both
+        // atlases, then each atlas's border texels mirror its interior. Recorded like every
+        // Photon dispatch (photon/PhotonDispatch.h).
+        RenderSystem *renderSystem = mRoot->getRenderSystem();
+        HlmsCompute *hlmsCompute = mRoot->getHlmsManager()->getComputeHlms();
+        DescriptorSetUav::TextureSlot uav( DescriptorSetUav::TextureSlot::makeEmpty() );
+        uav.access = ResourceAccess::ReadWrite;
+        uav.texture = mIrradianceTex;
+        mGenerationJob->_setUavTexture( 0, uav );
+        uav.texture = mDepthVarianceTex;
+        mGenerationJob->_setUavTexture( 1, uav );
+        jahshaka::engine::detail::photonDispatch( hlmsCompute, mGenerationJob, renderSystem );
+        uav.texture = mDepthVarianceTex;
+        mDepthMirrorBorderJob->_setUavTexture( 0, uav );
+        jahshaka::engine::detail::photonDispatch( hlmsCompute, mDepthMirrorBorderJob, renderSystem );
+        uav.texture = mIrradianceTex;
+        mColourMirrorBorderJob->_setUavTexture( 0, uav );
+        jahshaka::engine::detail::photonDispatch( hlmsCompute, mColourMirrorBorderJob, renderSystem );
     }
     //-------------------------------------------------------------------------
     size_t PhotonIrradianceField::getConstBufferSize() const

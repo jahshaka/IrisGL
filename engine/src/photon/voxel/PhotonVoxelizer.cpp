@@ -808,11 +808,8 @@ namespace Ogre
         shaderParams.setDirty();
 
         OgreProfileGpuBegin( "VCT partition AABBs" );
-        ResourceTransitionArray transitions;
-        job->analyzeBarriers( transitions );
-        renderSystem->executeResourceTransition( transitions );
-        jahshaka::engine::detail::notePhotonDispatch();
-        hlmsCompute->dispatch( job, 0, 0 );
+        // RECORDED (photon/PhotonDispatch.h): its barriers and its dispatch in photon_update.
+        jahshaka::engine::detail::photonDispatch( hlmsCompute, job, renderSystem );
         OgreProfileGpuEnd( "VCT partition AABBs" );
 
         // The buffers are the caller's and the job is shared: leave nothing bound.
@@ -1018,10 +1015,7 @@ namespace Ogre
                 shaderParams.mParams.push_back( paramVoxelPixelOrigin );
                 shaderParams.setDirty();
 
-                job->analyzeBarriers( mResourceTransitions );
-                mRenderSystem->executeResourceTransition( mResourceTransitions );
-                jahshaka::engine::detail::notePhotonDispatch();
-                hlmsCompute->dispatch( job, 0, 0 );
+                jahshaka::engine::detail::photonDispatch( hlmsCompute, job, mRenderSystem );
                 ++mLastDispatchCount;
             }
         }

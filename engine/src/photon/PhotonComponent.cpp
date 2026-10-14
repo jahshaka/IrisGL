@@ -8,6 +8,12 @@
 #include "jahshaka/engine/PhotonStatus.h"
 
 #include <OgreCamera.h>
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsComputeJob.h>
+#include <OgreHlmsManager.h>
+#include <OgreRenderSystem.h>
+#include <OgreResourceTransition.h>
+
 #include <OgreRoot.h>
 #include <OgreTextureGpuManager.h>
 #include <Compositor/OgreCompositorManager2.h>
@@ -120,9 +126,19 @@ void notePhotonDispatch() { ++(gPhotonPassDepth ? gPhotonInPass : gPhotonOutside
 PhotonPassScope::PhotonPassScope() { ++gPhotonPassDepth; }
 PhotonPassScope::~PhotonPassScope() { --gPhotonPassDepth; }
 unsigned long long photonDispatchesInPass() { return gPhotonInPass; }
-unsigned long long photonDispatchesOutsidePass() { return gPhotonOutsidePass; }
 
-bool PhotonComponent::updatePassOwed() const { return mSurfaceCache && mSurfaceCache->photonUpdateOwed(); }
+// ---- THE ONE DISPATCH DOOR (photon/PhotonDispatch.h) -------------------------------------------
+void photonDispatch(Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job, Ogre::RenderSystem *rs) {
+    Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+    job->analyzeBarriers(rt);
+    rs->executeResourceTransition(rt);
+    notePhotonDispatch();
+    hc->dispatch(job, 0, 0);
+}unsigned long long photonDispatchesOutsidePass() { return gPhotonOutsidePass; }
+
+bool PhotonComponent::updatePassOwed() const {
+    return mSurfaceCache && mSurfaceCache->photonUpdateOwed();
+}
 
 void PhotonComponent::recordUpdatePass() {
     PhotonPassScope pass;
