@@ -297,25 +297,17 @@
 	// post hook, and only where the field's fallback weight is above zero (SPEED-GPU,
 	// audit PH-2): inside the field that weight is exactly 0 and the four marches were
 	// multiplied by it.
-	INLINE void jahVctDiffuse( OGRE_INOUT_REF( float3, outDiffuse ), OGRE_INOUT_REF( float3, outDiffuseVoxel ),
-							   OGRE_INOUT_REF( float, outDiffuseOcclusion ),
+	INLINE void jahVctDiffuse( OGRE_INOUT_REF( float3, outDiffuse ),
 							   float3 posLS, float4 jahOrigin, float3x3 TBN, VctProbeParams probeParams )
 	{
 		float3 light;
 		float3 jahEnvD;
-		float jahOccD;
-		jahDiffuseCones( posLS, jahOrigin, TBN, light, jahEnvD, jahOccD );
+		jahDiffuseCones( posLS, jahOrigin, TBN, light, jahEnvD );
 		const float blend = 1.0f;
 		float blendWeight = probeParams.blendFade * blend * probeParams.multiplier;
 		// The voxels' share decoded by the volume's multiplier; the
 		// environment's share is radiance already.
 		outDiffuse.xyz += light.xyz * blendWeight + jahEnvD * ( probeParams.blendFade * blend );
-		// ...and the voxels' share ALONE, for the rough lobe's occluded share
-		// (applyVctRoughSpecular): the split made at its source.
-		outDiffuseVoxel += light.xyz * blendWeight;
-		// ...and the share of the hemisphere those voxels stopped, which that light is
-		// the stopped share's radiance times.
-		outDiffuseOcclusion += jahOccD;
 	}
 	@end
 
@@ -323,8 +315,7 @@
 	(
 		OGRE_INOUT_REF( float3, outDiffuse ), OGRE_INOUT_REF( float4, outSpecular ),
 		OGRE_INOUT_REF( float, outRoughOcclusion ),
-		OGRE_INOUT_REF( float3, outDiffuseVoxel ),
-		OGRE_INOUT_REF( float, outDiffuseOcclusion ),
+		OGRE_INOUT_REF( float3, outRoughVoxel ),
 		PixelData pixelData, float3 pos, float3x3 TBN,
 	@property( use_parallax_correct_cubemaps )
 		OGRE_INOUT_REF( float3, vctSpecPosVS ),
@@ -349,7 +340,7 @@
 		@end
 
 		@property( !vct_disable_diffuse && !irradiance_field )
-			jahVctDiffuse( outDiffuse, outDiffuseVoxel, outDiffuseOcclusion, posLS, jahOrigin, TBN, probeParams );
+			jahVctDiffuse( outDiffuse, posLS, jahOrigin, TBN, probeParams );
 		@end
 
 		float blendWeight = probeParams.blendFade * blend * probeParams.multiplier;
@@ -499,7 +490,25 @@
 												  : irrLight.colour.xyz * blendWeight ) +
 								   jahEnvS * ( probeParams.blendFade * blend ), blend );
 			if( jahRoughLobe )
+			{
 				outRoughOcclusion = 1.0f - specAlpha;
+				// THE STOPPED SHARE'S LIGHT IS WHAT THE QUERY STOPPED ON (BISTRO-FIXES-3): the
+				// march's colour is the voxels' radiance it composited, premultiplied by their
+				// opacity, after the below-horizon share (colour 0) took 1 - below of it - so
+				// colour / (1 - below) is the above-horizon lobe's stopped radiance times its
+				// stopped share, jahAbove; at the occlusion the sky is weighted by, that is
+				// colour / (1 - below) x occlusion / jahAbove. The diffuse set's voxel light
+				// stood for it before and is the wrong integral twice over: weighted by the
+				// SET's occlusion (a facade filling a grazing lobe over an open hemisphere read
+				// 0.36x a uniform world, gi.rough_sky_once's wall arm) and averaged over the
+				// SET's directions (a red panel to the side lit a dark slab's underside,
+				// gi.gather_glass). Decoded by the volume's multiplier like the cone's colour.
+				const float jahBelowR = jahSpecOrigin.w;
+				const float jahAboveR = saturate( ( irrLight.alpha - jahBelowR ) / max( 1.0f - jahBelowR, 1e-4f ) );
+				if( jahAboveR > 0.0f )
+					outRoughVoxel += irrLight.colour.xyz * blendWeight / max( 1.0f - jahBelowR, 1e-4f ) *
+									 ( outRoughOcclusion / jahAboveR );
+			}
 
 			@property( use_parallax_correct_cubemaps )
 				vctSpecPosVS = fromVctToViewSpace( irrLight.posLS.xyz, probeParams );
@@ -527,44 +536,20 @@
 @end
 
 @piece( applyVctRoughSpecular )
-	// THE ROUGH LOBE'S OCCLUDED SHARE (PHOTON-VOXEL-3/4, computeVctProbe's comment): a
-	// lobe wider than tan 1 takes its sky share elsewhere (the prefiltered lobe times what
-	// the capped occlusion query let through: the escape's jahEnvS, or the material's cube
-	// times jahGlobalEnvVisibility); what the voxels stopped it reads from the
-	// DIFFUSE estimator's VOXEL light - never its sky. Where the cones answer the pixel
-	// the split is made at the source: computeVctProbe hands the voxels' share alone
-	// (vctDiffuseVoxel). Subtracting an analytic sky from the cones' total instead
-	// (PHOTON-VOXEL-3) added the four-cone set's quadrature error against the SH as
-	// voxel light the moment ANY occlusion appeared - gi.env_cone's metal plate read
-	// 1.052x at roughness 0.8 on an occlusion sliver. Where the field or the gather
-	// wrote envColourD (their atlas and probes hold the SUM), the sky part is the
-	// unoccluded sky irradiance at the normal times the query's transmittance, as
-	// before - their sky is an exact 144-ray / per-probe integral, not four cones.
-	// The split-sum downstream applies the specular albedo. 0 for every lobe that marched.
+	// THE ROUGH LOBE'S OCCLUDED SHARE (PHOTON-VOXEL-3/4, computeVctProbe's comment;
+	// BISTRO-FIXES-3): a lobe wider than tan 1 takes its sky share elsewhere (the
+	// prefiltered lobe times what the capped occlusion query let through: the escape's
+	// jahEnvS, or the material's cube times jahGlobalEnvVisibility); the share the query
+	// stopped is lit by WHAT THE QUERY STOPPED ON - computeVctProbe's vctRoughVoxel, the
+	// march's own colour at the same occlusion - so the two shares sum to one lobe. Two
+	// proxies stood for it before and both were the wrong integral: the DIFFUSE set's voxel
+	// light (weighted by the set's occlusion and averaged over the set's directions: a
+	// facade filling a grazing lobe over an open hemisphere read 0.36x a uniform world,
+	// gi.rough_sky_once's wall arm), and, under the field or the gather, their diffuse
+	// estimate minus the sky's unoccluded irradiance times the query's transmittance. The
+	// split-sum downstream applies the specular albedo. 0 for every lobe that marched.
 	@property( !vct_disable_specular )
-		if( vctRoughOcclusion > 0.0f )
-		{
-		@property( !vct_disable_diffuse && !irradiance_field )
-			// THE VOXELS' LIGHT AT THE QUERY'S OWN SHARE (BISTRO-FIXES-3): vctDiffuseVoxel is
-			// the stopped share's radiance times the DIFFUSE set's occlusion, so the share this
-			// lobe's query stopped is that radiance times vctRoughOcclusion - the same split the
-			// sky's share (jahGlobalEnvVisibility, the escape) is made at, so the two sum to one
-			// lobe. Read as the diffuse set's light it lit the gap between the two estimates
-			// twice: a plate in a box emitting the sky's radiance read 1.16x the open sky with
-			// one 3 m opening above it (gi.rough_sky_once). The stopped radiance's estimate
-			// (the light over the diffuse set's occlusion) is taken from at least a tenth of the
-			// hemisphere: a sliver of diffuse occlusion is noise, while a query stopped more
-			// than the set (a facade filling the lobe over an open hemisphere) must still be
-			// lit at its own share, never capped at the set's (gi.rough_sky_once's wall arm).
-			pixelData.envColourS += vctDiffuseVoxel *
-									( vctRoughOcclusion / max( vctDiffuseOcclusion, 0.1f ) );
-		@else
-			float3 jahSkyD = jahEnvIrradiance( jahViewToWorldDir( float3( pixelData.normal ) ) );
-			pixelData.envColourS += max( float3( pixelData.envColourD ) -
-											 jahSkyD * ( 1.0f - vctRoughOcclusion ),
-										 float3( 0.0f, 0.0f, 0.0f ) );
-		@end
-		}
+		pixelData.envColourS += vctRoughVoxel;
 	@end
 @end
 
@@ -617,9 +602,8 @@
 	float3 vctDiffuse = float3( 0, 0, 0 );
 	float4 vctSpecular = float4( 0, 0, 0, 0 );
 	float vctRoughOcclusion = 0.0f;
-	float3 vctDiffuseVoxel = float3( 0, 0, 0 );
-	float vctDiffuseOcclusion = 0.0f;
-	computeVctProbe( vctDiffuse, vctSpecular, vctRoughOcclusion, vctDiffuseVoxel, vctDiffuseOcclusion,
+	float3 vctRoughVoxel = float3( 0, 0, 0 );
+	computeVctProbe( vctDiffuse, vctSpecular, vctRoughOcclusion, vctRoughVoxel,
 					 pixelData, inPs.pos, jahConeBasis,
 				@property( use_parallax_correct_cubemaps )
 					 vctSpecPosVS,

@@ -153,12 +153,8 @@ vec4 jahSpecularConeStart( vec3 surfaceLS, vec3 dirLS, vec3 biasDirLS )
 /// a ring of N >= 3 directions at polar angle t averages a band-l harmonic to
 /// P_l( cos t ) times its value on the normal, so those weights make the open-sky sum
 /// the SH irradiance exactly).
-///   `occlusion` (the six-argument form) the set's cosine-weighted OCCLUSION: the share of
-///            the hemisphere the voxels stopped, each cone's stopped share at its weight -
-///            `light` is the stopped share's radiance times it (the rough lobe's reader
-///            rescales the voxels' light to its own query's occlusion, BISTRO-FIXES-3)
 void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
-					  out vec3 light, out vec3 envD, out float occlusion )
+					  out vec3 light, out vec3 envD )
 {
 	const int kCones = 4;
 	const vec3 coneDirs[4] = vec3[4]( vec3( 0.707107, 0.0, 0.707107 ),
@@ -170,7 +166,6 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 	const uint coneFlags = 0u;
 	light = vec3( 0.0, 0.0, 0.0 );
 	envD = vec3( 0.0, 0.0, 0.0 );
-	occlusion = 0.0;
 	for( int i = 0; i < kCones; ++i )
 	{
 		vec3 d = basis * coneDirs[i];
@@ -178,21 +173,12 @@ void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
 		coneOrigin.w = jahConeBelow( normalize( d ), basis[2], coneAngleTan );
 		JahConeResult result = jahConeMarch( posLS, JAH_CONES_TO_LS( d ), coneAngleTan, coneOrigin, coneFlags );
 		light += coneWeights[i] * result.colour;
-		const float stopped = min( 1.0, result.alpha / 0.95 );
-		occlusion += coneWeights[i] * stopped;
-		envD += coneWeights[i] * ( 1.0 - stopped ) *
+		envD += coneWeights[i] * ( 1.0 - min( 1.0, result.alpha / 0.95 ) ) *
 				jahEnvQuadrant( JAH_CONES_TO_WORLD( d ), JAH_CONES_TO_WORLD( basis[2] ) );   // its quadrant, cosine-weighted
 	}
 	// THE SET'S SUM is what is clamped, never a cone (jahEnvQuadrant's note): the four
 	// quadrants' exact sum survives a negative band-weighted quadrant.
 	envD = max( envD, vec3( 0.0, 0.0, 0.0 ) );
-}
-
-void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
-					  out vec3 light, out vec3 envD )
-{
-	float occlusion;
-	jahDiffuseCones( posLS, origin, basis, light, envD, occlusion );
 }
 
 /// THE SKY'S SHARE ON A FINER QUADRATURE (CONTACT-OCCLUSION-1): what jahDiffuseCones'
