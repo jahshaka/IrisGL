@@ -46,9 +46,10 @@
 		// normalised space, per axis (all ones in a cube: no transform).
 		float4 worldToVolumeDir;
 		// Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP - x = the
-		// precision e (a probe stops once 2 SE <= e times its mean on every texel), y = the
-		// fewest samples a stop may follow (0: the stop is off), z = the mean below which a
-		// texel is unlit (no relative error to bound), w unused.
+		// precision e (a probe stops once t SE <= e times its mean on every texel, t the 95 %
+		// Student quantile at n - 1 degrees: jahIfdStudentT), y = the
+		// fewest samples a stop may follow (0: the stop is off), z = the mean at or below
+		// which a texel has read no light (it never stops its probe), w unused.
 		float4 varianceStop;
 	}
 	CONST_BUFFER_STRUCT_END( p );
@@ -417,7 +418,7 @@
 	// samples kept; a sample that replaces the estimate (blend 1) starts it at 0. THE STOP
 	// TEST, per texel: with n samples the estimate's standard error is sqrt( M2 / ( n - 1 ) / n ),
 	// and a texel is at the precision when its 95 % interval (jahIfdStudentT standard errors)
-	// sits inside e of its mean (an unlit texel has no relative error to bound); the probe stops
+	// sits inside e of its mean (a texel that has read no light never does); the probe stops
 	// when every texel is.
 	const float3 kLum = float3( 0.2126, 0.7152, 0.0722 );
 	for( uint t = lid; t < @value( irrad_resolution )u * @value( irrad_resolution )u;
@@ -451,10 +452,13 @@
 		ifdVariance[JAH_IFD_M2( probeIdx, t )] = floatBitsToUint( m2 );
 		if( p.varianceStop.y != 0.0 )
 		{
-			bool atPrecision = heldAfter >= p.varianceStop.y &&
-							   ( meanL <= p.varianceStop.z ||
-								 jahIfdStudentT( heldAfter ) * sqrt( max( m2, 0.0 ) / ( ( heldAfter - 1.0 ) * heldAfter ) ) <=
-									 p.varianceStop.x * meanL );
+			// A TEXEL THAT HAS READ NO LIGHT BOUNDS NOTHING: a source its rays have not met yet - the
+			// rare-and-bright integrand, a small emitter (gi.field_variance_stop_sliver: stopped at n = 4
+			// on four dark samples, those texels read 100 % off the oracle) - reads exactly that way, so
+			// such a texel keeps its probe refining to the target.
+			bool atPrecision = heldAfter >= p.varianceStop.y && meanL > p.varianceStop.z &&
+							   jahIfdStudentT( heldAfter ) * sqrt( max( m2, 0.0 ) / ( ( heldAfter - 1.0 ) * heldAfter ) ) <=
+								   p.varianceStop.x * meanL;
 			if( !atPrecision )
 				atomicOr( g_probeUnconverged, 1u );
 		}

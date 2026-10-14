@@ -55,6 +55,7 @@
 #include "EnginePrivate.h"
 #include "SceneLightList.h"
 #include "photon/voxel/PhotonVoxelMaterial.h"
+#include "photon/voxel/PhotonIrradianceField.h"
 #include <OgreLight.h>
 
 #include <Compositor/OgreCompositorNode.h>
@@ -8720,6 +8721,14 @@ unsigned long long PhotonComponent::gatherRestKey() const {
     };
     fold(giLightingSerial());
     fold(mScene.shadowEpoch() + mScene.rayLevelRefits());
+    // THE IRRADIANCE FIELD'S GENERATION (ENGINE-UPGRADE-2B stage 4): the generation job's own integration count,
+    // which advances only on frames the field writes. A gather pixel reads the field (its fallback, and through
+    // the hits it shades), so a REST MEAN held while the field still refined averaged the field's last passes in -
+    // under the variance stop a probe's last sample moves it by 1/n of its noise, n from 4 - and two at-rest shots
+    // differed (pool.world_sky_b's height_fog, 1.4e-4). In the REST key, not the restart key: the rest mean
+    // restarts and holds after the field's last write while the pixel history is untouched (a restart on every
+    // field write threw a moving lamp's history away each frame: the selftest's mover pose, up to 85 codes).
+    if (mIfd) fold(mIfd->getIntegrations());
     if (mSurfaceCache) {
         CardCacheStatus cs;
         mSurfaceCache->fillStatus(cs);

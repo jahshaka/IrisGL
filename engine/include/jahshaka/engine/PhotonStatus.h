@@ -26,7 +26,7 @@ struct PhotonFieldStatus {
     unsigned long long integrations = 0;
     /// Probes stopped by the variance stop, by the last reading that no fresh work outdated.
     unsigned probesStopped = 0;
-    /// The stop's rule: the fewest samples (0: the stop is off) and the precision (2 SE / mean).
+    /// The stop's rule: the fewest samples (0: the stop is off) and the precision (the 95 % Student-t interval / mean).
     unsigned stopMinSamples = 0;
     float stopPrecision = 0.0f;
 };

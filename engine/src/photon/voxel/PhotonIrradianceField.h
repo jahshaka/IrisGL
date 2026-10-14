@@ -220,8 +220,8 @@ namespace Ogre
             // transform" so a cube's rays are the bits they always were.
             float4 worldToVolumeDir;
             // Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP - x = the
-            // precision (2 SE / mean), y = the fewest samples a stop follows (0: off), z = the
-            // unlit mean floor, w unused (setVarianceStop).
+            // precision (the 95 % t interval / mean), y = the fewest samples a stop follows (0: off), z = the
+            // no-light mean floor (such a texel never stops its probe), w unused (setVarianceStop).
             float4 varianceStop;
         };
 
@@ -512,9 +512,10 @@ namespace Ogre
 
         /** Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP. A probe stops
             once it holds at least minSamples samples and, on every texel of its irradiance,
-            twice the standard error of its mean (from the running second moment) is inside
-            precision times the mean (a texel whose mean is at or below meanFloor is unlit:
-            nothing to bound). minSamples 0 turns the stop off (every probe to the target).
+            the 95 % interval of its mean - Student's t( 0.975, n - 1 ) standard errors, the deviation
+            from the running second moment - is inside
+            precision times the mean (a texel whose mean is at or below meanFloor has read no light
+            and never stops its probe: a source its rays have not met yet reads that way). minSamples 0 turns the stop off (every probe to the target).
         */
         void setVarianceStop( uint32 minSamples, float precision, float meanFloor );
         uint32 getStopMinSamples() const { return mStopMinSamples; }

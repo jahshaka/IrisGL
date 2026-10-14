@@ -376,7 +376,9 @@ static const Ogre::uint32 kIfdTargetSamples = 25u;
 // lit texels within two sigma, at 5.2x less work than the target; a stop from 6 samples moved
 // neither the coverage (94.7 %) nor the tail (the worst texel 0.23 at 4, 0.19 at 6 - one draw of
 // a 2-sigma statement over 300k texels) and paid 4.0x. A texel whose mean is at or below
-// kIfdStopMeanFloor is unlit (no relative error to bound). The arm gi.fieldStopOff turns the
+// kIfdStopMeanFloor has read no light and NEVER stops its probe (a small emitter its rays have not met yet reads
+// exactly that way: gi.field_variance_stop_sliver; an absolute floor in stored units, not a fraction of the
+// exposure - a debt line in the spec). The arm gi.fieldStopOff turns the
 // stop off (the oracle: every probe to the target).
 static const Ogre::uint32 kIfdStopMinSamples = 4u;
 static const float kIfdStopPrecision = 0.16f;
@@ -1253,6 +1255,11 @@ GiStatus PhotonComponent::giStatus() const {
         // Everything that waits on `giAtRest` — editor.screenshot, the selftest's
         // poses, gi.ddgi — waits for it with no change of its own.
         if (st.gather.running && !st.gather.settled) st.giAtRest = false;
+        // ...AND THE FIELD'S LAST WRITE IS A LIGHTING STEP FOR IT (ENGINE-UPGRADE-2B stage 4): a gather pixel reads
+        // the field, and the gather's rest mean restarts on the field's writes (its rest key), so rest waits the
+        // gather's settle frames after the last one - the held picture is then a mean of the finished field only
+        // (pool.world_sky_b's height_fog: two at-rest shots 1.4e-4 apart without it).
+        if (st.gather.running && mIfd && giWriterFrame() - mIfdWriteFrame < st.gather.settleFrames) st.giAtRest = false;
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -5975,8 +5982,15 @@ void PhotonComponent::teardownIrradianceField() {
 
 void PhotonComponent::planField(FrameWork &w) {
     if (!mIfd) return;
-    // The variance stop's counters, read back from an earlier frame's integrations.
-    JAH_TRY { mIfd->harvestVarianceReadout(); } JAH_CATCH(mError, );
+    // The variance stop's counters, read back from an earlier frame's integrations - and the frame the field's
+    // writes last moved them (the gather's settle waits on it: giStatus).
+    JAH_TRY {
+        mIfd->harvestVarianceReadout();
+        if (mIfd->getIntegrations() != mIfdIntegrationsSeen) {
+            mIfdIntegrationsSeen = mIfd->getIntegrations();
+            mIfdWriteFrame = giWriterFrame();
+        }
+    } JAH_CATCH(mError, );
     // A DEFERRED FOLLOW IS OWED: nothing integrates until it is paid
     // (mIfdFollowOwed). Cascade 0's rebuild last frame may have re-created the
     // light voxel textures this job binds, and `followCascade0Field` is what
@@ -5993,19 +6007,17 @@ void PhotonComponent::planField(FrameWork &w) {
         // Each whole-grid refinement gives every probe below the target one more
         // sample under a new ray rotation, at the budget's rate; the field stops
         // (and costs nothing) once none is owed.
-        // THE VARIANCE STOP (ENGINE-UPGRADE-2B stage 4): a refinement skips the probes already
-        // at the precision, so the budget flows to the rest - the batch covers the work at the
-        // rate the unconverged share of the grid allows (the share read back, lagging: a lower
-        // bound on the stopped) - and once every probe stopped no refinement is owed at all.
+        // THE VARIANCE STOP (ENGINE-UPGRADE-2B stage 4): a refinement skips the probes already at the
+        // precision (their groups exit at their history read), and once every probe stopped no refinement
+        // is owed at all. THE BATCH STAYS THE BUDGET: a batch widened by the unconverged share of the grid
+        // (budget x total / open) is a guess about WHERE the open probes are, and clustered they took up to
+        // 2.8x the budget's integrations in one frame (the stage 4 read) - the hitch the stop exists to
+        // remove. So the stop saves the work and the frames its early end cuts, never more per frame.
         JAH_TRY {
             if (mIfd->allProbesStopped()) { mIfd->endRefinements(); return; }   // converged early
             if (mIfd->isWorkDone() && !mIfd->beginOwedRefinement()) return;   // converged
             w.field = FrameWork::Field::Refine;
-            const Ogre::uint64 total = mIfdTotalProbes ? mIfdTotalProbes : 1u;
-            const Ogre::uint64 open = std::max<Ogre::uint64>(
-                1u, total - std::min<Ogre::uint64>(total, mIfd->getProbesStopped()));
-            const Ogre::uint64 flowed = (Ogre::uint64(mIfdProbesPerFrame) * total + open - 1u) / open;
-            w.fieldBatch = Ogre::uint32(std::min<Ogre::uint64>(flowed, mIfd->getWorkRemaining()));
+            w.fieldBatch = std::min(mIfdProbesPerFrame, mIfd->getWorkRemaining());
         } JAH_CATCH(mError, );
         return;
     }

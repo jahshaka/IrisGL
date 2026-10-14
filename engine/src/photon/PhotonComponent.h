@@ -1233,6 +1233,11 @@ private:
     /// keep every dispatch a whole multiple of the batch size (the last batch
     /// of an uneven split is where the zero-work-group abort lives).
     Ogre::uint32                      mIfdTotalProbes     = 0;
+    /// THE FIELD'S LAST WRITE, as the gather sees it (ENGINE-UPGRADE-2B stage 4): the generation job's integration
+    /// count last read back, and the engine frame it moved on. The gather's rest key folds the count (its rest mean
+    /// restarts after the field's last write) and giAtRest waits the gather's settle frames after that frame.
+    unsigned long long                mIfdIntegrationsSeen = 0;
+    unsigned long long                mIfdWriteFrame       = 0;
     Ogre::uint32                      mIfdProbesDone      = 0;
     Ogre::uint32                      mIfdProbesPerFrame  = 0;
     /// THE VOLUME THE FIELD IS PLACED OVER, as asked for (the field enlarges it
