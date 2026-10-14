@@ -124,6 +124,7 @@ namespace Ogre
         mKeepOnChange( 0u ),
         mRotateRays( true ),
         mRefinesOwed( 0u ),
+        mRefineWhole( true ),
         mFieldOrigin( Vector3::ZERO ),
         mFieldSize( Vector3::ZERO ),
         mVctLighting( 0 ),
@@ -355,6 +356,7 @@ namespace Ogre
         setWholeWork();
         mWorkMode = IntegrateFresh;
         mRefinesOwed = mTargetSamples - 1u;
+        mRefineWhole = true;
         createTextures();
         setIrradianceFieldGenParams();
     }
@@ -477,6 +479,7 @@ namespace Ogre
         setWholeWork();
         mWorkMode = IntegrateFresh;
         mRefinesOwed = mTargetSamples - 1u;
+        mRefineWhole = true;
         invalidateAllProbes();
 
         // The same enlargement initialize() applies, for the same reason (limited
@@ -658,11 +661,16 @@ namespace Ogre
         mNumProbesProcessed = 0u;
         mWorkMode = IntegrateChange;
         mRefinesOwed = mTargetSamples - 1u;
+        mRefineWhole = true;
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::refine()
     {
-        setWholeWork();
+        // OVER WHAT THE EVENT TOUCHED (scrollWindow's band), or the whole grid.
+        if( mRefineWhole )
+            setWholeWork();
+        else
+            setBoxesFromBands( mBandLo, mBandNum );
         mNumProbesProcessed = 0u;
         mWorkMode = IntegrateRefine;
     }
@@ -700,30 +708,12 @@ namespace Ogre
         return mFieldSize / mSettings.getNumProbes3f();
     }
     //-------------------------------------------------------------------------
-    void PhotonIrradianceField::scrollWindow( const int32 delta[3] )
+    void PhotonIrradianceField::setBoxesFromBands( const uint32 enteredLo[3], const uint32 enteredNum[3] )
     {
-        const Vector3 spacing = getProbeSpacing();
-        uint32 enteredLo[3];   // per axis: the first ENTERED slot (valid where delta != 0)
-        uint32 enteredNum[3];
-        for( size_t a = 0u; a < 3u; ++a )
-        {
-            const int32 n = static_cast<int32>( mSettings.mNumProbes[a] );
-            const int32 d = delta[a];
-            OGRE_ASSERT_LOW( d > -n && d < n && "scrollWindow: a whole-grid move keeps nothing" );
-            mFieldOrigin[a] += Real( d ) * spacing[a];
-            // The new window's first probe is the old one's d-th: its slot moves by d.
-            const int32 newOffset = ( ( static_cast<int32>( mWindowOffset[a] ) + d ) % n + n ) % n;
-            mWindowOffset[a] = static_cast<uint32>( newOffset );
-            // The ENTERED planes, window-local: the far end for a positive move
-            // (locals n-d .. n-1), the near end for a negative one (0 .. -d-1).
-            const int32 firstLocal = d > 0 ? n - d : 0;
-            enteredLo[a] = static_cast<uint32>( ( firstLocal + newOffset ) % n );
-            enteredNum[a] = static_cast<uint32>( d > 0 ? d : -d );
-        }
-        // THE WORK: one box per moved axis, DISJOINT (an integration job convolves a
+        // ONE BOX PER AXIS WITH A BAND, DISJOINT (an integration job convolves a
         // probe's tile in place, so no probe may be integrated twice by one
-        // dispatch). Box x takes the entered x planes whole; box y the entered y
-        // planes minus box x's columns; box z the rest.
+        // dispatch). Box x takes the x band's planes whole; box y the y band's planes
+        // minus box x's columns; box z the rest.
         mNumWorkBoxes = 0u;
         mWorkTotal = 0u;
         uint32 keptLo[3], keptNum[3];   // per axis: the slots NOT entered on it
@@ -760,10 +750,76 @@ namespace Ogre
             }
             mWorkTotal += count;
         }
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::scrollWindow( const int32 delta[3] )
+    {
+        const Vector3 spacing = getProbeSpacing();
+        uint32 enteredLo[3];   // per axis: the first ENTERED slot (valid where delta != 0)
+        uint32 enteredNum[3];
+        for( size_t a = 0u; a < 3u; ++a )
+        {
+            const int32 n = static_cast<int32>( mSettings.mNumProbes[a] );
+            const int32 d = delta[a];
+            OGRE_ASSERT_LOW( d > -n && d < n && "scrollWindow: a whole-grid move keeps nothing" );
+            mFieldOrigin[a] += Real( d ) * spacing[a];
+            // The new window's first probe is the old one's d-th: its slot moves by d.
+            const int32 newOffset = ( ( static_cast<int32>( mWindowOffset[a] ) + d ) % n + n ) % n;
+            mWindowOffset[a] = static_cast<uint32>( newOffset );
+            // The ENTERED planes, window-local: the far end for a positive move
+            // (locals n-d .. n-1), the near end for a negative one (0 .. -d-1).
+            const int32 firstLocal = d > 0 ? n - d : 0;
+            enteredLo[a] = static_cast<uint32>( ( firstLocal + newOffset ) % n );
+            enteredNum[a] = static_cast<uint32>( d > 0 ? d : -d );
+        }
+        // THE REFINEMENTS THIS SCROLL OWES cover what it touched (ENGINE-UPGRADE-2): the
+        // entered planes — joined to the band an unfinished refinement of an earlier
+        // scroll still owes, when the window kept moving the same way — never the whole
+        // grid, whose kept probes are at the target already. A schedule that cannot be
+        // a band (an unfinished whole-grid one, a reversal, a band around the grid)
+        // stays whole.
+        {
+            const bool pending = mRefinesOwed > 0u || !isWorkDone();
+            if( !pending )
+            {
+                mRefineWhole = false;
+                for( size_t a = 0u; a < 3u; ++a )
+                {
+                    mBandLo[a] = enteredLo[a];
+                    mBandNum[a] = enteredNum[a];
+                }
+            }
+            else if( !mRefineWhole )
+            {
+                for( size_t a = 0u; a < 3u && !mRefineWhole; ++a )
+                {
+                    if( !enteredNum[a] )
+                        continue;
+                    const uint32 n = mSettings.mNumProbes[a];
+                    if( !mBandNum[a] )
+                    {
+                        mBandLo[a] = enteredLo[a];
+                        mBandNum[a] = enteredNum[a];
+                    }
+                    else if( delta[a] > 0 && ( mBandLo[a] + mBandNum[a] ) % n == enteredLo[a] )
+                        mBandNum[a] += enteredNum[a];
+                    else if( delta[a] < 0 && ( enteredLo[a] + enteredNum[a] ) % n == mBandLo[a] )
+                    {
+                        mBandLo[a] = enteredLo[a];
+                        mBandNum[a] += enteredNum[a];
+                    }
+                    else
+                        mRefineWhole = true;
+                    if( mBandNum[a] >= n )
+                        mRefineWhole = true;
+                }
+            }
+        }
+        // THE WORK: the entered planes, fresh.
+        setBoxesFromBands( enteredLo, enteredNum );
         mNumProbesProcessed = 0u;
-        // The entered planes have no history (PHOTON-FIELD-ROTATE-1), and the whole
-        // grid owes the refinements that bring them to the target (the probes that
-        // stayed are there already, and a refinement skips them).
+        // The entered planes have no history (PHOTON-FIELD-ROTATE-1), and they owe the
+        // refinements that bring them to the target.
         mWorkMode = IntegrateFresh;
         mRefinesOwed = mTargetSamples - 1u;
         // The probe-to-voxel transform reads the (moved) origin.

@@ -258,9 +258,16 @@ namespace Ogre
         uint32          mTargetSamples;
         uint32          mKeepOnChange;
         bool            mRotateRays;
-        /// Whole-grid refinements owed after the current work (every event - a build,
-        /// a re-placement, a scroll, a change - owes mTargetSamples - 1 of them).
+        /// Refinements owed after the current work (every event - a build, a
+        /// re-placement, a scroll, a change - owes mTargetSamples - 1 of them), each
+        /// over WHAT THE EVENT TOUCHED (ENGINE-UPGRADE-2): the whole grid for a build,
+        /// a re-placement or a change; for a scroll the band of entered planes per axis
+        /// (joined over consecutive scrolls the same way while one is unfinished).
         uint32 mRefinesOwed;
+        bool   mRefineWhole;
+        uint32 mBandLo[3] = {}, mBandNum[3] = {};
+        /// The work boxes for a band of slots per axis (disjoint: see the definition).
+        void setBoxesFromBands( const uint32 lo[3], const uint32 num[3] );
         /// Jahshaka (PHOTON-FIELD-ROTATE-1): every probe's sample count to 0 - the
         /// pixel's reader weights a probe by its count (saturated), so a probe no
         /// integration has reached since is no probe at all and the reader's
@@ -466,7 +473,8 @@ namespace Ogre
         }
         /** Jahshaka (PHOTON-FIELD-ROTATE-1): THE FIELD'S CONVERGENCE SCHEDULE. Every event
             that gives probes a new sample - initialize(), setFieldVolume(), scrollWindow(),
-            reset() - owes mTargetSamples - 1 whole-grid refinements after its own work;
+            reset() - owes mTargetSamples - 1 refinements after its own work, over what it
+            touched (a scroll: the entered planes; the rest: the whole grid);
             once the current work is done this starts the next one (refine()) and returns
             true, or returns false when none is owed (the field has converged and costs
             nothing until the next event).
