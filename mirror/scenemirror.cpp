@@ -676,10 +676,11 @@ void SceneMirror::onMaterialItemsRebuilt(MaterialId material)
     ++mMaterialItemSerial[material];
 }
 
-void SceneMirror::setAttachBudget(int meshes, std::size_t vertices)
+void SceneMirror::setAttachBudget(std::size_t vertices, std::size_t indices)
 {
-    mBudgetMeshes = qMax(1, meshes);
+    mBudgeted = true;
     mBudgetVertices = vertices;
+    mBudgetIndices = indices;
 }
 
 int SceneMirror::sync()
@@ -692,12 +693,13 @@ int SceneMirror::sync()
         {
             m->mBuiltMeshes = 0;
             m->mBuiltVertices = 0;
+            m->mBuiltIndices = 0;
             m->mAttachesOwedThisSync = 0;
         }
         ~BudgetSpend()
         {
             m->mAttachesOwed = m->mAttachesOwedThisSync;
-            m->mBudgetMeshes = -1;
+            m->mBudgeted = false;
         }
     } spend(this);
     if (!mSource || !mSource->getRootNode()) return 0;
@@ -4295,6 +4297,7 @@ MeshId SceneMirror::meshFor(iris::Mesh *mesh, const QString &rigId)
     MeshId id = mTarget->createMesh(data);
     ++mBuiltMeshes;
     mBuiltVertices += data.vertexCount();
+    mBuiltIndices += data.indices.size();
     if (id) mMeshes.insert(key, id);
     return id;
 }

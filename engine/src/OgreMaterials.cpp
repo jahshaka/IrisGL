@@ -1378,35 +1378,34 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
                 rgba.createEmptyImage(w, h, 1u, Ogre::TextureTypes::Type2D,
                                       srgb ? Ogre::PFG_RGBA8_UNORM_SRGB : Ogre::PFG_RGBA8_UNORM,
                                       Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h));
-                // THE EXPANSION BY BYTES for the 8-bit case (every grayscale PNG and
-                // JPEG; BISTRO-ENGINE-1 stage 5): getColourAt/setColourAt convert
-                // each pixel through a ColourValue and cost the UI thread 1.4 s on
-                // one 2k map in a Debug build (the watchdog's backtrace at the
-                // template's first sync). A LINEAR map gets the same bytes as
-                // before (getColourAt reads v/255, setColourAt packs it back to
-                // v). An sRGB map is CORRECTED: setColourAt on an _SRGB format
-                // applies toSRGB, so the file's already-encoded byte was encoded
-                // a SECOND time and a grey base-colour map rendered too bright
-                // (v=128 stored as 188); its byte is now stored as the file has
-                // it. Any other single-channel format keeps the per-pixel path.
-                if (pf == Ogre::PFG_R8_UNORM) {
-                    const Ogre::TextureBox src = probe.getData(0);
-                    Ogre::TextureBox dst = rgba.getData(0);
-                    for (Ogre::uint32 y = 0; y < h; ++y) {
+                // THE EXPANSION BY BYTES (BISTRO-ENGINE-1 stage 5): getColourAt /
+                // setColourAt per pixel cost the UI thread 1.4 s on one 2k map in a
+                // Debug build (the watchdog's backtrace at the template's first
+                // sync). The destination is written as BYTES for every source
+                // format, and that is also a correction: setColourAt on an _SRGB
+                // format applies toSRGB, so the file's already-encoded value was
+                // encoded a SECOND time and a grey base-colour map rendered too
+                // bright (8-bit 128 stored as 188). The value is now stored as the
+                // file has it, at 8 and at 16 bits alike; a linear map gets the
+                // same bytes as before.
+                const Ogre::TextureBox src = probe.getData(0);
+                Ogre::TextureBox dst = rgba.getData(0);
+                for (Ogre::uint32 y = 0; y < h; ++y) {
+                    Ogre::uint8 *d = static_cast<Ogre::uint8 *>(dst.at(0, y, 0));
+                    if (pf == Ogre::PFG_R8_UNORM) {
                         const Ogre::uint8 *s = static_cast<const Ogre::uint8 *>(src.at(0, y, 0));
-                        Ogre::uint8 *d = static_cast<Ogre::uint8 *>(dst.at(0, y, 0));
                         for (Ogre::uint32 x = 0; x < w; ++x, d += 4) {
                             d[0] = d[1] = d[2] = s[x];
                             d[3] = 255u;
                         }
-                    }
-                } else {
-                    for (Ogre::uint32 y = 0; y < h; ++y)
-                        for (Ogre::uint32 x = 0; x < w; ++x) {
-                            Ogre::ColourValue c = probe.getColourAt(x, y, 0);
-                            c.g = c.b = c.r; c.a = 1.0f;
-                            rgba.setColourAt(c, x, y, 0);
+                    } else {
+                        // 16-bit, float: the source's value, unencoded, rounded to 8 bits.
+                        for (Ogre::uint32 x = 0; x < w; ++x, d += 4) {
+                            const float v = Ogre::Math::saturate(probe.getColourAt(x, y, 0).r);
+                            d[0] = d[1] = d[2] = Ogre::uint8(std::lround(v * 255.0f));
+                            d[3] = 255u;
                         }
+                    }
                 }
                 rgba.generateMipmaps(srgb, Ogre::Image2::FILTER_BILINEAR);
                 // MANUAL, because we filled it (the ManualTexture rule, learned

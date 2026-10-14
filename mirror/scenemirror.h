@@ -57,23 +57,26 @@ public:
     /// before Engine::renderOneFrame(). Returns the number of document nodes mirrored.
     int sync();
 
-    /// THE NEXT sync()'S MESH BUDGET (BISTRO-ENGINE-1 stage 5, finding 9): at
-    /// most `meshes` new engine meshes and `vertices` of their vertices are
-    /// built by that one sync (the first mesh always is, however big); a node
-    /// whose mesh is not built yet is left for the next sync, marked as changed
-    /// so the change list brings it back, and counted in attachesOwed(). ONE
-    /// SHOT: sync() spends it and returns to unbounded, so only a caller that
-    /// asks — the editor viewport's DRIVER ticks, whose frame is the one a user
-    /// is watching — ever gets a partial world, and every other sync (a
-    /// script's editor.frame, a screenshot, a thumbnail, the selftest) builds
-    /// everything it sees, exactly as before.
-    void setAttachBudget(int meshes, std::size_t vertices);
+    /// THE NEXT sync()'S MESH BUDGET, BY COST (BISTRO-ENGINE-1 stage 5, finding
+    /// 9): new engine meshes are built until `vertices` of their vertices or
+    /// `indices` of their indices have been built in that one sync (the first
+    /// mesh always is, however big); a node whose mesh is not built yet is left
+    /// for the next sync, marked as changed so the change list brings it back,
+    /// and counted in attachesOwed(). By cost, not by count: a world of many
+    /// small meshes and one of a few big ones arrive in the same number of
+    /// frames for the same geometry. ONE SHOT: sync() spends it and returns to
+    /// unbounded, so only a caller that asks — the editor viewport's driver
+    /// ticks and the open's boundary frames — ever gets a partial world; every
+    /// other sync (a script's editor.frame, a screenshot, a thumbnail, the
+    /// selftest) builds everything it sees, exactly as before.
+    void setAttachBudget(std::size_t vertices, std::size_t indices);
     /// Mesh nodes the LAST sync left without their mesh (0 = the world is in).
     quint64 attachesOwed() const { return mAttachesOwed; }
     /// Every deferral since the mirror was made (a test instrument).
     quint64 attachesDeferredTotal() const { return mAttachesDeferredTotal; }
     /// Vertices of the meshes the LAST sync built (a test instrument).
     std::size_t lastSyncBuiltVertices() const { return mBuiltVertices; }
+    std::size_t lastSyncBuiltIndices() const { return mBuiltIndices; }
 
     /// The engine node mirroring a document node, or 0.
     jahshaka::engine::NodeId engineNode(const iris::SceneNode *node) const;
@@ -2173,17 +2176,17 @@ private:
     quint64 mVerifierCatches = 0;
     quint64 mVisitPushes = 0;
     quint64 mMaterialSwaps = 0, mMeshAttaches = 0;
-    /// The attach budget (setAttachBudget): <0 = unbounded; spent by meshFor.
-    int mBudgetMeshes = -1;
-    std::size_t mBudgetVertices = 0;
+    /// The attach budget (setAttachBudget), spent by meshFor.
+    bool mBudgeted = false;
+    std::size_t mBudgetVertices = 0, mBudgetIndices = 0;
     int mBuiltMeshes = 0;
-    std::size_t mBuiltVertices = 0;
+    std::size_t mBuiltVertices = 0, mBuiltIndices = 0;
     quint64 mAttachesOwed = 0, mAttachesOwedThisSync = 0, mAttachesDeferredTotal = 0;
     /// Is the budget spent? The first mesh of a sync is always built.
     bool attachBudgetSpent() const
     {
-        return mBudgetMeshes >= 0 && mBuiltMeshes > 0 &&
-               (mBuiltMeshes >= mBudgetMeshes || mBuiltVertices >= mBudgetVertices);
+        return mBudgeted && mBuiltMeshes > 0 &&
+               (mBuiltVertices >= mBudgetVertices || mBuiltIndices >= mBudgetIndices);
     }
     /// The last global material revision this mirror folded in (§3.6): one
     /// relaxed atomic read is what a still frame pays to know that no material
