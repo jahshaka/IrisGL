@@ -44,6 +44,7 @@
 #include <Vao/OgreVaoManager.h>
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -69,8 +70,14 @@ const Ogre::String &sceneBindingKey() {
 void bindSceneManager(Ogre::SceneManager *sm, OgreScene *scene) {
     if (!sm) return;
     Ogre::UserObjectBindings &b = sm->getRootSceneNode(Ogre::SCENE_DYNAMIC)->getUserObjectBindings();
-    if (scene) b.setUserAny(sceneBindingKey(), Ogre::Any(scene));
-    else b.eraseUserAny(sceneBindingKey());
+    if (scene) {
+        // ONE SCENE PER MANAGER: a manager already bound to another scene is a construction
+        // bug (two OgreScenes on one SceneManager), never a re-bind.
+        assert(!b.getUserAny(sceneBindingKey()).has_value() || sceneOfManager(sm) == scene);
+        b.setUserAny(sceneBindingKey(), Ogre::Any(scene));
+    } else {
+        b.eraseUserAny(sceneBindingKey());
+    }
 }
 
 OgreScene *sceneOfManager(const Ogre::SceneManager *sm) {

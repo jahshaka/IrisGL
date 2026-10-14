@@ -277,8 +277,8 @@ public:
     size_t decodeTwinCount() const { return mTwins.size(); }
     size_t decodeMemberCount() const { return mTwinOfPbs.size(); }
     /// THE BUCKET a PBS datablock is shaded by (Twin::bucketId: never 0, never
-    /// reused), 0 when no twin serves it. The Atom view's Buckets table (OgreScene::
-    /// syncAtomViewTable) colours by this.
+    /// reused), 0 when no twin serves it. The Atom view's Buckets table
+    /// (AtomComponent::syncViewTable) colours by this.
     uint32_t bucketIdOf(const Ogre::HlmsDatablock *pbs) const;
     unsigned long long bucketGeneration() const { return mBucketGeneration; }
 
