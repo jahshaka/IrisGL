@@ -5,6 +5,7 @@
 #include "AtomPass.h"
 #include "SurfaceCache.h"
 #include "photon/PhotonDispatch.h"
+#include "photon/voxel/PhotonIrradianceField.h"
 #include "jahshaka/engine/PhotonStatus.h"
 
 #include <OgreCamera.h>
@@ -178,6 +179,20 @@ PhotonDispatchStatus photonDispatchStatus() {
     s.inRegion = detail::photonDispatchesInRegion();
     s.outsideRegion = detail::photonDispatchesOutsideRegion();
     return s;
+}
+
+PhotonFieldStatus photonFieldStatus(const Scene &scene) {
+    PhotonFieldStatus st;
+    const auto *s = dynamic_cast<const detail::OgreScene *>(&scene);
+    const Ogre::PhotonIrradianceField *f = s ? s->photon().irradianceField() : nullptr;
+    if (!f) return st;
+    st.field = true;
+    st.probes = f->getTotalNumProbes();
+    st.integrations = f->getIntegrations();
+    st.probesStopped = f->getProbesStopped();
+    st.stopMinSamples = f->getStopMinSamples();
+    st.stopPrecision = f->getStopPrecision();
+    return st;
 }
 
 }  // namespace engine

@@ -1862,6 +1862,7 @@ enum class ArmId : unsigned {
     GiFieldRays,         ///< "gi.fieldRays" — the field's rays per depth texel (0 = shipped)
     GiFieldSamples,      ///< "gi.fieldSamples" — the field's sample target (0 = shipped)
     GiFieldStatic,       ///< "gi.fieldStatic" — the field's rays NOT rotated per frame
+    GiFieldStopOff,      ///< "gi.fieldStopOff" — the field's per-probe variance stop off (every probe to the target)
     GiRefuseGeometry,    ///< "gi.refuseGeometry" — a voxel build with no geometry source (the refused device)
     AtomDiscriminate,    ///< "atom.discriminate" — the decode's failure colour codes (1), the chart (2)
     AtomHitWorldLights,  ///< "atom.hitWorldLights" — the hit decode's light list: 0 shipped, 1 off, 2 all

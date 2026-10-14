@@ -362,6 +362,25 @@ static const Ogre::uint8 kIfdIrradRes  = 6u;
 // Every event's own pass - a build's included - is the first sample everywhere
 // (unbiased, every probe valid); a PAUSED field (budget 0) targets one sample.
 static const Ogre::uint32 kIfdTargetSamples = 25u;
+// THE PER-PROBE VARIANCE STOP (ENGINE-UPGRADE-2B stage 4): the same precision e, PER PROBE. A
+// probe whose estimate is already inside it pays none of the samples after: the generation job
+// keeps a running second moment beside every texel's mean and stops the probe once, on every
+// texel, the 95 % interval of its mean sits inside e of it (kIfdStopPrecision = the e above,
+// rounded: 0.16). The interval is Student's t standard errors wide, not two: the deviation is
+// itself estimated from the probe's n samples (the job's jahIfdStudentT; at n = 4 that estimate
+// reads under half the truth one time in seven). K stays the target - the count that covers the worst
+// probe the derivation names; a probe that reads 4 % a sample (the lit room's median, the
+// instrument test_gi_field_dependency --variance) is at e after a handful. THE FEWEST SAMPLES A
+// STOP MAY FOLLOW is 4 (three degrees of freedom; the t interval is 3.18 standard errors there).
+// Measured against the 25-sample oracle (gi.field_variance_stop): 94.6 % of the stopped probes'
+// lit texels within two sigma, at 5.2x less work than the target; a stop from 6 samples moved
+// neither the coverage (94.7 %) nor the tail (the worst texel 0.23 at 4, 0.19 at 6 - one draw of
+// a 2-sigma statement over 300k texels) and paid 4.0x. A texel whose mean is at or below
+// kIfdStopMeanFloor is unlit (no relative error to bound). The arm gi.fieldStopOff turns the
+// stop off (the oracle: every probe to the target).
+static const Ogre::uint32 kIfdStopMinSamples = 4u;
+static const float kIfdStopPrecision = 0.16f;
+static const float kIfdStopMeanFloor = 1e-6f;
 // A LIGHT CHANGE REPLACES (keep 0): the history integrated the OLD light, so the
 // first integration after a change is the probe's value - the latency of the old
 // re-converge (one pass) - and the refinements then average the new light. What the
@@ -5859,6 +5878,8 @@ void PhotonComponent::buildIrradianceField() {
         // upstream for "major changes to the voxel lighting" is exactly this call.
         if (!mIfd) mIfd = new Ogre::PhotonIrradianceField(mRoot, mSceneMgr);
         mIfd->setIntegrationPolicy(targetSamples, kIfdKeepOnChange, rotateRays);
+        mIfd->setVarianceStop(arms && arms->on(ArmId::GiFieldStopOff) ? 0u : kIfdStopMinSamples,
+                              kIfdStopPrecision, kIfdStopMeanFloor);
         mIfd->initialize(settings, origin, size, mVctLighting);
         // WHERE THE FIELD IS, recorded as asked for (the field enlarges it by a
         // probe block per side for itself): the scheduler compares against this
@@ -5943,6 +5964,8 @@ void PhotonComponent::teardownIrradianceField() {
 
 void PhotonComponent::planField(FrameWork &w) {
     if (!mIfd) return;
+    // The variance stop's counters, read back from an earlier frame's integrations.
+    JAH_TRY { mIfd->harvestVarianceReadout(); } JAH_CATCH(mError, );
     // A DEFERRED FOLLOW IS OWED: nothing integrates until it is paid
     // (mIfdFollowOwed). Cascade 0's rebuild last frame may have re-created the
     // light voxel textures this job binds, and `followCascade0Field` is what
@@ -5959,10 +5982,19 @@ void PhotonComponent::planField(FrameWork &w) {
         // Each whole-grid refinement gives every probe below the target one more
         // sample under a new ray rotation, at the budget's rate; the field stops
         // (and costs nothing) once none is owed.
+        // THE VARIANCE STOP (ENGINE-UPGRADE-2B stage 4): a refinement skips the probes already
+        // at the precision, so the budget flows to the rest - the batch covers the work at the
+        // rate the unconverged share of the grid allows (the share read back, lagging: a lower
+        // bound on the stopped) - and once every probe stopped no refinement is owed at all.
         JAH_TRY {
+            if (mIfd->allProbesStopped()) { mIfd->endRefinements(); return; }   // converged early
             if (mIfd->isWorkDone() && !mIfd->beginOwedRefinement()) return;   // converged
             w.field = FrameWork::Field::Refine;
-            w.fieldBatch = std::min(mIfdProbesPerFrame, mIfd->getWorkRemaining());
+            const Ogre::uint64 total = mIfdTotalProbes ? mIfdTotalProbes : 1u;
+            const Ogre::uint64 open = std::max<Ogre::uint64>(
+                1u, total - std::min<Ogre::uint64>(total, mIfd->getProbesStopped()));
+            const Ogre::uint64 flowed = (Ogre::uint64(mIfdProbesPerFrame) * total + open - 1u) / open;
+            w.fieldBatch = Ogre::uint32(std::min<Ogre::uint64>(flowed, mIfd->getWorkRemaining()));
         } JAH_CATCH(mError, );
         return;
     }

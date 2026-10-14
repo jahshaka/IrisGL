@@ -47,6 +47,7 @@ THE SOFTWARE.
 #include "OgreTextureGpuManager.h"
 #include "Vao/OgreConstBufferPacked.h"
 #include "Vao/OgreTexBufferPacked.h"
+#include "Vao/OgreUavBufferPacked.h"
 #include "Vao/OgreVaoManager.h"
 
 
@@ -356,6 +357,7 @@ namespace Ogre
         mWindowOffset[0] = mWindowOffset[1] = mWindowOffset[2] = 0u;
         setWholeWork();
         mWorkMode = IntegrateFresh;
+        noteEstimatesReplaced();
         mRefinesOwed = mTargetSamples - 1u;
         mRefineWhole = true;
         createTextures();
@@ -415,6 +417,21 @@ namespace Ogre
             placeDebugVisualizer();
         }
 
+        // Jahshaka (ENGINE-UPGRADE-2B stage 4): THE VARIANCE STATE, zeroed (no probe stopped,
+        // every moment 0): four counters, a flag per probe, an M2 per interior irradiance
+        // texel (the generation job's JAH_IFD_ layout).
+        {
+            const size_t probes = mSettings.getTotalNumProbes();
+            const size_t res = mSettings.mIrradianceResolution;
+            const size_t words = 4u + probes + probes * res * res;
+            vector<uint32>::type zeros( words, 0u );
+            mVarianceBuffer = vaoManager->createUavBuffer( words, sizeof( uint32 ), 0, zeros.data(), false );
+            mVarianceTicket.reset();
+            ++mStopEpoch;
+            mProbesStopped = 0u;
+            mIntegrations = 0u;
+        }
+
         if( !mVctLighting )
             return;
 
@@ -455,6 +472,12 @@ namespace Ogre
             vaoManager->destroyTexBuffer( mDirectionsBuffer );
             mDirectionsBuffer = 0;
         }
+        mVarianceTicket.reset();
+        if( mVarianceBuffer )
+        {
+            vaoManager->destroyUavBuffer( mVarianceBuffer );
+            mVarianceBuffer = 0;
+        }
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::setFieldVolume( const Vector3 &fieldOrigin, const Vector3 &fieldSize )
@@ -467,6 +490,7 @@ namespace Ogre
         mWindowOffset[0] = mWindowOffset[1] = mWindowOffset[2] = 0u;
         setWholeWork();
         mWorkMode = IntegrateFresh;
+        noteEstimatesReplaced();
         mRefinesOwed = mTargetSamples - 1u;
         mRefineWhole = true;
         invalidateAllProbes();
@@ -638,10 +662,12 @@ namespace Ogre
         setWholeWork();
         mNumProbesProcessed = 0u;
         mWorkMode = IntegrateInvalidate;
+        noteEstimatesReplaced();
         update( mWorkTotal );
         setWholeWork();
         mNumProbesProcessed = 0u;
         mWorkMode = IntegrateFresh;
+        noteEstimatesReplaced();
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::reset()
@@ -649,6 +675,7 @@ namespace Ogre
         setWholeWork();
         mNumProbesProcessed = 0u;
         mWorkMode = IntegrateChange;
+        noteEstimatesReplaced();
         mRefinesOwed = mTargetSamples - 1u;
         mRefineWhole = true;
     }
@@ -662,6 +689,57 @@ namespace Ogre
             setBoxesFromBands( mBandLo, mBandNum );
         mNumProbesProcessed = 0u;
         mWorkMode = IntegrateRefine;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::setVarianceStop( uint32 minSamples, float precision, float meanFloor )
+    {
+        // A stop needs a variance: two samples at the very least.
+        mStopMinSamples = minSamples ? std::max( 2u, minSamples ) : 0u;
+        mStopPrecision = precision;
+        mStopMeanFloor = meanFloor;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::requestVarianceReadout()
+    {
+        if( !mVarianceBuffer || mVarianceTicket )
+            return;
+        // INACCURATE TRACKING (the voxel gather's readout, OgreGpuVoxelGather.cpp): the copy
+        // rides the frame's own submission after this frame's integrations, and the ticket is
+        // done once the device finished that frame.
+        mVarianceTicket = mVarianceBuffer->readRequest( 0u, 4u, false );
+        mVarianceTicketEpoch = mStopEpoch;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::harvestVarianceReadout()
+    {
+        if( !mVarianceTicket || !mVarianceTicket->queryIsTransferDone() )
+            return;
+        const uint32 *w = static_cast<const uint32 *>( mVarianceTicket->map() );
+        const uint32 stops = w[0], unstops = w[1], integrations = w[2];
+        mVarianceTicket->unmap();
+        mVarianceTicket.reset();
+        mIntegrations = integrations;
+        // A reading asked for before the last non-refining work counts stops that work cleared.
+        if( mVarianceTicketEpoch == mStopEpoch )
+            mProbesStopped = stops - unstops;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::noteEstimatesReplaced()
+    {
+        // FROM THE MOMENT THE WORK IS DEFINED, not from its first dispatch: a planner that read
+        // "every probe stopped" between a scroll's (or a change's) definition and its dispatch
+        // would end the very work that clears those stops.
+        ++mStopEpoch;
+        mProbesStopped = 0u;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::endRefinements()
+    {
+        // Only a REFINEMENT ends early: work that replaces estimates always runs whole.
+        if( mWorkMode != IntegrateRefine && !isWorkDone() )
+            return;
+        mRefinesOwed = 0u;
+        mNumProbesProcessed = mWorkTotal;
     }
     //-------------------------------------------------------------------------
     bool PhotonIrradianceField::beginOwedRefinement()
@@ -810,6 +888,7 @@ namespace Ogre
         // The entered planes have no history (PHOTON-FIELD-ROTATE-1), and they owe the
         // refinements that bring them to the target.
         mWorkMode = IntegrateFresh;
+        noteEstimatesReplaced();
         mRefinesOwed = mTargetSamples - 1u;
         // The probe-to-voxel transform reads the (moved) origin.
         if( mVctLighting )
@@ -918,7 +997,13 @@ namespace Ogre
             mIfGenParams.sweep.y = mTargetSamples;
             mIfGenParams.sweep.z = mKeepOnChange;
             mIfGenParams.sweep.w = mRotateRays ? 1u : 0u;
+            mIfGenParams.varianceStop = float4(
+                Vector4( mStopPrecision, static_cast<Real>( mStopMinSamples ), mStopMeanFloor, 0.0f ) );
         }
+        // Work that is not a refinement replaces estimates and clears their stops: every
+        // reading asked for before its last dispatch is stale.
+        if( mWorkMode != IntegrateRefine )
+            noteEstimatesReplaced();
         mIfGenParams.probesPerRow = numThreadGroupsX;  // There's one probe per group
         *ifGenParams = mIfGenParams;
 
@@ -945,7 +1030,14 @@ namespace Ogre
         mGenerationJob->_setUavTexture( 0, uav );
         uav.texture = mDepthVarianceTex;
         mGenerationJob->_setUavTexture( 1, uav );
+        DescriptorSetUav::BufferSlot variance( DescriptorSetUav::BufferSlot::makeEmpty() );
+        variance.buffer = mVarianceBuffer;
+        variance.access = ResourceAccess::ReadWrite;
+        mGenerationJob->_setUavBuffer( 2, variance );
         jahshaka::engine::detail::photonDispatch( hlmsCompute, mGenerationJob, renderSystem );
+        // The descriptor holds a raw pointer a rebuild destroys: nothing stays bound.
+        mGenerationJob->_setUavBuffer( 2, DescriptorSetUav::BufferSlot::makeEmpty() );
+        requestVarianceReadout();
         uav.texture = mDepthVarianceTex;
         mDepthMirrorBorderJob->_setUavTexture( 0, uav );
         jahshaka::engine::detail::photonDispatch( hlmsCompute, mDepthMirrorBorderJob, renderSystem );

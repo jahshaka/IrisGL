@@ -45,6 +45,11 @@
 		// Jahshaka (PHOTON-VOXEL-4, FIELD-DIR-1): a world direction to cascade 0's
 		// normalised space, per axis (all ones in a cube: no transform).
 		float4 worldToVolumeDir;
+		// Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP - x = the
+		// precision e (a probe stops once 2 SE <= e times its mean on every texel), y = the
+		// fewest samples a stop may follow (0: the stop is off), z = the mean below which a
+		// texel is unlit (no relative error to bound), w unused.
+		float4 varianceStop;
 	}
 	CONST_BUFFER_STRUCT_END( p );
 
@@ -181,6 +186,44 @@
 		return uint2( ( probeIdx * bordered ) % fullWidth,
 					  ( ( probeIdx * bordered ) / fullWidth ) * bordered ) + uint2( 1u, 1u );
 	}
+
+	// THE VARIANCE STATE (Jahshaka, ENGINE-UPGRADE-2B stage 4; PhotonIrradianceField's
+	// mVarianceBuffer): four counters (the stops made, the stops cleared, the integrations
+	// made, a pad), then one stopped flag per probe slot, then one running second moment
+	// (M2, the luminance's sum of squared deviations from the running mean - Welford) per
+	// interior texel of the irradiance tile.
+	#define JAH_IFD_STOPS 0u
+	#define JAH_IFD_UNSTOPS 1u
+	#define JAH_IFD_INTEGRATIONS 2u
+	#define JAH_IFD_FLAG( probe ) ( 4u + ( probe ) )
+	#define JAH_IFD_M2( probe, t ) ( 4u + p.numProbes.x * p.numProbes.y * p.numProbes.z + \
+		( probe ) * @value( irrad_resolution )u * @value( irrad_resolution )u + ( t ) )
+
+	// THE INTERVAL'S WIDTH FROM AN ESTIMATED DEVIATION (Student's t): the standard error a
+	// stop reads is itself estimated from the probe's n samples, so the two-sided 95 % interval
+	// of the mean is t( 0.975, n - 1 ) standard errors wide, not two - at n = 4 the deviation
+	// estimate of three degrees of freedom reads under half the truth one time in seven. Two
+	// from 30 degrees on (the derivation's own two sigma).
+	INLINE float jahIfdStudentT( float n )
+	{
+		const float t[29] = float[29]( 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262,
+									   2.228, 2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101,
+									   2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052,
+									   2.048, 2.045 );
+		int dof = int( n ) - 1;
+		return dof >= 1 && dof <= 29 ? t[dof - 1] : 2.0;
+	}
+
+	// A probe's estimate is about to be replaced (a fresh, change or invalidating pass): its
+	// stop no longer holds.
+	INLINE void jahIfdClearStop( uint probeIdx )
+	{
+		if( ifdVariance[JAH_IFD_FLAG( probeIdx )] != 0u )
+		{
+			ifdVariance[JAH_IFD_FLAG( probeIdx )] = 0u;
+			atomicAdd( ifdVariance[JAH_IFD_UNSTOPS], 1u );
+		}
+	}
 @end
 
 //in uvec3 gl_NumWorkGroups;
@@ -210,6 +253,8 @@
 	// until an integration reaches it. The same for every thread of the group.
 	if( p.sweep.x == @value( ifd_mode_invalidate )u )
 	{
+		if( lid == 0u )
+			jahIfdClearStop( probeIdx );
 		for( uint t = lid; t < @value( irrad_resolution )u * @value( irrad_resolution )u;
 			 t += @value( threads_per_group_x )u )
 		{
@@ -223,18 +268,24 @@
 	// the irradiance atlas's alpha (every texel of the tile, the border mirror
 	// included - the pixel's reader reads it as the probe's validity). A FRESH
 	// integration keeps nothing, a CHANGE keeps at most sweep.z samples' weight, a
-	// REFINEMENT skips a probe that already holds sweep.y samples.
+	// REFINEMENT skips a probe that already holds sweep.y samples - or that STOPPED (the
+	// variance stop, below: its estimate met the precision before the target).
 	if( lid == 0u )
 	{
 		float held = OGRE_imageLoad2D( irradianceField, irradTile ).w;
 		float kept = p.sweep.x == @value( ifd_mode_fresh )u
 						 ? 0.0
 						 : ( p.sweep.x == @value( ifd_mode_change )u ? min( held, float( p.sweep.z ) ) : held );
-		float skip = ( p.sweep.x == @value( ifd_mode_refine )u && held >= float( p.sweep.y ) ) ? 1.0 : 0.0;
-		g_probeHistory = float2( kept, skip );
+		bool refine = p.sweep.x == @value( ifd_mode_refine )u;
+		bool stopped = ifdVariance[JAH_IFD_FLAG( probeIdx )] != 0u;
+		float skip = ( refine && ( held >= float( p.sweep.y ) || stopped ) ) ? 1.0 : 0.0;
+		if( !refine )
+			jahIfdClearStop( probeIdx );
+		g_probeHistory = float4( kept, skip, held, 0.0 );
+		g_probeUnconverged = 0u;
 	}
 	__sharedOnlyBarrier;
-	float2 history = g_probeHistory;
+	float4 history = g_probeHistory;
 	if( history.y != 0.0 )
 		return;
 
@@ -360,6 +411,15 @@
 
 	// THE IRRADIANCE: each texel is the cosine-weighted mean radiance about its own
 	// direction (E / pi, in cascade 0's stored units), and alpha carries the count.
+	// THE SECOND MOMENT beside the mean (Welford, on the luminance): the sample's deviation
+	// from the held mean times its deviation from the new one. A change that keeps fewer
+	// samples than the probe held keeps its variance estimate, the moment scaled to the
+	// samples kept; a sample that replaces the estimate (blend 1) starts it at 0. THE STOP
+	// TEST, per texel: with n samples the estimate's standard error is sqrt( M2 / ( n - 1 ) / n ),
+	// and a texel is at the precision when its 95 % interval (jahIfdStudentT standard errors)
+	// sits inside e of its mean (an unlit texel has no relative error to bound); the probe stops
+	// when every texel is.
+	const float3 kLum = float3( 0.2126, 0.7152, 0.0722 );
 	for( uint t = lid; t < @value( irrad_resolution )u * @value( irrad_resolution )u;
 		 t += @value( threads_per_group_x )u )
 	{
@@ -374,8 +434,44 @@
 		float3 sampled = acc.w > 0.0 ? acc.xyz / acc.w : float3( 0, 0, 0 );
 		uint2 at = irradTile + xy;
 		float3 value = sampled;
+		float sampleL = dot( sampled, kLum );
+		float meanL = sampleL;
+		float m2 = 0.0;
 		if( blend < 1.0 )
-			value = lerp( OGRE_imageLoad2D( irradianceField, at ).xyz, sampled, blend );
+		{
+			float3 heldValue = OGRE_imageLoad2D( irradianceField, at ).xyz;
+			value = lerp( heldValue, sampled, blend );
+			float heldL = dot( heldValue, kLum );
+			float heldM2 = uintBitsToFloat( ifdVariance[JAH_IFD_M2( probeIdx, t )] );
+			float keptM2 = history.z > 1.0 ? heldM2 * max( history.x - 1.0, 0.0 ) / ( history.z - 1.0 ) : 0.0;
+			float d = sampleL - heldL;
+			meanL = heldL + d * blend;
+			m2 = keptM2 + d * ( sampleL - meanL );
+		}
+		ifdVariance[JAH_IFD_M2( probeIdx, t )] = floatBitsToUint( m2 );
+		if( p.varianceStop.y != 0.0 )
+		{
+			bool atPrecision = heldAfter >= p.varianceStop.y &&
+							   ( meanL <= p.varianceStop.z ||
+								 jahIfdStudentT( heldAfter ) * sqrt( max( m2, 0.0 ) / ( ( heldAfter - 1.0 ) * heldAfter ) ) <=
+									 p.varianceStop.x * meanL );
+			if( !atPrecision )
+				atomicOr( g_probeUnconverged, 1u );
+		}
 		OGRE_imageWrite2D4( irradianceField, at, float4( value, heldAfter ) );
+	}
+
+	// THE PROBE'S STOP: every texel at the precision - the refinements skip it from now on
+	// and the budget goes to the probes that are not. Counted, so the host knows when none
+	// is left.
+	__sharedOnlyBarrier;
+	if( lid == 0u )
+	{
+		atomicAdd( ifdVariance[JAH_IFD_INTEGRATIONS], 1u );
+		if( p.varianceStop.y != 0.0 && g_probeUnconverged == 0u )
+		{
+			ifdVariance[JAH_IFD_FLAG( probeIdx )] = 1u;
+			atomicAdd( ifdVariance[JAH_IFD_STOPS], 1u );
+		}
 	}
 @end

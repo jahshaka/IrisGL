@@ -36,6 +36,8 @@ THE SOFTWARE.
 #include "OgreIdString.h"
 #include "OgrePixelFormatGpu.h"
 #include "OgreShaderPrimitives.h"
+#include "OgreSharedPtr.h"
+#include "Vao/OgreAsyncTicket.h"
 
 #include "ogrestd/vector.h"
 
@@ -217,6 +219,10 @@ namespace Ogre
             // ones in a cubic box (every cascade of the chain), which the job reads as "no
             // transform" so a cube's rays are the bits they always were.
             float4 worldToVolumeDir;
+            // Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP - x = the
+            // precision (2 SE / mean), y = the fewest samples a stop follows (0: off), z = the
+            // unlit mean floor, w unused (setVarianceStop).
+            float4 varianceStop;
         };
 
         struct IfdBorderMirrorParams
@@ -265,6 +271,27 @@ namespace Ogre
         /// (joined over consecutive scrolls the same way while one is unfinished).
         uint32 mRefinesOwed;
         bool   mRefineWhole;
+        /// Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP. The generation
+        /// job keeps a running second moment beside every texel's running mean and stops a
+        /// probe whose standard error is inside the precision on every texel (setVarianceStop);
+        /// a refinement skips a stopped probe. The state lives on the GPU (mVarianceBuffer: the
+        /// counters, a flag per probe, an M2 per texel); its four counters come back in an
+        /// asynchronous readback, ACCEPTED only when no non-refining work ran since it was asked
+        /// for (mStopEpoch: a fresh, change or invalidating pass clears stops the reading still
+        /// counts).
+        UavBufferPacked *mVarianceBuffer = nullptr;
+        AsyncTicketPtr   mVarianceTicket;
+        uint32           mVarianceTicketEpoch = 0u;
+        uint32           mStopEpoch = 0u;
+        uint32           mStopMinSamples = 0u;
+        float            mStopPrecision = 0.0f;
+        float            mStopMeanFloor = 0.0f;
+        uint32           mProbesStopped = 0u;   ///< the last accepted reading (0 after any non-refining work)
+        uint64           mIntegrations = 0u;    ///< the job's integrations, ever (the last reading)
+        void requestVarianceReadout();
+        /// New work replaces estimates (a fresh, change or invalidating pass): the stops a reading
+        /// counts no longer hold.
+        void noteEstimatesReplaced();
         uint32 mBandLo[3] = {}, mBandNum[3] = {};
         /// The work boxes for a band of slots per axis (disjoint: see the definition).
         void setBoxesFromBands( const uint32 lo[3], const uint32 num[3] );
@@ -482,6 +509,31 @@ namespace Ogre
         */
         bool beginOwedRefinement();
         uint32 getRefinesOwed() const { return mRefinesOwed; }
+
+        /** Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP. A probe stops
+            once it holds at least minSamples samples and, on every texel of its irradiance,
+            twice the standard error of its mean (from the running second moment) is inside
+            precision times the mean (a texel whose mean is at or below meanFloor is unlit:
+            nothing to bound). minSamples 0 turns the stop off (every probe to the target).
+        */
+        void setVarianceStop( uint32 minSamples, float precision, float meanFloor );
+        uint32 getStopMinSamples() const { return mStopMinSamples; }
+        uint32 getTotalNumProbes() const { return mSettings.getTotalNumProbes(); }
+        float getStopPrecision() const { return mStopPrecision; }
+        /// Takes a finished readback of the variance counters (call once a frame).
+        void harvestVarianceReadout();
+        /// Probes stopped, by the last accepted reading (a lower bound: the reading lags).
+        uint32 getProbesStopped() const { return mProbesStopped; }
+        /// The generation job's probe integrations, ever (the last reading).
+        uint64 getIntegrations() const { return mIntegrations; }
+        /// Every probe of the grid stopped: the refinements owed have nothing left to do.
+        bool allProbesStopped() const
+        {
+            return mStopMinSamples && mProbesStopped >= mSettings.getTotalNumProbes();
+        }
+        /// The field converged early (allProbesStopped): no refinement is owed, the current
+        /// work is done.
+        void endRefinements();
 
         void update( uint32 probesPerFrame = 200u );
 

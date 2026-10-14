@@ -1101,6 +1101,9 @@ const ArmDef kArms[] = {
     { "gi.fieldStatic", 0.0, 0.0, 1.0,
       "The irradiance field's ray set NOT rotated per frame at its next build (the fixed-set arm). "
       "gi.field_thin_wall. Was JAHSHAKA_GI_FIELD_STATIC (a per-build read)." },
+    { "gi.fieldStopOff", 0.0, 0.0, 1.0,
+      "The irradiance field's per-probe variance stop OFF at its next build: every probe "
+      "integrates to the target (the oracle gi.field_variance_stop compares the stop with)." },
     { "gi.refuseGeometry", 0.0, 0.0, 1.0,
       "THE REFUSAL HOOK (a test door, gi.voxel_resident case 5): a voxel build runs with NO geometry "
       "source - the state of a device with no buffer device addresses - and must build an empty "

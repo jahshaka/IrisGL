@@ -60,11 +60,17 @@ uniform restrict image2D irradianceField;
 layout( vulkan( ogre_u1 ) vk_comma @insertpiece(uav1_pf_type) )
 uniform restrict image2D irradianceFieldDepth;
 
+// Jahshaka (ENGINE-UPGRADE-2B stage 4): THE VARIANCE STATE - the counters, the per-probe
+// stopped flags and the per-texel second moments (the piece's JAH_IFD_ layout).
+layout( std430, ogre_U2 ) restrict buffer ifdVarianceLayout { uint ifdVariance[]; };
+
 // One work group per probe: every ray's radiance and depth, and its direction.
 shared float4 g_rayColourDepth[@value( num_rays_per_probe )];
 shared float4 g_rayDir[@value( num_rays_per_probe )];
-// The probe's history: x = the samples the blend keeps, y = 1 when the probe is skipped.
-shared float2 g_probeHistory;
+// The probe's history: x = the samples the blend keeps, y = 1 when the probe is skipped,
+// z = the samples it held, w unused. And 1 when a texel of it is not at the precision.
+shared float4 g_probeHistory;
+shared uint g_probeUnconverged;
 
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
