@@ -1392,7 +1392,10 @@ void OgreScene::composeGpuScene(bool graphIsCurrent) const {
     if (!graphIsCurrent) walk = moved;
     else if (!sub.walkedThisFrame) walk = moved;
     else walk = epoch != sub.frameWalkEpoch;
-    if (!walk && sub.marks.empty()) return;
+    if (!walk && sub.marks.empty()) {
+        if (graphIsCurrent) checkWalkParity(atomDrawOn());
+        return;
+    }
     // THE EPOCH IS ONLY CONSUMED BY A WALK THAT COULD SEE THE TRUTH. A reader BEFORE
     // the frame runs on derived transforms `updateSceneGraph` has not recomputed; if
     // it marked the epoch spent, the frame's own walk would skip — and every CHILD of
@@ -1436,6 +1439,37 @@ void OgreScene::composeGpuScene(bool graphIsCurrent) const {
     sub.marks.clear();
     if (walk) walkGpuScene(graphIsCurrent);
     ++sub.composes;
+    if (graphIsCurrent) checkWalkParity(sub.atomDraw != 0);
+}
+
+// THE NAMED WALK'S GUARD (the arm gpuscene.walkParity; engine.gpu_walk_parity): after a frame's
+// compose — or on a frame that composed nothing — every slot against the table. A slot whose
+// world transform or flags word the table does not hold moved with neither a name nor a mark:
+// the whole walk would have staged it, the named walk did not.
+void OgreScene::checkWalkParity(bool atomDraw) const {
+    GpuSceneSubstrate &sub = mSubstrate;
+    // THE GUARD (the arm gpuscene.walkParity): every slot against the table, after the marks and
+    // the named walk — what a whole walk would stage now is a miss.
+    if (!mEngine || !mEngine->armRegistry().on(ArmId::GpuWalkParity)) return;
+    {
+        const detail::GpuInstance *mirror = mGpuScene.mirrorData();
+        for (size_t i = 0; i < mItemNodes.size(); ++i) {
+            const Node &node = *mItemNodes[i];
+            Ogre::Item *item = node.item;
+            Ogre::Node *pn = item ? item->getParentNode() : nullptr;
+            if (!pn) continue;
+            ++sub.walkChecked;
+            if (i >= mGpuScene.slotCount()) { ++sub.walkMissed; sub.walkLastMissed = uint32_t(i); continue; }
+            const detail::GpuInstance &was = mirror[i];
+            const Ogre::Matrix4 &m = pn->_getFullTransform();
+            Ogre::uint32 wasFlags;
+            std::memcpy(&wasFlags, &was.boundsMax[3], sizeof(wasFlags));
+            if (std::memcmp(&m[0][0], was.world, sizeof(was.world)) != 0 || gpuFlagsFor(node, atomDraw) != wasFlags) {
+                ++sub.walkMissed;
+                sub.walkLastMissed = uint32_t(i);
+            }
+        }
+    }
 }
 
 void OgreScene::commitGpuScene() const {
@@ -1729,6 +1763,9 @@ GpuSubstrateStatus gpuSubstrateStatus(const Scene &scene) {
     st.commits = sub.commits;
     st.slotsCompared = sub.slotsCompared;
     st.flagsRecomputed = sub.flagsRecomputed;
+    st.walkChecked = sub.walkChecked;
+    st.walkMissed = sub.walkMissed;
+    st.walkLastMissed = sub.walkLastMissed;
     st.holdsRayStructures = sub.rays != nullptr;
     return st;
 }

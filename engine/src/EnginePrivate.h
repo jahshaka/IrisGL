@@ -1870,6 +1870,7 @@ enum class ArmId : unsigned {
     ReflectMetalDecode,  ///< "reflect.metalDecode" — the reflector roughness below which a metal hit decodes
     GiHitDirect,         ///< "gi.hitDirect" — a voxel-answered hit's direct light at the hit (FAR-SUN-2; 0: the store whole)
     GpuWalkWhole,        ///< "gpuscene.wholeWalk" — the dirty scan walks every slot (the measuring arm; 0: the named slots)
+    GpuWalkParity,       ///< "gpuscene.walkParity" — after every frame's compose, every slot checked against the table (the guard)
     Count
 };
 class ArmRegistry {
@@ -5788,6 +5789,7 @@ private:
     /// slots), the commit (the device copy), and the stage they file.
     void composeGpuScene(bool graphIsCurrent) const;
     void walkGpuScene(bool graphIsCurrent) const;
+    void checkWalkParity(bool atomDraw) const;   ///< the arm gpuscene.walkParity
     void commitGpuScene() const;
     void noteGpuSceneStage(double micros, bool walked) const;
     /// `gpuFlagsFor` with the split's scene-wide switch (atomDrawOn) handed in: the

@@ -98,6 +98,11 @@ public:
     /// compared, and flags words it recomputed (gpuFlagsFor) — ever.
     unsigned long long slotsCompared = 0ull;
     unsigned long long flagsRecomputed = 0ull;
+    /// THE GUARD (the arm gpuscene.walkParity): slots checked against the table after a frame's
+    /// compose, and the misses — a slot whose transform or flags word the table does not hold.
+    unsigned long long walkChecked = 0ull;
+    unsigned long long walkMissed = 0ull;
+    uint32_t walkLastMissed = 0xFFFFFFFFu;
     double scanMicros = 0.0;               ///< the last frame's compose + commit (engine.gpuscene)
     /// The split's switch (OgreScene::atomDrawOn) as the running compose asked it once:
     /// 1 / 0 inside a compose, -1 outside (a predicate then asks for itself).

@@ -1137,6 +1137,11 @@ const ArmDef kArms[] = {
       "compares every slot's transform and recomputes every unmoved slot's flags word (the walk before "
       "the named walk; the paired cost A/B, scale.cpu_walks). 0 = shipped: the walk compares the slots "
       "the change set and the engine's seams named." },
+    { "gpuscene.walkParity", 0.0, 0.0, 1.0,
+      "THE NAMED WALK'S GUARD (ENGINE-UPGRADE-2B stage 2, engine.gpu_walk_parity): 1 = after every "
+      "frame's compose, every slot's world transform and flags word is compared with what the table "
+      "holds — what a whole walk would have staged and the named walk did not is a MISS "
+      "(GpuSubstrateStatus::walkMissed). A test door: O(items) a frame while on." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

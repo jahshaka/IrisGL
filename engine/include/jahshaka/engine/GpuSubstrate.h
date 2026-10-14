@@ -42,6 +42,13 @@ struct GpuSubstrateStatus {
     /// or an incomplete set owes it), so a one-mover frame compares the mover's subtree.
     unsigned long long slotsCompared = 0;
     unsigned long long flagsRecomputed = 0;
+    /// THE NAMED WALK'S GUARD (the arm "gpuscene.walkParity", engine.gpu_walk_parity): slots checked
+    /// after a frame's compose against what the table holds, and the MISSES — a slot whose world
+    /// transform or flags word moved with neither a name nor a mark (what the old whole walk's flags
+    /// backstop hid). 0 misses is the named walk's completeness. The slot of the last miss, or ~0u.
+    unsigned long long walkChecked = 0;
+    unsigned long long walkMissed = 0;
+    unsigned walkLastMissed = 0xFFFFFFFFu;
     /// True while the substrate holds the scene's ray structures (the TLAS, the
     /// BLAS set): they live and die with the scene, not in the ray tier.
     bool holdsRayStructures = false;
