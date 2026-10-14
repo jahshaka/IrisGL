@@ -396,8 +396,8 @@ void OgreScene::shadowWorkspaces(ShadowNodeKind kind,
         for (size_t i = 0; i < mPlanar->getNumActiveActorSlots(); ++i)
             if (Ogre::CompositorWorkspace *ws = mPlanar->getActiveActorWorkspace(i)) out.push_back(ws);
     } else if (kind == ShadowNodeKind::Probe) {
-        if (!mPcc || !mPccShadowed) return;
-        for (const Ogre::CubemapProbe *p : mPcc->getProbes())
+        if (!mPhoton.mPcc || !mPhoton.mPccShadowed) return;
+        for (const Ogre::CubemapProbe *p : mPhoton.mPcc->getProbes())
             if (Ogre::CompositorWorkspace *ws = p->getWorkspace()) out.push_back(ws);
     }
 }
@@ -427,8 +427,8 @@ void OgreScene::monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
                 if (owners) owners->push_back("planar:" + std::to_string(i));
             }
     }
-    if (mPcc) {
-        const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
+    if (mPhoton.mPcc) {
+        const Ogre::CubemapProbeVec &probes = mPhoton.mPcc->getProbes();
         for (size_t i = 0; i < probes.size(); ++i)
             if (Ogre::CompositorWorkspace *ws = probes[i]->getWorkspace()) {
                 out.push_back(ws);
@@ -438,8 +438,8 @@ void OgreScene::monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
 }
 
 void OgreScene::collectProbeInfo(std::vector<ProbeInfo> &out) const {
-    if (!mPcc) return;
-    const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
+    if (!mPhoton.mPcc) return;
+    const Ogre::CubemapProbeVec &probes = mPhoton.mPcc->getProbes();
     for (size_t i = 0; i < probes.size(); ++i) {
         const Ogre::CubemapProbe *p = probes[i];
         if (!p) continue;

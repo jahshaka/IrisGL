@@ -662,7 +662,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
             const bool voxelInputs = !it->second.paramsPushed ||
                 !sameCol(o.albedo, p.albedo) || !sameCol(o.emissive, p.emissive) ||
                 o.alpha != p.alpha || o.alphaMode != p.alphaMode || o.workflow != p.workflow;
-            noteMaterialChanged(id, voxelInputs);
+            mPhoton.noteMaterialChanged(id, voxelInputs);
             // THE LAMP-MAP CACHE'S MATERIAL INPUT (ENGINE_CACHE_POLICY_SPEC §3:
             // "only if it changes depth"). What a caster pass writes depends on
             // the alpha mode (a cutout discards), its cutoff, and which faces
@@ -731,7 +731,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         // drift. Only the CHANGE is noted; an ordinary push stays free.
         const Ogre::CompareFunction wasAlphaTest = db->getAlphaTest();
         applyPbr(db, p, mRefractionsActive);
-        if (wasGated != db->hasZeroSpecularResponse()) ++mProbeGateCrossings;
+        if (wasGated != db->hasZeroSpecularResponse()) ++mPhoton.mProbeGateCrossings;
         // THE METAL ANSWER FLIPPED (REFLECT-FIX-1): the edit is in place — no slot is
         // marked and no epoch moves — so a still scene would keep tracing its wearers
         // with the old kGpuMetal (a crate dragged to metalness 1 stayed black in a
@@ -815,7 +815,7 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
         // name (a recycled address would alias, and the store's in-place refresh
         // would read freed memory).
         invalidateGiCaches();
-        noteGiDatablockDied(hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
+        mPhoton.noteGiDatablockDied(hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
 
         // Remember who was rendering with this material, then take the
         // renderables down. attachMesh below rebuilds each one from scratch,
@@ -997,7 +997,7 @@ bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
         if (pieceChanged && slot == 1u) noteShadowShapeChanged(id);
         // A generated piece changes what the surface looks like, so it is a
         // probe input (P7); the voxelizer never runs the piece.
-        if (pieceChanged) noteMaterialChanged(id, false);
+        if (pieceChanged) mPhoton.noteMaterialChanged(id, false);
         syncCullTwins(rec);
         return true;
     } JAH_CATCH(mError, false);
@@ -1124,7 +1124,7 @@ bool OgreScene::destroyMaterial(MaterialId id) {
         Ogre::Hlms *hlms = hlmsFor(it->second);
         destroyCullTwins(it->second);   // unworn now (detached above); before their master
         Ogre::HlmsDatablock *dying = hlms->getDatablock(Ogre::IdString(it->second.datablockName));
-        noteGiDatablockDied(dying);   // evicted from the voxelisers' caches (fork ad452604a+0338ca7f2+c4c80b5f7 (was 0081))
+        mPhoton.noteGiDatablockDied(dying);   // evicted from the voxelisers' caches (fork ad452604a+0338ca7f2+c4c80b5f7 (was 0081))
         forgetDecodeTwinOf(dying);    // its decode twin dies first (HlmsAtom.h)
         if (dying) hlms->destroyDatablock(Ogre::IdString(it->second.datablockName));
         mMaterials.erase(it);
@@ -1840,7 +1840,7 @@ bool OgreScene::destroyTexture(TextureId id) {
             if (hit) noteShadowShapeChanged(kv.first);
         }
         // ...and now, if it really was in play, the caches that hold it.
-        if (boundSomewhere) { invalidateGiCaches(); noteGiDatablockDied(); }
+        if (boundSomewhere) { invalidateGiCaches(); mPhoton.noteGiDatablockDied(); }
         if (!it->second.path.empty()) {
             const std::string key = textureKey(it->second.path, it->second.decal,
                                                it->second.decalKind, it->second.srgb);
@@ -2187,7 +2187,7 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
         // two into its texture pool, by TextureGpu pointer, once).
         if (mit->second.boundTextures[size_t(slot)] != texId) {
             const bool voxelInput = slot == PbrTextureSlot::Albedo || slot == PbrTextureSlot::Emissive;
-            noteMaterialChanged(mat, voxelInput);
+            mPhoton.noteMaterialChanged(mat, voxelInput);
             // ...AND AGAIN WHEN THE PIXELS ACTUALLY ARRIVE (clean-2 lane,
             // 2026-09-13). loadTexture only SCHEDULES the decode, and a load
             // that misses the frame-head drain's no-progress deadline is a stub
@@ -2200,9 +2200,9 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
                 if (tit != mTextures.end() && tit->second.texture &&
                     !tit->second.texture->isDataReady()) {
                     bool parked = false;
-                    for (auto &e : mMaterialsAwaitingTexture)
+                    for (auto &e : mPhoton.mMaterialsAwaitingTexture)
                         if (e.first == mat) { e.second = e.second || voxelInput; parked = true; break; }
-                    if (!parked) mMaterialsAwaitingTexture.push_back({ mat, voxelInput });
+                    if (!parked) mPhoton.mMaterialsAwaitingTexture.push_back({ mat, voxelInput });
                 }
             }
             // A cutout's alpha comes from the albedo map: a new one is a new
@@ -2488,7 +2488,7 @@ void OgreScene::destroyCullTwin(MaterialRec &rec, CullTwin &t) {
             mTwinCandidates.erase(std::remove(mTwinCandidates.begin(), mTwinCandidates.end(), db),
                                   mTwinCandidates.end());
         mTwinOwners.erase(db);
-        noteGiDatablockDied(db);   // the voxelisers cache conversions by pointer
+        mPhoton.noteGiDatablockDied(db);   // the voxelisers cache conversions by pointer
         forgetDecodeTwinOf(db);    // its decode twin dies first (HlmsAtom.h)
         hlms->destroyDatablock(Ogre::IdString(t.datablockName));
     }

@@ -122,8 +122,8 @@ void OgreScene::setAmbient(const Colour &upper, const Colour &lower) {
 // filled with. Called before every PhotonVoxelLighting::update, and whenever the
 // environment's cube, gain or coefficients change.
 void OgreScene::applyVctEnvironment() {
-    if (!mVctLighting) return;
-    applyCascadeEnvironment(mVctLighting);
+    if (!mPhoton.mVctLighting) return;
+    applyCascadeEnvironment(mPhoton.mVctLighting);
     // EVERY CASCADE, not just the head (PHOTON_SPEC P0 rule 4): each cascade's
     // bounce job reads its own copy. Cascade 0 is mVctLighting and was just done.
     for (size_t i = 1; i < mPhoton.mVctCascades.size(); ++i)
@@ -176,8 +176,8 @@ void OgreScene::noteEnvironmentChanged() {
     // bounce count (PhotonVoxelLighting::update's sky pass reads the environment where its
     // cones escape — CONTACT-OCCLUSION-1; with one bounce it used to hold the lamps
     // only, and a sky-lit surface re-emitted nothing).
-    oweChainSettle();
-    if (mIfd) reintegrateFieldAfterInjection();
+    mPhoton.oweChainSettle();
+    if (mPhoton.mIfd) mPhoton.reintegrateFieldAfterInjection();
 }
 
 void OgreScene::setAmbientSh(const float sh[27]) {
@@ -915,7 +915,7 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, Node *rec, bool inherited
                 // ...and a lamp event for the GI scheduler (U0 3c): the lamp rides its -Y adapter, whose parent
                 // is the registered node.
                 if (const Node *owner = rec ? rec : registryNode(sn->getParent())) noteLampChanged(*owner);
-                else mGiPlan.stillLampOwed = true;
+                else mPhoton.mGiPlan.stillLampOwed = true;
             }
             else if (dynamic_cast<Ogre::Decal *>(obj)) staleProbeGrid(GiStaleReason::Moved);
         }
@@ -1190,14 +1190,14 @@ void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
     // promoted, they are rebuilt WITHOUT it, and the ghost turns into a hole
     // that a free clearing push would leave for ever. So the clearing push
     // invalidates exactly when that has happened, and the counter says so.
-    const bool healing = !movable && n.mobilitySoft && n.mobilitySoftRebuilds != mGiRebuilds;
+    const bool healing = !movable && n.mobilitySoft && n.mobilitySoftRebuilds != mPhoton.mGiRebuilds;
     n.mobilitySoft = movable && change == MobilityChange::Soft;
-    n.mobilitySoftRebuilds = mGiRebuilds;
+    n.mobilitySoftRebuilds = mPhoton.mGiRebuilds;
     // A LAMP CHANGING CLASS moves between the scheduler's two gates: both hear of it (U0 3c).
-    if (n.light) mGiPlan.stillLampOwed = mGiPlan.movableLampOwed = true;
+    if (n.light) mPhoton.mGiPlan.stillLampOwed = mPhoton.mGiPlan.movableLampOwed = true;
     // ...and an item the GI walk has already seen changing class is a FLIP the scheduler adopts (a classification
     // that arrives with the geometry is an arrival, and arrivals arm as they always did).
-    if (n.item && n.scan.giKnown) mGiPlan.mobilityFlipped = true;
+    if (n.item && n.scan.giKnown) mPhoton.mGiPlan.mobilityFlipped = true;
     n.movable = movable;
     applyNodeVisibilityFlags(n);
     const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
@@ -1212,7 +1212,7 @@ void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
         // me rebuilds?"). `mGiCachesDirty` already true means one is owed for
         // another reason and this change rides it.
         const bool wouldRebuild =
-            !mGiCachesDirty && (mPcc || mVctVoxelizer || mIfd);
+            !mPhoton.mGiCachesDirty && (mPhoton.mPcc || mPhoton.mVctVoxelizer || mPhoton.mIfd);
         invalidateGiCaches();
         if (wouldRebuild) ++mMobilityRebuilds;
     }
@@ -1750,7 +1750,7 @@ void OgreScene::destroy() {
         // (still live) GI arms and the cards' quads destroyed, all through this
         // manager — before teardownGi deletes the arms.
         releasePhotonView();
-        teardownGi();   // VPL lights die while the SceneManager is still alive
+        mPhoton.teardownGi();   // VPL lights die while the SceneManager is still alive
         // The atmosphere destroys its Rectangle2D THROUGH the SceneManager, so it
         // has to go while that is still alive (teardown law: components, then the
         // manager).
@@ -2092,7 +2092,7 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
     const bool gridNow = probeGridWanted();
     if (gridWas == gridNow) return;
     if (!gridNow) dropProbeGridByRays();
-    else mGiCachesDirty = true;
+    else mPhoton.mGiCachesDirty = true;
 }
 
 
@@ -2169,7 +2169,7 @@ void OgreScene::updateSurfaceCache() {
     // the cache exists exactly where the ray tier does (the World row resolved
     // against the machine, `rayReflectionsWanted`) and costs nothing elsewhere.
     // Off refuses it; on (the default) resolves against the rays.
-    const bool want = mGi.cards && rayReflectionsWanted();
+    const bool want = mPhoton.mGi.cards && rayReflectionsWanted();
     if (!want) {
         if (mPhoton.mSurfaceCache) mPhoton.mSurfaceCache.reset();
         return;
@@ -2201,16 +2201,16 @@ void OgreScene::updateSurfaceCache() {
     // view's last tracked position and is the ORIGIN until a frame has tracked
     // one. Capturing around the origin and then re-capturing everything on the
     // first tracked frame is the defect the chain already learned (audit B3).
-    if (!mGiCamPosKnown) return;
+    if (!mPhoton.mGiCamPosKnown) return;
 
     const GiQualityFacts facts =
-        giQualityFacts(mGi.quality, mPhoton.mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop);
+        giQualityFacts(mPhoton.mGi.quality, mPhoton.mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop);
     CardSceneView view;
     view.sceneMgr = mSceneMgr;
-    view.viewerPos = mGiCamPos;
-    view.budgetTexels = mGi.cardBudgetTexels > 0 ? unsigned(mGi.cardBudgetTexels)
+    view.viewerPos = mPhoton.mGiCamPos;
+    view.budgetTexels = mPhoton.mGi.cardBudgetTexels > 0 ? unsigned(mPhoton.mGi.cardBudgetTexels)
                                                  : facts.cardBudgetTexels;
-    view.radius = mGi.cardResidencyRadius > 0.0f ? mGi.cardResidencyRadius
+    view.radius = mPhoton.mGi.cardResidencyRadius > 0.0f ? mPhoton.mGi.cardResidencyRadius
                                                  : facts.cardResidencyRadius;
     // THE RADIANCE SIGNATURE (walkCardLights) — not `mGiLightWriteSerial`,
     // which bumps on every `setLight` push and every pose write: what a card's
@@ -2237,15 +2237,15 @@ void OgreScene::updateSurfaceCache() {
     lightStage.emplace("engine.cards.lights");
     const unsigned long long lightKey[4] = { transformEpoch(), mGiLightWriteSerial, mLightsRemoved,
                                              (unsigned long long)mLightNodes.size() };
-    const bool keyMoved = !mCardLightFoldValid ||
-                          std::memcmp(lightKey, mCardLightKey, sizeof lightKey) != 0;
-    if (keyMoved || mCardLightKeyMovedLastFrame) {
-        std::memcpy(mCardLightKey, lightKey, sizeof lightKey);
-        mCardLightFoldValid = true;
-        mCardLightFold = walkCardLights();
+    const bool keyMoved = !mPhoton.mCardLightFoldValid ||
+                          std::memcmp(lightKey, mPhoton.mCardLightKey, sizeof lightKey) != 0;
+    if (keyMoved || mPhoton.mCardLightKeyMovedLastFrame) {
+        std::memcpy(mPhoton.mCardLightKey, lightKey, sizeof lightKey);
+        mPhoton.mCardLightFoldValid = true;
+        mPhoton.mCardLightFold = walkCardLights();
     }
-    mCardLightKeyMovedLastFrame = keyMoved;
-    unsigned long long radianceSig = mCardLightFold;
+    mPhoton.mCardLightKeyMovedLastFrame = keyMoved;
+    unsigned long long radianceSig = mPhoton.mCardLightFold;
     view.rayFootprintPerMetre = mRayFootprintPerMetre;
     lightStage.reset();
     // THE CLOUD SHADOW (CLOUDS-2D-2): the snapshot the voxels are injected
@@ -2271,7 +2271,7 @@ void OgreScene::updateSurfaceCache() {
     // against voxels that had not moved, every frame): the chain's settles, each
     // cascade's rebuilds and lattice cell, the PhotonVoxelLighting objects themselves,
     // and the environment the escapes read (below).
-    view.vct = mVctLighting;
+    view.vct = mPhoton.mVctLighting;
     view.indirectBudgetTexels = facts.cardIndirectTexels;
     // ...and THE AMBIENT AT GI OFF (PHOTON-CARDS-5): the scene's SH, the engine's
     // own SH x gain (applySkyAmbient), in the indirect signature below.
@@ -2282,8 +2282,8 @@ void OgreScene::updateSurfaceCache() {
             sig ^= v;
             sig *= 1099511628211ull;
         };
-        foldI((unsigned long long)mGiChainSettles);
-        foldI(mGiRestTicks);
+        foldI((unsigned long long)mPhoton.mGiChainSettles);
+        foldI(mPhoton.mGiRestTicks);
         // ...AND THE ENVIRONMENT THE MARCH'S ESCAPES READ, which is not an
         // injection at all: noteEnvironmentChanged hands the new sky to every
         // PhotonVoxelLighting at once (applyVctEnvironment) and the pixel reads it the
@@ -2298,7 +2298,7 @@ void OgreScene::updateSurfaceCache() {
             for (int k = 0; k < 27; ++k)
                 foldI((unsigned long long)(long long)std::lround(double(mLastAmbientSh[k]) * 1e4));
         }
-        foldI((unsigned long long)(uintptr_t)mVctLighting);
+        foldI((unsigned long long)(uintptr_t)mPhoton.mVctLighting);
         for (const VctCascade &c : mPhoton.mVctCascades) {
             foldI((unsigned long long)(uintptr_t)c.lighting);
             foldI(c.rebuilds);
@@ -2320,9 +2320,9 @@ void OgreScene::updateSurfaceCache() {
     // re-staged slot (a material edit reaches it through the PBS change log).
     // THE GESTURE'S HELD NODES (REFLECT-FIX-1): a still the drag channel took off the GI
     // channel is released by the cache and must come back as itself (mReturning).
-    view.gestureHeld = mDragMovers;
+    view.gestureHeld = mPhoton.mDragMovers;
     mCardQuery.clear();
-    mCardFeed.query(mGiCamPos, view.radius, mCardQuery);
+    mCardFeed.query(mPhoton.mGiCamPos, view.radius, mCardQuery);
     view.candidates.reserve(mCardQuery.size());
     for (const uint32_t slot : mCardQuery) {
         if (slot >= mItemNodes.size()) continue;

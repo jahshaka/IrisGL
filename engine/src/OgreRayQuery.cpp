@@ -8693,12 +8693,12 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
 /// under a GI mode that is on (there is no diffuse GI to estimate otherwise);
 /// the machine answers whether it can trace at all.
 bool OgreScene::probeGatherWanted() const {
-    switch (mGi.gather) {
+    switch (mPhoton.mGi.gather) {
     case GiToggle::Off: return false;
     case GiToggle::On:  break;
     default:
-        if (mGi.mode == GiMode::Off) return false;
-        if (!giQualityFacts(mGi.quality,
+        if (mPhoton.mGi.mode == GiMode::Off) return false;
+        if (!giQualityFacts(mPhoton.mGi.quality,
                             mPhoton.mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
                  .gather.on)
             return false;
@@ -8769,13 +8769,13 @@ void OgreScene::setSunContact(const SunContactDesc &d) {
     SunContactDesc c = d;
     if (!(c.range >= kSunContactMinRange)) c.range = kSunContactMinRange;   // NaN too
     if (c.range > kSunContactMaxRange) c.range = kSunContactMaxRange;
-    mSunContact = c;
+    mPhoton.mSunContact = c;
 }
 
 /// The row resolved against the machine — `probeGatherWanted`'s shape: the
 /// row says what the scene asks for and the machine answers whether it can.
 bool OgreScene::sunContactWanted() const {
-    return mSunContact.enabled && rayTracingResolved();
+    return mPhoton.mSunContact.enabled && rayTracingResolved();
 }
 
 SunContactStatus OgreScene::sunContactStatus() const {
@@ -8938,7 +8938,7 @@ bool OgreScene::probeGatherWanted() const { return false; }
 bool OgreScene::traceCardMovers(const CardMoverTrace &) { return false; }
 void OgreScene::cardMoverTimes(float &, float &) {}
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }
-void OgreScene::setSunContact(const SunContactDesc &d) { mSunContact = d; }
+void OgreScene::setSunContact(const SunContactDesc &d) { mPhoton.mSunContact = d; }
 bool OgreScene::sunContactWanted() const { return false; }
 SunContactStatus OgreScene::sunContactStatus() const { return SunContactStatus(); }
 bool OgreScene::rayReflectionsWanted() const { return false; }

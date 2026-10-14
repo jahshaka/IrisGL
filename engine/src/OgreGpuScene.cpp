@@ -947,7 +947,7 @@ uint32_t OgreScene::gpuMaterialWordFor(const Node &n, Ogre::uint32 flags) const 
     if (!r) {
         // Only a GI-visible item is worth converting: nothing else is ever gathered.
         if ((flags & detail::kGpuGiVisible) && n.itemSlot != size_t(-1))
-            mVctPendingMaterialSlots.push_back(uint32_t(n.itemSlot));
+            mPhoton.mVctPendingMaterialSlots.push_back(uint32_t(n.itemSlot));
         return detail::GpuScene::kNoMaterialWord;
     }
     // Sixteen bits each: a pool holds 1,024 rows (PhotonVoxelMaterial's const-buffer size), and
@@ -1771,7 +1771,7 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
     };
     const auto record = [&](uint32_t i) {
         const detail::GpuInstance &e = mirror[i];
-        CardCasterRec &r = mCardCasters[i];
+        CardCasterRec &r = mPhoton.mCardCasters[i];
         r.node = NodeId(e.ids[0]);
         std::memcpy(r.world, e.world, sizeof(r.world));
         r.min = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
@@ -1817,25 +1817,25 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
     // slot holds another node than its record (the swap-remove renumbered the
     // tail into a freed slot while the count stayed — an arrival in the same
     // frame). Slots are not identities, so the records are compared BY NODE.
-    bool walk = slots != mCardMoverSlots;
+    bool walk = slots != mPhoton.mCardMoverSlots;
     if (moved && !walk)
         for (uint32_t slot : mGpuScene.movedSlots())
-            if (slot < slots && (slot >= mCardCasters.size() ||
-                                 mCardCasters[slot].node != NodeId(mirror[slot].ids[0]))) {
+            if (slot < slots && (slot >= mPhoton.mCardCasters.size() ||
+                                 mPhoton.mCardCasters[slot].node != NodeId(mirror[slot].ids[0]))) {
                 walk = true;
                 break;
             }
     if (walk) {
         std::unordered_map<NodeId, size_t> was;
-        was.reserve(mCardCasters.size());
-        for (size_t i = 0; i < mCardCasters.size(); ++i)
-            if (mCardCasters[i].node) was[mCardCasters[i].node] = i;
+        was.reserve(mPhoton.mCardCasters.size());
+        for (size_t i = 0; i < mPhoton.mCardCasters.size(); ++i)
+            if (mPhoton.mCardCasters[i].node) was[mPhoton.mCardCasters[i].node] = i;
         std::vector<CardCasterRec> prior;
-        prior.swap(mCardCasters);
-        mCardCasters.assign(slots, CardCasterRec());
+        prior.swap(mPhoton.mCardCasters);
+        mPhoton.mCardCasters.assign(slots, CardCasterRec());
         for (uint32_t i = 0; i < slots; ++i) {
             record(i);
-            auto it = was.find(mCardCasters[i].node);
+            auto it = was.find(mPhoton.mCardCasters[i].node);
             if (it == was.end()) continue;   // an arrival: see the header
             casterChange(prior[it->second], mirror[i]);
             was.erase(it);
@@ -1845,17 +1845,17 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
     } else if (moved) {
         for (uint32_t slot : mGpuScene.movedSlots()) {
             if (slot >= slots) continue;
-            casterChange(mCardCasters[slot], mirror[slot]);
+            casterChange(mPhoton.mCardCasters[slot], mirror[slot]);
             record(slot);
         }
     }
     // NEW TEXELS WITH NOTHING MOVED (ALPHA-MASK-IDENTITY-1): on a frame where this
     // scene uploaded into a texture, every still cut-out caster whose mask
     // generation moved changes its footprint's sun term, in place.
-    if (mTextureUploadSerial != mCardUploadSerialSeen) {
-        mCardUploadSerialSeen = mTextureUploadSerial;
-        for (uint32_t i = 0; i < slots && i < mCardCasters.size(); ++i) {
-            CardCasterRec &r = mCardCasters[i];
+    if (mTextureUploadSerial != mPhoton.mCardUploadSerialSeen) {
+        mPhoton.mCardUploadSerialSeen = mTextureUploadSerial;
+        for (uint32_t i = 0; i < slots && i < mPhoton.mCardCasters.size(); ++i) {
+            CardCasterRec &r = mPhoton.mCardCasters[i];
             if (!(r.flags & kGpuAlphaTested) || !stillCaster(r.flags)) continue;
             const uint32_t g = cutoutMaskGeneration(i);
             if (g == r.maskGen) continue;
@@ -1868,7 +1868,7 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
         }
     }
     if (moved || walk) {
-        mCardMovers.clear();
+        mPhoton.mCardMovers.clear();
         for (uint32_t i = 0; i < slots; ++i) {
             const detail::GpuInstance &e = mirror[i];
             if (!moverCaster(flagsOf(e))) continue;
@@ -1876,13 +1876,13 @@ bool OgreScene::cardMoverFrame(CardMoverFrame &out) {
             r.node = NodeId(e.ids[0]);
             r.min = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
             r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
-            mCardMovers.push_back(r);
+            mPhoton.mCardMovers.push_back(r);
         }
-        mCardMoverSlots = slots;
+        mPhoton.mCardMoverSlots = slots;
         out.moversChanged = true;
     }
-    out.movers.reserve(mCardMovers.size());
-    for (const CardMoverRec &r : mCardMovers) {
+    out.movers.reserve(mPhoton.mCardMovers.size());
+    for (const CardMoverRec &r : mPhoton.mCardMovers) {
         CardMoverBox b;
         b.node = r.node;
         b.min = r.min;

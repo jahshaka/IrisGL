@@ -23,7 +23,10 @@ void PhotonComponent::volumes(std::vector<Volume> &out) const {
         if (c.built) out.push_back(Volume{ c.lighting, c.voxelizer });
 }
 
-PhotonComponent::PhotonComponent() = default;
+PhotonComponent::PhotonComponent(OgreScene &scene, Ogre::Root *const &root,
+                                 Ogre::SceneManager *const &sceneMgr, OgreEngine *const &engine,
+                                 std::string &error)
+    : mScene(scene), mRoot(root), mSceneMgr(sceneMgr), mEngine(engine), mError(error) {}
 // Out of line: the cache's and the feeds' types are complete here.
 PhotonComponent::~PhotonComponent() = default;
 
