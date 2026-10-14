@@ -29,6 +29,7 @@ THE SOFTWARE.
 #include "OgreStableHeaders.h"
 
 #include "photon/voxel/PhotonVoxelizer.h"
+#include "photon/PhotonDispatch.h"
 
 #include "photon/voxel/PhotonVoxelMaterial.h"
 #include "photon/voxel/PhotonVoxelVisualizer.h"
@@ -810,6 +811,7 @@ namespace Ogre
         ResourceTransitionArray transitions;
         job->analyzeBarriers( transitions );
         renderSystem->executeResourceTransition( transitions );
+        jahshaka::engine::detail::notePhotonDispatch();
         hlmsCompute->dispatch( job, 0, 0 );
         OgreProfileGpuEnd( "VCT partition AABBs" );
 
@@ -1018,6 +1020,7 @@ namespace Ogre
 
                 job->analyzeBarriers( mResourceTransitions );
                 mRenderSystem->executeResourceTransition( mResourceTransitions );
+                jahshaka::engine::detail::notePhotonDispatch();
                 hlmsCompute->dispatch( job, 0, 0 );
                 ++mLastDispatchCount;
             }

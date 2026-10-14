@@ -1,6 +1,7 @@
 // ATOM P4b — THE VOXELISER'S INSTANCE FEED, ON THE DEVICE. See GpuVoxelGather.h
 // for what it replaces and why it is count-scan-write.
 #include "EnginePrivate.h"
+#include "photon/PhotonDispatch.h"
 #include "GpuScene.h"
 #include "GpuVoxelGather.h"
 
@@ -168,6 +169,7 @@ static void dispatchGatherImpl(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc, Og
     Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
     job->analyzeBarriers(rt);
     rs->executeResourceTransition(rt);
+    jahshaka::engine::detail::notePhotonDispatch();
     hc->dispatch(job, 0, 0);
 }
 

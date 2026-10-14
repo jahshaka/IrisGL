@@ -27,6 +27,7 @@ THE SOFTWARE.
 */
 
 #include "photon/voxel/PhotonIrradianceField.h"
+#include "photon/PhotonDispatch.h"
 
 #include "photon/voxel/PhotonIfdProbeVisualizer.h"
 #include "photon/voxel/PhotonVoxelLighting.h"
@@ -934,6 +935,8 @@ namespace Ogre
         *ifGenParams = mIfGenParams;
 
         paramsBuffer->unmap( UO_KEEP_PERSISTENT );
+
+        jahshaka::engine::detail::notePhotonDispatch();
 
         mGenerationWorkspace->_beginUpdate( false );
         mGenerationWorkspace->_update();

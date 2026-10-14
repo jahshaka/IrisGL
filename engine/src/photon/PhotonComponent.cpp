@@ -4,6 +4,8 @@
 #include "EnginePrivate.h"
 #include "AtomPass.h"
 #include "SurfaceCache.h"
+#include "photon/PhotonDispatch.h"
+#include "jahshaka/engine/PhotonStatus.h"
 
 #include <OgreCamera.h>
 #include <OgreRoot.h>
@@ -109,9 +111,21 @@ void PhotonComponent::releaseUpdatePass() {
     }
 }
 
+// THE WITNESS (photon/PhotonDispatch.h): process-wide, render thread only.
+namespace {
+unsigned gPhotonPassDepth = 0u;
+unsigned long long gPhotonInPass = 0ull, gPhotonOutsidePass = 0ull;
+}   // namespace
+void notePhotonDispatch() { ++(gPhotonPassDepth ? gPhotonInPass : gPhotonOutsidePass); }
+PhotonPassScope::PhotonPassScope() { ++gPhotonPassDepth; }
+PhotonPassScope::~PhotonPassScope() { --gPhotonPassDepth; }
+unsigned long long photonDispatchesInPass() { return gPhotonInPass; }
+unsigned long long photonDispatchesOutsidePass() { return gPhotonOutsidePass; }
+
 bool PhotonComponent::updatePassOwed() const { return mSurfaceCache && mSurfaceCache->photonUpdateOwed(); }
 
 void PhotonComponent::recordUpdatePass() {
+    PhotonPassScope pass;
     if (mSurfaceCache) mSurfaceCache->photonUpdate();
 }
 
@@ -127,5 +141,13 @@ void registerPhotonUpdatePass(AtomPassProvider *provider) {
 }
 
 }  // namespace detail
+
+PhotonDispatchStatus photonDispatchStatus() {
+    PhotonDispatchStatus s;
+    s.inPass = detail::photonDispatchesInPass();
+    s.outsidePass = detail::photonDispatchesOutsidePass();
+    return s;
+}
+
 }  // namespace engine
 }  // namespace jahshaka

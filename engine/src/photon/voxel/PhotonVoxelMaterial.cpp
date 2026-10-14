@@ -29,6 +29,7 @@ THE SOFTWARE.
 #include "OgreStableHeaders.h"
 
 #include "photon/voxel/PhotonVoxelMaterial.h"
+#include "photon/PhotonDispatch.h"
 
 #include "Compositor/OgreCompositorManager2.h"
 #include "Compositor/OgreCompositorWorkspace.h"
@@ -264,11 +265,13 @@ namespace Ogre
             psParams->setNamedConstant( "sliceIdx",
                                         static_cast<float>( texture->getInternalSliceStart() ) );
             mDownsampleMatPass2DArray->getTextureUnitState( 0 )->setTexture( texture );
+            jahshaka::engine::detail::notePhotonDispatch();
             mDownsampleWorkspace2DArray->_update();
         }
         else
         {
             mDownsampleMatPass2D->getTextureUnitState( 0 )->setTexture( texture );
+            jahshaka::engine::detail::notePhotonDispatch();
             mDownsampleWorkspace2D->_update();
         }
 

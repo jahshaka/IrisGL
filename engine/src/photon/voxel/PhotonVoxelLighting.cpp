@@ -29,6 +29,7 @@ THE SOFTWARE.
 #include "OgreStableHeaders.h"
 
 #include "photon/voxel/PhotonVoxelLighting.h"
+#include "photon/PhotonDispatch.h"
 
 #include "photon/voxel/PhotonVoxelizerSourceBase.h"
 #include "photon/voxel/PhotonVoxelVisualizer.h"
@@ -873,6 +874,7 @@ namespace Ogre
             }
             mAnisoGeneratorStep0->analyzeBarriers( mResourceTransitions );
             renderSystem->executeResourceTransition( mResourceTransitions );
+            jahshaka::engine::detail::notePhotonDispatch();
             hlmsCompute->dispatch( mAnisoGeneratorStep0, 0, 0 );
         }
 
@@ -883,6 +885,7 @@ namespace Ogre
         {
             ( *itor )->analyzeBarriers( mResourceTransitions );
             renderSystem->executeResourceTransition( mResourceTransitions );
+            jahshaka::engine::detail::notePhotonDispatch();
             hlmsCompute->dispatch( *itor, 0, 0 );
             ++itor;
         }
@@ -1020,6 +1023,7 @@ namespace Ogre
         HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
         mLightVctBounceInject->analyzeBarriers( mResourceTransitions );
         renderSystem->executeResourceTransition( mResourceTransitions );
+        jahshaka::engine::detail::notePhotonDispatch();
         hlmsCompute->dispatch( mLightVctBounceInject, 0, 0 );
 
         std::swap( mLightVoxel[0], mLightBounce );
@@ -1410,6 +1414,7 @@ namespace Ogre
         HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
         mLightInjectionJob->analyzeBarriers( mResourceTransitions );
         renderSystem->executeResourceTransition( mResourceTransitions );
+        jahshaka::engine::detail::notePhotonDispatch();
         hlmsCompute->dispatch( mLightInjectionJob, 0, 0 );
 
         if( mAnisotropic )

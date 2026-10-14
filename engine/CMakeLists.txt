@@ -36,6 +36,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuScene.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/GpuSceneSubstrate.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/PhotonComponent.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/PhotonDispatch.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/PhotonComponent.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/PhotonGi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/atom/AtomComponent.h
@@ -599,6 +600,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_ogre_head_inpu
 set(JAHSHAKA_ENGINE_BUILD_ID_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/Engine.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/GpuSubstrate.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/PhotonStatus.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/Types.h)
 set(_build_id_inputs ${JAHSHAKA_ENGINE_SOURCES} ${JAHSHAKA_ENGINE_BUILD_ID_HEADERS})
 set(JAHSHAKA_ENGINE_BUILD_ID_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
