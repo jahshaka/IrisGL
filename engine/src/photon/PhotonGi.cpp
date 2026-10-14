@@ -3368,7 +3368,7 @@ PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPo
 void PhotonComponent::recordFrame(const FrameWork &w) {
     recordField(w);
     if (w.aborted) return;
-    if (w.cascades) recordCascades(w);
+    if (w.cascadeStage) recordCascades(w);
     if (!mPcc || !mGiCamera) return;
     JAH_TRY {
         mGiCamera->setPosition(w.camPos);
@@ -4526,7 +4526,7 @@ static const float kStepHysteresis = 0.1f;
 
 void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
     if (mVctCascades.size() < 1u || !mVctCascades[0].built) return;
-    w.cascades = true;
+    w.cascadeStage = true;
     // CASCADE 0'S FIELD FOLLOW, when owed, is paid first and spends the frame (recordCascades).
     w.follow = mIfdFollowOwed != 0;
     w.followReason = mIfdFollowReason;

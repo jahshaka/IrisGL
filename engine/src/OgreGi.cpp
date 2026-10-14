@@ -702,7 +702,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                 // the newcomer a rebuild to take (no attach set to re-select: the
                 // gather reads membership from the GPU scene at every build). The
                 // scheduler still spends at most one cascade per frame.
-                if (!firstGi && mGiWalkIn.cascades) mGiWalk.cascadeDirty.push_back(a);
+                if (!firstGi && mGiWalkIn.chainBuilt) mGiWalk.cascadeDirty.push_back(a);
             } else if (PhotonComponent::giAabbMoved(n.scan.giBox, a)) {
                 Ogre::Aabb moved = n.scan.giBox;
                 moved.merge(a);
@@ -711,7 +711,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                 // is an edit (a scripted setPosition, a nudge, a paste, physics) and is answered where it happens,
                 // which is what the branch below does. The engine no longer infers a drag from a second move inside
                 // a window of frames: the host has the user's hand and says so.
-                if (mGiWalkIn.dragMoverChannel && underGesture(n) && mGiWalkIn.cascades && !n.movable) {
+                if (mGiWalkIn.dragMoverChannel && underGesture(n) && mGiWalkIn.chainBuilt && !n.movable) {
                     // THE PROMOTION. The object leaves the still world for the
                     // length of the gesture: one re-voxelisation HERE clears
                     // the copy of it the cascades hold at its old pose (the
@@ -741,7 +741,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                     // `mGiMovedBoxes` (per frame, by contract) accumulates until the
                     // host's settle asks the chain to answer for it: the frame a
                     // drag is released is not the frame the box moved.
-                    if (mGiWalkIn.cascades) mGiWalk.cascadeDirty.push_back(moved);
+                    if (mGiWalkIn.chainBuilt) mGiWalk.cascadeDirty.push_back(moved);
                     n.scan.giBox = a;
                 }
             }

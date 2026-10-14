@@ -175,7 +175,7 @@ public:
         bool fieldReplacing = false;          ///< Integrate: a fresh pass (ifd.replace), else ifd.converge
         Ogre::uint32 fieldBatch = 0u;
         Ogre::Vector3 camPos = Ogre::Vector3::ZERO;
-        bool cascades = false;                ///< the cascade stage runs (a built chain, no flush owed)
+        bool cascadeStage = false;             ///< the cascade stage runs (a built chain, no flush owed)
         bool follow = false;                  ///< cascade 0's field follow, paid first
         GiStaleReason followReason = GiStaleReason::Camera;
         int rebuild = -1;                     ///< the ONE cascade re-voxelised this frame
@@ -201,7 +201,7 @@ public:
     };
     /// What the walk asks of the component: the drag-mover channel's switch, and whether a
     /// cascade chain is built (an edit then owes the chain its box).
-    struct WalkInputs { bool dragMoverChannel = false; bool cascades = false; };
+    struct WalkInputs { bool dragMoverChannel = false; bool chainBuilt = false; };
     /// The mover list as last walked, and the slot count it was walked at: the
     /// walk runs only on a frame whose moved set is not empty or whose slot
     /// count changed (or a moved slot now holds another node).
