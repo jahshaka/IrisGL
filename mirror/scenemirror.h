@@ -55,6 +55,8 @@ public:
     /// Replaces the mirrored document. Clears everything previously mirrored.
     void setSource(iris::ScenePtr scene);
     iris::ScenePtr source() const { return mSource; }
+    /// The engine scene this mirror feeds (its GI scheduler's counts are read through its giStatus()).
+    jahshaka::engine::Scene *target() const { return mTarget; }
 
     /// ONE VIEW OF THIS SCENE IN THE FRAME (ENGINE-UPGRADE-1 U0 3a): what sync() puts in the frame's input for it.
     struct FrameView {
@@ -162,36 +164,15 @@ public:
     /// own passes whatever else drew (the engine's per-pass SceneGiBinding).
     void invalidateEnvironment();
 
-    /// How many times buildEnvironment has pushed a NEW GI configuration
-    /// (Scene::setGlobalIllumination) and how many times it has asked for a
-    /// re-solve of the existing one (Scene::refreshGlobalIllumination).
-    ///
-    /// Both are expensive — a VCT refresh tears the voxelizer down and rebuilds
-    /// it from every item in the scene — and both are debounced against the last
-    /// pushed value, so "an idle scene refreshes ZERO times" is a contract, not
-    /// an optimisation. It is not observable from the document or from pixels
-    /// (a re-voxelized scene looks identical; it just costs a frame), which is
-    /// why the counters exist: mirror.document_to_engine's "GI idle" block
-    /// asserts an idle VCT scene re-solves ZERO times over 60 frames, and that
-    /// a light that really moves re-solves exactly once.
-    quint64 giPushCount() const { return mGiPushCount; }
-    quint64 giRefreshCount() const { return mGiRefreshCount; }
+    /// (THE GI DEBOUNCE'S COUNTERS — pushes, re-solves, light ticks — ARE THE ENGINE'S since U0 3c: the scheduler
+    /// that counts them is OgreScene::planGi, read through GiStatus::scheduler*.)
+
     /// HOW MANY MATERIAL CHANGES the mirror answered IN PLACE (Scene::setNodeMaterial,
 /// MATERIAL-SWAP-GI-1) and how many by a full re-attach (a new mesh, a new rig,
 /// or a swap the engine refused). Test instruments: a hover in and out on a mesh
 /// is two swaps and no re-attach.
     quint64 materialSwapCount() const { return mMaterialSwaps; }
     quint64 meshAttachCount() const { return mMeshAttaches; }
-    /// How many times the CHEAP light-only re-inject ran instead of a full
-    /// re-solve (REFLECTIONS_ADOPTION_SPEC.md P2). During a light drag this is
-    /// the counter that moves; giRefreshCount() stays still until the drag ends.
-    quint64 giLightRefreshCount() const { return mGiLightRefreshCount; }
-    /// ...of which the ones taken AT REST (round-2 review F1): the injection is
-    /// deliberately cheap while something moves — one bounce, the coarse ray
-    /// march — so the tick that ENDS the motion must run the scene's full count
-    /// instead, and for a MOVABLE lamp this mirror is the only thing that knows
-    /// when that is (the path arms no settle). One per burst of movement.
-    quint64 giLightRefreshAtRestCount() const { return mGiLightRefreshAtRestCount; }
 
     /// HOW MANY MATERIAL DESCRIPTIONS THE LAST SYNC BUILT (MIRROR_SCALE lane).
     /// Building one converts the document material into a PbrParams and a
@@ -981,15 +962,6 @@ private:
         // mirror ever becomes real, the warn latch belongs on the node beside
         // the flag, not here.
         bool mobilityWarned = false;
-        /// A LIGHT'S GI PARAMETERS as last seen by a visit (lightGiParamSignature) — the per-light change key the
-        /// scene-wide light hashes were folded from. Compared at the light's own visit (a change seam), never per
-        /// frame; a change is a still- or movable-lamp event for the GI debounce (U0 3b).
-        quint64 giLightParams = 0;
-        bool    giLightParamsKnown = false;
-        /// ...and its WORLD POSE as a change key (worldTrsSignature), read only when the change set names the lamp or
-        /// an ancestor: a write of the same pose — play stop's restore, a script re-asserting it — is no move.
-        quint64 giLightPose = 0;
-        bool    giLightPoseKnown = false;
         // (hasBillboards/billboardSignature lived here and had no reader or
         // writer anywhere in the tree — deleted with the deep-audit fix wave.)
         // Particles (PARTICLES_FX2_SPEC): the engine simulates, so the mirror
@@ -2017,24 +1989,6 @@ private:
     // last sync(); pushed engine-wide by buildEnvironment (the engine's atlas is
     // global, like the filter — rebuild is expensive, so only on change).
     unsigned mMaxShadowResolution = 0;
-    // Global illumination: last pushed state + the driving light's transform, so
-    // buildEnvironment only re-pushes on change and re-traces on light movement.
-    jahshaka::engine::GiParams mLastGi;
-    bool mGiPushed = false;
-    /// The engine's material generation as last adopted (Scene::giMaterialSignature),
-    /// and whether the pending settle was armed by lights/geometry — the only
-    /// changes the cheap re-inject cadence serves (a material-only edit waits
-    /// for the settle without it).
-    quint64 mGiMaterialSignature = 0;
-    bool     mGiPendingInject = false;
-    /// The engine's GI GEOMETRY signature as last adopted (Scene::giGeometrySignature, read with the frame's pending
-    /// change set). The three LIGHT HASHES that stood beside it (still lamps, moving lamps, every lamp's pose) are
-    /// DELETED (U0 3b): what they detected is now named — a lamp's pose by the change set (the journal's written
-    /// nodes, an ancestor of the lamp among them), its parameters by its own visit — and arrives as the two owed
-    /// flags below, which stay set until the debounce has answered them (a paused budget keeps them).
-    quint64 mGiGeometrySignature = 0;
-    bool    mGiStillLampOwed = false;     ///< a still lamp moved, changed, arrived or left: arms the settle
-    bool    mGiMovableLampOwed = false;   ///< a moving lamp did: arms the cheap re-inject cadence only (O2)
 
     // ---- THE CHANGE SET (ENGINE-UPGRADE-1 U0 3b) ----------------------------
     /// This mirror's own cursor on the document's write journal (nodegraph.h): taken before the walk (the soft
@@ -2044,15 +1998,9 @@ private:
     /// The DOCUMENT nodes written since the last emit, by node (the soft promotion's question), and the record's set.
     QSet<const iris::SceneNode *> mWrittenThisSync;
     jahshaka::engine::ChangeSet mFrameChanges;
-    /// Drain the journal into the two above and the lamp flags (twice a sync: before the walk, at the emit).
+    /// Drain the journal into the two above (twice a sync: before the walk, at the emit).
     void takeWriteJournal();
     void noteWrittenNode(iris::SceneNode *node);
-    // Diagnostics behind giPushCount() / giRefreshCount(); never read by the
-    // mirror itself, and NOT reset by invalidateEnvironment (a re-take of the
-    // screen is a real push, and the gate counts real pushes).
-    quint64 mGiPushCount = 0;
-    quint64 mGiRefreshCount = 0;
-    quint64 mGiLightRefreshCount = 0;
     /// materialBuildCount() — reset at the top of every sync, so it reports the
     /// LAST walk rather than a running total.
     quint64 mMaterialBuilds = 0;
@@ -2121,27 +2069,6 @@ private:
     iris::LightNode *mSyncSun = nullptr;
     quint64 mMobilityMisses = 0;
     QString mLastMobilityMiss;
-    /// THE LIGHTS THIS WALK RESOLVED AS MOVING, by node pointer, valid for the
-    /// rest of the frame (buildEnvironment runs after sync and the pointers
-    /// cannot die in between). It exists because the GI light signature has to
-    /// ask "does this lamp move?" about each light while the answer is a
-    /// property of the node's whole ancestor chain, which only the walk knows.
-    ///
-    /// A VECTOR, cleared and refilled per sync for its CAPACITY: this is the
-    /// hot per-node walk, and a node-allocating container here would be a
-    /// malloc per movable lamp per frame for a list that is almost always
-    /// shorter than ten. Membership is a linear scan, which at that length
-    /// beats any tree.
-    std::vector<const iris::SceneNode *> mMovableLights;
-    /// "A node's mobility CHANGED this sync" — set by syncMobility, consumed by
-    /// buildEnvironment's settle gate. A class flip moves the engine's GI
-    /// geometry signature (the object enters or leaves it), and that signature
-    /// is the settle key: without this flag the frame a character promotes
-    /// ARMS a full re-solve, which is the hitch the whole design forbids
-    /// (code review 2026-09-12, item 1). The gate ADOPTS the new signature
-    /// instead — an Authoring flip's rebuild is owed on its own account
-    /// (setNodeMovable invalidated), and a Soft one owes nothing at all.
-    bool mMobilityChanged = false;
 
     // ---- THE DIRTY SET'S OWN STATE (DIRTY_SET_MIRROR_SPEC) ----------------
     /// The next sync walks the WHOLE document. True to begin with (the first
@@ -2228,60 +2155,10 @@ private:
     /// a still frame recomputes none of them.
     quint32 mRefractiveEntries = 0;
     quint32 mDistortionEntries = 0;
-    /// A moving lamp must re-inject its light into the voxels (owner decision O2) and must NOT arm the settle, or an
-    /// animated torch would hold the stability window open for ever and pay a full re-solve every time it paused.
-    /// `mGiMovableLightsMoving` is what carries the cadence when no settle is pending at all.
-    bool    mGiMovableLightsMoving = false;
-    /// ...AND THE REST FRAME IT OWES (round-2 review F1). A cadence tick taken
-    /// while the lamp was moving injects at ONE bounce and the coarse ray march
-    /// (Scene::refreshGiLighting's `inMotion`), which is right while it moves
-    /// and wrong the moment it stops — and this path arms no settle, so nothing
-    /// else would ever run the full count again: a three-bounce room with a
-    /// Movable lamp stayed lit at one bounce for the rest of the session. The
-    /// latch keeps the cadence alive for exactly one more tick after the motion
-    /// stops, and that tick is the `inMotion = false` one. A full re-solve
-    /// (the settle, or an explicit refresh) supersedes it and clears it.
-    bool    mGiMovableSettleOwed = false;
-    quint64 mGiLightRefreshAtRestCount = 0;
     /// The play edge the soft-promotion rule is scoped to. Play STOP clears the
     /// document's soft flags (Scene::setPlaying) and the per-node warn latches
     /// here, so a second play session starts clean.
     bool mWasPlaying = false;
-    // ---- Rebuild coalescing (REFLECTIONS_ADOPTION_SPEC.md §5 / P2) ----
-    // A moving light ARMS a refresh instead of performing one; the expensive
-    // rebuild fires when the light has held still. See buildEnvironment for the
-    // argument. The constants are deliberately not exposed: they are a debounce,
-    // not a preference.
-    bool     mGiPendingRefresh = false;
-    int      mGiStableFrames = 0;
-    int      mGiFramesSinceLightOnly = 0;
-    /// The value of Scene::giRefreshSerial this mirror has already acted on
-    /// (P1d). An EXPLICIT refresh never waits for the stability window.
-    quint64  mGiRefreshSerialSeen = 0;
-    /// Frames of a still light signature before the full rebuild fires. 15 at
-    /// 60 Hz is a quarter second — long enough that no drag ever crosses it,
-    /// short enough that letting go feels immediate.
-    ///
-    /// FRAMES ONLY, AND NEVER A WALL CLOCK (COLDGI-1, 2026-09-15). This gate
-    /// used to fire on `kGiStableFrames` frames OR 250 ms, whichever came
-    /// first, so that a slow Debug frame rate could not stretch the wait into
-    /// seconds. That made the number of GI RE-SOLVES a function of how fast
-    /// the machine rendered: the same script, stepping the same frames, fired
-    /// one extra full re-solve on a cold shader cache (where the first frames
-    /// cost seconds) and none on a warm one. `threading.mode_pixels` caught it
-    /// as two halves of one comparison running different GI histories
-    /// (staleSerial 8 against 9). It is the `cameras.exposure` lesson in its
-    /// second guise: a wall-clock settle measures nothing in an engine whose
-    /// clock is the simulated 1/60 s frame — count frames, and the answer is
-    /// the same on every machine and in every gate. The cost of dropping the
-    /// clock is honest and small: on a box rendering the scene at 10 fps the
-    /// settle after a drag takes 1.5 s instead of 250 ms. A picture that
-    /// depends on the machine is worse than a settle that depends on the
-    /// frame rate, which is what the user is watching anyway.
-    static constexpr int kGiStableFrames = 15;
-    /// While waiting, run the cheap light-only re-inject this often, so bounced
-    /// light follows a light that is being dragged.
-    static constexpr int kGiLightOnlyEveryN = 10;
 };
 
 #endif // SCENEMIRROR_H

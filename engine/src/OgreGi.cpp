@@ -649,6 +649,114 @@ bool OgreScene::setGiTuning(const GiParams &p) {
     } JAH_CATCH(mError, false);
 }
 
+// THE ONE GI SCHEDULER (ENGINE-UPGRADE-1 U0 3c) — what decides WHEN this scene's GI answers a change. It was the
+// mirror's debounce (the host asking the engine, every sync, through two signatures and three light hashes); it is
+// the engine's own now, run by the drain once per record that carries the scene's GI (an environment frame), over
+// facts the engine holds itself — the geometry term (giGeometryKey), the material generation, the lamp events the
+// drained change set and the light seams raised (mGiPlan.*LampOwed) — and the few only the document knows, carried
+// by the record (world.refreshGi()'s serial, a material hover preview, a mobility flip). PhotonComponent::plan() takes
+// it at EU-2's stage 4, with the orchestration it calls (refreshGlobalIllumination, refreshGiLighting).
+//
+// THE RULES, unchanged from the debounce (its comments' reasons stand; REFLECTIONS_ADOPTION_SPEC §5 / P2):
+//  * a configuration PUSH answers everything: the state restarts from it;
+//  * a lamp or geometry change ARMS a pending re-solve and the cheap light re-inject cadence (every
+//    kLightOnlyEveryN frames) until the change has held still for kStableFrames, then ONE re-solve (Settle);
+//  * a material change arms the re-solve only (nothing a re-inject reads changed); a hover preview is no change;
+//  * a MOVING lamp (decision O2) arms the cadence and nothing else, and owes one at-rest tick after its motion;
+//  * a mobility FLIP's geometry move is adopted, never armed (MobilityChange::Soft's promise);
+//  * world.refreshGi() re-solves at once;
+//  * a paused budget (updateBudget 0) follows nothing and keeps what it owes for the un-pause.
+void OgreScene::planGi(const FrameInputScene &part, bool pushed) {
+    GiPlan &g = mGiPlan;
+    const bool vctLike = mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid;
+    const unsigned long long serial = part.giRefreshSerial ? *part.giRefreshSerial : g.refreshSerialSeen;
+    const auto geometryNow = [&]() -> unsigned long long { return vctLike ? giGeometryKey() : 0ull; };
+    const auto materialNow = [&]() -> unsigned long long {
+        return part.materialPreview ? g.materialSig : mGiMaterialGeneration;
+    };
+    if (!g.pushed || pushed) {
+        g.pushed = true;
+        g.geometrySig = geometryNow();
+        g.materialSig = materialNow();
+        g.stillLampOwed = g.movableLampOwed = false;   // a from-scratch push answers every lamp
+        g.movableLightsMoving = g.movableSettleOwed = false;
+        g.pendingRefresh = g.pendingInject = false;
+        g.stableFrames = 0;
+        g.refreshSerialSeen = serial;
+        g.mobilityFlipped = false;
+        ++g.pushes;
+        return;
+    }
+    if (mGi.mode == GiMode::Off) return;
+    const bool live = mGi.updateBudget > 0;
+    const unsigned long long geomSig = geometryNow();
+    const unsigned long long matSig = materialNow();
+    const bool sigChanged = vctLike && (geomSig != g.geometrySig || g.stillLampOwed);
+    const bool explicitRefresh = serial != g.refreshSerialSeen;
+    if (vctLike && g.movableLampOwed && live) {
+        g.movableLampOwed = false;
+        g.movableLightsMoving = true;
+    }
+    const bool matChanged = matSig != g.materialSig;
+    if (matChanged && live) {
+        g.materialSig = matSig;
+        g.pendingRefresh = true;
+        g.stableFrames = 0;
+    }
+    const bool flipped = g.mobilityFlipped;
+    g.mobilityFlipped = false;              // per environment frame, like the mirror's flag it replaced
+    if (sigChanged && flipped) {
+        if (live) { g.geometrySig = geomSig; g.stillLampOwed = false; }
+    } else if (sigChanged) {
+        if (live) {
+            g.geometrySig = geomSig;
+            g.stillLampOwed = false;
+            if (!g.pendingInject) g.framesSinceLightOnly = 0;
+            g.pendingRefresh = true;
+            g.pendingInject = true;      // lights/geometry: the cheap path runs
+            g.stableFrames = 0;
+        }
+    } else if (g.pendingRefresh && !matChanged) {
+        ++g.stableFrames;
+    }
+    // A re-solve IS the rest frame: it answers every owed tick and lamp (LAMPREST-2: an owed moving tick after it
+    // would overwrite the full-count picture with the cheap one).
+    const auto answered = [&]() {
+        if (vctLike) g.geometrySig = giGeometryKey();
+        g.stillLampOwed = false;
+        g.materialSig = materialNow();
+        g.pendingInject = false;
+        g.movableSettleOwed = false;
+        g.movableLampOwed = false;
+        g.movableLightsMoving = false;
+    };
+    if (explicitRefresh) {
+        g.refreshSerialSeen = serial;
+        g.pendingRefresh = false;
+        g.stableFrames = 0;
+        refreshGlobalIllumination(GiRefreshReason::Explicit);
+        ++g.resolves;
+        answered();
+    } else if (g.pendingRefresh && g.stableFrames >= GiPlan::kStableFrames) {
+        g.pendingRefresh = false;
+        g.stableFrames = 0;
+        refreshGlobalIllumination(GiRefreshReason::Settle);   // the cheapest correct step, never a drained stage
+        ++g.resolves;
+        answered();
+    } else if ((g.pendingRefresh && g.pendingInject) || g.movableLightsMoving || g.movableSettleOwed) {
+        if (++g.framesSinceLightOnly >= GiPlan::kLightOnlyEveryN) {
+            g.framesSinceLightOnly = 0;
+            const bool inMotion = g.movableLightsMoving || (g.pendingRefresh && g.pendingInject);
+            g.movableLightsMoving = false;   // re-armed by the next move
+            g.movableSettleOwed = inMotion && !(g.pendingRefresh && g.pendingInject);
+            if (refreshGiLighting(inMotion)) {
+                ++g.lightTicks;
+                if (!inMotion) ++g.lightTicksAtRest;
+            }
+        }
+    }
+}
+
 void OgreScene::refreshGlobalIllumination(GiRefreshReason reason) {
     JAH_TRY {
         // THE HOST ASKED, EXPLICITLY. Recorded before the arm runs so that
@@ -716,7 +824,7 @@ void OgreScene::refreshGlobalIllumination(GiRefreshReason reason) {
 // whole point of this call is that a light just moved.
 // THE CHAIN IS SETTLED FOR THESE INPUTS (LAMPREST-3 fix round item 3). Recorded
 // by WHOEVER pays a full at-rest chain injection — the light tick, or the last
-// step of an incremental settle — and consulted by the mirror's stability-window
+// step of an incremental settle — and consulted by the GI scheduler's stability-window
 // tick, so one gesture costs one settle instead of two or three.
 void OgreScene::noteChainSettled() {
     mGiSettleStepsOwed = 0;
@@ -1157,6 +1265,7 @@ GiStatus OgreScene::giStatus() const {
         st.staleSerial     = mStaleSerial;
         st.rebuilds        = mGiRebuilds;
         st.giScans         = mGiScans;
+        st.giScansFull     = mGiScansFull;
         st.giScanMicros    = mGiScanMicros;
         st.giAabbReads     = mGiAabbReads;
         // THE PHOTON CHAIN, as BUILT.
@@ -1229,6 +1338,13 @@ GiStatus OgreScene::giStatus() const {
         st.chainSettles         = mGiChainSettles;
         st.dragMovers           = int(mDragMovers.size());     // MOVER-1
         st.dragMoverGestures    = mDragMoverGestures;
+        st.gestureActive        = mGesture.active;
+        st.schedulerPushes      = mGiPlan.pushes;            // THE ONE GI SCHEDULER (U0 3c)
+        st.schedulerResolves    = mGiPlan.resolves;
+        st.schedulerLightTicks  = mGiPlan.lightTicks;
+        st.schedulerLightTicksAtRest = mGiPlan.lightTicksAtRest;
+        st.settlePending        = mGiPlan.pendingRefresh;
+        st.settleStableFrames   = mGiPlan.stableFrames;
         // THE SCREEN-PROBE GATHER (GATHER-1a): the row resolved against the
         // machine, and — where a view has drawn one — the grid it placed, the
         // rays it traced and the GPU milliseconds the three jobs cost. Filled
@@ -1915,7 +2031,7 @@ std::vector<Ogre::Aabb> OgreScene::giItemBoundsRaw() const {
 
 // THE CONTENT THE CURRENT FIT WAS MADE FOR (lane ENGINE-7 item 2). A hash of
 // the gathered boxes, each quantized by its OWN largest extent — the same
-// quantum giGeometrySignature uses, so an idle sway or a settling physics body
+// quantum the scheduler's geometry term (giGeometryKey) uses, so an idle sway or a settling physics body
 // reads as "unchanged" here exactly as it does there. Order is mNodes' order,
 // which is stable for a still scene.
 unsigned long long OgreScene::giContentSignature(const std::vector<Ogre::Aabb> &boxes) {
@@ -2217,7 +2333,7 @@ void OgreScene::computeGiGeometrySignature() const {
         // to. The host's settle gate measures STABILITY of exactly this hash:
         // an object that dropped out of it while being dragged would make the
         // scene look still from the mirror's side, and the full re-solve the
-        // gate fires after kGiStableFrames would land in the MIDDLE of the
+        // gate fires after GiPlan::kStableFrames would land in the MIDDLE of the
         // gesture — the hitch the whole mobility design exists to avoid. So the
         // predicate is "bounces light, or is a mover because the user has hold
         // of it", and at the gesture's end the hash is exactly the hash the
@@ -2670,11 +2786,9 @@ size_t OgreScene::markDirtyCascadesPending(GiStaleReason why) {
 // THE END OF A DRAG GESTURE (MOVER-1) — where a dragged Still becomes still
 // world again and pays for the whole gesture at once.
 //
-// WHAT "STILL" MEANS HERE is the same thing it means to the probe deferral:
-// kProbeMotionSettleFrames ticks with no promoted mover moving. The clock is the
-// scene's GI tick and not a wall clock, for the reason every settle in this
-// engine counts frames (CLAUDE.md: a wall-clock settle measures nothing in this
-// engine).
+// WHEN IT ENDS IS THE RECORD'S (U0 3c): the first frame whose scene record carries no active gesture — the user
+// let go. (It used to be INFERRED: kProbeMotionSettleFrames ticks with no promoted mover moving, which ended a drag
+// under a hand that paused and kept one alive for a script that moved something every frame.)
 //
 // WHAT IT COSTS, and it is the whole trade: ONE cascade dirty box per mover —
 // the place it came to rest — so the chain re-voxelises it once, at the tier's
@@ -2689,11 +2803,18 @@ size_t OgreScene::markDirtyCascadesPending(GiStaleReason why) {
 // scene looks like once the settle has run — the object is GI geometry again,
 // at its new pose, voxelised from scratch — which is the property gi.drag_mover
 // asserts by rendering the same frame under both rules.
-void OgreScene::endDragGestureIfStill() {
+/// Is this item under the user's gesture (the node the record names, or anything below it)?
+bool OgreScene::underGesture(const Node &n) {
+    if (!mGesture.active || mGesture.nodes.empty() || !n.node) return false;
+    for (const Ogre::Node *p = n.node; p; p = p->getParent())
+        if (const Node *rec = registryNode(p))
+            if (std::find(mGesture.nodes.begin(), mGesture.nodes.end(), rec->selfId) != mGesture.nodes.end())
+                return true;
+    return false;
+}
+
+void OgreScene::endDragGesture() {
     if (mDragMovers.empty()) return;
-    if (mDragMoverMoved) { mDragQuietTicks = 0; return; }
-    if (++mDragQuietTicks < kProbeMotionSettleFrames) return;
-    mDragQuietTicks = 0;
     bool anyDemoted = false;
     for (NodeId id : mDragMovers) {
         auto it = mNodes.find(id);
@@ -2701,7 +2822,6 @@ void OgreScene::endDragGestureIfStill() {
         Node &n = it->second;
         if (!n.dragMover) continue;
         n.dragMover = false;
-        n.scan.giMovedTick = 0;
         applyNodeVisibilityFlags(n);
         // The box it came to rest in. `scan.giBox` is where the walk last saw
         // it, which is that box — the place it LEFT was re-voxelised at the
@@ -3355,7 +3475,6 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo)
     // scene: OgreEngine::renderOneFrame picks it, for the same reason the probe
     // budget must not be spent once per view.)
     mGiWalkedThisFrame = false;     // one GI walk per frame; the first consumer runs it
-    ++mGiTick;                      // the gesture clock (MOVER-1)
     // THE AUTHORITATIVE CAMERA, remembered: the Photon arm is built around it,
     // and a rebuild can arrive on a frame where no view has tracked yet.
     const bool firstCamera = !mGiCamPosKnown;
@@ -3392,7 +3511,7 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo)
             // settle. THE DEFECT, measured on the monolithic arm: a STILL-
             // classified cube dragged in the editor keeps a voxel copy of
             // itself at its OLD pose, because a geometry move restarts BOTH of
-            // the mirror's stability gates on every frame of the gesture, so
+            // the GI scheduler's stability gates on every frame of the gesture, so
             // the full re-solve never fires during it; the every-tenth-frame
             // `refreshGiLighting(inMotion)` then re-injects light over those
             // stale voxels and the cone's self-occlusion start bias paints
@@ -3411,9 +3530,9 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo)
             // The MONOLITHIC arm is deliberately unchanged here: one volume
             // cannot be re-voxelised per frame at any useful resolution, and
             // what to do there is the owner's call, not this lane's.
-            // THE GESTURE'S END (MOVER-1), before the marking below so the
+            // THE GESTURE'S END (MOVER-1; the record's since U0 3c), before the marking below so the
             // demotion's own box is spent by this same frame's scheduler.
-            endDragGestureIfStill();
+            if (!mGesture.active) endDragGesture();
             if (!mGiCascadeDirtyBoxes.empty() || mGiCascadeDirtyAll)
                 markDirtyCascadesPending(GiStaleReason::Moved);
         } JAH_CATCH(mError, );
@@ -3433,7 +3552,7 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo)
 // as the union of each mover's old and new world AABB. Two consumers, both of
 // them cheap paths: the probe round-robin below (a probe whose parallax shape
 // contains a moved box goes to the front of the sweep) and — through the
-// separate, stateless giGeometrySignature() — the mirror's debounce.
+// separate, stateless geometry term (giGeometryKey) — the GI scheduler's.
 //
 // The comparison is QUANTIZED (giAabbQuantum): sub-voxel jitter (a physics body settling, an idle
 // animation's sway) must not read as movement for ever. An item seen for the
@@ -3547,17 +3666,14 @@ void OgreScene::ensureGiWalk() {
         // The boxes are per frame by contract (walkItems clears them at its
         // head), so a skipped frame must publish "nothing moved" rather than
         // last frame's movers — otherwise a single move would stale the grid
-        // for ever. The drag-gesture flag (MOVER-1) is per frame for the same
-        // reason: a skipped walk is a frame in which nothing was written, which
-        // is exactly what the settle is counting.
+        // for ever.
         mGiMovedBoxes.clear();
-        mDragMoverMoved = false;
         mGiScanMicros = 0.0;
         return;
     }
     ++mGiScans;
     const auto t0 = std::chrono::steady_clock::now();
-    if (!mGiScannedOnce || mScanFullGi) walkItems(true, false, true);
+    if (!mGiScannedOnce || mScanFullGi) { ++mGiScansFull; walkItems(true, false, true); }
     else walkItems(true, false, true, &takeScanSubset(mScanPendingGi));
     mGiScanMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
 }
@@ -3583,20 +3699,30 @@ void OgreScene::noteSceneTransformWrite(const Node &n) {
 /// riders hanging off its bones (a TagPoint is a bone's child, not the node's) — named for both scans, once per frame;
 /// a light anywhere under them bumps the light serial ONCE (the re-inject's key: injectedAtLightSerial). An incomplete
 /// set owes the full pass and, when the scene has a light, the serial (it cannot say which moved).
-unsigned OgreScene::applyChangeSet(const ChangeSet &cs, bool drained) {
+unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
     if (!cs.complete) {
         ++mHostMoves;
         mScanFullGi = mScanFullShadow = true;
         mScanPendingGi.clear(); mScanPendingShadow.clear();
-        for (const auto &kv : mNodes)
-            if (kv.second.light) { ++mGiLightWriteSerial; return 1u; }
-        return 0u;
+        // Every lamp's pose key re-read as it stands now (the set cannot say which moved; the owed flags below say
+        // "any", and the next named move compares against this).
+        bool any = false;
+        for (auto &kv : mNodes) {
+            Node &n = kv.second;
+            if (!n.light) continue;
+            any = true;
+            if (Ogre::Node *ln = n.light->getParentNode()) {
+                n.lightPos = ln->_getDerivedPositionUpdated();
+                n.lightRot = ln->_getDerivedOrientationUpdated();
+                n.lightPoseKnown = true;
+            }
+        }
+        if (!any) return 0u;
+        ++mGiLightWriteSerial;
+        mGiPlan.stillLampOwed = mGiPlan.movableLampOwed = true;   // it cannot say which lamp moved
+        return 1u;
     }
     if (cs.moved.empty()) return 0u;
-    // A geometry signature still valid here read these writes already (noteSubmittedChanges): when nothing else was
-    // written since it was computed, the drain re-keys it to the epoch this drain leaves.
-    // (An engine write through this path is no drain: it moved boxes nobody has read yet.)
-    const bool rekey = drained && mGeomSigValid && mGeomSigEpoch == transformEpoch();
     bool light = false;
     std::vector<Ogre::Node *> stack;
     for (NodeId id : cs.moved) {
@@ -3614,7 +3740,18 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs, bool drained) {
         if (!seen.insert(on).second) continue;
         if (Node *rec = registryNode(on)) {
             if (rec->item || rec->decal) noteSceneTransformWrite(*rec);
-            if (rec->light) light = true;
+            // A LAMP UNDER A MOVED NODE: named, then COMPARED with its own pose key — the journal says WRITTEN,
+            // and only a pose that changed is a move the injection and the scheduler answer.
+            if (rec->light && rec->light->getParentNode()) {
+                Ogre::Node *ln = rec->light->getParentNode();
+                const Ogre::Vector3 p = ln->_getDerivedPositionUpdated();
+                const Ogre::Quaternion q = ln->_getDerivedOrientationUpdated();
+                if (rec->lightPoseKnown && !(p == rec->lightPos && q == rec->lightRot)) {
+                    light = true;
+                    noteLampChanged(*rec);
+                }
+                rec->lightPos = p; rec->lightRot = q; rec->lightPoseKnown = true;
+            }
             for (NodeId rider : rec->boneRiders) {
                 auto rit = mNodes.find(rider);
                 if (rit != mNodes.end() && rit->second.node) stack.push_back(rit->second.node);
@@ -3623,7 +3760,6 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs, bool drained) {
         for (size_t i = 0, e = on->numChildren(); i < e; ++i) stack.push_back(on->getChild(i));
     }
     if (light) ++mGiLightWriteSerial;
-    if (rekey) mGeomSigEpoch = transformEpoch();
     return light ? 1u : 0u;
 }
 
@@ -3746,7 +3882,6 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
     bool firstGi = false;
     if (gi) {
         mGiMovedBoxes.clear();
-        mDragMoverMoved = false;       // per frame, like the boxes (MOVER-1)
         firstGi = !mGiScannedOnce;
         mGiScannedOnce = true;
     }
@@ -3840,11 +3975,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
             // dirty list, and its box is tracked only so the settle knows when
             // the drag stopped and what to re-voxelise once at the end.
             if (n.dragMover) {
-                if (giAabbMoved(n.scan.giBox, a)) {
-                    n.scan.giBox = a;
-                    n.scan.giMovedTick = mGiTick;
-                    mDragMoverMoved = true;
-                }
+                if (giAabbMoved(n.scan.giBox, a)) n.scan.giBox = a;
             } else if (!(flags & kGiGeometryBit)) {
                 // PROBE-ONLY geometry (P7): unlit, captured by the probe faces,
                 // never voxelized. Same quantized test, its own record, and a
@@ -3884,20 +4015,12 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
             } else if (giAabbMoved(n.scan.giBox, a)) {
                 Ogre::Aabb moved = n.scan.giBox;
                 moved.merge(a);
-                // IS THIS A GESTURE? (MOVER-1, and the probe deferral's rule
-                // applied to the voxels.) A SECOND move inside the settle
-                // window is a drag; one move on its own is an edit — a scripted
-                // setPosition, a nudge, a paste — and an edit must be answered
-                // where it happens, which is what the branch below does. The
-                // window is measured in the scene's GI TICKS rather than in
-                // consecutive frames, because the editor renders about two
-                // frames per document edit and a dragged object's boxes
-                // therefore arrive on alternate frames (DRAG-1's measurement,
-                // which is why a consecutive-frames rule never fired).
-                const bool second = n.scan.giMovedTick &&
-                                    mGiTick - n.scan.giMovedTick <= kProbeMotionSettleFrames;
-                n.scan.giMovedTick = mGiTick;
-                if (mGi.dragMoverChannel && second && !mVctCascades.empty() && !n.movable) {
+                // IS THIS A GESTURE? (MOVER-1.) THE RECORD SAYS (U0 3c): an object the user's gesture moves — the
+                // node the host's FrameInputScene::gesture names, or anything under it — is a drag; any other move
+                // is an edit (a scripted setPosition, a nudge, a paste, physics) and is answered where it happens,
+                // which is what the branch below does. The engine no longer infers a drag from a second move inside
+                // a window of frames: the host has the user's hand and says so.
+                if (mGi.dragMoverChannel && underGesture(n) && !mVctCascades.empty() && !n.movable) {
                     // THE PROMOTION. The object leaves the still world for the
                     // length of the gesture: one re-voxelisation HERE clears
                     // the copy of it the cascades hold at its old pose (the
@@ -3919,7 +4042,6 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                     n.scan.giBox = a;
                     n.dragMover = true;
                     mDragMovers.push_back(n.selfId);
-                    mDragMoverMoved = true;
                     applyNodeVisibilityFlags(n);
                     noteGiCascadeDirty(&moved);
                 } else {
@@ -4229,17 +4351,16 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     // guarantee about every STALE probe, spent at the tier's budget.
 }
 
-// THE MOVEMENT TERM OF THE GI SIGNATURE (FIX WAVE B3, mirror half).
+// THE MOVEMENT TERM OF THE GI SCHEDULER (FIX WAVE B3; the scheduler's since U0 3c).
 //
-// A quantized hash of every GI item's world AABB — the same shape as the light
-// signature the mirror already debounces on, and deliberately STATELESS so that
-// calling it cannot disturb the movement scan above (the two ran into each other
+// A quantized hash of every GI item's world AABB, deliberately STATELESS so that
+// computing it cannot disturb the movement scan above (the two ran into each other
 // in an earlier draft: whichever consumer looked first consumed the movement).
 //
-// What it buys: geometry that moves now ARMS the mirror's stability window like
+// What it buys: geometry that moves ARMS the scheduler's stability window like
 // a dragged light does, so the CHEAP paths run during the drag — the probes the
 // object is inside re-capture on their next turn in the sweep, and the lights are
-// re-injected into the voxels every kGiLightOnlyEveryN frames — and exactly ONE
+// re-injected into the voxels every GiPlan::kLightOnlyEveryN frames — and exactly ONE
 // full re-solve lands when the movement stops. Before this, moving an object
 // changed nothing at all until somebody pressed Refresh.
 //
@@ -4252,29 +4373,14 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
 // spent one spurious re-solve immediately after arming (caught by gi.coalesce's
 // "20 idle frames cost nothing at all"). An item's own size is a property of the
 // item, so the hash of a still scene is still whatever the volume does.
-unsigned long long OgreScene::giGeometrySignature(const ChangeSet &pending) const {
-    // NOT GATED ON THE MODE (U0 3a): the mirror reads it while it builds a frame's input, i.e. BEFORE the drain
-    // applies that frame's GI mode — on the frame GI turns on it would read 0 and its debounce would see a change
-    // one frame later. The signature is the GI items' geometry, whatever the mode; the caller combines it only
-    // when its own mode needs it.
-    // CACHED AGAINST WHAT HAS BEEN WRITTEN (U0 3b): the drained moves and this scene's own named writes (the
-    // epoch), and the caller's PENDING set — this host frame's writes, which the engine has not drained yet (the
-    // mirror reads this while it builds the very record that will carry them). Nothing in either: the boxes cannot
-    // have moved since the last read and the cache answers.
+unsigned long long OgreScene::giGeometryKey() const {
+    // THE SCHEDULER'S GEOMETRY TERM (U0 3c: no longer a host-facing signature — planGi is its one reader, at the
+    // drain, after the frame's change set landed). Not gated on the mode: the term is the GI items' geometry,
+    // whatever the mode. Cached against the movement epoch: nothing written, nothing re-read.
     const unsigned long long epoch = transformEpoch();
-    if (pending.empty() && mGeomSigValid && mGeomSigEpoch == epoch && mGeomSigMode == mGi.mode) return mGeomSig;
+    if (mGeomSigValid && mGeomSigEpoch == epoch && mGeomSigMode == mGi.mode) return mGeomSig;
     computeGiGeometrySignature();
-    mGeomSigCovers = !pending.empty();
     return mGeomSig;
-}
-
-// THE MATERIAL TERM (ENGINE_CACHE_POLICY_SPEC P7), deliberately NOT folded into
-// the geometry signature above: the host arms the same one-re-solve-on-settle
-// debounce for it but skips the light re-inject cadence that geometry and
-// lights get, because nothing a re-inject reads changed (the voxels still hold
-// the old conversion until the re-solve builds fresh ones).
-unsigned long long OgreScene::giMaterialSignature() const {
-    return mGiMaterialGeneration;   // mode-independent, as giGeometrySignature (read before the frame's mode lands)
 }
 
 // The movement quantum for one item, and the test that uses it. Shared by the
@@ -5338,7 +5444,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // over COUPLED volumes (the same mathematics `refreshGiLighting`'s at-rest
     // rule is written from): the cascades inside and outside it still hold the
     // answer they had, and nothing in this engine then ran the chain's at-rest
-    // injection, because the mirror's cadence only ticks while a LIGHT or a
+    // injection, because the GI scheduler's cadence only ticks while a LIGHT or a
     // piece of GEOMETRY is moving and a camera walk moves neither.
     //
     // So the chain simply STAYED off its fixed point, for ever. Measured on the

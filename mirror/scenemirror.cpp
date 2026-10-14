@@ -371,27 +371,6 @@ quint64 worldTrsSignature(iris::graph::NodeHandle h)
     return sig;
 }
 
-/// THE LIGHT'S GI PARAMETERS as a change key (ENGINE_CACHE_POLICY_SPEC P7).
-/// Folded into the GI light signature beside the light's transform: VCT
-/// injects each light's colour x intensity over its reach and cone, so a
-/// colour, intensity, range, type, spot or area-shape edit stales the voxel
-/// solve exactly as moving the light does. Before this the signature hashed
-/// TRS only, and such an edit never reached the bounce at all (nor, once the
-/// endless probe sweep went, the reflections). The same debounce then applies:
-/// a slider drag re-injects on the cheap cadence and re-solves once on release.
-///
-/// And the light's EFFECTIVE shown state (its own flag and every ancestor's):
-/// VctLighting injects only visible lights, so switching a lamp off is as much
-/// a GI input as dimming it to zero (code review 2026-09-12).
-quint64 lightGiParamSignature(const iris::LightNode *l)
-{
-    Hasher h;
-    h << int(l->lightType) << l->color.rgba() << l->intensity << l->iesNormalisation
-      << l->distance << l->spotCutOff << l->spotCutOffSoftness << l->spotFalloff
-      << l->rectWidth << l->rectHeight << l->doubleSided << l->accurate
-      << l->isVisibleInScene();
-    return h.h;
-}
 
 }   // namespace
 
@@ -457,7 +436,6 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mDirtyScratch.clear();
     mEvictedScratch.clear();
     mMovableNodes = 0;
-    mMovableLights.clear();
     mSkinnedNodes = 0;
     mCharacterPieces = 0;
     mRefractiveEntries = 0;
@@ -564,7 +542,6 @@ void SceneMirror::evacuateEngineObjects()
     mDirtyScratch.clear();
     mEvictedScratch.clear();
     mMovableNodes = 0;
-    mMovableLights.clear();
     mSkinnedNodes = 0;
     mCharacterPieces = 0;
     mRefractiveEntries = 0;
@@ -802,11 +779,9 @@ int SceneMirror::sync(const FrameViews &frameViews)
     // edit: the sun's atmosphere tint (syncSunAtmosphere says why it cannot
     // ride the dirty set).
     syncSunAtmosphere();
-    // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3): mMovableNodes and
-    // mMovableLights are INCREMENTAL now (syncMobility maintains them on each
-    // entry's transition, releaseEntry gives the contribution back) — only the
-    // per-frame EVENT flag is reset here.
-    mMobilityChanged = false;
+    // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3): mMovableNodes is INCREMENTAL (syncMobility maintains it on each
+    // entry's transition, releaseEntry gives the contribution back). (The per-frame flip flag that stood here is the
+    // engine's since U0 3c: setNodeMovable raises it for its GI scheduler.)
     // THE PLAY EDGE the soft-promotion rule is scoped to. On the FALLING edge
     // the document has already cleared every node's soft flag
     // (Scene::setPlaying) and the transforms are back where the author left
@@ -3796,25 +3771,6 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             // from the node's transform (the light rides the adopted node and the
             // graph carries position and direction), so skipping an unchanged push
             // cannot freeze a moving light.
-            // ITS GI PARAMETERS, at the seam (U0 3b; was folded into the scene-wide light hash every frame): a lamp
-            // that arrives or changes what the voxel injection reads owes the debounce its answer.
-            {
-                const quint64 gp = lightGiParamSignature(light);
-                // The pose key's first reading, at the lamp's first visit (takeWriteJournal compares against it).
-                if (!e.giLightPoseKnown) {
-                    e.giLightPose = worldTrsSignature(light->graphNode());
-                    e.giLightPoseKnown = true;
-                }
-                if (!e.giLightParamsKnown || gp != e.giLightParams) {
-                    e.giLightParams = gp;
-                    e.giLightParamsKnown = true;
-                    const auto *sn = static_cast<const iris::SceneNode *>(light);
-                    if (std::find(mMovableLights.begin(), mMovableLights.end(), sn) != mMovableLights.end())
-                        mGiMovableLampOwed = true;
-                    else
-                        mGiStillLampOwed = true;
-                }
-            }
             const LightDesc want = toLightDesc(light, mSyncSun, true,
                                                atmosphereTintFor(light, mSyncSun),
                                                mSunExposureGain);
@@ -3891,36 +3847,10 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
 // owns, a cursor the log's cap overtook) makes the set incomplete: the engine takes its full pass once.
 void SceneMirror::takeWriteJournal()
 {
-    const bool complete = mJournal.take(mJournalScratch);
-    if (!complete) {
-        mFrameChanges.complete = false;
-        mGiStillLampOwed = mGiMovableLampOwed = true;   // it cannot say which lamp moved
-    }
-    if (mJournalScratch.empty()) return;
-    const std::size_t before = std::size_t(mWrittenThisSync.size());
+    if (!mJournal.take(mJournalScratch)) mFrameChanges.complete = false;
     for (iris::graph::NodeHandle h : mJournalScratch)
         if (iris::SceneNode *n = iris::graph::ownerOf(h)) noteWrittenNode(n);
     mJournalScratch.clear();
-    if (std::size_t(mWrittenThisSync.size()) == before || !mSource) return;
-    // THE LAMPS (bounded by the light count): a lamp moved when it, or an ancestor, was written.
-    for (const auto &l : mSource->lights) {
-        if (l.isNull() || l->lightType == iris::LightType::Sky) continue;
-        bool moved = false;
-        for (iris::graph::NodeHandle h = l->graphNode(); h && !moved; h = iris::graph::parentOf(h))
-            if (const iris::SceneNode *o = iris::graph::ownerOf(h)) moved = mWrittenThisSync.contains(o);
-        if (!moved) continue;
-        // NAMED, THEN COMPARED: the journal says the lamp's pose was written; its own pose key says whether it
-        // changed (the old scene-wide hash compared every lamp every frame — this compares the named ones).
-        const auto *n = static_cast<const iris::SceneNode *>(l.data());
-        auto e = mEntries.find(n);
-        if (e == mEntries.end()) continue;              // not mirrored yet: its adoption owes the debounce already
-        if (!e->giLightPoseKnown) continue;             // its first visit (this sync's walk) reads the pose
-        const quint64 pose = worldTrsSignature(l->graphNode());
-        if (pose == e->giLightPose) continue;
-        e->giLightPose = pose;
-        if (std::find(mMovableLights.begin(), mMovableLights.end(), n) != mMovableLights.end()) mGiMovableLampOwed = true;
-        else mGiStillLampOwed = true;
-    }
 }
 
 void SceneMirror::noteWrittenNode(iris::SceneNode *node)
@@ -3999,32 +3929,13 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
         e.countedMovable = movable;
         if (movable) {
             ++mMovableNodes;
-            // The GI light signature needs this answer per light and cannot
-            // derive it (rule 2 is a question about the whole ancestor chain);
-            // buildEnvironment reads the list later in the same frame.
-            if (node->getSceneNodeType() == iris::SceneNodeType::Light) {
-                mMovableLights.push_back(node);
-                mGiStillLampOwed = mGiMovableLampOwed = true;   // it changed class: both gates hear of it
-            }
         } else {
             if (mMovableNodes) --mMovableNodes;
-            if (node->getSceneNodeType() == iris::SceneNodeType::Light) {
-                auto it = std::find(mMovableLights.begin(), mMovableLights.end(), node);
-                if (it != mMovableLights.end()) mMovableLights.erase(it);
-                mGiStillLampOwed = mGiMovableLampOwed = true;
-            }
         }
     }
-    // ON CHANGE ONLY, like every other flag on this walk.
+    // ON CHANGE ONLY, like every other flag on this walk. (Whether a push is a FLIP or a node's first classification
+    // is the engine's question since U0 3c: setNodeMovable counts a flip only for an item its GI has already seen.)
     const int want = movable ? 1 : 0;
-    // ...and a node the walk has never seen is not a CHANGE: -1 is "never
-    // pushed", and its first push is the classification a node is born with.
-    // The distinction matters for the settle gate below — an arrival already
-    // has its own machinery (the engine's "items appeared" probe stale and the
-    // geometry signature the new item joins), and treating it as a flip would
-    // adopt a signature read before the scene graph has its transforms, which
-    // is the trap buildEnvironment's own "adopt AFTER the push" note describes.
-    const bool known = e.movable >= 0;
     if (e.movable != want) {
         // WHY the intent travels with the value: an AUTHORING change moves the
         // object in or out of the voxel bounce, which costs one from-scratch GI
@@ -4042,7 +3953,6 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
         notePush(node, "mobility");
         e.movable = want;
         e.movableSoft = movable && why == iris::MobilityReason::Play;
-        if (known) mMobilityChanged = true;
     }
     return movable;
 }
@@ -4401,16 +4311,9 @@ void SceneMirror::releaseEntry(Entry &e)
     e.gpuSkinned = false;
     e.characterHost = nullptr;
     noteRigCounts(e);
-    // A LAMP LEAVING is a GI change like one arriving (U0 3b: the hashes saw the list shrink).
-    if (e.giLightParamsKnown) {
-        if (e.countedMovable) mGiMovableLampOwed = true; else mGiStillLampOwed = true;
-        e.giLightParamsKnown = false;
-    }
     if (e.countedMovable) {
         e.countedMovable = false;
         if (mMovableNodes) --mMovableNodes;
-        auto it = std::find(mMovableLights.begin(), mMovableLights.end(), e.docNode);
-        if (it != mMovableLights.end()) mMovableLights.erase(it);
     }
     if (e.docNode && e.materialPtr) noteMaterialUser(e, e.docNode, e.materialPtr, nullptr);
     if (e.wireNode) mTarget->removeNode(e.wireNode);
@@ -7128,9 +7031,9 @@ static std::vector<LookDesc> resolveLooks(const QJsonArray &stack)
 //
 // SO THE SECOND VIEW GETS THIS, AND NOT THE WHOLE FUNCTION. Calling
 // buildEnvironment twice a frame would be wrong rather than merely wasteful:
-// the GI block counts FRAMES of stability (`++mGiStableFrames`) and would reach
-// its window in half the frames it is meant to, so a drag would re-solve the
-// whole chain mid-gesture. One scene half per frame; one call per view.
+// the scene's half carries the GI configuration, and the engine's scheduler counts
+// FRAMES of stability per record that carries it (OgreScene::planGi). One scene
+// half per frame; one call per view.
 //
 // `driving` is the camera the view is drawn through, for the per-camera lens
 // (CAMERA_LENS_SPEC §4/§5). buildEnvironment passes none because it reads the
@@ -7547,281 +7450,15 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // whether or not its SSR row asked for one — `ChainDesc::probeGather`),
         // so it rides the change debounce with the rest of the configuration.
         gi.gather = toggle(mSource->giGather);
-        // EVERY LIGHT IS A VOXEL LIGHT (PHOTON_SPEC E2 (4)): any light moving — or appearing, or dying, or changing a
-        // GI parameter — goes stale until a re-injection. WHAT TELLS US IS NAMED NOW (U0 3b): the three scene-wide
-        // light hashes that were folded here every frame are DELETED. A lamp's POSE moving is the frame's change set
-        // (the journal's written nodes: the lamp or an ancestor — takeWriteJournal), and the RENDERER hears it from
-        // the same set at the drain (a light under a moved node bumps its light serial: the re-inject's key — what
-        // noteLightsMoved used to say by hand). A lamp's GI PARAMETERS changing is its own visit (lightGiParamSignature
-        // per light, at the seam). Both arrive as the two owed flags: a STILL lamp arms the settle, a MOVING one
-        // (mMovableLights, decision O2) the cheap re-inject cadence and nothing else. The sky light is neither: it is
-        // the environment's (setEnvironmentLight), and a hide or an intensity drag never arms a re-solve.
-        const bool vctLike = gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid;
-        // ---- THE MOVEMENT TERM (FIX WAVE B3) --------------------------------
-        //
-        // Second term, same shape and the same debounce as the light's: a
-        // quantized hash of every GI item's world AABB. Before it, MOVING
-        // geometry changed nothing at all — the panel's own Refresh tooltip said
-        // so out loud ("moving objects does not do this automatically") — because
-        // the only cheap answer available was "re-solve every frame of the drag".
-        // There are cheap answers now: the probes covering the mover re-capture
-        // on their next turn in the engine's per-frame budget, and the lights are
-        // re-injected into the voxels on the kGiLightOnlyEveryN cadence. So
-        // geometry gets the treatment lights already had: the cheap paths during
-        // the gesture, exactly one full re-solve when it stops.
-        //
-        // The SAME gate as the lamps' rather than one of its own, so that moving a light and moving a box during one
-        // drag still cost one re-solve between them rather than two. Read WITH THE FRAME'S PENDING SET (U0 3b):
-        // this host frame's writes, which the record being built here carries and the engine has not drained.
-        const auto readEngineSignature = [&]() -> quint64 {
-            return vctLike ? mTarget->giGeometrySignature(scene.changes) : 0ull;
-        };
-        const quint64 geomSig = readEngineSignature();
-        // The engine's half of the signature is read from DERIVED world AABBs,
-        // and those are only correct once something has run updateSceneGraph —
-        // which, on the very first sync, is the GI build itself. Reading it
-        // before the push therefore hashes the items at their birth transforms
-        // and the next frame looks like a scene-wide move: one spurious
-        // re-solve, 15 frames after every arm (caught by gi.coalesce's "20 idle
-        // frames cost nothing at all"). So the push adopts the signature AFTER
-        // it pushes, exactly as the two refresh branches below already do.
-        // THE MATERIAL TERM (ENGINE_CACHE_POLICY_SPEC P7), kept OUT of the
-        // signature above on purpose: a material edit arms the same
-        // one-re-solve-on-settle debounce but NOT the cheap light re-inject
-        // cadence (and its irradiance-field reset) — nothing a re-inject reads
-        // changed. Every mode (Instant Radiosity re-traces on it too).
-        // A HOVER PREVIEW IS NOT A MATERIAL EDIT (MATERIAL-PREVIEW-1).
-        // The editor lends a mesh's material slot to whatever is being dragged
-        // over it and takes it back when the drag leaves; the document is never
-        // written and no undo step exists. The engine's material signature
-        // cannot tell the two apart. (Measured 2026-09-19, ledger 804-805: a
-        // colour-only swap does not move this term; a textured one does, and the
-        // engine re-voxelises on the re-attach either way — MATERIAL-SWAP-GI-1
-        // owns the rest, this gate's falling edge included.)
-        //
-        // The whole answer is here, at the ONE read: while the scene says a
-        // preview is on screen the material term reads as whatever was
-        // remembered before it began. Nothing can arm on it and — just as
-        // important — nothing can ADOPT it either (adoptSignature and the full
-        // push below both go through this), so the restore lands back on the
-        // remembered value and the debounce never saw a change at all. A real
-        // apply ends the preview BEFORE it pushes (MaterialPreviewService), so
-        // the commit's own signature move arms the one re-solve it is owed.
-        const auto readMaterialSignature = [&]() -> quint64 {
-            return mSource->materialPreviewActive() ? mGiMaterialSignature
-                                                    : mTarget->giMaterialSignature();
-        };
-        const quint64 matSig = readMaterialSignature();
-        // Compared BY VALUE (GiParams::operator==, beside the struct — every
-        // field setGlobalIllumination reads is in it, so a new field cannot fall
-        // behind the comparison the way a lambda one file away did).
-        //
-        // THE TUNING PUSH FIRST, and it is not an early-out (PHOTON_SPEC §7
-        // E2 (8)): the three per-frame floats are OUT of GiParams::operator==,
-        // so a slider tick on one of them leaves `gi == mLastGi` and would
-        // otherwise never reach the engine at all. A tick is now three constant
-        // writes instead of a teardown plus a re-voxelisation (times N under a
-        // cascade chain), and the rest of this block is unchanged: if anything
-        // in the CONFIGURATION also moved, the push below rebuilds anyway.
-        // THE CONFIGURATION RIDES THE RECORD (U0 3a): the engine's drain applies a tuning-only change through
-        // setGiTuning and a configuration change through setGlobalIllumination, comparing as this block does. The
-        // mLastGi / mGiPushed bookkeeping below stays for the DEBOUNCE, which reads "a push happened" (3c deletes it).
+        // THE CONFIGURATION RIDES THE RECORD (U0 3a), and WHEN THE GI ANSWERS A CHANGE IS THE ENGINE'S (U0 3c): the
+        // debounce that stood here — two engine signatures read every sync, three light hashes, a stability window
+        // and a re-inject cadence driven from the host — is the engine's one GI scheduler now (OgreScene::planGi),
+        // run at the drain over what the engine holds itself (a mobility flip included: setNodeMovable is its). The
+        // record carries the two facts only the document knows: world.refreshGi()'s serial and a material hover
+        // preview on screen (no edit).
         scene.gi = gi;
-        if (mGiPushed && !gi.giTuningEqual(mLastGi)) {
-            // ONLY THE THREE, and the narrowness is load-bearing: `mLastGi = gi`
-            // here would adopt the WHOLE configuration, so a frame in which a
-            // tuning float AND a real setting both changed would leave
-            // `gi == mLastGi` below and swallow the setting outright — the push
-            // would never happen. (Measured the hard way:
-            // scripting.e2e.screenshot_grades lost a grade change that arrived
-            // in the same frame as a tuning value.)
-            // EVERY FIELD `giTuningEqual` COMPARES (PHOTON-GATHER-1d):
-            // the gather's row, the card cache's row,
-            // budget and radius. Left out, one change to any of them kept the
-            // comparison unequal for ever and re-pushed the tuning (the field's
-            // constants included) on EVERY frame after it.
-            mLastGi.gather              = gi.gather;
-            mLastGi.cards               = gi.cards;
-            mLastGi.cardBudgetTexels    = gi.cardBudgetTexels;
-            mLastGi.cardResidencyRadius = gi.cardResidencyRadius;
-        }
-        if (!mGiPushed || gi != mLastGi) {
-            mLastGi = gi;
-            mGiGeometrySignature = readEngineSignature();
-            mGiStillLampOwed = mGiMovableLampOwed = false;   // a from-scratch push answers every lamp
-            mGiMovableLightsMoving = false;
-            mGiMovableSettleOwed = false;
-            mGiMaterialSignature = readMaterialSignature();
-            mGiPushed = true;
-            mGiPendingRefresh = false;
-            mGiPendingInject = false;
-            mGiStableFrames = 0;
-            mGiRefreshSerialSeen = mSource->giRefreshSerial;
-            ++mGiPushCount;
-        } else if (gi.mode != GiMode::Off) {
-            // ---- REBUILD COALESCING (REFLECTIONS_ADOPTION_SPEC.md §5 / P2) ----
-            //
-            // A full GI refresh is a teardown plus a re-voxelize plus, in the
-            // hybrid, every probe re-rendered twice (216 face renders at the
-            // shipped 18-probe grid). Doing it on the frame a light MOVES means
-            // doing it on every frame of a drag, synchronously inside mirror
-            // sync. The old code did exactly that — the branch's own comment
-            // knew, and the only thing saving the frame rate was that lights
-            // are usually still.
-            //
-            // So a changed light signature no longer refreshes. It ARMS a
-            // pending refresh and resets a stability counter; the expensive
-            // rebuild fires once the signature has held still for
-            // kGiStableFrames frames. During the wait the CHEAP path runs every
-            // kGiLightOnlyEveryN frames — re-inject the lights into the voxels
-            // that are already there — so bounced light follows the light being
-            // dragged instead of freezing until the mouse is released. Probes
-            // deliberately do not update on that path; they come back at the
-            // stability fire.
-            //
-            // FRAMES, AND ONLY FRAMES (COLDGI-1 — the reasoning is at
-            // kGiStableFrames). A wall clock beside the frame count makes the
-            // NUMBER OF GI RE-SOLVES a function of machine speed, which makes
-            // the picture a function of machine speed; a headless test that
-            // pumps 15 frames instantly still gets its refresh.
-            const bool stillLamp = vctLike && mGiStillLampOwed;
-            const bool sigChanged = (vctLike && geomSig != mGiGeometrySignature) || stillLamp;
-            // world.refreshGi() / the panel's Refresh button (P1d): an explicit
-            // demand, so it does NOT wait for the stability window.
-            const bool explicitRefresh = mSource->giRefreshSerial != mGiRefreshSerialSeen;
-
-            // THE MOVING LAMPS' OWN GATE (O2). It arms the cheap re-inject and
-            // NOTHING else: no stability window, no pending refresh, so a lamp
-            // that moves for ever costs a re-inject every kGiLightOnlyEveryN
-            // frames and not one re-solve. Like the settle gates, it is only
-            // tracked while the budget is live ("GI paused" means the mirror is
-            // not following the scene at all).
-            if (vctLike && mGiMovableLampOwed && mSource->giUpdateBudget > 0) {
-                mGiMovableLampOwed = false;
-                mGiMovableLightsMoving = true;
-            }
-            const bool matChanged = matSig != mGiMaterialSignature;
-            if (matChanged && mSource->giUpdateBudget > 0) {
-                // Arms the settle — and only the settle (see matSig above).
-                mGiMaterialSignature = matSig;
-                mGiPendingRefresh = true;
-                mGiStableFrames = 0;
-            }
-            // A MOBILITY FLIP MOVES THE SIGNATURE WITHOUT BEING A CHANGE THE
-            // SETTLE MAY ANSWER (code review 2026-09-12, item 1). The engine's
-            // GI geometry signature hashes the items that BOUNCE light, so an
-            // object entering or leaving that set changes it — which, through
-            // the gate below, would arm a pending refresh and fire a full
-            // re-solve ~250 ms later. On the frame a character soft-promotes at
-            // play, that re-solve IS the hitch the whole design promises cannot
-            // happen (Types.h's MobilityChange::Soft, EnginePrivate.h's
-            // kMovableBit); and for an authoring flip it would be a SECOND
-            // rebuild on top of the one setNodeMovable already invalidated for.
-            // So the flip's own frame ADOPTS the signature instead of arming.
-            // Anything else that moved in the same frame keeps changing it and
-            // re-arms on the next one, so nothing real is swallowed for longer
-            // than one frame.
-            // (Adopting = the geometry term taken and the still lamps answered; both only while the budget is live.)
-            const auto adoptGeometryAndLamps = [&]() {
-                mGiGeometrySignature = geomSig;
-                mGiStillLampOwed = false;
-            };
-            if (sigChanged && mMobilityChanged) {
-                if (mSource->giUpdateBudget > 0) adoptGeometryAndLamps();
-            } else if (sigChanged) {
-                if (mSource->giUpdateBudget > 0) {
-                    // The remembered signature is only advanced while the budget
-                    // is above zero, exactly as it was only advanced while Auto
-                    // Refresh was ON: with GI paused the mirror is not tracking
-                    // the scene at all, so un-pausing must notice the moves that
-                    // happened meanwhile rather than adopting them silently.
-                    adoptGeometryAndLamps();
-                    // The gate measures STABILITY, so it restarts on every
-                    // change: a drag that keeps changing the signature never
-                    // satisfies it, which is the whole point.
-                    if (!mGiPendingInject) mGiFramesSinceLightOnly = 0;
-                    mGiPendingRefresh = true;
-                    mGiPendingInject = true;      // lights/geometry: the cheap path runs
-                    mGiStableFrames = 0;
-                }
-            } else if (mGiPendingRefresh && !matChanged) {
-                ++mGiStableFrames;
-            }
-
-            // Re-reading the signature after the re-solve and adopting it is what
-            // keeps one gesture costing ONE re-solve (the re-solve itself brings
-            // the derived world boxes current).
-            const auto adoptSignature = [&]() {
-                if (vctLike) mGiGeometrySignature = readEngineSignature();
-                mGiStillLampOwed = false;
-                mGiMaterialSignature = readMaterialSignature();
-                mGiPendingInject = false;
-                // A full re-solve IS the rest frame, at the full bounce count:
-                // the movable path's owed one would only redo it (F1).
-                mGiMovableSettleOwed = false;
-                // ...AND THE MOVABLE LAMPS ARE NOT MOVING ANY MORE EITHER
-                // (LAMPREST-2, measured). `mGiMovableLightsMoving` is raised by
-                // a movable light's signature changing — which is exactly what
-                // happens on the frame a script (or the panel's Refresh button)
-                // moves a lamp and asks for a re-solve — and the re-solve above
-                // does not clear it. So the cadence fired ONE MORE TICK a few
-                // frames later, and that tick is the MOVING one: a single
-                // injection pass at ZERO bounces with the coarse ray march,
-                // which OVERWRITES the full-count picture the re-solve just
-                // produced with the cheap one. Measured on the movable-lamp
-                // room: after `world.refreshGi()` the picture was the moving
-                // answer for ten frames and the rest tick's for ever after,
-                // i.e. the verb's own answer was never what the user was left
-                // looking at, and which of the two a screenshot caught depended
-                // on the frame it landed on.
-                //
-                // The owed move is ANSWERED, not merely forgotten: the re-solve has injected the lamp where it is.
-                mGiMovableLampOwed = false;
-                mGiMovableLightsMoving = false;
-            };
-            if (explicitRefresh) {
-                mGiRefreshSerialSeen = mSource->giRefreshSerial;
-                mGiPendingRefresh = false;
-                mGiStableFrames = 0;
-                mTarget->refreshGlobalIllumination();
-                ++mGiRefreshCount;
-                adoptSignature();
-            } else if (mGiPendingRefresh && mGiStableFrames >= kGiStableFrames) {
-                mGiPendingRefresh = false;
-                mGiStableFrames = 0;
-                // A SETTLE, NOT A PERSON ASKING (OPEN_COVER_SPEC §2 A, fix round
-                // item 4): the engine takes the cheapest correct step and never
-                // drains a staged first build into this one frame.
-                mTarget->refreshGlobalIllumination(
-                    jahshaka::engine::GiRefreshReason::Settle);
-                ++mGiRefreshCount;
-                adoptSignature();
-            } else if ((mGiPendingRefresh && mGiPendingInject) || mGiMovableLightsMoving ||
-                       mGiMovableSettleOwed) {
-                // Still moving: the cheap path, rate-limited. (A material-only
-                // edit waits for the settle without it.) A MOVING LAMP reaches
-                // this branch on its own, with no settle pending — that is the
-                // whole of O2: its bounce follows it, and nothing re-solves.
-                if (++mGiFramesSinceLightOnly >= kGiLightOnlyEveryN) {
-                    mGiFramesSinceLightOnly = 0;
-                    // IS IT STILL MOVING? A drag has its settle coming and is in
-                    // motion by construction; a movable lamp is in motion while
-                    // its signature is still changing. When neither is true this
-                    // is the tick the latch kept alive — the REST frame, run at
-                    // the scene's full bounce count (F1).
-                    const bool inMotion = mGiMovableLightsMoving ||
-                                          (mGiPendingRefresh && mGiPendingInject);
-                    mGiMovableLightsMoving = false;   // re-armed by the next move
-                    // Owe one rest tick after any moving tick, and only after a
-                    // MOVABLE one: the drag path's settle does it properly.
-                    mGiMovableSettleOwed = inMotion && !(mGiPendingRefresh && mGiPendingInject);
-                    if (mTarget->refreshGiLighting(inMotion)) {
-                        ++mGiLightRefreshCount;
-                        if (!inMotion) ++mGiLightRefreshAtRestCount;
-                    }
-                }
-            }
-        }
+        scene.giRefreshSerial = mSource->giRefreshSerial;
+        scene.materialPreview = mSource->materialPreviewActive();
     }
     // Planar reflections (PLANAR_REFLECTIONS_SPEC.md §6). Same discipline as GI:
     // the engine's setter is idempotent, but a CHANGE rebuilds render targets

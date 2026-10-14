@@ -4307,6 +4307,9 @@ struct GiStatus {
     /// `giScanMicros` is what the last scan that actually ran cost — 0 on a
     /// skipped frame, which is the whole point.
     unsigned long long giScans = 0;
+    /// ...of them, the FULL ones (every item re-read: the first, an incomplete change set, a nodeless input). The
+    /// rest re-read only the items the frame's change set and the engine's seams named (U0 3b).
+    unsigned long long giScansFull = 0;
     double             giScanMicros = 0.0;
     /// EVERY `getWorldAabbUpdated` THIS ENGINE'S OWN GI CODE HAS ASKED FOR,
     /// cumulative. That call walks the node's parent chain and recomputes the
@@ -4509,6 +4512,16 @@ struct GiStatus {
     /// — a number that climbs while nothing is being dragged is a defect, and a
     /// drag that never ends is a promotion that never paid its re-voxelisation.
     unsigned long long dragMoverGestures = 0;
+    // ---- THE ONE GI SCHEDULER (ENGINE-UPGRADE-1 U0 3c) --------------------------
+    // What decides WHEN the scene's GI answers a change — moved over from the mirror's debounce, run once per
+    // drained record that carries the scene's GI (an environment frame). Cumulative counts, and the live state.
+    unsigned long long schedulerPushes = 0;          ///< configurations applied (a from-scratch answer each)
+    unsigned long long schedulerResolves = 0;        ///< re-solves: settles + explicit refreshes
+    unsigned long long schedulerLightTicks = 0;      ///< the cheap light re-injections asked for
+    unsigned long long schedulerLightTicksAtRest = 0;///< ...of them, the at-rest ones (the motion had stopped)
+    bool               settlePending = false;        ///< a change waits for the stability window
+    unsigned           settleStableFrames = 0;       ///< environment frames it has held still so far
+    bool               gestureActive = false;        ///< the drained record's gesture (FrameInputScene::gesture)
     /// Scrolls where MORE THAN HALF of the cascade's volume was new — the
     /// second DIRTY_ALL guard, counted rather than acted on in the whole-rebuild
     /// arm. It is the reading that says whether an incremental (slab-shifting)
@@ -7870,8 +7883,22 @@ struct ChangeSet {
     std::vector<NodeId> moved;
     bool empty() const { return complete && moved.empty(); }
 };
+/// The user's GESTURE as the host knows it (a gizmo drag, a viewport drag, a material hover): what makes a moving
+/// still object a DRAG MOVER for its length (GiParams::dragMoverChannel) and ends it — the engine infers nothing from
+/// motion (U0 3c). Per scene (a NodeId is a scene's own), per frame: a drain without one reads "no gesture".
+struct FrameInputGesture {
+    bool                active = false;
+    std::vector<NodeId> nodes;   ///< the nodes the gesture moves (each implies its subtree)
+    bool operator==(const FrameInputGesture &o) const { return active == o.active && nodes == o.nodes; }
+};
 struct FrameInputScene {
     Scene *scene = nullptr;
+    /// THE GI SCHEDULER'S INPUTS that only the document knows (U0 3c; read only on a record that carries `gi`):
+    /// world.refreshGi()'s serial (a change = an explicit re-solve) and a material HOVER PREVIEW on screen (the
+    /// material term holds still: a preview is no edit). Merged newest / by OR.
+    std::optional<unsigned long long> giRefreshSerial;
+    bool                              materialPreview = false;
+    std::optional<FrameInputGesture>  gesture;
     /// Never compared at the drain like the fields below: a set is EVENTS, applied once, merged by appending.
     ChangeSet changes;
     std::optional<ShadowDesc>             shadows;
@@ -7905,18 +7932,10 @@ struct FrameInputView {
     /// seed is derived from it (a new recorder view starts at the editor's measured exposure).
     std::optional<float>      seedExposure;
 };
-/// The user's GESTURE as the host knows it (a gizmo drag, a viewport drag, a material hover): carried for the
-/// engine's GI scheduler (U0 3c reads it; until then the engine still infers a gesture from motion).
-struct FrameInputGesture {
-    bool                active = false;
-    std::vector<NodeId> nodes;
-    bool operator==(const FrameInputGesture &o) const { return active == o.active && nodes == o.nodes; }
-};
 struct FrameInput {
     std::optional<float>              frameDelta;      ///< seconds every renderOneFrame advances by (persists)
     std::optional<FrameCause>         cause;           ///< why the next frame renders (resets to Driver)
     std::optional<FramePace>          pace;            ///< what the next frame may put off (resets to Complete)
-    std::optional<FrameInputGesture>  gesture;
     std::optional<unsigned>           shadowMapBudget; ///< engine-wide (the shadow map pool's size)
     bool                              refreshShadows = false;   ///< the document asked for a shadow re-render
     std::vector<FrameInputScene>      scenes;
@@ -7937,7 +7956,7 @@ struct FrameInputStatus {
     unsigned long long scenePartsMerged = 0;
     unsigned           fieldsApplied = 0; ///< fields the LAST drain applied (changed values only)
     unsigned           viewFieldsApplied = 0;   ///< ...of them, the per-view ones
-    bool               gestureActive = false;   ///< the last drained gesture
+    bool               gestureActive = false;   ///< the last drain carried an active gesture for some scene
     // ---- the change set (U0 3b) ----
     unsigned           changesMoved = 0;        ///< `moved` entries the LAST drain applied, over every scene
     unsigned           changesLights = 0;       ///< ...of whose subtrees held a light (each scene bumps its serial once)
@@ -7982,6 +8001,11 @@ struct FrameRecord {
     FrameCause  cause = FrameCause::Unknown;
     bool        onscreen = false;    ///< an enabled WINDOW view took part
     unsigned    scenesUpdated = 0;
+    /// THE FRAME'S INPUT, as its drain found it (U0 3c: the monitor reads the record): the change set's entries over
+    /// every scene, whether a scene's gesture was active, and the fields the drain applied (FrameInputStatus).
+    unsigned    inputMoved = 0;
+    bool        inputGesture = false;
+    unsigned    inputFieldsApplied = 0;
     std::vector<FrameStage> stages;
     std::vector<FramePass>  passes;
     std::vector<CacheWork>  cacheWork;

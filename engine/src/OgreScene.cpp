@@ -764,8 +764,14 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, Node *rec, bool inherited
         // decal rides the projector-box child, one unregistered level down,
         // and is reached by this same loop there.
         if (obj->getVisible() != shown) {
-            if (dynamic_cast<Ogre::Light *>(obj))      { ++mGiLightWriteSerial;
-                                                          staleProbeGrid(GiStaleReason::Light); }
+            if (dynamic_cast<Ogre::Light *>(obj)) {
+                ++mGiLightWriteSerial;
+                staleProbeGrid(GiStaleReason::Light);
+                // ...and a lamp event for the GI scheduler (U0 3c): the lamp rides its -Y adapter, whose parent
+                // is the registered node.
+                if (const Node *owner = rec ? rec : registryNode(sn->getParent())) noteLampChanged(*owner);
+                else mGiPlan.stillLampOwed = true;
+            }
             else if (dynamic_cast<Ogre::Decal *>(obj)) staleProbeGrid(GiStaleReason::Moved);
         }
         obj->setVisible(shown);
@@ -1042,6 +1048,11 @@ void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
     const bool healing = !movable && n.mobilitySoft && n.mobilitySoftRebuilds != mGiRebuilds;
     n.mobilitySoft = movable && change == MobilityChange::Soft;
     n.mobilitySoftRebuilds = mGiRebuilds;
+    // A LAMP CHANGING CLASS moves between the scheduler's two gates: both hear of it (U0 3c).
+    if (n.light) mGiPlan.stillLampOwed = mGiPlan.movableLampOwed = true;
+    // ...and an item the GI walk has already seen changing class is a FLIP the scheduler adopts (a classification
+    // that arrives with the geometry is an arrival, and arrivals arm as they always did).
+    if (n.item && n.scan.giKnown) mGiPlan.mobilityFlipped = true;
     n.movable = movable;
     applyNodeVisibilityFlags(n);
     const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
@@ -1448,6 +1459,32 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
         // VOXEL half of the same edit is the host's: its GI signature hashes
         // these parameters too, so the voxels re-inject on the drag cadence and
         // re-solve once on settle.
+        //
+        // ...AND THE VOXEL HALF IS THE ENGINE'S OWN SINCE U0 3c (the scheduler, planGi): the same fold over what the
+        // injection reads — not the shadowing, the channels or the cookie, which a re-solve would not change — is
+        // the lamp's GI key, and a new key (or a new lamp) is a lamp event. Its pose key is seeded here too: the
+        // drained change set compares a named lamp's pose against it.
+        {
+            unsigned long long gk = 1469598103934665603ull;
+            const auto gfold = [&gk](const auto &v) {
+                const unsigned char *b = reinterpret_cast<const unsigned char *>(&v);
+                for (size_t i = 0; i < sizeof v; ++i) { gk ^= b[i]; gk *= 1099511628211ull; }
+            };
+            gfold(int(d.type)); gfold(d.colour.r); gfold(d.colour.g); gfold(d.colour.b); gfold(d.intensity);
+            gfold(d.range); gfold(d.spotAngleDegrees); gfold(d.spotSoftness); gfold(d.spotFalloff);
+            gfold(d.rectWidth); gfold(d.rectHeight); gfold(d.doubleSided); gfold(d.accurate);
+            for (char c : d.iesProfilePath) gfold(c);
+            if (!n.lightGiKnown || gk != n.lightGiKey) {
+                n.lightGiKey = gk;
+                n.lightGiKnown = true;
+                noteLampChanged(n);
+            }
+            if (!n.lightPoseKnown && n.lightNode) {
+                n.lightPos = n.lightNode->_getDerivedPositionUpdated();
+                n.lightRot = n.lightNode->_getDerivedOrientationUpdated();
+                n.lightPoseKnown = true;
+            }
+        }
         {
             unsigned long long k = 1469598103934665603ull;      // FNV-1a
             const auto foldBits = [&k](const void *p, size_t n) {
@@ -1489,6 +1526,9 @@ bool OgreScene::removeLight(NodeId id) {
         // dead one carried, or the next setLight would skip re-assigning it.
         it->second.lightProfilePath.clear();
         it->second.lightMaskPath.clear();
+        // A LAMP LEAVING is a lamp event for the GI scheduler, like one arriving (U0 3c).
+        noteLampChanged(it->second);
+        it->second.lightGiKnown = it->second.lightPoseKnown = false;
         if (it->second.lightNode) { mSceneMgr->destroySceneNode(it->second.lightNode); it->second.lightNode = nullptr; }
         // A VANISHED LIGHT MUST STOP BOUNCING — and that is a re-INJECTION over
         // the voxels that are already there, never a re-voxelisation: not one

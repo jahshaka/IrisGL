@@ -1097,29 +1097,6 @@ public:
         return false;
     }
 
-    /// "Has any GI geometry MOVED?" — a quantized hash of every GI item's world
-    /// AABB (FIX WAVE B3). Same contract and the same debounce as the host's
-    /// light-transform signature: it changes on
-    /// every frame of a drag and freezes when the drag stops, so a host that
-    /// watches it spends the CHEAP paths during the gesture and exactly one full
-    /// re-solve at the end of it. Stateless — reading it twice in a frame is
-    /// free of side effects. Zero only when GI is off.
-    ///
-    /// Cheap: one world-AABB read per GI item, no allocation, renders nothing.
-    ///
-    /// `pending` (U0 3b) is the change set the caller is about to submit and the engine has not drained yet — the
-    /// writes of THIS host frame. The signature is cached against what the engine has drained; a pending set with
-    /// anything in it re-reads the boxes now, so the answer is this frame's (never one record behind).
-    virtual unsigned long long giGeometrySignature(const ChangeSet &pending) const = 0;
-    /// "Has a material GI converted changed?" (ENGINE_CACHE_POLICY_SPEC P7) — a
-    /// generation that moves when a parameter the voxelizer (or Instant
-    /// Radiosity's trace) reads — albedo, emissive, alpha, workflow, the albedo
-    /// or emissive map — changes on a material GI geometry wears. Its own term,
-    /// not part of giGeometrySignature: a host debounces it into ONE re-solve
-    /// when the edit settles, and must NOT run the light re-inject cadence for
-    /// it (a material edit changes nothing a re-inject reads). 0 when GI is off;
-    /// an idle scene never moves it. Cheap: returns a counter.
-    virtual unsigned long long giMaterialSignature() const = 0;
     /// "This object must not decide WHERE the reflection-probe grid is placed"
     /// (REFLECTIONS_ADOPTION_SPEC.md P1a; renamed by D4-PHOTON-TIERS). The object
     /// still voxelizes, bounces light and is photographed by every probe — it is
@@ -2045,6 +2022,10 @@ public:
     virtual void submitFrame(const FrameInput &input) = 0;
     /// What the drain did (FrameInputStatus) — the counts the U0 rows read.
     virtual FrameInputStatus frameInputStatus() const = 0;
+    /// Will the next drain apply a NEW GI configuration to `scene` (the pending record's `gi` differs from what the
+    /// scene last applied)? The engine's own compare, asked by a host that must know before the frame — a shot whose
+    /// record changes the GI draws that frame before it waits for giAtRest (U0 3c: the host keeps no copy of it).
+    virtual bool pendingGiConfiguration(const Scene *scene) const = 0;
 
     /// TEST-FACING: MAKE THE NEXT `frames` FRAMES FAULT (`FrameFault`, lane
     /// FRAME-CATCH-1, 2026-09-18).

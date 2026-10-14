@@ -503,9 +503,10 @@ void OgreScene::noteNodePosed(NodeId id) {
     noteShadowScanInput();          // the caster half reads poseEpoch (walkItems)
     // A POSE MOVES A SOCKET RIDER, and that is the ONLY thing about a pose the
     // GI movement scan can see (a skinned Item keeps its bind-pose bounds). So
-    // a rig with riders counts as a transform write and the scan runs while it animates —
-    // a rig without them costs nothing (clean-2 lane, ensureGiWalk).
-    if (!it->second.boneRiders.empty()) noteSceneTransformWrite();
+    // a rig's RIDERS are named as moved (their subtrees, U0 3b — never a scene-wide pass) and the scan runs over
+    // them while it animates — a rig without them costs nothing (clean-2 lane, ensureGiWalk).
+    const std::vector<NodeId> riders = it->second.boneRiders;
+    for (NodeId rider : riders) noteSubtreeWrite(rider);
 }
 
 void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {

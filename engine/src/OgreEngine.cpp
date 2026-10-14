@@ -853,6 +853,8 @@ void OgreEngine::renderOneFrame() {
             for (auto &v : mViews)
                 if (v->isEnabled() && !v->isOffscreen()) { onscreen = true; break; }
             monitor::gMonitor->beginFrame(mShadowFrame + 1ull, mNextFrameCause, onscreen);
+            monitor::gMonitor->noteInput(mFrameInputStatus.changesMoved, mFrameInputStatus.gestureActive,
+                                         mFrameInputStatus.fieldsApplied);
         }
         mNextFrameCause = FrameCause::Driver;
         // THE MEASUREMENT ARMS (lane TEST-1) take what was set since the last frame:
@@ -2385,15 +2387,9 @@ void OgreEngine::submitFrame(const FrameInput &in) {
     if (in.frameDelta) p.frameDelta = in.frameDelta;
     if (in.cause) p.cause = in.cause;
     if (in.pace) p.pace = in.pace;
-    if (in.gesture) p.gesture = in.gesture;
     if (in.shadowMapBudget) p.shadowMapBudget = in.shadowMapBudget;
     p.refreshShadows = p.refreshShadows || in.refreshShadows;
     for (const FrameInputScene &sc : in.scenes) {
-        // A SUBMITTED SET STALES THE SCENE'S CACHED GEOMETRY SIGNATURE AT ONCE (U0 3b): a host that reads it again
-        // before the drain (a second sync in the same host frame) must see these writes too — the read's own
-        // `pending` argument only carries the set it is building.
-        if (!sc.changes.empty())
-            for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == sc.scene) { q->noteSubmittedChanges(); break; }
         auto it = std::find_if(p.scenes.begin(), p.scenes.end(),
                                [&](const FrameInputScene &q) { return q.scene == sc.scene; });
         if (it == p.scenes.end()) { p.scenes.push_back(sc); continue; }
@@ -2414,6 +2410,9 @@ void OgreEngine::submitFrame(const FrameInput &in) {
         if (sc.shaderTime) it->shaderTime = sc.shaderTime;
         if (sc.grid) it->grid = sc.grid;
         it->reassert = it->reassert || sc.reassert;
+        if (sc.giRefreshSerial) it->giRefreshSerial = sc.giRefreshSerial;
+        it->materialPreview = it->materialPreview || sc.materialPreview;
+        if (sc.gesture) it->gesture = sc.gesture;
         ++mFrameInputStatus.scenePartsMerged;
     }
     for (const FrameInputView &v : in.views) {
@@ -2466,7 +2465,6 @@ void OgreEngine::drainFrameInput() {
     if (in.frameDelta && *in.frameDelta != fixedFrameDelta()) { applyFrameDelta(*in.frameDelta); ++applied; }
     if (in.cause) mNextFrameCause = *in.cause;
     if (in.pace) mNextFramePace = *in.pace;
-    if (in.gesture) { mDrainedGesture = *in.gesture; mFrameInputStatus.gestureActive = in.gesture->active; }
 
     // EACH SCENE'S ENVIRONMENT, in the order the host used to push it.
     for (const FrameInputScene &part : in.scenes) {
@@ -2477,7 +2475,12 @@ void OgreEngine::drainFrameInput() {
         mFrameInputStatus.changesMoved += unsigned(part.changes.moved.size());
         if (!part.changes.complete) ++mFrameInputStatus.changesIncomplete;
         mFrameInputStatus.changesLights += sc->applyChangeSet(part.changes);
+        // THE GESTURE HOLDS UNTIL THE SCENE'S NEXT RECORD THAT CARRIES ONE (U0 3c): the host that has the user's hand
+        // says so every frame it builds (the viewport); a frame some other host renders in between (a thumbnail, a
+        // preview) carries none for this scene and must not end the drag under the hand.
+        if (part.gesture) sc->mGesture = *part.gesture;
         FrameInputScene &last = sc->mFrameApplied;
+        bool giPushed = false;
         if (part.reassert) {
             const std::optional<GiParams> gi = last.gi;   // GI is never re-pushed (P10)
             last = FrameInputScene();
@@ -2498,7 +2501,7 @@ void OgreEngine::drainFrameInput() {
             // tuning-only change is setGiTuning — nothing torn down — and a configuration change is a rebuild).
             const GiParams &g = *part.gi;
             if (!last.gi) {
-                sc->setGlobalIllumination(g); last.gi = g; ++applied;
+                sc->setGlobalIllumination(g); last.gi = g; ++applied; giPushed = true;
             } else {
                 if (!g.giTuningEqual(*last.gi)) {
                     sc->setGiTuning(g);
@@ -2507,7 +2510,7 @@ void OgreEngine::drainFrameInput() {
                     last.gi->cardResidencyRadius = g.cardResidencyRadius;
                     ++applied;
                 }
-                if (g != *last.gi) { sc->setGlobalIllumination(g); last.gi = g; ++applied; }
+                if (g != *last.gi) { sc->setGlobalIllumination(g); last.gi = g; ++applied; giPushed = true; }
             }
         }
         applyIfChanged(part.planar, last.planar, applied,
@@ -2515,7 +2518,13 @@ void OgreEngine::drainFrameInput() {
         applyIfChanged(part.sky, last.sky, applied, [&](const SkyDesc &v) { sc->setSky(v); });
         applyIfChanged(part.shaderTime, last.shaderTime, applied, [&](float v) { sc->setShaderTime(v); });
         applyIfChanged(part.grid, last.grid, applied, [&](const GridDesc &v) { static_cast<Scene *>(sc)->setGrid(v); });
+        // THE ONE GI SCHEDULER (U0 3c; OgreGi.cpp planGi): once per record that carries the scene's GI, after every
+        // field of it has landed — the configuration it may have just applied included.
+        if (part.gi) sc->planGi(part, giPushed);
     }
+
+    mFrameInputStatus.gestureActive = false;
+    for (auto &q : mScenes) mFrameInputStatus.gestureActive = mFrameInputStatus.gestureActive || q->mGesture.active;
 
     // THE ENGINE-WIDE SHADOW PAIR (after the scenes' shadow settings, as the host pushed them).
     if (in.refreshShadows) { refreshShadows(); ++applied; }
@@ -2553,6 +2562,17 @@ void OgreEngine::drainFrameInput() {
     }
     mFrameInputStatus.viewFieldsApplied = viewApplied;
     mFrameInputStatus.fieldsApplied = applied + viewApplied;
+}
+
+bool OgreEngine::pendingGiConfiguration(const Scene *scene) const {
+    if (!mFrameInputPending) return false;
+    for (const FrameInputScene &part : mPendingFrameInput.scenes) {
+        if (part.scene != scene || !part.gi) continue;
+        for (const auto &q : mScenes)
+            if (static_cast<const Scene *>(q.get()) == scene)
+                return !q->mFrameApplied.gi || *part.gi != *q->mFrameApplied.gi;
+    }
+    return false;
 }
 
 float OgreEngine::fixedFrameDelta() const {
