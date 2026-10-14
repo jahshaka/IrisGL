@@ -130,12 +130,21 @@ public:
     std::vector<uint32_t> namedNodes;   ///< NodeIds named since the consuming walk
     bool namedFull = true;
     std::vector<uint32_t> namedSlots;   ///< the walk's scratch: the named nodes' slots
-    void nameNode(uint32_t node, size_t cap) {
-        if (namedFull) return;
-        if (namedNodes.size() >= cap) { namedNodes.clear(); namedFull = true; return; }
+    /// The take generation (stage 5): a node is named once per take (its stamp, OgreScene::Node::nameTakeGpu),
+    /// and the list overflows to the whole walk only once it names as many nodes as that walk visits (`cap`,
+    /// the scene's item slots) - the whole walk is then no dearer.
+    uint32_t namedTake = 1u;
+    void nameNode(uint32_t node, uint32_t &stamp, size_t cap) {
+        if (namedFull || stamp == namedTake) return;
+        if (namedNodes.size() >= cap) { clearNames(); namedFull = true; return; }
         namedNodes.push_back(node);
+        stamp = namedTake;
     }
-    void nameAll() { namedNodes.clear(); namedFull = true; }
+    void nameAll() { clearNames(); namedFull = true; }
+    void clearNames() { namedNodes.clear(); ++namedTake; }
+    /// THE NAMED WALK'S COUNTS (stage 5), ever: the slots a walk took from the names, and the whole walks.
+    unsigned long long slotsNamed = 0ull;
+    unsigned long long wholeWalks = 0ull;
 
     // ---- the ray structures ------------------------------------------------
     /// The scene's TLAS, BLAS set and skin caches; created by the ray tier on the

@@ -1290,6 +1290,8 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
         named.erase(std::unique(named.begin(), named.end()), named.end());
     }
     const size_t n = whole ? mItemNodes.size() : named.size();
+    if (whole) ++sub.wholeWalks;
+    else sub.slotsNamed += named.size();
     // THE PREDICATES' SCENE-WIDE INPUT, once per walk instead of once per slot (the
     // split's switch asks the device for an extension by name).
     const bool atomDraw = sub.atomDraw >= 0 ? sub.atomDraw != 0 : atomDrawOn();
@@ -1356,7 +1358,7 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     for (unsigned long long f : sub.shareFlags) sub.flagsRecomputed += f;
     // A walk on the graph's current transforms consumes the epoch (composeGpuScene), and with
     // it the names; a reader's walk before the graph (the warm-up) leaves them for the frame's.
-    if (graphIsCurrent) { sub.namedNodes.clear(); sub.namedFull = false; }
+    if (graphIsCurrent) { sub.clearNames(); sub.namedFull = false; }
     // THE COMPOSE, IN SLOT ORDER, on the frame's thread: the composer edits Ogre state
     // (the split's render queue) and queues GI conversions.
     detail::GpuInstance cand;
@@ -1763,6 +1765,9 @@ GpuSubstrateStatus gpuSubstrateStatus(const Scene &scene) {
     st.commits = sub.commits;
     st.slotsCompared = sub.slotsCompared;
     st.flagsRecomputed = sub.flagsRecomputed;
+    st.slotsNamed = sub.slotsNamed;
+    st.wholeWalks = sub.wholeWalks;
+    st.scansFull = s->scansFull();
     st.walkChecked = sub.walkChecked;
     st.walkMissed = sub.walkMissed;
     st.walkLastMissed = sub.walkLastMissed;

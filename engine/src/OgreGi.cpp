@@ -267,7 +267,7 @@ void OgreScene::runItemWalk(bool shadow) {
         // frame is a FRESH slot assignment, which renders every map anyway.
         mShadowScanPrimed = false;
         mShadowVanished.clear();
-        mScanPendingShadow.clear();      // the next primed walk is a full one (firstShadow)
+        clearScanNames(mScanPendingShadow, mNameTakeShadow);   // the next primed walk is a full one (firstShadow)
     }
     if (!shadow) return;
     // THE STILL-FRAME GATE (ENGINE-4 F5), the caster half's version of
@@ -321,7 +321,7 @@ void OgreScene::runItemWalk(bool shadow) {
         return;
     }
     const auto t0 = std::chrono::steady_clock::now();
-    if (!mShadowScanPrimed || mScanFullShadow) walkItems(false, true, false);
+    if (!mShadowScanPrimed || mScanFullShadow) { ++mShadowScansFull; walkItems(false, true, false); }
     else walkItems(false, true, false, &takeScanSubset(mScanPendingShadow));
     mShadowWalked = true;
     mCasterWalkMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
@@ -367,22 +367,16 @@ bool OgreScene::ensureGiWalk(const PhotonComponent::WalkInputs &in) {
     return true;
 }
 
-/// THE CHANGE SET'S ENGINE HALF (U0 3b; EnginePrivate.h). A pending list is bounded by the scene it names: a scene
-/// whose scans never run (GI off, no cached lamp) keeps a full pass owed instead of an ever-growing list.
-namespace { constexpr size_t kScanPendingSlack = 64; }
-
-void OgreScene::noteSceneTransformWrite(const Node &n) {
+/// THE CHANGE SET'S ENGINE HALF (U0 3b; EnginePrivate.h). A pending list is bounded by the walk it stands for: a
+/// node is named once per take (ENGINE-UPGRADE-2B stage 5 - attachMesh fired three or four seams for one node, and
+/// 500 re-adds pushed ~2,000 names past a cap of items + decals + 64 at 1k: the whole walk on the SMALLER scene),
+/// and a list naming as many nodes as a full walk visits owes the full walk instead, which is then no dearer. A
+/// scene whose scans never run (GI off, no cached lamp) keeps a full pass owed instead of an ever-growing list.
+void OgreScene::noteSceneTransformWrite(Node &n) {
     ++mSceneTransformWrites;
-    const size_t cap = mItemNodes.size() + mDecalNodes.size() + kScanPendingSlack;
-    mSubstrate.nameNode(n.selfId, cap);   // the GPU scene's walk takes the same name
-    if (!mScanFullGi) {
-        if (mScanPendingGi.size() >= cap) { mScanPendingGi.clear(); mScanFullGi = true; }
-        else mScanPendingGi.push_back(n.selfId);
-    }
-    if (!mScanFullShadow) {
-        if (mScanPendingShadow.size() >= cap) { mScanPendingShadow.clear(); mScanFullShadow = true; }
-        else mScanPendingShadow.push_back(n.selfId);
-    }
+    mSubstrate.nameNode(n.selfId, n.nameTakeGpu, mItemNodes.size());   // the GPU scene's walk takes the same name   // the GPU scene's walk takes the same name
+    nameForScan(n, mScanPendingGi, mScanFullGi, mNameTakeGi, n.nameTakeGi);
+    nameForScan(n, mScanPendingShadow, mScanFullShadow, mNameTakeShadow, n.nameTakeShadow);
 }
 
 /// THE DRAIN'S HALF: each moved node's SUBTREE — its Ogre children, registered or not (a light's -Y adapter), and the
@@ -393,7 +387,7 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
     if (!cs.complete) {
         ++mHostMoves;
         mScanFullGi = mScanFullShadow = true;
-        mScanPendingGi.clear(); mScanPendingShadow.clear();
+        clearScanNames(mScanPendingGi, mNameTakeGi); clearScanNames(mScanPendingShadow, mNameTakeShadow);
         mSubstrate.nameAll();
         // Every lamp's pose key re-read as it stands now (the set cannot say which moved; the owed flags below say
         // "any", and the next named move compares against this).
@@ -459,7 +453,7 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
 /// next frame's walk rather than this one's.
 std::vector<OgreScene::Node *> &OgreScene::takeScanSubset(std::vector<NodeId> &pending) {
     mScanTake.swap(pending);
-    pending.clear();
+    clearScanNames(pending, &pending == &mScanPendingGi ? mNameTakeGi : mNameTakeShadow);
     std::sort(mScanTake.begin(), mScanTake.end());
     mScanTake.erase(std::unique(mScanTake.begin(), mScanTake.end()), mScanTake.end());
     mScanSubset.clear();
@@ -567,8 +561,8 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
     // A FULL WALK answers for everything named so far (U0 3b): its halves' pending lists go, BEFORE the loop, so a
     // seam the walk itself fires names its node for the next walk. A SUBSET walk's caller took its list already.
     if (!subset) {
-        if (gi)     { mScanPendingGi.clear();     mScanFullGi = false; }
-        if (shadow) { mScanPendingShadow.clear(); mScanFullShadow = false; }
+        if (gi)     { clearScanNames(mScanPendingGi, mNameTakeGi);         mScanFullGi = false; }
+        if (shadow) { clearScanNames(mScanPendingShadow, mNameTakeShadow); mScanFullShadow = false; }
     }
     bool firstGi = false;
     if (gi) {

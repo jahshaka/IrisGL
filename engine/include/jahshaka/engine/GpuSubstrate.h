@@ -42,6 +42,12 @@ struct GpuSubstrateStatus {
     /// or an incomplete set owes it), so a one-mover frame compares the mover's subtree.
     unsigned long long slotsCompared = 0;
     unsigned long long flagsRecomputed = 0;
+    /// THE NAMES' COUNTS (ENGINE-UPGRADE-2B stage 5), ever: the slots walks took from the names (each named
+    /// node once per take), the WHOLE walks (an overflow, a nodeless write, an incomplete set, the arm), and
+    /// the full GI-movement and lamp-map caster scans (engine.readd_named: 0 on the re-add fragment).
+    unsigned long long slotsNamed = 0;
+    unsigned long long wholeWalks = 0;
+    unsigned long long scansFull = 0;
     /// THE NAMED WALK'S GUARD (the arm "gpuscene.walkParity", engine.gpu_walk_parity): slots checked
     /// after a frame's compose against what the table holds, and the MISSES — a slot whose world
     /// transform or flags word moved with neither a name nor a mark (what the old whole walk's flags

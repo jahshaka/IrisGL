@@ -4529,6 +4529,10 @@ private:
         NodeId           selfId = 0;
         /// This node's place in OgreScene::mItemNodes, or npos (no Item).
         size_t           itemSlot = size_t(-1);
+        /// THE NAMES' TAKES (ENGINE-UPGRADE-2B stage 5): the take generation of the GI scan's, the caster
+        /// scan's and the GPU scene's pending list this node was last named into - a node is named ONCE per
+        /// take, however many seams fire for it (attachMesh fired three or four).
+        uint32_t         nameTakeGi = 0, nameTakeShadow = 0, nameTakeGpu = 0;
         /// ...and its MESH's place in the GPU scene's mesh table (GpuScene.h),
         /// acquired at attach and released at detach. kNoMesh until geometry
         /// arrives, which is what an instance entry with no mesh reads as.
@@ -4740,10 +4744,19 @@ private:
     /// it needs `Node` to be complete.
     void markShadowShapeDirty(Node &n) {   // NAMED for the caster walk (U0 3b), never a full pass
         n.shadowShapeDirty = true; ++mShadowScanWrites;
-        if (mScanFullShadow) return;
-        if (mScanPendingShadow.size() > mItemNodes.size() + 64u) { mScanPendingShadow.clear(); mScanFullShadow = true; }
-        else mScanPendingShadow.push_back(n.selfId);
+        nameForScan(n, mScanPendingShadow, mScanFullShadow, mNameTakeShadow, n.nameTakeShadow);
     }
+    /// THE ONE NAMING DOOR of the two scans' pending lists (stage 5): a node once per take, and the list
+    /// bounded by the walk it stands for - once it names as many as a full walk visits (the items and the
+    /// decals), the full walk is no dearer, and it is owed instead. No slack constant.
+    void nameForScan(Node &n, std::vector<NodeId> &pending, bool &full, uint32_t &take, uint32_t &stamp) {
+        if (full || stamp == take) return;
+        if (pending.size() >= mItemNodes.size() + mDecalNodes.size()) { clearScanNames(pending, take); full = true; return; }
+        pending.push_back(n.selfId);
+        stamp = take;
+    }
+    /// A pending list emptied (taken, answered by a full walk, or overflowed): a new take begins.
+    static void clearScanNames(std::vector<NodeId> &pending, uint32_t &take) { pending.clear(); ++take; }
 
     /// A definition's frozen shape. Two systems can share a recycled def only if
     /// every element of this matches, because none of it can be changed after
@@ -6061,11 +6074,17 @@ private:
     /// drained (mHostMoves) + this scene's own writes: a count that moves exactly when something was written.
 public:   // (a seam PhotonComponent calls)
     unsigned long long transformEpoch() const { return mHostMoves + mSceneTransformWrites; }
-    void noteSceneTransformWrite(const Node &n);   ///< NAMED: n's item is re-read by both scans (OgreGi.cpp)
+    void noteSceneTransformWrite(Node &n);   ///< NAMED: n's item is re-read by both scans (OgreGi.cpp)
 private:
     /// An ENGINE write that moves a node's subtree (a rider, a decal box, setNodeTransform): named like a drained move.
     void noteSubtreeWrite(NodeId id) { ChangeSet c; c.moved.push_back(id); applyChangeSet(c); }
     std::vector<NodeId> mScanPendingGi, mScanPendingShadow, mScanTake;
+    uint32_t mNameTakeGi = 1u, mNameTakeShadow = 1u;   ///< the lists' take generations (Node::nameTake*)
+    unsigned long long mShadowScansFull = 0;            ///< full caster scans, ever (GpuSubstrateStatus::scansFull)
+public:
+    /// The full GI-movement and caster scans, ever (GpuSubstrateStatus::scansFull).
+    unsigned long long scansFull() const { return mGiScansFull + mShadowScansFull; }
+private:
     std::vector<Node *> mScanSubset;
     std::vector<Node *> &takeScanSubset(std::vector<NodeId> &pending);
     bool mScanFullGi = true, mScanFullShadow = true;
