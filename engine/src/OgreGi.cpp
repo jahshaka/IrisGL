@@ -3566,6 +3566,9 @@ void OgreScene::ensureGiWalk() {
 /// box. Both halves are counts of WRITES, so writing the same value again reads
 /// as movement and costs one extra scan; that is the safe direction.
 unsigned long long OgreScene::transformEpoch() const {
+    // (U0 3a carries the counter's value in FrameInput::transformEpoch and the drain keeps it — status only for now:
+    // the mirror's GI debounce reads this BETWEEN frames, and a value one drain behind would move its settle by a
+    // frame. The pointer, its verb and this live read go in 3b, with the debounce's readers.)
     const unsigned long long host =
         detail::gTransformWriteCounter
             ? detail::gTransformWriteCounter->load(std::memory_order_relaxed)

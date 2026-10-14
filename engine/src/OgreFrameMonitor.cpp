@@ -1228,13 +1228,11 @@ void OgreEngine::noteHostStage(const std::string &name, float ms) {
     if (mMonitor) mMonitor->hostStage(name, ms);
 }
 
-void OgreEngine::setNextFrameCause(FrameCause cause) { mNextFrameCause = cause; }
 
 // WHAT THE NEXT FRAME MAY PUT OFF (OPEN_COVER_SPEC §2.1). Consumed by
 // `renderOneFrame` and reset to `Complete`, like the cause above — and unlike
 // the cause it changes what the frame DOES, so the reset is the safety rule,
 // not bookkeeping.
-void OgreEngine::setNextFramePace(FramePace pace) { mNextFramePace = pace; }
 
 bool OgreEngine::framePaceOwesWork() const
 {

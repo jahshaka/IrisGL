@@ -2360,7 +2360,7 @@ void OgreScene::bakeCloudField() {
 // push, which setSky also runs on every look change — a dragged sun over the
 // realistic sky ticked it three times a frame). The frame delta the host
 // pushed for this frame (the document's SimulationClock through
-// Engine::setFixedFrameDelta — zero on a paused scene, a fixed 1/60 grid under
+// FrameInput::frameDelta — zero on a paused scene, a fixed 1/60 grid under
 // a script). Then the constants for the frame.
 void OgreScene::tickCloudClock() {
     if (!cloudLayerDrawn()) return;

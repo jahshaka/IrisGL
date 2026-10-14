@@ -4339,6 +4339,7 @@ public:
     void setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) override;
     unsigned vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) const override;
     bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;
+    bool nodeWorldPoseDrawn(NodeId id, Vec3 &position, Quat &rotation) const override;
     bool nodeBackdrop(NodeId id) const override;
     void setNodeLightMask(NodeId id, unsigned mask) override;
     unsigned nodeLightMask(NodeId id) const override;
@@ -7083,6 +7084,10 @@ private:
     unsigned long long mLightsRemoved = 0;
     /// changeStats(): the structural edits' counts (ENGINE-UPGRADE-1 stage 2).
     SceneChangeStats mChangeStats;
+public:
+    /// THE FRAME INPUT THIS SCENE LAST APPLIED (U0 3a): the drain's compare (OgreEngine::drainFrameInput).
+    FrameInputScene mFrameApplied;
+private:
     /// beginStructureEdit / endStructureEdit: the open depth, and what the edits inside asked of GI
     /// (applied once at the outermost end — applyGiInvalidation).
     int  mStructureEditDepth = 0;
@@ -7461,6 +7466,10 @@ public:
     bool setScene(Scene *scene) override;
     bool setCameraNode(NodeId node) override;
     NodeId cameraNode() const override { return mCameraNode; }
+    /// THE FRAME INPUT THIS VIEW LAST APPLIED (U0 3a): the drain's compare, and the target size the camera
+    /// was last applied at (the framing hold and the ortho window read the size: a resize re-applies it).
+    FrameInputView mFrameApplied;
+    unsigned mFrameAppliedW = 0, mFrameAppliedH = 0;
 
     /// Unbinds the scene: workspace and camera go, the scene itself survives.
     /// `takeBlank` = "and put the clear-only chain up in its place", which is
@@ -8433,6 +8442,17 @@ public:
 
     void setTransformWriteCounter(const std::atomic<unsigned long long> *counter) override;
     void renderOneFrame() override;
+    void submitFrame(const FrameInput &input) override;
+    FrameInputStatus frameInputStatus() const override { return mFrameInputStatus; }
+    /// THE ONE DRAIN (U0 3a): the record(s) submitted since the last frame, applied at the top of renderOneFrame.
+    void drainFrameInput();
+    FrameInput       mPendingFrameInput;
+    bool             mFrameInputPending = false;
+    FrameInputStatus mFrameInputStatus;
+    /// The last drained document transform epoch (FrameInput::transformEpoch) and gesture.
+    unsigned long long mDrainedTransformEpoch = 0;
+    bool               mDrainedTransformEpochValid = false;
+    FrameInputGesture  mDrainedGesture;
     /// THE FRAME'S CLOSE, RUN FROM renderOneFrame's SCOPE GUARD AND NOWHERE
     /// ELSE (lane FRAME-CATCH-1): the runtime's xrEndFrame, the monitor's
     /// record, a lost/stopped session's end, the device-lost latch and the
@@ -8632,8 +8652,9 @@ public:
     /// (ControllerManager -> FrameTimeControllerValue), held in its
     /// frame-delay mode for the whole process (setFrameDelay zeroes the time
     /// factor, so the wall clock never gets back in).
-    void  setFixedFrameDelta(float seconds) override;
     float fixedFrameDelta() const override;
+    /// FrameInput::frameDelta's application (the drain's).
+    void  applyFrameDelta(float seconds);
 
     /// GLOBAL by construction: HlmsPbs keeps ONE ShadowFilter for every shadowed
     /// light in every scene (HlmsPbs::mShadowFilter). The filter properties are
@@ -8797,8 +8818,8 @@ public:
     unsigned takeMonitorEvents(std::vector<MonitorEvent> &out) override;
     void noteMonitorEvent(const MonitorEvent &event) override;
     void noteHostStage(const std::string &name, float ms) override;
-    void setNextFrameCause(FrameCause cause) override;
-    void setNextFramePace(FramePace pace) override;
+    /// An engine-internal request for the NEXT frame's cause (the VR warm-up): a record field for a host.
+    void noteNextFrameCause(FrameCause cause) { mNextFrameCause = cause; }
     bool framePaceOwesWork() const override;
     StreamingWork streamingWork() const override;
     bool captureSnapshot(EngineSnapshot &out, const std::string &label,
@@ -9171,7 +9192,7 @@ private:
     ArmRegistry mArms;
     /// Ogre's metrics recording when the capture started (F6 restores it).
     bool mMetricsBeforeCapture = false;
-    /// Set by the host for the NEXT frame only (Engine::setNextFrameCause).
+    /// Set for the NEXT frame only (FrameInput::cause, drained at the frame's head).
     FrameCause mNextFrameCause = FrameCause::Driver;
     /// What the next frame may put off (OPEN_COVER_SPEC §2.1). `Complete` is
     /// the default and the value every frame is reset to, so only a host that

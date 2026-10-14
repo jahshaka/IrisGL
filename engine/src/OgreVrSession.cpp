@@ -3285,7 +3285,7 @@ void VrSession::warmUpBeginFrame() {
     // capture of a session start reads "warmup" on the expensive frames and
     // "driver" on the wearer's. Consumed by the monitor's own beginFrame, which
     // the engine opens a few lines after this call returns.
-    if (mEngine) mEngine->setNextFrameCause(FrameCause::WarmUp);
+    if (mEngine) mEngine->noteNextFrameCause(FrameCause::WarmUp);
 }
 
 void VrSession::warmUpEndFrame() {

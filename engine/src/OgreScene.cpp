@@ -960,6 +960,16 @@ bool OgreScene::nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const {
     return true;
 }
 
+bool OgreScene::nodeWorldPoseDrawn(NodeId id, Vec3 &position, Quat &rotation) const {
+    Ogre::SceneNode *n = node(id);
+    if (!n) return false;
+    const Ogre::Vector3 p = n->_getDerivedPosition();
+    const Ogre::Quaternion q = n->_getDerivedOrientation();
+    position = Vec3(p.x, p.y, p.z);
+    rotation = Quat(q.x, q.y, q.z, q.w);
+    return true;
+}
+
 // A BACKDROP IS A HELPER (kBackdropBit's note), so this goes through the same
 // door: the probe-visibility edge, the item re-flag and the cascade staleness
 // are all setNodeHelper's, and the only thing that differs is WHICH channel the

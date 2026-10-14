@@ -598,6 +598,16 @@ int indexInParent(NodeHandle n)
     return -1;
 }
 
+/// AFTER A REPARENT, A STATIC CHILD'S CACHED DERIVED TRANSFORMS ARE STALE (stage 2b's read, item a): Ogre refreshes a
+/// static node only on a static dirty, and neither Node::setParent nor reconcileStatic issues one for a static child
+/// that keeps its class under a new eligible parent — its local is kept, its parent changed, so its world moved.
+/// One notifyStaticDirty at its depth (Ogre's own path) re-derives it and its subtree next frame.
+static void settleAttached(Ogre::SceneNode *c)
+{
+    reconcileStatic(c);
+    if (c->isStatic() && c->getCreator()) c->getCreator()->notifyStaticDirty(c);
+}
+
 void attach(NodeHandle parent, NodeHandle child, int index)
 {
     if (!parent || !child || !engineAlive()) return;
@@ -625,7 +635,7 @@ void attach(NodeHandle parent, NodeHandle child, int index)
     // document build.
     if (index < 0 || std::size_t(index) >= p->numChildren()) {
         p->addChild(c);
-        reconcileStatic(c);
+        settleAttached(c);
         return;
     }
 
@@ -646,12 +656,12 @@ void attach(NodeHandle parent, NodeHandle child, int index)
         if (owned == index) { insertAt = i; break; }
         ++owned;
     }
-    if (insertAt >= kids.size()) { p->addChild(c); reconcileStatic(c); return; }
+    if (insertAt >= kids.size()) { p->addChild(c); settleAttached(c); return; }
 
     for (Ogre::Node *k : kids) p->removeChild(k);
     kids.insert(kids.begin() + std::ptrdiff_t(insertAt), c);
     for (Ogre::Node *k : kids) p->addChild(k);
-    reconcileStatic(c);
+    settleAttached(c);
 }
 
 NodeHandle detach(NodeHandle child)

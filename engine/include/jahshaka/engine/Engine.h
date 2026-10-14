@@ -1287,6 +1287,10 @@ public:
     ///
     /// False (and the outputs untouched) for an unknown id.
     virtual bool        nodeWorldPose(NodeId, Vec3 &position, Quat &rotation) const = 0;
+    /// WHERE THE LAST FRAME DREW IT: the scene manager's CACHED derived transform, not forced up to date — for a
+    /// static node, what its static pass last derived (ENGINE-UPGRADE-1 stage 2b: a static subtree moved under a
+    /// new parent must be re-derived, or it draws at its old world pose). False for an unknown id.
+    virtual bool        nodeWorldPoseDrawn(NodeId, Vec3 &position, Quat &rotation) const = 0;
 
     /// "DOES THIS THING MOVE?" — the document's resolved MOBILITY for one node
     /// (SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3). The host decides it
@@ -2064,6 +2068,13 @@ public:
     /// therefore never has to guess whether a frame that answered
     /// `lastError()` left something open.
     virtual void renderOneFrame() = 0;
+    /// THE FRAME'S INPUT (FrameInput, ENGINE-UPGRADE-1 U0 3a): handed over now, applied ONCE at the top of the
+    /// next renderOneFrame — never on the spot. Several submits before one frame merge (see FrameInput); a
+    /// frame with no submit drains nothing and keeps every value as it was. The scenes and views a record
+    /// names must belong to this engine; one destroyed before the drain is skipped.
+    virtual void submitFrame(const FrameInput &input) = 0;
+    /// What the drain did (FrameInputStatus) — the counts the U0 rows read.
+    virtual FrameInputStatus frameInputStatus() const = 0;
 
     /// TEST-FACING: MAKE THE NEXT `frames` FRAMES FAULT (`FrameFault`, lane
     /// FRAME-CATCH-1, 2026-09-18).
@@ -2600,12 +2611,12 @@ public:
     // seconds a frame simulated and the host pushes that product here, every
     // frame, scaled by the scene's particle time scale.
     /// The seconds EVERY renderOneFrame advances the engine-side simulation
-    /// by, until the next call. 0 freezes it (a paused scene, a frame that
+    /// by — FrameInput::frameDelta, applied at the drain and kept until a
+    /// record says otherwise. 0 freezes it (a paused scene, a frame that
     /// bought no clock step). Boots at kDefaultFrameDelta so a host that never
-    /// pushes (thumbnails, previews, engine-only suites) still simulates one
-    /// deterministic grid step per frame instead of the milliseconds an
+    /// submits one (thumbnails, previews, engine-only suites) still simulates
+    /// one deterministic grid step per frame instead of the milliseconds an
     /// offscreen frame takes on the wall clock.
-    virtual void setFixedFrameDelta(float seconds) = 0;
     virtual float fixedFrameDelta() const = 0;
     /// 1/60 — the document's SimulationClock grid (simulationclock.h).
     static constexpr float kDefaultFrameDelta = 1.0f / 60.0f;
@@ -2847,18 +2858,14 @@ public:
     /// frame record's stage list, so `frames.jsonl` carries one stage tree per
     /// frame. Ignored when the monitor is off.
     virtual void noteHostStage(const std::string &name, float ms) = 0;
-    /// Why the next frame is being rendered — the driver's tick, a script's
-    /// `editor.frame`, an offscreen readback, the warm-up gate. Consumed by the
-    /// next `renderOneFrame` and reset to `Driver`; an offscreen scope sets it
-    /// so analysis can tell a frame nobody saw from one the owner watched.
-    virtual void setNextFrameCause(FrameCause cause) = 0;
+    // (Why the next frame renders is FrameInput::cause: the driver's tick, a
+    // script's `editor.frame`, an offscreen readback, the warm-up gate. Drained
+    // by the next renderOneFrame and reset to Driver.)
 
     // ---- streaming a world in (SPECS/OPEN_COVER_SPEC.md §2.1) -------------
-    /// What the NEXT frame may put off — see `FramePace`. Consumed by the next
-    /// `renderOneFrame` and reset to `Complete`, so a host that sets nothing
-    /// renders complete frames exactly as it always did. Monitor-independent:
-    /// this changes what the frame DOES, not what it records.
-    virtual void setNextFramePace(FramePace pace) = 0;
+    // (What the NEXT frame may put off is FrameInput::pace — see `FramePace`.
+    // Drained by the next renderOneFrame and reset to Complete, so a host that
+    // sets nothing renders complete frames exactly as it always did.)
     /// Does any scene feeding an enabled view still owe first-time work that a
     /// `Streaming` frame would take a step of? The host reads it to decide how
     /// long to keep asking (and, in phase 2b, to draw the indicator).

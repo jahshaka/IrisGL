@@ -836,6 +836,10 @@ void OgreEngine::renderOneFrame() {
         // the VR-ENGINE-2 merge. A NO-OP on every engine without a session,
         // which is every engine outside a headset.
         if (mVrSession) vrSessionBeginFrame(mVrSession);
+        // THE ONE DRAIN (U0 3a): the frame's input lands before anything of the frame reads it — the cause the
+        // monitor's record opens with just below, the pace each scene is handed, every scene's environment and
+        // every view's camera.
+        drainFrameInput();
         // THE RENDER-LOOP MONITOR'S FRAME (RENDER_LOOP_MONITOR_SPEC §4.2).
         // Opened here and closed at the very bottom, so `totalMs` is exactly
         // what one renderOneFrame cost. `mNextFrameCause` is the caller's — the
@@ -2361,10 +2365,161 @@ std::string OgreEngine::takeLastError()
 // "back to the wall clock". A time factor never existed as a host concept:
 // the scene's particle time scale is multiplied into the delta by the host.
 
-void OgreEngine::setFixedFrameDelta(float seconds) {
+void OgreEngine::applyFrameDelta(float seconds) {
     JAH_TRY {
         Ogre::ControllerManager::getSingleton().setFrameDelay(std::max(0.0f, seconds));
     } JAH_CATCH(mLastError, );
+}
+
+// ---------------------------------------------------------------------------
+// THE FRAME INPUT (ENGINE-UPGRADE-1 U0 3a; FrameInput in Types.h). submitFrame MERGES into one pending record;
+// renderOneFrame's head DRAINS it — every value a frame depends on lands here, in one place and one order:
+// the frame's own fields, each scene's environment, the engine-wide shadow pair, then each view.
+
+void OgreEngine::submitFrame(const FrameInput &in) {
+    ++mFrameInputStatus.submitted;
+    mFrameInputPending = true;
+    FrameInput &p = mPendingFrameInput;
+    if (in.frameDelta) p.frameDelta = in.frameDelta;
+    if (in.cause) p.cause = in.cause;
+    if (in.pace) p.pace = in.pace;
+    if (in.transformEpoch) p.transformEpoch = in.transformEpoch;
+    if (in.gesture) p.gesture = in.gesture;
+    if (in.shadowMapBudget) p.shadowMapBudget = in.shadowMapBudget;
+    p.refreshShadows = p.refreshShadows || in.refreshShadows;
+    for (const FrameInputScene &sc : in.scenes) {
+        auto it = std::find_if(p.scenes.begin(), p.scenes.end(),
+                               [&](const FrameInputScene &q) { return q.scene == sc.scene; });
+        if (it == p.scenes.end()) { p.scenes.push_back(sc); continue; }
+        *it = sc;   // a scene's part is REPLACED whole by the newest (the plan's rule)
+        ++mFrameInputStatus.replaced;
+    }
+    for (const FrameInputView &v : in.views) {
+        auto it = std::find_if(p.views.begin(), p.views.end(),
+                               [&](const FrameInputView &q) { return q.view == v.view; });
+        if (it == p.views.end()) { p.views.push_back(v); continue; }
+        // A view's fields MERGE: the newest value of each, a reset requested by either.
+        if (v.camera) it->camera = v.camera;
+        if (v.cameraNode) it->cameraNode = v.cameraNode;
+        if (v.postFx) it->postFx = v.postFx;
+        if (v.shadows) it->shadows = v.shadows;
+        if (v.sampleCount) it->sampleCount = v.sampleCount;
+        if (v.background) it->background = v.background;
+        it->resetExposure = it->resetExposure || v.resetExposure;
+    }
+}
+
+namespace {
+/// Apply `want` when it differs from what was last applied from a record (`last`); count it.
+template <typename T, typename Apply>
+void applyIfChanged(const std::optional<T> &want, std::optional<T> &last, unsigned &applied, Apply &&apply) {
+    if (!want) return;
+    if (last && *last == *want) return;
+    apply(*want);
+    last = want;
+    ++applied;
+}
+}   // namespace
+
+void OgreEngine::drainFrameInput() {
+    const auto t0 = std::chrono::steady_clock::now();
+    struct Timed {
+        FrameInputStatus &st; std::chrono::steady_clock::time_point t0;
+        ~Timed() { st.drainMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(); }
+    } timed{ mFrameInputStatus, t0 };
+    ++mFrameInputStatus.drained;
+    mFrameInputStatus.fieldsApplied = 0;
+    mFrameInputStatus.viewFieldsApplied = 0;
+    if (!mFrameInputPending) { ++mFrameInputStatus.drainedEmpty; return; }
+    FrameInput in = std::move(mPendingFrameInput);
+    mPendingFrameInput = FrameInput();
+    mFrameInputPending = false;
+    unsigned applied = 0;
+
+    // THE FRAME'S OWN FIELDS. cause / pace are this frame's (renderOneFrame consumes and resets them); the
+    // delta persists; the epoch and the gesture are facts the frame reads.
+    if (in.frameDelta && *in.frameDelta != fixedFrameDelta()) { applyFrameDelta(*in.frameDelta); ++applied; }
+    if (in.cause) mNextFrameCause = *in.cause;
+    if (in.pace) mNextFramePace = *in.pace;
+    if (in.transformEpoch) {
+        mDrainedTransformEpoch = *in.transformEpoch;
+        mDrainedTransformEpochValid = true;
+        mFrameInputStatus.transformEpoch = *in.transformEpoch;
+    }
+    if (in.gesture) { mDrainedGesture = *in.gesture; mFrameInputStatus.gestureActive = in.gesture->active; }
+
+    // EACH SCENE'S ENVIRONMENT, in the order the host used to push it.
+    for (const FrameInputScene &part : in.scenes) {
+        OgreScene *sc = nullptr;
+        for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
+        if (!sc) continue;   // destroyed before its frame
+        FrameInputScene &last = sc->mFrameApplied;
+        applyIfChanged(part.shadows, last.shadows, applied, [&](const ShadowDesc &v) { sc->setShadowSettings(v); });
+        applyIfChanged(part.environmentLight, last.environmentLight, applied,
+                       [&](const Colour &v) { sc->setEnvironmentLight(v); });
+        applyIfChanged(part.fog, last.fog, applied, [&](const FogDesc &v) { sc->setFog(v); });
+        applyIfChanged(part.heightFog, last.heightFog, applied, [&](const HeightFogDesc &v) { sc->setHeightFog(v); });
+        applyIfChanged(part.rayTracing, last.rayTracing, applied, [&](RayTracingMode v) { sc->setRayTracing(v); });
+        applyIfChanged(part.sunContact, last.sunContact, applied,
+                       [&](const SunContactDesc &v) { sc->setSunContact(v); });
+        if (part.gi) {
+            // THE TUNING ROW FIRST, then the configuration (GiParams: operator== leaves the tuning out, so a
+            // tuning-only change is setGiTuning — nothing torn down — and a configuration change is a rebuild).
+            const GiParams &g = *part.gi;
+            if (!last.gi) {
+                sc->setGlobalIllumination(g); last.gi = g; ++applied;
+            } else {
+                if (!g.giTuningEqual(*last.gi)) {
+                    sc->setGiTuning(g);
+                    last.gi->gather = g.gather; last.gi->cards = g.cards;
+                    last.gi->cardBudgetTexels = g.cardBudgetTexels;
+                    last.gi->cardResidencyRadius = g.cardResidencyRadius;
+                    ++applied;
+                }
+                if (g != *last.gi) { sc->setGlobalIllumination(g); last.gi = g; ++applied; }
+            }
+        }
+        applyIfChanged(part.planar, last.planar, applied,
+                       [&](const PlanarReflectionParams &v) { sc->setPlanarReflections(v); });
+        applyIfChanged(part.sky, last.sky, applied, [&](const SkyDesc &v) { sc->setSky(v); });
+        applyIfChanged(part.shaderTime, last.shaderTime, applied, [&](float v) { sc->setShaderTime(v); });
+    }
+
+    // THE ENGINE-WIDE SHADOW PAIR (after the scenes' shadow settings, as the host pushed them).
+    if (in.refreshShadows) { refreshShadows(); ++applied; }
+    if (in.shadowMapBudget && *in.shadowMapBudget > 0 && shadowMapBudget() != *in.shadowMapBudget) {
+        setShadowMapBudget(*in.shadowMapBudget);
+        ++applied;
+    }
+
+    // EACH VIEW: its background and chain first, its camera last (the camera's letterbox reads the background).
+    unsigned viewApplied = 0;
+    for (const FrameInputView &part : in.views) {
+        OgreView *v = nullptr;
+        for (auto &q : mViews) if (static_cast<View *>(q.get()) == part.view) { v = q.get(); break; }
+        if (!v) continue;
+        FrameInputView &last = v->mFrameApplied;
+        applyIfChanged(part.background, last.background, viewApplied, [&](const Colour &c) { v->setBackground(c); });
+        applyIfChanged(part.shadows, last.shadows, viewApplied, [&](bool on) { v->setShadows(on); });
+        applyIfChanged(part.sampleCount, last.sampleCount, viewApplied, [&](unsigned n) { v->setSampleCount(n); });
+        applyIfChanged(part.postFx, last.postFx, viewApplied, [&](const PostFxDesc &fx) { v->setPostFx(fx); });
+        if (part.camera) {
+            // A RESIZE RE-APPLIES THE CAMERA: the framing hold and the ortho window are derived from the target's
+            // size inside setCamera, so the same description on a new size is a change.
+            const bool sizeMoved = v->width() != v->mFrameAppliedW || v->height() != v->mFrameAppliedH;
+            if (!last.camera || !(*last.camera == *part.camera) || sizeMoved) {
+                v->setCamera(*part.camera);
+                last.camera = part.camera;
+                v->mFrameAppliedW = v->width();
+                v->mFrameAppliedH = v->height();
+                ++viewApplied;
+            }
+        }
+        if (part.cameraNode && v->cameraNode() != *part.cameraNode) { v->setCameraNode(*part.cameraNode); ++viewApplied; }
+        if (part.resetExposure) { v->resetExposureHistory(); ++viewApplied; }
+    }
+    mFrameInputStatus.viewFieldsApplied = viewApplied;
+    mFrameInputStatus.fieldsApplied = applied + viewApplied;
 }
 
 float OgreEngine::fixedFrameDelta() const {

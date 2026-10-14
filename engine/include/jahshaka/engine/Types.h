@@ -6,6 +6,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -4567,6 +4568,14 @@ struct FogDesc {
     /// (fog disabled under the analytic sky) is pure extinction.
     float  breakMinBrightness = 0.25f;
     float  breakFalloff       = 0.1f;
+
+    bool operator==(const FogDesc &o) const {
+        return enabled == o.enabled && colour == o.colour && density == o.density &&
+               heightDensity == o.heightDensity && heightFalloff == o.heightFalloff &&
+               heightLevel == o.heightLevel && breakMinBrightness == o.breakMinBrightness &&
+               breakFalloff == o.breakFalloff;
+    }
+    bool operator!=(const FogDesc &o) const { return !(*this == o); }
 };
 
 // ---- Height fog (scene-level; SKY-DEFAULTS-1) ------------------------------
@@ -4697,6 +4706,13 @@ struct PlanarReflectionParams {
     /// Clear colour of the reflection render (what shows where the scene has no
     /// geometry and no sky). Normally the view's background.
     Colour   background = Colour(0.0f, 0.0f, 0.0f, 1.0f);
+
+    bool operator==(const PlanarReflectionParams &o) const {
+        return budget == o.budget && resolution == o.resolution && mipmaps == o.mipmaps &&
+               shadows == o.shadows && hdr == o.hdr && accurateLighting == o.accurateLighting &&
+               maxDistance == o.maxDistance && background == o.background;
+    }
+    bool operator!=(const PlanarReflectionParams &o) const { return !(*this == o); }
 };
 
 /// `Engine::createScene(name, kSceneMainThreadOnly)` — "this scene gets NO
@@ -7747,7 +7763,7 @@ struct FrameStage {
 };
 
 /// Why this frame was rendered. Set by the caller through
-/// `Engine::setNextFrameCause` — the driver tick, a script's `editor.frame`, an
+/// `FrameInput::cause` (Engine::submitFrame) — the driver tick, a script's `editor.frame`, an
 /// offscreen readback, the warm-up gate — so analysis can tell a frame nobody
 /// saw from one the owner watched.
 enum class FrameCause { Unknown, Driver, Scripted, Offscreen, WarmUp, Player };
@@ -7822,6 +7838,82 @@ enum class GiArmStage : unsigned char {
 /// first DRAWN, so "shaders still to compile" is not a number anything can
 /// know. `shadersCompiled` is the running total for this process, and a host
 /// that wants "is it still compiling" differences it across frames.
+class Scene;
+class View;
+
+/// ONE FRAME'S INPUT (ENGINE-UPGRADE-1 U0, part 3a UPGRADE-RECORD-1). Everything a host hands the engine FOR A FRAME —
+/// the frame's clock step, why it renders, its pace, the document's transform epoch, the gesture, each scene's
+/// environment and each view's camera and post chain — goes in one of these through Engine::submitFrame, and the
+/// engine applies it ONCE, at the top of the next renderOneFrame (the DRAIN), before anything of that frame runs.
+/// Nothing a frame depends on is written into the engine on the spot any more: a value lands in the frame that
+/// renders it, in one place, in one order.
+///
+/// EVERY FIELD IS OPTIONAL: an absent field leaves the engine's value as it is (a host that only steps the clock
+/// submits a record with `frameDelta` alone). Two submits before one frame MERGE: the frame fields and each VIEW's
+/// fields take the newest value; a SCENE's part is REPLACED whole by the newest (FrameInputStatus::replaced counts it).
+/// At the drain each field is COMPARED with what the engine last applied from a record and applied only when it
+/// differs — so a still document drains to nothing (FrameInputStatus::fieldsApplied == 0). The per-frame fields
+/// (`cause`, `pace`) reset after the drain to their defaults (Driver / Complete), as the verbs they replaced did;
+/// `frameDelta` persists until a record says otherwise (it boots at Engine::kDefaultFrameDelta).
+struct FrameInputScene {
+    Scene *scene = nullptr;
+    std::optional<ShadowDesc>             shadows;
+    std::optional<Colour>                 environmentLight;
+    std::optional<FogDesc>                fog;
+    std::optional<HeightFogDesc>          heightFog;
+    std::optional<RayTracingMode>         rayTracing;
+    std::optional<SunContactDesc>         sunContact;
+    std::optional<GiParams>               gi;          ///< a tuning-only change applies through setGiTuning
+    std::optional<PlanarReflectionParams> planar;
+    std::optional<SkyDesc>                sky;
+    std::optional<float>                  shaderTime;
+};
+struct FrameInputView {
+    View *view = nullptr;
+    std::optional<CameraDesc> camera;
+    std::optional<NodeId>     cameraNode;   ///< 0 = the camera rides no node
+    std::optional<PostFxDesc> postFx;
+    std::optional<bool>       shadows;
+    std::optional<unsigned>   sampleCount;
+    std::optional<Colour>     background;
+    bool                      resetExposure = false;   ///< a camera cut: the exposure history re-seeds once
+};
+/// The user's GESTURE as the host knows it (a gizmo drag, a viewport drag, a material hover): carried for the
+/// engine's GI scheduler (U0 3c reads it; until then the engine still infers a gesture from motion).
+struct FrameInputGesture {
+    bool                active = false;
+    std::vector<NodeId> nodes;
+    bool operator==(const FrameInputGesture &o) const { return active == o.active && nodes == o.nodes; }
+};
+struct FrameInput {
+    std::optional<float>              frameDelta;      ///< seconds every renderOneFrame advances by (persists)
+    std::optional<FrameCause>         cause;           ///< why the next frame renders (resets to Driver)
+    std::optional<FramePace>          pace;            ///< what the next frame may put off (resets to Complete)
+    std::optional<unsigned long long> transformEpoch;  ///< the document's transform-write counter at emit
+    std::optional<FrameInputGesture>  gesture;
+    std::optional<unsigned>           shadowMapBudget; ///< engine-wide (the shadow map pool's size)
+    bool                              refreshShadows = false;   ///< the document asked for a shadow re-render
+    std::vector<FrameInputScene>      scenes;
+    std::vector<FrameInputView>       views;
+
+    /// The usual one-field records.
+    static FrameInput delta(float seconds) { FrameInput f; f.frameDelta = seconds; return f; }
+    static FrameInput withCause(FrameCause c) { FrameInput f; f.cause = c; return f; }
+    static FrameInput withPace(FramePace p) { FrameInput f; f.pace = p; return f; }
+};
+/// What the drain did — Engine::frameInputStatus(). Running totals except the last drain's two fields.
+struct FrameInputStatus {
+    unsigned long long submitted = 0;     ///< submitFrame calls
+    unsigned long long drained = 0;       ///< frames that drained (one per renderOneFrame)
+    unsigned long long drainedEmpty = 0;  ///< ...that found no record submitted since the last
+    unsigned long long replaced = 0;      ///< scene parts replaced by a newer submit before their drain
+    unsigned           fieldsApplied = 0; ///< fields the LAST drain applied (changed values only)
+    unsigned           viewFieldsApplied = 0;   ///< ...of them, the per-view ones
+    bool               gestureActive = false;   ///< the last drained gesture
+    unsigned long long transformEpoch = 0;      ///< the last drained epoch
+    double             drainMicros = 0.0;       ///< what the LAST drain cost (the record's own overhead)
+};
+
 struct StreamingWork {
     /// Stages of the staged first arm build still to run, summed over every
     /// scene (0 = none owed). 4 the moment a build is staged, then 3, 2, 1.
