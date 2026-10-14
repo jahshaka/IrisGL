@@ -21,9 +21,6 @@ namespace detail {
 void notePhotonDispatch();
 unsigned long long photonDispatchesInRegion();
 unsigned long long photonDispatchesOutsideRegion();
-/// The region's open depth (nesting counts once): PhotonComponent::beginGiRegion / endGiRegion.
-void photonRegionBegin();
-void photonRegionEnd();
 
 /// THE ONE DISPATCH DOOR: a Photon compute dispatch with its barriers, noted by the witness.
 void photonDispatch(Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job, Ogre::RenderSystem *rs);

@@ -131,8 +131,6 @@ void notePhotonDispatch() {
             "the ASYNC bracket would miss it; PhotonDispatchStatus::outsideRegion counts every one",
             Ogre::LML_CRITICAL);
 }
-void photonRegionBegin() { ++gPhotonRegionDepth; }
-void photonRegionEnd() { --gPhotonRegionDepth; }
 unsigned long long photonDispatchesInRegion() { return gPhotonInRegion; }
 unsigned long long photonDispatchesOutsideRegion() { return gPhotonOutsideRegion; }
 
@@ -144,8 +142,14 @@ void photonDispatch(Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job, Ogre::Rend
     hc->dispatch(job, 0, 0);
 }
 
-void PhotonComponent::beginGiRegion() { photonRegionBegin(); }
-void PhotonComponent::endGiRegion() { photonRegionEnd(); }
+// The region's open depth (nesting counts once); GiRegion is the only door. A close with no
+// open is a broken pairing: logged, never wrapped to 4 billion open regions.
+void PhotonComponent::beginGiRegion() { ++gPhotonRegionDepth; }
+void PhotonComponent::endGiRegion() {
+    if (gPhotonRegionDepth) { --gPhotonRegionDepth; return; }
+    Ogre::LogManager::getSingleton().logMessage(
+        "Jahshaka photon: a GI region closed that was never opened", Ogre::LML_CRITICAL);
+}
 
 bool PhotonComponent::updatePassOwed() const {
     return mSurfaceCache && mSurfaceCache->photonUpdateOwed();

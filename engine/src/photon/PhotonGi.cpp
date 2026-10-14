@@ -3062,7 +3062,12 @@ void PhotonComponent::applyPendingGiDeferrable() {
     giDeferrable([this]() { applyPendingGi(); });
 }
 
+// THE DEFERRABLE ARM IS GI-REGION WORK WHEREVER IT RUNS (stage 3 read, finding A): the frame's
+// flush, and the two verb/drain-time callers — setGlobalIllumination's rebuild and
+// refreshGlobalIllumination's (the drain's plan()) — build NOW, in the same order as before,
+// inside the region, so the witness and the ASYNC bracket see every one of their dispatches.
 void PhotonComponent::giDeferrable(const std::function<void()> &work) {
+    GiRegion region;
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
     if (!mScene.asyncShaders() || !hc || !hm->getAsyncCompiler()->isRunning()) {

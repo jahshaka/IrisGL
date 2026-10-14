@@ -5,6 +5,7 @@
 #include "EnginePrivate.h"
 #include "SurfaceCache.h"
 #include "AtomPass.h"
+#include "photon/PhotonDispatch.h"
 
 #include <OgreCamera.h>
 #include <OgreItem.h>
@@ -1644,16 +1645,13 @@ void SurfaceCache::relightCards() {
     const bool shaderReady =
         !mAsyncShaders || hc->requestAsync(mLightJob) != Ogre::HlmsCompute::AsyncPending;
     if (shaderReady) {
-        Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
-        mLightJob->analyzeBarriers(rt);
-        rs->executeResourceTransition(rt);
         // THE RELIGHT'S MONITOR ROW (lane TEST-1, the perf audit's F1): it runs in
         // this workspace's own end callback, after its passes closed, so no pass
         // row holds it — and before, its GPU time lived only in the ray tier's
         // private ring (absent at the no-ray tier). One row at every tier now.
         detail::monitor::CacheScope relight(CacheKind::Gi, WorkReason::Light, 0, "cards.relight", rs, this);
         relight.setUnits(unsigned(mRelight.size()));
-        hc->dispatch(mLightJob, nullptr, nullptr);
+        detail::photonDispatch(hc, mLightJob, rs);   // the one door: its barriers, the witness
     }
     {
         const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
