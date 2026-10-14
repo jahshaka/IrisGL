@@ -3915,6 +3915,9 @@ public:
     unsigned applyNodeRecords(const std::vector<NodeRecord> &records);
     /// The close of a frame the engine drew: what the document reads without asking (PublishedFrame).
     void publishFrame(unsigned long long frame);
+    /// Called by the drain after applyNodeRecords: a planar reflector asked for on a DOCUMENT node is measured and
+    /// armed at the pose its record just landed (a refusal names itself in the error sink).
+    void armDeferredReflectors();
     bool setNodeParent(NodeId id, NodeId parent) override;
     void setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, const Vec3 &scale) override;
     void setNodeVisible(NodeId id, bool visible) override;
@@ -6243,6 +6246,8 @@ private:
     std::unordered_map<Ogre::IdType, NodeId> mNodeByOgreId;
     /// THE SCENE'S PUBLISHED FRAME (Scene::published, PublishedFrame), written at each frame's close.
     PublishedFrame mPublished;
+    /// Planar reflectors asked for on DOCUMENT nodes this frame, armed at the drain once their poses landed.
+    std::vector<NodeId> mReflectorsToArm;
     /// The nodes riding a bone tag right now (attachToBone / releaseBoneTag): publishFrame's whole walk.
     std::vector<NodeId> mBoneRiderIds;
     /// A document node's graph class -> its Ogre node, its attachments and the helper nodes hanging off it.
@@ -8801,6 +8806,7 @@ public:
     // The log bridge (SESSION_LOG_SPEC F3-B) — OgreLogBridge.cpp.
     void setLogSink(Engine::LogSink sink) override;
     DeviceInfo deviceInfo() const override;
+    bool prepareDevice() override;
     /// Attaches/detaches the Ogre LogListener. attach() runs immediately after
     /// `new Ogre::Root` (beside mShaderCache.attachCounters) so plugin loads,
     /// render-system init and device detection are all captured; detach() MUST

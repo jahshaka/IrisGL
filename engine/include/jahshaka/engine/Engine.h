@@ -2656,6 +2656,12 @@ public:
     /// system has a device. Empty strings before that, and under the NULL
     /// render system everything but `renderSystem` is legitimately empty.
     virtual DeviceInfo deviceInfo() const = 0;
+    /// THE BACKEND'S ONE-TIME PREPARATION, on demand: the render target a device and a scene manager cannot exist
+    /// without (a headless engine's own 1x1 window; a rendering one's surfaceless window when no View exists yet) and
+    /// the Hlms/resource registration. createScene does it itself; a host that needs the device's answers before its
+    /// first View (EngineHost's device block: deviceInfo, the media backend named from the adapter) asks for it.
+    /// Idempotent; false (lastError) when the backend cannot prepare.
+    virtual bool prepareDevice() = 0;
 
     /// What the renderer measured (STATS_OVERLAY_SPEC.md §4). Cheap: it reads
     /// counters the backend already keeps, and copies no buffers.

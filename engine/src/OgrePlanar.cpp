@@ -53,6 +53,7 @@
 //     component's own header says so, and it keeps a raw Renderable*.
 //   * setMaxActiveActors can only GROW a slot set and bakes width/height/mips into
 //     the slots it creates. Any parameter change therefore rebuilds the whole arm.
+#include <algorithm>
 #include "EnginePrivate.h"
 
 #include <Compositor/OgreCompositorNode.h>
@@ -482,9 +483,19 @@ bool OgreScene::setNodePlanarReflector(NodeId id, bool on) {
     if (!on) {
         disarmReflector(id, it->second);
         mReflectors.erase(id);
+        mReflectorsToArm.erase(std::remove(mReflectorsToArm.begin(), mReflectorsToArm.end(), id),
+                               mReflectorsToArm.end());
         return true;
     }
     if (mReflectors.count(id)) return true;
+    // A DOCUMENT node's pose arrives through the frame record (ENGINE-UPGRADE-U2): the plate is measured at the
+    // drain, after this frame's transforms land (armDeferredReflectors) — measured here it would be the pose of the
+    // last frame, and a plate flattened in the same sync would be refused as "not flat enough".
+    if (it->second.document) {
+        if (std::find(mReflectorsToArm.begin(), mReflectorsToArm.end(), id) == mReflectorsToArm.end())
+            mReflectorsToArm.push_back(id);
+        return true;
+    }
     // Validate NOW even when the arm is down, so the user is told immediately
     // that a sphere cannot be a mirror instead of at some later mode switch.
     if (!it->second.item) { mError = "setNodePlanarReflector: node has no mesh attached"; return false; }
@@ -496,7 +507,26 @@ bool OgreScene::setNodePlanarReflector(NodeId id, bool on) {
     return true;
 }
 
-bool OgreScene::nodePlanarReflector(NodeId id) const { return mReflectors.count(id) != 0; }
+bool OgreScene::nodePlanarReflector(NodeId id) const {
+    return mReflectors.count(id) != 0 ||
+           std::find(mReflectorsToArm.begin(), mReflectorsToArm.end(), id) != mReflectorsToArm.end();
+}
+
+void OgreScene::armDeferredReflectors() {
+    if (mReflectorsToArm.empty()) return;
+    std::vector<NodeId> ids;
+    ids.swap(mReflectorsToArm);
+    for (NodeId id : ids) {
+        auto it = mNodes.find(id);
+        if (it == mNodes.end()) continue;   // released before its frame
+        if (!it->second.item) { mError = "setNodePlanarReflector: node has no mesh attached"; continue; }
+        if (planar::isTwoSided(it->second.item)) { mError = planar::kTwoSidedRefusal; continue; }
+        planar::Plane probe;
+        if (!planar::derivePlane(it->second.node, it->second.item, probe, mError)) continue;
+        mReflectors.insert(id);
+        if (mPlanar && !armReflector(id, it->second)) mReflectors.erase(id);
+    }
+}
 
 int OgreScene::activePlanarReflectors() const {
     return mPlanar ? int(mPlanar->countActiveActors()) : 0;

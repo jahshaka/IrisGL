@@ -315,6 +315,10 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         n.item->setRenderQueueGroup(renderQueueFor(tit->second));
         n.gpuMeshSlot = acquireGpuMesh(mit->second);   // the GPU scene's mesh table
         markGpuSlotDirty(n);
+        // A SKINNED item is never static (rule 3, the document's isStaticEligible): a document node the document
+        // demoted this sync is still static here until its record lands at the drain (ENGINE-UPGRADE-U2), and
+        // attachObject throws on the mismatch — the class follows now, as the document's record will say.
+        if (n.node->isStatic()) { n.docStatic = false; enforceGraphClass(n); }
         n.node->attachObject(n.item);   // also hands the skeleton its parent node
         // A NODE THAT IS HIDDEN STAYS HIDDEN when it is given geometry:
         // SceneNode::setVisible only walks the objects attached AT THE TIME, so

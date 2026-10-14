@@ -247,20 +247,26 @@ Ogre::SceneManager *OgreEngine::blankSceneManager() {
     } JAH_CATCH(mLastError, nullptr);
 }
 
+// THE ONE-TIME PREPARATION a scene manager and a device cannot exist without (a render target, then the
+// Hlms/resource registration — CLAUDE.md's startup order). A headless engine already has its window (the NULL render
+// system's own, made in init); a rendering one gets a surfaceless one. What the document's staging scene manager used
+// to force at boot before ENGINE-UPGRADE-U2 deleted it — a document needs no engine — is now asked for by name.
+bool OgreEngine::prepareDevice() {
+    if (mHlmsRegistered) return true;
+    JAH_TRY {
+        if (!mNullWindow) {
+            Ogre::NameValuePairList wp; wp["windowType"] = "null";
+            mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"), 8, 8, false, &wp);
+        }
+        ensureHlms();
+        if (!mHlmsRegistered) { mLastError = "prepareDevice: Hlms unavailable"; return false; }
+        return true;
+    } JAH_CATCH(mLastError, false);
+}
+
 Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) {
-    // A SCENE BEFORE ANY VIEW: the one-time preparation a scene manager cannot exist without (a render target, then
-    // the Hlms/resource registration — CLAUDE.md's startup order) happens here. A headless engine already has its
-    // window (the NULL render system's own, made in init); a rendering one gets a surfaceless one, exactly what the
-    // document's staging scene manager used to force before ENGINE-UPGRADE-U2 deleted it (a document needs no engine).
-    if (!mHlmsRegistered) {
-        JAH_TRY {
-            if (!mNullWindow) {
-                Ogre::NameValuePairList wp; wp["windowType"] = "null";
-                mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"), 8, 8, false, &wp);
-            }
-            ensureHlms();
-        } JAH_CATCH(mLastError, nullptr);
-    }
+    // A SCENE BEFORE ANY VIEW: the backend's one-time preparation happens here (prepareDevice).
+    if (!mHlmsRegistered && !prepareDevice()) return nullptr;
     if (!mHlmsRegistered) {
         mLastError = "createScene('" + name + "'): no View exists yet — create a View first";
         return nullptr;
@@ -2451,6 +2457,7 @@ void OgreEngine::drainFrameInput() {
         // wrote lands before the change set names the moved subtrees to the scans.
         {
             const unsigned n = sc->applyNodeRecords(part.nodes);
+            sc->armDeferredReflectors();   // a reflector asked for this frame is measured at its landed pose
             mFrameInputStatus.nodeRecords += n;
             mFrameInputStatus.nodeRecordsTotal += n;
         }

@@ -1736,6 +1736,7 @@ void OgreScene::destroy() {
         mNodes.clear();
         mNodeByOgreId.clear();
         mBoneRiderIds.clear();
+        mReflectorsToArm.clear();
         mPublished = PublishedFrame();
         // The helper overlay queue's depth anchor: an entity in this
         // SceneManager's memory manager, so it dies before the manager does.
@@ -1904,6 +1905,7 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     // the component tracks by raw pointer dies.
     disarmReflector(id, n);
     mReflectors.erase(id);
+    mReflectorsToArm.erase(std::remove(mReflectorsToArm.begin(), mReflectorsToArm.end(), id), mReflectorsToArm.end());
     // The GI side is told about the box the node occupied BEFORE the Item dies (its world AABB is read here).
     // invalidateGiCaches frees nothing: it notes the box for the cascades now and requests the cache
     // invalidation — at once, or once at the end of an open Scene::beginStructureEdit (the mirror's sync).
