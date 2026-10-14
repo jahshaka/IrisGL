@@ -472,7 +472,9 @@ namespace {
 /// refusal (lights and PFX2 systems have no static twin) and drags the node along; a refusal rolls the attachments
 /// back and leaves the node where it was. Returns whether the node is in `value` afterwards.
 bool switchNodeClass(Ogre::SceneNode *n, bool value) {
-    if (n->isStatic() == value) return true;
+    // No early return on the NODE's class: Ogre's Node::setParent migrates a reparented node's whole subtree into the
+    // new parent's memory manager (OgreNode.cpp setParent / parentDepthLevelChanged) and leaves the attachments where
+    // they were, so a node can already be in `value` with its attachments still in the other class.
     std::vector<Ogre::MovableObject *> switched;
     switched.reserve(n->numAttachedObjects());
     for (size_t i = 0; i < n->numAttachedObjects(); ++i) {
@@ -480,12 +482,14 @@ bool switchNodeClass(Ogre::SceneNode *n, bool value) {
         if (obj->isStatic() == value) continue;
         if (!obj->setStatic(value)) {
             for (Ogre::MovableObject *done : switched) done->setStatic(!value);
+            if (n->isStatic() == value) n->Ogre::Node::setStatic(!value);   // Ogre's migration undone: rule 3
             return false;
         }
         switched.push_back(obj);
     }
+    const bool changed = !switched.empty() || n->isStatic() != value;
     n->Ogre::Node::setStatic(value);   // the attachments are already where they belong
-    if (value && n->getCreator()) n->getCreator()->notifyStaticDirty(n);
+    if (value && changed && n->getCreator()) n->getCreator()->notifyStaticDirty(n);
     return true;
 }
 
@@ -519,6 +523,25 @@ void OgreScene::enforceGraphClass(Node &rec) {
     }
 }
 
+// A REPARENT RE-ASSERTS THE WHOLE SUBTREE: Ogre's Node::setParent migrated every descendant into the new parent's
+// memory manager, document children included, and no record of theirs is owed (their own class did not change) — so
+// each document descendant is told its own class again, parent before child (a static child is never left under a
+// dynamic parent, a static group moved to the root keeps its children static), each one's helpers following it.
+void OgreScene::enforceSubtreeClass(Node &top) {
+    enforceGraphClass(top);
+    std::vector<Ogre::SceneNode *> stack;
+    auto pushChildren = [&stack](Ogre::SceneNode *n) {
+        for (size_t i = n->numChildren(); i-- > 0;) stack.push_back(static_cast<Ogre::SceneNode *>(n->getChild(i)));
+    };
+    pushChildren(top.node);
+    while (!stack.empty()) {
+        Ogre::SceneNode *c = stack.back();
+        stack.pop_back();
+        if (Node *crec = registryNode(c); crec && crec->document) enforceGraphClass(*crec);
+        pushChildren(c);
+    }
+}
+
 // THE EXTRACT'S APPLY (ENGINE-UPGRADE-U2). The document's mirror sends, per node it wrote, the node's LOCAL TRS and —
 // when they changed — its parent and its graph class; this engine composes its own hierarchy from them (a moved 10k
 // subtree root is one record). In order: a parent before a class (Ogre gives a reparented node its new parent's
@@ -526,49 +549,55 @@ void OgreScene::enforceGraphClass(Node &rec) {
 // is static-dirtied: Ogre's own path for "this static node moved", one static pass at its depth). Called from the
 // drain BEFORE applyChangeSet, which then names the moved subtrees to the scans with every pose already in place.
 unsigned OgreScene::applyNodeRecords(const std::vector<NodeRecord> &records) {
+    // ONE RECORD, ONE TRY: the journal has advanced and the latches say pushed, so a throw on one record must never
+    // drop the frame's later records for good — the failure is reported (mError) and the next record applies.
     unsigned applied = 0;
-    JAH_TRY {
-        Ogre::SceneNode *root = mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
-        for (const NodeRecord &r : records) {
-            Node *rec = record(r.id);
-            if (!rec || !rec->node || !rec->document) continue;   // released before its frame
-            Ogre::SceneNode *sn = rec->node;
-            bool classOwed = false;
-            // A RIDER keeps its bone: its document place moved, its engine parent is the tag until the host takes
-            // it off (detachFromBone names the parent then).
-            if ((r.fields & NodeRecord::Parent) && !rec->boneTag) {
-                Node *prec = r.parent ? record(r.parent) : nullptr;
-                Ogre::SceneNode *p = (prec && prec->node) ? prec->node : root;
-                if (sn->getParent() != p) {
-                    if (sn->getParent()) sn->getParent()->removeChild(sn);
-                    p->addChild(sn);
-                    // A move under a hidden parent hides the subtree, a move out from under one shows it again.
-                    bool giChanged = false;
-                    applyShownSubtree(sn, inheritedShown(sn), giChanged);
-                    if (giChanged) invalidateGiCaches(nullptr);
-                    classOwed = true;
-                    // A STATIC node that keeps its class under its new parent moved all the same (its local is kept,
-                    // its parent changed): one static dirty re-derives it and its subtree.
-                    if (sn->isStatic()) mSceneMgr->notifyStaticDirty(sn);
-                }
-            }
-            if (r.fields & NodeRecord::Static) { rec->docStatic = r.isStatic; classOwed = true; }
-            if (classOwed || sn->isStatic() != (rec->docStatic && !rec->boneTag)) enforceGraphClass(*rec);
-            if (r.fields & NodeRecord::Trs) {
-                sn->setPosition(toOgre(r.position));
-                setOrientationExact(sn, Ogre::Quaternion(r.rotation.w, r.rotation.x, r.rotation.y, r.rotation.z));
-                sn->setScale(toOgre(r.scale));
-                if (sn->isStatic()) mSceneMgr->notifyStaticDirty(sn);
-            }
-            ++applied;
-        }
-    } JAH_CATCH(mError, applied);
+    for (const NodeRecord &r : records)
+        if (applyNodeRecord(r)) ++applied;
     return applied;
 }
 
+bool OgreScene::applyNodeRecord(const NodeRecord &r) {
+    JAH_TRY {
+        Node *rec = record(r.id);
+        if (!rec || !rec->node || !rec->document) return false;   // released before its frame
+        Ogre::SceneNode *sn = rec->node;
+        bool classOwed = false, reparented = false;
+        // A RIDER keeps its bone: its document place moved, its engine parent is the tag until the host takes
+        // it off (detachFromBone names the parent then).
+        if ((r.fields & NodeRecord::Parent) && !rec->boneTag) {
+            Node *prec = r.parent ? record(r.parent) : nullptr;
+            Ogre::SceneNode *p = (prec && prec->node) ? prec->node : mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
+            if (sn->getParent() != p) {
+                if (sn->getParent()) sn->getParent()->removeChild(sn);
+                p->addChild(sn);
+                // A move under a hidden parent hides the subtree, a move out from under one shows it again.
+                bool giChanged = false;
+                applyShownSubtree(sn, inheritedShown(sn), giChanged);
+                if (giChanged) invalidateGiCaches(nullptr);
+                classOwed = reparented = true;
+                // A STATIC node that keeps its class under its new parent moved all the same (its local is kept,
+                // its parent changed): one static dirty re-derives it and its subtree.
+                if (sn->isStatic()) mSceneMgr->notifyStaticDirty(sn);
+            }
+        }
+        if (r.fields & NodeRecord::Static) { rec->docStatic = r.isStatic; classOwed = true; }
+        if (reparented) enforceSubtreeClass(*rec);
+        else if (classOwed || sn->isStatic() != (rec->docStatic && !rec->boneTag)) enforceGraphClass(*rec);
+        if (r.fields & NodeRecord::Trs) {
+            sn->setPosition(toOgre(r.position));
+            setOrientationExact(sn, Ogre::Quaternion(r.rotation.w, r.rotation.x, r.rotation.y, r.rotation.z));
+            sn->setScale(toOgre(r.scale));
+            if (sn->isStatic()) mSceneMgr->notifyStaticDirty(sn);
+        }
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
 void OgreScene::publishFrame(unsigned long long frame) {
-    mPublished.frame = frame;
-    mPublished.riderTags.clear();
+    PublishedFrame &back = mPublished[mPublishedIdx.load(std::memory_order_relaxed) ^ 1u];
+    back.frame = frame;
+    back.riderTags.clear();
     for (NodeId id : mBoneRiderIds) {
         const Node *rec = record(id);
         if (!rec || !rec->node || !rec->boneTag) continue;
@@ -580,8 +609,9 @@ void OgreScene::publishFrame(unsigned long long frame) {
         t.position = Vec3(p.x, p.y, p.z);
         t.rotation = Quat(q.x, q.y, q.z, q.w);
         t.scale = Vec3(sc.x, sc.y, sc.z);
-        mPublished.riderTags.push_back(t);
+        back.riderTags.push_back(t);
     }
+    mPublishedIdx.store(mPublishedIdx.load(std::memory_order_relaxed) ^ 1u, std::memory_order_release);
 }
 
 bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
@@ -1737,7 +1767,9 @@ void OgreScene::destroy() {
         mNodeByOgreId.clear();
         mBoneRiderIds.clear();
         mReflectorsToArm.clear();
-        mPublished = PublishedFrame();
+        mPublished[0] = PublishedFrame();
+        mPublished[1] = PublishedFrame();
+        mPublishedIdx.store(0, std::memory_order_release);
         // The helper overlay queue's depth anchor: an entity in this
         // SceneManager's memory manager, so it dies before the manager does.
         releaseQueueDepthAnchor();

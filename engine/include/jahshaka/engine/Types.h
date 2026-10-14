@@ -7975,7 +7975,7 @@ struct FrameInputStatus {
 
 /// WHAT A SCENE PUBLISHED FOR THE FRAME IT LAST DREW (ENGINE-UPGRADE-U2; Scene::published()): the engine's output the
 /// document reads WITHOUT asking — under U3 the document thread reads this snapshot and nothing else of the engine's
-/// state. Written once at the close of every frame the engine renders.
+/// state. Written once at the close of every frame the engine renders, as a whole-frame swap (Engine.h, THE SNAPSHOT).
 struct PublishedFrame {
     /// A bone RIDER's TAG (the socket's tag point on the bone): the rider's parent, as drawn. The document composes the
     /// rider's local under it and re-expresses a world write under it (iris::graph::setRiderTag).

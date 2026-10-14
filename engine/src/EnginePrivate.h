@@ -3909,7 +3909,9 @@ public:
     // ---- Hierarchy and transforms ----
     NodeId createNode(NodeId parent) override;
     NodeId createDocumentNode(NodeId parent) override;
-    const PublishedFrame &published() const override { return mPublished; }
+    const PublishedFrame &published() const override {
+        return mPublished[mPublishedIdx.load(std::memory_order_acquire)];
+    }
     /// THE EXTRACT'S APPLY (ENGINE-UPGRADE-U2): each document node's record — parent, graph class, local TRS — in
     /// order, before the change set names the subtrees. Returns how many records landed.
     unsigned applyNodeRecords(const std::vector<NodeRecord> &records);
@@ -6244,14 +6246,20 @@ private:
     /// ours, and what was it told?"). Keyed by Ogre's never-reused id rather
     /// than the node address, which Ogre recycles.
     std::unordered_map<Ogre::IdType, NodeId> mNodeByOgreId;
-    /// THE SCENE'S PUBLISHED FRAME (Scene::published, PublishedFrame), written at each frame's close.
-    PublishedFrame mPublished;
+    /// THE SCENE'S PUBLISHED FRAME (Scene::published, PublishedFrame): a whole-frame SWAP (Engine.h's contract) —
+    /// publishFrame writes the buffer published() is not returning, then flips the index.
+    PublishedFrame mPublished[2];
+    std::atomic<unsigned> mPublishedIdx{0};
     /// Planar reflectors asked for on DOCUMENT nodes this frame, armed at the drain once their poses landed.
     std::vector<NodeId> mReflectorsToArm;
     /// The nodes riding a bone tag right now (attachToBone / releaseBoneTag): publishFrame's whole walk.
     std::vector<NodeId> mBoneRiderIds;
     /// A document node's graph class -> its Ogre node, its attachments and the helper nodes hanging off it.
     void enforceGraphClass(Node &rec);
+    /// After a reparent: the node and every document descendant re-told its own class (Ogre migrated the subtree).
+    void enforceSubtreeClass(Node &top);
+    /// One record of applyNodeRecords, under its own try (a throw drops that record only).
+    bool applyNodeRecord(const NodeRecord &r);
     /// THE HOST'S CONTROLLER PROXY NODES, left then right (Scene::setVrProxyNodes,
     /// VR_SPEC §5 phase 4). The scene owns nothing about them but these two ids:
     /// a running VrSession reads them once a frame, right after it has located

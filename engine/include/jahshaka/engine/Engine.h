@@ -17,11 +17,41 @@
 //   * THE DOCUMENT THREAD builds the frame's record and hands it over with ONE entry point, submitFrame(); it reads
 //     what the engine computed only from the PUBLISHED per-frame snapshot (Scene::published()) — never waiting —
 //     and files every GPU->CPU read as a request with a fence (the picture service).
+//   * THE SNAPSHOT IS A WHOLE-FRAME SWAP: the engine writes each frame's PublishedFrame into the buffer the reader is
+//     NOT holding and then flips one index (release); published() returns the last whole frame (acquire). Two
+//     buffers: a reference taken from published() is never written by the publish that follows it — it stays one
+//     whole frame until the SECOND publish after it was taken. A reader copies what it keeps longer than a frame.
 //   * EVERY OTHER Engine/Scene/View call the document thread makes is a SYNCHRONOUS GETTER or a direct command, and
-//     each is a debt U3 pays down to zero (host.sync_getters). The getters that remain after U2: Scene::nodeWorldPose
-//     (vrapi.cpp's node.worldPose), Scene::bonePoses (the mirror's avatar overlay), the status getters (giStatus,
-//     rayQueryStatus, frameInputStatus and their kin); and the mirror's direct commands (createDocumentNode,
-//     attachMesh, materials, lights, decals, sockets), which become record messages in U3.
+//     each is a debt U3 pays down to zero (host.sync_getters). THE SYNCHRONOUS GETTERS after U2 are every const
+//     virtual of this file, by class (published() is the snapshot, not a getter; name/engine/scene are
+//     identities that never change after creation):
+//       Scene (65): name, engine, heightFogStatus, skyAmbientSh, sky, cloudStatus, atmosphereSunTint,
+//       atmosphereStatus, published, shadingModelOf, shaderTime, lodBias, objectLods, dumpMaterial, itemCount,
+//       hasSkeleton, boneNames, boneMatrices, streamedBoneCount, rigStats, changeStats, clipNames, bonePoses,
+//       clipBoneWeights, textureMipmaps, sharesSkeleton, boneAttachment, particleCount, particleDefinitionsCreated,
+//       lightWriteSerial, decalAtlasCapacity, decalAtlasUsed, isLoading, giStatus, rayQueryStatus,
+//       atomOcclusionEnabled, atomView, atomViewPaintable, photonView, photonViewRefusal, photonVoxelCascade,
+//       gpuSceneStatus, gpuSceneEntry, sunContact, sunContactStatus, nodeProbeGridExcluded, nodeHelper, nodeBackdrop,
+//       nodeVrHelper, vrProxyNodes, vrRayNodes, nodeWorldPose, nodeWorldPoseDrawn, nodeMovable, mobilityStatus,
+//       nodeLightMask, nodeCastShadow, nodeFaceCull, cullTwinCount, cullTwinCandidateCount, nodePlanarReflector,
+//       activePlanarReflectors, planarReflectorArms, rayTracingResolved, rayTracingResolvedFor.
+//       View (24): name, scene, cameraNode, background, shadows, isEnabled, width, height, sampleCount, isOffscreen,
+//       postFx, helpersVisible, vrHelpersVisible, lodHysteresisOffscreen, measuredExposureScale, overlay, pip,
+//       pipGeneration, workspaceGeneration, framesPresented, blankFramesPresented, globalsPushes, videoReadbackStatus,
+//       asyncShaders.
+//       Engine (53): isHeadless, frameInputStatus, pendingGiConfiguration, deviceLost, gpuFault, queueSubmissionTag,
+//       vrAvailable, vrPolicy, vrInfo, vrState, vrStatus, vrView, vrMirrorView, vrHandJoints, vrBindingBlocks, vrRay,
+//       hasEnabledViews, listViews, texturesDoneStreaming, textureLoadRequests, textureMultiLoadThreads,
+//       textureWaitTimeouts, textureWaitAdvances, textureWaitWorstMs, textureWaitBudgetMs,
+//       textureMetadataCacheEntries, textureChannelCacheEntries, vsync, rayTracing, rayQueryAvailable,
+//       fixedFrameDelta, shadowFilter, shadowResolution, shadowMapBudget, shadowStatus, shadowMeshOptimization,
+//       shaderCacheStats, deviceInfo, renderStats, objectCounts, threading, memoryStats, textureMemory, frameMonitor,
+//       arms, validation, monitorStatus, framePaceOwesWork, streamingWork, fillCullView, hzbStatus, asyncShaderStats,
+//       lastError.
+//     On the document's own path today: Scene::nodeWorldPose (vrapi.cpp's node.worldPose), Scene::bonePoses (the
+//     mirror's avatar overlay) and the status getters of the list (the tests and the panels). The mirror's
+//     direct commands (createDocumentNode, attachMesh, materials, lights, decals, sockets) become record messages
+//     in U3.
 //
 // Background work (thumbnails, imports) posts to the engine thread; it never calls in directly. A DOCUMENT may be
 // built on any thread: since U2 it holds no engine object at all (iris::graph is the document's own store).
