@@ -3800,6 +3800,11 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             // that arrives or changes what the voxel injection reads owes the debounce its answer.
             {
                 const quint64 gp = lightGiParamSignature(light);
+                // The pose key's first reading, at the lamp's first visit (takeWriteJournal compares against it).
+                if (!e.giLightPoseKnown) {
+                    e.giLightPose = worldTrsSignature(light->graphNode());
+                    e.giLightPoseKnown = true;
+                }
                 if (!e.giLightParamsKnown || gp != e.giLightParams) {
                     e.giLightParams = gp;
                     e.giLightParamsKnown = true;
@@ -3904,7 +3909,15 @@ void SceneMirror::takeWriteJournal()
         for (iris::graph::NodeHandle h = l->graphNode(); h && !moved; h = iris::graph::parentOf(h))
             if (const iris::SceneNode *o = iris::graph::ownerOf(h)) moved = mWrittenThisSync.contains(o);
         if (!moved) continue;
+        // NAMED, THEN COMPARED: the journal says the lamp's pose was written; its own pose key says whether it
+        // changed (the old scene-wide hash compared every lamp every frame — this compares the named ones).
         const auto *n = static_cast<const iris::SceneNode *>(l.data());
+        auto e = mEntries.find(n);
+        if (e == mEntries.end()) continue;              // not mirrored yet: its adoption owes the debounce already
+        if (!e->giLightPoseKnown) continue;             // its first visit (this sync's walk) reads the pose
+        const quint64 pose = worldTrsSignature(l->graphNode());
+        if (pose == e->giLightPose) continue;
+        e->giLightPose = pose;
         if (std::find(mMovableLights.begin(), mMovableLights.end(), n) != mMovableLights.end()) mGiMovableLampOwed = true;
         else mGiStillLampOwed = true;
     }

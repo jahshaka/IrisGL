@@ -986,6 +986,10 @@ private:
         /// frame; a change is a still- or movable-lamp event for the GI debounce (U0 3b).
         quint64 giLightParams = 0;
         bool    giLightParamsKnown = false;
+        /// ...and its WORLD POSE as a change key (worldTrsSignature), read only when the change set names the lamp or
+        /// an ancestor: a write of the same pose — play stop's restore, a script re-asserting it — is no move.
+        quint64 giLightPose = 0;
+        bool    giLightPoseKnown = false;
         // (hasBillboards/billboardSignature lived here and had no reader or
         // writer anywhere in the tree — deleted with the deep-audit fix wave.)
         // Particles (PARTICLES_FX2_SPEC): the engine simulates, so the mirror
