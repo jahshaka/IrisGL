@@ -269,14 +269,18 @@ constexpr float kGreyCardDisplay     = 0.18f;
 /// THE FILM CURVE (IMAGE-1): Unreal Engine's filmic tonemapper, the ACES-based
 /// curve of Unreal 4.15 (TonemapCommon.ush, FilmToneMap), as the fork's
 /// `Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl`
-/// runs it: five parameters, Unreal's defaults below. For a NEUTRAL input (a
+/// runs it: five parameters, Unreal's defaults below but the TOE: 0.3, not Unreal's
+/// 0.55 (BISTRO-FIXES-3, measured on the Bistro: 0.55 took the shaded facade to code
+/// 13 and its pavement to 6; at 0.3 they read 23.5 and 24, the sky 3 codes and the
+/// sunlit pavement 1 code darker - the toe moves the whole blend between the toe and
+/// the shoulder, so no value lifts the shade with the bright end fixed). For a NEUTRAL input (a
 /// grey) the colour terms of the shader — the RRT's glow and red modifier, the
 /// pre and post desaturation and the AP0/AP1 round trip — are all the identity,
 /// so this scalar is the curve a grey card sees. The tonemap suite holds the
 /// GPU to it at nine exposures.
 struct FilmParams {
     float slope = 0.88f;
-    float toe = 0.55f;
+    float toe = 0.3f;
     float shoulder = 0.26f;
     float blackClip = 0.0f;
     float whiteClip = 0.04f;

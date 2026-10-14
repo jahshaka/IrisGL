@@ -581,7 +581,7 @@ const ImageParamDef kImageParams[ImageParamCount] = {
     { "filmSlope", "Film Slope", 0.88f, 0.2f, 1.5f, 0.005, 3, true,
       "The film curve's mid-tone steepness (Unreal's filmic tonemapper, Slope). Higher is more "
       "contrasty film. The grey card always develops to the same grey." },
-    { "filmToe", "Film Toe", 0.55f, 0.0f, 1.0f, 0.005, 3, true,
+    { "filmToe", "Film Toe", 0.3f, 0.0f, 1.0f, 0.005, 3, true,
       "How the film curve rolls into black (Unreal's Toe): higher holds more detail in the "
       "darks before they crush." },
     { "filmShoulder", "Film Shoulder", 0.26f, 0.0f, 1.0f, 0.005, 3, true,

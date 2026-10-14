@@ -6318,7 +6318,7 @@ struct ImageGrade {
     float whiteTint = 0.0f;
     float vignette = 0.0f;
     float filmSlope = 0.88f;
-    float filmToe = 0.55f;
+    float filmToe = 0.3f;     // BISTRO-FIXES-3: softer than Unreal's 0.55 (iris::lens::FilmParams)
     float filmShoulder = 0.26f;
     float filmBlackClip = 0.0f;
     float filmWhiteClip = 0.04f;
