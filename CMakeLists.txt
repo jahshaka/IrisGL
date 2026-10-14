@@ -566,11 +566,10 @@ target_include_directories(IrisGL PRIVATE
     "${PROJECT_SOURCE_DIR}/thirdparty/meshoptimizer/src"
     "${_clod_patched_root}")   # clusterlod.h with its patch stack (above)
 
-# THE scene graph is Ogre-Next's (SPECS/SCENEGRAPH_SPEC.md D2), so the document
-# library links it. PRIVATE, exactly like the engine does: Ogre must not reach
-# Studio's include path, and the ONE translation unit here that includes an Ogre
-# header is document/scenegraph/nodegraph.cpp. See nodegraph.h for the law.
-target_link_libraries(IrisGL PRIVATE OgreNext)
+# NO OGRE. Since ENGINE-UPGRADE-U2 the document's scene graph is its own store
+# (document/scenegraph/nodegraph.h) and the engine owns its own nodes, so this
+# library links no engine and includes no Ogre header: a document builds with no
+# Ogre::Root, on any thread. (SCENEGRAPH_SPEC D2 had linked Ogre-Next here.)
 target_compile_options(IrisGL PUBLIC)
 target_compile_definitions(IrisGL PRIVATE
     JAHSHAKA_MESH_BAKE_PRODUCER_ID="${_mesh_bake_producer_id}"

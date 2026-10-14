@@ -552,7 +552,7 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 	// re-check fall back to every body.
 	// Read BEFORE step 1, whose own writes are bodies this pass writes anyway.
 	const bool recheck = !writeBackValid || graph::transformWrites() != writesAfterWriteBack;
-	std::vector<graph::NodeHandle> written;
+	std::vector<iris::SceneNode *> written;
 	const bool journalComplete = recheck && writeBackValid && writeJournal.take(written);
 	lastRechecks = 0;
 
@@ -572,10 +572,7 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 		for (auto it = bodyRecords.begin(); it != bodyRecords.end(); ++it)
 			recheckBody(const_cast<btRigidBody *>(it.key()), *it);
 	} else if (recheck) {
-		std::vector<iris::SceneNode *> stack;
-		stack.reserve(written.size());
-		for (graph::NodeHandle h : written)
-			if (iris::SceneNode *owner = graph::ownerOf(h)) stack.push_back(owner);
+		std::vector<iris::SceneNode *> stack(written.begin(), written.end());
 		QSet<QString> seen;
 		while (!stack.empty()) {
 			iris::SceneNode *owner = stack.back();

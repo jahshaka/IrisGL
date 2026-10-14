@@ -7152,17 +7152,6 @@ struct ObjectCounts {
     /// editor is the NORMAL, wanted state; `updatedScenes == scenes` with
     /// several preview pages alive means the gate stopped working.
     unsigned updatedScenes = 0;
-    /// SceneManagers the engine holds that are NOT Scenes: the document's
-    /// staging manager (SPECS/SCENEGRAPH_SPEC.md D2), where every node that is
-    /// not in a rendered scene lives — everything an importer builds, everything
-    /// the undo stack holds, every document that has not met a SceneMirror.
-    ///
-    /// A ROW OF ITS OWN rather than part of `scenes` (THREADING_ADOPTION_SPEC.md
-    /// P5): it has no View, no workspace, no worker threads and no place in the
-    /// frame loop, and the census is a debugging instrument — a number that
-    /// mixes two kinds of object answers no question. 0 until the host asks for
-    /// documentGraphScene(), 1 after.
-    unsigned stagingScenes = 0;
     unsigned nodes = 0;         ///< tracked node records, summed over scenes
     unsigned meshes = 0;        ///< tracked mesh records, summed over scenes
     unsigned materials = 0;     ///< tracked material records, summed over scenes
@@ -7878,6 +7867,20 @@ class View;
 /// every child under it). The engine re-reads exactly those items — the GI movement scan, the caster walk, the
 /// geometry signature — and bumps the light serial once when a light is among them (the re-inject). An empty set
 /// costs nothing anywhere; `complete == false` (the journal could not name every write) costs one full pass.
+/// ONE DOCUMENT NODE'S RECORD (ENGINE-UPGRADE-U2, the extract): what its mirror says changed since the last frame —
+/// the node's LOCAL transform (the engine composes its own hierarchy, so a moved subtree root is ONE record, never its
+/// subtree), its parent, its graph class. Only the named `fields` are meant. Applied at the top of the frame, in order,
+/// before the change set (OgreScene::applyNodeRecords), on a node made by Scene::createDocumentNode.
+struct NodeRecord {
+    enum : unsigned char { Trs = 1, Parent = 2, Static = 4 };
+    NodeId        id = 0;
+    unsigned char fields = 0;
+    bool          isStatic = false;   ///< Static: the GRAPH CLASS (SCENE_STATIC), the document's decision
+    NodeId        parent = 0;         ///< Parent: 0 = the scene root
+    Vec3          position;           ///< Trs: the LOCAL transform
+    Quat          rotation;
+    Vec3          scale = Vec3(1.0f, 1.0f, 1.0f);
+};
 struct ChangeSet {
     bool                complete = true;
     std::vector<NodeId> moved;
@@ -7901,6 +7904,8 @@ struct FrameInputScene {
     std::optional<FrameInputGesture>  gesture;
     /// Never compared at the drain like the fields below: a set is EVENTS, applied once, merged by appending.
     ChangeSet changes;
+    /// THE DOCUMENT NODES' RECORDS (the extract, NodeRecord): events too — applied in order, merged by appending.
+    std::vector<NodeRecord> nodes;
     std::optional<ShadowDesc>             shadows;
     std::optional<Colour>                 environmentLight;
     std::optional<FogDesc>                fog;
@@ -7961,7 +7966,26 @@ struct FrameInputStatus {
     unsigned           changesMoved = 0;        ///< `moved` entries the LAST drain applied, over every scene
     unsigned           changesLights = 0;       ///< ...of whose subtrees held a light (each scene bumps its serial once)
     unsigned long long changesIncomplete = 0;   ///< incomplete sets drained, ever (each one cost a full pass)
+    // ---- the extract (ENGINE-UPGRADE-U2) ----
+    unsigned           nodeRecords = 0;         ///< NodeRecords the LAST drain applied, over every scene
+    unsigned long long nodeRecordsTotal = 0;    ///< ...ever
     double             drainMicros = 0.0;       ///< what the LAST drain cost (the record's own overhead)
+};
+
+/// WHAT A SCENE PUBLISHED FOR THE FRAME IT LAST DREW (ENGINE-UPGRADE-U2; Scene::published()): the engine's output the
+/// document reads WITHOUT asking — under U3 the document thread reads this snapshot and nothing else of the engine's
+/// state. Written once at the close of every frame the engine renders.
+struct PublishedFrame {
+    /// A bone RIDER's TAG (the socket's tag point on the bone): the rider's parent, as drawn. The document composes the
+    /// rider's local under it and re-expresses a world write under it (iris::graph::setRiderTag).
+    struct RiderTag {
+        NodeId rider = 0;
+        Vec3   position;
+        Quat   rotation;
+        Vec3   scale = Vec3(1.0f, 1.0f, 1.0f);
+    };
+    unsigned long long   frame = 0;     ///< the engine frame it was published at (0 = never drawn)
+    std::vector<RiderTag> riderTags;
 };
 
 struct StreamingWork {

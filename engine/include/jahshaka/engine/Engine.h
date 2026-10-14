@@ -7,10 +7,24 @@
 //
 // Interface derived from what Studio DOES, not from what any engine offers.
 //
-// THREAD AFFINITY — no exceptions: every call on Engine, Scene and View, including
-// destruction, must happen on the thread that called Engine::create(). The backend
-// owns a single device and is not internally synchronised. Background work
-// (thumbnails, imports) posts to that thread; it never calls in directly.
+// THREAD AFFINITY — the rule U3 (the render thread) builds on, written while both halves still run on one thread
+// (ENGINE-UPGRADE-U2; ENGINE_UPGRADE_SPEC §1):
+//
+//   * THE ENGINE THREAD is the thread that called Engine::create(). It owns Ogre's Root, the device and every Scene,
+//     View and Ogre object behind them, and DRAINS the frame record at the top of each frame (renderOneFrame).
+//     Every call on Engine, Scene and View, destruction included, happens on it. The backend is not internally
+//     synchronised.
+//   * THE DOCUMENT THREAD builds the frame's record and hands it over with ONE entry point, submitFrame(); it reads
+//     what the engine computed only from the PUBLISHED per-frame snapshot (Scene::published()) — never waiting —
+//     and files every GPU->CPU read as a request with a fence (the picture service).
+//   * EVERY OTHER Engine/Scene/View call the document thread makes is a SYNCHRONOUS GETTER or a direct command, and
+//     each is a debt U3 pays down to zero (host.sync_getters). The getters that remain after U2: Scene::nodeWorldPose
+//     (vrapi.cpp's node.worldPose), Scene::bonePoses (the mirror's avatar overlay), the status getters (giStatus,
+//     rayQueryStatus, frameInputStatus and their kin); and the mirror's direct commands (createDocumentNode,
+//     attachMesh, materials, lights, decals, sockets), which become record messages in U3.
+//
+// Background work (thumbnails, imports) posts to the engine thread; it never calls in directly. A DOCUMENT may be
+// built on any thread: since U2 it holds no engine object at all (iris::graph is the document's own store).
 //
 // ERRORS: no backend exception ever escapes this boundary. A failing call returns
 // null/false and the reason is available from Engine::lastError() until the next
@@ -224,29 +238,16 @@ public:
     // ---- Hierarchy and transforms (VIEWPORT_MIGRATION_PLAN.md step 2) ----
     /// An empty transform node under `parent` (0 = the scene root).
     virtual NodeId      createNode(NodeId parent = 0) = 0;
-    /// ADOPTS a scene node the HOST already owns and gives it a NodeId, so that
-    /// everything else on this interface (attachMesh, setLight, decals, clips,
-    /// particles) works on it exactly as if the engine had made it.
-    ///
-    /// SPECS/SCENEGRAPH_SPEC.md D2: the document's scene graph IS this backend's
-    /// scene graph, and this is the one call that says so. An adopted node's
-    /// transform, parent and children belong to the host — setNodeTransform and
-    /// setNodeParent on it are refused — which is what makes the old per-frame
-    /// transform push unnecessary.
-    ///
-    /// The pointer is opaque here on purpose (`Ogre::SceneNode*` in the Ogre
-    /// backend); the host obtains it from iris::graph, which is the only other
-    /// place in the program that names an engine node type. The node must belong
-    /// to THIS scene's native scene manager — nativeSceneManager() is how the
-    /// host arranges that. Returns 0 on a null pointer or a foreign manager.
-    ///
-    /// removeNode() releases the engine's attachments and forgets the id; it
-    /// never destroys an adopted node.
-    virtual NodeId      adoptNode(void *nativeSceneNode) = 0;
-    /// This scene's native scene manager, opaque (`Ogre::SceneManager*`). The
-    /// document migrates its tree into it when a SceneMirror binds; nothing else
-    /// may use it.
-    virtual void       *nativeSceneManager() const = 0;
+    /// A node the DOCUMENT drives (SceneMirror, ENGINE-UPGRADE-U2): an empty node under `parent` (0 = the scene
+    /// root) whose LOCAL transform, parent and graph class (SCENE_STATIC) arrive through the frame record
+    /// (FrameInputScene::nodes, NodeRecord) and are applied at the top of the frame, before the change set. Everything
+    /// else on this interface (attachMesh, setLight, decals, clips, particles, sockets) works on it as on any node;
+    /// setNodeTransform and setNodeParent on it are REFUSED — the record is its one writer. Its document children are
+    /// the document's: the visibility cascade does not descend into them (their host pushes each, parent-first).
+    /// removeNode() destroys it; its children are re-parented to the scene root.
+    virtual NodeId      createDocumentNode(NodeId parent = 0) = 0;
+    /// WHAT THIS SCENE PUBLISHED for the frame the engine last drew (PublishedFrame): read without asking.
+    virtual const PublishedFrame &published() const = 0;
     virtual bool        setNodeParent(NodeId, NodeId parent) = 0;
     /// Absolute LOCAL transform (relative to the parent). The document owns the
     /// numbers; the engine composes the hierarchy.
@@ -264,7 +265,7 @@ public:
     /// already knows the parent's effective state (SceneMirror::visit). It is
     /// the only difference: `setNodeVisible` derives that state by walking up
     /// to the nearest registered ancestor — one registry lookup per push, which
-    /// on a first sync is one per adopted node on top of the one `adoptNode`
+    /// on a first sync is one per document node on top of the one `createDocumentNode`
     /// already paid, for an answer the caller computed a line earlier.
     /// `parentShown` is what the host would have found (true at the root of the
     /// pushed walk, and for a node whose engine parent is not in the document's
@@ -697,11 +698,11 @@ public:
     /// dependency, which Ogre calls "undefined, probably very wonky").
     ///
     /// NOTE for readers between frames: a tag point's world transform is the one
-    /// the LAST RENDERED FRAME produced. Ogre cannot resolve a tag on demand
-    /// (TagPoint::updateFromParentImpl is `assert(false)`), so
-    /// iris::graph::globalTransform reads the cached transform for a tagged
-    /// node — identical latency to the read-back path this replaces, while the
-    /// RENDER is exact.
+    /// the LAST RENDERED FRAME produced (Ogre cannot resolve a tag on demand —
+    /// TagPoint::updateFromParentImpl is `assert(false)`). The scene PUBLISHES it
+    /// per rider at the close of each frame (PublishedFrame::riderTags); the
+    /// document composes the rider under it (iris::graph::setRiderTag) — one
+    /// frame of latency on the bone, while the RENDER is exact.
     virtual bool attachToBone(NodeId rider, NodeId owner, const std::string &bone,
                               const Vec3 &position, const Quat &rotation, const Vec3 &scale) = 0;
     /// Takes the rider off its bone and puts it back under `parent` (0 = the
@@ -1970,25 +1971,6 @@ public:
     /// see the note on Tier::Utility in src/bridge/sceneworkerthreads.h.
     virtual Scene *createScene(const std::string &name, unsigned workerThreads = 0) = 0;
 
-    /// The scene manager DETACHED document nodes live in, opaque
-    /// (`Ogre::SceneManager*`). SPECS/SCENEGRAPH_SPEC.md D2: a document node IS
-    /// an engine node, so one has to exist for nodes that are not (yet) in any
-    /// rendered scene — every node an importer builds, everything the undo stack
-    /// holds, every document that has not met a SceneMirror. It renders nothing
-    /// and is never bound to a View.
-    ///
-    /// Creating it forces the backend's one-time preparation — the
-    /// Hlms/resource registration a scene manager cannot exist without, and, on
-    /// a RENDERING boot only, a surfaceless window to hang that registration
-    /// on. A HEADLESS engine (EngineConfig::headless) already has both when
-    /// create() returns, so asking for this costs nothing there.
-    ///
-    /// Hosts ask for it once, before their first document node, and hand it to
-    /// iris::graph. On a rendering boot, asking BEFORE the first real View is
-    /// what makes the backend create that surfaceless window ahead of the
-    /// on-screen one; hosts that can wait should wait (Studio's EngineHost
-    /// registers it lazily for exactly this reason).
-    virtual void *documentGraphScene() = 0;
     /// True when this engine was created with EngineConfig::headless — the NULL
     /// render system, no display, no device, and no View of any kind. Hosts
     /// that decide what to show read it instead of guessing from a failed

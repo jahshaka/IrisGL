@@ -401,19 +401,11 @@ SceneMirror::~SceneMirror()
     // The engine scene may already be gone (Engine destroyed first); only touch it
     // if the caller kept the documented order. Entries are cheap to drop.
     //
-    // The DOCUMENT, however, must come out of the engine's scene manager
-    // (SPECS/SCENEGRAPH_SPEC.md D2: its nodes ARE that manager's nodes now).
-    // Unbinding here covers the ordinary case; a caller that destroys the engine
-    // scene BEFORE letting go of the mirror gets a loud warning out of
-    // Scene::setGraphScene instead of a silent read-after-destroy.
-    //
-    // ONLY IF WE STILL OWN THE GRAPH: another mirror may have taken it since
-    // (player/editor share one document — 2026-09-05). Yanking it to staging
-    // from a non-owner would silently blank the owner's view; and the hook is
-    // the owner's, not ours to fire or clear.
-    if (mSource && mSource->graphScene() == mBoundHandle) {
-        mSource->_setGraphEvacuationHook(nullptr);   // entries are dropped, not released
-        mSource->setGraphScene(iris::graph::stagingScene());
+    // The document lets go of us — ONLY IF WE STILL OWN IT: another mirror may
+    // have taken it since, and the hook is the owner's, not ours to fire or clear.
+    if (mSource && mSource->boundMirror() == this) {
+        mSource->_setMirrorEvacuationHook(nullptr);   // entries are dropped, not released
+        mSource->bindMirror(nullptr);
     }
 }
 
@@ -446,26 +438,18 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mShaderTimeOverride = -1.0f;
     mVerifierCursor = 0;
     mCharacterRigs.clear();
-    // THE RIDERS COME OFF THEIR BONES FIRST, and this is not tidiness: a rider's
-    // Ogre parent is a TagPoint of THIS engine scene, so a rider left on one is
-    // not a child of anything the DOCUMENT tree contains — and the unbinding
-    // below walks that tree to take the document out of the engine's scene
-    // manager. A rider skipped there is a node left behind in a scene manager
-    // the caller is about to destroy, and the document node holding its handle
-    // faults at its own destruction (found by sockets.render's teardown).
+    // THE RIDERS COME OFF THEIR BONES FIRST: their engine nodes hang off THIS
+    // scene's tag points, and the entries below are released with them.
     releaseAllRiders();
     for (Entry &e : mEntries) releaseEntry(e);
     mEntries.clear();
     mVerifierOrder.clear();
-    // The outgoing document leaves the engine's scene manager before anything
-    // else is torn down: its nodes live IN that manager (one tree), and the
-    // caller is free to destroy the engine scene the moment this returns.
-    // Ownership-guarded (2026-09-05): if another mirror has taken the graph
-    // since, it is not ours to move — and the hook registered on the document
-    // is the owner's, not ours.
-    if (mSource && mSource->graphScene() == mBoundHandle) {
-        mSource->_setGraphEvacuationHook(nullptr);   // entries released above
-        mSource->setGraphScene(iris::graph::stagingScene());
+    // The outgoing document lets go of us. Ownership-guarded (2026-09-05): if
+    // another mirror has taken it since, the hook registered on it is the
+    // owner's, not ours.
+    if (mSource && mSource->boundMirror() == this) {
+        mSource->_setMirrorEvacuationHook(nullptr);   // entries released above
+        mSource->bindMirror(nullptr);
     }
     for (MeshId &m : mWireMeshes) { if (m) mTarget->destroyMesh(m); m = 0; }
     // The grid is the engine's own quad (GRID-2): a disabled description hides it.
@@ -515,17 +499,11 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     // next frame's input re-asserts every field (FrameInputScene::reassert).
     mReassertPending = true;
     mSource = scene;
-    // ...and the incoming one moves INTO it. This is the whole of the swap from
-    // the mirror's side: after it, the engine reads the very nodes the user
-    // edits, and the per-frame transform push (audit F1) has nothing to do.
+    // ...and the incoming one binds to us. bindMirror fires the PREVIOUS
+    // owner's evacuation hook (another mirror over this document) first.
     if (mSource) {
-        mBoundHandle =
-            reinterpret_cast<iris::graph::SceneHandle>(mTarget->nativeSceneManager());
-        // setGraphScene fires the PREVIOUS owner's evacuation hook (another
-        // mirror sharing this document — the player page's, say) before the
-        // migration destroys the nodes its engine objects sit on.
-        mSource->setGraphScene(mBoundHandle);
-        mSource->_setGraphEvacuationHook([this] { evacuateEngineObjects(); });
+        mSource->bindMirror(this);
+        mSource->_setMirrorEvacuationHook([this] { evacuateEngineObjects(); });
     }
 }
 
@@ -650,22 +628,20 @@ int SceneMirror::sync(const FrameViews &frameViews)
     // It is KEPT as the guard it was written to be (the 2026-09-05 crash):
     // should a host ever bind two mirrors to one document again, the result is
     // a full re-walk here instead of particle systems and the planar pass
-    // reading nodes the migration had already destroyed. The previous owner's
-    // evacuation hook releases its engine objects before the migration; our own
+    // reading nodes already gone. The previous owner's evacuation hook releases
+    // its engine objects first; our own
     // entries were emptied the same way when WE lost it, so the walk below
     // rebuilds from scratch.
-    if (mSource->graphScene() != mBoundHandle) {
-        mSource->setGraphScene(mBoundHandle);
-        mSource->_setGraphEvacuationHook([this] { evacuateEngineObjects(); });
+    if (mSource->boundMirror() != this) {
+        mSource->bindMirror(this);
+        mSource->_setMirrorEvacuationHook([this] { evacuateEngineObjects(); });
         // A RE-TAKE IS A FULL-WALK TRIGGER (§3.5): the other mirror's
-        // evacuation hook released every entry, and the migration rebuilt every
-        // Ogre node under this manager.
+        // evacuation hook released every entry.
         mFullWalkPending = true;
     }
-    // NO transform refresh. There is nothing to refresh: every document write
-    // lands in the document's transform store AND in the Ogre node the engine
-    // adopted (ENGINE-UPGRADE-U2 stage 1), and the document's readers derive
-    // their world transforms from the store (iris::graph::world).
+    // NO transform walk. The document's writes reach the engine through the
+    // frame record: each written node's LOCAL transform, named by the write
+    // journal (THE EXTRACT, ENGINE-UPGRADE-U2: takeWriteJournal + the emit).
     // Sockets (CAMERAS_SPEC §5) move nodes, so they resolve BEFORE the walk
     // that pushes transforms — a camera on a character's head has to be on the
     // head in the frame that renders it, not in the one after.
@@ -676,6 +652,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
         (mMonitorEngine && mMonitorEngine->frameMonitor() != jahshaka::engine::MonitorLevel::Off)
             ? mMonitorEngine : nullptr;
     { MirrorStage s(mon, "mirror.sockets");
+    takePublishedRiderTags();
     resolveSockets();
     }
     // THE CHANGE SET, FIRST TAKE (U0 3b): the document's writes since the last emit (this mirror's cursor on the
@@ -972,6 +949,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
     takeWriteJournal();
     scenePart.changes = std::move(mFrameChanges);
     mFrameChanges = jahshaka::engine::ChangeSet();
+    buildNodeRecords(scenePart.nodes);
     mWrittenThisSync.clear();
     std::vector<FrameInputView> parts(frameViews.views.size());
     for (size_t i = 0; i < frameViews.views.size(); ++i) {
@@ -1178,8 +1156,8 @@ void SceneMirror::runStaticSettle()
         if (!root) return;                         // nothing to classify
         mSettleDeferred = false;
         // The document root has no document parent: applyStaticDefaults
-        // starts it with parentMovable = false and no carry.
-        mSettleWalk.push_back({ root.toWeakRef(), nullptr, false, false });
+        // starts it with parentMovable = false.
+        mSettleWalk.push_back({ root.toWeakRef(), nullptr, false });
     }
     if (stepStaticSettle()) {
         // A rotation that deferred nothing is a whole re-derivation; one that
@@ -1267,11 +1245,11 @@ bool SceneMirror::stepStaticSettle()
             mSettleDeferred = true;
             continue;
         }
-        bool childCarry = false;
-        const bool movable = n->_applyStaticDefaultsStep(e.parentMovable, e.carry, &childCarry);
+        const bool movable = n->_applyStaticDefaultsStep(e.parentMovable);
+        noteGraphClass(n.data());   // the settle's own promotion: the engine hears it this sync
         for (int i = n->childCount(); i-- > 0;) {
             if (iris::SceneNode *c = n->childAt(i))
-                mSettleWalk.push_back({ c->sharedFromThis().toWeakRef(), n.data(), movable, childCarry });
+                mSettleWalk.push_back({ c->sharedFromThis().toWeakRef(), n.data(), movable });
         }
     }
     mSettleVisits = visits;
@@ -3219,6 +3197,41 @@ TextureId SceneMirror::iconTextureFor(const QString &path)
 SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool parentShown,
                                                 bool parentMovable)
 {
+    const VisitResult r = visitNodeBody(node, parentShown, parentMovable);
+    // THE GRAPH CLASS, AFTER the body: the visit itself may move it (a soft promotion's demotion, a hint replay).
+    if (node && r.entry) noteGraphClass(node);
+    return r;
+}
+
+// THE GRAPH CLASS'S LATCH (ENGINE-UPGRADE-U2): a node whose class moved owes the engine a Static record — and so does
+// every mirrored node under it whose class moved with it (iris::graph switches subtrees and marks only each switched
+// region's top, so this walk is the region's; it runs only when the top's class did change).
+void SceneMirror::noteGraphClass(iris::SceneNode *node)
+{
+    using jahshaka::engine::NodeRecord;
+    auto it = mEntries.find(node);
+    if (it == mEntries.end() || !it->node) return;
+    const int cls = node->isStaticInGraph() ? 1 : 0;
+    if (it->staticPushed == cls) return;
+    it->staticPushed = cls;
+    oweNodeRecord(node, NodeRecord::Static);
+    notePush(node, "graph class");
+    std::vector<iris::SceneNode *> stack;
+    for (int i = node->childCount(); i-- > 0;) if (iris::SceneNode *c = node->childAt(i)) stack.push_back(c);
+    while (!stack.empty()) {
+        iris::SceneNode *n = stack.back();
+        stack.pop_back();
+        auto ce = mEntries.find(n);
+        if (ce == mEntries.end() || !ce->node) continue;
+        const int c = n->isStaticInGraph() ? 1 : 0;
+        if (ce->staticPushed != c) { ce->staticPushed = c; oweNodeRecord(n, NodeRecord::Static); }
+        for (int i = n->childCount(); i-- > 0;) if (iris::SceneNode *k = n->childAt(i)) stack.push_back(k);
+    }
+}
+
+SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool parentShown,
+                                                    bool parentMovable)
+{
     VisitResult out;
     if (!node) { out.descend = false; return out; }
     if (mVerifying) ++mVerifierVisits;
@@ -3231,27 +3244,30 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
     // leaves it lazily, when the rotation finds its key gone.
     if (mEntries.size() != entriesBefore) mVerifierOrder.push_back(node);
     e.lastSeen = mSyncStamp;
-    // ONE TREE (SPECS/SCENEGRAPH_SPEC.md D2). The engine no longer makes a node
-    // for a document node — it ADOPTS the document's own, which is already an
-    // Ogre scene node in this scene's manager. That single change deletes the
-    // whole of audit F1: there is no transform to push (the engine reads the
-    // graph the user edited), and no parent to re-push either (a reparent in
-    // the hierarchy panel IS the reparent in the engine's tree).
-    const void *graphNode = reinterpret_cast<void *>(node->graphNode());
-    if (!e.node || e.graphNode != graphNode || e.graphEpoch != node->graphEpoch()) {
-        if (e.node) {
-            // The handle was rebuilt under us (a migration between scene
-            // managers). Everything the engine hung off the old one is gone
-            // with it; drop the entry's engine state and adopt afresh.
-            releaseEntry(e);
-        }
-        if (!graphNode) { out.descend = false; return out; }
-        e.node = mTarget->adoptNode(const_cast<void *>(graphNode));
-        e.graphNode = graphNode;
-        e.graphEpoch = node->graphEpoch();
+    // THE ENGINE OWNS ITS NODE (ENGINE-UPGRADE-U2): made once, under the parent's engine node (0 = the scene root:
+    // the document root is not mirrored), and from then on told — never asked — through the frame record: the local
+    // transform when the journal names a write, the parent and the graph class when they change (the latches below,
+    // pushed parent-first because the walk is). A moved subtree is one record: the engine composes the rest.
+    using jahshaka::engine::NodeRecord;
+    jahshaka::engine::NodeId parentId = 0;
+    if (const iris::graph::DocNode *dp = node->docNode().parent) {
+        const auto pit = mEntries.constFind(dp->owner);
+        if (pit != mEntries.cend()) parentId = pit->node;
+    }
+    if (!e.node) {
+        e.node = mTarget->createDocumentNode(parentId);
         if (!e.node) { out.descend = false; return out; }
+        e.parentPushed = parentId;
+        e.staticPushed = node->isStaticInGraph() ? 1 : 0;
         e.visiblePushed = -1;      // force one visibility application
         e.lightMaskEverPushed = false;   // ...and one lighting-channel application
+        oweNodeRecord(node, NodeRecord::Trs | NodeRecord::Parent | NodeRecord::Static);
+    } else {
+        if (e.parentPushed != parentId) {
+            e.parentPushed = parentId;
+            oweNodeRecord(node, NodeRecord::Parent);
+            notePush(node, "parent");
+        }
     }
 
     e.docNode = node;
@@ -3771,12 +3787,89 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
 // A written node this mirror has no engine node for (the document root, a node the walk refused or has not adopted
 // yet) passes the move to its mirrored descendants. An incomplete take (the reader's first, a write no document node
 // owns, a cursor the log's cap overtook) makes the set incomplete: the engine takes its full pass once.
+// THE RIDERS' TAGS, AS THE ENGINE DREW THEM (ENGINE-UPGRADE-U2: Scene::published, read without asking): each armed
+// rider's parent in the document's composition (iris::graph::setRiderTag) — its world and any world write on it.
+void SceneMirror::takePublishedRiderTags()
+{
+    if (mBoneRiders.isEmpty()) return;
+    const jahshaka::engine::PublishedFrame &pub = mTarget->published();
+    if (pub.riderTags.empty()) return;
+    for (auto it = mBoneRiders.begin(); it != mBoneRiders.end(); ++it) {
+        iris::SceneNode *rider = const_cast<iris::SceneNode *>(it.key());
+        const auto e = mEntries.constFind(rider);
+        if (e == mEntries.cend() || !e->node) continue;
+        for (const auto &t : pub.riderTags) {
+            if (t.rider != e->node) continue;
+            iris::graph::Trs w;
+            w.pos = iris::Vec3(t.position.x, t.position.y, t.position.z);
+            w.rot = iris::Quat(t.rotation.w, t.rotation.x, t.rotation.y, t.rotation.z);
+            w.scale = iris::Vec3(t.scale.x, t.scale.y, t.scale.z);
+            iris::graph::setRiderTag(rider->docNode(), w);
+            break;
+        }
+    }
+}
+
 void SceneMirror::takeWriteJournal()
 {
-    if (!mJournal.take(mJournalScratch)) mFrameChanges.complete = false;
-    for (iris::graph::NodeHandle h : mJournalScratch)
-        if (iris::SceneNode *n = iris::graph::ownerOf(h)) noteWrittenNode(n);
+    if (!mJournal.takePoses(mJournalScratch, mJournalPosed)) {
+        mFrameChanges.complete = false;
+        mPoseAllPending = true;   // a write the take cannot name: every mirrored node sends its transform
+    }
+    for (iris::SceneNode *n : mJournalScratch) {
+        noteWrittenNode(n);
+        if (mEntries.contains(n)) oweNodeRecord(n, jahshaka::engine::NodeRecord::Trs);
+    }
+    // POSED (a camera's write): no scene movement, so not in the change set — but the engine still draws it there.
+    for (iris::SceneNode *n : mJournalPosed)
+        if (mEntries.contains(n)) oweNodeRecord(n, jahshaka::engine::NodeRecord::Trs);
     mJournalScratch.clear();
+    mJournalPosed.clear();
+}
+
+void SceneMirror::oweNodeRecord(iris::SceneNode *node, quint8 fields)
+{
+    auto it = mFrameNodeFields.find(node);
+    if (it == mFrameNodeFields.end()) {
+        mFrameNodeFields.insert(node, fields);
+        mFrameNodeOrder.push_back(node);
+    } else {
+        it.value() |= fields;
+    }
+}
+
+// THE EXTRACT (ENGINE-UPGRADE-U2; ENGINE_UPGRADE_SPEC §1, "the crossing"). One NodeRecord per node owed this sync —
+// the journal's written nodes (their LOCAL transform: the engine composes its own hierarchy, so a moved subtree root
+// is ONE record and a still frame none), a new entry (everything), a changed parent or graph class (the walk's
+// latches) — read NOW, at the emit, so a node written twice in one sync is one record with its last values.
+void SceneMirror::buildNodeRecords(std::vector<jahshaka::engine::NodeRecord> &out)
+{
+    using jahshaka::engine::NodeRecord;
+    if (mPoseAllPending) {
+        mPoseAllPending = false;
+        for (auto it = mEntries.begin(); it != mEntries.end(); ++it)
+            if (it->node && it->docNode) oweNodeRecord(it->docNode, NodeRecord::Trs);
+    }
+    out.reserve(out.size() + mFrameNodeOrder.size());
+    for (iris::SceneNode *n : mFrameNodeOrder) {
+        const auto e = mEntries.constFind(n);
+        if (e == mEntries.cend() || !e->node) continue;   // released since it was owed (no deref: the key is gone)
+        const quint8 fields = mFrameNodeFields.value(n, 0);
+        NodeRecord r;
+        r.id = e->node;
+        r.fields = fields;
+        if (fields & NodeRecord::Parent) r.parent = e->parentPushed;
+        if (fields & NodeRecord::Static) r.isStatic = e->staticPushed > 0;
+        if (fields & NodeRecord::Trs) {
+            const iris::graph::DocNode &d = n->docNode();
+            r.position = toVec3(d.pos);
+            r.rotation = toQuat(d.rot);
+            r.scale = toVec3(d.scale);
+        }
+        out.push_back(r);
+    }
+    mFrameNodeOrder.clear();
+    mFrameNodeFields.clear();
 }
 
 void SceneMirror::noteWrittenNode(iris::SceneNode *node)
@@ -6320,7 +6413,7 @@ int SceneMirror::reconcileSockets()
                         keepScale = prior->authoredScale;
                     }
                 }
-                if (iris::graph::isSocketRider(rider->graphNode())) releaseRider(rider);
+                if (iris::graph::isSocketRider(rider->docNode())) releaseRider(rider);
                 // ...AND STRAIGHT BACK INTO THE ROW. releaseRider drops it, and
                 // the resolve below can fail (a socket whose bone the rig has
                 // not, a frame where the owner has no pose yet) — which used to
@@ -6407,11 +6500,11 @@ int SceneMirror::reconcileSockets()
                 // The rider keeps its place in the DOCUMENT hierarchy — the
                 // socket API's promise — by construction (the store owns it);
                 // the flag, set BEFORE the tag, makes its world the engine's.
-                iris::graph::setSocketRider(rider->graphNode(), true);
+                iris::graph::setSocketRider(rider->docNode(), true);
                 if (!mTarget->attachToBone(riderId, ownerId, socket->boneName.toStdString(),
                                            toVec3(socket->position), toQuat(socket->rotation),
                                            toVec3(socket->scale))) {
-                    iris::graph::setSocketRider(rider->graphNode(), false);
+                    iris::graph::setSocketRider(rider->docNode(), false);
                     // THE ROW SURVIVES A FAILED ARM (round-2 review, item 3).
                     // It used to be removed — and with it the AUTHORED OFFSET
                     // this rider must get back when the rig returns. A failed
@@ -6553,20 +6646,11 @@ void SceneMirror::releaseRider(iris::SceneNode *rider)
         }
         mTarget->detachFromBone(entry->node, parentId);
     }
-    iris::graph::setSocketRider(rider->graphNode(), false);
+    iris::graph::setSocketRider(rider->docNode(), false);
     mBoneRiders.remove(rider);
 
-    // ...AND BACK UNDER ITS DOCUMENT PARENT IN OGRE'S HIERARCHY (the store never
-    // moved it; the Ogre half must follow). The engine can only re-home the node under a node
-    // it has an id for, and the document's ROOT is not mirrored (the walk starts
-    // at its children) — so a rider whose parent is the root would be left as a
-    // sibling of the document tree instead of inside it. That is invisible until
-    // the document MIGRATES (a mirror unbinding, an editor/player swap), which
-    // walks the tree from its root: the stray node stays behind in a scene
-    // manager the caller is about to destroy, and the document node holding its
-    // handle faults at its own destruction. sockets.render's teardown found it.
-    if (!parent.isNull() && rider->graphNode() && parent->graphNode())
-        iris::graph::followParent(parent->graphNode(), rider->graphNode());
+    // ...and BACK UNDER ITS DOCUMENT PARENT: the engine re-homed its node under the parent's engine node (0 = the
+    // scene root, where the document root's children live) — the very parent the record already names.
     if (placedByCaller) {
         rider->setLocalPos(callerPos);
         rider->setLocalRot(callerRot);

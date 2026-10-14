@@ -1313,33 +1313,19 @@ public:
     SimulationClock &simulationClock() { return clock; }
     const SimulationClock &simulationClock() const { return clock; }
 
-    // ---- the scene-graph binding (SPECS/SCENEGRAPH_SPEC.md D2) ------------
-    /// The Ogre scene manager this document's ONE tree lives in. A scene starts
-    /// in the process-wide STAGING manager (which renders nothing) and is moved
-    /// into an engine scene's manager the moment a SceneMirror binds it — that
-    /// move is what lets the engine read the document's transforms directly
-    /// instead of having them pushed at it every frame (audit F1).
-    graph::SceneHandle graphScene() const { return mGraphScene; }
-    /// Registered by the mirror that OWNS this document's graph (the one whose
-    /// engine scene the tree lives in). setGraphScene fires it exactly once,
-    /// right BEFORE migrating the tree away, so the owner can release every
-    /// engine-side object it hung off the document's nodes (particle systems,
-    /// planar-reflection registrations, highlight shells, Items) while those
-    /// nodes still exist. Without this, whichever mirror bound the document
-    /// last silently took over the graph and the loser's engine objects kept
-    /// pointers to destroyed nodes — the 2026-09-05 player→editor faults.
-    void _setGraphEvacuationHook(std::function<void()> hook) { mGraphEvacuationHook = std::move(hook); }
-    /// Rebuilds the whole tree inside `target`. Passing the staging handle (or
-    /// nothing) UNBINDS: SceneMirror does that before it lets go of a document,
-    /// because an engine scene may be destroyed at any time afterwards and the
-    /// document's handles must not be inside it when that happens.
-    void setGraphScene(graph::SceneHandle target);
-    /// A subtree that has just left this scene's tree but is still ALIVE (the
-    /// undo stack holds deleted nodes — audit §3.3). It stays in this scene's
-    /// scene manager, so setGraphScene has to take it along; without that it
-    /// would be left inside a manager the engine is free to destroy, and an
-    /// undo after a world switch would walk stale handles.
-    void rememberDetached(const SceneNodePtr &node);
+    // ---- the mirror binding ------------------------------------------------
+    /// The SceneMirror that currently OWNS this document (the one consuming its
+    /// change list and drawing it), or null. Since ENGINE-UPGRADE-U2 the engine
+    /// owns its own nodes, so a binding moves no node: it says whose change list
+    /// this is. Another mirror binding the same document takes it over.
+    const void *boundMirror() const { return mBoundMirror; }
+    /// Registered by the mirror that owns this document. bindMirror fires it
+    /// exactly once when a DIFFERENT owner binds (or the owner unbinds through
+    /// someone else), so the loser releases its engine objects and walks the
+    /// whole document again if it ever binds back — one change list, one reader.
+    void _setMirrorEvacuationHook(std::function<void()> hook) { mEvacuationHook = std::move(hook); }
+    /// `owner` takes the document (null = unbind). Idempotent for the owner.
+    void bindMirror(const void *owner);
 
     /// One of the TWO ENTRY POINTS onto iris::picking::raycastMeshes (the other
     /// is Studio's ScenePicker) — audit F13's duplicate walk is gone, and with
@@ -1514,15 +1500,10 @@ public:
     void cleanup();
 
 private:
-    /// Where this document's tree currently lives. Never null once an
-    /// Ogre::Root exists; see setGraphScene.
-    graph::SceneHandle mGraphScene = nullptr;
-    /// See _setGraphEvacuationHook. One-shot: setGraphScene clears it as it fires.
-    std::function<void()> mGraphEvacuationHook;
-    /// Subtrees detached from this scene and still alive — see
-    /// rememberDetached. WEAK: this list must never be the reason a deleted
-    /// node stays alive; expired entries are pruned as they are found.
-    QList<SceneNodeWPtr> mDetached;
+    /// See bindMirror.
+    const void *mBoundMirror = nullptr;
+    /// See _setMirrorEvacuationHook. One-shot: bindMirror clears it as it fires.
+    std::function<void()> mEvacuationHook;
 };
 
 }

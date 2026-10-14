@@ -3908,8 +3908,13 @@ public:
 
     // ---- Hierarchy and transforms ----
     NodeId createNode(NodeId parent) override;
-    NodeId adoptNode(void *nativeSceneNode) override;
-    void *nativeSceneManager() const override;
+    NodeId createDocumentNode(NodeId parent) override;
+    const PublishedFrame &published() const override { return mPublished; }
+    /// THE EXTRACT'S APPLY (ENGINE-UPGRADE-U2): each document node's record — parent, graph class, local TRS — in
+    /// order, before the change set names the subtrees. Returns how many records landed.
+    unsigned applyNodeRecords(const std::vector<NodeRecord> &records);
+    /// The close of a frame the engine drew: what the document reads without asking (PublishedFrame).
+    void publishFrame(unsigned long long frame);
     bool setNodeParent(NodeId id, NodeId parent) override;
     void setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, const Vec3 &scale) override;
     void setNodeVisible(NodeId id, bool visible) override;
@@ -4589,12 +4594,13 @@ private:
     /// Item, Light, mesh and datablock on removal (audit).
     struct Node {
         Ogre::SceneNode *node  = nullptr;
-        /// False for a node ADOPTED from the document's own graph
-        /// (SPECS/SCENEGRAPH_SPEC.md: one tree). The engine hangs its Item,
-        /// light and decal off it but never destroys it, never re-parents its
-        /// children and must never dereference it after the document has let
-        /// it go — releaseNode nulls the pointer first.
-        bool             owned = true;
+        /// A node the DOCUMENT drives (createDocumentNode, ENGINE-UPGRADE-U2): its local TRS, parent and graph
+        /// class arrive through the frame record (applyNodeRecords) and nowhere else; its document children are
+        /// pushed by their host, so the visibility cascade does not descend into them.
+        bool             document = false;
+        /// ...and the GRAPH CLASS the document last said it is in (NodeRecord::isStatic); the node, its
+        /// attachments and its helper children follow it (enforceGraphClass).
+        bool             docStatic = false;
         Ogre::Item      *item  = nullptr;
         Ogre::Light     *light = nullptr;
         /// A hash of the LightDesc fields the SHADOW MAP depends on — type,
@@ -6235,6 +6241,12 @@ private:
     /// ours, and what was it told?"). Keyed by Ogre's never-reused id rather
     /// than the node address, which Ogre recycles.
     std::unordered_map<Ogre::IdType, NodeId> mNodeByOgreId;
+    /// THE SCENE'S PUBLISHED FRAME (Scene::published, PublishedFrame), written at each frame's close.
+    PublishedFrame mPublished;
+    /// The nodes riding a bone tag right now (attachToBone / releaseBoneTag): publishFrame's whole walk.
+    std::vector<NodeId> mBoneRiderIds;
+    /// A document node's graph class -> its Ogre node, its attachments and the helper nodes hanging off it.
+    void enforceGraphClass(Node &rec);
     /// THE HOST'S CONTROLLER PROXY NODES, left then right (Scene::setVrProxyNodes,
     /// VR_SPEC §5 phase 4). The scene owns nothing about them but these two ids:
     /// a running VrSession reads them once a frame, right after it has located
@@ -8420,7 +8432,6 @@ public:
     bool init(const EngineConfig &cfg, std::string &error);
 
     Scene *createScene(const std::string &name, unsigned workerThreads = 0) override;
-    void *documentGraphScene() override;
     /// The blank scene manager (@see mBlankScene), created on the first call.
     /// Null only when the Hlms is not registered yet, which cannot happen on
     /// the path that asks: a View exists by then.
@@ -8570,7 +8581,7 @@ public:
     VrSession *vrSession() const { return mVrSession; }
     /// Makes `mVrConnection` for a session or a probe (VR-START-1); false +
     /// mVrInfo.failure/reason when nothing answers. Ensures a Vulkan device
-    /// exists first (the surfaceless window, as documentGraphScene does).
+    /// exists first (the surfaceless window).
     bool vrConnect(std::string &why);
 
     bool updateScene(Scene *scene) override;
@@ -8936,13 +8947,9 @@ private:
 
     Ogre::Root     *mRoot = nullptr;
     Ogre::Window   *mNullWindow = nullptr;
-    /// The document's staging scene manager (SPECS/SCENEGRAPH_SPEC.md D2).
-    /// Owned here so that it dies with the engine, before the Root.
-    Ogre::SceneManager *mDocumentScene = nullptr;
     /// THE BLANK SCENE MANAGER (lane STALE-VIEW-1): the empty world every
     /// scene-less View's clear-only workspace runs against. One per process and
-    /// created on demand, in the shape mDocumentScene is created in and for the
-    /// same reason — a compositor workspace needs a SceneManager and a camera,
+    /// created on demand — a compositor workspace needs a SceneManager and a camera,
     /// and nothing in here is ever culled, lit or drawn. @see blankSceneManager.
     Ogre::SceneManager *mBlankScene = nullptr;
 #ifdef __linux__
@@ -8958,6 +8965,8 @@ private:
     /// EngineConfig::headless: the NULL render system is loaded, mNullWindow is
     /// the 1x1 window IT created at boot, and no View can exist.
     bool            mHeadless = false;
+    /// Frames closed (closeRenderFrame), the PublishedFrame::frame stamp.
+    unsigned long long mPublishedFrames = 0;
     /// The background shader compiler's thread count (ASYNC-SHADERS-1;
     /// EngineConfig::asyncShaderThreads, JAH_ASYNC_SHADER_THREADS).
     unsigned        mAsyncShaderThreads = 2;

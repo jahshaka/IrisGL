@@ -184,8 +184,8 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // called from createRenderWindow) has to be satisfied somehow, and
         // under the NULL system the cheapest satisfaction is the render
         // system's own 1x1 window: initialise(true) makes it, and it needs
-        // nothing from the machine. Keeping the pointer means documentGraphScene
-        // and the (refused) view calls never make a second one.
+        // nothing from the machine. Keeping the pointer means the (refused)
+        // view calls never make a second one.
         //
         // A RENDERING boot stays exactly as it always was — initialise(false),
         // no window, no device — so the first window a Vulkan session creates
@@ -223,46 +223,6 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     } JAH_CATCH(error, false);
 }
 
-void *OgreEngine::documentGraphScene() {
-    JAH_TRY {
-        if (mDocumentScene) return mDocumentScene;
-        // The same one-time preparation createOffscreenView does. A scene
-        // manager cannot exist before a Window and before the Hlms/resource
-        // registration (CLAUDE.md's startup-order fact; the crash is inside
-        // SceneManager's constructor, which looks up a material the common
-        // scripts define). The host asks for this scene once, before its first
-        // document node, so that from then on "an engine exists" and "a
-        // document node has real graph storage" are the same statement.
-        //
-        // HEADLESS runs never enter the branch below: the NULL render system
-        // created mNullWindow itself inside init(), so the rule is already
-        // satisfied and this call only registers the Hlms and makes the scene
-        // manager. A RENDERING run that asks before its first View is what
-        // makes the surfaceless window happen — see Engine.h.
-        if (!mHlmsRegistered && !mNullWindow) {
-            Ogre::NameValuePairList wp; wp["windowType"] = "null";
-            mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"),
-                                                    8, 8, false, &wp);
-        }
-        ensureHlms();
-        if (!mHlmsRegistered) { mLastError = "documentGraphScene: Hlms unavailable"; return nullptr; }
-        // NO worker threads and no Forward+ setup: nothing in here is ever
-        // culled, lit or drawn. It exists to hold nodes.
-        //
-        // ZERO, NOT ONE (THREADING_ADOPTION_SPEC.md P5). This asked for 1 until
-        // the hygiene phase, which spawned a thread and paid two barrier syncs
-        // per parallel pass so that a scene NOBODY EVER DRAWS could do its
-        // serial work on someone else's stack. At 0 Ogre sets mForceMainThread
-        // and runs those passes inline with no barrier and no thread
-        // (OgreSceneManager.cpp:171, :4705-4717). The frame loop has skipped
-        // this manager entirely since P3, so in practice the passes do not run
-        // at all — but the THREAD was created regardless, once per process.
-        mDocumentScene = mRoot->createSceneManager(Ogre::ST_GENERIC, 0u,
-                                                   processUniqueName("jahshaka-document"));
-        return mDocumentScene;
-    } JAH_CATCH(mLastError, nullptr);
-}
-
 // THE BLANK WORLD (lane STALE-VIEW-1). A compositor workspace needs a
 // SceneManager and a camera, and a View with no scene has neither — so the
 // clear-only chain a scene-less View owns (chain::buildBlank) runs against this
@@ -270,8 +230,7 @@ void *OgreEngine::documentGraphScene() {
 // pass that names it renders the OVERLAY queues, which are screen-space, and
 // the only object it owns is one camera per View that has ever lost a scene.
 //
-// ZERO WORKER THREADS, for exactly the reason mDocumentScene takes zero
-// (THREADING_ADOPTION_SPEC.md P5): at 0 Ogre sets mForceMainThread and runs the
+// ZERO WORKER THREADS (THREADING_ADOPTION_SPEC.md P5): at 0 Ogre sets mForceMainThread and runs the
 // parallel passes inline with no barrier and no thread. An empty world updated
 // once a frame through an inline pass is free; a thread pool for it would not be.
 Ogre::SceneManager *OgreEngine::blankSceneManager() {
@@ -289,6 +248,19 @@ Ogre::SceneManager *OgreEngine::blankSceneManager() {
 }
 
 Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) {
+    // A SCENE BEFORE ANY VIEW: the one-time preparation a scene manager cannot exist without (a render target, then
+    // the Hlms/resource registration — CLAUDE.md's startup order) happens here. A headless engine already has its
+    // window (the NULL render system's own, made in init); a rendering one gets a surfaceless one, exactly what the
+    // document's staging scene manager used to force before ENGINE-UPGRADE-U2 deleted it (a document needs no engine).
+    if (!mHlmsRegistered) {
+        JAH_TRY {
+            if (!mNullWindow) {
+                Ogre::NameValuePairList wp; wp["windowType"] = "null";
+                mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"), 8, 8, false, &wp);
+            }
+            ensureHlms();
+        } JAH_CATCH(mLastError, nullptr);
+    }
     if (!mHlmsRegistered) {
         mLastError = "createScene('" + name + "'): no View exists yet — create a View first";
         return nullptr;
@@ -1461,6 +1433,11 @@ void OgreEngine::renderOneFrame() {
 // on its own — a step that fails costs its own work and not the ones after it —
 // and the message lands in `lastError()`, which is where a host looks anyway.
 void OgreEngine::closeRenderFrame() noexcept {
+    // ---- 0. what the frame publishes (ENGINE-UPGRADE-U2: Scene::published) --
+    frameCloseStep(mLastError, [this] {
+        ++mPublishedFrames;
+        for (auto &s : mScenes) if (s) s->publishFrame(mPublishedFrames);
+    });
     // ---- 1. the runtime's frame ------------------------------------------
     frameCloseStep(mLastError, [this] {
         if (mVrSession) vrSessionEndFrame(mVrSession);
@@ -1751,8 +1728,7 @@ bool OgreEngine::vrConnect(std::string &why) {
         return false;
     }
     // THE DEVICE MUST EXIST: the connection binds to it. A host asks after its
-    // first view; one that asks earlier gets the surfaceless window here, the
-    // same one documentGraphScene would make.
+    // first view; one that asks earlier gets the surfaceless window here.
     if (!mHlmsRegistered && !mNullWindow) {
         Ogre::NameValuePairList wp; wp["windowType"] = "null";
         mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"), 8, 8, false, &wp);
@@ -2394,6 +2370,7 @@ void OgreEngine::submitFrame(const FrameInput &in) {
         // THE CHANGE SET APPENDS (events, not values): both submits' writes are this frame's.
         it->changes.complete = it->changes.complete && sc.changes.complete;
         it->changes.moved.insert(it->changes.moved.end(), sc.changes.moved.begin(), sc.changes.moved.end());
+        it->nodes.insert(it->nodes.end(), sc.nodes.begin(), sc.nodes.end());   // events, in order
         // A scene's part is REPLACED by the newest, FIELD BY FIELD: every field the newer record carries wins, and
         // one it does not carry keeps the older record's value (a sparser second sync never drops the first's).
         if (sc.shadows) it->shadows = sc.shadows;
@@ -2452,6 +2429,7 @@ void OgreEngine::drainFrameInput() {
     mFrameInputStatus.viewFieldsApplied = 0;
     mFrameInputStatus.changesMoved = 0;
     mFrameInputStatus.changesLights = 0;
+    mFrameInputStatus.nodeRecords = 0;
     if (!mFrameInputPending) { ++mFrameInputStatus.drainedEmpty; return; }
     FrameInput in = std::move(mPendingFrameInput);
     mPendingFrameInput = FrameInput();
@@ -2469,7 +2447,14 @@ void OgreEngine::drainFrameInput() {
         OgreScene *sc = nullptr;
         for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
         if (!sc) continue;   // destroyed before its frame
-        // THE CHANGE SET FIRST (U0 3b): what the document wrote, before anything of the frame reads a box.
+        // THE DOCUMENT'S NODES FIRST (ENGINE-UPGRADE-U2, the extract): every pose, parent and class the document
+        // wrote lands before the change set names the moved subtrees to the scans.
+        {
+            const unsigned n = sc->applyNodeRecords(part.nodes);
+            mFrameInputStatus.nodeRecords += n;
+            mFrameInputStatus.nodeRecordsTotal += n;
+        }
+        // THE CHANGE SET NEXT (U0 3b): what the document wrote, before anything of the frame reads a box.
         mFrameInputStatus.changesMoved += unsigned(part.changes.moved.size());
         if (!part.changes.complete) ++mFrameInputStatus.changesIncomplete;
         mFrameInputStatus.changesLights += sc->applyChangeSet(part.changes);
@@ -2883,7 +2868,6 @@ bool OgreEngine::memoryStats(MemoryStats &out) const {
             out.simdObjects += unsigned(sm->_getLightMemoryManager().getTotalNumObjects());
         };
         for (const auto &s : mScenes) if (s) walk(s->sceneManager());
-        walk(mDocumentScene);
 #ifdef __linux__
         if (FILE *f = std::fopen("/proc/self/statm", "r")) {
             unsigned long size = 0, resident = 0;
@@ -2907,7 +2891,6 @@ bool OgreEngine::reclaimMemory(MemoryStats *before, MemoryStats *after) {
     JAH_TRY {
         for (const auto &s : mScenes)
             if (s && s->sceneManager()) s->sceneManager()->shrinkToFitMemoryPools();
-        if (mDocumentScene) mDocumentScene->shrinkToFitMemoryPools();
         // (No VaoManager call: cleanupEmptyPools() throws ERR_NOT_IMPLEMENTED at
         // this pin, and the Vulkan VaoManager already returns an emptied pool
         // to the driver from its own _update — MemoryStats explains.)
@@ -2934,20 +2917,6 @@ bool OgreEngine::objectCounts(ObjectCounts &out) const {
         out.views  = unsigned(mViews.size());
         out.scenes = unsigned(mScenes.size());
         out.updatedScenes = mUpdatedScenes;
-        // STAGING SCENES ARE THEIR OWN ROW, not folded into `scenes`
-        // (THREADING_ADOPTION_SPEC.md P5, audit F10). `mScenes` holds the
-        // Scene OBJECTS this boundary handed out; the document's staging
-        // manager is an Ogre::SceneManager with no Scene wrapper, no View, no
-        // workspace and no place in the frame loop — invisible in this census
-        // until now. Folding it into `scenes` would have made the two kinds
-        // indistinguishable, and they behave nothing alike: this one is written
-        // by the import worker and never drawn.
-        //
-        // At most one per engine (documentGraphScene is memoised); the
-        // document's own fallback manager (iris::graph, "iris-staging") belongs
-        // to a Root this engine may not own and is deliberately not counted
-        // here — it exists only for hosts that never called setStagingScene.
-        if (mDocumentScene) out.stagingScenes = 1u;
         for (const auto &v : mViews) {
             if (v && v->isEnabled()) ++out.enabledViews;
         }
@@ -3124,16 +3093,11 @@ OgreEngine::~OgreEngine() {
     // bug as a MeshPtr outliving Root.
     // The blank world's render-queue listener comes off with the scenes' (each
     // removed its own in OgreScene::destroy) and BEFORE the OverlaySystem that
-    // owns it dies; the manager itself goes with mDocumentScene below. Its
+    // owns it dies; the manager itself goes below. Its
     // cameras are already gone — every View destroyed above took its own.
     if (mBlankScene) { try { hud::detach(mBlankScene); } catch (...) {} }
     try { hud::destroySystem(); } catch (...) {}
     try {
-        // The document's staging manager goes with the rest of the scenes and
-        // before the Root. Every handle in it goes stale afterwards, which is why
-        // iris::graph tests Ogre::Root's liveness on every call.
-        if (mDocumentScene && mRoot) mRoot->destroySceneManager(mDocumentScene);
-        mDocumentScene = nullptr;
         if (mBlankScene && mRoot) mRoot->destroySceneManager(mBlankScene);
         mBlankScene = nullptr;
     } catch (...) {}

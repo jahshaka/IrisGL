@@ -798,15 +798,11 @@ private:
 
     struct Entry {
         jahshaka::engine::NodeId node = 0;
-        /// The DOCUMENT's Ogre scene node this entry adopted (opaque —
-        /// iris::graph::NodeHandle). Compared every sync: a migration between
-        /// scene managers rebuilds the handle, and the adopted id then names a
-        /// node that no longer exists.
-        const void *graphNode = nullptr;
-        /// ...and its epoch. The pointer alone is not enough: Ogre recycles
-        /// node memory, so a migration out of this scene manager and back can
-        /// hand the rebuilt node the SAME address.
-        quint32 graphEpoch = 0;
+        /// THE EXTRACT'S LATCHES (ENGINE-UPGRADE-U2): the engine parent and the
+        /// graph class this entry last sent (NodeRecord) — pushed on CHANGE. The
+        /// local transform needs none: the write journal names every write.
+        jahshaka::engine::NodeId parentPushed = 0;
+        int staticPushed = -1;
         /// The EFFECTIVE visibility last pushed (the node's own flag AND every
         /// ancestor's — SceneNode::isVisibleInScene); -1 = never. Pushed on
         /// CHANGE only, and a change of an ANCESTOR is a change here.
@@ -1166,6 +1162,7 @@ private:
     /// the child recursion taken out — the one piece of surgery the dirty set
     /// needed (DIRTY_SET_MIRROR_SPEC §4). Every latch is unchanged.
     VisitResult visitNode(iris::SceneNode *node, bool parentShown, bool parentMovable);
+    VisitResult visitNodeBody(iris::SceneNode *node, bool parentShown, bool parentMovable);
     /// visitNode + the recursion: THE FULL WALK, which now runs only at the
     /// explicit triggers and as the verifier's oracle.
     void visit(iris::SceneNode *node, bool parentShown, bool parentMovable);
@@ -1221,17 +1218,11 @@ private:
     /// children inherit.
     bool syncMobility(Entry &e, iris::SceneNode *node, bool parentMovable);
     void releaseEntry(Entry &e);
-    /// Releases every engine object this mirror hung off DOCUMENT nodes
-    /// (entries + highlight shells) — the body of the graph-evacuation hook
-    /// (Scene::_setGraphEvacuationHook). Runs while the nodes still exist,
-    /// right before another mirror migrates the document's graph away. The
-    /// mirror-scene-scoped objects (grid, sky, wire meshes) stay: they live on
-    /// OUR engine scene's own nodes, not the document's.
+    /// Releases every engine object this mirror made for DOCUMENT nodes
+    /// (entries + highlight shells) — the body of the evacuation hook
+    /// (Scene::_setMirrorEvacuationHook), fired when another mirror binds the
+    /// document. The mirror-scene-scoped objects (grid, sky, wire meshes) stay.
     void evacuateEngineObjects();
-    /// The graph handle of OUR engine scene as of the last bind — kept so the
-    /// destructor can test ownership without touching mTarget (which may
-    /// already be gone).
-    iris::graph::SceneHandle mBoundHandle = nullptr;
     /// Drops the entries this sync did not reach. The "seen" set used to be a
     /// QSet<long> filled with one insert per node per frame (and keyed on a
     /// type that is 32-bit on Windows LLP64 while nodeId is 64-bit — audit F7);
@@ -1972,13 +1963,30 @@ private:
     // ---- THE CHANGE SET (ENGINE-UPGRADE-1 U0 3b) ----------------------------
     /// This mirror's own cursor on the document's write journal (nodegraph.h): taken before the walk (the soft
     /// promotion reads it) and again at the emit (the sync's own writes), so the record carries every write.
-    iris::graph::WriteJournalReader mJournal;
-    std::vector<iris::graph::NodeHandle> mJournalScratch;
+    /// ...with the POSED half (a camera's transform write is no scene movement, but the engine still draws it).
+    iris::graph::WriteJournalReader mJournal{ false, true };
+    std::vector<iris::SceneNode *> mJournalScratch;
+    std::vector<iris::SceneNode *> mJournalPosed;
+    // ---- THE EXTRACT (ENGINE-UPGRADE-U2) -----------------------------------
+    /// The nodes owing the engine a NodeRecord this sync, in the order they were named (the walk is parent-first),
+    /// each with the fields it owes (NodeRecord::Trs / Parent / Static). Built into FrameInputScene::nodes at the
+    /// emit, reading each node's values THEN — a node named twice is one record.
+    std::vector<iris::SceneNode *> mFrameNodeOrder;
+    QHash<const iris::SceneNode *, quint8> mFrameNodeFields;
+    /// A take the journal could not complete: every mirrored node owes its transform this emit.
+    bool mPoseAllPending = false;
+    void oweNodeRecord(iris::SceneNode *node, quint8 fields);
+    /// The graph class's latch: a changed class owes a Static record, for the node and its switched region.
+    void noteGraphClass(iris::SceneNode *node);
+    /// The extract itself (the emit): FrameInputScene::nodes from the owed set.
+    void buildNodeRecords(std::vector<jahshaka::engine::NodeRecord> &out);
     /// The DOCUMENT nodes written since the last emit, by node (the soft promotion's question), and the record's set.
     QSet<const iris::SceneNode *> mWrittenThisSync;
     jahshaka::engine::ChangeSet mFrameChanges;
     /// Drain the journal into the two above (twice a sync: before the walk, at the emit).
     void takeWriteJournal();
+    /// The engine's published rider tags into the document (iris::graph::setRiderTag), before the sockets resolve.
+    void takePublishedRiderTags();
     void noteWrittenNode(iris::SceneNode *node);
     /// materialBuildCount() — reset at the top of every sync, so it reports the
     /// LAST walk rather than a running total.
@@ -2012,7 +2020,6 @@ private:
         QWeakPointer<iris::SceneNode> node;
         iris::SceneNode *parent = nullptr;
         bool parentMovable = false;
-        bool carry = false;
     };
     std::vector<SettleEntry> mSettleWalk;
     quint32 mSettleVisits = 0;

@@ -63,31 +63,15 @@ SceneNode::SceneNode()
 
     attached = false;
 
-    // THE handle. Every node is born detached, in the staging scene manager
-    // (SPECS/SCENEGRAPH_SPEC.md §4: "fragments build as detached handle trees,
-    // attach on commit"); addChild moves it into whatever manager its new
-    // parent lives in.
-    mGraphNode = graph::createNode(graph::stagingScene(), nullptr, this);
-    if (!mGraphNode) {
-        // v1 consequence, stated honestly rather than papered over: the
-        // document graph IS Ogre's, so an Ogre::Root must exist before the
-        // first node. Headless paths boot the engine offscreen until v2's NULL
-        // render system lands (spec §3).
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            qWarning("iris::SceneNode: no scene graph device — an Ogre::Root must exist "
-                     "before the first document node is created (SCENEGRAPH_SPEC v1). "
-                     "Every transform on this node will read as identity.");
-        }
-    }
+    // THE OWNER TABLE the write journal resolves this node's id through (nodegraph.h).
+    graph::registerNode(this);
 
 	setGUID(IrisUtils::generateGUID());
 }
 
 void SceneNode::noteDocumentWrite()
 {
-    if (mGraphNode) graph::noteDocumentWrite(mGraphNode);
+    graph::noteDocumentWrite(this);
 }
 
 void SceneNode::notifyChangedSubtree(NodeChange what)
@@ -111,17 +95,11 @@ void SceneNode::notifyChangedSubtree(NodeChange what)
 
 SceneNode::~SceneNode()
 {
-    // Deepest-first, through the one sanctioned path. The children's handles
-    // are cleared on the way, so the QSharedPointers in mChildRefs (released
-    // after this body runs) find nothing left to destroy.
     // The store first: out of its parent's list (a parent being destroyed is
     // releasing it anyway) and its children orphaned (they die with their refs).
     graph::unlinkDoc(mDoc);
     if (mDoc.pickTable) mDoc.pickTable->remove(this);
-    if (mGraphNode) {
-        graph::destroyNode(mGraphNode);
-        mGraphNode = nullptr;
-    }
+    graph::unregisterNode(this);
 }
 
 SceneNodePtr SceneNode::create()
@@ -152,7 +130,7 @@ void SceneNode::setName(QString name)
     notifyChanged(NodeChange::Name);
 }
 
-qint64 SceneNode::getNodeId()
+qint64 SceneNode::getNodeId() const
 {
     return nodeId;
 }
@@ -175,12 +153,6 @@ QList<SceneNodePtr> SceneNode::children() const
     out.reserve(int(mDoc.children.size()));
     for (const graph::DocNode *c : mDoc.children) out.append(c->owner->sharedFromThis());
     return out;
-}
-
-void SceneNode::_migrateGraph(graph::SceneHandle target, graph::NodeHandle newParent)
-{
-    if (!mGraphNode) return;
-    mGraphNode = graph::migrate(mGraphNode, target, newParent);
 }
 
 void SceneNode::rotate(iris::Quat rot, bool global)
@@ -494,13 +466,13 @@ void SceneNode::_applyStaticHint(bool value)
     // inherited static from a static parent has `mStaticHint == false` while
     // sitting in the static manager, and _applyStaticHint(false) on it must
     // really demote it.
-    if (mStaticHint == value && graph::isStatic(mGraphNode) == value) return;
+    if (mStaticHint == value && graph::isStatic(mDoc) == value) return;
     mStaticHint = value;
     // The graph may refuse (an ineligible parent, an attachment that cannot
     // switch): the document then remembers what was asked for, because a later
     // reparent under a static parent makes the same request legal. `staticHint`
     // is the intent; `isStaticInGraph()` is the outcome.
-    graph::setStatic(mGraphNode, value);
+    graph::setStatic(mDoc, value);
     notifyChanged(NodeChange::Flags);
 }
 
@@ -515,7 +487,7 @@ void SceneNode::reapplyStaticHints()
     // qWarning per node per bind for something the document is not even
     // claiming any more. Asking only where the graph can say yes changes what
     // is re-asserted not at all: the refused asks were no-ops with a log line.
-    if (mStaticHint && graph::canBeStatic(mGraphNode)) _applyStaticHint(true);
+    if (mStaticHint && graph::canBeStatic(mDoc)) _applyStaticHint(true);
     const int n = childCount();
     for (int i = 0; i < n; ++i)
         if (SceneNode *c = childAt(i)) c->reapplyStaticHints();
@@ -532,32 +504,28 @@ void SceneNode::applyStaticDefaults()
 namespace {
 /// THE ONE RULE, recursed: the load's pass is the settle's step applied
 /// top-down in one go (the mirror's settle runs the same step in slices).
-void applyStaticDefaultsRec(SceneNode *node, bool parentMovable, bool carry)
+void applyStaticDefaultsRec(SceneNode *node, bool parentMovable)
 {
-    bool childCarry = false;
-    const bool movable = node->_applyStaticDefaultsStep(parentMovable, carry, &childCarry);
+    const bool movable = node->_applyStaticDefaultsStep(parentMovable);
     // Descend regardless — a light in the middle of an imported rig does not
     // stop the props below it from being static, it only stops ITSELF (and,
     // through canBeStatic, the branch under it, which is the rule).
     for (const graph::DocNode *c : node->docNode().children)
-        applyStaticDefaultsRec(c->owner, movable, childCarry);
+        applyStaticDefaultsRec(c->owner, movable);
 }
 }
 
 void SceneNode::applyStaticDefaultsFrom(bool parentMovable)
 {
-    applyStaticDefaultsRec(this, parentMovable, false);
+    applyStaticDefaultsRec(this, parentMovable);
 }
 
-bool SceneNode::_applyStaticDefaultsStep(bool parentMovable, bool carry, bool *childCarry)
+bool SceneNode::_applyStaticDefaultsStep(bool parentMovable)
 {
     // ONE NODE OF THE RULE. ONE RESOLUTION, TOP-DOWN: the parent's answer is
     // threaded down rather than re-walked per node, so a walk is O(nodes) and
-    // not O(nodes x depth). The promotion is graph::promoteNode (this node and
-    // its engine-owned children; `carry` = an ancestor's switch would have
-    // reached them, as graph::setStatic's subtree switch does) — the hint
-    // bookkeeping is _applyStaticHint's.
-    *childCarry = false;
+    // not O(nodes x depth). The promotion is graph::promoteNode (this node
+    // only) — the hint bookkeeping is _applyStaticHint's.
     const bool movable = resolveMobility(parentMovable) == Mobility::Movable;
     if (movable) {
         // Movable: out of the static half. `_applyStaticHint`, not setMobility
@@ -565,18 +533,16 @@ bool SceneNode::_applyStaticDefaultsStep(bool parentMovable, bool carry, bool *c
         // would write a derivation into the file on the next save). A demotion
         // stays the subtree switch (promoteNode's note says why).
         _applyStaticHint(false);
-    } else if (isStaticEligible() && graph::canBeStatic(mGraphNode)) {
+    } else if (isStaticEligible() && graph::canBeStatic(mDoc)) {
         // canBeStatic() first: an ineligible PARENT means this whole branch
         // stays dynamic, and asking anyway would log a refusal per node.
         // _applyStaticHint(true)'s early return: hint set AND in the graph.
-        const bool already = mStaticHint && graph::isStatic(mGraphNode);
-        bool switched = false;
-        const bool isStaticNow = graph::promoteNode(mGraphNode, carry, &switched);
+        const bool already = mStaticHint && graph::isStatic(mDoc);
+        graph::promoteNode(mDoc, nullptr);
         if (!already) {
             mStaticHint = true;     // recorded even where the graph refused
             notifyChanged(NodeChange::Flags);
         }
-        *childCarry = isStaticNow && (switched || carry);
     }
     return movable;
 }
@@ -819,18 +785,11 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
     const bool sameSceneMove = node->hasScene() && getScene() &&
                                node->getScene() == getScene();
     if (auto oldParent = node->getParent())
-        oldParent->removeChildInternal(node, false, sameSceneMove);
+        oldParent->removeChildInternal(node, sameSceneMove);
 
-    // THE STORE: the document's hierarchy (graph::DocNode).
+    // THE STORE: the document's hierarchy (graph::DocNode); its mirror tells the
+    // engine the new parent (the frame record).
     graph::attachDoc(mDoc, node->mDoc, position);
-    // THE OGRE HALF (stage 1 of ENGINE-UPGRADE-U2): the child's Ogre node moves
-    // with it. A child that lives in a different scene manager (the staging one,
-    // which is where every node is born) is REBUILT under us — an
-    // Ogre::SceneNode belongs to its creator and cannot be handed to another
-    // manager.
-    if (graph::sceneOf(node->mGraphNode) != graph::sceneOf(mGraphNode))
-        node->_migrateGraph(graph::sceneOf(mGraphNode), mGraphNode);
-    graph::attach(mGraphNode, node->mGraphNode, position);
 
     mChildRefs.append(node);      // the lifetime anchor; never the structure
 
@@ -880,24 +839,16 @@ void SceneNode::removeFromParent()
 
 void SceneNode::removeChild(SceneNodePtr node)
 {
-    removeChildInternal(node, true);
+    removeChildInternal(node);
 }
 
-void SceneNode::removeChildInternal(const SceneNodePtr &node, bool detachGraph,
-                                    bool keepSceneMembership)
+void SceneNode::removeChildInternal(const SceneNodePtr &node, bool keepSceneMembership)
 {
     if (!node) return;
     // Out of the tree first (this is what makes it stop rendering and stop
     // being reachable), THEN out of the scene registries, THEN drop our
     // ownership — the caller's own SceneNodePtr is what keeps it alive.
     graph::detachDoc(node->mDoc);
-    if (detachGraph) {
-        // The scene has to be told BEFORE removeFromScene clears the link: the
-        // subtree stays in that scene's scene manager and has to travel with it
-        // when it unbinds (see Scene::rememberDetached).
-        if (auto sc = node->getScene()) sc->rememberDetached(node);
-        node->mGraphNode = graph::detach(node->mGraphNode);
-    }
     // keepSceneMembership: insertChild's same-scene move — the node is about
     // to be re-attached under a parent in the SAME scene, so registries stay.
     if (!keepSceneMembership) node->removeFromScene();

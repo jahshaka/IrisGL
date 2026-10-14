@@ -166,23 +166,17 @@ protected:
     QList<AnimationPtr> animations;
     AnimationPtr animation;
 
-    /// This node's Ogre::SceneNode, opaque here (see nodegraph.h). Null only
-    /// when no Ogre::Root existed at construction time — a v1 programming
-    /// error, reported once and loudly, not a supported mode.
-    graph::NodeHandle mGraphNode = nullptr;
 
     /// THE DOCUMENT'S OWN TRUTH (ENGINE-UPGRADE-U2, nodegraph.h's store): this
     /// node's local TRS, its parent, its ordered children and its cached world.
-    /// Every read is answered here; mGraphNode is written in parallel for the
-    /// engine that still adopts it (stage 1).
+    /// The engine owns its own node for it and is told of every write through
+    /// the frame record (SceneMirror's extract).
     graph::DocNode mDoc{this};
 
     /// LIFETIME ANCHOR ONLY — see the class note. Never iterate it; use
     /// children().
     QList<SceneNodePtr> mChildRefs;
 
-    /// How many times mGraphNode has been REPLACED. See graphEpoch().
-    quint32 mGraphEpoch = 0;
 
     /// SCENE_STATIC, the document's side of it — the GRAPH class only, which
     /// rule 4 (a transform write) may clear at any time. Never the mobility.
@@ -464,25 +458,9 @@ public:
     static SceneNodePtr create();
 
     // ---- the handle itself ------------------------------------------------
-    /// This node's Ogre node. The mirror hands it to the engine (adoptNode) so
-    /// that the engine's Item rides the DOCUMENT's node — which is what makes
-    /// the per-frame transform push (audit F1) unnecessary.
-    graph::NodeHandle graphNode() const { return mGraphNode; }
     /// This node's entry in the document's transform store (nodegraph.h).
     graph::DocNode &docNode() { return mDoc; }
     const graph::DocNode &docNode() const { return mDoc; }
-    /// Called by iris::graph when a migration rebuilds this node in another
-    /// scene manager, and by its recursive destroy. Not for general use.
-    void _setGraphNode(graph::NodeHandle h) { mGraphNode = h; ++mGraphEpoch; }
-    /// Bumped every time the handle is REPLACED. The pointer alone cannot be
-    /// used to notice that: Ogre recycles node memory, so a migrate out and
-    /// back lands the rebuilt node on the very address the old one had (found
-    /// by mirror.document_to_engine's reparent case — the cube went invisible
-    /// because the mirror kept an engine Item attached to a destroyed node).
-    quint32 graphEpoch() const { return mGraphEpoch; }
-    /// Rebuilds this subtree inside `target` (an engine scene's manager, or the
-    /// staging one). Scene::setGraphScene is the only caller.
-    void _migrateGraph(graph::SceneHandle target, graph::NodeHandle newParent);
 
     // ---- the mutation funnel ----------------------------------------------
     //
@@ -566,7 +544,7 @@ public:
     void setName(QString name);
     QString getName();
 
-    qint64 getNodeId();
+    qint64 getNodeId() const;
 
 	void setGUID(const QString &id) const {
 		guid = id;
@@ -914,6 +892,9 @@ public:
     /// node's settle quiet clock from it (SceneMirror::noteSettleWrite) — the
     /// one per-document signal that a static node went dynamic.
     void _clearStaticHint() { mStaticHint = false; notifyChanged(NodeChange::Flags); }
+    /// iris::graph switched this node's GRAPH CLASS (a promotion, a demotion, a subtree switch reaching it): its
+    /// mirror owes the engine the new class.
+    void _noteGraphClassChanged() { notifyChanged(NodeChange::Flags); }
     /// DOES A WRITE TO THIS NODE'S TRANSFORM COUNT AS SCENE MOVEMENT?
     /// (nodegraph.h, the transform-write epoch — lane ENGINE-7 item 1.) True
     /// for everything the renderer draws; false for the VIEWER, which is a
@@ -944,7 +925,7 @@ public:
     void _applyStaticHint(bool value);
     /// True when the graph really did put this node in the static manager —
     /// the hint is what was ASKED for, this is what happened.
-    bool isStaticInGraph() const { return graph::isStatic(mGraphNode); }
+    bool isStaticInGraph() const { return graph::isStatic(mDoc); }
 
     /// THE CLASSIFICATION PASS: resolve mobility over this subtree and give
     /// the graph the static half of it.
@@ -977,24 +958,21 @@ public:
     /// ONE NODE of applyStaticDefaultsFrom, without the recursion — the unit
     /// of work of an INCREMENTAL pass (SceneMirror's settle spreads the
     /// whole-tree re-derivation over frames, kStaticSettleNodesPerSync at a
-    /// time). The caller walks the document top-down and threads two answers
-    /// down to each child: the returned mobility (rule 2, exactly as the
-    /// recursion threads it) and `*childCarry`, whether a subtree switch would
-    /// have reached the children (graph::promoteNode). A promotion here moves
+    /// time). The caller walks the document top-down and threads the returned
+    /// mobility down to each child (rule 2, exactly as the recursion threads
+    /// it). A promotion here moves
     /// THIS node only — its document children are promoted on their own
     /// visits, each under an already-static parent — so the cost of a visit is
     /// one node's, never its subtree's. Run over a whole tree it lands the
     /// same static set and the same hints as applyStaticDefaultsFrom
     /// (mirror.settle_incremental proves it on 50,000 nodes). Returns whether
     /// this node resolved MOVABLE.
-    bool _applyStaticDefaultsStep(bool parentMovable, bool carry, bool *childCarry);
+    bool _applyStaticDefaultsStep(bool parentMovable);
 
     /// Re-asserts recorded static hints into the GRAPH, top-down, changing no
-    /// hint and no override. For after a graph migration (Scene::setGraphScene)
-    /// — migrate rebuilds Ogre nodes, which are born dynamic, so the graph
-    /// state is lost while the document's hints survive. Policy-free on
-    /// purpose: applyStaticDefaults here would re-staticize nodes the user
-    /// moved this session (hint cleared, override None).
+    /// hint and no override. Policy-free on purpose: applyStaticDefaults here
+    /// would re-staticize nodes the user moved this session (hint cleared,
+    /// override None).
     void reapplyStaticHints();
 
     SceneNodeType getSceneNodeType();
@@ -1008,11 +986,8 @@ public:
     void removeFromParent();
     void removeChild(SceneNodePtr node);
 private:
-    /// removeChild's body. `detachGraph` is false for the reparent path, which
-    /// hands the node straight to its new parent — detaching it to the staging
-    /// manager first would rebuild the whole subtree twice.
-    void removeChildInternal(const SceneNodePtr &node, bool detachGraph,
-                             bool keepSceneMembership = false);
+    /// removeChild's body. `keepSceneMembership`: insertChild's same-scene move.
+    void removeChildInternal(const SceneNodePtr &node, bool keepSceneMembership = false);
 public:
 
     bool isRootNode();

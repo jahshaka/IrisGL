@@ -326,7 +326,6 @@ bool Scene::skyRealisticInSync() const
 
 Scene::Scene()
 {
-    mGraphScene = graph::stagingScene();
     rootNode = SceneNode::create();
     rootNode->setName("World");
 
@@ -1084,77 +1083,17 @@ ScenePtr Scene::create()
     return scene;
 }
 
-void Scene::setGraphScene(graph::SceneHandle target)
+void Scene::bindMirror(const void *owner)
 {
-    if (!target) target = graph::stagingScene();
-    if (target == mGraphScene) return;
-    if (!rootNode) { mGraphScene = target; return; }
-
-    // The scene manager we are LEAVING may already be gone — an engine scene
-    // destroyed while a document was still bound to it (the mirror is supposed
-    // to unbind first). Say so; walking those handles is a read-after-destroy.
-    if (mGraphScene && !graph::sceneAlive(mGraphScene)) {
-        // The scene manager died under us — an engine scene destroyed while a
-        // document was still bound to it (SceneMirror is supposed to unbind
-        // first). Every handle in it is stale, so nothing may WALK the tree:
-        // the registries are the only safe enumeration, and they cover every
-        // node the tree reached (SceneNode::setScene registers them all).
-        qWarning("iris::Scene: the engine scene this document was bound to has already been "
-                 "destroyed — every node handle in it is stale and its transforms are lost. "
-                 "SceneMirror must unbind (setSource(null)) before Engine::destroyScene().");
-        // The owner's engine objects died with the manager; firing the hook
-        // would walk dead handles. Drop it.
-        mGraphEvacuationHook = nullptr;
-        rootNode->_setGraphNode(nullptr);
-        for (const auto &n : nodes) if (n) n->_setGraphNode(nullptr);
-        for (const auto &w : mDetached) if (auto n = w.lock()) n->_setGraphNode(nullptr);
-        mDetached.clear();
-        mGraphScene = target;
-        return;
-    }
-
-    // The graph's current OWNER releases its engine-side objects while the
-    // nodes still exist (see _setGraphEvacuationHook). One-shot: whoever binds
-    // next registers a fresh hook.
-    if (mGraphEvacuationHook) {
-        auto evacuate = std::move(mGraphEvacuationHook);
-        mGraphEvacuationHook = nullptr;
+    if (owner == mBoundMirror) return;
+    // The current OWNER releases its engine-side objects (see _setMirrorEvacuationHook). One-shot: whoever binds next
+    // registers a fresh hook.
+    if (mEvacuationHook) {
+        auto evacuate = std::move(mEvacuationHook);
+        mEvacuationHook = nullptr;
         evacuate();
     }
-
-    rootNode->_migrateGraph(target, nullptr);
-    // ...and everything that left the tree but is still held somewhere (the
-    // undo stack). Anything that has since been re-attached elsewhere, or has
-    // died, is dropped here rather than followed.
-    const graph::SceneHandle leaving = mGraphScene;
-    for (auto it = mDetached.begin(); it != mDetached.end();) {
-        SceneNodePtr n = it->lock();
-        if (!n) { it = mDetached.erase(it); continue; }
-        if (graph::sceneOf(n->graphNode()) != leaving) { it = mDetached.erase(it); continue; }
-        n->_migrateGraph(target, nullptr);
-        ++it;
-    }
-    mGraphScene = target;
-    // A migration REBUILDS every Ogre node under the new manager, and rebuilt
-    // nodes are born SCENE_DYNAMIC — the document's static hints survive on
-    // the handles but the graph state is silently lost (found 2026-09-05:
-    // every project load lost its whole static classification the moment the
-    // viewport bound the scene, because the reader's applyStaticDefaults ran
-    // against the staging manager). Re-assert from the hints, top-down; the
-    // staging manager is skipped — nothing renders there, and the next real
-    // bind re-asserts anyway.
-    if (target != graph::stagingScene() && rootNode) rootNode->reapplyStaticHints();
-}
-
-void Scene::rememberDetached(const SceneNodePtr &node)
-{
-    if (node.isNull()) return;
-    for (auto it = mDetached.begin(); it != mDetached.end();) {
-        if (it->isNull()) it = mDetached.erase(it);
-        else if (it->lock() == node) return;
-        else ++it;
-    }
-    mDetached.append(node.toWeakRef());
+    mBoundMirror = owner;
 }
 
 void Scene::setOutlineWidth(int width)

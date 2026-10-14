@@ -474,7 +474,7 @@ private:
         // the shadow casters, the scene extent — and counting it re-ran every
         // one of those O(scene) walks on every frame of an orbit. A camera
         // that is given CHILDREN counts again; the graph layer asks.
-        graph::setCountsAsMovement(mGraphNode, false);
+        graph::setCountsAsMovement(this, false);
         updateCameraMatrices();
     }
 

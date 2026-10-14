@@ -127,6 +127,8 @@ bool OgreScene::attachToBone(NodeId riderId, NodeId ownerId, const std::string &
         r.boneName = bone;
         if (std::find(o.boneRiders.begin(), o.boneRiders.end(), riderId) == o.boneRiders.end())
             o.boneRiders.push_back(riderId);
+        if (std::find(mBoneRiderIds.begin(), mBoneRiderIds.end(), riderId) == mBoneRiderIds.end())
+            mBoneRiderIds.push_back(riderId);   // published at each frame's close (publishFrame)
         noteSubtreeWrite(riderId);       // the rider jumped to the bone (its subtree, named)
         return true;
     } JAH_CATCH(mError, false);
@@ -178,6 +180,7 @@ void OgreScene::releaseBoneTag(NodeId id, Node &n, NodeId parent)
     n.boneTag = nullptr;
     n.boneOwner = 0;
     n.boneName.clear();
+    mBoneRiderIds.erase(std::remove(mBoneRiderIds.begin(), mBoneRiderIds.end(), id), mBoneRiderIds.end());
     if (ownerId) {
         auto oit = mNodes.find(ownerId);
         if (oit != mNodes.end()) {
