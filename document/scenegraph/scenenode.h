@@ -1079,10 +1079,11 @@ protected:
     void notifyChanged(NodeChange what)
     {
         if (!mDirtySet) return;
-        // THE JOURNAL'S TAPS (graph::openJournalTap) hear every document write
-        // that is not a transform — a transform reaches them through the
-        // graph's own funnel. Before the per-frame dedupe: a tap's reader is
-        // on its own schedule, not the mirror's.
+        // THE JOURNAL'S WRITTEN HALF (graph::noteDocumentWrite, read by a
+        // WriteJournalReader(true)) hears every document write that is not a
+        // transform — a transform reaches the journal through the graph's own
+        // funnel. Before the per-frame dedupe: that reader is on its own
+        // schedule, not the mirror's.
         if (what != NodeChange::Transform) noteDocumentWrite();
         const quint16 bit = nodeChangeBit(what);
         if (mDirtyMask & bit) return;
@@ -1095,7 +1096,7 @@ protected:
 
 private:
     /// graph::noteDocumentWrite for this node (out of line: one relaxed load
-    /// when no tap is open).
+    /// when no reader asked for the journal's written half).
     void noteDocumentWrite();
     void setScene(ScenePtr scene);
     void removeFromScene();

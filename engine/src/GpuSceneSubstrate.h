@@ -63,8 +63,8 @@ public:
     std::vector<uint32_t> marks;
     /// This compose's slots (kept, not reallocated).
     std::vector<uint32_t> dirty;
-    /// The movement epoch the last consuming walk ran at, valid only where a host
-    /// counter makes it meaningful (Engine::setTransformWriteCounter).
+    /// The movement epoch the last consuming walk ran at, valid once a frame's walk set it (every write reaches
+    /// the epoch named since ENGINE-UPGRADE-1 U0 3b: there is no host counter to be missing).
     unsigned long long epoch = 0ull;
     bool epochValid = false;
     /// create() said no (the NULL render system's headless boot): never retried.

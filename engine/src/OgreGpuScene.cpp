@@ -1373,14 +1373,15 @@ void OgreScene::composeGpuScene(bool graphIsCurrent) const {
     // the frame runs on derived transforms `updateSceneGraph` has not recomputed; if
     // it marked the epoch spent, the frame's own walk would skip — and every CHILD of
     // a moved parent would silently never reach the table (measured: a parent with
-    // 8,000 children staged nothing at all). The epoch is held exactly as the caster
-    // walk holds it: valid only where a host counter makes it meaningful.
+    // 8,000 children staged nothing at all). Once a frame's walk has set it the epoch is
+    // trusted: every write reaches it named (ENGINE-UPGRADE-1 U0 3b — the change set and the
+    // engine's own seams), so there is no host counter whose absence could make it blind.
     if (walk && graphIsCurrent) {
         if (sub.walkedThisFrame) ++sub.extraWalks;
         sub.walkedThisFrame = true;
         sub.frameWalkEpoch = epoch;
         sub.epoch = epoch;
-        sub.epochValid = detail::gTransformWriteCounter != nullptr;
+        sub.epochValid = true;
     }
     sub.commitOwed = true;
     // THE SPLIT'S SWITCH, ONCE PER COMPOSE (an extension lookup by name): every slot this

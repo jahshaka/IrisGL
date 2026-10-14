@@ -176,11 +176,6 @@ float jahLodHysteresis();
 /// once, after Root::initialise and before any mesh or Item exists.
 void installJahLodStrategy();
 
-/// NEVER NULL SINCE U0 3b, and nothing writes through it: the engine learns every document write from the frame's
-/// ChangeSet, so its movement epoch is always trustworthy. Kept ONLY because EU-2's OgreGpuScene.cpp still asks
-/// `!= nullptr` (its one reader); deleted with that line at the window's rebase.
-extern const std::atomic<unsigned long long> *gTransformWriteCounter;
-
 /// Names handed to Ogre must be unique for the life of the process (a destroyed
 /// scene may be recreated under the same name while stale resources linger).
 inline std::string processUniqueName(const char *prefix) {

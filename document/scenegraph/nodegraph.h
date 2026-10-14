@@ -286,42 +286,31 @@ unsigned long long transformWrites();
 /// the log's cap dropped entries it had not read. An incomplete take is the caller's cue for its full pass.
 class WriteJournalReader {
 public:
-    WriteJournalReader();
+    /// `wantsWritten`: this reader also hears the journal's WRITTEN half (noteDocumentWrite) — the editor's scene
+    /// checker, which re-checks a moved node with its subtree and a written one alone (BISTRO-ENGINE-1's tap, re-homed).
+    explicit WriteJournalReader(bool wantsWritten = false);
     ~WriteJournalReader();
     WriteJournalReader(const WriteJournalReader &) = delete;
     WriteJournalReader &operator=(const WriteJournalReader &) = delete;
     /// The DOCUMENT nodes written since this reader's last take (or skip), each once, as live handles (a node destroyed
     /// since its write is gone from the answer; a migrated node answers with its new handle). False = incomplete (above).
     bool take(std::vector<NodeHandle> &out);
+    /// ...the same take split in two, for a reader that asked for the written half: `moved` (a journal write reached
+    /// the node — its world pose and its subtree's may have changed), `written` (only the node itself changed), each
+    /// node once; `gone` = written nodes destroyed since their write.
+    bool take(std::vector<NodeHandle> &moved, std::vector<NodeHandle> &written, int *gone = nullptr);
     /// Forget every write so far, unread — a reader whose own writes follow its take (physics' write-back) says so.
     void skip();
 
     // ---- the log's own bookkeeping (nodegraph.cpp) ----
     unsigned long long cursor = 0;   ///< the sequence number of the first write this reader has not read
     bool               primed = false;
+    const bool         wantsWritten;
 };
 /// Entries the log holds right now (a running diagnostic for the suites: a log no reader drains stays bounded).
 std::size_t writeJournalSize();
-/// A TAP ON THE JOURNAL, for a reader on its OWN schedule (the editor's scene
-/// checker runs once a second; the document step closes the journal every
-/// playing frame). A tap receives every write the journal records — a
-/// transform through the one funnel, a reparent, a detach — and every other
-/// DOCUMENT write SceneNode::notifyChanged reports (noteDocumentWrite: a mesh
-/// or material swap, a parameter, a visibility, a flag, a structure change),
-/// each node once, until the reader drains it; the close does not touch it.
-/// No tap open = one relaxed load per write and nothing else.
-int openJournalTap();
-void closeJournalTap(int tap);
-struct TapDrain
-{
-    bool complete = true;   ///< false: an engine-owned node was written — take the full pass
-    int gone = 0;           ///< written nodes destroyed since their write
-};
-/// The document nodes written since this tap's last drain, as live handles,
-/// and the tap emptied: `moved` = a journal write reached the node (its world
-/// pose and its subtree's may have changed), `written` = only the node itself.
-TapDrain drainJournalTap(int tap, std::vector<NodeHandle> &moved, std::vector<NodeHandle> &written);
-/// A document write that is not scene movement, for the taps (see above).
+/// A document write that is not scene movement — the journal's WRITTEN half (WriteJournalReader(true)): a mesh or
+/// material swap, a parameter, a visibility, a flag. One relaxed load and nothing else while no reader asked for it.
 void noteDocumentWrite(NodeHandle n);
 /// NODES THAT CHANGED MEMORY-MANAGER CLASS (a static <-> dynamic migration, one per node), a process-wide
 /// running total: what a promotion, a demotion or a reparent's rule-4 round trip cost, in counts

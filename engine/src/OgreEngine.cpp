@@ -767,8 +767,6 @@ void frameCloseStep(std::string &sink, Step &&step) {
 }
 }   // namespace
 
-namespace { const std::atomic<unsigned long long> gNoHostCounter{0}; }
-const std::atomic<unsigned long long> *gTransformWriteCounter = &gNoHostCounter;   // EnginePrivate.h says why
 
 namespace {
 /// The compute dispatches deferred before this frame began (AsyncHoldListener's hole test).
