@@ -95,7 +95,12 @@ PlayedNodeChannels playNodeChannels(const SceneNodePtr &fragment)
         bool keysARig = false;
         const auto &channels = clip->skeletalAnimation->boneAnimations;
         for (auto it = channels.constBegin(); it != channels.constEnd(); ++it) {
-            if (bones.contains(it.key())) { keysARig = true; continue; }
+            // A pivot-preserving FBX keys a bone through its `<bone>_$AssimpFbx$_<part>`
+            // pivot nodes (a Mixamo clip: almost every channel), so a channel belongs to
+            // a rig when its BASE name is a bone.
+            const int pivot = it.key().indexOf(QLatin1String("_$AssimpFbx$_"));
+            const QString base = pivot >= 0 ? it.key().left(pivot) : it.key();
+            if (bones.contains(base)) { keysARig = true; continue; }
             const BoneAnimation *channel = it.value().data();
             const SceneNodePtr node = byName.value(it.key());
             if (!channel || !node || node == fragment || !channel->moves()) continue;
