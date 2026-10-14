@@ -2420,7 +2420,6 @@ void OgreEngine::submitFrame(const FrameInput &in) {
         if (v.background) it->background = v.background;
         it->resetExposure = it->resetExposure || v.resetExposure;
         if (v.seedExposure) it->seedExposure = v.seedExposure;
-        it->reassert = it->reassert || v.reassert;
     }
 }
 
@@ -2473,6 +2472,8 @@ void OgreEngine::drainFrameInput() {
             const std::optional<GiParams> gi = last.gi;   // GI is never re-pushed (P10)
             last = FrameInputScene();
             last.gi = gi;
+            for (auto &q : mViews)   // ...and every view showing the scene (the view loop below runs after this one)
+                if (q->scene() == part.scene) { q->mFrameApplied = FrameInputView(); q->mFrameAppliedW = q->mFrameAppliedH = 0; }
         }
         applyIfChanged(part.shadows, last.shadows, applied, [&](const ShadowDesc &v) { sc->setShadowSettings(v); });
         applyIfChanged(part.environmentLight, last.environmentLight, applied,
@@ -2520,7 +2521,6 @@ void OgreEngine::drainFrameInput() {
         for (auto &q : mViews) if (static_cast<View *>(q.get()) == part.view) { v = q.get(); break; }
         if (!v) continue;
         FrameInputView &last = v->mFrameApplied;
-        if (part.reassert) { last = FrameInputView(); v->mFrameAppliedW = v->mFrameAppliedH = 0; }
         applyIfChanged(part.background, last.background, viewApplied, [&](const Colour &c) { v->setBackground(c); });
         applyIfChanged(part.shadows, last.shadows, viewApplied, [&](bool on) { v->setShadows(on); });
         applyIfChanged(part.sampleCount, last.sampleCount, viewApplied, [&](unsigned n) { v->setSampleCount(n); });

@@ -1048,7 +1048,6 @@ int SceneMirror::sync(const FrameViews &frameViews)
     std::vector<FrameInputView> parts(frameViews.views.size());
     for (size_t i = 0; i < frameViews.views.size(); ++i) {
         parts[i].view = frameViews.views[i].view;
-        parts[i].reassert = mReassertPending;
         parts[i].seedExposure = frameViews.views[i].seedExposure;
     }
     bool skyBuilt = false;

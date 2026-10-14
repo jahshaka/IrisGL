@@ -1424,7 +1424,7 @@ bool VrSession::create(std::string &reason) {
     // line, on the reasoning that "no mirror reaches a view the session made" —
     // and the consequence was that the wearer got the struct's DEFAULTS
     // (automatic exposure across a +/-2.5 stop window) whatever the author had
-    // chosen in the World panel. `SceneMirror::applyViewEnvironment` pushes the
+    // chosen in the World panel. `SceneMirror::buildViewEnvironment` pushes the
     // project's description into this view every frame now, exactly as it does
     // into the desktop's, and `applyVrViewPolicy` (Types.h) filters out what has
     // no per-eye form yet — in ONE place, stated once, with the reason for every

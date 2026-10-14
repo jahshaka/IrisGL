@@ -685,7 +685,7 @@ void OgreView::applyPip() {
 // THE PROJECT'S DESCRIPTION, THEN THE VR POLICY OVER IT (lane EYE-GRADE-1).
 //
 // A STEREO view is the picture somebody is standing in, and it is graded by the
-// project like every other view of that scene: `SceneMirror::applyViewEnvironment`
+// project like every other view of that scene: `SceneMirror::buildViewEnvironment`
 // pushes the world's PostFxDesc (with the driving camera's lens over it) into
 // this view every frame, exactly as it does into the desktop's. What has no
 // per-eye form yet is filtered out HERE — in the one place

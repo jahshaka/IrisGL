@@ -960,7 +960,7 @@ struct AtmosphereStatus {
 /// editor, a transparent thumbnail). It stays a view property on purpose.
 /// The gradient and Preetham "realistic" skies are not here either: both are
 /// CPU bakes of DOCUMENT parameters into an equirectangular image, and the
-/// image is what this boundary consumes — see SceneMirror::applySky, which
+/// image is what this boundary consumes — see SceneMirror::buildSky, which
 /// owns those bakes because they need an image decoder and this layer has
 /// none (no Qt, no image formats — Types.h's first line).
 /// THE SUN DISC (SKY_LIGHT_SPEC.md §3) — the bright disc drawn in the sky where
@@ -5666,7 +5666,7 @@ struct VrConfig {
     ///
     /// IT USED TO BE THE HOST'S TO PASS because the session's View was the one
     /// view no mirror reached, so the project's row had no other channel. That
-    /// is no longer true — `SceneMirror::applyViewEnvironment` pushes the whole
+    /// is no longer true — `SceneMirror::buildViewEnvironment` pushes the whole
     /// of the project's post description into the session's view every frame —
     /// so a host that says nothing gets the author's row by the ordinary route,
     /// and this field is what `vr.begin({reflections:n})` sets: one session,
@@ -7869,9 +7869,11 @@ struct FrameInputScene {
     std::optional<SkyDesc>                sky;
     std::optional<float>                  shaderTime;
     std::optional<GridDesc>               grid;
-    /// RE-ASSERT: forget what this scene last applied from a record (GI excepted — a GI push is a from-scratch
-    /// rebuild, ENGINE_CACHE_POLICY_SPEC P10) so every field present applies again. A host retaking the screen asks for
-    /// it: part of what the scene's fields set is process-wide backend state another scene may have changed meanwhile.
+    /// RE-ASSERT: forget what this scene AND EVERY VIEW SHOWING IT last applied from a record (GI excepted — a GI
+    /// push is a from-scratch rebuild, ENGINE_CACHE_POLICY_SPEC P10) so every field present applies again. A host
+    /// retaking the screen asks for it: part of what the scene's fields set is process-wide backend state another
+    /// scene may have changed meanwhile, and a view's chain may have been written outside the record. One flag on the
+    /// scene, so a record that carries no view part this frame cannot use it up before the views' parts arrive.
     bool                                  reassert = false;
 };
 struct FrameInputView {
@@ -7886,7 +7888,6 @@ struct FrameInputView {
     /// Seed the exposure history with this scale (View::seedExposureHistory) — after the chain lands, since the
     /// seed is derived from it (a new recorder view starts at the editor's measured exposure).
     std::optional<float>      seedExposure;
-    bool                      reassert = false;        ///< forget this view's last-applied fields (see the scene's)
 };
 /// The user's GESTURE as the host knows it (a gizmo drag, a viewport drag, a material hover): carried for the
 /// engine's GI scheduler (U0 3c reads it; until then the engine still infers a gesture from motion).
