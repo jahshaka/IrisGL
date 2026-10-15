@@ -1750,6 +1750,7 @@ bool OgreScene::gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const {
 /// "AsyncTextureTicket after a manual staging upload reads STALE VRAM").
 bool OgreScene::gpuSceneDeviceEntries(unsigned first, unsigned count,
                                       std::vector<GpuSceneEntry> &out) {
+    JAH_HOST_CALL("Scene::gpuSceneDeviceEntries");
     out.clear();
     if (!mGpuScene.live() || !count || first + count > mGpuScene.slotCapacity()) return false;
     Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;

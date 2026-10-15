@@ -330,6 +330,7 @@ bool derivePlane(Ogre::SceneNode *node, const Ogre::Item *item, Plane &out,
 // OgreScene: the scene-level arm.
 // ---------------------------------------------------------------------------
 bool OgreScene::setPlanarReflections(const PlanarReflectionParams &p) {
+    JAH_HOST_CALL("Scene::setPlanarReflections");
     PlanarReflectionParams q = p;
     q.budget     = std::max(0, std::min(8, q.budget));
     q.resolution = std::max(64u, std::min(2048u, q.resolution));
@@ -478,6 +479,7 @@ void OgreScene::disarmAllReflectors() {
 }
 
 bool OgreScene::setNodePlanarReflector(NodeId id, bool on) {
+    JAH_HOST_CALL("Scene::setNodePlanarReflector");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) { mError = "setNodePlanarReflector: unknown node"; return false; }
     mFactsDirty = true;   // the facts' reflectors (U3 stage 3)

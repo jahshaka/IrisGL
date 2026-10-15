@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <iterator>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <thread>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -16,6 +19,17 @@ SyncGetterSite::SyncGetterSite(const char *n) : name(n) {
                                                                  std::memory_order_relaxed));
 }
 SyncGetterSite *syncGetterSites() { return gSyncSites.load(std::memory_order_acquire); }
+
+std::atomic<bool> gAffinityChecks{ false };
+/// The render thread's id (set by the loop that owns the engine: the creating thread until stage 4b's thread).
+std::atomic<std::thread::id> gRenderThreadId{};
+void checkAffinity(const char *entry) {
+    if (tlsEngineSide != 0) return;
+    if (std::this_thread::get_id() == gRenderThreadId.load(std::memory_order_relaxed)) return;
+    std::fprintf(stderr, "AFFINITY: engine entry %s called off the render thread\n", entry);
+    std::fflush(stderr);
+    std::abort();
+}
 
 // ---- THE GAME SIDE -----------------------------------------------------------------------------------------------
 
@@ -45,6 +59,8 @@ void RenderThread::submit(FrameInput &&in) {
     ++mSubmit.submitted;
     mSlot.any = true;
     FrameInput &p = mSlot.record;
+    p.engineMessages.insert(p.engineMessages.end(), std::make_move_iterator(in.engineMessages.begin()),
+                            std::make_move_iterator(in.engineMessages.end()));   // the engine's stream, in order
     if (in.frameDelta) p.frameDelta = in.frameDelta;
     if (in.frameDelta) mEngine.mPushedFrameDelta = *in.frameDelta;   // the host's record (Engine::fixedFrameDelta)
     if (in.cause) p.cause = in.cause;
@@ -94,6 +110,16 @@ void RenderThread::submit(FrameInput &&in) {
         if (v.shadows) it->shadows = v.shadows;
         if (v.sampleCount) it->sampleCount = v.sampleCount;
         if (v.background) it->background = v.background;
+        if (v.scene) it->scene = v.scene;
+        if (v.enabled) it->enabled = v.enabled;
+        if (v.offscreenContract) it->offscreenContract = v.offscreenContract;
+        if (v.helpersVisible) it->helpersVisible = v.helpersVisible;
+        if (v.vrHelpersVisible) it->vrHelpersVisible = v.vrHelpersVisible;
+        if (v.asyncShaders) it->asyncShaders = v.asyncShaders;
+        if (v.overlay) it->overlay = v.overlay;
+        if (v.pip) it->pip = v.pip;
+        if (v.lodHysteresisOffscreen) it->lodHysteresisOffscreen = v.lodHysteresisOffscreen;
+        if (v.size) it->size = v.size;
         it->resetExposure = it->resetExposure || v.resetExposure;
         if (v.seedExposure) it->seedExposure = v.seedExposure;
     }

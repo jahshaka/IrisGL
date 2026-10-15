@@ -39,3 +39,26 @@ struct EngineSideScope {
             jahSyncSite_.calls.fetch_add(1ull, std::memory_order_relaxed);                                   \
         }                                                                                                    \
     } while (0)
+
+/// THE HOST-CALL COUNTER (ENGINE-UPGRADE-U3 stage 4a, decision 39): the first statement of every engine entry that is
+/// not a door (a post, a request, published(), the lockstep verb, a join) — counted into the same sites as the
+/// getters, so host.sync_getters reads every synchronous host entry. Stage 4b's law: 0 over the row's window.
+#if !defined(NDEBUG) && !defined(JAH_DEBUG)
+#define JAH_DEBUG 1
+#endif
+namespace jahshaka { namespace engine { namespace detail {
+/// THE AFFINITY LAW (U3 decision 39): under JAH_DEBUG, once the render thread owns the engine (stage 4b turns it on),
+/// every counted engine entry asserts it runs ON the render thread or inside the engine's own side. Off until then.
+extern std::atomic<bool> gAffinityChecks;
+void checkAffinity(const char *entry);
+}}}   // namespace jahshaka::engine::detail
+#ifdef JAH_DEBUG
+#define JAH_HOST_CALL(n)                                                                                     \
+    do {                                                                                                     \
+        JAH_SYNC_GETTER(n);                                                                                  \
+        if (::jahshaka::engine::detail::gAffinityChecks.load(std::memory_order_relaxed))                     \
+            ::jahshaka::engine::detail::checkAffinity(n);                                                    \
+    } while (0)
+#else
+#define JAH_HOST_CALL(n) JAH_SYNC_GETTER(n)
+#endif

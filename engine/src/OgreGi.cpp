@@ -183,6 +183,7 @@ bool OgreScene::demoteDragMover(NodeId id, Ogre::Aabb &rest) {
 }
 
 void OgreScene::setNodeProbeGridExcluded(NodeId id, bool excluded) {
+    JAH_HOST_CALL("Scene::setNodeProbeGridExcluded");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
     if (it->second.probeGridExcluded == excluded) return;
@@ -199,6 +200,7 @@ bool OgreScene::nodeProbeGridExcluded(NodeId id) const {
 }
 
 void OgreScene::endStructureEdit() {
+    JAH_HOST_CALL("Scene::endStructureEdit");
     if (mStructureEditDepth == 0 || --mStructureEditDepth > 0) return;
     mPhoton.structureEditClosed();
 }

@@ -3575,6 +3575,19 @@ public:
     void bindEngine(OgreEngine *e);
     OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
               std::string &errorSink);
+    /// The manager of a scene the host made through a create message (U3 stage 4a): bound at the message's drain.
+    void adoptManager(Ogre::SceneManager *sm);
+    /// THE HOST'S SIDE OF A SCENE COMMAND (U3 stage 4a, decision 39): posted as a message of this scene's stream
+    /// (Engine::post) when the host's calls are records; false on the engine's side, where the command applies.
+    bool hostPosts() const;
+    bool hostRecordsOn() const { return hostPosts(); }
+    template <class F> bool postScene(F &&body) {
+        if (!hostPosts()) return false;
+        postSceneMessage(SceneMessage{ [b = std::forward<F>(body)](Scene &s) mutable -> bool {
+            return b(static_cast<OgreScene &>(s)); }, 0 });
+        return true;
+    }
+    void postSceneMessage(SceneMessage &&m);
     ~OgreScene() override;
 
 
@@ -3689,7 +3702,7 @@ public:
     /// atmosphereSunTint, ENGINE-UPGRADE-U3 F-A).
     PublishedFrame::Atmosphere publishedAtmosphere() const;
     AtmosphereStatus atmosphereStatus() const;
-    void setReflectionFogEnabled(bool on) override { mReflectionFogOn = on; }
+    void setReflectionFogEnabled(bool on) override { JAH_HOST_CALL("Scene::setReflectionFogEnabled"); mReflectionFogOn = on; }
 
     /// THE SKY, CAPTURED ON THE GPU (SKY-GPU) — the one source of a scene's
     /// environment reflections and its ambient SH, for every sky that is not
@@ -3976,7 +3989,7 @@ public:
     size_t streamedBoneCount(NodeId id) const;
     RigStats rigStats() const;
     SceneChangeStats changeStats() const { return mChangeStats; }
-    void beginStructureEdit() override { ++mStructureEditDepth; }
+    void beginStructureEdit() override { JAH_HOST_CALL("Scene::beginStructureEdit"); ++mStructureEditDepth; }
     void endStructureEdit() override;
 
     // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC; impl in OgreClips.cpp) ----
@@ -4048,16 +4061,25 @@ public:
     unsigned decalAtlasCapacity(DecalMap kind) const;
     unsigned decalAtlasUsed(DecalMap kind) const;
 
-    bool setGlobalIllumination(const GiParams &p) override { return mPhoton.setGlobalIllumination(p); }
-    bool setGiTuning(const GiParams &p) override { return mPhoton.setGiTuning(p); }
-    void refreshGlobalIllumination(GiRefreshReason reason) override { return mPhoton.refreshGlobalIllumination(reason); }
+    bool setGlobalIllumination(const GiParams &p) override {
+        if (postScene([=](OgreScene &s) { return s.setGlobalIllumination(p); })) return true;   // U3 4a: a message
+        return mPhoton.setGlobalIllumination(p);
+    }
+    bool setGiTuning(const GiParams &p) override {
+        if (postScene([=](OgreScene &s) { return s.setGiTuning(p); })) return true;   // U3 4a: a message
+        return mPhoton.setGiTuning(p);
+    }
+    void refreshGlobalIllumination(GiRefreshReason reason) override { JAH_HOST_CALL("Scene::refreshGlobalIllumination"); return mPhoton.refreshGlobalIllumination(reason); }
     /// OPEN_COVER_SPEC §2 A — see the boundary's note. Sticky, per scene.
-    void setLoading(bool loading) override { mSceneLoading = loading; }
+    void setLoading(bool loading) override {
+        if (postScene([=](OgreScene &s) { s.setLoading(loading); return true; })) return;   // U3 4a: a message
+        mSceneLoading = loading;
+    }
     bool isLoading() const override { return mSceneLoading; }
     GiStatus giStatus() const { return mPhoton.giStatus(); }
-    GiVoxelStats giVoxelStats(int cascade) override { return mPhoton.giVoxelStats(cascade); }
-    bool giFieldAtlas(GiFieldAtlas &out) override { return mPhoton.giFieldAtlas(out); }
-    bool giVoxelVolume(int cascade, GiVoxelVolume &out) override { return mPhoton.giVoxelVolume(cascade, out); }
+    GiVoxelStats giVoxelStats(int cascade) override { JAH_HOST_CALL("Scene::giVoxelStats"); return mPhoton.giVoxelStats(cascade); }
+    bool giFieldAtlas(GiFieldAtlas &out) override { JAH_HOST_CALL("Scene::giFieldAtlas"); return mPhoton.giFieldAtlas(out); }
+    bool giVoxelVolume(int cascade, GiVoxelVolume &out) override { JAH_HOST_CALL("Scene::giVoxelVolume"); return mPhoton.giVoxelVolume(cascade, out); }
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
     /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
@@ -4067,7 +4089,7 @@ public:
     void setAtomOcclusionEnabled(bool on) override;
     void setAtomCutBudgetForTest(unsigned indices) override;
     bool atomOcclusionEnabled() const override { return mAtom.occlusionEnabled(); }
-    void setAtomView(AtomView view) override { mAtom.setView(view); }
+    void setAtomView(AtomView view) override { JAH_HOST_CALL("Scene::setAtomView"); mAtom.setView(view); }
     AtomView atomView() const { return mAtom.view(); }
     /// THE BUCKETS VIEW'S TABLE (OgreAtomDraw.cpp): one R32_UINT texel per GPU
     /// scene slot holding the decode bucket that shades it (0 = none), 1024 slots a
@@ -4111,7 +4133,7 @@ public:
     bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
     bool gpuSceneDeviceEntries(unsigned first, unsigned count,
                                std::vector<GpuSceneEntry> &out) override;
-    void measureGpuSceneScan(bool graphIsCurrent) override {
+    void measureGpuSceneScan(bool graphIsCurrent) override { JAH_HOST_CALL("Scene::measureGpuSceneScan");
         ensureGpuSceneTimed(graphIsCurrent);
     }
     // ---- SURFACE-CACHE phase 2: the capture cache (SurfaceCache.h) --------
@@ -4126,9 +4148,9 @@ public:
     void cardSceneFacts(CardSceneView &view) const;
     unsigned long long foldCardEnvironment(unsigned long long sig) const;
     void cardCandidates(const Ogre::Vector3 &centre, float radius, CardSceneView &view);   // fills view.candidates
-    bool readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) override { return mPhoton.readCardTexel(node, card, u, v, out); }
-    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out, NodeId onlyNode = 0) override { return mPhoton.readCardAt(world, normal, out, onlyNode); }
-    bool dumpCardAtlas(const std::string &prefix, std::string &err) override { return mPhoton.dumpCardAtlas(prefix, err); }
+    bool readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) override { JAH_HOST_CALL("Scene::readCardTexel"); return mPhoton.readCardTexel(node, card, u, v, out); }
+    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out, NodeId onlyNode = 0) override { JAH_HOST_CALL("Scene::readCardAt"); return mPhoton.readCardAt(world, normal, out, onlyNode); }
+    bool dumpCardAtlas(const std::string &prefix, std::string &err) override { JAH_HOST_CALL("Scene::dumpCardAtlas"); return mPhoton.dumpCardAtlas(prefix, err); }
     const SurfaceCache *surfaceCache() const { return mPhoton.surfaceCache(); }
     /// The compile mode the scene's views ask for (View::setAsyncShaders); its own captures
     /// follow it (ASYNC-SHADERS-1).
@@ -4181,10 +4203,14 @@ public:
     void gatherStatusInto(GatherStatus &out) const;
     /// The test-and-tool knobs (Engine.h's `setGatherTuning`): every zero means
     /// "what the tier derives", so the default is the shipped configuration.
-    void setGatherTuning(const GatherTuning &t) override { mGatherTuning = t; }
+    void setGatherTuning(const GatherTuning &t) override {
+        if (postScene([=](OgreScene &s) { s.setGatherTuning(t); return true; })) return;   // U3 4a: a message
+        JAH_HOST_CALL("Scene::setGatherTuning");
+        mGatherTuning = t;
+    }
     const GatherTuning &gatherTuning() const { return mGatherTuning; }
     GatherTuning mGatherTuning;
-    void setSunContact(const SunContactDesc &d) override { return mPhoton.setSunContact(d); }
+    void setSunContact(const SunContactDesc &d) override { JAH_HOST_CALL("Scene::setSunContact"); return mPhoton.setSunContact(d); }
     SunContactDesc sunContact() const override { return mPhoton.sunContact(); }
     SunContactStatus sunContactStatus() const;
     bool sunContactWanted() const { return mPhoton.sunContactWanted(); }
@@ -4235,7 +4261,7 @@ public:
     /// lane changes an input and not a pass.
     bool rayReflectionsWanted() const;
     bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) override;
-    bool refreshGiLighting(bool inMotion) override { return mPhoton.refreshGiLighting(inMotion); }
+    bool refreshGiLighting(bool inMotion) override { JAH_HOST_CALL("Scene::refreshGiLighting"); return mPhoton.refreshGiLighting(inMotion); }
     void setNodeProbeGridExcluded(NodeId id, bool excluded) override;
     bool nodeProbeGridExcluded(NodeId id) const override;
     void setNodeHelper(NodeId id, bool helper) override;
@@ -5895,10 +5921,14 @@ public:
     bool atomViewPaintable() const { return atomDrawOn() && !mAtom.hasPassthroughViews(); }
 
     // ---- THE PHOTON VIEW (PHOTON-VIEW-1, OgrePhotonView.cpp) ----------------
-    void setPhotonView(PhotonView view) override { mPhoton.setPhotonView(view); }
+    void setPhotonView(PhotonView view) override {
+        if (postScene([=](OgreScene &s) { s.setPhotonView(view); return true; })) return;   // U3 4a: a message
+        JAH_HOST_CALL("Scene::setPhotonView");
+        mPhoton.setPhotonView(view);
+    }
     PhotonView photonView() const { return mPhoton.photonView(); }
     std::string photonViewRefusal(PhotonView view) const { return mPhoton.photonViewRefusal(view); }
-    void setPhotonVoxelCascade(int cascade) override { mPhoton.setPhotonVoxelCascade(cascade); }
+    void setPhotonVoxelCascade(int cascade) override { JAH_HOST_CALL("Scene::setPhotonVoxelCascade"); mPhoton.setPhotonVoxelCascade(cascade); }
     void syncPhotonView() { return mPhoton.syncPhotonView(); }
     void releasePhotonView() { return mPhoton.releasePhotonView(); }
     using PhotonViewShape = PhotonComponent::PhotonViewShape;
@@ -6396,6 +6426,13 @@ public:
     OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *texture,
              const std::string &name, unsigned w, unsigned h, const Colour &background,
              std::string &errorSink);
+    /// THE HOST'S HANDLE OF AN OFFSCREEN VIEW (U3 stage 4a, decision 39 b): its identity now (name, id, size, clear
+    /// colour); its target and chain at the create message's drain (adoptTarget).
+    struct HostShell {};
+    OgreView(HostShell, Ogre::Root *root, const std::string &name, unsigned w, unsigned h, const Colour &background,
+             std::string &errorSink);
+    void adoptTarget(Ogre::TextureGpu *texture);
+    void buildChain();   ///< the compositor chain of the view's own definition (both constructors' Ogre half)
     ~OgreView() override;
 
     /// The same pointer, unerased — Engine::renderOneFrame groups views by the
@@ -6592,7 +6629,10 @@ public:
     bool requestFrameCapture(bool keepHelpers, bool alsoPresented) override;
     FrameCaptureState frameCaptureState() override;
     bool takeFrameCapture(Image &out, bool wait, Image *presented) override;
-    void cancelFrameCapture() override { releaseFrameCapture(); }
+    void cancelFrameCapture() override {   // a REQUEST on the host's side (U3 stage 4a, decision 39 d)
+        if (hostPosts()) { requestOnEngine([this] { releaseFrameCapture(); }); return; }
+        releaseFrameCapture();
+    }
     // THE VIDEO READBACK (VIDEO-REC-1; OgreVideoReadback.cpp).
     bool setVideoReadback(bool on) override;
     void armVideoFrame(unsigned long long tag) override;
@@ -6643,7 +6683,29 @@ public:
         if (part.postFx) mPushedPostFx = *part.postFx;
         if (part.background) mPushedBackground = *part.background;
         if (part.shadows) mPushedShadows = *part.shadows;
+        if (part.enabled) mPushedEnabled = *part.enabled;
+        if (part.overlay) mPushedOverlay = *part.overlay;
+        if (part.pip) mPushedPip = *part.pip;
+        if (part.scene) mBoundScene = *part.scene;
     }
+    /// THE HOST'S SIDE OF A SETTER (U3 stage 4a): the call is a field of the view's record — `fill` writes it, the
+    /// record is submitted, and the drain applies it on the engine's side. False on the engine's own side (the drain,
+    /// the VR session, a request): there the setter applies.
+    template <class F> bool postedAsField(F &&fill) {
+        if (!hostPosts()) return false;
+        FrameInput in;
+        FrameInputView part;
+        part.view = this;
+        fill(part);
+        in.views.push_back(std::move(part));
+        postRecord(std::move(in));
+        return true;
+    }
+    void postRecord(FrameInput &&in);
+    bool hostPosts() const;
+    void requestOnEngine(const std::function<void()> &f);   ///< Engine::request on this view's engine (U3 4a)
+    /// The scene the engine has bound (the drain's comparison; View::scene is the host's binding).
+    OgreScene *boundOgreScene() const { return mScene; }
     const PostFxDesc &postFx() const override;
     void resetExposureHistory() override;
     void seedExposureHistory(float scale) override;
@@ -7403,7 +7465,10 @@ public:
     FrameInputStatus frameInputStatus() const { return mFrameInputStatus; }
     const PublishedEngineFrame &published() const override { return mRenderThread.published(); }
     void setDisplayPeriod(float seconds) override { mRenderThread.setDisplayPeriod(seconds); }
-    void setFramePace(FramePace pace) override { mFramePace = pace; }
+    void setFramePace(FramePace pace) override {
+        if (postedAsMessage([=](OgreEngine &e) { e.setFramePace(pace); return true; })) return;   // U3 4a: a message
+        mFramePace = pace;
+    }
     void request(std::function<void(Engine &)> question, std::function<void()> done) override;
     std::vector<SyncGetterCount> syncGetters() const override {
         std::vector<SyncGetterCount> out;
@@ -7424,7 +7489,22 @@ public:
     /// THE RENDER SIDE's half of the record's status (U3 F4): written by the drain alone.
     FrameInputStatus mFrameInputStatus;
     /// The refusals of the last kFrameErrorsKept frames (PublishedEngineFrame::refusals), oldest first.
-    mutable std::deque<PublishedEngineFrame::Refusal> mRefusals;   // pruned at the publish (fillPublished)
+    mutable std::deque<PublishedEngineFrame::Refusal> mRefusals;
+    /// The engine messages' completions (PublishedEngineFrame::completions), pruned at the publish.
+    mutable std::deque<PublishedFrame::Completion> mEngineCompletions;
+    unsigned long long mEngineCompletionSeq = 0;
+    mutable bool mEngineCompletionsDirty = false;
+    mutable std::shared_ptr<const std::vector<PublishedFrame::Completion>> mEngineCompletionsPublished;
+    /// THE HOST'S SIDE OF AN ENGINE VERB (U3 stage 4a, decision 39 c): the call becomes a message of the engine's own
+    /// stream (the same verb, applied on the engine's side at the drain). False on the engine's side: the verb applies.
+    template <class F> bool postedAsMessage(F &&body, unsigned long long token = 0) {
+        if (!hostPosts()) return false;
+        FrameInput in;
+        in.engineMessages.push_back(EngineMessage{
+            [b = std::forward<F>(body)](Engine &e) mutable -> bool { return b(static_cast<OgreEngine &>(e)); }, token });
+        submitFrame(std::move(in));
+        return true;
+    }   // pruned at the publish (fillPublished)
     /// THE RENDER LOOP: the hand-over slot, the serial, the loop and the publish (RenderThread.h).
     RenderThread     mRenderThread{ *this };
     /// What the loop's publish reads of the engine at the close (RenderThread::publish): the engine's half of the
@@ -7457,7 +7537,12 @@ public:
     void advanceResources() override;
 
     // ---- VR (SPECS/VR_SPEC.md §4) -----------------------------------------
-    void setVrPolicy(const VrPolicy &policy) override { mVrPolicy = policy; mHostVrPolicy = policy; }
+    void setVrPolicy(const VrPolicy &policy) override {
+        mHostVrPolicy = policy;   // the host's record
+        if (postedAsMessage([=](OgreEngine &e) { e.setVrPolicy(policy); return true; })) return;   // U3 4a: a message
+        JAH_HOST_CALL("Engine::setVrPolicy");
+        mVrPolicy = policy;
+    }
     bool vrProbe() override;
     const VrInfo &vrInfo() const override { JAH_SYNC_GETTER("Engine::vrInfo"); return mVrInfo; }
     bool beginVrSession(Scene *scene, const VrConfig &cfg) override;
@@ -7469,12 +7554,18 @@ public:
     void setVrOrigin(const Vec3 &position, float yawDegrees) override;
     bool vrEyeScreenshot(unsigned eye, Image &out) override;
     bool vrInjectInput(int hand, const VrHandState &state) override;
-    void vrInjectFocus(bool focused) override { mVrInjectFocus = focused; }
+    void vrInjectFocus(bool focused) override {
+        if (postedAsMessage([=](OgreEngine &e) { e.vrInjectFocus(focused); return true; })) return;   // U3 4a: a message
+        mVrInjectFocus = focused;
+    }
     unsigned vrHandJoints(int hand, VrPose *out, unsigned count) const override;
     bool vrInjectJoints(int hand, const VrPose *joints, unsigned count) override;
     unsigned vrBindingBlocks(VrBindingBlock *out, unsigned count) const override;
     bool vrHaptic(int hand, float amplitude01, float seconds) override;
-    void setVrRay(const VrRayState &ray) override { mVrRay = ray; }
+    void setVrRay(const VrRayState &ray) override {
+        if (postedAsMessage([=](OgreEngine &e) { e.setVrRay(ray); return true; })) return;   // U3 4a: a message
+        mVrRay = ray;
+    }
     const VrRayState &vrRay() const override { JAH_SYNC_GETTER("Engine::vrRay"); return mVrRay; }
     /// THE INJECTED SAMPLE FOR ONE HAND, or false when none is live
     /// (OgreVrSession.cpp's readInput asks once per hand per frame). The store
@@ -7622,6 +7713,21 @@ public:
     std::vector<Scene *> mPendingSceneDestroy;
     const std::string &lastError() const override;
     std::string takeLastError() override;
+    /// A host-side refusal (a setter refused against the host's own record, U3 stage 4a): lastError() reports it.
+    void noteHostError(const std::string &why);
+    /// The host's calls are records (EngineConfig::hostRecords) AND this call is the host's (no frame running here).
+    bool hostPosts() const { return mHostRecords && detail::tlsEngineSide == 0; }
+    /// The create messages' engine-side halves (U3 stage 4a, decision 39 b).
+    bool adoptScene(std::unique_ptr<OgreScene> scene, unsigned workerThreads);
+    bool adoptScene(std::unique_ptr<OgreScene> scene, unsigned workerThreads, const std::string &name);
+    bool adoptOffscreenView(std::unique_ptr<OgreView> view);
+    /// THE ENGINE'S STREAM, APPLIED NOW (a join's first step: what the host created before it exists, what it
+    /// destroyed is gone) — the messages pending in the slot, in order; the rest of the record waits for its frame.
+    void applyPendingEngineMessages();
+    void applyEngineMessages(const std::vector<EngineMessage> &messages);
+    std::set<std::string> mHostSceneNames, mHostViewNames;   ///< the host's own name records (the creates' checks)
+    bool mHostRecords = false;
+    mutable std::string mHostError;
 
     /// PROCESS-WIDE: rides Ogre's single frame-time controller value
     /// (ControllerManager -> FrameTimeControllerValue), held in its

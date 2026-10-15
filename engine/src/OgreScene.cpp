@@ -18,6 +18,7 @@
 #include <Animation/OgreTagPoint2.h>
 #include <Animation/OgreSkeletonInstance.h>
 #include <algorithm>
+#include <array>
 #include <OgreSubItem.h>
 
 namespace jahshaka { namespace engine { namespace detail {
@@ -38,6 +39,16 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
     mGpuScene.addObserver(&mCardFeed);
 }
 
+// THE SCENE A HOST'S createScene MADE IS ADOPTED HERE (U3 stage 4a, decision 39 b): the object was the host's handle
+// from the call on; its manager is made by the create message on the engine's side, and bound now.
+bool OgreScene::hostPosts() const { return mEngine && mEngine->hostPosts(); }
+void OgreScene::postSceneMessage(SceneMessage &&m) { mEngine->post(this, std::move(m)); }
+
+void OgreScene::adoptManager(Ogre::SceneManager *sm) {
+    mSceneMgr = sm;
+    bindSceneManager(mSceneMgr, this);
+}
+
 OgreScene::~OgreScene() {
     destroy();
     // Before the members die: the table's destructor tells its observers.
@@ -54,6 +65,9 @@ OgreScene::~OgreScene() {
 // global Engine setters, and getting it wrong means rebuilding the shadow node
 // and every workspace that references it, every frame.
 void OgreScene::setShadowSettings(const ShadowDesc &desc) {
+    // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (postScene([=](OgreScene &s) { s.setShadowSettings(desc); return true; })) return;
+    JAH_HOST_CALL("Scene::setShadowSettings");
     mShadowDesc = desc;
     if (!mEngine) return;
     if (desc.hasFilter && mEngine->shadowFilter() != desc.filter)
@@ -68,6 +82,8 @@ void OgreScene::setShadowSettings(const ShadowDesc &desc) {
 }
 
 void OgreScene::setAmbient(const Colour &upper, const Colour &lower) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { s.setAmbient(upper, lower); return true; })) return;
     // The hemisphere pair, expressed EXACTLY in the SH basis the backend now
     // runs on: f(n) = lerp(lower, upper, n.y * 0.5 + 0.5)
     //              = (upper + lower)/2  +  (upper - lower)/2 * n.y,
@@ -181,6 +197,13 @@ void OgreScene::noteEnvironmentChanged() {
 }
 
 void OgreScene::setAmbientSh(const float sh[27]) {
+    // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (hostRecordsOn()) {
+        std::array<float, 27> c;
+        std::copy(sh, sh + 27, c.begin());
+        if (postScene([=](OgreScene &s) { s.setAmbientSh(c.data()); return true; })) return;
+    }
+    JAH_HOST_CALL("Scene::setAmbientSh");
     mSkyAmbientOwned = false;   // the host lights this scene itself
     applyAmbientSh(sh, GiStaleReason::Ambient);
 }
@@ -274,6 +297,8 @@ void OgreScene::applyAmbientSh(const float sh[27], GiStaleReason why) {
 // (Sky Light intensity 1, white) generates the identical shader it always did
 // and renders the identical pixels.
 void OgreScene::setEnvironmentLight(const Colour &gain) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { s.setEnvironmentLight(gain); return true; })) return;
     // THE FIELD'S PER-CHANNEL INPUTS ARE GUARDED AT THE SOURCE (PHOTON-FIELD-ROTATE-1,
     // F5): a non-finite gain would reach every probe ray's escape and the field's
     // running mean would carry it until the next change. Refused, the previous gain
@@ -417,6 +442,8 @@ float OgreScene::envmapScaleForPass() const {
 }
 
 bool OgreScene::removeNode(NodeId id) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { return s.removeNode(id); })) return true;
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return false;
     JAH_TRY {
@@ -438,6 +465,11 @@ bool OgreScene::removeNode(NodeId id) {
 
 // ---- Hierarchy and transforms ----
 NodeId OgreScene::createNode(NodeId parent, NodeId id) {
+    if (hostPosts()) {   // THE HOST'S CREATE (U3 4a): an id it reserves, the create a message
+        const NodeId nid = id ? id : reserveNodeId();
+        postScene([=](OgreScene &s) { return s.createNode(parent, nid) != 0; });
+        return nid;
+    }
     JAH_TRY {
         if (id && mNodes.count(id)) { mError = "createNode: the id is already a node of this scene"; return 0; }
         Node *prec = parent ? record(parent) : nullptr;          // one lookup (F9)
@@ -456,6 +488,7 @@ NodeId OgreScene::createNode(NodeId parent, NodeId id) {
 }
 
 NodeId OgreScene::createDocumentNode(NodeId id, NodeId parent) {
+    JAH_HOST_CALL("Scene::createDocumentNode");
     JAH_TRY {
         // THE DOCUMENT'S OWN ID (U3 stage 3, F6): the record names the node by it, before and after it exists here.
         if (!id) { mError = "createDocumentNode: no id (the document reserves one: reserveNodeId)"; return 0; }
@@ -703,6 +736,7 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
 }
 
 bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
+    JAH_HOST_CALL("Scene::setNodeParent");
     JAH_TRY {
         Node *rec = record(id);                                  // one lookup each (F9)
         Ogre::SceneNode *n = rec ? rec->node : nullptr;
@@ -733,6 +767,8 @@ bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
 }
 
 void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, const Vec3 &scale) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { s.setNodeTransform(id, pos, rot, scale); return true; })) return;
     JAH_TRY {
         auto it = mNodes.find(id);
         if (it != mNodes.end() && it->second.document) {
@@ -1102,6 +1138,8 @@ Ogre::uint32 OgreScene::particleVisibilityBits(const Node &n) {
 }
 
 void OgreScene::setNodeHelper(NodeId id, bool helper) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { s.setNodeHelper(id, helper); return true; })) return;
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
     if (it->second.helper == helper) return;
@@ -1126,6 +1164,8 @@ bool OgreScene::nodeHelper(NodeId id) const {
 // staleness of any kind. All it does is put the item in a second INCLUDE
 // channel that exactly one view in the process asks for.
 void OgreScene::setNodeVrHelper(NodeId id, bool vrHelper) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { s.setNodeVrHelper(id, vrHelper); return true; })) return;
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
     if (it->second.vrHelper == vrHelper) return;
@@ -1143,11 +1183,14 @@ bool OgreScene::nodeVrHelper(NodeId id) const {
 // their materials and their visibility stay the host's — a scene that never
 // wears a headset carries two zeroes.
 void OgreScene::setVrProxyNodes(NodeId left, NodeId right) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { s.setVrProxyNodes(left, right); return true; })) return;
     mVrProxyNode[0] = left;
     mVrProxyNode[1] = right;
 }
 
 bool OgreScene::publishBonePoses(NodeId id, bool on) {
+    JAH_HOST_CALL("Scene::publishBonePoses");
     const auto it = std::find(mPublishedRigs.begin(), mPublishedRigs.end(), id);
     if (!on) { if (it != mPublishedRigs.end()) mPublishedRigs.erase(it); return true; }
     if (!skeletonOf(id)) { mError = "publishBonePoses: the node has no rig"; return false; }
@@ -1165,6 +1208,8 @@ void OgreScene::vrProxyNodes(NodeId out[2]) const {
 // marker are the mirror's geometry, and the session scales and stands them up
 // inside the frame from the state the host pushed.
 void OgreScene::setVrRayNodes(NodeId line, NodeId marker) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { s.setVrRayNodes(line, marker); return true; })) return;
     mVrRayNode[0] = line;
     mVrRayNode[1] = marker;
 }
@@ -1181,6 +1226,7 @@ void OgreScene::vrRayNodes(NodeId out[2]) const {
 // frame that draws it (vrBoneTransform). A scene that never sees a tracked hand
 // carries two zero counts.
 void OgreScene::setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) {
+    JAH_HOST_CALL("Scene::setVrHandBoneNodes");
     if (hand >= 2u) return;
     const unsigned n = (!nodes || count == 0u)
                            ? 0u
@@ -1232,6 +1278,7 @@ bool OgreScene::nodeWorldPoseDrawn(NodeId id, Vec3 &position, Quat &rotation) co
 // meaning, so `setNodeHelper(id,false)` cannot leave an object claiming to be a
 // backdrop that no capture excludes.
 void OgreScene::setNodeBackdrop(NodeId id, bool backdrop) {
+    JAH_HOST_CALL("Scene::setNodeBackdrop");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
     if (it->second.backdrop == backdrop && (!backdrop || it->second.helper)) return;
@@ -1276,6 +1323,7 @@ bool OgreScene::nodeBackdrop(NodeId id) const {
 // node) reaches none of the three — there is no item to re-flag and no probe
 // that ever saw it — which is why a scene full of movers costs nothing to open.
 void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
+    JAH_HOST_CALL("Scene::setNodeMovable");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
     Node &n = it->second;
@@ -1406,6 +1454,7 @@ void OgreScene::rebuildFacts() {
 }
 
 void OgreScene::setNodeLightMask(NodeId id, unsigned mask) {
+    JAH_HOST_CALL("Scene::setNodeLightMask");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
     // Remembered even when nothing is attached yet: attachMesh applies it to
@@ -1435,6 +1484,7 @@ unsigned OgreScene::nodeLightMask(NodeId id) const {
 // MovableObject::setVisibilityFlags does NOT overwrite (it merges the reserved
 // layer bits), so this coexists with itemVisibilityFlags' channel scheme.
 void OgreScene::setNodeCastShadow(NodeId id, bool on) {
+    JAH_HOST_CALL("Scene::setNodeCastShadow");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
     const bool changed = it->second.castShadow != on;
@@ -1462,6 +1512,8 @@ bool OgreScene::nodeCastShadow(NodeId id) const {
 }
 
 void OgreScene::setNodeVisible(NodeId id, bool visible) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { s.setNodeVisible(id, visible); return true; })) return;
     setNodeVisibleImpl(id, visible, nullptr);
 }
 
@@ -1473,6 +1525,7 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
 // for an answer the caller had in a local variable. Measured at 10,503 nodes:
 // 21,006 inheritedShown calls, of which half were this one.
 void OgreScene::setNodeVisibleUnder(NodeId id, bool visible, bool parentShown) {
+    JAH_HOST_CALL("Scene::setNodeVisibleUnder");
     setNodeVisibleImpl(id, visible, &parentShown);
 }
 
@@ -1557,6 +1610,8 @@ void OgreScene::setNodeVisibleImpl(NodeId id, bool visible, const bool *parentSh
 
 // ---- Lights ----
 bool OgreScene::setLight(NodeId id, const LightDesc &d) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { return s.setLight(id, d); })) return true;
     auto it = mNodes.find(id);
     if (it == mNodes.end()) { mError = "setLight: unknown node"; return false; }
     JAH_TRY {
@@ -1824,6 +1879,7 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
 }
 
 bool OgreScene::removeLight(NodeId id) {
+    JAH_HOST_CALL("Scene::removeLight");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.light) return false;
     JAH_TRY {
@@ -2245,6 +2301,9 @@ void OgreScene::addObjectCounts(ObjectCounts &out) const {
 bool OgreScene::rayTracingResolved() const { JAH_SYNC_GETTER("Scene::rayTracingResolved"); return rayTracingResolvedFor(mRayTracing); }
 
 void OgreScene::setRayTracing(RayTracingMode mode) {
+    // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (postScene([=](OgreScene &s) { s.setRayTracing(mode); return true; })) return;
+    JAH_HOST_CALL("Scene::setRayTracing");
     const bool wasOn = mRayTracing != RayTracingMode::Off;
     const bool gridWas = probeGridWanted();
     mRayTracing = mode;

@@ -861,6 +861,8 @@ void OgreScene::destroyAtmosphere() {
 }
 
 void OgreScene::setFog(const FogDesc &desc) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { s.setFog(desc); return true; })) return;
     // THE PROBE CACHE'S FOG INPUT (ENGINE_CACHE_POLICY_SPEC P7): the probe
     // faces are fogged PBS renders. Compared by value — the host re-pushes fog
     // on every page return, and an unchanged push must cost no re-capture.
@@ -960,6 +962,7 @@ void OgreScene::pushFogState() {
 // (the PBS passes, through the JahFog piece) and the component's second quad
 // (the sky's pixels). Under ANY sky: a colour sky's in-scatter is its colour.
 void OgreScene::setHeightFog(const HeightFogDesc &desc) {
+    JAH_HOST_CALL("Scene::setHeightFog");
     const bool on = desc.enabled && desc.density > 0.0f;
     if (on == mHeightFogOn && (!on || desc == mHeightFog)) return;
     mHeightFog = desc;

@@ -871,6 +871,9 @@ void notePlanarRender(unsigned slots) {
 
 // THE HOST'S RECORD of the level (Engine::frameMonitor, U3 stage 2) follows every exit of the setter.
 void OgreEngine::setFrameMonitor(MonitorLevel level) {
+    // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (postedAsMessage([=](OgreEngine &e) { e.setFrameMonitor(level); return true; })) return;
+    JAH_HOST_CALL("Engine::setFrameMonitor");
     struct Record { OgreEngine *e = nullptr; ~Record() { e->mHostMonitorLevel = e->mMonitor ? e->mMonitor->mLevel : MonitorLevel::Off; } } record{ this };
     // LEVEL-SENSITIVE, not merely on/off: `Review` is the only recording level
     // today, but a future one must not be a silent no-op when a capture is
@@ -1196,6 +1199,7 @@ std::vector<ArmInfo> ArmRegistry::list() const {
 }
 
 bool OgreEngine::setArm(const std::string &name, double value) {
+    JAH_HOST_CALL("Engine::setArm");
     return mArms.set(name, value, mLastError);
 }
 
@@ -1227,6 +1231,7 @@ MonitorStatus OgreEngine::monitorStatus() const {
 }
 
 unsigned OgreEngine::takeMonitorRecords(std::vector<MonitorRecord> &out) {
+    JAH_HOST_CALL("Engine::takeMonitorRecords");
     if (mMonitor) return mMonitor->drainFrames(out);
     // The tail of the last capture, once, and then the storage goes.
     if (mFinalRecords.empty()) return 0u;
@@ -1237,16 +1242,20 @@ unsigned OgreEngine::takeMonitorRecords(std::vector<MonitorRecord> &out) {
 }
 
 unsigned OgreEngine::takeMonitorEvents(std::vector<MonitorEvent> &out) {
+    JAH_HOST_CALL("Engine::takeMonitorEvents");
     return mMonitor ? mMonitor->drainEvents(out) : 0u;
 }
 
 void OgreEngine::noteMonitorEvent(const MonitorEvent &event) {
+    // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
+    if (postedAsMessage([=](OgreEngine &e) { e.noteMonitorEvent(event); return true; })) return;
     if (!mMonitor) return;
     MonitorEvent e = event;
     mMonitor->event(std::move(e));
 }
 
 void OgreEngine::noteHostStage(const std::string &name, float ms) {
+    // A DOOR (the hand-over slot, under its lock): never counted.
     // THE HOST'S HALF OF THE RECORD (ENGINE-UPGRADE-U3): banked beside the record the host is building and handed
     // over with it; the frame that applies that hand-over folds it in (RenderThread::tickInline).
     mRenderThread.noteHostStage(name, ms);

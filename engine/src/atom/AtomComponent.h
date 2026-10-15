@@ -70,7 +70,7 @@ public:
     /// scene slot wears (its first sub-item's), or null — the Buckets view's walk.
     using SlotDatablock = std::function<const Ogre::HlmsDatablock *(uint32_t slot)>;
 
-    AtomComponent(Ogre::Root *root, Ogre::SceneManager *sm, GpuSceneSubstrate &substrate,
+    AtomComponent(Ogre::Root *root, Ogre::SceneManager *const &sm, GpuSceneSubstrate &substrate,
                   SlotDatablock slotDatablock);
     ~AtomComponent();
     AtomComponent(const AtomComponent &) = delete;
@@ -139,7 +139,8 @@ private:
     void syncViewTable();
 
     Ogre::Root *mRoot;
-    Ogre::SceneManager *mSceneMgr;
+    /// THE SCENE'S MANAGER, BY REFERENCE (U3 stage 4a): a scene the host created gets its manager at the create's drain.
+    Ogre::SceneManager *const &mSceneMgr;
     GpuSceneSubstrate &mSubstrate;
     SlotDatablock mSlotDatablock;
 

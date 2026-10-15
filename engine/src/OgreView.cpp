@@ -55,7 +55,26 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
     mIdentityName = name;                    // the boundary's identity (View::name, View::isOffscreen)
     mIdentityId = reserveNodeId();           // ...and its row's key in the snapshot (U3 stage 3, decision 21)
     mIdentityOffscreen = texture != nullptr;
-    mWorkspaceDef = name + "/Workspace";
+    buildChain();
+}
+
+OgreView::OgreView(HostShell, Ogre::Root *root, const std::string &name, unsigned w, unsigned h,
+                   const Colour &background, std::string &errorSink)
+    : mRoot(root), mWindow(nullptr), mTexture(nullptr),
+      mWidth(w), mHeight(h), mBackground(background), mError(errorSink) {
+    mPushedBackground = background;
+    mIdentityName = name;
+    mIdentityId = reserveNodeId();
+    mIdentityOffscreen = true;
+}
+
+void OgreView::adoptTarget(Ogre::TextureGpu *texture) {
+    mTexture = texture;
+    buildChain();
+}
+
+void OgreView::buildChain() {
+    mWorkspaceDef = mIdentityName + "/Workspace";
     // The compositor chain (POST_CHAIN_SPEC.md §3) replaces
     // CompositorManager2::createBasicWorkspaceDef: same pixels in the
     // passthrough shape, but the graph is ours to grow.
@@ -365,7 +384,7 @@ bool OgreView::overlaysAllowed() const {
 }
 
 void OgreView::setOverlay(const ViewOverlayDesc &d) {
-    mPushedOverlay = d;   // the host's own record (View::pushed*, U3 stage 2)
+    if (postedAsField([&](FrameInputView &p) { p.overlay = d; })) return;   // the host's: a field (U3 4a)
     if (d == mOverlay) return;          // hosts push per frame; the same value is free
     const bool wasAllowed = overlaysAllowed();
     mOverlay = d;
@@ -450,8 +469,12 @@ bool OgreView::pipAllowed() const {
     return !isOffscreen() || mPip.allowOffscreen;
 }
 
+void OgreView::postRecord(FrameInput &&in) { mEngine->submitFrame(std::move(in)); }
+bool OgreView::hostPosts() const { return mEngine && mEngine->hostPosts(); }
+void OgreView::requestOnEngine(const std::function<void()> &f) { mEngine->request([&](Engine &) { f(); }, nullptr); }
+
 void OgreView::setPip(const ViewPipDesc &d) {
-    mPushedPip = d;   // the host's own record (View::pushed*, U3 stage 2)
+    if (postedAsField([&](FrameInputView &p) { p.pip = d; })) return;   // the host's: a field (U3 4a)
     if (d == mPip) return;              // hosts push per frame; the same value is free
     // SHAPE vs STATE, the setPostFx split. Only `enabled` and `allowOffscreen`
     // decide whether the workspace exists (syncPip's `want`); the camera pose,
@@ -702,7 +725,10 @@ void OgreView::applyPip() {
 // `vr.state().postFx` shows and what the suite asserts against the desktop's.
 // THE HOST'S SETTER (ENGINE-UPGRADE-U3 stage 2): what it pushed is kept on its side of the boundary
 // (View::pushed*), then applied; the engine's own callers (the drain, the VR session's views) apply directly.
-void OgreView::setPostFx(const PostFxDesc &pushed) { mPushedPostFx = pushed; applyPostFx(pushed); }
+void OgreView::setPostFx(const PostFxDesc &pushed) {
+    if (postedAsField([&](FrameInputView &p) { p.postFx = pushed; })) return;   // the host's: a field (U3 4a)
+    applyPostFx(pushed);
+}
 
 void OgreView::applyPostFx(const PostFxDesc &pushed) {
     PostFxDesc fx = pushed;
@@ -769,9 +795,13 @@ void OgreView::applyPostFx(const PostFxDesc &pushed) {
 
 const PostFxDesc &OgreView::postFx() const { return mPostFx; }
 
-void OgreView::resetExposureHistory() { seedExposureHistory(0.0f); }
+void OgreView::resetExposureHistory() {
+    if (postedAsField([&](FrameInputView &p) { p.resetExposure = true; })) return;   // the host's: a field (U3 4a)
+    seedExposureHistory(0.0f);
+}
 
 void OgreView::seedExposureHistory(float scale) {
+    if (postedAsField([&](FrameInputView &p) { p.seedExposure = scale; })) return;   // the host's: a field (U3 4a)
     // A CALLER'S VALUE IS THE TONEMAPPER'S MULTIPLIER, which is exactly what
     // the seed pass writes and what measuredExposureScale() reads back — one
     // unit, three places. Anything that is not a positive finite number means
@@ -857,7 +887,8 @@ void OgreView::seedExposureHistory(float scale) {
 /// inside attachWorkspace, beside the generation counter, so it can only mean
 /// "frames THIS graph has drawn".
 float OgreView::measuredExposureScale() const {
-    JAH_SYNC_GETTER("View::measuredExposureScale");
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { float r{}; mEngine->request([&](Engine &) { r = measuredExposureScale(); }, nullptr); return r; }
     if (!mWorkspace || !mRoot) return 0.0f;
     const ChainDesc d = chainDesc();
     if (!d.hdr || d.tonemapFixed) return 0.0f;
@@ -907,6 +938,7 @@ OgreView::~OgreView() {
 
 
 bool OgreView::setCameraNode(NodeId node) {
+    if (postedAsField([&](FrameInputView &p) { p.cameraNode = node; })) return true;   // the host's: a field (U3 4a)
     JAH_TRY {
         if (!mCamera) { mError = "setCameraNode: this view has no camera yet"; return false; }
         if (!node) {
@@ -939,6 +971,17 @@ bool OgreView::setCameraNode(NodeId node) {
 }
 
 bool OgreView::setScene(Scene *scene) {
+    // THE HOST'S BINDING IS ITS OWN RECORD (U3 4a): refused here against what the host bound (View::scene), then a
+    // field the drain rebinds to.
+    if (hostPosts()) {
+        if (scene && mBoundScene && mBoundScene != scene) {
+            mEngine->noteHostError("View '" + mIdentityName + "' already shows a scene; detach it (setScene(nullptr)) "
+                                   "before binding another");
+            return false;
+        }
+        postedAsField([&](FrameInputView &p) { p.scene = scene; });
+        return true;
+    }
     JAH_TRY {
         if (!scene) { detachScene(); return true; }
         if (mScene) {
@@ -1282,6 +1325,7 @@ void OgreView::detachScene(bool takeBlank) {
 }
 
 void OgreView::setCamera(const CameraDesc &c) {
+    if (postedAsField([&](FrameInputView &p) { p.camera = c; })) return;   // the host's: a field (U3 4a)
     JAH_TRY {
         if (!mCamera) return;
         // TWO CAMERA PROPERTIES REACH THE GRAPH: the LETTERBOX (extra passes
@@ -1423,7 +1467,10 @@ void OgreView::applyLetterbox() {
 
 // THE HOST'S SETTER (ENGINE-UPGRADE-U3 stage 2): what it pushed is kept on its side of the boundary
 // (View::pushed*), then applied; the engine's own callers (the drain, the VR session's views) apply directly.
-void OgreView::setEnabled(bool on) { mPushedEnabled = on; applyEnabled(on); }
+void OgreView::setEnabled(bool on) {
+    if (postedAsField([&](FrameInputView &p) { p.enabled = on; })) return;   // the host's: a field (U3 4a)
+    applyEnabled(on);
+}
 
 void OgreView::applyEnabled(bool on) {
     mEnabled = on;
@@ -1458,7 +1505,10 @@ bool OgreView::shadows() const { return mShadows; }
 
 // THE HOST'S SETTER (ENGINE-UPGRADE-U3 stage 2): what it pushed is kept on its side of the boundary
 // (View::pushed*), then applied; the engine's own callers (the drain, the VR session's views) apply directly.
-void OgreView::setShadows(bool on) { mPushedShadows = on; applyShadows(on); }
+void OgreView::setShadows(bool on) {
+    if (postedAsField([&](FrameInputView &p) { p.shadows = on; })) return;   // the host's: a field (U3 4a)
+    applyShadows(on);
+}
 
 void OgreView::applyShadows(bool on) {
     if (on == mShadows) return;
@@ -1473,12 +1523,14 @@ void OgreView::applyShadows(bool on) {
 // handles and the adaptation history consistent. Hosts set it once, at view
 // creation, so the rebuild is free.
 void OgreView::setHelpersVisible(bool on) {
+    if (postedAsField([&](FrameInputView &p) { p.helpersVisible = on; })) return;   // the host's: a field (U3 4a)
     if (on == mHelpersVisible) return;
     mHelpersVisible = on;
     rebuildWorkspaceDef();
 }
 
 void OgreView::setVrHelpersVisible(bool on) {
+    if (postedAsField([&](FrameInputView &p) { p.vrHelpersVisible = on; })) return;   // the host's: a field (U3 4a)
     if (on == mVrHelpersVisible) return;
     mVrHelpersVisible = on;
     rebuildWorkspaceDef();
@@ -1496,6 +1548,7 @@ void OgreView::setHiddenAreaMask(bool on) {
 }
 
 void OgreView::setLodHysteresisOffscreen(bool on) {
+    if (postedAsField([&](FrameInputView &p) { p.lodHysteresisOffscreen = on; })) return;   // the host's: a field (U3 4a)
     if (on == mLodHysteresisOffscreen) return;
     mLodHysteresisOffscreen = on;
     // The band is written onto the pass definitions (applyLodHysteresis), so
@@ -1504,6 +1557,7 @@ void OgreView::setLodHysteresisOffscreen(bool on) {
 }
 
 void OgreView::setOffscreenContract(OffscreenContract c) {
+    if (postedAsField([&](FrameInputView &p) { p.offscreenContract = c; })) return;   // the host's: a field (U3 4a)
     if (c == mOffscreenContract) return;
     mOffscreenContract = c;
     mSaidNoContract = false;
@@ -1513,7 +1567,10 @@ void OgreView::setOffscreenContract(OffscreenContract c) {
 
 // THE HOST'S SETTER (ENGINE-UPGRADE-U3 stage 2): what it pushed is kept on its side of the boundary
 // (View::pushed*), then applied; the engine's own callers (the drain, the VR session's views) apply directly.
-void OgreView::setBackground(const Colour &c) { mPushedBackground = c; applyBackground(c); }
+void OgreView::setBackground(const Colour &c) {
+    if (postedAsField([&](FrameInputView &p) { p.background = c; })) return;   // the host's: a field (U3 4a)
+    applyBackground(c);
+}
 
 void OgreView::applyBackground(const Colour &c) {
     const bool same = std::abs(c.r - mBackground.r) < 1e-4f && std::abs(c.g - mBackground.g) < 1e-4f &&
@@ -1592,6 +1649,7 @@ unsigned OgreView::height() const {
 
 void OgreView::resize(unsigned w, unsigned h) {
     if (!w || !h) return;
+    if (postedAsField([&](FrameInputView &p) { p.size = std::make_pair(w, h); })) return;   // the host's: a field (U3 4a)
     JAH_TRY {
         if (mWindow) {
             // Record the request ONLY. mWidth/mHeight are the last size actually
@@ -1652,6 +1710,7 @@ unsigned OgreView::sanitizeSamples(unsigned samples) {
 }
 
 void OgreView::setSampleCount(unsigned samples) {
+    if (postedAsField([&](FrameInputView &p) { p.sampleCount = samples; })) return;   // the host's: a field (U3 4a)
     samples = sanitizeSamples(samples);
     if (samples == mRequestedSamples) return;   // hosts may push per frame; same value is free
     mRequestedSamples = samples;
@@ -1679,6 +1738,8 @@ unsigned OgreView::sampleCount() const {
 }
 
 bool OgreView::readPixels(Image &out) {
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = readPixels(out); }, nullptr); return r; }
     if (!mTexture) { mError = "readPixels: View '" + mIdentityName + "' is on-screen"; return false; }
     JAH_TRY {
         Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
@@ -1705,6 +1766,8 @@ bool OgreView::readPixels(Image &out) {
 }
 
 bool OgreView::readPixelsHdr(ImageF &out) {
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = readPixelsHdr(out); }, nullptr); return r; }
     if (!mTexture) { mError = "readPixelsHdr: View '" + mIdentityName + "' is on-screen"; return false; }
     if (!mChainHandles.radianceTexture || !mWorkspace) {
         mError = "readPixelsHdr: View '" + mIdentityName +
@@ -1716,12 +1779,16 @@ bool OgreView::readPixelsHdr(ImageF &out) {
 }
 
 bool OgreView::readReflectionHdr(ImageF &out) {
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = readReflectionHdr(out); }, nullptr); return r; }
     if (!mTexture) { mError = "readReflectionHdr: View '" + mIdentityName + "' is on-screen"; return false; }
     if (!mWorkspace) { mError = "readReflectionHdr: View '" + mIdentityName + "' has no workspace"; return false; }
     return readChainTexture(chain::reflectionTextureName(), out, "readReflectionHdr");
 }
 
 bool OgreView::readSsrHistoryHdr(ImageF &out) {
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = readSsrHistoryHdr(out); }, nullptr); return r; }
     if (!mTexture) { mError = "readSsrHistoryHdr: View '" + mIdentityName + "' is on-screen"; return false; }
     if (!mWorkspace) { mError = "readSsrHistoryHdr: View '" + mIdentityName + "' has no workspace"; return false; }
     if (!readChainTexture(chain::ssrHistoryTextureName(), out, "readSsrHistoryHdr")) return false;
@@ -1952,6 +2019,7 @@ void AsyncHoldListener::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
 }
 
 void OgreView::setAsyncShaders(bool on) {
+    if (postedAsField([&](FrameInputView &p) { p.asyncShaders = on; })) return;   // the host's: a field (U3 4a)
     // THE MODE'S EDGES ARE IN THE LOG: a compile that happened while a view compiled in the
     // background is a defect, and the log is where a failing row finds which side it was on.
     if (on != mAsyncShaders)
@@ -1978,6 +2046,8 @@ const Ogre::HlmsCompute *OgreView::computeHlms() const {
 }
 
 bool OgreView::warmUpShaders() {
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = warmUpShaders(); }, nullptr); return r; }
     if (!mScene)  { mError = "warmUpShaders: no scene is bound to view '" + mIdentityName + "'"; return false; }
     if (!mCamera) { mError = "warmUpShaders: view '" + mIdentityName + "' has no camera"; return false; }
     JAH_TRY {
@@ -2226,6 +2296,8 @@ void FrameCaptureListener::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
 }
 
 bool OgreView::requestFrameCapture(bool keepHelpers, bool alsoPresented) {
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = requestFrameCapture(keepHelpers, alsoPresented); }, nullptr); return r; }
     JAH_TRY {
         if (!target()) { mError = "requestFrameCapture: View '" + mIdentityName + "' has no target"; return false; }
         // A new request supersedes an unread one.
@@ -2498,6 +2570,8 @@ void OgreView::recordFrameCapture(Ogre::CompositorWorkspace *ws, bool incomplete
 }
 
 FrameCaptureState OgreView::frameCaptureState() {
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { FrameCaptureState r{}; mEngine->request([&](Engine &) { r = frameCaptureState(); }, nullptr); return r; }
     if (mCaptureState == FrameCaptureState::InFlight && mCaptureTicket) {
         JAH_TRY {
             if (mCaptureTicket->queryIsTransferDone() &&
@@ -2509,6 +2583,8 @@ FrameCaptureState OgreView::frameCaptureState() {
 }
 
 bool OgreView::takeFrameCapture(Image &out, bool wait, Image *presented) {
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = takeFrameCapture(out, wait, presented); }, nullptr); return r; }
     const FrameCaptureState st = frameCaptureState();
     if (st == FrameCaptureState::Idle) { mError = "takeFrameCapture: nothing was requested"; return false; }
     if (st == FrameCaptureState::Armed) {

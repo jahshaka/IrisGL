@@ -224,6 +224,8 @@ bool OgreScene::atomDrawWanted() const {
 }
 
 void OgreScene::setAtomDrawEnabled(bool on) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { s.setAtomDrawEnabled(on); return true; })) return;
     if (on == mAtom.drawEnabled()) return;
     mAtom.setDrawEnabled(on);
     // Every slot re-composes (its route and its queue follow), and every view of
@@ -234,12 +236,14 @@ void OgreScene::setAtomDrawEnabled(bool on) {
 }
 
 void OgreScene::setAtomOcclusionEnabled(bool on) {
+    JAH_HOST_CALL("Scene::setAtomOcclusionEnabled");
     // A SHAPE CHANGE and nothing else: every view of this scene re-derives its chain
     // (the pyramid and the late pass come or go) on its next sync, as for the split.
     mAtom.setOcclusionEnabled(on);
 }
 
 void OgreScene::setAtomCutBudgetForTest(unsigned indices) {
+    JAH_HOST_CALL("Scene::setAtomCutBudgetForTest");
     for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>()) {
         if (!v) continue;
         v->atomCull().setCutBudgetForTest(indices);
@@ -390,6 +394,7 @@ const Ogre::HlmsDatablock *OgreScene::atomSlotDatablock(uint32_t slot) const {
 }
 
 AtomDrawStatus OgreScene::atomDrawStatus() {
+    JAH_HOST_CALL("Scene::atomDrawStatus");
     AtomDrawStatus st;
     st.live = mGpuScene.live();
     // THE COMPONENT'S SHARE: the words, the decode draws and twins, the PBS views, the

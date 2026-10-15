@@ -6037,6 +6037,11 @@ struct EngineConfig {
     /// pixel readbacks stay exact — raise per view with View::setSampleCount.
     /// The driver may clamp; View::sampleCount() reports what was achieved.
     unsigned sampleCount = 1;
+    /// THE HOST'S CALLS ARE RECORDS (ENGINE-UPGRADE-U3 stage 4a, decision 39): a View setter, an engine verb or a
+    /// scene command the host calls becomes a field of the record or a message of its stream, applied at the drain —
+    /// the shape the render thread (stage 4b) needs. The app turns it on (bridge/enginehost.cpp); an engine fixture
+    /// that drives the engine directly on its own thread leaves it off and its calls apply where they are made.
+    bool hostRecords = false;
     /// Build a dedicated, de-duplicated, position-only vertex buffer for each
     /// mesh's shadow-map pass instead of re-streaming the full vertex. Shadow
     /// passes then read ~4x less vertex bandwidth, at the cost of extra VRAM per
@@ -7886,6 +7891,7 @@ enum class GiArmStage : unsigned char {
 /// that wants "is it still compiling" differences it across frames.
 class Scene;
 class View;
+class Engine;
 
 /// ONE FRAME'S INPUT (ENGINE-UPGRADE-1 U0, part 3a UPGRADE-RECORD-1). Everything a host hands the engine FOR A FRAME —
 /// the frame's clock step, why it renders, its pace, the gesture, each scene's environment and CHANGE SET, and each
@@ -7992,12 +7998,33 @@ struct FrameInputView {
     std::optional<bool>       shadows;
     std::optional<unsigned>   sampleCount;
     std::optional<Colour>     background;
+    // ---- THE HOST'S VIEW SETTERS AS FIELDS (ENGINE-UPGRADE-U3 stage 4a, decision 39 a): each View setter called on
+    // the host's side writes its field here (the newest wins in a merge) and the drain applies it — never inline.
+    std::optional<Scene *>            scene;              ///< View::setScene (null = detach); the drain rebinds
+    std::optional<bool>               enabled;            ///< View::setEnabled
+    std::optional<OffscreenContract>  offscreenContract;  ///< View::setOffscreenContract
+    std::optional<bool>               helpersVisible;     ///< View::setHelpersVisible
+    std::optional<bool>               vrHelpersVisible;   ///< View::setVrHelpersVisible
+    std::optional<bool>               asyncShaders;       ///< View::setAsyncShaders
+    std::optional<ViewOverlayDesc>    overlay;            ///< View::setOverlay
+    std::optional<ViewPipDesc>        pip;                ///< View::setPip
+    std::optional<bool>               lodHysteresisOffscreen;   ///< View::setLodHysteresisOffscreen
+    std::optional<std::pair<unsigned, unsigned>> size;    ///< View::resize (the target's new size; before the camera)
     bool                      resetExposure = false;   ///< a camera cut: the exposure history re-seeds once
     /// Seed the exposure history with this scale (View::seedExposureHistory) — after the chain lands, since the
     /// seed is derived from it (a new recorder view starts at the editor's measured exposure).
     std::optional<float>      seedExposure;
 };
+/// AN ENGINE MESSAGE (ENGINE-UPGRADE-U3 stage 4a, decision 39 c): an engine verb the host called — the VR session's,
+/// the shader cache's, the monitor's, a create — carried in the record and applied at the top of the drain, BEFORE
+/// the scenes' streams (a scene a message creates exists for its own commands), in the order the host called them.
+/// Its answer is its completion (PublishedEngineFrame::completions), the scene messages' shape.
+struct EngineMessage {
+    std::function<bool(Engine &)> apply;
+    unsigned long long token = 0;
+};
 struct FrameInput {
+    std::vector<EngineMessage>        engineMessages;  ///< the engine's own stream (decision 39 c), drained first
     std::optional<float>              frameDelta;      ///< seconds every renderOneFrame advances by (persists)
     std::optional<FrameCause>         cause;           ///< why the next frame renders (resets to Driver)
     std::optional<unsigned>           shadowMapBudget; ///< engine-wide (the shadow map pool's size)
@@ -8572,6 +8599,9 @@ struct PublishedEngineFrame {
         std::string        text;
     };
     std::vector<Refusal> refusals;
+    /// THE ENGINE MESSAGES' COMPLETIONS (decision 39 c): the named ones' answers and every refusal, the last
+    /// kFrameErrorsKept frames, by a sequence that only grows — PublishedFrame::Completion's shape.
+    std::shared_ptr<const std::vector<PublishedFrame::Completion>> completions;
     bool               deviceLost = false;
     GpuFault           gpuFault = GpuFault::None;
     MonitorStatus      monitor;

@@ -31,6 +31,9 @@ constexpr Ogre::uint8 kGridRenderQueue = 13u;
 }  // namespace
 
 bool OgreScene::setGrid(const GridDesc &desc) {
+    // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (postScene([=](OgreScene &s) { return s.setGrid(desc); })) return true;
+    JAH_HOST_CALL("Scene::setGrid");
     JAH_TRY {
         if (desc == mGridDesc) return true;
         if (!desc.enabled) {

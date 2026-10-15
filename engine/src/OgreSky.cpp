@@ -164,6 +164,9 @@ struct ShAccum {
 // reflection faces must not tear the sky down and back up, because that is a
 // texture upload plus a six-face cube build for nothing.
 bool OgreScene::setSky(const SkyDesc &desc) {
+    // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (postScene([=](OgreScene &s) { return s.setSky(desc); })) return true;
+    JAH_HOST_CALL("Scene::setSky");
     // NoSky is a FULL clear: a description with no sky and no opinion on
     // reflections must not leave an IBL-only reflection bound (the contract
     // EnginePrivate.h states and the mirror's setSource relies on; code review
@@ -1302,6 +1305,7 @@ bool OgreScene::applySkyReflectionFaces(const TextureId faces[6]) {
 // samples clamped under `_notifyIblSpecMipmap`'s process-wide count — acceptable
 // and noted, not measured.
 TextureId OgreScene::createCubemap(const TextureId faces[6], TextureId id) {
+    JAH_HOST_CALL("Scene::createCubemap");
     if (id && mTextures.count(id)) { mError = "createCubemap: the id is already a texture of this scene"; return 0; }
     JAH_TRY {
         Ogre::TextureGpu *tex[6];
@@ -1379,6 +1383,7 @@ void OgreScene::tuneSkyRenderable() {
 }
 
 Ogre::TextureGpu *OgreScene::makeSkyArrayTexture(Ogre::TextureGpu *src) {
+    JAH_HOST_CALL("Scene::makeSkyArrayTexture");
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     // A RECYCLED NAME, like every other texture this file creates (SKYARRAY-LEAK-1;
     // the recycling rule and its cost are at the head of this file and at
@@ -2604,6 +2609,7 @@ CloudStatus OgreScene::cloudStatus() const {
 // pass, so a pending one runs first; the read is a synchronous ticket after a
 // flush (DOCS/traps/ENGINE.md: a ticket without flushCommands reads stale VRAM).
 bool OgreScene::cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres) {
+    JAH_HOST_CALL("Scene::cloudField");
     tau.clear();
     size = 0u;
     tileMetres = 0.0f;
@@ -2645,6 +2651,7 @@ bool OgreScene::cloudField(std::vector<float> &tau, unsigned &size, float &tileM
 // viewer's lat-long convention on the CPU.
 bool OgreScene::renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize,
                                   float exposure, std::vector<unsigned char> &rgba) {
+    JAH_HOST_CALL("Scene::renderSkyEquirect");
     if (mSkyDesc.mode == SkyMode::NoSky || width == 0 || height == 0 || faceSize == 0) return false;
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     if (!cm->hasWorkspaceDefinition(Ogre::IdString(kSkyCaptureWorkspace))) return false;

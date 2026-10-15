@@ -27,7 +27,7 @@ HlmsAtom *atomHlmsOf(Ogre::Root *root) {
 constexpr uint32_t kViewTableWidth = 1024u;
 }  // namespace
 
-AtomComponent::AtomComponent(Ogre::Root *root, Ogre::SceneManager *sm, GpuSceneSubstrate &substrate,
+AtomComponent::AtomComponent(Ogre::Root *root, Ogre::SceneManager *const &sm, GpuSceneSubstrate &substrate,
                              SlotDatablock slotDatablock)
     : mRoot(root), mSceneMgr(sm), mSubstrate(substrate), mSlotDatablock(std::move(slotDatablock)) {
     // THE SELFTEST'S DOORS, a pair: JAHSHAKA_ATOM_DRAW_OFF shuts the split (every item

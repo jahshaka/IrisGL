@@ -567,6 +567,11 @@ void OgreScene::applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p
 
 // ---- Materials ----
 MaterialId OgreScene::createPbrMaterial(const PbrParams &p, MaterialId id) {
+    if (hostPosts()) {   // THE HOST'S CREATE (U3 4a): an id it reserves, the create a message
+        const MaterialId mid = id ? id : reserveMaterialId();
+        postScene([=](OgreScene &s) { return s.createPbrMaterial(p, mid) != 0; });
+        return mid;
+    }
     if (id && mMaterials.count(id)) { mError = "createPbrMaterial: the id is already a material of this scene"; return 0; }
     JAH_TRY {
         MaterialRec rec;
@@ -616,6 +621,7 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p, MaterialId id) {
 }
 
 bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
+    JAH_HOST_CALL("Scene::setPbrMaterial");
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
     // An OVERLAY unlit material (grid, gizmo, outline) has no PBR parameters at
@@ -765,6 +771,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
 // family, re-attach — and the MaterialId survives, because the host's scene
 // refers to it from every node.
 bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
+    JAH_HOST_CALL("Scene::setShadingModel");
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) { mError = "setShadingModel: unknown material"; return false; }
     MaterialRec &rec = it->second;
@@ -946,6 +953,7 @@ static Ogre::CustomPieceStage::CustomPieceStage ogrePieceStage(CustomPieceStage 
 
 bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
                                        CustomPieceStage stage) {
+    JAH_HOST_CALL("Scene::setMaterialCustomPiece");
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) { mError = "setMaterialCustomPiece: unknown material"; return false; }
     MaterialRec &rec = it->second;
@@ -1034,6 +1042,8 @@ void OgreScene::applyScrollOffsets() {
 }
 
 void OgreScene::setShaderTime(float seconds) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { s.setShaderTime(seconds); return true; })) return;
     mShaderTime = seconds;
     // THE SCROLLING MAPS (TORNADO-1) take the clock as a per-material OFFSET:
     // an alpha-tested caster's pixel shader has no pass buffer to read it from.
@@ -1101,6 +1111,7 @@ void OgreScene::bindTrackedPiecesInto(const MaterialRec &rec, Ogre::HlmsPbsDatab
 }
 
 bool OgreScene::destroyMaterial(MaterialId id) {
+    JAH_HOST_CALL("Scene::destroyMaterial");
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
     JAH_TRY {
@@ -1137,6 +1148,8 @@ bool OgreScene::destroyMaterial(MaterialId id) {
 }
 
 bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { return s.attachMesh(id, meshId, matId); })) return true;
     auto nit = mNodes.find(id); auto mit = mMeshes.find(meshId); auto tit = mMaterials.find(matId);
     if (nit == mNodes.end()) { mError = "attachMesh: unknown node"; return false; }
     if (mit == mMeshes.end()) { mError = "attachMesh: unknown mesh"; return false; }
@@ -1236,6 +1249,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
 // changes its datablock, the rules a material decides for it are re-derived,
 // and the volume owes a re-voxelisation of THIS ITEM'S BOX only.
 bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
+    JAH_HOST_CALL("Scene::setNodeMaterial");
     auto nit = mNodes.find(id); auto tit = mMaterials.find(matId);
     if (nit == mNodes.end()) { mError = "setNodeMaterial: unknown node"; return false; }
     if (tit == mMaterials.end()) { mError = "setNodeMaterial: unknown material"; return false; }
@@ -1290,6 +1304,7 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
 }
 
 bool OgreScene::detachMesh(NodeId id) {
+    JAH_HOST_CALL("Scene::detachMesh");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return false;
     JAH_TRY { detachItem(id, it->second); return true; } JAH_CATCH(mError, false);
@@ -1340,6 +1355,7 @@ void waitForTextureResident(Ogre::TextureGpu *tex) {
 }
 
 TextureId OgreScene::loadTexture(const std::string &path, bool srgb, TextureId id) {
+    JAH_HOST_CALL("Scene::loadTexture");
     if (id && mTextures.count(id)) { mError = "loadTexture: the id is already a texture of this scene"; return 0; }
     // Path dedup, but NEVER across the decal atlases: the same image file can be
     // both an ordinary PBR map and a decal image, and they live in different
@@ -1651,6 +1667,13 @@ void downsampleRgba(const unsigned char *src, unsigned w, unsigned h,
 
 TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb,
                                    bool mipmaps, TextureId id) {
+    if (hostPosts()) {   // THE HOST'S CREATE (U3 4a): an id it reserves, the create a message OWNING its pixels
+        const TextureId tid = id ? id : reserveTextureId();
+        std::vector<unsigned char> px;
+        if (rgba) px.assign(rgba, rgba + size_t(w) * size_t(h) * 4u);
+        postScene([=](OgreScene &s) { return s.createTexture(w, h, px.empty() ? nullptr : px.data(), srgb, mipmaps, tid) != 0; });
+        return tid;
+    }
     if (id && mTextures.count(id)) { mError = "createTexture: the id is already a texture of this scene"; return 0; }
     if (!w || !h || !rgba) { mError = "createTexture: empty image"; return 0; }
     JAH_TRY {
@@ -1750,6 +1773,7 @@ void OgreScene::uploadRgbaLevels(Ogre::TextureGpu *tex, unsigned w, unsigned h,
 // same frame — the 2026-09-03 sky fact, where an AsyncTextureTicket issued
 // before the buffer was submitted read a destroyed texture's VRAM.
 bool OgreScene::updateTexture(TextureId id, unsigned w, unsigned h, const unsigned char *rgba) {
+    JAH_HOST_CALL("Scene::updateTexture");
     if (!w || !h || !rgba) { mError = "updateTexture: empty image"; return false; }
     auto it = mTextures.find(id);
     if (it == mTextures.end()) { mError = "updateTexture: unknown texture"; return false; }
@@ -1814,6 +1838,7 @@ void OgreScene::releaseTextureRec(const TextureRec &rec) {
 }
 
 bool OgreScene::destroyTexture(TextureId id) {
+    JAH_HOST_CALL("Scene::destroyTexture");
     auto it = mTextures.find(id);
     if (it == mTextures.end()) return false;
     JAH_TRY {
@@ -2177,6 +2202,8 @@ Ogre::TextureGpu *OgreScene::reflectionTexFor(const MaterialRec &rec) const {
 }
 
 bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId texId) {
+    // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
+    if (postScene([=](OgreScene &s) { return s.setPbrTexture(mat, slot, texId); })) return true;
     auto mit = mMaterials.find(mat);
     if (mit == mMaterials.end() || (mit->second.unlit && !mit->second.shadingUnlit)) {
         mError = "setPbrTexture: not a PBR material"; return false;
@@ -2279,6 +2306,7 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
 static constexpr float kUnlitOpaqueAlpha = 0.999f;
 
 MaterialId OgreScene::createUnlitMaterial(const Colour &c, bool depthTest, bool wireframe, MaterialId id) {
+    JAH_HOST_CALL("Scene::createUnlitMaterial");
     if (id && mMaterials.count(id)) { mError = "createUnlitMaterial: the id is already a material of this scene"; return 0; }
     JAH_TRY {
         MaterialRec rec; rec.datablockName = processUniqueName("unlit"); rec.unlit = true; rec.onTop = !depthTest;
@@ -2312,6 +2340,7 @@ MaterialId OgreScene::createUnlitMaterial(const Colour &c, bool depthTest, bool 
 }
 
 MaterialId OgreScene::createOutlineMaterial(const Colour &c, bool skinnable, MaterialId id) {
+    JAH_HOST_CALL("Scene::createOutlineMaterial");
     if (id && mMaterials.count(id)) { mError = "createOutlineMaterial: the id is already a material of this scene"; return 0; }
     JAH_TRY {
         MaterialRec rec; rec.datablockName = processUniqueName("outline"); rec.unlit = true;
@@ -2367,6 +2396,7 @@ MaterialId OgreScene::createOutlineMaterial(const Colour &c, bool skinnable, Mat
 }
 
 bool OgreScene::setUnlitMaterial(MaterialId id, const Colour &c) {
+    JAH_HOST_CALL("Scene::setUnlitMaterial");
     auto it = mMaterials.find(id);
     if (it == mMaterials.end() || !it->second.unlit) return false;
     JAH_TRY {
@@ -2582,6 +2612,7 @@ void OgreScene::sweepCullTwins() {
 }
 
 void OgreScene::setNodeFaceCull(NodeId id, FaceCull cull) {
+    JAH_HOST_CALL("Scene::setNodeFaceCull");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
     Node &n = it->second;

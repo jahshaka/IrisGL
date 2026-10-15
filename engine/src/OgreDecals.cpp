@@ -195,6 +195,7 @@ Rgba sampleSrc(const Ogre::Image2 &src, bool grayscale, float u, float v)
 // ---------------------------------------------------------------------------
 TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind, TextureId id)
 {
+    JAH_HOST_CALL("Scene::loadDecalTexture");
     if (id && mTextures.count(id)) { mError = "loadDecalTexture: the id is already a texture of this scene"; return 0; }
     DecalAtlas &atlas = decalAtlas(kind);
 
@@ -403,6 +404,7 @@ unsigned OgreScene::decalAtlasUsed(DecalMap kind) const
 // ---------------------------------------------------------------------------
 bool OgreScene::setDecal(NodeId id, const DecalDesc &d)
 {
+    JAH_HOST_CALL("Scene::setDecal");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) { mError = "setDecal: unknown node"; return false; }
     if (!d.diffuse) {
@@ -484,6 +486,7 @@ bool OgreScene::setDecal(NodeId id, const DecalDesc &d)
 
 bool OgreScene::removeDecal(NodeId id)
 {
+    JAH_HOST_CALL("Scene::removeDecal");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.decal) return false;
     JAH_TRY {

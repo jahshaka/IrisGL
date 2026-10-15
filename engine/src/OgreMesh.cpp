@@ -293,6 +293,11 @@ void installJahLodStrategy()
 
 // ---- Meshes ----
 MeshId OgreScene::createMesh(const MeshData &data, MeshId id) {
+    if (hostPosts()) {   // THE HOST'S CREATE (U3 4a): an id it reserves, the create a message owning the data
+        const MeshId mid = id ? id : reserveMeshId();
+        postScene([=](OgreScene &s) { return s.createMesh(data, mid) != 0; });
+        return mid;
+    }
     if (id && mMeshes.count(id)) { mError = "createMesh: the id is already a mesh of this scene"; return 0; }
     if (data.positions.empty() || data.positions.size() % 3 != 0) { mError = "createMesh: positions must be xyz triples"; return 0; }
     if (data.indices.empty() || data.indices.size() % 3 != 0)     { mError = "createMesh: indices must be triangles"; return 0; }
@@ -424,6 +429,7 @@ MeshId OgreScene::createMesh(const MeshData &data, MeshId id) {
 
 bool OgreScene::updateMeshVertices(MeshId id, const std::vector<float> &positions,
                                    const std::vector<float> &normals) {
+    JAH_HOST_CALL("Scene::updateMeshVertices");
     auto it = mMeshes.find(id);
     if (it == mMeshes.end()) { mError = "updateMeshVertices: unknown mesh"; return false; }
     MeshRec &rec = it->second;
@@ -462,6 +468,7 @@ bool OgreScene::updateMeshVertices(MeshId id, const std::vector<float> &position
 }
 
 bool OgreScene::destroyMesh(MeshId id) {
+    JAH_HOST_CALL("Scene::destroyMesh");
     auto it = mMeshes.find(id);
     if (it == mMeshes.end()) return false;
     JAH_TRY {
@@ -477,6 +484,7 @@ bool OgreScene::destroyMesh(MeshId id) {
 }
 
 MeshId OgreScene::createLineMesh(const std::vector<Vec3> &points, bool strip, MeshId id) {
+    JAH_HOST_CALL("Scene::createLineMesh");
     if (id && mMeshes.count(id)) { mError = "createLineMesh: the id is already a mesh of this scene"; return 0; }
     if (points.size() < 2) { mError = "createLineMesh: need at least 2 points"; return 0; }
     JAH_TRY {
@@ -801,6 +809,9 @@ bool OgreScene::clusterStreamOf(MeshId mesh, ClusterStreamView &out) const {
 }
 
 void OgreScene::setLodBias(float bias) {
+    // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (postScene([=](OgreScene &s) { s.setLodBias(bias); return true; })) return;
+    JAH_HOST_CALL("Scene::setLodBias");
     if (!(bias >= 0.0f)) bias = 0.0f;
     if (bias == mLodBias) return;
     mLodBias = bias;

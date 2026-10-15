@@ -217,6 +217,7 @@ bool OgreEngine::hzbStatus(View *view, HzbStatus &out) const {
 
 bool OgreEngine::readHzbLevel(View *view, unsigned level, std::vector<float> &out,
                               unsigned &width, unsigned &height) {
+    JAH_HOST_CALL("Engine::readHzbLevel");
     out.clear();
     width = height = 0u;
     if (!mRoot) return false;
@@ -257,6 +258,7 @@ bool OgreEngine::readHzbLevel(View *view, unsigned level, std::vector<float> &ou
 /// THE ID IMAGE, read back (ATOM-OCCLUSION-1's proofs): the chain's `jahAtomIds` (two
 /// uint words a pixel), after the same load-bearing flush.
 bool OgreEngine::readAtomIds(View *view, std::vector<uint32_t> &words, unsigned &width, unsigned &height) {
+    JAH_HOST_CALL("Engine::readAtomIds");
     words.clear();
     width = height = 0u;
     OgreView *v = static_cast<OgreView *>(view);

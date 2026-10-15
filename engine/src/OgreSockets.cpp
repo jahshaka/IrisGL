@@ -64,6 +64,7 @@ bool isAncestorOf(const Ogre::Node *maybeAncestor, const Ogre::Node *n)
 bool OgreScene::attachToBone(NodeId riderId, NodeId ownerId, const std::string &bone,
                              const Vec3 &position, const Quat &rotation, const Vec3 &scale)
 {
+    JAH_HOST_CALL("Scene::attachToBone");
     auto rit = mNodes.find(riderId);
     if (rit == mNodes.end() || !rit->second.node) {
         mError = "attachToBone: unknown rider node";
@@ -136,6 +137,7 @@ bool OgreScene::attachToBone(NodeId riderId, NodeId ownerId, const std::string &
 
 bool OgreScene::detachFromBone(NodeId riderId, NodeId parent)
 {
+    JAH_HOST_CALL("Scene::detachFromBone");
     auto rit = mNodes.find(riderId);
     if (rit == mNodes.end() || !rit->second.node) {
         mError = "detachFromBone: unknown rider node";
@@ -149,6 +151,7 @@ bool OgreScene::detachFromBone(NodeId riderId, NodeId parent)
 bool OgreScene::setBoneAttachmentOffset(NodeId riderId, const Vec3 &position,
                                         const Quat &rotation, const Vec3 &scale)
 {
+    JAH_HOST_CALL("Scene::setBoneAttachmentOffset");
     auto rit = mNodes.find(riderId);
     if (rit == mNodes.end() || !rit->second.boneTag) {
         mError = "setBoneAttachmentOffset: the node is not on a bone";

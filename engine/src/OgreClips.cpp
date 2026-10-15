@@ -140,6 +140,7 @@ bool OgreScene::clipsAreStale(NodeId id, const NodeClips &nc,
 
 // ---------------------------------------------------------------------------
 bool OgreScene::attachClips(NodeId id, const ClipDesc *clips, size_t count) {
+    JAH_HOST_CALL("Scene::attachClips");
     // A FOLLOWER's skeleton IS the master's instance (AVATAR_RIG_PERF_SPEC
     // §3.3): a second clip set enabled on it would double-drive the whole
     // character, and attachClips' own "nothing may be playing" guard would then
@@ -374,6 +375,12 @@ std::vector<PublishedFrame::Facts::Clip> OgreScene::clipFacts(NodeId id) const {
 
 // ---------------------------------------------------------------------------
 bool OgreScene::setClipStates(NodeId id, const ClipState *states, size_t count) {
+    // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (hostRecordsOn()) {
+        std::vector<ClipState> c(states, states + (states ? count : 0));
+        if (postScene([=](OgreScene &s) { return s.setClipStates(id, c.empty() ? nullptr : c.data(), c.size()); })) return true;
+    }
+    JAH_HOST_CALL("Scene::setClipStates");
     if (sharesSkeleton(id)) {
         mError = "setClipStates: this node shares another node's skeleton — drive the source";
         return false;
@@ -519,6 +526,7 @@ bool OgreScene::setClipStates(NodeId id, const ClipState *states, size_t count) 
 
 // ---------------------------------------------------------------------------
 bool OgreScene::setBoneManual(NodeId id, const std::string &bone, bool manual) {
+    JAH_HOST_CALL("Scene::setBoneManual");
     if (sharesSkeleton(id)) {
         mError = "setBoneManual: this node shares another node's skeleton — mark it on the source";
         return false;

@@ -230,6 +230,7 @@ bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig,
 bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
                                   const SkeletonDesc &rig, const unsigned short *blendToRig,
                                   size_t blendToRigCount) {
+    JAH_HOST_CALL("Scene::attachSkinnedMesh");
     auto nit = mNodes.find(id);
     auto mit = mMeshes.find(meshId);
     auto tit = mMaterials.find(matId);
@@ -365,6 +366,7 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
 
 // ---------------------------------------------------------------------------
 bool OgreScene::followSkeleton(NodeId followerId, NodeId sourceId) {
+    JAH_HOST_CALL("Scene::followSkeleton");
     auto fit = mNodes.find(followerId);
     if (fit == mNodes.end()) { mError = "followSkeleton: unknown follower node"; return false; }
     Node &f = fit->second;
@@ -466,6 +468,7 @@ std::vector<std::string> OgreScene::boneNames(NodeId id) const {
 }
 
 bool OgreScene::setBonePoses(NodeId id, const BonePose *poses, size_t count) {
+    JAH_HOST_CALL("Scene::setBonePoses");
     // The lamp-map cache, per node (its caster scan).
     noteNodePosed(id);
 
@@ -544,6 +547,7 @@ bool OgreScene::boneMatrices(NodeId id, float *out, size_t count) const {
 // (`shareSource`) is what distinguishes "renders from somebody else's rig" from
 // "somebody else renders from mine".
 bool OgreScene::shareSkeleton(NodeId followerId, NodeId sourceId) {
+    JAH_HOST_CALL("Scene::shareSkeleton");
     auto fit = mNodes.find(followerId);
     if (fit == mNodes.end()) { mError = "shareSkeleton: unknown follower node"; return false; }
     Node &f = fit->second;

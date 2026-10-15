@@ -470,6 +470,9 @@ Ogre::ColourValue OgreEngine::shadowClearColour() const
 // The global knobs the atlas is built from
 // ---------------------------------------------------------------------------
 void OgreEngine::setShadowFilter(ShadowFilter f) {
+    // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (postedAsMessage([=](OgreEngine &e) { e.setShadowFilter(f); return true; })) return;
+    JAH_HOST_CALL("Engine::setShadowFilter");
     mShadowFilter = f;
     mHostShadowFilter = f;   // the host's record (Engine::shadowFilter)
     if (mHlmsRegistered) applyShadowFilter();
@@ -493,6 +496,8 @@ void OgreEngine::applyShadowFilter() {
 }
 
 void OgreEngine::setShadowResolution(unsigned pixels) {
+    // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
+    if (postedAsMessage([=](OgreEngine &e) { e.setShadowResolution(pixels); return true; })) return;
     const unsigned res = std::min(8192u, std::max(256u, pixels));
     if (res == mShadowResolution) return;
     rebuildShadowAtlas(res, mShadowMapCount, mShadowPerMapClears);
@@ -565,6 +570,8 @@ bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, b
 // The derived count (SHADOW_TOOLING_SPEC.md §4.1)
 // ---------------------------------------------------------------------------
 void OgreEngine::setShadowMapBudget(unsigned maps) {
+    // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
+    if (postedAsMessage([=](OgreEngine &e) { e.setShadowMapBudget(maps); return true; })) return;
     const unsigned want = std::min(kMaxShadowMaps, std::max(2u, maps));
     if (want == mShadowMapBudget) return;
     mShadowMapBudget = want;
@@ -718,6 +725,8 @@ void OgreEngine::deriveShadowMapCount() {
 // The readback
 // ---------------------------------------------------------------------------
 void OgreEngine::publishShadowStatus(unsigned frames) {
+    // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
+    if (postedAsMessage([=](OgreEngine &e) { e.publishShadowStatus(frames); return true; })) return;
     mShadowLeaseUntil = frames ? mShadowFrame + frames : 0ull;
 }
 
@@ -1039,6 +1048,8 @@ std::vector<hud::AtlasTileDesc> OgreEngine::collectAtlasTiles() const {
 }
 
 bool OgreEngine::refreshShadows() {
+    // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
+    if (postedAsMessage([=](OgreEngine &e) { return e.refreshShadows(); })) return true;
     if (!mHlmsRegistered || mHeadless) return false;
     bool any = false;
     for (auto &s : mScenes) { s->dirtyAllShadowMaps(); any = true; }

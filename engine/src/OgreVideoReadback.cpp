@@ -239,6 +239,8 @@ VideoReadbackStatus VideoReadback::status() const {
 // ---- the View verbs ---------------------------------------------------------
 
 bool OgreView::setVideoReadback(bool on) {
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = setVideoReadback(on); }, nullptr); return r; }
     if (!on) {
         if (mVideoReadback) {
             removeWorkspaceListener(mVideoReadback.get());
@@ -260,10 +262,14 @@ bool OgreView::setVideoReadback(bool on) {
 }
 
 void OgreView::armVideoFrame(unsigned long long tag) {
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { mEngine->request([&](Engine &) { armVideoFrame(tag); }, nullptr); return; }
     if (mVideoReadback) mVideoReadback->arm(tag);
 }
 
 bool OgreView::takeVideoFrame(VideoFrameNv12 &out, bool wait) {
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = takeVideoFrame(out, wait); }, nullptr); return r; }
     if (!mVideoReadback) { mError = "takeVideoFrame: the view's video readback is off"; return false; }
     std::string error;
     const bool ok = mVideoReadback->take(out, wait, error);
@@ -272,7 +278,8 @@ bool OgreView::takeVideoFrame(VideoFrameNv12 &out, bool wait) {
 }
 
 VideoReadbackStatus OgreView::videoReadbackStatus() const {
-    JAH_SYNC_GETTER("View::videoReadbackStatus");
+    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
+    if (hostPosts()) { VideoReadbackStatus r{}; mEngine->request([&](Engine &) { r = videoReadbackStatus(); }, nullptr); return r; }
     return mVideoReadback ? mVideoReadback->status() : VideoReadbackStatus();
 }
 

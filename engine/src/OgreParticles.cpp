@@ -202,6 +202,9 @@ void fillInterpStages(const float *srcTimes, const T *srcValues, unsigned count,
 
 bool OgreScene::createBillboardSet(NodeId id, TextureId texId, bool additiveBlend,
                                    unsigned capacity, BillboardLayer layer) {
+    // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (postScene([=](OgreScene &s) { return s.createBillboardSet(id, texId, additiveBlend, capacity, layer); })) return true;
+    JAH_HOST_CALL("Scene::createBillboardSet");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) { mError = "createBillboardSet: unknown node"; return false; }
     Ogre::TextureGpu *tex = nullptr;
@@ -279,6 +282,7 @@ bool OgreScene::createBillboardSet(NodeId id, TextureId texId, bool additiveBlen
 }
 
 bool OgreScene::setBillboards(NodeId id, const BillboardInstance *data, size_t count) {
+    JAH_HOST_CALL("Scene::setBillboards");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.billboards) {
         mError = "setBillboards: node has no billboard set"; return false;
@@ -313,6 +317,7 @@ bool OgreScene::setBillboards(NodeId id, const BillboardInstance *data, size_t c
 }
 
 bool OgreScene::destroyBillboardSet(NodeId id) {
+    JAH_HOST_CALL("Scene::destroyBillboardSet");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.billboards) return false;
     JAH_TRY { releaseBillboards(it->second); return true; } JAH_CATCH(mError, false);
@@ -711,6 +716,9 @@ void OgreScene::applyParticleValues(Node &n, const ParticleSystemDesc &d) {
 }
 
 bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
+    // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (postScene([=](OgreScene &s) { return s.setParticleSystem(id, d); })) return true;
+    JAH_HOST_CALL("Scene::setParticleSystem");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) { mError = "setParticleSystem: unknown node"; return false; }
     if (d.emitters.empty()) { mError = "setParticleSystem: no emitters"; return false; }
@@ -777,6 +785,7 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
 }
 
 bool OgreScene::removeParticleSystem(NodeId id) {
+    JAH_HOST_CALL("Scene::removeParticleSystem");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.particleDef) return false;
     JAH_TRY { releaseParticleSystem(it->second); return true; } JAH_CATCH(mError, false);
