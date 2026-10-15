@@ -7316,7 +7316,6 @@ public:
     /// Null only when the Hlms is not registered yet, which cannot happen on
     /// the path that asks: a View exists by then.
     Ogre::SceneManager *blankSceneManager();
-    bool  isHeadless() const override { return mHeadless; }
     /// The views currently bound to `scene` (ATOM-CLUSTER-CUT: the cut's counters
     /// are a view's, and AtomDrawStatus is a scene's).
     std::vector<OgreView *> viewsOf(const OgreScene *scene) const {
@@ -7355,7 +7354,7 @@ public:
     /// The game side's merge into the hand-over slot (RenderThread::submit).
     void submitFrame(const FrameInput &input) override;
     FrameSubmitStatus frameSubmitStatus() const override { return mRenderThread.submitStatus(); }
-    FrameInputStatus frameInputStatus() const override { return mFrameInputStatus; }
+    FrameInputStatus frameInputStatus() const override { JAH_SYNC_GETTER("Engine::frameInputStatus"); return mFrameInputStatus; }
     const PublishedEngineFrame &published() const override { return mRenderThread.published(); }
     void setDisplayPeriod(float seconds) override { mRenderThread.setDisplayPeriod(seconds); }
     std::vector<SyncGetterCount> syncGetters() const override {
@@ -7402,18 +7401,14 @@ public:
     void advanceResources() override;
 
     // ---- VR (SPECS/VR_SPEC.md §4) -----------------------------------------
-    bool vrAvailable() const override;
-    void setVrPolicy(const VrPolicy &policy) override { mVrPolicy = policy; }
-    const VrPolicy &vrPolicy() const override { return mVrPolicy; }
+    void setVrPolicy(const VrPolicy &policy) override { mVrPolicy = policy; mHostVrPolicy = policy; }
     bool vrProbe() override;
-    const VrInfo &vrInfo() const override { return mVrInfo; }
+    const VrInfo &vrInfo() const override { JAH_SYNC_GETTER("Engine::vrInfo"); return mVrInfo; }
     bool beginVrSession(Scene *scene, const VrConfig &cfg) override;
     void endVrSession() override;
     VrState vrState() const override;
     VrStatus vrStatus() const override;
-    View *vrView() const override;
     void setVrMirrorView(View *view) override;
-    View *vrMirrorView() const override { return mVrMirrorView; }
     void setVrOrigin(const Vec3 &position, float yawDegrees) override;
     bool vrEyeScreenshot(unsigned eye, Image &out) override;
     bool vrInjectInput(int hand, const VrHandState &state) override;
@@ -7423,7 +7418,7 @@ public:
     unsigned vrBindingBlocks(VrBindingBlock *out, unsigned count) const override;
     bool vrHaptic(int hand, float amplitude01, float seconds) override;
     void setVrRay(const VrRayState &ray) override { mVrRay = ray; }
-    const VrRayState &vrRay() const override { return mVrRay; }
+    const VrRayState &vrRay() const override { JAH_SYNC_GETTER("Engine::vrRay"); return mVrRay; }
     /// THE INJECTED SAMPLE FOR ONE HAND, or false when none is live
     /// (OgreVrSession.cpp's readInput asks once per hand per frame). The store
     /// lives HERE rather than in the session because the hook has to work with
@@ -7482,8 +7477,8 @@ public:
     bool vrConnect(std::string &why);
 
     bool updateScene(Scene *scene) override;
-    bool hasEnabledViews() const override;
-    void listViews(std::vector<View *> &out) const override;
+    /// Re-makes the boundary's view list (Engine::listViews) from mViews; after every change of it.
+    void syncHostViews();
 
     // Texture streaming (THREADING_ADOPTION_SPEC.md P2) — all five are one call
     // into TextureGpuManager, which belongs to the render system and is
@@ -7491,11 +7486,9 @@ public:
     bool texturesDoneStreaming() const override;
     double waitForTextureLoads() override;
     unsigned long long textureLoadRequests() const override;
-    unsigned textureMultiLoadThreads() const override;
-    unsigned textureWaitTimeouts() const override { return mTextureWaitTimeouts; }
+    unsigned textureWaitTimeouts() const override { JAH_SYNC_GETTER("Engine::textureWaitTimeouts"); return mTextureWaitTimeouts; }
     unsigned long long textureWaitAdvances() const override;
-    double textureWaitWorstMs() const override { return mTextureWaitWorstMs; }
-    unsigned textureWaitBudgetMs() const override { return mTextureWaitBudgetMs; }
+    double textureWaitWorstMs() const override { JAH_SYNC_GETTER("Engine::textureWaitWorstMs"); return mTextureWaitWorstMs; }
     unsigned textureMetadataCacheEntries() const override;
     unsigned textureChannelCacheEntries() const override;
     bool saveTextureCache() override;
@@ -7503,12 +7496,14 @@ public:
     /// Applies to every on-screen window that exists AND is remembered for the
     /// ones created later (createView and the MSAA-recreate hook both read it).
     void setVsync(bool on) override;
-    bool vsync() const override { return mVsync; }
 
     // ---- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------
     void setRayTracing(bool on) override;
-    bool rayTracing() const override { return mRayTracingWanted; }
-    bool rayQueryAvailable() const override;
+    /// The device's own answer (the base's rayQueryAvailable is fixed from it at noteDevice).
+    bool deviceRayQuery() const;
+    /// Fixes the device's constants (Engine::deviceInfo / rayQueryAvailable) once the device exists; idempotent.
+    void noteDevice();
+    bool mDeviceKnown = false;
     /// THE FRAME'S RAY-TIER UPDATE: the acceleration structures for every drawn
     /// scene, recorded into the frame's OWN command buffer at the item walk's
     /// point (applyShadowCacheDirties, after updateSceneGraph and before any
@@ -7575,7 +7570,8 @@ public:
     /// (ControllerManager -> FrameTimeControllerValue), held in its
     /// frame-delay mode for the whole process (setFrameDelay zeroes the time
     /// factor, so the wall clock never gets back in).
-    float fixedFrameDelta() const override;
+    /// The frame delta Ogre's clock is applying (the drain's compare); the host's own is Engine::fixedFrameDelta.
+    float appliedFrameDelta() const;
     /// FrameInput::frameDelta's application (the drain's).
     void  applyFrameDelta(float seconds);
 
@@ -7584,16 +7580,14 @@ public:
     /// evaluated in preparePassHash each pass, so changing it at runtime takes
     /// effect next frame — no datablock or workspace rebuild.
     void setShadowFilter(ShadowFilter f) override;
-    ShadowFilter shadowFilter() const override;
 
     /// GLOBAL like the filter, but NOT cheap: the sizes live in the shadow-node
     /// DEFINITION, which cannot change while any workspace instantiates it. So:
     /// drop every shadowed view's workspace, swap the definition, re-add them —
     /// the same teardown order the engine's destructor honours.
     void setShadowResolution(unsigned pixels) override;
-    unsigned shadowResolution() const override;
     void setShadowMapBudget(unsigned maps) override;
-    unsigned shadowMapBudget() const override;
+    unsigned shadowMapBudget() const;   ///< the pool size in force (the drain's compare)
     ShadowStatus shadowStatus() const override;
     /// THE BYTES ONE SHADOWED REFLECTION PROBE HOLDS FOR ITS SHADOW NODE
     /// (PCC-BUDGET-2): the probe node's atlas at this engine's live settings
@@ -7689,7 +7683,6 @@ public:
     /// read by buildMeshV2 when it decides whether to give a mesh its own
     /// position-only shadow VAOs (POST_CHAIN_SPEC.md §11).
     void setShadowMeshOptimization(bool on) override;
-    bool shadowMeshOptimization() const override;
 
     /// The persistent shader cache (SHADER_CACHE_SPEC.md). Loaded inside the
     /// first createView() -> ensureHlms(); saved on clean teardown and whenever
@@ -7697,7 +7690,7 @@ public:
     ShaderCacheStats shaderCacheStats() const override;
     // The log bridge (SESSION_LOG_SPEC F3-B) — OgreLogBridge.cpp.
     void setLogSink(Engine::LogSink sink) override;
-    DeviceInfo deviceInfo() const override;
+    DeviceInfo readDeviceInfo() const;
     bool prepareDevice() override;
     /// Attaches/detaches the Ogre LogListener. attach() runs immediately after
     /// `new Ogre::Root` (beside mShaderCache.attachCounters) so plugin loads,
@@ -7732,7 +7725,6 @@ public:
                           std::vector<EnvironmentConeAnswer> &out) override;
     // ---- The render-loop monitor (OgreFrameMonitor.cpp) ----
     void setFrameMonitor(MonitorLevel level) override;
-    MonitorLevel frameMonitor() const override;
     bool setArm(const std::string &name, double value) override;
     std::vector<ArmInfo> arms() const override;
     ValidationStatus validation() const override;

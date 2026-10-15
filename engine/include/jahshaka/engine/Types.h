@@ -8062,6 +8062,9 @@ struct PublishedFrame {
         Quat   rotation;
     };
     std::vector<NodePose> nodePoses;
+    /// THE GI CONFIGURATION THE DRAIN LAST APPLIED (U3 stage 2, F-B): what a host compares its own pending record's
+    /// `gi` against (Engine::pendingGiConfiguration — a computation on the submitting side, never a read of the engine).
+    std::optional<GiParams> giApplied;
 };
 
 struct StreamingWork {

@@ -101,6 +101,7 @@ bool OgreEngine::gpuCull(Scene *scene, View *view, const GpuCullRequest &request
 /// pair a GL-era derivation would write — and under reverse-Z the first is the
 /// FAR plane, which changes nothing about the volume they bound together.
 bool OgreEngine::fillCullView(View *view, GpuCullRequest &out) const {
+    JAH_SYNC_GETTER("Engine::fillCullView");
     OgreView *v = static_cast<OgreView *>(view);
     if (!v) return false;
     Ogre::Camera *cam = v->camera();
@@ -189,6 +190,7 @@ Ogre::TextureGpu *findHzbTexture(OgreView *view) {
 }  // namespace
 
 bool OgreEngine::hzbStatus(View *view, HzbStatus &out) const {
+    JAH_SYNC_GETTER("Engine::hzbStatus");
     out = HzbStatus();
     if (!mRoot) return false;
     JAH_TRY {

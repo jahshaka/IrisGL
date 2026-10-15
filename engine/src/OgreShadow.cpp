@@ -471,11 +471,11 @@ Ogre::ColourValue OgreEngine::shadowClearColour() const
 // ---------------------------------------------------------------------------
 void OgreEngine::setShadowFilter(ShadowFilter f) {
     mShadowFilter = f;
+    mHostShadowFilter = f;   // the host's record (Engine::shadowFilter)
     if (mHlmsRegistered) applyShadowFilter();
     // else: applied by ensureHlms() once the Hlms exists.
 }
 
-ShadowFilter OgreEngine::shadowFilter() const { return mShadowFilter; }
 
 /// Maps the neutral enum onto HlmsPbs. PCF only — see the declaration.
 void OgreEngine::applyShadowFilter() {
@@ -498,7 +498,6 @@ void OgreEngine::setShadowResolution(unsigned pixels) {
     rebuildShadowAtlas(res, mShadowMapCount, mShadowPerMapClears);
 }
 
-unsigned OgreEngine::shadowResolution() const { return mShadowResolution; }
 
 /// THE REBUILD. Both the resolution and the map count live in the shadow-node
 /// DEFINITION, which Ogre refuses to replace while anything instantiates it —
@@ -517,6 +516,7 @@ bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, b
         mHlmsRegistered)
         return false;
     mShadowResolution = res;
+    mHostShadowResolution = res;   // the boundary's record (Engine::shadowResolution)
     mShadowMapCount = maps;
     mShadowPerMapClears = clears;
     if (!mHlmsRegistered) return false;   // first createShadowNode() picks it up
@@ -718,6 +718,7 @@ void OgreEngine::deriveShadowMapCount() {
 // The readback
 // ---------------------------------------------------------------------------
 ShadowStatus OgreEngine::shadowStatus() const {
+    JAH_SYNC_GETTER("Engine::shadowStatus");
     ShadowStatus st;
     st.requestedBudget = mShadowMapBudget;
     st.atlasRebuilds = mShadowAtlasRebuilds;        // cumulative; true even headless

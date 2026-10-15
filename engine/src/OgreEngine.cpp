@@ -68,6 +68,7 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
 #endif
     mDefaultSamples = OgreView::sanitizeSamples(cfg.sampleCount);
     mVsync = cfg.vsync;
+    mHostVsync = mVsync;
     // THE HARDWARE RAY-TRACING PREFERENCE at boot (PHOTON_SPEC §7 R1): the tier
     // comes up only where the device advertises it AND this says yes.
     // `EngineConfig::rayTracing` is the HOST's answer — Studio fills it from the
@@ -75,6 +76,7 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     // --no-ray-query. The environment variable is kept as the override a suite
     // can set when it cannot reach the config.
     mRayTracingWanted = cfg.rayTracing && getenv("JAHSHAKA_NO_RAY_QUERY") == nullptr;
+    mHostRayTracing = mRayTracingWanted;   // the host's record (Engine::rayTracing)
     // ...and OFF REACHES THE DEVICE: the fork's VulkanDevice asks for the ray
     // extensions and feature bits only while this static says so, so a no-rays
     // process runs on exactly the device a machine without the hardware gets.
@@ -85,9 +87,11 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     // time (POST_CHAIN_SPEC.md §11). Setting it before Root exists is fine — it
     // is a plain static, not engine state.
     Ogre::Mesh::msOptimizeForShadowMapping = cfg.optimizeShadowMeshes;
+    mHostShadowMeshOptimization = cfg.optimizeShadowMeshes;
     mMediaDir = cfg.hlmsMediaDir;
     if (!mMediaDir.empty() && mMediaDir.back() != '/') mMediaDir += '/';
     mHeadless = cfg.headless;
+    mIdentityHeadless = mHeadless;
     // THE BACKGROUND SHADER COMPILER (ASYNC-SHADERS-1). JAH_ASYNC_SHADER_THREADS overrides
     // the host's count (0 = none) for A/B measurement without a rebuild.
     mAsyncShaderThreads = cfg.asyncShaderThreads;
@@ -121,6 +125,9 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         mRoot = new Ogre::Root(&mAbiCookie, "", "",
                                cfg.logFile.empty() ? "jahshaka-ogre.log" : cfg.logFile,
                                "Jahshaka");
+#if JAH_VR
+        mHostVrBuilt = true;   // a VR-built engine with a Root (Engine::vrAvailable, the host's record)
+#endif
         // Shader accounting starts here, with the log: Ogre has no compile
         // callback, but it names every compile and every microcode hit in two
         // fixed sentences, and the counters are what the startup progress
@@ -148,6 +155,7 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // set; a session connects later through XR_KHR_vulkan_enable. The
         // policy only says whether, and to which runtime, a session may connect.
         mVrPolicy = cfg.vr;
+        mHostVrPolicy = mVrPolicy;
         mVrInfo.failure = !cfg.vr.enabled ? VrFailure::Disabled
                         : cfg.headless    ? VrFailure::Headless
                                           : VrFailure::None;
@@ -259,6 +267,7 @@ bool OgreEngine::prepareDevice() {
         if (!mNullWindow) {
             Ogre::NameValuePairList wp; wp["windowType"] = "null";
             mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"), 8, 8, false, &wp);
+            noteDevice();   // the device exists from here (Engine::deviceInfo / rayQueryAvailable)
         }
         ensureHlms();
         if (!mHlmsRegistered) { mLastError = "prepareDevice: Hlms unavailable"; return false; }
@@ -444,7 +453,7 @@ void OgreEngine::destroyScene(Scene *scene) {
                     "' when it was destroyed - the engine ends it first",
                 Ogre::LML_NORMAL);
             endVrSession();
-            mVrMirrorView = nullptr;
+            mVrMirrorView = nullptr; mHostVrMirrorView = nullptr;
         }
         for (auto &v : mViews)
             if (v->scene() == scene) v->detachScene();
@@ -574,6 +583,7 @@ View *OgreEngine::createView(const std::string &name,
         // here AND in the resize lambda below, or a resize silently resets it.
         params["FSAA"] = Ogre::StringConverter::toString(mDefaultSamples);
         Ogre::Window *window = mRoot->createRenderWindow(name, width, height, false, &params);
+        noteDevice();   // the device exists from here (Engine::deviceInfo / rayQueryAvailable)
         // THE PRESENTED FRAME CAN BE READ BACK (CLOSE-SHOT-2, View::requestFrameCapture):
         // Ogre's own switch (OgreWindow.h) — TRANSFER_SRC on the swapchain images (on
         // Metal, a layer that is not framebufferOnly). Set before setVSync so the
@@ -583,6 +593,7 @@ View *OgreEngine::createView(const std::string &name,
         ensureHlms();
         mViews.emplace_back(new OgreView(mRoot, window, nullptr, name, width, height,
                                          background, mLastError));
+        syncHostViews();
         OgreView *view = mViews.back().get();
         view->mEngine = this;
         view->mRequestedSamples = mDefaultSamples;
@@ -660,12 +671,14 @@ OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, u
             Ogre::NameValuePairList wp; wp["windowType"] = "null";
             mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"),
                                                     8, 8, false, &wp);
+            noteDevice();   // the device exists from here (Engine::deviceInfo / rayQueryAvailable)
         }
         ensureHlms();   // retried on every call until it succeeds (e.g. bad media dir)
         Ogre::TextureGpu *rtt =
             OgreView::createRtt(mRoot, processUniqueName("rtt"), width, height, 1u, layers);
         mViews.emplace_back(new OgreView(mRoot, nullptr, rtt, name, width, height,
                                          background, mLastError));
+        syncHostViews();
         mViews.back()->mEngine = this;
         return mViews.back().get();
     } JAH_CATCH(mLastError, nullptr);
@@ -693,6 +706,7 @@ void OgreEngine::destroyView(View *view) {
         noteViewDestroyed(it->get());
         (*it)->destroy();
         mViews.erase(it);
+        syncHostViews();
         return;
     }
     mLastError = "destroyView: unknown View";
@@ -1510,7 +1524,7 @@ void OgreEngine::endLostOrStoppedVrSession() {
         // 4): the scene-teardown belt clears it, so the lost/stopped path
         // clears it too. A mirror pointed at a view whose session is gone is
         // nobody's wish, and the next session would inherit it.
-        mVrMirrorView = nullptr;
+        mVrMirrorView = nullptr; mHostVrMirrorView = nullptr;
     }
 }
 
@@ -1572,6 +1586,7 @@ void OgreEngine::latchOutOfMemoryInFrame() {
 }
 
 GpuFault OgreEngine::gpuFault() const {
+    JAH_SYNC_GETTER("Engine::gpuFault");
     return mDeviceLost ? GpuFault::DeviceLost : mGpuFault;
 }
 
@@ -1667,9 +1682,10 @@ void OgreEngine::raiseFrameFault() {
 }
 
 // ---------------------------------------------------------------------------
-bool OgreEngine::deviceLost() const { return mDeviceLost; }
+bool OgreEngine::deviceLost() const { JAH_SYNC_GETTER("Engine::deviceLost"); return mDeviceLost; }
 
 unsigned long long OgreEngine::queueSubmissionTag() const {
+    JAH_SYNC_GETTER("Engine::queueSubmissionTag");
     return (unsigned long long)monitor::queueSubmissionTag(mRoot ? mRoot->getRenderSystem() : nullptr);
 }
 
@@ -1729,13 +1745,7 @@ unsigned long long OgreEngine::queueSubmissionTag() const {
 // VR (SPECS/VR_SPEC.md §4). Five short methods: everything that knows what an
 // XrSession is lives in OgreVrSession.cpp.
 
-bool OgreEngine::vrAvailable() const {
-#if JAH_VR
-    return mVrPolicy.enabled && !mHeadless && mRoot;
-#else
-    return false;
-#endif
-}
+
 
 bool OgreEngine::vrConnect(std::string &why) {
     if (!mVrPolicy.enabled) {
@@ -1791,6 +1801,8 @@ bool OgreEngine::beginVrSession(Scene *scene, const VrConfig &cfg) {
         // just this.
         if (!vrConnect(why)) { mLastError = "beginVrSession: " + why; return false; }
         mVrSession = vr::sessionBegin(mVrConnection, this, s, cfg, why);
+        mHostVrSessionLive = mVrSession != nullptr;
+        mHostVrView = mVrSession ? vrSessionView(mVrSession) : nullptr;
         if (!mVrSession) {
             vr::disconnect(mVrConnection);
             mVrConnection = nullptr;
@@ -1822,6 +1834,8 @@ void OgreEngine::endVrSession() {
     // caller should see while one is being taken apart.
     VrSession *session = mVrSession;
     mVrSession = nullptr;
+    mHostVrSessionLive = false;
+    mHostVrView = nullptr;
     // ...AND NO SESSION LEAVES ITS OWN BEHIND (finding 1). A suite that
     // injected through a live session (with the override on) would otherwise
     // hand the next one, or the headless verbs after it, a hand nobody wrote.
@@ -1843,11 +1857,13 @@ void OgreEngine::endVrSession() {
 }
 
 VrState OgreEngine::vrState() const {
+    JAH_SYNC_GETTER("Engine::vrState");
     if (!mVrSession) return vrAvailable() ? VrState::Idle : VrState::Unavailable;
     return vrSessionState(mVrSession);
 }
 
 VrStatus OgreEngine::vrStatus() const {
+    JAH_SYNC_GETTER("Engine::vrStatus");
     if (!mVrSession) {
         VrStatus s;
         s.state = vrState();
@@ -1910,7 +1926,16 @@ VrStatus OgreEngine::vrStatus() const {
     return s;
 }
 
-View *OgreEngine::vrView() const { return mVrSession ? vrSessionView(mVrSession) : nullptr; }
+// THE DEVICE'S CONSTANTS (Engine::deviceInfo / rayQueryAvailable, ENGINE-UPGRADE-U3 stage 2): fixed once, right after
+// the first window — the one that creates the device — exists; every read after is the boundary's.
+void OgreEngine::noteDevice() {
+    if (mDeviceKnown || !mRoot) return;
+    const DeviceInfo info = readDeviceInfo();
+    if (info.deviceName.empty()) return;   // no device yet
+    mDeviceInfo = info;
+    mDeviceRayQuery = deviceRayQuery();
+    mDeviceKnown = true;
+}
 
 bool OgreEngine::vrEyeScreenshot(unsigned eye, Image &out) {
     if (!mVrSession) { mLastError = "vrEyeScreenshot: no session is running"; return false; }
@@ -1919,6 +1944,7 @@ bool OgreEngine::vrEyeScreenshot(unsigned eye, Image &out) {
 
 void OgreEngine::setVrMirrorView(View *view) {
     mVrMirrorView = static_cast<OgreView *>(view);
+    mHostVrMirrorView = view;
     if (mVrSession) vrSessionSetMirror(mVrSession, mVrMirrorView);
 }
 
@@ -1985,6 +2011,7 @@ bool OgreEngine::vrInjectInput(int hand, const VrHandState &state) {
 // test. The session holds this frame's set; with no session the store below is
 // the only source there can be.
 unsigned OgreEngine::vrHandJoints(int hand, VrPose *out, unsigned count) const {
+    JAH_SYNC_GETTER("Engine::vrHandJoints");
     if (hand < 0 || hand >= int(VrHandCount)) return 0u;
     // A LIVE SESSION WITH HANDS OFF HAS NO SKELETON TO REPORT (lane
     // HANDS-SWITCH-1), and that includes an injected one: a project that asked
@@ -2006,6 +2033,7 @@ unsigned OgreEngine::vrHandJoints(int hand, VrPose *out, unsigned count) const {
 // fix round; Engine::vrBindingBlocks). Only a session can answer: the blocks
 // are suggested once, at its creation.
 unsigned OgreEngine::vrBindingBlocks(VrBindingBlock *out, unsigned count) const {
+    JAH_SYNC_GETTER("Engine::vrBindingBlocks");
     return mVrSession ? vrSessionBindingBlocks(mVrSession, out, count) : 0u;
 }
 
@@ -2098,29 +2126,13 @@ bool OgreEngine::updateScene(Scene *scene) {
     } JAH_CATCH(mLastError, false);
 }
 
-bool OgreEngine::hasEnabledViews() const {
-    // A VR SESSION IS SOMETHING TO DRAW even when every View is off (the owner's
-    // WiVRn smoke, 2026-09-17): the runtime answers "no picture" on its first
-    // frames, the pump switches the session's View off for those frames, the
-    // Player's View is off by design and the editor's is hidden — and a host
-    // that skips renderOneFrame on "no enabled views" then never runs the pump
-    // again, so xrWaitFrame is never called, the runtime never synchronises
-    // and keeps answering "no picture" for ever: black in the headset, a spin
-    // on the desktop. The frame loop IS the session's heartbeat.
-    if (mVrSession) return true;
-    // Offscreen views count: they are enabled by construction and something is
-    // waiting on their pixels (a thumbnail, a preview dock, a scripted
-    // screenshot). The only state this reports is View::setEnabled, which the
-    // hosts drive from widget visibility.
-    for (const auto &v : mViews)
-        if (v->isEnabled()) return true;
-    return false;
-}
-
-void OgreEngine::listViews(std::vector<View *> &out) const {
-    out.clear();
-    out.reserve(mViews.size());
-    for (const auto &v : mViews) out.push_back(v.get());
+// THE HOST'S RECORD OF THE VIEWS (Engine::listViews / hasEnabledViews, ENGINE-UPGRADE-U3 stage 2): the boundary's
+// list, re-made after every change of mViews (creation, destruction, teardown). Whether one has something to draw is
+// the boundary's own reading (View::pushedEnabled, and a VR session always — its frame loop is its heartbeat).
+void OgreEngine::syncHostViews() {
+    mHostViews.clear();
+    mHostViews.reserve(mViews.size());
+    for (const auto &v : mViews) mHostViews.push_back(v.get());
 }
 
 // ---------------------------------------------------------------------------
@@ -2138,6 +2150,7 @@ Ogre::TextureGpuManager *textureManagerOf(Ogre::Root *root) {
 }   // namespace
 
 bool OgreEngine::texturesDoneStreaming() const {
+    JAH_SYNC_GETTER("Engine::texturesDoneStreaming");
     Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
     return tm ? tm->isDoneStreaming() : true;
 }
@@ -2301,20 +2314,22 @@ double OgreEngine::waitForTextureLoads() {
     return ms;
 }
 
-unsigned long long OgreEngine::textureWaitAdvances() const { return mTextureWaitAdvances; }
+unsigned long long OgreEngine::textureWaitAdvances() const { JAH_SYNC_GETTER("Engine::textureWaitAdvances"); return mTextureWaitAdvances; }
 
 unsigned long long OgreEngine::textureLoadRequests() const {
+    JAH_SYNC_GETTER("Engine::textureLoadRequests");
     Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
     return tm ? static_cast<unsigned long long>(tm->getLoadRequestsCounter()) : 0ull;
 }
 
-unsigned OgreEngine::textureMultiLoadThreads() const { return mMultiLoadThreads; }
 
 unsigned OgreEngine::textureMetadataCacheEntries() const {
+    JAH_SYNC_GETTER("Engine::textureMetadataCacheEntries");
     return textureCache().metadataEntries(mRoot);
 }
 
 unsigned OgreEngine::textureChannelCacheEntries() const {
+    JAH_SYNC_GETTER("Engine::textureChannelCacheEntries");
     return textureCache().channelEntries();
 }
 
@@ -2330,6 +2345,7 @@ bool OgreEngine::saveTextureCache() {
 void OgreEngine::setVsync(bool on) {
     if (mVsync == on) return;
     mVsync = on;
+    mHostVsync = on;   // the host's record (Engine::vsync)
     JAH_TRY {
         for (auto &v : mViews) {
             Ogre::Window *w = v->ogreWindow();
@@ -2344,7 +2360,7 @@ void OgreEngine::setVsync(bool on) {
     } JAH_CATCH(mLastError, );
 }
 
-const std::string &OgreEngine::lastError() const { return mLastError; }
+const std::string &OgreEngine::lastError() const { JAH_SYNC_GETTER("Engine::lastError"); return mLastError; }
 
 std::string OgreEngine::takeLastError()
 {
@@ -2417,7 +2433,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
 
     // THE FRAME'S OWN FIELDS. cause / pace are this frame's (renderOneFrame consumes and resets them); the
     // delta persists; the epoch and the gesture are facts the frame reads.
-    if (in.frameDelta && *in.frameDelta != fixedFrameDelta()) { applyFrameDelta(*in.frameDelta); ++applied; }
+    if (in.frameDelta && *in.frameDelta != appliedFrameDelta()) { applyFrameDelta(*in.frameDelta); ++applied; }
     if (in.cause) mNextFrameCause = *in.cause;
     if (in.pace) mNextFramePace = *in.pace;
 
@@ -2571,23 +2587,23 @@ bool OgreEngine::pendingGiConfiguration(const Scene *scene) const {
         if (!any) return false;
         for (const FrameInputScene &part : pending.scenes) {
             if (part.scene != scene || !part.gi) continue;
-            for (const auto &q : mScenes)
-                if (static_cast<const Scene *>(q.get()) == scene)
-                    return !q->mFrameApplied.gi || *part.gi != *q->mFrameApplied.gi;
+            // ...against the configuration the last frame APPLIED, as it published it (F-B: the submitting side's
+            // computation over its own pending record and the snapshot).
+            const std::optional<GiParams> &applied = scene->published().giApplied;
+            return !applied || *part.gi != *applied;
         }
         return false;
     });
 }
 
-float OgreEngine::fixedFrameDelta() const {
+float OgreEngine::appliedFrameDelta() const {
     return float(Ogre::ControllerManager::getSingleton().getFrameDelay());
 }
 
 // Shadow filter and resolution (and the atlas rebuild they trigger) live in
 // OgreShadow.cpp, beside the definition builder they drive.
 
-void OgreEngine::setShadowMeshOptimization(bool on) { Ogre::Mesh::msOptimizeForShadowMapping = on; }
-bool OgreEngine::shadowMeshOptimization() const { return Ogre::Mesh::msOptimizeForShadowMapping; }
+void OgreEngine::setShadowMeshOptimization(bool on) { Ogre::Mesh::msOptimizeForShadowMapping = on; mHostShadowMeshOptimization = on; }
 
 // ---------------------------------------------------------------------------
 // RECORDED WARM-UP SETS ARE GONE (WARMUPSET-2, 2026-09-21). The three verbs
@@ -2664,6 +2680,7 @@ void OgreEngine::setAsyncShaderPlaceholdersOnly(bool on) {
 }
 
 AsyncShaderStats OgreEngine::asyncShaderStats() const {
+    JAH_SYNC_GETTER("Engine::asyncShaderStats");
     AsyncShaderStats out;
     if (!mRoot) return out;
     const Ogre::HlmsAsyncCompiler *c = mRoot->getHlmsManager()->getAsyncCompiler();
@@ -2704,10 +2721,12 @@ void OgreEngine::waitForAsyncShaders() {
 }
 
 ShaderCacheStats OgreEngine::shaderCacheStats() const {
+    JAH_SYNC_GETTER("Engine::shaderCacheStats");
     return mShaderCache.stats(mRoot);
 }
 
 bool OgreEngine::renderStats(RenderStats &out) const {
+    JAH_SYNC_GETTER("Engine::renderStats");
     out = RenderStats();
     // BEFORE the early return: the advance counter is the engine's own and is
     // meaningful with no render system at all (it reads 0). A host asking
@@ -2799,6 +2818,7 @@ bool OgreEngine::renderStats(RenderStats &out) const {
 }
 
 bool OgreEngine::textureMemory(std::vector<TextureMemoryEntry> &out) const {
+    JAH_SYNC_GETTER("Engine::textureMemory");
     out.clear();
     if (!mRoot) return false;
     JAH_TRY {
@@ -2843,6 +2863,7 @@ bool OgreEngine::textureMemory(std::vector<TextureMemoryEntry> &out) const {
 }
 
 bool OgreEngine::memoryStats(MemoryStats &out) const {
+    JAH_SYNC_GETTER("Engine::memoryStats");
     out = MemoryStats();
     if (!mRoot) return false;
     JAH_TRY {
@@ -2932,6 +2953,7 @@ bool OgreEngine::reclaimMemory(MemoryStats *before, MemoryStats *after) {
 }
 
 bool OgreEngine::objectCounts(ObjectCounts &out) const {
+    JAH_SYNC_GETTER("Engine::objectCounts");
     out = ObjectCounts();
     if (!mRoot) return false;
     JAH_TRY {
@@ -2967,6 +2989,7 @@ bool OgreEngine::objectCounts(ObjectCounts &out) const {
 }
 
 bool OgreEngine::threading(EngineThreading &out) const {
+    JAH_SYNC_GETTER("Engine::threading");
     out = EngineThreading();
     if (!mRoot) return false;
     JAH_TRY {
@@ -3048,6 +3071,8 @@ OgreEngine::~OgreEngine() {
     if (mVrSession) {
         VrSession *session = mVrSession;
         mVrSession = nullptr;      // see endVrSession: cleared first, then deleted
+        mHostVrSessionLive = false;
+        mHostVrView = nullptr;
         try { vr::sessionEnd(session); } catch (...) {}
     }
     // The connection's XrInstance, while the device it is bound to is alive.
@@ -3089,6 +3114,7 @@ OgreEngine::~OgreEngine() {
     // -> null window -> any leftover meshes -> Root.
     for (auto &v : mViews)  v->destroy();
     mViews.clear();
+    syncHostViews();
     for (auto &s : mScenes) s->destroy();
     mScenes.clear();
     // The IES profile atlas and the area-light mask pool are process-wide, so
@@ -3386,6 +3412,7 @@ void OgreEngine::ensureHlms() {
             if (mHeadless) threads = 0;
             if (threads > 0) tm->setMultiLoadPool(threads);
             mMultiLoadThreads = threads;
+            mHostMultiLoadThreads = threads;
         }
     }
     // THE WAIT'S NO-PROGRESS BUDGET. The default (8 s) is a member initialiser,
@@ -3399,6 +3426,7 @@ void OgreEngine::ensureHlms() {
     if (const char *forced = std::getenv("JAH_TEXTURE_WAIT_MS")) {
         const long n = std::strtol(forced, nullptr, 10);
         mTextureWaitBudgetMs = unsigned(std::max(0l, std::min(600000l, n)));
+        mHostTextureWaitBudgetMs = mTextureWaitBudgetMs;
     }
     if (const char *fault = std::getenv("JAH_TEXTURE_WAIT_FAULT"))
         mTextureWaitFault = (std::strtol(fault, nullptr, 10) != 0);
@@ -3680,6 +3708,7 @@ bool namesValidation(const char *value) {
 }   // namespace
 
 ValidationStatus OgreEngine::validation() const {
+    JAH_SYNC_GETTER("Engine::validation");
     ValidationStatus s;
     s.requested = namesValidation(std::getenv("VK_INSTANCE_LAYERS")) ||
                   namesValidation(std::getenv("VK_LOADER_LAYERS_ENABLE"));

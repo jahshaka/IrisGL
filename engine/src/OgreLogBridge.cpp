@@ -104,7 +104,7 @@ void OgreEngine::setLogSink(Engine::LogSink sink) {
     mLogBridge->setSink(std::move(sink));
 }
 
-DeviceInfo OgreEngine::deviceInfo() const {
+DeviceInfo OgreEngine::readDeviceInfo() const {
     DeviceInfo info;
     if (!mRoot) return info;
     Ogre::RenderSystem *rs = mRoot->getRenderSystem();

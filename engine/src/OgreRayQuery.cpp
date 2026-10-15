@@ -8575,6 +8575,7 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
 void OgreEngine::setRayTracing(bool on) {
     if (mRayTracingWanted == on) return;
     mRayTracingWanted = on;
+    mHostRayTracing = on;   // the host's record (Engine::rayTracing)
     if (!on) shutdownRayQuery();
     Ogre::LogManager::getSingleton().logMessage(
         std::string("Jahshaka: hardware ray tracing switched ") + (on ? "ON" : "OFF") +
@@ -8621,7 +8622,7 @@ std::string rayStorageFormatRefused(VkPhysicalDevice pd) {
 }
 }   // namespace
 
-bool OgreEngine::rayQueryAvailable() const {
+bool OgreEngine::deviceRayQuery() const {
     if (mHeadless || !mRoot) return false;
     Ogre::VulkanRenderSystem *rs = dynamic_cast<Ogre::VulkanRenderSystem *>(mRoot->getRenderSystem());
     Ogre::VulkanDevice *dev = rs ? rs->getVulkanDevice() : nullptr;
@@ -8921,8 +8922,8 @@ namespace jahshaka {
 namespace engine {
 namespace detail {
 
-void OgreEngine::setRayTracing(bool on) { mRayTracingWanted = on; }
-bool OgreEngine::rayQueryAvailable() const { return false; }
+void OgreEngine::setRayTracing(bool on) { mRayTracingWanted = on; mHostRayTracing = on; }
+bool OgreEngine::deviceRayQuery() const { return false; }
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &) {}
 void OgreEngine::shutdownRayQuery() {}
 void registerPhotonRayPasses(AtomPassProvider *) {}

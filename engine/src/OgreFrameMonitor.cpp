@@ -869,7 +869,9 @@ void notePlanarRender(unsigned slots) {
 // OgreEngine — the boundary implementation
 // ---------------------------------------------------------------------------
 
+// THE HOST'S RECORD of the level (Engine::frameMonitor, U3 stage 2) follows every exit of the setter.
 void OgreEngine::setFrameMonitor(MonitorLevel level) {
+    struct Record { OgreEngine *e = nullptr; ~Record() { e->mHostMonitorLevel = e->mMonitor ? e->mMonitor->mLevel : MonitorLevel::Off; } } record{ this };
     // LEVEL-SENSITIVE, not merely on/off: `Review` is the only recording level
     // today, but a future one must not be a silent no-op when a capture is
     // already running. Same level = nothing to do; a DIFFERENT level while one
@@ -1197,13 +1199,12 @@ bool OgreEngine::setArm(const std::string &name, double value) {
     return mArms.set(name, value, mLastError);
 }
 
-std::vector<ArmInfo> OgreEngine::arms() const { return mArms.list(); }
+std::vector<ArmInfo> OgreEngine::arms() const { JAH_SYNC_GETTER("Engine::arms"); return mArms.list(); }
 
-MonitorLevel OgreEngine::frameMonitor() const {
-    return mMonitor ? mMonitor->mLevel : MonitorLevel::Off;
-}
+
 
 MonitorStatus OgreEngine::monitorStatus() const {
+    JAH_SYNC_GETTER("Engine::monitorStatus");
     MonitorStatus st;
     st.level = mMonitor ? mMonitor->mLevel : MonitorLevel::Off;
     if (!mMonitor) {
@@ -1260,6 +1261,7 @@ void OgreEngine::noteHostStage(const std::string &name, float ms) {
 
 bool OgreEngine::framePaceOwesWork() const
 {
+    JAH_SYNC_GETTER("Engine::framePaceOwesWork");
     for (const auto &sc : mScenes)
         if (sc->giBuildOwesWork()) return true;
     return false;
@@ -1278,6 +1280,7 @@ bool OgreEngine::framePaceOwesWork() const
 // call, not a once-a-frame one.
 StreamingWork OgreEngine::streamingWork() const
 {
+    JAH_SYNC_GETTER("Engine::streamingWork");
     StreamingWork out;
     for (const auto &sc : mScenes) {
         // The stage reported is the FURTHEST-BEHIND scene's: there is one world
@@ -1446,7 +1449,7 @@ bool OgreEngine::captureSnapshot(EngineSnapshot &out, const std::string &label,
                     if (v->isEnabled() && v->ogreScene()) { s = v->ogreScene(); break; }
         }
         out.live = true;
-        out.device = deviceInfo();
+        out.device = readDeviceInfo();
         out.shaderCache = shaderCacheStats();
         out.shadow = shadowStatus();
         objectCounts(out.objects);

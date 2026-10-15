@@ -22,37 +22,23 @@
 //     NOT holding and then flips one index (release); published() returns the last whole frame (acquire). Two
 //     buffers: a reference taken from published() is never written by the publish that follows it — it stays one
 //     whole frame until the SECOND publish after it was taken. A reader copies what it keeps longer than a frame.
-//   * EVERY OTHER Engine/Scene/View call the document thread makes is a SYNCHRONOUS GETTER or a direct command, and
-//     each is a debt U3 pays down to zero (host.sync_getters). THE SYNCHRONOUS GETTERS after U2 are every const
-//     virtual of this file, by class (published() is the snapshot, not a getter; name/engine/scene are
-//     identities that never change after creation):
-//       Scene (65): name, engine, heightFogStatus, skyAmbientSh, sky, cloudStatus, atmosphereSunTint,
-//       atmosphereStatus, published, shadingModelOf, shaderTime, lodBias, objectLods, dumpMaterial, itemCount,
-//       hasSkeleton, boneNames, boneMatrices, streamedBoneCount, rigStats, changeStats, clipNames, bonePoses,
-//       clipBoneWeights, textureMipmaps, sharesSkeleton, boneAttachment, particleCount, particleDefinitionsCreated,
-//       lightWriteSerial, decalAtlasCapacity, decalAtlasUsed, isLoading, giStatus, rayQueryStatus,
-//       atomOcclusionEnabled, atomView, atomViewPaintable, photonView, photonViewRefusal, photonVoxelCascade,
-//       gpuSceneStatus, gpuSceneEntry, sunContact, sunContactStatus, nodeProbeGridExcluded, nodeHelper, nodeBackdrop,
-//       nodeVrHelper, vrProxyNodes, vrRayNodes, nodeWorldPose, nodeWorldPoseDrawn, nodeMovable, mobilityStatus,
-//       nodeLightMask, nodeCastShadow, nodeFaceCull, cullTwinCount, cullTwinCandidateCount, nodePlanarReflector,
-//       activePlanarReflectors, planarReflectorArms, rayTracingResolved, rayTracingResolvedFor.
-//       View (24): name, scene, cameraNode, background, shadows, isEnabled, width, height, sampleCount, isOffscreen,
-//       postFx, helpersVisible, vrHelpersVisible, lodHysteresisOffscreen, measuredExposureScale, overlay, pip,
-//       pipGeneration, workspaceGeneration, framesPresented, blankFramesPresented, globalsPushes, videoReadbackStatus,
-//       asyncShaders.
-//       Engine (53): isHeadless, frameInputStatus, pendingGiConfiguration, deviceLost, gpuFault, queueSubmissionTag,
-//       vrAvailable, vrPolicy, vrInfo, vrState, vrStatus, vrView, vrMirrorView, vrHandJoints, vrBindingBlocks, vrRay,
-//       hasEnabledViews, listViews, texturesDoneStreaming, textureLoadRequests, textureMultiLoadThreads,
-//       textureWaitTimeouts, textureWaitAdvances, textureWaitWorstMs, textureWaitBudgetMs,
-//       textureMetadataCacheEntries, textureChannelCacheEntries, vsync, rayTracing, rayQueryAvailable,
-//       fixedFrameDelta, shadowFilter, shadowResolution, shadowMapBudget, shadowStatus, shadowMeshOptimization,
-//       shaderCacheStats, deviceInfo, renderStats, objectCounts, threading, memoryStats, textureMemory, frameMonitor,
-//       arms, validation, monitorStatus, framePaceOwesWork, streamingWork, fillCullView, hzbStatus, asyncShaderStats,
-//       lastError.
-//     On the document's own path today: Scene::nodeWorldPose (vrapi.cpp's node.worldPose), Scene::bonePoses (the
-//     mirror's avatar overlay) and the status getters of the list (the tests and the panels). The mirror's
-//     direct commands (createDocumentNode, attachMesh, materials, lights, decals, sockets) become record messages
-//     in U3.
+//   * EVERY OTHER Engine/Scene/View call the document thread makes is a COMMAND or one of three kinds of read
+//     (ENGINE-UPGRADE-U3 stage 2):
+//       - THE HOST'S OWN RECORD: what the host set, kept on its side of the boundary and never a read of the engine
+//         — the boundary's identities (Scene/View name, Scene::engine, View::isOffscreen, Engine::isHeadless), its
+//         bindings (View::scene, Engine::vrView / vrMirrorView, listViews), what the host pushed (View::pushed*,
+//         Engine::vsync / rayTracing / fixedFrameDelta / frameMonitor / shadowFilter / shadowResolution / vrPolicy /
+//         shadowMeshOptimization / texture loader config, hasEnabledViews over them) and the device's constants
+//         fixed when the device was made (deviceInfo, rayQueryAvailable). The echo getters the host never needs
+//         are gone; the fixtures read the engine's own record through EngineInspect.h.
+//       - THE SNAPSHOT: Engine::published() and each Scene::published(), the last closed frame's state.
+//       - THE COUNTED GETTERS that stay (host.sync_getters; Engine::syncGetters lists them): the request-shaped ones
+//         stage 3 makes requests (objectLods, dumpMaterial, memoryStats, measuredExposureScale, ...), the state the
+//         ENGINE mutates by itself that the host still reads (sharesSkeleton, boneAttachment, clipNames,
+//         nodePlanarReflector) and the snapshot-shaped ones only the fixtures read in lockstep. The editor's frame
+//         reads none of them (host.sync_getters).
+//     The mirror's direct commands (createDocumentNode, attachMesh, materials, lights, decals, sockets) become
+//     record messages in stage 3.
 //
 // Background work (thumbnails, imports) posts to the engine thread; it never calls in directly. A DOCUMENT may be
 // built on any thread: since U2 it holds no engine object at all (iris::graph is the document's own store).
@@ -1913,6 +1899,32 @@ protected:
 /// alive before touching the pointer — see EngineViewWidget for the pattern.
 class Engine {
 public:
+    // ---- THE HOST'S OWN RECORD (ENGINE-UPGRADE-U3 stage 2, F5) ---------------------------------------------------
+    // What the host itself set — never a read of the engine's state, which U3 moves to its own thread: the monitor
+    // level it asked for, the ray-tracing switch, the frame delta it last submitted, the views the engine made for
+    // it and whether one of them (or a VR session, whose loop IS its heartbeat) has anything to draw.
+    MonitorLevel frameMonitor() const { return mHostMonitorLevel; }
+    bool rayTracing() const { return mHostRayTracing; }
+    /// The frame delta the host last submitted (FrameInput::frameDelta), kDefaultFrameDelta until one is.
+    float fixedFrameDelta() const { return mPushedFrameDelta; }
+    /// Is there anything to draw? A VR session always (its frame loop is the session's heartbeat), else any view
+    /// enabled as the host (or, for its own view, the session) last set it — View::pushedEnabled.
+    bool hasEnabledViews() const {
+        if (mHostVrSessionLive) return true;
+        for (const View *v : mHostViews) if (v->pushedEnabled()) return true;
+        return false;
+    }
+    /// Every live View, in creation order.
+    void listViews(std::vector<View *> &out) const { out = mHostViews; }
+    /// Created with the NULL render system (EngineConfig::headless) — fixed at creation.
+    bool isHeadless() const { return mIdentityHeadless; }
+    /// The VR session's own eye-pair View while a session runs (null otherwise): the host's record of what
+    /// beginVrSession made, cleared when the session ends (the host's endVrSession, or the engine ending a lost one).
+    View *vrView() const { return mHostVrView; }
+    /// THE DEVICE'S CONSTANTS, fixed the moment the device exists (the first view, or a scene before any view —
+    /// prepareDevice): its identity and whether it can trace rays. Defaults (an empty name, false) before.
+    DeviceInfo deviceInfo() const { return mDeviceInfo; }
+    bool rayQueryAvailable() const { return mDeviceRayQuery; }
     virtual ~Engine() = default;
 
     /// Creates the engine. Returns null on failure and fills `error`.
@@ -1984,7 +1996,6 @@ public:
     /// render system, no display, no device, and no View of any kind. Hosts
     /// that decide what to show read it instead of guessing from a failed
     /// createView().
-    virtual bool  isHeadless() const = 0;
     /// Destroys the Scene and every node, mesh and material it owns. Views bound to
     /// it are detached first (they stay alive, showing nothing).
     ///
@@ -2126,11 +2137,11 @@ public:
     /// answer, in vrInfo(). VR is NOT fixed at boot any more — every engine
     /// runs on its own device with the interop extensions, and each session
     /// connects afresh.
-    virtual bool vrAvailable() const = 0;
+    bool vrAvailable() const { return mHostVrPolicy.enabled && !mIdentityHeadless && mHostVrBuilt; }   ///< the host's record (U3 stage 2)
     /// The process's VR policy (VrPolicy). Takes effect at the next connection;
     /// a running session is not touched.
     virtual void setVrPolicy(const VrPolicy &policy) = 0;
-    virtual const VrPolicy &vrPolicy() const = 0;
+    const VrPolicy &vrPolicy() const { return mHostVrPolicy; }   ///< as the host last set it (U3 stage 2)
     /// CONNECT, ASK, DISCONNECT: does a runtime the policy allows answer with a
     /// head-mounted display right now? Fills vrInfo() (failure + reason on no)
     /// and creates no session. With a policy that names runtimes, a
@@ -2190,7 +2201,6 @@ public:
     /// The View the session draws into — the both-eyes target. Null when no
     /// session runs. Hosts use it for nothing but introspection; the session
     /// owns its lifetime.
-    virtual View *vrView() const = 0;
     /// WHERE THE WEARER IS STANDING, IN THE WORLD (phase 3, the Player's VR
     /// mode). The reference space the session took is a ROOM — a floor origin
     /// (STAGE) with the wearer somewhere on it — and until this is called that
@@ -2221,7 +2231,7 @@ public:
     /// several pages needs to know whether the mirror is on the one it is about
     /// to hide — a mirror is a workspace of its OWN over that view's target and
     /// does not stop when the view does.
-    virtual View *vrMirrorView() const = 0;
+    View *vrMirrorView() const { return mHostVrMirrorView; }   ///< as the host last set it (U3 stage 2)
     /// ONE EYE OF THE RUNNING SESSION, RENDERED MONO AND READ BACK — the
     /// picture that eye is seeing, at the eye's own size, through the eye's own
     /// pose and projection.
@@ -2389,7 +2399,6 @@ public:
     ///
     /// Only View::setEnabled moves this, so nothing else has to change to stay
     /// correct: the tick after a viewport is shown sees `true` and renders.
-    virtual bool hasEnabledViews() const = 0;
 
     /// Every live View, in creation order (the vector is cleared first).
     ///
@@ -2404,7 +2413,6 @@ public:
     ///
     /// The pointers are the Engine's and die with it — hold them for the
     /// duration of a call, never across one that could destroy a View.
-    virtual void listViews(std::vector<View *> &out) const = 0;
 
     // ---- Texture streaming (SPECS/THREADING_ADOPTION_SPEC.md P2) -----------
     //
@@ -2449,7 +2457,7 @@ public:
     /// loading is the single background streaming thread). Set once at engine
     /// init from the machine's core count, overridable with JAH_TEXTURE_MULTILOAD
     /// for measurement — see the A/B protocol in THREADING_ADOPTION_SPEC G2-c.
-    virtual unsigned textureMultiLoadThreads() const = 0;
+    unsigned textureMultiLoadThreads() const { return mHostMultiLoadThreads; }   ///< fixed at creation (U3 stage 2)
 
     // ---- The texture wait's watchdog (defect 2026-09-08) ------------------
     //
@@ -2496,7 +2504,7 @@ public:
     /// The resolved no-progress budget (ms). Set once at engine init from
     /// JAH_TEXTURE_WAIT_MS, default 8000. 0 means the wait is disabled
     /// entirely, which is a measurement mode and not a supported one.
-    virtual unsigned textureWaitBudgetMs() const = 0;
+    unsigned textureWaitBudgetMs() const { return mHostTextureWaitBudgetMs; }   ///< fixed at creation (U3 stage 2)
 
     /// Rows in the backend's texture METADATA cache (P2 item 6): resolution,
     /// format, mipmaps and pool per texture path, remembered across launches so
@@ -2536,7 +2544,7 @@ public:
     /// rebuilt, exactly as a resize does. Call it on a user's change of mind,
     /// never per frame. A no-op when the value is unchanged.
     virtual void setVsync(bool) = 0;
-    virtual bool vsync() const = 0;
+    bool vsync() const { return mHostVsync; }   ///< as the host last set it (U3 stage 2)
 
     // ---- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------
     /// THE NO-RAYS SWITCH at runtime. True lets the tier run wherever the
@@ -2549,7 +2557,6 @@ public:
     /// A no-op where the device has no rays (there is nothing to switch off).
     /// Boots from EngineConfig::rayTracing.
     virtual void setRayTracing(bool) = 0;
-    virtual bool rayTracing() const = 0;
     /// The DEVICE's answer, once and for all: were the extensions and features
     /// enabled at vkCreateDevice? False on macOS, on a pre-RTX GPU, on
     /// lavapipe builds without ray query, and in a headless (NULL render
@@ -2561,7 +2568,6 @@ public:
     /// createSceneManager() — so between Engine::create() and the first
     /// createView()/createOffscreenView() there is no device to ask and this
     /// reads false on hardware that has rays.
-    virtual bool rayQueryAvailable() const = 0;
 
     // ---- Simulation clock (PARTICLES_FX2_SPEC.md; ENGINEERING_DEBT_SPEC A4.2) ----
     // The engine advances its own simulations inside renderOneFrame — the
@@ -2580,7 +2586,6 @@ public:
     /// submits one (thumbnails, previews, engine-only suites) still simulates
     /// one deterministic grid step per frame instead of the milliseconds an
     /// offscreen frame takes on the wall clock.
-    virtual float fixedFrameDelta() const = 0;
     /// 1/60 — the document's SimulationClock grid (simulationclock.h).
     static constexpr float kDefaultFrameDelta = 1.0f / 60.0f;
 
@@ -2590,7 +2595,7 @@ public:
     /// per-light document settings push the strongest requested quality.
     /// Cheap: takes effect next frame, no material rebuild. Default: Soft.
     virtual void setShadowFilter(ShadowFilter) = 0;
-    virtual ShadowFilter shadowFilter() const = 0;
+    ShadowFilter shadowFilter() const { return mHostShadowFilter; }   ///< as the host last set it (U3 stage 2)
 
     /// Shadow-map resolution for EVERY shadowed light in EVERY scene — global,
     /// like the filter: the backend renders all shadow maps into one fixed atlas
@@ -2601,7 +2606,7 @@ public:
     /// workspace that references it — call on change only, never per frame.
     /// Clamped to [256, 8192]. Default: 2048.
     virtual void setShadowResolution(unsigned pixels) = 0;
-    virtual unsigned shadowResolution() const = 0;
+    unsigned shadowResolution() const { return mHostShadowResolution; }   ///< the atlas the host's last setting built (U3 stage 2)
 
     /// HOW MANY POINT/SPOT LIGHTS MAY HAVE A SHADOW MAP AT ONCE
     /// (SPECS/SHADOW_TOOLING_SPEC.md §4.1). The atlas holds one PSSM block for
@@ -2620,7 +2625,6 @@ public:
     /// 4096 base do not fit inside the 16384 texture limit. `shadowStatus()`
     /// reports what survived both clamps. Default 8.
     virtual void setShadowMapBudget(unsigned maps) = 0;
-    virtual unsigned shadowMapBudget() const = 0;
 
     /// What the shadow atlas ACTUALLY is: its layout, which light holds which
     /// map, and which shadow-casting lights got none. Cheap (reads live
@@ -2643,7 +2647,7 @@ public:
     /// question for meshes created afterwards and leaves existing ones alone.
     /// That is why it is an application preference, not a per-scene setting.
     virtual void setShadowMeshOptimization(bool on) = 0;
-    virtual bool shadowMeshOptimization() const = 0;
+    bool shadowMeshOptimization() const { return mHostShadowMeshOptimization; }   ///< as the host last set it (U3 stage 2)
 
     // ---- Persistent shader cache (SHADER_CACHE_SPEC.md) ----
     // Three layers behind one fingerprinted container: the Vulkan pipeline
@@ -2685,7 +2689,6 @@ public:
     /// Which GPU, which driver, which API version — filled once the render
     /// system has a device. Empty strings before that, and under the NULL
     /// render system everything but `renderSystem` is legitimately empty.
-    virtual DeviceInfo deviceInfo() const = 0;
     /// THE BACKEND'S ONE-TIME PREPARATION, on demand: the render target a device and a scene manager cannot exist
     /// without (a headless engine's own 1x1 window; a rendering one's surfaceless window when no View exists yet) and
     /// the Hlms/resource registration. createScene does it itself; a host that needs the device's answers before its
@@ -2779,7 +2782,6 @@ public:
     /// Listeners ride the workspace seams, so they survive an atlas rebuild, a
     /// GI rebuild and a workspace recreation.
     virtual void setFrameMonitor(MonitorLevel level) = 0;
-    virtual MonitorLevel frameMonitor() const = 0;
 
     // ---- THE ARM REGISTRY (lane TEST-1; Types.h ArmInfo) -------------------
     /// Sets a measurement arm by name. The value is LATCHED at the start of the
@@ -3046,6 +3048,25 @@ public:
     /// harness media is missing (the reason in takeLastError()).
     virtual bool environmentCones(Scene *scene, const std::vector<EnvironmentConeQuery> &queries,
                                   std::vector<EnvironmentConeAnswer> &out) = 0;
+protected:
+    MonitorLevel        mHostMonitorLevel = MonitorLevel::Off;
+    bool                mHostRayTracing = false;
+    float               mPushedFrameDelta = 1.0f / 60.0f;
+    bool                mHostVrSessionLive = false;
+    std::vector<View *> mHostViews;
+    bool                mIdentityHeadless = false;
+    View               *mHostVrView = nullptr;
+    DeviceInfo          mDeviceInfo;
+    bool                mDeviceRayQuery = false;
+    VrPolicy            mHostVrPolicy;
+    bool                mHostVrBuilt = false;          ///< the engine was built with VR and has a Root
+    View               *mHostVrMirrorView = nullptr;
+    unsigned            mHostMultiLoadThreads = 0;
+    unsigned            mHostTextureWaitBudgetMs = 8000u;
+    bool                mHostVsync = true;
+    ShadowFilter        mHostShadowFilter = ShadowFilter::Soft;
+    unsigned            mHostShadowResolution = 2048;
+    bool                mHostShadowMeshOptimization = true;
 };
 
 }}  // namespace jahshaka::engine

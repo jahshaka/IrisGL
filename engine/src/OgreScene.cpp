@@ -608,6 +608,7 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     back.serial = serial;
     back.gi = giStatus();
     back.atmosphere = publishedAtmosphere();
+    back.giApplied = mFrameApplied.gi;
     // THE SCENE'S STATUS (ENGINE-UPGRADE-U3 stage 2): each the getter's own answer, read once here at the close.
     back.heightFog = heightFogStatus();
     back.skyAmbientShValid = skyAmbientSh(back.skyAmbientSh);
