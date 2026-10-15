@@ -6543,7 +6543,7 @@ public:
     /// Is this view drawing its clear-only workspace THIS frame? Read by
     /// OgreEngine::renderOneFrame, which must update the blank scene manager in
     /// the same frame its workspace runs (the rule stated in that loop).
-    bool drawsBlank() const { return mEnabled && mBlankWorkspace != nullptr; }
+    bool drawsBlank() const { return drawing() && mBlankWorkspace != nullptr; }
     /// Compositor listeners this view re-attaches to every workspace it builds.
     /// The view does NOT own them: register at setup, unregister before the
     /// listener dies. Registering twice is a no-op.
