@@ -223,14 +223,13 @@ bool PhotonComponent::gatherAndBuild(detail::VoxelFeed &feed, Ogre::PhotonVoxeli
     // instance table the last frame committed (the ring, GpuScene::createTables — this frame's
     // commit takes the next copy) and the inputs the last graphics region prepared. THE RING'S
     // DEPTH COVERS IT: a copy is rewritten only by the commit `tableCopies()` frames later, after the
-    // graphics fence of this frame (which, on the async arm, also proves this frame's compute: the
-    // frame end waits C) has been waited by the ring. The assert is a TAUTOLOGY today
-    // (GpuScene::createTables makes exactly framesInFlight + 1 copies), kept as the ring's statement;
-    // the real dependency - the frame end's wait on C before a copy is reused - is stage 3's.
+    // graphics fence of this frame has been waited by the ring. The assert is a TAUTOLOGY
+    // (GpuScene::createTables makes exactly framesInFlight + 1 copies), kept as the ring's statement.
     // NOT ALWAYS THE LAST FRAME'S (the stage-1 read): a GRAPHICS region earlier in this frame (the
     // still frame's re-solve -> a graphics build -> ensureGpuScene) commits the table, and this
-    // region then reads THIS frame's copy - in order, harmless; on the async arm a graphics-N write
-    // the bracket reads, an input stage 3's beforeGiInputWrite must cover.
+    // region then reads THIS frame's copy - in order, harmless. Running this region on a second
+    // queue (debt ASYNC-4-PINGPONG, if the owner takes it) would owe both: a wait on its own
+    // completion before a copy is reused, and a cover for the graphics writes of its inputs.
     else if (mScene.gpuScene().live()) {
         assert(mScene.gpuScene().tableCopies() >= mScene.gpuScene().framesInFlight() + 1u &&
                "the instance table's ring is shallower than the frames in flight + the one a frame writes");
@@ -3462,7 +3461,8 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
         GiRegion still(RegionKind::Graphics);
         if (mGiPlan.pushed && mGiPlan.frame != giWriterFrame()) plan(FrameInputScene(), false);
     }
-    // THE COMPUTE REGION: the GI step the async bracket wraps.
+    // THE COMPUTE REGION: the GI step - compute-legal, bracketed in the region row only
+    // (gi.region_compute_only).
     GiRegion region(RegionKind::Compute);
     // ITS GPU SPAN, one monitor row (ENGINE-UPGRADE-ASYNC-3 stage 2: THE JOB the window is measured
     // against; nothing is constructed while the monitor is off - CacheScope's own rule).

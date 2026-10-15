@@ -2587,6 +2587,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mVisibilityMask = kDistortionBit;
             p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
             p->mProfilingId = "Jahshaka distortion field";
+            // HlmsUnlit datablocks only (applyDistortion; the particle distortion too): they write a
+            // displacement field and sample no GI (PhotonPassBinding::passReadsGi).
+            p->mJahReadsGi = false;
             if (desc.letterbox) inset(handlesOut, p);
         }
         {

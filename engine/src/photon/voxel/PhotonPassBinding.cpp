@@ -19,6 +19,7 @@
 #include <Compositor/Pass/OgreCompositorPassDef.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassScene.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
+#include <Compositor/Pass/PassWarmUp/OgreCompositorPassWarmUpDef.h>
 #include <CommandBuffer/OgreCbTexture.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
 #include <Cubemaps/OgreParallaxCorrectedCubemapBase.h>
@@ -124,6 +125,9 @@ const SceneGiBinding *bindingOf(const Ogre::SceneManager *sm) {
 const Ogre::CompositorPassDef *sScenePass = nullptr;
 
 struct GiReaderListener final : public Ogre::CompositorWorkspaceListener {
+    // A pass that throws between its start and its end never reaches passPosExecute: every pass's
+    // start forgets the last one (the stage-2 read's H1), so no definition outlives a chain rebuild.
+    void passEarlyPreExecute(Ogre::CompositorPass *) override { sScenePass = nullptr; }
     void passSceneAfterShadowMaps(Ogre::CompositorPassScene *pass) override {
         sScenePass = pass ? pass->getDefinition() : nullptr;
     }
@@ -141,6 +145,11 @@ unsigned long long PhotonPassBinding::nonReaderPrepares() { return sNonReaderPre
 bool PhotonPassBinding::passReadsGi(const Ogre::CompositorPassDef *def) {
     if (!def || !def->mJahReadsGi || def->mShadowMapIdx != ~Ogre::uint32(0)) return false;
     if (def->getType() == Ogre::PASS_CUSTOM) return true;
+    // THE WARM-UP PASS IS ITS SCENE PASS'S STAND-IN (the stage-2 read's D1): it compiles what that
+    // pass will draw with, so it reads the GI exactly when that pass does (the fork copies the flag).
+    if (def->getType() == Ogre::PASS_WARM_UP)
+        return static_cast<const Ogre::CompositorPassWarmUpDef *>(def)->mShadowNodeRecalculation !=
+               Ogre::SHADOW_NODE_CASTER_PASS;
     if (def->getType() != Ogre::PASS_SCENE) return false;
     return static_cast<const Ogre::CompositorPassSceneDef *>(def)->mShadowNodeRecalculation !=
            Ogre::SHADOW_NODE_CASTER_PASS;
@@ -153,7 +162,11 @@ bool PhotonPassBinding::scenePassReadsGi(const Ogre::SceneManager *sceneManager)
 }
 
 void PhotonPassBinding::installPassListener(Ogre::CompositorManager2 *cm) {
-    if (cm) cm->addPassListener(&sReaderListener);
+    if (!cm) return;
+    // ONCE PER MANAGER (the stage-2 read's wl4: the Hlms registration's retry calls this again).
+    for (const Ogre::CompositorWorkspaceListener *l : cm->getPassListeners())
+        if (l == &sReaderListener) return;
+    cm->addPassListener(&sReaderListener);
 }
 void PhotonPassBinding::uninstallPassListener(Ogre::CompositorManager2 *cm) {
     if (cm) cm->removePassListener(&sReaderListener);

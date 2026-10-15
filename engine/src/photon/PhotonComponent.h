@@ -622,7 +622,8 @@ public:
     /// the ONLY door (its open/close are private); nesting counts once.
     /// ITS KIND (ENGINE-UPGRADE-ASYNC-3 stage 1): COMPUTE = the GI step at engine.pre (harvest ->
     /// plan -> record: the cascade update, the field's batch, the injections, the mips, the
-    /// border mirrors), the one span the async bracket wraps — nothing graphics-only may be
+    /// border mirrors), the compute-legal span - bracketed in the region row only
+    /// (setPhotonRegionBracketCheck, gi.region_compute_only) - nothing graphics-only may be
     /// recorded in it, and its inputs are the ones a graphics region prepared before it (the
     /// material conversions, the partitions, the geometry rows: prepareGiInputs). GRAPHICS = the
     /// arm builds (applyPendingGiDeferrable and the verb-time builds) and the cards'

@@ -4,7 +4,8 @@
 // build after it, each inside PhotonComponent::GiRegion; the cards' photon_update pass is a region
 // of its own. Every Photon compute dispatch goes through photonDispatch (its barriers, the witness,
 // the dispatch); one made outside every region is counted OUTSIDE (jahshaka/engine/PhotonStatus.h)
-// and logged once. The ASYNC bracket wraps the region.
+// and logged once. The Compute region (the GI step) is compute-legal; it is bracketed in the region
+// row only (gi.region_compute_only).
 #ifndef JAHSHAKA_ENGINE_PHOTONDISPATCH_H
 #define JAHSHAKA_ENGINE_PHOTONDISPATCH_H
 

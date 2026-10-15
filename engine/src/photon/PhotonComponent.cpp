@@ -138,7 +138,9 @@ unsigned long long renderSystemDispatches() {
 }
 unsigned long long gPhotonInRegion = 0ull, gPhotonOutsideRegion = 0ull;
 
-// THE REGION'S BRACKET CHECK (jahshaka/engine/PhotonStatus.h setPhotonRegionBracketCheck).
+// THE REGION'S BRACKET CHECK (jahshaka/engine/PhotonStatus.h setPhotonRegionBracketCheck): stage 1's
+// acceptance instrument for gi.region_compute_only - the in-order bracket is the row's door, not a
+// shipped path (nothing in the product turns it on).
 bool gRegionCheck = false;
 bool gRegionCheckWasEnabled = false;   // the queue's arm before the check switched it off
 bool gRegionCheckOpen = false;         // the bracket the outermost open began
@@ -162,7 +164,8 @@ void notePhotonDispatch() {
             "the ASYNC bracket would miss it; PhotonDispatchStatus::outsideRegion counts every one",
             Ogre::LML_CRITICAL);
     // THE DOOR ASSERTS (ENGINE-UPGRADE-ASYNC-3 stage 1): a debug build stops at the first one — the
-    // async bracket wraps the region, so a dispatch outside it would record on the wrong queue.
+    // Compute region is the compute-legal span (bracketed in the region row only), and a dispatch
+    // outside every region escapes its witness.
     assert(false && "a Photon compute dispatch outside the GI region (PhotonComponent::GiRegion)");
 }
 unsigned long long photonDispatchesInRegion() { return gPhotonInRegion; }

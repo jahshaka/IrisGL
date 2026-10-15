@@ -1,5 +1,5 @@
 // PHOTON'S DISPATCH COUNT — the test door of ENGINE-UPGRADE-2B stage 3 (ONE GI REGION: every Photon
-// compute dispatch is made inside PhotonComponent's GI region, the span the ASYNC bracket wraps).
+// compute dispatch is made inside PhotonComponent's GI region; its Compute span is compute-legal).
 // Counters only, process-wide (the dispatch sites are the voxel classes, which know no scene).
 #ifndef JAHSHAKA_ENGINE_PHOTONSTATUS_H
 #define JAHSHAKA_ENGINE_PHOTONSTATUS_H
@@ -26,7 +26,8 @@ struct PhotonDispatchStatus {
 };
 PhotonDispatchStatus photonDispatchStatus();
 
-/// THE REGION'S BRACKET CHECK (ENGINE-UPGRADE-ASYNC-3 stage 1) — a TEST instrument: while on, the
+/// THE REGION'S BRACKET CHECK (ENGINE-UPGRADE-ASYNC-3 stage 1) — stage 1's acceptance instrument for
+/// gi.region_compute_only, the row's door and not a shipped path (nothing in the product sets it): while on, the
 /// outermost open of every GI region opens the fork's async compute bracket on its IN-ORDER arm (the
 /// graphics queue still records; the queue's async arm is switched off while the check runs) and its
 /// close ends it. The fork refuses every graphics-only command inside a bracket in either arm (an
