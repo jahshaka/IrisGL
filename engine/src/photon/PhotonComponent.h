@@ -637,6 +637,8 @@ public:
     };
     /// True while the outermost open region is a Compute one.
     static bool inComputeRegion();
+    /// Did the open Compute region dispatch anything through the door yet?
+    static bool computeRegionDispatched();
     /// THE FRAME'S GI, in three parts (ENGINE-UPGRADE-2B stage 2): harvest the readouts that
     /// landed; plan the frame's work (every decision: the driving profile, the camera, the
     /// walk absorbed and the cascades it marked, the field's batch, the cascade step test and
@@ -1373,15 +1375,15 @@ private:
     void bindGeometrySource(Ogre::PhotonVoxelizer *v);
     /// THE GI STEP'S GRAPHICS INPUTS (ENGINE-UPGRADE-ASYNC-3 stage 1), prepared in a GRAPHICS
     /// region: the owed material conversions (render passes, copies), the GPU tables, the
-    /// partitions and the geometry rows on the device. The Compute region's builds read what
-    /// the last preparation left; a conversion made here that changes an instance's word marks
-    /// the cascades its item reaches (`reVoxelise`), so the material reaches the GI one build
-    /// later — the protocol's own latency. A Graphics-region build calls it inline (in order).
-    void prepareGiInputs(bool reVoxelise);
+    /// partitions and the geometry rows on the device. The Compute region's builds read what the
+    /// last preparation left: while a CONVERSION is owed no cascade re-voxelises (one frame: this
+    /// empties the queue), and a cascade rebuilt while a REFRESH is owed stays pending one more frame
+    /// (recordCascades) - the material reaches the voxels one build later, the protocol's own
+    /// latency. A Graphics-region build calls it inline (in order).
+    void prepareGiInputs();
     /// The owed store refresh, then every pending slot's datablock converted and its slot
     /// marked for re-composition (graphics work: prepareGiInputs is its only caller).
-    /// `reVoxelise`: a slot whose word changed also marks its item's cascades dirty.
-    void convertPendingMaterials(bool reVoxelise);
+    void convertPendingMaterials();
     /// A from-scratch arm: every GI-visible slot queued for conversion (the store may
     /// not have seen any of them - GI was off, or the store is new).
     void queueAllGiMaterials();

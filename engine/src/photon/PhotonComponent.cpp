@@ -130,7 +130,7 @@ void PhotonComponent::releaseUpdatePass() {
 namespace {
 unsigned gPhotonRegionDepth = 0u;
 bool gPhotonRegionCompute = false;     // the outermost open region's kind
-unsigned long long gDoorInCompute = 0ull, gRsInCompute = 0ull, gRsAtComputeOpen = 0ull;
+unsigned long long gDoorInCompute = 0ull, gRsInCompute = 0ull, gRsAtComputeOpen = 0ull, gDoorAtComputeOpen = 0ull;
 unsigned long long renderSystemDispatches() {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     auto *vk = root ? dynamic_cast<Ogre::VulkanRenderSystem *>(root->getRenderSystem()) : nullptr;
@@ -188,6 +188,7 @@ void photonClearUavUint(Ogre::ComputeTools *tools, Ogre::TextureGpu *tex, const 
 // The region's open depth (nesting counts once); GiRegion is the only door. A close with no
 // open is a broken pairing: logged, never wrapped to 4 billion open regions.
 bool PhotonComponent::inComputeRegion() { return gPhotonRegionDepth && gPhotonRegionCompute; }
+bool PhotonComponent::computeRegionDispatched() { return gDoorInCompute != gDoorAtComputeOpen; }
 
 void PhotonComponent::beginGiRegion(RegionKind kind) {
     if (gPhotonRegionDepth) {
@@ -199,7 +200,10 @@ void PhotonComponent::beginGiRegion(RegionKind kind) {
     }
     ++gPhotonRegionDepth;
     gPhotonRegionCompute = kind == RegionKind::Compute;
-    if (gPhotonRegionCompute) gRsAtComputeOpen = renderSystemDispatches();
+    if (gPhotonRegionCompute) {
+        gRsAtComputeOpen = renderSystemDispatches();
+        gDoorAtComputeOpen = gDoorInCompute;
+    }
     if (!gRegionCheck || !gPhotonRegionCompute) return;
     Ogre::VulkanAsyncComputeQueue *q = regionQueue();
     if (!q || q->isOpen()) return;
@@ -255,6 +259,7 @@ PhotonDispatchStatus photonDispatchStatus() {
     s.inRegion = detail::photonDispatchesInRegion();
     s.outsideRegion = detail::photonDispatchesOutsideRegion();
     s.mipDispatches = Ogre::PhotonMipChain::numDispatches();
+    s.mipJobs = Ogre::PhotonMipChain::numJobs();
     s.regionBrackets = detail::gRegionBrackets;
     s.doorInCompute = detail::gDoorInCompute;
     s.renderSystemInCompute = detail::gRsInCompute;

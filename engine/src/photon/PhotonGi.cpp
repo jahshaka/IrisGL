@@ -110,12 +110,12 @@ void PhotonComponent::bindGeometrySource(Ogre::PhotonVoxelizer *v) {
     if (v) v->setGeometrySource(mScene.gpuScene().geomBuffer());
 }
 
-void PhotonComponent::prepareGiInputs(bool reVoxelise) {
+void PhotonComponent::prepareGiInputs() {
     if (mVctCascades.empty() && !mVctVoxelizer) return;   // no arm to feed
     // A rebuild that converts materials binds the store's pool, which the conversion renders
     // into: the temps exist before the first conversion.
     ensureVctMaterialTemps();
-    convertPendingMaterials(reVoxelise);
+    convertPendingMaterials();
     mScene.ensureGpuTables();
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::RenderSystem *rs = mRoot->getRenderSystem();
@@ -155,7 +155,7 @@ void PhotonComponent::queueAllGiMaterials() {
 /// word valid across a material edit. A datablock whose texture CLASS changed (it
 /// gained or lost a diffuse or emissive map) moves pool; only then do words change,
 /// and every GI slot is re-composed.
-void PhotonComponent::convertPendingMaterials(bool reVoxelise) {
+void PhotonComponent::convertPendingMaterials() {
     Ogre::PhotonVoxelMaterial *store = vctMaterialStore();
     if (!store) return;
     // A SLOT IS RE-COMPOSED ONLY WHEN ITS WORD CHANGES. A from-scratch arm queues
@@ -171,13 +171,6 @@ void PhotonComponent::convertPendingMaterials(bool reVoxelise) {
                                 : detail::GpuScene::kNoMaterialWord;
         if (!mirror || n.itemSlot >= mScene.itemNodes().size() || mirror[n.itemSlot].ids[1] != word) {
             mScene.markGpuSlotDirty(n);
-            // OUTSIDE A BUILD the word reaches the voxels only through a re-voxelisation of the
-            // cascades the item reaches (the next Compute region's build reads the table the
-            // frame commits with it).
-            if (reVoxelise) {
-                const Ogre::Aabb box = n.item->getWorldAabbUpdated();
-                noteGiCascadeDirty(&box);
-            }
         }
     };
     if (mVctMaterialRefreshOwed) {
@@ -223,7 +216,7 @@ bool PhotonComponent::gatherAndBuild(detail::VoxelFeed &feed, Ogre::PhotonVoxeli
         // (gpuMaterialWordFor), the conversion converts it, and the second compose re-composes
         // the converted slots with their words (a no-op scan otherwise).
         mScene.ensureGpuScene(/*graphIsCurrent=*/true);
-        prepareGiInputs(/*reVoxelise=*/false);
+        prepareGiInputs();
         mScene.ensureGpuScene(/*graphIsCurrent=*/true);
     }
     // THE COMPUTE REGION (ENGINE-UPGRADE-ASYNC-3 stage 1) composes nothing: the gather reads the
@@ -3118,7 +3111,7 @@ void PhotonComponent::applyPendingGiDeferrable() {
     // THE NEXT GI STEP'S GRAPHICS INPUTS (ENGINE-UPGRADE-ASYNC-3 stage 1): the conversions, the
     // partitions and the rows the Compute region of the next frame reads — prepared here, in order.
     if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
-        [this]() { JAH_TRY { prepareGiInputs(/*reVoxelise=*/true); } JAH_CATCH(mError, ); }();   // JAH_CATCH returns
+        [this]() { JAH_TRY { prepareGiInputs(); } JAH_CATCH(mError, ); }();   // JAH_CATCH returns
     }
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
@@ -3476,6 +3469,8 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
     monitor::CacheScope stepRow(CacheKind::Gi, WorkReason::None, 0ull, "gi.step", mRoot->getRenderSystem(), this);
     harvest();     // before any of this frame's GI work is recorded
     recordFrame(planFrame(camPos, driverStereo));
+    // A STILL FRAME FILES NO GI ROW (gi.coalesce): the row exists only when the step dispatched.
+    if (!computeRegionDispatched()) stepRow.cancel();
 }
 
 // THE FRAME'S RESULTS, HARVESTED: the voxel feeds' device readouts that have landed (the
@@ -4697,8 +4692,12 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
     // the picture is never half-built, only slightly behind.
     // THE ONE RE-VOXELISATION: the innermost pending cascade, unless the follow spent the frame
     // (every other pending cascade is deferred to a later frame).
-    // A cascade whose first edit mark is THIS frame's waits for the frame's commit (editSince).
-    if (!w.follow)
+    // A cascade whose first edit mark is THIS frame's waits for the frame's commit (editSince); and
+    // no cascade re-voxelises while a material CONVERSION is owed (a new datablock: the gather would
+    // skip its instances, word "none") - the frame's graphics region converts it, so this is one frame
+    // at most (prepareGiInputs empties the queue every frame; a conversion is an attach's or a
+    // preset's, never a slider's - a slider owes a refresh, which never holds a rebuild: F3).
+    if (!w.follow && mVctPendingMaterialSlots.empty())
         for (size_t i = 0; i < mVctCascades.size(); ++i)
             if (mVctCascades[i].pending && mVctCascades[i].editSince != giWriterFrame()) {
                 w.rebuild = int(i);
@@ -4731,7 +4730,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         if (!c.pending) continue;
         // AN EDIT IS VOXELISED ONCE THE TABLE CARRIES IT (editSince): not in the frame that first
         // marked it - this frame's table is the last frame's commit.
-        if (spent || int(i) != w.rebuild || c.editSince == giWriterFrame()) {
+        if (spent || int(i) != w.rebuild || c.editSince == giWriterFrame() || !mVctPendingMaterialSlots.empty()) {
             ++mCascadeDeferrals;
             continue;
         }

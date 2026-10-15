@@ -30,6 +30,7 @@ THE SOFTWARE.
 
 #include "photon/voxel/PhotonVoxelizer.h"
 #include "photon/PhotonDispatch.h"
+#include "photon/voxel/PhotonMipChain.h"
 
 #include "photon/voxel/PhotonVoxelMaterial.h"
 #include "photon/voxel/PhotonVoxelVisualizer.h"
@@ -464,15 +465,6 @@ namespace Ogre
     /// Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the merge accumulator dies with the voxel textures.
     void PhotonVoxelizer::destroyVoxelTextures()
     {
-        // The chains' jobs bind the volumes: they go first.
-        mAlbedoMips.destroy();
-        mEmissiveMips.destroy();
-        mNormalMips.destroy();
-        for( size_t h = 0u; h < 2u; ++h )
-        {
-            mCoverageMips[h].destroy();
-            mPositionMips[h].destroy();
-        }
         if( mMergeAccumTex )
         {
             releaseMergeAccum( mTextureGpuManager, mMergeAccumTex );
@@ -1062,13 +1054,13 @@ namespace Ogre
     /// shadows, the emissive and normal without mNeedsAllMipmaps) writes nothing.
     void PhotonVoxelizer::generateMips()
     {
-        mAlbedoMips.generate( mHlmsManager, mRenderSystem, mAlbedoVox );
+        PhotonMipChain::generate( mHlmsManager, mRenderSystem, mAlbedoVox );
         for( size_t h = 0u; h < 2u; ++h )
         {
-            mCoverageMips[h].generate( mHlmsManager, mRenderSystem, mCoverageVox[h] );
-            mPositionMips[h].generate( mHlmsManager, mRenderSystem, mPositionVox[h] );
+            PhotonMipChain::generate( mHlmsManager, mRenderSystem, mCoverageVox[h] );
+            PhotonMipChain::generate( mHlmsManager, mRenderSystem, mPositionVox[h] );
         }
-        mEmissiveMips.generate( mHlmsManager, mRenderSystem, mEmissiveVox );
-        mNormalMips.generate( mHlmsManager, mRenderSystem, mNormalVox );
+        PhotonMipChain::generate( mHlmsManager, mRenderSystem, mEmissiveVox );
+        PhotonMipChain::generate( mHlmsManager, mRenderSystem, mNormalVox );
     }
 }  // namespace Ogre

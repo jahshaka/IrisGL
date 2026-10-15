@@ -38,7 +38,6 @@ THE SOFTWARE.
 #include <algorithm>
 
 #include "SceneLightList.h"
-#include "photon/voxel/PhotonMipChain.h"
 
 #include "OgreHeaderPrefix.h"
 
@@ -136,11 +135,6 @@ namespace Ogre
         /// exactly as long as mLightBounce does (see setAllowMultipleBounces): a
         /// volume that cannot bounce has no use for it.
         TextureGpu *mLightDirect;
-        /// THE MIP CHAINS ON COMPUTE (ENGINE-UPGRADE-ASYNC-3 stage 1; PhotonMipChain.h): the
-        /// total's (mLightVoxel[0], which ping-pongs with mLightBounce: one role, one format) on
-        /// the isotropic and SDF tiers, and the direct term's (mLightDirect).
-        PhotonMipChain mTotalMips;
-        PhotonMipChain mDirectMips;
         /// setStoreSkyLight (BOUNCES-ZERO-1).
         bool mStoreSkyLight = true;
         /// Jahshaka (PHOTON-VOXEL-5), the anisotropic tiers with a bounce: the BACK side's direct

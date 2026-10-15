@@ -4,6 +4,7 @@
 // engine/src/ is the only directory that includes Ogre; the shared declarations
 // live in EnginePrivate.h, which documents the invariants this backend rests on.
 #include "EnginePrivate.h"
+#include "photon/voxel/PhotonMipChain.h"
 #include "photon/voxel/PhotonPassBinding.h"
 
 #include <OgreHlmsCompute.h>
@@ -3136,6 +3137,8 @@ OgreEngine::~OgreEngine() {
     // The pass listener's samplerblock references go back to the manager that
     // gave them (PHOTON-ENV-1 audit F10) — it dies with Root.
     try { FogHlmsListener::releaseSamplers(); } catch (...) {}
+    // The pooled mip jobs (ENGINE-UPGRADE-ASYNC-3) go back to the compute Hlms that cloned them.
+    try { Ogre::PhotonMipChain::releasePool(); } catch (...) {}
     if (mRoot && mInRecordFaultAttached) mRoot->removeFrameListener(mInRecordFault.get());
     mInRecordFaultAttached = false;
     delete mRoot;

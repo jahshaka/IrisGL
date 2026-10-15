@@ -12,65 +12,92 @@
 #include "OgreStringConverter.h"
 #include "OgreTextureGpu.h"
 
+#include <map>
+
 namespace Ogre
 {
     namespace
     {
         unsigned long long gMipDispatches = 0ull;
+        unsigned long long gMipJobs = 0ull;
         uint32 gMipCloneId = 0u;
-    }  // namespace
 
-    unsigned long long PhotonMipChain::numDispatches() { return gMipDispatches; }
-
-    PhotonMipChain::~PhotonMipChain() { destroy(); }
-
-    void PhotonMipChain::destroy()
-    {
-        if( !mHlmsManager )
-            return;
-        HlmsCompute *hlmsCompute = mHlmsManager->getComputeHlms();
-        for( HlmsComputeJob *job : mJobs )
-            hlmsCompute->destroyComputeJob( job->getName() );
-        mJobs.clear();
-        mHlmsManager = nullptr;
-    }
-
-    void PhotonMipChain::generate( HlmsManager *hlmsManager, RenderSystem *renderSystem,
-                                   TextureGpu *texture )
-    {
-        const uint8 numMips = texture->getNumMipmaps();
-        if( numMips <= 1u )
-            return;
-        if( mHlmsManager && mHlmsManager != hlmsManager )
-            destroy();
-        HlmsCompute *hlmsCompute = hlmsManager->getComputeHlms();
-        mHlmsManager = hlmsManager;
-        if( mJobs.size() < size_t( numMips - 1u ) )
+        /// THE POOL: one job per (format, volume size, level), shared by every volume of that kind -
+        /// every cascade, every rebuild - so a pipeline is built once per kind, never per volume
+        /// (a clone per volume and level built ~220 pipelines per arm build). Owned by the compute
+        /// Hlms it was cloned from; released by releasePool before that Hlms dies.
+        struct Key
         {
+            PixelFormatGpu format;
+            uint32 width, height, depth;
+            uint8 level;
+            bool operator<( const Key &o ) const
+            {
+                if( format != o.format ) return format < o.format;
+                if( width != o.width ) return width < o.width;
+                if( height != o.height ) return height < o.height;
+                if( depth != o.depth ) return depth < o.depth;
+                return level < o.level;
+            }
+        };
+        HlmsManager *gPoolManager = nullptr;
+        std::map<Key, HlmsComputeJob *> gPool;
+
+        HlmsComputeJob *pooledJob( HlmsManager *hlmsManager, const TextureGpu *texture, uint8 level )
+        {
+            if( gPoolManager && gPoolManager != hlmsManager )
+                PhotonMipChain::releasePool();
+            gPoolManager = hlmsManager;
+            const Key key = { texture->getPixelFormat(), texture->getWidth(), texture->getHeight(),
+                              texture->getDepth(), level };
+            auto it = gPool.find( key );
+            if( it != gPool.end() )
+                return it->second;
+            HlmsCompute *hlmsCompute = hlmsManager->getComputeHlms();
+            HlmsComputeJob *baseJob = hlmsCompute->findComputeJob( "Photon/MipDown" );
+            char tmpBuffer[96];
+            LwString name( LwString::FromEmptyPointer( tmpBuffer, sizeof( tmpBuffer ) ) );
+            name.a( "Photon/MipDown/", ++gMipCloneId );
+            HlmsComputeJob *job = baseJob->clone( name.c_str() );
             // THE BLIT'S SAMPLING: linear, clamped to the edge, read at the view's only level.
-            // Each clone holds its own reference (setSamplerblock), released with the clone.
             HlmsSamplerblock samplerblock;
             samplerblock.mMinFilter = FO_LINEAR;
             samplerblock.mMagFilter = FO_LINEAR;
             samplerblock.mMipFilter = FO_POINT;
             samplerblock.setAddressingMode( TAM_CLAMP );
-            HlmsComputeJob *baseJob = hlmsCompute->findComputeJob( "Photon/MipDown" );
-            char tmpBuffer[96];
-            LwString name( LwString::FromEmptyPointer( tmpBuffer, sizeof( tmpBuffer ) ) );
-            while( mJobs.size() < size_t( numMips - 1u ) )
-            {
-                name.clear();
-                name.a( "Photon/MipDown/", ++gMipCloneId );
-                HlmsComputeJob *job = baseJob->clone( name.c_str() );
-                job->setSamplerblock( 0, samplerblock );
-                mJobs.push_back( job );
-            }
+            job->setSamplerblock( 0, samplerblock );
+            gPool[key] = job;
+            ++gMipJobs;
+            return job;
         }
+    }  // namespace
 
+    unsigned long long PhotonMipChain::numDispatches() { return gMipDispatches; }
+    unsigned long long PhotonMipChain::numJobs() { return gMipJobs; }
+
+    void PhotonMipChain::releasePool()
+    {
+        if( gPoolManager )
+        {
+            HlmsCompute *hlmsCompute = gPoolManager->getComputeHlms();
+            for( auto &kv : gPool )
+                hlmsCompute->destroyComputeJob( kv.second->getName() );
+        }
+        gPool.clear();
+        gPoolManager = nullptr;
+    }
+
+    void PhotonMipChain::generate( HlmsManager *hlmsManager, RenderSystem *renderSystem,
+                                   TextureGpu *texture )
+    {
+        if( !texture || texture->getNumMipmaps() <= 1u )
+            return;
+        const uint8 numMips = texture->getNumMipmaps();
+        HlmsCompute *hlmsCompute = hlmsManager->getComputeHlms();
         renderSystem->debugAnnotationPush( "Photon mips" );
         for( uint8 level = 1u; level < numMips; ++level )
         {
-            HlmsComputeJob *job = mJobs[level - 1u];
+            HlmsComputeJob *job = pooledJob( hlmsManager, texture, level );
 
             DescriptorSetTexture2::TextureSlot texSlot( DescriptorSetTexture2::TextureSlot::makeEmpty() );
             texSlot.texture = texture;

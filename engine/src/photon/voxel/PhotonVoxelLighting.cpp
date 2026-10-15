@@ -30,6 +30,7 @@ THE SOFTWARE.
 
 #include "photon/voxel/PhotonVoxelLighting.h"
 #include "photon/PhotonDispatch.h"
+#include "photon/voxel/PhotonMipChain.h"
 
 #include "photon/voxel/PhotonVoxelizerSourceBase.h"
 #include "photon/voxel/PhotonVoxelVisualizer.h"
@@ -504,7 +505,6 @@ namespace Ogre
     void PhotonVoxelLighting::destroyTextures()
     {
         restoreSwappedTextures();
-        mTotalMips.destroy();   // its jobs bind the total: they go first
 
         // Jahshaka (PHOTON-VOXEL-3/-4): the coverage and position entries are the voxelizer's,
         // and (PHOTON-VOXEL-5) so is the normal's.
@@ -1030,7 +1030,7 @@ namespace Ogre
         if( mAnisotropic )
             generateAnisotropicMips();
 
-        mTotalMips.generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
+        PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
 
         mBounceShaderParams->mParams.swap( mLocalBounceShaderParams );
 
@@ -1170,8 +1170,6 @@ namespace Ogre
         else
         {
             restoreSwappedTextures();
-            mTotalMips.destroy();    // they bound the bounce's half of the ping-pong too
-            mDirectMips.destroy();
             textureManager->destroyTexture( mLightBounce );
             mLightBounce = 0;
             if( mLightDirect )
@@ -1401,8 +1399,8 @@ namespace Ogre
 
         // Jahshaka (MOVER-OCCLUSION-1): D's own chain, read by the ray tier's hits.
         if( mLightDirect )
-            mDirectMips.generate( mVoxelizer->getHlmsManager(), renderSystem, mLightDirect );
-        mTotalMips.generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
+            PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightDirect );
+        PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
 
         // Jahshaka (CONTACT-OCCLUSION-1, SKY-BOUNCE-1): THE SKY IS A LIGHT. Its direct term
         // enters the store first - total = direct + rho * E_sky, E_sky the environment

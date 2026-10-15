@@ -14,6 +14,8 @@ struct PhotonDispatchStatus {
     unsigned long long outsideRegion = 0;
     /// The mip chains' dispatches (ENGINE-UPGRADE-ASYNC-3 stage 1: one a level, through the door), ever.
     unsigned long long mipDispatches = 0;
+    /// The mip jobs ever pooled (one per format, volume size and level: a rebuild adds none).
+    unsigned long long mipJobs = 0;
     /// Brackets the region check opened (setPhotonRegionBracketCheck), ever.
     unsigned long long regionBrackets = 0;
     /// THE COMPUTE REGION'S TWO COUNTS (ENGINE-UPGRADE-ASYNC-3 stage 1): the door's dispatches made
