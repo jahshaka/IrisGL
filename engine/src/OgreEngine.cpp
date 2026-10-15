@@ -2556,6 +2556,7 @@ void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
     out.streaming = streamingWork();
     out.shaders = asyncShaderStats();
     out.hasEnabledViews = hasEnabledViews();
+    out.paceOwesWork = framePaceOwesWork();
     out.views.clear();
     for (const auto &v : mViews)
         if (v) {

@@ -1389,7 +1389,9 @@ public:
     virtual bool           rayTracingResolved() const = 0;
     /// The same predicate for a state this scene does not hold YET — a host building the frame's input (a view's
     /// chain reads it) before the drain applies the scene's FrameInputScene::rayTracing.
-    virtual bool           rayTracingResolvedFor(RayTracingMode mode) const = 0;
+    /// A host computation (ENGINE-UPGRADE-U3 stage 2): the mode, the engine's ray switch and the device's answer —
+    /// all the host's own record — never a read of the engine (defined after Engine, below).
+    bool                   rayTracingResolvedFor(RayTracingMode mode) const;
 protected:
     std::string mIdentityName;
     Engine     *mIdentityEngine = nullptr;
@@ -1921,6 +1923,10 @@ public:
     /// The VR session's own eye-pair View while a session runs (null otherwise): the host's record of what
     /// beginVrSession made, cleared when the session ends (the host's endVrSession, or the engine ending a lost one).
     View *vrView() const { return mHostVrView; }
+    /// Is a VR session running? The host's record of beginVrSession / endVrSession — and of the engine ending a
+    /// session the runtime took away, at the close of the frame that saw it (VrStatus::active as the next frame
+    /// reads it).
+    bool vrSessionLive() const { return mHostVrSessionLive; }
     /// THE DEVICE'S CONSTANTS, fixed the moment the device exists (the first view, or a scene before any view —
     /// prepareDevice): its identity and whether it can trace rays. Defaults (an empty name, false) before.
     DeviceInfo deviceInfo() const { return mDeviceInfo; }
@@ -3068,5 +3074,10 @@ protected:
     unsigned            mHostShadowResolution = 2048;
     bool                mHostShadowMeshOptimization = true;
 };
+
+inline bool Scene::rayTracingResolvedFor(RayTracingMode mode) const {
+    return mode != RayTracingMode::Off && mIdentityEngine && mIdentityEngine->rayTracing() &&
+           mIdentityEngine->rayQueryAvailable();
+}
 
 }}  // namespace jahshaka::engine

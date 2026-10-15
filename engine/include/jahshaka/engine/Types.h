@@ -8333,6 +8333,7 @@ struct PublishedEngineFrame {
     StreamingWork      streaming;
     AsyncShaderStats   shaders;            ///< the compile counters (`compiledInForeground` = livecompiles' total)
     bool               hasEnabledViews = false;
+    bool               paceOwesWork = false;   ///< Engine::framePaceOwesWork as the frame closed it
     std::vector<ViewFrames> views;
     /// The view named `name` as this frame closed it; null when no live view has that name.
     const ViewFrames *view(const std::string &name) const {

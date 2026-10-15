@@ -2120,14 +2120,6 @@ void OgreScene::addObjectCounts(ObjectCounts &out) const {
 // On does not force hardware, it asks the editor to SAY when there is none.
 bool OgreScene::rayTracingResolved() const { JAH_SYNC_GETTER("Scene::rayTracingResolved"); return rayTracingResolvedFor(mRayTracing); }
 
-bool OgreScene::rayTracingResolvedFor(RayTracingMode mode) const {
-    JAH_SYNC_GETTER("Scene::rayTracingResolvedFor");
-    if (mode == RayTracingMode::Off) return false;
-    if (!mEngine) return false;
-    return mEngine->rayTracing() && mEngine->rayQueryAvailable();
-}
-
-
 void OgreScene::setRayTracing(RayTracingMode mode) {
     const bool wasOn = mRayTracing != RayTracingMode::Off;
     const bool gridWas = probeGridWanted();
