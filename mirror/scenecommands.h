@@ -33,7 +33,7 @@ inline void post(Scene *scene, std::function<bool(Scene &)> fn, unsigned long lo
     part.scene = scene;
     part.messages.push_back({std::move(fn), token});
     in.scenes.push_back(std::move(part));
-    engine->submitFrame(in);
+    engine->submitFrame(std::move(in));   // moved: a copy would copy what the message owns (a texture's pixels)
 }
 inline void post(Scene *scene, std::function<void(Scene &)> fn)
 {
@@ -100,9 +100,10 @@ inline jahshaka::engine::TextureId newTexture(Scene *scene, unsigned w, unsigned
                                               bool srgb, bool mipmaps = false)
 {
     const jahshaka::engine::TextureId id = jahshaka::engine::reserveTextureId();
-    std::vector<unsigned char> px(rgba, rgba + size_t(w) * size_t(h) * 4u);
+    std::vector<unsigned char> px;
+    if (rgba) px.assign(rgba, rgba + size_t(w) * size_t(h) * 4u);
     post(scene, std::function<void(Scene &)>([id, w, h, px = std::move(px), srgb, mipmaps](Scene &s) {
-        s.createTexture(w, h, px.data(), srgb, mipmaps, id);
+        s.createTexture(w, h, px.empty() ? nullptr : px.data(), srgb, mipmaps, id);
     }));
     return id;
 }

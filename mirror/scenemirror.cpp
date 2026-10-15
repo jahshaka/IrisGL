@@ -1032,9 +1032,9 @@ int SceneMirror::sync(const FrameViews &frameViews)
         const FrameView &fv = frameViews.views[i];
         if (fv.view && fv.finish) fv.finish(parts[i], fv.view);
     }
-    in.scenes.push_back(scenePart);
+    in.scenes.push_back(std::move(scenePart));
     for (FrameInputView &p : parts) if (p.view) in.views.push_back(std::move(p));
-    if (jahshaka::engine::Engine *engine = mTarget->engine()) engine->submitFrame(in);
+    if (jahshaka::engine::Engine *engine = mTarget->engine()) engine->submitFrame(std::move(in));
     mReassertPending = false;
     mFrameShaderTime.reset();
     mFrameGrid.reset();
