@@ -480,6 +480,7 @@ void OgreScene::disarmAllReflectors() {
 bool OgreScene::setNodePlanarReflector(NodeId id, bool on) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) { mError = "setNodePlanarReflector: unknown node"; return false; }
+    mFactsDirty = true;   // the facts' reflectors (U3 stage 3)
     if (!on) {
         disarmReflector(id, it->second);
         mReflectors.erase(id);
@@ -508,13 +509,13 @@ bool OgreScene::setNodePlanarReflector(NodeId id, bool on) {
 }
 
 bool OgreScene::nodePlanarReflector(NodeId id) const {
-    JAH_SYNC_GETTER("Scene::nodePlanarReflector");
     return mReflectors.count(id) != 0 ||
            std::find(mReflectorsToArm.begin(), mReflectorsToArm.end(), id) != mReflectorsToArm.end();
 }
 
 void OgreScene::armDeferredReflectors() {
     if (mReflectorsToArm.empty()) return;
+    mFactsDirty = true;   // the facts' reflectors (U3 stage 3)
     std::vector<NodeId> ids;
     ids.swap(mReflectorsToArm);
     for (NodeId id : ids) {

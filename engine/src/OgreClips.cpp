@@ -113,6 +113,7 @@ unsigned long long OgreScene::rigGenerationOf(NodeId id) const {
 }
 
 void OgreScene::dropNodeClips(NodeId id) {
+    mFactsDirty = true;   // the facts' clips (U3 stage 3)
     auto it = mClips.find(id);
     if (it == mClips.end()) return;
     NodeClips &nc = it->second;
@@ -241,13 +242,9 @@ bool OgreScene::attachClips(NodeId id, const ClipDesc *clips, size_t count) {
             // the FIRST match and throws if absent, so a second clip of the same
             // name would be unreachable forever. Uniquified here, and the
             // mapping is what clipNames reports back.
-            rec.name = desc.name.empty() ? ("clip" + std::to_string(nc.clips.size())) : desc.name;
-            {
-                const std::string base = rec.name;
-                int suffix = 2;
-                while (skel->hasAnimation(Ogre::IdString(rec.name)))
-                    rec.name = base + " " + std::to_string(suffix++);
-            }
+            // The rule is clipNameFor (Types.h): a host that pushes a clip names it the same way the moment it pushes.
+            rec.name = clipNameFor(desc.name, nc.clips.size(),
+                                   [&](const std::string &n) { return skel->hasAnimation(Ogre::IdString(n)); });
 
             // R7: the def cache is process-lifetime and keyed by NAME, so the
             // name has to be a content hash or a re-imported clip aliases the
@@ -344,6 +341,7 @@ bool OgreScene::attachClips(NodeId id, const ClipDesc *clips, size_t count) {
                 rec.weightPtr.push_back(ptr);
             }
             nc.clips.push_back(rec);
+            mFactsDirty = true;   // the facts' clips (U3 stage 3)
             // ...and WHOSE instance the records above point into (S16).
             nc.owner = skel;
             nc.ownerGeneration = rigGenerationOf(id);
@@ -354,7 +352,6 @@ bool OgreScene::attachClips(NodeId id, const ClipDesc *clips, size_t count) {
 
 // ---------------------------------------------------------------------------
 std::vector<std::string> OgreScene::clipNames(NodeId id) const {
-    JAH_SYNC_GETTER("Scene::clipNames");
     auto it = mClips.find(id);
     if (it == mClips.end()) return {};
     // S16: records that outlived their instance are not clips this node has —
@@ -363,6 +360,15 @@ std::vector<std::string> OgreScene::clipNames(NodeId id) const {
     std::vector<std::string> out;
     out.reserve(it->second.clips.size());
     for (const auto &rec : it->second.clips) out.push_back(rec.name);
+    return out;
+}
+
+std::vector<PublishedFrame::Facts::Clip> OgreScene::clipFacts(NodeId id) const {
+    std::vector<PublishedFrame::Facts::Clip> out;
+    auto it = mClips.find(id);
+    if (it == mClips.end() || clipsAreStale(id, it->second, skeletonOf(id))) return out;   // S16, as clipNames
+    out.reserve(it->second.clips.size());
+    for (const auto &rec : it->second.clips) out.push_back({rec.id, rec.name});
     return out;
 }
 

@@ -166,7 +166,6 @@ bool OgreScene::setBoneAttachmentOffset(NodeId riderId, const Vec3 &position,
 
 NodeId OgreScene::boneAttachment(NodeId riderId, std::string *bone) const
 {
-    JAH_SYNC_GETTER("Scene::boneAttachment");
     auto rit = mNodes.find(riderId);
     if (rit == mNodes.end() || !rit->second.boneTag) return 0;
     if (bone) *bone = rit->second.boneName;

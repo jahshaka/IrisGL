@@ -511,9 +511,9 @@ public:
     /// A clip whose length is <= 0 is PADDED to a minimum length and reported
     /// in the log, never refused.
     virtual bool attachClips(NodeId, const ClipDesc *clips, size_t count) = 0;
-    /// The node's clip names, in attach order — including any uniquifying
-    /// suffix the backend added for a collision. Empty when it has no rig.
-    virtual std::vector<std::string> clipNames(NodeId) const = 0;
+    // The node's clip names, in attach order — including any uniquifying
+    // suffix the backend added for a collision. Empty when it has no rig.
+    // -> Scene::published().factsBlock().clipsOf(node) — content id and engine name, in attach order (U3 stage 3); a host names a clip it pushes with clipNameFor (Types.h), the engine's own rule.
 
     /// THE per-frame clip call. Absolute times only. Clips the array does not
     /// name are disabled. Weights are raw intent; the backend normalizes them
@@ -670,10 +670,10 @@ public:
     /// does not hand the master's rig a null parent node — and the host re-arms
     /// it on the next sync.
     virtual bool        shareSkeleton(NodeId follower, NodeId source) = 0;
-    /// True when this node's Item is rendering from another node's instance. STAYS A COUNTED GETTER (host.sync_getters;
-    /// ENGINE-UPGRADE-U3 stage 2): the ENGINE drops a share by itself (an Item re-created, a skeleton replaced), so it
-    /// is not the host's own shadow — the mirror's sync guards against exactly that.
-    virtual bool        sharesSkeleton(NodeId) const = 0;
+    // True when this node's Item is rendering from another node's instance. STAYS A COUNTED GETTER (host.sync_getters;
+    // ENGINE-UPGRADE-U3 stage 2): the ENGINE drops a share by itself (an Item re-created, a skeleton replaced), so it
+    // is not the host's own shadow — the mirror's sync guards against exactly that.
+    // -> Scene::published().factsBlock().sharesSkeleton(node) / shareSourceOf (ENGINE-UPGRADE-U3 stage 3: the facts block).
 
     // ---- Bone attachments: engine TAG POINTS (AVATAR_RIG_PERF_SPEC §4) ----
     /// Hangs `rider`'s node off `owner`'s bone, through an engine TagPoint whose
@@ -710,9 +710,9 @@ public:
     /// Re-writes the tag's local transform — the socket was edited.
     virtual bool setBoneAttachmentOffset(NodeId rider, const Vec3 &position,
                                          const Quat &rotation, const Vec3 &scale) = 0;
-    /// The owner this rider is attached to, or 0 — and the bone, through `bone`. STAYS A COUNTED GETTER (U3 stage 2):
-    /// the engine frees a tag by itself whenever the owner's skeleton is replaced — not the host's shadow.
-    virtual NodeId boneAttachment(NodeId rider, std::string *bone = nullptr) const = 0;
+    // The owner this rider is attached to, or 0 — and the bone, through `bone`. STAYS A COUNTED GETTER (U3 stage 2):
+    // the engine frees a tag by itself whenever the owner's skeleton is replaced — not the host's shadow.
+    // -> Scene::published().boneAttachmentOf(rider, &bone) (U3 stage 3: the rider's tag carries its owner and bone).
     /// A line list (pairs of points) or, with `strip`, a connected polyline.
     /// Attach with attachMesh like any mesh. One pixel wide.
     virtual MeshId      createLineMesh(const std::vector<Vec3> &points, bool strip) = 0;
@@ -1350,17 +1350,17 @@ public:
     /// Reflectors survive `setPlanarReflections` changes; the flag is remembered
     /// even while the budget is 0.
     virtual bool        setNodePlanarReflector(NodeId, bool) = 0;
-    /// Is the node an ARMED reflector? STAYS A COUNTED GETTER (U3 stage 2): the ENGINE decides it — a flag asked for
-    /// on a document node is measured at its landed pose in the drain (armDeferredReflectors) and refused when the
-    /// geometry is not plate-like — not the host's own shadow.
-    virtual bool        nodePlanarReflector(NodeId) const = 0;
+    // Is the node an ARMED reflector? STAYS A COUNTED GETTER (U3 stage 2): the ENGINE decides it — a flag asked for
+    // on a document node is measured at its landed pose in the drain (armDeferredReflectors) and refused when the
+    // geometry is not plate-like — not the host's own shadow.
+    // -> Scene::published().factsBlock().isPlanarReflector(node) (U3 stage 3).
     // How many reflection planes actually rendered last frame — the "achieved"
     // number against the requested budget (planes off screen do not render).
     // 0 when reflections are off or nothing has rendered yet.
     // -> Scene::published().activePlanarReflectors (U3 stage 2b).
-    /// Reflectors ARMED (an Ogre actor made) since the scene was created — a diagnostic counter of the engine's
-    /// (engine.planar): an edit that does not move a mirror-relevant state re-arms nothing.
-    virtual unsigned    planarReflectorArms() const = 0;
+    // Reflectors ARMED (an Ogre actor made) since the scene was created — a diagnostic counter of the engine's
+    // (engine.planar): an edit that does not move a mirror-relevant state re-arms nothing.
+    // -> Scene::published().factsBlock().reflectorArms (U3 stage 3).
 
     // ---- Hardware ray tracing (owner, 2026-09-15; ledger §425) -----------
     /// WHAT THE SCENE WAS AUTHORED FOR (RayTracingMode). Scene-level, like GI

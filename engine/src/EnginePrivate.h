@@ -3959,13 +3959,13 @@ public:
                            size_t blendToRigCount) override;
     bool followSkeleton(NodeId follower, NodeId source) override;
     bool shareSkeleton(NodeId follower, NodeId source) override;
-    bool sharesSkeleton(NodeId id) const override;
+    bool sharesSkeleton(NodeId id) const;
     bool attachToBone(NodeId rider, NodeId owner, const std::string &bone,
                       const Vec3 &position, const Quat &rotation, const Vec3 &scale) override;
     bool detachFromBone(NodeId rider, NodeId parent) override;
     bool setBoneAttachmentOffset(NodeId rider, const Vec3 &position, const Quat &rotation,
                                  const Vec3 &scale) override;
-    NodeId boneAttachment(NodeId rider, std::string *bone = nullptr) const override;
+    NodeId boneAttachment(NodeId rider, std::string *bone = nullptr) const;
     /// Copies every follower's pose from its source. Once per rendered frame,
     /// AFTER the frame, so the poses copied are the ones just drawn.
     void applySkeletonFollowers();
@@ -3981,7 +3981,8 @@ public:
 
     // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC; impl in OgreClips.cpp) ----
     bool attachClips(NodeId id, const ClipDesc *clips, size_t count) override;
-    std::vector<std::string> clipNames(NodeId id) const override;
+    std::vector<std::string> clipNames(NodeId id) const;
+    std::vector<PublishedFrame::Facts::Clip> clipFacts(NodeId id) const;   ///< the facts block's clips (S16-checked)
     bool setClipStates(NodeId id, const ClipState *states, size_t count) override;
     bool setBoneManual(NodeId id, const std::string &bone, bool manual) override;
     bool bonePoses(NodeId id, BonePose *out, size_t count) const override;
@@ -4277,9 +4278,9 @@ public:
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md; impl OgrePlanar.cpp) ----
     bool setPlanarReflections(const PlanarReflectionParams &p) override;
     bool setNodePlanarReflector(NodeId id, bool on) override;
-    bool nodePlanarReflector(NodeId id) const override;
+    bool nodePlanarReflector(NodeId id) const;
     int  activePlanarReflectors() const;
-    unsigned planarReflectorArms() const override { JAH_SYNC_GETTER("Scene::planarReflectorArms"); return mPlanarArms; }
+    unsigned planarReflectorArms() const { return mPlanarArms; }
     unsigned mPlanarArms = 0;   ///< armReflector's actors made (a diagnostic)
 
     // ---- Hardware ray tracing, per scene (ledger §425; impl OgreScene.cpp) ----
@@ -4507,6 +4508,7 @@ private:
         struct Counted {
             bool movable = false, movableItem = false, movableLight = false, rigged = false, shared = false;
             bool particle = false;   ///< carries a particle system (PublishedFrame::particles lists it)
+            NodeId shareSource = 0;  ///< the node whose skeleton it renders from (the facts block's shares)
             const Ogre::SkeletonInstance *skel = nullptr;
             size_t streamed = 0;
         } counted;
@@ -6189,6 +6191,11 @@ private:
     /// bones each rigged node streams.
     std::set<NodeId>            mParticleNodeIds;
     std::map<NodeId, size_t>    mStreamedByNode;
+    std::map<NodeId, NodeId>    mShareSources;   ///< follower -> source, kept by applyCounted
+    /// THE FACTS BLOCK (U3 stage 3, decision 13): rebuilt at the publish only when a mutation site raised the flag.
+    bool                                        mFactsDirty = true;
+    std::shared_ptr<const PublishedFrame::Facts> mFacts;
+    void rebuildFacts();
     /// Re-derives one node's contribution after a mutation of its movable flag, Item, light, particles, billboards or
     /// share (recountNode), or takes it out (uncountNode: the node is leaving).
     void recountNode(Node &n);

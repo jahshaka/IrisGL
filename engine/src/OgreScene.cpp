@@ -634,6 +634,9 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     for (NodeId id : mParticleNodeIds) back.particles.push_back({id, size_t(particleCount(id))});
     back.streamedBones.clear();
     for (const auto &kv : mStreamedByNode) back.streamedBones.push_back({kv.first, kv.second});
+    // THE FACTS (U3 stage 3): the same block every frame until a mutation site says a fact moved.
+    if (mFactsDirty || !mFacts || mFacts->reflectorArms != mPlanarArms) rebuildFacts();
+    back.facts = mFacts;
     back.atomViewPaintable = atomViewPaintable();
     for (int v = 0; v < kPhotonViewCount; ++v)
         back.photonViewRefusals[v] = v == 0 ? std::string() : photonViewRefusal(static_cast<PhotonView>(v));
@@ -668,6 +671,8 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
         const Ogre::TagPoint *tag = rec->boneTag;
         PublishedFrame::RiderTag t;
         t.rider = id;
+        t.owner = rec->boneOwner;
+        t.bone = rec->boneName;
         const Ogre::Vector3 p = tag->_getDerivedPosition(), sc = tag->_getDerivedScale();
         const Ogre::Quaternion q = tag->_getDerivedOrientation();
         t.position = Vec3(p.x, p.y, p.z);
@@ -1320,6 +1325,11 @@ void OgreScene::applyCounted(Node &n, const Node::Counted &now) {
     if (was.particle != now.particle) {
         if (now.particle) mParticleNodeIds.insert(n.selfId); else mParticleNodeIds.erase(n.selfId);
     }
+    if (was.shareSource != now.shareSource) {
+        if (now.shareSource) mShareSources[n.selfId] = now.shareSource; else mShareSources.erase(n.selfId);
+        mFactsDirty = true;
+    }
+    if (was.skel != now.skel) mFactsDirty = true;   // a replaced instance drops its clips (the facts' clips)
     if (was.streamed != now.streamed) {
         if (now.streamed) mStreamedByNode[n.selfId] = now.streamed; else mStreamedByNode.erase(n.selfId);
     }
@@ -1341,10 +1351,36 @@ void OgreScene::recountNode(Node &n) {
     now.shared = now.rigged && n.shareSource != 0;
     now.streamed = now.rigged ? streamedBonesOf(n) : 0;
     now.particle = n.particleDef != nullptr;
+    now.shareSource = now.rigged ? n.shareSource : 0;
     applyCounted(n, now);
 }
 
 void OgreScene::uncountNode(Node &n) { applyCounted(n, Node::Counted()); }
+
+// THE FACTS BLOCK (ENGINE-UPGRADE-U3 stage 3, decision 13): the shares (applyCounted keeps the map), the flagged
+// reflectors (armed or waiting for the arm), the actors made, and every node's clips by content id and engine name —
+// a fresh block, so a frame that published the previous one keeps it whole.
+void OgreScene::rebuildFacts() {
+    auto f = std::make_shared<PublishedFrame::Facts>();
+    for (const auto &kv : mShareSources) f->shares.push_back({kv.first, kv.second});
+    std::vector<NodeId> refl(mReflectors.begin(), mReflectors.end());
+    for (NodeId id : mReflectorsToArm) refl.push_back(id);
+    std::sort(refl.begin(), refl.end());
+    refl.erase(std::unique(refl.begin(), refl.end()), refl.end());
+    f->reflectors = std::move(refl);
+    f->reflectorArms = mPlanarArms;
+    std::vector<NodeId> clipNodes;
+    for (const auto &kv : mClips) clipNodes.push_back(kv.first);
+    std::sort(clipNodes.begin(), clipNodes.end());
+    for (NodeId id : clipNodes) {
+        PublishedFrame::Facts::NodeClips nc;
+        nc.node = id;
+        nc.clips = clipFacts(id);
+        if (!nc.clips.empty()) f->clips.push_back(std::move(nc));
+    }
+    mFacts = std::move(f);
+    mFactsDirty = false;
+}
 
 void OgreScene::setNodeLightMask(NodeId id, unsigned mask) {
     auto it = mNodes.find(id);
@@ -1880,9 +1916,12 @@ void OgreScene::destroy() {
         mSkeletonRefs.clear();
         mParticleNodeIds.clear();
         mStreamedByNode.clear();
+        mShareSources.clear();
+        mFactsDirty = true;
         mNodeByOgreId.clear();
         mBoneRiderIds.clear();
         mReflectorsToArm.clear();
+        mFactsDirty = true;
         mPublished[0] = PublishedFrame();
         mPublished[1] = PublishedFrame();
         mPublishedIdx.store(0, std::memory_order_release);
@@ -2055,6 +2094,7 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     disarmReflector(id, n);
     mReflectors.erase(id);
     mReflectorsToArm.erase(std::remove(mReflectorsToArm.begin(), mReflectorsToArm.end(), id), mReflectorsToArm.end());
+    mFactsDirty = true;   // a released node leaves the facts (U3 stage 3)
     // The GI side is told about the box the node occupied BEFORE the Item dies (its world AABB is read here).
     // invalidateGiCaches frees nothing: it notes the box for the cascades now and requests the cache
     // invalidation — at once, or once at the end of an open Scene::beginStructureEdit (the mirror's sync).

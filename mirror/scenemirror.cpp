@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include <QSet>
+#include <set>
 
 #include "irisgl/document/scenegraph/nodegraph.h"
 #include "irisgl/document/scenegraph/scene.h"
@@ -3514,6 +3515,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                         e.boneCount = rig.bones.size();
                         e.rigId = rig.id;
                         e.clipSignature = 0;         // force a clip re-attach
+                        e.engineClipsFresh = true;   // a new instance: it carries no clips
                         e.shareEligibleValid = false;   // ...and re-decide sharing (rigId moved)
                     }
                 }
@@ -6156,7 +6158,13 @@ void SceneMirror::attachClipsFor(Entry &e)
     QVector<QPair<const iris::Animation *, QString>> pushed;   // (animation, clip id), in push order
     descs.reserve(size_t(clips.size()));
     QVector<iris::ExtractedClip> extracted(clips.size());
-    const std::vector<std::string> before = mTarget->clipNames(e.node);
+    // WHAT THE ENGINE CARRIES NOW (ENGINE-UPGRADE-U3 stage 3, the facts block): the last frame's clips on this node —
+    // or none, when this sync itself replaced the node's skeleton instance (a fresh instance carries no clips; the
+    // facts learn it only at the next frame's close).
+    std::vector<jahshaka::engine::PublishedFrame::Facts::Clip> carried;
+    if (!e.engineClipsFresh)
+        if (const auto *c = mTarget->published().factsBlock().clipsOf(e.node)) carried = *c;
+    e.engineClipsFresh = false;
     for (int i = 0; i < clips.size(); ++i) {
         QString err;
         if (!iris::ClipExtractor::extract(host->sharedFromThis(), e.docNode->sharedFromThis(),
@@ -6206,13 +6214,20 @@ void SceneMirror::attachClipsFor(Entry &e)
     // Whatever the engine appended, in the order it was pushed, is the mapping
     // for the clips that were NOT already there. Names it already knew keep
     // their existing mapping.
+    // ...named by the engine's own rule (clipNameFor), so the names are known the moment the clips are pushed: a
+    // content id the node already carries is skipped (attachClips is idempotent per id), every other one takes
+    // the next index and a name no clip of the node has.
     QStringList added;
     {
-        QSet<QString> had;
-        for (const auto &n : before) had.insert(QString::fromStdString(n));
-        for (const auto &n : mTarget->clipNames(e.node)) {
-            const QString name = QString::fromStdString(n);
-            if (!had.contains(name)) added.append(name);
+        std::set<std::string> ids, taken;
+        for (const auto &c : carried) { ids.insert(c.id); taken.insert(c.name); }
+        size_t index = carried.size();
+        for (const auto &d : descs) {
+            if (!ids.insert(d.id).second) continue;
+            const std::string name = jahshaka::engine::clipNameFor(
+                d.name, index++, [&](const std::string &n) { return taken.count(n) != 0; });
+            taken.insert(name);
+            added.append(QString::fromStdString(name));
         }
     }
     // Names appear in the engine's list once per DISTINCT content id, in push
@@ -6543,7 +6558,7 @@ int SceneMirror::reconcileSockets()
             // latch would then believe in an attachment that no longer exists.
             std::string actualBone;
             const jahshaka::engine::NodeId actualOwner =
-                mTarget->boneAttachment(riderId, &actualBone);
+                mTarget->published().boneAttachmentOf(riderId, &actualBone);   // the last frame's tag (U3 stage 3)
             const bool armed = actualOwner == ownerId &&
                                actualBone == socket->boneName.toStdString();
             RiderState &state = riderState(rider);
@@ -6778,10 +6793,11 @@ void SceneMirror::syncSkeletonSharing()
         }
         // A master that is itself sharing (its geometry changed and the group
         // re-formed around it) has to be freed first — sharing is not chained.
-        if (mTarget->sharesSkeleton(master->node)) {
+        if (mTarget->published().factsBlock().sharesSkeleton(master->node)) {   // the facts (U3 stage 3)
             mTarget->shareSkeleton(master->node, 0);
             master->shareMaster = 0;
             master->clipSignature = 0;          // it owns its clips again
+            master->engineClipsFresh = true;
             master->lastClipPush.clear();
         }
         // THE WORLD COMPARISONS, ONLY WHEN A WORLD CAN HAVE MOVED. Eligibility
@@ -6805,7 +6821,7 @@ void SceneMirror::syncSkeletonSharing()
                 e->shareEligibleValid = true;
             }
             const bool eligible = e->shareEligible;
-            const bool shared = mTarget->sharesSkeleton(e->node);
+            const bool shared = mTarget->published().factsBlock().sharesSkeleton(e->node);
             if (eligible && (!shared || e->shareMaster != master->node)) {
                 if (mTarget->shareSkeleton(e->node, master->node)) {
                     e->shareMaster = master->node;
@@ -6813,6 +6829,7 @@ void SceneMirror::syncSkeletonSharing()
                     // instance goes): forget what we think it has, so that if it
                     // ever un-shares the clip pass re-attaches from scratch.
                     e->clipSignature = 0;
+                    e->engineClipsFresh = true;
                     e->clipMap.clear();
                     e->clipIdMap.clear();
                     e->clipNameMap.clear();
@@ -6824,6 +6841,7 @@ void SceneMirror::syncSkeletonSharing()
                 mTarget->shareSkeleton(e->node, 0);
                 e->shareMaster = 0;
                 e->clipSignature = 0;           // it needs its own clips again
+                e->engineClipsFresh = true;
                 e->clipMap.clear();
                 e->clipIdMap.clear();
                 e->clipNameMap.clear();

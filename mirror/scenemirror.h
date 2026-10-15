@@ -1032,6 +1032,9 @@ private:
         /// compare against last frame's (MIRROR_SCALE lane). 0 = "no clips
         /// attached", which is what the re-attach sites write.
         quint64 clipSignature = 0;
+        /// This sync replaced the node's skeleton instance (a bind, a share made or dropped): the engine carries no
+        /// clips on it, whatever the last frame's facts say (ENGINE-UPGRADE-U3 stage 3).
+        bool engineClipsFresh = false;
         /// Document clip -> its content id -> the name the engine gave it.
         ///
         /// Two hops because attachClips is IDEMPOTENT PER CONTENT ID and clips

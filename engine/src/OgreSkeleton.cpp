@@ -618,7 +618,6 @@ bool OgreScene::shareSkeleton(NodeId followerId, NodeId sourceId) {
 }
 
 bool OgreScene::sharesSkeleton(NodeId id) const {
-    JAH_SYNC_GETTER("Scene::sharesSkeleton");
     auto it = mNodes.find(id);
     return it != mNodes.end() && it->second.shareSource != 0;
 }

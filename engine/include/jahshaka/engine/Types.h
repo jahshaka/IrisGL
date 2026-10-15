@@ -6,6 +6,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -8004,6 +8005,20 @@ struct FrameInputStatus {
     double             drainMicros = 0.0;       ///< what the LAST drain cost (the record's own overhead)
 };
 
+/// THE ENGINE'S NAME FOR AN ATTACHED CLIP (ENGINE-UPGRADE-U3 stage 3) — the ONE rule, used by the engine when it
+/// attaches (Scene::attachClips) and by a host that must know the name the moment it pushes (the record lands a frame
+/// later): the clip's own name, or "clip<index>" (its index on the node) when it has none, uniquified against the
+/// names the node already carries with " 2", " 3", … (Ogre's skeleton finds a clip by name, the first match).
+template <class Taken>
+std::string clipNameFor(const std::string &descName, size_t index, Taken &&taken)
+{
+    std::string name = descName.empty() ? ("clip" + std::to_string(index)) : descName;
+    const std::string base = name;
+    int suffix = 2;
+    while (taken(name)) name = base + " " + std::to_string(suffix++);
+    return name;
+}
+
 /// WHAT THE TABLES HOLD AND WHAT KEEPING THEM COSTS. Every count is cumulative
 /// over the scene's life except `lastDirty` / `lastCopyMs`, which are the last
 /// update's.
@@ -8054,11 +8069,67 @@ struct PublishedFrame {
         Vec3   position;
         Quat   rotation;
         Vec3   scale = Vec3(1.0f, 1.0f, 1.0f);
+        /// WHO THE RIDER IS TAGGED TO (ENGINE-UPGRADE-U3 stage 3, the facts): the owner node and the bone — the engine
+        /// frees a tag by itself when the owner's skeleton is replaced, so a host's guard reads this, never a latch.
+        NodeId      owner = 0;
+        std::string bone;
     };
     unsigned long long   frame = 0;     ///< the engine frame it was published at (0 = never drawn)
     /// The record the frame applied (FrameInput::serial; an empty hand-over carries the last) — ENGINE-UPGRADE-U3.
     unsigned long long   serial = 0;
     std::vector<RiderTag> riderTags;
+    /// The rider's owner as the frame drew it (0 = no tag), and its bone into `bone` when given.
+    NodeId boneAttachmentOf(NodeId rider, std::string *bone = nullptr) const {
+        for (const RiderTag &t : riderTags)
+            if (t.rider == rider) { if (bone) *bone = t.bone; return t.owner; }
+        return 0;
+    }
+    /// THE ENGINE-MUTATED FACTS (ENGINE-UPGRADE-U3 stage 3, decision 13): what the engine itself changes under a
+    /// host — a skeleton share (dropped when an instance is replaced), the planar reflectors flagged (armed or waiting
+    /// for the arm), the reflector actors made, the clips each rigged node carries by content id and engine name. ONE
+    /// block, rebuilt only on the frame a fact changed; every other frame shares the same block (`facts` is the
+    /// same pointer), so a host compares pointers to learn "nothing moved".
+    struct Facts {
+        struct Share {
+            NodeId follower = 0;
+            NodeId source = 0;
+        };
+        std::vector<Share> shares;            ///< by follower id
+        std::vector<NodeId> reflectors;       ///< flagged planar reflectors, by id
+        unsigned reflectorArms = 0;           ///< reflector actors armed since the scene was made (a diagnostic)
+        struct Clip {
+            std::string id;                   ///< the host's content id (ClipDesc::id)
+            std::string name;                 ///< the engine's name for it (clipNameFor)
+        };
+        struct NodeClips {
+            NodeId node = 0;
+            std::vector<Clip> clips;          ///< in attach order
+        };
+        std::vector<NodeClips> clips;         ///< by node id
+        NodeId shareSourceOf(NodeId follower) const {
+            for (const Share &s : shares) if (s.follower == follower) return s.source;
+            return 0;
+        }
+        bool sharesSkeleton(NodeId id) const { return shareSourceOf(id) != 0; }
+        bool isPlanarReflector(NodeId id) const {
+            for (NodeId r : reflectors) if (r == id) return true;
+            return false;
+        }
+        const std::vector<Clip> *clipsOf(NodeId id) const {
+            for (const NodeClips &c : clips) if (c.node == id) return &c.clips;
+            return nullptr;
+        }
+        std::vector<std::string> clipNamesOf(NodeId id) const {
+            std::vector<std::string> out;
+            if (const std::vector<Clip> *c = clipsOf(id)) for (const Clip &k : *c) out.push_back(k.name);
+            return out;
+        }
+    };
+    std::shared_ptr<const Facts> facts;
+    const Facts &factsBlock() const {
+        static const Facts kNone;
+        return facts ? *facts : kNone;
+    }
     /// THE SCENE'S GI MACHINE as the frame closed it (Scene::giStatus at the close; U3 stage 1 — the readers move to
     /// it in stage 2).
     GiStatus             gi;
