@@ -517,7 +517,7 @@ void OgreView::syncPip() {
         // (spike T2).
         if (mPipWorkspace) { cm->removeWorkspace(mPipWorkspace); mPipWorkspace = nullptr; }
         mPipWorkspace = cm->addWorkspace(
-            mScene->sceneManager(), target(), mPipCamera, mPipWorkspaceDef, mEnabled,
+            mScene->sceneManager(), target(), mPipCamera, mPipWorkspaceDef, drawing(),
             /*position*/ -1, /*uavBuffers*/ nullptr, /*initialLayouts*/ nullptr,
             /*vpOffsetScale*/ Ogre::Vector4(mPip.left, mPip.top, mPip.width, mPip.height),
             // 0x00 IS THE DEFAULT AND IT SILENTLY DISABLES THE MODIFIER — the
@@ -989,7 +989,7 @@ bool OgreView::attachWorkspace() {
         Ogre::TextureGpu *t = target();
         if (!t) return false;
         mWorkspace = mRoot->getCompositorManager2()->addWorkspace(
-            mScene->sceneManager(), t, mCamera, mWorkspaceDef, mEnabled);
+            mScene->sceneManager(), t, mCamera, mWorkspaceDef, drawing());
         if (!mWorkspace) return false;
         // ASYNC-SHADERS-1: the view's compile mode rides every rebuild of its chain.
         mWorkspace->setAsyncShaderCompile(mAsyncShaders);
@@ -1133,7 +1133,7 @@ bool OgreView::attachBlankWorkspace() {
         chain::buildBlank(mRoot->getCompositorManager2(), mBlankWorkspaceDef, mBackground,
                           overlaysAllowed(), chainDesc().displayEncode, mBlankNodeDefs);
         mBlankWorkspace = mRoot->getCompositorManager2()->addWorkspace(
-            sm, t, mBlankCamera, mBlankWorkspaceDef, mEnabled);
+            sm, t, mBlankCamera, mBlankWorkspaceDef, drawing());
         // THE SCENE-LESS FRAME COMPILES LIKE THE VIEW (ASYNC-SHADERS-1): its overlay pass drew
         // the HUD's unlit fill and font with a blocking compile while the view was between
         // scenes in an asynchronous session (measured: 'Jahshaka/OverlayFill', 'Fonts/DebugFont'
@@ -1174,7 +1174,7 @@ void OgreView::syncGlobalsListener() {
     // did not opt in, so anyEffect() is false there and no listener is ever
     // created — a thumbnail cannot be reached by this mechanism even in
     // principle.
-    const bool wanted = mEnabled && mScene && mCamera && chainDesc().anyEffect();
+    const bool wanted = drawing() && mScene && mCamera && chainDesc().anyEffect();
     if (!wanted) {
         if (mGlobalsListener) {
             removeWorkspaceListener(mGlobalsListener.get());
@@ -1224,13 +1224,13 @@ void OgreView::notePresented() {
     // Deliberately conservative: a disabled view's workspace is skipped by the
     // compositor, and a view with no scene or no workspace draws nothing. Only
     // frames that really put this view's pixels on the target count.
-    if (mEnabled && mWorkspace && mScene) { ++mFramesPresented; ++mWorkspaceFramesPresented; }
+    if (drawing() && mWorkspace && mScene) { ++mFramesPresented; ++mWorkspaceFramesPresented; }
     // ...and the other half (View::blankFramesPresented): the frames this view
     // put on screen with NO scene bound — its background and the HUD over it.
     // Counted separately and never reset, because it answers a different
     // question: not "are there pixels of THIS world yet" but "did the teardown
     // reach the screen at all".
-    else if (mEnabled && mBlankWorkspace && !mScene) ++mBlankFramesPresented;
+    else if (drawing() && mBlankWorkspace && !mScene) ++mBlankFramesPresented;
 }
 
 unsigned long long OgreView::blankFramesPresented() const { JAH_SYNC_GETTER("View::blankFramesPresented"); return mBlankFramesPresented; }
@@ -1426,6 +1426,21 @@ void OgreView::setEnabled(bool on) { mPushedEnabled = on; applyEnabled(on); }
 
 void OgreView::applyEnabled(bool on) {
     mEnabled = on;
+    applyWorkspacesEnabled();
+}
+
+// THE VR SESSION PAINTS THE HEADSET'S EYE OVER THIS VIEW (ENGINE-UPGRADE-U3 stage 2 read F2): the view's own
+// workspaces stop drawing while the session's mirror covers it — render-side state, never the host's record of its
+// enable (View::pushedEnabled): the host's wish and the session's cover combine, and the cover going away gives back
+// exactly what the host asked for.
+void OgreView::setSessionCovers(bool covers) {
+    if (covers == mSessionCovers) return;
+    mSessionCovers = covers;
+    applyWorkspacesEnabled();
+}
+
+void OgreView::applyWorkspacesEnabled() {
+    const bool on = drawing();
     JAH_TRY {
         if (mWorkspace) mWorkspace->setEnabled(on);
         // ...and so does the clear-only one: a hidden viewport must not clear
@@ -1546,7 +1561,7 @@ Ogre::CompositorShadowNode *OgreView::shadowNodeInstance() const {
     return mWorkspace->findShadowNode(Ogre::IdString(kShadowNodeName));
 }
 
-bool OgreView::isEnabled() const { return mEnabled; }
+bool OgreView::isEnabled() const { return drawing(); }   // what draws (the host's wish and the session's cover)
 
 // The ACHIEVED size, exactly like sampleCount() reports the achieved sample
 // count: what the render target really is, not what the host asked for. For an
@@ -1883,12 +1898,12 @@ static Ogre::Vector3 cameraWorldPosition(Ogre::Camera *cam) {
 }
 
 void OgreView::updateParticles() {
-    if (mEnabled && mScene && mCamera)
+    if (drawing() && mScene && mCamera)
         mScene->sceneManager()->getParticleSystemManager2()->setCameraPosition(cameraWorldPosition(mCamera));
 }
 
 void OgreView::updateGi() {
-    if (mEnabled && mScene && mCamera) {
+    if (drawing() && mScene && mCamera) {
         mScene->updateGiTracking(cameraWorldPosition(mCamera), mStereo);
         // The Forward+ depth-slice range follows the same camera, from the same
         // once-a-frame hook (LIGHTING_FIX fix 8). The scene does the rate
@@ -1981,7 +1996,7 @@ bool OgreView::warmUpShaders() {
         const bool usesPass = chain::warmUpUsesPass(mRoot->getCompositorManager2(), refNode);
         const bool wasEnabled = mEnabled;
         const bool wantEnabled = !usesPass;
-        if (wasEnabled != wantEnabled) setEnabled(wantEnabled);
+        if (wasEnabled != wantEnabled) applyEnabled(wantEnabled);   // the engine's own toggle: never pushedEnabled
         // THE SCREEN DECODE IS WARMED WITH THE REST (ATOM S3-DRAW): its twins' draws
         // are hidden outside the passes the id pass stands in for, so for this one
         // frame they are shown against the stand-in source.
@@ -2043,10 +2058,10 @@ bool OgreView::warmUpShaders() {
                 }
             }
             atom->armForWarmUp(mScene->sceneManager(), true);
-            ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mName) && ok;
+            ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mIdentityName) && ok;
             atom->armForWarmUp(mScene->sceneManager(), false);
         }
-        if (wasEnabled != wantEnabled) setEnabled(wasEnabled);
+        if (wasEnabled != wantEnabled) applyEnabled(wasEnabled);
         return ok;
     } JAH_CATCH(mError, false);
 }
@@ -2308,7 +2323,7 @@ void OgreView::beginFrameCapture() {
     if (mCaptureState != FrameCaptureState::Armed && mCaptureState != FrameCaptureState::InFlight &&
         mCaptureState != FrameCaptureState::Ready)
         destroyCaptureWorkspace();
-    mCaptureThisFrame = mCaptureState == FrameCaptureState::Armed && mEnabled && mWorkspace &&
+    mCaptureThisFrame = mCaptureState == FrameCaptureState::Armed && drawing() && mWorkspace &&
                         mScene && mCamera;
     // The listener rides only while something is armed — removed here, between
     // frames, never from inside the workspace's own listener walk.

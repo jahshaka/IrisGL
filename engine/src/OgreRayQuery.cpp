@@ -7908,7 +7908,7 @@ void OgreView::syncReflectListener() {
     // the gather on and SSR off would build the prepass and nothing would ever
     // run in front of it.
     const ChainDesc shape = chainDesc();
-    const bool wanted = mEnabled && mScene && mCamera && mEngine && mEngine->mRayTier != nullptr &&
+    const bool wanted = drawing() && mScene && mCamera && mEngine && mEngine->mRayTier != nullptr &&
                         (shape.rayReflect || shape.probeGather || shape.sunContact);
     if (!wanted) {
         if (mReflectListener) {

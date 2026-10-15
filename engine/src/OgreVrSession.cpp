@@ -3726,7 +3726,9 @@ void VrSession::setDesktopShowsEye(bool eye) {
     const bool off = want && mMirrorWorkspace != nullptr && mMirrorWorkspace->getEnabled();
     if (off == mDesktopViewOff) return;
     mDesktopViewOff = off;
-    mMirrorView->setEnabled(!off);
+    // RENDER-SIDE ONLY (ENGINE-UPGRADE-U3 stage 2 read F2): the session covers the desktop view's own picture; the
+    // host's record of its enable is the host's (the fact "the desktop shows the eye" is VrStatus::mirrorShowing).
+    mMirrorView->setSessionCovers(off);
     vrLog("the desktop now shows %s", off ? "the headset's eye" : "its own camera");
 }
 

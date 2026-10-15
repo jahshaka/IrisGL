@@ -6383,6 +6383,12 @@ public:
     void setCamera(const CameraDesc &c) override;
     void setEnabled(bool on) override;
     void applyEnabled(bool on);       ///< the engine's own: the drain, the VR session's views
+    /// The VR session's eye mirror covers this view (VrSession::setDesktopShowsEye; U3 read F2).
+    void setSessionCovers(bool covers);
+    void applyWorkspacesEnabled();
+    bool mSessionCovers = false;
+    /// WHAT DRAWS: the host's wish (mEnabled) AND no session cover — every "does this view draw" site reads this.
+    bool drawing() const { return mEnabled && !mSessionCovers; }
     Colour background() const override;
     bool shadows() const override;
     void setShadows(bool on) override;

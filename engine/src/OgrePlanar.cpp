@@ -569,7 +569,7 @@ void OgreScene::applyPendingPlanar() {
 // ---------------------------------------------------------------------------
 void OgreView::syncPlanarListener() {
     Ogre::PlanarReflections *pr = mScene ? mScene->planarReflections() : nullptr;
-    if (!pr || !mCamera || !mEnabled) {
+    if (!pr || !mCamera || !drawing()) {
         if (mPlanarListener) {
             removeWorkspaceListener(mPlanarListener.get());
             mPlanarListener.reset();
