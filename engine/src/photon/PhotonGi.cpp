@@ -231,7 +231,13 @@ bool PhotonComponent::gatherAndBuild(detail::VoxelFeed &feed, Ogre::PhotonVoxeli
     // commit takes the next copy) and the inputs the last graphics region prepared. THE RING'S
     // DEPTH COVERS IT: a copy is rewritten only by the commit `tableCopies()` frames later, after the
     // graphics fence of this frame (which, on the async arm, also proves this frame's compute: the
-    // frame end waits C) has been waited by the ring.
+    // frame end waits C) has been waited by the ring. The assert is a TAUTOLOGY today
+    // (GpuScene::createTables makes exactly framesInFlight + 1 copies), kept as the ring's statement;
+    // the real dependency - the frame end's wait on C before a copy is reused - is stage 3's.
+    // NOT ALWAYS THE LAST FRAME'S (the stage-1 read): a GRAPHICS region earlier in this frame (the
+    // still frame's re-solve -> a graphics build -> ensureGpuScene) commits the table, and this
+    // region then reads THIS frame's copy - in order, harmless; on the async arm a graphics-N write
+    // the bracket reads, an input stage 3's beforeGiInputWrite must cover.
     else if (mScene.gpuScene().live()) {
         assert(mScene.gpuScene().tableCopies() >= mScene.gpuScene().framesInFlight() + 1u &&
                "the instance table's ring is shallower than the frames in flight + the one a frame writes");
@@ -4720,12 +4726,9 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
     for (size_t i = 0; i < mVctCascades.size(); ++i) {
         VctCascade &c = mVctCascades[i];
         if (!c.pending) continue;
-        // A MATERIAL REFRESH OWED (an edit of a voxel input) is graphics work the frame's graphics
-        // region does after this one (prepareGiInputs, ENGINE-UPGRADE-ASYNC-3): a re-voxelisation now
-        // would read the rows before the edit and leave the cascade clean. It waits one frame.
-        // ...AND AN EDIT IS VOXELISED ONCE THE TABLE CARRIES IT (editSince): not in the frame that first
+        // AN EDIT IS VOXELISED ONCE THE TABLE CARRIES IT (editSince): not in the frame that first
         // marked it - this frame's table is the last frame's commit.
-        if (spent || int(i) != w.rebuild || mVctMaterialRefreshOwed || c.editSince == giWriterFrame()) {
+        if (spent || int(i) != w.rebuild || c.editSince == giWriterFrame()) {
             ++mCascadeDeferrals;
             continue;
         }
@@ -4781,9 +4784,13 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         }
         c.failures = 0;
         if (c.jumped) { ++mCascadeFullRebuilds; c.jumped = false; }
-        if (c.editLast == giWriterFrame()) {
-            // AN EDIT OF THIS FRAME IS NOT IN THE TABLE THIS REBUILD READ: one more, next frame.
-            c.editSince = c.editLast;
+        if (c.editLast == giWriterFrame() || mVctMaterialRefreshOwed) {
+            // AN EDIT OF THIS FRAME IS NOT IN THE TABLE THIS REBUILD READ - nor, when a MATERIAL REFRESH
+            // is owed, in the store's rows (the frame's graphics region refreshes them after this one,
+            // prepareGiInputs): one more, next frame. (Never a hold of the rebuild itself: under a
+            // material slider every cascade would freeze - the stage-1 read's F3.)
+            c.editSince = giWriterFrame();
+            c.editLast = giWriterFrame();
         } else {
             c.pending = 0;
             c.pendingReason = GiStaleReason::Camera;
