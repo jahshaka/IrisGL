@@ -161,42 +161,42 @@ public:
     /// description does nothing; a disabled one hides the quad. False (see
     /// lastError()) when the grid material is not staged.
     virtual bool        setGrid(const GridDesc &) = 0;
-    /// THE SKY'S OWN AMBIENT, as the same 9x3 spherical harmonics setAmbientSh
-    /// takes, integrated from the sky the backend just drew (SKY-GPU).
-    ///
-    /// The backend captures whatever sky is bound into a small cubemap on the
-    /// GPU and integrates THAT — so a photograph, a gradient, a picked colour
-    /// and the analytic sky all answer the same question the same way, and no
-    /// host needs an image decoder, a scattering model or a sphere-integral of
-    /// its own. Returns false while no sky has been captured yet (no sky at
-    /// all, or the capture has not run: it happens inside the next rendered
-    /// frame, like the IBL convolution).
-    ///
-    /// THE ENVIRONMENT IS ONE SET (PHOTON-SKY-TRANSIENT-1): this answer, the
-    /// reflection cube every datablock samples and the Sky Light gain change
-    /// TOGETHER. A sky change keeps the previous set bound until the next
-    /// capture, its convolution and its SH have all landed, then swaps the cube
-    /// and these coefficients in one step — never a cube nothing has written,
-    /// never a cube of one sky with the SH of another; the scene's ambient is
-    /// set to this answer x the setEnvironmentLight gain in the same step. When that lands:
-    ///
-    ///   * A LONE sky change lands INSIDE the frame that captured it (the
-    ///     capture, the convolution and a synchronous SH read all run before
-    ///     that frame draws): its first frame already shows the whole new set.
-    ///   * A GESTURE — a second capture within a couple of drawn frames of the
-    ///     previous one, i.e. a sun being dragged — DEFERS its SH readback: the
-    ///     download is issued without a flush and read at the top of the NEXT
-    ///     frame, where the set lands; the previous set is drawn meanwhile. In
-    ///     exchange the capture frame does not block on the GPU (measured
-    ///     0.94 ms of flush and wait per change, i.e. per frame of a drag).
-    ///
-    /// UNSCALED: this is the sky's mean incident radiance (the ambient the
-    /// engine applies is this x the setEnvironmentLight gain). Read-only for a
-    /// host: a status readout, never a value to push back.
-    virtual bool        skyAmbientSh(float out[27]) const = 0;
-    /// THE CLOUD LAYER'S LIVE STATE (SkyDesc::clouds; CloudStatus says what each
-    /// field means). A scene that never enabled the layer answers "off".
-    virtual CloudStatus cloudStatus() const { return CloudStatus(); }
+    // THE SKY'S OWN AMBIENT, as the same 9x3 spherical harmonics setAmbientSh
+    // takes, integrated from the sky the backend just drew (SKY-GPU).
+    //
+    // The backend captures whatever sky is bound into a small cubemap on the
+    // GPU and integrates THAT — so a photograph, a gradient, a picked colour
+    // and the analytic sky all answer the same question the same way, and no
+    // host needs an image decoder, a scattering model or a sphere-integral of
+    // its own. Returns false while no sky has been captured yet (no sky at
+    // all, or the capture has not run: it happens inside the next rendered
+    // frame, like the IBL convolution).
+    //
+    // THE ENVIRONMENT IS ONE SET (PHOTON-SKY-TRANSIENT-1): this answer, the
+    // reflection cube every datablock samples and the Sky Light gain change
+    // TOGETHER. A sky change keeps the previous set bound until the next
+    // capture, its convolution and its SH have all landed, then swaps the cube
+    // and these coefficients in one step — never a cube nothing has written,
+    // never a cube of one sky with the SH of another; the scene's ambient is
+    // set to this answer x the setEnvironmentLight gain in the same step. When that lands:
+    //
+    //   * A LONE sky change lands INSIDE the frame that captured it (the
+    //     capture, the convolution and a synchronous SH read all run before
+    //     that frame draws): its first frame already shows the whole new set.
+    //   * A GESTURE — a second capture within a couple of drawn frames of the
+    //     previous one, i.e. a sun being dragged — DEFERS its SH readback: the
+    //     download is issued without a flush and read at the top of the NEXT
+    //     frame, where the set lands; the previous set is drawn meanwhile. In
+    //     exchange the capture frame does not block on the GPU (measured
+    //     0.94 ms of flush and wait per change, i.e. per frame of a drag).
+    //
+    // UNSCALED: this is the sky's mean incident radiance (the ambient the
+    // engine applies is this x the setEnvironmentLight gain). Read-only for a
+    // host: a status readout, never a value to push back.
+    // -> Scene::published().skyAmbientSh / skyAmbientShValid (ENGINE-UPGRADE-U3 stage 2b: the getter is deleted).
+    // THE CLOUD LAYER'S LIVE STATE (SkyDesc::clouds; CloudStatus says what each
+    // field means). A scene that never enabled the layer answers "off".
+    // -> Scene::published().clouds (U3 stage 2b).
     /// THE SKY AS A PICTURE (CLOUDS-2D-1's export bake): renders the bound sky
     /// AND its cloud layer — exactly what the environment capture renders — into
     /// a `faceSize`^2 cube and resamples it into a `width` x `height` lat-long
@@ -216,9 +216,9 @@ public:
     /// frame-time one. False with no layer drawn (or headless).
     virtual bool        cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres)
     { tau.clear(); size = 0; tileMetres = 0.0f; return false; }
-    /// THE ATMOSPHERE'S TABLES, counted (AtmosphereStatus). A scene without
-    /// the planet's atmosphere answers `on` false and zeros.
-    virtual AtmosphereStatus atmosphereStatus() const { return AtmosphereStatus(); }
+    // THE ATMOSPHERE'S TABLES, counted (AtmosphereStatus). A scene without
+    // the planet's atmosphere answers `on` false and zeros.
+    // -> Scene::published().atmosphereStatus (U3 stage 2b).
     /// THE MEASURING DOOR OF THE FOG ALONG A REFLECTION (PHOTON-I-1; a tool's A/B,
     /// never a mode, not saved): open (the default) the ray jobs and the screen
     /// reflection's resolve carry the fog law along a reflection's own path
@@ -467,21 +467,21 @@ public:
     /// when the node has no rig or `count` misses the rig's bone count.
     /// The read-back surface for the pose: what proves GPU and CPU skinning agree.
     virtual bool        boneMatrices(NodeId, float *out, size_t count) const = 0;
-    /// How many bone matrices HlmsPbs streams for this node PER PASS: the
-    /// length of the renderable's blend-index map, which is the whole rig while
-    /// the map is the identity and only the piece's own bones once it is
-    /// compacted (AVATAR_RIG_PERF_SPEC §1 row 4). 0 when the node has no rig.
-    ///
-    /// A read of the real Ogre state, not of our intent: the map IS what the
-    /// shader is handed, so a remap that silently failed to land reads as the
-    /// old number here.
-    virtual size_t      streamedBoneCount(NodeId) const = 0;
+    // How many bone matrices HlmsPbs streams for this node PER PASS: the
+    // length of the renderable's blend-index map, which is the whole rig while
+    // the map is the identity and only the piece's own bones once it is
+    // compacted (AVATAR_RIG_PERF_SPEC §1 row 4). 0 when the node has no rig.
+    //
+    // A read of the real Ogre state, not of our intent: the map IS what the
+    // shader is handed, so a remap that silently failed to land reads as the
+    // old number here.
+    // -> Scene::published().streamedBonesOf(node) (U3 stage 2b).
     /// What this scene's rigs cost right now (RigStats). The measurement
     /// surface the rig-perf bench and its gates read; cheap enough to call per
     /// frame, but nothing on the frame path calls it.
     virtual RigStats    rigStats() const = 0;
-    /// What this scene's structural edits cost so far, in counts (SceneChangeStats).
-    virtual SceneChangeStats changeStats() const = 0;
+    // What this scene's structural edits cost so far, in counts (SceneChangeStats).
+    // -> Scene::published().changes (U3 stage 2b).
     /// ONE STRUCTURAL EDIT, MANY NODES (ENGINE-UPGRADE-1 stage 2). Between begin and end (nestable) the
     /// GI side of every node removed, attached or re-meshed is COLLECTED: the cascades still get each
     /// changed box, but the caches are invalidated and a staged probe build rewound ONCE, at end — so a
@@ -762,14 +762,14 @@ public:
     /// KEPT as the explicit counterpart of setParticleSystem: a node may stop
     /// being an emitter without being removed. Live particles vanish with it.
     virtual bool removeParticleSystem(NodeId) = 0;
-    /// How many particles are currently alive in the node's system, for tests and
-    /// the properties panel. 0 when the node has no system. SIMD-rounded up.
-    virtual unsigned particleCount(NodeId) const = 0;
-    /// DIAGNOSTIC: how many particle definitions this Scene has ever created.
-    /// Definitions cannot be destroyed before the Scene is, so this number never
-    /// falls — it is the leak the recycling pool exists to bound, and the
-    /// particle suites assert on it. Never call it from UI code.
-    virtual unsigned particleDefinitionsCreated() const = 0;
+    // How many particles are currently alive in the node's system, for tests and
+    // the properties panel. 0 when the node has no system. SIMD-rounded up.
+    // -> Scene::published().particlesOf(node) (U3 stage 2b).
+    // DIAGNOSTIC: how many particle definitions this Scene has ever created.
+    // Definitions cannot be destroyed before the Scene is, so this number never
+    // falls — it is the leak the recycling pool exists to bound, and the
+    // particle suites assert on it. Never call it from UI code.
+    // -> Scene::published().particleDefinitionsCreated (U3 stage 2b).
 
     // ---- Lights (step 5): a node may carry one light. Directional and spot lights
     // shine down the node's -Y (the document's convention: identity = straight down).
@@ -777,12 +777,12 @@ public:
     /// KEPT as the explicit counterpart of setLight: a node may stop being a light
     /// without being removed (the document changes a node's type in place).
     virtual bool        removeLight(NodeId) = 0;
-    /// THE LIGHT SERIAL: every light write through this interface advances it, and so does a frame whose ChangeSet
-    /// moved a light (U0 3b — a lamp dragged, carried by a parent or animated writes no light verb at all; the
-    /// mirror's set names the written node and the drain finds the light under it). Monotonic, only ever compared
-    /// for equality; what the voxel light injection keys "have the lights changed since I injected?" on.
-    /// DIAGNOSTIC — the suites assert that a lamp that moved advanced it.
-    virtual unsigned long long lightWriteSerial() const = 0;
+    // THE LIGHT SERIAL: every light write through this interface advances it, and so does a frame whose ChangeSet
+    // moved a light (U0 3b — a lamp dragged, carried by a parent or animated writes no light verb at all; the
+    // mirror's set names the written node and the drain finds the light under it). Monotonic, only ever compared
+    // for equality; what the voxel light injection keys "have the lights changed since I injected?" on.
+    // DIAGNOSTIC — the suites assert that a lamp that moved advanced it.
+    // -> Scene::published().lightWriteSerial (U3 stage 2b).
 
     // ---- Decals (DECALS_SPEC.md): a node may carry one projected-texture decal.
     // A decal is an oriented box that overwrites base colour / roughness /
@@ -812,10 +812,10 @@ public:
     /// silent fallback: an overflowing decal would sample another decal's image
     /// with no warning at all.
     virtual TextureId   loadDecalTexture(const std::string &path, DecalMap kind) = 0;
-    /// How many slices the `kind` atlas has, and how many are already taken.
-    /// The UI surfaces "decal image budget full" from this rather than guessing.
-    virtual unsigned    decalAtlasCapacity(DecalMap kind) const = 0;
-    virtual unsigned    decalAtlasUsed(DecalMap kind) const = 0;
+    // How many slices the `kind` atlas has, and how many are already taken.
+    // The UI surfaces "decal image budget full" from this rather than guessing.
+    // -> Scene::published().decalAtlasCapacity / decalAtlasUsed[kind] (U3 stage 2b).
+    // (the used slices: Scene::published().decalAtlasUsed[DecalMap])
 
     // ---- Global illumination (GI_SPEC.md). Scene-level, like fog and sky. ----
     /// Applies the GI state and BUILDS IT FROM SCRATCH — voxels, the probe grid
@@ -899,22 +899,22 @@ public:
     /// lamp (REALTIME_REFLECTIONS_SPEC §3.3, O2) never arms a settle at all,
     /// and without that last call its room stays lit at one bounce for good.
     virtual bool        refreshGiLighting(bool inMotion) = 0;
-    /// What GI actually ACHIEVED, as opposed to what was requested — probe
-    /// count and whether the probe/VCT bindings are live on this scene. The
-    /// hybrid can degrade to plain VCT (a missing probe workspace definition);
-    /// without this nothing, not even a pixel test, could tell the difference.
-    /// Cheap: reads live pointers, renders nothing.
-    virtual GiStatus    giStatus() const = 0;
-    /// WHAT THE RAY-QUERY TIER HOLDS FOR THIS SCENE (PHOTON_SPEC §7 R1) — the
-    /// acceleration structures, their size, and what the last frame's update
-    /// cost. The same "what it ACHIEVED, not what was asked for" contract as
-    /// giStatus() above, and it is reported beside it (`world.giStatus()
-    /// .rayQuery`). Cheap: reads counters, renders nothing.
-    ///
-    /// NOT part of GiStatus itself on purpose: the tier is not global
-    /// illumination — it is a geometry service GI happens to be the first
-    /// consumer of.
-    virtual RayQueryStatus rayQueryStatus() const { return RayQueryStatus(); }
+    // What GI actually ACHIEVED, as opposed to what was requested — probe
+    // count and whether the probe/VCT bindings are live on this scene. The
+    // hybrid can degrade to plain VCT (a missing probe workspace definition);
+    // without this nothing, not even a pixel test, could tell the difference.
+    // Cheap: reads live pointers, renders nothing.
+    // -> Scene::published().gi (U3 stage 2b).
+    // WHAT THE RAY-QUERY TIER HOLDS FOR THIS SCENE (PHOTON_SPEC §7 R1) — the
+    // acceleration structures, their size, and what the last frame's update
+    // cost. The same "what it ACHIEVED, not what was asked for" contract as
+    // giStatus() above, and it is reported beside it (`world.giStatus()
+    // .rayQuery`). Cheap: reads counters, renders nothing.
+    //
+    // NOT part of GiStatus itself on purpose: the tier is not global
+    // illumination — it is a geometry service GI happens to be the first
+    // consumer of.
+    // -> Scene::published().rayQuery (U3 stage 2b).
     /// THE VISIBILITY BUFFER'S SPLIT AND BUCKETS (ATOM S3-DRAW): which items the
     /// id pass draws, which stay on stock PBS and why, and how many decode draws
     /// the atom items' materials need (AtomDrawStatus). Computes the bucket keys
@@ -955,12 +955,12 @@ public:
     /// holds the scene's whole lit content (the outermost when none does), n the
     /// chain's cascade n (clamped to the chain). Not saved.
     virtual void setPhotonVoxelCascade(int cascade) { (void)cascade; }
-    /// THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
-    /// counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
-    /// authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,
-    /// which flushes the render system's recorded commands first and is
-    /// therefore a suite's verb and never a frame's.
-    virtual GpuSceneStatus gpuSceneStatus() const { return GpuSceneStatus(); }
+    // THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
+    // counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
+    // authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,
+    // which flushes the render system's recorded commands first and is
+    // therefore a suite's verb and never a frame's.
+    // -> Scene::published().gpuScene (U3 stage 2b).
     virtual bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const {
         (void)slot; (void)out; return false;
     }
@@ -1026,8 +1026,8 @@ public:
     /// row: storing it builds nothing; a view whose scene resolves it on gains
     /// the prepass the rays start from on its next frame. Off by default.
     virtual void setSunContact(const SunContactDesc &) {}
-    /// What the job did on the last drawn frame (Types.h `SunContactStatus`).
-    virtual SunContactStatus sunContactStatus() const { return SunContactStatus(); }
+    // What the job did on the last drawn frame (Types.h `SunContactStatus`).
+    // -> Scene::published().sunContact (U3 stage 2b).
 
     /// WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — a TEST AND TOOL
     /// readback of one cascade's light volume: its peak, its mean over lit
@@ -1319,11 +1319,11 @@ public:
     /// destroyed once nothing wears it. Same shape as setNodeCastShadow: applies
     /// immediately, survives an Item rebuild, may be set before geometry arrives.
     virtual void        setNodeFaceCull(NodeId, FaceCull) = 0;
-    /// Cull twins alive in this scene right now (a diagnostic: mirror.cull_twin).
-    virtual unsigned    cullTwinCount() const = 0;
-    /// Twins waiting for the sweep (a diagnostic: mirror.cull_twin) — never more
-    /// than the twins alive, drawn or not.
-    virtual unsigned    cullTwinCandidateCount() const = 0;
+    // Cull twins alive in this scene right now (a diagnostic: mirror.cull_twin).
+    // -> Scene::published().cullTwins (U3 stage 2b).
+    // Twins waiting for the sweep (a diagnostic: mirror.cull_twin) — never more
+    // than the twins alive, drawn or not.
+    // -> Scene::published().cullTwinCandidates (U3 stage 2b).
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md). Scene-level, like GI. ----
     /// Applies the reflection state idempotently. Pushing the same params twice is
@@ -1354,10 +1354,10 @@ public:
     /// on a document node is measured at its landed pose in the drain (armDeferredReflectors) and refused when the
     /// geometry is not plate-like — not the host's own shadow.
     virtual bool        nodePlanarReflector(NodeId) const = 0;
-    /// How many reflection planes actually rendered last frame — the "achieved"
-    /// number against the requested budget (planes off screen do not render).
-    /// 0 when reflections are off or nothing has rendered yet.
-    virtual int         activePlanarReflectors() const = 0;
+    // How many reflection planes actually rendered last frame — the "achieved"
+    // number against the requested budget (planes off screen do not render).
+    // 0 when reflections are off or nothing has rendered yet.
+    // -> Scene::published().activePlanarReflectors (U3 stage 2b).
     /// Reflectors ARMED (an Ogre actor made) since the scene was created — a diagnostic counter of the engine's
     /// (engine.planar): an edit that does not move a mirror-relevant state re-arms nothing.
     virtual unsigned    planarReflectorArms() const = 0;

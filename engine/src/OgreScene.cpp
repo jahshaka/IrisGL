@@ -621,6 +621,19 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     back.mobility = mMobilityCounts;
     back.mobility.mobilityRebuilds = mMobilityRebuilds;
     back.rigs = mRigCounts;
+    // THE COUNTERS (U3 stage 2b): what the deleted getters returned, each read once here.
+    back.changes = changeStats();
+    back.particleDefinitionsCreated = particleDefinitionsCreated();
+    back.lightWriteSerial = lightWriteSerial();
+    back.decalAtlasCapacity = decalAtlasCapacity(DecalMap::Diffuse);
+    for (int k = 0; k < 3; ++k) back.decalAtlasUsed[k] = decalAtlasUsed(static_cast<DecalMap>(k));
+    back.gpuScene = gpuSceneStatus();
+    back.cullTwins = cullTwinCount();
+    back.cullTwinCandidates = cullTwinCandidateCount();
+    back.particles.clear();
+    for (NodeId id : mParticleNodeIds) back.particles.push_back({id, size_t(particleCount(id))});
+    back.streamedBones.clear();
+    for (const auto &kv : mStreamedByNode) back.streamedBones.push_back({kv.first, kv.second});
     back.atomViewPaintable = atomViewPaintable();
     for (int v = 0; v < kPhotonViewCount; ++v)
         back.photonViewRefusals[v] = v == 0 ? std::string() : photonViewRefusal(static_cast<PhotonView>(v));
@@ -1304,6 +1317,12 @@ void OgreScene::applyCounted(Node &n, const Node::Counted &now) {
     step(mRigCounts.shared, was.shared, now.shared);
     mRigCounts.streamedBones += now.streamed;
     mRigCounts.streamedBones -= was.streamed;
+    if (was.particle != now.particle) {
+        if (now.particle) mParticleNodeIds.insert(n.selfId); else mParticleNodeIds.erase(n.selfId);
+    }
+    if (was.streamed != now.streamed) {
+        if (now.streamed) mStreamedByNode[n.selfId] = now.streamed; else mStreamedByNode.erase(n.selfId);
+    }
     if (was.skel != now.skel) {
         if (was.skel) { auto it = mSkeletonRefs.find(was.skel); if (it != mSkeletonRefs.end() && --it->second == 0) mSkeletonRefs.erase(it); }
         if (now.skel) ++mSkeletonRefs[now.skel];
@@ -1321,6 +1340,7 @@ void OgreScene::recountNode(Node &n) {
     now.rigged = now.skel != nullptr;
     now.shared = now.rigged && n.shareSource != 0;
     now.streamed = now.rigged ? streamedBonesOf(n) : 0;
+    now.particle = n.particleDef != nullptr;
     applyCounted(n, now);
 }
 
@@ -1858,6 +1878,8 @@ void OgreScene::destroy() {
         mMobilityCounts = MobilityStatus();   // every node gone: the totals with them
         mRigCounts = RigStats();
         mSkeletonRefs.clear();
+        mParticleNodeIds.clear();
+        mStreamedByNode.clear();
         mNodeByOgreId.clear();
         mBoneRiderIds.clear();
         mReflectorsToArm.clear();

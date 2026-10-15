@@ -1696,7 +1696,6 @@ void toPublic(const detail::GpuInstance &in, GpuSceneEntry &out) {
 }  // namespace
 
 GpuSceneStatus OgreScene::gpuSceneStatus() const {
-    JAH_SYNC_GETTER("Scene::gpuSceneStatus");
     GpuSceneStatus st;
     st.live = mGpuScene.live();
     st.slotCount = unsigned(mItemNodes.size());

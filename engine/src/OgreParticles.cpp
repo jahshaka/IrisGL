@@ -518,6 +518,7 @@ bool OgreScene::buildParticleDef(Node &n, const ParticleSystemDesc &d,
     auto poolIt = mParticleDefPool.find(key);
     if (poolIt != mParticleDefPool.end() && !poolIt->second.empty()) {
         n.particleDef = poolIt->second.back();
+        recountNode(n);
         poolIt->second.pop_back();
         n.particleTopology = key;
         return true;
@@ -559,13 +560,14 @@ bool OgreScene::buildParticleDef(Node &n, const ParticleSystemDesc &d,
     // needs (a rotating UV set on a clamped texture tears the sprite).
     def->setRotationType(Ogre::ParticleRotationType::Vertex);
     n.particleDef = def;
+    recountNode(n);
     n.particleTopology = key;
 
     // The datablock must exist and be named before init(): init() looks
     // mMaterialName up in the HlmsManager and binds whatever it finds, once and
     // for all (setMaterialName afterwards is a no-op for a PFX2 def).
     const std::string dbName = ensureParticleDatablock(n, d);
-    if (dbName.empty()) { n.particleDef = nullptr; return false; }
+    if (dbName.empty()) { n.particleDef = nullptr; recountNode(n); return false; }
     mParticleDatablocks[def] = dbName;
     // Qualified: ParticleSystemDef inherits setMaterialName from BOTH
     // ParticleSystem (public) and Renderable (protected) — unqualified it is
@@ -781,7 +783,6 @@ bool OgreScene::removeParticleSystem(NodeId id) {
 }
 
 unsigned OgreScene::particleCount(NodeId id) const {
-    JAH_SYNC_GETTER("Scene::particleCount");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.particleDef) return 0;
     // SIMD-rounded and never above the quota: the backend tracks live particles
@@ -806,6 +807,7 @@ void OgreScene::releaseParticleSystem(Node &n) {
     n.particleDef->setVisibilityFlags(0u);
     mParticleDefPool[n.particleTopology].push_back(n.particleDef);
     n.particleDef = nullptr;
+    recountNode(n);
     n.particleTopology.clear();
     n.particleDistortion = false;
 }

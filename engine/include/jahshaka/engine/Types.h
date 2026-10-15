@@ -8004,6 +8004,45 @@ struct FrameInputStatus {
     double             drainMicros = 0.0;       ///< what the LAST drain cost (the record's own overhead)
 };
 
+/// WHAT THE TABLES HOLD AND WHAT KEEPING THEM COSTS. Every count is cumulative
+/// over the scene's life except `lastDirty` / `lastCopyMs`, which are the last
+/// update's.
+struct GpuSceneStatus {
+    /// False where there are no tables at all — the NULL render system's
+    /// headless boot, where every consumer keeps its CPU path.
+    bool     live = false;
+    /// Live item slots (the dense item index's length). NOT named `slots`: that
+    /// is one of Qt's moc keywords (`#define slots`), and this header is included
+    /// by Qt translation units.
+    unsigned slotCount = 0;
+    unsigned capacity = 0;    ///< slots the table can hold before the next grow
+    unsigned meshEntries = 0; ///< entries in the mesh table
+    unsigned lastDirty = 0;   ///< slots the last update wrote
+    unsigned long long writes = 0;     ///< slot writes, ever
+    unsigned long long copyRuns = 0;   ///< device copies issued, ever (one per contiguous run)
+    unsigned long long updates = 0;    ///< updates that copied anything, ever
+    unsigned long long grows = 0;      ///< instance-table doublings, ever
+    unsigned long long scans = 0;      ///< dirty scans run, ever
+    unsigned long long aabbReads = 0;  ///< world AABBs the scan asked Ogre for, ever
+    double   lastCopyMs = 0.0;         ///< CPU cost of the last update's staging + copies
+    double   lastScanMicros = 0.0;     ///< ...of the last TIMED scan (0 when never timed)
+    // ---- THE RAY LEVEL's own cost (ATOM P3, AT-A8r) ------------------------
+    /// Slots whose ray level was RE-EVALUATED, ever: the 2x distance band was
+    /// left and the rule was asked again.
+    unsigned long long rayLevelEvals = 0;
+    /// ...of those, the ones whose ANSWER CHANGED — one BLAS refit each, and
+    /// the number the hysteresis exists to keep small.
+    unsigned long long rayLevelRefits = 0;
+    /// Walks of the ray-level pass (one per frame in which the camera or the
+    /// scene moved; a still frame runs none).
+    unsigned long long rayLevelWalks = 0;
+    /// THE CHANGE FEED's notifications, ever (ATOM-CPU-WALKS-1): slot changes told to
+    /// the consumers that derive from the table (the split's words, the ray tier's
+    /// traced set, the card candidates) — each one is that many visits for each. A
+    /// still frame adds none; a mover frame adds one per moved slot.
+    unsigned long long feedNotifies = 0;
+};
+
 /// WHAT A SCENE PUBLISHED FOR THE FRAME IT LAST DREW (ENGINE-UPGRADE-U2; Scene::published()): the engine's output the
 /// document reads WITHOUT asking — under U3 the document thread reads this snapshot and nothing else of the engine's
 /// state. Written once at the close of every frame the engine renders, as a whole-frame swap (Engine.h, THE SNAPSHOT).
@@ -8053,6 +8092,39 @@ struct PublishedFrame {
     /// mutation sites, copied here every frame — no walk of the graph).
     MobilityStatus       mobility;
     RigStats             rigs;
+    /// THE SCENE'S COUNTERS as the frame closed them (ENGINE-UPGRADE-U3 stage 2b: the getters they replace are deleted;
+    /// each is a counter the engine keeps for another reason, copied here — the meaning is the old getter's, kept in
+    /// Engine.h's comment where it stood).
+    SceneChangeStats     changes;                       ///< structural edits so far (SceneChangeStats)
+    unsigned             particleDefinitionsCreated = 0;   ///< particle definitions this scene ever created (the pool's leak bound)
+    unsigned long long   lightWriteSerial = 0;          ///< moves when any light the injection reads changed
+    unsigned             decalAtlasCapacity = 0;        ///< slices per decal atlas (one figure for every DecalMap)
+    unsigned             decalAtlasUsed[3] = {};        ///< slices taken, indexed by DecalMap (Diffuse, Normal, Emissive)
+    GpuSceneStatus       gpuScene;
+    unsigned             cullTwins = 0;                 ///< cull twins alive (mirror.cull_twin)
+    unsigned             cullTwinCandidates = 0;        ///< twins waiting for the sweep — never more than cullTwins
+    /// PER NODE: the live particles of every node with a particle system (SIMD-rounded up, as Ogre packs them), and
+    /// the bones every rigged node streams to its shader. A node not listed has none.
+    struct NodeCount {
+        NodeId node = 0;
+        size_t count = 0;
+    };
+    std::vector<NodeCount> particles;
+    std::vector<NodeCount> streamedBones;
+    unsigned particlesOf(NodeId id) const {
+        for (const NodeCount &c : particles) if (c.node == id) return unsigned(c.count);
+        return 0u;
+    }
+    size_t streamedBonesOf(NodeId id) const {
+        for (const NodeCount &c : streamedBones) if (c.node == id) return c.count;
+        return 0u;
+    }
+    /// The sky's SH into `out` when the scene has one (skyAmbientShValid); `out` untouched otherwise.
+    bool copySkyAmbientSh(float out[27]) const {
+        if (!skyAmbientShValid) return false;
+        for (int i = 0; i < 27; ++i) out[i] = skyAmbientSh[i];
+        return true;
+    }
     /// THE POSES OF THE RIGS A HOST ASKED FOR (Scene::publishBonePoses): each rig's bones, parent-local, in the mesh
     /// node's frame — what Scene::bonePoses read, as drawn by this frame.
     struct RigPoses {
@@ -8498,45 +8570,6 @@ struct GpuSceneEntry {
     /// of this item's SKIN CACHE — its posed vertices — or 0xFFFFFFFF when its
     /// mesh's own rows are its geometry (every unrigged item).
     unsigned skinRow = 0xFFFFFFFFu;
-};
-
-/// WHAT THE TABLES HOLD AND WHAT KEEPING THEM COSTS. Every count is cumulative
-/// over the scene's life except `lastDirty` / `lastCopyMs`, which are the last
-/// update's.
-struct GpuSceneStatus {
-    /// False where there are no tables at all — the NULL render system's
-    /// headless boot, where every consumer keeps its CPU path.
-    bool     live = false;
-    /// Live item slots (the dense item index's length). NOT named `slots`: that
-    /// is one of Qt's moc keywords (`#define slots`), and this header is included
-    /// by Qt translation units.
-    unsigned slotCount = 0;
-    unsigned capacity = 0;    ///< slots the table can hold before the next grow
-    unsigned meshEntries = 0; ///< entries in the mesh table
-    unsigned lastDirty = 0;   ///< slots the last update wrote
-    unsigned long long writes = 0;     ///< slot writes, ever
-    unsigned long long copyRuns = 0;   ///< device copies issued, ever (one per contiguous run)
-    unsigned long long updates = 0;    ///< updates that copied anything, ever
-    unsigned long long grows = 0;      ///< instance-table doublings, ever
-    unsigned long long scans = 0;      ///< dirty scans run, ever
-    unsigned long long aabbReads = 0;  ///< world AABBs the scan asked Ogre for, ever
-    double   lastCopyMs = 0.0;         ///< CPU cost of the last update's staging + copies
-    double   lastScanMicros = 0.0;     ///< ...of the last TIMED scan (0 when never timed)
-    // ---- THE RAY LEVEL's own cost (ATOM P3, AT-A8r) ------------------------
-    /// Slots whose ray level was RE-EVALUATED, ever: the 2x distance band was
-    /// left and the rule was asked again.
-    unsigned long long rayLevelEvals = 0;
-    /// ...of those, the ones whose ANSWER CHANGED — one BLAS refit each, and
-    /// the number the hysteresis exists to keep small.
-    unsigned long long rayLevelRefits = 0;
-    /// Walks of the ray-level pass (one per frame in which the camera or the
-    /// scene moved; a still frame runs none).
-    unsigned long long rayLevelWalks = 0;
-    /// THE CHANGE FEED's notifications, ever (ATOM-CPU-WALKS-1): slot changes told to
-    /// the consumers that derive from the table (the split's words, the ray tier's
-    /// traced set, the card candidates) — each one is that many visits for each. A
-    /// still frame adds none; a mover frame adds one per moved slot.
-    unsigned long long feedNotifies = 0;
 };
 
 /// ONE CONE FOR THE ONE VOXEL READER'S PARITY HARNESS (PHOTON-READER-1;

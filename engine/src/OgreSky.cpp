@@ -519,7 +519,6 @@ Colour atmosphereSunTint(const PublishedFrame::Atmosphere &air, const Vec3 &toSu
 namespace jahshaka { namespace engine { namespace detail {
 
 AtmosphereStatus OgreScene::atmosphereStatus() const {
-    JAH_SYNC_GETTER("Scene::atmosphereStatus");
     if (!mAtmosphere) return AtmosphereStatus();
     AtmosphereStatus st = mAtmosphere->status();
     st.on = mAtmoSkyOn;
@@ -700,7 +699,6 @@ void OgreScene::syncAtmosphere() {
 void OgreScene::requestSkyCapture() { mSkyCapturePending = true; }
 
 bool OgreScene::skyAmbientSh(float out[27]) const {
-    JAH_SYNC_GETTER("Scene::skyAmbientSh");
     if (!mSkyShInForceValid) return false;
     for (int i = 0; i < 27; ++i) out[i] = mSkyShInForce[i];
     return true;
@@ -2592,7 +2590,6 @@ void OgreScene::destroyCloudLayer() {
 }
 
 CloudStatus OgreScene::cloudStatus() const {
-    JAH_SYNC_GETTER("Scene::cloudStatus");
     CloudStatus st = mCloudStatus;
     st.drawn = cloudLayerDrawn();
     if (st.drawn) st.reason.clear();

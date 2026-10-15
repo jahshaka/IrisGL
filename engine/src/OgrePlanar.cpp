@@ -530,7 +530,6 @@ void OgreScene::armDeferredReflectors() {
 }
 
 int OgreScene::activePlanarReflectors() const {
-    JAH_SYNC_GETTER("Scene::activePlanarReflectors");
     return mPlanar ? int(mPlanar->countActiveActors()) : 0;
 }
 

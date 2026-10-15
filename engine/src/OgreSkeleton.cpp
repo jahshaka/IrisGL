@@ -727,7 +727,6 @@ void OgreScene::dropShareFollowers(NodeId id, Node &n) {
 // evaluates. A remap or a share that silently did not land therefore reads as
 // the OLD number here instead of as the number we meant.
 size_t OgreScene::streamedBoneCount(NodeId id) const {
-    JAH_SYNC_GETTER("Scene::streamedBoneCount");
     auto it = mNodes.find(id);
     return it == mNodes.end() ? 0 : streamedBonesOf(it->second);
 }

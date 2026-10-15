@@ -3688,7 +3688,7 @@ public:
     /// The air the sun's beam crosses, for the snapshot (PublishedFrame::atmosphere; the inputs of the stateless
     /// atmosphereSunTint, ENGINE-UPGRADE-U3 F-A).
     PublishedFrame::Atmosphere publishedAtmosphere() const;
-    AtmosphereStatus atmosphereStatus() const override;
+    AtmosphereStatus atmosphereStatus() const;
     void setReflectionFogEnabled(bool on) override { mReflectionFogOn = on; }
 
     /// THE SKY, CAPTURED ON THE GPU (SKY-GPU) — the one source of a scene's
@@ -3768,7 +3768,7 @@ public:
     /// The sky's ambient, 9 SH bands x 3 channels: the coefficients of the
     /// environment IN FORCE (mSkyShInForce), never a newer integral whose cube
     /// has not landed yet. The host scales them by its Sky Light.
-    bool skyAmbientSh(float out[27]) const override;
+    bool skyAmbientSh(float out[27]) const;
     /// The LATEST integral (the capture's or the deferred read's). Valid only
     /// while mSkyShValid; mSkyShFresh = it has not been swapped in yet (the two
     /// are set together, and forgetSkySh clears both).
@@ -3973,9 +3973,9 @@ public:
     std::vector<std::string> boneNames(NodeId id) const override;
     bool setBonePoses(NodeId id, const BonePose *poses, size_t count) override;
     bool boneMatrices(NodeId id, float *out, size_t count) const override;
-    size_t streamedBoneCount(NodeId id) const override;
+    size_t streamedBoneCount(NodeId id) const;
     RigStats rigStats() const override;
-    SceneChangeStats changeStats() const override { JAH_SYNC_GETTER("Scene::changeStats"); return mChangeStats; }
+    SceneChangeStats changeStats() const { return mChangeStats; }
     void beginStructureEdit() override { ++mStructureEditDepth; }
     void endStructureEdit() override;
 
@@ -4032,20 +4032,20 @@ public:
     // mParticleDefPool keyed by its topology, and a matching rebuild reuses it.
     bool     setParticleSystem(NodeId id, const ParticleSystemDesc &d) override;
     bool     removeParticleSystem(NodeId id) override;
-    unsigned particleCount(NodeId id) const override;
-    unsigned particleDefinitionsCreated() const override { JAH_SYNC_GETTER("Scene::particleDefinitionsCreated"); return mParticleDefsCreated; }
+    unsigned particleCount(NodeId id) const;
+    unsigned particleDefinitionsCreated() const { return mParticleDefsCreated; }
 
     // ---- Lights ----
     bool setLight(NodeId id, const LightDesc &d) override;
     bool removeLight(NodeId id) override;
-    unsigned long long lightWriteSerial() const override { JAH_SYNC_GETTER("Scene::lightWriteSerial"); return mGiLightWriteSerial; }
+    unsigned long long lightWriteSerial() const { return mGiLightWriteSerial; }
 
     // ---- Decals (DECALS_SPEC.md; impl in OgreDecals.cpp) ----
     bool setDecal(NodeId id, const DecalDesc &d) override;
     bool removeDecal(NodeId id) override;
     TextureId loadDecalTexture(const std::string &path, DecalMap kind) override;
-    unsigned decalAtlasCapacity(DecalMap kind) const override;
-    unsigned decalAtlasUsed(DecalMap kind) const override;
+    unsigned decalAtlasCapacity(DecalMap kind) const;
+    unsigned decalAtlasUsed(DecalMap kind) const;
 
     bool setGlobalIllumination(const GiParams &p) override { return mPhoton.setGlobalIllumination(p); }
     bool setGiTuning(const GiParams &p) override { return mPhoton.setGiTuning(p); }
@@ -4053,14 +4053,14 @@ public:
     /// OPEN_COVER_SPEC §2 A — see the boundary's note. Sticky, per scene.
     void setLoading(bool loading) override { mSceneLoading = loading; }
     bool isLoading() const override { return mSceneLoading; }
-    GiStatus giStatus() const override { JAH_SYNC_GETTER("Scene::giStatus"); return mPhoton.giStatus(); }
+    GiStatus giStatus() const { return mPhoton.giStatus(); }
     GiVoxelStats giVoxelStats(int cascade) override { return mPhoton.giVoxelStats(cascade); }
     bool giFieldAtlas(GiFieldAtlas &out) override { return mPhoton.giFieldAtlas(out); }
     bool giVoxelVolume(int cascade, GiVoxelVolume &out) override { return mPhoton.giVoxelVolume(cascade, out); }
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
     /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
-    RayQueryStatus rayQueryStatus() const override;
+    RayQueryStatus rayQueryStatus() const;
     AtomDrawStatus atomDrawStatus() override;
     void setAtomDrawEnabled(bool on) override;
     void setAtomOcclusionEnabled(bool on) override;
@@ -4073,7 +4073,7 @@ public:
     /// row. Written by updateAtomDraw ONLY while the view is Buckets (a CPU walk of
     /// the slots and an upload when a value moved); null until then.
     Ogre::TextureGpu *atomViewTable() const { return mAtom.viewTable(); }
-    GpuSceneStatus gpuSceneStatus() const override;
+    GpuSceneStatus gpuSceneStatus() const;
     /// THE CUT'S INDEX NEED, the scene's high-water mark (ATOM-CLUSTER-CUT F1): the most
     /// indices any view's cut of this scene asked of its stream (the stats ring's
     /// cursor). Every GpuCull sizes its stream from at least this, so a view born into
@@ -4185,7 +4185,7 @@ public:
     GatherTuning mGatherTuning;
     void setSunContact(const SunContactDesc &d) override { return mPhoton.setSunContact(d); }
     SunContactDesc sunContact() const override { return mPhoton.sunContact(); }
-    SunContactStatus sunContactStatus() const override;
+    SunContactStatus sunContactStatus() const;
     bool sunContactWanted() const { return mPhoton.sunContactWanted(); }
     // --- THE GPU SCENE (A3_GPU_SCENE_SLICE_DESIGN.md; GpuScene.h) -----------
     /// Brings the device-side instance and mesh tables up to date for this
@@ -4260,8 +4260,8 @@ public:
     bool nodeCastShadow(NodeId id) const override;
     void setNodeFaceCull(NodeId id, FaceCull cull) override;
     FaceCull nodeFaceCull(NodeId id) const override;
-    unsigned cullTwinCount() const override { JAH_SYNC_GETTER("Scene::cullTwinCount"); return mCullTwinCount; }
-    unsigned cullTwinCandidateCount() const override { JAH_SYNC_GETTER("Scene::cullTwinCandidateCount"); return unsigned(mTwinCandidates.size()); }
+    unsigned cullTwinCount() const { return mCullTwinCount; }
+    unsigned cullTwinCandidateCount() const { return unsigned(mTwinCandidates.size()); }
     /// THE CULL TWINS' SWEEP (CULL-MODE-2; CULL-TWIN-DEBTS-1): destroys a twin that
     /// no renderable has worn for kCullTwinGraceFrames of this scene's frames. It
     /// visits only the CANDIDATES — twins an Item let go of since (noteTwinLetGo) —
@@ -4278,7 +4278,7 @@ public:
     bool setPlanarReflections(const PlanarReflectionParams &p) override;
     bool setNodePlanarReflector(NodeId id, bool on) override;
     bool nodePlanarReflector(NodeId id) const override;
-    int  activePlanarReflectors() const override;
+    int  activePlanarReflectors() const;
     unsigned planarReflectorArms() const override { JAH_SYNC_GETTER("Scene::planarReflectorArms"); return mPlanarArms; }
     unsigned mPlanarArms = 0;   ///< armReflector's actors made (a diagnostic)
 
@@ -4506,6 +4506,7 @@ private:
         /// every mutation site (recountNode), so MobilityStatus / RigStats are running totals, never a walk.
         struct Counted {
             bool movable = false, movableItem = false, movableLight = false, rigged = false, shared = false;
+            bool particle = false;   ///< carries a particle system (PublishedFrame::particles lists it)
             const Ogre::SkeletonInstance *skel = nullptr;
             size_t streamed = 0;
         } counted;
@@ -5284,7 +5285,7 @@ private:
     /// called at the head of applyPendingSkyCapture, so a capture queued by
     /// the same change photographs the new field.
     void bakeCloudField();
-    CloudStatus cloudStatus() const override;
+    CloudStatus cloudStatus() const;
     bool renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize, float exposure,
                            std::vector<unsigned char> &rgba) override;
     bool cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres) override;
@@ -6184,6 +6185,10 @@ private:
     MobilityStatus mMobilityCounts;
     RigStats       mRigCounts;
     std::unordered_map<const Ogre::SkeletonInstance *, size_t> mSkeletonRefs;
+    /// ...and the per-node lists the snapshot carries (U3 stage 2b), ordered by id: the particle-system nodes, the
+    /// bones each rigged node streams.
+    std::set<NodeId>            mParticleNodeIds;
+    std::map<NodeId, size_t>    mStreamedByNode;
     /// Re-derives one node's contribution after a mutation of its movable flag, Item, light, particles, billboards or
     /// share (recountNode), or takes it out (uncountNode: the node is leaving).
     void recountNode(Node &n);

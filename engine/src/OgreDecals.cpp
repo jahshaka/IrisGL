@@ -385,13 +385,11 @@ TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind)
 
 unsigned OgreScene::decalAtlasCapacity(DecalMap) const
 {
-    JAH_SYNC_GETTER("Scene::decalAtlasCapacity");
     return detail::decalAtlasCapacity();
 }
 
 unsigned OgreScene::decalAtlasUsed(DecalMap kind) const
 {
-    JAH_SYNC_GETTER("Scene::decalAtlasUsed");
     return decalAtlas(kind).used;
 }
 

@@ -8782,7 +8782,6 @@ bool PhotonComponent::sunContactWanted() const {
 }
 
 SunContactStatus OgreScene::sunContactStatus() const {
-    JAH_SYNC_GETTER("Scene::sunContactStatus");
     SunContactStatus st;
     st.on = sunContactWanted();
     if (st.on && mEngine && mEngine->mRayTier) mEngine->mRayTier->sunContactStatsInto(this, st);
@@ -8874,7 +8873,6 @@ bool OgreScene::rayReflectionsWanted() const {
 }
 
 RayQueryStatus OgreScene::rayQueryStatus() const {
-    JAH_SYNC_GETTER("Scene::rayQueryStatus");
     RayQueryStatus st;
     if (!mEngine) return st;
     st.available = mEngine->rayQueryAvailable();
