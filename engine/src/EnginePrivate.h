@@ -1954,7 +1954,7 @@ public:
     bool mMarked = false;
 };
 
-/// THE MONITOR ITSELF: the ring of finished FrameRecords, the frame being
+/// THE MONITOR ITSELF: the ring of finished MonitorRecords, the frame being
 /// built, the event queue and the pass stack. One per process, owned by
 /// OgreEngine, created when the monitor goes on and destroyed when it goes off
 /// — which is what makes "off" cost nothing rather than cost little.
@@ -1965,7 +1965,7 @@ public:
     // ---- the frame --------------------------------------------------------
     void beginFrame(unsigned long long frame, FrameCause cause, bool onscreen);
     void endFrame(unsigned scenesUpdated);
-    /// The frame's drained input (FrameRecord::input*), noted right after beginFrame.
+    /// The frame's drained input (MonitorRecord::input*), noted right after beginFrame.
     void noteInput(unsigned moved, bool gesture, unsigned fields) {
         mCurrent.inputMoved = moved; mCurrent.inputGesture = gesture; mCurrent.inputFieldsApplied = fields;
     }
@@ -1988,7 +1988,7 @@ public:
     /// A frame waiting for its GPU samples, with the sample id of each pass
     /// and of each timed cache row.
     struct PendingFrame {
-        FrameRecord           rec;
+        MonitorRecord           rec;
         std::vector<unsigned> passSampleIds;    ///< parallel to rec.passes
         std::vector<unsigned> cacheSampleIds;   ///< parallel to rec.cacheWork
         /// Parallel to the two lists above: the row's sample opened with no other
@@ -2049,7 +2049,7 @@ public:
     /// adopts) lies inside it; closed when the frame's recording ends
     /// (`frameRenderingQueued`, or `endFrame` for a frame that rendered nothing).
     /// It is a SPAN — the first command of the frame's submission to the last —
-    /// so a mid-frame flush's CPU bubble is inside it; FrameRecord::unattributedGpuMs
+    /// so a mid-frame flush's CPU bubble is inside it; MonitorRecord::unattributedGpuMs
     /// is the span less the top-level rows.
     unsigned mFrameSampleId = 0u;
     bool     mFrameSampleOpen = false;
@@ -2057,8 +2057,8 @@ public:
     /// is open and no row of ours is, a "gap" sample is open; each row's sample
     /// closes it and the last row's end opens the next. A gap whose Ogre command
     /// buffer changed under it crossed a SUBMISSION (the GPU idled for the CPU):
-    /// FrameRecord::gpuIdleMs; the others are GPU work no row names:
-    /// FrameRecord::unattributedGpuMs. Registered with the pair's owner record when
+    /// MonitorRecord::gpuIdleMs; the others are GPU work no row names:
+    /// MonitorRecord::unattributedGpuMs. Registered with the pair's owner record when
     /// the pair closes (the pair outlives the record's end: it closes at the frame's
     /// close, after the VR eye copy).
     unsigned mGapId = 0u;
@@ -2119,7 +2119,7 @@ public:
     /// The next sample id for a pass about to execute (0 = not sampling).
     unsigned nextGpuSampleId() { return mGpu ? mNextGpuSampleId++ : 0u; }
     bool inFrame() const { return mInFrame; }
-    FrameRecord &current() { return mCurrent; }
+    MonitorRecord &current() { return mCurrent; }
 
     // ---- what the instrumentation sites file ------------------------------
     void stage(const char *name, double ms);
@@ -2136,7 +2136,7 @@ public:
     void adoptPendingCacheWork();
 
     // ---- the host drains ---------------------------------------------------
-    unsigned drainFrames(std::vector<FrameRecord> &out);
+    unsigned drainFrames(std::vector<MonitorRecord> &out);
     unsigned drainEvents(std::vector<MonitorEvent> &out);
 
     // ---- the pass stack (PassListener's, kept here so it dies with a frame) -
@@ -2201,11 +2201,11 @@ public:
     unsigned mAttachedCount = 0u;
 
 private:
-    void push(FrameRecord &&r);
+    void push(MonitorRecord &&r);
 
     /// THE RING IS THE HAND-BACK (ENGINE-UPGRADE-U3 stage 1): the frame pushes a finished record (render side), the
-    /// host drains (takeFrameRecords, the document side) — the one structure both touch, so it is the one locked.
-    std::vector<FrameRecord>  mRing;
+    /// host drains (takeMonitorRecords, the document side) — the one structure both touch, so it is the one locked.
+    std::vector<MonitorRecord>  mRing;
     unsigned                  mWrite = 0u;
     mutable std::mutex        mRingLock;
     std::vector<MonitorEvent> mEvents;
@@ -2218,7 +2218,7 @@ private:
     /// row is adopted.
     std::vector<unsigned>     mPendingCacheSampleIds;
     std::vector<char>         mPendingCacheTop;
-    FrameRecord               mCurrent;
+    MonitorRecord               mCurrent;
     std::chrono::steady_clock::time_point mFrameStart;
     /// The number of the last frame that BEGAN. Events recorded between frames
     /// are stamped with it rather than with the empty record's 0.
@@ -7753,7 +7753,7 @@ public:
     ValidationStatus validation() const override;
     const ArmRegistry &armRegistry() const { return mArms; }
     MonitorStatus monitorStatus() const override;
-    unsigned takeFrameRecords(std::vector<FrameRecord> &out) override;
+    unsigned takeMonitorRecords(std::vector<MonitorRecord> &out) override;
     unsigned takeMonitorEvents(std::vector<MonitorEvent> &out) override;
     void noteMonitorEvent(const MonitorEvent &event) override;
     void noteHostStage(const std::string &name, float ms) override;
@@ -8170,11 +8170,11 @@ private:
     /// WHAT STOPPING A CAPTURE LEAVES BEHIND. Switching the monitor off flushes
     /// the frames still waiting for their GPU samples (which arrive two frames
     /// late) into here, so the host's usual "stop, then drain" order does not
-    /// silently lose the tail of every capture. The NEXT takeFrameRecords moves
+    /// silently lose the tail of every capture. The NEXT takeMonitorRecords moves
     /// them out and frees the storage; until then MonitorStatus reports them as
     /// `ringFrames` with a `ringCapacity` of 0, because the ring itself is
     /// gone.
-    std::vector<FrameRecord> mFinalRecords;
+    std::vector<MonitorRecord> mFinalRecords;
 };
 
 }  // namespace detail

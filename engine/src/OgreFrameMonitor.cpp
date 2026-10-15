@@ -121,7 +121,7 @@ FrameMonitor::FrameMonitor() {
 
 void FrameMonitor::beginFrame(unsigned long long frame, FrameCause cause, bool onscreen) {
     const auto t0 = std::chrono::steady_clock::now();
-    mCurrent = FrameRecord();
+    mCurrent = MonitorRecord();
     mCurrent.frame = frame;
     mLastFrameNumber = frame;
     mCurrent.cause = cause;
@@ -215,7 +215,7 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
     }
     mPending.push_back(std::move(pf));
     retirePending(false);
-    mCurrent = FrameRecord();
+    mCurrent = MonitorRecord();
     mInFrame = false;
     ++mFramesRecorded;
 }
@@ -231,7 +231,7 @@ void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
     if (where.frame < mPending.size()) {
         PendingFrame &pf = mPending[where.frame];
         if (pf.outstanding) --pf.outstanding;
-        FrameRecord &rec = pf.rec;
+        MonitorRecord &rec = pf.rec;
         // A NEGATIVE time is the fork's "this sample will never have one" (no
         // query room, a wrapped counter, a lost pool): it answers the sample
         // and leaves the row unmeasured.
@@ -319,7 +319,7 @@ void FrameMonitor::retirePending(bool all) {
     }
 }
 
-void FrameMonitor::push(FrameRecord &&r) {
+void FrameMonitor::push(MonitorRecord &&r) {
     std::lock_guard<std::mutex> lock(mRingLock);
     if (mRing.size() < kRingCapacity) { mRing.push_back(std::move(r)); return; }
     mRing[mWrite] = std::move(r);
@@ -327,7 +327,7 @@ void FrameMonitor::push(FrameRecord &&r) {
     ++mFramesDropped;
 }
 
-unsigned FrameMonitor::drainFrames(std::vector<FrameRecord> &out) {
+unsigned FrameMonitor::drainFrames(std::vector<MonitorRecord> &out) {
     // THE HOST'S SIDE OF THE HAND-BACK (ENGINE-UPGRADE-U3): only the ring, under its lock. The holding queue is the
     // frame's (it waits on GPU samples the render system answers inside frames) — its retire runs at the frame's
     // close (OgreEngine::closeRenderFrame), never here.
@@ -943,7 +943,7 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
     // A TAIL NOBODY DRAINED belongs to the PREVIOUS capture; carrying it into
     // the next one would put frames from before the key press into a bundle
     // that is supposed to be forward-only.
-    std::vector<FrameRecord>().swap(mFinalRecords);
+    std::vector<MonitorRecord>().swap(mFinalRecords);
     monitor::resetEpoch();
     mMonitor.reset(new monitor::FrameMonitor());
     mMonitor->mLevel = level;
@@ -1227,13 +1227,13 @@ MonitorStatus OgreEngine::monitorStatus() const {
     return st;
 }
 
-unsigned OgreEngine::takeFrameRecords(std::vector<FrameRecord> &out) {
+unsigned OgreEngine::takeMonitorRecords(std::vector<MonitorRecord> &out) {
     if (mMonitor) return mMonitor->drainFrames(out);
     // The tail of the last capture, once, and then the storage goes.
     if (mFinalRecords.empty()) return 0u;
     const unsigned n = unsigned(mFinalRecords.size());
-    for (FrameRecord &r : mFinalRecords) out.push_back(std::move(r));
-    std::vector<FrameRecord>().swap(mFinalRecords);
+    for (MonitorRecord &r : mFinalRecords) out.push_back(std::move(r));
+    std::vector<MonitorRecord>().swap(mFinalRecords);
     return n;
 }
 

@@ -2799,7 +2799,7 @@ public:
     ///    call to this returns it even though the monitor is off. That makes
     ///    the natural host order — stop the capture, then drain — lossless. The
     ///    call after that returns 0 and the storage is freed.
-    virtual unsigned takeFrameRecords(std::vector<FrameRecord> &out) = 0;
+    virtual unsigned takeMonitorRecords(std::vector<MonitorRecord> &out) = 0;
     /// The same for discrete events (GI rebuilds, atlas changes, compiles,
     /// texture loads, VRAM flushes, device-lost, and the host's own).
     virtual unsigned takeMonitorEvents(std::vector<MonitorEvent> &out) = 0;

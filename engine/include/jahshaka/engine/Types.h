@@ -7657,7 +7657,7 @@ enum class PassBucket {
 /// root-caused here; it is reported upstream-ward rather than guessed at.
 /// The monitor reports the render system's own numbers faithfully; analysis
 /// must therefore read a zero as "the renderer counted nothing here", never as
-/// "this pass drew nothing". `FrameRecord::metricsRecording` says whether the
+/// "this pass drew nothing". `MonitorRecord::metricsRecording` says whether the
 /// counters were live at all.
 struct FramePass {
     std::string workspace;        ///< the workspace instance's definition name
@@ -7768,7 +7768,7 @@ struct CacheWork {
     /// It is the ONLY GPU time in a capture that does not come from a
     /// compositor pass: a GI voxelisation, a light injection and an irradiance
     /// field's integration are compute dispatches the compositor never sees,
-    /// so they are absent from `FrameRecord::gpuMs` (which stays the sum of the
+    /// so they are absent from `MonitorRecord::gpuMs` (which stays the sum of the
     /// frame's passes — the invariant a suite asserts) and appear only here.
     float      gpuMs = -1.0f;
 };
@@ -8099,9 +8099,9 @@ struct StreamingWork {
 };
 
 /// EVERYTHING ONE `renderOneFrame` DID. One of these per frame while a capture
-/// runs; the host drains them with `takeFrameRecords` and writes them to
+/// runs; the host drains them with `takeMonitorRecords` and writes them to
 /// `frames.jsonl`.
-struct FrameRecord {
+struct MonitorRecord {
     unsigned long long frame = 0;    ///< the engine's monotonic frame counter
     /// THE HAND-OVER'S SERIAL (ENGINE-UPGRADE-U3): the record this frame applied (FrameInput::serial). The host's half
     /// of the record — its stages, noted on the thread that submits — rode THAT hand-over, so the two halves are one
@@ -8272,7 +8272,7 @@ struct MonitorStatus {
     unsigned gpuQueryPools = 0;      ///< MUST be 0 outside a capture
     /// GPU timing MARKS the query pool could not hold, CUMULATIVE since this
     /// capture turned the monitor on (the per-frame count rides each
-    /// FrameRecord::gpuMarksDropped). Non-zero means the capture's GPU numbers
+    /// MonitorRecord::gpuMarksDropped). Non-zero means the capture's GPU numbers
     /// are INCOMPLETE — said out loud rather than left for analysis to notice
     /// that some passes have no time. Cumulative because the host reads this
     /// on its drain timer, and a LAST-FRAME reading (what this field used to
