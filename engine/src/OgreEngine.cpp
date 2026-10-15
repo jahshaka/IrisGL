@@ -2431,6 +2431,7 @@ void OgreEngine::applyFrameDelta(float seconds) {
 // environment, the engine-wide shadow pair, then each view.
 
 void OgreEngine::submitFrame(FrameInput in) { mRenderThread.submit(std::move(in)); }
+void OgreEngine::post(Scene *scene, SceneMessage &&message) { mRenderThread.post(scene, std::move(message)); }
 
 // THE REQUEST DOOR (U3 stage 3): the question runs on the engine's side — its reads are the engine's own, never a
 // host's synchronous read — inline today; stage 4 moves it onto the render thread.

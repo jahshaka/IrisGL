@@ -39,6 +39,9 @@ public:
     /// Accumulates `in` into the pending record (the merge, FrameInput's rules). `in.serial` is ignored: the
     /// hand-over stamps it.
     void submit(FrameInput &&in);
+    /// ONE MESSAGE onto `scene`'s pending part (decision 35): the slot's lock and an append — the last part touched is
+    /// tried first, so a sync's run of messages finds its part at once.
+    void post(Scene *scene, SceneMessage &&message);
     /// The host's half of the monitor's record (a stage it timed): banked in the slot, handed over with the record,
     /// folded into the frame's record by the render side — never written into the engine's current record across
     /// threads. Coalesced by name past kHostStageCoalesce entries so a slot nobody takes cannot grow without bound.
@@ -89,6 +92,7 @@ private:
     mutable std::mutex mSlotLock;
     Slot               mSlot;           ///< guarded by mSlotLock
     FrameSubmitStatus  mSubmit;         ///< guarded by mSlotLock
+    size_t             mLastPart = 0;   ///< guarded by mSlotLock: the scene part the last post appended to
     // ---- render side only ----
     unsigned long long mSerial = 0;
     unsigned long long mFramesWithError = 0;

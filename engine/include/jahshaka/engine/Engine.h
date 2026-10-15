@@ -2021,6 +2021,10 @@ public:
     /// (U3 F2). The scenes and views a record names must belong to this engine; one destroyed before the drain
     /// is skipped.
     virtual void submitFrame(FrameInput input) = 0;   ///< by value: a host that moves its record in copies nothing (U3 stage 3)
+    /// ONE DOOR PER MESSAGE (U3 stage 3 fix round, decision 35): appends a structural message to `scene`'s part of the
+    /// pending record under the slot's lock — no record built per message. The order is the order of the calls, across
+    /// every host and every submitFrame (the drain applies a scene's messages in the order they arrived).
+    virtual void post(Scene *scene, SceneMessage &&message) = 0;
     /// What the submits did (FrameSubmitStatus) — the game side's half of the record's status (U3 F4).
     virtual FrameSubmitStatus frameSubmitStatus() const = 0;
     // What the drain did (FrameInputStatus) — the counts the U0 rows read. The render side's half (U3 F4); the same

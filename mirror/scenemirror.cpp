@@ -683,6 +683,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
     } spend(this);
     if (!mSource || !mSource->getRootNode()) return 0;
     takeCompletions();   // the answers to the named messages of the frames since the last sync (U3 stage 3)
+    mMaterialsBornThisSync.clear();
     // RE-TAKE the graph if another mirror took this document while we were not
     // looking. NOTHING IN THE TREE DOES THAT ANY MORE (lane PLAYER-1, owner
     // decision 2026-09-14): the Player page used to be a second engine scene
@@ -5169,8 +5170,10 @@ void SceneMirror::syncTextures(Entry &e, const MaterialSync &ms)
             boundIds[int(b.slot)] = t;
         }
     }
-    for (int i = 0; i < kSlotCount; ++i)
-        if (!bound[i]) postCall(&jahshaka::engine::Scene::setPbrTexture, e.material, PbrTextureSlot(i), 0);
+    // THE CLEARS UNBIND WHAT A SLOT HELD (decision 35): a material created this sync holds nothing to unbind.
+    if (!mMaterialsBornThisSync.contains(e.material))
+        for (int i = 0; i < kSlotCount; ++i)
+            if (!bound[i]) postCall(&jahshaka::engine::Scene::setPbrTexture, e.material, PbrTextureSlot(i), 0);
     // What reclaimUnused needs: the IDS, not the paths. A world switch or a
     // material edit that drops a map leaves the engine texture referenced by
     // nobody, and before this the mirror simply never freed one.

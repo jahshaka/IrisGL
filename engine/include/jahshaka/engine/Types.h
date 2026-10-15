@@ -8021,6 +8021,7 @@ struct FrameInput {
 /// of the record's status is written by one thread; this half by the thread that submits). Running totals.
 struct FrameSubmitStatus {
     unsigned long long submitted = 0;     ///< submitFrame calls
+    unsigned long long messagesPosted = 0;   ///< Engine::post calls (one per structural message, decision 35)
     /// Scene parts MERGED into an earlier pending part of the same scene (field by field, the newest value wins) —
     /// every second submit for a scene before one hand-over counts, the host's several syncs a frame included.
     unsigned long long scenePartsMerged = 0;

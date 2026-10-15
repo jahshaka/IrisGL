@@ -28,12 +28,7 @@ inline void post(Scene *scene, std::function<bool(Scene &)> fn, unsigned long lo
     if (!scene || !fn) return;
     jahshaka::engine::Engine *engine = scene->engine();
     if (!engine) return;
-    jahshaka::engine::FrameInput in;
-    jahshaka::engine::FrameInputScene part;
-    part.scene = scene;
-    part.messages.push_back({std::move(fn), token});
-    in.scenes.push_back(std::move(part));
-    engine->submitFrame(std::move(in));   // moved: a copy would copy what the message owns (a texture's pixels)
+    engine->post(scene, jahshaka::engine::SceneMessage{std::move(fn), token});   // one append, no record (decision 35)
 }
 inline void post(Scene *scene, std::function<void(Scene &)> fn)
 {

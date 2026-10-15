@@ -7397,6 +7397,7 @@ public:
     void renderOneFrame() override;
     /// The game side's merge into the hand-over slot (RenderThread::submit).
     void submitFrame(FrameInput input) override;
+    void post(Scene *scene, SceneMessage &&message) override;
     FrameSubmitStatus frameSubmitStatus() const override { return mRenderThread.submitStatus(); }
     FrameInputStatus frameInputStatus() const { return mFrameInputStatus; }
     const PublishedEngineFrame &published() const override { return mRenderThread.published(); }

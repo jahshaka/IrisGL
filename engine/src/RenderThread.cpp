@@ -22,6 +22,24 @@ SyncGetterSite *syncGetterSites() { return gSyncSites.load(std::memory_order_acq
 // THE MERGE STAYS (U3 F1): one frame today is the merge of 2-6 submits — the driver's cause, the viewport's pace, the
 // mirror's record, the viewport's delta + gesture, a preview's scene part — and that merge IS the record's builder.
 // What changed is where it lands: the hand-over slot, under its lock, never the record a frame is draining.
+void RenderThread::post(Scene *scene, SceneMessage &&message) {
+    if (!scene || !message.apply) return;
+    std::lock_guard<std::mutex> lock(mSlotLock);
+    ++mSubmit.messagesPosted;
+    mSlot.any = true;
+    std::vector<FrameInputScene> &parts = mSlot.record.scenes;
+    if (mLastPart >= parts.size() || parts[mLastPart].scene != scene) {
+        mLastPart = 0;
+        while (mLastPart < parts.size() && parts[mLastPart].scene != scene) ++mLastPart;
+        if (mLastPart == parts.size()) {
+            FrameInputScene part;
+            part.scene = scene;
+            parts.push_back(std::move(part));
+        }
+    }
+    parts[mLastPart].messages.push_back(std::move(message));
+}
+
 void RenderThread::submit(FrameInput &&in) {
     std::lock_guard<std::mutex> lock(mSlotLock);
     ++mSubmit.submitted;

@@ -1430,7 +1430,16 @@ private:
         notePost();
         return scenecmd::newOutlineMaterial(mTarget, c, skinnable);
     }
-    jahshaka::engine::MaterialId newPbrMaterial(const jahshaka::engine::PbrParams &p) { notePost(); return scenecmd::newPbrMaterial(mTarget, p); }
+    jahshaka::engine::MaterialId newPbrMaterial(const jahshaka::engine::PbrParams &p)
+    {
+        notePost();
+        const jahshaka::engine::MaterialId id = scenecmd::newPbrMaterial(mTarget, p);
+        mMaterialsBornThisSync.insert(id);
+        return id;
+    }
+    /// The materials this sync created (decision 35): a new material binds nothing, so its texture pass posts no
+    /// clear for the slots it leaves empty. Emptied at every sync's top.
+    QSet<jahshaka::engine::MaterialId> mMaterialsBornThisSync;
     jahshaka::engine::TextureId newTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb, bool mipmaps = false)
     {
         notePost();
