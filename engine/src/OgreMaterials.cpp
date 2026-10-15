@@ -664,7 +664,8 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
             const bool voxelInputs = !it->second.paramsPushed ||
                 !sameCol(o.albedo, p.albedo) || !sameCol(o.emissive, p.emissive) ||
                 o.alpha != p.alpha || o.alphaMode != p.alphaMode || o.workflow != p.workflow ||
-                o.metalness != p.metalness || o.roughness != p.roughness;
+                (o.metalness != p.metalness && p.workflow == PbrParams::Workflow::Metallic) ||
+                o.roughness != p.roughness;
             mPhoton.noteMaterialChanged(id, voxelInputs);
             // THE LAMP-MAP CACHE'S MATERIAL INPUT (ENGINE_CACHE_POLICY_SPEC §3:
             // "only if it changes depth"). What a caster pass writes depends on
