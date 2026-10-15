@@ -81,7 +81,11 @@ namespace Ogre
             DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
             uavSlot.texture = texture;
             uavSlot.mipmapLevel = level;
-            uavSlot.access = ResourceAccess::Write;
+            // READ-WRITE, not Write (the stage-1 read's F1): level L - 1 of this SAME texture is sampled
+            // through the texture slot, which the job marks generalReadWrite (it is also our UAV), so
+            // the solver's only transition is this slot's - and the barrier before the next level's
+            // dispatch must make this level's write visible to its SHADER READ, not only to a write.
+            uavSlot.access = ResourceAccess::ReadWrite;
             job->_setUavTexture( 0, uavSlot );
 
             ++gMipDispatches;
