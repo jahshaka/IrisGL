@@ -620,13 +620,15 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     back.atomViewPaintable = atomViewPaintable();
     for (int v = 0; v < kPhotonViewCount; ++v)
         back.photonViewRefusals[v] = v == 0 ? std::string() : photonViewRefusal(static_cast<PhotonView>(v));
-    // THE RIGS A HOST SUBSCRIBED (publishBonePoses): a rig gone (its node removed, its Item without a skeleton) is
-    // dropped from the list and published no more.
+    // THE RIGS A HOST SUBSCRIBED (publishBonePoses): a rig whose NODE is gone is dropped from the list; a node whose
+    // Item has no skeleton right now (the engine re-creates Items: a share dropped, a mesh re-attached) KEEPS its
+    // subscription and publishes nothing until the skeleton is back — the host subscribes once, at its attach.
     back.bonePoses.clear();
     for (size_t i = 0; i < mPublishedRigs.size();) {
         const NodeId id = mPublishedRigs[i];
-        Ogre::SkeletonInstance *skel = record(id) ? skeletonOf(id) : nullptr;
-        if (!skel) { mPublishedRigs.erase(mPublishedRigs.begin() + std::ptrdiff_t(i)); continue; }
+        if (!record(id)) { mPublishedRigs.erase(mPublishedRigs.begin() + std::ptrdiff_t(i)); continue; }
+        Ogre::SkeletonInstance *skel = skeletonOf(id);
+        if (!skel) { ++i; continue; }
         PublishedFrame::RigPoses rp;
         rp.node = id;
         rp.poses.resize(skel->getNumBones());
