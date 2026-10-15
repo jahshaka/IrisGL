@@ -2086,6 +2086,14 @@ bool OgreEngine::updateScene(Scene *scene) {
         // behind. Root's frame clears both afterwards; a standalone update has
         // to do the same or repeated calls grow the light list without bound.
         sm->clearFrameData();
+        // ...AND THE RESOLVE IS PUBLISHED (ENGINE-UPGRADE-U3 stage 2): the scene's half of the snapshot is re-written
+        // with the pose this resolve produced (the subscribed rigs' bones, PublishedFrame::bonePoses) — the call's
+        // completion, read by the host without asking (stage 3 makes the call itself a request). The frame stamp
+        // and the serial are the last frame's: no frame was drawn.
+        {
+            EngineSideScope engineSide;
+            target->publishFrame(mPublishedFrames, mRenderThread.serial());
+        }
         return true;
     } JAH_CATCH(mLastError, false);
 }
@@ -2498,10 +2506,10 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
         for (auto &q : mViews) if (static_cast<View *>(q.get()) == part.view) { v = q.get(); break; }
         if (!v) continue;
         FrameInputView &last = v->mFrameApplied;
-        applyIfChanged(part.background, last.background, viewApplied, [&](const Colour &c) { v->setBackground(c); });
-        applyIfChanged(part.shadows, last.shadows, viewApplied, [&](bool on) { v->setShadows(on); });
+        applyIfChanged(part.background, last.background, viewApplied, [&](const Colour &c) { v->applyBackground(c); });
+        applyIfChanged(part.shadows, last.shadows, viewApplied, [&](bool on) { v->applyShadows(on); });
         applyIfChanged(part.sampleCount, last.sampleCount, viewApplied, [&](unsigned n) { v->setSampleCount(n); });
-        applyIfChanged(part.postFx, last.postFx, viewApplied, [&](const PostFxDesc &fx) { v->setPostFx(fx); });
+        applyIfChanged(part.postFx, last.postFx, viewApplied, [&](const PostFxDesc &fx) { v->applyPostFx(fx); });
         if (part.camera) {
             // A RESIZE RE-APPLIES THE CAMERA: the framing hold and the ortho window are derived from the target's
             // size inside setCamera, so the same description on a new size is a change.
@@ -2534,7 +2542,20 @@ void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
     out.hasEnabledViews = hasEnabledViews();
     out.views.clear();
     for (const auto &v : mViews)
-        if (v) out.views.push_back({ v->name(), v->framesPresented(), v->blankFramesPresented() });
+        if (v) {
+            PublishedEngineFrame::ViewFrames f;
+            f.name = v->name();
+            f.presented = v->framesPresented();
+            f.blank = v->blankFramesPresented();
+            f.width = v->width();
+            f.height = v->height();
+            f.sampleCount = v->sampleCount();
+            f.pipGeneration = v->pipGeneration();
+            f.workspaceGeneration = v->workspaceGeneration();
+            f.globalsPushes = v->globalsPushes();
+            f.postFx = v->postFx();
+            out.views.push_back(std::move(f));
+        }
     out.deviceLost = deviceLost();
     out.gpuFault = gpuFault();
     if (mMonitor) {

@@ -40,4 +40,23 @@ public:
 /// The scene's record; null for a scene this engine did not make.
 const SceneEcho *scene(const Scene *s);
 
+/// The view's record of the host's pushes (setters and the record's view part, as applied).
+class ViewEcho {
+public:
+    virtual ~ViewEcho() = default;
+    virtual NodeId                 cameraNode() const = 0;
+    virtual Colour                 background() const = 0;
+    virtual bool                   shadows() const = 0;
+    virtual bool                   isEnabled() const = 0;
+    virtual const PostFxDesc      &postFx() const = 0;
+    virtual bool                   helpersVisible() const = 0;
+    virtual bool                   vrHelpersVisible() const = 0;
+    virtual bool                   lodHysteresisOffscreen() const = 0;
+    virtual const ViewOverlayDesc &overlay() const = 0;
+    virtual const ViewPipDesc     &pip() const = 0;
+    virtual bool                   asyncShaders() const = 0;
+};
+/// The view's record; null for a view this engine did not make.
+const ViewEcho *view(const View *v);
+
 }}}   // namespace jahshaka::engine::inspect

@@ -51,6 +51,9 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
                    std::string &errorSink)
     : mRoot(root), mWindow(window), mTexture(texture), mName(name),
       mWidth(w), mHeight(h), mBackground(background), mError(errorSink) {
+    mPushedBackground = background;          // what the host created it with
+    mIdentityName = name;                    // the boundary's identity (View::name, View::isOffscreen)
+    mIdentityOffscreen = texture != nullptr;
     mWorkspaceDef = name + "/Workspace";
     // The compositor chain (POST_CHAIN_SPEC.md §3) replaces
     // CompositorManager2::createBasicWorkspaceDef: same pixels in the
@@ -361,6 +364,7 @@ bool OgreView::overlaysAllowed() const {
 }
 
 void OgreView::setOverlay(const ViewOverlayDesc &d) {
+    mPushedOverlay = d;   // the host's own record (View::pushed*, U3 stage 2)
     if (d == mOverlay) return;          // hosts push per frame; the same value is free
     const bool wasAllowed = overlaysAllowed();
     mOverlay = d;
@@ -446,6 +450,7 @@ bool OgreView::pipAllowed() const {
 }
 
 void OgreView::setPip(const ViewPipDesc &d) {
+    mPushedPip = d;   // the host's own record (View::pushed*, U3 stage 2)
     if (d == mPip) return;              // hosts push per frame; the same value is free
     // SHAPE vs STATE, the setPostFx split. Only `enabled` and `allowOffscreen`
     // decide whether the workspace exists (syncPip's `want`); the camera pose,
@@ -525,7 +530,7 @@ void OgreView::syncPip() {
     } JAH_CATCH(mError, );
 }
 
-unsigned OgreView::pipGeneration() const { return mPipGeneration; }
+unsigned OgreView::pipGeneration() const { JAH_SYNC_GETTER("View::pipGeneration"); return mPipGeneration; }
 
 void OgreView::pipTexFactors(float &widthFactor, float &heightFactor) const {
     const unsigned tw = width(), th = height();
@@ -694,7 +699,11 @@ void OgreView::applyPip() {
 //
 // `postFx()` therefore reports the EFFECTIVE description, which is what
 // `vr.state().postFx` shows and what the suite asserts against the desktop's.
-void OgreView::setPostFx(const PostFxDesc &pushed) {
+// THE HOST'S SETTER (ENGINE-UPGRADE-U3 stage 2): what it pushed is kept on its side of the boundary
+// (View::pushed*), then applied; the engine's own callers (the drain, the VR session's views) apply directly.
+void OgreView::setPostFx(const PostFxDesc &pushed) { mPushedPostFx = pushed; applyPostFx(pushed); }
+
+void OgreView::applyPostFx(const PostFxDesc &pushed) {
     PostFxDesc fx = pushed;
     if (mStereo) {
         applyVrViewPolicy(fx, mVrSsrOverride);
@@ -847,6 +856,7 @@ void OgreView::seedExposureHistory(float scale) {
 /// inside attachWorkspace, beside the generation counter, so it can only mean
 /// "frames THIS graph has drawn".
 float OgreView::measuredExposureScale() const {
+    JAH_SYNC_GETTER("View::measuredExposureScale");
     if (!mWorkspace || !mRoot) return 0.0f;
     const ChainDesc d = chainDesc();
     if (!d.hdr || d.tonemapFixed) return 0.0f;
@@ -894,8 +904,6 @@ OgreView::~OgreView() {
     destroy();
 }
 
-const std::string &OgreView::name() const { return mName; }
-Scene *OgreView::scene() const { return mScene; }
 
 bool OgreView::setCameraNode(NodeId node) {
     JAH_TRY {
@@ -946,6 +954,7 @@ bool OgreView::setScene(Scene *scene) {
         mCamera->setFarClipDistance(1000.0f);
         mCamera->setAutoAspectRatio(true);
         mScene = s;
+        mBoundScene = scene;   // the boundary's binding (View::scene)
         // ITS CAPTURES FOLLOW THE VIEW'S COMPILE MODE FROM THE FIRST FRAME (ASYNC-SHADERS-1): a
         // freshly bound scene would otherwise capture BLOCKING until the host's next push.
         if (mScene) mScene->setAsyncShaders(mAsyncShaders);
@@ -1205,9 +1214,9 @@ void OgreView::removeWorkspaceListener(Ogre::CompositorWorkspaceListener *l) {
     } JAH_CATCH(mError, );
 }
 
-unsigned OgreView::workspaceGeneration() const { return mWorkspaceGeneration; }
+unsigned OgreView::workspaceGeneration() const { JAH_SYNC_GETTER("View::workspaceGeneration"); return mWorkspaceGeneration; }
 
-unsigned long long OgreView::framesPresented() const { return mFramesPresented; }
+unsigned long long OgreView::framesPresented() const { JAH_SYNC_GETTER("View::framesPresented"); return mFramesPresented; }
 
 void OgreView::notePresented() {
     mCaptureThisFrame = false;   // the capture flag is one frame's (beginFrameCapture)
@@ -1224,7 +1233,7 @@ void OgreView::notePresented() {
     else if (mEnabled && mBlankWorkspace && !mScene) ++mBlankFramesPresented;
 }
 
-unsigned long long OgreView::blankFramesPresented() const { return mBlankFramesPresented; }
+unsigned long long OgreView::blankFramesPresented() const { JAH_SYNC_GETTER("View::blankFramesPresented"); return mBlankFramesPresented; }
 
 void OgreView::detachScene(bool takeBlank) {
     // A CAPTURE ASKED OF THIS SCENE DIES WITH IT (CLOSE-SHOT-2): an armed request
@@ -1260,6 +1269,7 @@ void OgreView::detachScene(bool takeBlank) {
         }
         if (mPhotonOverlay) retirePhotonOverlay();
         mScene  = nullptr;
+        mBoundScene = nullptr;
         mFramesPresented = 0;
         // AND THE CLEAR-ONLY CHAIN TAKES OVER, in the same call (lane
         // STALE-VIEW-1). Without it this view would present nothing until a
@@ -1410,7 +1420,11 @@ void OgreView::applyLetterbox() {
     } JAH_CATCH(mError, );
 }
 
-void OgreView::setEnabled(bool on) {
+// THE HOST'S SETTER (ENGINE-UPGRADE-U3 stage 2): what it pushed is kept on its side of the boundary
+// (View::pushed*), then applied; the engine's own callers (the drain, the VR session's views) apply directly.
+void OgreView::setEnabled(bool on) { mPushedEnabled = on; applyEnabled(on); }
+
+void OgreView::applyEnabled(bool on) {
     mEnabled = on;
     JAH_TRY {
         if (mWorkspace) mWorkspace->setEnabled(on);
@@ -1426,7 +1440,11 @@ void OgreView::setEnabled(bool on) {
 Colour OgreView::background() const { return mBackground; }
 bool OgreView::shadows() const { return mShadows; }
 
-void OgreView::setShadows(bool on) {
+// THE HOST'S SETTER (ENGINE-UPGRADE-U3 stage 2): what it pushed is kept on its side of the boundary
+// (View::pushed*), then applied; the engine's own callers (the drain, the VR session's views) apply directly.
+void OgreView::setShadows(bool on) { mPushedShadows = on; applyShadows(on); }
+
+void OgreView::applyShadows(bool on) {
     if (on == mShadows) return;
     mShadows = on;
     rebuildWorkspaceDef();
@@ -1477,7 +1495,11 @@ void OgreView::setOffscreenContract(OffscreenContract c) {
     rebuildWorkspaceDef();
 }
 
-void OgreView::setBackground(const Colour &c) {
+// THE HOST'S SETTER (ENGINE-UPGRADE-U3 stage 2): what it pushed is kept on its side of the boundary
+// (View::pushed*), then applied; the engine's own callers (the drain, the VR session's views) apply directly.
+void OgreView::setBackground(const Colour &c) { mPushedBackground = c; applyBackground(c); }
+
+void OgreView::applyBackground(const Colour &c) {
     const bool same = std::abs(c.r - mBackground.r) < 1e-4f && std::abs(c.g - mBackground.g) < 1e-4f &&
                       std::abs(c.b - mBackground.b) < 1e-4f && std::abs(c.a - mBackground.a) < 1e-4f;
     if (same) return;
@@ -1535,16 +1557,17 @@ bool OgreView::isEnabled() const { return mEnabled; }
 // made the selftest's resize assertion tautological (deep audit area 7 F3):
 // it compared the values we had just pushed with themselves.
 unsigned OgreView::width() const {
+    JAH_SYNC_GETTER("View::width");
     Ogre::TextureGpu *t = target();
     // A LAYERED (stereo) target reports its eye PAIR laid side by side — the
     // layout readPixels returns and the size the view was created at.
     return t ? t->getWidth() * t->getNumSlices() : mWidth;
 }
 unsigned OgreView::height() const {
+    JAH_SYNC_GETTER("View::height");
     Ogre::TextureGpu *t = target();
     return t ? t->getHeight() : mHeight;
 }
-bool OgreView::isOffscreen() const { return mTexture != nullptr; }
 
 void OgreView::resize(unsigned w, unsigned h) {
     if (!w || !h) return;
@@ -1625,6 +1648,7 @@ void OgreView::setSampleCount(unsigned samples) {
 }
 
 unsigned OgreView::sampleCount() const {
+    JAH_SYNC_GETTER("View::sampleCount");
     // The ACHIEVED count: drivers clamp (Vulkan halves unsupported requests), and
     // the validated description lands on the target at window creation /
     // Resident transition. Before a target exists, report the request.

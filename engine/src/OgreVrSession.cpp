@@ -1467,7 +1467,7 @@ bool VrSession::create(std::string &reason) {
     {
         PostFxDesc fx;
         fx.hdr = true;
-        mView->setPostFx(fx);   // the policy is applied by setStereo, below
+        mView->applyPostFx(fx);   // the policy is applied by setStereo, below
     }
     mView->setStereo(true, "JahshakaVrCullCamera");
     // THE TWO HELPER CHANNELS (kVrHelperBit's two-bit rule, phase 4; owner
@@ -1516,7 +1516,7 @@ bool VrSession::create(std::string &reason) {
     // the numbers are in the lane's report — and it is the right trade: a
     // headset with no shadows is not a preview of the scene, it is a different
     // scene.
-    mView->setShadows(true);
+    mView->applyShadows(true);
     // THE GI DRIVER. Without this the cascades would follow whichever on-screen
     // view was created first — the editor's — and the headset would look at a
     // field centred somewhere else entirely (VR_SPEC §3.4).
@@ -1533,6 +1533,8 @@ bool VrSession::create(std::string &reason) {
     mView->addWorkspaceListener(this);
     // ...and never the capture's (CLOSE-SHOT-2): the eyes are submitted once a frame.
     mView->excludeFromCapture(this);
+    // setEnabled, not applyEnabled: the session OWNS this view, so its record of the enable (View::pushedEnabled)
+    // is the session's - the host's OffscreenRenderScope reads it (U3 stage 2; a render-side write from stage 4 on).
     mView->setEnabled(true);
 
     // THE HANDS (phase 4). After the session and the reference space exist and
@@ -3404,7 +3406,7 @@ void VrSession::endFrame() {
 void VrSession::setSessionViewEnabled(bool on) {
     if (!mView || mViewEnabled == on) return;
     mViewEnabled = on;
-    mView->setEnabled(on);
+    mView->setEnabled(on);   // the session's own view: its record is the session's (see the begin)
 }
 
 // ---------------------------------------------------------------------------
@@ -4693,9 +4695,9 @@ bool VrSession::eyeScreenshot(unsigned eye, Image &out, std::string &error) {
             fx.tonemapFixed = true;
             fx.exposureScale = exposure;
         }
-        control->setPostFx(fx);
+        control->applyPostFx(fx);
         control->setHelpersVisible(mView->helpersVisible());
-        control->setShadows(mView->shadows());
+        control->applyShadows(mView->shadows());
         if (control->setScene(mScene)) {
             CameraDesc desc;
             desc.nearClip = float(mView->camera() ? mView->camera()->getNearClipDistance()

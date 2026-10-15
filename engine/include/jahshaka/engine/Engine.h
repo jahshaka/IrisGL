@@ -1414,12 +1414,27 @@ protected:
 class View {
 public:
     virtual ~View() = default;
-    virtual const std::string &name() const = 0;
+    /// THE VIEW'S IDENTITY AND ITS BINDING (ENGINE-UPGRADE-U3 stage 2): its name and whether it is offscreen, fixed
+    /// when the engine creates it, and the Scene the host bound with setScene (null = none) — what the host itself
+    /// set, never a read of the engine's state.
+    const std::string &name() const { return mIdentityName; }
+    bool isOffscreen() const { return mIdentityOffscreen; }
+    Scene *scene() const { return mBoundScene; }
+    /// WHAT THE HOST LAST PUSHED for this view (ENGINE-UPGRADE-U3 stage 2 — the host's own shadow, F5): the chain, the
+    /// clear colour, the shadows flag, the enable, the overlay and the picture-in-picture, each as the host last set it, by a setter or by a view part of a
+    /// submitted record (its merge, on the submitting side). NEVER the engine's applied state — a record's part lands
+    /// a frame later — and never written by the engine: a host building a part on top of what it already pushed
+    /// reads these.
+    const PostFxDesc &pushedPostFx() const { return mPushedPostFx; }
+    const Colour &pushedBackground() const { return mPushedBackground; }
+    bool pushedShadows() const { return mPushedShadows; }
+    bool pushedEnabled() const { return mPushedEnabled; }
+    const ViewOverlayDesc &pushedOverlay() const { return mPushedOverlay; }
+    const ViewPipDesc &pushedPip() const { return mPushedPip; }
     /// Binds a Scene to this View. Call after createScene(); a View renders nothing
     /// until a Scene is attached. A View holds at most one Scene: binding a second
     /// while one is attached fails (false, lastError()). Pass null to detach.
     virtual bool setScene(Scene *) = 0;
-    virtual Scene *scene() const = 0;
     /// Full camera state in one call (step 5). The document camera is pushed
     /// through this every frame. This is the ONLY way to move a View's camera.
     virtual void setCamera(const CameraDesc &) = 0;
@@ -1440,8 +1455,6 @@ public:
     /// `node = 0` returns the camera to the pushed pose. The node must belong to
     /// this view's scene.
     virtual bool setCameraNode(NodeId node) = 0;
-    /// The node the camera rides, or 0.
-    virtual NodeId cameraNode() const = 0;
     /// ONE WRITER PER FIELD (U0 3a; the 3a read, D): on a view a mirror feeds, the background, the post chain, the
     /// shadows switch, the sample count and the camera are FrameInput fields, and the drain applies a field only when
     /// the RECORD's value changes — a host writing one of them here on the spot is no longer corrected next frame.
@@ -1452,20 +1465,13 @@ public:
     /// Clear colour behind the scene (the document's flat sky colour). Cheap to
     /// call with the same value; a change rebuilds the view's compositor workspace.
     virtual void setBackground(const Colour &) = 0;
-    /// KEPT: cheap introspection the host needs to avoid redundant (workspace-
-    /// rebuilding) setBackground calls, and pinned by the engine suites.
-    virtual Colour background() const = 0;
     /// Shadow maps for this view (PSSM for directional, focused for point/spot;
     /// lights opt in with LightDesc::castShadows). Off by default; toggling rebuilds
     /// the view's workspace.
     virtual void setShadows(bool) = 0;
-    virtual bool shadows() const = 0;
     /// A disabled View is skipped by renderOneFrame(). Hidden viewports MUST be
     /// disabled — the backend otherwise keeps drawing them at full cost.
     virtual void setEnabled(bool) = 0;
-    /// KEPT: cheap introspection — hosts query it before pushing per-frame state
-    /// into a View they may have disabled; pinned by the engine suites.
-    virtual bool isEnabled() const = 0;
     /// Asks for a new size in LOGICAL POINTS (see Engine::createView on units).
     /// Cheap and idempotent: for an on-screen View this only records the request
     /// — it is applied once, at frame time, by the next renderOneFrame(), so a
@@ -1491,9 +1497,6 @@ public:
     /// sampleCount() reports the ACHIEVED count once the target exists.
     virtual void setSampleCount(unsigned samples) = 0;
     virtual unsigned sampleCount() const = 0;
-    /// KEPT: cheap introspection — readPixels() only works offscreen, so callers
-    /// (thumbnails, tests) branch on this; pinned by the engine suites.
-    virtual bool isOffscreen() const = 0;
 
     /// The post-processing chain for this View (POST_CHAIN_SPEC.md): HDR +
     /// filmic tonemap, bloom, SSAO, SMAA, SSR, refractive glass.
@@ -1506,7 +1509,6 @@ public:
     /// change to an ENABLE flag rebuilds the workspace; a change to a tuning
     /// value is a uniform and rebuilds nothing. A RECORD FIELD on a mirrored view (see setBackground: one writer).
     virtual void setPostFx(const PostFxDesc &) = 0;
-    virtual const PostFxDesc &postFx() const = 0;
 
     /// CUT THE EXPOSURE INSTEAD OF FADING IT (CAMERA_LENS_SPEC §4).
     ///
@@ -1572,7 +1574,6 @@ public:
     /// NOT affected: backdrops (Scene::setNodeBackdrop — the Ground plane widget),
     /// the sun disc, and every piece of real scene content.
     virtual void setHelpersVisible(bool) = 0;
-    virtual bool helpersVisible() const = 0;
 
     /// ...AND DOES IT DRAW THE VR CHANNEL? (SPECS/VR_SPEC.md §5 phase 4; owner
     /// 2026-09-17.)
@@ -1591,7 +1592,6 @@ public:
     /// setHelpersVisible — a per-pass mask, graph shape, set it once at view
     /// creation.
     virtual void setVrHelpersVisible(bool) = 0;
-    virtual bool vrHelpersVisible() const = 0;
 
     /// DOES THIS OFFSCREEN VIEW GET THE LOD SWITCH BAND? (fork 5230c9390+8282f6d70 (was 0075),
     /// ATOM-3; lane ENGINE-SMALL-A's LOD-LATCH-1, 2026-09-18.)
@@ -1620,7 +1620,6 @@ public:
     /// workspace and restarts its adaptation history — set it once, when the
     /// view is created. Ignored on an on-screen view, which has the band anyway.
     virtual void setLodHysteresisOffscreen(bool) = 0;
-    virtual bool lodHysteresisOffscreen() const = 0;
 
     /// WHAT AN OFFSCREEN VIEW'S PICTURE IS FOR (PHOTON-GATHER-1d fix round) — and
     /// so whether the screen-probe gather runs in it. At a gather tier the
@@ -1677,7 +1676,6 @@ public:
     /// Ogre's overlay set is process-wide, so two on-screen Views cannot show
     /// different text simultaneously (see ViewOverlayDesc's constraint note).
     virtual void setOverlay(const ViewOverlayDesc &) = 0;
-    virtual const ViewOverlayDesc &overlay() const = 0;
 
     /// The picture-in-picture inset for this View (CAMERAS_SPEC §7.7): a second
     /// camera's view of the SAME scene, composited into a rectangle of this
@@ -1705,7 +1703,6 @@ public:
     /// so binding the next scene never rebuilds an inset nobody asked for on
     /// it (VIEWS-XID-1). A host that wants one there calls setPip again.
     virtual void setPip(const ViewPipDesc &) = 0;
-    virtual const ViewPipDesc &pip() const = 0;
     /// How many times the INSET's own workspace has been created — the
     /// counterpart of workspaceGeneration for the second workspace, and the
     /// number that proves a steady inset costs nothing structural per frame.
@@ -1891,7 +1888,16 @@ public:
     /// not keep a placeholder). No-op while the service is not running. Survives a
     /// workspace rebuild.
     virtual void setAsyncShaders(bool on) = 0;
-    virtual bool asyncShaders() const = 0;
+protected:
+    std::string mIdentityName;
+    bool        mIdentityOffscreen = false;
+    Scene      *mBoundScene = nullptr;
+    PostFxDesc  mPushedPostFx;
+    Colour      mPushedBackground;
+    bool        mPushedShadows = false;
+    bool        mPushedEnabled = true;
+    ViewOverlayDesc mPushedOverlay;
+    ViewPipDesc     mPushedPip;
 };
 
 /// Owns the device and every Scene and View.

@@ -272,6 +272,7 @@ bool OgreView::takeVideoFrame(VideoFrameNv12 &out, bool wait) {
 }
 
 VideoReadbackStatus OgreView::videoReadbackStatus() const {
+    JAH_SYNC_GETTER("View::videoReadbackStatus");
     return mVideoReadback ? mVideoReadback->status() : VideoReadbackStatus();
 }
 

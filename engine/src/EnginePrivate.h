@@ -6352,7 +6352,7 @@ public:
     unsigned long long mHoleyPresented = 0;   ///< frames with a hole that were presented anyway
 };
 
-class OgreView final : public View {
+class OgreView final : public View, public inspect::ViewEcho {
 public:
     /// On-screen: `window` is set. Offscreen: `texture` is set. Never both.
     OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *texture,
@@ -6360,8 +6360,6 @@ public:
              std::string &errorSink);
     ~OgreView() override;
 
-    const std::string &name() const override;
-    Scene *scene() const override;
     /// The same pointer, unerased — Engine::renderOneFrame groups views by the
     /// scene they draw (the authoritative-view rule on updateGi).
     OgreScene *ogreScene() const { return mScene; }
@@ -6385,10 +6383,13 @@ public:
 
     void setCamera(const CameraDesc &c) override;
     void setEnabled(bool on) override;
+    void applyEnabled(bool on);       ///< the engine's own: the drain, the VR session's views
     Colour background() const override;
     bool shadows() const override;
     void setShadows(bool on) override;
+    void applyShadows(bool on);
     void setBackground(const Colour &c) override;
+    void applyBackground(const Colour &c);
     /// The clear colour and the shadow node live in the chain's definitions:
     /// rebuild definitions + workspace, keeping scene, camera and enabled state.
     void rebuildWorkspaceDef();
@@ -6478,7 +6479,7 @@ public:
     /// not climb is a view rendering with whatever the last workspace to update
     /// happened to leave in the process-wide materials. @see globalsPushes.
     void noteGlobalsPush() { ++mGlobalsPushes; }
-    unsigned long long globalsPushes() const override { return mGlobalsPushes; }
+    unsigned long long globalsPushes() const override { JAH_SYNC_GETTER("View::globalsPushes"); return mGlobalsPushes; }
     /// THE TWO EYES THIS VIEW IS RENDERING, this frame (@see StereoEyeBasis).
     /// Pushed by the VR session every frame it locates them, dropped when the
     /// session ends; read by the ray-traced reflection so each eye's pixels get
@@ -6591,6 +6592,13 @@ public:
     void destroyCaptureWorkspace();
 
     void setPostFx(const PostFxDesc &fx) override;
+    void applyPostFx(const PostFxDesc &fx);
+    /// The submitting side's merge of a view part (RenderThread::submit): what the host pushed, kept (View::pushed*).
+    void notePushed(const FrameInputView &part) {
+        if (part.postFx) mPushedPostFx = *part.postFx;
+        if (part.background) mPushedBackground = *part.background;
+        if (part.shadows) mPushedShadows = *part.shadows;
+    }
     const PostFxDesc &postFx() const override;
     void resetExposureHistory() override;
     void seedExposureHistory(float scale) override;
@@ -6664,7 +6672,6 @@ public:
     bool isEnabled() const override;
     unsigned width()  const override;
     unsigned height() const override;
-    bool isOffscreen() const override;
     /// The presenting window, or null for an offscreen view. The engine needs
     /// it for the one decision that is process-wide but lives on the window:
     /// vsync (Engine::setVsync).

@@ -8302,8 +8302,14 @@ struct PublishedEngineFrame {
     /// after a destroyView.
     struct ViewFrames {
         std::string        name;
-        unsigned long long presented = 0;
-        unsigned long long blank = 0;
+        unsigned long long presented = 0;       ///< View::framesPresented (reset when a scene is bound)
+        unsigned long long blank = 0;           ///< View::blankFramesPresented
+        unsigned           width = 0, height = 0;   ///< the ACHIEVED target size (View::width/height)
+        unsigned           sampleCount = 1;     ///< the ACHIEVED MSAA count
+        unsigned           pipGeneration = 0;
+        unsigned           workspaceGeneration = 0;
+        unsigned long long globalsPushes = 0;
+        PostFxDesc         postFx;              ///< the EFFECTIVE chain the view drew with (a VR policy applied)
     };
     /// ONE FRAME'S ERROR (U3 F3): the record it applied, the frame, the text.
     struct FrameError {
@@ -8322,6 +8328,11 @@ struct PublishedEngineFrame {
     AsyncShaderStats   shaders;            ///< the compile counters (`compiledInForeground` = livecompiles' total)
     bool               hasEnabledViews = false;
     std::vector<ViewFrames> views;
+    /// The view named `name` as this frame closed it; null when no live view has that name.
+    const ViewFrames *view(const std::string &name) const {
+        for (const ViewFrames &v : views) if (v.name == name) return &v;
+        return nullptr;
+    }
     /// THE FRAME'S ERROR (U3 F3): what THIS frame wrote ("" = nothing failed). A failing CALL's error is not here — it
     /// stays Engine::lastError()'s until stage 3 makes every call a message with its own completion.
     std::string        frameError;

@@ -2433,4 +2433,5 @@ void OgreScene::bindEngine(OgreEngine *e) { mEngine = e; mIdentityEngine = e; }
 namespace jahshaka { namespace engine { namespace inspect {
 // THE TEST DOOR (EngineInspect.h): the engine's own record of a host's pushes, for the fixtures alone.
 const SceneEcho *scene(const Scene *s) { return dynamic_cast<const SceneEcho *>(s); }
+const ViewEcho *view(const View *v) { return dynamic_cast<const ViewEcho *>(v); }
 }}}   // namespace jahshaka::engine::inspect

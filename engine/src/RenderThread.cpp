@@ -60,6 +60,9 @@ void RenderThread::submit(const FrameInput &in) {
         ++mSubmit.scenePartsMerged;
     }
     for (const FrameInputView &v : in.views) {
+        // WHAT THE HOST PUSHED, kept on its side (View::pushed*, ENGINE-UPGRADE-U3 stage 2 F5): a part a host builds
+        // on top of its own last push reads it, never the engine's applied state.
+        if (v.view) static_cast<OgreView *>(v.view)->notePushed(v);
         auto it = std::find_if(p.views.begin(), p.views.end(),
                                [&](const FrameInputView &q) { return q.view == v.view; });
         if (it == p.views.end()) { p.views.push_back(v); continue; }

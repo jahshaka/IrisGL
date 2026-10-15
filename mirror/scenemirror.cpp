@@ -7545,7 +7545,7 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // The reflection's clear colour is the view's, so a mirror showing
         // "nothing" shows the same nothing the viewport does.
         // (THIS frame's background when the sky sets one — the record's — else the view's own.)
-        pr.background = part.background ? *part.background : view->background();
+        pr.background = part.background ? *part.background : view->pushedBackground();
         scene.planar = pr;
     }
     // THE GI VOLUME OVERLAY GOES LAST, and it belongs HERE rather than in
@@ -8446,7 +8446,7 @@ void SceneMirror::buildCamera(FrameInputView &part, iris::CameraNodePtr camera, 
         // the view's own (applied by an earlier frame).
         PostFxDesc fx = part.postFx ? *part.postFx
                       : (view == mWorldPostFxView && mWorldPostFxStamp + 1 >= mSyncStamp) ? mWorldPostFx
-                                                                                          : view->postFx();   // the world's, as buildEnvironment left it
+                                                                                          : view->pushedPostFx();   // the world's, as the host last pushed it
         applyCameraPostFx(camera, fx);
         part.postFx = fx;
         // A CUT IS NOT A LIGHTING CHANGE. The chain's auto exposure adapts at
