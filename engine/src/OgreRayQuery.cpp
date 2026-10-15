@@ -256,8 +256,7 @@ constexpr unsigned kReflectSplitKinds = 4u;
 /// each record's sun, footprint and weight) — jah_rq_hit_record.glsl.
 constexpr unsigned kReflectHitBinding = 25u;
 /// ...and (PHOTON-VOXEL-5) level 0's BACK side (29) and the voxelizer's NORMAL (30): the hit's
-/// level-0 read takes the side of a two-sided voxel its ray meets (the isotropic volume stands
-/// in for both on a Low chain - the back of a one-light store is its light).
+/// level-0 read takes the side of a two-sided voxel its ray meets.
 constexpr unsigned kReflectSideBinding = 29u;
 constexpr unsigned kReflectSideKinds = 2u;
 /// The volumes per cascade the ray programs bind: iso, X, Y, Z, coverage +/-, position +/-,
@@ -5266,7 +5265,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                          cam->getFarClipDistance());
     pp.knobs[2] = float(rv.frame & 0xFFFFu);
     pp.knobs[3] = float(voxCount);
-    pp.knobs2[0] = 0.0f;   // unused (the anisotropic switch it carried is gone: PHOTON-MARCH-1)
     // THE SURFACE BIAS, in world units, derived from the finest cell rather than
     // chosen: it has to clear the voxel grid's own quantisation (a ray that
     // starts inside the cell holding its own surface reads that surface back as

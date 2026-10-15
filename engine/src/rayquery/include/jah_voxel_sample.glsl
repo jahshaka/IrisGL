@@ -65,7 +65,7 @@
 /// KERNEL is the footprint. A trilinear fetch weighs the texels within one texel of the
 /// sample, so its kernel is two texels wide: the level whose texel is half the
 /// footprint. (Upstream read the footprint's own level - a kernel twice the footprint.)
-/// `texelCells` is the level-0 texel in cells: 1 for the isotropic volume, 2 for a
+/// `texelCells` is the level-0 texel in cells: 1 for the total's level 0, 2 for a
 /// directional one (half resolution, both signs packed along x).
 float jahVoxelKernelMip( float lod, float texelCells )
 {

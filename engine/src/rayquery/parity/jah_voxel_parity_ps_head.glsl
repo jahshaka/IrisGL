@@ -69,7 +69,7 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4 chainInvRes[8];
 	uniform vec4 chainFromPrev[14];
 	uniform vec4 cones[256];
-	uniform vec4 counts;	// x = cones, y = cascades, z unused
+	uniform vec4 counts;	// x = cones, y = cascades, zw spare (0)
 	uniform vec4 sdf;		// x = the SDF skip's max mip, y = its factor
 vulkan( }; )
 

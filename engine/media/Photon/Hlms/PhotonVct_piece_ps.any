@@ -177,7 +177,7 @@
 		#define JAH_VOX_FROM_PREV_SCALE( c ) passBuf.vctProbeParams.fromPreviousProbeToNext[(c) - 1][0]
 		#define JAH_VOX_FROM_PREV_OFFSET( c ) passBuf.vctProbeParams.fromPreviousProbeToNext[(c) - 1][1]
 	@end
-	@property( vct_enable_specular_sdf_quality && vct_num_probes <= 1 )
+	@property( vct_enable_specular_sdf_quality )
 		#define JAH_VOX_SDF_MAXMIP passBuf.vctProbeParams.specSdfMaxMip
 		#define JAH_VOX_SDF_FACTOR passBuf.vctProbeParams.specularSdfFactor
 	@end
@@ -376,7 +376,7 @@
 			if( jahRoughLobe )
 				jahSpecStart = float4( posLS, 0.0f );
 			JahConeResult irrLight = jahConeMarchAged( jahSpecStart.xyz, reflVecLS, min( specConeAngleTan, 1.0f ), jahSpecOrigin,
-			@property( vct_enable_specular_sdf_quality && vct_num_probes <= 1 )
+			@property( vct_enable_specular_sdf_quality )
 												   JAH_MARCH_SPECULAR | JAH_MARCH_SDF, jahSpecStart.w );
 			@else
 												   JAH_MARCH_SPECULAR, jahSpecStart.w );

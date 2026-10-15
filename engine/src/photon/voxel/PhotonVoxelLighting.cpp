@@ -92,7 +92,8 @@ namespace Ogre
     static PixelFormatGpu jahLightVoxelFormat() { return PFG_RGBA16_FLOAT; }
     static PixelFormatGpu jahLightVoxelUavFormat() { return PFG_RGBA16_FLOAT; }
     //-------------------------------------------------------------------------
-    PhotonVoxelLighting::PhotonVoxelLighting( IdType id, PhotonVoxelizerSourceBase *voxelizer ) :
+    PhotonVoxelLighting::PhotonVoxelLighting( IdType id, PhotonVoxelizerSourceBase *voxelizer,
+                                              bool chainOfOne ) :
         IdObject( id ),
         mSamplerblockTrilinear( 0 ),
         mVoxelizer( voxelizer ),
@@ -108,6 +109,7 @@ namespace Ogre
         mInjectHigherMipHalfWidth( 0 ),
         mBakingMultiplier( 1.0f ),
         mInvBakingMultiplier( 1.0f ),
+        mChainOfOne( chainOfOne ),
         mNumLights( 0 ),
         mBakingMultiplierParam( 0 ),
         mVoxelCellSize( 0 ),
@@ -377,7 +379,10 @@ namespace Ogre
         // of a voxel's two sides, with the back beside it) and every coarser level from the
         // directional volumes - the light per facing half-axis, the colour law at every tier. Its
         // mips exist only under the specular SDF quality: the empty-space skip
-        // (jah_voxel_march.glsl, JAH_MARCH_SDF) reads its coarse opacity, nothing else does.
+        // (jah_voxel_march.glsl, JAH_MARCH_SDF) reads its coarse opacity, nothing else does,
+        // and it runs on a one-cascade chain only (shouldEnableSpecularSdfQuality) - a shipped
+        // chain of 2-4 cascades allocated the chain and regenerated it after every injection
+        // and every bounce for no reader.
         const uint8 numMipsMain = bSdfQuality ? PixelFormatGpuUtils::getMaxMipmapCount( shortest ) : 1u;
         const uint8 numMipsAniso = PixelFormatGpuUtils::getMaxMipmapCount( std::max( 1u, shortest >> 1u ) );
 
@@ -1011,6 +1016,7 @@ namespace Ogre
 
         generateAnisotropicMips();
 
+        // (the total's levels exist under the specular SDF quality only: otherwise a no-op)
         PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
 
         mBounceShaderParams->mParams.swap( mLocalBounceShaderParams );
@@ -1364,6 +1370,7 @@ namespace Ogre
         // Jahshaka (MOVER-OCCLUSION-1): D's own chain, read by the ray tier's hits.
         if( mLightDirect )
             PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightDirect );
+        // (the total's levels exist under the specular SDF quality only: otherwise a no-op)
         PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
 
         // Jahshaka (CONTACT-OCCLUSION-1, SKY-BOUNCE-1): THE SKY IS A LIGHT. Its direct term
@@ -1608,7 +1615,10 @@ namespace Ogre
     //-------------------------------------------------------------------------
     bool PhotonVoxelLighting::shouldEnableSpecularSdfQuality() const
     {
-        return mVoxelizer->getAlbedoVox()->getWidth() > 32u &&
+        // THE SKIP'S OWN PREDICATE, ONE DEFINITION (PHOTON-MARCH-1): upstream's empty-space skip
+        // reads a single volume (jah_voxel_march.glsl), so it is on for a one-cascade chain of
+        // more than 32 cells per axis - what the pixel's pieces and the total's mip chain key on.
+        return mChainOfOne && mVoxelizer->getAlbedoVox()->getWidth() > 32u &&
                mVoxelizer->getAlbedoVox()->getHeight() > 32u &&
                mVoxelizer->getAlbedoVox()->getDepth() > 32u;
     }

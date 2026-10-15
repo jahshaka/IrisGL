@@ -443,8 +443,8 @@
 	const float bm = p_bakingMultiplier;
 	const float3 emissive = emissiveVal.xyz;
 	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz );
-	// LEVEL 0 HOLDS THE SIDES' MEAN (the isotropic reads - the Low tier's whole chain - and a
-	// one-sided voxel's light unchanged); the anisotropic tiers keep the back beside it.
+	// LEVEL 0 HOLDS THE SIDES' MEAN (a one-sided voxel's light unchanged; the bounce's march reads
+	// it) and the back side beside it (backVoxel, below).
 	float4 injectedVoxel = float4( ( ( front + back ) * 0.5f + emissive ) * ( bm * c ), c );
 	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( injectedVoxel ) );
 	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): the same value, kept apart as the bounce iteration's

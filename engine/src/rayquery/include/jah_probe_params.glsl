@@ -37,7 +37,7 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// units, z = the frame index (the sample sequence's only input),
 	/// w = how many cascades are bound.
 	vec4 knobs;
-	/// x = 1 when the voxel textures carry the anisotropic slots, y = the
+	/// x spare (0), y = the
 	/// ray start's floor off the surface in world units (an epsilon; the trace
 	/// takes the larger of it and 1e-4 of the probe's view distance), z = 1
 	/// when a sky cubemap is bound,

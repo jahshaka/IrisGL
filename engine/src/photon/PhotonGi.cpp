@@ -1466,8 +1466,9 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
         st.voxels = wt.count;
         st.voxelsAboveOne = wt.aboveOne;
 
-        // THE BYTES of every light volume a reader samples (the total, the
-        // anisotropic axes, the per-axis coverage), hashed raw — the one-sweep
+        // THE BYTES of every light volume a reader samples (all of
+        // getNumVoxelTextures(): the total, the directional axes, the coverage and the
+        // position per half, the back side, the normal), hashed raw — the one-sweep
         // proof's instrument.
         {
             Ogre::uint64 h = 1469598103934665603ull;
@@ -1747,8 +1748,9 @@ void PhotonComponent::noteMaterialChanged(MaterialId id, bool voxelInputsChanged
     // it is deliberately BEFORE the GI effect test: a card holds a picture of a
     // surface, so ANY change to what that surface looks like stales it —
     // including the ones `giMaterialChangeEffect` declines because they cannot
-    // move a VOXEL (a roughness edit, a normal map, a material nothing GI-lit
-    // wears yet). It throws the cards of the instances wearing THAT material
+    // move a VOXEL (a normal map, a material nothing GI-lit wears yet; the
+    // roughness and the metalness DO move one - the voxel's albedo and lobe -
+    // and the edit says so, OgreMaterials.cpp's voxelInputs). It throws the cards of the instances wearing THAT material
     // back on the queue and frees no page; the counter model is
     // `gi.material_swap`'s.
     if (mSurfaceCache) mSurfaceCache->noteMaterialChanged(id);
@@ -4225,7 +4227,7 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
         const VoxelGatherInputs in = cascadeGatherInputs(c, mask);
         gatherAndBuild(*c.feed, c.voxelizer, in);
         c.lighting = new Ogre::PhotonVoxelLighting(Ogre::Id::generateNewId<Ogre::PhotonVoxelLighting>(),
-                                           c.voxelizer);
+                                           c.voxelizer, table.size() == 1u);
         // THE BOUNCE VOLUMES AT EVERY BOUNCE COUNT (CONTACT-OCCLUSION-1): the sky's
         // direct term is a bounce-job pass (PhotonVoxelLighting::update's sky pass, fork), so a
         // one-bounce document needs them too — without them a surface lit only by the

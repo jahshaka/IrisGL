@@ -147,6 +147,8 @@ namespace Ogre
 
         float mBakingMultiplier;
         float mInvBakingMultiplier;
+        /// The scene's chain is this one cascade (the constructor's; the SDF skip's condition).
+        bool  mChainOfOne;
 
         /// THE ONE ENVIRONMENT, FOR THE BOUNCE (Jahshaka, PHOTON-ENV-1): what a bounce
         /// cone that escapes the voxels sees - the host's disc-free sky cube (or null:
@@ -273,7 +275,9 @@ namespace Ogre
         bool hasEnvironmentLight() const;
 
     public:
-        PhotonVoxelLighting( IdType id, PhotonVoxelizerSourceBase *voxelizer );
+        /// `chainOfOne`: the scene's cascade chain is this one cascade (the specular SDF skip's
+        /// condition: shouldEnableSpecularSdfQuality).
+        PhotonVoxelLighting( IdType id, PhotonVoxelizerSourceBase *voxelizer, bool chainOfOne );
         ~PhotonVoxelLighting() override;
 
         /// Used by a host's cascade chain (upstream's VctCascadedVoxelizer is not in

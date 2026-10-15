@@ -87,7 +87,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// world units, z = the frame index (the sample sequence's only input),
 	/// w = how many cascades are bound.
 	vec4 knobs;
-	/// x unused (the anisotropic switch, gone: PHOTON-MARCH-1), y = the
+	/// x spare (0), y = the
 	/// surface bias in world units (a ray starts this far off its own surface),
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).

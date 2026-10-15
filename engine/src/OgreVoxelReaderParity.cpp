@@ -186,7 +186,6 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
         }
         params.counts[0] = float(cones.size());
         params.counts[1] = float(numCascades);
-        params.counts[2] = 0.0f;   // unused (the anisotropic switch, gone: PHOTON-MARCH-1)
         // The specular empty-space skip's two parameters, at the values
         // PhotonVoxelLighting's pass buffer gives a 64^3 volume (the harness exercises the
         // branch; its numbers are not the subject).

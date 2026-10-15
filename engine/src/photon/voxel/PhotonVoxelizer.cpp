@@ -511,10 +511,10 @@ namespace Ogre
                 "VctVoxelizer" + StringConverter::toString( getId() ) + "/AccumVal",
                 GpuPageOutStrategy::Discard, TextureFlags::NotTexture | texFlags, TextureTypes::Type3D );
 
-            // Jahshaka (PHOTON-VOXEL-3): the per-axis coverage. A full mip chain on
-            // every tier, generated after each build like the albedo's: the
-            // isotropic tier's cone march reads the light volume's own mips and the
-            // coverage's beside them at the same lod, and the injection's shadow
+            // Jahshaka (PHOTON-VOXEL-3): the per-axis coverage. A full mip chain,
+            // generated after each build like the albedo's: the cone march's kernel
+            // reads it at the footprint's lod (and the directional plane's origin and
+            // first-plane gates one level below the plane's), and the injection's shadow
             // march reads it at the lod an area light widens to.
             // (PHOTON-VOXEL-4) One per half-axis: the faces looking +a, then -a.
             // Jahshaka (PHOTON-VOXEL-4): the surface position per half, a full mip chain
@@ -837,8 +837,8 @@ namespace Ogre
         {
             mLastDispatchCount = 0u;
             clearVoxels();
-            // The coverage's mips are read beside the light volume's (the isotropic
-            // tier): an empty store is empty at every mip.
+            // The coverage's mips are read by the cone march's kernel: an empty store is
+            // empty at every mip.
             generateMips();
             OgreProfileGpuEnd( "VCT build" );
             return;

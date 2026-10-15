@@ -5134,8 +5134,9 @@ struct GiVoxelStats {
     long long emissiveAboveOne = 0;
 
     /// THE BYTES (PHOTON-WRITER-1): a 64-bit FNV-1a hash over the raw bytes of
-    /// every light volume a reader of this cascade samples — the total and the
-    /// three axis volumes (mip 0 of each), in that
+    /// every light volume a reader of this cascade samples — all ten of the
+    /// voxel lighting's list (mip 0 of each: the total, the three axis volumes, the
+    /// coverage and the position per half, the back side, the normal), in that
     /// order — as 16 hex digits. Two readings are equal exactly when the
     /// volumes are byte-identical: it is the instrument of the proof that one
     /// at-rest sweep IS the chain's fixed point (gi.chain_converge).
