@@ -62,9 +62,7 @@ const Ogre::IdString kShadowCaster("hlms_shadowcaster");
 /// The light volumes per cascade, in the order the voxel lighting lists them
 /// (PhotonVoxelLighting::getLightVoxelTextures) and the pieces declare them — the
 /// voxel lighting's own count, so the two cannot disagree.
-Ogre::int32 volumesPerCascade(bool anisotropic) {
-    return Ogre::int32(Ogre::PhotonVoxelLighting::volumesPerCascade(anisotropic));
-}
+constexpr Ogre::int32 kVolumesPerCascade = Ogre::int32(Ogre::PhotonVoxelLighting::kVolumesPerCascade);
 constexpr Ogre::int32 kFieldTextures = Ogre::int32(Ogre::PhotonIrradianceField::kPassTextures);
 
 /// THE ONE CONDITION for the field in a pass: its pass properties, its textures
@@ -190,7 +188,11 @@ void PhotonPassBinding::preparePassHash(bool casterPass, Ogre::SceneManager *sce
     if (b->vct) {
         hb.vct = b->vct;
         hlms->_setProperty(tid, kJahVctCascades, Ogre::int32(b->vct->getNumCascades()));
-        hlms->_setProperty(tid, kVctAnisotropic, b->vct->isAnisotropic());
+        // ONE LIGHT STORE AT EVERY TIER (PHOTON-MARCH-1): the directional volumes are always
+        // bound. The property stays for upstream's HlmsPbs, whose root layout declares the
+        // three axis arrays beside `vctProbes` from it (OgreHlmsPbs.cpp setupRootLayout);
+        // none of our pieces reads it.
+        hlms->_setProperty(tid, kVctAnisotropic, 1);
         hlms->_setProperty(tid, kVctSdfQuality, b->vct->shouldEnableSpecularSdfQuality());
         // 'Static' reflections on cubemaps look horrible (upstream's own words).
         if (b->pcc && b->pcc->isRendering()) hlms->_setProperty(tid, kVctDisableSpecular, 1);
@@ -209,9 +211,8 @@ Ogre::uint16 PhotonPassBinding::numExtraPassTextures(const Ogre::HlmsPropertyVec
                                                      bool casterPass) {
     if (casterPass) return 0u;
     const Ogre::int32 cascades = Ogre::Hlms::getProperty(properties, kJahVctCascades);
-    const bool aniso = Ogre::Hlms::getProperty(properties, kVctAnisotropic) != 0;
     const bool ifd = Ogre::Hlms::getProperty(properties, kJahIfd) != 0;
-    return Ogre::uint16(cascades * volumesPerCascade(aniso) + (ifd ? kFieldTextures : 0));
+    return Ogre::uint16(cascades * kVolumesPerCascade + (ifd ? kFieldTextures : 0));
 }
 
 void PhotonPassBinding::propertiesMerged(Ogre::Hlms *hlms, size_t tid, Ogre::int32 endSlot) {
@@ -221,8 +222,7 @@ void PhotonPassBinding::propertiesMerged(Ogre::Hlms *hlms, size_t tid, Ogre::int
     if (cascades <= 0 && !ifd) return;
     // The same count numExtraPassTextures gave HlmsPbs for this property set.
     Ogre::int32 slot =
-        endSlot - (cascades > 0 ? cascades * volumesPerCascade(hlms->_getProperty(tid, kVctAnisotropic) != 0)
-                                : 0) -
+        endSlot - (cascades > 0 ? cascades * kVolumesPerCascade : 0) -
         (ifd ? kFieldTextures : 0);
     if (cascades > 0) {
         hlms->_setProperty(tid, kVctNumProbes, cascades);
@@ -233,23 +233,16 @@ void PhotonPassBinding::propertiesMerged(Ogre::Hlms *hlms, size_t tid, Ogre::int
             hlms->_getProperty(tid, kQTangent);
         hlms->_setProperty(tid, kNormalMap, normalMapCanBeSupported);
         // The volumes' registers, in the order the voxel lighting lists them: the
-        // isotropic total, the three anisotropic axes, the coverage per half-axis,
+        // total (level 0), the three directional axes, the coverage per half-axis,
         // the surface position per half, then level 0's back side and the
-        // voxeliser's normal on the anisotropic tiers.
-        const bool aniso = hlms->_getProperty(tid, kVctAnisotropic) != 0;
-        static const char *const kIso[] = { "vctProbes", "vctProbeCovP", "vctProbeCovN",
-                                            "vctProbePosP", "vctProbePosN" };
-        static const char *const kAniso[] = { "vctProbes",    "vctProbeX",    "vctProbeY",
-                                              "vctProbeZ",    "vctProbeCovP", "vctProbeCovN",
-                                              "vctProbePosP", "vctProbePosN", "vctProbeBack",
-                                              "vctProbeNrm" };
-        static_assert(sizeof(kIso) / sizeof(kIso[0]) ==
-                          Ogre::PhotonVoxelLighting::kVolumesPerCascadeIsotropic &&
-                      sizeof(kAniso) / sizeof(kAniso[0]) ==
-                          Ogre::PhotonVoxelLighting::kVolumesPerCascadeAnisotropic,
+        // voxeliser's normal.
+        static const char *const names[] = { "vctProbes",    "vctProbeX",    "vctProbeY",
+                                             "vctProbeZ",    "vctProbeCovP", "vctProbeCovN",
+                                             "vctProbePosP", "vctProbePosN", "vctProbeBack",
+                                             "vctProbeNrm" };
+        static_assert(sizeof(names) / sizeof(names[0]) == size_t(kVolumesPerCascade),
                       "one register name per light volume the voxel lighting lists");
-        const char *const *names = aniso ? kAniso : kIso;
-        for (Ogre::int32 i = 0; i < volumesPerCascade(aniso); ++i) {
+        for (Ogre::int32 i = 0; i < kVolumesPerCascade; ++i) {
             hlms->_setTextureReg(tid, Ogre::PixelShader, names[i], slot);
             slot += cascades;
         }
@@ -269,14 +262,14 @@ void PhotonPassBinding::propertiesMerged(Ogre::Hlms *hlms, size_t tid, Ogre::int
 
 void PhotonPassBinding::setupRootLayout(Ogre::RootLayout &rootLayout,
                                         const Ogre::HlmsPropertyVec &properties) {
-    // HlmsPbs::setupRootLayout adds the isotropic array and, anisotropic, the three
-    // axes (upstream's own volumes) whenever `vct_num_probes` > 1; the rest are ours.
+    // HlmsPbs::setupRootLayout adds the total's array and the three axes (upstream's
+    // own volumes, vct_anisotropic always 1) whenever `vct_num_probes` > 1; the rest
+    // are ours.
     const Ogre::int32 cascades = Ogre::Hlms::getProperty(properties, kVctNumProbes);
     if (cascades <= 1) return;
-    const bool aniso = Ogre::Hlms::getProperty(properties, kVctAnisotropic) != 0;
     Ogre::int32 idx = Ogre::Hlms::getProperty(properties, Ogre::IdString("vctProbes"));
-    idx += cascades * (aniso ? 4 : 1);
-    const Ogre::int32 ours = volumesPerCascade(aniso) - (aniso ? 4 : 1);
+    idx += cascades * 4;
+    const Ogre::int32 ours = kVolumesPerCascade - 4;
     for (Ogre::int32 i = 0; i < ours; ++i) {
         rootLayout.addArrayBinding(Ogre::DescBindingTypes::Texture,
                                    Ogre::RootLayout::ArrayDesc(Ogre::uint16(idx), Ogre::uint16(cascades)));

@@ -87,9 +87,9 @@ constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPas
 constexpr size_t kPassTextureTable = 64u;
 constexpr size_t kOgrePassTexturesFullest = 17u;
 // The Photon share, from the constants that decide it: the longest shipped
-// tier chain x the anisotropic volumes per cascade + the field's two.
+// tier chain x the light volumes per cascade + the field's two.
 constexpr size_t kPhotonPassTexturesFullest =
-    size_t(kGiTierMaxCascades) * Ogre::PhotonVoxelLighting::kVolumesPerCascadeAnisotropic +
+    size_t(kGiTierMaxCascades) * Ogre::PhotonVoxelLighting::kVolumesPerCascade +
     Ogre::PhotonIrradianceField::kPassTextures;
 static_assert(kPhotonPassTexturesFullest == 42u,
               "the measured 59 = Ogre's 17 + Photon's 42; a change here re-measures the table");

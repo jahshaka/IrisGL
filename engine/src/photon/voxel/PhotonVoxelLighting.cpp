@@ -92,7 +92,7 @@ namespace Ogre
     static PixelFormatGpu jahLightVoxelFormat() { return PFG_RGBA16_FLOAT; }
     static PixelFormatGpu jahLightVoxelUavFormat() { return PFG_RGBA16_FLOAT; }
     //-------------------------------------------------------------------------
-    PhotonVoxelLighting::PhotonVoxelLighting( IdType id, PhotonVoxelizerSourceBase *voxelizer, bool bAnisotropic ) :
+    PhotonVoxelLighting::PhotonVoxelLighting( IdType id, PhotonVoxelizerSourceBase *voxelizer ) :
         IdObject( id ),
         mSamplerblockTrilinear( 0 ),
         mVoxelizer( voxelizer ),
@@ -108,7 +108,6 @@ namespace Ogre
         mInjectHigherMipHalfWidth( 0 ),
         mBakingMultiplier( 1.0f ),
         mInvBakingMultiplier( 1.0f ),
-        mAnisotropic( bAnisotropic ),
         mNumLights( 0 ),
         mBakingMultiplierParam( 0 ),
         mVoxelCellSize( 0 ),
@@ -374,12 +373,15 @@ namespace Ogre
         // for 32 x 16 x 32 cells the 4 x 1 x 2 one (step 1 would otherwise composite a
         // one-texel axis with the out-of-range texel beside it).
         const uint32 shortest = std::min( width, std::min( height, depth ) );
-        const uint8 numMipsMain = ( mAnisotropic && !bSdfQuality )
-                                      ? 1u
-                                      : PixelFormatGpuUtils::getMaxMipmapCount( shortest );
+        // THE TOTAL IS LEVEL 0 ONLY (PHOTON-MARCH-1): every reader takes level 0 from it (the mean
+        // of a voxel's two sides, with the back beside it) and every coarser level from the
+        // directional volumes - the light per facing half-axis, the colour law at every tier. Its
+        // mips exist only under the specular SDF quality: the empty-space skip
+        // (jah_voxel_march.glsl, JAH_MARCH_SDF) reads its coarse opacity, nothing else does.
+        const uint8 numMipsMain = bSdfQuality ? PixelFormatGpuUtils::getMaxMipmapCount( shortest ) : 1u;
         const uint8 numMipsAniso = PixelFormatGpuUtils::getMaxMipmapCount( std::max( 1u, shortest >> 1u ) );
 
-        const size_t numTextures = mAnisotropic ? 4u : 1u;
+        const size_t numTextures = 4u;
 
         const char *names[] = {
             "Main",    //
@@ -418,7 +420,6 @@ namespace Ogre
             mLightVoxel[positionIndex( h )] = mVoxelizer->getPositionVox( h );
         }
 
-        if( mAnisotropic )
         {
             // Jahshaka (PHOTON-VOXEL-5): LEVEL 0's BACK SIDE (mLightVoxel[0] holds the sides'
             // mean) - level 0 only, read by the level-0 readers with the voxelizer's normal (the
@@ -513,8 +514,7 @@ namespace Ogre
             mLightVoxel[coverageIndex( h )] = 0;
             mLightVoxel[positionIndex( h )] = 0;
         }
-        if( mAnisotropic )
-            mLightVoxel[normalIndex()] = 0;
+        mLightVoxel[normalIndex()] = 0;
 
         TextureGpuManager *textureManager = mVoxelizer->getTextureGpuManager();
         for( size_t i = 0; i < sizeof( mLightVoxel ) / sizeof( mLightVoxel[0] ); ++i )
@@ -602,11 +602,7 @@ namespace Ogre
         // Jahshaka (PHOTON-VOXEL-3/-4): + four per cascade - the coverage per half-axis and
         // the surface position per half, the list's last entries - bound after the probe
         // sets and before `directVoxel`.
-        uint8 numNeededTexUnits;
-        if( mAnisotropic )
-            numNeededTexUnits = 10u + 8u * static_cast<uint8>( numExtraCascades ) + 1u;
-        else
-            numNeededTexUnits = 7u + 5u * static_cast<uint8>( numExtraCascades ) + 1u;
+        uint8 numNeededTexUnits = 10u + 8u * static_cast<uint8>( numExtraCascades ) + 1u;
         // Jahshaka (PHOTON-ENV-1): +1 for the environment cube, at the very last unit
         // (after `directVoxel`) and only while one is set - the job's `jah_env`
         // property says so to the shader, and it is re-asserted per dispatch with
@@ -617,10 +613,9 @@ namespace Ogre
         // holds the voxel's roughness (the bounce's re-emission carries the diffuse
         // lobe's hemispherical albedo). Bound right after `directVoxel`.
         ++numNeededTexUnits;
-        // Jahshaka (PHOTON-VOXEL-5): +1 on the anisotropic tiers for the BACK side's direct term,
-        // right after the emissive volume (before the environment cube).
-        if( mAnisotropic )
-            ++numNeededTexUnits;
+        // Jahshaka (PHOTON-VOXEL-5): +1 for the BACK side's direct term, right after the emissive
+        // volume (before the environment cube).
+        ++numNeededTexUnits;
 
         HlmsManager *hlmsManager = mVoxelizer->getHlmsManager();
         const RenderSystemCapabilities *caps = hlmsManager->getRenderSystem()->getCapabilities();
@@ -662,30 +657,27 @@ namespace Ogre
             }
         }
 
-        if( mAnisotropic )
+        for( uint8 i = 0u; i < 3u; ++i )
         {
-            for( uint8 i = 0u; i < 3u; ++i )
+            texSlot.texture = mLightVoxel[i + 1u];
+            mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
+            if( bSetSamplerNow )
             {
-                texSlot.texture = mLightVoxel[i + 1u];
+                // Only OpenGL needs this sampler set
+                hlmsManager->addReference( mSamplerblockTrilinear );
+                mLightVctBounceInject->_setSamplerblock( texSlotIdx - 1u, mSamplerblockTrilinear );
+            }
+
+            for( size_t cascadeIdx = 0u; cascadeIdx < numExtraCascades; ++cascadeIdx )
+            {
+                texSlot.texture = mExtraCascades[cascadeIdx]->mLightVoxel[i + 1u];
                 mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
                 if( bSetSamplerNow )
                 {
                     // Only OpenGL needs this sampler set
                     hlmsManager->addReference( mSamplerblockTrilinear );
-                    mLightVctBounceInject->_setSamplerblock( texSlotIdx - 1u, mSamplerblockTrilinear );
-                }
-
-                for( size_t cascadeIdx = 0u; cascadeIdx < numExtraCascades; ++cascadeIdx )
-                {
-                    texSlot.texture = mExtraCascades[cascadeIdx]->mLightVoxel[i + 1u];
-                    mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
-                    if( bSetSamplerNow )
-                    {
-                        // Only OpenGL needs this sampler set
-                        hlmsManager->addReference( mSamplerblockTrilinear );
-                        mLightVctBounceInject->_setSamplerblock( texSlotIdx - 1u,
-                                                                 mSamplerblockTrilinear );
-                    }
+                    mLightVctBounceInject->_setSamplerblock( texSlotIdx - 1u,
+                                                             mSamplerblockTrilinear );
                 }
             }
         }
@@ -728,11 +720,8 @@ namespace Ogre
         texSlot.texture = mVoxelizer->getEmissiveVox();
         mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
         // Jahshaka (PHOTON-VOXEL-5): the back side's direct term (a Load3D, no sampler).
-        if( mAnisotropic )
-        {
-            texSlot.texture = mLightDirectBack;
-            mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
-        }
+        texSlot.texture = mLightDirectBack;
+        mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
 
         // Jahshaka (PHOTON-ENV-1): the environment cube, sampled with the probes'
         // trilinear sampler (a separate sampler object on Vulkan).
@@ -747,25 +736,21 @@ namespace Ogre
             mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
         }
 
-        // Jahshaka (PHOTON-VOXEL-5): the back side's total, u1 on the anisotropic tiers, written in
+        // Jahshaka (PHOTON-VOXEL-5): the back side's total, u1 (every tier, PHOTON-MARCH-1), written in
         // place: the march's level-0 read in this job takes the sides' MEAN (it binds no back), so
         // nothing here reads it. Measured: a back that ping-pongs and is read per side moved the
         // roof fixture's two-bounce underside by nothing (gi.voxel_coverage, 0.02193 both), at
         // 8 B a voxel on every bouncing tier.
-        const uint8 numUavs = mAnisotropic ? 2u : 1u;
-        if( mLightVctBounceInject->getNumUavUnits() != numUavs )
-            mLightVctBounceInject->setNumUavUnits( numUavs );
+        if( mLightVctBounceInject->getNumUavUnits() != 2u )
+            mLightVctBounceInject->setNumUavUnits( 2u );
 
         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
         uavSlot.access = ResourceAccess::Write;
         uavSlot.texture = mLightBounce;
         uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
         mLightVctBounceInject->_setUavTexture( 0, uavSlot );
-        if( mAnisotropic )
-        {
-            uavSlot.texture = mLightVoxel[backIndex()];
-            mLightVctBounceInject->_setUavTexture( 1, uavSlot );
-        }
+        uavSlot.texture = mLightVoxel[backIndex()];
+        mLightVctBounceInject->_setUavTexture( 1, uavSlot );
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::setupGlslTextureUnits()
@@ -773,12 +758,12 @@ namespace Ogre
         const size_t numExtraCascades = mExtraCascades.size();
         // THE LIST'S LENGTH IS PARAMETERS, NOT UNITS (Jahshaka, PHOTON-VOXEL-5; the VOXEL-4
         // audit's F1): the two fixed textures, then ONE array parameter per texture variable
-        // (vctProbes, the three axes when anisotropic, the four split kinds - each an array over
+        // (vctProbes, the three axes, the four split kinds - each an array over
         // every cascade), then `directVoxel` (JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076)) and voxelEmissiveTex
         // (PHOTON-WRITER-1). It was compared with a unit count (8 + 6e + 2 / 5 + 3e + 2), which the
         // list never had, so the "glsl" list was rebuilt and set dirty on every bounce dispatch.
-        const size_t numTextureVariables = mAnisotropic ? 8u : 5u;
-        const size_t numNeededParams = 2u + numTextureVariables + 2u + ( mAnisotropic ? 1u : 0u );
+        const size_t numTextureVariables = 8u;
+        const size_t numNeededParams = 2u + numTextureVariables + 3u;
 
         // This code assumes there's 2 textures at the beginning that always stays the same
         // the rest of them are dynamically generated.
@@ -802,8 +787,8 @@ namespace Ogre
 
             for( size_t i = 0u; i < numTextureVariables; ++i )
             {
-                // the isotropic volume, the three axes (anisotropic), then the split kinds in order
-                const size_t numLead = mAnisotropic ? 4u : 1u;
+                // the total (level 0), the three axes, then the split kinds in order
+                const size_t numLead = 4u;
                 param.name = i < numLead ? names[i] : splitNames[i - numLead];
                 int32 textureUnitsTmp[16];
                 for( size_t cascadeIdx = 0u; cascadeIdx < numExtraCascades + 1u; ++cascadeIdx )
@@ -822,12 +807,9 @@ namespace Ogre
             param.setManualValue( texSlotIdx + 1 );
             glslShaderParams.mParams.push_back( param );
             // Jahshaka (PHOTON-VOXEL-5): the back side's direct term, right after.
-            if( mAnisotropic )
-            {
-                param.name = "directBackVoxel";
-                param.setManualValue( texSlotIdx + 2 );
-                glslShaderParams.mParams.push_back( param );
-            }
+            param.name = "directBackVoxel";
+            param.setManualValue( texSlotIdx + 2 );
+            glslShaderParams.mParams.push_back( param );
 
             glslShaderParams.setDirty();
         }
@@ -1027,8 +1009,7 @@ namespace Ogre
         uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
         mLightVctBounceInject->_setUavTexture( 0, uavSlot );
 
-        if( mAnisotropic )
-            generateAnisotropicMips();
+        generateAnisotropicMips();
 
         PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
 
@@ -1125,47 +1106,44 @@ namespace Ogre
             directTex->scheduleTransitionTo( GpuResidency::Resident );
             mLightDirect = directTex;
 
-            if( mAnisotropic )
+            // Jahshaka (PHOTON-VOXEL-5): the BACK side's direct term and the directional level
+            // 0's direct part per axis (8-bit sRGB like the direct term: it is normalised to
+            // the ceiling by construction), born and buried with the bounce - the bounce's
+            // fixed point per side and step 0's per half need them - and step 0 itself.
+            texName.clear();
+            texName.a( "VctLightingDirectBack/Id", getId() );
+            mLightDirectBack = textureManager->createTexture(
+                texName.c_str(), GpuPageOutStrategy::Discard,
+                TextureFlags::Uav, TextureTypes::Type3D );
+            mLightDirectBack->setResolution( mLightVoxel[0]->getWidth(), mLightVoxel[0]->getHeight(),
+                                             mLightVoxel[0]->getDepth() );
+            mLightDirectBack->setNumMipmaps( 1u );
+            mLightDirectBack->setPixelFormat( jahLightVoxelFormat() );
+            mLightDirectBack->scheduleTransitionTo( GpuResidency::Resident );
+            for( uint8 i = 0u; i < 3u; ++i )
             {
-                // Jahshaka (PHOTON-VOXEL-5): the BACK side's direct term and the directional level
-                // 0's direct part per axis (8-bit sRGB like the direct term: it is normalised to
-                // the ceiling by construction), born and buried with the bounce - the bounce's
-                // fixed point per side and step 0's per half need them - and step 0 itself.
                 texName.clear();
-                texName.a( "VctLightingDirectBack/Id", getId() );
-                mLightDirectBack = textureManager->createTexture(
+                texName.a( "VctLightingDirectDir", i, "/Id", getId() );
+                TextureGpu *t = textureManager->createTexture(
                     texName.c_str(), GpuPageOutStrategy::Discard,
                     TextureFlags::Uav, TextureTypes::Type3D );
-                mLightDirectBack->setResolution( mLightVoxel[0]->getWidth(), mLightVoxel[0]->getHeight(),
-                                                 mLightVoxel[0]->getDepth() );
-                mLightDirectBack->setNumMipmaps( 1u );
-                mLightDirectBack->setPixelFormat( jahLightVoxelFormat() );
-                mLightDirectBack->scheduleTransitionTo( GpuResidency::Resident );
-                for( uint8 i = 0u; i < 3u; ++i )
-                {
-                    texName.clear();
-                    texName.a( "VctLightingDirectDir", i, "/Id", getId() );
-                    TextureGpu *t = textureManager->createTexture(
-                        texName.c_str(), GpuPageOutStrategy::Discard,
-                        TextureFlags::Uav, TextureTypes::Type3D );
-                    t->setResolution( mLightVoxel[1]->getWidth(), mLightVoxel[1]->getHeight(),
-                                      mLightVoxel[1]->getDepth() );
-                    t->setNumMipmaps( 1u );
-                    t->setPixelFormat( jahLightVoxelFormat() );
-                    t->scheduleTransitionTo( GpuResidency::Resident );
-                    mLightDirectDir[i] = t;
-                }
-
-                HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
-                HlmsComputeJob *baseJob = hlmsCompute->findComputeJob( "VCT/AnisotropicMipStep0" );
-                texName.clear();
-                texName.a( "VCT/AnisotropicMipStep0/Id", getId() );
-                mAnisoGeneratorStep0 = baseJob->clone( texName.c_str() );
-                ShaderParams *shaderParams = &mAnisoGeneratorStep0->getShaderParams( "default" );
-                shaderParams->mParams.back().setManualValue(
-                    static_cast<int32>( mLightVoxel[1]->getWidth() >> 1u ) );
-                shaderParams->setDirty();
+                t->setResolution( mLightVoxel[1]->getWidth(), mLightVoxel[1]->getHeight(),
+                                  mLightVoxel[1]->getDepth() );
+                t->setNumMipmaps( 1u );
+                t->setPixelFormat( jahLightVoxelFormat() );
+                t->scheduleTransitionTo( GpuResidency::Resident );
+                mLightDirectDir[i] = t;
             }
+
+            HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
+            HlmsComputeJob *baseJob = hlmsCompute->findComputeJob( "VCT/AnisotropicMipStep0" );
+            texName.clear();
+            texName.a( "VCT/AnisotropicMipStep0/Id", getId() );
+            mAnisoGeneratorStep0 = baseJob->clone( texName.c_str() );
+            ShaderParams *shaderParams = &mAnisoGeneratorStep0->getShaderParams( "default" );
+            shaderParams->mParams.back().setManualValue(
+                static_cast<int32>( mLightVoxel[1]->getWidth() >> 1u ) );
+            shaderParams->setDirty();
         }
         else
         {
@@ -1201,16 +1179,7 @@ namespace Ogre
 
         if( mLightVctBounceInject )
         {
-            if( mAnisotropic )
-            {
-                mLightVctBounceInject->setProperty( "vct_anisotropic", 1 );
-                mLightVctBounceInject->setNumTexUnits( 8u );  // + the coverage and the position
-            }
-            else
-            {
-                mLightVctBounceInject->setProperty( "vct_anisotropic", 0 );
-                mLightVctBounceInject->setNumTexUnits( 5u );  // + the coverage and the position
-            }
+            mLightVctBounceInject->setNumTexUnits( 8u );  // + the coverage and the position
         }
 
         if( bAllowMultipleBounces )
@@ -1274,17 +1243,16 @@ namespace Ogre
         // The count is change-guarded because setNumUavUnits() invalidates the PSO
         // cache hash unconditionally.
         //
-        // Jahshaka (PHOTON-VOXEL-5): on the anisotropic tiers the same dispatch writes level 0's
+        // Jahshaka (PHOTON-VOXEL-5; every tier since PHOTON-MARCH-1): the same dispatch writes level 0's
         // BACK side, the back's direct term (with a bounce) and the directional volumes' level 0
         // (the fused step 0: from each voxel's light per half-axis) - into the volumes themselves
         // without a bounce, into the direct part's own volumes with one (step 0 adds the bounce's
         // part after every bounce). The slots follow u0 in LightInjection_cs.glsl's order.
         const uint8 numUavsNeeded =
-            uint8( 1u + ( mLightDirect ? 1u : 0u ) + ( mAnisotropic ? ( mLightDirect ? 5u : 4u ) : 0u ) );
+            uint8( 1u + ( mLightDirect ? 1u : 0u ) + ( mLightDirect ? 5u : 4u ) );
         if( mLightInjectionJob->getNumUavUnits() != numUavsNeeded )
             mLightInjectionJob->setNumUavUnits( numUavsNeeded );
         mLightInjectionJob->setProperty( "vct_keep_direct", mLightDirect ? 1 : 0 );
-        mLightInjectionJob->setProperty( "vct_anisotropic", mAnisotropic ? 1 : 0 );
         uint8 uavIdx = 1u;
         if( mLightDirect )
         {
@@ -1292,25 +1260,22 @@ namespace Ogre
             uavSlot.pixelFormat = jahLightVoxelUavFormat();
             mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
         }
-        if( mAnisotropic )
+        uavSlot.texture = mLightVoxel[backIndex()];
+        uavSlot.pixelFormat = jahLightVoxelUavFormat();
+        mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
+        if( mLightDirect )
         {
-            uavSlot.texture = mLightVoxel[backIndex()];
+            uavSlot.texture = mLightDirectBack;
             uavSlot.pixelFormat = jahLightVoxelUavFormat();
             mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
-            if( mLightDirect )
-            {
-                uavSlot.texture = mLightDirectBack;
-                uavSlot.pixelFormat = jahLightVoxelUavFormat();
-                mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
-            }
-            for( uint8 i = 0u; i < 3u; ++i )
-            {
-                uavSlot.texture = mLightDirect ? mLightDirectDir[i] : mLightVoxel[i + 1u];
-                uavSlot.pixelFormat = jahLightVoxelUavFormat();
-                mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
-            }
-            mInjectHigherMipHalfWidth->setManualValue( static_cast<int32>( mLightVoxel[1]->getWidth() >> 1u ) );
         }
+        for( uint8 i = 0u; i < 3u; ++i )
+        {
+            uavSlot.texture = mLightDirect ? mLightDirectDir[i] : mLightVoxel[i + 1u];
+            uavSlot.pixelFormat = jahLightVoxelUavFormat();
+            mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
+        }
+        mInjectHigherMipHalfWidth->setManualValue( static_cast<int32>( mLightVoxel[1]->getWidth() >> 1u ) );
 
         float autoMultiplierValue = 0.0f;
 
@@ -1394,8 +1359,7 @@ namespace Ogre
         HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
         jahshaka::engine::detail::photonDispatch( hlmsCompute, mLightInjectionJob, renderSystem );
 
-        if( mAnisotropic )
-            generateAnisotropicMips();
+        generateAnisotropicMips();
 
         // Jahshaka (MOVER-OCCLUSION-1): D's own chain, read by the ray tier's hits.
         if( mLightDirect )
@@ -1502,17 +1466,8 @@ namespace Ogre
             const uint32 heightCascade = cascadeLightVoxel->getHeight();
             const uint32 depthCascade = cascadeLightVoxel->getDepth();
 
-            uint8 cascadeNumMipmaps = 0u;
-
-            if( cascade->mAnisotropic )
-            {
-                // Anisotropic has the number of mipmaps calculated
-                cascadeNumMipmaps = cascade->mLightVoxel[1]->getNumMipmaps();
-            }
-            else
-            {
-                cascadeNumMipmaps = cascadeLightVoxel->getNumMipmaps();
-            }
+            // the directional volumes hold every level past 0 (the total is level 0 only)
+            const uint8 cascadeNumMipmaps = cascade->mLightVoxel[1]->getNumMipmaps();
 
             *outInvResMaxLod++ = 1.0f / static_cast<float>( widthCascade );
             *outInvResMaxLod++ = 1.0f / static_cast<float>( heightCascade );
@@ -1694,15 +1649,6 @@ namespace Ogre
     }
     //-------------------------------------------------------------------------
     bool PhotonVoxelLighting::getDebugVisualizationMode() const { return mDebugVoxelVisualizer != 0; }
-    //-------------------------------------------------------------------------
-    void PhotonVoxelLighting::setAnisotropic( bool bAnisotropic )
-    {
-        if( mAnisotropic != bAnisotropic )
-        {
-            mAnisotropic = bAnisotropic;
-            createTextures();
-        }
-    }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::setEnvironment( TextureGpu *cube, const ColourValue &gain, const float sh[27] )
     {

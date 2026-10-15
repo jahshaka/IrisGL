@@ -17,16 +17,14 @@ vulkan_layout( ogre_t1 ) uniform texture3D voxelNormalTex;
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbes[@value( hlms_num_vct_cascades )];
 @add( vctTexUnit, hlms_num_vct_cascades )
 
-@property( vct_anisotropic )
-	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeX[@value( hlms_num_vct_cascades )];
-	@add( vctTexUnit, hlms_num_vct_cascades )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeX[@value( hlms_num_vct_cascades )];
+@add( vctTexUnit, hlms_num_vct_cascades )
 
-	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeY[@value( hlms_num_vct_cascades )];
-	@add( vctTexUnit, hlms_num_vct_cascades )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeY[@value( hlms_num_vct_cascades )];
+@add( vctTexUnit, hlms_num_vct_cascades )
 
-	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeZ[@value( hlms_num_vct_cascades )];
-	@add( vctTexUnit, hlms_num_vct_cascades )
-@end
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeZ[@value( hlms_num_vct_cascades )];
+@add( vctTexUnit, hlms_num_vct_cascades )
 
 // Jahshaka (PHOTON-VOXEL-3): every cascade's PER-AXIS COVERAGE, after the probe
 // arrays (VctLighting::setupBounceTextures' order): the march's mip-0 read takes the
@@ -58,10 +56,8 @@ vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelEmissiveTex;
 // Jahshaka (PHOTON-VOXEL-5): THE BACK SIDE'S DIRECT TERM on the anisotropic tiers, after the
 // emissive volume (VctLighting::setupBounceTextures): a two-sided voxel's back is its own fixed
 // point, L_back = D_back + rho * G_back.
-@property( vct_anisotropic )
-	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D directBackVoxel;
-	@add( vctTexUnit, 1 )
-@end
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D directBackVoxel;
+@add( vctTexUnit, 1 )
 
 // JAHSHAKA (PHOTON-ENV-1): THE ONE ENVIRONMENT, at the unit after `directVoxel`
 // (VctLighting::setupBounceTextures binds it last, and only while the host set a
@@ -77,10 +73,8 @@ layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
 uniform restrict writeonly image3D lightVoxel;
 // Jahshaka (PHOTON-VOXEL-5): the back side's total, written in place (no reader of this job reads
 // it: the march's level-0 read here takes the sides' mean).
-@property( vct_anisotropic )
-	layout( vulkan( ogre_u1 ) vk_comma rgba16f )
-	uniform restrict writeonly image3D backVoxel;
-@end
+layout( vulkan( ogre_u1 ) vk_comma rgba16f )
+uniform restrict writeonly image3D backVoxel;
 
 layout( local_size_x = @value( threads_per_group_x ),
         local_size_y = @value( threads_per_group_y ),

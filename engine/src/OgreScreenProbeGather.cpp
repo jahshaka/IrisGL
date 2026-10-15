@@ -1290,7 +1290,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                                                  v.restFrames   // a rest mean holds by 4097: < 2^21, exact
                                            : (v.frame & 0xFFFFu));
     pp.knobs[3] = float(in.cascadeCount);
-    pp.knobs2[0] = in.anisotropic ? 1.0f : 0.0f;
+    pp.knobs2[0] = 0.0f;   // unused (the anisotropic switch it carried is gone: PHOTON-MARCH-1)
     // THE RAY'S START, OFF THE SURFACE BY AN EPSILON — never by half a voxel
     // (the fix round, gi.gather_cards' near-foot chase): the probe measures the
     // irradiance AT the surface, and a start lifted 4 cm (0.5 x cascade 0's

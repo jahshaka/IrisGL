@@ -86,20 +86,13 @@
 	// Jahshaka (PHOTON-VOXEL-4): the SURFACE POSITION, the list's last entry - the gate.
 	#define JAH_VOX_SAMPLE_POSP( c, u, l ) OGRE_SampleLevel( vctProbePosP[c], probeSampler, u, l )
 	#define JAH_VOX_SAMPLE_POSN( c, u, l ) OGRE_SampleLevel( vctProbePosN[c], probeSampler, u, l )
-	@property( vct_anisotropic )
-		#define JAH_VOX_HAS_ANISO 1
-		#define JAH_VOX_ANISO true
-		#define JAH_VOX_SAMPLE_X( c, u, l ) OGRE_SampleLevel( vctProbeX[c], probeSampler, u, l )
-		#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], probeSampler, u, l )
-		#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], probeSampler, u, l )
-		// Jahshaka (PHOTON-VOXEL-5): level 0 read per side (jah_voxel_sample.glsl).
-		#define JAH_VOX_HAS_BACK 1
-		#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], probeSampler, u, l )
-		#define JAH_VOX_SAMPLE_NRM( c, u, l ) OGRE_SampleLevel( vctProbeNrm[c], probeSampler, u, l )
-	@else
-		#define JAH_VOX_HAS_ANISO 0
-		#define JAH_VOX_ANISO false
-	@end
+	#define JAH_VOX_SAMPLE_X( c, u, l ) OGRE_SampleLevel( vctProbeX[c], probeSampler, u, l )
+	#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], probeSampler, u, l )
+	#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], probeSampler, u, l )
+	// Jahshaka (PHOTON-VOXEL-5): level 0 read per side (jah_voxel_sample.glsl).
+	#define JAH_VOX_HAS_BACK 1
+	#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], probeSampler, u, l )
+	#define JAH_VOX_SAMPLE_NRM( c, u, l ) OGRE_SampleLevel( vctProbeNrm[c], probeSampler, u, l )
 	#define JAH_VOX_INVRES( c ) p.vctInvResMaxLod[c].xyz
 	#define JAH_VOX_MAXLOD( c ) p.vctInvResMaxLod[c].w
 	#define JAH_VOX_FROM_PREV_SCALE( c ) p.vctFromPrev[( (c) - 1 ) * 2]

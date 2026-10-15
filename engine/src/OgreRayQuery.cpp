@@ -5048,27 +5048,22 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     /// the other half, so the product is available from outside.
     float voxMultiplier[kMaxReflectCascades];
     unsigned voxCount = 0;
-    bool anisotropic = false;
     const auto takeVolume = [&](Ogre::PhotonVoxelLighting *lighting,
                                 Ogre::PhotonVoxelizer *voxelizer) {
         if (voxCount >= kMaxReflectCascades || !lighting || !voxelizer) return;
         Ogre::TextureGpu **tex = lighting->getLightVoxelTextures();
         if (!tex || !tex[0]) return;
-        const bool aniso = lighting->isAnisotropic() && tex[1] && tex[2] && tex[3];
-        if (voxCount == 0) anisotropic = aniso;
-        else if (anisotropic != aniso) return;   // one shader path per dispatch
-        // BY NAME (RQ-COV-SLOT-1): the isotropic volume, the three directional ones (the
-        // isotropic volume stands in on a Low chain, whose shader never reads them) and
-        // the coverage from PhotonVoxelLighting's own index.
+        // BY NAME (RQ-COV-SLOT-1): the total, the three directional volumes (every tier keeps
+        // them, PHOTON-MARCH-1), the coverage and the position from PhotonVoxelLighting's own
+        // index, level 0's back side and the voxelizer's normal.
         vox[voxCount][0] = tex[0];
-        for (int i = 1; i < 4; ++i) vox[voxCount][i] = (aniso && tex[i]) ? tex[i] : tex[0];
+        for (int i = 1; i < 4; ++i) vox[voxCount][i] = tex[i];
         for (unsigned h = 0; h < 2u; ++h) {
-            Ogre::TextureGpu *cov = tex[lighting->coverageIndex(h)], *pos = tex[lighting->positionIndex(h)];
-            vox[voxCount][4 + h] = cov ? cov : tex[0];
-            vox[voxCount][6 + h] = pos ? pos : tex[0];
+            vox[voxCount][4 + h] = tex[lighting->coverageIndex(h)];
+            vox[voxCount][6 + h] = tex[lighting->positionIndex(h)];
         }
-        vox[voxCount][8] = aniso && tex[lighting->backIndex()] ? tex[lighting->backIndex()] : tex[0];
-        vox[voxCount][9] = aniso && tex[lighting->normalIndex()] ? tex[lighting->normalIndex()] : tex[0];
+        vox[voxCount][8] = tex[lighting->backIndex()];
+        vox[voxCount][9] = tex[lighting->normalIndex()];
         // MOVER-OCCLUSION-1: the direct term's volume, or the total (no share to gate).
         vox[voxCount][10] = lighting->getLightDirectTexture() ? lighting->getLightDirectTexture() : tex[0];
         voxOrigin[voxCount] = voxelizer->getVoxelOrigin();
@@ -5271,7 +5266,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                          cam->getFarClipDistance());
     pp.knobs[2] = float(rv.frame & 0xFFFFu);
     pp.knobs[3] = float(voxCount);
-    pp.knobs2[0] = anisotropic ? 1.0f : 0.0f;
+    pp.knobs2[0] = 0.0f;   // unused (the anisotropic switch it carried is gone: PHOTON-MARCH-1)
     // THE SURFACE BIAS, in world units, derived from the finest cell rather than
     // chosen: it has to clear the voxel grid's own quantisation (a ray that
     // starts inside the cell holding its own surface reads that surface back as
@@ -6746,20 +6741,16 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         if (in.cascadeCount >= kGatherMaxCascades || !lighting || !voxelizer) return;
         Ogre::TextureGpu **tex = lighting->getLightVoxelTextures();
         if (!tex || !tex[0]) return;
-        const bool aniso = lighting->isAnisotropic() && tex[1] && tex[2] && tex[3];
-        if (in.cascadeCount == 0) in.anisotropic = aniso;
-        else if (in.anisotropic != aniso) return;
         const unsigned c = in.cascadeCount;
         // BY NAME (RQ-COV-SLOT-1): as the reflection binds them.
         in.voxel[c][0] = tex[0];
-        for (int i = 1; i < 4; ++i) in.voxel[c][i] = (aniso && tex[i]) ? tex[i] : tex[0];
+        for (int i = 1; i < 4; ++i) in.voxel[c][i] = tex[i];
         for (unsigned h = 0; h < 2u; ++h) {
-            Ogre::TextureGpu *cov = tex[lighting->coverageIndex(h)], *pos = tex[lighting->positionIndex(h)];
-            in.voxel[c][4 + h] = cov ? cov : tex[0];
-            in.voxel[c][6 + h] = pos ? pos : tex[0];
+            in.voxel[c][4 + h] = tex[lighting->coverageIndex(h)];
+            in.voxel[c][6 + h] = tex[lighting->positionIndex(h)];
         }
-        in.voxel[c][8] = aniso && tex[lighting->backIndex()] ? tex[lighting->backIndex()] : tex[0];
-        in.voxel[c][9] = aniso && tex[lighting->normalIndex()] ? tex[lighting->normalIndex()] : tex[0];
+        in.voxel[c][8] = tex[lighting->backIndex()];
+        in.voxel[c][9] = tex[lighting->normalIndex()];
         in.voxel[c][10] = lighting->getLightDirectTexture() ? lighting->getLightDirectTexture() : tex[0];
         const Ogre::Vector3 og = voxelizer->getVoxelOrigin();
         const Ogre::Vector3 sz = voxelizer->getVoxelSize();

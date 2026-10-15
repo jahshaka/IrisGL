@@ -1627,11 +1627,10 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
             !grab(coverage[1], out.coverageN) || !grab(position[0], out.positionP) ||
             !grab(position[1], out.positionN))
             return false;
-        // PHOTON-VOXEL-5: level 0's back side and the voxelizer's normal (the anisotropic tiers;
-        // empty on a Low volume, whose one light is both sides).
+        // PHOTON-VOXEL-5: level 0's back side and the voxelizer's normal (every tier).
         out.lightBack.clear();
         out.normal.clear();
-        if (lighting->isAnisotropic()) {
+        {
             Ogre::TextureGpu *back = lighting->getLightVoxelTextures()[lighting->backIndex()];
             Ogre::TextureGpu *nrm = voxelizer->getNormalVox();
             if (!back || !nrm || !grab(back, out.lightBack) || !grab(nrm, out.normal)) return false;
@@ -4160,7 +4159,6 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
     queueAllGiMaterials();
     const std::vector<GiParams::GiCascadeDesc> table = resolveCascadeTable();
     if (table.empty()) return 0;
-    const bool anisotropic = mGi.quality != GiQuality::Low;
 
     // World transforms must be current before voxelisation: the GPU scene's table
     // is brought current from them.
@@ -4227,7 +4225,7 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
         const VoxelGatherInputs in = cascadeGatherInputs(c, mask);
         gatherAndBuild(*c.feed, c.voxelizer, in);
         c.lighting = new Ogre::PhotonVoxelLighting(Ogre::Id::generateNewId<Ogre::PhotonVoxelLighting>(),
-                                           c.voxelizer, anisotropic);
+                                           c.voxelizer);
         // THE BOUNCE VOLUMES AT EVERY BOUNCE COUNT (CONTACT-OCCLUSION-1): the sky's
         // direct term is a bounce-job pass (PhotonVoxelLighting::update's sky pass, fork), so a
         // one-bounce document needs them too — without them a surface lit only by the

@@ -5134,8 +5134,8 @@ struct GiVoxelStats {
     long long emissiveAboveOne = 0;
 
     /// THE BYTES (PHOTON-WRITER-1): a 64-bit FNV-1a hash over the raw bytes of
-    /// every light volume a reader of this cascade samples — the total and, on
-    /// an anisotropic tier, the three axis volumes (mip 0 of each), in that
+    /// every light volume a reader of this cascade samples — the total and the
+    /// three axis volumes (mip 0 of each), in that
     /// order — as 16 hex digits. Two readings are equal exactly when the
     /// volumes are byte-identical: it is the instrument of the proof that one
     /// at-rest sweep IS the chain's fixed point (gi.chain_converge).
@@ -5169,7 +5169,7 @@ struct GiVoxelVolume {
     std::vector<float> albedo;
     std::vector<float> coverageP, coverageN;
     std::vector<float> positionP, positionN;
-    /// LEVEL 0 PER SIDE (PHOTON-VOXEL-5), the anisotropic tiers (empty on a Low volume): `light`
+    /// LEVEL 0 PER SIDE (PHOTON-VOXEL-5), every tier: `light`
     /// holds the MEAN of a voxel's two sides and `lightBack` its BACK (premultiplied the same way;
     /// the front = 2 light - lightBack), `normal` the voxeliser's (rgb biased 0.5 + 0.5 n, a = 1 for
     /// a two-sided voxel, whose normal is canonical: the front is the side it points to). The

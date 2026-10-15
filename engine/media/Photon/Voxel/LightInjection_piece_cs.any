@@ -5,10 +5,12 @@
 	// THE ONE VOXEL READER'S TEXT (jah_voxel_sample.glsl, the piece JahVoxelSample) over this
 	// job's single volume: the shadow march calls its origin gate (jahVoxelOriginGate) and its
 	// tent instead of carrying a copy of either. The job reads the coverage and the position
-	// per half only (it WRITES the light), so the light and axis reads are absent.
-	#define JAH_VOX_HAS_ANISO 0
-	#define JAH_VOX_ANISO false
+	// per half only (it WRITES the light), so every light read is absent: the reader's light
+	// macros stand at zero here and nothing in this job calls a function that reads them.
 	#define JAH_VOX_SAMPLE_ISO( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
+	#define JAH_VOX_SAMPLE_X( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
+	#define JAH_VOX_SAMPLE_Y( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
+	#define JAH_VOX_SAMPLE_Z( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
 	#define JAH_VOX_SAMPLE_COVP( c, u, l ) OGRE_SampleLevel( voxelCoveragePTex, voxelAlbedoSampler, u, l )
 	#define JAH_VOX_SAMPLE_COVN( c, u, l ) OGRE_SampleLevel( voxelCoverageNTex, voxelAlbedoSampler, u, l )
 	#define JAH_VOX_SAMPLE_POSP( c, u, l ) OGRE_SampleLevel( voxelPositionPTex, voxelAlbedoSampler, u, l )
@@ -125,12 +127,10 @@
 @end
 
 @piece( HeaderCS )
-	@property( vct_anisotropic )
-		// Jahshaka (PHOTON-VOXEL-5): each voxel's light PER HALF-AXIS for its 2x2x2 block's
-		// composite - (radiance x k, k) per half (+a first) and axis, the workgroup's 64 voxels.
-		shared float4 jahHalfLight[64 * 6];
-		@insertpiece( JahDirectionalComposite )
-	@end
+	// Jahshaka (PHOTON-VOXEL-5): each voxel's light PER HALF-AXIS for its 2x2x2 block's
+	// composite - (radiance x k, k) per half (+a first) and axis, the workgroup's 64 voxels.
+	shared float4 jahHalfLight[64 * 6];
+	@insertpiece( JahDirectionalComposite )
 	// Jahshaka (IMAGE-1): THE ONE FALLOFF of a point or spot light, the function the
 	// pixel, Forward+, the cards and Atom call (the fork's JahBrdf piece). Inserted
 	// BEFORE the member macros below: its spot function names a parameter
@@ -265,11 +265,9 @@
 
 	float3 front = float3( 0.0f, 0.0f, 0.0f );
 	float3 back = float3( 0.0f, 0.0f, 0.0f );
-	@property( vct_anisotropic )
-		float3 halfLight[6];
-		for( int q = 0; q < 6; ++q )
-			halfLight[q] = float3( 0.0f, 0.0f, 0.0f );
-	@end
+	float3 halfLight[6];
+	for( int q = 0; q < 6; ++q )
+		halfLight[q] = float3( 0.0f, 0.0f, 0.0f );
 
 	if( anyInvocationARB( c > 0 ) )
 	{
@@ -359,50 +357,48 @@
 			for( int q = 0; q < 6; ++q )
 				visH[q] = -1.0f;
 
-			@property( vct_anisotropic )
-				// PER HALF-AXIS: the half's side normal (the canonical normal or its opposite, the
-				// one whose component along the axis looks the half's way; a one-sided voxel's own
-				// normal where it does, the axis otherwise), its cosine, its march from its face.
-				for( int h = 0; h < 2; ++h )
+			// PER HALF-AXIS: the half's side normal (the canonical normal or its opposite, the
+			// one whose component along the axis looks the half's way; a one-sided voxel's own
+			// normal where it does, the axis otherwise), its cosine, its march from its face.
+			for( int h = 0; h < 2; ++h )
+			{
+				for( int a = 0; a < 3; ++a )
 				{
-					for( int a = 0; a < 3; ++a )
+					const float o = h == 0 ? covP0[a] : covN0[a];
+					if( !( o > 0.0f ) )
+						continue;
+					const float hs = h == 0 ? 1.0f : -1.0f;
+					float3 nn = float3( 0.0f, 0.0f, 0.0f );
+					const float along = hs * nrm[a];
+					if( along > 0.0f )
+						nn = normalVal.xyz;
+					else if( along < 0.0f && twoSided )
+						nn = -normalVal.xyz;
+					else
+						nn[a] = hs;
+					float cosL = dot( nn, lightDir );
+					@property( hlms_lights_area_ltc )
+						if( isLtc )
+							cosL = LTC_Evaluate( nn, float3( 0, 1, 0 ), voxelAabbCenter.xyz,
+												 buildFloat3x3( float3( 1, 0, 0 ), float3( 0, 1, 0 ), float3( 0, 0, 1 ) ),
+												 lights[lightIdx].points, doubleSidedLtc );
+					@end
+					if( !( cosL > 0.0f ) )
+						continue;
+					const int q = h * 3 + a;
+					if( visH[q] < 0.0f )
 					{
-						const float o = h == 0 ? covP0[a] : covN0[a];
-						if( !( o > 0.0f ) )
-							continue;
-						const float hs = h == 0 ? 1.0f : -1.0f;
-						float3 nn = float3( 0.0f, 0.0f, 0.0f );
-						const float along = hs * nrm[a];
-						if( along > 0.0f )
-							nn = normalVal.xyz;
-						else if( along < 0.0f && twoSided )
-							nn = -normalVal.xyz;
-						else
-							nn[a] = hs;
-						float cosL = dot( nn, lightDir );
-						@property( hlms_lights_area_ltc )
-							if( isLtc )
-								cosL = LTC_Evaluate( nn, float3( 0, 1, 0 ), voxelAabbCenter.xyz,
-													 buildFloat3x3( float3( 1, 0, 0 ), float3( 0, 1, 0 ), float3( 0, 0, 1 ) ),
-													 lights[lightIdx].points, doubleSidedLtc );
-						@end
-						if( !( cosL > 0.0f ) )
-							continue;
-						const int q = h * 3 + a;
-						if( visH[q] < 0.0f )
-						{
-							float3 s = voxelUvwPos;
-							const float pa = ( h == 0 ? posP0[a] : posN0[a] ) / o;
-							s[a] = pa;
-							visH[q] = jahInjectVisibility( s, marchD, marchEnd, voxelId, a, pa, hs );
-						}
-						// THE ALBEDO THE SURFACE REALLY HAS FOR THIS LAMP (PHOTON-WRITER-1): the
-						// normalised Disney diffuse's directional albedo at this cosine and roughness.
-						halfLight[q] += cosL * jahDiffuseAlbedo( saturate( dot( nn, lightDir ) ), voxelRoughness ) *
-										lightCol * visH[q];
+						float3 s = voxelUvwPos;
+						const float pa = ( h == 0 ? posP0[a] : posN0[a] ) / o;
+						s[a] = pa;
+						visH[q] = jahInjectVisibility( s, marchD, marchEnd, voxelId, a, pa, hs );
 					}
+					// THE ALBEDO THE SURFACE REALLY HAS FOR THIS LAMP (PHOTON-WRITER-1): the
+					// normalised Disney diffuse's directional albedo at this cosine and roughness.
+					halfLight[q] += cosL * jahDiffuseAlbedo( saturate( dot( nn, lightDir ) ), voxelRoughness ) *
+									lightCol * visH[q];
 				}
-			@end
+			}
 
 			// THE TWO SIDES (level 0): the front along the (canonical) normal, the back against it
 			// - the back only on a two-sided voxel - each through its dominant half's march.
@@ -425,28 +421,11 @@
 					continue;
 				const int h = side == 0 ? hFront : 1 - hFront;
 				const int q = h * 3 + dom;
-				@property( vct_anisotropic )
-					// the per-half loop above marched this side's dominant half already (the same
-					// cosine: the side normal of the half along the normal's dominant axis IS the
-					// side's); a side with no face along it has no light of its own here
-					if( visH[q] < 0.0f )
-						visH[q] = 0.0f;
-				@else
+				// the per-half loop above marched this side's dominant half already (the same
+				// cosine: the side normal of the half along the normal's dominant axis IS the
+				// side's); a side with no face along it has no light of its own here
 				if( visH[q] < 0.0f )
-				{
-					const float o = h == 0 ? covP0[dom] : covN0[dom];
-					float3 s = voxelUvwPos;
-					int oAxis = -1;
-					float pa = 0.0f;
-					if( o > 0.0f )
-					{
-						pa = ( h == 0 ? posP0[dom] : posN0[dom] ) / o;
-						s[dom] = pa;
-						oAxis = dom;
-					}
-					visH[q] = jahInjectVisibility( s, marchD, marchEnd, voxelId, oAxis, pa, h == 0 ? 1.0f : -1.0f );
-				}
-				@end
+					visH[q] = 0.0f;
 				const float3 lit = cosS * jahDiffuseAlbedo( saturate( side == 0 ? dot( normalVal.xyz, lightDir )
 																				 : -dot( normalVal.xyz, lightDir ) ),
 															  voxelRoughness ) * lightCol * visH[q];
@@ -476,58 +455,56 @@
 		OGRE_imageWrite3D4( directVoxel, voxelCelUvw, jahStoreDirect( injectedVoxel ) );
 	@end
 
-	@property( vct_anisotropic )
-		const float4 backVoxelVal = float4( ( back + emissive ) * ( bm * c ), c );
-		OGRE_imageWrite3D4( backVoxel, voxelCelUvw, backVoxelVal );
-		@property( vct_keep_direct )
-			OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, backVoxelVal );
-		@end
-
-		// THE FUSED STEP 0: the directional level 0 from the block's children per half-axis.
-		const uint li = gl_LocalInvocationIndex;
-		for( int h = 0; h < 2; ++h )
-		{
-			for( int a = 0; a < 3; ++a )
-			{
-				const float k = min( h == 0 ? covP0[a] : covN0[a], 1.0f );
-				jahHalfLight[li * 6u + uint( h * 3 + a )] =
-					k > 0.0f && c > 0.0f ? float4( ( halfLight[h * 3 + a] + emissive ) * ( bm * k ), k )
-										 : float4( 0.0f, 0.0f, 0.0f, 0.0f );
-			}
-		}
-		memoryBarrierShared();
-		barrier();
-		if( li < 48u )
-		{
-			JAH_DIR_OFFSETS;
-			JAH_DIR_FRONT;
-			JAH_DIR_BACK;
-			const uint blk = li / 6u;
-			const uint dir = li - blk * 6u;
-			const uint axis = dir >> 1u;
-			const uint3 bl = uint3( blk & 1u, ( blk >> 1u ) & 1u, blk >> 2u );
-			// the -a texel (even) is read travelling +a: the faces looking -a (half 1); the +a one half 0
-			const uint hIdx = ( dir & 1u ) != 0u ? 0u : 1u;
-			float4 accumVal = float4( 0, 0, 0, 0 );
-			for( int p = 0; p < 4; ++p )
-			{
-				const uint3 cf = bl * 2u + uint3( jahDirOffsets[jahDirFront[dir * 4u + uint( p )]] );
-				const uint3 cb = bl * 2u + uint3( jahDirOffsets[jahDirBack[dir * 4u + uint( p )]] );
-				const uint lf = cf.x + cf.y * 4u + cf.z * 16u;
-				const uint lb = cb.x + cb.y * 4u + cb.z * 16u;
-				accumVal += compositeAlongAxis( jahHalfLight[lf * 6u + hIdx * 3u + axis],
-												jahHalfLight[lb * 6u + hIdx * 3u + axis] );
-			}
-			accumVal *= 0.25f;
-			wshort3 outIUvw = wshort3( gl_WorkGroupID.xyz * 2u + bl );
-			if( ( dir & 1u ) != 0u )
-				outIUvw.x += p_higherMipHalfWidth;
-			if( axis == 0u )
-				OGRE_imageWrite3D4( dirOut0, outIUvw, accumVal );
-			else if( axis == 1u )
-				OGRE_imageWrite3D4( dirOut1, outIUvw, accumVal );
-			else
-				OGRE_imageWrite3D4( dirOut2, outIUvw, accumVal );
-		}
+	const float4 backVoxelVal = float4( ( back + emissive ) * ( bm * c ), c );
+	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, backVoxelVal );
+	@property( vct_keep_direct )
+		OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, backVoxelVal );
 	@end
+
+	// THE FUSED STEP 0: the directional level 0 from the block's children per half-axis.
+	const uint li = gl_LocalInvocationIndex;
+	for( int h = 0; h < 2; ++h )
+	{
+		for( int a = 0; a < 3; ++a )
+		{
+			const float k = min( h == 0 ? covP0[a] : covN0[a], 1.0f );
+			jahHalfLight[li * 6u + uint( h * 3 + a )] =
+				k > 0.0f && c > 0.0f ? float4( ( halfLight[h * 3 + a] + emissive ) * ( bm * k ), k )
+									 : float4( 0.0f, 0.0f, 0.0f, 0.0f );
+		}
+	}
+	memoryBarrierShared();
+	barrier();
+	if( li < 48u )
+	{
+		JAH_DIR_OFFSETS;
+		JAH_DIR_FRONT;
+		JAH_DIR_BACK;
+		const uint blk = li / 6u;
+		const uint dir = li - blk * 6u;
+		const uint axis = dir >> 1u;
+		const uint3 bl = uint3( blk & 1u, ( blk >> 1u ) & 1u, blk >> 2u );
+		// the -a texel (even) is read travelling +a: the faces looking -a (half 1); the +a one half 0
+		const uint hIdx = ( dir & 1u ) != 0u ? 0u : 1u;
+		float4 accumVal = float4( 0, 0, 0, 0 );
+		for( int p = 0; p < 4; ++p )
+		{
+			const uint3 cf = bl * 2u + uint3( jahDirOffsets[jahDirFront[dir * 4u + uint( p )]] );
+			const uint3 cb = bl * 2u + uint3( jahDirOffsets[jahDirBack[dir * 4u + uint( p )]] );
+			const uint lf = cf.x + cf.y * 4u + cf.z * 16u;
+			const uint lb = cb.x + cb.y * 4u + cb.z * 16u;
+			accumVal += compositeAlongAxis( jahHalfLight[lf * 6u + hIdx * 3u + axis],
+											jahHalfLight[lb * 6u + hIdx * 3u + axis] );
+		}
+		accumVal *= 0.25f;
+		wshort3 outIUvw = wshort3( gl_WorkGroupID.xyz * 2u + bl );
+		if( ( dir & 1u ) != 0u )
+			outIUvw.x += p_higherMipHalfWidth;
+		if( axis == 0u )
+			OGRE_imageWrite3D4( dirOut0, outIUvw, accumVal );
+		else if( axis == 1u )
+			OGRE_imageWrite3D4( dirOut1, outIUvw, accumVal );
+		else
+			OGRE_imageWrite3D4( dirOut2, outIUvw, accumVal );
+	}
 @end

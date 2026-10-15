@@ -1482,13 +1482,11 @@ void SurfaceCache::relightCards() {
     // takes them from (the pixel's pass buffer is filled from the same calls).
     Ogre::PhotonVoxelLighting *vct = mVct;
     unsigned numCascades = 0u;
-    bool aniso = false;
     Ogre::TextureGpu *envCube = nullptr;
     mGiCpu.assign(kGiParamFloats, 0.0f);
     if (vct && vct->getLightVoxelTextures() && vct->getLightVoxelTextures()[0]) {
         const size_t chainLen = vct->getNumCascades();
         numCascades = unsigned(std::min<size_t>(chainLen, kMaxCardCascades));
-        aniso = vct->isAnisotropic();
         std::vector<float> invRes(4u * chainLen, 0.0f);
         std::vector<float> fromPrev(8u * std::max<size_t>(chainLen, 1u), 0.0f);
         vct->getCascadeChainParams(invRes.data(), fromPrev.data());
@@ -1539,8 +1537,6 @@ void SurfaceCache::relightCards() {
     // binding is set here and released after the dispatch is recorded.
     if (mLightJob->getProperty("hlms_num_vct_cascades") != Ogre::int32(numCascades))
         mLightJob->setProperty("hlms_num_vct_cascades", Ogre::int32(numCascades));
-    if (mLightJob->getProperty("vct_anisotropic") != (aniso ? 1 : 0))
-        mLightJob->setProperty("vct_anisotropic", aniso ? 1 : 0);
     if (mLightJob->getProperty("jah_env") != (envCube ? 1 : 0))
         mLightJob->setProperty("jah_env", envCube ? 1 : 0);
     // THE STORE'S ROUNDING follows the layer's format (jahCardRound): the
@@ -1550,9 +1546,9 @@ void SurfaceCache::relightCards() {
         if (mLightJob->getProperty("jah_card_round_r11g11b10") != round)
             mLightJob->setProperty("jah_card_round_r11g11b10", round);
     }
-    // Every light volume a reader binds per cascade: the total, the anisotropic
+    // Every light volume a reader binds per cascade: the total, the directional
     // axes, the per-axis coverage (PHOTON-VOXEL-3), the surface position
-    // (PHOTON-VOXEL-4) - PhotonVoxelLighting's list.
+    // (PHOTON-VOXEL-4), the back side and the normal - PhotonVoxelLighting's list.
     const unsigned kinds = numCascades ? unsigned(vct->getNumVoxelTextures()) : 0u;
     const unsigned vctUnits = numCascades ? kinds * numCascades + (envCube ? 1u : 0u) : 0u;
     // THE CLOUD FIELD, the LAST texture unit (after the chain and the

@@ -36,32 +36,30 @@ uniform restrict writeonly image3D lightVoxel;
 // pass adds its own part in the anisotropic mip step 0); `directBackVoxel` the back side's
 // direct term for the bounce's fixed point. The slots follow u0 and the direct term in this
 // order (VctLighting::update binds them so).
-@property( vct_anisotropic )
+layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+uniform restrict writeonly image3D backVoxel;
+@add( jahInjUav, 1 )
+@property( vct_keep_direct )
 	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict writeonly image3D backVoxel;
+	uniform restrict writeonly image3D directBackVoxel;
 	@add( jahInjUav, 1 )
-	@property( vct_keep_direct )
-		layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-		uniform restrict writeonly image3D directBackVoxel;
-		@add( jahInjUav, 1 )
-		layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-		uniform restrict writeonly image3D dirOut0;
-		@add( jahInjUav, 1 )
-		layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-		uniform restrict writeonly image3D dirOut1;
-		@add( jahInjUav, 1 )
-		layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-		uniform restrict writeonly image3D dirOut2;
-	@else
-		layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-		uniform restrict writeonly image3D dirOut0;
-		@add( jahInjUav, 1 )
-		layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-		uniform restrict writeonly image3D dirOut1;
-		@add( jahInjUav, 1 )
-		layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-		uniform restrict writeonly image3D dirOut2;
-	@end
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict writeonly image3D dirOut0;
+	@add( jahInjUav, 1 )
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict writeonly image3D dirOut1;
+	@add( jahInjUav, 1 )
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict writeonly image3D dirOut2;
+@else
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict writeonly image3D dirOut0;
+	@add( jahInjUav, 1 )
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict writeonly image3D dirOut1;
+	@add( jahInjUav, 1 )
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict writeonly image3D dirOut2;
 @end
 
 // Jahshaka (PHOTON-VOXEL-3/-4): THE PER-HALF-AXIS COVERAGE at t3 (the faces looking +a) and

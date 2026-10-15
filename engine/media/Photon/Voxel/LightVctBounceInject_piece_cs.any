@@ -26,16 +26,9 @@
 	// Jahshaka (PHOTON-VOXEL-4): the SURFACE POSITION, the list's last entry - the gate.
 	#define JAH_VOX_SAMPLE_POSP( c, u, l ) OGRE_SampleLevel( vctProbePosP[c], vctProbeSampler, u, l )
 	#define JAH_VOX_SAMPLE_POSN( c, u, l ) OGRE_SampleLevel( vctProbePosN[c], vctProbeSampler, u, l )
-	@property( vct_anisotropic )
-		#define JAH_VOX_HAS_ANISO 1
-		#define JAH_VOX_ANISO true
-		#define JAH_VOX_SAMPLE_X( c, u, l ) OGRE_SampleLevel( vctProbeX[c], vctProbeSampler, u, l )
-		#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], vctProbeSampler, u, l )
-		#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], vctProbeSampler, u, l )
-	@else
-		#define JAH_VOX_HAS_ANISO 0
-		#define JAH_VOX_ANISO false
-	@end
+	#define JAH_VOX_SAMPLE_X( c, u, l ) OGRE_SampleLevel( vctProbeX[c], vctProbeSampler, u, l )
+	#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], vctProbeSampler, u, l )
+	#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], vctProbeSampler, u, l )
 	#define JAH_VOX_INVRES( c ) p_vctInvResMaxLod[c].xyz
 	#define JAH_VOX_MAXLOD( c ) p_vctInvResMaxLod[c].w
 	@property( hlms_num_vct_cascades > 1 )
@@ -175,9 +168,7 @@
 	// injection writes albedoVal.w to each), so reading it here keeps it exactly as
 	// the accumulating form did.
 	float4 currentLight = OGRE_Load3D( directVoxel, gl_GlobalInvocationID.xyz, 0 );
-	@property( vct_anisotropic )
-		float4 backLight = OGRE_Load3D( directBackVoxel, gl_GlobalInvocationID.xyz, 0 );
-	@end
+	float4 backLight = OGRE_Load3D( directBackVoxel, gl_GlobalInvocationID.xyz, 0 );
 
 	if( anyInvocationARB( albedoVal.a > 0 ) )
 	{
@@ -214,14 +205,10 @@
 		// how much of it they fill, exactly like the direct term it is added to.
 		const float3 reemit = albedoVal.xyz * p_iterationDampening * jahDiffuseAlbedoHemi( voxelRoughness ) * albedoVal.w;
 		currentLight.xyz += reemit * ( 0.5f * ( vctDiffuse + vctDiffuseBack ) );
-		@property( vct_anisotropic )
-			backLight.xyz += reemit * vctDiffuseBack;
-		@end
+		backLight.xyz += reemit * vctDiffuseBack;
 	}
 
 	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz );
 	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( currentLight ) );  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
-	@property( vct_anisotropic )
-		OGRE_imageWrite3D4( backVoxel, voxelCelUvw, float4( backLight.xyz, currentLight.w ) );
-	@end
+	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, float4( backLight.xyz, currentLight.w ) );
 @end

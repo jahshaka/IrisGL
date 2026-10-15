@@ -65,7 +65,6 @@
             {
                 "hlms_lights_area_ltc" : 1,
                 "jah_cloud_shadow" : 0,
-                "vct_anisotropic" : 0,
                 "vct_keep_direct" : 0
             },
 
@@ -184,7 +183,6 @@
 
             "properties" :
             {
-                "vct_anisotropic" : 0,
                 "hlms_num_vct_cascades" : 1
             },
 

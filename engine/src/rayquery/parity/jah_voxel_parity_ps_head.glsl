@@ -69,7 +69,7 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4 chainInvRes[8];
 	uniform vec4 chainFromPrev[14];
 	uniform vec4 cones[256];
-	uniform vec4 counts;	// x = cones, y = cascades, z = anisotropic
+	uniform vec4 counts;	// x = cones, y = cascades, z unused
 	uniform vec4 sdf;		// x = the SDF skip's max mip, y = its factor
 vulkan( }; )
 
@@ -79,8 +79,6 @@ out vec4 fragColour;
 #define JAH_PARITY_PICK( base, c, u, l ) ( ( c ) == 0 ? textureLod( sampler3D( base##0, vSmp ), u, l ) : ( c ) == 1 ? textureLod( sampler3D( base##1, vSmp ), u, l ) : ( c ) == 2 ? textureLod( sampler3D( base##2, vSmp ), u, l ) : textureLod( sampler3D( base##3, vSmp ), u, l ) )
 #define JAH_VOX_MAX_CASCADES 4
 #define JAH_VOX_COUNT int( counts.y )
-#define JAH_VOX_HAS_ANISO 1
-#define JAH_VOX_ANISO ( counts.z > 0.5 )
 #define JAH_VOX_SAMPLE_ISO( c, u, l ) JAH_PARITY_PICK( vIso, c, u, l )
 #define JAH_VOX_SAMPLE_X( c, u, l ) JAH_PARITY_PICK( vX, c, u, l )
 #define JAH_VOX_SAMPLE_Y( c, u, l ) JAH_PARITY_PICK( vY, c, u, l )

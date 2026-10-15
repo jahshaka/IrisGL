@@ -52,9 +52,10 @@ namespace Ogre
     public:
 
     protected:
-        /// When mAnisotropic == false, mLightVoxel[0] contains all the mips.
-        ///
-        /// When mAnisotropic == true, mLightVoxel[0] contains mip 0.
+        /// mLightVoxel[0] contains mip 0 (and its whole chain only under the specular SDF
+        /// quality, which the empty-space skip reads) - ONE LIGHT STORE AT EVERY TIER
+        /// (PHOTON-MARCH-1: the isotropic store Low kept is deleted; its colour per unit of
+        /// opacity mixed every surface in a texel, a wall read 0.87 L beside a floor):
         ///  * mLightVoxel[1] contains mipmaps in -X and +X
         ///  * mLightVoxel[2] contains mipmaps in -Y and +Y
         ///  * mLightVoxel[3] contains mipmaps in -Z and +Z
@@ -75,15 +76,14 @@ namespace Ogre
         /// But more importantly, we would waste 1/4th of memory (actually 1/2 of memory
         /// because GPUs like GCN round memory consumption to the next power of 2).
         ///
-        /// Jahshaka (PHOTON-VOXEL-3/-4): THE LAST FOUR ENTRIES - from mLightVoxel[4]
-        /// anisotropic, mLightVoxel[1] isotropic - are the voxelizer's COVERAGE PER HALF-AXIS
+        /// Jahshaka (PHOTON-VOXEL-3/-4): mLightVoxel[4..7] are the voxelizer's COVERAGE PER HALF-AXIS
         /// (coverageIndex(0 / 1): the faces looking +a / -a) and its SURFACE POSITION per
         /// half (positionIndex(0 / 1)), NOT owned here: every reader of the light volumes
         /// reads the opacity along its ray from the coverage and the origin plane from the
         /// position, so they ride the same list and every reader that binds
         /// getNumVoxelTextures() volumes per cascade binds them too.
         ///
-        /// Jahshaka (PHOTON-VOXEL-5): on the anisotropic tiers two more follow - mLightVoxel[8],
+        /// Jahshaka (PHOTON-VOXEL-5): two more follow - mLightVoxel[8],
         /// level 0's BACK side (owned; backIndex()), and mLightVoxel[9], the voxelizer's NORMAL
         /// (not owned; normalIndex()): level 0 holds the MEAN of a voxel's two sides
         /// (mLightVoxel[0]) and its back, and the normal says which side a half-axis's faces look
@@ -109,7 +109,7 @@ namespace Ogre
         /// Jahshaka (PHOTON-VOXEL-5): step 0 is the BOUNCE'S part of the directional level 0 -
         /// the injection composites the direct part itself (into mLightDirectDir when a bounce
         /// follows); after every bounce this job adds the bounce's part per half-axis to it.
-        /// Created with the bounce textures, on the anisotropic tiers.
+        /// Created with the bounce textures.
         HlmsComputeJob             *mAnisoGeneratorStep0;
         FastArray<HlmsComputeJob *> mAnisoGeneratorStep1;
 
@@ -137,7 +137,7 @@ namespace Ogre
         TextureGpu *mLightDirect;
         /// setStoreSkyLight (BOUNCES-ZERO-1).
         bool mStoreSkyLight = true;
-        /// Jahshaka (PHOTON-VOXEL-5), the anisotropic tiers with a bounce: the BACK side's direct
+        /// Jahshaka (PHOTON-VOXEL-5), with a bounce: the BACK side's direct
         /// term and the directional level 0's direct part per axis (float like mLightDirect and
         /// the total since CONTACT-OCCLUSION-1 - an emitter exceeds the lamps' ceiling; level 0 only; both signs packed along x like mLightVoxel[1..3]) - what
         /// the bounce's fixed point and step 0 need per side and per half.
@@ -159,8 +159,6 @@ namespace Ogre
         TextureGpu *mEnvCube;
         float       mEnvGain[3];
         float       mEnvSh[27];  ///< world basis {1,y,z,x,xy,yz,3z^2-1,zx,x^2-y^2}, radiance units
-
-        bool  mAnisotropic;
 
         /// When we do multiple bounces, cascades can be used to improve accuracy
         FastArray<PhotonVoxelLighting *> mExtraCascades;
@@ -275,7 +273,7 @@ namespace Ogre
         bool hasEnvironmentLight() const;
 
     public:
-        PhotonVoxelLighting( IdType id, PhotonVoxelizerSourceBase *voxelizer, bool bAnisotropic );
+        PhotonVoxelLighting( IdType id, PhotonVoxelizerSourceBase *voxelizer );
         ~PhotonVoxelLighting() override;
 
         /// Used by a host's cascade chain (upstream's VctCascadedVoxelizer is not in
@@ -458,24 +456,6 @@ namespace Ogre
         /// without searching the scene graph for it.
         PhotonVoxelVisualizer *getDebugVisualizer() const { return mDebugVoxelVisualizer; }
 
-        /** Toggles anisotropic mips.
-
-            Anisotropic mips provide much higher quality and generally lower light leaking.
-            However it costs a bit more performance, and increases memory consumption.
-
-            Normally regular mipmaps of 3D textures increase memory consumption by 1/7
-            Anisotropic mipmaps of 3D textures increase memory consumption by 6/7
-
-             + Isotropic 256x256x256 RGBA8_UNORM = 256x256x256x4 * (1+1/7) = 64 MB * 1.143 =  73.14MB
-             + Anisotrop 256x256x256 RGBA8_UNORM = 256x256x256x4 * (1+6/7) = 64 MB * 1.857 = 118.85MB
-
-        @remarks
-            After changing this setting, PhotonVoxelLighting::update
-            *must* be called again to repopulate the light data.
-        */
-        void setAnisotropic( bool bAnisotropic );
-        bool isAnisotropic() const { return mAnisotropic; }
-
         /** THE ENVIRONMENT A BOUNCE CONE ESCAPES TO (Jahshaka, PHOTON-ENV-1). Replaces
             upstream's setAmbient hemisphere pair, which the pixel shader used to add
             wherever a cone escaped: the pixel shader now reads the environment itself
@@ -512,29 +492,23 @@ namespace Ogre
         /// class could see the volume to check it.
         TextureGpu  *getLightDirectTexture() const { return mLightDirect; }
         TextureGpu **getLightVoxelTextures( const size_t cascadeIdx );
-        /// The light volumes a reader binds per cascade: the total (and its three
-        /// anisotropic axes), then the coverage per half-axis (+a, -a; PHOTON-VOXEL-3/-4),
-        /// then the surface position per half (PHOTON-VOXEL-4).
-        /// ...and on the anisotropic tiers (PHOTON-VOXEL-5) level 0's back side and the
-        /// voxelizer's normal, the last two (backIndex / normalIndex).
-        uint32       getNumVoxelTextures() const { return volumesPerCascade( mAnisotropic ); }
+        /// The light volumes a reader binds per cascade: the total (level 0) and its three
+        /// directional axes, then the coverage per half-axis (+a, -a; PHOTON-VOXEL-3/-4),
+        /// then the surface position per half (PHOTON-VOXEL-4), then (PHOTON-VOXEL-5) level
+        /// 0's back side and the voxelizer's normal, the last two (backIndex / normalIndex).
+        uint32       getNumVoxelTextures() const { return kVolumesPerCascade; }
         /// Jahshaka (OWN-GI-1): the same count without an instance — what the PBS
         /// pass claims per cascade (PhotonPassBinding) and the pass budget is sized on.
-        static constexpr uint32 kVolumesPerCascadeIsotropic = 5u;
-        static constexpr uint32 kVolumesPerCascadeAnisotropic = 10u;
-        static constexpr uint32 volumesPerCascade( bool anisotropic )
-        {
-            return anisotropic ? kVolumesPerCascadeAnisotropic : kVolumesPerCascadeIsotropic;
-        }
+        static constexpr uint32 kVolumesPerCascade = 10u;
         /// Jahshaka (PHOTON-VOXEL-5): level 0's BACK side (the front = 2 x mLightVoxel[0] - it)
-        /// and the voxelizer's normal (the side a half-axis looks to), anisotropic tiers only.
+        /// and the voxelizer's normal (the side a half-axis looks to).
         uint32       backIndex() const { return 8u; }
         uint32       normalIndex() const { return 9u; }
         /// Where the coverage of half `h` (0: the faces looking +a, 1: -a) sits in
         /// getLightVoxelTextures().
-        uint32       coverageIndex( uint32 h ) const { return ( mAnisotropic ? 4u : 1u ) + h; }
+        uint32       coverageIndex( uint32 h ) const { return 4u + h; }
         /// Where the surface position of half `h` sits: the last two entries.
-        uint32       positionIndex( uint32 h ) const { return ( mAnisotropic ? 6u : 3u ) + h; }
+        uint32       positionIndex( uint32 h ) const { return 6u + h; }
 
         const HlmsSamplerblock *getBindTrilinearSamplerblock() { return mSamplerblockTrilinear; }
 

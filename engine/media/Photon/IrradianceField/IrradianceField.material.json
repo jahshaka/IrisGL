@@ -19,7 +19,6 @@
 
             "properties" :
             {
-                "vct_anisotropic" : 0,
                 "hlms_num_vct_cascades" : 1
             },
 

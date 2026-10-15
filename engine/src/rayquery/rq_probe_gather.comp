@@ -99,7 +99,6 @@ layout( set = 0, binding = 30 ) uniform sampler3D voxelDirect[kMaxCascades];
 #define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
 
 #define JAH_VOX_COUNT       int( p.knobs.w )
-#define JAH_VOX_ANISO       ( p.knobs2.x > 0.5 )
 #define JAH_VOX_ORIGIN( c )  p.voxelOrigin[c]
 #define JAH_VOX_INVSIZE( c ) p.voxelInvSize[c]
 #define JAH_SKY_ON          ( p.knobs2.z > 0.5 )

@@ -16,11 +16,9 @@
 	@property( syntax == glsl || syntax == glslvk )
 		vulkan_layout( ogre_t@value(vctProbes) ) uniform texture3D vctProbes[@value( vct_num_probes )];
 		vulkan( layout( ogre_s@value(vctProbes) ) uniform sampler vctProbeSampler );
-		@property( vct_anisotropic )
-			vulkan_layout( ogre_t@value(vctProbeX) ) uniform texture3D vctProbeX[@value( vct_num_probes )];
-			vulkan_layout( ogre_t@value(vctProbeY) ) uniform texture3D vctProbeY[@value( vct_num_probes )];
-			vulkan_layout( ogre_t@value(vctProbeZ) ) uniform texture3D vctProbeZ[@value( vct_num_probes )];
-		@end
+		vulkan_layout( ogre_t@value(vctProbeX) ) uniform texture3D vctProbeX[@value( vct_num_probes )];
+		vulkan_layout( ogre_t@value(vctProbeY) ) uniform texture3D vctProbeY[@value( vct_num_probes )];
+		vulkan_layout( ogre_t@value(vctProbeZ) ) uniform texture3D vctProbeZ[@value( vct_num_probes )];
 		// Jahshaka (PHOTON-VOXEL-3/-4): the per-half-axis coverage (HlmsPbs registers it after
 		// the anisotropic arrays, VctLighting's last light-volume entry).
 		vulkan_layout( ogre_t@value(vctProbeCovP) ) uniform texture3D vctProbeCovP[@value( vct_num_probes )];
@@ -28,12 +26,10 @@
 		// Jahshaka (PHOTON-VOXEL-4): the surface position per half-axis, the list's last entries.
 		vulkan_layout( ogre_t@value(vctProbePosP) ) uniform texture3D vctProbePosP[@value( vct_num_probes )];
 		vulkan_layout( ogre_t@value(vctProbePosN) ) uniform texture3D vctProbePosN[@value( vct_num_probes )];
-		@property( vct_anisotropic )
-			// Jahshaka (PHOTON-VOXEL-5): level 0's BACK side and the voxeliser's normal (its side) -
-			// the list's last two entries on the anisotropic tiers.
-			vulkan_layout( ogre_t@value(vctProbeBack) ) uniform texture3D vctProbeBack[@value( vct_num_probes )];
-			vulkan_layout( ogre_t@value(vctProbeNrm) ) uniform texture3D vctProbeNrm[@value( vct_num_probes )];
-		@end
+		// Jahshaka (PHOTON-VOXEL-5): level 0's BACK side and the voxeliser's normal (its side) -
+		// the list's last two entries on the anisotropic tiers.
+		vulkan_layout( ogre_t@value(vctProbeBack) ) uniform texture3D vctProbeBack[@value( vct_num_probes )];
+		vulkan_layout( ogre_t@value(vctProbeNrm) ) uniform texture3D vctProbeNrm[@value( vct_num_probes )];
 		// THE CONE FUNCTIONS COME AFTER THE VOLUMES THEY READ (PHOTON-READER-1): the
 		// march reads the volumes as globals through its macro convention, and this
 		// piece is the first point in the pixel shader where they are declared
@@ -43,20 +39,16 @@
 	@property( syntax == hlsl )
 		Texture3D vctProbes[@value( vct_num_probes )]		: register(t@value(vctProbes));
 		SamplerState vctProbeSampler	: register(s@value(vctProbes));
-		@property( vct_anisotropic )
-			Texture3D vctProbeX[@value( vct_num_probes )]	: register(t@value(vctProbeX));
-			Texture3D vctProbeY[@value( vct_num_probes )]	: register(t@value(vctProbeY));
-			Texture3D vctProbeZ[@value( vct_num_probes )]	: register(t@value(vctProbeZ));
-		@end
+		Texture3D vctProbeX[@value( vct_num_probes )]	: register(t@value(vctProbeX));
+		Texture3D vctProbeY[@value( vct_num_probes )]	: register(t@value(vctProbeY));
+		Texture3D vctProbeZ[@value( vct_num_probes )]	: register(t@value(vctProbeZ));
 	@end
 	@property( syntax == metal )
 		, array<texture3d<float> vctProbes, @value( vct_num_probes )>	[[texture(@value(vctProbes))]]
 		, sampler vctProbeSampler			[[sampler(@value(vctProbes))]]
-		@property( vct_anisotropic )
-			, array<texture3d<float> vctProbeX, @value( vct_num_probes )>	[[texture(@value(vctProbeX))]]
-			, array<texture3d<float> vctProbeY, @value( vct_num_probes )>	[[texture(@value(vctProbeY))]]
-			, array<texture3d<float> vctProbeZ, @value( vct_num_probes )>	[[texture(@value(vctProbeZ))]]
-		@end
+		, array<texture3d<float> vctProbeX, @value( vct_num_probes )>	[[texture(@value(vctProbeX))]]
+		, array<texture3d<float> vctProbeY, @value( vct_num_probes )>	[[texture(@value(vctProbeY))]]
+		, array<texture3d<float> vctProbeZ, @value( vct_num_probes )>	[[texture(@value(vctProbeZ))]]
 	@end
 @end
 
@@ -172,20 +164,13 @@
 	// Jahshaka (PHOTON-VOXEL-4): the SURFACE POSITION, the list's last entry - the gate.
 	#define JAH_VOX_SAMPLE_POSP( c, u, l ) OGRE_SampleLevel( vctProbePosP[c], vctProbeSampler, u, l )
 	#define JAH_VOX_SAMPLE_POSN( c, u, l ) OGRE_SampleLevel( vctProbePosN[c], vctProbeSampler, u, l )
-	@property( vct_anisotropic )
-		#define JAH_VOX_HAS_ANISO 1
-		#define JAH_VOX_ANISO true
-		#define JAH_VOX_SAMPLE_X( c, u, l ) OGRE_SampleLevel( vctProbeX[c], vctProbeSampler, u, l )
-		#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], vctProbeSampler, u, l )
-		#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], vctProbeSampler, u, l )
-		// Jahshaka (PHOTON-VOXEL-5): level 0 read per side (jah_voxel_sample.glsl).
-		#define JAH_VOX_HAS_BACK 1
-		#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], vctProbeSampler, u, l )
-		#define JAH_VOX_SAMPLE_NRM( c, u, l ) OGRE_SampleLevel( vctProbeNrm[c], vctProbeSampler, u, l )
-	@else
-		#define JAH_VOX_HAS_ANISO 0
-		#define JAH_VOX_ANISO false
-	@end
+	#define JAH_VOX_SAMPLE_X( c, u, l ) OGRE_SampleLevel( vctProbeX[c], vctProbeSampler, u, l )
+	#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], vctProbeSampler, u, l )
+	#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], vctProbeSampler, u, l )
+	// Jahshaka (PHOTON-VOXEL-5): level 0 read per side (jah_voxel_sample.glsl).
+	#define JAH_VOX_HAS_BACK 1
+	#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], vctProbeSampler, u, l )
+	#define JAH_VOX_SAMPLE_NRM( c, u, l ) OGRE_SampleLevel( vctProbeNrm[c], vctProbeSampler, u, l )
 	#define JAH_VOX_INVRES( c ) passBuf.vctProbeParams.vctInvResolution_cascadeMaxLod[c].xyz
 	#define JAH_VOX_MAXLOD( c ) passBuf.vctProbeParams.vctInvResolution_cascadeMaxLod[c].w
 	@property( vct_num_probes > 1 )

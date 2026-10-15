@@ -178,17 +178,16 @@ struct GatherInputs {
     Ogre::TextureGpu *sky = nullptr;
     float skyColour[3] = { 0.0f, 0.0f, 0.0f };
 
-    /// The cascade chain's light volumes: [cascade][slot], slot 0 isotropic,
-    /// 1..3 the anisotropic chains, 4/5 the coverage per half-axis (+a, -a), 6/7 the
+    /// The cascade chain's light volumes: [cascade][slot], slot 0 the total (level 0),
+    /// 1..3 the directional chains, 4/5 the coverage per half-axis (+a, -a), 6/7 the
     /// surface position per half (by name, RQ-COV-SLOT-1 / PHOTON-VOXEL-4), 8 level 0's back
-    /// side and 9 the voxelizer's normal (PHOTON-VOXEL-5; the isotropic volume on a Low chain).
+    /// side and 9 the voxelizer's normal (PHOTON-VOXEL-5).
     Ogre::TextureGpu *voxel[kGatherMaxCascades][11] = {};   // ...[10] the direct term (MOVER-OCCLUSION-1)
     float voxelOrigin[kGatherMaxCascades][3] = {};
     float voxelSize[kGatherMaxCascades][3] = {};
     float voxelCell[kGatherMaxCascades] = {};
     float voxelMultiplier[kGatherMaxCascades] = {};
     unsigned cascadeCount = 0u;
-    bool anisotropic = false;
 
     /// The camera's basis, in the five vectors the shaders reconstruct with.
     /// Under STEREO these are the LEFT eye's, over its own layer as a 0..1 image.

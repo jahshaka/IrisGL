@@ -17,7 +17,6 @@
 // binding number:
 //
 //     JAH_VOX_COUNT        int    how many cascades are bound
-//     JAH_VOX_ANISO        bool   the volumes carry the three anisotropic slots
 //     JAH_VOX_ORIGIN(c)    vec4   xyz = the box's world origin, w = the
 //                                 cascade's radiance multiplier (the bake's
 //                                 normalisation undone — DRAG-1)
@@ -49,16 +48,13 @@
 #include "jah_rq_finite.glsl"
 
 // THE READ ITSELF IS THE ONE VOXEL RADIANCE READER'S (PHOTON-READER-1): the
-// anisotropic three-axis blend, the isotropic slot at Low, the footprint's mip
+// directional three-axis blend, the total's level 0, the footprint's mip
 // and the usable-sample guard live in jah_voxel_sample.glsl, which the pixel
 // shader's cone march, the bounce job and the irradiance field read too. This
 // file keeps what is the HIT's own: which cascade answers, the step into the
 // hit's cell, the six-cell crossfade, the multiplier and the opacity divide.
 // The ray jobs declare combined sampler arrays under the names below, so the
 // sample macros default to them.
-#ifndef JAH_VOX_HAS_ANISO
-#define JAH_VOX_HAS_ANISO 1
-#endif
 #ifndef JAH_VOX_SAMPLE_ISO
 #define JAH_VOX_SAMPLE_ISO( c, u, l ) textureLod( voxelIso[c], u, l )
 #define JAH_VOX_SAMPLE_X( c, u, l ) textureLod( voxelX[c], u, l )
@@ -73,7 +69,7 @@
 #define JAH_VOX_SAMPLE_POSP( c, u, l ) textureLod( voxelPosP[c], u, l )
 #define JAH_VOX_SAMPLE_POSN( c, u, l ) textureLod( voxelPosN[c], u, l )
 // LEVEL 0 PER SIDE (PHOTON-VOXEL-5): the back side and the voxeliser's normal, `voxelBack` /
-// `voxelNrm` (on a Low chain the isotropic volume stands in for both: one light, either side).
+// `voxelNrm`.
 #define JAH_VOX_HAS_BACK 1
 #define JAH_VOX_SAMPLE_BACK( c, u, l ) textureLod( voxelBack[c], u, l )
 #define JAH_VOX_SAMPLE_NRM( c, u, l ) textureLod( voxelNrm[c], u, l )

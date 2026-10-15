@@ -44,16 +44,9 @@ vec4 jahParityAnswer( int cone, int part )
 		const float da = c1.xyz[axis];
 		const float sgn = da > 0.0 ? 1.0 : -1.0;
 		const float invAbsDa = 1.0 / abs( da );
-#if JAH_VOX_HAS_ANISO
-		const bool directional = JAH_VOX_ANISO && c3.x > 0.5;
-		const bool anisoTier = JAH_VOX_ANISO;
-#else
-		const bool directional = false;
-		const bool anisoTier = false;
-#endif
+		const bool directional = c3.x > 0.5;
 		const float texelCells = directional ? 2.0 : 1.0;
-		const float mip = ( anisoTier && !directional ) ? 0.0
-														: floor( jahVoxelKernelMip( c3.x, texelCells ) );
+		const float mip = directional ? floor( jahVoxelKernelMip( c3.x, texelCells ) ) : 0.0;
 		const float texelLS = texelCells * exp2( mip ) * invRes[axis];
 		const vec2 faces = jahMarchPlane( c0.xyz[axis], texelLS, sgn );
 		const float tCentre = ( 0.5 * ( faces.x + faces.y ) - c0.xyz[axis] ) * sgn * invAbsDa;

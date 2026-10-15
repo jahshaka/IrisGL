@@ -18,16 +18,14 @@
 // HOW A CALLER BINDS IT. The shader's bindings are its own; this file reads the
 // volumes through macros the caller defines before it:
 //
-//     JAH_VOX_HAS_ANISO          0 or 1, a PREPROCESSOR constant: the three
-//                                anisotropic slots are DECLARED in this shader
-//     JAH_VOX_ANISO              bool: they carry data (a runtime choice is
-//                                fine; the Low tier builds without them)
-//     JAH_VOX_SAMPLE_ISO(c,u,l)  vec4: cascade c's isotropic volume at uvw u,
-//                                mip l (Low: every mip; anisotropic tiers: the
-//                                full-resolution level the march starts in)
-//     JAH_VOX_SAMPLE_X(c,u,l)    vec4: the X-axis anisotropic volume (both
+//     JAH_VOX_SAMPLE_ISO(c,u,l)  vec4: cascade c's total at uvw u - level 0 (the mean of a
+//                                voxel's two sides), the only level a light read takes
+//                                from it (its coarse levels exist only for the specular
+//                                SDF skip, jah_voxel_march.glsl)
+//     JAH_VOX_SAMPLE_X(c,u,l)    vec4: the X-axis directional volume (both
 //     JAH_VOX_SAMPLE_Y(c,u,l)    signs packed side by side along u.x, so u.x
-//     JAH_VOX_SAMPLE_Z(c,u,l)    runs over [0, 1) and the halves are 0.5 apart)
+//     JAH_VOX_SAMPLE_Z(c,u,l)    runs over [0, 1) and the halves are 0.5 apart) - every
+//                                level past 0, at every tier (PHOTON-MARCH-1)
 //     JAH_VOX_SAMPLE_COVP(c,u,l) vec4: cascade c's COVERAGE of the faces looking +a (xyz = O_x+,
 //     JAH_VOX_SAMPLE_COVN(c,u,l)   O_y+, O_z+) and of those looking -a (PHOTON-VOXEL-3/-4;
 //                                VctLighting's coverageIndex(0 / 1))
@@ -35,19 +33,26 @@
 //     JAH_VOX_SAMPLE_POSN(c,u,l)   p absolute in the cascade's normalised space; positionIndex(0 / 1))
 //                                - the origin plane's test
 //     JAH_VOX_INVRES(c)          vec3: 1 / cascade c's resolution, per axis
-//     JAH_VOX_HAS_BACK           0 or 1, a PREPROCESSOR constant (PHOTON-VOXEL-5): the anisotropic
-//                                tiers' level-0 BACK side and the voxeliser's normal are bound:
+//     JAH_VOX_HAS_BACK           0 or 1, a PREPROCESSOR constant (PHOTON-VOXEL-5): the level-0
+//                                BACK side and the voxeliser's normal are bound (the bounce job
+//                                reads the sides' mean and binds neither):
 //     JAH_VOX_SAMPLE_BACK(c,u,l) vec4: level 0's back side (premultiplied like the isotropic
 //                                volume, which holds the two sides' MEAN - the front is twice
 //                                the mean minus the back); VctLighting::backIndex()
 //     JAH_VOX_SAMPLE_NRM(c,u,l)  vec4: the voxeliser's normal (xyz biased, the canonical normal of a
 //                                two-sided voxel: the front is the side it points to); normalIndex()
 //
-// THE VOLUME'S DIRECTIONAL READ IS THE ONLY RULE HERE — ONE RULE AT EVERY MIP
-// (PHOTON-VOXEL-3, jahVoxelReadIso's comment): a step takes the opacity of what it
-// crosses, per axis, from the per-axis coverage at mip 0 and from the half of each
-// axis volume composited TOWARDS the reader above it. The pixel's cones, the bounce,
-// the field, the cards and the ray hit read through it; nothing else reads a volume.
+// THE VOLUME'S DIRECTIONAL READ IS THE ONLY RULE HERE — ONE RULE AT EVERY MIP AND EVERY TIER
+// (PHOTON-VOXEL-3; PHOTON-MARCH-1): a step takes the opacity of what it crosses, per axis,
+// from the per-axis coverage at mip 0 and from the half of each axis volume composited
+// TOWARDS the reader above it - and THE COLOUR THAT COMES WITH AN OPACITY IS THE
+// COVERAGE-WEIGHTED RADIANCE OF THE SAME HALF-AXIS FACES THE OPACITY COUNTS (the directional
+// store keeps (radiance x k, k) per half-axis: JahDirectionalComposite_piece_cs.any). The
+// isotropic store the Low tier kept took the colour as a texel's MEAN radiance over every
+// surface in it: a wall of L standing on a plate read 0.998 / 0.954 / 0.873 L at 32 / 64 / 128
+// cells of a 9 m cascade (gi.march_underread), 0.999 / 0.996 / 0.990 through this law. The
+// pixel's cones, the bounce, the field, the cards and the ray hit read through it; nothing
+// else reads a volume.
 
 #ifndef JAH_VOXEL_SAMPLE_GLSL
 #define JAH_VOXEL_SAMPLE_GLSL
@@ -87,8 +92,8 @@ int jahVoxelAxis( vec3 dir, vec3 invRes )
 /// dominant axis a, jah_voxel_march.glsl) reads:
 ///
 ///   THE PLANE'S OWN AXIS a, AT THE PLANE, from the half that looks back at the travel: the
-///   texel's full-crossing opacity (isotropic: 2^m O_a, the chain holding a mean per cell;
-///   directional: alpha_a) times w, the part of the plane's depth not yet read (1 but on a
+///   texel's full-crossing opacity (level 0: the voxel's O_a; a directional level: alpha_a)
+///   times w, the part of the plane's depth not yet read (1 but on a
 ///   cascade's first plane). Sampled at the plane's centre, the fetch is that texel along a.
 ///
 ///   THE OTHER TWO AXES b, THROUGH A KERNEL THE SIZE OF THE CONE'S FOOTPRINT: the coverage
@@ -115,8 +120,8 @@ int jahVoxelAxis( vec3 dir, vec3 invRes )
 ///   along n in this cascade's normalised space, z the normal's sign along n.
 ///
 /// With the light that comes with it (the plane axis: the texel's premultiplied light; the
-/// kernel's axes: the kernel's mean radiance - on the directional tiers the half facing the
-/// rays that meet it - times what they take); the march composites ADDITIVELY, capped at 1.
+/// kernel's axes: the directional volume's half facing the rays that meet it - times what
+/// they take); the march composites ADDITIVELY, capped at 1.
 ///
 /// WHY ADDITIVE: a surface split between two voxels puts half its coverage in each, and the
 /// halves ADD UP to the surface - opaque. Composited as independent occluders they
@@ -181,7 +186,6 @@ vec3 jahVoxelAnisoUvw( vec3 posLS )
 	return uvw;
 }
 
-#if JAH_VOX_HAS_ANISO
 /// Cascade c's directional volume for axis b at `posLS`, level `mip`, the texel read by a
 /// reader travelling +b (`positive`) or -b - composited from the faces that look back at it.
 vec4 jahVoxelReadAxis( int c, int b, vec3 posLS, bool positive, float mip )
@@ -194,7 +198,6 @@ vec4 jahVoxelReadAxis( int c, int b, vec3 posLS, bool positive, float mip )
 		return JAH_VOX_SAMPLE_Y( c, u, mip );
 	return JAH_VOX_SAMPLE_Z( c, u, mip );
 }
-#endif
 
 /// THE FIRST PLANE (a cascade's, holding the point the cone has read up to): part of its depth
 /// is behind that point. Its surface counts by WHERE it lies - all of it ahead, none behind, a
@@ -241,7 +244,6 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 	float aA;
 	vec3 cA;
 	float gA = 1.0;
-#if JAH_VOX_HAS_ANISO
 	if( directional )
 	{
 		const vec4 v = jahVoxelReadAxis( c, axis, posLS, dir[axis] > 0.0, mip );
@@ -258,9 +260,9 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 		}
 	}
 	else
-#endif
 	{
-		vec4 s = JAH_VOX_SAMPLE_ISO( c, posLS, mip );
+		// LEVEL 0 (the only level a light read takes from the total; `mip` is 0 here)
+		vec4 s = JAH_VOX_SAMPLE_ISO( c, posLS, 0.0 );
 #if JAH_VOX_HAS_BACK
 		// LEVEL 0 PER SIDE (PHOTON-VOXEL-5): a voxel holding both faces of a slab thinner than the
 		// cell keeps two lights - the isotropic volume their mean, the back beside it - and the
@@ -270,8 +272,8 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 		// filtered like the light (the canonical normal of a two-sided voxel agrees between
 		// neighbours: VoxelMerge_piece_cs.any).
 		{
-			const vec4 bk = JAH_VOX_SAMPLE_BACK( c, posLS, mip );
-			const float along = ( ha == 0 ? 1.0 : -1.0 ) * ( JAH_VOX_SAMPLE_NRM( c, posLS, mip )[axis] * 2.0 - 1.0 );
+			const vec4 bk = JAH_VOX_SAMPLE_BACK( c, posLS, 0.0 );
+			const float along = ( ha == 0 ? 1.0 : -1.0 ) * ( JAH_VOX_SAMPLE_NRM( c, posLS, 0.0 )[axis] * 2.0 - 1.0 );
 			if( along < 0.0 )
 				s.xyz = bk.xyz;
 			else if( along > 0.0 )
@@ -279,13 +281,13 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 		}
 #endif
 		// a ray takes both halves (any face it crosses stops it), a cone the one looking back
-		const float oBack = jahVoxelCov( c, ha, posLS, mip )[axis];
-		const float o = ray ? min( 1.0, oBack + jahVoxelCov( c, 1 - ha, posLS, mip )[axis] ) : oBack;
-		aA = exp2( mip ) * o;
+		const float oBack = jahVoxelCov( c, ha, posLS, 0.0 )[axis];
+		const float o = ray ? min( 1.0, oBack + jahVoxelCov( c, 1 - ha, posLS, 0.0 )[axis] ) : oBack;
+		aA = o;
 		cA = ( s.w > 0.0 ) ? s.xyz * ( aA / s.w ) : vec3( 0.0 );
 		if( n == axis || w < 1.0 )
 		{
-			const float pO = jahVoxelPos( c, ha, posLS, mip )[axis];
+			const float pO = jahVoxelPos( c, ha, posLS, 0.0 )[axis];
 			if( n == axis )
 				gA = jahVoxelOriginGate( pO, oBack, org, invRes[ni] );
 			if( w < 1.0 )
@@ -297,18 +299,8 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 	float x = kA * aA;
 	vec3 colour = kA * cA;
 
-	// THE OTHER TWO AXES, through the footprint kernel, each half at the cone's rate
-#if JAH_VOX_HAS_ANISO
-	const bool anisoTier = JAH_VOX_ANISO;
-#else
-	const bool anisoTier = false;
-#endif
-	vec3 isoRad = vec3( 0.0 );
-	if( !anisoTier )
-	{
-		const vec4 sk = JAH_VOX_SAMPLE_ISO( c, kernelLS, lk );
-		isoRad = ( sk.w > 0.0 ) ? sk.xyz * ( 1.0 / sk.w ) : vec3( 0.0 );
-	}
+	// THE OTHER TWO AXES, through the footprint kernel, each half at the cone's rate, the
+	// colour from the directional volume's half facing the rays that meet it
 	// A RAY (aperture 0) IS STOPPED BY ANY FACE IT CROSSES, from either side: it may start
 	// inside a solid (a field probe in a wall) and the solid's back face then stops it. A
 	// ray from outside meets the front face first, so both halves together - capped per
@@ -334,14 +326,8 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 			const float xb = ( b == n ? gN : 1.0 ) * ok[b] * ( rate * lenLS / invRes[b] );
 			if( !( xb > 0.0 ) )
 				continue;
-			vec3 rad = isoRad;
-#if JAH_VOX_HAS_ANISO
-			if( anisoTier )
-			{
-				const vec4 v = jahVoxelReadAxis( c, b, kernelLS, h == 1, max( lk - 1.0, 0.0 ) );
-				rad = ( v.w > 0.0 ) ? v.xyz * ( 1.0 / v.w ) : vec3( 0.0 );
-			}
-#endif
+			const vec4 v = jahVoxelReadAxis( c, b, kernelLS, h == 1, max( lk - 1.0, 0.0 ) );
+			const vec3 rad = ( v.w > 0.0 ) ? v.xyz * ( 1.0 / v.w ) : vec3( 0.0 );
 			x += xb;
 			colour += xb * rad;
 		}
@@ -350,7 +336,7 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 }
 
 /// THE LEVEL-0 TEXEL of the volume a read takes, in cells: 2 for the directional volumes
-/// (half resolution, both signs packed along x), 1 for the isotropic one.
+/// (half resolution, both signs packed along x), 1 for the total's level 0.
 float jahVoxelTexelCells( bool directional )
 {
 	return directional ? 2.0 : 1.0;
@@ -359,22 +345,16 @@ float jahVoxelTexelCells( bool directional )
 /// Cascade c's radiance at `posLS` (the cascade's normalised [0, 1] box) seen along `dir`
 /// for a footprint `lod`: ONE PLANE of the march read whole at that point as a ray (aperture
 /// 0), with no origin plane (the ray hit: a point on the surface it reads; the march's own one-step read, to
-/// the bit - engine.voxel_reader_parity). The directional volumes where the anisotropic
-/// slots carry data, the isotropic volume otherwise. Capped at 1.
+/// the bit - engine.voxel_reader_parity). Level 0 of the total for a footprint within a
+/// cell, the directional volumes past it. Capped at 1.
 vec4 jahVoxelSample( int c, vec3 posLS, vec3 dir, float lod )
 {
 	const vec3 invRes = JAH_VOX_INVRES( c );
 	const int axis = jahVoxelAxis( dir, invRes );
 	const float invAbsDa = 1.0 / abs( dir[axis] );
-#if JAH_VOX_HAS_ANISO
-	const bool directional = JAH_VOX_ANISO && lod > 0.5;
-	const bool anisoTier = JAH_VOX_ANISO;
-#else
-	const bool directional = false;
-	const bool anisoTier = false;
-#endif
+	const bool directional = lod > 0.5;
 	const float texelCells = jahVoxelTexelCells( directional );
-	const float mip = ( anisoTier && !directional ) ? 0.0 : floor( jahVoxelKernelMip( lod, texelCells ) );
+	const float mip = directional ? floor( jahVoxelKernelMip( lod, texelCells ) ) : 0.0;
 	const float texelLS = texelCells * exp2( mip ) * invRes[axis];
 	const vec4 r = jahVoxelReadPlane( c, posLS, posLS, dir, axis, mip, directional, 1.0, 0.0,
 									  texelLS * invAbsDa, jahVoxelKernelLevel( lod, texelCells, mip ), 0.0,

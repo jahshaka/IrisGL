@@ -517,14 +517,13 @@ namespace Ogre
 
         // The job's texture units, in the order the shader declares them (the same
         // order PhotonVoxelLighting::setupBounceTextures binds the bounce job's): unit 0 the
-        // directions buffer, then every cascade's isotropic volume, then - anisotropic
-        // tiers - every cascade's X, every cascade's Y, every cascade's Z; then every
+        // directions buffer, then every cascade's total (level 0), then every cascade's
+        // X, every cascade's Y, every cascade's Z; then every
         // cascade's per-axis coverage (PHOTON-VOXEL-3), then every cascade's surface
         // position (PHOTON-VOXEL-4).
         const uint32 numCascades =
             std::min<uint32>( static_cast<uint32>( mVctLighting->getNumCascades() ),
                               kMaxChainCascades );
-        const bool bIsAnisotropic = mVctLighting->isAnisotropic();
         // + the per-axis coverage and the surface position, the light-volume list's last
         // entries (PHOTON-VOXEL-3/-4): the probe rays' march reads the opacity along each
         // ray from them.
@@ -533,9 +532,6 @@ namespace Ogre
         const int32 numCascadesI32 = static_cast<int32>( numCascades );
         if( mGenerationJob->getProperty( "hlms_num_vct_cascades" ) != numCascadesI32 )
             mGenerationJob->setProperty( "hlms_num_vct_cascades", numCascadesI32 );
-        const int32 anisoI32 = bIsAnisotropic ? 1 : 0;
-        if( mGenerationJob->getProperty( "vct_anisotropic" ) != anisoI32 )
-            mGenerationJob->setProperty( "vct_anisotropic", anisoI32 );
 
         // Jahshaka (PHOTON-ENV-1): + the environment cube, last, while the lighting
         // has one (the job property jah_env declares it).

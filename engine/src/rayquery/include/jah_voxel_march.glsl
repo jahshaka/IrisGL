@@ -93,9 +93,11 @@
 //   itself and the slab's unlit underside filled the rest: gi.cards' wall indirect 0.130 at
 //   h 0.6 m against 0.260 around it. w < 1 is left only for a cascade's FIRST plane, the
 //   one holding its start (the start bias point, or where the previous cascade stopped).
-//   THE EXIT per cascade: the isotropic level is read while the footprint's level is below
-//   the hand-over mip; on the anisotropic tiers the isotropic level 0 is read until the
-//   footprint outgrows it (lod > 0.5), then the directional volumes. The LEVEL a plane
+//   THE EXIT per cascade: the total's level 0 is read until the footprint outgrows it (lod >
+//   0.5), then the directional volumes - at every tier (PHOTON-MARCH-1: the colour that
+//   comes with an opacity is the radiance of the half-axis faces that opacity counts,
+//   jah_voxel_sample.glsl's header) - while the footprint's level is below the hand-over
+//   mip. The LEVEL a plane
 //   reads is an INTEGER level, the footprint's (jahVoxelKernelMip floored: the texel never
 //   wider than half the footprint). A cascade ends at an opacity of 0.95, at the hand-over
 //   mip, or at its box (below).
@@ -229,12 +231,6 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 	const float invAbsDa = 1.0 / abs( da );
 	const float startA = posLS[axis];
 
-#if JAH_VOX_HAS_ANISO
-	const bool aniso = JAH_VOX_ANISO;
-#else
-	const bool aniso = false;
-#endif
-
 	float alpha = startingAlpha;
 	vec3 color = vec3( 0.0 );
 	float readTo = startA;		// B: the coordinate along the axis the march has read up to
@@ -258,12 +254,12 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 			break;	// the hand-over: the next cascade reads from here
 
 		// WHICH VOLUME AND WHICH LEVEL (THE EXIT): the footprint's integer level - the texel
-		// half the footprint (jahVoxelKernelMip, floored); the anisotropic tiers read the
-		// isotropic level 0 until the footprint outgrows it. No height rule: the surface the
-		// cone left is gated out by its position, at any level (the file's header).
-		bool directional = aniso && lodLevel > 0.5;
+		// half the footprint (jahVoxelKernelMip, floored) of the directional volumes, and the
+		// total's level 0 until the footprint outgrows it - at every tier. No height rule: the
+		// surface the cone left is gated out by its position, at any level (the file's header).
+		bool directional = lodLevel > 0.5;
 		float texelCells = directional ? 2.0 : 1.0;
-		float mip = ( aniso && !directional ) ? 0.0 : floor( jahVoxelKernelMip( lodLevel, texelCells ) );
+		float mip = directional ? floor( jahVoxelKernelMip( lodLevel, texelCells ) ) : 0.0;
 
 		// THE PLANE: the one of this level holding the point read up to, fetched at its
 		// centre. A COARSER LEVEL IS TAKEN ONLY ON ITS OWN PLANE BOUNDARY: while the point read
