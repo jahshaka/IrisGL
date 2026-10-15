@@ -170,6 +170,7 @@ void GpuScene::destroy() {
     mVao = nullptr;
     mMirror.clear();
     mBorn.clear();
+    mSlotNode.clear();
     mStagedAt.clear();
     mFreedSlots.clear();
     mRuns.clear();
@@ -191,6 +192,7 @@ void GpuScene::growTo(uint32_t capacity) {
     const uint32_t want = roundUpPow2(capacity, std::max(kInitialSlots, mSlotCapacity ? mSlotCapacity : kInitialSlots));
     mMirror.resize(want);
     mBorn.resize(want, 0u);
+    mSlotNode.resize(want, 0u);
     mStagedAt.resize(want, 0u);
     if (!mTables.empty()) {
         destroyTables();
@@ -504,7 +506,7 @@ void GpuScene::setSlotCount(uint32_t n) {
     mSlotCount = n;
 }
 
-void GpuScene::stage(uint32_t slot, const GpuInstance &in) {
+void GpuScene::stage(uint32_t slot, const GpuInstance &in, uint64_t node) {
     if (slot >= mSlotCapacity) ensureSlots(slot + 1u);
     if (slot >= mSlotCapacity) return;
     // ONCE PER UPDATE (see the header): a second stage would read the world the
@@ -526,6 +528,7 @@ void GpuScene::stage(uint32_t slot, const GpuInstance &in) {
     std::memcpy(&dst, &in, sizeof(GpuInstance));
     std::memcpy(dst.prevWorld, prev, sizeof(prev));
     mBorn[slot] = 1u;
+    mSlotNode[slot] = node;
     ++mWrites;
     notify(slot, &dst);
 }
@@ -554,6 +557,7 @@ void GpuScene::onSlotFreed(uint32_t slot) {
     if (slot >= mSlotCapacity) return;
     std::memset(&mMirror[slot], 0, sizeof(GpuInstance));
     mBorn[slot] = 0u;
+    mSlotNode[slot] = 0u;
     mStagedAt[slot] = 0u;
     mFreedSlots.push_back(slot);
     notify(slot, nullptr);
@@ -567,6 +571,7 @@ void GpuScene::onSlotMoved(uint32_t from, uint32_t to) {
     // previous pose of the object that DIED in that slot.
     std::memcpy(&mMirror[to], &mMirror[from], sizeof(GpuInstance));
     mBorn[to] = mBorn[from];
+    mSlotNode[to] = mSlotNode[from];
     mStagedAt[to] = 0u;      // it must be re-staged/copied this update
     notify(to, mBorn[to] ? &mMirror[to] : nullptr);
     onSlotFreed(from);       // ...and the tail it came from is cleared and copied
@@ -1369,7 +1374,7 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
             Ogre::Node *pn = node.item->getParentNode();
             const Ogre::Matrix4 &m = graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
             composeGpuInstance(node, m, graphIsCurrent, cand);
-            mGpuScene.stage(i, cand);
+            mGpuScene.stage(i, cand, node.selfId);
             sub.dirty.push_back(i);
             ++sub.aabbReads;
         }
@@ -1435,7 +1440,7 @@ void OgreScene::composeGpuScene(bool graphIsCurrent) const {
         const Ogre::Matrix4 &m =
             graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
         composeGpuInstance(n, m, graphIsCurrent, cand);
-        mGpuScene.stage(slot, cand);
+        mGpuScene.stage(slot, cand, n.selfId);
         sub.dirty.push_back(slot);
     }
     sub.marks.clear();
@@ -1534,6 +1539,14 @@ void OgreScene::commitGpuSceneFrame() const {
 
 // ---------------------------------------------------------------------------
 // THE READ-ONLY GPU-SCENE VIEW (EnginePrivate.h): a slot's or a node's item facts.
+inspect::SceneEcho::CardWalk OgreScene::cardWalk() const {
+    CardWalk w;
+    w.micros = mPhoton.mCardWalkMicros;
+    w.slotCount = mPhoton.mCardWalkSlots;
+    w.walks = mPhoton.mCardWalks;
+    return w;
+}
+
 NodeId OgreScene::nodeOfGpuKey(uint32_t key) const {
     auto it = mNodeByOgreId.find(Ogre::IdType(key));
     return it == mNodeByOgreId.end() ? 0 : it->second;
@@ -1850,7 +1863,7 @@ bool PhotonComponent::cardMoverFrame(CardMoverFrame &out) {
     const auto record = [&](uint32_t i) {
         const detail::GpuInstance &e = mirror[i];
         CardCasterRec &r = mCardCasters[i];
-        r.node = mScene.nodeOfGpuKey(e.ids[0]);
+        r.node = mScene.gpuScene().nodeOfSlot(i);   // the slot table's id, no map find (decision 36)
         std::memcpy(r.world, e.world, sizeof(r.world));
         r.min = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
         r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
@@ -1899,11 +1912,20 @@ bool PhotonComponent::cardMoverFrame(CardMoverFrame &out) {
     if (moved && !walk)
         for (uint32_t slot : mScene.gpuScene().movedSlots())
             if (slot < slots && (slot >= mCardCasters.size() ||
-                                 mCardCasters[slot].node != mScene.nodeOfGpuKey(mirror[slot].ids[0]))) {
+                                 mCardCasters[slot].node != mScene.gpuScene().nodeOfSlot(slot))) {
                 walk = true;
                 break;
             }
     if (walk) {
+        const auto walkStart = std::chrono::steady_clock::now();
+        struct WalkTimer {
+            PhotonComponent &p; std::chrono::steady_clock::time_point t0; uint32_t slots;
+            ~WalkTimer() {
+                p.mCardWalkMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+                p.mCardWalkSlots = slots;
+                ++p.mCardWalks;
+            }
+        } walkTimer{ *this, walkStart, slots };
         std::unordered_map<NodeId, size_t> was;
         was.reserve(mCardCasters.size());
         for (size_t i = 0; i < mCardCasters.size(); ++i)
@@ -1951,7 +1973,7 @@ bool PhotonComponent::cardMoverFrame(CardMoverFrame &out) {
             const detail::GpuInstance &e = mirror[i];
             if (!moverCaster(flagsOf(e))) continue;
             CardMoverRec r;
-            r.node = mScene.nodeOfGpuKey(e.ids[0]);
+            r.node = mScene.gpuScene().nodeOfSlot(i);
             r.min = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
             r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
             mCardMovers.push_back(r);
@@ -1970,7 +1992,7 @@ bool PhotonComponent::cardMoverFrame(CardMoverFrame &out) {
     if (moved)
         for (uint32_t slot : mScene.gpuScene().movedSlots())
             if (slot < slots && moverCaster(flagsOf(mirror[slot])))
-                out.moved.push_back(mScene.nodeOfGpuKey(mirror[slot].ids[0]));
+                out.moved.push_back(mScene.gpuScene().nodeOfSlot(slot));
     return true;
 }
 

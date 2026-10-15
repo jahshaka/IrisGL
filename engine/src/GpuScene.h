@@ -438,7 +438,10 @@ public:
     /// first had just written and set `prevWorld` to THIS frame's pose — erasing
     /// the motion of anything that moved in the same frame. The second call is
     /// dropped (`mStagedAt`).
-    void stage(uint32_t slot, const GpuInstance &in);
+    void stage(uint32_t slot, const GpuInstance &in, uint64_t node);
+    /// THE SLOT'S NODE, its full 64-bit id (U3 stage 3 fix round, decision 36): carried beside the mirror and moved
+    /// with it, so a host-side walk names a slot's node by index — the GPU row holds only Ogre's 32-bit key.
+    uint64_t nodeOfSlot(uint32_t slot) const { return slot < mSlotNode.size() ? mSlotNode[slot] : 0u; }
     /// Has this slot already been staged in the update now being assembled?
     bool stagedThisUpdate(uint32_t slot) const {
         return slot < mSlotCapacity && mStagedAt[slot] == mUpdateSerial;
@@ -710,6 +713,7 @@ private:
     /// paying inside a frame).
     std::vector<GpuInstance> mMirror;
     std::vector<unsigned char> mBorn;  ///< 0 = this slot has never been staged
+    std::vector<uint64_t> mSlotNode;   ///< the node each slot holds (nodeOfSlot), 0 = none
     /// THE UPDATE THIS SLOT WAS LAST STAGED IN — the stamp that replaces every
     /// membership SEARCH in the write path. A linear `std::find` over the dirty
     /// list per slot is O(N^2) on exactly the case that matters: one parent with

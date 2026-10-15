@@ -4250,6 +4250,7 @@ public:
     void vrProxyNodes(NodeId out[2]) const override;
     void setVrRayNodes(NodeId line, NodeId marker) override;
     void vrRayNodes(NodeId out[2]) const override;
+    CardWalk cardWalk() const override;
     void setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) override;
     unsigned vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) const override;
     bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;

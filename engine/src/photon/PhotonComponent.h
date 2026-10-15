@@ -825,6 +825,12 @@ private:
     bool mGiDriverStereo = false;
     std::vector<CardMoverRec> mCardMovers;
     uint32_t mCardMoverSlots = 0xFFFFFFFFu;
+public:
+    /// The last card walk's cost (inspect::SceneEcho::cardWalk).
+    double             mCardWalkMicros = 0.0;
+    unsigned           mCardWalkSlots = 0;
+    unsigned long long mCardWalks = 0;
+private:
     std::vector<CardCasterRec> mCardCasters;
     unsigned long long mCardUploadSerialSeen = 0;
     /// The lighting arm met a permutation still building (applyPendingGiDeferrable).

@@ -8124,12 +8124,14 @@ struct PublishedFrame {
     unsigned long long   frame = 0;     ///< the engine frame it was published at (0 = never drawn)
     /// The record the frame applied (FrameInput::serial; an empty hand-over carries the last) — ENGINE-UPGRADE-U3.
     unsigned long long   serial = 0;
-    std::vector<RiderTag> riderTags;
+    std::vector<RiderTag> riderTags;     ///< SORTED by rider (decision 36: the lookups are binary searches)
     /// The rider's owner as the frame drew it (0 = no tag), and its bone into `bone` when given.
     NodeId boneAttachmentOf(NodeId rider, std::string *bone = nullptr) const {
-        for (const RiderTag &t : riderTags)
-            if (t.rider == rider) { if (bone) *bone = t.bone; return t.owner; }
-        return 0;
+        const auto it = std::lower_bound(riderTags.begin(), riderTags.end(), rider,
+                                         [](const RiderTag &t, NodeId id) { return t.rider < id; });
+        if (it == riderTags.end() || it->rider != rider) return 0;
+        if (bone) *bone = it->bone;
+        return it->owner;
     }
     /// THE ENGINE-MUTATED FACTS (ENGINE-UPGRADE-U3 stage 3, decision 13): what the engine itself changes under a
     /// host — a skeleton share (dropped when an instance is replaced), the planar reflectors flagged (armed or waiting
@@ -8141,8 +8143,8 @@ struct PublishedFrame {
             NodeId follower = 0;
             NodeId source = 0;
         };
-        std::vector<Share> shares;            ///< by follower id
-        std::vector<NodeId> reflectors;       ///< flagged planar reflectors, by id
+        std::vector<Share> shares;            ///< SORTED by follower id (every lookup below is a binary search)
+        std::vector<NodeId> reflectors;       ///< flagged planar reflectors, SORTED
         unsigned reflectorArms = 0;           ///< reflector actors armed since the scene was made (a diagnostic)
         struct Clip {
             std::string id;                   ///< the host's content id (ClipDesc::id)
@@ -8152,19 +8154,20 @@ struct PublishedFrame {
             NodeId node = 0;
             std::vector<Clip> clips;          ///< in attach order
         };
-        std::vector<NodeClips> clips;         ///< by node id
+        std::vector<NodeClips> clips;         ///< SORTED by node id
+        // BINARY SEARCHES (U3 stage 3 fix round, decision 36): the mirror asks per rigged node and per rider per sync,
+        // so a linear scan was O(n^2) at crowd scale.
         NodeId shareSourceOf(NodeId follower) const {
-            for (const Share &s : shares) if (s.follower == follower) return s.source;
-            return 0;
+            const auto it = std::lower_bound(shares.begin(), shares.end(), follower,
+                                             [](const Share &s, NodeId id) { return s.follower < id; });
+            return it != shares.end() && it->follower == follower ? it->source : 0;
         }
         bool sharesSkeleton(NodeId id) const { return shareSourceOf(id) != 0; }
-        bool isPlanarReflector(NodeId id) const {
-            for (NodeId r : reflectors) if (r == id) return true;
-            return false;
-        }
+        bool isPlanarReflector(NodeId id) const { return std::binary_search(reflectors.begin(), reflectors.end(), id); }
         const std::vector<Clip> *clipsOf(NodeId id) const {
-            for (const NodeClips &c : clips) if (c.node == id) return &c.clips;
-            return nullptr;
+            const auto it = std::lower_bound(clips.begin(), clips.end(), id,
+                                             [](const NodeClips &c, NodeId n) { return c.node < n; });
+            return it != clips.end() && it->node == id ? &it->clips : nullptr;
         }
         std::vector<std::string> clipNamesOf(NodeId id) const {
             std::vector<std::string> out;

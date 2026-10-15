@@ -2135,7 +2135,15 @@ bool OgreEngine::updateScene(Scene *scene) {
             });
             if (!messages.empty() || !nodes.empty()) {
                 EngineSideScope engineSide;
+                // THE LAST DRAIN'S FIELDS ARE THE DRAIN'S (decision 36): a resolve's stream counts into the totals
+                // only — the per-drain counts keep saying what the last frame's drain applied.
+                const unsigned lastMessages = mFrameInputStatus.messages;
+                const unsigned lastRecords = mFrameInputStatus.nodeRecords;
+                const unsigned lastTransforms = mFrameInputStatus.nodeTransforms;
                 applySceneStream(target, messages, nodes, step);
+                mFrameInputStatus.messages = lastMessages;
+                mFrameInputStatus.nodeRecords = lastRecords;
+                mFrameInputStatus.nodeTransforms = lastTransforms;
             }
         }
         sm->updateSceneGraph();

@@ -36,6 +36,15 @@ public:
     /// what the host's own SkeletonDesc already says (the getters are DOC since U3 stage 2).
     virtual bool                     hasSkeleton(NodeId) const = 0;
     virtual std::vector<std::string> boneNames(NodeId) const = 0;
+    /// THE CARD WALK'S COST (U3 stage 3 fix round, decision 36's measurement): the last walk of the card casters'
+    /// records (PhotonComponent::cardMoverFrame — a slot-count change, or a renumbered slot), in µs, the slots it
+    /// walked, and how many walks ran. A measuring fixture's reading.
+    struct CardWalk {
+        double             micros = 0.0;
+        unsigned           slotCount = 0;   // (not `slots`: a Qt keyword where Qt is included)
+        unsigned long long walks = 0;
+    };
+    virtual CardWalk cardWalk() const = 0;
 };
 /// The scene's record; null for a scene this engine did not make.
 const SceneEcho *scene(const Scene *s);

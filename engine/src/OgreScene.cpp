@@ -697,6 +697,8 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
         t.scale = Vec3(sc.x, sc.y, sc.z);
         back.riderTags.push_back(t);
     }
+    std::sort(back.riderTags.begin(), back.riderTags.end(),   // the lookups are binary searches (decision 36)
+              [](const PublishedFrame::RiderTag &a, const PublishedFrame::RiderTag &b) { return a.rider < b.rider; });
     mPublishedIdx.store(mPublishedIdx.load(std::memory_order_relaxed) ^ 1u, std::memory_order_release);
 }
 
