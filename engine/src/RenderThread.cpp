@@ -29,7 +29,6 @@ void RenderThread::submit(const FrameInput &in) {
     if (in.frameDelta) p.frameDelta = in.frameDelta;
     if (in.frameDelta) mEngine.mPushedFrameDelta = *in.frameDelta;   // the host's record (Engine::fixedFrameDelta)
     if (in.cause) p.cause = in.cause;
-    if (in.pace) p.pace = in.pace;
     if (in.shadowMapBudget) p.shadowMapBudget = in.shadowMapBudget;
     p.refreshShadows = p.refreshShadows || in.refreshShadows;
     if (in.stepSerial) p.stepSerial = in.stepSerial;

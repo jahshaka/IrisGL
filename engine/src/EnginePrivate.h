@@ -7356,6 +7356,7 @@ public:
     FrameInputStatus frameInputStatus() const override { JAH_SYNC_GETTER("Engine::frameInputStatus"); return mFrameInputStatus; }
     const PublishedEngineFrame &published() const override { return mRenderThread.published(); }
     void setDisplayPeriod(float seconds) override { mRenderThread.setDisplayPeriod(seconds); }
+    void setFramePace(FramePace pace) override { mFramePace = pace; }
     std::vector<SyncGetterCount> syncGetters() const override {
         std::vector<SyncGetterCount> out;
         for (const SyncGetterSite *s = syncGetterSites(); s; s = s->next)
@@ -7406,6 +7407,7 @@ public:
     bool beginVrSession(Scene *scene, const VrConfig &cfg) override;
     void endVrSession() override;
     VrState vrState() const override;
+    VrState vrStateNow() const;   ///< the uncounted read vrStatus() composes from
     VrStatus vrStatus() const override;
     void setVrMirrorView(View *view) override;
     void setVrOrigin(const Vec3 &position, float yawDegrees) override;
@@ -8117,7 +8119,7 @@ private:
     /// What the next frame may put off (OPEN_COVER_SPEC §2.1). `Complete` is
     /// the default and the value every frame is reset to, so only a host that
     /// asks per frame ever gets anything else.
-    FramePace  mNextFramePace = FramePace::Complete;
+    FramePace  mFramePace = FramePace::Complete;   ///< Engine::setFramePace (the driver's, in force until set again)
 
     /// XID-2: latched the first frame the render system reports a lost device.
     bool mDeviceLost = false;

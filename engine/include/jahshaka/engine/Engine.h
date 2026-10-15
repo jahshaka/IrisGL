@@ -2840,9 +2840,11 @@ public:
     // by the next renderOneFrame and reset to Driver.)
 
     // ---- streaming a world in (SPECS/OPEN_COVER_SPEC.md §2.1) -------------
-    // (What the NEXT frame may put off is FrameInput::pace — see `FramePace`.
-    // Drained by the next renderOneFrame and reset to Complete, so a host that
-    // sets nothing renders complete frames exactly as it always did.)
+    /// WHAT THE NEXT FRAMES MAY PUT OFF (`FramePace`; ENGINE-UPGRADE-U3 stage 2 read F3 — a DRIVER property, not a
+    /// record field, like setDisplayPeriod): in force for every frame until set again. The render driver raises
+    /// `Streaming` for its own frame of an arriving world and lowers it right after; every other frame (a scripted
+    /// one, a cover's inline present, a readback) renders `Complete`, as a host that sets nothing always did.
+    virtual void setFramePace(FramePace pace) = 0;
     /// Does any scene feeding an enabled view still owe first-time work that a
     /// `Streaming` frame would take a step of? The host reads it to decide how
     /// long to keep asking (and, in phase 2b, to draw the indicator).

@@ -873,8 +873,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         // nothing renders the frame it always did. Pushed to every scene here,
         // once, because the decisions it changes are per scene (the GI arm's
         // staged build) and per frame (the texture drain below).
-        const FramePace pace = mNextFramePace;
-        mNextFramePace = FramePace::Complete;
+        const FramePace pace = mFramePace;
         for (auto &sc : mScenes) sc->setFramePace(pace);
         std::unique_ptr<monitor::Stage> monPre;
         if (monitor::live()) {
@@ -1861,6 +1860,10 @@ void OgreEngine::endVrSession() {
 
 VrState OgreEngine::vrState() const {
     JAH_SYNC_GETTER("Engine::vrState");
+    return vrStateNow();
+}
+
+VrState OgreEngine::vrStateNow() const {
     if (!mVrSession) return vrAvailable() ? VrState::Idle : VrState::Unavailable;
     return vrSessionState(mVrSession);
 }
@@ -1869,7 +1872,7 @@ VrStatus OgreEngine::vrStatus() const {
     JAH_SYNC_GETTER("Engine::vrStatus");
     if (!mVrSession) {
         VrStatus s;
-        s.state = vrState();
+        s.state = vrStateNow();
         // WITH NO SESSION THE ONLY HANDS THERE CAN BE ARE INJECTED ONES, and
         // they are reported through exactly the fields a session fills — which
         // is what lets the gesture logic above this boundary be written once
@@ -2440,7 +2443,6 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     // delta persists; the epoch and the gesture are facts the frame reads.
     if (in.frameDelta && *in.frameDelta != appliedFrameDelta()) { applyFrameDelta(*in.frameDelta); ++applied; }
     if (in.cause) mNextFrameCause = *in.cause;
-    if (in.pace) mNextFramePace = *in.pace;
 
     // EACH SCENE'S ENVIRONMENT, in the order the host used to push it.
     for (const FrameInputScene &part : in.scenes) {

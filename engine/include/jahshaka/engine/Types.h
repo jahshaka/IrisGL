@@ -7870,8 +7870,8 @@ class View;
 /// newer record carries wins and one it does not carry keeps the older value — for the frame, each VIEW and each SCENE
 /// (FrameInputStatus::scenePartsMerged counts a scene part merged into an earlier one).
 /// At the drain each field is COMPARED with what the engine last applied from a record and applied only when it
-/// differs — so a still document drains to nothing (FrameInputStatus::fieldsApplied == 0). The per-frame fields
-/// (`cause`, `pace`) reset after the drain to their defaults (Driver / Complete), as the verbs they replaced did;
+/// differs — so a still document drains to nothing (FrameInputStatus::fieldsApplied == 0). The per-frame field
+/// (`cause`) resets after the drain to its default (Driver); the pace is the driver's setter (Engine::setFramePace, U3);
 /// `frameDelta` persists until a record says otherwise (it boots at Engine::kDefaultFrameDelta).
 /// THE FRAME'S CHANGE SET (U0 3b UPGRADE-CHANGESET-1): what the DOCUMENT wrote into the shared scene graph since the
 /// scene's last record, by engine node — the one source of "what moved" the engine has. A document node's transform
@@ -7957,7 +7957,6 @@ struct FrameInputView {
 struct FrameInput {
     std::optional<float>              frameDelta;      ///< seconds every renderOneFrame advances by (persists)
     std::optional<FrameCause>         cause;           ///< why the next frame renders (resets to Driver)
-    std::optional<FramePace>          pace;            ///< what the next frame may put off (resets to Complete)
     std::optional<unsigned>           shadowMapBudget; ///< engine-wide (the shadow map pool's size)
     bool                              refreshShadows = false;   ///< the document asked for a shadow re-render
     std::vector<FrameInputScene>      scenes;
@@ -7974,7 +7973,6 @@ struct FrameInput {
     /// The usual one-field records.
     static FrameInput delta(float seconds) { FrameInput f; f.frameDelta = seconds; return f; }
     static FrameInput withCause(FrameCause c) { FrameInput f; f.cause = c; return f; }
-    static FrameInput withPace(FramePace p) { FrameInput f; f.pace = p; return f; }
 };
 /// WHAT THE SUBMITS DID — Engine::frameSubmitStatus(): the GAME side of the hand-over (ENGINE-UPGRADE-U3 F4: each half
 /// of the record's status is written by one thread; this half by the thread that submits). Running totals.
