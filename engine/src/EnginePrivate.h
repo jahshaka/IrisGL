@@ -7412,6 +7412,12 @@ public:
     /// THE ONE DRAIN (U0 3a): the record the hand-over took (`any` false = an EMPTY hand-over), applied at the top of
     /// the frame.
     void drainFrameInput(FrameInput &in, bool any);
+    /// A SCENE'S STREAM (U3 stage 3): its structural messages in emission order, then its node records — the drain's
+    /// per-scene head, and what updateScene applies of the pending record before it resolves (a resolve answers for
+    /// the commands already sent). Counts into the status; returns nothing.
+    void applySceneStream(OgreScene *sc, const std::vector<SceneMessage> &messages,
+                          const std::vector<NodeRecord> &nodes,
+                          unsigned long long stepSerial);
     /// THE RENDER SIDE's half of the record's status (U3 F4): written by the drain alone.
     FrameInputStatus mFrameInputStatus;
     /// THE RENDER LOOP: the hand-over slot, the serial, the loop and the publish (RenderThread.h).

@@ -2115,6 +2115,29 @@ bool OgreEngine::updateScene(Scene *scene) {
     JAH_TRY {
         Ogre::SceneManager *sm = target->sceneManager();
         if (!sm) { mLastError = "updateScene: scene has no manager"; return false; }
+        // WHAT WAS ALREADY SENT LANDS FIRST (U3 stage 3): the scene's commands are messages in the pending record now
+        // (a clip's time is setClipStates, a pose is a node record), and a resolve that ran before them would answer
+        // for the previous frame's input. This scene's stream is taken out of the record and applied here, in its
+        // emission order; the rest of the record (its environment, the views, every other scene) waits for the frame.
+        {
+            std::vector<SceneMessage> messages;
+            std::vector<NodeRecord> nodes;
+            unsigned long long step = 0ull;
+            mRenderThread.withPending([&](FrameInput &rec, bool) {
+                for (FrameInputScene &p : rec.scenes)
+                    if (p.scene == scene) {
+                        for (SceneMessage &m : p.messages) messages.push_back(std::move(m));
+                        for (NodeRecord &r : p.nodes) nodes.push_back(std::move(r));
+                        p.messages.clear();
+                        p.nodes.clear();
+                    }
+                step = rec.stepSerial.value_or(0ull);
+            });
+            if (!messages.empty() || !nodes.empty()) {
+                EngineSideScope engineSide;
+                applySceneStream(target, messages, nodes, step);
+            }
+        }
         sm->updateSceneGraph();
         // PAIRED, and it matters: updateSceneGraph APPENDS to the manager's
         // global light list (buildLightList) and leaves render-queue state
@@ -2431,6 +2454,29 @@ void applyIfChanged(const std::optional<T> &want, std::optional<T> &last, unsign
 }
 }   // namespace
 
+// THE STRUCTURAL MESSAGES (ENGINE-UPGRADE-U3 stage 3): create / destroy / attach / material ... in emission order,
+// before the node records that may name what they create — the order a sync's direct commands ran in before its record
+// drained. The host's structure-edit brackets ride the stream as messages of their own. THEN THE DOCUMENT'S NODES
+// (ENGINE-UPGRADE-U2, the extract): every pose, parent and class the document wrote lands before the change set names
+// the moved subtrees to the scans.
+void OgreEngine::applySceneStream(OgreScene *sc, const std::vector<SceneMessage> &messages,
+                                  const std::vector<NodeRecord> &nodes,
+                                  unsigned long long stepSerial) {
+    for (const SceneMessage &m : messages) {
+        if (!m.apply) continue;
+        const std::string before = mLastError;
+        const bool ok = m.apply(*sc);
+        if (m.token) sc->noteCompletion(m.token, ok, ok || mLastError == before ? std::string() : mLastError);
+    }
+    mFrameInputStatus.messages += unsigned(messages.size());
+    mFrameInputStatus.messagesTotal += messages.size();
+    const unsigned n = sc->applyNodeRecords(nodes, stepSerial);
+    sc->armDeferredReflectors();   // a reflector asked for this frame is measured at its landed pose
+    mFrameInputStatus.nodeRecords += n;
+    for (const NodeRecord &r : nodes) if (r.fields & NodeRecord::Trs) ++mFrameInputStatus.nodeTransforms;
+    mFrameInputStatus.nodeRecordsTotal += n;
+}
+
 void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     const auto t0 = std::chrono::steady_clock::now();
     struct Timed {
@@ -2459,26 +2505,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
         OgreScene *sc = nullptr;
         for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
         if (!sc) continue;   // destroyed before its frame
-        // THE STRUCTURAL MESSAGES (ENGINE-UPGRADE-U3 stage 3): create / destroy / attach / material ... in emission
-        // order, before the node records that may name what they create — the order a sync's direct commands ran in
-        // before its record drained. The host's structure-edit brackets ride the stream as messages of their own.
-        for (const SceneMessage &m : part.messages) {
-            if (!m.apply) continue;
-            const std::string before = mLastError;
-            const bool ok = m.apply(*sc);
-            if (m.token) sc->noteCompletion(m.token, ok, ok || mLastError == before ? std::string() : mLastError);
-        }
-        mFrameInputStatus.messages += unsigned(part.messages.size());
-        mFrameInputStatus.messagesTotal += part.messages.size();
-        // THE DOCUMENT'S NODES FIRST (ENGINE-UPGRADE-U2, the extract): every pose, parent and class the document
-        // wrote lands before the change set names the moved subtrees to the scans.
-        {
-            const unsigned n = sc->applyNodeRecords(part.nodes, in.stepSerial.value_or(0ull));
-            sc->armDeferredReflectors();   // a reflector asked for this frame is measured at its landed pose
-            mFrameInputStatus.nodeRecords += n;
-            for (const NodeRecord &r : part.nodes) if (r.fields & NodeRecord::Trs) ++mFrameInputStatus.nodeTransforms;
-            mFrameInputStatus.nodeRecordsTotal += n;
-        }
+        applySceneStream(sc, part.messages, part.nodes, in.stepSerial.value_or(0ull));
         // THE CHANGE SET NEXT (U0 3b): what the document wrote, before anything of the frame reads a box.
         mFrameInputStatus.changesMoved += unsigned(part.changes.moved.size());
         if (!part.changes.complete) ++mFrameInputStatus.changesIncomplete;
