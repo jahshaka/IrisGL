@@ -73,14 +73,26 @@ class Engine;
 class Scene;
 class View;
 
+/// THE ATMOSPHERE'S TINT ON THE DIRECT SUNLIGHT — a STATELESS boundary function (ENGINE-UPGRADE-U3 stage 2, F-A;
+/// it was Scene::atmosphereSunTint). The fraction of the sun's beam that survives the trip from the top of the air to
+/// the observer, per channel, relative to the trip it makes at the zenith (the transmittance table's own integral:
+/// the same three species, the same coefficients, the same ray), times the earth's occlusion of the disc across the
+/// astronomical sunset band. Exactly (1,1,1) at noon — the user's picked colour IS the noon colour — falling, blue
+/// first, as the sun goes down; white when `air.on` is false (no realistic sky). Pure: the game thread calls it with
+/// the scene's published air (Scene::published().atmosphere) while it builds the next record, never a frame late and
+/// never a read of the engine. `toSun` need not be unit length.
+Colour atmosphereSunTint(const PublishedFrame::Atmosphere &air, const Vec3 &toSun);
+
 /// A renderable scene. Views draw it; several Views may share one, or each may own one.
 /// Owned by the Engine: destroy with Engine::destroyScene().
 class Scene {
 public:
     virtual ~Scene() = default;
-    virtual const std::string &name() const = 0;
-    /// The engine this scene belongs to — where a host submits the scene's part of a frame (Engine::submitFrame).
-    virtual Engine *engine() const = 0;
+    /// THE SCENE'S IDENTITY (ENGINE-UPGRADE-U3 stage 2): its name and its engine, fixed when the engine creates it and
+    /// never a read of the engine's state — the engine is where a host submits the scene's part of a frame
+    /// (Engine::submitFrame).
+    const std::string &name() const { return mIdentityName; }
+    Engine *engine() const { return mIdentityEngine; }
     /// Ambient light as a hemisphere pair: `upper` is what a surface facing +Y
     /// receives, `lower` what a surface facing -Y receives. Kept as the simple
     /// entry point (previews, thumbnails, tests); it is expressed EXACTLY in the
@@ -197,8 +209,6 @@ public:
     /// engine applies is this x the setEnvironmentLight gain). Read-only for a
     /// host: a status readout, never a value to push back.
     virtual bool        skyAmbientSh(float out[27]) const = 0;
-    /// The description currently in force (default-constructed = no sky).
-    virtual SkyDesc     sky() const = 0;
     /// THE CLOUD LAYER'S LIVE STATE (SkyDesc::clouds; CloudStatus says what each
     /// field means). A scene that never enabled the layer answers "off".
     virtual CloudStatus cloudStatus() const { return CloudStatus(); }
@@ -221,30 +231,6 @@ public:
     /// frame-time one. False with no layer drawn (or headless).
     virtual bool        cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres)
     { tau.clear(); size = 0; tileMetres = 0.0f; return false; }
-    /// THE ATMOSPHERE'S TINT ON A LIGHT COMING FROM `toSun` (SUN_FOLLOWS_
-    /// ATMOSPHERE). White (1,1,1) unless the scene's sky IS the planet's
-    /// atmosphere — every other sky is a picture, and a picture knows nothing
-    /// about what the air does to sunlight.
-    ///
-    /// WHAT IT IS. The DIRECT BEAM's transmittance through the atmosphere from
-    /// the observer towards the sun, divided by its value with the sun at the
-    /// zenith, per channel — the SAME model the sky is drawn with
-    /// (AtmosphereSky; the transmittance table's integral, evaluated on the CPU
-    /// with the same coefficients, OgreAtmosphere.cpp). So it is 1,1,1 at noon
-    /// — the user's picked colour IS the noon value — and falls, blue first, as
-    /// the sun goes down: the reddening AND the dimming a low sun really does
-    /// to direct light. Every dial of the air moves it (the haze most).
-    ///
-    /// ...TIMES THE EARTH: a smooth occlusion that runs 1 to 0 between
-    /// geometric elevations -0.305 and -0.835 degrees — the sun's own
-    /// 0.53-degree disc setting through the horizon, lifted by 0.57 degrees of
-    /// refraction. So this value REACHES ZERO, continuously, and the light, the
-    /// sun disc and the sun's shadow all ride this one number and fade together.
-    ///
-    /// `toSun` points AT the sun, in world space; it does not have to be
-    /// normalised. Memoised against the direction and the model: an unchanged
-    /// sun costs a compare.
-    virtual Colour      atmosphereSunTint(const Vec3 &toSun) const = 0;
     /// THE ATMOSPHERE'S TABLES, counted (AtmosphereStatus). A scene without
     /// the planet's atmosphere answers `on` false and zeros.
     virtual AtmosphereStatus atmosphereStatus() const { return AtmosphereStatus(); }
@@ -338,10 +324,6 @@ public:
     /// from it — silently. Idempotent: setting the model it already has
     /// succeeds and touches nothing.
     virtual bool        setShadingModel(MaterialId, ShadingModel) = 0;
-    /// The family the material is in NOW (Lit for an unknown id). A host that re-asserts a model
-    /// asks this first: setShadingModel succeeds when nothing changes, and that success is not a switch
-    /// (ENGINE-UPGRADE-1 stage 2 — the mirror read it as one and re-queued every user of the material).
-    virtual ShadingModel shadingModelOf(MaterialId) const = 0;
     virtual bool        destroyMaterial(MaterialId) = 0;
     /// Binds a GENERATED shader piece to one material (HLMS_ADOPTION P5).
     /// `path` is an absolute path to a piece file; its directory is registered
@@ -378,7 +360,6 @@ public:
     ///
     /// Materials with no generated piece do not read it and are unaffected.
     virtual void        setShaderTime(float seconds) = 0;
-    virtual float       shaderTime() const = 0;
     /// ATOM stage 1 (SPECS/NANITE_SPEC.md §7): the scene-wide LOD dial. 1 is the
     /// reference — every mesh switches level where its baked geometric error
     /// covers ONE PIXEL of the pass that is drawing it, at that pass's live lens
@@ -392,7 +373,6 @@ public:
     /// re-derived in place and every Item reads them through a pointer. Meshes
     /// with no baked chain are unaffected by any value.
     virtual void        setLodBias(float bias) = 0;
-    virtual float       lodBias() const = 0;
     /// DIAGNOSTIC: the SHAPE of a mesh's LOD and shadow VAO lists (ATOM P1's
     /// AT-A11). `levels` is how many LOD levels the mesh has and
     /// `shadowIndependent` how many of its shadow VAOs are NOT aliases of the
@@ -489,10 +469,6 @@ public:
     virtual bool        attachSkinnedMesh(NodeId, MeshId, MaterialId, const SkeletonDesc &,
                                           const unsigned short *blendToRig = nullptr,
                                           size_t blendToRigCount = 0) = 0;
-    /// True when the node carries a GPU-skinned mesh with a live rig.
-    virtual bool        hasSkeleton(NodeId) const = 0;
-    /// The node's bone names, in rig index order. Empty when it has no rig.
-    virtual std::vector<std::string> boneNames(NodeId) const = 0;
     /// The node's pose: `count` entries, index-parallel to the rig's bones, each
     /// LOCAL to its parent bone. This is the per-frame call — everything else on
     /// the rig surface is event-driven. False (lastError()) when the node has no
@@ -572,6 +548,10 @@ public:
     /// Reads back the EVALUATED pose: `count` bones in rig order, each LOCAL to
     /// its parent bone (a root bone: local to the mesh node) — the same frame
     /// setBonePoses writes in. Resolved as of the last rendered frame.
+    /// PUBLISH THIS RIG'S POSES in every frame's snapshot (PublishedFrame::bonePoses, ENGINE-UPGRADE-U3 stage 2) — the
+    /// host's way to read a drawn pose without asking (the mirror's socketed rigs). Off by default; false for a node
+    /// with no rig. A removed node leaves the list.
+    virtual bool publishBonePoses(NodeId node, bool on) = 0;
     virtual bool bonePoses(NodeId, BonePose *out, size_t count) const = 0;
 
     /// The effective per-bone weight the backend applied for `clip`, in rig
@@ -705,7 +685,9 @@ public:
     /// does not hand the master's rig a null parent node — and the host re-arms
     /// it on the next sync.
     virtual bool        shareSkeleton(NodeId follower, NodeId source) = 0;
-    /// True when this node's Item is rendering from another node's instance.
+    /// True when this node's Item is rendering from another node's instance. STAYS A COUNTED GETTER (host.sync_getters;
+    /// ENGINE-UPGRADE-U3 stage 2): the ENGINE drops a share by itself (an Item re-created, a skeleton replaced), so it
+    /// is not the host's own shadow — the mirror's sync guards against exactly that.
     virtual bool        sharesSkeleton(NodeId) const = 0;
 
     // ---- Bone attachments: engine TAG POINTS (AVATAR_RIG_PERF_SPEC §4) ----
@@ -743,7 +725,8 @@ public:
     /// Re-writes the tag's local transform — the socket was edited.
     virtual bool setBoneAttachmentOffset(NodeId rider, const Vec3 &position,
                                          const Quat &rotation, const Vec3 &scale) = 0;
-    /// The owner this rider is attached to, or 0 — and the bone, through `bone`.
+    /// The owner this rider is attached to, or 0 — and the bone, through `bone`. STAYS A COUNTED GETTER (U3 stage 2):
+    /// the engine frees a tag by itself whenever the owner's skeleton is replaced — not the host's shadow.
     virtual NodeId boneAttachment(NodeId rider, std::string *bone = nullptr) const = 0;
     /// A line list (pairs of points) or, with `strip`, a connected polyline.
     /// Attach with attachMesh like any mesh. One pixel wide.
@@ -906,7 +889,6 @@ public:
     /// world is on screen. Default false, so an engine nobody tells is an
     /// engine that behaves exactly as it always did.
     virtual void        setLoading(bool loading) = 0;
-    virtual bool        isLoading() const = 0;
     /// The LIGHT-ONLY refresh (REFLECTIONS_ADOPTION_SPEC.md P2): re-injects the
     /// scene's lights into the EXISTING voxel volume and leaves the geometry
     /// alone. Orders of magnitude cheaper than the full call — no
@@ -965,7 +947,6 @@ public:
     /// frustum-only (no pyramid, no late pass). AtomDrawStatus::occluded and
     /// ::disoccluded count what it does.
     virtual void setAtomOcclusionEnabled(bool on) { (void)on; }
-    virtual bool atomOcclusionEnabled() const { return false; }
     /// A TEST DOOR (ATOM-BLACK-FRAMES-1's coverage trace; never a mode, not saved): every
     /// view of this scene re-creates its id pass's cut buffers at `indices` of stream on
     /// its next frame — smaller than the need, the overflow path runs (the root cut from
@@ -977,7 +958,6 @@ public:
     /// Switching it rebuilds nothing (the chain's pass is gated by the workspace's
     /// execution mask); Off is byte-identical to a scene that never had it.
     virtual void setAtomView(AtomView view) { (void)view; }
-    virtual AtomView atomView() const { return AtomView::Off; }
     /// Whether the view can paint anything here: the split is live AND every view
     /// of the scene that draws into a window carries the id pass (the Low tier's
     /// passthrough viewport does not). Hosts refuse a mode other than Off when false.
@@ -986,7 +966,6 @@ public:
     /// every view of this scene that draws the post chain. Switching it rebuilds
     /// nothing; Off is byte-identical to a scene that never had it.
     virtual void setPhotonView(PhotonView view) { (void)view; }
-    virtual PhotonView photonView() const { return PhotonView::Off; }
     /// Empty when `view` can paint in this scene right now, otherwise WHY it
     /// cannot (the tier has no field, the rays are off, ...). Off always can.
     /// Hosts refuse a mode with a reason.
@@ -997,7 +976,6 @@ public:
     /// holds the scene's whole lit content (the outermost when none does), n the
     /// chain's cascade n (clamped to the chain). Not saved.
     virtual void setPhotonVoxelCascade(int cascade) { (void)cascade; }
-    virtual int photonVoxelCascade() const { return -1; }
     /// THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
     /// counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
     /// authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,
@@ -1069,7 +1047,6 @@ public:
     /// row: storing it builds nothing; a view whose scene resolves it on gains
     /// the prepass the rays start from on its next frame. Off by default.
     virtual void setSunContact(const SunContactDesc &) {}
-    virtual SunContactDesc sunContact() const { return SunContactDesc(); }
     /// What the job did on the last drawn frame (Types.h `SunContactStatus`).
     virtual SunContactStatus sunContactStatus() const { return SunContactStatus(); }
 
@@ -1139,7 +1116,6 @@ public:
     /// camera-centred window), never a lighting volume. Takes effect on the next
     /// placement, exactly like moving the geometry would.
     virtual void        setNodeProbeGridExcluded(NodeId, bool) = 0;
-    virtual bool        nodeProbeGridExcluded(NodeId) const = 0;
     /// "This node is an EDITOR HELPER" (REFLECTIONS_ADOPTION_SPEC.md P1b): the
     /// ground grid, light icons, range wires, camera helpers — geometry the
     /// user must see in the viewport and a reflection probe must never capture.
@@ -1149,7 +1125,6 @@ public:
     /// takes effect immediately whether it is set before or after they attach.
     /// Not inherited: set it on each node that carries helper geometry.
     virtual void        setNodeHelper(NodeId, bool) = 0;
-    virtual bool        nodeHelper(NodeId) const = 0;
 
     /// "This node is a BACKDROP" — a helper that is part of the PICTURE.
     ///
@@ -1163,7 +1138,6 @@ public:
     /// setNodeHelper(id, false) clears it too — one flag pair, one meaning.
     /// Not inherited; may be set before the geometry arrives.
     virtual void        setNodeBackdrop(NodeId, bool) = 0;
-    virtual bool        nodeBackdrop(NodeId) const = 0;
 
     /// "THIS HELPER IS DRAWN IN THE HEADSET TOO" (SPECS/VR_SPEC.md §5 phase 4).
     ///
@@ -1199,7 +1173,6 @@ public:
     /// neither. The VR channel is off by default on every view, which is what
     /// keeps a screenshot clean; it is not a consequence of the desk switch.
     virtual void        setNodeVrHelper(NodeId, bool) = 0;
-    virtual bool        nodeVrHelper(NodeId) const = 0;
 
     /// THE WEARER'S CONTROLLER PROXIES, BY NODE (SPECS/VR_SPEC.md §5 phase 4).
     ///
@@ -1217,7 +1190,6 @@ public:
     ///
     /// 0 for either id unregisters it. Pass the LEFT hand's node first.
     virtual void        setVrProxyNodes(NodeId left, NodeId right) = 0;
-    virtual void        vrProxyNodes(NodeId out[2]) const = 0;
 
     /// THE CONTROLLER'S RAY AND ITS HIT MARKER, BY NODE (VR_INPUT_SPEC §3,
     /// phase 4b stage 1) — the same arrangement as the proxies above, for the
@@ -1244,7 +1216,6 @@ public:
     ///
     /// 0 for either id unregisters it. Pass the LINE first.
     virtual void        setVrRayNodes(NodeId line, NodeId marker) = 0;
-    virtual void        vrRayNodes(NodeId out[2]) const = 0;
 
     /// THE WEARER'S OWN HAND, BONE BY BONE (VR_INPUT_SPEC §7, phase 4b stage
     /// 3) — the third arrangement of the same shape, for the third time for the
@@ -1307,7 +1278,6 @@ public:
     /// promotion costs nothing by construction: see MobilityChange.
     virtual void        setNodeMovable(NodeId, bool,
                                        MobilityChange = MobilityChange::Authoring) = 0;
-    virtual bool        nodeMovable(NodeId) const = 0;
     /// How many nodes this scene has been told are movable, split by what they
     /// carry. A pure read of the records — no walk of the graph, no allocation.
     virtual MobilityStatus mobilityStatus() const = 0;
@@ -1340,7 +1310,6 @@ public:
     /// on attach), and is remembered for a node whose geometry has not arrived
     /// yet. Not inherited: set it on every node that carries geometry.
     virtual void        setNodeLightMask(NodeId, unsigned mask) = 0;
-    virtual unsigned    nodeLightMask(NodeId) const = 0;
 
     /// PER-OBJECT SHADOW CASTING (Unreal's `Cast Shadow` tick).
     ///
@@ -1360,7 +1329,6 @@ public:
     /// every node that carries geometry. Cached lamp maps that could see the
     /// node re-render in the frame it changes.
     virtual void        setNodeCastShadow(NodeId, bool) = 0;
-    virtual bool        nodeCastShadow(NodeId) const = 0;
 
     /// PER-OBJECT FACE CULL (CULL-MODE-2; the document's MeshNode::faceCullingMode).
     /// `FaceCull::Material` (the default) wears the material as authored; any other
@@ -1372,7 +1340,6 @@ public:
     /// destroyed once nothing wears it. Same shape as setNodeCastShadow: applies
     /// immediately, survives an Item rebuild, may be set before geometry arrives.
     virtual void        setNodeFaceCull(NodeId, FaceCull) = 0;
-    virtual FaceCull    nodeFaceCull(NodeId) const = 0;
     /// Cull twins alive in this scene right now (a diagnostic: mirror.cull_twin).
     virtual unsigned    cullTwinCount() const = 0;
     /// Twins waiting for the sweep (a diagnostic: mirror.cull_twin) — never more
@@ -1404,14 +1371,16 @@ public:
     /// Reflectors survive `setPlanarReflections` changes; the flag is remembered
     /// even while the budget is 0.
     virtual bool        setNodePlanarReflector(NodeId, bool) = 0;
+    /// Is the node an ARMED reflector? STAYS A COUNTED GETTER (U3 stage 2): the ENGINE decides it — a flag asked for
+    /// on a document node is measured at its landed pose in the drain (armDeferredReflectors) and refused when the
+    /// geometry is not plate-like — not the host's own shadow.
     virtual bool        nodePlanarReflector(NodeId) const = 0;
     /// How many reflection planes actually rendered last frame — the "achieved"
     /// number against the requested budget (planes off screen do not render).
     /// 0 when reflections are off or nothing has rendered yet.
     virtual int         activePlanarReflectors() const = 0;
-    /// Reflectors ARMED (an Ogre actor made) since the scene was created — a
-    /// diagnostic (engine.planar): an edit that does not move a mirror-relevant
-    /// state re-arms nothing.
+    /// Reflectors ARMED (an Ogre actor made) since the scene was created — a diagnostic counter of the engine's
+    /// (engine.planar): an edit that does not move a mirror-relevant state re-arms nothing.
     virtual unsigned    planarReflectorArms() const = 0;
 
     // ---- Hardware ray tracing (owner, 2026-09-15; ledger §425) -----------
@@ -1435,6 +1404,9 @@ public:
     /// The same predicate for a state this scene does not hold YET — a host building the frame's input (a view's
     /// chain reads it) before the drain applies the scene's FrameInputScene::rayTracing.
     virtual bool           rayTracingResolvedFor(RayTracingMode mode) const = 0;
+protected:
+    std::string mIdentityName;
+    Engine     *mIdentityEngine = nullptr;
 };
 
 /// A view onto a Scene, rendering into a native window supplied by the host or
@@ -2053,6 +2025,9 @@ public:
     /// change by the render driver). Never read by the engine's clock (trap 7: that is the record's `frameDelta`);
     /// stage 5's interpolation weight divides by it. 0 = unknown.
     virtual void setDisplayPeriod(float seconds) = 0;
+    /// THE DOOR, COUNTED (host.sync_getters, ENGINE-UPGRADE-U3 stage 2): every synchronous getter that stays, with
+    /// its calls from the host's side (SyncGetterCount). Process-wide; not itself counted.
+    virtual std::vector<SyncGetterCount> syncGetters() const = 0;
     /// Will the next drain apply a NEW GI configuration to `scene` (the pending record's `gi` differs from what the
     /// scene last applied)? The engine's own compare, asked by a host that must know before the frame — a shot whose
     /// record changes the GI draws that frame before it waits for giAtRest (U0 3c: the host keeps no copy of it).

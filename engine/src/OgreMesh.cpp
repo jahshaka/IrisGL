@@ -734,6 +734,7 @@ void OgreScene::applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<floa
 // threshold walk and no bias — asking the strategy again from outside would be a
 // second answer that could disagree with the picture.
 void OgreScene::objectLods(std::vector<ObjectLodDesc> &out) const {
+    JAH_SYNC_GETTER("Scene::objectLods");
     out.clear();
     out.reserve(mNodes.size());
     for (const auto &kv : mNodes) {

@@ -495,6 +495,7 @@ bool OgreScene::setBonePoses(NodeId id, const BonePose *poses, size_t count) {
 }
 
 bool OgreScene::boneMatrices(NodeId id, float *out, size_t count) const {
+    JAH_SYNC_GETTER("Scene::boneMatrices");
     Ogre::SkeletonInstance *skel = skeletonOf(id);
     if (!skel) { mError = "boneMatrices: the node has no rig"; return false; }
     if (!out || count != skel->getNumBones()) {
@@ -615,6 +616,7 @@ bool OgreScene::shareSkeleton(NodeId followerId, NodeId sourceId) {
 }
 
 bool OgreScene::sharesSkeleton(NodeId id) const {
+    JAH_SYNC_GETTER("Scene::sharesSkeleton");
     auto it = mNodes.find(id);
     return it != mNodes.end() && it->second.shareSource != 0;
 }
@@ -720,6 +722,7 @@ void OgreScene::dropShareFollowers(NodeId id, Node &n) {
 // evaluates. A remap or a share that silently did not land therefore reads as
 // the OLD number here instead of as the number we meant.
 size_t OgreScene::streamedBoneCount(NodeId id) const {
+    JAH_SYNC_GETTER("Scene::streamedBoneCount");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.item) return 0;
     const Ogre::Item *item = it->second.item;
@@ -735,6 +738,7 @@ size_t OgreScene::streamedBoneCount(NodeId id) const {
 }
 
 RigStats OgreScene::rigStats() const {
+    JAH_SYNC_GETTER("Scene::rigStats");
     RigStats out;
     // DISTINCT instances, counted by pointer: two Items sharing one instance
     // are one evaluation in updateAllAnimations, however the sharing was

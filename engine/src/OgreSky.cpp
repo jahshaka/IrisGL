@@ -450,54 +450,76 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
 // the capture photographs are one atmosphere. Divided by its zenith value so
 // the answer is exactly (1,1,1) at noon — the user's picked colour IS the noon
 // colour — and falls, blue first, as the sun goes down.
-Colour OgreScene::atmosphereSunTint(const Vec3 &toSunIn) const {
+PublishedFrame::Atmosphere OgreScene::publishedAtmosphere() const {
+    PublishedFrame::Atmosphere air;
+    if (!mAtmosphere || !mAtmoSkyOn) return air;
+    const AtmosphereModel &m = mAtmosphere->model();
+    air.on = true;
+    air.rayleighScale = m.rayleighScale;
+    air.mieScale = m.mieScale;
+    air.ozone = m.ozone;
+    air.planetRadiusKm = m.planetRadiusKm;
+    air.atmosphereHeightKm = m.atmosphereHeightKm;
+    air.observerKm = mAtmosphere->observerKm();
+    return air;
+}
+
+}}}   // namespace jahshaka::engine::detail
+
+namespace jahshaka { namespace engine {
+
+// THE STATELESS HALF (ENGINE-UPGRADE-U3 F-A; Engine.h states the contract). The same integral the sky is drawn with,
+// over the published model and observer: what the scene's getter computed, with nothing of the scene read.
+Colour atmosphereSunTint(const PublishedFrame::Atmosphere &air, const Vec3 &toSunIn) {
     const Colour white(1.0f, 1.0f, 1.0f, 1.0f);
-    if (!mAtmosphere || !mAtmoSkyOn) return white;
+    if (!air.on) return white;
     Ogre::Vector3 toSun(toSunIn.x, toSunIn.y, toSunIn.z);
     if (toSun.squaredLength() < 1e-12f) return white;
     toSun.normalise();
-    if (mAtmoTintGeneration == mAtmosphere->modelGeneration() &&
-        (mAtmoTintDir - toSun).squaredLength() < 1e-12f)
-        return mAtmoTint;
-    Colour tint = white;
-    JAH_TRY {
-        const float r0 = mAtmosphere->observerRadiusKm();
-        const Ogre::Vector3 t = mAtmosphere->transmittance(r0, toSun.y);
-        const Ogre::Vector3 tz = mAtmosphere->transmittance(r0, 1.0f);
-        float rgb[3] = { t.x / std::max(tz.x, 1e-6f), t.y / std::max(tz.y, 1e-6f),
-                         t.z / std::max(tz.z, 1e-6f) };
-        for (float &c : rgb) c = std::max(0.0f, std::min(1.0f, c));
-        tint = Colour(rgb[0], rgb[1], rgb[2], 1.0f);
-        // ...AND THEN THE EARTH GETS IN THE WAY (lane SUN-DISC-1). The table
-        // integrates to the top of the air and does not know the ground; the
-        // term that ends sunlight is geometry, and it is exact. The sun's own
-        // disc is 0.53 degrees wide (0.265 of radius) and refraction lifts the
-        // apparent disc by about 0.57 degrees at the horizon, so direct sunlight
-        // starts to be cut at a GEOMETRIC centre elevation of -(0.57 - 0.265) =
-        // -0.305 degrees and has ended by -(0.57 + 0.265) = -0.835 — the
-        // astronomical definition of sunset. A smoothstep across that band
-        // makes the crossing CONTINUOUS: the light, the disc and the shadow all
-        // ride the same tint and fade together.
-        const float elevDeg = float(std::asin(std::max(-1.0, std::min(1.0, double(toSun.y))))
-                                    * 180.0 / M_PI);
-        constexpr float kSunSetStartDeg = -0.305f;   // lower limb touches the horizon
-        constexpr float kSunSetEndDeg   = -0.835f;   // upper limb goes under
-        float occl = 1.0f;
-        if (elevDeg <= kSunSetEndDeg) {
-            occl = 0.0f;
-        } else if (elevDeg < kSunSetStartDeg) {
-            const float u = (elevDeg - kSunSetEndDeg) / (kSunSetStartDeg - kSunSetEndDeg);
-            occl = u * u * (3.0f - 2.0f * u);        // smoothstep, C1 at both ends
-        }
-        tint = Colour(tint.r * occl, tint.g * occl, tint.b * occl, 1.0f);
-    } JAH_CATCH(mError, white);
-    mAtmoTintDir = toSun;
-    mAtmoTint = tint;
-    mAtmoTintGeneration = mAtmosphere->modelGeneration();
+    detail::AtmosphereModel model;
+    model.rayleighScale = air.rayleighScale;
+    model.mieScale = air.mieScale;
+    model.ozone = air.ozone;
+    model.planetRadiusKm = air.planetRadiusKm;
+    model.atmosphereHeightKm = air.atmosphereHeightKm;
+    const float r0 = model.planetRadiusKm + air.observerKm;
+    const Ogre::Vector3 t = detail::JahAtmosphere::transmittanceOf(model, r0, toSun.y);
+    const Ogre::Vector3 tz = detail::JahAtmosphere::transmittanceOf(model, r0, 1.0f);
+    float rgb[3] = { t.x / std::max(tz.x, 1e-6f), t.y / std::max(tz.y, 1e-6f),
+                     t.z / std::max(tz.z, 1e-6f) };
+    for (float &c : rgb) c = std::max(0.0f, std::min(1.0f, c));
+    Colour tint(rgb[0], rgb[1], rgb[2], 1.0f);
+    // ...AND THEN THE EARTH GETS IN THE WAY (lane SUN-DISC-1). The table
+    // integrates to the top of the air and does not know the ground; the
+    // term that ends sunlight is geometry, and it is exact. The sun's own
+    // disc is 0.53 degrees wide (0.265 of radius) and refraction lifts the
+    // apparent disc by about 0.57 degrees at the horizon, so direct sunlight
+    // starts to be cut at a GEOMETRIC centre elevation of -(0.57 - 0.265) =
+    // -0.305 degrees and has ended by -(0.57 + 0.265) = -0.835 — the
+    // astronomical definition of sunset. A smoothstep across that band
+    // makes the crossing CONTINUOUS: the light, the disc and the shadow all
+    // ride the same tint and fade together.
+    const float elevDeg = float(std::asin(std::max(-1.0, std::min(1.0, double(toSun.y))))
+                                * 180.0 / M_PI);
+    constexpr float kSunSetStartDeg = -0.305f;   // lower limb touches the horizon
+    constexpr float kSunSetEndDeg   = -0.835f;   // upper limb goes under
+    float occl = 1.0f;
+    if (elevDeg <= kSunSetEndDeg) {
+        occl = 0.0f;
+    } else if (elevDeg < kSunSetStartDeg) {
+        const float u = (elevDeg - kSunSetEndDeg) / (kSunSetStartDeg - kSunSetEndDeg);
+        occl = u * u * (3.0f - 2.0f * u);        // smoothstep, C1 at both ends
+    }
+    tint = Colour(tint.r * occl, tint.g * occl, tint.b * occl, 1.0f);
     return tint;
 }
 
+}}   // namespace jahshaka::engine
+
+namespace jahshaka { namespace engine { namespace detail {
+
 AtmosphereStatus OgreScene::atmosphereStatus() const {
+    JAH_SYNC_GETTER("Scene::atmosphereStatus");
     if (!mAtmosphere) return AtmosphereStatus();
     AtmosphereStatus st = mAtmosphere->status();
     st.on = mAtmoSkyOn;
@@ -678,6 +700,7 @@ void OgreScene::syncAtmosphere() {
 void OgreScene::requestSkyCapture() { mSkyCapturePending = true; }
 
 bool OgreScene::skyAmbientSh(float out[27]) const {
+    JAH_SYNC_GETTER("Scene::skyAmbientSh");
     if (!mSkyShInForceValid) return false;
     for (int i = 0; i < 27; ++i) out[i] = mSkyShInForce[i];
     return true;
@@ -2569,6 +2592,7 @@ void OgreScene::destroyCloudLayer() {
 }
 
 CloudStatus OgreScene::cloudStatus() const {
+    JAH_SYNC_GETTER("Scene::cloudStatus");
     CloudStatus st = mCloudStatus;
     st.drawn = cloudLayerDrawn();
     if (st.drawn) st.reason.clear();

@@ -366,7 +366,7 @@ Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) 
         // The scene's per-scene shadow request resolves against GLOBAL engine
         // state (one filter, one atlas — Scene::setShadowSettings), so it needs
         // its engine.
-        mScenes.back()->mEngine = this;
+        mScenes.back()->bindEngine(this);
         return mScenes.back().get();
     } JAH_CATCH(mLastError, nullptr);
 }

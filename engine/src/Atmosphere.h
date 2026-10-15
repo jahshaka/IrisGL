@@ -123,7 +123,9 @@ public:
 
     /// The transmittance from radius `rKm` along the zenith cosine `mu` to the
     /// top of the air — the table's integral, on the CPU (the sun's tint).
-    Ogre::Vector3 transmittance(float rKm, float mu) const;
+    Ogre::Vector3 transmittance(float rKm, float mu) const { return transmittanceOf(mModel, rKm, mu); }
+    /// ...the same integral for any model: the stateless half the boundary's atmosphereSunTint evaluates.
+    static Ogre::Vector3 transmittanceOf(const AtmosphereModel &model, float rKm, float mu);
     /// The observer's radius (km).
     float observerRadiusKm() const { return mModel.planetRadiusKm + mObserverKm; }
     float observerKm() const { return mObserverKm; }

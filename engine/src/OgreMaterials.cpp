@@ -759,13 +759,6 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
 // THE FAMILY SWITCH (HLMS_ADOPTION P4a §6.2). Destroy, recreate in the other
 // family, re-attach — and the MaterialId survives, because the host's scene
 // refers to it from every node.
-ShadingModel OgreScene::shadingModelOf(MaterialId id) const {
-    auto it = mMaterials.find(id);
-    if (it == mMaterials.end()) return ShadingModel::Lit;
-    if (it->second.distortion) return ShadingModel::Distortion;
-    return it->second.shadingUnlit ? ShadingModel::Unlit : ShadingModel::Lit;
-}
-
 bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) { mError = "setShadingModel: unknown material"; return false; }
@@ -903,6 +896,7 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
 }
 
 std::string OgreScene::dumpMaterial(MaterialId id) const {
+    JAH_SYNC_GETTER("Scene::dumpMaterial");
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) { mError = "dumpMaterial: unknown material"; return {}; }
     JAH_TRY {
@@ -1858,6 +1852,7 @@ bool OgreScene::destroyTexture(TextureId id) {
 }
 
 unsigned OgreScene::textureMipmaps(TextureId id) const {
+    JAH_SYNC_GETTER("Scene::textureMipmaps");
     auto it = mTextures.find(id);
     if (it == mTextures.end() || !it->second.texture) return 0u;
     return it->second.texture->getNumMipmaps();

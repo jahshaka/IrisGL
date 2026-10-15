@@ -8022,6 +8022,46 @@ struct PublishedFrame {
     /// THE SCENE'S GI MACHINE as the frame closed it (Scene::giStatus at the close; U3 stage 1 — the readers move to
     /// it in stage 2).
     GiStatus             gi;
+    /// THE AIR THE SUN'S BEAM CROSSES, as the frame left it (ENGINE-UPGRADE-U3 stage 2, F-A): the realistic sky's model
+    /// and the observer's altitude the engine's tables were built for — the inputs of atmosphereSunTint(), the
+    /// stateless boundary function a host calls while it builds the next record. `on` false = no realistic sky
+    /// (the tint is white).
+    struct Atmosphere {
+        bool  on = false;
+        float rayleighScale = 1.0f;
+        float mieScale = 1.0f;
+        bool  ozone = true;
+        float planetRadiusKm = 6360.0f;
+        float atmosphereHeightKm = 100.0f;
+        float observerKm = 0.0f;
+    };
+    Atmosphere           atmosphere;
+    // ---- THE SCENE'S STATUS AS THE FRAME CLOSED IT (ENGINE-UPGRADE-U3 stage 2: what the host read synchronously) ----
+    HeightFogStatus      heightFog;
+    bool                 skyAmbientShValid = false;   ///< skyAmbientSh holds the sky's SH (Scene's old getter's bool)
+    float                skyAmbientSh[27] = {};
+    CloudStatus          clouds;
+    AtmosphereStatus     atmosphereStatus;
+    RayQueryStatus       rayQuery;
+    SunContactStatus     sunContact;
+    int                  activePlanarReflectors = 0;
+    bool                 atomViewPaintable = false;
+    /// Why each Photon view cannot paint right now ("" = it can), indexed by PhotonView.
+    std::string          photonViewRefusals[kPhotonViewCount];
+    /// THE POSES OF THE RIGS A HOST ASKED FOR (Scene::publishBonePoses): each rig's bones, parent-local, in the mesh
+    /// node's frame — what Scene::bonePoses read, as drawn by this frame.
+    struct RigPoses {
+        NodeId                node = 0;
+        std::vector<BonePose> poses;
+    };
+    std::vector<RigPoses> bonePoses;
+    /// THE NAMED NODES' WORLD POSES (the VR proxies' and rays' — Scene::setVrProxyNodes / setVrRayNodes), as drawn.
+    struct NodePose {
+        NodeId node = 0;
+        Vec3   position;
+        Quat   rotation;
+    };
+    std::vector<NodePose> nodePoses;
 };
 
 struct StreamingWork {
@@ -8241,6 +8281,15 @@ struct MonitorStatus {
     unsigned long long gpuFramesAgedOut = 0;
     std::string gpuReason;           ///< why GPU timing is unavailable, when it is
     float    overheadMs = 0.0f;      ///< the monitor's own cost, last frame
+};
+
+/// ONE SYNCHRONOUS GETTER'S HOST-SIDE CALLS (host.sync_getters, ENGINE-UPGRADE-U3 stage 2; Engine::syncGetters): a
+/// const virtual that still reads the engine's state on the caller's thread, by name ("Scene::giStatus"), with the
+/// calls made outside every frame of the render loop since the process started. Only getters called at least once
+/// are listed.
+struct SyncGetterCount {
+    std::string        name;
+    unsigned long long calls = 0;
 };
 
 /// WHAT THE ENGINE PUBLISHED FOR THE FRAME IT LAST CLOSED (ENGINE-UPGRADE-U3 stage 1; Engine::published()): the

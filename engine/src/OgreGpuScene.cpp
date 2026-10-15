@@ -1696,6 +1696,7 @@ void toPublic(const detail::GpuInstance &in, GpuSceneEntry &out) {
 }  // namespace
 
 GpuSceneStatus OgreScene::gpuSceneStatus() const {
+    JAH_SYNC_GETTER("Scene::gpuSceneStatus");
     GpuSceneStatus st;
     st.live = mGpuScene.live();
     st.slotCount = unsigned(mItemNodes.size());
@@ -1718,6 +1719,7 @@ GpuSceneStatus OgreScene::gpuSceneStatus() const {
 }
 
 bool OgreScene::gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const {
+    JAH_SYNC_GETTER("Scene::gpuSceneEntry");
     if (!mGpuScene.live() || slot >= mGpuScene.slotCapacity()) return false;
     toPublic(mGpuScene.entry(slot), out);
     return true;

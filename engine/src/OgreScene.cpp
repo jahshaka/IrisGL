@@ -16,6 +16,8 @@
 #include <OgreHlmsDatablock.h>
 #include <OgreItem.h>
 #include <Animation/OgreTagPoint2.h>
+#include <Animation/OgreSkeletonInstance.h>
+#include <algorithm>
 #include <OgreSubItem.h>
 
 namespace jahshaka { namespace engine { namespace detail {
@@ -23,6 +25,7 @@ namespace jahshaka { namespace engine { namespace detail {
 OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
                      std::string &errorSink)
     : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {
+    mIdentityName = name;
     // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
     mGiBinding.lightWriteSerial = &mGiLightWriteSerial;
     mGiBinding.lightsRemoved = &mLightsRemoved;
@@ -41,7 +44,6 @@ OgreScene::~OgreScene() {
     mGpuScene.removeObserver(&mCardFeed);
 }
 
-const std::string &OgreScene::name() const { return mName; }
 
 // THE PER-SCENE SHADOW REQUEST (ENGINEERING_DEBT_SPEC.md item 4; ShadowDesc
 // carries the model). The backend has one filter and one shadow atlas for the
@@ -605,6 +607,40 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     back.frame = frame;
     back.serial = serial;
     back.gi = giStatus();
+    back.atmosphere = publishedAtmosphere();
+    // THE SCENE'S STATUS (ENGINE-UPGRADE-U3 stage 2): each the getter's own answer, read once here at the close.
+    back.heightFog = heightFogStatus();
+    back.skyAmbientShValid = skyAmbientSh(back.skyAmbientSh);
+    back.clouds = cloudStatus();
+    back.atmosphereStatus = atmosphereStatus();
+    back.rayQuery = rayQueryStatus();
+    back.sunContact = sunContactStatus();
+    back.activePlanarReflectors = activePlanarReflectors();
+    back.atomViewPaintable = atomViewPaintable();
+    for (int v = 0; v < kPhotonViewCount; ++v)
+        back.photonViewRefusals[v] = v == 0 ? std::string() : photonViewRefusal(static_cast<PhotonView>(v));
+    // THE RIGS A HOST SUBSCRIBED (publishBonePoses): a rig gone (its node removed, its Item without a skeleton) is
+    // dropped from the list and published no more.
+    back.bonePoses.clear();
+    for (size_t i = 0; i < mPublishedRigs.size();) {
+        const NodeId id = mPublishedRigs[i];
+        Ogre::SkeletonInstance *skel = record(id) ? skeletonOf(id) : nullptr;
+        if (!skel) { mPublishedRigs.erase(mPublishedRigs.begin() + std::ptrdiff_t(i)); continue; }
+        PublishedFrame::RigPoses rp;
+        rp.node = id;
+        rp.poses.resize(skel->getNumBones());
+        if (bonePoses(id, rp.poses.data(), rp.poses.size())) back.bonePoses.push_back(std::move(rp));
+        ++i;
+    }
+    // THE NAMED NODES (the VR proxies and rays the host named), as drawn.
+    back.nodePoses.clear();
+    const NodeId named[4] = { mVrProxyNode[0], mVrProxyNode[1], mVrRayNode[0], mVrRayNode[1] };
+    for (NodeId id : named) {
+        if (!id) continue;
+        PublishedFrame::NodePose np;
+        np.node = id;
+        if (nodeWorldPoseDrawn(id, np.position, np.rotation)) back.nodePoses.push_back(np);
+    }
     back.riderTags.clear();
     for (NodeId id : mBoneRiderIds) {
         const Node *rec = record(id);
@@ -1067,6 +1103,14 @@ void OgreScene::setVrProxyNodes(NodeId left, NodeId right) {
     mVrProxyNode[1] = right;
 }
 
+bool OgreScene::publishBonePoses(NodeId id, bool on) {
+    const auto it = std::find(mPublishedRigs.begin(), mPublishedRigs.end(), id);
+    if (!on) { if (it != mPublishedRigs.end()) mPublishedRigs.erase(it); return true; }
+    if (!skeletonOf(id)) { mError = "publishBonePoses: the node has no rig"; return false; }
+    if (it == mPublishedRigs.end()) mPublishedRigs.push_back(id);
+    return true;
+}
+
 void OgreScene::vrProxyNodes(NodeId out[2]) const {
     out[0] = mVrProxyNode[0];
     out[1] = mVrProxyNode[1];
@@ -1116,6 +1160,7 @@ unsigned OgreScene::vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) 
 // asking about the picture, and the scene manager's own walk happens later in
 // the frame.
 bool OgreScene::nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const {
+    JAH_SYNC_GETTER("Scene::nodeWorldPose");
     Ogre::SceneNode *n = node(id);
     if (!n) return false;
     const Ogre::Vector3 p = n->_getDerivedPositionUpdated();
@@ -1126,6 +1171,7 @@ bool OgreScene::nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const {
 }
 
 bool OgreScene::nodeWorldPoseDrawn(NodeId id, Vec3 &position, Quat &rotation) const {
+    JAH_SYNC_GETTER("Scene::nodeWorldPoseDrawn");
     Ogre::SceneNode *n = node(id);
     if (!n) return false;
     const Ogre::Vector3 p = n->_getDerivedPosition();
@@ -1232,6 +1278,7 @@ bool OgreScene::nodeMovable(NodeId id) const {
 }
 
 MobilityStatus OgreScene::mobilityStatus() const {
+    JAH_SYNC_GETTER("Scene::mobilityStatus");
     MobilityStatus out;
     out.mobilityRebuilds = mMobilityRebuilds;
     for (const auto &kv : mNodes) {
@@ -1922,6 +1969,7 @@ void OgreScene::dropSkeletonFollowers(NodeId id, Node &n) {
 }
 
 size_t OgreScene::itemCount(NodeId id) const {
+    JAH_SYNC_GETTER("Scene::itemCount");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.node) return 0;
     size_t n = 0;
@@ -2069,15 +2117,15 @@ void OgreScene::addObjectCounts(ObjectCounts &out) const {
 // instead of assumed. `rayQueryAvailable()` is the DEVICE's own answer and
 // nothing in the document can move it — which is the whole point of the row:
 // On does not force hardware, it asks the editor to SAY when there is none.
-bool OgreScene::rayTracingResolved() const { return rayTracingResolvedFor(mRayTracing); }
+bool OgreScene::rayTracingResolved() const { JAH_SYNC_GETTER("Scene::rayTracingResolved"); return rayTracingResolvedFor(mRayTracing); }
 
 bool OgreScene::rayTracingResolvedFor(RayTracingMode mode) const {
+    JAH_SYNC_GETTER("Scene::rayTracingResolvedFor");
     if (mode == RayTracingMode::Off) return false;
     if (!mEngine) return false;
     return mEngine->rayTracing() && mEngine->rayQueryAvailable();
 }
 
-Engine *OgreScene::engine() const { return mEngine; }
 
 void OgreScene::setRayTracing(RayTracingMode mode) {
     const bool wasOn = mRayTracing != RayTracingMode::Off;
@@ -2377,3 +2425,12 @@ bool PhotonComponent::dumpCardAtlas(const std::string &prefix, std::string &err)
 }
 
 }}}  // namespace jahshaka::engine::detail
+
+namespace jahshaka { namespace engine { namespace detail {
+void OgreScene::bindEngine(OgreEngine *e) { mEngine = e; mIdentityEngine = e; }
+}}}   // namespace jahshaka::engine::detail
+
+namespace jahshaka { namespace engine { namespace inspect {
+// THE TEST DOOR (EngineInspect.h): the engine's own record of a host's pushes, for the fixtures alone.
+const SceneEcho *scene(const Scene *s) { return dynamic_cast<const SceneEcho *>(s); }
+}}}   // namespace jahshaka::engine::inspect

@@ -508,6 +508,7 @@ bool OgreScene::setNodePlanarReflector(NodeId id, bool on) {
 }
 
 bool OgreScene::nodePlanarReflector(NodeId id) const {
+    JAH_SYNC_GETTER("Scene::nodePlanarReflector");
     return mReflectors.count(id) != 0 ||
            std::find(mReflectorsToArm.begin(), mReflectorsToArm.end(), id) != mReflectorsToArm.end();
 }
@@ -529,6 +530,7 @@ void OgreScene::armDeferredReflectors() {
 }
 
 int OgreScene::activePlanarReflectors() const {
+    JAH_SYNC_GETTER("Scene::activePlanarReflectors");
     return mPlanar ? int(mPlanar->countActiveActors()) : 0;
 }
 

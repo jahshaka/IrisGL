@@ -354,6 +354,7 @@ bool OgreScene::attachClips(NodeId id, const ClipDesc *clips, size_t count) {
 
 // ---------------------------------------------------------------------------
 std::vector<std::string> OgreScene::clipNames(NodeId id) const {
+    JAH_SYNC_GETTER("Scene::clipNames");
     auto it = mClips.find(id);
     if (it == mClips.end()) return {};
     // S16: records that outlived their instance are not clips this node has —
@@ -541,6 +542,7 @@ bool OgreScene::setBoneManual(NodeId id, const std::string &bone, bool manual) {
 
 // ---------------------------------------------------------------------------
 bool OgreScene::bonePoses(NodeId id, BonePose *out, size_t count) const {
+    JAH_SYNC_GETTER("Scene::bonePoses");
     Ogre::SkeletonInstance *skel = skeletonOf(id);
     if (!skel) { mError = "bonePoses: the node has no rig"; return false; }
     const RigRec *rig = rigOf(id);
@@ -577,6 +579,7 @@ bool OgreScene::bonePoses(NodeId id, BonePose *out, size_t count) const {
 
 // ---------------------------------------------------------------------------
 std::vector<float> OgreScene::clipBoneWeights(NodeId id, const std::string &clip) const {
+    JAH_SYNC_GETTER("Scene::clipBoneWeights");
     auto it = mClips.find(id);
     if (it == mClips.end()) return {};
     // S16: every weight below is READ through a cached float* into the

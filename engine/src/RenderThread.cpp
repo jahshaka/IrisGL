@@ -6,6 +6,16 @@
 
 namespace jahshaka { namespace engine { namespace detail {
 
+// ---- host.sync_getters (SyncGetters.h) ---------------------------------------------------------------------------
+thread_local int tlsEngineSide = 0;
+namespace { std::atomic<SyncGetterSite *> gSyncSites{ nullptr }; }
+SyncGetterSite::SyncGetterSite(const char *n) : name(n) {
+    SyncGetterSite *head = gSyncSites.load(std::memory_order_relaxed);
+    do { next = head; } while (!gSyncSites.compare_exchange_weak(head, this, std::memory_order_release,
+                                                                 std::memory_order_relaxed));
+}
+SyncGetterSite *syncGetterSites() { return gSyncSites.load(std::memory_order_acquire); }
+
 // ---- THE GAME SIDE -----------------------------------------------------------------------------------------------
 
 // THE MERGE STAYS (U3 F1): one frame today is the merge of 2-6 submits — the driver's cause, the viewport's pace, the
@@ -107,6 +117,8 @@ void RenderThread::tickInline() {
     // — is swapped aside for the length of the frame, so what the frame writes (its drain, its work, its close) is
     // the frame's error and goes to the snapshot, and the CALLS' error the host may still be about to read comes
     // back untouched.
+    // THE RENDER SIDE from here to the publish: the engine's own reads of its state are not the host's door.
+    EngineSideScope engineSide;
     std::string callError;
     callError.swap(mEngine.mLastError);
     const bool ran = mEngine.runFrame(handed.record, handed.any);

@@ -18,6 +18,7 @@
 //     serial THEN — never per submit — and an EMPTY slot is a legal hand-over that carries the last serial (F2).
 // Ogre-free: the engine's private TUs include it through EnginePrivate.h.
 #include "jahshaka/engine/Types.h"
+#include "SyncGetters.h"
 
 #include <atomic>
 #include <mutex>

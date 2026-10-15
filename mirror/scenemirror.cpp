@@ -475,6 +475,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mMeshes.clear();
     for (MaterialId m : mMaterials) mTarget->destroyMaterial(m);
     mMaterials.clear();
+    mMaterialModels.clear();
     for (TextureId t : mTextures) mTarget->destroyTexture(t);
     mTextures.clear();
     mLiveGenerations.clear();   // a key is here only while its engine texture is (code review 2026-09-10)
@@ -2329,7 +2330,7 @@ void SceneMirror::syncGiVolume()
         }
         return;
     }
-    const jahshaka::engine::GiStatus st = mTarget->giStatus();
+    const jahshaka::engine::GiStatus &st = mTarget->published().gi;   // the snapshot (ENGINE-UPGRADE-U3 stage 2)
     // THE MODE THIS FRAME'S RECORD CARRIES (U0 3a): the engine applies it at the next frame's head, after this
     // overlay is placed — reading the engine's would show a GI that the same frame turns off. The box is the
     // engine's (it follows the volume the renderer reports, a frame behind like every engine readout).
@@ -3503,6 +3504,9 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                                  size_t(blendToRig.size()))) {
                         attached = true;
                         e.gpuSkinned = true;
+                        // ITS DRAWN POSE RIDES EVERY FRAME'S SNAPSHOT (ENGINE-UPGRADE-U3 stage 2): the sockets and the
+                        // avatar overlay read it from there (entryBoneWorldTransforms), never from the engine.
+                        mTarget->publishBonePoses(e.node, true);
                         e.rigSkeleton = rigSkeleton;
                         e.blendToRig = blendToRig;
                         e.characterHost = host;
@@ -3595,8 +3599,11 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                     // latch, and setShadingModel SUCCEEDS on the model the material already has — which read
                     // as a switch: every re-adopted node re-queued every other user of its material, a
                     // 500-node fragment re-attached in a 10k scene visited 4.5 M nodes in one sync.
-                    if (mTarget->shadingModelOf(e.material) != ms.pbr.shadingModel &&
+                    // THE MODEL IN FORCE IS THE MIRROR'S OWN RECORD (ENGINE-UPGRADE-U3 stage 2: the host keeps
+                    // what it set — the material's family at its creation, then every switch the engine accepted).
+                    if (materialModelOf(e.material) != ms.pbr.shadingModel &&
                         mTarget->setShadingModel(e.material, ms.pbr.shadingModel)) {
+                        mMaterialModels.insert(e.material, ms.pbr.shadingModel);
                         notePush(node, "shading model");
                     }
                 }
@@ -4277,6 +4284,7 @@ void SceneMirror::reclaimUnused()
         if (usedMaterials.contains(it.value())) { ++it; continue; }
         // The per-material memo goes WITH the material (lead review F7).
         mMaterialSync.remove(it.key());
+        mMaterialModels.remove(it.value());
         mTarget->destroyMaterial(it.value()); it = mMaterials.erase(it);
     }
     // Textures, the third cache — and the one that was never reclaimed at all
@@ -4432,17 +4440,34 @@ MaterialId SceneMirror::materialFor(iris::Material *material)
         // A material class the mirror cannot translate gets one shared neutral
         // material. The document holds PbrMaterials only, so this is a guard
         // (and the no-material node's surface) rather than a translation.
-        if (!mDefaultMaterial) mDefaultMaterial = mTarget->createPbrMaterial(defaultMaterialSync().pbr);
+        if (!mDefaultMaterial) {
+            mDefaultMaterial = mTarget->createPbrMaterial(defaultMaterialSync().pbr);
+            noteMaterialCreated(mDefaultMaterial, defaultMaterialSync().pbr);
+        }
         return mDefaultMaterial;
     }
     auto it = mMaterials.constFind(material);
     if (it != mMaterials.constEnd()) return it.value();
     MaterialId id = mTarget->createPbrMaterial(p);
     if (id) {
+        noteMaterialCreated(id, p);
         mMaterials.insert(material, id);
         syncCustomPieces(material, id);
     }
     return id;
+}
+
+// THE MATERIAL'S FAMILY, AS THE MIRROR MADE IT (ENGINE-UPGRADE-U3 stage 2; Scene::shadingModelOf deleted): the engine
+// builds a material in the Unlit or Distortion family when its params ask for it and in Lit otherwise
+// (OgreScene::createPbrMaterial), and only an accepted setShadingModel moves it after that.
+void SceneMirror::noteMaterialCreated(jahshaka::engine::MaterialId id, const jahshaka::engine::PbrParams &p) {
+    if (!id) return;
+    const ShadingModel m = p.shadingModel;
+    mMaterialModels.insert(id, (m == ShadingModel::Unlit || m == ShadingModel::Distortion) ? m : ShadingModel::Lit);
+}
+
+jahshaka::engine::ShadingModel SceneMirror::materialModelOf(jahshaka::engine::MaterialId id) const {
+    return mMaterialModels.value(id, ShadingModel::Lit);
 }
 
 /// GENERATED SHADER PIECES (HLMS_ADOPTION P5). A graph material carries the
@@ -5141,10 +5166,10 @@ Colour SceneMirror::atmosphereTintFor(const iris::LightNode *light,
     const iris::Vec3 travel = const_cast<iris::LightNode *>(light)->getLightDir();
     if (travel.lengthSquared() < 1e-12f) return white;
     const iris::Vec3 toSun = -travel.normalized();
-    // The ENGINE decides whether there is an atmosphere to ask at all: it
-    // answers white for every other sky, so "is the realistic sky on?" is not
-    // a second opinion kept here.
-    return mTarget->atmosphereSunTint(Vec3(toSun.x(), toSun.y(), toSun.z()));
+    // The ENGINE's air decides whether there is an atmosphere to ask at all (the published `on`: white for every other
+    // sky), and the tint is the boundary's STATELESS function of it (ENGINE-UPGRADE-U3 F-A) — the air as the last frame
+    // left it, which is what the record being built here is drawn under.
+    return jahshaka::engine::atmosphereSunTint(mTarget->published().atmosphere, Vec3(toSun.x(), toSun.y(), toSun.z()));
 }
 
 LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun, bool sunKnown,
@@ -6216,9 +6241,15 @@ bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::
     // per bone-overlay refresh, and now it runs every frame for every rig that
     // carries a socket. assign()/resize() on a member keeps the capacity, so
     // the steady state is zero allocations here.
-    mPoseScratch.assign(e.boneCount, BonePose());
-    if (!mTarget->bonePoses(e.node, mPoseScratch.data(), mPoseScratch.size())) return false;
-    std::vector<BonePose> &poses = mPoseScratch;
+    // THE POSE AS THE LAST FRAME DREW IT (ENGINE-UPGRADE-U3 stage 2: the snapshot's PublishedFrame::bonePoses — the
+    // rig was subscribed at its skinned attach). Absent until a frame has drawn the rig: the bind pose, as before a
+    // rig's first frame.
+    const PublishedFrame &pub = mTarget->published();
+    const PublishedFrame::RigPoses *rig = nullptr;
+    for (const PublishedFrame::RigPoses &r : pub.bonePoses)
+        if (r.node == e.node) { rig = &r; break; }
+    if (!rig || rig->poses.size() != e.boneCount) return false;
+    const std::vector<BonePose> &poses = rig->poses;
 
     // The engine hands back parent-local TRS; the FK back up to world is
     // ours. Bone order is free (a parent may follow its child), so the

@@ -352,7 +352,7 @@ void JahAtmosphere::setAirOn(bool on) {
 // THE TRANSMITTANCE TABLE'S INTEGRAL, on the CPU: the same medium
 // (jah_atmosphere.glsl, jahAtmoMedium) along the same ray to the top of the air,
 // with more steps than the table uses (the table is interpolated; this is not).
-Ogre::Vector3 JahAtmosphere::transmittance(float rKm, float mu) const {
+Ogre::Vector3 JahAtmosphere::transmittanceOf(const AtmosphereModel &mModel, float rKm, float mu) {
     const double Rb = mModel.planetRadiusKm, Rt = Rb + mModel.atmosphereHeightKm;
     const double r = std::max(double(rKm), Rb);
     mu = std::max(-1.0f, std::min(1.0f, mu));

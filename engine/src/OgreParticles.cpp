@@ -778,6 +778,7 @@ bool OgreScene::removeParticleSystem(NodeId id) {
 }
 
 unsigned OgreScene::particleCount(NodeId id) const {
+    JAH_SYNC_GETTER("Scene::particleCount");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.particleDef) return 0;
     // SIMD-rounded and never above the quota: the backend tracks live particles

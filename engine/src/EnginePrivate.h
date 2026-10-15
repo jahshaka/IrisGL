@@ -17,6 +17,7 @@
 //     MeshManager::removeAll -> Root. A MeshPtr outliving Root hits a dead VaoManager.
 //   * No Ogre exception may escape: every virtual is wrapped and translated.
 #include "jahshaka/engine/Engine.h"
+#include "jahshaka/engine/EngineInspect.h"
 // THE GPU SCENE's tables (A3 slice). Engine-private and Ogre-aware — it holds
 // MeshPtrs and hands out UavBufferPackeds — but it knows nothing of Vulkan and
 // nothing of OgreScene's Node, which is what keeps it bindable from an
@@ -3568,13 +3569,14 @@ struct IndexBufferRelease {
     void operator()(Ogre::IndexBufferPacked *b) const;
 };
 
-class OgreScene final : public Scene {
+class OgreScene final : public Scene, public inspect::SceneEcho {
 public:
+    /// The engine that made this scene: its own pointer and the boundary's identity (Scene::engine), set once.
+    void bindEngine(OgreEngine *e);
     OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
               std::string &errorSink);
     ~OgreScene() override;
 
-    const std::string &name() const override;
 
     void setAmbient(const Colour &upper, const Colour &lower) override;
     /// A HOST'S OWN AMBIENT: it takes the ambient back from the engine (a later
@@ -3683,13 +3685,9 @@ public:
     void pushHeightFog();
     HeightFogDesc mHeightFog;
     bool mHeightFogOn = false;
-    /// atmosphereSunTint's memo: the direction asked about, the answer, and the
-    /// model generation it was computed under. A sun that has not moved costs a
-    /// compare.
-    mutable Ogre::Vector3 mAtmoTintDir = Ogre::Vector3::ZERO;
-    mutable Colour        mAtmoTint = Colour(1.0f, 1.0f, 1.0f, 1.0f);
-    mutable unsigned long long mAtmoTintGeneration = 0;
-    Colour atmosphereSunTint(const Vec3 &toSun) const override;
+    /// The air the sun's beam crosses, for the snapshot (PublishedFrame::atmosphere; the inputs of the stateless
+    /// atmosphereSunTint, ENGINE-UPGRADE-U3 F-A).
+    PublishedFrame::Atmosphere publishedAtmosphere() const;
     AtmosphereStatus atmosphereStatus() const override;
     void setReflectionFogEnabled(bool on) override { mReflectionFogOn = on; }
 
@@ -3977,12 +3975,10 @@ public:
     bool boneMatrices(NodeId id, float *out, size_t count) const override;
     size_t streamedBoneCount(NodeId id) const override;
     RigStats rigStats() const override;
-    Engine *engine() const override;
     bool rayTracingResolvedFor(RayTracingMode mode) const override;
-    SceneChangeStats changeStats() const override { return mChangeStats; }
+    SceneChangeStats changeStats() const override { JAH_SYNC_GETTER("Scene::changeStats"); return mChangeStats; }
     void beginStructureEdit() override { ++mStructureEditDepth; }
     void endStructureEdit() override;
-    ShadingModel shadingModelOf(MaterialId id) const override;
 
     // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC; impl in OgreClips.cpp) ----
     bool attachClips(NodeId id, const ClipDesc *clips, size_t count) override;
@@ -3990,6 +3986,9 @@ public:
     bool setClipStates(NodeId id, const ClipState *states, size_t count) override;
     bool setBoneManual(NodeId id, const std::string &bone, bool manual) override;
     bool bonePoses(NodeId id, BonePose *out, size_t count) const override;
+    bool publishBonePoses(NodeId node, bool on) override;
+    /// The rigs whose poses every frame's snapshot carries (publishBonePoses), in subscription order.
+    std::vector<NodeId> mPublishedRigs;
     std::vector<float> clipBoneWeights(NodeId id, const std::string &clip) const override;
 
     // ---- Textures ----
@@ -4035,12 +4034,12 @@ public:
     bool     setParticleSystem(NodeId id, const ParticleSystemDesc &d) override;
     bool     removeParticleSystem(NodeId id) override;
     unsigned particleCount(NodeId id) const override;
-    unsigned particleDefinitionsCreated() const override { return mParticleDefsCreated; }
+    unsigned particleDefinitionsCreated() const override { JAH_SYNC_GETTER("Scene::particleDefinitionsCreated"); return mParticleDefsCreated; }
 
     // ---- Lights ----
     bool setLight(NodeId id, const LightDesc &d) override;
     bool removeLight(NodeId id) override;
-    unsigned long long lightWriteSerial() const override { return mGiLightWriteSerial; }
+    unsigned long long lightWriteSerial() const override { JAH_SYNC_GETTER("Scene::lightWriteSerial"); return mGiLightWriteSerial; }
 
     // ---- Decals (DECALS_SPEC.md; impl in OgreDecals.cpp) ----
     bool setDecal(NodeId id, const DecalDesc &d) override;
@@ -4055,7 +4054,7 @@ public:
     /// OPEN_COVER_SPEC §2 A — see the boundary's note. Sticky, per scene.
     void setLoading(bool loading) override { mSceneLoading = loading; }
     bool isLoading() const override { return mSceneLoading; }
-    GiStatus giStatus() const override { return mPhoton.giStatus(); }
+    GiStatus giStatus() const override { JAH_SYNC_GETTER("Scene::giStatus"); return mPhoton.giStatus(); }
     GiVoxelStats giVoxelStats(int cascade) override { return mPhoton.giVoxelStats(cascade); }
     bool giFieldAtlas(GiFieldAtlas &out) override { return mPhoton.giFieldAtlas(out); }
     bool giVoxelVolume(int cascade, GiVoxelVolume &out) override { return mPhoton.giVoxelVolume(cascade, out); }
@@ -4069,7 +4068,7 @@ public:
     void setAtomCutBudgetForTest(unsigned indices) override;
     bool atomOcclusionEnabled() const override { return mAtom.occlusionEnabled(); }
     void setAtomView(AtomView view) override { mAtom.setView(view); }
-    AtomView atomView() const override { return mAtom.view(); }
+    AtomView atomView() const { return mAtom.view(); }
     /// THE BUCKETS VIEW'S TABLE (OgreAtomDraw.cpp): one R32_UINT texel per GPU
     /// scene slot holding the decode bucket that shades it (0 = none), 1024 slots a
     /// row. Written by updateAtomDraw ONLY while the view is Buckets (a CPU walk of
@@ -4262,8 +4261,8 @@ public:
     bool nodeCastShadow(NodeId id) const override;
     void setNodeFaceCull(NodeId id, FaceCull cull) override;
     FaceCull nodeFaceCull(NodeId id) const override;
-    unsigned cullTwinCount() const override { return mCullTwinCount; }
-    unsigned cullTwinCandidateCount() const override { return unsigned(mTwinCandidates.size()); }
+    unsigned cullTwinCount() const override { JAH_SYNC_GETTER("Scene::cullTwinCount"); return mCullTwinCount; }
+    unsigned cullTwinCandidateCount() const override { JAH_SYNC_GETTER("Scene::cullTwinCandidateCount"); return unsigned(mTwinCandidates.size()); }
     /// THE CULL TWINS' SWEEP (CULL-MODE-2; CULL-TWIN-DEBTS-1): destroys a twin that
     /// no renderable has worn for kCullTwinGraceFrames of this scene's frames. It
     /// visits only the CANDIDATES — twins an Item let go of since (noteTwinLetGo) —
@@ -4281,7 +4280,7 @@ public:
     bool setNodePlanarReflector(NodeId id, bool on) override;
     bool nodePlanarReflector(NodeId id) const override;
     int  activePlanarReflectors() const override;
-    unsigned planarReflectorArms() const override { return mPlanarArms; }
+    unsigned planarReflectorArms() const override { JAH_SYNC_GETTER("Scene::planarReflectorArms"); return mPlanarArms; }
     unsigned mPlanarArms = 0;   ///< armReflector's actors made (a diagnostic)
 
     // ---- Hardware ray tracing, per scene (ledger §425; impl OgreScene.cpp) ----
@@ -5879,14 +5878,13 @@ public:
     /// view of the scene draws straight into a window without the id pass (the Low
     /// tier's passthrough viewport — AtomDrawStatus::passthroughViews). A VR eye
     /// pair carries no id pass either, but the desktop view beside it does.
-    bool atomViewPaintable() const override { return atomDrawOn() && !mAtom.hasPassthroughViews(); }
+    bool atomViewPaintable() const override { JAH_SYNC_GETTER("Scene::atomViewPaintable"); return atomDrawOn() && !mAtom.hasPassthroughViews(); }
 
     // ---- THE PHOTON VIEW (PHOTON-VIEW-1, OgrePhotonView.cpp) ----------------
     void setPhotonView(PhotonView view) override { mPhoton.setPhotonView(view); }
-    PhotonView photonView() const override { return mPhoton.photonView(); }
-    std::string photonViewRefusal(PhotonView view) const override { return mPhoton.photonViewRefusal(view); }
+    PhotonView photonView() const { return mPhoton.photonView(); }
+    std::string photonViewRefusal(PhotonView view) const override { JAH_SYNC_GETTER("Scene::photonViewRefusal"); return mPhoton.photonViewRefusal(view); }
     void setPhotonVoxelCascade(int cascade) override { mPhoton.setPhotonVoxelCascade(cascade); }
-    int photonVoxelCascade() const override { return mPhoton.photonVoxelCascade(); }
     void syncPhotonView() { return mPhoton.syncPhotonView(); }
     void releasePhotonView() { return mPhoton.releasePhotonView(); }
     using PhotonViewShape = PhotonComponent::PhotonViewShape;
@@ -7353,6 +7351,12 @@ public:
     FrameInputStatus frameInputStatus() const override { return mFrameInputStatus; }
     const PublishedEngineFrame &published() const override { return mRenderThread.published(); }
     void setDisplayPeriod(float seconds) override { mRenderThread.setDisplayPeriod(seconds); }
+    std::vector<SyncGetterCount> syncGetters() const override {
+        std::vector<SyncGetterCount> out;
+        for (const SyncGetterSite *s = syncGetterSites(); s; s = s->next)
+            out.push_back({ s->name, s->calls.load(std::memory_order_relaxed) });
+        return out;
+    }
     bool pendingGiConfiguration(const Scene *scene) const override;
     /// THE ONE DRAIN (U0 3a): the record the hand-over took (`any` false = an EMPTY hand-over), applied at the top of
     /// the frame.

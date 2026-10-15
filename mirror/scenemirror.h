@@ -1617,7 +1617,6 @@ private:
     /// entryBoneWorldTransforms' scratch. Members because sockets made that
     /// function per-frame work (it used to run only when the bone overlay
     /// refreshed) — see the note at its assign() calls.
-    mutable std::vector<jahshaka::engine::BonePose> mPoseScratch;
     mutable std::vector<iris::Mat4>                 mDerivedScratch;
     mutable std::vector<char>                       mDerivedDone;
     /// syncClips' two reused buffers, members for the same reason: it runs for
@@ -1658,6 +1657,11 @@ private:
     // was retired with its clip evaluator — deleted rather than shadowed by the
     // read-back scratch above, which is a live buffer with the same name.)
     QHash<iris::Material *, jahshaka::engine::MaterialId> mMaterials;
+    /// THE SHADING MODEL IN FORCE per PBR material the mirror made (ENGINE-UPGRADE-U3 stage 2: the host keeps what it
+    /// set; Scene::shadingModelOf is deleted). Unknown ids read Lit, as the engine's own did.
+    QHash<jahshaka::engine::MaterialId, jahshaka::engine::ShadingModel> mMaterialModels;
+    void noteMaterialCreated(jahshaka::engine::MaterialId id, const jahshaka::engine::PbrParams &p);
+    jahshaka::engine::ShadingModel materialModelOf(jahshaka::engine::MaterialId id) const;
     QHash<QString, jahshaka::engine::TextureId> mTextures;
     /// For every LIVE entry of mTextures (same key), the document generation
     /// its pixels were last uploaded from. A key is here only while its engine
