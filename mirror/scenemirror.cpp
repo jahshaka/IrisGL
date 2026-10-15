@@ -3808,12 +3808,20 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
 // owns, a cursor the log's cap overtook) makes the set incomplete: the engine takes its full pass once.
 // THE RIDERS' TAGS, AS THE ENGINE DREW THEM (ENGINE-UPGRADE-U2: Scene::published, read without asking): each armed
 // rider's parent in the document's composition (iris::graph::setRiderTag) — its world and any world write on it.
+SceneMirror::RiderState &SceneMirror::riderState(iris::SceneNode *rider)
+{
+    RiderState &st = mBoneRiders[rider];
+    if (st.alive.isNull()) st.alive = rider->sharedFromThis();
+    return st;
+}
+
 void SceneMirror::takePublishedRiderTags()
 {
     if (mBoneRiders.isEmpty()) return;
     const jahshaka::engine::PublishedFrame &pub = mTarget->published();
     if (pub.riderTags.empty()) return;
     for (auto it = mBoneRiders.begin(); it != mBoneRiders.end(); ++it) {
+        if (it->alive.isNull()) continue;   // deleted by the document: the walk below drops it
         iris::SceneNode *rider = const_cast<iris::SceneNode *>(it.key());
         const auto e = mEntries.constFind(rider);
         if (e == mEntries.cend() || !e->node) continue;
@@ -6464,7 +6472,7 @@ int SceneMirror::reconcileSockets()
                 // The authored offset is the one thing about a rider that must
                 // outlive every one of those.
                 {
-                    RiderState &kept = mBoneRiders[rider];
+                    RiderState &kept = riderState(rider);
                     if (!kept.authoredValid) {
                         kept.authoredPos = keepPos;
                         kept.authoredRot = keepRot;
@@ -6481,7 +6489,7 @@ int SceneMirror::reconcileSockets()
                 // The write below lands in the rider's LOCAL, which since D4 is
                 // its offset from the socket — so the authored value is kept
                 // first and restored the moment a tag can be armed.
-                RiderState &st = mBoneRiders[rider];
+                RiderState &st = riderState(rider);
                 st.fallbackDriven = true;    // the authored offset is already kept, above
                 // CHANGE-GUARDED (lane ENGINE-7 item 4). This is a DOCUMENT
                 // write through the marking setters, so a still scene holding a
@@ -6538,7 +6546,7 @@ int SceneMirror::reconcileSockets()
                 mTarget->boneAttachment(riderId, &actualBone);
             const bool armed = actualOwner == ownerId &&
                                actualBone == socket->boneName.toStdString();
-            RiderState &state = mBoneRiders[rider];
+            RiderState &state = riderState(rider);
             if (!armed) {
                 // The rider keeps its place in the DOCUMENT hierarchy — the
                 // socket API's promise — by construction (the store owns it);

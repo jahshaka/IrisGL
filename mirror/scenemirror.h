@@ -1555,6 +1555,11 @@ private:
     /// What the engine was last asked for, per rider — so an unchanged socket
     /// costs one comparison and no engine call.
     struct RiderState {
+        /// THE RIDER'S LIFE, without touching it: the map is keyed by the document node's POINTER, and a rider the
+        /// document deleted is a freed pointer here until the walk drops its entry — the published tags are applied at
+        /// the TOP of sync (takePublishedRiderTags), before that walk, so they check this first (ENGINE-UPGRADE-U3
+        /// stage 3: a frame's tags reached a deleted rider, sockets.tags under ASan's eye).
+        QWeakPointer<iris::SceneNode> alive;
         jahshaka::engine::NodeId owner = 0;
         QString bone;
         quint64 offsetKey = 0;
@@ -1992,6 +1997,7 @@ private:
     void takeWriteJournal();
     /// The engine's published rider tags into the document (iris::graph::setRiderTag), before the sockets resolve.
     void takePublishedRiderTags();
+    RiderState &riderState(iris::SceneNode *rider);   ///< the rider's row, its life recorded on first use
     void noteWrittenNode(iris::SceneNode *node);
     /// materialBuildCount() — reset at the top of every sync, so it reports the
     /// LAST walk rather than a running total.
