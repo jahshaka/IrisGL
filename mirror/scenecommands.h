@@ -47,12 +47,26 @@ inline unsigned long long newToken()
     return next.fetch_add(1, std::memory_order_relaxed);
 }
 
-/// A member call with its arguments COPIED now (a message owns what it carries; a pointer argument is not this).
+/// A member call as a message's body, its answer the call's own (decision 34: a refusal is its message's): a bool
+/// call answers itself, a call that returns an id answers "not 0", a void call is accepted. The arguments are COPIED
+/// now (a message owns what it carries; a pointer argument is not this).
+template <class Fn, class... A>
+std::function<bool(Scene &)> bindCall(Fn fn, A &&...args)
+{
+    return [fn, tup = std::make_tuple(std::decay_t<A>(std::forward<A>(args))...)](Scene &s) mutable {
+        return std::apply([&](auto &...a) -> bool {
+            using R = decltype((s.*fn)(a...));
+            if constexpr (std::is_void_v<R>) { (s.*fn)(a...); return true; }
+            else if constexpr (std::is_same_v<R, bool>) return (s.*fn)(a...);
+            else return (s.*fn)(a...) != R{};
+        }, tup);
+    };
+}
+/// The member call as an unnamed message: a refusal comes back as a token-0 completion.
 template <class Fn, class... A>
 void call(Scene *scene, Fn fn, A &&...args)
 {
-    post(scene, std::function<void(Scene &)>([fn, tup = std::make_tuple(std::decay_t<A>(std::forward<A>(args))...)](
-                                                 Scene &s) mutable { std::apply([&](auto &...a) { (s.*fn)(a...); }, tup); }));
+    post(scene, bindCall(fn, std::forward<A>(args)...));
 }
 
 inline jahshaka::engine::NodeId newNode(Scene *scene, jahshaka::engine::NodeId parent = 0)

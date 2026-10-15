@@ -1399,11 +1399,18 @@ public:   // the sync's bracket (scenemirror.cpp's StructureEditScope)
     }
 private:
     unsigned long long mCompletionSeqSeen = 0;
-    QHash<unsigned long long, std::function<void(const std::string &)>> mOnRefused;
+    using Answer = std::function<void(bool ok, const std::string &why)>;
+    QHash<unsigned long long, Answer> mOnAnswer;
     void post(std::function<void(jahshaka::engine::Scene &)> fn);
-    /// A command whose REFUSAL the mirror must answer (a rig the engine would not bind): its completion comes back in
-    /// the snapshot (Scene::published().completions) and `onRefused` runs at the next sync that reads it.
+    /// A command whose ANSWER the mirror must act on (decision 34): its completion comes back in the snapshot
+    /// (Scene::published().completions) and `onAnswer` runs at the next sync that reads it — accepted or refused.
+    void postAnswered(std::function<bool(jahshaka::engine::Scene &)> fn, Answer onAnswer);
+    /// ...the same, acting on a refusal only (a rig the engine would not bind, a node id still taken).
     void postChecked(std::function<bool(jahshaka::engine::Scene &)> fn, std::function<void(const std::string &)> onRefused);
+    /// THE REFUSAL OF AN ENTRY'S COMMAND (decision 34): the latch the walk set when it posted is handed back by
+    /// `reset` and the node marked, so the next sync tries again — what a refused direct call did on the spot.
+    std::function<void(const std::string &)> entryRefusal(iris::SceneNode *node, const char *what,
+                                                          std::function<void(Entry &)> reset, bool retry = true);
     void takeCompletions();
     void postTransform(jahshaka::engine::NodeId node, const iris::Mat4 &world);
     jahshaka::engine::NodeId newNode(jahshaka::engine::NodeId parent = 0) { notePost(); return scenecmd::newNode(mTarget, parent); }
@@ -1440,13 +1447,13 @@ private:
         notePost();
         return scenecmd::newDecalTexture(mTarget, path, kind);
     }
-    /// A command whose answer the walk used to branch on: posted, and taken as accepted — the engine's refusal (an
-    /// unknown id, a data check) reaches the frame's errors (PublishedEngineFrame::frameErrors) instead, and the
-    /// mirror's next look at the snapshot (the facts, the rigs) is what it trusts.
+    /// A command whose answer the walk used to branch on: posted and taken as accepted (the walk latches what it
+    /// pushed), its COMPLETION read at the next sync — a refusal runs `onRefused`, which hands the latch back
+    /// (decision 34; entryRefusal for an entry's).
     template <class Fn, class... A>
-    bool postOk(Fn fn, A &&...args)
+    bool postOk(std::function<void(const std::string &)> onRefused, Fn fn, A &&...args)
     {
-        postCall(fn, std::forward<A>(args)...);
+        postChecked(scenecmd::bindCall(fn, std::forward<A>(args)...), std::move(onRefused));
         return true;
     }
     template <class Fn, class... A>

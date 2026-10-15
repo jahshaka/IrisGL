@@ -606,30 +606,58 @@ void SceneMirror::post(std::function<void(jahshaka::engine::Scene &)> fn)
     scenecmd::post(mTarget, std::move(fn));
 }
 
-void SceneMirror::postChecked(std::function<bool(jahshaka::engine::Scene &)> fn,
-                              std::function<void(const std::string &)> onRefused)
+void SceneMirror::postAnswered(std::function<bool(jahshaka::engine::Scene &)> fn, Answer onAnswer)
 {
     notePost();
     const unsigned long long token = scenecmd::newToken();
-    mOnRefused.insert(token, std::move(onRefused));
+    mOnAnswer.insert(token, std::move(onAnswer));
     scenecmd::post(mTarget, std::move(fn), token);
+}
+
+void SceneMirror::postChecked(std::function<bool(jahshaka::engine::Scene &)> fn,
+                              std::function<void(const std::string &)> onRefused)
+{
+    postAnswered(std::move(fn), [r = std::move(onRefused)](bool ok, const std::string &why) {
+        if (!ok && r) r(why);
+    });
+}
+
+std::function<void(const std::string &)> SceneMirror::entryRefusal(iris::SceneNode *node, const char *what,
+                                                                   std::function<void(Entry &)> reset, bool retry)
+{
+    const auto it = mEntries.constFind(node);
+    const jahshaka::engine::NodeId id = it != mEntries.cend() ? it->node : 0;
+    return [this, key = node, alive = QWeakPointer<iris::SceneNode>(node->sharedFromThis()), id, what, retry,
+            reset = std::move(reset)](const std::string &why) {
+        if (alive.isNull()) return;
+        const auto e = mEntries.find(key);
+        if (e == mEntries.end() || e->node != id) return;   // released or re-adopted since: nothing of ours to hand back
+        qWarning("SceneMirror: the engine refused the %s of '%s' (%s)%s", what, qUtf8Printable(key->getName()),
+                 why.c_str(), retry ? "; retried at the next sync" : "");
+        if (reset) reset(*e);
+        if (retry) key->markChanged(iris::NodeChange::Content);
+    };
 }
 
 // THE COMPLETIONS, READ AT THE TOP OF A SYNC (U3 stage 3): every named message the engine answered since the last
 // look — a refusal runs its answer (the walk then does what it used to do on the spot, one frame later).
 void SceneMirror::takeCompletions()
 {
-    if (mOnRefused.isEmpty() || !mTarget) return;
+    if (!mTarget) return;
     const auto &list = mTarget->published().completions;
     if (!list) return;
     for (const jahshaka::engine::PublishedFrame::Completion &c : *list) {
         if (c.seq <= mCompletionSeqSeen) continue;
         mCompletionSeqSeen = c.seq;
-        const auto it = mOnRefused.find(c.token);
-        if (it == mOnRefused.end()) continue;
-        const std::function<void(const std::string &)> answer = it.value();
-        mOnRefused.erase(it);
-        if (!c.ok && answer) answer(c.error);
+        if (!c.token) {   // an unnamed command's refusal (an overlay's, a fire-and-forget push): said, once
+            qWarning("SceneMirror: the engine refused a command (%s)", c.error.c_str());
+            continue;
+        }
+        const auto it = mOnAnswer.find(c.token);
+        if (it == mOnAnswer.end()) continue;
+        const Answer answer = std::move(it.value());
+        mOnAnswer.erase(it);
+        if (answer) answer(c.ok, c.error);
     }
 }
 
@@ -1529,7 +1557,8 @@ void SceneMirror::syncSunAtmosphere()
     const LightDesc want = toLightDesc(mSyncSun, mSyncSun, true,
                                        atmosphereTintFor(mSyncSun, mSyncSun), mSunExposureGain);
     if (want == it->lastLight) return;            // the still case, every frame
-    if (postOk(&jahshaka::engine::Scene::setLight, it->node, want)) {
+    if (postOk(entryRefusal(mSyncSun, "sun tint", [](Entry &x) { x.lastLight = LightDesc(); }),
+               &jahshaka::engine::Scene::setLight, it->node, want)) {
         notePush(mSyncSun, "sun atmosphere tint");
         it->hasLight = true;
         it->lastLight = want;
@@ -1822,7 +1851,11 @@ void SceneMirror::syncHighlight()
         if (!shellMat) continue;
         if (s.mesh != m || s.wireframe != mHighlightWireframe || s.skinned != skinned
             || s.master != master || s.primary != primary) {
-            if (postOk(&jahshaka::engine::Scene::attachMesh, s.node, m, shellMat)) {
+            const auto shellRefused = [this, shell = s.node](const std::string &why) {
+                qWarning("SceneMirror: the engine refused a selection shell (%s)", why.c_str());
+                for (HighlightShell &h : mHighlightShells) if (h.node == shell) h.mesh = 0;   // re-attached next sync
+            };
+            if (postOk(shellRefused, &jahshaka::engine::Scene::attachMesh, s.node, m, shellMat)) {
                 s.mesh = m;
                 s.wireframe = mHighlightWireframe;
                 s.skinned = skinned;
@@ -2303,7 +2336,11 @@ void SceneMirror::syncGroundPlane()
     if (!mGroundPlaneMaterial) {
         iris::Material *doc = mGroundPlaneDoc.data();
         const MaterialId mat = materialFor(doc);
-        if (!mat || !postOk(&jahshaka::engine::Scene::attachMesh, mGroundPlaneNode, mGroundPlaneMesh, mat)) return;
+        const auto planeRefused = [this](const std::string &why) {
+            qWarning("SceneMirror: the engine refused the ground plane (%s)", why.c_str());
+            mGroundPlaneMaterial = 0;   // attached again at the next sync
+        };
+        if (!mat || !postOk(planeRefused, &jahshaka::engine::Scene::attachMesh, mGroundPlaneNode, mGroundPlaneMesh, mat)) return;
         mGroundPlaneMaterial = mat;
         // ITS MAPS, bound here: an entry binds its material's textures in its
         // own visit (syncTextures), and the plane is not an entry.
@@ -2313,7 +2350,7 @@ void SceneMirror::syncGroundPlane()
             for (const TextureBind &b : ms.binds) {
                 const TextureId t = b.slot == PbrTextureSlot::Reflection ? reflectionCubeFor(b.path)
                                                                          : textureFor(b.path, b.srgb);
-                if (t && postOk(&jahshaka::engine::Scene::setPbrTexture, mat, b.slot, t)) mGroundPlaneTextures.push_back(t);
+                if (t && postOk(planeRefused, &jahshaka::engine::Scene::setPbrTexture, mat, b.slot, t)) mGroundPlaneTextures.push_back(t);
             }
         }
         mReclaimPending = true;
@@ -3031,7 +3068,8 @@ void SceneMirror::pushWireColour(Entry &e, const Colour &c)
 {
     if (!e.wireMaterial) return;
     if (e.wireColourPushed && e.wireColour == c) return;
-    if (postOk(&jahshaka::engine::Scene::setUnlitMaterial, e.wireMaterial, c)) {
+    if (postOk(entryRefusal(e.docNode, "wire colour", [](Entry &x) { x.wireColourPushed = false; }),
+               &jahshaka::engine::Scene::setUnlitMaterial, e.wireMaterial, c)) {
         notePush(e.docNode, "wire colour");
         e.wireColour = c;
         e.wireColourPushed = true;
@@ -3098,7 +3136,13 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
     if (!m) return;
     if (!e.wireMaterial) e.wireMaterial = newUnlitMaterial(Colour(1, 1, 1), false);
     if (!e.wireMaterial) return;
-    if (e.wireKind != shape) { if (postOk(&jahshaka::engine::Scene::attachMesh, e.wireNode, m, e.wireMaterial)) { e.wireKind = shape; notePush(light, "wire shape"); } }
+    if (e.wireKind != shape) {
+        if (postOk(entryRefusal(light, "light wire", [](Entry &x) { x.wireKind = -2; }),
+                   &jahshaka::engine::Scene::attachMesh, e.wireNode, m, e.wireMaterial)) {
+            e.wireKind = shape;
+            notePush(light, "wire shape");
+        }
+    }
     const QColor c = light->color;
     // On change only, like every other push here: setUnlitMaterial schedules a
     // const-buffer update, and a light's colour is edited by hand, not animated.
@@ -3175,7 +3219,8 @@ void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
         }
     }
     if (!e.hasIcon || e.iconSignature != path) {
-        if (!postOk(&jahshaka::engine::Scene::createBillboardSet, e.wireNode, iconTextureFor(path), false, 1,
+        if (!postOk(entryRefusal(light, "light icon", [](Entry &x) { x.hasIcon = false; }),
+                    &jahshaka::engine::Scene::createBillboardSet, e.wireNode, iconTextureFor(path), false, 1,
                                          jahshaka::engine::BillboardLayer::Overlay))
             return;
         e.hasIcon = true;
@@ -3610,7 +3655,9 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                 e.characterHost = nullptr;
                 m = meshFor(mesh);
             }
-            if (!attached && m && mat) attached = postOk(&jahshaka::engine::Scene::attachMesh, e.node, m, mat);
+            if (!attached && m && mat)
+                attached = postOk(entryRefusal(node, "mesh attach", [](Entry &x) { x.hasMesh = false; }),
+                                  &jahshaka::engine::Scene::attachMesh, e.node, m, mat);
             if (attached) {
                 notePush(node, "mesh attach");
                 ++mMeshAttaches;
@@ -3685,7 +3732,12 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                     // THE MODEL IN FORCE IS THE MIRROR'S OWN RECORD (ENGINE-UPGRADE-U3 stage 2: the host keeps
                     // what it set — the material's family at its creation, then every switch the engine accepted).
                     if (materialModelOf(e.material) != ms.pbr.shadingModel &&
-                        postOk(&jahshaka::engine::Scene::setShadingModel, e.material, ms.pbr.shadingModel)) {
+                        postOk([this, mid = e.material, was = materialModelOf(e.material)](const std::string &why) {
+                                   qWarning("SceneMirror: the engine refused a shading-model switch (%s)", why.c_str());
+                                   mMaterialModels.insert(mid, was);   // the record says what the engine holds
+                                   for (MaterialSync &m : mMaterialSync) if (m.pushedTo == mid) m.pushed = false;
+                               },
+                               &jahshaka::engine::Scene::setShadingModel, e.material, ms.pbr.shadingModel)) {
                         mMaterialModels.insert(e.material, ms.pbr.shadingModel);
                         notePush(node, "shading model");
                     }
@@ -3698,7 +3750,11 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                 MaterialSync &push = const_cast<MaterialSync &>(ms);
                 if (!push.pushed || push.pushedTo != e.material
                     || push.pushedFingerprint != ms.fingerprint) {
-                    if (postOk(&jahshaka::engine::Scene::setPbrMaterial, e.material, ms.pbr)) {
+                    if (postOk([this, mid = e.material](const std::string &why) {
+                                   qWarning("SceneMirror: the engine refused a material's parameters (%s)", why.c_str());
+                                   for (MaterialSync &m : mMaterialSync) if (m.pushedTo == mid) m.pushed = false;
+                               },
+                               &jahshaka::engine::Scene::setPbrMaterial, e.material, ms.pbr)) {
                         notePush(node, "pbr params");
                         push.pushedTo = e.material;
                         push.pushedFingerprint = ms.fingerprint;
@@ -3730,13 +3786,19 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
             return m == jahshaka::engine::ShadingModel::Unlit ? 1 : m == jahshaka::engine::ShadingModel::Distortion ? 2 : 0;
         };
         const bool crosses = pendingSwapFrom && familyOf(materialModelOf(pendingSwapFrom)) != familyOf(materialModelOf(pendingSwap));
-        post([n = e.node, mesh = e.mesh, mat = pendingSwap, crosses](jahshaka::engine::Scene &s) {
-            if ((crosses || !s.setNodeMaterial(n, mat)) && mesh) s.attachMesh(n, mesh, mat);
-        });
+        // THE COUNTERS COUNT THE ANSWER (decision 34): a swap the engine took is a swap; one it refused was answered
+        // by the re-attach inside the same message (the frame shows the new material either way) and counts as one.
         if (!crosses) {
             notePush(node, "material swap");
-            ++mMaterialSwaps;
+            postAnswered([n = e.node, mesh = e.mesh, mat = pendingSwap](jahshaka::engine::Scene &s) {
+                if (s.setNodeMaterial(n, mat)) return true;
+                if (mesh) s.attachMesh(n, mesh, mat);
+                return false;
+            }, [this](bool swapped, const std::string &) {
+                if (swapped) ++mMaterialSwaps; else ++mMeshAttaches;
+            });
         } else if (e.mesh) {
+            postCall(&jahshaka::engine::Scene::attachMesh, e.node, e.mesh, pendingSwap);
             notePush(node, "mesh attach");
             ++mMeshAttaches;
         }
@@ -3833,7 +3895,8 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
             // setLight reads is in it, which is what keeps a new field from
             // silently stopping at the first push).
             if (!e.lightPushed || want != e.lastLight) {
-                if (postOk(&jahshaka::engine::Scene::setLight, e.node, want)) {
+                if (postOk(entryRefusal(node, "light", [](Entry &x) { x.lightPushed = false; }),
+                           &jahshaka::engine::Scene::setLight, e.node, want)) {
                     notePush(node, "light");
                     e.hasLight = true;
                     e.lastLight = want;
@@ -4353,7 +4416,8 @@ void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
     // whose texture cannot be resolved is left with no texture rather than
     // silently keeping a stale one.
     const TextureId tex = texPath.isEmpty() ? 0 : textureFor(texPath, true);
-    if (postOk(&jahshaka::engine::Scene::setParticleSystem, e.node, toParticleDesc(ps, tex))) {
+    if (postOk(entryRefusal(ps, "particle system", [](Entry &x) { x.hasParticles = false; x.particleSignature = 0; }),
+               &jahshaka::engine::Scene::setParticleSystem, e.node, toParticleDesc(ps, tex))) {
         notePush(ps, "particles");
         e.hasParticles = true;
         e.particleSignature = sig;
@@ -5099,7 +5163,8 @@ void SceneMirror::syncTextures(Entry &e, const MaterialSync &ms)
         if (bound[int(b.slot)]) continue;
         TextureId t = b.slot == PbrTextureSlot::Reflection ? reflectionCubeFor(b.path)
                                                            : textureFor(b.path, b.srgb);
-        if (t && postOk(&jahshaka::engine::Scene::setPbrTexture, e.material, b.slot, t)) {
+        if (t && postOk(entryRefusal(e.docNode, "texture bind", [](Entry &x) { x.texturesPushed = false; }),
+                        &jahshaka::engine::Scene::setPbrTexture, e.material, b.slot, t)) {
             bound[int(b.slot)] = true;
             boundIds[int(b.slot)] = t;
         }
@@ -5471,7 +5536,8 @@ void SceneMirror::syncDecal(Entry &e, iris::DecalNode *decal)
        << d.width << d.height << d.depth << d.metalness << d.roughness
        << quint32(d.ignoreAlphaDiffuse ? 1 : 0);
     if (!e.hasDecal || e.decalPushKey != dk.h) {
-        if (postOk(&jahshaka::engine::Scene::setDecal, e.node, d)) {
+        if (postOk(entryRefusal(decal, "decal", [](Entry &x) { x.hasDecal = false; x.decalPushKey = 0; }),
+                   &jahshaka::engine::Scene::setDecal, e.node, d)) {
             notePush(decal, "decal");
             e.hasDecal = true;
             e.decalPushKey = dk.h;
@@ -5507,7 +5573,11 @@ void SceneMirror::syncDecalWires(Entry &e, iris::DecalNode *decal)
     if (!m) return;
     if (!e.wireMaterial) e.wireMaterial = newUnlitMaterial(Colour(1, 1, 1), false);
     if (!e.wireMaterial) return;
-    if (e.wireKind != 4) { if (postOk(&jahshaka::engine::Scene::attachMesh, e.wireNode, m, e.wireMaterial)) e.wireKind = 4; }
+    if (e.wireKind != 4) {
+        if (postOk(entryRefusal(decal, "decal wire", [](Entry &x) { x.wireKind = -2; }),
+                   &jahshaka::engine::Scene::attachMesh, e.wireNode, m, e.wireMaterial))
+            e.wireKind = 4;
+    }
     // Amber when the decal projects, dim grey when it has no usable image —
     // the difference between "placed" and "placed but blank" has to be visible.
     pushWireColour(e, e.hasDecal ? Colour(1.0f, 0.75f, 0.2f, 1.0f)
@@ -6315,12 +6385,14 @@ void SceneMirror::attachClipsFor(Entry &e)
     // playing node goes stale every one of them. Nothing is enabled yet at this
     // point (the state push below is what enables), so one batched call is all
     // that is needed — and the engine refuses the alternative anyway.
-    // (A MESSAGE, U3 stage 3: a refusal reaches the frame's errors, and the facts carry what the node really holds —
-    // the next attachClipsFor reads them.)
-    post([node = e.node, descs](jahshaka::engine::Scene &s) {
-        if (!s.attachClips(node, descs.data(), descs.size()))
-            qWarning("SceneMirror: attachClips failed for a skinned node; it will render at bind pose");
-    });
+    // (A MESSAGE, U3 stage 3; its REFUSAL is its completion, decision 34: the mirror's clip maps are emptied as the
+    // direct call's refusal did — the node renders at bind pose and no clip state is pushed for clips it lacks.)
+    postChecked([node = e.node, descs](jahshaka::engine::Scene &s) { return s.attachClips(node, descs.data(), descs.size()); },
+                entryRefusal(e.docNode, "clip attach", [](Entry &x) {
+                    x.clipMap.clear();
+                    x.clipIdMap.clear();
+                    x.clipNameMap.clear();
+                }, false));
     // Whatever the engine appended, in the order it was pushed, is the mapping
     // for the clips that were NOT already there. Names it already knew keep
     // their existing mapping.
@@ -6677,7 +6749,20 @@ int SceneMirror::reconcileSockets()
                 // socket API's promise — by construction (the store owns it);
                 // the flag, set BEFORE the tag, makes its world the engine's.
                 iris::graph::setSocketRider(rider->docNode(), true);
-                if (!postOk(&jahshaka::engine::Scene::attachToBone, riderId, ownerId, socket->boneName.toStdString(),
+                const auto armRefused = [this, key = rider, alive = QWeakPointer<iris::SceneNode>(rider->sharedFromThis()),
+                                         ownerId](const std::string &why) {
+                    if (alive.isNull()) return;
+                    const auto st = mBoneRiders.find(key);
+                    if (st == mBoneRiders.end() || st->owner != ownerId) return;
+                    qWarning("SceneMirror: the engine refused a socket arm (%s)", why.c_str());
+                    // The refused arm's own answer, one sync later (the row survives; the claim does not).
+                    iris::graph::setSocketRider(key->docNode(), false);
+                    st->owner = 0;
+                    st->bone.clear();
+                    st->offsetKey = 0;
+                    ++mSocketDangling;
+                };
+                if (!postOk(armRefused, &jahshaka::engine::Scene::attachToBone, riderId, ownerId, socket->boneName.toStdString(),
                                            toVec3(socket->position), toQuat(socket->rotation),
                                            toVec3(socket->scale))) {
                     iris::graph::setSocketRider(rider->docNode(), false);
@@ -6933,7 +7018,8 @@ void SceneMirror::syncSkeletonSharing()
             const bool eligible = e->shareEligible;
             const bool shared = mTarget->published().factsBlock().sharesSkeleton(e->node);
             if (eligible && (!shared || e->shareMaster != master->node)) {
-                if (postOk(&jahshaka::engine::Scene::shareSkeleton, e->node, master->node)) {
+                if (postOk(entryRefusal(e->docNode, "skeleton share", [](Entry &x) { x.shareMaster = 0; }),
+                           &jahshaka::engine::Scene::shareSkeleton, e->node, master->node)) {
                     e->shareMaster = master->node;
                     // A follower holds NO clips (the engine drops them when the
                     // instance goes): forget what we think it has, so that if it

@@ -642,6 +642,12 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     // THE FACTS (U3 stage 3): the same block every frame until a mutation site says a fact moved.
     if (mFactsDirty || !mFacts || mFacts->reflectorArms != mPlanarArms) rebuildFacts();
     back.facts = mFacts;
+    // THE WINDOW IS FRAMES (decision 34): what the drains of the last kCompletionFrames frames answered.
+    while (!mCompletions.empty() && mCompletions.front().frame + PublishedFrame::kCompletionFrames <= frame) {
+        mCompletions.pop_front();
+        mCompletionsDirty = true;
+    }
+    mCompletionFrame = frame + 1;   // the next drain's answers belong to the next published frame
     if (mCompletionsDirty || !mCompletionsPublished) {
         mCompletionsPublished = std::make_shared<std::vector<PublishedFrame::Completion>>(mCompletions.begin(),
                                                                                           mCompletions.end());
@@ -1368,8 +1374,7 @@ void OgreScene::recountNode(Node &n) {
 void OgreScene::uncountNode(Node &n) { applyCounted(n, Node::Counted()); }
 
 void OgreScene::noteCompletion(unsigned long long token, bool ok, std::string error) {
-    mCompletions.push_back({++mCompletionSeq, token, ok, std::move(error)});
-    while (mCompletions.size() > PublishedFrame::kCompletionsKept) mCompletions.pop_front();
+    mCompletions.push_back({++mCompletionSeq, token, ok, std::move(error), mCompletionFrame});
     mCompletionsDirty = true;
 }
 

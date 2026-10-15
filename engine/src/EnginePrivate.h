@@ -6199,10 +6199,11 @@ private:
     std::map<NodeId, NodeId>    mShareSources;   ///< follower -> source, kept by applyCounted
     /// THE FACTS BLOCK (U3 stage 3, decision 13): rebuilt at the publish only when a mutation site raised the flag.
     bool                                        mFactsDirty = true;
-    /// THE NAMED MESSAGES' COMPLETIONS (U3 stage 3): kept to PublishedFrame::kCompletionsKept, republished on change.
+    /// THE NAMED MESSAGES' COMPLETIONS (U3 stage 3): the last PublishedFrame::kCompletionFrames frames, republished on change.
     std::deque<PublishedFrame::Completion>      mCompletions;
     unsigned long long                          mCompletionSeq = 0;
     bool                                        mCompletionsDirty = false;
+    unsigned long long                          mCompletionFrame = 1;   ///< the frame the next drain's answers carry
     std::shared_ptr<const std::vector<PublishedFrame::Completion>> mCompletionsPublished;
 public:
     void noteCompletion(unsigned long long token, bool ok, std::string error);

@@ -8046,6 +8046,7 @@ struct FrameInputStatus {
     // ---- the structural messages (ENGINE-UPGRADE-U3 stage 3) ----
     unsigned           messages = 0;            ///< structural messages the LAST drain applied, over every scene
     unsigned long long messagesTotal = 0;       ///< ...ever
+    unsigned long long messagesRefused = 0;     ///< ...ever refused (each one a completion of its own, decision 34)
     unsigned long long nodeRecordsTotal = 0;    ///< ...ever
     double             drainMicros = 0.0;       ///< what the LAST drain cost (the record's own overhead)
 };
@@ -8171,15 +8172,19 @@ struct PublishedFrame {
         }
     };
     std::shared_ptr<const Facts> facts;
-    /// THE COMPLETIONS OF THE NAMED MESSAGES (SceneMessage::token, U3 stage 3): the last kCompletionsKept, by a
-    /// sequence that only grows — a host remembers the last it read, so frames rendered between its looks lose none.
+    /// THE COMPLETIONS (U3 stage 3; decision 34): every NAMED message's answer (SceneMessage::token, accepted or
+    /// refused) and every REFUSAL of an unnamed one (token 0) — a refusal belongs to the message that caused it,
+    /// never to the frame's error string. Kept for the last kCompletionFrames published frames (the frame-error
+    /// list's span; never an entry count, so an adopting sync of any size loses none), by a sequence that only
+    /// grows — a host remembers the last it read.
     struct Completion {
         unsigned long long seq = 0;
         unsigned long long token = 0;
         bool               ok = true;
         std::string        error;   ///< the engine's reason when refused
+        unsigned long long frame = 0;   ///< the published frame whose drain answered it
     };
-    static constexpr size_t kCompletionsKept = 1024;
+    static constexpr unsigned kCompletionFrames = 16;
     std::shared_ptr<const std::vector<Completion>> completions;
     const Facts &factsBlock() const {
         static const Facts kNone;

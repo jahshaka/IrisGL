@@ -2462,11 +2462,18 @@ void applyIfChanged(const std::optional<T> &want, std::optional<T> &last, unsign
 void OgreEngine::applySceneStream(OgreScene *sc, const std::vector<SceneMessage> &messages,
                                   const std::vector<NodeRecord> &nodes,
                                   unsigned long long stepSerial) {
+    // A REFUSAL IS ITS MESSAGE'S (decision 34): a named message is answered either way, an unnamed one when refused
+    // (token 0); the call's reason goes into the answer and the engine's error string is handed back as it was, so
+    // the frame's error stays the frame's own fault.
     for (const SceneMessage &m : messages) {
         if (!m.apply) continue;
         const std::string before = mLastError;
         const bool ok = m.apply(*sc);
-        if (m.token) sc->noteCompletion(m.token, ok, ok || mLastError == before ? std::string() : mLastError);
+        if (!ok) ++mFrameInputStatus.messagesRefused;
+        if (m.token || !ok)
+            sc->noteCompletion(m.token, ok, ok ? std::string()
+                                               : mLastError != before ? mLastError : std::string("refused"));
+        mLastError = before;
     }
     mFrameInputStatus.messages += unsigned(messages.size());
     mFrameInputStatus.messagesTotal += messages.size();
