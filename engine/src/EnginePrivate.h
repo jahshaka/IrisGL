@@ -3882,7 +3882,7 @@ public:
 
     // ---- Hierarchy and transforms ----
     NodeId createNode(NodeId parent) override;
-    NodeId createDocumentNode(NodeId parent) override;
+    NodeId createDocumentNode(NodeId id, NodeId parent) override;
     const PublishedFrame &published() const override {
         return mPublished[mPublishedIdx.load(std::memory_order_acquire)];
     }
@@ -5571,7 +5571,8 @@ public:
     Ogre::SceneNode *node(NodeId id) const;
 private:
     /// Ids are monotonic per scene and never reused.
-    NodeId track(const Node &n);
+    NodeId track(const Node &n, NodeId id);   ///< the node under the id it is given (reserved: never 0, never taken)
+
 
 
     Ogre::Root         *mRoot;
@@ -5757,6 +5758,10 @@ public:
     };
     bool gpuSlotView(uint32_t slot, GpuSlotView &out) const;
     bool gpuNodeView(uint32_t node, GpuSlotView &out) const;
+    /// THE GPU'S NODE KEY (U3 stage 3, F6): Ogre's own 32-bit IdType of the node's SceneNode, never the 64-bit id —
+    /// what GpuInstance::ids[0], the skin rows, the substrate's names and the slot views carry; and back to the id.
+    static uint32_t gpuKeyOf(const Node &n) { return uint32_t(n.ogreId); }
+    NodeId nodeOfGpuKey(uint32_t key) const;
     /// The node's slot is re-composed by the next compose (no-op for a node with no Item).
     void markGpuNodeDirty(uint32_t node);
     /// What the ray structures are current against: the caster epoch (a transform, a
@@ -6260,7 +6265,6 @@ private:
     bool                mHelperOverlayQueueReady = false;
     Ogre::MovableObject *mQueueDepthAnchor = nullptr;
     TextureId           mNextTextureId = 0;
-    NodeId              mNextId = 0;
     MeshId              mNextMeshId = 0;
     MaterialId          mNextMaterialId = 0;
     /// How many times guardSamplerCeiling has had to step off a full block, and

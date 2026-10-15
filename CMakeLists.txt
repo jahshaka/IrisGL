@@ -554,6 +554,9 @@ target_include_directories(IrisGL PRIVATE
     "${PROJECT_BINARY_DIR}/thirdparty/assimp/include/"
     "${PROJECT_SOURCE_DIR}/thirdparty/assimp/include/"
 )
+# THE ONE NODE-ID SPACE (ENGINE-UPGRADE-U3 stage 3, F6): the document takes its node ids from the engine's Ogre-free
+# Types.h (reserveNodeId), the counter every Scene::createNode draws from too. PRIVATE, and Types.h only.
+target_include_directories(IrisGL PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
 
 target_link_libraries (IrisGL PUBLIC zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent)
 target_link_libraries (IrisGL PRIVATE assimp)

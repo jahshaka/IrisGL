@@ -9,6 +9,7 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
+#include "jahshaka/engine/Types.h"   // reserveNodeId (U3 stage 3)
 #include "core/math/trs.h"
 #include "core/math/qtinterop.h"
 #include "core/math/mat4.h"
@@ -40,9 +41,8 @@ For more information see the LICENSE file
 namespace iris
 {
 
-/// The node-id counter. Relaxed ordering is enough: the only requirement is
-/// that no two calls return the same value, not that ids order anything.
-static std::atomic<qint64> sNextNodeId{0};
+// THE NODE-ID COUNTER IS THE ENGINE'S (ENGINE-UPGRADE-U3 stage 3, F6): one process-wide space, 1-based (0 = none),
+// shared with every Scene::createNode — so a document node's id IS its engine node's id (jahshaka::engine::NodeId).
 
 SceneNode::SceneNode()
 {
@@ -964,7 +964,7 @@ void SceneNode::removeFromScene()
 
 qint64 SceneNode::generateNodeId()
 {
-    return sNextNodeId.fetch_add(1, std::memory_order_relaxed);
+    return qint64(jahshaka::engine::reserveNodeId());
 }
 
 void SceneNode::setGlobalPos(iris::Vec3 pos)

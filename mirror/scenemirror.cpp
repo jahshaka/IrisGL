@@ -3269,7 +3269,8 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
         if (pit != mEntries.cend()) parentId = pit->node;
     }
     if (!e.node) {
-        e.node = mTarget->createDocumentNode(parentId);
+        // ONE ID SPACE (U3 stage 3, F6): the engine node takes the document node's own id.
+        e.node = mTarget->createDocumentNode(jahshaka::engine::NodeId(node->nodeId), parentId);
         if (!e.node) { out.descend = false; return out; }
         e.parentPushed = parentId;
         e.staticPushed = node->isStaticInGraph() ? 1 : 0;

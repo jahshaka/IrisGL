@@ -1,6 +1,7 @@
 #pragma once
 // Engine-neutral value types. NOTHING here may reference Ogre, Qt or GL.
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -2308,9 +2309,19 @@ using NativeWindowHandle = unsigned long long;
 /// no behaviour difference. Recorded, deliberately not smuggled in.
 using NativeDisplayHandle = unsigned long long;
 
-/// Opaque handle to something in a Scene. 0 is "none". Ids are per-Scene and
-/// monotonic: a removed node's id is NEVER reused, so a stale id is harmless.
-using NodeId = unsigned int;
+/// A node's id: THE DOCUMENT'S, ONE PROCESS-WIDE SPACE (ENGINE-UPGRADE-U3 stage 3, F6): 64 bits, 1-based (0 is
+/// "none"), never reused, so a stale id is harmless. reserveNodeId() hands out the next one — to the document
+/// (iris::SceneNode), to the mirror's own helper nodes and to every Scene::createNode alike, so the record can name a
+/// node before the engine built it and no two scenes' ids collide. The GPU's 32-bit node key is Ogre's own IdType
+/// (OgreScene's gpuKeyOf), never this.
+using NodeId = unsigned long long;
+/// One counter for the process: a function-local static of an inline function is ONE object across the shared
+/// libraries and the executable (GCC's unique-object binding on ELF; a coalesced weak definition on Mach-O).
+inline NodeId reserveNodeId()
+{
+    static std::atomic<NodeId> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
 
 // ---- Global illumination (scene-level; SPECS/PHOTON_SPEC.md is the live
 // ---- program doc — GI_SPEC.md and GI_UNIFIED_SPEC.md are its earlier specs,
@@ -8629,7 +8640,7 @@ struct GpuSceneEntry {
     /// (the traced set), 256 drag mover, 512 ATOM (the visibility buffer's id pass
     /// draws it and the decode shades it — AtomDrawStatus).
     unsigned flags = 0u;
-    unsigned nodeId = 0u;
+    NodeId   nodeId = 0u;      ///< the slot's node (the GPU holds Ogre's key for it; read back to the node's id)
     unsigned lightMask = 0u;
     /// THE RAY LEVEL (`GpuInstance.ids.w`, ATOM P3's AT-A8r): the mesh level
     /// this instance's NEAR bottom-level structure is built from at its

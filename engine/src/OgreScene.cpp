@@ -449,12 +449,15 @@ NodeId OgreScene::createNode(NodeId parent) {
         // have to ask the registry about every child to find out.
         if (prec) ++prec->ownedChildren;
         Node rec; rec.node = p->createChildSceneNode(Ogre::SCENE_DYNAMIC);
-        return track(rec);
+        return track(rec, reserveNodeId());   // the one process-wide id space (U3 stage 3, F6)
     } JAH_CATCH(mError, 0);
 }
 
-NodeId OgreScene::createDocumentNode(NodeId parent) {
+NodeId OgreScene::createDocumentNode(NodeId id, NodeId parent) {
     JAH_TRY {
+        // THE DOCUMENT'S OWN ID (U3 stage 3, F6): the record names the node by it, before and after it exists here.
+        if (!id) { mError = "createDocumentNode: no id (the document reserves one: reserveNodeId)"; return 0; }
+        if (mNodes.count(id)) { mError = "createDocumentNode: the id is already a node of this scene"; return 0; }
         Node *prec = parent ? record(parent) : nullptr;
         Ogre::SceneNode *p = prec ? prec->node : nullptr;
         if (parent && !p) { mError = "createDocumentNode: unknown parent"; return 0; }
@@ -463,7 +466,7 @@ NodeId OgreScene::createDocumentNode(NodeId parent) {
         Node rec;
         rec.node = p->createChildSceneNode(Ogre::SCENE_DYNAMIC);
         rec.document = true;
-        return track(rec);
+        return track(rec, id);
     } JAH_CATCH(mError, 0);
 }
 
@@ -2179,8 +2182,7 @@ Ogre::SceneNode *OgreScene::node(NodeId id) const {
     return it == mNodes.end() ? nullptr : it->second.node;
 }
 
-NodeId OgreScene::track(const Node &n) {
-    const NodeId id = ++mNextId;
+NodeId OgreScene::track(const Node &n, NodeId id) {
     Node &rec = mNodes[id] = n;
     rec.selfId = id;
     if (rec.node) {

@@ -988,7 +988,7 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     // (which a view with an id pass skips), everything else where its material
     // files it (renderQueueFor).
     placeAtomQueue(n, (flags & kGpuAtom) != 0u);
-    out.ids[0] = uint32_t(n.selfId);
+    out.ids[0] = gpuKeyOf(n);   // Ogre's 32-bit key, never the 64-bit id (U3 stage 3, F6)
     out.ids[1] = gpuMaterialWordFor(n, flags);
     out.ids[2] = uint32_t(n.lightMask);
     // THE RAY LEVEL (AT-A8r) travels with the entry rather than being poked
@@ -1004,7 +1004,7 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     // THE SKIN ROW (PHOTON-SKIN-1): the item's own posed geometry, when the ray
     // tier has made it one (GpuInstance::raster's note). Read from the node's
     // record in the table, so a slot re-staged for any other reason keeps it.
-    out.raster[2] = mGpuScene.skinRowOf(uint32_t(n.selfId));
+    out.raster[2] = mGpuScene.skinRowOf(gpuKeyOf(n));
     if (item->getNumSubItems()) {
         const Ogre::SubItem *sub = item->getSubItem(0);
         out.raster[0] = detail::HlmsAtom::materialWordOf(sub->getDatablock());
@@ -1281,7 +1281,7 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     std::vector<uint32_t> &named = sub.namedSlots;
     named.clear();
     if (!whole) {
-        for (uint32_t id : sub.namedNodes) {
+        for (NodeId id : sub.namedNodes) {
             auto it = mNodes.find(id);
             if (it == mNodes.end() || !it->second.item || it->second.itemSlot == size_t(-1)) continue;
             named.push_back(uint32_t(it->second.itemSlot));
@@ -1534,12 +1534,17 @@ void OgreScene::commitGpuSceneFrame() const {
 
 // ---------------------------------------------------------------------------
 // THE READ-ONLY GPU-SCENE VIEW (EnginePrivate.h): a slot's or a node's item facts.
+NodeId OgreScene::nodeOfGpuKey(uint32_t key) const {
+    auto it = mNodeByOgreId.find(Ogre::IdType(key));
+    return it == mNodeByOgreId.end() ? 0 : it->second;
+}
+
 bool OgreScene::gpuNodeView(uint32_t node, GpuSlotView &out) const {
     out = GpuSlotView();
-    auto it = mNodes.find(NodeId(node));
+    auto it = mNodes.find(nodeOfGpuKey(node));   // `node` is the GPU key (gpuKeyOf)
     if (it == mNodes.end()) return false;
     const Node &n = it->second;
-    out.node = uint32_t(n.selfId);
+    out.node = gpuKeyOf(n);
     out.item = n.item;
     out.rigGeneration = n.rigGeneration;
     out.poseSerial = n.poseEpoch;
@@ -1553,11 +1558,11 @@ bool OgreScene::gpuNodeView(uint32_t node, GpuSlotView &out) const {
 bool OgreScene::gpuSlotView(uint32_t slot, GpuSlotView &out) const {
     out = GpuSlotView();
     if (slot >= mItemNodes.size() || !mItemNodes[slot]) return false;
-    return gpuNodeView(uint32_t(mItemNodes[slot]->selfId), out);
+    return gpuNodeView(gpuKeyOf(*mItemNodes[slot]), out);
 }
 
 void OgreScene::markGpuNodeDirty(uint32_t node) {
-    auto it = mNodes.find(NodeId(node));
+    auto it = mNodes.find(nodeOfGpuKey(node));   // the GPU key
     if (it != mNodes.end()) markGpuSlotDirty(it->second);
 }
 
@@ -1721,6 +1726,7 @@ bool OgreScene::gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const {
     JAH_SYNC_GETTER("Scene::gpuSceneEntry");
     if (!mGpuScene.live() || slot >= mGpuScene.slotCapacity()) return false;
     toPublic(mGpuScene.entry(slot), out);
+    out.nodeId = nodeOfGpuKey(mGpuScene.entry(slot).ids[0]);   // the key back to the node's id
     return true;
 }
 
@@ -1738,7 +1744,10 @@ bool OgreScene::gpuSceneDeviceEntries(unsigned first, unsigned count,
     Ogre::AsyncTicketPtr ticket = mGpuScene.instanceBuffer()->readRequest(first, count);
     const detail::GpuInstance *raw = static_cast<const detail::GpuInstance *>(ticket->map());
     out.resize(count);
-    for (unsigned i = 0; i < count; ++i) toPublic(raw[i], out[i]);
+    for (unsigned i = 0; i < count; ++i) {
+        toPublic(raw[i], out[i]);
+        out[i].nodeId = nodeOfGpuKey(raw[i].ids[0]);
+    }
     ticket->unmap();
     return true;
 }
@@ -1841,7 +1850,7 @@ bool PhotonComponent::cardMoverFrame(CardMoverFrame &out) {
     const auto record = [&](uint32_t i) {
         const detail::GpuInstance &e = mirror[i];
         CardCasterRec &r = mCardCasters[i];
-        r.node = NodeId(e.ids[0]);
+        r.node = mScene.nodeOfGpuKey(e.ids[0]);
         std::memcpy(r.world, e.world, sizeof(r.world));
         r.min = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
         r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
@@ -1890,7 +1899,7 @@ bool PhotonComponent::cardMoverFrame(CardMoverFrame &out) {
     if (moved && !walk)
         for (uint32_t slot : mScene.gpuScene().movedSlots())
             if (slot < slots && (slot >= mCardCasters.size() ||
-                                 mCardCasters[slot].node != NodeId(mirror[slot].ids[0]))) {
+                                 mCardCasters[slot].node != mScene.nodeOfGpuKey(mirror[slot].ids[0]))) {
                 walk = true;
                 break;
             }
@@ -1942,7 +1951,7 @@ bool PhotonComponent::cardMoverFrame(CardMoverFrame &out) {
             const detail::GpuInstance &e = mirror[i];
             if (!moverCaster(flagsOf(e))) continue;
             CardMoverRec r;
-            r.node = NodeId(e.ids[0]);
+            r.node = mScene.nodeOfGpuKey(e.ids[0]);
             r.min = Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]);
             r.max = Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]);
             mCardMovers.push_back(r);
@@ -1961,7 +1970,7 @@ bool PhotonComponent::cardMoverFrame(CardMoverFrame &out) {
     if (moved)
         for (uint32_t slot : mScene.gpuScene().movedSlots())
             if (slot < slots && moverCaster(flagsOf(mirror[slot])))
-                out.moved.push_back(NodeId(mirror[slot].ids[0]));
+                out.moved.push_back(mScene.nodeOfGpuKey(mirror[slot].ids[0]));
     return true;
 }
 

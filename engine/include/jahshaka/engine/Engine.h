@@ -247,7 +247,7 @@ public:
     /// setNodeTransform and setNodeParent on it are REFUSED — the record is its one writer. Its document children are
     /// the document's: the visibility cascade does not descend into them (their host pushes each, parent-first).
     /// removeNode() destroys it; its children are re-parented to the scene root.
-    virtual NodeId      createDocumentNode(NodeId parent = 0) = 0;
+    virtual NodeId      createDocumentNode(NodeId id, NodeId parent = 0) = 0;   ///< `id` = the document's (reserveNodeId); refused when 0 or taken
     /// WHAT THIS SCENE PUBLISHED for the frame the engine last drew (PublishedFrame): read without asking.
     virtual const PublishedFrame &published() const = 0;
     virtual bool        setNodeParent(NodeId, NodeId parent) = 0;
