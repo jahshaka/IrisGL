@@ -7624,7 +7624,9 @@ public:
     void setShadowResolution(unsigned pixels) override;
     void setShadowMapBudget(unsigned maps) override;
     unsigned shadowMapBudget() const;   ///< the pool size in force (the drain's compare)
-    ShadowStatus shadowStatus() const override;
+    ShadowStatus shadowStatus() const;
+    void publishShadowStatus(unsigned frames) override;
+    void publishRenderStats(unsigned frames) override;
     /// THE BYTES ONE SHADOWED REFLECTION PROBE HOLDS FOR ITS SHADOW NODE
     /// (PCC-BUDGET-2): the probe node's atlas at this engine's live settings
     /// (planShadowAtlas at probeShadowResolution, the derived focused count capped
@@ -7735,7 +7737,7 @@ public:
     void attachLogBridge();
     void detachLogBridge();
 
-    bool renderStats(RenderStats &out) const override;
+    bool renderStats(RenderStats &out) const;
     bool objectCounts(ObjectCounts &out) const override;
     bool threading(EngineThreading &out) const override;
     bool memoryStats(MemoryStats &out) const override;
@@ -7998,20 +8000,21 @@ private:
     /// The view the VIEW counter rides, so it moves with the primary view
     /// instead of counting a dead workspace's passes.
     OgreView       *mShadowCounterView = nullptr;
-    /// THE COUNTERS ARE OPT-IN, AND THE OPT-IN EXPIRES (P8). A workspace
-    /// listener costs a callback per compositor pass per frame, so they run
-    /// only while somebody reads shadowStatus(): each read stamps the frame,
-    /// and kShadowPollWindowFrames frames without one detach them again. (It
-    /// used to be a latch that never cleared, so one World-panel open kept a
-    /// per-pass callback on the render path for the rest of the session.)
-    /// `mutable` because shadowStatus() is const and asking is what arms it —
-    /// the RenderStats::metricsRecording pattern.
-    static constexpr unsigned long long kShadowPollWindowFrames = 120ull;
+    /// THE COUNTERS ARE OPT-IN, FOR EXACTLY A SUBSCRIBED SPAN (P8; U3 stage 3). A workspace listener costs a callback
+    /// per compositor pass per frame, so they run only while a reader subscribes (publishShadowStatus) and come off
+    /// the render path the frame its span ends.
     unsigned long long mShadowFrame = 0;
-    mutable unsigned long long mShadowPollFrame = 0;
-    mutable bool    mShadowPolled = false;
+    /// THE SUBSCRIPTION (U3 stage 3): the last shadow frame the counters run for (0 = none) — publishShadowStatus.
+    unsigned long long mShadowLeaseUntil = 0;
+    bool shadowLeased() const { return mShadowLeaseUntil != 0 && mShadowFrame <= mShadowLeaseUntil; }
+    /// ...and the render stats': the last published frame they are on the snapshot for (0 = none), and whether the
+    /// HUD's stats overlay asked for the geometry counting this frame (it reads them engine-side).
+    mutable unsigned long long mRenderLeaseUntil = 0;
+    mutable bool               mHudStatsThisFrame = false;
+    mutable bool               mMetricsByUs = false;   ///< the counting is on because a subscriber or the HUD wants it
+    void syncMetricsRecording(bool want) const;   ///< at the publish (fillPublished is const)
     /// Were the counters actually ARMED for the last frame that rendered? It is
-    /// not the same question as `mShadowPolled`: arming happens inside
+    /// not the same question as `shadowLeased()`: arming happens inside
     /// applyShadowCacheDirties, so a read taken before any frame has rendered
     /// under the listeners must report "not measured" rather than a zero that
     /// looks like a measurement (ShadowStatus::countersMeasured).

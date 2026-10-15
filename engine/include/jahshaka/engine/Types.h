@@ -8498,6 +8498,12 @@ struct PublishedEngineFrame {
     bool               deviceLost = false;
     GpuFault           gpuFault = GpuFault::None;
     MonitorStatus      monitor;
+    /// THE SHADOW ATLAS AND THE RENDERER'S FIGURES, EVERY FRAME (U3 stage 3): the layout, the cumulative counts and
+    /// the frame timing are cheap reads and always here; the per-pass shadow counters (ShadowStatus::countersMeasured)
+    /// and the geometry counting (RenderStats::metricsRecording) are MEASURED only while a reader subscribes
+    /// (Engine::publishShadowStatus / publishRenderStats) — zero, and said so, otherwise.
+    ShadowStatus       shadow;
+    RenderStats        render;
     /// What the PREVIOUS publish cost the loop, microseconds (the snapshot's own price: the engine's half + every
     /// scene's, their GiStatus included) — read by the U3 measurements, never a bar.
     double             publishMicros = 0.0;

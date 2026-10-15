@@ -88,8 +88,8 @@ const Ogre::IdString &shadowNodeId(ShadowNodeKind k) {
 
 /// RenderingMetrics is reset once per frame by the render system; the monitor
 /// only ever READS it, so nothing here changes what any other reader sees.
-/// (Recording is already on for the process — `renderStats()` turns it on
-/// lazily and never off — so this adds no cost of its own.)
+/// (Recording is on for a capture — monitor start arms it, and the render-stats subscription keeps it on while
+/// the monitor lives (syncMetricsRecording) — so this adds no cost of its own.)
 void readMetrics(Ogre::RenderSystem *rs, unsigned &draws, unsigned &batches,
                  unsigned long long &tris, unsigned &instances) {
     draws = batches = instances = 0u;

@@ -1230,6 +1230,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
             }
             if (owner) {
                 RenderStats stats;
+                if (owner->overlay().stats) mHudStatsThisFrame = true;   // the HUD reads the counting (U3 stage 3)
                 renderStats(stats);
                 // The shadow-atlas inspector's data (SHADOW_TOOLING_SPEC.md
                 // §4.4). Collected HERE and not in the HUD because it lives
@@ -2582,6 +2583,14 @@ void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
     out.deviceLost = deviceLost();
     out.gpuFault = gpuFault();
     out.monitor = monitorStatus();   // its own answer with the monitor off too (the tail's frames, the GPU timing)
+    // THE SHADOW ATLAS AND THE RENDERER'S FIGURES (U3 stage 3): every frame; their counters measured only while
+    // subscribed (the shadow pass counters by shadowLeased, the geometry counting below).
+    out.shadow = shadowStatus();
+    const bool renderLeased = mRenderLeaseUntil != 0 && mPublishedFrames <= mRenderLeaseUntil;
+    if (!renderLeased) mRenderLeaseUntil = 0;
+    out.render = RenderStats();
+    renderStats(out.render);
+    syncMetricsRecording(renderLeased || mHudStatsThisFrame || mMonitor != nullptr);   // a capture counts too
 }
 
 bool OgreEngine::pendingGiConfiguration(const Scene *scene) const {
@@ -2726,6 +2735,23 @@ ShaderCacheStats OgreEngine::shaderCacheStats() const {
     return mShaderCache.stats(mRoot);
 }
 
+void OgreEngine::publishRenderStats(unsigned frames) {
+    mRenderLeaseUntil = frames ? mPublishedFrames + frames : 0ull;
+    if (frames) syncMetricsRecording(true);   // the span's first frame counts
+}
+
+// THE GEOMETRY COUNTING FOLLOWS ITS READERS (U3 stage 3): on while a subscriber or the HUD wants it, off the frame
+// nobody does — never a latch (it used to stay on for the session after the first read).
+void OgreEngine::syncMetricsRecording(bool want) const {
+    mHudStatsThisFrame = false;
+    if (!mRoot) return;
+    Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+    if (!rs) return;
+    const bool on = rs->getMetrics().mIsRecordingMetrics;
+    if (want && !on) { rs->setMetricsRecordingEnabled(true); mMetricsByUs = true; }
+    else if (!want && on && mMetricsByUs) { rs->setMetricsRecordingEnabled(false); mMetricsByUs = false; }
+}
+
 bool OgreEngine::renderStats(RenderStats &out) const {
     JAH_SYNC_GETTER("Engine::renderStats");
     out = RenderStats();
@@ -2750,18 +2776,13 @@ bool OgreEngine::renderStats(RenderStats &out) const {
             out.bestMs  = fs->getBestTime()  * 1000.0;
             out.worstMs = fs->getWorstTime() * 1000.0;
         }
-        // ---- geometry. LAZY, and this is the whole reason the accessor is not
-        // a plain getter: recording is OFF by default in Ogre (OgreCommon.cpp:
-        // 177) and costs integer adds per draw batch, so nothing that never
-        // asks for stats ever pays for them. The FIRST call switches it on and
-        // honestly reports metricsRecording=false with zeroed counters; every
-        // call after a rendered frame reports real numbers.
+        // ---- geometry. OFF by default in Ogre (OgreCommon.cpp:177) and an integer add per draw batch: on only while
+        // a reader subscribes or the HUD's stats show (syncMetricsRecording, U3 stage 3). The first frame of a span
+        // honestly reports metricsRecording=false with zeroed counters; every frame after it the real numbers.
         if (Ogre::RenderSystem *rs = mRoot->getRenderSystem()) {
             const Ogre::RenderingMetrics &m = rs->getMetrics();
             out.metricsRecording = m.mIsRecordingMetrics;
-            if (!m.mIsRecordingMetrics) {
-                rs->setMetricsRecordingEnabled(true);
-            } else {
+            if (m.mIsRecordingMetrics) {
                 out.draws     = (unsigned long long)m.mDrawCount;
                 out.batches   = (unsigned long long)m.mBatchCount;
                 out.triangles = (unsigned long long)m.mFaceCount;

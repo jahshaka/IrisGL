@@ -717,6 +717,10 @@ void OgreEngine::deriveShadowMapCount() {
 // ---------------------------------------------------------------------------
 // The readback
 // ---------------------------------------------------------------------------
+void OgreEngine::publishShadowStatus(unsigned frames) {
+    mShadowLeaseUntil = frames ? mShadowFrame + frames : 0ull;
+}
+
 ShadowStatus OgreEngine::shadowStatus() const {
     JAH_SYNC_GETTER("Engine::shadowStatus");
     ShadowStatus st;
@@ -728,14 +732,7 @@ ShadowStatus OgreEngine::shadowStatus() const {
     // still read it.
     for (const auto &s : mScenes) st.casterWalkItems += s->casterWalkItems();
     if (!mHlmsRegistered || mHeadless) return st;   // live stays false
-    // ASKING TURNS THE COUNTERS ON, exactly like RenderStats::metricsRecording:
-    // the shadow-pass listeners are not free (a callback per compositor pass
-    // per frame), so they run only while somebody is reading — and the asking
-    // EXPIRES: kShadowPollWindowFrames frames without a read detach them again
-    // (P8; it used to be a latch that never cleared). The FIRST call therefore
-    // reports 0 passes; every call after a rendered frame reports the truth.
-    mShadowPolled = true;
-    mShadowPollFrame = mShadowFrame;
+    // (THE COUNTERS RUN BY SUBSCRIPTION — publishShadowStatus, U3 stage 3; reading arms nothing.)
     JAH_TRY {
         st.resolution = mShadowResolution;
         st.budget = effectiveShadowMapBudget();
@@ -1172,11 +1169,10 @@ void OgreEngine::applyShadowCache() {
             }
         }
 
-        // THE COUNTERS' OPT-IN EXPIRES (P8): nobody asked for a while, so the
-        // per-pass callbacks come off the render path and the readings go to 0.
-        const bool want = mShadowPolled && mShadowFrame - mShadowPollFrame <= kShadowPollWindowFrames;
-        if (!want) {
-            mShadowPolled = false;
+        // THE SUBSCRIPTION ENDED (U3 stage 3; P8's expiry): the per-pass callbacks come off the render path and the
+        // readings go to 0 — the counters run for exactly the subscribed span.
+        if (!shadowLeased()) {
+            mShadowLeaseUntil = 0;
             mShadowCountersArmed = false;
             if (mShadowCounters[0] || mShadowCounters[1] || mShadowCounters[2]) detachShadowCounter();
         }
@@ -1368,8 +1364,8 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // The frame about to render is MEASURED exactly when this arms it. A
         // reader that asks before any such frame gets countersMeasured = false
         // and reports "not measured" instead of a zero (SKY-SMALL).
-        mShadowCountersArmed = mShadowPolled;
-        if (mShadowPolled) {
+        mShadowCountersArmed = shadowLeased();
+        if (mShadowCountersArmed) {
             for (unsigned k = 0; k < kShadowNodeKinds; ++k) {
                 if (!mShadowCounters[k])
                     mShadowCounters[k] = new ShadowPassCounter(shadowNodeNameOf(ShadowNodeKind(k)));

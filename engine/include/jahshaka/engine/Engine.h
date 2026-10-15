@@ -2613,12 +2613,13 @@ public:
     /// reports what survived both clamps. Default 8.
     virtual void setShadowMapBudget(unsigned maps) = 0;
 
-    /// What the shadow atlas ACTUALLY is: its layout, which light holds which
-    /// map, and which shadow-casting lights got none. Cheap (reads live
-    /// pointers, renders nothing); `live == false` on a headless engine.
-    /// ASKING ARMS THE PASS COUNTERS for the frames that follow; they come off
-    /// the render path again after ~120 frames without a call.
-    virtual ShadowStatus shadowStatus() const = 0;
+    /// WHAT THE SHADOW ATLAS ACTUALLY IS — its layout, which light holds which map, which shadow-casting lights got
+    /// none — is PublishedEngineFrame::shadow, every frame; ITS PASS COUNTERS ARE BY SUBSCRIPTION (ENGINE-UPGRADE-U3
+    /// stage 3, decision 17): measured for the next `frames` frames (a callback per compositor pass) and for exactly
+    /// that span; 0 ends it now. A reader that keeps reading renews it — the
+    /// World panel while it refreshes, world.shadowStatus at each call. The first frame of a span reports
+    /// countersMeasured = false (nothing was armed before it); `live == false` on a headless engine.
+    virtual void publishShadowStatus(unsigned frames) = 0;
 
     /// Re-render EVERY cached point/spot shadow map in every scene, once, on
     /// the next frame — the "I do not know what changed" button, and the shadow
@@ -2683,18 +2684,12 @@ public:
     /// Idempotent; false (lastError) when the backend cannot prepare.
     virtual bool prepareDevice() = 0;
 
-    /// What the renderer measured (STATS_OVERLAY_SPEC.md §4). Cheap: it reads
-    /// counters the backend already keeps, and copies no buffers.
-    ///
-    /// LAZY BY DESIGN. Geometry counting (draws/batches/triangles) is OFF in
-    /// the backend by default and costs integer adds per draw call, so the
-    /// FIRST call to this switches it on and reports metricsRecording=false
-    /// with zeroed counters. Every call after a rendered frame reports real
-    /// numbers. Nothing that never asks for stats ever pays for them.
-    ///
-    /// Returns false only when there is no backend to ask; `out` is then left
-    /// default-constructed.
-    virtual bool renderStats(RenderStats &out) const = 0;
+    /// WHAT THE RENDERER MEASURED (STATS_OVERLAY_SPEC.md §4) is PublishedEngineFrame::render, every frame; ITS
+    /// GEOMETRY COUNTING IS BY SUBSCRIPTION (ENGINE-UPGRADE-U3 stage 3, decision 17): the backend's integer add per
+    /// draw call (OFF by default) runs for the next `frames` frames and for exactly that span — or while the HUD's
+    /// stats overlay shows or a capture runs; 0 ends it now. The first frame of a span reports metricsRecording =
+    /// false with zeroed counters; every frame after it the real numbers. Nothing that never asks pays.
+    virtual void publishRenderStats(unsigned frames) = 0;
 
     /// What the renderer is HOLDING (see ObjectCounts). The companion to
     /// renderStats: that one answers "what did the frame cost", this one
