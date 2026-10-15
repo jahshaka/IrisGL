@@ -1003,7 +1003,6 @@ void OgreScene::pushHeightFog() {
 }
 
 HeightFogStatus OgreScene::heightFogStatus() const {
-    JAH_SYNC_GETTER("Scene::heightFogStatus");
     HeightFogStatus st;
     if (!mAtmosphere || !mHeightFogOn) return st;
     st.on = mSceneMgr->getAtmosphereRaw() == mAtmosphere;

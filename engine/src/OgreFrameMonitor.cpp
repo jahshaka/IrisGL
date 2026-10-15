@@ -1280,7 +1280,6 @@ bool OgreEngine::framePaceOwesWork() const
 // call, not a once-a-frame one.
 StreamingWork OgreEngine::streamingWork() const
 {
-    JAH_SYNC_GETTER("Engine::streamingWork");
     StreamingWork out;
     for (const auto &sc : mScenes) {
         // The stage reported is the FURTHEST-BEHIND scene's: there is one world

@@ -139,7 +139,6 @@ public:
     /// start distance, over the sky's pixels too). Off by default and OFF IS
     /// EXACT: no shader carries its code. The enabled edge is a shader variant.
     virtual void        setHeightFog(const HeightFogDesc &) {}
-    virtual HeightFogStatus heightFogStatus() const { return HeightFogStatus(); }
     /// THE SCENE'S SKY AND ITS ENVIRONMENT REFLECTIONS, as one description —
     /// SkyDesc carries the whole model (modes, face order, what
     /// `reflections == false` means, and why the flat colour and the CPU-baked
@@ -944,20 +943,14 @@ public:
     /// Switching it rebuilds nothing (the chain's pass is gated by the workspace's
     /// execution mask); Off is byte-identical to a scene that never had it.
     virtual void setAtomView(AtomView view) { (void)view; }
-    /// Whether the view can paint anything here: the split is live AND every view
-    /// of the scene that draws into a window carries the id pass (the Low tier's
-    /// passthrough viewport does not). Hosts refuse a mode other than Off when false.
-    virtual bool atomViewPaintable() const { return false; }
+    // Whether the view can paint (the split is live AND every windowed view carries the id pass) is
+    // PublishedFrame::atomViewPaintable — hosts refuse a mode other than Off when it is false.
     /// THE PHOTON VIEW (PhotonView, Types.h): the lighting's debug pictures over
     /// every view of this scene that draws the post chain. Switching it rebuilds
     /// nothing; Off is byte-identical to a scene that never had it.
     virtual void setPhotonView(PhotonView view) { (void)view; }
-    /// Empty when `view` can paint in this scene right now, otherwise WHY it
-    /// cannot (the tier has no field, the rays are off, ...). Off always can.
-    /// Hosts refuse a mode with a reason.
-    virtual std::string photonViewRefusal(PhotonView view) const {
-        return view == PhotonView::Off ? std::string() : std::string("the renderer has no photon view");
-    }
+    // WHY a mode cannot paint right now ("" = it can; Off always can) is PublishedFrame::photonViewRefusals[view] —
+    // hosts refuse a mode with a reason.
     /// WHICH CASCADE the Voxels picture shows: -1 (the default) the finest that
     /// holds the scene's whole lit content (the outermost when none does), n the
     /// chain's cascade n (clamped to the chain). Not saved.
@@ -1737,24 +1730,8 @@ public:
     /// screen", which is a difference across the load, not a state). It is the
     /// number that says a load in place never showed the previous world.
     virtual unsigned long long blankFramesPresented() const = 0;
-    /// HOW MANY TIMES THIS VIEW'S PER-FRAME CHAIN GLOBALS HAVE BEEN PUSHED
-    /// (lane EYE-GRADE-1's fix round; the mechanism is one workspace listener
-    /// per view, firing immediately before that view's passes execute).
-    ///
-    /// WHY IT IS WORTH AN ACCESSOR. Most of the post chain is SHAPE — built
-    /// into the compositor graph — and a few values are written into the graph
-    /// the moment a host pushes them (the fixed exposure's clear colour). But
-    /// the METER's uniforms, the automatic exposure's terms, the bloom
-    /// threshold, the AO and SSR camera terms and every look's parameters are
-    /// PROCESS-WIDE material parameters, pushed per view per frame in that
-    /// listener, and a view whose count does not climb is a view rendering with
-    /// whatever the last workspace to update happened to leave in them. That is
-    /// invisible in a picture until two views disagree — which is exactly the
-    /// case a headset introduced — so it is countable rather than inferable.
-    ///
-    /// 0 for a view with no chain (every thumbnail, preview and pixel suite:
-    /// they have no effects, so no listener is ever created for them).
-    virtual unsigned long long globalsPushes() const = 0;
+    // How many times a view's chain pushed its per-view globals is PublishedEngineFrame's per-view `globalsPushes`
+    // (counted, not inferred: a view whose count does not climb renders with another view's process-wide values).
     /// Reads this View's rendered pixels back to the CPU. Offscreen Views only —
     /// returns false for on-screen windows. This is the thumbnail path, and what
     /// makes the engine testable without a window.
@@ -2849,11 +2826,7 @@ public:
     /// `Streaming` frame would take a step of? The host reads it to decide how
     /// long to keep asking (and, in phase 2b, to draw the indicator).
     virtual bool framePaceOwesWork() const = 0;
-    /// WHAT THE WORLD STILL OWES, for the loading indicator (§2.1 / §3, lane
-    /// OPEN-COVER-2b) — see `StreamingWork` for what each field means and for
-    /// why this is not `shaderCacheStats()`. Cheap enough to read once a frame
-    /// while a world arrives; every field is a counter kept for another reason.
-    virtual StreamingWork streamingWork() const = 0;
+    // WHAT THE WORLD STILL OWES (the loading indicator, §2.1 / §3) is PublishedEngineFrame::streaming.
 
     /// THE ENGINE, AT ONE INSTANT (§4.8) — every GI parameter and what it
     /// resolved to, the probe grid, the shadow setup with per-light cache

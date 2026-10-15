@@ -3681,7 +3681,7 @@ public:
     /// say. pushHeightFog hands the component the dials and the colour in force
     /// (the sky's SH at +Y), and runs again whenever a new SH lands.
     void setHeightFog(const HeightFogDesc &desc) override;
-    HeightFogStatus heightFogStatus() const override;
+    HeightFogStatus heightFogStatus() const;
     void pushHeightFog();
     HeightFogDesc mHeightFog;
     bool mHeightFogOn = false;
@@ -5884,12 +5884,12 @@ public:
     /// view of the scene draws straight into a window without the id pass (the Low
     /// tier's passthrough viewport — AtomDrawStatus::passthroughViews). A VR eye
     /// pair carries no id pass either, but the desktop view beside it does.
-    bool atomViewPaintable() const override { JAH_SYNC_GETTER("Scene::atomViewPaintable"); return atomDrawOn() && !mAtom.hasPassthroughViews(); }
+    bool atomViewPaintable() const { return atomDrawOn() && !mAtom.hasPassthroughViews(); }
 
     // ---- THE PHOTON VIEW (PHOTON-VIEW-1, OgrePhotonView.cpp) ----------------
     void setPhotonView(PhotonView view) override { mPhoton.setPhotonView(view); }
     PhotonView photonView() const { return mPhoton.photonView(); }
-    std::string photonViewRefusal(PhotonView view) const override { JAH_SYNC_GETTER("Scene::photonViewRefusal"); return mPhoton.photonViewRefusal(view); }
+    std::string photonViewRefusal(PhotonView view) const { return mPhoton.photonViewRefusal(view); }
     void setPhotonVoxelCascade(int cascade) override { mPhoton.setPhotonVoxelCascade(cascade); }
     void syncPhotonView() { return mPhoton.syncPhotonView(); }
     void releasePhotonView() { return mPhoton.releasePhotonView(); }
@@ -6501,7 +6501,7 @@ public:
     /// not climb is a view rendering with whatever the last workspace to update
     /// happened to leave in the process-wide materials. @see globalsPushes.
     void noteGlobalsPush() { ++mGlobalsPushes; }
-    unsigned long long globalsPushes() const override { JAH_SYNC_GETTER("View::globalsPushes"); return mGlobalsPushes; }
+    unsigned long long globalsPushes() const { return mGlobalsPushes; }
     /// THE TWO EYES THIS VIEW IS RENDERING, this frame (@see StereoEyeBasis).
     /// Pushed by the VR session every frame it locates them, dropped when the
     /// session ends; read by the ray-traced reflection so each eye's pixels get
@@ -7761,7 +7761,7 @@ public:
     /// An engine-internal request for the NEXT frame's cause (the VR warm-up): a record field for a host.
     void noteNextFrameCause(FrameCause cause) { mNextFrameCause = cause; }
     bool framePaceOwesWork() const override;
-    StreamingWork streamingWork() const override;
+    StreamingWork streamingWork() const;
     bool captureSnapshot(EngineSnapshot &out, const std::string &label,
                          Scene *scene = nullptr) const override;
     /// Attaches (or removes) the monitor's pass listener on every live
