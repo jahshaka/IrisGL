@@ -4502,6 +4502,13 @@ private:
         };
         LocalTrs           prevLocal, curLocal;
         unsigned long long stepSerial = 0;
+        /// WHAT THIS NODE ADDS TO THE SCENE'S MOBILITY AND RIG COUNTS (ENGINE-UPGRADE-U3 stage 2 read 12(b)): kept at
+        /// every mutation site (recountNode), so MobilityStatus / RigStats are running totals, never a walk.
+        struct Counted {
+            bool movable = false, movableItem = false, movableLight = false, rigged = false, shared = false;
+            const Ogre::SkeletonInstance *skel = nullptr;
+            size_t streamed = 0;
+        } counted;
         Ogre::Item      *item  = nullptr;
         Ogre::Light     *light = nullptr;
         /// A hash of the LightDesc fields the SHADOW MAP depends on — type,
@@ -6174,6 +6181,16 @@ private:
     /// rebuilds?", which a total cannot: every other rebuild reason (a mode
     /// change, a destroyed object, a quality dial) is mixed into that one.
     unsigned long long mMobilityRebuilds = 0;
+    /// THE RUNNING TOTALS (U3 read 12(b)): what every node's Counted adds up to; instances by distinct skeleton.
+    MobilityStatus mMobilityCounts;
+    RigStats       mRigCounts;
+    std::unordered_map<const Ogre::SkeletonInstance *, size_t> mSkeletonRefs;
+    /// Re-derives one node's contribution after a mutation of its movable flag, Item, light, particles, billboards or
+    /// share (recountNode), or takes it out (uncountNode: the node is leaving).
+    void recountNode(Node &n);
+    void uncountNode(Node &n);
+    void applyCounted(Node &n, const Node::Counted &now);
+    size_t streamedBonesOf(const Node &n) const;
     /// WHAT THIS SCENE'S PASSES BIND (SceneGiBinding): registered under mSceneMgr
     /// at construction; each field is written where the arm is finished and
     /// cleared where it dies — nowhere else.

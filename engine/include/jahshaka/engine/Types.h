@@ -8049,6 +8049,10 @@ struct PublishedFrame {
     bool                 atomViewPaintable = false;
     /// Why each Photon view cannot paint right now ("" = it can), indexed by PhotonView.
     std::string          photonViewRefusals[kPhotonViewCount];
+    /// THE SCENE'S MOBILITY AND RIG COUNTS as the frame closed them (U3 stage 2 read 12(b): running totals kept at the
+    /// mutation sites, copied here every frame — no walk of the graph).
+    MobilityStatus       mobility;
+    RigStats             rigs;
     /// THE POSES OF THE RIGS A HOST ASKED FOR (Scene::publishBonePoses): each rig's bones, parent-local, in the mesh
     /// node's frame — what Scene::bonePoses read, as drawn by this frame.
     struct RigPoses {

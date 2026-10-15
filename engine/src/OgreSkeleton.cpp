@@ -304,6 +304,7 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         // is ever set — and that is what puts `hlms_skeleton` in the shader hash.
         n.item = mSceneMgr->createItem(mit->second.mesh, Ogre::SCENE_DYNAMIC);
         wearDatablock(n.item, wornDatablock(n, tit->second));   // the node's cull (CULL-MODE-2)
+        recountNode(n);
         markShadowShapeDirty(n);     // a rebuilt Item is a new caster shape (attachMesh says why)
         indexItemNode(n);
         n.item->setVisibilityFlags(
@@ -601,6 +602,7 @@ bool OgreScene::shareSkeleton(NodeId followerId, NodeId sourceId) {
         releaseBoneRiders(followerId, f);
         f.item->useSkeletonInstanceFrom(s.item);
         f.shareSource = sourceId;
+        recountNode(f);
         // A CASTER-SHAPE INPUT (round-2 review F4): from this call the follower
         // is posed by the MASTER's instance, so its silhouette can change with
         // no transform write and no pose push of its own. The caster walk reads
@@ -625,6 +627,7 @@ void OgreScene::unshareFollower(NodeId followerId, Node &f, Node *master) {
     if (!f.shareSource) return;
     const NodeId sourceId = f.shareSource;
     f.shareSource = 0;
+    recountNode(f);
     if (master) {
         auto &list = master->shareFollowers;
         list.erase(std::remove(list.begin(), list.end(), followerId), list.end());
@@ -673,6 +676,7 @@ void OgreScene::unshareFollower(NodeId followerId, Node &f, Node *master) {
             f.node->attachObject(f.item);
         }
         Ogre::SkeletonInstance *own = f.item->getSkeletonInstance();
+        recountNode(f);   // the follower's own fresh instance is a distinct one now
         if (own && own->getNumBones() == keep.size()) {
             for (size_t i = 0; i < keep.size(); ++i) {
                 Ogre::Bone *b = own->getBone(i);
@@ -710,6 +714,7 @@ void OgreScene::dropShareFollowers(NodeId id, Node &n) {
             list.erase(std::remove(list.begin(), list.end(), id), list.end());
         }
         n.shareSource = 0;
+        recountNode(n);
     }
 }
 
@@ -724,8 +729,12 @@ void OgreScene::dropShareFollowers(NodeId id, Node &n) {
 size_t OgreScene::streamedBoneCount(NodeId id) const {
     JAH_SYNC_GETTER("Scene::streamedBoneCount");
     auto it = mNodes.find(id);
-    if (it == mNodes.end() || !it->second.item) return 0;
-    const Ogre::Item *item = it->second.item;
+    return it == mNodes.end() ? 0 : streamedBonesOf(it->second);
+}
+
+size_t OgreScene::streamedBonesOf(const Node &node) const {
+    if (!node.item) return 0;
+    const Ogre::Item *item = node.item;
     size_t n = 0;
     for (size_t i = 0; i < item->getNumSubItems(); ++i) {
         const Ogre::SubItem *sub = item->getSubItem(i);
@@ -739,26 +748,9 @@ size_t OgreScene::streamedBoneCount(NodeId id) const {
 
 RigStats OgreScene::rigStats() const {
     JAH_SYNC_GETTER("Scene::rigStats");
-    RigStats out;
-    // DISTINCT instances, counted by pointer: two Items sharing one instance
-    // are one evaluation in updateAllAnimations, however the sharing was
-    // arranged, and a follower whose master went away is honestly its own again.
-    std::vector<const Ogre::SkeletonInstance *> seen;
-    for (const auto &kv : mNodes) {
-        const Node &n = kv.second;
-        if (!n.item) continue;
-        const Ogre::SkeletonInstance *skel = n.item->getSkeletonInstance();
-        if (!skel) continue;
-        ++out.rigged;
-        out.streamedBones += streamedBoneCount(kv.first);
-        if (std::find(seen.begin(), seen.end(), skel) == seen.end()) seen.push_back(skel);
-        // OUR bookkeeping, not Ogre's `sharesSkeletonInstance()`: that is
-        // refcount > 1, which is true of the MASTER too, and "shared" here means
-        // "renders from somebody else's instance".
-        if (n.shareSource) ++out.shared;
-    }
-    out.instances = seen.size();
-    return out;
+    // RUNNING TOTALS (recountNode, U3 read 12(b)): DISTINCT instances by pointer (two Items sharing one instance are
+    // one evaluation in updateAllAnimations), "shared" = renders from somebody else's instance — no walk.
+    return mRigCounts;
 }
 
 }}}  // namespace jahshaka::engine::detail

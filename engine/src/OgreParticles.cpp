@@ -265,6 +265,7 @@ bool OgreScene::createBillboardSet(NodeId id, TextureId texId, bool additiveBlen
         set->setMaterialName(dbName, Ogre::ResourceGroupManager::AUTODETECT_RESOURCE_GROUP_NAME);
         set->init(mRoot->getRenderSystem()->getVaoManager());
         n.billboards = set;
+        recountNode(n);
         n.billboardDatablockName = dbName;
         n.billboardCapacity = std::max(1u, capacity);
         // Visibility follows the node: the caller pushes it via setNodeVisible
@@ -388,6 +389,7 @@ void OgreScene::releaseBillboards(Node &n) {
         // Detaches, releases the GPU buffers via the live VaoManager, deletes.
         mSceneMgr->destroyBillboardSet2(n.billboards);
         n.billboards = nullptr;
+        recountNode(n);
         n.billboardHandles.clear();
         n.billboardCapacity = 0;
     }
@@ -753,6 +755,7 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
 
         if (!n.particleSystem) {
             n.particleSystem = mSceneMgr->createParticleSystem2(n.particleDef);
+            recountNode(n);
             // MANDATORY: emission reads system->getParentNode() with no null
             // check (OgreParticleSystemManager2.cpp:213-215). Attaching to the
             // node's own SceneNode is also what makes the emitter follow the
@@ -794,6 +797,7 @@ void OgreScene::releaseParticleSystem(Node &n) {
         n.particleSystem->detachFromParent();
         mSceneMgr->destroyParticleSystem2(n.particleSystem);
         n.particleSystem = nullptr;
+        recountNode(n);
     }
     // The def survives — nothing can destroy one before the SceneManager dies.
     // Hide it (the def is what the render queue tests, so its live particles

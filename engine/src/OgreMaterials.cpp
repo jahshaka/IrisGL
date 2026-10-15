@@ -1164,6 +1164,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         }
         n.item = mSceneMgr->createItem(mit->second.mesh, cls);
         ++mChangeStats.itemsCreated;
+        recountNode(n);
         wearDatablock(n.item, wornDatablock(n, tit->second));   // the node's cull (CULL-MODE-2)
         // A REBUILT ITEM IS A NEW CASTER SHAPE (lamp-map cache): a mesh or
         // material swap detaches and recreates in this one call, and the

@@ -427,6 +427,7 @@ bool OgreScene::removeNode(NodeId id) {
         auto idx = mNodeByOgreId.find(it->second.ogreId);
         if (idx != mNodeByOgreId.end() && idx->second == id) mNodeByOgreId.erase(idx);
         releaseNode(it->first, it->second);
+        uncountNode(it->second);
         mNodes.erase(it);
         // The last decal leaving must clear the SceneManager's atlas bindings,
         // which is what drops the decal code back out of every PBS shader.
@@ -617,6 +618,9 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     back.rayQuery = rayQueryStatus();
     back.sunContact = sunContactStatus();
     back.activePlanarReflectors = activePlanarReflectors();
+    back.mobility = mMobilityCounts;
+    back.mobility.mobilityRebuilds = mMobilityRebuilds;
+    back.rigs = mRigCounts;
     back.atomViewPaintable = atomViewPaintable();
     for (int v = 0; v < kPhotonViewCount; ++v)
         back.photonViewRefusals[v] = v == 0 ? std::string() : photonViewRefusal(static_cast<PhotonView>(v));
@@ -1256,6 +1260,7 @@ void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
     // that arrives with the geometry is an arrival, and arrivals arm as they always did).
     if (n.item && n.scan.giKnown) mPhoton.noteMobilityFlipped();
     n.movable = movable;
+    recountNode(n);
     applyNodeVisibilityFlags(n);
     const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
     if (healing && giBefore != giAfter) {
@@ -1282,17 +1287,44 @@ bool OgreScene::nodeMovable(NodeId id) const {
 
 MobilityStatus OgreScene::mobilityStatus() const {
     JAH_SYNC_GETTER("Scene::mobilityStatus");
-    MobilityStatus out;
+    MobilityStatus out = mMobilityCounts;   // running totals (recountNode): no walk of the graph
     out.mobilityRebuilds = mMobilityRebuilds;
-    for (const auto &kv : mNodes) {
-        const Node &n = kv.second;
-        if (!n.movable) continue;
-        ++out.movableNodes;
-        if (n.item || n.particleSystem || n.billboards) ++out.movableItems;
-        if (n.light) ++out.movableLights;
-    }
     return out;
 }
+
+// THE RUNNING TOTALS (ENGINE-UPGRADE-U3 stage 2 read 12(b)): each node's contribution is re-derived where it can
+// change and the difference applied, so the counts are exact and cost O(the edit).
+void OgreScene::applyCounted(Node &n, const Node::Counted &now) {
+    const Node::Counted &was = n.counted;
+    auto step = [](size_t &total, bool before, bool after) { if (before != after) { if (after) ++total; else --total; } };
+    step(mMobilityCounts.movableNodes, was.movable, now.movable);
+    step(mMobilityCounts.movableItems, was.movableItem, now.movableItem);
+    step(mMobilityCounts.movableLights, was.movableLight, now.movableLight);
+    step(mRigCounts.rigged, was.rigged, now.rigged);
+    step(mRigCounts.shared, was.shared, now.shared);
+    mRigCounts.streamedBones += now.streamed;
+    mRigCounts.streamedBones -= was.streamed;
+    if (was.skel != now.skel) {
+        if (was.skel) { auto it = mSkeletonRefs.find(was.skel); if (it != mSkeletonRefs.end() && --it->second == 0) mSkeletonRefs.erase(it); }
+        if (now.skel) ++mSkeletonRefs[now.skel];
+        mRigCounts.instances = mSkeletonRefs.size();
+    }
+    n.counted = now;
+}
+
+void OgreScene::recountNode(Node &n) {
+    Node::Counted now;
+    now.movable = n.movable;
+    now.movableItem = n.movable && (n.item || n.particleSystem || n.billboards);
+    now.movableLight = n.movable && n.light;
+    now.skel = n.item ? n.item->getSkeletonInstance() : nullptr;
+    now.rigged = now.skel != nullptr;
+    now.shared = now.rigged && n.shareSource != 0;
+    now.streamed = now.rigged ? streamedBonesOf(n) : 0;
+    applyCounted(n, now);
+}
+
+void OgreScene::uncountNode(Node &n) { applyCounted(n, Node::Counted()); }
 
 void OgreScene::setNodeLightMask(NodeId id, unsigned mask) {
     auto it = mNodes.find(id);
@@ -1468,6 +1500,7 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             n.lightNode->setOrientation(Ogre::Quaternion(Ogre::Radian(-Ogre::Math::HALF_PI), Ogre::Vector3::UNIT_X));
             n.light = mSceneMgr->createLight();
             n.lightNode->attachObject(n.light);
+            recountNode(n);
             // Born HIDDEN on a hidden node (or under a hidden ancestor): the
             // visibility walk only reaches objects attached at the time, and
             // a host pushes visibility before it pushes the light.
@@ -1723,6 +1756,7 @@ bool OgreScene::removeLight(NodeId id) {
         it->second.light = nullptr;
         mLightNodes.erase(std::remove(mLightNodes.begin(), mLightNodes.end(), id),
                           mLightNodes.end());
+        recountNode(it->second);
         ++mLightsRemoved;
         // A recreated light starts with no profile and no mask: forget what the
         // dead one carried, or the next setLight would skip re-assigning it.
@@ -1821,6 +1855,9 @@ void OgreScene::destroy() {
         destroyGrid();
         for (auto &kv : mNodes) releaseNode(kv.first, kv.second);
         mNodes.clear();
+        mMobilityCounts = MobilityStatus();   // every node gone: the totals with them
+        mRigCounts = RigStats();
+        mSkeletonRefs.clear();
         mNodeByOgreId.clear();
         mBoneRiderIds.clear();
         mReflectorsToArm.clear();
@@ -1932,6 +1969,7 @@ void OgreScene::detachItem(NodeId id, Node &n) {
         // A CULL TWIN this Item wore may be worn by nothing now (CULL-MODE-2).
         noteTwinsLetGo(n.item);
         n.item->detachFromParent(); mSceneMgr->destroyItem(n.item); n.item = nullptr;
+        recountNode(n);
         // AND THE CLIPS (S16, SMOKE_FIX_SPEC_2026_09_11 §1.1). The
         // SkeletonInstance belongs to the Item and has just died with it, while
         // every ClipRec this node holds is a set of raw float*s into that
