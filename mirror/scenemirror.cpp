@@ -13,6 +13,7 @@
 
 #include <QSet>
 #include <set>
+#include <array>
 
 #include "irisgl/document/scenegraph/nodegraph.h"
 #include "irisgl/document/scenegraph/scene.h"
@@ -452,47 +453,47 @@ void SceneMirror::setSource(iris::ScenePtr scene)
         mSource->_setMirrorEvacuationHook(nullptr);   // entries released above
         mSource->bindMirror(nullptr);
     }
-    for (MeshId &m : mWireMeshes) { if (m) mTarget->destroyMesh(m); m = 0; }
+    for (MeshId &m : mWireMeshes) { if (m) postCall(&jahshaka::engine::Scene::destroyMesh, m); m = 0; }
     // The grid is the engine's own quad (GRID-2): a disabled description hides it.
-    mTarget->setGrid(jahshaka::engine::GridDesc());
+    postCall(&jahshaka::engine::Scene::setGrid, jahshaka::engine::GridDesc());
     // The Ground plane widget: same discipline as the grid. Its MATERIAL and
     // textures live in mMaterials/mTextures, which are torn down below.
     releaseGroundPlane();
     // The GI volume overlay's two boxes (fix 9): same discipline as the grid.
-    if (mGiVolLitNode)   { mTarget->removeNode(mGiVolLitNode);   mGiVolLitNode = 0; }
-    if (mGiVolProbeNode) { mTarget->removeNode(mGiVolProbeNode); mGiVolProbeNode = 0; }
-    if (mGiVolLitMesh)   { mTarget->destroyMesh(mGiVolLitMesh);   mGiVolLitMesh = 0; }
-    if (mGiVolProbeMesh) { mTarget->destroyMesh(mGiVolProbeMesh); mGiVolProbeMesh = 0; }
-    if (mGiVolLitMaterial)   { mTarget->destroyMaterial(mGiVolLitMaterial);   mGiVolLitMaterial = 0; }
-    if (mGiVolProbeMaterial) { mTarget->destroyMaterial(mGiVolProbeMaterial); mGiVolProbeMaterial = 0; }
+    if (mGiVolLitNode)   { postCall(&jahshaka::engine::Scene::removeNode, mGiVolLitNode);   mGiVolLitNode = 0; }
+    if (mGiVolProbeNode) { postCall(&jahshaka::engine::Scene::removeNode, mGiVolProbeNode); mGiVolProbeNode = 0; }
+    if (mGiVolLitMesh)   { postCall(&jahshaka::engine::Scene::destroyMesh, mGiVolLitMesh);   mGiVolLitMesh = 0; }
+    if (mGiVolProbeMesh) { postCall(&jahshaka::engine::Scene::destroyMesh, mGiVolProbeMesh); mGiVolProbeMesh = 0; }
+    if (mGiVolLitMaterial)   { postCall(&jahshaka::engine::Scene::destroyMaterial, mGiVolLitMaterial);   mGiVolLitMaterial = 0; }
+    if (mGiVolProbeMaterial) { postCall(&jahshaka::engine::Scene::destroyMaterial, mGiVolProbeMaterial); mGiVolProbeMaterial = 0; }
     mGiVolBuilt = false;
     mHighlighted.clear();
     mHighlightSet.clear();
     mHighlightRequestedPrimary.clear();
-    for (HighlightShell &s : mHighlightShells) if (s.node) mTarget->removeNode(s.node);
+    for (HighlightShell &s : mHighlightShells) if (s.node) postCall(&jahshaka::engine::Scene::removeNode, s.node);
     mHighlightShells.clear();
-    if (mHighlightMaterial) { mTarget->destroyMaterial(mHighlightMaterial); mHighlightMaterial = 0; }
-    for (MeshId m : mMeshes) mTarget->destroyMesh(m);
+    if (mHighlightMaterial) { postCall(&jahshaka::engine::Scene::destroyMaterial, mHighlightMaterial); mHighlightMaterial = 0; }
+    for (MeshId m : mMeshes) postCall(&jahshaka::engine::Scene::destroyMesh, m);
     mMeshes.clear();
-    for (MaterialId m : mMaterials) mTarget->destroyMaterial(m);
+    for (MaterialId m : mMaterials) postCall(&jahshaka::engine::Scene::destroyMaterial, m);
     mMaterials.clear();
     mMaterialModels.clear();
-    for (TextureId t : mTextures) mTarget->destroyTexture(t);
+    for (TextureId t : mTextures) postCall(&jahshaka::engine::Scene::destroyTexture, t);
     mTextures.clear();
     mLiveGenerations.clear();   // a key is here only while its engine texture is (code review 2026-09-10)
     mMaterialSync.clear();     // the per-material memo dies with the materials
-    for (TextureId t : mIconTextures) mTarget->destroyTexture(t);
+    for (TextureId t : mIconTextures) postCall(&jahshaka::engine::Scene::destroyTexture, t);
     mIconTextures.clear();
     // Decal-atlas slices are a FIXED, process-wide budget (32 slices), and this
     // map used to survive setSource: open five worlds with decals and the atlas
     // was full, after which every decal in the session silently projected
     // nothing. The atlas is refcounted, so releasing our references here is
     // enough — a slice another scene still holds stays alive.
-    for (TextureId t : mDecalTextures) if (t) mTarget->destroyTexture(t);
+    for (TextureId t : mDecalTextures) if (t) postCall(&jahshaka::engine::Scene::destroyTexture, t);
     mDecalTextures.clear();
-    mTarget->setSky(SkyDesc());   // no sky — which also clears the reflection cubemap
-    for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
-    if (mCloudWeatherTexture) mTarget->destroyTexture(mCloudWeatherTexture);
+    postCall(&jahshaka::engine::Scene::setSky, SkyDesc());   // no sky — which also clears the reflection cubemap
+    for (TextureId &t : mSkyFaceTextures)  { if (t) postCall(&jahshaka::engine::Scene::destroyTexture, t); t = 0; }
+    if (mCloudWeatherTexture) postCall(&jahshaka::engine::Scene::destroyTexture, mCloudWeatherTexture);
     mCloudWeatherTexture = 0;
     mCloudWeatherPath.clear();
     mSkySource = SkySource();
@@ -546,7 +547,7 @@ void SceneMirror::evacuateEngineObjects()
     mCharacterRigs.clear();
     mBoneRiders.clear();
     for (HighlightShell &s : mHighlightShells)
-        if (s.node) mTarget->removeNode(s.node);
+        if (s.node) postCall(&jahshaka::engine::Scene::removeNode, s.node);
     mHighlightShells.clear();
     mHighlighted.clear();
     mHighlightSet.clear();
@@ -587,16 +588,51 @@ namespace {
 /// THE ENGINE'S STRUCTURE EDIT, EXCEPTION-SAFE (Scene::beginStructureEdit): opened for the sync's releases,
 /// adoptions and reclaim sweep, closed by end() — or by the destructor when anything in between throws, so a
 /// throw never leaves the scene's edit depth open (which would defer its GI invalidations for good).
+// The brackets are MESSAGES (ENGINE-UPGRADE-U3 stage 3), opened lazily: they keep their places among the commands
+// they bracket, and a sync that commands nothing posts neither.
 struct StructureEditScope {
-    jahshaka::engine::Scene *scene;
-    bool open = true;
-    explicit StructureEditScope(jahshaka::engine::Scene *s) : scene(s) { scene->beginStructureEdit(); }
-    void end() { if (open) { open = false; scene->endStructureEdit(); } }
+    SceneMirror *m;
+    explicit StructureEditScope(SceneMirror *mirror) : m(mirror) { m->openStructureEdit(); }
+    void end() { m->closeStructureEdit(); }
     ~StructureEditScope() { end(); }
     StructureEditScope(const StructureEditScope &) = delete;
     StructureEditScope &operator=(const StructureEditScope &) = delete;
 };
 }   // namespace
+
+void SceneMirror::post(std::function<void(jahshaka::engine::Scene &)> fn)
+{
+    notePost();
+    scenecmd::post(mTarget, std::move(fn));
+}
+
+void SceneMirror::postChecked(std::function<bool(jahshaka::engine::Scene &)> fn,
+                              std::function<void(const std::string &)> onRefused)
+{
+    notePost();
+    const unsigned long long token = scenecmd::newToken();
+    mOnRefused.insert(token, std::move(onRefused));
+    scenecmd::post(mTarget, std::move(fn), token);
+}
+
+// THE COMPLETIONS, READ AT THE TOP OF A SYNC (U3 stage 3): every named message the engine answered since the last
+// look — a refusal runs its answer (the walk then does what it used to do on the spot, one frame later).
+void SceneMirror::takeCompletions()
+{
+    if (mOnRefused.isEmpty() || !mTarget) return;
+    const auto &list = mTarget->published().completions;
+    if (!list) return;
+    for (const jahshaka::engine::PublishedFrame::Completion &c : *list) {
+        if (c.seq <= mCompletionSeqSeen) continue;
+        mCompletionSeqSeen = c.seq;
+        const auto it = mOnRefused.find(c.token);
+        if (it == mOnRefused.end()) continue;
+        const std::function<void(const std::string &)> answer = it.value();
+        mOnRefused.erase(it);
+        if (!c.ok && answer) answer(c.error);
+    }
+}
+
 
 int SceneMirror::sync(const FrameViews &frameViews)
 {
@@ -618,6 +654,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
         }
     } spend(this);
     if (!mSource || !mSource->getRootNode()) return 0;
+    takeCompletions();   // the answers to the named messages of the frames since the last sync (U3 stage 3)
     // RE-TAKE the graph if another mirror took this document while we were not
     // looking. NOTHING IN THE TREE DOES THAT ANY MORE (lane PLAYER-1, owner
     // decision 2026-09-14): the Player page used to be a second engine scene
@@ -768,7 +805,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
     std::vector<iris::SceneNode *> settleWrites;
     // ONE STRUCTURAL EDIT for the engine (ENGINE-UPGRADE-1 stage 2): the releases and adoptions below ask
     // the GI side for one invalidation, not one per node (Scene::beginStructureEdit).
-    StructureEditScope structureEdit(mTarget);
+    StructureEditScope structureEdit(this);
     if (full) {
         // JAH_MIRROR_VERIFY=full: the walk IS the verification, so every
         // material is re-fingerprinted and every push it makes is a catch.
@@ -1492,7 +1529,7 @@ void SceneMirror::syncSunAtmosphere()
     const LightDesc want = toLightDesc(mSyncSun, mSyncSun, true,
                                        atmosphereTintFor(mSyncSun, mSyncSun), mSunExposureGain);
     if (want == it->lastLight) return;            // the still case, every frame
-    if (mTarget->setLight(it->node, want)) {
+    if (postOk(&jahshaka::engine::Scene::setLight, it->node, want)) {
         notePush(mSyncSun, "sun atmosphere tint");
         it->hasLight = true;
         it->lastLight = want;
@@ -1506,7 +1543,16 @@ int SceneMirror::pushedVisibility(const iris::SceneNode *node) const
     return it == mEntries.constEnd() ? -1 : it->visiblePushed;
 }
 
-void SceneMirror::pushTransform(Scene *scene, NodeId node, const iris::Mat4 &t)
+// THE MIRROR'S OWN NODES MOVE BY MESSAGE (U3 stage 3): a helper this sync created exists only once the record lands.
+void SceneMirror::postTransform(NodeId node, const iris::Mat4 &t)
+{
+    Vec3 p, s;
+    Quat r;
+    decomposeTransform(t, p, r, s);
+    postCall(&jahshaka::engine::Scene::setNodeTransform, node, p, r, s);
+}
+
+void SceneMirror::decomposeTransform(const iris::Mat4 &t, Vec3 &outPos, Quat &outRot, Vec3 &outScale)
 {
     const iris::Vec3 cx = t.column(0).toVector3D(), cy = t.column(1).toVector3D(), cz = t.column(2).toVector3D();
     const iris::Vec3 scale(cx.length(), cy.length(), cz.length());
@@ -1516,9 +1562,9 @@ void SceneMirror::pushTransform(Scene *scene, NodeId node, const iris::Mat4 &t)
                    cx.y() / sx, cy.y() / sy, cz.y() / sz,
                    cx.z() / sx, cy.z() / sy, cz.z() / sz };
     const iris::Quat rot = iris::Quat::fromRotationMatrix(iris::Mat3(m));
-    scene->setNodeTransform(node, Vec3(pos.x(), pos.y(), pos.z()),
-                            Quat(rot.x(), rot.y(), rot.z(), rot.scalar()),
-                            Vec3(scale.x(), scale.y(), scale.z()));
+    outPos = Vec3(pos.x(), pos.y(), pos.z());
+    outRot = Quat(rot.x(), rot.y(), rot.z(), rot.scalar());
+    outScale = Vec3(scale.x(), scale.y(), scale.z());
 }
 
 // ---- selection highlight -------------------------------------------------------
@@ -1643,12 +1689,12 @@ void SceneMirror::syncHighlight()
         // of an idle editor, exactly the per-frame sweep the flag exists to
         // prevent. A shell that was already released has released nothing.
         for (HighlightShell &s : mHighlightShells) {
-            if (s.node && s.shown) { mTarget->setNodeVisible(s.node, false); s.shown = false; }
+            if (s.node && s.shown) { postCall(&jahshaka::engine::Scene::setNodeVisible, s.node, false); s.shown = false; }
             if (s.mesh) {
                 s.mesh = 0;
                 // A parked shell stops riding its character's pose: the per-frame
                 // copy should cost only what is actually on screen.
-                if (s.skinned) { mTarget->followSkeleton(s.node, 0); s.skinned = false; s.master = 0; }
+                if (s.skinned) { postCall(&jahshaka::engine::Scene::followSkeleton, s.node, 0); s.skinned = false; s.master = 0; }
                 mReclaimPending = true;
             }
         }
@@ -1683,15 +1729,15 @@ void SceneMirror::syncHighlight()
     if (pref != mHighlightColourApplied || primaryPref != mHighlightPrimaryColourApplied) {
         mHighlightColourApplied = pref;
         mHighlightPrimaryColourApplied = primaryPref;
-        if (mHighlightMaterial) mTarget->setUnlitMaterial(mHighlightMaterial, kSelection);
-        if (mOutlineMaterial)   mTarget->setUnlitMaterial(mOutlineMaterial, kSelection);
-        if (mOutlineSkinnedMaterial) mTarget->setUnlitMaterial(mOutlineSkinnedMaterial, kSelection);
+        if (mHighlightMaterial) postCall(&jahshaka::engine::Scene::setUnlitMaterial, mHighlightMaterial, kSelection);
+        if (mOutlineMaterial)   postCall(&jahshaka::engine::Scene::setUnlitMaterial, mOutlineMaterial, kSelection);
+        if (mOutlineSkinnedMaterial) postCall(&jahshaka::engine::Scene::setUnlitMaterial, mOutlineSkinnedMaterial, kSelection);
         if (mHighlightPrimaryMaterial)
-            mTarget->setUnlitMaterial(mHighlightPrimaryMaterial, kPrimary);
+            postCall(&jahshaka::engine::Scene::setUnlitMaterial, mHighlightPrimaryMaterial, kPrimary);
         if (mOutlinePrimaryMaterial)
-            mTarget->setUnlitMaterial(mOutlinePrimaryMaterial, kPrimary);
+            postCall(&jahshaka::engine::Scene::setUnlitMaterial, mOutlinePrimaryMaterial, kPrimary);
         if (mOutlinePrimarySkinnedMaterial)
-            mTarget->setUnlitMaterial(mOutlinePrimarySkinnedMaterial, kPrimary);
+            postCall(&jahshaka::engine::Scene::setUnlitMaterial, mOutlinePrimarySkinnedMaterial, kPrimary);
     }
     // The material a target's shell wants, made on first use. Four flavours
     // (wireframe / hull) x (secondary / primary), plus the two skinned hulls,
@@ -1700,16 +1746,16 @@ void SceneMirror::syncHighlight()
         const Colour &colour = primary ? kPrimary : kSelection;
         if (mHighlightWireframe && !skinned) {
             MaterialId &slot = primary ? mHighlightPrimaryMaterial : mHighlightMaterial;
-            if (!slot) slot = mTarget->createUnlitMaterial(colour, false, true);  // on top, wireframe
+            if (!slot) slot = newUnlitMaterial(colour, false, true);  // on top, wireframe
             return slot;
         }
         if (skinned) {
             MaterialId &slot = primary ? mOutlinePrimarySkinnedMaterial : mOutlineSkinnedMaterial;
-            if (!slot) slot = mTarget->createOutlineMaterial(colour, true);
+            if (!slot) slot = newOutlineMaterial(colour, true);
             return slot;
         }
         MaterialId &slot = primary ? mOutlinePrimaryMaterial : mOutlineMaterial;
-        if (!slot) slot = mTarget->createOutlineMaterial(colour);
+        if (!slot) slot = newOutlineMaterial(colour);
         return slot;
     };
     // One pooled shell per target mesh; extra shells from a previous (larger)
@@ -1721,7 +1767,7 @@ void SceneMirror::syncHighlight()
         const bool primary = targets[i].primary;
         HighlightShell &s = mHighlightShells[i];
         if (!s.node) {
-            s.node = mTarget->createNode();
+            s.node = newNode();
             // AT BIRTH, like every other helper in this file (the light wires
             // at :706, the grid, the camera bodies): the selection shell is
             // EDITOR FURNITURE, and without the flag itemVisibilityFlags gives
@@ -1748,7 +1794,7 @@ void SceneMirror::syncHighlight()
             // PLAYER's eyes for the same reason the grid is — a player is not
             // editing. It does NOT carry the VR channel, which is the wearer's
             // own hands and pointer.
-            if (s.node) mTarget->setNodeHelper(s.node, true);
+            if (s.node) postCall(&jahshaka::engine::Scene::setNodeHelper, s.node, true);
         }
         if (!s.node) continue;
 
@@ -1776,7 +1822,7 @@ void SceneMirror::syncHighlight()
         if (!shellMat) continue;
         if (s.mesh != m || s.wireframe != mHighlightWireframe || s.skinned != skinned
             || s.master != master || s.primary != primary) {
-            if (mTarget->attachMesh(s.node, m, shellMat)) {
+            if (postOk(&jahshaka::engine::Scene::attachMesh, s.node, m, shellMat)) {
                 s.mesh = m;
                 s.wireframe = mHighlightWireframe;
                 s.skinned = skinned;
@@ -1784,7 +1830,7 @@ void SceneMirror::syncHighlight()
                 s.primary = primary;
                 // The pairing is remembered engine-side, so a re-attach on
                 // either end re-arms it by itself.
-                mTarget->followSkeleton(s.node, master);   // 0 master = stop following
+                postCall(&jahshaka::engine::Scene::followSkeleton, s.node, master);   // 0 master = stop following
                 mReclaimPending = true;   // the shell's previous mesh may be free
             }
         }
@@ -1809,18 +1855,18 @@ void SceneMirror::syncHighlight()
         if (!s.transformPushed || s.transformKey != key.h) {
             iris::Mat4 t = meshNode->getGlobalTransform();
             if (!mHighlightWireframe) t.scale(1.0f + float(width) / 150.0f);
-            pushTransform(mTarget, s.node, t);
+            postTransform(s.node, t);
             s.transformKey = key.h;
             s.transformPushed = true;
         }
-        if (!s.shown) { mTarget->setNodeVisible(s.node, true); s.shown = true; }
+        if (!s.shown) { postCall(&jahshaka::engine::Scene::setNodeVisible, s.node, true); s.shown = true; }
     }
     for (size_t i = targets.size(); i < mHighlightShells.size(); ++i) {
         HighlightShell &s = mHighlightShells[i];
-        if (s.node && s.shown) { mTarget->setNodeVisible(s.node, false); s.shown = false; }
+        if (s.node && s.shown) { postCall(&jahshaka::engine::Scene::setNodeVisible, s.node, false); s.shown = false; }
         if (s.mesh) {
             s.mesh = 0;
-            if (s.skinned) { mTarget->followSkeleton(s.node, 0); s.skinned = false; s.master = 0; }
+            if (s.skinned) { postCall(&jahshaka::engine::Scene::followSkeleton, s.node, 0); s.skinned = false; s.master = 0; }
             mReclaimPending = true;
         }
     }
@@ -1953,19 +1999,19 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
         // setNodeVisible walks the node's subtree, and this ran every frame for
         // every camera body in the scene whether it was already hidden or not.
         if (e.wireNode && e.wireVisible != 0) {
-            mTarget->setNodeVisible(e.wireNode, false);
+            postCall(&jahshaka::engine::Scene::setNodeVisible, e.wireNode, false);
             e.wireVisible = 0;
             notePush(camera, "camera body off");
         }
         return;
     }
     if (!e.wireNode) {
-        e.wireNode = mTarget->createNode(e.node);
+        e.wireNode = newNode(e.node);
         // EDITOR HELPER (REFLECTIONS_ADOPTION_SPEC.md P1b): wires, range circles
         // and light icons are things the user must see and a reflection probe
         // must never capture. Marked at CREATION so the very first frame of
         // geometry already carries kHelperBit.
-        if (e.wireNode) mTarget->setNodeHelper(e.wireNode, true);
+        if (e.wireNode) postCall(&jahshaka::engine::Scene::setNodeHelper, e.wireNode, true);
     }
     if (!e.wireNode) return;
 
@@ -2066,16 +2112,16 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
             line(Vec3(mid.x, p[0].y, p[0].z), Vec3(mid.x, p[2].y, p[2].z));
         }
 
-        const jahshaka::engine::MeshId built = mTarget->createLineMesh(pts, false);
+        const jahshaka::engine::MeshId built = newLineMesh(pts, false);
         if (built) {
             notePush(camera, "camera body");
-            if (e.cameraMesh) mTarget->destroyMesh(e.cameraMesh);
+            if (e.cameraMesh) postCall(&jahshaka::engine::Scene::destroyMesh, e.cameraMesh);
             e.cameraMesh = built;
             e.cameraSignature = sig;
             e.wireKind = -2;                       // force the attach below
             if (!e.wireMaterial)
-                e.wireMaterial = mTarget->createUnlitMaterial(jahshaka::engine::Colour(1, 1, 1), false);
-            if (e.wireMaterial) mTarget->attachMesh(e.wireNode, e.cameraMesh, e.wireMaterial);
+                e.wireMaterial = newUnlitMaterial(jahshaka::engine::Colour(1, 1, 1), false);
+            if (e.wireMaterial) postCall(&jahshaka::engine::Scene::attachMesh, e.wireNode, e.cameraMesh, e.wireMaterial);
         }
     }
     if (!e.wireMaterial) return;
@@ -2095,7 +2141,7 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
     quint64 xk = 1469598103934665603ull;
     mixFloat(xk, sc.x()); mixFloat(xk, sc.y()); mixFloat(xk, sc.z());
     if (!e.wireXformPushed || e.wireXformKey != xk) {
-        mTarget->setNodeTransform(e.wireNode, jahshaka::engine::Vec3(), jahshaka::engine::Quat(),
+        postCall(&jahshaka::engine::Scene::setNodeTransform, e.wireNode, jahshaka::engine::Vec3(), jahshaka::engine::Quat(),
                                   jahshaka::engine::Vec3(sc.x() > 1e-6f ? 1.0f / sc.x() : 1.0f,
                                                          sc.y() > 1e-6f ? 1.0f / sc.y() : 1.0f,
                                                          sc.z() > 1e-6f ? 1.0f / sc.z() : 1.0f));
@@ -2103,7 +2149,7 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
         e.wireXformPushed = true;
         notePush(camera, "camera wire transform");
     }
-    if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; notePush(camera, "camera wire visible"); }
+    if (e.wireVisible != 1) { postCall(&jahshaka::engine::Scene::setNodeVisible, e.wireNode, true); e.wireVisible = 1; notePush(camera, "camera wire visible"); }
 }
 
 // ---- ground grid (EDITOR_SHORTCUTS_SPEC §3) --------------------------------------
@@ -2189,7 +2235,7 @@ void SceneMirror::setGroundPlaneMaterial(const iris::MaterialPtr &material)
     if (mGroundPlaneDoc == material) return;
     // A different material re-attaches on the next sync; the old one's id
     // leaves the pin, so arm the sweep to reclaim it.
-    if (mGroundPlaneNode && mGroundPlaneMaterial) mTarget->detachMesh(mGroundPlaneNode);
+    if (mGroundPlaneNode && mGroundPlaneMaterial) postCall(&jahshaka::engine::Scene::detachMesh, mGroundPlaneNode);
     mGroundPlaneDoc = material;
     mGroundPlaneMaterial = 0;
     mGroundPlaneTextures.clear();
@@ -2199,8 +2245,8 @@ void SceneMirror::setGroundPlaneMaterial(const iris::MaterialPtr &material)
 
 void SceneMirror::releaseGroundPlane()
 {
-    if (mGroundPlaneNode) { mTarget->removeNode(mGroundPlaneNode); mGroundPlaneNode = 0; }
-    if (mGroundPlaneMesh) { mTarget->destroyMesh(mGroundPlaneMesh); mGroundPlaneMesh = 0; }
+    if (mGroundPlaneNode) { postCall(&jahshaka::engine::Scene::removeNode, mGroundPlaneNode); mGroundPlaneNode = 0; }
+    if (mGroundPlaneMesh) { postCall(&jahshaka::engine::Scene::destroyMesh, mGroundPlaneMesh); mGroundPlaneMesh = 0; }
     mGroundPlanePlaced = false;
     mGroundPlaneMaterial = 0;
     mGroundPlaneTextures.clear();
@@ -2214,25 +2260,25 @@ void SceneMirror::syncGroundPlane()
         // A HIDE IS NOT A DELETE (DRAG-1): the quad and its material stay, so
         // a show is one visibility flip in the very next frame.
         if (mGroundPlaneNode && mGroundPlaneShown != 0) {
-            mTarget->setNodeVisible(mGroundPlaneNode, false);
+            postCall(&jahshaka::engine::Scene::setNodeVisible, mGroundPlaneNode, false);
             mGroundPlaneShown = 0;
         }
         return;
     }
     if (!mGroundPlaneNode) {
-        mGroundPlaneNode = mTarget->createNode();
+        mGroundPlaneNode = newNode();
         if (!mGroundPlaneNode) return;
         // A BACKDROP (EnginePrivate.h's bit scheme): out of every capture —
         // shadow casters, GI geometry, probe faces, planar mirrors, the Atom id
         // pass (it still RECEIVES shadows: its material samples the maps) —
         // and drawn by every view, the Player's included (the Player's host
         // turns the widget off rather than masking it).
-        mTarget->setNodeBackdrop(mGroundPlaneNode, true);
+        postCall(&jahshaka::engine::Scene::setNodeBackdrop, mGroundPlaneNode, true);
         mGroundPlanePlaced = false;
         mGroundPlaneShown = -1;
     }
     if (!mGroundPlanePlaced) {
-        mTarget->setNodeTransform(mGroundPlaneNode,
+        postCall(&jahshaka::engine::Scene::setNodeTransform, mGroundPlaneNode,
                                   Vec3(0.0f, mGroundPlaneHeight - kGroundPlaneSink, 0.0f),
                                   Quat(0.0f, 0.0f, 0.0f, 1.0f), Vec3(1.0f, 1.0f, 1.0f));
         mGroundPlanePlaced = true;
@@ -2250,14 +2296,14 @@ void SceneMirror::syncGroundPlane()
                            0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f };
         quad.uvs       = { u0, v0,   u1, v0,   u1, v1,   u0, v1 };
         quad.indices   = { 0, 2, 1,  0, 3, 2 };
-        mGroundPlaneMesh = mTarget->createMesh(quad);
+        mGroundPlaneMesh = newMesh(quad);
         if (!mGroundPlaneMesh) return;
         mGroundPlaneMaterial = 0;      // nothing is attached yet
     }
     if (!mGroundPlaneMaterial) {
         iris::Material *doc = mGroundPlaneDoc.data();
         const MaterialId mat = materialFor(doc);
-        if (!mat || !mTarget->attachMesh(mGroundPlaneNode, mGroundPlaneMesh, mat)) return;
+        if (!mat || !postOk(&jahshaka::engine::Scene::attachMesh, mGroundPlaneNode, mGroundPlaneMesh, mat)) return;
         mGroundPlaneMaterial = mat;
         // ITS MAPS, bound here: an entry binds its material's textures in its
         // own visit (syncTextures), and the plane is not an entry.
@@ -2267,14 +2313,14 @@ void SceneMirror::syncGroundPlane()
             for (const TextureBind &b : ms.binds) {
                 const TextureId t = b.slot == PbrTextureSlot::Reflection ? reflectionCubeFor(b.path)
                                                                          : textureFor(b.path, b.srgb);
-                if (t && mTarget->setPbrTexture(mat, b.slot, t)) mGroundPlaneTextures.push_back(t);
+                if (t && postOk(&jahshaka::engine::Scene::setPbrTexture, mat, b.slot, t)) mGroundPlaneTextures.push_back(t);
             }
         }
         mReclaimPending = true;
         mGroundPlaneShown = -1;
     }
     if (mGroundPlaneShown != 1) {
-        mTarget->setNodeVisible(mGroundPlaneNode, true);
+        postCall(&jahshaka::engine::Scene::setNodeVisible, mGroundPlaneNode, true);
         mGroundPlaneShown = 1;
     }
 }
@@ -2323,10 +2369,10 @@ void SceneMirror::syncGiVolume()
             // Latched, like the grid above: two subtree walks a frame to keep
             // two boxes nobody asked for hidden.
             if (mGiVolLitNode && mGiVolLitVisible != 0) {
-                mTarget->setNodeVisible(mGiVolLitNode, false); mGiVolLitVisible = 0;
+                postCall(&jahshaka::engine::Scene::setNodeVisible, mGiVolLitNode, false); mGiVolLitVisible = 0;
             }
             if (mGiVolProbeNode && mGiVolProbeVisible != 0) {
-                mTarget->setNodeVisible(mGiVolProbeNode, false); mGiVolProbeVisible = 0;
+                postCall(&jahshaka::engine::Scene::setNodeVisible, mGiVolProbeNode, false); mGiVolProbeVisible = 0;
             }
         }
         return;
@@ -2341,32 +2387,32 @@ void SceneMirror::syncGiVolume()
     const bool haveProbe = haveLit && !degenerateBox(st.probeRegionMin, st.probeRegionMax);
 
     if (!mGiVolLitNode) {
-        mGiVolLitNode = mTarget->createNode();
-        mGiVolProbeNode = mTarget->createNode();
+        mGiVolLitNode = newNode();
+        mGiVolProbeNode = newNode();
         if (!mGiVolLitNode || !mGiVolProbeNode) return;
         // EDITOR HELPERS, marked at creation: these boxes describe where GI
         // happens and must never be captured BY it.
-        mTarget->setNodeHelper(mGiVolLitNode, true);
-        mTarget->setNodeHelper(mGiVolProbeNode, true);
+        postCall(&jahshaka::engine::Scene::setNodeHelper, mGiVolLitNode, true);
+        postCall(&jahshaka::engine::Scene::setNodeHelper, mGiVolProbeNode, true);
         // Unlit, depth-tested, blended — the same treatment as the grid, so a
         // box behind geometry reads as behind it.
-        mGiVolLitMaterial   = mTarget->createUnlitMaterial(Colour(0.35f, 0.85f, 1.0f, 0.65f), true);
-        mGiVolProbeMaterial = mTarget->createUnlitMaterial(Colour(1.0f, 0.75f, 0.25f, 0.65f), true);
+        mGiVolLitMaterial   = newUnlitMaterial(Colour(0.35f, 0.85f, 1.0f, 0.65f), true);
+        mGiVolProbeMaterial = newUnlitMaterial(Colour(1.0f, 0.75f, 0.25f, 0.65f), true);
         mGiVolBuilt = true;
     }
 
     const auto rebuild = [&](NodeId node, MeshId &mesh, MaterialId material,
                              const Vec3 &mn, const Vec3 &mx,
                              Vec3 &cachedMin, Vec3 &cachedMax, bool have, int &vis) {
-        if (!have) { if (vis != 0) { mTarget->setNodeVisible(node, false); vis = 0; } return; }
+        if (!have) { if (vis != 0) { postCall(&jahshaka::engine::Scene::setNodeVisible, node, false); vis = 0; } return; }
         if (!mesh || !sameBox(mn, mx, cachedMin, cachedMax)) {
-            if (mesh) { mTarget->detachMesh(node); mTarget->destroyMesh(mesh); mesh = 0; }
-            mesh = mTarget->createLineMesh(boxEdges(mn, mx), false);
-            if (mesh) mTarget->attachMesh(node, mesh, material);
+            if (mesh) { postCall(&jahshaka::engine::Scene::detachMesh, node); postCall(&jahshaka::engine::Scene::destroyMesh, mesh); mesh = 0; }
+            mesh = newLineMesh(boxEdges(mn, mx), false);
+            if (mesh) postCall(&jahshaka::engine::Scene::attachMesh, node, mesh, material);
             cachedMin = mn; cachedMax = mx;
         }
         const int want = mesh != 0 ? 1 : 0;
-        if (vis != want) { mTarget->setNodeVisible(node, want != 0); vis = want; }
+        if (vis != want) { postCall(&jahshaka::engine::Scene::setNodeVisible, node, want != 0); vis = want; }
     };
     rebuild(mGiVolLitNode, mGiVolLitMesh, mGiVolLitMaterial,
             st.boundsMin, st.boundsMax, mGiVolLitMin, mGiVolLitMax, haveLit, mGiVolLitVisible);
@@ -2469,12 +2515,12 @@ void SceneMirror::setVrProxyModels(const QString &leftPath, const QString &right
         mVrProxyModelTried[i] = false;
         if (!mVrProxyModelMesh[i] || !mTarget) continue;
         if (mVrProxyMesh[i] == mVrProxyModelMesh[i]) {
-            mTarget->detachMesh(mVrProxyNode[i]);
+            postCall(&jahshaka::engine::Scene::detachMesh, mVrProxyNode[i]);
             mVrProxyMesh[i] = mVrProxyWandMesh[i];
             if (mVrProxyMesh[i])
-                mTarget->attachMesh(mVrProxyNode[i], mVrProxyMesh[i], mVrProxyMaterial[i]);
+                postCall(&jahshaka::engine::Scene::attachMesh, mVrProxyNode[i], mVrProxyMesh[i], mVrProxyMaterial[i]);
         }
-        mTarget->destroyMesh(mVrProxyModelMesh[i]);
+        postCall(&jahshaka::engine::Scene::destroyMesh, mVrProxyModelMesh[i]);
         mVrProxyModelMesh[i] = 0;
     }
 }
@@ -2514,7 +2560,7 @@ jahshaka::engine::MeshId SceneMirror::vrProxyModelMesh(int hand)
         return 0;
     }
     mVrProxyModelTriangles[hand] = int(data.indices.size() / 3);
-    mVrProxyModelMesh[hand] = mTarget->createMesh(data);
+    mVrProxyModelMesh[hand] = newMesh(data);
     return mVrProxyModelMesh[hand];
 }
 
@@ -2558,7 +2604,7 @@ void SceneMirror::syncVrProxies()
         if (mVrProxiesBuilt) {
             for (int i = 0; i < 2; ++i)
                 if (mVrProxyNode[i] && mVrProxyVisible[i] != 0) {
-                    mTarget->setNodeVisible(mVrProxyNode[i], false);
+                    postCall(&jahshaka::engine::Scene::setNodeVisible, mVrProxyNode[i], false);
                     mVrProxyVisible[i] = 0;
                 }
             // ...AND THE RAY WITH THEM: the session is its only writer, so
@@ -2566,7 +2612,7 @@ void SceneMirror::syncVrProxies()
             // that is merely running with the wands switched off keeps it —
             // that is the switch, not the end.)
             for (int i = 0; i < 2; ++i)
-                if (mVrRayNode[i]) mTarget->setNodeVisible(mVrRayNode[i], false);
+                if (mVrRayNode[i]) postCall(&jahshaka::engine::Scene::setNodeVisible, mVrRayNode[i], false);
             // ...AND THE WEARER'S HANDS (stage 3), for the same reason and on
             // the same terms as the wands: the session that placed them is gone.
             syncVrHandBones(false);
@@ -2613,7 +2659,7 @@ void SceneMirror::syncVrProxies()
             marker.push_back(Vec3(0, 0, -m)); marker.push_back(Vec3(0, 0, m));
         }
         for (int i = 0; i < 2; ++i) {
-            mVrProxyNode[i] = mTarget->createNode();
+            mVrProxyNode[i] = newNode();
             if (!mVrProxyNode[i]) return;
             // BOTH HELPER CHANNELS (kVrHelperBit's note). kHelperBit is what
             // keeps a controller out of every reflection-probe capture, every
@@ -2621,13 +2667,13 @@ void SceneMirror::syncVrProxies()
             // the desktop editor's picture; kVrHelperBit is what puts it in
             // EVERY VR eye — including a Player's, which draws no other
             // furniture at all. A wearer must see their own hands in both modes.
-            mTarget->setNodeHelper(mVrProxyNode[i], true);
-            mTarget->setNodeVrHelper(mVrProxyNode[i], true);
+            postCall(&jahshaka::engine::Scene::setNodeHelper, mVrProxyNode[i], true);
+            postCall(&jahshaka::engine::Scene::setNodeVrHelper, mVrProxyNode[i], true);
         }
         // Left and right in two colours, because "which hand is that" is the
         // second question anybody asks of a pair of markers.
-        mVrProxyMaterial[0] = mTarget->createUnlitMaterial(Colour(0.35f, 0.80f, 1.0f, 0.90f), true);
-        mVrProxyMaterial[1] = mTarget->createUnlitMaterial(Colour(1.0f, 0.72f, 0.30f, 0.90f), true);
+        mVrProxyMaterial[0] = newUnlitMaterial(Colour(0.35f, 0.80f, 1.0f, 0.90f), true);
+        mVrProxyMaterial[1] = newUnlitMaterial(Colour(1.0f, 0.72f, 0.30f, 0.90f), true);
         // THE VENDORED MODELS ARE LIT, AND THAT IS THE OWNER'S HEADSET SMOKE
         // TALKING (2026-09-17, WiVRn + Quest Pro): with an UNLIT flat grey they
         // read as PURE WHITE SILHOUETTES in the eyes — the shape moved in 3D
@@ -2655,45 +2701,45 @@ void SceneMirror::syncVrProxies()
             wandModel.albedo = Colour(grey.r, grey.g, grey.b, 1.0f);
             wandModel.roughness = 0.6f;
             wandModel.metalness = 0.0f;
-            mVrProxyModelMaterial = mTarget->createPbrMaterial(wandModel);
+            mVrProxyModelMaterial = newPbrMaterial(wandModel);
         }
-        mVrProxyWandMesh[0] = mTarget->createLineMesh(wand, false);
-        mVrProxyWandMesh[1] = mTarget->createLineMesh(wand, false);
+        mVrProxyWandMesh[0] = newLineMesh(wand, false);
+        mVrProxyWandMesh[1] = newLineMesh(wand, false);
         for (int i = 0; i < 2; ++i) {
             mVrProxyMesh[i] = mVrProxyWandMesh[i];
             if (mVrProxyMesh[i])
-                mTarget->attachMesh(mVrProxyNode[i], mVrProxyMesh[i], mVrProxyMaterial[i]);
+                postCall(&jahshaka::engine::Scene::attachMesh, mVrProxyNode[i], mVrProxyMesh[i], mVrProxyMaterial[i]);
         }
         // THE RAY'S TWO NODES, on the same two channels as the wands: in every
         // VR eye and in the desktop editor's picture, in no capture and in no
         // user's screenshot.
         for (int i = 0; i < 2; ++i) {
-            mVrRayNode[i] = mTarget->createNode();
+            mVrRayNode[i] = newNode();
             if (!mVrRayNode[i]) return;
-            mTarget->setNodeHelper(mVrRayNode[i], true);
-            mTarget->setNodeVrHelper(mVrRayNode[i], true);
+            postCall(&jahshaka::engine::Scene::setNodeHelper, mVrRayNode[i], true);
+            postCall(&jahshaka::engine::Scene::setNodeVrHelper, mVrRayNode[i], true);
         }
-        mVrRayMaterial[0] = mTarget->createUnlitMaterial(Colour(0.55f, 0.90f, 1.0f, 0.85f), true);
-        mVrRayMaterial[1] = mTarget->createUnlitMaterial(Colour(1.0f, 0.95f, 0.45f, 0.95f), false);
-        mVrRayMesh[0] = mTarget->createLineMesh(rayLine, false);
-        mVrRayMesh[1] = mTarget->createLineMesh(marker, false);
+        mVrRayMaterial[0] = newUnlitMaterial(Colour(0.55f, 0.90f, 1.0f, 0.85f), true);
+        mVrRayMaterial[1] = newUnlitMaterial(Colour(1.0f, 0.95f, 0.45f, 0.95f), false);
+        mVrRayMesh[0] = newLineMesh(rayLine, false);
+        mVrRayMesh[1] = newLineMesh(marker, false);
         for (int i = 0; i < 2; ++i) {
             if (mVrRayMesh[i])
-                mTarget->attachMesh(mVrRayNode[i], mVrRayMesh[i], mVrRayMaterial[i]);
+                postCall(&jahshaka::engine::Scene::attachMesh, mVrRayNode[i], mVrRayMesh[i], mVrRayMaterial[i]);
             // HIDDEN UNTIL A SESSION PLACES THEM. The ray belongs to a live
             // gesture and the session is its only writer (`placeRay`), so a
             // host with no session never shows one — and a node born visible
             // would draw a metre of line at the world origin for one frame.
-            mTarget->setNodeVisible(mVrRayNode[i], false);
+            postCall(&jahshaka::engine::Scene::setNodeVisible, mVrRayNode[i], false);
         }
-        mTarget->setVrRayNodes(mVrRayNode[0], mVrRayNode[1]);
+        postCall(&jahshaka::engine::Scene::setVrRayNodes, mVrRayNode[0], mVrRayNode[1]);
         // ...AND THE SESSION IS TOLD WHICH NODES THEY ARE (VR-4-FIX finding 4).
         // A running session then places them INSIDE its own frame, right after
         // it has located the hands — which is the only moment this frame's
         // poses exist. The mirror keeps everything else about them: it made
         // them, it owns their meshes and materials, and it decides whether they
         // are shown.
-        mTarget->setVrProxyNodes(mVrProxyNode[0], mVrProxyNode[1]);
+        postCall(&jahshaka::engine::Scene::setVrProxyNodes, mVrProxyNode[0], mVrProxyNode[1]);
         mVrProxiesBuilt = true;
     }
 
@@ -2704,7 +2750,7 @@ void SceneMirror::syncVrProxies()
     if (!mVrProxiesVisible) {
         for (int i = 0; i < 2; ++i)
             if (mVrProxyNode[i] && mVrProxyVisible[i] != 0) {
-                mTarget->setNodeVisible(mVrProxyNode[i], false);
+                postCall(&jahshaka::engine::Scene::setNodeVisible, mVrProxyNode[i], false);
                 mVrProxyVisible[i] = 0;
             }
         // A BARE HAND IS A HAND MARKER TOO (stage 3): `vr.proxies(false)` means
@@ -2744,8 +2790,8 @@ void SceneMirror::syncVrProxies()
             // DETACH IS NOT DESTROY: both meshes stay alive for the life of
             // the scene, so a wearer who puts a controller down and picks a
             // different one up swaps the mesh back with no reload.
-            mTarget->detachMesh(mVrProxyNode[i]);
-            mTarget->attachMesh(mVrProxyNode[i], want, material);
+            postCall(&jahshaka::engine::Scene::detachMesh, mVrProxyNode[i]);
+            postCall(&jahshaka::engine::Scene::attachMesh, mVrProxyNode[i], want, material);
             mVrProxyMesh[i] = want;
         }
     }
@@ -2774,7 +2820,7 @@ void SceneMirror::syncVrProxies()
             // status pushed while the session's own frame was skipped — and
             // because a session overwrites it a few microseconds later with
             // the pose that frame actually draws.
-            mTarget->setNodeTransform(mVrProxyNode[i], p.position, p.rotation,
+            postCall(&jahshaka::engine::Scene::setNodeTransform, mVrProxyNode[i], p.position, p.rotation,
                                       Vec3(1.0f, 1.0f, 1.0f));
         }
         // THE MEMO IS NOT THE ONLY WRITER (VR-INPUT-1E-FIX finding 4). The
@@ -2792,10 +2838,10 @@ void SceneMirror::syncVrProxies()
         // side, where this is the only writer that ever asks for a hide with
         // the hand still valid.
         if (want) {
-            mTarget->setNodeVisible(mVrProxyNode[i], true);
+            postCall(&jahshaka::engine::Scene::setNodeVisible, mVrProxyNode[i], true);
             mVrProxyVisible[i] = 1;
         } else if (mVrProxyVisible[i] != 0) {
-            mTarget->setNodeVisible(mVrProxyNode[i], false);
+            postCall(&jahshaka::engine::Scene::setNodeVisible, mVrProxyNode[i], false);
             mVrProxyVisible[i] = 0;
         }
     }
@@ -2858,8 +2904,8 @@ void SceneMirror::syncVrHandBones(bool draw)
             // subtree walks a frame to re-hide what is already hidden.
             if (!mVrHandBonesRegistered[h]) { mVrHandBonesShownCount[h] = 0u; continue; }
             for (unsigned b = 0; b < jahshaka::engine::kVrHandBoneCount; ++b)
-                if (mVrHandBoneNode[h][b]) mTarget->setNodeVisible(mVrHandBoneNode[h][b], false);
-            mTarget->setVrHandBoneNodes(h, nullptr, 0u);
+                if (mVrHandBoneNode[h][b]) postCall(&jahshaka::engine::Scene::setNodeVisible, mVrHandBoneNode[h][b], false);
+            post([h](jahshaka::engine::Scene &s) { s.setVrHandBoneNodes(h, nullptr, 0u); });
             mVrHandBonesRegistered[h] = false;
             mVrHandBonesShownCount[h] = 0u;
             continue;
@@ -2867,7 +2913,7 @@ void SceneMirror::syncVrHandBones(bool draw)
         if (!mVrHandBonesBuilt[h]) {
             if (!mVrHandBoneMesh) {
                 const std::vector<Vec3> segment = { Vec3(0, 0, 0), Vec3(0, 0, -1) };
-                mVrHandBoneMesh = mTarget->createLineMesh(segment, false);
+                mVrHandBoneMesh = newLineMesh(segment, false);
                 if (!mVrHandBoneMesh) return;
             }
             // BUILT IS SET FIRST, AND A NODE THE SCENE REFUSED IS A ZERO
@@ -2879,17 +2925,17 @@ void SceneMirror::syncVrHandBones(bool draw)
             // zero, so a partial row draws what it has and leaks nothing.
             mVrHandBonesBuilt[h] = true;
             for (unsigned b = 0; b < jahshaka::engine::kVrHandBoneCount; ++b) {
-                const NodeId node = mTarget->createNode();
+                const NodeId node = newNode();
                 if (!node) { mVrHandBoneNode[h][b] = 0; continue; }
                 // BOTH HELPER CHANNELS, exactly like the wands: kHelperBit
                 // keeps the wearer's hands out of every probe capture, every
                 // shadow map and every user screenshot and puts them in the
                 // desktop editor's picture; kVrHelperBit puts them in EVERY VR
                 // eye, including a Player's, which draws no other furniture.
-                mTarget->setNodeHelper(node, true);
-                mTarget->setNodeVrHelper(node, true);
-                mTarget->setNodeVisible(node, false);
-                mTarget->attachMesh(node, mVrHandBoneMesh, mVrProxyMaterial[h]);
+                postCall(&jahshaka::engine::Scene::setNodeHelper, node, true);
+                postCall(&jahshaka::engine::Scene::setNodeVrHelper, node, true);
+                postCall(&jahshaka::engine::Scene::setNodeVisible, node, false);
+                postCall(&jahshaka::engine::Scene::attachMesh, node, mVrHandBoneMesh, mVrProxyMaterial[h]);
                 mVrHandBoneNode[h][b] = node;
             }
         }
@@ -2897,8 +2943,12 @@ void SceneMirror::syncVrHandBones(bool draw)
         // the frame that draws them — this write below is the host's own best
         // answer for a frame no session drew (a suite with no runtime, the first
         // frame of a session), one tick old, exactly like the wands'.
-        mTarget->setVrHandBoneNodes(h, mVrHandBoneNode[h],
-                                    unsigned(jahshaka::engine::kVrHandBoneCount));
+        {
+            std::vector<NodeId> ids(mVrHandBoneNode[h], mVrHandBoneNode[h] + jahshaka::engine::kVrHandBoneCount);
+            post([h, ids = std::move(ids)](jahshaka::engine::Scene &s) {
+                s.setVrHandBoneNodes(h, ids.data(), unsigned(ids.size()));
+            });
+        }
         mVrHandBonesRegistered[h] = true;
         unsigned shown = 0u;
         for (unsigned b = 0; b < jahshaka::engine::kVrHandBoneCount; ++b) {
@@ -2913,9 +2963,9 @@ void SceneMirror::syncVrHandBones(bool draw)
                             from.valid && to.valid &&
                             jahshaka::engine::vrBoneTransform(from.position, to.position,
                                                               position, rotation, scale);
-            if (!ok) { mTarget->setNodeVisible(node, false); continue; }
-            mTarget->setNodeTransform(node, position, rotation, scale);
-            mTarget->setNodeVisible(node, true);
+            if (!ok) { postCall(&jahshaka::engine::Scene::setNodeVisible, node, false); continue; }
+            postCall(&jahshaka::engine::Scene::setNodeTransform, node, position, rotation, scale);
+            postCall(&jahshaka::engine::Scene::setNodeVisible, node, true);
             ++shown;
         }
         mVrHandBonesShownCount[h] = shown;
@@ -2973,7 +3023,7 @@ MeshId SceneMirror::wireMeshFor(int kind)
             }
         }
     }
-    mWireMeshes[kind] = mTarget->createLineMesh(pts, false);
+    mWireMeshes[kind] = newLineMesh(pts, false);
     return mWireMeshes[kind];
 }
 
@@ -2981,7 +3031,7 @@ void SceneMirror::pushWireColour(Entry &e, const Colour &c)
 {
     if (!e.wireMaterial) return;
     if (e.wireColourPushed && e.wireColour == c) return;
-    if (mTarget->setUnlitMaterial(e.wireMaterial, c)) {
+    if (postOk(&jahshaka::engine::Scene::setUnlitMaterial, e.wireMaterial, c)) {
         notePush(e.docNode, "wire colour");
         e.wireColour = c;
         e.wireColourPushed = true;
@@ -2994,7 +3044,7 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
         // Hides the wire lines AND the icon billboard set riding on wireNode
         // (the engine toggles a set's visibility flags with its owning node).
         if (e.wireNode && e.wireVisible != 0) {
-            mTarget->setNodeVisible(e.wireNode, false); e.wireVisible = 0;
+            postCall(&jahshaka::engine::Scene::setNodeVisible, e.wireNode, false); e.wireVisible = 0;
             notePush(light, "light wires off");
         }
         return;
@@ -3004,12 +3054,12 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
     // and no emitter rectangle to draw.
     if (light->lightType == iris::LightType::Sky) {
         if (!e.wireNode) {
-            e.wireNode = mTarget->createNode(e.node);
-            if (e.wireNode) mTarget->setNodeHelper(e.wireNode, true);
+            e.wireNode = newNode(e.node);
+            if (e.wireNode) postCall(&jahshaka::engine::Scene::setNodeHelper, e.wireNode, true);
         }
         if (!e.wireNode) return;
-        if (e.wireKind != -1) { mTarget->detachMesh(e.wireNode); e.wireKind = -1; notePush(light, "sky wire"); }
-        if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; notePush(light, "sky wire visible"); }
+        if (e.wireKind != -1) { postCall(&jahshaka::engine::Scene::detachMesh, e.wireNode); e.wireKind = -1; notePush(light, "sky wire"); }
+        if (e.wireVisible != 1) { postCall(&jahshaka::engine::Scene::setNodeVisible, e.wireNode, true); e.wireVisible = 1; notePush(light, "sky wire visible"); }
         syncLightIcon(e, light);
         return;
     }
@@ -3029,26 +3079,26 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
         else if (kind == 2) shape = 0;    // spot: keep the arrow, drop the cone
     }
     if (!e.wireNode) {
-        e.wireNode = mTarget->createNode(e.node);
+        e.wireNode = newNode(e.node);
         // EDITOR HELPER (REFLECTIONS_ADOPTION_SPEC.md P1b): wires, range circles
         // and light icons are things the user must see and a reflection probe
         // must never capture. Marked at CREATION so the very first frame of
         // geometry already carries kHelperBit.
-        if (e.wireNode) mTarget->setNodeHelper(e.wireNode, true);
+        if (e.wireNode) postCall(&jahshaka::engine::Scene::setNodeHelper, e.wireNode, true);
     }
     if (!e.wireNode) return;
     if (shape < 0) {
-        if (e.wireKind != -1) { mTarget->detachMesh(e.wireNode); e.wireKind = -1; notePush(light, "wire shape"); }
+        if (e.wireKind != -1) { postCall(&jahshaka::engine::Scene::detachMesh, e.wireNode); e.wireKind = -1; notePush(light, "wire shape"); }
         // the icon set rides this node
-        if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; notePush(light, "wire visible"); }
+        if (e.wireVisible != 1) { postCall(&jahshaka::engine::Scene::setNodeVisible, e.wireNode, true); e.wireVisible = 1; notePush(light, "wire visible"); }
         syncLightIcon(e, light);
         return;
     }
     MeshId m = wireMeshFor(shape);
     if (!m) return;
-    if (!e.wireMaterial) e.wireMaterial = mTarget->createUnlitMaterial(Colour(1, 1, 1), false);
+    if (!e.wireMaterial) e.wireMaterial = newUnlitMaterial(Colour(1, 1, 1), false);
     if (!e.wireMaterial) return;
-    if (e.wireKind != shape) { if (mTarget->attachMesh(e.wireNode, m, e.wireMaterial)) { e.wireKind = shape; notePush(light, "wire shape"); } }
+    if (e.wireKind != shape) { if (postOk(&jahshaka::engine::Scene::attachMesh, e.wireNode, m, e.wireMaterial)) { e.wireKind = shape; notePush(light, "wire shape"); } }
     const QColor c = light->color;
     // On change only, like every other push here: setUnlitMaterial schedules a
     // const-buffer update, and a light's colour is edited by hand, not animated.
@@ -3080,12 +3130,12 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
     Hasher wireKey;
     wireKey << wireScale.x << wireScale.y << wireScale.z;
     if (!e.wireXformPushed || e.wireXformKey != wireKey.h) {
-        mTarget->setNodeTransform(e.wireNode, Vec3(), Quat(), wireScale);
+        postCall(&jahshaka::engine::Scene::setNodeTransform, e.wireNode, Vec3(), Quat(), wireScale);
         e.wireXformKey = wireKey.h;
         e.wireXformPushed = true;
         notePush(light, "wire transform");
     }
-    if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; notePush(light, "wire visible"); }
+    if (e.wireVisible != 1) { postCall(&jahshaka::engine::Scene::setNodeVisible, e.wireNode, true); e.wireVisible = 1; notePush(light, "wire visible"); }
     syncLightIcon(e, light);
 }
 
@@ -3125,7 +3175,7 @@ void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
         }
     }
     if (!e.hasIcon || e.iconSignature != path) {
-        if (!mTarget->createBillboardSet(e.wireNode, iconTextureFor(path), false, 1,
+        if (!postOk(&jahshaka::engine::Scene::createBillboardSet, e.wireNode, iconTextureFor(path), false, 1,
                                          jahshaka::engine::BillboardLayer::Overlay))
             return;
         e.hasIcon = true;
@@ -3145,7 +3195,8 @@ void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
     const iris::Vec3 p = light->getGlobalPosition();
     b.position = Vec3(p.x(), p.y(), p.z());
     b.size = light->iconSize > 0.0f ? light->iconSize : 0.5f;
-    if (mTarget->setBillboards(e.wireNode, &b, 1)) {
+    post([node = e.wireNode, b](jahshaka::engine::Scene &s) { s.setBillboards(node, &b, 1); });
+    {
         notePush(light, "light icon");
         e.iconKey = key.h;
         e.iconPushed = true;
@@ -3190,7 +3241,7 @@ TextureId SceneMirror::iconTextureFor(const QString &path)
     // MIPMAPPED (the second half of the 2026-09-08 icon fix): these images are
     // always seen minified — a 640x640 glyph at ~30 pixels — and the base level
     // alone aliases into a sparkling mess. The chain is built once, here.
-    TextureId id = mTarget->createTexture(unsigned(img.width()), unsigned(img.height()),
+    TextureId id = newTexture(unsigned(img.width()), unsigned(img.height()),
                                           img.constBits(), true, /*mipmaps*/ true);
     mIconTextures.insert(path, id);   // cache failures (0) too: don't retry every frame
     return id;
@@ -3270,8 +3321,8 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
     }
     if (!e.node) {
         // ONE ID SPACE (U3 stage 3, F6): the engine node takes the document node's own id.
-        e.node = mTarget->createDocumentNode(jahshaka::engine::NodeId(node->nodeId), parentId);
-        if (!e.node) { out.descend = false; return out; }
+        e.node = jahshaka::engine::NodeId(node->nodeId);
+        post([id = e.node, parentId](jahshaka::engine::Scene &s) { s.createDocumentNode(id, parentId); });
         e.parentPushed = parentId;
         e.staticPushed = node->isStaticInGraph() ? 1 : 0;
         e.visiblePushed = -1;      // force one visibility application
@@ -3316,7 +3367,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
         // would derive the same answer again by walking up to the nearest
         // registered ancestor, one registry lookup per push. On a first sync
         // that is one per adopted node, for a value sitting in a local.
-        mTarget->setNodeVisibleUnder(e.node, shown, parentShown);
+        postCall(&jahshaka::engine::Scene::setNodeVisibleUnder, e.node, shown, parentShown);
         e.visiblePushed = wantVisible;
         notePush(node, "visibility");
     }
@@ -3346,7 +3397,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
     // the LightDesc below).
     const quint32 wantLightMask = node->getLightMask();
     if (!e.lightMaskEverPushed || e.lightMaskPushed != wantLightMask) {
-        mTarget->setNodeLightMask(e.node, wantLightMask);
+        postCall(&jahshaka::engine::Scene::setNodeLightMask, e.node, wantLightMask);
         e.lightMaskPushed = wantLightMask;
         e.lightMaskEverPushed = true;
         notePush(node, "lightMask");
@@ -3362,14 +3413,14 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
     // there.
     const int wantCastShadow = node->getShadowCastingEnabled() ? 1 : 0;
     if (e.castShadowPushed != wantCastShadow) {
-        mTarget->setNodeCastShadow(e.node, wantCastShadow != 0);
+        postCall(&jahshaka::engine::Scene::setNodeCastShadow, e.node, wantCastShadow != 0);
         e.castShadowPushed = wantCastShadow;
         notePush(node, "castShadow");
     }
 
     // The material-only swap the mesh branch decides and the tail of this
     // function performs, once the new material is complete (MATERIAL-SWAP-GI-1).
-    MaterialId pendingSwap = 0;
+    MaterialId pendingSwap = 0, pendingSwapFrom = 0;
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
         auto *meshNode = static_cast<iris::MeshNode *>(node);
         // THE NODE'S FACE CULL (CULL-MODE-2). The engine holds it per node and picks
@@ -3386,7 +3437,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
             case iris::FaceCullingMode::DefinedInMaterial: break;
             }
             if (e.faceCullPushed != int(wantCull)) {
-                mTarget->setNodeFaceCull(e.node, wantCull);
+                postCall(&jahshaka::engine::Scene::setNodeFaceCull, e.node, wantCull);
                 e.faceCullPushed = int(wantCull);
                 notePush(node, "faceCull");
             }
@@ -3436,6 +3487,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
             if (pendingSwap) {
                 noteMaterialUser(e, node, e.materialPtr, material);
                 if (e.material) mDroppedMaterials.insert(e.material);   // the old material may now be unreferenced
+                pendingSwapFrom = e.material;
                 e.material = pendingSwap; e.materialPtr = material;
                 noteTaken(0, pendingSwap);
                 e.texturesPushed = false;
@@ -3472,7 +3524,8 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
             e.gpuSkinned = false;
             e.boneCount = 0;
             MeshId m = 0;
-            if (mat && !e.skeleton.isNull()) {
+            if (e.meshPtr != mesh) e.rigRefused = false;   // a new mesh is a new question
+            if (mat && !e.skeleton.isNull() && !e.rigRefused) {
                 // GPU skinning: a SEPARATE entry point, because the engine has to
                 // know the mesh is skinned before the renderable exists —
                 // attaching first and rigging later yields a silently unskinned
@@ -3500,15 +3553,29 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                 SkeletonDesc rig;
                 if (toSkeletonDesc(rigSkeleton, rig)) {
                     m = meshFor(mesh, QString::fromStdString(rig.id));
-                    if (m && mTarget->attachSkinnedMesh(
-                                 e.node, m, mat, rig,
-                                 blendToRig.isEmpty() ? nullptr : blendToRig.constData(),
-                                 size_t(blendToRig.size()))) {
+                    std::vector<unsigned short> blend(blendToRig.cbegin(), blendToRig.cend());
+                    // THE RIG'S ANSWER COMES BACK AS A COMPLETION (U3 stage 3): a refusal re-attaches unskinned at
+                    // the next sync — what the walk did on the spot when the call was direct.
+                    const auto refused = [this, key = node, alive = QWeakPointer<iris::SceneNode>(node->sharedFromThis()),
+                                          id = e.node](const std::string &why) {
+                        if (alive.isNull()) return;
+                        const auto it = mEntries.find(key);
+                        if (it == mEntries.end() || it->node != id) return;
+                        qWarning("SceneMirror: the engine would not rig a skinned mesh (%s); it renders unskinned",
+                                 why.c_str());
+                        it->rigRefused = true;
+                        it->hasMesh = false;
+                        key->markChanged(iris::NodeChange::Content);
+                    };
+                    if (m && (postChecked([node = e.node, m, mat, rig, blend = std::move(blend)](jahshaka::engine::Scene &s) {
+                                  return s.attachSkinnedMesh(node, m, mat, rig, blend.empty() ? nullptr : blend.data(),
+                                                             blend.size());
+                              }, refused), true)) {
                         attached = true;
                         e.gpuSkinned = true;
                         // ITS DRAWN POSE RIDES EVERY FRAME'S SNAPSHOT (ENGINE-UPGRADE-U3 stage 2): the sockets and the
                         // avatar overlay read it from there (entryBoneWorldTransforms), never from the engine.
-                        mTarget->publishBonePoses(e.node, true);
+                        postCall(&jahshaka::engine::Scene::publishBonePoses, e.node, true);
                         e.rigSkeleton = rigSkeleton;
                         e.blendToRig = blendToRig;
                         e.characterHost = host;
@@ -3530,7 +3597,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                 e.characterHost = nullptr;
                 m = meshFor(mesh);
             }
-            if (!attached && m && mat) attached = mTarget->attachMesh(e.node, m, mat);
+            if (!attached && m && mat) attached = postOk(&jahshaka::engine::Scene::attachMesh, e.node, m, mat);
             if (attached) {
                 notePush(node, "mesh attach");
                 ++mMeshAttaches;
@@ -3551,7 +3618,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
         } else if (!mesh && e.hasMesh) {
             // The document dropped the mesh (a node kept, its MeshPtr cleared).
             // Without this the engine kept drawing the old geometry forever.
-            mTarget->detachMesh(e.node);
+            postCall(&jahshaka::engine::Scene::detachMesh, e.node);
             notePush(node, "mesh detach");
             noteMaterialUser(e, node, e.materialPtr, nullptr);
             e.materialPtr = nullptr;
@@ -3605,7 +3672,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                     // THE MODEL IN FORCE IS THE MIRROR'S OWN RECORD (ENGINE-UPGRADE-U3 stage 2: the host keeps
                     // what it set — the material's family at its creation, then every switch the engine accepted).
                     if (materialModelOf(e.material) != ms.pbr.shadingModel &&
-                        mTarget->setShadingModel(e.material, ms.pbr.shadingModel)) {
+                        postOk(&jahshaka::engine::Scene::setShadingModel, e.material, ms.pbr.shadingModel)) {
                         mMaterialModels.insert(e.material, ms.pbr.shadingModel);
                         notePush(node, "shading model");
                     }
@@ -3618,7 +3685,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                 MaterialSync &push = const_cast<MaterialSync &>(ms);
                 if (!push.pushed || push.pushedTo != e.material
                     || push.pushedFingerprint != ms.fingerprint) {
-                    if (mTarget->setPbrMaterial(e.material, ms.pbr)) {
+                    if (postOk(&jahshaka::engine::Scene::setPbrMaterial, e.material, ms.pbr)) {
                         notePush(node, "pbr params");
                         push.pushedTo = e.material;
                         push.pushedFingerprint = ms.fingerprint;
@@ -3643,10 +3710,20 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
     // it now. A refusal (a family crossing, a normal map without tangents) is
     // answered by the full re-attach, exactly as before this lane.
     if (pendingSwap) {
-        if (mTarget->setNodeMaterial(e.node, pendingSwap)) {
+        // ONE MESSAGE, THE ENGINE'S ANSWER INSIDE IT (U3 stage 3): the swap, and the re-attach where the engine
+        // refuses it. A family crossing (Lit / Unlit / Distortion) is known here — the mirror keeps every material's
+        // model — and goes straight to the re-attach; a normal map on a mesh without tangents is the engine's to say.
+        const auto familyOf = [](jahshaka::engine::ShadingModel m) {
+            return m == jahshaka::engine::ShadingModel::Unlit ? 1 : m == jahshaka::engine::ShadingModel::Distortion ? 2 : 0;
+        };
+        const bool crosses = pendingSwapFrom && familyOf(materialModelOf(pendingSwapFrom)) != familyOf(materialModelOf(pendingSwap));
+        post([n = e.node, mesh = e.mesh, mat = pendingSwap, crosses](jahshaka::engine::Scene &s) {
+            if ((crosses || !s.setNodeMaterial(n, mat)) && mesh) s.attachMesh(n, mesh, mat);
+        });
+        if (!crosses) {
             notePush(node, "material swap");
             ++mMaterialSwaps;
-        } else if (e.mesh && mTarget->attachMesh(e.node, e.mesh, pendingSwap)) {
+        } else if (e.mesh) {
             notePush(node, "mesh attach");
             ++mMeshAttaches;
         }
@@ -3662,7 +3739,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
     {
         const int want = node->getPlanarReflector() ? 1 : 0;
         if (e.planarReflector != want) {
-            mTarget->setNodePlanarReflector(e.node, want != 0);
+            postCall(&jahshaka::engine::Scene::setNodePlanarReflector, e.node, want != 0);
             e.planarReflector = want;
             notePush(node, "planar reflector");
         }
@@ -3674,7 +3751,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
     {
         const int want = node->getProbeGridExcluded() ? 1 : 0;
         if (e.probeGridExcluded != want) {
-            mTarget->setNodeProbeGridExcluded(e.node, want != 0);
+            postCall(&jahshaka::engine::Scene::setNodeProbeGridExcluded, e.node, want != 0);
             e.probeGridExcluded = want;
             notePush(node, "probe grid excluded");
         }
@@ -3686,7 +3763,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
         // A node may stop being an emitter without being removed (the document
         // changes a node's type in place). removeParticleSystem is the explicit
         // counterpart setParticleSystem needs for exactly that.
-        mTarget->removeParticleSystem(e.node);
+        postCall(&jahshaka::engine::Scene::removeParticleSystem, e.node);
         notePush(node, "particles removed");
         e.hasParticles = false;
         e.particleSignature = 0;
@@ -3706,7 +3783,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
         // selectable like any other light's) — only the engine light is absent.
         if (light->lightType == iris::LightType::Sky) {
             if (e.hasLight) {
-                mTarget->removeLight(e.node);
+                postCall(&jahshaka::engine::Scene::removeLight, e.node);
                 notePush(node, "sky light has no engine light");
                 e.hasLight = false;
             }
@@ -3743,7 +3820,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
             // setLight reads is in it, which is what keeps a new field from
             // silently stopping at the first push).
             if (!e.lightPushed || want != e.lastLight) {
-                if (mTarget->setLight(e.node, want)) {
+                if (postOk(&jahshaka::engine::Scene::setLight, e.node, want)) {
                     notePush(node, "light");
                     e.hasLight = true;
                     e.lastLight = want;
@@ -3996,7 +4073,7 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
         // same reason, from the other side: the object never left the voxels,
         // so nothing has to be rebuilt to put it back.
         const bool soft = why == iris::MobilityReason::Play || (!movable && e.movableSoft);
-        mTarget->setNodeMovable(e.node, movable,
+        postCall(&jahshaka::engine::Scene::setNodeMovable, e.node, movable,
                                 soft ? jahshaka::engine::MobilityChange::Soft
                                      : jahshaka::engine::MobilityChange::Authoring);
         notePush(node, "mobility");
@@ -4263,7 +4340,7 @@ void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
     // whose texture cannot be resolved is left with no texture rather than
     // silently keeping a stale one.
     const TextureId tex = texPath.isEmpty() ? 0 : textureFor(texPath, true);
-    if (mTarget->setParticleSystem(e.node, toParticleDesc(ps, tex))) {
+    if (postOk(&jahshaka::engine::Scene::setParticleSystem, e.node, toParticleDesc(ps, tex))) {
         notePush(ps, "particles");
         e.hasParticles = true;
         e.particleSignature = sig;
@@ -4284,7 +4361,7 @@ void SceneMirror::reclaimUnused()
     if (mGroundPlaneMaterial) usedMaterials.insert(mGroundPlaneMaterial);
     for (auto it = mMeshes.begin(); it != mMeshes.end();) {
         if (usedMeshes.contains(it.value())) { ++it; continue; }
-        mTarget->destroyMesh(it.value()); it = mMeshes.erase(it);
+        postCall(&jahshaka::engine::Scene::destroyMesh, it.value()); it = mMeshes.erase(it);
     }
     // ...and the per-material MEMO with them. It used to be swept at the end of
     // every sync — one pass over every material in the scene, every frame, and
@@ -4296,7 +4373,7 @@ void SceneMirror::reclaimUnused()
         // The per-material memo goes WITH the material (lead review F7).
         mMaterialSync.remove(it.key());
         mMaterialModels.remove(it.value());
-        mTarget->destroyMaterial(it.value()); it = mMaterials.erase(it);
+        postCall(&jahshaka::engine::Scene::destroyMaterial, it.value()); it = mMaterials.erase(it);
     }
     // Textures, the third cache — and the one that was never reclaimed at all
     // (deep audit 2026-09, area 5). Browsing an asset library or editing a
@@ -4334,7 +4411,7 @@ void SceneMirror::reclaimUnused()
     for (TextureId t : mGroundPlaneTextures) usedTextures.insert(t);
     for (auto it = mTextures.begin(); it != mTextures.end();) {
         if (usedTextures.contains(it.value())) { ++it; continue; }
-        mTarget->destroyTexture(it.value());
+        postCall(&jahshaka::engine::Scene::destroyTexture, it.value());
         // A live texture's generation record dies with its engine texture, or
         // the next bind of the same guid would be recorded as already current
         // and never receive its first upload.
@@ -4361,15 +4438,15 @@ void SceneMirror::releaseEntry(Entry &e)
         if (mMovableNodes) --mMovableNodes;
     }
     if (e.docNode && e.materialPtr) noteMaterialUser(e, e.docNode, e.materialPtr, nullptr);
-    if (e.wireNode) mTarget->removeNode(e.wireNode);
-    if (e.wireMaterial) mTarget->destroyMaterial(e.wireMaterial);
+    if (e.wireNode) postCall(&jahshaka::engine::Scene::removeNode, e.wireNode);
+    if (e.wireMaterial) postCall(&jahshaka::engine::Scene::destroyMaterial, e.wireMaterial);
     // The camera body/frustum mesh belongs to this entry alone (it is derived
     // from that one camera's lens, so nothing else can reference it) and lives
     // outside the shared mMeshes cache reclaimUnused sweeps.
-    if (e.cameraMesh) mTarget->destroyMesh(e.cameraMesh);
+    if (e.cameraMesh) postCall(&jahshaka::engine::Scene::destroyMesh, e.cameraMesh);
     // removeNode on an ADOPTED node releases the engine's attachments and
     // forgets the id; the node itself belongs to the document.
-    if (e.node) mTarget->removeNode(e.node);
+    if (e.node) postCall(&jahshaka::engine::Scene::removeNode, e.node);
     e = Entry();
 }
 
@@ -4421,7 +4498,7 @@ MeshId SceneMirror::meshFor(iris::Mesh *mesh, const QString &rigId)
         }
         data.blendWeights = bw;
     }
-    MeshId id = mTarget->createMesh(data);
+    MeshId id = newMesh(data);
     ++mBuiltMeshes;
     mBuiltVertices += data.vertexCount();
     mBuiltIndices += data.indices.size();
@@ -4452,14 +4529,14 @@ MaterialId SceneMirror::materialFor(iris::Material *material)
         // material. The document holds PbrMaterials only, so this is a guard
         // (and the no-material node's surface) rather than a translation.
         if (!mDefaultMaterial) {
-            mDefaultMaterial = mTarget->createPbrMaterial(defaultMaterialSync().pbr);
+            mDefaultMaterial = newPbrMaterial(defaultMaterialSync().pbr);
             noteMaterialCreated(mDefaultMaterial, defaultMaterialSync().pbr);
         }
         return mDefaultMaterial;
     }
     auto it = mMaterials.constFind(material);
     if (it != mMaterials.constEnd()) return it.value();
-    MaterialId id = mTarget->createPbrMaterial(p);
+    MaterialId id = newPbrMaterial(p);
     if (id) {
         noteMaterialCreated(id, p);
         mMaterials.insert(material, id);
@@ -4498,10 +4575,10 @@ void SceneMirror::syncCustomPieces(iris::Material *material, MaterialId id)
     if (pbr->textureVelocityU != 0.0f || pbr->textureVelocityV != 0.0f) mAnyCustomPiece = true;
     if (pbr->customPiecePixel.isEmpty() && pbr->customPieceVertex.isEmpty()) return;
     if (!pbr->customPiecePixel.isEmpty())
-        mTarget->setMaterialCustomPiece(id, pbr->customPiecePixel.toStdString(),
+        postCall(&jahshaka::engine::Scene::setMaterialCustomPiece, id, pbr->customPiecePixel.toStdString(),
                                         CustomPieceStage::PixelPreLights);
     if (!pbr->customPieceVertex.isEmpty())
-        mTarget->setMaterialCustomPiece(id, pbr->customPieceVertex.toStdString(),
+        postCall(&jahshaka::engine::Scene::setMaterialCustomPiece, id, pbr->customPieceVertex.toStdString(),
                                         CustomPieceStage::VertexPreTransform);
     // One scene-wide clock, pushed from here on because a piece exists to read
     // it. A scene with no generated piece never calls setShaderTime at all —
@@ -4665,7 +4742,7 @@ TextureId SceneMirror::textureFor(const QString &path, bool srgb)
         if (!live || !live->isLive()) return 0;
         const QImage &img = live->liveImage();
         if (img.isNull()) return 0;
-        TextureId live_id = mTarget->createTexture(unsigned(img.width()), unsigned(img.height()),
+        TextureId live_id = newTexture(unsigned(img.width()), unsigned(img.height()),
                                                    img.constBits(), srgb, live->liveMipmaps());
         if (live_id) {
             mTextures.insert(key, live_id);
@@ -4674,7 +4751,7 @@ TextureId SceneMirror::textureFor(const QString &path, bool srgb)
         return live_id;
     }
     if (!QFileInfo::exists(path)) return 0;
-    TextureId id = mTarget->loadTexture(path.toStdString(), srgb);
+    TextureId id = newLoadedTexture(path.toStdString(), srgb);
     if (id) mTextures.insert(key, id);
     return id;
 }
@@ -4706,9 +4783,15 @@ void SceneMirror::syncLiveTextures()
         // recorded here, and pretending otherwise would hide a real mismatch
         // behind a number. (updateTexture only refuses a size change, which
         // writeLive already refuses on the document side.)
-        if (mTarget->updateTexture(tex.value(), unsigned(img.width()),
-                                   unsigned(img.height()), img.constBits()))
+        // THE MESSAGE OWNS THE PIXELS (U3 stage 3, decision 8): copied here; a refusal is a frame error.
+        {
+            const unsigned w = unsigned(img.width()), h = unsigned(img.height());
+            std::vector<unsigned char> px(img.constBits(), img.constBits() + size_t(w) * size_t(h) * 4u);
+            post([t = tex.value(), w, h, px = std::move(px)](jahshaka::engine::Scene &s) {
+                s.updateTexture(t, w, h, px.data());
+            });
             it.value() = gen;
+        }
     }
 }
 
@@ -4989,13 +5072,13 @@ void SceneMirror::syncTextures(Entry &e, const MaterialSync &ms)
         if (bound[int(b.slot)]) continue;
         TextureId t = b.slot == PbrTextureSlot::Reflection ? reflectionCubeFor(b.path)
                                                            : textureFor(b.path, b.srgb);
-        if (t && mTarget->setPbrTexture(e.material, b.slot, t)) {
+        if (t && postOk(&jahshaka::engine::Scene::setPbrTexture, e.material, b.slot, t)) {
             bound[int(b.slot)] = true;
             boundIds[int(b.slot)] = t;
         }
     }
     for (int i = 0; i < kSlotCount; ++i)
-        if (!bound[i]) mTarget->setPbrTexture(e.material, PbrTextureSlot(i), 0);
+        if (!bound[i]) postCall(&jahshaka::engine::Scene::setPbrTexture, e.material, PbrTextureSlot(i), 0);
     // What reclaimUnused needs: the IDS, not the paths. A world switch or a
     // material edit that drops a map leaves the engine texture referenced by
     // nobody, and before this the mirror simply never freed one.
@@ -5314,7 +5397,7 @@ TextureId SceneMirror::decalTextureFor(const QString &path, DecalMap kind)
     if (it != mDecalTextures.constEnd()) return it.value();
     // Qt resources (":/...") are not files the engine can read.
     if (!QFileInfo::exists(path)) return 0;
-    const TextureId id = mTarget->loadDecalTexture(path.toStdString(), kind);
+    const TextureId id = newDecalTexture(path.toStdString(), kind);
     // Cache failures (0) too — a full atlas or an unreadable file must not be
     // retried on every single frame.
     mDecalTextures.insert(key, id);
@@ -5339,7 +5422,7 @@ void SceneMirror::syncDecal(Entry &e, iris::DecalNode *decal)
         // draws its wire box, but projects nothing. Never leave a STALE decal
         // bound — that would keep painting the previous image.
         if (e.hasDecal) {
-            mTarget->removeDecal(e.node);
+            postCall(&jahshaka::engine::Scene::removeDecal, e.node);
             notePush(decal, "decal removed");
             e.hasDecal = false;
         }
@@ -5361,7 +5444,7 @@ void SceneMirror::syncDecal(Entry &e, iris::DecalNode *decal)
        << d.width << d.height << d.depth << d.metalness << d.roughness
        << quint32(d.ignoreAlphaDiffuse ? 1 : 0);
     if (!e.hasDecal || e.decalPushKey != dk.h) {
-        if (mTarget->setDecal(e.node, d)) {
+        if (postOk(&jahshaka::engine::Scene::setDecal, e.node, d)) {
             notePush(decal, "decal");
             e.hasDecal = true;
             e.decalPushKey = dk.h;
@@ -5379,25 +5462,25 @@ void SceneMirror::syncDecalWires(Entry &e, iris::DecalNode *decal)
 {
     if (!mLightWires) {
         if (e.wireNode && e.wireVisible != 0) {
-            mTarget->setNodeVisible(e.wireNode, false);
+            postCall(&jahshaka::engine::Scene::setNodeVisible, e.wireNode, false);
             e.wireVisible = 0;
         }
         return;
     }
     if (!e.wireNode) {
-        e.wireNode = mTarget->createNode(e.node);
+        e.wireNode = newNode(e.node);
         // EDITOR HELPER (REFLECTIONS_ADOPTION_SPEC.md P1b): wires, range circles
         // and light icons are things the user must see and a reflection probe
         // must never capture. Marked at CREATION so the very first frame of
         // geometry already carries kHelperBit.
-        if (e.wireNode) mTarget->setNodeHelper(e.wireNode, true);
+        if (e.wireNode) postCall(&jahshaka::engine::Scene::setNodeHelper, e.wireNode, true);
     }
     if (!e.wireNode) return;
     MeshId m = wireMeshFor(4);
     if (!m) return;
-    if (!e.wireMaterial) e.wireMaterial = mTarget->createUnlitMaterial(Colour(1, 1, 1), false);
+    if (!e.wireMaterial) e.wireMaterial = newUnlitMaterial(Colour(1, 1, 1), false);
     if (!e.wireMaterial) return;
-    if (e.wireKind != 4) { if (mTarget->attachMesh(e.wireNode, m, e.wireMaterial)) e.wireKind = 4; }
+    if (e.wireKind != 4) { if (postOk(&jahshaka::engine::Scene::attachMesh, e.wireNode, m, e.wireMaterial)) e.wireKind = 4; }
     // Amber when the decal projects, dim grey when it has no usable image —
     // the difference between "placed" and "placed but blank" has to be visible.
     pushWireColour(e, e.hasDecal ? Colour(1.0f, 0.75f, 0.2f, 1.0f)
@@ -5416,12 +5499,12 @@ void SceneMirror::syncDecalWires(Entry &e, iris::DecalNode *decal)
     Hasher wireKey;
     wireKey << wireScale.x << wireScale.y << wireScale.z;
     if (!e.wireXformPushed || e.wireXformKey != wireKey.h) {
-        mTarget->setNodeTransform(e.wireNode, Vec3(), Quat(), wireScale);
+        postCall(&jahshaka::engine::Scene::setNodeTransform, e.wireNode, Vec3(), Quat(), wireScale);
         e.wireXformKey = wireKey.h;
         e.wireXformPushed = true;
         notePush(decal, "decal wire");
     }
-    if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; }
+    if (e.wireVisible != 1) { postCall(&jahshaka::engine::Scene::setNodeVisible, e.wireNode, true); e.wireVisible = 1; }
 }
 
 bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
@@ -6150,7 +6233,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     // scripting.e2e.avatar the moment a cross-file clip was added: the
     // character froze at bind pose with one warning in the log.)
     ++mClipStatePushes;
-    mTarget->setClipStates(e.node, nullptr, 0);
+    post([node = e.node](jahshaka::engine::Scene &s) { s.setClipStates(node, nullptr, 0); });
 
     // The pivot composition, once per (rig, clip): §3.1's "compose then
     // resample". Its cost is O(bones x keys) and it happens here rather than per
@@ -6205,13 +6288,12 @@ void SceneMirror::attachClipsFor(Entry &e)
     // playing node goes stale every one of them. Nothing is enabled yet at this
     // point (the state push below is what enables), so one batched call is all
     // that is needed — and the engine refuses the alternative anyway.
-    if (!mTarget->attachClips(e.node, descs.data(), descs.size())) {
-        qWarning("SceneMirror: attachClips failed for a skinned node; it will render at bind pose");
-        e.clipMap.clear();
-        e.clipIdMap.clear();
-        e.clipNameMap.clear();
-        return;
-    }
+    // (A MESSAGE, U3 stage 3: a refusal reaches the frame's errors, and the facts carry what the node really holds —
+    // the next attachClipsFor reads them.)
+    post([node = e.node, descs](jahshaka::engine::Scene &s) {
+        if (!s.attachClips(node, descs.data(), descs.size()))
+            qWarning("SceneMirror: attachClips failed for a skinned node; it will render at bind pose");
+    });
     // Whatever the engine appended, in the order it was pushed, is the mapping
     // for the clips that were NOT already there. Names it already knew keep
     // their existing mapping.
@@ -6568,7 +6650,7 @@ int SceneMirror::reconcileSockets()
                 // socket API's promise — by construction (the store owns it);
                 // the flag, set BEFORE the tag, makes its world the engine's.
                 iris::graph::setSocketRider(rider->docNode(), true);
-                if (!mTarget->attachToBone(riderId, ownerId, socket->boneName.toStdString(),
+                if (!postOk(&jahshaka::engine::Scene::attachToBone, riderId, ownerId, socket->boneName.toStdString(),
                                            toVec3(socket->position), toQuat(socket->rotation),
                                            toVec3(socket->scale))) {
                     iris::graph::setSocketRider(rider->docNode(), false);
@@ -6602,7 +6684,7 @@ int SceneMirror::reconcileSockets()
                 state.lastLocalRot = rider->getLocalRot();
                 state.lastLocalScale = rider->getLocalScale();
             } else if (state.offsetKey != key) {
-                mTarget->setBoneAttachmentOffset(riderId, toVec3(socket->position),
+                postCall(&jahshaka::engine::Scene::setBoneAttachmentOffset, riderId, toVec3(socket->position),
                                                  toQuat(socket->rotation), toVec3(socket->scale));
                 state.offsetKey = key;
                 state.owner = ownerId;
@@ -6711,7 +6793,7 @@ void SceneMirror::releaseRider(iris::SceneNode *rider)
             const auto pe = mEntries.constFind(parent.data());
             if (pe != mEntries.constEnd()) parentId = pe->node;
         }
-        mTarget->detachFromBone(entry->node, parentId);
+        postCall(&jahshaka::engine::Scene::detachFromBone, entry->node, parentId);
     }
     iris::graph::setSocketRider(rider->docNode(), false);
     mBoneRiders.remove(rider);
@@ -6795,7 +6877,7 @@ void SceneMirror::syncSkeletonSharing()
         // A master that is itself sharing (its geometry changed and the group
         // re-formed around it) has to be freed first — sharing is not chained.
         if (mTarget->published().factsBlock().sharesSkeleton(master->node)) {   // the facts (U3 stage 3)
-            mTarget->shareSkeleton(master->node, 0);
+            postCall(&jahshaka::engine::Scene::shareSkeleton, master->node, 0);
             master->shareMaster = 0;
             master->clipSignature = 0;          // it owns its clips again
             master->engineClipsFresh = true;
@@ -6824,7 +6906,7 @@ void SceneMirror::syncSkeletonSharing()
             const bool eligible = e->shareEligible;
             const bool shared = mTarget->published().factsBlock().sharesSkeleton(e->node);
             if (eligible && (!shared || e->shareMaster != master->node)) {
-                if (mTarget->shareSkeleton(e->node, master->node)) {
+                if (postOk(&jahshaka::engine::Scene::shareSkeleton, e->node, master->node)) {
                     e->shareMaster = master->node;
                     // A follower holds NO clips (the engine drops them when the
                     // instance goes): forget what we think it has, so that if it
@@ -6839,7 +6921,7 @@ void SceneMirror::syncSkeletonSharing()
                     e->shareMaster = 0;
                 }
             } else if (!eligible && shared) {
-                mTarget->shareSkeleton(e->node, 0);
+                postCall(&jahshaka::engine::Scene::shareSkeleton, e->node, 0);
                 e->shareMaster = 0;
                 e->clipSignature = 0;           // it needs its own clips again
                 e->engineClipsFresh = true;
@@ -6991,7 +7073,7 @@ void SceneMirror::syncClips()
         if (mClipPushScratch.isEmpty()) {
             if (!e.lastClipPush.isEmpty()) {
                 ++mClipStatePushes;
-                mTarget->setClipStates(e.node, nullptr, 0);
+                post([node = e.node](jahshaka::engine::Scene &s) { s.setClipStates(node, nullptr, 0); });
                 e.lastClipPush.clear();
             }
             continue;
@@ -7031,8 +7113,10 @@ void SceneMirror::syncClips()
             s.looping = p.looping;
         }
         ++mClipStatePushes;
-        if (mTarget->setClipStates(e.node, mClipStateScratch.data(), mClipStateScratch.size()))
-            e.lastClipPush = mClipPushScratch;
+        post([node = e.node, states = mClipStateScratch](jahshaka::engine::Scene &s) {
+            s.setClipStates(node, states.data(), states.size());
+        });
+        e.lastClipPush = mClipPushScratch;
     }
 }
 
@@ -7749,7 +7833,7 @@ void SceneMirror::buildSky(FrameInputScene &scene, std::optional<Colour> &backgr
         mSkySource = src;
         mSkyTexture = 0;
         mReclaimPending = true;
-        for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
+        for (TextureId &t : mSkyFaceTextures)  { if (t) postCall(&jahshaka::engine::Scene::destroyTexture, t); t = 0; }
         // Default = no sky and NO OPINION about reflections; every failure path
         // below simply leaves it that way, which is what the old code spelled
         // out as setSky(NoSky, 0) in four places.
@@ -7771,7 +7855,7 @@ void SceneMirror::buildSky(FrameInputScene &scene, std::optional<Colour> &backgr
             for (int i = 0; ok && i < 6; ++i) {
                 const QImage img = faces[i].convertToFormat(QImage::Format_RGBA8888);
                 if (img.isNull()) { ok = false; break; }
-                mSkyFaceTextures[i] = mTarget->createTexture(unsigned(img.width()), unsigned(img.height()), img.constBits(), true);
+                mSkyFaceTextures[i] = newTexture(unsigned(img.width()), unsigned(img.height()), img.constBits(), true);
                 if (!mSkyFaceTextures[i]) ok = false;
             }
             if (ok) {
@@ -7790,7 +7874,7 @@ void SceneMirror::buildSky(FrameInputScene &scene, std::optional<Colour> &backgr
             const QImage strip = iris::bakeGradientSky(mSource->gradientTop, mSource->gradientMid,
                                                        mSource->gradientBot, mSource->gradientOffset);
             mSkyFaceTextures[0] = strip.isNull() ? 0
-                : mTarget->createTexture(unsigned(strip.width()), unsigned(strip.height()),
+                : newTexture(unsigned(strip.width()), unsigned(strip.height()),
                                          strip.constBits(), true);
             if (mSkyFaceTextures[0]) {
                 mSkyDesc.mode = SkyMode::Equirectangular;
@@ -7828,7 +7912,7 @@ void SceneMirror::buildSky(FrameInputScene &scene, std::optional<Colour> &backgr
             const QColor c = mSource->skyColor;
             QImage strip(64, 32, QImage::Format_RGBA8888);
             strip.fill(QColor(c.red(), c.green(), c.blue(), 255));
-            mSkyFaceTextures[0] = mTarget->createTexture(unsigned(strip.width()),
+            mSkyFaceTextures[0] = newTexture(unsigned(strip.width()),
                                                          unsigned(strip.height()),
                                                          strip.constBits(), true);
             if (mSkyFaceTextures[0]) {
@@ -7972,7 +8056,7 @@ void SceneMirror::applyCloudLayer()
                                  mSource->cloudWeatherMap)
                                     ? mSource->cloudWeatherMap->source : QString();
     if (weatherPath != mCloudWeatherPath) {
-        if (mCloudWeatherTexture) mTarget->destroyTexture(mCloudWeatherTexture);
+        if (mCloudWeatherTexture) postCall(&jahshaka::engine::Scene::destroyTexture, mCloudWeatherTexture);
         mCloudWeatherTexture = 0;
         mCloudWeatherPath = weatherPath;
         if (!weatherPath.isEmpty()) {
@@ -7985,7 +8069,7 @@ void SceneMirror::applyCloudLayer()
                 if (img.width() > 512 || img.height() > 512)
                     img = img.scaled(512, 512, Qt::KeepAspectRatio, Qt::SmoothTransformation);
                 img = img.convertToFormat(QImage::Format_RGBA8888);
-                mCloudWeatherTexture = mTarget->createTexture(unsigned(img.width()),
+                mCloudWeatherTexture = newTexture(unsigned(img.width()),
                                                               unsigned(img.height()),
                                                               img.constBits(), false);
             }
@@ -8122,7 +8206,7 @@ bool SceneMirror::buildEquirectCubeFaces(const QImage &equirect, TextureId ids[6
                 fetch(ut, vt, &face[(size_t(py) * N + px) * 4u]);
             }
         }
-        ids[f] = mTarget->createTexture(unsigned(N), unsigned(N), face.data(), true);
+        ids[f] = newTexture(unsigned(N), unsigned(N), face.data(), true);
         if (!ids[f]) ok = false;
     }
     return ok;
@@ -8155,8 +8239,8 @@ TextureId SceneMirror::reflectionCubeFor(const QString &path)
 
     TextureId faces[6] = { 0, 0, 0, 0, 0, 0 };
     TextureId cube = 0;
-    if (buildEquirectCubeFaces(equirect, faces)) cube = mTarget->createCubemap(faces);
-    for (int i = 0; i < 6; ++i) if (faces[i]) mTarget->destroyTexture(faces[i]);
+    if (buildEquirectCubeFaces(equirect, faces)) cube = newCubemap(faces);
+    for (int i = 0; i < 6; ++i) if (faces[i]) postCall(&jahshaka::engine::Scene::destroyTexture, faces[i]);
     if (cube) mTextures.insert(key, cube);
     return cube;
 }
@@ -8457,7 +8541,7 @@ void SceneMirror::buildCamera(FrameInputView &part, iris::CameraNodePtr camera, 
         // between them would show the camera's own frustum fanning across the
         // whole image. Cheap: one hash lookup on a change only.
         auto it = mEntries.find(mViewCamera);
-        if (it != mEntries.end() && it->wireNode) mTarget->setNodeVisible(it->wireNode, false);
+        if (it != mEntries.end() && it->wireNode) postCall(&jahshaka::engine::Scene::setNodeVisible, it->wireNode, false);
     }
 
     // THE CAMERA'S OWN LOOK (CAMERA_LENS_SPEC §4/§5) — the second of the two

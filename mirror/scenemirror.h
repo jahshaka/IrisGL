@@ -30,6 +30,7 @@
 #include <set>
 #include <vector>
 #include "irisgl/irisglfwd.h"
+#include "irisgl/mirror/scenecommands.h"
 #include "irisgl/document/animation/clipextractor.h"
 #include "irisgl/document/scenegraph/nodegraph.h"
 #include "irisgl/document/scenegraph/socket.h"
@@ -500,7 +501,8 @@ public:
     /// it, and the gate asserts pushes-per-frame == characters.
     quint64 clipStatePushes() const { return mClipStatePushes; }
     /// Pushes a world matrix onto an engine node as TRS (used by overlays too).
-    static void pushTransform(jahshaka::engine::Scene *scene, jahshaka::engine::NodeId node, const iris::Mat4 &world);
+    static void decomposeTransform(const iris::Mat4 &world, jahshaka::engine::Vec3 &pos, jahshaka::engine::Quat &rot,
+                                   jahshaka::engine::Vec3 &scale);
 
     /// The whole selected SET (EDITOR_MULTISELECT_SPEC §2.3). The shell walk
     /// was always N-mesh — one shell per mesh under the highlighted node — so
@@ -1035,6 +1037,10 @@ private:
         /// This sync replaced the node's skeleton instance (a bind, a share made or dropped): the engine carries no
         /// clips on it, whatever the last frame's facts say (ENGINE-UPGRADE-U3 stage 3).
         bool engineClipsFresh = false;
+        /// The engine refused to rig this node's mesh (an over-limit rig, a mesh without blend weights — the completion
+        /// of its attachSkinnedMesh, U3 stage 3): the next attach is the unskinned one, at bind pose, until the mesh
+        /// changes.
+        bool rigRefused = false;
         /// Document clip -> its content id -> the name the engine gave it.
         ///
         /// Two hops because attachClips is IDEMPOTENT PER CONTENT ID and clips
@@ -1362,6 +1368,90 @@ private:
     bool mHideFloorPending = false;
 
     jahshaka::engine::Scene *mTarget;
+    // ---- THE STRUCTURAL MESSAGES (ENGINE-UPGRADE-U3 stage 3) -------------------------------------------------------
+    // Every command this mirror gives its scene is a MESSAGE through scenecmd (mirror/scenecommands.h), submitted
+    // the moment it is given — so the engine applies the mirror's commands and every other host's (the overlays, the
+    // VR arc) in the one order they were given — and applied at the top of the next frame, before the node records.
+    unsigned long long mMessagesPosted = 0;
+    /// THE SYNC'S STRUCTURE-EDIT BRACKET, OPENED LAZILY (U3 stage 3): begin goes out before the first command the
+    /// bracket holds and end only after one — a still sync posts nothing at all.
+    bool mEditOpen = false, mEditBegun = false;
+    void notePost()
+    {
+        ++mMessagesPosted;
+        if (mEditOpen && !mEditBegun) {
+            mEditBegun = true;
+            scenecmd::post(mTarget, std::function<void(jahshaka::engine::Scene &)>(
+                                        [](jahshaka::engine::Scene &s) { s.beginStructureEdit(); }));
+        }
+    }
+public:   // the sync's bracket (scenemirror.cpp's StructureEditScope)
+    void openStructureEdit() { mEditOpen = true; mEditBegun = false; }
+    void closeStructureEdit()
+    {
+        if (mEditOpen && mEditBegun)
+            scenecmd::post(mTarget, std::function<void(jahshaka::engine::Scene &)>(
+                                        [](jahshaka::engine::Scene &s) { s.endStructureEdit(); }));
+        mEditOpen = mEditBegun = false;
+    }
+private:
+    unsigned long long mCompletionSeqSeen = 0;
+    QHash<unsigned long long, std::function<void(const std::string &)>> mOnRefused;
+    void post(std::function<void(jahshaka::engine::Scene &)> fn);
+    /// A command whose REFUSAL the mirror must answer (a rig the engine would not bind): its completion comes back in
+    /// the snapshot (Scene::published().completions) and `onRefused` runs at the next sync that reads it.
+    void postChecked(std::function<bool(jahshaka::engine::Scene &)> fn, std::function<void(const std::string &)> onRefused);
+    void takeCompletions();
+    void postTransform(jahshaka::engine::NodeId node, const iris::Mat4 &world);
+    jahshaka::engine::NodeId newNode(jahshaka::engine::NodeId parent = 0) { notePost(); return scenecmd::newNode(mTarget, parent); }
+    jahshaka::engine::MeshId newMesh(jahshaka::engine::MeshData data) { notePost(); return scenecmd::newMesh(mTarget, std::move(data)); }
+    jahshaka::engine::MeshId newLineMesh(std::vector<jahshaka::engine::Vec3> points, bool strip)
+    {
+        notePost();
+        return scenecmd::newLineMesh(mTarget, std::move(points), strip);
+    }
+    jahshaka::engine::MaterialId newUnlitMaterial(const jahshaka::engine::Colour &c, bool depthTest, bool wireframe = false)
+    {
+        notePost();
+        return scenecmd::newUnlitMaterial(mTarget, c, depthTest, wireframe);
+    }
+    jahshaka::engine::MaterialId newOutlineMaterial(const jahshaka::engine::Colour &c, bool skinnable = false)
+    {
+        notePost();
+        return scenecmd::newOutlineMaterial(mTarget, c, skinnable);
+    }
+    jahshaka::engine::MaterialId newPbrMaterial(const jahshaka::engine::PbrParams &p) { notePost(); return scenecmd::newPbrMaterial(mTarget, p); }
+    jahshaka::engine::TextureId newTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb, bool mipmaps = false)
+    {
+        notePost();
+        return scenecmd::newTexture(mTarget, w, h, rgba, srgb, mipmaps);
+    }
+    jahshaka::engine::TextureId newCubemap(const jahshaka::engine::TextureId faces[6]) { notePost(); return scenecmd::newCubemap(mTarget, faces); }
+    jahshaka::engine::TextureId newLoadedTexture(const std::string &path, bool srgb)
+    {
+        notePost();
+        return scenecmd::newLoadedTexture(mTarget, path, srgb);
+    }
+    jahshaka::engine::TextureId newDecalTexture(const std::string &path, jahshaka::engine::DecalMap kind)
+    {
+        notePost();
+        return scenecmd::newDecalTexture(mTarget, path, kind);
+    }
+    /// A command whose answer the walk used to branch on: posted, and taken as accepted — the engine's refusal (an
+    /// unknown id, a data check) reaches the frame's errors (PublishedEngineFrame::frameErrors) instead, and the
+    /// mirror's next look at the snapshot (the facts, the rigs) is what it trusts.
+    template <class Fn, class... A>
+    bool postOk(Fn fn, A &&...args)
+    {
+        postCall(fn, std::forward<A>(args)...);
+        return true;
+    }
+    template <class Fn, class... A>
+    void postCall(Fn fn, A &&...args)
+    {
+        notePost();
+        scenecmd::call(mTarget, fn, std::forward<A>(args)...);
+    }
     iris::ScenePtr           mSource;
     /// Keyed by the DOCUMENT NODE ITSELF, not by `nodeId` (SCENEGRAPH_SPEC §4:
     /// "the mirror's ... nodeId entry keying" dies with the swap). The node
