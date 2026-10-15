@@ -28,9 +28,9 @@ namespace Ogre
         /// Hlms it was cloned from; released by releasePool before that Hlms dies.
         struct Key
         {
-            PixelFormatGpu format;
-            uint32 width, height, depth;
-            uint8 level;
+            PixelFormatGpu format = PFG_UNKNOWN;
+            uint32 width = 0u, height = 0u, depth = 0u;
+            uint8 level = 0u;
             bool operator<( const Key &o ) const
             {
                 if( format != o.format ) return format < o.format;
