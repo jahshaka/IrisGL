@@ -248,7 +248,7 @@ bool OgreView::setVideoReadback(bool on) {
     }
     if (mVideoReadback) return true;
     if (!isOffscreen()) {
-        mError = "setVideoReadback: View '" + mName + "' is on screen; the readback is an offscreen view's";
+        mError = "setVideoReadback: View '" + mIdentityName + "' is on screen; the readback is an offscreen view's";
         return false;
     }
     auto rb = std::make_unique<VideoReadback>(this, mRoot);

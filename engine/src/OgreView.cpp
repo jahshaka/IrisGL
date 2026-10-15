@@ -49,7 +49,7 @@ bool orthoPostFxAdapted() {
 OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *texture,
                    const std::string &name, unsigned w, unsigned h, const Colour &background,
                    std::string &errorSink)
-    : mRoot(root), mWindow(window), mTexture(texture), mName(name),
+    : mRoot(root), mWindow(window), mTexture(texture),
       mWidth(w), mHeight(h), mBackground(background), mError(errorSink) {
     mPushedBackground = background;          // what the host created it with
     mIdentityName = name;                    // the boundary's identity (View::name, View::isOffscreen)
@@ -186,7 +186,7 @@ ChainDesc OgreView::chainDesc() const {
         !mSaidNoContract) {
         mSaidNoContract = true;
         Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka: offscreen view '" + mName + "' declares no contract "
+            "Jahshaka: offscreen view '" + mIdentityName + "' declares no contract "
             "(View::setOffscreenContract: StillPicture or Live) — it refuses the screen-probe "
             "gather and takes the field's diffuse");
     }
@@ -482,7 +482,7 @@ void OgreView::syncPip() {
     JAH_TRY {
         Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
         if (mPipWorkspaceDef.empty()) {
-            mPipWorkspaceDef = mName + "/PipWorkspace";
+            mPipWorkspaceDef = mIdentityName + "/PipWorkspace";
             // THE LOCAL TEXTURE'S SIZE IS DECIDED HERE, once per build, from the
             // rect the inset currently has (Route C). applyPip re-derives the
             // same fractions every frame and rebuilds only when the WHOLE-PIXEL
@@ -505,7 +505,7 @@ void OgreView::syncPip() {
             // directly and never consults mVisibleCameras. Note the naming trap
             // — the header calls the argument notShadowCaster, the .cpp calls
             // it isVisible.
-            mPipCamera = mScene->sceneManager()->createCamera(mName + "/PipCamera", false);
+            mPipCamera = mScene->sceneManager()->createCamera(mIdentityName + "/PipCamera", false);
             mPipCamera->setNearClipDistance(0.1f);
             mPipCamera->setFarClipDistance(1000.0f);
         }
@@ -941,12 +941,12 @@ bool OgreView::setScene(Scene *scene) {
     JAH_TRY {
         if (!scene) { detachScene(); return true; }
         if (mScene) {
-            mError = "View '" + mName + "' already shows scene '" + mScene->name() +
+            mError = "View '" + mIdentityName + "' already shows scene '" + mScene->name() +
                      "'; detach it (setScene(nullptr)) before binding another";
             return false;
         }
         auto *s = static_cast<OgreScene *>(scene);
-        mCamera = s->sceneManager()->createCamera(mName + "/Camera");
+        mCamera = s->sceneManager()->createCamera(mIdentityName + "/Camera");
         mCamera->setNearClipDistance(0.1f);
         // Ogre's default far plane is 100000; PSSM splits computed over that range
         // leave no shadow-map resolution for the actual scene (a View that is
@@ -1119,10 +1119,10 @@ bool OgreView::attachBlankWorkspace() {
             // camera — it survives the binds and there is nothing to churn.
             // Nothing is ever drawn through it: the only pass that names it
             // renders the overlay queues, which are screen-space.
-            mBlankCamera = sm->createCamera(mName + "/BlankCamera");
+            mBlankCamera = sm->createCamera(mIdentityName + "/BlankCamera");
             mBlankCamera->setAutoAspectRatio(true);
         }
-        if (mBlankWorkspaceDef.empty()) mBlankWorkspaceDef = mName + "/BlankWorkspace";
+        if (mBlankWorkspaceDef.empty()) mBlankWorkspaceDef = mIdentityName + "/BlankWorkspace";
         // REBUILT EVERY TIME, because the two things the chain is made of can
         // both have moved since the last one: the view's BACKGROUND (the clear
         // colour) and its overlay entitlement. A definition rebuild of two
@@ -1674,7 +1674,7 @@ unsigned OgreView::sampleCount() const {
 }
 
 bool OgreView::readPixels(Image &out) {
-    if (!mTexture) { mError = "readPixels: View '" + mName + "' is on-screen"; return false; }
+    if (!mTexture) { mError = "readPixels: View '" + mIdentityName + "' is on-screen"; return false; }
     JAH_TRY {
         Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
         // A LAYERED (stereo) target is read as its eye PAIR side by side: layer
@@ -1700,9 +1700,9 @@ bool OgreView::readPixels(Image &out) {
 }
 
 bool OgreView::readPixelsHdr(ImageF &out) {
-    if (!mTexture) { mError = "readPixelsHdr: View '" + mName + "' is on-screen"; return false; }
+    if (!mTexture) { mError = "readPixelsHdr: View '" + mIdentityName + "' is on-screen"; return false; }
     if (!mChainHandles.radianceTexture || !mWorkspace) {
-        mError = "readPixelsHdr: View '" + mName +
+        mError = "readPixelsHdr: View '" + mIdentityName +
                  "' keeps no float scene result (PostFxDesc::hdrReadback is off, or no frame has "
                  "built the workspace yet)";
         return false;
@@ -1711,14 +1711,14 @@ bool OgreView::readPixelsHdr(ImageF &out) {
 }
 
 bool OgreView::readReflectionHdr(ImageF &out) {
-    if (!mTexture) { mError = "readReflectionHdr: View '" + mName + "' is on-screen"; return false; }
-    if (!mWorkspace) { mError = "readReflectionHdr: View '" + mName + "' has no workspace"; return false; }
+    if (!mTexture) { mError = "readReflectionHdr: View '" + mIdentityName + "' is on-screen"; return false; }
+    if (!mWorkspace) { mError = "readReflectionHdr: View '" + mIdentityName + "' has no workspace"; return false; }
     return readChainTexture(chain::reflectionTextureName(), out, "readReflectionHdr");
 }
 
 bool OgreView::readSsrHistoryHdr(ImageF &out) {
-    if (!mTexture) { mError = "readSsrHistoryHdr: View '" + mName + "' is on-screen"; return false; }
-    if (!mWorkspace) { mError = "readSsrHistoryHdr: View '" + mName + "' has no workspace"; return false; }
+    if (!mTexture) { mError = "readSsrHistoryHdr: View '" + mIdentityName + "' is on-screen"; return false; }
+    if (!mWorkspace) { mError = "readSsrHistoryHdr: View '" + mIdentityName + "' has no workspace"; return false; }
     if (!readChainTexture(chain::ssrHistoryTextureName(), out, "readSsrHistoryHdr")) return false;
     // ...with the history's DEPTH in alpha (REFLECT-FIX-1): -1 where no surface shows.
     ImageF depth;
@@ -1750,7 +1750,7 @@ bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char
             }
         }
         if (!src) {
-            mError = std::string(who) + ": the chain of View '" + mName + "' defines no '" +
+            mError = std::string(who) + ": the chain of View '" + mIdentityName + "' defines no '" +
                      textureName + "'";
             return false;
         }
@@ -1950,7 +1950,7 @@ void OgreView::setAsyncShaders(bool on) {
     // THE MODE'S EDGES ARE IN THE LOG: a compile that happened while a view compiled in the
     // background is a defect, and the log is where a failing row finds which side it was on.
     if (on != mAsyncShaders)
-        Ogre::LogManager::getSingleton().logMessage("Jahshaka view '" + mName + "': shaders compile " +
+        Ogre::LogManager::getSingleton().logMessage("Jahshaka view '" + mIdentityName + "': shaders compile " +
                                                     (on ? "in the background" : "blocking (in the frame)"));
     if (on != mAsyncShaders) detail::noteAsyncView(on);
     mAsyncShaders = on;
@@ -1973,10 +1973,10 @@ const Ogre::HlmsCompute *OgreView::computeHlms() const {
 }
 
 bool OgreView::warmUpShaders() {
-    if (!mScene)  { mError = "warmUpShaders: no scene is bound to view '" + mName + "'"; return false; }
-    if (!mCamera) { mError = "warmUpShaders: view '" + mName + "' has no camera"; return false; }
+    if (!mScene)  { mError = "warmUpShaders: no scene is bound to view '" + mIdentityName + "'"; return false; }
+    if (!mCamera) { mError = "warmUpShaders: view '" + mIdentityName + "' has no camera"; return false; }
     JAH_TRY {
-        if (!attachWorkspace()) { mError = "warmUpShaders: no workspace for view '" + mName + "'"; return false; }
+        if (!attachWorkspace()) { mError = "warmUpShaders: no workspace for view '" + mIdentityName + "'"; return false; }
         const std::string refNode = chain::sceneNodeDefName(mWorkspaceDef);
         // THE TWO ROUTES WANT OPPOSITE THINGS FROM THIS VIEW.
         //
@@ -2010,7 +2010,7 @@ bool OgreView::warmUpShaders() {
         // casters, the captures and the stay-on-PBS items need) and uploads the
         // datablocks; then the table is composed and the items routed here, and the
         // second frame compiles the decode twins they now wear, and nothing else.
-        bool ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mName);
+        bool ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mIdentityName);
         if (atom) {
             mScene->ensureGpuScene(/*graphIsCurrent=*/false);
             mScene->updateAtomDraw();
@@ -2222,7 +2222,7 @@ void FrameCaptureListener::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
 
 bool OgreView::requestFrameCapture(bool keepHelpers, bool alsoPresented) {
     JAH_TRY {
-        if (!target()) { mError = "requestFrameCapture: View '" + mName + "' has no target"; return false; }
+        if (!target()) { mError = "requestFrameCapture: View '" + mIdentityName + "' has no target"; return false; }
         // A new request supersedes an unread one.
         releaseFrameCapture();
         mCaptureKeepHelpers = keepHelpers;
@@ -2463,7 +2463,7 @@ void OgreView::recordFrameCapture(Ogre::CompositorWorkspace *ws, bool incomplete
     try {
         Ogre::RenderSystem *rs = mRoot->getRenderSystem();
         if (own && mWindow && !mWindow->canDownloadData() && (!clean || mCaptureAlsoPresented)) {
-            mError = "frame capture: the window of View '" + mName + "' cannot download";
+            mError = "frame capture: the window of View '" + mIdentityName + "' cannot download";
             releaseFrameCapture();
             return;
         }
@@ -2507,7 +2507,7 @@ bool OgreView::takeFrameCapture(Image &out, bool wait, Image *presented) {
     const FrameCaptureState st = frameCaptureState();
     if (st == FrameCaptureState::Idle) { mError = "takeFrameCapture: nothing was requested"; return false; }
     if (st == FrameCaptureState::Armed) {
-        mError = "takeFrameCapture: View '" + mName + "' has not rendered the armed frame yet";
+        mError = "takeFrameCapture: View '" + mIdentityName + "' has not rendered the armed frame yet";
         return false;
     }
     if (st == FrameCaptureState::InFlight && !wait) return false;

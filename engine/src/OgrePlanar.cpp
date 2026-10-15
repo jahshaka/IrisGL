@@ -361,7 +361,7 @@ void OgreScene::rebuildPlanar() {
     if (mPlanar || mPlanarParams.budget <= 0) return;
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
 
-    mPlanarWorkspaceDef = processUniqueName((mName + "/PlanarReflect").c_str());
+    mPlanarWorkspaceDef = processUniqueName((mIdentityName + "/PlanarReflect").c_str());
     // The reflection pass may reference the half-resolution shadow node; the
     // definition is created once by the engine (createShadowNode) and only
     // COSTS memory here, where a workspace instantiates it — one atlas per slot.

@@ -5573,7 +5573,6 @@ private:
 
     Ogre::Root         *mRoot;
     Ogre::SceneManager *mSceneMgr;
-    std::string         mName;
     std::string        &mError;
     std::map<NodeId, Node> mNodes;
     /// Reverse index Ogre node id -> registry id, for the one question the
@@ -7014,7 +7013,7 @@ private:
     std::vector<std::string>   mBlankNodeDefs;
     /// @see View::blankFramesPresented.
     unsigned long long         mBlankFramesPresented = 0;
-    std::string                mName, mWorkspaceDef;
+    std::string                mWorkspaceDef;   // the name is Scene/View's mIdentityName (one name per object)
     /// Every node definition the chain builder made for this view, in creation
     /// order. Was a single std::string while the chain was one node — a
     /// multi-node chain that removes one definition leaks the rest across view

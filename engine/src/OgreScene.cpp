@@ -24,7 +24,7 @@ namespace jahshaka { namespace engine { namespace detail {
 
 OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
                      std::string &errorSink)
-    : mRoot(root), mSceneMgr(sm), mName(name), mError(errorSink) {
+    : mRoot(root), mSceneMgr(sm), mError(errorSink) {
     mIdentityName = name;
     // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
     mGiBinding.lightWriteSerial = &mGiLightWriteSerial;

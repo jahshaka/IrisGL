@@ -3040,7 +3040,7 @@ protected:
     DeviceInfo          mDeviceInfo;
     bool                mDeviceRayQuery = false;
     VrPolicy            mHostVrPolicy;
-    bool                mHostVrBuilt = false;          ///< the engine was built with VR and has a Root
+    bool                mHostVrBuilt = false;          ///< the engine has a Root AND was built with JAH_VR (set only under JAH_VR)
     View               *mHostVrMirrorView = nullptr;
     unsigned            mHostMultiLoadThreads = 0;
     unsigned            mHostTextureWaitBudgetMs = 8000u;
