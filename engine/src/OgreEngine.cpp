@@ -2478,10 +2478,12 @@ void OgreEngine::applySceneStream(OgreScene *sc, const std::vector<SceneMessage>
         if (!m.apply) continue;
         const std::string before = mLastError;
         const bool ok = m.apply(*sc);
-        if (!ok) ++mFrameInputStatus.messagesRefused;
-        if (m.token || !ok)
-            sc->noteCompletion(m.token, ok, ok ? std::string()
-                                               : mLastError != before ? mLastError : std::string("refused"));
+        const std::string why = ok ? std::string() : mLastError != before ? mLastError : std::string("refused");
+        if (!ok) {
+            ++mFrameInputStatus.messagesRefused;
+            mRefusals.push_back({ mPublishedFrames + 1, why });   // the frame this drain belongs to
+        }
+        if (m.token || !ok) sc->noteCompletion(m.token, ok, why);
         mLastError = before;
     }
     mFrameInputStatus.messages += unsigned(messages.size());
@@ -2621,6 +2623,10 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
 // with a throw — never once a frame); at Off it is the absence the getter reports, the undrained tail included.
 void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
     out.input = mFrameInputStatus;
+    // THE REFUSALS OF THE LAST kFrameErrorsKept FRAMES (decision 34), for the error pump.
+    while (!mRefusals.empty() && mRefusals.front().frame + PublishedEngineFrame::kFrameErrorsKept <= mPublishedFrames)
+        mRefusals.pop_front();
+    out.refusals.assign(mRefusals.begin(), mRefusals.end());
     out.vr = vrStatus();
     out.streaming = streamingWork();
     out.shaders = asyncShaderStats();

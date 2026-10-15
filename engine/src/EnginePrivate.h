@@ -7423,6 +7423,8 @@ public:
                           unsigned long long stepSerial);
     /// THE RENDER SIDE's half of the record's status (U3 F4): written by the drain alone.
     FrameInputStatus mFrameInputStatus;
+    /// The refusals of the last kFrameErrorsKept frames (PublishedEngineFrame::refusals), oldest first.
+    mutable std::deque<PublishedEngineFrame::Refusal> mRefusals;   // pruned at the publish (fillPublished)
     /// THE RENDER LOOP: the hand-over slot, the serial, the loop and the publish (RenderThread.h).
     RenderThread     mRenderThread{ *this };
     /// What the loop's publish reads of the engine at the close (RenderThread::publish): the engine's half of the

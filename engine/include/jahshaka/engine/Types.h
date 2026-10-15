@@ -8563,6 +8563,15 @@ struct PublishedEngineFrame {
     static constexpr unsigned kFrameErrorsKept = 16;
     std::vector<FrameError> frameErrors;
     unsigned long long framesWithError = 0;
+    /// THE COMMANDS' REFUSALS (decision 34): every message an engine scene refused in the last kFrameErrorsKept
+    /// frames, with the reason, oldest first — the same refusals the scenes' completions carry, gathered for the one
+    /// reader that wants them all (the error pump). Numbered by input.messagesRefused (the running count): a reader
+    /// takes the newest `messagesRefused - taken`.
+    struct Refusal {
+        unsigned long long frame = 0;
+        std::string        text;
+    };
+    std::vector<Refusal> refusals;
     bool               deviceLost = false;
     GpuFault           gpuFault = GpuFault::None;
     MonitorStatus      monitor;
