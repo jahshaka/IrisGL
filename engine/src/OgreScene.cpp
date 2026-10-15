@@ -450,6 +450,7 @@ NodeId OgreScene::createNode(NodeId parent, NodeId id) {
         // have to ask the registry about every child to find out.
         if (prec) ++prec->ownedChildren;
         Node rec; rec.node = p->createChildSceneNode(Ogre::SCENE_DYNAMIC);
+        if (!id) ++mChangeStats.engineAssignedIds;
         return track(rec, id ? id : reserveNodeId());   // the one process-wide id space (U3 stage 3, F6)
     } JAH_CATCH(mError, 0);
 }

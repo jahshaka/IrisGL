@@ -698,6 +698,9 @@ struct SceneChangeStats {
     unsigned long long itemsDestroyed = 0;      ///< Items destroyed with their node (removeNode)
     unsigned long long giInvalidations = 0;     ///< GI cache invalidations requested (invalidateGiCaches)
     unsigned long long probeBuildRestarts = 0;  ///< staged probe builds rewound to their first stage
+    /// Creates that came WITHOUT a host-reserved id (the engine reserved one): 0 for a scene a mirror feeds — every
+    /// command it gives names its id (U3 stage 3, mirror.messages_in_order).
+    unsigned long long engineAssignedIds = 0;
 };
 
 /// WHAT THIS SCENE'S MOBILITY LOOKS LIKE (SPECS/REALTIME_REFLECTIONS_SPEC.md

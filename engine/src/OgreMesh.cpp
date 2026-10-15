@@ -414,6 +414,7 @@ MeshId OgreScene::createMesh(const MeshData &data, MeshId id) {
         // filled after the record is in the map.
         const bool chained = !rec.lodBounds.empty() && rec.mesh;
         Ogre::Mesh *const ogreMesh = rec.mesh.get();
+        if (!id) ++mChangeStats.engineAssignedIds;
         const MeshId mid = id ? id : reserveMeshId();   // reserved by the host or here (U3 stage 3)
         mMeshes[mid] = std::move(rec);
         if (chained) mMeshIdByOgreMesh[ogreMesh] = mid;
@@ -510,6 +511,7 @@ MeshId OgreScene::createLineMesh(const std::vector<Vec3> &points, bool strip, Me
         const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
         rec.mesh->_setBounds(aabb, false);
         rec.mesh->_setBoundingSphereRadius(std::max(aabb.getRadius(), 0.001f));
+        if (!id) ++mChangeStats.engineAssignedIds;
         const MeshId mid = id ? id : reserveMeshId();
         mMeshes[mid] = std::move(rec);
         return mid;

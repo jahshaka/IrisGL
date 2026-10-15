@@ -589,6 +589,7 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p, MaterialId id) {
             if (distortion) applyDistortion(db, p);
             else            applyUnlit(db, p);
             rec.paramsPushed = true;   // the record now matches the live datablock
+            if (!id) ++mChangeStats.engineAssignedIds;
             const MaterialId mid = id ? id : reserveMaterialId();   // reserved by the host or here (U3 stage 3)
             mMaterials[mid] = rec;
             return mid;
@@ -607,6 +608,7 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p, MaterialId id) {
         rec.paramsPushed = true;
         if (Ogre::TextureGpu *rt = reflectionTexFor(rec)) db->setTexture(Ogre::PBSM_REFLECTION, rt);
         markIblMipmapsDirty();
+        if (!id) ++mChangeStats.engineAssignedIds;
         const MaterialId mid = id ? id : reserveMaterialId();   // reserved by the host or here (U3 stage 3)
         mMaterials[mid] = rec;
         return mid;
@@ -1305,6 +1307,7 @@ std::string OgreScene::textureKey(const std::string &path, bool decal, DecalMap 
 }
 
 TextureId OgreScene::trackTexture(const TextureRec &rec, TextureId given) {
+    if (!given) ++mChangeStats.engineAssignedIds;
     const TextureId id = given ? given : reserveTextureId();   // reserved by the host or here (U3 stage 3)
     mTextures[id] = rec;
     // Pixel-uploaded textures (createTexture) have no path and are never
@@ -2301,6 +2304,7 @@ MaterialId OgreScene::createUnlitMaterial(const Colour &c, bool depthTest, bool 
             Ogre::IdString(rec.datablockName), rec.datablockName, macro, blend, Ogre::HlmsParamVec()));
         db->setUseColour(true);
         db->setColour(toOgre(c));
+        if (!id) ++mChangeStats.engineAssignedIds;
         const MaterialId mid = id ? id : reserveMaterialId();   // reserved by the host or here (U3 stage 3)
         mMaterials[mid] = rec;
         return mid;
@@ -2323,6 +2327,7 @@ MaterialId OgreScene::createOutlineMaterial(const Colour &c, bool skinnable, Mat
                 Ogre::IdString(rec.datablockName), rec.datablockName, macro, Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
             db->setUseColour(true);
             db->setColour(toOgre(c));
+            if (!id) ++mChangeStats.engineAssignedIds;
             const MaterialId mid = id ? id : reserveMaterialId();   // reserved by the host or here (U3 stage 3)
             mMaterials[mid] = rec;
             return mid;
@@ -2354,6 +2359,7 @@ MaterialId OgreScene::createOutlineMaterial(const Colour &c, bool skinnable, Mat
         // The shell is a UI affordance, not geometry: it must not throw a
         // shadow of the character it outlines.
         db->setReceiveShadows(false);
+        if (!id) ++mChangeStats.engineAssignedIds;
         const MaterialId mid = id ? id : reserveMaterialId();   // reserved by the host or here (U3 stage 3)
         mMaterials[mid] = rec;
         return mid;
