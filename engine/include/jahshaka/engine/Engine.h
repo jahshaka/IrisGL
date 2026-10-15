@@ -1402,10 +1402,13 @@ public:
     const std::string &name() const { return mIdentityName; }
     bool isOffscreen() const { return mIdentityOffscreen; }
     Scene *scene() const { return mBoundScene; }
-    /// WHAT THIS VIEW DREW at the frame the engine last closed (ENGINE-UPGRADE-U3 stage 2b): its row of
-    /// Engine::published().views — the achieved target size and sample count, the frames presented, the generations.
-    /// A default row before the view's first frame. Read without asking; the reference holds like the engine's own.
-    virtual const PublishedEngineFrame::ViewFrames &published() const = 0;
+    /// The view's id (ENGINE-UPGRADE-U3 stage 3): reserved when the engine made it, never reused — its snapshot row's key.
+    NodeId id() const { return mIdentityId; }
+    /// WHAT THIS VIEW DREW at the frame the engine last closed (ENGINE-UPGRADE-U3 stage 2b; decisions 21 / 23): its row
+    /// of Engine::published().views, BY VALUE (one lookup, by id; nothing points into the double-buffered frame) — the
+    /// achieved target size and sample count, the frames presented, the generations. A default row (id 0) before the
+    /// view's first frame.
+    virtual PublishedEngineFrame::ViewFrames published() const = 0;
     /// WHAT THE HOST LAST PUSHED for this view (ENGINE-UPGRADE-U3 stage 2 — the host's own shadow, F5): the chain, the
     /// clear colour, the shadows flag, the enable, the overlay and the picture-in-picture, each as the host last set it, by a setter or by a view part of a
     /// submitted record (its merge, on the submitting side). NEVER the engine's applied state — a record's part lands
@@ -1859,6 +1862,7 @@ public:
     /// workspace rebuild.
     virtual void setAsyncShaders(bool on) = 0;
 protected:
+    NodeId mIdentityId = 0;
     std::string mIdentityName;
     bool        mIdentityOffscreen = false;
     Scene      *mBoundScene = nullptr;

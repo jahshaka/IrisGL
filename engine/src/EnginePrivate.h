@@ -6577,7 +6577,7 @@ public:
     /// which is how `HzbStatus::primed` is answered.
     unsigned long long workspaceFramesPresented() const { return mWorkspaceFramesPresented; }
     unsigned long long blankFramesPresented() const;
-    const PublishedEngineFrame::ViewFrames &published() const override;
+    PublishedEngineFrame::ViewFrames published() const override;
     bool warmUpShaders() override;
     void setAsyncShaders(bool on) override;
     bool asyncShaders() const override;

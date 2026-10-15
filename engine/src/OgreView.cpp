@@ -53,6 +53,7 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
       mWidth(w), mHeight(h), mBackground(background), mError(errorSink) {
     mPushedBackground = background;          // what the host created it with
     mIdentityName = name;                    // the boundary's identity (View::name, View::isOffscreen)
+    mIdentityId = reserveNodeId();           // ...and its row's key in the snapshot (U3 stage 3, decision 21)
     mIdentityOffscreen = texture != nullptr;
     mWorkspaceDef = name + "/Workspace";
     // The compositor chain (POST_CHAIN_SPEC.md §3) replaces
@@ -1564,11 +1565,10 @@ Ogre::CompositorShadowNode *OgreView::shadowNodeInstance() const {
 bool OgreView::isEnabled() const { return drawing(); }
 
 // THE VIEW'S ROW OF THE ENGINE'S SNAPSHOT (ENGINE-UPGRADE-U3 stage 2b): what the last closed frame drew for it.
-const PublishedEngineFrame::ViewFrames &OgreView::published() const {
-    static const PublishedEngineFrame::ViewFrames kNone;
-    if (!mEngine) return kNone;
-    const PublishedEngineFrame::ViewFrames *row = mEngine->published().view(mIdentityName);
-    return row ? *row : kNone;
+PublishedEngineFrame::ViewFrames OgreView::published() const {
+    if (!mEngine) return PublishedEngineFrame::ViewFrames();
+    const PublishedEngineFrame::ViewFrames *row = mEngine->published().view(mIdentityId);
+    return row ? *row : PublishedEngineFrame::ViewFrames();
 }   // what draws (the host's wish and the session's cover)
 
 // The ACHIEVED size, exactly like sampleCount() reports the achieved sample

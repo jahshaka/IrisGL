@@ -2587,6 +2587,7 @@ void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
     for (const auto &v : mViews)
         if (v) {
             PublishedEngineFrame::ViewFrames f;
+            f.id = v->id();
             f.name = v->name();
             f.presented = v->framesPresented();
             f.blank = v->blankFramesPresented();

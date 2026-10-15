@@ -8507,6 +8507,10 @@ struct PublishedEngineFrame {
     /// keyed by the view's NAME (unique among live views): a pointer would dangle in the snapshot for the two frames
     /// after a destroyView.
     struct ViewFrames {
+        /// THE VIEW'S ID (ENGINE-UPGRADE-U3 stage 3, decision 21): reserved when the engine makes the view, never
+        /// reused — a row is found by it, never by name, so a view re-created under the same name has NO row until
+        /// its first frame publishes (a reader sees "not yet drawn", never a dead view's picture).
+        NodeId             id = 0;
         std::string        name;
         unsigned long long presented = 0;       ///< View::framesPresented (reset when a scene is bound)
         unsigned long long blank = 0;           ///< View::blankFramesPresented
@@ -8536,8 +8540,8 @@ struct PublishedEngineFrame {
     bool               paceOwesWork = false;   ///< Engine::framePaceOwesWork as the frame closed it
     std::vector<ViewFrames> views;
     /// The view named `name` as this frame closed it; null when no live view has that name.
-    const ViewFrames *view(const std::string &name) const {
-        for (const ViewFrames &v : views) if (v.name == name) return &v;
+    const ViewFrames *view(NodeId id) const {
+        for (const ViewFrames &v : views) if (v.id == id) return &v;
         return nullptr;
     }
     /// THE FRAME'S ERROR (U3 F3): what THIS frame wrote ("" = nothing failed). A failing CALL's error is not here — it
