@@ -146,6 +146,20 @@ namespace Ogre
             for( size_t i = 0; i < 4; ++i )
                 shaderMaterial.bgDiffuse[i] = bgDiffuse[i];
             shaderMaterial.diffuse[3] = transparency;
+            // THE VOXEL'S ALBEDO IS THE DIFFUSE LOBE'S (VOXEL-METAL-ALBEDO-1): a voxel stores the
+            // radiance its surface scatters DIFFUSELY (the light injection's direct term and the
+            // bounce's re-emission both multiply the albedo), and in the metallic workflow HlmsPbs
+            // gives the diffuse lobe base x (1 - metalness) - the rest of the base colour is the
+            // specular F0 (800.PixelShader_piece_ps.any: diffuse -= diffuse x metalness). The base
+            // colour stood here, so a white metal re-emitted the bounce of a white diffuser. The
+            // scalar only, like the roughness: a metalness MAP is not voxelised. The specular
+            // workflows' diffuse colour is their diffuse lobe already.
+            if( pbsDatablock->getWorkflow() == HlmsPbsDatablock::MetallicWorkflow )
+            {
+                const float diffuseShare = 1.0f - pbsDatablock->getMetalness();
+                for( size_t i = 0; i < 3; ++i )
+                    shaderMaterial.diffuse[i] *= diffuseShare;
+            }
             shaderMaterial.emissive[3] = 1.0f;
             // The scalar only: a roughness MAP is not voxelised (the voxel is one
             // surface-averaged texel either way).

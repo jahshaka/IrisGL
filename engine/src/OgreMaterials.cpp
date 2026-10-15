@@ -651,9 +651,11 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         // parameter change on a material that visible geometry wears changes
         // what every reflection probe would capture, so the grid goes stale
         // (it used to be refreshed only by an endless sweep). The fields the
-        // VOXELIZER converts — diffuse, emissive, transparency (PhotonVoxelMaterial
-        // addDatablockToBucket) — additionally move the material generation,
-        // which re-voxelizes once when the edit settles.
+        // VOXELIZER converts — diffuse, emissive, transparency, the roughness (the
+        // injection's and the bounce's diffuse albedo read it: PHOTON-WRITER-1) and, in
+        // the metallic workflow, the metalness that scales the diffuse lobe
+        // (PhotonVoxelMaterial writeRow, VOXEL-METAL-ALBEDO-1) — additionally move the
+        // material generation, which re-voxelizes once when the edit settles.
         {
             const PbrParams &o = it->second.params;
             const auto sameCol = [](const Colour &a, const Colour &b) {
@@ -661,7 +663,8 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
             };
             const bool voxelInputs = !it->second.paramsPushed ||
                 !sameCol(o.albedo, p.albedo) || !sameCol(o.emissive, p.emissive) ||
-                o.alpha != p.alpha || o.alphaMode != p.alphaMode || o.workflow != p.workflow;
+                o.alpha != p.alpha || o.alphaMode != p.alphaMode || o.workflow != p.workflow ||
+                o.metalness != p.metalness || o.roughness != p.roughness;
             mPhoton.noteMaterialChanged(id, voxelInputs);
             // THE LAMP-MAP CACHE'S MATERIAL INPUT (ENGINE_CACHE_POLICY_SPEC §3:
             // "only if it changes depth"). What a caster pass writes depends on
