@@ -7352,6 +7352,7 @@ public:
     FrameSubmitStatus frameSubmitStatus() const override { return mRenderThread.submitStatus(); }
     FrameInputStatus frameInputStatus() const override { return mFrameInputStatus; }
     const PublishedEngineFrame &published() const override { return mRenderThread.published(); }
+    void setDisplayPeriod(float seconds) override { mRenderThread.setDisplayPeriod(seconds); }
     bool pendingGiConfiguration(const Scene *scene) const override;
     /// THE ONE DRAIN (U0 3a): the record the hand-over took (`any` false = an EMPTY hand-over), applied at the top of
     /// the frame.

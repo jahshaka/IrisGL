@@ -2049,6 +2049,10 @@ public:
     /// asking. A whole-frame swap like Scene::published() (THE SNAPSHOT, above): a reference stays one whole frame
     /// until the SECOND publish after it was taken. Before the first frame every field is its default.
     virtual const PublishedEngineFrame &published() const = 0;
+    /// THE DISPLAY'S PERIOD the host draws at, seconds (ENGINE-UPGRADE-U3: a display property, not a record — set on
+    /// change by the render driver). Never read by the engine's clock (trap 7: that is the record's `frameDelta`);
+    /// stage 5's interpolation weight divides by it. 0 = unknown.
+    virtual void setDisplayPeriod(float seconds) = 0;
     /// Will the next drain apply a NEW GI configuration to `scene` (the pending record's `gi` differs from what the
     /// scene last applied)? The engine's own compare, asked by a host that must know before the frame — a shot whose
     /// record changes the GI draws that frame before it waits for giAtRest (U0 3c: the host keeps no copy of it).
@@ -2996,7 +3000,7 @@ public:
     ///
     /// A FRAME'S FAILURE IS NOT HERE (ENGINE-UPGRADE-U3 F3, stage 1): whatever renderOneFrame's frame — its drain, its
     /// work, its close (a device loss, an out-of-memory, an injected fault) — fails at is the frame's error, published
-    /// in published().frameError / lastFrameError; the sink holds what it held before the frame, untouched by it.
+    /// in published().frameError / frameErrors; the sink holds what it held before the frame, untouched by it.
     ///
     /// NOTE this is a PEEK: the sink is never cleared on success, so a stale
     /// reason outlives the call that set it. Callers that check a specific

@@ -2,6 +2,7 @@
 #include "EnginePrivate.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -21,7 +22,6 @@ void RenderThread::submit(const FrameInput &in) {
     if (in.shadowMapBudget) p.shadowMapBudget = in.shadowMapBudget;
     p.refreshShadows = p.refreshShadows || in.refreshShadows;
     if (in.stepSerial) p.stepSerial = in.stepSerial;
-    if (in.displayDt) p.displayDt = in.displayDt;
     for (const FrameInputScene &sc : in.scenes) {
         auto it = std::find_if(p.scenes.begin(), p.scenes.end(),
                                [&](const FrameInputScene &q) { return q.scene == sc.scene; });
@@ -120,6 +120,7 @@ void RenderThread::tickInline() {
 // the close latched (a lost device, an out-of-memory, a session the runtime ended). Every scene's half first (its
 // rider tags, its GI machine), then the engine's.
 void RenderThread::publish(bool recordApplied, std::string &&frameError) {
+    const auto t0 = std::chrono::steady_clock::now();
     OgreEngine &e = mEngine;
     ++e.mPublishedFrames;
     for (auto &s : e.mScenes) {
@@ -135,10 +136,16 @@ void RenderThread::publish(bool recordApplied, std::string &&frameError) {
     back.frame = e.mPublishedFrames;
     back.serial = mSerial;
     back.recordApplied = recordApplied;
-    if (!frameError.empty()) { ++mFramesWithError; mLastFrameError = frameError; }
+    if (!frameError.empty()) {
+        ++mFramesWithError;
+        mFrameErrors.push_back({ mSerial, e.mPublishedFrames, frameError });
+        if (mFrameErrors.size() > PublishedEngineFrame::kFrameErrorsKept) mFrameErrors.erase(mFrameErrors.begin());
+    }
     back.frameError = std::move(frameError);
-    back.lastFrameError = mLastFrameError;
+    back.frameErrors = mFrameErrors;
     back.framesWithError = mFramesWithError;
+    back.publishMicros = mPublishMicros;
+    mPublishMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
     mPublishedIdx.store(mPublishedIdx.load(std::memory_order_relaxed) ^ 1u, std::memory_order_release);
 }
 

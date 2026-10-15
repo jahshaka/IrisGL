@@ -7970,9 +7970,6 @@ struct FrameInput {
     /// The document clock's step count (iris::SimulationClock::steps) the record was built at — the grid state its
     /// node records are (stage 5 interpolates between the last two of them). Newest wins in a merge.
     std::optional<unsigned long long> stepSerial;
-    /// The seconds the HOST's display period is (the driver's), never read by the engine's clock (trap 7: the
-    /// engine's clock is `frameDelta`) — stage 5's interpolation weight divides by it. Newest wins in a merge.
-    std::optional<float>              displayDt;
 
     /// The usual one-field records.
     static FrameInput delta(float seconds) { FrameInput f; f.frameDelta = seconds; return f; }
@@ -8251,11 +8248,19 @@ struct MonitorStatus {
 /// of the engine's per-frame state today through a synchronous getter is here, written once at the close of every
 /// frame as a whole-frame swap (Engine.h, THE SNAPSHOT) — stage 2 moves the readers onto it.
 struct PublishedEngineFrame {
-    /// A view's presented-frame counters (View::framesPresented / blankFramesPresented) as the frame closed them.
+    /// A view's presented-frame counters (View::framesPresented / blankFramesPresented) as the frame closed them,
+    /// keyed by the view's NAME (unique among live views): a pointer would dangle in the snapshot for the two frames
+    /// after a destroyView.
     struct ViewFrames {
-        const View        *view = nullptr;
+        std::string        name;
         unsigned long long presented = 0;
         unsigned long long blank = 0;
+    };
+    /// ONE FRAME'S ERROR (U3 F3): the record it applied, the frame, the text.
+    struct FrameError {
+        unsigned long long serial = 0;
+        unsigned long long frame = 0;
+        std::string        text;
     };
     unsigned long long frame = 0;          ///< frames closed so far (0 = never drawn); PublishedFrame::frame's stamp
     /// The record this frame applied (FrameInput::serial). AN EMPTY HAND-OVER (a frame nothing was submitted for) is
@@ -8271,13 +8276,19 @@ struct PublishedEngineFrame {
     /// THE FRAME'S ERROR (U3 F3): what THIS frame wrote ("" = nothing failed). A failing CALL's error is not here — it
     /// stays Engine::lastError()'s until stage 3 makes every call a message with its own completion.
     std::string        frameError;
-    /// ...and the newest error ANY frame wrote, with how many frames wrote one: a reader that did not see every
-    /// frame (the error pump drains once a tick; a scripted run draws many) takes it when the count moves.
-    std::string        lastFrameError;
+    /// ...and THE FRAMES' ERRORS, newest last: the last kFrameErrorsKept frames that wrote one, each keyed by its
+    /// serial, with the running count of frames that ever wrote one. A reader that did not see every frame (the error
+    /// pump drains once a tick; a scripted run draws many) takes the entries the count says it has not seen — an
+    /// earlier error is never hidden behind a later one.
+    static constexpr unsigned kFrameErrorsKept = 16;
+    std::vector<FrameError> frameErrors;
     unsigned long long framesWithError = 0;
     bool               deviceLost = false;
     GpuFault           gpuFault = GpuFault::None;
     MonitorStatus      monitor;
+    /// What the PREVIOUS publish cost the loop, microseconds (the snapshot's own price: the engine's half + every
+    /// scene's, their GiStatus included) — read by the U3 measurements, never a bar.
+    double             publishMicros = 0.0;
 };
 
 // ---- Engine snapshot (§4.8 `snapshot_start.json` / `snapshot_end.json`) ----

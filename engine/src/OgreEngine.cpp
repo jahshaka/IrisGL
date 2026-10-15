@@ -2534,7 +2534,7 @@ void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
     out.hasEnabledViews = hasEnabledViews();
     out.views.clear();
     for (const auto &v : mViews)
-        if (v) out.views.push_back({ v.get(), v->framesPresented(), v->blankFramesPresented() });
+        if (v) out.views.push_back({ v->name(), v->framesPresented(), v->blankFramesPresented() });
     out.deviceLost = deviceLost();
     out.gpuFault = gpuFault();
     if (mMonitor) {

@@ -64,6 +64,10 @@ public:
     }
     /// The serial of the last record a hand-over took (0 = none yet).
     unsigned long long serial() const { return mSerial; }
+    /// THE DISPLAY'S PERIOD (Engine::setDisplayPeriod): a display property the driver sets on change, read by the
+    /// render side (stage 5's interpolation weight).
+    void setDisplayPeriod(float seconds) { mDisplayPeriod.store(seconds, std::memory_order_relaxed); }
+    float displayPeriod() const { return mDisplayPeriod.load(std::memory_order_relaxed); }
 
     static constexpr unsigned kHostStageCoalesce = 64u;
 
@@ -87,7 +91,9 @@ private:
     // ---- render side only ----
     unsigned long long mSerial = 0;
     unsigned long long mFramesWithError = 0;
-    std::string        mLastFrameError;
+    std::vector<PublishedEngineFrame::FrameError> mFrameErrors;   ///< the newest kFrameErrorsKept, oldest first
+    double             mPublishMicros = 0.0;
+    std::atomic<float> mDisplayPeriod{ 0.0f };
     PublishedEngineFrame mPublished[2];
     std::atomic<unsigned> mPublishedIdx{ 0u };
 };
