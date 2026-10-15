@@ -269,7 +269,15 @@ void unregisterNode(SceneNode *n)
 {
     if (!n) return;
     if (n->docNode().graphStatic) gStaticNodes.fetch_sub(1, std::memory_order_relaxed);
-    setOwnerById(n->getNodeId(), nullptr);
+    if (ownerById(n->getNodeId()) == n) setOwnerById(n->getNodeId(), nullptr);
+}
+
+void reassignNodeId(SceneNode *n, long long id)
+{
+    if (!n || n->getNodeId() == id) return;
+    if (ownerById(n->getNodeId()) == n) setOwnerById(n->getNodeId(), nullptr);
+    n->nodeId = id;
+    setOwnerById(id, n);
 }
 
 unsigned long long transformWrites() { return gTransformWrites.load(std::memory_order_relaxed); }

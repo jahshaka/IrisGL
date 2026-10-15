@@ -1227,6 +1227,9 @@ private:
     /// children inherit.
     bool syncMobility(Entry &e, iris::SceneNode *node, bool parentMovable);
     void releaseEntry(Entry &e);
+    /// A refused adoption (decision 33): the entries of `node` and its subtree forgotten without a removeNode, and
+    /// the nodes marked — the next sync adopts them afresh.
+    void forgetSubtree(iris::SceneNode *node);
     /// Releases every engine object this mirror made for DOCUMENT nodes
     /// (entries + highlight shells) — the body of the evacuation hook
     /// (Scene::_setMirrorEvacuationHook), fired when another mirror binds the

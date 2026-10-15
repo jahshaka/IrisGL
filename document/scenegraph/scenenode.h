@@ -545,6 +545,10 @@ public:
     QString getName();
 
     qint64 getNodeId() const;
+    /// Takes a SESSION id (an undo's replay, src/io/scenereader.cpp): the owner table the write journal resolves
+    /// through follows the id (graph::reassignNodeId) — a raw write of `nodeId` would leave the writes to this node
+    /// resolved to the node that held it before (ENGINE-UPGRADE-U3 decision 33).
+    void setNodeId(qint64 id);
 
 	void setGUID(const QString &id) const {
 		guid = id;

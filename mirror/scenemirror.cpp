@@ -827,11 +827,11 @@ int SceneMirror::sync(const FrameViews &frameViews)
             for (iris::SceneNode *n : mDirtyScratch)
                 if (n && (n->_takeDirtyMask() & kSettleWriteMask)) settleWrites.push_back(n);
             mDirtyScratch.clear();
-            // Evictions are safe to drop here: those nodes are out of the tree,
-            // so the walk cannot stamp them and removeMissing releases them.
-            marks->takeEvicted(mEvictedScratch);
-            mEvictedScratch.clear();
         }
+        // EVICTIONS FIRST, AS IN THE DIRTY PATH (U3 stage 3 fix round, decision 33): an evicted node's engine id
+        // may be the one a same-tick re-create takes (delete + undo: the fragment keeps its ids), and the walk
+        // adopts before removeMissing would release — so the old entries go before the walk, never after it.
+        consumeEvicted();
         // ...and the same for the material epoch: read BEFORE, so a material
         // touched DURING the walk is caught by the next sync rather than
         // assumed to have been seen.
@@ -3322,7 +3322,20 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
     if (!e.node) {
         // ONE ID SPACE (U3 stage 3, F6): the engine node takes the document node's own id.
         e.node = jahshaka::engine::NodeId(node->nodeId);
-        post([id = e.node, parentId](jahshaka::engine::Scene &s) { s.createDocumentNode(id, parentId); });
+        // THE CREATE IS ANSWERED (U3 stage 3 fix round, decision 33): a refusal — the id still held by the engine
+        // node of an entry this sync has not released yet (a same-id re-create the full walk met before the old
+        // node's removal) — forgets the entry and its subtree's, and marks them: the mirror's own retry adopts them
+        // afresh at the next sync, once the old node is gone.
+        postChecked([id = e.node, parentId](jahshaka::engine::Scene &s) { return s.createDocumentNode(id, parentId) != 0; },
+                    [this, key = node, alive = QWeakPointer<iris::SceneNode>(node->sharedFromThis()),
+                     id = e.node](const std::string &why) {
+                        if (alive.isNull()) return;
+                        const auto it = mEntries.constFind(key);
+                        if (it == mEntries.cend() || it->node != id) return;
+                        qWarning("SceneMirror: the engine refused node %llu (%s); re-adopted at the next sync",
+                                 static_cast<unsigned long long>(id), why.c_str());
+                        forgetSubtree(key);
+                    });
         e.parentPushed = parentId;
         e.staticPushed = node->isStaticInGraph() ? 1 : 0;
         e.visiblePushed = -1;      // force one visibility application
@@ -4423,6 +4436,20 @@ void SceneMirror::reclaimUnused()
 /// Everything the engine hung off one entry, released. Used both by
 /// removeMissing (the node left the document) and by visit (the document's
 /// handle was rebuilt by a migration, so the adopted id names a dead node).
+void SceneMirror::forgetSubtree(iris::SceneNode *node)
+{
+    if (!node) return;
+    const auto it = mEntries.find(node);
+    if (it != mEntries.end()) {
+        it->node = 0;   // the engine never made it: nothing to remove under this id
+        mBoneRiders.remove(it.key());
+        releaseEntry(*it);
+        mEntries.erase(it);
+    }
+    node->markChanged(iris::NodeChange::Content);
+    for (int i = 0, n = node->childCount(); i < n; ++i) forgetSubtree(node->childAt(i));
+}
+
 void SceneMirror::releaseEntry(Entry &e)
 {
     noteDropped(e);   // the reclaim's candidates (mDroppedMeshes): what this entry held

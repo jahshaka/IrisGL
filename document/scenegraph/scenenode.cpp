@@ -135,6 +135,11 @@ qint64 SceneNode::getNodeId() const
     return nodeId;
 }
 
+void SceneNode::setNodeId(qint64 id)
+{
+    graph::reassignNodeId(this, id);
+}
+
 // ---- structure -------------------------------------------------------------
 
 SceneNodePtr SceneNode::getParent() const

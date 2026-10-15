@@ -248,11 +248,16 @@ bool worldBox(const DocNode &n, const Vec3 &localMin, const Vec3 &localMax, floa
 /// document's mirror drains from the WRITE JOURNAL below — the same writes, by name. The count stays the physics
 /// write-back's cheap "did anything else write?" test.
 unsigned long long transformWrites();
-/// The owner table the journal resolves ids through: SceneNode's constructor and destructor, nothing else.
+/// The owner table the journal resolves ids through: SceneNode's constructor, destructor and setNodeId, nothing else.
 void registerNode(SceneNode *n);
 /// The live document node with this SceneNode::getNodeId, or null (destroyed, or never made).
 SceneNode *nodeById(long long id);
+/// Clears the node's row ONLY while the row is still the node's: a node that gave its id to another (an undo's
+/// replay, SceneNode::setNodeId) must not erase the new owner when it dies.
 void unregisterNode(SceneNode *n);
+/// THE ID MOVES WITH ITS ROW (ENGINE-UPGRADE-U3 stage 3 fix round, decision 33): the node takes `id` and the owner
+/// table names it under that id — the old row is let go when it was the node's. SceneNode::setNodeId.
+void reassignNodeId(SceneNode *n, long long id);
 /// THE WRITE JOURNAL — the change record every frame's ChangeSet is drained from (ENGINE-UPGRADE-1 U0 3b; first
 /// built for ENGINE_V2_SPEC V2-1, SPEED-CPU 2026-10-04). The counter above says THAT something moved; the journal
 /// says WHAT: every write the counter counts (a transform setter through the one funnel, a reparent, a detach) also
