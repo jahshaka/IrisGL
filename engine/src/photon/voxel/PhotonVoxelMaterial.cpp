@@ -334,7 +334,7 @@ namespace Ogre
     //-------------------------------------------------------------------------
     void PhotonVoxelMaterial::initTempResources( SceneManager *sceneManager )
     {
-        // IDEMPOTENT. The texture and the camera are created under FIXED NAMES, so a
+        // IDEMPOTENT. The texture and the camera are created under the store's names, so a
         // second init without a destroy throws on the duplicate - which is how a
         // rebuild that threw between the bracket's two halves used to poison every
         // rebuild after it. Now the owner may call this freely and the failure path may
@@ -342,15 +342,20 @@ namespace Ogre
         if( mDownsampleTex )
             return;
 
+        // Jahshaka (ENGINE-UPGRADE-ASYNC-3): NAMED BY THE STORE. The temps live as long as their store
+        // now (they were a per-build bracket, so two never coexisted), and every scene owns a store:
+        // a second scene's fixed name was a duplicate texture and its GI never converted a material.
+        const String tempName = "VctMaterialDownsampleTex/" + StringConverter::toString( getId() );
         mDownsampleTex = mTextureGpuManager->createTexture(
-            "VctMaterialDownsampleTex", "VctMaterialDownsampleTex", GpuPageOutStrategy::Discard,
+            tempName, tempName, GpuPageOutStrategy::Discard,
             TextureFlags::RenderToTexture | TextureFlags::DiscardableContent, TextureTypes::Type2D );
         mDownsampleTex->setResolution( 64u, 64u );
         mDownsampleTex->setPixelFormat( PFG_RGBA8_UNORM_SRGB );
         mDownsampleTex->_setDepthBufferDefaults( DepthBuffer::POOL_NO_DEPTH, false, PFG_UNKNOWN );
         mDownsampleTex->scheduleTransitionTo( GpuResidency::Resident );
 
-        Camera *dummyCamera = sceneManager->createCamera( "VctMaterialCam" );
+        Camera *dummyCamera =
+            sceneManager->createCamera( "VctMaterialCam/" + StringConverter::toString( getId() ) );
 
         mDownsampleWorkspace2DArray = mCompositorManager->addWorkspace(
             sceneManager, mDownsampleTex, dummyCamera, "VctTexDownsampleWorkspace", false, -1, 0, 0,

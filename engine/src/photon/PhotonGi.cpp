@@ -96,7 +96,7 @@ void PhotonComponent::destroyVctMaterialStore() {
 }
 
 /// THE STORE'S TEMP RESOURCES: a 64x64 render target, a dummy camera and two (disabled)
-/// workspaces under FIXED names, created once (idempotent) and destroyed with the store
+/// workspaces under the store's own names, created once (idempotent) and destroyed with the store
 /// (destroyVctMaterialStore). They used to be a per-rebuild bracket: a texture creation and
 /// two workspaces inside the GI step on every re-voxelisation.
 void PhotonComponent::ensureVctMaterialTemps() {
@@ -2682,6 +2682,10 @@ size_t PhotonComponent::markDirtyCascadesPending(GiStaleReason why) {
         if (!hit) continue;
         c.pending = 1;
         c.pendingReason = why;
+        // Rebuilt once the frame's commit carries the edit (VctCascade::editSince).
+        const unsigned long long frame = giWriterFrame();
+        if (!c.editSince) c.editSince = frame;
+        c.editLast = frame;
         ++marked;
     }
     mGiCascadeDirtyBoxes.clear();
@@ -4684,9 +4688,13 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
     // the picture is never half-built, only slightly behind.
     // THE ONE RE-VOXELISATION: the innermost pending cascade, unless the follow spent the frame
     // (every other pending cascade is deferred to a later frame).
+    // A cascade whose first edit mark is THIS frame's waits for the frame's commit (editSince).
     if (!w.follow)
         for (size_t i = 0; i < mVctCascades.size(); ++i)
-            if (mVctCascades[i].pending) { w.rebuild = int(i); break; }
+            if (mVctCascades[i].pending && mVctCascades[i].editSince != giWriterFrame()) {
+                w.rebuild = int(i);
+                break;
+            }
     w.spent = w.follow || w.rebuild >= 0;
 }
 
@@ -4715,7 +4723,12 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         // A MATERIAL REFRESH OWED (an edit of a voxel input) is graphics work the frame's graphics
         // region does after this one (prepareGiInputs, ENGINE-UPGRADE-ASYNC-3): a re-voxelisation now
         // would read the rows before the edit and leave the cascade clean. It waits one frame.
-        if (spent || int(i) != w.rebuild || mVctMaterialRefreshOwed) { ++mCascadeDeferrals; continue; }
+        // ...AND AN EDIT IS VOXELISED ONCE THE TABLE CARRIES IT (editSince): not in the frame that first
+        // marked it - this frame's table is the last frame's commit.
+        if (spent || int(i) != w.rebuild || mVctMaterialRefreshOwed || c.editSince == giWriterFrame()) {
+            ++mCascadeDeferrals;
+            continue;
+        }
         // THE PLACEMENT, SAVED BEFORE IT MOVES (audit B4). recentreCascade
         // writes the voxeliser's region, and the shader reads that region live
         // — so if the build then throws, the old voxels would be sampled as if
@@ -4768,8 +4781,14 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         }
         c.failures = 0;
         if (c.jumped) { ++mCascadeFullRebuilds; c.jumped = false; }
-        c.pending = 0;
-        c.pendingReason = GiStaleReason::Camera;
+        if (c.editLast == giWriterFrame()) {
+            // AN EDIT OF THIS FRAME IS NOT IN THE TABLE THIS REBUILD READ: one more, next frame.
+            c.editSince = c.editLast;
+        } else {
+            c.pending = 0;
+            c.pendingReason = GiStaleReason::Camera;
+            c.editSince = c.editLast = 0;
+        }
         // THE FIELD RIDES CASCADE 0 (E1 item 1), and it follows ON THE NEXT
         // FRAME, out of that frame's own GI slot (V1-RIG item 2 /
         // LATER_OPTIMISATIONS L11: the two GPU bursts together are 11.7 ms at a

@@ -355,6 +355,14 @@ public:
         /// when the dirty path marked it (G1), so a capture can separate the
         /// cost of walking around a scene from the cost of changing it.
         GiStaleReason pendingReason = GiStaleReason::Camera;
+        /// THE TABLE THE REBUILD WILL READ (ENGINE-UPGRADE-ASYNC-3 stage 1). The GI step's Compute region
+        /// reads the instance table the LAST frame committed, which does not carry an edit made since
+        /// (the dirty path: a moved still, a spawn, a converted material). `editSince` = the writer
+        /// frame of the first edit mark not yet voxelised, `editLast` = the latest: a cascade is rebuilt
+        /// only once editSince is an earlier frame (its table carries that edit), and a rebuild in a
+        /// frame that marked it again stays pending for the next (the table carries this frame's edit
+        /// then). Under a drag: one rebuild a frame, one frame behind the pose. 0 = no edit mark.
+        unsigned long long editSince = 0, editLast = 0;
         /// This cascade's queued rebuild came from the JUMP guard, not from an
         /// ordinary scroll — i.e. nothing of its old volume was reusable.
         /// Cleared when the rebuild is serviced, and counted there, so the
