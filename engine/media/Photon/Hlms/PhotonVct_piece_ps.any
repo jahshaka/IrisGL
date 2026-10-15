@@ -370,10 +370,11 @@
 			// specular cone read the lamp outside through a 0.5 m wall. Such a lobe is
 			// read in two shares. THE SKY'S: the prefiltered lobe (jahEnvLobe - exactly
 			// what PBS reads outside every volume, the split-sum) times the share the
-			// voxels did not stop; THE OCCLUDED ONE: the diffuse estimator's voxel light
-			// (applyVctRoughSpecular, after the field has written envColourD). The
-			// occlusion comes from this march CAPPED AT TAN 1 - an occlusion query along
-			// the reflection, its colour unused - handed out in outRoughOcclusion.
+			// voxels did not stop; THE STOPPED ONE: what this march stopped on - its own
+			// colour at the same occlusion, handed out in outRoughVoxel and added by
+			// applyVctRoughSpecular (BISTRO-FIXES-3; the diffuse set's voxel light stood
+			// for it before and was the wrong integral). The occlusion comes from this
+			// march CAPPED AT TAN 1 - a query along the reflection - in outRoughOcclusion.
 			const bool jahRoughLobe = specConeAngleTan > 1.0f;
 			// the lobe's share below the surface is stopped by it (jahConeBelow)
 			float4 jahSpecOrigin = jahOrigin;
