@@ -5180,6 +5180,10 @@ struct GiVoxelVolume {
     /// term and the emissive - what a hit's read takes out of the store (jah_rq_hit.glsl's bounce
     /// share 1 - D / T). Empty where the cascade keeps none (no bounce texture).
     std::vector<float> direct;
+    /// THE ALBEDO VOLUME'S MIP LEVELS 1..n (ENGINE-UPGRADE-ASYNC-3 stage 1), decoded like `albedo`
+    /// (level 0): albedoLevels[L - 1] is level L, max(1, size >> L) per axis, RGBA, x fastest — the
+    /// compute chain's proof (each texel the blit's filter of the level below).
+    std::vector<std::vector<float>> albedoLevels;
 };
 
 // ---------------------------------------------------------------------------

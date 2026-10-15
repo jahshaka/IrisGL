@@ -6,9 +6,12 @@
 #include "SurfaceCache.h"
 #include "photon/PhotonDispatch.h"
 #include "photon/voxel/PhotonIrradianceField.h"
+#include "photon/voxel/PhotonMipChain.h"
 #include "jahshaka/engine/PhotonStatus.h"
 
+#include <Compute/OgreComputeTools.h>
 #include <OgreCamera.h>
+#include <cassert>
 #include <OgreLogManager.h>
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsComputeJob.h>
@@ -18,6 +21,9 @@
 
 #include <OgreRoot.h>
 #include <OgreTextureGpuManager.h>
+#include <OgreVulkanAsyncComputeQueue.h>
+#include <OgreVulkanDevice.h>
+#include <OgreVulkanRenderSystem.h>
 #include <Compositor/OgreCompositorManager2.h>
 #include <Compositor/OgreCompositorNodeDef.h>
 #include <Compositor/OgreCompositorWorkspace.h>
@@ -122,15 +128,41 @@ void PhotonComponent::releaseUpdatePass() {
 // THE WITNESS AND THE DOOR (photon/PhotonDispatch.h): process-wide, render thread only.
 namespace {
 unsigned gPhotonRegionDepth = 0u;
+bool gPhotonRegionCompute = false;     // the outermost open region's kind
+unsigned long long gDoorInCompute = 0ull, gRsInCompute = 0ull, gRsAtComputeOpen = 0ull;
+unsigned long long renderSystemDispatches() {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    auto *vk = root ? dynamic_cast<Ogre::VulkanRenderSystem *>(root->getRenderSystem()) : nullptr;
+    return vk ? vk->_jahGetNumDispatches() : 0ull;
+}
 unsigned long long gPhotonInRegion = 0ull, gPhotonOutsideRegion = 0ull;
+
+// THE REGION'S BRACKET CHECK (jahshaka/engine/PhotonStatus.h setPhotonRegionBracketCheck).
+bool gRegionCheck = false;
+bool gRegionCheckWasEnabled = false;   // the queue's arm before the check switched it off
+bool gRegionCheckOpen = false;         // the bracket the outermost open began
+unsigned long long gRegionBrackets = 0ull;
+Ogre::VulkanAsyncComputeQueue *regionQueue() {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    auto *vk = root ? dynamic_cast<Ogre::VulkanRenderSystem *>(root->getRenderSystem()) : nullptr;
+    Ogre::VulkanDevice *dev = vk ? vk->getVulkanDevice() : nullptr;
+    return dev ? dev->getAsyncCompute() : nullptr;
+}
 }   // namespace
 void notePhotonDispatch() {
-    if (gPhotonRegionDepth) { ++gPhotonInRegion; return; }
+    if (gPhotonRegionDepth) {
+        ++gPhotonInRegion;
+        if (gPhotonRegionCompute) ++gDoorInCompute;
+        return;
+    }
     if (!gPhotonOutsideRegion++)
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka photon: a Photon compute dispatch OUTSIDE the GI region (PhotonComponent::GiRegion) — "
             "the ASYNC bracket would miss it; PhotonDispatchStatus::outsideRegion counts every one",
             Ogre::LML_CRITICAL);
+    // THE DOOR ASSERTS (ENGINE-UPGRADE-ASYNC-3 stage 1): a debug build stops at the first one — the
+    // async bracket wraps the region, so a dispatch outside it would record on the wrong queue.
+    assert(false && "a Photon compute dispatch outside the GI region (PhotonComponent::GiRegion)");
 }
 unsigned long long photonDispatchesInRegion() { return gPhotonInRegion; }
 unsigned long long photonDispatchesOutsideRegion() { return gPhotonOutsideRegion; }
@@ -143,11 +175,54 @@ void photonDispatch(Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job, Ogre::Rend
     hc->dispatch(job, 0, 0);
 }
 
+void photonClearUavFloat(Ogre::ComputeTools *tools, Ogre::TextureGpu *tex, const float value[4]) {
+    notePhotonDispatch();
+    tools->clearUavFloat(tex, value);
+}
+void photonClearUavUint(Ogre::ComputeTools *tools, Ogre::TextureGpu *tex, const unsigned value[4]) {
+    notePhotonDispatch();
+    tools->clearUavUint(tex, value);
+}
+
 // The region's open depth (nesting counts once); GiRegion is the only door. A close with no
 // open is a broken pairing: logged, never wrapped to 4 billion open regions.
-void PhotonComponent::beginGiRegion() { ++gPhotonRegionDepth; }
+bool PhotonComponent::inComputeRegion() { return gPhotonRegionDepth && gPhotonRegionCompute; }
+
+void PhotonComponent::beginGiRegion(RegionKind kind) {
+    if (gPhotonRegionDepth) {
+        // A graphics region inside the compute one would record graphics work in the bracket.
+        assert(!(gPhotonRegionCompute && kind == RegionKind::Graphics) &&
+               "a Graphics GI region opened inside the Compute region");
+        ++gPhotonRegionDepth;
+        return;
+    }
+    ++gPhotonRegionDepth;
+    gPhotonRegionCompute = kind == RegionKind::Compute;
+    if (gPhotonRegionCompute) gRsAtComputeOpen = renderSystemDispatches();
+    if (!gRegionCheck || !gPhotonRegionCompute) return;
+    Ogre::VulkanAsyncComputeQueue *q = regionQueue();
+    if (!q || q->isOpen()) return;
+    if (q->isEnabled()) {   // the check runs the IN-ORDER arm (switched once, restored at its end)
+        gRegionCheckWasEnabled = true;
+        q->setEnabled(false);
+    }
+    q->begin(0u, "jah.gi.check");
+    gRegionCheckOpen = true;
+    ++gRegionBrackets;
+}
 void PhotonComponent::endGiRegion() {
-    if (gPhotonRegionDepth) { --gPhotonRegionDepth; return; }
+    if (gPhotonRegionDepth) {
+        if (--gPhotonRegionDepth == 0u) {
+            if (gPhotonRegionCompute) gRsInCompute += renderSystemDispatches() - gRsAtComputeOpen;
+            gPhotonRegionCompute = false;
+        }
+        if (gPhotonRegionDepth == 0u && gRegionCheckOpen) {
+            gRegionCheckOpen = false;
+            if (Ogre::VulkanAsyncComputeQueue *q = regionQueue())
+                if (q->isOpen()) q->end();
+        }
+        return;
+    }
     Ogre::LogManager::getSingleton().logMessage(
         "Jahshaka photon: a GI region closed that was never opened", Ogre::LML_CRITICAL);
 }
@@ -157,7 +232,7 @@ bool PhotonComponent::updatePassOwed() const {
 }
 
 void PhotonComponent::recordUpdatePass() {
-    GiRegion region;   // the cards' work: its own span of the region
+    GiRegion region(RegionKind::Graphics);   // the cards' work (this frame's capture): graphics, in order
     if (mSurfaceCache) mSurfaceCache->photonUpdate();
 }
 
@@ -178,7 +253,25 @@ PhotonDispatchStatus photonDispatchStatus() {
     PhotonDispatchStatus s;
     s.inRegion = detail::photonDispatchesInRegion();
     s.outsideRegion = detail::photonDispatchesOutsideRegion();
+    s.mipDispatches = Ogre::PhotonMipChain::numDispatches();
+    s.regionBrackets = detail::gRegionBrackets;
+    s.doorInCompute = detail::gDoorInCompute;
+    s.renderSystemInCompute = detail::gRsInCompute;
     return s;
+}
+
+void setPhotonRegionBracketCheck(bool on) {
+    using namespace detail;
+    if (on == gRegionCheck) return;
+    // The check runs the IN-ORDER arm (the graphics queue keeps recording; the bracket's refusals
+    // are the same as on the async arm): the first region it opens switches the queue's arm off
+    // (the device may not exist yet when the check is turned on); turning it off restores it.
+    if (!on) {
+        Ogre::VulkanAsyncComputeQueue *q = regionQueue();
+        if (q && gRegionCheckWasEnabled && !q->isOpen()) q->setEnabled(true);
+        gRegionCheckWasEnabled = false;
+    }
+    gRegionCheck = on;
 }
 
 PhotonFieldStatus photonFieldStatus(const Scene &scene) {

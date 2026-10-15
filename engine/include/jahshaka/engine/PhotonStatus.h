@@ -12,8 +12,24 @@ struct PhotonDispatchStatus {
     unsigned long long inRegion = 0;
     /// ...and outside every region (an event, a tool, a path the region does not cover): the bar is 0.
     unsigned long long outsideRegion = 0;
+    /// The mip chains' dispatches (ENGINE-UPGRADE-ASYNC-3 stage 1: one a level, through the door), ever.
+    unsigned long long mipDispatches = 0;
+    /// Brackets the region check opened (setPhotonRegionBracketCheck), ever.
+    unsigned long long regionBrackets = 0;
+    /// THE COMPUTE REGION'S TWO COUNTS (ENGINE-UPGRADE-ASYNC-3 stage 1): the door's dispatches made
+    /// while a Compute region was open, and the RENDER SYSTEM's own dispatches recorded in the same
+    /// spans (the fork's VulkanRenderSystem count) - equal when nothing dispatches around the door.
+    unsigned long long doorInCompute = 0;
+    unsigned long long renderSystemInCompute = 0;
 };
 PhotonDispatchStatus photonDispatchStatus();
+
+/// THE REGION'S BRACKET CHECK (ENGINE-UPGRADE-ASYNC-3 stage 1) — a TEST instrument: while on, the
+/// outermost open of every GI region opens the fork's async compute bracket on its IN-ORDER arm (the
+/// graphics queue still records; the queue's async arm is switched off while the check runs) and its
+/// close ends it. The fork refuses every graphics-only command inside a bracket in either arm (an
+/// Ogre exception naming it, logged), so a region that records one is seen. Off restores the arm.
+void setPhotonRegionBracketCheck(bool on);
 
 class Scene;
 /// THE IRRADIANCE FIELD'S VARIANCE STOP (ENGINE-UPGRADE-2B stage 4): the generation job's own

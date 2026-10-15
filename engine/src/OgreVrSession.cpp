@@ -3461,6 +3461,10 @@ void VrSession::copyEyes() {
     solver.resolveTransition(trans, rtt, Ogre::ResourceLayout::CopySrc,
                              Ogre::ResourceAccess::Read, 0);
     vkRs->executeResourceTransition(trans);
+    // THE OPENXR HAND-OVER IS GRAPHICS (ENGINE-UPGRADE-ASYNC-3): the swapchain image is the
+    // graphics queue's (the session binds that queue, :509-510), so this copy is never recorded
+    // inside an async compute bracket - the fork refuses it there, by name.
+    dev->_jahRequireGraphics("the OpenXR hand-over (the eye copies into the swapchain)");
     dev->mGraphicsQueue.endAllEncoders();
     // getCurrentCmdBuffer never returns null: on a lost device its own
     // checkVkResult throws (the accessor fork 1a81f866a (was 0040) made linkable).

@@ -35,10 +35,22 @@ AtomPassProvider &providerObject() {
 VkCommandBuffer_T *AtomPassContext::frameCmd() const {
 #if JAH_RAY_QUERY
     Ogre::VulkanRenderSystem *vk = atomVulkanOf(renderSystem);
-    return vk && vk->getVulkanDevice() ? vk->getVulkanDevice()->mGraphicsQueue.getCurrentCmdBuffer() : nullptr;
+    // THE RECORDING QUEUE (ENGINE-UPGRADE-ASYNC-3): the async compute queue inside a bracket on the
+    // async arm, the graphics queue otherwise - a pass's raw commands go where Ogre's do.
+    return vk && vk->getVulkanDevice() ? vk->getVulkanDevice()->_jahRecordQueue().getCurrentCmdBuffer() : nullptr;
 #else
     return nullptr;
 #endif
+}
+
+VkCommandBuffer_T *AtomPassContext::graphicsFrameCmd(const char *what) const {
+#if JAH_RAY_QUERY
+    Ogre::VulkanRenderSystem *vk = atomVulkanOf(renderSystem);
+    if (vk && vk->getVulkanDevice()) vk->getVulkanDevice()->_jahRequireGraphics(what);
+#else
+    (void)what;
+#endif
+    return frameCmd();
 }
 
 AtomPass::AtomPass(const AtomPassDef *definition, Ogre::CompositorNode *parentNode,

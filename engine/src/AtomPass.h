@@ -67,6 +67,9 @@ struct AtomPassContext {
     /// command buffer from — the ray tier's GatherHost::gatherFrameCmd seam — so where a
     /// pass records is decided here, never at each vkCmd site. Null without Vulkan.
     VkCommandBuffer_T *frameCmd() const;
+    /// The same buffer for work that MUST be graphics (a caster's draws: ENGINE-UPGRADE-ASYNC-3):
+    /// refused, naming `what`, inside an async compute bracket (the fork's _jahRequireGraphics).
+    VkCommandBuffer_T *graphicsFrameCmd(const char *what) const;
     /// True when the recorder bound state of its own (a pipeline, descriptor sets, an
     /// index buffer): the provider then forgets Ogre's caches. A recorder that only
     /// used Ogre's own calls leaves it false and the caches are kept.

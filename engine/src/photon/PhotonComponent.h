@@ -609,17 +609,26 @@ public:
     /// Called by OgreView each frame with its camera position: the PCC probe
     /// blend tracks the viewer. No-op unless the hybrid mode is live.
     void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo);
-    /// THE GI REGION (ENGINE-UPGRADE-2B stage 3): the one span of the frame Photon's compute
-    /// dispatches are made in — the GI step (harvest -> plan -> record) and the arm build at
-    /// engine.pre, and the cards' photon_update pass. photonDispatch counts a dispatch outside it.
-    /// The ASYNC bracket wraps it. A scope type, the ONLY door (its open/close are private);
-    /// nesting counts once.
+    /// THE GI REGION (ENGINE-UPGRADE-2B stage 3): the spans of the frame Photon's compute
+    /// dispatches are made in. photonDispatch counts a dispatch outside every one. A scope type,
+    /// the ONLY door (its open/close are private); nesting counts once.
+    /// ITS KIND (ENGINE-UPGRADE-ASYNC-3 stage 1): COMPUTE = the GI step at engine.pre (harvest ->
+    /// plan -> record: the cascade update, the field's batch, the injections, the mips, the
+    /// border mirrors), the one span the async bracket wraps — nothing graphics-only may be
+    /// recorded in it, and its inputs are the ones a graphics region prepared before it (the
+    /// material conversions, the partitions, the geometry rows: prepareGiInputs). GRAPHICS = the
+    /// arm builds (applyPendingGiDeferrable and the verb-time builds) and the cards'
+    /// photon_update pass: in order on the graphics queue, never bracketed. The OUTERMOST open
+    /// decides; a Graphics region opened inside a Compute one is a defect (asserted).
+    enum class RegionKind { Compute, Graphics };
     struct GiRegion {
-        GiRegion() { beginGiRegion(); }
+        explicit GiRegion(RegionKind kind) { beginGiRegion(kind); }
         ~GiRegion() { endGiRegion(); }
         GiRegion(const GiRegion &) = delete;
         GiRegion &operator=(const GiRegion &) = delete;
     };
+    /// True while the outermost open region is a Compute one.
+    static bool inComputeRegion();
     /// THE FRAME'S GI, in three parts (ENGINE-UPGRADE-2B stage 2): harvest the readouts that
     /// landed; plan the frame's work (every decision: the driving profile, the camera, the
     /// walk absorbed and the cascades it marked, the field's batch, the cascade step test and
@@ -713,7 +722,7 @@ public:
     bool sunContactWanted() const;
 private:
     // THE REGION'S OPEN AND CLOSE: GiRegion is their only caller (a scope never leaves one open).
-    static void beginGiRegion();
+    static void beginGiRegion(RegionKind kind);
     static void endGiRegion();
     OgreScene &mScene;
     /// photon_update's workspace and what it renders through (it never draws): a 4x4 target,
@@ -1048,9 +1057,10 @@ private:
     /// What one cascade's gather is asked: rule 2's floor, the level rule's terms,
     /// the budget's pick (filled into `mask` when a budget is on).
     VoxelGatherInputs cascadeGatherInputs(const VctCascade &c, std::vector<uint32_t> &mask) const;
-    /// ONE VOXEL BUILD, fed on the device (ATOM P4b): the owed material work inside
-    /// the store's bracket, the GPU scene brought current, the partitions, the
-    /// gather, and the voxeliser's build over what the gather wrote.
+    /// ONE VOXEL BUILD, fed on the device (ATOM P4b): the gather and the voxeliser's build over
+    /// what the gather wrote. In a GRAPHICS region the inputs are prepared first, in order (the
+    /// table composed, the materials converted, the partitions); in the COMPUTE region they are
+    /// what the last graphics region prepared and the table the last frame committed.
     bool gatherAndBuild(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *voxelizer,
                         const VoxelGatherInputs &in);
     /// How many items carry the GI geometry channel (the arms' existence test).
@@ -1347,12 +1357,23 @@ private:
     /// Created lazily before the first voxeliser, destroyed after the last.
     Ogre::PhotonVoxelMaterial *vctMaterialStore();
     void destroyVctMaterialStore();
-    void beginVctMaterialBracket();
-    void endVctMaterialBracket();
+    /// The store's temp resources (its render target and workspaces), created ONCE and kept
+    /// until the store dies (ENGINE-UPGRADE-ASYNC-3: a texture creation is graphics work, and
+    /// the per-build pair put one inside the GI step on every re-voxelisation). Idempotent.
+    void ensureVctMaterialTemps();
+    /// The voxeliser's geometry source (the GPU scene's geometry rows, as last uploaded).
     void bindGeometrySource(Ogre::PhotonVoxelizer *v);
-    /// Inside a GI build's bracket: the owed store refresh, then every pending slot's
-    /// datablock converted and its slot marked for re-composition.
-    void convertPendingMaterials();
+    /// THE GI STEP'S GRAPHICS INPUTS (ENGINE-UPGRADE-ASYNC-3 stage 1), prepared in a GRAPHICS
+    /// region: the owed material conversions (render passes, copies), the GPU tables, the
+    /// partitions and the geometry rows on the device. The Compute region's builds read what
+    /// the last preparation left; a conversion made here that changes an instance's word marks
+    /// the cascades its item reaches (`reVoxelise`), so the material reaches the GI one build
+    /// later — the protocol's own latency. A Graphics-region build calls it inline (in order).
+    void prepareGiInputs(bool reVoxelise);
+    /// The owed store refresh, then every pending slot's datablock converted and its slot
+    /// marked for re-composition (graphics work: prepareGiInputs is its only caller).
+    /// `reVoxelise`: a slot whose word changed also marks its item's cascades dirty.
+    void convertPendingMaterials(bool reVoxelise);
     /// A from-scratch arm: every GI-visible slot queued for conversion (the store may
     /// not have seen any of them - GI was off, or the store is new).
     void queueAllGiMaterials();

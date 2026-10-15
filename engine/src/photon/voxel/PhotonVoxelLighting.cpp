@@ -345,16 +345,15 @@ namespace Ogre
         // store, whose UAV view (RGBA8_UNORM) reinterpreted the sRGB texture; a float
         // store's UAV view IS its format. And the flag is not free: a reinterpretable
         // texture is created as its format FAMILY -- R16G16B16A16_UINT for 16F --
-        // and the mip chain's linear blit (_autogenerateMipmaps) is then invalid on
-        // an integer image (VUID-vkCmdBlitImage-filter-02001: the format has no
-        // linear-filter feature), so the coarse mips the cone gather reads would be
-        // undefined. The direct volumes are float too since CONTACT-OCCLUSION-1 and carry
-        // no Reinterpretable either (their UAV views are their formats).
-        uint32 texFlags = TextureFlags::Uav;
+        // and the mip chain's linear filter is then invalid on an integer image (the
+        // format has no linear-filter feature), so the coarse mips the cone gather reads
+        // would be undefined. The direct volumes are float too since CONTACT-OCCLUSION-1
+        // and carry no Reinterpretable either (their UAV views are their formats).
+        // Jahshaka (ENGINE-UPGRADE-ASYNC-3 stage 1): a UAV and nothing more - the chains are
+        // written by compute (PhotonMipChain), never blitted.
+        const uint32 texFlags = TextureFlags::Uav;
 
         const bool bSdfQuality = shouldEnableSpecularSdfQuality();
-        if( !mAnisotropic || bSdfQuality )
-            texFlags |= TextureFlags::RenderToTexture | TextureFlags::AllowAutomipmaps;
 
         const TextureGpu *albedoVox = mVoxelizer->getAlbedoVox();
 
@@ -408,8 +407,6 @@ namespace Ogre
             texture->setPixelFormat( jahLightVoxelFormat() );  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
             texture->scheduleTransitionTo( GpuResidency::Resident );
             mLightVoxel[i] = texture;
-
-            texFlags &= ( uint32 ) ~( TextureFlags::RenderToTexture | TextureFlags::AllowAutomipmaps );
         }
         // Jahshaka (PHOTON-VOXEL-3/-4): the coverage and the surface position per
         // half-axis, the list's last four entries (the voxelizer's, not owned -
@@ -507,6 +504,7 @@ namespace Ogre
     void PhotonVoxelLighting::destroyTextures()
     {
         restoreSwappedTextures();
+        mTotalMips.destroy();   // its jobs bind the total: they go first
 
         // Jahshaka (PHOTON-VOXEL-3/-4): the coverage and position entries are the voxelizer's,
         // and (PHOTON-VOXEL-5) so is the normal's.
@@ -1032,13 +1030,7 @@ namespace Ogre
         if( mAnisotropic )
             generateAnisotropicMips();
 
-        if( mLightVoxel[0]->getNumMipmaps() > 1u )
-        {
-            renderSystem->debugAnnotationPush( "PhotonVoxelLighting::runBounce regular mipmaps" );
-            mLightVoxel[0]->_autogenerateMipmaps();
-            renderSystem->endCopyEncoder();
-            renderSystem->debugAnnotationPop();
-        }
+        mTotalMips.generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
 
         mBounceShaderParams->mParams.swap( mLocalBounceShaderParams );
 
@@ -1082,9 +1074,7 @@ namespace Ogre
         if( bAllowMultipleBounces )
         {
             // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): not Reinterpretable -- see createTextures.
-            uint32 texFlags = TextureFlags::Uav;
-            if( !mAnisotropic || shouldEnableSpecularSdfQuality() )
-                texFlags |= TextureFlags::RenderToTexture | TextureFlags::AllowAutomipmaps;
+            const uint32 texFlags = TextureFlags::Uav;
 
             char tmpBuffer[128];
             LwString texName( LwString::FromEmptyPointer( tmpBuffer, sizeof( tmpBuffer ) ) );
@@ -1123,10 +1113,9 @@ namespace Ogre
             TextureGpu *directTex = textureManager->createTexture(
                 texName.c_str(), GpuPageOutStrategy::Discard,
                 // NOT Reinterpretable (the total's rule, fork 0080): the store is float and its
-                // UAV view IS its format, and a mutable-format image fails the linear-filter
-                // blit its mip chain is built with (VUID-vkCmdBlitImage-filter-02001).
-                TextureFlags::Uav | TextureFlags::RenderToTexture | TextureFlags::AllowAutomipmaps,
-                TextureTypes::Type3D );
+                // UAV view IS its format, and a mutable-format image has no linear filter for
+                // its mip chain (PhotonMipChain samples the level below).
+                TextureFlags::Uav, TextureTypes::Type3D );
             directTex->setResolution( mLightVoxel[0]->getWidth(), mLightVoxel[0]->getHeight(),
                                       mLightVoxel[0]->getDepth() );
             directTex->setNumMipmaps( PixelFormatGpuUtils::getMaxMipmapCount(
@@ -1181,6 +1170,8 @@ namespace Ogre
         else
         {
             restoreSwappedTextures();
+            mTotalMips.destroy();    // they bound the bounce's half of the ping-pong too
+            mDirectMips.destroy();
             textureManager->destroyTexture( mLightBounce );
             mLightBounce = 0;
             if( mLightDirect )
@@ -1409,21 +1400,9 @@ namespace Ogre
             generateAnisotropicMips();
 
         // Jahshaka (MOVER-OCCLUSION-1): D's own chain, read by the ray tier's hits.
-        if( mLightDirect && mLightDirect->getNumMipmaps() > 1u )
-        {
-            renderSystem->debugAnnotationPush( "PhotonVoxelLighting::update direct mipmaps" );
-            mLightDirect->_autogenerateMipmaps();
-            renderSystem->endCopyEncoder();
-            renderSystem->debugAnnotationPop();
-        }
-
-        if( mLightVoxel[0]->getNumMipmaps() > 1u )
-        {
-            renderSystem->debugAnnotationPush( "PhotonVoxelLighting::update regular mipmaps" );
-            mLightVoxel[0]->_autogenerateMipmaps();
-            renderSystem->endCopyEncoder();
-            renderSystem->debugAnnotationPop();
-        }
+        if( mLightDirect )
+            mDirectMips.generate( mVoxelizer->getHlmsManager(), renderSystem, mLightDirect );
+        mTotalMips.generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
 
         // Jahshaka (CONTACT-OCCLUSION-1, SKY-BOUNCE-1): THE SKY IS A LIGHT. Its direct term
         // enters the store first - total = direct + rho * E_sky, E_sky the environment

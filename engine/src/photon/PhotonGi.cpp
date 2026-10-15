@@ -21,6 +21,7 @@
 #include "photon/voxel/PhotonVoxelMaterial.h"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -94,27 +95,33 @@ void PhotonComponent::destroyVctMaterialStore() {
     mVctMaterialStore = nullptr;
 }
 
-/// THE CHAIN'S BRACKET. The store's temp resources are a 64x64 render target, a dummy
-/// camera and two workspaces under FIXED names, so exactly one pair must wrap ALL the
-/// builds of one rebuild. Two cascades inside one bracket cannot collide: the builds
-/// are sequential on the render thread and share the one store's resources. Both halves
-/// are idempotent, so a rebuild that throws between them cannot poison the next.
-void PhotonComponent::beginVctMaterialBracket() {
+/// THE STORE'S TEMP RESOURCES: a 64x64 render target, a dummy camera and two (disabled)
+/// workspaces under FIXED names, created once (idempotent) and destroyed with the store
+/// (destroyVctMaterialStore). They used to be a per-rebuild bracket: a texture creation and
+/// two workspaces inside the GI step on every re-voxelisation.
+void PhotonComponent::ensureVctMaterialTemps() {
     if (Ogre::PhotonVoxelMaterial *store = vctMaterialStore()) store->initTempResources(mSceneMgr);
-}
-void PhotonComponent::endVctMaterialBracket() {
-    if (mVctMaterialStore) mVctMaterialStore->destroyTempResources();
 }
 
 void PhotonComponent::bindGeometrySource(Ogre::PhotonVoxelizer *v) {
-    mScene.ensureGpuTables();
-    // THE ROWS MUST BE ON THE DEVICE, NOT MERELY IN THE MIRROR. `GpuScene::update`
-    // uploads them once per frame with the other tables, but a GI rebuild runs outside
-    // that scan: a row still only in the mirror is read as a ZERO ADDRESS, and the
-    // voxelise shader dereferences it. Measured: NVRM Xid 109 CTX SWITCH TIMEOUT and a
-    // lost device on the selftest's second scene.
-    mScene.gpuScene().flushGeomRows();
+    // THE ROWS MUST BE ON THE DEVICE, NOT MERELY IN THE MIRROR (a row only in the mirror is read
+    // as a ZERO ADDRESS: Xid 109 on the selftest's second scene). The frame's scan uploads them,
+    // and prepareGiInputs flushes the rows staged since — both before any build reads them.
     if (v) v->setGeometrySource(mScene.gpuScene().geomBuffer());
+}
+
+void PhotonComponent::prepareGiInputs(bool reVoxelise) {
+    if (mVctCascades.empty() && !mVctVoxelizer) return;   // no arm to feed
+    // A rebuild that converts materials binds the store's pool, which the conversion renders
+    // into: the temps exist before the first conversion.
+    ensureVctMaterialTemps();
+    convertPendingMaterials(reVoxelise);
+    mScene.ensureGpuTables();
+    Ogre::HlmsManager *hm = mRoot->getHlmsManager();
+    Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+    // Rebuilt only when the mesh set changed (it flushes the rows itself first).
+    mScene.gpuScene().ensurePartitions(hm, rs, Ogre::PhotonVoxelizer::kIndicesPerPartition);
+    mScene.gpuScene().flushGeomRows();
 }
 
 
@@ -148,7 +155,7 @@ void PhotonComponent::queueAllGiMaterials() {
 /// word valid across a material edit. A datablock whose texture CLASS changed (it
 /// gained or lost a diffuse or emissive map) moves pool; only then do words change,
 /// and every GI slot is re-composed.
-void PhotonComponent::convertPendingMaterials() {
+void PhotonComponent::convertPendingMaterials(bool reVoxelise) {
     Ogre::PhotonVoxelMaterial *store = vctMaterialStore();
     if (!store) return;
     // A SLOT IS RE-COMPOSED ONLY WHEN ITS WORD CHANGES. A from-scratch arm queues
@@ -162,8 +169,16 @@ void PhotonComponent::convertPendingMaterials() {
             store->lookupDatablock(n.item->getSubItem(0)->getDatablock());
         const uint32_t word = r ? ((r->bucketIdx << 16u) | (r->slotIdx & 0xFFFFu))
                                 : detail::GpuScene::kNoMaterialWord;
-        if (!mirror || n.itemSlot >= mScene.itemNodes().size() || mirror[n.itemSlot].ids[1] != word)
+        if (!mirror || n.itemSlot >= mScene.itemNodes().size() || mirror[n.itemSlot].ids[1] != word) {
             mScene.markGpuSlotDirty(n);
+            // OUTSIDE A BUILD the word reaches the voxels only through a re-voxelisation of the
+            // cascades the item reaches (the next Compute region's build reads the table the
+            // frame commits with it).
+            if (reVoxelise) {
+                const Ogre::Aabb box = n.item->getWorldAabbUpdated();
+                noteGiCascadeDirty(&box);
+            }
+        }
     };
     if (mVctMaterialRefreshOwed) {
         mVctMaterialRefreshOwed = false;
@@ -201,24 +216,26 @@ unsigned PhotonComponent::countGiItems() const {
 bool PhotonComponent::gatherAndBuild(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *voxelizer,
                                const VoxelGatherInputs &in) {
     if (!voxelizer) return false;
-    // THE TABLE, CURRENT - the transforms and flags the gather reads. Composing a slot
-    // whose datablock the store has not converted QUEUES it (gpuMaterialWordFor).
-    mScene.ensureGpuScene(/*graphIsCurrent=*/true);
-    // ONE BRACKET around the conversions AND the build: a conversion can render into
-    // the store's pool, and build() binds that pool.
-    beginVctMaterialBracket();
-    struct BracketClose {
-        PhotonComponent *s = nullptr;
-        ~BracketClose() { s->endVctMaterialBracket(); }
-    } close{ this };
-    convertPendingMaterials();
-    // The slots just converted, re-composed with their words (a no-op scan otherwise:
-    // the epoch has not moved since the call above).
-    mScene.ensureGpuScene(/*graphIsCurrent=*/true);
-    Ogre::HlmsManager *hm = mRoot->getHlmsManager();
-    Ogre::RenderSystem *rs = mRoot->getRenderSystem();
-    // Rebuilt only when the mesh set changed; its answer is "did work", not "exists".
-    mScene.gpuScene().ensurePartitions(hm, rs, Ogre::PhotonVoxelizer::kIndicesPerPartition);
+    if (!inComputeRegion()) {
+        // A GRAPHICS-REGION BUILD (an arm build, a verb-time build): in order, so the inputs are
+        // brought current first. THE TABLE, CURRENT - the transforms and flags the gather reads;
+        // composing a slot whose datablock the store has not converted QUEUES it
+        // (gpuMaterialWordFor), the conversion converts it, and the second compose re-composes
+        // the converted slots with their words (a no-op scan otherwise).
+        mScene.ensureGpuScene(/*graphIsCurrent=*/true);
+        prepareGiInputs(/*reVoxelise=*/false);
+        mScene.ensureGpuScene(/*graphIsCurrent=*/true);
+    }
+    // THE COMPUTE REGION (ENGINE-UPGRADE-ASYNC-3 stage 1) composes nothing: the gather reads the
+    // instance table the last frame committed (the ring, GpuScene::createTables — this frame's
+    // commit takes the next copy) and the inputs the last graphics region prepared. THE RING'S
+    // DEPTH COVERS IT: a copy is rewritten only by the commit `tableCopies()` frames later, after the
+    // graphics fence of this frame (which, on the async arm, also proves this frame's compute: the
+    // frame end waits C) has been waited by the ring.
+    else if (mScene.gpuScene().live()) {
+        assert(mScene.gpuScene().tableCopies() >= mScene.gpuScene().framesInFlight() + 1u &&
+               "the instance table's ring is shallower than the frames in flight + the one a frame writes");
+    }
     bindGeometrySource(voxelizer);
     // THE REFUSAL HOOK (gi.voxel_resident case 5): the state a device with no buffer
     // device addresses is in for the whole scene - no geometry the voxeliser can
@@ -1557,7 +1574,7 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
         Ogre::RenderSystem *rs = mRoot->getRenderSystem();
         rs->flushCommands();
         Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
-        const auto grab = [&](Ogre::TextureGpu *tex, std::vector<float> &dst) -> bool {
+        const auto grab = [&](Ogre::TextureGpu *tex, std::vector<float> &dst, Ogre::uint8 mip = 0u) -> bool {
             const Ogre::PixelFormatGpu fmt = tex->getPixelFormat();
             const bool isHalf = (fmt == Ogre::PFG_RGBA16_FLOAT);
             const bool isByte = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB || fmt == Ogre::PFG_RGBA8_UNORM);
@@ -1565,13 +1582,14 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
             const bool isUnorm16 = (fmt == Ogre::PFG_RGBA16_UNORM);
             if (!isHalf && !isByte && !is1010102 && !isUnorm16) return false;
             const bool srgb = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB);
-            const Ogre::uint32 W = tex->getWidth(), H = tex->getHeight(), D = tex->getDepth();
+            const Ogre::uint32 W = std::max(1u, tex->getWidth() >> mip), H = std::max(1u, tex->getHeight() >> mip),
+                               D = std::max(1u, tex->getDepth() >> mip);
             dst.assign(size_t(W) * H * D * 4u, 0.0f);
             Ogre::AsyncTextureTicket *ticket =
                 tm->createAsyncTextureTicket(W, H, D, Ogre::TextureTypes::Type3D, fmt);
             bool ok = false;
             try {
-                ticket->download(tex, 0u, true);
+                ticket->download(tex, mip, true);
                 const Ogre::TextureBox box = ticket->map(0);
                 for (Ogre::uint32 z = 0; z < D; ++z)
                     for (Ogre::uint32 y = 0; y < H; ++y) {
@@ -1624,6 +1642,11 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
         out.direct.clear();
         if (Ogre::TextureGpu *direct = lighting->getLightDirectTexture())
             if (direct->getResidencyStatus() == Ogre::GpuResidency::Resident && !grab(direct, out.direct)) return false;
+        // ENGINE-UPGRADE-ASYNC-3 stage 1: the albedo's levels 1..n, the compute chain's proof.
+        out.albedoLevels.assign(albedo->getNumMipmaps() > 1u ? albedo->getNumMipmaps() - 1u : 0u,
+                                std::vector<float>());
+        for (Ogre::uint8 mip = 1u; mip < albedo->getNumMipmaps(); ++mip)
+            if (!grab(albedo, out.albedoLevels[mip - 1u], mip)) return false;
         out.width = int(total->getWidth());
         out.height = int(total->getHeight());
         out.depth = int(total->getDepth());
@@ -3039,7 +3062,7 @@ bool PhotonComponent::stepStagedGiBuild() {
 }
 
 void PhotonComponent::applyPendingGi() {
-    GiRegion region;   // Photon's compute work is made inside the GI region
+    GiRegion region(RegionKind::Graphics);   // Photon's compute work is made inside the GI region
     // NOTHING OF THIS WORLD IS ON SCREEN YET: spend nothing at all
     // (Scene::setLoading). The ordinary flush below is gated on the same thing
     // inside `rebuildVct`; this is the staged machine's half.
@@ -3081,7 +3104,12 @@ void PhotonComponent::applyPendingGi() {
 // AsyncHoldListener reads giDeferralPending) and, once the compute permutations in flight have
 // landed, the arm is rebuilt whole.
 void PhotonComponent::applyPendingGiDeferrable() {
-    GiRegion region;   // Photon's compute work is made inside the GI region
+    GiRegion region(RegionKind::Graphics);   // Photon's compute work is made inside the GI region
+    // THE NEXT GI STEP'S GRAPHICS INPUTS (ENGINE-UPGRADE-ASYNC-3 stage 1): the conversions, the
+    // partitions and the rows the Compute region of the next frame reads — prepared here, in order.
+    if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
+        [this]() { JAH_TRY { prepareGiInputs(/*reVoxelise=*/true); } JAH_CATCH(mError, ); }();   // JAH_CATCH returns
+    }
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
     if (mGiDeferralRetry && mScene.asyncShaders() && hc) {
@@ -3098,7 +3126,7 @@ void PhotonComponent::applyPendingGiDeferrable() {
 // refreshGlobalIllumination's (the drain's plan()) — build NOW, in the same order as before,
 // inside the region, so the witness and the ASYNC bracket see every one of their dispatches.
 void PhotonComponent::giDeferrable(const std::function<void()> &work) {
-    GiRegion region;
+    GiRegion region(RegionKind::Graphics);
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
     if (!mScene.asyncShaders() || !hc || !hm->getAsyncCompiler()->isRunning()) {
@@ -3127,7 +3155,7 @@ void PhotonComponent::giDeferrable(const std::function<void()> &work) {
 
 // The flush proper — what `applyPendingGi` was before the staged machine.
 void PhotonComponent::applyPendingGiFlush() {
-    GiRegion region;   // Photon's compute work is made inside the GI region
+    GiRegion region(RegionKind::Graphics);   // Photon's compute work is made inside the GI region
     if (!mGiCachesDirty) return;
     mGiCachesDirty = false;
     // A STREAMING FRAME BUILDS THE CHAIN AND PARKS (see rebuildVct's tail).
@@ -3312,12 +3340,6 @@ void PhotonComponent::forwardPlusLightCensus(unsigned &lights, unsigned &budget)
 
 PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPos, bool driverStereo) {
     FrameWork w;
-    // A FRAME THAT DRAINED NO RECORD OF THIS SCENE IS STILL (ENGINE-UPGRADE-2B stage 4): nothing the scheduler
-    // reads changed, so it runs once for it as for a record that carries no change - a pending re-solve's
-    // stability window advances and the re-solve lands. A screenshot's settle drains no record (the document's
-    // clock does not move), and its picture at rest used to be taken with the re-solve still pending
-    // (pool.world_sky_b's height_fog: two at-rest shots 0.1 % apart once the field settled faster).
-    if (mGiPlan.pushed && mGiPlan.frame != giWriterFrame()) plan(FrameInputScene(), false);
     // THE VR CASCADE PROFILE FOLLOWS THE DRIVER (V1-RIG item 4). The view that
     // places the chain is the one that reads it, and in a session that is the
     // headset's — five times the pixels for half the frame. A change of driver
@@ -3425,7 +3447,20 @@ void PhotonComponent::recordFrame(const FrameWork &w) {
 // THE ENGINE'S PER-FRAME GI STEP (the authoritative view, engine.pre): the readouts that
 // landed (harvest), the frame's decisions (planFrame), its work (recordFrame).
 void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) {
-    GiRegion region;   // Photon's compute work is made inside the GI region
+    // A FRAME THAT DRAINED NO RECORD OF THIS SCENE IS STILL (ENGINE-UPGRADE-2B stage 4): nothing the scheduler
+    // reads changed, so it runs once for it as for a record that carries no change - a pending re-solve's
+    // stability window advances and the re-solve lands. A screenshot's settle drains no record (the document's
+    // clock does not move), and its picture at rest used to be taken with the re-solve still pending
+    // (pool.world_sky_b's height_fog: two at-rest shots 0.1 % apart once the field settled faster).
+    // A GRAPHICS REGION, BEFORE THE COMPUTE ONE (ENGINE-UPGRADE-ASYNC-3 stage 1): the re-solve it lands is a
+    // refresh (refreshGlobalIllumination), which may rebuild an arm or re-place the probe grid - texture
+    // creations and render passes. It ran first in the GI step and still does.
+    {
+        GiRegion still(RegionKind::Graphics);
+        if (mGiPlan.pushed && mGiPlan.frame != giWriterFrame()) plan(FrameInputScene(), false);
+    }
+    // THE COMPUTE REGION: the GI step the async bracket wraps.
+    GiRegion region(RegionKind::Compute);
     harvest();     // before any of this frame's GI work is recorded
     recordFrame(planFrame(camPos, driverStereo));
 }
@@ -4677,7 +4712,10 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
     for (size_t i = 0; i < mVctCascades.size(); ++i) {
         VctCascade &c = mVctCascades[i];
         if (!c.pending) continue;
-        if (spent || int(i) != w.rebuild) { ++mCascadeDeferrals; continue; }
+        // A MATERIAL REFRESH OWED (an edit of a voxel input) is graphics work the frame's graphics
+        // region does after this one (prepareGiInputs, ENGINE-UPGRADE-ASYNC-3): a re-voxelisation now
+        // would read the rows before the edit and leave the cascade clean. It waits one frame.
+        if (spent || int(i) != w.rebuild || mVctMaterialRefreshOwed) { ++mCascadeDeferrals; continue; }
         // THE PLACEMENT, SAVED BEFORE IT MOVES (audit B4). recentreCascade
         // writes the voxeliser's region, and the shader reads that region live
         // — so if the build then throws, the old voxels would be sampled as if

@@ -503,7 +503,7 @@ bool ensureProbeBuffer(const CasterPipelines &C, Ogre::VulkanDevice *device, Pro
 void captureProbe(const AtomPassContext &ctx, const CasterPipelines &C, Ogre::VulkanDevice *device, ProbeState &p,
                   GpuCull &cull, uint32_t frame) {
     if (!ensureProbeBuffer(C, device, p)) return;
-    VkCommandBuffer cmd = ctx.frameCmd();
+    VkCommandBuffer cmd = ctx.graphicsFrameCmd("an atom caster");
     VkMemoryBarrier mb{};
     mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -558,7 +558,7 @@ bool growRing(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanDevic
     CasterRing bigger;
     if (!ensureRing(d.C, device, bigger, r.slots, std::min(r.columns * 2u, kMaxUses))) return false;
     const uint32_t s = frame % r.slots;
-    VkCommandBuffer cmd = ctx.frameCmd();
+    VkCommandBuffer cmd = ctx.graphicsFrameCmd("an atom caster");
     if (r.uses[s]) {
         VkMemoryBarrier mb{};
         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -646,7 +646,7 @@ uint32_t beginUse(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanD
 void endUse(const AtomPassContext &ctx, CasterRing &r, GpuCull &cull, uint32_t frame, uint32_t use) {
     if (use == kNoUse || use >= r.columns || !r.buffer || !cull.count()) return;
     const uint32_t s = frame % r.slots;
-    VkCommandBuffer cmd = ctx.frameCmd();
+    VkCommandBuffer cmd = ctx.graphicsFrameCmd("an atom caster");
     VkMemoryBarrier mb{};
     mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -811,7 +811,7 @@ void recordCasterPass(AtomPassContext &ctx) {
     {
         // (0) THE LIST'S WRITE-AFTER-READ: the previous use's draw (this frame's last
         // map, or the last frame's) read the commands, the stream and the tables.
-        VkCommandBuffer cmd = ctx.frameCmd();
+        VkCommandBuffer cmd = ctx.graphicsFrameCmd("an atom caster");
         vkCmdPipelineBarrier(cmd,
                              VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
                                  VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
@@ -852,7 +852,7 @@ void recordCasterPass(AtomPassContext &ctx) {
     }
 
     // ---- (2) THE EDGES THE SOLVER CANNOT EXPRESS -----------------------------------
-    VkCommandBuffer cmd = ctx.frameCmd();
+    VkCommandBuffer cmd = ctx.graphicsFrameCmd("an atom caster");
     {
         VkMemoryBarrier mb{};
         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -866,7 +866,7 @@ void recordCasterPass(AtomPassContext &ctx) {
 
     // ---- (3) OGRE'S RENDER PASS, OUR PIPELINE ----------------------------------------
     if (!pass->beginRenderPass()) return;
-    cmd = ctx.frameCmd();
+    cmd = ctx.graphicsFrameCmd("an atom caster");
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     ctx.boundRawState = true;
     {

@@ -432,7 +432,8 @@ std::uintptr_t queueSubmissionTag(Ogre::RenderSystem *rs) {
     auto *vk = dynamic_cast<Ogre::VulkanRenderSystem *>(rs);
     if (!vk || !vk->getVulkanDevice()) return 0u;
     try {
-        return reinterpret_cast<std::uintptr_t>(vk->getVulkanDevice()->mGraphicsQueue.getCurrentCmdBuffer());
+        // The RECORDING queue's buffer (ENGINE-UPGRADE-ASYNC-3): the one the frame's commands go to.
+        return reinterpret_cast<std::uintptr_t>(vk->getVulkanDevice()->_jahRecordQueue().getCurrentCmdBuffer());
     } catch (...) {
         return 0u;
     }

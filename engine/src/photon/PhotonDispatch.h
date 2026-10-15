@@ -9,6 +9,8 @@
 #define JAHSHAKA_ENGINE_PHOTONDISPATCH_H
 
 namespace Ogre {
+class ComputeTools;
+class TextureGpu;
 class HlmsCompute;
 class HlmsComputeJob;
 class RenderSystem;
@@ -24,6 +26,11 @@ unsigned long long photonDispatchesOutsideRegion();
 
 /// THE ONE DISPATCH DOOR: a Photon compute dispatch with its barriers, noted by the witness.
 void photonDispatch(Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job, Ogre::RenderSystem *rs);
+/// ...and its two siblings for ComputeTools' clears (a compute dispatch each, ENGINE-UPGRADE-ASYNC-3):
+/// noted by the witness like every other, so the door's count is every Photon dispatch. The
+/// caller has resolved the clears' barriers (ComputeTools::prepareForUavClear).
+void photonClearUavFloat(Ogre::ComputeTools *tools, Ogre::TextureGpu *tex, const float value[4]);
+void photonClearUavUint(Ogre::ComputeTools *tools, Ogre::TextureGpu *tex, const unsigned value[4]);
 
 }  // namespace detail
 }  // namespace engine

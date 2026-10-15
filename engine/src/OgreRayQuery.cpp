@@ -1876,7 +1876,8 @@ VkCommandBuffer RayQueryTier::frameCmd() {
     // or copy encoder; vkCmdBuildAccelerationStructuresKHR may not be recorded
     // inside a render pass, and a copy encoder left open would make the
     // barriers below meaningless.
-    mDev->mGraphicsQueue.endAllEncoders();
+    // THE RECORDING QUEUE (ENGINE-UPGRADE-ASYNC-3): where Ogre records the frame's commands.
+    mDev->_jahRecordQueue().endAllEncoders();
     // The pin's own public accessor — usable from outside the plugin since
     // fork 1a81f866a (was 0040) exported Ogre::onVulkanFailure, which its device-lost
     // branch calls and which the Vulkan render system did not export (so this
@@ -1887,7 +1888,7 @@ VkCommandBuffer RayQueryTier::frameCmd() {
     // The null guard at the call site is therefore belt-and-braces, not the
     // device-lost path it once claimed to be — the honest device-lost question
     // is the render system's own reason string, asked before we record.
-    return mDev->mGraphicsQueue.getCurrentCmdBuffer();
+    return mDev->_jahRecordQueue().getCurrentCmdBuffer();
 }
 
 // ---------------------------------------------------------------------------
@@ -7652,7 +7653,7 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
         // TRANSFER_DST — a layout they no longer hold. (The movers' trace had the
         // same order since PHOTON-CARDS-4; the still trace runs every capture frame,
         // which is what surfaced it.)
-        mDev->mGraphicsQueue.endAllEncoders();
+        mDev->_jahRecordQueue().endAllEncoders();   // the queue frameCmd() records on
         const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
         Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
         Ogre::ResourceTransitionArray trans;

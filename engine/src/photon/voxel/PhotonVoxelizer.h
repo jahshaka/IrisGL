@@ -28,6 +28,7 @@ THE SOFTWARE.
 #ifndef JAH_PHOTON_VOXELIZER_H
 #define JAH_PHOTON_VOXELIZER_H
 
+#include "photon/voxel/PhotonMipChain.h"
 #include "photon/voxel/PhotonVoxelizerSourceBase.h"
 
 #include "OgreResourceTransition.h"
@@ -246,6 +247,14 @@ namespace Ogre
         bool mNeedsAllMipmaps;
 
         ComputeTools *mComputeTools;
+
+        /// THE VOLUMES' MIP CHAINS, ON COMPUTE (ENGINE-UPGRADE-ASYNC-3 stage 1; PhotonMipChain.h):
+        /// one per volume that carries levels - the albedo (mNeedsAlbedoMipmaps or
+        /// mNeedsAllMipmaps), the emissive and the normal (mNeedsAllMipmaps), the coverage and
+        /// the position per half (always). generateMips() writes them after every build.
+        PhotonMipChain mAlbedoMips, mEmissiveMips, mNormalMips;
+        PhotonMipChain mCoverageMips[2], mPositionMips[2];
+        void generateMips();
 
         PhotonVoxelMaterial *mVctMaterial;
 
