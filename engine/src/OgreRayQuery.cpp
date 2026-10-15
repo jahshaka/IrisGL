@@ -1876,7 +1876,11 @@ VkCommandBuffer RayQueryTier::frameCmd() {
     // or copy encoder; vkCmdBuildAccelerationStructuresKHR may not be recorded
     // inside a render pass, and a copy encoder left open would make the
     // barriers below meaningless.
-    // THE RECORDING QUEUE (ENGINE-UPGRADE-ASYNC-3): where Ogre records the frame's commands.
+    // GRAPHICS, AND SAID SO (ENGINE-UPGRADE-ASYNC-3): the ray tier's frame work (the gather - a GI
+    // READER -, the cards' trace, the TLAS builds) is never inside an async compute bracket; the
+    // fork refuses it there by name. Outside one the recording queue IS the graphics queue.
+    mDev->_jahRequireGraphics("the ray tier's frame commands (the gather, the card trace, the TLAS)");
+    // THE RECORDING QUEUE: where Ogre records the frame's commands.
     mDev->_jahRecordQueue().endAllEncoders();
     // The pin's own public accessor — usable from outside the plugin since
     // fork 1a81f866a (was 0040) exported Ogre::onVulkanFailure, which its device-lost
