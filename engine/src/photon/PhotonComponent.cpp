@@ -7,6 +7,7 @@
 #include "photon/PhotonDispatch.h"
 #include "photon/voxel/PhotonIrradianceField.h"
 #include "photon/voxel/PhotonMipChain.h"
+#include "photon/voxel/PhotonPassBinding.h"
 #include "jahshaka/engine/PhotonStatus.h"
 
 #include <Compute/OgreComputeTools.h>
@@ -257,6 +258,13 @@ PhotonDispatchStatus photonDispatchStatus() {
     s.regionBrackets = detail::gRegionBrackets;
     s.doorInCompute = detail::gDoorInCompute;
     s.renderSystemInCompute = detail::gRsInCompute;
+    return s;
+}
+
+PhotonBindingStatus photonBindingStatus() {
+    PhotonBindingStatus s;
+    s.readerPrepares = detail::PhotonPassBinding::readerPrepares();
+    s.nonReaderPrepares = detail::PhotonPassBinding::nonReaderPrepares();
     return s;
 }
 

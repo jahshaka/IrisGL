@@ -4,6 +4,7 @@
 // engine/src/ is the only directory that includes Ogre; the shared declarations
 // live in EnginePrivate.h, which documents the invariants this backend rests on.
 #include "EnginePrivate.h"
+#include "photon/voxel/PhotonPassBinding.h"
 
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsAsyncCompiler.h>
@@ -3095,6 +3096,7 @@ OgreEngine::~OgreEngine() {
     // provider is a process static: left installed, it stayed armed across Root's
     // teardown, holding the closures the two releases just emptied.
     if (mRoot) { try { AtomPassProvider::uninstall(mRoot->getCompositorManager2()); } catch (...) {} }
+    if (mRoot) { try { detail::PhotonPassBinding::uninstallPassListener(mRoot->getCompositorManager2()); } catch (...) {} }
     // AFTER every scene (each of which removed its own render-queue listener in
     // OgreScene::destroy) and BEFORE Root: ~OverlaySystem deletes the
     // FontManager, whose Font::unloadResource destroys the HlmsUnlit datablock
@@ -3243,6 +3245,7 @@ void OgreEngine::ensureHlms() {
         mRoot->getHlmsManager()->registerHlms(atom);
     }
     AtomPassProvider::install(mRoot->getCompositorManager2());
+    detail::PhotonPassBinding::installPassListener(mRoot->getCompositorManager2());   // the GI readers (ASYNC-3)
     registerAtomIdPass();
     registerAtomCasterPass();
     // Ambient is SPHERICAL HARMONICS, always and everywhere (Scene::setAmbientSh;

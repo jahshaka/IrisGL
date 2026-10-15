@@ -42,6 +42,8 @@
 #include <cstddef>
 
 namespace Ogre {
+class CompositorManager2;
+class CompositorPassDef;
 class BarrierSolver;
 class CommandBuffer;
 class Hlms;
@@ -79,6 +81,25 @@ struct PhotonPassBinding {
     static void forget(const void *volume);
     /// The field's samplerblock reference, given back before Root (~OgreEngine).
     static void releaseSamplers();
+
+    /// THE GI READERS (ENGINE-UPGRADE-ASYNC-3 stage 2). A pass READS THE GI when its definition says
+    /// so (CompositorPassDef::mJahReadsGi, true unless the chain cleared it on a pass whose shaders
+    /// sample none: the G-buffer prepasses, the card capture, the overlays, the Atom id passes) and
+    /// it is a scene pass that is not a shadow caster pass, or a custom pass (the ray tier's photon
+    /// trace / resolve, photon_update). Quads, clears, copies and the shadow nodes' passes read none.
+    static bool passReadsGi(const Ogre::CompositorPassDef *def);
+    /// Is the scene pass being prepared a GI reader? The pass the scene manager is rendering, else
+    /// the scene pass the always-on listener saw start (analyzeBarriers runs before Ogre names the
+    /// current pass), else YES (an unknown pass is a reader). Every binding call below asks it: the
+    /// GI's properties, pass-buffer blocks, textures and barriers exist ONLY on reader passes.
+    static bool scenePassReadsGi(const Ogre::SceneManager *sceneManager);
+    /// The always-on listener (CompositorManager2::addPassListener: every workspace's passes, the
+    /// probe captures' included), installed with the engine's compositor and removed before it dies.
+    static void installPassListener(Ogre::CompositorManager2 *cm);
+    static void uninstallPassListener(Ogre::CompositorManager2 *cm);
+    /// photonBindingStatus's counts (PhotonStatus.h).
+    static unsigned long long readerPrepares();
+    static unsigned long long nonReaderPrepares();
 };
 
 }}}   // namespace jahshaka::engine::detail

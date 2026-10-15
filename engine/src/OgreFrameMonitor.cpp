@@ -27,6 +27,7 @@
 // THREADING: engine calls are UI-thread-only by contract, so nothing here is
 // atomic and nothing is locked.
 #include "EnginePrivate.h"
+#include "photon/voxel/PhotonPassBinding.h"
 #include "OgreVulkanRenderSystem.h"
 #include "OgreVulkanDevice.h"
 #include "OgreVulkanQueue.h"
@@ -392,6 +393,7 @@ void FrameMonitor::cacheWork(const CacheWork &w, unsigned gpuSampleId, bool top)
     }
 }
 void FrameMonitor::pass(FramePass &&p, unsigned gpuSampleId, bool top) {
+    p.topLevel = top;
     if (!mInFrame) {
         // BETWEEN FRAMES (a one-shot sky bake, an IBL convolution — F2): the row
         // is the next frame's, like a between-frames cache row, and so is its
@@ -630,6 +632,7 @@ void PassListener::passPreExecute(Ogre::CompositorPass *pass) {
                          ? def->mProfilingId
                          : std::string(passTypeName(type));
         if (def->mShadowMapIdx != ~Ogre::uint32(0)) f.rec.shadowMapIdx = def->mShadowMapIdx;
+        f.rec.readsGi = PhotonPassBinding::passReadsGi(def);
     }
     // THE BUCKET is read from the parent NODE, not inferred from timings: the
     // three shadow nodes are named constants, so "this is a probe's shadow map

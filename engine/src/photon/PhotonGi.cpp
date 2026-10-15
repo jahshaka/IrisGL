@@ -3471,6 +3471,9 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
     }
     // THE COMPUTE REGION: the GI step the async bracket wraps.
     GiRegion region(RegionKind::Compute);
+    // ITS GPU SPAN, one monitor row (ENGINE-UPGRADE-ASYNC-3 stage 2: THE JOB the window is measured
+    // against; nothing is constructed while the monitor is off - CacheScope's own rule).
+    monitor::CacheScope stepRow(CacheKind::Gi, WorkReason::None, 0ull, "gi.step", mRoot->getRenderSystem(), this);
     harvest();     // before any of this frame's GI work is recorded
     recordFrame(planFrame(camPos, driverStereo));
 }

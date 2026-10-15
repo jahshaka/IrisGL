@@ -7681,6 +7681,13 @@ struct FramePass {
     /// the build has no JAH_GPU_TIMESTAMPS, the device has no usable
     /// timestamps, or the result has not come back yet. Never faked as 0.
     float       gpuMs = -1.0f;
+    /// A TOP-LEVEL row (not nested in another pass's timestamp pair: a shadow node's passes are their
+    /// scene pass's children) — the rows whose gpuMs add up to the frame's.
+    bool        topLevel = false;
+    /// THE PASS READS THE GI (ENGINE-UPGRADE-ASYNC-3 stage 2; the engine's passReadsGi: a scene pass that
+    /// is not a caster pass, or a custom pass, whose definition is not marked as sampling none). The
+    /// frame's first and last such row bound the async compute window.
+    bool        readsGi = false;
 };
 
 /// The caches whose work and reason the monitor records (§4.7).

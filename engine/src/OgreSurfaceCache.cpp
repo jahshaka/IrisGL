@@ -470,6 +470,7 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
         // a pass that recomputed LOD from this ortho camera would undo it.
         p->mUpdateLodLists = false;
         p->mProfilingId = "Jahshaka card capture";
+        p->mJahReadsGi = false;   // the capture is a PrePassCreate G-buffer: it samples no GI (ENGINE-UPGRADE-ASYNC-3)
     }
 
     Ogre::CompositorWorkspaceDef *wd = cm->addWorkspaceDefinition(mWsDef);

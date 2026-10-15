@@ -13,6 +13,12 @@
 #include "photon/voxel/PhotonIrradianceField.h"
 #include "photon/voxel/PhotonVoxelLighting.h"
 
+#include <Compositor/OgreCompositorManager2.h>
+#include <Compositor/OgreCompositorWorkspaceListener.h>
+#include <Compositor/Pass/OgreCompositorPass.h>
+#include <Compositor/Pass/OgreCompositorPassDef.h>
+#include <Compositor/Pass/PassScene/OgreCompositorPassScene.h>
+#include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <CommandBuffer/OgreCbTexture.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
 #include <Cubemaps/OgreParallaxCorrectedCubemapBase.h>
@@ -112,7 +118,47 @@ const Ogre::HlmsSamplerblock *fieldSampler(Ogre::HlmsManager *mgr) {
 const SceneGiBinding *bindingOf(const Ogre::SceneManager *sm) {
     return sm ? sceneGiBindingOf(sm) : nullptr;
 }
+
+/// The scene pass the always-on listener saw start (render thread only): set in
+/// passSceneAfterShadowMaps, which Ogre fires BEFORE the pass's analyzeBarriers, cleared at its end.
+const Ogre::CompositorPassDef *sScenePass = nullptr;
+
+struct GiReaderListener final : public Ogre::CompositorWorkspaceListener {
+    void passSceneAfterShadowMaps(Ogre::CompositorPassScene *pass) override {
+        sScenePass = pass ? pass->getDefinition() : nullptr;
+    }
+    void passPosExecute(Ogre::CompositorPass *pass) override {
+        if (pass && pass->getDefinition() == sScenePass) sScenePass = nullptr;
+    }
+};
+GiReaderListener sReaderListener;
+unsigned long long sReaderPrepares = 0ull, sNonReaderPrepares = 0ull;
 }   // namespace
+
+unsigned long long PhotonPassBinding::readerPrepares() { return sReaderPrepares; }
+unsigned long long PhotonPassBinding::nonReaderPrepares() { return sNonReaderPrepares; }
+
+bool PhotonPassBinding::passReadsGi(const Ogre::CompositorPassDef *def) {
+    if (!def || !def->mJahReadsGi || def->mShadowMapIdx != ~Ogre::uint32(0)) return false;
+    if (def->getType() == Ogre::PASS_CUSTOM) return true;
+    if (def->getType() != Ogre::PASS_SCENE) return false;
+    return static_cast<const Ogre::CompositorPassSceneDef *>(def)->mShadowNodeRecalculation !=
+           Ogre::SHADOW_NODE_CASTER_PASS;
+}
+
+bool PhotonPassBinding::scenePassReadsGi(const Ogre::SceneManager *sceneManager) {
+    const Ogre::CompositorPass *current = sceneManager ? sceneManager->getCurrentCompositorPass() : nullptr;
+    const Ogre::CompositorPassDef *def = current ? current->getDefinition() : sScenePass;
+    return !def || passReadsGi(def);
+}
+
+void PhotonPassBinding::installPassListener(Ogre::CompositorManager2 *cm) {
+    if (cm) cm->addPassListener(&sReaderListener);
+}
+void PhotonPassBinding::uninstallPassListener(Ogre::CompositorManager2 *cm) {
+    if (cm) cm->removePassListener(&sReaderListener);
+    sScenePass = nullptr;
+}
 
 void PhotonPassBinding::preparePassHash(bool casterPass, Ogre::SceneManager *sceneManager,
                                         Ogre::Hlms *hlms) {
@@ -122,6 +168,11 @@ void PhotonPassBinding::preparePassHash(bool casterPass, Ogre::SceneManager *sce
     if (casterPass) return;
     const SceneGiBinding *b = bindingOf(sceneManager);
     if (!b) return;
+    if (!scenePassReadsGi(sceneManager)) {   // no GI on a pass that samples none
+        if (b->vct || fieldBound(b)) ++sNonReaderPrepares;
+        return;
+    }
+    if (b->vct || fieldBound(b)) ++sReaderPrepares;
     const size_t tid = Ogre::Hlms::kNoTid;
     if (b->vct) {
         hb.vct = b->vct;
@@ -221,7 +272,7 @@ void PhotonPassBinding::setupRootLayout(Ogre::RootLayout &rootLayout,
 }
 
 Ogre::uint32 PhotonPassBinding::passBufferSize(bool casterPass, Ogre::SceneManager *sceneManager) {
-    if (casterPass) return 0u;
+    if (casterPass || !scenePassReadsGi(sceneManager)) return 0u;
     const SceneGiBinding *b = bindingOf(sceneManager);
     if (!b) return 0u;
     size_t bytes = 0u;
@@ -232,7 +283,7 @@ Ogre::uint32 PhotonPassBinding::passBufferSize(bool casterPass, Ogre::SceneManag
 
 float *PhotonPassBinding::preparePassBuffer(bool casterPass, Ogre::SceneManager *sceneManager,
                                             float *passBufferPtr) {
-    if (casterPass) return passBufferPtr;
+    if (casterPass || !scenePassReadsGi(sceneManager)) return passBufferPtr;
     const SceneGiBinding *b = bindingOf(sceneManager);
     if (!b || (!b->vct && !fieldBound(b))) return passBufferPtr;
     // The view matrix HlmsPbs::preparePassHash fills its own blocks with.
@@ -279,7 +330,7 @@ size_t PhotonPassBinding::bind(bool casterPass, Ogre::CommandBuffer *commandBuff
 void PhotonPassBinding::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
                                         Ogre::ResourceTransitionArray &resourceTransitions,
                                         const Ogre::SceneManager *sceneManager, bool casterPass) {
-    if (casterPass) return;
+    if (casterPass || !scenePassReadsGi(sceneManager)) return;
     const SceneGiBinding *b = bindingOf(sceneManager);
     if (!b) return;
     if (Ogre::PhotonVoxelLighting *vct = b->vct) {

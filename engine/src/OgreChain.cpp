@@ -880,6 +880,7 @@ void addAtomOcclusionPasses(Ogre::CompositorNodeDef *n, const ChainDesc &desc, C
     Ogre::CompositorTargetDef *t = n->addTargetPass(kAtomIdRtv);
     t->setNumPasses(1);
     Ogre::CompositorPassDef *p = t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(kAtomIdLatePassId));
+    p->mJahReadsGi = false;   // the visibility ids: no GI sampled (PhotonPassBinding::passReadsGi)
     p->setAllLoadActions(Ogre::LoadAction::Load);
     p->mStoreActionColour[0] = Ogre::StoreAction::Store;
     p->mStoreActionDepth = Ogre::StoreAction::Store;
@@ -899,6 +900,7 @@ void addAtomIdPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandl
     Ogre::CompositorTargetDef *t = n->addTargetPass(kAtomIdRtv);
     t->setNumPasses(1);
     Ogre::CompositorPassDef *p = t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(kAtomIdPassId));
+    p->mJahReadsGi = false;   // the visibility ids: no GI sampled (PhotonPassBinding::passReadsGi)
     p->mLoadActionColour[0] = Ogre::LoadAction::DontCare;
     p->mLoadActionDepth = Ogre::LoadAction::Clear;
     p->mLoadActionStencil = Ogre::LoadAction::Clear;
@@ -1655,6 +1657,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // kIncludeOverlaysNote and ChainDesc::overlays).
             p->mIncludeOverlays = desc.overlays;
             p->mProfilingId = "Jahshaka overlays";
+            p->mJahReadsGi = false;   // the editor furniture: no GI sampled (PhotonPassBinding::passReadsGi)
             // Gizmos and wires belong to the SHOT, not to the bars.
             if (desc.letterbox) inset(handlesOut, p);
         }
@@ -2279,10 +2282,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             Ogre::CompositorPassSceneDef *decode =
                 desc.atomDraw ? addAtomDecodePass(n, kSsrPrepassRtv, true, true, "Jahshaka atom decode prepass")
                               : nullptr;
+            if (decode) decode->mJahReadsGi = false;   // the G-buffer decode: no GI sampled (PhotonPassBinding::passReadsGi)
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrepassRtv);
             t->setNumPasses(1);
             auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
             p->mPrePassMode = Ogre::PrePassCreate;
+            p->mJahReadsGi = false;   // the SSR G-buffer prepass: no GI sampled (PhotonPassBinding::passReadsGi)
             p->mShadowNode = desc.shadows ? Ogre::IdString(OgreView::kShadowNodeName)
                                           : Ogre::IdString();
             // Clear to white, the sample's value: an unwritten normals texel
@@ -2663,6 +2668,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->setSkipRenderQueue(kHitDecodeRenderQueue, true);
             p->mIncludeOverlays = false;                         // see kIncludeOverlaysNote
             p->mProfilingId = "Jahshaka SSR helper mask";
+            p->mJahReadsGi = false;   // the helpers' MASK (their coverage, not their light): no GI sampled
             if (desc.letterbox) inset(handlesOut, p);
         }
         auto *dq = addQuad(n, kSsrPrevDepth, "Jahshaka/SsrHistoryDepth", "Jahshaka SSR history depth");
@@ -3004,6 +3010,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // as the passthrough shape's (kIncludeOverlaysNote).
         p->mIncludeOverlays = desc.overlays;
         p->mProfilingId = "Jahshaka overlays";
+        p->mJahReadsGi = false;   // the editor furniture: no GI sampled (PhotonPassBinding::passReadsGi)
         // Gizmos and wires belong to the SHOT, not to the bars.
         if (desc.letterbox) inset(handlesOut, p);
     }
@@ -3073,6 +3080,7 @@ void buildBlank(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         p->mVisibilityMask  = overlayVisibilityMask();
         p->mIncludeOverlays = overlays;
         p->mProfilingId = "Jahshaka blank overlays";
+        p->mJahReadsGi = false;   // the editor furniture: no GI sampled (PhotonPassBinding::passReadsGi)
     }
     Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
     workDef->connectExternal(0, nodeName, 0);

@@ -31,6 +31,16 @@ PhotonDispatchStatus photonDispatchStatus();
 /// Ogre exception naming it, logged), so a region that records one is seen. Off restores the arm.
 void setPhotonRegionBracketCheck(bool on);
 
+/// THE GI BINDING BY READER (ENGINE-UPGRADE-ASYNC-3 stage 2): a scene's GI (its voxel volumes, its
+/// field) is bound only on the passes that sample it. Counts of the PBS/Atom pass preparations, ever,
+/// for a pass whose scene HAS a GI binding: on a reader pass (bound) and on a pass marked as sampling
+/// none (the G-buffer prepasses, the card capture, the overlays: not bound).
+struct PhotonBindingStatus {
+    unsigned long long readerPrepares = 0;
+    unsigned long long nonReaderPrepares = 0;
+};
+PhotonBindingStatus photonBindingStatus();
+
 class Scene;
 /// THE IRRADIANCE FIELD'S VARIANCE STOP (ENGINE-UPGRADE-2B stage 4): the generation job's own
 /// counts, read back from the GPU (lagging a few frames). Zero when the scene has no field.
