@@ -6553,14 +6553,15 @@ public:
     /// type crosses the boundary) that lets hosts and tests see that a call was
     /// or was not structurally expensive — every rebuild goes through the seam,
     /// so this is exactly the number of times it ran.
-    unsigned workspaceGeneration() const override;
+    unsigned workspaceGeneration() const;
 
-    unsigned long long framesPresented() const override;
+    unsigned long long framesPresented() const;
     /// Frames presented since THIS WORKSPACE was built (reset by every chain
     /// rebuild) — what says whether a compute pass of the chain has ever run,
     /// which is how `HzbStatus::primed` is answered.
     unsigned long long workspaceFramesPresented() const { return mWorkspaceFramesPresented; }
-    unsigned long long blankFramesPresented() const override;
+    unsigned long long blankFramesPresented() const;
+    const PublishedEngineFrame::ViewFrames &published() const override;
     bool warmUpShaders() override;
     void setAsyncShaders(bool on) override;
     bool asyncShaders() const override;
@@ -6648,7 +6649,7 @@ public:
     // ---- The picture-in-picture inset (CAMERAS_SPEC §7.7) ------------------
     void setPip(const ViewPipDesc &d) override;
     const ViewPipDesc &pip() const override;
-    unsigned pipGeneration() const override;
+    unsigned pipGeneration() const;
     /// Is this view ENTITLED to draw an inset at all? On-screen always;
     /// offscreen only with ViewPipDesc::allowOffscreen. The determinism law's
     /// single gate, in the same shape as overlaysAllowed() and chainDesc()'s
@@ -6696,8 +6697,8 @@ public:
     /// mirror writes the mirror View's.
     Ogre::TextureGpu *targetTexture() const;
     bool isEnabled() const override;
-    unsigned width()  const override;
-    unsigned height() const override;
+    unsigned width()  const;
+    unsigned height() const;
     /// The presenting window, or null for an offscreen view. The engine needs
     /// it for the one decision that is process-wide but lives on the window:
     /// vsync (Engine::setVsync).
@@ -6726,7 +6727,7 @@ public:
     OgreEngine *mEngine = nullptr;
 
     void setSampleCount(unsigned samples) override;
-    unsigned sampleCount() const override;
+    unsigned sampleCount() const;
 
     /// On-screen resize is applied at frame time (applyPendingResize): by then Qt has
     /// resized the native window, and doing it once per frame coalesces layout bursts.

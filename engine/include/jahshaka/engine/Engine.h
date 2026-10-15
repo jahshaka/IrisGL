@@ -1401,6 +1401,10 @@ public:
     const std::string &name() const { return mIdentityName; }
     bool isOffscreen() const { return mIdentityOffscreen; }
     Scene *scene() const { return mBoundScene; }
+    /// WHAT THIS VIEW DREW at the frame the engine last closed (ENGINE-UPGRADE-U3 stage 2b): its row of
+    /// Engine::published().views — the achieved target size and sample count, the frames presented, the generations.
+    /// A default row before the view's first frame. Read without asking; the reference holds like the engine's own.
+    virtual const PublishedEngineFrame::ViewFrames &published() const = 0;
     /// WHAT THE HOST LAST PUSHED for this view (ENGINE-UPGRADE-U3 stage 2 — the host's own shadow, F5): the chain, the
     /// clear colour, the shadows flag, the enable, the overlay and the picture-in-picture, each as the host last set it, by a setter or by a view part of a
     /// submitted record (its merge, on the submitting side). NEVER the engine's applied state — a record's part lands
@@ -1460,15 +1464,15 @@ public:
     /// offscreen View's texture is replaced immediately (an RTT cannot resize in
     /// place), which also drops whatever was rendered into it.
     virtual void resize(unsigned width, unsigned height) = 0;
-    /// The render target's ACTUAL size, in PIXELS — not what resize() was last
-    /// asked for. Exactly like sampleCount() reports the ACHIEVED sample count:
-    /// a swapchain follows the native window (on X11 the surface's currentExtent
-    /// wins outright), a request made this frame lands at the next frame, and a
-    /// window manager may never grant it at all. Hosts that need to know what is
-    /// really being drawn — and every test that asserts a resize took — must read
-    /// these, not their own request.
-    virtual unsigned width() const = 0;
-    virtual unsigned height() const = 0;
+    // The render target's ACTUAL size, in PIXELS — not what resize() was last
+    // asked for. Exactly like sampleCount() reports the ACHIEVED sample count:
+    // a swapchain follows the native window (on X11 the surface's currentExtent
+    // wins outright), a request made this frame lands at the next frame, and a
+    // window manager may never grant it at all. Hosts that need to know what is
+    // really being drawn — and every test that asserts a resize took — must read
+    // these, not their own request.
+    // -> View::published().width / .height (ENGINE-UPGRADE-U3 stage 2b: the getters are deleted).
+    // (the height: View::published().height)
     /// Hardware anti-aliasing (MSAA) for this view's render target: 1 = off,
     /// 2/4/8 typical (values are rounded down to a power of two and clamped).
     /// NOT cheap on change: the render target is recreated — on-screen at the
@@ -1477,7 +1481,7 @@ public:
     /// The driver may clamp the request (Vulkan only guarantees 1 and 4);
     /// sampleCount() reports the ACHIEVED count once the target exists.
     virtual void setSampleCount(unsigned samples) = 0;
-    virtual unsigned sampleCount() const = 0;
+    // -> View::published().sampleCount (U3 stage 2b).
 
     /// The post-processing chain for this View (POST_CHAIN_SPEC.md): HDR +
     /// filmic tonemap, bloom, SSAO, SMAA, SSR, refractive glass.
@@ -1684,52 +1688,52 @@ public:
     /// so binding the next scene never rebuilds an inset nobody asked for on
     /// it (VIEWS-XID-1). A host that wants one there calls setPip again.
     virtual void setPip(const ViewPipDesc &) = 0;
-    /// How many times the INSET's own workspace has been created — the
-    /// counterpart of workspaceGeneration for the second workspace, and the
-    /// number that proves a steady inset costs nothing structural per frame.
-    /// It moves when the inset is switched on, when its local texture has to
-    /// be re-sized (a rect resize or a `tonemap` flip), and each time the main
-    /// workspace is rebuilt (the inset must be re-appended to stay LAST on the
-    /// target — there is no reorder API). Never on a rect MOVE, a camera move
-    /// or an exposure change. 0 while there is no inset.
-    virtual unsigned pipGeneration() const = 0;
-    /// How many times this View has (re)built its compositor workspace — the
-    /// structurally expensive operation behind setShadows(), setBackground(),
-    /// resize(), setSampleCount() and the engine's shadow-atlas rebuild. Starts
-    /// at 0 and reaches 1 when a Scene is first bound. Hosts use it to verify
-    /// that a per-frame push really was free; tests use it to pin the fact that
-    /// there is exactly ONE place a workspace is created (POST_CHAIN_SPEC.md).
-    virtual unsigned workspaceGeneration() const = 0;
-    /// How many frames this View has actually drawn AND presented since its
-    /// current Scene was bound — the honest "are there real pixels in that
-    /// window yet?" signal. A frame counts only when the View was enabled, had
-    /// a live workspace and a bound Scene while Engine::renderOneFrame ran, so
-    /// a hidden, scene-less or workspace-less View never inflates it. Binding a
-    /// Scene (or detaching one) resets it to 0; a workspace REBUILD does not —
-    /// the pixels of the previous frame are still on screen.
-    ///
-    /// Hosts use it to know when the window stopped showing stale pixels: the
-    /// editor's loading cover (src/viewport/viewportcover.h) is on screen until
-    /// this passes its threshold.
-    virtual unsigned long long framesPresented() const = 0;
-    /// THE OTHER HALF OF THAT QUESTION (lane STALE-VIEW-1): how many frames this
-    /// View has drawn AND presented with NO SCENE BOUND — its background cleared
-    /// and whatever the host asked the HUD to draw over it, and nothing else.
-    ///
-    /// A View with no scene used to present NOTHING, so a window kept the last
-    /// frame it was given — the world that had just been torn down — and the
-    /// "No world open" panel a host raises over an empty viewport changed not
-    /// one pixel. A View whose scene has been TAKEN AWAY now owns a clear-only
-    /// workspace, and this counts what it puts on screen. (Taken away, not
-    /// "never bound": a view that has never had a scene has no workspace at
-    /// all, which is what makes a thumbnail's first frame its own — see
-    /// chain::buildBlank in the engine.)
-    ///
-    /// Monotonic for the life of the View (a scene bind does NOT reset it — the
-    /// question a caller asks across a load is "did the teardown reach the
-    /// screen", which is a difference across the load, not a state). It is the
-    /// number that says a load in place never showed the previous world.
-    virtual unsigned long long blankFramesPresented() const = 0;
+    // How many times the INSET's own workspace has been created — the
+    // counterpart of workspaceGeneration for the second workspace, and the
+    // number that proves a steady inset costs nothing structural per frame.
+    // It moves when the inset is switched on, when its local texture has to
+    // be re-sized (a rect resize or a `tonemap` flip), and each time the main
+    // workspace is rebuilt (the inset must be re-appended to stay LAST on the
+    // target — there is no reorder API). Never on a rect MOVE, a camera move
+    // or an exposure change. 0 while there is no inset.
+    // -> View::published().pipGeneration (U3 stage 2b).
+    // How many times this View has (re)built its compositor workspace — the
+    // structurally expensive operation behind setShadows(), setBackground(),
+    // resize(), setSampleCount() and the engine's shadow-atlas rebuild. Starts
+    // at 0 and reaches 1 when a Scene is first bound. Hosts use it to verify
+    // that a per-frame push really was free; tests use it to pin the fact that
+    // there is exactly ONE place a workspace is created (POST_CHAIN_SPEC.md).
+    // -> View::published().workspaceGeneration (U3 stage 2b).
+    // How many frames this View has actually drawn AND presented since its
+    // current Scene was bound — the honest "are there real pixels in that
+    // window yet?" signal. A frame counts only when the View was enabled, had
+    // a live workspace and a bound Scene while Engine::renderOneFrame ran, so
+    // a hidden, scene-less or workspace-less View never inflates it. Binding a
+    // Scene (or detaching one) resets it to 0; a workspace REBUILD does not —
+    // the pixels of the previous frame are still on screen.
+    //
+    // Hosts use it to know when the window stopped showing stale pixels: the
+    // editor's loading cover (src/viewport/viewportcover.h) is on screen until
+    // this passes its threshold.
+    // -> View::published().presented (U3 stage 2b).
+    // THE OTHER HALF OF THAT QUESTION (lane STALE-VIEW-1): how many frames this
+    // View has drawn AND presented with NO SCENE BOUND — its background cleared
+    // and whatever the host asked the HUD to draw over it, and nothing else.
+    //
+    // A View with no scene used to present NOTHING, so a window kept the last
+    // frame it was given — the world that had just been torn down — and the
+    // "No world open" panel a host raises over an empty viewport changed not
+    // one pixel. A View whose scene has been TAKEN AWAY now owns a clear-only
+    // workspace, and this counts what it puts on screen. (Taken away, not
+    // "never bound": a view that has never had a scene has no workspace at
+    // all, which is what makes a thumbnail's first frame its own — see
+    // chain::buildBlank in the engine.)
+    //
+    // Monotonic for the life of the View (a scene bind does NOT reset it — the
+    // question a caller asks across a load is "did the teardown reach the
+    // screen", which is a difference across the load, not a state). It is the
+    // number that says a load in place never showed the previous world.
+    // -> View::published().blank (U3 stage 2b).
     // How many times a view's chain pushed its per-view globals is PublishedEngineFrame's per-view `globalsPushes`
     // (counted, not inferred: a view whose count does not climb renders with another view's process-wide values).
     /// Reads this View's rendered pixels back to the CPU. Offscreen Views only —

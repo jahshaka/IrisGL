@@ -530,7 +530,7 @@ void OgreView::syncPip() {
     } JAH_CATCH(mError, );
 }
 
-unsigned OgreView::pipGeneration() const { JAH_SYNC_GETTER("View::pipGeneration"); return mPipGeneration; }
+unsigned OgreView::pipGeneration() const { return mPipGeneration; }
 
 void OgreView::pipTexFactors(float &widthFactor, float &heightFactor) const {
     const unsigned tw = width(), th = height();
@@ -1214,9 +1214,9 @@ void OgreView::removeWorkspaceListener(Ogre::CompositorWorkspaceListener *l) {
     } JAH_CATCH(mError, );
 }
 
-unsigned OgreView::workspaceGeneration() const { JAH_SYNC_GETTER("View::workspaceGeneration"); return mWorkspaceGeneration; }
+unsigned OgreView::workspaceGeneration() const { return mWorkspaceGeneration; }
 
-unsigned long long OgreView::framesPresented() const { JAH_SYNC_GETTER("View::framesPresented"); return mFramesPresented; }
+unsigned long long OgreView::framesPresented() const { return mFramesPresented; }
 
 void OgreView::notePresented() {
     mCaptureThisFrame = false;   // the capture flag is one frame's (beginFrameCapture)
@@ -1233,7 +1233,7 @@ void OgreView::notePresented() {
     else if (drawing() && mBlankWorkspace && !mScene) ++mBlankFramesPresented;
 }
 
-unsigned long long OgreView::blankFramesPresented() const { JAH_SYNC_GETTER("View::blankFramesPresented"); return mBlankFramesPresented; }
+unsigned long long OgreView::blankFramesPresented() const { return mBlankFramesPresented; }
 
 void OgreView::detachScene(bool takeBlank) {
     // A CAPTURE ASKED OF THIS SCENE DIES WITH IT (CLOSE-SHOT-2): an armed request
@@ -1561,7 +1561,15 @@ Ogre::CompositorShadowNode *OgreView::shadowNodeInstance() const {
     return mWorkspace->findShadowNode(Ogre::IdString(kShadowNodeName));
 }
 
-bool OgreView::isEnabled() const { return drawing(); }   // what draws (the host's wish and the session's cover)
+bool OgreView::isEnabled() const { return drawing(); }
+
+// THE VIEW'S ROW OF THE ENGINE'S SNAPSHOT (ENGINE-UPGRADE-U3 stage 2b): what the last closed frame drew for it.
+const PublishedEngineFrame::ViewFrames &OgreView::published() const {
+    static const PublishedEngineFrame::ViewFrames kNone;
+    if (!mEngine) return kNone;
+    const PublishedEngineFrame::ViewFrames *row = mEngine->published().view(mIdentityName);
+    return row ? *row : kNone;
+}   // what draws (the host's wish and the session's cover)
 
 // The ACHIEVED size, exactly like sampleCount() reports the achieved sample
 // count: what the render target really is, not what the host asked for. For an
@@ -1572,14 +1580,12 @@ bool OgreView::isEnabled() const { return drawing(); }   // what draws (the host
 // made the selftest's resize assertion tautological (deep audit area 7 F3):
 // it compared the values we had just pushed with themselves.
 unsigned OgreView::width() const {
-    JAH_SYNC_GETTER("View::width");
     Ogre::TextureGpu *t = target();
     // A LAYERED (stereo) target reports its eye PAIR laid side by side — the
     // layout readPixels returns and the size the view was created at.
     return t ? t->getWidth() * t->getNumSlices() : mWidth;
 }
 unsigned OgreView::height() const {
-    JAH_SYNC_GETTER("View::height");
     Ogre::TextureGpu *t = target();
     return t ? t->getHeight() : mHeight;
 }
@@ -1663,7 +1669,6 @@ void OgreView::setSampleCount(unsigned samples) {
 }
 
 unsigned OgreView::sampleCount() const {
-    JAH_SYNC_GETTER("View::sampleCount");
     // The ACHIEVED count: drivers clamp (Vulkan halves unsupported requests), and
     // the validated description lands on the target at window creation /
     // Resident transition. Before a target exists, report the request.
