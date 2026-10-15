@@ -476,10 +476,10 @@ public:
     // shader is handed, so a remap that silently failed to land reads as the
     // old number here.
     // -> Scene::published().streamedBonesOf(node) (U3 stage 2b).
-    /// What this scene's rigs cost right now (RigStats). The measurement
-    /// surface the rig-perf bench and its gates read; cheap enough to call per
-    /// frame, but nothing on the frame path calls it.
-    virtual RigStats    rigStats() const = 0;
+    // What this scene's rigs cost right now (RigStats). The measurement
+    // surface the rig-perf bench and its gates read; cheap enough to call per
+    // frame, but nothing on the frame path calls it.
+    // -> Scene::published().rigs (U3 stage 3: the getter is deleted; the running totals publish every frame).
     // What this scene's structural edits cost so far, in counts (SceneChangeStats).
     // -> Scene::published().changes (U3 stage 2b).
     /// ONE STRUCTURAL EDIT, MANY NODES (ENGINE-UPGRADE-1 stage 2). Between begin and end (nestable) the
@@ -1258,9 +1258,9 @@ public:
     /// promotion costs nothing by construction: see MobilityChange.
     virtual void        setNodeMovable(NodeId, bool,
                                        MobilityChange = MobilityChange::Authoring) = 0;
-    /// How many nodes this scene has been told are movable, split by what they
-    /// carry. A pure read of the records — no walk of the graph, no allocation.
-    virtual MobilityStatus mobilityStatus() const = 0;
+    // How many nodes this scene has been told are movable, split by what they
+    // carry. A pure read of the records — no walk of the graph, no allocation.
+    // -> Scene::published().mobility (U3 stage 3: the getter is deleted).
 
     /// LIGHTING CHANNELS, object side (LightDesc::lightMask is the light side).
     ///
@@ -2074,16 +2074,16 @@ public:
     // process as it does for a loss (no orderly teardown), saying which.
     // -> Engine::published().gpuFault (U3 stage 2b).
 
-    /// A TEST DOOR (VOXEL-READOUT-1; never a mode): the renderer's CURRENT command
-    /// buffer, as an opaque tag. It changes exactly when the queue SUBMITS (a new
-    /// command buffer begins), so a tag unchanged across a call proves the call
-    /// neither submitted nor committed a command buffer - in no time unit. It does
-    /// NOT prove the call never waited: a blocking map of a ticket whose fence was
-    /// already submitted waits without moving the tag (gi.readout_async covers that
-    /// with its flush sentry and its landed-reading check, not with this tag).
-    /// Valid between frames too (Ogre opens the next command buffer at every submit);
-    /// 0 = cannot tell (not the Vulkan renderer, or a lost device).
-    virtual unsigned long long queueSubmissionTag() const = 0;
+    // A TEST DOOR (VOXEL-READOUT-1; never a mode): the renderer's CURRENT command
+    // buffer, as an opaque tag. It changes exactly when the queue SUBMITS (a new
+    // command buffer begins), so a tag unchanged across a call proves the call
+    // neither submitted nor committed a command buffer - in no time unit. It does
+    // NOT prove the call never waited: a blocking map of a ticket whose fence was
+    // already submitted waits without moving the tag (gi.readout_async covers that
+    // with its flush sentry and its landed-reading check, not with this tag).
+    // Valid between frames too (Ogre opens the next command buffer at every submit);
+    // 0 = cannot tell (not the Vulkan renderer, or a lost device).
+    // -> jahshaka::engine::inspect::engine(e)->queueSubmissionTag() (U3 stage 3: a between-frames test probe, off the boundary — EngineInspect.h).
 
     /// ADVANCES THE RENDERER'S RESOURCE BOOKKEEPING WITHOUT DRAWING ANYTHING
     /// (lane OPEN-FRAMES-1, 2026-09-15).
@@ -2822,6 +2822,16 @@ public:
     /// `Streaming` for its own frame of an arriving world and lowers it right after; every other frame (a scripted
     /// one, a cover's inline present, a readback) renders `Complete`, as a host that sets nothing always did.
     virtual void setFramePace(FramePace pace) = 0;
+
+    // ---- THE REQUEST DOOR (ENGINE-UPGRADE-U3 stage 3, decisions 14 / 17) ---------------------------------------------
+    /// A QUESTION THAT WALKS OGRE OR THE GPU IS ASKED, NEVER READ: `question` runs ON THE ENGINE'S SIDE — where the
+    /// counted getters it calls (objectLods, dumpMaterial, itemCount, bone matrices and poses, clip weights, texture
+    /// mips, GPU-scene entries, node world poses, memoryStats, textureMemory, objectCounts, threading, fillCullView,
+    /// hzbStatus, measuredExposureScale, shaderCacheStats, validation, the texture streaming counters) are the
+    /// engine's own reads — and `done` runs once it has answered. Served INLINE today (one thread: the question runs
+    /// now, then `done`); stage 4 serves it on the render thread between frames and delivers `done` on the host's.
+    /// A getter of that list called outside a request is a synchronous read (host.sync_getters counts it).
+    virtual void request(std::function<void(Engine &)> question, std::function<void()> done = {}) = 0;
     // Does any scene feeding an enabled view still owe first-time work that a
     // `Streaming` frame would take a step of? The host reads it to decide how
     // long to keep asking (and, in phase 2b, to draw the indicator).

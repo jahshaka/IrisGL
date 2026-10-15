@@ -1686,7 +1686,6 @@ void OgreEngine::raiseFrameFault() {
 bool OgreEngine::deviceLost() const { return mDeviceLost; }
 
 unsigned long long OgreEngine::queueSubmissionTag() const {
-    JAH_SYNC_GETTER("Engine::queueSubmissionTag");
     return (unsigned long long)monitor::queueSubmissionTag(mRoot ? mRoot->getRenderSystem() : nullptr);
 }
 
@@ -2410,6 +2409,16 @@ void OgreEngine::applyFrameDelta(float seconds) {
 
 void OgreEngine::submitFrame(FrameInput in) { mRenderThread.submit(std::move(in)); }
 
+// THE REQUEST DOOR (U3 stage 3): the question runs on the engine's side — its reads are the engine's own, never a
+// host's synchronous read — inline today; stage 4 moves it onto the render thread.
+void OgreEngine::request(std::function<void(Engine &)> question, std::function<void()> done) {
+    if (question) {
+        EngineSideScope engineSide;
+        question(*this);
+    }
+    if (done) done();
+}
+
 namespace {
 /// Apply `want` when it differs from what was last applied from a record (`last`); count it.
 template <typename T, typename Apply>
@@ -2958,6 +2967,7 @@ bool OgreEngine::memoryStats(MemoryStats &out) const {
 }
 
 bool OgreEngine::reclaimMemory(MemoryStats *before, MemoryStats *after) {
+    EngineSideScope engineSide;   // the reads below are the command's own, on the engine's side (U3 stage 3)
     if (!mRoot) return false;
     MemoryStats b;
     memoryStats(b);

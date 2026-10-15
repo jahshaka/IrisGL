@@ -59,4 +59,15 @@ public:
 /// The view's record; null for a view this engine did not make.
 const ViewEcho *view(const View *v);
 
+/// The engine's test probes (ENGINE-UPGRADE-U3 stage 3): readings only a fixture between its own frames asks for.
+class EngineEcho {
+public:
+    virtual ~EngineEcho() = default;
+    /// The renderer's CURRENT command buffer, as an opaque tag: it changes exactly when the queue submits, so a tag
+    /// unchanged across a call proves the call neither submitted nor committed a command buffer (0 = cannot tell).
+    virtual unsigned long long queueSubmissionTag() const = 0;
+};
+/// The engine's probes; null for an engine of another kind.
+const EngineEcho *engine(const Engine *e);
+
 }}}   // namespace jahshaka::engine::inspect

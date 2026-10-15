@@ -745,7 +745,6 @@ size_t OgreScene::streamedBonesOf(const Node &node) const {
 }
 
 RigStats OgreScene::rigStats() const {
-    JAH_SYNC_GETTER("Scene::rigStats");
     // RUNNING TOTALS (recountNode, U3 read 12(b)): DISTINCT instances by pointer (two Items sharing one instance are
     // one evaluation in updateAllAnimations), "shared" = renders from somebody else's instance — no walk.
     return mRigCounts;

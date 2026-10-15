@@ -1428,6 +1428,7 @@ void OgreEngine::collectCompositorGraph(std::vector<CompositorWorkspaceInfo> &ou
 
 bool OgreEngine::captureSnapshot(EngineSnapshot &out, const std::string &label,
                                  Scene *scene) const {
+    EngineSideScope engineSide;   // a capture's reads are the engine's own (U3 stage 3: one request, the bundle)
     out = EngineSnapshot();
     out.label = label;
     out.atMs = monitor::nowMs();

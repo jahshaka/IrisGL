@@ -1315,7 +1315,6 @@ bool OgreScene::nodeMovable(NodeId id) const {
 }
 
 MobilityStatus OgreScene::mobilityStatus() const {
-    JAH_SYNC_GETTER("Scene::mobilityStatus");
     MobilityStatus out = mMobilityCounts;   // running totals (recountNode): no walk of the graph
     out.mobilityRebuilds = mMobilityRebuilds;
     return out;
@@ -2545,4 +2544,5 @@ namespace jahshaka { namespace engine { namespace inspect {
 // THE TEST DOOR (EngineInspect.h): the engine's own record of a host's pushes, for the fixtures alone.
 const SceneEcho *scene(const Scene *s) { return dynamic_cast<const SceneEcho *>(s); }
 const ViewEcho *view(const View *v) { return dynamic_cast<const ViewEcho *>(v); }
+const EngineEcho *engine(const Engine *e) { return dynamic_cast<const EngineEcho *>(e); }
 }}}   // namespace jahshaka::engine::inspect

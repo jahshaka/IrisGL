@@ -3974,7 +3974,7 @@ public:
     bool setBonePoses(NodeId id, const BonePose *poses, size_t count) override;
     bool boneMatrices(NodeId id, float *out, size_t count) const override;
     size_t streamedBoneCount(NodeId id) const;
-    RigStats rigStats() const override;
+    RigStats rigStats() const;
     SceneChangeStats changeStats() const { return mChangeStats; }
     void beginStructureEdit() override { ++mStructureEditDepth; }
     void endStructureEdit() override;
@@ -4241,7 +4241,7 @@ public:
     void setNodeHelper(NodeId id, bool helper) override;
     void setNodeMovable(NodeId id, bool movable, MobilityChange change) override;
     bool nodeMovable(NodeId id) const override;
-    MobilityStatus mobilityStatus() const override;
+    MobilityStatus mobilityStatus() const;
     bool nodeHelper(NodeId id) const override;
     void setNodeBackdrop(NodeId id, bool backdrop) override;
     void setNodeVrHelper(NodeId id, bool vrHelper) override;
@@ -7350,7 +7350,7 @@ inline bool vrTestInjectAllowed() {
 bool    vrSessionHaptic(VrSession *, int hand, float amplitude01, float seconds,
                         std::string &error);
 
-class OgreEngine final : public Engine {
+class OgreEngine final : public Engine, public inspect::EngineEcho {
 public:
     bool init(const EngineConfig &cfg, std::string &error);
 
@@ -7401,6 +7401,7 @@ public:
     const PublishedEngineFrame &published() const override { return mRenderThread.published(); }
     void setDisplayPeriod(float seconds) override { mRenderThread.setDisplayPeriod(seconds); }
     void setFramePace(FramePace pace) override { mFramePace = pace; }
+    void request(std::function<void(Engine &)> question, std::function<void()> done) override;
     std::vector<SyncGetterCount> syncGetters() const override {
         std::vector<SyncGetterCount> out;
         for (const SyncGetterSite *s = syncGetterSites(); s; s = s->next)
@@ -7435,7 +7436,7 @@ public:
     void raiseFrameFault();
     bool deviceLost() const;
     GpuFault gpuFault() const;
-    unsigned long long queueSubmissionTag() const override;
+    unsigned long long queueSubmissionTag() const override;   // inspect::EngineEcho (U3 stage 3)
     /// The render system's out-of-memory count (VulkanDevice::getOutOfMemoryFailures,
     /// the fork) and the last one's text; 0 / "" without the Vulkan render system.
     unsigned vulkanOomCount() const;
