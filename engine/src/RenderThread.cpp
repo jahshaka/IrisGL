@@ -2,6 +2,7 @@
 #include "EnginePrivate.h"
 
 #include <algorithm>
+#include <iterator>
 #include <chrono>
 
 namespace jahshaka { namespace engine { namespace detail {
@@ -21,7 +22,7 @@ SyncGetterSite *syncGetterSites() { return gSyncSites.load(std::memory_order_acq
 // THE MERGE STAYS (U3 F1): one frame today is the merge of 2-6 submits — the driver's cause, the viewport's pace, the
 // mirror's record, the viewport's delta + gesture, a preview's scene part — and that merge IS the record's builder.
 // What changed is where it lands: the hand-over slot, under its lock, never the record a frame is draining.
-void RenderThread::submit(const FrameInput &in) {
+void RenderThread::submit(FrameInput &&in) {
     std::lock_guard<std::mutex> lock(mSlotLock);
     ++mSubmit.submitted;
     mSlot.any = true;
@@ -32,14 +33,16 @@ void RenderThread::submit(const FrameInput &in) {
     if (in.shadowMapBudget) p.shadowMapBudget = in.shadowMapBudget;
     p.refreshShadows = p.refreshShadows || in.refreshShadows;
     if (in.stepSerial) p.stepSerial = in.stepSerial;
-    for (const FrameInputScene &sc : in.scenes) {
+    for (FrameInputScene &sc : in.scenes) {
         auto it = std::find_if(p.scenes.begin(), p.scenes.end(),
                                [&](const FrameInputScene &q) { return q.scene == sc.scene; });
-        if (it == p.scenes.end()) { p.scenes.push_back(sc); continue; }
+        if (it == p.scenes.end()) { p.scenes.push_back(std::move(sc)); continue; }
         // THE CHANGE SET APPENDS (events, not values): both submits' writes are this frame's.
         it->changes.complete = it->changes.complete && sc.changes.complete;
         it->changes.moved.insert(it->changes.moved.end(), sc.changes.moved.begin(), sc.changes.moved.end());
         it->nodes.insert(it->nodes.end(), sc.nodes.begin(), sc.nodes.end());   // events, in order
+        it->messages.insert(it->messages.end(), std::make_move_iterator(sc.messages.begin()),
+                            std::make_move_iterator(sc.messages.end()));   // commands, in order
         // A scene's part is REPLACED by the newest, FIELD BY FIELD: every field the newer record carries wins, and
         // one it does not carry keeps the older record's value (a sparser second sync never drops the first's).
         if (sc.shadows) it->shadows = sc.shadows;

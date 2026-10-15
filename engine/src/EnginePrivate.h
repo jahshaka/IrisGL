@@ -3881,7 +3881,7 @@ public:
     bool removeNode(NodeId id) override;
 
     // ---- Hierarchy and transforms ----
-    NodeId createNode(NodeId parent) override;
+    NodeId createNode(NodeId parent = 0, NodeId id = 0) override;
     NodeId createDocumentNode(NodeId id, NodeId parent) override;
     const PublishedFrame &published() const override {
         return mPublished[mPublishedIdx.load(std::memory_order_acquire)];
@@ -3900,7 +3900,7 @@ public:
     void setNodeVisibleUnder(NodeId id, bool visible, bool parentShown) override;
 
     // ---- Meshes and materials ----
-    MeshId createMesh(const MeshData &data) override;
+    MeshId createMesh(const MeshData &data, MeshId id = 0) override;
     /// A MULTI-SUBMESH ITEM, for the suites that hold a per-submesh consumer to
     /// it (REFLECT-MOVERS-2: the ray tier's cut-out table is per submesh). No
     /// product path builds one — buildMeshV2 makes one submesh a mesh — so these
@@ -3914,7 +3914,7 @@ public:
     bool updateMeshVertices(MeshId id, const std::vector<float> &positions,
                             const std::vector<float> &normals) override;
     bool destroyMesh(MeshId id) override;
-    MaterialId createPbrMaterial(const PbrParams &p) override;
+    MaterialId createPbrMaterial(const PbrParams &p, MaterialId id = 0) override;
     bool setPbrMaterial(MaterialId id, const PbrParams &p) override;
     bool setShadingModel(MaterialId id, ShadingModel model) override;
     bool destroyMaterial(MaterialId id) override;
@@ -3992,10 +3992,10 @@ public:
     std::vector<float> clipBoneWeights(NodeId id, const std::string &clip) const override;
 
     // ---- Textures ----
-    TextureId loadTexture(const std::string &path, bool srgb) override;
+    TextureId loadTexture(const std::string &path, bool srgb, TextureId id = 0) override;
     TextureId createTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb,
-                            bool mipmaps = false) override;
-    TextureId createCubemap(const TextureId faces[6]) override;
+                            bool mipmaps = false, TextureId id = 0) override;
+    TextureId createCubemap(const TextureId faces[6], TextureId id = 0) override;
     bool updateTexture(TextureId id, unsigned w, unsigned h, const unsigned char *rgba) override;
     /// The staged RGBA upload (level 0 + the CPU-built mip chain), shared by
     /// createTexture and updateTexture so there is one copy of it.
@@ -4006,10 +4006,10 @@ public:
     bool setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId texId) override;
 
     // ---- Overlay primitives ----
-    MaterialId createUnlitMaterial(const Colour &c, bool depthTest, bool wireframe) override;
-    MaterialId createOutlineMaterial(const Colour &c, bool skinnable) override;
+    MaterialId createUnlitMaterial(const Colour &c, bool depthTest, bool wireframe = false, MaterialId id = 0) override;
+    MaterialId createOutlineMaterial(const Colour &c, bool skinnable = false, MaterialId id = 0) override;
     bool setUnlitMaterial(MaterialId id, const Colour &c) override;
-    MeshId createLineMesh(const std::vector<Vec3> &points, bool strip) override;
+    MeshId createLineMesh(const std::vector<Vec3> &points, bool strip, MeshId id = 0) override;
 
     // ---- Particles (billboard sets) ----
     // Ogre-Next's BillboardSet2 (ParticleFX2 core, lives in OgreNextMain — no
@@ -4044,7 +4044,7 @@ public:
     // ---- Decals (DECALS_SPEC.md; impl in OgreDecals.cpp) ----
     bool setDecal(NodeId id, const DecalDesc &d) override;
     bool removeDecal(NodeId id) override;
-    TextureId loadDecalTexture(const std::string &path, DecalMap kind) override;
+    TextureId loadDecalTexture(const std::string &path, DecalMap kind, TextureId id = 0) override;
     unsigned decalAtlasCapacity(DecalMap kind) const;
     unsigned decalAtlasUsed(DecalMap kind) const;
 
@@ -5662,7 +5662,7 @@ private:
                                   bool srgb);
     /// Registers a texture record: assigns the next id and indexes it by path.
     /// The ONLY way a TextureRec enters mTextures, so the index cannot drift.
-    TextureId trackTexture(const TextureRec &rec);
+    TextureId trackTexture(const TextureRec &rec, TextureId id);   ///< under `id` (0 = reserve one)
     /// Does this material bind a normal map in any slot (I-6's cheap half)?
     static bool materialUsesNormalMap(const MaterialRec &rec);
     /// Our slot enum -> Ogre's PBSM_* unit.
@@ -6199,6 +6199,14 @@ private:
     std::map<NodeId, NodeId>    mShareSources;   ///< follower -> source, kept by applyCounted
     /// THE FACTS BLOCK (U3 stage 3, decision 13): rebuilt at the publish only when a mutation site raised the flag.
     bool                                        mFactsDirty = true;
+    /// THE NAMED MESSAGES' COMPLETIONS (U3 stage 3): kept to PublishedFrame::kCompletionsKept, republished on change.
+    std::deque<PublishedFrame::Completion>      mCompletions;
+    unsigned long long                          mCompletionSeq = 0;
+    bool                                        mCompletionsDirty = false;
+    std::shared_ptr<const std::vector<PublishedFrame::Completion>> mCompletionsPublished;
+public:
+    void noteCompletion(unsigned long long token, bool ok, std::string error);
+private:
     std::shared_ptr<const PublishedFrame::Facts> mFacts;
     void rebuildFacts();
     /// Re-derives one node's contribution after a mutation of its movable flag, Item, light, particles, billboards or
@@ -6264,9 +6272,6 @@ private:
     /// (kQueueDepthAnchorRenderQueue explains why it must exist).
     bool                mHelperOverlayQueueReady = false;
     Ogre::MovableObject *mQueueDepthAnchor = nullptr;
-    TextureId           mNextTextureId = 0;
-    MeshId              mNextMeshId = 0;
-    MaterialId          mNextMaterialId = 0;
     /// How many times guardSamplerCeiling has had to step off a full block, and
     /// whether the one log line has been written. See it for what a generation
     /// is; 0 is the state every scene that ever shipped stays in.
@@ -7390,7 +7395,7 @@ public:
     /// (runFrame, below), the publish. The public door stays here until stage 4 deletes it.
     void renderOneFrame() override;
     /// The game side's merge into the hand-over slot (RenderThread::submit).
-    void submitFrame(const FrameInput &input) override;
+    void submitFrame(FrameInput input) override;
     FrameSubmitStatus frameSubmitStatus() const override { return mRenderThread.submitStatus(); }
     FrameInputStatus frameInputStatus() const { return mFrameInputStatus; }
     const PublishedEngineFrame &published() const override { return mRenderThread.published(); }

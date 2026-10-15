@@ -48,6 +48,15 @@ struct Quat {
 /// monotonic like NodeId. A mesh or material may be shared by any number of nodes.
 using MeshId     = unsigned int;
 using MaterialId = unsigned int;
+/// THE RESOURCE IDS ARE RESERVED BY WHOEVER CREATES (ENGINE-UPGRADE-U3 stage 3): one process-wide counter per kind,
+/// 1-based (0 = none), never reused — a host names a mesh, a material or a texture in the record before the engine
+/// built it (Scene::createMesh(data, id) ...), and an engine create with no id reserves from the same counter.
+inline MeshId reserveMeshId() { static std::atomic<MeshId> next{1}; return next.fetch_add(1, std::memory_order_relaxed); }
+inline MaterialId reserveMaterialId()
+{
+    static std::atomic<MaterialId> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
 
 /// CPU-side triangle mesh, the shape the assimp importer produces at import time.
 /// positions: xyz per vertex (required). normals: xyz per vertex (optional — smooth
@@ -814,6 +823,11 @@ struct ClipState {
 };
 
 using TextureId = unsigned int;
+inline TextureId reserveTextureId()
+{
+    static std::atomic<TextureId> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
 enum class SkyMode { NoSky, Equirectangular, Cubemap, Atmosphere };   // 'None' collides with X11's macro
 
 /// THE PLANET'S ATMOSPHERE, drawn by the engine itself (SKY-ATMOSPHERE-1).
@@ -7915,6 +7929,18 @@ struct ChangeSet {
     std::vector<NodeId> moved;
     bool empty() const { return complete && moved.empty(); }
 };
+/// A STRUCTURAL MESSAGE (ENGINE-UPGRADE-U3 stage 3): one command of the host's sync — a create (under the id the host
+/// reserved), a destroy, an attach, a material, a light, a decal, a socket, a texture — carried by the record and
+/// applied, in the order the host emitted it, at the top of the frame that takes the record, BEFORE the node records
+/// (which may name what it creates). It owns what it carries (the pixels, the mesh data): nothing points back into
+/// the host. A command the engine refuses says so in the frame's errors (PublishedEngineFrame::frameErrors).
+struct SceneMessage {
+    std::function<bool(Scene &)> apply;   ///< the command; its answer (false = refused) is the completion's
+    /// A host that must learn the answer names the message (non-zero): its completion — ok or refused, with the
+    /// engine's reason — is published in Scene::published().completions (U3 stage 3).
+    unsigned long long token = 0;
+};
+
 /// The user's GESTURE as the host knows it (a gizmo drag, a viewport drag, a material hover): what makes a moving
 /// still object a DRAG MOVER for its length (GiParams::dragMoverChannel) and ends it — the engine infers nothing from
 /// motion (U0 3c). Per scene (a NodeId is a scene's own), per frame: a drain without one reads "no gesture".
@@ -7935,6 +7961,8 @@ struct FrameInputScene {
     ChangeSet changes;
     /// THE DOCUMENT NODES' RECORDS (the extract, NodeRecord): events too — applied in order, merged by appending.
     std::vector<NodeRecord> nodes;
+    /// THE STRUCTURAL MESSAGES, in emission order (U3 stage 3) — applied before `nodes`.
+    std::vector<SceneMessage> messages;
     std::optional<ShadowDesc>             shadows;
     std::optional<Colour>                 environmentLight;
     std::optional<FogDesc>                fog;
@@ -8012,6 +8040,9 @@ struct FrameInputStatus {
     // ---- the extract (ENGINE-UPGRADE-U2) ----
     unsigned           nodeRecords = 0;         ///< NodeRecords the LAST drain applied, over every scene
     unsigned           nodeTransforms = 0;      ///< ...of them, the ones carrying a transform (the written nodes)
+    // ---- the structural messages (ENGINE-UPGRADE-U3 stage 3) ----
+    unsigned           messages = 0;            ///< structural messages the LAST drain applied, over every scene
+    unsigned long long messagesTotal = 0;       ///< ...ever
     unsigned long long nodeRecordsTotal = 0;    ///< ...ever
     double             drainMicros = 0.0;       ///< what the LAST drain cost (the record's own overhead)
 };
@@ -8137,6 +8168,16 @@ struct PublishedFrame {
         }
     };
     std::shared_ptr<const Facts> facts;
+    /// THE COMPLETIONS OF THE NAMED MESSAGES (SceneMessage::token, U3 stage 3): the last kCompletionsKept, by a
+    /// sequence that only grows — a host remembers the last it read, so frames rendered between its looks lose none.
+    struct Completion {
+        unsigned long long seq = 0;
+        unsigned long long token = 0;
+        bool               ok = true;
+        std::string        error;   ///< the engine's reason when refused
+    };
+    static constexpr size_t kCompletionsKept = 1024;
+    std::shared_ptr<const std::vector<Completion>> completions;
     const Facts &factsBlock() const {
         static const Facts kNone;
         return facts ? *facts : kNone;

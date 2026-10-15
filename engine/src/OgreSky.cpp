@@ -1301,7 +1301,8 @@ bool OgreScene::applySkyReflectionFaces(const TextureId faces[6]) {
 // convolution's AllowAutomipmaps. A shorter mip chain than the global cube's
 // samples clamped under `_notifyIblSpecMipmap`'s process-wide count — acceptable
 // and noted, not measured.
-TextureId OgreScene::createCubemap(const TextureId faces[6]) {
+TextureId OgreScene::createCubemap(const TextureId faces[6], TextureId id) {
+    if (id && mTextures.count(id)) { mError = "createCubemap: the id is already a texture of this scene"; return 0; }
     JAH_TRY {
         Ogre::TextureGpu *tex[6];
         for (int i = 0; i < 6; ++i) {
@@ -1326,7 +1327,7 @@ TextureId OgreScene::createCubemap(const TextureId faces[6]) {
         rec.texture = cube;
         rec.path = "";      // pixel-born: never deduplicated, the caller owns it
         rec.srgb = false;   // the faces decide; the cube copies their format
-        return trackTexture(rec);
+        return trackTexture(rec, id);
     } JAH_CATCH(mError, 0);
 }
 

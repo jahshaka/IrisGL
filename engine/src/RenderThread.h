@@ -38,7 +38,7 @@ public:
     // ---- THE GAME SIDE -----------------------------------------------------------------------------------------
     /// Accumulates `in` into the pending record (the merge, FrameInput's rules). `in.serial` is ignored: the
     /// hand-over stamps it.
-    void submit(const FrameInput &in);
+    void submit(FrameInput &&in);
     /// The host's half of the monitor's record (a stage it timed): banked in the slot, handed over with the record,
     /// folded into the frame's record by the render side — never written into the engine's current record across
     /// threads. Coalesced by name past kHostStageCoalesce entries so a slot nobody takes cannot grow without bound.

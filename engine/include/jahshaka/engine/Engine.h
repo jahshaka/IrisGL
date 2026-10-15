@@ -239,7 +239,7 @@ public:
 
     // ---- Hierarchy and transforms (VIEWPORT_MIGRATION_PLAN.md step 2) ----
     /// An empty transform node under `parent` (0 = the scene root).
-    virtual NodeId      createNode(NodeId parent = 0) = 0;
+    virtual NodeId      createNode(NodeId parent = 0, NodeId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
     /// A node the DOCUMENT drives (SceneMirror, ENGINE-UPGRADE-U2): an empty node under `parent` (0 = the scene
     /// root) whose LOCAL transform, parent and graph class (SCENE_STATIC) arrive through the frame record
     /// (FrameInputScene::nodes, NodeRecord) and are applied at the top of the frame, before the change set. Everything
@@ -277,7 +277,7 @@ public:
 
     // ---- Meshes and materials (step 3/4) ----
     /// Uploads geometry. Returns 0 on invalid data (lastError()).
-    virtual MeshId      createMesh(const MeshData &) = 0;
+    virtual MeshId      createMesh(const MeshData &, MeshId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
     virtual bool        destroyMesh(MeshId) = 0;
     /// Rewrites the vertex positions (and, when non-empty, normals) of a mesh
     /// created with MeshData::dynamic — the CPU-skinning path: the host computes
@@ -288,7 +288,7 @@ public:
     /// unknown or non-dynamic meshes or size mismatches.
     virtual bool        updateMeshVertices(MeshId, const std::vector<float> &positions,
                                            const std::vector<float> &normals) = 0;
-    virtual MaterialId  createPbrMaterial(const PbrParams &) = 0;
+    virtual MaterialId  createPbrMaterial(const PbrParams &, MaterialId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
     /// Re-applies every parameter EXCEPT the shading model — see
     /// setShadingModel for why that one is a separate, atomic call.
     virtual bool        setPbrMaterial(MaterialId, const PbrParams &) = 0;
@@ -548,7 +548,7 @@ public:
     /// Loads an image file (png/jpg/tga/dds...). `srgb` for colour maps (albedo,
     /// emissive); false for data maps (normal, roughness, metalness). The same path
     /// loaded twice returns the same id. 0 on failure (lastError()).
-    virtual TextureId   loadTexture(const std::string &path, bool srgb) = 0;
+    virtual TextureId   loadTexture(const std::string &path, bool srgb, TextureId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
     /// A texture from RGBA8 pixels in memory (top-left origin, width*height*4 bytes).
     ///
     /// `mipmaps` builds the whole chain (box-filtered on the CPU, at upload
@@ -559,7 +559,7 @@ public:
     /// "blurred" glyph of the 2026-09-08 owner report. Costs a third more
     /// memory and a few hundred microseconds, once, per icon.
     virtual TextureId   createTexture(unsigned width, unsigned height, const unsigned char *rgba,
-                                      bool srgb, bool mipmaps = false) = 0;
+                                      bool srgb, bool mipmaps = false, TextureId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
     /// A CUBEMAP from six square, same-size, same-format face textures, in
     /// WORLD-AXIS order (+X, -X, +Y, -Y, +Z, -Z) with image row 0 at the top —
     /// exactly what SkyDesc::reflectionFaces takes, and built by the SAME code, so the
@@ -569,7 +569,7 @@ public:
     ///
     /// Its use today is a per-material reflection override (ADDENDUM A-5):
     /// `setPbrTexture(mat, PbrTextureSlot::Reflection, id)`.
-    virtual TextureId   createCubemap(const TextureId faces[6]) = 0;
+    virtual TextureId   createCubemap(const TextureId faces[6], TextureId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
     /// REPLACE the pixels of an existing texture, same size, same format
     /// (ADDENDUM A-1). The upload path createTexture already is, re-run — the
     /// staging texture comes from and returns to a pool, so a per-frame call is
@@ -599,7 +599,8 @@ public:
     /// Flat colour, unlit. With depthTest=false it draws on top of everything —
     /// what gizmo handles need. Alpha < 1 blends.
     /// `wireframe` draws only the triangle edges — the selection outline uses it.
-    virtual MaterialId  createUnlitMaterial(const Colour &, bool depthTest, bool wireframe = false) = 0;
+    virtual MaterialId  createUnlitMaterial(const Colour &, bool depthTest, bool wireframe = false,
+                                            MaterialId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
     /// The colour, LIVE — and the alpha with it (GIZMO-2 item 4). Passing an
     /// alpha below 1 to a material created opaque turns it into a blended one
     /// (and back): whether a surface blends is rasterizer state rather than a
@@ -624,7 +625,7 @@ public:
     /// diffuse/specular and the colour as EMISSIVE, which is unlit in effect and
     /// skins; pair it with shareSkeleton so the shell rides the character's own
     /// pose instead of a second, un-posed skeleton.
-    virtual MaterialId  createOutlineMaterial(const Colour &, bool skinnable = false) = 0;
+    virtual MaterialId  createOutlineMaterial(const Colour &, bool skinnable = false, MaterialId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
     /// Makes `follower`'s renderable copy `source`'s POSE every frame — the
     /// selection silhouette over an animating character, and anything else that
     /// needs a second renderable of the same rig to move with the first.
@@ -715,7 +716,7 @@ public:
     // -> Scene::published().boneAttachmentOf(rider, &bone) (U3 stage 3: the rider's tag carries its owner and bone).
     /// A line list (pairs of points) or, with `strip`, a connected polyline.
     /// Attach with attachMesh like any mesh. One pixel wide.
-    virtual MeshId      createLineMesh(const std::vector<Vec3> &points, bool strip) = 0;
+    virtual MeshId      createLineMesh(const std::vector<Vec3> &points, bool strip, MeshId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
 
     // ---- Particles: externally-simulated particles drawn as camera-facing quads.
     // The set rides on a node for ownership (removeNode frees it) but instance
@@ -811,7 +812,7 @@ public:
     /// Returns 0 with a clear lastError() when the atlas is FULL — never a
     /// silent fallback: an overflowing decal would sample another decal's image
     /// with no warning at all.
-    virtual TextureId   loadDecalTexture(const std::string &path, DecalMap kind) = 0;
+    virtual TextureId   loadDecalTexture(const std::string &path, DecalMap kind, TextureId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
     // How many slices the `kind` atlas has, and how many are already taken.
     // The UI surfaces "decal image budget full" from this rather than guessing.
     // -> Scene::published().decalAtlasCapacity / decalAtlasUsed[kind] (U3 stage 2b).
@@ -2015,7 +2016,7 @@ public:
     /// submit is an EMPTY hand-over: it drains nothing, keeps every value as it was and carries the last serial
     /// (U3 F2). The scenes and views a record names must belong to this engine; one destroyed before the drain
     /// is skipped.
-    virtual void submitFrame(const FrameInput &input) = 0;
+    virtual void submitFrame(FrameInput input) = 0;   ///< by value: a host that moves its record in copies nothing (U3 stage 3)
     /// What the submits did (FrameSubmitStatus) — the game side's half of the record's status (U3 F4).
     virtual FrameSubmitStatus frameSubmitStatus() const = 0;
     // What the drain did (FrameInputStatus) — the counts the U0 rows read. The render side's half (U3 F4); the same

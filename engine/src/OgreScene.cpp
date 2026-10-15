@@ -437,8 +437,9 @@ bool OgreScene::removeNode(NodeId id) {
 }
 
 // ---- Hierarchy and transforms ----
-NodeId OgreScene::createNode(NodeId parent) {
+NodeId OgreScene::createNode(NodeId parent, NodeId id) {
     JAH_TRY {
+        if (id && mNodes.count(id)) { mError = "createNode: the id is already a node of this scene"; return 0; }
         Node *prec = parent ? record(parent) : nullptr;          // one lookup (F9)
         Ogre::SceneNode *p = prec ? prec->node : nullptr;
         if (parent && !p) { mError = "createNode: unknown parent"; return 0; }
@@ -449,7 +450,7 @@ NodeId OgreScene::createNode(NodeId parent) {
         // have to ask the registry about every child to find out.
         if (prec) ++prec->ownedChildren;
         Node rec; rec.node = p->createChildSceneNode(Ogre::SCENE_DYNAMIC);
-        return track(rec, reserveNodeId());   // the one process-wide id space (U3 stage 3, F6)
+        return track(rec, id ? id : reserveNodeId());   // the one process-wide id space (U3 stage 3, F6)
     } JAH_CATCH(mError, 0);
 }
 
@@ -640,6 +641,12 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     // THE FACTS (U3 stage 3): the same block every frame until a mutation site says a fact moved.
     if (mFactsDirty || !mFacts || mFacts->reflectorArms != mPlanarArms) rebuildFacts();
     back.facts = mFacts;
+    if (mCompletionsDirty || !mCompletionsPublished) {
+        mCompletionsPublished = std::make_shared<std::vector<PublishedFrame::Completion>>(mCompletions.begin(),
+                                                                                          mCompletions.end());
+        mCompletionsDirty = false;
+    }
+    back.completions = mCompletionsPublished;
     back.atomViewPaintable = atomViewPaintable();
     for (int v = 0; v < kPhotonViewCount; ++v)
         back.photonViewRefusals[v] = v == 0 ? std::string() : photonViewRefusal(static_cast<PhotonView>(v));
@@ -1359,6 +1366,12 @@ void OgreScene::recountNode(Node &n) {
 }
 
 void OgreScene::uncountNode(Node &n) { applyCounted(n, Node::Counted()); }
+
+void OgreScene::noteCompletion(unsigned long long token, bool ok, std::string error) {
+    mCompletions.push_back({++mCompletionSeq, token, ok, std::move(error)});
+    while (mCompletions.size() > PublishedFrame::kCompletionsKept) mCompletions.pop_front();
+    mCompletionsDirty = true;
+}
 
 // THE FACTS BLOCK (ENGINE-UPGRADE-U3 stage 3, decision 13): the shares (applyCounted keeps the map), the flagged
 // reflectors (armed or waiting for the arm), the actors made, and every node's clips by content id and engine name —

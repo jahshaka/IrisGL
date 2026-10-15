@@ -292,7 +292,8 @@ void installJahLodStrategy()
 }
 
 // ---- Meshes ----
-MeshId OgreScene::createMesh(const MeshData &data) {
+MeshId OgreScene::createMesh(const MeshData &data, MeshId id) {
+    if (id && mMeshes.count(id)) { mError = "createMesh: the id is already a mesh of this scene"; return 0; }
     if (data.positions.empty() || data.positions.size() % 3 != 0) { mError = "createMesh: positions must be xyz triples"; return 0; }
     if (data.indices.empty() || data.indices.size() % 3 != 0)     { mError = "createMesh: indices must be triangles"; return 0; }
     const size_t nv = data.vertexCount();
@@ -413,9 +414,10 @@ MeshId OgreScene::createMesh(const MeshData &data) {
         // filled after the record is in the map.
         const bool chained = !rec.lodBounds.empty() && rec.mesh;
         Ogre::Mesh *const ogreMesh = rec.mesh.get();
-        mMeshes[++mNextMeshId] = std::move(rec);
-        if (chained) mMeshIdByOgreMesh[ogreMesh] = mNextMeshId;
-        return mNextMeshId;
+        const MeshId mid = id ? id : reserveMeshId();   // reserved by the host or here (U3 stage 3)
+        mMeshes[mid] = std::move(rec);
+        if (chained) mMeshIdByOgreMesh[ogreMesh] = mid;
+        return mid;
     } JAH_CATCH(mError, 0);
 }
 
@@ -473,7 +475,8 @@ bool OgreScene::destroyMesh(MeshId id) {
     } JAH_CATCH(mError, false);
 }
 
-MeshId OgreScene::createLineMesh(const std::vector<Vec3> &points, bool strip) {
+MeshId OgreScene::createLineMesh(const std::vector<Vec3> &points, bool strip, MeshId id) {
+    if (id && mMeshes.count(id)) { mError = "createLineMesh: the id is already a mesh of this scene"; return 0; }
     if (points.size() < 2) { mError = "createLineMesh: need at least 2 points"; return 0; }
     JAH_TRY {
         MeshRec rec; rec.name = processUniqueName("lines");
@@ -507,8 +510,9 @@ MeshId OgreScene::createLineMesh(const std::vector<Vec3> &points, bool strip) {
         const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
         rec.mesh->_setBounds(aabb, false);
         rec.mesh->_setBoundingSphereRadius(std::max(aabb.getRadius(), 0.001f));
-        mMeshes[++mNextMeshId] = std::move(rec);
-        return mNextMeshId;
+        const MeshId mid = id ? id : reserveMeshId();
+        mMeshes[mid] = std::move(rec);
+        return mid;
     } JAH_CATCH(mError, 0);
 }
 

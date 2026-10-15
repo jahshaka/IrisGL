@@ -193,8 +193,9 @@ Rgba sampleSrc(const Ogre::Image2 &src, bool grayscale, float u, float v)
 }  // namespace
 
 // ---------------------------------------------------------------------------
-TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind)
+TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind, TextureId id)
 {
+    if (id && mTextures.count(id)) { mError = "loadDecalTexture: the id is already a texture of this scene"; return 0; }
     DecalAtlas &atlas = decalAtlas(kind);
 
     // Already in this scene's table? (Same path, same kind = same slice.)
@@ -202,7 +203,13 @@ TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind)
     // namespaces decal slices by kind exactly so this stays correct.
     {
         auto hit = mTextureIndex.find(textureKey(path, true, kind, /*srgb=*/false));
-        if (hit != mTextureIndex.end()) return hit->second;
+        if (hit != mTextureIndex.end()) {
+            if (!id) return hit->second;
+            // A host-reserved id for a slice this scene already holds (U3 stage 3): one more reference to it.
+            TextureRec alias = mTextures[hit->second];
+            ++atlas.refs[alias.texture];
+            return trackTexture(alias, id);
+        }
     }
 
     JAH_TRY {
@@ -217,7 +224,7 @@ TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind)
             rec.path = path;
             rec.decal = true;
             rec.decalKind = kind;
-            return trackTexture(rec);
+            return trackTexture(rec, id);
         }
 
         // Budget check BEFORE anything is created. Overflow is the one failure
@@ -379,7 +386,7 @@ TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind)
         rec.path = path;
         rec.decal = true;
         rec.decalKind = kind;
-        return trackTexture(rec);
+        return trackTexture(rec, id);
     } JAH_CATCH(mError, 0);
 }
 

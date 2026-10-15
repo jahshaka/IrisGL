@@ -2408,7 +2408,7 @@ void OgreEngine::applyFrameDelta(float seconds) {
 // every value a frame depends on lands here, in one place and one order: the frame's own fields, each scene's
 // environment, the engine-wide shadow pair, then each view.
 
-void OgreEngine::submitFrame(const FrameInput &in) { mRenderThread.submit(in); }
+void OgreEngine::submitFrame(FrameInput in) { mRenderThread.submit(std::move(in)); }
 
 namespace {
 /// Apply `want` when it differs from what was last applied from a record (`last`); count it.
@@ -2435,6 +2435,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     mFrameInputStatus.changesLights = 0;
     mFrameInputStatus.nodeRecords = 0;
     mFrameInputStatus.nodeTransforms = 0;
+    mFrameInputStatus.messages = 0;
     if (!any) { ++mFrameInputStatus.drainedEmpty; return; }
     FrameInput in = std::move(handed);
     unsigned applied = 0;
@@ -2449,8 +2450,17 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
         OgreScene *sc = nullptr;
         for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
         if (!sc) continue;   // destroyed before its frame
-        // (THE STRUCTURAL MESSAGES' PLACE — ENGINE-UPGRADE-U3 stage 3: create / destroy / attach / material ... drain
-        // HERE, in emission order, before the node records that may name what they create.)
+        // THE STRUCTURAL MESSAGES (ENGINE-UPGRADE-U3 stage 3): create / destroy / attach / material ... in emission
+        // order, before the node records that may name what they create — the order a sync's direct commands ran in
+        // before its record drained. The host's structure-edit brackets ride the stream as messages of their own.
+        for (const SceneMessage &m : part.messages) {
+            if (!m.apply) continue;
+            const std::string before = mLastError;
+            const bool ok = m.apply(*sc);
+            if (m.token) sc->noteCompletion(m.token, ok, ok || mLastError == before ? std::string() : mLastError);
+        }
+        mFrameInputStatus.messages += unsigned(part.messages.size());
+        mFrameInputStatus.messagesTotal += part.messages.size();
         // THE DOCUMENT'S NODES FIRST (ENGINE-UPGRADE-U2, the extract): every pose, parent and class the document
         // wrote lands before the change set names the moved subtrees to the scans.
         {

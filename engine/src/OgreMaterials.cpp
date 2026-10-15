@@ -566,7 +566,8 @@ void OgreScene::applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p
 }
 
 // ---- Materials ----
-MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
+MaterialId OgreScene::createPbrMaterial(const PbrParams &p, MaterialId id) {
+    if (id && mMaterials.count(id)) { mError = "createPbrMaterial: the id is already a material of this scene"; return 0; }
     JAH_TRY {
         MaterialRec rec;
         rec.params = p;
@@ -588,8 +589,9 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
             if (distortion) applyDistortion(db, p);
             else            applyUnlit(db, p);
             rec.paramsPushed = true;   // the record now matches the live datablock
-            mMaterials[++mNextMaterialId] = rec;
-            return mNextMaterialId;
+            const MaterialId mid = id ? id : reserveMaterialId();   // reserved by the host or here (U3 stage 3)
+            mMaterials[mid] = rec;
+            return mid;
         }
         rec.datablockName = processUniqueName("pbr");
         rec.refractive = p.alphaMode == PbrAlphaMode::Refractive;
@@ -605,8 +607,9 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
         rec.paramsPushed = true;
         if (Ogre::TextureGpu *rt = reflectionTexFor(rec)) db->setTexture(Ogre::PBSM_REFLECTION, rt);
         markIblMipmapsDirty();
-        mMaterials[++mNextMaterialId] = rec;
-        return mNextMaterialId;
+        const MaterialId mid = id ? id : reserveMaterialId();   // reserved by the host or here (U3 stage 3)
+        mMaterials[mid] = rec;
+        return mid;
     } JAH_CATCH(mError, 0);
 }
 
@@ -1301,8 +1304,8 @@ std::string OgreScene::textureKey(const std::string &path, bool decal, DecalMap 
     return (srgb ? "s|" : "l|") + path;
 }
 
-TextureId OgreScene::trackTexture(const TextureRec &rec) {
-    const TextureId id = ++mNextTextureId;
+TextureId OgreScene::trackTexture(const TextureRec &rec, TextureId given) {
+    const TextureId id = given ? given : reserveTextureId();   // reserved by the host or here (U3 stage 3)
     mTextures[id] = rec;
     // Pixel-uploaded textures (createTexture) have no path and are never
     // deduplicated — the caller owns their identity.
@@ -1333,7 +1336,8 @@ void waitForTextureResident(Ogre::TextureGpu *tex) {
     tex->waitForData();
 }
 
-TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
+TextureId OgreScene::loadTexture(const std::string &path, bool srgb, TextureId id) {
+    if (id && mTextures.count(id)) { mError = "loadTexture: the id is already a texture of this scene"; return 0; }
     // Path dedup, but NEVER across the decal atlases: the same image file can be
     // both an ordinary PBR map and a decal image, and they live in different
     // pools with different formats. Handing a decal slice back from here would
@@ -1343,7 +1347,16 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
     // every texture in the scene into one hash lookup.
     {
         auto hit = mTextureIndex.find(textureKey(path, false, DecalMap::Diffuse, srgb));
-        if (hit != mTextureIndex.end()) return hit->second;
+        if (hit != mTextureIndex.end()) {
+            if (!id) return hit->second;
+            // A HOST-RESERVED ID FOR A PATH THIS SCENE ALREADY HOLDS (U3 stage 3): the same GPU texture under a
+            // second id, refcounted like a texture two scenes share, so either id's destroy releases only its own.
+            TextureRec &orig = mTextures[hit->second];
+            if (!orig.shared) { orig.shared = true; detail::retainSharedTexture(orig.texture); }
+            TextureRec alias = orig;
+            detail::retainSharedTexture(alias.texture);
+            return trackTexture(alias, id);
+        }
     }
     const size_t slash = path.find_last_of("/\\");
     const std::string dir  = slash == std::string::npos ? "." : path.substr(0, slash);
@@ -1479,7 +1492,7 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
                 tex->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
                 rgba.uploadTo(tex, 0, Ogre::uint8(rgba.getNumMipmaps() - 1u));
                 TextureRec rec; rec.texture = tex; rec.path = path; rec.srgb = srgb;
-                return trackTexture(rec);
+                return trackTexture(rec, id);
             }
         }
         Ogre::uint32 flags = Ogre::TextureFlags::AutomaticBatching;
@@ -1538,7 +1551,7 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
         TextureRec rec; rec.texture = tex; rec.path = path; rec.srgb = srgb;
         rec.shared = true;
         detail::retainSharedTexture(tex);
-        return trackTexture(rec);
+        return trackTexture(rec, id);
     } JAH_CATCH(mError, 0);
 }
 
@@ -1634,7 +1647,8 @@ void downsampleRgba(const unsigned char *src, unsigned w, unsigned h,
 }   // namespace
 
 TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb,
-                                   bool mipmaps) {
+                                   bool mipmaps, TextureId id) {
+    if (id && mTextures.count(id)) { mError = "createTexture: the id is already a texture of this scene"; return 0; }
     if (!w || !h || !rgba) { mError = "createTexture: empty image"; return 0; }
     JAH_TRY {
         Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
@@ -1672,7 +1686,7 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
         // image and no re-reads of the source.
         uploadRgbaLevels(tex, w, h, rgba);
         TextureRec rec; rec.texture = tex; rec.path = ""; rec.srgb = srgb;
-        return trackTexture(rec);
+        return trackTexture(rec, id);
     } JAH_CATCH(mError, 0);
 }
 
@@ -2261,7 +2275,8 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
 // so a material cannot disagree with itself about what it is.
 static constexpr float kUnlitOpaqueAlpha = 0.999f;
 
-MaterialId OgreScene::createUnlitMaterial(const Colour &c, bool depthTest, bool wireframe) {
+MaterialId OgreScene::createUnlitMaterial(const Colour &c, bool depthTest, bool wireframe, MaterialId id) {
+    if (id && mMaterials.count(id)) { mError = "createUnlitMaterial: the id is already a material of this scene"; return 0; }
     JAH_TRY {
         MaterialRec rec; rec.datablockName = processUniqueName("unlit"); rec.unlit = true; rec.onTop = !depthTest;
         rec.blended = c.a < kUnlitOpaqueAlpha;
@@ -2286,12 +2301,14 @@ MaterialId OgreScene::createUnlitMaterial(const Colour &c, bool depthTest, bool 
             Ogre::IdString(rec.datablockName), rec.datablockName, macro, blend, Ogre::HlmsParamVec()));
         db->setUseColour(true);
         db->setColour(toOgre(c));
-        mMaterials[++mNextMaterialId] = rec;
-        return mNextMaterialId;
+        const MaterialId mid = id ? id : reserveMaterialId();   // reserved by the host or here (U3 stage 3)
+        mMaterials[mid] = rec;
+        return mid;
     } JAH_CATCH(mError, 0);
 }
 
-MaterialId OgreScene::createOutlineMaterial(const Colour &c, bool skinnable) {
+MaterialId OgreScene::createOutlineMaterial(const Colour &c, bool skinnable, MaterialId id) {
+    if (id && mMaterials.count(id)) { mError = "createOutlineMaterial: the id is already a material of this scene"; return 0; }
     JAH_TRY {
         MaterialRec rec; rec.datablockName = processUniqueName("outline"); rec.unlit = true;
         Ogre::HlmsMacroblock macro;
@@ -2306,8 +2323,9 @@ MaterialId OgreScene::createOutlineMaterial(const Colour &c, bool skinnable) {
                 Ogre::IdString(rec.datablockName), rec.datablockName, macro, Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
             db->setUseColour(true);
             db->setColour(toOgre(c));
-            mMaterials[++mNextMaterialId] = rec;
-            return mNextMaterialId;
+            const MaterialId mid = id ? id : reserveMaterialId();   // reserved by the host or here (U3 stage 3)
+            mMaterials[mid] = rec;
+            return mid;
         }
         // THE SKINNED SILHOUETTE. HlmsUnlit has no skeletal path in this engine
         // (`hlms_skeleton` appears only in the Pbs templates), so an unlit hull
@@ -2336,8 +2354,9 @@ MaterialId OgreScene::createOutlineMaterial(const Colour &c, bool skinnable) {
         // The shell is a UI affordance, not geometry: it must not throw a
         // shadow of the character it outlines.
         db->setReceiveShadows(false);
-        mMaterials[++mNextMaterialId] = rec;
-        return mNextMaterialId;
+        const MaterialId mid = id ? id : reserveMaterialId();   // reserved by the host or here (U3 stage 3)
+        mMaterials[mid] = rec;
+        return mid;
     } JAH_CATCH(mError, 0);
 }
 
