@@ -24,8 +24,9 @@
 // every C++-built shadow pass as "(unnamed pass)" because those definitions
 // carry no profiling id. Deleted with this file's arrival (CRUD law, D4).
 //
-// THREADING: engine calls are UI-thread-only by contract, so nothing here is
-// atomic and nothing is locked.
+// THREADING (ENGINE-UPGRADE-U3 stage 1): everything here is the RENDER side's, but two hand-overs: the host's stages
+// arrive through the render loop's hand-over slot (RenderThread::noteHostStage — never written into the current
+// record from the host's thread), and finished records leave through the ring, the one locked structure.
 #include "EnginePrivate.h"
 #include "photon/voxel/PhotonPassBinding.h"
 #include "OgreVulkanRenderSystem.h"
@@ -319,6 +320,7 @@ void FrameMonitor::retirePending(bool all) {
 }
 
 void FrameMonitor::push(FrameRecord &&r) {
+    std::lock_guard<std::mutex> lock(mRingLock);
     if (mRing.size() < kRingCapacity) { mRing.push_back(std::move(r)); return; }
     mRing[mWrite] = std::move(r);
     mWrite = (mWrite + 1u) % kRingCapacity;
@@ -326,7 +328,10 @@ void FrameMonitor::push(FrameRecord &&r) {
 }
 
 unsigned FrameMonitor::drainFrames(std::vector<FrameRecord> &out) {
-    retirePending(false);
+    // THE HOST'S SIDE OF THE HAND-BACK (ENGINE-UPGRADE-U3): only the ring, under its lock. The holding queue is the
+    // frame's (it waits on GPU samples the render system answers inside frames) — its retire runs at the frame's
+    // close (OgreEngine::closeRenderFrame), never here.
+    std::lock_guard<std::mutex> lock(mRingLock);
     if (mRing.empty()) return 0u;
     const unsigned n = unsigned(mRing.size());
     // OLDEST FIRST. The ring is either still in order (never wrapped) or split
@@ -1242,7 +1247,9 @@ void OgreEngine::noteMonitorEvent(const MonitorEvent &event) {
 }
 
 void OgreEngine::noteHostStage(const std::string &name, float ms) {
-    if (mMonitor) mMonitor->hostStage(name, ms);
+    // THE HOST'S HALF OF THE RECORD (ENGINE-UPGRADE-U3): banked beside the record the host is building and handed
+    // over with it; the frame that applies that hand-over folds it in (RenderThread::tickInline).
+    mRenderThread.noteHostStage(name, ms);
 }
 
 

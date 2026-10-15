@@ -5770,6 +5770,11 @@ struct VrStatus {
     bool               active = false;      ///< a session object exists
     unsigned long long frames = 0;          ///< xrEndFrame calls that succeeded
     unsigned long long rendered = 0;        ///< frames the runtime asked us to draw
+    /// DISPLAY PERIODS THE APPLICATION MISSED (ENGINE-UPGRADE-U3, vr.ui_stall): over every xrWaitFrame after the
+    /// session's first, the runtime's own predicted display times stepped by more than one predicted display period
+    /// — a COUNT of the headset refreshes no frame of ours was submitted for, read from the runtime's clock, never
+    /// from ours. 0 on a session that kept up with its runtime.
+    unsigned long long missedDisplayPeriods = 0;
     /// The distance between the two located eye positions, metres. 0 before the
     /// session's first frame; through the WARM-UP frames it reads the synthetic
     /// pair's 0.064 (VrConfig::warmUpFrames) until the first real xrLocateViews
@@ -7957,20 +7962,36 @@ struct FrameInput {
     bool                              refreshShadows = false;   ///< the document asked for a shadow re-render
     std::vector<FrameInputScene>      scenes;
     std::vector<FrameInputView>       views;
+    // ---- THE HAND-OVER (ENGINE-UPGRADE-U3 stage 1, the seam) ----
+    /// THE RECORD'S SERIAL: stamped by the ENGINE when the render loop takes the record accumulated since the last
+    /// hand-over at its frame head — one serial per frame that applies a record (an empty hand-over keeps the last).
+    /// A submitter never sets it: submitFrame ignores the field. PublishedEngineFrame::serial is the one a frame applied.
+    unsigned long long                serial = 0;
+    /// The document clock's step count (iris::SimulationClock::steps) the record was built at — the grid state its
+    /// node records are (stage 5 interpolates between the last two of them). Newest wins in a merge.
+    std::optional<unsigned long long> stepSerial;
+    /// The seconds the HOST's display period is (the driver's), never read by the engine's clock (trap 7: the
+    /// engine's clock is `frameDelta`) — stage 5's interpolation weight divides by it. Newest wins in a merge.
+    std::optional<float>              displayDt;
 
     /// The usual one-field records.
     static FrameInput delta(float seconds) { FrameInput f; f.frameDelta = seconds; return f; }
     static FrameInput withCause(FrameCause c) { FrameInput f; f.cause = c; return f; }
     static FrameInput withPace(FramePace p) { FrameInput f; f.pace = p; return f; }
 };
-/// What the drain did — Engine::frameInputStatus(). Running totals except the last drain's two fields.
-struct FrameInputStatus {
+/// WHAT THE SUBMITS DID — Engine::frameSubmitStatus(): the GAME side of the hand-over (ENGINE-UPGRADE-U3 F4: each half
+/// of the record's status is written by one thread; this half by the thread that submits). Running totals.
+struct FrameSubmitStatus {
     unsigned long long submitted = 0;     ///< submitFrame calls
-    unsigned long long drained = 0;       ///< frames that drained (one per renderOneFrame)
-    unsigned long long drainedEmpty = 0;  ///< ...that found no record submitted since the last
     /// Scene parts MERGED into an earlier pending part of the same scene (field by field, the newest value wins) —
-    /// every second submit for a scene before one drain counts, the host's several syncs a frame included.
+    /// every second submit for a scene before one hand-over counts, the host's several syncs a frame included.
     unsigned long long scenePartsMerged = 0;
+};
+/// What the drain did — Engine::frameInputStatus() / PublishedEngineFrame::input: the RENDER side of the hand-over,
+/// written by the frame alone (U3 F4). Running totals except the last drain's fields.
+struct FrameInputStatus {
+    unsigned long long drained = 0;       ///< frames that drained (one per renderOneFrame)
+    unsigned long long drainedEmpty = 0;  ///< ...that found no record submitted since the last (an EMPTY hand-over)
     unsigned           fieldsApplied = 0; ///< fields the LAST drain applied (changed values only)
     unsigned           viewFieldsApplied = 0;   ///< ...of them, the per-view ones
     bool               gestureActive = false;   ///< the last drain carried an active gesture for some scene
@@ -7998,7 +8019,12 @@ struct PublishedFrame {
         Vec3   scale = Vec3(1.0f, 1.0f, 1.0f);
     };
     unsigned long long   frame = 0;     ///< the engine frame it was published at (0 = never drawn)
+    /// The record the frame applied (FrameInput::serial; an empty hand-over carries the last) — ENGINE-UPGRADE-U3.
+    unsigned long long   serial = 0;
     std::vector<RiderTag> riderTags;
+    /// THE SCENE'S GI MACHINE as the frame closed it (Scene::giStatus at the close; U3 stage 1 — the readers move to
+    /// it in stage 2).
+    GiStatus             gi;
 };
 
 struct StreamingWork {
@@ -8032,6 +8058,10 @@ struct StreamingWork {
 /// `frames.jsonl`.
 struct FrameRecord {
     unsigned long long frame = 0;    ///< the engine's monotonic frame counter
+    /// THE HAND-OVER'S SERIAL (ENGINE-UPGRADE-U3): the record this frame applied (FrameInput::serial). The host's half
+    /// of the record — its stages, noted on the thread that submits — rode THAT hand-over, so the two halves are one
+    /// record joined by this number, never one thread writing into the other's.
+    unsigned long long serial = 0;
     /// Milliseconds since the capture started, at the frame's first stage mark.
     double      startMs = 0.0;
     float       totalMs = 0.0f;      ///< the whole renderOneFrame, wall clock
@@ -8214,6 +8244,40 @@ struct MonitorStatus {
     unsigned long long gpuFramesAgedOut = 0;
     std::string gpuReason;           ///< why GPU timing is unavailable, when it is
     float    overheadMs = 0.0f;      ///< the monitor's own cost, last frame
+};
+
+/// WHAT THE ENGINE PUBLISHED FOR THE FRAME IT LAST CLOSED (ENGINE-UPGRADE-U3 stage 1; Engine::published()): the
+/// engine-wide half of the snapshot (each scene's half is its PublishedFrame). Every field the document thread reads
+/// of the engine's per-frame state today through a synchronous getter is here, written once at the close of every
+/// frame as a whole-frame swap (Engine.h, THE SNAPSHOT) — stage 2 moves the readers onto it.
+struct PublishedEngineFrame {
+    /// A view's presented-frame counters (View::framesPresented / blankFramesPresented) as the frame closed them.
+    struct ViewFrames {
+        const View        *view = nullptr;
+        unsigned long long presented = 0;
+        unsigned long long blank = 0;
+    };
+    unsigned long long frame = 0;          ///< frames closed so far (0 = never drawn); PublishedFrame::frame's stamp
+    /// The record this frame applied (FrameInput::serial). AN EMPTY HAND-OVER (a frame nothing was submitted for) is
+    /// legal and carries the LAST serial — `recordApplied` false (U3 F2).
+    unsigned long long serial = 0;
+    bool               recordApplied = false;
+    FrameInputStatus   input;              ///< the drain's own status (the render side)
+    VrStatus           vr;                 ///< the session as this frame left it (the last begun frame's pose)
+    StreamingWork      streaming;
+    AsyncShaderStats   shaders;            ///< the compile counters (`compiledInForeground` = livecompiles' total)
+    bool               hasEnabledViews = false;
+    std::vector<ViewFrames> views;
+    /// THE FRAME'S ERROR (U3 F3): what THIS frame wrote ("" = nothing failed). A failing CALL's error is not here — it
+    /// stays Engine::lastError()'s until stage 3 makes every call a message with its own completion.
+    std::string        frameError;
+    /// ...and the newest error ANY frame wrote, with how many frames wrote one: a reader that did not see every
+    /// frame (the error pump drains once a tick; a scripted run draws many) takes it when the count moves.
+    std::string        lastFrameError;
+    unsigned long long framesWithError = 0;
+    bool               deviceLost = false;
+    GpuFault           gpuFault = GpuFault::None;
+    MonitorStatus      monitor;
 };
 
 // ---- Engine snapshot (§4.8 `snapshot_start.json` / `snapshot_end.json`) ----

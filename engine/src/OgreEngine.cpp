@@ -390,8 +390,10 @@ void OgreEngine::destroyScene(Scene *scene) {
     if (!scene) return;
     // ITS PART OF THE PENDING RECORD GOES WITH IT (the 3a read, C): a scene re-created at the same address before
     // the next drain must not receive the dead one's fields.
-    { auto &v = mPendingFrameInput.scenes;
-      v.erase(std::remove_if(v.begin(), v.end(), [&](const FrameInputScene &q) { return q.scene == scene; }), v.end()); }
+    mRenderThread.withPending([&](FrameInput &p, bool) {
+        auto &v = p.scenes;
+        v.erase(std::remove_if(v.begin(), v.end(), [&](const FrameInputScene &q) { return q.scene == scene; }), v.end());
+    });
     if (mInRenderFrame) {
         for (Scene *pending : mPendingSceneDestroy)
             if (pending == scene) return;          // asked for twice in one frame
@@ -672,8 +674,10 @@ OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, u
 void OgreEngine::destroyView(View *view) {
     if (!view) return;
     // ...and the same for a view's part (the 3a read, C).
-    { auto &v = mPendingFrameInput.views;
-      v.erase(std::remove_if(v.begin(), v.end(), [&](const FrameInputView &q) { return q.view == view; }), v.end()); }
+    mRenderThread.withPending([&](FrameInput &p, bool) {
+        auto &v = p.views;
+        v.erase(std::remove_if(v.begin(), v.end(), [&](const FrameInputView &q) { return q.view == view; }), v.end());
+    });
     // THE MIRROR'S VIEW CAN DIE WHILE A SESSION RUNS (a page closing, a window
     // rebuilt): the session holds a raw OgreView* and a workspace on that
     // view's target, so it is told before anything is freed.
@@ -759,7 +763,12 @@ namespace { std::atomic<int> gAsyncViews{0}; }
 int asyncViewCount() { return gAsyncViews.load(std::memory_order_relaxed); }
 void noteAsyncView(bool on) { gAsyncViews.fetch_add(on ? 1 : -1, std::memory_order_relaxed); }
 
-void OgreEngine::renderOneFrame() {
+// ONE TURN OF THE RENDER LOOP (ENGINE-UPGRADE-U3 stage 1, the seam): the hand-over, the frame, the publish — all
+// RenderThread's (RenderThread.cpp), on the caller's thread until stage 4 gives the loop its own.
+void OgreEngine::renderOneFrame() { mRenderThread.tickInline(); }
+
+// THE FRAME'S BODY (ENGINE-UPGRADE-U3 F7): the loop hands it the record the hand-over took.
+bool OgreEngine::runFrame(FrameInput &record, bool any) {
     if (mRoot && mRoot->getHlmsManager())
         if (Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms())
             gComputeDeferralsAtFrameStart = hc->getNumDeferredDispatches();
@@ -787,7 +796,7 @@ void OgreEngine::renderOneFrame() {
     // setup). Nothing is touched from here on; the host ends the process. This is
     // TERMINAL until the evict/retry lane (after D) makes a mid-frame OOM
     // recoverable.
-    if (mGpuFault == GpuFault::OutOfMemoryInFrame) return;
+    if (mGpuFault == GpuFault::OutOfMemoryInFrame) return false;
     struct FrameScope {
         OgreEngine *self;
         explicit FrameScope(OgreEngine *s) : self(s) { self->mInRenderFrame = true; }
@@ -803,7 +812,7 @@ void OgreEngine::renderOneFrame() {
         // every view's camera. BEFORE the VR frame (the 3a read, A): the session notes its own cause (WarmUp) and
         // writes the head pose onto the session view, and both are the engine's — a host's record (the driver's
         // Driver cause; the eyes' part carries no pose) must land under them, never over them.
-        drainFrameInput();
+        drainFrameInput(record, any);
         // ---- THE VR FRAME OPENS HERE (SPECS/VR_SPEC.md §4.3) --------------
         // While a session runs this call IS the frame's clock: it polls the
         // runtime's lifecycle events, blocks in xrWaitFrame until the runtime
@@ -831,6 +840,9 @@ void OgreEngine::renderOneFrame() {
             for (auto &v : mViews)
                 if (v->isEnabled() && !v->isOffscreen()) { onscreen = true; break; }
             monitor::gMonitor->beginFrame(mShadowFrame + 1ull, mNextFrameCause, onscreen);
+            // The record this frame applied: the host's half of the monitor's record rode the same hand-over
+            // (RenderThread::tickInline folded it in before this frame opened), so the two halves are joined by it.
+            monitor::gMonitor->current().serial = mRenderThread.serial();
             monitor::gMonitor->noteInput(mFrameInputStatus.changesMoved, mFrameInputStatus.gestureActive,
                                          mFrameInputStatus.fieldsApplied);
         }
@@ -1391,12 +1403,13 @@ void OgreEngine::renderOneFrame() {
     catch (Ogre::Exception &e) {
         mLastError = detail::describeOgreFailure(e);
         mFrameThrewOom = detail::isVulkanOutOfMemory(e);
-        return;
+        return true;
     }
-    catch (std::exception &e) { mLastError = std::string("engine: ") + e.what(); return; }
+    catch (std::exception &e) { mLastError = std::string("engine: ") + e.what(); return true; }
     // NOTHING BELONGS HERE. Every line that used to follow the catch ran on the
     // normal path only (JAH_CATCH returns); the frame's close is
     // `closeRenderFrame`, called by the scope guard above.
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1441,11 +1454,8 @@ void OgreEngine::renderOneFrame() {
 // on its own — a step that fails costs its own work and not the ones after it —
 // and the message lands in `lastError()`, which is where a host looks anyway.
 void OgreEngine::closeRenderFrame() noexcept {
-    // ---- 0. what the frame publishes (ENGINE-UPGRADE-U2: Scene::published) --
-    frameCloseStep(mLastError, [this] {
-        ++mPublishedFrames;
-        for (auto &s : mScenes) if (s) s->publishFrame(mPublishedFrames);
-    });
+    // (WHAT THE FRAME PUBLISHES is the render loop's, after this close — RenderThread::publish, ENGINE-UPGRADE-U3 F7:
+    // the snapshot then carries what the close latched, the lost device and the out-of-memory included.)
     // ---- 1. the runtime's frame ------------------------------------------
     frameCloseStep(mLastError, [this] {
         if (mVrSession) vrSessionEndFrame(mVrSession);
@@ -1457,6 +1467,9 @@ void OgreEngine::closeRenderFrame() noexcept {
         // THE POOLS TURN OVER HERE, and the next frame's GPU pair opens
         // (gpuFrameBegin's note): the between-frames work is that frame's.
         if (monitor::live()) gpuFrameBegin();
+        // ...and every held record whose samples have answered by now goes to the ring: the holding queue is the
+        // frame's own (ENGINE-UPGRADE-U3), the host's drain only takes the ring.
+        if (monitor::live()) monitor::gMonitor->retirePending(false);
     });
     // ---- 3. a lost or stopped session ------------------------------------
     frameCloseStep(mLastError, [this] { endLostOrStoppedVrSession(); });
@@ -2358,61 +2371,12 @@ void OgreEngine::applyFrameDelta(float seconds) {
 }
 
 // ---------------------------------------------------------------------------
-// THE FRAME INPUT (ENGINE-UPGRADE-1 U0 3a; FrameInput in Types.h). submitFrame MERGES into one pending record;
-// renderOneFrame's head DRAINS it — every value a frame depends on lands here, in one place and one order:
-// the frame's own fields, each scene's environment, the engine-wide shadow pair, then each view.
+// THE FRAME INPUT (ENGINE-UPGRADE-1 U0 3a; FrameInput in Types.h). submitFrame MERGES into the render loop's
+// hand-over slot (RenderThread::submit, ENGINE-UPGRADE-U3); the frame's head DRAINS the record the hand-over took —
+// every value a frame depends on lands here, in one place and one order: the frame's own fields, each scene's
+// environment, the engine-wide shadow pair, then each view.
 
-void OgreEngine::submitFrame(const FrameInput &in) {
-    ++mFrameInputStatus.submitted;
-    mFrameInputPending = true;
-    FrameInput &p = mPendingFrameInput;
-    if (in.frameDelta) p.frameDelta = in.frameDelta;
-    if (in.cause) p.cause = in.cause;
-    if (in.pace) p.pace = in.pace;
-    if (in.shadowMapBudget) p.shadowMapBudget = in.shadowMapBudget;
-    p.refreshShadows = p.refreshShadows || in.refreshShadows;
-    for (const FrameInputScene &sc : in.scenes) {
-        auto it = std::find_if(p.scenes.begin(), p.scenes.end(),
-                               [&](const FrameInputScene &q) { return q.scene == sc.scene; });
-        if (it == p.scenes.end()) { p.scenes.push_back(sc); continue; }
-        // THE CHANGE SET APPENDS (events, not values): both submits' writes are this frame's.
-        it->changes.complete = it->changes.complete && sc.changes.complete;
-        it->changes.moved.insert(it->changes.moved.end(), sc.changes.moved.begin(), sc.changes.moved.end());
-        it->nodes.insert(it->nodes.end(), sc.nodes.begin(), sc.nodes.end());   // events, in order
-        // A scene's part is REPLACED by the newest, FIELD BY FIELD: every field the newer record carries wins, and
-        // one it does not carry keeps the older record's value (a sparser second sync never drops the first's).
-        if (sc.shadows) it->shadows = sc.shadows;
-        if (sc.environmentLight) it->environmentLight = sc.environmentLight;
-        if (sc.fog) it->fog = sc.fog;
-        if (sc.heightFog) it->heightFog = sc.heightFog;
-        if (sc.rayTracing) it->rayTracing = sc.rayTracing;
-        if (sc.sunContact) it->sunContact = sc.sunContact;
-        if (sc.gi) it->gi = sc.gi;
-        if (sc.planar) it->planar = sc.planar;
-        if (sc.sky) it->sky = sc.sky;
-        if (sc.shaderTime) it->shaderTime = sc.shaderTime;
-        if (sc.grid) it->grid = sc.grid;
-        it->reassert = it->reassert || sc.reassert;
-        if (sc.giRefreshSerial) it->giRefreshSerial = sc.giRefreshSerial;
-        it->materialPreview = it->materialPreview || sc.materialPreview;
-        if (sc.gesture) it->gesture = sc.gesture;
-        ++mFrameInputStatus.scenePartsMerged;
-    }
-    for (const FrameInputView &v : in.views) {
-        auto it = std::find_if(p.views.begin(), p.views.end(),
-                               [&](const FrameInputView &q) { return q.view == v.view; });
-        if (it == p.views.end()) { p.views.push_back(v); continue; }
-        // A view's fields MERGE: the newest value of each, a reset requested by either.
-        if (v.camera) it->camera = v.camera;
-        if (v.cameraNode) it->cameraNode = v.cameraNode;
-        if (v.postFx) it->postFx = v.postFx;
-        if (v.shadows) it->shadows = v.shadows;
-        if (v.sampleCount) it->sampleCount = v.sampleCount;
-        if (v.background) it->background = v.background;
-        it->resetExposure = it->resetExposure || v.resetExposure;
-        if (v.seedExposure) it->seedExposure = v.seedExposure;
-    }
-}
+void OgreEngine::submitFrame(const FrameInput &in) { mRenderThread.submit(in); }
 
 namespace {
 /// Apply `want` when it differs from what was last applied from a record (`last`); count it.
@@ -2426,7 +2390,7 @@ void applyIfChanged(const std::optional<T> &want, std::optional<T> &last, unsign
 }
 }   // namespace
 
-void OgreEngine::drainFrameInput() {
+void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     const auto t0 = std::chrono::steady_clock::now();
     struct Timed {
         FrameInputStatus &st; std::chrono::steady_clock::time_point t0;
@@ -2439,10 +2403,8 @@ void OgreEngine::drainFrameInput() {
     mFrameInputStatus.changesLights = 0;
     mFrameInputStatus.nodeRecords = 0;
     mFrameInputStatus.nodeTransforms = 0;
-    if (!mFrameInputPending) { ++mFrameInputStatus.drainedEmpty; return; }
-    FrameInput in = std::move(mPendingFrameInput);
-    mPendingFrameInput = FrameInput();
-    mFrameInputPending = false;
+    if (!any) { ++mFrameInputStatus.drainedEmpty; return; }
+    FrameInput in = std::move(handed);
     unsigned applied = 0;
 
     // THE FRAME'S OWN FIELDS. cause / pace are this frame's (renderOneFrame consumes and resets them); the
@@ -2456,10 +2418,12 @@ void OgreEngine::drainFrameInput() {
         OgreScene *sc = nullptr;
         for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
         if (!sc) continue;   // destroyed before its frame
+        // (THE STRUCTURAL MESSAGES' PLACE — ENGINE-UPGRADE-U3 stage 3: create / destroy / attach / material ... drain
+        // HERE, in emission order, before the node records that may name what they create.)
         // THE DOCUMENT'S NODES FIRST (ENGINE-UPGRADE-U2, the extract): every pose, parent and class the document
         // wrote lands before the change set names the moved subtrees to the scans.
         {
-            const unsigned n = sc->applyNodeRecords(part.nodes);
+            const unsigned n = sc->applyNodeRecords(part.nodes, in.stepSerial.value_or(0ull));
             sc->armDeferredReflectors();   // a reflector asked for this frame is measured at its landed pose
             mFrameInputStatus.nodeRecords += n;
             for (const NodeRecord &r : part.nodes) if (r.fields & NodeRecord::Trs) ++mFrameInputStatus.nodeTransforms;
@@ -2558,15 +2522,40 @@ void OgreEngine::drainFrameInput() {
     mFrameInputStatus.fieldsApplied = applied + viewApplied;
 }
 
-bool OgreEngine::pendingGiConfiguration(const Scene *scene) const {
-    if (!mFrameInputPending) return false;
-    for (const FrameInputScene &part : mPendingFrameInput.scenes) {
-        if (part.scene != scene || !part.gi) continue;
-        for (const auto &q : mScenes)
-            if (static_cast<const Scene *>(q.get()) == scene)
-                return !q->mFrameApplied.gi || *part.gi != *q->mFrameApplied.gi;
+// THE ENGINE'S HALF OF THE SNAPSHOT (ENGINE-UPGRADE-U3 stage 1; RenderThread::publish): every per-frame state the
+// document side reads today through a synchronous getter, read once here at the frame's close. The monitor's status
+// is read only while a capture runs (its GPU half asks the render system by an attribute a production build answers
+// with a throw — never once a frame); at Off it is the absence the getter reports, the undrained tail included.
+void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
+    out.input = mFrameInputStatus;
+    out.vr = vrStatus();
+    out.streaming = streamingWork();
+    out.shaders = asyncShaderStats();
+    out.hasEnabledViews = hasEnabledViews();
+    out.views.clear();
+    for (const auto &v : mViews)
+        if (v) out.views.push_back({ v.get(), v->framesPresented(), v->blankFramesPresented() });
+    out.deviceLost = deviceLost();
+    out.gpuFault = gpuFault();
+    if (mMonitor) {
+        out.monitor = monitorStatus();
+    } else {
+        out.monitor = MonitorStatus();
+        out.monitor.ringFrames = unsigned(mFinalRecords.size());
     }
-    return false;
+}
+
+bool OgreEngine::pendingGiConfiguration(const Scene *scene) const {
+    return mRenderThread.withPending([&](const FrameInput &pending, bool any) {
+        if (!any) return false;
+        for (const FrameInputScene &part : pending.scenes) {
+            if (part.scene != scene || !part.gi) continue;
+            for (const auto &q : mScenes)
+                if (static_cast<const Scene *>(q.get()) == scene)
+                    return !q->mFrameApplied.gi || *part.gi != *q->mFrameApplied.gi;
+        }
+        return false;
+    });
 }
 
 float OgreEngine::fixedFrameDelta() const {

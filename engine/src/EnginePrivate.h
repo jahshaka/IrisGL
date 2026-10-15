@@ -28,6 +28,7 @@
 #include "jahshaka/engine/GpuSubstrate.h"
 #include "GpuVoxelGather.h"
 #include "SceneLightList.h"
+#include "RenderThread.h"   // the render loop the frame belongs to (ENGINE-UPGRADE-U3)
 
 #include <cmath>
 #include <OgreRoot.h>
@@ -2112,7 +2113,7 @@ public:
     /// frame that already aged out) are dropped.
     void noteGpuSample(unsigned sampleId, float ms);
     /// Moves everything that has waited long enough from the holding queue into
-    /// the ring.
+    /// the ring. RENDER SIDE: the frame's close (and the monitor's stop) call it, never the host's drain.
     void retirePending(bool all);
     /// The next sample id for a pass about to execute (0 = not sampling).
     unsigned nextGpuSampleId() { return mGpu ? mNextGpuSampleId++ : 0u; }
@@ -2168,7 +2169,7 @@ public:
     double *mStageChild = nullptr;
 
     // ---- status -------------------------------------------------------------
-    unsigned ringFrames() const { return unsigned(mRing.size()); }
+    unsigned ringFrames() const { std::lock_guard<std::mutex> lock(mRingLock); return unsigned(mRing.size()); }
     unsigned pendingEvents() const { return unsigned(mEvents.size()); }
     unsigned long long framesRecorded() const { return mFramesRecorded; }
     unsigned long long framesDropped() const { return mFramesDropped; }
@@ -2201,8 +2202,11 @@ public:
 private:
     void push(FrameRecord &&r);
 
+    /// THE RING IS THE HAND-BACK (ENGINE-UPGRADE-U3 stage 1): the frame pushes a finished record (render side), the
+    /// host drains (takeFrameRecords, the document side) — the one structure both touch, so it is the one locked.
     std::vector<FrameRecord>  mRing;
     unsigned                  mWrite = 0u;
+    mutable std::mutex        mRingLock;
     std::vector<MonitorEvent> mEvents;
     std::vector<FrameStage>   mPendingHostStages;
     std::vector<CacheWork>    mPendingCacheWork;
@@ -3886,9 +3890,9 @@ public:
     }
     /// THE EXTRACT'S APPLY (ENGINE-UPGRADE-U2): each document node's record — parent, graph class, local TRS — in
     /// order, before the change set names the subtrees. Returns how many records landed.
-    unsigned applyNodeRecords(const std::vector<NodeRecord> &records);
+    unsigned applyNodeRecords(const std::vector<NodeRecord> &records, unsigned long long stepSerial);
     /// The close of a frame the engine drew: what the document reads without asking (PublishedFrame).
-    void publishFrame(unsigned long long frame);
+    void publishFrame(unsigned long long frame, unsigned long long serial);
     /// Called by the drain after applyNodeRecords: a planar reflector asked for on a DOCUMENT node is measured and
     /// armed at the pose its record just landed (a refusal names itself in the error sink).
     void armDeferredReflectors();
@@ -4489,6 +4493,17 @@ private:
         /// ...and the GRAPH CLASS the document last said it is in (NodeRecord::isStatic); the node, its
         /// attachments and its helper children follow it (enforceGraphClass).
         bool             docStatic = false;
+        /// THE TWO GRID STATES OF A DOCUMENT NODE (ENGINE-UPGRADE-U3 stage 1): the LOCAL TRS of the last two records
+        /// that carried one (applyNodeRecord) and the document step the newer was built at (FrameInput::stepSerial).
+        /// `cur` is what the node draws; stage 5's free-running frame interpolates prev -> cur. Both start at the
+        /// identity a document node is born with.
+        struct LocalTrs {
+            Ogre::Vector3    position = Ogre::Vector3::ZERO;
+            Ogre::Quaternion rotation = Ogre::Quaternion::IDENTITY;
+            Ogre::Vector3    scale = Ogre::Vector3::UNIT_SCALE;
+        };
+        LocalTrs           prevLocal, curLocal;
+        unsigned long long stepSerial = 0;
         Ogre::Item      *item  = nullptr;
         Ogre::Light     *light = nullptr;
         /// A hash of the LightDesc fields the SHADOW MAP depends on — type,
@@ -5574,7 +5589,7 @@ private:
     /// After a reparent: the node and every document descendant re-told its own class (Ogre migrated the subtree).
     void enforceSubtreeClass(Node &top);
     /// One record of applyNodeRecords, under its own try (a throw drops that record only).
-    bool applyNodeRecord(const NodeRecord &r);
+    bool applyNodeRecord(const NodeRecord &r, unsigned long long stepSerial);
     /// THE HOST'S CONTROLLER PROXY NODES, left then right (Scene::setVrProxyNodes,
     /// VR_SPEC §5 phase 4). The scene owns nothing about them but these two ids:
     /// a running VrSession reads them once a frame, right after it has located
@@ -7329,15 +7344,25 @@ public:
 
     void destroyView(View *view) override;
 
+    /// ONE TURN OF THE RENDER LOOP (ENGINE-UPGRADE-U3 stage 1): RenderThread::tickInline — the hand-over, the frame
+    /// (runFrame, below), the publish. The public door stays here until stage 4 deletes it.
     void renderOneFrame() override;
+    /// The game side's merge into the hand-over slot (RenderThread::submit).
     void submitFrame(const FrameInput &input) override;
+    FrameSubmitStatus frameSubmitStatus() const override { return mRenderThread.submitStatus(); }
     FrameInputStatus frameInputStatus() const override { return mFrameInputStatus; }
+    const PublishedEngineFrame &published() const override { return mRenderThread.published(); }
     bool pendingGiConfiguration(const Scene *scene) const override;
-    /// THE ONE DRAIN (U0 3a): the record(s) submitted since the last frame, applied at the top of renderOneFrame.
-    void drainFrameInput();
-    FrameInput       mPendingFrameInput;
-    bool             mFrameInputPending = false;
+    /// THE ONE DRAIN (U0 3a): the record the hand-over took (`any` false = an EMPTY hand-over), applied at the top of
+    /// the frame.
+    void drainFrameInput(FrameInput &in, bool any);
+    /// THE RENDER SIDE's half of the record's status (U3 F4): written by the drain alone.
     FrameInputStatus mFrameInputStatus;
+    /// THE RENDER LOOP: the hand-over slot, the serial, the loop and the publish (RenderThread.h).
+    RenderThread     mRenderThread{ *this };
+    /// What the loop's publish reads of the engine at the close (RenderThread::publish): the engine's half of the
+    /// snapshot, every field but the serial and the error the loop keeps itself.
+    void fillPublished(PublishedEngineFrame &out) const;
 
     /// THE FRAME'S CLOSE, RUN FROM renderOneFrame's SCOPE GUARD AND NOWHERE
     /// ELSE (lane FRAME-CATCH-1): the runtime's xrEndFrame, the monitor's
@@ -7745,7 +7770,14 @@ public:
 
     ~OgreEngine() override;
 
+    /// THE FRAME'S BODY (ENGINE-UPGRADE-U3 F7 as corrected: the public door renderOneFrame stays, and is one turn of
+    /// the render loop; the loop calls this with the record the hand-over took). False when no frame ran (a fatal
+    /// out-of-memory ended the frames) — nothing to publish then.
+    bool runFrame(FrameInput &record, bool any);
+
 private:
+    /// THE RENDER LOOP reads the engine's error sink and frame stamp at its hand-over and publish (RenderThread.cpp).
+    friend class RenderThread;
 #ifdef __linux__
     /// The exact layout Ogre's Vulkan/XCB backend reads out of the "SDL2x11"
     /// misc param (`struct SDLx11 { Display *display; ::Window window; }`,

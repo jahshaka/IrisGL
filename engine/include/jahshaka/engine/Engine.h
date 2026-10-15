@@ -15,7 +15,8 @@
 //     Every call on Engine, Scene and View, destruction included, happens on it. The backend is not internally
 //     synchronised.
 //   * THE DOCUMENT THREAD builds the frame's record and hands it over with ONE entry point, submitFrame(); it reads
-//     what the engine computed only from the PUBLISHED per-frame snapshot (Scene::published()) — never waiting —
+//     what the engine computed only from the PUBLISHED per-frame snapshot (Engine::published(), each
+//     Scene::published()) — never waiting —
 //     and files every GPU->CPU read as a request with a fence (the picture service).
 //   * THE SNAPSHOT IS A WHOLE-FRAME SWAP: the engine writes each frame's PublishedFrame into the buffer the reader is
 //     NOT holding and then flips one index (release); published() returns the last whole frame (acquire). Two
@@ -2026,14 +2027,28 @@ public:
     /// and still honours a `destroyScene` asked for from inside it. A host
     /// therefore never has to guess whether a frame that answered
     /// `lastError()` left something open.
+    ///
+    /// THE SEAM (ENGINE-UPGRADE-U3 stage 1): the frame belongs to the engine's RENDER LOOP (a private object that will
+    /// own the render thread from stage 4). This call runs ONE turn of that loop on the caller's thread: the HAND-OVER
+    /// (the record accumulated since the last turn, stamped with its serial), the frame, and the PUBLISH (published(),
+    /// each Scene::published()). Every test drives it in LOCKSTEP: one turn, one hand-over, one frame.
     virtual void renderOneFrame() = 0;
     /// THE FRAME'S INPUT (FrameInput, ENGINE-UPGRADE-1 U0 3a): handed over now, applied ONCE at the top of the
-    /// next renderOneFrame — never on the spot. Several submits before one frame merge (see FrameInput); a
-    /// frame with no submit drains nothing and keeps every value as it was. The scenes and views a record
-    /// names must belong to this engine; one destroyed before the drain is skipped.
+    /// next renderOneFrame — never on the spot. Several submits before one frame merge (see FrameInput): the
+    /// merge builds the ONE record the next hand-over takes and stamps with its serial (U3 F1). A frame with no
+    /// submit is an EMPTY hand-over: it drains nothing, keeps every value as it was and carries the last serial
+    /// (U3 F2). The scenes and views a record names must belong to this engine; one destroyed before the drain
+    /// is skipped.
     virtual void submitFrame(const FrameInput &input) = 0;
-    /// What the drain did (FrameInputStatus) — the counts the U0 rows read.
+    /// What the submits did (FrameSubmitStatus) — the game side's half of the record's status (U3 F4).
+    virtual FrameSubmitStatus frameSubmitStatus() const = 0;
+    /// What the drain did (FrameInputStatus) — the counts the U0 rows read. The render side's half (U3 F4); the same
+    /// numbers are in published().input as the last frame closed them.
     virtual FrameInputStatus frameInputStatus() const = 0;
+    /// WHAT THE ENGINE PUBLISHED for the frame it last closed (PublishedEngineFrame, ENGINE-UPGRADE-U3): read without
+    /// asking. A whole-frame swap like Scene::published() (THE SNAPSHOT, above): a reference stays one whole frame
+    /// until the SECOND publish after it was taken. Before the first frame every field is its default.
+    virtual const PublishedEngineFrame &published() const = 0;
     /// Will the next drain apply a NEW GI configuration to `scene` (the pending record's `gi` differs from what the
     /// scene last applied)? The engine's own compare, asked by a host that must know before the frame — a shot whose
     /// record changes the GI draws that frame before it waits for giAtRest (U0 3c: the host keeps no copy of it).
@@ -2977,7 +2992,11 @@ public:
     virtual void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
                                      unsigned &expected) const = 0;
 
-    /// Reason for the most recent failure; empty if none.
+    /// Reason for the most recent failing CALL; empty if none.
+    ///
+    /// A FRAME'S FAILURE IS NOT HERE (ENGINE-UPGRADE-U3 F3, stage 1): whatever renderOneFrame's frame — its drain, its
+    /// work, its close (a device loss, an out-of-memory, an injected fault) — fails at is the frame's error, published
+    /// in published().frameError / lastFrameError; the sink holds what it held before the frame, untouched by it.
     ///
     /// NOTE this is a PEEK: the sink is never cleared on success, so a stale
     /// reason outlives the call that set it. Callers that check a specific

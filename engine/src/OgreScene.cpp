@@ -546,16 +546,16 @@ void OgreScene::enforceSubtreeClass(Node &top) {
 // memory manager, so the class is re-asserted after), a class before the transform (a static node handed a transform
 // is static-dirtied: Ogre's own path for "this static node moved", one static pass at its depth). Called from the
 // drain BEFORE applyChangeSet, which then names the moved subtrees to the scans with every pose already in place.
-unsigned OgreScene::applyNodeRecords(const std::vector<NodeRecord> &records) {
+unsigned OgreScene::applyNodeRecords(const std::vector<NodeRecord> &records, unsigned long long stepSerial) {
     // ONE RECORD, ONE TRY: the journal has advanced and the latches say pushed, so a throw on one record must never
     // drop the frame's later records for good — the failure is reported (mError) and the next record applies.
     unsigned applied = 0;
     for (const NodeRecord &r : records)
-        if (applyNodeRecord(r)) ++applied;
+        if (applyNodeRecord(r, stepSerial)) ++applied;
     return applied;
 }
 
-bool OgreScene::applyNodeRecord(const NodeRecord &r) {
+bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSerial) {
     JAH_TRY {
         Node *rec = record(r.id);
         if (!rec || !rec->node || !rec->document) return false;   // released before its frame
@@ -583,18 +583,28 @@ bool OgreScene::applyNodeRecord(const NodeRecord &r) {
         if (reparented) enforceSubtreeClass(*rec);
         else if (classOwed || sn->isStatic() != (rec->docStatic && !rec->boneTag)) enforceGraphClass(*rec);
         if (r.fields & NodeRecord::Trs) {
-            sn->setPosition(toOgre(r.position));
-            setOrientationExact(sn, Ogre::Quaternion(r.rotation.w, r.rotation.x, r.rotation.y, r.rotation.z));
-            sn->setScale(toOgre(r.scale));
+            // THE TWO GRID STATES (ENGINE-UPGRADE-U3 stage 1): the previous record's local becomes `prev`, this one
+            // `cur`, stamped with the document step it was built at. CUR IS WHAT IS DRAWN until stage 5 interpolates
+            // prev -> cur on a free-running frame; a lockstep frame (every test) always draws cur exactly.
+            rec->prevLocal = rec->curLocal;
+            rec->curLocal.position = toOgre(r.position);
+            rec->curLocal.rotation = Ogre::Quaternion(r.rotation.w, r.rotation.x, r.rotation.y, r.rotation.z);
+            rec->curLocal.scale = toOgre(r.scale);
+            rec->stepSerial = stepSerial;
+            sn->setPosition(rec->curLocal.position);
+            setOrientationExact(sn, rec->curLocal.rotation);
+            sn->setScale(rec->curLocal.scale);
             if (sn->isStatic()) mSceneMgr->notifyStaticDirty(sn);
         }
         return true;
     } JAH_CATCH(mError, false);
 }
 
-void OgreScene::publishFrame(unsigned long long frame) {
+void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial) {
     PublishedFrame &back = mPublished[mPublishedIdx.load(std::memory_order_relaxed) ^ 1u];
     back.frame = frame;
+    back.serial = serial;
+    back.gi = giStatus();
     back.riderTags.clear();
     for (NodeId id : mBoneRiderIds) {
         const Node *rec = record(id);

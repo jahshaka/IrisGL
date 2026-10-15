@@ -1188,6 +1188,10 @@ private:
     bool        mSaidHands = false;
 
     unsigned long long mFrames = 0ull, mRendered = 0ull;
+    /// THE RUNTIME'S REFRESHES WE MISSED (VrStatus::missedDisplayPeriods, ENGINE-UPGRADE-U3 vr.ui_stall): counted on
+    /// the runtime's predicted display times, the last one kept to difference the next.
+    unsigned long long mMissedDisplayPeriods = 0ull;
+    XrTime             mLastPredictedDisplayTime = 0;
     float       mIpd = 0.0f;
     bool        mAsymmetricFov = false;
     float       mRefreshHz = 0.0f;
@@ -2800,6 +2804,17 @@ void VrSession::beginFrame() {
         setDesktopShowsEye(false);      // no runtime, no eye to copy
         return;
     }
+    // A MISSED REFRESH IS THE RUNTIME'S FACT, NOT OURS: its predicted display time stepped by more than one of its
+    // own display periods since the last wait — refreshes that no frame of ours reached (rounded to whole periods,
+    // so a runtime's jitter inside one period is never counted).
+    if (mLastPredictedDisplayTime > 0 && mFrameState.predictedDisplayPeriod > 0 &&
+        mFrameState.predictedDisplayTime > mLastPredictedDisplayTime) {
+        const double periods = double(mFrameState.predictedDisplayTime - mLastPredictedDisplayTime) /
+                               double(mFrameState.predictedDisplayPeriod);
+        const long long whole = std::llround(periods);
+        if (whole > 1) mMissedDisplayPeriods += (unsigned long long)(whole - 1);
+    }
+    mLastPredictedDisplayTime = mFrameState.predictedDisplayTime;
     if (mRefreshHz <= 0.0f && mFrameState.predictedDisplayPeriod > 0) {
         mRefreshHz = float(1.0e9 / double(mFrameState.predictedDisplayPeriod));
         mEngine->mVrInfo.refreshHz = mRefreshHz;
@@ -3847,6 +3862,7 @@ VrStatus VrSession::status() const {
     s.active = !mEnded && mState != VrState::Lost;
     s.frames = mFrames;
     s.rendered = mRendered;
+    s.missedDisplayPeriods = mMissedDisplayPeriods;
     s.ipd = mIpd;
     s.warmUpFrames = mWarmUpDone;
     s.warmUpMs = mWarmUpMs;
