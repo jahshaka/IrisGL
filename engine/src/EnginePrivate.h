@@ -7381,7 +7381,7 @@ public:
     /// The game side's merge into the hand-over slot (RenderThread::submit).
     void submitFrame(const FrameInput &input) override;
     FrameSubmitStatus frameSubmitStatus() const override { return mRenderThread.submitStatus(); }
-    FrameInputStatus frameInputStatus() const override { JAH_SYNC_GETTER("Engine::frameInputStatus"); return mFrameInputStatus; }
+    FrameInputStatus frameInputStatus() const { return mFrameInputStatus; }
     const PublishedEngineFrame &published() const override { return mRenderThread.published(); }
     void setDisplayPeriod(float seconds) override { mRenderThread.setDisplayPeriod(seconds); }
     void setFramePace(FramePace pace) override { mFramePace = pace; }
@@ -7417,8 +7417,8 @@ public:
     /// Raises the armed fault (mFrameFault) and spends one of its frames.
     /// Called from ONE site inside renderOneFrame; always throws.
     void raiseFrameFault();
-    bool deviceLost() const override;
-    GpuFault gpuFault() const override;
+    bool deviceLost() const;
+    GpuFault gpuFault() const;
     unsigned long long queueSubmissionTag() const override;
     /// The render system's out-of-memory count (VulkanDevice::getOutOfMemoryFailures,
     /// the fork) and the last one's text; 0 / "" without the Vulkan render system.
@@ -7758,14 +7758,14 @@ public:
     std::vector<ArmInfo> arms() const override;
     ValidationStatus validation() const override;
     const ArmRegistry &armRegistry() const { return mArms; }
-    MonitorStatus monitorStatus() const override;
+    MonitorStatus monitorStatus() const;
     unsigned takeMonitorRecords(std::vector<MonitorRecord> &out) override;
     unsigned takeMonitorEvents(std::vector<MonitorEvent> &out) override;
     void noteMonitorEvent(const MonitorEvent &event) override;
     void noteHostStage(const std::string &name, float ms) override;
     /// An engine-internal request for the NEXT frame's cause (the VR warm-up): a record field for a host.
     void noteNextFrameCause(FrameCause cause) { mNextFrameCause = cause; }
-    bool framePaceOwesWork() const override;
+    bool framePaceOwesWork() const;
     StreamingWork streamingWork() const;
     bool captureSnapshot(EngineSnapshot &out, const std::string &label,
                          Scene *scene = nullptr) const override;
@@ -7798,7 +7798,7 @@ public:
                              unsigned &expected) const override;
     void setAsyncShaderThreads(unsigned threads) override;
     void setAsyncShaderPlaceholdersOnly(bool on) override;
-    AsyncShaderStats asyncShaderStats() const override;
+    AsyncShaderStats asyncShaderStats() const;
     void waitForAsyncShaders() override;
 
     ~OgreEngine() override;

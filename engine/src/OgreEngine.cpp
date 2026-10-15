@@ -1587,7 +1587,6 @@ void OgreEngine::latchOutOfMemoryInFrame() {
 }
 
 GpuFault OgreEngine::gpuFault() const {
-    JAH_SYNC_GETTER("Engine::gpuFault");
     return mDeviceLost ? GpuFault::DeviceLost : mGpuFault;
 }
 
@@ -1683,7 +1682,7 @@ void OgreEngine::raiseFrameFault() {
 }
 
 // ---------------------------------------------------------------------------
-bool OgreEngine::deviceLost() const { JAH_SYNC_GETTER("Engine::deviceLost"); return mDeviceLost; }
+bool OgreEngine::deviceLost() const { return mDeviceLost; }
 
 unsigned long long OgreEngine::queueSubmissionTag() const {
     JAH_SYNC_GETTER("Engine::queueSubmissionTag");
@@ -2582,12 +2581,7 @@ void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
         }
     out.deviceLost = deviceLost();
     out.gpuFault = gpuFault();
-    if (mMonitor) {
-        out.monitor = monitorStatus();
-    } else {
-        out.monitor = MonitorStatus();
-        out.monitor.ringFrames = unsigned(mFinalRecords.size());
-    }
+    out.monitor = monitorStatus();   // its own answer with the monitor off too (the tail's frames, the GPU timing)
 }
 
 bool OgreEngine::pendingGiConfiguration(const Scene *scene) const {
@@ -2688,7 +2682,6 @@ void OgreEngine::setAsyncShaderPlaceholdersOnly(bool on) {
 }
 
 AsyncShaderStats OgreEngine::asyncShaderStats() const {
-    JAH_SYNC_GETTER("Engine::asyncShaderStats");
     AsyncShaderStats out;
     if (!mRoot) return out;
     const Ogre::HlmsAsyncCompiler *c = mRoot->getHlmsManager()->getAsyncCompiler();

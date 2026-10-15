@@ -2018,9 +2018,9 @@ public:
     virtual void submitFrame(const FrameInput &input) = 0;
     /// What the submits did (FrameSubmitStatus) — the game side's half of the record's status (U3 F4).
     virtual FrameSubmitStatus frameSubmitStatus() const = 0;
-    /// What the drain did (FrameInputStatus) — the counts the U0 rows read. The render side's half (U3 F4); the same
-    /// numbers are in published().input as the last frame closed them.
-    virtual FrameInputStatus frameInputStatus() const = 0;
+    // What the drain did (FrameInputStatus) — the counts the U0 rows read. The render side's half (U3 F4); the same
+    // numbers are in published().input as the last frame closed them.
+    // -> Engine::published().input (ENGINE-UPGRADE-U3 stage 2b: the getter is deleted).
     /// WHAT THE ENGINE PUBLISHED for the frame it last closed (PublishedEngineFrame, ENGINE-UPGRADE-U3): read without
     /// asking. A whole-frame swap like Scene::published() (THE SNAPSHOT, above): a reference stays one whole frame
     /// until the SECOND publish after it was taken. Before the first frame every field is its default.
@@ -2052,26 +2052,26 @@ public:
     /// `vr.session`.
     virtual void setFrameFault(FrameFault fault, unsigned frames) = 0;
 
-    /// THE GPU IS GONE AND THIS PROCESS CANNOT COME BACK FROM IT (lane XID-2,
-    /// 2026-09-17). True once the render system has reported a lost device — on
-    /// this driver that is an `NVRM: Xid` in the kernel log and a
-    /// `VK_ERROR_DEVICE_LOST` from a fence wait. Nothing renders again after it:
-    /// the render system vetoes every frame from then on.
-    ///
-    /// A HOST THAT SEES THIS MUST SAY SO AND END THE PROCESS WITHOUT AN ORDERLY
-    /// TEARDOWN. `vkDestroyDevice` on a device whose channel the driver has not
-    /// reclaimed does not return (measured: it spins at 100 % of a core for
-    /// ever), so running destructors is how an application FREEZES instead of
-    /// ending — which is what the owner saw. Log, tell the user, `_exit`.
-    virtual bool deviceLost() const = 0;
+    // THE GPU IS GONE AND THIS PROCESS CANNOT COME BACK FROM IT (lane XID-2,
+    // 2026-09-17). True once the render system has reported a lost device — on
+    // this driver that is an `NVRM: Xid` in the kernel log and a
+    // `VK_ERROR_DEVICE_LOST` from a fence wait. Nothing renders again after it:
+    // the render system vetoes every frame from then on.
+    //
+    // A HOST THAT SEES THIS MUST SAY SO AND END THE PROCESS WITHOUT AN ORDERLY
+    // TEARDOWN. `vkDestroyDevice` on a device whose channel the driver has not
+    // reclaimed does not return (measured: it spins at 100 % of a core for
+    // ever), so running destructors is how an application FREEZES instead of
+    // ending — which is what the owner saw. Log, tell the user, `_exit`.
+    // -> Engine::published().deviceLost (U3 stage 2b).
 
-    /// THE FATAL GPU FAULT, IF ANY (`GpuFault`, lane FORK-OOM-1). `DeviceLost`
-    /// exactly when `deviceLost()`; `OutOfMemoryInFrame` once a Vulkan OOM hit
-    /// a frame's work — from then on `renderOneFrame` does nothing and
-    /// `lastError()` reads "GPU out of memory (VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    /// the device is NOT lost — <the pool>) ...". Either way the host ends the
-    /// process as it does for a loss (no orderly teardown), saying which.
-    virtual GpuFault gpuFault() const = 0;
+    // THE FATAL GPU FAULT, IF ANY (`GpuFault`, lane FORK-OOM-1). `DeviceLost`
+    // exactly when `deviceLost()`; `OutOfMemoryInFrame` once a Vulkan OOM hit
+    // a frame's work — from then on `renderOneFrame` does nothing and
+    // `lastError()` reads "GPU out of memory (VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    // the device is NOT lost — <the pool>) ...". Either way the host ends the
+    // process as it does for a loss (no orderly teardown), saying which.
+    // -> Engine::published().gpuFault (U3 stage 2b).
 
     /// A TEST DOOR (VOXEL-READOUT-1; never a mode): the renderer's CURRENT command
     /// buffer, as an opaque tag. It changes exactly when the queue SUBMITS (a new
@@ -2786,9 +2786,9 @@ public:
     /// layer asserts `requested && active` — a layered row whose layer never loaded is
     /// otherwise indistinguishable from a clean one.
     virtual ValidationStatus validation() const = 0;
-    /// What the monitor is doing, including the four zero-cost assertions and
-    /// the state of both GPU-timing off-switches.
-    virtual MonitorStatus monitorStatus() const = 0;
+    // What the monitor is doing, including the four zero-cost assertions and
+    // the state of both GPU-timing off-switches.
+    // -> Engine::published().monitor (U3 stage 2b).
 
     /// Drains the frame ring into `out` (appending) and returns how many
     /// records were moved. The host drains on its own tick; anything it does
@@ -2826,10 +2826,10 @@ public:
     /// `Streaming` for its own frame of an arriving world and lowers it right after; every other frame (a scripted
     /// one, a cover's inline present, a readback) renders `Complete`, as a host that sets nothing always did.
     virtual void setFramePace(FramePace pace) = 0;
-    /// Does any scene feeding an enabled view still owe first-time work that a
-    /// `Streaming` frame would take a step of? The host reads it to decide how
-    /// long to keep asking (and, in phase 2b, to draw the indicator).
-    virtual bool framePaceOwesWork() const = 0;
+    // Does any scene feeding an enabled view still owe first-time work that a
+    // `Streaming` frame would take a step of? The host reads it to decide how
+    // long to keep asking (and, in phase 2b, to draw the indicator).
+    // -> Engine::published().paceOwesWork (U3 stage 2b).
     // WHAT THE WORLD STILL OWES (the loading indicator, §2.1 / §3) is PublishedEngineFrame::streaming.
 
     /// THE ENGINE, AT ONE INSTANT (§4.8) — every GI parameter and what it
@@ -2952,7 +2952,7 @@ public:
     /// the pass they are drawn in, never their own permutation (the startup gate's tier
     /// sweep: every pass's placeholders built, nobody's material paid for in every pass).
     virtual void setAsyncShaderPlaceholdersOnly(bool on) = 0;
-    virtual AsyncShaderStats asyncShaderStats() const = 0;
+    // -> Engine::published().shaders (U3 stage 2b).
     /// Blocks until nothing is pending, publishing as jobs land. For tests and for a
     /// caller that must hand over a finished picture; never on an interactive path.
     virtual void waitForAsyncShaders() = 0;

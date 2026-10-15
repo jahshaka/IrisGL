@@ -1204,7 +1204,6 @@ std::vector<ArmInfo> OgreEngine::arms() const { JAH_SYNC_GETTER("Engine::arms");
 
 
 MonitorStatus OgreEngine::monitorStatus() const {
-    JAH_SYNC_GETTER("Engine::monitorStatus");
     MonitorStatus st;
     st.level = mMonitor ? mMonitor->mLevel : MonitorLevel::Off;
     if (!mMonitor) {
@@ -1261,7 +1260,6 @@ void OgreEngine::noteHostStage(const std::string &name, float ms) {
 
 bool OgreEngine::framePaceOwesWork() const
 {
-    JAH_SYNC_GETTER("Engine::framePaceOwesWork");
     for (const auto &sc : mScenes)
         if (sc->giBuildOwesWork()) return true;
     return false;
