@@ -229,6 +229,8 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // does not exist until a render target is created, and HlmsUnlit/HlmsPbs
         // registration walks it via ConstBufferPool::_changeRenderSystem —
         // registering here segfaults.
+        // A HEADLESS engine's render system is the device it will ever have (the NULL one): its constants now.
+        if (mHeadless) noteDevice();
         return true;
     } JAH_CATCH(error, false);
 }
@@ -1763,6 +1765,7 @@ bool OgreEngine::vrConnect(std::string &why) {
     if (!mHlmsRegistered && !mNullWindow) {
         Ogre::NameValuePairList wp; wp["windowType"] = "null";
         mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"), 8, 8, false, &wp);
+        noteDevice();   // the device exists from here (Engine::deviceInfo / rayQueryAvailable)
         ensureHlms();
     }
     mVrConnection = vr::connect(mRoot, mVrPolicy, mVrInfo, why);
@@ -1931,7 +1934,9 @@ VrStatus OgreEngine::vrStatus() const {
 void OgreEngine::noteDevice() {
     if (mDeviceKnown || !mRoot) return;
     const DeviceInfo info = readDeviceInfo();
-    if (info.deviceName.empty()) return;   // no device yet
+    // KNOWN once a render system answers (its name); called only where a device exists — after a window that
+    // creates it, or at the end of a headless init, whose NULL system names no device at all.
+    if (info.renderSystem.empty()) return;
     mDeviceInfo = info;
     mDeviceRayQuery = deviceRayQuery();
     mDeviceKnown = true;
