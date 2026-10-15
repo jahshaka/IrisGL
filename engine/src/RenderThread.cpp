@@ -92,7 +92,9 @@ void RenderThread::noteHostStage(const std::string &name, float ms) {
 
 FrameSubmitStatus RenderThread::submitStatus() const {
     std::lock_guard<std::mutex> lock(mSlotLock);
-    return mSubmit;
+    FrameSubmitStatus st = mSubmit;
+    st.nextSerial = mSerial + (mSlot.any ? 1ull : 0ull);   // mSerial moves only under this lock (handOver)
+    return st;
 }
 
 // ---- THE RENDER SIDE ---------------------------------------------------------------------------------------------

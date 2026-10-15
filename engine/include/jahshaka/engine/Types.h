@@ -7983,6 +7983,9 @@ struct FrameSubmitStatus {
     /// Scene parts MERGED into an earlier pending part of the same scene (field by field, the newest value wins) —
     /// every second submit for a scene before one hand-over counts, the host's several syncs a frame included.
     unsigned long long scenePartsMerged = 0;
+    /// THE SERIAL THE PENDING RECORD WILL BE APPLIED AS (the next hand-over's; the last one's when nothing is pending):
+    /// what the LOCKSTEP verb waits for — "a frame with serial >= this presented" (F2).
+    unsigned long long nextSerial = 0;
 };
 /// What the drain did — Engine::frameInputStatus() / PublishedEngineFrame::input: the RENDER side of the hand-over,
 /// written by the frame alone (U3 F4). Running totals except the last drain's fields.
