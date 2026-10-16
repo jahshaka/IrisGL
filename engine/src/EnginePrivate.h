@@ -6756,7 +6756,13 @@ public:
     /// record is submitted, and the drain applies it on the engine's side. False on the engine's own side (the drain,
     /// the VR session, a request): there the setter applies.
     template <class F> bool postedAsField(F &&fill) {
-        if (!hostPosts()) return false;
+        if (!hostPosts()) {
+            // WITHOUT RECORDS THE CALLER IS THE HOST (a direct engine, the suites' shape): its record (View::pushed*)
+            // is written at its call, as the submit's merge writes it when the calls are records — never from the
+            // drain (decision 45, D5): there the engine's own side calls, and callIsTheHosts() is false.
+            if (callIsTheHosts()) { FrameInputView part; fill(part); notePushed(part); }
+            return false;
+        }
         FrameInput in;
         FrameInputView part;
         part.view = this;
@@ -6767,6 +6773,8 @@ public:
     }
     void postRecord(FrameInput &&in);
     bool hostPosts() const;
+    /// An engine whose calls are not records: the call in hand is the host's own (its record written at the call).
+    bool callIsTheHosts() const;
     void requestOnEngine(const std::function<void()> &f);   ///< Engine::request on this view's engine (U3 4a)
     /// The scene the engine has bound (the drain's comparison; View::scene is the host's binding).
     OgreScene *boundOgreScene() const { return mScene; }

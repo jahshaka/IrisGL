@@ -471,6 +471,7 @@ bool OgreView::pipAllowed() const {
 
 void OgreView::postRecord(FrameInput &&in) { mEngine->submitFrame(std::move(in)); }
 bool OgreView::hostPosts() const { return mEngine && mEngine->hostPosts(); }
+bool OgreView::callIsTheHosts() const { return !mEngine || !mEngine->mHostRecords; }
 void OgreView::requestOnEngine(const std::function<void()> &f) { mEngine->request([&](Engine &) { f(); }, nullptr); }
 
 void OgreView::setPip(const ViewPipDesc &d) {
@@ -2072,6 +2073,12 @@ bool OgreView::warmUpShaders() {
         const bool wasEnabled = mEnabled;
         const bool wantEnabled = !usesPass;
         if (wasEnabled != wantEnabled) applyEnabled(wantEnabled);   // the engine's own toggle: never pushedEnabled
+        // ...AND THE SESSION'S COVER WITH IT (U3 decision 26's stage-6 note): a view a VR session covers draws nothing
+        // (drawing()), so on the fallback route — this view's own frame — the warm-up would warm nothing. The cover is
+        // lifted for the warm-up's frames and put back however they end.
+        struct CoverBack { bool &covers; const bool was; ~CoverBack() { covers = was; } } coverBack{ mSessionCovers,
+                                                                                                     mSessionCovers };
+        if (wantEnabled) mSessionCovers = false;
         // THE SCREEN DECODE IS WARMED WITH THE REST (ATOM S3-DRAW): its twins' draws
         // are hidden outside the passes the id pass stands in for, so for this one
         // frame they are shown against the stand-in source.

@@ -253,11 +253,12 @@ bool PhotonComponent::gatherAndBuild(detail::VoxelFeed &feed, Ogre::PhotonVoxeli
 const detail::VoxelReading &PhotonComponent::currentReading(detail::VoxelFeed *feed) {
     static const detail::VoxelReading kNone;
     if (!feed) return kNone;
-    // THE LAST LANDED READING, never a request and never a wait (VOXEL-READOUT-1):
-    // giStatus is read from the UI thread between frames (the World panel's timer,
-    // the shader-build gate, the screenshot settle). A caller that needs the newest
-    // gather's numbers renders frames until cascades[i].voxelReadingGather reaches
-    // voxelGathers.
+    // THE LAST LANDED READING, never a request and never a wait (VOXEL-READOUT-1).
+    // THE RENDER THREAD'S ALONE (ENGINE-UPGRADE-U3 stage 6, the 10-08 audit's VoxelFeed::mReading): giStatus is
+    // composed at the frame's publish into the scene's snapshot (PublishedFrame::gi) and the host reads that — the
+    // feed's reading is written (harvest, noteEmpty) and read (here) on the render thread only, so the race the one
+    // thread hid has no second thread left. A caller that needs the newest gather's numbers renders frames until
+    // cascades[i].voxelReadingGather reaches voxelGathers.
     return feed->reading();
 }
 
