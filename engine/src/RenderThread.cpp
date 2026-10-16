@@ -230,8 +230,24 @@ void RenderThread::stop(const std::function<void()> &teardown) {
     gRenderThreadId.store(std::this_thread::get_id(), std::memory_order_relaxed);
 }
 
-void RenderThread::tickInline() {
-    Slot handed = handOver();
+// THE FREE-RUNNING FRAME (U3 stage 4b): the record is handed over NOW, on the host's thread — the frame applies
+// exactly what was submitted before the kick, whatever the host submits while it runs — and the frame runs on the
+// render thread without the host waiting. False when the render thread is still busy (the host skips this tick).
+bool RenderThread::kick() {
+    if (!threaded()) { tickInline(); return true; }
+    std::unique_lock<std::mutex> l(mTaskLock);
+    if (mTaskPending) return false;
+    auto handed = std::make_shared<Slot>(handOver());
+    mTask = [this, handed] { tickWith(std::move(*handed)); };
+    mTaskPending = true;
+    l.unlock();
+    mTaskCv.notify_all();
+    return true;
+}
+
+void RenderThread::tickInline() { tickWith(handOver()); }
+
+void RenderThread::tickWith(Slot &&handed) {
     // THE HOST'S HALF OF THE MONITOR'S RECORD, folded in before the frame opens (the next beginFrame adopts what is
     // banked between frames, so it leads the stage list as it always did). Dropped when no capture runs, as the
     // host's stages always were.

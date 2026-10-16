@@ -7473,6 +7473,7 @@ public:
     /// ONE TURN OF THE RENDER LOOP (ENGINE-UPGRADE-U3 stage 1): RenderThread::tickInline — the hand-over, the frame
     /// (runFrame, below), the publish. The public door stays here until stage 4 deletes it.
     void renderOneFrame() override;
+    bool kickFrame() override { return mRenderThread.kick(); }
     /// The game side's merge into the hand-over slot (RenderThread::submit).
     void submitFrame(FrameInput input) override;
     void post(Scene *scene, SceneMessage &&message) override;

@@ -49,6 +49,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "Types.h"
@@ -1899,11 +1900,15 @@ public:
     /// enabled as the host (or, for its own view, the session) last set it — View::pushedEnabled.
     bool hasEnabledViews() const {
         if (mHostVrSessionLive) return true;
+        std::lock_guard<std::mutex> lock(mHostViewsLock);   // the render thread re-makes the list (U3 stage 4b)
         for (const View *v : mHostViews) if (v->pushedEnabled()) return true;
         return false;
     }
     /// Every live View, in creation order.
-    void listViews(std::vector<View *> &out) const { out = mHostViews; }
+    void listViews(std::vector<View *> &out) const {
+        std::lock_guard<std::mutex> lock(mHostViewsLock);
+        out = mHostViews;
+    }
     /// Created with the NULL render system (EngineConfig::headless) — fixed at creation.
     bool isHeadless() const { return mIdentityHeadless; }
     /// The VR session's own eye-pair View while a session runs (null otherwise): the host's record of what
@@ -2014,6 +2019,10 @@ public:
     /// (the record accumulated since the last turn, stamped with its serial), the frame, and the PUBLISH (published(),
     /// each Scene::published()). Every test drives it in LOCKSTEP: one turn, one hand-over, one frame.
     virtual void renderOneFrame() = 0;
+    /// THE FREE-RUNNING FRAME (ENGINE-UPGRADE-U3 stage 4b): the record submitted so far is handed over now and the
+    /// frame runs on the render thread while the caller goes on (the owner's loop — EngineRenderDriver's tick). False
+    /// when the last frame is still running (the tick draws nothing). Without a render thread it IS renderOneFrame.
+    virtual bool kickFrame() = 0;
     /// THE FRAME'S INPUT (FrameInput, ENGINE-UPGRADE-1 U0 3a): handed over now, applied ONCE at the top of the
     /// next renderOneFrame — never on the spot. Several submits before one frame merge (see FrameInput): the
     /// merge builds the ONE record the next hand-over takes and stamps with its serial (U3 F1). A frame with no
@@ -3053,6 +3062,7 @@ protected:
     float               mPushedFrameDelta = 1.0f / 60.0f;
     bool                mHostVrSessionLive = false;
     std::vector<View *> mHostViews;
+    mutable std::mutex  mHostViewsLock;   ///< guards mHostViews: written on the render thread, read on the host's
     bool                mIdentityHeadless = false;
     View               *mHostVrView = nullptr;
     DeviceInfo          mDeviceInfo;

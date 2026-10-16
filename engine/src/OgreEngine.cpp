@@ -2304,6 +2304,7 @@ bool OgreEngine::updateScene(Scene *scene) {
 // list, re-made after every change of mViews (creation, destruction, teardown). Whether one has something to draw is
 // the boundary's own reading (View::pushedEnabled, and a VR session always — its frame loop is its heartbeat).
 void OgreEngine::syncHostViews() {
+    std::lock_guard<std::mutex> lock(mHostViewsLock);
     mHostViews.clear();
     mHostViews.reserve(mViews.size());
     for (const auto &v : mViews) mHostViews.push_back(v.get());

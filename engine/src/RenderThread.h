@@ -65,6 +65,9 @@ public:
     /// ONE TURN OF THE LOOP on the caller's thread (stage 1's seam; stage 4's run() loops it on its own thread):
     /// the hand-over, the frame (OgreEngine::runFrame), the publish.
     void tickInline();
+    /// THE FREE-RUNNING FRAME (stage 4b): hands the slot over now and runs the frame on the render thread without
+    /// waiting; false when the thread is still busy with the last one.
+    bool kick();
     /// The last frame the loop closed (Engine::published()).
     const PublishedEngineFrame &published() const {
         return mPublished[mPublishedIdx.load(std::memory_order_acquire)];
@@ -104,6 +107,7 @@ private:
     };
     /// THE HAND-OVER (render side, under the lock): swaps the slot out, stamps the serial on a non-empty record.
     Slot handOver();
+    void tickWith(Slot &&handed);
     /// THE PUBLISH (render side): the frame's error (taken from the engine's sink, which holds the CALLS' error again
     /// after this), every scene's half and the engine's half, each a whole-frame swap.
     void publish(bool recordApplied, std::string &&frameError);
