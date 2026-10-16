@@ -977,7 +977,22 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         // the pump used to answer was dead (seven `return true`s), deleted at
         // the VR-ENGINE-2 merge. A NO-OP on every engine without a session,
         // which is every engine outside a headset.
-        if (mVrSession) vrSessionBeginFrame(mVrSession);
+        if (mVrSession) {
+            if (!mRenderThread.onRenderThread()) ++mVrFramesOffRenderThread;   // the XR-thread law (stage 6's spike)
+            vrSessionBeginFrame(mVrSession);
+        }
+        mFrameWaitedOnRuntime = mVrSession && vrSessionWaitedThisFrame(mVrSession);
+        // THE FAKE RUNTIME (the test door vr.fakeRuntimePace): a free frame with no session waits for its next display
+        // time as xrWaitFrame would — the render loop's pace rule (no pad after a runtime-paced frame) under test.
+        if (!mVrSession && mFreeFrame && mArms.value(ArmId::FakeRuntimePace) > 0.0) {
+            const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double, std::milli>(mArms.value(ArmId::FakeRuntimePace)));
+            const auto now = std::chrono::steady_clock::now();
+            if (mFakeRuntimeNext.time_since_epoch().count() == 0 || mFakeRuntimeNext + period < now) mFakeRuntimeNext = now;
+            std::this_thread::sleep_until(mFakeRuntimeNext);
+            mFakeRuntimeNext += period;
+            mFrameWaitedOnRuntime = true;
+        }
         // THE RENDER-LOOP MONITOR'S FRAME (RENDER_LOOP_MONITOR_SPEC §4.2).
         // Opened here and closed at the very bottom, so `totalMs` is exactly
         // what one renderOneFrame cost. `mNextFrameCause` is the caller's — the
@@ -2045,6 +2060,7 @@ VrStatus OgreEngine::vrStatus() const {
         return s;
     }
     VrStatus s = vrSessionStatus(mVrSession);
+    s.framesOffRenderThread = mVrFramesOffRenderThread;
     // ...AND WITH A SESSION THE STORE IS STILL THE TRUTH BETWEEN FRAMES
     // (VR-INPUT-1E-FIX, the lead's item 2026-09-17). The session's `input[]` is
     // a per-FRAME copy — the injection is applied inside readInput, which is
@@ -2965,6 +2981,8 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
 // is read only while a capture runs (its GPU half asks the render system by an attribute a production build answers
 // with a throw — never once a frame); at Off it is the absence the getter reports, the undrained tail included.
 void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
+    out.presentAlpha = mPresentAlpha;
+    out.presentFree = mFreeFrame;
     out.input = mFrameInputStatus;
     out.vrSessionLive = mVrSession != nullptr;
     // THE REFUSALS OF THE LAST kFrameErrorsKept FRAMES (decision 34), for the error pump.

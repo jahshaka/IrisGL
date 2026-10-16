@@ -243,10 +243,17 @@ void RenderThread::threadMain() {
         if (freeFrame) {
             if (mTornDown) { mFreeRun.store(false, std::memory_order_relaxed); continue; }
             const auto t0 = std::chrono::steady_clock::now();
-            try { tickWith(handOver(), true); } catch (...) {}
-            // THE PACE WHERE THE PRESENT DID NOT BLOCK (an offscreen session, vsync off): the rest of the display
-            // period, waited on the task condition so a task still goes at once.
-            const double period = double(mDisplayPeriod.load(std::memory_order_relaxed));
+            // THE MEASURED PERIOD (worth-a-look 3): the interval between two free frames' starts — what the
+            // presentation clock advances by when the driver sends no period (Unlimited pacing).
+            if (mLastFreeStart.time_since_epoch().count() != 0)
+                mMeasuredPeriod.store(float(std::chrono::duration<double>(t0 - mLastFreeStart).count()),
+                                      std::memory_order_relaxed);
+            mLastFreeStart = t0;
+            tickWith(handOver(), true);   // a throw inside the frame is the frame's published error (tickWith)
+            // THE PACE (decision 53): the rest of the display period — but NEVER after a frame the XR runtime paced
+            // (xrWaitFrame already waited: a 60 Hz panel's period would pad a 90 Hz headset to 60), and none under
+            // Unlimited (period 0). Waited on the task condition, so a task still goes at once.
+            const double period = mEngine.mFrameWaitedOnRuntime ? 0.0 : double(mDisplayPeriod.load(std::memory_order_relaxed));
             const double spent = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (period > 0.0 && spent < period) {
                 std::unique_lock<std::mutex> l(mTaskLock);

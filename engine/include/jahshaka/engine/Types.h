@@ -5799,6 +5799,12 @@ struct VrStatus {
     bool               active = false;      ///< a session object exists
     unsigned long long frames = 0;          ///< xrEndFrame calls that succeeded
     unsigned long long rendered = 0;        ///< frames the runtime asked us to draw
+    /// VR frames begun OFF the engine's render thread (ENGINE-UPGRADE-U3 stage 6, the XR-thread law: xrWaitFrame /
+    /// xrBeginFrame / xrEndFrame run on the render thread — 0 always).
+    unsigned long long framesOffRenderThread = 0;
+    /// The runtime's display rate (predictedDisplayPeriod; VrInfo::refreshHz) — 0 until a session has pumped. What the
+    /// host's loop sends as the display period while the session runs (U3 decision 53), never the panel's.
+    float              refreshHz = 0.0f;
     /// DISPLAY PERIODS THE APPLICATION MISSED (ENGINE-UPGRADE-U3, vr.ui_stall): over every xrWaitFrame after the
     /// session's first, the runtime's own predicted display times stepped by more than one predicted display period
     /// — a COUNT of the headset refreshes no frame of ours was submitted for, read from the runtime's clock, never
@@ -8593,6 +8599,10 @@ struct PublishedEngineFrame {
     unsigned long long serial = 0;
     bool               recordApplied = false;
     unsigned long long handOver = 0;       ///< which hand-over this frame took (FrameSubmitStatus::handOvers' count)
+    /// THE INTERPOLATION THIS FRAME DREW (U3 stage 5's rows): the weight of the newest step's nodes between their two
+    /// grid states (1 = cur, every lockstep frame) and whether the frame was a free one.
+    float              presentAlpha = 1.0f;
+    bool               presentFree = false;
     FrameInputStatus   input;              ///< the drain's own status (the render side)
     VrStatus           vr;                 ///< the session as this frame left it (the last begun frame's pose)
     StreamingWork      streaming;

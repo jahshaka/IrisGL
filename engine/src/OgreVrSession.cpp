@@ -115,6 +115,7 @@ bool colourEncodedOnce() { return true; }   // no session is ever wrong about co
 // The engine's four session entry points, for the same reason.
 void vrSessionBeginFrame(VrSession *) {}
 void vrSessionEndFrame(VrSession *) {}
+bool vrSessionWaitedThisFrame(const VrSession *) { return false; }
 Ogre::CompositorWorkspace *vrSessionMirrorWorkspace(VrSession *) { return nullptr; }
 VrState vrSessionState(const VrSession *) { return VrState::Unavailable; }
 VrStatus vrSessionStatus(const VrSession *) { return VrStatus(); }
@@ -745,6 +746,7 @@ public:
     /// closed here and the desktop still draws (F4); the old bool answer never
     /// said false and is gone (VR-ENGINE-2 merge).
     void beginFrame();
+    bool waitedThisFrame() const { return mWaited; }
     void endFrame();
 
     void workspacePosUpdate(Ogre::CompositorWorkspace *workspace) override;
@@ -1003,6 +1005,8 @@ private:
     bool        mTestStopAsked = false;
     bool        mSaidNoPose = false;   ///< the invalid-pose stretch logged once
     bool        mInFrame = false;     ///< between xrBeginFrame and xrEndFrame
+    /// THIS FRAME WAITED IN xrWaitFrame (U3 decision 53): the runtime paced it — the render loop pads nothing after it.
+    bool        mWaited = false;
     bool        mDrewThisFrame = false;
     XrFrameState mFrameState{ XR_TYPE_FRAME_STATE };
     XrView      mViews[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
@@ -2744,6 +2748,7 @@ void VrSession::pollEvents() {
 
 // ---------------------------------------------------------------------------
 void VrSession::beginFrame() {
+    mWaited = false;   // set by this frame's xrWaitFrame, if it reaches one
     // THE HANDS ARE THIS FRAME'S OR THEY ARE NOTHING (VrPose's note, phase 4).
     // Cleared at the top so every early return below — lost, not running, no
     // picture, no pose — leaves them invalid rather than leaving yesterday's
@@ -2799,6 +2804,7 @@ void VrSession::beginFrame() {
     // interval with the mirror window's vsync off for the duration, so this
     // call is the only pacer.
     XrResult r = xrWaitFrame(mSession, &fwi, &mFrameState);
+    mWaited = !XR_FAILED(r);
     if (XR_FAILED(r)) {
         vrLog("xrWaitFrame failed: %s", xrResultName(mBoot->mInstance, r).c_str());
         mState = VrState::Lost; mRunning = false;
@@ -3867,6 +3873,7 @@ VrStatus VrSession::status() const {
     s.frames = mFrames;
     s.rendered = mRendered;
     s.missedDisplayPeriods = mMissedDisplayPeriods;
+    s.refreshHz = mRefreshHz;   // the session's predicted period, the render loop's pace while it runs (U3 decision 53)
     s.ipd = mIpd;
     s.warmUpFrames = mWarmUpDone;
     s.warmUpMs = mWarmUpMs;
@@ -4825,6 +4832,7 @@ bool colourEncodedOnce() { return sColourEncodedOnce; }
 void vrSessionBeginFrame(VrSession *s) { if (s) s->beginFrame(); }
 Ogre::CompositorWorkspace *vrSessionMirrorWorkspace(VrSession *s) { return s ? s->mirrorWorkspace() : nullptr; }
 void vrSessionEndFrame(VrSession *s) { if (s) s->endFrame(); }
+bool vrSessionWaitedThisFrame(const VrSession *s) { return s && s->waitedThisFrame(); }
 VrState vrSessionState(const VrSession *s) { return s ? s->state() : VrState::Unavailable; }
 bool vrSessionIsOver(const VrSession *s) { return s && s->isOver(); }
 VrStatus vrSessionStatus(const VrSession *s) { return s ? s->status() : VrStatus(); }

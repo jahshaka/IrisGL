@@ -1167,6 +1167,11 @@ const ArmDef kArms[] = {
     { "interp.serial", 0.0, 0.0, 1.0,
       "THE APPLY'S MEASURING ARM (ENGINE-UPGRADE-U3 stage 5, frame.interpolation_apply): 1 = the free frames' "
       "interpolation of the newest step's nodes runs on the frame's thread, never on the scene's pool." },
+    { "vr.fakeRuntimePace", 0.0, 0.0, 100.0,
+      "A RUNTIME'S PACE WITHOUT A RUNTIME (ENGINE-UPGRADE-U3 decision 53, frame.runtime_pace): N > 0 = every free frame "
+      "with no session waits for its next display time N ms after the last, as xrWaitFrame would, and counts as paced by "
+      "the runtime (the render loop pads nothing after it). A test door: the one way to put a headset faster than the "
+      "panel on a rig whose runtime (Monado's null compositor) runs at 20 Hz." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

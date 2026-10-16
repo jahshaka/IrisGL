@@ -1876,6 +1876,7 @@ enum class ArmId : unsigned {
     GpuWalkParity,       ///< "gpuscene.walkParity" — after every frame's compose, every slot checked against the table (the guard)
     MessagesRefuse,      ///< "messages.refuse" — every scene message of the frame refused unapplied (a test door, U3 decision 44)
     InterpSerial,        ///< "interp.serial" — the free frames' interpolation on the frame's thread (the measuring arm)
+    FakeRuntimePace,     ///< "vr.fakeRuntimePace" — ms: each free frame waits as a runtime's xrWaitFrame would (a test door, U3 decision 53)
     Count
 };
 class ArmRegistry {
@@ -7411,6 +7412,8 @@ bool colourEncodedOnce();
 /// swapchain images and submits the projection layer.
 void    vrSessionBeginFrame(VrSession *);
 void    vrSessionEndFrame(VrSession *);
+/// Did this frame wait in xrWaitFrame (the runtime paced it)? False without a session (U3 decision 53).
+bool    vrSessionWaitedThisFrame(const VrSession *);
 /// The session's desktop MIRROR workspace (null without one) — the frame
 /// monitor's listener rides it (lane TEST-1, the perf audit's F2).
 Ogre::CompositorWorkspace *vrSessionMirrorWorkspace(VrSession *);
