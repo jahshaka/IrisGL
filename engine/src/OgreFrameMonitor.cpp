@@ -1160,6 +1160,10 @@ const ArmDef kArms[] = {
       "frame's compose, every slot's world transform and flags word is compared with what the table "
       "holds — what a whole walk would have staged and the named walk did not is a MISS "
       "(GpuSubstrateStatus::walkMissed). A test door: O(items) a frame while on." },
+    { "messages.refuse", 0.0, 0.0, 1.0,
+      "THE REFUSING MESSAGE (ENGINE-UPGRADE-U3 decision 44, host.error_door): 1 = every scene message a frame drains is "
+      "refused unapplied, its refusal a completion and a refusal of the snapshot — the frame writes the engine's error "
+      "sink every frame while the host's error pump drains its own door. A test door." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

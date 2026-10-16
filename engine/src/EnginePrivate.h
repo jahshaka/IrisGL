@@ -1874,6 +1874,7 @@ enum class ArmId : unsigned {
     GiHitDirect,         ///< "gi.hitDirect" — a voxel-answered hit's direct light at the hit (FAR-SUN-2; 0: the store whole)
     GpuWalkWhole,        ///< "gpuscene.wholeWalk" — the dirty scan walks every slot (the measuring arm; 0: the named slots)
     GpuWalkParity,       ///< "gpuscene.walkParity" — after every frame's compose, every slot checked against the table (the guard)
+    MessagesRefuse,      ///< "messages.refuse" — every scene message of the frame refused unapplied (a test door, U3 decision 44)
     Count
 };
 class ArmRegistry {
@@ -7754,6 +7755,8 @@ public:
     std::string takeLastError() override;
     /// A host-side refusal (a setter refused against the host's own record, U3 stage 4a): lastError() reports it.
     void noteHostError(const std::string &why);
+    /// A join's refusal, moved into the host's error at the rendezvous (render side, the host waiting).
+    void moveErrorToHost();
     /// The host's calls are records (EngineConfig::hostRecords) AND this call is the host's (no frame running here).
     bool hostPosts() const { return mHostRecords && detail::tlsEngineSide == 0; }
     /// The create messages' engine-side halves (U3 stage 4a, decision 39 b).

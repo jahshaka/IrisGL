@@ -286,9 +286,9 @@ Ogre::SceneManager *OgreEngine::blankSceneManager() {
 // system's own, made in init); a rendering one gets a surfaceless one. What the document's staging scene manager used
 // to force at boot before ENGINE-UPGRADE-U2 deleted it — a document needs no engine — is now asked for by name.
 bool OgreEngine::prepareDevice() {
-    if (!mRenderThread.onRenderThread()) {   // the boot's door: on the render thread (U3 stage 4b)
+    if (hostPosts()) {   // the boot's door: on the render thread (U3 stage 4b), its refusal the host's (decision 44)
         bool ok = false;
-        mRenderThread.runOn([&] { ok = prepareDevice(); });
+        mRenderThread.runOn([&] { EngineSideScope engineSide; ok = prepareDevice(); moveErrorToHost(); });
         return ok;
     }
     // THE BOOT'S DOOR (EngineHost, once, right after create — stage 4b runs it on the render thread inside create).
@@ -556,9 +556,16 @@ View *OgreEngine::createView(const std::string &name,
                              const Colour &background) {
     // THE FIRST JOIN (U3 stage 4b): the window's surface is made on the render thread; the host posted the winId and
     // waits (Qt's rule: the native window exists and outlives the surface).
-    if (!mRenderThread.onRenderThread()) {
+    // ...and its refusal is moved into the host's error at the rendezvous (decision 44): the host never reads the
+    // engine's sink. The pending record's structure lands first, as destroyView's does (decision 46).
+    if (hostPosts()) {
         View *made = nullptr;
-        mRenderThread.runOn([&] { made = createView(name, handle, width, height, background); });
+        mRenderThread.runOn([&] {
+            EngineSideScope engineSide;
+            applyPendingEngineMessages();
+            made = createView(name, handle, width, height, background);
+            moveErrorToHost();
+        });
         return made;
     }
     EngineSideScope engineSide;   // a join: the engine's own calls inside it are the render side's (U3 4a)
@@ -786,7 +793,10 @@ OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, u
 
 void OgreEngine::destroyView(View *view) {
     // THE SECOND JOIN (U3 stage 4b): the surface goes on the render thread before Qt destroys its window.
-    if (!mRenderThread.onRenderThread()) { mRenderThread.runOn([&] { destroyView(view); }); return; }
+    if (hostPosts()) {
+        mRenderThread.runOn([&] { EngineSideScope engineSide; destroyView(view); moveErrorToHost(); });
+        return;
+    }
     EngineSideScope engineSide;   // a join: the engine's own calls inside it are the render side's (U3 4a)
     // A JOIN'S FIRST STEP (U3 stage 4a): the engine's own stream lands — a view the host made and destroys before
     // its first frame exists to be destroyed.
@@ -2545,22 +2555,31 @@ void OgreEngine::setVsync(bool on) {
 // THE HOST'S ERROR DOOR (U3 stage 4a): what the host's own calls were refused for — a setter refused against the
 // host's record (noteHostError), a join's reason — folded into the calls' string the engine-side bodies write. A door,
 // not a read of the frame's state: the frame's faults are the snapshot's (frameErrors, refusals).
+// THE HOST'S ERROR DOOR (U3 stage 4a; decision 44): on the host's side it is the host's own string ONLY — a setter
+// refused against the host's record (noteHostError), a join's refusal moved here at the rendezvous — and NEVER the
+// engine's sink (mLastError is the frame's while one runs; a free-running frame writes it on the render thread). The
+// frame's faults are the snapshot's (frameErrors, refusals). On the engine's side (a request's question, a fixture
+// that drives the engine directly) it is the calls' string, as it always was.
 const std::string &OgreEngine::lastError() const {
-    if (!mHostError.empty()) { mLastError += mLastError.empty() ? mHostError : "; " + mHostError; mHostError.clear(); }
+    if (hostPosts()) return mHostError;
     return mLastError;
 }
 
 void OgreEngine::noteHostError(const std::string &why) { mHostError = why; }
 
+void OgreEngine::moveErrorToHost() {
+    if (mLastError.empty()) return;
+    mHostError = mLastError;
+    mLastError.clear();
+}
+
 std::string OgreEngine::takeLastError()
 {
-    (void)lastError();   // the host's refusals folded in
-    // Swap, don't copy-then-clear: every OgreScene and OgreView holds
-    // `std::string &mError` bound to THIS member (OgreEngine.cpp createScene /
-    // createView), so the object must stay put — swapping its contents is fine,
-    // reseating it would not be.
     std::string taken;
-    taken.swap(mLastError);
+    // Swap, don't copy-then-clear: every OgreScene and OgreView holds `std::string &mError` bound to mLastError, so
+    // that object must stay put — swapping its contents is fine, reseating it would not be.
+    if (hostPosts()) taken.swap(mHostError);
+    else taken.swap(mLastError);
     return taken;
 }
 
@@ -2654,11 +2673,30 @@ void OgreEngine::applySceneStream(OgreScene *sc, const std::vector<SceneMessage>
     mFrameInputStatus.nodeRecordsTotal += n;
 }
 
+void OgreEngine::applySceneMessage(OgreScene *sc, const SceneMessage &m) {
+    ++mFrameInputStatus.messages;
+    ++mFrameInputStatus.messagesTotal;
+    if (!m.apply) return;
+    const std::string before = mLastError;
+    const bool refuse = mArms.on(ArmId::MessagesRefuse);   // the test door (decision 44's row)
+    if (refuse) mLastError = "refused by the messages.refuse arm";
+    const bool ok = !refuse && m.apply(*sc);
+    const std::string why = ok ? std::string() : mLastError != before ? mLastError : std::string("refused");
+    if (!ok) {
+        ++mFrameInputStatus.messagesRefused;
+        mRefusals.push_back({ mPublishedFrames + 1, why });   // the frame this drain belongs to
+    }
+    if (m.token || !ok) sc->noteCompletion(m.token, ok, why);
+    mLastError = before;
+}
+
 // THE ENGINE'S STREAM (U3 stage 4a, decision 39 c): each message applied on the engine's side, its refusal its own
 // completion, the engine's error string handed back as it was.
-void OgreEngine::applyEngineMessages(const std::vector<EngineMessage> &messages, bool late) {
-    for (const EngineMessage &m : messages) {
-        if (!m.apply || m.late != late) continue;
+void OgreEngine::applyEngineMessage(const EngineMessage &m) {
+    {
+        ++mFrameInputStatus.messages;
+        ++mFrameInputStatus.messagesTotal;
+        if (!m.apply) return;
         const std::string before = mLastError;
         const bool ok = m.apply(*this);
         const std::string why = ok ? std::string() : mLastError != before ? mLastError : std::string("refused");
