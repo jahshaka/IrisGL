@@ -7649,7 +7649,9 @@ public:
     bool vrEyeScreenshot(unsigned eye, Image &out) override;
     bool vrInjectInput(int hand, const VrHandState &state) override;
     void vrInjectFocus(bool focused) override {
-        if (postedAsMessage([=](OgreEngine &e) { e.vrInjectFocus(focused); return true; })) return;   // U3 4a: a message
+        // AN INJECTION IS A REQUEST (U3 stage 6): a test door the host reads straight back (vr.state().inputFocused,
+        // the next vr.step) — applied and republished before the call returns, like vrInjectInput.
+        if (hostPosts()) { request([=](Engine &e) { static_cast<OgreEngine &>(e).vrInjectFocus(focused); }, nullptr); return; }
         mVrInjectFocus = focused;
     }
     unsigned vrHandJoints(int hand, VrPose *out, unsigned count) const override;
@@ -7854,6 +7856,13 @@ public:
     unsigned long long mPresentFrame = 0;
     bool mPresentBegun = false;
     VrRayState mHostVrRay;   ///< the host's record of the ray it set (Engine::vrRay on the host's side, U3 stage 6)
+    /// The host's record of the origin it set, sequenced; the sequence the engine last applied (VrStatus::originSeq).
+    Vec3 mHostVrOrigin;
+    float mHostVrOriginYaw = 0.0f;
+    unsigned long long mHostVrOriginSeq = 0;
+    unsigned long long mVrOriginSeq = 0;
+    /// A state in which a session exists (Ready..Stopping) — what the host's ended session must not report.
+    static bool vrStateIsLive(VrState s) { return s != VrState::Idle && s != VrState::Unavailable; }
     float mPresentAlpha = 1.0f;   ///< the last interpolateScene's weight (PublishedEngineFrame::presentAlpha)
     void beginPresentation();
     void interpolateScene(OgreScene *sc);

@@ -2076,8 +2076,11 @@ bool OgreView::warmUpShaders() {
         // ...AND THE SESSION'S COVER WITH IT (U3 decision 26's stage-6 note): a view a VR session covers draws nothing
         // (drawing()), so on the fallback route — this view's own frame — the warm-up would warm nothing. The cover is
         // lifted for the warm-up's frames and put back however they end.
-        struct CoverBack { bool &covers; const bool was; ~CoverBack() { covers = was; } } coverBack{ mSessionCovers,
-                                                                                                     mSessionCovers };
+        struct CoverBack {
+            bool *covers = nullptr;
+            bool was = false;
+            ~CoverBack() { if (covers) *covers = was; }
+        } coverBack{ &mSessionCovers, mSessionCovers };
         if (wantEnabled) mSessionCovers = false;
         // THE SCREEN DECODE IS WARMED WITH THE REST (ATOM S3-DRAW): its twins' draws
         // are hidden outside the passes the id pass stands in for, so for this one

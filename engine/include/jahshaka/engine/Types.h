@@ -5888,6 +5888,10 @@ struct VrStatus {
     /// given rather than trusting its own copy.
     Vec3               origin;
     float              originYaw = 0.0f;
+    /// THE HOST'S LAST setVrOrigin THIS ORIGIN CARRIES (ENGINE-UPGRADE-U3 stage 6): the host composes its next step
+    /// from the origin it reads; while its own newer write has not landed (its sequence ahead of this one) the host's
+    /// read reports that write — two steps inside one frame never compose from the same stale origin.
+    unsigned long long originSeq = 0;
     /// HOW MANY TIMES THE RUNTIME RECENTRED THE ROOM under this session (the
     /// Quest's long-press, a guardian re-setup). Each one moves every pose the
     /// runtime reports discontinuously; the session ABSORBS it into the rig so

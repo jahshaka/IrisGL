@@ -2016,7 +2016,11 @@ void OgreEngine::endVrSession() {
 
 VrState OgreEngine::vrState() const {
     // A VR READ ON THE HOST'S SIDE IS THE SNAPSHOT'S (U3 stage 6; a request until then).
-    if (hostPosts()) return published().vrState;   // THE SNAPSHOT (stage 6): the last frame's, never a wait
+    if (hostPosts()) {   // THE SNAPSHOT (stage 6): the last frame's, never a wait — a session the host ended is ended
+        if (!mHostVrSessionLive && vrStateIsLive(published().vrState)) return vrAvailable() ? VrState::Idle
+                                                                                            : VrState::Unavailable;
+        return published().vrState;
+    }
     return vrStateNow();
 }
 
@@ -2028,7 +2032,25 @@ VrState OgreEngine::vrStateNow() const {
 VrStatus OgreEngine::vrStatus() const {
     // A VR READ ON THE HOST'S SIDE IS THE SNAPSHOT'S (U3 stage 6; a request until then): the frame's status, the
     // injections it applied included (a host injection is a request — republished before the host reads again).
-    if (hostPosts()) return published().vr;
+    if (hostPosts()) {
+        VrStatus s = published().vr;
+        // ...WITH THE HOST'S OWN WRITES OVER IT where the host is the writer and the frame has not caught up: a session
+        // the host ended (its record), and an origin it set since the frame the snapshot is.
+        if (!mHostVrSessionLive && s.active) {
+            // The engine's answer with no session (its end clears the injection store too): nothing of the session —
+            // its counters belong to it, not to the process.
+            VrStatus none;
+            none.state = vrAvailable() ? VrState::Idle : VrState::Unavailable;
+            none.framesOffRenderThread = s.framesOffRenderThread;
+            return none;
+        }
+        if (mHostVrOriginSeq > s.originSeq) {
+            s.origin = mHostVrOrigin;
+            s.originYaw = mHostVrOriginYaw;
+            s.originSeq = mHostVrOriginSeq;
+        }
+        return s;
+    }
     if (!mVrSession) {
         VrStatus s;
         s.state = vrStateNow();
@@ -2060,6 +2082,7 @@ VrStatus OgreEngine::vrStatus() const {
     }
     VrStatus s = vrSessionStatus(mVrSession);
     s.framesOffRenderThread = mVrFramesOffRenderThread;
+    s.originSeq = mVrOriginSeq;
     // ...AND WITH A SESSION THE STORE IS STILL THE TRUTH BETWEEN FRAMES
     // (VR-INPUT-1E-FIX, the lead's item 2026-09-17). The session's `input[]` is
     // a per-FRAME copy — the injection is applied inside readInput, which is
@@ -2263,8 +2286,15 @@ bool OgreEngine::vrHaptic(int hand, float amplitude01, float seconds) {
 }
 
 void OgreEngine::setVrOrigin(const Vec3 &position, float yawDegrees) {
-    // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
-    if (postedAsMessage([=](OgreEngine &e) { e.setVrOrigin(position, yawDegrees); return true; })) return;
+    // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain — and the
+    // host's RECORD of it, sequenced (U3 stage 6): its reads report the write until a frame applied it.
+    if (hostPosts()) {
+        const unsigned long long seq = ++mHostVrOriginSeq;
+        mHostVrOrigin = position;
+        mHostVrOriginYaw = yawDegrees;
+        if (postedAsMessage([=](OgreEngine &e) { e.setVrOrigin(position, yawDegrees); e.mVrOriginSeq = seq; return true; }))
+            return;
+    }
     // NOT REMEMBERED ACROSS SESSIONS, deliberately: where the wearer stands is
     // a property of the RUN the host started, and a session that inherited the
     // previous one's origin would put the next wearer wherever the last one
