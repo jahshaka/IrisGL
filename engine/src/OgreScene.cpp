@@ -457,6 +457,7 @@ bool OgreScene::removeNode(NodeId id) {
         releaseNode(it->first, it->second);
         uncountNode(it->second);
         mNodes.erase(it);
+        mInterpRecsValid = false;   // the interpolation's resolved pointers name the map's nodes
         // The last decal leaving must clear the SceneManager's atlas bindings,
         // which is what drops the decal code back out of every PBS shader.
         if (hadDecal) refreshDecalBindings();
@@ -638,29 +639,37 @@ bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSeri
             rec->stepSerial = stepSerial;
             rec->hasCur = true;
             if (first) rec->prevLocal = rec->curLocal;   // a node's first record has no motion to show
-            noteInterpolated(r.id, stepSerial);           // the two grid states the free frames draw between (stage 5)
-            sn->setPosition(rec->curLocal.position);
-            setOrientationExact(sn, rec->curLocal.rotation);
-            sn->setScale(rec->curLocal.scale);
-            if (sn->isStatic()) mSceneMgr->notifyStaticDirty(sn);
+            noteInterpolated(*rec, r.id, stepSerial);     // the two grid states the free frames draw between (stage 5)
+            // A FREE FRAME'S DRAIN LEAVES THE WRITE TO THE INTERPOLATION (worth-a-look 4): one write per node per
+            // frame, made right after the records (OgreEngine::applySceneStream). Everywhere else cur, at once.
+            if (!(mEngine && mEngine->mDeferNodeWrites)) {
+                sn->setPosition(rec->curLocal.position);
+                setOrientationExact(sn, rec->curLocal.rotation);
+                sn->setScale(rec->curLocal.scale);
+                rec->drawnCur = true;
+                if (sn->isStatic()) mSceneMgr->notifyStaticDirty(sn);
+            } else {
+                rec->drawnCur = false;   // owed: the interpolation writes it this frame
+            }
         }
         return true;
     } JAH_CATCH(mError, false);
 }
 
 // ---- THE TWO GRID STATES, INTERPOLATED (ENGINE-UPGRADE-U3 stage 5) -----------------------------------------------------
-void OgreScene::noteInterpolated(NodeId id, unsigned long long step) {
+void OgreScene::noteInterpolated(Node &rec, NodeId id, unsigned long long step) {
     if (step != mInterpStep) {
-        restoreInterpolated();   // the last step's nodes back on their cur before the list moves on
+        // THE STEP MOVES ON: the last step's nodes are owed cur where this step does not record them again — put back
+        // once by the next interpolate, never by a restore before the apply (worth-a-look 4: one write per node).
+        mInterpStale.insert(mInterpStale.end(), mInterpNodes.begin(), mInterpNodes.end());
         mInterpNodes.clear();
         mInterpStep = step;
     }
-    mInterpNodes.push_back(id);
-}
-
-void OgreScene::restoreInterpolated() {
-    if (mInterpDrawnAlpha >= 1.0f) return;
-    interpolate(1.0f);
+    if (rec.interpStep != step) {   // each node once a step (two merged records, one entry)
+        rec.interpStep = step;
+        mInterpNodes.push_back(id);
+    }
+    mInterpRecsValid = false;
 }
 
 namespace {
@@ -679,31 +688,48 @@ constexpr size_t kParallelInterpNodes = 256u;
 
 void OgreScene::interpolate(float alpha) {
     alpha = alpha < 0.0f ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
-    if (mInterpNodes.empty() || (alpha >= 1.0f && mInterpDrawnAlpha >= 1.0f)) { mInterpDrawnAlpha = alpha; return; }
+    if (mInterpNodes.empty() && mInterpStale.empty()) { mInterpDrawnAlpha = alpha; return; }
     const auto t0 = std::chrono::steady_clock::now();
-    // The nodes resolved once, serially (the map is not touched by the shares).
-    mInterpRecs.clear();
-    for (NodeId id : mInterpNodes) {
-        Node *rec = record(id);
-        if (rec && rec->node && rec->document && rec->hasCur) mInterpRecs.push_back(rec);
+    // THE NODES, resolved once a step (a note or a removal re-resolves), serially — the map is not the shares'.
+    if (!mInterpRecsValid) {
+        mInterpRecs.clear();
+        for (NodeId id : mInterpNodes) {
+            Node *rec = record(id);
+            if (rec && rec->node && rec->document && rec->hasCur) mInterpRecs.push_back(rec);
+        }
+        mInterpRecsValid = true;
     }
-    const auto apply = [this, alpha](size_t begin, size_t end) {
+    // WHAT THIS FRAME WRITES, each node once: the newest step's at `alpha` (at 1, only those not already on cur) and
+    // the step before's that were not recorded again, back on cur.
+    mInterpWrite.clear();
+    for (NodeId id : mInterpStale) {
+        Node *rec = record(id);
+        if (rec && rec->node && rec->document && rec->hasCur && rec->interpStep != mInterpStep && !rec->drawnCur)
+            mInterpWrite.push_back({ rec, 1.0f });
+    }
+    mInterpStale.clear();
+    for (Node *rec : mInterpRecs)
+        if (alpha < 1.0f || !rec->drawnCur) mInterpWrite.push_back({ rec, alpha });
+    const size_t n = mInterpWrite.size();
+    if (n == 0u) { mInterpDrawnAlpha = alpha; return; }
+    const auto apply = [this](size_t begin, size_t end) {
         for (size_t i = begin; i < end; ++i) {
-            Node *rec = mInterpRecs[i];
+            Node *rec = mInterpWrite[i].rec;
+            const float a = mInterpWrite[i].alpha;
             Ogre::SceneNode *sn = rec->node;
-            if (alpha >= 1.0f) {
+            if (a >= 1.0f) {
                 sn->setPosition(rec->curLocal.position);
                 setOrientationExact(sn, rec->curLocal.rotation);
                 sn->setScale(rec->curLocal.scale);
             } else {
                 // lerp + nlerp (Tutorial06 GraphicsSystem.cpp's rule), the shortest path.
-                sn->setPosition(rec->prevLocal.position + (rec->curLocal.position - rec->prevLocal.position) * alpha);
-                sn->setOrientation(Ogre::Quaternion::nlerp(alpha, rec->prevLocal.rotation, rec->curLocal.rotation, true));
-                sn->setScale(rec->prevLocal.scale + (rec->curLocal.scale - rec->prevLocal.scale) * alpha);
+                sn->setPosition(rec->prevLocal.position + (rec->curLocal.position - rec->prevLocal.position) * a);
+                sn->setOrientation(Ogre::Quaternion::nlerp(a, rec->prevLocal.rotation, rec->curLocal.rotation, true));
+                sn->setScale(rec->prevLocal.scale + (rec->curLocal.scale - rec->prevLocal.scale) * a);
             }
+            rec->drawnCur = a >= 1.0f;
         }
     };
-    const size_t n = mInterpRecs.size();
     const size_t workers = mSceneMgr ? mSceneMgr->getNumWorkerThreads() : 0u;
     const bool serial = mEngine && mEngine->armRegistry().on(ArmId::InterpSerial);
     const size_t shares = (!serial && n >= kParallelInterpNodes && workers >= 1u) ? workers + 1u : 1u;
@@ -716,10 +742,23 @@ void OgreScene::interpolate(float alpha) {
         share(shares - 1u);
         mSceneMgr->waitForPendingUserScalableTask();
     }
-    for (Node *rec : mInterpRecs)
-        if (rec->node->isStatic()) mSceneMgr->notifyStaticDirty(rec->node);
+    const auto t1 = std::chrono::steady_clock::now();
+    // EVERY POSE WRITTEN IS NAMED (decision 56): the GPU-scene table and the GI / shadow scan boxes follow the raster,
+    // through the drain's own door; a lamp under a written node is compared with its pose key there.
+    // The written nodes are known records, each once: named directly; only what hangs under them (children, riders)
+    // takes the door's general walk.
+    mInterpStack.clear();
+    bool lampMoved = false;
+    for (const InterpWrite &w : mInterpWrite) {
+        if (w.rec->node->isStatic()) mSceneMgr->notifyStaticDirty(w.rec->node);
+        if (nameMovedNode(*w.rec, w.rec->node, mInterpStack)) lampMoved = true;
+    }
+    if (!mInterpStack.empty() && nameMovedSubtrees(mInterpStack)) lampMoved = true;
+    if (lampMoved) ++mGiLightWriteSerial;
     mInterpDrawnAlpha = alpha;
-    mInterpMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+    const auto t2 = std::chrono::steady_clock::now();
+    mInterpMicros = std::chrono::duration<double, std::micro>(t1 - t0).count();
+    mInterpNameMicros = std::chrono::duration<double, std::micro>(t2 - t1).count();
     mInterpNodesLast = unsigned(n);
 }
 
@@ -2086,6 +2125,7 @@ void OgreScene::destroy() {
         destroyGrid();
         for (auto &kv : mNodes) releaseNode(kv.first, kv.second);
         mNodes.clear();
+        mInterpNodes.clear(); mInterpStale.clear(); mInterpRecs.clear(); mInterpRecsValid = false;
         mMobilityCounts = MobilityStatus();   // every node gone: the totals with them
         mRigCounts = RigStats();
         mSkeletonRefs.clear();

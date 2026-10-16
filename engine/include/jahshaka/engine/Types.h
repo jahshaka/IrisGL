@@ -8047,6 +8047,10 @@ struct FrameInput {
     /// The document clock's step count (iris::SimulationClock::steps) the record was built at — the grid state its
     /// node records are (stage 5 interpolates between the last two of them). Newest wins in a merge.
     std::optional<unsigned long long> stepSerial;
+    /// THE GRID'S STEP, in seconds (iris::SimulationClock::kStepSeconds, 1/60): the interpolation's period (U3
+    /// decision 55) — never `frameDelta`, which is the particles' (simulated x particleTimeScale: 0 on a stepless
+    /// frame, k steps on a hitch). Newest wins in a merge; 1/60 until a record says.
+    std::optional<float>              stepPeriod;
 
     /// The usual one-field records.
     static FrameInput delta(float seconds) { FrameInput f; f.frameDelta = seconds; return f; }

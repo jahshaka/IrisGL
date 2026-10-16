@@ -21,6 +21,7 @@
 #include "SyncGetters.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -84,6 +85,7 @@ public:
     /// render side (stage 5's interpolation weight).
     void setDisplayPeriod(float seconds) { mDisplayPeriod.store(seconds, std::memory_order_relaxed); }
     float displayPeriod() const { return mDisplayPeriod.load(std::memory_order_relaxed); }
+    float measuredPeriod() const { return mMeasuredPeriod.load(std::memory_order_relaxed); }
 
     static constexpr unsigned kHostStageCoalesce = 64u;
 

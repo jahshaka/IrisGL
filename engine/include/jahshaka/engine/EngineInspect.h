@@ -80,7 +80,8 @@ public:
     /// clock, the clock advanced by the display period — drawn now and waited for.
     virtual void presentationFrame() = 0;
     /// The last free frame's interpolation: its nodes and its microseconds (scene `s`), for the apply's measure row.
-    virtual void lastInterpolation(const Scene *s, unsigned &nodes, double &micros) const = 0;
+    /// ...`micros` the apply's writes, `namingMicros` the naming of what they wrote to the scans (decision 56).
+    virtual void lastInterpolation(const Scene *s, unsigned &nodes, double &micros, double &namingMicros) const = 0;
 };
 /// The engine's probes; null for an engine of another kind.
 const EngineEcho *engine(const Engine *e);

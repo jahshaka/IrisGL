@@ -952,8 +952,15 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         // every view's camera. BEFORE the VR frame (the 3a read, A): the session notes its own cause (WarmUp) and
         // writes the head pose onto the session view, and both are the engine's — a host's record (the driver's
         // Driver cause; the eyes' part carries no pose) must land under them, never over them.
+        // THE PRESENTATION'S FRAME OPENS (U3 stage 5; decision 56): inside a FREE frame's drain the node records leave
+        // the write to the interpolation, which each scene runs right after its records (applySceneStream).
+        ++mPresentFrame;
+        mPresentBegun = false;
+        mDeferNodeWrites = mFreeFrame;
+        struct DeferEnds { bool &f; ~DeferEnds() { f = false; } } deferEnds{ mDeferNodeWrites };
         drainFrameInput(record, any);
-        // THE PRESENTATION (U3 stage 5): a free frame draws the newest step's nodes between their two grid states.
+        mDeferNodeWrites = false;
+        // ...and every scene the record did not reach is drawn between its two grid states too (a lockstep frame: cur).
         interpolateFrame();
         // ---- THE VR FRAME OPENS HERE (SPECS/VR_SPEC.md §4.3) --------------
         // While a session runs this call IS the frame's clock: it polls the
@@ -2665,6 +2672,9 @@ void OgreEngine::applySceneStream(OgreScene *sc, const std::vector<SceneMessage>
     // the frame's error stays the frame's own fault.
     for (const SceneMessage &m : messages) applySceneMessage(sc, m);
     const unsigned n = sc->applyNodeRecords(nodes, stepSerial);
+    // A FREE FRAME'S ONE WRITE PER NODE (worth-a-look 4), here — before the reflector arm and the change set read a pose,
+    // so both see what the frame draws (decision 56).
+    if (mDeferNodeWrites) interpolateScene(sc);
     sc->armDeferredReflectors();   // a reflector asked for this frame is measured at its landed pose
     mFrameInputStatus.nodeRecords += n;
     for (const NodeRecord &r : nodes) if (r.fields & NodeRecord::Trs) ++mFrameInputStatus.nodeTransforms;
@@ -2729,6 +2739,7 @@ void OgreEngine::applyPendingEngineMessages() {
         pending.scenes.swap(rec.scenes);
         pending.views.swap(rec.views);
         pending.stepSerial = rec.stepSerial;
+        pending.stepPeriod = rec.stepPeriod;
     });
     if (pending.engineMessages.empty() && pending.scenes.empty() && pending.views.empty()) return;
     EngineSideScope engineSide;
@@ -2739,22 +2750,38 @@ void OgreEngine::applyPendingEngineMessages() {
 // newest record's nodes at alpha = (P - the step before the newest) / the step period, P held inside that interval
 // (render one step behind: Tutorial06 GraphicsGameState's rule), then P advances by the display period the driver
 // supplies; a LOCKSTEP frame draws cur exactly (alpha 1 — every test, every hash) and P stands at the newest step.
-void OgreEngine::interpolateFrame() {
-    const double step = double(appliedFrameDelta() > 0.0f ? appliedFrameDelta() : 1.0f / 60.0f);
+void OgreEngine::beginPresentation() {
+    if (mPresentBegun) return;
+    mPresentBegun = true;
+    // THE GRID'S STEP (decision 55): the simulation clock's period the record carries — never the particles' delta.
+    const double step = mStepPeriod > 0.0 ? mStepPeriod : 1.0 / 60.0;
     const double hi = double(mNewestStep) * step, lo = hi - step;
-    if (!mFreeFrame) {
-        mPresentTime = hi;
-        for (auto &s : mScenes) if (s) s->restoreInterpolated();
-        return;
-    }
+    if (!mFreeFrame) { mPresentTime = hi; return; }
     if (mPresentTime < lo) mPresentTime = lo;
     if (mPresentTime > hi) mPresentTime = hi;
-    for (auto &s : mScenes) {
-        if (!s) continue;
-        const double sLo = (double(s->interpolationStep()) - 1.0) * step;
-        s->interpolate(float((mPresentTime - sLo) / step));
-    }
-    const double period = double(mRenderThread.displayPeriod());
+}
+
+void OgreEngine::interpolateScene(OgreScene *sc) {
+    if (!sc || sc->mInterpFrame == mPresentFrame) return;   // once a frame
+    sc->mInterpFrame = mPresentFrame;
+    beginPresentation();
+    if (!mFreeFrame) { mPresentAlpha = 1.0f; sc->restoreInterpolated(); return; }   // lockstep: cur (written only where owed)
+    const double step = mStepPeriod > 0.0 ? mStepPeriod : 1.0 / 60.0;
+    const double sLo = (double(sc->interpolationStep()) - 1.0) * step;
+    const float alpha = float((mPresentTime - sLo) / step);
+    if (!sc->mInterpNodes.empty()) mPresentAlpha = alpha < 0.0f ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
+    sc->interpolate(alpha);
+}
+
+void OgreEngine::interpolateFrame() {
+    beginPresentation();
+    for (auto &s : mScenes) interpolateScene(s.get());
+    if (!mFreeFrame) return;
+    const double step = mStepPeriod > 0.0 ? mStepPeriod : 1.0 / 60.0;
+    // The display's period the driver sends (a session's predicted one while it runs); under Unlimited none is sent
+    // and the measured start-to-start interval of the free frames advances the clock (worth-a-look 3).
+    double period = double(mRenderThread.displayPeriod());
+    if (!(period > 0.0)) period = double(mRenderThread.measuredPeriod());
     mPresentTime += period > 0.0 ? period : step;
     mLastAlphaPresent = mPresentTime;
 }
@@ -2777,6 +2804,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     FrameInput in = std::move(handed);
     unsigned applied = 0;
     if (in.stepSerial && *in.stepSerial > mNewestStep) mNewestStep = *in.stepSerial;   // the presentation's grid
+    if (in.stepPeriod && *in.stepPeriod > 0.0f) mStepPeriod = double(*in.stepPeriod);   // the grid's step (decision 55)
 
     // THE ONE ORDER (decision 46; stage 3's FIFO law across every stream): the engine's messages, every scene's
     // messages and every view's binding, in the order the host posted them (their sequence). A create precedes the

@@ -412,7 +412,6 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
         return 1u;
     }
     if (cs.moved.empty()) return 0u;
-    bool light = false;
     std::vector<Ogre::Node *> stack;
     for (NodeId id : cs.moved) {
         auto it = mNodes.find(id);
@@ -420,6 +419,39 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
         ++mHostMoves;
         stack.push_back(it->second.node);
     }
+    const bool light = nameMovedSubtrees(stack);
+    if (light) ++mGiLightWriteSerial;
+    return light ? 1u : 0u;
+}
+
+/// THE DOOR ITSELF (decision 56: the drain's change set and the free frames' interpolation both name through it).
+/// One registered node: named to the scans when it draws (an item or a decal), its lamp compared with its pose key, and
+/// what moves with it — its bones' riders and its Ogre children — pushed for the walk. True when its lamp moved.
+bool OgreScene::nameMovedNode(Node &rec, Ogre::Node *on, std::vector<Ogre::Node *> &stack) {
+    bool light = false;
+    if (rec.item || rec.decal) noteSceneTransformWrite(rec);
+    // A LAMP UNDER A MOVED NODE: named, then COMPARED with its own pose key — the journal says WRITTEN,
+    // and only a pose that changed is a move the injection and the scheduler answer.
+    if (rec.light && rec.light->getParentNode()) {
+        Ogre::Node *ln = rec.light->getParentNode();
+        const Ogre::Vector3 p = ln->_getDerivedPositionUpdated();
+        const Ogre::Quaternion q = ln->_getDerivedOrientationUpdated();
+        if (rec.lightPoseKnown && !(p == rec.lightPos && q == rec.lightRot)) {
+            light = true;
+            noteLampChanged(rec);
+        }
+        rec.lightPos = p; rec.lightRot = q; rec.lightPoseKnown = true;
+    }
+    for (NodeId rider : rec.boneRiders) {
+        auto rit = mNodes.find(rider);
+        if (rit != mNodes.end() && rit->second.node) stack.push_back(rit->second.node);
+    }
+    for (size_t i = 0, e = on->numChildren(); i < e; ++i) stack.push_back(on->getChild(i));
+    return light;
+}
+
+bool OgreScene::nameMovedSubtrees(std::vector<Ogre::Node *> &stack) {
+    bool light = false;
     // Each Ogre node ONCE: a moved parent and its moved child must not walk the child's subtree twice (a whole
     // document written at once — a load, a paste — is O(nodes), never O(nodes x depth)).
     std::unordered_set<const Ogre::Node *> seen;
@@ -428,28 +460,12 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
         stack.pop_back();
         if (!seen.insert(on).second) continue;
         if (Node *rec = registryNode(on)) {
-            if (rec->item || rec->decal) noteSceneTransformWrite(*rec);
-            // A LAMP UNDER A MOVED NODE: named, then COMPARED with its own pose key — the journal says WRITTEN,
-            // and only a pose that changed is a move the injection and the scheduler answer.
-            if (rec->light && rec->light->getParentNode()) {
-                Ogre::Node *ln = rec->light->getParentNode();
-                const Ogre::Vector3 p = ln->_getDerivedPositionUpdated();
-                const Ogre::Quaternion q = ln->_getDerivedOrientationUpdated();
-                if (rec->lightPoseKnown && !(p == rec->lightPos && q == rec->lightRot)) {
-                    light = true;
-                    noteLampChanged(*rec);
-                }
-                rec->lightPos = p; rec->lightRot = q; rec->lightPoseKnown = true;
-            }
-            for (NodeId rider : rec->boneRiders) {
-                auto rit = mNodes.find(rider);
-                if (rit != mNodes.end() && rit->second.node) stack.push_back(rit->second.node);
-            }
+            if (nameMovedNode(*rec, on, stack)) light = true;
+        } else {
+            for (size_t i = 0, e = on->numChildren(); i < e; ++i) stack.push_back(on->getChild(i));
         }
-        for (size_t i = 0, e = on->numChildren(); i < e; ++i) stack.push_back(on->getChild(i));
     }
-    if (light) ++mGiLightWriteSerial;
-    return light ? 1u : 0u;
+    return light;
 }
 
 /// The pending list as the walk's item subset: each named node once, those that still carry an Item. The list is

@@ -3579,16 +3579,22 @@ public:
               std::string &errorSink);
     /// The manager of a scene the host made through a create message (U3 stage 4a): bound at the message's drain.
     void adoptManager(Ogre::SceneManager *sm);
-    /// THE TWO GRID STATES DRAWN BETWEEN (U3 stage 5): the newest step's moved nodes, set to lerp(prev, cur, alpha)
-    /// in parallel on the scene's pool (alpha 1 = cur, a lockstep frame's — and the restore).
+    /// THE TWO GRID STATES DRAWN BETWEEN (U3 stage 5; decisions 55-56): the newest step's moved nodes set to
+    /// lerp(prev, cur, alpha) — ONE write per node per frame, the whole apply on the scene's pool — and the previous
+    /// step's nodes that were not re-recorded put back on cur once; every node written is named to the scans and the
+    /// GPU-scene walk through the drain's own door (nameMovedSubtrees). A node already drawn at cur is never written
+    /// again (a lockstep frame's apply wrote it): lockstep frames write and name nothing here.
     void interpolate(float alpha);
-    void noteInterpolated(NodeId id, unsigned long long step);
-    void restoreInterpolated();
+    void restoreInterpolated() { interpolate(1.0f); }
     unsigned long long interpolationStep() const { return mInterpStep; }
-    std::vector<NodeId> mInterpNodes;
+    std::vector<NodeId> mInterpNodes;   ///< the newest step's nodes (each once)
+    std::vector<NodeId> mInterpStale;   ///< the step before's, owed cur where not re-recorded
     unsigned long long mInterpStep = 0;
+    unsigned long long mInterpFrame = 0;   ///< the engine frame this scene was last interpolated in (once a frame)
+    bool mInterpRecsValid = false;      ///< mInterpRecs resolves mInterpNodes (cleared by a note or a removal)
     float mInterpDrawnAlpha = 1.0f;
-    double mInterpMicros = 0.0;
+    double mInterpMicros = 0.0;       ///< the last interpolate's writes (the apply)
+    double mInterpNameMicros = 0.0;   ///< ...and its naming of them to the scans (decision 56)
     unsigned mInterpNodesLast = 0;
     /// THE HOST'S SIDE OF A SCENE COMMAND (U3 stage 4a, decision 39): posted as a message of this scene's stream
     /// (Engine::post) when the host's calls are records; false on the engine's side, where the command applies.
@@ -4571,6 +4577,8 @@ private:
         LocalTrs           prevLocal, curLocal;
         unsigned long long stepSerial = 0;
         bool               hasCur = false;   ///< a record has set cur (stage 5: the first has no motion)
+        unsigned long long interpStep = ~0ull;   ///< the step it is listed for (OgreScene::mInterpNodes, once a step)
+        bool               drawnCur = true;  ///< its Ogre node holds cur (false while a free frame drew it in between)
         /// WHAT THIS NODE ADDS TO THE SCENE'S MOBILITY AND RIG COUNTS (ENGINE-UPGRADE-U3 stage 2 read 12(b)): kept at
         /// every mutation site (recountNode), so MobilityStatus / RigStats are running totals, never a walk.
         struct Counted {
@@ -5570,6 +5578,16 @@ private:
     /// `node(id)` + `mNodes.find(id)`, for the callers that need both the Ogre
     /// node and the record (round-2 review F9).
     std::vector<Node *> mInterpRecs;   ///< the interpolation's resolved nodes (scratch, U3 stage 5)
+    /// THE DRAIN'S DOOR TO THE SCANS (U0 3b; decision 56): each node's subtree — its Ogre children and its bones'
+    /// riders — named once to the GPU-scene walk and the GI/shadow scans, a lamp under it compared with its pose key.
+    /// True when a lamp moved. `stack` is consumed. nameMovedNode: one registered node, what moves with it pushed.
+    bool nameMovedSubtrees(std::vector<Ogre::Node *> &stack);
+    bool nameMovedNode(Node &rec, Ogre::Node *on, std::vector<Ogre::Node *> &stack);
+    /// The node's record joins the newest step's list (applyNodeRecord; each node once a step).
+    void noteInterpolated(Node &rec, NodeId id, unsigned long long step);
+    struct InterpWrite { Node *rec; float alpha; };
+    std::vector<InterpWrite> mInterpWrite;    ///< what one interpolate writes, each node once (scratch)
+    std::vector<Ogre::Node *> mInterpStack;   ///< ...named to the scans through nameMovedSubtrees (scratch)
     Node *record(NodeId id) {
         auto it = mNodes.find(id);
         return it == mNodes.end() ? nullptr : &it->second;
@@ -7504,10 +7522,10 @@ public:
     void setFreeRunning(bool on) override { if (mRenderThread.threaded()) mRenderThread.setFreeRunning(on); }
     void latchSnapshot() override { mRenderThread.latchSnapshots(); }
     void presentationFrame() override { mRenderThread.freeFrameNow(); }
-    void lastInterpolation(const Scene *s, unsigned &nodes, double &micros) const override {
-        nodes = 0; micros = 0.0;
+    void lastInterpolation(const Scene *s, unsigned &nodes, double &micros, double &namingMicros) const override {
+        nodes = 0; micros = 0.0; namingMicros = 0.0;
         for (const auto &q : mScenes)
-            if (q.get() == s) { nodes = q->mInterpNodesLast; micros = q->mInterpMicros; }
+            if (q.get() == s) { nodes = q->mInterpNodesLast; micros = q->mInterpMicros; namingMicros = q->mInterpNameMicros; }
     }
     /// The game side's merge into the hand-over slot (RenderThread::submit).
     void submitFrame(FrameInput input) override;
@@ -7798,6 +7816,23 @@ public:
     bool mHostRecords = false;
     /// THIS FRAME IS A FREE-RUNNING ONE (U3 stage 5, RenderThread::tickWith): it interpolates; a lockstep frame draws cur.
     bool mFreeFrame = false;
+    /// INSIDE A FREE FRAME'S DRAIN (decision 56, worth-a-look 4): a node record stores prev/cur and leaves the Ogre
+    /// node to the interpolation's one write (applySceneStream runs it right after the records, before the change set
+    /// and the reflector arm read a pose). Off everywhere else — a lockstep frame and a request's resolve write cur.
+    bool mDeferNodeWrites = false;
+    /// THIS FRAME WAITED ON THE XR RUNTIME (decision 53): the render loop's pad is skipped after it — xrWaitFrame is the
+    /// clock. And the VR frames begun off the render thread (the XR-thread spike's count: 0 is the law).
+    bool mFrameWaitedOnRuntime = false;
+    unsigned long long mVrFramesOffRenderThread = 0;
+    std::chrono::steady_clock::time_point mFakeRuntimeNext{};   ///< vr.fakeRuntimePace's next display time (render side)
+    /// THE GRID'S STEP in seconds (FrameInput::stepPeriod; decision 55): never the particles' delta.
+    double mStepPeriod = 1.0 / 60.0;
+    /// The presentation's frame (once per frame: clamped at the drain's head, advanced at the frame's).
+    unsigned long long mPresentFrame = 0;
+    bool mPresentBegun = false;
+    float mPresentAlpha = 1.0f;   ///< the last interpolateScene's weight (PublishedEngineFrame::presentAlpha)
+    void beginPresentation();
+    void interpolateScene(OgreScene *sc);
     /// THE PRESENTATION CLOCK (U3 stage 5), in the document's step time: advanced by the display period per free frame,
     /// held between the newest record's two grid states — never a wall clock read by the engine.
     double mPresentTime = 0.0;

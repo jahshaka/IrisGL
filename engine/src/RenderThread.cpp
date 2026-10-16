@@ -96,6 +96,7 @@ void RenderThread::submit(FrameInput &&in) {
     if (in.shadowMapBudget) p.shadowMapBudget = in.shadowMapBudget;
     p.refreshShadows = p.refreshShadows || in.refreshShadows;
     if (in.stepSerial) p.stepSerial = in.stepSerial;
+    if (in.stepPeriod) p.stepPeriod = in.stepPeriod;
     for (FrameInputScene &sc : in.scenes) {
         auto it = std::find_if(p.scenes.begin(), p.scenes.end(),
                                [&](const FrameInputScene &q) { return q.scene == sc.scene; });
