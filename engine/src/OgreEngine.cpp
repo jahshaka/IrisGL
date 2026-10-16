@@ -460,7 +460,7 @@ bool OgreEngine::adoptScene(std::unique_ptr<OgreScene> adopted, unsigned workerT
 void OgreEngine::destroyScene(Scene *scene) {
     // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
     if (hostPosts() && scene) mHostSceneNames.erase(scene->name());
-    if (postedAsMessage([=](OgreEngine &e) { e.destroyScene(scene); return true; }, 0, true)) return;   // a destroy: late
+    if (postedAsMessage([=](OgreEngine &e) { e.destroyScene(scene); return true; })) return;   // in the one order
     if (!scene) return;
     // ITS PART OF THE PENDING RECORD GOES WITH IT (the 3a read, C): a scene re-created at the same address before
     // the next drain must not receive the dead one's fields.
@@ -2661,20 +2661,7 @@ void OgreEngine::applySceneStream(OgreScene *sc, const std::vector<SceneMessage>
     // A REFUSAL IS ITS MESSAGE'S (decision 34): a named message is answered either way, an unnamed one when refused
     // (token 0); the call's reason goes into the answer and the engine's error string is handed back as it was, so
     // the frame's error stays the frame's own fault.
-    for (const SceneMessage &m : messages) {
-        if (!m.apply) continue;
-        const std::string before = mLastError;
-        const bool ok = m.apply(*sc);
-        const std::string why = ok ? std::string() : mLastError != before ? mLastError : std::string("refused");
-        if (!ok) {
-            ++mFrameInputStatus.messagesRefused;
-            mRefusals.push_back({ mPublishedFrames + 1, why });   // the frame this drain belongs to
-        }
-        if (m.token || !ok) sc->noteCompletion(m.token, ok, why);
-        mLastError = before;
-    }
-    mFrameInputStatus.messages += unsigned(messages.size());
-    mFrameInputStatus.messagesTotal += messages.size();
+    for (const SceneMessage &m : messages) applySceneMessage(sc, m);
     const unsigned n = sc->applyNodeRecords(nodes, stepSerial);
     sc->armDeferredReflectors();   // a reflector asked for this frame is measured at its landed pose
     mFrameInputStatus.nodeRecords += n;
@@ -2722,7 +2709,7 @@ void OgreEngine::applyEngineMessage(const EngineMessage &m) {
 }
 
 // A JOIN APPLIES WHAT THE HOST ALREADY SENT (U3 stage 4a): the pending record's structure — the engine's stream,
-// every scene's commands, every view's fields, the destroys last — lands before the join's own work, in the drain's
+// every scene's commands, every view's fields, in the one order — lands before the join's own work, in the drain's
 // order; the frame's own fields (its cause, its delta) stay for the frame.
 void OgreEngine::applyPendingEngineMessages() {
     FrameInput pending;
@@ -2757,11 +2744,43 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     FrameInput in = std::move(handed);
     unsigned applied = 0;
 
-    // THE ENGINE'S OWN STREAM FIRST (U3 stage 4a, decision 39 c): the host's engine verbs in the order it called them
-    // — a scene a message creates exists before its own scene part is drained below.
-    applyEngineMessages(in.engineMessages, false);   // the creates and the verbs, first
-    mFrameInputStatus.messages += unsigned(in.engineMessages.size());
-    mFrameInputStatus.messagesTotal += in.engineMessages.size();
+    // THE ONE ORDER (decision 46; stage 3's FIFO law across every stream): the engine's messages, every scene's
+    // messages and every view's binding, in the order the host posted them (their sequence). A create precedes the
+    // commands posted after it; a view unbound before its scene's destroy is unbound first. The scenes' node records,
+    // changes and fields, and the views' other fields, follow — the record's state after its structure.
+    {
+        struct Op {
+            unsigned long long seq;
+            const EngineMessage *engineMessage;
+            Scene *scene;
+            const SceneMessage *sceneMessage;
+            View *view;
+            Scene *bind;
+        };
+        std::vector<Op> ops;
+        for (const EngineMessage &m : in.engineMessages) ops.push_back({ m.seq, &m, nullptr, nullptr, nullptr, nullptr });
+        for (const FrameInputScene &part : in.scenes)
+            for (const SceneMessage &m : part.messages) ops.push_back({ m.seq, nullptr, part.scene, &m, nullptr, nullptr });
+        for (const FrameInputView &part : in.views)
+            if (part.scene) ops.push_back({ part.sceneSeq, nullptr, nullptr, nullptr, part.view, *part.scene });
+        std::stable_sort(ops.begin(), ops.end(), [](const Op &a, const Op &b) { return a.seq < b.seq; });
+        for (const Op &op : ops) {
+            if (op.engineMessage) {
+                applyEngineMessage(*op.engineMessage);
+            } else if (op.sceneMessage) {
+                OgreScene *sc = nullptr;   // resolved now: a message earlier in the order may have destroyed it
+                for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == op.scene) { sc = q.get(); break; }
+                if (sc) applySceneMessage(sc, *op.sceneMessage);
+            } else if (op.view) {
+                OgreView *v = nullptr;
+                for (auto &q : mViews) if (static_cast<View *>(q.get()) == op.view) { v = q.get(); break; }
+                if (v && v->boundOgreScene() != static_cast<OgreScene *>(op.bind)) {
+                    if (v->boundOgreScene()) v->setScene(nullptr);
+                    if (op.bind) v->setScene(op.bind);
+                }
+            }
+        }
+    }
 
     // THE FRAME'S OWN FIELDS. cause / pace are this frame's (renderOneFrame consumes and resets them); the
     // delta persists; the epoch and the gesture are facts the frame reads.
@@ -2773,7 +2792,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
         OgreScene *sc = nullptr;
         for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
         if (!sc) continue;   // destroyed before its frame
-        applySceneStream(sc, part.messages, part.nodes, in.stepSerial.value_or(0ull));
+        applySceneStream(sc, {}, part.nodes, in.stepSerial.value_or(0ull));   // its messages ran in the one order above
         // THE CHANGE SET NEXT (U0 3b): what the document wrote, before anything of the frame reads a box.
         mFrameInputStatus.changesMoved += unsigned(part.changes.moved.size());
         if (!part.changes.complete) ++mFrameInputStatus.changesIncomplete;
@@ -2843,12 +2862,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
         for (auto &q : mViews) if (static_cast<View *>(q.get()) == part.view) { v = q.get(); break; }
         if (!v) continue;
         FrameInputView &last = v->mFrameApplied;
-        // THE BINDING FIRST (U3 stage 4a: View::setScene is a field): the camera and the chain below need the scene.
-        if (part.scene && v->boundOgreScene() != static_cast<OgreScene *>(*part.scene)) {
-            if (v->boundOgreScene()) v->setScene(nullptr);
-            if (*part.scene) v->setScene(*part.scene);
-            ++viewApplied;
-        }
+        if (part.scene) ++viewApplied;   // the binding ran in the one order above (decision 46)
         if (part.size) { v->resize(part.size->first, part.size->second); ++viewApplied; }   // before the camera (U3 4a)
         applyIfChanged(part.background, last.background, viewApplied, [&](const Colour &c) { v->applyBackground(c); });
         applyIfChanged(part.shadows, last.shadows, viewApplied, [&](bool on) { v->applyShadows(on); });
@@ -2882,7 +2896,6 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     }
     mFrameInputStatus.viewFieldsApplied = viewApplied;
     mFrameInputStatus.fieldsApplied = applied + viewApplied;
-    applyEngineMessages(in.engineMessages, true);   // the destroys, last (U3 stage 4a)
 }
 
 // THE ENGINE'S HALF OF THE SNAPSHOT (ENGINE-UPGRADE-U3 stage 1; RenderThread::publish): every per-frame state the

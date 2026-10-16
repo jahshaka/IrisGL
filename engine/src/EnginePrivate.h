@@ -7528,12 +7528,11 @@ public:
     mutable std::shared_ptr<const std::vector<PublishedFrame::Completion>> mEngineCompletionsPublished;
     /// THE HOST'S SIDE OF AN ENGINE VERB (U3 stage 4a, decision 39 c): the call becomes a message of the engine's own
     /// stream (the same verb, applied on the engine's side at the drain). False on the engine's side: the verb applies.
-    template <class F> bool postedAsMessage(F &&body, unsigned long long token = 0, bool late = false) {
+    template <class F> bool postedAsMessage(F &&body, unsigned long long token = 0) {
         if (!hostPosts()) return false;
         FrameInput in;
         in.engineMessages.push_back(EngineMessage{
-            [b = std::forward<F>(body)](Engine &e) mutable -> bool { return b(static_cast<OgreEngine &>(e)); }, token,
-            late });
+            [b = std::forward<F>(body)](Engine &e) mutable -> bool { return b(static_cast<OgreEngine &>(e)); }, token });
         submitFrame(std::move(in));
         return true;
     }   // pruned at the publish (fillPublished)
@@ -7773,7 +7772,8 @@ public:
     std::function<void()> mHostCompileObserver;
     std::atomic<unsigned long long> mCompileTicks{ 0 };
     unsigned long long mCompileTicksDelivered = 0;
-    void applyEngineMessages(const std::vector<EngineMessage> &messages, bool late);
+    void applyEngineMessage(const EngineMessage &m);
+    void applySceneMessage(OgreScene *sc, const SceneMessage &m);
     std::set<std::string> mHostSceneNames, mHostViewNames;   ///< the host's own name records (the creates' checks)
     bool mHostRecords = false;
     mutable std::string mHostError;

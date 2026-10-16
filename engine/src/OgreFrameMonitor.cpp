@@ -875,7 +875,7 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
     if (hostPosts()) mHostMonitorLevel = level;   // the host's record, at the call (the drain confirms it)
     if (postedAsMessage([=](OgreEngine &e) { e.setFrameMonitor(level); return true; })) return;
     JAH_HOST_CALL("Engine::setFrameMonitor");
-    struct Record { OgreEngine *e = nullptr; ~Record() { e->mHostMonitorLevel = e->mMonitor ? e->mMonitor->mLevel : MonitorLevel::Off; } } record{ this };
+    struct Record { OgreEngine *e = nullptr; ~Record() { if (!e->mHostRecords) e->mHostMonitorLevel = e->mMonitor ? e->mMonitor->mLevel : MonitorLevel::Off; } } record{ this };
     // LEVEL-SENSITIVE, not merely on/off: `Review` is the only recording level
     // today, but a future one must not be a silent no-op when a capture is
     // already running. Same level = nothing to do; a DIFFERENT level while one

@@ -26,6 +26,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <exception>
 #include <vector>
 
 namespace jahshaka { namespace engine { namespace detail {

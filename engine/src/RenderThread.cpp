@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
+#include <exception>
+#include <utility>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -51,6 +53,7 @@ void RenderThread::post(Scene *scene, SceneMessage &&message) {
             parts.push_back(std::move(part));
         }
     }
+    message.seq = ++mPostSeq;   // the one order across streams (decision 46)
     parts[mLastPart].messages.push_back(std::move(message));
 }
 
@@ -59,8 +62,11 @@ void RenderThread::submit(FrameInput &&in) {
     ++mSubmit.submitted;
     mSlot.any = true;
     FrameInput &p = mSlot.record;
+    for (EngineMessage &m : in.engineMessages) m.seq = ++mPostSeq;   // the one order (decision 46)
     p.engineMessages.insert(p.engineMessages.end(), std::make_move_iterator(in.engineMessages.begin()),
                             std::make_move_iterator(in.engineMessages.end()));   // the engine's stream, in order
+    for (FrameInputScene &sc : in.scenes) for (SceneMessage &m : sc.messages) m.seq = ++mPostSeq;
+    for (FrameInputView &v : in.views) if (v.scene) v.sceneSeq = ++mPostSeq;
     if (in.frameDelta) p.frameDelta = in.frameDelta;
     if (in.frameDelta) mEngine.mPushedFrameDelta = *in.frameDelta;   // the host's record (Engine::fixedFrameDelta)
     if (in.cause) p.cause = in.cause;
@@ -110,7 +116,7 @@ void RenderThread::submit(FrameInput &&in) {
         if (v.shadows) it->shadows = v.shadows;
         if (v.sampleCount) it->sampleCount = v.sampleCount;
         if (v.background) it->background = v.background;
-        if (v.scene) it->scene = v.scene;
+        if (v.scene) { it->scene = v.scene; it->sceneSeq = v.sceneSeq; }
         if (v.enabled) it->enabled = v.enabled;
         if (v.offscreenContract) it->offscreenContract = v.offscreenContract;
         if (v.helpersVisible) it->helpersVisible = v.helpersVisible;
@@ -161,6 +167,7 @@ RenderThread::Slot RenderThread::handOver() {
 // ---- THE THREAD (U3 stage 4b) -----------------------------------------------------------------------------------
 
 bool RenderThread::start(std::function<bool()> boot) {
+    mHostThread = std::this_thread::get_id();   // the host's thread: the one that started the engine
     bool ok = false;
     std::mutex bootLock;
     std::condition_variable bootCv;

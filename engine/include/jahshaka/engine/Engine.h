@@ -1941,9 +1941,9 @@ public:
     /// POINTS, the units the host's toolkit lays out in (Qt's QWidget::width()).
     /// The window backend converts: on X11 at the current pin the conversion is
     /// the identity, on macOS the Metal window multiplies by the layer's
-    /// contentsScale. What comes BACK — View::width()/height() — is the render
-    /// target's real size in PIXELS, which is why it can differ from what was
-    /// pushed (see View::width). Points == pixels on every unscaled display, so
+    /// contentsScale. What comes BACK — the snapshot's ViewFrames::width/height (View::published, the host's door;
+    /// U3 decision 46) — is the render target's real size in PIXELS, which is why it can differ from what was
+    /// pushed. Points == pixels on every unscaled display, so
     /// the two only diverge on HiDPI, which is its own program and not handled
     /// anywhere in this tree yet (deep audit area 7 F4).
     virtual View  *createView(const std::string &name,

@@ -295,7 +295,9 @@ void installJahLodStrategy()
 MeshId OgreScene::createMesh(const MeshData &data, MeshId id) {
     if (hostPosts()) {   // THE HOST'S CREATE (U3 4a): an id it reserves, the create a message owning the data
         const MeshId mid = id ? id : reserveMeshId();
-        postScene([=](OgreScene &s) { return s.createMesh(data, mid) != 0; });
+        // ONE COPY, SHARED (decision 46): the host's data copied once into a shared block the message carries.
+        auto shared = std::make_shared<const MeshData>(data);
+        postScene([shared, mid](OgreScene &s) { return s.createMesh(*shared, mid) != 0; });
         return mid;
     }
     if (id && mMeshes.count(id)) { mError = "createMesh: the id is already a mesh of this scene"; return 0; }

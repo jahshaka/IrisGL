@@ -4590,10 +4590,12 @@ MeshId SceneMirror::meshFor(iris::Mesh *mesh, const QString &rigId)
         }
         data.blendWeights = bw;
     }
-    MeshId id = newMesh(data);
+    // THE DATA IS MOVED INTO ITS MESSAGE (decision 46 (3)): the counts read first, then the mesh handed over — a copy
+    // here was the UI thread's whole vertex buffer, once per import.
     ++mBuiltMeshes;
     mBuiltVertices += data.vertexCount();
     mBuiltIndices += data.indices.size();
+    MeshId id = newMesh(std::move(data));
     if (id) mMeshes.insert(key, id);
     return id;
 }

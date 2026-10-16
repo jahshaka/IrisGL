@@ -7951,6 +7951,9 @@ struct SceneMessage {
     /// A host that must learn the answer names the message (non-zero): its completion — ok or refused, with the
     /// engine's reason — is published in Scene::published().completions (U3 stage 3).
     unsigned long long token = 0;
+    /// THE ONE ORDER (decision 46): stamped when the message reaches the slot — the drain applies every stream's
+    /// messages (the engine's, every scene's, every view's binding) in this order.
+    unsigned long long seq = 0;
 };
 
 /// The user's GESTURE as the host knows it (a gizmo drag, a viewport drag, a material hover): what makes a moving
@@ -8004,6 +8007,7 @@ struct FrameInputView {
     // ---- THE HOST'S VIEW SETTERS AS FIELDS (ENGINE-UPGRADE-U3 stage 4a, decision 39 a): each View setter called on
     // the host's side writes its field here (the newest wins in a merge) and the drain applies it — never inline.
     std::optional<Scene *>            scene;              ///< View::setScene (null = detach); the drain rebinds
+    unsigned long long                sceneSeq = 0;       ///< the binding's place in the one order (decision 46)
     std::optional<bool>               enabled;            ///< View::setEnabled
     std::optional<OffscreenContract>  offscreenContract;  ///< View::setOffscreenContract
     std::optional<bool>               helpersVisible;     ///< View::setHelpersVisible
@@ -8025,9 +8029,7 @@ struct FrameInputView {
 struct EngineMessage {
     std::function<bool(Engine &)> apply;
     unsigned long long token = 0;
-    /// A DESTROY drains LAST (after the scenes' and the views' parts): teardown mirrors creation, so a view the host
-    /// unbound in the same record is unbound before the scene it showed goes.
-    bool late = false;
+    unsigned long long seq = 0;   ///< the one order across streams (decision 46), stamped at the slot
 };
 struct FrameInput {
     std::vector<EngineMessage>        engineMessages;  ///< the engine's own stream (decision 39 c), drained first
