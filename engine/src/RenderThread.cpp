@@ -158,6 +158,78 @@ RenderThread::Slot RenderThread::handOver() {
     return out;
 }
 
+// ---- THE THREAD (U3 stage 4b) -----------------------------------------------------------------------------------
+
+bool RenderThread::start(std::function<bool()> boot) {
+    bool ok = false;
+    std::mutex bootLock;
+    std::condition_variable bootCv;
+    bool booted = false;
+    mThread = std::thread([&, boot = std::move(boot)] {
+        gRenderThreadId.store(std::this_thread::get_id(), std::memory_order_relaxed);
+        {
+            EngineSideScope engineSide;
+            ok = boot();
+        }
+        { std::lock_guard<std::mutex> l(bootLock); booted = true; }
+        bootCv.notify_all();
+        threadMain();
+    });
+    std::unique_lock<std::mutex> l(bootLock);
+    bootCv.wait(l, [&] { return booted; });
+    return ok;
+}
+
+void RenderThread::threadMain() {
+    for (;;) {
+        std::function<void()> task;
+        {
+            std::unique_lock<std::mutex> l(mTaskLock);
+            mTaskCv.wait(l, [this] { return mTaskPending || mQuit; });
+            if (!mTaskPending && mQuit) return;
+            task = std::move(mTask);
+        }
+        if (task) task();
+        bool quit = false;
+        {
+            std::lock_guard<std::mutex> l(mTaskLock);
+            mTaskPending = false;
+            mTask = nullptr;
+            quit = mQuit;
+        }
+        mTaskCv.notify_all();
+        if (quit) return;
+    }
+}
+
+void RenderThread::runOn(const std::function<void()> &task) {
+    if (onRenderThread()) { task(); return; }
+    std::unique_lock<std::mutex> l(mTaskLock);
+    mTaskCv.wait(l, [this] { return !mTaskPending; });   // one task at a time (a second host thread queues)
+    mTask = task;
+    mTaskPending = true;
+    mTaskCv.notify_all();
+    // THE HOST WAITS — and keeps its own side alive while it does (the splash's progress inside a long frame).
+    while (mTaskPending) {
+        mTaskCv.wait_for(l, std::chrono::milliseconds(10), [this] { return !mTaskPending; });
+        if (mTaskPending && mHostPump) { l.unlock(); mHostPump(); l.lock(); }
+    }
+    l.unlock();
+    if (mHostPump) mHostPump();
+}
+
+void RenderThread::stop(const std::function<void()> &teardown) {
+    if (!threaded()) { if (teardown) teardown(); return; }
+    runOn([&] { EngineSideScope engineSide; if (teardown) teardown(); });
+    {
+        std::lock_guard<std::mutex> l(mTaskLock);
+        mQuit = true;
+    }
+    mTaskCv.notify_all();
+    mThread.join();
+    gRenderThreadId.store(std::this_thread::get_id(), std::memory_order_relaxed);
+}
+
 void RenderThread::tickInline() {
     Slot handed = handOver();
     // THE HOST'S HALF OF THE MONITOR'S RECORD, folded in before the frame opens (the next beginFrame adopts what is

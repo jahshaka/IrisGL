@@ -1305,6 +1305,13 @@ bool OgreScene::applySkyReflectionFaces(const TextureId faces[6]) {
 // samples clamped under `_notifyIblSpecMipmap`'s process-wide count — acceptable
 // and noted, not measured.
 TextureId OgreScene::createCubemap(const TextureId faces[6], TextureId id) {
+    // U3 stage 4a: the host's call is a message OWNING what it carries (a copy of the pointed-to data).
+    if (hostPosts()) {
+        const TextureId rid = id ? id : reserveTextureId();
+        const std::array<TextureId, 6> f{ faces[0], faces[1], faces[2], faces[3], faces[4], faces[5] };
+        postScene([=](OgreScene &s) { return s.createCubemap(f.data(), rid) != 0; });
+        return rid;
+    }
     JAH_HOST_CALL("Scene::createCubemap");
     if (id && mTextures.count(id)) { mError = "createCubemap: the id is already a texture of this scene"; return 0; }
     JAH_TRY {
@@ -2609,6 +2616,8 @@ CloudStatus OgreScene::cloudStatus() const {
 // pass, so a pending one runs first; the read is a synchronous ticket after a
 // flush (DOCS/traps/ENGINE.md: a ticket without flushCommands reads stale VRAM).
 bool OgreScene::cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres) {
+    // U3 stage 4a: a read on the host's side is a REQUEST, answered on the engine's side.
+    if (hostPosts()) { bool r = false; requestOnEngine([&] { r = cloudField(tau, size, tileMetres); }); return r; }
     JAH_HOST_CALL("Scene::cloudField");
     tau.clear();
     size = 0u;
@@ -2651,6 +2660,8 @@ bool OgreScene::cloudField(std::vector<float> &tau, unsigned &size, float &tileM
 // viewer's lat-long convention on the CPU.
 bool OgreScene::renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize,
                                   float exposure, std::vector<unsigned char> &rgba) {
+    // U3 stage 4a: a read on the host's side is a REQUEST, answered on the engine's side.
+    if (hostPosts()) { bool r = false; requestOnEngine([&] { r = renderSkyEquirect(width, height, faceSize, exposure, rgba); }); return r; }
     JAH_HOST_CALL("Scene::renderSkyEquirect");
     if (mSkyDesc.mode == SkyMode::NoSky || width == 0 || height == 0 || faceSize == 0) return false;
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();

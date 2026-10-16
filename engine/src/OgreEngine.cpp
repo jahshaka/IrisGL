@@ -61,9 +61,28 @@ const Ogre::uint32 kLowestLatencyVSync = 0x80000000u;
 
 }  // namespace
 
+bool OgreEngine::startRenderThread(const EngineConfig &cfg, std::string &error) {
+    // THE AFFINITY LAW IS ON from here (decision 39; JAH_DEBUG builds assert it): a counted entry the host calls
+    // instead of posting, requesting or joining stops the process with its name.
+    gAffinityChecks.store(true, std::memory_order_relaxed);
+    // The host's side while it waits on the render thread: the compile observer, delivered here (it repaints Qt's
+    // splash, which only the host's thread may touch).
+    mRenderThread.setHostPump([this] {
+        const unsigned long long ticks = mCompileTicks.load(std::memory_order_relaxed);
+        if (ticks != mCompileTicksDelivered) {
+            mCompileTicksDelivered = ticks;
+            if (mHostCompileObserver) mHostCompileObserver();
+        }
+    });
+    std::string bootError;
+    const bool ok = mRenderThread.start([&] { return init(cfg, bootError); });
+    if (!ok) error = bootError;
+    return ok;
+}
+
 bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     EngineSideScope engineSide;   // the boot: the engine's own calls inside it are the render side's (U3 4a)
-    mHostRecords = cfg.hostRecords;
+    mHostRecords = cfg.hostRecords || cfg.renderThread;
 #ifdef __linux__
     mDisplay = reinterpret_cast<void *>(cfg.display);
 #else
@@ -267,6 +286,11 @@ Ogre::SceneManager *OgreEngine::blankSceneManager() {
 // system's own, made in init); a rendering one gets a surfaceless one. What the document's staging scene manager used
 // to force at boot before ENGINE-UPGRADE-U2 deleted it — a document needs no engine — is now asked for by name.
 bool OgreEngine::prepareDevice() {
+    if (!mRenderThread.onRenderThread()) {   // the boot's door: on the render thread (U3 stage 4b)
+        bool ok = false;
+        mRenderThread.runOn([&] { ok = prepareDevice(); });
+        return ok;
+    }
     // THE BOOT'S DOOR (EngineHost, once, right after create — stage 4b runs it on the render thread inside create).
     if (mHlmsRegistered) return true;
     JAH_TRY {
@@ -429,7 +453,7 @@ bool OgreEngine::adoptScene(std::unique_ptr<OgreScene> adopted, unsigned workerT
 void OgreEngine::destroyScene(Scene *scene) {
     // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
     if (hostPosts() && scene) mHostSceneNames.erase(scene->name());
-    if (postedAsMessage([=](OgreEngine &e) { e.destroyScene(scene); return true; })) return;
+    if (postedAsMessage([=](OgreEngine &e) { e.destroyScene(scene); return true; }, 0, true)) return;   // a destroy: late
     if (!scene) return;
     // ITS PART OF THE PENDING RECORD GOES WITH IT (the 3a read, C): a scene re-created at the same address before
     // the next drain must not receive the dead one's fields.
@@ -530,6 +554,13 @@ void OgreEngine::drainPendingSceneDestroys() noexcept {
 View *OgreEngine::createView(const std::string &name,
                              NativeWindowHandle handle, unsigned width, unsigned height,
                              const Colour &background) {
+    // THE FIRST JOIN (U3 stage 4b): the window's surface is made on the render thread; the host posted the winId and
+    // waits (Qt's rule: the native window exists and outlives the surface).
+    if (!mRenderThread.onRenderThread()) {
+        View *made = nullptr;
+        mRenderThread.runOn([&] { made = createView(name, handle, width, height, background); });
+        return made;
+    }
     EngineSideScope engineSide;   // a join: the engine's own calls inside it are the render side's (U3 4a)
     if (viewNameTaken(name)) return nullptr;
     if (mHeadless) {
@@ -754,6 +785,8 @@ OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, u
 }
 
 void OgreEngine::destroyView(View *view) {
+    // THE SECOND JOIN (U3 stage 4b): the surface goes on the render thread before Qt destroys its window.
+    if (!mRenderThread.onRenderThread()) { mRenderThread.runOn([&] { destroyView(view); }); return; }
     EngineSideScope engineSide;   // a join: the engine's own calls inside it are the render side's (U3 4a)
     // A JOIN'S FIRST STEP (U3 stage 4a): the engine's own stream lands — a view the host made and destroys before
     // its first frame exists to be destroyed.
@@ -853,7 +886,9 @@ void noteAsyncView(bool on) { gAsyncViews.fetch_add(on ? 1 : -1, std::memory_ord
 
 // ONE TURN OF THE RENDER LOOP (ENGINE-UPGRADE-U3 stage 1, the seam): the hand-over, the frame, the publish — all
 // RenderThread's (RenderThread.cpp), on the caller's thread until stage 4 gives the loop its own.
-void OgreEngine::renderOneFrame() { mRenderThread.tickInline(); }
+// THE LOCKSTEP VERB (U3 stage 4b): the frame runs on the render thread and the caller waits for it — "serial >= k
+// presented": the record it submitted is the one the frame applies. Inline where there is no thread (a fixture).
+void OgreEngine::renderOneFrame() { mRenderThread.runOn([this] { mRenderThread.tickInline(); }); }
 
 // THE FRAME'S BODY (ENGINE-UPGRADE-U3 F7): the loop hands it the record the hand-over took.
 bool OgreEngine::runFrame(FrameInput &record, bool any) {
@@ -1904,6 +1939,7 @@ bool OgreEngine::beginVrSession(Scene *scene, const VrConfig &cfg) {
 
 void OgreEngine::endVrSession() {
     // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
+    if (hostPosts()) { mHostVrSessionLive = false; mHostVrView = nullptr; }   // the host's records, at the call
     if (postedAsMessage([=](OgreEngine &e) { e.endVrSession(); return true; })) return;
     if (!mVrSession) return;
     // CLEARED FIRST, THEN DELETED. The session's destructor calls back into
@@ -1936,7 +1972,9 @@ void OgreEngine::endVrSession() {
 }
 
 VrState OgreEngine::vrState() const {
-    JAH_SYNC_GETTER("Engine::vrState");
+    // A VR READ ON THE HOST'S SIDE IS A REQUEST (U3 stage 4a; its snapshot field is stage 6's): answered after what
+    // the host already sent.
+    if (hostPosts()) { VrState r{}; const_cast<OgreEngine *>(this)->request([&](Engine &) { r = vrState(); }, nullptr); return r; }
     return vrStateNow();
 }
 
@@ -1946,7 +1984,9 @@ VrState OgreEngine::vrStateNow() const {
 }
 
 VrStatus OgreEngine::vrStatus() const {
-    JAH_SYNC_GETTER("Engine::vrStatus");
+    // A VR READ ON THE HOST'S SIDE IS A REQUEST (U3 stage 4a; its snapshot field is stage 6's): answered after what
+    // the host already sent.
+    if (hostPosts()) { VrStatus r; const_cast<OgreEngine *>(this)->request([&](Engine &) { r = vrStatus(); }, nullptr); return r; }
     if (!mVrSession) {
         VrStatus s;
         s.state = vrStateNow();
@@ -2030,6 +2070,7 @@ bool OgreEngine::vrEyeScreenshot(unsigned eye, Image &out) {
 
 void OgreEngine::setVrMirrorView(View *view) {
     // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
+    if (hostPosts()) mHostVrMirrorView = view;   // the host's record, at the call
     if (postedAsMessage([=](OgreEngine &e) { e.setVrMirrorView(view); return true; })) return;
     mVrMirrorView = static_cast<OgreView *>(view);
     mHostVrMirrorView = view;
@@ -2100,7 +2141,9 @@ bool OgreEngine::vrInjectInput(int hand, const VrHandState &state) {
 // test. The session holds this frame's set; with no session the store below is
 // the only source there can be.
 unsigned OgreEngine::vrHandJoints(int hand, VrPose *out, unsigned count) const {
-    JAH_SYNC_GETTER("Engine::vrHandJoints");
+    // A VR READ ON THE HOST'S SIDE IS A REQUEST (U3 stage 4a; its snapshot field is stage 6's): answered after what
+    // the host already sent.
+    if (hostPosts()) { unsigned r = 0; const_cast<OgreEngine *>(this)->request([&](Engine &) { r = vrHandJoints(hand, out, count); }, nullptr); return r; }
     if (hand < 0 || hand >= int(VrHandCount)) return 0u;
     // A LIVE SESSION WITH HANDS OFF HAS NO SKELETON TO REPORT (lane
     // HANDS-SWITCH-1), and that includes an injected one: a project that asked
@@ -2122,7 +2165,9 @@ unsigned OgreEngine::vrHandJoints(int hand, VrPose *out, unsigned count) const {
 // fix round; Engine::vrBindingBlocks). Only a session can answer: the blocks
 // are suggested once, at its creation.
 unsigned OgreEngine::vrBindingBlocks(VrBindingBlock *out, unsigned count) const {
-    JAH_SYNC_GETTER("Engine::vrBindingBlocks");
+    // A VR READ ON THE HOST'S SIDE IS A REQUEST (U3 stage 4a; its snapshot field is stage 6's): answered after what
+    // the host already sent.
+    if (hostPosts()) { unsigned r = 0; const_cast<OgreEngine *>(this)->request([&](Engine &) { r = vrBindingBlocks(out, count); }, nullptr); return r; }
     return mVrSession ? vrSessionBindingBlocks(mVrSession, out, count) : 0u;
 }
 
@@ -2476,6 +2521,7 @@ bool OgreEngine::saveTextureCache() {
 
 void OgreEngine::setVsync(bool on) {
     // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (hostPosts()) mHostVsync = on;   // the host's record, at the call
     if (postedAsMessage([=](OgreEngine &e) { e.setVsync(on); return true; })) return;
     JAH_HOST_CALL("Engine::setVsync");
     if (mVsync == on) return;
@@ -2550,10 +2596,15 @@ void OgreEngine::post(Scene *scene, SceneMessage &&message) { mRenderThread.post
 // THE REQUEST DOOR (U3 stage 3): the question runs on the engine's side — its reads are the engine's own, never a
 // host's synchronous read — inline today; stage 4 moves it onto the render thread.
 void OgreEngine::request(std::function<void(Engine &)> question, std::function<void()> done) {
-    if (question) {
+    // ANSWERED BETWEEN FRAMES ON THE RENDER THREAD (U3 stage 4b): the render thread runs one task at a time, so the
+    // question never meets a frame; `done` runs on the asker's thread once it has its answer.
+    // ...AFTER WHAT THE HOST ALREADY SENT (U3 stage 4a): a request is answered on the state the host's earlier calls
+    // made — the pending record's structure lands first (a view it just created exists to be asked about).
+    if (question) mRenderThread.runOn([&] {
         EngineSideScope engineSide;
+        if (mHostRecords) applyPendingEngineMessages();
         question(*this);
-    }
+    });
     if (done) done();
 }
 
@@ -2603,9 +2654,9 @@ void OgreEngine::applySceneStream(OgreScene *sc, const std::vector<SceneMessage>
 
 // THE ENGINE'S STREAM (U3 stage 4a, decision 39 c): each message applied on the engine's side, its refusal its own
 // completion, the engine's error string handed back as it was.
-void OgreEngine::applyEngineMessages(const std::vector<EngineMessage> &messages) {
+void OgreEngine::applyEngineMessages(const std::vector<EngineMessage> &messages, bool late) {
     for (const EngineMessage &m : messages) {
-        if (!m.apply) continue;
+        if (!m.apply || m.late != late) continue;
         const std::string before = mLastError;
         const bool ok = m.apply(*this);
         const std::string why = ok ? std::string() : mLastError != before ? mLastError : std::string("refused");
@@ -2621,13 +2672,22 @@ void OgreEngine::applyEngineMessages(const std::vector<EngineMessage> &messages)
     }
 }
 
+// A JOIN APPLIES WHAT THE HOST ALREADY SENT (U3 stage 4a): the pending record's structure — the engine's stream,
+// every scene's commands, every view's fields, the destroys last — lands before the join's own work, in the drain's
+// order; the frame's own fields (its cause, its delta) stay for the frame.
 void OgreEngine::applyPendingEngineMessages() {
-    std::vector<EngineMessage> pending;
-    mRenderThread.withPending([&](FrameInput &rec, bool) { pending.swap(rec.engineMessages); });
-    if (pending.empty()) return;
+    FrameInput pending;
+    bool any = false;
+    mRenderThread.withPending([&](FrameInput &rec, bool a) {
+        any = a;
+        pending.engineMessages.swap(rec.engineMessages);
+        pending.scenes.swap(rec.scenes);
+        pending.views.swap(rec.views);
+        pending.stepSerial = rec.stepSerial;
+    });
+    if (pending.engineMessages.empty() && pending.scenes.empty() && pending.views.empty()) return;
     EngineSideScope engineSide;
-    applyEngineMessages(pending);
-    mFrameInputStatus.messagesTotal += pending.size();
+    drainFrameInput(pending, any);
 }
 
 void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
@@ -2650,7 +2710,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
 
     // THE ENGINE'S OWN STREAM FIRST (U3 stage 4a, decision 39 c): the host's engine verbs in the order it called them
     // — a scene a message creates exists before its own scene part is drained below.
-    applyEngineMessages(in.engineMessages);
+    applyEngineMessages(in.engineMessages, false);   // the creates and the verbs, first
     mFrameInputStatus.messages += unsigned(in.engineMessages.size());
     mFrameInputStatus.messagesTotal += in.engineMessages.size();
 
@@ -2773,6 +2833,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     }
     mFrameInputStatus.viewFieldsApplied = viewApplied;
     mFrameInputStatus.fieldsApplied = applied + viewApplied;
+    applyEngineMessages(in.engineMessages, true);   // the destroys, last (U3 stage 4a)
 }
 
 // THE ENGINE'S HALF OF THE SNAPSHOT (ENGINE-UPGRADE-U3 stage 1; RenderThread::publish): every per-frame state the
@@ -3323,6 +3384,18 @@ bool OgreEngine::clearShaderCache() {
 }
 
 void OgreEngine::setCompileObserver(std::function<void()> observer) {
+    // ON TWO THREADS (U3 stage 4b) the observer stays the host's: the render side counts the compiles it makes and
+    // the host delivers them on its own thread while it waits (the pump, startRenderThread).
+    if (mRenderThread.threaded() && detail::tlsEngineSide == 0) {
+        mHostCompileObserver = observer;
+        const bool on = static_cast<bool>(observer);
+        postedAsMessage([on](OgreEngine &e) {
+            e.mShaderCache.setCompileObserver(on ? std::function<void()>([&e] { e.mCompileTicks.fetch_add(1); })
+                                                 : std::function<void()>());
+            return true;
+        });
+        return;
+    }
     // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
     if (postedAsMessage([observer](OgreEngine &e) { e.setCompileObserver(observer); return true; })) return;
     mShaderCache.setCompileObserver(std::move(observer));
@@ -3333,7 +3406,13 @@ void OgreEngine::shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
     mShaderCache.progress(compiled, fromCache, expected);
 }
 
+// THE TEARDOWN RUNS ON THE RENDER THREAD (U3 stage 4b, the third join): the UI thread joins it after every view's
+// surface is gone and before Qt destroys the widgets' windows — trap 1's order inside unchanged.
 OgreEngine::~OgreEngine() {
+    mRenderThread.stop([this] { teardown(); });
+}
+
+void OgreEngine::teardown() {
     EngineSideScope engineSide;   // the teardown: the engine's own calls inside it are the render side's (U3 4a)
     // THE HOST CALLS OF THE RUN, DUMPED (U3 stage 4a's census-by-counter): JAH_HOST_CALLS_DUMP=<file> appends every
     // counted site that saw a host call — the work list the counter settles, never a grep.
@@ -4050,6 +4129,13 @@ std::unique_ptr<Engine> Engine::create(const EngineConfig &cfg, std::string &err
     if (cfg.hlmsMediaDir.empty()) { error = "EngineConfig::hlmsMediaDir is empty"; return nullptr; }
     auto engine = std::unique_ptr<detail::OgreEngine>(new detail::OgreEngine());
     detail::gLiveEngine = engine.get();
+    // THE RENDER THREAD (U3 stage 4b): Root and the device are made on it; create returns when they are up.
+    if (cfg.renderThread) {
+        detail::OgreEngine *e = engine.get();
+        if (!e->startRenderThread(cfg, error)) return nullptr;   // ~OgreEngine joins the thread
+        return engine;
+    }
+    detail::gRenderThreadId.store(std::this_thread::get_id(), std::memory_order_relaxed);
     if (!engine->init(cfg, error)) return nullptr;   // ~OgreEngine clears gLiveEngine
     return engine;
 }

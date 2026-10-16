@@ -9,6 +9,7 @@
 // One static site per getter, registered on its first counted call into a lock-free list; Engine::syncGetters() reads
 // the list. Ogre-free: the engine's private TUs include it through EnginePrivate.h.
 #include <atomic>
+#include <thread>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -50,6 +51,7 @@ namespace jahshaka { namespace engine { namespace detail {
 /// THE AFFINITY LAW (U3 decision 39): under JAH_DEBUG, once the render thread owns the engine (stage 4b turns it on),
 /// every counted engine entry asserts it runs ON the render thread or inside the engine's own side. Off until then.
 extern std::atomic<bool> gAffinityChecks;
+extern std::atomic<std::thread::id> gRenderThreadId;
 void checkAffinity(const char *entry);
 }}}   // namespace jahshaka::engine::detail
 #ifdef JAH_DEBUG

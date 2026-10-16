@@ -195,6 +195,11 @@ Rgba sampleSrc(const Ogre::Image2 &src, bool grayscale, float u, float v)
 // ---------------------------------------------------------------------------
 TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind, TextureId id)
 {
+    if (hostPosts()) {   // U3 4a: the create a message under an id the host reserves
+        const TextureId rid = id ? id : reserveTextureId();
+        postScene([=](OgreScene &s) { return s.loadDecalTexture(path, kind, rid) != 0; });
+        return rid;
+    }
     JAH_HOST_CALL("Scene::loadDecalTexture");
     if (id && mTextures.count(id)) { mError = "loadDecalTexture: the id is already a texture of this scene"; return 0; }
     DecalAtlas &atlas = decalAtlas(kind);
@@ -404,6 +409,7 @@ unsigned OgreScene::decalAtlasUsed(DecalMap kind) const
 // ---------------------------------------------------------------------------
 bool OgreScene::setDecal(NodeId id, const DecalDesc &d)
 {
+    if (postScene([=](OgreScene &s) { return s.setDecal(id, d); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setDecal");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) { mError = "setDecal: unknown node"; return false; }
@@ -486,6 +492,7 @@ bool OgreScene::setDecal(NodeId id, const DecalDesc &d)
 
 bool OgreScene::removeDecal(NodeId id)
 {
+    if (postScene([=](OgreScene &s) { return s.removeDecal(id); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::removeDecal");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.decal) return false;

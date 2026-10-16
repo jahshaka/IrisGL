@@ -43,6 +43,7 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
 // from the call on; its manager is made by the create message on the engine's side, and bound now.
 bool OgreScene::hostPosts() const { return mEngine && mEngine->hostPosts(); }
 void OgreScene::postSceneMessage(SceneMessage &&m) { mEngine->post(this, std::move(m)); }
+void OgreScene::requestOnEngine(const std::function<void()> &f) { mEngine->request([&](Engine &) { f(); }, nullptr); }
 
 void OgreScene::adoptManager(Ogre::SceneManager *sm) {
     mSceneMgr = sm;
@@ -488,6 +489,7 @@ NodeId OgreScene::createNode(NodeId parent, NodeId id) {
 }
 
 NodeId OgreScene::createDocumentNode(NodeId id, NodeId parent) {
+    if (postScene([=](OgreScene &s) { return s.createDocumentNode(id, parent) != 0; })) return id;   // U3 4a: a message
     JAH_HOST_CALL("Scene::createDocumentNode");
     JAH_TRY {
         // THE DOCUMENT'S OWN ID (U3 stage 3, F6): the record names the node by it, before and after it exists here.
@@ -736,6 +738,7 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
 }
 
 bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
+    if (postScene([=](OgreScene &s) { return s.setNodeParent(id, parent); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeParent");
     JAH_TRY {
         Node *rec = record(id);                                  // one lookup each (F9)
@@ -1190,6 +1193,7 @@ void OgreScene::setVrProxyNodes(NodeId left, NodeId right) {
 }
 
 bool OgreScene::publishBonePoses(NodeId id, bool on) {
+    if (postScene([=](OgreScene &s) { return s.publishBonePoses(id, on); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::publishBonePoses");
     const auto it = std::find(mPublishedRigs.begin(), mPublishedRigs.end(), id);
     if (!on) { if (it != mPublishedRigs.end()) mPublishedRigs.erase(it); return true; }
@@ -1226,6 +1230,12 @@ void OgreScene::vrRayNodes(NodeId out[2]) const {
 // frame that draws it (vrBoneTransform). A scene that never sees a tracked hand
 // carries two zero counts.
 void OgreScene::setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) {
+    // U3 stage 4a: the host's call is a message OWNING what it carries (a copy of the pointed-to data).
+    if (hostPosts()) {
+        std::vector<NodeId> c(nodes, nodes + (nodes ? count : 0u));
+        postScene([=](OgreScene &s) { s.setVrHandBoneNodes(hand, c.empty() ? nullptr : c.data(), unsigned(c.size())); return true; });
+        return;
+    }
     JAH_HOST_CALL("Scene::setVrHandBoneNodes");
     if (hand >= 2u) return;
     const unsigned n = (!nodes || count == 0u)
@@ -1278,6 +1288,7 @@ bool OgreScene::nodeWorldPoseDrawn(NodeId id, Vec3 &position, Quat &rotation) co
 // meaning, so `setNodeHelper(id,false)` cannot leave an object claiming to be a
 // backdrop that no capture excludes.
 void OgreScene::setNodeBackdrop(NodeId id, bool backdrop) {
+    if (postScene([=](OgreScene &s) { s.setNodeBackdrop(id, backdrop); return true; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeBackdrop");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
@@ -1323,6 +1334,7 @@ bool OgreScene::nodeBackdrop(NodeId id) const {
 // node) reaches none of the three — there is no item to re-flag and no probe
 // that ever saw it — which is why a scene full of movers costs nothing to open.
 void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
+    if (postScene([=](OgreScene &s) { s.setNodeMovable(id, movable, change); return true; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeMovable");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
@@ -1454,6 +1466,7 @@ void OgreScene::rebuildFacts() {
 }
 
 void OgreScene::setNodeLightMask(NodeId id, unsigned mask) {
+    if (postScene([=](OgreScene &s) { s.setNodeLightMask(id, mask); return true; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeLightMask");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
@@ -1484,6 +1497,7 @@ unsigned OgreScene::nodeLightMask(NodeId id) const {
 // MovableObject::setVisibilityFlags does NOT overwrite (it merges the reserved
 // layer bits), so this coexists with itemVisibilityFlags' channel scheme.
 void OgreScene::setNodeCastShadow(NodeId id, bool on) {
+    if (postScene([=](OgreScene &s) { s.setNodeCastShadow(id, on); return true; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeCastShadow");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
@@ -1525,6 +1539,7 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
 // for an answer the caller had in a local variable. Measured at 10,503 nodes:
 // 21,006 inheritedShown calls, of which half were this one.
 void OgreScene::setNodeVisibleUnder(NodeId id, bool visible, bool parentShown) {
+    if (postScene([=](OgreScene &s) { s.setNodeVisibleUnder(id, visible, parentShown); return true; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeVisibleUnder");
     setNodeVisibleImpl(id, visible, &parentShown);
 }
@@ -1879,6 +1894,7 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
 }
 
 bool OgreScene::removeLight(NodeId id) {
+    if (postScene([=](OgreScene &s) { return s.removeLight(id); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::removeLight");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.light) return false;

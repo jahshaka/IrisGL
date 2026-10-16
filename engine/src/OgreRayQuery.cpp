@@ -8574,6 +8574,7 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
 // private to this TU.
 void OgreEngine::setRayTracing(bool on) {
     // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (hostPosts()) mHostRayTracing = on;   // the host's record, at the call
     if (postedAsMessage([=](OgreEngine &e) { e.setRayTracing(on); return true; })) return;
     JAH_HOST_CALL("Engine::setRayTracing");
     if (mRayTracingWanted == on) return;
@@ -8899,6 +8900,8 @@ RayQueryStatus OgreScene::rayQueryStatus() const {
 
 /// THE BOUNDARY'S TRACE (tests and tools only — see traceBlocking).
 bool OgreScene::traceRays(const std::vector<float> &rays, std::vector<float> &hits) {
+    // U3 stage 4a: a read on the host's side is a REQUEST, answered on the engine's side.
+    if (hostPosts()) { bool r = false; requestOnEngine([&] { r = traceRays(rays, hits); }); return r; }
     JAH_HOST_CALL("Scene::traceRays");
     hits.clear();
     if (!mEngine || !mEngine->mRayTier) return false;

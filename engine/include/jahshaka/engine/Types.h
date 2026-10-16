@@ -6042,6 +6042,9 @@ struct EngineConfig {
     /// the shape the render thread (stage 4b) needs. The app turns it on (bridge/enginehost.cpp); an engine fixture
     /// that drives the engine directly on its own thread leaves it off and its calls apply where they are made.
     bool hostRecords = false;
+    /// THE RENDER THREAD (ENGINE-UPGRADE-U3 stage 4b): Root, the device, the windows and every frame on a thread of the
+    /// engine's own; the caller's frames, requests and the view joins wait for it (lockstep). Implies hostRecords.
+    bool renderThread = false;
     /// Build a dedicated, de-duplicated, position-only vertex buffer for each
     /// mesh's shadow-map pass instead of re-streaming the full vertex. Shadow
     /// passes then read ~4x less vertex bandwidth, at the cost of extra VRAM per
@@ -8022,6 +8025,9 @@ struct FrameInputView {
 struct EngineMessage {
     std::function<bool(Engine &)> apply;
     unsigned long long token = 0;
+    /// A DESTROY drains LAST (after the scenes' and the views' parts): teardown mirrors creation, so a view the host
+    /// unbound in the same record is unbound before the scene it showed goes.
+    bool late = false;
 };
 struct FrameInput {
     std::vector<EngineMessage>        engineMessages;  ///< the engine's own stream (decision 39 c), drained first

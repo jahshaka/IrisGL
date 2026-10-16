@@ -471,6 +471,7 @@ Ogre::ColourValue OgreEngine::shadowClearColour() const
 // ---------------------------------------------------------------------------
 void OgreEngine::setShadowFilter(ShadowFilter f) {
     // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (hostPosts()) mHostShadowFilter = f;   // the host's record, at the call
     if (postedAsMessage([=](OgreEngine &e) { e.setShadowFilter(f); return true; })) return;
     JAH_HOST_CALL("Engine::setShadowFilter");
     mShadowFilter = f;
@@ -497,6 +498,7 @@ void OgreEngine::applyShadowFilter() {
 
 void OgreEngine::setShadowResolution(unsigned pixels) {
     // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
+    if (hostPosts()) mHostShadowResolution = std::min(8192u, std::max(256u, pixels));   // the host's record, at the call
     if (postedAsMessage([=](OgreEngine &e) { e.setShadowResolution(pixels); return true; })) return;
     const unsigned res = std::min(8192u, std::max(256u, pixels));
     if (res == mShadowResolution) return;

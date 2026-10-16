@@ -282,6 +282,12 @@ bool OgreScene::createBillboardSet(NodeId id, TextureId texId, bool additiveBlen
 }
 
 bool OgreScene::setBillboards(NodeId id, const BillboardInstance *data, size_t count) {
+    // U3 stage 4a: the host's call is a message OWNING what it carries (a copy of the pointed-to data).
+    if (hostPosts()) {
+        std::vector<BillboardInstance> c(data, data + (data ? count : 0));
+        postScene([=](OgreScene &s) { return s.setBillboards(id, c.empty() ? nullptr : c.data(), c.size()); });
+        return true;
+    }
     JAH_HOST_CALL("Scene::setBillboards");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.billboards) {
@@ -317,6 +323,7 @@ bool OgreScene::setBillboards(NodeId id, const BillboardInstance *data, size_t c
 }
 
 bool OgreScene::destroyBillboardSet(NodeId id) {
+    if (postScene([=](OgreScene &s) { return s.destroyBillboardSet(id); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::destroyBillboardSet");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.billboards) return false;
@@ -785,6 +792,7 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
 }
 
 bool OgreScene::removeParticleSystem(NodeId id) {
+    if (postScene([=](OgreScene &s) { return s.removeParticleSystem(id); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::removeParticleSystem");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.particleDef) return false;

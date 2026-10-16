@@ -230,6 +230,14 @@ bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig,
 bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
                                   const SkeletonDesc &rig, const unsigned short *blendToRig,
                                   size_t blendToRigCount) {
+    // U3 stage 4a: the host's call is a message OWNING what it carries (a copy of the pointed-to data).
+    if (hostPosts()) {
+        std::vector<unsigned short> b(blendToRig, blendToRig + (blendToRig ? blendToRigCount : 0));
+        postScene([=](OgreScene &s) {
+            return s.attachSkinnedMesh(id, meshId, matId, rig, b.empty() ? nullptr : b.data(), b.size());
+        });
+        return true;
+    }
     JAH_HOST_CALL("Scene::attachSkinnedMesh");
     auto nit = mNodes.find(id);
     auto mit = mMeshes.find(meshId);
@@ -366,6 +374,7 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
 
 // ---------------------------------------------------------------------------
 bool OgreScene::followSkeleton(NodeId followerId, NodeId sourceId) {
+    if (postScene([=](OgreScene &s) { return s.followSkeleton(followerId, sourceId); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::followSkeleton");
     auto fit = mNodes.find(followerId);
     if (fit == mNodes.end()) { mError = "followSkeleton: unknown follower node"; return false; }
@@ -468,6 +477,12 @@ std::vector<std::string> OgreScene::boneNames(NodeId id) const {
 }
 
 bool OgreScene::setBonePoses(NodeId id, const BonePose *poses, size_t count) {
+    // U3 stage 4a: the host's call is a message OWNING what it carries (a copy of the pointed-to data).
+    if (hostPosts()) {
+        std::vector<BonePose> c(poses, poses + (poses ? count : 0));
+        postScene([=](OgreScene &s) { return s.setBonePoses(id, c.empty() ? nullptr : c.data(), c.size()); });
+        return true;
+    }
     JAH_HOST_CALL("Scene::setBonePoses");
     // The lamp-map cache, per node (its caster scan).
     noteNodePosed(id);
@@ -547,6 +562,7 @@ bool OgreScene::boneMatrices(NodeId id, float *out, size_t count) const {
 // (`shareSource`) is what distinguishes "renders from somebody else's rig" from
 // "somebody else renders from mine".
 bool OgreScene::shareSkeleton(NodeId followerId, NodeId sourceId) {
+    if (postScene([=](OgreScene &s) { return s.shareSkeleton(followerId, sourceId); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::shareSkeleton");
     auto fit = mNodes.find(followerId);
     if (fit == mNodes.end()) { mError = "shareSkeleton: unknown follower node"; return false; }

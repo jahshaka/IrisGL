@@ -872,6 +872,7 @@ void notePlanarRender(unsigned slots) {
 // THE HOST'S RECORD of the level (Engine::frameMonitor, U3 stage 2) follows every exit of the setter.
 void OgreEngine::setFrameMonitor(MonitorLevel level) {
     // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
+    if (hostPosts()) mHostMonitorLevel = level;   // the host's record, at the call (the drain confirms it)
     if (postedAsMessage([=](OgreEngine &e) { e.setFrameMonitor(level); return true; })) return;
     JAH_HOST_CALL("Engine::setFrameMonitor");
     struct Record { OgreEngine *e = nullptr; ~Record() { e->mHostMonitorLevel = e->mMonitor ? e->mMonitor->mLevel : MonitorLevel::Off; } } record{ this };

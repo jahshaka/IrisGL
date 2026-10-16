@@ -962,6 +962,7 @@ void OgreScene::pushFogState() {
 // (the PBS passes, through the JahFog piece) and the component's second quad
 // (the sky's pixels). Under ANY sky: a colour sky's in-scatter is its colour.
 void OgreScene::setHeightFog(const HeightFogDesc &desc) {
+    if (postScene([=](OgreScene &s) { s.setHeightFog(desc); return true; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setHeightFog");
     const bool on = desc.enabled && desc.density > 0.0f;
     if (on == mHeightFogOn && (!on || desc == mHeightFog)) return;

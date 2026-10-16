@@ -236,6 +236,7 @@ void OgreScene::setAtomDrawEnabled(bool on) {
 }
 
 void OgreScene::setAtomOcclusionEnabled(bool on) {
+    if (postScene([=](OgreScene &s) { s.setAtomOcclusionEnabled(on); return true; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setAtomOcclusionEnabled");
     // A SHAPE CHANGE and nothing else: every view of this scene re-derives its chain
     // (the pyramid and the late pass come or go) on its next sync, as for the split.
@@ -243,6 +244,7 @@ void OgreScene::setAtomOcclusionEnabled(bool on) {
 }
 
 void OgreScene::setAtomCutBudgetForTest(unsigned indices) {
+    if (postScene([=](OgreScene &s) { s.setAtomCutBudgetForTest(indices); return true; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setAtomCutBudgetForTest");
     for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>()) {
         if (!v) continue;
@@ -394,6 +396,8 @@ const Ogre::HlmsDatablock *OgreScene::atomSlotDatablock(uint32_t slot) const {
 }
 
 AtomDrawStatus OgreScene::atomDrawStatus() {
+    // U3 stage 4a: a read on the host's side is a REQUEST, answered on the engine's side.
+    if (hostPosts()) { AtomDrawStatus r; requestOnEngine([&] { r = atomDrawStatus(); }); return r; }
     JAH_HOST_CALL("Scene::atomDrawStatus");
     AtomDrawStatus st;
     st.live = mGpuScene.live();

@@ -429,6 +429,7 @@ MeshId OgreScene::createMesh(const MeshData &data, MeshId id) {
 
 bool OgreScene::updateMeshVertices(MeshId id, const std::vector<float> &positions,
                                    const std::vector<float> &normals) {
+    if (postScene([=](OgreScene &s) { return s.updateMeshVertices(id, positions, normals); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::updateMeshVertices");
     auto it = mMeshes.find(id);
     if (it == mMeshes.end()) { mError = "updateMeshVertices: unknown mesh"; return false; }
@@ -468,6 +469,7 @@ bool OgreScene::updateMeshVertices(MeshId id, const std::vector<float> &position
 }
 
 bool OgreScene::destroyMesh(MeshId id) {
+    if (postScene([=](OgreScene &s) { return s.destroyMesh(id); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::destroyMesh");
     auto it = mMeshes.find(id);
     if (it == mMeshes.end()) return false;
@@ -484,6 +486,11 @@ bool OgreScene::destroyMesh(MeshId id) {
 }
 
 MeshId OgreScene::createLineMesh(const std::vector<Vec3> &points, bool strip, MeshId id) {
+    if (hostPosts()) {   // U3 4a: the create a message under an id the host reserves
+        const MeshId rid = id ? id : reserveMeshId();
+        postScene([=](OgreScene &s) { return s.createLineMesh(points, strip, rid) != 0; });
+        return rid;
+    }
     JAH_HOST_CALL("Scene::createLineMesh");
     if (id && mMeshes.count(id)) { mError = "createLineMesh: the id is already a mesh of this scene"; return 0; }
     if (points.size() < 2) { mError = "createLineMesh: need at least 2 points"; return 0; }

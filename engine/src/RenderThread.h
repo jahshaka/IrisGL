@@ -21,8 +21,11 @@
 #include "SyncGetters.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace jahshaka { namespace engine { namespace detail {
@@ -75,6 +78,23 @@ public:
 
     static constexpr unsigned kHostStageCoalesce = 64u;
 
+    // ---- THE THREAD (ENGINE-UPGRADE-U3 stage 4b) -------------------------------------------------------------------
+    // The render thread owns Root, the device, every window surface and every frame. It runs ONE task at a time —
+    // a frame (the lockstep verb), a request, a join (createView / destroyView / the boot / the teardown) — and the
+    // host that posted it waits for it: LOCKSTEP, so the two threads never run engine code at once. While it waits
+    // the host keeps its own side alive (pumpHost: the compile observer's splash, on the host's thread).
+    /// Starts the thread and runs `boot` on it (Root, the device); returns boot's answer. Not called = inline: every
+    /// task runs on the caller's thread (the engine fixtures).
+    bool start(std::function<bool()> boot);
+    /// Runs `task` on the render thread and waits for it; inline when the thread is not started or this IS it.
+    void runOn(const std::function<void()> &task);
+    /// Runs `teardown` on the render thread, then joins it.
+    void stop(const std::function<void()> &teardown);
+    bool threaded() const { return mThread.joinable(); }
+    bool onRenderThread() const { return !threaded() || std::this_thread::get_id() == mThread.get_id(); }
+    /// What the host does while it waits (set by OgreEngine: the compile observer's delivery).
+    void setHostPump(std::function<void()> pump) { mHostPump = std::move(pump); }
+
 private:
     /// What the game side accumulates between two hand-overs.
     struct Slot {
@@ -89,6 +109,15 @@ private:
     void publish(bool recordApplied, std::string &&frameError);
 
     OgreEngine &mEngine;
+    // ---- the thread's task hand-off (stage 4b) ----
+    void threadMain();
+    std::thread             mThread;
+    std::mutex              mTaskLock;
+    std::condition_variable mTaskCv;
+    std::function<void()>   mTask;
+    bool                    mTaskPending = false;
+    bool                    mQuit = false;
+    std::function<void()>   mHostPump;
     mutable std::mutex mSlotLock;
     Slot               mSlot;           ///< guarded by mSlotLock
     FrameSubmitStatus  mSubmit;         ///< guarded by mSlotLock

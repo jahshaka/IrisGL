@@ -64,6 +64,7 @@ bool isAncestorOf(const Ogre::Node *maybeAncestor, const Ogre::Node *n)
 bool OgreScene::attachToBone(NodeId riderId, NodeId ownerId, const std::string &bone,
                              const Vec3 &position, const Quat &rotation, const Vec3 &scale)
 {
+    if (postScene([=](OgreScene &s) { return s.attachToBone(riderId, ownerId, bone, position, rotation, scale); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::attachToBone");
     auto rit = mNodes.find(riderId);
     if (rit == mNodes.end() || !rit->second.node) {
@@ -137,6 +138,7 @@ bool OgreScene::attachToBone(NodeId riderId, NodeId ownerId, const std::string &
 
 bool OgreScene::detachFromBone(NodeId riderId, NodeId parent)
 {
+    if (postScene([=](OgreScene &s) { return s.detachFromBone(riderId, parent); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::detachFromBone");
     auto rit = mNodes.find(riderId);
     if (rit == mNodes.end() || !rit->second.node) {
@@ -151,6 +153,7 @@ bool OgreScene::detachFromBone(NodeId riderId, NodeId parent)
 bool OgreScene::setBoneAttachmentOffset(NodeId riderId, const Vec3 &position,
                                         const Quat &rotation, const Vec3 &scale)
 {
+    if (postScene([=](OgreScene &s) { return s.setBoneAttachmentOffset(riderId, position, rotation, scale); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setBoneAttachmentOffset");
     auto rit = mNodes.find(riderId);
     if (rit == mNodes.end() || !rit->second.boneTag) {

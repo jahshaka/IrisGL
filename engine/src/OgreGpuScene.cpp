@@ -1750,6 +1750,8 @@ bool OgreScene::gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const {
 /// "AsyncTextureTicket after a manual staging upload reads STALE VRAM").
 bool OgreScene::gpuSceneDeviceEntries(unsigned first, unsigned count,
                                       std::vector<GpuSceneEntry> &out) {
+    // U3 stage 4a: a read on the host's side is a REQUEST, answered on the engine's side.
+    if (hostPosts()) { bool r = false; requestOnEngine([&] { r = gpuSceneDeviceEntries(first, count, out); }); return r; }
     JAH_HOST_CALL("Scene::gpuSceneDeviceEntries");
     out.clear();
     if (!mGpuScene.live() || !count || first + count > mGpuScene.slotCapacity()) return false;
@@ -1920,7 +1922,7 @@ bool PhotonComponent::cardMoverFrame(CardMoverFrame &out) {
     if (walk) {
         const auto walkStart = std::chrono::steady_clock::now();
         struct WalkTimer {
-            PhotonComponent &p; std::chrono::steady_clock::time_point t0; uint32_t slots;
+            PhotonComponent &p; std::chrono::steady_clock::time_point t0; uint32_t slots = 0;
             ~WalkTimer() {
                 p.mCardWalkMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
                 p.mCardWalkSlots = slots;
