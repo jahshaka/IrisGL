@@ -89,6 +89,7 @@ public:
     /// The host's hook, called after every FREE frame's publish (Engine::setFramePublishedHook).
     void setPublishedHook(std::function<void()> hook);
     long long frameInFlightSinceNs() const { return mInFlightSinceNs.load(std::memory_order_acquire); }
+    long long lastFrameWorkNs() const { return mLastFrameWorkNs.load(std::memory_order_acquire); }
 
     static constexpr unsigned kHostStageCoalesce = 64u;
 
@@ -159,6 +160,7 @@ private:
     std::mutex mHookLock;
     std::function<void()> mPublishedHook;   ///< under mHookLock
     std::atomic<long long> mInFlightSinceNs{ 0 };
+    std::atomic<long long> mLastFrameWorkNs{ 0 };   ///< the last free frame's hand-over to its split publish (ns)
     std::atomic<long long> mLastFrameSpentNs{ 0 };  ///< the last free frame's start to publish (ns)   ///< the free frame being drawn began (steady ns), 0: none
     std::atomic<float> mMeasuredPeriod{ 0.0f };            ///< the last two free frames' start-to-start (seconds)
     std::chrono::steady_clock::time_point mLastFreeStart{};   ///< render thread only

@@ -397,6 +397,11 @@ void RenderThread::publishAtSplit() {
     try { publish(mFrameAny, std::move(soFar), false); }
     catch (std::exception &) { return; }      // the frame's end publishes it then
     mSplitPublished = true;
+    const long long since = mInFlightSinceNs.load(std::memory_order_acquire);
+    if (since > 0)
+        mLastFrameWorkNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch()).count() - since,
+                               std::memory_order_release);
     std::lock_guard<std::mutex> l(mHookLock);
     if (mPublishedHook) mPublishedHook();
 }

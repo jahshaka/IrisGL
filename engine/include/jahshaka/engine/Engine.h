@@ -2037,6 +2037,10 @@ public:
     /// free frame it is drawing now, 0 when none is in flight — the host attributes a late record to a frame that
     /// overran (never a wait: an atomic read).
     virtual long long frameInFlightSinceNs() const = 0;
+    /// THE LAST FREE FRAME'S WORK (ns, hand-over to its publish at the split — no block counted: neither the runtime's
+    /// wait nor the pad nor a blocking present): over a display period, the frame overran it, and the tick it posted
+    /// had no block to land in (U3 decision 66's pad shape).
+    virtual long long lastFrameWorkNs() const = 0;
     /// THE FRAME'S INPUT (FrameInput, ENGINE-UPGRADE-1 U0 3a): handed over now, applied ONCE at the top of the
     /// next renderOneFrame — never on the spot. Several submits before one frame merge (see FrameInput): the
     /// merge builds the ONE record the next hand-over takes and stamps with its serial (U3 F1). A frame with no
