@@ -7221,6 +7221,14 @@ private:
     std::unique_ptr<FrameCaptureListener> mCaptureListener;
     /// VIDEO-REC-1: the recorder's per-frame NV12 readback, while on.
     std::unique_ptr<VideoReadback> mVideoReadback;
+    /// ...its finished frames, mapped by the render thread at its publish and popped by the host (U3 stage 6).
+    std::mutex                 mVideoQueueLock;
+    std::deque<VideoFrameNv12> mVideoQueue;
+    bool popVideoFrame(VideoFrameNv12 &out);
+public:
+    /// The render side's harvest of the finished readbacks into the queue (RenderThread::publish).
+    void harvestVideoFrames();
+private:
     Ogre::AsyncTextureTicket *mCaptureTicket = nullptr;
     /// A clean capture's companion: the same frame as presented (alsoPresented).
     Ogre::AsyncTextureTicket *mPresentedTicket = nullptr;

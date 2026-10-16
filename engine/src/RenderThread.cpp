@@ -376,6 +376,12 @@ void RenderThread::publish(bool recordApplied, std::string &&frameError) {
         catch (Ogre::Exception &x) { frameError = describeOgreFailure(x); }
         catch (std::exception &x) { frameError = std::string("engine: ") + x.what(); }
     }
+    // THE RECORDER'S FINISHED FRAMES, TO ITS QUEUE (U3 stage 6): mapped here, on the render thread, popped by the host.
+    for (auto &v : e.mViews)
+        if (v) {
+            try { v->harvestVideoFrames(); }
+            catch (Ogre::Exception &x) { frameError = describeOgreFailure(x); }
+        }
     PublishedEngineFrame &back = mPublished.back();
     try { e.fillPublished(back); }
     catch (Ogre::Exception &x) { frameError = describeOgreFailure(x); }

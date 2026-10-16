@@ -23,6 +23,8 @@
 // flush per frame — OgreVulkanAsyncTextureTicket.cpp).
 #include "EnginePrivate.h"
 
+#include <mutex>
+
 #include <OgreAsyncTextureTicket.h>
 #include <OgreDescriptorSetTexture.h>
 #include <OgreDescriptorSetUav.h>
@@ -246,6 +248,8 @@ bool OgreView::setVideoReadback(bool on) {
             removeWorkspaceListener(mVideoReadback.get());
             mVideoReadback.reset();
         }
+        std::lock_guard<std::mutex> l(mVideoQueueLock);
+        mVideoQueue.clear();
         return true;
     }
     if (mVideoReadback) return true;
@@ -262,17 +266,71 @@ bool OgreView::setVideoReadback(bool on) {
 }
 
 void OgreView::armVideoFrame(unsigned long long tag) {
-    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
-    if (hostPosts()) { mEngine->request([&](Engine &) { armVideoFrame(tag); }, nullptr); return; }
+    // THE HOST'S ARM IS A MESSAGE (U3 stage 6; a request until then): it lands at the next drain, before the frame it
+    // arms — never a wait on the UI thread.
+    if (hostPosts()) { mEngine->postedAsMessage([this, tag](OgreEngine &) { armVideoFrame(tag); return true; }); return; }
     if (mVideoReadback) mVideoReadback->arm(tag);
 }
 
-bool OgreView::takeVideoFrame(VideoFrameNv12 &out, bool wait) {
-    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
-    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = takeVideoFrame(out, wait); }, nullptr); return r; }
-    if (!mVideoReadback) { mError = "takeVideoFrame: the view's video readback is off"; return false; }
+// THE FINISHED FRAMES, TO THE ENCODER BY QUEUE (U3 stage 6): the render thread maps every finished readback at its
+// frame's publish (harvestVideoFrames) and queues it; the host's poll pops the queue — never a request, never a wait.
+// A WAITING take (the offline recorder, lockstep by mode) is a request: the queue first, then the oldest ticket.
+void OgreView::harvestVideoFrames() {
+    if (!mVideoReadback) return;
+    // BOUNDED AT THE RING'S SIZE: a host that stops polling fills the queue, then the ring — and the recorder's own
+    // backpressure (its offline path's waited take, its live path's held tick) answers, exactly as for a full ring;
+    // the queue never grows with the frames nobody takes (3 MB a frame at 1080p).
+    const size_t bound = size_t(mVideoReadback->status().ringSize);
     std::string error;
-    const bool ok = mVideoReadback->take(out, wait, error);
+    VideoFrameNv12 frame;
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> l(mVideoQueueLock);
+            if (mVideoQueue.size() >= bound) break;
+        }
+        if (!mVideoReadback->take(frame, false, error)) break;
+        std::lock_guard<std::mutex> l(mVideoQueueLock);
+        mVideoQueue.push_back(std::move(frame));
+        frame = VideoFrameNv12();
+    }
+    if (!error.empty()) mError = error;
+}
+
+bool OgreView::popVideoFrame(VideoFrameNv12 &out) {
+    std::lock_guard<std::mutex> l(mVideoQueueLock);
+    if (mVideoQueue.empty()) return false;
+    out = std::move(mVideoQueue.front());
+    mVideoQueue.pop_front();
+    return true;
+}
+
+bool OgreView::takeVideoFrame(VideoFrameNv12 &out, bool wait) {
+    if (hostPosts()) {
+        if (!wait) return popVideoFrame(out);
+        bool r{};
+        mEngine->request([&](Engine &) { r = takeVideoFrame(out, true); }, nullptr);
+        return r;
+    }
+    if (!mVideoReadback) {
+        if (popVideoFrame(out)) return true;
+        mError = "takeVideoFrame: the view's video readback is off";
+        return false;
+    }
+    std::string error;
+    bool ok = popVideoFrame(out);   // the oldest first: the queue holds frames older than the ring's
+    if (!ok) ok = mVideoReadback->take(out, wait, error);
+    // A WAITED TAKE FREES A RING SLOT (the recorder arms right after it): a full ring's oldest ticket moves to the
+    // queue, waited for — the next arm never finds every slot pending (it would drop a frame).
+    else if (wait) {
+        const VideoReadbackStatus st = mVideoReadback->status();
+        if (st.ringSize > 0 && st.pending >= st.ringSize) {
+            VideoFrameNv12 next;
+            if (mVideoReadback->take(next, true, error)) {
+                std::lock_guard<std::mutex> l(mVideoQueueLock);
+                mVideoQueue.push_back(std::move(next));
+            }
+        }
+    }
     if (!error.empty()) mError = error;
     return ok;
 }
