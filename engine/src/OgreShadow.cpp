@@ -1587,7 +1587,7 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // band already tolerates the difference.
         for (OgreScene *s : drawn) {
             for (auto &v : mViews) {
-                if (!v || !v->isEnabled() || v->scene() != s) continue;
+                if (!v || !v->isEnabled() || v->boundOgreScene() != s) continue;   // the engine's binding, never the host's record
                 Ogre::Camera *cam = v->camera();
                 // CONTINUE, not break: a scene whose FIRST enabled view is
                 // orthographic (a preview, a card capture) still has a

@@ -521,7 +521,7 @@ void OgreEngine::destroyScene(Scene *scene) {
             mVrMirrorView = nullptr; if (!mHostRecords) mHostVrMirrorView = nullptr;
         }
         for (auto &v : mViews)
-            if (v->scene() == scene) v->detachScene();
+            if (static_cast<Scene *>(v->boundOgreScene()) == scene) v->detachScene();   // the engine's binding (U3 65's TSan)
         // THE BELT ON THE TEARDOWN (lane OPEN-FRAMES-1). Destroying a scene
         // frees every mesh, texture and buffer it owned, and each of those
         // goes onto the backend's delayed-release lists — which only
@@ -848,7 +848,9 @@ void OgreEngine::scenesFeedingEnabledViews(std::vector<OgreScene *> &out) const 
     out.clear();
     for (const auto &s : mScenes) {
         for (const auto &v : mViews) {
-            if (v && v->isEnabled() && v->scene() == s.get()) { out.push_back(s.get()); break; }
+            // THE ENGINE'S BINDING, never View::scene() — the host's record, which the host writes at its call while a
+            // frame publishes (the clang TSan arm's race, decision 65's rerun).
+            if (v && v->isEnabled() && v->boundOgreScene() == s.get()) { out.push_back(s.get()); break; }
         }
     }
 }
@@ -1359,7 +1361,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
             bool allHaveRefraction = true;
             if (anyView) {
                 for (auto &v : mViews) {
-                    if (v->scene() != s.get() || !v->isEnabled()) continue;
+                    if (v->boundOgreScene() != s.get() || !v->isEnabled()) continue;
                     if (!v->chainDesc().refractions) allHaveRefraction = false;
                 }
             }
@@ -2976,7 +2978,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
             last = FrameInputScene();
             last.gi = gi;
             for (auto &q : mViews)   // ...and every view showing the scene (the view loop below runs after this one)
-                if (q->scene() == part.scene) { q->mFrameApplied = FrameInputView(); q->mFrameAppliedW = q->mFrameAppliedH = 0; }
+                if (q->boundOgreScene() == sc) { q->mFrameApplied = FrameInputView(); q->mFrameAppliedW = q->mFrameAppliedH = 0; }
         }
         applyIfChanged(part.shadows, last.shadows, applied, [&](const ShadowDesc &v) { sc->setShadowSettings(v); });
         applyIfChanged(part.environmentLight, last.environmentLight, applied,
