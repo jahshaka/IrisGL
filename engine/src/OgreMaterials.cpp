@@ -2163,7 +2163,7 @@ void OgreScene::bindTrackedTexturesInto(MaterialRec &rec, Ogre::HlmsDatablock *r
                 if (Ogre::TextureGpu *rt = reflectionTexFor(rec))
                     db->setTexture(Ogre::PBSM_REFLECTION, rt);
                 else if (st.everBound)
-                    db->setTexture(Ogre::PBSM_REFLECTION, nullptr);
+                    db->setTexture(Ogre::PBSM_REFLECTION, static_cast<Ogre::TextureGpu *>(nullptr));   // typed: clang finds two overloads for a bare null
                 st.lastBoundTextures[s] = rec.boundTextures[s];
                 markIblMipmapsDirty();
             }
