@@ -3912,7 +3912,9 @@ public:
     // ---- Hierarchy and transforms ----
     NodeId createNode(NodeId parent = 0, NodeId id = 0) override;
     NodeId createDocumentNode(NodeId id, NodeId parent) override;
-    const PublishedFrame &published() const override { return mPublished.read(mPublishedSeen); }
+    const PublishedFrame &published() const override { return mPublished.read(); }
+    /// The render side's publish of the frame's buffer, under snapshotLock() (RenderThread::publish: the set at once).
+    void commitPublishedLocked() { mPublished.commitLocked(); }
     /// THE EXTRACT'S APPLY (ENGINE-UPGRADE-U2): each document node's record — parent, graph class, local TRS — in
     /// order, before the change set names the subtrees. Returns how many records landed.
     unsigned applyNodeRecords(const std::vector<NodeRecord> &records, unsigned long long stepSerial);
@@ -5654,7 +5656,6 @@ private:
     /// THE SCENE'S PUBLISHED FRAME (Scene::published, PublishedFrame): a whole-frame SWAP (Engine.h's contract) —
     /// publishFrame writes the buffer published() is not returning, then flips the index.
     mutable SnapshotBuffers<PublishedFrame> mPublished;   ///< three buffers and the host's latch (U3 stage 5)
-    mutable std::atomic<unsigned long long> mPublishedSeen{ ~0ull };
     /// Planar reflectors asked for on DOCUMENT nodes this frame, armed at the drain once their poses landed.
     std::vector<NodeId> mReflectorsToArm;
     /// The nodes riding a bone tag right now (attachToBone / releaseBoneTag): publishFrame's whole walk.

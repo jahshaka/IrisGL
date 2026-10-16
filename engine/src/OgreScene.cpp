@@ -814,7 +814,7 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     }
     std::sort(back.riderTags.begin(), back.riderTags.end(),   // the lookups are binary searches (decision 36)
               [](const PublishedFrame::RiderTag &a, const PublishedFrame::RiderTag &b) { return a.rider < b.rider; });
-    mPublished.commit(back);
+    // ...committed with the engine's half, the frame's whole set under one lock (RenderThread::publish).
 }
 
 bool OgreScene::setNodeParent(NodeId id, NodeId parent) {

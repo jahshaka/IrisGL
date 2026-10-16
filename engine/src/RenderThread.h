@@ -75,7 +75,7 @@ public:
     /// The engine's half of the snapshot re-made after a request (the frame's stamp unchanged).
     void republishEngine();
     /// The last frame the loop closed (Engine::published()).
-    const PublishedEngineFrame &published() const { return mPublished.read(mPublishedSeen); }
+    const PublishedEngineFrame &published() const { return mPublished.read(); }
     /// The host's latch (U3 stage 5): its reads see the newest snapshot from here to its next latch.
     void latchSnapshots();
     /// The serial of the last record a hand-over took (0 = none yet).
@@ -144,8 +144,9 @@ private:
     std::vector<PublishedEngineFrame::FrameError> mFrameErrors;   ///< the newest kFrameErrorsKept, oldest first
     double             mPublishMicros = 0.0;
     std::atomic<float> mDisplayPeriod{ 0.0f };
+    std::atomic<float> mMeasuredPeriod{ 0.0f };            ///< the last two free frames' start-to-start (seconds)
+    std::chrono::steady_clock::time_point mLastFreeStart{};   ///< render thread only
     mutable SnapshotBuffers<PublishedEngineFrame> mPublished;
-    mutable std::atomic<unsigned long long> mPublishedSeen{ ~0ull };
 };
 
 }}}   // namespace jahshaka::engine::detail

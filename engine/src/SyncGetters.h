@@ -9,6 +9,7 @@
 // One static site per getter, registered on its first counted call into a lock-free list; Engine::syncGetters() reads
 // the list. Ogre-free: the engine's private TUs include it through EnginePrivate.h.
 #include <atomic>
+#include <mutex>
 #include <thread>
 
 namespace jahshaka { namespace engine { namespace detail {
@@ -30,44 +31,70 @@ struct EngineSideScope {
     EngineSideScope &operator=(const EngineSideScope &) = delete;
 };
 
-/// THE SNAPSHOT, THREE BUFFERS AND A HOST LATCH (ENGINE-UPGRADE-U3 stage 5). The render thread publishes every display
-/// frame in the owner's mode while the host reads at its own pace: it writes the buffer that is neither the newest
-/// nor the one the host latched, so a buffer the host is reading is never written. The host's reads see what it
-/// latched (latch(): the newest, at its tick's head or after any task it waited for); the engine's own reads, the
-/// newest. Lockstep latches after every task, so a test reads exactly what it used to.
-/// The host's latch generation (bumped by every latch; a scene latches lazily at its first host read after a bump) and
-/// whether a render thread exists (without one there is no concurrent publish: the host reads the newest).
-extern std::atomic<unsigned long long> gHostLatchEpoch;
+/// THE SNAPSHOT, THE EXCHANGE TRIPLE BUFFER (ENGINE-UPGRADE-U3 stage 5; decision 54). The render thread publishes every
+/// display frame in the owner's mode while the host reads at its own pace. Three buffers, each index OWNED by exactly
+/// one side at every instant: the render side's back (the one it fills) and newest (the one it last published — read,
+/// never written, until it comes back through the exchange), the host's latched one, and the READY word between them
+/// — one atomic: an index and a FRESH bit. The render publishes by `back = ready.exchange(back | fresh)`; the host
+/// latches by `latched = ready.exchange(latched)` when the fresh bit is set. No window: a buffer one side holds is
+/// never the other's to write.
+/// ONE FRAME PER LATCH: a frame's whole set — every scene's buffer and the engine's — is exchanged under ONE short lock
+/// (RenderThread::publish), and the host latches every buffer under the same lock, EAGERLY: at its tick's head
+/// (Engine::latchSnapshot) and after every task it waited for (lockstep: every frame). The engine's own reads and a
+/// process without a render thread read the newest.
 extern std::atomic<bool> gRenderThreaded;
+/// The lock a frame's set is published under and the host's latch is taken under.
+std::mutex &snapshotLock();
+struct SnapshotLatchable {
+    SnapshotLatchable *prevLatchable = nullptr, *nextLatchable = nullptr;
+    /// The host's exchange (called with snapshotLock() held).
+    virtual void latchLocked() = 0;
+protected:
+    ~SnapshotLatchable() = default;
+};
+/// Every live snapshot, latched together (snapshotLock() held by both).
+void registerSnapshot(SnapshotLatchable *s);
+void unregisterSnapshot(SnapshotLatchable *s);
+/// THE HOST'S LATCH: every snapshot's newest published frame, under the one lock.
+void latchAllSnapshots();
 template <class T>
-struct SnapshotBuffers {
-    T                     buf[3];
-    std::atomic<unsigned> latest{ 0u };
-    std::atomic<unsigned> latched{ 0u };
+struct SnapshotBuffers final : SnapshotLatchable {
+    static constexpr unsigned kFresh = 4u;
+    T buf[3];
+    SnapshotBuffers() { registerSnapshot(this); }
+    ~SnapshotBuffers() { unregisterSnapshot(this); }
+    SnapshotBuffers(const SnapshotBuffers &) = delete;
+    SnapshotBuffers &operator=(const SnapshotBuffers &) = delete;
     /// The buffer the next publish fills (render side).
-    T &back() {
-        const unsigned a = latest.load(std::memory_order_relaxed), b = latched.load(std::memory_order_acquire);
-        for (unsigned i = 0; i < 3u; ++i) if (i != a && i != b) return buf[i];
-        return buf[(a + 1u) % 3u];
+    T &back() { return buf[mBack]; }
+    /// The render side's publish of what it filled, with snapshotLock() held (a frame's set at once).
+    void commitLocked() {
+        mNewest = mBack;
+        mBack = mReady.exchange(mBack | kFresh, std::memory_order_acq_rel) & 3u;
     }
-    unsigned backIndex() const {
-        const unsigned a = latest.load(std::memory_order_relaxed), b = latched.load(std::memory_order_acquire);
-        for (unsigned i = 0; i < 3u; ++i) if (i != a && i != b) return i;
-        return (a + 1u) % 3u;
+    void commit() { std::lock_guard<std::mutex> l(snapshotLock()); commitLocked(); }
+    const T &newest() const { return buf[mNewest]; }
+    const T &hostView() const { return buf[mHost]; }
+    void latchLocked() override {
+        if (mReady.load(std::memory_order_acquire) & kFresh)
+            mHost = mReady.exchange(mHost, std::memory_order_acq_rel) & 3u;
     }
-    void commit(const T &written) { latest.store(unsigned(&written - buf), std::memory_order_release); }
-    const T &newest() const { return buf[latest.load(std::memory_order_acquire)]; }
-    const T &hostView() const { return buf[latched.load(std::memory_order_acquire)]; }
-    void latch() { latched.store(latest.load(std::memory_order_acquire), std::memory_order_release); }
     /// What a read on THIS thread sees: the newest on the engine's side or without a render thread; the host's latch
-    /// otherwise, taken lazily at the first read of each latch generation.
-    const T &read(std::atomic<unsigned long long> &seenEpoch) {
+    /// otherwise.
+    const T &read() const {
         if (tlsEngineSide != 0 || !gRenderThreaded.load(std::memory_order_relaxed)) return newest();
-        const unsigned long long epoch = gHostLatchEpoch.load(std::memory_order_acquire);
-        if (seenEpoch.load(std::memory_order_relaxed) != epoch) { latch(); seenEpoch.store(epoch, std::memory_order_relaxed); }
         return hostView();
     }
-    void reset(const T &empty) { buf[0] = buf[1] = buf[2] = empty; latest.store(0u); latched.store(0u); }
+    void reset(const T &empty) {
+        std::lock_guard<std::mutex> l(snapshotLock());
+        buf[0] = buf[1] = buf[2] = empty;
+        mBack = 1u; mNewest = 0u; mHost = 2u;
+        mReady.store(0u, std::memory_order_release);
+    }
+private:
+    unsigned              mBack = 1u, mNewest = 0u;   ///< the render side's
+    unsigned              mHost = 2u;                 ///< the host's
+    std::atomic<unsigned> mReady{ 0u };               ///< between them: an index and the fresh bit
 };
 
 }}}   // namespace jahshaka::engine::detail

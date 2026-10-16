@@ -23,7 +23,26 @@ SyncGetterSite::SyncGetterSite(const char *n) : name(n) {
 SyncGetterSite *syncGetterSites() { return gSyncSites.load(std::memory_order_acquire); }
 
 std::atomic<bool> gAffinityChecks{ false };
-std::atomic<unsigned long long> gHostLatchEpoch{ 1ull };
+std::mutex &snapshotLock() { static std::mutex m; return m; }
+namespace { SnapshotLatchable *gSnapshots = nullptr; }   // under snapshotLock()
+void registerSnapshot(SnapshotLatchable *s) {
+    std::lock_guard<std::mutex> l(snapshotLock());
+    s->nextLatchable = gSnapshots;
+    s->prevLatchable = nullptr;
+    if (gSnapshots) gSnapshots->prevLatchable = s;
+    gSnapshots = s;
+}
+void unregisterSnapshot(SnapshotLatchable *s) {
+    std::lock_guard<std::mutex> l(snapshotLock());
+    if (s->prevLatchable) s->prevLatchable->nextLatchable = s->nextLatchable;
+    else if (gSnapshots == s) gSnapshots = s->nextLatchable;
+    if (s->nextLatchable) s->nextLatchable->prevLatchable = s->prevLatchable;
+    s->prevLatchable = s->nextLatchable = nullptr;
+}
+void latchAllSnapshots() {
+    std::lock_guard<std::mutex> l(snapshotLock());
+    for (SnapshotLatchable *s = gSnapshots; s; s = s->nextLatchable) s->latchLocked();
+}
 std::atomic<bool> gRenderThreaded{ false };
 /// The render thread's id (set by the loop that owns the engine: the creating thread until stage 4b's thread).
 std::atomic<std::thread::id> gRenderThreadId{};
@@ -288,7 +307,7 @@ void RenderThread::stop(const std::function<void()> &teardown) {
 void RenderThread::tickInline() { tickWith(handOver(), false); }
 
 void RenderThread::latchSnapshots() {
-    gHostLatchEpoch.fetch_add(1ull, std::memory_order_acq_rel);   // every snapshot latches at its next host read
+    latchAllSnapshots();   // EAGER (decision 54): every snapshot's newest frame, one frame for all of them
 }
 
 void RenderThread::setFreeRunning(bool on) {
@@ -350,7 +369,11 @@ void RenderThread::publish(bool recordApplied, std::string &&frameError) {
     back.framesWithError = mFramesWithError;
     back.publishMicros = mPublishMicros;
     mPublishMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
-    mPublished.commit(back);
+    // THE FRAME'S WHOLE SET AT ONCE (decision 54): every scene's buffer and the engine's exchanged under the one lock
+    // the host's latch takes — a latch sees one frame everywhere.
+    std::lock_guard<std::mutex> l(snapshotLock());
+    for (auto &s : e.mScenes) if (s) s->commitPublishedLocked();
+    mPublished.commitLocked();
 }
 
 // THE ENGINE'S HALF RE-PUBLISHED AFTER A REQUEST (U3 stage 4b): what the request applied (the pending record's
@@ -369,7 +392,7 @@ void RenderThread::republishEngine() {
     back.frameErrors = mFrameErrors;
     back.framesWithError = mFramesWithError;
     back.publishMicros = front.publishMicros;
-    mPublished.commit(back);
+    mPublished.commit();
 }
 
 }}}   // namespace jahshaka::engine::detail
