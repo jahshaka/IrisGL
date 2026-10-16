@@ -4084,9 +4084,15 @@ public:
     }
     bool isLoading() const override { return mSceneLoading; }
     GiStatus giStatus() const { return mPhoton.giStatus(); }
-    GiVoxelStats giVoxelStats(int cascade) override { JAH_HOST_CALL("Scene::giVoxelStats"); return mPhoton.giVoxelStats(cascade); }
-    bool giFieldAtlas(GiFieldAtlas &out) override { JAH_HOST_CALL("Scene::giFieldAtlas"); return mPhoton.giFieldAtlas(out); }
-    bool giVoxelVolume(int cascade, GiVoxelVolume &out) override { JAH_HOST_CALL("Scene::giVoxelVolume"); return mPhoton.giVoxelVolume(cascade, out); }
+    GiVoxelStats giVoxelStats(int cascade) override {
+        if (hostPosts()) { GiVoxelStats r{}; requestOnEngine([&] { r = giVoxelStats(cascade); }); return r; }   // a REQUEST on the host's side (U3 4b)
+        JAH_HOST_CALL("Scene::giVoxelStats"); return mPhoton.giVoxelStats(cascade); }
+    bool giFieldAtlas(GiFieldAtlas &out) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giFieldAtlas(out); }); return r; }   // a REQUEST on the host's side (U3 4b)
+        JAH_HOST_CALL("Scene::giFieldAtlas"); return mPhoton.giFieldAtlas(out); }
+    bool giVoxelVolume(int cascade, GiVoxelVolume &out) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelVolume(cascade, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
+        JAH_HOST_CALL("Scene::giVoxelVolume"); return mPhoton.giVoxelVolume(cascade, out); }
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
     /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
@@ -4142,7 +4148,9 @@ public:
     bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
     bool gpuSceneDeviceEntries(unsigned first, unsigned count,
                                std::vector<GpuSceneEntry> &out) override;
-    void measureGpuSceneScan(bool graphIsCurrent) override { JAH_HOST_CALL("Scene::measureGpuSceneScan");
+    void measureGpuSceneScan(bool graphIsCurrent) override {
+        if (hostPosts()) { requestOnEngine([&] { measureGpuSceneScan(graphIsCurrent); }); return; }   // a REQUEST (U3 4b)
+        JAH_HOST_CALL("Scene::measureGpuSceneScan");
         ensureGpuSceneTimed(graphIsCurrent);
     }
     // ---- SURFACE-CACHE phase 2: the capture cache (SurfaceCache.h) --------
@@ -4157,9 +4165,15 @@ public:
     void cardSceneFacts(CardSceneView &view) const;
     unsigned long long foldCardEnvironment(unsigned long long sig) const;
     void cardCandidates(const Ogre::Vector3 &centre, float radius, CardSceneView &view);   // fills view.candidates
-    bool readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) override { JAH_HOST_CALL("Scene::readCardTexel"); return mPhoton.readCardTexel(node, card, u, v, out); }
-    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out, NodeId onlyNode = 0) override { JAH_HOST_CALL("Scene::readCardAt"); return mPhoton.readCardAt(world, normal, out, onlyNode); }
-    bool dumpCardAtlas(const std::string &prefix, std::string &err) override { JAH_HOST_CALL("Scene::dumpCardAtlas"); return mPhoton.dumpCardAtlas(prefix, err); }
+    bool readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = readCardTexel(node, card, u, v, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
+        JAH_HOST_CALL("Scene::readCardTexel"); return mPhoton.readCardTexel(node, card, u, v, out); }
+    bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out, NodeId onlyNode = 0) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = readCardAt(world, normal, out, onlyNode); }); return r; }   // a REQUEST on the host's side (U3 4b)
+        JAH_HOST_CALL("Scene::readCardAt"); return mPhoton.readCardAt(world, normal, out, onlyNode); }
+    bool dumpCardAtlas(const std::string &prefix, std::string &err) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = dumpCardAtlas(prefix, err); }); return r; }   // a REQUEST on the host's side (U3 4b)
+        JAH_HOST_CALL("Scene::dumpCardAtlas"); return mPhoton.dumpCardAtlas(prefix, err); }
     const SurfaceCache *surfaceCache() const { return mPhoton.surfaceCache(); }
     /// The compile mode the scene's views ask for (View::setAsyncShaders); its own captures
     /// follow it (ASYNC-SHADERS-1).
