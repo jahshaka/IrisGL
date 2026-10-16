@@ -8063,6 +8063,9 @@ struct FrameSubmitStatus {
     /// THE SERIAL THE PENDING RECORD WILL BE APPLIED AS (the next hand-over's; the last one's when nothing is pending):
     /// what the LOCKSTEP verb waits for — "a frame with serial >= this presented" (F2).
     unsigned long long nextSerial = 0;
+    /// THE HAND-OVERS SO FAR (U3 stage 5): every frame's head takes the slot once — a record submitted after the
+    /// n-th is applied by the frame of the (n+1)-th (frame.drag_latency's law: never two frames late).
+    unsigned long long handOvers = 0;
 };
 /// What the drain did — Engine::frameInputStatus() / PublishedEngineFrame::input: the RENDER side of the hand-over,
 /// written by the frame alone (U3 F4). Running totals except the last drain's fields.
@@ -8576,6 +8579,7 @@ struct PublishedEngineFrame {
     /// legal and carries the LAST serial — `recordApplied` false (U3 F2).
     unsigned long long serial = 0;
     bool               recordApplied = false;
+    unsigned long long handOver = 0;       ///< which hand-over this frame took (FrameSubmitStatus::handOvers' count)
     FrameInputStatus   input;              ///< the drain's own status (the render side)
     VrStatus           vr;                 ///< the session as this frame left it (the last begun frame's pose)
     StreamingWork      streaming;

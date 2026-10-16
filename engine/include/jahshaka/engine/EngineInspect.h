@@ -75,6 +75,12 @@ public:
     /// The renderer's CURRENT command buffer, as an opaque tag: it changes exactly when the queue submits, so a tag
     /// unchanged across a call proves the call neither submitted nor committed a command buffer (0 = cannot tell).
     virtual unsigned long long queueSubmissionTag() const = 0;
+    /// ONE FREE-RUNNING FRAME, ON REQUEST (U3 stage 5's fixtures: frame.interpolation's closed form): the frame the
+    /// render thread draws on its own in the owner's mode — the newest record, interpolated at the presentation
+    /// clock, the clock advanced by the display period — drawn now and waited for.
+    virtual void presentationFrame() = 0;
+    /// The last free frame's interpolation: its nodes and its microseconds (scene `s`), for the apply's measure row.
+    virtual void lastInterpolation(const Scene *s, unsigned &nodes, double &micros) const = 0;
 };
 /// The engine's probes; null for an engine of another kind.
 const EngineEcho *engine(const Engine *e);

@@ -953,6 +953,8 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         // writes the head pose onto the session view, and both are the engine's — a host's record (the driver's
         // Driver cause; the eyes' part carries no pose) must land under them, never over them.
         drainFrameInput(record, any);
+        // THE PRESENTATION (U3 stage 5): a free frame draws the newest step's nodes between their two grid states.
+        interpolateFrame();
         // ---- THE VR FRAME OPENS HERE (SPECS/VR_SPEC.md §4.3) --------------
         // While a session runs this call IS the frame's clock: it polls the
         // runtime's lifecycle events, blocks in xrWaitFrame until the runtime
@@ -2726,6 +2728,30 @@ void OgreEngine::applyPendingEngineMessages() {
     drainFrameInput(pending, any);
 }
 
+// THE PRESENTATION CLOCK (U3 stage 5), in the document's step time and never a wall clock: a FREE frame shows the
+// newest record's nodes at alpha = (P - the step before the newest) / the step period, P held inside that interval
+// (render one step behind: Tutorial06 GraphicsGameState's rule), then P advances by the display period the driver
+// supplies; a LOCKSTEP frame draws cur exactly (alpha 1 — every test, every hash) and P stands at the newest step.
+void OgreEngine::interpolateFrame() {
+    const double step = double(appliedFrameDelta() > 0.0f ? appliedFrameDelta() : 1.0f / 60.0f);
+    const double hi = double(mNewestStep) * step, lo = hi - step;
+    if (!mFreeFrame) {
+        mPresentTime = hi;
+        for (auto &s : mScenes) if (s) s->restoreInterpolated();
+        return;
+    }
+    if (mPresentTime < lo) mPresentTime = lo;
+    if (mPresentTime > hi) mPresentTime = hi;
+    for (auto &s : mScenes) {
+        if (!s) continue;
+        const double sLo = (double(s->interpolationStep()) - 1.0) * step;
+        s->interpolate(float((mPresentTime - sLo) / step));
+    }
+    const double period = double(mRenderThread.displayPeriod());
+    mPresentTime += period > 0.0 ? period : step;
+    mLastAlphaPresent = mPresentTime;
+}
+
 void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     const auto t0 = std::chrono::steady_clock::now();
     struct Timed {
@@ -2743,6 +2769,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     if (!any) { ++mFrameInputStatus.drainedEmpty; return; }
     FrameInput in = std::move(handed);
     unsigned applied = 0;
+    if (in.stepSerial && *in.stepSerial > mNewestStep) mNewestStep = *in.stepSerial;   // the presentation's grid
 
     // THE ONE ORDER (decision 46; stage 3's FIFO law across every stream): the engine's messages, every scene's
     // messages and every view's binding, in the order the host posted them (their sequence). A create precedes the
@@ -2750,12 +2777,12 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     // changes and fields, and the views' other fields, follow — the record's state after its structure.
     {
         struct Op {
-            unsigned long long seq;
-            const EngineMessage *engineMessage;
-            Scene *scene;
-            const SceneMessage *sceneMessage;
-            View *view;
-            Scene *bind;
+            unsigned long long   seq = 0;
+            const EngineMessage *engineMessage = nullptr;
+            Scene               *scene = nullptr;
+            const SceneMessage  *sceneMessage = nullptr;
+            View                *view = nullptr;
+            Scene               *bind = nullptr;
         };
         std::vector<Op> ops;
         for (const EngineMessage &m : in.engineMessages) ops.push_back({ m.seq, &m, nullptr, nullptr, nullptr, nullptr });

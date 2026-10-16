@@ -66,15 +66,18 @@ public:
     /// ONE TURN OF THE LOOP on the caller's thread (stage 1's seam; stage 4's run() loops it on its own thread):
     /// the hand-over, the frame (OgreEngine::runFrame), the publish.
     void tickInline();
-    /// THE FREE-RUNNING FRAME (stage 4b): hands the slot over now and runs the frame on the render thread without
-    /// waiting; false when the thread is still busy with the last one.
-    bool kick();
+    /// THE OWNER'S MODE (U3 stage 5): the render thread draws continuously, paced by the present and the display
+    /// period, applying the newest record and interpolating between its two grid states; off = only on request.
+    void setFreeRunning(bool on);
+    /// One free frame now, waited for (inspect::EngineEcho::presentationFrame).
+    void freeFrameNow() { runOn([this] { tickWith(handOver(), true); }); }
+    bool freeRunning() const { return mFreeRun.load(std::memory_order_relaxed); }
     /// The engine's half of the snapshot re-made after a request (the frame's stamp unchanged).
     void republishEngine();
     /// The last frame the loop closed (Engine::published()).
-    const PublishedEngineFrame &published() const {
-        return mPublished[mPublishedIdx.load(std::memory_order_acquire)];
-    }
+    const PublishedEngineFrame &published() const { return mPublished.read(mPublishedSeen); }
+    /// The host's latch (U3 stage 5): its reads see the newest snapshot from here to its next latch.
+    void latchSnapshots();
     /// The serial of the last record a hand-over took (0 = none yet).
     unsigned long long serial() const { return mSerial; }
     /// THE DISPLAY'S PERIOD (Engine::setDisplayPeriod): a display property the driver sets on change, read by the
@@ -110,7 +113,7 @@ private:
     };
     /// THE HAND-OVER (render side, under the lock): swaps the slot out, stamps the serial on a non-empty record.
     Slot handOver();
-    void tickWith(Slot &&handed);
+    void tickWith(Slot &&handed, bool freeFrame);
     /// THE PUBLISH (render side): the frame's error (taken from the engine's sink, which holds the CALLS' error again
     /// after this), every scene's half and the engine's half, each a whole-frame swap.
     void publish(bool recordApplied, std::string &&frameError);
@@ -126,6 +129,8 @@ private:
     bool                    mQuit = false;
     std::exception_ptr      mTaskThrown;   ///< what the last task threw (runOn rethrows it on the asker)
     std::function<void()>   mHostPump;
+    std::atomic<bool>       mFreeRun{ false };
+    bool                    mTornDown = false;   ///< render side: the teardown ran (no frame after it)
     std::thread::id         mHostThread;   ///< the thread that started the engine: the only one that pumps
     mutable std::mutex mSlotLock;
     Slot               mSlot;           ///< guarded by mSlotLock
@@ -134,12 +139,13 @@ private:
     unsigned long long mPostSeq = 0;    ///< guarded by mSlotLock: the one order's counter (decision 46)   ///< guarded by mSlotLock: the scene part the last post appended to
     // ---- render side only ----
     unsigned long long mSerial = 0;
+    unsigned long long mHandOverNow = 0;   ///< the hand-over the running frame took
     unsigned long long mFramesWithError = 0;
     std::vector<PublishedEngineFrame::FrameError> mFrameErrors;   ///< the newest kFrameErrorsKept, oldest first
     double             mPublishMicros = 0.0;
     std::atomic<float> mDisplayPeriod{ 0.0f };
-    PublishedEngineFrame mPublished[2];
-    std::atomic<unsigned> mPublishedIdx{ 0u };
+    mutable SnapshotBuffers<PublishedEngineFrame> mPublished;
+    mutable std::atomic<unsigned long long> mPublishedSeen{ ~0ull };
 };
 
 }}}   // namespace jahshaka::engine::detail

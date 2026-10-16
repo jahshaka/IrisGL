@@ -1164,6 +1164,9 @@ const ArmDef kArms[] = {
       "THE REFUSING MESSAGE (ENGINE-UPGRADE-U3 decision 44, host.error_door): 1 = every scene message a frame drains is "
       "refused unapplied, its refusal a completion and a refusal of the snapshot — the frame writes the engine's error "
       "sink every frame while the host's error pump drains its own door. A test door." },
+    { "interp.serial", 0.0, 0.0, 1.0,
+      "THE APPLY'S MEASURING ARM (ENGINE-UPGRADE-U3 stage 5, frame.interpolation_apply): 1 = the free frames' "
+      "interpolation of the newest step's nodes runs on the frame's thread, never on the scene's pool." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

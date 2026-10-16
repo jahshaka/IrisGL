@@ -30,6 +30,46 @@ struct EngineSideScope {
     EngineSideScope &operator=(const EngineSideScope &) = delete;
 };
 
+/// THE SNAPSHOT, THREE BUFFERS AND A HOST LATCH (ENGINE-UPGRADE-U3 stage 5). The render thread publishes every display
+/// frame in the owner's mode while the host reads at its own pace: it writes the buffer that is neither the newest
+/// nor the one the host latched, so a buffer the host is reading is never written. The host's reads see what it
+/// latched (latch(): the newest, at its tick's head or after any task it waited for); the engine's own reads, the
+/// newest. Lockstep latches after every task, so a test reads exactly what it used to.
+/// The host's latch generation (bumped by every latch; a scene latches lazily at its first host read after a bump) and
+/// whether a render thread exists (without one there is no concurrent publish: the host reads the newest).
+extern std::atomic<unsigned long long> gHostLatchEpoch;
+extern std::atomic<bool> gRenderThreaded;
+template <class T>
+struct SnapshotBuffers {
+    T                     buf[3];
+    std::atomic<unsigned> latest{ 0u };
+    std::atomic<unsigned> latched{ 0u };
+    /// The buffer the next publish fills (render side).
+    T &back() {
+        const unsigned a = latest.load(std::memory_order_relaxed), b = latched.load(std::memory_order_acquire);
+        for (unsigned i = 0; i < 3u; ++i) if (i != a && i != b) return buf[i];
+        return buf[(a + 1u) % 3u];
+    }
+    unsigned backIndex() const {
+        const unsigned a = latest.load(std::memory_order_relaxed), b = latched.load(std::memory_order_acquire);
+        for (unsigned i = 0; i < 3u; ++i) if (i != a && i != b) return i;
+        return (a + 1u) % 3u;
+    }
+    void commit(const T &written) { latest.store(unsigned(&written - buf), std::memory_order_release); }
+    const T &newest() const { return buf[latest.load(std::memory_order_acquire)]; }
+    const T &hostView() const { return buf[latched.load(std::memory_order_acquire)]; }
+    void latch() { latched.store(latest.load(std::memory_order_acquire), std::memory_order_release); }
+    /// What a read on THIS thread sees: the newest on the engine's side or without a render thread; the host's latch
+    /// otherwise, taken lazily at the first read of each latch generation.
+    const T &read(std::atomic<unsigned long long> &seenEpoch) {
+        if (tlsEngineSide != 0 || !gRenderThreaded.load(std::memory_order_relaxed)) return newest();
+        const unsigned long long epoch = gHostLatchEpoch.load(std::memory_order_acquire);
+        if (seenEpoch.load(std::memory_order_relaxed) != epoch) { latch(); seenEpoch.store(epoch, std::memory_order_relaxed); }
+        return hostView();
+    }
+    void reset(const T &empty) { buf[0] = buf[1] = buf[2] = empty; latest.store(0u); latched.store(0u); }
+};
+
 }}}   // namespace jahshaka::engine::detail
 
 /// The first statement of every counted getter.

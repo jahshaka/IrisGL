@@ -1875,6 +1875,7 @@ enum class ArmId : unsigned {
     GpuWalkWhole,        ///< "gpuscene.wholeWalk" — the dirty scan walks every slot (the measuring arm; 0: the named slots)
     GpuWalkParity,       ///< "gpuscene.walkParity" — after every frame's compose, every slot checked against the table (the guard)
     MessagesRefuse,      ///< "messages.refuse" — every scene message of the frame refused unapplied (a test door, U3 decision 44)
+    InterpSerial,        ///< "interp.serial" — the free frames' interpolation on the frame's thread (the measuring arm)
     Count
 };
 class ArmRegistry {
@@ -3578,6 +3579,17 @@ public:
               std::string &errorSink);
     /// The manager of a scene the host made through a create message (U3 stage 4a): bound at the message's drain.
     void adoptManager(Ogre::SceneManager *sm);
+    /// THE TWO GRID STATES DRAWN BETWEEN (U3 stage 5): the newest step's moved nodes, set to lerp(prev, cur, alpha)
+    /// in parallel on the scene's pool (alpha 1 = cur, a lockstep frame's — and the restore).
+    void interpolate(float alpha);
+    void noteInterpolated(NodeId id, unsigned long long step);
+    void restoreInterpolated();
+    unsigned long long interpolationStep() const { return mInterpStep; }
+    std::vector<NodeId> mInterpNodes;
+    unsigned long long mInterpStep = 0;
+    float mInterpDrawnAlpha = 1.0f;
+    double mInterpMicros = 0.0;
+    unsigned mInterpNodesLast = 0;
     /// THE HOST'S SIDE OF A SCENE COMMAND (U3 stage 4a, decision 39): posted as a message of this scene's stream
     /// (Engine::post) when the host's calls are records; false on the engine's side, where the command applies.
     bool hostPosts() const;
@@ -3900,9 +3912,7 @@ public:
     // ---- Hierarchy and transforms ----
     NodeId createNode(NodeId parent = 0, NodeId id = 0) override;
     NodeId createDocumentNode(NodeId id, NodeId parent) override;
-    const PublishedFrame &published() const override {
-        return mPublished[mPublishedIdx.load(std::memory_order_acquire)];
-    }
+    const PublishedFrame &published() const override { return mPublished.read(mPublishedSeen); }
     /// THE EXTRACT'S APPLY (ENGINE-UPGRADE-U2): each document node's record — parent, graph class, local TRS — in
     /// order, before the change set names the subtrees. Returns how many records landed.
     unsigned applyNodeRecords(const std::vector<NodeRecord> &records, unsigned long long stepSerial);
@@ -4558,6 +4568,7 @@ private:
         };
         LocalTrs           prevLocal, curLocal;
         unsigned long long stepSerial = 0;
+        bool               hasCur = false;   ///< a record has set cur (stage 5: the first has no motion)
         /// WHAT THIS NODE ADDS TO THE SCENE'S MOBILITY AND RIG COUNTS (ENGINE-UPGRADE-U3 stage 2 read 12(b)): kept at
         /// every mutation site (recountNode), so MobilityStatus / RigStats are running totals, never a walk.
         struct Counted {
@@ -5556,6 +5567,7 @@ private:
     /// This scene's record for `id`, or null — the one-lookup form of
     /// `node(id)` + `mNodes.find(id)`, for the callers that need both the Ogre
     /// node and the record (round-2 review F9).
+    std::vector<Node *> mInterpRecs;   ///< the interpolation's resolved nodes (scratch, U3 stage 5)
     Node *record(NodeId id) {
         auto it = mNodes.find(id);
         return it == mNodes.end() ? nullptr : &it->second;
@@ -5641,8 +5653,8 @@ private:
     std::unordered_map<Ogre::IdType, NodeId> mNodeByOgreId;
     /// THE SCENE'S PUBLISHED FRAME (Scene::published, PublishedFrame): a whole-frame SWAP (Engine.h's contract) —
     /// publishFrame writes the buffer published() is not returning, then flips the index.
-    PublishedFrame mPublished[2];
-    std::atomic<unsigned> mPublishedIdx{0};
+    mutable SnapshotBuffers<PublishedFrame> mPublished;   ///< three buffers and the host's latch (U3 stage 5)
+    mutable std::atomic<unsigned long long> mPublishedSeen{ ~0ull };
     /// Planar reflectors asked for on DOCUMENT nodes this frame, armed at the drain once their poses landed.
     std::vector<NodeId> mReflectorsToArm;
     /// The nodes riding a bone tag right now (attachToBone / releaseBoneTag): publishFrame's whole walk.
@@ -7488,7 +7500,14 @@ public:
     /// ONE TURN OF THE RENDER LOOP (ENGINE-UPGRADE-U3 stage 1): RenderThread::tickInline — the hand-over, the frame
     /// (runFrame, below), the publish. The public door stays here until stage 4 deletes it.
     void renderOneFrame() override;
-    bool kickFrame() override { return mRenderThread.kick(); }
+    void setFreeRunning(bool on) override { if (mRenderThread.threaded()) mRenderThread.setFreeRunning(on); }
+    void latchSnapshot() override { mRenderThread.latchSnapshots(); }
+    void presentationFrame() override { mRenderThread.freeFrameNow(); }
+    void lastInterpolation(const Scene *s, unsigned &nodes, double &micros) const override {
+        nodes = 0; micros = 0.0;
+        for (const auto &q : mScenes)
+            if (q.get() == s) { nodes = q->mInterpNodesLast; micros = q->mInterpMicros; }
+    }
     /// The game side's merge into the hand-over slot (RenderThread::submit).
     void submitFrame(FrameInput input) override;
     void post(Scene *scene, SceneMessage &&message) override;
@@ -7776,6 +7795,14 @@ public:
     void applySceneMessage(OgreScene *sc, const SceneMessage &m);
     std::set<std::string> mHostSceneNames, mHostViewNames;   ///< the host's own name records (the creates' checks)
     bool mHostRecords = false;
+    /// THIS FRAME IS A FREE-RUNNING ONE (U3 stage 5, RenderThread::tickWith): it interpolates; a lockstep frame draws cur.
+    bool mFreeFrame = false;
+    /// THE PRESENTATION CLOCK (U3 stage 5), in the document's step time: advanced by the display period per free frame,
+    /// held between the newest record's two grid states — never a wall clock read by the engine.
+    double mPresentTime = 0.0;
+    unsigned long long mNewestStep = 0;
+    double mLastAlphaPresent = 0.0;
+    void interpolateFrame();
     mutable std::string mHostError;
 
     /// PROCESS-WIDE: rides Ogre's single frame-time controller value

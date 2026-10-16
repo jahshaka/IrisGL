@@ -2020,10 +2020,15 @@ public:
     /// (the record accumulated since the last turn, stamped with its serial), the frame, and the PUBLISH (published(),
     /// each Scene::published()). Every test drives it in LOCKSTEP: one turn, one hand-over, one frame.
     virtual void renderOneFrame() = 0;
-    /// THE FREE-RUNNING FRAME (ENGINE-UPGRADE-U3 stage 4b): the record submitted so far is handed over now and the
-    /// frame runs on the render thread while the caller goes on (the owner's loop — EngineRenderDriver's tick). False
-    /// when the last frame is still running (the tick draws nothing). Without a render thread it IS renderOneFrame.
-    virtual bool kickFrame() = 0;
+    /// THE OWNER'S MODE (ENGINE-UPGRADE-U3 stage 5): the render thread draws on its own — every display frame the
+    /// newest record, interpolated between its two grid states, paced by the present and the display period
+    /// (setDisplayPeriod) — while the host only submits. Off (the default, every test): frames only on request.
+    /// Without a render thread it does nothing (the host's renderOneFrame is the only frame).
+    virtual void setFreeRunning(bool on) = 0;
+    /// THE HOST'S LATCH (stage 5): from here to the next latch the host's reads of published() — the engine's and every
+    /// scene's — see one snapshot, however many frames the render thread publishes meanwhile (the driver latches at
+    /// its tick's head; a lockstep task latches when it returns). A door.
+    virtual void latchSnapshot() = 0;
     /// THE FRAME'S INPUT (FrameInput, ENGINE-UPGRADE-1 U0 3a): handed over now, applied ONCE at the top of the
     /// next renderOneFrame — never on the spot. Several submits before one frame merge (see FrameInput): the
     /// merge builds the ONE record the next hand-over takes and stamps with its serial (U3 F1). A frame with no

@@ -629,11 +629,16 @@ bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSeri
             // THE TWO GRID STATES (ENGINE-UPGRADE-U3 stage 1): the previous record's local becomes `prev`, this one
             // `cur`, stamped with the document step it was built at. CUR IS WHAT IS DRAWN until stage 5 interpolates
             // prev -> cur on a free-running frame; a lockstep frame (every test) always draws cur exactly.
-            rec->prevLocal = rec->curLocal;
+            // A second record of the SAME step (two submits merged) moves cur only: prev stays the last step's.
+            if (rec->stepSerial != stepSerial || !rec->hasCur) rec->prevLocal = rec->hasCur ? rec->curLocal : Node::LocalTrs();
+            const bool first = !rec->hasCur;
             rec->curLocal.position = toOgre(r.position);
             rec->curLocal.rotation = Ogre::Quaternion(r.rotation.w, r.rotation.x, r.rotation.y, r.rotation.z);
             rec->curLocal.scale = toOgre(r.scale);
             rec->stepSerial = stepSerial;
+            rec->hasCur = true;
+            if (first) rec->prevLocal = rec->curLocal;   // a node's first record has no motion to show
+            noteInterpolated(r.id, stepSerial);           // the two grid states the free frames draw between (stage 5)
             sn->setPosition(rec->curLocal.position);
             setOrientationExact(sn, rec->curLocal.rotation);
             sn->setScale(rec->curLocal.scale);
@@ -643,8 +648,83 @@ bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSeri
     } JAH_CATCH(mError, false);
 }
 
+// ---- THE TWO GRID STATES, INTERPOLATED (ENGINE-UPGRADE-U3 stage 5) -----------------------------------------------------
+void OgreScene::noteInterpolated(NodeId id, unsigned long long step) {
+    if (step != mInterpStep) {
+        restoreInterpolated();   // the last step's nodes back on their cur before the list moves on
+        mInterpNodes.clear();
+        mInterpStep = step;
+    }
+    mInterpNodes.push_back(id);
+}
+
+void OgreScene::restoreInterpolated() {
+    if (mInterpDrawnAlpha >= 1.0f) return;
+    interpolate(1.0f);
+}
+
+namespace {
+/// THE APPLY AS OGRE'S UNIFORM SCALABLE TASK (Tutorial06's parallel lerp): share `threadId` on worker `threadId`.
+template <class Share>
+class InterpolateTask final : public Ogre::UniformScalableTask {
+public:
+    explicit InterpolateTask(Share &share) : mShare(share) {}
+    void execute(size_t threadId, size_t) override { mShare(threadId); }
+private:
+    Share &mShare;
+};
+/// Below this many nodes the apply stays on the frame's thread (a barrier round trip costs more).
+constexpr size_t kParallelInterpNodes = 256u;
+}   // namespace
+
+void OgreScene::interpolate(float alpha) {
+    alpha = alpha < 0.0f ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
+    if (mInterpNodes.empty() || (alpha >= 1.0f && mInterpDrawnAlpha >= 1.0f)) { mInterpDrawnAlpha = alpha; return; }
+    const auto t0 = std::chrono::steady_clock::now();
+    // The nodes resolved once, serially (the map is not touched by the shares).
+    mInterpRecs.clear();
+    for (NodeId id : mInterpNodes) {
+        Node *rec = record(id);
+        if (rec && rec->node && rec->document && rec->hasCur) mInterpRecs.push_back(rec);
+    }
+    const auto apply = [this, alpha](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i) {
+            Node *rec = mInterpRecs[i];
+            Ogre::SceneNode *sn = rec->node;
+            if (alpha >= 1.0f) {
+                sn->setPosition(rec->curLocal.position);
+                setOrientationExact(sn, rec->curLocal.rotation);
+                sn->setScale(rec->curLocal.scale);
+            } else {
+                // lerp + nlerp (Tutorial06 GraphicsSystem.cpp's rule), the shortest path.
+                sn->setPosition(rec->prevLocal.position + (rec->curLocal.position - rec->prevLocal.position) * alpha);
+                sn->setOrientation(Ogre::Quaternion::nlerp(alpha, rec->prevLocal.rotation, rec->curLocal.rotation, true));
+                sn->setScale(rec->prevLocal.scale + (rec->curLocal.scale - rec->prevLocal.scale) * alpha);
+            }
+        }
+    };
+    const size_t n = mInterpRecs.size();
+    const size_t workers = mSceneMgr ? mSceneMgr->getNumWorkerThreads() : 0u;
+    const bool serial = mEngine && mEngine->armRegistry().on(ArmId::InterpSerial);
+    const size_t shares = (!serial && n >= kParallelInterpNodes && workers >= 1u) ? workers + 1u : 1u;
+    if (shares == 1u) {
+        apply(0, n);
+    } else {
+        const auto share = [&](size_t s) { apply(n * s / shares, n * (s + 1) / shares); };
+        InterpolateTask<decltype(share)> task(share);
+        mSceneMgr->executeUserScalableTask(&task, false);
+        share(shares - 1u);
+        mSceneMgr->waitForPendingUserScalableTask();
+    }
+    for (Node *rec : mInterpRecs)
+        if (rec->node->isStatic()) mSceneMgr->notifyStaticDirty(rec->node);
+    mInterpDrawnAlpha = alpha;
+    mInterpMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+    mInterpNodesLast = unsigned(n);
+}
+
 void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial) {
-    PublishedFrame &back = mPublished[mPublishedIdx.load(std::memory_order_relaxed) ^ 1u];
+    PublishedFrame &back = mPublished.back();
     back.frame = frame;
     back.serial = serial;
     back.gi = giStatus();
@@ -734,7 +814,7 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     }
     std::sort(back.riderTags.begin(), back.riderTags.end(),   // the lookups are binary searches (decision 36)
               [](const PublishedFrame::RiderTag &a, const PublishedFrame::RiderTag &b) { return a.rider < b.rider; });
-    mPublishedIdx.store(mPublishedIdx.load(std::memory_order_relaxed) ^ 1u, std::memory_order_release);
+    mPublished.commit(back);
 }
 
 bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
@@ -2017,9 +2097,7 @@ void OgreScene::destroy() {
         mBoneRiderIds.clear();
         mReflectorsToArm.clear();
         mFactsDirty = true;
-        mPublished[0] = PublishedFrame();
-        mPublished[1] = PublishedFrame();
-        mPublishedIdx.store(0, std::memory_order_release);
+        mPublished.reset(PublishedFrame());
         // The helper overlay queue's depth anchor: an entity in this
         // SceneManager's memory manager, so it dies before the manager does.
         releaseQueueDepthAnchor();

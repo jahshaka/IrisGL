@@ -23,6 +23,8 @@ SyncGetterSite::SyncGetterSite(const char *n) : name(n) {
 SyncGetterSite *syncGetterSites() { return gSyncSites.load(std::memory_order_acquire); }
 
 std::atomic<bool> gAffinityChecks{ false };
+std::atomic<unsigned long long> gHostLatchEpoch{ 1ull };
+std::atomic<bool> gRenderThreaded{ false };
 /// The render thread's id (set by the loop that owns the engine: the creating thread until stage 4b's thread).
 std::atomic<std::thread::id> gRenderThreadId{};
 void checkAffinity(const char *entry) {
@@ -159,6 +161,8 @@ RenderThread::Slot RenderThread::handOver() {
     std::lock_guard<std::mutex> lock(mSlotLock);
     Slot out = std::move(mSlot);
     mSlot = Slot();
+    ++mSubmit.handOvers;
+    mHandOverNow = mSubmit.handOvers;
     if (out.any) ++mSerial;
     out.record.serial = mSerial;
     return out;
@@ -168,6 +172,7 @@ RenderThread::Slot RenderThread::handOver() {
 
 bool RenderThread::start(std::function<bool()> boot) {
     mHostThread = std::this_thread::get_id();   // the host's thread: the one that started the engine
+    gRenderThreaded.store(true, std::memory_order_relaxed);
     bool ok = false;
     std::mutex bootLock;
     std::condition_variable bootCv;
@@ -193,11 +198,31 @@ bool RenderThread::start(std::function<bool()> boot) {
 void RenderThread::threadMain() {
     for (;;) {
         std::function<void()> task;
+        bool freeFrame = false;
         {
             std::unique_lock<std::mutex> l(mTaskLock);
-            mTaskCv.wait(l, [this] { return mTaskPending || mQuit; });
+            // FREE-RUNNING (U3 stage 5): with no task waiting the render thread draws on its own — a display frame
+            // of the newest record, paced by the present (the vsync acquire) and, where the present does not block,
+            // by the display period the driver supplies. A task (a request, a join, a lockstep frame) goes between two.
+            mTaskCv.wait(l, [this] { return mTaskPending || mQuit || mFreeRun.load(std::memory_order_relaxed); });
             if (!mTaskPending && mQuit) return;
-            task = std::move(mTask);
+            if (mTaskPending) task = std::move(mTask);
+            else freeFrame = true;
+        }
+        if (freeFrame) {
+            if (mTornDown) { mFreeRun.store(false, std::memory_order_relaxed); continue; }
+            const auto t0 = std::chrono::steady_clock::now();
+            try { tickWith(handOver(), true); } catch (...) {}
+            // THE PACE WHERE THE PRESENT DID NOT BLOCK (an offscreen session, vsync off): the rest of the display
+            // period, waited on the task condition so a task still goes at once.
+            const double period = double(mDisplayPeriod.load(std::memory_order_relaxed));
+            const double spent = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            if (period > 0.0 && spent < period) {
+                std::unique_lock<std::mutex> l(mTaskLock);
+                mTaskCv.wait_for(l, std::chrono::duration<double>(period - spent),
+                                 [this] { return mTaskPending || mQuit || !mFreeRun.load(std::memory_order_relaxed); });
+            }
+            continue;
         }
         // A THROW ON THE RENDER THREAD IS THE ASKER'S (decision 45, D3): caught into the slot and rethrown on the waiting
         // thread by runOn — never std::terminate.
@@ -220,7 +245,11 @@ void RenderThread::threadMain() {
 }
 
 void RenderThread::runOn(const std::function<void()> &task) {
-    if (onRenderThread()) { task(); return; }
+    if (onRenderThread()) {
+        task();
+        if (tlsEngineSide == 0) latchSnapshots();   // inline (no thread): the caller's reads see the task's publish
+        return;
+    }
     std::unique_lock<std::mutex> l(mTaskLock);
     mTaskCv.wait(l, [this] { return !mTaskPending; });   // one task at a time (a second host thread queues)
     mTaskThrown = nullptr;   // a kicked frame's throw before this is the frame's (the kick has no asker)
@@ -236,13 +265,16 @@ void RenderThread::runOn(const std::function<void()> &task) {
     }
     std::exception_ptr thrown = std::exchange(mTaskThrown, nullptr);
     l.unlock();
+    latchSnapshots();   // what the task published is what the asker reads next (lockstep: every task)
     if (pump) mHostPump();
     if (thrown) std::rethrow_exception(thrown);
 }
 
 void RenderThread::stop(const std::function<void()> &teardown) {
+    // NO FREE FRAME AFTER THIS (stage 5): the teardown is the render thread's last task, and nothing draws after it.
+    mFreeRun.store(false, std::memory_order_relaxed);
     if (!threaded()) { if (teardown) teardown(); return; }
-    runOn([&] { EngineSideScope engineSide; if (teardown) teardown(); });
+    runOn([&] { EngineSideScope engineSide; if (teardown) teardown(); mTornDown = true; });
     {
         std::lock_guard<std::mutex> l(mTaskLock);
         mQuit = true;
@@ -250,26 +282,23 @@ void RenderThread::stop(const std::function<void()> &teardown) {
     mTaskCv.notify_all();
     mThread.join();
     gRenderThreadId.store(std::this_thread::get_id(), std::memory_order_relaxed);
+    gRenderThreaded.store(false, std::memory_order_relaxed);
 }
 
-// THE FREE-RUNNING FRAME (U3 stage 4b): the record is handed over NOW, on the host's thread — the frame applies
-// exactly what was submitted before the kick, whatever the host submits while it runs — and the frame runs on the
-// render thread without the host waiting. False when the render thread is still busy (the host skips this tick).
-bool RenderThread::kick() {
-    if (!threaded()) { tickInline(); return true; }
-    std::unique_lock<std::mutex> l(mTaskLock);
-    if (mTaskPending) return false;
-    auto handed = std::make_shared<Slot>(handOver());
-    mTask = [this, handed] { tickWith(std::move(*handed)); };
-    mTaskPending = true;
-    l.unlock();
+void RenderThread::tickInline() { tickWith(handOver(), false); }
+
+void RenderThread::latchSnapshots() {
+    gHostLatchEpoch.fetch_add(1ull, std::memory_order_acq_rel);   // every snapshot latches at its next host read
+}
+
+void RenderThread::setFreeRunning(bool on) {
+    if (mFreeRun.exchange(on, std::memory_order_relaxed) == on) return;
+    std::lock_guard<std::mutex> l(mTaskLock);
     mTaskCv.notify_all();
-    return true;
 }
 
-void RenderThread::tickInline() { tickWith(handOver()); }
-
-void RenderThread::tickWith(Slot &&handed) {
+void RenderThread::tickWith(Slot &&handed, bool freeFrame) {
+    mEngine.mFreeFrame = freeFrame;   // the interpolation's switch (OgreEngine::runFrame): a lockstep frame draws cur
     // THE HOST'S HALF OF THE MONITOR'S RECORD, folded in before the frame opens (the next beginFrame adopts what is
     // banked between frames, so it leads the stage list as it always did). Dropped when no capture runs, as the
     // host's stages always were.
@@ -303,13 +332,14 @@ void RenderThread::publish(bool recordApplied, std::string &&frameError) {
         catch (Ogre::Exception &x) { frameError = describeOgreFailure(x); }
         catch (std::exception &x) { frameError = std::string("engine: ") + x.what(); }
     }
-    PublishedEngineFrame &back = mPublished[mPublishedIdx.load(std::memory_order_relaxed) ^ 1u];
+    PublishedEngineFrame &back = mPublished.back();
     try { e.fillPublished(back); }
     catch (Ogre::Exception &x) { frameError = describeOgreFailure(x); }
     catch (std::exception &x) { frameError = std::string("engine: ") + x.what(); }
     back.frame = e.mPublishedFrames;
     back.serial = mSerial;
     back.recordApplied = recordApplied;
+    back.handOver = mHandOverNow;
     if (!frameError.empty()) {
         ++mFramesWithError;
         mFrameErrors.push_back({ mSerial, e.mPublishedFrames, frameError });
@@ -320,26 +350,26 @@ void RenderThread::publish(bool recordApplied, std::string &&frameError) {
     back.framesWithError = mFramesWithError;
     back.publishMicros = mPublishMicros;
     mPublishMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
-    mPublishedIdx.store(mPublishedIdx.load(std::memory_order_relaxed) ^ 1u, std::memory_order_release);
+    mPublished.commit(back);
 }
 
 // THE ENGINE'S HALF RE-PUBLISHED AFTER A REQUEST (U3 stage 4b): what the request applied (the pending record's
 // structure, the question's own change — a monitor started or stopped) is in the snapshot the asker reads next, the
 // frame's stamp unchanged (no frame was drawn).
 void RenderThread::republishEngine() {
-    const unsigned idx = mPublishedIdx.load(std::memory_order_relaxed);
-    const PublishedEngineFrame &front = mPublished[idx];
-    PublishedEngineFrame &back = mPublished[idx ^ 1u];
+    const PublishedEngineFrame &front = mPublished.newest();
+    PublishedEngineFrame &back = mPublished.back();
     try { mEngine.fillPublished(back); }
     catch (...) { return; }
     back.frame = front.frame;
     back.serial = front.serial;
     back.recordApplied = front.recordApplied;
+    back.handOver = front.handOver;
     back.frameError = front.frameError;
     back.frameErrors = mFrameErrors;
     back.framesWithError = mFramesWithError;
     back.publishMicros = front.publishMicros;
-    mPublishedIdx.store(idx ^ 1u, std::memory_order_release);
+    mPublished.commit(back);
 }
 
 }}}   // namespace jahshaka::engine::detail
