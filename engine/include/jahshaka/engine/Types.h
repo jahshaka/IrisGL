@@ -8605,6 +8605,9 @@ struct PublishedEngineFrame {
         std::string        text;
     };
     std::vector<Refusal> refusals;
+    /// A VR SESSION IS RUNNING as the frame closed it (decision 45, D5): what the engine learns on its own — the runtime
+    /// ended the session — reaches the host here, never as a write of the host's record.
+    bool vrSessionLive = false;
     /// THE ENGINE MESSAGES' COMPLETIONS (decision 39 c): the named ones' answers and every refusal, the last
     /// kFrameErrorsKept frames, by a sequence that only grows — PublishedFrame::Completion's shape.
     std::shared_ptr<const std::vector<PublishedFrame::Completion>> completions;

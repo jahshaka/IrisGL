@@ -123,11 +123,14 @@ private:
     std::function<void()>   mTask;
     bool                    mTaskPending = false;
     bool                    mQuit = false;
+    std::exception_ptr      mTaskThrown;   ///< what the last task threw (runOn rethrows it on the asker)
     std::function<void()>   mHostPump;
+    std::thread::id         mHostThread;   ///< the thread that started the engine: the only one that pumps
     mutable std::mutex mSlotLock;
     Slot               mSlot;           ///< guarded by mSlotLock
     FrameSubmitStatus  mSubmit;         ///< guarded by mSlotLock
-    size_t             mLastPart = 0;   ///< guarded by mSlotLock: the scene part the last post appended to
+    size_t             mLastPart = 0;
+    unsigned long long mPostSeq = 0;    ///< guarded by mSlotLock: the one order's counter (decision 46)   ///< guarded by mSlotLock: the scene part the last post appended to
     // ---- render side only ----
     unsigned long long mSerial = 0;
     unsigned long long mFramesWithError = 0;

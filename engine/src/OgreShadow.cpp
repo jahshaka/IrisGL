@@ -475,7 +475,7 @@ void OgreEngine::setShadowFilter(ShadowFilter f) {
     if (postedAsMessage([=](OgreEngine &e) { e.setShadowFilter(f); return true; })) return;
     JAH_HOST_CALL("Engine::setShadowFilter");
     mShadowFilter = f;
-    mHostShadowFilter = f;   // the host's record (Engine::shadowFilter)
+    if (!mHostRecords) mHostShadowFilter = f;   // the host's record (Engine::shadowFilter); at its call when records (D5)
     if (mHlmsRegistered) applyShadowFilter();
     // else: applied by ensureHlms() once the Hlms exists.
 }

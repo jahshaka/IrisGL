@@ -83,6 +83,7 @@ bool OgreEngine::startRenderThread(const EngineConfig &cfg, std::string &error) 
 bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     EngineSideScope engineSide;   // the boot: the engine's own calls inside it are the render side's (U3 4a)
     mHostRecords = cfg.hostRecords || cfg.renderThread;
+    mHostRecordsMode = mHostRecords;
 #ifdef __linux__
     mDisplay = reinterpret_cast<void *>(cfg.display);
 #else
@@ -332,8 +333,11 @@ bool OgreEngine::adoptScene(std::unique_ptr<OgreScene> adopted, unsigned workerT
         mLastError = "createScene('" + name + "'): no View exists yet — create a View first";
         return false;
     }
-    for (auto &s : mScenes)
-        if (s->name() == name) { mLastError = "Scene '" + name + "' already exists"; return false; }
+    // THE HOST'S NAME RECORD IS THE LAW when the host's calls are records (decision 45, D2): a destroy and a re-create
+    // of one name in one record drain create-first (the destroy is late), so the engine must not refuse the new one.
+    if (!mHostRecords || !adopted)
+        for (auto &s : mScenes)
+            if (s->name() == name) { mLastError = "Scene '" + name + "' already exists"; return false; }
     JAH_TRY {
         // WORKER THREADS ARE PER SCENE, and the caller decides (Engine.h).
         // Ogre forks culling, render-queue building and object updates across
@@ -356,7 +360,10 @@ bool OgreEngine::adoptScene(std::unique_ptr<OgreScene> adopted, unsigned workerT
         const unsigned threads = workerThreads == kSceneMainThreadOnly ? 0u
                                  : workerThreads == 0u                 ? 2u
                                  : (workerThreads > 32u ? 32u : workerThreads);
-        Ogre::SceneManager *sm = mRoot->createSceneManager(Ogre::ST_GENERIC, threads, name);
+        // ...and Ogre's instance name is unique however the host's names overlap in one record (the old manager is
+        // still alive when the re-create drains).
+        const std::string smName = mRoot->hasSceneManager(name) ? processUniqueName(name.c_str()) : name;
+        Ogre::SceneManager *sm = mRoot->createSceneManager(Ogre::ST_GENERIC, threads, smName);
         // HlmsPbs shades point and spot lights ONLY through Forward+ (Forward3D /
         // ForwardClustered); without it only directional lights reach the shader.
         // 16x8 grid, 24 slices, 2..50 units depth range.
@@ -511,7 +518,7 @@ void OgreEngine::destroyScene(Scene *scene) {
                     "' when it was destroyed - the engine ends it first",
                 Ogre::LML_NORMAL);
             endVrSession();
-            mVrMirrorView = nullptr; mHostVrMirrorView = nullptr;
+            mVrMirrorView = nullptr; if (!mHostRecords) mHostVrMirrorView = nullptr;
         }
         for (auto &v : mViews)
             if (v->scene() == scene) v->detachScene();
@@ -1643,7 +1650,7 @@ void OgreEngine::endLostOrStoppedVrSession() {
         // 4): the scene-teardown belt clears it, so the lost/stopped path
         // clears it too. A mirror pointed at a view whose session is gone is
         // nobody's wish, and the next session would inherit it.
-        mVrMirrorView = nullptr; mHostVrMirrorView = nullptr;
+        mVrMirrorView = nullptr; if (!mHostRecords) mHostVrMirrorView = nullptr;
     }
 }
 
@@ -1959,8 +1966,10 @@ void OgreEngine::endVrSession() {
     // caller should see while one is being taken apart.
     VrSession *session = mVrSession;
     mVrSession = nullptr;
-    mHostVrSessionLive = false;
-    mHostVrView = nullptr;
+    if (!mHostRecords) {   // the host's records are the host's (decision 45, D5): set at its call, never at the drain
+        mHostVrSessionLive = false;
+        mHostVrView = nullptr;
+    }
     // ...AND NO SESSION LEAVES ITS OWN BEHIND (finding 1). A suite that
     // injected through a live session (with the override on) would otherwise
     // hand the next one, or the headless verbs after it, a hand nobody wrote.
@@ -2083,7 +2092,7 @@ void OgreEngine::setVrMirrorView(View *view) {
     if (hostPosts()) mHostVrMirrorView = view;   // the host's record, at the call
     if (postedAsMessage([=](OgreEngine &e) { e.setVrMirrorView(view); return true; })) return;
     mVrMirrorView = static_cast<OgreView *>(view);
-    mHostVrMirrorView = view;
+    if (!mHostRecords) mHostVrMirrorView = view;   // the host set it at its call (D5)
     if (mVrSession) vrSessionSetMirror(mVrSession, mVrMirrorView);
 }
 
@@ -2537,7 +2546,7 @@ void OgreEngine::setVsync(bool on) {
     JAH_HOST_CALL("Engine::setVsync");
     if (mVsync == on) return;
     mVsync = on;
-    mHostVsync = on;   // the host's record (Engine::vsync)
+    if (!mHostRecords) mHostVsync = on;   // the host's record (Engine::vsync); set at its call when records (D5)
     JAH_TRY {
         for (auto &v : mViews) {
             Ogre::Window *w = v->ogreWindow();
@@ -2882,6 +2891,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
 // with a throw — never once a frame); at Off it is the absence the getter reports, the undrained tail included.
 void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
     out.input = mFrameInputStatus;
+    out.vrSessionLive = mVrSession != nullptr;
     // THE REFUSALS OF THE LAST kFrameErrorsKept FRAMES (decision 34), for the error pump.
     while (!mRefusals.empty() && mRefusals.front().frame + PublishedEngineFrame::kFrameErrorsKept <= mPublishedFrames)
         mRefusals.pop_front();

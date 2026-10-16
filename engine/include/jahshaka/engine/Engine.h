@@ -1899,7 +1899,7 @@ public:
     /// Is there anything to draw? A VR session always (its frame loop is the session's heartbeat), else any view
     /// enabled as the host (or, for its own view, the session) last set it — View::pushedEnabled.
     bool hasEnabledViews() const {
-        if (mHostVrSessionLive) return true;
+        if (vrSessionLive()) return true;   // the record and the snapshot (a session the runtime ended draws nothing)
         std::lock_guard<std::mutex> lock(mHostViewsLock);   // the render thread re-makes the list (U3 stage 4b)
         for (const View *v : mHostViews) if (v->pushedEnabled()) return true;
         return false;
@@ -1913,11 +1913,12 @@ public:
     bool isHeadless() const { return mIdentityHeadless; }
     /// The VR session's own eye-pair View while a session runs (null otherwise): the host's record of what
     /// beginVrSession made, cleared when the session ends (the host's endVrSession, or the engine ending a lost one).
-    View *vrView() const { return mHostVrView; }
+    View *vrView() const { return vrSessionLive() ? mHostVrView : nullptr; }
     /// Is a VR session running? The host's record of beginVrSession / endVrSession — and of the engine ending a
     /// session the runtime took away, at the close of the frame that saw it (VrStatus::active as the next frame
     /// reads it).
-    bool vrSessionLive() const { return mHostVrSessionLive; }
+    /// The host's record AND the snapshot (decision 45, D5): a session the runtime ended is gone for the host too.
+    bool vrSessionLive() const { return mHostVrSessionLive && (!mHostRecordsMode || published().vrSessionLive); }
     /// THE DEVICE'S CONSTANTS, fixed the moment the device exists (the first view, or a scene before any view —
     /// prepareDevice): its identity and whether it can trace rays. Defaults (an empty name, false) before.
     DeviceInfo deviceInfo() const { return mDeviceInfo; }
@@ -3062,6 +3063,7 @@ protected:
     float               mPushedFrameDelta = 1.0f / 60.0f;
     bool                mHostVrSessionLive = false;
     std::vector<View *> mHostViews;
+    bool                mHostRecordsMode = false;   ///< EngineConfig::hostRecords (the snapshot backs the VR records)
     mutable std::mutex  mHostViewsLock;   ///< guards mHostViews: written on the render thread, read on the host's
     bool                mIdentityHeadless = false;
     View               *mHostVrView = nullptr;

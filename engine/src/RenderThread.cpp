@@ -171,8 +171,11 @@ bool RenderThread::start(std::function<bool()> boot) {
             EngineSideScope engineSide;
             ok = boot();
         }
-        { std::lock_guard<std::mutex> l(bootLock); booted = true; }
-        bootCv.notify_all();
+        {   // NOTIFIED UNDER THE LOCK (decision 45, D4): start() cannot return and take the condition with it first.
+            std::lock_guard<std::mutex> l(bootLock);
+            booted = true;
+            bootCv.notify_all();
+        }
         threadMain();
     });
     std::unique_lock<std::mutex> l(bootLock);
@@ -189,12 +192,19 @@ void RenderThread::threadMain() {
             if (!mTaskPending && mQuit) return;
             task = std::move(mTask);
         }
-        if (task) task();
+        // A THROW ON THE RENDER THREAD IS THE ASKER'S (decision 45, D3): caught into the slot and rethrown on the waiting
+        // thread by runOn — never std::terminate.
+        std::exception_ptr thrown;
+        if (task) {
+            try { task(); }
+            catch (...) { thrown = std::current_exception(); }
+        }
         bool quit = false;
         {
             std::lock_guard<std::mutex> l(mTaskLock);
             mTaskPending = false;
             mTask = nullptr;
+            mTaskThrown = thrown;
             quit = mQuit;
         }
         mTaskCv.notify_all();
@@ -206,16 +216,21 @@ void RenderThread::runOn(const std::function<void()> &task) {
     if (onRenderThread()) { task(); return; }
     std::unique_lock<std::mutex> l(mTaskLock);
     mTaskCv.wait(l, [this] { return !mTaskPending; });   // one task at a time (a second host thread queues)
+    mTaskThrown = nullptr;   // a kicked frame's throw before this is the frame's (the kick has no asker)
+    // THE PUMP IS THE HOST'S THREAD'S (decision 46): another thread that waits (a worker's request) never repaints it.
+    const bool pump = mHostPump && std::this_thread::get_id() == mHostThread;
     mTask = task;
     mTaskPending = true;
     mTaskCv.notify_all();
     // THE HOST WAITS — and keeps its own side alive while it does (the splash's progress inside a long frame).
     while (mTaskPending) {
         mTaskCv.wait_for(l, std::chrono::milliseconds(10), [this] { return !mTaskPending; });
-        if (mTaskPending && mHostPump) { l.unlock(); mHostPump(); l.lock(); }
+        if (mTaskPending && pump) { l.unlock(); mHostPump(); l.lock(); }
     }
+    std::exception_ptr thrown = std::exchange(mTaskThrown, nullptr);
     l.unlock();
-    if (mHostPump) mHostPump();
+    if (pump) mHostPump();
+    if (thrown) std::rethrow_exception(thrown);
 }
 
 void RenderThread::stop(const std::function<void()> &teardown) {
