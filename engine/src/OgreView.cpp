@@ -999,7 +999,9 @@ bool OgreView::setScene(Scene *scene) {
         mCamera->setFarClipDistance(1000.0f);
         mCamera->setAutoAspectRatio(true);
         mScene = s;
-        mBoundScene = scene;   // the boundary's binding (View::scene)
+        // THE HOST'S RECORD IS THE HOST'S (decision 66; decision 45): written here only when the call in hand IS the host's
+        // (an engine without records); under records the host wrote it at its own setScene.
+        if (callIsTheHosts()) mBoundScene = scene;
         // ITS CAPTURES FOLLOW THE VIEW'S COMPILE MODE FROM THE FIRST FRAME (ASYNC-SHADERS-1): a
         // freshly bound scene would otherwise capture BLOCKING until the host's next push.
         if (mScene) mScene->setAsyncShaders(mAsyncShaders);
@@ -1314,7 +1316,7 @@ void OgreView::detachScene(bool takeBlank) {
         }
         if (mPhotonOverlay) retirePhotonOverlay();
         mScene  = nullptr;
-        mBoundScene = nullptr;
+        if (callIsTheHosts()) mBoundScene = nullptr;   // the host's record, the host's (decision 66)
         mFramesPresented = 0;
         // AND THE CLEAR-ONLY CHAIN TAKES OVER, in the same call (lane
         // STALE-VIEW-1). Without it this view would present nothing until a

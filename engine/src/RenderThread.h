@@ -89,7 +89,6 @@ public:
     /// The host's hook, called after every FREE frame's publish (Engine::setFramePublishedHook).
     void setPublishedHook(std::function<void()> hook);
     long long frameInFlightSinceNs() const { return mInFlightSinceNs.load(std::memory_order_acquire); }
-    long long lastFrameSpentNs() const { return mLastFrameSpentNs.load(std::memory_order_acquire); }
 
     static constexpr unsigned kHostStageCoalesce = 64u;
 

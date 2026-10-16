@@ -6781,6 +6781,8 @@ public:
     bool hostPosts() const;
     /// An engine whose calls are not records: the call in hand is the host's own (its record written at the call).
     bool callIsTheHosts() const;
+    /// The host's record of the binding, cleared at the HOST's destroyScene of the scene it names (decision 66).
+    void forgetHostBinding() { mBoundScene = nullptr; }
     void requestOnEngine(const std::function<void()> &f);   ///< Engine::request on this view's engine (U3 4a)
     /// The scene the engine has bound (the drain's comparison; View::scene is the host's binding).
     OgreScene *boundOgreScene() const { return mScene; }
@@ -7553,7 +7555,6 @@ public:
     void latchSnapshot() override { mRenderThread.latchSnapshots(); }
     void setFramePublishedHook(std::function<void()> hook) override { mRenderThread.setPublishedHook(std::move(hook)); }
     long long frameInFlightSinceNs() const override { return mRenderThread.frameInFlightSinceNs(); }
-    long long lastFrameSpentNs() const override { return mRenderThread.lastFrameSpentNs(); }
     void presentationFrame() override { mRenderThread.freeFrameNow(); }
     void lastInterpolation(const Scene *s, unsigned &nodes, double &micros, double &namingMicros) const override {
         nodes = 0; micros = 0.0; namingMicros = 0.0;

@@ -54,6 +54,7 @@
 #if JAH_VR
 
 #include <algorithm>
+#include <utility>
 #include <cassert>
 #include <cctype>
 #include <filesystem>
@@ -2767,6 +2768,10 @@ void VrSession::waitFrameEarly() {
 
 void VrSession::beginFrame() {
     mWaited = false;   // set by this frame's xrWaitFrame, if it reaches one
+    // THE EARLY WAIT, TAKEN AT THE TOP (decision 66): consumed into this frame whatever it returns below — a frame never
+    // inherits another's wait, never begins without its own — and its poll was the frame's one (no second pollEvents).
+    const bool earlyWaited = std::exchange(mEarlyWaited, false);
+    const XrResult earlyResult = mEarlyWaitResult;
     // THE HANDS ARE THIS FRAME'S OR THEY ARE NOTHING (VrPose's note, phase 4).
     // Cleared at the top so every early return below — lost, not running, no
     // picture, no pose — leaves them invalid rather than leaving yesterday's
@@ -2787,7 +2792,7 @@ void VrSession::beginFrame() {
         setDesktopShowsEye(false);
         teardownMirror(); setSessionViewEnabled(false); return;
     }
-    pollEvents();
+    if (!earlyWaited) pollEvents();   // the early wait polled already: one poll per frame
     if (!mRunning) {
         // NOTHING HAS BEEN DRAWN INTO THE EYE TARGET YET, so a mirror would
         // paint black over the desktop's own picture. It appears when the
@@ -2823,9 +2828,8 @@ void VrSession::beginFrame() {
     // record the frame drains is the one submitted during the wait); its result is
     // taken here.
     XrResult r;
-    if (mEarlyWaited) {
-        mEarlyWaited = false;
-        r = mEarlyWaitResult;
+    if (earlyWaited) {
+        r = earlyResult;
     } else {
         XrFrameWaitInfo fwi{ XR_TYPE_FRAME_WAIT_INFO };
         mFrameState = XrFrameState{ XR_TYPE_FRAME_STATE };

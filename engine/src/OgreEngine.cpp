@@ -459,7 +459,13 @@ bool OgreEngine::adoptScene(std::unique_ptr<OgreScene> adopted, unsigned workerT
 // asked for it to be"); what moves is by how many microseconds.
 void OgreEngine::destroyScene(Scene *scene) {
     // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
-    if (hostPosts() && scene) mHostSceneNames.erase(scene->name());
+    if (hostPosts() && scene) {
+        mHostSceneNames.erase(scene->name());
+        // ...and the host's records of the views it bound to it (decision 66: the engine never writes them).
+        std::lock_guard<std::mutex> lock(mHostViewsLock);
+        for (View *v : mHostViews)
+            if (v && v->scene() == scene) static_cast<OgreView *>(v)->forgetHostBinding();
+    }
     if (postedAsMessage([=](OgreEngine &e) { e.destroyScene(scene); return true; })) return;   // in the one order
     if (!scene) return;
     // ITS PART OF THE PENDING RECORD GOES WITH IT (the 3a read, C): a scene re-created at the same address before
