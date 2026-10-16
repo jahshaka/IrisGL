@@ -238,7 +238,12 @@ void RenderThread::threadMain() {
                 mMeasuredPeriod.store(float(std::chrono::duration<double>(t0 - mLastFreeStart).count()),
                                       std::memory_order_relaxed);
             mLastFreeStart = t0;
+            mInFlightSinceNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count(),
+                                   std::memory_order_release);
             tickWith(handOver(), true);   // a throw inside the frame is the frame's published error (tickWith)
+            mInFlightSinceNs.store(0, std::memory_order_release);
+            mLastFrameSpentNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now() - t0).count(), std::memory_order_release);
             // THE PACE (decision 53): the rest of the display period — but NEVER after a frame the XR runtime paced
             // (xrWaitFrame already waited: a 60 Hz panel's period would pad a 90 Hz headset to 60), and none under
             // Unlimited (period 0). Waited on the task condition, so a task still goes at once.

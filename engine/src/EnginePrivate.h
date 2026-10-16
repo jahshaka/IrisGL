@@ -7549,6 +7549,8 @@ public:
     void setFreeRunning(bool on) override { if (mRenderThread.threaded()) mRenderThread.setFreeRunning(on); }
     void latchSnapshot() override { mRenderThread.latchSnapshots(); }
     void setFramePublishedHook(std::function<void()> hook) override { mRenderThread.setPublishedHook(std::move(hook)); }
+    long long frameInFlightSinceNs() const override { return mRenderThread.frameInFlightSinceNs(); }
+    long long lastFrameSpentNs() const override { return mRenderThread.lastFrameSpentNs(); }
     void presentationFrame() override { mRenderThread.freeFrameNow(); }
     void lastInterpolation(const Scene *s, unsigned &nodes, double &micros, double &namingMicros) const override {
         nodes = 0; micros = 0.0; namingMicros = 0.0;

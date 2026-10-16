@@ -2033,6 +2033,13 @@ public:
     /// publishes on its own (free-running) — the host's way to pace its tick by the present. It must only post (a
     /// queued event) and return. Empty = none; set and cleared by the host while the engine lives.
     virtual void setFramePublishedHook(std::function<void()> hook) = 0;
+    /// THE FRAME IN FLIGHT (U3 decision 63): the steady-clock time (ns since its epoch) the render thread began the
+    /// free frame it is drawing now, 0 when none is in flight — the host attributes a late record to a frame that
+    /// overran (never a wait: an atomic read).
+    virtual long long frameInFlightSinceNs() const = 0;
+    /// ...and how long the LAST free frame ran, start to publish (ns, 0 before the first): a frame that used its whole
+    /// display period leaves the host's tick no slack before the next frame begins (decision 63's frame overrun).
+    virtual long long lastFrameSpentNs() const = 0;
     /// THE FRAME'S INPUT (FrameInput, ENGINE-UPGRADE-1 U0 3a): handed over now, applied ONCE at the top of the
     /// next renderOneFrame — never on the spot. Several submits before one frame merge (see FrameInput): the
     /// merge builds the ONE record the next hand-over takes and stamps with its serial (U3 F1). A frame with no
