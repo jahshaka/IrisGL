@@ -2678,7 +2678,11 @@ void OgreEngine::applySceneMessage(OgreScene *sc, const SceneMessage &m) {
     const std::string before = mLastError;
     const bool refuse = mArms.on(ArmId::MessagesRefuse);   // the test door (decision 44's row)
     if (refuse) mLastError = "refused by the messages.refuse arm";
-    const bool ok = !refuse && m.apply(*sc);
+    bool ok = false;
+    // A MESSAGE THAT THROWS IS REFUSED, ITS COMPLETION CARRYING THE THROW (worth-a-look 2): never a drain cut short.
+    try { ok = !refuse && m.apply(*sc); }
+    catch (Ogre::Exception &x) { mLastError = describeOgreFailure(x); ok = false; }
+    catch (std::exception &x) { mLastError = std::string("engine: ") + x.what(); ok = false; }
     const std::string why = ok ? std::string() : mLastError != before ? mLastError : std::string("refused");
     if (!ok) {
         ++mFrameInputStatus.messagesRefused;
@@ -2696,7 +2700,10 @@ void OgreEngine::applyEngineMessage(const EngineMessage &m) {
         ++mFrameInputStatus.messagesTotal;
         if (!m.apply) return;
         const std::string before = mLastError;
-        const bool ok = m.apply(*this);
+        bool ok = false;
+        try { ok = m.apply(*this); }   // a throw is the message's refusal, its completion carrying it (worth-a-look 2)
+        catch (Ogre::Exception &x) { mLastError = describeOgreFailure(x); ok = false; }
+        catch (std::exception &x) { mLastError = std::string("engine: ") + x.what(); ok = false; }
         const std::string why = ok ? std::string() : mLastError != before ? mLastError : std::string("refused");
         if (!ok) {
             ++mFrameInputStatus.messagesRefused;

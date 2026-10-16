@@ -342,7 +342,13 @@ void RenderThread::tickWith(Slot &&handed, bool freeFrame) {
     EngineSideScope engineSide;
     std::string callError;
     callError.swap(mEngine.mLastError);
-    const bool ran = mEngine.runFrame(handed.record, handed.any);
+    // A THROW INSIDE THE FRAME IS THE FRAME'S PUBLISHED ERROR (worth-a-look 2), never swallowed: the frame that
+    // threw publishes, its error text the frame's.
+    bool ran = false;
+    try { ran = mEngine.runFrame(handed.record, handed.any); }
+    catch (Ogre::Exception &x) { mEngine.mLastError = describeOgreFailure(x); ran = true; }
+    catch (std::exception &x) { mEngine.mLastError = std::string("engine: ") + x.what(); ran = true; }
+    catch (...) { mEngine.mLastError = "engine: an exception of an unknown type left the frame"; ran = true; }
     std::string frameError;
     frameError.swap(mEngine.mLastError);
     mEngine.mLastError.swap(callError);
