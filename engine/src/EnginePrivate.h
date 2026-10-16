@@ -5586,7 +5586,7 @@ private:
     bool nameMovedNode(Node &rec, Ogre::Node *on, std::vector<Ogre::Node *> &stack);
     /// The node's record joins the newest step's list (applyNodeRecord; each node once a step).
     void noteInterpolated(Node &rec, NodeId id, unsigned long long step);
-    struct InterpWrite { Node *rec; float alpha; };
+    struct InterpWrite { Node *rec = nullptr; float alpha = 1.0f; };
     std::vector<InterpWrite> mInterpWrite;    ///< what one interpolate writes, each node once (scratch)
     std::vector<Ogre::Node *> mInterpStack;   ///< ...named to the scans through nameMovedSubtrees (scratch)
     Node *record(NodeId id) {

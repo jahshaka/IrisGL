@@ -2339,6 +2339,10 @@ bool OgreEngine::updateScene(Scene *scene) {
         {
             EngineSideScope engineSide;
             target->publishFrame(mPublishedFrames, mRenderThread.serial());
+            // ...and committed on its own (decision 54: a frame's set commits in RenderThread::publish; a resolve is
+            // one scene's publish between frames).
+            std::lock_guard<std::mutex> l(snapshotLock());
+            target->commitPublishedLocked();
         }
         return true;
     } JAH_CATCH(mLastError, false);
