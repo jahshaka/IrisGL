@@ -109,6 +109,7 @@ private:
     struct Slot {
         FrameInput              record;
         bool                    any = false;     ///< a submit since the last hand-over
+        unsigned long long      firstAt = 0;     ///< the hand-overs counted at its first submit (its age, in frames)
         std::vector<FrameStage> hostStages;      ///< the host's half of the monitor's record
     };
     /// THE HAND-OVER (render side, under the lock): swaps the slot out, stamps the serial on a non-empty record.

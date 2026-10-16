@@ -63,6 +63,7 @@ void RenderThread::post(Scene *scene, SceneMessage &&message) {
     if (!scene || !message.apply) return;
     std::lock_guard<std::mutex> lock(mSlotLock);
     ++mSubmit.messagesPosted;
+    if (!mSlot.any) mSlot.firstAt = mSubmit.handOvers;   // the record's age is counted from its first submit
     mSlot.any = true;
     std::vector<FrameInputScene> &parts = mSlot.record.scenes;
     if (mLastPart >= parts.size() || parts[mLastPart].scene != scene) {
@@ -81,6 +82,7 @@ void RenderThread::post(Scene *scene, SceneMessage &&message) {
 void RenderThread::submit(FrameInput &&in) {
     std::lock_guard<std::mutex> lock(mSlotLock);
     ++mSubmit.submitted;
+    if (!mSlot.any) mSlot.firstAt = mSubmit.handOvers;
     mSlot.any = true;
     FrameInput &p = mSlot.record;
     for (EngineMessage &m : in.engineMessages) m.seq = ++mPostSeq;   // the one order (decision 46)
@@ -167,6 +169,7 @@ FrameSubmitStatus RenderThread::submitStatus() const {
     std::lock_guard<std::mutex> lock(mSlotLock);
     FrameSubmitStatus st = mSubmit;
     st.nextSerial = mSerial + (mSlot.any ? 1ull : 0ull);   // mSerial moves only under this lock (handOver)
+    st.pending = mSlot.any;
     return st;
 }
 
@@ -182,6 +185,14 @@ RenderThread::Slot RenderThread::handOver() {
     mSlot = Slot();
     ++mSubmit.handOvers;
     mHandOverNow = mSubmit.handOvers;
+    // THE RECORD'S LATENESS IN FRAMES (decision 50, editor.drag_latency): the hand-overs since its first submit — 1 is
+    // the next frame begun; more would be a record held back past a frame that began without it.
+    if (out.any) {
+        const unsigned long long late = mSubmit.handOvers - out.firstAt;
+        ++mSubmit.recordsHanded;
+        if (late > 1ull) ++mSubmit.recordsLate;
+        if (late > mSubmit.worstLatency) mSubmit.worstLatency = late;
+    }
     if (out.any) ++mSerial;
     out.record.serial = mSerial;
     return out;
