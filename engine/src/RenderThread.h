@@ -68,6 +68,8 @@ public:
     /// THE FREE-RUNNING FRAME (stage 4b): hands the slot over now and runs the frame on the render thread without
     /// waiting; false when the thread is still busy with the last one.
     bool kick();
+    /// The engine's half of the snapshot re-made after a request (the frame's stamp unchanged).
+    void republishEngine();
     /// The last frame the loop closed (Engine::published()).
     const PublishedEngineFrame &published() const {
         return mPublished[mPublishedIdx.load(std::memory_order_acquire)];

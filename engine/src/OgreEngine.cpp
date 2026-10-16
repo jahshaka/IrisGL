@@ -2605,6 +2605,7 @@ void OgreEngine::request(std::function<void(Engine &)> question, std::function<v
         EngineSideScope engineSide;
         if (mHostRecords) applyPendingEngineMessages();
         question(*this);
+        if (mHostRecords) mRenderThread.republishEngine();   // what it applied is in the next read (U3 stage 4b)
     });
     if (done) done();
 }

@@ -301,4 +301,23 @@ void RenderThread::publish(bool recordApplied, std::string &&frameError) {
     mPublishedIdx.store(mPublishedIdx.load(std::memory_order_relaxed) ^ 1u, std::memory_order_release);
 }
 
+// THE ENGINE'S HALF RE-PUBLISHED AFTER A REQUEST (U3 stage 4b): what the request applied (the pending record's
+// structure, the question's own change — a monitor started or stopped) is in the snapshot the asker reads next, the
+// frame's stamp unchanged (no frame was drawn).
+void RenderThread::republishEngine() {
+    const unsigned idx = mPublishedIdx.load(std::memory_order_relaxed);
+    const PublishedEngineFrame &front = mPublished[idx];
+    PublishedEngineFrame &back = mPublished[idx ^ 1u];
+    try { mEngine.fillPublished(back); }
+    catch (...) { return; }
+    back.frame = front.frame;
+    back.serial = front.serial;
+    back.recordApplied = front.recordApplied;
+    back.frameError = front.frameError;
+    back.frameErrors = mFrameErrors;
+    back.framesWithError = mFramesWithError;
+    back.publishMicros = front.publishMicros;
+    mPublishedIdx.store(idx ^ 1u, std::memory_order_release);
+}
+
 }}}   // namespace jahshaka::engine::detail
