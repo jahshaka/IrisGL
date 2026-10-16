@@ -139,9 +139,13 @@ void VideoReadback::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
         return;
     }
     Slot *free = nullptr;
-    for (Slot &s : mSlots)
-        if (!s.pending) { free = &s; break; }
-    if (!free) { ++mDropped; return; }
+    unsigned pending = 0;
+    for (Slot &s : mSlots) {
+        if (s.pending) ++pending;
+        else if (!free) free = &s;
+    }
+    // THE RING IS THREE FRAMES NOT YET TAKEN (U3 stage 6): the ones the view has queued count too.
+    if (!free || pending + held() >= kRing) { ++mDropped; return; }
     free->tag = mArmedTag;
     record(*free);
 }
@@ -231,6 +235,7 @@ VideoReadbackStatus VideoReadback::status() const {
     st.height = mHeight;
     st.ringSize = kRing;
     for (const Slot &s : mSlots) if (s.pending) ++st.pending;
+    st.pending += held();   // read back, queued for the host, not yet taken
     st.recorded = mRecorded;
     st.delivered = mDelivered;
     st.dropped = mDropped;
@@ -250,6 +255,7 @@ bool OgreView::setVideoReadback(bool on) {
         }
         std::lock_guard<std::mutex> l(mVideoQueueLock);
         mVideoQueue.clear();
+        mVideoQueued.store(0u, std::memory_order_release);
         return true;
     }
     if (mVideoReadback) return true;
@@ -257,7 +263,7 @@ bool OgreView::setVideoReadback(bool on) {
         mError = "setVideoReadback: View '" + mIdentityName + "' is on screen; the readback is an offscreen view's";
         return false;
     }
-    auto rb = std::make_unique<VideoReadback>(this, mRoot);
+    auto rb = std::make_unique<VideoReadback>(this, mRoot, &mVideoQueued);
     std::string error;
     if (!rb->init(error)) { mError = error; return false; }
     mVideoReadback = std::move(rb);
@@ -291,6 +297,7 @@ void OgreView::harvestVideoFrames() {
         if (!mVideoReadback->take(frame, false, error)) break;
         std::lock_guard<std::mutex> l(mVideoQueueLock);
         mVideoQueue.push_back(std::move(frame));
+        mVideoQueued.store(unsigned(mVideoQueue.size()), std::memory_order_release);
         frame = VideoFrameNv12();
     }
     if (!error.empty()) mError = error;
@@ -301,6 +308,7 @@ bool OgreView::popVideoFrame(VideoFrameNv12 &out) {
     if (mVideoQueue.empty()) return false;
     out = std::move(mVideoQueue.front());
     mVideoQueue.pop_front();
+    mVideoQueued.store(unsigned(mVideoQueue.size()), std::memory_order_release);
     return true;
 }
 
@@ -328,6 +336,7 @@ bool OgreView::takeVideoFrame(VideoFrameNv12 &out, bool wait) {
             if (mVideoReadback->take(next, true, error)) {
                 std::lock_guard<std::mutex> l(mVideoQueueLock);
                 mVideoQueue.push_back(std::move(next));
+                mVideoQueued.store(unsigned(mVideoQueue.size()), std::memory_order_release);
             }
         }
     }

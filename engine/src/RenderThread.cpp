@@ -63,7 +63,6 @@ void RenderThread::post(Scene *scene, SceneMessage &&message) {
     if (!scene || !message.apply) return;
     std::lock_guard<std::mutex> lock(mSlotLock);
     ++mSubmit.messagesPosted;
-    if (!mSlot.any) mSlot.firstAt = mSubmit.handOvers;   // the record's age is counted from its first submit
     mSlot.any = true;
     std::vector<FrameInputScene> &parts = mSlot.record.scenes;
     if (mLastPart >= parts.size() || parts[mLastPart].scene != scene) {
@@ -82,7 +81,6 @@ void RenderThread::post(Scene *scene, SceneMessage &&message) {
 void RenderThread::submit(FrameInput &&in) {
     std::lock_guard<std::mutex> lock(mSlotLock);
     ++mSubmit.submitted;
-    if (!mSlot.any) mSlot.firstAt = mSubmit.handOvers;
     mSlot.any = true;
     FrameInput &p = mSlot.record;
     for (EngineMessage &m : in.engineMessages) m.seq = ++mPostSeq;   // the one order (decision 46)
@@ -170,7 +168,6 @@ FrameSubmitStatus RenderThread::submitStatus() const {
     std::lock_guard<std::mutex> lock(mSlotLock);
     FrameSubmitStatus st = mSubmit;
     st.nextSerial = mSerial + (mSlot.any ? 1ull : 0ull);   // mSerial moves only under this lock (handOver)
-    st.pending = mSlot.any;
     return st;
 }
 
@@ -186,14 +183,6 @@ RenderThread::Slot RenderThread::handOver() {
     mSlot = Slot();
     ++mSubmit.handOvers;
     mHandOverNow = mSubmit.handOvers;
-    // THE RECORD'S LATENESS IN FRAMES (decision 50, editor.drag_latency): the hand-overs since its first submit — 1 is
-    // the next frame begun; more would be a record held back past a frame that began without it.
-    if (out.any) {
-        const unsigned long long late = mSubmit.handOvers - out.firstAt;
-        ++mSubmit.recordsHanded;
-        if (late > 1ull) ++mSubmit.recordsLate;
-        if (late > mSubmit.worstLatency) mSubmit.worstLatency = late;
-    }
     if (out.any) ++mSerial;
     out.record.serial = mSerial;
     return out;
@@ -360,7 +349,28 @@ void RenderThread::tickWith(Slot &&handed, bool freeFrame) {
     std::string frameError;
     frameError.swap(mEngine.mLastError);
     mEngine.mLastError.swap(callError);
-    if (ran) publish(handed.any, std::move(frameError));
+    // ONE CATCH AROUND THE PUBLISH (decision 61): what it copies (the recorder's frames, the snapshot's vectors) can
+    // throw; the error is the frame's, never std::terminate on the render thread.
+    if (ran) {
+        try { publish(handed.any, std::move(frameError)); }
+        catch (std::exception &x) {   // the frame's error, carried by the next publish (never the calls' sink)
+            ++mFramesWithError;
+            mFrameErrors.push_back({ mSerial, mEngine.mPublishedFrames, std::string("engine: the frame's publish: ") +
+                                                                          x.what() });
+            if (mFrameErrors.size() > PublishedEngineFrame::kFrameErrorsKept) mFrameErrors.erase(mFrameErrors.begin());
+        }
+    }
+    // THE PRESENT'S BEAT TO THE HOST (U3 decision 60): a frame drawn on its own tells the host it published — the
+    // host's hook posts its next tick and returns (it never works on this thread).
+    if (ran && freeFrame) {
+        std::lock_guard<std::mutex> l(mHookLock);
+        if (mPublishedHook) mPublishedHook();
+    }
+}
+
+void RenderThread::setPublishedHook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> l(mHookLock);
+    mPublishedHook = std::move(hook);
 }
 
 // THE PUBLISH (U2's whole-frame swap, now the loop's — U3 F7): after the frame's close, so the snapshot carries what
@@ -381,6 +391,7 @@ void RenderThread::publish(bool recordApplied, std::string &&frameError) {
         if (v) {
             try { v->harvestVideoFrames(); }
             catch (Ogre::Exception &x) { frameError = describeOgreFailure(x); }
+            catch (std::exception &x) { frameError = std::string("engine: the recorder's frames: ") + x.what(); }
         }
     PublishedEngineFrame &back = mPublished.back();
     try { e.fillPublished(back); }

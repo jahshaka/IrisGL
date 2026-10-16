@@ -6429,7 +6429,10 @@ private:
 class VideoReadback final : public Ogre::CompositorWorkspaceListener {
 public:
     static constexpr unsigned kRing = 3u;
-    VideoReadback(OgreView *view, Ogre::Root *root) : mView(view), mRoot(root) {}
+    /// `held`: the frames the view has taken off the ring but the host has not yet taken (its queue) — they count
+    /// against the ring's three, so a host that stops polling still sees "three read back, the rest dropped".
+    VideoReadback(OgreView *view, Ogre::Root *root, const std::atomic<unsigned> *held)
+        : mView(view), mRoot(root), mHeld(held) {}
     /// Waits out every pending copy, then frees the tickets and the target.
     ~VideoReadback();
     /// Allocates for the view's current target; false with `error` when the
@@ -6457,6 +6460,8 @@ private:
     unsigned long long mArmedTag = 0, mOrder = 0;
     unsigned long long mRecorded = 0, mDelivered = 0, mDropped = 0;
     std::string mError;
+    const std::atomic<unsigned> *mHeld = nullptr;
+    unsigned held() const { return mHeld ? mHeld->load(std::memory_order_acquire) : 0u; }
 };
 
 /// THE HELD FRAME (ASYNC-SHADERS-1), THE SAFETY NET. The grey placeholder (PBS and the Atom
@@ -7232,6 +7237,7 @@ private:
     /// ...its finished frames, mapped by the render thread at its publish and popped by the host (U3 stage 6).
     std::mutex                 mVideoQueueLock;
     std::deque<VideoFrameNv12> mVideoQueue;
+    std::atomic<unsigned>      mVideoQueued{ 0u };   ///< mVideoQueue.size(), for the readback's ring arithmetic
     bool popVideoFrame(VideoFrameNv12 &out);
 public:
     /// The render side's harvest of the finished readbacks into the queue (RenderThread::publish).
@@ -7542,6 +7548,7 @@ public:
     void renderOneFrame() override;
     void setFreeRunning(bool on) override { if (mRenderThread.threaded()) mRenderThread.setFreeRunning(on); }
     void latchSnapshot() override { mRenderThread.latchSnapshots(); }
+    void setFramePublishedHook(std::function<void()> hook) override { mRenderThread.setPublishedHook(std::move(hook)); }
     void presentationFrame() override { mRenderThread.freeFrameNow(); }
     void lastInterpolation(const Scene *s, unsigned &nodes, double &micros, double &namingMicros) const override {
         nodes = 0; micros = 0.0; namingMicros = 0.0;
@@ -7643,7 +7650,9 @@ public:
     void endVrSession() override;
     VrState vrState() const override;
     VrState vrStateNow() const;   ///< the uncounted read vrStatus() composes from
-    VrStatus vrStatus() const override;
+    const VrStatus &vrStatus() const override;
+    mutable VrStatus mHostVrStatusRead;   ///< the host's read when its own writes overlay the frame (host thread)
+    mutable VrStatus mVrStatusScratch;    ///< the engine side's composed status (render thread)
     void setVrMirrorView(View *view) override;
     void setVrOrigin(const Vec3 &position, float yawDegrees) override;
     bool vrEyeScreenshot(unsigned eye, Image &out) override;

@@ -86,6 +86,8 @@ public:
     void setDisplayPeriod(float seconds) { mDisplayPeriod.store(seconds, std::memory_order_relaxed); }
     float displayPeriod() const { return mDisplayPeriod.load(std::memory_order_relaxed); }
     float measuredPeriod() const { return mMeasuredPeriod.load(std::memory_order_relaxed); }
+    /// The host's hook, called after every FREE frame's publish (Engine::setFramePublishedHook).
+    void setPublishedHook(std::function<void()> hook);
 
     static constexpr unsigned kHostStageCoalesce = 64u;
 
@@ -111,7 +113,6 @@ private:
     struct Slot {
         FrameInput              record;
         bool                    any = false;     ///< a submit since the last hand-over
-        unsigned long long      firstAt = 0;     ///< the hand-overs counted at its first submit (its age, in frames)
         std::vector<FrameStage> hostStages;      ///< the host's half of the monitor's record
     };
     /// THE HAND-OVER (render side, under the lock): swaps the slot out, stamps the serial on a non-empty record.
@@ -147,6 +148,8 @@ private:
     std::vector<PublishedEngineFrame::FrameError> mFrameErrors;   ///< the newest kFrameErrorsKept, oldest first
     double             mPublishMicros = 0.0;
     std::atomic<float> mDisplayPeriod{ 0.0f };
+    std::mutex mHookLock;
+    std::function<void()> mPublishedHook;   ///< under mHookLock
     std::atomic<float> mMeasuredPeriod{ 0.0f };            ///< the last two free frames' start-to-start (seconds)
     std::chrono::steady_clock::time_point mLastFreeStart{};   ///< render thread only
     mutable SnapshotBuffers<PublishedEngineFrame> mPublished;

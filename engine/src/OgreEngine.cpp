@@ -2029,30 +2029,36 @@ VrState OgreEngine::vrStateNow() const {
     return vrSessionState(mVrSession);
 }
 
-VrStatus OgreEngine::vrStatus() const {
+const VrStatus &OgreEngine::vrStatus() const {
     // A VR READ ON THE HOST'S SIDE IS THE SNAPSHOT'S (U3 stage 6; a request until then): the frame's status, the
-    // injections it applied included (a host injection is a request — republished before the host reads again).
+    // injections it applied included (a host injection is a request — republished before the host reads again) — A
+    // REFERENCE INTO THE LATCHED BUFFER (decision 61: no copy per call; valid until the next latch, never held across
+    // one).
     if (hostPosts()) {
-        VrStatus s = published().vr;
+        const VrStatus &frame = published().vr;
         // ...WITH THE HOST'S OWN WRITES OVER IT where the host is the writer and the frame has not caught up: a session
-        // the host ended (its record), and an origin it set since the frame the snapshot is.
-        if (!mHostVrSessionLive && s.active) {
+        // the host ended (its record), and an origin it set since the frame the snapshot is (a host-side copy then).
+        if (!mHostVrSessionLive && frame.active) {
             // The engine's answer with no session (its end clears the injection store too): nothing of the session —
             // its counters belong to it, not to the process.
-            VrStatus none;
-            none.state = vrAvailable() ? VrState::Idle : VrState::Unavailable;
-            none.framesOffRenderThread = s.framesOffRenderThread;
-            return none;
+            mHostVrStatusRead = VrStatus();
+            mHostVrStatusRead.state = vrAvailable() ? VrState::Idle : VrState::Unavailable;
+            mHostVrStatusRead.framesOffRenderThread = frame.framesOffRenderThread;
+            return mHostVrStatusRead;
         }
-        if (mHostVrOriginSeq > s.originSeq) {
-            s.origin = mHostVrOrigin;
-            s.originYaw = mHostVrOriginYaw;
-            s.originSeq = mHostVrOriginSeq;
+        if (mHostVrOriginSeq > frame.originSeq) {
+            mHostVrStatusRead = frame;
+            mHostVrStatusRead.origin = mHostVrOrigin;
+            mHostVrStatusRead.originYaw = mHostVrOriginYaw;
+            mHostVrStatusRead.originSeq = mHostVrOriginSeq;
+            return mHostVrStatusRead;
         }
-        return s;
+        return frame;
     }
+    // THE ENGINE'S OWN SIDE composes its answer into its scratch (the render thread's alone).
+    VrStatus &s = mVrStatusScratch;
     if (!mVrSession) {
-        VrStatus s;
+        s = VrStatus();
         s.state = vrStateNow();
         // WITH NO SESSION THE ONLY HANDS THERE CAN BE ARE INJECTED ONES, and
         // they are reported through exactly the fields a session fills — which
@@ -2080,7 +2086,7 @@ VrStatus OgreEngine::vrStatus() const {
         s.inputFocused = vrAnyInjectedInput() && mVrInjectFocus;
         return s;
     }
-    VrStatus s = vrSessionStatus(mVrSession);
+    s = vrSessionStatus(mVrSession);
     s.framesOffRenderThread = mVrFramesOffRenderThread;
     s.originSeq = mVrOriginSeq;
     // ...AND WITH A SESSION THE STORE IS STILL THE TRUTH BETWEEN FRAMES

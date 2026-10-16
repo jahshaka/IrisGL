@@ -8084,15 +8084,6 @@ struct FrameSubmitStatus {
     /// THE HAND-OVERS SO FAR (U3 stage 5): every frame's head takes the slot once — a record submitted after the
     /// n-th is applied by the frame of the (n+1)-th (frame.drag_latency's law: never two frames late).
     unsigned long long handOvers = 0;
-    /// A RECORD WAITS FOR ITS FRAME (U3 decision 50, editor.drag_latency): the slot holds a submit no frame has taken
-    /// yet. Read at a tick's head before its own submits, true means the LAST tick's record has not had a frame begun
-    /// for it a whole tick later (the render loop fell behind the ticks).
-    bool pending = false;
-    /// THE RECORDS' LATENESS IN FRAMES (U3 decision 50): records a frame took, those taken more than one hand-over after
-    /// their first submit, and the worst such count (1 = every record drawn by the next frame the render loop began).
-    unsigned long long recordsHanded = 0;
-    unsigned long long recordsLate = 0;
-    unsigned long long worstLatency = 0;
 };
 /// What the drain did — Engine::frameInputStatus() / PublishedEngineFrame::input: the RENDER side of the hand-over,
 /// written by the frame alone (U3 F4). Running totals except the last drain's fields.

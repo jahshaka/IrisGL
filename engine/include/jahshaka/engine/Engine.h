@@ -2029,6 +2029,10 @@ public:
     /// scene's — see one snapshot, however many frames the render thread publishes meanwhile (the driver latches at
     /// its tick's head; a lockstep task latches when it returns). A door.
     virtual void latchSnapshot() = 0;
+    /// THE PRESENT'S BEAT (ENGINE-UPGRADE-U3 decision 60): `hook` runs ON THE RENDER THREAD after every frame it
+    /// publishes on its own (free-running) — the host's way to pace its tick by the present. It must only post (a
+    /// queued event) and return. Empty = none; set and cleared by the host while the engine lives.
+    virtual void setFramePublishedHook(std::function<void()> hook) = 0;
     /// THE FRAME'S INPUT (FrameInput, ENGINE-UPGRADE-1 U0 3a): handed over now, applied ONCE at the top of the
     /// next renderOneFrame — never on the spot. Several submits before one frame merge (see FrameInput): the
     /// merge builds the ONE record the next hand-over takes and stamps with its serial (U3 F1). A frame with no
@@ -2208,7 +2212,7 @@ public:
     /// test has to render a frame it does not otherwise need. A hand whose
     /// runtime has bound a real profile is NOT overlaid: the refusal rule is
     /// the same here as everywhere (see vrInjectInput).
-    virtual VrStatus vrStatus() const = 0;
+    virtual const VrStatus &vrStatus() const = 0;   ///< valid until the host's next latch (U3 decision 61)
     /// The View the session draws into — the both-eyes target. Null when no
     /// session runs. Hosts use it for nothing but introspection; the session
     /// owns its lifetime.
