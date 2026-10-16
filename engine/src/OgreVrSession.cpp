@@ -116,6 +116,7 @@ bool colourEncodedOnce() { return true; }   // no session is ever wrong about co
 void vrSessionBeginFrame(VrSession *) {}
 void vrSessionEndFrame(VrSession *) {}
 bool vrSessionWaitedThisFrame(const VrSession *) { return false; }
+void vrSessionWaitFrameEarly(VrSession *) {}
 Ogre::CompositorWorkspace *vrSessionMirrorWorkspace(VrSession *) { return nullptr; }
 VrState vrSessionState(const VrSession *) { return VrState::Unavailable; }
 VrStatus vrSessionStatus(const VrSession *) { return VrStatus(); }
@@ -747,6 +748,7 @@ public:
     /// said false and is gone (VR-ENGINE-2 merge).
     void beginFrame();
     bool waitedThisFrame() const { return mWaited; }
+    void waitFrameEarly();
     void endFrame();
 
     void workspacePosUpdate(Ogre::CompositorWorkspace *workspace) override;
@@ -1007,6 +1009,8 @@ private:
     bool        mInFrame = false;     ///< between xrBeginFrame and xrEndFrame
     /// THIS FRAME WAITED IN xrWaitFrame (U3 decision 53): the runtime paced it — the render loop pads nothing after it.
     bool        mWaited = false;
+    bool        mEarlyWaited = false;           ///< waitFrameEarly waited: beginFrame takes its result
+    XrResult    mEarlyWaitResult = XR_SUCCESS;
     bool        mDrewThisFrame = false;
     XrFrameState mFrameState{ XR_TYPE_FRAME_STATE };
     XrView      mViews[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
@@ -2747,6 +2751,20 @@ void VrSession::pollEvents() {
 }
 
 // ---------------------------------------------------------------------------
+// THE WAIT BEFORE THE HAND-OVER (ENGINE-UPGRADE-U3 decision 65): the free loop waits for the runtime's next frame
+// BEFORE it takes the host's record, so the record is the newest the host could make while the runtime held the
+// frame. Skipped where beginFrame would not reach its wait (a lost or stopped session, the stereo warm-up).
+void VrSession::waitFrameEarly() {
+    mEarlyWaited = false;
+    if (mState == VrState::Lost || !mRunning || mWarmUpLeft) return;
+    pollEvents();
+    if (!mRunning) return;
+    XrFrameWaitInfo fwi{ XR_TYPE_FRAME_WAIT_INFO };
+    mFrameState = XrFrameState{ XR_TYPE_FRAME_STATE };
+    mEarlyWaitResult = xrWaitFrame(mSession, &fwi, &mFrameState);
+    mEarlyWaited = true;
+}
+
 void VrSession::beginFrame() {
     mWaited = false;   // set by this frame's xrWaitFrame, if it reaches one
     // THE HANDS ARE THIS FRAME'S OR THEY ARE NOTHING (VrPose's note, phase 4).
@@ -2797,13 +2815,22 @@ void VrSession::beginFrame() {
     // eye target exists at its final size.
     if (mWarmUpLeft) { warmUpBeginFrame(); return; }
 
-    XrFrameWaitInfo fwi{ XR_TYPE_FRAME_WAIT_INFO };
-    mFrameState = XrFrameState{ XR_TYPE_FRAME_STATE };
     // THE CLOCK. This is where a VR frame waits — not in a timer and not in a
     // swapchain acquire (VR_SPEC §4.3). The host's driver runs at a zero
     // interval with the mirror window's vsync off for the duration, so this
-    // call is the only pacer.
-    XrResult r = xrWaitFrame(mSession, &fwi, &mFrameState);
+    // call is the only pacer. ON THE RENDER THREAD'S FREE LOOP IT WAITED ALREADY
+    // (ENGINE-UPGRADE-U3 decision 65: waitFrameEarly, before the hand-over — the
+    // record the frame drains is the one submitted during the wait); its result is
+    // taken here.
+    XrResult r;
+    if (mEarlyWaited) {
+        mEarlyWaited = false;
+        r = mEarlyWaitResult;
+    } else {
+        XrFrameWaitInfo fwi{ XR_TYPE_FRAME_WAIT_INFO };
+        mFrameState = XrFrameState{ XR_TYPE_FRAME_STATE };
+        r = xrWaitFrame(mSession, &fwi, &mFrameState);
+    }
     mWaited = !XR_FAILED(r);
     if (XR_FAILED(r)) {
         vrLog("xrWaitFrame failed: %s", xrResultName(mBoot->mInstance, r).c_str());
@@ -4834,6 +4861,7 @@ void vrSessionBeginFrame(VrSession *s) { if (s) s->beginFrame(); }
 Ogre::CompositorWorkspace *vrSessionMirrorWorkspace(VrSession *s) { return s ? s->mirrorWorkspace() : nullptr; }
 void vrSessionEndFrame(VrSession *s) { if (s) s->endFrame(); }
 bool vrSessionWaitedThisFrame(const VrSession *s) { return s && s->waitedThisFrame(); }
+void vrSessionWaitFrameEarly(VrSession *s) { if (s) s->waitFrameEarly(); }
 VrState vrSessionState(const VrSession *s) { return s ? s->state() : VrState::Unavailable; }
 bool vrSessionIsOver(const VrSession *s) { return s && s->isOver(); }
 VrStatus vrSessionStatus(const VrSession *s) { return s ? s->status() : VrStatus(); }

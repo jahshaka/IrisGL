@@ -1172,6 +1172,11 @@ const ArmDef kArms[] = {
       "with no session waits for its next display time N ms after the last, as xrWaitFrame would, and counts as paced by "
       "the runtime (the render loop pads nothing after it). A test door: the one way to put a headset faster than the "
       "panel on a rig whose runtime (Monado's null compositor) runs at 20 Hz." },
+    { "view.fakePresentBlock", 0.0, 0.0, 100.0,
+      "A BLOCKING PRESENT WITHOUT A DISPLAY THAT BLOCKS (ENGINE-UPGRADE-U3 decision 65, editor.drag_latency): N > 0 = "
+      "every free frame, after its publish at the record/swap split, blocks until N ms after its start, as a FIFO "
+      "present would — the end-block shape of the render loop's order (the host's tick runs during the block). A test "
+      "door." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

@@ -1877,6 +1877,7 @@ enum class ArmId : unsigned {
     MessagesRefuse,      ///< "messages.refuse" — every scene message of the frame refused unapplied (a test door, U3 decision 44)
     InterpSerial,        ///< "interp.serial" — the free frames' interpolation on the frame's thread (the measuring arm)
     FakeRuntimePace,     ///< "vr.fakeRuntimePace" — ms: each free frame waits as a runtime's xrWaitFrame would (a test door, U3 decision 53)
+    FakePresentBlock,    ///< "view.fakePresentBlock" — ms: a free frame blocks to that span after its publish, in place of a blocking present (a test door, U3 decision 65)
     Count
 };
 class ArmRegistry {
@@ -7438,6 +7439,8 @@ void    vrSessionBeginFrame(VrSession *);
 void    vrSessionEndFrame(VrSession *);
 /// Did this frame wait in xrWaitFrame (the runtime paced it)? False without a session (U3 decision 53).
 bool    vrSessionWaitedThisFrame(const VrSession *);
+/// The runtime's wait, before the free loop's hand-over (U3 decision 65); the frame's beginFrame takes its result.
+void    vrSessionWaitFrameEarly(VrSession *);
 /// The session's desktop MIRROR workspace (null without one) — the frame
 /// monitor's listener rides it (lane TEST-1, the perf audit's F2).
 Ogre::CompositorWorkspace *vrSessionMirrorWorkspace(VrSession *);
@@ -8456,6 +8459,11 @@ private:
     /// frame listener, attached only while that kind is armed.
     std::unique_ptr<Ogre::FrameListener> mInRecordFault;
     bool mInRecordFaultAttached = false;
+    std::unique_ptr<Ogre::FrameListener> mSplitPublish;   ///< the free frame's publish at its record/swap split (decision 65)
+    bool mSplitPublishAttached = false;
+    bool mFakeRuntimeWaited = false;   ///< waitBeforeFrame's vr.fakeRuntimePace waited this frame
+    void waitBeforeFrame();
+    void onRecordSplit();
     /// FORK-OOM-1 — THE FRAME'S WORK WINDOW. The render system's OOM count at the
     /// top of the frame and at the end of its work (the after-record point where the
     /// injected frame fault fires); an OOM between the two, caught by whoever, is

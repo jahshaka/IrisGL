@@ -231,6 +231,14 @@ void RenderThread::threadMain() {
         }
         if (freeFrame) {
             if (mTornDown) { mFreeRun.store(false, std::memory_order_relaxed); continue; }
+            // THE LOOP'S ORDER (decision 65): any blocking wait first — the runtime's xrWaitFrame, its test door — then
+            // the hand-over, the LAST thing before the drain; the publish is the FIRST thing after the frame's work
+            // (the record/swap split, before a blocking present). The host's tick, posted at the publish, lands in
+            // whichever block follows: the present's, the runtime's wait, or the pad below.
+            {
+                EngineSideScope engineSide;
+                mEngine.waitBeforeFrame();
+            }
             const auto t0 = std::chrono::steady_clock::now();
             // THE MEASURED PERIOD (worth-a-look 3): the interval between two free frames' starts — what the
             // presentation clock advances by when the driver sends no period (Unlimited pacing).
@@ -347,6 +355,10 @@ void RenderThread::tickWith(Slot &&handed, bool freeFrame) {
     // A THROW INSIDE THE FRAME IS THE FRAME'S PUBLISHED ERROR (worth-a-look 2), never swallowed: the frame that
     // threw publishes, its error text the frame's.
     bool ran = false;
+    mInFreeFrame = freeFrame;
+    mSplitPublished = false;
+    mFrameAny = handed.any;
+    struct FreeEnds { bool &f; ~FreeEnds() { f = false; } } freeEnds{ mInFreeFrame };
     try { ran = mEngine.runFrame(handed.record, handed.any); }
     catch (Ogre::Exception &x) { mEngine.mLastError = describeOgreFailure(x); ran = true; }
     catch (std::exception &x) { mEngine.mLastError = std::string("engine: ") + x.what(); ran = true; }
@@ -356,8 +368,14 @@ void RenderThread::tickWith(Slot &&handed, bool freeFrame) {
     mEngine.mLastError.swap(callError);
     // ONE CATCH AROUND THE PUBLISH (decision 61): what it copies (the recorder's frames, the snapshot's vectors) can
     // throw; the error is the frame's, never std::terminate on the render thread.
+    mInFreeFrame = false;
     if (ran) {
-        try { publish(handed.any, std::move(frameError)); }
+        // A FRAME PUBLISHED AT ITS SPLIT (a free frame that rendered) republishes the engine's half with what its close
+        // latched and its final error; any other frame publishes here, as it always did.
+        try {
+            if (mSplitPublished) finishPublish(std::move(frameError));
+            else publish(handed.any, std::move(frameError));
+        }
         catch (std::exception &x) {   // the frame's error, carried by the next publish (never the calls' sink)
             ++mFramesWithError;
             mFrameErrors.push_back({ mSerial, mEngine.mPublishedFrames, std::string("engine: the frame's publish: ") +
@@ -367,10 +385,45 @@ void RenderThread::tickWith(Slot &&handed, bool freeFrame) {
     }
     // THE PRESENT'S BEAT TO THE HOST (U3 decision 60): a frame drawn on its own tells the host it published — the
     // host's hook posts its next tick and returns (it never works on this thread).
-    if (ran && freeFrame) {
+    if (ran && freeFrame && !mSplitPublished) {
         std::lock_guard<std::mutex> l(mHookLock);
         if (mPublishedHook) mPublishedHook();
     }
+}
+
+// THE PUBLISH AT THE SPLIT (decision 65): the free frame's work is recorded and submitted; the frame is published now
+// — its error so far its own, counted at the close — and the host's tick posted, before the present can block.
+void RenderThread::publishAtSplit() {
+    if (mSplitPublished || !mInFreeFrame) return;
+    std::string soFar = mEngine.mLastError;   // the frame's sink so far (the calls' error is swapped aside)
+    try { publish(mFrameAny, std::move(soFar), false); }
+    catch (std::exception &) { return; }      // the frame's end publishes it then
+    mSplitPublished = true;
+    std::lock_guard<std::mutex> l(mHookLock);
+    if (mPublishedHook) mPublishedHook();
+}
+
+// ...AND AFTER THE CLOSE: the engine's half again, the frame's stamp unchanged, with what the close latched (a lost
+// device, a session the runtime ended) and the frame's final error, counted once.
+void RenderThread::finishPublish(std::string &&frameError) {
+    const PublishedEngineFrame &front = mPublished.newest();
+    PublishedEngineFrame &back = mPublished.back();
+    try { mEngine.fillPublished(back); }
+    catch (Ogre::Exception &x) { if (frameError.empty()) frameError = describeOgreFailure(x); }
+    back.frame = front.frame;
+    back.serial = front.serial;
+    back.recordApplied = front.recordApplied;
+    back.handOver = front.handOver;
+    back.publishMicros = front.publishMicros;
+    if (!frameError.empty()) {
+        ++mFramesWithError;
+        mFrameErrors.push_back({ mSerial, mEngine.mPublishedFrames, frameError });
+        if (mFrameErrors.size() > PublishedEngineFrame::kFrameErrorsKept) mFrameErrors.erase(mFrameErrors.begin());
+    }
+    back.frameError = std::move(frameError);
+    back.frameErrors = mFrameErrors;
+    back.framesWithError = mFramesWithError;
+    mPublished.commit();
 }
 
 void RenderThread::setPublishedHook(std::function<void()> hook) {
@@ -381,7 +434,7 @@ void RenderThread::setPublishedHook(std::function<void()> hook) {
 // THE PUBLISH (U2's whole-frame swap, now the loop's — U3 F7): after the frame's close, so the snapshot carries what
 // the close latched (a lost device, an out-of-memory, a session the runtime ended). Every scene's half first (its
 // rider tags, its GI machine), then the engine's.
-void RenderThread::publish(bool recordApplied, std::string &&frameError) {
+void RenderThread::publish(bool recordApplied, std::string &&frameError, bool countError) {
     const auto t0 = std::chrono::steady_clock::now();
     OgreEngine &e = mEngine;
     ++e.mPublishedFrames;
@@ -406,7 +459,7 @@ void RenderThread::publish(bool recordApplied, std::string &&frameError) {
     back.serial = mSerial;
     back.recordApplied = recordApplied;
     back.handOver = mHandOverNow;
-    if (!frameError.empty()) {
+    if (countError && !frameError.empty()) {
         ++mFramesWithError;
         mFrameErrors.push_back({ mSerial, e.mPublishedFrames, frameError });
         if (mFrameErrors.size() > PublishedEngineFrame::kFrameErrorsKept) mFrameErrors.erase(mFrameErrors.begin());

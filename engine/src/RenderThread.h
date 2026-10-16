@@ -122,7 +122,14 @@ private:
     void tickWith(Slot &&handed, bool freeFrame);
     /// THE PUBLISH (render side): the frame's error (taken from the engine's sink, which holds the CALLS' error again
     /// after this), every scene's half and the engine's half, each a whole-frame swap.
-    void publish(bool recordApplied, std::string &&frameError);
+    void publish(bool recordApplied, std::string &&frameError, bool countError = true);
+    void finishPublish(std::string &&frameError);
+    bool mInFreeFrame = false, mSplitPublished = false, mFrameAny = false;   ///< the free frame in hand (render side)
+public:
+    /// The free frame's publish at its record/swap split (OgreEngine::onRecordSplit; decision 65).
+    void publishAtSplit();
+    bool inFreeFrame() const { return mInFreeFrame; }
+private:
 
     OgreEngine &mEngine;
     // ---- the thread's task hand-off (stage 4b) ----

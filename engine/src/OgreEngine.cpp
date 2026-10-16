@@ -905,6 +905,18 @@ void noteAsyncView(bool on) { gAsyncViews.fetch_add(on ? 1 : -1, std::memory_ord
 // RenderThread's (RenderThread.cpp), on the caller's thread until stage 4 gives the loop its own.
 // THE LOCKSTEP VERB (U3 stage 4b): the frame runs on the render thread and the caller waits for it — "serial >= k
 // presented": the record it submitted is the one the frame applies. Inline where there is no thread (a fixture).
+namespace {
+/// THE SPLIT'S PUBLISH (decision 65): Ogre's frameRenderingQueued — every render target recorded and submitted, the
+/// swap next (OgreRoot.cpp:1575-1584) — is where a free frame publishes.
+class SplitPublishListener final : public Ogre::FrameListener {
+public:
+    explicit SplitPublishListener(std::function<void()> at) : mAt(std::move(at)) {}
+    bool frameRenderingQueued(const Ogre::FrameEvent &) override { mAt(); return true; }
+private:
+    std::function<void()> mAt;
+};
+}   // namespace
+
 void OgreEngine::renderOneFrame() { mRenderThread.runOn([this] { mRenderThread.tickInline(); }); }
 
 // THE FRAME'S BODY (ENGINE-UPGRADE-U3 F7): the loop hands it the record the hand-over took.
@@ -981,17 +993,14 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
             if (!mRenderThread.onRenderThread()) ++mVrFramesOffRenderThread;   // the XR-thread law (stage 6's spike)
             vrSessionBeginFrame(mVrSession);
         }
-        mFrameWaitedOnRuntime = mVrSession && vrSessionWaitedThisFrame(mVrSession);
-        // THE FAKE RUNTIME (the test door vr.fakeRuntimePace): a free frame with no session waits for its next display
-        // time as xrWaitFrame would — the render loop's pace rule (no pad after a runtime-paced frame) under test.
-        if (!mVrSession && mFreeFrame && mArms.value(ArmId::FakeRuntimePace) > 0.0) {
-            const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                std::chrono::duration<double, std::milli>(mArms.value(ArmId::FakeRuntimePace)));
-            const auto now = std::chrono::steady_clock::now();
-            if (mFakeRuntimeNext.time_since_epoch().count() == 0 || mFakeRuntimeNext + period < now) mFakeRuntimeNext = now;
-            std::this_thread::sleep_until(mFakeRuntimeNext);
-            mFakeRuntimeNext += period;
-            mFrameWaitedOnRuntime = true;
+        mFrameWaitedOnRuntime = (mVrSession && vrSessionWaitedThisFrame(mVrSession)) || mFakeRuntimeWaited;
+        mFakeRuntimeWaited = false;
+        // THE SPLIT'S PUBLISH (decision 65): the free frame publishes at its record/swap split, before a blocking present;
+        // the listener is attached once, with Root.
+        if (!mSplitPublishAttached && mRoot) {
+            if (!mSplitPublish) mSplitPublish.reset(new SplitPublishListener([this] { onRecordSplit(); }));
+            mRoot->addFrameListener(mSplitPublish.get());
+            mSplitPublishAttached = true;
         }
         // THE RENDER-LOOP MONITOR'S FRAME (RENDER_LOOP_MONITOR_SPEC §4.2).
         // Opened here and closed at the very bottom, so `totalMs` is exactly
@@ -2815,6 +2824,38 @@ void OgreEngine::applyPendingEngineMessages() {
 // newest record's nodes at alpha = (P - the step before the newest) / the step period, P held inside that interval
 // (render one step behind: Tutorial06 GraphicsGameState's rule), then P advances by the display period the driver
 // supplies; a LOCKSTEP frame draws cur exactly (alpha 1 — every test, every hash) and P stands at the newest step.
+// THE WAITS BEFORE THE HAND-OVER (ENGINE-UPGRADE-U3 decision 65): the free loop blocks HERE — the runtime's
+// xrWaitFrame (taken early; the frame's beginFrame uses its result), or the test door vr.fakeRuntimePace standing in
+// for one — and only then takes the host's record: the record is the newest the host could submit during the block.
+void OgreEngine::waitBeforeFrame() {
+    mFakeRuntimeWaited = false;
+    if (mVrSession) { vrSessionWaitFrameEarly(mVrSession); return; }
+    if (mArms.value(ArmId::FakeRuntimePace) > 0.0) {
+        const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double, std::milli>(mArms.value(ArmId::FakeRuntimePace)));
+        const auto now = std::chrono::steady_clock::now();
+        if (mFakeRuntimeNext.time_since_epoch().count() == 0 || mFakeRuntimeNext + period < now) mFakeRuntimeNext = now;
+        std::this_thread::sleep_until(mFakeRuntimeNext);
+        mFakeRuntimeNext += period;
+        mFakeRuntimeWaited = true;
+    }
+}
+
+// THE RECORD/SWAP SPLIT (decision 65): a free frame's work is recorded and submitted, the present is next. The frame
+// PUBLISHES HERE — the host's tick it posts runs while a blocking present (or the test door view.fakePresentBlock,
+// standing in for one) holds this thread — and the close's latches follow as the engine's republish.
+void OgreEngine::onRecordSplit() {
+    if (!mFreeFrame || !mRenderThread.inFreeFrame()) return;
+    mRenderThread.publishAtSplit();
+    const double blockMs = mArms.value(ArmId::FakePresentBlock);
+    if (blockMs > 0.0) {
+        const long long since = mRenderThread.frameInFlightSinceNs();
+        const auto start = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(since));
+        std::this_thread::sleep_until(start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                  std::chrono::duration<double, std::milli>(blockMs)));
+    }
+}
+
 void OgreEngine::beginPresentation() {
     if (mPresentBegun) return;
     mPresentBegun = true;
@@ -3754,6 +3795,8 @@ void OgreEngine::teardown() {
     try { Ogre::PhotonMipChain::releasePool(); } catch (...) {}
     if (mRoot && mInRecordFaultAttached) mRoot->removeFrameListener(mInRecordFault.get());
     mInRecordFaultAttached = false;
+    if (mRoot && mSplitPublishAttached) mRoot->removeFrameListener(mSplitPublish.get());
+    mSplitPublishAttached = false;
     delete mRoot;
     mRoot = nullptr;
     gLiveEngine = nullptr;
