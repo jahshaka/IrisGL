@@ -3589,10 +3589,10 @@ public:
     void restoreInterpolated() { interpolate(1.0f); }
     unsigned long long interpolationStep() const { return mInterpStep; }
     std::vector<NodeId> mInterpNodes;   ///< the newest step's nodes (each once)
-    std::vector<NodeId> mInterpStale;   ///< the step before's, owed cur where not re-recorded
+    std::vector<NodeId> mInterpStale;   ///< the step before's, owed cur where not re-recorded (by id: after a removal)
     unsigned long long mInterpStep = 0;
     unsigned long long mInterpFrame = 0;   ///< the engine frame this scene was last interpolated in (once a frame)
-    bool mInterpRecsValid = false;      ///< mInterpRecs resolves mInterpNodes (cleared by a note or a removal)
+    bool mInterpRecsValid = true;       ///< mInterpRecs resolves mInterpNodes (false after a removal, until a step)
     float mInterpDrawnAlpha = 1.0f;
     double mInterpMicros = 0.0;       ///< the last interpolate's writes (the apply)
     double mInterpNameMicros = 0.0;   ///< ...and its naming of them to the scans (decision 56)
@@ -5578,7 +5578,9 @@ private:
     /// This scene's record for `id`, or null — the one-lookup form of
     /// `node(id)` + `mNodes.find(id)`, for the callers that need both the Ogre
     /// node and the record (round-2 review F9).
-    std::vector<Node *> mInterpRecs;   ///< the interpolation's resolved nodes (scratch, U3 stage 5)
+    std::vector<Node *> mInterpRecs;   ///< the newest step's nodes, resolved at their notes (valid: mInterpRecsValid)
+    std::vector<Node *> mInterpStaleRecs;   ///< the step before's, by pointer (no removal since their notes)
+    void forgetInterpolationPointers();
     /// THE DRAIN'S DOOR TO THE SCANS (U0 3b; decision 56): each node's subtree — its Ogre children and its bones'
     /// riders — named once to the GPU-scene walk and the GI/shadow scans, a lamp under it compared with its pose key.
     /// True when a lamp moved. `stack` is consumed. nameMovedNode: one registered node, what moves with it pushed.

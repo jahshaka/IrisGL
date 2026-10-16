@@ -454,10 +454,10 @@ bool OgreScene::removeNode(NodeId id) {
         // if it still points HERE: a re-adoption of the same Ogre node owns it.
         auto idx = mNodeByOgreId.find(it->second.ogreId);
         if (idx != mNodeByOgreId.end() && idx->second == id) mNodeByOgreId.erase(idx);
+        forgetInterpolationPointers();   // before the erase: the stale pointers become ids while their nodes live
         releaseNode(it->first, it->second);
         uncountNode(it->second);
         mNodes.erase(it);
-        mInterpRecsValid = false;   // the interpolation's resolved pointers name the map's nodes
         // The last decal leaving must clear the SceneManager's atlas bindings,
         // which is what drops the decal code back out of every PBS shader.
         if (hadDecal) refreshDecalBindings();
@@ -660,15 +660,27 @@ bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSeri
 void OgreScene::noteInterpolated(Node &rec, NodeId id, unsigned long long step) {
     if (step != mInterpStep) {
         // THE STEP MOVES ON: the last step's nodes are owed cur where this step does not record them again — put back
-        // once by the next interpolate, never by a restore before the apply (worth-a-look 4: one write per node).
-        mInterpStale.insert(mInterpStale.end(), mInterpNodes.begin(), mInterpNodes.end());
+        // once by the next interpolate, never by a restore before the apply (worth-a-look 4: one write per node). By
+        // pointer while no removal has touched the map since they were noted, by id otherwise.
+        if (mInterpRecsValid) mInterpStaleRecs.insert(mInterpStaleRecs.end(), mInterpRecs.begin(), mInterpRecs.end());
+        else mInterpStale.insert(mInterpStale.end(), mInterpNodes.begin(), mInterpNodes.end());
         mInterpNodes.clear();
+        mInterpRecs.clear();
+        mInterpRecsValid = true;   // the new step's list is resolved as it is noted
         mInterpStep = step;
     }
     if (rec.interpStep != step) {   // each node once a step (two merged records, one entry)
         rec.interpStep = step;
         mInterpNodes.push_back(id);
+        if (mInterpRecsValid) mInterpRecs.push_back(&rec);   // THE NODE RESOLVED AT ITS NOTE (worth-a-look 4)
     }
+}
+
+/// A REMOVAL (removeNode / the scene's clear) makes the noted pointers unsafe: the stale ones go back to ids while the
+/// node they name is still alive, the newest step's list re-resolves by id at the next interpolate.
+void OgreScene::forgetInterpolationPointers() {
+    for (Node *rec : mInterpStaleRecs) mInterpStale.push_back(rec->selfId);
+    mInterpStaleRecs.clear();
     mInterpRecsValid = false;
 }
 
@@ -688,9 +700,9 @@ constexpr size_t kParallelInterpNodes = 256u;
 
 void OgreScene::interpolate(float alpha) {
     alpha = alpha < 0.0f ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
-    if (mInterpNodes.empty() && mInterpStale.empty()) { mInterpDrawnAlpha = alpha; return; }
+    if (mInterpNodes.empty() && mInterpStale.empty() && mInterpStaleRecs.empty()) { mInterpDrawnAlpha = alpha; return; }
     const auto t0 = std::chrono::steady_clock::now();
-    // THE NODES, resolved once a step (a note or a removal re-resolves), serially — the map is not the shares'.
+    // THE NODES, resolved at their notes; by id only after a removal (forgetInterpolationPointers), serially.
     if (!mInterpRecsValid) {
         mInterpRecs.clear();
         for (NodeId id : mInterpNodes) {
@@ -702,6 +714,10 @@ void OgreScene::interpolate(float alpha) {
     // WHAT THIS FRAME WRITES, each node once: the newest step's at `alpha` (at 1, only those not already on cur) and
     // the step before's that were not recorded again, back on cur.
     mInterpWrite.clear();
+    for (Node *rec : mInterpStaleRecs)
+        if (rec->node && rec->document && rec->hasCur && rec->interpStep != mInterpStep && !rec->drawnCur)
+            mInterpWrite.push_back({ rec, 1.0f });
+    mInterpStaleRecs.clear();
     for (NodeId id : mInterpStale) {
         Node *rec = record(id);
         if (rec && rec->node && rec->document && rec->hasCur && rec->interpStep != mInterpStep && !rec->drawnCur)
@@ -2125,7 +2141,7 @@ void OgreScene::destroy() {
         destroyGrid();
         for (auto &kv : mNodes) releaseNode(kv.first, kv.second);
         mNodes.clear();
-        mInterpNodes.clear(); mInterpStale.clear(); mInterpRecs.clear(); mInterpRecsValid = false;
+        mInterpNodes.clear(); mInterpStale.clear(); mInterpRecs.clear(); mInterpStaleRecs.clear(); mInterpRecsValid = false;
         mMobilityCounts = MobilityStatus();   // every node gone: the totals with them
         mRigCounts = RigStats();
         mSkeletonRefs.clear();
