@@ -3873,6 +3873,7 @@ VrStatus VrSession::status() const {
     s.frames = mFrames;
     s.rendered = mRendered;
     s.missedDisplayPeriods = mMissedDisplayPeriods;
+    s.displayTimeNs = (long long)mLastPredictedDisplayTime;   // the runtime's clock (U3 stage 6: the interaction's dt)
     s.refreshHz = mRefreshHz;   // the session's predicted period, the render loop's pace while it runs (U3 decision 53)
     s.ipd = mIpd;
     s.warmUpFrames = mWarmUpDone;

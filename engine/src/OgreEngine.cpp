@@ -2015,9 +2015,8 @@ void OgreEngine::endVrSession() {
 }
 
 VrState OgreEngine::vrState() const {
-    // A VR READ ON THE HOST'S SIDE IS A REQUEST (U3 stage 4a; its snapshot field is stage 6's): answered after what
-    // the host already sent.
-    if (hostPosts()) { VrState r{}; const_cast<OgreEngine *>(this)->request([&](Engine &) { r = vrState(); }, nullptr); return r; }
+    // A VR READ ON THE HOST'S SIDE IS THE SNAPSHOT'S (U3 stage 6; a request until then).
+    if (hostPosts()) return published().vrState;   // THE SNAPSHOT (stage 6): the last frame's, never a wait
     return vrStateNow();
 }
 
@@ -2027,9 +2026,9 @@ VrState OgreEngine::vrStateNow() const {
 }
 
 VrStatus OgreEngine::vrStatus() const {
-    // A VR READ ON THE HOST'S SIDE IS A REQUEST (U3 stage 4a; its snapshot field is stage 6's): answered after what
-    // the host already sent.
-    if (hostPosts()) { VrStatus r; const_cast<OgreEngine *>(this)->request([&](Engine &) { r = vrStatus(); }, nullptr); return r; }
+    // A VR READ ON THE HOST'S SIDE IS THE SNAPSHOT'S (U3 stage 6; a request until then): the frame's status, the
+    // injections it applied included (a host injection is a request — republished before the host reads again).
+    if (hostPosts()) return published().vr;
     if (!mVrSession) {
         VrStatus s;
         s.state = vrStateNow();
@@ -2185,9 +2184,14 @@ bool OgreEngine::vrInjectInput(int hand, const VrHandState &state) {
 // test. The session holds this frame's set; with no session the store below is
 // the only source there can be.
 unsigned OgreEngine::vrHandJoints(int hand, VrPose *out, unsigned count) const {
-    // A VR READ ON THE HOST'S SIDE IS A REQUEST (U3 stage 4a; its snapshot field is stage 6's): answered after what
-    // the host already sent.
-    if (hostPosts()) { unsigned r = 0; const_cast<OgreEngine *>(this)->request([&](Engine &) { r = vrHandJoints(hand, out, count); }, nullptr); return r; }
+    // A VR READ ON THE HOST'S SIDE IS THE SNAPSHOT'S (U3 stage 6): this frame's joints, as the frame located them.
+    if (hostPosts()) {
+        if (hand < 0 || hand >= int(VrHandCount) || !out) return 0u;
+        const std::vector<VrPose> &j = published().vrJoints[hand];
+        const unsigned n = unsigned(std::min<size_t>(j.size(), count));
+        std::copy(j.begin(), j.begin() + n, out);
+        return n;
+    }
     if (hand < 0 || hand >= int(VrHandCount)) return 0u;
     // A LIVE SESSION WITH HANDS OFF HAS NO SKELETON TO REPORT (lane
     // HANDS-SWITCH-1), and that includes an injected one: a project that asked
@@ -2209,9 +2213,14 @@ unsigned OgreEngine::vrHandJoints(int hand, VrPose *out, unsigned count) const {
 // fix round; Engine::vrBindingBlocks). Only a session can answer: the blocks
 // are suggested once, at its creation.
 unsigned OgreEngine::vrBindingBlocks(VrBindingBlock *out, unsigned count) const {
-    // A VR READ ON THE HOST'S SIDE IS A REQUEST (U3 stage 4a; its snapshot field is stage 6's): answered after what
-    // the host already sent.
-    if (hostPosts()) { unsigned r = 0; const_cast<OgreEngine *>(this)->request([&](Engine &) { r = vrBindingBlocks(out, count); }, nullptr); return r; }
+    // A VR READ ON THE HOST'S SIDE IS THE SNAPSHOT'S (U3 stage 6): the blocks the session was created with.
+    if (hostPosts()) {
+        if (!out) return 0u;
+        const std::vector<VrBindingBlock> &b = published().vrBindingBlocks;
+        const unsigned n = unsigned(std::min<size_t>(b.size(), count));
+        std::copy(b.begin(), b.begin() + n, out);
+        return n;
+    }
     return mVrSession ? vrSessionBindingBlocks(mVrSession, out, count) : 0u;
 }
 
@@ -3005,6 +3014,19 @@ void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
     }
     out.completions = mEngineCompletionsPublished;
     out.vr = vrStatus();
+    // THE REST OF THE VR DOOR (stage 6): the host's VR getters read these.
+    out.vrState = vrStateNow();
+    out.vrInfo = mVrInfo;
+    for (unsigned h = 0; h < VrHandCount; ++h) {
+        VrPose joints[kVrHandJointCount];
+        const unsigned n = vrHandJoints(int(h), joints, kVrHandJointCount);
+        out.vrJoints[h].assign(joints, joints + n);
+    }
+    {
+        VrBindingBlock blocks[kVrBindingBlockMax];
+        const unsigned n = mVrSession ? vrSessionBindingBlocks(mVrSession, blocks, kVrBindingBlockMax) : 0u;
+        out.vrBindingBlocks.assign(blocks, blocks + n);
+    }
     out.streaming = streamingWork();
     out.shaders = asyncShaderStats();
     out.hasEnabledViews = hasEnabledViews();

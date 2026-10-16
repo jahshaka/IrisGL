@@ -5802,6 +5802,10 @@ struct VrStatus {
     /// VR frames begun OFF the engine's render thread (ENGINE-UPGRADE-U3 stage 6, the XR-thread law: xrWaitFrame /
     /// xrBeginFrame / xrEndFrame run on the render thread — 0 always).
     unsigned long long framesOffRenderThread = 0;
+    /// THE RUNTIME'S CLOCK (ENGINE-UPGRADE-U3 stage 6): the newest frame's predictedDisplayTime, ns, on the runtime's
+    /// own timeline (0 before the first) — what the wearer's interaction steps by (the delta between two reads),
+    /// never a wall clock of ours.
+    long long          displayTimeNs = 0;
     /// The runtime's display rate (predictedDisplayPeriod; VrInfo::refreshHz) — 0 until a session has pumped. What the
     /// host's loop sends as the display period while the session runs (U3 decision 53), never the panel's.
     float              refreshHz = 0.0f;
@@ -8605,6 +8609,14 @@ struct PublishedEngineFrame {
     bool               presentFree = false;
     FrameInputStatus   input;              ///< the drain's own status (the render side)
     VrStatus           vr;                 ///< the session as this frame left it (the last begun frame's pose)
+    /// THE REST OF THE VR DOOR (ENGINE-UPGRADE-U3 stage 6): what the host's VR getters read — the session's state,
+    /// what the last probe or session learned (VrInfo), each hand's joints as this frame located them (empty: none)
+    /// and the session's suggested-binding blocks. Engine::vrState / vrInfo / vrHandJoints / vrBindingBlocks on the
+    /// host's side are these fields, never a wait.
+    VrState            vrState = VrState::Unavailable;
+    VrInfo             vrInfo;
+    std::vector<VrPose> vrJoints[VrHandCount];
+    std::vector<VrBindingBlock> vrBindingBlocks;
     StreamingWork      streaming;
     AsyncShaderStats   shaders;            ///< the compile counters (`compiledInForeground` = livecompiles' total)
     bool               hasEnabledViews = false;

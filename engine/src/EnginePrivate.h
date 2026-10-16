@@ -7618,8 +7618,8 @@ public:
         mVrPolicy = policy;
     }
     bool vrProbe() override;
-    const VrInfo &vrInfo() const override {   // the host's side: a request lands what it sent, then the record (U3 4a)
-        if (hostPosts()) { const_cast<OgreEngine *>(this)->request([](Engine &) {}, nullptr); return mVrInfo; }
+    const VrInfo &vrInfo() const override {   // the host's side: the SNAPSHOT's (U3 stage 6) — never the engine's member
+        if (hostPosts()) return published().vrInfo;
         JAH_SYNC_GETTER("Engine::vrInfo");
         return mVrInfo;
     }
@@ -7641,11 +7641,13 @@ public:
     unsigned vrBindingBlocks(VrBindingBlock *out, unsigned count) const override;
     bool vrHaptic(int hand, float amplitude01, float seconds) override;
     void setVrRay(const VrRayState &ray) override {
+        if (hostPosts()) mHostVrRay = ray;   // the host's record, at its call (U3 stage 6)
         if (postedAsMessage([=](OgreEngine &e) { e.setVrRay(ray); return true; })) return;   // U3 4a: a message
         mVrRay = ray;
+        if (!mHostRecords) mHostVrRay = ray;
     }
-    const VrRayState &vrRay() const override {   // the host's side: a request lands what it sent, then the record (U3 4a)
-        if (hostPosts()) { const_cast<OgreEngine *>(this)->request([](Engine &) {}, nullptr); return mVrRay; }
+    const VrRayState &vrRay() const override {   // the host's side: its own record (U3 stage 6) — it is the ray's writer
+        if (hostPosts()) return mHostVrRay;
         JAH_SYNC_GETTER("Engine::vrRay");
         return mVrRay;
     }
@@ -7835,6 +7837,7 @@ public:
     /// The presentation's frame (once per frame: clamped at the drain's head, advanced at the frame's).
     unsigned long long mPresentFrame = 0;
     bool mPresentBegun = false;
+    VrRayState mHostVrRay;   ///< the host's record of the ray it set (Engine::vrRay on the host's side, U3 stage 6)
     float mPresentAlpha = 1.0f;   ///< the last interpolateScene's weight (PublishedEngineFrame::presentAlpha)
     void beginPresentation();
     void interpolateScene(OgreScene *sc);
