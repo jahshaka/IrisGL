@@ -241,7 +241,9 @@ bool PhotonComponent::updatePassOwed() const {
 
 void PhotonComponent::recordUpdatePass() {
     GiRegion region(RegionKind::Graphics);   // the cards' work (this frame's capture): graphics, in order
-    if (mSurfaceCache) mSurfaceCache->photonUpdate();
+    if (!mSurfaceCache) return;
+    mSurfaceCache->setSunGridParity(mEngine && mEngine->armRegistry().on(ArmId::CardsSunGridParity));
+    mSurfaceCache->photonUpdate();
 }
 
 /// photon_update's recorder and gate: the pass's scene (bound on its manager) and its component.

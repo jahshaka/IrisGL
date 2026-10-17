@@ -1791,6 +1791,161 @@ bool shades(const Footprint &caster, const Footprint &card) {
     return caster.a0 <= card.a1 && card.a0 <= caster.a1 && caster.b0 <= card.b1 &&
            card.b0 <= caster.b1 && card.top < caster.top;
 }
+
+// THE CARDS' SUN-SPACE GRID (ENGINE-UPGRADE-U4 stage 2). `shades` needs the two
+// rectangles to OVERLAP in the plane normal to the sun, so a footprint can only
+// shade a card some point of whose rectangle it shares — and that point falls in
+// ONE cell of a grid laid over the plane: the cell index is a monotone function
+// of the coordinate (a subtraction, a multiplication by a positive constant and a
+// truncation, each monotone in IEEE arithmetic), so a card filed in every cell its
+// [a0, a1] x [b0, b1] spans and a query visiting every cell ITS rectangle spans
+// share the shared point's cell. The search therefore visits a superset of the
+// cards the exhaustive loop would test true, and the exact test (`shades`, the
+// corner form) decides each: the hit set is the exhaustive loop's, card for card.
+// A card wider than kGridMaxCells cells (a floor's card) or not finite is not
+// filed: every query visits it (`wide`). A query whose rectangle is inverted or
+// not finite (a degenerate box) cannot be placed on the grid: it visits every
+// card. The grid is BUILT PER CALL: a card's footprint carries its sun lift,
+// which reads the viewer's distance (sunLiftOf) — a grid cached across calls would
+// go stale with the camera.
+constexpr int kGridMaxSide = 256;      ///< cells a side, at most
+constexpr unsigned kGridMaxCells = 64u; ///< a card spanning more cells than this is `wide`
+bool finiteRect(const Footprint &f) {
+    return std::isfinite(f.a0) && std::isfinite(f.a1) && std::isfinite(f.b0) && std::isfinite(f.b1);
+}
+int gridCell(float x, float origin, float inv, int n) {
+    const float t = (x - origin) * inv;
+    if (!(t > 0.0f)) return 0;
+    if (t >= float(n)) return n - 1;
+    return std::min(n - 1, int(t));
+}
+/// Files `cards` (indices into `fp`) on `g`.
+void buildSunGrid(CardSunGrid &g, const std::vector<Footprint> &fp, const std::vector<unsigned> &cards) {
+    g.items.clear();
+    g.wide.clear();
+    g.nx = g.ny = 0;
+    if (g.stamp.size() < fp.size()) g.stamp.assign(fp.size(), 0u);
+    g.allBounded = true;
+    g.ua0 = g.ub0 = 1e30f; g.ua1 = g.ub1 = -1e30f;
+    for (unsigned i : cards) {
+        const Footprint &f = fp[i];
+        if (!finiteRect(f) || !(f.a0 <= f.a1) || !(f.b0 <= f.b1)) { g.allBounded = false; break; }
+        g.ua0 = std::min(g.ua0, f.a0); g.ua1 = std::max(g.ua1, f.a1);
+        g.ub0 = std::min(g.ub0, f.b0); g.ub1 = std::max(g.ub1, f.b1);
+    }
+    // THE CELL SIDE: the median card's larger extent (a few wide cards must not
+    // coarsen the grid), never finer than the filed span over kGridMaxSide.
+    g.scratch.clear();
+    for (unsigned i : cards)
+        if (finiteRect(fp[i]) && fp[i].a0 <= fp[i].a1 && fp[i].b0 <= fp[i].b1)
+            g.scratch.push_back(std::max(fp[i].a1 - fp[i].a0, fp[i].b1 - fp[i].b0));
+    if (g.scratch.empty()) { g.wide = cards; return; }
+    std::nth_element(g.scratch.begin(), g.scratch.begin() + g.scratch.size() / 2, g.scratch.end());
+    const float median = std::max(g.scratch[g.scratch.size() / 2], 1e-4f);
+    // A card more than 16 medians wide goes to `wide` before the bounds are taken.
+    const float wideAt = 16.0f * median;
+    float a0 = 1e30f, a1 = -1e30f, b0 = 1e30f, b1 = -1e30f;
+    const auto filed = [&](const Footprint &f) {
+        return finiteRect(f) && f.a0 <= f.a1 && f.b0 <= f.b1 && f.a1 - f.a0 <= wideAt && f.b1 - f.b0 <= wideAt;
+    };
+    for (unsigned i : cards) {
+        const Footprint &f = fp[i];
+        if (!filed(f)) continue;
+        a0 = std::min(a0, f.a0); a1 = std::max(a1, f.a1);
+        b0 = std::min(b0, f.b0); b1 = std::max(b1, f.b1);
+    }
+    if (!(a0 <= a1)) { g.wide = cards; return; }
+    const float side = std::max(median, std::max(a1 - a0, b1 - b0) / float(kGridMaxSide));
+    g.a0 = a0; g.b0 = b0; g.a1 = a1; g.b1 = b1; g.inv = 1.0f / side;
+    g.nx = std::max(1, std::min(kGridMaxSide, int((a1 - a0) * g.inv) + 1));
+    g.ny = std::max(1, std::min(kGridMaxSide, int((b1 - b0) * g.inv) + 1));
+    g.start.assign(size_t(g.nx) * size_t(g.ny) + 1u, 0u);
+    // Two passes (count, then fill): one flat array, no list per cell.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (unsigned i : cards) {
+            const Footprint &f = fp[i];
+            bool wide = !filed(f);
+            int x0 = 0, x1 = -1, y0 = 0, y1 = -1;
+            if (!wide) {
+                x0 = gridCell(f.a0, g.a0, g.inv, g.nx); x1 = gridCell(f.a1, g.a0, g.inv, g.nx);
+                y0 = gridCell(f.b0, g.b0, g.inv, g.ny); y1 = gridCell(f.b1, g.b0, g.inv, g.ny);
+                wide = unsigned(x1 - x0 + 1) * unsigned(y1 - y0 + 1) > kGridMaxCells;
+            }
+            if (wide) { if (pass == 0) g.wide.push_back(i); continue; }
+            for (int y = y0; y <= y1; ++y)
+                for (int x = x0; x <= x1; ++x) {
+                    const size_t c = size_t(y) * size_t(g.nx) + size_t(x);
+                    if (pass == 0) ++g.start[c + 1u];
+                    else g.items[g.start[c]++] = i;
+                }
+        }
+        if (pass == 0) {
+            for (size_t c = 1; c < g.start.size(); ++c) g.start[c] += g.start[c - 1];
+            g.items.resize(g.start.back());
+        } else {
+            // the fill advanced each cell's start to the next cell's: shift back
+            for (size_t c = g.start.size() - 1; c > 0; --c) g.start[c] = g.start[c - 1];
+            g.start[0] = 0u;
+        }
+    }
+}
+/// A box's footprint rectangle, CONSERVATIVELY: the centre's projection grown by
+/// the half-extents' projections (|e . axis| h — the box's exact interval in exact
+/// arithmetic) plus the caster margin and a slack that covers the corner form's
+/// rounding. Contains boxFootprint's rectangle; `top` is left unset. Not finite
+/// for a box that is not.
+Footprint boxReach(const SunFrame &f, const Ogre::Vector3 &mn, const Ogre::Vector3 &mx) {
+    const Ogre::Vector3 c = (mn + mx) * 0.5f, h = (mx - mn) * 0.5f;
+    const float a = f.e1.dotProduct(c), b = f.e2.dotProduct(c);
+    const float ra = std::fabs(f.e1.x) * h.x + std::fabs(f.e1.y) * h.y + std::fabs(f.e1.z) * h.z;
+    const float rb = std::fabs(f.e2.x) * h.x + std::fabs(f.e2.y) * h.y + std::fabs(f.e2.z) * h.z;
+    // the slack is relative to the CORNERS' magnitude (what the dot products round at), not the projection's
+    const float mag = std::fabs(c.x) + std::fabs(c.y) + std::fabs(c.z) + h.x + h.y + h.z;
+    const float sa = kFootprintMargin + 1e-3f * (1.0f + mag);
+    const float sb = kFootprintMargin + 1e-3f * (1.0f + mag);
+    Footprint p;
+    p.a0 = a - ra - sa; p.a1 = a + ra + sa;
+    p.b0 = b - rb - sb; p.b1 = b + rb + sb;
+    return p;
+}
+/// True when a search rectangle provably meets no card the grid was given.
+bool missesEveryCard(const CardSunGrid &g, const Footprint &q) {
+    if (!g.allBounded || !finiteRect(q) || !(q.a0 <= q.a1) || !(q.b0 <= q.b1)) return false;
+    return q.a1 < g.ua0 || q.a0 > g.ua1 || q.b1 < g.ub0 || q.b0 > g.ub1;
+}
+/// A new query: the cards it visits are visited once however many of its
+/// rectangles reach them (a move's old and new footprints).
+unsigned beginSunQuery(CardSunGrid &g) {
+    if (++g.query == 0u) { std::fill(g.stamp.begin(), g.stamp.end(), 0u); g.query = 1u; }
+    return g.query;
+}
+/// Visits every card `q`'s rectangle may overlap (a superset; the caller tests
+/// each exactly), once per query. `all` = every card the grid holds, for a
+/// rectangle the grid cannot place.
+template <class Visit>
+void visitSunGrid(CardSunGrid &g, const Footprint &q, const std::vector<unsigned> &all, Visit &&visit) {
+    const unsigned id = g.query;
+    const auto once = [&](unsigned i) {
+        if (g.stamp[i] == id) return;
+        g.stamp[i] = id;
+        visit(i);
+    };
+    if (!finiteRect(q) || !(q.a0 <= q.a1) || !(q.b0 <= q.b1)) {
+        for (unsigned i : all) once(i);
+        return;
+    }
+    for (unsigned i : g.wide) once(i);
+    // Every filed card lies inside [a0, a1] x [b0, b1]: a query outside it overlaps none (the cell clamp would
+    // otherwise send it to the edge cells, a superset the exact test discards at a cost).
+    if (!g.nx || q.a1 < g.a0 || q.a0 > g.a1 || q.b1 < g.b0 || q.b0 > g.b1) return;
+    const int x0 = gridCell(q.a0, g.a0, g.inv, g.nx), x1 = gridCell(q.a1, g.a0, g.inv, g.nx);
+    const int y0 = gridCell(q.b0, g.b0, g.inv, g.ny), y1 = gridCell(q.b1, g.b0, g.inv, g.ny);
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x) {
+            const size_t c = size_t(y) * size_t(g.nx) + size_t(x);
+            for (unsigned k = g.start[c]; k < g.start[c + 1u]; ++k) once(g.items[k]);
+        }
+}
 }   // namespace
 
 const Ogre::Light *SurfaceCache::cardSun() const {
@@ -1829,6 +1984,7 @@ void SurfaceCache::traceSun() {
     mTraceSunCost.cards = unsigned(mCards.size());
     mTraceSunCost.casterHits = 0u;
     mTraceSunCost.casterHitDigest = 0ull;
+    mTraceSunCost.hookMicros = mTraceSunCost.stepOneMicros = 0.0;
     // THIS FRAME ONLY: the batch is the frame's only when update() planned this
     // frame (workspacePreUpdate drops a stale plan the same way).
     // A batch that cannot be traced this frame waits for its still term.
@@ -1842,7 +1998,10 @@ void SurfaceCache::traceSun() {
     if (!mMoverHooks.frame || !mMoverVis || !mRadiance) { batchWaits(); return; }
     if (mBatchFrame != Ogre::Root::getSingleton().getCompositorManager2()->getFrameCount()) return;
     CardMoverFrame mf;
-    if (!mMoverHooks.frame(mf)) { batchWaits(); return; }
+    const auto tHook = std::chrono::steady_clock::now();
+    const bool framed = mMoverHooks.frame(mf);
+    mTraceSunCost.hookMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tHook).count();
+    if (!framed) { batchWaits(); return; }
     mMovers.swap(mf.movers);
     mTraceSunCost.casterMoves = unsigned(mf.casterMoves.size());
 
@@ -1851,16 +2010,20 @@ void SurfaceCache::traceSun() {
         sunLight ? (-sunLight->getDerivedDirection()).normalisedCopy() : Ogre::Vector3::ZERO;
     const bool haveSun = sunLight != nullptr;
     const SunFrame sf = sunFrame(haveSun ? toSun : Ogre::Vector3::UNIT_Y);
-    // A card's footprint, computed once per call and only if something asks.
+    // A card's footprint, computed once per call and only for a card something asks about (the grid files the
+    // landed cards only).
     std::vector<Footprint> cardFp;
+    std::vector<char> cardFpHave;
     const auto cardFpAt = [&](unsigned i) -> const Footprint & {
         if (cardFp.empty()) {
             cardFp.resize(mCards.size());
-            for (size_t k = 0; k < mCards.size(); ++k) {
-                const CardRec &c = mCards[k];
-                const float texel = 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size));
-                cardFp[k] = cardFootprint(sf, c, sunLiftOf(c) + texel);
-            }
+            cardFpHave.assign(mCards.size(), 0);
+        }
+        if (!cardFpHave[i]) {
+            const CardRec &c = mCards[i];
+            const float texel = 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size));
+            cardFp[i] = cardFootprint(sf, c, sunLiftOf(c) + texel);
+            cardFpHave[i] = 1;
         }
         return cardFp[i];
     };
@@ -1899,26 +2062,130 @@ void SurfaceCache::traceSun() {
     //    A card whose still term waits KEEPS its traced movers' term (step 3
     //    waits for `stillPending`): a demoted mover's shadow passes from the
     //    movers' trace to the still one without a frame of neither.
+    // THE LANDED CARDS ON THE SUN-SPACE GRID (U4 stage 2; "The cards' sun-space
+    // grid" above), built for a set of searches: step 1's (the moved still
+    // casters), then steps 3 and 3b's (the movers). Only a landed card whose
+    // CONSERVATIVE rectangle (its centre's projection grown by the sum of its
+    // half-extents — the unit axes' projections are at most 1 — plus its margin
+    // and a slack for the corners' rounding) meets the searches' bounding
+    // rectangle is filed and has its exact footprint computed: a card outside it
+    // overlaps no search, so leaving it out changes no answer.
+    std::vector<unsigned> landedCards;
+    bool landedKnown = false;
+    const auto landedList = [&]() -> const std::vector<unsigned> & {
+        if (!landedKnown) {
+            for (unsigned i = 0; i < mCards.size(); ++i)
+                if (landed(mCards[i])) landedCards.push_back(i);
+            landedKnown = true;
+        }
+        return landedCards;
+    };
+    struct SearchBounds {
+        bool bounded = true, any = false;
+        float a0 = 1e30f, a1 = -1e30f, b0 = 1e30f, b1 = -1e30f;
+        void add(const Footprint &f) {
+            any = true;
+            if (!finiteRect(f) || !(f.a0 <= f.a1) || !(f.b0 <= f.b1)) { bounded = false; return; }
+            a0 = std::min(a0, f.a0); a1 = std::max(a1, f.a1);
+            b0 = std::min(b0, f.b0); b1 = std::max(b1, f.b1);
+        }
+    };
+    const auto mayReach = [&](const CardRec &c, const SearchBounds &u) {
+        if (!u.bounded) return true;
+        const float a = sf.e1.dotProduct(c.centre), b = sf.e2.dotProduct(c.centre);
+        const float texel = 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size));
+        const float r = c.halfU + c.halfV + c.halfDepth + sunLiftOf(c) + texel;
+        // the slack is relative to the corners' magnitude (what the corner form rounds at)
+        const float mag = std::fabs(c.centre.x) + std::fabs(c.centre.y) + std::fabs(c.centre.z) + r;
+        const float reach = r + 1e-3f * (1.0f + mag);
+        if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(reach)) return true;
+        return a + reach >= u.a0 && a - reach <= u.a1 && b + reach >= u.b0 && b - reach <= u.b1;
+    };
+    std::vector<unsigned> filedCards;   // the landed cards the current grid holds
+    const auto buildGrid = [&](const SearchBounds &u) -> CardSunGrid & {
+        filedCards.clear();
+        for (unsigned i : landedList())
+            if (mayReach(mCards[i], u)) { cardFpAt(i); filedCards.push_back(i); }
+        buildSunGrid(mSunGrid, cardFp, filedCards);
+        return mSunGrid;
+    };
+    const auto searchInto = [&](CardSunGrid &g, std::vector<char> &mask, const Footprint &f) {
+        beginSunQuery(g);
+        visitSunGrid(g, f, filedCards, [&](unsigned i) {
+            if (!mask[i] && shades(f, cardFp[i])) mask[i] = 1;
+        });
+    };
+    // The grid's guard (the arm cards.sunGridParity): the exhaustive search's
+    // answer for one card set, compared card for card.
+    bool parityRan = false;
+    const auto parity = [&](const std::vector<char> &mask, const std::vector<char> &exhaustive) {
+        parityRan = true;
+        for (size_t i = 0; i < mask.size(); ++i)
+            if ((mask[i] != 0) != (exhaustive[i] != 0)) ++mTraceSunCost.parityMisses;
+    };
+    const auto tStepOne = std::chrono::steady_clock::now();
     if (haveSun) {
+        // Not yet captured or queued (its capture traces it) — the grid holds
+        // only landed cards; captured THIS frame (traced below, after the scene
+        // graph: it sees the caster where it is now), or the caster's own (a
+        // moved instance re-allocates its cards, a hidden one gives them back).
         std::vector<char> hit(mf.casterMoves.empty() ? 0u : mCards.size(), 0);
-        for (const CardCasterMove &m : mf.casterMoves) {
-            const Footprint o = boxFootprint(sf, m.oldMin, m.oldMax);
-            const Footprint n = boxFootprint(sf, m.newMin, m.newMax);
-            for (unsigned i = 0; i < mCards.size(); ++i) {
-                CardRec &c = mCards[i];
-                // Not yet captured, queued (its capture traces it), captured THIS
-                // frame (traced below, after the scene graph: it sees the caster
-                // where it is now), or the caster's own (a moved instance
-                // re-allocates its cards, a hidden one gives them back).
-                if (c.queued || !c.lastUpdated || c.lastUpdated == mFrame) continue;
-                if (mInstances[c.instance].node == m.node) continue;
-                const Footprint &cf = cardFpAt(i);
-                if (!shades(o, cf) && !shades(n, cf)) continue;
-                hit[i] = 1;
-                if (!c.stillPending) ++mCasterRetraces;
-                pendStill(c);
+        const auto eligible = [&](unsigned i, NodeId mover) {
+            const CardRec &c = mCards[i];
+            return c.lastUpdated != mFrame && mInstances[c.instance].node != mover;
+        };
+        if (!mf.casterMoves.empty() && !landedList().empty()) {
+            // Each move's CONSERVATIVE old and new rectangles (boxReach), the grid
+            // for their bounds; then the exact footprints of the moves whose
+            // rectangles meet a filed card's bounds at all.
+            std::vector<Footprint> reach(2u * mf.casterMoves.size());
+            SearchBounds u;
+            for (size_t k = 0; k < mf.casterMoves.size(); ++k) {
+                const CardCasterMove &m = mf.casterMoves[k];
+                reach[2u * k] = boxReach(sf, m.oldMin, m.oldMax);
+                reach[2u * k + 1u] = boxReach(sf, m.newMin, m.newMax);
+                u.add(reach[2u * k]);
+                u.add(reach[2u * k + 1u]);
+            }
+            CardSunGrid &g = buildGrid(u);
+            if (!g.empty()) {
+                for (size_t k = 0; k < mf.casterMoves.size(); ++k) {
+                    if (missesEveryCard(g, reach[2u * k]) && missesEveryCard(g, reach[2u * k + 1u])) continue;
+                    const CardCasterMove &m = mf.casterMoves[k];
+                    const Footprint o = boxFootprint(sf, m.oldMin, m.oldMax);
+                    const Footprint n = boxFootprint(sf, m.newMin, m.newMax);
+                    const auto test = [&](unsigned i) {
+                        if (hit[i] || !eligible(i, m.node)) return;
+                        const Footprint &cf = cardFp[i];
+                        if (shades(o, cf) || shades(n, cf)) hit[i] = 1;
+                    };
+                    beginSunQuery(g);
+                    visitSunGrid(g, o, filedCards, test);
+                    visitSunGrid(g, n, filedCards, test);
+                }
             }
         }
+        if (mSunGridParity && !mf.casterMoves.empty()) {
+            std::vector<char> all(mCards.size(), 0);
+            for (const CardCasterMove &m : mf.casterMoves) {
+                const Footprint o = boxFootprint(sf, m.oldMin, m.oldMax);
+                const Footprint n = boxFootprint(sf, m.newMin, m.newMax);
+                for (unsigned i = 0; i < mCards.size(); ++i) {
+                    if (!landed(mCards[i]) || !eligible(i, m.node)) continue;
+                    const Footprint &cf = cardFpAt(i);
+                    if (shades(o, cf) || shades(n, cf)) all[i] = 1;
+                }
+            }
+            parity(hit, all);
+        }
+        for (unsigned i = 0; i < hit.size(); ++i) {
+            if (!hit[i]) continue;
+            CardRec &c = mCards[i];
+            if (!c.stillPending) ++mCasterRetraces;
+            pendStill(c);
+        }
+        mTraceSunCost.stepOneMicros =
+            std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tStepOne).count();
         unsigned long long digest = 1469598103934665603ull;
         for (unsigned i = 0; i < hit.size(); ++i) {
             if (!hit[i]) continue;
@@ -2055,31 +2322,68 @@ void SurfaceCache::traceSun() {
     // 3. THE CARDS: inside a changed footprint, or captured this frame (their
     //    Depth is new) — pending; a pending card no CURRENT footprint reaches is
     //    retired instead (its term dropped, relit without it).
-    if (!changed.empty()) {
-        for (unsigned i = 0; i < mCards.size(); ++i) {
-            if (!landed(mCards[i])) continue;
-            const Footprint &cf = cardFpAt(i);
-            for (const Footprint &f : changed)
-                if (shades(f, cf)) { pend(mCards[i]); break; }
+    // Steps 3 and 3b search ONE grid, built for the movers' changed and current footprints together, only when one
+    // of them searches.
+    const bool canTrace = haveSun && bool(mMoverHooks.trace);
+    CardSunGrid *moverGrid = nullptr;
+    const auto moversGrid = [&]() -> CardSunGrid & {
+        if (!moverGrid) {
+            SearchBounds u;
+            for (const Footprint &f : changed) u.add(f);
+            if (canTrace) for (const Footprint &f : current) u.add(f);
+            moverGrid = &buildGrid(u);
         }
+        return *moverGrid;
+    };
+    if (!changed.empty()) {
+        std::vector<char> inside(mCards.size(), 0);
+        for (const Footprint &f : changed) searchInto(moversGrid(), inside, f);
+        if (mSunGridParity) {
+            std::vector<char> all(mCards.size(), 0);
+            for (unsigned i = 0; i < mCards.size(); ++i) {
+                if (!landed(mCards[i])) continue;
+                for (const Footprint &f : changed)
+                    if (shades(f, cardFpAt(i))) { all[i] = 1; break; }
+            }
+            parity(inside, all);
+        }
+        for (unsigned i = 0; i < inside.size(); ++i)
+            if (inside[i]) pend(mCards[i]);
     }
     for (unsigned idx : mBatch)
         if (!mMovers.empty() || mCards[idx].moverTraced) pend(mCards[idx]);
 
     std::vector<unsigned> trace;
-    const bool canTrace = haveSun && bool(mMoverHooks.trace);
     mMoverPending = 0u;
     mMoverPendingAge = 0u;
+    // WHICH LANDED CARDS A CURRENT MOVER'S FOOTPRINT REACHES — searched on the
+    // grid, only when a landed card waits on the movers' term. (The batch's
+    // pend just above makes no card landed or unlanded: the wait is read now.)
+    std::vector<char> reachedBy;
+    if (canTrace && !current.empty()) {
+        bool waiting = false;
+        for (const CardRec &c : mCards)
+            if (c.moverPending && landed(c)) { waiting = true; break; }
+        if (waiting) {
+            reachedBy.assign(mCards.size(), 0);
+            for (const Footprint &f : current) searchInto(moversGrid(), reachedBy, f);
+            if (mSunGridParity) {
+                std::vector<char> all(mCards.size(), 0);
+                for (unsigned i = 0; i < mCards.size(); ++i) {
+                    if (!landed(mCards[i])) continue;
+                    for (const Footprint &f : current)
+                        if (shades(f, cardFpAt(i))) { all[i] = 1; break; }
+                }
+                parity(reachedBy, all);
+            }
+        }
+    }
+    if (parityRan) ++mTraceSunCost.parityChecks;
     for (unsigned i = 0; i < mCards.size(); ++i) {
         CardRec &c = mCards[i];
         if (!c.moverPending) continue;
         if (!landed(c)) continue;   // waits for its capture
-        bool reached = false;
-        if (canTrace) {
-            const Footprint &cf = cardFpAt(i);
-            for (const Footprint &f : current)
-                if (shades(f, cf)) { reached = true; break; }
-        }
+        const bool reached = !reachedBy.empty() && reachedBy[i];
         if (!reached) {
             // Its still term is stale (a demoted mover): the movers' term stands
             // until the still trace lands, never a frame of neither.

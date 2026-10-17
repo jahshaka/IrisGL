@@ -141,6 +141,27 @@ constexpr unsigned kCaptureBatch = 8u;
 constexpr unsigned kCardPassIdentifier = 0x4A434300u;   // 'JCC\0'
 
 
+/// THE CARDS' SUN-SPACE GRID (ENGINE-UPGRADE-U4 stage 2; OgreSurfaceCache.cpp, "The cards' sun-space grid"): the
+/// landed cards bucketed by their footprint's rectangle in the plane normal to the sun, built per traceSun call, so a
+/// footprint (a moved caster's, a mover's) visits only the cards whose cells it covers. Scratch kept between calls.
+struct CardSunGrid {
+    float a0 = 0.0f, b0 = 0.0f, inv = 0.0f;   ///< the grid's origin in the sun frame and 1 / its cell side
+    float a1 = 0.0f, b1 = 0.0f;               ///< the filed cards' far bounds (a query beyond them meets no cell)
+    /// EVERY card's rectangle the grid was given (filed and wide), bounded — false where one is not finite: a search
+    /// outside it meets no card at all.
+    bool allBounded = false;
+    float ua0 = 0.0f, ua1 = 0.0f, ub0 = 0.0f, ub1 = 0.0f;
+    int nx = 0, ny = 0;
+    std::vector<unsigned> start;               ///< per cell, its first entry in `items` (nx * ny + 1)
+    std::vector<unsigned> items;               ///< card indices, cell by cell
+    std::vector<unsigned> wide;                ///< cards no cell list holds (a footprint wider than the cells' bound,
+                                               ///< or not finite): every query visits them
+    std::vector<unsigned> stamp;               ///< per card, the last query that visited it
+    unsigned query = 0u;
+    std::vector<float> scratch;
+    bool empty() const { return items.empty() && wide.empty(); }
+};
+
 /// ONE CARD, ALLOCATED AND (perhaps) CAPTURED.
 ///
 /// The rectangle is in WORLD space: the instance's transform is applied when
@@ -479,6 +500,12 @@ public:
         /// faster search must reproduce exactly.
         unsigned casterHits = 0u;
         unsigned long long casterHitDigest = 0ull;
+        /// THE GRID'S GUARD (the arm "cards.sunGridParity", gi.trace_sun_cost): calls checked against the exhaustive
+        /// search of every footprint against every card, and the cards whose result differed (0 is the law).
+        unsigned long long parityChecks = 0ull, parityMisses = 0ull;
+        /// ...of `micros`: the scene's moves frame (the hook: PhotonComponent::cardMoverFrame, the producer of the
+        /// moves and the movers) and step 1 (the still casters' search, their footprints included).
+        double hookMicros = 0.0, stepOneMicros = 0.0;
     };
     const TraceSunCost &traceSunCost() const { return mTraceSunCost; }
 
@@ -593,6 +620,12 @@ private:
     float mRayFootprintPerMetre = 0.0f;
     float mStillCpuMs = 0.0f;   ///< the still trace's CPU this frame (in captureMs with a batch)
     TraceSunCost mTraceSunCost;
+    CardSunGrid mSunGrid;
+    /// The arm "cards.sunGridParity" as the frame latched it (the owner sets it before each trace).
+    bool mSunGridParity = false;
+public:
+    void setSunGridParity(bool on) { mSunGridParity = on; }
+private:
     unsigned mStillTracedLastFrame = 0u, mStillTexelsLastFrame = 0u, mStillPending = 0u;
     unsigned long long mStillTraces = 0ull, mInvalidSun = 0ull, mCasterRetraces = 0ull;
     Ogre::UavBufferPacked *mGiBuffer = nullptr;

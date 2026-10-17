@@ -1880,6 +1880,7 @@ enum class ArmId : unsigned {
     InterpSerial,        ///< "interp.serial" — the free frames' interpolation on the frame's thread (the measuring arm)
     FakeRuntimePace,     ///< "vr.fakeRuntimePace" — ms: each free frame waits as a runtime's xrWaitFrame would (a test door, U3 decision 53)
     FakePresentBlock,    ///< "view.fakePresentBlock" — ms: a free frame blocks to that span after its publish, in place of a blocking present (a test door, U3 decision 65)
+    CardsSunGridParity,  ///< "cards.sunGridParity" — every sun trace's grid searches checked against the exhaustive search (the guard, U4 stage 2)
     Count
 };
 class ArmRegistry {

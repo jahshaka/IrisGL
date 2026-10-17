@@ -1198,6 +1198,11 @@ const ArmDef kArms[] = {
       "every free frame, after its publish at the record/swap split, blocks until N ms after its start, as a FIFO "
       "present would — the end-block shape of the render loop's order (the host's tick runs during the block). A test "
       "door." },
+    { "cards.sunGridParity", 0.0, 0.0, 1.0,
+      "THE SUN-SPACE GRID'S GUARD (ENGINE-UPGRADE-U4 stage 2, gi.trace_sun_cost): 1 = every sun trace's three grid "
+      "searches (the moved still casters, the movers' changed and current footprints) are repeated as the exhaustive "
+      "search of every footprint against every landed card, and every card whose answer differs is a MISS "
+      "(inspect::SceneEcho::traceSun().parityMisses). A test door: O(footprints x cards) a frame while on." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

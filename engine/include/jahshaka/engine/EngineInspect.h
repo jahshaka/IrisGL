@@ -66,6 +66,12 @@ public:
         /// per-card mask — the identity a faster search is held to.
         unsigned           casterHits = 0;
         unsigned long long casterHitDigest = 0;
+        /// THE GRID'S GUARD (the arm "cards.sunGridParity"): calls checked against the exhaustive search, and the
+        /// cards whose answer differed — 0 is the law.
+        unsigned long long parityChecks = 0, parityMisses = 0;
+        /// ...of `micros`: the scene's moves frame (the producer of the moves, PhotonComponent::cardMoverFrame) and
+        /// step 1 (the still casters' search, their footprints included).
+        double             hookMicros = 0.0, stepOneMicros = 0.0;
     };
     virtual TraceSun traceSun() const = 0;
 };

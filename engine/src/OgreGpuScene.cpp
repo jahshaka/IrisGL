@@ -1586,6 +1586,10 @@ inspect::SceneEcho::TraceSun OgreScene::traceSun() const {
         t.calls = k.calls;
         t.casterHits = k.casterHits;
         t.casterHitDigest = k.casterHitDigest;
+        t.parityChecks = k.parityChecks;
+        t.parityMisses = k.parityMisses;
+        t.hookMicros = k.hookMicros;
+        t.stepOneMicros = k.stepOneMicros;
     }
     return t;
 }
