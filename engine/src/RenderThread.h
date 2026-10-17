@@ -52,6 +52,8 @@ public:
     /// threads. Coalesced by name past kHostStageCoalesce entries so a slot nobody takes cannot grow without bound.
     void noteHostStage(const std::string &name, float ms);
     FrameSubmitStatus submitStatus() const;
+    /// One host request counted (FrameSubmitStatus::requests), under the slot's lock.
+    void noteRequest() { std::lock_guard<std::mutex> lock(mSlotLock); ++mSubmit.requests; }
     /// Runs `f(pending, any)` under the slot's lock — the engine's own game-side reads and purges of the pending
     /// record (a destroyed scene's or view's part, pendingGiConfiguration).
     template <class F> auto withPending(F &&f) {

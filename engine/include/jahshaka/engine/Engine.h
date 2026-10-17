@@ -2890,6 +2890,16 @@ public:
     /// `scene` null = the scene of the first enabled on-screen view. Works with
     /// the monitor off (it renders nothing and allocates nothing persistent) —
     /// the host takes one at the start of a capture and one at the end.
+    ///
+    /// ASKED, NEVER CALLED (FRAME-MONITOR-DOOR-1 stage 3): it walks Ogre — the
+    /// views, the scenes, the texture census, the compositor graph — so a host
+    /// takes it inside ONE `Engine::request` (between two frames on the render
+    /// thread); a direct call from the host trips the affinity assert under
+    /// JAH_DEBUG. Once per capture at each end, never on a per-tick path.
+    /// `frame` is the engine's frame counter when the request ran: the last
+    /// frame that CLOSED before it, numbered as MonitorRecord::frame — and every
+    /// field is read live, that frame's close included (it is not the published
+    /// snapshot, whose close-side fields are one frame behind in free-running).
     virtual bool captureSnapshot(EngineSnapshot &out, const std::string &label,
                                  Scene *scene = nullptr) const = 0;
 

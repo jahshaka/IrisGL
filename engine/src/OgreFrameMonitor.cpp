@@ -1468,11 +1468,14 @@ void OgreEngine::collectCompositorGraph(std::vector<CompositorWorkspaceInfo> &ou
 
 bool OgreEngine::captureSnapshot(EngineSnapshot &out, const std::string &label,
                                  Scene *scene) const {
-    EngineSideScope engineSide;   // a capture's reads are the engine's own (U3 stage 3: one request, the bundle)
+    // A HOST ENTRY THAT WALKS OGRE (FRAME-MONITOR-DOOR-1 stage 3): asked through ONE Engine::request (its scope makes
+    // the reads below the engine's own); called directly from the host it is counted and, under JAH_DEBUG with the
+    // render thread up, aborts on the affinity assert — the door is enforced, never trusted.
+    JAH_HOST_CALL("Engine::captureSnapshot");
     out = EngineSnapshot();
     out.label = label;
     out.atMs = monitor::nowMs();
-    out.frame = mShadowFrame;
+    out.frame = mShadowFrame;   // the last frame that closed before the request ran (MonitorRecord::frame's numbering)
     if (!mRoot) return false;
     JAH_TRY {
         // THE SCENE THE SNAPSHOT DESCRIBES: the caller's, or the first enabled

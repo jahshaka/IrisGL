@@ -2716,6 +2716,9 @@ void OgreEngine::post(Scene *scene, SceneMessage &&message) { mRenderThread.post
 // THE REQUEST DOOR (U3 stage 3): the question runs on the engine's side — its reads are the engine's own, never a
 // host's synchronous read — inline today; stage 4 moves it onto the render thread.
 void OgreEngine::request(std::function<void(Engine &)> question, std::function<void()> done) {
+    // COUNTED WHEN THE HOST ASKS (FRAME-MONITOR-DOOR-1): the door's own count, never a sync getter's (a request is a
+    // door — host.sync_getters' law stays 0); a request made on the engine's side (a fixture's nested one) is not.
+    if (question && detail::tlsEngineSide == 0) mRenderThread.noteRequest();
     // ANSWERED BETWEEN FRAMES ON THE RENDER THREAD (U3 stage 4b): the render thread runs one task at a time, so the
     // question never meets a frame; `done` runs on the asker's thread once it has its answer.
     // ...AFTER WHAT THE HOST ALREADY SENT (U3 stage 4a): a request is answered on the state the host's earlier calls

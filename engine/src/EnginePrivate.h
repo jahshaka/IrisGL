@@ -1969,7 +1969,9 @@ public:
 ///
 /// OWNED BY THE ENGINE, not by the FrameMonitor: the monitor object dies when a capture stops, and the stop's tail (the
 /// frames still waiting for their GPU samples, flushed) must outlive it until the host pops it. A new capture clears
-/// it (a tail nobody popped is the previous capture's). BOUNDED like the ring it replaces: records at kRingCapacity, the
+/// it (a tail nobody popped is the previous capture's) — so what a stop leaves, the events filed after the host's last
+/// pop included, waits there until the next pop or the next start (bounded, counted; Studio pops once after its stop).
+/// BOUNDED like the ring it replaces: records at kRingCapacity, the
 /// OLDEST dropped when full; events at kEventCapacity, the NEW one dropped — never a block; the monitor counts both
 /// (MonitorStatus::framesDropped / eventsDropped, published).
 class HandBack {

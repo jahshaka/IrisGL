@@ -8075,6 +8075,9 @@ struct FrameInput {
 struct FrameSubmitStatus {
     unsigned long long submitted = 0;     ///< submitFrame calls
     unsigned long long messagesPosted = 0;   ///< Engine::post calls (one per structural message, decision 35)
+    /// Engine::request calls the HOST made (off the engine's side; FRAME-MONITOR-DOOR-1): a request waits up to a frame
+    /// in free-running, so the per-tick path makes none — perf.capture_free_tick holds a capture's ticks to 0 here.
+    unsigned long long requests = 0;
     /// Scene parts MERGED into an earlier pending part of the same scene (field by field, the newest value wins) —
     /// every second submit for a scene before one hand-over counts, the host's several syncs a frame included.
     unsigned long long scenePartsMerged = 0;
