@@ -2821,23 +2821,31 @@ public:
     // the state of both GPU-timing off-switches.
     // -> Engine::published().monitor (U3 stage 2b).
 
-    /// Drains the frame ring into `out` (appending) and returns how many
-    /// records were moved. The host drains on its own tick; anything it does
-    /// not drain is overwritten, counted by `MonitorStatus::framesDropped`.
+    /// THE MONITOR'S DOOR (FRAME-MONITOR-DOOR-1): POPS every finished record
+    /// into `out` (appending, oldest first) and returns how many moved — 0 when
+    /// none is queued. A POP, NEVER A REQUEST: it touches only the engine's
+    /// hand-back queue, under its lock, and never waits on a frame, so it is
+    /// safe on a per-tick path in free-running (a request there waits for the
+    /// frame in flight while the next one pushes the next record — the measured
+    /// drain livelock). The host's call (any thread; Studio pops on the UI
+    /// thread). The queue holds the ring's size; a host that does not pop
+    /// loses the OLDEST, counted by `MonitorStatus::framesDropped`.
     ///
     /// TWO THINGS TO KNOW, both consequences of GPU timing:
     ///  * A frame is not published the instant it ends. GPU samples come back
     ///    when the GPU has finished the frame (at most Ogre's frames in flight
-    ///    + 1 later), so a record waits for them; drain in a loop, never
+    ///    + 1 later), so a record waits for them; pop across frames, never
     ///    "render one frame, expect one record".
-    ///  * STOPPING the monitor flushes everything still waiting, and the NEXT
-    ///    call to this returns it even though the monitor is off. That makes
-    ///    the natural host order — stop the capture, then drain — lossless. The
-    ///    call after that returns 0 and the storage is freed.
-    virtual unsigned takeMonitorRecords(std::vector<MonitorRecord> &out) = 0;
+    ///  * STOPPING the monitor flushes everything still waiting into the queue,
+    ///    and the NEXT pop returns it even though the monitor is off. That makes
+    ///    the natural host order — stop the capture, then pop — lossless. The
+    ///    pop after that returns 0; the storage goes with the pop.
+    virtual unsigned popMonitorRecords(std::vector<MonitorRecord> &out) = 0;
     /// The same for discrete events (GI rebuilds, atlas changes, compiles,
-    /// texture loads, VRAM flushes, device-lost, and the host's own).
-    virtual unsigned takeMonitorEvents(std::vector<MonitorEvent> &out) = 0;
+    /// texture loads, VRAM flushes, device-lost, and the host's own); the
+    /// queue holds kEventCapacity and a full one drops the NEW event, counted
+    /// by `MonitorStatus::eventsDropped`.
+    virtual unsigned popMonitorEvents(std::vector<MonitorEvent> &out) = 0;
     /// THE HOST'S HOOK. Page switches, UI-thread gaps, script marks, toast
     /// lifetimes — anything the host knows and the engine cannot. Ignored when
     /// the monitor is off, so a caller never has to check first. `frame` and

@@ -8362,7 +8362,7 @@ struct StreamingWork {
 };
 
 /// EVERYTHING ONE `renderOneFrame` DID. One of these per frame while a capture
-/// runs; the host drains them with `takeMonitorRecords` and writes them to
+/// runs; the host pops them with `popMonitorRecords` and writes them to
 /// `frames.jsonl`.
 struct MonitorRecord {
     unsigned long long frame = 0;    ///< the engine's monotonic frame counter

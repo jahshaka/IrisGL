@@ -1958,13 +1958,46 @@ public:
     bool mMarked = false;
 };
 
-/// THE MONITOR ITSELF: the ring of finished MonitorRecords, the frame being
-/// built, the event queue and the pass stack. One per process, owned by
-/// OgreEngine, created when the monitor goes on and destroyed when it goes off
-/// — which is what makes "off" cost nothing rather than cost little.
+/// THE MONITOR'S HAND-BACK (FRAME-MONITOR-DOOR-1): the finished records and the events, POPPED by the host — never a
+/// request. A SECOND DOOR OF THE RECORDER'S KIND (OgreView::harvestVideoFrames / popVideoFrame), NOT the exchange
+/// snapshot: the snapshot is a latest-value triple buffer the host latches; this is a bounded queue of items each read
+/// once, the render side pushing (a record at its retire — the frame's close, or the stop's flush; an event when the
+/// engine files it), the host popping under the one lock, and a pop never waits on a frame. Why it is not a request any
+/// more: a request waits for the frame in flight, and in free-running the next frame pushes the next record — a drain
+/// by request never found the queue empty (the measured livelock: 128 frame-waits per drain, the editor answering every
+/// 3.5 s during a capture; spikes/free-running-hang/diagnosis.md).
+///
+/// OWNED BY THE ENGINE, not by the FrameMonitor: the monitor object dies when a capture stops, and the stop's tail (the
+/// frames still waiting for their GPU samples, flushed) must outlive it until the host pops it. A new capture clears
+/// it (a tail nobody popped is the previous capture's). BOUNDED like the ring it replaces: records at kRingCapacity, the
+/// OLDEST dropped when full; events at kEventCapacity, the NEW one dropped — never a block; the monitor counts both
+/// (MonitorStatus::framesDropped / eventsDropped, published).
+class HandBack {
+public:
+    /// The render side: a finished record, oldest first. True when the queue was full and its oldest was dropped.
+    bool pushRecord(MonitorRecord &&r);
+    /// The render side: an event. False when the queue was full and this one was dropped.
+    bool pushEvent(MonitorEvent &&e);
+    /// The host: every queued record (events), oldest first, appended to `out`; the count. Never waits on a frame;
+    /// the storage goes with the pop.
+    unsigned popRecords(std::vector<MonitorRecord> &out);
+    unsigned popEvents(std::vector<MonitorEvent> &out);
+    unsigned records() const { std::lock_guard<std::mutex> l(mLock); return unsigned(mRecords.size()); }
+    unsigned events() const { std::lock_guard<std::mutex> l(mLock); return unsigned(mEvents.size()); }
+    /// A capture starts: what is queued is the previous capture's.
+    void clear();
+private:
+    mutable std::mutex        mLock;
+    std::deque<MonitorRecord> mRecords;
+    std::deque<MonitorEvent>  mEvents;
+};
+
+/// THE MONITOR ITSELF: the frame being built, the holding queue (frames waiting for their GPU samples) and the pass
+/// stack; what it finishes goes to the engine's HandBack. One per process, owned by OgreEngine, created when the
+/// monitor goes on and destroyed when it goes off — which is what makes "off" cost nothing rather than cost little.
 class FrameMonitor {
 public:
-    FrameMonitor();
+    explicit FrameMonitor(HandBack &out);
 
     // ---- the frame --------------------------------------------------------
     void beginFrame(unsigned long long frame, FrameCause cause, bool onscreen);
@@ -2139,10 +2172,6 @@ public:
     /// to the frame that is about to render it.
     void adoptPendingCacheWork();
 
-    // ---- the host drains ---------------------------------------------------
-    unsigned drainFrames(std::vector<MonitorRecord> &out);
-    unsigned drainEvents(std::vector<MonitorEvent> &out);
-
     // ---- the pass stack (PassListener's, kept here so it dies with a frame) -
     struct PassFrame {
         std::chrono::steady_clock::time_point start;
@@ -2174,8 +2203,8 @@ public:
     double *mStageChild = nullptr;
 
     // ---- status -------------------------------------------------------------
-    unsigned ringFrames() const { std::lock_guard<std::mutex> lock(mRingLock); return unsigned(mRing.size()); }
-    unsigned pendingEvents() const { return unsigned(mEvents.size()); }
+    unsigned ringFrames() const { return mOut.records(); }
+    unsigned pendingEvents() const { return mOut.events(); }
     unsigned long long framesRecorded() const { return mFramesRecorded; }
     unsigned long long framesDropped() const { return mFramesDropped; }
     /// GPU timing marks the query pool could not hold, since the monitor went
@@ -2207,12 +2236,8 @@ public:
 private:
     void push(MonitorRecord &&r);
 
-    /// THE RING IS THE HAND-BACK (ENGINE-UPGRADE-U3 stage 1): the frame pushes a finished record (render side), the
-    /// host drains (takeMonitorRecords, the document side) — the one structure both touch, so it is the one locked.
-    std::vector<MonitorRecord>  mRing;
-    unsigned                  mWrite = 0u;
-    mutable std::mutex        mRingLock;
-    std::vector<MonitorEvent> mEvents;
+    /// THE HAND-BACK (FRAME-MONITOR-DOOR-1): the engine's, where every finished record and event goes; the host pops it.
+    HandBack                 &mOut;
     std::vector<FrameStage>   mPendingHostStages;
     std::vector<CacheWork>    mPendingCacheWork;
     /// The GPU sample id of each pending row, parallel to `mPendingCacheWork`.
@@ -8056,8 +8081,8 @@ public:
     ValidationStatus validation() const override;
     const ArmRegistry &armRegistry() const { return mArms; }
     MonitorStatus monitorStatus() const;
-    unsigned takeMonitorRecords(std::vector<MonitorRecord> &out) override;
-    unsigned takeMonitorEvents(std::vector<MonitorEvent> &out) override;
+    unsigned popMonitorRecords(std::vector<MonitorRecord> &out) override;
+    unsigned popMonitorEvents(std::vector<MonitorEvent> &out) override;
     void noteMonitorEvent(const MonitorEvent &event) override;
     void noteHostStage(const std::string &name, float ms) override;
     /// An engine-internal request for the NEXT frame's cause (the VR warm-up): a record field for a host.
@@ -8431,6 +8456,10 @@ private:
     std::vector<OgreScene *>                 mShadowSceneScratch;
     OgreScene::ShadowCacheFrame              mShadowFrameScratch;
     std::vector<std::unique_ptr<OgreView>>  mViews;
+    /// THE MONITOR'S HAND-BACK (FRAME-MONITOR-DOOR-1; monitor::HandBack): the finished records and events, popped by
+    /// the host (popMonitorRecords / popMonitorEvents) — never a request. Declared BEFORE mMonitor, which holds a
+    /// reference to it: it outlives every capture (the stop's flushed tail waits here for its pop).
+    monitor::HandBack mMonitorOut;
     /// THE RENDER-LOOP MONITOR (OgreFrameMonitor.cpp). Held by pointer and
     /// NULL while the monitor is off — that is what "zero cost when off" means
     /// structurally: nothing to allocate, nothing to read, and every
@@ -8476,14 +8505,6 @@ private:
     unsigned mOomAtFrameWorkEnd = 0u;
     bool     mFrameWorkEnded = false;
     bool     mFrameThrewOom = false;
-    /// WHAT STOPPING A CAPTURE LEAVES BEHIND. Switching the monitor off flushes
-    /// the frames still waiting for their GPU samples (which arrive two frames
-    /// late) into here, so the host's usual "stop, then drain" order does not
-    /// silently lose the tail of every capture. The NEXT takeMonitorRecords moves
-    /// them out and frees the storage; until then MonitorStatus reports them as
-    /// `ringFrames` with a `ringCapacity` of 0, because the ring itself is
-    /// gone.
-    std::vector<MonitorRecord> mFinalRecords;
 };
 
 }  // namespace detail
