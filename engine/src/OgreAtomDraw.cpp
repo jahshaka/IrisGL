@@ -344,6 +344,11 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     if (rq == kRefractiveRenderQueue || db->getBlendblock()->isAutoTransparent() ||
         pbs->getTransparencyMode() == Ogre::HlmsPbsDatablock::Refractive)
         return AtomRoute::Blended;
+    // A CUTOUT IS ROUTED BY WHAT IT IS (MAIN-REDS-1 stage 2): alpha-tested, before the faces
+    // rule below. Its CASTER macroblock culls nothing by law (BISTRO-FIXES-3, applyPbr's last
+    // word: a thin card shadows from both sides) while its colour pass keeps its cull — that
+    // mismatch is the shadow's business, and tested first it filed every cutout as cullFront.
+    if (flags & kGpuAlphaTested) return AtomRoute::AlphaTested;
     // THE FACES (ATOM-TWO-SIDED-1): the id pass and the caster cut draw back-culled
     // (Ogre's default macroblock) or BOTH faces (CULL_NONE: the item's command rides
     // the list's two-sided range, kGpuTwoSided, drawn by the no-cull pipelines) — one
@@ -365,7 +370,6 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     // datablock (updateDescriptorSets -> flushRenderables), which the PBS change log
     // notes: the next drain re-composes the item and re-routes it.
     if (HlmsAtom::isBucketPending(db)) return AtomRoute::Pending;
-    if (flags & kGpuAlphaTested) return AtomRoute::AlphaTested;
     if (flags & kGpuSkinned) return AtomRoute::Skinned;
     // THE ROW IS SUBMESH 0's OF A TRIANGLE LIST: every mesh this engine builds has
     // one submesh (buildMeshV2 is the one createSubMesh a scene mesh meets), and a
