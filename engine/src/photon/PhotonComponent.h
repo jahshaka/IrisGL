@@ -449,6 +449,11 @@ public:
             double units = 0.0;                     ///< the whole slab's cost (the budget's units)
             size_t frames() const { return frameEnd.size(); }
         } scroll;
+        /// THE AGE OF WHAT THIS CASCADE OWES (CASCADE-DRAG-STARVE-1, the lead's decision 7): the writer
+        /// frame it became pending, or was last given a frame of work while it stayed pending (a scroll's
+        /// chunk frame, a rebuild an edit of the same frame keeps owed). The scheduler serves the OLDEST
+        /// first, so N pending cascades are each served within N frames - under a drag too. 0 = owes nothing.
+        unsigned long long pendingSince = 0;
         unsigned long long scrolls = 0;        ///< camera scrolls committed by the slab path
         unsigned long long scrollFrames = 0;   ///< frames spent building scrolls' chunks
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
@@ -1126,7 +1131,7 @@ private:
     void   endDragGesture();
     /// THE SCHEDULER, called once a frame from updateGiTracking with the
     /// authoritative camera. Re-quantises every cascade, queues the ones that
-    /// moved, and spends AT MOST ONE rebuild this frame, innermost first.
+    /// moved, and spends AT MOST ONE cascade's work this frame, the oldest owed first (ties: innermost).
     /// THE CASCADE STAGE, planned (the step test, the one re-voxelisation) and recorded.
     void planCascades(const Ogre::Vector3 &camPos, FrameWork &w);
     void recordCascades(const FrameWork &w);

@@ -5276,6 +5276,12 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
     // CASCADE 0'S FIELD FOLLOW, when owed, is paid first and spends the frame (recordCascades).
     w.follow = mIfdFollowOwed != 0;
     w.followReason = mIfdFollowReason;
+    // THE AGES (decision 7): a cascade that owes nothing has none; one the dirty path marked since the
+    // last frame (planFrame's markDirtyCascadesPending ran before this) is stamped now.
+    for (VctCascade &c : mVctCascades) {
+        if (!c.pending) c.pendingSince = 0;
+        else if (!c.pendingSince) c.pendingSince = giWriterFrame();
+    }
     for (VctCascade &c : mVctCascades) {
         const float cell = c.cell();
         const float step = c.step();
@@ -5336,7 +5342,7 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
             // and the work is the same one rebuild either way. The REASON,
             // though, is the edit's: a capture must not read "the camera did
             // this" for a frame an edit paid for (E0's B12/D5 in reverse).
-            if (!c.pending) c.pendingReason = GiStaleReason::Camera;
+            if (!c.pending) { c.pendingReason = GiStaleReason::Camera; c.pendingSince = giWriterFrame(); }
             c.pending = 1;
         }
     }
@@ -5362,11 +5368,11 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
         }
     }
 
-    // ---- 3. SPEND AT MOST ONE CASCADE'S WORK, INNERMOST FIRST ---------------
-    // The near field is what the user is looking at, so it is what gets the
-    // frame. A cascade that waits keeps showing its old, correctly-lit volume:
-    // the picture is never half-built, only slightly behind.
-    // THE ONE PIECE OF VOXEL WORK: the innermost pending cascade, unless the follow spent the frame
+    // ---- 3. SPEND AT MOST ONE CASCADE'S WORK, OLDEST FIRST ------------------
+    // Among cascades that became owed together the near field goes first (it is what the user is
+    // looking at); beyond that the oldest debt does, so none waits more than N frames. A cascade that
+    // waits keeps showing its old, correctly-lit volume: the picture is never half-built, only behind.
+    // THE ONE PIECE OF VOXEL WORK: the oldest pending cascade, unless the follow spent the frame
     // (every other pending cascade is deferred to a later frame).
     // A cascade whose first edit mark is THIS frame's waits for the frame's commit (editSince); and
     // no cascade re-voxelises while a material CONVERSION is owed (a new datablock: the gather would
@@ -5383,10 +5389,22 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
     // size's target holds it): a cascade whose size is busy waits, and the frame goes to the next.
     // A scroll step waits out a material refresh owed this frame (the store's rows are re-read in
     // the frame's graphics region, after this step), so its chunks never mix two versions of a row.
-    if (!w.follow && mVctPendingMaterialSlots.empty())
-        for (size_t i = 0; i < mVctCascades.size(); ++i) {
+    // THE PICK IS BY AGE (CASCADE-DRAG-STARVE-1, decision 7, measured by U4: a drag 7.5 m before the
+    // camera marked cascades 1-3 every frame and "innermost first" rebuilt cascade 1 119 times in 120
+    // frames, 2 and 3 never). The OLDEST owed work is served first (VctCascade::pendingSince), ties to
+    // the innermost - so with N cascades pending each is served within N frames of its mark, a scroll's
+    // chunks and an edit's rebuild alike; and a cascade served while it stays owed (a drag re-marks it
+    // every frame; a scroll in flight) is re-stamped, so it waits its turn behind the others.
+    if (!w.follow && mVctPendingMaterialSlots.empty()) {
+        // The candidates, oldest first (a stable sort keeps the innermost first among equals).
+        std::vector<size_t> order;
+        for (size_t i = 0; i < mVctCascades.size(); ++i)
+            if (mVctCascades[i].pending && mVctCascades[i].editSince != giWriterFrame()) order.push_back(i);
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            return mVctCascades[a].pendingSince < mVctCascades[b].pendingSince;
+        });
+        for (size_t i : order) {
             VctCascade &c = mVctCascades[i];
-            if (!c.pending || c.editSince == giWriterFrame()) continue;
             if (c.scroll.active) {
                 if (mVctMaterialRefreshOwed) continue;
                 w.rebuild = int(i);
@@ -5409,6 +5427,7 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
             w.rebuild = int(i);
             break;
         }
+    }
     w.spent = w.follow || w.rebuild >= 0;
 }
 
@@ -5461,6 +5480,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
                                     std::chrono::steady_clock::now() - t0).count());
             if (ok) {
                 ++c.scrollFrames;
+                c.pendingSince = giWriterFrame();   // served, still owed: behind the others (decision 7)
             } else {
                 row.setUnits(0);
                 abortScroll(i);
@@ -5471,7 +5491,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
                         ") - the scroll is dropped, the next frame plans it again, and a second "
                         "failure stands the cascade down until the camera moves again");
                 }
-                if (++c.failures >= 2u) c.pending = 0;
+                if (++c.failures >= 2u) { c.pending = 0; c.pendingSince = 0; }
             }
             spent = true;
             continue;
@@ -5530,7 +5550,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
                 staleTop = std::max(staleTop, (long long)i);   // ...and their light is not
             }
             spent = true;                          // the frame paid for it either way
-            if (++c.failures >= 2u) c.pending = 0; // ...otherwise `pending` stays set
+            if (++c.failures >= 2u) { c.pending = 0; c.pendingSince = 0; } // ...otherwise `pending` stays set
             continue;
         }
         c.failures = 0;
@@ -5542,8 +5562,12 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             // material slider every cascade would freeze - the stage-1 read's F3.)
             c.editSince = giWriterFrame();
             c.editLast = giWriterFrame();
+            c.pendingSince = giWriterFrame();     // served, still owed: behind the others (decision 7)
         } else {
             c.pending = 0;
+            // Owes nothing: the age goes with the debt (a mark later this frame starts a new one - the
+            // dirty path raises `pending` before the scheduler's own stamping can see it was clear).
+            c.pendingSince = 0;
             c.pendingReason = GiStaleReason::Camera;
             c.editSince = c.editLast = 0;
         }
