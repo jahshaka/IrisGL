@@ -1862,6 +1862,7 @@ enum class ArmId : unsigned {
     // per-frame / per-pass / per-build code.
     GiCascadeFault,      ///< "gi.cascadeFault" — cascade N's rebuild throws before its build (-1 = none)
     GiCascadeFaultPost,  ///< "gi.cascadeFaultPost" — cascade N's rebuild throws after its build (-1 = none)
+    GiScrollBudget,      ///< "gi.scrollBudgetMs" — a scroll's per-frame voxelisation budget in ms (0 = shipped)
     GiRebuildSettle,     ///< "gi.rebuildSettle" — the rebuild settle runs (0: off, the paired arm)
     GiFieldRays,         ///< "gi.fieldRays" — the field's rays per depth texel (0 = shipped)
     GiFieldSamples,      ///< "gi.fieldSamples" — the field's sample target (0 = shipped)

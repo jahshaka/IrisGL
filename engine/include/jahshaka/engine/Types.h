@@ -4388,6 +4388,14 @@ struct GiStatus {
         /// so owing two is the same as owing one. Non-zero only while the
         /// camera is outrunning the scheduler.
         int   pending = 0;
+        /// THE INCREMENTAL SCROLL (ENGINE-UPGRADE-U5 stage 1). A camera scroll keeps the voxels the
+        /// new box shares with the old one and voxelises only the entering slab, spread over frames
+        /// by a per-frame GPU budget; the cascade's placement moves when the slab is complete.
+        /// `scrolls` counts the scrolls committed that way (each is also one of `rebuilds`),
+        /// `scrollFrames` the frames spent building their slabs, `scrolling` a scroll in flight now.
+        unsigned long long scrolls = 0;
+        unsigned long long scrollFrames = 0;
+        bool  scrolling = false;
         /// THE READINGS BELOW ARE THE DEVICE'S OWN COUNTS (ATOM P4b, A5b §3): the
         /// gather that writes the voxeliser's records on the GPU counts as it
         /// writes, into a small readout collected without a stall and read here.
@@ -4552,11 +4560,14 @@ struct GiStatus {
     unsigned           settleStableFrames = 0;       ///< environment frames it has held still so far
     bool               gestureActive = false;        ///< the drained record's gesture (FrameInputScene::gesture)
     /// Scrolls where MORE THAN HALF of the cascade's volume was new — the
-    /// second DIRTY_ALL guard, counted rather than acted on in the whole-rebuild
-    /// arm. It is the reading that says whether an incremental (slab-shifting)
-    /// arm could save anything at this speed: a scroll that is already
-    /// majority-dirty has nothing to shift.
+    /// second DIRTY_ALL guard, counted: such a scroll still takes the slab path
+    /// (ENGINE-UPGRADE-U5), but its slab is most of the volume, so it is the
+    /// reading that says how much of the walking cost the copy is NOT saving.
     unsigned long long cascadeDirtyMajority = 0;
+    /// Incremental scrolls dropped before their commit (ENGINE-UPGRADE-U5 stage 1): an edit
+    /// reached the scroll's target box while its slab was being built, or a step threw. The
+    /// cascade then rebuilds (an edit of its live box) or scrolls again from where it stands.
+    unsigned long long cascadeScrollAborts = 0;
     /// THE SCREEN-PROBE GATHER's own reading (see GatherStatus). `on` false is
     /// the shipped state and every number below it is zero.
     GatherStatus gather;

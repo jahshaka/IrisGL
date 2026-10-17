@@ -9,9 +9,9 @@
             "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "Matrix_piece_all", "JahGeomRows_piece_all.any", "VoxelMerge_piece_cs.any", "Voxelizer_piece_cs.any"],
             "inform_shader_of_texture_data_change" : true,
 
-            "uav_units" : 11,
+            "uav_units" : 12,
 
-            "gl_tex_slot_start" : 11,
+            "gl_tex_slot_start" : 12,
 			
 			"params" :
             [
@@ -27,7 +27,8 @@
                 ["voxelCoveragePTex",		[6], "int"],
                 ["voxelCoverageNTex",		[7], "int"],
                 ["voxelPositionPTex",		[8], "int"],
-                ["voxelPositionNTex",		[9], "int"]
+                ["voxelPositionNTex",		[9], "int"],
+                ["voxelPositionSums",		[10], "int"]
 			],
 
 			"properties" :
@@ -228,6 +229,48 @@
             [
                 ["srcLevel",                [0], "int"],
                 ["dstLevel",                [0], "int"]
+            ]
+        },
+
+        "Photon/ScrollCopy" :
+        {
+            "threads_per_group" : [4, 4, 4],
+
+            "source" : "PhotonScrollCopy_cs",
+            "pieces" : ["CrossPlatformSettings_piece_all"],
+            "inform_shader_of_texture_data_change" : true,
+
+            "uav_units" : 2,
+
+            "params_glsl" :
+            [
+                ["srcVolume",               [0], "int"],
+                ["dstVolume",               [1], "int"]
+            ],
+
+            "properties" :
+            {
+                "copy_uint" : 0
+            }
+        },
+
+        "Photon/ScrollPosition" :
+        {
+            "threads_per_group" : [4, 4, 4],
+
+            "source" : "PhotonScrollPosition_cs",
+            "pieces" : ["CrossPlatformSettings_piece_all", "VoxelMerge_piece_cs.any"],
+            "inform_shader_of_texture_data_change" : true,
+
+            "uav_units" : 5,
+
+            "params_glsl" :
+            [
+                ["srcSums",                 [0], "int"],
+                ["srcPositionP",            [1], "int"],
+                ["srcPositionN",            [2], "int"],
+                ["dstPositionP",            [3], "int"],
+                ["dstPositionN",            [4], "int"]
             ]
         },
 

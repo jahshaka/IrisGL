@@ -108,6 +108,14 @@ layout( vulkan( ogre_u9 ) vk_comma @insertpiece(uav9_pf_type) )
 uniform restrict writeonly image3D voxelPositionPTex;
 layout( vulkan( ogre_u10 ) vk_comma @insertpiece(uav10_pf_type) )
 uniform restrict writeonly image3D voxelPositionNTex;
+// Jahshaka (ENGINE-UPGRADE-U5 stage 1): THE POSITION SUMS, kept per voxel - the merge's four packed
+// sums the surface position is resolved from (the coverage and the position-weighted coverage per
+// half, VoxelMerge_piece_cs.any), four R32 texels per voxel interleaved in Z (voxelCel.z x 4 + k:
+// 0 the coverage looking +a, 1 looking -a, 2 and 3 their position twins). The position is stored
+// ABSOLUTE in the volume's normalised coordinate, so a scrolled copy of a voxel must re-resolve it
+// at its new cell, and only these exact integers make that re-resolve the voxeliser's own bits.
+layout( vulkan( ogre_u11 ) vk_comma @insertpiece(uav11_pf_type) )
+uniform restrict writeonly uimage3D voxelPositionSums;
 
 
 
@@ -145,12 +153,14 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform float3 voxelOrigin;
 	uniform float3 voxelCellSize;
 	uniform uint3 voxelPixelOrigin;
+	uniform uint3 voxelPixelsToWrite;
 vulkan( }; )
 
 #define p_rangeIdx rangeIdx_pad.x
 #define p_voxelOrigin voxelOrigin
 #define p_voxelCellSize voxelCellSize
 #define p_voxelPixelOrigin voxelPixelOrigin
+#define p_voxelPixelsToWrite voxelPixelsToWrite
 
 //in uvec3 gl_NumWorkGroups;
 //in uvec3 gl_WorkGroupID;

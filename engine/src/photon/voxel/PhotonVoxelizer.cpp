@@ -187,6 +187,7 @@ namespace Ogre
         mNumOctantsZ( 0u )
     {
         memset( mComputeJobs, 0, sizeof( mComputeJobs ) );
+        mPositionSumsTex = 0;
         createComputeJobs();
 
         // A device with no buffer device addresses cannot voxelize at all any more:
@@ -470,6 +471,11 @@ namespace Ogre
             releaseMergeAccum( mTextureGpuManager, mMergeAccumTex );
             mMergeAccumTex = 0;
         }
+        if( mPositionSumsTex )
+        {
+            mTextureGpuManager->destroyTexture( mPositionSumsTex );
+            mPositionSumsTex = 0;
+        }
         PhotonVoxelizerSourceBase::destroyVoxelTextures();
     }
     //-------------------------------------------------------------------------
@@ -588,6 +594,21 @@ namespace Ogre
         if( mMergeAccumTex )
             releaseMergeAccum( mTextureGpuManager, mMergeAccumTex );
         mMergeAccumTex = acquireMergeAccum( mTextureGpuManager, mWidth, mHeight, mDepth );
+
+        // Jahshaka (ENGINE-UPGRADE-U5 stage 1): THE POSITION SUMS, this voxeliser's own (a scroll
+        // reads them after other cascades' builds have reused the shared accumulator above).
+        if( !mPositionSumsTex )
+        {
+            mPositionSumsTex = mTextureGpuManager->createTexture(
+                "VctVoxelizer" + StringConverter::toString( getId() ) + "/PositionSums",
+                GpuPageOutStrategy::Discard, TextureFlags::NotTexture | TextureFlags::Uav,
+                TextureTypes::Type3D );
+        }
+        mPositionSumsTex->scheduleTransitionTo( GpuResidency::OnStorage );
+        mPositionSumsTex->setPixelFormat( PFG_R32_UINT );
+        mPositionSumsTex->setResolution( mWidth, mHeight, mDepth * 4u );
+        mPositionSumsTex->setNumMipmaps( 1u );
+        mPositionSumsTex->scheduleTransitionTo( GpuResidency::Resident );
 
         // Jahshaka (PHOTON-VOXEL-4): THE CHAIN STOPS WHERE THE SHORTEST AXIS REACHES ONE TEXEL.
         // A cell is a cube and every level halves every axis, so every texel stays a cube -
@@ -720,6 +741,7 @@ namespace Ogre
         mComputeTools->prepareForUavClear( mResourceTransitions, mAccumValVox );
         // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the sums start at zero, every build.
         mComputeTools->prepareForUavClear( mResourceTransitions, mMergeAccumTex );
+        mComputeTools->prepareForUavClear( mResourceTransitions, mPositionSumsTex );
         for( size_t h = 0u; h < 2u; ++h )
         {
             mComputeTools->prepareForUavClear( mResourceTransitions, mCoverageVox[h] );
@@ -732,6 +754,7 @@ namespace Ogre
         jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mNormalVox, fClearNormals );
         jahshaka::engine::detail::photonClearUavUint( mComputeTools, mAccumValVox, uClearValue );
         jahshaka::engine::detail::photonClearUavUint( mComputeTools, mMergeAccumTex, uClearValue );
+        jahshaka::engine::detail::photonClearUavUint( mComputeTools, mPositionSumsTex, uClearValue );
         for( size_t h = 0u; h < 2u; ++h )
         {
             jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mCoverageVox[h], fClearValue );
@@ -811,6 +834,284 @@ namespace Ogre
         job->clearTexBuffers();
     }
     //-------------------------------------------------------------------------
+    PhotonVoxelizer::VolumeSet PhotonVoxelizer::liveVolumes() const
+    {
+        VolumeSet v;
+        v.albedo = mAlbedoVox;
+        v.emissive = mEmissiveVox;
+        v.normal = mNormalVox;
+        v.accumVal = mAccumValVox;
+        for( size_t h = 0u; h < 2u; ++h )
+        {
+            v.coverage[h] = mCoverageVox[h];
+            v.position[h] = mPositionVox[h];
+        }
+        v.positionSums = mPositionSumsTex;
+        return v;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelizer::bindVolumes( const VolumeSet &v, bool hasTypedUavs )
+    {
+        for( size_t i = 0; i < sizeof( mComputeJobs ) / sizeof( mComputeJobs[0] ); ++i )
+        {
+            // THE GEOMETRY TABLE, the same for every variant (the format is a field of
+            // a row, not a permutation).
+            DescriptorSetUav::BufferSlot bufferSlot( DescriptorSetUav::BufferSlot::makeEmpty() );
+            bufferSlot.buffer = mGeometryBuffer;
+            bufferSlot.access = ResourceAccess::Read;
+            mComputeJobs[i]->_setUavBuffer( 0, bufferSlot );
+
+            // THE RANGES (U1): each dispatch's (start, count) into the records, written
+            // by the host's gather on the device. Beside the geometry table and NOT
+            // after the images: Ogre's compute root layout packs a job's UAV buffers
+            // and UAV textures as two contiguous ranges (HlmsComputeJob::
+            // setupRootLayout), so a buffer after the images would leave the images'
+            // bindings undeclared. The shader's instance LOOP BOUND comes
+            // from here - which is all the count needs to be, because the dispatch's
+            // thread count is the octant's and never the instance count's.
+            bufferSlot.buffer = mRanges;
+            bufferSlot.access = ResourceAccess::Read;
+            mComputeJobs[i]->_setUavBuffer( 1, bufferSlot );
+
+            DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+            uavSlot.access = ResourceAccess::ReadWrite;
+
+            uavSlot.texture = v.albedo;
+            if( hasTypedUavs )
+                uavSlot.pixelFormat = v.albedo->getPixelFormat();
+            else
+                uavSlot.pixelFormat = PFG_R32_UINT;
+            uavSlot.access = ResourceAccess::ReadWrite;
+            mComputeJobs[i]->_setUavTexture( 2, uavSlot );
+
+            uavSlot.texture = v.normal;
+            if( hasTypedUavs )
+                uavSlot.pixelFormat = v.normal->getPixelFormat();
+            else
+                uavSlot.pixelFormat = PFG_R32_UINT;
+            uavSlot.access = ResourceAccess::ReadWrite;
+            mComputeJobs[i]->_setUavTexture( 3, uavSlot );
+
+            uavSlot.texture = v.emissive;
+            if( hasTypedUavs )
+                uavSlot.pixelFormat = v.emissive->getPixelFormat();
+            else
+                uavSlot.pixelFormat = PFG_R32_UINT;
+            uavSlot.access = ResourceAccess::ReadWrite;
+            mComputeJobs[i]->_setUavTexture( 4, uavSlot );
+
+            // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): THIS SLOT WAS THE TRIANGLE COUNTER and is now the
+            // per-voxel INTEGER ACCUMULATOR the merge sums into (the count rides in
+            // it). Same slot, same uimage3D, so this job's binding shape — and the
+            // Vulkan root layout Ogre derives from it — is exactly the pin's. That
+            // is not cosmetic: a separate VCT/VoxelResolve compute job was tried
+            // first and corrupted the descriptor set of the job dispatched after it
+            // (VUID-VkWriteDescriptorSet-descriptorType-00319 on LightInjection's
+            // `lightVoxel`, then VK_ERROR_DEVICE_LOST on the Showroom samples).
+            uavSlot.texture = v.accumVal;
+            uavSlot.pixelFormat = v.accumVal->getPixelFormat();
+            uavSlot.access = ResourceAccess::ReadWrite;
+            mComputeJobs[i]->_setUavTexture( 5, uavSlot );
+
+            // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the per-voxel INTEGER ACCUMULATOR the merge
+            // sums into (R32_UINT, thirteen texels per voxel — see
+            // VoxelMerge_piece_cs.any for why it is not RGBA32_UINT).
+            uavSlot.texture = mMergeAccumTex;
+            uavSlot.pixelFormat = mMergeAccumTex->getPixelFormat();
+            uavSlot.access = ResourceAccess::ReadWrite;
+            mComputeJobs[i]->_setUavTexture( 6, uavSlot );
+
+            // Jahshaka (PHOTON-VOXEL-3/-4): the coverage per half-axis (7, 8) and the
+            // surface position per half (9, 10) the resolve writes.
+            for( size_t h = 0u; h < 2u; ++h )
+            {
+                uavSlot.texture = v.coverage[h];
+                uavSlot.pixelFormat = v.coverage[h]->getPixelFormat();
+                uavSlot.access = ResourceAccess::Write;
+                mComputeJobs[i]->_setUavTexture( uint8( 7u + h ), uavSlot );
+                uavSlot.texture = v.position[h];
+                uavSlot.pixelFormat = v.position[h]->getPixelFormat();
+                uavSlot.access = ResourceAccess::Write;
+                mComputeJobs[i]->_setUavTexture( uint8( 9u + h ), uavSlot );
+            }
+
+            // Jahshaka (ENGINE-UPGRADE-U5 stage 1): the position sums (11).
+            uavSlot.texture = v.positionSums;
+            uavSlot.pixelFormat = v.positionSums->getPixelFormat();
+            uavSlot.access = ResourceAccess::Write;
+            mComputeJobs[i]->_setUavTexture( 11u, uavSlot );
+
+            DescriptorSetTexture2::BufferSlot texBufSlot(
+                DescriptorSetTexture2::BufferSlot::makeEmpty() );
+            texBufSlot.buffer = mRecordsAsTex;
+            mComputeJobs[i]->setTexBuffer( 0, texBufSlot );
+        }
+
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelizer::dispatchOctants()
+    {
+        const uint32 numBuckets = static_cast<uint32>( mVctMaterial->getNumBuckets() );
+        HlmsCompute *hlmsCompute = mHlmsManager->getComputeHlms();
+        mLastDispatchCount = 0u;
+
+        const uint32 *threadsPerGroup = mComputeJobs[0]->getThreadsPerGroup();
+
+        ShaderParams::Param paramRange;
+        ShaderParams::Param paramVoxelOrigin;
+        ShaderParams::Param paramVoxelCellSize;
+        ShaderParams::Param paramVoxelPixelOrigin;
+        ShaderParams::Param paramPixelsToWrite;
+
+        paramRange.name = "rangeIdx_pad";
+        paramVoxelOrigin.name = "voxelOrigin";
+        paramVoxelCellSize.name = "voxelCellSize";
+        paramVoxelPixelOrigin.name = "voxelPixelOrigin";
+        paramPixelsToWrite.name = "voxelPixelsToWrite";
+
+        paramVoxelCellSize.setManualValue( getVoxelCellSize() );
+
+        OgreProfileGpuBegin( "VCT Voxelization Jobs" );
+
+        // ONE DISPATCH PER (octant, bucket), where a bucket is one of the STORE's
+        // material pools. The order is the store's bucket order, which is a stable
+        // order; fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065)'s order-independent merge means it decides nothing about
+        // the voxels anyway.
+        const uint32 numOctants = static_cast<uint32>( mOctants.size() );
+        for( uint32 octantIdx = 0u; octantIdx < numOctants; ++octantIdx )
+        {
+            const Octant &octant = mOctants[octantIdx];
+            for( uint32 bucketIdx = 0u; bucketIdx < numBuckets; ++bucketIdx )
+            {
+                const bool hasDiffuse = mVctMaterial->getBucketHasDiffuse( bucketIdx );
+                const bool hasEmissive = mVctMaterial->getBucketHasEmissive( bucketIdx );
+                uint32 variant = 0u;
+                if( hasDiffuse )
+                    variant |= PhotonVoxelizerJobSetting::HasDiffuseTex;
+                if( hasEmissive )
+                    variant |= PhotonVoxelizerJobSetting::HasEmissiveTex;
+                HlmsComputeJob *job = mComputeJobs[variant];
+
+                // ROUNDED UP, with the bounds guard writing exactly the octant (ENGINE-UPGRADE-U5
+                // stage 1): a scroll's slab is the step in cells, which is no multiple of four.
+                job->setNumThreadGroups(
+                    std::max( 1u, ( octant.width + threadsPerGroup[0] - 1u ) / threadsPerGroup[0] ),
+                    std::max( 1u, ( octant.height + threadsPerGroup[1] - 1u ) / threadsPerGroup[1] ),
+                    std::max( 1u, ( octant.depth + threadsPerGroup[2] - 1u ) / threadsPerGroup[2] ) );
+
+                job->setConstBuffer( 0, mVctMaterial->getBucketBuffer( bucketIdx ) );
+
+                if( variant )
+                {
+                    DescriptorSetTexture2::TextureSlot texSlot(
+                        DescriptorSetTexture2::TextureSlot::makeEmpty() );
+                    texSlot.texture = mVctMaterial->getTexturePool();
+                    HlmsSamplerblock samplerblock;
+                    samplerblock.setAddressingMode( TAM_WRAP );
+                    job->setTexture( 1u, texSlot, &samplerblock );
+                }
+
+                const uint32 range[2] = { rangeIndex( octantIdx, bucketIdx, numBuckets ), 0u };
+                const uint32 voxelPixelOrigin[3] = { octant.x, octant.y, octant.z };
+
+                paramRange.setManualValue( range, 2u );
+                paramVoxelOrigin.setManualValue( octant.region.getMinimum() );
+                paramVoxelPixelOrigin.setManualValue( voxelPixelOrigin, 3u );
+                const uint32 pixelsToWrite[3] = { octant.width, octant.height, octant.depth };
+                paramPixelsToWrite.setManualValue( pixelsToWrite, 3u );
+
+                ShaderParams &shaderParams = job->getShaderParams( "default" );
+                shaderParams.mParams.clear();
+                shaderParams.mParams.push_back( paramRange );
+                shaderParams.mParams.push_back( paramVoxelOrigin );
+                shaderParams.mParams.push_back( paramVoxelCellSize );
+                shaderParams.mParams.push_back( paramVoxelPixelOrigin );
+                shaderParams.mParams.push_back( paramPixelsToWrite );
+                shaderParams.setDirty();
+
+                jahshaka::engine::detail::photonDispatch( hlmsCompute, job, mRenderSystem );
+                ++mLastDispatchCount;
+            }
+        }
+
+        OgreProfileGpuEnd( "VCT Voxelization Jobs" );
+
+        // The dispatches are recorded; the host's buffers may be grown before the next
+        // build, so nothing of theirs stays bound in the shared jobs.
+        clearComputeJobResources();
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelizer::setChunkOctants( const CellBox *chunks, size_t count,
+                                           const Vector3 &targetOrigin )
+    {
+        OGRE_ASSERT_LOW( count > 0u && count <= 8u );
+        // THE SAME ARITHMETIC AS A WHOLE BUILD'S, so a chunk's voxels are the whole build's bits:
+        // a voxel's corner is origin + cell x id in the shader, and with the chunk's origin at
+        // targetOrigin + cell x lo every term is an exact multiple of a dyadic cell (the shipped
+        // tables' cells all are) - the same float as targetOrigin + cell x ( lo + id ).
+        const Vector3 cell = getVoxelCellSize();
+        mOctants.clear();
+        mOctants.reserve( count );
+        for( size_t i = 0u; i < count; ++i )
+        {
+            const CellBox &c = chunks[i];
+            Octant octant;
+            octant.x = c.x;
+            octant.y = c.y;
+            octant.z = c.z;
+            octant.width = c.w;
+            octant.height = c.h;
+            octant.depth = c.d;
+            const Vector3 lo = targetOrigin + cell * Vector3( Real( c.x ), Real( c.y ), Real( c.z ) );
+            const Vector3 hi = targetOrigin + cell * Vector3( Real( c.x + c.w ), Real( c.y + c.h ),
+                                                              Real( c.z + c.d ) );
+            octant.region.setExtents( lo, hi );
+            mOctants.push_back( octant );
+        }
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelizer::restoreOctants()
+    {
+        if( mNumOctantsX )
+            dividideOctants( mNumOctantsX, mNumOctantsY, mNumOctantsZ );
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelizer::buildChunks( const VolumeSet &target )
+    {
+        OgreProfile( "PhotonVoxelizer::buildChunks" );
+        OgreProfileGpuBegin( "VCT scroll chunks" );
+        OGRE_ASSERT_LOW( !mOctants.empty() );
+        mRenderSystem->endRenderPassDescriptor();
+        createVoxelTextures();   // a no-op on a built voxeliser: the scroll follows a whole build
+        const uint32 numBuckets =
+            mVctMaterial ? static_cast<uint32>( mVctMaterial->getNumBuckets() ) : 0u;
+        // NOTHING TO VOXELISE: the chunks' cells stay as the scroll's begin cleared them - the
+        // honest empty picture, as build() leaves it.
+        if( !mGeometryBuffer || !mRecords || !mRecordsAsTex || !mRanges || !numBuckets )
+        {
+            mLastDispatchCount = 0u;
+            OgreProfileGpuEnd( "VCT scroll chunks" );
+            return;
+        }
+        const bool hasTypedUavs = mRenderSystem->getCapabilities()->hasCapability( RSC_TYPED_UAV_LOADS );
+        bindVolumes( target, hasTypedUavs );
+        // THE MERGE'S SUMS START AT ZERO for this build, as clearVoxels() starts them for a whole
+        // one: the accumulator is scratch of ONE build, shared by every voxeliser of this size.
+        uint32 uClearValue[4] = { 0u, 0u, 0u, 0u };
+        mResourceTransitions.clear();
+        mComputeTools->prepareForUavClear( mResourceTransitions, mMergeAccumTex );
+        mRenderSystem->executeResourceTransition( mResourceTransitions );
+        jahshaka::engine::detail::photonClearUavUint( mComputeTools, mMergeAccumTex, uClearValue );
+        dispatchOctants();
+        OgreProfileGpuEnd( "VCT scroll chunks" );
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelizer::finishScroll( const Aabb &newRegion )
+    {
+        setRegionToVoxelize( newRegion );
+        generateMips();
+    }
+    //-------------------------------------------------------------------------
     void PhotonVoxelizer::build( SceneManager *sceneManager )
     {
         // The scene manager is no longer needed here: build() converts no material (the
@@ -845,176 +1146,10 @@ namespace Ogre
         }
 
         const bool hasTypedUavs = mRenderSystem->getCapabilities()->hasCapability( RSC_TYPED_UAV_LOADS );
+        bindVolumes( liveVolumes(), hasTypedUavs );
 
-        for( size_t i = 0; i < sizeof( mComputeJobs ) / sizeof( mComputeJobs[0] ); ++i )
-        {
-            // THE GEOMETRY TABLE, the same for every variant (the format is a field of
-            // a row, not a permutation).
-            DescriptorSetUav::BufferSlot bufferSlot( DescriptorSetUav::BufferSlot::makeEmpty() );
-            bufferSlot.buffer = mGeometryBuffer;
-            bufferSlot.access = ResourceAccess::Read;
-            mComputeJobs[i]->_setUavBuffer( 0, bufferSlot );
-
-            // THE RANGES (U1): each dispatch's (start, count) into the records, written
-            // by the host's gather on the device. Beside the geometry table and NOT
-            // after the images: Ogre's compute root layout packs a job's UAV buffers
-            // and UAV textures as two contiguous ranges (HlmsComputeJob::
-            // setupRootLayout), so a buffer after the images would leave the images'
-            // bindings undeclared. The shader's instance LOOP BOUND comes
-            // from here - which is all the count needs to be, because the dispatch's
-            // thread count is the octant's and never the instance count's.
-            bufferSlot.buffer = mRanges;
-            bufferSlot.access = ResourceAccess::Read;
-            mComputeJobs[i]->_setUavBuffer( 1, bufferSlot );
-
-            DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
-            uavSlot.access = ResourceAccess::ReadWrite;
-
-            uavSlot.texture = mAlbedoVox;
-            if( hasTypedUavs )
-                uavSlot.pixelFormat = mAlbedoVox->getPixelFormat();
-            else
-                uavSlot.pixelFormat = PFG_R32_UINT;
-            uavSlot.access = ResourceAccess::ReadWrite;
-            mComputeJobs[i]->_setUavTexture( 2, uavSlot );
-
-            uavSlot.texture = mNormalVox;
-            if( hasTypedUavs )
-                uavSlot.pixelFormat = mNormalVox->getPixelFormat();
-            else
-                uavSlot.pixelFormat = PFG_R32_UINT;
-            uavSlot.access = ResourceAccess::ReadWrite;
-            mComputeJobs[i]->_setUavTexture( 3, uavSlot );
-
-            uavSlot.texture = mEmissiveVox;
-            if( hasTypedUavs )
-                uavSlot.pixelFormat = mEmissiveVox->getPixelFormat();
-            else
-                uavSlot.pixelFormat = PFG_R32_UINT;
-            uavSlot.access = ResourceAccess::ReadWrite;
-            mComputeJobs[i]->_setUavTexture( 4, uavSlot );
-
-            // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): THIS SLOT WAS THE TRIANGLE COUNTER and is now the
-            // per-voxel INTEGER ACCUMULATOR the merge sums into (the count rides in
-            // it). Same slot, same uimage3D, so this job's binding shape — and the
-            // Vulkan root layout Ogre derives from it — is exactly the pin's. That
-            // is not cosmetic: a separate VCT/VoxelResolve compute job was tried
-            // first and corrupted the descriptor set of the job dispatched after it
-            // (VUID-VkWriteDescriptorSet-descriptorType-00319 on LightInjection's
-            // `lightVoxel`, then VK_ERROR_DEVICE_LOST on the Showroom samples).
-            uavSlot.texture = mAccumValVox;
-            uavSlot.pixelFormat = mAccumValVox->getPixelFormat();
-            uavSlot.access = ResourceAccess::ReadWrite;
-            mComputeJobs[i]->_setUavTexture( 5, uavSlot );
-
-            // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the per-voxel INTEGER ACCUMULATOR the merge
-            // sums into (R32_UINT, thirteen texels per voxel — see
-            // VoxelMerge_piece_cs.any for why it is not RGBA32_UINT).
-            uavSlot.texture = mMergeAccumTex;
-            uavSlot.pixelFormat = mMergeAccumTex->getPixelFormat();
-            uavSlot.access = ResourceAccess::ReadWrite;
-            mComputeJobs[i]->_setUavTexture( 6, uavSlot );
-
-            // Jahshaka (PHOTON-VOXEL-3/-4): the coverage per half-axis (7, 8) and the
-            // surface position per half (9, 10) the resolve writes.
-            for( size_t h = 0u; h < 2u; ++h )
-            {
-                uavSlot.texture = mCoverageVox[h];
-                uavSlot.pixelFormat = mCoverageVox[h]->getPixelFormat();
-                uavSlot.access = ResourceAccess::Write;
-                mComputeJobs[i]->_setUavTexture( uint8( 7u + h ), uavSlot );
-                uavSlot.texture = mPositionVox[h];
-                uavSlot.pixelFormat = mPositionVox[h]->getPixelFormat();
-                uavSlot.access = ResourceAccess::Write;
-                mComputeJobs[i]->_setUavTexture( uint8( 9u + h ), uavSlot );
-            }
-
-            DescriptorSetTexture2::BufferSlot texBufSlot(
-                DescriptorSetTexture2::BufferSlot::makeEmpty() );
-            texBufSlot.buffer = mRecordsAsTex;
-            mComputeJobs[i]->setTexBuffer( 0, texBufSlot );
-        }
-
-        HlmsCompute *hlmsCompute = mHlmsManager->getComputeHlms();
         clearVoxels();
-        mLastDispatchCount = 0u;
-
-        const uint32 *threadsPerGroup = mComputeJobs[0]->getThreadsPerGroup();
-
-        ShaderParams::Param paramRange;
-        ShaderParams::Param paramVoxelOrigin;
-        ShaderParams::Param paramVoxelCellSize;
-        ShaderParams::Param paramVoxelPixelOrigin;
-
-        paramRange.name = "rangeIdx_pad";
-        paramVoxelOrigin.name = "voxelOrigin";
-        paramVoxelCellSize.name = "voxelCellSize";
-        paramVoxelPixelOrigin.name = "voxelPixelOrigin";
-
-        paramVoxelCellSize.setManualValue( getVoxelCellSize() );
-
-        OgreProfileGpuBegin( "VCT Voxelization Jobs" );
-
-        // ONE DISPATCH PER (octant, bucket), where a bucket is one of the STORE's
-        // material pools. The order is the store's bucket order, which is a stable
-        // order; fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065)'s order-independent merge means it decides nothing about
-        // the voxels anyway.
-        const uint32 numOctants = static_cast<uint32>( mOctants.size() );
-        for( uint32 octantIdx = 0u; octantIdx < numOctants; ++octantIdx )
-        {
-            const Octant &octant = mOctants[octantIdx];
-            for( uint32 bucketIdx = 0u; bucketIdx < numBuckets; ++bucketIdx )
-            {
-                const bool hasDiffuse = mVctMaterial->getBucketHasDiffuse( bucketIdx );
-                const bool hasEmissive = mVctMaterial->getBucketHasEmissive( bucketIdx );
-                uint32 variant = 0u;
-                if( hasDiffuse )
-                    variant |= PhotonVoxelizerJobSetting::HasDiffuseTex;
-                if( hasEmissive )
-                    variant |= PhotonVoxelizerJobSetting::HasEmissiveTex;
-                HlmsComputeJob *job = mComputeJobs[variant];
-
-                job->setNumThreadGroups( std::max( 1u, octant.width / threadsPerGroup[0] ),
-                                         std::max( 1u, octant.height / threadsPerGroup[1] ),
-                                         std::max( 1u, octant.depth / threadsPerGroup[2] ) );
-
-                job->setConstBuffer( 0, mVctMaterial->getBucketBuffer( bucketIdx ) );
-
-                if( variant )
-                {
-                    DescriptorSetTexture2::TextureSlot texSlot(
-                        DescriptorSetTexture2::TextureSlot::makeEmpty() );
-                    texSlot.texture = mVctMaterial->getTexturePool();
-                    HlmsSamplerblock samplerblock;
-                    samplerblock.setAddressingMode( TAM_WRAP );
-                    job->setTexture( 1u, texSlot, &samplerblock );
-                }
-
-                const uint32 range[2] = { rangeIndex( octantIdx, bucketIdx, numBuckets ), 0u };
-                const uint32 voxelPixelOrigin[3] = { octant.x, octant.y, octant.z };
-
-                paramRange.setManualValue( range, 2u );
-                paramVoxelOrigin.setManualValue( octant.region.getMinimum() );
-                paramVoxelPixelOrigin.setManualValue( voxelPixelOrigin, 3u );
-
-                ShaderParams &shaderParams = job->getShaderParams( "default" );
-                shaderParams.mParams.clear();
-                shaderParams.mParams.push_back( paramRange );
-                shaderParams.mParams.push_back( paramVoxelOrigin );
-                shaderParams.mParams.push_back( paramVoxelCellSize );
-                shaderParams.mParams.push_back( paramVoxelPixelOrigin );
-                shaderParams.setDirty();
-
-                jahshaka::engine::detail::photonDispatch( hlmsCompute, job, mRenderSystem );
-                ++mLastDispatchCount;
-            }
-        }
-
-        OgreProfileGpuEnd( "VCT Voxelization Jobs" );
-
-        // The dispatches are recorded; the host's buffers may be grown before the next
-        // build, so nothing of theirs stays bound in the shared jobs.
-        clearComputeJobResources();
+        dispatchOctants();
 
         // Jahshaka (ENGINE-UPGRADE-ASYNC-3 stage 1): THE COUNT VOLUME STAYS RESIDENT, like the merge
         // accumulator beside it. Upstream returned it to storage after every build and made it

@@ -76,6 +76,8 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelizer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonMipChain.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonMipChain.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelScroll.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelScroll.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelMaterial.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelMaterial.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelLighting.h

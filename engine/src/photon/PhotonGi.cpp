@@ -19,6 +19,7 @@
 #include "photon/voxel/PhotonPassBinding.h"
 #include "SurfaceCache.h"   // SURFACE-CACHE phase 2: giStatus copies the Component's counters
 #include "photon/voxel/PhotonVoxelMaterial.h"
+#include "photon/voxel/PhotonVoxelScroll.h"
 
 #include <algorithm>
 #include <cassert>
@@ -35,6 +36,10 @@
 #include <OgreHlmsAsyncCompiler.h>
 #include <OgreBitwise.h>
 #include <OgrePixelFormatGpuUtils.h>
+#include <OgreMesh2.h>
+#include <OgreSubMesh2.h>
+#include <Vao/OgreIndexBufferPacked.h>
+#include <Vao/OgreVertexArrayObject.h>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -208,6 +213,17 @@ unsigned PhotonComponent::countGiItems() const {
 /// region and brought the scene graph current.
 bool PhotonComponent::gatherAndBuild(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *voxelizer,
                                const VoxelGatherInputs &in) {
+    if (!gatherFeed(feed, voxelizer, in)) return false;
+    voxelizer->build(mSceneMgr);
+    return true;
+}
+
+/// THE GATHER ALONE (ENGINE-UPGRADE-U5 stage 1): what gatherAndBuild does before the build - the
+/// inputs prepared in a graphics region, the records written for the voxeliser's octants - so a
+/// scroll's chunks (their octants are the chunks) and its census (the whole new box) gather
+/// exactly as a whole build does.
+bool PhotonComponent::gatherFeed(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *voxelizer,
+                                 const VoxelGatherInputs &in) {
     if (!voxelizer) return false;
     if (!inComputeRegion()) {
         // A GRAPHICS-REGION BUILD (an arm build, a verb-time build): in order, so the inputs are
@@ -246,7 +262,6 @@ bool PhotonComponent::gatherAndBuild(detail::VoxelFeed &feed, Ogre::PhotonVoxeli
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka GI: the voxel gather did not run (" + mError +
             ") - the volume builds empty", Ogre::LML_CRITICAL);
-    voxelizer->build(mSceneMgr);
     return true;
 }
 
@@ -1200,6 +1215,9 @@ GiStatus PhotonComponent::giStatus() const {
             cs.centre     = toV(c.centre);
             cs.rebuilds   = c.rebuilds;
             cs.pending    = c.pending;
+            cs.scrolls      = c.scrolls;
+            cs.scrollFrames = c.scrollFrames;
+            cs.scrolling    = c.scroll.active;
             // WHAT THIS CASCADE VOXELISED - A READING of the device's own counts,
             // written as the gather wrote the records (ATOM P4b, A5b §3). They
             // used to be CPU walks: `items` an AABB test per GI item per rebuild,
@@ -1243,6 +1261,7 @@ GiStatus PhotonComponent::giStatus() const {
         st.cascadeFullRebuilds = mCascadeFullRebuilds;
         st.cascadeDeferrals    = mCascadeDeferrals;
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
+        st.cascadeScrollAborts  = mCascadeScrollAborts;
         st.chainInjectionRefusals   = mGiInjectionRefusals;
         st.chainInjectionsPeakFrame = mGiInjectionsPeak;
         st.chainSettles         = mGiChainSettles;
@@ -2592,7 +2611,10 @@ void PhotonComponent::invalidateGiCaches(const Ogre::Aabb *where, bool geometryV
     } else {
         applyGiInvalidation(restart);
     }
-    if (geometryVoxelsChanged) noteGiCascadeDirty(where);
+    if (geometryVoxelsChanged) {
+        noteGiCascadeDirty(where);
+        noteScrollEdit(where);    // ...and a scroll in flight whose TARGET it reaches (ENGINE-UPGRADE-U5)
+    }
 }
 
 // THE WALK, ABSORBED (ENGINE-UPGRADE-2B stage 2): the scene's walk records what it found
@@ -2604,7 +2626,10 @@ void PhotonComponent::absorbWalk(const WalkRecord &w) {
     if (w.itemsAppeared) mGiItemsAppeared = true;
     mGiAabbReads += w.aabbReads;
     mDragMovers.insert(mDragMovers.end(), w.promoted.begin(), w.promoted.end());
-    for (const Ogre::Aabb &box : w.cascadeDirty) noteGiCascadeDirty(&box);
+    for (const Ogre::Aabb &box : w.cascadeDirty) {
+        noteGiCascadeDirty(&box);
+        noteScrollEdit(&box);     // ENGINE-UPGRADE-U5: the target box the dirty path cannot see
+    }
     mGiItemDirtyBoxes.insert(mGiItemDirtyBoxes.end(), w.itemDirty.begin(), w.itemDirty.end());
 }
 
@@ -2857,6 +2882,7 @@ void PhotonComponent::endDragGesture() {
         Ogre::Aabb rest;
         if (!mScene.demoteDragMover(id, rest)) continue;
         noteGiCascadeDirty(&rest);
+        noteScrollEdit(&rest);     // ENGINE-UPGRADE-U5: the target box the dirty path cannot see
         anyDemoted = true;
     }
     mDragMovers.clear();
@@ -4498,6 +4524,9 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
         // reported it per rebuild): giStatus carries only the LAST rebuild's
         // cost, so a burst — a boot's, a teleport's — could not be added up.
     }
+    // THE SCROLL TARGETS, one per volume size (ENGINE-UPGRADE-U5 stage 1) - here, in the arm's
+    // build (a graphics region: they are texture creations), once every cascade's volumes exist.
+    buildScrollTargets();
 
     // The head IS cascade 0 — from here on every existing rule in this file
     // (binding, teardown, material generation, status) sees the arm it knows.
@@ -4651,7 +4680,8 @@ static const float kCascadeLodCellFraction = 1.0f / 256.0f;
 //
 // WHAT IT NEVER READS is unchanged: the camera, the drawn LOD and the LOD bias.
 PhotonComponent::VoxelGatherInputs PhotonComponent::cascadeGatherInputs(const VctCascade &c,
-                                                            std::vector<uint32_t> &mask) const {
+                                                            std::vector<uint32_t> &mask,
+                                                            const Ogre::Vector3 *centre) const {
     VoxelGatherInputs in;
     in.cell = c.cell();
     in.tolerance = kCascadeLodCellFraction;
@@ -4660,7 +4690,7 @@ PhotonComponent::VoxelGatherInputs PhotonComponent::cascadeGatherInputs(const Vc
     // (`GiStatus::cascadeVoxelLod` reports it).
     in.lod = mCascadeVoxelLod;
     if (mGi.cascadeInstanceCap > 0) {
-        budgetMaskFor(c, mask);
+        budgetMaskFor(c, centre ? *centre : c.centre, mask);
         in.budgetMask = &mask;
     }
     return in;
@@ -4678,14 +4708,15 @@ PhotonComponent::VoxelGatherInputs PhotonComponent::cascadeGatherInputs(const Vc
 //
 // WHY IT STAYS ON THE CPU: a top-K over a partial sort is a GPU radix select, not a
 // one-pass predicate, and this lane moved the predicates. Stated, not hidden.
-void PhotonComponent::budgetMaskFor(const VctCascade &c, std::vector<uint32_t> &mask) const {
+void PhotonComponent::budgetMaskFor(const VctCascade &c, const Ogre::Vector3 &centre,
+                                    std::vector<uint32_t> &mask) const {
     const float cell = c.cell();
     const float minExtent = cell * kCascadeSubVoxelFactor;
     const int cap = std::max(0, mGi.cascadeInstanceCap);
     mask.assign((mScene.itemNodes().size() + 31u) / 32u, 0u);
     if (!cap) return;
     const float reach = c.halfSize + c.step();
-    const Ogre::Aabb reachBox(c.centre, Ogre::Vector3(reach));
+    const Ogre::Aabb reachBox(centre, Ogre::Vector3(reach));
     struct Ranked { bool reachable = false; float cells = 0.0f; float dist2 = 0.0f;
                     size_t slot = 0; };
     std::vector<Ranked> ranked;
@@ -4698,7 +4729,7 @@ void PhotonComponent::budgetMaskFor(const VctCascade &c, std::vector<uint32_t> &
         const Ogre::Vector3 h = wa.mHalfSize;
         const float extent = std::max(std::max(h.x, h.y), h.z) * 2.0f;
         if (extent < minExtent) continue;                                     // rule 2
-        const Ogre::Vector3 d = wa.mCenter - c.centre;
+        const Ogre::Vector3 d = wa.mCenter - centre;
         ranked.push_back({ reachBox.intersects(wa), extent / cell, d.dotProduct(d), np->itemSlot });
     }
     const size_t take = std::min(size_t(cap), ranked.size());
@@ -4712,7 +4743,23 @@ void PhotonComponent::budgetMaskFor(const VctCascade &c, std::vector<uint32_t> &
         mask[ranked[i].slot >> 5u] |= 1u << (ranked[i].slot & 31u);
 }
 
-bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *placementCommitted) {
+// THE MONITOR'S ROWS OF A CASCADE'S VOXEL WORK, a compile-time constant per cascade index for the
+// reason EnginePrivate.h's CacheScope header gives (nothing is constructed at the call site while
+// the monitor is off): `vct.cascadeN` one per rebuild (a whole one or a scroll's commit), with the GPU
+// pair; `vct.voxelN` the voxelisation inside it (ENGINE-UPGRADE-U5 stage 1: the gather and build of
+// a whole one, or the scroll's last chunks and its copies); `vct.scrollN` a scroll's chunk frame
+// before its commit.
+static const char *const kRowNames[8] = { "vct.cascade0", "vct.cascade1", "vct.cascade2",
+                                          "vct.cascade3", "vct.cascade4", "vct.cascade5",
+                                          "vct.cascade6", "vct.cascade7" };
+static const char *const kVoxelRowNames[8] = { "vct.voxel0", "vct.voxel1", "vct.voxel2", "vct.voxel3",
+                                               "vct.voxel4", "vct.voxel5", "vct.voxel6", "vct.voxel7" };
+static const char *const kScrollRowNames[8] = { "vct.scroll0", "vct.scroll1", "vct.scroll2",
+                                                "vct.scroll3", "vct.scroll4", "vct.scroll5",
+                                                "vct.scroll6", "vct.scroll7" };
+
+bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *placementCommitted,
+                                     bool scroll) {
     if (placementCommitted) *placementCommitted = false;
     if (idx >= mVctCascades.size()) return false;
     VctCascade &c = mVctCascades[idx];
@@ -4721,9 +4768,6 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
     // number P0 exists to measure. The detail is a compile-time constant per
     // cascade index for the reason EnginePrivate.h's CacheScope header gives:
     // nothing may be constructed at the call site while the monitor is off.
-    static const char *kRowNames[8] = { "vct.cascade0", "vct.cascade1", "vct.cascade2",
-                                        "vct.cascade3", "vct.cascade4", "vct.cascade5",
-                                        "vct.cascade6", "vct.cascade7" };
     monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), (unsigned long long)idx,
                              kRowNames[std::min(idx, size_t(7))], mRoot->getRenderSystem());
     const auto t0 = std::chrono::steady_clock::now();
@@ -4759,9 +4803,31 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
             // wrote. The readings (items, levels, triangles) are its readout,
             // counted on the device and taken by giStatus.
             if (!c.feed) c.feed.reset(new detail::VoxelFeed());
-            std::vector<uint32_t> mask;
-            gatherAndBuild(*c.feed, c.voxelizer, cascadeGatherInputs(c, mask));
-            built = true;
+            {
+                // THE VOXELISATION ALONE, its own row inside this one (ENGINE-UPGRADE-U5 stage 1):
+                // what a scroll saves is voxelising, and the light injection below is whole either
+                // way - gi.scroll_slab's bar compares these rows, never the rebuild's.
+                monitor::CacheScope voxelise(CacheKind::Gi, monitor::reasonOf(reason), (unsigned long long)idx,
+                                             kVoxelRowNames[std::min(idx, size_t(7))],
+                                             mRoot->getRenderSystem());
+                if (scroll) {
+                    // THE SCROLL'S COMMIT: its last chunks, the target into the live volumes, the
+                    // placement moved (`built` the moment the live volumes describe the new box).
+                    // The row carries the last chunks' budget units (thousands), like vct.scrollN.
+                    const VctCascade::Scroll &sc = c.scroll;
+                    if (sc.active && sc.frame < sc.frames()) {
+                        double units = 0.0;
+                        for (size_t k = sc.frame ? sc.frameEnd[sc.frame - 1u] : 0u; k < sc.frameEnd[sc.frame]; ++k)
+                            units += sc.chunks[k].units;
+                        voxelise.setUnits(unsigned(std::min(units * 1e-3, 4.0e9)));
+                    }
+                    stepScroll(idx, true, &built);
+                } else {
+                    std::vector<uint32_t> mask;
+                    gatherAndBuild(*c.feed, c.voxelizer, cascadeGatherInputs(c, mask));
+                    built = true;
+                }
+            }
             // THE SECOND FAULT ARM (round-2 F1): everything above this line can
             // throw BEFORE the volumes describe the new placement and everything
             // below it AFTER, and the two failure paths are opposites - one puts
@@ -4800,6 +4866,9 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
     // injection missing: the caller must NOT put the placement back, because the
     // region the shader reads live is the one these voxels were built for.
     if (!ok && built && placementCommitted) *placementCommitted = true;
+    // ...AND A SCROLL WHOSE COMMIT LANDED IS OVER, whatever threw after it: the live volumes hold
+    // the target and the placement moved with them. (One that threw before is dropped by the caller.)
+    if (!ok && built && scroll) c.scroll = VctCascade::Scroll();
     c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - t0).count());
     if (!ok) {
@@ -4819,6 +4888,11 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
     }
     c.built = true;
     ++c.rebuilds;
+    if (scroll) {
+        ++c.scrolls;
+        ++c.scrollFrames;
+        c.scroll = VctCascade::Scroll();      // committed: the target is free
+    }
     monitor::noteCascadeRebuild();     // the frame's own "<= 1 per frame" counter
     // WHAT THIS CASCADE VOXELISED, not what the scene holds (audit D6, round-2
     // F1) - per cascade, so a capture can tell the outer cascade's work from the
@@ -4864,6 +4938,338 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
 // (how far the volume is from describing where the camera is), a clock is not.
 static const float kStepHysteresis = 0.1f;
 
+// THE INCREMENTAL SCROLL'S BUDGET (ENGINE-UPGRADE-U5 stage 1; the lead's decision 1: "<= 16 ms of
+// voxelisation per frame in Debug on Bistro"). A scroll's entering slab is cut into chunks and the
+// chunks into frames so that no frame's voxelisation exceeds kScrollBudgetMs of GPU time - a cost
+// ESTIMATED ON THE CPU before anything is dispatched, from what the scene is, never from a clock, so
+// the same scene and the same walk cut the same chunks into the same frames on every run (the
+// hashes, and "tests count frames"). The estimate is the voxeliser's own loop (Voxelizer_piece_cs.any):
+// every 4^3 group of a dispatch walks the records whose box reaches it and votes over their
+// triangles in batches of 64. An instance spanning G groups of the volume, cut into partitions of at
+// most kIndicesPerPartition / 3 = 667 triangles, costs each of its groups at least one partition's
+// worth and, all together, at least all of its triangles once - a dense mesh inside a few groups of a
+// coarse cascade pays its whole count in each (measured on Bistro's walk: the first form alone put a
+// 440 ms slab of cascade 2 into one frame):
+//
+//     units(box) = sum over the GI instances reaching `box` of
+//                  max( g x min(T, 667), T x g / G ),   g = its groups inside `box`, G = all of them
+//
+// with T the instance's finest level's triangle count (the gather's level rule only coarsens, so this
+// is an upper bound). A unit's GPU cost then GROWS WITH THE CELL: a coarse cascade's group holds more
+// of every triangle, so more of its batches pass the group vote into the per-voxel loop. MEASURED on
+// Bistro's walk (the U5 stage-1 walk, 342 chunk rows of all four cascades, GPU ms against units): the
+// 90th percentile of ms per unit is 1.41e-5 / 3.35e-5 / 2.05e-4 / 1.48e-3 at cells of 0.078 / 0.156 /
+// 0.469 / 1.875 m, which is
+//
+//     ms per unit = kScrollMsPerUnit x ( cell / kScrollCellRef ) ^ kScrollCellPower     (a log fit, all four
+//                                                                                       within 12 %)
+//
+// The 90th percentile and not the median: the budget is a ceiling - a frame above it is the jerk this
+// exists to remove. The commit's copies and the census gather are outside it (well under a
+// millisecond); the light injection of the commit frame is whole (12-26 ms on Bistro), as it is for a
+// whole rebuild.
+static const double kScrollBudgetMs = 16.0;
+static const double kScrollMsPerUnit = 1.34e-5;
+static const double kScrollCellRef = 0.078125;
+static const double kScrollCellPower = 1.49;
+/// The gather's octant cap: a frame's chunks are one gather's octants.
+static const size_t kScrollChunksPerFrame = 8u;
+/// The triangles one record carries at most (a partition: PhotonVoxelizer::kIndicesPerPartition / 3).
+static const double kScrollRecordTriangles = 667.0;
+
+bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &camPos) {
+    if (idx >= mVctCascades.size()) return false;
+    VctCascade &c = mVctCascades[idx];
+    const float cell = c.cell();
+    const int res = int(c.resolution);
+    if (cell <= 0.0f || res <= 0) return false;
+    VctCascade::Scroll sc;
+    const long long target[3] = { jahQuantAxis(camPos.x, cell), jahQuantAxis(camPos.y, cell),
+                                  jahQuantAxis(camPos.z, cell) };
+    const long long live[3] = { c.latticeX, c.latticeY, c.latticeZ };
+    for (int a = 0; a < 3; ++a) {
+        const long long d = target[a] - live[a];
+        if (d <= -res || d >= res) return false;     // nothing of the live box is kept: a whole rebuild
+        sc.shift[a] = int(d);
+        sc.lattice[a] = target[a];
+    }
+    sc.cam = camPos;
+    sc.editMark = c.editLast;
+    // THE TARGET BOX'S CORNER, by recentreCascade's arithmetic and the Aabb's (centre - half): the
+    // float a whole build at this placement voxelises from.
+    const Ogre::Vector3 centre(float(double(target[0]) * double(cell)), float(double(target[1]) * double(cell)),
+                               float(double(target[2]) * double(cell)));
+    const Ogre::Vector3 lo = Ogre::Aabb(centre, Ogre::Vector3(c.halfSize)).getMinimum();
+
+    // THE ENTERING REGION, as up to three disjoint slabs of the target's cells: the cells outside
+    // the overlap along x (every y, z), then along y inside the overlap's x, then along z inside
+    // both - their union is the target minus the overlap, each cell exactly once.
+    struct Box { int lo[3], hi[3]; };
+    int ovLo[3], ovHi[3];
+    for (int a = 0; a < 3; ++a) {
+        ovLo[a] = sc.shift[a] < 0 ? -sc.shift[a] : 0;
+        ovHi[a] = sc.shift[a] > 0 ? res - sc.shift[a] : res;
+    }
+    std::vector<Box> slabs;
+    for (int a = 0; a < 3; ++a) {
+        if (!sc.shift[a]) continue;
+        Box b;
+        for (int k = 0; k < 3; ++k) {
+            if (k < a)       { b.lo[k] = ovLo[k]; b.hi[k] = ovHi[k]; }
+            else if (k == a) { b.lo[k] = sc.shift[a] > 0 ? ovHi[a] : 0; b.hi[k] = sc.shift[a] > 0 ? res : ovLo[a]; }
+            else             { b.lo[k] = 0; b.hi[k] = res; }
+        }
+        slabs.push_back(b);
+    }
+
+    // THE INSTANCES THE ESTIMATE WALKS: the gather's own predicates that the CPU can read (the GI
+    // channel, a live slot, rule 2's size floor), in the target's cell coordinates.
+    struct Inst { float mn[3], mx[3]; double tris, perGroup, groups; };
+    std::vector<Inst> insts;
+    if (!slabs.empty()) {
+        const float minExtent = cell * kCascadeSubVoxelFactor;
+        std::unordered_map<const Ogre::Mesh *, double> meshTris;
+        for (const auto *np : mScene.itemNodes()) {
+            Ogre::Item *item = np->item;
+            if (!item || !(item->getVisibilityFlags() & kGiGeometryBit) || np->itemSlot == size_t(-1)) continue;
+            const Ogre::Aabb wa = item->getWorldAabb();
+            const Ogre::Vector3 h = wa.mHalfSize;
+            if (std::max(std::max(h.x, h.y), h.z) * 2.0f < minExtent) continue;
+            Inst in;
+            bool inside = true;
+            const Ogre::Vector3 wmn = wa.getMinimum(), wmx = wa.getMaximum();
+            for (int a = 0; a < 3; ++a) {
+                in.mn[a] = (wmn[a] - lo[a]) / cell;
+                in.mx[a] = (wmx[a] - lo[a]) / cell;
+                if (in.mx[a] < 0.0f || in.mn[a] > float(res)) inside = false;
+            }
+            if (!inside) continue;
+            const Ogre::Mesh *mesh = item->getMesh().get();
+            double tris = 0.0;
+            const auto it = meshTris.find(mesh);
+            if (it != meshTris.end()) {
+                tris = it->second;
+            } else {
+                if (mesh) {
+                    for (unsigned sm = 0; sm < mesh->getNumSubMeshes(); ++sm) {
+                        const Ogre::SubMesh *sub = mesh->getSubMesh(sm);
+                        if (!sub || sub->mVao[Ogre::VpNormal].empty()) continue;
+                        const Ogre::VertexArrayObject *vao = sub->mVao[Ogre::VpNormal][0];
+                        if (vao && vao->getIndexBuffer())
+                            tris += double(vao->getIndexBuffer()->getNumElements()) / 3.0;
+                    }
+                }
+                meshTris.emplace(mesh, tris);
+            }
+            in.tris = tris;
+            in.perGroup = std::min(tris, kScrollRecordTriangles);
+            // ITS GROUPS IN THE VOLUME (G): the volume's 4^3 lattice over its box, clamped to the box.
+            in.groups = 1.0;
+            for (int a = 0; a < 3; ++a) {
+                const float l = std::max(in.mn[a], 0.0f), h = std::min(in.mx[a], float(res) - 1e-3f);
+                in.groups *= double(std::floor(std::max(l, h) / 4.0f) - std::floor(l / 4.0f) + 1.0f);
+            }
+            if (in.tris > 0.0) insts.push_back(in);
+        }
+    }
+
+    // THE CHUNKS: each slab cut along its longest axis into layers one 4-cell group thick (on the
+    // volume's own group lattice), consecutive layers merged while their units fit the budget; a
+    // layer heavier than the budget is a chunk of its own. NOT CUT FINER, AND MEASURED (Bistro's walk,
+    // spikes/engine-upgrade/u5/stage1): a chunk's GPU time is not the sum of its groups' work - a
+    // layer is a few dozen 4^3 groups, a few per cent of the card, so a dispatch runs as long as its
+    // slowest group's serial loop over every record and triangle near it. Cutting a heavy layer into
+    // single groups raised the frames over 100 ms (29 -> 47), the spread (c3: 16 -> 206 frames) and
+    // the total GPU per scroll, and left the tail where it was: the dense group's serial loop is
+    // the voxeliser's per-voxel cost, stage 2's subject.
+    double budgetMs = kScrollBudgetMs;
+    if (mEngine && mEngine->armRegistry().value(ArmId::GiScrollBudget) > 0.0)
+        budgetMs = mEngine->armRegistry().value(ArmId::GiScrollBudget);
+    const double budget =
+        budgetMs / (kScrollMsPerUnit * std::pow(double(cell) / kScrollCellRef, kScrollCellPower));
+    const auto groupsOf = [](const Box &b, int k) { return (b.hi[k] + 3) / 4 - b.lo[k] / 4; };
+    const auto cut = [&](const Box &b) {
+        int ax = -1;
+        for (int k = 0; k < 3; ++k)
+            if (groupsOf(b, k) > 1 && (ax < 0 || b.hi[k] - b.lo[k] > b.hi[ax] - b.lo[ax])) ax = k;
+        std::vector<double> layer(size_t(ax < 0 ? 1 : groupsOf(b, ax)), 0.0);
+        const int axis = ax < 0 ? 0 : ax;
+        const int o1 = (axis + 1) % 3, o2 = (axis + 2) % 3;
+        const int g0 = b.lo[axis] / 4, g1 = g0 + int(layer.size());
+        for (const Inst &in : insts) {
+            float olo[3], ohi[3];
+            bool hit = true;
+            for (int k = 0; k < 3; ++k) {
+                olo[k] = std::max(in.mn[k], float(b.lo[k]));
+                ohi[k] = std::min(in.mx[k], float(b.hi[k]));
+                if (ohi[k] < olo[k]) hit = false;
+            }
+            if (!hit) continue;
+            long long gl[3], gh[3];
+            for (int k = 0; k < 3; ++k) {
+                const float top = std::max(olo[k], std::min(ohi[k], float(b.hi[k]) - 1e-3f));
+                gl[k] = (long long)std::floor(double(olo[k]) / 4.0);
+                gh[k] = (long long)std::floor(double(top) / 4.0);
+            }
+            // ONE GROUP-LAYER's share: g = the groups across the layer, max( g x min(T, 667), T x g / G ).
+            const double g = double(gh[o1] - gl[o1] + 1) * double(gh[o2] - gl[o2] + 1);
+            const double w = std::max(g * in.perGroup, in.tris * g / std::max(in.groups, 1.0));
+            const long long first = std::max<long long>(gl[axis], g0), last = std::min<long long>(gh[axis], g1 - 1);
+            for (long long q = first; q <= last; ++q) layer[size_t(q - g0)] += w;
+        }
+        const auto emit = [&](const Box &cb, double units) {
+            VctCascade::Scroll::Chunk ch;
+            ch.x = Ogre::uint32(cb.lo[0]); ch.y = Ogre::uint32(cb.lo[1]); ch.z = Ogre::uint32(cb.lo[2]);
+            ch.w = Ogre::uint32(cb.hi[0] - cb.lo[0]); ch.h = Ogre::uint32(cb.hi[1] - cb.lo[1]);
+            ch.d = Ogre::uint32(cb.hi[2] - cb.lo[2]);
+            ch.units = units;
+            sc.units += units;
+            sc.chunks.push_back(ch);
+        };
+        if (ax < 0) { emit(b, layer[0]); return; }   // one group: the grain
+        for (size_t jl = 0; jl < layer.size();) {
+            double units = 0.0;
+            size_t j1 = jl;
+            while (j1 < layer.size() && (j1 == jl || units + layer[j1] <= budget)) units += layer[j1++];
+            Box cb = b;
+            cb.lo[axis] = std::max(b.lo[axis], (g0 + int(jl)) * 4);
+            cb.hi[axis] = std::min(b.hi[axis], (g0 + int(j1)) * 4);
+            emit(cb, units);
+            jl = j1;
+        }
+    };
+    for (const Box &b : slabs) cut(b);
+    // THE FRAMES: consecutive chunks while their units fit the budget, at most the gather's eight.
+    // A scroll with no slab (a shift of nothing) is one frame: the copy and the commit.
+    {
+        double units = 0.0;
+        size_t n = 0;
+        for (size_t k = 0; k < sc.chunks.size(); ++k) {
+            if (n && (units + sc.chunks[k].units > budget || n == kScrollChunksPerFrame)) {
+                sc.frameEnd.push_back(k);
+                units = 0.0;
+                n = 0;
+            }
+            units += sc.chunks[k].units;
+            ++n;
+        }
+        sc.frameEnd.push_back(sc.chunks.size());
+    }
+    sc.active = true;
+    c.scroll = std::move(sc);
+    return true;
+}
+
+void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
+    VctCascade &c = mVctCascades[idx];
+    VctCascade::Scroll &sc = c.scroll;
+    Ogre::PhotonVoxelScroll *target = scrollTarget(c.resolution);
+    if (!sc.active || !target || !c.voxelizer || sc.frame >= sc.frames())
+        OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR, "a scroll step with no scroll in flight",
+                    "PhotonComponent::stepScroll");
+    if (!commit) {
+        // THE CHUNK FRAME'S OWN PREAMBLE, the whole rebuild's (rebuildCascade's attempt): the scene
+        // graph current, and the fault arm that proves the failure path.
+        giUpdateSceneGraph(mSceneMgr);
+        if (mEngine && mEngine->armRegistry().value(ArmId::GiCascadeFault) == double(idx))
+            OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR, "gi.cascadeFault: forced cascade build failure",
+                        "PhotonComponent::stepScroll");
+    }
+    if (!c.feed) c.feed.reset(new detail::VoxelFeed());
+    const float cell = c.cell();
+    const Ogre::Vector3 centre(float(double(sc.lattice[0]) * double(cell)), float(double(sc.lattice[1]) * double(cell)),
+                               float(double(sc.lattice[2]) * double(cell)));
+    if (!sc.begun) {
+        target->begin(c.voxelizer, sc.shift);
+        sc.begun = true;
+    }
+    const size_t from = sc.frame ? sc.frameEnd[sc.frame - 1u] : 0u, to = sc.frameEnd[sc.frame];
+    if (to > from) {
+        std::vector<Ogre::PhotonVoxelizer::CellBox> boxes;
+        boxes.reserve(to - from);
+        for (size_t k = from; k < to; ++k) {
+            const VctCascade::Scroll::Chunk &ch = sc.chunks[k];
+            Ogre::PhotonVoxelizer::CellBox b;
+            b.x = ch.x; b.y = ch.y; b.z = ch.z; b.w = ch.w; b.h = ch.h; b.d = ch.d;
+            boxes.push_back(b);
+        }
+        // THE CHUNKS ARE THE VOXELISER'S OCTANTS for this one gather and build, and the live
+        // division is put back whatever happens (the readers' region never moved).
+        struct Restore {
+            Ogre::PhotonVoxelizer *v;
+            ~Restore() { v->restoreOctants(); }
+        } restore{ c.voxelizer };
+        c.voxelizer->setChunkOctants(boxes.data(), boxes.size(),
+                                     Ogre::Aabb(centre, Ogre::Vector3(c.halfSize)).getMinimum());
+        // THE TARGET BOX'S INSTANCE SET (the lead's decision 1): the budget, when one is on, ranks
+        // for the box being built, and the chunks' octants filter it - a whole build's set.
+        std::vector<uint32_t> mask;
+        gatherFeed(*c.feed, c.voxelizer, cascadeGatherInputs(c, mask, &centre));
+        c.voxelizer->buildChunks(target->volumes());
+    }
+    ++sc.frame;
+    if (!commit) return;
+    // THE COMMIT: the target into the live volumes and, with no throw in between, the placement to
+    // it - the readers' region and the voxels move together.
+    // A COPY THAT THROWS HALF WAY leaves the live volumes neither box's: the cascade then owes a
+    // WHOLE rebuild (`jumped`: nothing of its volume is reusable), never a scroll copying from them.
+    try {
+        target->commit(c.voxelizer);
+    } catch (...) {
+        c.jumped = true;
+        throw;
+    }
+    recentreCascade(c, sc.cam);
+    if (committed) *committed = true;
+    assert(c.latticeX == sc.lattice[0] && c.latticeY == sc.lattice[1] && c.latticeZ == sc.lattice[2] &&
+           "a scroll commits at the lattice it was planned for");
+    c.voxelizer->finishScroll(Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)));
+    // THE CENSUS: one gather over the whole new box, built into nothing, so this cascade's readings
+    // (items, attached, levels, triangles, records - GiStatus::CascadeStatus) describe the box as a
+    // whole build's gather does, never the last chunk.
+    std::vector<uint32_t> mask;
+    gatherFeed(*c.feed, c.voxelizer, cascadeGatherInputs(c, mask));
+}
+
+void PhotonComponent::abortScroll(size_t idx) {
+    if (idx >= mVctCascades.size() || !mVctCascades[idx].scroll.active) return;
+    mVctCascades[idx].scroll = VctCascade::Scroll();
+    ++mCascadeScrollAborts;
+}
+
+void PhotonComponent::noteScrollEdit(const Ogre::Aabb *box) {
+    for (VctCascade &c : mVctCascades) {
+        if (!c.scroll.active || c.scroll.stale) continue;
+        if (!box) { c.scroll.stale = true; continue; }
+        const float cell = c.cell();
+        const Ogre::Vector3 centre(float(double(c.scroll.lattice[0]) * double(cell)),
+                                   float(double(c.scroll.lattice[1]) * double(cell)),
+                                   float(double(c.scroll.lattice[2]) * double(cell)));
+        if (Ogre::Aabb(centre, Ogre::Vector3(c.halfSize)).intersects(*box)) c.scroll.stale = true;
+    }
+}
+
+Ogre::PhotonVoxelScroll *PhotonComponent::scrollTarget(Ogre::uint32 resolution) const {
+    for (const auto &t : mScrollTargets)
+        if (t && t->resolution() == resolution) return t.get();
+    return nullptr;
+}
+
+void PhotonComponent::buildScrollTargets() {
+    destroyScrollTargets();
+    for (const VctCascade &c : mVctCascades) {
+        if (!c.voxelizer || scrollTarget(c.resolution)) continue;
+        mScrollTargets.emplace_back(new Ogre::PhotonVoxelScroll(
+            mRoot->getRenderSystem(), mRoot->getHlmsManager(), mRoot->getRenderSystem()->getTextureGpuManager(),
+            c.voxelizer, c.resolution));
+    }
+}
+
+void PhotonComponent::destroyScrollTargets() {
+    for (VctCascade &c : mVctCascades) c.scroll = VctCascade::Scroll();
+    mScrollTargets.clear();
+}
+
 void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
     if (mVctCascades.size() < 1u || !mVctCascades[0].built) return;
     w.cascadeStage = true;
@@ -4903,13 +5309,11 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
         //
         // GUARD 2 — MORE THAN HALF THE VOLUME IS NEW. The reusable part is the
         // product over the axes of the overlapping fraction; one minus it is
-        // what an incremental arm would have to re-voxelise anyway. Above a
-        // half there is nothing left to save and a whole build is the cheaper
-        // answer. In THIS arm the rebuild is whole either way, so the guard
-        // cannot change the work — it is COUNTED instead
-        // (`cascadeDirtyMajority`), because "how often is a scroll already
-        // majority-dirty" is precisely the number that decides whether a
-        // slab-shifting arm is worth building at all (PHOTON_SPEC D1).
+        // what the scroll's slab re-voxelises. It changes no decision - such a
+        // scroll still takes the slab path (ENGINE-UPGRADE-U5: the copy of what
+        // is left costs a fraction of a millisecond, and the slab is spread by the
+        // budget like any other) - so it is COUNTED (`cascadeDirtyMajority`): the
+        // walking speed at which the copy stops saving anything.
         const long long diff[3] = {
             std::llabs(jahQuantAxis(camPos.x, cell) - jahQuantAxis(c.builtCam.x, cell)),
             std::llabs(jahQuantAxis(camPos.y, cell) - jahQuantAxis(c.builtCam.y, cell)),
@@ -4937,23 +5341,74 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
         }
     }
 
-    // ---- 2. SPEND AT MOST ONE REBUILD, INNERMOST FIRST ---------------------
+    // ---- 2. A SCROLL IN FLIGHT THAT AN EDIT REACHED IS DROPPED -------------
+    // (ENGINE-UPGRADE-U5 stage 1.) Its target holds the overlap copied from the live volumes and
+    // the chunks built so far, each as the scene stood when it was built. An edit of the LIVE box
+    // (the dirty path marked this cascade since the scroll was planned: `editLast` moved) makes the
+    // copy stale: the scroll is dropped and the edit's own rebuild - whole, at the camera - answers
+    // both. An edit that reached only the TARGET box (noteScrollEdit; the dirty path tests the live
+    // box and cannot see it) makes the chunks stale: the scroll is dropped and planned again once
+    // the frame's table carries the edit - marked exactly as the dirty path marks an edit.
+    for (size_t i = 0; i < mVctCascades.size(); ++i) {
+        VctCascade &c = mVctCascades[i];
+        if (!c.scroll.active) continue;
+        // (A camera that left the live box by a whole box or more owes the teleport's whole rebuild.)
+        if (c.jumped || c.editLast != c.scroll.editMark) { abortScroll(i); continue; }
+        if (c.scroll.stale) {
+            abortScroll(i);
+            const unsigned long long frame = giWriterFrame();
+            if (!c.editSince) c.editSince = frame;
+            c.editLast = frame;
+        }
+    }
+
+    // ---- 3. SPEND AT MOST ONE CASCADE'S WORK, INNERMOST FIRST ---------------
     // The near field is what the user is looking at, so it is what gets the
     // frame. A cascade that waits keeps showing its old, correctly-lit volume:
     // the picture is never half-built, only slightly behind.
-    // THE ONE RE-VOXELISATION: the innermost pending cascade, unless the follow spent the frame
+    // THE ONE PIECE OF VOXEL WORK: the innermost pending cascade, unless the follow spent the frame
     // (every other pending cascade is deferred to a later frame).
     // A cascade whose first edit mark is THIS frame's waits for the frame's commit (editSince); and
     // no cascade re-voxelises while a material CONVERSION is owed (a new datablock: the gather would
     // skip its instances, word "none") - the frame's graphics region converts it, so this is one frame
     // at most (prepareGiInputs empties the queue every frame; a conversion is an attach's or a
     // preset's, never a slider's - a slider owes a refresh, which never holds a rebuild: F3).
+    //
+    // THE WORK IS A SCROLL OR A WHOLE REBUILD (ENGINE-UPGRADE-U5 stage 1). A cascade the CAMERA moved
+    // (pending for the camera alone, built, its shift under a whole box on every axis) SCROLLS: the
+    // overlap copied, the entering slab voxelised in chunks spread over frames by the per-frame
+    // budget, the commit when the last is built - one step of it this frame. Everything else - an
+    // edit, a teleport of a whole box or more, the first build - is a whole rebuild in one frame:
+    // a load is a load, and an edit's box is its own. One scroll per volume size at a time (the
+    // size's target holds it): a cascade whose size is busy waits, and the frame goes to the next.
+    // A scroll step waits out a material refresh owed this frame (the store's rows are re-read in
+    // the frame's graphics region, after this step), so its chunks never mix two versions of a row.
     if (!w.follow && mVctPendingMaterialSlots.empty())
-        for (size_t i = 0; i < mVctCascades.size(); ++i)
-            if (mVctCascades[i].pending && mVctCascades[i].editSince != giWriterFrame()) {
+        for (size_t i = 0; i < mVctCascades.size(); ++i) {
+            VctCascade &c = mVctCascades[i];
+            if (!c.pending || c.editSince == giWriterFrame()) continue;
+            if (c.scroll.active) {
+                if (mVctMaterialRefreshOwed) continue;
                 w.rebuild = int(i);
+                w.scroll = true;
                 break;
             }
+            const bool cameraOnly = c.built && !c.jumped && c.pendingReason == GiStaleReason::Camera &&
+                                    scrollTarget(c.resolution) != nullptr;
+            if (cameraOnly) {
+                bool busy = false;
+                for (const VctCascade &o : mVctCascades)
+                    busy = busy || (o.scroll.active && o.resolution == c.resolution);
+                if (busy || mVctMaterialRefreshOwed) continue;
+                if (planScroll(i, camPos)) {
+                    w.rebuild = int(i);
+                    w.scroll = true;
+                    break;
+                }
+            }
+            w.rebuild = int(i);
+            break;
+        }
     w.spent = w.follow || w.rebuild >= 0;
 }
 
@@ -4985,6 +5440,42 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             ++mCascadeDeferrals;
             continue;
         }
+        // A SCROLL'S CHUNK FRAME (ENGINE-UPGRADE-U5 stage 1): the chunks the budget holds this frame,
+        // built into the target. Nothing the readers sample changes; the frame is spent. The LAST
+        // frame of a scroll is its commit and takes the rebuild below, like a whole rebuild.
+        if (w.scroll && c.scroll.active && c.scroll.frame + 1u < c.scroll.frames()) {
+            const auto t0 = std::chrono::steady_clock::now();
+            monitor::CacheScope row(CacheKind::Gi, monitor::reasonOf(GiStaleReason::Camera),
+                                    (unsigned long long)i, kScrollRowNames[std::min(i, size_t(7))],
+                                    mRoot->getRenderSystem());
+            const size_t from = c.scroll.frame ? c.scroll.frameEnd[c.scroll.frame - 1u] : 0u;
+            double units = 0.0;
+            for (size_t k = from; k < c.scroll.frameEnd[c.scroll.frame]; ++k) units += c.scroll.chunks[k].units;
+            row.setUnits(unsigned(std::min(units * 1e-3, 4.0e9)));   // the budget's units, thousands
+            bool ok = false;
+            JAH_TRY {
+                stepScroll(i, false);
+                ok = true;
+            } JAH_CATCH(mError, (void)0);
+            c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - t0).count());
+            if (ok) {
+                ++c.scrollFrames;
+            } else {
+                row.setUnits(0);
+                abortScroll(i);
+                if (!mCascadeFailureLogged) {
+                    mCascadeFailureLogged = true;
+                    Ogre::LogManager::getSingleton().logMessage(
+                        "Jahshaka GI: cascade " + std::to_string(i) + " failed a scroll step (" + mError +
+                        ") - the scroll is dropped, the next frame plans it again, and a second "
+                        "failure stands the cascade down until the camera moves again");
+                }
+                if (++c.failures >= 2u) c.pending = 0;
+            }
+            spent = true;
+            continue;
+        }
         // THE PLACEMENT, SAVED BEFORE IT MOVES (audit B4). recentreCascade
         // writes the voxeliser's region, and the shader reads that region live
         // — so if the build then throws, the old voxels would be sampled as if
@@ -4993,7 +5484,10 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         const long long lx = c.latticeX, ly = c.latticeY, lz = c.latticeZ;
         const Ogre::Vector3 prevCentre = c.centre, prevCam = c.builtCam;
         const bool wasJumped = c.jumped;
-        recentreCascade(c, camPos);
+        // A SCROLL'S COMMIT places the cascade itself, at the target it was planned for and only once
+        // the target is in the live volumes (stepScroll); a whole rebuild is placed here.
+        const bool scrollCommit = w.scroll && c.scroll.active;
+        if (!scrollCommit) recentreCascade(c, camPos);
         // THE MONITOR'S REASON IS THE CAMERA (audit B12/D5): this work was
         // caused by walking, not by an edit, and `mLastStaleReason` — the last
         // thing that staled the PROBE grid, possibly minutes ago — said
@@ -5001,7 +5495,10 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         // teleport-forced one, which is what `cascadeFullRebuilds` counts.
         bool placementCommitted = false;
         const GiStaleReason reason = c.jumped ? GiStaleReason::Rebuild : c.pendingReason;
-        if (!rebuildCascade(i, reason, &placementCommitted)) {
+        if (!rebuildCascade(i, reason, &placementCommitted, scrollCommit)) {
+            // A SCROLL THAT THREW BEFORE ITS COMMIT moved nothing (the revert below is the identity):
+            // its target is dropped and the next frame plans it again.
+            if (scrollCommit && c.scroll.active) abortScroll(i);
             // ...UNLESS THE CASCADE KEPT IT (round-2 F1). A rebuild that failed
             // AFTER its build succeeded has current voxels for the NEW box; putting the old box back would describe them
             // wrong, which is exactly the defect the revert exists to prevent,
@@ -5225,6 +5722,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
 // always. Returns 0 so it can be the value of a JAH_CATCH.
 size_t PhotonComponent::abandonCascadeChain() {
     ++mGiPlacementSerial;
+    destroyScrollTargets();
     for (size_t i = mVctCascades.size(); i--; ) {
         delete mVctCascades[i].lighting;  mVctCascades[i].lighting = nullptr;
         delete mVctCascades[i].voxelizer; mVctCascades[i].voxelizer = nullptr;
@@ -6647,6 +7145,8 @@ void PhotonComponent::teardownVct() {
     // so the vector's [0] is already dangling and teardownExtraCascades knows
     // not to touch it). After the head, which is the order the arm requires.
     teardownExtraCascades();
+    // The scroll targets go with the chain they were built for (ENGINE-UPGRADE-U5 stage 1).
+    destroyScrollTargets();
     // ...and LAST, the one material store they all shared (A5b §2). Its texture pool is
     // bound into the shared compute jobs' descriptors by every dispatch, so it may not
     // die while a voxeliser can still be dispatched — which, after the two lines above,

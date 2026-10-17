@@ -8,6 +8,7 @@
 #include "photon/voxel/PhotonIrradianceField.h"
 #include "photon/voxel/PhotonMipChain.h"
 #include "photon/voxel/PhotonPassBinding.h"
+#include "photon/voxel/PhotonVoxelScroll.h"
 #include "jahshaka/engine/PhotonStatus.h"
 
 #include <Compute/OgreComputeTools.h>

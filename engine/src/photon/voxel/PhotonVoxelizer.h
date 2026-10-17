@@ -85,6 +85,31 @@ namespace Ogre
     class PhotonVoxelizer : public PhotonVoxelizerSourceBase
     {
     public:
+        /** JAHSHAKA (ENGINE-UPGRADE-U5 stage 1): THE STORE'S LEVEL-0 VOLUMES, AS ONE SET - what a
+            voxelise dispatch writes, and what a scroll copies. This voxeliser's own (liveVolumes) or
+            a scroll's target of the same size (PhotonVoxelScroll): the voxelise jobs bind whichever
+            they are given, so the entering slab of a scroll is built by the same dispatches, the
+            same shader and the same merge as a whole build. `positionSums` is the merge's four
+            packed sums the surface position is resolved from (Voxelizer_cs.glsl), kept so a
+            scrolled voxel can be re-resolved at its new cell.
+        */
+        struct VolumeSet
+        {
+            TextureGpu *albedo = nullptr;
+            TextureGpu *emissive = nullptr;
+            TextureGpu *normal = nullptr;
+            TextureGpu *accumVal = nullptr;
+            TextureGpu *coverage[2] = {};
+            TextureGpu *position[2] = {};
+            TextureGpu *positionSums = nullptr;
+        };
+        /// A box of the volume's cells: [x, x + w) x [y, y + h) x [z, z + d).
+        struct CellBox
+        {
+            uint32 x = 0u, y = 0u, z = 0u;
+            uint32 w = 0u, h = 0u, d = 0u;
+        };
+
         /** JAHSHAKA (ATOM P4) - ONE (mesh, LOD level, submesh)'s GEOMETRY, AS THE
             SHADER READS IT. std430, 48 bytes, three uvec4 lanes so C++ and GLSL agree
             with no padding rule to remember.
@@ -272,6 +297,17 @@ namespace Ogre
 
         ResourceTransitionArray mResourceTransitions;
 
+        /// Jahshaka (ENGINE-UPGRADE-U5 stage 1): THE POSITION SUMS (Voxelizer_cs.glsl), PFG_R32_UINT,
+        /// (mWidth, mHeight, mDepth * 4): sixteen bytes a voxel, resident for the voxeliser's life,
+        /// cleared and written by every build. A scroll re-resolves a copied voxel's position from
+        /// them (PhotonScrollPosition_cs.glsl).
+        TextureGpu *mPositionSumsTex;
+
+        /// Binds `v` and the host's buffers into every voxelise variant, then dispatches one job per
+        /// (octant, bucket) - build()'s loop, shared with buildChunks().
+        void bindVolumes( const VolumeSet &v, bool hasTypedUavs );
+        void dispatchOctants();
+
         void createComputeJobs();
         /// Unbinds every host buffer from the shared compute jobs - they live in
         /// HlmsCompute and outlive this build and this object, and their descriptor
@@ -347,6 +383,29 @@ namespace Ogre
         /// volume. NOT OWNED - see the constructor. The host that owns the store
         /// should evict on the STORE, once, rather than through each voxelizer.
         PhotonVoxelMaterial *getVctMaterial() const { return mVctMaterial; }
+
+        VolumeSet liveVolumes() const;
+
+        /** THE SCROLL'S CHUNKS, AS THIS VOXELISER'S OCTANTS (ENGINE-UPGRADE-U5 stage 1). Every
+            octant of the gather and of the dispatches is one box of the TARGET volume's cells, its
+            world region `targetOrigin + cell x box` - the new placement's, not the live region the
+            readers sample (that one moves only when the scroll commits). At most eight (the
+            gather's cap). restoreOctants() puts back the whole-volume division of the live region.
+        */
+        void setChunkOctants( const CellBox *chunks, size_t count, const Vector3 &targetOrigin );
+        void restoreOctants();
+        /** Voxelises the current octants (setChunkOctants) into `target`, through the instance
+            source the gather bound: the shared merge accumulator cleared first (it is scratch of
+            one build), nothing else - the target's cells in the chunks are already clear (the
+            scroll's begin cleared the whole target). Same dispatches, same shader, same merge as
+            build(); the bounds guard writes exactly the chunk's cells.
+        */
+        void buildChunks( const VolumeSet &target );
+        /** THE SCROLL COMMITTED: the live volumes now hold the new placement's level 0 (the
+            scroll's copy back), so the region moves to it and every mip chain is regenerated
+            whole - the same chains a whole build ends with.
+        */
+        void finishScroll( const Aabb &newRegion );
     };
 }  // namespace Ogre
 

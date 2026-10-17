@@ -1125,6 +1125,10 @@ const ArmDef kArms[] = {
       "FAULT INJECTION (a test door, gi.cascades round-2 F1): cascade N's rebuild throws AFTER its "
       "build - the keep-the-placement path. -1 = none. Was JAH_GI_CASCADE_FAULT_POST (a per-rebuild "
       "read)." },
+    { "gi.scrollBudgetMs", 0.0, 0.0, 1000.0,
+      "THE INCREMENTAL SCROLL'S PER-FRAME BUDGET (ENGINE-UPGRADE-U5 stage 1) in milliseconds of "
+      "voxelisation, read when a scroll is planned: a small value spreads a fixture's slab over "
+      "many frames (gi.scroll_slab's spread arm). 0 = the shipped budget (kScrollBudgetMs)." },
     { "gi.rebuildSettle", 1.0, 0.0, 1.0,
       "The rebuild settle (the chain's owed settle steps after a rebuild). 0 = off: "
       "gi.chain_converge's paired arm. Was JAHSHAKA_GI_NO_REBUILD_SETTLE (a per-frame read)." },

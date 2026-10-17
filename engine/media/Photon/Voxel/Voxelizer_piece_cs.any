@@ -383,6 +383,15 @@
 //in uint  gl_LocalInvocationIndex;
 
 @piece( BodyCS )
+	// Jahshaka (ENGINE-UPGRADE-U5 stage 1): THE BOUNDS GUARD. A dispatch covers its octant in 4^3
+	// groups rounded UP, so an octant whose size is not a multiple of four (a scroll's entering slab:
+	// the step in cells) has lanes past its edge. They run the loop below like every other lane -
+	// the group vote needs all 64 - and write nothing: the voxel they would write belongs to the
+	// copied part of the volume or lies outside it. Upstream's check_out_of_bounds, the same test.
+	bool voxelInBounds = gl_GlobalInvocationID.x < p_voxelPixelsToWrite.x &&
+							   gl_GlobalInvocationID.y < p_voxelPixelsToWrite.y &&
+							   gl_GlobalInvocationID.z < p_voxelPixelsToWrite.z;
+
 	Aabb voxelAabb;
 	voxelAabb.center	= p_voxelOrigin + p_voxelCellSize * (float3( gl_GlobalInvocationID.xyz ) + 0.5f);
 	voxelAabb.halfSize	= p_voxelCellSize * 0.5f;
@@ -598,7 +607,7 @@
 	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz + ushort3( p_voxelPixelOrigin ) );
 
 	@property( syntax != hlsl || typed_uav_load )
-		uint origAccumWeight = OGRE_imageLoad3D( voxelAccumVal, voxelCelUvw ).x;
+		uint origAccumWeight = voxelInBounds ? OGRE_imageLoad3D( voxelAccumVal, voxelCelUvw ).x : 0u;
 	@else
 		uint origAccumWeightVal = OGRE_imageLoad3D( voxelAccumVal,
 													wshort3( voxelCelUvw.x >> 1u, voxelCelUvw.yz ) ).x;
@@ -606,7 +615,7 @@
 																  (origAccumWeightVal & 0xFFFFu);
 	@end
 
-	if( accumWeight > 0u )
+	if( accumWeight > 0u && voxelInBounds )
 	{
 		uint3 voxelCel = uint3( gl_GlobalInvocationID.xyz ) + uint3( p_voxelPixelOrigin );
 
@@ -708,6 +717,11 @@
 								float4( voxelMergePositionResolve( sumPosP, sumAxisP, voxelCel, invRes ), casterShareP ) );
 			OGRE_imageWrite3D4( voxelPositionNTex, voxelCelUvw,
 								float4( voxelMergePositionResolve( sumPosN, sumAxisN, voxelCel, invRes ), casterShareN ) );
+			// ENGINE-UPGRADE-U5 stage 1: the four sums the two writes above resolved, kept (Voxelizer_cs.glsl).
+			OGRE_imageWrite3D1( voxelPositionSums, uint3( voxelCel.xy, voxelCel.z * 4u + 0u ), uint4( sumAxisP, 0u, 0u, 0u ) );
+			OGRE_imageWrite3D1( voxelPositionSums, uint3( voxelCel.xy, voxelCel.z * 4u + 1u ), uint4( sumAxisN, 0u, 0u, 0u ) );
+			OGRE_imageWrite3D1( voxelPositionSums, uint3( voxelCel.xy, voxelCel.z * 4u + 2u ), uint4( sumPosP, 0u, 0u, 0u ) );
+			OGRE_imageWrite3D1( voxelPositionSums, uint3( voxelCel.xy, voxelCel.z * 4u + 3u ), uint4( sumPosN, 0u, 0u, 0u ) );
 		@else
 			// JAHSHAKA fork ad452604a+155a56bf8 (was 0087): THE BRANCH THAT CANNOT FOLLOW THE FLOAT STORE.
 			// This is D3D11 without typed UAV loads, where each texel is packed
