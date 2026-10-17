@@ -43,6 +43,7 @@
 #include <OgrePrerequisites.h>
 #include <Vao/OgreStagingBuffer.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -761,9 +762,19 @@ private:
     std::vector<GpuSceneObserver *> mObservers;
     void notify(uint32_t slot, const GpuInstance *now) {
         ++mNotifies;
+        if (mObservers.empty()) return;
+        // THE OBSERVERS' TIME, a running total (ENGINE-UPGRADE-U4 stage 1: the compose's NOTIFY share — the part a
+        // parallel compose must replay serially; inspect::SceneEcho::gpuWalk).
+        const auto t0 = std::chrono::steady_clock::now();
         for (GpuSceneObserver *o : mObservers) o->gpuSlotChanged(slot, now);
+        mNotifyMicros += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
     }
     unsigned long long mNotifies = 0ull;
+    double mNotifyMicros = 0.0;
+public:
+    /// The observers' time in every notify so far, µs (the walk differences it around its compose).
+    double notifyMicros() const { return mNotifyMicros; }
+private:
     /// Slots whose ray level was patched since their last copy (patchRayLevel).
     std::vector<uint32_t> mPatched;
     /// Copies `mCopySet` (sorted, unique, in range) to the device: one staging map,

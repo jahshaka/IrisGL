@@ -467,6 +467,20 @@ public:
     /// workspace did not finish (a capture that threw).
     void photonUpdate();
     bool photonUpdateOwed() const { return mPosUpdated; }
+    /// THE SUN TRACE'S CPU (ENGINE-UPGRADE-U4 stage 1, premise P1; inspect::SceneEcho::traceSun): the last traceSun
+    /// call's whole time on the render thread, the still casters' moves it took, the cards it held, the frame it ran
+    /// in and how many calls ran.
+    struct TraceSunCost {
+        double micros = 0.0;
+        unsigned casterMoves = 0u, cards = 0u;
+        unsigned long long frame = 0ull, calls = 0ull;
+        /// THE STILL CASTERS' HIT SET of the call (step 1): the cards a moved still caster's old or new footprint
+        /// shades, as a count and a digest of the per-card mask (FNV-1a over the card indices in order) — what a
+        /// faster search must reproduce exactly.
+        unsigned casterHits = 0u;
+        unsigned long long casterHitDigest = 0ull;
+    };
+    const TraceSunCost &traceSunCost() const { return mTraceSunCost; }
 
 private:
     struct InstanceRec {
@@ -578,6 +592,7 @@ private:
     std::vector<float> mStillCpu;
     float mRayFootprintPerMetre = 0.0f;
     float mStillCpuMs = 0.0f;   ///< the still trace's CPU this frame (in captureMs with a batch)
+    TraceSunCost mTraceSunCost;
     unsigned mStillTracedLastFrame = 0u, mStillTexelsLastFrame = 0u, mStillPending = 0u;
     unsigned long long mStillTraces = 0ull, mInvalidSun = 0ull, mCasterRetraces = 0ull;
     Ogre::UavBufferPacked *mGiBuffer = nullptr;

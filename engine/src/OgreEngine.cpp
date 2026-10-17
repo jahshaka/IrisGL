@@ -2911,12 +2911,29 @@ void OgreEngine::interpolateFrame() {
     mLastAlphaPresent = mPresentTime;
 }
 
+namespace {
+/// ONE TIMED PART OF THE DRAIN (ENGINE-UPGRADE-U4 stage 1): the span added to its FrameInputStatus figure and, while a
+/// capture runs, filed as a monitor stage (exclusive of the parts nested in it). The drain runs before the frame's
+/// monitor record opens, so its stages bank and the frame that opens right after adopts them (FrameMonitor::stage).
+struct DrainPart {
+    double &acc;
+    monitor::Stage stage;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    DrainPart(double &a, const char *name) : acc(a), stage(name) {}
+    ~DrainPart() { acc += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(); }
+    DrainPart(const DrainPart &) = delete;
+    DrainPart &operator=(const DrainPart &) = delete;
+};
+}   // namespace
+
 void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
-    const auto t0 = std::chrono::steady_clock::now();
-    struct Timed {
-        FrameInputStatus &st; std::chrono::steady_clock::time_point t0;
-        ~Timed() { st.drainMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(); }
-    } timed{ mFrameInputStatus, t0 };
+    // THE DRAIN IS A STAGE (U4 stage 1): `engine.drain` and its three parts, and the same spans on the snapshot
+    // (FrameInputStatus::drainMicros and its three parts) — frame-counted, never sampled.
+    mFrameInputStatus.drainMicros = 0.0;
+    mFrameInputStatus.drainNameMicros = 0.0;
+    mFrameInputStatus.drainRecordsMicros = 0.0;
+    mFrameInputStatus.drainPlanMicros = 0.0;
+    DrainPart whole(mFrameInputStatus.drainMicros, "engine.drain");
     ++mFrameInputStatus.drained;
     mFrameInputStatus.fieldsApplied = 0;
     mFrameInputStatus.viewFieldsApplied = 0;
@@ -2979,11 +2996,17 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
         OgreScene *sc = nullptr;
         for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
         if (!sc) continue;   // destroyed before its frame
-        applySceneStream(sc, {}, part.nodes, in.stepSerial.value_or(0ull));   // its messages ran in the one order above
+        {
+            DrainPart records(mFrameInputStatus.drainRecordsMicros, "engine.drain.records");
+            applySceneStream(sc, {}, part.nodes, in.stepSerial.value_or(0ull));   // its messages ran in the one order above
+        }
         // THE CHANGE SET NEXT (U0 3b): what the document wrote, before anything of the frame reads a box.
         mFrameInputStatus.changesMoved += unsigned(part.changes.moved.size());
         if (!part.changes.complete) ++mFrameInputStatus.changesIncomplete;
-        mFrameInputStatus.changesLights += sc->applyChangeSet(part.changes);
+        {
+            DrainPart name(mFrameInputStatus.drainNameMicros, "engine.drain.name");
+            mFrameInputStatus.changesLights += sc->applyChangeSet(part.changes);
+        }
         // THE GESTURE HOLDS UNTIL THE SCENE'S NEXT RECORD THAT CARRIES ONE (U0 3c): the host that has the user's hand
         // says so every frame it builds (the viewport); a frame some other host renders in between (a thumbnail, a
         // preview) carries none for this scene and must not end the drag under the hand.
@@ -3029,7 +3052,10 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
         applyIfChanged(part.grid, last.grid, applied, [&](const GridDesc &v) { static_cast<Scene *>(sc)->setGrid(v); });
         // THE ONE GI SCHEDULER (U0 3c; OgreGi.cpp planGi): once per record that carries the scene's GI, after every
         // field of it has landed — the configuration it may have just applied included.
-        if (part.gi) sc->planGi(part, giPushed);
+        if (part.gi) {
+            DrainPart plan(mFrameInputStatus.drainPlanMicros, "engine.drain.plan");
+            sc->planGi(part, giPushed);
+        }
     }
 
     mFrameInputStatus.gestureActive = false;

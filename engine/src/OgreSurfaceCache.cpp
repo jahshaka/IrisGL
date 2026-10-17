@@ -1815,6 +1815,20 @@ float SurfaceCache::sunLiftOf(const CardRec &c) const {
 }
 
 void SurfaceCache::traceSun() {
+    // ITS WHOLE CPU, every call (U4 stage 1, P1): the fixtures' reading of what a frame of moves costs here.
+    struct Timed {
+        TraceSunCost &c;
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        ~Timed() {
+            c.micros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+            ++c.calls;
+        }
+    } timed{ mTraceSunCost };
+    mTraceSunCost.frame = mFrame;
+    mTraceSunCost.casterMoves = 0u;
+    mTraceSunCost.cards = unsigned(mCards.size());
+    mTraceSunCost.casterHits = 0u;
+    mTraceSunCost.casterHitDigest = 0ull;
     // THIS FRAME ONLY: the batch is the frame's only when update() planned this
     // frame (workspacePreUpdate drops a stale plan the same way).
     // A batch that cannot be traced this frame waits for its still term.
@@ -1830,6 +1844,7 @@ void SurfaceCache::traceSun() {
     CardMoverFrame mf;
     if (!mMoverHooks.frame(mf)) { batchWaits(); return; }
     mMovers.swap(mf.movers);
+    mTraceSunCost.casterMoves = unsigned(mf.casterMoves.size());
 
     const Ogre::Light *sunLight = cardSun();
     const Ogre::Vector3 toSun =
@@ -1885,6 +1900,7 @@ void SurfaceCache::traceSun() {
     //    waits for `stillPending`): a demoted mover's shadow passes from the
     //    movers' trace to the still one without a frame of neither.
     if (haveSun) {
+        std::vector<char> hit(mf.casterMoves.empty() ? 0u : mCards.size(), 0);
         for (const CardCasterMove &m : mf.casterMoves) {
             const Footprint o = boxFootprint(sf, m.oldMin, m.oldMax);
             const Footprint n = boxFootprint(sf, m.newMin, m.newMax);
@@ -1898,10 +1914,18 @@ void SurfaceCache::traceSun() {
                 if (mInstances[c.instance].node == m.node) continue;
                 const Footprint &cf = cardFpAt(i);
                 if (!shades(o, cf) && !shades(n, cf)) continue;
+                hit[i] = 1;
                 if (!c.stillPending) ++mCasterRetraces;
                 pendStill(c);
             }
         }
+        unsigned long long digest = 1469598103934665603ull;
+        for (unsigned i = 0; i < hit.size(); ++i) {
+            if (!hit[i]) continue;
+            ++mTraceSunCost.casterHits;
+            for (int b = 0; b < 4; ++b) { digest ^= (i >> (8 * b)) & 0xFFu; digest *= 1099511628211ull; }
+        }
+        mTraceSunCost.casterHitDigest = mTraceSunCost.casterHits ? digest : 0ull;
     }
 
     // 1b. THE STILL TRACE: this frame's batch whole (a capture is not readable

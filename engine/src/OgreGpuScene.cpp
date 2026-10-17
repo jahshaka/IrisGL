@@ -1280,6 +1280,11 @@ constexpr size_t kParallelWalkSlots = 512u;
 
 void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     GpuSceneSubstrate &sub = mSubstrate;
+    using WalkClock = std::chrono::steady_clock;
+    const auto usSince = [](WalkClock::time_point t) {
+        return std::chrono::duration<double, std::micro>(WalkClock::now() - t).count();
+    };
+    const auto tName = WalkClock::now();
     // THE NAMED SLOTS (GpuSceneSubstrate's named walk): the slots of the nodes written since
     // the last consuming walk, once each, in slot order — or every slot where one is owed.
     const bool whole = sub.namedFull || (mEngine && mEngine->armRegistry().on(ArmId::GpuWalkWhole));
@@ -1295,6 +1300,8 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
         named.erase(std::unique(named.begin(), named.end()), named.end());
     }
     const size_t n = whole ? mItemNodes.size() : named.size();
+    sub.lastNameMicros = usSince(tName);
+    const auto tCompare = WalkClock::now();
     if (whole) ++sub.wholeWalks;
     else sub.slotsNamed += named.size();
     // THE PREDICATES' SCENE-WIDE INPUT, once per walk instead of once per slot (the
@@ -1359,6 +1366,11 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
         share(shares - 1u);
         mSceneMgr->waitForPendingUserScalableTask();
     }
+    sub.lastCompareMicros = usSince(tCompare);
+    sub.lastWalkSlots = unsigned(n);
+    const auto tCompose = WalkClock::now();
+    const double notify0 = mGpuScene.notifyMicros();
+    const size_t dirtyBefore = sub.dirty.size();
     sub.slotsCompared += n;
     for (unsigned long long f : sub.shareFlags) sub.flagsRecomputed += f;
     // A walk on the graph's current transforms consumes the epoch (composeGpuScene), and with
@@ -1379,6 +1391,9 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
             ++sub.aabbReads;
         }
     }
+    sub.lastComposeMicros = usSince(tCompose);
+    sub.lastNotifyMicros = mGpuScene.notifyMicros() - notify0;
+    sub.lastComposedSlots = unsigned(sub.dirty.size() - dirtyBefore);
     ++sub.walks;
 }
 
@@ -1545,6 +1560,34 @@ inspect::SceneEcho::CardWalk OgreScene::cardWalk() const {
     w.slotCount = mPhoton.mCardWalkSlots;
     w.walks = mPhoton.mCardWalks;
     return w;
+}
+
+inspect::SceneEcho::GpuWalk OgreScene::gpuWalk() const {
+    GpuWalk w;
+    w.nameMicros = mSubstrate.lastNameMicros;
+    w.compareMicros = mSubstrate.lastCompareMicros;
+    w.composeMicros = mSubstrate.lastComposeMicros;
+    w.notifyMicros = mSubstrate.lastNotifyMicros;
+    w.slotsCompared = mSubstrate.lastWalkSlots;
+    w.slotsComposed = mSubstrate.lastComposedSlots;
+    w.shares = mSubstrate.walkShares;
+    w.walks = mSubstrate.walks;
+    return w;
+}
+
+inspect::SceneEcho::TraceSun OgreScene::traceSun() const {
+    TraceSun t;
+    if (const SurfaceCache *c = mPhoton.surfaceCache()) {
+        const SurfaceCache::TraceSunCost &k = c->traceSunCost();
+        t.micros = k.micros;
+        t.casterMoves = k.casterMoves;
+        t.cards = k.cards;
+        t.frame = k.frame;
+        t.calls = k.calls;
+        t.casterHits = k.casterHits;
+        t.casterHitDigest = k.casterHitDigest;
+    }
+    return t;
 }
 
 NodeId OgreScene::nodeOfGpuKey(uint32_t key) const {

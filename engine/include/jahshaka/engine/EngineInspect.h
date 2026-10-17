@@ -45,6 +45,29 @@ public:
         unsigned long long walks = 0;
     };
     virtual CardWalk cardWalk() const = 0;
+    /// THE GPU SCENE'S LAST WALK, BY PHASE (ENGINE-UPGRADE-U4 stage 1, premise P2): the named slots resolved, the
+    /// compare (Ogre's pool: `shares` = the workers plus the frame's thread), the compose (the frame's thread) and,
+    /// inside the compose, the change feed's observers (the notify share), in µs; the slots compared and composed;
+    /// the walks run.
+    struct GpuWalk {
+        double             nameMicros = 0.0, compareMicros = 0.0, composeMicros = 0.0, notifyMicros = 0.0;
+        unsigned           slotsCompared = 0, slotsComposed = 0, shares = 0;
+        unsigned long long walks = 0;
+    };
+    virtual GpuWalk gpuWalk() const = 0;
+    /// THE SUN TRACE'S CPU (ENGINE-UPGRADE-U4 stage 1, premise P1): the last SurfaceCache::traceSun call — its whole
+    /// time in µs, the still casters' moves it took, the cards it held, the cache's frame it ran in, the calls so far.
+    /// All zero where the scene has no card cache.
+    struct TraceSun {
+        double             micros = 0.0;
+        unsigned           casterMoves = 0, cards = 0;
+        unsigned long long frame = 0, calls = 0;
+        /// The still casters' HIT SET (step 1): the cards a moved still caster shades this call, and a digest of the
+        /// per-card mask — the identity a faster search is held to.
+        unsigned           casterHits = 0;
+        unsigned long long casterHitDigest = 0;
+    };
+    virtual TraceSun traceSun() const = 0;
 };
 /// The scene's record; null for a scene this engine did not make.
 const SceneEcho *scene(const Scene *s);

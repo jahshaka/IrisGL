@@ -114,6 +114,12 @@ public:
     unsigned long long frameComposeWalks = 0ull;
     /// The walk's width last time: the SceneManager's workers plus the main thread.
     unsigned walkShares = 0u;
+    /// THE LAST WALK'S THREE PHASES (ENGINE-UPGRADE-U4 stage 1, premise P2; inspect::SceneEcho::gpuWalk), µs: the
+    /// named slots resolved, the compare (the pool's shares), the compose (the frame's thread, in slot order); the
+    /// slots it compared and the slots it composed.
+    double lastNameMicros = 0.0, lastCompareMicros = 0.0, lastComposeMicros = 0.0;
+    double lastNotifyMicros = 0.0;   ///< ...of the compose, the change feed's observers (GpuScene::notify)
+    unsigned lastWalkSlots = 0u, lastComposedSlots = 0u;
 
     // ---- the walk's shares (the task's scratch, kept between frames) -------
     std::vector<std::vector<uint32_t>> shareDirty;
