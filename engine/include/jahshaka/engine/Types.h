@@ -4949,14 +4949,18 @@ struct RayQueryStatus {
 ///                id pass and the caster cut draw both faces, the decode lights
 ///                the facing one — ATOM-TWO-SIDED-1).
 ///   pbsItems     items that stay on stock HlmsPbs, split by the FIRST reason
-///                that holds, in this order: `notPbs` (an Unlit or other non-PBS
-///                datablock), `customPiece` (a per-datablock custom piece — the
-///                twin cannot carry one), `blended` (a transparent, faded or
-///                refractive material), `cullFront` (a material that culls its
-///                FRONT faces — only back faces drawn, an inverted hull — or whose
-///                shadow caster culls unlike its surface), `pending` (its
+///                that holds, in this order (OgreScene::atomRouteFor): `notWorld` (a
+///                backdrop or helper: the id pass draws world channels only),
+///                `notPbs` (an Unlit or other non-PBS datablock), `customPiece` (a
+///                per-datablock custom piece or a live material — the twin cannot
+///                carry one), `blended` (a transparent, faded or refractive
+///                material), `alphaTested` (a cut-out, whatever its shadow
+///                caster's cull — a cutout's caster culls nothing by law),
+///                `cullFront` (a material that culls its FRONT faces — only back
+///                faces drawn, an inverted hull — or whose shadow caster culls
+///                unlike its surface), `planar` (a planar mirror), `pending` (its
 ///                textures are still being baked, so its bucket is not known yet:
-///                PBS draws it for those frames), `alphaTested`,
+///                PBS draws it for those frames),
 ///                `skinned` (the id pass reads the mesh's bind-pose rows), `noRow`
 ///                (no readable level-0 triangle row: a line mesh, no device
 ///                addresses, a normal the decode does not read — or more than one
