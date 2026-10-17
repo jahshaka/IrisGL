@@ -1203,6 +1203,15 @@ const ArmDef kArms[] = {
       "searches (the moved still casters, the movers' changed and current footprints) are repeated as the exhaustive "
       "search of every footprint against every landed card, and every card whose answer differs is a MISS "
       "(inspect::SceneEcho::traceSun().parityMisses). A test door: O(footprints x cards) a frame while on." },
+    { "gi.geomSigParity", 0.0, 0.0, 1.0,
+      "THE INCREMENTAL GEOMETRY SIGNATURE'S GUARD (ENGINE-UPGRADE-U4 stage 3): 1 = after every signature pass (the "
+      "written items' terms replaced) the whole order-free sum is recomputed over every GI item, and a difference is a "
+      "MISS (inspect::SceneEcho::giPlan().sigMisses). A test door: O(items) a pass while on." },
+    { "gi.rootBoxParity", 0.0, 0.0, 1.0,
+      "THE ROOT BOXES' GUARD (ENGINE-UPGRADE-U4 stage 3): 1 = the GI walk also keeps every moved item's own box, and "
+      "every cascade mark is checked against the cascades those boxes reach — one the marks miss is a MISS "
+      "(inspect::SceneEcho::giPlan().rootMisses; one box per moved subtree root must mark no cascade fewer), one marked "
+      "that no item box reaches is counted as the union's extra. A test door." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

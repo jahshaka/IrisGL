@@ -2206,50 +2206,102 @@ std::vector<Ogre::Aabb> PhotonComponent::giItemBounds() const {
     return adopt(out);
 }
 
-// THE GEOMETRY SIGNATURE, ONE WALK, OVER THE ITEM INDEX (audit D4): the item
-// index rather than the node map, one getWorldAabbUpdated per GI item, on every
-// frame the movement epoch moved.
+// THE GEOMETRY SIGNATURE (audit D4; ENGINE-UPGRADE-U4 stage 3: ORDER-FREE AND
+// INCREMENTAL). Each GI item contributes one term — FNV-1a over its id and its
+// world box quantised to a 64th of its OWN size — and the signature is their SUM
+// (mod 2^64): order-free, so a frame that wrote K items re-reads those K (the
+// scene's signature name list, fed by the same door that names the scans) and
+// replaces their terms, instead of one getWorldAabbUpdated per GI item on every
+// frame the movement epoch moved. A full pass is taken when the scene owes one
+// (the item set changed, a node died, a nodeless write, an incomplete change set)
+// or the mode changed. The arm `gi.geomSigParity` recomputes the whole sum after
+// every pass and counts a miss where they differ (the guard). Only equality over
+// time is read (planGi's geometry term), so the value's form is free.
 //
 // (The MOVEMENT SCAN — ensureGiWalk/walkItems — is deliberately NOT folded in:
 // its `mGiMovedBoxes` are per FRAME and are consumed by the probe budget inside
 // `renderOneFrame`, while this is read by the mirror BEFORE it, after the mirror
 // has written this frame's transforms. One walk serving both would answer at two
 // different epochs in the same frame.)
+namespace {
+/// One item's term, or false when the item is not in the signature: it bounces
+/// light, or is a mover because the user has hold of it.
+///
+/// A PROMOTED DRAG MOVER STAYS IN THIS SIGNATURE (MOVER-1), and it has to. The
+/// host's settle gate measures STABILITY of exactly this hash: an object that
+/// dropped out of it while being dragged would make the scene look still from the
+/// mirror's side, and the full re-solve the gate fires after GiPlan::kStableFrames
+/// would land in the MIDDLE of the gesture — the hitch the whole mobility design
+/// exists to avoid. At the gesture's end the term is exactly the term the same
+/// pose would have had without the promotion.
+template <class NodeT>
+bool geomSigTerm(NodeT &n, unsigned long long &term, unsigned long long &reads, unsigned long long epoch) {
+    const Ogre::Item *item = n.item;
+    const bool dragged = n.dragMover && n.shown;
+    if (!item || n.itemSlot == size_t(-1) || (!(item->getVisibilityFlags() & kGiGeometryBit) && !dragged))
+        return false;
+    ++reads;
+    const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
+    n.sigBox = a;
+    n.sigBoxEpoch = epoch;
+    const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
+    const float quantum = PhotonComponent::giAabbQuantum(a);
+    unsigned long long h = 1469598103934665603ull;
+    const auto fold = [&h](unsigned long long v) { h ^= v; h *= 1099511628211ull; };
+    fold((unsigned long long)n.selfId);
+    for (size_t ax = 0; ax < 3u; ++ax) {
+        fold((unsigned long long)(long long)std::floor(mn[ax] / quantum));
+        fold((unsigned long long)(long long)std::floor(mx[ax] / quantum));
+    }
+    term = h;
+    return true;
+}
+}   // namespace
+
 void PhotonComponent::computeGiGeometrySignature() const {
     const unsigned long long epoch = mScene.transformEpoch();
-    static const unsigned long long kFnvBasis = 1469598103934665603ull;
-    unsigned long long hg = kFnvBasis;
-    const auto fold = [](unsigned long long &h, unsigned long long v) {
-        h ^= v; h *= 1099511628211ull;
-    };
-    for (const auto *np : mScene.itemNodes()) {          // the item index, not the map (D4)
-        const Ogre::Item *item = np->item;
-        // A PROMOTED DRAG MOVER STAYS IN THIS SIGNATURE (MOVER-1), and it has
-        // to. The host's settle gate measures STABILITY of exactly this hash:
-        // an object that dropped out of it while being dragged would make the
-        // scene look still from the mirror's side, and the full re-solve the
-        // gate fires after GiPlan::kStableFrames would land in the MIDDLE of the
-        // gesture — the hitch the whole mobility design exists to avoid. So the
-        // predicate is "bounces light, or is a mover because the user has hold
-        // of it", and at the gesture's end the hash is exactly the hash the
-        // same pose would have had without the promotion (which is what makes
-        // the at-rest picture identical under both rules).
-        const bool dragged = np->dragMover && np->shown;
-        if (!item || (!(item->getVisibilityFlags() & kGiGeometryBit) && !dragged)) continue;
-        ++mGiAabbReads;
-        const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
-        const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
-        // The GEOMETRY half: every GI item, quantised to a 64th of its OWN size.
-        {
-            const float quantum = giAabbQuantum(a);
-            fold(hg, (unsigned long long)np->selfId);
-            for (size_t ax = 0; ax < 3u; ++ax) {
-                fold(hg, (unsigned long long)(long long)std::floor(mn[ax] / quantum));
-                fold(hg, (unsigned long long)(long long)std::floor(mx[ax] / quantum));
+    const bool full = !mGeomSigValid || mGeomSigMode != mGi.mode || mScene.geomSigFullOwed();
+    if (full) {
+        if (++mGeomSigGen == 0u) mGeomSigGen = 1u;   // a node's term counts only in its generation
+        unsigned long long sum = 0ull;
+        for (auto *np : mScene.itemNodes()) {          // the item index, not the map (D4)
+            unsigned long long term = 0ull;
+            if (geomSigTerm(*np, term, mGiAabbReads, epoch)) {
+                np->geomSigTerm = term;
+                np->geomSigGen = mGeomSigGen;
+                sum += term;
+            } else {
+                np->geomSigGen = 0u;
             }
         }
+        mGeomSig = sum;
+        ++mGeomSigFullPasses;
+    } else {
+        // THE WRITTEN NODES ONLY: each named node's old term (if it counted) out, its new one (if it counts) in.
+        unsigned long long sum = mGeomSig;
+        for (auto *np : mScene.geomSigNames()) {
+            if (np->geomSigGen == mGeomSigGen) sum -= np->geomSigTerm;
+            unsigned long long term = 0ull;
+            if (geomSigTerm(*np, term, mGiAabbReads, epoch)) {
+                np->geomSigTerm = term;
+                np->geomSigGen = mGeomSigGen;
+                sum += term;
+            } else {
+                np->geomSigGen = 0u;
+            }
+        }
+        mGeomSig = sum;
     }
-    mGeomSig = hg;
+    const_cast<OgreScene &>(mScene).tookGeomSigNames();
+    if (mEngine && mEngine->armRegistry().on(ArmId::GiGeomSigParity)) {
+        unsigned long long whole = 0ull, reads = 0ull;
+        for (auto *np : mScene.itemNodes()) {
+            unsigned long long term = 0ull;
+            if (geomSigTerm(*np, term, reads, epoch)) whole += term;
+        }
+        ++mGeomSigChecks;
+        if (whole != mGeomSig) ++mGeomSigMisses;
+    }
     mGeomSigEpoch = epoch;
     mGeomSigMode = mGi.mode;
     mGeomSigValid = true;
@@ -2544,6 +2596,7 @@ void PhotonComponent::absorbWalk(const WalkRecord &w) {
     mGiAabbReads += w.aabbReads;
     mDragMovers.insert(mDragMovers.end(), w.promoted.begin(), w.promoted.end());
     for (const Ogre::Aabb &box : w.cascadeDirty) noteGiCascadeDirty(&box);
+    mGiItemDirtyBoxes.insert(mGiItemDirtyBoxes.end(), w.itemDirty.begin(), w.itemDirty.end());
 }
 
 void PhotonComponent::structureEditClosed() {
@@ -3343,6 +3396,18 @@ void PhotonComponent::forwardPlusLightCensus(unsigned &lights, unsigned &budget)
 }
 
 PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPos, bool driverStereo) {
+    // THE PLAN'S LOG (U4 stage 3): its CPU, what the walk handed the cascades, what was marked and picked.
+    const auto tPlan = std::chrono::steady_clock::now();
+    mPlanLog.boxes = 0u;
+    mPlanLog.marked = 0u;
+    mPlanLog.rebuild = -1;
+    struct PlanTimed {
+        PlanLog &log; std::chrono::steady_clock::time_point t0;
+        ~PlanTimed() {
+            log.micros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+            ++log.plans;
+        }
+    } planTimed{ mPlanLog, tPlan };
     FrameWork w;
     // THE VR CASCADE PROFILE FOLLOWS THE DRIVER (V1-RIG item 4). The view that
     // places the chain is the one that reads it, and in a session that is the
@@ -3393,7 +3458,10 @@ PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPo
     // (round-2 F4); this only spends them.
     if (!mVctCascades.empty()) {
         JAH_TRY {
-            if (mScene.ensureGiWalk(walkInputs())) absorbWalk(mScene.giWalk());
+            if (mScene.ensureGiWalk(walkInputs())) {
+                mPlanLog.boxes = unsigned(mScene.giWalk().cascadeDirty.size());
+                absorbWalk(mScene.giWalk());
+            }
             // A STILL OBJECT THAT IS MOVING RIGHT NOW IS RE-VOXELISED WHILE IT
             // MOVES (smoke rig 2026-09-15, ledger §320) — not left until the
             // settle. THE DEFECT, measured on the monolithic arm: a STILL-
@@ -3421,12 +3489,39 @@ PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPo
             // THE GESTURE'S END (MOVER-1; the record's since U0 3c), before the marking below so the
             // demotion's own box is spent by this same frame's scheduler.
             if (!mScene.gestureActive()) endDragGesture();
-            if (!mGiCascadeDirtyBoxes.empty() || mGiCascadeDirtyAll)
+            if (!mGiCascadeDirtyBoxes.empty() || mGiCascadeDirtyAll) {
+                const auto before = [this]() {
+                    unsigned m = 0u;
+                    for (size_t i = 0; i < mVctCascades.size() && i < 32u; ++i)
+                        if (mVctCascades[i].pending) m |= 1u << i;
+                    return m;
+                };
+                // THE ROOT BOXES' GUARD (gi.rootBoxParity): which cascades the items' own boxes reach, exactly.
+                unsigned exact = 0u;
+                const bool parity = mEngine && mEngine->armRegistry().on(ArmId::GiRootBoxParity);
+                if (parity)
+                    for (size_t i = 0; i < mVctCascades.size() && i < 32u; ++i) {
+                        const Ogre::Aabb box(mVctCascades[i].centre, Ogre::Vector3(mVctCascades[i].halfSize));
+                        for (const Ogre::Aabb &d : mGiItemDirtyBoxes)
+                            if (box.intersects(d)) { exact |= 1u << i; break; }
+                    }
+                const unsigned was = before();
                 markDirtyCascadesPending(GiStaleReason::Moved);
+                mPlanLog.marked = before();   // the pending set after the mark (the newly marked and the waiting)
+                if (parity) {
+                    // A cascade already pending before the mark counts as marked (the mark cannot un-mark it).
+                    const unsigned got = mPlanLog.marked;
+                    ++mPlanLog.rootChecks;
+                    mPlanLog.rootMisses += unsigned(__builtin_popcount(exact & ~got));
+                    mPlanLog.rootExtras += unsigned(__builtin_popcount(got & ~exact & ~was));
+                }
+                mGiItemDirtyBoxes.clear();
+            }
         } JAH_CATCH(mError, (w.aborted = true, w));   // an exception ends the frame's GI after the field
     }
     w.camPos = camPos;
     if (!mGiCachesDirty) planCascades(camPos, w);
+    mPlanLog.rebuild = w.rebuild;
     return w;
 }
 

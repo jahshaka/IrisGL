@@ -453,10 +453,12 @@ bool OgreScene::removeNode(NodeId id) {
         // node may already be gone, so it cannot be asked for its id now. Only
         // if it still points HERE: a re-adoption of the same Ogre node owns it.
         auto idx = mNodeByOgreId.find(it->second.ogreId);
-        if (idx != mNodeByOgreId.end() && idx->second == id) mNodeByOgreId.erase(idx);
+        if (idx != mNodeByOgreId.end() && idx->second == &it->second) mNodeByOgreId.erase(idx);
         forgetInterpolationPointers();   // before the erase: the stale pointers become ids while their nodes live
+        owesGeomSigFull();               // the signature's name list holds records: a dying one must not be read
         releaseNode(it->first, it->second);
         uncountNode(it->second);
+        mNodeById.erase(it->first);
         mNodes.erase(it);
         // The last decal leaving must clear the SceneManager's atlas bindings,
         // which is what drops the decal code back out of every PBS shader.
@@ -763,13 +765,15 @@ void OgreScene::interpolate(float alpha) {
     // through the drain's own door; a lamp under a written node is compared with its pose key there.
     // The written nodes are known records, each once: named directly; only what hangs under them (children, riders)
     // takes the door's general walk.
-    mInterpStack.clear();
+    // Each written node is a moved subtree ROOT (U4 stage 3): its subtree's GI boxes fold into one box.
     bool lampMoved = false;
+    beginNamingPass();
     for (const InterpWrite &w : mInterpWrite) {
         if (w.rec->node->isStatic()) mSceneMgr->notifyStaticDirty(w.rec->node);
-        if (nameMovedNode(*w.rec, w.rec->node, mInterpStack)) lampMoved = true;
+        mInterpStack.clear();
+        mInterpStack.push_back(w.rec->node);
+        if (nameMovedSubtrees(mInterpStack, openGiRoot())) lampMoved = true;
     }
-    if (!mInterpStack.empty() && nameMovedSubtrees(mInterpStack)) lampMoved = true;
     if (lampMoved) ++mGiLightWriteSerial;
     mInterpDrawnAlpha = alpha;
     const auto t2 = std::chrono::steady_clock::now();
@@ -1122,9 +1126,7 @@ void OgreScene::applyNodeCasterBit(Node &n) {
 OgreScene::Node *OgreScene::registryNode(const Ogre::Node *sn) {
     if (!sn) return nullptr;
     auto idx = mNodeByOgreId.find(sn->getId());
-    if (idx == mNodeByOgreId.end()) return nullptr;
-    auto it = mNodes.find(idx->second);
-    return it == mNodes.end() ? nullptr : &it->second;
+    return idx == mNodeByOgreId.end() ? nullptr : idx->second;
 }
 
 bool OgreScene::inheritedShown(const Ogre::Node *sn) {
@@ -2140,6 +2142,8 @@ void OgreScene::destroy() {
         destroySky();   // also unbinds + destroys the reflection cubemap
         destroyGrid();
         for (auto &kv : mNodes) releaseNode(kv.first, kv.second);
+        owesGeomSigFull();
+        mNodeById.clear();
         mNodes.clear();
         mInterpNodes.clear(); mInterpStale.clear(); mInterpRecs.clear(); mInterpStaleRecs.clear(); mInterpRecsValid = false;
         mMobilityCounts = MobilityStatus();   // every node gone: the totals with them
@@ -2411,9 +2415,10 @@ Ogre::SceneNode *OgreScene::node(NodeId id) const {
 NodeId OgreScene::track(const Node &n, NodeId id) {
     Node &rec = mNodes[id] = n;
     rec.selfId = id;
+    mNodeById[id] = &rec;
     if (rec.node) {
         rec.ogreId = rec.node->getId();
-        mNodeByOgreId[rec.ogreId] = id;
+        mNodeByOgreId[rec.ogreId] = &rec;
         // Born with the EFFECTIVE state of wherever it hangs: a node created
         // (or adopted) under a hidden parent is hidden until that parent shows.
         rec.shown = rec.visible && inheritedShown(rec.node);

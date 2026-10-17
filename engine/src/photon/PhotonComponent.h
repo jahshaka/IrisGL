@@ -189,12 +189,15 @@ public:
         /// empty when still. Read in place (the probe budget's moved-cover test).
         std::vector<Ogre::Aabb> movedBoxes;
         std::vector<Ogre::Aabb> cascadeDirty;   ///< the boxes the cascades owe, in walk order
+        /// THE ROOT BOXES' GUARD (the arm gi.rootBoxParity, U4 stage 3): with the arm on, every item's own box the
+        /// walk would have owed the cascades before the roots — the law is that the roots mark no cascade fewer.
+        std::vector<Ogre::Aabb> itemDirty;
         std::vector<NodeId> promoted;           ///< stills the gesture put on the mover channel
         bool probeOnlyChanged = false;          ///< a probe-only input moved (a non-GI item, a decal)
         bool itemsAppeared = false;             ///< a GI item seen for the first time
         unsigned long long aabbReads = 0;       ///< getWorldAabbUpdated calls the walk made
         void clear() {
-            movedBoxes.clear(); cascadeDirty.clear(); promoted.clear();
+            movedBoxes.clear(); cascadeDirty.clear(); itemDirty.clear(); promoted.clear();
             probeOnlyChanged = itemsAppeared = false; aabbReads = 0;
         }
     };
@@ -1227,6 +1230,23 @@ private:
     /// cannot say where".
     std::vector<Ogre::Aabb> mGiCascadeDirtyBoxes;
     bool mGiCascadeDirtyAll = false;
+public:
+    /// THE PLAN'S LOG (ENGINE-UPGRADE-U4 stage 3; inspect::SceneEcho::giPlan): the last planFrame's CPU, the boxes its
+    /// walk handed the cascades, the cascades it marked pending (a bit per cascade), the one it rebuilds (-1: none), and
+    /// how many plans ran.
+    struct PlanLog {
+        double micros = 0.0;
+        unsigned boxes = 0u, marked = 0u;
+        int rebuild = -1;
+        unsigned long long plans = 0ull;
+        /// The root boxes' guard (gi.rootBoxParity): marks checked; cascades the items' own boxes reach that the
+        /// marks missed (0 is the law); cascades marked that no item box reaches (the union's conservative extra).
+        unsigned long long rootChecks = 0ull, rootMisses = 0ull, rootExtras = 0ull;
+    };
+    const PlanLog &planLog() const { return mPlanLog; }
+private:
+    PlanLog mPlanLog;
+    std::vector<Ogre::Aabb> mGiItemDirtyBoxes;   ///< the guard's: the items' own boxes since the last mark
     /// The authoritative camera position the GI tracker last saw, and whether
     /// any view has ever tracked one. A cascade arm is built AROUND it, so a
     /// rebuild that arrives before the first tracked frame (every scene open:
@@ -1444,6 +1464,15 @@ private:
     /// THE GI SCHEDULER'S GEOMETRY TERM (giGeometryKey), cached
     /// against the movement epoch (clean-2 lane, 2026-09-13).
     mutable unsigned long long mGeomSigEpoch = 0, mGeomSig = 0;
+    /// The signature's generation (a node's term counts only in it), its full passes, and the guard's counts
+    /// (the arm gi.geomSigParity: passes checked against the whole sum, and the misses).
+    mutable uint32_t           mGeomSigGen = 0;
+    mutable unsigned long long mGeomSigFullPasses = 0, mGeomSigChecks = 0, mGeomSigMisses = 0;
+public:
+    unsigned long long geomSigFullPasses() const { return mGeomSigFullPasses; }
+    unsigned long long geomSigChecks() const { return mGeomSigChecks; }
+    unsigned long long geomSigMisses() const { return mGeomSigMisses; }
+private:
     mutable bool               mGeomSigValid = false;
     mutable GiMode             mGeomSigMode = GiMode::Off;
     /// ONE WALK FOR BOTH SIGNATURES (audit D4). They are pure functions of the

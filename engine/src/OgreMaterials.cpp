@@ -1291,6 +1291,7 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
         wearDatablock(n.item, wornDatablock(n, rec));   // the node's cull; the old twin may be free
         markShadowShapeDirty(n);
         n.item->setVisibilityFlags(itemVisibilityFlags(n, rec.unlit, rec.distortion));
+        nameForGeomSig(n);   // its GI channel may have changed: the signature re-reads it (U4 stage 3)
         n.item->setRenderQueueGroup(renderQueueFor(rec));
         markGpuSlotDirty(n);   // its flags word and its queue just changed
         n.materialRef = matId;

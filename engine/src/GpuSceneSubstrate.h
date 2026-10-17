@@ -133,14 +133,16 @@ public:
     // PBS change log), so the old per-slot flags compare over the whole index (the backstop)
     // is gone. A nodeless write, an incomplete change set or an overflow owes the whole index
     // once (`namedFull`, which also makes the first walk whole).
-    std::vector<NodeId> namedNodes;   ///< NodeIds named since the consuming walk (the 64-bit id, U3 stage 3)
+    /// The nodes named since the consuming walk, by their OGRE id (U4 stage 3): resolved through the scene's one
+    /// reverse index (Ogre id -> record, one lookup), which forgets a dead node — and Ogre never reuses an id.
+    std::vector<uint32_t> namedNodes;
     bool namedFull = true;
     std::vector<uint32_t> namedSlots;   ///< the walk's scratch: the named nodes' slots
     /// The take generation (stage 5): a node is named once per take (its stamp, OgreScene::Node::nameTakeGpu),
     /// and the list overflows to the whole walk only once it names as many nodes as that walk visits (`cap`,
     /// the scene's item slots) - the whole walk is then no dearer.
     uint32_t namedTake = 1u;
-    void nameNode(NodeId node, uint32_t &stamp, size_t cap) {
+    void nameNode(uint32_t node, uint32_t &stamp, size_t cap) {
         if (namedFull || stamp == namedTake) return;
         if (namedNodes.size() >= cap) { clearNames(); namedFull = true; return; }
         namedNodes.push_back(node);

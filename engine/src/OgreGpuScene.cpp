@@ -1291,10 +1291,10 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     std::vector<uint32_t> &named = sub.namedSlots;
     named.clear();
     if (!whole) {
-        for (NodeId id : sub.namedNodes) {
-            auto it = mNodes.find(id);
-            if (it == mNodes.end() || !it->second.item || it->second.itemSlot == size_t(-1)) continue;
-            named.push_back(uint32_t(it->second.itemSlot));
+        for (uint32_t ogreId : sub.namedNodes) {
+            auto it = mNodeByOgreId.find(Ogre::IdType(ogreId));
+            if (it == mNodeByOgreId.end() || !it->second->item || it->second->itemSlot == size_t(-1)) continue;
+            named.push_back(uint32_t(it->second->itemSlot));
         }
         std::sort(named.begin(), named.end());
         named.erase(std::unique(named.begin(), named.end()), named.end());
@@ -1575,6 +1575,23 @@ inspect::SceneEcho::GpuWalk OgreScene::gpuWalk() const {
     return w;
 }
 
+inspect::SceneEcho::GiPlan OgreScene::giPlan() const {
+    GiPlan g;
+    const PhotonComponent::PlanLog &l = mPhoton.planLog();
+    g.micros = l.micros;
+    g.boxes = l.boxes;
+    g.pending = l.marked;
+    g.rebuild = l.rebuild;
+    g.plans = l.plans;
+    g.sigFullPasses = mPhoton.geomSigFullPasses();
+    g.sigChecks = mPhoton.geomSigChecks();
+    g.sigMisses = mPhoton.geomSigMisses();
+    g.rootChecks = l.rootChecks;
+    g.rootMisses = l.rootMisses;
+    g.rootExtras = l.rootExtras;
+    return g;
+}
+
 inspect::SceneEcho::TraceSun OgreScene::traceSun() const {
     TraceSun t;
     if (const SurfaceCache *c = mPhoton.surfaceCache()) {
@@ -1596,7 +1613,7 @@ inspect::SceneEcho::TraceSun OgreScene::traceSun() const {
 
 NodeId OgreScene::nodeOfGpuKey(uint32_t key) const {
     auto it = mNodeByOgreId.find(Ogre::IdType(key));
-    return it == mNodeByOgreId.end() ? 0 : it->second;
+    return it == mNodeByOgreId.end() ? 0 : it->second->selfId;
 }
 
 bool OgreScene::gpuNodeView(uint32_t node, GpuSlotView &out) const {

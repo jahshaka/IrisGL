@@ -1881,6 +1881,8 @@ enum class ArmId : unsigned {
     FakeRuntimePace,     ///< "vr.fakeRuntimePace" — ms: each free frame waits as a runtime's xrWaitFrame would (a test door, U3 decision 53)
     FakePresentBlock,    ///< "view.fakePresentBlock" — ms: a free frame blocks to that span after its publish, in place of a blocking present (a test door, U3 decision 65)
     CardsSunGridParity,  ///< "cards.sunGridParity" — every sun trace's grid searches checked against the exhaustive search (the guard, U4 stage 2)
+    GiGeomSigParity,     ///< "gi.geomSigParity" — every geometry signature checked against the whole sum (the guard, U4 stage 3)
+    GiRootBoxParity,     ///< "gi.rootBoxParity" — every cascade mark checked against the items' own boxes (the guard, U4 stage 3)
     Count
 };
 class ArmRegistry {
@@ -4402,6 +4404,7 @@ public:
     CardWalk cardWalk() const override;
     GpuWalk gpuWalk() const override;
     TraceSun traceSun() const override;
+    GiPlan giPlan() const override;
     void setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) override;
     unsigned vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) const override;
     bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;
@@ -4605,7 +4608,7 @@ public:
     /// looked?" — and a false yes costs one scan.
     /// NODELESS = scene-wide: every item may have changed, so both scans owe a full pass. A seam that knows its node
     /// NAMES it instead (the overload): only that node's item is re-read (U0 3b, the change set's engine half).
-    void noteSceneTransformWrite() { ++mSceneTransformWrites; mScanFullGi = mScanFullShadow = true; mSubstrate.nameAll(); }
+    void noteSceneTransformWrite() { ++mSceneTransformWrites; mScanFullGi = mScanFullShadow = mGeomSigFull = true; mSubstrate.nameAll(); }
     /// AN INPUT TO THE CASTER HALF OF THE WALK CHANGED, and it is not a
     /// transform (ENGINE-4 F5): a rig posed, a caster-shape seam (a mesh or
     /// material swap, a rebuilt Item, a per-object Cast Shadow flag, a
@@ -4711,6 +4714,18 @@ private:
         /// scan's and the GPU scene's pending list this node was last named into - a node is named ONCE per
         /// take, however many seams fire for it (attachMesh fired three or four).
         uint32_t         nameTakeGi = 0, nameTakeShadow = 0, nameTakeGpu = 0;
+        /// THE NAMING PASS AND THE ROOT (U4 stage 3): the pass this node was last named in (each node once a pass),
+        /// and the moved subtree root's GI box its walk folds into — valid while giRootEpoch is the scene's.
+        uint32_t         nameSeen = 0, giRootEpoch = 0, giRootSlot = 0xFFFFFFFFu;
+        /// THE GEOMETRY SIGNATURE'S TERM (U4 stage 3; PhotonComponent::computeGiGeometrySignature): this node's share
+        /// of the order-free sum, counted while `geomSigGen` is the signature's generation; and its take of the
+        /// signature's name list.
+        unsigned long long geomSigTerm = 0;
+        uint32_t         geomSigGen = 0, nameTakeSig = 0;
+        /// ...and the world box the signature read, at the scene's transform epoch of the read: the GI walk's own
+        /// fresh read takes it while nothing was written since (the same getWorldAabbUpdated on the same poses).
+        Ogre::Aabb       sigBox;
+        unsigned long long sigBoxEpoch = ~0ull;
         /// ...and its MESH's place in the GPU scene's mesh table (GpuScene.h),
         /// acquired at attach and released at detach. kNoMesh until geometry
         /// arrives, which is what an instance entry with no mesh reads as.
@@ -5662,7 +5677,25 @@ private:
     /// THE DRAIN'S DOOR TO THE SCANS (U0 3b; decision 56): each node's subtree — its Ogre children and its bones'
     /// riders — named once to the GPU-scene walk and the GI/shadow scans, a lamp under it compared with its pose key.
     /// True when a lamp moved. `stack` is consumed. nameMovedNode: one registered node, what moves with it pushed.
-    bool nameMovedSubtrees(std::vector<Ogre::Node *> &stack);
+    /// `rootSlot`: the moved subtree root's GI box this pass's nodes fold into (openGiRoot), or kNoGiRoot. A naming
+    /// PASS (beginNamingPass) visits each Ogre node once across all its calls.
+    bool nameMovedSubtrees(std::vector<Ogre::Node *> &stack, uint32_t rootSlot);
+    static constexpr uint32_t kNoGiRoot = 0xFFFFFFFFu;
+    /// THE NAMING PASS (U4 stage 3): one change set's (or one interpolation's) roots share it, so a node under two
+    /// moved roots is named once.
+    void beginNamingPass();
+    /// ONE BOX PER MOVED SUBTREE ROOT (U4 stage 3): a root's slot, into which the GI walk folds the old and new box
+    /// of every item named under it (instead of one cascade box per item); kNoGiRoot past kGiRootCap open roots.
+    uint32_t openGiRoot();
+    static constexpr size_t kGiRootCap = 4096u;
+    uint32_t mNameSeenEpoch = 0u;
+    std::unordered_set<const Ogre::Node *> mNameSeenOther;   ///< the pass's unregistered nodes (a light's adapter)
+    std::vector<Ogre::Node *> mNameStack;                    ///< the change set's naming stack (scratch)
+    /// The open roots' boxes and whether any item folded in, consumed (cleared) by the GI walk; `mGiRootEpoch` is the
+    /// window a node's tag belongs to (the walk advances it).
+    std::vector<Ogre::Aabb> mGiRootBoxes;
+    std::vector<char> mGiRootUsed;
+    uint32_t mGiRootEpoch = 1u;
     bool nameMovedNode(Node &rec, Ogre::Node *on, std::vector<Ogre::Node *> &stack);
     /// The node's record joins the newest step's list (applyNodeRecord; each node once a step).
     void noteInterpolated(Node &rec, NodeId id, unsigned long long step);
@@ -5670,8 +5703,10 @@ private:
     std::vector<InterpWrite> mInterpWrite;    ///< what one interpolate writes, each node once (scratch)
     std::vector<Ogre::Node *> mInterpStack;   ///< ...named to the scans through nameMovedSubtrees (scratch)
     Node *record(NodeId id) {
-        auto it = mNodes.find(id);
-        return it == mNodes.end() ? nullptr : &it->second;
+        // ONE HASH LOOKUP (U4 stage 3), never the ordered map's descent: the per-record and per-name paths call this
+        // per node.
+        auto it = mNodeById.find(id);
+        return it == mNodeById.end() ? nullptr : it->second;
     }
     /// The EFFECTIVE visibility `sn`'s children inherit from above it: the
     /// `shown` of the nearest registered ancestor, true when there is none.
@@ -5747,11 +5782,17 @@ private:
     Ogre::SceneManager *mSceneMgr;
     std::string        &mError;
     std::map<NodeId, Node> mNodes;
-    /// Reverse index Ogre node id -> registry id, for the one question the
-    /// visibility cascade has to ask of every node it walks ("is this one of
-    /// ours, and what was it told?"). Keyed by Ogre's never-reused id rather
-    /// than the node address, which Ogre recycles.
-    std::unordered_map<Ogre::IdType, NodeId> mNodeByOgreId;
+    /// Reverse index Ogre node id -> the RECORD, for the one question the
+    /// visibility cascade and the change set's naming ask of every node they
+    /// walk ("is this one of ours, and what was it told?"). Keyed by Ogre's
+    /// never-reused id rather than the node address, which Ogre recycles; it
+    /// holds the record itself (a std::map node is address-stable until it is
+    /// erased, and its entry here goes first) — ONE lookup on the naming path,
+    /// never a hash then a tree descent (ENGINE-UPGRADE-U4 stage 3).
+    std::unordered_map<Ogre::IdType, Node *> mNodeByOgreId;
+    /// ...and the registry id -> the record (record(): the node records, the change set, the scans' names), the same
+    /// address-stable record; inserted at track, erased with the record (U4 stage 3).
+    std::unordered_map<NodeId, Node *> mNodeById;
     /// THE SCENE'S PUBLISHED FRAME (Scene::published, PublishedFrame): a whole-frame SWAP (Engine.h's contract) —
     /// publishFrame writes the buffer published() is not returning, then flips the index.
     mutable SnapshotBuffers<PublishedFrame> mPublished;   ///< three buffers and the host's latch (U3 stage 5)
@@ -6263,6 +6304,25 @@ private:
     /// The GI movement scan has run this frame (reset by updateGiTracking, the
     /// once-per-frame entry point): whoever consumes mGiMovedBoxes first runs it.
     bool mGiWalkedThisFrame = false;
+    /// THE GEOMETRY SIGNATURE'S NAMES (U4 stage 3): the nodes written since the signature last read (each once a
+    /// take), or a full pass owed — the item set changed, a node died (the list holds records), a nodeless write, an
+    /// incomplete change set, or the list grew to a full pass's size.
+    std::vector<Node *> mGeomSigNames;
+    bool mGeomSigFull = true;
+    uint32_t mNameTakeSig = 0;
+public:
+    void nameForGeomSig(Node &n) {
+        if (mGeomSigFull || n.nameTakeSig == mNameTakeSig + 1u) return;
+        if (mGeomSigNames.size() >= mItemNodes.size()) { owesGeomSigFull(); return; }
+        n.nameTakeSig = mNameTakeSig + 1u;
+        mGeomSigNames.push_back(&n);
+    }
+    void owesGeomSigFull() { mGeomSigFull = true; mGeomSigNames.clear(); ++mNameTakeSig; }
+    bool geomSigFullOwed() const { return mGeomSigFull; }
+    const std::vector<Node *> &geomSigNames() const { return mGeomSigNames; }
+    /// The signature read them: the list starts again (a new take).
+    void tookGeomSigNames() { mGeomSigNames.clear(); mGeomSigFull = false; ++mNameTakeSig; }
+private:
     /// THE WALK'S GI RECORD and the inputs it was walked with (ensureGiWalk).
     PhotonComponent::WalkRecord mGiWalk;
     PhotonComponent::WalkInputs mGiWalkIn;

@@ -74,6 +74,22 @@ public:
         double             hookMicros = 0.0, stepOneMicros = 0.0;
     };
     virtual TraceSun traceSun() const = 0;
+    /// THE GI PLAN'S LOG (ENGINE-UPGRADE-U4 stage 3): the last PhotonComponent::planFrame — its CPU in µs, the boxes
+    /// the walk handed the cascades, the cascades pending after its mark (a bit each), the one it rebuilds (-1 none),
+    /// the plans run.
+    struct GiPlan {
+        double             micros = 0.0;
+        unsigned           boxes = 0, pending = 0;
+        int                rebuild = -1;
+        unsigned long long plans = 0;
+        /// THE GEOMETRY SIGNATURE (the drain's plan part): its full passes, and the guard's (gi.geomSigParity)
+        /// passes checked and misses — 0 is the law.
+        unsigned long long sigFullPasses = 0, sigChecks = 0, sigMisses = 0;
+        /// THE ROOT BOXES' GUARD (gi.rootBoxParity): marks checked, cascades the items' own boxes reach that the
+        /// marks missed (0 is the law), cascades marked that no item box reaches (the union's extra).
+        unsigned long long rootChecks = 0, rootMisses = 0, rootExtras = 0;
+    };
+    virtual GiPlan giPlan() const = 0;
 };
 /// The scene's record; null for a scene this engine did not make.
 const SceneEcho *scene(const Scene *s);

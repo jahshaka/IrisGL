@@ -378,8 +378,9 @@ bool OgreScene::ensureGiWalk(const PhotonComponent::WalkInputs &in) {
 /// scene whose scans never run (GI off, no cached lamp) keeps a full pass owed instead of an ever-growing list.
 void OgreScene::noteSceneTransformWrite(Node &n) {
     ++mSceneTransformWrites;
-    mSubstrate.nameNode(n.selfId, n.nameTakeGpu, mItemNodes.size());   // the GPU scene's walk takes the same name   // the GPU scene's walk takes the same name
+    mSubstrate.nameNode(n.ogreId, n.nameTakeGpu, mItemNodes.size());   // the GPU scene's walk takes the same name
     nameForScan(n, mScanPendingGi, mScanFullGi, mNameTakeGi, n.nameTakeGi);
+    nameForGeomSig(n);                                                  // ...and the geometry signature (U4 stage 3)
     nameForScan(n, mScanPendingShadow, mScanFullShadow, mNameTakeShadow, n.nameTakeShadow);
 }
 
@@ -391,6 +392,7 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
     if (!cs.complete) {
         ++mHostMoves;
         mScanFullGi = mScanFullShadow = true;
+        owesGeomSigFull();
         clearScanNames(mScanPendingGi, mNameTakeGi); clearScanNames(mScanPendingShadow, mNameTakeShadow);
         mSubstrate.nameAll();
         // Every lamp's pose key re-read as it stands now (the set cannot say which moved; the owed flags below say
@@ -412,16 +414,37 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
         return 1u;
     }
     if (cs.moved.empty()) return 0u;
-    std::vector<Ogre::Node *> stack;
+    // EACH MOVED ID IS A SUBTREE ROOT (U4 stage 3): its subtree named under its own GI box (one box per root, not
+    // per item), in one naming pass — a node under two moved roots is named once, under the first.
+    beginNamingPass();
+    bool light = false;
     for (NodeId id : cs.moved) {
-        auto it = mNodes.find(id);
-        if (it == mNodes.end() || !it->second.node) continue;   // released since the emit
+        Node *rec = record(id);
+        if (!rec || !rec->node) continue;   // released since the emit
         ++mHostMoves;
-        stack.push_back(it->second.node);
+        mNameStack.clear();
+        mNameStack.push_back(rec->node);
+        if (nameMovedSubtrees(mNameStack, openGiRoot())) light = true;
     }
-    const bool light = nameMovedSubtrees(stack);
     if (light) ++mGiLightWriteSerial;
     return light ? 1u : 0u;
+}
+
+void OgreScene::beginNamingPass() {
+    if (++mNameSeenEpoch == 0u) {   // the 32-bit pass counter wrapped: no node may read as seen
+        for (auto &kv : mNodes) kv.second.nameSeen = 0u;
+        mNameSeenEpoch = 1u;
+    }
+    mNameSeenOther.clear();
+}
+
+uint32_t OgreScene::openGiRoot() {
+    // Bounded: a scene whose GI walk never runs (no chain) never consumes its roots; past the cap a root is no root
+    // and its items' boxes go one per item, as before.
+    if (mGiRootBoxes.size() >= kGiRootCap) return kNoGiRoot;
+    mGiRootBoxes.push_back(Ogre::Aabb());
+    mGiRootUsed.push_back(0);
+    return uint32_t(mGiRootBoxes.size() - 1u);
 }
 
 /// THE DOOR ITSELF (decision 56: the drain's change set and the free frames' interpolation both name through it).
@@ -450,18 +473,22 @@ bool OgreScene::nameMovedNode(Node &rec, Ogre::Node *on, std::vector<Ogre::Node 
     return light;
 }
 
-bool OgreScene::nameMovedSubtrees(std::vector<Ogre::Node *> &stack) {
+bool OgreScene::nameMovedSubtrees(std::vector<Ogre::Node *> &stack, uint32_t rootSlot) {
     bool light = false;
-    // Each Ogre node ONCE: a moved parent and its moved child must not walk the child's subtree twice (a whole
-    // document written at once — a load, a paste — is O(nodes), never O(nodes x depth)).
-    std::unordered_set<const Ogre::Node *> seen;
+    // Each Ogre node ONCE A PASS: a moved parent and its moved child must not walk the child's subtree twice (a
+    // whole document written at once — a load, a paste — is O(nodes), never O(nodes x depth)). A registered node
+    // carries the pass it was named in (one lookup, no set); an unregistered one (a light's adapter) is in the pass's
+    // small set.
     while (!stack.empty()) {
         Ogre::Node *on = stack.back();
         stack.pop_back();
-        if (!seen.insert(on).second) continue;
         if (Node *rec = registryNode(on)) {
+            if (rec->nameSeen == mNameSeenEpoch) continue;
+            rec->nameSeen = mNameSeenEpoch;
+            if (rootSlot != kNoGiRoot) { rec->giRootEpoch = mGiRootEpoch; rec->giRootSlot = rootSlot; }
             if (nameMovedNode(*rec, on, stack)) light = true;
         } else {
+            if (!mNameSeenOther.insert(on).second) continue;
             for (size_t i = 0, e = on->numChildren(); i < e; ++i) stack.push_back(on->getChild(i));
         }
     }
@@ -478,9 +505,8 @@ std::vector<OgreScene::Node *> &OgreScene::takeScanSubset(std::vector<NodeId> &p
     mScanTake.erase(std::unique(mScanTake.begin(), mScanTake.end()), mScanTake.end());
     mScanSubset.clear();
     for (NodeId id : mScanTake) {
-        auto it = mNodes.find(id);
-        if (it != mNodes.end() && it->second.item && it->second.itemSlot != size_t(-1))
-            mScanSubset.push_back(&it->second);
+        Node *rec = record(id);
+        if (rec && rec->item && rec->itemSlot != size_t(-1)) mScanSubset.push_back(rec);
     }
     mScanTake.clear();
     return mScanSubset;
@@ -488,6 +514,7 @@ std::vector<OgreScene::Node *> &OgreScene::takeScanSubset(std::vector<NodeId> &p
 
 void OgreScene::indexItemNode(Node &n) {
     noteSceneTransformWrite(n);     // an Item arriving is an input to every scan (named: its item is re-read)
+    owesGeomSigFull();              // the item set changed: the signature sums its items afresh
     if (n.itemSlot != size_t(-1)) return;
     n.itemSlot = mItemNodes.size();
     mItemNodes.push_back(&n);
@@ -514,6 +541,7 @@ void OgreScene::unindexDecalNode(Node &n) {
 
 void OgreScene::unindexItemNode(Node &n) {
     noteSceneTransformWrite(n);     // ...and so is one leaving (the walk runs and reports the departure)
+    owesGeomSigFull();
     // A CASTER LEAVING: its last box is what the lamps around it must re-render
     // without it (the scan never sees a node that has no Item).
     if (n.scan.shadowPresent && mShadowScanPrimed)
@@ -585,6 +613,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
         if (shadow) { clearScanNames(mScanPendingShadow, mNameTakeShadow); mScanFullShadow = false; }
     }
     bool firstGi = false;
+    const bool rootParity = gi && mEngine && mEngine->armRegistry().on(ArmId::GiRootBoxParity);
     if (gi) {
         mGiWalk.clear();
         firstGi = !mGiScannedOnce;
@@ -646,8 +675,11 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
         // would let the fresh walk skip the update where nothing moved, exists
         // only in OGRE_DEBUG_MEDIUM builds — an engine-side movement epoch is
         // the way to cut this, and it is a lane of its own.)
-        if (fresh) ++mGiWalk.aabbReads;
-        const Ogre::Aabb a = fresh ? item->getWorldAabbUpdated() : item->getWorldAabb();
+        // ...UNLESS THE GEOMETRY SIGNATURE READ IT AT THIS EPOCH (U4 stage 3): nothing written since, the same
+        // updated read on the same poses — taken, not read again.
+        const bool reuse = fresh && n.sigBoxEpoch == transformEpoch();
+        if (fresh && !reuse) ++mGiWalk.aabbReads;
+        const Ogre::Aabb a = reuse ? n.sigBox : fresh ? item->getWorldAabbUpdated() : item->getWorldAabb();
         // Read once per item, both halves use them (each is an SoA read, and
         // this loop is the per-frame cost the whole walk is measured by).
         const Ogre::uint32 flags = item->getVisibilityFlags();
@@ -716,7 +748,10 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                 // the newcomer a rebuild to take (no attach set to re-select: the
                 // gather reads membership from the GPU scene at every build). The
                 // scheduler still spends at most one cascade per frame.
-                if (!firstGi && mGiWalkIn.chainBuilt) mGiWalk.cascadeDirty.push_back(a);
+                if (!firstGi && mGiWalkIn.chainBuilt) {
+                    mGiWalk.cascadeDirty.push_back(a);
+                    if (rootParity) mGiWalk.itemDirty.push_back(a);
+                }
             } else if (PhotonComponent::giAabbMoved(n.scan.giBox, a)) {
                 Ogre::Aabb moved = n.scan.giBox;
                 moved.merge(a);
@@ -749,13 +784,26 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                     mGiWalk.promoted.push_back(n.selfId);
                     applyNodeVisibilityFlags(n);
                     mGiWalk.cascadeDirty.push_back(moved);
+                    if (rootParity) mGiWalk.itemDirty.push_back(moved);
                 } else {
                     mGiWalk.movedBoxes.push_back(moved);
                     // ...AND THE CASCADE CHAIN'S OWN RECORD (G1), which unlike
                     // `mGiMovedBoxes` (per frame, by contract) accumulates until the
                     // host's settle asks the chain to answer for it: the frame a
                     // drag is released is not the frame the box moved.
-                    if (mGiWalkIn.chainBuilt) mGiWalk.cascadeDirty.push_back(moved);
+                    // ONE BOX PER MOVED SUBTREE ROOT (U4 stage 3): an item named
+                    // under a root this window folds its old and new box into the
+                    // root's (emitted after the loop) — a superset of the item's,
+                    // so never a cascade fewer; anything else, its own box.
+                    if (mGiWalkIn.chainBuilt) {
+                        if (rootParity) mGiWalk.itemDirty.push_back(moved);
+                        if (n.giRootEpoch == mGiRootEpoch && n.giRootSlot < mGiRootBoxes.size()) {
+                            if (mGiRootUsed[n.giRootSlot]) mGiRootBoxes[n.giRootSlot].merge(moved);
+                            else { mGiRootBoxes[n.giRootSlot] = moved; mGiRootUsed[n.giRootSlot] = 1; }
+                        } else {
+                            mGiWalk.cascadeDirty.push_back(moved);
+                        }
+                    }
                     n.scan.giBox = a;
                 }
             }
@@ -798,6 +846,16 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
         }
     }
     if (gi) {
+        // THE ROOTS' BOXES, one each, after the items' own (U4 stage 3) — and the window closes: a tag from it is
+        // no longer a root's.
+        for (size_t i = 0; i < mGiRootBoxes.size(); ++i)
+            if (mGiRootUsed[i]) mGiWalk.cascadeDirty.push_back(mGiRootBoxes[i]);
+        mGiRootBoxes.clear();
+        mGiRootUsed.clear();
+        if (++mGiRootEpoch == 0u) {   // wrapped: no node may read as tagged
+            for (auto &kv : mNodes) kv.second.giRootEpoch = 0u;
+            mGiRootEpoch = 1u;
+        }
         // THE DECALS (clean-2 lane, 2026-09-13). A decal is not an Item and its
         // node usually carries none, so the loop above cannot see it — yet the
         // probe faces render decals like any other Forward+ surface, which
