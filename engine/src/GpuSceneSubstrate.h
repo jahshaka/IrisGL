@@ -127,7 +127,12 @@ public:
     /// ...and what each share composed (U4 stage 4: the compose inside the compare's task): the slots it staged, in
     /// its slot order, with the serial tail each owes (the Atom route, the material queue) — replayed after the
     /// barrier, share by share, the serial compose's order.
-    struct Composed { uint32_t slot; bool atom; bool queueMaterial; uint32_t laneOwed; };   ///< (laneOwed: decision 17.1)
+    struct Composed {   ///< (laneOwed: decision 17.1)
+        uint32_t slot = 0;
+        bool atom = false;
+        bool queueMaterial = false;
+        uint32_t laneOwed = 0;
+    };
     std::vector<std::vector<Composed>> shareComposed;
     /// A share that threw (decision 18.3): its error, and the shares recomposed on the frame's thread, ever.
     std::vector<std::string> shareError;

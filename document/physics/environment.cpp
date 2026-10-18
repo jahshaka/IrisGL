@@ -759,8 +759,8 @@ void Environment::createPhysicsWorld()
 	collisionConfig = new btDefaultCollisionConfiguration();
 #if BT_THREADSAFE
 	// THE MULTI-THREADED WORLD (U4 stage 6): the narrow phase's pairs across the scheduler (btCollisionDispatcherMt),
-	// the simulation islands across a pool of solvers (btConstraintSolverPoolMt, one per scheduler thread), and one
-	// multi-threaded solver for an island too large for one thread (btSequentialImpulseConstraintSolverMt).
+	// the simulation islands across a pool of solvers (btConstraintSolverPoolMt, one per scheduler thread); the
+	// multi-threaded solver's in-island batching stays off (setIslandBatching: Bullet's grid assignment asserts).
 	// Built on any thread (a scene opened on a loader thread builds its world there): the constructors read the
 	// scheduler's thread count and take no thread index; only the step and a ray test do (bindGameThread).
 	if (gBound.load()) {

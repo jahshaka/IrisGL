@@ -1488,7 +1488,7 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
         // on the frame's thread between (decision 18.3: every barrier pairs).
         GpuSceneWalkTask<decltype(share)> task(share);
         struct Barrier {
-            Ogre::SceneManager *sm;
+            Ogre::SceneManager *sm = nullptr;
             ~Barrier() { sm->waitForPendingUserScalableTask(); }
         } barrier{ mSceneMgr };
         mSceneMgr->executeUserScalableTask(&task, false);
