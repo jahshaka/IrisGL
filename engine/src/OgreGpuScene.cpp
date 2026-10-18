@@ -1294,11 +1294,8 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     std::vector<uint32_t> &named = sub.namedSlots;
     named.clear();
     if (!whole) {
-        for (uint32_t ogreId : sub.namedNodes) {
-            auto it = mNodeByOgreId.find(Ogre::IdType(ogreId));
-            if (it == mNodeByOgreId.end() || !it->second->item || it->second->itemSlot == size_t(-1)) continue;
-            named.push_back(uint32_t(it->second->itemSlot));
-        }
+        for (const Node *n : mNamed)   // the one name list's records the GPU walk owes (U4 decision 12.1 ii)
+            if ((n->namedMask & kNameGpu) && n->item && n->itemSlot != size_t(-1)) named.push_back(uint32_t(n->itemSlot));
         std::sort(named.begin(), named.end());
         named.erase(std::unique(named.begin(), named.end()), named.end());
     }
@@ -1378,7 +1375,7 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     for (unsigned long long f : sub.shareFlags) sub.flagsRecomputed += f;
     // A walk on the graph's current transforms consumes the epoch (composeGpuScene), and with
     // it the names; a reader's walk before the graph (the warm-up) leaves them for the frame's.
-    if (graphIsCurrent) { sub.clearNames(); sub.namedFull = false; }
+    if (graphIsCurrent) { releaseNamed(kNameGpu); sub.namedFull = false; }
     // THE COMPOSE, IN SLOT ORDER, on the frame's thread: the composer edits Ogre state
     // (the split's render queue) and queues GI conversions.
     detail::GpuInstance cand;
@@ -1575,6 +1572,10 @@ inspect::SceneEcho::GpuWalk OgreScene::gpuWalk() const {
     w.slotsComposed = mSubstrate.lastComposedSlots;
     w.shares = mSubstrate.walkShares;
     w.walks = mSubstrate.walks;
+    w.ogreIdReach = mNodeByOgreId.reach();
+    w.ogreIdPages = mNodeByOgreId.allocated();
+    w.nodeIdReach = mNodeById.reach();
+    w.nodeIdPages = mNodeById.allocated();
     return w;
 }
 
@@ -1595,6 +1596,13 @@ inspect::SceneEcho::GiPlan OgreScene::giPlan() const {
     g.signatureMicros = l.signatureMicros;
     g.boxesMicros = l.boxesMicros;
     g.pickMicros = l.pickMicros;
+    g.pccStages = l.pccStages;
+    g.pccStagesLit = l.pccStagesLit;
+    g.pccLightChanges = l.pccLightChanges;
+    g.pccLightsBefore = l.pccLightsBefore;
+    g.pccLightsAfter = l.pccLightsAfter;
+    g.pccProbes = l.pccProbes;
+    g.pccProbeOffsetMax = l.pccProbeOffsetMax;
     return g;
 }
 
@@ -1615,14 +1623,18 @@ inspect::SceneEcho::TraceSun OgreScene::traceSun() const {
         t.stepOneMicros = k.stepOneMicros;
         t.step3Micros = k.step3Micros;
         t.step3bMicros = k.step3bMicros;
+        t.stillMicros = k.stillMicros;
+        t.step2Micros = k.step2Micros;
+        t.step4Micros = k.step4Micros;
+        t.traceJobMicros = k.traceJobMicros;
         t.wideCards = k.wideCards;
     }
     return t;
 }
 
 NodeId OgreScene::nodeOfGpuKey(uint32_t key) const {
-    auto it = mNodeByOgreId.find(Ogre::IdType(key));
-    return it == mNodeByOgreId.end() ? 0 : it->second->selfId;
+    const Node *n = mNodeByOgreId.get(Ogre::IdType(key));
+    return n ? n->selfId : 0;
 }
 
 bool OgreScene::gpuNodeView(uint32_t node, GpuSlotView &out) const {

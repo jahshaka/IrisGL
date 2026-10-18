@@ -53,6 +53,9 @@ public:
         double             nameMicros = 0.0, compareMicros = 0.0, composeMicros = 0.0, notifyMicros = 0.0;
         unsigned           slotsCompared = 0, slotsComposed = 0, shares = 0;
         unsigned long long walks = 0;
+        /// THE DIRECT INDEXES' REACH (U4 decision 12.1 i): the Ogre-id and the registry-id page tables — the ids their
+        /// pages span and the pages allocated.
+        unsigned long long ogreIdReach = 0, ogreIdPages = 0, nodeIdReach = 0, nodeIdPages = 0;
     };
     virtual GpuWalk gpuWalk() const = 0;
     /// THE SUN TRACE'S CPU (ENGINE-UPGRADE-U4 stage 1, premise P1): the last SurfaceCache::traceSun call — its whole
@@ -75,6 +78,9 @@ public:
         /// ...and the movers' searches: step 3 (the changed footprints' cards) and step 3b (the pending cards a
         /// current footprint reaches).
         double             step3Micros = 0.0, step3bMicros = 0.0;
+        /// ...and the rest, named: step 1b (the still trace — the per-hit term), step 2 (the movers' changed boxes),
+        /// step 4 (the order and the pick), the movers' trace job.
+        double             stillMicros = 0.0, step2Micros = 0.0, step4Micros = 0.0, traceJobMicros = 0.0;
         /// The cards the call's grids held apart as `wide` (the most of its grids).
         unsigned           wideCards = 0;
     };
@@ -96,6 +102,13 @@ public:
         /// THE PLAN'S PARTS (µs; the monitor's engine.plan children): the geometry signature's last pass, the walk
         /// with its boxes and marks, the scheduler's pick.
         double             signatureMicros = 0.0, boxesMicros = 0.0, pickMicros = 0.0;
+        /// THE PLACEMENT'S GUARD (gi.pccPlacementLights, U4 decision 14): probe-placement stages checked, the stages
+        /// that changed the scene manager's light count, the count before and after the last one, the probes checked
+        /// and the largest offset (m) of a placed probe's derived node from where it was set — 0 changes and 0 m are
+        /// the law.
+        unsigned long long pccStages = 0, pccStagesLit = 0, pccLightChanges = 0;   ///< (Lit: began with a light list)
+        unsigned           pccLightsBefore = 0, pccLightsAfter = 0, pccProbes = 0;
+        float              pccProbeOffsetMax = 0.0f;
     };
     virtual GiPlan giPlan() const = 0;
 };

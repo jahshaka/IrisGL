@@ -516,6 +516,10 @@ public:
         /// (the pending cards a current footprint reaches); the rest is the step-2 bookkeeping, the trace's records and
         /// the relight hand-off.
         double step3Micros = 0.0, step3bMicros = 0.0;
+        /// ...and the rest, named (U4 decision 12.3): step 1b (the still trace of the stale cards the hits made pending
+        /// — the per-hit term), step 2 (the movers' changed boxes), step 4 (the trace list's order and the budget's pick)
+        /// and the movers' trace job (recorded, with the relight hand-off).
+        double stillMicros = 0.0, step2Micros = 0.0, step4Micros = 0.0, traceJobMicros = 0.0;
         /// The cards the call's grids held apart (`wide`: wider than the cells' bound, or not finite) — the most of
         /// its grids, so a row can say its wide path ran.
         unsigned wideCards = 0u;

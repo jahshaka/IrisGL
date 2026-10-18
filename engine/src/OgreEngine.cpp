@@ -1420,7 +1420,6 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         syncMonitorListeners(updated);
         monPre.reset();                    // closes the "engine.pre" stage
         if (mRoot) {
-            const unsigned long long headFrameNumber = (unsigned long long)mRoot->getNextFrameNumber();
             // `_fireFrameStarted()` can veto the frame (a lost device, or a
             // frame listener saying stop); upstream returns false there and
             // does nothing else, so neither do we.
@@ -1435,14 +1434,24 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                 // just made every drawn scene's world AABBs this frame's (Ogre's workers, SoA), so the GI scheduler's
                 // plan (the geometry term) and the GI step (the walk, its boxes, the marks, the pick and the step's
                 // work) read the cached boxes — no parent-chain recompute per item — and nothing has rendered yet.
-                // Then the probe cache's latch (after the budget spent itself) and the listeners the plan's refresh
-                // may have invalidated (a re-solve can rebuild an arm), re-synced as at the frame's head.
+                // Then the probe cache's latch (after the budget spent itself), the probe collection, and the listeners
+                // the plan's refresh may have invalidated (a re-solve can rebuild an arm), re-synced as at the frame's
+                // head. (Root's frame counter advances in _fireFrameRenderingQueued, not in frameStarted: inside this
+                // block getNextFrameNumber() is still the frame's head — every GI writer stamps the frame it always did.)
+                // THE PENDING FLUSHES RUN HERE TOO, after the scene graph (decision 14): a PCC placement's
+                // updateAllDirtyProbes leaves the scene manager's light list as it found it (fork, ParallaxCorrected-
+                // CubemapAuto) and a probe it places has its node and its bounds current at once (fork, CubemapProbe::
+                // syncInternalProbe) — the frame that follows draws with its lamps and the probe where it was set.
                 {
                     std::unique_ptr<monitor::Stage> planStage;
                     if (monitor::live()) planStage.reset(new monitor::Stage("engine.plan"));
-                    for (OgreScene *s : updated) s->setBoxesCurrent(true);
-                    mPlanFrameNumber = headFrameNumber;
-                    struct PlanFrameEnds { unsigned long long &n; ~PlanFrameEnds() { n = 0ull; } } planFrameEnds{ mPlanFrameNumber };
+                    // `boxesCurrent` for exactly this block, whatever throws inside it (decision 13.4): the next
+                    // drain's and the requests' box reads must never read cached boxes outside a current graph.
+                    struct BoxesCurrent {
+                        const std::vector<OgreScene *> &s;
+                        explicit BoxesCurrent(const std::vector<OgreScene *> &v) : s(v) { for (OgreScene *x : s) x->setBoxesCurrent(true); }
+                        ~BoxesCurrent() { for (OgreScene *x : s) x->setBoxesCurrent(false); }
+                    } boxesCurrent(updated);
                     for (auto &s : mScenes) s->runStashedGiPlan();
                     for (OgreView *v : giDrivers) v->updateGi();
                     // ...THEN WHAT ALWAYS FOLLOWED THE GI STEP, in its order: the scenes' pending work and the
@@ -1511,12 +1520,11 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                     // and before the frame renders the dirty probes.
 
                     for (auto &s : mScenes) s->latchProbeCaptures(drawnThisFrame(s.get()));
-                    // OGRE'S PCC COLLECTS ITS DIRTY PROBES IN ITS frameStarted (ParallaxCorrectedCubemapAuto::
-                    // updateSceneGraph), which ran before this block: the probe budget above dirtied this frame's
-                    // after it, so the collection runs again here (its own entry, idempotent: it rebuilds its list) —
-                    // the probes the budget chose capture in THIS frame, as when the budget ran before frameStarted.
-                    for (OgreScene *s : updated) s->recollectProbes();
-                    for (OgreScene *s : updated) s->setBoxesCurrent(false);
+                    // THE PCC'S DIRTY-PROBE COLLECTION, ONCE, AFTER THE PROBE BUDGET (decision 14.3; fork:
+                    // ParallaxCorrectedCubemapAuto::collectDirtyProbes): the engine declared at the PCC's build that it
+                    // collects, so Ogre's frameStarted no longer does — the probes the budget chose capture in THIS frame.
+                    // Every scene, as frameStarted ran for every PCC (a paused one collects nothing).
+                    for (auto &s : mScenes) s->collectDirtyProbes();
                     for (auto &v : mViews) {
                         v->syncPlanarListener();
                         v->syncGlobalsListener();
@@ -2903,6 +2911,12 @@ void OgreEngine::applyPendingEngineMessages() {
     if (pending.engineMessages.empty() && pending.scenes.empty() && pending.views.empty()) return;
     EngineSideScope engineSide;
     drainFrameInput(pending, any);
+    // ...AND ITS GI PLAN, AT ONCE (U4 decision 13.6): a join runs no frame, so no `engine.plan` would run the plan the
+    // drain stashed before the request it serves reads the answer (a re-solve after world.refreshGi()). FRAME-LESS:
+    // no scene graph ran, nothing is current — the plan's geometry term takes the recomputing reads (boxesCurrent is
+    // false here), harmless at a join: the next frame's updateSceneGraph writes the SoA values over the scalars before
+    // anything draws (the parity miss was a recompute that persisted INTO a draw).
+    for (auto &s : mScenes) s->runStashedGiPlan();
 }
 
 // THE PRESENTATION CLOCK (U3 stage 5), in the document's step time and never a wall clock: a FREE frame shows the

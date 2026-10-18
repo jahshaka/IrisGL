@@ -845,10 +845,6 @@ void PhotonComponent::payChainSettleStep() {
 // one frame late, whereas an abort is not a picture at all; `gi.one_writer`
 // asserts the counter stays 0 on a drag + settle.
 unsigned long long PhotonComponent::giWriterFrame() const {
-    // THE FRAME THE WRITERS WRITE FOR: Root's next frame number — read at the frame's head. Inside the frame's
-    // `engine.plan` (after Root's frameStarted advanced the counter; U4 stage 3) the head's own number, latched by the
-    // engine, so the plan stamps and compares with the value it always did.
-    if (mEngine && mEngine->planFrameNumber()) return mEngine->planFrameNumber();
     return (unsigned long long)mRoot->getNextFrameNumber();
 }
 
@@ -2660,8 +2656,59 @@ void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box) {
     if (mVctCascades.empty()) return;          // no chain: nothing to describe
     if (mGiCascadeDirtyAll) return;            // already the strongest statement
     if (!box) { mGiCascadeDirtyAll = true; mGiCascadeDirtyBoxes.clear(); return; }
+    // THE RUNNING UNION AND THE COLLAPSE (ENGINE-UPGRADE-U4 decision 12.2). The voxeliser's cost is the VOLUME a box
+    // covers, so the list of boxes earns its keep only while the union of what it holds is much larger than their
+    // sum: once union.volume <= 2 x sum(list volumes) the list IS the union (one box), and every further box this
+    // mark merges into it alone — O(1), where the cap-16 merge below is O(16) per box (10k moved leaves = 160k
+    // merges). A box's volume is taken with each extent at least the finest cascade's cell (a flat box still covers
+    // a voxel layer: plain volume would read every coplanar box as zero).
+    // ...AND THE UNION MARKS NO CASCADE ITS MEMBERS DO NOT (gi.cascades' flat clusters: two far-apart groups of
+    // movers are dense along their slab, and the slab crosses the inner cascades between them). The marks are the
+    // list's one consumer (markDirtyCascadesPending: a box test per cascade), so the collapse — and every merge into
+    // the collapsed union — is taken only where the union's reach equals the OR of its members' reaches against the
+    // cascades as they stand: the marks are exactly the list's, and a box that would widen them stands apart.
+    const float cell = std::max(mVctCascades.front().cell(), 1e-4f);
+    const auto volumeOf = [cell](const Ogre::Aabb &a) {
+        return double(std::max(2.0f * a.mHalfSize.x, cell)) * double(std::max(2.0f * a.mHalfSize.y, cell)) *
+               double(std::max(2.0f * a.mHalfSize.z, cell));
+    };
+    const auto reachOf = [this](const Ogre::Aabb &a) {
+        unsigned m = 0u;
+        for (size_t i = 0; i < mVctCascades.size() && i < 32u; ++i)
+            if (Ogre::Aabb(mVctCascades[i].centre, Ogre::Vector3(mVctCascades[i].halfSize)).intersects(a)) m |= 1u << i;
+        return m;
+    };
+    const unsigned reach = reachOf(*box);
+    if (mGiCascadeDirtyBoxes.empty()) { mGiDirtyCollapsed = false; mGiDirtySumVolume = 0.0; mGiDirtyReach = 0u; }
+    if (mGiDirtyCollapsed) {
+        Ogre::Aabb merged = mGiCascadeDirtyBoxes.front();
+        merged.merge(*box);
+        if (reachOf(merged) == (mGiDirtyReach | reach)) {
+            mGiCascadeDirtyBoxes.front() = merged;
+            mGiDirtyReach |= reach;
+            return;
+        }
+        // The union would reach a cascade no member does: this box stands apart, and the running union restarts
+        // from the list as it stands.
+        mGiDirtyCollapsed = false;
+        mGiDirtyUnion = mGiCascadeDirtyBoxes.front();
+        mGiDirtySumVolume = volumeOf(mGiDirtyUnion);
+    }
+    mGiDirtyReach |= reach;
+    if (mGiCascadeDirtyBoxes.empty()) mGiDirtyUnion = *box;
+    else mGiDirtyUnion.merge(*box);
+    const auto collapseIfDense = [&]() {
+        if (mGiCascadeDirtyBoxes.size() >= 2u && volumeOf(mGiDirtyUnion) <= 2.0 * mGiDirtySumVolume &&
+            reachOf(mGiDirtyUnion) == mGiDirtyReach) {
+            mGiCascadeDirtyBoxes.assign(1u, mGiDirtyUnion);
+            mGiDirtySumVolume = volumeOf(mGiDirtyUnion);
+            mGiDirtyCollapsed = true;
+        }
+    };
     if (mGiCascadeDirtyBoxes.size() < kGiCascadeDirtyBoxCap) {
         mGiCascadeDirtyBoxes.push_back(*box);
+        mGiDirtySumVolume += volumeOf(*box);
+        collapseIfDense();
         return;
     }
     // AT THE CAP THE LIST MERGES; IT DOES NOT GIVE UP (PHOTON audit F14). The
@@ -2704,7 +2751,10 @@ void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box) {
         const double growth = marginOf(merged) - marginOf(mGiCascadeDirtyBoxes[i]);
         if (growth < bestGrowth) { bestGrowth = growth; best = i; }
     }
+    mGiDirtySumVolume -= volumeOf(mGiCascadeDirtyBoxes[best]);
     mGiCascadeDirtyBoxes[best].merge(*box);
+    mGiDirtySumVolume += volumeOf(mGiCascadeDirtyBoxes[best]);
+    collapseIfDense();
 }
 
 // A DATABLOCK OR A TEXTURE THE MATERIAL STORE HOLDS IS DYING. Narrower than
@@ -3129,6 +3179,27 @@ bool PhotonComponent::stepStagedGiBuild() {
     // from scratch.
     } JAH_CATCH(mError, (destroyProbeGrid(), mGiBuildStage = GiBuildStage::Idle,
                          mGiCachesDirty = true, true));
+}
+
+void PhotonComponent::notePccPlacement(size_t lightsBefore) {
+    // What a frame that placed probes AFTER its updateSceneGraph draws with: the light list the scene graph built (a
+    // placement's updateAllDirtyProbes leaves it as it found it — fork) and every placed probe's node where it was
+    // set (CubemapProbe::syncInternalProbe makes it current at once — fork). Root-parented nodes: derived = local.
+    PlanLog &l = mPlanLog;
+    const size_t after = mSceneMgr->getGlobalLightList().lights.size();
+    ++l.pccStages;
+    if (lightsBefore) ++l.pccStagesLit;   // inside a frame, after its scene graph built the list
+    if (after != lightsBefore) ++l.pccLightChanges;
+    l.pccLightsBefore = unsigned(lightsBefore);
+    l.pccLightsAfter = unsigned(after);
+    if (!mPcc) return;
+    for (const Ogre::CubemapProbe *probe : mPcc->getProbes()) {
+        const Ogre::SceneNode *node = probe ? probe->getInternalCubemapProbeSceneNode() : nullptr;
+        if (!node) continue;
+        ++l.pccProbes;
+        const float d = (node->_getDerivedPosition() - node->getPosition()).length();
+        l.pccProbeOffsetMax = std::max(l.pccProbeOffsetMax, d);
+    }
 }
 
 void PhotonComponent::applyPendingGi() {
@@ -5203,6 +5274,13 @@ double PhotonComponent::pccPhaseSplit() {
 // knobs the other two stages read. 69-84 ms measured. Leaves mPccStageOk
 // false when the grid cannot be built at all — this stage's only refusal.
 void PhotonComponent::buildPccScout(const Ogre::Aabb &litVolume) {
+    // THE PLACEMENT'S GUARD (gi.pccPlacementLights, U4 decision 14): the light count before this stage, read back
+    // after it — staged or whole, wherever in the frame it runs.
+    struct PlacementNote {
+        PhotonComponent *c; bool on; size_t before;
+        ~PlacementNote() { if (on) c->notePccPlacement(before); }
+    } placementNote{ this, mEngine && mEngine->armRegistry().on(ArmId::GiPccPlacementLights),
+                     mSceneMgr ? mSceneMgr->getGlobalLightList().lights.size() : 0u };
     mPccStageOk = false;
     ++mProbePlacements;
     mGiStagedVolume = litVolume;
@@ -5461,6 +5539,10 @@ void PhotonComponent::buildPccFit() {
     mPcc = new Ogre::ParallaxCorrectedCubemapAuto(
         Ogre::Id::generateNewId<Ogre::ParallaxCorrectedCubemapAuto>(),
         mRoot, mSceneMgr, cm->getWorkspaceDefinition(mPccWorkspaceName.c_str()));
+    // THE ENGINE COLLECTS THIS PCC'S DIRTY PROBES (U4 decision 14.3): once a frame after its probe budget, in the
+    // frame's `engine.plan` (OgreScene::collectDirtyProbes) — Ogre's frameStarted collection would run before the
+    // budget dirtied the frame's probes.
+    mPcc->setCollectsExternally(true);
 
     Ogre::PccPerPixelGridPlacement placement;
     placement.setParallaxCorrectedCubemapAuto(mPcc);
@@ -5745,6 +5827,13 @@ void PhotonComponent::buildPccFit() {
 // shapes clamped, the grid re-created at the real resolution, and one closing
 // capture each. 288 ms measured on a 32-probe grid at 512 px.
 void PhotonComponent::buildPccFinish() {
+    // THE PLACEMENT'S GUARD (gi.pccPlacementLights, U4 decision 14): the light count before this stage, read back
+    // after it — staged or whole, wherever in the frame it runs.
+    struct PlacementNote {
+        PhotonComponent *c; bool on; size_t before;
+        ~PlacementNote() { if (on) c->notePccPlacement(before); }
+    } placementNote{ this, mEngine && mEngine->armRegistry().on(ArmId::GiPccPlacementLights),
+                     mSceneMgr ? mSceneMgr->getGlobalLightList().lights.size() : 0u };
     if (!mPccStageOk || !mPcc) return;
     const Ogre::Aabb region = mGiProbeRegion;
     const Ogre::uint32 probeRes = mPccProbeRes;

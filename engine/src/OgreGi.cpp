@@ -271,7 +271,7 @@ void OgreScene::runItemWalk(bool shadow) {
         // frame is a FRESH slot assignment, which renders every map anyway.
         mShadowScanPrimed = false;
         mShadowVanished.clear();
-        clearScanNames(mScanPendingShadow, mNameTakeShadow);   // the next primed walk is a full one (firstShadow)
+        releaseNamed(kNameShadow);   // the next primed walk is a full one (firstShadow)
     }
     if (!shadow) return;
     // THE STILL-FRAME GATE (ENGINE-4 F5), the caster half's version of
@@ -304,7 +304,7 @@ void OgreScene::runItemWalk(bool shadow) {
     // THE GATE IS THE CHANGE SET (U0 3b): what the drained ChangeSet and the seams NAMED since the last walk (each
     // item re-read, nothing else), a full pass only where a nodeless input owes one (noteShadowScanInput, a nodeless
     // write, an incomplete set) — and with nothing named, nothing.
-    if (mShadowScanPrimed && !mScanFullShadow && mScanPendingShadow.empty()) {
+    if (mShadowScanPrimed && !mScanFullShadow && !hasNamed(kNameShadow)) {
         // The changes are per frame by contract (walkItems clears them at its
         // head), and "the walk ran and found nothing" is what the consumer
         // must see — collectShadowCacheFrame walks for itself when the frame's
@@ -326,15 +326,16 @@ void OgreScene::runItemWalk(bool shadow) {
     }
     const auto t0 = std::chrono::steady_clock::now();
     if (!mShadowScanPrimed || mScanFullShadow) { ++mShadowScansFull; walkItems(false, true, false); }
-    else walkItems(false, true, false, &takeScanSubset(mScanPendingShadow));
+    else walkItems(false, true, false, &takeScanSubset(kNameShadow));
     mShadowWalked = true;
     mCasterWalkMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
 }
 
 // THE GI MOVEMENT SCAN, ONCE PER FRAME, ON DEMAND (the shape FIX WAVE B3 gave
-// it): whoever consumes mGiMovedBoxes first this frame runs it, and it reads
-// each item's world AABB UPDATED — the GI consumers run before the scene graph
-// does, and a mover has to stale the probes in the frame it moves.
+// it): whoever consumes mGiMovedBoxes first this frame runs it — the GI step,
+// in the frame's `engine.plan` AFTER the scene graph (U4 decisions 8 + 14), so
+// it reads each item's CACHED world AABB, and what it stales is spent in the
+// same frame; a scene no view draws (no scene graph this frame) recomputes.
 bool OgreScene::ensureGiWalk(const PhotonComponent::WalkInputs &in) {
     if (mGiWalkedThisFrame) return false;
     mGiWalkIn = in;
@@ -354,7 +355,7 @@ bool OgreScene::ensureGiWalk(const PhotonComponent::WalkInputs &in) {
     //
     // THE GATE IS THE CHANGE SET (U0 3b), as the caster walk's: the items named since the last scan are re-read and
     // nothing else; nothing named, nothing read (giScanMicros 0).
-    if (mGiScannedOnce && !mScanFullGi && mScanPendingGi.empty()) {
+    if (mGiScannedOnce && !mScanFullGi && !hasNamed(kNameGi)) {
         // The boxes are per frame by contract (walkItems clears them at its
         // head), so a skipped frame must publish "nothing moved" rather than
         // last frame's movers — otherwise a single move would stale the grid
@@ -369,7 +370,7 @@ bool OgreScene::ensureGiWalk(const PhotonComponent::WalkInputs &in) {
     // frame's — the SoA load, no parent-chain recompute; only a walk before it (a scene no view draws) recomputes.
     const bool fresh = !mBoxesCurrent;
     if (!mGiScannedOnce || mScanFullGi) { ++mGiScansFull; walkItems(true, false, fresh); }
-    else walkItems(true, false, fresh, &takeScanSubset(mScanPendingGi));
+    else walkItems(true, false, fresh, &takeScanSubset(kNameGi));
     mGiScanMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
     return true;
 }
@@ -381,10 +382,9 @@ bool OgreScene::ensureGiWalk(const PhotonComponent::WalkInputs &in) {
 /// scene whose scans never run (GI off, no cached lamp) keeps a full pass owed instead of an ever-growing list.
 void OgreScene::noteSceneTransformWrite(Node &n) {
     ++mSceneTransformWrites;
-    mSubstrate.nameNode(n.ogreId, n.nameTakeGpu, mItemNodes.size());   // the GPU scene's walk takes the same name
-    nameForScan(n, mScanPendingGi, mScanFullGi, mNameTakeGi, n.nameTakeGi);
-    nameForGeomSig(n);                                                  // ...and the geometry signature (U4 stage 3)
-    nameForScan(n, mScanPendingShadow, mScanFullShadow, mNameTakeShadow, n.nameTakeShadow);
+    // ONCE, on the one list, for all four consumers: the GPU scene's walk, the GI and caster scans, the geometry
+    // signature (U4 decision 12.1 ii).
+    nameFor(n, kNameAll);
 }
 
 /// THE DRAIN'S HALF: each moved node's SUBTREE — its Ogre children, registered or not (a light's -Y adapter), and the
@@ -394,10 +394,7 @@ void OgreScene::noteSceneTransformWrite(Node &n) {
 unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
     if (!cs.complete) {
         ++mHostMoves;
-        mScanFullGi = mScanFullShadow = true;
-        owesGeomSigFull();
-        clearScanNames(mScanPendingGi, mNameTakeGi); clearScanNames(mScanPendingShadow, mNameTakeShadow);
-        mSubstrate.nameAll();
+        owesNamesFull(kNameAll);
         // Every lamp's pose key re-read as it stands now (the set cannot say which moved; the owed flags below say
         // "any", and the next named move compares against this).
         bool any = false;
@@ -513,10 +510,9 @@ bool OgreScene::nameMovedSubtrees(std::vector<Ogre::Node *> &stack, uint32_t roo
 /// The pending list as the walk's item subset: each named node once, those that still carry an Item. The list is
 /// TAKEN (cleared) first, so a seam the walk itself fires (a drag promotion's flag write) names its node for the
 /// next frame's walk rather than this one's.
-std::vector<OgreScene::Node *> &OgreScene::takeScanSubset(std::vector<Node *> &pending) {
-    mScanTakeNodes.swap(pending);
-    clearScanNames(pending, &pending == &mScanPendingGi ? mNameTakeGi : mNameTakeShadow);
-    // NO SORT (U4 stage 3): a node is named ONCE per take (its stamp, nameForScan), so the list holds no duplicate, and
+std::vector<OgreScene::Node *> &OgreScene::takeScanSubset(uint8_t bit) {
+    takeNamed(bit, mScanTakeNodes);
+    // NO SORT (U4 stage 3): a node is on the one name list ONCE (its mask, nameFor), so the take holds no duplicate, and
     // the walk's consumers are order-free — the probes' moved-cover test, the lamp maps' dirty set, and the cascades'
     // boxes, which fold into their roots (an untagged seam's own box is the one ordered input: it merges at the cap
     // in naming order, deterministic as the names are).
@@ -529,7 +525,7 @@ std::vector<OgreScene::Node *> &OgreScene::takeScanSubset(std::vector<Node *> &p
 
 void OgreScene::indexItemNode(Node &n) {
     noteSceneTransformWrite(n);     // an Item arriving is an input to every scan (named: its item is re-read)
-    owesGeomSigFull();              // the item set changed: the signature sums its items afresh
+    owesNamesFull(kNameSig);        // the item set changed: the signature sums its items afresh
     if (n.itemSlot != size_t(-1)) return;
     n.itemSlot = mItemNodes.size();
     mItemNodes.push_back(&n);
@@ -556,7 +552,7 @@ void OgreScene::unindexDecalNode(Node &n) {
 
 void OgreScene::unindexItemNode(Node &n) {
     noteSceneTransformWrite(n);     // ...and so is one leaving (the walk runs and reports the departure)
-    owesGeomSigFull();
+    owesNamesFull(kNameSig);
     // A CASTER LEAVING: its last box is what the lamps around it must re-render
     // without it (the scan never sees a node that has no Item).
     if (n.scan.shadowPresent && mShadowScanPrimed)
@@ -624,8 +620,8 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
     // A FULL WALK answers for everything named so far (U0 3b): its halves' pending lists go, BEFORE the loop, so a
     // seam the walk itself fires names its node for the next walk. A SUBSET walk's caller took its list already.
     if (!subset) {
-        if (gi)     { clearScanNames(mScanPendingGi, mNameTakeGi);         mScanFullGi = false; }
-        if (shadow) { clearScanNames(mScanPendingShadow, mNameTakeShadow); mScanFullShadow = false; }
+        if (gi)     { releaseNamed(kNameGi);     mScanFullGi = false; }
+        if (shadow) { releaseNamed(kNameShadow); mScanFullShadow = false; }
     }
     bool firstGi = false;
     const bool rootParity = gi && mEngine && mEngine->armRegistry().on(ArmId::GiRootBoxParity);
@@ -881,7 +877,8 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
         for (Node *np : mDecalNodes) {
             Node &n = *np;
             if (!n.decal || !n.decalNode) continue;
-            const Ogre::Aabb a = n.decal->getWorldAabbUpdated();
+            // (the cached box after the scene graph — `engine.plan`, U4 decision 13.2 — as the items' above)
+            const Ogre::Aabb a = fresh ? n.decal->getWorldAabbUpdated() : n.decal->getWorldAabb();
             if (!n.scan.decalKnown) {
                 n.scan.decalKnown = true;
                 n.scan.decalBox = a;

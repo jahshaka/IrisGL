@@ -1886,6 +1886,7 @@ enum class ArmId : unsigned {
     GpuWalkTiming,       ///< "gpuscene.walkTiming" — the GPU scene's walk times its observers' notifies (a measuring arm, U4 stage 3)
     GpuObserversOff,     ///< "gpuscene.observersOff" — the change feed's observers are not told (the paired arm of the notify share; a test door)
     CardsNullMove,       ///< "cards.nullMove" — the sun trace takes one more still-caster move with a NULL box (the non-finite search's test door, U4 stage 3)
+    GiPccPlacementLights,///< "gi.pccPlacementLights" — every staged probe placement's light list and probe nodes checked (the guard, U4 decision 14)
     Count
 };
 class ArmRegistry {
@@ -4611,7 +4612,7 @@ public:
     /// looked?" — and a false yes costs one scan.
     /// NODELESS = scene-wide: every item may have changed, so both scans owe a full pass. A seam that knows its node
     /// NAMES it instead (the overload): only that node's item is re-read (U0 3b, the change set's engine half).
-    void noteSceneTransformWrite() { ++mSceneTransformWrites; mScanFullGi = mScanFullShadow = mGeomSigFull = true; mSubstrate.nameAll(); }
+    void noteSceneTransformWrite() { ++mSceneTransformWrites; owesNamesFull(kNameAll); }
     /// AN INPUT TO THE CASTER HALF OF THE WALK CHANGED, and it is not a
     /// transform (ENGINE-4 F5): a rig posed, a caster-shape seam (a mesh or
     /// material swap, a rebuilt Item, a per-object Cast Shadow flag, a
@@ -4716,7 +4717,8 @@ private:
         /// THE NAMES' TAKES (ENGINE-UPGRADE-2B stage 5): the take generation of the GI scan's, the caster
         /// scan's and the GPU scene's pending list this node was last named into - a node is named ONCE per
         /// take, however many seams fire for it (attachMesh fired three or four).
-        uint32_t         nameTakeGi = 0, nameTakeShadow = 0, nameTakeGpu = 0;
+        /// THE ONE NAME LIST's bits this record is owed by (OgreScene::nameFor; U4 decision 12.1 ii).
+        mutable uint8_t  namedMask = 0;
         /// THE NAMING PASS AND THE ROOT (U4 stage 3): the pass this node was last named in (each node once a pass),
         /// and the moved subtree root's GI box its walk folds into — valid while giRootEpoch is the scene's.
         uint32_t         nameSeen = 0, giRootEpoch = 0, giRootSlot = 0xFFFFFFFFu;
@@ -4724,7 +4726,7 @@ private:
         /// of the order-free sum, counted while `geomSigGen` is the signature's generation; and its take of the
         /// signature's name list.
         unsigned long long geomSigTerm = 0;
-        uint32_t         geomSigGen = 0, nameTakeSig = 0;
+        uint32_t         geomSigGen = 0;
         /// ...and its MESH's place in the GPU scene's mesh table (GpuScene.h),
         /// acquired at attach and released at detach. kNoMesh until geometry
         /// arrives, which is what an instance entry with no mesh reads as.
@@ -4936,28 +4938,93 @@ private:
     /// it needs `Node` to be complete.
     void markShadowShapeDirty(Node &n) {   // NAMED for the caster walk (U0 3b), never a full pass
         n.shadowShapeDirty = true; ++mShadowScanWrites;
-        nameForScan(n, mScanPendingShadow, mScanFullShadow, mNameTakeShadow, n.nameTakeShadow);
+        nameFor(n, kNameShadow);
     }
-    /// THE ONE NAMING DOOR of the two scans' pending lists (stage 5): a node once per take, and the list
-    /// bounded by the walk it stands for - once it names as many as a full walk visits (the items and the
-    /// decals), the full walk is no dearer, and it is owed instead. No slack constant.
-    /// THE LISTS HOLD THE RECORDS (U4 stage 3): a walk takes them with no lookup; a node's death owes both scans their
-    /// full walk (owesScansFull), so a list never holds a dead record.
-    void nameForScan(Node &n, std::vector<Node *> &pending, bool &full, uint32_t &take, uint32_t &stamp) {
-        if (full || stamp == take) return;
-        if (pending.size() >= mItemNodes.size() + mDecalNodes.size()) { clearScanNames(pending, take); full = true; return; }
-        pending.push_back(&n);
-        stamp = take;
+    /// THE ONE NAME LIST (ENGINE-UPGRADE-U4 decision 12.1 ii): every node written since its consumers last read, ONCE,
+    /// with a bit per consumer that still owes it — the GPU scene's walk, the GI scan, the caster scan, the geometry
+    /// signature — instead of four lists pushed per write. A consumer reads the records carrying its bit and releases
+    /// the bit; a record no consumer owes leaves the list. Bounded by the walk it stands for: once it holds as many
+    /// records as a full walk visits (the items and the decals), every consumer owes its full pass instead. It holds
+    /// RECORDS: a death owes every consumer its full pass, so it never holds a dead one.
+    enum NameBits : uint8_t { kNameGpu = 1u, kNameGi = 2u, kNameShadow = 4u, kNameSig = 8u, kNameAll = 15u };
+    uint8_t namesFullMask() const {
+        return uint8_t((mSubstrate.namedFull ? kNameGpu : 0u) | (mScanFullGi ? kNameGi : 0u) |
+                       (mScanFullShadow ? kNameShadow : 0u) | (mGeomSigFull ? kNameSig : 0u));
     }
-    /// A pending list emptied (taken, answered by a full walk, or overflowed): a new take begins.
-    static void clearScanNames(std::vector<Node *> &pending, uint32_t &take) { pending.clear(); ++take; }
-    /// A record dies: both scans owe their full walk (their lists hold records) — the walk then visits every item,
-    /// which answers what the named one would have.
-    void owesScansFull() {
-        mScanFullGi = mScanFullShadow = true;
-        clearScanNames(mScanPendingGi, mNameTakeGi);
-        clearScanNames(mScanPendingShadow, mNameTakeShadow);
+    void nameFor(Node &n, uint8_t bits) const {
+        bits = uint8_t(bits & ~namesFullMask() & ~n.namedMask);
+        if (!bits) return;
+        if (!n.namedMask) {
+            if (mNamed.size() >= mItemNodes.size() + mDecalNodes.size()) { owesNamesFull(kNameAll); return; }
+            mNamed.push_back(&n);
+            ++mNamedLive;
+        }
+        n.namedMask = uint8_t(n.namedMask | bits);
+        for (unsigned b = 0; b < 4u; ++b) if (bits & (1u << b)) ++mNamedCount[b];
     }
+    static unsigned nameBitIndex(uint8_t bit) { return bit == kNameGpu ? 0u : bit == kNameGi ? 1u : bit == kNameShadow ? 2u : 3u; }
+    bool hasNamed(uint8_t bit) const { return mNamedCount[nameBitIndex(bit)] != 0u; }
+    /// The consumers' bits released: their counts zero, and the list emptied once no consumer owes any record (the
+    /// common case: every write names all four) — else compacted in naming order once half of it is owed by nobody.
+    void releaseNamed(uint8_t bits) const {
+        bool any = false;
+        for (unsigned b = 0; b < 4u; ++b) if ((bits & (1u << b)) && mNamedCount[b]) { mNamedCount[b] = 0u; any = true; }
+        if (!any) return;
+        for (Node *n : mNamed) {
+            if (!(n->namedMask & bits)) continue;
+            n->namedMask = uint8_t(n->namedMask & ~bits);
+            if (!n->namedMask) --mNamedLive;
+        }
+        compactNamed();
+    }
+    /// A consumer's take in ONE pass: the records it owes, its bit released.
+    void takeNamed(uint8_t bit, std::vector<Node *> &out) const {
+        out.clear();
+        unsigned &count = mNamedCount[nameBitIndex(bit)];
+        if (!count) return;
+        for (Node *n : mNamed) {
+            if (!(n->namedMask & bit)) continue;
+            out.push_back(n);
+            n->namedMask = uint8_t(n->namedMask & ~bit);
+            if (!n->namedMask) --mNamedLive;
+        }
+        count = 0u;
+        compactNamed();
+    }
+    /// Emptied when nobody owes anything (the common case), else compacted once half the list is owed by nobody —
+    /// the live count is kept, never counted.
+    void compactNamed() const {
+        if (!mNamedLive) { mNamed.clear(); return; }
+        if (mNamedLive * 2u > mNamed.size()) return;
+        mNamed.erase(std::remove_if(mNamed.begin(), mNamed.end(), [](const Node *n) { return n->namedMask == 0u; }),
+                     mNamed.end());
+    }
+    /// A RECORD DIES: it leaves the list (its bits with it) — the consumers lose nothing, the list holds no dead record.
+    void forgetNamed(Node &n) const {
+        if (!n.namedMask) return;
+        for (unsigned b = 0; b < 4u; ++b) if (n.namedMask & (1u << b)) --mNamedCount[b];
+        n.namedMask = 0u;
+        --mNamedLive;
+        mNamed.erase(std::remove(mNamed.begin(), mNamed.end(), &n), mNamed.end());
+    }
+    /// The consumers in `bits` owe their full pass (a nodeless write, an incomplete set, an overflow, a death).
+    void owesNamesFull(uint8_t bits) const {
+        if (bits & kNameGpu) mSubstrate.namedFull = true;
+        if (bits & kNameGi) mScanFullGi = true;
+        if (bits & kNameShadow) mScanFullShadow = true;
+        if (bits & kNameSig) mGeomSigFull = true;
+        if (bits == kNameAll) {
+            for (Node *n : mNamed) n->namedMask = 0u;
+            mNamed.clear();
+            mNamedLive = 0u;
+            for (unsigned &c : mNamedCount) c = 0u;
+        } else {
+            releaseNamed(bits);
+        }
+    }
+    mutable std::vector<Node *> mNamed;
+    mutable unsigned mNamedCount[4] = { 0u, 0u, 0u, 0u };
+    mutable size_t mNamedLive = 0u;   ///< the list's records some consumer still owes
 
     /// A definition's frozen shape. Two systems can share a recycled def only if
     /// every element of this matches, because none of it can be changed after
@@ -5607,21 +5674,25 @@ public:
     /// reads texture contents and cannot be asked twice (OPEN_COVER_SPEC §2 E).
     bool iblReadPending() const { return mIblPending; }
     void latchProbeCaptures(bool drawn) { return mPhoton.latchProbeCaptures(drawn); }
-    /// Ogre's PCC frame-start collection of its dirty probes, run again after the GI step dirtied this frame's (U4
-    /// stage 3: the step runs after Root's frameStarted now). Paused (an undrawn scene) it does nothing, as in Ogre.
-    void recollectProbes() {
-        if (Ogre::ParallaxCorrectedCubemapAuto *p = mPhoton.pcc()) p->frameStarted(Ogre::FrameEvent());
-    }
     void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) { return mPhoton.updateGiTracking(camPos, driverStereo); }
     void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo) { mPhoton.noteGiCamera(camPos, driverStereo); }
-    /// THE PLAN AFTER THE SCENE GRAPH (ENGINE-UPGRADE-U4 stage 3): the drain STASHES what the GI scheduler's plan
-    /// reads from the record (planGi: its refresh serial, the material preview, whether the configuration was pushed)
-    /// and the frame runs it once the scene graph has made the world boxes current (runStashedGiPlan) — the geometry
-    /// term then reads cached boxes. `boxesCurrent` says so, between the frame's updateSceneGraph and its plan's end.
+    /// THE PCC'S DIRTY-PROBE COLLECTION (U4 decision 14.3; the fork's ParallaxCorrectedCubemapAuto::collectDirtyProbes):
+    /// the engine's, once a frame after its probe budget — the PCC's own frameStarted collection is switched off at
+    /// its build (setCollectsExternally). A paused PCC (an undrawn scene) collects nothing, as frameStarted did.
+    void collectDirtyProbes() {
+        if (Ogre::ParallaxCorrectedCubemapAuto *p = mPhoton.pcc()) p->collectDirtyProbes();
+    }
+    /// THE PLAN AFTER THE SCENE GRAPH (ENGINE-UPGRADE-U4 decisions 8 + 14): the drain STASHES what the GI scheduler's
+    /// plan reads from the record (planGi: its refresh serial, the material preview, whether the configuration was
+    /// pushed — merged as the record merges them: a serial newest-wins only when one is carried, the preview by OR)
+    /// and the frame runs it once the scene graph has made the world boxes current (runStashedGiPlan, first in
+    /// `engine.plan`, BEFORE the pending flushes — the geometry term is read where 414c323 read it) — a join runs it
+    /// at once (applyPendingEngineMessages), frame-less, with recomputing reads. `boxesCurrent` says the boxes are
+    /// the frame's: between the frame's updateSceneGraph and the end of its plan block.
     void stashGiPlan(const FrameInputScene &part, bool pushed) {
         mGiPlanStash.owed = true;
-        mGiPlanStash.refreshSerial = part.giRefreshSerial;
-        mGiPlanStash.materialPreview = part.materialPreview;
+        if (part.giRefreshSerial) mGiPlanStash.refreshSerial = part.giRefreshSerial;   // the newest that carries one
+        mGiPlanStash.materialPreview = mGiPlanStash.materialPreview || part.materialPreview;
         mGiPlanStash.pushed = mGiPlanStash.pushed || pushed;
     }
     void runStashedGiPlan();
@@ -5732,8 +5803,7 @@ private:
     Node *record(NodeId id) {
         // ONE HASH LOOKUP (U4 stage 3), never the ordered map's descent: the per-record and per-name paths call this
         // per node.
-        auto it = mNodeById.find(id);
-        return it == mNodeById.end() ? nullptr : it->second;
+        return id ? mNodeById.get(id) : nullptr;
     }
     /// The EFFECTIVE visibility `sn`'s children inherit from above it: the
     /// `shown` of the nearest registered ancestor, true when there is none.
@@ -5816,10 +5886,46 @@ private:
     /// holds the record itself (a std::map node is address-stable until it is
     /// erased, and its entry here goes first) — ONE lookup on the naming path,
     /// never a hash then a tree descent (ENGINE-UPGRADE-U4 stage 3).
-    std::unordered_map<Ogre::IdType, Node *> mNodeByOgreId;
+    /// THE DIRECT INDEX (U4 decision 12.1 i): Ogre's node ids come from ONE process-wide counter (IdObject, never
+    /// reused), so the record of an id is found by indexing, never hashing — in PAGES of 4,096 slots allocated on
+    /// first use (a scene that registers only recent ids holds only their pages, not every id the process ever made).
+    template <class Key>
+    struct PagedIndex {
+        static constexpr size_t kPage = 4096u;
+        /// Ids at or past this (16.7 M) are kept in a hash: the counters are dense from 1, so only an id the engine did
+        /// not hand out lands there, and a page table never grows to a stray id's size.
+        static constexpr unsigned long long kDirect = 1ull << 24;
+        std::vector<std::unique_ptr<Node *[]>> pages;
+        std::unordered_map<unsigned long long, Node *> far;
+        Node *get(Key id) const {
+            const unsigned long long k = (unsigned long long)id;
+            if (k >= kDirect) { auto it = far.find(k); return it == far.end() ? nullptr : it->second; }
+            const size_t p = size_t(k / kPage);
+            return p < pages.size() && pages[p] ? pages[p][size_t(k % kPage)] : nullptr;
+        }
+        void set(Key id, Node *n) {
+            const unsigned long long k = (unsigned long long)id;
+            if (k >= kDirect) { if (n) far[k] = n; else far.erase(k); return; }
+            const size_t p = size_t(k / kPage);
+            if (p >= pages.size()) { if (!n) return; pages.resize(p + 1u); }
+            if (!pages[p]) {
+                if (!n) return;
+                pages[p].reset(new Node *[kPage]);
+                std::fill(pages[p].get(), pages[p].get() + kPage, nullptr);
+            }
+            pages[p][size_t(k % kPage)] = n;
+        }
+        void clear() { pages.clear(); far.clear(); }
+        /// The ids its pages can hold (pages x kPage) and the pages allocated.
+        size_t reach() const { return pages.size() * kPage; }
+        size_t allocated() const { size_t k = 0; for (const auto &p : pages) k += p ? 1u : 0u; return k; }
+    };
+    PagedIndex<Ogre::IdType> mNodeByOgreId;
     /// ...and the registry id -> the record (record(): the node records, the change set, the scans' names), the same
     /// address-stable record; inserted at track, erased with the record (U4 stage 3).
-    std::unordered_map<NodeId, Node *> mNodeById;
+    /// (decision 12.1: the document's ids come from ONE process-wide counter too — reserveNodeId — so the same
+    /// paged direct index, never a hash.)
+    PagedIndex<NodeId> mNodeById;
     /// THE SCENE'S PUBLISHED FRAME (Scene::published, PublishedFrame): a whole-frame SWAP (Engine.h's contract) —
     /// publishFrame writes the buffer published() is not returning, then flips the index.
     mutable SnapshotBuffers<PublishedFrame> mPublished;   ///< three buffers and the host's latch (U3 stage 5)
@@ -6334,26 +6440,21 @@ private:
     /// THE GEOMETRY SIGNATURE'S NAMES (U4 stage 3): the nodes written since the signature last read (each once a
     /// take), or a full pass owed — the item set changed, a node died (the list holds records), a nodeless write, an
     /// incomplete change set, or the list grew to a full pass's size.
-    std::vector<Node *> mGeomSigNames;
-    bool mGeomSigFull = true;
+    mutable bool mGeomSigFull = true;
+    std::vector<Node *> mGeomSigTake;   ///< the signature's read of the name list (scratch)
+    bool mBoxesCurrent = false;
     struct GiPlanStash {
         bool owed = false, pushed = false, materialPreview = false;
         std::optional<unsigned long long> refreshSerial;
     } mGiPlanStash;
-    bool mBoxesCurrent = false;
-    uint32_t mNameTakeSig = 0;
 public:
-    void nameForGeomSig(Node &n) {
-        if (mGeomSigFull || n.nameTakeSig == mNameTakeSig + 1u) return;
-        if (mGeomSigNames.size() >= mItemNodes.size()) { owesGeomSigFull(); return; }
-        n.nameTakeSig = mNameTakeSig + 1u;
-        mGeomSigNames.push_back(&n);
-    }
-    void owesGeomSigFull() { mGeomSigFull = true; mGeomSigNames.clear(); ++mNameTakeSig; }
+    void nameForGeomSig(Node &n) { nameFor(n, kNameSig); }
+    void owesGeomSigFull() { owesNamesFull(kNameSig); }
     bool geomSigFullOwed() const { return mGeomSigFull; }
-    const std::vector<Node *> &geomSigNames() const { return mGeomSigNames; }
-    /// The signature read them: the list starts again (a new take).
-    void tookGeomSigNames() { mGeomSigNames.clear(); mGeomSigFull = false; ++mNameTakeSig; }
+    /// The signature's take (its bit released in the same pass).
+    const std::vector<Node *> &geomSigNames() { takeNamed(kNameSig, mGeomSigTake); return mGeomSigTake; }
+    /// The signature read them (a full pass reads none): its bit released, its full pass paid.
+    void tookGeomSigNames() { releaseNamed(kNameSig); mGeomSigFull = false; }
 private:
     /// THE WALK'S GI RECORD and the inputs it was walked with (ensureGiWalk).
     PhotonComponent::WalkRecord mGiWalk;
@@ -6369,17 +6470,16 @@ public:   // (a seam PhotonComponent calls)
 private:
     /// An ENGINE write that moves a node's subtree (a rider, a decal box, setNodeTransform): named like a drained move.
     void noteSubtreeWrite(NodeId id) { ChangeSet c; c.moved.push_back(id); applyChangeSet(c); }
-    std::vector<Node *> mScanPendingGi, mScanPendingShadow, mScanTakeNodes;
+    std::vector<Node *> mScanTakeNodes;
     std::vector<NodeId> mScanTake;   ///< the shadow walk's deformer scratch
-    uint32_t mNameTakeGi = 1u, mNameTakeShadow = 1u;   ///< the lists' take generations (Node::nameTake*)
     unsigned long long mShadowScansFull = 0;            ///< full caster scans, ever (GpuSubstrateStatus::scansFull)
 public:
     /// The full GI-movement and caster scans, ever (GpuSubstrateStatus::scansFull).
     unsigned long long scansFull() const { return mGiScansFull + mShadowScansFull; }
 private:
     std::vector<Node *> mScanSubset;
-    std::vector<Node *> &takeScanSubset(std::vector<Node *> &pending);
-    bool mScanFullGi = true, mScanFullShadow = true;
+    std::vector<Node *> &takeScanSubset(uint8_t bit);
+    mutable bool mScanFullGi = true, mScanFullShadow = true;
     unsigned long long mHostMoves = 0;
     /// THE SAME SKIP FOR THE CASTER HALF (ENGINE-4 F5). It was left out when
     /// the GI half got its gate because a caster's inputs are not all
@@ -7109,7 +7209,7 @@ public:
     /// there.
     void updateGi();
     /// The authoritative view's camera to its scene's GI at the frame's head (U4 stage 3: updateGi runs after the
-    /// scene graph).
+    /// scene graph; the driver's profile and the first camera owe the pending flush before it runs).
     void noteGiCamera();
     /// Per-frame maintenance of everything derived from the TARGET's size:
     /// the letterbox rectangle and the inset's. Free when neither is in use.
@@ -7758,10 +7858,6 @@ public:
     /// the frame.
     void drainFrameInput(FrameInput &in, bool any);
     bool mInDrain = false;   ///< inside drainFrameInput: applySceneStream times its parts (U4 stage 3)
-    /// Root's next frame number as the frame's head read it, while the frame's `engine.plan` runs (after
-    /// frameStarted advanced it); 0 elsewhere (PhotonComponent::giWriterFrame).
-    unsigned long long mPlanFrameNumber = 0ull;
-    unsigned long long planFrameNumber() const { return mPlanFrameNumber; }
     /// A SCENE'S STREAM (U3 stage 3): its structural messages in emission order, then its node records — the drain's
     /// per-scene head, and what updateScene applies of the pending record before it resolves (a resolve answers for
     /// the commands already sent). Counts into the status; returns nothing.

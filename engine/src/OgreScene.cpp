@@ -452,14 +452,13 @@ bool OgreScene::removeNode(NodeId id) {
         // The reverse index, by the id recorded at track() time — an adopted
         // node may already be gone, so it cannot be asked for its id now. Only
         // if it still points HERE: a re-adoption of the same Ogre node owns it.
-        auto idx = mNodeByOgreId.find(it->second.ogreId);
-        if (idx != mNodeByOgreId.end() && idx->second == &it->second) mNodeByOgreId.erase(idx);
+        if (mNodeByOgreId.get(it->second.ogreId) == &it->second) mNodeByOgreId.set(it->second.ogreId, nullptr);
         forgetInterpolationPointers();   // before the erase: the stale pointers become ids while their nodes live
-        owesGeomSigFull();               // the signature's name list holds records: a dying one must not be read
         releaseNode(it->first, it->second);
-        owesScansFull();                 // ...and so do the scans' (after the release, which may name it again)
+        forgetNamed(it->second);         // the one name list holds records: a dying one leaves it (after the release,
+                                         // which may name it again) — no consumer owes a full pass for a death
         uncountNode(it->second);
-        mNodeById.erase(it->first);
+        if (mNodeById.get(it->first) == &it->second) mNodeById.set(it->first, nullptr);
         mNodes.erase(it);
         // The last decal leaving must clear the SceneManager's atlas bindings,
         // which is what drops the decal code back out of every PBS shader.
@@ -1126,8 +1125,7 @@ void OgreScene::applyNodeCasterBit(Node &n) {
 
 OgreScene::Node *OgreScene::registryNode(const Ogre::Node *sn) {
     if (!sn) return nullptr;
-    auto idx = mNodeByOgreId.find(sn->getId());
-    return idx == mNodeByOgreId.end() ? nullptr : idx->second;
+    return mNodeByOgreId.get(sn->getId());
 }
 
 bool OgreScene::inheritedShown(const Ogre::Node *sn) {
@@ -2143,8 +2141,7 @@ void OgreScene::destroy() {
         destroySky();   // also unbinds + destroys the reflection cubemap
         destroyGrid();
         for (auto &kv : mNodes) releaseNode(kv.first, kv.second);
-        owesGeomSigFull();
-        owesScansFull();
+        owesNamesFull(kNameAll);
         mNodeById.clear();
         mNodes.clear();
         mInterpNodes.clear(); mInterpStale.clear(); mInterpRecs.clear(); mInterpStaleRecs.clear(); mInterpRecsValid = false;
@@ -2417,10 +2414,10 @@ Ogre::SceneNode *OgreScene::node(NodeId id) const {
 NodeId OgreScene::track(const Node &n, NodeId id) {
     Node &rec = mNodes[id] = n;
     rec.selfId = id;
-    mNodeById[id] = &rec;
+    mNodeById.set(id, &rec);
     if (rec.node) {
         rec.ogreId = rec.node->getId();
-        mNodeByOgreId[rec.ogreId] = &rec;
+        mNodeByOgreId.set(rec.ogreId, &rec);
         // Born with the EFFECTIVE state of wherever it hangs: a node created
         // (or adopted) under a hidden parent is hidden until that parent shows.
         rec.shown = rec.visible && inheritedShown(rec.node);

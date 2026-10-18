@@ -1983,7 +1983,10 @@ void OgreView::noteGiCamera() {
 
 void OgreView::updateGi() {
     if (drawing() && mScene && mCamera) {
-        mScene->updateGiTracking(cameraWorldPosition(mCamera), mStereo);
+        // After updateSceneGraph (U4 decision 8: the GI step runs in `engine.plan`) the camera's node holds this
+        // frame's derived transform: the cached read — the recompute would overwrite the SoA-derived value with its
+        // scalar one, a socketed camera's parent chain included (decision 13.2).
+        mScene->updateGiTracking(mCamera->getDerivedPosition(), mStereo);
         // The Forward+ depth-slice range follows the same camera, from the same
         // once-a-frame hook (LIGHTING_FIX fix 8). The scene does the rate
         // limiting and the hysteresis; this is only where the camera is known.

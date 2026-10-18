@@ -1223,6 +1223,11 @@ const ArmDef kArms[] = {
       "THE NON-FINITE SEARCH'S TEST DOOR (ENGINE-UPGRADE-U4 stage 3, gi.trace_sun_cost): 1 = every sun trace takes one "
       "more still-caster move whose old and new boxes are Ogre's BOX_NULL (no engine item can carry one: createMesh "
       "refuses an empty mesh), so the grid's unbounded and unplaceable paths run under the parity arm. A test door." },
+    { "gi.pccPlacementLights", 0.0, 0.0, 1.0,
+      "THE PLACEMENT'S GUARD (ENGINE-UPGRADE-U4 decision 14, gi.pcc_placement_lights): 1 = every staged probe placement "
+      "stage (Scout, Finish) — run after the frame's scene graph — records the scene manager's light count before and "
+      "after it and every placed probe's node offset from where it was set (inspect::SceneEcho::giPlan): the fork "
+      "keeps the frame's light list and makes a synced probe's node current. 0 = shipped: nothing read." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

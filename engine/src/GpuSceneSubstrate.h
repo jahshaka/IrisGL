@@ -133,23 +133,10 @@ public:
     // PBS change log), so the old per-slot flags compare over the whole index (the backstop)
     // is gone. A nodeless write, an incomplete change set or an overflow owes the whole index
     // once (`namedFull`, which also makes the first walk whole).
-    /// The nodes named since the consuming walk, by their OGRE id (U4 stage 3): resolved through the scene's one
-    /// reverse index (Ogre id -> record, one lookup), which forgets a dead node — and Ogre never reuses an id.
-    std::vector<uint32_t> namedNodes;
+    /// (The nodes named since the consuming walk live on the scene's ONE name list, OgreScene::nameFor — U4 decision
+    /// 12.1 ii; this is the GPU walk's own "the whole index is owed".)
     bool namedFull = true;
     std::vector<uint32_t> namedSlots;   ///< the walk's scratch: the named nodes' slots
-    /// The take generation (stage 5): a node is named once per take (its stamp, OgreScene::Node::nameTakeGpu),
-    /// and the list overflows to the whole walk only once it names as many nodes as that walk visits (`cap`,
-    /// the scene's item slots) - the whole walk is then no dearer.
-    uint32_t namedTake = 1u;
-    void nameNode(uint32_t node, uint32_t &stamp, size_t cap) {
-        if (namedFull || stamp == namedTake) return;
-        if (namedNodes.size() >= cap) { clearNames(); namedFull = true; return; }
-        namedNodes.push_back(node);
-        stamp = namedTake;
-    }
-    void nameAll() { clearNames(); namedFull = true; }
-    void clearNames() { namedNodes.clear(); ++namedTake; }
     /// THE NAMED WALK'S COUNTS (stage 5), ever: the slots a walk took from the names, and the whole walks.
     unsigned long long slotsNamed = 0ull;
     unsigned long long wholeWalks = 0ull;

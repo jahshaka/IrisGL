@@ -886,6 +886,9 @@ private:
     /// Spends ONE stage of a staged arm build. Returns true when the build is
     /// finished (the stage machine is back to Idle).
     bool stepStagedGiBuild();
+    /// The placement guard's reading after a probe stage (gi.pccPlacementLights): `lightsBefore` = the scene
+    /// manager's light count when the stage began.
+    void notePccPlacement(size_t lightsBefore);
     /// The probe grid's three stages. Each is `buildPcc`'s corresponding block,
     /// verbatim; `buildPcc` itself is the three of them in a row.
     void buildPccScout(const Ogre::Aabb &volume);
@@ -1232,6 +1235,12 @@ private:
     /// one statement that really is scene-wide: a null box, i.e. "somewhere, I
     /// cannot say where".
     std::vector<Ogre::Aabb> mGiCascadeDirtyBoxes;
+    /// THE RUNNING UNION of the boxes noted since the list was last emptied, the sum of the list's own volumes, and
+    /// whether the list has collapsed to the union (noteGiCascadeDirty; U4 decision 12.2).
+    Ogre::Aabb mGiDirtyUnion;
+    double     mGiDirtySumVolume = 0.0;
+    bool       mGiDirtyCollapsed = false;
+    unsigned   mGiDirtyReach = 0u;   ///< the OR of the list's members' cascade reaches (the collapse's guard)
     bool mGiCascadeDirtyAll = false;
 public:
     /// THE PLAN'S LOG (ENGINE-UPGRADE-U4 stage 3; inspect::SceneEcho::giPlan): the last planFrame's CPU, the boxes its
@@ -1248,6 +1257,12 @@ public:
         /// ...its parts (µs): the walk with its boxes and marks, the scheduler's pick; and the geometry signature's
         /// last pass (planGi's term, now after the scene graph too).
         double boxesMicros = 0.0, pickMicros = 0.0, signatureMicros = 0.0;
+        /// THE PLACEMENT'S GUARD (gi.pccPlacementLights, U4 decision 14): stages checked, the light list's count
+        /// before and after the last one, the stages that changed it, the probes checked and the largest offset of a
+        /// placed probe's derived node position from the position it was set to.
+        unsigned long long pccStages = 0ull, pccStagesLit = 0ull, pccLightChanges = 0ull;   ///< (Lit: a list on entry)
+        unsigned pccLightsBefore = 0u, pccLightsAfter = 0u, pccProbes = 0u;
+        float pccProbeOffsetMax = 0.0f;
     };
     const PlanLog &planLog() const { return mPlanLog; }
 private:

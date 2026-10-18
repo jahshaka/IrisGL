@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -1987,6 +1988,8 @@ void SurfaceCache::traceSun() {
     mTraceSunCost.casterHitDigest = 0ull;
     mTraceSunCost.hookMicros = mTraceSunCost.stepOneMicros = 0.0;
     mTraceSunCost.step3Micros = mTraceSunCost.step3bMicros = 0.0;
+    mTraceSunCost.step2Micros = mTraceSunCost.step4Micros = mTraceSunCost.traceJobMicros = 0.0;
+    mTraceSunCost.stillMicros = 0.0;
     mTraceSunCost.wideCards = 0u;
     // THIS FRAME ONLY: the batch is the frame's only when update() planned this
     // frame (workspacePreUpdate drops a stale plan the same way).
@@ -2288,8 +2291,10 @@ void SurfaceCache::traceSun() {
             }
         }
         mStillCpuMs = float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tStill).count());
+        mTraceSunCost.stillMicros = double(mStillCpuMs) * 1000.0;
     }
 
+    const auto tStep2 = std::chrono::steady_clock::now();
     // 2. THE MOVERS' BOXES THAT CHANGED: a moved mover's old and new box, a
     //    mover this cache has not traced yet, one that left (its old box), and
     //    every box when the sun turned (every trace is stale).
@@ -2336,6 +2341,8 @@ void SurfaceCache::traceSun() {
     // direction) must retrace every footprint.
     mMoverSun = haveSun ? toSun : Ogre::Vector3::ZERO;
 
+    mTraceSunCost.step2Micros =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tStep2).count();
     const auto tStep3 = std::chrono::steady_clock::now();
     // 3. THE CARDS: inside a changed footprint, or captured this frame (their
     //    Depth is new) — pending; a pending card no CURRENT footprint reaches is
@@ -2425,6 +2432,13 @@ void SurfaceCache::traceSun() {
         std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tStep3b).count();
     if (trace.empty()) return;
 
+    // (step 4's and the trace job's own time, to the door, whichever return ends the call)
+    struct StepTimer {
+        double &us; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        explicit StepTimer(double &u) : us(u) {}
+        ~StepTimer() { us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(); }
+    };
+    std::unique_ptr<StepTimer> step4Timer(new StepTimer(mTraceSunCost.step4Micros));
     // 4. OLDEST FIRST, NEAREST AMONG EQUALS, under the budget — the relight's
     //    own number, spent a second time on the movers' term; the rest waits (a
     //    stat). THE AGE IS WHAT BOUNDS THE WAIT: nearest-first alone served the
@@ -2481,6 +2495,8 @@ void SurfaceCache::traceSun() {
     job.shadowRough = mAtlas[unsigned(CardLayer::ShadowRough)];   // bound, not written, in this mode
     job.toSun = toSun;
     job.range = kMoverRayRange;
+    step4Timer.reset();
+    StepTimer jobTimer(mTraceSunCost.traceJobMicros);   // the movers' trace recorded, the relight hand-off
     if (!mMoverHooks.trace(job)) {
         mMoverPending = unsigned(trace.size());   // no structure this frame: next frame
         mMoverPendingAge = ageOf(trace.front());
