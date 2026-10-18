@@ -725,7 +725,7 @@ void ShaderCache::load(Ogre::Root *root) {
     // every template and piece file (0.18-0.75 ms per Hlms measured) and the fork caches it per code-cache generation;
     // asked here, on every exit of the load, the first save of the session never pays it inside a frame.
     struct PrimeChecksums {
-        Ogre::Root *root;
+        Ogre::Root *root = nullptr;
         ~PrimeChecksums() {
             Ogre::HlmsManager *hm = root ? root->getHlmsManager() : nullptr;
             if (!hm) return;
