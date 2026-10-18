@@ -8136,6 +8136,13 @@ struct FrameInputStatus {
     double             drainNameMicros = 0.0;
     double             drainRecordsMicros = 0.0;
     double             drainInterpolateMicros = 0.0;
+    /// ...AND ITS COUNTS (ENGINE-UPGRADE-U4 decision 15 — what the drain row asserts at every arm; the µs bars are per
+    /// arm): the index lookups the node records made (one per record, one more for a record that names a parent),
+    /// and the naming passes' node visits and the index lookups they made (each node of a moved subtree once, one
+    /// lookup per visit). A scan creeping back shows here as a count, whatever the box's load.
+    unsigned           drainRecordLookups = 0;
+    unsigned           drainNameVisits = 0;
+    unsigned           drainNameLookups = 0;
 };
 
 /// THE ENGINE'S NAME FOR AN ATTACHED CLIP (ENGINE-UPGRADE-U3 stage 3) — the ONE rule, used by the engine when it

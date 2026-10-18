@@ -494,13 +494,16 @@ bool OgreScene::nameMovedSubtrees(std::vector<Ogre::Node *> &stack, uint32_t roo
     while (!stack.empty()) {
         Ogre::Node *on = stack.back();
         stack.pop_back();
+        ++mCountNameLookups;
         if (Node *rec = registryNode(on)) {
             if (rec->nameSeen == mNameSeenEpoch) continue;
             rec->nameSeen = mNameSeenEpoch;
+            ++mCountNameVisits;
             if (rootSlot != kNoGiRoot) { rec->giRootEpoch = mGiRootEpoch; rec->giRootSlot = rootSlot; }
             if (nameMovedNode(*rec, on, stack)) light = true;
         } else {
             if (!mNameSeenOther.insert(on).second) continue;
+            ++mCountNameVisits;
             for (size_t i = 0, e = on->numChildren(); i < e; ++i) stack.push_back(on->getChild(i));
         }
     }

@@ -3000,6 +3000,13 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     mFrameInputStatus.drainRecordsMicros = 0.0;
     mFrameInputStatus.drainInterpolateMicros = 0.0;
     DrainPart whole(mFrameInputStatus.drainMicros, "engine.drain");
+    // THE COUNTS (decision 15): what ran outside a drain is dropped; the drain's own are summed at its end.
+    mFrameInputStatus.drainRecordLookups = mFrameInputStatus.drainNameVisits = mFrameInputStatus.drainNameLookups = 0u;
+    for (auto &q : mScenes) q->takeDrainCounts(nullptr);
+    struct DrainCounts {
+        OgreEngine &e;
+        ~DrainCounts() { for (auto &q : e.mScenes) q->takeDrainCounts(&e.mFrameInputStatus); }
+    } drainCounts{ *this };
     mInDrain = true;
     struct InDrain { bool &f; ~InDrain() { f = false; } } inDrain{ mInDrain };
     ++mFrameInputStatus.drained;

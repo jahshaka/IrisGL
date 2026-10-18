@@ -5696,6 +5696,16 @@ public:
         mGiPlanStash.pushed = mGiPlanStash.pushed || pushed;
     }
     void runStashedGiPlan();
+    /// THE DRAIN'S COUNTS (FrameInputStatus::drainRecordLookups / drainNameVisits / drainNameLookups; U4 decision 15):
+    /// added into `st` and reset (null: reset only — what ran outside a drain).
+    void takeDrainCounts(FrameInputStatus *st) const {
+        if (st) {
+            st->drainRecordLookups += mCountRecordLookups;
+            st->drainNameVisits += mCountNameVisits;
+            st->drainNameLookups += mCountNameLookups;
+        }
+        mCountRecordLookups = mCountNameVisits = mCountNameLookups = 0u;
+    }
     void setBoxesCurrent(bool current) { mBoxesCurrent = current; }
     bool boxesCurrent() const { return mBoxesCurrent; }
     void updateForwardPlusRanges(const Ogre::Camera *cam) { return mPhoton.updateForwardPlusRanges(cam); }
@@ -6447,6 +6457,7 @@ private:
         bool owed = false, pushed = false, materialPreview = false;
         std::optional<unsigned long long> refreshSerial;
     } mGiPlanStash;
+    mutable unsigned mCountRecordLookups = 0u, mCountNameVisits = 0u, mCountNameLookups = 0u;   ///< takeDrainCounts
 public:
     void nameForGeomSig(Node &n) { nameFor(n, kNameSig); }
     void owesGeomSigFull() { owesNamesFull(kNameSig); }

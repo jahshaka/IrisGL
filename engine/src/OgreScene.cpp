@@ -5,6 +5,7 @@
 
 #include <optional>
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include "HlmsAtom.h"
@@ -604,6 +605,7 @@ unsigned OgreScene::applyNodeRecords(const std::vector<NodeRecord> &records, uns
 bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSerial) {
     JAH_TRY {
         Node *rec = record(r.id);
+        ++mCountRecordLookups;
         if (!rec || !rec->node || !rec->document) return false;   // released before its frame
         Ogre::SceneNode *sn = rec->node;
         bool classOwed = false, reparented = false;
@@ -611,6 +613,7 @@ bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSeri
         // it off (detachFromBone names the parent then).
         if ((r.fields & NodeRecord::Parent) && !rec->boneTag) {
             Node *prec = r.parent ? record(r.parent) : nullptr;
+            if (r.parent) ++mCountRecordLookups;
             Ogre::SceneNode *p = (prec && prec->node) ? prec->node : mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
             if (sn->getParent() != p) {
                 if (sn->getParent()) sn->getParent()->removeChild(sn);
