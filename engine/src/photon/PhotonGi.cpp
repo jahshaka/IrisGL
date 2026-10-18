@@ -1526,6 +1526,43 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
                 std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)h);
                 st.lightDigest = buf;
             }
+            // THE VOXELISER'S STORE (storeDigest, ENGINE-UPGRADE-U5 stage 2): the same hash over what a
+            // build writes - level 0 of the albedo, emissive, normal, coverage and position per half.
+            if (voxelizer) {
+                const Ogre::PhotonVoxelizer::VolumeSet vs = voxelizer->liveVolumes();
+                Ogre::TextureGpu *store[7] = { vs.albedo, vs.emissive, vs.normal, vs.coverage[0], vs.coverage[1],
+                                               vs.position[0], vs.position[1] };
+                Ogre::uint64 hs = 1469598103934665603ull;
+                bool ok = true;
+                for (Ogre::TextureGpu *tex : store) {
+                    if (!tex || tex->getResidencyStatus() != Ogre::GpuResidency::Resident) { ok = false; break; }
+                    Ogre::AsyncTextureTicket *ticket = tm->createAsyncTextureTicket(
+                        tex->getWidth(), tex->getHeight(), tex->getDepth(), Ogre::TextureTypes::Type3D,
+                        tex->getPixelFormat());
+                    try {
+                        ticket->download(tex, 0u, true);
+                        const Ogre::TextureBox box = ticket->map(0);
+                        const size_t rowBytes = size_t(tex->getWidth()) * box.bytesPerPixel;
+                        for (Ogre::uint32 z = 0; z < tex->getDepth(); ++z)
+                            for (Ogre::uint32 y = 0; y < tex->getHeight(); ++y) {
+                                const Ogre::uint8 *row = reinterpret_cast<const Ogre::uint8 *>(box.at(0, y, z));
+                                for (size_t b = 0; b < rowBytes; ++b) {
+                                    hs ^= row[b];
+                                    hs *= 1099511628211ull;
+                                }
+                            }
+                        ticket->unmap();
+                    } catch (Ogre::Exception &e) { mError = e.getFullDescription(); ok = false; }
+                      catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); ok = false; }
+                    tm->destroyAsyncTextureTicket(ticket);
+                    if (!ok) break;
+                }
+                if (ok) {
+                    char buf[17];
+                    std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)hs);
+                    st.storeDigest = buf;
+                }
+            }
         }
 
         // The DIRECT volume exists only on a cascade that bounces (fork ae2ed529f+155a56bf8
@@ -1655,6 +1692,38 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
             Ogre::TextureGpu *back = lighting->getLightVoxelTextures()[lighting->backIndex()];
             Ogre::TextureGpu *nrm = voxelizer->getNormalVox();
             if (!back || !nrm || !grab(back, out.lightBack) || !grab(nrm, out.normal)) return false;
+        }
+        // ENGINE-UPGRADE-U5 (decision 11 g): the emissive, and the build's raw integers.
+        if (!grab(voxelizer->getEmissiveVox(), out.emissive)) return false;
+        {
+            const Ogre::PhotonVoxelizer::VolumeSet vs = voxelizer->liveVolumes();
+            const auto grabUint = [&](Ogre::TextureGpu *tex, std::vector<unsigned> &dst) -> bool {
+                if (!tex) return false;
+                const Ogre::PixelFormatGpu fmt = tex->getPixelFormat();
+                if (fmt != Ogre::PFG_R32_UINT && fmt != Ogre::PFG_R16_UINT) return false;
+                dst.assign(size_t(tex->getWidth()) * tex->getHeight() * tex->getDepth(), 0u);
+                Ogre::AsyncTextureTicket *ticket = tm->createAsyncTextureTicket(
+                    tex->getWidth(), tex->getHeight(), tex->getDepth(), Ogre::TextureTypes::Type3D, fmt);
+                bool ok = false;
+                try {
+                    ticket->download(tex, 0u, true);
+                    const Ogre::TextureBox box = ticket->map(0);
+                    for (Ogre::uint32 z = 0; z < tex->getDepth(); ++z)
+                        for (Ogre::uint32 y = 0; y < tex->getHeight(); ++y) {
+                            const void *row = box.at(0, y, z);
+                            unsigned *o = &dst[(size_t(z) * tex->getHeight() + y) * tex->getWidth()];
+                            for (Ogre::uint32 x = 0; x < tex->getWidth(); ++x)
+                                o[x] = fmt == Ogre::PFG_R32_UINT ? reinterpret_cast<const uint32_t *>(row)[x]
+                                                                 : uint32_t(reinterpret_cast<const Ogre::uint16 *>(row)[x]);
+                        }
+                    ticket->unmap();
+                    ok = true;
+                } catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
+                  catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
+                tm->destroyAsyncTextureTicket(ticket);
+                return ok;
+            };
+            if (!grabUint(vs.accumVal, out.accumWeight) || !grabUint(vs.positionSums, out.positionSums)) return false;
         }
         // FAR-SUN-2: the DIRECT volume beside the total (level 0; empty where the cascade keeps none)
         out.direct.clear();
@@ -4896,6 +4965,8 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
         ++c.scrolls;
         ++c.scrollFrames;
         c.scroll = VctCascade::Scroll();      // committed: the target is free
+    } else {
+        c.liveTorn = false;                   // a whole build: the live store is one box's again
     }
     monitor::noteCascadeRebuild();     // the frame's own "<= 1 per frame" counter
     // WHAT THIS CASCADE VOXELISED, not what the scene holds (audit D6, round-2
@@ -4960,22 +5031,26 @@ static const float kStepHysteresis = 0.1f;
 //
 // with T the instance's finest level's triangle count (the gather's level rule only coarsens, so this
 // is an upper bound). A unit's GPU cost then GROWS WITH THE CELL: a coarse cascade's group holds more
-// of every triangle, so more of its batches pass the group vote into the per-voxel loop. MEASURED on
-// Bistro's walk (the U5 stage-1 walk, 342 chunk rows of all four cascades, GPU ms against units): the
-// 90th percentile of ms per unit is 1.41e-5 / 3.35e-5 / 2.05e-4 / 1.48e-3 at cells of 0.078 / 0.156 /
-// 0.469 / 1.875 m, which is
+// of every triangle, so more of each triangle's clips land in it. MEASURED on Bistro's walk with the
+// stage-2 partition (a triangle per lane; 1,422 chunk rows of all four cascades, GPU ms against
+// units): the 90th percentile of ms per unit is 9.13e-6 / 2.33e-5 / 5.34e-5 / 2.22e-4 at cells of
+// 0.078 / 0.156 / 0.469 / 1.875 m, which is
 //
-//     ms per unit = kScrollMsPerUnit x ( cell / kScrollCellRef ) ^ kScrollCellPower     (a log fit, all four
-//                                                                                       within 12 %)
+//     ms per unit = kScrollMsPerUnit x ( cell / kScrollCellRef ) ^ kScrollCellPower     (a log fit)
+//
+// THE UNIT COST IS THAT FORMULA OF THE CELL SIZE AND NEVER A CLOCK (the reader's ruling, decision 11 e):
+// the spread is a pure function of the scene and the camera's path - deterministic per scene - which
+// is why every selftest scroll lands in the frame it always did and the six hashes hold. A GPU time
+// fed back into the budget would make the frames a scroll takes depend on the box's load: a review red.
 //
 // The 90th percentile and not the median: the budget is a ceiling - a frame above it is the jerk this
 // exists to remove. The commit's copies and the census gather are outside it (well under a
 // millisecond); the light injection of the commit frame is whole (12-26 ms on Bistro), as it is for a
 // whole rebuild.
 static const double kScrollBudgetMs = 16.0;
-static const double kScrollMsPerUnit = 1.34e-5;
+static const double kScrollMsPerUnit = 1.01e-5;
 static const double kScrollCellRef = 0.078125;
-static const double kScrollCellPower = 1.49;
+static const double kScrollCellPower = 0.97;
 /// The gather's octant cap: a frame's chunks are one gather's octants.
 static const size_t kScrollChunksPerFrame = 8u;
 /// The triangles one record carries at most (a partition: PhotonVoxelizer::kIndicesPerPartition / 3).
@@ -5216,11 +5291,12 @@ void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
     // THE COMMIT: the target into the live volumes and, with no throw in between, the placement to
     // it - the readers' region and the voxels move together.
     // A COPY THAT THROWS HALF WAY leaves the live volumes neither box's: the cascade then owes a
-    // WHOLE rebuild (`jumped`: nothing of its volume is reusable), never a scroll copying from them.
+    // WHOLE rebuild (`liveTorn`: nothing of its volume is reusable), never a scroll copying from them.
     try {
-        target->commit(c.voxelizer);
+        const bool fault = mEngine && mEngine->armRegistry().value(ArmId::GiCascadeFaultCommit) == double(idx);
+        target->commit(c.voxelizer, fault);
     } catch (...) {
-        c.jumped = true;
+        c.liveTorn = true;   // outside the placement's revert (recordCascades): only a whole rebuild clears it
         throw;
     }
     recentreCascade(c, sc.cam);
@@ -5295,7 +5371,7 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
     // last frame (planFrame's markDirtyCascadesPending ran before this) is stamped now.
     for (VctCascade &c : mVctCascades) {
         if (!c.pending) c.pendingSince = 0;
-        else if (!c.pendingSince) c.pendingSince = giWriterFrame();
+        else if (!c.pendingSince) c.pendingSince = c.editSince ? c.editSince : giWriterFrame();   // its first mark
     }
     for (VctCascade &c : mVctCascades) {
         const float cell = c.cell();
@@ -5426,8 +5502,8 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
                 w.scroll = true;
                 break;
             }
-            const bool cameraOnly = c.built && !c.jumped && c.pendingReason == GiStaleReason::Camera &&
-                                    scrollTarget(c.resolution) != nullptr;
+            const bool cameraOnly = c.built && !c.jumped && !c.liveTorn &&
+                                    c.pendingReason == GiStaleReason::Camera;
             if (cameraOnly) {
                 bool busy = false;
                 for (const VctCascade &o : mVctCascades)
@@ -5495,7 +5571,9 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
                                     std::chrono::steady_clock::now() - t0).count());
             if (ok) {
                 ++c.scrollFrames;
-                c.pendingSince = giWriterFrame();   // served, still owed: behind the others (decision 7)
+                // A scroll's chunk frame: the debt is the same scroll, still owed; it waits its turn behind
+                // older debts by the frame of this service, the scroll's own clock (decision 7).
+                c.pendingSince = giWriterFrame();
             } else {
                 row.setUnits(0);
                 abortScroll(i);
@@ -5577,7 +5655,9 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             // material slider every cascade would freeze - the stage-1 read's F3.)
             c.editSince = giWriterFrame();
             c.editLast = giWriterFrame();
-            c.pendingSince = giWriterFrame();     // served, still owed: behind the others (decision 7)
+            // SERVED, STILL OWED: what it owes now is the mark this frame's table does not carry, and the age
+            // of THAT debt is its first mark (decision 11 c) - the frame it was marked, not the scheduler's.
+            c.pendingSince = c.editLast;
         } else {
             c.pending = 0;
             // Owes nothing: the age goes with the debt (a mark later this frame starts a new one - the

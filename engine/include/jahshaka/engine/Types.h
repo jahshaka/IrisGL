@@ -5185,6 +5185,11 @@ struct GiVoxelStats {
     /// volumes are byte-identical: it is the instrument of the proof that one
     /// at-rest sweep IS the chain's fixed point (gi.chain_converge).
     std::string lightDigest;
+    /// THE VOXELISER'S STORE, hashed the same way (ENGINE-UPGRADE-U5 stage 2): level 0 of the albedo,
+    /// the emissive, the normal, the coverage and the surface position per half - what a build WRITES,
+    /// independent of the light's history - so two builds of one place compare by 16 hex digits (the
+    /// voxeliser's work partition proved bit for bit on a real scene, ENGINE-UPGRADE-U5 stage 2).
+    std::string storeDigest;
 };
 
 /// ONE CASCADE'S VOXELS, WHOLE (PHOTON-VOXEL-3) — the test and tool readback of
@@ -5221,6 +5226,14 @@ struct GiVoxelVolume {
     /// faces looking +a take the front where n_a > 0, the back where n_a < 0.
     std::vector<float> lightBack;
     std::vector<float> normal;
+    /// THE REST OF THE VOXELISER'S LEVEL 0 (ENGINE-UPGRADE-U5, the reader's decision 11 g): the emissive
+    /// (rgb, the material roughness in a), decoded like `albedo`; and the raw integers a build keeps - the
+    /// area weight per voxel (`accumWeight`, width*height*depth) and the four packed position sums per voxel
+    /// (`positionSums`, width*height*depth*4, z-interleaved as the volume holds them: z*4 + k). With the
+    /// arrays above, every level-0 volume a build writes: the mips are regenerated from level 0.
+    std::vector<float> emissive;
+    std::vector<unsigned> accumWeight;
+    std::vector<unsigned> positionSums;
     /// THE DIRECT VOLUME (FAR-SUN-2), level 0, premultiplied like `light`: every lamp's direct
     /// term and the emissive - what a hit's read takes out of the store (jah_rq_hit.glsl's bounce
     /// share 1 - D / T). Empty where the cascade keeps none (no bounce texture).

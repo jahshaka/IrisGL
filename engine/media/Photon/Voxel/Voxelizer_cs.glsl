@@ -57,6 +57,12 @@
 	#define anyInvocationARB( value ) emulatedAnyInvocationARB( value )
 @end
 
+// Jahshaka (ENGINE-UPGRADE-U5 stage 2): THE GROUP'S PER-VOXEL SUMS (Voxelizer_piece_cs.any, the work
+// partition): 33 integers for each of the 64 voxels - albedo 4, the raw and the folded normal 3 + 3, the
+// emissive 3, the roughness, the area weight, the coverage per half 3 + 3, the position per half 3 + 3,
+// the casters' coverage per half 3 + 3 - indexed sum x 64 + voxel. 8.4 KB.
+shared uint g_voxelSums[33 * 64];
+
 @insertpiece( PreBindingsHeaderCS )
 
 @property( syntax == glsl )

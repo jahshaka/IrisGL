@@ -59,8 +59,9 @@ namespace Ogre
         /// into it - a voxel at new cell n from old cell n + shift (shift = new lattice - old lattice,
         /// per axis, each |shift| < resolution).
         void begin( PhotonVoxelizer *live, const int32 shift[3] );
-        /// THE COMMIT'S COPY: every level-0 volume of this target into `live`'s, whole.
-        void commit( PhotonVoxelizer *live );
+        /// THE COMMIT'S COPY: every level-0 volume of this target into `live`'s, whole. `fault` (the test
+        /// door gi.cascadeFaultCommit) throws after the first half of the copies - a torn live store.
+        void commit( PhotonVoxelizer *live, bool fault = false );
 
     private:
         void copyBox( TextureGpu *src, TextureGpu *dst, const uint32 srcOrigin[3],

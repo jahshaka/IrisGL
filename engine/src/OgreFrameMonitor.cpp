@@ -1125,6 +1125,10 @@ const ArmDef kArms[] = {
       "FAULT INJECTION (a test door, gi.cascades round-2 F1): cascade N's rebuild throws AFTER its "
       "build - the keep-the-placement path. -1 = none. Was JAH_GI_CASCADE_FAULT_POST (a per-rebuild "
       "read)." },
+    { "gi.cascadeFaultCommit", -1.0, -1.0, 15.0,
+      "FAULT INJECTION (a test door, gi.scroll_slab case F; ENGINE-UPGRADE-U5 decision 11 a): cascade N's "
+      "scroll commit throws after copying the first half of its volumes into the live store - the torn-store "
+      "path (the cascade owes a whole rebuild, never a scroll). -1 = none." },
     { "gi.scrollBudgetMs", 0.0, 0.0, 1000.0,
       "THE INCREMENTAL SCROLL'S PER-FRAME BUDGET (ENGINE-UPGRADE-U5 stage 1) in milliseconds of "
       "voxelisation, read when a scroll is planned: a small value spreads a fixture's slab over "

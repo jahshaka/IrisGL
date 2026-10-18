@@ -1862,6 +1862,7 @@ enum class ArmId : unsigned {
     // per-frame / per-pass / per-build code.
     GiCascadeFault,      ///< "gi.cascadeFault" — cascade N's rebuild throws before its build (-1 = none)
     GiCascadeFaultPost,  ///< "gi.cascadeFaultPost" — cascade N's rebuild throws after its build (-1 = none)
+    GiCascadeFaultCommit,///< "gi.cascadeFaultCommit" — cascade N's scroll commit throws half way through its copies (-1 = none)
     GiScrollBudget,      ///< "gi.scrollBudgetMs" — a scroll's per-frame voxelisation budget in ms (0 = shipped)
     GiVoxelOctants,      ///< "gi.voxelOctants" — a whole build's octants per axis (1 shipped, 2 = 8 octants; stage 2's measure)
     GiRebuildCascade,    ///< "gi.rebuildCascade" — cascade N rebuilt whole every frame while set (-1 = none; a measuring door)

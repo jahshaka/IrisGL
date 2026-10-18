@@ -454,6 +454,10 @@ public:
         /// chunk frame, a rebuild an edit of the same frame keeps owed). The scheduler serves the OLDEST
         /// first, so N pending cascades are each served within N frames - under a drag too. 0 = owes nothing.
         unsigned long long pendingSince = 0;
+        /// THE LIVE STORE IS TORN (the reader's decision 11 a): a scroll's commit threw between its copies, so
+        /// the live volumes are part target, part old box. Never scrolled from (a scroll copies them); only a
+        /// whole rebuild clears it. Outside the placement's revert on purpose.
+        bool liveTorn = false;
         unsigned long long scrolls = 0;        ///< camera scrolls committed by the slab path
         unsigned long long scrollFrames = 0;   ///< frames spent building scrolls' chunks
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }

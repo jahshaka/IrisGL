@@ -7,6 +7,7 @@
 #include "OgreHlmsCompute.h"
 #include "OgreHlmsComputeJob.h"
 #include "OgreHlmsManager.h"
+#include "OgreException.h"
 #include "OgreLwString.h"
 #include "OgreProfiler.h"
 #include "OgrePixelFormatGpuUtils.h"
@@ -253,7 +254,7 @@ namespace Ogre
         OgreProfileGpuEnd( "Photon scroll begin" );
     }
     //-------------------------------------------------------------------------
-    void PhotonVoxelScroll::commit( PhotonVoxelizer *live )
+    void PhotonVoxelScroll::commit( PhotonVoxelizer *live, bool fault )
     {
         OgreProfileGpuBegin( "Photon scroll commit" );
         mRenderSystem->endRenderPassDescriptor();
@@ -266,6 +267,13 @@ namespace Ogre
             // WHOLE level 0, texel for texel - the positions too: they were resolved for THIS box.
             const uint32 size[3] = { from[i]->getWidth(), from[i]->getHeight(), from[i]->getDepth() };
             copyBox( from[i], to[i], zero, zero, size );
+            if( fault && i == 4u )
+            {
+                OgreProfileGpuEnd( "Photon scroll commit" );
+                OGRE_EXCEPT( Exception::ERR_INTERNAL_ERROR,
+                             "gi.cascadeFaultCommit: forced failure half way through a scroll's commit",
+                             "PhotonVoxelScroll::commit" );
+            }
         }
         OgreProfileGpuEnd( "Photon scroll commit" );
     }
