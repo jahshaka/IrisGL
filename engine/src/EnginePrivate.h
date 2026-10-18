@@ -1889,7 +1889,7 @@ enum class ArmId : unsigned {
     GiPccPlacementLights,///< "gi.pccPlacementLights" — every staged probe placement's light list and probe nodes checked (the guard, U4 decision 14)
     GpuSerialCompose,    ///< "gpuscene.serialCompose" — the GPU scene's compose after the barrier on the frame's thread (the identity row's other arm, U4 stage 4)
     GpuComposeDigest,    ///< "gpuscene.composeDigest" — the compose's digest of every staged row and tail (the identity row, U4 stage 4)
-    GpuThrowInLane,      ///< "gpuscene.throwInLane" — share N-1 of the GPU scene's compose throws once (a test door, U4 decision 18.3)
+    GpuThrowInLane,      ///< "gpuscene.throwInLane" — the GPU scene compose throw door: before the stage, after it, or every time (a test door, U4 decisions 18.3 + 22.4)
     Count
 };
 class ArmRegistry {
