@@ -270,6 +270,9 @@ public:
     /// a scene's classification hold instead of leaking away.
     quint64 staticNodeCount() const;
     quint64 staticRepromotionCount() const { return mStaticRepromotions; }
+    /// THE SYNC'S STAGE LOG (a measuring door, U4 stage 5): with it on, the last sync's MirrorStage spans (name, ms).
+    void setStageLog(bool on) { mStageLogOn = on; }
+    const std::vector<std::pair<const char *, double>> &lastStageLog() const { return mStageLog; }
     /// How many syncs a node must go UNWRITTEN before the settle may promote
     /// it — its own quiet count, not the document's or the process's. Half a
     /// second at 60 Hz: long enough that a drag's inter-frame gaps never trip
@@ -831,6 +834,15 @@ private:
         /// once kStaticSettleFrames syncs have passed since; until then it
         /// leaves the node and its subtree for the next rotation.
         quint32 lastWriteSync = 0;
+        /// THE EXTRACT ON THE ENTRY (ENGINE-UPGRADE-U4 stage 5): the emit it owes a NodeRecord to (mOwedSerial; 0 =
+        /// none) and the fields owed; the journal take it was last WRITTEN in (mWrittenSerial) — one lookup per written
+        /// node, no side map. (The order stays the node KEYS, mFrameNodeOrder: an Entry* into the QHash moves on rehash.)
+        quint32 owedSerial = 0;
+        quint8  owedFields = 0;
+        quint32 writtenSerial = 0;
+        /// THE SETTLE'S ROTATION that last VISITED this node (mSettleRotation; 0 = none): a write during a rotation owes
+        /// a next one only for a node the running rotation already passed (or under a parent it passed — §5).
+        quint32 settleVisited = 0;
         bool hasMesh  = false;
         bool hasLight = false;
         bool hasDecal = false;                       // an engine decal is bound
@@ -2093,17 +2105,25 @@ private:
     /// each with the fields it owes (NodeRecord::Trs / Parent / Static). Built into FrameInputScene::nodes at the
     /// emit, reading each node's values THEN — a node named twice is one record.
     std::vector<iris::SceneNode *> mFrameNodeOrder;
-    QHash<const iris::SceneNode *, quint8> mFrameNodeFields;
+    quint32 mOwedSerial = 1;     ///< the emit being assembled (Entry::owedSerial); moves at each buildNodeRecords
     /// A take the journal could not complete: every mirrored node owes its transform this emit.
     bool mPoseAllPending = false;
     void oweNodeRecord(iris::SceneNode *node, quint8 fields);
+    void oweEntryRecord(iris::SceneNode *node, Entry &e, quint8 fields);
     /// The graph class's latch: a changed class owes a Static record, for the node and its switched region.
     void noteGraphClass(iris::SceneNode *node);
     std::vector<long long> mClassScratch;
     /// The extract itself (the emit): FrameInputScene::nodes from the owed set.
     void buildNodeRecords(std::vector<jahshaka::engine::NodeRecord> &out);
-    /// The DOCUMENT nodes written since the last emit, by node (the soft promotion's question), and the record's set.
-    QSet<const iris::SceneNode *> mWrittenThisSync;
+    /// The DOCUMENT nodes written since the last emit (the soft promotion's question): ON THE ENTRY (Entry::writtenSerial
+    /// == mWrittenSerial), and in this small set only for a node written while it has no entry (its mirrored
+    /// descendants are named instead) — U4 stage 5.
+    quint32 mWrittenSerial = 1;
+    QSet<const iris::SceneNode *> mWrittenEntryless;
+    bool writtenThisSync(const iris::SceneNode *node, const Entry &e) const {
+        return e.writtenSerial == mWrittenSerial || mWrittenEntryless.contains(node);
+    }
+    void newWrittenSync() { ++mWrittenSerial; mWrittenEntryless.clear(); }
     jahshaka::engine::ChangeSet mFrameChanges;
     /// Drain the journal into the two above (twice a sync: before the walk, at the emit).
     void takeWriteJournal();
@@ -2145,6 +2165,9 @@ private:
         bool parentMovable = false;
     };
     std::vector<SettleEntry> mSettleWalk;
+    quint32 mSettleRotation = 0;
+    bool mStageLogOn = false;
+    std::vector<std::pair<const char *, double>> mStageLog;   ///< the running (or last) rotation's id (Entry::settleVisited; U4 stage 5)
     quint32 mSettleVisits = 0;
     /// Runs one slice of the settle (at most kStaticSettleNodesPerSync visits).
     /// Returns true when the rotation is complete.

@@ -62,20 +62,25 @@ namespace {
 /// every frame with no capture running — it reads no clock and does nothing.
 /// The scopes below are SEQUENTIAL, never nested, so the times they report are
 /// exclusive by construction and sum to the mirror's own stage.
+/// THE SYNC'S OWN STAGE LOG (U4 stage 5: the extract's phases at 10k movers, the fixture's breakdown): while a mirror
+/// asked for it (SceneMirror::setStageLog), every MirrorStage of its sync appends (name, ms) — no engine needed.
+thread_local std::vector<std::pair<const char *, double>> *tStageLog = nullptr;
+
 struct MirrorStage {
     jahshaka::engine::Engine *engine;
     const char *name;
     std::chrono::steady_clock::time_point start;
     MirrorStage(jahshaka::engine::Engine *e, const char *n) : engine(e), name(n)
     {
-        if (engine) start = std::chrono::steady_clock::now();
+        if (engine || tStageLog) start = std::chrono::steady_clock::now();
     }
     ~MirrorStage()
     {
-        if (!engine) return;
+        if (!engine && !tStageLog) return;
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - start).count();
-        engine->noteHostStage(std::string(name), float(ms));
+        if (tStageLog) tStageLog->push_back({ name, ms });
+        if (engine) engine->noteHostStage(std::string(name), float(ms));
     }
     MirrorStage(const MirrorStage &) = delete;
     MirrorStage &operator=(const MirrorStage &) = delete;
@@ -682,6 +687,9 @@ int SceneMirror::sync(const FrameViews &frameViews)
         }
     } spend(this);
     if (!mSource || !mSource->getRootNode()) return 0;
+    mStageLog.clear();
+    tStageLog = mStageLogOn ? &mStageLog : nullptr;
+    struct StageLogEnds { ~StageLogEnds() { tStageLog = nullptr; } } stageLogEnds;
     takeCompletions();   // the answers to the named messages of the frames since the last sync (U3 stage 3)
     mMaterialsBornThisSync.clear();
     // RE-TAKE the graph if another mirror took this document while we were not
@@ -803,7 +811,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
             mWasPlaying = playing;
             // THE EDGE'S OWN SYNC PROMOTES NOTHING: the writes the set holds were made BEFORE play started (an edit,
             // the edge's own restore) — a node has to be written WHILE playing to be a surprise mover.
-            mWrittenThisSync.clear();
+            newWrittenSync();
             // A FULL-WALK TRIGGER (§3.5). The play edge clears soft mobility
             // tree-wide and re-arms the surprise-mover watch, and a node has to
             // be SEEN STANDING STILL before it can be seen moving — which means
@@ -914,7 +922,9 @@ int SceneMirror::sync(const FrameViews &frameViews)
     // before it, a node written since the last sync could be promoted inside
     // its quiet window and then go unstamped (noteSettleWrite skips a node
     // that is static by then).
+    { MirrorStage s(mon, "mirror.settle");
     runStaticSettle();
+    }
     // The handful of things that legitimately cost something EVERY frame, all
     // bounded by the scene's light and camera registries rather than by node
     // count — and idempotent, so running them after a full walk costs a latch
@@ -1025,7 +1035,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
         mClassScratch.clear();
     }
     buildNodeRecords(scenePart.nodes);
-    mWrittenThisSync.clear();
+    newWrittenSync();
     std::vector<FrameInputView> parts(frameViews.views.size());
     for (size_t i = 0; i < frameViews.views.size(); ++i) {
         parts[i].view = frameViews.views[i].view;
@@ -1230,6 +1240,7 @@ void SceneMirror::runStaticSettle()
         mSettleOwed = false;
         if (!root) return;                         // nothing to classify
         mSettleDeferred = false;
+        if (++mSettleRotation == 0u) mSettleRotation = 1u;   // this rotation's id (Entry::settleVisited)
         // The document root has no document parent: applyStaticDefaults
         // starts it with parentMovable = false.
         mSettleWalk.push_back({ root.toWeakRef(), nullptr, false });
@@ -1274,6 +1285,21 @@ void SceneMirror::noteSettleWrite(iris::SceneNode *n, Entry *e)
     if (n->sceneNodeType != iris::SceneNodeType::Mesh && n->sceneNodeType != iris::SceneNodeType::Empty)
         return;
     if (e->movable < 0 && n->resolvedMobility() != iris::Mobility::Static) return;
+    // A ROTATION IS RUNNING (U4 stage 5, mirror.settle_incremental §5): a node it has NOT reached yet is reached by it
+    // — its visit reads the quiet clock stamped above and defers the node (owing the next rotation) only if it is
+    // still inside its window then. A write owes a NEXT rotation only where the running one has passed: the node
+    // itself was visited, or its CURRENT parent was (a node reparented under an already-visited parent is never
+    // reached by this rotation — its queued entry fails the parent check).
+    if (!mSettleWalk.empty()) {
+        bool passed = e->settleVisited == mSettleRotation;
+        if (!passed) {
+            const iris::graph::DocNode *p = n->docNode().parent;
+            iris::SceneNode *parent = p ? p->owner : nullptr;
+            const auto pit = parent ? mEntries.constFind(parent) : mEntries.cend();
+            passed = pit != mEntries.cend() && pit->settleVisited == mSettleRotation;
+        }
+        if (!passed) return;
+    }
     oweSettle(mSyncStamp + kStaticSettleFrames);
 }
 
@@ -1313,8 +1339,9 @@ bool SceneMirror::stepStaticSettle()
         // ITS OWN QUIET WINDOW. Written within kStaticSettleFrames syncs: left
         // as it is, with its subtree (rule 2 — nothing under a dynamic node can
         // be static), for the next rotation, which starts once it is quiet.
-        const auto ent = mEntries.constFind(n.data());
-        if (ent != mEntries.cend() && ent->lastWriteSync != 0
+        const auto ent = mEntries.find(n.data());
+        if (ent != mEntries.end()) ent->settleVisited = mSettleRotation;   // passed by this rotation (noteSettleWrite)
+        if (ent != mEntries.end() && ent->lastWriteSync != 0
             && mSyncStamp - ent->lastWriteSync < kStaticSettleFrames) {
             oweSettle(ent->lastWriteSync + kStaticSettleFrames);
             mSettleDeferred = true;
@@ -3957,7 +3984,7 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
 // (graph::WriteJournalReader), so another reader (physics' write-back, a thumbnail's mirror) draining the same
 // process-wide log never costs it a write. Each written node becomes:
 //   * an entry in the record's ChangeSet (its engine node; the engine re-reads that node's SUBTREE and nothing else);
-//   * a member of mWrittenThisSync (the soft promotion's question: was THIS node written while playing?);
+//   * written this sync (writtenThisSync: the soft promotion's question — was THIS node written while playing?);
 //   * for every lamp at or under it, an owed flag for the GI debounce (a still lamp arms the settle, a moving one the
 //     re-inject cadence) — what the three scene-wide light hashes used to detect by re-hashing every lamp every frame.
 // A written node this mirror has no engine node for (the document root, a node the walk refused or has not adopted
@@ -3996,29 +4023,49 @@ void SceneMirror::takePublishedRiderTags()
 
 void SceneMirror::takeWriteJournal()
 {
-    if (!mJournal.takePoses(mJournalScratch, mJournalPosed)) {
+    bool took = true;
+    { MirrorStage s(nullptr, "mirror.journal.take");   // (the stage log's: the document's own half)
+    took = mJournal.takePoses(mJournalScratch, mJournalPosed);
+    }
+    if (!took) {
         mFrameChanges.complete = false;
         mPoseAllPending = true;   // a write the take cannot name: every mirrored node sends its transform
     }
+    // ONE LOOKUP PER WRITTEN NODE (U4 stage 5): the entry says whether it was named this take, carries what it owes
+    // the emit, and a mirrored node needs no stack.
     for (iris::SceneNode *n : mJournalScratch) {
-        noteWrittenNode(n);
-        if (mEntries.contains(n)) oweNodeRecord(n, jahshaka::engine::NodeRecord::Trs);
+        const auto it = mEntries.find(n);
+        if (it == mEntries.end()) { noteWrittenNode(n); continue; }   // not mirrored: its mirrored descendants
+        if (it->writtenSerial != mWrittenSerial) {
+            it->writtenSerial = mWrittenSerial;
+            if (it->node) mFrameChanges.moved.push_back(it->node);
+            else noteWrittenNode(n);   // an entry without an engine node: its descendants
+        }
+        oweEntryRecord(n, *it, jahshaka::engine::NodeRecord::Trs);
     }
     // POSED (a camera's write): no scene movement, so not in the change set — but the engine still draws it there.
-    for (iris::SceneNode *n : mJournalPosed)
-        if (mEntries.contains(n)) oweNodeRecord(n, jahshaka::engine::NodeRecord::Trs);
+    for (iris::SceneNode *n : mJournalPosed) {
+        const auto it = mEntries.find(n);
+        if (it != mEntries.end()) oweEntryRecord(n, *it, jahshaka::engine::NodeRecord::Trs);
+    }
     mJournalScratch.clear();
     mJournalPosed.clear();
 }
 
 void SceneMirror::oweNodeRecord(iris::SceneNode *node, quint8 fields)
 {
-    auto it = mFrameNodeFields.find(node);
-    if (it == mFrameNodeFields.end()) {
-        mFrameNodeFields.insert(node, fields);
+    const auto it = mEntries.find(node);
+    if (it != mEntries.end()) oweEntryRecord(node, *it, fields);   // an entry-less node is never emitted
+}
+
+void SceneMirror::oweEntryRecord(iris::SceneNode *node, Entry &e, quint8 fields)
+{
+    if (e.owedSerial != mOwedSerial) {
+        e.owedSerial = mOwedSerial;
+        e.owedFields = fields;
         mFrameNodeOrder.push_back(node);
     } else {
-        it.value() |= fields;
+        e.owedFields |= fields;
     }
 }
 
@@ -4028,17 +4075,21 @@ void SceneMirror::oweNodeRecord(iris::SceneNode *node, quint8 fields)
 // latches) — read NOW, at the emit, so a node written twice in one sync is one record with its last values.
 void SceneMirror::buildNodeRecords(std::vector<jahshaka::engine::NodeRecord> &out)
 {
+    MirrorStage s(nullptr, "mirror.emit.records");
     using jahshaka::engine::NodeRecord;
     if (mPoseAllPending) {
         mPoseAllPending = false;
         for (auto it = mEntries.begin(); it != mEntries.end(); ++it)
-            if (it->node && it->docNode) oweNodeRecord(it->docNode, NodeRecord::Trs);
+            if (it->node && it->docNode) oweEntryRecord(it->docNode, *it, NodeRecord::Trs);
     }
     out.reserve(out.size() + mFrameNodeOrder.size());
     for (iris::SceneNode *n : mFrameNodeOrder) {
-        const auto e = mEntries.constFind(n);
-        if (e == mEntries.cend() || !e->node) continue;   // released since it was owed (no deref: the key is gone)
-        const quint8 fields = mFrameNodeFields.value(n, 0);
+        const auto e = mEntries.find(n);
+        if (e == mEntries.end() || !e->node) continue;   // released since it was owed (no deref: the key is gone)
+        // (an entry released and re-created since the owe carries the new owe or none; a key named twice is one record)
+        if (e->owedSerial != mOwedSerial) continue;
+        e->owedSerial = 0;
+        const quint8 fields = e->owedFields;
         NodeRecord r;
         r.id = e->node;
         r.fields = fields;
@@ -4053,13 +4104,17 @@ void SceneMirror::buildNodeRecords(std::vector<jahshaka::engine::NodeRecord> &ou
         out.push_back(r);
     }
     mFrameNodeOrder.clear();
-    mFrameNodeFields.clear();
+    if (++mOwedSerial == 0u) mOwedSerial = 1u;   // (a wrap: every entry's stamp is stale by construction at 2^32 emits)
 }
 
 void SceneMirror::noteWrittenNode(iris::SceneNode *node)
 {
-    if (mWrittenThisSync.contains(node)) return;   // named once per emit
-    mWrittenThisSync.insert(node);
+    // THE SLOW PATH (U4 stage 5): a written node with no engine node — its nearest mirrored descendants are named.
+    // An entry-less node is named once per take by this set; an entry's stamp was set by the take.
+    if (!mEntries.contains(node)) {
+        if (mWrittenEntryless.contains(node)) return;
+        mWrittenEntryless.insert(node);
+    }
     // The node itself, or — when this mirror has no engine node for it — its nearest mirrored descendants.
     std::vector<iris::SceneNode *> stack{ node };
     while (!stack.empty()) {
@@ -4107,7 +4162,7 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
     // play edge's own sync holds none) is moving; the pose compare that stood here, a movement detector of the
     // mirror's own, is gone. A write of the same value counts, as it does for every scan — the safe direction.
     if (!movable && mSource && mSource->isPlaying() && node->mobility() == iris::Mobility::Auto) {
-        if (mWrittenThisSync.contains(node)) {
+        if (writtenThisSync(node, e)) {
             node->_setSoftMovable(true);
             movable = true;
             why = iris::MobilityReason::Play;
