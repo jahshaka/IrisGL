@@ -5022,7 +5022,9 @@ struct RayQueryStatus {
 /// map) and the LATE one (the first's rejected, tested again against this frame's) - and the
 /// instances each half's depth test rejected (`lateOccluded` = drawn by neither: wholly behind
 /// the map's own depth). `lightTested` is false for a map the light's depth does not reach (a
-/// spot or point map, the probes', a map's first frame). The pbs* fields are filled only under
+/// spot or point map, the probes', a map's first frame), `receiverTested` false for a map with no receiver
+/// grid that frame (a view without an id pass - a VR headset's -, a capture, the scene's door shut). The pbs*
+/// fields are filled only under
 /// the measuring door shadow.casterPbsProbe: the stock casters in the map's frustum and those
 /// NOT wholly behind its final depth (the triangles at the level the light's footprint picks,
 /// submesh 0 only).
@@ -5060,15 +5062,9 @@ struct AtomCasterMapStats {
     unsigned long long triangles = 0ull, lateTriangles = 0ull;
     unsigned pbsInstances = 0, pbsVisibleInstances = 0;
     unsigned long long pbsTriangles = 0ull, pbsVisibleTriangles = 0ull;
-    /// THE RECEIVER TEST'S COUNT (stage 4b's premise; the measuring door shadow.casterReceiverProbe): the
-    /// drawn caster clusters and their triangles the map's two halves drew, and those a receiver test
-    /// would cut (no receiver the camera sees farther from the light under their dilated box).
+    /// THE RECEIVER TEST RAN on this map (stage 4b: the view's id depth of that frame built its receiver grid;
+    /// the triangles above are after it).
     bool receiverTested = false;
-    unsigned receiverClusters = 0, receiverCutClusters = 0;
-    unsigned long long receiverTriangles = 0ull, receiverCutTriangles = 0ull;
-    /// ...and per INSTANCE box (a cluster counted cut only when its whole instance would be).
-    unsigned receiverInstanceCutClusters = 0;
-    unsigned long long receiverInstanceCutTriangles = 0ull;
 };
 
 struct AtomDrawStatus {

@@ -1827,4 +1827,11 @@ bool OgreScene::shadowCasterRoutes(std::vector<ShadowRouteShare> &out)
     } JAH_CATCH(mError, false);
 }
 
+void OgreScene::setShadowReceiverCull(bool on)
+{
+    if (postScene([=](OgreScene &s) { s.setShadowReceiverCull(on); return true; })) return;   // U3 4a: a message
+    JAH_HOST_CALL("Scene::setShadowReceiverCull");
+    mShadowReceiverCull = on;
+}
+
 }}}   // namespace jahshaka::engine::detail

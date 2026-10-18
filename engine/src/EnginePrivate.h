@@ -1876,7 +1876,6 @@ enum class ArmId : unsigned {
     GiRebuildCascade,    ///< "gi.rebuildCascade" — cascade N rebuilt whole every frame while set (-1 = none; a measuring door)
     ShadowCasterCull,    ///< "shadow.casterCull" — a sun map's Atom casters culled by the light's own depth (0: frustum only, the parity arm)
     ShadowCasterPbsProbe,///< "shadow.casterPbsProbe" — a sun map's PBS casters TESTED against the light's depth and counted (a measuring door)
-    ShadowCasterReceiverProbe,///< "shadow.casterReceiverProbe" — N > 0: the receiver grid (N-texel tiles) built per sun map and the cut clusters a receiver test would drop counted (stage 4b's premise)
     GiRebuildSettle,     ///< "gi.rebuildSettle" — the rebuild settle runs (0: off, the paired arm)
     GiFieldRays,         ///< "gi.fieldRays" — the field's rays per depth texel (0 = shipped)
     GiFieldSamples,      ///< "gi.fieldSamples" — the field's sample target (0 = shipped)
@@ -1907,6 +1906,65 @@ enum class ArmId : unsigned {
     GpuThrowInLane,      ///< "gpuscene.throwInLane" — the GPU scene compose throw door: before the stage, after it, or every time (a test door, U4 decisions 18.3 + 22.4)
     Count
 };
+/// THE ARMS' NAMES, IN ArmId'S ORDER (ENGINE-UPGRADE-U5 decision 17: a table row out of order swapped two doors
+/// silently - a measurement read the other arm's value). OgreFrameMonitor.cpp asserts at compile time that its
+/// table (kArms) names each arm here in this order; a new arm is an enumerator, a name here and a row there.
+inline constexpr const char *kArmNames[] = {
+    "reflect.motion",
+    "reflect.posed",
+    "reflect.alphaTested",
+    "reflect.edgeClasses",
+    "reflect.monoEyes",
+    "rayquery.tlasRefit",
+    "gather.temporal",
+    "atom.decode",
+    "cards.footprintTexels",
+    "gi.fieldScroll",
+    "photon.diffuseConeSkip",
+    "photon.specularConeSkip",
+    "gather.decodeHits",
+    "gather.octRes",
+    "gather.stride",
+    "gather.historyFrames",
+    "gather.filterRadius",
+    "gather.restOff",
+    "gather.restFrames",
+    "gather.restSeed",
+    "gather.ageView",
+    "gather.freezeFrame",
+    "gather.youngFrames",
+    "gather.youngReach",
+    "gather.validationOff",
+    "gather.crossStrata",
+    "gi.cascadeFault",
+    "gi.cascadeFaultPost",
+    "gi.cascadeFaultCommit",
+    "gi.scrollBudgetMs",
+    "gi.voxelOctants",
+    "gi.rebuildCascade",
+    "shadow.casterCull",
+    "shadow.casterPbsProbe",
+    "gi.rebuildSettle",
+    "gi.fieldRays",
+    "gi.fieldSamples",
+    "gi.fieldStatic",
+    "gi.fieldStopOff",
+    "gi.refuseGeometry",
+    "atom.discriminate",
+    "atom.hitWorldLights",
+    "atom.hitVctSpecular",
+    "gather.hitsReadback",
+    "reflect.metalDecode",
+    "gi.hitDirect",
+    "gpuscene.wholeWalk",
+    "gpuscene.walkParity",
+    "messages.refuse",
+    "interp.serial",
+    "vr.fakeRuntimePace",
+    "view.fakePresentBlock",
+};
+static_assert(sizeof(kArmNames) / sizeof(kArmNames[0]) == unsigned(ArmId::Count), "ArmId and kArmNames differ");
+
 class ArmRegistry {
 public:
     ArmRegistry();
@@ -4225,6 +4283,9 @@ public:
     bool shadowCasterRoutes(std::vector<ShadowRouteShare> &out) override;
     void setAtomDrawEnabled(bool on) override;
     void setAtomOcclusionEnabled(bool on) override;
+    void setShadowReceiverCull(bool on) override;
+    bool shadowReceiverCull() const { return mShadowReceiverCull; }
+    bool mShadowReceiverCull = true;
     void setAtomCutBudgetForTest(unsigned indices) override;
     bool atomOcclusionEnabled() const override { return mAtom.occlusionEnabled(); }
     void setAtomView(AtomView view) override {
@@ -6489,9 +6550,16 @@ public:
     /// the id pass's "id.cull.cut", a tool's or the chain warm-up's plain
     /// "cull.cut"; a shadow map's caster cull files none (its pass row holds it).
     enum class CullRows { Tool, IdPass, Caster };
+    /// THE RECEIVER TEST'S INPUTS (ENGINE-UPGRADE-U5 stage 4b; OgreAtomCasterPass.cpp): a sun map's receiver
+    /// grid and its request, read by the cut's per-cluster test (JahCullCut_cs, cut_receivers).
+    struct CullReceivers {
+        Ogre::UavBufferPacked *params = nullptr;
+        Ogre::UavBufferPacked *grid = nullptr;   ///< the grid's farthest-receiver pyramid, its levels in a row
+    };
     bool recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
                        std::string &err, double *requestMs = nullptr,
-                       const GpuCull *prior = nullptr, CullRows rows = CullRows::Tool);
+                       const GpuCull *prior = nullptr, CullRows rows = CullRows::Tool,
+                       const CullReceivers *receivers = nullptr);
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
                     GpuCullResult &out);
 private:
@@ -6795,6 +6863,8 @@ struct AtomReceiverDepth {
     Ogre::Matrix4 drawMatrix = Ogre::Matrix4::IDENTITY;
     unsigned rect[4] = { 0u, 0u, 0u, 0u };
     uint32_t frame = ~0u;
+    /// The workspace whose id pass wrote it: only that workspace's shadow node may read it.
+    const Ogre::CompositorWorkspace *workspace = nullptr;
 };
 
 /// THE PRESENTED FRAME'S CAPTURE (View::requestFrameCapture, CLOSE-SHOT-2). One per

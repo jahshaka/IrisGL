@@ -77,6 +77,30 @@ layout( std430, ogre_U6 ) restrict buffer cntLayout { uint counter[]; };
 layout( std430, ogre_U7 ) writeonly restrict buffer drawLayout { uint draws[]; };
 layout( std430, ogre_U8 ) writeonly restrict buffer recordLayout { uvec4 records[]; };
 layout( std430, ogre_U9 ) writeonly restrict buffer slotBaseLayout { uint slotBase[]; };
+@property( cut_receivers )
+// THE SUN MAP'S RECEIVERS (ENGINE-UPGRADE-U5 stage 4b; JahReceiverGrid_cs builds the grid): the request (the map's
+// cull matrix, its size, the tile, the dilation, the depth margin) and the tiles of farthest receiver depth.
+struct RecvParams
+{
+	vec4  invViewProjRow[4];
+	vec4  lightRow[4];
+	vec4  planes[6];
+	uvec4 dims;     // z tiles x, w tiles y
+	uvec4 map;      // x map width, y map height, z tile texels
+	vec4  misc;     // y the dilation in texels
+	uvec4 counts;   // w the pyramid's levels
+	uvec4 rect;
+};
+layout( std430, ogre_U10 ) readonly restrict buffer recvParamsLayout { RecvParams recv; };
+// The grid as a FARTHEST-DEPTH PYRAMID in one buffer (JahReceiverGrid_cs: the tiles at level 0, the levels one
+// after the other; an empty region all bits set): the test reads <= 3 x 3 texels at the level where the cluster's
+// rectangle is <= 2 texels wide - the farthest receiver under them.
+layout( std430, ogre_U11 ) readonly restrict buffer recvGridLayout { uint recvGrid[]; };
+uvec2 jahRecvLevelSize( uint k )
+{
+	return max( uvec2( recv.dims.z, recv.dims.w ) >> k, uvec2( 1u ) );
+}
+@end
 
 #define JAH_INSTANCE_LANES 10u
 #define JAH_FLAG_TWO_SIDED 0x800u   // GpuScene.h kGpuTwoSided
@@ -149,6 +173,54 @@ bool jahClusterInFrustum( vec4 sphere )
 			return false;
 	}
 	return true;
+}
+
+// THE RECEIVER TEST (stage 4b, decision 17): a caster cluster changes the picture only where its shadow can fall on
+// a receiver the camera sees. Its sphere in the map, dilated by the shadow filter's reach, the receivers' normal
+// offset and a tile (recv.misc.y texels), is WANTED when some tile under it holds a receiver FARTHER from the light
+// than the sphere's nearest point (reverse-Z: a smaller value); else none of its texels is ever compared against a
+// receiver's depth it could beat - not drawn, and the picture is the same. A rectangle too wide to walk is kept.
+bool jahClusterReceived( vec4 sphere )
+{
+@property( cut_receivers )
+	vec4 c4 = vec4( dot( gRow0.xyz, sphere.xyz ) + gRow0.w,
+					dot( gRow1.xyz, sphere.xyz ) + gRow1.w,
+					dot( gRow2.xyz, sphere.xyz ) + gRow2.w, 1.0 );
+	float r = sphere.w * gScale;
+	r += r * ( 1.0 / 4096.0 ) + 1.0e-6;
+	vec3 q = vec3( dot( recv.lightRow[0], c4 ), dot( recv.lightRow[1], c4 ), dot( recv.lightRow[2], c4 ) );
+	vec3 ext = r * vec3( length( recv.lightRow[0].xyz ), length( recv.lightRow[1].xyz ), length( recv.lightRow[2].xyz ) );
+	float nearest = q.z + ext.z;
+	vec2 t = vec2( ( q.x * 0.5 + 0.5 ) * float( recv.map.x ), ( 0.5 - q.y * 0.5 ) * float( recv.map.y ) );
+	vec2 half2 = vec2( ext.x * 0.5 * float( recv.map.x ), ext.y * 0.5 * float( recv.map.y ) ) + recv.misc.y;
+	vec2 lo = max( t - half2, vec2( 0.0 ) );
+	vec2 hi = min( t + half2, vec2( recv.map.xy ) - vec2( 1.0 ) );
+	if( lo.x > hi.x || lo.y > hi.y )
+		return true;   // outside the map's rectangle: the side planes' business, kept here
+	// IN TILES, at the mip where the rectangle is <= 4 texels wide (<= 5 texel indices a side, <= 25 reads): each
+	// texel holds the farthest receiver of its footprint, so the farthest under the rectangle is the least of
+	// those. (The 2-texel mip of the depth pyramids kept 3.14x the id pass on Bistro's interior map 1 where the
+	// tile walk keeps 2.48x; the 4-texel mip is the measured compromise.)
+	vec2 t0 = lo / float( recv.map.z ), t1 = hi / float( recv.map.z );
+	float widest = max( t1.x - t0.x, t1.y - t0.y );
+	int mip = clamp( int( ceil( log2( max( widest, 1.0 ) / 4.0 ) ) ), 0, int( recv.counts.w ) - 1 );
+	uint base = 0u;
+	for( int j = 0; j < mip; ++j )
+	{
+		uvec2 sz = jahRecvLevelSize( uint( j ) );
+		base += sz.x * sz.y;
+	}
+	ivec2 mipSize = ivec2( jahRecvLevelSize( uint( mip ) ) );
+	ivec2 a = clamp( ivec2( floor( t0 / float( 1 << mip ) ) ), ivec2( 0 ), mipSize - 1 );
+	ivec2 b = clamp( ivec2( floor( t1 / float( 1 << mip ) ) ), ivec2( 0 ), mipSize - 1 );
+	uint farthest = 0xFFFFFFFFu;
+	for( int y = a.y; y <= b.y; ++y )
+		for( int x = a.x; x <= b.x; ++x )
+			farthest = min( farthest, recvGrid[base + uint( y ) * uint( mipSize.x ) + uint( x )] );
+	return farthest != 0xFFFFFFFFu && nearest > uintBitsToFloat( farthest );
+@else
+	return true;
+@end
 }
 
 bool jahCutEvaluate( uint g )
@@ -244,12 +316,16 @@ void main()
 		uvec4 range = clusters[dag.x + c].range;
 		if( !jahClusterInFrustum( clusters[dag.x + c].sphere ) )
 			continue;
-		if( jahCutDrawn( range ) )
+		// THE RECEIVER TEST, for a cluster one of the two cuts draws only (the DAG's others never reach a map).
+		bool cutHere = jahCutDrawn( range ), rootHere = jahRootDrawn( range );
+		if( ( cutHere || rootHere ) && !jahClusterReceived( clusters[dag.x + c].sphere ) )
+			continue;
+		if( cutHere )
 		{
 			myIdx += range.y;
 			++myRec;
 		}
-		if( jahRootDrawn( range ) )
+		if( rootHere )
 		{
 			myRootIdx += range.y;
 			++myRootRec;
@@ -372,6 +448,8 @@ void main()
 		if( !jahClusterInFrustum( clusters[dag.x + c].sphere ) )
 			continue;
 		if( mode == 1u ? !jahCutDrawn( range ) : !jahRootDrawn( range ) )
+			continue;
+		if( !jahClusterReceived( clusters[dag.x + c].sphere ) )
 			continue;
 		uint depth = range.w == JAH_NO_GROUP ? 0u : uint( groups[range.w].error.z ) + 1u;
 		records[rec] = uvec4( slot, dag.x + c, idx, depth );

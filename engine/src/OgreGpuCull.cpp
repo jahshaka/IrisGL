@@ -222,7 +222,7 @@ void unbindCutJobs(Ogre::HlmsComputeJob *cut, Ogre::HlmsComputeJob *emit) {
     const Ogre::DescriptorSetUav::BufferSlot empty =
         Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
     if (cut) {
-        for (uint8_t i = 0; i < 10u; ++i) cut->_setUavBuffer(i, empty);
+        for (uint8_t i = 0; i < uint8_t(cut->getNumUavUnits()); ++i) cut->_setUavBuffer(i, empty);
         cut->setIndirectDispatchBuffer(0);
     }
     if (emit) {
@@ -256,7 +256,7 @@ void dispatchWithBarriers(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc,
 // frame. The answer stays in the cull's buffers (count, survivors, levels, draws).
 bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
                               std::string &err, double *requestMs, const GpuCull *prior,
-                              CullRows rows) {
+                              CullRows rows, const CullReceivers *receivers) {
     // The rows' names, static (a CacheScope keeps the pointer for its sample). A CASTER's
     // cull files NO rows: it runs once per shadow map re-rendered, inside the caster pass
     // whose own row already holds its time: five scopes (ten timestamps) a map would be a
@@ -406,6 +406,15 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
             cutJob->_setUavBuffer(7u, cullSlot(cull.draws(), Ogre::ResourceAccess::Write));
             cutJob->_setUavBuffer(8u, cullSlot(cull.cutRecords(), Ogre::ResourceAccess::Write));
             cutJob->_setUavBuffer(9u, cullSlot(cull.cutSlotBase(), Ogre::ResourceAccess::Write));
+            // THE RECEIVER TEST (stage 4b): a sun map's caster cut with its receiver grid - a permutation, two
+            // buffers more (a job never declares a slot it does not fill).
+            const bool recv = receivers && receivers->params && receivers->grid;
+            cutJob->setProperty("cut_receivers", recv ? 1 : 0);
+            cutJob->setNumUavUnits(recv ? 12u : 10u);
+            if (recv) {
+                cutJob->_setUavBuffer(10u, cullSlot(receivers->params, Ogre::ResourceAccess::Read));
+                cutJob->_setUavBuffer(11u, cullSlot(receivers->grid, Ogre::ResourceAccess::Read));
+            }
             cutJob->setIndirectDispatchBuffer(cull.count(), GpuCull::kCutIndirectOffsetBytes);
             emitJob->_setUavBuffer(0u, cullSlot(cull.params(), Ogre::ResourceAccess::Read));
             emitJob->_setUavBuffer(1u, cullSlot(cull.cutRecords(), Ogre::ResourceAccess::Read));

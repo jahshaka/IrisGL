@@ -355,7 +355,7 @@ constexpr uint32_t kNoUse = 0xFFFFFFFFu;
 /// cut wrote this frame reads zero (beginUse clears the column).
 constexpr VkDeviceSize kCountBytes = GpuCull::kCountElements * sizeof(uint32_t);
 enum UseBlock : uint32_t {
-    kBlockFirst = 0u, kBlockLate = 1u, kBlockPbsAll = 2u, kBlockPbsVisible = 3u, kBlockReceivers = 4u, kUseBlocks = 5u
+    kBlockFirst = 0u, kBlockLate = 1u, kBlockPbsAll = 2u, kBlockPbsVisible = 3u, kUseBlocks = 4u
 };
 constexpr VkDeviceSize kUseBytes = kCountBytes * kUseBlocks;
 
@@ -470,7 +470,7 @@ struct LightPyramid {
     uint32_t lastFrame = 0u;
     bool seen = false;
     /// THE RECEIVER GRID (stage 4b's counting door): its request, its tiles, its counts.
-    Ogre::UavBufferPacked *recvParams = nullptr, *recvGrid = nullptr, *recvOut = nullptr;
+    Ogre::UavBufferPacked *recvParams = nullptr, *recvGrid = nullptr;
     uint32_t recvTiles = 0u;
 };
 /// A PYRAMID ITS MAP DID NOT RENDER FOR this many frames is freed (decision 16.3): the sun removed, the
@@ -513,7 +513,7 @@ void destroyPyramid(LightPyramid &p) {
     Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
     if (p.tex && rs && rs->getTextureGpuManager()) rs->getTextureGpuManager()->destroyTexture(p.tex);
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
-    for (Ogre::UavBufferPacked **b : { &p.origin, &p.recvParams, &p.recvGrid, &p.recvOut }) {
+    for (Ogre::UavBufferPacked **b : { &p.origin, &p.recvParams, &p.recvGrid }) {
         if (*b && vao) vao->destroyUavBuffer(*b);
         *b = nullptr;
     }
@@ -773,7 +773,6 @@ uint32_t beginUse(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanD
                 const uint32_t *l = w + GpuCull::kCountElements * kBlockLate;
                 const uint32_t *pa = w + GpuCull::kCountElements * kBlockPbsAll;
                 const uint32_t *pv = w + GpuCull::kCountElements * kBlockPbsVisible;
-                const uint32_t *rv = w + GpuCull::kCountElements * kBlockReceivers;
                 // THE CUT'S WORDS (GpuCull.h's count layout): [0] survivors, [4] triangles,
                 // [8] drawn-cluster records, [11] indices reserved, [12] coarse, [13] nothing,
                 // [16] rejected by the depth test.
@@ -806,12 +805,6 @@ uint32_t beginUse(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanD
                 m.pbsVisibleInstances = pv[0];
                 m.pbsVisibleTriangles = pv[4];
                 m.receiverTested = (tag >> 25) & 1u;
-                m.receiverClusters = rv[0];
-                m.receiverCutClusters = rv[1];
-                m.receiverTriangles = rv[4];
-                m.receiverCutTriangles = rv[5];
-                m.receiverInstanceCutClusters = rv[2];
-                m.receiverInstanceCutTriangles = rv[6];
             }
             atom.setCasterStats(cs);
             r.written[s] = false;
@@ -898,8 +891,8 @@ Ogre::CompositorPassScene *scenePassBefore(Ogre::CompositorPass *pass) {
     return nullptr;
 }
 
-// ---- THE RECEIVER GRID (stage 4b's premise: the counting door shadow.casterReceiverProbe) --------------
-/// JahReceiverGrid_cs's request, std430: 4 + 4 matrix rows, 6 planes, five vec4-sized lanes.
+// ---- THE RECEIVER GRID (stage 4b, decisions 15 and 17) ----------------------------------------------------------
+/// JahReceiverGrid_cs's and the cut's receiver request, std430: 4 + 4 matrix rows, 6 planes, five vec4-sized lanes.
 struct RecvParams {
     float    invViewProjRow[16] = {};
     float    lightRow[16] = {};
@@ -911,6 +904,8 @@ struct RecvParams {
     uint32_t rect[4] = {};
 };
 static_assert(sizeof(RecvParams) == 304, "JahReceiverGrid_cs's request layout");
+/// The tile: 8 x 8 texels of the map (the premise measured 8 / 16 / 32: within 0.3x of each other).
+constexpr unsigned kReceiverTileTexels = 8u;
 
 Ogre::DescriptorSetUav::BufferSlot uavOf(Ogre::UavBufferPacked *b, Ogre::ResourceAccess::ResourceAccess a) {
     Ogre::DescriptorSetUav::BufferSlot slot = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
@@ -921,69 +916,94 @@ Ogre::DescriptorSetUav::BufferSlot uavOf(Ogre::UavBufferPacked *b, Ogre::Resourc
     return slot;
 }
 
-/// The map's receiver grid built (the view's id depth, the stock-path boxes) and the two halves' drawn
-/// clusters tested against it, counted into `lp.recvOut` (the ring's receiver block). Nothing drawn.
-bool countReceivers(Ogre::RenderSystem *rs, OgreScene *scene, LightPyramid &lp, const AtomReceiverDepth &rd,
-                    const Ogre::Camera *viewCam, const Ogre::Matrix4 &cullM, unsigned mapW, unsigned mapH,
-                    unsigned tileTexels, float dilationTexels, float depthMargin, GpuCull &first, GpuCull *late) {
+/// THE MAP'S RECEIVER GRID of this frame (into `lp.recvGrid`, its request into `lp.recvParams`): the view's id depth
+/// projected into the map and every stock-route instance's box in the camera's frustum, each tile keeping the
+/// farthest receiver depth; the request also carries the cut's dilation and depth margin. False = no grid this
+/// frame (the cut then has no receiver test).
+bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreScene *scene, LightPyramid &lp,
+                       const AtomReceiverDepth &rd,
+                       const Ogre::Camera *viewCam, const Ogre::Matrix4 &cullM, unsigned mapW, unsigned mapH,
+                       float dilationTexels, float depthMargin) {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     Ogre::HlmsCompute *hc = root && root->getHlmsManager() ? root->getHlmsManager()->getComputeHlms() : nullptr;
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
-    if (!hc || !vao || !rd.depth || !viewCam || !tileTexels) return false;
+    if (!hc || !vao || !rd.depth || !viewCam) return false;
     Ogre::HlmsComputeJob *depthJob = hc->findComputeJobNoThrow("Jahshaka/ReceiverDepth");
     Ogre::HlmsComputeJob *boxJob = hc->findComputeJobNoThrow("Jahshaka/ReceiverBoxes");
-    Ogre::HlmsComputeJob *countJob = hc->findComputeJobNoThrow("Jahshaka/ReceiverCount");
+    Ogre::HlmsComputeJob *reduceJob = hc->findComputeJobNoThrow("Jahshaka/ReceiverReduce");
     GpuScene &gs = scene->gpuScene();
-    if (!depthJob || !boxJob || !countJob || !gs.instanceBuffer() || !gs.clusterBuffer()) return false;
-    const uint32_t tx = (mapW + tileTexels - 1u) / tileTexels, ty = (mapH + tileTexels - 1u) / tileTexels;
-    const uint32_t tiles = tx * ty;
-    if (lp.recvTiles != tiles) {
-        if (lp.recvGrid) vao->destroyUavBuffer(lp.recvGrid);
-        lp.recvGrid = vao->createUavBuffer(tiles, 4u, 0, nullptr, false);
-        lp.recvTiles = tiles;
+    if (!depthJob || !boxJob || !reduceJob || !gs.instanceBuffer()) return false;
+    const unsigned tile = kReceiverTileTexels;
+    const uint32_t tx = (mapW + tile - 1u) / tile, ty = (mapH + tile - 1u) / tile;
+    // THE PYRAMID'S LEVELS, one after the other in the grid's buffer.
+    unsigned levels = 1u;
+    uint32_t words = 0u;
+    for (uint32_t w = tx, h = ty;; ++levels) {
+        words += w * h;
+        if (w == 1u && h == 1u) break;
+        w = std::max(1u, w >> 1u);
+        h = std::max(1u, h >> 1u);
     }
-    if (!lp.recvParams) lp.recvParams = vao->createUavBuffer(1u, sizeof(RecvParams), 0, nullptr, false);
-    if (!lp.recvOut) lp.recvOut = vao->createUavBuffer(GpuCull::kCountElements, 4u, 0, nullptr, false);
-    RecvParams p;
-    const Ogre::Matrix4 inv = rd.drawMatrix.inverse();
-    for (int r = 0; r < 4; ++r)
-        for (int c = 0; c < 4; ++c) {
-            p.invViewProjRow[r * 4 + c] = float(inv[r][c]);
-            p.lightRow[r * 4 + c] = float(cullM[r][c]);
-        }
-    GpuCullRequest fr;
-    fillCullFrustum(viewCam, float(std::max(1u, rd.rect[3])), fr);
-    std::memcpy(p.planes, fr.planes, sizeof(p.planes));
-    p.dims[0] = rd.rect[2];
-    p.dims[1] = rd.rect[3];
-    p.dims[2] = tx;
-    p.dims[3] = ty;
-    p.map[0] = mapW;
-    p.map[1] = mapH;
-    p.map[2] = tileTexels;
-    p.map[3] = first.cutRecordBudget();
-    p.misc[0] = rs->isReverseDepth() ? 0.0f : 1.0f;
-    p.misc[1] = dilationTexels;
-    p.misc[2] = depthMargin;
-    p.counts[0] = gs.slotCount();
-    p.counts[1] = kGpuVisible;
-    p.counts[2] = kGpuAtom;
-    std::copy(rd.rect, rd.rect + 4, p.rect);
-    lp.recvParams->upload(&p, 0, 1u);
-    {
-        std::vector<uint32_t> empty(tiles, 0xFFFFFFFFu);
-        lp.recvGrid->upload(empty.data(), 0, tiles);
-        const uint32_t zeros[GpuCull::kCountElements] = {};
-        lp.recvOut->upload(zeros, 0, GpuCull::kCountElements);
-    }
-    rs->endRenderPassDescriptor();
-    const auto dispatch = [&](Ogre::HlmsComputeJob *job) {
-        Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
-        job->analyzeBarriers(rt);
-        rs->executeResourceTransition(rt);
-        hc->dispatch(job, nullptr, nullptr);
-    };
+    const uint32_t tiles = words;
     JAH_TRY {
+        if (lp.recvTiles != tiles) {
+            if (lp.recvGrid) vao->destroyUavBuffer(lp.recvGrid);
+            lp.recvGrid = vao->createUavBuffer(tiles, 4u, 0, nullptr, false);
+            lp.recvTiles = tiles;
+        }
+        if (!lp.recvParams) lp.recvParams = vao->createUavBuffer(1u, sizeof(RecvParams), 0, nullptr, false);
+        RecvParams p;
+        const Ogre::Matrix4 inv = rd.drawMatrix.inverse();
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) {
+                p.invViewProjRow[r * 4 + c] = float(inv[r][c]);
+                p.lightRow[r * 4 + c] = float(cullM[r][c]);
+            }
+        GpuCullRequest fr;
+        fillCullFrustum(viewCam, float(std::max(1u, rd.rect[3])), fr);
+        std::memcpy(p.planes, fr.planes, sizeof(p.planes));
+        p.dims[0] = rd.rect[2];
+        p.dims[1] = rd.rect[3];
+        p.dims[2] = tx;
+        p.dims[3] = ty;
+        p.map[0] = mapW;
+        p.map[1] = mapH;
+        p.map[2] = tile;
+        p.misc[0] = rs->isReverseDepth() ? 0.0f : 1.0f;
+        p.misc[1] = dilationTexels;
+        p.misc[2] = depthMargin;
+        p.counts[0] = gs.slotCount();
+        p.counts[1] = 0u;            // every instance the id pass does not draw - hidden ones too (a superset)
+        p.counts[2] = kGpuAtom;
+        p.counts[3] = levels;        // the pyramid's levels (the cut's mip pick)
+        std::copy(rd.rect, rd.rect + 4, p.rect);
+        lp.recvParams->upload(&p, 0, 1u);
+        {
+            // EMPTY, on the device (every level: the reductions rewrite all but level 0 anyway).
+            VkCommandBuffer cmd = ctx.graphicsFrameCmd("an atom caster");
+            VkBuffer buf = VK_NULL_HANDLE;
+            VkDeviceSize off = 0;
+            atomBufferOf(lp.recvGrid, buf, off);
+            VkMemoryBarrier pre{};
+            pre.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            pre.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            pre.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &pre, 0,
+                                 nullptr, 0, nullptr);
+            vkCmdFillBuffer(cmd, buf, off, VkDeviceSize(tiles) * 4u, 0xFFFFFFFFu);
+            VkMemoryBarrier post{};
+            post.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            post.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            post.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &post, 0,
+                                 nullptr, 0, nullptr);
+        }
+        const auto dispatch = [&](Ogre::HlmsComputeJob *job) {
+            Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+            job->analyzeBarriers(rt);
+            rs->executeResourceTransition(rt);
+            hc->dispatch(job, nullptr, nullptr);
+        };
         {
             Ogre::DescriptorSetTexture2::TextureSlot ts = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
             ts.texture = rd.depth;
@@ -999,28 +1019,25 @@ bool countReceivers(Ogre::RenderSystem *rs, OgreScene *scene, LightPyramid &lp, 
             boxJob->_setUavBuffer(0u, uavOf(lp.recvParams, Ogre::ResourceAccess::Read));
             boxJob->_setUavBuffer(1u, uavOf(lp.recvGrid, Ogre::ResourceAccess::ReadWrite));
             boxJob->_setUavBuffer(2u, uavOf(gs.instanceBuffer(), Ogre::ResourceAccess::Read));
-            boxJob->setNumThreadGroups(std::max(1u, (gs.slotCount() + 63u) / 64u), 1u, 1u);
+            boxJob->setNumThreadGroups(std::max(1u, gs.slotCount()), 1u, 1u);   // one workgroup an instance
             dispatch(boxJob);
             for (Ogre::uint8 u = 0u; u < 3u; ++u) boxJob->_setUavBuffer(u, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
         }
-        for (GpuCull *list : { &first, late }) {
-            if (!list || !list->cutRecords() || !list->count()) continue;
-            countJob->_setUavBuffer(0u, uavOf(lp.recvParams, Ogre::ResourceAccess::Read));
-            countJob->_setUavBuffer(1u, uavOf(lp.recvGrid, Ogre::ResourceAccess::Read));
-            countJob->_setUavBuffer(2u, uavOf(gs.instanceBuffer(), Ogre::ResourceAccess::Read));
-            countJob->_setUavBuffer(3u, uavOf(gs.clusterBuffer(), Ogre::ResourceAccess::Read));
-            countJob->_setUavBuffer(4u, uavOf(list->cutRecords(), Ogre::ResourceAccess::Read));
-            countJob->_setUavBuffer(5u, uavOf(list->count(), Ogre::ResourceAccess::Read));
-            countJob->_setUavBuffer(6u, uavOf(lp.recvOut, Ogre::ResourceAccess::ReadWrite));
-            countJob->setNumThreadGroups(std::max(1u, (std::min(list->cutRecordBudget(), first.cutRecordBudget()) + 63u) / 64u),
-                                         1u, 1u);
-            dispatch(countJob);
-            for (Ogre::uint8 u = 0u; u < 7u; ++u) countJob->_setUavBuffer(u, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        // THE FARTHEST-RECEIVER PYRAMID, a level a dispatch (a 2048 map's 256 x 256 tiles: eight small ones).
+        reduceJob->_setUavBuffer(0u, uavOf(lp.recvParams, Ogre::ResourceAccess::Read));
+        reduceJob->_setUavBuffer(1u, uavOf(lp.recvGrid, Ogre::ResourceAccess::ReadWrite));
+        for (unsigned k = 1u; k < levels; ++k) {
+            const uint32_t w = std::max(1u, tx >> k), h = std::max(1u, ty >> k);
+            reduceJob->setProperty("jah_recv_level", Ogre::int32(k));
+            reduceJob->setNumThreadGroups((w + 7u) / 8u, (h + 7u) / 8u, 1u);
+            dispatch(reduceJob);
         }
+        for (Ogre::uint8 u = 0u; u < 2u; ++u) reduceJob->_setUavBuffer(u, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
         return true;
     }
     catch (const Ogre::Exception &e) {
-        logOnce(std::string("the receiver count did not record (") + e.getDescription() + ")");
+        logOnce(std::string("a sun map's receiver grid did not record (") + e.getDescription() +
+                "): the map is culled without its receiver test");
         return false;
     }
 }
@@ -1177,8 +1194,39 @@ void recordCasterPass(AtomPassContext &ctx) {
     std::string err;
     gs.flushClusterTables();
     if (!gs.clusterBuffer() || !gs.groupBuffer()) return;
+    // ---- (1'') THE RECEIVER TEST (stage 4b, decision 17) ---------------------------------------------------------
+    // A caster cluster changes the picture only where its shadow can fall on a receiver the camera sees: this map's
+    // receiver grid is built from the view's id depth of THIS frame (the id pass runs before every scene pass, so
+    // before the shadow node) and the boxes of everything the id pass does not draw; both halves of the cut test
+    // their clusters against it. Only for the workspace whose id pass recorded that depth (a capture's or another
+    // shape's view has its own), never a view without an id pass (a VR headset's: its maps keep the frustum and
+    // light-depth cull), and off with the scene's door (Scene::setShadowReceiverCull, the parity arm).
+    OgreScene::CullReceivers receivers;
+    bool receiversOn = false;
+    if (lp && scene->shadowReceiverCull()) {
+        OgreView *rv = atomViewOfPass(pass);
+        const AtomReceiverDepth *rd = rv ? &rv->atomReceiverDepth() : nullptr;
+        if (rd && rd->depth && rd->frame == vao->getFrameCount() && rd->workspace == pass->getParentNode()->getWorkspace() &&
+            rv->camera()) {
+            // THE DILATION: the widest PCF kernel's reach (6 x 6: 3 texels), the receivers' normal offset (the shader
+            // moves a receiver up to normalOffsetBias / the map's width along its normal - Ogre's
+            // getNormalOffsetBias) and one tile. The offset's reach along the light is the depth margin.
+            const float offsetWorld = float(shadowNode->getNormalOffsetBias(mapIdx)) / float(std::max(1u, rect[2]));
+            const Ogre::Vector3 r0(cullM[0][0], cullM[0][1], cullM[0][2]), r2(cullM[2][0], cullM[2][1], cullM[2][2]);
+            const float dilation = 3.0f + offsetWorld * float(r0.length()) * 0.5f * float(rect[2]) + float(kReceiverTileTexels);
+            const float margin = offsetWorld * float(r2.length());
+            // THE GRID'S OWN ROW under the measuring door shadow.casterPbsProbe (decision 17's cost bar).
+            std::optional<monitor::CacheScope> row;
+            if (engine && engine->armRegistry().on(ArmId::ShadowCasterPbsProbe))
+                row.emplace(CacheKind::Cull, WorkReason::Camera, 0, "atom.caster.receivers", ctx.renderSystem);
+            receiversOn = buildReceiverGrid(ctx, ctx.renderSystem, scene, *lp, *rd, rv->camera(), cullM, rect[2],
+                                            rect[3], dilation, margin);
+            receivers.params = lp->recvParams;
+            receivers.grid = lp->recvGrid;
+        }
+    }
     if (!scene->recordGpuCull(cull, req, firstTests ? lp->tex : nullptr, err, nullptr, nullptr,
-                              OgreScene::CullRows::Caster)) {
+                              OgreScene::CullRows::Caster, receiversOn ? &receivers : nullptr)) {
         logOnce("the caster cut did not record (" + err + ")");
         return;
     }
@@ -1187,8 +1235,8 @@ void recordCasterPass(AtomPassContext &ctx) {
     const Ogre::uint32 face = reorient ? std::min<Ogre::uint32>(sceneDef->getRtIndex(), 5u) : 0u;
     if (use != kNoUse && use < ring.tags[frameNow % std::max(ring.slots, 1u)].size()) {
         const uint32_t kind = probeKind ? 2u : nodeName == Ogre::IdString(OgreView::kReflectShadowNodeName) ? 1u : 0u;
-        ring.tags[frameNow % ring.slots][use] =
-            (firstTests ? 1u << 24 : 0u) | (kind << 16) | ((face & 0xFFu) << 8) | (mapIdx & 0xFFu);
+        ring.tags[frameNow % ring.slots][use] = (firstTests ? 1u << 24 : 0u) | (receiversOn ? 1u << 25 : 0u) |
+                                                (kind << 16) | ((face & 0xFFu) << 8) | (mapIdx & 0xFFu);
     }
     // THE TEST DOOR: the armed map of the view kind's node, once (its FIRST cut: the request and
     // the drawn set of the light's cut at this frame's matrix).
@@ -1325,8 +1373,8 @@ void recordCasterPass(AtomPassContext &ctx) {
             for (int r = 0; r < 4; ++r)
                 for (int c = 0; c < 4; ++c) lateReq.viewProj[r * 4 + c] = float(cullM[r][c]);
             listWar();
-            if (!scene->recordGpuCull(lateList, lateReq, lp->tex, err, nullptr, &cull,
-                                      OgreScene::CullRows::Caster)) {
+            if (!scene->recordGpuCull(lateList, lateReq, lp->tex, err, nullptr, &cull, OgreScene::CullRows::Caster,
+                                      receiversOn ? &receivers : nullptr)) {
                 logOnce("the caster's late cut did not record (" + err + ")");
             } else {
                 endUse(ctx, ring, lateList, frameNow, use, kBlockLate);
@@ -1363,27 +1411,6 @@ void recordCasterPass(AtomPassContext &ctx) {
                 if (scene->recordGpuCull(probeList, pr, lp->tex, err, nullptr, nullptr,
                                          OgreScene::CullRows::Caster))
                     endUse(ctx, ring, probeList, frameNow, use, kBlockPbsVisible);
-            }
-        }
-        // THE RECEIVER COUNT (shadow.casterReceiverProbe, stage 4b's premise): this map's receiver grid from the
-        // view's id depth of this frame, and the two halves' drawn clusters tested against it. Draws nothing.
-        const double recvTile = engine ? engine->armRegistry().value(ArmId::ShadowCasterReceiverProbe) : 0.0;
-        OgreView *recvView = recvTile >= 1.0 ? atomViewOfPass(pass) : nullptr;
-        if (built && recvView && recvView->atomReceiverDepth().frame == frameNow && recvView->camera()) {
-            // THE DILATION: the widest PCF kernel's reach (6 x 6: 3 texels), the receivers' normal offset (the
-            // shader moves a receiver up to normalOffsetBias / the map's width along its normal - Ogre's
-            // getNormalOffsetBias), and one tile. The offset's reach along the light is the depth margin.
-            const float offsetWorld = float(shadowNode->getNormalOffsetBias(mapIdx)) / float(std::max(1u, rect[2]));
-            const Ogre::Vector3 r0(cullM[0][0], cullM[0][1], cullM[0][2]), r2(cullM[2][0], cullM[2][1], cullM[2][2]);
-            const unsigned tile = unsigned(recvTile);
-            const float dilation = 3.0f + offsetWorld * float(r0.length()) * 0.5f * float(rect[2]) + float(tile);
-            const float margin = offsetWorld * float(r2.length());
-            if (countReceivers(ctx.renderSystem, scene, *lp, recvView->atomReceiverDepth(), recvView->camera(), cullM,
-                               rect[2], rect[3], tile, dilation, margin, cull,
-                               lateRan ? &atom.casterCullLate() : nullptr)) {
-                endUseOf(ctx, ring, lp->recvOut, frameNow, use, kBlockReceivers);
-                if (use != kNoUse && use < ring.tags[frameNow % ring.slots].size())
-                    ring.tags[frameNow % ring.slots][use] |= 1u << 25;
             }
         }
         // THE HISTORY: this frame's pyramid, read next frame with the matrix it was drawn with.

@@ -1009,7 +1009,7 @@ struct ArmDef {
     const char *what = nullptr;
 };
 // THE TABLE, in ArmId's order (asserted below). Each row names the door it replaced.
-const ArmDef kArms[] = {
+constexpr ArmDef kArms[] = {
     { "reflect.motion", 1.0, 0.0, 1.0,
       "The screen march's object-motion job and the reflection trace's mover branches "
       "(REFLECT-MOVERS-1). 0 = the camera path alone: the pre-lane picture. gi.reflect_mover's "
@@ -1151,13 +1151,6 @@ const ArmDef kArms[] = {
       "against the map's final depth pyramid and counted (world.atomStatus casterPerMap: pbsInstances / "
       "pbsTriangles in the frustum, pbsVisible* the ones not wholly behind the map's depth). Nothing is "
       "drawn differently." },
-    { "shadow.casterReceiverProbe", 0.0, 0.0, 256.0,
-      "A MEASURING DOOR (ENGINE-UPGRADE-U5 stage 4b, decision 15's premise): N > 0 = every sun map of a view "
-      "with an id pass builds its RECEIVER GRID (N x N-texel tiles holding the farthest receiver depth from the "
-      "light: the view's id depth projected into the map, and the stock-path instances in the camera's frustum "
-      "as whole boxes) and COUNTS the drawn caster clusters whose box, dilated by the filter's reach and the "
-      "receivers' normal offset, touches no receiver farther from the light than its nearest point - the ones a "
-      "receiver test would cut (casterPerMap receiver*). Nothing is drawn differently. 0 = off." },
     { "gi.rebuildSettle", 1.0, 0.0, 1.0,
       "The rebuild settle (the chain's owed settle steps after a rebuild). 0 = off: "
       "gi.chain_converge's paired arm. Was JAHSHAKA_GI_NO_REBUILD_SETTLE (a per-frame read)." },
@@ -1278,6 +1271,17 @@ const ArmDef kArms[] = {
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");
+// EACH ROW IS ITS ARM'S (decision 17): the table's names in ArmId's order, kArmNames's (EnginePrivate.h).
+constexpr bool armNameIs(const char *a, const char *b) {
+    for (; *a && *a == *b; ++a, ++b) {}
+    return *a == *b;
+}
+constexpr bool armTableInOrder() {
+    for (unsigned i = 0; i < unsigned(ArmId::Count); ++i)
+        if (!armNameIs(kArms[i].name, kArmNames[i])) return false;
+    return true;
+}
+static_assert(armTableInOrder(), "kArms is out of ArmId's order: a row names another arm than its enumerator (kArmNames)");
 }   // namespace
 
 ArmRegistry::ArmRegistry() {

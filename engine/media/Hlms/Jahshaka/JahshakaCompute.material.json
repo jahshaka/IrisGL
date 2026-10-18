@@ -303,14 +303,14 @@
 			"properties" : { "jah_receiver_mode" : 1 }
 		},
 
-		"Jahshaka/ReceiverCount" :
+		"Jahshaka/ReceiverReduce" :
 		{
-			"threads_per_group" : [64, 1, 1],
+			"threads_per_group" : [8, 8, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahReceiverGrid_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all"],
-			"uav_units" : 7,
-			"properties" : { "jah_receiver_mode" : 2 }
+			"uav_units" : 2,
+			"properties" : { "jah_receiver_mode" : 2, "jah_recv_level" : 1 }
 		},
 
 		"Jahshaka/VideoNv12" :

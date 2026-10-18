@@ -939,6 +939,10 @@ public:
     /// frustum-only (no pyramid, no late pass). AtomDrawStatus::occluded and
     /// ::disoccluded count what it does.
     virtual void setAtomOcclusionEnabled(bool on) { (void)on; }
+    /// THE MEASURING DOOR OF THE SUN MAPS' RECEIVER TEST (ENGINE-UPGRADE-U5 stage 4b; a tool's A/B and the parity
+    /// arm, never a mode, not saved): on (the default) a sun map's caster cut draws only the clusters whose shadow
+    /// can fall on a surface the camera sees; off, every cluster the light's frustum and depth keep.
+    virtual void setShadowReceiverCull(bool on) { (void)on; }
     /// A TEST DOOR (ATOM-BLACK-FRAMES-1's coverage trace; never a mode, not saved): every
     /// view of this scene re-creates its id pass's cut buffers at `indices` of stream on
     /// its next frame — smaller than the need, the overflow path runs (the root cut from

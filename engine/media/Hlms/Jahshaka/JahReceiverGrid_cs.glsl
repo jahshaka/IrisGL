@@ -1,17 +1,16 @@
-// Jahshaka - THE SUN MAP'S RECEIVERS (ENGINE-UPGRADE-U5 stage 4b, the lead's decision 15; the counting arm
-// shadow.casterReceiverProbe). A caster changes the picture only where its shadow can fall on a receiver the
-// camera sees. Per sun map, a grid of light-space TILES (tileTexels x tileTexels texels of the map) holds the
-// FARTHEST receiver depth from the light (reverse-Z: the SMALLEST value; empty = all bits set):
-//   mode 0, a thread per pixel of the view's id depth (the Atom surfaces it sees): the pixel unprojected to
-//     the world with the inverse of the matrix it was drawn with, projected into the map;
-//   mode 1, a thread per GPU scene instance on the stock (PBS) path in the camera's frustum - their pixels
-//     are not in that depth when the maps render: the whole box is taken as receiver (a superset);
-//   mode 2, a thread per DRAWN CLUSTER RECORD of a caster cut (the map's first or late list): its bounding
-//     sphere in the map, dilated by the filter's reach and the receivers' normal offset, is TESTED - wanted if
-//     some tile it touches holds a receiver farther from the light than the cluster's nearest point - and
-//     COUNTED (clusters and triangles, all and the ones the test would cut). Nothing is drawn differently.
-// The receivers' depth is moved toward the far side by `misc.z` (the normal offset's reach along the light)
-// before it is kept: the test then keeps whatever any receiver's filter could compare against.
+// Jahshaka - THE SUN MAP'S RECEIVERS (ENGINE-UPGRADE-U5 stage 4b, the lead's decisions 15 and 17). A caster changes
+// the picture only where its shadow can fall on a receiver the camera sees. Per sun map, a grid of light-space
+// TILES (tileTexels x tileTexels texels of the map) holds the FARTHEST receiver depth from the light (reverse-Z:
+// the SMALLEST value; empty = all bits set), which the caster cut's receiver test reads (JahCullCut_cs,
+// cut_receivers):
+//   mode 0, a thread per pixel of the view's id depth of this frame (every surface the Atom decode shades):
+//     the pixel unprojected to the world with the inverse of the matrix it was drawn with, projected into the map;
+//   mode 1, a thread per GPU scene instance NOT drawn by the id pass (the stock (PBS) route: blended, alpha-tested,
+//     a helper, a skinned item, one still loading - hidden ones too, a superset) in the camera's frustum: its pixels
+//     are not in that depth when the maps render, so its whole box is taken as receiver.
+// Nothing else samples a sun map: the particles and billboards are unlit, a decal is shaded on the surface it
+// lies on, a ray hit takes the sun from its own shadow ray. The receivers' depth is moved toward the far side by
+// `misc.z` (the normal offset's reach along the light) before it is kept.
 @insertpiece( SetCrossPlatformSettings )
 
 struct RecvParams
@@ -20,7 +19,7 @@ struct RecvParams
 	vec4  lightRow[4];        // the map's cull matrix (y row negated): rows
 	vec4  planes[6];          // the camera's frustum, inward
 	uvec4 dims;               // x depth width, y depth height, z tiles x, w tiles y
-	uvec4 map;                // x map width, y map height, z tile texels, w record budget
+	uvec4 map;                // x map width, y map height, z tile texels
 	vec4  misc;               // x the depth's clear value, y the dilation in texels, z the depth margin
 	uvec4 counts;             // x instances, y flags required, z flags forbidden
 	uvec4 rect;               // the id depth's viewport: x0, y0, width, height
@@ -36,29 +35,32 @@ struct GpuInstance
 	uvec4 raster;
 };
 
-struct GpuCluster
-{
-	uint firstIndex;
-	uint indexCount;
-	uint group;
-	uint refined;
-	vec4 sphere;
-};
-
 layout( std430, ogre_U0 ) readonly restrict buffer paramsLayout { RecvParams params; };
 layout( std430, ogre_U1 ) restrict buffer gridLayout { uint grid[]; };
-@property( jah_receiver_mode >= 1 )
+@property( jah_receiver_mode == 1 )
 layout( std430, ogre_U2 ) readonly restrict buffer instLayout { GpuInstance instances[]; };
-@end
-@property( jah_receiver_mode == 2 )
-layout( std430, ogre_U3 ) readonly restrict buffer clusterLayout { GpuCluster clusters[]; };
-layout( std430, ogre_U4 ) readonly restrict buffer recordLayout { uvec4 records[]; };
-layout( std430, ogre_U5 ) readonly restrict buffer listCountLayout { uint listCount[]; };
-layout( std430, ogre_U6 ) restrict buffer outLayout { uint outCount[]; };
 @end
 @property( jah_receiver_mode == 0 )
 vulkan_layout( ogre_t0 ) uniform texture2D depthTexture;
 @end
+// THE GRID IS A PYRAMID in the one buffer: level 0 the tiles, level k (k >= 1) each texel the least - the farthest
+// receiver - of level k - 1's 2 x 2 under it (and the third row / column of an odd level's last texel: the
+// footprint never loses an edge), the levels one after the other (jahRecvLevelOffset). Mode 2 reduces level
+// jah_recv_level from the one before; the caster cut tests at the level where its rectangle is <= 2 texels wide.
+uvec2 jahRecvLevelSize( uint k )
+{
+	return max( uvec2( params.dims.z, params.dims.w ) >> k, uvec2( 1u ) );
+}
+uint jahRecvLevelOffset( uint k )
+{
+	uint o = 0u;
+	for( uint j = 0u; j < k; ++j )
+	{
+		uvec2 sz = jahRecvLevelSize( j );
+		o += sz.x * sz.y;
+	}
+	return o;
+}
 
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
@@ -81,33 +83,14 @@ void jahKeep( ivec2 tile, float depth )
 	if( tile.x < 0 || tile.y < 0 || tile.x >= int( params.dims.z ) || tile.y >= int( params.dims.w ) )
 		return;
 	float d = clamp( depth - params.misc.z, 0.0, 1.0 );
-	atomicMin( grid[uint( tile.y ) * params.dims.z + uint( tile.x )], floatBitsToUint( d ) );
+	uint at = uint( tile.y ) * params.dims.z + uint( tile.x );
+	uint bits = floatBitsToUint( d );
+	// READ FIRST: thousands of the camera's pixels fall in one tile, and only the ones farther than what it holds
+	// need the atomic (the min is the same either way).
+	if( grid[at] > bits )
+		atomicMin( grid[at], bits );
 }
 
-@property( jah_receiver_mode == 2 )
-// WANTED: some tile under the texel rectangle [lo, hi] - dilated by the filter's reach and the normal offset
-// (misc.y) - holds a receiver FARTHER from the light than `nearest` (reverse-Z: a smaller value). A
-// rectangle too wide to walk is kept: the test may keep, never drop.
-bool jahWanted( vec2 lo, vec2 hi, float nearest )
-{
-	lo = max( lo - params.misc.y, vec2( 0.0 ) );
-	hi = min( hi + params.misc.y, vec2( params.map.xy ) - vec2( 1.0 ) );
-	if( lo.x > hi.x || lo.y > hi.y )
-		return false;
-	ivec2 a = ivec2( floor( lo / float( params.map.z ) ) );
-	ivec2 b = ivec2( floor( hi / float( params.map.z ) ) );
-	if( ( b.x - a.x + 1 ) * ( b.y - a.y + 1 ) > 4096 )
-		return true;
-	for( int y = a.y; y <= b.y; ++y )
-		for( int x = a.x; x <= b.x; ++x )
-		{
-			uint g = grid[uint( y ) * params.dims.z + uint( x )];
-			if( g != 0xFFFFFFFFu && nearest > uintBitsToFloat( g ) )
-				return true;
-		}
-	return false;
-}
-@end
 
 void main()
 {
@@ -132,7 +115,9 @@ void main()
 	jahKeep( ivec2( floor( t / float( params.map.z ) ) ), q.z );
 @end
 @property( jah_receiver_mode == 1 )
-	uint slot = gl_GlobalInvocationID.x;
+	// ONE WORKGROUP PER INSTANCE, its lanes striding the box's tiles (a ground plane covers the whole map).
+	uint slot = gl_WorkGroupID.x;
+	uint lane = gl_LocalInvocationIndex;
 	if( slot >= params.counts.x )
 		return;
 	vec4 bMin = instances[slot].boundsMin;
@@ -141,7 +126,7 @@ void main()
 	if( ( flags & params.counts.y ) != params.counts.y || ( flags & params.counts.z ) != 0u )
 		return;
 	if( floatBitsToUint( bMin.w ) == 0xFFFFFFFFu )
-		return;
+		return;   // no mesh: nothing drawn
 	for( int i = 0; i < 6; ++i )
 	{
 		vec4 pl = params.planes[i];
@@ -166,59 +151,26 @@ void main()
 		return;
 	ivec2 a = ivec2( floor( lo / float( params.map.z ) ) );
 	ivec2 b = ivec2( floor( hi / float( params.map.z ) ) );
-	for( int y = a.y; y <= b.y; ++y )
-		for( int x = a.x; x <= b.x; ++x )
-			jahKeep( ivec2( x, y ), farthest );
+	uint w = uint( b.x - a.x + 1 ), h = uint( b.y - a.y + 1 );
+	for( uint i = lane; i < w * h; i += @value( threads_per_group_x ) )
+		jahKeep( a + ivec2( int( i % w ), int( i / w ) ), farthest );
 @end
 @property( jah_receiver_mode == 2 )
-	uint r = gl_GlobalInvocationID.x;
-	if( r >= min( listCount[8], params.map.w ) )
+	uint k = uint( @value( jah_recv_level ) );
+	uvec2 dst = gl_GlobalInvocationID.xy;
+	uvec2 dstSize = jahRecvLevelSize( k ), srcSize = jahRecvLevelSize( k - 1u );
+	if( dst.x >= dstSize.x || dst.y >= dstSize.y )
 		return;
-	uvec4 rec = records[r];
-	uint slot = rec.x;
-	if( slot >= params.counts.x )
-		return;   // a skipped (overflow) record
-	GpuCluster cl = clusters[rec.y];
-	uint tris = cl.indexCount / 3u;
-	vec4 w0 = instances[slot].world[0], w1 = instances[slot].world[1], w2 = instances[slot].world[2];
-	vec4 c4 = vec4( cl.sphere.xyz, 1.0 );
-	vec3 centre = vec3( dot( w0, c4 ), dot( w1, c4 ), dot( w2, c4 ) );
-	float scale = max( max( length( vec3( w0.x, w1.x, w2.x ) ), length( vec3( w0.y, w1.y, w2.y ) ) ),
-					   length( vec3( w0.z, w1.z, w2.z ) ) );
-	float radius = cl.sphere.w * scale;
-	vec3 q = jahLight( centre );
-	vec3 ext = radius * vec3( length( params.lightRow[0].xyz ), length( params.lightRow[1].xyz ),
-							  length( params.lightRow[2].xyz ) );
-	vec2 t = jahTexel( q );
-	vec2 half2 = vec2( ext.x * 0.5 * float( params.map.x ), ext.y * 0.5 * float( params.map.y ) );
-	// THE CLUSTER'S TEST (its sphere), and its INSTANCE's (the world box, the depth test's own grain: a
-	// receiver cull per instance would cut a cluster only with its whole instance).
-	bool wanted = jahWanted( t - half2, t + half2, q.z + ext.z );
-	vec4 bMin = instances[slot].boundsMin;
-	vec4 bMax = instances[slot].boundsMax;
-	vec2 lo = vec2( 1.0e30 ), hi = vec2( -1.0e30 );
-	float nearestBox = -1.0e30;
-	for( int c = 0; c < 8; ++c )
-	{
-		vec3 p = vec3( ( c & 1 ) != 0 ? bMax.x : bMin.x, ( c & 2 ) != 0 ? bMax.y : bMin.y, ( c & 4 ) != 0 ? bMax.z : bMin.z );
-		vec3 qc = jahLight( p );
-		vec2 tc = jahTexel( qc );
-		lo = min( lo, tc );
-		hi = max( hi, tc );
-		nearestBox = max( nearestBox, qc.z );
-	}
-	bool wantedBox = jahWanted( lo, hi, nearestBox );
-	atomicAdd( outCount[0], 1u );
-	atomicAdd( outCount[4], tris );
-	if( !wanted )
-	{
-		atomicAdd( outCount[1], 1u );
-		atomicAdd( outCount[5], tris );
-	}
-	if( !wantedBox )
-	{
-		atomicAdd( outCount[2], 1u );
-		atomicAdd( outCount[6], tris );
-	}
+	uint srcBase = jahRecvLevelOffset( k - 1u ), dstBase = jahRecvLevelOffset( k );
+	uvec2 extra = uvec2( ( ( srcSize.x & 1u ) != 0u && dst.x == dstSize.x - 1u ) ? 1u : 0u,
+						 ( ( srcSize.y & 1u ) != 0u && dst.y == dstSize.y - 1u ) ? 1u : 0u );
+	uint kept = 0xFFFFFFFFu;
+	for( uint y = 0u; y <= 1u + extra.y; ++y )
+		for( uint x = 0u; x <= 1u + extra.x; ++x )
+		{
+			uvec2 s = min( dst * 2u + uvec2( x, y ), srcSize - uvec2( 1u ) );
+			kept = min( kept, grid[srcBase + s.y * srcSize.x + s.x] );
+		}
+	grid[dstBase + dst.y * dstSize.x + dst.x] = kept;
 @end
 }

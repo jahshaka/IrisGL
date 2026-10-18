@@ -859,6 +859,7 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         rd.drawMatrix = vpm;
         std::copy(rect, rect + 4, rd.rect);
         rd.frame = vkRs->getVaoManager()->getFrameCount();
+        rd.workspace = pass->getParentNode()->getWorkspace();
     }
     if (draw) {
         // ---- (2) THE EDGES THE SOLVER CANNOT EXPRESS -----------------------------
