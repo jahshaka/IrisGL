@@ -980,6 +980,13 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         struct DeferEnds { bool &f; ~DeferEnds() { f = false; } } deferEnds{ mDeferNodeWrites };
         drainFrameInput(record, any);
         mDeferNodeWrites = false;
+        // THE SHADER CACHE'S CHUNKED COPY CONTINUES (FRAME-MONITOR-DOOR-1 stage 4): one step a frame, here at the drain,
+        // when the frame's own messages ran none (a save message is a step) — a copy of N new entries costs
+        // ceil(N / kCopyChunkEntries) frames of <= 1 ms each, never one frame of all of it.
+        if (!mShaderCache.takeStepMark() && mShaderCache.copyInProgress()) {
+            mShaderCache.save(mRoot);
+            mShaderCache.takeStepMark();
+        }
         // ...and every scene the record did not reach is drawn between its two grid states too (a lockstep frame: cur).
         interpolateFrame();
         // ---- THE VR FRAME OPENS HERE (SPECS/VR_SPEC.md §4.3) --------------
@@ -3713,7 +3720,7 @@ void OgreEngine::teardown() {
     // read is still alive and before a single view or scene has been torn down.
     // This is the primary save point (SHADER_CACHE_SPEC §4.4): a clean quit is
     // the only moment we are certain nothing is compiling.
-    if (mRoot) { try { mShaderCache.save(mRoot); } catch (...) {} }
+    if (mRoot) { try { mShaderCache.saveWhole(mRoot); } catch (...) {} }   // unchunked: nothing draws after this
     // The TEXTURE cache in the same breath and for the same reason
     // (THREADING_ADOPTION_SPEC.md P2): its metadata half is exported from
     // TextureGpuManager, which dies with the render system a few lines below.

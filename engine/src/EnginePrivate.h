@@ -44,6 +44,8 @@
 #include <OgreArchiveManager.h>
 #include <OgreHlmsJson.h>
 #include <OgreHlmsManager.h>
+#include <OgreHlmsDiskCache.h>
+#include <OgreGpuProgramManager.h>
 #include <OgreHlmsListener.h>
 #include <OgreHlmsPbs.h>
 #include <OgreHlmsUnlit.h>
@@ -2723,6 +2725,14 @@ public:
     /// (the layers stay dirty; the next save writes them) — nothing ever waits
     /// on the calling thread, and nothing queues up behind a slow disk.
     bool save(Ogre::Root *root);
+    /// THE SAVE IS A CHUNKED COPY (FRAME-MONITOR-DOOR-1 stage 4): `save` copies at most kCopyChunkEntries shader
+    /// entries per call (one render frame's message) and returns; while a copy is in progress the render loop
+    /// continues it once a frame (OgreEngine::runFrame), and the call that catches up hands the job to the writer.
+    /// `saveWhole` is the unchunked form for a teardown save; flushWrites completes a copy in progress first.
+    bool saveWhole(Ogre::Root *root);
+    bool copyInProgress() const { return mCopyInProgress; }
+    /// True once per frame a save step ran in (cleared by the read): the loop's continuation runs only when none did.
+    bool takeStepMark() { const bool m = mStepMark; mStepMark = false; return m; }
     /// Waits for an in-flight off-thread write. True when the writer is idle,
     /// false when `budgetMs` ran out first (the write continues; nothing is
     /// abandoned). A no-op when no write is in flight.
@@ -2788,16 +2798,43 @@ private:
     /// thread. `blobs` is parallel to `names`; `compileCount` is the counter
     /// reading this write makes true once it lands.
     struct PendingWrite {
+        /// THE COPIES, serialized on the writer (stage 4): each dirty Hlms' disk-cache object BY REFERENCE (the
+        /// ShaderCache's own, mCopy — the render thread appends to them only while no write is in flight, the
+        /// skip law at the head of save(), which is what makes the sharing safe), the microcode SNAPSHOT (a map of
+        /// immutable blobs) and the render system whose pipeline cache the writer reads (vk.xml: no externsync).
+        std::vector<std::pair<std::string, Ogre::HlmsDiskCache *>> hlms;
+        bool                                    microcodeDirty = false;
+        Ogre::GpuProgramManager::MicrocodeMap   microcode;
+        Ogre::RenderSystem                     *rs = nullptr;
+        /// ...and the bytes the writer makes of them, before the atomic writes.
         std::vector<std::string>       names;
         std::vector<std::vector<char>> blobs;
         unsigned                       compileCount = 0;
         unsigned                       enginePipelines = 0;   ///< sEnginePipelines when serialized
     };
+    /// THE CHUNK (stage 4): shader-code entries copied per message. MEASURED, Debug: 27-51 us an entry on a quiet box
+    /// (the drag row's shape: 27 pbs entries 0.73-1.41 ms, 44 of type 4 1.53 ms) and 42-105 us under a sibling lane's
+    /// build (load 9.5: shadercache.save_off_frame's cold run, chunks of 16 = 0.67-1.68 ms) — 8 x 105 us = 0.84 ms a
+    /// chunk at the worst rate measured, leaving the catch-up's whole-copied rest (the PSO lists, the pieces, the
+    /// microcode map: ~0.7 ms loaded) inside the message's 2 ms. A COUNT, never a clock.
+    static constexpr size_t kCopyChunkEntries = 8u;
+    bool  saveStep(Ogre::Root *root, size_t entryBudget);
+    std::unique_ptr<Ogre::HlmsDiskCache> mCopy[Ogre::HLMS_MAX];   ///< one per Hlms type, alive across saves
+    unsigned     mCopyMask = 0u;          ///< the Hlms types this save copies
+    bool         mCopyInProgress = false;
+    bool         mStepMark = false;
+    Ogre::Root  *mCopyRoot = nullptr;
+    unsigned     mCopyMessages = 0u;      ///< the messages this save's copy took so far
+    double       mCopyWorstMs = 0.0;      ///< ...and the longest of them
+    unsigned     mSavesCopied = 0u, mCopyMessagesTotal = 0u;   ///< the process's (ShaderCacheStats)
+    double       mCopyWorstEverMs = 0.0, mCopyChunkWorstEverMs = 0.0;
+    std::atomic<unsigned> mSavesWritten { 0u };                 ///< the writer's finished writes
 
-    /// THE WRITER THREAD's body: publish every blob atomically, carry the
-    /// manifest forward, write it, enforce the size cap. Touches no Ogre
-    /// object of any kind — that is what makes it safe here.
-    bool  runWrite(const PendingWrite &job);
+    /// THE WRITER THREAD's body: SERIALIZE the job's copies (each disk cache's saveTo, the microcode snapshot, the
+    /// pipeline cache's data — vk.xml: vkGetPipelineCacheData needs no external sync), then publish every blob
+    /// atomically, carry the manifest forward, write it, enforce the size cap. It reads the copies and the device's
+    /// pipeline cache, nothing the render thread is writing.
+    bool  runWrite(PendingWrite &job);
     void  writerLoop();
     /// Hands `job` to the writer (starting it on first use). False when a
     /// write is already in flight.

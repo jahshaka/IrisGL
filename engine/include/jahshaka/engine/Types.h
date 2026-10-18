@@ -6236,6 +6236,15 @@ struct ShaderCacheStats {
     unsigned  expectedShaders = 0;
     /// Wall-clock of the last successful save, ms since the Unix epoch; 0 = never.
     long long lastSavedUnixMs = 0;
+    /// THE SAVE'S RENDER-THREAD SIDE, this process (FRAME-MONITOR-DOOR-1 stage 4): the saves whose chunked copy
+    /// completed and was handed to the writer, the frame messages those copies took, the longest message (the bar:
+    /// <= 2 ms) and the longest NON-final step (a chunk of at most 20 entries: <= 1 ms); and the writes the writer
+    /// finished ("saved N files").
+    unsigned savesCopied = 0;
+    unsigned copyMessages = 0;
+    double   copyWorstMs = 0.0;
+    double   copyChunkWorstMs = 0.0;
+    unsigned savesWritten = 0;
     /// Compute pipelines the engine built outside the Hlms this PROCESS (the ray
     /// tier's, through the device's pipeline cache), and their build time — a warm
     /// pipeline layer makes the second near zero.
