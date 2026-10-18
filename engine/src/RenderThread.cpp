@@ -248,8 +248,17 @@ void RenderThread::threadMain() {
             mLastFreeStart = t0;
             mInFlightSinceNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count(),
                                    std::memory_order_release);
+            const unsigned saveSteps0 = mEngine.mShaderCache.stepCount();
             tickWith(handOver(), true);   // a throw inside the frame is the frame's published error (tickWith)
             mInFlightSinceNs.store(0, std::memory_order_release);
+            // THE SAVE'S FRAMES (FRAME-MONITOR-DOOR-1 stage 4, the read's item 6): a free frame that carried a shader-cache
+            // save step is counted, and counted OVERRUN when its work (hand-over to publish, no block) exceeded the display
+            // period — the driver's own attribution (EngineRenderDriver::tick, decision 66), on exactly the save's frames.
+            if (mEngine.mShaderCache.stepCount() != saveSteps0) {
+                const double p = double(mDisplayPeriod.load(std::memory_order_relaxed));
+                mEngine.mShaderCache.noteStepFrame(p > 0.0 &&
+                                                   double(mLastFrameWorkNs.load(std::memory_order_acquire)) > p * 1e9);
+            }
             // THE PACE (decision 53): the rest of the display period — but NEVER after a frame the XR runtime paced
             // (xrWaitFrame already waited: a 60 Hz panel's period would pad a 90 Hz headset to 60), and none under
             // Unlimited (period 0). Waited on the task condition, so a task still goes at once.

@@ -6244,6 +6244,12 @@ struct ShaderCacheStats {
     unsigned copyMessages = 0;
     double   copyWorstMs = 0.0;
     double   copyChunkWorstMs = 0.0;
+    unsigned copyChunkMaxEntries = 0;   ///< the most entries one chunked message took (the guard: <= copyChunkEntries)
+    unsigned copyChunkEntries = 0;      ///< K, the chunk's count
+    /// The free frames that carried a save step, and those of them whose work exceeded the display period (the
+    /// driver's frame-overrun attribution on exactly the save's frames: the guard is 0).
+    unsigned copyFrames = 0;
+    unsigned copyFrameOverruns = 0;
     unsigned savesWritten = 0;
     /// Compute pipelines the engine built outside the Hlms this PROCESS (the ray
     /// tier's, through the device's pipeline cache), and their build time — a warm

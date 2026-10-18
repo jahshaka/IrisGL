@@ -1720,6 +1720,7 @@ void OgreEngine::latchDeviceLost() {
     if (!(mFrameFaultDeviceLost || (rs && rs->isDeviceLost()))) return;
     mDeviceLost = true;
     mLastError = "the GPU device was lost";
+    mShaderCache.noteDeviceLost();   // FRAME-MONITOR-DOOR-1: the writer never reads a lost device's pipeline cache
     Ogre::LogManager::getSingleton().logMessage(
         "Jahshaka: THE GPU DEVICE WAS LOST. The session cannot continue; the renderer "
         "does not recreate a lost device. Look for an 'NVRM: Xid' line in the system "

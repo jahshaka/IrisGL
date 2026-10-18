@@ -694,6 +694,10 @@ void ShaderCache::wipe() const {
 
 bool ShaderCache::clear() {
     if (!mEnabled) return true;
+    // A COPY IN PROGRESS IS ABANDONED, not completed (the read's item 4): its files are about to be deleted, and
+    // completing it would be one unbounded message plus a wait on this thread. The copies stay valid — the next
+    // save continues them incrementally.
+    mCopyInProgress = false;
     // A write in flight would otherwise land IN the directory we are about to
     // empty, leaving a manifest naming files this wipe deleted.
     flushWrites(kWriteWaitMs);
@@ -981,6 +985,9 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
         explicit Reentry(bool &f) : flag(f) { flag = true; }
         ~Reentry() { flag = false; }
     } reentry(mSaving);
+    // THE MESSAGE'S WHOLE SPAN (the read's item 3): from the entry — the write check, the lock's open and fcntl,
+    // dirty(), mkpath — to the dispatch.
+    const auto stepStart = std::chrono::steady_clock::now();
     mStepMark = true;
     Ogre::RenderSystem *rs = root->getRenderSystem();
     if (!rs || !Ogre::GpuProgramManager::getSingletonPtr()) return false;
@@ -1013,9 +1020,9 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
         mCopyRoot = root;
         mCopyMessages = 0u;
         mCopyWorstMs = 0.0;
+        mCopyRearmLogged = false;
     }
 
-    const auto stepStart = std::chrono::steady_clock::now();
     size_t left = entryBudget, entries = 0u;
     bool caughtUp = true;
     try {
@@ -1039,11 +1046,20 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
     ++mCopyMessages;
     mCopyWorstMs = std::max(mCopyWorstMs, stepMs);
     ++mCopyMessagesTotal;
+    // THE CHUNK'S COUNT (the row's guard): the most entries one CHUNKED message took — the bound is K by construction.
+    if (entryBudget == kCopyChunkEntries) mChunkMaxEntries = std::max(mChunkMaxEntries, unsigned(entries));
     if (!caughtUp) {
+        // (No log line per chunk — an Ogre Log write and flush under the Log mutex the writer shares; one line a save.)
         mCopyChunkWorstEverMs = std::max(mCopyChunkWorstEverMs, stepMs);
         mCopyWorstEverMs = std::max(mCopyWorstEverMs, stepMs);
-        logLine("copy step " + std::to_string(mCopyMessages) + ": " + std::to_string(entries) + " entr" +
-                (entries == 1u ? "y" : "ies") + " in " + fmtMs(stepMs) + " ms on the render thread — the next frame continues");
+        return true;
+    }
+    // THE WRITER MAY BE BUSY WITH A TASK (the read's F2: dispatchTask — the texture cache's write — can hold it while a
+    // copy spans frames): the catch-up RE-ARMS — the copy stays in progress and the next frame's step dispatches. Never
+    // a dropped save the watchdog believes saved. (A write JOB cannot be in flight: only this step dispatches one.)
+    if (writeInFlight()) {
+        if (!mCopyRearmLogged) { logLine("caught up while the writer is busy — the next frame dispatches"); mCopyRearmLogged = true; }
+        mCopyWorstEverMs = std::max(mCopyWorstEverMs, stepMs);
         return true;
     }
 
@@ -1058,7 +1074,11 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
         gpm.copyMicrocodeCache(job->microcode);
         job->microcodeDirty = true;
     }
-    job->rs = rs;
+    // A LOST DEVICE IS NOT READ (the read's item 5): after the engine latched a loss, the writer serializes the CPU
+    // copies only — no vkGetPipelineCacheData against a dead device. (Its destruction is not reachable while the
+    // writer runs: the fork never recreates a lost device and no forced election exists — validateDevice(true) has
+    // no caller — and the teardown joins the writer before the render system goes; finishWrites, OgreEngine.cpp.)
+    job->rs = mDeviceGone ? nullptr : rs;
     // THE SPLASH DENOMINATOR, and it is LAST-RUN, not all-time (audit F6).
     // shaderbuildgate.h:26-29 promises "the run that wrote the cache recorded
     // how many shaders it needed", and std::max broke that promise in one
@@ -1080,18 +1100,19 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
     const double tailMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tailStart).count();
     mCopyWorstMs = std::max(mCopyWorstMs, stepMs + tailMs);
     mCopyWorstEverMs = std::max(mCopyWorstEverMs, stepMs + tailMs);
-    ++mSavesCopied;
     const size_t layers = job->hlms.size() + (job->microcodeDirty ? 1u : 0u) + 1u;
     mCopyInProgress = false;
     logLine("copied " + std::to_string(layers) + " layer(s) on the render thread in " + std::to_string(mCopyMessages) +
             " message(s), the longest " + fmtMs(mCopyWorstMs) + " ms (this one " + fmtMs(stepMs + tailMs) +
             " ms, " + std::to_string(entries) + " entries) — serializing and writing off-thread");
     if (!dispatchWrite(std::move(job))) {
-        // Only reachable if a write started between the check at this copy's start and here, which no caller can
-        // do: every one of them is this thread, and only this step dispatches.
-        logLine("a write was already in flight — nothing dispatched");
-        return false;
+        // Only reachable if the writer took a TASK between the check above and here (dispatchTask runs on other
+        // threads): re-armed like the busy case — the copy stays in progress and the next frame dispatches.
+        mCopyInProgress = true;
+        logLine("the writer took a task first — re-armed, the next frame dispatches");
+        return true;
     }
+    ++mSavesCopied;
     return true;
 }
 
@@ -1278,7 +1299,17 @@ bool ShaderCache::flushWrites(unsigned budgetMs) {
     // A CHUNKED COPY IN PROGRESS IS COMPLETED FIRST (stage 4): the caller means "everything saved is on disk" — the
     // clean quit (flushShaderCache -> saveShaderCache -> flushShaderCache), a wipe, the teardown — so the rest of the
     // copy is taken now, in one step, and its write is the one waited for below.
-    if (mCopyInProgress && mCopyRoot && !mSaving) saveStep(mCopyRoot, std::numeric_limits<size_t>::max());
+    if (mCopyInProgress && mCopyRoot && !mSaving) {
+        saveStep(mCopyRoot, std::numeric_limits<size_t>::max());
+        if (mCopyInProgress) {   // re-armed behind a task: wait the writer out, then dispatch
+            {
+                std::unique_lock<std::mutex> lock(mWriteMutex);
+                mWriteDoneCv.wait_for(lock, std::chrono::milliseconds(budgetMs),
+                                      [this]() { return !mWriteJob && !mWriteBusy && mWriteTasks.empty(); });
+            }
+            saveStep(mCopyRoot, std::numeric_limits<size_t>::max());
+        }
+    }
     std::unique_lock<std::mutex> lock(mWriteMutex);
     auto idle = [this]() { return !mWriteJob && !mWriteBusy && mWriteTasks.empty(); };
     if (idle()) return true;
@@ -1316,6 +1347,10 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
     s.copyMessages = mCopyMessagesTotal;
     s.copyWorstMs = mCopyWorstEverMs;
     s.copyChunkWorstMs = mCopyChunkWorstEverMs;
+    s.copyChunkMaxEntries = mChunkMaxEntries;
+    s.copyChunkEntries = unsigned(kCopyChunkEntries);
+    s.copyFrames = mStepFrames;
+    s.copyFrameOverruns = mStepFrameOverruns;
     s.savesWritten = mSavesWritten.load();
     s.enginePipelinesThisRun = sEnginePipelines.load();
     s.enginePipelineMs = double(sEnginePipelineUs.load()) / 1000.0;

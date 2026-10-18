@@ -2731,6 +2731,12 @@ public:
     /// `saveWhole` is the unchunked form for a teardown save; flushWrites completes a copy in progress first.
     bool saveWhole(Ogre::Root *root);
     bool copyInProgress() const { return mCopyInProgress; }
+    /// The engine latched a device loss: later saves serialize the CPU copies only (no pipeline-cache read).
+    void noteDeviceLost() { mDeviceGone = true; }
+    /// Save steps run (the render loop compares it around a free frame) and the free frames that carried one —
+    /// `overrun` when that frame's work exceeded the display period (RenderThread::threadMain).
+    unsigned stepCount() const { return mCopyMessagesTotal; }
+    void noteStepFrame(bool overrun) { ++mStepFrames; if (overrun) ++mStepFrameOverruns; }
     /// True once per frame a save step ran in (cleared by the read): the loop's continuation runs only when none did.
     bool takeStepMark() { const bool m = mStepMark; mStepMark = false; return m; }
     /// Waits for an in-flight off-thread write. True when the writer is idle,
@@ -2826,6 +2832,10 @@ private:
     Ogre::Root  *mCopyRoot = nullptr;
     unsigned     mCopyMessages = 0u;      ///< the messages this save's copy took so far
     double       mCopyWorstMs = 0.0;      ///< ...and the longest of them
+    bool         mCopyRearmLogged = false;   ///< one "re-armed" line a save
+    bool         mDeviceGone = false;        ///< the engine latched a loss: the writer never reads the device again
+    unsigned     mChunkMaxEntries = 0u;      ///< the most entries one chunked message took (<= K)
+    unsigned     mStepFrames = 0u, mStepFrameOverruns = 0u;   ///< the free frames that carried a step / overran
     unsigned     mSavesCopied = 0u, mCopyMessagesTotal = 0u;   ///< the process's (ShaderCacheStats)
     double       mCopyWorstEverMs = 0.0, mCopyChunkWorstEverMs = 0.0;
     std::atomic<unsigned> mSavesWritten { 0u };                 ///< the writer's finished writes
