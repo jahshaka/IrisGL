@@ -1755,10 +1755,10 @@ bool OgreScene::shadowMapDigests(std::vector<ShadowMapDigest> &out)
                     for (unsigned c = d.x; c < d.x + d.width && c < tw; ++c) {
                         const uint32_t bits = row[c];
                         if (bits != clearBits) ++d.covered;
-                        for (int b = 0; b < 4; ++b) {
-                            h ^= (bits >> (8 * b)) & 0xFFu;
-                            h *= 1099511628211ull;
-                        }
+                        // FNV-1a over the texel's WORD (a fourth of the byte-wise walk's steps: the digests are only
+                        // ever compared with each other, and the byte walk made a test's 50 digests cost seconds)
+                        h ^= bits;
+                        h *= 1099511628211ull;
                     }
                 }
                 d.digest = h;
