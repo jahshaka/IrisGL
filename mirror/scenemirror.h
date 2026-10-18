@@ -2126,7 +2126,7 @@ private:
     void newWrittenSync() { ++mWrittenSerial; mWrittenEntryless.clear(); }
     jahshaka::engine::ChangeSet mFrameChanges;
     /// Drain the journal into the two above (twice a sync: before the walk, at the emit).
-    void takeWriteJournal();
+    void takeWriteJournal(bool beforeWalk);
     /// The engine's published rider tags into the document (iris::graph::setRiderTag), before the sockets resolve.
     void takePublishedRiderTags();
     RiderState &riderState(iris::SceneNode *rider);   ///< the rider's row, its life recorded on first use

@@ -53,6 +53,8 @@ namespace {
 const quint16 kSettleWriteMask = quint16(iris::nodeChangeBit(iris::NodeChange::Transform)
                                          | iris::nodeChangeBit(iris::NodeChange::Structure)
                                          | iris::nodeChangeBit(iris::NodeChange::Flags));
+/// A transform write and no other mark: consumeDirty's fast path (U4 stage 5).
+const quint16 kTransformOnlyMask = quint16(iris::nodeChangeBit(iris::NodeChange::Transform));
 }
 
 namespace {
@@ -731,11 +733,6 @@ int SceneMirror::sync(const FrameViews &frameViews)
     takePublishedRiderTags();
     resolveSockets();
     }
-    // THE CHANGE SET, FIRST TAKE (U0 3b): the document's writes since the last emit (this mirror's cursor on the
-    // write journal), before the walk — the soft promotion below asks "was this node written?" of it.
-    { MirrorStage s(mon, "mirror.journal");
-    takeWriteJournal();
-    }
     // THE PLAYER'S FLOOR SWITCH OWES A VISIT (PLAYER-FLOOR-1, the fix round).
     // `setHideDefaultFloor` changed a term the WALK reads, and a still frame
     // runs no walk: it consumes the document's change list and rotates a
@@ -769,6 +766,14 @@ int SceneMirror::sync(const FrameViews &frameViews)
     mDirtyNodes = 0;
     mEvictedNodes = 0;
     mVerifierVisits = 0;
+    // THE CHANGE SET, FIRST TAKE (U0 3b): the document's writes since the last emit (this mirror's cursor on the
+    // write journal), before the walk — the soft promotion below asks "was this node written?" of it. AFTER the
+    // sync's stamp and the floor switch's marks (U4 stage 5): the take serves a written node whose ONLY mark is its
+    // transform (consumeDirty's fast path, moved here — the take already holds its entry), stamping its settle clock
+    // with THIS sync.
+    { MirrorStage s(mon, "mirror.journal");
+    takeWriteJournal(true);
+    }
     // (mCharacterPieces / mSkinnedNodes are NOT reset here any more: they are
     // maintained on each entry's own transition — noteRigCounts — because a
     // still frame runs no walk to recount them. §3.7.)
@@ -1024,7 +1029,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
     // THE CHANGE SET, SECOND TAKE: the writes made DURING this sync (a socket's fallback placement, a settle's
     // re-expression) join the set, so the record carries every write up to its emit — the frame that renders a
     // write is the frame whose scans hear of it.
-    takeWriteJournal();
+    takeWriteJournal(false);
     scenePart.changes = std::move(mFrameChanges);
     mFrameChanges = jahshaka::engine::ChangeSet();
     // THE CLASS CHANGES the document made since the last emit (the dirty set's class list): each owes a Static record.
@@ -1154,7 +1159,8 @@ SceneMirror::VisitResult SceneMirror::visitDirty(iris::SceneNode *node)
     // well as on the child) must not adopt it. Its own `visible` flag still
     // reaches its children: setVisible cascades the whole subtree.
     if (mSource && node == mSource->getRootNode().data()) return {};
-    return visitNode(node, parentShownOf(node), parentMovableOf(node));
+    const quint8 ps = parentStateOf(node);   // ONE memo probe for both answers (U4 stage 5)
+    return visitNode(node, (ps & kParentShown) != 0, (ps & kParentMovable) != 0);
 }
 
 /// Entries whose document nodes have left. This is what replaced
@@ -1406,6 +1412,7 @@ void SceneMirror::consumeDirty()
     // THIS frame. A node queued twice is visited twice, which is idempotent and
     // cheaper than a set.
     bool materialsAsked = false;
+    const std::size_t docList = mDirtyScratch.size();
     for (std::size_t i = 0;; ++i) {
         if (i >= mDirtyScratch.size()) {
             if (materialsAsked) break;
@@ -1418,6 +1425,10 @@ void SceneMirror::consumeDirty()
         // CLEARED BEFORE THE VISIT, so a write the visit itself makes (the
         // mirror's own soft-mobility promotion) is not lost.
         const quint16 mask = n->_takeDirtyMask();
+        // THE DOCUMENT'S LIST, A NODE THE JOURNAL'S TAKE ALREADY SERVED (its transform-only mark consumed there, U4
+        // stage 5) — or a second queueing of a node whose mark an earlier entry took: nothing left to visit.
+        // (Nodes this pass appends — a material's users, a character's pieces — are visited whatever their mask.)
+        if (mask == 0 && i < docList) continue;
         const VisitResult v = visitDirty(n);
         if (mask & kSettleWriteMask) noteSettleWrite(n, v.entry);
     }
@@ -4021,8 +4032,9 @@ void SceneMirror::takePublishedRiderTags()
     }
 }
 
-void SceneMirror::takeWriteJournal()
+void SceneMirror::takeWriteJournal(bool beforeWalk)
 {
+    const bool serve = beforeWalk && mSource && !mSource->isPlaying() && !mFullWalkPending && !mVerifyEverything;
     bool took = true;
     { MirrorStage s(nullptr, "mirror.journal.take");   // (the stage log's: the document's own half)
     took = mJournal.takePoses(mJournalScratch, mJournalPosed);
@@ -4042,6 +4054,19 @@ void SceneMirror::takeWriteJournal()
             else noteWrittenNode(n);   // an entry without an engine node: its descendants
         }
         oweEntryRecord(n, *it, jahshaka::engine::NodeRecord::Trs);
+        // A MOVED MESH OR GROUP, AND NOTHING ELSE MARKED (U4 stage 5): its transform reaches the engine through this
+        // record, its graph class through the class list, its settle clock here — the visit's latches cannot move
+        // (visibility, mobility outside play, materials, the mesh, the lighting channels, the parent are other
+        // marks), so the walk does not visit it: its mark is consumed here, by the entry the take already holds (the
+        // node touched ONCE, no second lookup). The oracle (verifyAgainstFullWalk) holds it to the full walk.
+        if (serve && it->node && it->docNode == n && n->dirtyMask() == kTransformOnlyMask && !it->gpuSkinned &&
+            !it->hasParticles && !it->hasLight && !it->hasDecal &&
+            (n->sceneNodeType == iris::SceneNodeType::Mesh || n->sceneNodeType == iris::SceneNodeType::Empty)) {
+            n->_takeDirtyMask();
+            ++mVisited;
+            it->lastSeen = mSyncStamp;
+            noteSettleWrite(n, &*it);
+        }
     }
     // POSED (a camera's write): no scene movement, so not in the change set — but the engine still draws it there.
     for (iris::SceneNode *n : mJournalPosed) {
