@@ -256,10 +256,11 @@ namespace Ogre
         const PhotonVoxelizer::VolumeSet src = live->liveVolumes();
         TextureGpu *from[kVolumes];
         volumeList( src, from );
-        // Every volume but the positions (6, 7) and the sums (8), texel for texel.
-        for( size_t i = 0u; i < 6u; ++i )
-            copyBox( from[i], dst[i], srcOrigin, dstOrigin, size );
-        copyBox( from[9], dst[9], srcOrigin, dstOrigin, size );
+        // Every volume but the positions (6, 7) and the sums (8), texel for texel - the metal (9) and the
+        // emissive factors (10, 11) with them.
+        for( size_t i = 0u; i < kVolumes; ++i )
+            if( i < 6u || i > 8u )
+                copyBox( from[i], dst[i], srcOrigin, dstOrigin, size );
         // THE SUMS are four texels a voxel interleaved in Z (Voxelizer_cs.glsl): the same box with
         // its z scaled by four is one contiguous box of texels.
         {
