@@ -310,7 +310,8 @@
 			"source" : "JahReceiverGrid_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all"],
 			"uav_units" : 2,
-			"properties" : { "jah_receiver_mode" : 2, "jah_recv_level" : 1 }
+			"properties" : { "jah_receiver_mode" : 2 },
+			"params" : [ ["recvLevel", [1], "uint"] ]
 		},
 
 		"Jahshaka/VideoNv12" :

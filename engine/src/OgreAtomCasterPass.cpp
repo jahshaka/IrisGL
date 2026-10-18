@@ -471,7 +471,7 @@ struct LightPyramid {
     bool seen = false;
     /// THE RECEIVER GRID (stage 4b's counting door): its request, its tiles, its counts.
     Ogre::UavBufferPacked *recvParams = nullptr, *recvGrid = nullptr;
-    uint32_t recvTiles = 0u;
+    uint32_t recvGridWords = 0u;   ///< the grid's words: every level of its pyramid
 };
 /// A PYRAMID ITS MAP DID NOT RENDER FOR this many frames is freed (decision 16.3): the sun removed, the
 /// shadows or the Atom draw turned off, a tier's atlas rebuilt - the transition frees its VRAM at once,
@@ -517,7 +517,7 @@ void destroyPyramid(LightPyramid &p) {
         if (*b && vao) vao->destroyUavBuffer(*b);
         *b = nullptr;
     }
-    p.recvTiles = 0u;
+    p.recvGridWords = 0u;
     p.tex = nullptr;
     p.valid = false;
 }
@@ -923,7 +923,7 @@ Ogre::DescriptorSetUav::BufferSlot uavOf(Ogre::UavBufferPacked *b, Ogre::Resourc
 bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreScene *scene, LightPyramid &lp,
                        const AtomReceiverDepth &rd,
                        const Ogre::Camera *viewCam, const Ogre::Matrix4 &cullM, unsigned mapW, unsigned mapH,
-                       float dilationTexels, float depthMargin) {
+                       const float dilationTexels[2], float depthMargin) {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     Ogre::HlmsCompute *hc = root && root->getHlmsManager() ? root->getHlmsManager()->getComputeHlms() : nullptr;
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
@@ -944,12 +944,11 @@ bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreS
         w = std::max(1u, w >> 1u);
         h = std::max(1u, h >> 1u);
     }
-    const uint32_t tiles = words;
     JAH_TRY {
-        if (lp.recvTiles != tiles) {
+        if (lp.recvGridWords != words) {
             if (lp.recvGrid) vao->destroyUavBuffer(lp.recvGrid);
-            lp.recvGrid = vao->createUavBuffer(tiles, 4u, 0, nullptr, false);
-            lp.recvTiles = tiles;
+            lp.recvGrid = vao->createUavBuffer(words, 4u, 0, nullptr, false);
+            lp.recvGridWords = words;
         }
         if (!lp.recvParams) lp.recvParams = vao->createUavBuffer(1u, sizeof(RecvParams), 0, nullptr, false);
         RecvParams p;
@@ -970,8 +969,9 @@ bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreS
         p.map[1] = mapH;
         p.map[2] = tile;
         p.misc[0] = rs->isReverseDepth() ? 0.0f : 1.0f;
-        p.misc[1] = dilationTexels;
+        p.misc[1] = dilationTexels[0];
         p.misc[2] = depthMargin;
+        p.misc[3] = dilationTexels[1];
         p.counts[0] = gs.slotCount();
         p.counts[1] = 0u;            // every instance the id pass does not draw - hidden ones too (a superset)
         p.counts[2] = kGpuAtom;
@@ -990,7 +990,7 @@ bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreS
             pre.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &pre, 0,
                                  nullptr, 0, nullptr);
-            vkCmdFillBuffer(cmd, buf, off, VkDeviceSize(tiles) * 4u, 0xFFFFFFFFu);
+            vkCmdFillBuffer(cmd, buf, off, VkDeviceSize(words) * 4u, 0xFFFFFFFFu);
             VkMemoryBarrier post{};
             post.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             post.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1019,16 +1019,21 @@ bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreS
             boxJob->_setUavBuffer(0u, uavOf(lp.recvParams, Ogre::ResourceAccess::Read));
             boxJob->_setUavBuffer(1u, uavOf(lp.recvGrid, Ogre::ResourceAccess::ReadWrite));
             boxJob->_setUavBuffer(2u, uavOf(gs.instanceBuffer(), Ogre::ResourceAccess::Read));
-            boxJob->setNumThreadGroups(std::max(1u, gs.slotCount()), 1u, 1u);   // one workgroup an instance
+            // one workgroup an instance, capped at the device's 65,535 (OgreScreenProbeGather.cpp's rule): a workgroup
+            // strides the slots past it (JahReceiverGrid_cs, mode 1)
+            boxJob->setNumThreadGroups(std::min(65535u, std::max(1u, gs.slotCount())), 1u, 1u);
             dispatch(boxJob);
             for (Ogre::uint8 u = 0u; u < 3u; ++u) boxJob->_setUavBuffer(u, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
         }
         // THE FARTHEST-RECEIVER PYRAMID, a level a dispatch (a 2048 map's 256 x 256 tiles: eight small ones).
         reduceJob->_setUavBuffer(0u, uavOf(lp.recvParams, Ogre::ResourceAccess::Read));
         reduceJob->_setUavBuffer(1u, uavOf(lp.recvGrid, Ogre::ResourceAccess::ReadWrite));
-        for (unsigned k = 1u; k < levels; ++k) {
+        Ogre::ShaderParams &rp = reduceJob->getShaderParams("default");
+        Ogre::ShaderParams::Param *level = rp.findParameter("recvLevel");
+        for (unsigned k = 1u; k < levels && level; ++k) {
             const uint32_t w = std::max(1u, tx >> k), h = std::max(1u, ty >> k);
-            reduceJob->setProperty("jah_recv_level", Ogre::int32(k));
+            level->setManualValue(Ogre::uint32(k));   // a parameter: one compiled shader for every level (decision 19.6)
+            rp.setDirty();
             reduceJob->setNumThreadGroups((w + 7u) / 8u, (h + 7u) / 8u, 1u);
             dispatch(reduceJob);
         }
@@ -1208,12 +1213,17 @@ void recordCasterPass(AtomPassContext &ctx) {
         const AtomReceiverDepth *rd = rv ? &rv->atomReceiverDepth() : nullptr;
         if (rd && rd->depth && rd->frame == vao->getFrameCount() && rd->workspace == pass->getParentNode()->getWorkspace() &&
             rv->camera()) {
-            // THE DILATION: the widest PCF kernel's reach (6 x 6: 3 texels), the receivers' normal offset (the shader
+            // THE DILATION, PER AXIS (decision 19.1: a focused split's window is not square - map 2's x and y rows
+            // differ): the widest PCF kernel's reach (6 x 6: 3 texels), the receivers' normal offset (the shader
             // moves a receiver up to normalOffsetBias / the map's width along its normal - Ogre's
-            // getNormalOffsetBias) and one tile. The offset's reach along the light is the depth margin.
+            // getNormalOffsetBias) in each axis' own texels and one tile. The offset's reach along the light is
+            // the depth margin.
             const float offsetWorld = float(shadowNode->getNormalOffsetBias(mapIdx)) / float(std::max(1u, rect[2]));
-            const Ogre::Vector3 r0(cullM[0][0], cullM[0][1], cullM[0][2]), r2(cullM[2][0], cullM[2][1], cullM[2][2]);
-            const float dilation = 3.0f + offsetWorld * float(r0.length()) * 0.5f * float(rect[2]) + float(kReceiverTileTexels);
+            const Ogre::Vector3 r0(cullM[0][0], cullM[0][1], cullM[0][2]), r1(cullM[1][0], cullM[1][1], cullM[1][2]),
+                r2(cullM[2][0], cullM[2][1], cullM[2][2]);
+            const float dilation[2] = {
+                3.0f + offsetWorld * float(r0.length()) * 0.5f * float(rect[2]) + float(kReceiverTileTexels),
+                3.0f + offsetWorld * float(r1.length()) * 0.5f * float(rect[3]) + float(kReceiverTileTexels) };
             const float margin = offsetWorld * float(r2.length());
             // THE GRID'S OWN ROW under the measuring door shadow.casterPbsProbe (decision 17's cost bar).
             std::optional<monitor::CacheScope> row;

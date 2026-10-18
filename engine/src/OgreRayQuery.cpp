@@ -7122,6 +7122,12 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         take(ArmId::GatherCrossStrata, in.tuning.crossStrata);
         if (armValue(ArmId::GatherYoungReach) > 0.0)
             in.tuning.youngReach = float(armValue(ArmId::GatherYoungReach));
+        // the reconstruction's arms (decision 20) and the E/pi instrument
+        const double jitter = armValue(ArmId::GatherJitter);
+        if (jitter > 0.5 && jitter < 1.5) in.tuning.jitterOff = true;
+        if (jitter > 1.5) in.tuning.jitterCommon = true;
+        if (arm(ArmId::GatherFilterOff, false)) in.tuning.filterOff = true;
+        if (arm(ArmId::GatherIrradianceReadback, false)) in.tuning.readback = true;
     }
     in.restKey = gatherRestKeyArmed(scene);
     in.restartKey = scene->gatherRestartKey();

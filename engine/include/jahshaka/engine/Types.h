@@ -3481,6 +3481,11 @@ struct GatherTuning {
     /// The probe sits at its cell's CENTRE instead of being jittered inside it
     /// -- the A/B for what the jitter costs and buys.
     bool     jitterOff = false;
+    /// THE GRID'S JITTER, ONE OFFSET A FRAME (GATHER-INTEGRATION-FACTOR's measuring arm, ENGINE-UPGRADE-U5
+    /// decision 20): every cell's probe at the SAME offset inside its cell, and the integrate's bilinear on the
+    /// grid so shifted - the probes' true positions - instead of each probe jittered alone and read as if at its
+    /// cell's centre. (jitterOff wins.)
+    bool     jitterCommon = false;
     /// THE RAYS AT THEIR TEXELS' CENTRES (IMAGE-1): every ray of a probe leaves
     /// through its octahedral texel's centre instead of a jittered point in it —
     /// with jitterOff, a still view's estimate is then the same every frame, the

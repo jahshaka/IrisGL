@@ -1839,129 +1839,88 @@ public:
 // of the frame (`latch`, from renderOneFrame), so an arm set mid-frame — a script
 // verb between two passes of a frame never happens, but a VR pump's early return
 // does — changes whole frames only. Every default is the shipped picture.
+/// THE ARMS, ONE LIST (ENGINE-UPGRADE-U5 decision 19.3): X(enumerator, "name") - the enum, kArmNames and the
+/// table's rows (OgreFrameMonitor.cpp, kArms) are all generated from or checked against it, each row by a
+/// static_assert of its own, so an arm out of place is a compile error naming it. A new arm is one line here and
+/// its row there.
+#define JAH_ARM_LIST(X) \
+    X(ReflectMotion, "reflect.motion") /* the march's object motion + the trace's mover branches */ \
+    X(ReflectPosed, "reflect.posed") /* the posed (skinned) identification */ \
+    X(ReflectAlphaTested, "reflect.alphaTested") /* cut-out geometry traced as cut-out */ \
+    X(ReflectEdgeClasses, "reflect.edgeClasses") /* the Hits view's class overlay (0 off, 1, 2) */ \
+    X(ReflectMonoEyes, "reflect.monoEyes") /* a stereo trace with the mono basis */ \
+    X(TlasRefit, "rayquery.tlasRefit") /* refit the TLAS instead of rebuilding it */ \
+    X(GatherTemporal, "gather.temporal") /* the screen-probe gather's pixel history */ \
+    X(AtomDecode, "atom.decode") /* the screen decode armed (0: the Atom items drawn by nothing) */ \
+    X(CardFootprint, "cards.footprintTexels") /* the card read's footprint gate */ \
+    X(FieldScroll, "gi.fieldScroll") /* the irradiance field scrolls (0: re-placed whole) */ \
+    X(DiffuseConeSkip, "photon.diffuseConeSkip") /* the pixel's cone diffuse only where the field's fallback weight is > 0 */ \
+    X(SpecularConeSkip, "photon.specularConeSkip") /* the pixel's specular cone only where the reflection's w < 1 */ \
+    X(GatherDecodeHits, "gather.decodeHits") /* every gather hit a record (the decode route), never the caches */ \
+    X(GatherOctRes, "gather.octRes") /* the probe map's resolution (rays = octRes^2; 0 = the tier's) */ \
+    X(GatherStride, "gather.stride") /* the probe stride in pixels (0 = the tier's) */ \
+    X(GatherHistory, "gather.historyFrames") /* the pixel history's floor in frames (0 = shipped) */ \
+    X(GatherFilterRadius, "gather.filterRadius") /* the probe-space filter's reach (0 = shipped) */ \
+    X(GatherRestOff, "gather.restOff") /* no rest mean: every frame is the history's */ \
+    X(GatherRestFrames, "gather.restFrames") /* the rest mean's length (0 = the settle) */ \
+    X(GatherRestSeed, "gather.restSeed") /* the rest frames' sequence offset */ \
+    X(GatherAgeView, "gather.ageView") /* paint pixels whose history is younger than N frames */ \
+    X(GatherFreezeFrame, "gather.freezeFrame") /* the sample sequence's frame held (the determinism door) */ \
+    X(GatherYoungFrames, "gather.youngFrames") /* the history length below which a pixel reads wider (0 = shipped) */ \
+    X(GatherYoungReach, "gather.youngReach") /* that reach in pixels at a history of 0 (0 = shipped) */ \
+    X(GatherValidationOff, "gather.validationOff") /* every reprojected history texel accepted (a test door) */ \
+    X(GatherCrossStrata, "gather.crossStrata") /* rays stratified across N x N probes (0 = shipped, 1 = off) */ \
+    X(GiCascadeFault, "gi.cascadeFault") /* cascade N's rebuild throws before its build (-1 = none) */ \
+    X(GiCascadeFaultPost, "gi.cascadeFaultPost") /* cascade N's rebuild throws after its build (-1 = none) */ \
+    X(GiCascadeFaultCommit, "gi.cascadeFaultCommit") /* cascade N's scroll commit throws half way through its copies (-1 = none) */ \
+    X(GiScrollBudget, "gi.scrollBudgetMs") /* a scroll's per-frame voxelisation budget in ms (0 = shipped) */ \
+    X(GiVoxelOctants, "gi.voxelOctants") /* a whole build's octants per axis (1 shipped, 2 = 8 octants; stage 2's measure) */ \
+    X(GiRebuildCascade, "gi.rebuildCascade") /* cascade N rebuilt whole every frame while set (-1 = none; a measuring door) */ \
+    X(ShadowCasterCull, "shadow.casterCull") /* a sun map's Atom casters culled by the light's own depth (0: frustum only, the parity arm) */ \
+    X(ShadowCasterPbsProbe, "shadow.casterPbsProbe") /* a sun map's PBS casters TESTED against the light's depth and counted (a measuring door) */ \
+    X(GiRebuildSettle, "gi.rebuildSettle") /* the rebuild settle runs (0: off, the paired arm) */ \
+    X(GiFieldRays, "gi.fieldRays") /* the field's rays per depth texel (0 = shipped) */ \
+    X(GiFieldSamples, "gi.fieldSamples") /* the field's sample target (0 = shipped) */ \
+    X(GiFieldStatic, "gi.fieldStatic") /* the field's rays NOT rotated per frame */ \
+    X(GiFieldStopOff, "gi.fieldStopOff") /* the field's per-probe variance stop off (every probe to the target) */ \
+    X(GiRefuseGeometry, "gi.refuseGeometry") /* a voxel build with no geometry source (the refused device) */ \
+    X(AtomDiscriminate, "atom.discriminate") /* the decode's failure colour codes (1), the chart (2) */ \
+    X(AtomHitWorldLights, "atom.hitWorldLights") /* the hit decode's light list: 0 shipped, 1 off, 2 all */ \
+    X(AtomHitVctSpecular, "atom.hitVctSpecular") /* the hit decode's VCT specular cone (0: compiled out) */ \
+    X(GatherHitsReadback, "gather.hitsReadback") /* every uniform probe's per-ray record read back (FAR-SUN-1) */ \
+    X(ReflectMetalDecode, "reflect.metalDecode") /* the reflector roughness below which a metal hit decodes */ \
+    X(GiHitDirect, "gi.hitDirect") /* a voxel-answered hit's direct light at the hit (FAR-SUN-2; 0: the store whole) */ \
+    X(GpuWalkWhole, "gpuscene.wholeWalk") /* the dirty scan walks every slot (the measuring arm; 0: the named slots) */ \
+    X(GpuWalkParity, "gpuscene.walkParity") /* after every frame's compose, every slot checked against the table (the guard) */ \
+    X(MessagesRefuse, "messages.refuse") /* every scene message of the frame refused unapplied (a test door, U3 decision 44) */ \
+    X(InterpSerial, "interp.serial") /* the free frames' interpolation on the frame's thread (the measuring arm) */ \
+    X(FakeRuntimePace, "vr.fakeRuntimePace") /* ms: each free frame waits as a runtime's xrWaitFrame would (a test door, U3 decision 53) */ \
+    X(FakePresentBlock, "view.fakePresentBlock") /* ms: a free frame blocks to that span after its publish, in place of a blocking present (a test door, U3 decision 65) */ \
+    X(CardsSunGridParity, "cards.sunGridParity") /* every sun trace's grid searches checked against the exhaustive search (the guard, U4 stage 2) */ \
+    X(GiGeomSigParity, "gi.geomSigParity") /* every geometry signature checked against the whole sum (the guard, U4 stage 3) */ \
+    X(GiRootBoxParity, "gi.rootBoxParity") /* every cascade mark checked against the items' own boxes (the guard, U4 stage 3) */ \
+    X(GpuWalkTiming, "gpuscene.walkTiming") /* the GPU scene's walk times its observers' notifies (a measuring arm, U4 stage 3) */ \
+    X(GpuObserversOff, "gpuscene.observersOff") /* the change feed's observers are not told (the paired arm of the notify share; a test door) */ \
+    X(CardsNullMove, "cards.nullMove") /* the sun trace takes one more still-caster move with a NULL box (the non-finite search's test door, U4 stage 3) */ \
+    X(GiPccPlacementLights, "gi.pccPlacementLights") /* every staged probe placement's light list and probe nodes checked (the guard, U4 decision 14) */ \
+    X(GpuSerialCompose, "gpuscene.serialCompose") /* the GPU scene's compose after the barrier on the frame's thread (the identity row's other arm, U4 stage 4) */ \
+    X(GpuComposeDigest, "gpuscene.composeDigest") /* the compose's digest of every staged row and tail (the identity row, U4 stage 4) */ \
+    X(GpuThrowInLane, "gpuscene.throwInLane") /* the GPU scene compose throw door: before the stage, after it, or every time (a test door, U4 decisions 18.3 + 22.4) */ \
+    X(GatherJitter, "gather.jitter") /* the probes' jitter: 0 shipped, 1 off (the centre), 2 one offset for the grid */ \
+    X(GatherFilterOff, "gather.filterOff") /* the probe-space filter off (the measuring arm, decision 20) */ \
+    X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */
+
 enum class ArmId : unsigned {
-    ReflectMotion,       ///< "reflect.motion" — the march's object motion + the trace's mover branches
-    ReflectPosed,        ///< "reflect.posed" — the posed (skinned) identification
-    ReflectAlphaTested,  ///< "reflect.alphaTested" — cut-out geometry traced as cut-out
-    ReflectEdgeClasses,  ///< "reflect.edgeClasses" — the Hits view's class overlay (0 off, 1, 2)
-    ReflectMonoEyes,     ///< "reflect.monoEyes" — a stereo trace with the mono basis
-    TlasRefit,           ///< "rayquery.tlasRefit" — refit the TLAS instead of rebuilding it
-    GatherTemporal,      ///< "gather.temporal" — the screen-probe gather's pixel history
-    AtomDecode,          ///< "atom.decode" — the screen decode armed (0: the Atom items drawn by nothing)
-    CardFootprint,       ///< "cards.footprintTexels" — the card read's footprint gate
-    FieldScroll,         ///< "gi.fieldScroll" — the irradiance field scrolls (0: re-placed whole)
-    DiffuseConeSkip,     ///< "photon.diffuseConeSkip" — the pixel's cone diffuse only where the field's fallback weight is > 0
-    SpecularConeSkip,    ///< "photon.specularConeSkip" — the pixel's specular cone only where the reflection's w < 1
-    GatherDecodeHits,    ///< "gather.decodeHits" — every gather hit a record (the decode route), never the caches
-    GatherOctRes,        ///< "gather.octRes" — the probe map's resolution (rays = octRes^2; 0 = the tier's)
-    GatherStride,        ///< "gather.stride" — the probe stride in pixels (0 = the tier's)
-    GatherHistory,       ///< "gather.historyFrames" — the pixel history's floor in frames (0 = shipped)
-    GatherFilterRadius,  ///< "gather.filterRadius" — the probe-space filter's reach (0 = shipped)
-    GatherRestOff,       ///< "gather.restOff" — no rest mean: every frame is the history's
-    GatherRestFrames,    ///< "gather.restFrames" — the rest mean's length (0 = the settle)
-    GatherRestSeed,      ///< "gather.restSeed" — the rest frames' sequence offset
-    GatherAgeView,       ///< "gather.ageView" — paint pixels whose history is younger than N frames
-    GatherFreezeFrame,   ///< "gather.freezeFrame" — the sample sequence's frame held (the determinism door)
-    GatherYoungFrames,   ///< "gather.youngFrames" — the history length below which a pixel reads wider (0 = shipped)
-    GatherYoungReach,    ///< "gather.youngReach" — that reach in pixels at a history of 0 (0 = shipped)
-    GatherValidationOff, ///< "gather.validationOff" — every reprojected history texel accepted (a test door)
-    GatherCrossStrata,   ///< "gather.crossStrata" — rays stratified across N x N probes (0 = shipped, 1 = off)
-    // TESTING-CLEANUP-2 H8f: the GI and Atom doors that were environment reads in shipped
-    // per-frame / per-pass / per-build code.
-    GiCascadeFault,      ///< "gi.cascadeFault" — cascade N's rebuild throws before its build (-1 = none)
-    GiCascadeFaultPost,  ///< "gi.cascadeFaultPost" — cascade N's rebuild throws after its build (-1 = none)
-    GiCascadeFaultCommit,///< "gi.cascadeFaultCommit" — cascade N's scroll commit throws half way through its copies (-1 = none)
-    GiScrollBudget,      ///< "gi.scrollBudgetMs" — a scroll's per-frame voxelisation budget in ms (0 = shipped)
-    GiVoxelOctants,      ///< "gi.voxelOctants" — a whole build's octants per axis (1 shipped, 2 = 8 octants; stage 2's measure)
-    GiRebuildCascade,    ///< "gi.rebuildCascade" — cascade N rebuilt whole every frame while set (-1 = none; a measuring door)
-    ShadowCasterCull,    ///< "shadow.casterCull" — a sun map's Atom casters culled by the light's own depth (0: frustum only, the parity arm)
-    ShadowCasterPbsProbe,///< "shadow.casterPbsProbe" — a sun map's PBS casters TESTED against the light's depth and counted (a measuring door)
-    GiRebuildSettle,     ///< "gi.rebuildSettle" — the rebuild settle runs (0: off, the paired arm)
-    GiFieldRays,         ///< "gi.fieldRays" — the field's rays per depth texel (0 = shipped)
-    GiFieldSamples,      ///< "gi.fieldSamples" — the field's sample target (0 = shipped)
-    GiFieldStatic,       ///< "gi.fieldStatic" — the field's rays NOT rotated per frame
-    GiFieldStopOff,      ///< "gi.fieldStopOff" — the field's per-probe variance stop off (every probe to the target)
-    GiRefuseGeometry,    ///< "gi.refuseGeometry" — a voxel build with no geometry source (the refused device)
-    AtomDiscriminate,    ///< "atom.discriminate" — the decode's failure colour codes (1), the chart (2)
-    AtomHitWorldLights,  ///< "atom.hitWorldLights" — the hit decode's light list: 0 shipped, 1 off, 2 all
-    AtomHitVctSpecular,  ///< "atom.hitVctSpecular" — the hit decode's VCT specular cone (0: compiled out)
-    GatherHitsReadback,  ///< "gather.hitsReadback" — every uniform probe's per-ray record read back (FAR-SUN-1)
-    ReflectMetalDecode,  ///< "reflect.metalDecode" — the reflector roughness below which a metal hit decodes
-    GiHitDirect,         ///< "gi.hitDirect" — a voxel-answered hit's direct light at the hit (FAR-SUN-2; 0: the store whole)
-    GpuWalkWhole,        ///< "gpuscene.wholeWalk" — the dirty scan walks every slot (the measuring arm; 0: the named slots)
-    GpuWalkParity,       ///< "gpuscene.walkParity" — after every frame's compose, every slot checked against the table (the guard)
-    MessagesRefuse,      ///< "messages.refuse" — every scene message of the frame refused unapplied (a test door, U3 decision 44)
-    InterpSerial,        ///< "interp.serial" — the free frames' interpolation on the frame's thread (the measuring arm)
-    FakeRuntimePace,     ///< "vr.fakeRuntimePace" — ms: each free frame waits as a runtime's xrWaitFrame would (a test door, U3 decision 53)
-    FakePresentBlock,    ///< "view.fakePresentBlock" — ms: a free frame blocks to that span after its publish, in place of a blocking present (a test door, U3 decision 65)
-    CardsSunGridParity,  ///< "cards.sunGridParity" — every sun trace's grid searches checked against the exhaustive search (the guard, U4 stage 2)
-    GiGeomSigParity,     ///< "gi.geomSigParity" — every geometry signature checked against the whole sum (the guard, U4 stage 3)
-    GiRootBoxParity,     ///< "gi.rootBoxParity" — every cascade mark checked against the items' own boxes (the guard, U4 stage 3)
-    GpuWalkTiming,       ///< "gpuscene.walkTiming" — the GPU scene's walk times its observers' notifies (a measuring arm, U4 stage 3)
-    GpuObserversOff,     ///< "gpuscene.observersOff" — the change feed's observers are not told (the paired arm of the notify share; a test door)
-    CardsNullMove,       ///< "cards.nullMove" — the sun trace takes one more still-caster move with a NULL box (the non-finite search's test door, U4 stage 3)
-    GiPccPlacementLights,///< "gi.pccPlacementLights" — every staged probe placement's light list and probe nodes checked (the guard, U4 decision 14)
-    GpuSerialCompose,    ///< "gpuscene.serialCompose" — the GPU scene's compose after the barrier on the frame's thread (the identity row's other arm, U4 stage 4)
-    GpuComposeDigest,    ///< "gpuscene.composeDigest" — the compose's digest of every staged row and tail (the identity row, U4 stage 4)
-    GpuThrowInLane,      ///< "gpuscene.throwInLane" — the GPU scene compose throw door: before the stage, after it, or every time (a test door, U4 decisions 18.3 + 22.4)
+#define JAH_ARM_ENUM(e, n) e,
+    JAH_ARM_LIST(JAH_ARM_ENUM)
+#undef JAH_ARM_ENUM
     Count
 };
-/// THE ARMS' NAMES, IN ArmId'S ORDER (ENGINE-UPGRADE-U5 decision 17: a table row out of order swapped two doors
-/// silently - a measurement read the other arm's value). OgreFrameMonitor.cpp asserts at compile time that its
-/// table (kArms) names each arm here in this order; a new arm is an enumerator, a name here and a row there.
+/// THE ARMS' NAMES, IN ArmId'S ORDER - generated from the one list.
 inline constexpr const char *kArmNames[] = {
-    "reflect.motion",
-    "reflect.posed",
-    "reflect.alphaTested",
-    "reflect.edgeClasses",
-    "reflect.monoEyes",
-    "rayquery.tlasRefit",
-    "gather.temporal",
-    "atom.decode",
-    "cards.footprintTexels",
-    "gi.fieldScroll",
-    "photon.diffuseConeSkip",
-    "photon.specularConeSkip",
-    "gather.decodeHits",
-    "gather.octRes",
-    "gather.stride",
-    "gather.historyFrames",
-    "gather.filterRadius",
-    "gather.restOff",
-    "gather.restFrames",
-    "gather.restSeed",
-    "gather.ageView",
-    "gather.freezeFrame",
-    "gather.youngFrames",
-    "gather.youngReach",
-    "gather.validationOff",
-    "gather.crossStrata",
-    "gi.cascadeFault",
-    "gi.cascadeFaultPost",
-    "gi.cascadeFaultCommit",
-    "gi.scrollBudgetMs",
-    "gi.voxelOctants",
-    "gi.rebuildCascade",
-    "shadow.casterCull",
-    "shadow.casterPbsProbe",
-    "gi.rebuildSettle",
-    "gi.fieldRays",
-    "gi.fieldSamples",
-    "gi.fieldStatic",
-    "gi.fieldStopOff",
-    "gi.refuseGeometry",
-    "atom.discriminate",
-    "atom.hitWorldLights",
-    "atom.hitVctSpecular",
-    "gather.hitsReadback",
-    "reflect.metalDecode",
-    "gi.hitDirect",
-    "gpuscene.wholeWalk",
-    "gpuscene.walkParity",
-    "messages.refuse",
-    "interp.serial",
-    "vr.fakeRuntimePace",
-    "view.fakePresentBlock",
+#define JAH_ARM_NAME(e, n) n,
+    JAH_ARM_LIST(JAH_ARM_NAME)
+#undef JAH_ARM_NAME
 };
 static_assert(sizeof(kArmNames) / sizeof(kArmNames[0]) == unsigned(ArmId::Count), "ArmId and kArmNames differ");
 

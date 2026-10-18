@@ -443,7 +443,11 @@ void main()
 	// THE FOUR GRID PROBES AROUND THE PIXEL: the cells whose centres bracket
 	// it, and the bilinear weights of that bracket. A cell off the grid clamps
 	// onto the border cell (its weight joins the border's).
-	const vec2 g = ( vec2( lx, pix.y ) + 0.5 ) / stride - 0.5;
+	// (the grid's common jitter, plane.w 2: the probes sit at cell x stride + the frame's offset, and the
+	// bracket is taken on that shifted grid - rq_probe_place.comp's offset, the same hash)
+	vec2 g = ( vec2( lx, pix.y ) + 0.5 ) / stride - 0.5;
+	if( p.plane.w > 1.5 )
+		g = ( vec2( lx, pix.y ) + 0.5 - ( floor( jahSample2( ivec2( 0 ), 0u, uint( p.knobs.z ) ) * stride ) + 0.5 ) ) / stride;
 	const ivec2 c0 = ivec2( floor( g ) );
 	const vec2 f = g - vec2( c0 );
 	const int bands = p.knobs4.x > 5.0 ? 9 : 4;

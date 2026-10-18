@@ -264,7 +264,7 @@ constexpr unsigned kRestSequenceBase = 0x10000u;
 bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
     return a.probeStride == b.probeStride && a.octRes == b.octRes && a.rayLength == b.rayLength &&
            a.adaptiveCap == b.adaptiveCap && a.freezeFrameIndex == b.freezeFrameIndex &&
-           a.jitterOff == b.jitterOff && a.rayJitterOff == b.rayJitterOff &&
+           a.jitterOff == b.jitterOff && a.jitterCommon == b.jitterCommon && a.rayJitterOff == b.rayJitterOff &&
            a.farQueryOff == b.farQueryOff &&
            a.shBands == b.shBands && a.filterOff == b.filterOff &&
            a.historyFrames == b.historyFrames &&
@@ -1091,6 +1091,16 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // The pending frames' records are dropped WHENEVER the arm is off - not only once a host copy
     // exists: an arm on for fewer frames than the retire latency left them pending, and the first
     // frame after it decoded one (ready for a frame the arm no longer covered).
+    // ...AND THE IRRADIANCE'S (ENGINE-UPGRADE-U5 stage 5, world.gatherIrradiance): a host copy of a frame the readback
+    // no longer covers is no reading either - it stood after the door closed and answered as the gather's.
+    if (!in.tuning.readback) {
+        for (unsigned i = 0; i < kFramesInFlight; ++i) v.pending[i].irradiance = false;
+        if (!v.irrHost.empty()) {
+            v.irrHost.clear();
+            v.irrHost.shrink_to_fit();
+            v.irrHostFrame = 0u;
+        }
+    }
     if (!in.hitsReadback) {
         for (unsigned i = 0; i < kFramesInFlight; ++i) v.pending[i].rays = false;
         if (!v.raysHost.empty()) {
@@ -1321,7 +1331,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     }
     pp.plane[0] = kPlaneTolerance;
     pp.plane[1] = kNormalTolerance;
-    pp.plane[3] = in.tuning.jitterOff ? 1.0f : 0.0f;
+    // w: 0 each cell's own jitter, 1 the centre (jitterOff), 2 one offset for the whole grid (jitterCommon)
+    pp.plane[3] = in.tuning.jitterOff ? 1.0f : in.tuning.jitterCommon ? 2.0f : 0.0f;
     for (int i = 0; i < 3; ++i) pp.skyColour[i] = std::max(0.0f, in.skyColour[i]);
     for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
         const unsigned src = c < in.cascadeCount ? c : (in.cascadeCount ? in.cascadeCount - 1u : 0u);

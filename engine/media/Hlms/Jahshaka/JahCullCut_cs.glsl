@@ -87,14 +87,14 @@ struct RecvParams
 	vec4  planes[6];
 	uvec4 dims;     // z tiles x, w tiles y
 	uvec4 map;      // x map width, y map height, z tile texels
-	vec4  misc;     // y the dilation in texels
+	vec4  misc;     // y the dilation in texels along the map's x, w along its y (decision 19.1)
 	uvec4 counts;   // w the pyramid's levels
 	uvec4 rect;
 };
 layout( std430, ogre_U10 ) readonly restrict buffer recvParamsLayout { RecvParams recv; };
 // The grid as a FARTHEST-DEPTH PYRAMID in one buffer (JahReceiverGrid_cs: the tiles at level 0, the levels one
-// after the other; an empty region all bits set): the test reads <= 3 x 3 texels at the level where the cluster's
-// rectangle is <= 2 texels wide - the farthest receiver under them.
+// after the other; an empty region all bits set): the test reads <= 5 x 5 texels at the level where the cluster's
+// rectangle is <= 4 texels wide - the farthest receiver under them.
 layout( std430, ogre_U11 ) readonly restrict buffer recvGridLayout { uint recvGrid[]; };
 uvec2 jahRecvLevelSize( uint k )
 {
@@ -137,6 +137,10 @@ vec4 gRow0;
 vec4 gRow1;
 vec4 gRow2;
 float gScale;
+// THE INSTANCE'S SHADOW CONSTANT BIAS IS NEGATIVE (raster.w, lane 9): its raster depth moves NEARER the light than
+// its geometry says, so no depth comparison made from its sphere is exact - the receiver test keeps it whole, as
+// the light-depth test does (JahCullTest_cs, decision 15.3; decision 19.2).
+bool gNegativeBias;
 uint gGroupBase;
 bool gUseMask;
 
@@ -177,12 +181,15 @@ bool jahClusterInFrustum( vec4 sphere )
 
 // THE RECEIVER TEST (stage 4b, decision 17): a caster cluster changes the picture only where its shadow can fall on
 // a receiver the camera sees. Its sphere in the map, dilated by the shadow filter's reach, the receivers' normal
-// offset and a tile (recv.misc.y texels), is WANTED when some tile under it holds a receiver FARTHER from the light
-// than the sphere's nearest point (reverse-Z: a smaller value); else none of its texels is ever compared against a
-// receiver's depth it could beat - not drawn, and the picture is the same. A rectangle too wide to walk is kept.
+// offset and a tile (recv.misc.y texels along the map's x, recv.misc.w along its y: a focused map's window is not
+// square), is WANTED when some tile under it holds a receiver FARTHER from the light than the sphere's nearest
+// point (reverse-Z: a smaller value); else none of its texels is ever compared against a receiver's depth it could
+// beat - not drawn, and the picture is the same. An instance with a negative shadow bias is kept whole.
 bool jahClusterReceived( vec4 sphere )
 {
 @property( cut_receivers )
+	if( gNegativeBias )
+		return true;
 	vec4 c4 = vec4( dot( gRow0.xyz, sphere.xyz ) + gRow0.w,
 					dot( gRow1.xyz, sphere.xyz ) + gRow1.w,
 					dot( gRow2.xyz, sphere.xyz ) + gRow2.w, 1.0 );
@@ -192,7 +199,7 @@ bool jahClusterReceived( vec4 sphere )
 	vec3 ext = r * vec3( length( recv.lightRow[0].xyz ), length( recv.lightRow[1].xyz ), length( recv.lightRow[2].xyz ) );
 	float nearest = q.z + ext.z;
 	vec2 t = vec2( ( q.x * 0.5 + 0.5 ) * float( recv.map.x ), ( 0.5 - q.y * 0.5 ) * float( recv.map.y ) );
-	vec2 half2 = vec2( ext.x * 0.5 * float( recv.map.x ), ext.y * 0.5 * float( recv.map.y ) ) + recv.misc.y;
+	vec2 half2 = vec2( ext.x * 0.5 * float( recv.map.x ), ext.y * 0.5 * float( recv.map.y ) ) + recv.misc.yw;
 	vec2 lo = max( t - half2, vec2( 0.0 ) );
 	vec2 hi = min( t + half2, vec2( recv.map.xy ) - vec2( 1.0 ) );
 	if( lo.x > hi.x || lo.y > hi.y )
@@ -293,6 +300,7 @@ void main()
 	uvec4 dag = meshes[meshIndex].dag;
 	uint groupCount = floatBitsToUint( meshes[meshIndex].localBoundsMin.w );
 	gScale = jahWorldMaxAxisScale( gRow0, gRow1, gRow2 );
+	gNegativeBias = instanceWords[slot * JAH_INSTANCE_LANES + 9u].w < 0.0;
 	gGroupBase = dag.z;
 	gUseMask = groupCount <= JAH_GROUP_WORDS * 32u;
 

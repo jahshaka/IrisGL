@@ -1004,63 +1004,64 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
 // ---------------------------------------------------------------------------
 namespace {
 struct ArmDef {
-    const char *name = nullptr;
+    ArmId id = ArmId::Count;
     double def = 0.0, lo = 0.0, hi = 0.0;
     const char *what = nullptr;
 };
-// THE TABLE, in ArmId's order (asserted below). Each row names the door it replaced.
+// THE TABLE, in ArmId's order: a row names its arm by its enumerator, and EVERY enumerator is asserted below to
+// own the row at its index (decision 19.3). Each row names the door it replaced.
 constexpr ArmDef kArms[] = {
-    { "reflect.motion", 1.0, 0.0, 1.0,
+    { ArmId::ReflectMotion, 1.0, 0.0, 1.0,
       "The screen march's object-motion job and the reflection trace's mover branches "
       "(REFLECT-MOVERS-1). 0 = the camera path alone: the pre-lane picture. gi.reflect_mover's "
       "paired cost arm. Was the JAH_R5_NO_MOTION environment door (two per-frame reads)." },
-    { "reflect.posed", 1.0, 0.0, 1.0,
+    { ArmId::ReflectPosed, 1.0, 0.0, 1.0,
       "The POSED identification (SKINNED-VELOCITY-1): the trace and the march's velocity take "
       "the posed geometry rows. 0 = the id image alone, the pre-lane motion for a character. "
       "gi.reflect_mover --cost-posed. Was JAH_R7_NO_POSED (two per-frame reads)." },
-    { "reflect.alphaTested", 1.0, 0.0, 1.0,
+    { ArmId::ReflectAlphaTested, 1.0, 0.0, 1.0,
       "Alpha-tested (cut-out) geometry traced as cut-out by the reflection, the gather and the "
       "sun contact (REFLECT-MOVERS-2's alpha table). 0 = every cut-out traced opaque. "
       "gi.rt_alpha_tested's cost arm. Was JAH_R6_NO_ALPHA (a per-frame read)." },
-    { "reflect.edgeClasses", 0.0, 0.0, 2.0,
+    { ArmId::ReflectEdgeClasses, 0.0, 0.0, 2.0,
       "The Hits photon view's history-class overlay (REFLECT-EDGE-2's instrument): 1 = mover "
       "hit / restart / reflected-image path, 2 = the new count's bins; 0 = off. Nothing but "
       "that view reads it. gi.reflect_mover --edge. Was JAH_R7_EDGE_CLASSES (a per-frame read)." },
-    { "reflect.monoEyes", 0.0, 0.0, 1.0,
+    { ArmId::ReflectMonoEyes, 0.0, 0.0, 1.0,
       "A stereo view's trace reconstructs with the MONO basis (the pre-REFLECT-VR-1 arm, "
       "wrong for one eye by construction): the A/B that proves the per-eye basis. Was "
       "JAH_R5_MONO_EYES (read once per process)." },
-    { "rayquery.tlasRefit", 0.0, 0.0, 1.0,
+    { ArmId::TlasRefit, 0.0, 0.0, 1.0,
       "Refit the top-level structure when the traced SET is unchanged, instead of rebuilding "
       "it (the rebuild is the default: the better tree, 0.21-0.35 ms at 8,001 instances). "
       "far_blas_measure --tlas. Was JAH_RQ_REFIT (read once per process)." },
-    { "gather.temporal", 1.0, 0.0, 1.0,
+    { ArmId::GatherTemporal, 1.0, 0.0, 1.0,
       "The screen-probe gather's pixel history (PHOTON-GATHER-1c). 0 = each frame's estimate alone, "
       "no history read or written (the measurement lever: gi.gather, gi.gather_temporal, "
       "gi.gather_reference, gi.gather_phase2). Was JAHSHAKA_GATHER_NO_TEMPORAL (a per-frame read)." },
-    { "atom.decode", 1.0, 0.0, 1.0,
+    { ArmId::AtomDecode, 1.0, 0.0, 1.0,
       "The screen decode armed in the decode pass. 0 = unarmed: the Atom items are drawn by NOTHING "
       "in that pass (engine.atom_draw's proof that the view's passes skip their queue; scale's "
       "negative control). Was JAHSHAKA_ATOM_DECODE_OFF (a per-frame read)." },
-    { "cards.footprintTexels", 4.0, 0.0, 1e12,
+    { ArmId::CardFootprint, 4.0, 0.0, 1e12,
       "The card read's footprint gate in texels (Types.h kCardFootprintTexels = 4): the sweep that "
       "chose it (test_rt_reflect --footprint-sweep) sets it per arm, 1e12 = the gate open, 0 = shut. "
       "Was JAHSHAKA_CARD_FOOTPRINT_K (a per-frame read)." },
-    { "gi.fieldScroll", 1.0, 0.0, 1.0,
+    { ArmId::FieldScroll, 1.0, 0.0, 1.0,
       "The irradiance field SCROLLS on a cascade-0 step (keeps the probes that stay inside). 0 = the "
       "same snapped window re-placed WHOLE, the behaviour the scroll replaced (gi.field_scroll walks "
       "one path both ways). Was JAHSHAKA_GI_FIELD_NO_SCROLL (a per-step read)." },
-    { "photon.diffuseConeSkip", 1.0, 0.0, 1.0,
+    { ArmId::DiffuseConeSkip, 1.0, 0.0, 1.0,
       "The pixel's four-cone diffuse is marched only where the irradiance field's fallback weight "
       "(1 - confidence) is above zero - the only pixels it reaches (SPEED-GPU, audit PH-2). 0 = "
       "marched in every pixel of a chain with a field, the cost before the skip; the picture is "
       "the same bytes (gi.cone_skip)." },
-    { "photon.specularConeSkip", 1.0, 0.0, 1.0,
+    { ArmId::SpecularConeSkip, 1.0, 0.0, 1.0,
       "The pixel's specular cone is marched only where the screen/ray reflection's confidence w "
       "is below 1 - the composite replaces the whole environment term where it is 1 (SPEED-GPU, "
       "audit PH-1 / S1). 0 = marched in every pixel, the cost before the skip; the picture is the "
       "same bytes (gi.cone_skip)." },
-    { "gather.decodeHits", 0.0, 0.0, 1.0,
+    { ArmId::GatherDecodeHits, 0.0, 0.0, 1.0,
       "EVERY screen-probe gather hit is a hit RECORD shaded by the visibility-buffer decode, "
       "never read from the cards or the voxels (SPECKLE-FIX-1). The route-agreement instrument: "
       "the decode answers a gather hit with the diffuse response only, exactly what the caches "
@@ -1069,205 +1070,216 @@ constexpr ArmDef kArms[] = {
       "(kHitListHeightFactorDecodeAll; toggling it rebuilds the view's graph) - at the shipped size "
       "it dropped 46 % of Showroom 2's hits as black; any drop left is giStatus rayQuery.hitDropped "
       "and a measurement that reads it refuses." },
-    { "gather.octRes", 0.0, 0.0, 8.0,
+    { ArmId::GatherOctRes, 0.0, 0.0, 8.0,
       "The screen-probe gather's probe map resolution: rays per probe = octRes^2 (GATHER-NOISE-1's "
       "noise lever; GatherTuning::octRes). 0 = the tier's (8: 64 rays). At most 8 - one ray is one "
       "thread of the trace's 8x8 workgroup." },
-    { "gather.stride", 0.0, 0.0, 64.0,
+    { ArmId::GatherStride, 0.0, 0.0, 64.0,
       "The screen-probe gather's probe stride in pixels (GatherTuning::probeStride). 0 = the tier's "
       "(8 at Epic, 16 at High and Medium)." },
-    { "gather.historyFrames", 0.0, 0.0, 64.0,
+    { ArmId::GatherHistory, 0.0, 0.0, 64.0,
       "The gather's pixel history floor in frames: a true mean that long, then an EMA at 1/N "
       "(GatherTuning::historyFrames). 0 = the shipped value; clamped to the history count's range." },
-    { "gather.filterRadius", 0.0, 0.0, 2.0,
+    { ArmId::GatherFilterRadius, 0.0, 0.0, 2.0,
       "The probe-space filter's reach (GatherTuning::filterRadius): 1 = the 3x3 neighbourhood, "
       "2 = plus the ring of eight at two cells (17 taps). 0 = the shipped reach." },
-    { "gather.restOff", 0.0, 0.0, 1.0,
+    { ArmId::GatherRestOff, 0.0, 0.0, 1.0,
       "No rest mean (GatherTuning::restOff): a still view keeps running the history's EMA instead of "
       "handing over to the rest mean and holding - the door that measures the history at rest." },
-    { "gather.restFrames", 0.0, 0.0, 4096.0,
+    { ArmId::GatherRestFrames, 0.0, 0.0, 4096.0,
       "The rest mean's length in frames (GatherTuning::restFrames): a still view averages this many "
       "rest frames before it holds. 0 = the settle. With gather.restSeed it builds a CONVERGED "
       "reference (gi.flythrough_noise)." },
-    { "gather.restSeed", 0.0, 0.0, 255.0,
+    { ArmId::GatherRestSeed, 0.0, 0.0, 255.0,
       "The rest frames' sample-sequence offset (GatherTuning::restSeed): two references of one pose "
       "at two seeds are independent draws. 0 = the shipped sequence. At most 255: the frame index "
       "travels as a float, exact below 2^24." },
-    { "gather.ageView", 0.0, 0.0, 64.0,
+    { ArmId::GatherAgeView, 0.0, 0.0, 64.0,
       "THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument): N > 0 replaces the gather's "
       "answer with magenta where the pixel's reprojected history held fewer than N frames and black "
       "elsewhere (read in the diffuse photon view). 0 = off." },
-    { "gather.freezeFrame", 0.0, 0.0, 1.0,
+    { ArmId::GatherFreezeFrame, 0.0, 0.0, 1.0,
       "The gather's sample sequence held at one frame (GatherTuning::freezeFrameIndex): every frame "
       "draws the same rays at the same cell, so two runs of one path differ only by what is NOT the "
       "gather's Monte-Carlo (the caches' state, the rounding) - GATHER-NOISE-1's separation arm." },
-    { "gather.youngFrames", 0.0, 0.0, 64.0,
+    { ArmId::GatherYoungFrames, 0.0, 0.0, 64.0,
       "THE YOUNG HISTORY'S REACH (GatherTuning::youngFrames): a pixel whose history holds fewer "
       "frames than this reads a wider probe neighbourhood, narrowing to the bilinear four as its "
       "history fills. 0 = the shipped value; 1 with gather.youngReach 1 = off." },
-    { "gather.youngReach", 0.0, 0.0, 64.0,
+    { ArmId::GatherYoungReach, 0.0, 0.0, 64.0,
       "The young pixel's reach in PIXELS at a history of 0 (GatherTuning::youngReach): a tent that "
       "wide, in probe cells of the view's stride, never under the bilinear's one cell (any reach up "
       "to the stride = off). 0 = the shipped 24 px." },
-    { "gather.validationOff", 0.0, 0.0, 1.0,
+    { ArmId::GatherValidationOff, 0.0, 0.0, 1.0,
       "THE HISTORY'S VALIDATION OFF (GatherTuning::historyValidationOff, a test door): every "
       "reprojected texel on the previous picture is accepted, the distance and normal tests off - "
       "what separates a pixel new to the screen from one the tests rejected (GATHER-NOISE-1)." },
-    { "gather.crossStrata", 0.0, 0.0, 8.0,
+    { ArmId::GatherCrossStrata, 0.0, 0.0, 8.0,
       "THE RAYS STRATIFIED ACROSS NEIGHBOURING PROBES (GatherTuning::crossStrata): a ray's jitter in "
       "its octahedral texel is confined to one of N x N sub-cells, any N x N block of probes covering "
       "all of them once (shifted at random per texel and frame). 1 = off; 0 = the shipped N." },
-    { "gi.cascadeFault", -1.0, -1.0, 15.0,
+    { ArmId::GiCascadeFault, -1.0, -1.0, 15.0,
       "FAULT INJECTION (a test door, gi.cascades F2): cascade N's rebuild throws after its region "
       "moved and BEFORE its build - the revert path. -1 = none. Was JAH_GI_CASCADE_FAULT (a "
       "per-rebuild read)." },
-    { "gi.cascadeFaultPost", -1.0, -1.0, 15.0,
+    { ArmId::GiCascadeFaultPost, -1.0, -1.0, 15.0,
       "FAULT INJECTION (a test door, gi.cascades round-2 F1): cascade N's rebuild throws AFTER its "
       "build - the keep-the-placement path. -1 = none. Was JAH_GI_CASCADE_FAULT_POST (a per-rebuild "
       "read)." },
-    { "gi.cascadeFaultCommit", -1.0, -1.0, 15.0,
+    { ArmId::GiCascadeFaultCommit, -1.0, -1.0, 15.0,
       "FAULT INJECTION (a test door, gi.scroll_slab case F; ENGINE-UPGRADE-U5 decision 11 a): cascade N's "
       "scroll commit throws after copying the first half of its volumes into the live store - the torn-store "
       "path (the cascade owes a whole rebuild, never a scroll). -1 = none." },
-    { "gi.scrollBudgetMs", 0.0, 0.0, 1000.0,
+    { ArmId::GiScrollBudget, 0.0, 0.0, 1000.0,
       "THE INCREMENTAL SCROLL'S PER-FRAME BUDGET (ENGINE-UPGRADE-U5 stage 1) in milliseconds of "
       "voxelisation, read when a scroll is planned: a small value spreads a fixture's slab over "
       "many frames (gi.scroll_slab's spread arm). 0 = the shipped budget (kScrollBudgetMs)." },
-    { "gi.voxelOctants", 1.0, 1.0, 2.0,
+    { ArmId::GiVoxelOctants, 1.0, 1.0, 2.0,
       "THE VOXELISER'S WORK PARTITION (ENGINE-UPGRADE-U5 stage 2, measured first): a whole cascade "
       "build divided into N x N x N octants - each octant's dispatches loop only the records the "
       "gather put in it - instead of one. Exact by the order-independent merge. 1 = shipped." },
-    { "gi.rebuildCascade", -1.0, -1.0, 7.0,
+    { ArmId::GiRebuildCascade, -1.0, -1.0, 7.0,
       "A MEASURING DOOR (ENGINE-UPGRADE-U5 stage 2): while set to N, cascade N owes a whole rebuild "
       "every frame (an edit's, at its own placement) - what a measurement of a whole build's cost "
       "needs on a still scene. -1 = none." },
-    { "shadow.casterCull", 1.0, 0.0, 1.0,
+    { ArmId::ShadowCasterCull, 1.0, 0.0, 1.0,
       "THE CASTER CULL BY THE LIGHT'S OWN DEPTH (ENGINE-UPGRADE-U5 stage 4): 1 = shipped, a sun map's Atom "
       "casters are tested against the previous frame's depth pyramid of that map, the rejected tested again "
       "against this frame's once the map holds the survivors, and only the visible drawn - the map is the "
       "frustum-only map texel for texel. 0 = frustum only (the parity arm: the pyramids are still built)." },
-    { "shadow.casterPbsProbe", 0.0, 0.0, 1.0,
+    { ArmId::ShadowCasterPbsProbe, 0.0, 0.0, 1.0,
       "A MEASURING DOOR (ENGINE-UPGRADE-U5 stage 4): 1 = every sun map's stock (PBS) casters are tested "
       "against the map's final depth pyramid and counted (world.atomStatus casterPerMap: pbsInstances / "
       "pbsTriangles in the frustum, pbsVisible* the ones not wholly behind the map's depth). Nothing is "
       "drawn differently." },
-    { "gi.rebuildSettle", 1.0, 0.0, 1.0,
+    { ArmId::GiRebuildSettle, 1.0, 0.0, 1.0,
       "The rebuild settle (the chain's owed settle steps after a rebuild). 0 = off: "
       "gi.chain_converge's paired arm. Was JAHSHAKA_GI_NO_REBUILD_SETTLE (a per-frame read)." },
-    { "gi.fieldRays", 0.0, 0.0, 7.0,
+    { ArmId::GiFieldRays, 0.0, 0.0, 7.0,
       "The irradiance field's rays per depth texel at its next build (1-7; 0 = the shipped count). "
       "gi.field_thin_wall's noise arms. Was JAHSHAKA_GI_FIELD_RAYS (a per-build read)." },
-    { "gi.fieldSamples", 0.0, 0.0, 4096.0,
+    { ArmId::GiFieldSamples, 0.0, 0.0, 4096.0,
       "The irradiance field's sample target per texel at its next build (0 = the shipped "
       "kIfdTargetSamples). gi.field_thin_wall. Was JAHSHAKA_GI_FIELD_SAMPLES (a per-build read)." },
-    { "gi.fieldStatic", 0.0, 0.0, 1.0,
+    { ArmId::GiFieldStatic, 0.0, 0.0, 1.0,
       "The irradiance field's ray set NOT rotated per frame at its next build (the fixed-set arm). "
       "gi.field_thin_wall. Was JAHSHAKA_GI_FIELD_STATIC (a per-build read)." },
-    { "gi.fieldStopOff", 0.0, 0.0, 1.0,
+    { ArmId::GiFieldStopOff, 0.0, 0.0, 1.0,
       "The irradiance field's per-probe variance stop OFF at its next build: every probe "
       "integrates to the target (the oracle gi.field_variance_stop compares the stop with)." },
-    { "gi.refuseGeometry", 0.0, 0.0, 1.0,
+    { ArmId::GiRefuseGeometry, 0.0, 0.0, 1.0,
       "THE REFUSAL HOOK (a test door, gi.voxel_resident case 5): a voxel build runs with NO geometry "
       "source - the state of a device with no buffer device addresses - and must build an empty "
       "volume, not crash. Was JAH_VCT_REFUSE_GEOMETRY (a per-build read)." },
-    { "atom.discriminate", 0.0, 0.0, 2.0,
+    { ArmId::AtomDiscriminate, 0.0, 0.0, 2.0,
       "THE DECODE'S DISCRIMINATOR (a test door, ATOM-BLACK-FRAMES-1): 1 = a colour code per failed "
       "validity term instead of the discard, 2 = also the code chart. 0 = shipped. scale's decode "
       "rows. Was JAHSHAKA_ATOM_DISCRIMINATE (a per-pass read)." },
-    { "atom.hitWorldLights", 0.0, 0.0, 2.0,
+    { ArmId::AtomHitWorldLights, 0.0, 0.0, 2.0,
       "The ray-hit decode's light list: 0 = shipped (the world list where the hit has no cell), "
       "1 = off (the picture before the list), 2 = all (every hit the world list, no Forward+ cell). "
       "gi.hit_shade. Was JAHSHAKA_HIT_WORLD_LIGHTS (a per-pass read)." },
-    { "atom.hitVctSpecular", 1.0, 0.0, 1.0,
+    { ArmId::AtomHitVctSpecular, 1.0, 0.0, 1.0,
       "The VCT specular cone in the ray-hit decode. 0 = compiled out (vct_disable_specular). "
       "gi.hit_shade. Was JAHSHAKA_HIT_VCT_SPECULAR (a per-pass read)." },
-    { "gather.hitsReadback", 0.0, 0.0, 1.0,
+    { ArmId::GatherHitsReadback, 0.0, 0.0, 1.0,
       "THE GATHER-HITS READBACK (FAR-SUN-1, an instrument): every ray of every uniform probe records "
       "what answered it (the card, the voxels and which cascade, the sky, a decode record, a far one, "
       "a dropped one), the radiance it returned, its hit and the sun's visibility there - "
       "GatherStatus::rays, the verb world.gatherHits. One more ray per hit while on, and the view "
       "never holds its rest (a held view traces nothing). Nothing reads it but the readback." },
-    { "reflect.metalDecode", kReflectMetalDecodeRoughness, 0.0, 1.0,
+    { ArmId::ReflectMetalDecode, kReflectMetalDecodeRoughness, 0.0, 1.0,
       "THE METAL HIT'S ROUTE (REFLECT-FIX-1): a reflection ray from a reflector of perceptual "
       "roughness BELOW this value that hits a metal is decoded (its specular lobe, the pass' second-"
       "bounce cone); a glossier reflector takes the metal hit from the voxel store (it blurs it "
       "anyway). 0 = never decoded, 1 = always (the full-decode reference)." },
-    { "gi.hitDirect", 1.0, 0.0, 1.0,
+    { ArmId::GiHitDirect, 1.0, 0.0, 1.0,
       "THE HIT'S DIRECT LIGHT AT THE HIT (FAR-SUN-2, jah_rq_hit_direct.glsl): a voxel-answered gather or "
       "reflection hit sums every light's direct term at the hit (its material, its normal, its own shadow "
       "rays) plus its emissive and the store's bounce part. 0 = the measuring arm: the hit reads the store "
       "whole, the cell's light (the paired cost A/B, gi.far_sun_lamp's base)." },
-    { "gpuscene.wholeWalk", 0.0, 0.0, 1.0,
+    { ArmId::GpuWalkWhole, 0.0, 0.0, 1.0,
       "THE DIRTY SCAN'S WHOLE WALK (ENGINE-UPGRADE-2B stage 2, the measuring arm): 1 = every walk "
       "compares every slot's transform and recomputes every unmoved slot's flags word (the walk before "
       "the named walk; the paired cost A/B, scale.cpu_walks). 0 = shipped: the walk compares the slots "
       "the change set and the engine's seams named." },
-    { "gpuscene.walkParity", 0.0, 0.0, 1.0,
+    { ArmId::GpuWalkParity, 0.0, 0.0, 1.0,
       "THE NAMED WALK'S GUARD (ENGINE-UPGRADE-2B stage 2, engine.gpu_walk_parity): 1 = after every "
       "frame's compose, every slot's world transform and flags word is compared with what the table "
       "holds — what a whole walk would have staged and the named walk did not is a MISS "
       "(GpuSubstrateStatus::walkMissed). A test door: O(items) a frame while on." },
-    { "messages.refuse", 0.0, 0.0, 1.0,
+    { ArmId::MessagesRefuse, 0.0, 0.0, 1.0,
       "THE REFUSING MESSAGE (ENGINE-UPGRADE-U3 decision 44, host.error_door): 1 = every scene message a frame drains is "
       "refused unapplied, its refusal a completion and a refusal of the snapshot — the frame writes the engine's error "
       "sink every frame while the host's error pump drains its own door. A test door." },
-    { "interp.serial", 0.0, 0.0, 1.0,
+    { ArmId::InterpSerial, 0.0, 0.0, 1.0,
       "THE APPLY'S MEASURING ARM (ENGINE-UPGRADE-U3 stage 5, frame.interpolation_apply): 1 = the free frames' "
       "interpolation of the newest step's nodes runs on the frame's thread, never on the scene's pool." },
-    { "vr.fakeRuntimePace", 0.0, 0.0, 100.0,
+    { ArmId::FakeRuntimePace, 0.0, 0.0, 100.0,
       "A RUNTIME'S PACE WITHOUT A RUNTIME (ENGINE-UPGRADE-U3 decision 53, frame.runtime_pace): N > 0 = every free frame "
       "with no session waits for its next display time N ms after the last, as xrWaitFrame would, and counts as paced by "
       "the runtime (the render loop pads nothing after it). A test door: the one way to put a headset faster than the "
       "panel on a rig whose runtime (Monado's null compositor) runs at 20 Hz." },
-    { "view.fakePresentBlock", 0.0, 0.0, 100.0,
+    { ArmId::FakePresentBlock, 0.0, 0.0, 100.0,
       "A BLOCKING PRESENT WITHOUT A DISPLAY THAT BLOCKS (ENGINE-UPGRADE-U3 decision 65, editor.drag_latency): N > 0 = "
       "every free frame, after its publish at the record/swap split, blocks until N ms after its start, as a FIFO "
       "present would — the end-block shape of the render loop's order (the host's tick runs during the block). A test "
       "door." },
-    { "cards.sunGridParity", 0.0, 0.0, 1.0,
+    { ArmId::CardsSunGridParity, 0.0, 0.0, 1.0,
       "THE SUN-SPACE GRID'S GUARD (ENGINE-UPGRADE-U4 stage 2, gi.trace_sun_cost): 1 = every sun trace's three grid "
       "searches (the moved still casters, the movers' changed and current footprints) are repeated as the exhaustive "
       "search of every footprint against every landed card, and every card whose answer differs is a MISS "
       "(inspect::SceneEcho::traceSun().parityMisses). A test door: O(footprints x cards) a frame while on." },
-    { "gi.geomSigParity", 0.0, 0.0, 1.0,
+    { ArmId::GiGeomSigParity, 0.0, 0.0, 1.0,
       "THE INCREMENTAL GEOMETRY SIGNATURE'S GUARD (ENGINE-UPGRADE-U4 stage 3): 1 = after every signature pass (the "
       "written items' terms replaced) the whole order-free sum is recomputed over every GI item, and a difference is a "
       "MISS (inspect::SceneEcho::giPlan().sigMisses). A test door: O(items) a pass while on." },
-    { "gi.rootBoxParity", 0.0, 0.0, 1.0,
+    { ArmId::GiRootBoxParity, 0.0, 0.0, 1.0,
       "THE ROOT BOXES' GUARD (ENGINE-UPGRADE-U4 stage 3): 1 = the GI walk also keeps every moved item's own box, and "
       "every cascade mark is checked against the cascades those boxes reach — one the marks miss is a MISS "
       "(inspect::SceneEcho::giPlan().rootMisses; one box per moved subtree root must mark no cascade fewer), one marked "
       "that no item box reaches is counted as the union's extra. A test door." },
-    { "gpuscene.walkTiming", 0.0, 0.0, 1.0,
+    { ArmId::GpuWalkTiming, 0.0, 0.0, 1.0,
       "THE GPU SCENE WALK'S NOTIFY TIMER (ENGINE-UPGRADE-U4 stage 3): 1 = every observed notify of the compose is timed "
       "(inspect::SceneEcho::gpuWalk().notifyMicros); 0 = shipped: no clock read per notify." },
-    { "gpuscene.observersOff", 0.0, 0.0, 1.0,
+    { ArmId::GpuObserversOff, 0.0, 0.0, 1.0,
       "THE NOTIFY SHARE'S PAIRED ARM (ENGINE-UPGRADE-U4 stage 3, engine.gpuscene_compose): 1 = the compose stages its "
       "slots without telling the change feed's observers (the card feed, the ray tier's feed), so the compose's time "
       "with and without them is measured in one process. A test door: the feeds miss what changes while it is on." },
-    { "cards.nullMove", 0.0, 0.0, 1.0,
+    { ArmId::CardsNullMove, 0.0, 0.0, 1.0,
       "THE NON-FINITE SEARCH'S TEST DOOR (ENGINE-UPGRADE-U4 stage 3, gi.trace_sun_cost): 1 = every sun trace takes one "
       "more still-caster move whose old and new boxes are Ogre's BOX_NULL (no engine item can carry one: createMesh "
       "refuses an empty mesh), so the grid's unbounded and unplaceable paths run under the parity arm. A test door." },
-    { "gi.pccPlacementLights", 0.0, 0.0, 1.0,
+    { ArmId::GiPccPlacementLights, 0.0, 0.0, 1.0,
       "THE PLACEMENT'S GUARD (ENGINE-UPGRADE-U4 decision 14, gi.pcc_placement_lights): 1 = every staged probe placement "
       "stage (Scout, Finish) — run after the frame's scene graph — records the scene manager's light count before and "
       "after it and every placed probe's node offset from where it was set (inspect::SceneEcho::giPlan): the fork "
       "keeps the frame's light list and makes a synced probe's node current. 0 = shipped: nothing read." },
-    { "gpuscene.serialCompose", 0.0, 0.0, 1.0,
+    { ArmId::GpuSerialCompose, 0.0, 0.0, 1.0,
       "THE COMPOSE'S IDENTITY ARM (ENGINE-UPGRADE-U4 stage 4, engine.gpuscene_identity): 1 = the GPU scene's compose "
       "runs after the compare's barrier on the frame's thread instead of inside the workers' shares — the same rows, "
       "tails and replay order, so the two composes are compared byte for byte in one process. A test door." },
-    { "gpuscene.composeDigest", 0.0, 0.0, 1.0,
+    { ArmId::GpuComposeDigest, 0.0, 0.0, 1.0,
       "THE COMPOSE'S DIGEST (ENGINE-UPGRADE-U4 stage 4): 1 = every walk folds each composed slot (its index, its "
       "staged row, its tail) in replay order into inspect::SceneEcho::gpuWalk().composeDigest. 0 = shipped: nothing." },
-    { "gpuscene.throwInLane", 0.0, 0.0, 48.0,
+    { ArmId::GpuThrowInLane, 0.0, 0.0, 48.0,
       "THE COMPOSE'S THROW DOOR (ENGINE-UPGRADE-U4 decisions 18.3 + 22.4, engine.gpuscene_identity): 1-16 = share N-1 "
       "of the GPU scene's compose throws at its first composed slot before the stage, once per walk; 17-32 = share "
       "N-17 throws after its first stage (the row staged, not collected), once per walk; 33-48 = share N-33 throws "
       "every time it composes, lane and recompose. The share's error is recorded and it is redone from its start on "
       "the frame's thread after the barrier; a second throw gives up for the frame (its staged rows replayed, its "
       "other slots marked for the next compose). Every barrier still pairs. A test door; 0 = off." },
+    { ArmId::GatherJitter, 0.0, 0.0, 2.0,
+      "THE GATHER'S PROBE JITTER (GATHER-INTEGRATION-FACTOR, a measuring arm - ENGINE-UPGRADE-U5 decision 20): "
+      "0 = shipped (each cell's probe at its own jittered pixel), 1 = off (every probe at its cell's centre), "
+      "2 = one offset a frame for the whole grid, read by the integrate's bilinear (GatherTuning::jitterCommon). "
+      "Over the scene's own tuning (a tuning's jitterOff wins)." },
+    { ArmId::GatherFilterOff, 0.0, 0.0, 1.0,
+      "THE GATHER'S PROBE-SPACE FILTER OFF (GATHER-INTEGRATION-FACTOR, a measuring arm - decision 20): "
+      "1 = GatherTuning::filterOff for every scene." },
+    { ArmId::GatherIrradianceReadback, 0.0, 0.0, 1.0,
+      "THE GATHER'S E/PI TO THE HOST (an instrument): GatherTuning::readback for every scene - the verb "
+      "world.gatherIrradiance reads it. One image copy a frame while on." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");
@@ -1276,12 +1288,11 @@ constexpr bool armNameIs(const char *a, const char *b) {
     for (; *a && *a == *b; ++a, ++b) {}
     return *a == *b;
 }
-constexpr bool armTableInOrder() {
-    for (unsigned i = 0; i < unsigned(ArmId::Count); ++i)
-        if (!armNameIs(kArms[i].name, kArmNames[i])) return false;
-    return true;
-}
-static_assert(armTableInOrder(), "kArms is out of ArmId's order: a row names another arm than its enumerator (kArmNames)");
+static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count), "the arm table has a row per arm");
+#define JAH_ARM_ROW_CHECK(e, n) \
+    static_assert(kArms[unsigned(ArmId::e)].id == ArmId::e, "the arm table's row for " n " is out of place");
+JAH_ARM_LIST(JAH_ARM_ROW_CHECK)
+#undef JAH_ARM_ROW_CHECK
 }   // namespace
 
 ArmRegistry::ArmRegistry() {
@@ -1290,7 +1301,7 @@ ArmRegistry::ArmRegistry() {
 
 bool ArmRegistry::set(const std::string &name, double value, std::string &err) {
     for (unsigned i = 0; i < unsigned(ArmId::Count); ++i) {
-        if (name != kArms[i].name) continue;
+        if (name != kArmNames[i]) continue;
         if (!(value >= kArms[i].lo && value <= kArms[i].hi)) {   // a NaN fails too
             err = "arm " + name + ": " + std::to_string(value) + " is outside [" +
                   std::to_string(kArms[i].lo) + ", " + std::to_string(kArms[i].hi) + "]";
@@ -1307,7 +1318,7 @@ std::vector<ArmInfo> ArmRegistry::list() const {
     std::vector<ArmInfo> out;
     for (unsigned i = 0; i < unsigned(ArmId::Count); ++i) {
         ArmInfo a;
-        a.name = kArms[i].name;
+        a.name = kArmNames[i];
         a.value = mLive[i];
         a.defaultValue = kArms[i].def;
         a.minValue = kArms[i].lo;
