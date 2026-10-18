@@ -605,7 +605,6 @@ unsigned OgreScene::applyNodeRecords(const std::vector<NodeRecord> &records, uns
 bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSerial) {
     JAH_TRY {
         Node *rec = record(r.id);
-        ++mCountRecordLookups;
         if (!rec || !rec->node || !rec->document) return false;   // released before its frame
         Ogre::SceneNode *sn = rec->node;
         bool classOwed = false, reparented = false;
@@ -613,7 +612,6 @@ bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSeri
         // it off (detachFromBone names the parent then).
         if ((r.fields & NodeRecord::Parent) && !rec->boneTag) {
             Node *prec = r.parent ? record(r.parent) : nullptr;
-            if (r.parent) ++mCountRecordLookups;
             Ogre::SceneNode *p = (prec && prec->node) ? prec->node : mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
             if (sn->getParent() != p) {
                 if (sn->getParent()) sn->getParent()->removeChild(sn);
@@ -1128,6 +1126,7 @@ void OgreScene::applyNodeCasterBit(Node &n) {
 
 OgreScene::Node *OgreScene::registryNode(const Ogre::Node *sn) {
     if (!sn) return nullptr;
+    ++mCountNameLookups;   // every Ogre-id lookup (decision 18.6: the count lives in the lookup)
     return mNodeByOgreId.get(sn->getId());
 }
 
@@ -2653,28 +2652,21 @@ uint64_t cardColumnKey(int ix, int iz) {
 }
 }  // namespace
 
-void OgreScene::CardFeed::gpuSlotChanged(uint32_t slot, const GpuInstance *now) {
-    ++visits;
-    bool want = false;
-    uint64_t key = 0ull;
+bool OgreScene::CardFeed::measure(uint32_t slot, const GpuInstance *now, uint64_t &key) const {
+    key = 0ull;
     if (now && scene && slot < scene->mItemNodes.size() && scene->mItemNodes[slot] &&
         scene->cardEligible(*scene->mItemNodes[slot])) {
         const float cx = 0.5f * (now->boundsMin[0] + now->boundsMax[0]);
         const float cz = 0.5f * (now->boundsMin[2] + now->boundsMax[2]);
         if (std::isfinite(cx) && std::isfinite(cz)) {
-            want = true;
             key = cardColumnKey(int(std::floor(cx / kColumn)), int(std::floor(cz / kColumn)));
+            return true;
         }
     }
-    if (slot >= filed.size()) {
-        filed.resize(size_t(slot) + 1u, 0u);
-        columnOf.resize(size_t(slot) + 1u, 0ull);
-        at.resize(size_t(slot) + 1u, 0u);
-        changedAt.resize(size_t(slot) + 1u, 0ull);
-        centreOf.resize(size_t(slot) + 1u, Ogre::Vector3::ZERO);
-        cardsOf.resize(size_t(slot) + 1u, nullptr);
-        boundsOf.resize(size_t(slot) + 1u, nullptr);
-    }
+    return false;
+}
+
+void OgreScene::CardFeed::fileSlotFields(uint32_t slot, const GpuInstance *now, bool want) {
     changedAt[slot] = serial;
     if (want) {
         const Node &n = *scene->mItemNodes[slot];
@@ -2685,6 +2677,9 @@ void OgreScene::CardFeed::gpuSlotChanged(uint32_t slot, const GpuInstance *now) 
         cardsOf[slot] = scene->meshCardsFor(mesh);
         boundsOf[slot] = scene->lodBoundsFor(mesh);
     }
+}
+
+void OgreScene::CardFeed::fileColumn(uint32_t slot, bool want, uint64_t key) {
     if (filed[slot] && want && columnOf[slot] == key) return;
     if (filed[slot]) {
         // SWAP-REMOVE inside the column; the slot that moved into the hole is told.
@@ -2708,6 +2703,33 @@ void OgreScene::CardFeed::gpuSlotChanged(uint32_t slot, const GpuInstance *now) 
         columnOf[slot] = key;
         filed[slot] = 1u;
     }
+}
+
+void OgreScene::CardFeed::gpuSlotChanged(uint32_t slot, const GpuInstance *now) {
+    visits.fetch_add(1u, std::memory_order_relaxed);
+    uint64_t key = 0ull;
+    const bool want = measure(slot, now, key);
+    if (slot >= filed.size()) growTo(size_t(slot) + 1u);
+    fileSlotFields(slot, now, want);
+    fileColumn(slot, want, key);
+}
+
+bool OgreScene::CardFeed::gpuSlotChangedLane(uint32_t slot, const GpuInstance *now) {
+    // ON A WORKER: the slot's own fields only (this share is the slot's one writer; the arrays were pre-sized —
+    // a slot past them is the replay's, whole); the column map is read, never written, here.
+    if (slot >= filed.size()) return true;
+    visits.fetch_add(1u, std::memory_order_relaxed);
+    uint64_t key = 0ull;
+    const bool want = measure(slot, now, key);
+    fileSlotFields(slot, now, want);
+    return (filed[slot] != 0u) != want || (want && columnOf[slot] != key);   // a column move is owed
+}
+
+void OgreScene::CardFeed::gpuSlotChangedOwed(uint32_t slot, const GpuInstance *now) {
+    if (slot >= filed.size()) { gpuSlotChanged(slot, now); return; }
+    uint64_t key = 0ull;
+    const bool want = measure(slot, now, key);
+    fileColumn(slot, want, key);   // the fields were filed by the lane half
 }
 
 void OgreScene::CardFeed::query(const Ogre::Vector3 &centre, float radius, std::vector<uint32_t> &out) const {

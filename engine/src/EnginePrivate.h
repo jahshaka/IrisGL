@@ -1889,6 +1889,7 @@ enum class ArmId : unsigned {
     GiPccPlacementLights,///< "gi.pccPlacementLights" — every staged probe placement's light list and probe nodes checked (the guard, U4 decision 14)
     GpuSerialCompose,    ///< "gpuscene.serialCompose" — the GPU scene's compose after the barrier on the frame's thread (the identity row's other arm, U4 stage 4)
     GpuComposeDigest,    ///< "gpuscene.composeDigest" — the compose's digest of every staged row and tail (the identity row, U4 stage 4)
+    GpuThrowInLane,      ///< "gpuscene.throwInLane" — share N-1 of the GPU scene's compose throws once (a test door, U4 decision 18.3)
     Count
 };
 class ArmRegistry {
@@ -5021,15 +5022,20 @@ private:
         n.namedListed = false;
         mNamed.erase(std::remove(mNamed.begin(), mNamed.end(), &n), mNamed.end());
     }
-    /// THE LIST'S GUARD (gpuscene.walkParity's companion, decision 16.2): listed entries that are not a live record of
-    /// this scene — compared by address against the record map, never dereferenced. 0 is the law.
-    unsigned namedDanglingCount() const {
+    /// THE LIST'S GUARD (decisions 16.2 + 18.5): listed entries that are not a live record of this scene — compared by
+    /// address against the record map, never dereferenced — and, of the live ones, those without the listed flag or
+    /// listed more than once. 0, 0 and 0 is the law.
+    void namedListGuard(unsigned &dangling, unsigned &notFlagged, unsigned &duplicates) const {
         std::unordered_set<const Node *> live;
         live.reserve(mNodes.size());
         for (const auto &kv : mNodes) live.insert(&kv.second);
-        unsigned bad = 0u;
-        for (const Node *n : mNamed) if (!live.count(n)) ++bad;
-        return bad;
+        std::unordered_set<const Node *> seen;
+        dangling = notFlagged = duplicates = 0u;
+        for (const Node *n : mNamed) {
+            if (!live.count(n)) { ++dangling; continue; }
+            if (!n->namedListed) ++notFlagged;
+            if (!seen.insert(n).second) ++duplicates;
+        }
     }
     /// The consumers in `bits` owe their full pass (a nodeless write, an incomplete set, an overflow, a death).
     void owesNamesFull(uint8_t bits) const {
@@ -5838,8 +5844,9 @@ private:
     std::vector<InterpWrite> mInterpWrite;    ///< what one interpolate writes, each node once (scratch)
     std::vector<Ogre::Node *> mInterpStack;   ///< ...named to the scans through nameMovedSubtrees (scratch)
     Node *record(NodeId id) {
-        // ONE HASH LOOKUP (U4 stage 3), never the ordered map's descent: the per-record and per-name paths call this
-        // per node.
+        // ONE DIRECT-INDEX LOOKUP (U4 stage 3, decision 12.1), never the ordered map's descent: the per-record and
+        // per-name paths call this per node — and every call is counted (decision 18.6: the count lives in the lookup).
+        ++mCountRecordLookups;
         return id ? mNodeById.get(id) : nullptr;
     }
     /// The EFFECTIVE visibility `sn`'s children inherit from above it: the
@@ -6331,8 +6338,29 @@ private:
         /// moved is the same bits (measured: 0 of 250,000 differ once settled).
         std::vector<unsigned long long> changedAt;
         unsigned long long serial = 1ull;
-        unsigned long long visits = 0ull;
+        std::atomic<unsigned long long> visits{ 0ull };   ///< the slots told (lane halves count from the workers)
         void gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) override;
+        /// THE LANE HALF (U4 decision 17.1): the slot's own fields (its change stamp, centre, cards and LOD bounds —
+        /// one writer per slot, the arrays pre-sized) inside the compose task; the COLUMN move (a shared map's
+        /// erase and insert, ordered) only when the slot changed column, in the replay.
+        bool hasLaneHalf() const override { return true; }
+        void gpuSlotsReserve(uint32_t count) override { growTo(count); }
+        bool gpuSlotChangedLane(uint32_t slot, const detail::GpuInstance *now) override;
+        void gpuSlotChangedOwed(uint32_t slot, const detail::GpuInstance *now) override;
+        /// The slot's filing, measured (want, the column's key) — the one read both halves share.
+        bool measure(uint32_t slot, const detail::GpuInstance *now, uint64_t &key) const;
+        void fileSlotFields(uint32_t slot, const detail::GpuInstance *now, bool want);
+        void fileColumn(uint32_t slot, bool want, uint64_t key);
+        void growTo(size_t count) {
+            if (count <= filed.size()) return;
+            filed.resize(count, 0u);
+            columnOf.resize(count, 0ull);
+            at.resize(count, 0u);
+            changedAt.resize(count, 0ull);
+            centreOf.resize(count, Ogre::Vector3::ZERO);
+            cardsOf.resize(count, nullptr);
+            boundsOf.resize(count, nullptr);
+        }
         void gpuSceneReset() override {
             columns.clear();
             filed.clear();

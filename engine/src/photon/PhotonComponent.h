@@ -1264,6 +1264,10 @@ private:
     /// cascade re-placed before the mark has the members tested against it, so the union never marks a cascade no
     /// member reaches.
     std::vector<Ogre::Aabb> mGiDirtyMembers;
+    /// THE LIST EMPTIED, everywhere it is (decision 18.1): the boxes, the scene-wide flag, and the union's state and
+    /// members with them — a collapsed union never outlives its list.
+    void clearCascadeDirty();
+    void clearCascadeDirtyUnion();
     unsigned long long      mGiDirtyPlacementSerial = 0ull;
     /// Moves whenever a cascade's placement does (recentreCascade, its revert, a rebuilt or torn-down chain).
     unsigned long long      mGiPlacementSerial = 0ull;

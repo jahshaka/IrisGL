@@ -318,6 +318,15 @@ public:
     virtual ~GpuSceneObserver() = default;
     virtual void gpuSlotChanged(uint32_t slot, const GpuInstance *now) = 0;
     virtual void gpuSceneReset() = 0;
+    /// THE LANE HALF (ENGINE-UPGRADE-U4 decision 17.1): an observer whose per-slot work is mostly COMMUTATIVE writes
+    /// (a slot's own fields, a stamp, a counter) runs that part inside the compose task, on the worker that staged the
+    /// slot (gpuSlotChangedLane — its per-slot storage pre-sized by gpuSlotsReserve before the task), and says whether
+    /// the slot still owes it an ORDERED effect; the replay then calls gpuSlotChangedOwed for those, in slot order.
+    /// An observer without one is told whole in the replay (gpuSlotChanged), as before.
+    virtual bool hasLaneHalf() const { return false; }
+    virtual void gpuSlotsReserve(uint32_t /*count*/) {}
+    virtual bool gpuSlotChangedLane(uint32_t /*slot*/, const GpuInstance * /*now*/) { return true; }
+    virtual void gpuSlotChangedOwed(uint32_t slot, const GpuInstance *now) { gpuSlotChanged(slot, now); }
 };
 
 /// THE MATERIAL WORDS A SCENE'S ITEMS WEAR, kept by the change feed (ATOM-CPU-WALKS-1):
@@ -448,8 +457,50 @@ public:
     bool stageRow(uint32_t slot, const GpuInstance &in, uint64_t node);
     void noteStaged(uint32_t slot) {
         ++mWrites;
+        digestRow(slot);
         notify(slot, &mMirror[slot]);
     }
+    /// ...THE OBSERVERS SPLIT (decision 17.1): the lane halves, inside the task (returns the observers that still owe
+    /// the slot an ordered effect, one bit each), and the replay's half (the observers without a lane half, and the
+    /// owed ones), in slot order.
+    void reserveObserverSlots(uint32_t count) {
+        for (GpuSceneObserver *o : mObservers) if (o->hasLaneHalf()) o->gpuSlotsReserve(count);
+    }
+    uint32_t notifyLanes(uint32_t slot) {
+        if (mObservers.empty() || mObserversMuted) return 0u;
+        uint32_t owed = 0u;
+        for (size_t k = 0; k < mObservers.size() && k < 32u; ++k)
+            if (mObservers[k]->hasLaneHalf() && mObservers[k]->gpuSlotChangedLane(slot, &mMirror[slot])) owed |= 1u << k;
+        return owed;
+    }
+    void noteStagedSplit(uint32_t slot, uint32_t laneOwed) {
+        ++mWrites;
+        digestRow(slot);
+        ++mNotifies;
+        if (mObservers.empty() || mObserversMuted) { digestNotify(slot); return; }
+        for (size_t k = 0; k < mObservers.size(); ++k) {
+            GpuSceneObserver *o = mObservers[k];
+            const bool lane = o->hasLaneHalf();
+            if (lane && !(k < 32u && (laneOwed >> k) & 1u)) continue;   // its lane half answered the slot
+            const auto t0 = mNotifyTiming ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+            if (lane) o->gpuSlotChangedOwed(slot, &mMirror[slot]);
+            else o->gpuSlotChanged(slot, &mMirror[slot]);
+            if (mNotifyTiming) noteObserverTime(k, t0);
+        }
+        digestNotify(slot);
+    }
+    /// THE COMPOSE'S DIGEST (gpuscene.composeDigest, the identity row): while set, each staged slot's row (after its
+    /// stage) and each notify (the slot and the observers told) are folded — the parallel and the serial compose must
+    /// fold the same sequence. The scene folds the tails (OgreScene::applyComposeTail).
+    void setDigest(unsigned long long *d) { mDigest = d; }
+    void digestFold(const void *p, size_t bytes) {
+        if (!mDigest) return;
+        const unsigned char *b = static_cast<const unsigned char *>(p);
+        for (size_t j = 0; j < bytes; ++j) { *mDigest ^= b[j]; *mDigest *= 1099511628211ull; }
+    }
+    /// The observers' time per observer in the timed notifies (gpuscene.walkTiming), µs, in registration order.
+    const std::vector<double> &observerMicros() const { return mObserverMicros; }
+    bool observerHasLaneHalf(size_t k) const { return k < mObservers.size() && mObservers[k]->hasLaneHalf(); }
     /// THE SLOT'S NODE, its full 64-bit id (U3 stage 3 fix round, decision 36): carried beside the mirror and moved
     /// with it, so a host-side walk names a slot's node by index — the GPU row holds only Ogre's 32-bit key.
     uint64_t nodeOfSlot(uint32_t slot) const { return slot < mSlotNode.size() ? mSlotNode[slot] : 0u; }
@@ -772,17 +823,42 @@ private:
     std::vector<GpuSceneObserver *> mObservers;
     void notify(uint32_t slot, const GpuInstance *now) {
         ++mNotifies;
-        if (mObservers.empty() || mObserversMuted) return;
+        if (mObservers.empty() || mObserversMuted) { digestNotify(slot); return; }
         if (!mNotifyTiming) {
             for (GpuSceneObserver *o : mObservers) o->gpuSlotChanged(slot, now);
+            digestNotify(slot);
             return;
         }
-        // THE OBSERVERS' TIME, a running total — only while the arm gpuscene.walkTiming is latched (U4 stage 3,
-        // decision 11 d: two clock reads per notify are no production cost).
-        const auto t0 = std::chrono::steady_clock::now();
-        for (GpuSceneObserver *o : mObservers) o->gpuSlotChanged(slot, now);
-        mNotifyMicros += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+        // THE OBSERVERS' TIME, a running total and per observer — only while the arm gpuscene.walkTiming is latched
+        // (U4 stage 3, decision 11 d: two clock reads per notify are no production cost).
+        for (size_t k = 0; k < mObservers.size(); ++k) {
+            const auto t0 = std::chrono::steady_clock::now();
+            mObservers[k]->gpuSlotChanged(slot, now);
+            noteObserverTime(k, t0);
+        }
+        digestNotify(slot);
     }
+    void noteObserverTime(size_t k, std::chrono::steady_clock::time_point t0) {
+        const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+        mNotifyMicros += us;
+        if (mObserverMicros.size() < mObservers.size()) mObserverMicros.resize(mObservers.size(), 0.0);
+        mObserverMicros[k] += us;
+    }
+    void digestRow(uint32_t slot) {
+        if (!mDigest) return;
+        const unsigned char tag = 'R';
+        digestFold(&tag, 1u);
+        digestFold(&slot, sizeof(slot));
+        digestFold(&mMirror[slot], sizeof(GpuInstance));
+    }
+    void digestNotify(uint32_t slot) {
+        if (!mDigest) return;
+        const unsigned char tag[2] = { 'N', (unsigned char)(mObserversMuted ? 0u : mObservers.size()) };
+        digestFold(tag, 2u);
+        digestFold(&slot, sizeof(slot));
+    }
+    unsigned long long *mDigest = nullptr;
+    std::vector<double> mObserverMicros;
     unsigned long long mNotifies = 0ull;
     double mNotifyMicros = 0.0;
     bool mNotifyTiming = false, mObserversMuted = false;

@@ -61,9 +61,16 @@ public:
         /// the observers); `composeDigest` the last walk's digest while gpuscene.composeDigest is on.
         double             replayMicros = 0.0;
         unsigned long long composeDigest = 0;
+        /// (decision 18.3) shares recomposed on the frame's thread after a throw, ever; (18.4) the last walk's tails —
+        /// the Atom routes and the material queue pushes applied; (17.1) the observers' time in the timed notifies,
+        /// ever, µs — the ones with a lane half (their ordered halves; the card feed) and the rest (the ray feed).
+        unsigned long long shareRecomposes = 0;
+        unsigned           tailAtoms = 0, tailQueues = 0;
+        double             observerLaneMicros = 0.0, observerOtherMicros = 0.0;
         /// THE NAME LIST'S GUARD (U4 decision 16.2): listed entries that are not a live record (by address, never
         /// dereferenced) — 0 is the law — and the list's length.
         unsigned           namedDangling = 0, namedListed = 0, namedLive = 0;
+        unsigned           namedNotFlagged = 0, namedDuplicates = 0;   ///< (decision 18.5: both 0)
     };
     virtual GpuWalk gpuWalk() const = 0;
     /// THE SUN TRACE'S CPU (ENGINE-UPGRADE-U4 stage 1, premise P1): the last SurfaceCache::traceSun call — its whole

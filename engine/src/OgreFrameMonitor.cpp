@@ -1235,6 +1235,10 @@ const ArmDef kArms[] = {
     { "gpuscene.composeDigest", 0.0, 0.0, 1.0,
       "THE COMPOSE'S DIGEST (ENGINE-UPGRADE-U4 stage 4): 1 = every walk folds each composed slot (its index, its "
       "staged row, its tail) in replay order into inspect::SceneEcho::gpuWalk().composeDigest. 0 = shipped: nothing." },
+    { "gpuscene.throwInLane", 0.0, 0.0, 16.0,
+      "THE COMPOSE'S THROW DOOR (ENGINE-UPGRADE-U4 decision 18.3, engine.gpuscene_identity): N = share N-1 of the GPU "
+      "scene's compose throws at its first composed slot, once per walk — the share's error is recorded, it is "
+      "recomposed on the frame's thread after the barrier, and every barrier still pairs. A test door; 0 = off." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

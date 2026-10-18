@@ -28,6 +28,7 @@
 #include <Vao/OgreTexBufferPacked.h>
 
 #include <OgreLogManager.h>
+#include <stdexcept>
 #include <OgreHlmsPbsDatablock.h>
 #include <OgreRenderSystem.h>
 #include <OgreRoot.h>
@@ -984,6 +985,15 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
 }
 
 void OgreScene::applyComposeTail(const Node &n, const ComposeTail &tail) const {
+    if (tail.atom) ++mSubstrate.lastTailAtoms;
+    if (tail.queueMaterial) ++mSubstrate.lastTailQueues;
+    // (the identity row's digest: the tail, in the order it is applied — decision 18.4)
+    if (n.itemSlot != size_t(-1)) {
+        const unsigned char t[2] = { 'T', (unsigned char)((tail.atom ? 1u : 0u) | (tail.queueMaterial ? 2u : 0u)) };
+        const uint32_t slot = uint32_t(n.itemSlot);
+        mGpuScene.digestFold(t, 2u);
+        mGpuScene.digestFold(&slot, sizeof(slot));
+    }
     // THE SPLIT'S QUEUE follows the route: an Atom item lives in kAtomRenderQueue (which a view with an id pass
     // skips), everything else where its material files it (renderQueueFor).
     placeAtomQueue(n, tail.atom);
@@ -1341,29 +1351,52 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     // on the frame's thread (the identity row's other arm).
     const bool serialCompose = mEngine && mEngine->armRegistry().on(ArmId::GpuSerialCompose);
     const bool digest = mEngine && mEngine->armRegistry().on(ArmId::GpuComposeDigest);
+    // THE THROW DOOR (decision 18.3, gpuscene.throwInLane = share + 1): that share throws at its first composed slot,
+    // once per walk — the failed share is recomposed on the frame's thread after the barrier.
+    const int throwShare = mEngine ? int(mEngine->armRegistry().value(ArmId::GpuThrowInLane)) - 1 : -1;
+    std::atomic<bool> thrown{ false };
     sub.walkShares = unsigned(shares);
     const detail::GpuInstance *mirror = mGpuScene.mirrorData();
+    if (sub.shareComposed.size() != shares) sub.shareComposed.assign(shares, std::vector<GpuSceneSubstrate::Composed>());
+    if (sub.shareError.size() != shares) sub.shareError.assign(shares, std::string());
+    for (std::string &err : sub.shareError) err.clear();
+    // THE DIGEST (the identity row): the tails, the staged rows and the notifies, folded in the order they happen.
+    unsigned long long h = 1469598103934665603ull;
+    mGpuScene.setDigest(digest ? &h : nullptr);
+    struct DigestEnds { detail::GpuScene &g; ~DigestEnds() { g.setDigest(nullptr); } } digestEnds{ mGpuScene };
+    // The observers' lane halves write per-slot storage inside the task: sized before it (decision 17.1).
+    if (!serialCompose) mGpuScene.reserveObserverSlots(uint32_t(mItemNodes.size()));
+    // THE COMPOSE INSIDE THE COMPARE'S TASK (ENGINE-UPGRADE-U4 stage 4): share k composes and stages the rows of its
+    // own dirty slots the moment its compare ends (one barrier) — the lanes READ Ogre objects only and write only
+    // their own slots' rows (GpuScene::stageRow; the table pre-sized by setSlotCount) and the observers' lane halves
+    // (decision 17.1); what is not lane-local (the Atom route's render-queue edit, the material store's queue, the
+    // write count, the observers' ordered halves) is collected per share and REPLAYED after the barrier in the
+    // serial compose's order (share by share, ascending slot within a share). The arm gpuscene.serialCompose runs
+    // the OLD compose instead: after the barrier, per slot compose -> tail -> stage -> every observer, whole.
+    // ONE SHARE'S COMPOSE: its dirty slots, in its slot order — the row staged, the lane halves told, the tail
+    // collected. `resume`: a failed share recomposed after the barrier keeps what its lane already staged.
+    const auto composeShare = [&](size_t k, bool resume) {
+        std::vector<GpuSceneSubstrate::Composed> &done = sub.shareComposed[k];
+        if (!resume) done.clear();
+        detail::GpuInstance cand;
+        ComposeTail tail;
+        for (uint32_t i : sub.shareDirty[k]) {
+            if (mGpuScene.stagedThisUpdate(i)) continue;   // the marks staged it before the walk, or this lane did
+            if (int(k) == throwShare && !thrown.exchange(true)) throw std::runtime_error("gpuscene.throwInLane");
+            const Node &node = *mItemNodes[i];
+            Ogre::Node *pn = node.item->getParentNode();
+            const Ogre::Matrix4 &m = graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
+            composeGpuInstanceLane(node, m, graphIsCurrent, cand, tail);
+            if (mGpuScene.stageRow(i, cand, node.selfId))
+                done.push_back({ i, tail.atom, tail.queueMaterial, mGpuScene.notifyLanes(i) });
+        }
+    };
     // THE COMPARE, one contiguous share of the slots per thread: the slots whose world
     // transform or flags word differ from the mirror's. Read-only on everything it
     // touches (the items, their nodes' cached derived transforms, their datablocks, the
     // mirror, the stamps), so the SceneManager's workers and the frame's thread run it
     // side by side.
-    // ONE SHARE'S COMPOSE: its dirty slots, in its slot order — the row staged, the tail collected.
-    const auto composeShare = [&](size_t k) {
-        std::vector<GpuSceneSubstrate::Composed> &done = sub.shareComposed[k];
-        done.clear();
-        detail::GpuInstance cand;
-        ComposeTail tail;
-        for (uint32_t i : sub.shareDirty[k]) {
-            if (mGpuScene.stagedThisUpdate(i)) continue;   // the marks staged it before the walk (serial)
-            const Node &node = *mItemNodes[i];
-            Ogre::Node *pn = node.item->getParentNode();
-            const Ogre::Matrix4 &m = graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
-            composeGpuInstanceLane(node, m, graphIsCurrent, cand, tail);
-            if (mGpuScene.stageRow(i, cand, node.selfId)) done.push_back({ i, tail.atom, tail.queueMaterial });
-        }
-    };
-    auto share = [&](size_t k) {
+    const auto compareShare = [&](size_t k) {
         const size_t first = n * k / shares, last = n * (k + 1) / shares;
         std::vector<uint32_t> &dirty = sub.shareDirty[k];
         dirty.clear();
@@ -1396,18 +1429,45 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
             // A slot the marks already staged is skipped at the compose (the stamp).
             if (d) dirty.push_back(uint32_t(i));
         }
-        if (!serialCompose) composeShare(k);
+    };
+    // A SHARE THAT THROWS (decision 18.3) records its error and stops; nothing leaves the lane — a worker's throw
+    // would terminate the process, the frame thread's would skip the barrier.
+    auto share = [&](size_t k) {
+        try {
+            compareShare(k);
+            if (!serialCompose) composeShare(k, false);
+        } catch (const std::exception &ex) {
+            sub.shareError[k] = ex.what();
+        } catch (...) {
+            sub.shareError[k] = "unknown";
+        }
     };
     if (shares == 1u) {
         share(0u);
     } else {
         // THE WORKERS TAKE SHARES 0..workers-1, THE FRAME'S THREAD THE LAST: fired
-        // without blocking, the frame's thread runs its own share, then waits.
+        // without blocking, the frame's thread runs its own share, then waits — the wait by scope, whatever happens
+        // on the frame's thread between (decision 18.3: every barrier pairs).
         GpuSceneWalkTask<decltype(share)> task(share);
+        struct Barrier {
+            Ogre::SceneManager *sm;
+            ~Barrier() { sm->waitForPendingUserScalableTask(); }
+        } barrier{ mSceneMgr };
         mSceneMgr->executeUserScalableTask(&task, false);
         share(shares - 1u);
-        mSceneMgr->waitForPendingUserScalableTask();
     }
+    // A FAILED SHARE, RECOMPOSED ON THE FRAME'S THREAD (decision 18.3): its compare again, whole, and its compose
+    // from where its lane stopped (what the lane staged is kept, in order) — the frame's result is the serial one.
+    std::string failures;
+    for (size_t k = 0; k < shares; ++k) {
+        if (sub.shareError[k].empty()) continue;
+        if (!failures.empty()) failures += "; ";
+        failures += "share " + std::to_string(k) + ": " + sub.shareError[k];
+        compareShare(k);
+        if (!serialCompose) composeShare(k, true);
+        ++sub.shareRecomposes;
+    }
+    if (!failures.empty()) mError = "the GPU scene's compose: a worker share threw (" + failures + ") — recomposed on the frame's thread";
     sub.lastCompareMicros = usSince(tCompare);
     sub.lastWalkSlots = unsigned(n);
     const auto tCompose = WalkClock::now();
@@ -1418,30 +1478,33 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     // A walk on the graph's current transforms consumes the epoch (composeGpuScene), and with
     // it the names; a reader's walk before the graph (the warm-up) leaves them for the frame's.
     if (graphIsCurrent) { releaseNamed(kNameGpu); sub.namedFull = false; }
-    // THE SERIAL-COMPOSE ARM (the identity row's other half): the compose after the barrier, on the frame's thread,
-    // share by share — the order the lanes' replay keeps.
-    if (serialCompose)
-        for (size_t k = 0; k < shares; ++k) composeShare(k);
-    // THE REPLAY, IN THE SERIAL COMPOSE'S ORDER: each composed slot's tail (the Atom route's render-queue edit, the
-    // material store's queue), the write count and the change feed's observers, then the dirty list.
     const auto tReplay = WalkClock::now();
-    unsigned long long h = 1469598103934665603ull;
-    const auto fold = [&h](const void *p, size_t bytes) {
-        const unsigned char *b = static_cast<const unsigned char *>(p);
-        for (size_t j = 0; j < bytes; ++j) { h ^= b[j]; h *= 1099511628211ull; }
-    };
-    for (const std::vector<GpuSceneSubstrate::Composed> &done : sub.shareComposed) {
-        for (const GpuSceneSubstrate::Composed &c : done) {
-            const Node &node = *mItemNodes[c.slot];
-            applyComposeTail(node, ComposeTail{ c.atom, c.queueMaterial });
-            mGpuScene.noteStaged(c.slot);
-            sub.dirty.push_back(c.slot);
-            ++sub.aabbReads;
-            if (digest) {
-                fold(&c.slot, sizeof(c.slot));
-                fold(&mGpuScene.entry(c.slot), sizeof(detail::GpuInstance));
-                const unsigned char t = (c.atom ? 1u : 0u) | (c.queueMaterial ? 2u : 0u);
-                fold(&t, 1u);
+    sub.lastTailAtoms = sub.lastTailQueues = 0u;
+    if (serialCompose) {
+        // THE OLD COMPOSE, IN FULL (the identity row's other arm, decision 18.4): per slot in the walk's order, the
+        // whole composer (its tail applied), the stage, every observer told whole.
+        detail::GpuInstance cand;
+        for (size_t k = 0; k < shares; ++k)
+            for (uint32_t i : sub.shareDirty[k]) {
+                if (mGpuScene.stagedThisUpdate(i)) continue;
+                const Node &node = *mItemNodes[i];
+                Ogre::Node *pn = node.item->getParentNode();
+                const Ogre::Matrix4 &m = graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
+                composeGpuInstance(node, m, graphIsCurrent, cand);
+                mGpuScene.stage(i, cand, node.selfId);
+                sub.dirty.push_back(i);
+                ++sub.aabbReads;
+            }
+    } else {
+        // THE REPLAY, IN THE SERIAL COMPOSE'S ORDER: each composed slot's tail (the Atom route's render-queue edit,
+        // the material store's queue), the write count and the observers' ordered halves, then the dirty list.
+        for (const std::vector<GpuSceneSubstrate::Composed> &done : sub.shareComposed) {
+            for (const GpuSceneSubstrate::Composed &c : done) {
+                const Node &node = *mItemNodes[c.slot];
+                applyComposeTail(node, ComposeTail{ c.atom, c.queueMaterial });
+                mGpuScene.noteStagedSplit(c.slot, c.laneOwed);
+                sub.dirty.push_back(c.slot);
+                ++sub.aabbReads;
             }
         }
     }
@@ -1633,8 +1696,15 @@ inspect::SceneEcho::GpuWalk OgreScene::gpuWalk() const {
     w.nodeIdReach = mNodeById.reach();
     w.nodeIdPages = mNodeById.allocated();
     w.replayMicros = mSubstrate.lastReplayMicros;
+    w.shareRecomposes = mSubstrate.shareRecomposes;
+    w.tailAtoms = mSubstrate.lastTailAtoms;
+    w.tailQueues = mSubstrate.lastTailQueues;
+    {
+        const std::vector<double> &om = mGpuScene.observerMicros();
+        for (size_t k = 0; k < om.size(); ++k) (mGpuScene.observerHasLaneHalf(k) ? w.observerLaneMicros : w.observerOtherMicros) += om[k];
+    }
     w.composeDigest = mSubstrate.lastComposeDigest;
-    w.namedDangling = namedDanglingCount();
+    namedListGuard(w.namedDangling, w.namedNotFlagged, w.namedDuplicates);
     w.namedListed = unsigned(mNamed.size());
     w.namedLive = unsigned(mNamedLive);
     return w;

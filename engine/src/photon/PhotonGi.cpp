@@ -2652,10 +2652,23 @@ void PhotonComponent::applyGiInvalidation(bool restartStagedBuild) {
 // corner of a scene costs the cascades that reach that corner and nothing else.
 // A null box is "somewhere": the whole chain owes a rebuild, which the scheduler
 // still spends one per frame.
+void PhotonComponent::clearCascadeDirtyUnion() {
+    mGiDirtyCollapsed = false;
+    mGiDirtySumVolume = 0.0;
+    mGiDirtyReach = 0u;
+    mGiDirtyMembers.clear();
+}
+
+void PhotonComponent::clearCascadeDirty() {
+    mGiCascadeDirtyBoxes.clear();
+    mGiCascadeDirtyAll = false;
+    clearCascadeDirtyUnion();
+}
+
 void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box) {
     if (mVctCascades.empty()) return;          // no chain: nothing to describe
     if (mGiCascadeDirtyAll) return;            // already the strongest statement
-    if (!box) { mGiCascadeDirtyAll = true; mGiCascadeDirtyBoxes.clear(); return; }
+    if (!box) { clearCascadeDirty(); mGiCascadeDirtyAll = true; return; }
     // THE RUNNING UNION AND THE COLLAPSE (ENGINE-UPGRADE-U4 decision 12.2). The voxeliser's cost is the VOLUME a box
     // covers, so the list of boxes earns its keep only while the union of what it holds is much larger than their
     // sum: once union.volume <= 2 x sum(list volumes) the list IS the union (one box), and every further box this
@@ -2680,17 +2693,19 @@ void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box) {
     };
     const unsigned reach = reachOf(*box);
     if (mGiCascadeDirtyBoxes.empty()) {
-        mGiDirtyCollapsed = false; mGiDirtySumVolume = 0.0; mGiDirtyReach = 0u;
-        mGiDirtyMembers.clear();
+        clearCascadeDirtyUnion();
         mGiDirtyPlacementSerial = mGiPlacementSerial;
     }
+    // EVERY NOTED BOX IS A MEMBER, as noted (decision 18.2): never a merged box, never the union — the mark's
+    // re-check against a re-placed cascade tests exactly what was noted, on every path (the stand-apart, a
+    // re-collapse, the cap's merges).
+    mGiDirtyMembers.push_back(*box);
     if (mGiDirtyCollapsed) {
         Ogre::Aabb merged = mGiCascadeDirtyBoxes.front();
         merged.merge(*box);
         if (reachOf(merged) == (mGiDirtyReach | reach)) {
             mGiCascadeDirtyBoxes.front() = merged;
             mGiDirtyReach |= reach;
-            mGiDirtyMembers.push_back(*box);
             return;
         }
         // The union would reach a cascade no member does: this box stands apart, and the running union restarts
@@ -2705,7 +2720,6 @@ void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box) {
     const auto collapseIfDense = [&]() {
         if (mGiCascadeDirtyBoxes.size() >= 2u && volumeOf(mGiDirtyUnion) <= 2.0 * mGiDirtySumVolume &&
             reachOf(mGiDirtyUnion) == mGiDirtyReach) {
-            mGiDirtyMembers.assign(mGiCascadeDirtyBoxes.begin(), mGiCascadeDirtyBoxes.end());   // what the union stands for
             mGiCascadeDirtyBoxes.assign(1u, mGiDirtyUnion);
             mGiDirtySumVolume = volumeOf(mGiDirtyUnion);
             mGiDirtyCollapsed = true;
@@ -2792,7 +2806,9 @@ size_t PhotonComponent::markDirtyCascadesPending(GiStaleReason why) {
     size_t marked = 0;
     // THE COLLAPSED UNION'S REACH, RE-CHECKED HERE (decision 16.4): it was taken equal to its members' against the
     // cascades as they stood at the last note; a cascade re-placed since then is tested against the members.
-    const bool replaced = mGiDirtyCollapsed && mGiDirtyPlacementSerial != mGiPlacementSerial;
+    // (a cleared list holds no union: the collapsed state goes with it — decision 18.1)
+    const bool replaced = mGiDirtyCollapsed && !mGiCascadeDirtyBoxes.empty() &&
+                          mGiDirtyPlacementSerial != mGiPlacementSerial;
     const std::vector<Ogre::Aabb> &boxes = replaced ? mGiDirtyMembers : mGiCascadeDirtyBoxes;
     for (VctCascade &c : mVctCascades) {
         // ONLY THE BOX TEST DECIDES (round-2 F2): a structural edit in one
@@ -2814,9 +2830,7 @@ size_t PhotonComponent::markDirtyCascadesPending(GiStaleReason why) {
         c.editLast = frame;
         ++marked;
     }
-    mGiCascadeDirtyBoxes.clear();
-    mGiDirtyMembers.clear();
-    mGiCascadeDirtyAll = false;
+    clearCascadeDirty();
     return marked;
 }
 
@@ -4481,8 +4495,7 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
     mGiBuiltMaterialGeneration = mGiMaterialGeneration;
     // A FROM-SCRATCH CHAIN OWES NOTHING: every cascade was just built from the
     // live scene, so whatever the dirty path had recorded is answered (G1).
-    mGiCascadeDirtyBoxes.clear();
-    mGiCascadeDirtyAll = false;
+    clearCascadeDirty();   // the list, the union's state and its members (decision 18.1)
     return itemCount;
 }
 
@@ -6585,8 +6598,7 @@ void PhotonComponent::teardownVct() {
     // dirty path recorded is answered by the build that follows, and carrying it
     // across would mark every cascade of the NEXT chain pending on its first
     // frame.
-    mGiCascadeDirtyBoxes.clear();
-    mGiCascadeDirtyAll = false;
+    clearCascadeDirty();   // the list, the union's state and its members (decision 18.1)
     // ...AND IT OWES NO SETTLE EITHER (LAMPREST-3 fix round item 4). The debt is
     // a count of injections into cascades that are about to stop existing; a
     // tier change after a walk would otherwise pay it into the FRESH chain,

@@ -495,7 +495,6 @@ bool OgreScene::nameMovedSubtrees(std::vector<Ogre::Node *> &stack, uint32_t roo
     while (!stack.empty()) {
         Ogre::Node *on = stack.back();
         stack.pop_back();
-        ++mCountNameLookups;
         if (Node *rec = registryNode(on)) {
             if (rec->nameSeen == mNameSeenEpoch) continue;
             rec->nameSeen = mNameSeenEpoch;

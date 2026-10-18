@@ -127,8 +127,14 @@ public:
     /// ...and what each share composed (U4 stage 4: the compose inside the compare's task): the slots it staged, in
     /// its slot order, with the serial tail each owes (the Atom route, the material queue) — replayed after the
     /// barrier, share by share, the serial compose's order.
-    struct Composed { uint32_t slot; bool atom; bool queueMaterial; };
+    struct Composed { uint32_t slot; bool atom; bool queueMaterial; uint32_t laneOwed; };   ///< (laneOwed: decision 17.1)
     std::vector<std::vector<Composed>> shareComposed;
+    /// A share that threw (decision 18.3): its error, and the shares recomposed on the frame's thread, ever.
+    std::vector<std::string> shareError;
+    unsigned long long shareRecomposes = 0ull;
+    /// The last walk's tails, counted where they are applied (the identity row reads them: the Atom routes and the
+    /// material queue pushes the compose exercised).
+    unsigned lastTailAtoms = 0u, lastTailQueues = 0u;
     /// THE COMPOSE'S DIGEST (the identity row, gpuscene.serialCompose): FNV-1a over each composed slot in replay
     /// order — its index, its staged row's bytes, its tail — so the parallel and the serial compose are compared
     /// byte for byte in one process. Computed only while the arm gpuscene.composeDigest is latched.
