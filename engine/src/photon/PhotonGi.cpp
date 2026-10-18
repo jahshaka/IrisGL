@@ -2679,13 +2679,18 @@ void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box) {
         return m;
     };
     const unsigned reach = reachOf(*box);
-    if (mGiCascadeDirtyBoxes.empty()) { mGiDirtyCollapsed = false; mGiDirtySumVolume = 0.0; mGiDirtyReach = 0u; }
+    if (mGiCascadeDirtyBoxes.empty()) {
+        mGiDirtyCollapsed = false; mGiDirtySumVolume = 0.0; mGiDirtyReach = 0u;
+        mGiDirtyMembers.clear();
+        mGiDirtyPlacementSerial = mGiPlacementSerial;
+    }
     if (mGiDirtyCollapsed) {
         Ogre::Aabb merged = mGiCascadeDirtyBoxes.front();
         merged.merge(*box);
         if (reachOf(merged) == (mGiDirtyReach | reach)) {
             mGiCascadeDirtyBoxes.front() = merged;
             mGiDirtyReach |= reach;
+            mGiDirtyMembers.push_back(*box);
             return;
         }
         // The union would reach a cascade no member does: this box stands apart, and the running union restarts
@@ -2700,6 +2705,7 @@ void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box) {
     const auto collapseIfDense = [&]() {
         if (mGiCascadeDirtyBoxes.size() >= 2u && volumeOf(mGiDirtyUnion) <= 2.0 * mGiDirtySumVolume &&
             reachOf(mGiDirtyUnion) == mGiDirtyReach) {
+            mGiDirtyMembers.assign(mGiCascadeDirtyBoxes.begin(), mGiCascadeDirtyBoxes.end());   // what the union stands for
             mGiCascadeDirtyBoxes.assign(1u, mGiDirtyUnion);
             mGiDirtySumVolume = volumeOf(mGiDirtyUnion);
             mGiDirtyCollapsed = true;
@@ -2784,6 +2790,10 @@ void PhotonComponent::noteGiDatablockDied(Ogre::HlmsDatablock *dying) {
 // Returns how many were marked; clears the region either way.
 size_t PhotonComponent::markDirtyCascadesPending(GiStaleReason why) {
     size_t marked = 0;
+    // THE COLLAPSED UNION'S REACH, RE-CHECKED HERE (decision 16.4): it was taken equal to its members' against the
+    // cascades as they stood at the last note; a cascade re-placed since then is tested against the members.
+    const bool replaced = mGiDirtyCollapsed && mGiDirtyPlacementSerial != mGiPlacementSerial;
+    const std::vector<Ogre::Aabb> &boxes = replaced ? mGiDirtyMembers : mGiCascadeDirtyBoxes;
     for (VctCascade &c : mVctCascades) {
         // ONLY THE BOX TEST DECIDES (round-2 F2): a structural edit in one
         // corner, or a light REMOVAL that moved no geometry, must not mark the
@@ -2792,7 +2802,7 @@ size_t PhotonComponent::markDirtyCascadesPending(GiStaleReason why) {
         bool hit = mGiCascadeDirtyAll;
         if (!hit) {
             const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
-            for (const Ogre::Aabb &d : mGiCascadeDirtyBoxes)
+            for (const Ogre::Aabb &d : boxes)
                 if (box.intersects(d)) { hit = true; break; }
         }
         if (!hit) continue;
@@ -2805,6 +2815,7 @@ size_t PhotonComponent::markDirtyCascadesPending(GiStaleReason why) {
         ++marked;
     }
     mGiCascadeDirtyBoxes.clear();
+    mGiDirtyMembers.clear();
     mGiCascadeDirtyAll = false;
     return marked;
 }
@@ -3181,7 +3192,17 @@ bool PhotonComponent::stepStagedGiBuild() {
                          mGiCachesDirty = true, true));
 }
 
-void PhotonComponent::notePccPlacement(size_t lightsBefore) {
+void PhotonComponent::noteProbeCollection() {
+    if (!mEngine || !mEngine->armRegistry().on(ArmId::GiPccPlacementLights) || !mSceneMgr) return;
+    ++mPlanLog.pccCollections;
+    mPlanLog.pccCollectLights = unsigned(mSceneMgr->getGlobalLightList().lights.size());
+}
+
+PhotonComponent::PlacementNote::PlacementNote(PhotonComponent &pc, const Ogre::ParallaxCorrectedCubemapAuto *p)
+    : c(pc), pcc(p), on(pc.mEngine && pc.mEngine->armRegistry().on(ArmId::GiPccPlacementLights)),
+      before(pc.mSceneMgr ? pc.mSceneMgr->getGlobalLightList().lights.size() : 0u) {}
+
+void PhotonComponent::notePccPlacement(size_t lightsBefore, const Ogre::ParallaxCorrectedCubemapAuto *pcc) {
     // What a frame that placed probes AFTER its updateSceneGraph draws with: the light list the scene graph built (a
     // placement's updateAllDirtyProbes leaves it as it found it — fork) and every placed probe's node where it was
     // set (CubemapProbe::syncInternalProbe makes it current at once — fork). Root-parented nodes: derived = local.
@@ -3192,8 +3213,9 @@ void PhotonComponent::notePccPlacement(size_t lightsBefore) {
     if (after != lightsBefore) ++l.pccLightChanges;
     l.pccLightsBefore = unsigned(lightsBefore);
     l.pccLightsAfter = unsigned(after);
-    if (!mPcc) return;
-    for (const Ogre::CubemapProbe *probe : mPcc->getProbes()) {
+    if (!pcc) pcc = mPcc;
+    if (!pcc) return;
+    for (const Ogre::CubemapProbe *probe : pcc->getProbes()) {
         const Ogre::SceneNode *node = probe ? probe->getInternalCubemapProbeSceneNode() : nullptr;
         if (!node) continue;
         ++l.pccProbes;
@@ -4045,6 +4067,7 @@ bool PhotonComponent::rebuildVct() {
     }
 
     ++mGiRebuilds;
+    ++mGiPlacementSerial;   // the chain is placed anew (noteGiCascadeDirty's reach premise)
     // THE MONITOR'S GI EVENT (§4.7 / §4.8). A rebuild is the single most
     // expensive thing this engine does on the UI thread — measured in seconds
     // on a page return — so it is timed and tagged with the stale reason that
@@ -4466,6 +4489,7 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
 // Re-centres one cascade's region on the cell lattice around `camPos` and
 // records the camera it was placed for. Does NOT voxelise.
 void PhotonComponent::recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos) {
+    ++mGiPlacementSerial;
     const float cell = c.cell();
     c.latticeX = jahQuantAxis(camPos.x, cell);
     c.latticeY = jahQuantAxis(camPos.y, cell);
@@ -4959,6 +4983,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             if (!placementCommitted) {
                 c.latticeX = lx; c.latticeY = ly; c.latticeZ = lz;
                 c.centre = prevCentre; c.builtCam = prevCam; c.jumped = wasJumped;
+                ++mGiPlacementSerial;
                 if (c.voxelizer)
                     c.voxelizer->setRegionToVoxelize(
                         Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)));
@@ -5173,6 +5198,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
 // here too and every one of them must go — lighting before voxeliser, as
 // always. Returns 0 so it can be the value of a JAH_CATCH.
 size_t PhotonComponent::abandonCascadeChain() {
+    ++mGiPlacementSerial;
     for (size_t i = mVctCascades.size(); i--; ) {
         delete mVctCascades[i].lighting;  mVctCascades[i].lighting = nullptr;
         delete mVctCascades[i].voxelizer; mVctCascades[i].voxelizer = nullptr;
@@ -5182,6 +5208,7 @@ size_t PhotonComponent::abandonCascadeChain() {
 }
 
 void PhotonComponent::teardownExtraCascades() {
+    ++mGiPlacementSerial;
     // Cascades 1..N-1 only: [0] is mVctVoxelizer/mVctLighting and belongs to
     // teardownVct, which deletes it in the order the arm requires (lighting
     // before voxeliser, both after the HlmsPbs unbind). The head's
@@ -5274,13 +5301,6 @@ double PhotonComponent::pccPhaseSplit() {
 // knobs the other two stages read. 69-84 ms measured. Leaves mPccStageOk
 // false when the grid cannot be built at all — this stage's only refusal.
 void PhotonComponent::buildPccScout(const Ogre::Aabb &litVolume) {
-    // THE PLACEMENT'S GUARD (gi.pccPlacementLights, U4 decision 14): the light count before this stage, read back
-    // after it — staged or whole, wherever in the frame it runs.
-    struct PlacementNote {
-        PhotonComponent *c; bool on; size_t before;
-        ~PlacementNote() { if (on) c->notePccPlacement(before); }
-    } placementNote{ this, mEngine && mEngine->armRegistry().on(ArmId::GiPccPlacementLights),
-                     mSceneMgr ? mSceneMgr->getGlobalLightList().lights.size() : 0u };
     mPccStageOk = false;
     ++mProbePlacements;
     mGiStagedVolume = litVolume;
@@ -5430,6 +5450,7 @@ void PhotonComponent::buildPccScout(const Ogre::Aabb &litVolume) {
             cm->getWorkspaceDefinition("JahshakaPccProbeWorkspace"));
         Ogre::PccPerPixelGridPlacement scout;
         scout.setParallaxCorrectedCubemapAuto(&scoutPcc);
+        PlacementNote placementNote(*this, &scoutPcc);   // the guard over the Scout's own PCC (decision 16.3)
         Ogre::uint32 one[3] = { 1u, 1u, 1u };
         scout.setNumProbes(one);
         scout.setFullRegion(aabb);
@@ -5530,6 +5551,7 @@ void PhotonComponent::buildPccScout(const Ogre::Aabb &litVolume) {
 // PccPerPixelGridPlacement over every candidate at the scout resolution, then
 // the per-probe keep/drop. 186-316 ms measured, the largest single stage.
 void PhotonComponent::buildPccFit() {
+    PlacementNote placementNote(*this, nullptr);   // the guard (gi.pccPlacementLights): the Fit's buildStart update
     if (!mPccStageOk) return;
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     const Ogre::Aabb aabb = mGiStagedVolume;
@@ -5827,13 +5849,7 @@ void PhotonComponent::buildPccFit() {
 // shapes clamped, the grid re-created at the real resolution, and one closing
 // capture each. 288 ms measured on a 32-probe grid at 512 px.
 void PhotonComponent::buildPccFinish() {
-    // THE PLACEMENT'S GUARD (gi.pccPlacementLights, U4 decision 14): the light count before this stage, read back
-    // after it — staged or whole, wherever in the frame it runs.
-    struct PlacementNote {
-        PhotonComponent *c; bool on; size_t before;
-        ~PlacementNote() { if (on) c->notePccPlacement(before); }
-    } placementNote{ this, mEngine && mEngine->armRegistry().on(ArmId::GiPccPlacementLights),
-                     mSceneMgr ? mSceneMgr->getGlobalLightList().lights.size() : 0u };
+    PlacementNote placementNote(*this, nullptr);   // the guard (gi.pccPlacementLights): the Finish's update
     if (!mPccStageOk || !mPcc) return;
     const Ogre::Aabb region = mGiProbeRegion;
     const Ogre::uint32 probeRes = mPccProbeRes;
@@ -6705,6 +6721,7 @@ void PhotonComponent::recreateGiAfterShadowRebuild() {
             if (mGi.updateBudget <= 0) {
                 for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->mDirty = true;
                 for (ProbeSlot &sl : mProbeSlots) sl.sweepPending = false;
+                PlacementNote placementNote(*this, nullptr);   // the guard (gi.pccPlacementLights)
                 mPcc->updateAllDirtyProbes();
                 mPlacementCapturesThisFrame += int(mPcc->getProbes().size());
             }

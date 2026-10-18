@@ -886,9 +886,27 @@ private:
     /// Spends ONE stage of a staged arm build. Returns true when the build is
     /// finished (the stage machine is back to Idle).
     bool stepStagedGiBuild();
-    /// The placement guard's reading after a probe stage (gi.pccPlacementLights): `lightsBefore` = the scene
-    /// manager's light count when the stage began.
-    void notePccPlacement(size_t lightsBefore);
+    /// The placement guard's reading after a probe update (gi.pccPlacementLights): `lightsBefore` = the scene
+    /// manager's light count when the update began; `pcc` = the placement's own PCC (the Scout's temporary one), or
+    /// null for the scene's (mPcc as it stands when the update ends).
+    void notePccPlacement(size_t lightsBefore, const Ogre::ParallaxCorrectedCubemapAuto *pcc);
+public:
+    /// ...and after the frame's dirty-probe collection (decision 16.1): the light list's count, kept while the arm is
+    /// on — a static probe's recapture culls lights through its own camera, so the list then holds its lamps too.
+    void noteProbeCollection();
+private:
+    /// ...over ONE probe-update site (every updateAllDirtyProbes this component causes: the Scout, the Fit, the
+    /// Finish, the re-capture after a shadow rebuild — decision 16.3), by scope.
+    struct PlacementNote {
+        PhotonComponent &c;
+        const Ogre::ParallaxCorrectedCubemapAuto *pcc;
+        bool on;
+        size_t before;
+        PlacementNote(PhotonComponent &pc, const Ogre::ParallaxCorrectedCubemapAuto *p);
+        ~PlacementNote() { if (on) c.notePccPlacement(before, pcc); }
+        PlacementNote(const PlacementNote &) = delete;
+        PlacementNote &operator=(const PlacementNote &) = delete;
+    };
     /// The probe grid's three stages. Each is `buildPcc`'s corresponding block,
     /// verbatim; `buildPcc` itself is the three of them in a row.
     void buildPccScout(const Ogre::Aabb &volume);
@@ -1241,6 +1259,14 @@ private:
     double     mGiDirtySumVolume = 0.0;
     bool       mGiDirtyCollapsed = false;
     unsigned   mGiDirtyReach = 0u;   ///< the OR of the list's members' cascade reaches (the collapse's guard)
+    /// ...the reach's premise, kept for the mark (decision 16.4): the boxes the collapsed union stands for (the list
+    /// at the collapse, then every box merged into it), and the cascades' placement serial when the list began — a
+    /// cascade re-placed before the mark has the members tested against it, so the union never marks a cascade no
+    /// member reaches.
+    std::vector<Ogre::Aabb> mGiDirtyMembers;
+    unsigned long long      mGiDirtyPlacementSerial = 0ull;
+    /// Moves whenever a cascade's placement does (recentreCascade, its revert, a rebuilt or torn-down chain).
+    unsigned long long      mGiPlacementSerial = 0ull;
     bool mGiCascadeDirtyAll = false;
 public:
     /// THE PLAN'S LOG (ENGINE-UPGRADE-U4 stage 3; inspect::SceneEcho::giPlan): the last planFrame's CPU, the boxes its
@@ -1262,6 +1288,8 @@ public:
         /// placed probe's derived node position from the position it was set to.
         unsigned long long pccStages = 0ull, pccStagesLit = 0ull, pccLightChanges = 0ull;   ///< (Lit: a list on entry)
         unsigned pccLightsBefore = 0u, pccLightsAfter = 0u, pccProbes = 0u;
+        unsigned long long pccCollections = 0ull;   ///< collections read (the arm on)
+        unsigned pccCollectLights = 0u;             ///< the light list's count after the last one
         float pccProbeOffsetMax = 0.0f;
     };
     const PlanLog &planLog() const { return mPlanLog; }

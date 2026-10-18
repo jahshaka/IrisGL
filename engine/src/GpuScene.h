@@ -440,6 +440,16 @@ public:
     /// the motion of anything that moved in the same frame. The second call is
     /// dropped (`mStagedAt`).
     void stage(uint32_t slot, const GpuInstance &in, uint64_t node);
+    /// ...IN TWO HALVES, for a compose that runs on the SceneManager's workers (ENGINE-UPGRADE-U4 stage 4): `stageRow`
+    /// is the lane-local half — the row, prevWorld from the mirror's own row, the stamps, the slot's node; each slot is
+    /// written by exactly one lane and the table is pre-sized (no growth: a slot past the capacity is refused, false) —
+    /// and `noteStaged` the serial half, replayed in slot order after the lanes: the write count and the change feed's
+    /// observers (neither thread-safe). stage() = stageRow + noteStaged.
+    bool stageRow(uint32_t slot, const GpuInstance &in, uint64_t node);
+    void noteStaged(uint32_t slot) {
+        ++mWrites;
+        notify(slot, &mMirror[slot]);
+    }
     /// THE SLOT'S NODE, its full 64-bit id (U3 stage 3 fix round, decision 36): carried beside the mirror and moved
     /// with it, so a host-side walk names a slot's node by index — the GPU row holds only Ogre's 32-bit key.
     uint64_t nodeOfSlot(uint32_t slot) const { return slot < mSlotNode.size() ? mSlotNode[slot] : 0u; }

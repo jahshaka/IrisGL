@@ -1887,6 +1887,8 @@ enum class ArmId : unsigned {
     GpuObserversOff,     ///< "gpuscene.observersOff" — the change feed's observers are not told (the paired arm of the notify share; a test door)
     CardsNullMove,       ///< "cards.nullMove" — the sun trace takes one more still-caster move with a NULL box (the non-finite search's test door, U4 stage 3)
     GiPccPlacementLights,///< "gi.pccPlacementLights" — every staged probe placement's light list and probe nodes checked (the guard, U4 decision 14)
+    GpuSerialCompose,    ///< "gpuscene.serialCompose" — the GPU scene's compose after the barrier on the frame's thread (the identity row's other arm, U4 stage 4)
+    GpuComposeDigest,    ///< "gpuscene.composeDigest" — the compose's digest of every staged row and tail (the identity row, U4 stage 4)
     Count
 };
 class ArmRegistry {
@@ -4719,6 +4721,9 @@ private:
         /// take, however many seams fire for it (attachMesh fired three or four).
         /// THE ONE NAME LIST's bits this record is owed by (OgreScene::nameFor; U4 decision 12.1 ii).
         mutable uint8_t  namedMask = 0;
+        /// ...and whether it is ON the list (a record whose bits were all taken stays listed until the list compacts:
+        /// the death erases a LISTED record whatever its mask, and a listed record is never pushed twice — decision 16.2).
+        mutable bool     namedListed = false;
         /// THE NAMING PASS AND THE ROOT (U4 stage 3): the pass this node was last named in (each node once a pass),
         /// and the moved subtree root's GI box its walk folds into — valid while giRootEpoch is the scene's.
         uint32_t         nameSeen = 0, giRootEpoch = 0, giRootSlot = 0xFFFFFFFFu;
@@ -4954,11 +4959,12 @@ private:
     void nameFor(Node &n, uint8_t bits) const {
         bits = uint8_t(bits & ~namesFullMask() & ~n.namedMask);
         if (!bits) return;
-        if (!n.namedMask) {
+        if (!n.namedListed) {
             if (mNamed.size() >= mItemNodes.size() + mDecalNodes.size()) { owesNamesFull(kNameAll); return; }
             mNamed.push_back(&n);
-            ++mNamedLive;
+            n.namedListed = true;
         }
+        if (!n.namedMask) ++mNamedLive;
         n.namedMask = uint8_t(n.namedMask | bits);
         for (unsigned b = 0; b < 4u; ++b) if (bits & (1u << b)) ++mNamedCount[b];
     }
@@ -4994,18 +5000,36 @@ private:
     /// Emptied when nobody owes anything (the common case), else compacted once half the list is owed by nobody —
     /// the live count is kept, never counted.
     void compactNamed() const {
-        if (!mNamedLive) { mNamed.clear(); return; }
+        if (!mNamedLive) {
+            for (Node *n : mNamed) n->namedListed = false;
+            mNamed.clear();
+            return;
+        }
         if (mNamedLive * 2u > mNamed.size()) return;
-        mNamed.erase(std::remove_if(mNamed.begin(), mNamed.end(), [](const Node *n) { return n->namedMask == 0u; }),
+        mNamed.erase(std::remove_if(mNamed.begin(), mNamed.end(),
+                                    [](Node *n) { return n->namedMask == 0u ? (n->namedListed = false, true) : false; }),
                      mNamed.end());
     }
-    /// A RECORD DIES: it leaves the list (its bits with it) — the consumers lose nothing, the list holds no dead record.
+    /// A RECORD DIES: a LISTED record leaves the list (its bits with it) — whatever its mask: a record whose bits were
+    /// all taken is still listed until the list compacts (decision 16.2: the early return on an empty mask left a
+    /// dangling pointer there). The consumers lose nothing; the list never holds a dead record.
     void forgetNamed(Node &n) const {
-        if (!n.namedMask) return;
+        if (!n.namedListed) return;
         for (unsigned b = 0; b < 4u; ++b) if (n.namedMask & (1u << b)) --mNamedCount[b];
+        if (n.namedMask) --mNamedLive;
         n.namedMask = 0u;
-        --mNamedLive;
+        n.namedListed = false;
         mNamed.erase(std::remove(mNamed.begin(), mNamed.end(), &n), mNamed.end());
+    }
+    /// THE LIST'S GUARD (gpuscene.walkParity's companion, decision 16.2): listed entries that are not a live record of
+    /// this scene — compared by address against the record map, never dereferenced. 0 is the law.
+    unsigned namedDanglingCount() const {
+        std::unordered_set<const Node *> live;
+        live.reserve(mNodes.size());
+        for (const auto &kv : mNodes) live.insert(&kv.second);
+        unsigned bad = 0u;
+        for (const Node *n : mNamed) if (!live.count(n)) ++bad;
+        return bad;
     }
     /// The consumers in `bits` owe their full pass (a nodeless write, an incomplete set, an overflow, a death).
     void owesNamesFull(uint8_t bits) const {
@@ -5014,7 +5038,7 @@ private:
         if (bits & kNameShadow) mScanFullShadow = true;
         if (bits & kNameSig) mGeomSigFull = true;
         if (bits == kNameAll) {
-            for (Node *n : mNamed) n->namedMask = 0u;
+            for (Node *n : mNamed) { n->namedMask = 0u; n->namedListed = false; }
             mNamed.clear();
             mNamedLive = 0u;
             for (unsigned &c : mNamedCount) c = 0u;
@@ -5680,7 +5704,10 @@ public:
     /// the engine's, once a frame after its probe budget — the PCC's own frameStarted collection is switched off at
     /// its build (setCollectsExternally). A paused PCC (an undrawn scene) collects nothing, as frameStarted did.
     void collectDirtyProbes() {
-        if (Ogre::ParallaxCorrectedCubemapAuto *p = mPhoton.pcc()) p->collectDirtyProbes();
+        if (Ogre::ParallaxCorrectedCubemapAuto *p = mPhoton.pcc()) {
+            p->collectDirtyProbes();
+            mPhoton.noteProbeCollection();   // the guard's reading (gi.pccPlacementLights): the list after it
+        }
     }
     /// THE PLAN AFTER THE SCENE GRAPH (ENGINE-UPGRADE-U4 decisions 8 + 14): the drain STASHES what the GI scheduler's
     /// plan reads from the record (planGi: its refresh serial, the material preview, whether the configuration was
@@ -6067,7 +6094,9 @@ private:
     void indexItemNode(Node &n);
     void unindexItemNode(Node &n);
 
-    uint32_t gpuMaterialWordFor(const Node &n, Ogre::uint32 flags) const;
+    /// `queue`: the item is GI-visible and its datablock not converted yet — the slot is owed to the material
+    /// store's queue (the composer's serial tail does the push, U4 stage 4).
+    uint32_t gpuMaterialWordFor(const Node &n, Ogre::uint32 flags, bool &queue) const;
 
 
     /// THE SUBSTRATE — the scene's ONE writer of its GPU description (GpuSceneSubstrate.h,
@@ -6400,6 +6429,14 @@ private:
     void forgetRayLevel(uint32_t slot);
     void composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bool graphIsCurrent,
                             detail::GpuInstance &out) const;
+    /// THE COMPOSER, SPLIT FOR THE WORKERS (ENGINE-UPGRADE-U4 stage 4): the lane half READS only (the node, its Item,
+    /// its datablock, the material store's map, the skin rows) and returns what the serial tail owes — the Atom
+    /// route's render-queue edit (Ogre state) and the material store's queue push (a shared vector) — which the walk
+    /// replays in slot order after the lanes, the serial compose's order. composeGpuInstance = lane + tail.
+    struct ComposeTail { bool atom = false, queueMaterial = false; };
+    void composeGpuInstanceLane(const Node &n, const Ogre::Matrix4 &world, bool graphIsCurrent,
+                                detail::GpuInstance &out, ComposeTail &tail) const;
+    void applyComposeTail(const Node &n, const ComposeTail &tail) const;
     /// The mesh table entry for an attached mesh, reference-counted per attach.
     uint32_t acquireGpuMesh(const MeshRec &rec);
     void releaseGpuMesh(const Ogre::Mesh *mesh);

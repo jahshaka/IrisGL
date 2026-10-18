@@ -256,12 +256,13 @@ void OgreScene::runItemWalk(bool shadow) {
     // current (getWorldAabb, no root-recursive getWorldAabbUpdated per item:
     // measured 2.1 ms -> 0.4 ms at 5k items in Debug+ASan).
     //
-    // THE GI HALF IS NOT HERE, and that is a correctness rule, not a taste:
-    // its consumer (the probe budget) runs EARLIER in the frame, before any
-    // scene graph update, so it must see THIS
-    // frame's transforms through getWorldAabbUpdated — ensureGiWalk, below.
-    // Running it here instead made every mover stale the probes a frame late
-    // and took gi.dynamic_probes, gi.budget and gi.probe_inputs with it.
+    // THE GI HALF IS NOT HERE: its consumers (the GI step's walk, its marks and
+    // the probe budget) run in the frame's `engine.plan`, also after the scene
+    // graph but BEFORE this caster walk (U4 decisions 8 + 14), and stale the
+    // probes in this same frame — ensureGiWalk, below, on the cached boxes.
+    // (Before U4 they ran ahead of the scene graph on getWorldAabbUpdated; a
+    // walk here, after the probe budget had spent, made every mover stale the
+    // probes a frame late: gi.dynamic_probes, gi.budget, gi.probe_inputs.)
     if (!shadow && mShadowScanPrimed) {
         // THE CACHE IS NOT RUNNING HERE (this scene has no shadow node to cache
         // into, or not one cacheable lamp): its caster records go stale, and so

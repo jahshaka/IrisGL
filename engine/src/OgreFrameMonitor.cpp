@@ -1228,6 +1228,13 @@ const ArmDef kArms[] = {
       "stage (Scout, Finish) — run after the frame's scene graph — records the scene manager's light count before and "
       "after it and every placed probe's node offset from where it was set (inspect::SceneEcho::giPlan): the fork "
       "keeps the frame's light list and makes a synced probe's node current. 0 = shipped: nothing read." },
+    { "gpuscene.serialCompose", 0.0, 0.0, 1.0,
+      "THE COMPOSE'S IDENTITY ARM (ENGINE-UPGRADE-U4 stage 4, engine.gpuscene_identity): 1 = the GPU scene's compose "
+      "runs after the compare's barrier on the frame's thread instead of inside the workers' shares — the same rows, "
+      "tails and replay order, so the two composes are compared byte for byte in one process. A test door." },
+    { "gpuscene.composeDigest", 0.0, 0.0, 1.0,
+      "THE COMPOSE'S DIGEST (ENGINE-UPGRADE-U4 stage 4): 1 = every walk folds each composed slot (its index, its "
+      "staged row, its tail) in replay order into inspect::SceneEcho::gpuWalk().composeDigest. 0 = shipped: nothing." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

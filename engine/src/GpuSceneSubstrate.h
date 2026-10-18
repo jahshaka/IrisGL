@@ -124,6 +124,16 @@ public:
     // ---- the walk's shares (the task's scratch, kept between frames) -------
     std::vector<std::vector<uint32_t>> shareDirty;
     std::vector<unsigned long long> shareFlags;   ///< per share: the flags words it recomputed
+    /// ...and what each share composed (U4 stage 4: the compose inside the compare's task): the slots it staged, in
+    /// its slot order, with the serial tail each owes (the Atom route, the material queue) — replayed after the
+    /// barrier, share by share, the serial compose's order.
+    struct Composed { uint32_t slot; bool atom; bool queueMaterial; };
+    std::vector<std::vector<Composed>> shareComposed;
+    /// THE COMPOSE'S DIGEST (the identity row, gpuscene.serialCompose): FNV-1a over each composed slot in replay
+    /// order — its index, its staged row's bytes, its tail — so the parallel and the serial compose are compared
+    /// byte for byte in one process. Computed only while the arm gpuscene.composeDigest is latched.
+    unsigned long long lastComposeDigest = 0ull;
+    double lastReplayMicros = 0.0;   ///< ...of the compose, the serial replay after the barrier
 
     // ---- THE NAMED WALK (ENGINE-UPGRADE-2B stage 2) -------------------------
     // The walk compares the slots of the nodes WRITTEN since a walk last consumed the epoch

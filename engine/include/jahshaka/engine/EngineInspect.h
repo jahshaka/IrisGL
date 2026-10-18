@@ -56,6 +56,14 @@ public:
         /// THE DIRECT INDEXES' REACH (U4 decision 12.1 i): the Ogre-id and the registry-id page tables — the ids their
         /// pages span and the pages allocated.
         unsigned long long ogreIdReach = 0, ogreIdPages = 0, nodeIdReach = 0, nodeIdPages = 0;
+        /// THE COMPOSE INSIDE THE COMPARE'S TASK (U4 stage 4): `compareMicros` is the task (the shares' compare and
+        /// compose), `composeMicros` the serial part after the barrier, `replayMicros` of it the replay (the tails,
+        /// the observers); `composeDigest` the last walk's digest while gpuscene.composeDigest is on.
+        double             replayMicros = 0.0;
+        unsigned long long composeDigest = 0;
+        /// THE NAME LIST'S GUARD (U4 decision 16.2): listed entries that are not a live record (by address, never
+        /// dereferenced) — 0 is the law — and the list's length.
+        unsigned           namedDangling = 0, namedListed = 0, namedLive = 0;
     };
     virtual GpuWalk gpuWalk() const = 0;
     /// THE SUN TRACE'S CPU (ENGINE-UPGRADE-U4 stage 1, premise P1): the last SurfaceCache::traceSun call — its whole
@@ -109,6 +117,9 @@ public:
         unsigned long long pccStages = 0, pccStagesLit = 0, pccLightChanges = 0;   ///< (Lit: began with a light list)
         unsigned           pccLightsBefore = 0, pccLightsAfter = 0, pccProbes = 0;
         float              pccProbeOffsetMax = 0.0f;
+        /// ...and the frame's dirty-probe collection (decision 16.1): collections read, the light count after the last.
+        unsigned long long pccCollections = 0;
+        unsigned           pccCollectLights = 0;
     };
     virtual GiPlan giPlan() const = 0;
 };

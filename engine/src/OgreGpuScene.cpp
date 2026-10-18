@@ -508,10 +508,14 @@ void GpuScene::setSlotCount(uint32_t n) {
 
 void GpuScene::stage(uint32_t slot, const GpuInstance &in, uint64_t node) {
     if (slot >= mSlotCapacity) ensureSlots(slot + 1u);
-    if (slot >= mSlotCapacity) return;
+    if (stageRow(slot, in, node)) noteStaged(slot);
+}
+
+bool GpuScene::stageRow(uint32_t slot, const GpuInstance &in, uint64_t node) {
+    if (slot >= mSlotCapacity) return false;   // never grown here: a lane's caller pre-sizes (setSlotCount)
     // ONCE PER UPDATE (see the header): a second stage would read the world the
     // first just wrote and call it the PREVIOUS world.
-    if (mStagedAt[slot] == mUpdateSerial) return;
+    if (mStagedAt[slot] == mUpdateSerial) return false;
     mStagedAt[slot] = mUpdateSerial;
     GpuInstance &dst = mMirror[slot];
     // THE PREVIOUS WORLD IS THE MIRROR'S OWN CURRENT WORLD, which is what makes
@@ -529,8 +533,7 @@ void GpuScene::stage(uint32_t slot, const GpuInstance &in, uint64_t node) {
     std::memcpy(dst.prevWorld, prev, sizeof(prev));
     mBorn[slot] = 1u;
     mSlotNode[slot] = node;
-    ++mWrites;
-    notify(slot, &dst);
+    return true;
 }
 
 void GpuScene::addObserver(GpuSceneObserver *o) {
@@ -943,7 +946,8 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n, bool atomDraw) const {
 /// SUB-ITEM 0's DATABLOCK, because the word is one per instance: every mesh this
 /// engine builds has one submesh (buildMeshV2), and the geometry rows the gather
 /// reads are submesh 0's too.
-uint32_t OgreScene::gpuMaterialWordFor(const Node &n, Ogre::uint32 flags) const {
+uint32_t OgreScene::gpuMaterialWordFor(const Node &n, Ogre::uint32 flags, bool &queue) const {
+    queue = false;
     if (!n.item || !n.item->getNumSubItems() || !mPhoton.materials())
         return detail::GpuScene::kNoMaterialWord;
     const Ogre::HlmsDatablock *db = n.item->getSubItem(0)->getDatablock();
@@ -951,8 +955,7 @@ uint32_t OgreScene::gpuMaterialWordFor(const Node &n, Ogre::uint32 flags) const 
     const Ogre::PhotonVoxelMaterial::DatablockConversionResult *r = mPhoton.materials()->lookupDatablock(db);
     if (!r) {
         // Only a GI-visible item is worth converting: nothing else is ever gathered.
-        if ((flags & detail::kGpuGiVisible) && n.itemSlot != size_t(-1))
-            mPhoton.queueMaterialSlot(uint32_t(n.itemSlot));
+        queue = (flags & detail::kGpuGiVisible) && n.itemSlot != size_t(-1);
         return detail::GpuScene::kNoMaterialWord;
     }
     // Sixteen bits each: a pool holds 1,024 rows (PhotonVoxelMaterial's const-buffer size), and
@@ -975,7 +978,22 @@ uint32_t OgreScene::gpuMaterialWordFor(const Node &n, Ogre::uint32 flags) const 
 /// recursion for the same answer.
 void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bool graphIsCurrent,
                                    detail::GpuInstance &out) const {
+    ComposeTail tail;
+    composeGpuInstanceLane(n, world, graphIsCurrent, out, tail);
+    applyComposeTail(n, tail);
+}
+
+void OgreScene::applyComposeTail(const Node &n, const ComposeTail &tail) const {
+    // THE SPLIT'S QUEUE follows the route: an Atom item lives in kAtomRenderQueue (which a view with an id pass
+    // skips), everything else where its material files it (renderQueueFor).
+    placeAtomQueue(n, tail.atom);
+    if (tail.queueMaterial) mPhoton.queueMaterialSlot(uint32_t(n.itemSlot));
+}
+
+void OgreScene::composeGpuInstanceLane(const Node &n, const Ogre::Matrix4 &world, bool graphIsCurrent,
+                                       detail::GpuInstance &out, ComposeTail &tail) const {
     out = detail::GpuInstance();
+    tail = ComposeTail();
     Ogre::Item *item = n.item;
     if (!item) return;
     std::memcpy(out.world, &world[0][0], sizeof(out.world));
@@ -989,12 +1007,10 @@ void OgreScene::composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bo
     const Ogre::uint32 flags = gpuFlagsFor(n);
     std::memcpy(&out.boundsMin[3], &meshIndex, sizeof(uint32_t));
     std::memcpy(&out.boundsMax[3], &flags, sizeof(uint32_t));
-    // THE SPLIT'S QUEUE follows the route: an Atom item lives in kAtomRenderQueue
-    // (which a view with an id pass skips), everything else where its material
-    // files it (renderQueueFor).
-    placeAtomQueue(n, (flags & kGpuAtom) != 0u);
+    // (the split's queue — the Atom route's render-queue edit — is the serial tail's: applyComposeTail)
+    tail.atom = (flags & kGpuAtom) != 0u;
     out.ids[0] = gpuKeyOf(n);   // Ogre's 32-bit key, never the 64-bit id (U3 stage 3, F6)
-    out.ids[1] = gpuMaterialWordFor(n, flags);
+    out.ids[1] = gpuMaterialWordFor(n, flags, tail.queueMaterial);
     out.ids[2] = uint32_t(n.lightMask);
     // THE RAY LEVEL (AT-A8r) travels with the entry rather than being poked
     // into the mirror: every write to this table goes through one composer, so
@@ -1315,6 +1331,16 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
         (graphIsCurrent && n >= kParallelWalkSlots && workers >= 1u) ? workers + 1u : 1u;
     if (sub.shareDirty.size() != shares) sub.shareDirty.assign(shares, std::vector<uint32_t>());
     if (sub.shareFlags.size() != shares) sub.shareFlags.assign(shares, 0ull);
+    if (sub.shareComposed.size() != shares) sub.shareComposed.assign(shares, std::vector<GpuSceneSubstrate::Composed>());
+    // THE COMPOSE RUNS INSIDE THE COMPARE'S TASK (ENGINE-UPGRADE-U4 stage 4): share k composes and stages the rows of
+    // its own dirty slots the moment its compare ends (one barrier, not two) — the lanes READ Ogre objects only and
+    // write only their own slots' rows (GpuScene::stageRow; the table pre-sized by setSlotCount); what is not
+    // lane-local (the Atom route's render-queue edit, the material store's queue, the write count and the change
+    // feed's observers) is collected per share and REPLAYED after the barrier in the serial compose's order (share
+    // by share, ascending slot within a share). The arm gpuscene.serialCompose composes after the barrier instead,
+    // on the frame's thread (the identity row's other arm).
+    const bool serialCompose = mEngine && mEngine->armRegistry().on(ArmId::GpuSerialCompose);
+    const bool digest = mEngine && mEngine->armRegistry().on(ArmId::GpuComposeDigest);
     sub.walkShares = unsigned(shares);
     const detail::GpuInstance *mirror = mGpuScene.mirrorData();
     // THE COMPARE, one contiguous share of the slots per thread: the slots whose world
@@ -1322,6 +1348,21 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     // touches (the items, their nodes' cached derived transforms, their datablocks, the
     // mirror, the stamps), so the SceneManager's workers and the frame's thread run it
     // side by side.
+    // ONE SHARE'S COMPOSE: its dirty slots, in its slot order — the row staged, the tail collected.
+    const auto composeShare = [&](size_t k) {
+        std::vector<GpuSceneSubstrate::Composed> &done = sub.shareComposed[k];
+        done.clear();
+        detail::GpuInstance cand;
+        ComposeTail tail;
+        for (uint32_t i : sub.shareDirty[k]) {
+            if (mGpuScene.stagedThisUpdate(i)) continue;   // the marks staged it before the walk (serial)
+            const Node &node = *mItemNodes[i];
+            Ogre::Node *pn = node.item->getParentNode();
+            const Ogre::Matrix4 &m = graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
+            composeGpuInstanceLane(node, m, graphIsCurrent, cand, tail);
+            if (mGpuScene.stageRow(i, cand, node.selfId)) done.push_back({ i, tail.atom, tail.queueMaterial });
+        }
+    };
     auto share = [&](size_t k) {
         const size_t first = n * k / shares, last = n * (k + 1) / shares;
         std::vector<uint32_t> &dirty = sub.shareDirty[k];
@@ -1355,6 +1396,7 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
             // A slot the marks already staged is skipped at the compose (the stamp).
             if (d) dirty.push_back(uint32_t(i));
         }
+        if (!serialCompose) composeShare(k);
     };
     if (shares == 1u) {
         share(0u);
@@ -1376,21 +1418,35 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     // A walk on the graph's current transforms consumes the epoch (composeGpuScene), and with
     // it the names; a reader's walk before the graph (the warm-up) leaves them for the frame's.
     if (graphIsCurrent) { releaseNamed(kNameGpu); sub.namedFull = false; }
-    // THE COMPOSE, IN SLOT ORDER, on the frame's thread: the composer edits Ogre state
-    // (the split's render queue) and queues GI conversions.
-    detail::GpuInstance cand;
-    for (const std::vector<uint32_t> &dirty : sub.shareDirty) {
-        for (uint32_t i : dirty) {
-            if (mGpuScene.stagedThisUpdate(i)) continue;
-            const Node &node = *mItemNodes[i];
-            Ogre::Node *pn = node.item->getParentNode();
-            const Ogre::Matrix4 &m = graphIsCurrent ? pn->_getFullTransform() : pn->_getFullTransformUpdated();
-            composeGpuInstance(node, m, graphIsCurrent, cand);
-            mGpuScene.stage(i, cand, node.selfId);
-            sub.dirty.push_back(i);
+    // THE SERIAL-COMPOSE ARM (the identity row's other half): the compose after the barrier, on the frame's thread,
+    // share by share — the order the lanes' replay keeps.
+    if (serialCompose)
+        for (size_t k = 0; k < shares; ++k) composeShare(k);
+    // THE REPLAY, IN THE SERIAL COMPOSE'S ORDER: each composed slot's tail (the Atom route's render-queue edit, the
+    // material store's queue), the write count and the change feed's observers, then the dirty list.
+    const auto tReplay = WalkClock::now();
+    unsigned long long h = 1469598103934665603ull;
+    const auto fold = [&h](const void *p, size_t bytes) {
+        const unsigned char *b = static_cast<const unsigned char *>(p);
+        for (size_t j = 0; j < bytes; ++j) { h ^= b[j]; h *= 1099511628211ull; }
+    };
+    for (const std::vector<GpuSceneSubstrate::Composed> &done : sub.shareComposed) {
+        for (const GpuSceneSubstrate::Composed &c : done) {
+            const Node &node = *mItemNodes[c.slot];
+            applyComposeTail(node, ComposeTail{ c.atom, c.queueMaterial });
+            mGpuScene.noteStaged(c.slot);
+            sub.dirty.push_back(c.slot);
             ++sub.aabbReads;
+            if (digest) {
+                fold(&c.slot, sizeof(c.slot));
+                fold(&mGpuScene.entry(c.slot), sizeof(detail::GpuInstance));
+                const unsigned char t = (c.atom ? 1u : 0u) | (c.queueMaterial ? 2u : 0u);
+                fold(&t, 1u);
+            }
         }
     }
+    sub.lastReplayMicros = usSince(tReplay);
+    if (digest) sub.lastComposeDigest = h;
     sub.lastComposeMicros = usSince(tCompose);
     sub.lastNotifyMicros = mGpuScene.notifyMicros() - notify0;
     sub.lastComposedSlots = unsigned(sub.dirty.size() - dirtyBefore);
@@ -1576,6 +1632,11 @@ inspect::SceneEcho::GpuWalk OgreScene::gpuWalk() const {
     w.ogreIdPages = mNodeByOgreId.allocated();
     w.nodeIdReach = mNodeById.reach();
     w.nodeIdPages = mNodeById.allocated();
+    w.replayMicros = mSubstrate.lastReplayMicros;
+    w.composeDigest = mSubstrate.lastComposeDigest;
+    w.namedDangling = namedDanglingCount();
+    w.namedListed = unsigned(mNamed.size());
+    w.namedLive = unsigned(mNamedLive);
     return w;
 }
 
@@ -1603,6 +1664,8 @@ inspect::SceneEcho::GiPlan OgreScene::giPlan() const {
     g.pccLightsAfter = l.pccLightsAfter;
     g.pccProbes = l.pccProbes;
     g.pccProbeOffsetMax = l.pccProbeOffsetMax;
+    g.pccCollections = l.pccCollections;
+    g.pccCollectLights = l.pccCollectLights;
     return g;
 }
 
