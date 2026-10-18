@@ -2579,21 +2579,41 @@ bool OgreEngine::drainTextureStreaming(double *msSpent) {
     // looks like from in here — the deadline, the diagnostic and the latch then
     // run exactly as they would in the wild. Off unless the env var is set.
     if (msSpent) *msSpent = 0.0;
-    Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
-    if (!tm) return true;
-    if (mTextureWaitBroken || mTextureWaitBudgetMs == 0u) return tm->isDoneStreaming();
-    if (!mTextureWaitFault && tm->isDoneStreaming()) return true;
+    TextureDrain d;
+    int step = beginTextureDrain(d);
+    while (step == 1) {
+        step = stepTextureDrain(d);
+        if (step == 1) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (d.active) {
+        const double spent = d.elapsedMs();
+        if (spent > mTextureWaitWorstMs) mTextureWaitWorstMs = spent;
+        if (msSpent) *msSpent = spent;
+    }
+    return step == 0;
+}
 
+/// THE DRAIN'S START (WAIT-TEXTURE-LOADS-1): 0 nothing to wait for (or the wait is broken / disabled: the queue's
+/// own answer), 1 a drain begun.
+int OgreEngine::beginTextureDrain(TextureDrain &d) {
+    d = TextureDrain();
+    Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
+    if (!tm) return 0;
+    if (mTextureWaitBroken || mTextureWaitBudgetMs == 0u) return tm->isDoneStreaming() ? 0 : 2;
+    if (!mTextureWaitFault && tm->isDoneStreaming()) return 0;
+    d.active = true;
+    d.t0 = std::chrono::steady_clock::now();
+    return 1;
+}
+
+/// ONE STEP OF THE BOUNDED DRAIN, never a sleep (WAIT-TEXTURE-LOADS-1): drainTextureStreaming loops it with a
+/// millisecond's sleep between steps; pumpTextureLoads hands each step to a host that waits OFF the render thread.
+/// 0 the queues emptied, 1 still streaming, 2 the no-progress budget expired (logged, latched).
+int OgreEngine::stepTextureDrain(TextureDrain &d) {
+    Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
+    if (!tm || !d.active) return 0;
     Ogre::VaoManager *vao = mRoot->getRenderSystem()->getVaoManager();
-    const auto t0 = std::chrono::steady_clock::now();
-    const auto elapsedMs = [&t0]() {
-        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
-            .count();
-    };
     const double budget = double(mTextureWaitBudgetMs);
-    size_t bestPending = std::numeric_limits<size_t>::max();
-    double lastProgressMs = 0.0;
-    double lastPollMs = -1000.0;
     // THE VAO ADVANCE IS ON A CADENCE, NOT ON THE POLL (DRAIN-1, audit ON-17;
     // mTextureDrainAdvanceMs has the measurement and the reason). -1e9 so the
     // first iteration advances immediately — and WHAT THAT FIRST ADVANCE DOES
@@ -2605,23 +2625,20 @@ bool OgreEngine::drainTextureStreaming(double *msSpent) {
     // finishes inside one cadence therefore commits nothing itself, exactly as
     // before this line: the drain never submitted the capture-free first call's
     // work either, and the next frame's own commit carries it.
-    double lastAdvanceMs = -1.0e9;
-    bool ok = true;
-
-    for (;;) {
+    {
         const bool workerDone = tm->_update(true);
-        if (!mTextureWaitFault && workerDone && tm->isDoneStreaming()) break;
+        if (!mTextureWaitFault && workerDone && tm->isDoneStreaming()) return 0;
 
-        const double now = elapsedMs();
+        const double now = d.elapsedMs();
         // The pending census is O(textures in the process) — poll it every
         // 250 ms rather than every iteration. Below that interval the loop is
         // two mutex acquisitions and a millisecond of sleep.
-        if (now - lastPollMs >= 250.0) {
-            lastPollMs = now;
+        if (now - d.lastPollMs >= 250.0) {
+            d.lastPollMs = now;
             const size_t pending = countPendingTextures(tm, nullptr);
-            if (pending < bestPending) { bestPending = pending; lastProgressMs = now; }
+            if (pending < d.bestPending) { d.bestPending = pending; d.lastProgressMs = now; }
         }
-        if (now - lastProgressMs >= budget) {
+        if (now - d.lastProgressMs >= budget) {
             std::string names;
             const size_t pending = countPendingTextures(tm, &names);
             Ogre::LogManager::getSingleton().logMessage(
@@ -2634,21 +2651,15 @@ bool OgreEngine::drainTextureStreaming(double *msSpent) {
                 Ogre::LML_CRITICAL);
             mTextureWaitBroken = true;
             ++mTextureWaitTimeouts;
-            ok = false;
-            break;
+            return 2;
         }
-        if (vao && now - lastAdvanceMs >= mTextureDrainAdvanceMs) {
-            lastAdvanceMs = now;
+        if (vao && now - d.lastAdvanceMs >= mTextureDrainAdvanceMs) {
+            d.lastAdvanceMs = now;
             ++mTextureWaitAdvances;
             vao->_update();
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-
-    const double spent = elapsedMs();
-    if (spent > mTextureWaitWorstMs) mTextureWaitWorstMs = spent;
-    if (msSpent) *msSpent = spent;
-    return ok;
+    return 1;
 }
 
 double OgreEngine::waitForTextureLoads() {
@@ -2656,6 +2667,22 @@ double OgreEngine::waitForTextureLoads() {
     double ms = 0.0;
     drainTextureStreaming(&ms);
     return ms;
+}
+
+int OgreEngine::pumpTextureLoads() {
+    JAH_HOST_CALL("Engine::pumpTextureLoads");
+    // THE HOST'S WAIT, ONE STEP A CALL (WAIT-TEXTURE-LOADS-1): the drain's state lives here between the calls, so the
+    // render thread does one step a request and the host waits between them - the frame is never held by it.
+    int step = mHostDrain.active ? stepTextureDrain(mHostDrain) : beginTextureDrain(mHostDrain);
+    if (step == 1 && !mHostDrain.active) step = 0;
+    if (step != 1) {
+        if (mHostDrain.active) {
+            const double spent = mHostDrain.elapsedMs();
+            if (spent > mTextureWaitWorstMs) mTextureWaitWorstMs = spent;
+        }
+        mHostDrain = TextureDrain();
+    }
+    return step;
 }
 
 unsigned long long OgreEngine::textureWaitAdvances() const { JAH_SYNC_GETTER("Engine::textureWaitAdvances"); return mTextureWaitAdvances; }

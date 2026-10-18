@@ -2480,6 +2480,13 @@ public:
     /// one-shot renders and for scripts that want a provably complete image.
     virtual double waitForTextureLoads() = 0;
 
+    /// THE SAME WAIT, ONE STEP A CALL (WAIT-TEXTURE-LOADS-1): one pass of the bounded drain - the streaming
+    /// worker's completions collected, the staging advanced on the drain's cadence - and NO wait. 0 = the queues
+    /// are empty, 1 = still streaming (call again; a host waits BETWEEN the calls, so the render thread is never
+    /// held by the wait), 2 = the no-progress budget expired (logged, textureWaitTimeouts counts it). The drain's
+    /// budget and cadence are waitForTextureLoads' own: the same wait, its sleeps on the caller's side.
+    virtual int pumpTextureLoads() = 0;
+
     /// A monotonic count of texture LOAD REQUESTS this process has made. Only
     /// differences mean anything: snapshot it, render, compare. It moving across
     /// a render is exactly the condition upstream's double-render guard tests.

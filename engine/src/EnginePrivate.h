@@ -8210,6 +8210,7 @@ public:
     // therefore process-wide, not per scene.
     bool texturesDoneStreaming() const override;
     double waitForTextureLoads() override;
+    int pumpTextureLoads() override;
     unsigned long long textureLoadRequests() const override;
     unsigned textureWaitTimeouts() const override { JAH_SYNC_GETTER("Engine::textureWaitTimeouts"); return mTextureWaitTimeouts; }
     unsigned long long textureWaitAdvances() const override;
@@ -8841,6 +8842,22 @@ private:
     /// queues really did empty; false when the no-progress budget expired, in
     /// which case it has already logged the pending textures by name.
     bool drainTextureStreaming(double *msSpent = nullptr);
+    /// THE DRAIN'S STATE between its steps (WAIT-TEXTURE-LOADS-1): drainTextureStreaming keeps one on its stack, the
+    /// host's wait (pumpTextureLoads) one across its calls.
+    struct TextureDrain {
+        bool active = false;
+        std::chrono::steady_clock::time_point t0{};
+        size_t bestPending = std::numeric_limits<size_t>::max();
+        double lastProgressMs = 0.0;
+        double lastPollMs = -1000.0;
+        double lastAdvanceMs = -1.0e9;
+        double elapsedMs() const {
+            return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        }
+    };
+    int beginTextureDrain(TextureDrain &d);
+    int stepTextureDrain(TextureDrain &d);
+    TextureDrain mHostDrain;
     /// One collection pass with no wait — a streaming frame's half of the drain
     /// (OPEN_COVER_SPEC §2 E).
     void collectTextureStreaming();
