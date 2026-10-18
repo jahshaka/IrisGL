@@ -418,6 +418,10 @@ private:
         /// Compaction state machine: 0 = built, size not asked; 1 = size query
         /// written, waiting; 2 = compacted (or declined).
         unsigned compactState = 0;
+        /// A traced slot references this (mesh, level) now (the change feed's key count > 0;
+        /// ENGINE-UPGRADE-U5 stage 3): it is never stale. `lastSeen` is the frame the last
+        /// reference went, which is all eviction reads - kept at the change, never stamped per frame.
+        bool referenced = false;
         unsigned compactSlot = 0;
         uint32_t compactFrame = 0;
         /// The last frame an instance referenced this mesh (finding 5). A BLAS
@@ -456,6 +460,25 @@ private:
         /// address a build, a compaction or an eviction moved) and the GPU scene's
         /// mesh-set serial.
         unsigned long long blasVersion = 1ull, inputsBlasVersion = 0ull, inputsMeshSerial = ~0ull;
+        /// THE INPUTS ARE PATCHED, NOT REBUILT (ENGINE-UPGRADE-U5 stage 3): the meshes whose structures
+        /// changed since the job's inputs were written (a build, a compaction's new address, an eviction),
+        /// each re-writing its own record; `inputsNeedFull` (a failure path, the first write) re-writes
+        /// all of them. `meshIndexOf` is the mesh table's index of each mesh, re-made when the mesh set's
+        /// serial moves.
+        std::vector<const Ogre::Mesh *> dirtyMeshRows;
+        bool inputsNeedFull = true;
+        std::unordered_map<const Ogre::Mesh *, uint32_t> meshIndexOf;
+        /// THE (mesh entry, level) PAIRS THE SET REFERENCES AND NOBODY BUILT YET, ascending (the order
+        /// ensureBlas builds in), kept by the feed's key events - the scan over every key is gone.
+        std::map<std::pair<uint32_t, uint32_t>, const Ogre::Mesh *> missing;
+        /// THE ALPHA AND HIT TABLES' INPUTS as they were last written (stage 3): re-written only when one moves.
+        unsigned long long alphaMaterialSerial = ~0ull, hitMaterialSerial = ~0ull, hitLightSerial = ~0ull,
+                           hitRowsSerial = ~0ull;
+        /// The mesh each job record was written for (index = the mesh-table entry): a mesh-set change
+        /// re-writes the entries whose mesh changed, never the table.
+        std::vector<const Ogre::Mesh *> recordedMeshAt;
+        uint64_t alphaRowsAddress = ~0ull;
+        bool alphaPending = true;
         /// The build's primitive count (2 x the slot count it was written for).
         unsigned  tlasPrimitives = 0;
         unsigned  instanceCount = 0;      ///< ACTIVE near + far copies: what the TLAS traces
@@ -479,6 +502,9 @@ private:
         RawBuffer alphaTable;
         VkDeviceAddress alphaAddress = 0;
         std::vector<uint32_t> alphaWords, alphaScratch;
+        /// The masks this table names (AlphaMask::id), counted in their `users` (stage 3).
+        std::vector<unsigned long long> alphaMaskIds;
+        unsigned long long alphaMaskEpoch = ~0ull, alphaUploadSerial = ~0ull;
         /// THE HIT TABLE (FAR-SUN-2; jah_rq_hit_direct.glsl has the layout): what a
         /// voxel-answered hit computes its DIRECT light and its emissive from AT THE HIT -
         /// the scene's lights (the one light list, world space, the injection's packing) and
@@ -524,6 +550,14 @@ private:
             /// "still referenced").
             struct KeyRef { uint32_t count = 0u; uint32_t meshIndex = 0u; };
             std::unordered_map<BlasKey, KeyRef, BlasKeyHash> keys;
+            /// ...AND ITS EVENTS since the tier last took them (ENGINE-UPGRADE-U5 stage 3): a key whose
+            /// count went 0 -> 1 (added) or 1 -> 0 (gone), in order; `keysReset` = the whole map was
+            /// cleared (the table reset) - every structure unreferenced, then the re-prime adds.
+            struct KeyEvent { BlasKey key; uint32_t meshIndex = 0u; bool added = false; };
+            std::vector<KeyEvent> keyEvents;
+            bool keysReset = false;
+            /// An alpha-tested slot changed (entered, left, re-levelled): the alpha table is owed.
+            bool alphaDirty = true;
             /// Kind-2 slots (rigged, traced, with a mesh) and the skin pass' wants
             /// (rigged + traced), ascending — the order the old walks visited them.
             std::set<uint32_t> skinned, rigged;
@@ -542,7 +576,7 @@ private:
 
             void gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) override;
             void gpuSceneReset() override;
-            void take(uint32_t slot, const Rec &r, int sign);
+            void take(uint32_t slot, const Rec &r, int sign, bool withKeys = true);
         };
         Feed feed;
         bool feedOn = false;
@@ -974,8 +1008,16 @@ private:
         RawBuffer bits;
         VkDeviceAddress address = 0;
         uint32_t lastUsed = 0;
+        /// ENGINE-UPGRADE-U5 stage 3: a stable id, and the scenes' alpha tables that name this mask now
+        /// (a table is re-written only when its inputs move, so `lastUsed` alone would expire a mask
+        /// in use; a mask a table names never expires).
+        unsigned long long id = 0ull;
+        uint32_t users = 0u;
     };
     std::vector<AlphaMask> mAlphaMasks;
+    unsigned long long mNextAlphaMaskId = 1ull;
+    /// Moves whenever a mask is made or dropped: every scene's table that may name it is re-written.
+    unsigned long long mAlphaMaskEpoch = 0ull;
     bool makeAlphaMaskPipeline(std::string &err);
     /// The mask for (tex, cmp, threshold): its index, or -1 while it cannot be made
     /// yet (the texture not resident, this frame's budget spent, no pipeline).
@@ -1524,7 +1566,9 @@ void RayQueryTier::evictStaleBlas(SceneAs &sa) {
     for (size_t i = 0; i < sa.blas.size(); ++i) {
         Blas &bl = sa.blas[i];
         if (!bl.as || bl.compactState == 1u) continue;        // a size query is still owed
-        if (bl.lastSeen == 0u || uint32_t(now - bl.lastSeen) < kEvictAfterFrames) continue;
+        // STILL REFERENCED = never stale (stage 3: the feed's key events keep `referenced`; `lastSeen`
+        // is the frame the last reference went).
+        if (bl.referenced || bl.lastSeen == 0u || uint32_t(now - bl.lastSeen) < kEvictAfterFrames) continue;
         // The slot stays (indices are referenced by blasOf and by the
         // instance patches); only its contents go, and the map entry with them,
         // so the next sighting rebuilds into a fresh slot.
@@ -1532,6 +1576,7 @@ void RayQueryTier::evictStaleBlas(SceneAs &sa) {
             if (it->second == i) it = sa.blasOf.erase(it); else ++it;
         }
         retire(bl.as, bl.storage);
+        sa.dirtyMeshRows.push_back(bl.mesh.get());   // its record loses this level's address
         bl.mesh.reset();
         bl.triangles = 0;
         bl.address = 0;
@@ -2283,6 +2328,9 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     }
     retire(sa.alphaTable);
     sa.alphaAddress = 0;
+    for (AlphaMask &m : mAlphaMasks)   // the masks this scene's table named lose a user (stage 3)
+        if (std::binary_search(sa.alphaMaskIds.begin(), sa.alphaMaskIds.end(), m.id) && m.users) --m.users;
+    sa.alphaMaskIds.clear();
     for (unsigned r = 0; r < kFramesInFlight; ++r) { retire(sa.hitTable[r]); sa.hitTableCap[r] = 0u; }
     sa.hitTableAddress = 0;
     // THE SKIN CACHES (PHOTON-SKIN-1): each hands back its structure, its buffer
@@ -2358,7 +2406,7 @@ constexpr uint32_t kTlasThreadsPerGroup = 64u;   // rq_tlas_write.comp's local_s
 VkDescriptorBufferInfo rawBufferInfo(Ogre::UavBufferPacked *b);   // below, with the hit list's
 }   // namespace
 
-void RayQueryTier::SceneAs::Feed::take(uint32_t slot, const Rec &r, int sign) {
+void RayQueryTier::SceneAs::Feed::take(uint32_t slot, const Rec &r, int sign, bool withKeys) {
     if (r.rigged) {
         if (sign > 0) rigged.insert(slot); else rigged.erase(slot);
     }
@@ -2368,15 +2416,20 @@ void RayQueryTier::SceneAs::Feed::take(uint32_t slot, const Rec &r, int sign) {
     if (r.kind == 1u) {
         traced = sign > 0 ? traced + 1u : (traced ? traced - 1u : 0u);
         for (const uint32_t level : { r.nearLevel, r.farLevel }) {
+            if (!withKeys) break;
             const BlasKey key{ r.mesh, level };
             if (sign > 0) {
                 KeyRef &k = keys[key];
-                ++k.count;
+                if (++k.count == 1u) keyEvents.push_back({ key, r.meshIndex, true });
                 k.meshIndex = r.meshIndex;
             } else {
                 auto it = keys.find(key);
-                if (it != keys.end() && (it->second.count <= 1u)) keys.erase(it);
-                else if (it != keys.end()) --it->second.count;
+                if (it != keys.end() && (it->second.count <= 1u)) {
+                    keys.erase(it);
+                    keyEvents.push_back({ key, r.meshIndex, false });
+                } else if (it != keys.end()) {
+                    --it->second.count;
+                }
             }
         }
         if (r.coarse > 0.0f) {
@@ -2403,8 +2456,8 @@ void RayQueryTier::SceneAs::Feed::gpuSlotChanged(uint32_t slot, const detail::Gp
         // table row; any other has none.
         uint32_t f = 0u;
         if (now) std::memcpy(&f, &now->boundsMax[3], sizeof(f));
-        if ((f & detail::kGpuRayTraced) && (f & detail::kGpuAlphaTested)) alpha.insert(slot);
-        else alpha.erase(slot);
+        if ((f & detail::kGpuRayTraced) && (f & detail::kGpuAlphaTested)) { alpha.insert(slot); alphaDirty = true; }
+        else if (alpha.erase(slot)) alphaDirty = true;
     }
     words.set(slot, now ? now->raster[0] : detail::WordCounts::kNone);
     Rec next;
@@ -2438,8 +2491,13 @@ void RayQueryTier::SceneAs::Feed::gpuSlotChanged(uint32_t slot, const detail::Gp
     if (slot >= recs.size()) recs.resize(size_t(slot) + 1u);
     Rec &was = recs[slot];
     if (!was.sameKeys(next)) structDirty = true;
-    take(slot, was, -1);
-    take(slot, next, +1);
+    // THE KEYS ONLY WHEN THEY CHANGED (ENGINE-UPGRADE-U5 stage 3): a slot that moved and kept its mesh
+    // and its levels references the same structures - taking them out and back would pass their count
+    // through zero and file a removal and an addition for nothing.
+    const bool keysSame = was.kind == 1u && next.kind == 1u && was.mesh == next.mesh &&
+                          was.nearLevel == next.nearLevel && was.farLevel == next.farLevel;
+    take(slot, was, -1, !keysSame);
+    take(slot, next, +1, !keysSame);
     // THE NEAR COPY'S ROW. A rigged slot's row is its skin cache's, written by the
     // gather from the ready caches (writeTlasInputs); it keeps the one it has here.
     if (rows) {
@@ -2464,6 +2522,9 @@ void RayQueryTier::SceneAs::Feed::gpuSceneReset() {
     coarse.clear();
     traced = 0u;
     structDirty = true;
+    keyEvents.clear();
+    keysReset = true;
+    alphaDirty = true;
     if (rows) rows->clear();
 }
 
@@ -2477,49 +2538,108 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
     detail::GpuScene &gs = scene->gpuScene();
     SceneAs::Feed &fd = sa.feed;
     const uint32_t meshes = gs.meshEntryCount();
-    std::vector<uint32_t> &w = sa.tlasInScratch;
-    const bool meshesCurrent = sa.inputsBlasVersion == sa.blasVersion &&
-                               sa.inputsMeshSerial == gs.meshSetSerial() &&
-                               sa.tlasInWords.size() >= size_t(kTlasHeaderWords) + size_t(meshes) * kTlasMeshWords &&
-                               sa.tlasInWords.size() > 1u && sa.tlasInWords[1] == meshes;
-    w.assign(size_t(kTlasHeaderWords) + size_t(meshes) * kTlasMeshWords, 0u);
-    w[0] = gs.slotCount();
-    w[1] = meshes;
-    w[4] = kRayMaskNear;
-    w[5] = kRayMaskCaster;
-    w[6] = kRayMaskMover;
-    w[7] = kRayMaskStill;
-    w[8] = kRayMaskMoverCaster;
-    w[9] = kRayMaskFar;
-    w[10] = detail::kGpuRayTraced;
-    w[11] = detail::kGpuCaster;
-    w[12] = detail::kGpuMover;
-    w[13] = detail::kGpuSkinned;
-    w[14] = kRayMaskStillCaster;
-    w[15] = detail::kGpuAlphaTested;
-    if (meshesCurrent) {
-        std::copy(sa.tlasInWords.begin() + kTlasHeaderWords,
-                  sa.tlasInWords.begin() + kTlasHeaderWords + ptrdiff_t(meshes) * kTlasMeshWords,
-                  w.begin() + kTlasHeaderWords);
-    } else {
-        for (uint32_t m = 0; m < meshes; ++m) {
-            const Ogre::MeshPtr &mp = gs.meshAt(m);
-            if (!mp) continue;
-            uint32_t *rec = w.data() + kTlasHeaderWords + size_t(m) * kTlasMeshWords;
-            for (uint32_t l = 0; l < kTlasLevels; ++l) {
-                auto it = sa.blasOf.find(BlasKey{ mp.get(), l });
-                const VkDeviceAddress a =
-                    (it != sa.blasOf.end() && it->second < sa.blas.size()) ? sa.blas[it->second].address : 0u;
-                rec[2u * l] = uint32_t(a & 0xFFFFFFFFu);
-                rec[2u * l + 1u] = uint32_t(a >> 32u);
-            }
-            rec[2u * kTlasLevels] = std::min(coarsestLevelOf(mp.get()), kRayLevels - 1u);
+    const size_t meshWords = size_t(kTlasHeaderWords) + size_t(meshes) * kTlasMeshWords;
+    // ONE MESH'S RECORD: every level's structure address and the coarsest level. A hash find per level.
+    const auto writeRecord = [&](uint32_t m, uint32_t *rec) {
+        const Ogre::MeshPtr &mp = gs.meshAt(m);
+        if (!mp) { std::fill(rec, rec + kTlasMeshWords, 0u); return; }
+        for (uint32_t l = 0; l < kTlasLevels; ++l) {
+            ++sa.st.updateLookups;
+            auto it = sa.blasOf.find(BlasKey{ mp.get(), l });
+            const VkDeviceAddress a =
+                (it != sa.blasOf.end() && it->second < sa.blas.size()) ? sa.blas[it->second].address : 0u;
+            rec[2u * l] = uint32_t(a & 0xFFFFFFFFu);
+            rec[2u * l + 1u] = uint32_t(a >> 32u);
         }
-        sa.inputsBlasVersion = sa.blasVersion;
+        rec[2u * kTlasLevels] = std::min(coarsestLevelOf(mp.get()), kRayLevels - 1u);
+        for (uint32_t k = 2u * kTlasLevels + 1u; k < kTlasMeshWords; ++k) rec[k] = 0u;
+        ++sa.st.updateRows;
+    };
+    // THE PER-MESH RECORDS ARE PATCHED, NOT REBUILT (ENGINE-UPGRADE-U5 stage 3). They used to be
+    // re-written WHOLE - a hash find per mesh per level and the submesh walk of each - whenever the BLAS
+    // set's version moved, which on a walk is every frame a level is built (56 % of the tier's update on
+    // Bistro's B walk). Now a mesh's record is re-written when ITS structures changed (dirtyMeshRows: a
+    // build, a compaction's new address, an eviction) and the whole table only when the mesh SET moved
+    // (its serial) or a failure path asked (inputsNeedFull).
+    const bool full = sa.inputsNeedFull || sa.tlasInWords.size() < kTlasHeaderWords ||
+                      sa.recordedMeshAt.size() * kTlasMeshWords + kTlasHeaderWords > sa.tlasInWords.size();
+    changed = false;
+    if (!full && sa.inputsMeshSerial != gs.meshSetSerial()) {
+        // THE MESH SET MOVED: the table grows or shrinks to the entry count (the tail is re-written below)
+        // and every entry whose mesh changed is re-written - a pointer compare per entry, a record per change.
+        const size_t had = sa.recordedMeshAt.size();
+        sa.tlasInWords.resize(kTlasHeaderWords + had * kTlasMeshWords);   // drop the tail
+        sa.tlasInWords.resize(meshWords, 0u);
+        sa.recordedMeshAt.resize(meshes, nullptr);
+        uint32_t rec[kTlasMeshWords];
+        std::vector<const Ogre::Mesh *> writtenMeshes;
+        for (uint32_t m = 0; m < meshes; ++m) {
+            const Ogre::Mesh *mesh = gs.meshAt(m).get();
+            if (m < had && sa.recordedMeshAt[m] == mesh) continue;
+            if (m < had && sa.recordedMeshAt[m]) {
+                ++sa.st.updateLookups;
+                const auto it = sa.meshIndexOf.find(sa.recordedMeshAt[m]);
+                if (it != sa.meshIndexOf.end() && it->second == m) sa.meshIndexOf.erase(it);
+            }
+            if (mesh) { ++sa.st.updateLookups; sa.meshIndexOf[mesh] = m; }
+            writeRecord(m, rec);
+            std::memcpy(sa.tlasInWords.data() + kTlasHeaderWords + size_t(m) * kTlasMeshWords, rec, sizeof(rec));
+            sa.recordedMeshAt[m] = mesh;
+            if (mesh) writtenMeshes.push_back(mesh);
+            changed = true;
+        }
         sa.inputsMeshSerial = gs.meshSetSerial();
+        if (meshes != had) changed = true;
+        // A record just written is current: the dirty pass below need not write it again.
+        std::sort(sa.dirtyMeshRows.begin(), sa.dirtyMeshRows.end());
+        sa.dirtyMeshRows.erase(std::unique(sa.dirtyMeshRows.begin(), sa.dirtyMeshRows.end()), sa.dirtyMeshRows.end());
+        std::sort(writtenMeshes.begin(), writtenMeshes.end());
+        for (const Ogre::Mesh *&mesh : sa.dirtyMeshRows)
+            if (mesh && std::binary_search(writtenMeshes.begin(), writtenMeshes.end(), mesh)) mesh = nullptr;
     }
+    if (full) {
+        std::vector<uint32_t> &w = sa.tlasInScratch;
+        w.assign(meshWords, 0u);
+        for (uint32_t m = 0; m < meshes; ++m) writeRecord(m, w.data() + kTlasHeaderWords + size_t(m) * kTlasMeshWords);
+        sa.meshIndexOf.clear();
+        sa.recordedMeshAt.assign(meshes, nullptr);
+        for (uint32_t m = 0; m < meshes; ++m)
+            if (const Ogre::Mesh *mesh = gs.meshAt(m).get()) { sa.meshIndexOf[mesh] = m; sa.recordedMeshAt[m] = mesh; }
+        sa.inputsMeshSerial = gs.meshSetSerial();
+        sa.inputsNeedFull = false;
+        sa.tlasInWords.swap(w);          // the header and the tail are written below, in place
+        sa.tlasInWords.resize(meshWords);
+        changed = true;
+    } else {
+        // IN PLACE: only the dirty meshes' records, each compared before it is written. (A dropped tail
+        // above leaves the table exactly the records; the tail is put back below.)
+        if (sa.tlasInWords.size() < meshWords) sa.tlasInWords.resize(meshWords, 0u);
+        uint32_t rec[kTlasMeshWords];
+        for (const Ogre::Mesh *mesh : sa.dirtyMeshRows) {
+            if (!mesh) continue;
+            ++sa.st.updateLookups;
+            const auto it = sa.meshIndexOf.find(mesh);
+            if (it == sa.meshIndexOf.end() || it->second >= meshes) continue;
+            writeRecord(it->second, rec);
+            uint32_t *dst = sa.tlasInWords.data() + kTlasHeaderWords + size_t(it->second) * kTlasMeshWords;
+            if (std::memcmp(dst, rec, sizeof(rec)) != 0) {
+                std::memcpy(dst, rec, sizeof(rec));
+                changed = true;
+            }
+        }
+    }
+    sa.dirtyMeshRows.clear();
+    sa.inputsBlasVersion = sa.blasVersion;
+    // THE HEADER, written in place.
+    const uint32_t head[kTlasHeaderWords] = { gs.slotCount(), meshes, 0u, 0u,
+                                              kRayMaskNear, kRayMaskCaster, kRayMaskMover, kRayMaskStill,
+                                              kRayMaskMoverCaster, kRayMaskFar, detail::kGpuRayTraced,
+                                              detail::kGpuCaster, detail::kGpuMover, detail::kGpuSkinned,
+                                              kRayMaskStillCaster, detail::kGpuAlphaTested };
     // THE READY RIGGED SLOTS (the skin pass just ran: sa.skinUse is this frame's),
-    // and their rows — O(rigged items).
+    // and their rows — O(rigged items): the tail, past the mesh records.
+    std::vector<uint32_t> &tail = sa.tlasInScratch;
+    tail.clear();
     skinReady = 0u;
     if (sa.geomRowOfSlot.size() < gs.slotCount())
         sa.geomRowOfSlot.resize(gs.slotCount(), detail::GpuScene::kNoGeomRow);
@@ -2527,25 +2647,33 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
         if (slot >= gs.slotCount()) continue;
         auto it = sa.skinUse.find(gs.entry(slot).ids[0]);
         if (it == sa.skinUse.end()) {
+            if (sa.geomRowOfSlot[slot] != detail::GpuScene::kNoGeomRow && fd.alpha.count(slot)) fd.alphaDirty = true;
             sa.geomRowOfSlot[slot] = detail::GpuScene::kNoGeomRow;
             continue;
         }
-        w.push_back(slot);
-        w.push_back(uint32_t(it->second.first & 0xFFFFFFFFu));
-        w.push_back(uint32_t(it->second.first >> 32u));
-        w.push_back(0u);
+        tail.push_back(slot);
+        tail.push_back(uint32_t(it->second.first & 0xFFFFFFFFu));
+        tail.push_back(uint32_t(it->second.first >> 32u));
+        tail.push_back(0u);
+        if (sa.geomRowOfSlot[slot] != it->second.second && fd.alpha.count(slot)) fd.alphaDirty = true;
         sa.geomRowOfSlot[slot] = it->second.second;
         ++skinReady;
     }
-    w[2] = skinReady;
     // The rows past the slot count describe nothing (a freed tail).
     if (sa.geomRowOfSlot.size() > gs.slotCount()) sa.geomRowOfSlot.resize(gs.slotCount());
-
-    changed = w != sa.tlasInWords;
-    if (changed) {
-        sa.tlasInWords.swap(w);
-        ++sa.inputsVersion;
+    uint32_t *words = sa.tlasInWords.data();
+    for (uint32_t k = 0; k < kTlasHeaderWords; ++k) {
+        const uint32_t v = k == 2u ? skinReady : head[k];
+        if (words[k] != v) { words[k] = v; changed = true; }
     }
+    const size_t oldTail = sa.tlasInWords.size() - meshWords;
+    if (oldTail != tail.size() ||
+        (!tail.empty() && std::memcmp(sa.tlasInWords.data() + meshWords, tail.data(), tail.size() * 4u) != 0)) {
+        sa.tlasInWords.resize(meshWords);
+        sa.tlasInWords.insert(sa.tlasInWords.end(), tail.begin(), tail.end());
+        changed = true;
+    }
+    if (changed) ++sa.inputsVersion;
     (void)err;
     return true;
 }
@@ -2891,6 +3019,7 @@ bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<BlasWant> &wants,
         // and rendered the world as copies of the first mesh).
         j.slot = sa.blas.size();
         sa.blasOf[BlasKey{ j.mesh.get(), j.level }] = j.slot;
+        sa.dirtyMeshRows.push_back(j.mesh.get());   // its record gains this level's address (stage 3)
         sa.blas.push_back(std::move(bl));
         builds.push_back(j.build);
         rangePtrs.push_back(j.geo.ranges.data());
@@ -3025,6 +3154,7 @@ bool RayQueryTier::runCompaction(SceneAs &sa, VkCommandBuffer cmd) {
         // The TLAS references the OLD address until it is rebuilt: the inputs'
         // version moves, so the job re-writes the instances and the build is full.
         ++sa.blasVersion;
+        sa.dirtyMeshRows.push_back(bl.mesh.get());   // its record carries the new address (stage 3)
         compacted_any = true;
     }
     return compacted_any;
@@ -3638,6 +3768,9 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     SceneAs &sa = asFor(scene);
     sa.st.available = true;
     sa.st.enabled = true;
+    // THE FRAME'S HOST WORK, COUNTED (stage 3: engine.ray_update_counts), from zero.
+    sa.st.updateLookups = 0ull;
+    sa.st.updateRows = 0ull;
 
     // THE GATE. The caster walk's epoch — the host's transform-write counter
     // plus the engine's own writes plus the pushed shape events — is exactly
@@ -3762,44 +3895,74 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     detail::GpuScene &gs = scene->gpuScene();
     const uint32_t slots = gs.slotCount();
     {
-        // 1. THE STRUCTURES THE SET REFERENCES and nobody built yet, ascending by
-        //    (mesh entry, level) so the order is the same every run.
-        std::vector<std::pair<std::pair<uint32_t, uint32_t>, BlasWant>> missing;
-        for (const auto &kv : fd.keys) {
-            if (!kv.second.count || sa.blasOf.count(kv.first)) continue;
-            const Ogre::MeshPtr &mp = gs.meshAt(kv.second.meshIndex);
-            if (!mp || mp.get() != kv.first.mesh) continue;
-            missing.push_back({ { kv.second.meshIndex, kv.first.level }, BlasWant{ mp, kv.first.level } });
+        // 1. THE KEY EVENTS (ENGINE-UPGRADE-U5 stage 3): what the change feed saw since the last update
+        //    - a (mesh, level) the set began or stopped referencing - applied to the structures, and
+        //    the ones referenced and not built yet kept in `sa.missing` (ascending by (mesh entry,
+        //    level), the order the builds run in). The two scans over EVERY key that were here (the
+        //    missing scan and a lastSeen stamp, a hash find each, every moved frame: 27 % of the tier's
+        //    update on Bistro's walk) are gone: the work is one lookup per event.
+        if (fd.keysReset) {
+            for (Blas &bl : sa.blas)
+                if (bl.referenced) { bl.referenced = false; bl.lastSeen = frame ? frame : 1u; }
+            sa.missing.clear();
+            fd.keysReset = false;
         }
-        std::sort(missing.begin(), missing.end(),
-                  [](const auto &x, const auto &y) { return x.first < y.first; });
-        if (!missing.empty()) {
-            std::vector<BlasWant> wants;
-            wants.reserve(missing.size());
-            for (auto &m : missing) wants.push_back(m.second);
-            unsigned built = 0;
-            monitor::CacheScope scope(CacheKind::Gi, WorkReason::Added, 0, "rq.blas", mRs, &sa);
-            if (!ensureBlas(sa, wants, cmd, built, err)) {
-                Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
-                scope.cancel();
-                // The TLAS goes with the failure: compaction may already have
-                // retired structures it references, and a scene that stops
-                // moving would keep that half-built tree for ever (finding 6).
-                retire(sa.tlas, sa.tlasStorage);
-                ++sa.blasVersion;
-                sa.st.enabled = false;
-                return;
+        for (const SceneAs::Feed::KeyEvent &ev : fd.keyEvents) {
+            ++sa.st.updateLookups;
+            const auto it = sa.blasOf.find(ev.key);
+            const bool have = it != sa.blasOf.end() && it->second < sa.blas.size();
+            if (ev.added) {
+                if (have) sa.blas[it->second].referenced = true;
+                else sa.missing[{ ev.meshIndex, ev.key.level }] = ev.key.mesh;
+            } else {
+                if (have) {
+                    Blas &bl = sa.blas[it->second];
+                    bl.referenced = false;
+                    bl.lastSeen = frame ? frame : 1u;
+                }
+                sa.missing.erase({ ev.meshIndex, ev.key.level });
             }
-            scope.setUnits(built);
-            sa.st.blasBuilds += built;
-            if (built) ++sa.blasVersion;
         }
-        // Every structure the set still references was SEEN this frame
-        // (evictStaleBlas' clock) — O(keys), never O(instances).
-        for (const auto &kv : fd.keys) {
-            if (!kv.second.count) continue;
-            auto it = sa.blasOf.find(kv.first);
-            if (it != sa.blasOf.end() && it->second < sa.blas.size()) sa.blas[it->second].lastSeen = frame;
+        fd.keyEvents.clear();
+        if (!sa.missing.empty()) {
+            std::vector<BlasWant> wants;
+            std::vector<BlasKey> wantKeys;
+            std::vector<std::pair<uint32_t, uint32_t>> wantEntries;
+            wants.reserve(sa.missing.size());
+            for (const auto &m : sa.missing) {
+                const Ogre::MeshPtr &mp = gs.meshAt(m.first.first);
+                if (!mp || mp.get() != m.second) continue;   // the entry moved: retried once it is named again
+                wants.push_back(BlasWant{ mp, m.first.second });
+                wantKeys.push_back(BlasKey{ m.second, m.first.second });
+                wantEntries.push_back(m.first);
+            }
+            unsigned built = 0;
+            if (!wants.empty()) {
+                monitor::CacheScope scope(CacheKind::Gi, WorkReason::Added, 0, "rq.blas", mRs, &sa);
+                if (!ensureBlas(sa, wants, cmd, built, err)) {
+                    Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
+                    scope.cancel();
+                    // The TLAS goes with the failure: compaction may already have
+                    // retired structures it references, and a scene that stops
+                    // moving would keep that half-built tree for ever (finding 6).
+                    retire(sa.tlas, sa.tlasStorage);
+                    ++sa.blasVersion;
+                    sa.inputsNeedFull = true;
+                    sa.st.enabled = false;
+                    return;
+                }
+                scope.setUnits(built);
+                sa.st.blasBuilds += built;
+                if (built) ++sa.blasVersion;
+            }
+            // WHAT WAS BUILT IS REFERENCED (it was wanted because it is), and no longer missing.
+            for (size_t k = 0; k < wantKeys.size(); ++k) {
+                ++sa.st.updateLookups;
+                const auto it = sa.blasOf.find(wantKeys[k]);
+                if (it == sa.blasOf.end() || it->second >= sa.blas.size()) continue;
+                sa.blas[it->second].referenced = true;
+                sa.missing.erase(wantEntries[k]);
+            }
         }
     }
     // 2. THE JOB'S INPUTS (and the rigged slots' rows), then 3. THE DISPATCH.
@@ -3811,6 +3974,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
         retire(sa.tlas, sa.tlasStorage);
         ++sa.blasVersion;
+        sa.inputsNeedFull = true;
         sa.st.enabled = false;
         return;
     }
@@ -3840,6 +4004,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                 // moving would keep that half-built tree for ever (finding 6).
                 retire(sa.tlas, sa.tlasStorage);
                 ++sa.blasVersion;
+                sa.inputsNeedFull = true;
                 sa.st.enabled = false;
                 return;
             }
@@ -5985,6 +6150,7 @@ int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float thresh
     if (stale >= 0) {
         retire(mAlphaMasks[size_t(stale)].bits);
         mAlphaMasks.erase(mAlphaMasks.begin() + stale);
+        ++mAlphaMaskEpoch;   // a table naming it is re-written (stage 3)
     }
     if (tex->getResidencyStatus() != Ogre::GpuResidency::Resident || !tex->isDataReady()) return -1;
     if (tex->getTextureType() != Ogre::TextureTypes::Type2D &&
@@ -6087,21 +6253,46 @@ int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float thresh
                          0, nullptr, 0, nullptr);
     --budget;
     m.lastUsed = now;
+    m.id = mNextAlphaMaskId++;
+    ++mAlphaMaskEpoch;
     mAlphaMasks.push_back(std::move(m));
     return int(mAlphaMasks.size() - 1u);
 }
 
 void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
     const uint32_t now = frameNow();
-    // FORGET THE IDLE MASKS (no scene asked for one in kAlphaMaskIdleFrames).
+    // FORGET THE IDLE MASKS (no scene asked for one in kAlphaMaskIdleFrames, and no table names one).
     for (size_t i = 0; i < mAlphaMasks.size();) {
-        if (uint32_t(now - mAlphaMasks[i].lastUsed) > kAlphaMaskIdleFrames) {
+        if (!mAlphaMasks[i].users && uint32_t(now - mAlphaMasks[i].lastUsed) > kAlphaMaskIdleFrames) {
             retire(mAlphaMasks[i].bits);
             mAlphaMasks.erase(mAlphaMasks.begin() + ptrdiff_t(i));
+            ++mAlphaMaskEpoch;
         } else {
             ++i;
         }
     }
+    // THE TABLE IS RE-WRITTEN ONLY WHEN ITS INPUTS MOVED (ENGINE-UPGRADE-U5 stage 3; it was re-derived
+    // every frame - a slot view and every submesh's datablock per alpha-tested slot, 9 % of the tier's
+    // update on Bistro's walk): the alpha-tested slots or their rows (the feed), a material edit (the
+    // writer's serial), a mask made or dropped, a texture's texels (the upload serial: a mask follows
+    // its content), the row buffer's address, or a mask still pending last time.
+    Ogre::VaoManager *vaoMgrGate = mRs ? mRs->getVaoManager() : nullptr;
+    {
+        detail::GpuScene &gsg = scene->gpuScene();
+        const uint64_t rowsGate = (gsg.live() && gsg.geomBuffer() && vaoMgrGate)
+                                      ? vaoMgrGate->getBufferDeviceAddress(gsg.geomBuffer()) : 0u;
+        const unsigned long long matSerial = scene->photon().materialEditSerial();
+        const unsigned long long uploads = scene->textureUploadSerial();
+        if (!sa.feed.alphaDirty && !sa.alphaPending && matSerial == sa.alphaMaterialSerial &&
+            mAlphaMaskEpoch == sa.alphaMaskEpoch && uploads == sa.alphaUploadSerial && rowsGate == sa.alphaRowsAddress)
+            return;
+        sa.feed.alphaDirty = false;
+        sa.alphaMaterialSerial = matSerial;
+        sa.alphaUploadSerial = uploads;
+        sa.alphaRowsAddress = rowsGate;
+    }
+    sa.alphaPending = false;
+    std::vector<unsigned long long> maskIds;
     std::vector<uint32_t> &w = sa.alphaScratch;
     w.clear();
     const std::set<uint32_t> &slots = sa.feed.alpha;
@@ -6141,6 +6332,7 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
                                                             detail::GpuScene::kSubmeshesPerMesh));
             w[4u + slot] = uint32_t(w.size());
             ++w[1];
+            ++sa.st.updateRows;
             const uint32_t head[4] = { nearRow, farRow, subs, 0u };
             w.insert(w.end(), head, head + 4);
             for (uint32_t g = 0; g < subs; ++g) {
@@ -6162,8 +6354,10 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
                         const int mi = alphaMaskFor(tex, uint32_t(cmp), thr, budget);
                         if (mi < 0) {
                             flags = kAlphaPending;
+                            sa.alphaPending = true;      // re-written next frame, until it is made
                         } else {
                             const AlphaMask &m = mAlphaMasks[size_t(mi)];
+                            maskIds.push_back(m.id);
                             e[0] = uint32_t(m.address & 0xFFFFFFFFu);
                             e[1] = uint32_t(m.address >> 32u);
                             e[2] = (m.w & 0xFFFFu) | ((m.h & 0xFFFFu) << 16u);
@@ -6187,6 +6381,15 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
             }
         }
     }
+    // THE MASKS THE TABLE NAMES, counted (after the build: alphaMaskFor may have made or dropped some).
+    sa.alphaMaskEpoch = mAlphaMaskEpoch;
+    std::sort(maskIds.begin(), maskIds.end());
+    maskIds.erase(std::unique(maskIds.begin(), maskIds.end()), maskIds.end());
+    for (AlphaMask &m : mAlphaMasks) {
+        if (std::binary_search(sa.alphaMaskIds.begin(), sa.alphaMaskIds.end(), m.id) && m.users) --m.users;
+        if (std::binary_search(maskIds.begin(), maskIds.end(), m.id)) ++m.users;
+    }
+    sa.alphaMaskIds.swap(maskIds);
     if (w == sa.alphaWords) return;
     retire(sa.alphaTable);
     sa.alphaAddress = 0;
@@ -6236,6 +6439,23 @@ constexpr unsigned kHitLightWords = 32u;
 }   // namespace
 
 void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
+    // RE-WRITTEN ONLY WHEN ITS INPUTS MOVED (ENGINE-UPGRADE-U5 stage 3; it was re-derived every frame):
+    // the lights (the scene's light-write serial: a light set, added, removed, or its node moved -
+    // every lamp move names itself there, OgreGi's nameMovedSubtrees), the material store's rows (their
+    // serial) and the material edits; a published table stays otherwise - a mover that is no light
+    // re-writes nothing.
+    {
+        const Ogre::PhotonVoxelMaterial *storeGate = scene->photon().materials();
+        const unsigned long long lights = scene->lightWriteSerial();
+        const unsigned long long rows = storeGate ? storeGate->getRowsSerial() : 0ull;
+        const unsigned long long edits = scene->photon().materialEditSerial();
+        if (sa.hitTableAddress && lights == sa.hitLightSerial &&
+            rows == sa.hitRowsSerial && edits == sa.hitMaterialSerial)
+            return;
+        sa.hitLightSerial = lights;
+        sa.hitRowsSerial = rows;
+        sa.hitMaterialSerial = edits;
+    }
     std::vector<uint32_t> &w = sa.hitScratch;
     w.assign(4u, 0u);
     auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, sizeof u); return u; };
@@ -6281,6 +6501,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
             }
             for (float f : L) w.push_back(bits(f));
             ++nLights;
+            ++sa.st.updateRows;
         }
     }
     const Ogre::PhotonVoxelMaterial *store = scene->photon().materials();
@@ -6290,6 +6511,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         const auto &rows = store->getRowWords();
         nRows = uint32_t(rows.size() / Ogre::PhotonVoxelMaterial::kRowWords);
         w.insert(w.end(), rows.begin(), rows.end());
+        sa.st.updateRows += nRows;
     }
     w[0] = nLights;
     w[1] = nRows;

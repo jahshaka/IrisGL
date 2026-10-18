@@ -201,6 +201,7 @@ namespace Ogre
             mRowWords.resize( ( size_t( out.bucketIdx ) + 1u ) * kRowsPerBucket * kRowWords, 0u );
         shaderMaterial.padding0 = ( diffuseTex ? kRowHasDiffuseTex : 0u ) | ( emissiveTex ? kRowHasEmissiveTex : 0u );
         memcpy( &mRowWords[at], &shaderMaterial, sizeof( shaderMaterial ) );
+        ++mRowsSerial;
     }
     //-------------------------------------------------------------------------
     PhotonVoxelMaterial::DatablockConversionResult PhotonVoxelMaterial::addDatablockToBucket( HlmsDatablock *datablock,

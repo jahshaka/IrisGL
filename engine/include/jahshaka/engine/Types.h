@@ -4903,6 +4903,13 @@ struct RayQueryStatus {
     /// a still frame adds none).
     unsigned long long tlasJobDispatches = 0ull;
     unsigned long long feedSlotVisits = 0ull;
+    /// THE LAST FRAME'S HOST WORK, COUNTED (ENGINE-UPGRADE-U5 stage 3; engine.ray_update_counts): the hash
+    /// lookups the tier's update made (its BLAS map, its key and mesh indices) and the table rows it wrote
+    /// (the job's per-mesh records, the alpha table's slot rows, the hit table's light and material rows).
+    /// Both are 0 in a frame in which nothing the tables describe changed, and O(changes) in one that did:
+    /// the tables are patched by what changed, never rebuilt.
+    unsigned long long updateLookups = 0ull;
+    unsigned long long updateRows = 0ull;
     /// True when the last top-level update was a REFIT rather than a full
     /// rebuild. The default is a rebuild (NVIDIA's own guidance for a TLAS;
     /// 0.5 ms at 8k instances buys the better tree); the refit is the
@@ -5186,7 +5193,8 @@ struct GiVoxelStats {
     /// at-rest sweep IS the chain's fixed point (gi.chain_converge).
     std::string lightDigest;
     /// THE VOXELISER'S STORE, hashed the same way (ENGINE-UPGRADE-U5 stage 2): level 0 of the albedo,
-    /// the emissive, the normal, the coverage and the surface position per half - what a build WRITES,
+    /// the emissive, the normal, the coverage and the surface position per half, the area weight and the
+    /// position sums (all nine volumes a build writes) - what a build WRITES,
     /// independent of the light's history - so two builds of one place compare by 16 hex digits (the
     /// voxeliser's work partition proved bit for bit on a real scene, ENGINE-UPGRADE-U5 stage 2).
     std::string storeDigest;

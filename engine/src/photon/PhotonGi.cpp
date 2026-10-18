@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -1530,8 +1531,10 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
             // build writes - level 0 of the albedo, emissive, normal, coverage and position per half.
             if (voxelizer) {
                 const Ogre::PhotonVoxelizer::VolumeSet vs = voxelizer->liveVolumes();
-                Ogre::TextureGpu *store[7] = { vs.albedo, vs.emissive, vs.normal, vs.coverage[0], vs.coverage[1],
-                                               vs.position[0], vs.position[1] };
+                // ALL NINE (decision 12.2): the raw integers too - the area weight and the position sums, the two
+                // volumes a build's integer sums write directly.
+                Ogre::TextureGpu *store[9] = { vs.albedo, vs.emissive, vs.normal, vs.coverage[0], vs.coverage[1],
+                                               vs.position[0], vs.position[1], vs.accumVal, vs.positionSums };
                 Ogre::uint64 hs = 1469598103934665603ull;
                 bool ok = true;
                 for (Ogre::TextureGpu *tex : store) {
@@ -1833,6 +1836,7 @@ bool PhotonComponent::giMaterialChangeEffect(MaterialId id, bool voxelInputsChan
 }
 
 void PhotonComponent::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
+    ++mMaterialEditSerial;   // every edit, before any early answer: the ray tier's alpha table reads it
     // THE SURFACE CACHE'S ONE INVALIDATION HOOK (SURFACE-CACHE phase 2), and
     // it is deliberately BEFORE the GI effect test: a card holds a picture of a
     // surface, so ANY change to what that surface looks like stales it —
@@ -4622,6 +4626,25 @@ void PhotonComponent::recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos
                              float(double(c.latticeY) * double(cell)),
                              float(double(c.latticeZ) * double(cell)));
     c.builtCam = camPos;
+#ifndef NDEBUG
+    // THE LATTICE THE VOXELISER'S EXACTNESS RESTS ON (ENGINE-UPGRADE-U5 decision 12.4; the piece's note at
+    // its per-lane group-box cull): the cell a SHORT DYADIC RATIONAL (at most 12 significant bits - every
+    // shipped cell is: 10/128, 20/128, 30/64, 120/64 m) and the box's corner an EXACT multiple of it, so
+    // origin + cell x id is exact for every voxel. A non-dyadic placement is a bug, not a case.
+    {
+        int e = 0;
+        const double mantissa = std::ldexp(std::frexp(double(cell), &e), 24);
+        assert(mantissa == std::floor(mantissa) && std::fmod(mantissa, 4096.0) == 0.0 &&
+               "a cascade's cell is a short dyadic rational");
+        const Ogre::Vector3 lo = c.centre - Ogre::Vector3(c.halfSize);
+        for (int a = 0; a < 3; ++a) {
+            const double q = double(lo[size_t(a)]) / double(cell);
+            assert(q == std::floor(q) && "a cascade's corner is an exact multiple of its cell");
+            (void)q;
+        }
+        (void)mantissa;
+    }
+#endif
     if (c.voxelizer)
         c.voxelizer->setRegionToVoxelize(Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)));
 }
@@ -4942,6 +4965,8 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
     // ...AND A SCROLL WHOSE COMMIT LANDED IS OVER, whatever threw after it: the live volumes hold
     // the target and the placement moved with them. (One that threw before is dropped by the caller.)
     if (!ok && built && scroll) c.scroll = VctCascade::Scroll();
+    // ...AND A WHOLE BUILD WHOSE VOXELS LANDED made the live store one box's, whatever threw after (12.3).
+    if (!ok && built && !scroll) c.liveTorn = false;
     c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - t0).count());
     if (!ok) {
@@ -5584,7 +5609,8 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
                         ") - the scroll is dropped, the next frame plans it again, and a second "
                         "failure stands the cascade down until the camera moves again");
                 }
-                if (++c.failures >= 2u) { c.pending = 0; c.pendingSince = 0; }
+                // (A TORN STORE IS NEVER STOOD DOWN, decision 12.1: it stays owed its whole rebuild.)
+                if (++c.failures >= 2u && !c.liveTorn) { c.pending = 0; c.pendingSince = 0; }
             }
             spent = true;
             continue;
@@ -5643,7 +5669,9 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
                 staleTop = std::max(staleTop, (long long)i);   // ...and their light is not
             }
             spent = true;                          // the frame paid for it either way
-            if (++c.failures >= 2u) { c.pending = 0; c.pendingSince = 0; } // ...otherwise `pending` stays set
+            // ...otherwise `pending` stays set - and ALWAYS while the live store is torn (decision 12.1: the stand-down
+            // is refused, never the count; a torn store stays owed the whole rebuild that is its only repair).
+            if (++c.failures >= 2u && !c.liveTorn) { c.pending = 0; c.pendingSince = 0; }
             continue;
         }
         c.failures = 0;

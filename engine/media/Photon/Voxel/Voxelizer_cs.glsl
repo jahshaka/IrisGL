@@ -14,7 +14,6 @@
 @insertpiece( DeclUavCrossPlatform )
 
 @piece( CustomGlslExtensions )
-	#extension GL_ARB_shader_group_vote: require
 	// Jahshaka (ATOM P4): the geometry is read where the raster keeps it, through
 	// buffer device addresses - see the JahGeomRows piece. The uvec2 form is
 	// deliberate: shaderInt64 is not an enabled device feature.
@@ -22,40 +21,8 @@
 	#extension GL_EXT_buffer_reference_uvec2: require
 @end
 
-@property( !vendor_shader_extension )
-	// We are emulating anyInvocationARB because for it to work
-	// correctly we need the following guarantees:
-	//	1. gl_SubGroupSizeARB is known beforehand and all lanes [0; gl_SubGroupSizeARB) are always active
-	//	2. VK_EXT_subgroup_size_control to enforce 1
-	//	3. REQUIRE_FULL_SUBGROUPS_BIT_EXT to ensure all lanes are occupied the way we need
-	//     (perfect lockstep)
-	//
-	// See https://github.com/KhronosGroup/GLSL/issues/19#issuecomment-881931582
-	// See https://forums.ogre3d.org/viewtopic.php?p=551000#p551000
-	shared bool g_emulatedGroupVote[64];
-
-	bool emulatedAnyInvocationARB( bool value )
-	{
-		g_emulatedGroupVote[gl_LocalInvocationIndex] = value;
-
-		for( uint i=0u; i<6u; ++i )
-		{
-			__sharedOnlyBarrier;
-			uint nextIdx = gl_LocalInvocationIndex + (1u << i);
-			uint mask = (1u << (i+1u)) - 1u;
-			if( ( gl_LocalInvocationIndex & mask ) == 0u )
-			{
-				g_emulatedGroupVote[gl_LocalInvocationIndex] =
-					g_emulatedGroupVote[gl_LocalInvocationIndex] || g_emulatedGroupVote[nextIdx];
-			}
-		}
-
-		__sharedOnlyBarrier;
-		return g_emulatedGroupVote[0];
-	}
-
-	#define anyInvocationARB( value ) emulatedAnyInvocationARB( value )
-@end
+// (THE GROUP VOTE AND ITS EMULATION ARE DELETED, ENGINE-UPGRADE-U5 decision 12.5: a lane owns a triangle and
+// skips it by its own box, Voxelizer_piece_cs.any.)
 
 // Jahshaka (ENGINE-UPGRADE-U5 stage 2): THE GROUP'S PER-VOXEL SUMS (Voxelizer_piece_cs.any, the work
 // partition): 33 integers for each of the 64 voxels - albedo 4, the raw and the folded normal 3 + 3, the

@@ -590,6 +590,9 @@ public:
     /// from what moves when an injection LANDS (the chain's settles, each
     /// cascade's rebuilds and lattice cell).
     unsigned long long giLightingSerial() const;
+    /// EVERY MATERIAL EDIT the scene's writer reports (noteMaterialChanged), counted (ENGINE-UPGRADE-U5
+    /// stage 3): the ray tier re-writes its alpha table only when this, its slots or its masks moved.
+    unsigned long long materialEditSerial() const { return mMaterialEditSerial; }
     bool refreshGiLighting(bool inMotion);
     /// The SAME contract for the hybrid's reflection-probe arm, and the fix for
     /// SHADOW_TOOLING_SPEC.md risk R3: when the probe captures are SHADOWED,
@@ -1294,6 +1297,7 @@ private:
     unsigned long long mCascadeDirtyMajority = 0;
     /// Scrolls dropped before their commit (an edit reached them, or a step threw) - cumulative.
     unsigned long long mCascadeScrollAborts = 0;
+    unsigned long long mMaterialEditSerial = 0;
     /// THE SCROLL TARGETS, one per volume size the chain holds (ENGINE-UPGRADE-U5 stage 1):
     /// built with the chain, destroyed with it.
     std::vector<std::unique_ptr<Ogre::PhotonVoxelScroll>> mScrollTargets;

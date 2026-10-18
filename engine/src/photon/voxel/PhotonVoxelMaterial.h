@@ -102,6 +102,8 @@ namespace Ogre
 
         vector<uint32>::type mRowWords;
 
+        unsigned long long mRowsSerial = 0ull;
+
         DatablockConversionResult addDatablockToBucket( HlmsDatablock  *datablock,
                                                         MaterialBucket &bucket );
         /// The one conversion: writes `datablock`'s row at `slot` of `bucket` and fills
@@ -197,6 +199,9 @@ namespace Ogre
         static constexpr uint32 kRowHasDiffuseTex = 1u;
         static constexpr uint32 kRowHasEmissiveTex = 2u;
         const vector<uint32>::type &getRowWords() const { return mRowWords; }
+        /// Jahshaka (ENGINE-UPGRADE-U5 stage 3): moves with every row written - the ray tier's hit table
+        /// re-copies the rows only when it moved.
+        unsigned long long getRowsSerial() const { return mRowsSerial; }
 
         /// Are the temp resources up? A store shared by a whole chain is bracketed ONCE
         /// per rebuild by its owner, so a voxelizer's build can assert it rather than

@@ -495,7 +495,7 @@
 	// Jahshaka (ENGINE-UPGRADE-U5 stage 1): THE BOUNDS GUARD. A dispatch covers its octant in 4^3
 	// groups rounded UP, so an octant whose size is not a multiple of four (a scroll's entering slab:
 	// the step in cells) has lanes past its edge. They run the loop below like every other lane -
-	// the group vote needs all 64 - and write nothing: the voxel they would write belongs to the
+	// their triangles' clips reach in-octant voxels too - and write nothing: the voxel they would write belongs to the
 	// copied part of the volume or lies outside it. Upstream's check_out_of_bounds, the same test.
 	bool voxelInBounds = gl_GlobalInvocationID.x < p_voxelPixelsToWrite.x &&
 							   gl_GlobalInvocationID.y < p_voxelPixelsToWrite.y &&
@@ -559,7 +559,7 @@
 
 	// THE RECORDS OF THIS (octant, bucket), as the host's gather wrote them on the
 	// device: (start, count) into the instance buffer. Dynamically uniform - every
-	// lane reads the same range - which the emulated group vote below relies on.
+	// lane reads the same range.
 	uint2 instanceRange = ranges[p_rangeIdx];
 	// Jahshaka (ENGINE-UPGRADE-U5 stage 2): THE WORK PARTITION - A TRIANGLE PER LANE, THE SUMS IN
 	// GROUPSHARED. The voxeliser used to give each of the group's 64 lanes ONE VOXEL and loop it over
@@ -570,11 +570,13 @@
 	// of the group its box reaches (most triangles touch 1-8 of the 64), each contribution added with
 	// an atomic into that voxel's GROUPSHARED sums. The sums are EXACT INTEGERS on VoxelMerge's grid -
 	// order-free, whoever adds them - and the arithmetic is the one piece both partitions insert
-	// (VoxelPieceContribution), so the store is the old one bit for bit - proved by gi.scroll_slab's
-	// float-for-float equality, the six hashes, and on Bistro (cascades 2 and 0 built under both
-	// partitions, ABBA: the stores' digests equal; cascade 2 567 -> 31 ms of GPU, cascade 0 65 -> 13).
-	// The reference partition and its arm are deleted.
-	// The group vote, the broadphase, the octants and the buckets are unchanged.
+	// (VoxelPieceContribution), so the store is the old one bit for bit - proved on Bistro (cascades 2
+	// and 0 built whole under the old piece and this one in the same binary: the nine-volume store
+	// digests equal; cascade 2 567 -> 31 ms of GPU, cascade 0 65 -> 13) and by the six hashes.
+	// (gi.scroll_slab's float-for-float equality is this partition against itself: it proves the
+	// scroll, not the partition.)
+	// The reference partition and its arm are deleted; the group vote too (decision 12.5). The
+	// broadphase, the octants and the buckets are unchanged.
 	@foreach( 33, k )
 		g_voxelSums[@k * 64 + gl_LocalInvocationIndex] = 0u;
 	@end
@@ -584,7 +586,7 @@
 	{
 		Instance instance = getInstance( i PARAMS_ARG );
 
-		//Broadphase culling (uniform: every lane runs the same records and batches - the vote needs all 64).
+		//Broadphase culling: the record against the group's box (every lane runs the same records).
 		if( intersects( groupVoxelAabb, instance.bounds ) )
 		{
 			Material material = materials[instance.materialIdx];
@@ -593,37 +595,55 @@
 
 			for( uint triIdxBase=0u; triIdxBase<numTris; triIdxBase += 64u )
 			{
-				//First make the 64 threads check if any of the triangles intersects
-				//against the combined AABB of the 4x4x4 block. If none do, we can skip
-				//64 triangles in one go.
-				uint tmpTriIdx = min( triIdxBase + gl_LocalInvocationIndex, numTris - 1u );
-				Aabb tmpTriAabb = getTriangleAabb( tmpTriIdx, instance.mesh, instance.worldTransform PARAMS_ARG );
-
-				bool groupTriInters = intersects( tmpTriAabb, groupVoxelAabb );
-
-				if( anyInvocationARB( groupTriInters ) )
+				// THE BATCH: lane t owns triangle triIdxBase + t, and the batch's tail ENDS it
+				// (PHOTON-VOXEL-3): a lane past it owns no triangle. NO GROUP VOTE (decision 12.5): it
+				// was the voxel-per-lane loop's batch filter - every lane now skips, by its own
+				// triangle's box, exactly what the vote would have skipped, and the vote's emulation
+				// cost seven barriers a batch.
+				uint numInBatch = min( 64u, numTris - triIdxBase );
+				if( gl_LocalInvocationIndex < numInBatch )
 				{
-					// The batch's tail ENDS the batch (PHOTON-VOXEL-3): a lane past it owns no triangle.
-					uint numInBatch = min( 64u, numTris - triIdxBase );
-					if( gl_LocalInvocationIndex < numInBatch && groupTriInters )
+					uint triIdx = triIdxBase + gl_LocalInvocationIndex;
+					// FETCHED AND TRANSFORMED ONCE (decision 12.6): the box below is made from these
+					// vertices - the arithmetic getTriangleAabb did on a second fetch, value for value.
+					Triangle tri = getTriangle( triIdx, instance.mesh PARAMS_ARG );
+
+					for( uint i=0; i<3u; ++i )
 					{
-						uint triIdx = triIdxBase + gl_LocalInvocationIndex;
-						Triangle tri = getTriangle( triIdx, instance.mesh PARAMS_ARG );
+						tri.v[i] = mul( float4( tri.v[i], 1.0f ), instance.worldTransform );
+						tri.n[i] = mul( tri.n[i], toFloat3x3( instance.worldTransform ) );
+					}
+					const float3 triMin = min( min( tri.v[0], tri.v[1] ), tri.v[2] );
+					const float3 triMax = max( max( tri.v[0], tri.v[1] ), tri.v[2] );
+					Aabb triAabb;
+					triAabb.center		= ( triMin + triMax ) * 0.5f;
+					triAabb.halfSize	= ( triMax - triMin ) * 0.5f;
 
-						for( uint i=0; i<3u; ++i )
+					// THE GROUP'S BOX CULLS A TRIANGLE ONLY WHERE NO CLIP COULD GIVE IT AREA. That is
+					// the exactness of this partition, and it rests on the LATTICE: a cascade's origin
+					// is an exact integer multiple of its cell and the cell a short dyadic rational, so
+					// a voxel's corner origin + cell x id is exact and the group's box is exactly the
+					// union of its 64 voxels - a triangle reaching a voxel with area reaches the box.
+					// The host asserts the lattice where the placement is set (PhotonGi.cpp,
+					// recentreCascade, under JAH_DEBUG): a non-dyadic origin is a bug, not a case.
+					if( intersects( triAabb, groupVoxelAabb ) )
+					{
+						// THE VOXELS ITS BOX REACHES, widened by a thousandth of a cell each way: a
+						// superset, so every voxel the clip gives an area is visited, each by the same
+						// test as before. CLAMPED IN FLOAT, then converted (decision 12.8): a float
+						// outside the int range is undefined in the conversion; a NaN goes to 0.
+						float3 fLo = clamp( floor( ( triMin - groupLo ) / p_voxelCellSize - 1e-3f ),
+											float3( 0.0f, 0.0f, 0.0f ), float3( 3.0f, 3.0f, 3.0f ) );
+						float3 fHi = clamp( floor( ( triMax - groupLo ) / p_voxelCellSize + 1e-3f ),
+											float3( 0.0f, 0.0f, 0.0f ), float3( 3.0f, 3.0f, 3.0f ) );
+						// THE NaN TEST IS ON THE BITS (trap 5: x == x is no NaN test in our shaders).
+						for( int a = 0; a < 3; ++a )
 						{
-							tri.v[i] = mul( float4( tri.v[i], 1.0f ), instance.worldTransform );
-							tri.n[i] = mul( tri.n[i], toFloat3x3( instance.worldTransform ) );
+							if( ( floatBitsToUint( fLo[a] ) & 0x7FFFFFFFu ) > 0x7F800000u ) fLo[a] = 0.0f;
+							if( ( floatBitsToUint( fHi[a] ) & 0x7FFFFFFFu ) > 0x7F800000u ) fHi[a] = 0.0f;
 						}
-
-						// THE VOXELS ITS BOX REACHES, widened by a thousandth of a cell each way: a superset,
-						// so every voxel the clip gives an area is visited, and each by the same test as before.
-						const float3 triMin = min( tri.v[0], min( tri.v[1], tri.v[2] ) );
-						const float3 triMax = max( tri.v[0], max( tri.v[1], tri.v[2] ) );
-						const int3 vLo = clamp( int3( floor( ( triMin - groupLo ) / p_voxelCellSize - 1e-3f ) ),
-												int3( 0, 0, 0 ), int3( 3, 3, 3 ) );
-						const int3 vHi = clamp( int3( floor( ( triMax - groupLo ) / p_voxelCellSize + 1e-3f ) ),
-												int3( 0, 0, 0 ), int3( 3, 3, 3 ) );
+						const int3 vLo = int3( fLo );
+						const int3 vHi = int3( fHi );
 						for( int vz = vLo.z; vz <= vHi.z; ++vz )
 						for( int vy = vLo.y; vy <= vHi.y; ++vy )
 						for( int vx = vLo.x; vx <= vHi.x; ++vx )
