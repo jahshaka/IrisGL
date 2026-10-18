@@ -92,6 +92,11 @@ public:
     ///   constant; the hint after the step is its one public knob). Default true.
     static void setSequentialSteps(bool sequential);
     static void setSleepAfterStep(bool sleep);
+    /// - setIslandBatching(true): Bullet's IN-ISLAND batched solve (btSequentialImpulseConstraintSolverMt's spatial
+    ///   grid, for an island of 250+ manifolds) — OFF in the shipped world: its grid assignment asserts on a float
+    ///   rounding (btBatchedConstraints.cpp:729, `coordMax == coordMin + 1`: an abort in Debug, and in Release two
+    ///   batches of one phase sharing a body — a race). Islands are still solved in parallel (the solver pool).
+    static void setIslandBatching(bool on);
 
 	QHash<QString, btCollisionObject*> collisionObjects;
     QHash<QString, btRigidBody*> hashBodies;

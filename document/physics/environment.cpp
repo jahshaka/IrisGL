@@ -13,6 +13,7 @@
 #include <QtGlobal>
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <thread>
 #include "BulletCollision/CollisionShapes/btBvhTriangleMeshShape.h"
 
@@ -672,6 +673,7 @@ void Environment::bindGameThread(int threads)
     btITaskScheduler *ts = btCreateDefaultTaskScheduler();
     if (!ts) qFatal("iris::Environment::bindGameThread: Bullet's default task scheduler is not built");
     ts->setNumThreads(std::clamp(threads, 1, ts->getMaxNumThreads()));
+    setIslandBatching(false);   // see setIslandBatching: Bullet's grid batching asserts on a float rounding
     btSetTaskScheduler(ts);
     gScheduler = ts;
     gBound.store(true);
@@ -704,6 +706,16 @@ void Environment::setSequentialSteps(bool sequential)
 }
 
 void Environment::setSleepAfterStep(bool sleep) { gSleepAfterStep.store(sleep); }
+
+void Environment::setIslandBatching(bool on)
+{
+#if BT_THREADSAFE
+    // Bullet's own threshold (250 manifolds by default): an island below it is solved by one solver of the pool.
+    btSequentialImpulseConstraintSolverMt::s_minimumContactManifoldsForBatching = on ? 250 : std::numeric_limits<int>::max();
+#else
+    (void)on;
+#endif
+}
 
 void Environment::stepWorld(float delta)
 {

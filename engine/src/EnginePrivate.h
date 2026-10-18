@@ -8007,19 +8007,23 @@ public:
     /// graph, the GPU scene's compose, the culling) — in steady_clock ns, the last kPoolSpans frames.
     void poolSpans(std::vector<std::pair<unsigned long long, unsigned long long>> &out) const override {
         std::lock_guard<std::mutex> lock(mPoolSpanMutex);
-        out = mPoolSpans;
+        out.clear();
+        out.reserve(mPoolSpans.size());
+        for (size_t i = 0; i < mPoolSpans.size(); ++i) out.push_back(mPoolSpans[(mPoolSpanHead + i) % mPoolSpans.size()]);
     }
     void notePoolSpan(std::chrono::steady_clock::time_point b, std::chrono::steady_clock::time_point e) {
         const auto ns = [](std::chrono::steady_clock::time_point t) {
             return (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
         };
         std::lock_guard<std::mutex> lock(mPoolSpanMutex);
-        if (mPoolSpans.size() >= kPoolSpans) mPoolSpans.erase(mPoolSpans.begin());
-        mPoolSpans.push_back({ ns(b), ns(e) });
+        if (mPoolSpans.size() < kPoolSpans) { mPoolSpans.push_back({ ns(b), ns(e) }); return; }
+        mPoolSpans[mPoolSpanHead] = { ns(b), ns(e) };   // a ring once full: the oldest overwritten
+        mPoolSpanHead = (mPoolSpanHead + 1) % kPoolSpans;
     }
-    static constexpr size_t kPoolSpans = 2048;
+    static constexpr size_t kPoolSpans = 16384;   // ~4.5 min of frames at 60 Hz
     mutable std::mutex mPoolSpanMutex;
     std::vector<std::pair<unsigned long long, unsigned long long>> mPoolSpans;
+    size_t mPoolSpanHead = 0;   ///< the oldest span once the ring is full
     /// The render system's out-of-memory count (VulkanDevice::getOutOfMemoryFailures,
     /// the fork) and the last one's text; 0 / "" without the Vulkan render system.
     unsigned vulkanOomCount() const;
