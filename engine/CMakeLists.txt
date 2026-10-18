@@ -163,9 +163,9 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_SPEC_ALBEDO}"
         COMMAND ${CMAKE_COMMAND} -DUNWRAP=1 -DOUT=${JAH_RQ_SPEC_ALBEDO}
-                -DIN0=${CMAKE_CURRENT_SOURCE_DIR}/media/Photon/Voxel/JahSpecularAlbedo_piece_all.any
+                -DIN0=${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/JahSpecularAlbedo_piece_all.any
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/media/Photon/Voxel/JahSpecularAlbedo_piece_all.any"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/JahSpecularAlbedo_piece_all.any"
                 "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
         COMMENT "Unwrapping the metal's lobe integrals for the ray jobs' hit"
         VERBATIM)
@@ -287,6 +287,7 @@ if(JAH_RAY_QUERY_OK)
                        "${JAH_RQ_INCLUDE}/jah_environment.glsl"
                        "${JAH_RQ_INCLUDE}/jah_probe_params.glsl"
                        "${JAH_RQ_INCLUDE}/jah_reproject.glsl"
+                       "${JAH_RQ_INCLUDE}/jah_probe_history.glsl"
                        "${JAH_RQ_INCLUDE}/jah_rq_hit_direct.glsl"
                        "${JAH_RQ_INCLUDE}/jah_cloud_shadow.glsl")
     add_custom_command(

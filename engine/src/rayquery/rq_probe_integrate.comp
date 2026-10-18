@@ -122,28 +122,7 @@ layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray restMean;
 layout( rgba16f, set = 0, binding = 8 ) uniform writeonly image2DArray photonOverlay;
 
 #include "jah_reproject.glsl"
-
-/// The history's count saturates here (4 bits); the blend reads it only up to
-/// 1 / the floor (GatherTuning::historyFrames, 1..15; 10 shipped).
-const uint kHistoryCountMax = 15u;
-
-/// THE HISTORY'S GEOMETRY WORD's normal: an octahedral pair at 5 bits each
-/// (about 3 degrees; the test is at 25). Zero words are "no surface here",
-/// which the distance test rejects.
-vec2 octEncode( vec3 n )
-{
-	vec2 o = n.xy / max( abs( n.x ) + abs( n.y ) + abs( n.z ), 1e-6 );
-	if( n.z < 0.0 )
-		o = ( 1.0 - abs( o.yx ) ) * vec2( o.x >= 0.0 ? 1.0 : -1.0, o.y >= 0.0 ? 1.0 : -1.0 );
-	return o;
-}
-vec3 octDecode( vec2 o )
-{
-	vec3 n = vec3( o, 1.0 - abs( o.x ) - abs( o.y ) );
-	if( n.z < 0.0 )
-		n.xy = ( 1.0 - abs( n.yx ) ) * vec2( n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0 );
-	return normalize( n );
-}
+#include "jah_probe_history.glsl"
 
 /// THE ROUNDING'S NUMBER on [0,1): a pure function of (the pixel IN ITS EYE'S
 /// OWN IMAGE, the view's ADVANCING frame counter p.knobs6.z, which quantity) —
@@ -187,28 +166,6 @@ vec3 unpackRgbShared( uint w )
 {
 	const float scale = exp2( float( int( w >> 27u ) - 24 ) );
 	return vec3( float( w & 511u ), float( ( w >> 9u ) & 511u ), float( ( w >> 18u ) & 511u ) ) * scale;
-}
-
-/// THE GEOMETRY WORD: the distance (a half without its sign, its mantissa
-/// rounded to 7 bits: 0.4 % against the 5 % test) in bits 0-11, the normal's
-/// octahedral pair in 12-21, the count in 22-25 and the mean coverage (6 bits,
-/// rounded like the mean, with `u`) in 26-31.
-uint packGeom( float dist, vec3 n, uint count, float coverage, float u )
-{
-	const uint h = packHalf2x16( vec2( dist, 0.0 ) ) & 0x7FFFu;
-	const uint d = min( ( h + 4u ) >> 3u, 0xFFFu );
-	const uvec2 q = uvec2( clamp( round( ( octEncode( n ) * 0.5 + 0.5 ) * 31.0 ), vec2( 0.0 ),
-								  vec2( 31.0 ) ) );
-	const uint cov = uint( min( floor( clamp( coverage, 0.0, 1.0 ) * 63.0 + u ), 63.0 ) );
-	return d | ( q.x << 12u ) | ( q.y << 17u ) | ( min( count, kHistoryCountMax ) << 22u ) | ( cov << 26u );
-}
-void unpackGeom( uint g, out float dist, out vec3 n, out uint count, out float coverage )
-{
-	dist = unpackHalf2x16( ( g & 0xFFFu ) << 3u ).x;
-	n = octDecode( vec2( float( ( g >> 12u ) & 31u ), float( ( g >> 17u ) & 31u ) ) / 31.0 * 2.0 -
-				   1.0 );
-	count = ( g >> 22u ) & 15u;
-	coverage = float( g >> 26u ) / 63.0;
 }
 
 /// E/pi of probe `i` at the unit normal n, reading only the vec4s of the SH
@@ -384,41 +341,18 @@ void main()
 	uint prevCount = 0u;
 	if( temporal && p.knobs5.x >= 1.0 )
 	{
-		vec2 was;
-		float z;
 		// THROUGH THIS EYE'S PREVIOUS CAMERA, onto this eye's own half of the
-		// history (PHOTON-GA-VR, rq_reflect.comp's historyAt rule): an eye's
-		// mean is never read from the other eye's texels.
-		const JahEye before = jahEyeBefore( eye );
-		if( jahReproject( pixelWorld, before.camPos, before.perspective, before.rayTL,
-						  before.rayRight, before.rayDown, before.fwd, was, z ) == 0 )
+		// history, on THE SAME SURFACE only (jah_probe_history.glsl, the filter's
+		// reader of the same history).
+		uvec2 texel;
+		uint wasCount;
+		if( jahHistoryAt( pixelWorld, pixelNormal, eye, texel, wasCount ) )
 		{
-			const ivec2 pc = clamp( ivec2( was * vec2( eyeW, full.y ) ), ivec2( 0 ),
-									ivec2( eyeW - 1, full.y - 1 ) );
-			const uvec2 texel = imageLoad( historyPrev, ivec3( pc, eye ) ).xy;
-			float wasDist;
-			vec3 wasNormal;
-			uint wasCount;
-			float wasCoverage;
-			unpackGeom( texel.y, wasDist, wasNormal, wasCount, wasCoverage );
-			// THE SAME SURFACE: the same distance (the 5 % test) AND the same
-			// facing (the gather's own same-surface tolerance, the plane test's
-			// normal dot). A corner or a crease reprojects onto a surface at the
-			// same distance facing elsewhere, which the distance alone would pass.
-			// (knobs5.w = 1 is the test door that turns BOTH tests off —
-			// GatherTuning::historyValidationOff, the arm gi.gather_motion
-			// proves its disocclusion bar against; never shipped.)
-			const bool accept = p.knobs5.w > 0.5 ||
-								( jahSameDistance( wasDist, z ) &&
-								  dot( wasNormal, pixelNormal ) >= p.plane.y );
-			if( wasCount > 0u && accept )
+			const vec4 h = vec4( unpackRgbShared( texel.x ), float( texel.y >> 26u ) / 63.0 );
+			if( finite3( h.xyz ) && finite1( h.w ) )
 			{
-				const vec4 h = vec4( unpackRgbShared( texel.x ), wasCoverage );
-				if( finite3( h.xyz ) && finite1( h.w ) )
-				{
-					prev = clamp( h, vec4( 0.0 ), vec4( 1024.0, 1024.0, 1024.0, 1.0 ) );
-					prevCount = wasCount;
-				}
+				prev = clamp( h, vec4( 0.0 ), vec4( 1024.0, 1024.0, 1024.0, 1.0 ) );
+				prevCount = wasCount;
 			}
 		}
 	}

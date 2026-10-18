@@ -43,6 +43,7 @@
 #include <cstdio>
 #include <fstream>
 #include <limits>
+#include <stdexcept>
 #include <thread>
 
 namespace jahshaka { namespace engine {
@@ -2595,12 +2596,12 @@ bool OgreEngine::drainTextureStreaming(double *msSpent) {
 
 /// THE DRAIN'S START (WAIT-TEXTURE-LOADS-1): 0 nothing to wait for (or the wait is broken / disabled: the queue's
 /// own answer), 1 a drain begun.
-int OgreEngine::beginTextureDrain(TextureDrain &d) {
+int OgreEngine::beginTextureDrain(TextureDrain &d, bool neverDone) {
     d = TextureDrain();
     Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
     if (!tm) return 0;
     if (mTextureWaitBroken || mTextureWaitBudgetMs == 0u) return tm->isDoneStreaming() ? 0 : 2;
-    if (!mTextureWaitFault && tm->isDoneStreaming()) return 0;
+    if (!mTextureWaitFault && !neverDone && tm->isDoneStreaming()) return 0;
     d.active = true;
     d.t0 = std::chrono::steady_clock::now();
     return 1;
@@ -2609,7 +2610,7 @@ int OgreEngine::beginTextureDrain(TextureDrain &d) {
 /// ONE STEP OF THE BOUNDED DRAIN, never a sleep (WAIT-TEXTURE-LOADS-1): drainTextureStreaming loops it with a
 /// millisecond's sleep between steps; pumpTextureLoads hands each step to a host that waits OFF the render thread.
 /// 0 the queues emptied, 1 still streaming, 2 the no-progress budget expired (logged, latched).
-int OgreEngine::stepTextureDrain(TextureDrain &d) {
+int OgreEngine::stepTextureDrain(TextureDrain &d, bool neverDone) {
     Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
     if (!tm || !d.active) return 0;
     Ogre::VaoManager *vao = mRoot->getRenderSystem()->getVaoManager();
@@ -2627,7 +2628,7 @@ int OgreEngine::stepTextureDrain(TextureDrain &d) {
     // work either, and the next frame's own commit carries it.
     {
         const bool workerDone = tm->_update(true);
-        if (!mTextureWaitFault && workerDone && tm->isDoneStreaming()) return 0;
+        if (!mTextureWaitFault && !neverDone && workerDone && tm->isDoneStreaming()) return 0;
 
         const double now = d.elapsedMs();
         // The pending census is O(textures in the process) — poll it every
@@ -2673,7 +2674,18 @@ int OgreEngine::pumpTextureLoads() {
     JAH_HOST_CALL("Engine::pumpTextureLoads");
     // THE HOST'S WAIT, ONE STEP A CALL (WAIT-TEXTURE-LOADS-1): the drain's state lives here between the calls, so the
     // render thread does one step a request and the host waits between them - the frame is never held by it.
-    int step = mHostDrain.active ? stepTextureDrain(mHostDrain) : beginTextureDrain(mHostDrain);
+    // A THROW INSIDE A STEP ENDS THE WAIT (decision 22.5): the drain's state is reset on the way out, so the host's
+    // next wait begins its own no-progress budget instead of stepping a stale one past it (which latched
+    // mTextureWaitBroken for the process). The arm textures.pumpFault is the door that throws.
+    struct ResetOnThrow {
+        TextureDrain &d;
+        bool kept = false;
+        ~ResetOnThrow() { if (!kept) d = TextureDrain(); }
+    } reset{mHostDrain};
+    const double fault = mArms.value(ArmId::TexturePumpFault);
+    if (mHostDrain.active && fault > 1.5)
+        throw std::runtime_error("textures.pumpFault: the host's texture-drain step threw (a test door)");
+    int step = mHostDrain.active ? stepTextureDrain(mHostDrain, fault > 0.5) : beginTextureDrain(mHostDrain, fault > 0.5);
     if (step == 1 && !mHostDrain.active) step = 0;
     if (step != 1) {
         if (mHostDrain.active) {
@@ -2682,6 +2694,7 @@ int OgreEngine::pumpTextureLoads() {
         }
         mHostDrain = TextureDrain();
     }
+    reset.kept = true;
     return step;
 }
 

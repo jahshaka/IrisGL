@@ -70,7 +70,7 @@ namespace Ogre
         /// THE MERGE ACCUMULATOR'S TEXELS PER VOXEL (VoxelMerge_piece_cs.any, voxelMergeUvw's
         /// multiplier): the eighteen sums of the merge, the casters' coverage per half (FAR-SUN-1) and
         /// the metal's F0 (METAL-BOUNCE-1; its Fresnel-90 weight took the albedo alpha's dead texel).
-        constexpr uint32 kMergeAccumTexels = 23u;
+        constexpr uint32 kMergeAccumTexels = 26u;
         /// THE MERGE ACCUMULATOR IS SHARED BY SIZE (SPEED-VR-MEM, perf audit M-13). Every
         /// voxeliser used to hold its own for life (W x H x 18D R32_UINT: 18.9 MB at 64^3,
         /// 151 MB at 128^3), yet it is scratch that lives only INSIDE one build(): cleared at
@@ -544,6 +544,12 @@ namespace Ogre
                     "VctVoxelizer" + StringConverter::toString( getId() ) + "/Position" + halfName[h],
                     GpuPageOutStrategy::Discard,
                     TextureFlags::Uav, TextureTypes::Type3D );
+                // Jahshaka (JUNCTION-NORMAL-1): the emissive factor per half - level 0 only (the injection
+                // is its one reader, at the voxel it writes).
+                mEmitVox[h] = mTextureGpuManager->createTexture(
+                    "VctVoxelizer" + StringConverter::toString( getId() ) + "/Emit" + halfName[h],
+                    GpuPageOutStrategy::Discard,
+                    TextureFlags::Uav, TextureTypes::Type3D );
             }
 
         }
@@ -593,12 +599,13 @@ namespace Ogre
         // interleaved in Z - the shader derives their coordinates from the voxel's own, so a
         // dispatch that covers one OCTANT needs to know nothing about the volume's depth.
         // Jahshaka (SPEED-VR-MEM, M-13): THE MERGE ACCUMULATOR is the one every voxeliser of
-        // this size shares (acquireMergeAccum, above), at this volume's size: twenty-three sums
+        // this size shares (acquireMergeAccum, above), at this volume's size: twenty-six sums
         // per voxel - fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065)'s thirteen,
         // (PHOTON-WRITER-1) the material roughness, (PHOTON-VOXEL-3) the three per-axis
         // coverage sums packed into one, (PHOTON-VOXEL-4) the coverage split by the side a
         // face looks to (two packed sums) and the two position-weighted sums, (FAR-SUN-1) the
-        // casters' two, (METAL-BOUNCE-1) the metal's F0. R32_UINT
+        // casters' two, (METAL-BOUNCE-1) the metal's F0, (JUNCTION-NORMAL-1) the emitters' coverage
+        // per half and their weight. R32_UINT
         // rather than RGBA32_UINT because ComputeTools' clear of a 128-bit 3D uav lost the
         // device on this driver (VoxelMerge_piece_cs).
         if( mMergeAccumTex )
@@ -647,6 +654,12 @@ namespace Ogre
             mPositionVox[h]->setResolution( mWidth, mHeight, mDepth );
             mPositionVox[h]->setNumMipmaps( numMipmaps );
             mPositionVox[h]->scheduleTransitionTo( GpuResidency::Resident );
+            // JUNCTION-NORMAL-1: 4 B a voxel a half, level 0: 2 x 8.4 MB at 128^3.
+            mEmitVox[h]->scheduleTransitionTo( GpuResidency::OnStorage );
+            mEmitVox[h]->setPixelFormat( PFG_R10G10B10A2_UNORM );
+            mEmitVox[h]->setResolution( mWidth, mHeight, mDepth );
+            mEmitVox[h]->setNumMipmaps( 1u );
+            mEmitVox[h]->scheduleTransitionTo( GpuResidency::Resident );
         }
 
         for( size_t i = 0; i < sizeof( textures ) / sizeof( textures[0] ); ++i )
@@ -757,6 +770,7 @@ namespace Ogre
         {
             mComputeTools->prepareForUavClear( mResourceTransitions, mCoverageVox[h] );
             mComputeTools->prepareForUavClear( mResourceTransitions, mPositionVox[h] );
+            mComputeTools->prepareForUavClear( mResourceTransitions, mEmitVox[h] );
         }
         mRenderSystem->executeResourceTransition( mResourceTransitions );
 
@@ -771,6 +785,7 @@ namespace Ogre
         {
             jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mCoverageVox[h], fClearValue );
             jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mPositionVox[h], fClearValue );
+            jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mEmitVox[h], fClearValue );
         }
         OgreProfileGpuEnd( "VCT Voxelization Clear" );
     }
@@ -858,6 +873,7 @@ namespace Ogre
         {
             v.coverage[h] = mCoverageVox[h];
             v.position[h] = mPositionVox[h];
+            v.emit[h] = mEmitVox[h];
         }
         v.positionSums = mPositionSumsTex;
         return v;
@@ -927,7 +943,7 @@ namespace Ogre
             mComputeJobs[i]->_setUavTexture( 5, uavSlot );
 
             // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the per-voxel INTEGER ACCUMULATOR the merge
-            // sums into (R32_UINT, twenty-three texels per voxel — see
+            // sums into (R32_UINT, twenty-six texels per voxel — see
             // VoxelMerge_piece_cs.any for why it is not RGBA32_UINT).
             uavSlot.texture = mMergeAccumTex;
             uavSlot.pixelFormat = mMergeAccumTex->getPixelFormat();
@@ -962,6 +978,15 @@ namespace Ogre
                 uavSlot.pixelFormat = PFG_R32_UINT;
             uavSlot.access = ResourceAccess::Write;
             mComputeJobs[i]->_setUavTexture( 12u, uavSlot );
+
+            // Jahshaka (JUNCTION-NORMAL-1): the emissive factor per half-axis (13, 14), written by the resolve.
+            for( size_t h = 0u; h < 2u; ++h )
+            {
+                uavSlot.texture = v.emit[h];
+                uavSlot.pixelFormat = v.emit[h]->getPixelFormat();
+                uavSlot.access = ResourceAccess::Write;
+                mComputeJobs[i]->_setUavTexture( uint8( 13u + h ), uavSlot );
+            }
 
             DescriptorSetTexture2::BufferSlot texBufSlot(
                 DescriptorSetTexture2::BufferSlot::makeEmpty() );
@@ -1198,7 +1223,7 @@ namespace Ogre
         // two, so the residency round trip never actually saves anything -- it
         // only returns memory the next build immediately asks for again.
         // THE COST is one accumulator per volume SIZE, held while any voxeliser of that
-        // size lives: width * height * depth * 23 * 4 bytes (24.1 MB at 64^3, 193 MB at
+        // size lives: width * height * depth * 26 * 4 bytes (27.3 MB at 64^3, 218 MB at
         // 128^3), shared by every cascade of that size (SPEED-VR-MEM, acquireMergeAccum).
 
         generateMips();

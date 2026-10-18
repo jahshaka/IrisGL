@@ -1533,11 +1533,12 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
             // build writes - level 0 of the albedo, emissive, normal, coverage and position per half.
             if (voxelizer) {
                 const Ogre::PhotonVoxelizer::VolumeSet vs = voxelizer->liveVolumes();
-                // ALL TEN (decision 12.2): the raw integers too - the area weight and the position sums, the two
-                // volumes a build's integer sums write directly - and the metal (METAL-BOUNCE-1).
-                Ogre::TextureGpu *store[10] = { vs.albedo, vs.emissive, vs.normal, vs.coverage[0], vs.coverage[1],
+                // ALL TWELVE (decision 12.2): the raw integers too - the area weight and the position sums, the two
+                // volumes a build's integer sums write directly - the metal (METAL-BOUNCE-1) and the emissive factor
+                // per half (JUNCTION-NORMAL-1).
+                Ogre::TextureGpu *store[12] = { vs.albedo, vs.emissive, vs.normal, vs.coverage[0], vs.coverage[1],
                                                 vs.position[0], vs.position[1], vs.accumVal, vs.positionSums,
-                                                vs.metal };
+                                                vs.metal, vs.emit[0], vs.emit[1] };
                 Ogre::uint64 hs = 1469598103934665603ull;
                 bool ok = true;
                 for (Ogre::TextureGpu *tex : store) {
@@ -1701,6 +1702,7 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
         }
         // ENGINE-UPGRADE-U5 (decision 11 g): the emissive, and the build's raw integers.
         if (!grab(voxelizer->getEmissiveVox(), out.emissive)) return false;
+        if (!grab(voxelizer->getEmitVox(0), out.emitP) || !grab(voxelizer->getEmitVox(1), out.emitN)) return false;
         {
             const Ogre::PhotonVoxelizer::VolumeSet vs = voxelizer->liveVolumes();
             const auto grabUint = [&](Ogre::TextureGpu *tex, std::vector<unsigned> &dst) -> bool {

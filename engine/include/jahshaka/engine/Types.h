@@ -3513,6 +3513,12 @@ struct GatherTuning {
     /// is projected from its own 64 rays alone — the A/B that prices the filter
     /// and measures what it buys.
     bool     filterOff = false;
+    /// THE FILTER'S WIDTH BY THE PROBE'S AGE (a measuring door, ENGINE-UPGRADE-U5 decision 21; shipped off):
+    /// the neighbours' taps weighed 1 - age / filterAgeFrames, the age the pixel history's count under the
+    /// probe (rq_probe_filter.comp has the measurement).
+    bool     filterByAge = false;
+    /// ...the age at which it has fallen to none, in frames (0 = the young history's length, kYoungFrames).
+    unsigned filterAgeFrames = 0u;
     /// THE PIXEL HISTORY'S MEMORY (PHOTON-GATHER-1c): the frames after which
     /// its running mean becomes an EMA at 1/historyFrames — a TRUE mean for
     /// that many frames, then each new frame weighs 1/historyFrames. 0 = the
@@ -5070,6 +5076,10 @@ struct AtomCasterMapStats {
     /// THE RECEIVER TEST RAN on this map (stage 4b: the view's id depth of that frame built its receiver grid;
     /// the triangles above are after it).
     bool receiverTested = false;
+    /// ...and the receivers' DILATION it ran with, in texels along the map's x and y (decision 19.1: the widest
+    /// filter's reach, the normal offset in each axis' own texels and one tile - unequal on a map whose window is
+    /// not square, Ogre's focused split). 0 without a grid.
+    float receiverDilation[2] = {0.0f, 0.0f};
 };
 
 struct AtomDrawStatus {
@@ -5328,6 +5338,10 @@ struct GiVoxelVolume {
     /// (`positionSums`, width*height*depth*4, z-interleaved as the volume holds them: z*4 + k). With the
     /// arrays above, every level-0 volume a build writes: the mips are regenerated from level 0.
     std::vector<float> emissive;
+    /// THE EMISSIVE FACTOR PER HALF-AXIS (JUNCTION-NORMAL-1), rgb per axis of the faces looking +a (P) and -a (N),
+    /// as stored: u = f / (1 + f) on 1022 steps of the 10-bit UNORM (f = c / (1022 - c), c = round(u x 1023)) - a
+    /// half emits `emissive` x f.
+    std::vector<float> emitP, emitN;
     std::vector<unsigned> accumWeight;
     std::vector<unsigned> positionSums;
     /// THE DIRECT VOLUME (FAR-SUN-2), level 0, premultiplied like `light`: every lamp's direct

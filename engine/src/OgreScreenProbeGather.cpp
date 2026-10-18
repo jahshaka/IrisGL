@@ -118,7 +118,9 @@ static_assert(kTraceRaysBinding == kTraceDirectBinding + 1u && kTraceOverlayBind
                   kTraceBindings == kTraceCloudBinding + 1u &&
                   kTraceDirectBinding == kTraceCardViewBinding + SurfaceCache::kViewLayers,
               "the direct volume follows the card read's view-term layers, the instrument's two follow it");
-constexpr unsigned kFilterBindings = 3u;
+/// The filter's four: params, records, the raw atlas and the previous frame's history (the
+/// probe's AGE sets the filter's width, ENGINE-UPGRADE-U5 decision 21).
+constexpr unsigned kFilterBindings = 4u;
 /// The integrate's nine: params, records, normals, depth, the irradiance, the
 /// history's two halves (one packed texel each, PHOTON-GA-VR), the rest mean and
 /// the photon view's overlay (PHOTON-VIEW-1).
@@ -266,7 +268,8 @@ bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
            a.adaptiveCap == b.adaptiveCap && a.freezeFrameIndex == b.freezeFrameIndex &&
            a.jitterOff == b.jitterOff && a.jitterCommon == b.jitterCommon && a.rayJitterOff == b.rayJitterOff &&
            a.farQueryOff == b.farQueryOff &&
-           a.shBands == b.shBands && a.filterOff == b.filterOff &&
+           a.shBands == b.shBands && a.filterOff == b.filterOff && a.filterByAge == b.filterByAge &&
+           a.filterAgeFrames == b.filterAgeFrames &&
            a.historyFrames == b.historyFrames &&
            a.historyValidationOff == b.historyValidationOff && a.restOff == b.restOff &&
            a.filterRadius == b.filterRadius && a.restFrames == b.restFrames &&
@@ -389,6 +392,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 1 records
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 2 the raw atlas
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 3 last frame's history (the probe's age)
         };
         if (!makeLayout(kFilterBindings, t, nullptr, mFilterLayout, "filter")) return false;
     }
@@ -1464,6 +1468,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                                      float(stride));   // pixels -> cells of this view's stride
     // THE RAYS STRATIFIED ACROSS NEIGHBOURING PROBES (GATHER-NOISE-1).
     pp.young[2] = float(in.tuning.crossStrata ? in.tuning.crossStrata : kCrossStrata);
+    // THE FILTER'S WIDTH BY THE PROBE'S AGE, a measuring door (ENGINE-UPGRADE-U5 decision 21;
+    // rq_probe_filter.comp): bit 0 on, the age at which it falls to none above it (0 = young[0]).
+    pp.young[3] = float((in.tuning.filterByAge ? 1u : 0u) | (std::min(in.tuning.filterAgeFrames, 255u) << 2));
     std::memcpy(pp.camPos2, in.camPos2, sizeof(pp.camPos2));
     put3(pp.rayTL2, in.rayTL2, 0.0f);
     put3(pp.rayRight2, in.rayRight2, 0.0f);
@@ -1727,6 +1734,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[1].pBufferInfo = &recordsInfo;
         w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[2].pImageInfo = &filterRaw;
+        VkDescriptorImageInfo filterHistory{};
+        filterHistory.imageView = v.historyView[prev];
+        filterHistory.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        w[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[3].pImageInfo = &filterHistory;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kFilterBindings, w, 0, nullptr);
     }
 

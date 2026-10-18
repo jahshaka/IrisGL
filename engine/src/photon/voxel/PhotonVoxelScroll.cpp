@@ -23,7 +23,7 @@ namespace Ogre
         uint32 gScrollCloneId = 0u;
 
         /// The live store's volumes, in one fixed order: the copy and the clear walk it.
-        constexpr size_t kVolumes = 10u;
+        constexpr size_t kVolumes = 12u;
         void volumeList( const PhotonVoxelizer::VolumeSet &v, TextureGpu *out[kVolumes] )
         {
             out[0] = v.albedo;
@@ -36,11 +36,13 @@ namespace Ogre
             out[7] = v.position[1];
             out[8] = v.positionSums;
             out[9] = v.metal;   // METAL-BOUNCE-1
+            out[10] = v.emit[0];   // JUNCTION-NORMAL-1
+            out[11] = v.emit[1];
         }
         const char *const kVolumeNames[kVolumes] = { "Albedo",    "Emissive",  "Normal",
                                                       "AccumVal",  "CoverageP", "CoverageN",
                                                       "PositionP", "PositionN", "PositionSums",
-                                                      "Metal" };
+                                                      "Metal",     "EmitP",     "EmitN" };
     }  // namespace
 
     PhotonVoxelScroll::PhotonVoxelScroll( RenderSystem *renderSystem, HlmsManager *hlmsManager,
@@ -82,6 +84,8 @@ namespace Ogre
         mVolumes.position[1] = dst[7];
         mVolumes.positionSums = dst[8];
         mVolumes.metal = dst[9];
+        mVolumes.emit[0] = dst[10];
+        mVolumes.emit[1] = dst[11];
 
         HlmsCompute *hlmsCompute = hlmsManager->getComputeHlms();
         HlmsComputeJob *base = hlmsCompute->findComputeJob( "Photon/ScrollPosition" );

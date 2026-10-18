@@ -70,6 +70,10 @@ namespace Ogre
         /// COVERAGE); PhotonVoxelLighting exposes both as entries of its light-volume list, so every
         /// reader that binds the list binds them too.
         TextureGpu *mCoverageVox[2] = {};
+        /// Jahshaka (JUNCTION-NORMAL-1): THE EMISSIVE FACTOR PER HALF-AXIS (RGB10A2 each, level 0 only) -
+        /// [0] the faces looking +a, [1] -a: what a half's own faces emit over the voxel's area-mean emissive,
+        /// as u = f / (1 + f) on 1022 steps (VoxelMerge_piece_cs.any, THE EMISSIVE PER HALF-AXIS).
+        TextureGpu *mEmitVox[2] = {};
         /// Jahshaka (PHOTON-VOXEL-4): THE SURFACE POSITION per half-axis (RGBA16_UNORM, xyz)
         /// - the coverage-weighted mean position of each half's surfaces along each axis,
         /// ABSOLUTE in the volume's normalised coordinate and premultiplied by that half's
@@ -114,6 +118,7 @@ namespace Ogre
         /// `half`: 0 the faces looking +a, 1 those looking -a.
         TextureGpu *getCoverageVox( size_t half ) { return mCoverageVox[half]; }
         TextureGpu *getPositionVox( size_t half ) { return mPositionVox[half]; }
+        TextureGpu *getEmitVox( size_t half ) { return mEmitVox[half]; }
 
         TextureGpuManager *getTextureGpuManager();
         RenderSystem      *getRenderSystem();

@@ -382,6 +382,9 @@
 	uint3 cAxisN = uint3( 0u, 0u, 0u );
 	uint3 cCasterP = uint3( 0u, 0u, 0u );
 	uint3 cCasterN = uint3( 0u, 0u, 0u );
+	uint3 cEmitP = uint3( 0u, 0u, 0u );
+	uint3 cEmitN = uint3( 0u, 0u, 0u );
+	uint  cEmitWeight = 0u;
 	uint3 cPosP = uint3( 0u, 0u, 0u );
 	uint3 cPosN = uint3( 0u, 0u, 0u );
 	{
@@ -477,6 +480,14 @@
 					cCasterP = voxelMergeAxisQuantize( contribP );
 					cCasterN = voxelMergeAxisQuantize( contribN );
 				}
+				// JUNCTION-NORMAL-1: an EMITTING piece's share of the coverage and of the weight
+				// (VoxelMerge_piece_cs.any, THE EMISSIVE PER HALF-AXIS).
+				if( any( greaterThan( cEmissive, uint3( 0u, 0u, 0u ) ) ) )
+				{
+					cEmitP = cAxisP;
+					cEmitN = cAxisN;
+					cEmitWeight = weight;
+				}
 				const float3 cellLocal =
 					saturate( ( pieceCentroid - voxelLo ) / p_voxelCellSize );
 				cPosP = voxelMergeAxisQuantize( contribP * cellLocal );
@@ -524,6 +535,10 @@
 	// (VoxelMerge_piece_cs.any, THE CASTER SHARE).
 	uint3 accCasterP = uint3( 0u, 0u, 0u );
 	uint3 accCasterN = uint3( 0u, 0u, 0u );
+	// Jahshaka (JUNCTION-NORMAL-1): THE EMITTERS' COVERAGE per half-axis and their weight.
+	uint3 accEmitP = uint3( 0u, 0u, 0u );
+	uint3 accEmitN = uint3( 0u, 0u, 0u );
+	uint  accEmitWeight = 0u;
 	// Jahshaka (PHOTON-VOXEL-3): THE VOXEL'S COVERAGE PER AXIS - the surface's
 	// area inside the voxel PROJECTED onto each axis, over the voxel's face area,
 	// times the material's opacity: sum of w * alpha * |n . axis| on
@@ -572,7 +587,7 @@
 	// scroll, not the partition.)
 	// The reference partition and its arm are deleted; the group vote too (decision 12.5). The
 	// broadphase, the octants and the buckets are unchanged.
-	@foreach( 36, k )
+	@foreach( 43, k )
 		g_voxelSums[@k * 64 + gl_LocalInvocationIndex] = 0u;
 	@end
 	__sharedOnlyBarrier;
@@ -674,7 +689,10 @@
 									atomicAdd( g_voxelSums[( 24 + @c ) * 64 + v], cPosN[@c] );
 									atomicAdd( g_voxelSums[( 27 + @c ) * 64 + v], cCasterP[@c] );
 									atomicAdd( g_voxelSums[( 30 + @c ) * 64 + v], cCasterN[@c] );
+									atomicAdd( g_voxelSums[( 36 + @c ) * 64 + v], cEmitP[@c] );
+									atomicAdd( g_voxelSums[( 39 + @c ) * 64 + v], cEmitN[@c] );
 								@end
+								atomicAdd( g_voxelSums[42 * 64 + v], cEmitWeight );
 								atomicAdd( g_voxelSums[13 * 64 + v], cRoughness );
 								atomicAdd( g_voxelSums[14 * 64 + v], cWeight );
 							}
@@ -703,7 +721,10 @@
 			accPosN[@c]			= g_voxelSums[( 24 + @c ) * 64 + v];
 			accCasterP[@c]		= g_voxelSums[( 27 + @c ) * 64 + v];
 			accCasterN[@c]		= g_voxelSums[( 30 + @c ) * 64 + v];
+			accEmitP[@c]		= g_voxelSums[( 36 + @c ) * 64 + v];
+			accEmitN[@c]		= g_voxelSums[( 39 + @c ) * 64 + v];
 		@end
+		accEmitWeight	= g_voxelSums[42 * 64 + v];
 		accRoughness	= g_voxelSums[13 * 64 + v];
 		accumWeight		= g_voxelSums[14 * 64 + v];
 	}
@@ -758,6 +779,13 @@
 												accCasterP );
 		uint  sumCasterN	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 19u ) ).x,
 												accCasterN );
+		// JUNCTION-NORMAL-1: the emitters' coverage (+23 looking +a, +24 -a) and weight (+25).
+		uint  sumEmitP	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 23u ) ).x,
+											accEmitP );
+		uint  sumEmitN	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 24u ) ).x,
+											accEmitN );
+		uint  sumEmitWeight	= voxelMergeAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 25u ) ).x,
+											accEmitWeight );
 		@foreach( 3, c )
 			sumAlbedo[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, @c ) ).x;
 			sumMetal[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 20u + @c ) ).x;
@@ -808,6 +836,9 @@
 		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 17u ), uint4( sumPosN, 0u, 0u, 0u ) );
 		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 18u ), uint4( sumCasterP, 0u, 0u, 0u ) );
 		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 19u ), uint4( sumCasterN, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 23u ), uint4( sumEmitP, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 24u ), uint4( sumEmitN, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 25u ), uint4( sumEmitWeight, 0u, 0u, 0u ) );
 		@foreach( 3, c )
 			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 4u + @c ),
 								uint4( sumNormal[@c], 0u, 0u, 0u ) );
@@ -837,6 +868,11 @@
 			OGRE_imageWrite3D1( voxelAccumVal, voxelCelUvw, uint4( totalWeight, 0u, 0u, 0u ) );
 			OGRE_imageWrite3D4( voxelCoveragePTex, voxelCelUvw, float4( voxelCoverageP, 0.0f ) );
 			OGRE_imageWrite3D4( voxelCoverageNTex, voxelCelUvw, float4( voxelCoverageN, 0.0f ) );
+			// JUNCTION-NORMAL-1: the emissive factor per half-axis (VoxelMerge_piece_cs.any).
+			OGRE_imageWrite3D4( voxelEmitPTex, voxelCelUvw,
+								float4( voxelMergeEmitFactor( sumEmitP, sumAxisP, sumEmitWeight, totalWeight ), 0.0f ) );
+			OGRE_imageWrite3D4( voxelEmitNTex, voxelCelUvw,
+								float4( voxelMergeEmitFactor( sumEmitN, sumAxisN, sumEmitWeight, totalWeight ), 0.0f ) );
 			// FAR-SUN-1: THE CASTER SHARE in both position halves' alpha (16 bits; otherwise
 			// unused - VoxelMerge_piece_cs.any).
 			const float casterShareP = voxelMergeCasterShare( sumCasterP, sumAxisP );

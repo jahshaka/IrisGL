@@ -103,6 +103,7 @@ namespace Ogre
             TextureGpu *coverage[2] = {};
             TextureGpu *position[2] = {};
             TextureGpu *positionSums = nullptr;
+            TextureGpu *emit[2] = {};   ///< JUNCTION-NORMAL-1: the emissive factor per half-axis
         };
         /// A box of the volume's cells: [x, x + w) x [y, y + h) x [z, z + d).
         struct CellBox

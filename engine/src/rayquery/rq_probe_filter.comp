@@ -39,6 +39,22 @@
 //    — and costs 0.14-0.32 ms. With the trace's cross-probe strata
 //    (rq_probe_gather.comp) the 3 x 3 taps of one direction are stratified
 //    samples of the texel, not independent ones.
+//    THE WIDTH BY THE PROBE'S AGE - A MEASURING DOOR (ENGINE-UPGRADE-U5 decision
+//    21; young.w bit 0, GatherTuning::filterByAge, the arm gather.filterByAge;
+//    shipped OFF, the lead's call - the measurement below): the filter exists
+//    for NOISE and the noise of what a pixel shows decays with the frames its
+//    history has averaged, so under the door every neighbour's tap is weighed
+//    by 1 - age / A (clamped): full at an age of 0, NONE from A frames on (A =
+//    young.w >> 2, or the young history's young.x), the age the count of the
+//    previous frame's history where the probe sits, read on the same surface
+//    as the integrate reads it (jah_probe_history.glsl). MEASURED: at A = 12
+//    gi.gather_plane reads 1.041 at two strides (1.0585 shipped) but
+//    gi.gather_estimator's young-pixel noise rises to 0.814 of the pre-lane's
+//    (bar 0.80; 0.605 shipped) and a still view's frame-to-frame residue
+//    trips pool.editor_view_b's outline probes; at A = 24, 1.055 / 0.629;
+//    from 48 on the shipped picture (the history's count saturates at 15).
+//    The pixel history is an EMA past its tenth frame: its noise stops
+//    decaying, so the filter's reason does not vanish under motion.
 //    The probe's own texel always weighs 1. An ADAPTIVE probe filters against
 //    its CELL's neighbours (its own cell's uniform probe fails its plane by
 //    construction — that is why it was appended). The nine taps are read in
@@ -76,6 +92,11 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 layout( std430, set = 0, binding = 1 ) buffer Records { JahProbeRecord r[]; } records;
 layout( rgba16f, set = 0, binding = 2 ) uniform readonly image2D probeAtlas;
+/// THE PREVIOUS FRAME'S PIXEL HISTORY (the integrate's, read only): the AGE under the probe.
+layout( rg32ui, set = 0, binding = 3 ) uniform readonly uimage2DArray historyPrev;
+
+#include "jah_reproject.glsl"
+#include "jah_probe_history.glsl"
 
 
 /// Eight vec4 of partial sums per lane: 27 SH floats (coefficient k, channel c
@@ -95,6 +116,8 @@ shared vec4 gSum[8][64];
 shared vec4 gTapT[16];
 shared vec4 gTapB[16];
 shared vec4 gTapN[16];
+/// THE NEIGHBOURS' SHARE BY THE PROBE'S AGE (lane 0; see the header): 1 = the full filter, 0 = none.
+shared float gAgeWeight;
 
 /// A neighbour's ray whose hit distance is this far off this probe's in the
 /// same direction (as the RATIO of the nearer to the farther) is weighed out
@@ -134,6 +157,19 @@ void main()
 	// centre skipped — the fixed order the taps are summed in; lanes 8..15 the
 	// same eight directions at two cells (the filter's reach 2).
 	const int taps = p.knobs4.z > 1.5 ? 16 : 8;
+	// ---- THE PROBE'S AGE: the frames the history under it holds (none without a
+	// history this frame: the gather's first frame, a reset, the temporal arm off).
+	if( lane == 0u )
+	{
+		uint age = 0u;
+		uvec2 texel;
+		const bool byAge = ( uint( p.young.w ) & 1u ) != 0u;
+		if( byAge && onSurface && p.knobs5.z > 0.5 && p.knobs5.x >= 1.0 )
+			jahHistoryAt( posW.xyz, normalW.xyz, jahEyeOfCell( cell.x ), texel, age );
+		gAgeWeight = !byAge ? 1.0
+							: clamp( 1.0 - float( age ) / max( ( uint( p.young.w ) >> 2u ) > 0u ? float( uint( p.young.w ) >> 2u )
+																									: p.young.x, 1.0 ), 0.0, 1.0 );
+	}
 	if( lane < uint( taps ) )
 	{
 		const int kk = int( lane ) & 7;
@@ -189,7 +225,8 @@ void main()
 		vec3 sum = own.xyz;
 		float wsum = 1.0;
 
-		if( p.knobs4.z > 0.5 )
+		const float ageWeight = gAgeWeight;
+		if( p.knobs4.z > 0.5 && ageWeight > 0.0 )
 		{
 			// THE NINE TAPS, IN ONE FIXED ORDER (row by row); the centre is this
 			// probe itself and is already in the sum. The neighbours' frames and
@@ -221,7 +258,7 @@ void main()
 									   ( kDistanceRatioIn - kDistanceRatioOut ),
 								   0.0, 1.0 );
 				}
-				const float w = wPlane * wDist;
+				const float w = wPlane * wDist * ageWeight;
 				if( w <= 0.0 || !finite3( s.xyz ) )
 					continue;
 				sum += s.xyz * w;

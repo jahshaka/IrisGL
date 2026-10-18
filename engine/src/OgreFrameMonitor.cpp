@@ -1277,9 +1277,22 @@ constexpr ArmDef kArms[] = {
     { ArmId::GatherFilterOff, 0.0, 0.0, 1.0,
       "THE GATHER'S PROBE-SPACE FILTER OFF (GATHER-INTEGRATION-FACTOR, a measuring arm - decision 20): "
       "1 = GatherTuning::filterOff for every scene." },
+    { ArmId::GatherFilterByAge, 0.0, 0.0, 255.0,
+      "THE GATHER'S FILTER BY THE PROBE'S AGE (a measuring arm - ENGINE-UPGRADE-U5 decision 21): N > 0 = "
+      "GatherTuning::filterByAge for every scene, the neighbours' taps weighed 1 - age / N (the pixel history's "
+      "count under the probe). 0 = shipped, the constant width." },
     { ArmId::GatherIrradianceReadback, 0.0, 0.0, 1.0,
       "THE GATHER'S E/PI TO THE HOST (an instrument): GatherTuning::readback for every scene - the verb "
       "world.gatherIrradiance reads it. One image copy a frame while on." },
+    { ArmId::ShadowReceiverBoxesOff, 0.0, 0.0, 1.0,
+      "THE RECEIVER GRID WITHOUT THE STOCK ROUTE'S BOXES (ENGINE-UPGRADE-U5 decision 22.3): 1 = the sun maps' receiver "
+      "grid takes the view's id depth only - an alpha-tested, blended or skinned receiver is no receiver, and the "
+      "caster cut drops what shadows it. The negative control of shadow.caster_receivers (its pictures must then "
+      "differ). A test door." },
+    { ArmId::TexturePumpFault, 0.0, 0.0, 2.0,
+      "THE HOST'S TEXTURE WAIT, FAULTED (ENGINE-UPGRADE-U5 decision 22.5, engine.texture_drain_reset): 1 = the drain "
+      "Engine::pumpTextureLoads steps never agrees the queues are empty (the frame's own drain is untouched), 2 = and "
+      "its step THROWS - the exception path that must leave the next wait clean. A test door." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

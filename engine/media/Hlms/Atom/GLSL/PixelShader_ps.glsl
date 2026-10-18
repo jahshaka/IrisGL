@@ -71,6 +71,7 @@ layout(std140) uniform;
 in vec4 gl_FragCoord;
 @end
 
+@insertpiece( AtomPreBrdf )
 @insertpiece( DefaultHeaderPS )
 @insertpiece( custom_ps_uniformDeclaration )
 

@@ -72,16 +72,20 @@ vulkan_layout( ogre_t6 ) uniform texture3D voxelPositionNTex;
 // Jahshaka (METAL-BOUNCE-1): THE METAL at t7 - the F0 (rgb) and Fresnel-90 weight (alpha) of the metal's
 // specular lobe, re-emitted by the lobe's directional integral (JahSpecularAlbedo).
 vulkan_layout( ogre_t7 ) uniform texture3D voxelMetalTex;
+// Jahshaka (JUNCTION-NORMAL-1): THE EMISSIVE FACTOR PER HALF-AXIS at t8 (the faces looking +a) and t9
+// (looking -a): what each half's faces emit over the voxel's area mean (VoxelMerge_piece_cs.any).
+vulkan_layout( ogre_t8 ) uniform texture3D voxelEmitPTex;
+vulkan_layout( ogre_t9 ) uniform texture3D voxelEmitNTex;
 
-// JAHSHAKA (CLOUDS-2D-2): THE CLOUD LAYER'S FIELD -- the host binds it at t8 (after the
-// surface position, PHOTON-VOXEL-4, and the metal, METAL-BOUNCE-1)
+// JAHSHAKA (CLOUDS-2D-2): THE CLOUD LAYER'S FIELD -- the host binds it at t10 (after the
+// surface position, PHOTON-VOXEL-4, the metal, METAL-BOUNCE-1, and the emissive factors, JUNCTION-NORMAL-1)
 // and sets `jah_cloud_shadow` when a 2D cloud layer shades the sun
 // (OgreScene::bindCloudInjection). Its three parameters are declared in the
 // Params block below whether or not it is bound, so the job's parameter list
 // is one list; without the property nothing reads them.
 @property( jah_cloud_shadow )
-	vulkan_layout( ogre_t8 ) uniform texture2D jahCloudField;
-	vulkan( layout( ogre_s8 ) uniform sampler jahCloudSampler );
+	vulkan_layout( ogre_t10 ) uniform texture2D jahCloudField;
+	vulkan( layout( ogre_s10 ) uniform sampler jahCloudSampler );
 @end
 
 layout( local_size_x = @value( threads_per_group_x ),

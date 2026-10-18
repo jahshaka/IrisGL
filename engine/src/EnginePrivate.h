@@ -1908,7 +1908,10 @@ public:
     X(GpuThrowInLane, "gpuscene.throwInLane") /* the GPU scene compose throw door: before the stage, after it, or every time (a test door, U4 decisions 18.3 + 22.4) */ \
     X(GatherJitter, "gather.jitter") /* the probes' jitter: 0 shipped, 1 off (the centre), 2 one offset for the grid */ \
     X(GatherFilterOff, "gather.filterOff") /* the probe-space filter off (the measuring arm, decision 20) */ \
-    X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */
+    X(GatherFilterByAge, "gather.filterByAge") /* the probe-space filter's width by the probe's age: 0 shipped, N = none from N frames (decision 21) */ \
+    X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */ \
+    X(ShadowReceiverBoxesOff, "shadow.receiverBoxesOff") /* the receiver grid without the stock route's boxes (the fixture's negative control, U5 decision 22.3) */ \
+    X(TexturePumpFault, "textures.pumpFault") /* the host's texture wait: 1 never done, 2 and its step throws (a test door, U5 decision 22.5) */
 
 enum class ArmId : unsigned {
 #define JAH_ARM_ENUM(e, n) e,
@@ -8861,8 +8864,9 @@ private:
             return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         }
     };
-    int beginTextureDrain(TextureDrain &d);
-    int stepTextureDrain(TextureDrain &d);
+    /// `neverDone`: the queues are never taken as empty (the host's wait under the arm textures.pumpFault).
+    int beginTextureDrain(TextureDrain &d, bool neverDone = false);
+    int stepTextureDrain(TextureDrain &d, bool neverDone = false);
     TextureDrain mHostDrain;
     /// One collection pass with no wait — a streaming frame's half of the drain
     /// (OPEN_COVER_SPEC §2 E).

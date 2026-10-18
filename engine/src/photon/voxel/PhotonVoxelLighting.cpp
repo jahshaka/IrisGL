@@ -1244,7 +1244,8 @@ namespace Ogre
         // Jahshaka (PHOTON-VOXEL-3/-4): the coverage per half-axis at units 3 (+a) and 4
         // (-a) - the shadow march's opacity along the lamp's direction, the half that looks
         // back at it - and the surface position per half at 5 and 6 (its origin plane).
-        // (METAL-BOUNCE-1) The metal at unit 7. The host's cloud field is at unit 8.
+        // (METAL-BOUNCE-1) The metal at unit 7; (JUNCTION-NORMAL-1) the emissive factor per half at 8
+        // (+a) and 9 (-a). The host's cloud field is at unit 10.
         for( uint8 h = 0u; h < 2u; ++h )
         {
             texSlot.texture = mVoxelizer->getCoverageVox( h );
@@ -1254,6 +1255,11 @@ namespace Ogre
         }
         texSlot.texture = mVoxelizer->getMetalVox();
         mLightInjectionJob->setTexture( 7u, texSlot );
+        for( uint8 h = 0u; h < 2u; ++h )
+        {
+            texSlot.texture = mVoxelizer->getEmitVox( h );
+            mLightInjectionJob->setTexture( uint8( 8u + h ), texSlot );
+        }
 
         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
         uavSlot.access = ResourceAccess::Write;

@@ -9,9 +9,9 @@
             "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "Matrix_piece_all", "JahGeomRows_piece_all.any", "VoxelMerge_piece_cs.any", "Voxelizer_piece_cs.any"],
             "inform_shader_of_texture_data_change" : true,
 
-            "uav_units" : 13,
+            "uav_units" : 15,
 
-            "gl_tex_slot_start" : 13,
+            "gl_tex_slot_start" : 15,
 			
 			"params" :
             [
@@ -29,7 +29,9 @@
                 ["voxelPositionPTex",		[8], "int"],
                 ["voxelPositionNTex",		[9], "int"],
                 ["voxelPositionSums",		[10], "int"],
-                ["voxelMetalTex",			[11], "int"]
+                ["voxelMetalTex",			[11], "int"],
+                ["voxelEmitPTex",			[12], "int"],
+                ["voxelEmitNTex",			[13], "int"]
 			],
 
 			"properties" :
@@ -54,6 +56,8 @@
 
             "textures" :
             [
+                {},
+                {},
                 {},
                 {},
                 {},
@@ -93,6 +97,8 @@
                 ["voxelPositionPTex",       [5], "int"],
                 ["voxelPositionNTex",       [6], "int"],
                 ["voxelMetalTex",           [7], "int"],
+                ["voxelEmitPTex",           [8], "int"],
+                ["voxelEmitNTex",           [9], "int"],
 
                 ["lightVoxel",              [0], "int"]
             ]

@@ -89,6 +89,26 @@
 		// scene's point and spot lights the pass buffer does not hold, world space,
 		// Forward+'s six float4 a light after a header (the count, the per-hit cap).
 		ReadOnlyBufferF( @value(atomWorldLightBuf), float4, atomWorldLights );
+		// A METAL'S LOBE FOR A GATHER RECORD (ENGINE-UPGRADE-U5 decision 22.1): a gather hit is diffuse-only (the
+		// caches it is averaged with hold the diffuse response), and a metal's diffuse is ~0 - so the store, the
+		// injection and the hit-direct path re-emit a metal by its specular lobe's DIRECTIONAL ALBEDO per light,
+		// F0 A( mu, r ) + w B( mu, r ) (METAL-BOUNCE-1), and the decode does the same from the SAME table
+		// (JahSpecularAlbedo, appended to the world light list after the lights: HlmsAtom::buildWorldLights, the
+		// header's z its first float4), added to the diffuse response inside the BRDF (the hook custom_ps_brdfDiffuse,
+		// fork 200.BRDFs). atomHitMetal is the F0 (rgb) and the Fresnel-90 weight (w) of the metal lobe, as the
+		// voxeliser stores them (base x metalness x kS, metalness x kS): written for a gather record only, zero else.
+		float4 atomHitMetal = float4( 0.0, 0.0, 0.0, 0.0 );
+		#define JAH_SPEC_ALBEDO( k ) readOnlyFetch( atomWorldLights, int( floatBitsToUint( readOnlyFetch( atomWorldLights, 0 ).z ) ) + ( ( k ) >> 2 ) )[( k ) & 3]
+		@insertpiece( JahSpecularAlbedo )
+		midf3 atomGatherMetalLobe( midf NdotL, midf perceptualRoughness )
+		{
+			if( !( atomHitMetal.w > 0.0 ) )
+				return midf3_c( 0.0, 0.0, 0.0 );
+			float sa, sb;
+			jahSpecularAlbedo( float( NdotL ), float( perceptualRoughness ), sa, sb );
+			// in the diffuse response's units (Rd carries the albedo over pi)
+			return midf3( ( atomHitMetal.xyz * sa + atomHitMetal.w * sb ) * 0.318309886 );
+		}
 		// A HIT HAS NO SCREEN NEIGHBOURS: the fragments of one quad are four
 		// unrelated rays, so every screen derivative of the body is zero - the
 		// footprint in the record is the only width a hit has.
@@ -884,6 +904,14 @@
 // HIT MODE'S PIECES (see the header): the eye vector and the world's lights, the
 // sun, and the record's "shaded" mark.
 @property( atom_hit_mode )
+	// THE GATHER RECORD'S METAL LOBE inside the BRDF (decision 22.1): declared before the BRDF (Atom's template inserts
+	// AtomPreBrdf before DefaultHeaderPS), defined with the decode's declarations.
+	@piece( AtomPreBrdf )
+		midf3 atomGatherMetalLobe( midf NdotL, midf perceptualRoughness );
+	@end
+	@piece( custom_ps_brdfDiffuse )
+		Rd += atomGatherMetalLobe( NdotL, pixelData.perceptualRoughness );
+	@end
 	// THE MARK THE WRITE-BACK READS: w = 1 where a record was shaded, whatever
 	// alpha the material computes (a transparent surface's hit is shaded as its
 	// surface; the day-one front end is opaque). No other library defines this
@@ -917,6 +945,14 @@
 		// diffuse untouched. The REFLECTION's records keep the full lobe.
 		if( atomHitDiffuseOnly )
 		{
+			// ...EXCEPT A METAL'S LOBE, WHICH RE-EMITS BY ITS DIRECTIONAL ALBEDO (decision 22.1; atomGatherMetalLobe):
+			// the base x metalness out of PBS's F0 = lerp( 0.04, base, metalness ), the kS weight the voxeliser's.
+			@property( metallic_workflow )
+				const float atomKs = clamp( ( float( pixelData.specular.x ) + float( pixelData.specular.y ) +
+											  float( pixelData.specular.z ) ) * ( 1.0 / 3.0 ), 0.0, 1.0 );
+				atomHitMetal = float4( max( float3( pixelData.F0 ) - 0.04 * ( 1.0 - float( metalness ) ), float3( 0.0, 0.0, 0.0 ) ) * atomKs,
+									   float( metalness ) * atomKs );
+			@end
 			pixelData.specular.xyz = midf3_c( 0.0, 0.0, 0.0 );
 			@property( clear_coat )
 				pixelData.clearCoat = _h( 0.0 );

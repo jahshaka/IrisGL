@@ -69,6 +69,7 @@
 #include <algorithm>
 #include <chrono>
 #include <map>
+#include <array>
 #include <optional>
 #include <cstring>
 #include <string>
@@ -377,6 +378,8 @@ struct CasterRing {
     /// WHICH MAP each use of a slot was (AtomCasterMapStats: kind << 16 | face << 8 | map, and
     /// bit 24 = the light's depth tested it), host-side: the counters carry no name.
     std::vector<uint32_t> tags[8];
+    /// ...and each use's receiver dilation in texels along the map's x and y (decision 19.1; 0 without a grid).
+    std::vector<std::array<float, 2>> dilations[8];
 };
 
 void destroyRing(const CasterPipelines &C, CasterRing &r) {
@@ -736,7 +739,10 @@ bool growRing(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanDevic
     bigger.written[s] = r.written[s];
     bigger.writtenAt[s] = r.writtenAt[s];
     bigger.lastTriangles = r.lastTriangles;
-    for (uint32_t i = 0; i < 8u; ++i) bigger.tags[i] = r.tags[i];
+    for (uint32_t i = 0; i < 8u; ++i) {
+        bigger.tags[i] = r.tags[i];
+        bigger.dilations[i] = r.dilations[i];
+    }
     bigger.peakUses = r.peakUses;
     bigger.unrecorded = r.unrecorded;
     d.grave.emplace_back(r, frame);
@@ -808,6 +814,10 @@ uint32_t beginUse(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanD
                 m.pbsVisibleInstances = pv[0];
                 m.pbsVisibleTriangles = pv[4];
                 m.receiverTested = (tag >> 25) & 1u;
+                if (u < r.dilations[s].size()) {
+                    m.receiverDilation[0] = r.dilations[s][u][0];
+                    m.receiverDilation[1] = r.dilations[s][u][1];
+                }
             }
             atom.setCasterStats(cs);
             r.written[s] = false;
@@ -826,6 +836,8 @@ uint32_t beginUse(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanD
     }
     if (r.tags[s].size() <= r.usesThisFrame) r.tags[s].resize(r.usesThisFrame + 1u, 0u);
     r.tags[s][r.usesThisFrame] = 0u;
+    if (r.dilations[s].size() <= r.usesThisFrame) r.dilations[s].resize(r.usesThisFrame + 1u, {0.0f, 0.0f});
+    r.dilations[s][r.usesThisFrame] = {0.0f, 0.0f};
     return r.usesThisFrame++;
 }
 
@@ -926,7 +938,7 @@ Ogre::DescriptorSetUav::BufferSlot uavOf(Ogre::UavBufferPacked *b, Ogre::Resourc
 bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreScene *scene, LightPyramid &lp,
                        const AtomReceiverDepth &rd,
                        const Ogre::Camera *viewCam, const Ogre::Matrix4 &cullM, unsigned mapW, unsigned mapH,
-                       const float dilationTexels[2], float depthMargin) {
+                       const float dilationTexels[2], float depthMargin, bool boxes = true) {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     Ogre::HlmsCompute *hc = root && root->getHlmsManager() ? root->getHlmsManager()->getComputeHlms() : nullptr;
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
@@ -1025,7 +1037,8 @@ bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreS
             // one workgroup an instance, capped at the device's 65,535 (OgreScreenProbeGather.cpp's rule): a workgroup
             // strides the slots past it (JahReceiverGrid_cs, mode 1)
             boxJob->setNumThreadGroups(std::min(65535u, std::max(1u, gs.slotCount())), 1u, 1u);
-            dispatch(boxJob);
+            // (the measuring door shadow.receiverBoxesOff skips it: the fixture's negative control, decision 22.3)
+            if (boxes) dispatch(boxJob);
             for (Ogre::uint8 u = 0u; u < 3u; ++u) boxJob->_setUavBuffer(u, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
         }
         // THE FARTHEST-RECEIVER PYRAMID, a level a dispatch (a 2048 map's 256 x 256 tiles: eight small ones).
@@ -1211,6 +1224,7 @@ void recordCasterPass(AtomPassContext &ctx) {
     // light-depth cull), and off with the scene's door (Scene::setShadowReceiverCull, the parity arm).
     OgreScene::CullReceivers receivers;
     bool receiversOn = false;
+    float recvDilation[2] = {0.0f, 0.0f};
     if (lp && scene->shadowReceiverCull()) {
         OgreView *rv = atomViewOfPass(pass);
         const AtomReceiverDepth *rd = rv ? &rv->atomReceiverDepth() : nullptr;
@@ -1232,8 +1246,13 @@ void recordCasterPass(AtomPassContext &ctx) {
             std::optional<monitor::CacheScope> row;
             if (engine && engine->armRegistry().on(ArmId::ShadowCasterPbsProbe))
                 row.emplace(CacheKind::Cull, WorkReason::Camera, 0, "atom.caster.receivers", ctx.renderSystem);
+            const bool boxesOff = engine && engine->armRegistry().on(ArmId::ShadowReceiverBoxesOff);
             receiversOn = buildReceiverGrid(ctx, ctx.renderSystem, scene, *lp, *rd, rv->camera(), cullM, rect[2],
-                                            rect[3], dilation, margin);
+                                            rect[3], dilation, margin, !boxesOff);
+            if (receiversOn) {
+                recvDilation[0] = dilation[0];
+                recvDilation[1] = dilation[1];
+            }
             receivers.params = lp->recvParams;
             receivers.grid = lp->recvGrid;
         }
@@ -1250,6 +1269,8 @@ void recordCasterPass(AtomPassContext &ctx) {
         const uint32_t kind = probeKind ? 2u : nodeName == Ogre::IdString(OgreView::kReflectShadowNodeName) ? 1u : 0u;
         ring.tags[frameNow % ring.slots][use] = (firstTests ? 1u << 24 : 0u) | (receiversOn ? 1u << 25 : 0u) |
                                                 (kind << 16) | ((face & 0xFFu) << 8) | (mapIdx & 0xFFu);
+        if (use < ring.dilations[frameNow % ring.slots].size())
+            ring.dilations[frameNow % ring.slots][use] = {recvDilation[0], recvDilation[1]};
     }
     // THE TEST DOOR: the armed map of the view kind's node, once (its FIRST cut: the request and
     // the drawn set of the light's cut at this frame's matrix).

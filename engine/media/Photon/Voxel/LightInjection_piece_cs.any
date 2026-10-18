@@ -22,15 +22,17 @@
 	// voxels from the start toward the lamp: in every voxel the ray passes, each half's SURFACE
 	// PLANE along each axis (its stored position) that the ray crosses inside that voxel stops it
 	// by the half's coverage - from either side, like any shadow ray (a face hidden inside another
-	// solid must be shadowed by that solid's back face) - capped per axis like one surface, the faces it enters and those it leaves summed apart (below); the
+	// solid must be shadowed by that solid's back face) - capped per axis like one surface, the faces it enters and those
+	// it leaves counted by the inside fraction's law (below); the
 	// ORIGIN PLANE (the lit face itself, axis `oAxis` at `oCoord`, facing `oSign`) never, through
 	// the one reader's gate. The march it replaces stepped one cell from the voxel's centre and
 	// took a coverage times the cells crossed: a wall sharing the lit face's cell was never read,
 	// and at 1.875 m cells every wall voxel of a room holds two walls (the leak room's corner: a
 	// side wall's inner face lit by the lamp outside, 21 of 36 cones red; this march, 0).
 	INLINE float jahInjectPlane( float o, float pO, int b, float lo, float hi, float sb, float db, float vLo, float vHi,
-								 int oAxis, float oCoord, float oSign )
+								 int oAxis, float oCoord, float oSign, float hSign, OGRE_OUT_REF( float, tCross ) )
 	{
+		tCross = 0.0f;
 		if( !( o > 0.0f ) )
 			return 0.0f;
 		// The surfaces of this half lie in THIS voxel: the stored position (16-bit) is clamped into
@@ -40,7 +42,13 @@
 		const float pp = clamp( pO / o, vLo, vHi );
 		if( !( pp >= lo - 2e-5f && pp <= hi + 2e-5f ) )
 			return 0.0f;
-		if( b == oAxis )
+		// where along the ray the plane is crossed (the march takes a voxel's faces in that order)
+		tCross = ( pp - sb ) / db;
+		// THE ORIGIN'S OWN SURFACES ONLY (decision 22.2): the gate keeps the march from stopping on the lit face's own
+		// quantised planes - faces looking the way the origin looks (hSign == oSign). A face looking BACK at it within
+		// the gate's cell and a half is another surface (a plate's end facing a wall 0.15 m off it): an occluder, and
+		// the inside fraction must see it enter, or the solid's far face reads as an open surface seen from behind.
+		if( b == oAxis && hSign == oSign )
 		{
 			const float g = jahVoxelOriginGate( pp * o, o, float4( float( oAxis ), oCoord, oSign, 0.0f ),
 												p_invVoxelResolution[b] );
@@ -80,20 +88,26 @@
 			tDel[a] = p_invVoxelResolution[a] / abs( d[a] );
 			tEnd = min( tEnd, d[a] > 0.0f ? ( 1.0f - s[a] ) / d[a] : -s[a] / d[a] );
 		}
-		// THE ENTRIES AND THE EXITS, APART (SUN-INJECTION-RES-1, ENGINE-UPGRADE-U5 stage 5). A ray that crosses a
-		// solid meets it twice - where it enters (a face looking back at the ray) and where it leaves (a face
-		// looking the ray's way) - and both faces carry the same coverage of the same rows of the cell: a 0.1 m
-		// plate's two ends each cover 0.71 of a 0.14 m cell's face, ONE band 0.1 m tall. Summed, the plate stopped
-		// 1.42 of the ray - a wall's row beside it went black where 29 % of it is lit, and the band's darkening
-		// moved with the cell size (the sun-lit wall's lobe 1.019 / 1.003 / 0.982 at 32 / 64 / 128 cells while the
-		// store's lit face read 0.657 at all three: the face column's row at the plate's height 0.643 / 0.000 /
-		// 0.155 of the face against the coverage's 0.643 / 0.286 / 0.571). So the entering faces and the leaving
-		// ones are summed apart and the ray is stopped by the LARGER: one solid crossed is counted once, a face
-		// inside a solid (a march starting in it) is still stopped by the solid's exit, and two solids are two.
-		float occIn = 0.0f, occOut = 0.0f;
+		// THE INSIDE FRACTION (SUN-INJECTION-RES-1, ENGINE-UPGRADE-U5 stage 5 and decision 22.2). A ray that crosses a
+		// solid meets it twice - where it enters (a FRONT face, looking back at the ray) and where it leaves (a BACK face,
+		// looking the ray's way) - and both faces carry the same coverage of the same rows of the cell: a 0.1 m plate's
+		// two ends each cover 0.71 of a 0.14 m cell's face, ONE band 0.1 m tall. Summed, the plate stopped 1.42 of the
+		// ray (the face column's row at the plate's height read 0.643 / 0.000 / 0.155 of the face at 32 / 64 / 128 cells
+		// against the coverage's 0.643 / 0.286 / 0.571); taking the larger of the entries and the exits counted a solid
+		// once but let TWO OPEN single-sided surfaces facing away from each other along the ray (foliage cards, an
+		// awning over a slat: the voxeliser puts a one-sided face in the half its normal looks to) through as one solid
+		// - 0.4 of the sun past two 0.6 cards. So the march carries T, the light left, and f, the fraction of the ray's
+		// cross-section INSIDE a solid, and takes every face it crosses IN THE ORDER IT CROSSES THEM:
+		//   a FRONT face of coverage c blocks (T x (1 - c)) and enters (f += c (1 - f));
+		//   a BACK face of coverage c first leaves what was entered (min( c, f ) leaves f and blocks nothing - the
+		//   solid's front already did), and its REMAINDER c - min( c, f ) is an open surface seen from behind,
+		//   which blocks (T x (1 - remainder)).
+		// One solid crossed end to end: once. Two solids: twice. A march starting inside a solid: stopped by its exit
+		// (nothing entered). Two open faces back to back: (1 - c)^2.
+		float T = 1.0f, fIn = 0.0f;
 		float tIn = 0.0f;
 		const int maxSteps = res.x + res.y + res.z + 3;
-		for( int it = 0; it < maxSteps && max( occIn, occOut ) < 1.0f; ++it )
+		for( int it = 0; it < maxSteps && T > 0.0f; ++it )
 		{
 			const float tOut = min( min( min( tMax.x, tMax.y ), tMax.z ), tEnd );
 			const float3 cP = OGRE_Load3D( voxelCoveragePTex, iv, 0 ).xyz;
@@ -104,6 +118,10 @@
 				const float4 pN4 = OGRE_Load3D( voxelPositionNTex, iv, 0 );
 				const float3 pP = pP4.xyz;
 				const float3 pN = pN4.xyz;
+				// THE VOXEL'S FACES THE RAY CROSSES: up to two per axis (a front, a back), each with where it is crossed.
+				float evT[6], evC[6];
+				bool evFront[6];
+				int evN = 0;
 				// THE CASTER SHARE PER HALF-AXIS (FAR-SUN-1; VoxelMerge_piece_cs.any): only the
 				// surfaces that CAST a shadow stop the march - the shadow maps' caster set - while
 				// every surface still bounces. 1 in a voxel of casters: the pre-lane march exactly.
@@ -115,15 +133,61 @@
 					const float lo = min( e0, e1 ), hi = max( e0, e1 );
 					const float vLo = float( iv[b] ) * p_invVoxelResolution[b];
 					const float vHi = vLo + p_invVoxelResolution[b];
+					float tP, tN;
 					const float takeP =
-						jahInjectPlane( cP[b], pP[b], b, lo, hi, s[b], d[b], vLo, vHi, oAxis, oCoord, oSign ) *
+						jahInjectPlane( cP[b], pP[b], b, lo, hi, s[b], d[b], vLo, vHi, oAxis, oCoord, oSign, 1.0f, tP ) *
 							jahInjectCasterShare( pP4.w, b );
 					const float takeN =
-						jahInjectPlane( cN[b], pN[b], b, lo, hi, s[b], d[b], vLo, vHi, oAxis, oCoord, oSign ) *
+						jahInjectPlane( cN[b], pN[b], b, lo, hi, s[b], d[b], vLo, vHi, oAxis, oCoord, oSign, -1.0f, tN ) *
 							jahInjectCasterShare( pN4.w, b );
 					// the faces looking +b face a ray travelling -b (it enters through them), and the other way
-					occIn += min( d[b] < 0.0f ? takeP : takeN, 1.0f );
-					occOut += min( d[b] < 0.0f ? takeN : takeP, 1.0f );
+					const bool pFront = d[b] < 0.0f;
+					if( takeP > 0.0f )
+					{
+						evT[evN] = tP;
+						evC[evN] = min( takeP, 1.0f );
+						evFront[evN] = pFront;
+						++evN;
+					}
+					if( takeN > 0.0f )
+					{
+						evT[evN] = tN;
+						evC[evN] = min( takeN, 1.0f );
+						evFront[evN] = !pFront;
+						++evN;
+					}
+				}
+				// IN THE ORDER THE RAY CROSSES THEM (at one place: the front first - a face the ray enters there).
+				for( int k = 1; k < evN; ++k )
+				{
+					const float kt = evT[k], kc = evC[k];
+					const bool kf = evFront[k];
+					int j = k - 1;
+					while( j >= 0 && ( evT[j] > kt || ( evT[j] == kt && !evFront[j] && kf ) ) )
+					{
+						evT[j + 1] = evT[j];
+						evC[j + 1] = evC[j];
+						evFront[j + 1] = evFront[j];
+						--j;
+					}
+					evT[j + 1] = kt;
+					evC[j + 1] = kc;
+					evFront[j + 1] = kf;
+				}
+				for( int k = 0; k < evN; ++k )
+				{
+					const float c = evC[k];
+					if( evFront[k] )
+					{
+						T *= 1.0f - c;
+						fIn += c * ( 1.0f - fIn );
+					}
+					else
+					{
+						const float leave = min( c, fIn );
+						fIn -= leave;
+						T *= 1.0f - ( c - leave );
+					}
 				}
 			}
 			if( tOut >= tEnd )
@@ -135,7 +199,7 @@
 			tIn = tMax[a];
 			tMax[a] += tDel[a];
 		}
-		return max( 0.0f, 1.0f - max( occIn, occOut ) );
+		return max( 0.0f, T );
 	}
 @end
 
@@ -285,6 +349,11 @@
 	// normal and the back, each marched from its dominant half's face.
 	const float3 covP0 = OGRE_Load3D( voxelCoveragePTex, voxelId, 0 ).xyz;
 	const float3 covN0 = OGRE_Load3D( voxelCoverageNTex, voxelId, 0 ).xyz;
+	// JUNCTION-NORMAL-1: THE EMISSIVE PER HALF-AXIS - each half emits what its own faces emit, the area
+	// mean E times the half's factor f = u / ( 1 - u ) (VoxelMerge_piece_cs.any: u on 1022 steps, f = 1
+	// exactly at code 511 - a voxel that is all emitter keeps E on every half it faces, bit for bit).
+	const float3 emitU[2] = { floor( OGRE_Load3D( voxelEmitPTex, voxelId, 0 ).xyz * 1023.0f + 0.5f ) / 1022.0f,
+							  floor( OGRE_Load3D( voxelEmitNTex, voxelId, 0 ).xyz * 1023.0f + 0.5f ) / 1022.0f };
 	const float3 posP0 = OGRE_Load3D( voxelPositionPTex, voxelId, 0 ).xyz;
 	const float3 posN0 = OGRE_Load3D( voxelPositionNTex, voxelId, 0 ).xyz;
 	const float3 an = abs( normalVal.xyz );
@@ -511,7 +580,8 @@
 		{
 			const float k = min( h == 0 ? covP0[a] : covN0[a], 1.0f );
 			jahHalfLight[li * 6u + uint( h * 3 + a )] =
-				k > 0.0f && c > 0.0f ? float4( ( halfLight[h * 3 + a] + emissive ) * ( bm * k ), k )
+				k > 0.0f && c > 0.0f ? float4( ( halfLight[h * 3 + a] +
+												 emissive * ( emitU[h][a] / ( 1.0f - emitU[h][a] ) ) ) * ( bm * k ), k )
 									 : float4( 0.0f, 0.0f, 0.0f, 0.0f );
 		}
 	}

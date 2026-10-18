@@ -39,8 +39,8 @@
 #define VOXEL_MERGE_SCALE 4096.0f
 #define VOXEL_MERGE_CLAMP 16.0f
 
-	/// ONE VOXEL'S TWENTY-THREE ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
-	/// z*23+0..2 (rgb), THE METAL'S Fresnel-90 weight at +3 and its F0 at +20..22 (rgb;
+	/// ONE VOXEL'S TWENTY-SIX ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
+	/// z*26+0..2 (rgb), THE METAL'S Fresnel-90 weight at +3 and its F0 at +20..22 (rgb;
 	/// METAL-BOUNCE-1 - +3 summed the diffuse colour's alpha, which no resolve read),
 	/// RAW normal sum at +4..6 (xyz, two's complement),
 	/// emissive sum at +7..9 (rgb), FOLDED normal sum at +10..12 (xyz), the
@@ -49,7 +49,9 @@
 	/// (PHOTON-VOXEL-3/-4, THE DIRECTIONAL COVERAGE below) and the matching
 	/// POSITION-WEIGHTED sums into +16 and +17 (PHOTON-VOXEL-4, THE SURFACE POSITION
 	/// below), and the CASTERS' COVERAGE into +18 and +19 (FAR-SUN-1, THE CASTER SHARE
-	/// below), and the metal's three: twenty-three, because only those carry anything — a
+	/// below), and the metal's three, and THE EMITTERS' COVERAGE per half packed into +23 (looking
+	/// +a) and +24 (-a) with THE EMITTERS' WEIGHT at +25 (JUNCTION-NORMAL-1, THE EMISSIVE PER HALF
+	/// below): twenty-six, because only those carry anything — a
 	/// fourth channel on the three vectors would be 25 MB read and written for nothing
 	/// at 128^3.
 	/// Interleaved rather than stacked planes so the shader needs no knowledge of
@@ -73,7 +75,7 @@
 	/// more per 64^3 volume, resident.
 	INLINE uint3 voxelMergeUvw( uint3 voxelCel, uint chan )
 	{
-		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 23u + chan );
+		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 26u + chan );
 	}
 
 
@@ -280,6 +282,41 @@
 			packed |= uint( share * 31.0f + 0.5f ) << uint( 5 * a );
 		}
 		return float( packed ) / 65535.0f;
+	}
+	/// THE EMISSIVE PER HALF-AXIS (JUNCTION-NORMAL-1, ENGINE-UPGRADE-U5 decision 21). The emissive
+	/// volume holds the voxel's AREA MEAN E = sum( w e ) / W over every surface in it, and the
+	/// directional store used to put that mean on every half-axis: at a junction - a lit emitter
+	/// wall meeting a dark plate in one cell - the wall's half emitted the wall's L diluted by
+	/// the plate's area (0.554 L at 128 cells, 0.328 L at 256, following the face's sub-cell
+	/// offset, not the cell size). A half emits what ITS faces emit: the mean over the pieces
+	/// facing it, weighted by their projected coverage like the half's own coverage. With one
+	/// emitter in the voxel that is E x f, f = ( Se / S ) / ( We / W ): Se the EMITTERS' share
+	/// of the half's coverage (the coverage's own sums, +23 and +24, over the pieces that emit),
+	/// S all of it, We the emitters' weight (+25) and W the voxel's - the emitter's own radiance
+	/// over the area it covers on that side. A voxel that is all emitter reads f = 1 EXACTLY (the
+	/// encoding keeps 1 at a code), so a store without junctions is the store it was, bit for
+	/// bit; a half no emitter faces reads 0. (Two different emitters in one cell take their
+	/// pooled mean on each side they face - a cell's colour, never a mixed half.)
+	/// The three factors of a half are stored as u = f / ( 1 + f ) on a 10-bit UNORM grid of
+	/// 1022 steps (f = 1 at code 511, f in [0, 1021]: 0.2 - 0.5 % between 0.1 and 4), one
+	/// R10G10B10A2 texel per half (+a, -a) - the coverage's shape.
+	INLINE float3 voxelMergeEmitFactor( uint emitPacked, uint coveragePacked, uint emitWeight, uint totalWeight )
+	{
+		const float3 se = float3( voxelMergeAxisUnpack( emitPacked ) );
+		const float3 all = float3( voxelMergeAxisUnpack( coveragePacked ) );
+		float3 u = float3( 0.0f, 0.0f, 0.0f );
+		if( emitWeight > 0u )
+		{
+			// (the voxel's weight is capped at 16 bits, VCT's divisor; the emitters' at the same cap)
+			const float weightRatio = float( totalWeight ) / float( min( emitWeight, totalWeight ) );
+			for( int a = 0; a < 3; ++a )
+			{
+				// f = 1 exactly where the emitters are the half's whole coverage and the voxel's whole weight
+				const float f = all[a] > 0.0f ? ( se[a] == all[a] ? weightRatio : se[a] / all[a] * weightRatio ) : 0.0f;
+				u[a] = ( f == 1.0f ? 511.0f : min( floor( f / ( 1.0f + f ) * 1022.0f + 0.5f ), 1021.0f ) ) / 1023.0f;
+			}
+		}
+		return u;
 	}
 	INLINE uint voxelMergeAxisAddSat( uint packed, uint3 add )
 	{
