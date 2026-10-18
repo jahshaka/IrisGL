@@ -478,10 +478,8 @@ bool OgreScene::nameMovedNode(Node &rec, Ogre::Node *on, std::vector<Ogre::Node 
         }
         rec.lightPos = p; rec.lightRot = q; rec.lightPoseKnown = true;
     }
-    for (NodeId rider : rec.boneRiders) {
-        auto rit = mNodes.find(rider);
-        if (rit != mNodes.end() && rit->second.node) stack.push_back(rit->second.node);
-    }
+    for (NodeId rider : rec.boneRiders)   // the direct index, counted (decision 22.7): never the ordered map's descent
+        if (Node *r = record(rider); r && r->node) stack.push_back(r->node);
     for (size_t i = 0, e = on->numChildren(); i < e; ++i) stack.push_back(on->getChild(i));
     return light;
 }

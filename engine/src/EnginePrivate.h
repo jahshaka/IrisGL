@@ -6351,6 +6351,26 @@ private:
         bool measure(uint32_t slot, const detail::GpuInstance *now, uint64_t &key) const;
         void fileSlotFields(uint32_t slot, const detail::GpuInstance *now, bool want);
         void fileColumn(uint32_t slot, bool want, uint64_t key);
+        /// THE TABLE, FOLDED into the compose's digest (the identity row, decision 22.6): the columns in key order with
+        /// their slot lists, then per slot its filing, column, index in it and centre.
+        void digestInto(detail::GpuScene &g) const {
+            std::vector<uint64_t> keys;
+            keys.reserve(columns.size());
+            for (const auto &kv : columns) keys.push_back(kv.first);
+            std::sort(keys.begin(), keys.end());
+            for (uint64_t k : keys) {
+                const std::vector<uint32_t> &col = columns.at(k);
+                g.digestFold(&k, sizeof(k));
+                if (!col.empty()) g.digestFold(col.data(), col.size() * sizeof(uint32_t));
+            }
+            for (size_t s = 0; s < filed.size(); ++s) {
+                g.digestFold(&filed[s], sizeof(filed[s]));
+                if (!filed[s]) continue;
+                g.digestFold(&columnOf[s], sizeof(columnOf[s]));
+                g.digestFold(&at[s], sizeof(at[s]));
+                g.digestFold(&centreOf[s], sizeof(Ogre::Vector3));
+            }
+        }
         void growTo(size_t count) {
             if (count <= filed.size()) return;
             filed.resize(count, 0u);
@@ -7982,6 +8002,24 @@ public:
     bool deviceLost() const;
     GpuFault gpuFault() const;
     unsigned long long queueSubmissionTag() const override;   // inspect::EngineEcho (U3 stage 3)
+    /// THE FRAME'S POOL SPANS (ENGINE-UPGRADE-U4 stage 6, the core budget's measurement): each frame's span from its
+    /// updateSceneGraph to the end of _updateAllRenderTargets — where the SceneManagers' workers run (the scene
+    /// graph, the GPU scene's compose, the culling) — in steady_clock ns, the last kPoolSpans frames.
+    void poolSpans(std::vector<std::pair<unsigned long long, unsigned long long>> &out) const override {
+        std::lock_guard<std::mutex> lock(mPoolSpanMutex);
+        out = mPoolSpans;
+    }
+    void notePoolSpan(std::chrono::steady_clock::time_point b, std::chrono::steady_clock::time_point e) {
+        const auto ns = [](std::chrono::steady_clock::time_point t) {
+            return (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
+        };
+        std::lock_guard<std::mutex> lock(mPoolSpanMutex);
+        if (mPoolSpans.size() >= kPoolSpans) mPoolSpans.erase(mPoolSpans.begin());
+        mPoolSpans.push_back({ ns(b), ns(e) });
+    }
+    static constexpr size_t kPoolSpans = 2048;
+    mutable std::mutex mPoolSpanMutex;
+    std::vector<std::pair<unsigned long long, unsigned long long>> mPoolSpans;
     /// The render system's out-of-memory count (VulkanDevice::getOutOfMemoryFailures,
     /// the fork) and the last one's text; 0 / "" without the Vulkan render system.
     unsigned vulkanOomCount() const;

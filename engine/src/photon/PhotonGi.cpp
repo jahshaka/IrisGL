@@ -2654,6 +2654,7 @@ void PhotonComponent::applyGiInvalidation(bool restartStagedBuild) {
 // still spends one per frame.
 void PhotonComponent::clearCascadeDirtyUnion() {
     mGiDirtyCollapsed = false;
+    mGiDirtyListMerged = false;
     mGiDirtySumVolume = 0.0;
     mGiDirtyReach = 0u;
     mGiDirtyMembers.clear();
@@ -2696,41 +2697,6 @@ void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box) {
         clearCascadeDirtyUnion();
         mGiDirtyPlacementSerial = mGiPlacementSerial;
     }
-    // EVERY NOTED BOX IS A MEMBER, as noted (decision 18.2): never a merged box, never the union — the mark's
-    // re-check against a re-placed cascade tests exactly what was noted, on every path (the stand-apart, a
-    // re-collapse, the cap's merges).
-    mGiDirtyMembers.push_back(*box);
-    if (mGiDirtyCollapsed) {
-        Ogre::Aabb merged = mGiCascadeDirtyBoxes.front();
-        merged.merge(*box);
-        if (reachOf(merged) == (mGiDirtyReach | reach)) {
-            mGiCascadeDirtyBoxes.front() = merged;
-            mGiDirtyReach |= reach;
-            return;
-        }
-        // The union would reach a cascade no member does: this box stands apart, and the running union restarts
-        // from the list as it stands.
-        mGiDirtyCollapsed = false;
-        mGiDirtyUnion = mGiCascadeDirtyBoxes.front();
-        mGiDirtySumVolume = volumeOf(mGiDirtyUnion);
-    }
-    mGiDirtyReach |= reach;
-    if (mGiCascadeDirtyBoxes.empty()) mGiDirtyUnion = *box;
-    else mGiDirtyUnion.merge(*box);
-    const auto collapseIfDense = [&]() {
-        if (mGiCascadeDirtyBoxes.size() >= 2u && volumeOf(mGiDirtyUnion) <= 2.0 * mGiDirtySumVolume &&
-            reachOf(mGiDirtyUnion) == mGiDirtyReach) {
-            mGiCascadeDirtyBoxes.assign(1u, mGiDirtyUnion);
-            mGiDirtySumVolume = volumeOf(mGiDirtyUnion);
-            mGiDirtyCollapsed = true;
-        }
-    };
-    if (mGiCascadeDirtyBoxes.size() < kGiCascadeDirtyBoxCap) {
-        mGiCascadeDirtyBoxes.push_back(*box);
-        mGiDirtySumVolume += volumeOf(*box);
-        collapseIfDense();
-        return;
-    }
     // AT THE CAP THE LIST MERGES; IT DOES NOT GIVE UP (PHOTON audit F14). The
     // member's note has the why — seventeen crates settling in one corner used
     // to read as "the scene changed everywhere" and rebuild the chain out to the
@@ -2763,18 +2729,63 @@ void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box) {
         return double(std::max(a.mHalfSize.x, 0.0f)) + double(std::max(a.mHalfSize.y, 0.0f)) +
                double(std::max(a.mHalfSize.z, 0.0f));
     };
-    size_t best = 0;
-    double bestGrowth = std::numeric_limits<double>::max();
-    for (size_t i = 0; i < mGiCascadeDirtyBoxes.size(); ++i) {
-        Ogre::Aabb merged = mGiCascadeDirtyBoxes[i];
+    // One box into the list: appended under the cap, merged into its least-margin entry at it (the entry then holds a
+    // box no single note made: mGiDirtyListMerged).
+    const auto insertBox = [&](const Ogre::Aabb &b) {
+        if (mGiCascadeDirtyBoxes.size() < kGiCascadeDirtyBoxCap) {
+            mGiCascadeDirtyBoxes.push_back(b);
+            mGiDirtySumVolume += volumeOf(b);
+            return;
+        }
+        size_t best = 0;
+        double bestGrowth = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < mGiCascadeDirtyBoxes.size(); ++i) {
+            Ogre::Aabb merged = mGiCascadeDirtyBoxes[i];
+            merged.merge(b);
+            const double growth = marginOf(merged) - marginOf(mGiCascadeDirtyBoxes[i]);
+            if (growth < bestGrowth) { bestGrowth = growth; best = i; }
+        }
+        mGiDirtySumVolume -= volumeOf(mGiCascadeDirtyBoxes[best]);
+        mGiCascadeDirtyBoxes[best].merge(b);
+        mGiDirtySumVolume += volumeOf(mGiCascadeDirtyBoxes[best]);
+        mGiDirtyListMerged = true;
+    };
+    // EVERY NOTED BOX IS A MEMBER, as noted (decision 18.2): never a merged box, never the union — the mark's
+    // re-check against a re-placed cascade tests exactly what was noted, on every path (the stand-apart, a
+    // re-collapse, the cap's merges).
+    mGiDirtyMembers.push_back(*box);
+    if (mGiDirtyCollapsed) {
+        Ogre::Aabb merged = mGiCascadeDirtyBoxes.front();
         merged.merge(*box);
-        const double growth = marginOf(merged) - marginOf(mGiCascadeDirtyBoxes[i]);
-        if (growth < bestGrowth) { bestGrowth = growth; best = i; }
+        if (reachOf(merged) == (mGiDirtyReach | reach)) {
+            mGiCascadeDirtyBoxes.front() = merged;
+            mGiDirtyReach |= reach;
+            return;
+        }
+        // The union would reach a cascade no member does: this box STANDS APART, and the list becomes the MEMBERS
+        // (decision 22.2) — every box noted, this one last, through the list's own cap — never the union box, which
+        // would carry its reach on past a cascade re-placement with nothing left to say it was a union. (No
+        // re-collapse: the members' union is `merged`, which reaches past them — the test just taken.)
+        mGiDirtyCollapsed = false;
+        mGiDirtyListMerged = false;
+        mGiDirtyReach |= reach;
+        mGiCascadeDirtyBoxes.clear();
+        mGiDirtySumVolume = 0.0;
+        mGiDirtyUnion = merged;
+        for (const Ogre::Aabb &m : mGiDirtyMembers) insertBox(m);
+        return;
     }
-    mGiDirtySumVolume -= volumeOf(mGiCascadeDirtyBoxes[best]);
-    mGiCascadeDirtyBoxes[best].merge(*box);
-    mGiDirtySumVolume += volumeOf(mGiCascadeDirtyBoxes[best]);
-    collapseIfDense();
+    mGiDirtyReach |= reach;
+    if (mGiCascadeDirtyBoxes.empty()) mGiDirtyUnion = *box;
+    else mGiDirtyUnion.merge(*box);
+    insertBox(*box);
+    if (mGiCascadeDirtyBoxes.size() >= 2u && volumeOf(mGiDirtyUnion) <= 2.0 * mGiDirtySumVolume &&
+        reachOf(mGiDirtyUnion) == mGiDirtyReach) {
+        mGiCascadeDirtyBoxes.assign(1u, mGiDirtyUnion);
+        mGiDirtySumVolume = volumeOf(mGiDirtyUnion);
+        mGiDirtyCollapsed = true;
+        mGiDirtyListMerged = true;
+    }
 }
 
 // A DATABLOCK OR A TEXTURE THE MATERIAL STORE HOLDS IS DYING. Narrower than
@@ -2807,7 +2818,9 @@ size_t PhotonComponent::markDirtyCascadesPending(GiStaleReason why) {
     // THE COLLAPSED UNION'S REACH, RE-CHECKED HERE (decision 16.4): it was taken equal to its members' against the
     // cascades as they stood at the last note; a cascade re-placed since then is tested against the members.
     // (a cleared list holds no union: the collapsed state goes with it — decision 18.1)
-    const bool replaced = mGiDirtyCollapsed && !mGiCascadeDirtyBoxes.empty() &&
+    // Keyed on THE LIST HOLDING A UNION (decision 22.2) — the collapsed union, or a cap merge — not on the collapse
+    // alone: any box no single note made is re-tested through the members it stands for.
+    const bool replaced = mGiDirtyListMerged && !mGiCascadeDirtyBoxes.empty() &&
                           mGiDirtyPlacementSerial != mGiPlacementSerial;
     const std::vector<Ogre::Aabb> &boxes = replaced ? mGiDirtyMembers : mGiCascadeDirtyBoxes;
     for (VctCascade &c : mVctCascades) {

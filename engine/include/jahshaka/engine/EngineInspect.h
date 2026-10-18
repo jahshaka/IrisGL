@@ -65,6 +65,8 @@ public:
         /// the Atom routes and the material queue pushes applied; (17.1) the observers' time in the timed notifies,
         /// ever, µs — the ones with a lane half (their ordered halves; the card feed) and the rest (the ray feed).
         unsigned long long shareRecomposes = 0;
+        /// (decision 22.4 b) shares whose recompose threw again, ever — their unstaged slots marked for the next compose.
+        unsigned long long shareGiveUps = 0;
         unsigned           tailAtoms = 0, tailQueues = 0;
         double             observerLaneMicros = 0.0, observerOtherMicros = 0.0;
         /// THE NAME LIST'S GUARD (U4 decision 16.2): listed entries that are not a live record (by address, never
@@ -166,6 +168,10 @@ public:
     /// The last free frame's interpolation: its nodes and its microseconds (scene `s`), for the apply's measure row.
     /// ...`micros` the apply's writes, `namingMicros` the naming of what they wrote to the scans (decision 56).
     virtual void lastInterpolation(const Scene *s, unsigned &nodes, double &micros, double &namingMicros) const = 0;
+    /// THE FRAME'S POOL SPANS (U4 stage 6): each frame's span from its scene-graph update to the end of its render —
+    /// where the SceneManagers' workers run — in steady_clock nanoseconds, the newest last (a bounded ring). Safe from
+    /// any thread.
+    virtual void poolSpans(std::vector<std::pair<unsigned long long, unsigned long long>> &out) const = 0;
 };
 /// The engine's probes; null for an engine of another kind.
 const EngineEcho *engine(const Engine *e);

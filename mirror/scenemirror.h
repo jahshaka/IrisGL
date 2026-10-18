@@ -190,6 +190,12 @@ public:
     /// (DIRTY_SET_MIRROR_SPEC) this is the MARKED set, not the scene: on a
     /// still frame it is ZERO however big the document is.
     int visitedCount() const { return mVisited; }
+    /// Of those, how many the journal take's TRANSFORM-ONLY FAST PATH consumed (the walk never visited them) — in edit
+    /// and, for an entry already movable, in play (U4 decision 22.1); mirror.extract_movers' play arm asserts on it.
+    int fastPathServedCount() const { return mFastServed; }
+    /// THE DIRTY LIST'S INVARIANT, counted (decision 22.5): document-list nodes found NOT queued at the consumption —
+    /// a slot left behind by a take, which no removal would cancel. Cumulative; must be zero.
+    quint64 unqueuedDirtySlots() const { return mUnqueuedDirtySlots; }
     /// HOW MANY DOCUMENT NODES THIS MIRROR CURRENTLY HOLDS AN ENTRY FOR. The
     /// question `sync()`'s return value used to answer by accident, back when
     /// the walk reached every node every frame; since the dirty set it is the
@@ -272,6 +278,12 @@ public:
     quint64 staticRepromotionCount() const { return mStaticRepromotions; }
     /// THE SYNC'S STAGE LOG (a measuring door, U4 stage 5): with it on, the last sync's MirrorStage spans (name, ms).
     void setStageLog(bool on) { mStageLogOn = on; }
+    /// THE RECORDS TAP (U4 decision 22.3, the records oracle): with it on, a copy of the last sync's NODE RECORDS and
+    /// its change set's moved list, as emitted — mirror.extract_movers compares the dirty path's against a full walk's
+    /// over the same history, set and contents.
+    void setRecordTap(bool on) { mRecordTapOn = on; }
+    const std::vector<jahshaka::engine::NodeRecord> &lastNodeRecords() const { return mTapRecords; }
+    const std::vector<jahshaka::engine::NodeId> &lastMovedList() const { return mTapMoved; }
     const std::vector<std::pair<const char *, double>> &lastStageLog() const { return mStageLog; }
     /// How many syncs a node must go UNWRITTEN before the settle may promote
     /// it — its own quiet count, not the document's or the process's. Half a
@@ -1498,6 +1510,8 @@ private:
     quint32                  mSyncStamp = 0;
     /// How many document nodes the current walk reached — sync()'s return value.
     int                      mVisited = 0;
+    int                      mFastServed = 0;   // fastPathServedCount
+    quint64                  mUnqueuedDirtySlots = 0;   // unqueuedDirtySlots
     /// Something may have stopped referencing an engine mesh / material /
     /// texture since the last cache sweep. reclaimUnused() rebuilds three
     /// QSets out of every entry in the scene, so running it on a frame where
@@ -2123,7 +2137,8 @@ private:
     bool writtenThisSync(const iris::SceneNode *node, const Entry &e) const {
         return e.writtenSerial == mWrittenSerial || mWrittenEntryless.contains(node);
     }
-    void newWrittenSync() { ++mWrittenSerial; mWrittenEntryless.clear(); }
+    /// (0 is skipped on the wrap: an Entry's writtenSerial is born 0, which must never read "written this sync".)
+    void newWrittenSync() { if (++mWrittenSerial == 0u) mWrittenSerial = 1u; mWrittenEntryless.clear(); }
     jahshaka::engine::ChangeSet mFrameChanges;
     /// Drain the journal into the two above (twice a sync: before the walk, at the emit).
     void takeWriteJournal(bool beforeWalk);
@@ -2165,8 +2180,13 @@ private:
         bool parentMovable = false;
     };
     std::vector<SettleEntry> mSettleWalk;
+    /// THE RUNNING ROTATION'S ID (U4 stage 5): bumped as a rotation starts, 0 skipped on the wrap (Entry::settleVisited
+    /// is born 0 = "no rotation") — a write during a rotation owes a next one only behind it (noteSettleWrite).
     quint32 mSettleRotation = 0;
     bool mStageLogOn = false;
+    bool mRecordTapOn = false;
+    std::vector<jahshaka::engine::NodeRecord> mTapRecords;   ///< setRecordTap
+    std::vector<jahshaka::engine::NodeId>     mTapMoved;
     std::vector<std::pair<const char *, double>> mStageLog;   ///< the running (or last) rotation's id (Entry::settleVisited; U4 stage 5)
     quint32 mSettleVisits = 0;
     /// Runs one slice of the settle (at most kStaticSettleNodesPerSync visits).

@@ -156,6 +156,10 @@ set(_jah_outer_shared_libs "${BUILD_SHARED_LIBS}")
 set(_jah_outer_pic "${CMAKE_POSITION_INDEPENDENT_CODE}")
 set(BUILD_SHARED_LIBS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# BULLET'S MULTI-THREADED WORLD (ENGINE-UPGRADE-U4 stage 6, the owner's word): Bullet built thread-safe (its own
+# -DBT_THREADSAFE=1, its std::thread task scheduler); the define is PUBLIC on IrisGL below, because Bullet's headers
+# change shape under it (btDbvtBroadphase's per-thread ray stacks) and every TU that includes them must agree.
+set(BULLET2_MULTITHREADING ON)
 add_subdirectory_with_folder("Dependencies/Bullet" thirdparty/bullet3)
 add_subdirectory_with_folder("Dependencies/Zip" thirdparty/zip)
 # meshoptimizer (ATOM stage 1, SPECS/NANITE_SPEC.md §7): the simplifier that
@@ -559,6 +563,7 @@ target_include_directories(IrisGL PRIVATE
 target_include_directories(IrisGL PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
 
 target_link_libraries (IrisGL PUBLIC zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent)
+target_compile_definitions(IrisGL PUBLIC BT_THREADSAFE=1)   # Bullet's multi-threaded build (above)
 target_link_libraries (IrisGL PRIVATE assimp)
 # meshoptimizer is PRIVATE for the same reason assimp is: the LOD chain it builds
 # crosses to the engine as plain data (iris::Mesh::lodIndices), never as one of

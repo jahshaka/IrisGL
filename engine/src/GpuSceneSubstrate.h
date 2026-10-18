@@ -132,6 +132,14 @@ public:
     /// A share that threw (decision 18.3): its error, and the shares recomposed on the frame's thread, ever.
     std::vector<std::string> shareError;
     unsigned long long shareRecomposes = 0ull;
+    /// ...the slot a share STAGED and had not yet collected (its tail and its lane halves owed) when it threw — the
+    /// redo keeps its row, never restages it (decision 22.4 a); kNoSlot when none. And the redo's own scratch: the
+    /// slots the lane staged, sorted.
+    static constexpr uint32_t kNoSlot = 0xFFFFFFFFu;
+    std::vector<uint32_t> shareInflight;
+    std::vector<std::vector<uint32_t>> shareLaneStaged;   ///< per share, built only by a redo
+    /// Shares whose frame-thread recompose threw again (decision 22.4 b), ever: their slots marked for the next compose.
+    unsigned long long shareGiveUps = 0ull;
     /// The last walk's tails, counted where they are applied (the identity row reads them: the Atom routes and the
     /// material queue pushes the compose exercised).
     unsigned lastTailAtoms = 0u, lastTailQueues = 0u;

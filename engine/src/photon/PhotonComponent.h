@@ -1258,6 +1258,9 @@ private:
     Ogre::Aabb mGiDirtyUnion;
     double     mGiDirtySumVolume = 0.0;
     bool       mGiDirtyCollapsed = false;
+    /// THE LIST HOLDS A BOX NO SINGLE NOTE MADE — the collapsed union or a cap merge (decision 22.2): the mark tests the
+    /// members instead once a cascade has been re-placed since the list began.
+    bool       mGiDirtyListMerged = false;
     unsigned   mGiDirtyReach = 0u;   ///< the OR of the list's members' cascade reaches (the collapse's guard)
     /// ...the reach's premise, kept for the mark (decision 16.4): the boxes the collapsed union stands for (the list
     /// at the collapse, then every box merged into it), and the cascades' placement serial when the list began — a

@@ -4,6 +4,16 @@
 
 #include "btBulletDynamicsCommon.h"
 #include "BulletCollision/CollisionDispatch/btGhostObject.h"
+#if BT_THREADSAFE
+#include "BulletCollision/CollisionDispatch/btCollisionDispatcherMt.h"
+#include "BulletDynamics/Dynamics/btDiscreteDynamicsWorldMt.h"
+#include "BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolverMt.h"
+#include "LinearMath/btThreads.h"
+#endif
+#include <QtGlobal>
+#include <algorithm>
+#include <atomic>
+#include <thread>
 #include "BulletCollision/CollisionShapes/btBvhTriangleMeshShape.h"
 
 #include "document/physics/avatarmovement.h"
@@ -214,7 +224,7 @@ void Environment::stepSimulation(float delta)
 		// dt: maxSubSteps 1 ran at most one 1/60 step per frame, so the
 		// simulation's speed was the frame rate's (ENGINEERING_DEBT_SPEC
 		// ADDENDUM 4).
-		world->stepSimulation(delta, 0);
+		stepWorld(delta);
 		// WHICH BODIES THIS STEP MOVED (writeBack): read now, per step, because
 		// a body can integrate in one step of a frame and be put to sleep in
 		// the next — the frame's last state alone would miss its last move.
@@ -635,6 +645,94 @@ void Environment::restartPhysics()
 	createPhysicsWorld();
 }
 
+// ---- THE TASK SCHEDULER (ENGINE-UPGRADE-U4 stage 6, decision 23) -----------------------------------------------------
+// ONE for the process (Bullet's btSetTaskScheduler is global): Bullet's own std::thread scheduler, created by
+// bindGameThread ON the game thread (index 0), its thread count the host's share of the core budget, fixed. Its
+// workers are told to sleep after every step (sleepWorkerThreadsHint): an idle Bullet worker must not spin on a core
+// Ogre's barrier workers need.
+namespace {
+std::thread::id gGameThread;
+std::atomic<bool> gBound{ false };
+std::atomic<bool> gSleepAfterStep{ true };
+#if BT_THREADSAFE
+btITaskScheduler *gScheduler = nullptr;   // Bullet's default scheduler, bound for the process
+#endif
+}   // namespace
+
+void Environment::bindGameThread(int threads)
+{
+#if BT_THREADSAFE
+    if (gBound.load()) {
+        if (std::this_thread::get_id() != gGameThread) qFatal("iris::Environment::bindGameThread: bound twice, on two threads");
+        return;   // once per process: the dispatchers' arrays are sized by the count it set
+    }
+    gGameThread = std::this_thread::get_id();
+    if (btGetCurrentThreadIndex() != 0)
+        qFatal("iris::Environment::bindGameThread: another thread touched Bullet first (its thread index 0 is taken)");
+    btITaskScheduler *ts = btCreateDefaultTaskScheduler();
+    if (!ts) qFatal("iris::Environment::bindGameThread: Bullet's default task scheduler is not built");
+    ts->setNumThreads(std::clamp(threads, 1, ts->getMaxNumThreads()));
+    btSetTaskScheduler(ts);
+    gScheduler = ts;
+    gBound.store(true);
+#else
+    (void)threads;
+    gGameThread = std::this_thread::get_id();
+    gBound.store(true);
+#endif
+}
+
+int Environment::taskThreads()
+{
+#if BT_THREADSAFE
+    return gBound.load() ? btGetTaskScheduler()->getNumThreads() : 1;
+#else
+    return 1;
+#endif
+}
+
+bool Environment::onGameThread() { return !gBound.load() || std::this_thread::get_id() == gGameThread; }
+
+void Environment::setSequentialSteps(bool sequential)
+{
+#if BT_THREADSAFE
+    if (!gBound.load() || !onGameThread()) qFatal("iris::Environment::setSequentialSteps: not on the bound game thread");
+    btSetTaskScheduler(sequential ? btGetSequentialTaskScheduler() : gScheduler);
+#else
+    (void)sequential;
+#endif
+}
+
+void Environment::setSleepAfterStep(bool sleep) { gSleepAfterStep.store(sleep); }
+
+void Environment::stepWorld(float delta)
+{
+    if (worldThreads == 0) {   // the single-threaded world
+        world->stepSimulation(delta, 0);
+        return;
+    }
+#if BT_THREADSAFE
+    // THE ONE THREAD (decision 23.2): the step, the only Bullet call that takes thread indices besides a ray test,
+    // runs on the game thread and Bullet's own workers — never a pool or render thread.
+    if (!onGameThread()) qFatal("iris::Environment::stepSimulation: called off the game thread (Bullet's thread-index trap)");
+    btITaskScheduler *ts = btGetTaskScheduler();
+    if (ts->getNumThreads() > worldThreads)
+        qFatal("iris::Environment::stepSimulation: the scheduler runs %d threads, the world was built for %d",
+               ts->getNumThreads(), worldThreads);
+    world->stepSimulation(delta, 0);
+    if (gSleepAfterStep.load()) ts->sleepWorkerThreadsHint();
+#endif
+}
+
+bool Environment::multiThreadedWorld()
+{
+#if BT_THREADSAFE
+    return true;
+#else
+    return false;
+#endif
+}
+
 void Environment::createPhysicsWorld()
 {
 	btVector3 worldMin(-1000, -1000, -1000);
@@ -647,9 +745,29 @@ void Environment::createPhysicsWorld()
 	broadphase = sweepBP;
 
 	collisionConfig = new btDefaultCollisionConfiguration();
-	dispatcher = new btCollisionDispatcher(collisionConfig);
-	solver = new btSequentialImpulseConstraintSolver();
-	world = new btDiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfig);
+#if BT_THREADSAFE
+	// THE MULTI-THREADED WORLD (U4 stage 6): the narrow phase's pairs across the scheduler (btCollisionDispatcherMt),
+	// the simulation islands across a pool of solvers (btConstraintSolverPoolMt, one per scheduler thread), and one
+	// multi-threaded solver for an island too large for one thread (btSequentialImpulseConstraintSolverMt).
+	// Built on any thread (a scene opened on a loader thread builds its world there): the constructors read the
+	// scheduler's thread count and take no thread index; only the step and a ray test do (bindGameThread).
+	if (gBound.load()) {
+		btITaskScheduler *ts = btGetTaskScheduler();
+		worldThreads = ts->getNumThreads();
+		dispatcher = new btCollisionDispatcherMt(collisionConfig, 40);
+		solverPool = new btConstraintSolverPoolMt(worldThreads);
+		solver = new btSequentialImpulseConstraintSolverMt();
+		world = new btDiscreteDynamicsWorldMt(dispatcher, broadphase, static_cast<btConstraintSolverPoolMt *>(solverPool),
+		                                      solver, collisionConfig);
+	}
+	else
+#endif
+	{
+		worldThreads = 0;
+		dispatcher = new btCollisionDispatcher(collisionConfig);
+		solver = new btSequentialImpulseConstraintSolver();
+		world = new btDiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfig);
+	}
 
 	hashBodies.reserve(512);
 	nodeTransforms.reserve(512);
@@ -904,6 +1022,9 @@ void Environment::destroyPhysicsWorld()
 
 	delete solver;
 	solver = 0;
+
+	delete solverPool;
+	solverPool = 0;
 
 	delete broadphase;
 	broadphase = 0;

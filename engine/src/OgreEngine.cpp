@@ -1424,6 +1424,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
             // frame listener saying stop); upstream returns false there and
             // does nothing else, so neither do we.
             if (mRoot->_fireFrameStarted()) {
+                const auto poolSpanBegin = std::chrono::steady_clock::now();   // (the frame's pool span, U4 stage 6)
                 {
                     std::unique_ptr<monitor::Stage> st;
                     if (monitor::live()) st.reset(new monitor::Stage("engine.sceneGraph"));
@@ -1557,6 +1558,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                 const auto monFrameStart = std::chrono::steady_clock::now();
                 if (monitor::live()) monitor::gMonitor->mSplit.mMarked = false;
                 const bool monRendered = mRoot->_updateAllRenderTargets();
+                notePoolSpan(poolSpanBegin, std::chrono::steady_clock::now());
                 if (monitor::live()) {
                     const auto end = std::chrono::steady_clock::now();
                     const auto &sp = monitor::gMonitor->mSplit;

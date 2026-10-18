@@ -62,8 +62,12 @@ namespace {
 /// ONE MIRROR SUB-STAGE, folded into the frame record the engine is building
 /// (RENDER_LOOP_MONITOR_SPEC §4.2). Constructed with a null engine — which is
 /// every frame with no capture running — it reads no clock and does nothing.
-/// The scopes below are SEQUENTIAL, never nested, so the times they report are
-/// exclusive by construction and sum to the mirror's own stage.
+/// The scopes the ENGINE sees (a non-null engine) are SEQUENTIAL, never nested, so
+/// the times they report are exclusive by construction and sum to the mirror's own
+/// stage. The stage log's own two (null engine: "mirror.journal.take" and
+/// "mirror.emit.records", U4 stage 5) NEST inside them — the take in
+/// "mirror.journal" (and again in "mirror.emit"), the records in "mirror.emit" — and
+/// reach the stage log only: a log reader subtracts them, never sums them.
 /// THE SYNC'S OWN STAGE LOG (U4 stage 5: the extract's phases at 10k movers, the fixture's breakdown): while a mirror
 /// asked for it (SceneMirror::setStageLog), every MirrorStage of its sync appends (name, ms) — no engine needed.
 thread_local std::vector<std::pair<const char *, double>> *tStageLog = nullptr;
@@ -762,6 +766,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
 
     ++mSyncStamp;
     mVisited = 0;
+    mFastServed = 0;
     mMaterialBuilds = 0;    // per-walk, not a running total (materialBuildCount)
     mDirtyNodes = 0;
     mEvictedNodes = 0;
@@ -1040,6 +1045,10 @@ int SceneMirror::sync(const FrameViews &frameViews)
         mClassScratch.clear();
     }
     buildNodeRecords(scenePart.nodes);
+    if (mRecordTapOn) {
+        mTapRecords = scenePart.nodes;
+        mTapMoved = scenePart.changes.moved;
+    }
     newWrittenSync();
     std::vector<FrameInputView> parts(frameViews.views.size());
     for (size_t i = 0; i < frameViews.views.size(); ++i) {
@@ -1421,12 +1430,17 @@ void SceneMirror::consumeDirty()
             if (i >= mDirtyScratch.size()) break;
         }
         iris::SceneNode *n = mDirtyScratch[i];
-        if (!n) continue;               // tombstoned: the node left the document
+        if (!n) continue;               // tombstoned: the node left the document, or a take outside this pass served it
+        // THE LIST'S INVARIANT (decision 22.5): every node the DOCUMENT queued is still queued here — a take cancels
+        // its slot (SceneNode::_takeDirtyMask), so an un-queued node in the list is a slot no removal would cancel.
+        if (i < docList && !n->isQueuedDirty()) {
+            if (mUnqueuedDirtySlots++ == 0)
+                qWarning("SceneMirror: a node on the dirty list is not queued (a take that left its slot behind)");
+            continue;
+        }
         // CLEARED BEFORE THE VISIT, so a write the visit itself makes (the
         // mirror's own soft-mobility promotion) is not lost.
         const quint16 mask = n->_takeDirtyMask();
-        // THE DOCUMENT'S LIST, A NODE THE JOURNAL'S TAKE ALREADY SERVED (its transform-only mark consumed there, U4
-        // stage 5) — or a second queueing of a node whose mark an earlier entry took: nothing left to visit.
         // (Nodes this pass appends — a material's users, a character's pieces — are visited whatever their mask.)
         if (mask == 0 && i < docList) continue;
         const VisitResult v = visitDirty(n);
@@ -4034,7 +4048,11 @@ void SceneMirror::takePublishedRiderTags()
 
 void SceneMirror::takeWriteJournal(bool beforeWalk)
 {
-    const bool serve = beforeWalk && mSource && !mSource->isPlaying() && !mFullWalkPending && !mVerifyEverything;
+    const bool serve = beforeWalk && mSource && !mFullWalkPending && !mVerifyEverything;
+    // IN PLAY TOO, for a node already MOVABLE (decision 22.1): the visit's one question a play write asks — the
+    // surprise mover's soft promotion (syncMobility) — is asked only of a node that resolved static with Auto mobility;
+    // a movable node's write moves no latch, in play or not (the physics bodies and the animated, once promoted).
+    const bool playing = mSource && mSource->isPlaying();
     bool took = true;
     { MirrorStage s(nullptr, "mirror.journal.take");   // (the stage log's: the document's own half)
     took = mJournal.takePoses(mJournalScratch, mJournalPosed);
@@ -4059,11 +4077,13 @@ void SceneMirror::takeWriteJournal(bool beforeWalk)
         // (visibility, mobility outside play, materials, the mesh, the lighting channels, the parent are other
         // marks), so the walk does not visit it: its mark is consumed here, by the entry the take already holds (the
         // node touched ONCE, no second lookup). The oracle (verifyAgainstFullWalk) holds it to the full walk.
-        if (serve && it->node && it->docNode == n && n->dirtyMask() == kTransformOnlyMask && !it->gpuSkinned &&
+        if (serve && (!playing || it->movable == 1) && it->node && it->docNode == n &&
+            n->dirtyMask() == kTransformOnlyMask && !it->gpuSkinned &&
             !it->hasParticles && !it->hasLight && !it->hasDecal &&
             (n->sceneNodeType == iris::SceneNodeType::Mesh || n->sceneNodeType == iris::SceneNodeType::Empty)) {
             n->_takeDirtyMask();
             ++mVisited;
+            ++mFastServed;
             it->lastSeen = mSyncStamp;
             noteSettleWrite(n, &*it);
         }

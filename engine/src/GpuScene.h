@@ -473,14 +473,18 @@ public:
             if (mObservers[k]->hasLaneHalf() && mObservers[k]->gpuSlotChangedLane(slot, &mMirror[slot])) owed |= 1u << k;
         return owed;
     }
+    /// `laneOwed == kLanesNeverRan`: a slot staged whose lane halves did not all run (a share that threw between its
+    /// stage and its collection and gave up, decision 22.4 b) — every observer is told WHOLE here.
+    static constexpr uint32_t kLanesNeverRan = 0xFFFFFFFFu;
     void noteStagedSplit(uint32_t slot, uint32_t laneOwed) {
         ++mWrites;
         digestRow(slot);
         ++mNotifies;
         if (mObservers.empty() || mObserversMuted) { digestNotify(slot); return; }
+        const bool whole = laneOwed == kLanesNeverRan;
         for (size_t k = 0; k < mObservers.size(); ++k) {
             GpuSceneObserver *o = mObservers[k];
-            const bool lane = o->hasLaneHalf();
+            const bool lane = o->hasLaneHalf() && !whole;
             if (lane && !(k < 32u && (laneOwed >> k) & 1u)) continue;   // its lane half answered the slot
             const auto t0 = mNotifyTiming ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
             if (lane) o->gpuSlotChangedOwed(slot, &mMirror[slot]);

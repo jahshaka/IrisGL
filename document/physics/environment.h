@@ -63,6 +63,36 @@ public:
     Environment();
     ~Environment();
 
+    /// THE PHYSICS STEP'S THREADS AND ITS ONE THREAD (ENGINE-UPGRADE-U4 stage 6, decision 23). Bullet's multi-threaded
+    /// world (btDiscreteDynamicsWorldMt: the collision pairs and the simulation islands across Bullet's OWN task
+    /// scheduler) steps on `threads` threads, the calling thread included — the host's share of the box's ONE core
+    /// budget (beside Ogre's pool, the render and game threads and the dedicated ones: sceneworkers::physicsThreads),
+    /// fixed for the process. Called ONCE, on the GAME THREAD, before the first world is stepped:
+    ///
+    /// THE THREAD-INDEX TRAP. Bullet hands out thread indices from one global counter on first use (whoever asks first
+    /// is index 0, "main"; at most 64, never given back), and the MT dispatcher's per-thread manifold arrays — sized by
+    /// the scheduler's thread count when the world is built — are indexed by it (btCollisionDispatcherMt.cpp:31,73).
+    /// So index 0 must be the game thread (this call takes it: btSetTaskScheduler refuses any other), Bullet's own
+    /// workers take 1..threads-1, and NO other thread may ever step or ray-test a world: a Qt-pool or render thread
+    /// taking an index would push a worker past the arrays. stepSimulation dies (qFatal) on any other thread.
+    ///
+    /// A process that never binds (a tool, a test with no physics frame) builds the single-threaded world.
+    static void bindGameThread(int threads);
+    /// The thread count of the bound scheduler (1 when unbound, or in a build without BT_THREADSAFE).
+    static int taskThreads();
+    /// True on the bound game thread (and in a process that never bound).
+    static bool onGameThread();
+    /// The world type this build creates once bound: true = btDiscreteDynamicsWorldMt.
+    static bool multiThreadedWorld();
+    /// THE MEASUREMENT'S TWO ARMS (physics.step_cost; never a user setting):
+    /// - setSequentialSteps(true): the worlds built after it step on Bullet's sequential scheduler (one thread: the
+    ///   single- vs multi-threaded comparison in one process, Bullet's workers keeping their indices). Game thread only.
+    /// - setSleepAfterStep(false): Bullet's workers are NOT sent to sleep after each step (Bullet's own 100 us
+    ///   spin-before-sleep then runs on past the step, btTaskScheduler.cpp:512 — the cooldown is Bullet's private
+    ///   constant; the hint after the step is its one public knob). Default true.
+    static void setSequentialSteps(bool sequential);
+    static void setSleepAfterStep(bool sleep);
+
 	QHash<QString, btCollisionObject*> collisionObjects;
     QHash<QString, btRigidBody*> hashBodies;
     /// The pre-play LOCAL transform of every body and avatar, restored on
@@ -201,6 +231,14 @@ private:
     btDispatcher                *dispatcher = nullptr;
     btBroadphaseInterface       *broadphase = nullptr;
     btConstraintSolver          *solver = nullptr;
+    /// THE MULTI-THREADED WORLD'S SOLVER POOL (ENGINE-UPGRADE-U4 stage 6): one solver per task-scheduler thread, the
+    /// islands handed out across them (btConstraintSolverPoolMt); null in a build without BT_THREADSAFE.
+    /// The one Bullet step (bindGameThread's rules): the world's own stepSimulation, the scheduler's checks around it.
+    void                         stepWorld(float delta);
+    btConstraintSolver          *solverPool = nullptr;
+    /// The scheduler's thread count this world's per-thread arrays were sized for (0 = the single-threaded world): a
+    /// step under a scheduler of MORE threads would index past them, so stepSimulation refuses it.
+    int                          worldThreads = 0;
     btDynamicsWorld             *world = nullptr;
 	
 	QHash<int, PickingHandle> pickingHandles;

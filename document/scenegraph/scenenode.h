@@ -480,8 +480,16 @@ public:
     /// THE CONSUMER'S END of the funnel: hands over the mask and re-arms the
     /// node. Cleared BEFORE the visit that consumes it, so a write the visit
     /// itself makes (the mirror's own `_setSoftMovable`) is not lost.
+    /// ...AND ITS SLOT GOES WITH IT (U4 decision 22.5): a take outside the list's
+    /// consumption (the mirror's transform-only fast path, in the journal take)
+    /// would otherwise leave the node in the live list un-queued — a slot
+    /// `_leaveDirtySet` no longer cancels, dangling once the node is released.
+    /// (Inside the consumption the list has been swapped away and the cancel's
+    /// node check finds nothing to clear.) THE INVARIANT: a node in the live
+    /// list is queued — SceneMirror counts any that is not (unqueuedDirtySlots).
     quint16 _takeDirtyMask()
     {
+        if (mQueued && mDirtySet) mDirtySet->cancel(mDirtySlot, this);
         const quint16 m = mDirtyMask;
         mDirtyMask = 0;
         mQueued = false;
