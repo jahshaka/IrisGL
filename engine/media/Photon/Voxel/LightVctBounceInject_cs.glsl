@@ -59,6 +59,12 @@ vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelEmissiveTex;
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D directBackVoxel;
 @add( vctTexUnit, 1 )
 
+// Jahshaka (METAL-BOUNCE-1): THE METAL after the back side's direct term (VctLighting::setupBounceTextures):
+// the F0 and Fresnel-90 weight of the metal's specular lobe, re-emitted by the lobe's hemispherical
+// integral. A plain Load3D, no sampler.
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelMetalTex;
+@add( vctTexUnit, 1 )
+
 // JAHSHAKA (PHOTON-ENV-1): THE ONE ENVIRONMENT, at the unit after `directVoxel`
 // (VctLighting::setupBounceTextures binds it last, and only while the host set a
 // cube - the job property jah_env). Sampled with vctProbeSampler.

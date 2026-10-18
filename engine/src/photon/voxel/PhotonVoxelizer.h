@@ -97,6 +97,7 @@ namespace Ogre
         {
             TextureGpu *albedo = nullptr;
             TextureGpu *emissive = nullptr;
+            TextureGpu *metal = nullptr;   ///< METAL-BOUNCE-1: the metal's F0 and Fresnel-90 weight
             TextureGpu *normal = nullptr;
             TextureGpu *accumVal = nullptr;
             TextureGpu *coverage[2] = {};

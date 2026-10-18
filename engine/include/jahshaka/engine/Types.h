@@ -5276,8 +5276,8 @@ struct GiVoxelStats {
     /// at-rest sweep IS the chain's fixed point (gi.chain_converge).
     std::string lightDigest;
     /// THE VOXELISER'S STORE, hashed the same way (ENGINE-UPGRADE-U5 stage 2): level 0 of the albedo,
-    /// the emissive, the normal, the coverage and the surface position per half, the area weight and the
-    /// position sums (all nine volumes a build writes) - what a build WRITES,
+    /// the emissive, the normal, the coverage and the surface position per half, the area weight, the
+    /// position sums and the metal (all ten volumes a build writes) - what a build WRITES,
     /// independent of the light's history - so two builds of one place compare by 16 hex digits (the
     /// voxeliser's work partition proved bit for bit on a real scene, ENGINE-UPGRADE-U5 stage 2).
     std::string storeDigest;

@@ -43,6 +43,7 @@ namespace Ogre
         IdObject( id ),
         mAlbedoVox( 0 ),
         mEmissiveVox( 0 ),
+        mMetalVox( 0 ),
         mNormalVox( 0 ),
         mAccumValVox( 0 ),
         mCoverageVox{ 0, 0 },
@@ -104,6 +105,7 @@ namespace Ogre
         {
             mTextureGpuManager->destroyTexture( mAlbedoVox );
             mTextureGpuManager->destroyTexture( mEmissiveVox );
+            mTextureGpuManager->destroyTexture( mMetalVox );
             mTextureGpuManager->destroyTexture( mNormalVox );
             mTextureGpuManager->destroyTexture( mAccumValVox );
             for( size_t h = 0u; h < 2u; ++h )
@@ -118,6 +120,7 @@ namespace Ogre
 
             mAlbedoVox = 0;
             mEmissiveVox = 0;
+            mMetalVox = 0;
             mNormalVox = 0;
             mAccumValVox = 0;
 

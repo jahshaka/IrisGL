@@ -23,14 +23,17 @@
 //
 // THE TABLE (RayQueryTier::updateHitTable), read through its device address JAH_HIT_TABLE (a uvec2;
 // zero = no table: the hit reads the store whole): u[0] = the lights, u[1] = the material rows,
-// u[2] = the first light's word, u[3] = the first row's word. A light is 32 words (eight vec4):
+// u[2] = the first light's word, u[3] = the first row's word, u[4] = the first word of the metal's lobe
+// integrals (METAL-BOUNCE-1: photon/voxel/PhotonSpecularAlbedo.h's table, its floats' bits). A light is
+// 32 words (eight vec4):
 //   0 position (directional: the direction TOWARDS the light), w = the type (0 directional,
 //     1 point, 2 spot, 5 area); 1 the diffuse colour x power, w = the range (0: none);
 //   2 a spot's direction (-z), w = a point/spot's source radius; 3 a spot's (1 / (cos inner -
 //     cos outer), cos outer, falloff), w = 1 for a two-sided area light; 4-7 an area light's corners.
-// A row is 16 words: bgDiffuse, diffuse, emissive (vec4 each), the albedo and emissive pool
-// slices, the roughness's float bits, the flags (bit 0 the albedo samples its slice, bit 1 the
-// emissive does).
+// A row is 16 words: bgDiffuse, the BASE colour and the transparency, the emissive and the
+// metalness (vec4 each), the albedo and emissive pool slices (16 bits each, one word), the
+// specular weight, the roughness's float bits, the flags (bit 0 the albedo samples its slice, bit 1
+// the emissive does) - PhotonVoxelMaterial::writeRow's row.
 //
 // HOW A CALLER BINDS IT (macros and names defined first): JAH_HIT_TABLE (uvec2), JAH_HIT_POOL_ON and
 // JAH_HIT_CLOUD_ON (bool), JAH_HIT_CLOUD_MAP and JAH_HIT_CLOUD_SUN (vec4: jah_cloud_shadow.glsl's
@@ -60,6 +63,17 @@ const uint kJahHitRowsPerPool = 1024u;
 const uint kJahHitRowDiffuseTex = 1u;
 const uint kJahHitRowEmissiveTex = 2u;
 
+/// THE METAL'S LOBE INTEGRALS (METAL-BOUNCE-1), from the table's u[4]: the floats the Photon jobs read
+/// from their constant buffer (JahSpecularAlbedo_piece_all.any, unwrapped by the build into
+/// jah_spec_albedo.glsl), so a hit's metal and its voxel re-emit by one table.
+float jahHitSpecularAlbedoWord( int k )
+{
+	JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
+	return uintBitsToFloat( T.u[T.u[4] + uint( k )] );
+}
+#define JAH_SPEC_ALBEDO( k ) jahHitSpecularAlbedoWord( k )
+#include "jah_spec_albedo.glsl"
+
 /// THE HIT, as its caller saw it: the slot, the BLAS geometry (= submesh) and triangle, the
 /// barycentrics, the object-to-world transform, the ray's length and whether the far copy
 /// answered (its triangle is the mesh's coarsest level: no row of the near copy names it).
@@ -78,11 +92,15 @@ JahHitSurface jahHitSurf = JahHitSurface( 0u, 0u, 0u, vec2( 0.0 ), mat4x3( 1.0 )
 
 /// The material the store was voxelised from, at the hit. False where the table, the slot's
 /// material word or its row is missing (an item the store has not converted yet: one rebuild).
-bool jahHitMaterial( float footprint, out vec3 albedo, out vec3 emissive, out float roughness )
+/// `albedo` is the diffuse lobe's, base x (1 - metalness); `metal` the metal's specular lobe, its F0
+/// (base x metalness x kS) and Fresnel-90 weight (metalness x kS) - the voxeliser's split
+/// (Voxelizer_piece_cs.any, METAL-BOUNCE-1).
+bool jahHitMaterial( float footprint, out vec3 albedo, out vec3 emissive, out float roughness, out vec4 metal )
 {
 	albedo = vec3( 0.0 );
 	emissive = vec3( 0.0 );
 	roughness = 1.0;
+	metal = vec4( 0.0 );
 	const uvec2 a = JAH_HIT_TABLE;
 	if( ( a.x | a.y ) == 0u || !jahHitSurf.valid || jahHitSurf.slot >= JAH_HIT_INSTANCES )
 		return false;
@@ -96,11 +114,13 @@ bool jahHitMaterial( float footprint, out vec3 albedo, out vec3 emissive, out fl
 	const uint b = T.u[3] + row * kJahHitRowWords;
 	const vec4 bgDiffuse = uintBitsToFloat( uvec4( T.u[b], T.u[b + 1u], T.u[b + 2u], T.u[b + 3u] ) );
 	const vec4 diffuse = uintBitsToFloat( uvec4( T.u[b + 4u], T.u[b + 5u], T.u[b + 6u], T.u[b + 7u] ) );
-	const vec3 em = uintBitsToFloat( uvec3( T.u[b + 8u], T.u[b + 9u], T.u[b + 10u] ) );
+	const vec4 em = uintBitsToFloat( uvec4( T.u[b + 8u], T.u[b + 9u], T.u[b + 10u], T.u[b + 11u] ) );
+	const uint slices = T.u[b + 12u];
+	const float metalW = em.w * uintBitsToFloat( T.u[b + 13u] );
 	const uint flags = T.u[b + 15u];
 	roughness = uintBitsToFloat( T.u[b + 14u] );
-	albedo = diffuse.xyz * bgDiffuse.xyz;
-	emissive = em;
+	vec3 base = diffuse.xyz * bgDiffuse.xyz;
+	emissive = em.xyz;
 	if( ( flags & ( kJahHitRowDiffuseTex | kJahHitRowEmissiveTex ) ) != 0u && JAH_HIT_POOL_ON )
 	{
 		// THE HIT'S UV, and the map's level for the ray's footprint (the triangle's texel density:
@@ -138,10 +158,12 @@ bool jahHitMaterial( float footprint, out vec3 albedo, out vec3 emissive, out fl
 		}
 		lod = min( lod, float( textureQueryLevels( jahHitPool ) - 1 ) );
 		if( ( flags & kJahHitRowDiffuseTex ) != 0u )
-			albedo = diffuse.xyz * textureLod( jahHitPool, vec3( uv, float( T.u[b + 12u] ) ), lod ).xyz;
+			base = diffuse.xyz * textureLod( jahHitPool, vec3( uv, float( slices & 0xFFFFu ) ), lod ).xyz;
 		if( ( flags & kJahHitRowEmissiveTex ) != 0u )
-			emissive = em * textureLod( jahHitPool, vec3( uv, float( T.u[b + 13u] ) ), lod ).xyz;
+			emissive = em.xyz * textureLod( jahHitPool, vec3( uv, float( slices >> 16u ) ), lod ).xyz;
 	}
+	albedo = base * ( 1.0 - em.w );
+	metal = vec4( base * metalW, metalW );
 	return true;
 }
 
@@ -201,9 +223,10 @@ float jahHitQuadFormFactor( vec3 N, vec3 P, vec3 c0, vec3 c1, vec3 c2, vec3 c3, 
 }
 
 /// THE HIT'S DIRECT LIGHT: every light of the table at P about N (the geometric normal facing the
-/// ray's origin), the material's albedo and roughness - the injection's per-light form, the hit's
-/// own shadow ray (the casters, the sun's mask and lift).
-vec3 jahHitDirect( vec3 P, vec3 N, vec3 albedo, float roughness )
+/// ray's origin), the material's albedo, metal and roughness - the injection's per-light form (the
+/// diffuse lobe's directional albedo, and a metal's specular lobe's, F0 A( mu, r ) + w B( mu, r ):
+/// METAL-BOUNCE-1), the hit's own shadow ray (the casters, the sun's mask and lift).
+vec3 jahHitDirect( vec3 P, vec3 N, vec3 albedo, float roughness, vec4 metal )
 {
 	JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
 	const uint count = T.u[0];
@@ -211,6 +234,8 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 albedo, float roughness )
 	const float lift = max( jahHitSurf.far ? JAH_HIT_FAR_LIFT : JAH_HIT_LIFT, 1e-4 * jahHitSurf.t );
 	const vec3 origin = P + N * lift;
 	vec3 sum = vec3( 0.0 );
+	vec3 sumA = vec3( 0.0 );
+	vec3 sumB = vec3( 0.0 );
 	for( uint i = 0u; i < count; ++i )
 	{
 		const uint o = base + i * kJahHitLightWords;
@@ -259,8 +284,17 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 albedo, float roughness )
 		if( !( vis > 0.0 ) )
 			continue;
 		sum += cosL * jahDiffuseAlbedo( clamp( dot( N, L ), 0.0, 1.0 ), roughness ) * ( 0.318309886 * v1.xyz ) * atten * vis;
+		if( metal.w > 0.0 )
+		{
+			float sa, sb;
+			jahSpecularAlbedo( clamp( dot( N, L ), 0.0, 1.0 ), roughness, sa, sb );
+			const vec3 l = cosL * ( 0.318309886 * v1.xyz ) * atten * vis;
+			sumA += sa * l;
+			sumB += sb * l;
+		}
 	}
-	return sum * albedo;
+	// a non-metal adds exactly zero (the metal's terms are zero): its light is the diffuse lobe's, bit for bit
+	return sum * albedo + ( sumA * metal.xyz + sumB * metal.w );
 }
 
 #endif   // JAH_RQ_HIT_DIRECT_GLSL

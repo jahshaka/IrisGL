@@ -157,6 +157,18 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
         COMMENT "Unwrapping the fork's diffuse lobe for the ray jobs' card read"
         VERBATIM)
+    # THE METAL'S LOBE INTEGRALS FOR GLSLANG (METAL-BOUNCE-1): the Photon jobs' piece, unwrapped the
+    # same way, so a ray's metal hit and the voxel store read one table through one text.
+    set(JAH_RQ_SPEC_ALBEDO "${JAH_RQ_GEN_DIR}/jah_spec_albedo.glsl")
+    add_custom_command(
+        OUTPUT "${JAH_RQ_SPEC_ALBEDO}"
+        COMMAND ${CMAKE_COMMAND} -DUNWRAP=1 -DOUT=${JAH_RQ_SPEC_ALBEDO}
+                -DIN0=${CMAKE_CURRENT_SOURCE_DIR}/media/Photon/Voxel/JahSpecularAlbedo_piece_all.any
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/media/Photon/Voxel/JahSpecularAlbedo_piece_all.any"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
+        COMMENT "Unwrapping the metal's lobe integrals for the ray jobs' hit"
+        VERBATIM)
     # BUILD-TIME SPIR-V, at spirv1.4 — never committed bytes (the spike
     # committed SPIR-V 1.5 headers, which are legal only on a device at
     # apiVersion >= 1.2 and which no reviewer can read: audit C-7/C-10).
@@ -203,6 +215,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_height_fog.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_fog_along.glsl"
                 "${JAH_RQ_FORK_BRDF}"
+                "${JAH_RQ_SPEC_ALBEDO}"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
     # gi.card_read_parity's harness: the reflection's card read (jah_rq_card.glsl),
@@ -221,6 +234,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
                 "${JAH_RQ_FORK_BRDF}"
+                "${JAH_RQ_SPEC_ALBEDO}"
         COMMENT "Compiling the card-read parity compute shader at SPIR-V 1.4"
         VERBATIM)
     # REFLECT-MOVERS-1's object motion for the screen march's resolve, same rule.
@@ -315,6 +329,7 @@ if(JAH_RAY_QUERY_OK)
                 "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
                 "${JAH_RQ_INCLUDE}/jah_card_view.glsl"
                 "${JAH_RQ_FORK_BRDF}"
+                "${JAH_RQ_SPEC_ALBEDO}"
         COMMENT "Compiling the screen-probe gather trace at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(

@@ -34,10 +34,16 @@
 	struct Material
 	{
 		float4 bgDiffuse;
+		// Jahshaka (METAL-BOUNCE-1): the BASE colour (the piece splits it into the two lobes below)
+		// and the transparency.
 		float4 diffuse;
-		float4 emissive;
-		uint diffuseTexIdx;
-		uint emissiveTexIdx;
+		// ...the emissive, and the METALNESS in the fourth lane
+		float3 emissive;
+		float metalness;
+		// the albedo map's pool slice in the low half, the emissive map's in the high half
+		uint texSlices;
+		// the mean of the datablock's kS: the specular lobe's scale (PhotonVoxelMaterial::writeRow)
+		float specularWeight;
 		// Jahshaka (PHOTON-WRITER-1): the datablock's perceptual roughness
 		// (VctMaterial's row), merged per voxel into the emissive volume's alpha.
 		float roughness;
@@ -366,7 +372,8 @@
 	// unchanged: the sums are exact integers, whoever adds them.
 	// In: tri (world space), material, instance, voxelAabb, voxelLo, voxelHi, invFaceArea, invAxisFaceArea.
 	uint  cWeight = 0u;
-	uint4 cAlbedo = uint4( 0u, 0u, 0u, 0u );
+	uint3 cAlbedo = uint3( 0u, 0u, 0u );
+	uint4 cMetal = uint4( 0u, 0u, 0u, 0u );
 	uint3 cEmissive = uint3( 0u, 0u, 0u );
 	uint  cRoughness = 0u;
 	int3  cNormalRaw = int3( 0, 0, 0 );
@@ -399,18 +406,28 @@
 				float3 finalEmissive	= material.emissive.xyz;
 			@property( has_diffuse_tex )
 				finalDiffuse *= OGRE_SampleArray2DLevel( texturePool, poolSampler, uv,
-														 material.diffuseTexIdx, 0 );
+														 material.texSlices & 0xFFFFu, 0 );
 			@else
 				finalDiffuse *= material.bgDiffuse.xyzw;
 			@end
 
 			@property( has_emissive_tex )
 				finalEmissive *= OGRE_SampleArray2DLevel( texturePool, poolSampler, uv,
-														  material.emissiveTexIdx, 0 ).xyz;
+														  material.texSlices >> 16u, 0 ).xyz;
 			@end
 
-				cAlbedo		= voxelMergeWeigh4( voxelMergeQuantize4( finalDiffuse ),
-													 weight );
+				// THE TWO LOBES (VOXEL-METAL-ALBEDO-1, METAL-BOUNCE-1): of the base colour b at
+				// metalness m, HlmsPbs's diffuse lobe takes b (1 - m) - the albedo volume - and the
+				// metal's specular lobe F0 = b m kS with its Fresnel-90 weight m kS - the metal
+				// volume, which the injection and the bounce re-emit by the lobe's integral
+				// (JahSpecularAlbedo). Both are area means like every material property here.
+				const float metalW = material.metalness * material.specularWeight;
+				cAlbedo		= voxelMergeWeigh3( voxelMergeQuantize3( finalDiffuse.xyz *
+																	 ( 1.0f - material.metalness ) ),
+												weight );
+				cMetal		= voxelMergeWeigh4( voxelMergeQuantize4( float4( finalDiffuse.xyz * metalW,
+																			 metalW ) ),
+												weight );
 				cEmissive		= voxelMergeWeigh3( voxelMergeQuantize3( finalEmissive ),
 													 weight );
 				cRoughness	= voxelMergeWeigh3( voxelMergeQuantize3(
@@ -528,7 +545,8 @@
 	// are ALL of the state, so neither the split of the instances between
 	// dispatches nor their order inside one decides anything
 	// (VoxelMerge_piece_cs.any has the whole argument).
-	uint4 accAlbedo			= uint4( 0u, 0u, 0u, 0u );
+	uint3 accAlbedo			= uint3( 0u, 0u, 0u );
+	uint4 accMetal			= uint4( 0u, 0u, 0u, 0u );	// METAL-BOUNCE-1: F0 rgb, the Fresnel-90 weight
 	int3  accNormalRaw		= int3( 0, 0, 0 );
 	int3  accNormalFolded	= int3( 0, 0, 0 );
 	uint3 accEmissive		= uint3( 0u, 0u, 0u );
@@ -554,7 +572,7 @@
 	// scroll, not the partition.)
 	// The reference partition and its arm are deleted; the group vote too (decision 12.5). The
 	// broadphase, the octants and the buckets are unchanged.
-	@foreach( 33, k )
+	@foreach( 36, k )
 		g_voxelSums[@k * 64 + gl_LocalInvocationIndex] = 0u;
 	@end
 	__sharedOnlyBarrier;
@@ -641,9 +659,11 @@
 							if( cWeight > 0u )
 							{
 								const uint v = uint( vx + 4 * vy + 16 * vz );
-								@foreach( 4, c )
+								@foreach( 3, c )
 									atomicAdd( g_voxelSums[( 0 + @c ) * 64 + v], cAlbedo[@c] );
+									atomicAdd( g_voxelSums[( 33 + @c ) * 64 + v], cMetal[@c] );
 								@end
+								atomicAdd( g_voxelSums[3 * 64 + v], cMetal.w );
 								@foreach( 3, c )
 									atomicAdd( g_voxelSums[( 4 + @c ) * 64 + v], uint( cNormalRaw[@c] ) );
 									atomicAdd( g_voxelSums[( 7 + @c ) * 64 + v], uint( cNormalFolded[@c] ) );
@@ -668,9 +688,11 @@
 	// THIS LANE'S VOXEL'S SUMS, as its own loop used to leave them.
 	{
 		const uint v = gl_LocalInvocationIndex;
-		@foreach( 4, c )
+		@foreach( 3, c )
 			accAlbedo[@c] = g_voxelSums[( 0 + @c ) * 64 + v];
+			accMetal[@c] = g_voxelSums[( 33 + @c ) * 64 + v];
 		@end
+		accMetal.w = g_voxelSums[3 * 64 + v];
 		@foreach( 3, c )
 			accNormalRaw[@c]	= int( g_voxelSums[( 4 + @c ) * 64 + v] );
 			accNormalFolded[@c]	= int( g_voxelSums[( 7 + @c ) * 64 + v] );
@@ -715,10 +737,12 @@
 	{
 		uint3 voxelCel = uint3( gl_GlobalInvocationID.xyz ) + uint3( p_voxelPixelOrigin );
 
-		// Fourteen scalar texels per voxel: albedo rgba, the raw normal xyz, the
-		// emissive rgb, the folded normal xyz, the roughness (PHOTON-WRITER-1).
-		// Only what carries something.
-		uint4 sumAlbedo		= uint4( 0u, 0u, 0u, 0u );
+		// The scalar texels per voxel (VoxelMerge_piece_cs.any has the layout): the albedo rgb,
+		// the metal's F0 rgb and Fresnel-90 weight (METAL-BOUNCE-1), the raw normal xyz, the
+		// emissive rgb, the folded normal xyz, the roughness (PHOTON-WRITER-1), the coverage, the
+		// position and the casters per half. Only what carries something.
+		uint3 sumAlbedo		= uint3( 0u, 0u, 0u );
+		uint4 sumMetal		= uint4( 0u, 0u, 0u, 0u );
 		uint4 sumNormal		= uint4( 0u, 0u, 0u, 0u );
 		uint4 sumEmissive	= uint4( 0u, 0u, 0u, 0u );
 		uint4 sumFolded		= uint4( 0u, 0u, 0u, 0u );
@@ -734,9 +758,11 @@
 												accCasterP );
 		uint  sumCasterN	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 19u ) ).x,
 												accCasterN );
-		@foreach( 4, c )
+		@foreach( 3, c )
 			sumAlbedo[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, @c ) ).x;
+			sumMetal[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 20u + @c ) ).x;
 		@end
+		sumMetal.w	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 3u ) ).x;
 		@foreach( 3, c )
 			sumNormal[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 4u + @c ) ).x;
 			sumEmissive[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 7u + @c ) ).x;
@@ -748,8 +774,11 @@
 		// the triangle count at sixty-five thousand on this backend. Saturating
 		// addition is commutative and associative, so the merge stays exactly as
 		// order-independent as it was (VoxelMerge_piece_cs.any, THE GRID).
-		@foreach( 4, c )
+		@foreach( 3, c )
 			sumAlbedo[@c]	= voxelMergeAddSat( sumAlbedo[@c], accAlbedo[@c] );
+		@end
+		@foreach( 4, c )
+			sumMetal[@c]	= voxelMergeAddSat( sumMetal[@c], accMetal[@c] );
 		@end
 		@foreach( 3, c )
 			sumEmissive[@c]	= voxelMergeAddSat( sumEmissive[@c], accEmissive[@c] );
@@ -764,10 +793,13 @@
 		sumNormal.xyz	= uint3( int3( sumNormal.xyz ) + accNormalRaw );
 		sumFolded.xyz	= uint3( int3( sumFolded.xyz ) + accNormalFolded );
 
-		@foreach( 4, c )
+		@foreach( 3, c )
 			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, @c ),
 								uint4( sumAlbedo[@c], 0u, 0u, 0u ) );
+			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 20u + @c ),
+								uint4( sumMetal[@c], 0u, 0u, 0u ) );
 		@end
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 3u ), uint4( sumMetal.w, 0u, 0u, 0u ) );
 		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 13u ),
 							uint4( sumRoughness, 0u, 0u, 0u ) );
 		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 14u ), uint4( sumAxisP, 0u, 0u, 0u ) );
@@ -795,11 +827,13 @@
 		float4 voxelAlbedo		= voxelMergeAlbedo( sumAlbedo, totalWeight, voxelCoverage );
 		float4 voxelNormal		= voxelMergeNormal( sumNormal, sumFolded, totalWeight );
 		float4 voxelEmissive	= voxelMergeEmissive( sumEmissive, sumRoughness, totalWeight );
+		float4 voxelMetal		= voxelMergeMetal( sumMetal, totalWeight );
 
 		@property( syntax != hlsl || typed_uav_load )
 			OGRE_imageWrite3D4( voxelAlbedoTex, voxelCelUvw, voxelAlbedo );
 			OGRE_imageWrite3D4( voxelNormalTex, voxelCelUvw, voxelNormal );
 			OGRE_imageWrite3D4( voxelEmissiveTex, voxelCelUvw, voxelEmissive );
+			OGRE_imageWrite3D4( voxelMetalTex, voxelCelUvw, voxelMetal );
 			OGRE_imageWrite3D1( voxelAccumVal, voxelCelUvw, uint4( totalWeight, 0u, 0u, 0u ) );
 			OGRE_imageWrite3D4( voxelCoveragePTex, voxelCelUvw, float4( voxelCoverageP, 0.0f ) );
 			OGRE_imageWrite3D4( voxelCoverageNTex, voxelCelUvw, float4( voxelCoverageN, 0.0f ) );
@@ -834,6 +868,7 @@
 			OGRE_imageWrite3D4( voxelAlbedoTex, voxelCelUvw, packUnorm4x8( voxelAlbedo ) );
 			OGRE_imageWrite3D4( voxelNormalTex, voxelCelUvw, packUnormRGB10A2( voxelNormal ) );
 			OGRE_imageWrite3D4( voxelEmissiveTex, voxelCelUvw, packUnorm4x8( voxelEmissive ) );
+			OGRE_imageWrite3D4( voxelMetalTex, voxelCelUvw, packUnorm4x8( voxelMetal ) );
 		@end
 	}
 

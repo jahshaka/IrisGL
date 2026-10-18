@@ -31,6 +31,7 @@ THE SOFTWARE.
 #include "photon/voxel/PhotonVoxelLighting.h"
 #include "photon/PhotonDispatch.h"
 #include "photon/voxel/PhotonMipChain.h"
+#include "photon/voxel/PhotonSpecularAlbedo.h"
 
 #include "photon/voxel/PhotonVoxelizerSourceBase.h"
 #include "photon/voxel/PhotonVoxelVisualizer.h"
@@ -101,6 +102,7 @@ namespace Ogre
         mVoxelizerListenersRemoved( false ),
         mLightInjectionJob( 0 ),
         mLightsConstBuffer( 0 ),
+        mSpecularAlbedoBuffer( 0 ),
         mAnisoGeneratorStep0( 0 ),
         mLightVctBounceInject( 0 ),
         mLightBounce( 0 ),
@@ -161,6 +163,12 @@ namespace Ogre
         mLightsConstBuffer = vaoManager->createConstBuffer( sizeof( PhotonShaderVoxelLight ) * kLightSlots,
                                                             BT_DYNAMIC_PERSISTENT, 0, false );
         mLightInjectionJob->setProperty( "vct_light_budget", static_cast<int32>( kLightSlots ) );
+        // THE METAL'S LOBE INTEGRALS (METAL-BOUNCE-1): the table, as the shader declares it - float4s,
+        // four floats each, 528 of them (JahSpecularAlbedo_piece_all.any).
+        static_assert( PhotonSpecularAlbedo::kFloats == 528u * 4u, "the shader's array is 528 float4s" );
+        mSpecularAlbedoBuffer = vaoManager->createConstBuffer(
+            sizeof( PhotonSpecularAlbedo::kTable ), BT_IMMUTABLE,
+            const_cast<float *>( PhotonSpecularAlbedo::kTable ), false );
 
         HlmsManager *hlmsManager = mVoxelizer->getHlmsManager();
         HlmsSamplerblock samplerblock;
@@ -198,6 +206,11 @@ namespace Ogre
                 mLightsConstBuffer->unmap( UO_UNMAP_ALL );
             vaoManager->destroyConstBuffer( mLightsConstBuffer );
             mLightsConstBuffer = 0;
+        }
+        if( mSpecularAlbedoBuffer )
+        {
+            vaoManager->destroyConstBuffer( mSpecularAlbedoBuffer );
+            mSpecularAlbedoBuffer = 0;
         }
 
         HlmsManager *hlmsManager = mVoxelizer->getHlmsManager();
@@ -621,6 +634,9 @@ namespace Ogre
         // Jahshaka (PHOTON-VOXEL-5): +1 for the BACK side's direct term, right after the emissive
         // volume (before the environment cube).
         ++numNeededTexUnits;
+        // Jahshaka (METAL-BOUNCE-1): +1 for the voxeliser's METAL volume, right after the back side's
+        // direct term (before the environment cube).
+        ++numNeededTexUnits;
 
         HlmsManager *hlmsManager = mVoxelizer->getHlmsManager();
         const RenderSystemCapabilities *caps = hlmsManager->getRenderSystem()->getCapabilities();
@@ -727,6 +743,10 @@ namespace Ogre
         // Jahshaka (PHOTON-VOXEL-5): the back side's direct term (a Load3D, no sampler).
         texSlot.texture = mLightDirectBack;
         mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
+        // Jahshaka (METAL-BOUNCE-1): the metal (a Load3D, no sampler) and its lobe's integrals.
+        texSlot.texture = mVoxelizer->getMetalVox();
+        mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
+        mLightVctBounceInject->setConstBuffer( 0, mSpecularAlbedoBuffer );
 
         // Jahshaka (PHOTON-ENV-1): the environment cube, sampled with the probes'
         // trilinear sampler (a separate sampler object on Vulkan).
@@ -768,7 +788,7 @@ namespace Ogre
         // (PHOTON-WRITER-1). It was compared with a unit count (8 + 6e + 2 / 5 + 3e + 2), which the
         // list never had, so the "glsl" list was rebuilt and set dirty on every bounce dispatch.
         const size_t numTextureVariables = 8u;
-        const size_t numNeededParams = 2u + numTextureVariables + 3u;
+        const size_t numNeededParams = 2u + numTextureVariables + 4u;
 
         // This code assumes there's 2 textures at the beginning that always stays the same
         // the rest of them are dynamically generated.
@@ -814,6 +834,10 @@ namespace Ogre
             // Jahshaka (PHOTON-VOXEL-5): the back side's direct term, right after.
             param.name = "directBackVoxel";
             param.setManualValue( texSlotIdx + 2 );
+            glslShaderParams.mParams.push_back( param );
+            // Jahshaka (METAL-BOUNCE-1): the metal, right after.
+            param.name = "voxelMetalTex";
+            param.setManualValue( texSlotIdx + 3 );
             glslShaderParams.mParams.push_back( param );
 
             glslShaderParams.setDirty();
@@ -1208,6 +1232,7 @@ namespace Ogre
         renderSystem->debugAnnotationPush( "VctLighting Update" );
 
         mLightInjectionJob->setConstBuffer( 0, mLightsConstBuffer );
+        mLightInjectionJob->setConstBuffer( 1, mSpecularAlbedoBuffer );   // METAL-BOUNCE-1
 
         DescriptorSetTexture2::TextureSlot texSlot( DescriptorSetTexture2::TextureSlot::makeEmpty() );
         texSlot.texture = mVoxelizer->getAlbedoVox();
@@ -1219,7 +1244,7 @@ namespace Ogre
         // Jahshaka (PHOTON-VOXEL-3/-4): the coverage per half-axis at units 3 (+a) and 4
         // (-a) - the shadow march's opacity along the lamp's direction, the half that looks
         // back at it - and the surface position per half at 5 and 6 (its origin plane).
-        // The host's cloud field is at unit 7.
+        // (METAL-BOUNCE-1) The metal at unit 7. The host's cloud field is at unit 8.
         for( uint8 h = 0u; h < 2u; ++h )
         {
             texSlot.texture = mVoxelizer->getCoverageVox( h );
@@ -1227,6 +1252,8 @@ namespace Ogre
             texSlot.texture = mVoxelizer->getPositionVox( h );
             mLightInjectionJob->setTexture( uint8( 5u + h ), texSlot );
         }
+        texSlot.texture = mVoxelizer->getMetalVox();
+        mLightInjectionJob->setTexture( 7u, texSlot );
 
         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
         uavSlot.access = ResourceAccess::Write;

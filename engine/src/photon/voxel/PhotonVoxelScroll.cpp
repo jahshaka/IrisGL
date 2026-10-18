@@ -23,7 +23,8 @@ namespace Ogre
         uint32 gScrollCloneId = 0u;
 
         /// The live store's volumes, in one fixed order: the copy and the clear walk it.
-        void volumeList( const PhotonVoxelizer::VolumeSet &v, TextureGpu *out[9] )
+        constexpr size_t kVolumes = 10u;
+        void volumeList( const PhotonVoxelizer::VolumeSet &v, TextureGpu *out[kVolumes] )
         {
             out[0] = v.albedo;
             out[1] = v.emissive;
@@ -34,10 +35,12 @@ namespace Ogre
             out[6] = v.position[0];
             out[7] = v.position[1];
             out[8] = v.positionSums;
+            out[9] = v.metal;   // METAL-BOUNCE-1
         }
-        const char *const kVolumeNames[9] = { "Albedo",    "Emissive",  "Normal",
-                                               "AccumVal",  "CoverageP", "CoverageN",
-                                               "PositionP", "PositionN", "PositionSums" };
+        const char *const kVolumeNames[kVolumes] = { "Albedo",    "Emissive",  "Normal",
+                                                      "AccumVal",  "CoverageP", "CoverageN",
+                                                      "PositionP", "PositionN", "PositionSums",
+                                                      "Metal" };
     }  // namespace
 
     PhotonVoxelScroll::PhotonVoxelScroll( RenderSystem *renderSystem, HlmsManager *hlmsManager,
@@ -51,11 +54,11 @@ namespace Ogre
         mPositionJob( 0 )
     {
         const PhotonVoxelizer::VolumeSet live = like->liveVolumes();
-        TextureGpu *src[9];
+        TextureGpu *src[kVolumes];
         volumeList( live, src );
-        TextureGpu *dst[9] = {};
+        TextureGpu *dst[kVolumes] = {};
         const uint32 id = ++gScrollCloneId;
-        for( size_t i = 0u; i < 9u; ++i )
+        for( size_t i = 0u; i < kVolumes; ++i )
         {
             OGRE_ASSERT_LOW( src[i] && src[i]->getWidth() == resolution );
             // LEVEL 0 ONLY: the target is copied into the live volumes, whose chains are then
@@ -78,6 +81,7 @@ namespace Ogre
         mVolumes.position[0] = dst[6];
         mVolumes.position[1] = dst[7];
         mVolumes.positionSums = dst[8];
+        mVolumes.metal = dst[9];
 
         HlmsCompute *hlmsCompute = hlmsManager->getComputeHlms();
         HlmsComputeJob *base = hlmsCompute->findComputeJob( "Photon/ScrollPosition" );
@@ -93,9 +97,9 @@ namespace Ogre
         if( mPositionJob )
             hlmsCompute->destroyComputeJob( mPositionJob->getName() );
         mPositionJob = 0;
-        TextureGpu *dst[9];
+        TextureGpu *dst[kVolumes];
         volumeList( mVolumes, dst );
-        for( size_t i = 0u; i < 9u; ++i )
+        for( size_t i = 0u; i < kVolumes; ++i )
             if( dst[i] )
                 mTextureManager->destroyTexture( dst[i] );
         mVolumes = PhotonVoxelizer::VolumeSet();
@@ -105,10 +109,10 @@ namespace Ogre
     //-------------------------------------------------------------------------
     size_t PhotonVoxelScroll::bytes() const
     {
-        TextureGpu *dst[9];
+        TextureGpu *dst[kVolumes];
         volumeList( mVolumes, dst );
         size_t total = 0u;
-        for( size_t i = 0u; i < 9u; ++i )
+        for( size_t i = 0u; i < kVolumes; ++i )
             if( dst[i] )
                 total += dst[i]->getSizeBytes();
         return total;
@@ -207,16 +211,16 @@ namespace Ogre
         mRenderSystem->endRenderPassDescriptor();
         // CLEARED AS A WHOLE BUILD CLEARS (PhotonVoxelizer::clearVoxels): every value zero but the
         // normal's 0.5 bias. The entering slab's cells keep these until its chunks write them.
-        TextureGpu *dst[9];
+        TextureGpu *dst[kVolumes];
         volumeList( mVolumes, dst );
         mResourceTransitions.clear();
-        for( size_t i = 0u; i < 9u; ++i )
+        for( size_t i = 0u; i < kVolumes; ++i )
             mComputeTools->prepareForUavClear( mResourceTransitions, dst[i] );
         mRenderSystem->executeResourceTransition( mResourceTransitions );
         const float fZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         const float fNormal[4] = { 0.5f, 0.5f, 0.5f, 0.0f };
         const uint32 uZero[4] = { 0u, 0u, 0u, 0u };
-        for( size_t i = 0u; i < 9u; ++i )
+        for( size_t i = 0u; i < kVolumes; ++i )
         {
             if( PixelFormatGpuUtils::isInteger( dst[i]->getPixelFormat() ) )
                 jahshaka::engine::detail::photonClearUavUint( mComputeTools, dst[i], uZero );
@@ -236,11 +240,12 @@ namespace Ogre
             size[a] = mResolution - uint32( s < 0 ? -s : s );
         }
         const PhotonVoxelizer::VolumeSet src = live->liveVolumes();
-        TextureGpu *from[9];
+        TextureGpu *from[kVolumes];
         volumeList( src, from );
         // Every volume but the positions (6, 7) and the sums (8), texel for texel.
         for( size_t i = 0u; i < 6u; ++i )
             copyBox( from[i], dst[i], srcOrigin, dstOrigin, size );
+        copyBox( from[9], dst[9], srcOrigin, dstOrigin, size );
         // THE SUMS are four texels a voxel interleaved in Z (Voxelizer_cs.glsl): the same box with
         // its z scaled by four is one contiguous box of texels.
         {
@@ -258,11 +263,11 @@ namespace Ogre
     {
         OgreProfileGpuBegin( "Photon scroll commit" );
         mRenderSystem->endRenderPassDescriptor();
-        TextureGpu *from[9], *to[9];
+        TextureGpu *from[kVolumes], *to[kVolumes];
         volumeList( mVolumes, from );
         volumeList( live->liveVolumes(), to );
         const uint32 zero[3] = { 0u, 0u, 0u };
-        for( size_t i = 0u; i < 9u; ++i )
+        for( size_t i = 0u; i < kVolumes; ++i )
         {
             // WHOLE level 0, texel for texel - the positions too: they were resolved for THIS box.
             const uint32 size[3] = { from[i]->getWidth(), from[i]->getHeight(), from[i]->getDepth() };

@@ -55,6 +55,7 @@
 #include "EnginePrivate.h"
 #include "SceneLightList.h"
 #include "photon/voxel/PhotonVoxelMaterial.h"
+#include "photon/voxel/PhotonSpecularAlbedo.h"
 #include "photon/voxel/PhotonIrradianceField.h"
 #include <OgreLight.h>
 
@@ -6560,7 +6561,8 @@ bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
 }
 
 /// THE HIT TABLE (FAR-SUN-2; the layout is jah_rq_hit_direct.glsl's): u[0] = the lights,
-/// u[1] = the material rows, u[2] = the first light's word, u[3] = the first row's; a light is
+/// u[1] = the material rows, u[2] = the first light's word, u[3] = the first row's, u[4] = the first
+/// word of the metal's lobe integrals (METAL-BOUNCE-1: PhotonSpecularAlbedo::kTable); a light is
 /// kHitLightWords words (eight vec4, PhotonVoxelLighting::addLight's packing in WORLD space), a
 /// row PhotonVoxelMaterial::kRowWords. THE LIGHTS are the scene's one light list
 /// (SceneLightList), EVERY visible light with the injection's mask and NO budget (the lead's
@@ -6603,7 +6605,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         sa.hitMaterialSerial = edits;
     }
     std::vector<uint32_t> &w = sa.hitScratch;
-    w.assign(4u, 0u);
+    w.assign(5u, 0u);
     auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, sizeof u); return u; };
     Ogre::SceneManager *sm = scene->sceneManager();
     uint32_t nLights = 0u;
@@ -6659,10 +6661,15 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         w.insert(w.end(), rows.begin(), rows.end());
         sa.st.updateRows += nRows;
     }
+    // THE METAL'S LOBE INTEGRALS (METAL-BOUNCE-1; photon/voxel/PhotonSpecularAlbedo.h): the hit's metal is
+    // shaded by the directional albedo the injection takes (jah_rq_hit_direct.glsl), from the same floats.
+    const uint32_t specWords = uint32_t(w.size());
+    for (float f : Ogre::PhotonSpecularAlbedo::kTable) w.push_back(bits(f));
     w[0] = nLights;
     w[1] = nRows;
-    w[2] = 4u;
+    w[2] = 5u;
     w[3] = lightWords;
+    w[4] = specWords;
     const uint32_t nowFrame = frameNow();
     if (w == sa.hitWords && sa.hitTableAddress) {
         if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = nowFrame;

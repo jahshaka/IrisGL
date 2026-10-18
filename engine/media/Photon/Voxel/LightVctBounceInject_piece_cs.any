@@ -68,6 +68,16 @@
 	@insertpiece( JahEnvironment )
 	// Jahshaka (PHOTON-WRITER-1): the diffuse lobe's albedo (jah_diffuse_albedo.glsl).
 	@insertpiece( JahDiffuseAlbedo )
+	// Jahshaka (METAL-BOUNCE-1): THE METAL'S LOBE INTEGRALS - PhotonSpecularAlbedo.h's table, two floats
+	// an entry and four to a float4 (slot 0, the job's one constant buffer: PhotonVoxelLighting::setupBounceTextures binds it).
+	@property( syntax != metal )
+		CONST_BUFFER( JahSpecularAlbedoBuf, 0 )
+		{
+			float4 jahSpecularAlbedoTable[528];
+		};
+	@end
+	#define JAH_SPEC_ALBEDO( k ) jahSpecularAlbedoTable[( k ) >> 2][( k ) & 3]
+	@insertpiece( JahSpecularAlbedo )
 
 	// THE ONE DIFFUSE CONE INTEGRATOR (Jahshaka, PHOTON-CARDS-2; jah_voxel_cones.glsl,
 	// wrapped into the piece JahVoxelCones): the cone frame, the one cone set (four;
@@ -203,7 +213,18 @@
 		// ...times the voxel's opacity c (the albedo's alpha, PHOTON-VOXEL-3): the albedo
 		// is the surfaces' area MEAN, and what the voxel re-emits is premultiplied by
 		// how much of it they fill, exactly like the direct term it is added to.
-		const float3 reemit = albedoVal.xyz * p_iterationDampening * jahDiffuseAlbedoHemi( voxelRoughness ) * albedoVal.w;
+		float3 reemit = albedoVal.xyz * p_iterationDampening * jahDiffuseAlbedoHemi( voxelRoughness ) * albedoVal.w;
+		// ...AND THE METAL'S SPECULAR LOBE (METAL-BOUNCE-1): of what it gathers, a metal of F0 and
+		// Fresnel-90 weight w re-emits its lobe's HEMISPHERICAL albedo F0 A-bar( r ) + w B-bar( r )
+		// (JahSpecularAlbedo) - a white rough metal ~ its reflectance, where the diffuse-only store
+		// had it re-emit 0. Premultiplied by the opacity like the diffuse term.
+		const float4 metalVal = OGRE_Load3D( voxelMetalTex, gl_GlobalInvocationID.xyz, 0 );
+		if( metalVal.w > 0.0f )
+		{
+			float sa, sb;
+			jahSpecularAlbedoHemi( voxelRoughness, sa, sb );
+			reemit += ( metalVal.xyz * sa + metalVal.w * sb ) * p_iterationDampening * albedoVal.w;
+		}
 		currentLight.xyz += reemit * ( 0.5f * ( vctDiffuse + vctDiffuseBack ) );
 		backLight.xyz += reemit * vctDiffuseBack;
 	}

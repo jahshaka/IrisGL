@@ -153,9 +153,10 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 	// (MOVER-OCCLUSION-1: jahHitIndirectGate).
 	vec3 albedo, emissive;
 	float roughness;
-	if( ok && jahHitMaterial( footprint, albedo, emissive, roughness ) )
+	vec4 metal;
+	if( ok && jahHitMaterial( footprint, albedo, emissive, roughness, metal ) )
 	{
-		const vec3 r = jahHitDirect( hitPos, normalize( hitNormal ), albedo, roughness ) + emissive +
+		const vec3 r = jahHitDirect( hitPos, normalize( hitNormal ), albedo, roughness, metal ) + emissive +
 					   jahHitIndirectGate * jahVoxelBounceOut;
 		return finite3( r ) ? clamp( r, vec3( 0.0 ), vec3( kMaxRadiance ) ) : voxel;
 	}

@@ -39,16 +39,18 @@
 #define VOXEL_MERGE_SCALE 4096.0f
 #define VOXEL_MERGE_CLAMP 16.0f
 
-	/// ONE VOXEL'S TWENTY ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
-	/// z*20+0..3 (rgba), RAW normal sum at +4..6 (xyz, two's complement),
+	/// ONE VOXEL'S TWENTY-THREE ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
+	/// z*23+0..2 (rgb), THE METAL'S Fresnel-90 weight at +3 and its F0 at +20..22 (rgb;
+	/// METAL-BOUNCE-1 - +3 summed the diffuse colour's alpha, which no resolve read),
+	/// RAW normal sum at +4..6 (xyz, two's complement),
 	/// emissive sum at +7..9 (rgb), FOLDED normal sum at +10..12 (xyz), the
 	/// ROUGHNESS sum at +13 (PHOTON-WRITER-1), the PER-HALF-AXIS COVERAGE sums
 	/// packed into +14 (the faces looking +x, +y, +z) and +15 (looking -x, -y, -z)
 	/// (PHOTON-VOXEL-3/-4, THE DIRECTIONAL COVERAGE below) and the matching
 	/// POSITION-WEIGHTED sums into +16 and +17 (PHOTON-VOXEL-4, THE SURFACE POSITION
 	/// below), and the CASTERS' COVERAGE into +18 and +19 (FAR-SUN-1, THE CASTER SHARE
-	/// below): twenty. Twenty because only twenty carry anything — a fourth
-	/// channel on the three vectors would be 25 MB read and written for nothing
+	/// below), and the metal's three: twenty-three, because only those carry anything — a
+	/// fourth channel on the three vectors would be 25 MB read and written for nothing
 	/// at 128^3.
 	/// Interleaved rather than stacked planes so the shader needs no knowledge of
 	/// the volume's depth (a voxelisation dispatch covers one OCTANT and does not
@@ -71,7 +73,7 @@
 	/// more per 64^3 volume, resident.
 	INLINE uint3 voxelMergeUvw( uint3 voxelCel, uint chan )
 	{
-		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 20u + chan );
+		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 23u + chan );
 	}
 
 
@@ -206,10 +208,17 @@
 	{
 		return 1.0f / float( max( totalWeight, 1u ) );
 	}
-	INLINE float4 voxelMergeAlbedo( uint4 sumAlbedo, uint totalWeight, float3 coverage )
+	INLINE float4 voxelMergeAlbedo( uint3 sumAlbedo, uint totalWeight, float3 coverage )
 	{
 		return float4( float3( sumAlbedo.xyz ) * voxelMergeInvMean( totalWeight ),
 					   max( coverage.x, max( coverage.y, coverage.z ) ) );
+	}
+	/// THE METAL (METAL-BOUNCE-1): its F0 (rgb) and its Fresnel-90 weight (alpha), area means like
+	/// the albedo - what the metal volume holds and the light injection and the bounce re-emit by
+	/// the specular lobe's integral (JahSpecularAlbedo_piece_all.any).
+	INLINE float4 voxelMergeMetal( uint4 sumMetal, uint totalWeight )
+	{
+		return float4( sumMetal ) * voxelMergeInvMean( totalWeight );
 	}
 
 	/// THE DIRECTIONAL COVERAGE (PHOTON-VOXEL-3). A ray along axis a sees of a

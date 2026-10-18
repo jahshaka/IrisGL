@@ -68,8 +68,9 @@ namespace Ogre
     namespace
     {
         /// THE MERGE ACCUMULATOR'S TEXELS PER VOXEL (VoxelMerge_piece_cs.any, voxelMergeUvw's
-        /// multiplier): the eighteen sums of the merge and the non-casters' coverage per half (FAR-SUN-1).
-        constexpr uint32 kMergeAccumTexels = 20u;
+        /// multiplier): the eighteen sums of the merge, the casters' coverage per half (FAR-SUN-1) and
+        /// the metal's F0 (METAL-BOUNCE-1; its Fresnel-90 weight took the albedo alpha's dead texel).
+        constexpr uint32 kMergeAccumTexels = 23u;
         /// THE MERGE ACCUMULATOR IS SHARED BY SIZE (SPEED-VR-MEM, perf audit M-13). Every
         /// voxeliser used to hold its own for life (W x H x 18D R32_UINT: 18.9 MB at 64^3,
         /// 151 MB at 128^3), yet it is scratch that lives only INSIDE one build(): cleared at
@@ -509,6 +510,12 @@ namespace Ogre
             mEmissiveVox = mTextureGpuManager->createTexture(
                 "VctVoxelizer" + StringConverter::toString( getId() ) + "/Emissive",
                 GpuPageOutStrategy::Discard, texFlags, TextureTypes::Type3D );
+            // Jahshaka (METAL-BOUNCE-1): THE METAL - the F0 and Fresnel-90 weight of the metal's
+            // specular lobe, which the injection and the bounce re-emit by its integral. Level 0 only
+            // (no reader samples a coarser one): 4 B a voxel, 8 MB at 128^3.
+            mMetalVox = mTextureGpuManager->createTexture(
+                "VctVoxelizer" + StringConverter::toString( getId() ) + "/Metal",
+                GpuPageOutStrategy::Discard, texFlags, TextureTypes::Type3D );
             mNormalVox = mTextureGpuManager->createTexture(
                 "VctVoxelizer" + StringConverter::toString( getId() ) + "/Normal",
                 GpuPageOutStrategy::Discard, texFlags, TextureTypes::Type3D );
@@ -541,7 +548,7 @@ namespace Ogre
 
         }
 
-        TextureGpu *textures[4] = { mAlbedoVox, mEmissiveVox, mNormalVox, mAccumValVox };
+        TextureGpu *textures[5] = { mAlbedoVox, mEmissiveVox, mNormalVox, mAccumValVox, mMetalVox };
         for( size_t i = 0; i < sizeof( textures ) / sizeof( textures[0] ); ++i )
             textures[i]->scheduleTransitionTo( GpuResidency::OnStorage );
 
@@ -575,6 +582,8 @@ namespace Ogre
         // Voxelizer_piece_cs.any.
         mEmissiveVox->setPixelFormat( PFG_RGBA16_FLOAT );
         mNormalVox->setPixelFormat( PFG_R10G10B10A2_UNORM );
+        // the metal's F0 and weight are ratios in [0, 1], like the albedo
+        mMetalVox->setPixelFormat( PFG_RGBA8_UNORM );
         if( hasTypedUavs )
             mAccumValVox->setPixelFormat( PFG_R16_UINT );
         else
@@ -584,11 +593,12 @@ namespace Ogre
         // interleaved in Z - the shader derives their coordinates from the voxel's own, so a
         // dispatch that covers one OCTANT needs to know nothing about the volume's depth.
         // Jahshaka (SPEED-VR-MEM, M-13): THE MERGE ACCUMULATOR is the one every voxeliser of
-        // this size shares (acquireMergeAccum, above), at this volume's size: twenty sums
+        // this size shares (acquireMergeAccum, above), at this volume's size: twenty-three sums
         // per voxel - fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065)'s thirteen,
         // (PHOTON-WRITER-1) the material roughness, (PHOTON-VOXEL-3) the three per-axis
         // coverage sums packed into one, (PHOTON-VOXEL-4) the coverage split by the side a
-        // face looks to (two packed sums) and the two position-weighted sums. R32_UINT
+        // face looks to (two packed sums) and the two position-weighted sums, (FAR-SUN-1) the
+        // casters' two, (METAL-BOUNCE-1) the metal's F0. R32_UINT
         // rather than RGBA32_UINT because ComputeTools' clear of a 128-bit 3D uav lost the
         // device on this driver (VoxelMerge_piece_cs).
         if( mMergeAccumTex )
@@ -737,6 +747,7 @@ namespace Ogre
         mResourceTransitions.clear();
         mComputeTools->prepareForUavClear( mResourceTransitions, mAlbedoVox );
         mComputeTools->prepareForUavClear( mResourceTransitions, mEmissiveVox );
+        mComputeTools->prepareForUavClear( mResourceTransitions, mMetalVox );
         mComputeTools->prepareForUavClear( mResourceTransitions, mNormalVox );
         mComputeTools->prepareForUavClear( mResourceTransitions, mAccumValVox );
         // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the sums start at zero, every build.
@@ -751,6 +762,7 @@ namespace Ogre
 
         jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mAlbedoVox, fClearValue );
         jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mEmissiveVox, fClearValue );
+        jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mMetalVox, fClearValue );
         jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mNormalVox, fClearNormals );
         jahshaka::engine::detail::photonClearUavUint( mComputeTools, mAccumValVox, uClearValue );
         jahshaka::engine::detail::photonClearUavUint( mComputeTools, mMergeAccumTex, uClearValue );
@@ -839,6 +851,7 @@ namespace Ogre
         VolumeSet v;
         v.albedo = mAlbedoVox;
         v.emissive = mEmissiveVox;
+        v.metal = mMetalVox;
         v.normal = mNormalVox;
         v.accumVal = mAccumValVox;
         for( size_t h = 0u; h < 2u; ++h )
@@ -914,7 +927,7 @@ namespace Ogre
             mComputeJobs[i]->_setUavTexture( 5, uavSlot );
 
             // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the per-voxel INTEGER ACCUMULATOR the merge
-            // sums into (R32_UINT, thirteen texels per voxel — see
+            // sums into (R32_UINT, twenty-three texels per voxel — see
             // VoxelMerge_piece_cs.any for why it is not RGBA32_UINT).
             uavSlot.texture = mMergeAccumTex;
             uavSlot.pixelFormat = mMergeAccumTex->getPixelFormat();
@@ -940,6 +953,15 @@ namespace Ogre
             uavSlot.pixelFormat = v.positionSums->getPixelFormat();
             uavSlot.access = ResourceAccess::Write;
             mComputeJobs[i]->_setUavTexture( 11u, uavSlot );
+
+            // Jahshaka (METAL-BOUNCE-1): the metal (12), written by the resolve beside the albedo.
+            uavSlot.texture = v.metal;
+            if( hasTypedUavs )
+                uavSlot.pixelFormat = v.metal->getPixelFormat();
+            else
+                uavSlot.pixelFormat = PFG_R32_UINT;
+            uavSlot.access = ResourceAccess::Write;
+            mComputeJobs[i]->_setUavTexture( 12u, uavSlot );
 
             DescriptorSetTexture2::BufferSlot texBufSlot(
                 DescriptorSetTexture2::BufferSlot::makeEmpty() );
@@ -1176,7 +1198,7 @@ namespace Ogre
         // two, so the residency round trip never actually saves anything -- it
         // only returns memory the next build immediately asks for again.
         // THE COST is one accumulator per volume SIZE, held while any voxeliser of that
-        // size lives: width * height * depth * 20 * 4 bytes (21.0 MB at 64^3, 168 MB at
+        // size lives: width * height * depth * 23 * 4 bytes (24.1 MB at 64^3, 193 MB at
         // 128^3), shared by every cascade of that size (SPEED-VR-MEM, acquireMergeAccum).
 
         generateMips();

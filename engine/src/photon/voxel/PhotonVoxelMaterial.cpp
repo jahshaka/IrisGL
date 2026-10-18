@@ -28,6 +28,8 @@ THE SOFTWARE.
 
 #include "OgreStableHeaders.h"
 
+#include <algorithm>
+
 #include "photon/voxel/PhotonVoxelMaterial.h"
 
 #include "Compositor/OgreCompositorManager2.h"
@@ -52,11 +54,18 @@ namespace Ogre
 
     struct PhotonShaderVoxelMaterial
     {
+        // THE ROW (METAL-BOUNCE-1, ENGINE-UPGRADE-U5 stage 5): the background diffuse; the BASE colour
+        // (the whole of it - the voxeliser splits it into the diffuse lobe and the metal's F0 itself)
+        // and the transparency; the emissive and, in its fourth lane, THE METALNESS; the two pool
+        // slices in one word (the albedo map's in the low half, the emissive map's in the high half);
+        // THE SPECULAR WEIGHT (the mean of the datablock's kS); the roughness; a lane the ray jobs'
+        // copy fills with its flags.
         float bgDiffuse[4] = {};
         float diffuse[4] = {};
-        float emissive[4] = {};
-        uint32 diffuseTexIdx = 0u;
-        uint32 emissiveTexIdx = 0u;
+        float emissive[3] = {};
+        float metalness = 0.0f;
+        uint32 texSlices = 0u;
+        float specularWeight = 0.0f;
         // Jahshaka (PHOTON-WRITER-1): the datablock's perceptual roughness, so the
         // voxel's stored radiance can be what its surface renders (the diffuse
         // lobe's directional albedo depends on it; LightInjection reads it).
@@ -110,7 +119,7 @@ namespace Ogre
     }
     //-------------------------------------------------------------------------
     /// ONE ROW, WRITTEN AT A SLOT THE CALLER CHOSE. The conversion itself - the
-    /// datablock's colours, its background diffuse, its transparency and the texture
+    /// datablock's colours, its background diffuse, its metalness and specular weight and the texture
     /// pool slices of its albedo and emissive maps - is the same whether the slot is
     /// new or the datablock already owns it, so both the first conversion and an
     /// in-place refresh go through here and cannot drift apart.
@@ -123,14 +132,15 @@ namespace Ogre
         memset( &shaderMaterial, 0, sizeof( shaderMaterial ) );
 
         {
-            ColourValue diffuseCol = datablock->getDiffuseColour();
-            ColourValue emissiveCol = datablock->getEmissiveColour();
+            const ColourValue diffuseCol = datablock->getDiffuseColour();
+            const ColourValue emissiveCol = datablock->getEmissiveColour();
             for( size_t i = 0; i < 4; ++i )
             {
                 shaderMaterial.bgDiffuse[i] = 1.0f;
                 shaderMaterial.diffuse[i] = diffuseCol[i];
-                shaderMaterial.emissive[i] = emissiveCol[i];
             }
+            for( size_t i = 0; i < 3; ++i )
+                shaderMaterial.emissive[i] = emissiveCol[i];
 
             shaderMaterial.diffuse[3] = std::max( diffuseCol.a, emissiveCol.a );
         }
@@ -140,27 +150,32 @@ namespace Ogre
             OGRE_ASSERT_HIGH( dynamic_cast<HlmsPbsDatablock *>( datablock ) );
             HlmsPbsDatablock *pbsDatablock = static_cast<HlmsPbsDatablock *>( datablock );
 
-            ColourValue bgDiffuse = pbsDatablock->getBackgroundDiffuse();
-            float transparency = pbsDatablock->getTransparency();
-
+            const ColourValue bgDiffuse = pbsDatablock->getBackgroundDiffuse();
             for( size_t i = 0; i < 4; ++i )
                 shaderMaterial.bgDiffuse[i] = bgDiffuse[i];
-            shaderMaterial.diffuse[3] = transparency;
-            // THE VOXEL'S ALBEDO IS THE DIFFUSE LOBE'S (VOXEL-METAL-ALBEDO-1): a voxel stores the
-            // radiance its surface scatters DIFFUSELY (the light injection's direct term and the
-            // bounce's re-emission both multiply the albedo), and in the metallic workflow HlmsPbs
-            // gives the diffuse lobe base x (1 - metalness) - the rest of the base colour is the
-            // specular F0 (800.PixelShader_piece_ps.any: diffuse -= diffuse x metalness). The base
-            // colour stood here, so a white metal re-emitted the bounce of a white diffuser. The
-            // scalar only, like the roughness: a metalness MAP is not voxelised. The specular
-            // workflows' diffuse colour is their diffuse lobe already.
+            shaderMaterial.diffuse[3] = pbsDatablock->getTransparency();
+            // THE TWO LOBES OF THE METALLIC WORKFLOW (VOXEL-METAL-ALBEDO-1, METAL-BOUNCE-1). HlmsPbs
+            // splits the base colour: the diffuse lobe gets base x (1 - metalness)
+            // (800.PixelShader_piece_ps.any: diffuse -= diffuse x metalness) and the specular F0 is
+            // lerp( F0, base, metalness ) - so a metal's energy leaves by its specular lobe, which
+            // a voxel used to drop (a white rough metal re-emitted 0). The row carries the base and
+            // the metalness and the voxeliser splits them per piece (Voxelizer_piece_cs.any): the
+            // albedo volume the diffuse lobe, the METAL volume the metal's share of the specular
+            // lobe, F0 = base x metalness x kS and its Fresnel-90 weight metalness x kS. kS is the
+            // datablock's specular colour, which scales the whole lobe (Rs = F x D x G x kS); its MEAN
+            // is the weight (a tinted kS on a metal is not voxelised, nor is a metalness map - the
+            // scalars only, like the roughness). WHAT IS NOT STORED: a dielectric's own specular
+            // lobe (F0 0.04: 2.7 % of a white diffuser's re-emission at roughness 1, 6.5 % at 0.5)
+            // and the specular workflows' F0 - the store's specular term is the metal's.
             if( pbsDatablock->getWorkflow() == HlmsPbsDatablock::MetallicWorkflow )
             {
-                const float diffuseShare = 1.0f - pbsDatablock->getMetalness();
-                for( size_t i = 0; i < 3; ++i )
-                    shaderMaterial.diffuse[i] *= diffuseShare;
+                const Vector3 kS = pbsDatablock->getSpecular();
+                shaderMaterial.metalness = std::min( 1.0f, std::max( 0.0f, pbsDatablock->getMetalness() ) );
+                // clamped to [0, 1]: the metal volume is UNORM8, and a kS above 1 reflects more than
+                // arrives
+                shaderMaterial.specularWeight =
+                    std::min( 1.0f, std::max( 0.0f, ( kS.x + kS.y + kS.z ) * ( 1.0f / 3.0f ) ) );
             }
-            shaderMaterial.emissive[3] = 1.0f;
             // The scalar only: a roughness MAP is not voxelised (the voxel is one
             // surface-averaged texel either way).
             shaderMaterial.roughness = pbsDatablock->getRoughness();
@@ -182,12 +197,12 @@ namespace Ogre
         if( diffuseTex )
         {
             out.diffuseTexIdx = getPoolSliceIdxForTexture( diffuseTex );
-            shaderMaterial.diffuseTexIdx = out.diffuseTexIdx;
+            shaderMaterial.texSlices |= out.diffuseTexIdx & 0xFFFFu;
         }
         if( emissiveTex )
         {
             out.emissiveTexIdx = getPoolSliceIdxForTexture( emissiveTex );
-            shaderMaterial.emissiveTexIdx = out.emissiveTexIdx;
+            shaderMaterial.texSlices |= ( out.emissiveTexIdx & 0xFFFFu ) << 16u;
         }
 
         bucket.buffer->upload( &shaderMaterial, slot * sizeof( PhotonShaderVoxelMaterial ),

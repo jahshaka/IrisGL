@@ -58,6 +58,9 @@ namespace Ogre
     protected:
         TextureGpu *mAlbedoVox;
         TextureGpu *mEmissiveVox;
+        /// Jahshaka (METAL-BOUNCE-1): THE METAL - its F0 (rgb) and Fresnel-90 weight (alpha), RGBA8, level 0
+        /// only (VoxelMerge_piece_cs.any, voxelMergeMetal).
+        TextureGpu *mMetalVox;
         TextureGpu *mNormalVox;
         TextureGpu *mAccumValVox;
         /// Jahshaka (PHOTON-VOXEL-3/-4): THE PER-HALF-AXIS COVERAGE (RGB10A2 each: O_x, O_y,
@@ -107,6 +110,7 @@ namespace Ogre
         TextureGpu *getAlbedoVox() { return mAlbedoVox; }
         TextureGpu *getNormalVox() { return mNormalVox; }
         TextureGpu *getEmissiveVox() { return mEmissiveVox; }
+        TextureGpu *getMetalVox() { return mMetalVox; }
         /// `half`: 0 the faces looking +a, 1 those looking -a.
         TextureGpu *getCoverageVox( size_t half ) { return mCoverageVox[half]; }
         TextureGpu *getPositionVox( size_t half ) { return mPositionVox[half]; }

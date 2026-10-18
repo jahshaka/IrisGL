@@ -1,0 +1,40 @@
+@piece( JahSpecularAlbedo )
+// THE METAL'S SPECULAR LOBE, INTEGRATED (METAL-BOUNCE-1, ENGINE-UPGRADE-U5 stage 5): what HlmsPbs's
+// specular lobe (BRDF_Default: GGX, the height-correlated Smith visibility, Schlick's Fresnel)
+// reflects of a light at cosine v is F0 x A( v, r ) + B( v, r ); of a uniform incoming hemisphere,
+// F0 x A-bar( r ) + B-bar( r ). The numbers are a TABLE (engine/src/photon/voxel/PhotonSpecularAlbedo.h
+// states the integral, the sampler and why not a fit), read bilinearly here: directional entry
+// ( i, j ) at floats 2 ( 32 j + i ) and + 1, v = i / 31, r = j / 31; the hemispherical rows after
+// them, entry j at floats 2048 + 2 j and + 1.
+//
+// THE INCLUDER defines JAH_SPEC_ALBEDO( k ), the table's float k: the Photon jobs read their
+// constant buffer, the ray jobs the hit table (jah_rq_hit_direct.glsl). Plain GLSL between this
+// piece's header and its end (the ray jobs' build unwraps it: CMakeLists, jah_fork_brdf.glsl), and no
+// directive mark in any comment.
+
+void jahSpecularAlbedo( float v, float r, out float a, out float b )
+{
+	const float x = clamp( v, 0.0, 1.0 ) * 31.0;
+	const float y = clamp( r, 0.0, 1.0 ) * 31.0;
+	const int i0 = min( int( x ), 30 );
+	const int j0 = min( int( y ), 30 );
+	const float fx = x - float( i0 );
+	const float fy = y - float( j0 );
+	const int k00 = 2 * ( 32 * j0 + i0 );
+	const int k01 = k00 + 64;
+	a = mix( mix( JAH_SPEC_ALBEDO( k00 ), JAH_SPEC_ALBEDO( k00 + 2 ), fx ),
+			 mix( JAH_SPEC_ALBEDO( k01 ), JAH_SPEC_ALBEDO( k01 + 2 ), fx ), fy );
+	b = mix( mix( JAH_SPEC_ALBEDO( k00 + 1 ), JAH_SPEC_ALBEDO( k00 + 3 ), fx ),
+			 mix( JAH_SPEC_ALBEDO( k01 + 1 ), JAH_SPEC_ALBEDO( k01 + 3 ), fx ), fy );
+}
+
+void jahSpecularAlbedoHemi( float r, out float a, out float b )
+{
+	const float y = clamp( r, 0.0, 1.0 ) * 31.0;
+	const int j0 = min( int( y ), 30 );
+	const float fy = y - float( j0 );
+	const int k0 = 2048 + 2 * j0;
+	a = mix( JAH_SPEC_ALBEDO( k0 ), JAH_SPEC_ALBEDO( k0 + 2 ), fy );
+	b = mix( JAH_SPEC_ALBEDO( k0 + 1 ), JAH_SPEC_ALBEDO( k0 + 3 ), fy );
+}
+@end

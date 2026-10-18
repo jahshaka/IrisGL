@@ -25,10 +25,11 @@
 // skips it by its own box, Voxelizer_piece_cs.any.)
 
 // Jahshaka (ENGINE-UPGRADE-U5 stage 2): THE GROUP'S PER-VOXEL SUMS (Voxelizer_piece_cs.any, the work
-// partition): 33 integers for each of the 64 voxels - albedo 4, the raw and the folded normal 3 + 3, the
-// emissive 3, the roughness, the area weight, the coverage per half 3 + 3, the position per half 3 + 3,
-// the casters' coverage per half 3 + 3 - indexed sum x 64 + voxel. 8.4 KB.
-shared uint g_voxelSums[33 * 64];
+// partition): 36 integers for each of the 64 voxels - albedo 3 and the metal's Fresnel-90 weight, the raw
+// and the folded normal 3 + 3, the emissive 3, the roughness, the area weight, the coverage per half 3 + 3,
+// the position per half 3 + 3, the casters' coverage per half 3 + 3, the metal's F0 3 (METAL-BOUNCE-1) -
+// indexed sum x 64 + voxel. 9.2 KB.
+shared uint g_voxelSums[36 * 64];
 
 @insertpiece( PreBindingsHeaderCS )
 
@@ -89,6 +90,10 @@ uniform restrict writeonly image3D voxelPositionNTex;
 // at its new cell, and only these exact integers make that re-resolve the voxeliser's own bits.
 layout( vulkan( ogre_u11 ) vk_comma @insertpiece(uav11_pf_type) )
 uniform restrict writeonly uimage3D voxelPositionSums;
+// Jahshaka (METAL-BOUNCE-1): THE METAL - the F0 (rgb) and Fresnel-90 weight (alpha) of the metal's
+// specular lobe, area means written by the resolve beside the albedo (VoxelMerge_piece_cs.any).
+layout( vulkan( ogre_u12 ) vk_comma @insertpiece(uav12_pf_type) )
+uniform restrict writeonly image3D voxelMetalTex;
 
 
 

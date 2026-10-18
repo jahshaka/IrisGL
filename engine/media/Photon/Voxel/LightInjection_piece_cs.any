@@ -22,7 +22,7 @@
 	// voxels from the start toward the lamp: in every voxel the ray passes, each half's SURFACE
 	// PLANE along each axis (its stored position) that the ray crosses inside that voxel stops it
 	// by the half's coverage - from either side, like any shadow ray (a face hidden inside another
-	// solid must be shadowed by that solid's back face) - capped per axis like one surface; the
+	// solid must be shadowed by that solid's back face) - capped per axis like one surface, the faces it enters and those it leaves summed apart (below); the
 	// ORIGIN PLANE (the lit face itself, axis `oAxis` at `oCoord`, facing `oSign`) never, through
 	// the one reader's gate. The march it replaces stepped one cell from the voxel's centre and
 	// took a coverage times the cells crossed: a wall sharing the lit face's cell was never read,
@@ -80,10 +80,20 @@
 			tDel[a] = p_invVoxelResolution[a] / abs( d[a] );
 			tEnd = min( tEnd, d[a] > 0.0f ? ( 1.0f - s[a] ) / d[a] : -s[a] / d[a] );
 		}
-		float occ = 0.0f;
+		// THE ENTRIES AND THE EXITS, APART (SUN-INJECTION-RES-1, ENGINE-UPGRADE-U5 stage 5). A ray that crosses a
+		// solid meets it twice - where it enters (a face looking back at the ray) and where it leaves (a face
+		// looking the ray's way) - and both faces carry the same coverage of the same rows of the cell: a 0.1 m
+		// plate's two ends each cover 0.71 of a 0.14 m cell's face, ONE band 0.1 m tall. Summed, the plate stopped
+		// 1.42 of the ray - a wall's row beside it went black where 29 % of it is lit, and the band's darkening
+		// moved with the cell size (the sun-lit wall's lobe 1.019 / 1.003 / 0.982 at 32 / 64 / 128 cells while the
+		// store's lit face read 0.657 at all three: the face column's row at the plate's height 0.643 / 0.000 /
+		// 0.155 of the face against the coverage's 0.643 / 0.286 / 0.571). So the entering faces and the leaving
+		// ones are summed apart and the ray is stopped by the LARGER: one solid crossed is counted once, a face
+		// inside a solid (a march starting in it) is still stopped by the solid's exit, and two solids are two.
+		float occIn = 0.0f, occOut = 0.0f;
 		float tIn = 0.0f;
 		const int maxSteps = res.x + res.y + res.z + 3;
-		for( int it = 0; it < maxSteps && occ < 1.0f; ++it )
+		for( int it = 0; it < maxSteps && max( occIn, occOut ) < 1.0f; ++it )
 		{
 			const float tOut = min( min( min( tMax.x, tMax.y ), tMax.z ), tEnd );
 			const float3 cP = OGRE_Load3D( voxelCoveragePTex, iv, 0 ).xyz;
@@ -105,12 +115,15 @@
 					const float lo = min( e0, e1 ), hi = max( e0, e1 );
 					const float vLo = float( iv[b] ) * p_invVoxelResolution[b];
 					const float vHi = vLo + p_invVoxelResolution[b];
-					const float take =
+					const float takeP =
 						jahInjectPlane( cP[b], pP[b], b, lo, hi, s[b], d[b], vLo, vHi, oAxis, oCoord, oSign ) *
-							jahInjectCasterShare( pP4.w, b ) +
+							jahInjectCasterShare( pP4.w, b );
+					const float takeN =
 						jahInjectPlane( cN[b], pN[b], b, lo, hi, s[b], d[b], vLo, vHi, oAxis, oCoord, oSign ) *
 							jahInjectCasterShare( pN4.w, b );
-					occ += min( take, 1.0f );
+					// the faces looking +b face a ray travelling -b (it enters through them), and the other way
+					occIn += min( d[b] < 0.0f ? takeP : takeN, 1.0f );
+					occOut += min( d[b] < 0.0f ? takeN : takeP, 1.0f );
 				}
 			}
 			if( tOut >= tEnd )
@@ -122,7 +135,7 @@
 			tIn = tMax[a];
 			tMax[a] += tDel[a];
 		}
-		return max( 0.0f, 1.0f - occ );
+		return max( 0.0f, 1.0f - max( occIn, occOut ) );
 	}
 @end
 
@@ -181,6 +194,16 @@
 	// Jahshaka (PHOTON-WRITER-1): the diffuse lobe's directional albedo, the
 	// function the pixel's environment lobe reads (jah_diffuse_albedo.glsl).
 	@insertpiece( JahDiffuseAlbedo )
+	// Jahshaka (METAL-BOUNCE-1): THE METAL'S LOBE INTEGRALS - PhotonSpecularAlbedo.h's table, two floats
+	// an entry and four to a float4 (slot 1, after the lights: PhotonVoxelLighting::update binds it).
+	@property( syntax != metal )
+		CONST_BUFFER( JahSpecularAlbedoBuf, 1 )
+		{
+			float4 jahSpecularAlbedoTable[528];
+		};
+	@end
+	#define JAH_SPEC_ALBEDO( k ) jahSpecularAlbedoTable[( k ) >> 2][( k ) & 3]
+	@insertpiece( JahSpecularAlbedo )
 	@insertpiece( DeclSRgbFuncs )
 	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): THE STORE'S ENCODING FOLLOWS ITS FORMAT.
 	// `uav0_orig_pf_srgb` is the property HlmsComputeJob derives from the pixel
@@ -223,6 +246,12 @@
 	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, gl_GlobalInvocationID.xyz, 0 );
 	float4 normalVal = OGRE_Load3D( voxelNormalTex, gl_GlobalInvocationID.xyz, 0 );
 	float4 emissiveVal = OGRE_Load3D( voxelEmissiveTex, gl_GlobalInvocationID.xyz, 0 );
+	// THE METAL (METAL-BOUNCE-1): its F0 (rgb) and Fresnel-90 weight (alpha), zero where no metal is. A
+	// lamp at cosine mu reaches the metal's specular lobe as well as the diffuse one, and the lobe
+	// re-emits F0 A( mu, r ) + w B( mu, r ) of it - its directional albedo (JahSpecularAlbedo): the
+	// energy a rough metal scatters back into the room, which a diffuse-only store dropped.
+	const float4 metalVal = OGRE_Load3D( voxelMetalTex, gl_GlobalInvocationID.xyz, 0 );
+	const bool metalVoxel = metalVal.w > 0.0f;
 
 	normalVal.xyz = normalVal.xyz * 2.0f - 1.0f;
 	normalVal.xyz = normalize( normalVal.xyz );
@@ -351,6 +380,8 @@
 			// exactly what HlmsPbs computes for the direct lighting of the same surface
 			// (NdotL * D * kD); the store below is scaled by p_bakingMultiplier = PI / D_max.
 			const float3 lightCol = c_invPI * light.diffuse.xyz * albedoVal.xyz * lightAtten;
+			// ...and the same light before the diffuse albedo, which the metal's lobe takes
+			const float3 lightRaw = c_invPI * light.diffuse.xyz * lightAtten;
 
 			// each half's visibility, marched once per lamp and only where it is needed
 			float visH[6];
@@ -397,6 +428,12 @@
 					// normalised Disney diffuse's directional albedo at this cosine and roughness.
 					halfLight[q] += cosL * jahDiffuseAlbedo( saturate( dot( nn, lightDir ) ), voxelRoughness ) *
 									lightCol * visH[q];
+					if( metalVoxel )
+					{
+						float sa, sb;
+						jahSpecularAlbedo( saturate( dot( nn, lightDir ) ), voxelRoughness, sa, sb );
+						halfLight[q] += cosL * ( metalVal.xyz * sa + metalVal.w * sb ) * lightRaw * visH[q];
+					}
 				}
 			}
 
@@ -426,9 +463,14 @@
 				// side's); a side with no face along it has no light of its own here
 				if( visH[q] < 0.0f )
 					visH[q] = 0.0f;
-				const float3 lit = cosS * jahDiffuseAlbedo( saturate( side == 0 ? dot( normalVal.xyz, lightDir )
-																				 : -dot( normalVal.xyz, lightDir ) ),
-															  voxelRoughness ) * lightCol * visH[q];
+				const float cosSide = saturate( side == 0 ? dot( normalVal.xyz, lightDir ) : -dot( normalVal.xyz, lightDir ) );
+				float3 lit = cosS * jahDiffuseAlbedo( cosSide, voxelRoughness ) * lightCol * visH[q];
+				if( metalVoxel )
+				{
+					float sa, sb;
+					jahSpecularAlbedo( cosSide, voxelRoughness, sa, sb );
+					lit += cosS * ( metalVal.xyz * sa + metalVal.w * sb ) * lightRaw * visH[q];
+				}
 				if( side == 0 )
 					front += lit;
 				else
