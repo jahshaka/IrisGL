@@ -4823,6 +4823,10 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                     }
                     stepScroll(idx, true, &built);
                 } else {
+                    // THE WORK PARTITION (gi.voxelOctants, stage 2's measurement): 1 x 1 x 1 shipped.
+                    Ogre::uint32 octants = 1u;
+                    if (mEngine && mEngine->armRegistry().value(ArmId::GiVoxelOctants) >= 2.0) octants = 2u;
+                    c.voxelizer->dividideOctants(octants, octants, octants);
                     std::vector<uint32_t> mask;
                     gatherAndBuild(*c.feed, c.voxelizer, cascadeGatherInputs(c, mask));
                     built = true;
@@ -5276,6 +5280,17 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
     // CASCADE 0'S FIELD FOLLOW, when owed, is paid first and spends the frame (recordCascades).
     w.follow = mIfdFollowOwed != 0;
     w.followReason = mIfdFollowReason;
+    // THE MEASURING DOOR (gi.rebuildCascade, stage 2's measurement): cascade N owes a whole rebuild
+    // at its own placement, every frame the arm names it.
+    if (mEngine) {
+        const double forced = mEngine->armRegistry().value(ArmId::GiRebuildCascade);
+        if (forced >= 0.0 && size_t(forced) < mVctCascades.size()) {
+            VctCascade &c = mVctCascades[size_t(forced)];
+            abortScroll(size_t(forced));
+            c.pending = 1;
+            c.pendingReason = GiStaleReason::Refresh;
+        }
+    }
     // THE AGES (decision 7): a cascade that owes nothing has none; one the dirty path marked since the
     // last frame (planFrame's markDirtyCascadesPending ran before this) is stamped now.
     for (VctCascade &c : mVctCascades) {

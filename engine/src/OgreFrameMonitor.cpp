@@ -1129,6 +1129,14 @@ const ArmDef kArms[] = {
       "THE INCREMENTAL SCROLL'S PER-FRAME BUDGET (ENGINE-UPGRADE-U5 stage 1) in milliseconds of "
       "voxelisation, read when a scroll is planned: a small value spreads a fixture's slab over "
       "many frames (gi.scroll_slab's spread arm). 0 = the shipped budget (kScrollBudgetMs)." },
+    { "gi.voxelOctants", 1.0, 1.0, 2.0,
+      "THE VOXELISER'S WORK PARTITION (ENGINE-UPGRADE-U5 stage 2, measured first): a whole cascade "
+      "build divided into N x N x N octants - each octant's dispatches loop only the records the "
+      "gather put in it - instead of one. Exact by the order-independent merge. 1 = shipped." },
+    { "gi.rebuildCascade", -1.0, -1.0, 7.0,
+      "A MEASURING DOOR (ENGINE-UPGRADE-U5 stage 2): while set to N, cascade N owes a whole rebuild "
+      "every frame (an edit's, at its own placement) - what a measurement of a whole build's cost "
+      "needs on a still scene. -1 = none." },
     { "gi.rebuildSettle", 1.0, 0.0, 1.0,
       "The rebuild settle (the chain's owed settle steps after a rebuild). 0 = off: "
       "gi.chain_converge's paired arm. Was JAHSHAKA_GI_NO_REBUILD_SETTLE (a per-frame read)." },
