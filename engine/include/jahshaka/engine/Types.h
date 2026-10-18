@@ -8128,13 +8128,14 @@ struct FrameInputStatus {
     unsigned long long messagesRefused = 0;     ///< ...ever refused (each one a completion of its own, decision 34)
     unsigned long long nodeRecordsTotal = 0;    ///< ...ever
     double             drainMicros = 0.0;       ///< what the LAST drain cost (the record's own overhead)
-    /// ...THE LAST DRAIN'S THREE PARTS (ENGINE-UPGRADE-U4 stage 1; the monitor's stage `engine.drain` and its children
+    /// ...THE LAST DRAIN'S PARTS (ENGINE-UPGRADE-U4 stages 1, 3; the monitor's stage `engine.drain` and its children
     /// time the same spans): NAMING the moved subtrees to the scans (applyChangeSet -> nameMovedSubtrees), the NODE
-    /// RECORDS (applySceneStream -> applyNodeRecords) and the GI SCHEDULER (planGi -> PhotonComponent::plan), summed
-    /// over every scene; the rest of drainMicros is the messages, the fields and the views.
+    /// RECORDS (applyNodeRecords alone) and, in free mode, the INTERPOLATION (interpolateScene + the reflector arm),
+    /// summed over every scene; the rest of drainMicros is the messages, the fields and the views. (The GI
+    /// scheduler's plan left the drain in stage 3: `engine.plan`.)
     double             drainNameMicros = 0.0;
     double             drainRecordsMicros = 0.0;
-    double             drainPlanMicros = 0.0;
+    double             drainInterpolateMicros = 0.0;
 };
 
 /// THE ENGINE'S NAME FOR AN ATTACHED CLIP (ENGINE-UPGRADE-U3 stage 3) — the ONE rule, used by the engine when it

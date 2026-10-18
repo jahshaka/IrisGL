@@ -1218,11 +1218,14 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                 OgreView **slot = driverSlot(v->ogreScene());
                 if (!*slot) *slot = v.get();
             }
+        // THE GI STEP RUNS AFTER THE SCENE GRAPH (U4 stage 3, decision 8: `engine.plan`, below, where the world boxes
+        // are the frame's own); here only its camera and the driver's profile, which the pending flush may owe.
+        std::vector<OgreView *> giDrivers;
         for (auto &v : mViews) {
             const bool authoritative = v->isEnabled() && v->ogreScene() &&
                                        *driverSlot(v->ogreScene()) == v.get();
             v->applyPendingResize(); v->updateParticles();
-            if (authoritative) v->updateGi();
+            if (authoritative) { v->noteGiCamera(); giDrivers.push_back(v.get()); }
             // THE ATMOSPHERE'S OBSERVER is the same driving camera (SKY-ATMOSPHERE-1):
             // its altitude decides the horizon's dip and the air it looks through.
             if (authoritative && v->camera())
@@ -1298,69 +1301,10 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         // cannot present the result, and its pendings are latches: they are
         // still set when a view of it is enabled again, so nothing is skipped,
         // only postponed to the frame it can be seen in.
-        for (auto &s : mScenes)
-            if (drawnThisFrame(s.get())) {
-                // THE SKY AMBIENT'S DEFERRED READ (audit ON-14), first: it is a
-                // `queryIsTransferDone` and, when the copy has landed, a map
-                // and 6 x 1024 texels of integral. Never a wait — see
-                // OgreScene::pollSkyShRead — and here rather than beside the
-                // capture because a read issued inside a frame must not be
-                // polled in that same frame.
-                s->pollSkyShRead();
-                // THE CLOUD LAYER'S FRAME (CLOUDS-2D-1): its clock, its scroll
-                // and its capture cadence — before the capture below it may ask for.
-                s->tickCloudClock();
-                s->applyPendingGiDeferrable(); s->applyPendingIbl(); s->applyPendingPlanar();
-                // THIS SCENE'S IBL CHAIN LENGTH (SceneGiBinding::iblMipmaps), after
-                // the pendings that can change what its env slots hold.
-                s->resolveIblMipmaps();
-                // SURFACE-CACHE, after the pendings: the cache reads the
-                // material generation and the light write serial that
-                // applyPendingGi may just have moved, and PLANS this frame's
-                // capture batch. The capture itself runs inside Root's frame
-                // (its workspace is enabled and first in the manager's list),
-                // after the frame's scene-graph update and light list — the
-                // light list a capture planned here used to run without.
-                // ITS OWN MONITOR STAGE (lane D1-SCALE-FIXTURES, W13): the
-                // candidate walk over every item runs here every frame, and
-                // scale.cpu_walks reads it as a number rather than an A/B.
-                monitor::Stage cardStage("engine.cards");
-                s->updateSurfaceCache();
-                // THE PHOTON VIEW's scene half (PHOTON-VIEW-1), after the cache
-                // planned its frame (the Cards picture reads its table) and the
-                // pendings rebuilt what they rebuild (the Voxels and Probes pictures
-                // follow the arms). Free when the view is Off and nothing is up.
-                s->syncPhotonView();
-            }
-        // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
-        // applyGlobals in two). The MSAA resolve weights and the SMAA preset
-        // are SHADER RELOADS — a hitch — so they cannot be per view without
-        // hitching on every camera cut and every page switch. They keep the
-        // rule POST_CHAIN_SPEC §7.4 wrote: "the primary on-screen view owns the
-        // globals", i.e. the first enabled view whose chain has effects, and
-        // each helper debounces on "did the value actually change".
-        //
-        // Everything CHEAP that used to ride along here — exposure, the bloom
-        // threshold, the AO kernel's camera terms, the SSR march's matrices —
-        // is now pushed per view by chain::ViewGlobalsListener, from that
-        // view's own workspacePreUpdate. That is what ended the two defects
-        // this loop used to cause: two on-screen views fighting over one
-        // exposure, and SSAO marching the first view's projection in the
-        // second view's frame.
-        //
-        // Offscreen views never qualify — their chainDesc() has every effect
-        // off by construction unless the caller deliberately opted in.
-        for (auto &v : mViews) {
-            if (!v->isEnabled()) continue;
-            const ChainDesc d = v->chainDesc();
-            if (!d.anyEffect()) continue;
-            chain::applyRecompileGlobals(mRoot, d);
-            break;
-        }
-        // THE PROBE CACHE'S FRAME COUNTER (ENGINE_CACHE_POLICY_SPEC P1): after
-        // the budget spent itself (updateGi) and any flush rebuilt (applyPendingGi),
-        // and before the frame renders the dirty probes.
-        for (auto &s : mScenes) s->latchProbeCaptures(drawnThisFrame(s.get()));
+        // (THE SCENES' PENDING WORK — the sky's read, the clouds' clock, the GI / IBL / planar flushes, the cards' plan,
+        // the Photon view — and the post chain's recompile globals run after the GI step, in `engine.plan` below, in
+        // the order they always ran after it: U4 stage 3 moved the step after the scene graph.)
+        // (THE PROBE CACHE'S LATCH runs after the GI step, in `engine.plan` below.)
         // The refraction interlock (OgreScene::setRefractionsActive). A
         // Refractive datablock drawn by a pass that offers it no refractions
         // fails to COMPILE and loses the whole frame, and one scene can be drawn
@@ -1476,6 +1420,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         syncMonitorListeners(updated);
         monPre.reset();                    // closes the "engine.pre" stage
         if (mRoot) {
+            const unsigned long long headFrameNumber = (unsigned long long)mRoot->getNextFrameNumber();
             // `_fireFrameStarted()` can veto the frame (a lost device, or a
             // frame listener saying stop); upstream returns false there and
             // does nothing else, so neither do we.
@@ -1485,6 +1430,101 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                     if (monitor::live()) st.reset(new monitor::Stage("engine.sceneGraph"));
                     for (OgreScene *s : updated) s->sceneManager()->updateSceneGraph();
                     if (blankUpdated) blankUpdated->updateSceneGraph();
+                }
+                // THE PLAN, WHERE THE BOXES ARE CURRENT (ENGINE-UPGRADE-U4 stage 3, decision 8). updateSceneGraph has
+                // just made every drawn scene's world AABBs this frame's (Ogre's workers, SoA), so the GI scheduler's
+                // plan (the geometry term) and the GI step (the walk, its boxes, the marks, the pick and the step's
+                // work) read the cached boxes — no parent-chain recompute per item — and nothing has rendered yet.
+                // Then the probe cache's latch (after the budget spent itself) and the listeners the plan's refresh
+                // may have invalidated (a re-solve can rebuild an arm), re-synced as at the frame's head.
+                {
+                    std::unique_ptr<monitor::Stage> planStage;
+                    if (monitor::live()) planStage.reset(new monitor::Stage("engine.plan"));
+                    for (OgreScene *s : updated) s->setBoxesCurrent(true);
+                    mPlanFrameNumber = headFrameNumber;
+                    struct PlanFrameEnds { unsigned long long &n; ~PlanFrameEnds() { n = 0ull; } } planFrameEnds{ mPlanFrameNumber };
+                    for (auto &s : mScenes) s->runStashedGiPlan();
+                    for (OgreView *v : giDrivers) v->updateGi();
+                    // ...THEN WHAT ALWAYS FOLLOWED THE GI STEP, in its order: the scenes' pending work and the
+                    // recompile globals (moved here with the step, U4 stage 3).
+                    for (auto &s : mScenes)
+                        if (drawnThisFrame(s.get())) {
+                            // THE SKY AMBIENT'S DEFERRED READ (audit ON-14), first: it is a
+                            // `queryIsTransferDone` and, when the copy has landed, a map
+                            // and 6 x 1024 texels of integral. Never a wait — see
+                            // OgreScene::pollSkyShRead — and here rather than beside the
+                            // capture because a read issued inside a frame must not be
+                            // polled in that same frame.
+                            s->pollSkyShRead();
+                            // THE CLOUD LAYER'S FRAME (CLOUDS-2D-1): its clock, its scroll
+                            // and its capture cadence — before the capture below it may ask for.
+                            s->tickCloudClock();
+                            s->applyPendingGiDeferrable(); s->applyPendingIbl(); s->applyPendingPlanar();
+                            // THIS SCENE'S IBL CHAIN LENGTH (SceneGiBinding::iblMipmaps), after
+                            // the pendings that can change what its env slots hold.
+                            s->resolveIblMipmaps();
+                            // SURFACE-CACHE, after the pendings: the cache reads the
+                            // material generation and the light write serial that
+                            // applyPendingGi may just have moved, and PLANS this frame's
+                            // capture batch. The capture itself runs inside Root's frame
+                            // (its workspace is enabled and first in the manager's list),
+                            // after the frame's scene-graph update and light list — the
+                            // light list a capture planned here used to run without.
+                            // ITS OWN MONITOR STAGE (lane D1-SCALE-FIXTURES, W13): the
+                            // candidate walk over every item runs here every frame, and
+                            // scale.cpu_walks reads it as a number rather than an A/B.
+                            monitor::Stage cardStage("engine.cards");
+                            s->updateSurfaceCache();
+                            // THE PHOTON VIEW's scene half (PHOTON-VIEW-1), after the cache
+                            // planned its frame (the Cards picture reads its table) and the
+                            // pendings rebuilt what they rebuild (the Voxels and Probes pictures
+                            // follow the arms). Free when the view is Off and nothing is up.
+                            s->syncPhotonView();
+                        }
+                    // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
+                    // applyGlobals in two). The MSAA resolve weights and the SMAA preset
+                    // are SHADER RELOADS — a hitch — so they cannot be per view without
+                    // hitching on every camera cut and every page switch. They keep the
+                    // rule POST_CHAIN_SPEC §7.4 wrote: "the primary on-screen view owns the
+                    // globals", i.e. the first enabled view whose chain has effects, and
+                    // each helper debounces on "did the value actually change".
+                    //
+                    // Everything CHEAP that used to ride along here — exposure, the bloom
+                    // threshold, the AO kernel's camera terms, the SSR march's matrices —
+                    // is now pushed per view by chain::ViewGlobalsListener, from that
+                    // view's own workspacePreUpdate. That is what ended the two defects
+                    // this loop used to cause: two on-screen views fighting over one
+                    // exposure, and SSAO marching the first view's projection in the
+                    // second view's frame.
+                    //
+                    // Offscreen views never qualify — their chainDesc() has every effect
+                    // off by construction unless the caller deliberately opted in.
+                    for (auto &v : mViews) {
+                        if (!v->isEnabled()) continue;
+                        const ChainDesc d = v->chainDesc();
+                        if (!d.anyEffect()) continue;
+                        chain::applyRecompileGlobals(mRoot, d);
+                        break;
+                    }
+                    // THE PROBE CACHE'S FRAME COUNTER (ENGINE_CACHE_POLICY_SPEC P1): after
+                    // the budget spent itself (updateGi) and any flush rebuilt (applyPendingGi),
+                    // and before the frame renders the dirty probes.
+
+                    for (auto &s : mScenes) s->latchProbeCaptures(drawnThisFrame(s.get()));
+                    // OGRE'S PCC COLLECTS ITS DIRTY PROBES IN ITS frameStarted (ParallaxCorrectedCubemapAuto::
+                    // updateSceneGraph), which ran before this block: the probe budget above dirtied this frame's
+                    // after it, so the collection runs again here (its own entry, idempotent: it rebuilds its list) —
+                    // the probes the budget chose capture in THIS frame, as when the budget ran before frameStarted.
+                    for (OgreScene *s : updated) s->recollectProbes();
+                    for (OgreScene *s : updated) s->setBoxesCurrent(false);
+                    for (auto &v : mViews) {
+                        v->syncPlanarListener();
+                        v->syncGlobalsListener();
+                        v->syncReflectListener();
+                        v->syncAtomDraw();
+                        v->syncPhotonView();
+                    }
+                    syncMonitorListeners(updated);
                 }
                 // THE LAMP-MAP CACHE, second half: here and nowhere earlier. The
                 // scene graph has just made every world AABB and light pose this
@@ -2757,6 +2797,21 @@ void applyIfChanged(const std::optional<T> &want, std::optional<T> &last, unsign
 // drained. The host's structure-edit brackets ride the stream as messages of their own. THEN THE DOCUMENT'S NODES
 // (ENGINE-UPGRADE-U2, the extract): every pose, parent and class the document wrote lands before the change set names
 // the moved subtrees to the scans.
+namespace {
+/// ONE TIMED PART OF THE DRAIN (ENGINE-UPGRADE-U4 stage 1): the span added to its FrameInputStatus figure and, while a
+/// capture runs, filed as a monitor stage (exclusive of the parts nested in it). The drain runs before the frame's
+/// monitor record opens, so its stages bank and the frame that opens right after adopts them (FrameMonitor::stage).
+struct DrainPart {
+    double &acc;
+    monitor::Stage stage;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    DrainPart(double &a, const char *name) : acc(a), stage(name) {}
+    ~DrainPart() { acc += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(); }
+    DrainPart(const DrainPart &) = delete;
+    DrainPart &operator=(const DrainPart &) = delete;
+};
+}   // namespace
+
 void OgreEngine::applySceneStream(OgreScene *sc, const std::vector<SceneMessage> &messages,
                                   const std::vector<NodeRecord> &nodes,
                                   unsigned long long stepSerial) {
@@ -2764,11 +2819,22 @@ void OgreEngine::applySceneStream(OgreScene *sc, const std::vector<SceneMessage>
     // (token 0); the call's reason goes into the answer and the engine's error string is handed back as it was, so
     // the frame's error stays the frame's own fault.
     for (const SceneMessage &m : messages) applySceneMessage(sc, m);
-    const unsigned n = sc->applyNodeRecords(nodes, stepSerial);
-    // A FREE FRAME'S ONE WRITE PER NODE (worth-a-look 4), here — before the reflector arm and the change set read a pose,
-    // so both see what the frame draws (decision 56).
-    if (mDeferNodeWrites) interpolateScene(sc);
-    sc->armDeferredReflectors();   // a reflector asked for this frame is measured at its landed pose
+    // THE DRAIN'S TWO CHILDREN HERE (U4 stage 3, decision 11 f): `.records` the node records alone, `.interpolate`
+    // the free frame's interpolation and the reflector arm (timed only inside the drain; a request's stream is not).
+    unsigned n = 0;
+    {
+        std::unique_ptr<DrainPart> part;
+        if (mInDrain) part.reset(new DrainPart(mFrameInputStatus.drainRecordsMicros, "engine.drain.records"));
+        n = sc->applyNodeRecords(nodes, stepSerial);
+    }
+    {
+        std::unique_ptr<DrainPart> part;
+        if (mInDrain) part.reset(new DrainPart(mFrameInputStatus.drainInterpolateMicros, "engine.drain.interpolate"));
+        // A FREE FRAME'S ONE WRITE PER NODE (worth-a-look 4), here — before the reflector arm and the change set read
+        // a pose, so both see what the frame draws (decision 56).
+        if (mDeferNodeWrites) interpolateScene(sc);
+        sc->armDeferredReflectors();   // a reflector asked for this frame is measured at its landed pose
+    }
     mFrameInputStatus.nodeRecords += n;
     for (const NodeRecord &r : nodes) if (r.fields & NodeRecord::Trs) ++mFrameInputStatus.nodeTransforms;
     mFrameInputStatus.nodeRecordsTotal += n;
@@ -2911,20 +2977,6 @@ void OgreEngine::interpolateFrame() {
     mLastAlphaPresent = mPresentTime;
 }
 
-namespace {
-/// ONE TIMED PART OF THE DRAIN (ENGINE-UPGRADE-U4 stage 1): the span added to its FrameInputStatus figure and, while a
-/// capture runs, filed as a monitor stage (exclusive of the parts nested in it). The drain runs before the frame's
-/// monitor record opens, so its stages bank and the frame that opens right after adopts them (FrameMonitor::stage).
-struct DrainPart {
-    double &acc;
-    monitor::Stage stage;
-    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
-    DrainPart(double &a, const char *name) : acc(a), stage(name) {}
-    ~DrainPart() { acc += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(); }
-    DrainPart(const DrainPart &) = delete;
-    DrainPart &operator=(const DrainPart &) = delete;
-};
-}   // namespace
 
 void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     // THE DRAIN IS A STAGE (U4 stage 1): `engine.drain` and its three parts, and the same spans on the snapshot
@@ -2932,8 +2984,10 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     mFrameInputStatus.drainMicros = 0.0;
     mFrameInputStatus.drainNameMicros = 0.0;
     mFrameInputStatus.drainRecordsMicros = 0.0;
-    mFrameInputStatus.drainPlanMicros = 0.0;
+    mFrameInputStatus.drainInterpolateMicros = 0.0;
     DrainPart whole(mFrameInputStatus.drainMicros, "engine.drain");
+    mInDrain = true;
+    struct InDrain { bool &f; ~InDrain() { f = false; } } inDrain{ mInDrain };
     ++mFrameInputStatus.drained;
     mFrameInputStatus.fieldsApplied = 0;
     mFrameInputStatus.viewFieldsApplied = 0;
@@ -2996,10 +3050,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
         OgreScene *sc = nullptr;
         for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
         if (!sc) continue;   // destroyed before its frame
-        {
-            DrainPart records(mFrameInputStatus.drainRecordsMicros, "engine.drain.records");
-            applySceneStream(sc, {}, part.nodes, in.stepSerial.value_or(0ull));   // its messages ran in the one order above
-        }
+        applySceneStream(sc, {}, part.nodes, in.stepSerial.value_or(0ull));   // its messages ran in the one order above
         // THE CHANGE SET NEXT (U0 3b): what the document wrote, before anything of the frame reads a box.
         mFrameInputStatus.changesMoved += unsigned(part.changes.moved.size());
         if (!part.changes.complete) ++mFrameInputStatus.changesIncomplete;
@@ -3052,10 +3103,9 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
         applyIfChanged(part.grid, last.grid, applied, [&](const GridDesc &v) { static_cast<Scene *>(sc)->setGrid(v); });
         // THE ONE GI SCHEDULER (U0 3c; OgreGi.cpp planGi): once per record that carries the scene's GI, after every
         // field of it has landed — the configuration it may have just applied included.
-        if (part.gi) {
-            DrainPart plan(mFrameInputStatus.drainPlanMicros, "engine.drain.plan");
-            sc->planGi(part, giPushed);
-        }
+        // ...AND IT RUNS AFTER THE SCENE GRAPH (U4 stage 3, decision 8): what it reads of the record is stashed here,
+        // the plan itself (its geometry term over the world boxes) runs in the frame's `engine.plan`.
+        if (part.gi) sc->stashGiPlan(part, giPushed);
     }
 
     mFrameInputStatus.gestureActive = false;

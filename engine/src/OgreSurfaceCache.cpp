@@ -1742,9 +1742,7 @@ constexpr float kMoverRayRange = 10000.0f;
 struct SunFrame {
     Ogre::Vector3 L, e1, e2;
 };
-struct Footprint {
-    float a0 = 0.0f, a1 = 0.0f, b0 = 0.0f, b1 = 0.0f, top = 0.0f;   ///< the projected rect, and the top along the sun
-};
+using Footprint = CardSunFootprint;   ///< the projected rect, and the top along the sun (SurfaceCache.h)
 SunFrame sunFrame(const Ogre::Vector3 &toSun) {
     SunFrame f;
     f.L = toSun;
@@ -1916,6 +1914,9 @@ bool missesEveryCard(const CardSunGrid &g, const Footprint &q) {
 /// A new query: the cards it visits are visited once however many of its
 /// rectangles reach them (a move's old and new footprints).
 unsigned beginSunQuery(CardSunGrid &g) {
+    // THE STAMP'S WRAP: a card is visited once a query when its stamp equals the query's id. At the 32-bit wrap every
+    // stamp is zeroed and the ids restart at 1 — no stamp written before the wrap can equal an id after it (a stamp is
+    // 0 or an id handed out since). A stamp array grown for new cards starts at 0, which no query id is.
     if (++g.query == 0u) { std::fill(g.stamp.begin(), g.stamp.end(), 0u); g.query = 1u; }
     return g.query;
 }
@@ -1985,6 +1986,8 @@ void SurfaceCache::traceSun() {
     mTraceSunCost.casterHits = 0u;
     mTraceSunCost.casterHitDigest = 0ull;
     mTraceSunCost.hookMicros = mTraceSunCost.stepOneMicros = 0.0;
+    mTraceSunCost.step3Micros = mTraceSunCost.step3bMicros = 0.0;
+    mTraceSunCost.wideCards = 0u;
     // THIS FRAME ONLY: the batch is the frame's only when update() planned this
     // frame (workspacePreUpdate drops a stale plan the same way).
     // A batch that cannot be traced this frame waits for its still term.
@@ -2003,6 +2006,13 @@ void SurfaceCache::traceSun() {
     mTraceSunCost.hookMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tHook).count();
     if (!framed) { batchWaits(); return; }
     mMovers.swap(mf.movers);
+    if (mNullMove) {   // the test door: a still caster whose boxes are BOX_NULL (min +inf, max -inf)
+        CardCasterMove m;
+        const Ogre::Aabb nb = Ogre::Aabb::BOX_NULL;
+        m.oldMin = m.newMin = nb.getMinimum();
+        m.oldMax = m.newMax = nb.getMaximum();
+        mf.casterMoves.push_back(m);
+    }
     mTraceSunCost.casterMoves = unsigned(mf.casterMoves.size());
 
     const Ogre::Light *sunLight = cardSun();
@@ -2012,8 +2022,10 @@ void SurfaceCache::traceSun() {
     const SunFrame sf = sunFrame(haveSun ? toSun : Ogre::Vector3::UNIT_Y);
     // A card's footprint, computed once per call and only for a card something asks about (the grid files the
     // landed cards only).
-    std::vector<Footprint> cardFp;
-    std::vector<char> cardFpHave;
+    std::vector<Footprint> &cardFp = mTrace.cardFp;
+    std::vector<char> &cardFpHave = mTrace.cardFpHave;
+    cardFp.clear();
+    cardFpHave.clear();
     const auto cardFpAt = [&](unsigned i) -> const Footprint & {
         if (cardFp.empty()) {
             cardFp.resize(mCards.size());
@@ -2070,7 +2082,8 @@ void SurfaceCache::traceSun() {
     // and a slack for the corners' rounding) meets the searches' bounding
     // rectangle is filed and has its exact footprint computed: a card outside it
     // overlaps no search, so leaving it out changes no answer.
-    std::vector<unsigned> landedCards;
+    std::vector<unsigned> &landedCards = mTrace.landedCards;
+    landedCards.clear();
     bool landedKnown = false;
     const auto landedList = [&]() -> const std::vector<unsigned> & {
         if (!landedKnown) {
@@ -2101,12 +2114,14 @@ void SurfaceCache::traceSun() {
         if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(reach)) return true;
         return a + reach >= u.a0 && a - reach <= u.a1 && b + reach >= u.b0 && b - reach <= u.b1;
     };
-    std::vector<unsigned> filedCards;   // the landed cards the current grid holds
+    std::vector<unsigned> &filedCards = mTrace.filedCards;   // the landed cards the current grid holds
+    filedCards.clear();
     const auto buildGrid = [&](const SearchBounds &u) -> CardSunGrid & {
         filedCards.clear();
         for (unsigned i : landedList())
             if (mayReach(mCards[i], u)) { cardFpAt(i); filedCards.push_back(i); }
         buildSunGrid(mSunGrid, cardFp, filedCards);
+        mTraceSunCost.wideCards = std::max(mTraceSunCost.wideCards, unsigned(mSunGrid.wide.size()));
         return mSunGrid;
     };
     const auto searchInto = [&](CardSunGrid &g, std::vector<char> &mask, const Footprint &f) {
@@ -2129,7 +2144,8 @@ void SurfaceCache::traceSun() {
         // only landed cards; captured THIS frame (traced below, after the scene
         // graph: it sees the caster where it is now), or the caster's own (a
         // moved instance re-allocates its cards, a hidden one gives them back).
-        std::vector<char> hit(mf.casterMoves.empty() ? 0u : mCards.size(), 0);
+        std::vector<char> &hit = mTrace.hit;
+        hit.assign(mf.casterMoves.empty() ? 0u : mCards.size(), 0);
         const auto eligible = [&](unsigned i, NodeId mover) {
             const CardRec &c = mCards[i];
             return c.lastUpdated != mFrame && mInstances[c.instance].node != mover;
@@ -2138,7 +2154,8 @@ void SurfaceCache::traceSun() {
             // Each move's CONSERVATIVE old and new rectangles (boxReach), the grid
             // for their bounds; then the exact footprints of the moves whose
             // rectangles meet a filed card's bounds at all.
-            std::vector<Footprint> reach(2u * mf.casterMoves.size());
+            std::vector<Footprint> &reach = mTrace.reach;
+            reach.assign(2u * mf.casterMoves.size(), Footprint());
             SearchBounds u;
             for (size_t k = 0; k < mf.casterMoves.size(); ++k) {
                 const CardCasterMove &m = mf.casterMoves[k];
@@ -2319,6 +2336,7 @@ void SurfaceCache::traceSun() {
     // direction) must retrace every footprint.
     mMoverSun = haveSun ? toSun : Ogre::Vector3::ZERO;
 
+    const auto tStep3 = std::chrono::steady_clock::now();
     // 3. THE CARDS: inside a changed footprint, or captured this frame (their
     //    Depth is new) — pending; a pending card no CURRENT footprint reaches is
     //    retired instead (its term dropped, relit without it).
@@ -2336,7 +2354,8 @@ void SurfaceCache::traceSun() {
         return *moverGrid;
     };
     if (!changed.empty()) {
-        std::vector<char> inside(mCards.size(), 0);
+        std::vector<char> &inside = mTrace.inside;
+        inside.assign(mCards.size(), 0);
         for (const Footprint &f : changed) searchInto(moversGrid(), inside, f);
         if (mSunGridParity) {
             std::vector<char> all(mCards.size(), 0);
@@ -2353,13 +2372,17 @@ void SurfaceCache::traceSun() {
     for (unsigned idx : mBatch)
         if (!mMovers.empty() || mCards[idx].moverTraced) pend(mCards[idx]);
 
+    mTraceSunCost.step3Micros =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tStep3).count();
+    const auto tStep3b = std::chrono::steady_clock::now();
     std::vector<unsigned> trace;
     mMoverPending = 0u;
     mMoverPendingAge = 0u;
     // WHICH LANDED CARDS A CURRENT MOVER'S FOOTPRINT REACHES — searched on the
     // grid, only when a landed card waits on the movers' term. (The batch's
     // pend just above makes no card landed or unlanded: the wait is read now.)
-    std::vector<char> reachedBy;
+    std::vector<char> &reachedBy = mTrace.reachedBy;
+    reachedBy.clear();
     if (canTrace && !current.empty()) {
         bool waiting = false;
         for (const CardRec &c : mCards)
@@ -2398,6 +2421,8 @@ void SurfaceCache::traceSun() {
         }
         trace.push_back(i);
     }
+    mTraceSunCost.step3bMicros =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tStep3b).count();
     if (trace.empty()) return;
 
     // 4. OLDEST FIRST, NEAREST AMONG EQUALS, under the budget — the relight's

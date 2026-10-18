@@ -365,8 +365,11 @@ bool OgreScene::ensureGiWalk(const PhotonComponent::WalkInputs &in) {
     }
     ++mGiScans;
     const auto t0 = std::chrono::steady_clock::now();
-    if (!mGiScannedOnce || mScanFullGi) { ++mGiScansFull; walkItems(true, false, true); }
-    else walkItems(true, false, true, &takeScanSubset(mScanPendingGi));
+    // THE BOXES WHERE OGRE MADE THEM (U4 stage 3): after the frame's updateSceneGraph the cached world box IS this
+    // frame's — the SoA load, no parent-chain recompute; only a walk before it (a scene no view draws) recomputes.
+    const bool fresh = !mBoxesCurrent;
+    if (!mGiScannedOnce || mScanFullGi) { ++mGiScansFull; walkItems(true, false, fresh); }
+    else walkItems(true, false, fresh, &takeScanSubset(mScanPendingGi));
     mGiScanMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
     return true;
 }
@@ -428,6 +431,18 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
     }
     if (light) ++mGiLightWriteSerial;
     return light ? 1u : 0u;
+}
+
+void OgreScene::runStashedGiPlan() {
+    if (!mGiPlanStash.owed) return;
+    monitor::Stage st("engine.plan.signature");   // planGi: its geometry term and its decisions
+    FrameInputScene part;
+    part.scene = this;
+    part.giRefreshSerial = mGiPlanStash.refreshSerial;
+    part.materialPreview = mGiPlanStash.materialPreview;
+    const bool pushed = mGiPlanStash.pushed;
+    mGiPlanStash = GiPlanStash();
+    planGi(part, pushed);
 }
 
 void OgreScene::beginNamingPass() {
@@ -498,17 +513,17 @@ bool OgreScene::nameMovedSubtrees(std::vector<Ogre::Node *> &stack, uint32_t roo
 /// The pending list as the walk's item subset: each named node once, those that still carry an Item. The list is
 /// TAKEN (cleared) first, so a seam the walk itself fires (a drag promotion's flag write) names its node for the
 /// next frame's walk rather than this one's.
-std::vector<OgreScene::Node *> &OgreScene::takeScanSubset(std::vector<NodeId> &pending) {
-    mScanTake.swap(pending);
+std::vector<OgreScene::Node *> &OgreScene::takeScanSubset(std::vector<Node *> &pending) {
+    mScanTakeNodes.swap(pending);
     clearScanNames(pending, &pending == &mScanPendingGi ? mNameTakeGi : mNameTakeShadow);
-    std::sort(mScanTake.begin(), mScanTake.end());
-    mScanTake.erase(std::unique(mScanTake.begin(), mScanTake.end()), mScanTake.end());
+    // NO SORT (U4 stage 3): a node is named ONCE per take (its stamp, nameForScan), so the list holds no duplicate, and
+    // the walk's consumers are order-free — the probes' moved-cover test, the lamp maps' dirty set, and the cascades'
+    // boxes, which fold into their roots (an untagged seam's own box is the one ordered input: it merges at the cap
+    // in naming order, deterministic as the names are).
     mScanSubset.clear();
-    for (NodeId id : mScanTake) {
-        Node *rec = record(id);
-        if (rec && rec->item && rec->itemSlot != size_t(-1)) mScanSubset.push_back(rec);
-    }
-    mScanTake.clear();
+    for (Node *rec : mScanTakeNodes)
+        if (rec->item && rec->itemSlot != size_t(-1)) mScanSubset.push_back(rec);
+    mScanTakeNodes.clear();
     return mScanSubset;
 }
 
@@ -675,11 +690,10 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
         // would let the fresh walk skip the update where nothing moved, exists
         // only in OGRE_DEBUG_MEDIUM builds — an engine-side movement epoch is
         // the way to cut this, and it is a lane of its own.)
-        // ...UNLESS THE GEOMETRY SIGNATURE READ IT AT THIS EPOCH (U4 stage 3): nothing written since, the same
-        // updated read on the same poses — taken, not read again.
-        const bool reuse = fresh && n.sigBoxEpoch == transformEpoch();
-        if (fresh && !reuse) ++mGiWalk.aabbReads;
-        const Ogre::Aabb a = reuse ? n.sigBox : fresh ? item->getWorldAabbUpdated() : item->getWorldAabb();
+        // (The GI walk's reads are counted whichever form they take: the count is the walk's item boxes, the probe
+        // and the scan rows' "the walk ran" — U4 stage 3 made them cached after the scene graph.)
+        if (gi) ++mGiWalk.aabbReads;
+        const Ogre::Aabb a = fresh ? item->getWorldAabbUpdated() : item->getWorldAabb();
         // Read once per item, both halves use them (each is an SoA read, and
         // this loop is the per-frame cost the whole walk is measured by).
         const Ogre::uint32 flags = item->getVisibilityFlags();

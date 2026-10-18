@@ -1280,6 +1280,9 @@ constexpr size_t kParallelWalkSlots = 512u;
 
 void OgreScene::walkGpuScene(bool graphIsCurrent) const {
     GpuSceneSubstrate &sub = mSubstrate;
+    // THE TWO MEASURING DOORS of the notify share, latched from the arms (U4 stage 3, decision 11 d).
+    mGpuScene.setNotifyTiming(mEngine && mEngine->armRegistry().on(ArmId::GpuWalkTiming));
+    mGpuScene.setObserversMuted(mEngine && mEngine->armRegistry().on(ArmId::GpuObserversOff));
     using WalkClock = std::chrono::steady_clock;
     const auto usSince = [](WalkClock::time_point t) {
         return std::chrono::duration<double, std::micro>(WalkClock::now() - t).count();
@@ -1589,6 +1592,9 @@ inspect::SceneEcho::GiPlan OgreScene::giPlan() const {
     g.rootChecks = l.rootChecks;
     g.rootMisses = l.rootMisses;
     g.rootExtras = l.rootExtras;
+    g.signatureMicros = l.signatureMicros;
+    g.boxesMicros = l.boxesMicros;
+    g.pickMicros = l.pickMicros;
     return g;
 }
 
@@ -1607,6 +1613,9 @@ inspect::SceneEcho::TraceSun OgreScene::traceSun() const {
         t.parityMisses = k.parityMisses;
         t.hookMicros = k.hookMicros;
         t.stepOneMicros = k.stepOneMicros;
+        t.step3Micros = k.step3Micros;
+        t.step3bMicros = k.step3bMicros;
+        t.wideCards = k.wideCards;
     }
     return t;
 }

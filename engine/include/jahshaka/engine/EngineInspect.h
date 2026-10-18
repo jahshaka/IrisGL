@@ -72,6 +72,11 @@ public:
         /// ...of `micros`: the scene's moves frame (the producer of the moves, PhotonComponent::cardMoverFrame) and
         /// step 1 (the still casters' search, their footprints included).
         double             hookMicros = 0.0, stepOneMicros = 0.0;
+        /// ...and the movers' searches: step 3 (the changed footprints' cards) and step 3b (the pending cards a
+        /// current footprint reaches).
+        double             step3Micros = 0.0, step3bMicros = 0.0;
+        /// The cards the call's grids held apart as `wide` (the most of its grids).
+        unsigned           wideCards = 0;
     };
     virtual TraceSun traceSun() const = 0;
     /// THE GI PLAN'S LOG (ENGINE-UPGRADE-U4 stage 3): the last PhotonComponent::planFrame — its CPU in µs, the boxes
@@ -88,6 +93,9 @@ public:
         /// THE ROOT BOXES' GUARD (gi.rootBoxParity): marks checked, cascades the items' own boxes reach that the
         /// marks missed (0 is the law), cascades marked that no item box reaches (the union's extra).
         unsigned long long rootChecks = 0, rootMisses = 0, rootExtras = 0;
+        /// THE PLAN'S PARTS (µs; the monitor's engine.plan children): the geometry signature's last pass, the walk
+        /// with its boxes and marks, the scheduler's pick.
+        double             signatureMicros = 0.0, boxesMicros = 0.0, pickMicros = 0.0;
     };
     virtual GiPlan giPlan() const = 0;
 };

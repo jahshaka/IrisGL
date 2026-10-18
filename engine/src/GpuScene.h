@@ -762,18 +762,28 @@ private:
     std::vector<GpuSceneObserver *> mObservers;
     void notify(uint32_t slot, const GpuInstance *now) {
         ++mNotifies;
-        if (mObservers.empty()) return;
-        // THE OBSERVERS' TIME, a running total (ENGINE-UPGRADE-U4 stage 1: the compose's NOTIFY share — the part a
-        // parallel compose must replay serially; inspect::SceneEcho::gpuWalk).
+        if (mObservers.empty() || mObserversMuted) return;
+        if (!mNotifyTiming) {
+            for (GpuSceneObserver *o : mObservers) o->gpuSlotChanged(slot, now);
+            return;
+        }
+        // THE OBSERVERS' TIME, a running total — only while the arm gpuscene.walkTiming is latched (U4 stage 3,
+        // decision 11 d: two clock reads per notify are no production cost).
         const auto t0 = std::chrono::steady_clock::now();
         for (GpuSceneObserver *o : mObservers) o->gpuSlotChanged(slot, now);
         mNotifyMicros += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
     }
     unsigned long long mNotifies = 0ull;
     double mNotifyMicros = 0.0;
+    bool mNotifyTiming = false, mObserversMuted = false;
 public:
-    /// The observers' time in every notify so far, µs (the walk differences it around its compose).
+    /// The observers' time in every TIMED notify so far, µs (the walk differences it around its compose).
     double notifyMicros() const { return mNotifyMicros; }
+    /// The two measuring doors, latched by the scene from its arms before each compose: the notify timer
+    /// (gpuscene.walkTiming) and the observers muted (gpuscene.observersOff — a test door: the change feed's
+    /// consumers miss what changes while it is on).
+    void setNotifyTiming(bool on) { mNotifyTiming = on; }
+    void setObserversMuted(bool on) { mObserversMuted = on; }
 private:
     /// Slots whose ray level was patched since their last copy (patchRayLevel).
     std::vector<uint32_t> mPatched;

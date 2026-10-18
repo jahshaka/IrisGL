@@ -1977,6 +1977,10 @@ void OgreView::updateParticles() {
         mScene->sceneManager()->getParticleSystemManager2()->setCameraPosition(cameraWorldPosition(mCamera));
 }
 
+void OgreView::noteGiCamera() {
+    if (drawing() && mScene && mCamera) mScene->noteGiCamera(cameraWorldPosition(mCamera), mStereo);
+}
+
 void OgreView::updateGi() {
     if (drawing() && mScene && mCamera) {
         mScene->updateGiTracking(cameraWorldPosition(mCamera), mStereo);

@@ -1883,6 +1883,9 @@ enum class ArmId : unsigned {
     CardsSunGridParity,  ///< "cards.sunGridParity" — every sun trace's grid searches checked against the exhaustive search (the guard, U4 stage 2)
     GiGeomSigParity,     ///< "gi.geomSigParity" — every geometry signature checked against the whole sum (the guard, U4 stage 3)
     GiRootBoxParity,     ///< "gi.rootBoxParity" — every cascade mark checked against the items' own boxes (the guard, U4 stage 3)
+    GpuWalkTiming,       ///< "gpuscene.walkTiming" — the GPU scene's walk times its observers' notifies (a measuring arm, U4 stage 3)
+    GpuObserversOff,     ///< "gpuscene.observersOff" — the change feed's observers are not told (the paired arm of the notify share; a test door)
+    CardsNullMove,       ///< "cards.nullMove" — the sun trace takes one more still-caster move with a NULL box (the non-finite search's test door, U4 stage 3)
     Count
 };
 class ArmRegistry {
@@ -4722,10 +4725,6 @@ private:
         /// signature's name list.
         unsigned long long geomSigTerm = 0;
         uint32_t         geomSigGen = 0, nameTakeSig = 0;
-        /// ...and the world box the signature read, at the scene's transform epoch of the read: the GI walk's own
-        /// fresh read takes it while nothing was written since (the same getWorldAabbUpdated on the same poses).
-        Ogre::Aabb       sigBox;
-        unsigned long long sigBoxEpoch = ~0ull;
         /// ...and its MESH's place in the GPU scene's mesh table (GpuScene.h),
         /// acquired at attach and released at detach. kNoMesh until geometry
         /// arrives, which is what an instance entry with no mesh reads as.
@@ -4942,14 +4941,23 @@ private:
     /// THE ONE NAMING DOOR of the two scans' pending lists (stage 5): a node once per take, and the list
     /// bounded by the walk it stands for - once it names as many as a full walk visits (the items and the
     /// decals), the full walk is no dearer, and it is owed instead. No slack constant.
-    void nameForScan(Node &n, std::vector<NodeId> &pending, bool &full, uint32_t &take, uint32_t &stamp) {
+    /// THE LISTS HOLD THE RECORDS (U4 stage 3): a walk takes them with no lookup; a node's death owes both scans their
+    /// full walk (owesScansFull), so a list never holds a dead record.
+    void nameForScan(Node &n, std::vector<Node *> &pending, bool &full, uint32_t &take, uint32_t &stamp) {
         if (full || stamp == take) return;
         if (pending.size() >= mItemNodes.size() + mDecalNodes.size()) { clearScanNames(pending, take); full = true; return; }
-        pending.push_back(n.selfId);
+        pending.push_back(&n);
         stamp = take;
     }
     /// A pending list emptied (taken, answered by a full walk, or overflowed): a new take begins.
-    static void clearScanNames(std::vector<NodeId> &pending, uint32_t &take) { pending.clear(); ++take; }
+    static void clearScanNames(std::vector<Node *> &pending, uint32_t &take) { pending.clear(); ++take; }
+    /// A record dies: both scans owe their full walk (their lists hold records) — the walk then visits every item,
+    /// which answers what the named one would have.
+    void owesScansFull() {
+        mScanFullGi = mScanFullShadow = true;
+        clearScanNames(mScanPendingGi, mNameTakeGi);
+        clearScanNames(mScanPendingShadow, mNameTakeShadow);
+    }
 
     /// A definition's frozen shape. Two systems can share a recycled def only if
     /// every element of this matches, because none of it can be changed after
@@ -5599,7 +5607,26 @@ public:
     /// reads texture contents and cannot be asked twice (OPEN_COVER_SPEC §2 E).
     bool iblReadPending() const { return mIblPending; }
     void latchProbeCaptures(bool drawn) { return mPhoton.latchProbeCaptures(drawn); }
+    /// Ogre's PCC frame-start collection of its dirty probes, run again after the GI step dirtied this frame's (U4
+    /// stage 3: the step runs after Root's frameStarted now). Paused (an undrawn scene) it does nothing, as in Ogre.
+    void recollectProbes() {
+        if (Ogre::ParallaxCorrectedCubemapAuto *p = mPhoton.pcc()) p->frameStarted(Ogre::FrameEvent());
+    }
     void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) { return mPhoton.updateGiTracking(camPos, driverStereo); }
+    void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo) { mPhoton.noteGiCamera(camPos, driverStereo); }
+    /// THE PLAN AFTER THE SCENE GRAPH (ENGINE-UPGRADE-U4 stage 3): the drain STASHES what the GI scheduler's plan
+    /// reads from the record (planGi: its refresh serial, the material preview, whether the configuration was pushed)
+    /// and the frame runs it once the scene graph has made the world boxes current (runStashedGiPlan) — the geometry
+    /// term then reads cached boxes. `boxesCurrent` says so, between the frame's updateSceneGraph and its plan's end.
+    void stashGiPlan(const FrameInputScene &part, bool pushed) {
+        mGiPlanStash.owed = true;
+        mGiPlanStash.refreshSerial = part.giRefreshSerial;
+        mGiPlanStash.materialPreview = part.materialPreview;
+        mGiPlanStash.pushed = mGiPlanStash.pushed || pushed;
+    }
+    void runStashedGiPlan();
+    void setBoxesCurrent(bool current) { mBoxesCurrent = current; }
+    bool boxesCurrent() const { return mBoxesCurrent; }
     void updateForwardPlusRanges(const Ogre::Camera *cam) { return mPhoton.updateForwardPlusRanges(cam); }
     void forwardPlusLightCensus(unsigned &lights, unsigned &budget) const { return mPhoton.forwardPlusLightCensus(lights, budget); }
 private:
@@ -6309,6 +6336,11 @@ private:
     /// incomplete change set, or the list grew to a full pass's size.
     std::vector<Node *> mGeomSigNames;
     bool mGeomSigFull = true;
+    struct GiPlanStash {
+        bool owed = false, pushed = false, materialPreview = false;
+        std::optional<unsigned long long> refreshSerial;
+    } mGiPlanStash;
+    bool mBoxesCurrent = false;
     uint32_t mNameTakeSig = 0;
 public:
     void nameForGeomSig(Node &n) {
@@ -6337,7 +6369,8 @@ public:   // (a seam PhotonComponent calls)
 private:
     /// An ENGINE write that moves a node's subtree (a rider, a decal box, setNodeTransform): named like a drained move.
     void noteSubtreeWrite(NodeId id) { ChangeSet c; c.moved.push_back(id); applyChangeSet(c); }
-    std::vector<NodeId> mScanPendingGi, mScanPendingShadow, mScanTake;
+    std::vector<Node *> mScanPendingGi, mScanPendingShadow, mScanTakeNodes;
+    std::vector<NodeId> mScanTake;   ///< the shadow walk's deformer scratch
     uint32_t mNameTakeGi = 1u, mNameTakeShadow = 1u;   ///< the lists' take generations (Node::nameTake*)
     unsigned long long mShadowScansFull = 0;            ///< full caster scans, ever (GpuSubstrateStatus::scansFull)
 public:
@@ -6345,7 +6378,7 @@ public:
     unsigned long long scansFull() const { return mGiScansFull + mShadowScansFull; }
 private:
     std::vector<Node *> mScanSubset;
-    std::vector<Node *> &takeScanSubset(std::vector<NodeId> &pending);
+    std::vector<Node *> &takeScanSubset(std::vector<Node *> &pending);
     bool mScanFullGi = true, mScanFullShadow = true;
     unsigned long long mHostMoves = 0;
     /// THE SAME SKIP FOR THE CASTER HALF (ENGINE-4 F5). It was left out when
@@ -7075,6 +7108,9 @@ public:
     /// on-screen one, falling back to the first enabled — and calls this only
     /// there.
     void updateGi();
+    /// The authoritative view's camera to its scene's GI at the frame's head (U4 stage 3: updateGi runs after the
+    /// scene graph).
+    void noteGiCamera();
     /// Per-frame maintenance of everything derived from the TARGET's size:
     /// the letterbox rectangle and the inset's. Free when neither is in use.
     void applyLetterboxAndPip();
@@ -7721,6 +7757,11 @@ public:
     /// THE ONE DRAIN (U0 3a): the record the hand-over took (`any` false = an EMPTY hand-over), applied at the top of
     /// the frame.
     void drainFrameInput(FrameInput &in, bool any);
+    bool mInDrain = false;   ///< inside drainFrameInput: applySceneStream times its parts (U4 stage 3)
+    /// Root's next frame number as the frame's head read it, while the frame's `engine.plan` runs (after
+    /// frameStarted advanced it); 0 elsewhere (PhotonComponent::giWriterFrame).
+    unsigned long long mPlanFrameNumber = 0ull;
+    unsigned long long planFrameNumber() const { return mPlanFrameNumber; }
     /// A SCENE'S STREAM (U3 stage 3): its structural messages in emission order, then its node records — the drain's
     /// per-scene head, and what updateScene applies of the pending record before it resolves (a resolve answers for
     /// the commands already sent). Counts into the status; returns nothing.

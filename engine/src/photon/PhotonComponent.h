@@ -649,6 +649,9 @@ public:
     /// the ONE re-voxelisation); record it (stage 3 records it inside photon_update).
     void harvest();
     FrameWork planFrame(const Ogre::Vector3 &camPos, bool driverStereo);
+    /// The authoritative camera and the driver's profile, at the frame's head (U4 stage 3; planFrame is after the
+    /// scene graph): what they owe the pending flush is owed before it runs.
+    void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo);
     void recordFrame(const FrameWork &w);
     /// Re-derives the Forward+ clustered depth-slice range from this camera and
     /// the scene's own extent (LIGHTING_FIX fix 8 / F-F1). Rate-limited AND
@@ -1242,6 +1245,9 @@ public:
         /// The root boxes' guard (gi.rootBoxParity): marks checked; cascades the items' own boxes reach that the
         /// marks missed (0 is the law); cascades marked that no item box reaches (the union's conservative extra).
         unsigned long long rootChecks = 0ull, rootMisses = 0ull, rootExtras = 0ull;
+        /// ...its parts (µs): the walk with its boxes and marks, the scheduler's pick; and the geometry signature's
+        /// last pass (planGi's term, now after the scene graph too).
+        double boxesMicros = 0.0, pickMicros = 0.0, signatureMicros = 0.0;
     };
     const PlanLog &planLog() const { return mPlanLog; }
 private:

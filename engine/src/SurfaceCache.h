@@ -141,6 +141,12 @@ constexpr unsigned kCaptureBatch = 8u;
 constexpr unsigned kCardPassIdentifier = 0x4A434300u;   // 'JCC\0'
 
 
+/// A footprint in the plane normal to the sun: the projected rectangle, and the top along the sun (OgreSurfaceCache.cpp,
+/// "The movers' shadow"). Here rather than in the TU so the trace's scratch can be the cache's own (U4 stage 3).
+struct CardSunFootprint {
+    float a0 = 0.0f, a1 = 0.0f, b0 = 0.0f, b1 = 0.0f, top = 0.0f;
+};
+
 /// THE CARDS' SUN-SPACE GRID (ENGINE-UPGRADE-U4 stage 2; OgreSurfaceCache.cpp, "The cards' sun-space grid"): the
 /// landed cards bucketed by their footprint's rectangle in the plane normal to the sun, built per traceSun call, so a
 /// footprint (a moved caster's, a mover's) visits only the cards whose cells it covers. Scratch kept between calls.
@@ -506,6 +512,13 @@ public:
         /// ...of `micros`: the scene's moves frame (the hook: PhotonComponent::cardMoverFrame, the producer of the
         /// moves and the movers) and step 1 (the still casters' search, their footprints included).
         double hookMicros = 0.0, stepOneMicros = 0.0;
+        /// ...and the movers' searches: step 3 (the changed footprints' cards, with the grid they build) and step 3b
+        /// (the pending cards a current footprint reaches); the rest is the step-2 bookkeeping, the trace's records and
+        /// the relight hand-off.
+        double step3Micros = 0.0, step3bMicros = 0.0;
+        /// The cards the call's grids held apart (`wide`: wider than the cells' bound, or not finite) — the most of
+        /// its grids, so a row can say its wide path ran.
+        unsigned wideCards = 0u;
     };
     const TraceSunCost &traceSunCost() const { return mTraceSunCost; }
 
@@ -621,10 +634,19 @@ private:
     float mStillCpuMs = 0.0f;   ///< the still trace's CPU this frame (in captureMs with a batch)
     TraceSunCost mTraceSunCost;
     CardSunGrid mSunGrid;
-    /// The arm "cards.sunGridParity" as the frame latched it (the owner sets it before each trace).
-    bool mSunGridParity = false;
+    /// THE TRACE'S SCRATCH (U4 stage 3, decision 11 e): every per-call list traceSun builds, kept between calls and
+    /// cleared, never re-allocated (the grid's own storage already is).
+    struct TraceScratch {
+        std::vector<CardSunFootprint> cardFp, reach;
+        std::vector<char> cardFpHave, hit, inside, reachedBy;
+        std::vector<unsigned> landedCards, filedCards;
+    } mTrace;
+    /// The arms "cards.sunGridParity" and "cards.nullMove" as the frame latched them (the owner sets them before each
+    /// trace).
+    bool mSunGridParity = false, mNullMove = false;
 public:
     void setSunGridParity(bool on) { mSunGridParity = on; }
+    void setNullMove(bool on) { mNullMove = on; }
 private:
     unsigned mStillTracedLastFrame = 0u, mStillTexelsLastFrame = 0u, mStillPending = 0u;
     unsigned long long mStillTraces = 0ull, mInvalidSun = 0ull, mCasterRetraces = 0ull;

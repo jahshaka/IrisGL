@@ -845,6 +845,10 @@ void PhotonComponent::payChainSettleStep() {
 // one frame late, whereas an abort is not a picture at all; `gi.one_writer`
 // asserts the counter stays 0 on a drag + settle.
 unsigned long long PhotonComponent::giWriterFrame() const {
+    // THE FRAME THE WRITERS WRITE FOR: Root's next frame number — read at the frame's head. Inside the frame's
+    // `engine.plan` (after Root's frameStarted advanced the counter; U4 stage 3) the head's own number, latched by the
+    // engine, so the plan stamps and compares with the value it always did.
+    if (mEngine && mEngine->planFrameNumber()) return mEngine->planFrameNumber();
     return (unsigned long long)mRoot->getNextFrameNumber();
 }
 
@@ -1919,7 +1923,10 @@ std::vector<Ogre::Aabb> PhotonComponent::giItemBoundsRaw() const {
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         if (kv.second.probeGridExcluded) continue;
         ++mGiAabbReads;
-        all.push_back(const_cast<Ogre::Item *>(item)->getWorldAabbUpdated());
+        // (after the scene graph — the frame's `engine.plan`, U4 stage 3 — the cached box is this frame's; the
+        // recomputing read would overwrite Ogre's SoA-derived transform with its scalar recompute)
+        Ogre::Item *it = const_cast<Ogre::Item *>(item);
+        all.push_back(mScene.boxesCurrent() ? it->getWorldAabb() : it->getWorldAabbUpdated());
     }
     return all;
 }
@@ -2234,16 +2241,17 @@ namespace {
 /// would land in the MIDDLE of the gesture — the hitch the whole mobility design
 /// exists to avoid. At the gesture's end the term is exactly the term the same
 /// pose would have had without the promotion.
+/// `current`: the scene graph has made this frame's world boxes (after updateSceneGraph): the cached SoA box, no
+/// recompute (U4 stage 3); else the recomputing read (a scene no view draws this frame).
 template <class NodeT>
-bool geomSigTerm(NodeT &n, unsigned long long &term, unsigned long long &reads, unsigned long long epoch) {
+bool geomSigTerm(NodeT &n, unsigned long long &term, unsigned long long &reads, bool current) {
     const Ogre::Item *item = n.item;
     const bool dragged = n.dragMover && n.shown;
     if (!item || n.itemSlot == size_t(-1) || (!(item->getVisibilityFlags() & kGiGeometryBit) && !dragged))
         return false;
-    ++reads;
-    const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
-    n.sigBox = a;
-    n.sigBoxEpoch = epoch;
+    Ogre::Item *it = const_cast<Ogre::Item *>(item);
+    ++reads;   // an item box read, whichever form (the rows count the signature's reads)
+    const Ogre::Aabb a = current ? it->getWorldAabb() : it->getWorldAabbUpdated();
     const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
     const float quantum = PhotonComponent::giAabbQuantum(a);
     unsigned long long h = 1469598103934665603ull;
@@ -2259,14 +2267,16 @@ bool geomSigTerm(NodeT &n, unsigned long long &term, unsigned long long &reads, 
 }   // namespace
 
 void PhotonComponent::computeGiGeometrySignature() const {
+    const auto tSig = std::chrono::steady_clock::now();
     const unsigned long long epoch = mScene.transformEpoch();
+    const bool current = mScene.boxesCurrent();
     const bool full = !mGeomSigValid || mGeomSigMode != mGi.mode || mScene.geomSigFullOwed();
     if (full) {
         if (++mGeomSigGen == 0u) mGeomSigGen = 1u;   // a node's term counts only in its generation
         unsigned long long sum = 0ull;
         for (auto *np : mScene.itemNodes()) {          // the item index, not the map (D4)
             unsigned long long term = 0ull;
-            if (geomSigTerm(*np, term, mGiAabbReads, epoch)) {
+            if (geomSigTerm(*np, term, mGiAabbReads, current)) {
                 np->geomSigTerm = term;
                 np->geomSigGen = mGeomSigGen;
                 sum += term;
@@ -2282,7 +2292,7 @@ void PhotonComponent::computeGiGeometrySignature() const {
         for (auto *np : mScene.geomSigNames()) {
             if (np->geomSigGen == mGeomSigGen) sum -= np->geomSigTerm;
             unsigned long long term = 0ull;
-            if (geomSigTerm(*np, term, mGiAabbReads, epoch)) {
+            if (geomSigTerm(*np, term, mGiAabbReads, current)) {
                 np->geomSigTerm = term;
                 np->geomSigGen = mGeomSigGen;
                 sum += term;
@@ -2297,7 +2307,7 @@ void PhotonComponent::computeGiGeometrySignature() const {
         unsigned long long whole = 0ull, reads = 0ull;
         for (auto *np : mScene.itemNodes()) {
             unsigned long long term = 0ull;
-            if (geomSigTerm(*np, term, reads, epoch)) whole += term;
+            if (geomSigTerm(*np, term, reads, current)) whole += term;
         }
         ++mGeomSigChecks;
         if (whole != mGeomSig) ++mGeomSigMisses;
@@ -2305,6 +2315,8 @@ void PhotonComponent::computeGiGeometrySignature() const {
     mGeomSigEpoch = epoch;
     mGeomSigMode = mGi.mode;
     mGeomSigValid = true;
+    const_cast<PlanLog &>(mPlanLog).signatureMicros =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tSig).count();
 }
 
 void PhotonComponent::noteProbeFitVolume(const Ogre::Aabb &fitted, bool automatic) {
@@ -2364,7 +2376,8 @@ bool PhotonComponent::giContentCentre(float maxEdge, Ogre::Vector3 &centre) cons
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         if (kv.second.probeGridExcluded) continue;
         ++mGiAabbReads;
-        const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
+        Ogre::Item *it = const_cast<Ogre::Item *>(item);   // (cached after the scene graph, as giItemBounds)
+        const Ogre::Aabb a = mScene.boxesCurrent() ? it->getWorldAabb() : it->getWorldAabbUpdated();
         const Ogre::Vector3 size = a.getSize();
         if (std::max(std::max(size.x, size.y), size.z) > maxEdge) continue;   // scenery
         sum += a.mCenter;
@@ -3298,7 +3311,7 @@ void PhotonComponent::updateForwardPlusRanges(const Ogre::Camera *cam) {
                 // not a capture's.
                 if (!item || !(item->getVisibilityFlags() & (kVisibleBit | kMovableBit))) continue;
                 ++mGiAabbReads;
-                const Ogre::Aabb a = item->getWorldAabbUpdated();
+                const Ogre::Aabb a = mScene.boxesCurrent() ? item->getWorldAabb() : item->getWorldAabbUpdated();
                 bmn.makeFloor(a.getMinimum()); bmx.makeCeil(a.getMaximum());
                 ++found;
             }
@@ -3395,6 +3408,37 @@ void PhotonComponent::forwardPlusLightCensus(unsigned &lights, unsigned &budget)
     }
 }
 
+// THE AUTHORITATIVE CAMERA AND THE DRIVER'S PROFILE, AT THE FRAME'S HEAD (ENGINE-UPGRADE-U4 stage 3): planFrame runs after
+// the scene graph now (the boxes it reads are the frame's own there), but what these two OWE — a rebuild through the
+// ordinary pending-GI flush — must be owed before that flush runs, in this frame, as before; and the cards' residency
+// centres on this camera before planFrame has run.
+void PhotonComponent::noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo) {
+    // THE VR CASCADE PROFILE FOLLOWS THE DRIVER (V1-RIG item 4). The view that
+    // places the chain is the one that reads it, and in a session that is the
+    // headset's — five times the pixels for half the frame. A change of driver
+    // profile is a change of TABLE, so the chain is rebuilt through the ordinary
+    // dirty flush rather than mutated: `resolveCascadeTable` reads this.
+    if (driverStereo != mGiDriverStereo) {
+        mGiDriverStereo = driverStereo;
+        if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
+            mGiChainShapeDirty = true;
+            mGiCachesDirty = true;
+        }
+    }
+    // THE AUTHORITATIVE CAMERA, remembered: the Photon arm is built around it,
+    // and a rebuild can arrive on a frame where no view has tracked yet.
+    const bool firstCamera = !mGiCamPosKnown;
+    mGiCamPos = camPos; mGiCamPosKnown = true;
+    // ...and the arm that was waiting for it (B3) is asked for now. Through
+    // the ordinary pending-GI flush rather than by calling rebuildVct here, so
+    // the build lands where every other structural rebuild lands — after the
+    // frame's tracking updates, once per frame, inside applyPendingGi's
+    // try/catch.
+    if (firstCamera && mGiCascadeAwaitingCamera &&
+        (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid))
+        mGiCachesDirty = true;
+}
+
 PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPos, bool driverStereo) {
     // THE PLAN'S LOG (U4 stage 3): its CPU, what the walk handed the cascades, what was marked and picked.
     const auto tPlan = std::chrono::steady_clock::now();
@@ -3409,18 +3453,8 @@ PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPo
         }
     } planTimed{ mPlanLog, tPlan };
     FrameWork w;
-    // THE VR CASCADE PROFILE FOLLOWS THE DRIVER (V1-RIG item 4). The view that
-    // places the chain is the one that reads it, and in a session that is the
-    // headset's — five times the pixels for half the frame. A change of driver
-    // profile is a change of TABLE, so the chain is rebuilt through the ordinary
-    // dirty flush rather than mutated: `resolveCascadeTable` reads this.
-    if (driverStereo != mGiDriverStereo) {
-        mGiDriverStereo = driverStereo;
-        if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
-            mGiChainShapeDirty = true;
-            mGiCachesDirty = true;
-        }
-    }
+    // (THE DRIVER'S PROFILE AND THE FIRST CAMERA are noteGiCamera's, at the frame's head, before the pending flush
+    // they may owe — U4 stage 3: this runs after the scene graph.)
     // The DDGI half runs FIRST and unconditionally: it is scene-fitted, so it
     // needs no camera at all, and it must run in plain VCT mode too — where
     // there is no PCC and the probe half below returns immediately. (Both
@@ -3428,18 +3462,7 @@ PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPo
     // scene: OgreEngine::renderOneFrame picks it, for the same reason the probe
     // budget must not be spent once per view.)
     mScene.openGiWalkFrame();     // one GI walk per frame; the first consumer runs it
-    // THE AUTHORITATIVE CAMERA, remembered: the Photon arm is built around it,
-    // and a rebuild can arrive on a frame where no view has tracked yet.
-    const bool firstCamera = !mGiCamPosKnown;
     mGiCamPos = camPos; mGiCamPosKnown = true;
-    // ...and the arm that was waiting for it (B3) is asked for now. Through
-    // the ordinary pending-GI flush rather than by calling rebuildVct here, so
-    // the build lands where every other structural rebuild lands — after the
-    // frame's tracking updates, once per frame, inside applyPendingGi's
-    // try/catch.
-    if (firstCamera && mGiCascadeAwaitingCamera &&
-        (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid))
-        mGiCachesDirty = true;
     planField(w);   // the field's batch (recorded FIRST, before the cascades, as it always ran)
     // THE CASCADE SCHEDULER (PHOTON_SPEC P0). Before the probe half and
     // unconditionally: it is per SCENE and per FRAME, it costs one quantise
@@ -3457,6 +3480,12 @@ PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPo
     // it the one walk the frame pays for. The walk itself records the boxes
     // (round-2 F4); this only spends them.
     if (!mVctCascades.empty()) {
+        monitor::Stage boxesStage("engine.plan.boxes");   // the walk, its boxes, the marks (U4 stage 3)
+        const auto tBoxes = std::chrono::steady_clock::now();
+        struct BoxesTimed {
+            double &us; std::chrono::steady_clock::time_point t0;
+            ~BoxesTimed() { us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(); }
+        } boxesTimed{ mPlanLog.boxesMicros, tBoxes };
         JAH_TRY {
             if (mScene.ensureGiWalk(walkInputs())) {
                 mPlanLog.boxes = unsigned(mScene.giWalk().cascadeDirty.size());
@@ -3520,7 +3549,12 @@ PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPo
         } JAH_CATCH(mError, (w.aborted = true, w));   // an exception ends the frame's GI after the field
     }
     w.camPos = camPos;
-    if (!mGiCachesDirty) planCascades(camPos, w);
+    {
+        monitor::Stage pickStage("engine.plan.pick");   // the scheduler's pick (U5's planCascades), timed here
+        const auto tPick = std::chrono::steady_clock::now();
+        if (!mGiCachesDirty) planCascades(camPos, w);
+        mPlanLog.pickMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tPick).count();
+    }
     mPlanLog.rebuild = w.rebuild;
     return w;
 }

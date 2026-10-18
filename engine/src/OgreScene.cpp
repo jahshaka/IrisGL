@@ -457,6 +457,7 @@ bool OgreScene::removeNode(NodeId id) {
         forgetInterpolationPointers();   // before the erase: the stale pointers become ids while their nodes live
         owesGeomSigFull();               // the signature's name list holds records: a dying one must not be read
         releaseNode(it->first, it->second);
+        owesScansFull();                 // ...and so do the scans' (after the release, which may name it again)
         uncountNode(it->second);
         mNodeById.erase(it->first);
         mNodes.erase(it);
@@ -2143,6 +2144,7 @@ void OgreScene::destroy() {
         destroyGrid();
         for (auto &kv : mNodes) releaseNode(kv.first, kv.second);
         owesGeomSigFull();
+        owesScansFull();
         mNodeById.clear();
         mNodes.clear();
         mInterpNodes.clear(); mInterpStale.clear(); mInterpRecs.clear(); mInterpStaleRecs.clear(); mInterpRecsValid = false;
@@ -2607,7 +2609,11 @@ void OgreScene::cardCandidates(const Ogre::Vector3 &centre, float radius, CardSc
         c.material = n->materialRef;
         c.cards = cards;
         c.lodBounds = mCardFeed.boundsOf[slot];
-        const bool fresh = slot < mCardFeed.changedAt.size() && mCardFeed.changedAt[slot] + 1u >= mCardFeed.serial;
+        // After the scene graph (U4 stage 3: the cards plan in `engine.plan`) the cached box IS this frame's — and the
+        // recomputing read would overwrite Ogre's SoA-derived transform with its scalar recompute, which the GPU
+        // scene's table (composed from the SoA one) then disagrees with by an ulp.
+        const bool fresh = !mBoxesCurrent && slot < mCardFeed.changedAt.size() &&
+                           mCardFeed.changedAt[slot] + 1u >= mCardFeed.serial;
         c.box = fresh ? n->item->getWorldAabbUpdated() : n->item->getWorldAabb();
         out.push_back(c);
     }

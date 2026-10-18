@@ -243,6 +243,7 @@ void PhotonComponent::recordUpdatePass() {
     GiRegion region(RegionKind::Graphics);   // the cards' work (this frame's capture): graphics, in order
     if (!mSurfaceCache) return;
     mSurfaceCache->setSunGridParity(mEngine && mEngine->armRegistry().on(ArmId::CardsSunGridParity));
+    mSurfaceCache->setNullMove(mEngine && mEngine->armRegistry().on(ArmId::CardsNullMove));
     mSurfaceCache->photonUpdate();
 }
 
