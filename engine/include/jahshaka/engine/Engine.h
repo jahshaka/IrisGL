@@ -922,6 +922,9 @@ public:
     /// the atom items' materials need (AtomDrawStatus). Computes the bucket keys
     /// (no shader is compiled); a tool and test read, not a per-frame one.
     virtual AtomDrawStatus atomDrawStatus() { return AtomDrawStatus(); }
+    /// THE SUN MAPS' CONTENT (ShadowMapDigest; a test door: a synchronous read of the first view's
+    /// shadow atlas). False without a view or an atlas.
+    virtual bool shadowMapDigests(std::vector<ShadowMapDigest> &out) { out.clear(); return false; }
     /// THE MEASUREMENT DOOR of the visibility buffer (a tool's A/B, never a mode):
     /// off, every item draws through PBS and every view's chain is rebuilt without
     /// the id pass. On by default.

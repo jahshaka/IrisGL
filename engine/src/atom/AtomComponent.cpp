@@ -51,6 +51,7 @@ void AtomComponent::release() {
     // THE CASTER CUT'S LIST and its pass state, with the tables they read; the Buckets
     // table, a texture of this tree's manager.
     mCasterCull.destroy();
+    mCasterCullLate.destroy();
     mCasterState.reset();
     releaseViewTable();
 }
@@ -182,6 +183,11 @@ void AtomComponent::status(AtomDrawStatus &st) const {
     st.casterTriangles = mCasterStats.triangles;
     st.casterMapsPeak = mCasterStats.peakMaps;
     st.casterUnrecorded = mCasterStats.unrecorded;
+    st.casterOccluded = mCasterStats.occluded;
+    st.casterLateInstances = mCasterStats.lateInstances;
+    st.casterLateOccluded = mCasterStats.lateOccluded;
+    st.casterLateTriangles = mCasterStats.lateTriangles;
+    st.casterPerMap = mCasterStats.perMap;
 }
 
 }  // namespace detail

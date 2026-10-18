@@ -89,18 +89,26 @@ namespace detail {
 /// first use (no pass declares it), found there again, and unbound and destroyed by
 /// releaseHzbBuild before Root — no pointer of ours holds it.
 namespace {
-Ogre::HlmsComputeJob *hzbJob() {
+/// The whole-depth build and the RECTANGLE build (a shadow map's, ENGINE-UPGRADE-U5 stage 4): one
+/// source, two jobs, each with its own counter (the rectangle's job binds its corner after it).
+constexpr const char *kHzbJobs[2] = { "Jahshaka/HzbBuild", "Jahshaka/HzbBuildRect" };
+constexpr Ogre::uint8 kHzbOriginSlot = kHzbCounterSlot + 1u;
+Ogre::HlmsComputeJob *hzbJob(unsigned which = 0u) {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     Ogre::HlmsCompute *hc = root && root->getHlmsManager() ? root->getHlmsManager()->getComputeHlms() : nullptr;
-    return hc ? hc->findComputeJobNoThrow("Jahshaka/HzbBuild") : nullptr;
+    return hc ? hc->findComputeJobNoThrow(kHzbJobs[which]) : nullptr;
 }
 Ogre::UavBufferPacked *hzbCounterOf(const Ogre::HlmsComputeJob *job) {
     return job && job->getNumUavUnits() > kHzbCounterSlot ? job->getUavBuffer(kHzbCounterSlot) : nullptr;
 }
+Ogre::HlmsComputeJob *hzbJobWithCounter(unsigned which);
 }  // namespace
 
-Ogre::HlmsComputeJob *hzbBuildJob() {
-    Ogre::HlmsComputeJob *job = hzbJob();
+Ogre::HlmsComputeJob *hzbBuildJob() { return hzbJobWithCounter(0u); }
+
+namespace {
+Ogre::HlmsComputeJob *hzbJobWithCounter(unsigned which) {
+    Ogre::HlmsComputeJob *job = hzbJob(which);
     if (!job) return nullptr;
     if (!hzbCounterOf(job)) {
         Ogre::Root *root = Ogre::Root::getSingletonPtr();
@@ -116,15 +124,18 @@ Ogre::HlmsComputeJob *hzbBuildJob() {
     }
     return job;
 }
+}  // namespace
 
 void releaseHzbBuild() {
-    Ogre::HlmsComputeJob *job = hzbJob();
-    Ogre::UavBufferPacked *counter = hzbCounterOf(job);
-    if (!counter) return;
-    job->_setUavBuffer(kHzbCounterSlot, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
-    Ogre::Root *root = Ogre::Root::getSingletonPtr();
-    if (root && root->getRenderSystem() && root->getRenderSystem()->getVaoManager())
-        root->getRenderSystem()->getVaoManager()->destroyUavBuffer(counter);
+    for (unsigned which = 0u; which < 2u; ++which) {
+        Ogre::HlmsComputeJob *job = hzbJob(which);
+        Ogre::UavBufferPacked *counter = hzbCounterOf(job);
+        if (!counter) continue;
+        job->_setUavBuffer(kHzbCounterSlot, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        Ogre::Root *root = Ogre::Root::getSingletonPtr();
+        if (root && root->getRenderSystem() && root->getRenderSystem()->getVaoManager())
+            root->getRenderSystem()->getVaoManager()->destroyUavBuffer(counter);
+    }
 }
 
 /// THE OCCLUSION'S PYRAMID (EnginePrivate.h): ONE dispatch of the single-pass build
@@ -132,10 +143,12 @@ void releaseHzbBuild() {
 /// compositor's own compute-pass discipline (CompositorPassCompute::execute — bind, the
 /// job's barriers through Ogre's solver, dispatch), the level count read off the texture
 /// as it is.
-bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::TextureGpu *hzb) {
+namespace {
+bool recordPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::TextureGpu *hzb,
+                   Ogre::UavBufferPacked *origin) {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     Ogre::HlmsCompute *hc = root && root->getHlmsManager() ? root->getHlmsManager()->getComputeHlms() : nullptr;
-    Ogre::HlmsComputeJob *job = hzbBuildJob();
+    Ogre::HlmsComputeJob *job = hzbJobWithCounter(origin ? 1u : 0u);
     if (!rs || !hc || !depth || !hzb || !job) return false;
     const Ogre::uint8 levels = hzb->getNumMipmaps();
     if (levels == 0u || levels > kHzbMaxLevels) return false;
@@ -165,6 +178,18 @@ bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogr
         t.mipmapLevel = std::min<Ogre::uint8>(m, Ogre::uint8(levels - 1u));
         job->_setUavTexture(m, t);
     }
+    if (origin) {
+        // THE RECTANGLE'S CORNER, and the groups the PYRAMID's size asks for (the job is sized
+        // by nothing: the depth it reads is the whole atlas) - one 64 x 64 tile a group, the
+        // whole-depth job's own divisor.
+        Ogre::DescriptorSetUav::BufferSlot b(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        b.buffer = origin;
+        b.offset = 0;
+        b.sizeBytes = 0;
+        b.access = Ogre::ResourceAccess::Read;
+        job->_setUavBuffer(kHzbOriginSlot, b);
+        job->setNumThreadGroups((hzb->getWidth() + 63u) / 64u, (hzb->getHeight() + 63u) / 64u, 1u);
+    }
     {
         Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
         job->analyzeBarriers(rt);
@@ -176,9 +201,20 @@ bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogr
     job->setTexture(0u, Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
     for (Ogre::uint8 m = 0u; m < kHzbMaxLevels; ++m)
         job->_setUavTexture(m, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+    if (origin) job->_setUavBuffer(kHzbOriginSlot, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
     if (wasReverse != reverse) job->setProperty("hzb_reverse_z", wasReverse);
     if (wasFarthest != 1) job->setProperty("hzb_farthest", wasFarthest);
     return true;
+}
+}  // namespace
+
+bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::TextureGpu *hzb) {
+    return recordPyramid(rs, depth, hzb, nullptr);
+}
+
+bool recordOcclusionPyramidRect(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::TextureGpu *hzb,
+                                Ogre::UavBufferPacked *origin) {
+    return origin && recordPyramid(rs, depth, hzb, origin);
 }
 
 #if JAH_RAY_QUERY
@@ -929,6 +965,10 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
 }
 
 }  // namespace
+
+/// THE MATRIX A CULL TESTS A PYRAMID WITH (cullMatrixOf above), for the caster pass's own pyramids
+/// (OgreAtomCasterPass.cpp: a sun map draws through a positive-height viewport too).
+Ogre::Matrix4 pyramidCullMatrix(const Ogre::Matrix4 &draw) { return cullMatrixOf(draw); }
 
 bool atomIdPassSupported(Ogre::RenderSystem *rs) {
     Ogre::VulkanRenderSystem *vkRs = atomVulkanOf(rs);

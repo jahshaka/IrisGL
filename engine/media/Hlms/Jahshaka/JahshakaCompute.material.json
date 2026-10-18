@@ -261,6 +261,26 @@
 			}
 		},
 
+		"Jahshaka/HzbBuildRect" :
+		{
+			"threads_per_group" : [16, 16, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahHzbBuild_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
+			"inform_shader_of_texture_data_change" : true,
+			"textures" : [ {} ],
+			"uav_units" : 18,
+			"properties" :
+			{
+				"hzb_slots" : 16,
+				"hzb_tile_slots" : 6,
+				"hzb_reverse_z" : 1,
+				"hzb_farthest" : 1,
+				"hzb_src_rect" : 1,
+				"hzb_origin_slot" : 17
+			}
+		},
+
 		"Jahshaka/VideoNv12" :
 		{
 			"threads_per_group" : [8, 8, 1],

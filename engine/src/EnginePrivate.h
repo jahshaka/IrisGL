@@ -919,6 +919,14 @@ OgreScene *sceneOfManager(const Ogre::SceneManager *sm);
 /// farthest), through HlmsCompute with Ogre's barrier solver. False when the job is not
 /// staged.
 bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::TextureGpu *hzb);
+/// THE SAME BUILD OVER A RECTANGLE of `depth` (a shadow map's in its atlas; ENGINE-UPGRADE-U5 stage
+/// 4): `hzb` is the rectangle's size, and `origin` (a 16-byte UAV buffer: x, y, 0, 0) holds its
+/// corner in `depth`. The job Jahshaka/HzbBuildRect; false when it is not staged.
+/// The matrix a cull tests such a pyramid with, from the pass's draw matrix (its y row negated:
+/// OgreAtomIdPass.cpp's cullMatrixOf, where it says why). Vulkan builds only.
+Ogre::Matrix4 pyramidCullMatrix(const Ogre::Matrix4 &draw);
+bool recordOcclusionPyramidRect(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::TextureGpu *hzb,
+                                Ogre::UavBufferPacked *origin);
 /// THE SINGLE-PASS BUILD'S JOB (JahHzbBuild_cs): UAV slots 0..kHzbMaxLevels-1 are the
 /// pyramid's mips, slot kHzbCounterSlot the engine-lifetime arrival counter, which
 /// `hzbBuildJob` creates and binds at its first call and `releaseHzbBuild` frees
@@ -1866,6 +1874,8 @@ enum class ArmId : unsigned {
     GiScrollBudget,      ///< "gi.scrollBudgetMs" — a scroll's per-frame voxelisation budget in ms (0 = shipped)
     GiVoxelOctants,      ///< "gi.voxelOctants" — a whole build's octants per axis (1 shipped, 2 = 8 octants; stage 2's measure)
     GiRebuildCascade,    ///< "gi.rebuildCascade" — cascade N rebuilt whole every frame while set (-1 = none; a measuring door)
+    ShadowCasterCull,    ///< "shadow.casterCull" — a sun map's Atom casters culled by the light's own depth (0: frustum only, the parity arm)
+    ShadowCasterPbsProbe,///< "shadow.casterPbsProbe" — a sun map's PBS casters TESTED against the light's depth and counted (a measuring door)
     GiRebuildSettle,     ///< "gi.rebuildSettle" — the rebuild settle runs (0: off, the paired arm)
     GiFieldRays,         ///< "gi.fieldRays" — the field's rays per depth texel (0 = shipped)
     GiFieldSamples,      ///< "gi.fieldSamples" — the field's sample target (0 = shipped)
@@ -4167,6 +4177,9 @@ public:
     bool setLight(NodeId id, const LightDesc &d) override;
     bool removeLight(NodeId id) override;
     unsigned long long lightWriteSerial() const { return mGiLightWriteSerial; }
+    /// Lights destroyed so far (removeLight, releaseNode): the dirt a light list's reader pairs with
+    /// lightWriteSerial (OgreGi's sceneLightDirt; the ray tier's hit table, decision 14.1).
+    unsigned long long lightsRemoved() const { return mLightsRemoved; }
 
     // ---- Decals (DECALS_SPEC.md; impl in OgreDecals.cpp) ----
     bool setDecal(NodeId id, const DecalDesc &d) override;
@@ -4207,6 +4220,7 @@ public:
     /// of the ray tier lives in a TU that does not include Vulkan.
     RayQueryStatus rayQueryStatus() const;
     AtomDrawStatus atomDrawStatus() override;
+    bool shadowMapDigests(std::vector<ShadowMapDigest> &out) override;
     void setAtomDrawEnabled(bool on) override;
     void setAtomOcclusionEnabled(bool on) override;
     void setAtomCutBudgetForTest(unsigned indices) override;
@@ -6618,9 +6632,11 @@ private:
     std::vector<NodeId> mLightNodes;
     using ProbeSlot = PhotonComponent::ProbeSlot;
     /// EVERY WRITE A LIGHT INJECTION WOULD READ (DRAG-1 round 2, F5): a light's
-    /// parameters (setLight), its POSE (setNodeTransform on a node that owns
+    /// parameters (setLight) and its POSE (setNodeTransform on a node that owns
     /// one — a movable lamp never stales the probe grid, so nothing else sees
-    /// it), and a light leaving the scene. Monotonic; only ever compared.
+    /// it). A light LEAVING the scene does not move it: that is mLightsRemoved,
+    /// and a reader of the light set gates on the pair (ENGINE-UPGRADE-U5 decision
+    /// 14.1). Monotonic; only ever compared.
     unsigned long long mGiLightWriteSerial = 0;
     /// Lights destroyed (removeLight, removeNode) — the world light list's dirt
     /// beside mGiLightWriteSerial (SceneGiBinding::lightsRemoved).

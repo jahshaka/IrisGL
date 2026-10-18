@@ -322,6 +322,10 @@ namespace Ogre
         void clearVoxels();
 
     public:
+        /// Jahshaka (ENGINE-UPGRADE-U5 decision 14.8): every level-0 volume of the live store set to
+        /// EMPTY - what a torn cascade whose whole rebuild failed twice is stood down with (no bounce
+        /// from it, never a torn store's wrong one). The caller re-injects, which re-derives the light.
+        void clearToEmpty() { clearVoxels(); }
         /** @param materialStore
                 THE MATERIAL STORE THIS VOXELIZER USES, AND DOES NOT OWN. Required.
 

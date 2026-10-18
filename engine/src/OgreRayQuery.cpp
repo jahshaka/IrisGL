@@ -470,10 +470,18 @@ private:
         std::unordered_map<const Ogre::Mesh *, uint32_t> meshIndexOf;
         /// THE (mesh entry, level) PAIRS THE SET REFERENCES AND NOBODY BUILT YET, ascending (the order
         /// ensureBlas builds in), kept by the feed's key events - the scan over every key is gone.
-        std::map<std::pair<uint32_t, uint32_t>, const Ogre::Mesh *> missing;
+        /// keyed by the feed's (mesh, level) key, the value the mesh-table entry it was last seen at
+        /// (decision 14.5: keyed by the entry, a mesh re-indexed before its build was stranded).
+        std::unordered_map<BlasKey, uint32_t, BlasKeyHash> missing;
+        /// THE STRUCTURES WAITING ON THEIR COMPACTED SIZE (compactState 1; decision 14.4: the frame's
+        /// "anything owed?" and runCompaction read this list, never every structure).
+        std::vector<size_t> compactWaiting;
+        /// THE EVICTION SWEEP'S CLOCK (decision 14.4): one pass over the structures per
+        /// kEvictSweepFrames, never one a frame.
+        uint32_t evictSweptAt = 0u;
         /// THE ALPHA AND HIT TABLES' INPUTS as they were last written (stage 3): re-written only when one moves.
         unsigned long long alphaMaterialSerial = ~0ull, hitMaterialSerial = ~0ull, hitLightSerial = ~0ull,
-                           hitRowsSerial = ~0ull;
+                           hitLightsRemoved = ~0ull, hitRowsSerial = ~0ull;
         /// The mesh each job record was written for (index = the mesh-table entry): a mesh-set change
         /// re-writes the entries whose mesh changed, never the table.
         std::vector<const Ogre::Mesh *> recordedMeshAt;
@@ -513,6 +521,11 @@ private:
         RawBuffer hitTable[kFramesInFlight];        // a frame ring (W1 of the read): written in place
         uint32_t hitTableCap[kFramesInFlight] = {};  // each slot's capacity in words
         VkDeviceAddress hitTableAddress = 0;         // the slot published this frame
+        /// THE LAST FRAME EACH SLOT WAS THE PUBLISHED ONE (decision 14.7): a frame in flight reads the
+        /// slot published when it was recorded, which is not its own frame's slot once the table goes
+        /// unwritten for frames - so a write takes a slot no frame still in flight can read.
+        uint32_t hitSlotUntil[kFramesInFlight] = {};
+        int hitSlot = -1;
         std::vector<uint32_t> hitWords, hitScratch;
         /// THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): the material words they were
         /// last synced for and HlmsAtom's twin epoch at that sync (updateScene).
@@ -1016,12 +1029,18 @@ private:
     };
     std::vector<AlphaMask> mAlphaMasks;
     unsigned long long mNextAlphaMaskId = 1ull;
+    unsigned long long mAlphaMasksMade = 0ull;   ///< masks made, ever (RayQueryStatus::alphaMasksMade)
     /// Moves whenever a mask is made or dropped: every scene's table that may name it is re-written.
     unsigned long long mAlphaMaskEpoch = 0ull;
     bool makeAlphaMaskPipeline(std::string &err);
     /// The mask for (tex, cmp, threshold): its index, or -1 while it cannot be made
     /// yet (the texture not resident, this frame's budget spent, no pipeline).
-    int alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float threshold, unsigned &budget);
+    /// The mask's index, or -1 (not made: retried next frame). `stale` = the index is an OLDER content's
+    /// mask, served because this frame's budget is spent (decision 14.2: the caller keeps the table
+    /// pending, so it is remade within ceil(n / budget) frames); `refused` = this device cannot make
+    /// masks at all (retried on the next change, never every frame).
+    int alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float threshold, unsigned &budget, bool &stale,
+                     bool &refused);
     /// Rebuilds `sa`'s alpha table from the feed's alpha-tested slots.
     void updateAlphaTable(OgreScene *scene, SceneAs &sa);
     /// Rebuilds `sa`'s hit table (FAR-SUN-2) from the scene's lights and material rows.
@@ -1562,8 +1581,14 @@ void RayQueryTier::retire(VkAccelerationStructureKHR &as, RawBuffer &storage) {
 /// traced set (an object hidden and shown) must not pay a rebuild each time.
 void RayQueryTier::evictStaleBlas(SceneAs &sa) {
     static constexpr uint32_t kEvictAfterFrames = 600u;      // ~10 s at 60 Hz
+    // ONE SWEEP PER kEvictSweepFrames, its own clock (decision 14.4): the walk over every structure ran
+    // every moved frame. A structure is evicted 600 to 1,200 frames after its last reference went.
+    static constexpr uint32_t kEvictSweepFrames = 600u;
     const uint32_t now = frameNow();
+    if (sa.evictSweptAt && uint32_t(now - sa.evictSweptAt) < kEvictSweepFrames) return;
+    sa.evictSweptAt = now ? now : 1u;
     for (size_t i = 0; i < sa.blas.size(); ++i) {
+        ++sa.st.updateVisits;
         Blas &bl = sa.blas[i];
         if (!bl.as || bl.compactState == 1u) continue;        // a size query is still owed
         // STILL REFERENCED = never stale (stage 3: the feed's key events keep `referenced`; `lastSeen`
@@ -2343,8 +2368,10 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     // The compaction slots this scene still owed a read are never going to be
     // read; hand them back or the ring leaks capacity until compaction stops
     // for EVERY scene (round 3, finding 1: a parked preview did exactly that).
-    for (const Blas &bl : sa.blas)
-        if (bl.compactState == 1u) mCompactBusy &= ~(uint64_t(1) << bl.compactSlot);
+    for (const size_t idx : sa.compactWaiting)
+        if (idx < sa.blas.size() && sa.blas[idx].compactState == 1u)
+            mCompactBusy &= ~(uint64_t(1) << sa.blas[idx].compactSlot);
+    sa.compactWaiting.clear();
     detail::monitor::forgetGpuOwner(&sa);
     scene->rayStructuresSlot().reset();
     forgetCardMovers(scene);
@@ -2456,9 +2483,14 @@ void RayQueryTier::SceneAs::Feed::gpuSlotChanged(uint32_t slot, const detail::Gp
         // table row; any other has none.
         uint32_t f = 0u;
         if (now) std::memcpy(&f, &now->boundsMax[3], sizeof(f));
-        if ((f & detail::kGpuRayTraced) && (f & detail::kGpuAlphaTested)) { alpha.insert(slot); alphaDirty = true; }
+        // DIRTY ONLY WHEN THE SET CHANGES (decision 14.10: an insert of a member set it, so a moving
+        // alpha-tested slot re-wrote the whole table every frame) - or, below, when a member's rows did.
+        if ((f & detail::kGpuRayTraced) && (f & detail::kGpuAlphaTested)) { if (alpha.insert(slot).second) alphaDirty = true; }
         else if (alpha.erase(slot)) alphaDirty = true;
     }
+    const bool alphaMember = alpha.count(slot) != 0u;
+    const uint32_t rowWas = rows && slot < rows->size() ? (*rows)[slot] : detail::GpuScene::kNoGeomRow;
+    const Rec recWas = slot < recs.size() ? recs[slot] : Rec();
     words.set(slot, now ? now->raster[0] : detail::WordCounts::kNone);
     Rec next;
     if (now && scene) {
@@ -2509,6 +2541,11 @@ void RayQueryTier::SceneAs::Feed::gpuSlotChanged(uint32_t slot, const detail::Gp
         else if (next.kind != 2u || was.kind != 2u)
             (*rows)[slot] = detail::GpuScene::kNoGeomRow;
     }
+    // A MEMBER'S ROWS (the alpha table names its near row and its far copy's mesh and level).
+    if (alphaMember && (rowWas != (rows && slot < rows->size() ? (*rows)[slot] : detail::GpuScene::kNoGeomRow) ||
+                        recWas.kind != next.kind || recWas.meshIndex != next.meshIndex ||
+                        recWas.farLevel != next.farLevel))
+        alphaDirty = true;
     was = next;
 }
 
@@ -2542,7 +2579,8 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
     // ONE MESH'S RECORD: every level's structure address and the coarsest level. A hash find per level.
     const auto writeRecord = [&](uint32_t m, uint32_t *rec) {
         const Ogre::MeshPtr &mp = gs.meshAt(m);
-        if (!mp) { std::fill(rec, rec + kTlasMeshWords, 0u); return; }
+        // THE ZERO-FILLED RECORD IS A ROW WRITTEN (decision 14.4: it returned before the count).
+        if (!mp) { std::fill(rec, rec + kTlasMeshWords, 0u); ++sa.st.updateRows; return; }
         for (uint32_t l = 0; l < kTlasLevels; ++l) {
             ++sa.st.updateLookups;
             auto it = sa.blasOf.find(BlasKey{ mp.get(), l });
@@ -2574,6 +2612,7 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
         uint32_t rec[kTlasMeshWords];
         std::vector<const Ogre::Mesh *> writtenMeshes;
         for (uint32_t m = 0; m < meshes; ++m) {
+            ++sa.st.updateVisits;   // the diff's pointer compare (the table names no changed entry)
             const Ogre::Mesh *mesh = gs.meshAt(m).get();
             if (m < had && sa.recordedMeshAt[m] == mesh) continue;
             if (m < had && sa.recordedMeshAt[m]) {
@@ -2604,7 +2643,11 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
         sa.meshIndexOf.clear();
         sa.recordedMeshAt.assign(meshes, nullptr);
         for (uint32_t m = 0; m < meshes; ++m)
-            if (const Ogre::Mesh *mesh = gs.meshAt(m).get()) { sa.meshIndexOf[mesh] = m; sa.recordedMeshAt[m] = mesh; }
+            if (const Ogre::Mesh *mesh = gs.meshAt(m).get()) {
+                ++sa.st.updateLookups;
+                sa.meshIndexOf[mesh] = m;
+                sa.recordedMeshAt[m] = mesh;
+            }
         sa.inputsMeshSerial = gs.meshSetSerial();
         sa.inputsNeedFull = false;
         sa.tlasInWords.swap(w);          // the header and the tail are written below, in place
@@ -2645,6 +2688,7 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
         sa.geomRowOfSlot.resize(gs.slotCount(), detail::GpuScene::kNoGeomRow);
     for (const uint32_t slot : fd.skinned) {
         if (slot >= gs.slotCount()) continue;
+        ++sa.st.updateLookups;   // decision 14.4: counted (one per rigged slot a moved frame)
         auto it = sa.skinUse.find(gs.entry(slot).ids[0]);
         if (it == sa.skinUse.end()) {
             if (sa.geomRowOfSlot[slot] != detail::GpuScene::kNoGeomRow && fd.alpha.count(slot)) fd.alphaDirty = true;
@@ -2671,6 +2715,7 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
         (!tail.empty() && std::memcmp(sa.tlasInWords.data() + meshWords, tail.data(), tail.size() * 4u) != 0)) {
         sa.tlasInWords.resize(meshWords);
         sa.tlasInWords.insert(sa.tlasInWords.end(), tail.begin(), tail.end());
+        sa.st.updateRows += tail.size() / 4u;   // the tail's rows, re-written (decision 14.4)
         changed = true;
     }
     if (changed) ++sa.inputsVersion;
@@ -2981,6 +3026,16 @@ bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<BlasWant> &wants,
     std::vector<const VkAccelerationStructureBuildRangeInfoKHR *> rangePtrs;
     builds.reserve(jobs.size());
     rangePtrs.reserve(jobs.size());
+    // THE STRUCTURES ARE REGISTERED ONLY ONCE EVERY ONE OF THEM EXISTS (decision 14.6): a failure half
+    // way used to leave the first ones in `blasOf` - their addresses published, their builds never
+    // recorded - with `lastSeen` 0, which eviction skips for good. Now a failure retires what this call
+    // made and registers nothing; a registered slot carries the frame it was made at.
+    std::vector<Blas> made;
+    made.reserve(jobs.size());
+    const auto unmake = [&]() {
+        for (Blas &m : made) retire(m.as, m.storage);
+        made.clear();
+    };
     for (Job &j : jobs) {
         Blas bl;
         bl.triangles = j.geo.triangles;
@@ -2990,6 +3045,7 @@ bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<BlasWant> &wants,
                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, true,
                         bl.storage, err)) {
             dropBuffer(scratch);
+            unmake();
             return false;
         }
         VkAccelerationStructureCreateInfoKHR ci{};
@@ -3001,6 +3057,7 @@ bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<BlasWant> &wants,
             err = "rayquery: vkCreateAccelerationStructureKHR (BLAS) failed";
             dropBuffer(bl.storage);
             dropBuffer(scratch);
+            unmake();
             return false;
         }
         VkAccelerationStructureDeviceAddressInfoKHR ai{};
@@ -3017,13 +3074,22 @@ bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<BlasWant> &wants,
         // never in the collection loop (the spike wrote `mBlasOfMesh[mesh] =
         // mBlas.size()` while mBlas was still empty, gave every mesh slot 0,
         // and rendered the world as copies of the first mesh).
-        j.slot = sa.blas.size();
-        sa.blasOf[BlasKey{ j.mesh.get(), j.level }] = j.slot;
-        sa.dirtyMeshRows.push_back(j.mesh.get());   // its record gains this level's address (stage 3)
-        sa.blas.push_back(std::move(bl));
+        j.slot = sa.blas.size() + made.size();
+        made.push_back(std::move(bl));
         builds.push_back(j.build);
         rangePtrs.push_back(j.geo.ranges.data());
-        ++built;
+    }
+    {
+        const uint32_t now = frameNow();
+        for (size_t k = 0; k < made.size(); ++k) {
+            Job &j = jobs[k];
+            made[k].lastSeen = now ? now : 1u;
+            sa.blasOf[BlasKey{ j.mesh.get(), j.level }] = j.slot;
+            sa.dirtyMeshRows.push_back(j.mesh.get());   // its record gains this level's address (stage 3)
+            sa.blas.push_back(std::move(made[k]));
+            ++built;
+        }
+        made.clear();
     }
 
     // OGRE'S PENDING UPLOADS FIRST, expressed as a barrier instead of a stall:
@@ -3087,6 +3153,7 @@ bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<BlasWant> &wants,
                 bl.compactState = 1;
                 bl.compactSlot = q;
                 bl.compactFrame = stamp;
+                sa.compactWaiting.push_back(j.slot);
                 mCompactBusy |= uint64_t(1) << q;
                 ++q;
             }
@@ -3110,14 +3177,27 @@ bool RayQueryTier::runCompaction(SceneAs &sa, VkCommandBuffer cmd) {
     if (!mCompactSizes) return false;
     bool compacted_any = false;
     const uint32_t now = frameNow(), inFlight = framesInFlight();
-    for (Blas &bl : sa.blas) {
-        if (bl.compactState != 1u) continue;
+    // THE STRUCTURES WAITING ON A SIZE ANSWER, never every structure (decision 14.4: this walked the
+    // whole BLAS vector every frame a compaction was owed).
+    std::vector<size_t> &waiting = sa.compactWaiting;
+    for (size_t w = 0; w < waiting.size();) {
+        const size_t idx = waiting[w];
+        if (idx >= sa.blas.size() || sa.blas[idx].compactState != 1u) {
+            waiting[w] = waiting.back();
+            waiting.pop_back();
+            continue;
+        }
+        Blas &bl = sa.blas[idx];
+        ++w;
         if (uint32_t(now - bl.compactFrame) < inFlight) continue;   // not submitted yet
         VkDeviceSize compacted = 0;
         const VkResult r = vkGetQueryPoolResults(mVk, mCompactSizes, bl.compactSlot, 1,
                                                  sizeof(compacted), &compacted, sizeof(compacted),
                                                  VK_QUERY_RESULT_64_BIT);
         if (r != VK_SUCCESS || compacted == 0) continue;            // not available yet
+        --w;
+        waiting[w] = waiting.back();
+        waiting.pop_back();
         bl.compactState = 2;
         mCompactBusy &= ~(uint64_t(1) << bl.compactSlot);   // answered: reusable
         if (compacted >= bl.storage.size) continue;                 // nothing to win
@@ -3771,6 +3851,8 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // THE FRAME'S HOST WORK, COUNTED (stage 3: engine.ray_update_counts), from zero.
     sa.st.updateLookups = 0ull;
     sa.st.updateRows = 0ull;
+    sa.st.alphaStaleServed = 0ull;
+    sa.st.updateVisits = 0ull;
 
     // THE GATE. The caster walk's epoch — the host's transform-write counter
     // plus the engine's own writes plus the pushed shape events — is exactly
@@ -3824,9 +3906,9 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // changes it with nothing else moving.
     updateAlphaTable(scene, sa);
     updateHitTable(scene, sa);
-    bool compactionPending = false;
-    for (const Blas &bl : sa.blas)
-        if (bl.compactState == 1u) { compactionPending = true; break; }
+    // A COMPACTION OWED, from its own list (decision 14.4: this was a walk of every structure every
+    // frame, an idle one included).
+    const bool compactionPending = !sa.compactWaiting.empty();
     if (!moved && sa.tlas && !compactionPending) {
         settleStillSkins(scene, sa);
         return;
@@ -3897,45 +3979,74 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     {
         // 1. THE KEY EVENTS (ENGINE-UPGRADE-U5 stage 3): what the change feed saw since the last update
         //    - a (mesh, level) the set began or stopped referencing - applied to the structures, and
-        //    the ones referenced and not built yet kept in `sa.missing` (ascending by (mesh entry,
-        //    level), the order the builds run in). The two scans over EVERY key that were here (the
+        //    the ones referenced and not built yet kept in `sa.missing` (by key; built in ascending
+        //    entry order). The two scans over EVERY key that were here (the
         //    missing scan and a lastSeen stamp, a hash find each, every moved frame: 27 % of the tier's
         //    update on Bistro's walk) are gone: the work is one lookup per event.
         if (fd.keysReset) {
-            for (Blas &bl : sa.blas)
+            for (Blas &bl : sa.blas) {
+                ++sa.st.updateVisits;   // a reset's one pass (the feed re-primed), never a frame's
                 if (bl.referenced) { bl.referenced = false; bl.lastSeen = frame ? frame : 1u; }
+            }
             sa.missing.clear();
             fd.keysReset = false;
+            sa.inputsNeedFull = true;   // the GPU scene reset: the job's records re-written whole (decision 14.10)
         }
+        // Every hash or map operation is counted (decision 14.4): the event's find, and `missing`'s insert
+        // or erase - an erase only when the structure is NOT built (a built key is never missing), so a
+        // hide or a show stays one lookup.
         for (const SceneAs::Feed::KeyEvent &ev : fd.keyEvents) {
             ++sa.st.updateLookups;
             const auto it = sa.blasOf.find(ev.key);
             const bool have = it != sa.blasOf.end() && it->second < sa.blas.size();
             if (ev.added) {
-                if (have) sa.blas[it->second].referenced = true;
-                else sa.missing[{ ev.meshIndex, ev.key.level }] = ev.key.mesh;
+                if (have) {
+                    sa.blas[it->second].referenced = true;
+                } else {
+                    ++sa.st.updateLookups;
+                    sa.missing[ev.key] = ev.meshIndex;
+                }
             } else {
                 if (have) {
                     Blas &bl = sa.blas[it->second];
                     bl.referenced = false;
                     bl.lastSeen = frame ? frame : 1u;
+                } else {
+                    ++sa.st.updateLookups;
+                    sa.missing.erase(ev.key);
                 }
-                sa.missing.erase({ ev.meshIndex, ev.key.level });
             }
         }
         fd.keyEvents.clear();
         if (!sa.missing.empty()) {
-            std::vector<BlasWant> wants;
-            std::vector<BlasKey> wantKeys;
-            std::vector<std::pair<uint32_t, uint32_t>> wantEntries;
-            wants.reserve(sa.missing.size());
-            for (const auto &m : sa.missing) {
-                const Ogre::MeshPtr &mp = gs.meshAt(m.first.first);
-                if (!mp || mp.get() != m.second) continue;   // the entry moved: retried once it is named again
-                wants.push_back(BlasWant{ mp, m.first.second });
-                wantKeys.push_back(BlasKey{ m.second, m.first.second });
-                wantEntries.push_back(m.first);
+            // KEYED BY (mesh, level) - the feed's key (decision 14.5): the mesh-table entry is a HINT, and a
+            // mesh re-indexed under its unchanged key before its structure was built is found again through
+            // the job's own mesh index (meshIndexOf, kept by the mesh-set diff), never stranded. Built in
+            // ascending entry order, the order the slots were handed out in before.
+            struct Want { uint32_t entry; BlasKey key; Ogre::MeshPtr mesh; };
+            std::vector<Want> found;
+            found.reserve(sa.missing.size());
+            for (auto &m : sa.missing) {
+                ++sa.st.updateLookups;   // a visit of a missing key (one per moved frame while it waits)
+                uint32_t entry = m.second;
+                const Ogre::Mesh *at = entry < gs.meshEntryCount() ? gs.meshAt(entry).get() : nullptr;
+                if (at != m.first.mesh) {
+                    ++sa.st.updateLookups;
+                    const auto ix = sa.meshIndexOf.find(m.first.mesh);
+                    if (ix == sa.meshIndexOf.end() || ix->second >= gs.meshEntryCount() ||
+                        gs.meshAt(ix->second).get() != m.first.mesh)
+                        continue;   // not in the table yet: retried the next moved frame
+                    entry = ix->second;
+                    m.second = entry;
+                }
+                found.push_back(Want{ entry, m.first, gs.meshAt(entry) });
             }
+            std::sort(found.begin(), found.end(), [](const Want &a, const Want &b) {
+                return a.entry != b.entry ? a.entry < b.entry : a.key.level < b.key.level;
+            });
+            std::vector<BlasWant> wants;
+            wants.reserve(found.size());
+            for (const Want &f : found) wants.push_back(BlasWant{ f.mesh, f.key.level });
             unsigned built = 0;
             if (!wants.empty()) {
                 monitor::CacheScope scope(CacheKind::Gi, WorkReason::Added, 0, "rq.blas", mRs, &sa);
@@ -3956,12 +4067,13 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                 if (built) ++sa.blasVersion;
             }
             // WHAT WAS BUILT IS REFERENCED (it was wanted because it is), and no longer missing.
-            for (size_t k = 0; k < wantKeys.size(); ++k) {
+            for (const Want &f : found) {
                 ++sa.st.updateLookups;
-                const auto it = sa.blasOf.find(wantKeys[k]);
+                const auto it = sa.blasOf.find(f.key);
                 if (it == sa.blasOf.end() || it->second >= sa.blas.size()) continue;
                 sa.blas[it->second].referenced = true;
-                sa.missing.erase(wantEntries[k]);
+                ++sa.st.updateLookups;
+                sa.missing.erase(f.key);
             }
         }
     }
@@ -4040,18 +4152,20 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     sa.st.gatherMs = float(gatherMs);
     // LIVE structures only: an evicted slot keeps its place in the vector (the
     // index is referenced by the table) but holds nothing (F6).
-    sa.st.blasCount = 0;
-    for (const Blas &bl : sa.blas)
-        if (bl.as) ++sa.st.blasCount;
     // THE TRACED SET is the near copies; the far copies are the same objects
     // again (A5b §4), counted apart so a reader can tell the two halves.
     sa.st.instances = int(sa.instanceCount - sa.farInstanceCount);
     sa.st.farInstances = int(sa.farInstanceCount);
+    sa.st.blasCount = 0;
     sa.st.triangles = 0;
     sa.st.blasBytes = 0;
     sa.st.levelBlasCount = 0;
     sa.st.levelBlasBytes = 0;
+    // ONE PASS over the structures a MOVED frame (decision 14.4: two were here), counted - an idle frame
+    // returned long before this.
     for (const Blas &bl : sa.blas) {
+        ++sa.st.updateVisits;
+        if (bl.as) ++sa.st.blasCount;
         sa.st.triangles += int(bl.triangles);
         sa.st.blasBytes += bl.storage.size;
         if (bl.as && bl.level > 0u) {
@@ -6127,7 +6241,10 @@ bool RayQueryTier::makeAlphaMaskPipeline(std::string &err) {
     return ensureSamplers(err);
 }
 
-int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float threshold, unsigned &budget) {
+int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float threshold, unsigned &budget, bool &staleOut,
+                               bool &refused) {
+    staleOut = false;
+    refused = false;
     uint32_t thresholdBits = 0;
     std::memcpy(&thresholdBits, &threshold, sizeof(thresholdBits));
     const uint32_t now = frameNow();
@@ -6146,7 +6263,9 @@ int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float thresh
             stale = int(i);
         }
     }
-    if (!budget || mAlphaFailed) return stale;   // the old holes until a mask can be made
+    // THE OLD HOLES until a mask can be made - said so: a stale index is not a made mask.
+    if (mAlphaFailed) { refused = true; staleOut = stale >= 0; return stale; }
+    if (!budget) { staleOut = stale >= 0; return stale; }
     if (stale >= 0) {
         retire(mAlphaMasks[size_t(stale)].bits);
         mAlphaMasks.erase(mAlphaMasks.begin() + stale);
@@ -6154,11 +6273,14 @@ int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float thresh
     }
     if (tex->getResidencyStatus() != Ogre::GpuResidency::Resident || !tex->isDataReady()) return -1;
     if (tex->getTextureType() != Ogre::TextureTypes::Type2D &&
-        tex->getTextureType() != Ogre::TextureTypes::Type2DArray)
+        tex->getTextureType() != Ogre::TextureTypes::Type2DArray) {
+        refused = true;   // never a mask: the next change asks again, no frame before it
         return -1;
+    }
     std::string err;
     if (!mAlphaPipeline && !makeAlphaMaskPipeline(err)) {
         mAlphaFailed = true;
+        refused = true;
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: cut-outs stay out of the rays' reach (" + err + ")");
         return -1;
@@ -6252,6 +6374,7 @@ int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float thresh
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb,
                          0, nullptr, 0, nullptr);
     --budget;
+    ++mAlphaMasksMade;
     m.lastUsed = now;
     m.id = mNextAlphaMaskId++;
     ++mAlphaMaskEpoch;
@@ -6261,6 +6384,10 @@ int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float thresh
 
 void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
     const uint32_t now = frameNow();
+    struct MadeOut {   // the count read back on every path out
+        SceneAs &sa; const unsigned long long &made;
+        ~MadeOut() { sa.st.alphaMasksMade = made; }
+    } madeOut{ sa, mAlphaMasksMade };
     // FORGET THE IDLE MASKS (no scene asked for one in kAlphaMaskIdleFrames, and no table names one).
     for (size_t i = 0; i < mAlphaMasks.size();) {
         if (!mAlphaMasks[i].users && uint32_t(now - mAlphaMasks[i].lastUsed) > kAlphaMaskIdleFrames) {
@@ -6351,10 +6478,15 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
                         flags = kAlphaConstant |
                                 (alphaKept(cmp, thr, pbs->getBackgroundDiffuse().a) ? kAlphaConstantSolid : 0u);
                     } else {
-                        const int mi = alphaMaskFor(tex, uint32_t(cmp), thr, budget);
+                        bool staleServed = false, refused = false;
+                        const int mi = alphaMaskFor(tex, uint32_t(cmp), thr, budget, staleServed, refused);
+                        // RE-WRITTEN NEXT FRAME until it is made - a stale mask served past the budget too
+                        // (decision 14.2: it read as made and was never remade); a refusal waits for the
+                        // next change (decision 14.10).
+                        if (staleServed) { sa.alphaPending = true; ++sa.st.alphaStaleServed; }
                         if (mi < 0) {
                             flags = kAlphaPending;
-                            sa.alphaPending = true;      // re-written next frame, until it is made
+                            if (!refused) sa.alphaPending = true;
                         } else {
                             const AlphaMask &m = mAlphaMasks[size_t(mi)];
                             maskIds.push_back(m.id);
@@ -6447,12 +6579,20 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     {
         const Ogre::PhotonVoxelMaterial *storeGate = scene->photon().materials();
         const unsigned long long lights = scene->lightWriteSerial();
+        // THE PAIR (decision 14.1): removeLight and releaseNode move only the removal count, never the
+        // write serial - a deleted lamp went on lighting hits while the gate read the serial alone.
+        const unsigned long long removed = scene->lightsRemoved();
+        // The rows' serial is process-wide (PhotonVoxelMaterial::nextRowsSerial): a store the chain's
+        // teardown re-created never repeats an older store's value (decision 14.7).
         const unsigned long long rows = storeGate ? storeGate->getRowsSerial() : 0ull;
         const unsigned long long edits = scene->photon().materialEditSerial();
-        if (sa.hitTableAddress && lights == sa.hitLightSerial &&
-            rows == sa.hitRowsSerial && edits == sa.hitMaterialSerial)
+        if (sa.hitTableAddress && lights == sa.hitLightSerial && removed == sa.hitLightsRemoved &&
+            rows == sa.hitRowsSerial && edits == sa.hitMaterialSerial) {
+            if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = frameNow();
             return;
+        }
         sa.hitLightSerial = lights;
+        sa.hitLightsRemoved = removed;
         sa.hitRowsSerial = rows;
         sa.hitMaterialSerial = edits;
     }
@@ -6517,10 +6657,29 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     w[1] = nRows;
     w[2] = 4u;
     w[3] = lightWords;
-    if (w == sa.hitWords && sa.hitTableAddress) return;
-    // THIS FRAME'S RING SLOT (host-visible; the frame kFramesInFlight back has finished reading
-    // it - Ogre's frame fence): re-written in place, re-made only when the words outgrow it.
-    const unsigned ring = frameNow() % kFramesInFlight;
+    const uint32_t nowFrame = frameNow();
+    if (w == sa.hitWords && sa.hitTableAddress) {
+        if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = nowFrame;
+        return;
+    }
+    // A SLOT NO FRAME IN FLIGHT CAN READ (decision 14.7). frameNow() is Ogre's VaoManager frame count,
+    // the counter its frame fence retires dynamic buffers on (+1 a submitted frame): a slot last
+    // published at frame u is read by frames up to u, all retired once nowFrame - u >= framesInFlight().
+    // The slot `frameNow() % 3` this used was safe only while the table was written EVERY frame - the
+    // stage-3 gate leaves it unwritten for frames, and a write 3k frames on landed in the slot the
+    // frames still in flight read. The published slot is never taken; one write a frame always finds
+    // one of the other two retired.
+    int pick = -1;
+    for (unsigned r = 0; r < kFramesInFlight && pick < 0; ++r)
+        if (int(r) != sa.hitSlot && (sa.hitSlotUntil[r] == 0u || nowFrame - sa.hitSlotUntil[r] >= framesInFlight()))
+            pick = int(r);
+    if (pick < 0) {
+        // Two writes inside one frame's window: a fresh buffer (the old one retires behind the fence).
+        pick = (sa.hitSlot + 1) % int(kFramesInFlight);
+        retire(sa.hitTable[pick]);
+        sa.hitTableCap[pick] = 0u;
+    }
+    const unsigned ring = unsigned(pick);
     RawBuffer &buf = sa.hitTable[ring];
     const uint32_t words = uint32_t(w.size());
     if (!buf.buffer || sa.hitTableCap[ring] < words) {
@@ -6540,6 +6699,11 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     }
     std::memcpy(buf.mapped, w.data(), words * 4u);
     sa.hitTableAddress = addressOf(buf.buffer);
+    sa.st.hitLights = nLights;
+    sa.st.hitMaterialRows = nRows;
+    if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = nowFrame;   // read by the frames up to this one
+    sa.hitSlot = int(ring);
+    sa.hitSlotUntil[ring] = nowFrame;
     sa.hitWords.swap(w);
 }
 

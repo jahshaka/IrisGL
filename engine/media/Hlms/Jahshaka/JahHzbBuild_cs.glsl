@@ -51,6 +51,23 @@ layout( vulkan( ogre_u@n ) vk_comma r32f ) uniform coherent image2D mip@n;
 
 layout( std430, ogre_U@value( hzb_slots ) ) coherent buffer counterLayout { uint arrivals[]; };
 
+// THE SOURCE RECTANGLE (the job Jahshaka/HzbBuildRect, ENGINE-UPGRADE-U5 stage 4): the pyramid is
+// ONE SHADOW MAP's, and the map is a rectangle of the shadow atlas. Mip 0 is the pyramid's own size
+// (the rectangle's), and its texel uv reads the depth at uv plus the rectangle's corner - the one
+// buffer slot after the counter holds that corner (x, y). The whole-depth build reads at uv.
+@property( hzb_src_rect )
+layout( std430, ogre_U@value( hzb_origin_slot ) ) readonly restrict buffer originLayout { uvec4 srcOrigin; };
+float depthAt( ivec2 uv )
+{
+	return texelFetch( depthTexture, uv + ivec2( srcOrigin.xy ), 0 ).x;
+}
+@else
+float depthAt( ivec2 uv )
+{
+	return texelFetch( depthTexture, uv, 0 ).x;
+}
+@end
+
 // Reverse-Z makes NEAR = 1, so "keep the nearest" is a max there and a min
 // otherwise; "keep the farthest" is the other one. The seed of the extreme is
 // the opposite end of the range, so an untouched footprint cannot win.
@@ -158,7 +175,7 @@ void main()
 			for( int idx = int( lid ); idx < n.x * n.y; idx += HZB_THREADS )
 			{
 				ivec2 uv = ivec2( rx.x + idx % n.x, ry.x + idx / n.x );
-				imageStore( mip0, uv, vec4( texelFetch( depthTexture, uv, 0 ).x, 0.0, 0.0, 0.0 ) );
+				imageStore( mip0, uv, vec4( depthAt( uv ), 0.0, 0.0, 0.0 ) );
 			}
 		}
 
@@ -185,7 +202,7 @@ void main()
 					for( int x = 0; x <= 1 + extra.x; ++x )
 					{
 						ivec2 uv = min( base + ivec2( x, y ), size0 - ivec2( 1, 1 ) );
-						float d = texelFetch( depthTexture, uv, 0 ).x;
+						float d = depthAt( uv );
 						imageStore( mip0, uv, vec4( d, 0.0, 0.0, 0.0 ) );
 						kept = HZB_PICK( kept, d );
 					}

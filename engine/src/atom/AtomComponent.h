@@ -112,6 +112,9 @@ public:
     // --- THE CASTER CUT -----------------------------------------------------------------------
     /// ONE list per scene, reused map after map inside a frame (OgreAtomCasterPass.cpp).
     GpuCull &casterCull() { return mCasterCull; }
+    /// THE LATE LIST (ENGINE-UPGRADE-U5 stage 4): a sun map's second cut - the first list's
+    /// depth-rejected instances tested again against the map's own pyramid of this frame.
+    GpuCull &casterCullLate() { return mCasterCullLate; }
     /// What the caster recorder read back (AtomDrawStatus's caster fields).
     struct CasterStats {
         bool valid = false;
@@ -119,6 +122,10 @@ public:
         unsigned long long triangles = 0ull;
         unsigned peakMaps = 0;              ///< the most maps one frame recorded (cumulative)
         unsigned long long unrecorded = 0;  ///< maps rendered but not recorded (cumulative)
+        /// The light's own depth (ENGINE-UPGRADE-U5 stage 4): AtomDrawStatus's caster* twins.
+        unsigned occluded = 0, lateInstances = 0, lateOccluded = 0;
+        unsigned long long lateTriangles = 0ull;
+        std::vector<AtomCasterMapStats> perMap;
     };
     void setCasterStats(const CasterStats &s) { mCasterStats = s; }
     /// The caster pass's per-scene state, created on its first use.
@@ -190,6 +197,7 @@ private:
     std::unordered_set<const void *> mStereoViews, mPassthroughViews;
 
     GpuCull mCasterCull;
+    GpuCull mCasterCullLate;
     CasterStats mCasterStats;
     std::unique_ptr<AtomCasterScene, AtomCasterSceneDelete> mCasterState;
 };

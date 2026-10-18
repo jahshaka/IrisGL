@@ -458,6 +458,19 @@ public:
         /// the live volumes are part target, part old box. Never scrolled from (a scroll copies them); only a
         /// whole rebuild clears it. Outside the placement's revert on purpose.
         bool liveTorn = false;
+        /// A TORN STORE CLEARED (decision 14.8): its whole rebuild failed twice, so its volumes were set
+        /// to empty and it stood down - CascadeStatus::tornCleared until a rebuild succeeds.
+        bool tornCleared = false;
+        /// The WHOLE rebuilds that failed while the store was torn (the commit that tore it not counted):
+        /// at two the store is cleared and stood down (decision 14.8).
+        unsigned tornRebuildFailures = 0u;
+        /// STOOD DOWN AT THIS CAMERA STEP (decision 14.8): after a cascade's second failure the camera
+        /// step test does not re-arm it until the camera reaches ANOTHER step cell of the hysteretic
+        /// lattice (an edit still marks it). The stand-down's own promise - "until the camera moves
+        /// again" - which the step test, measuring from the placement the failure reverted to, broke:
+        /// a camera standing away re-armed the failing rebuild every other frame.
+        bool held = false;
+        long long heldAt[3] = { 0, 0, 0 };
         unsigned long long scrolls = 0;        ///< camera scrolls committed by the slab path
         unsigned long long scrollFrames = 0;   ///< frames spent building scrolls' chunks
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
@@ -1166,6 +1179,12 @@ private:
     void stepScroll(size_t idx, bool commit, bool *committed = nullptr);
     /// The scroll dropped (an edit, a failure, a chain going away): the target is free again.
     void abortScroll(size_t idx);
+    /// A TORN CASCADE WHOSE WHOLE REBUILD FAILED TWICE (decision 14.8): its live volumes set to empty and
+    /// re-injected (the light re-derived from nothing), `tornCleared` set, counted. Bounded either way:
+    /// the caller stands it down whatever this manages.
+    void clearTornCascade(size_t idx);
+    /// A STAND-DOWN'S HOLD at the camera's step cell (VctCascade::held).
+    void holdCascade(VctCascade &c, const Ogre::Vector3 &camPos);
     /// An edit's box (null = everywhere), seen while a scroll is in flight: the target box it
     /// reaches is stale. Called beside every noteGiCascadeDirty.
     void noteScrollEdit(const Ogre::Aabb *box);
@@ -1297,6 +1316,7 @@ private:
     unsigned long long mCascadeDirtyMajority = 0;
     /// Scrolls dropped before their commit (an edit reached them, or a step threw) - cumulative.
     unsigned long long mCascadeScrollAborts = 0;
+    unsigned long long mCascadeTornCleared = 0;   ///< GiStatus::cascadeTornCleared
     unsigned long long mMaterialEditSerial = 0;
     /// THE SCROLL TARGETS, one per volume size the chain holds (ENGINE-UPGRADE-U5 stage 1):
     /// built with the chain, destroyed with it.

@@ -134,29 +134,6 @@
 		return retVal;
 	}
 
-	INLINE Aabb getTriangleAabb( uint triIdx, Mesh mesh, ogre_float4x3 worldTransform PARAMS_ARG_DECL )
-	{
-		GeometryRow row = geometryTable[mesh.geomRow];
-
-		uint idx = geomIndex( row, mesh.firstIndex + triIdx * 3u + 0u );
-		float3 vertexPos = mul( float4( geomPosition( row, idx ), 1.0f ), worldTransform );
-		float3 minValue = vertexPos;
-		float3 maxValue = vertexPos;
-		for( uint i=1u; i<3u; ++i )
-		{
-			idx = geomIndex( row, mesh.firstIndex + triIdx * 3u + i );
-			vertexPos = mul( float4( geomPosition( row, idx ), 1.0f ), worldTransform );
-			minValue = min( minValue, vertexPos );
-			maxValue = max( maxValue, vertexPos );
-		}
-
-		Aabb retVal;
-		retVal.center	= (minValue + maxValue) * 0.5f;
-		retVal.halfSize	= (maxValue - minValue) * 0.5f;
-
-		return retVal;
-	}
-
 	INLINE bool intersects( Aabb a, Aabb b )
 	{
 		float3 absDistance = abs( a.center - b.center );
@@ -605,7 +582,7 @@
 				{
 					uint triIdx = triIdxBase + gl_LocalInvocationIndex;
 					// FETCHED AND TRANSFORMED ONCE (decision 12.6): the box below is made from these
-					// vertices - the arithmetic getTriangleAabb did on a second fetch, value for value.
+					// vertices - the arithmetic the deleted second-fetch box made, value for value.
 					Triangle tri = getTriangle( triIdx, instance.mesh PARAMS_ARG );
 
 					for( uint i=0; i<3u; ++i )

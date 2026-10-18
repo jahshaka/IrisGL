@@ -1695,4 +1695,60 @@ void OgreEngine::latchShadowCounters() {
     } JAH_CATCH(mLastError, );
 }
 
+// ---------------------------------------------------------------------------
+// THE SUN MAPS' CONTENT (Scene::shadowMapDigests; ENGINE-UPGRADE-U5 stage 4's parity door): the
+// first view's atlas read back synchronously (Image2 - a test's read, never a frame's) and each
+// active directional map's rectangle hashed texel for texel.
+bool OgreScene::shadowMapDigests(std::vector<ShadowMapDigest> &out)
+{
+    out.clear();
+    JAH_TRY {
+        for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>()) {
+            Ogre::CompositorWorkspace *ws = v ? v->workspace() : nullptr;
+            Ogre::CompositorShadowNode *sn =
+                ws ? ws->findShadowNode(Ogre::IdString(OgreView::kShadowNodeName)) : nullptr;
+            Ogre::TextureGpu *atlas = sn ? sn->getDefinedTexture(Ogre::IdString("atlas0")) : nullptr;
+            if (!atlas) continue;
+            Ogre::Image2 img;
+            img.convertFromTexture(atlas, 0u, 0u);
+            const Ogre::TextureBox box = img.getData(0u);
+            const unsigned tw = atlas->getWidth(), th = atlas->getHeight();
+            const bool reverse = mRoot && mRoot->getRenderSystem() && mRoot->getRenderSystem()->isReverseDepth();
+            const float clearDepth = reverse ? 0.0f : 1.0f;
+            uint32_t clearBits = 0u;
+            std::memcpy(&clearBits, &clearDepth, sizeof(clearBits));
+            const Ogre::CompositorShadowNodeDef *def = sn->getDefinition();
+            const size_t n = def->getNumShadowTextureDefinitions();
+            for (size_t i = 0; i < n; ++i) {
+                if (!sn->isShadowMapIdxActive(i)) continue;
+                const Ogre::Light *l = sn->getLightAssociatedWith(i);
+                if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL) continue;
+                const Ogre::ShadowTextureDefinition *td = def->getShadowTextureDefinition(i);
+                ShadowMapDigest d;
+                d.map = unsigned(i);
+                d.x = unsigned(td->uvOffset.x * Ogre::Real(tw) + Ogre::Real(0.5));
+                d.y = unsigned(td->uvOffset.y * Ogre::Real(th) + Ogre::Real(0.5));
+                d.width = unsigned(td->uvLength.x * Ogre::Real(tw) + Ogre::Real(0.5));
+                d.height = unsigned(td->uvLength.y * Ogre::Real(th) + Ogre::Real(0.5));
+                unsigned long long h = 1469598103934665603ull;
+                for (unsigned r = d.y; r < d.y + d.height && r < th; ++r) {
+                    const auto *row = static_cast<const uint32_t *>(box.at(0, r, 0));
+                    for (unsigned c = d.x; c < d.x + d.width && c < tw; ++c) {
+                        const uint32_t bits = row[c];
+                        if (bits != clearBits) ++d.covered;
+                        for (int b = 0; b < 4; ++b) {
+                            h ^= (bits >> (8 * b)) & 0xFFu;
+                            h *= 1099511628211ull;
+                        }
+                    }
+                }
+                d.digest = h;
+                out.push_back(d);
+            }
+            return true;
+        }
+        return false;
+    } JAH_CATCH(mError, false);
+}
+
 }}}   // namespace jahshaka::engine::detail

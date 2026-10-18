@@ -1141,6 +1141,16 @@ const ArmDef kArms[] = {
       "A MEASURING DOOR (ENGINE-UPGRADE-U5 stage 2): while set to N, cascade N owes a whole rebuild "
       "every frame (an edit's, at its own placement) - what a measurement of a whole build's cost "
       "needs on a still scene. -1 = none." },
+    { "shadow.casterCull", 1.0, 0.0, 1.0,
+      "THE CASTER CULL BY THE LIGHT'S OWN DEPTH (ENGINE-UPGRADE-U5 stage 4): 1 = shipped, a sun map's Atom "
+      "casters are tested against the previous frame's depth pyramid of that map, the rejected tested again "
+      "against this frame's once the map holds the survivors, and only the visible drawn - the map is the "
+      "frustum-only map texel for texel. 0 = frustum only (the parity arm: the pyramids are still built)." },
+    { "shadow.casterPbsProbe", 0.0, 0.0, 1.0,
+      "A MEASURING DOOR (ENGINE-UPGRADE-U5 stage 4): 1 = every sun map's stock (PBS) casters are tested "
+      "against the map's final depth pyramid and counted (world.atomStatus casterPerMap: pbsInstances / "
+      "pbsTriangles in the frustum, pbsVisible* the ones not wholly behind the map's depth). Nothing is "
+      "drawn differently." },
     { "gi.rebuildSettle", 1.0, 0.0, 1.0,
       "The rebuild settle (the chain's owed settle steps after a rebuild). 0 = off: "
       "gi.chain_converge's paired arm. Was JAHSHAKA_GI_NO_REBUILD_SETTLE (a per-frame read)." },

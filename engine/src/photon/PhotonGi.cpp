@@ -1219,6 +1219,7 @@ GiStatus PhotonComponent::giStatus() const {
             cs.scrolls      = c.scrolls;
             cs.scrollFrames = c.scrollFrames;
             cs.scrolling    = c.scroll.active;
+            cs.tornCleared  = c.tornCleared;
             // WHAT THIS CASCADE VOXELISED - A READING of the device's own counts,
             // written as the gather wrote the records (ATOM P4b, A5b §3). They
             // used to be CPU walks: `items` an AABB test per GI item per rebuild,
@@ -1263,6 +1264,7 @@ GiStatus PhotonComponent::giStatus() const {
         st.cascadeDeferrals    = mCascadeDeferrals;
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
         st.cascadeScrollAborts  = mCascadeScrollAborts;
+        st.cascadeTornCleared   = mCascadeTornCleared;
         st.chainInjectionRefusals   = mGiInjectionRefusals;
         st.chainInjectionsPeakFrame = mGiInjectionsPeak;
         st.chainSettles         = mGiChainSettles;
@@ -4627,22 +4629,29 @@ void PhotonComponent::recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos
                              float(double(c.latticeZ) * double(cell)));
     c.builtCam = camPos;
 #ifndef NDEBUG
-    // THE LATTICE THE VOXELISER'S EXACTNESS RESTS ON (ENGINE-UPGRADE-U5 decision 12.4; the piece's note at
-    // its per-lane group-box cull): the cell a SHORT DYADIC RATIONAL (at most 12 significant bits - every
-    // shipped cell is: 10/128, 20/128, 30/64, 120/64 m) and the box's corner an EXACT multiple of it, so
-    // origin + cell x id is exact for every voxel. A non-dyadic placement is a bug, not a case.
+    // THE LATTICE THE VOXELISER'S EXACTNESS RESTS ON (ENGINE-UPGRADE-U5 decisions 12.4 and 14.9; the piece's
+    // note at its per-lane group-box cull): origin + cell x id is EXACT in a float for every voxel when the
+    // cell is a dyadic rational of s significant bits, the box's corner an exact multiple q of it, and
+    // |q| + resolution < 2^(24 - s) - every lattice point then fits the float's 24-bit significand. The
+    // shipped cells have s <= 4 (10/128 = 5 x 2^-6, 20/128, 30/64 = 15 x 2^-5, 120/64), so the bound is
+    // 2^20 cells from the origin: 81 km at the finest cell. A placement past it is a bug, not a case.
     {
         int e = 0;
-        const double mantissa = std::ldexp(std::frexp(double(cell), &e), 24);
-        assert(mantissa == std::floor(mantissa) && std::fmod(mantissa, 4096.0) == 0.0 &&
-               "a cascade's cell is a short dyadic rational");
+        double mantissa = std::ldexp(std::frexp(double(cell), &e), 24);
+        assert(mantissa == std::floor(mantissa) && "a cascade's cell is a dyadic rational");
+        int sigBits = 24;
+        while (sigBits > 1 && std::fmod(mantissa, 2.0) == 0.0) { mantissa *= 0.5; --sigBits; }
+        assert(sigBits <= 12 && "a cascade's cell is a SHORT dyadic rational");
+        const double limit = std::ldexp(1.0, 24 - sigBits);
         const Ogre::Vector3 lo = c.centre - Ogre::Vector3(c.halfSize);
         for (int a = 0; a < 3; ++a) {
             const double q = double(lo[size_t(a)]) / double(cell);
             assert(q == std::floor(q) && "a cascade's corner is an exact multiple of its cell");
+            assert(std::fabs(q) + double(c.resolution) < limit &&
+                   "a cascade's lattice points are exact floats (|corner / cell| + resolution < 2^(24 - bits))");
             (void)q;
         }
-        (void)mantissa;
+        (void)limit;
     }
 #endif
     if (c.voxelizer)
@@ -4986,6 +4995,9 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
     }
     c.built = true;
     ++c.rebuilds;
+    c.tornCleared = false;   // a rebuild that succeeded: the store is a box's again (decision 14.8)
+    c.tornRebuildFailures = 0u;
+    c.held = false;
     if (scroll) {
         ++c.scrolls;
         ++c.scrollFrames;
@@ -5336,6 +5348,38 @@ void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
     gatherFeed(*c.feed, c.voxelizer, cascadeGatherInputs(c, mask));
 }
 
+void PhotonComponent::clearTornCascade(size_t idx) {
+    if (idx >= mVctCascades.size()) return;
+    VctCascade &c = mVctCascades[idx];
+    bool cleared = false;
+    JAH_TRY {
+        if (c.voxelizer) {
+            c.voxelizer->clearToEmpty();
+            c.injectedFrame = ~0ull;
+            cleared = injectCascade(idx);
+        }
+    } JAH_CATCH(mError, );
+    // STILL TORN, cleared or not: what it holds is not the scene, so the next mark (the camera stepping
+    // on, an edit) owes a WHOLE rebuild - a scroll would copy the empty overlap and keep the hole. Each
+    // round of two failures clears it again and stands it down: bounded at every mark.
+    c.tornCleared = cleared;
+    c.tornRebuildFailures = 0u;
+    if (cleared) ++mCascadeTornCleared;
+    Ogre::LogManager::getSingleton().logMessage(
+        "Jahshaka GI: cascade " + std::to_string(idx) + " was torn and its whole rebuild failed twice - " +
+        (cleared ? std::string("its volumes are cleared (no bounce from it) and it stands down")
+                 : std::string("its volumes could not be cleared (") + mError + "); it stands down"));
+}
+
+void PhotonComponent::holdCascade(VctCascade &c, const Ogre::Vector3 &camPos) {
+    const float lattice = c.step() * (1.0f - kStepHysteresis);
+    if (!(lattice > 0.0f)) return;
+    c.held = true;
+    c.heldAt[0] = jahQuantAxis(camPos.x, lattice);
+    c.heldAt[1] = jahQuantAxis(camPos.y, lattice);
+    c.heldAt[2] = jahQuantAxis(camPos.z, lattice);
+}
+
 void PhotonComponent::abortScroll(size_t idx) {
     if (idx >= mVctCascades.size() || !mVctCascades[idx].scroll.active) return;
     mVctCascades[idx].scroll = VctCascade::Scroll();
@@ -5396,7 +5440,7 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
     // last frame (planFrame's markDirtyCascadesPending ran before this) is stamped now.
     for (VctCascade &c : mVctCascades) {
         if (!c.pending) c.pendingSince = 0;
-        else if (!c.pendingSince) c.pendingSince = c.editSince ? c.editSince : giWriterFrame();   // its first mark
+        else if (!c.pendingSince) c.pendingSince = c.editSince ? c.editSince : giWriterFrame();   // a NEW debt, aged from its mark (decision 13: re-stamped at each service while still owed)
     }
     for (VctCascade &c : mVctCascades) {
         const float cell = c.cell();
@@ -5453,6 +5497,13 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
         // worthless work by construction: `pending` is a FLAG ("this cascade is
         // behind"), and a burst of steps while the budget is spent elsewhere
         // collapses into the one rebuild that catches it up.
+        // STOOD DOWN HERE (decision 14.8): the camera has not reached another step cell since.
+        if (c.held) {
+            if (jahQuantAxis(camPos.x, lattice) == c.heldAt[0] && jahQuantAxis(camPos.y, lattice) == c.heldAt[1] &&
+                jahQuantAxis(camPos.z, lattice) == c.heldAt[2])
+                continue;
+            c.held = false;
+        }
         if (moved || jumped) {
             // A SCROLL CLAIMS A PENDING FLAG AN EDIT MAY ALREADY HAVE RAISED —
             // and the work is the same one rebuild either way. The REASON,
@@ -5610,7 +5661,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
                         "failure stands the cascade down until the camera moves again");
                 }
                 // (A TORN STORE IS NEVER STOOD DOWN, decision 12.1: it stays owed its whole rebuild.)
-                if (++c.failures >= 2u && !c.liveTorn) { c.pending = 0; c.pendingSince = 0; }
+                if (++c.failures >= 2u && !c.liveTorn) { c.pending = 0; c.pendingSince = 0; holdCascade(c, camPos); }
             }
             spent = true;
             continue;
@@ -5669,9 +5720,19 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
                 staleTop = std::max(staleTop, (long long)i);   // ...and their light is not
             }
             spent = true;                          // the frame paid for it either way
-            // ...otherwise `pending` stays set - and ALWAYS while the live store is torn (decision 12.1: the stand-down
-            // is refused, never the count; a torn store stays owed the whole rebuild that is its only repair).
-            if (++c.failures >= 2u && !c.liveTorn) { c.pending = 0; c.pendingSince = 0; }
+            // ...otherwise `pending` stays set. A TORN store is never stood down AS IT IS (decision 12.1): after
+            // its second failed whole rebuild its volumes are CLEARED and it stands down then (decision 14.8:
+            // bounded - a rebuild that cannot succeed no longer spends the GI budget every frame for ever;
+            // the status says torn-cleared, the owner sees missing bounce, never a torn store's).
+            // (A torn store's own count: its WHOLE rebuilds that failed - the commit that tore it is not one.)
+            const bool tornWholeFailed = c.liveTorn && !scrollCommit;
+            if (tornWholeFailed) ++c.tornRebuildFailures;
+            if (c.liveTorn ? c.tornRebuildFailures >= 2u : ++c.failures >= 2u) {
+                if (c.liveTorn) clearTornCascade(i);
+                c.pending = 0;
+                c.pendingSince = 0;
+                holdCascade(c, camPos);
+            }
             continue;
         }
         c.failures = 0;
@@ -5683,8 +5744,11 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             // material slider every cascade would freeze - the stage-1 read's F3.)
             c.editSince = giWriterFrame();
             c.editLast = giWriterFrame();
-            // SERVED, STILL OWED: what it owes now is the mark this frame's table does not carry, and the age
-            // of THAT debt is its first mark (decision 11 c) - the frame it was marked, not the scheduler's.
+            // SERVED, STILL OWED: the age is re-stamped at this LAST mark (decision 13; decision 11 c's "first
+            // mark" and 12.7(i)'s "keep the older mark" withdrawn): oldest-last-mark-first IS the round-robin
+            // among the dirty. Kept at the older mark, a cascade edited every frame stays the oldest forever and
+            // takes every slot (simulated: [238, 0, 0, 0] rebuilds; edited every other frame, gaps of 7 > N);
+            // re-stamped, every dirty cascade is served within N frames (gi.cascade_drag_age's four-dirty case).
             c.pendingSince = c.editLast;
         } else {
             c.pending = 0;

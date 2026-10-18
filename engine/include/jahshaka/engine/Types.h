@@ -4396,6 +4396,11 @@ struct GiStatus {
         unsigned long long scrolls = 0;
         unsigned long long scrollFrames = 0;
         bool  scrolling = false;
+        /// TORN, THEN CLEARED (ENGINE-UPGRADE-U5 decision 14.8): a scroll's commit failed half way (the
+        /// store part new box, part old), and the whole rebuild that is its only repair failed twice -
+        /// so its volumes were set to EMPTY and the cascade stood down: missing bounce, never a wrong
+        /// one. Cleared by the next rebuild that succeeds (the camera moving, an edit).
+        bool  tornCleared = false;
         /// THE READINGS BELOW ARE THE DEVICE'S OWN COUNTS (ATOM P4b, A5b §3): the
         /// gather that writes the voxeliser's records on the GPU counts as it
         /// writes, into a small readout collected without a stall and read here.
@@ -4568,6 +4573,8 @@ struct GiStatus {
     /// reached the scroll's target box while its slab was being built, or a step threw. The
     /// cascade then rebuilds (an edit of its live box) or scrolls again from where it stands.
     unsigned long long cascadeScrollAborts = 0;
+    /// Torn cascades stood down with their volumes cleared (decision 14.8; CascadeStatus::tornCleared).
+    unsigned long long cascadeTornCleared = 0;
     /// THE SCREEN-PROBE GATHER's own reading (see GatherStatus). `on` false is
     /// the shipped state and every number below it is zero.
     GatherStatus gather;
@@ -4910,6 +4917,20 @@ struct RayQueryStatus {
     /// the tables are patched by what changed, never rebuilt.
     unsigned long long updateLookups = 0ull;
     unsigned long long updateRows = 0ull;
+    /// The same frame's WHOLE PASSES, in elements visited (decision 14.4): a moved frame's one pass over
+    /// the bottom-level structures (the status totals), a mesh-set change's one pointer compare per
+    /// mesh-table entry (the table's diff: the GPU scene names no changed entry), the eviction sweep's
+    /// pass (once per 600 frames) and a feed reset's. 0 on an idle frame; at most one visit per
+    /// structure plus one per entry on a moved one.
+    unsigned long long updateVisits = 0ull;
+    /// THE CUT-OUT MASKS (decision 14.2): masks made, ever (the tier's), and the masks of an OLDER
+    /// content the last frame served because its budget of kAlphaMasksPerFrame was spent - each one
+    /// keeps the table pending, so n stale masks are remade within ceil(n / 8) frames.
+    unsigned long long alphaMasksMade = 0ull;
+    unsigned long long alphaStaleServed = 0ull;
+    /// THE HIT TABLE AS PUBLISHED (FAR-SUN-2; decision 14.1's count): the lights it holds and the material
+    /// rows - a deleted lamp leaves it the frame after its removal.
+    unsigned hitLights = 0u, hitMaterialRows = 0u;
     /// True when the last top-level update was a REFIT rather than a full
     /// rebuild. The default is a rebuild (NVIDIA's own guidance for a TLAS;
     /// 0.5 ms at 8k instances buys the better tree); the refit is the
@@ -4991,6 +5012,38 @@ struct RayQueryStatus {
 ///   twins        decode twins HlmsAtom holds (every scene),
 ///   decodeDraws  this scene's hit decode draws, and
 ///   screenDraws  its screen decode draws.
+/// ONE SHADOW MAP'S CASTERS (ENGINE-UPGRADE-U5 stage 4), as the scene last read them back
+/// (AtomDrawStatus::casterPerMap): which map (`kind` 0 a view's node, 1 a mirror's, 2 the
+/// probes'; `map` its index in the node; `face` a point light's cube face), the Atom casters it
+/// drew in its two halves - the FIRST cut (tested against the previous frame's pyramid of this
+/// map) and the LATE one (the first's rejected, tested again against this frame's) - and the
+/// instances each half's depth test rejected (`lateOccluded` = drawn by neither: wholly behind
+/// the map's own depth). `lightTested` is false for a map the light's depth does not reach (a
+/// spot or point map, the probes', a map's first frame). The pbs* fields are filled only under
+/// the measuring door shadow.casterPbsProbe: the stock casters in the map's frustum and those
+/// NOT wholly behind its final depth (the triangles at the level the light's footprint picks,
+/// submesh 0 only).
+/// ONE SUN MAP'S CONTENT (Scene::shadowMapDigests, a test door; ENGINE-UPGRADE-U5 stage 4): the
+/// first view's shadow atlas read back and each active directional map's rectangle hashed texel
+/// for texel (FNV-1a 64 over the float bits, row by row) - two maps are equal iff the digests are,
+/// the parity arm of the caster cull (shadow.casterCull on and off). `covered` counts the texels
+/// holding a depth other than the clear.
+struct ShadowMapDigest {
+    unsigned map = 0;
+    unsigned x = 0, y = 0, width = 0, height = 0;
+    unsigned long long digest = 0ull;
+    unsigned covered = 0;
+};
+
+struct AtomCasterMapStats {
+    unsigned kind = 0, map = 0, face = 0;
+    bool lightTested = false;
+    unsigned instances = 0, occluded = 0, lateInstances = 0, lateOccluded = 0;
+    unsigned long long triangles = 0ull, lateTriangles = 0ull;
+    unsigned pbsInstances = 0, pbsVisibleInstances = 0;
+    unsigned long long pbsTriangles = 0ull, pbsVisibleTriangles = 0ull;
+};
+
 struct AtomDrawStatus {
     bool     live = false;
     /// The split is live: the GPU scene exists, this device runs the id pass (it
@@ -5075,6 +5128,13 @@ struct AtomDrawStatus {
     /// unless one frame renders more than that — or a growth failed.
     unsigned casterMapsPeak = 0;
     unsigned long long casterUnrecorded = 0ull;
+    /// THE LIGHT'S OWN DEPTH (ENGINE-UPGRADE-U5 stage 4; shadow.casterCull), summed over the maps
+    /// of that frame: the instances the first cut's depth test rejected, the late cut's survivors
+    /// and their triangles (in casterTriangles too), and the instances neither drew. Per map:
+    /// casterPerMap.
+    unsigned casterOccluded = 0, casterLateInstances = 0, casterLateOccluded = 0;
+    unsigned long long casterLateTriangles = 0ull;
+    std::vector<AtomCasterMapStats> casterPerMap;
     /// The render system's frame counter at this read — the stamp the engine's
     /// JAHSHAKA_ATOM_TRACE log lines carry (ATOM-BLACK-FRAMES-1's coverage trace).
     unsigned long long frame = 0ull;

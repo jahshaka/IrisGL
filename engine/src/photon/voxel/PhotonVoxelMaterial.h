@@ -28,6 +28,7 @@ THE SOFTWARE.
 #ifndef JAH_PHOTON_VOXEL_MATERIAL_H
 #define JAH_PHOTON_VOXEL_MATERIAL_H
 
+#include <atomic>
 #include "OgreHlmsPbsPrerequisites.h"
 
 #include "OgreFastArray.h"
@@ -102,7 +103,15 @@ namespace Ogre
 
         vector<uint32>::type mRowWords;
 
-        unsigned long long mRowsSerial = 0ull;
+        /// PROCESS-WIDE (ENGINE-UPGRADE-U5 decision 14.7): a store re-created by the Photon chain's
+        /// teardown starts at a value no earlier store held, so a reader comparing serials can never
+        /// take a new store's rows for the old one's.
+        static unsigned long long nextRowsSerial()
+        {
+            static std::atomic<unsigned long long> gSerial{ 0ull };
+            return ++gSerial;
+        }
+        unsigned long long mRowsSerial = nextRowsSerial();
 
         DatablockConversionResult addDatablockToBucket( HlmsDatablock  *datablock,
                                                         MaterialBucket &bucket );
