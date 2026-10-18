@@ -4931,6 +4931,9 @@ struct RayQueryStatus {
     /// THE HIT TABLE AS PUBLISHED (FAR-SUN-2; decision 14.1's count): the lights it holds and the material
     /// rows - a deleted lamp leaves it the frame after its removal.
     unsigned hitLights = 0u, hitMaterialRows = 0u;
+    /// The hit table's ring buffers made, ever (decision 16.2: a written-every-frame table re-makes none
+    /// once its three slots exist).
+    unsigned long long hitTableBuffers = 0ull;
     /// True when the last top-level update was a REFIT rather than a full
     /// rebuild. The default is a rebuild (NVIDIA's own guidance for a TLAS;
     /// 0.5 ms at 8k instances buys the better tree); the refit is the
@@ -5024,15 +5027,30 @@ struct RayQueryStatus {
 /// NOT wholly behind its final depth (the triangles at the level the light's footprint picks,
 /// submesh 0 only).
 /// ONE SUN MAP'S CONTENT (Scene::shadowMapDigests, a test door; ENGINE-UPGRADE-U5 stage 4): the
-/// first view's shadow atlas read back and each active directional map's rectangle hashed texel
+/// first view's shadow atlas (and every planar mirror's, kind 1) read back and each active directional
+/// map's rectangle hashed texel
 /// for texel (FNV-1a 64 over the float bits, row by row) - two maps are equal iff the digests are,
 /// the parity arm of the caster cull (shadow.casterCull on and off). `covered` counts the texels
 /// holding a depth other than the clear.
 struct ShadowMapDigest {
+    unsigned kind = 0;   ///< 0 the view's node, 1 a mirror's
     unsigned map = 0;
     unsigned x = 0, y = 0, width = 0, height = 0;
     unsigned long long digest = 0ull;
     unsigned covered = 0;
+};
+
+/// ONE SUN MAP'S CASTERS BY ROUTE (Scene::shadowCasterRoutes, a measuring door; ENGINE-UPGRADE-U5 decision
+/// 15.1, ATOM-ROUTE-COVERAGE-1): the shown shadow-casting items whose world box reaches the map's light
+/// frustum, by the render-queue split's route (AtomDrawStatus's reasons, in its order: 0 atom, 1 notWorld,
+/// 2 notPbs, 3 customPiece, 4 blended, 5 cullFront, 6 planar, 7 pending, 8 alphaTested, 9 skinned, 10 noRow,
+/// 11 stock) - the items and their level-0 triangles. Read on the host from the items' boxes (a door, not
+/// a frame's work).
+struct ShadowRouteShare {
+    static constexpr unsigned kRoutes = 12u;
+    unsigned map = 0;
+    unsigned items[kRoutes] = {};
+    unsigned long long triangles[kRoutes] = {};
 };
 
 struct AtomCasterMapStats {
@@ -5042,6 +5060,15 @@ struct AtomCasterMapStats {
     unsigned long long triangles = 0ull, lateTriangles = 0ull;
     unsigned pbsInstances = 0, pbsVisibleInstances = 0;
     unsigned long long pbsTriangles = 0ull, pbsVisibleTriangles = 0ull;
+    /// THE RECEIVER TEST'S COUNT (stage 4b's premise; the measuring door shadow.casterReceiverProbe): the
+    /// drawn caster clusters and their triangles the map's two halves drew, and those a receiver test
+    /// would cut (no receiver the camera sees farther from the light under their dilated box).
+    bool receiverTested = false;
+    unsigned receiverClusters = 0, receiverCutClusters = 0;
+    unsigned long long receiverTriangles = 0ull, receiverCutTriangles = 0ull;
+    /// ...and per INSTANCE box (a cluster counted cut only when its whole instance would be).
+    unsigned receiverInstanceCutClusters = 0;
+    unsigned long long receiverInstanceCutTriangles = 0ull;
 };
 
 struct AtomDrawStatus {

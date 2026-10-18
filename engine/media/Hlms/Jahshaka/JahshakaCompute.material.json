@@ -281,6 +281,38 @@
 			}
 		},
 
+		"Jahshaka/ReceiverDepth" :
+		{
+			"threads_per_group" : [8, 8, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahReceiverGrid_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"inform_shader_of_texture_data_change" : true,
+			"textures" : [ {} ],
+			"uav_units" : 2,
+			"properties" : { "jah_receiver_mode" : 0 }
+		},
+
+		"Jahshaka/ReceiverBoxes" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahReceiverGrid_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"uav_units" : 3,
+			"properties" : { "jah_receiver_mode" : 1 }
+		},
+
+		"Jahshaka/ReceiverCount" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahReceiverGrid_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"uav_units" : 7,
+			"properties" : { "jah_receiver_mode" : 2 }
+		},
+
 		"Jahshaka/VideoNv12" :
 		{
 			"threads_per_group" : [8, 8, 1],

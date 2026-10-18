@@ -1701,13 +1701,31 @@ void OgreEngine::latchShadowCounters() {
 // active directional map's rectangle hashed texel for texel.
 bool OgreScene::shadowMapDigests(std::vector<ShadowMapDigest> &out)
 {
+    // A READ OF THE ENGINE'S TEXTURES: on the host's side a REQUEST, answered on the engine's side (U3 stage
+    // 4a; decision 16.1 - it read the atlas from the host thread).
+    if (hostPosts()) { bool r = false; requestOnEngine([&] { r = shadowMapDigests(out); }); return r; }
+    JAH_HOST_CALL("Scene::shadowMapDigests");
     out.clear();
     JAH_TRY {
+        // THE VIEW'S NODE first, then every mirror's (kind 1: a mirror's sun maps ride the same cull).
+        std::vector<std::pair<Ogre::CompositorShadowNode *, unsigned>> nodes;
         for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>()) {
             Ogre::CompositorWorkspace *ws = v ? v->workspace() : nullptr;
             Ogre::CompositorShadowNode *sn =
                 ws ? ws->findShadowNode(Ogre::IdString(OgreView::kShadowNodeName)) : nullptr;
-            Ogre::TextureGpu *atlas = sn ? sn->getDefinedTexture(Ogre::IdString("atlas0")) : nullptr;
+            if (sn && sn->getDefinedTexture(Ogre::IdString("atlas0"))) { nodes.push_back({ sn, 0u }); break; }
+        }
+        if (nodes.empty()) return false;
+        {
+            std::vector<Ogre::CompositorWorkspace *> mirrors;
+            shadowWorkspaces(ShadowNodeKind::Reflect, mirrors);
+            for (Ogre::CompositorWorkspace *w : mirrors)
+                if (Ogre::CompositorShadowNode *n = w ? w->findShadowNode(Ogre::IdString(OgreView::kReflectShadowNodeName)) : nullptr)
+                    nodes.push_back({ n, 1u });
+        }
+        for (const auto &nk : nodes) {
+            Ogre::CompositorShadowNode *sn = nk.first;
+            Ogre::TextureGpu *atlas = sn->getDefinedTexture(Ogre::IdString("atlas0"));
             if (!atlas) continue;
             Ogre::Image2 img;
             img.convertFromTexture(atlas, 0u, 0u);
@@ -1725,6 +1743,7 @@ bool OgreScene::shadowMapDigests(std::vector<ShadowMapDigest> &out)
                 if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL) continue;
                 const Ogre::ShadowTextureDefinition *td = def->getShadowTextureDefinition(i);
                 ShadowMapDigest d;
+                d.kind = nk.second;
                 d.map = unsigned(i);
                 d.x = unsigned(td->uvOffset.x * Ogre::Real(tw) + Ogre::Real(0.5));
                 d.y = unsigned(td->uvOffset.y * Ogre::Real(th) + Ogre::Real(0.5));
@@ -1744,6 +1763,63 @@ bool OgreScene::shadowMapDigests(std::vector<ShadowMapDigest> &out)
                 }
                 d.digest = h;
                 out.push_back(d);
+            }
+        }
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+// THE SUN MAPS' CASTERS BY ROUTE (Scene::shadowCasterRoutes; decision 15.1's measurement): every shown
+// shadow-casting item whose world box reaches a sun map's light frustum (its view-projection, the depth
+// unbounded: the maps draw with depth clamp), by its route, with its level-0 triangles.
+bool OgreScene::shadowCasterRoutes(std::vector<ShadowRouteShare> &out)
+{
+    if (hostPosts()) { bool r = false; requestOnEngine([&] { r = shadowCasterRoutes(out); }); return r; }
+    JAH_HOST_CALL("Scene::shadowCasterRoutes");
+    out.clear();
+    JAH_TRY {
+        for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>()) {
+            Ogre::CompositorWorkspace *ws = v ? v->workspace() : nullptr;
+            Ogre::CompositorShadowNode *sn =
+                ws ? ws->findShadowNode(Ogre::IdString(OgreView::kShadowNodeName)) : nullptr;
+            if (!sn) continue;
+            const size_t n = sn->getDefinition()->getNumShadowTextureDefinitions();
+            for (size_t i = 0; i < n; ++i) {
+                if (!sn->isShadowMapIdxActive(i)) continue;
+                const Ogre::Light *l = sn->getLightAssociatedWith(i);
+                if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL) continue;
+                const Ogre::Matrix4 vp = sn->getViewProjectionMatrix(i);
+                ShadowRouteShare share;
+                share.map = unsigned(i);
+                for (Node *nd : mItemNodes) {
+                    if (!nd || !nd->item || !nd->shown || !nd->item->getCastShadows()) continue;
+                    const Ogre::uint32 flags = gpuFlagsFor(*nd);
+                    if (!(flags & kGpuCaster)) continue;
+                    const Ogre::Aabb box = nd->item->getWorldAabbUpdated();
+                    const Ogre::Vector3 lo = box.getMinimum(), hi = box.getMaximum();
+                    Ogre::Vector2 a(1e30f, 1e30f), b(-1e30f, -1e30f);
+                    for (int c = 0; c < 8; ++c) {
+                        const Ogre::Vector3 p((c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z);
+                        const Ogre::Vector4 q = vp * Ogre::Vector4(p.x, p.y, p.z, 1.0f);
+                        const float w = std::fabs(float(q.w)) > 1e-12f ? float(q.w) : 1.0f;
+                        a.x = std::min(a.x, float(q.x) / w); a.y = std::min(a.y, float(q.y) / w);
+                        b.x = std::max(b.x, float(q.x) / w); b.y = std::max(b.y, float(q.y) / w);
+                    }
+                    if (b.x < -1.0f || a.x > 1.0f || b.y < -1.0f || a.y > 1.0f) continue;
+                    const unsigned route = std::min(unsigned(atomRouteFor(*nd, flags)), ShadowRouteShare::kRoutes - 1u);
+                    unsigned long long tris = 0ull;
+                    const Ogre::MeshPtr &mesh = nd->item->getMesh();
+                    for (size_t sm = 0; mesh && sm < mesh->getNumSubMeshes(); ++sm) {
+                        const Ogre::SubMesh *sub = mesh->getSubMesh(sm);
+                        if (sub->mVao[Ogre::VpNormal].empty()) continue;
+                        const Ogre::VertexArrayObject *vao = sub->mVao[Ogre::VpNormal][0];
+                        tris += vao->getIndexBuffer() ? vao->getIndexBuffer()->getNumElements() / 3u
+                                                      : vao->getBaseVertexBuffer()->getNumElements() / 3u;
+                    }
+                    ++share.items[route];
+                    share.triangles[route] += tris;
+                }
+                out.push_back(share);
             }
             return true;
         }

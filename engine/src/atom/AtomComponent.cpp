@@ -57,6 +57,8 @@ void AtomComponent::release() {
 }
 
 void AtomComponent::step() {
+    // THE SUN MAPS' PYRAMIDS whose maps stopped rendering (the sun gone, shadows or the draw off, a new atlas).
+    sweepCasterPyramids(mCasterState.get());
     syncSplit();
     // THE ATOM VIEW'S TABLE follows whatever the split just decided.
     syncViewTable();

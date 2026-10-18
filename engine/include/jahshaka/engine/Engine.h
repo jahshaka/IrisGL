@@ -925,6 +925,8 @@ public:
     /// THE SUN MAPS' CONTENT (ShadowMapDigest; a test door: a synchronous read of the first view's
     /// shadow atlas). False without a view or an atlas.
     virtual bool shadowMapDigests(std::vector<ShadowMapDigest> &out) { out.clear(); return false; }
+    /// THE SUN MAPS' CASTERS BY ROUTE (ShadowRouteShare; a measuring door). False without a view or a sun.
+    virtual bool shadowCasterRoutes(std::vector<ShadowRouteShare> &out) { out.clear(); return false; }
     /// THE MEASUREMENT DOOR of the visibility buffer (a tool's A/B, never a mode):
     /// off, every item draws through PBS and every view's chain is rebuilt without
     /// the id pass. On by default.

@@ -1876,6 +1876,7 @@ enum class ArmId : unsigned {
     GiRebuildCascade,    ///< "gi.rebuildCascade" — cascade N rebuilt whole every frame while set (-1 = none; a measuring door)
     ShadowCasterCull,    ///< "shadow.casterCull" — a sun map's Atom casters culled by the light's own depth (0: frustum only, the parity arm)
     ShadowCasterPbsProbe,///< "shadow.casterPbsProbe" — a sun map's PBS casters TESTED against the light's depth and counted (a measuring door)
+    ShadowCasterReceiverProbe,///< "shadow.casterReceiverProbe" — N > 0: the receiver grid (N-texel tiles) built per sun map and the cut clusters a receiver test would drop counted (stage 4b's premise)
     GiRebuildSettle,     ///< "gi.rebuildSettle" — the rebuild settle runs (0: off, the paired arm)
     GiFieldRays,         ///< "gi.fieldRays" — the field's rays per depth texel (0 = shipped)
     GiFieldSamples,      ///< "gi.fieldSamples" — the field's sample target (0 = shipped)
@@ -4221,6 +4222,7 @@ public:
     RayQueryStatus rayQueryStatus() const;
     AtomDrawStatus atomDrawStatus() override;
     bool shadowMapDigests(std::vector<ShadowMapDigest> &out) override;
+    bool shadowCasterRoutes(std::vector<ShadowRouteShare> &out) override;
     void setAtomDrawEnabled(bool on) override;
     void setAtomOcclusionEnabled(bool on) override;
     void setAtomCutBudgetForTest(unsigned indices) override;
@@ -4263,6 +4265,9 @@ public:
         unsigned long long triangles = 0ull;
         struct Drawn { unsigned slot = 0, cluster = 0, depth = 0; };   ///< cluster = MESH-LOCAL index
         std::vector<Drawn> drawn;
+        /// The same map's LATE half (stage 4: the first half's depth-rejected set re-tested against the map's
+        /// own pyramid of that frame), when it ran.
+        std::vector<Drawn> lateDrawn;
     };
     void armCasterProbeForTest(unsigned map, unsigned face);
     bool casterProbeForTest(CasterProbe &out);
@@ -6781,6 +6786,17 @@ struct AtomOcclusionHistory {
     const void *scene = nullptr;
 };
 
+/// THE VIEW'S ID DEPTH OF THIS FRAME (ENGINE-UPGRADE-U5 stage 4b): what the sun maps' receiver grid is
+/// built from (OgreAtomCasterPass.cpp) - the depth the id pass wrote, the matrix it drew with, its
+/// viewport and the frame. The id pass runs before every scene pass of the view, so the view's shadow
+/// node renders after it in the same frame.
+struct AtomReceiverDepth {
+    Ogre::TextureGpu *depth = nullptr;
+    Ogre::Matrix4 drawMatrix = Ogre::Matrix4::IDENTITY;
+    unsigned rect[4] = { 0u, 0u, 0u, 0u };
+    uint32_t frame = ~0u;
+};
+
 /// THE PRESENTED FRAME'S CAPTURE (View::requestFrameCapture, CLOSE-SHOT-2). One per
 /// view, registered through OgreView::addWorkspaceListener while a capture is armed
 /// (so it rides the view's workspace AND the clean capture's). The furniture and the
@@ -7416,6 +7432,7 @@ public:
     /// viewport rectangle it covered, the pyramid's size, the workspace generation and
     /// the scene — a pyramid of another graph, size or world is not tested against.
     AtomOcclusionHistory &atomOcclusionHistory() { return mAtomOcclHistory; }
+    AtomReceiverDepth &atomReceiverDepth() { return mAtomReceiverDepth; }
     /// Whether THIS frame's first cull tested against a pyramid (set by the first pass,
     /// read by the late one: nothing was rejected otherwise).
     void setAtomFirstTested(bool tested) { mAtomFirstTested = tested; }
@@ -7613,6 +7630,7 @@ private:
     detail::GpuCull mAtomCullLate;
     detail::GpuCull mAtomCullCapture;
     AtomOcclusionHistory mAtomOcclHistory;
+    AtomReceiverDepth mAtomReceiverDepth;
     bool mAtomFirstTested = false;
     unsigned long long mAtomLateTriangles = 0ull;
     unsigned mAtomLateSurvivors = 0u, mAtomOccluded = 0u, mAtomDisoccluded = 0u;

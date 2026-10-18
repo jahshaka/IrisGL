@@ -63,6 +63,9 @@ struct AtomCasterScene;
 struct AtomCasterSceneDelete {
     void operator()(AtomCasterScene *p) const;   ///< OgreAtomCasterPass.cpp
 };
+/// THE SUN MAPS' PYRAMIDS A MAP NO LONGER RENDERS, freed (OgreAtomCasterPass.cpp; ENGINE-UPGRADE-U5 decision
+/// 16.3) - from the component's per-frame step.
+void sweepCasterPyramids(AtomCasterScene *state);
 
 class AtomComponent {
 public:

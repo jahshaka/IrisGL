@@ -1030,6 +1030,7 @@ private:
     std::vector<AlphaMask> mAlphaMasks;
     unsigned long long mNextAlphaMaskId = 1ull;
     unsigned long long mAlphaMasksMade = 0ull;   ///< masks made, ever (RayQueryStatus::alphaMasksMade)
+    uint32_t mAlphaSweptAt = 0u;                 ///< the idle-mask sweep's clock (decision 15.4)
     /// Moves whenever a mask is made or dropped: every scene's table that may name it is re-written.
     unsigned long long mAlphaMaskEpoch = 0ull;
     bool makeAlphaMaskPipeline(std::string &err);
@@ -6388,8 +6389,13 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
         SceneAs &sa; const unsigned long long &made;
         ~MadeOut() { sa.st.alphaMasksMade = made; }
     } madeOut{ sa, mAlphaMasksMade };
-    // FORGET THE IDLE MASKS (no scene asked for one in kAlphaMaskIdleFrames, and no table names one).
-    for (size_t i = 0; i < mAlphaMasks.size();) {
+    // FORGET THE IDLE MASKS (no scene asked for one in kAlphaMaskIdleFrames, and no table names one) - ONE
+    // SWEEP PER 600 FRAMES on its own clock, counted (decision 15.4: it walked every mask every frame, an idle
+    // one included). A mask is forgotten 600 to 1,200 frames past its idle bound.
+    const bool sweepMasks = !mAlphaSweptAt || uint32_t(now - mAlphaSweptAt) >= 600u;
+    if (sweepMasks) mAlphaSweptAt = now ? now : 1u;
+    for (size_t i = 0; sweepMasks && i < mAlphaMasks.size();) {
+        ++sa.st.updateVisits;
         if (!mAlphaMasks[i].users && uint32_t(now - mAlphaMasks[i].lastUsed) > kAlphaMaskIdleFrames) {
             retire(mAlphaMasks[i].bits);
             mAlphaMasks.erase(mAlphaMasks.begin() + ptrdiff_t(i));
@@ -6663,12 +6669,12 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         return;
     }
     // A SLOT NO FRAME IN FLIGHT CAN READ (decision 14.7). frameNow() is Ogre's VaoManager frame count,
-    // the counter its frame fence retires dynamic buffers on (+1 a submitted frame): a slot last
-    // published at frame u is read by frames up to u, all retired once nowFrame - u >= framesInFlight().
-    // The slot `frameNow() % 3` this used was safe only while the table was written EVERY frame - the
-    // stage-3 gate leaves it unwritten for frames, and a write 3k frames on landed in the slot the
-    // frames still in flight read. The published slot is never taken; one write a frame always finds
-    // one of the other two retired.
+    // the counter its frame fence retires dynamic buffers on (+1 a submitted frame): a slot whose last
+    // reader was frame u is free once nowFrame - u >= framesInFlight(). The slot `frameNow() % 3` this
+    // used was safe only while the table was written EVERY frame - the stage-3 gate leaves it unwritten
+    // for frames, and a write 3k frames on landed in the slot the frames still in flight read. Under one
+    // write a frame the slots' last readers are this frame - 1 (the leaving one), - 2 and - 3: the third
+    // is free (3 >= framesInFlight() 3), so the ring re-makes nothing (the lamp arm counts it).
     int pick = -1;
     for (unsigned r = 0; r < kFramesInFlight && pick < 0; ++r)
         if (int(r) != sa.hitSlot && (sa.hitSlotUntil[r] == 0u || nowFrame - sa.hitSlotUntil[r] >= framesInFlight()))
@@ -6687,6 +6693,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         uint32_t cap = std::max<uint32_t>(sa.hitTableCap[ring], 1024u);
         while (cap < words) cap *= 2u;
         std::string err;
+        ++sa.st.hitTableBuffers;
         if (!makeBuffer(VkDeviceSize(cap) * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, true, buf, err)) {
             Ogre::LogManager::getSingleton().logMessage("rayquery: the hit table: " + err);
             sa.hitTableAddress = 0;
@@ -6701,7 +6708,10 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     sa.hitTableAddress = addressOf(buf.buffer);
     sa.st.hitLights = nLights;
     sa.st.hitMaterialRows = nRows;
-    if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = nowFrame;   // read by the frames up to this one
+    // THE LEAVING SLOT's last reader is the PREVIOUS frame (this frame's traces read the new one: the table is
+    // written before them) - stamped with it (decision 16.2: stamped with this frame, a slot was never old
+    // enough again under one write a frame and every frame from the fourth re-made its buffer).
+    if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = nowFrame ? nowFrame - 1u : 0u;
     sa.hitSlot = int(ring);
     sa.hitSlotUntil[ring] = nowFrame;
     sa.hitWords.swap(w);

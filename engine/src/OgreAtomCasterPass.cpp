@@ -52,7 +52,10 @@
 #include <Compositor/Pass/PassScene/OgreCompositorPassScene.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <OgreCamera.h>
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsComputeJob.h>
 #include <OgreHlmsManager.h>
+#include <OgreResourceTransition.h>
 #include <OgreLight.h>
 #include <OgreLogManager.h>
 #include <OgreRenderPassDescriptor.h>
@@ -66,6 +69,7 @@
 #include <algorithm>
 #include <chrono>
 #include <map>
+#include <optional>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -350,7 +354,9 @@ constexpr uint32_t kNoUse = 0xFFFFFFFFu;
 /// (shadow.casterPbsProbe: the frustum's, then the ones the map's depth does not hide). A block no
 /// cut wrote this frame reads zero (beginUse clears the column).
 constexpr VkDeviceSize kCountBytes = GpuCull::kCountElements * sizeof(uint32_t);
-enum UseBlock : uint32_t { kBlockFirst = 0u, kBlockLate = 1u, kBlockPbsAll = 2u, kBlockPbsVisible = 3u, kUseBlocks = 4u };
+enum UseBlock : uint32_t {
+    kBlockFirst = 0u, kBlockLate = 1u, kBlockPbsAll = 2u, kBlockPbsVisible = 3u, kBlockReceivers = 4u, kUseBlocks = 5u
+};
 constexpr VkDeviceSize kUseBytes = kCountBytes * kUseBlocks;
 
 struct CasterRing {
@@ -428,6 +434,15 @@ struct ProbeState {
     VkDeviceMemory memory = VK_NULL_HANDLE;
     const uint32_t *mapped = nullptr;
     OgreScene::CasterProbe info;
+    /// THE SAME MAP'S LATE CUT (stage 4's second half, decision 16.5's per-object law): its own buffer, filled
+    /// the frame the first cut was captured when that map ran its late half.
+    struct Late {
+        bool captured = false;
+        uint32_t recordBudget = 0;
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        const uint32_t *mapped = nullptr;
+    } late;
 };
 }  // namespace
 
@@ -454,8 +469,14 @@ struct LightPyramid {
     float viewProj[16] = {};
     uint32_t lastFrame = 0u;
     bool seen = false;
+    /// THE RECEIVER GRID (stage 4b's counting door): its request, its tiles, its counts.
+    Ogre::UavBufferPacked *recvParams = nullptr, *recvGrid = nullptr, *recvOut = nullptr;
+    uint32_t recvTiles = 0u;
 };
-constexpr uint32_t kPyramidIdleFrames = 120u;
+/// A PYRAMID ITS MAP DID NOT RENDER FOR this many frames is freed (decision 16.3): the sun removed, the
+/// shadows or the Atom draw turned off, a tier's atlas rebuilt - the transition frees its VRAM at once,
+/// from the scene's per-frame step (sweepCasterPyramids), not 120 frames later and only when a map renders.
+constexpr uint32_t kPyramidIdleFrames = 2u;
 
 /// A SCENE'S caster pass state (atom/AtomComponent.h): its stats ring, its test door, the sun maps'
 /// pyramids (by node and map) and the measuring door's list (shadow.casterPbsProbe).
@@ -491,27 +512,34 @@ void destroyPyramid(LightPyramid &p) {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
     if (p.tex && rs && rs->getTextureGpuManager()) rs->getTextureGpuManager()->destroyTexture(p.tex);
-    if (p.origin && rs && rs->getVaoManager()) rs->getVaoManager()->destroyUavBuffer(p.origin);
+    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
+    for (Ogre::UavBufferPacked **b : { &p.origin, &p.recvParams, &p.recvGrid, &p.recvOut }) {
+        if (*b && vao) vao->destroyUavBuffer(*b);
+        *b = nullptr;
+    }
+    p.recvTiles = 0u;
     p.tex = nullptr;
-    p.origin = nullptr;
     p.valid = false;
 }
 
 /// THE MAP'S PYRAMID (LightPyramid), made or remade as the map's rectangle asks; null on the map's
 /// first frame (nothing to predict with yet, nothing made) or where the device refuses it.
-LightPyramid *lightPyramidFor(Ogre::RenderSystem *rs, AtomCasterScene &state, const void *node, uint32_t map,
-                              const Ogre::TextureGpu *atlas, const unsigned rect[4], uint32_t frame) {
-    if (state.sweptAt != frame) {
-        state.sweptAt = frame;
-        for (auto it = state.pyramids.begin(); it != state.pyramids.end();) {
-            if (frame - it->second.lastFrame > kPyramidIdleFrames) {
-                destroyPyramid(it->second);
-                it = state.pyramids.erase(it);
-            } else {
-                ++it;
-            }
+void sweepPyramids(AtomCasterScene &state, uint32_t frame) {
+    if (state.sweptAt == frame) return;
+    state.sweptAt = frame;
+    for (auto it = state.pyramids.begin(); it != state.pyramids.end();) {
+        if (frame - it->second.lastFrame > kPyramidIdleFrames) {
+            destroyPyramid(it->second);
+            it = state.pyramids.erase(it);
+        } else {
+            ++it;
         }
     }
+}
+
+LightPyramid *lightPyramidFor(Ogre::RenderSystem *rs, AtomCasterScene &state, const void *node, uint32_t map,
+                              const Ogre::TextureGpu *atlas, const unsigned rect[4], uint32_t frame) {
+    sweepPyramids(state, frame);
     LightPyramid &p = state.pyramids[std::make_pair(node, map)];
     const bool consecutive = p.seen && (p.lastFrame == frame || p.lastFrame + 1u == frame);
     p.seen = true;
@@ -559,11 +587,23 @@ void destroyProbe(const CasterPipelines &C, ProbeState &p) {
         vkFreeMemory(C.dev, p.memory, nullptr);
     }
     if (p.buffer) vkDestroyBuffer(C.dev, p.buffer, nullptr);
+    if (p.late.memory) {
+        vkUnmapMemory(C.dev, p.late.memory);
+        vkFreeMemory(C.dev, p.late.memory, nullptr);
+    }
+    if (p.late.buffer) vkDestroyBuffer(C.dev, p.late.buffer, nullptr);
     p = ProbeState();
 }
 
+bool makeProbeBuffer(const CasterPipelines &C, Ogre::VulkanDevice *device, VkBuffer &buffer, VkDeviceMemory &memory,
+                     const uint32_t *&mapped);
 bool ensureProbeBuffer(const CasterPipelines &C, Ogre::VulkanDevice *device, ProbeState &p) {
-    if (p.buffer) return true;
+    return p.buffer || makeProbeBuffer(C, device, p.buffer, p.memory, p.mapped);
+}
+bool makeProbeBuffer(const CasterPipelines &C, Ogre::VulkanDevice *device, VkBuffer &bufferOut, VkDeviceMemory &memoryOut,
+                     const uint32_t *&mappedOut) {
+    struct { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE; const uint32_t *mapped = nullptr; } pp;
+    auto &p = pp;
     VkBufferCreateInfo bi{};
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size = kCountBytes + VkDeviceSize(kProbeRecords) * 16u;
@@ -588,19 +628,23 @@ bool ensureProbeBuffer(const CasterPipelines &C, Ogre::VulkanDevice *device, Pro
         vkMapMemory(C.dev, p.memory, 0, VK_WHOLE_SIZE, 0, &m) != VK_SUCCESS) {
         if (p.memory) vkFreeMemory(C.dev, p.memory, nullptr);
         if (p.buffer) vkDestroyBuffer(C.dev, p.buffer, nullptr);
-        p.buffer = VK_NULL_HANDLE;
-        p.memory = VK_NULL_HANDLE;
         return false;
     }
     p.mapped = static_cast<const uint32_t *>(m);
+    bufferOut = p.buffer;
+    memoryOut = p.memory;
+    mappedOut = p.mapped;
     return true;
 }
 
 /// The armed map's cut, copied right after it was recorded (the list is reused by the
 /// next map of the frame).
 void captureProbe(const AtomPassContext &ctx, const CasterPipelines &C, Ogre::VulkanDevice *device, ProbeState &p,
-                  GpuCull &cull, uint32_t frame) {
-    if (!ensureProbeBuffer(C, device, p)) return;
+                  GpuCull &cull, uint32_t frame, bool late = false) {
+    if (late ? (!p.late.buffer && !makeProbeBuffer(C, device, p.late.buffer, p.late.memory, p.late.mapped))
+             : !ensureProbeBuffer(C, device, p))
+        return;
+    const VkBuffer dstBuffer = late ? p.late.buffer : p.buffer;
     VkCommandBuffer cmd = ctx.graphicsFrameCmd("an atom caster");
     VkMemoryBarrier mb{};
     mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -615,13 +659,14 @@ void captureProbe(const AtomPassContext &ctx, const CasterPipelines &C, Ogre::Vu
     c.srcOffset = srcOff;
     c.dstOffset = 0;
     c.size = kCountBytes;
-    vkCmdCopyBuffer(cmd, src, p.buffer, 1, &c);
-    p.recordBudget = std::min(cull.cutRecordBudget(), kProbeRecords);
+    vkCmdCopyBuffer(cmd, src, dstBuffer, 1, &c);
+    const uint32_t budget = std::min(cull.cutRecordBudget(), kProbeRecords);
+    (late ? p.late.recordBudget : p.recordBudget) = budget;
     atomBufferOf(cull.cutRecords(), src, srcOff);
     c.srcOffset = srcOff;
     c.dstOffset = kCountBytes;
-    c.size = VkDeviceSize(p.recordBudget) * 16u;
-    vkCmdCopyBuffer(cmd, src, p.buffer, 1, &c);
+    c.size = VkDeviceSize(budget) * 16u;
+    vkCmdCopyBuffer(cmd, src, dstBuffer, 1, &c);
     VkMemoryBarrier hb{};
     hb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
@@ -629,9 +674,14 @@ void captureProbe(const AtomPassContext &ctx, const CasterPipelines &C, Ogre::Vu
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, nullptr, 0,
                          nullptr);
+    if (late) {
+        p.late.captured = true;
+        return;
+    }
     p.captured = true;
     p.armed = false;
     p.frame = frame;
+    p.late.captured = false;
 }
 
 void reapGrave(AtomCasterDevice &d, uint32_t frame) {
@@ -723,6 +773,7 @@ uint32_t beginUse(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanD
                 const uint32_t *l = w + GpuCull::kCountElements * kBlockLate;
                 const uint32_t *pa = w + GpuCull::kCountElements * kBlockPbsAll;
                 const uint32_t *pv = w + GpuCull::kCountElements * kBlockPbsVisible;
+                const uint32_t *rv = w + GpuCull::kCountElements * kBlockReceivers;
                 // THE CUT'S WORDS (GpuCull.h's count layout): [0] survivors, [4] triangles,
                 // [8] drawn-cluster records, [11] indices reserved, [12] coarse, [13] nothing,
                 // [16] rejected by the depth test.
@@ -754,6 +805,13 @@ uint32_t beginUse(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanD
                 m.pbsTriangles = pa[4];
                 m.pbsVisibleInstances = pv[0];
                 m.pbsVisibleTriangles = pv[4];
+                m.receiverTested = (tag >> 25) & 1u;
+                m.receiverClusters = rv[0];
+                m.receiverCutClusters = rv[1];
+                m.receiverTriangles = rv[4];
+                m.receiverCutTriangles = rv[5];
+                m.receiverInstanceCutClusters = rv[2];
+                m.receiverInstanceCutTriangles = rv[6];
             }
             atom.setCasterStats(cs);
             r.written[s] = false;
@@ -777,9 +835,15 @@ uint32_t beginUse(const AtomPassContext &ctx, AtomCasterDevice &d, Ogre::VulkanD
 
 /// After the use's cut: its counters into the ring's column (the next cut's reset is a
 /// transfer write that waits for this read).
+void endUseOf(const AtomPassContext &ctx, CasterRing &r, Ogre::UavBufferPacked *counts, uint32_t frame,
+              uint32_t use, UseBlock block);
 void endUse(const AtomPassContext &ctx, CasterRing &r, GpuCull &cull, uint32_t frame, uint32_t use,
             UseBlock block = kBlockFirst) {
-    if (use == kNoUse || use >= r.columns || !r.buffer || !cull.count()) return;
+    endUseOf(ctx, r, cull.count(), frame, use, block);
+}
+void endUseOf(const AtomPassContext &ctx, CasterRing &r, Ogre::UavBufferPacked *counts, uint32_t frame,
+              uint32_t use, UseBlock block) {
+    if (use == kNoUse || use >= r.columns || !r.buffer || !counts) return;
     const uint32_t s = frame % r.slots;
     VkCommandBuffer cmd = ctx.graphicsFrameCmd("an atom caster");
     VkMemoryBarrier mb{};
@@ -791,7 +855,7 @@ void endUse(const AtomPassContext &ctx, CasterRing &r, GpuCull &cull, uint32_t f
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
     VkBuffer src = VK_NULL_HANDLE;
     VkDeviceSize srcOff = 0;
-    atomBufferOf(cull.count(), src, srcOff);
+    atomBufferOf(counts, src, srcOff);
     VkBufferCopy c{};
     c.srcOffset = srcOff;
     c.dstOffset = (VkDeviceSize(s) * r.columns + use) * kUseBytes + VkDeviceSize(block) * kCountBytes;
@@ -832,6 +896,133 @@ Ogre::CompositorPassScene *scenePassBefore(Ogre::CompositorPass *pass) {
         return static_cast<Ogre::CompositorPassScene *>(prev);
     }
     return nullptr;
+}
+
+// ---- THE RECEIVER GRID (stage 4b's premise: the counting door shadow.casterReceiverProbe) --------------
+/// JahReceiverGrid_cs's request, std430: 4 + 4 matrix rows, 6 planes, five vec4-sized lanes.
+struct RecvParams {
+    float    invViewProjRow[16] = {};
+    float    lightRow[16] = {};
+    float    planes[24] = {};
+    uint32_t dims[4] = {};
+    uint32_t map[4] = {};
+    float    misc[4] = {};
+    uint32_t counts[4] = {};
+    uint32_t rect[4] = {};
+};
+static_assert(sizeof(RecvParams) == 304, "JahReceiverGrid_cs's request layout");
+
+Ogre::DescriptorSetUav::BufferSlot uavOf(Ogre::UavBufferPacked *b, Ogre::ResourceAccess::ResourceAccess a) {
+    Ogre::DescriptorSetUav::BufferSlot slot = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
+    slot.buffer = b;
+    slot.offset = 0;
+    slot.sizeBytes = 0;
+    slot.access = a;
+    return slot;
+}
+
+/// The map's receiver grid built (the view's id depth, the stock-path boxes) and the two halves' drawn
+/// clusters tested against it, counted into `lp.recvOut` (the ring's receiver block). Nothing drawn.
+bool countReceivers(Ogre::RenderSystem *rs, OgreScene *scene, LightPyramid &lp, const AtomReceiverDepth &rd,
+                    const Ogre::Camera *viewCam, const Ogre::Matrix4 &cullM, unsigned mapW, unsigned mapH,
+                    unsigned tileTexels, float dilationTexels, float depthMargin, GpuCull &first, GpuCull *late) {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::HlmsCompute *hc = root && root->getHlmsManager() ? root->getHlmsManager()->getComputeHlms() : nullptr;
+    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
+    if (!hc || !vao || !rd.depth || !viewCam || !tileTexels) return false;
+    Ogre::HlmsComputeJob *depthJob = hc->findComputeJobNoThrow("Jahshaka/ReceiverDepth");
+    Ogre::HlmsComputeJob *boxJob = hc->findComputeJobNoThrow("Jahshaka/ReceiverBoxes");
+    Ogre::HlmsComputeJob *countJob = hc->findComputeJobNoThrow("Jahshaka/ReceiverCount");
+    GpuScene &gs = scene->gpuScene();
+    if (!depthJob || !boxJob || !countJob || !gs.instanceBuffer() || !gs.clusterBuffer()) return false;
+    const uint32_t tx = (mapW + tileTexels - 1u) / tileTexels, ty = (mapH + tileTexels - 1u) / tileTexels;
+    const uint32_t tiles = tx * ty;
+    if (lp.recvTiles != tiles) {
+        if (lp.recvGrid) vao->destroyUavBuffer(lp.recvGrid);
+        lp.recvGrid = vao->createUavBuffer(tiles, 4u, 0, nullptr, false);
+        lp.recvTiles = tiles;
+    }
+    if (!lp.recvParams) lp.recvParams = vao->createUavBuffer(1u, sizeof(RecvParams), 0, nullptr, false);
+    if (!lp.recvOut) lp.recvOut = vao->createUavBuffer(GpuCull::kCountElements, 4u, 0, nullptr, false);
+    RecvParams p;
+    const Ogre::Matrix4 inv = rd.drawMatrix.inverse();
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) {
+            p.invViewProjRow[r * 4 + c] = float(inv[r][c]);
+            p.lightRow[r * 4 + c] = float(cullM[r][c]);
+        }
+    GpuCullRequest fr;
+    fillCullFrustum(viewCam, float(std::max(1u, rd.rect[3])), fr);
+    std::memcpy(p.planes, fr.planes, sizeof(p.planes));
+    p.dims[0] = rd.rect[2];
+    p.dims[1] = rd.rect[3];
+    p.dims[2] = tx;
+    p.dims[3] = ty;
+    p.map[0] = mapW;
+    p.map[1] = mapH;
+    p.map[2] = tileTexels;
+    p.map[3] = first.cutRecordBudget();
+    p.misc[0] = rs->isReverseDepth() ? 0.0f : 1.0f;
+    p.misc[1] = dilationTexels;
+    p.misc[2] = depthMargin;
+    p.counts[0] = gs.slotCount();
+    p.counts[1] = kGpuVisible;
+    p.counts[2] = kGpuAtom;
+    std::copy(rd.rect, rd.rect + 4, p.rect);
+    lp.recvParams->upload(&p, 0, 1u);
+    {
+        std::vector<uint32_t> empty(tiles, 0xFFFFFFFFu);
+        lp.recvGrid->upload(empty.data(), 0, tiles);
+        const uint32_t zeros[GpuCull::kCountElements] = {};
+        lp.recvOut->upload(zeros, 0, GpuCull::kCountElements);
+    }
+    rs->endRenderPassDescriptor();
+    const auto dispatch = [&](Ogre::HlmsComputeJob *job) {
+        Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+        job->analyzeBarriers(rt);
+        rs->executeResourceTransition(rt);
+        hc->dispatch(job, nullptr, nullptr);
+    };
+    JAH_TRY {
+        {
+            Ogre::DescriptorSetTexture2::TextureSlot ts = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+            ts.texture = rd.depth;
+            depthJob->setTexture(0u, ts);
+            depthJob->_setUavBuffer(0u, uavOf(lp.recvParams, Ogre::ResourceAccess::Read));
+            depthJob->_setUavBuffer(1u, uavOf(lp.recvGrid, Ogre::ResourceAccess::ReadWrite));
+            depthJob->setNumThreadGroups((rd.rect[2] + 7u) / 8u, (rd.rect[3] + 7u) / 8u, 1u);
+            dispatch(depthJob);
+            depthJob->setTexture(0u, Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+            for (Ogre::uint8 u = 0u; u < 2u; ++u) depthJob->_setUavBuffer(u, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        }
+        {
+            boxJob->_setUavBuffer(0u, uavOf(lp.recvParams, Ogre::ResourceAccess::Read));
+            boxJob->_setUavBuffer(1u, uavOf(lp.recvGrid, Ogre::ResourceAccess::ReadWrite));
+            boxJob->_setUavBuffer(2u, uavOf(gs.instanceBuffer(), Ogre::ResourceAccess::Read));
+            boxJob->setNumThreadGroups(std::max(1u, (gs.slotCount() + 63u) / 64u), 1u, 1u);
+            dispatch(boxJob);
+            for (Ogre::uint8 u = 0u; u < 3u; ++u) boxJob->_setUavBuffer(u, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        }
+        for (GpuCull *list : { &first, late }) {
+            if (!list || !list->cutRecords() || !list->count()) continue;
+            countJob->_setUavBuffer(0u, uavOf(lp.recvParams, Ogre::ResourceAccess::Read));
+            countJob->_setUavBuffer(1u, uavOf(lp.recvGrid, Ogre::ResourceAccess::Read));
+            countJob->_setUavBuffer(2u, uavOf(gs.instanceBuffer(), Ogre::ResourceAccess::Read));
+            countJob->_setUavBuffer(3u, uavOf(gs.clusterBuffer(), Ogre::ResourceAccess::Read));
+            countJob->_setUavBuffer(4u, uavOf(list->cutRecords(), Ogre::ResourceAccess::Read));
+            countJob->_setUavBuffer(5u, uavOf(list->count(), Ogre::ResourceAccess::Read));
+            countJob->_setUavBuffer(6u, uavOf(lp.recvOut, Ogre::ResourceAccess::ReadWrite));
+            countJob->setNumThreadGroups(std::max(1u, (std::min(list->cutRecordBudget(), first.cutRecordBudget()) + 63u) / 64u),
+                                         1u, 1u);
+            dispatch(countJob);
+            for (Ogre::uint8 u = 0u; u < 7u; ++u) countJob->_setUavBuffer(u, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        }
+        return true;
+    }
+    catch (const Ogre::Exception &e) {
+        logOnce(std::string("the receiver count did not record (") + e.getDescription() + ")");
+        return false;
+    }
 }
 
 bool casterGate(const AtomPassContext &ctx) {
@@ -1119,7 +1310,14 @@ void recordCasterPass(AtomPassContext &ctx) {
     // after this, and a depth-only draw keeps the nearest whatever the order), so it could have
     // written no texel: the map is the frustum-only map texel for texel (shadow.caster_cull).
     if (lp && lp->tex) {
-        const bool built = recordOcclusionPyramidRect(ctx.renderSystem, depthTex, lp->tex, lp->origin);
+        bool lateRan = false;
+        bool built = false;
+        {
+            // THE BUILD'S OWN ROW under the measuring door (decision 16.6: one pyramid build per map measured).
+            std::optional<monitor::CacheScope> row;
+            if (probeOn) row.emplace(CacheKind::Cull, WorkReason::Camera, 0, "atom.caster.pyramid", ctx.renderSystem);
+            built = recordOcclusionPyramidRect(ctx.renderSystem, depthTex, lp->tex, lp->origin);
+        }
         if (built && firstTests) {
             GpuCull &lateList = atom.casterCullLate();
             lateList.followCutBudget(cull);
@@ -1132,7 +1330,14 @@ void recordCasterPass(AtomPassContext &ctx) {
                 logOnce("the caster's late cut did not record (" + err + ")");
             } else {
                 endUse(ctx, ring, lateList, frameNow, use, kBlockLate);
+                {
+                    ProbeState &pr = state.probe;
+                    if (pr.captured && !pr.late.captured && pr.frame == frameNow && pr.map == mapIdx && pr.face == face &&
+                        nodeName == Ogre::IdString(OgreView::kShadowNodeName))
+                        captureProbe(ctx, C, device, pr, lateList, frameNow, true);
+                }
                 drawCut(lateList);
+                lateRan = true;
             }
         }
         // THE MEASURING DOOR (shadow.casterPbsProbe): the stock casters of this map, counted in its
@@ -1144,6 +1349,12 @@ void recordCasterPass(AtomPassContext &ctx) {
             pr.flagsRequired = kGpuVisible | kGpuCaster;
             pr.flagsForbidden = kGpuAtom;
             pr.mode = 2u;
+            // ITS OWN PYRAMID REQUEST (decision 16.4: it inherited the first cut's, 0 with the cull off).
+            pr.hzbLevels = lp->tex->getNumMipmaps();
+            pr.hzbRect[0] = 0u;
+            pr.hzbRect[1] = 0u;
+            pr.hzbRect[2] = rect[2];
+            pr.hzbRect[3] = rect[3];
             GpuCull &probeList = state.pbsProbe;
             listWar();
             if (scene->recordGpuCull(probeList, pr, nullptr, err, nullptr, nullptr, OgreScene::CullRows::Caster)) {
@@ -1152,6 +1363,27 @@ void recordCasterPass(AtomPassContext &ctx) {
                 if (scene->recordGpuCull(probeList, pr, lp->tex, err, nullptr, nullptr,
                                          OgreScene::CullRows::Caster))
                     endUse(ctx, ring, probeList, frameNow, use, kBlockPbsVisible);
+            }
+        }
+        // THE RECEIVER COUNT (shadow.casterReceiverProbe, stage 4b's premise): this map's receiver grid from the
+        // view's id depth of this frame, and the two halves' drawn clusters tested against it. Draws nothing.
+        const double recvTile = engine ? engine->armRegistry().value(ArmId::ShadowCasterReceiverProbe) : 0.0;
+        OgreView *recvView = recvTile >= 1.0 ? atomViewOfPass(pass) : nullptr;
+        if (built && recvView && recvView->atomReceiverDepth().frame == frameNow && recvView->camera()) {
+            // THE DILATION: the widest PCF kernel's reach (6 x 6: 3 texels), the receivers' normal offset (the
+            // shader moves a receiver up to normalOffsetBias / the map's width along its normal - Ogre's
+            // getNormalOffsetBias), and one tile. The offset's reach along the light is the depth margin.
+            const float offsetWorld = float(shadowNode->getNormalOffsetBias(mapIdx)) / float(std::max(1u, rect[2]));
+            const Ogre::Vector3 r0(cullM[0][0], cullM[0][1], cullM[0][2]), r2(cullM[2][0], cullM[2][1], cullM[2][2]);
+            const unsigned tile = unsigned(recvTile);
+            const float dilation = 3.0f + offsetWorld * float(r0.length()) * 0.5f * float(rect[2]) + float(tile);
+            const float margin = offsetWorld * float(r2.length());
+            if (countReceivers(ctx.renderSystem, scene, *lp, recvView->atomReceiverDepth(), recvView->camera(), cullM,
+                               rect[2], rect[3], tile, dilation, margin, cull,
+                               lateRan ? &atom.casterCullLate() : nullptr)) {
+                endUseOf(ctx, ring, lp->recvOut, frameNow, use, kBlockReceivers);
+                if (use != kNoUse && use < ring.tags[frameNow % ring.slots].size())
+                    ring.tags[frameNow % ring.slots][use] |= 1u << 25;
             }
         }
         // THE HISTORY: this frame's pyramid, read next frame with the matrix it was drawn with.
@@ -1240,6 +1472,13 @@ AtomCasterScene &AtomComponent::casterState() {
     return *mCasterState;
 }
 
+void sweepCasterPyramids(AtomCasterScene *state) {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
+    if (!state || !rs || !rs->getVaoManager()) return;
+    sweepPyramids(*state, rs->getVaoManager()->getFrameCount());
+}
+
 void OgreScene::armCasterProbeForTest(unsigned map, unsigned face) {
     ProbeState &p = mAtom.casterState().probe;
     p.armed = true;
@@ -1275,12 +1514,30 @@ bool OgreScene::casterProbeForTest(CasterProbe &out) {
         d.cluster = rec[1] - base;
         out.drawn.push_back(d);
     }
+    // THE LATE HALF's drawn set, when the map ran one that frame (stage 4).
+    out.lateDrawn.clear();
+    if (p.late.captured && p.late.mapped) {
+        const uint32_t *lw = p.late.mapped;
+        const uint32_t lateRecords = std::min(lw[8], p.late.recordBudget);
+        for (uint32_t r = 0; r < lateRecords; ++r) {
+            const uint32_t *rec = p.late.mapped + GpuCull::kCountElements + size_t(r) * 4u;
+            OgreScene::CasterProbe::Drawn d{};
+            d.slot = rec[0];
+            d.depth = rec[3];
+            GpuSceneEntry e;
+            uint32_t base = 0u;
+            if (gpuSceneEntry(rec[0], e) && e.meshIndex != 0xFFFFFFFFu) base = mGpuScene.meshEntry(e.meshIndex).dag[0];
+            d.cluster = rec[1] - base;
+            out.lateDrawn.push_back(d);
+        }
+    }
     return true;
 }
 
 #else   // !JAH_RAY_QUERY — no raw Vulkan here (macOS): no shadow node carries the pass.
 
 void OgreScene::armCasterProbeForTest(unsigned, unsigned) {}
+void sweepCasterPyramids(AtomCasterScene *) {}
 bool OgreScene::casterProbeForTest(CasterProbe &) { return false; }
 void registerAtomCasterPass() {}
 void releaseAtomCasterPass() {}

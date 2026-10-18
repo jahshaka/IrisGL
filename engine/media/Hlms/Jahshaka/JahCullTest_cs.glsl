@@ -244,7 +244,11 @@ void main()
 
 	// ---- the hierarchical depth test --------------------------------------
 @property( cull_hzb )
-	if( params.hzb.x > 0u )
+	// A NEGATIVE SHADOW CONSTANT BIAS (raster.w, the datablock's) moves a caster's raster depth NEARER the
+	// light than its box (atom_caster.vert): the box test could then reject what draws (ENGINE-UPGRADE-U5
+	// decision 15.3). Such an instance is never rejected by depth - exact for any bias, never silently
+	// wrong. (No writer sets one today; Ogre's default is 0.01.)
+	if( params.hzb.x > 0u && uintBitsToFloat( instances[slot].raster.w ) >= 0.0 )
 	{
 		// The eight corners, projected. A box that crosses the near plane
 		// (any w at or below zero) is NOT tested: its screen rectangle is not

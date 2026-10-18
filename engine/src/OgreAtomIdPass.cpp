@@ -852,6 +852,14 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
     } else if (late && view) {
         view->atomOcclusionHistory().valid = false;
     }
+    if (draw && !capture && view) {
+        // THE RECEIVERS' DEPTH (stage 4b): this frame's, for the sun maps that render after.
+        AtomReceiverDepth &rd = view->atomReceiverDepth();
+        rd.depth = depthTex;
+        rd.drawMatrix = vpm;
+        std::copy(rect, rect + 4, rd.rect);
+        rd.frame = vkRs->getVaoManager()->getFrameCount();
+    }
     if (draw) {
         // ---- (2) THE EDGES THE SOLVER CANNOT EXPRESS -----------------------------
         VkCommandBuffer cmd = ctx.frameCmd();
