@@ -453,6 +453,7 @@ struct AtomCasterDevice {
     CasterPipelines C;
     std::vector<std::pair<CasterRing, uint32_t>> grave;
     std::string lastLog;
+    uint32_t pyramidIds = 0u;   ///< the sun maps' pyramid textures' names (JahLightHzb/<n>): the device's, never a static
 };
 /// A SUN MAP'S OWN DEPTH (ENGINE-UPGRADE-U5 stage 4): the farthest-depth pyramid of one map of one
 /// shadow node (its rectangle of the atlas: R32F, the full chain), the rectangle's corner for the
@@ -555,10 +556,12 @@ LightPyramid *lightPyramidFor(Ogre::RenderSystem *rs, AtomCasterScene &state, co
         unsigned levels = 1u;
         for (unsigned m = std::max(rect[2], rect[3]); m > 1u; m >>= 1u) ++levels;
         if (levels > kHzbMaxLevels) return nullptr;
-        static uint32_t gPyramidId = 0u;
+        AtomCasterDevice *dev = casterDev();
+        const uint32_t id = dev ? ++dev->pyramidIds : 0u;
         JAH_TRY {
             // A UAV the cull samples (no NotTexture): GPU-written only, never uploaded.
-            p.tex = tm->createTexture("JahLightHzb/" + std::to_string(++gPyramidId), Ogre::GpuPageOutStrategy::Discard,
+            p.tex = tm->createTexture("JahLightHzb/" + std::to_string(id) + "/" + std::to_string(uintptr_t(&p)),
+                                      Ogre::GpuPageOutStrategy::Discard,
                                       Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
             p.tex->setPixelFormat(Ogre::PFG_R32_FLOAT);
             p.tex->setResolution(rect[2], rect[3]);
@@ -1516,6 +1519,52 @@ void sweepCasterPyramids(AtomCasterScene *state) {
     sweepPyramids(*state, rs->getVaoManager()->getFrameCount());
 }
 
+void warmCasterPassJobs(OgreScene *scene, Ogre::RenderSystem *rs, const Ogre::Camera *camera, Ogre::TextureGpu *depth,
+                        Ogre::TextureGpu *hzb) {
+    if (!scene || !rs || !camera || !depth || !hzb || !rs->getVaoManager()) return;
+    Ogre::VaoManager *vao = rs->getVaoManager();
+    AtomPassContext ctx;
+    ctx.renderSystem = rs;
+    ctx.scene = scene;
+    ctx.sceneManager = scene->sceneManager();
+    LightPyramid lp;
+    const float kWarmDilation[2] = { 3.0f + float(kReceiverTileTexels), 3.0f + float(kReceiverTileTexels) };
+    JAH_TRY {
+        // THE RECTANGLE'S PYRAMID BUILD (Jahshaka/HzbBuildRect: one permutation for every map since it no longer keys
+        // on the textures' sizes): the view's pyramid from the view's depth at a zero corner.
+        lp.origin = vao->createUavBuffer(1u, 16u, 0, nullptr, false);
+        const uint32_t corner[4] = { 0u, 0u, 0u, 0u };
+        lp.origin->upload(corner, 0, 1u);
+        recordOcclusionPyramidRect(rs, depth, hzb, lp.origin);
+        // THE RECEIVER GRID'S THREE JOBS (its params, its pyramid of tiles) over the view's depth, a map of the
+        // pyramid's size seen through the camera's own matrix...
+        AtomReceiverDepth rd;
+        rd.depth = depth;
+        rd.rect[2] = depth->getWidth();
+        rd.rect[3] = depth->getHeight();
+        const Ogre::Matrix4 m = camera->getProjectionMatrixWithRSDepth() * camera->getViewMatrix(true);
+        rd.drawMatrix = m;
+        rs->endRenderPassDescriptor();
+        if (buildReceiverGrid(ctx, rs, scene, lp, rd, camera, m, hzb->getWidth(), hzb->getHeight(), kWarmDilation, 0.0f)) {
+            // ...and the cut's receiver test, into a list of its own that nothing draws.
+            GpuCull scratch;
+            GpuCullRequest req;
+            fillCullFrustum(camera, float(std::max(1u, rd.rect[3])), req);
+            req.flagsRequired = kGpuVisible | kGpuAtom;
+            req.mode = 3u;
+            OgreScene::CullReceivers receivers;
+            receivers.params = lp.recvParams;
+            receivers.grid = lp.recvGrid;
+            std::string err;
+            scene->recordGpuCull(scratch, req, nullptr, err, nullptr, nullptr, OgreScene::CullRows::Caster, &receivers);
+        }
+    }
+    catch (const Ogre::Exception &e) {
+        logOnce(std::string("the caster jobs' warm-up did not record (") + e.getDescription() + ")");
+    }
+    destroyPyramid(lp);
+}
+
 void OgreScene::armCasterProbeForTest(unsigned map, unsigned face) {
     ProbeState &p = mAtom.casterState().probe;
     p.armed = true;
@@ -1574,6 +1623,7 @@ bool OgreScene::casterProbeForTest(CasterProbe &out) {
 #else   // !JAH_RAY_QUERY — no raw Vulkan here (macOS): no shadow node carries the pass.
 
 void OgreScene::armCasterProbeForTest(unsigned, unsigned) {}
+void warmCasterPassJobs(OgreScene *, Ogre::RenderSystem *, const Ogre::Camera *, Ogre::TextureGpu *, Ogre::TextureGpu *) {}
 void sweepCasterPyramids(AtomCasterScene *) {}
 bool OgreScene::casterProbeForTest(CasterProbe &) { return false; }
 void registerAtomCasterPass() {}

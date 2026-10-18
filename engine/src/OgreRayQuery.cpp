@@ -4025,7 +4025,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
             // mesh re-indexed under its unchanged key before its structure was built is found again through
             // the job's own mesh index (meshIndexOf, kept by the mesh-set diff), never stranded. Built in
             // ascending entry order, the order the slots were handed out in before.
-            struct Want { uint32_t entry; BlasKey key; Ogre::MeshPtr mesh; };
+            struct Want { uint32_t entry = 0u; BlasKey key; Ogre::MeshPtr mesh; };
             std::vector<Want> found;
             found.reserve(sa.missing.size());
             for (auto &m : sa.missing) {

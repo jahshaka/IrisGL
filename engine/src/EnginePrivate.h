@@ -6825,6 +6825,12 @@ struct AtomReceiverDepth {
     /// The workspace whose id pass wrote it: only that workspace's shadow node may read it.
     const Ogre::CompositorWorkspace *workspace = nullptr;
 };
+/// THE SUN MAPS' CASTER JOBS, WARMED (OgreAtomCasterPass.cpp; OgreView::warmUpShaders): a warm-up frame never runs the
+/// light's pyramid (made on a map's second frame) nor the receiver grid (it needs a frame's id depth), so one of each
+/// is recorded here against the view's own depth and pyramid - the rectangle's pyramid build, the receiver grid's
+/// three jobs and the cut's receiver test - into scratch the device frees behind the frame. Nothing reads them.
+void warmCasterPassJobs(OgreScene *scene, Ogre::RenderSystem *rs, const Ogre::Camera *camera, Ogre::TextureGpu *depth,
+                        Ogre::TextureGpu *hzb);
 
 /// THE PRESENTED FRAME'S CAPTURE (View::requestFrameCapture, CLOSE-SHOT-2). One per
 /// view, registered through OgreView::addWorkspaceListener while a capture is armed

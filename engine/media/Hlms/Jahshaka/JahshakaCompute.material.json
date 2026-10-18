@@ -267,7 +267,7 @@
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahHzbBuild_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
-			"inform_shader_of_texture_data_change" : true,
+			"inform_shader_of_texture_data_change" : false,
 			"textures" : [ {} ],
 			"uav_units" : 18,
 			"properties" :
@@ -287,7 +287,7 @@
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahReceiverGrid_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all"],
-			"inform_shader_of_texture_data_change" : true,
+			"inform_shader_of_texture_data_change" : false,
 			"textures" : [ {} ],
 			"uav_units" : 2,
 			"properties" : { "jah_receiver_mode" : 0 }

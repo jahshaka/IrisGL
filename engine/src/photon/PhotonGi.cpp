@@ -5121,7 +5121,7 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &camPos) {
     // THE ENTERING REGION, as up to three disjoint slabs of the target's cells: the cells outside
     // the overlap along x (every y, z), then along y inside the overlap's x, then along z inside
     // both - their union is the target minus the overlap, each cell exactly once.
-    struct Box { int lo[3], hi[3]; };
+    struct Box { int lo[3] = {}, hi[3] = {}; };
     int ovLo[3], ovHi[3];
     for (int a = 0; a < 3; ++a) {
         ovLo[a] = sc.shift[a] < 0 ? -sc.shift[a] : 0;
@@ -5141,7 +5141,7 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &camPos) {
 
     // THE INSTANCES THE ESTIMATE WALKS: the gather's own predicates that the CPU can read (the GI
     // channel, a live slot, rule 2's size floor), in the target's cell coordinates.
-    struct Inst { float mn[3], mx[3]; double tris, perGroup, groups; };
+    struct Inst { float mn[3] = {}, mx[3] = {}; double tris = 0.0, perGroup = 0.0, groups = 0.0; };
     std::vector<Inst> insts;
     if (!slabs.empty()) {
         const float minExtent = cell * kCascadeSubVoxelFactor;
@@ -5313,8 +5313,8 @@ void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
         // THE CHUNKS ARE THE VOXELISER'S OCTANTS for this one gather and build, and the live
         // division is put back whatever happens (the readers' region never moved).
         struct Restore {
-            Ogre::PhotonVoxelizer *v;
-            ~Restore() { v->restoreOctants(); }
+            Ogre::PhotonVoxelizer *v = nullptr;
+            ~Restore() { if (v) v->restoreOctants(); }
         } restore{ c.voxelizer };
         c.voxelizer->setChunkOctants(boxes.data(), boxes.size(),
                                      Ogre::Aabb(centre, Ogre::Vector3(c.halfSize)).getMinimum());

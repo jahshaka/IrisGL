@@ -2148,6 +2148,10 @@ bool OgreView::warmUpShaders() {
                         req.hzbLevels = hzb->getNumMipmaps();
                         mScene->recordGpuCull(mAtomCull, req, hzb, err);
                         mScene->recordGpuCull(mAtomCullLate, req, hzb, err, nullptr, &mAtomCull);
+                        // ...AND THE SUN MAPS' OWN JOBS (ENGINE-UPGRADE-U5 stages 4-4b): the light's pyramid build over
+                        // a rectangle, the receiver grid's three and the cut's receiver test - which no warm-up frame
+                        // runs (a map's pyramid is made on its second frame, its receivers need a frame's id depth).
+                        warmCasterPassJobs(mScene, rs, mCamera, depth, hzb);
                     }
                 }
             }

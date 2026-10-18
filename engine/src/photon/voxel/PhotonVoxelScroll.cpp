@@ -86,6 +86,16 @@ namespace Ogre
         HlmsCompute *hlmsCompute = hlmsManager->getComputeHlms();
         HlmsComputeJob *base = hlmsCompute->findComputeJob( "Photon/ScrollPosition" );
         mPositionJob = base->clone( "Photon/ScrollPosition/" + StringConverter::toString( id ) );
+
+        // THE SCROLL'S JOBS ARE BUILT HERE, AT THE CHAIN'S BUILD (vr.warmup: no shader is compiled on a frame a
+        // headset is shown, and a scroll is what the first head movement does): one texel of every volume copied
+        // and one re-resolved - every permutation a scroll and its commit dispatch (a copy per format at this
+        // size, the position re-resolve), into this target, which every scroll clears before it fills it.
+        mRenderSystem->endRenderPassDescriptor();
+        const uint32 zero[3] = { 0u, 0u, 0u }, one[3] = { 1u, 1u, 1u };
+        for( size_t i = 0u; i < kVolumes; ++i )
+            copyBox( src[i], dst[i], zero, zero, one );
+        copyPositions( live, mVolumes, zero, zero, one );
     }
     //-------------------------------------------------------------------------
     PhotonVoxelScroll::~PhotonVoxelScroll()
