@@ -13,6 +13,7 @@
 #include <Compositor/OgreCompositorWorkspace.h>
 #include <Compositor/OgreCompositorWorkspaceListener.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
+#include <Compositor/Pass/PassQuad/OgreCompositorPassQuadDef.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <OgreHlmsManager.h>
 #include <OgreHlmsPbsDatablock.h>
@@ -91,10 +92,16 @@ public:
         OgreScene *scene = mView ? mView->ogreScene() : nullptr;
         // THE CAPTURE'S RENDER (View::requestFrameCapture) is the picture, never the
         // viewing aid: the Atom view stays off in that workspace alone.
-        const AtomView view =
-            (scene && ws != mView->captureWorkspace()) ? scene->atomView() : AtomView::Off;
-        Ogre::TextureGpu *table = scene ? scene->atomViewTable() : nullptr;
-        Ogre::Pass *pass = (view != AtomView::Off && table) ? atomViewMaterialPass() : nullptr;
+        const bool own = scene && ws != mView->captureWorkspace();
+        const AtomView view = own ? scene->atomView() : AtomView::Off;
+        // THE DENSITY COUNT AND THE CUT PROBE (ATOM-2): the view's own frames take the scene's probe arming and
+        // count their visible Atom pixels for the Density mode or the probe; the Density mode's table is the
+        // view's own (its pixels are this view's), and the probe's frame runs the two passes with the quad's
+        // mode 0 (it paints nothing) where the scene's view is Off.
+        bool probePaint = false;
+        Ogre::TextureGpu *ownTable = own ? atomDensityFrame(mView, scene, view, probePaint) : nullptr;
+        Ogre::TextureGpu *table = ownTable ? ownTable : scene ? scene->atomViewTable() : nullptr;
+        Ogre::Pass *pass = ((view != AtomView::Off || probePaint) && table) ? atomViewMaterialPass() : nullptr;
         const bool on = pass && pass->hasFragmentProgram() && pass->getNumTextureUnitStates() >= 4u;
         const Ogre::uint8 mask = ws->getExecutionMask();
         ws->setExecutionMask(on ? Ogre::uint8(mask | kAtomViewExecutionBit)
@@ -104,6 +111,15 @@ public:
         ps->setIgnoreMissingParams(true);
         ps->setNamedConstant("atomViewParams", Ogre::Vector4(Ogre::Real(int(view)), 0, 0, 0));
         pass->getTextureUnitState(3)->setTexture(table);
+    }
+    /// THE DENSITY COUNT (ATOM-2): at the Atom view's quad, before its render pass begins — the id image, the id
+    /// pass's depth copy and the scene's final depth are all this frame's there.
+    void passEarlyPreExecute(Ogre::CompositorPass *pass) override {
+        if (!pass || pass->getType() != Ogre::PASS_QUAD || !mView) return;
+        const auto *def = static_cast<const Ogre::CompositorPassQuadDef *>(pass->getDefinition());
+        if (!def || def->mMaterialName != kAtomViewMaterial) return;
+        if (pass->getParentNode()->getWorkspace() == mView->captureWorkspace()) return;
+        if (OgreScene *scene = mView->ogreScene()) atomDensityRecord(mView, scene, pass);
     }
     void passPreExecute(Ogre::CompositorPass *pass) override {
         if (!pass || pass->getType() != Ogre::PASS_SCENE || !mView) return;
@@ -533,6 +549,8 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         st.occlusion = v->atomOcclusionStats(st.occluded, st.disoccluded);
         break;
     }
+    // THE DENSITY (ATOM-2): while the scene's view is Density, the first view's last frame, read back.
+    atomDensityStatus(this, mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>(), st);
     return st;
 }
 

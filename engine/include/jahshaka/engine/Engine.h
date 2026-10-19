@@ -922,6 +922,13 @@ public:
     /// the atom items' materials need (AtomDrawStatus). Computes the bucket keys
     /// (no shader is compiled); a tool and test read, not a per-frame one.
     virtual AtomDrawStatus atomDrawStatus() { return AtomDrawStatus(); }
+    /// THE CUT PROBE (ATOM-2 stage 1; AtomCutProbe — a measuring door, never a frame's path): arms the NEXT frame of
+    /// the first view of this scene that carries the id pass to record every group decision of its cut, the clusters
+    /// it drew and its visible Atom pixels per object; false where nothing can record it (no id pass). `atomCutProbe`
+    /// then reads that frame back (a synchronous read) and disarms: true with `out.valid` once the armed frame has
+    /// been drawn and no later frame has overwritten it, false while it is still owed (render a frame and ask again).
+    virtual bool armAtomCutProbe() { return false; }
+    virtual bool atomCutProbe(AtomCutProbe &out) { out = AtomCutProbe(); return false; }
     /// THE SUN MAPS' CONTENT (ShadowMapDigest; a test door: a synchronous read of the first view's
     /// shadow atlas). False without a view or an atlas.
     virtual bool shadowMapDigests(std::vector<ShadowMapDigest> &out) { out.clear(); return false; }

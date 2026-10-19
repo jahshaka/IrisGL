@@ -2192,6 +2192,7 @@ void OgreView::destroy() {
     mAtomCullLate.destroy();
     mAtomCullCapture.destroy();
     mAtomStatsRing.reset();   // the lists' stats ring retires with them (OgreAtomIdPass.cpp)
+    mAtomDensity.reset();     // ...and its density count and cut probe (OgreAtomDensity.cpp)
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);
         // Same reason as the MSAA recreate: destroying a render window destroys

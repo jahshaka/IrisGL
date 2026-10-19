@@ -147,6 +147,25 @@
 			"uav_units" : 10
 		},
 
+		"Jahshaka/AtomDensityCount" :
+		{
+			"threads_per_group" : [8, 8, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahAtomDensityCount_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"textures" : [ {}, {}, {} ],
+			"uav_units" : 1
+		},
+
+		"Jahshaka/AtomDensityResolve" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahAtomDensityResolve_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
+			"uav_units" : 4
+		},
+
 		"Jahshaka/CullEmit" :
 		{
 			"threads_per_group" : [64, 1, 1],

@@ -5190,6 +5190,14 @@ struct AtomDrawStatus {
     unsigned casterOccluded = 0, casterLateInstances = 0, casterLateOccluded = 0;
     unsigned long long casterLateTriangles = 0ull;
     std::vector<AtomCasterMapStats> casterPerMap;
+    /// THE DENSITY (ATOM-2 stage 1, the 'density' Atom view): while the view is on, the first such view's last frame
+    /// read back on demand (a measuring read): the visible Atom pixels and the objects they belong to, split by the
+    /// BASE mesh's level-0 triangles per visible pixel — [0] under 1 (green), [1] 1 to 4 (yellow), [2] over 4 (red) —
+    /// and the pixels by the DAG depth the cut drew them at. `densityValid` false while the view is not 'density'.
+    bool     densityValid = false;
+    unsigned densityPixels = 0, densityObjects = 0;
+    unsigned densityClassPixels[3] = {}, densityClassObjects[3] = {};
+    unsigned densityDepthPixels[16] = {};
     /// The render system's frame counter at this read — the stamp the engine's
     /// JAHSHAKA_ATOM_TRACE log lines carry (ATOM-BLACK-FRAMES-1's coverage trace).
     unsigned long long frame = 0ull;
@@ -5199,6 +5207,53 @@ struct AtomDrawStatus {
 struct AtomCutStats {
     unsigned clusters = 0, indices = 0, evaluated = 0, overflow = 0, missing = 0, overflowIndices = 0,
              indexBudget = 0;
+};
+
+/// THE CUT PROBE (ATOM-2 stage 1; Scene::armAtomCutProbe / Scene::atomCutProbe): ONE frame of the first view's id-pass
+/// cut, read back on demand — a measuring door, never a frame's path. Every group of every surviving instance's DAG,
+/// judged by the cut job's own function in that frame (JahCullCut_cs.glsl, the permutation `cut_probe`), with the
+/// terms it was judged on; the clusters the cut drew; and the frame's visible Atom pixels per object and depth (the
+/// id image where the final depth is the id pass's - exactly the pixels the Atom view paints).
+struct AtomCutProbeGroup {
+    unsigned slot = 0;        ///< the GPU scene slot of the instance
+    unsigned group = 0;       ///< the group's index in its MESH's DAG
+    unsigned depth = 0;       ///< its DAG depth
+    bool     affordable = false;  ///< error < allowed: the verdict the cut drew with
+    bool     terminal = false;    ///< the bake's FLT_MAX (a group that does not simplify): never affordable
+    bool     late = false;        ///< judged by the disocclusion pass's list (ATOM-OCCLUSION-1)
+    float    error = 0.0f;    ///< the bake's measured error, mesh units
+    float    allowed = 0.0f;  ///< what the view affords at the group, mesh units (jahClusterGroupAllowed)
+    float    distance = 0.0f; ///< d: the eye to the transformed sphere minus its radius, metres (1 orthographic)
+    float    radius = 0.0f;   ///< the sphere's radius x the instance's largest axis scale, metres
+};
+/// One drawn object of the probe's frame (a slot the cut drew or whose groups it judged).
+struct AtomCutProbeObject {
+    unsigned slot = 0;
+    NodeId   node = 0;
+    unsigned meshEntry = 0;
+    float    scale = 0.0f;                    ///< the instance's largest axis scale (the currency's meshToWorldScale)
+    unsigned long long level0Triangles = 0ull;   ///< the BASE mesh's (the GPU mesh table's level-0 indices / 3)
+    unsigned pixels = 0;                      ///< its visible Atom pixels this frame
+    unsigned depthPixels[16] = {};            ///< ...by the DAG depth the pixel was drawn at (15 = 15 and deeper)
+    unsigned drawnClusters = 0;
+    unsigned long long drawnTriangles = 0ull;
+    unsigned long long depthTriangles[16] = {};  ///< the cut's drawn triangles by depth
+    unsigned groups = 0, groupsAffordable = 0, groupsTerminal = 0;
+};
+struct AtomCutProbe {
+    bool        valid = false;
+    std::string error;                        ///< why not, when not
+    /// THE REQUEST THE FIRST LIST WAS CULLED WITH, read back from the device: the tolerance (pixels), proj[1][1],
+    /// the pass's viewport height, the eye, orthographic.
+    float       tolerance = 0.0f, projScaleY = 0.0f, viewportHeight = 0.0f;
+    float       eye[3] = { 0.0f, 0.0f, 0.0f };
+    bool        orthographic = false;
+    unsigned    width = 0, height = 0;        ///< the id image's
+    unsigned    atomPixels = 0;               ///< visible Atom pixels in the frame
+    unsigned    depthPixels[16] = {};
+    unsigned    groupsDropped = 0;            ///< records past the probe buffer's capacity (0 is the invariant)
+    std::vector<AtomCutProbeGroup>  groups;
+    std::vector<AtomCutProbeObject> objects;  ///< by slot
 };
 
 /// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback
@@ -7657,7 +7712,9 @@ struct ViewOverlayDesc {
 ///              orange, yellow, lime, green, cyan, blue to level 7 (violet)
 ///   Buckets    a hash of the decode bucket (one colour per decode draw)
 ///   Objects    a hash of the GPU scene slot (one colour per object)
-enum class AtomView { Off = 0, Triangles, Levels, Buckets, Objects };
+///   Density    the BASE mesh's level-0 triangles per visible pixel, per object (ATOM-2): green under 1,
+///              yellow 1 to 4, red over 4 - where the authored geometry is finer than the pixels
+enum class AtomView { Off = 0, Triangles, Levels, Buckets, Objects, Density };
 
 /// THE PHOTON VIEW (PHOTON-VIEW-1): the lighting's own debug pictures, one at a
 /// time, over every view of the renderer's SCENE that draws the post chain. A

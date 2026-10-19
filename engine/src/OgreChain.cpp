@@ -229,7 +229,7 @@ constexpr const char *kAoApplied   = "jahAoApplied";
 /// A NAMEABLE depth buffer. depth_pool ids cannot be sampled; SSAO marches the
 /// depth, refraction copies it, so the scene pass renders through an explicit
 /// RTV whose depth attachment is this texture.
-constexpr const char *kDepth    = "jahDepth";
+constexpr const char *kDepth    = kSceneDepthTexture;
 /// THE HIERARCHICAL DEPTH PYRAMID (NANITE_SPEC §4.3). One R32_FLOAT texture at
 /// the view's resolution with a FULL mip chain down to 1x1, each level holding
 /// the CLOSEST depth of its footprint in the level above. A single texture and
@@ -263,7 +263,7 @@ constexpr const char *kDisplayEncodeMaterial = "Jahshaka/DisplayEncode";
 /// THE PRICE OF "NO REBUILD ON SWITCH": the texture is part of the graph, so EVERY
 /// view that carries the id pass holds one, view Off or not — a full-target D32,
 /// 8.3 MB at 1920x1080 and 33 MB at 3840x2160.
-constexpr const char *kAtomViewDepth    = "jahAtomViewDepth";
+constexpr const char *kAtomViewDepth    = kAtomViewDepthTexture;
 /// THE MATERIAL DEPTH (ATOM-DECODE-CLASS-1; Nanite's form): each pixel's bucket CLASS
 /// as a depth (HlmsAtom.h kClassDepthStep), written by the classifier as the first
 /// draw of the frame's first screen decode pass and tested EQUAL by every bucket

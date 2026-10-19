@@ -43,18 +43,18 @@ struct JahCluster
 	vec4  sphere;
 };
 
-// What the consumer can afford AT ONE GROUP: the distance from the eye to the
-// group's sphere, transformed by the instance, spelled operation for operation as
-// clusterGroupAllowed spells it. ORTHOGRAPHIC: no distance term (the level walk's
-// own ortho case, JahCullTest_cs.glsl) - one metre makes the footprint the window
-// over the target.
-float jahClusterGroupAllowed( vec4 sphere, vec4 row0, vec4 row1, vec4 row2, float scale,
-							  vec3 eye, float tolerance, float projScaleY, float viewportHeight,
-							  bool orthographic )
+// The distance the rule judges a group at: from the eye to the group's sphere,
+// transformed by the instance, minus its radius at the instance's scale (never
+// below zero), spelled operation for operation as clusterGroupAllowed spells it.
+// ORTHOGRAPHIC: no distance term (the level walk's own ortho case,
+// JahCullTest_cs.glsl) - one metre makes the footprint the window over the target.
+float jahClusterGroupDistance( vec4 sphere, vec4 row0, vec4 row1, vec4 row2, float scale, vec3 eye,
+							   bool orthographic )
 {
 	// PRECISE: no fused multiply-add the compiler chooses per call site — one group
 	// judged at two places must give one answer (the cut job judges each group once
-	// anyway; this keeps the inline fallback and the parity job to the same rule).
+	// anyway; this keeps the inline fallback, the parity job and the cut probe to the
+	// same rule).
 	precise float cx = row0.x * sphere.x + row0.y * sphere.y + row0.z * sphere.z + row0.w;
 	precise float cy = row1.x * sphere.x + row1.y * sphere.y + row1.z * sphere.z + row1.w;
 	precise float cz = row2.x * sphere.x + row2.y * sphere.y + row2.z * sphere.z + row2.w;
@@ -62,6 +62,16 @@ float jahClusterGroupAllowed( vec4 sphere, vec4 row0, vec4 row1, vec4 row2, floa
 	precise float dy = cy - eye.y;
 	precise float dz = cz - eye.z;
 	precise float d = orthographic ? 1.0 : max( 0.0, sqrt( dx * dx + dy * dy + dz * dz ) - sphere.w * scale );
+	return d;
+}
+
+// What the consumer can afford AT ONE GROUP: one sample's footprint at the group's
+// distance, in the mesh's units.
+float jahClusterGroupAllowed( vec4 sphere, vec4 row0, vec4 row1, vec4 row2, float scale,
+							  vec3 eye, float tolerance, float projScaleY, float viewportHeight,
+							  bool orthographic )
+{
+	precise float d = jahClusterGroupDistance( sphere, row0, row1, row2, scale, eye, orthographic );
 	return jahAllowedWorldError( tolerance, jahSampleFootprint( d, projScaleY, viewportHeight ), scale );
 }
 

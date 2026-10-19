@@ -51,6 +51,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomDraw.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgrePhotonView.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomIdPass.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomDensity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomCasterPass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.cpp

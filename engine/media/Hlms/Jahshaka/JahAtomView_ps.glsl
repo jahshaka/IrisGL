@@ -71,7 +71,8 @@ void main()
 	uint slot = id.x & 0x00FFFFFFu;
 	uint depth = id.x >> 24u;
 
-	// THE SLOT'S TABLE ROW (bucketTable, AtomComponent::syncViewTable): its BUCKET in mode 3, its MESH ENTRY in mode 1.
+	// THE SLOT'S TABLE ROW (bucketTable, AtomComponent::syncViewTable): its BUCKET in mode 3, its MESH ENTRY in mode 1;
+	// in mode 5 the VIEW's density table (its own texture, bound per view by the view's atom listener).
 	ivec2 tSize = textureSize( bucketTable, 0 );
 	ivec2 txy = ivec2( int( slot & 1023u ), int( slot >> 10u ) );
 	bool inTable = txy.y < tSize.y;
@@ -110,6 +111,13 @@ void main()
 		colour = bucket == 0u ? vec3( 0.3 )
 							  : atomHsv( fract( float( bucket ) * 0.61803398875 ), 0.85, 0.95 );
 	}
+	else if( mode == 5u )
+	{
+		// THE DENSITY (ATOM-2): the table holds the slot's BASE-mesh level-0 triangles per visible pixel this frame
+		// (float bits, JahAtomDensityResolve_cs.glsl) - green under one a pixel, yellow one to four, red over four.
+		float tpp = uintBitsToFloat( row );
+		colour = tpp > 4.0 ? vec3( 1.0, 0.15, 0.1 ) : tpp >= 1.0 ? vec3( 1.0, 0.9, 0.1 ) : vec3( 0.15, 0.85, 0.25 );
+	}
 	else
 	{
 		colour = atomPalette( atomHash( slot + 0x68E31DA4u ) );
@@ -117,7 +125,7 @@ void main()
 
 	// LAST (the helper-lane rule): nothing named, a mode of zero, or a surface
 	// that is not the atom item the id names (a stock-PBR object in front of it).
-	if( id.x == 0xFFFFFFFFu || mode == 0u || mode > 4u ||
+	if( id.x == 0xFFFFFFFFu || mode == 0u || mode > 5u ||
 		floatBitsToUint( idDepth ) != floatBitsToUint( finalDepth ) )
 		discard;
 	fragColour = vec4( colour, 1.0 );

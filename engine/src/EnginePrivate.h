@@ -925,6 +925,17 @@ struct AtomIdViewRingDelete {
     void operator()(AtomIdViewRing *p) const;
 };
 using AtomIdViewRingPtr = std::unique_ptr<AtomIdViewRing, AtomIdViewRingDelete>;
+/// ATOM-2 stage 1 — A VIEW'S DENSITY COUNT AND CUT PROBE (OgreAtomDensity.cpp): the device buffers the 'density'
+/// Atom view and Scene::atomCutProbe read, made on first use and freed with the view (Ogre's buffers and textures:
+/// their memory waits out the frames in flight in Ogre's own managers).
+struct AtomDensityState;
+struct AtomDensityStateDelete {
+    void operator()(AtomDensityState *p) const;
+};
+using AtomDensityStatePtr = std::unique_ptr<AtomDensityState, AtomDensityStateDelete>;
+/// The texture names the Atom view's quad reads, the chain's (OgreChain.cpp defines them).
+constexpr const char *kAtomViewDepthTexture = "jahAtomViewDepth";
+constexpr const char *kSceneDepthTexture = "jahDepth";
 /// OgreAtomCasterPass.cpp — THE CASTER CUT's device half (ATOM-SHADOWS-1): its recorder
 /// on the provider (beside the id pass's), its pipelines destroyed before Root. Its
 /// per-scene state is the scene's AtomComponent's (atom/AtomComponent.h).
@@ -940,6 +951,22 @@ void releaseAtomCasterPass();
 /// OgreScene owns (the blank world, the document's staging manager). OgreGpuScene.cpp.
 void bindSceneManager(Ogre::SceneManager *sm, OgreScene *scene);
 OgreScene *sceneOfManager(const Ogre::SceneManager *sm);
+/// THE DENSITY COUNT AND THE CUT PROBE, per frame of a view (ATOM-2 stage 1; OgreAtomDensity.cpp). At the head of
+/// each of the view's own frames (its atom listener's workspacePreUpdate, never the capture's): the view TAKES the
+/// scene's probe arming if there is one, and the frame COUNTS its visible Atom pixels when the scene's Atom view is
+/// Density or the probe is this frame's. Returns the texture the Atom view's quad binds at its fourth unit this
+/// frame in place of the scene's table (the view's density table), or null for the scene's own; `paint` says the
+/// view's two passes (the depth copy and the quad) must execute this frame although the scene's view may be Off
+/// (the probe's frame: the quad's mode 0 paints nothing).
+Ogre::TextureGpu *atomDensityFrame(OgreView *view, OgreScene *scene, AtomView mode, bool &paint);
+/// ...and at the quad's early pre-execute (before its render pass begins): the count over the view's id image and,
+/// in the Density mode, the resolve into the view's density table.
+void atomDensityRecord(OgreView *view, OgreScene *scene, Ogre::CompositorPass *quad);
+/// The view's cut-probe buffer for its first (`late` false) or late list IN THE PROBE'S FRAME, else null
+/// (OgreAtomIdPass.cpp hands it to recordGpuCull).
+Ogre::UavBufferPacked *atomCutProbeBuffer(OgreView *view, bool late);
+/// ...and the Density mode's figures for AtomDrawStatus: the first of `views` whose last frame counted, read back.
+void atomDensityStatus(OgreScene *scene, const std::vector<OgreView *> &views, AtomDrawStatus &out);
 /// THE OCCLUSION'S PYRAMID (ATOM-OCCLUSION-1, OgreAtomIdPass.cpp): `hzb`'s every level
 /// rebuilt from `depth` — ONE dispatch of the single-pass build (JahHzbBuild_cs,
 /// farthest), through HlmsCompute with Ogre's barrier solver. False when the job is not
@@ -4270,6 +4297,16 @@ public:
     /// of the ray tier lives in a TU that does not include Vulkan.
     RayQueryStatus rayQueryStatus() const;
     AtomDrawStatus atomDrawStatus() override;
+    /// THE CUT PROBE (ATOM-2 stage 1; OgreAtomDensity.cpp).
+    bool armAtomCutProbe() override;
+    bool atomCutProbe(AtomCutProbe &out) override;
+    /// ...the arming, TAKEN by the first view of this scene whose next frame draws the id pass (the view's atom
+    /// listener): true once, for the frame that records it.
+    bool takeAtomCutProbeArm() {
+        const bool armed = mAtomCutProbeArmed;
+        mAtomCutProbeArmed = false;
+        return armed;
+    }
     bool shadowMapDigests(std::vector<ShadowMapDigest> &out) override;
     bool shadowCasterRoutes(std::vector<ShadowRouteShare> &out) override;
     void setAtomDrawEnabled(bool on) override;
@@ -4325,6 +4362,8 @@ public:
     bool casterProbeForTest(CasterProbe &out);
     uint32_t cutIndexNeed() const { return mCutIndexNeed; }
     uint32_t mCutIndexNeed = 0u;
+    /// THE CUT PROBE'S ARMING (ATOM-2; armAtomCutProbe sets it, takeAtomCutProbeArm takes it).
+    bool mAtomCutProbeArmed = false;
     bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const override;
     bool gpuSceneDeviceEntries(unsigned first, unsigned count,
                                std::vector<GpuSceneEntry> &out) override;
@@ -6558,10 +6597,12 @@ public:
         Ogre::UavBufferPacked *params = nullptr;
         Ogre::UavBufferPacked *grid = nullptr;   ///< the grid's farthest-receiver pyramid, its levels in a row
     };
+    /// `probe` (ATOM-2): the view's cut-probe buffer for this list in the probe's frame (atomCutProbeBuffer), null
+    /// otherwise — the cut job's `cut_probe` permutation records every group decision into it. Never with receivers.
     bool recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
                        std::string &err, double *requestMs = nullptr,
                        const GpuCull *prior = nullptr, CullRows rows = CullRows::Tool,
-                       const CullReceivers *receivers = nullptr);
+                       const CullReceivers *receivers = nullptr, Ogre::UavBufferPacked *probe = nullptr);
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
                     GpuCullResult &out);
 private:
@@ -7503,6 +7544,8 @@ public:
     /// The id pass's stats ring of the view's two lists (OgreAtomIdPass.cpp; null before
     /// the first frame that copies their counters).
     AtomIdViewRingPtr &atomStatsRing() { return mAtomStatsRing; }
+    /// THE DENSITY COUNT AND THE CUT PROBE of this view (ATOM-2; OgreAtomDensity.cpp), null before first use.
+    AtomDensityStatePtr &atomDensity() { return mAtomDensity; }
     /// Whether this view's chain carries the two-pass occlusion (ChainDesc::atomOcclusion).
     bool chainAtomOcclusion() const { return mChainAtomOcclusion; }
     /// WHAT THE FIRST CULL TESTS AGAINST (OgreAtomIdPass.cpp): the matrix the pyramid
@@ -7716,6 +7759,7 @@ private:
     /// The id pass's stats ring of THIS view's lists (OgreAtomIdPass.cpp), created on the
     /// first frame that reads them back; retired with the view.
     AtomIdViewRingPtr mAtomStatsRing;
+    AtomDensityStatePtr mAtomDensity;
     /// PHOTON-VIEW-1: the view's photon listener and the tier's overlay.
     PhotonListenerPtr mPhotonListener;
     /// CLOSE-SHOT-2: the presented frame's capture (requestFrameCapture).

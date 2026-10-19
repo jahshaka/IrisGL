@@ -7,13 +7,14 @@
 //   unit 0  the id image (R32G32_UINT: slot | level, triangle - HlmsAtom.h AtomId)
 //   unit 1  the id pass's depth, copied right after the id pass
 //   unit 2  the scene's final depth
-//   unit 3  the Buckets table (OgreScene::atomViewTable, bound from C++ per view)
+//   unit 3  the Buckets table (OgreScene::atomViewTable, bound from C++ per view) -
+//           in the Density mode the view's own density table (OgreAtomDensity.cpp)
 //
 // A pixel whose id is empty, or whose final depth is not the id pass's depth (a
 // stock-PBR object stands in front of the atom item the id image still names),
 // is DISCARDED: it keeps the lit picture.
 //
-// `atomViewParams.x` is the mode (1 triangles, 2 levels, 3 buckets, 4 objects),
+// `atomViewParams.x` is the mode (1 triangles, 2 levels, 3 buckets, 4 objects, 5 density),
 // pushed per view by the view's atom listener; the default 0 draws nothing.
 // GLSL + Vulkan only.
 fragment_program Jahshaka/AtomView_ps_VK glslvk

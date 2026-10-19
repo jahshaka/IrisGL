@@ -77,6 +77,14 @@ layout( std430, ogre_U6 ) restrict buffer cntLayout { uint counter[]; };
 layout( std430, ogre_U7 ) writeonly restrict buffer drawLayout { uint draws[]; };
 layout( std430, ogre_U8 ) writeonly restrict buffer recordLayout { uvec4 records[]; };
 layout( std430, ogre_U9 ) writeonly restrict buffer slotBaseLayout { uint slotBase[]; };
+@property( cut_probe )
+// THE CUT PROBE (ATOM-2 stage 1; Scene::atomCutProbe — one frame on demand, never a frame's path): every group of
+// every survivor's DAG with the terms the rule judged it on. [0] = (the cursor, the capacity in records, the records
+// dropped past it, 0), then two uvec4 a record: (slot, the group's index in its mesh's DAG, its depth, the verdict
+// bits: 1 affordable, 2 terminal) and the float bits of (the error, allowed, the distance d, radius x scale).
+// Only the view's own lists carry it (the caster cut never does: its receiver buffers hold U10 and U11).
+layout( std430, ogre_U10 ) restrict buffer probeLayout { uvec4 probe[]; };
+@end
 @property( cut_receivers )
 // THE SUN MAP'S RECEIVERS (ENGINE-UPGRADE-U5 stage 4b; JahReceiverGrid_cs builds the grid): the request (the map's
 // cull matrix, its size, the tile, the dilation, the depth margin) and the tiles of farthest receiver depth.
@@ -316,6 +324,30 @@ void main()
 				atomicOr( gAffordable[g >> 5u], 1u << ( g & 31u ) );
 		barrier();
 	}
+
+@property( cut_probe )
+	// ---- THE PROBE: every group, judged by the function pass 0 judges it by -------
+	for( uint g = lane; g < groupCount; g += JAH_CUT_WIDTH )
+	{
+		JahClusterGroup gr = groups[dag.z + g];
+		float allowed = jahClusterGroupAllowed( gr.sphere, gRow0, gRow1, gRow2, gScale, params.eye.xyz,
+												params.lod.x, params.lod.y, params.lod.z, params.lod.w > 0.5 );
+		float d = jahClusterGroupDistance( gr.sphere, gRow0, gRow1, gRow2, gScale, params.eye.xyz,
+										   params.lod.w > 0.5 );
+		uint verdict = ( jahCutEvaluate( dag.z + g ) ? 1u : 0u ) | ( gr.error.x >= JAH_TERMINAL ? 2u : 0u );
+		uint r = atomicAdd( probe[0].x, 1u );
+		if( r < probe[0].y )
+		{
+			probe[1u + 2u * r] = uvec4( slot, g, uint( gr.error.z ), verdict );
+			probe[2u + 2u * r] = uvec4( floatBitsToUint( gr.error.x ), floatBitsToUint( allowed ),
+										floatBitsToUint( d ), floatBitsToUint( gr.sphere.w * gScale ) );
+		}
+		else
+		{
+			atomicAdd( probe[0].z, 1u );
+		}
+	}
+@end
 
 	// ---- pass 1: what this lane's clusters draw, in the cut and in the root cut ---
 	uint myIdx = 0u, myRec = 0u, myRootIdx = 0u, myRootRec = 0u;
