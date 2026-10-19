@@ -59,7 +59,9 @@ endif()
 # in front of Studio's CMAKE_<LANG>_COMPILER_LAUNCHER (`env PWD=<build dir> ccache`), giving `ccache env PWD=… ccache c++`:
 # the outer ccache sees a compiler of type "other" (multiple_source_files), the inner one is disabled, and NOTHING is
 # cached (4,163 "multiple source files" on the box for a 4,150-object rebuild). A normal variable, not option(): the cache
-# of an older tree holds ON, and assimp's option() honours a normal variable (its CMP0077 is NEW, cmake 3.22).
+# of an older tree holds ON, and assimp's option() honours a normal variable (its CMP0077 is NEW, cmake 3.22). So the
+# CACHE may still read ASSIMP_BUILD_USE_CCACHE:BOOL=ON (an older configure wrote it, nothing removes it): that entry
+# is cosmetic — this normal variable wins in every configure, and no rule of build.ninja carries assimp's launcher.
 set(ASSIMP_BUILD_USE_CCACHE OFF)
 option(ASSIMP_BUILD_ASSIMP_TOOLS                "" OFF)
 option(ASSIMP_BUILD_TESTS                       "" OFF)
