@@ -645,8 +645,49 @@ add_custom_target(JahshakaEngineBuildId DEPENDS "${_build_id_header}")
 set(JAHSHAKA_ENGINE_BUILD_ID_DIR "${JAHSHAKA_ENGINE_BUILD_ID_DIR}" PARENT_SCOPE)
 set(JAHSHAKA_OGRE_FORK_COMMIT "${_ogre_fork_commit}" PARENT_SCOPE)
 
+# A GENERATED HEADER IS AN INPUT OF THE OBJECTS THAT INCLUDE IT (TOOLING-2 stage 3). The ray jobs' SPIR-V
+# (rq_*_spv.h, atom_*_spv.h) and the engine build id are written by custom commands; add_dependencies() only ORDERS
+# them before the engine's compiles, and the objects' own dependency on them was ninja's deps log alone — spelled
+# through ccache's base_dir (~/Developer) relative to the REAL working directory (/mnt/work/Developer: ~/Developer is
+# a symlink), `../../../../../../../../home/…/rq_reflect_spv.h`, a node no custom command produces. So an edit of a
+# jah_rq_*.glsl include or a .comp regenerated the header and compiled OgreRayQuery.cpp / OgreScreenProbeGather.cpp
+# against the OLD one in the same run — the binary linked the previous SPIR-V (PHOTON-1 lost two measurements,
+# §2557; FAR-SUN-2's `.comp` edit, BUILD-GRAPH-COMP-LINK) — and every engine edit (a new build id) recompiled
+# OgreTextureCache / OgreShaderCache and relinked in a SECOND build (BUILD-RELINK-TWICE-1). The includes are read from
+# each source at configure (a source that adds one re-configures: it is in the target's sources), and the headers
+# become OBJECT_DEPENDS of exactly those objects: one ninja run orders and rebuilds them, whatever the deps log spells.
+function(jahshaka_engine_generated_deps target)
+    get_target_property(_srcs ${target} SOURCES)
+    get_target_property(_sdir ${target} SOURCE_DIR)
+    foreach(_s IN LISTS _srcs)
+        if(NOT _s MATCHES "\\.(cpp|cc|cxx)$")
+            continue()
+        endif()
+        if(NOT IS_ABSOLUTE "${_s}")
+            set(_s "${_sdir}/${_s}")
+        endif()
+        file(STRINGS "${_s}" _incs
+             REGEX "^[ \t]*#[ \t]*include[ \t]*\"(rayquery/[A-Za-z0-9_]+_spv\\.h|jahshaka_engine_build_id\\.h)\"")
+        set(_deps "")
+        foreach(_l IN LISTS _incs)
+            string(REGEX REPLACE "^[^\"]*\"([^\"]+)\".*$" "\\1" _h "${_l}")
+            if(_h MATCHES "^rayquery/")
+                if(JAH_RAY_QUERY_OK)
+                    list(APPEND _deps "${JAH_RQ_GEN_DIR}/../${_h}")
+                endif()
+            else()
+                list(APPEND _deps "${JAHSHAKA_ENGINE_BUILD_ID_DIR}/${_h}")
+            endif()
+        endforeach()
+        if(_deps)
+            set_property(SOURCE "${_s}" TARGET_DIRECTORY ${target} APPEND PROPERTY OBJECT_DEPENDS ${_deps})
+        endif()
+    endforeach()
+endfunction()
+
 add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
 add_dependencies(JahshakaEngine JahshakaEngineBuildId)
+jahshaka_engine_generated_deps(JahshakaEngine)
 jahshaka_engine_ray_query(JahshakaEngine)
 jahshaka_engine_vr(JahshakaEngine)
 target_compile_definitions(JahshakaEngine PRIVATE
