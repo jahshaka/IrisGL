@@ -6,6 +6,7 @@
 #include "EnginePrivate.h"
 #include "photon/voxel/PhotonMipChain.h"
 #include "photon/voxel/PhotonPassBinding.h"
+#include "photon/voxel/PhotonSpecularAlbedoBuffer.h"
 
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsAsyncCompiler.h>
@@ -3956,6 +3957,8 @@ void OgreEngine::teardown() {
     // The pass listener's samplerblock references go back to the manager that
     // gave them (PHOTON-ENV-1 audit F10) — it dies with Root.
     try { FogHlmsListener::releaseSamplers(); } catch (...) {}
+    // ...and the specular albedo table's buffer goes back to the VaoManager that made it (PHOTON-3).
+    try { Ogre::PhotonSpecularAlbedo::releaseConstBuffer(); } catch (...) {}
     // The pooled mip jobs (ENGINE-UPGRADE-ASYNC-3) go back to the compute Hlms that cloned them.
     try { Ogre::PhotonMipChain::releasePool(); } catch (...) {}
     if (mRoot && mInRecordFaultAttached) mRoot->removeFrameListener(mInRecordFault.get());
@@ -4133,6 +4136,10 @@ void OgreEngine::ensureHlms() {
     // the scene's atmosphere component — OgreFog.cpp, Atmosphere.h). Unlit gets
     // no listener: gizmos, wires and billboards stay unfogged.
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
+    // THE SPECULAR LOBE'S ALBEDO TABLE (PHOTON-3): the one immutable constant buffer every
+    // colour pass's environment term (bound by that listener) and the Photon jobs read, made
+    // HERE - an immutable upload is a copy on the device queue, never one inside a pass.
+    Ogre::PhotonSpecularAlbedo::constBuffer(mRoot->getRenderSystem()->getVaoManager());
     // Shader-generation debugging: JAHSHAKA_HLMS_DEBUG_DIR=/some/dir/ dumps every
     // generated shader (and its properties) there, for EVERY PBS-family host (a
     // debug output path is not relayed by tellEveryHlms). Diagnostic only.

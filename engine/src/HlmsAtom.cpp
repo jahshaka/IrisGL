@@ -10,7 +10,6 @@
 #include "EnginePrivate.h"
 #include "photon/voxel/PhotonPassBinding.h"
 #include "SceneLightList.h"
-#include "photon/voxel/PhotonSpecularAlbedo.h"
 
 #include <CommandBuffer/OgreCbShaderBuffer.h>
 #include <CommandBuffer/OgreCbTexture.h>
@@ -966,14 +965,6 @@ void HlmsAtom::buildWorldLights(Ogre::SceneManager *sm, WorldLights &out) {
         data.insert(data.end(), { 1.0f / (std::cos(inner * 0.5f) - std::cos(outer * 0.5f)), std::cos(outer * 0.5f),
                                   float(l->getSpotlightFalloff()), 0.0f });
     }
-    // THE METAL'S LOBE INTEGRALS AFTER THE LIGHTS (ENGINE-UPGRADE-U5 decision 22.1): a gather record's decode re-emits a
-    // metal by F0 A( mu, r ) + w B( mu, r ) per light, the store's and the hit-direct path's law, from the SAME table
-    // (PhotonSpecularAlbedo.h, JahSpecularAlbedo_piece_all.any); the header's z names the float4 it starts at.
-    const Ogre::uint32 tableAt = Ogre::uint32(data.size() / 4u);
-    data[2] = bits(tableAt);
-    data.insert(data.end(), Ogre::PhotonSpecularAlbedo::kTable,
-                Ogre::PhotonSpecularAlbedo::kTable + Ogre::PhotonSpecularAlbedo::kFloats);
-    while (data.size() % 4u) data.push_back(0.0f);
     out.count = count;
 }
 
@@ -1014,7 +1005,7 @@ void HlmsAtom::uploadWorldLights(Ogre::SceneManager *sm, const Ogre::CompositorS
     }
     if (!mWorldLightBuf) {
         // Room for 32 lights before the first regrowth.
-        const size_t room = std::max(bytes, (4u + 32u * 24u + Ogre::PhotonSpecularAlbedo::kFloats) * sizeof(float));
+        const size_t room = std::max(bytes, (4u + 32u * 24u) * sizeof(float));
         mWorldLightBuf = mVaoManager->createReadOnlyBuffer(Ogre::PFG_RGBA32_FLOAT, room, Ogre::BT_DEFAULT,
                                                            nullptr, false);
     }

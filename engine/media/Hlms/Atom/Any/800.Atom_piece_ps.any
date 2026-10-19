@@ -94,13 +94,11 @@
 		// is ~0 - so the store, the injection and the hit-direct path re-emit every surface (a metal, and a
 		// dielectric's 0.04 layer) by its specular lobe's DIRECTIONAL ALBEDO per light,
 		// F0 A( mu, r ) + w B( mu, r ) (METAL-BOUNCE-1), and the decode does the same from the SAME table
-		// (JahSpecularAlbedo, appended to the world light list after the lights: HlmsAtom::buildWorldLights, the
-		// header's z its first float4), added to the diffuse response inside the BRDF (the hook custom_ps_brdfDiffuse,
+		// (JahSpecularAlbedo: the pass's own constant buffer, PhotonSpecularAlbedoBuffer.h, declared with the
+		// BRDF by the fork's DeclJahSpecularAlbedo), added to the diffuse response inside the BRDF (the hook custom_ps_brdfDiffuse,
 		// fork 200.BRDFs). atomHitMetal is the F0 (rgb) and the Fresnel-90 weight (w) of the specular lobe, as the
 		// voxeliser stores them (lerp( 0.04, base, metalness ) x kS, kS): written for a gather record only, zero else.
 		float4 atomHitMetal = float4( 0.0, 0.0, 0.0, 0.0 );
-		#define JAH_SPEC_ALBEDO( k ) readOnlyFetch( atomWorldLights, int( floatBitsToUint( readOnlyFetch( atomWorldLights, 0 ).z ) ) + ( ( k ) >> 2 ) )[( k ) & 3]
-		@insertpiece( JahSpecularAlbedo )
 		midf3 atomGatherMetalLobe( midf NdotL, midf perceptualRoughness )
 		{
 			if( !( atomHitMetal.w > 0.0 ) )

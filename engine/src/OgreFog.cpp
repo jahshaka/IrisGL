@@ -24,8 +24,11 @@
 #include "HlmsAtom.h"
 #include "Atmosphere.h"
 #include "photon/voxel/PhotonPassBinding.h"
+#include "photon/voxel/PhotonSpecularAlbedoBuffer.h"
 #include "photon/voxel/PhotonIrradianceField.h"
 #include "photon/voxel/PhotonVoxelLighting.h"
+#include <CommandBuffer/OgreCbShaderBuffer.h>
+#include <OgreRootLayout.h>
 #include <CommandBuffer/OgreCbTexture.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
 #include <OgreRootLayout.h>
@@ -313,9 +316,25 @@ Ogre::uint16 FogHlmsListener::getNumExtraPassTextures(const Ogre::HlmsPropertyVe
     return n;
 }
 
+namespace {
+/// The pass property naming the specular albedo table's constant-buffer slot (PHOTON-3;
+/// the fork's DeclJahSpecularAlbedo reads it), hashed once.
+const Ogre::IdString kSpecAlbedoCb("jah_spec_albedo_cb");
+}  // namespace
+
 void FogHlmsListener::setupRootLayout(Ogre::RootLayout &rootLayout,
                                       const Ogre::HlmsPropertyVec &properties, size_t) const {
     PhotonPassBinding::setupRootLayout(rootLayout, properties);
+    // THE SPECULAR LOBE'S ALBEDO TABLE (PHOTON-3): its constant buffer sits one past HlmsPbs's
+    // own range - the pass buffers and the manual probe's slot, which HlmsPbs::setupRootLayout
+    // counts only where the probe can be declared; a slot left unbound in between holds the
+    // render system's dummy buffer - and the range is widened over it.
+    const Ogre::int32 slot = Ogre::Hlms::getProperty(properties, kSpecAlbedoCb, 0);
+    if (slot > 0) {
+        Ogre::DescBindingRange &cb =
+            rootLayout.mDescBindingRanges[0][Ogre::DescBindingTypes::ConstBuffer];
+        cb.end = std::max<Ogre::uint16>(cb.end, Ogre::uint16(slot + 1));
+    }
     // Every PBS-family permutation passes here (HlmsPbs::setupRootLayout ends with this
     // call, and HlmsAtom's starts with PBS's): the set's ends are final for PBS, and
     // HlmsAtom's own widening moves only the starts (it checks again after it).
@@ -347,6 +366,14 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
     // The Photon volumes first, at the slots they were numbered at (OWN-GI-1).
     texUnit = PhotonPassBinding::bind(casterPass, commandBuffer, datablock, texUnit);
     const PassBinds &pb = sPass[datablock->getCreator()->getType()];
+    // THE SPECULAR LOBE'S ALBEDO TABLE (PHOTON-3) at the slot preparePassHash named: the
+    // engine's one immutable buffer, bound whole on every Hlms-type switch (HlmsPbs's own
+    // pass buffers are re-bound at the same moment).
+    if (pb.specAlbedoSlot > 0) {
+        if (Ogre::ConstBufferPacked *table = Ogre::PhotonSpecularAlbedo::constBufferIfCreated())
+            *commandBuffer->addCommand<Ogre::CbShaderBuffer>() =
+                Ogre::CbShaderBuffer(Ogre::PixelShader, Ogre::uint16(pb.specAlbedoSlot), table, 0, 0);
+    }
     // kExtraPassSlots' order: the sky's environment, GATHER-0's irradiance,
     // the cloud field, the sun contact visibility, the atmosphere's volume.
     // Each pair was set together in preparePassHash with its property, or not
@@ -419,6 +446,18 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // field of the pass's own scene, which HlmsPbs used to be handed and now never
     // is — their pass properties are read further down (the environment's reader).
     PhotonPassBinding::preparePassHash(casterPass, sceneManager, hlms);
+    // THE SPECULAR LOBE'S ALBEDO TABLE (PHOTON-3): every colour pass declares its constant
+    // buffer (the fork's DeclJahSpecularAlbedo; BRDF_EnvMap's split sum reads it) one past the
+    // manual probe's slot, which is HlmsPbs's num_pass_const_buffers (set before this hook).
+    // The property, the root layout (setupRootLayout) and the binding (hlmsTypeChanged) read
+    // this one number. The buffer exists from the engine's start (OgreEngine).
+    pb.specAlbedoSlot = -1;
+    if (hlms && !casterPass && Ogre::PhotonSpecularAlbedo::constBufferIfCreated()) {
+        const Ogre::int32 numPass =
+            hlms->_getProperty(Ogre::Hlms::kNoTid, Ogre::IdString("num_pass_const_buffers"));
+        pb.specAlbedoSlot = int(numPass) + 1;
+        hlms->_setProperty(Ogre::Hlms::kNoTid, kSpecAlbedoCb, pb.specAlbedoSlot);
+    }
     // THE CONE SKIPS' ARMS (SPEED-GPU): a skip switched OFF is a permutation that marches
     // everywhere, the cost before the skip; the shipped arms set nothing (JahIfd_piece_ps.any
     // and PhotonVct_piece_ps.any read the two properties).

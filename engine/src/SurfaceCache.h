@@ -95,7 +95,6 @@ class CompositorPassSceneDef;
 class Node;
 class SceneManager;
 class TextureGpu;
-class ConstBufferPacked;
 }   // namespace Ogre
 
 namespace jahshaka {
@@ -633,9 +632,6 @@ private:
     /// voxel re-emits the lobe's directional albedo). The read adds it outside the
     /// diffuse view restore; the Radiance holds it too. +16 MB at 2048 square.
     Ogre::TextureGpu *mFlat = nullptr;
-    /// The lobe's integrals (PhotonSpecularAlbedo.h's table) for the relight, the
-    /// SAME floats the store's jobs and the ray hit read: one immutable buffer.
-    Ogre::ConstBufferPacked *mSpecAlbedoBuffer = nullptr;
     /// THE MOVERS' VISIBILITY (PHOTON-CARDS-4): R8 over the atlas, written by the
     /// ray tier's trace (rq_card_movers.comp), read by the relight where the card
     /// is `moverTraced`. +4 MB at 2048 square.

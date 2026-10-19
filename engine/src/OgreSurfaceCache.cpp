@@ -17,7 +17,7 @@
 #include <OgreHlmsPbs.h>
 #include "photon/voxel/PhotonVoxelLighting.h"
 #include "photon/voxel/PhotonVoxelizerSourceBase.h"
-#include "photon/voxel/PhotonSpecularAlbedo.h"
+#include "photon/voxel/PhotonSpecularAlbedoBuffer.h"
 #include <OgreDescriptorSetTexture.h>
 #include <OgreDescriptorSetUav.h>
 #include <OgreMesh2.h>
@@ -360,14 +360,6 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     mFlat->setPixelFormat(radFmt);
     mFlat->setNumMipmaps(1u);
     mFlat->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
-    // ...and the lobe's integrals, the store's own table (PhotonSpecularAlbedo.h): what
-    // the relight's jahSpecularAlbedo reads, 528 float4s, written once.
-    if (!mSpecAlbedoBuffer) {
-        static_assert(Ogre::PhotonSpecularAlbedo::kFloats == 528u * 4u, "the shader's array is 528 float4s");
-        mSpecAlbedoBuffer = Ogre::Root::getSingleton().getRenderSystem()->getVaoManager()->createConstBuffer(
-            sizeof(Ogre::PhotonSpecularAlbedo::kTable), Ogre::BT_IMMUTABLE,
-            const_cast<float *>(Ogre::PhotonSpecularAlbedo::kTable), false);
-    }
     // ...and THE MOVERS' VISIBILITY (PHOTON-CARDS-4): R8 over the atlas, a UAV
     // the ray tier's trace writes and the relight reads (only inside the cards
     // it flags `moverTraced`, so a texel no trace wrote is never read). +4 MB.
@@ -607,10 +599,6 @@ void SurfaceCache::destroyAll() {
         if (mIndirect) { tm->destroyTexture(mIndirect); mIndirect = nullptr; }
         if (mFlat) { tm->destroyTexture(mFlat); mFlat = nullptr; }
         if (mMoverVis) { tm->destroyTexture(mMoverVis); mMoverVis = nullptr; }
-        if (mSpecAlbedoBuffer) {
-            rs->getVaoManager()->destroyConstBuffer(mSpecAlbedoBuffer);
-            mSpecAlbedoBuffer = nullptr;
-        }
     }
 }
 
@@ -1665,8 +1653,10 @@ void SurfaceCache::relightCards() {
         mLightJob->_setUavTexture(8u, uav);
     }
     mLightJob->_setUavBuffer(2u, bufSlot(mGiBuffer, Ogre::ResourceAccess::Read));
-    // ...and the lobe's integrals, the store's table (the job's one constant buffer).
-    mLightJob->setConstBuffer(0u, mSpecAlbedoBuffer);
+    // ...and the lobe's integrals: the engine's one table (PhotonSpecularAlbedoBuffer.h), the
+    // job's one constant buffer.
+    mLightJob->setConstBuffer(
+        0u, Ogre::PhotonSpecularAlbedo::constBuffer(Ogre::Root::getSingleton().getRenderSystem()->getVaoManager()));
     mLightJob->setThreadsPerGroup(8u, 8u, 1u);
     mLightJob->setNumThreadGroups(kCardPageSize / 8u, kCardPageSize / 8u, unsigned(mRelight.size()));
     // THE RELIGHT NEVER COMPILES IN THE FRAME (ASYNC-SHADERS-1). A permutation this job has

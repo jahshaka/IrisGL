@@ -31,7 +31,7 @@ THE SOFTWARE.
 #include "photon/voxel/PhotonVoxelLighting.h"
 #include "photon/PhotonDispatch.h"
 #include "photon/voxel/PhotonMipChain.h"
-#include "photon/voxel/PhotonSpecularAlbedo.h"
+#include "photon/voxel/PhotonSpecularAlbedoBuffer.h"
 
 #include "photon/voxel/PhotonVoxelizerSourceBase.h"
 #include "photon/voxel/PhotonVoxelVisualizer.h"
@@ -102,7 +102,6 @@ namespace Ogre
         mVoxelizerListenersRemoved( false ),
         mLightInjectionJob( 0 ),
         mLightsConstBuffer( 0 ),
-        mSpecularAlbedoBuffer( 0 ),
         mAnisoGeneratorStep0( 0 ),
         mLightVctBounceInject( 0 ),
         mLightBounce( 0 ),
@@ -163,12 +162,6 @@ namespace Ogre
         mLightsConstBuffer = vaoManager->createConstBuffer( sizeof( PhotonShaderVoxelLight ) * kLightSlots,
                                                             BT_DYNAMIC_PERSISTENT, 0, false );
         mLightInjectionJob->setProperty( "vct_light_budget", static_cast<int32>( kLightSlots ) );
-        // THE METAL'S LOBE INTEGRALS (METAL-BOUNCE-1): the table, as the shader declares it - float4s,
-        // four floats each, 528 of them (JahSpecularAlbedo_piece_all.any).
-        static_assert( PhotonSpecularAlbedo::kFloats == 528u * 4u, "the shader's array is 528 float4s" );
-        mSpecularAlbedoBuffer = vaoManager->createConstBuffer(
-            sizeof( PhotonSpecularAlbedo::kTable ), BT_IMMUTABLE,
-            const_cast<float *>( PhotonSpecularAlbedo::kTable ), false );
 
         HlmsManager *hlmsManager = mVoxelizer->getHlmsManager();
         HlmsSamplerblock samplerblock;
@@ -206,11 +199,6 @@ namespace Ogre
                 mLightsConstBuffer->unmap( UO_UNMAP_ALL );
             vaoManager->destroyConstBuffer( mLightsConstBuffer );
             mLightsConstBuffer = 0;
-        }
-        if( mSpecularAlbedoBuffer )
-        {
-            vaoManager->destroyConstBuffer( mSpecularAlbedoBuffer );
-            mSpecularAlbedoBuffer = 0;
         }
 
         HlmsManager *hlmsManager = mVoxelizer->getHlmsManager();
@@ -746,7 +734,9 @@ namespace Ogre
         // Jahshaka (METAL-BOUNCE-1): the metal (a Load3D, no sampler) and its lobe's integrals.
         texSlot.texture = mVoxelizer->getMetalVox();
         mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
-        mLightVctBounceInject->setConstBuffer( 0, mSpecularAlbedoBuffer );
+        // The engine's one table (PhotonSpecularAlbedoBuffer.h), never a copy of it.
+        mLightVctBounceInject->setConstBuffer(
+            0, PhotonSpecularAlbedo::constBuffer( mVoxelizer->getRenderSystem()->getVaoManager() ) );
 
         // Jahshaka (PHOTON-ENV-1): the environment cube, sampled with the probes'
         // trilinear sampler (a separate sampler object on Vulkan).
@@ -1232,7 +1222,8 @@ namespace Ogre
         renderSystem->debugAnnotationPush( "VctLighting Update" );
 
         mLightInjectionJob->setConstBuffer( 0, mLightsConstBuffer );
-        mLightInjectionJob->setConstBuffer( 1, mSpecularAlbedoBuffer );   // METAL-BOUNCE-1
+        // METAL-BOUNCE-1: the lobe's integrals, the engine's one table (PhotonSpecularAlbedoBuffer.h).
+        mLightInjectionJob->setConstBuffer( 1, PhotonSpecularAlbedo::constBuffer( renderSystem->getVaoManager() ) );
 
         DescriptorSetTexture2::TextureSlot texSlot( DescriptorSetTexture2::TextureSlot::makeEmpty() );
         texSlot.texture = mVoxelizer->getAlbedoVox();

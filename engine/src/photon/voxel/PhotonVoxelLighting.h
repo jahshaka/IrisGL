@@ -98,9 +98,6 @@ namespace Ogre
 
         HlmsComputeJob    *mLightInjectionJob;
         ConstBufferPacked *mLightsConstBuffer;
-        /// Jahshaka (METAL-BOUNCE-1): THE METAL'S LOBE INTEGRALS (PhotonSpecularAlbedo.h), immutable - the
-        /// injection's constant buffer 1 and the bounce's 0 (JahSpecularAlbedo_piece_all.any).
-        ConstBufferPacked *mSpecularAlbedoBuffer;
 
         /// Anisotropic mipmap generation consists of 2 main steps:
         ///

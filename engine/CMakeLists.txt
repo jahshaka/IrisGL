@@ -83,6 +83,8 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelScroll.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelMaterial.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelMaterial.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonSpecularAlbedoBuffer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonSpecularAlbedoBuffer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelLighting.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelLighting.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonVoxelVisualizer.h
@@ -160,15 +162,15 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
         COMMENT "Unwrapping the fork's diffuse lobe for the ray jobs' card read"
         VERBATIM)
-    # THE METAL'S LOBE INTEGRALS FOR GLSLANG (METAL-BOUNCE-1): the Photon jobs' piece, unwrapped the
-    # same way, so a ray's metal hit and the voxel store read one table through one text.
+    # THE LOBE INTEGRALS FOR GLSLANG (METAL-BOUNCE-1; the fork's Pbs piece since PHOTON-3): unwrapped the
+    # same way, so a ray's hit, the voxel store and the pixel's environment read one table through one text.
     set(JAH_RQ_SPEC_ALBEDO "${JAH_RQ_GEN_DIR}/jah_spec_albedo.glsl")
     add_custom_command(
         OUTPUT "${JAH_RQ_SPEC_ALBEDO}"
         COMMAND ${CMAKE_COMMAND} -DUNWRAP=1 -DOUT=${JAH_RQ_SPEC_ALBEDO}
-                -DIN0=${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/JahSpecularAlbedo_piece_all.any
+                -DIN0=${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/JahSpecularAlbedo_piece_all.any
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/JahSpecularAlbedo_piece_all.any"
+        DEPENDS "${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/JahSpecularAlbedo_piece_all.any"
                 "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake"
         COMMENT "Unwrapping the metal's lobe integrals for the ray jobs' hit"
         VERBATIM)

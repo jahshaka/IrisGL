@@ -3317,7 +3317,8 @@ public:
                          const Ogre::HlmsDatablock *datablock, size_t texUnit) override;
     /// THE PHOTON VOLUMES' ARRAYS (OWN-GI-1): the light volumes are texture ARRAYS of
     /// one per cascade, and HlmsPbs adds the array bindings only for the four it knows
-    /// (PhotonPassBinding::setupRootLayout adds the rest).
+    /// (PhotonPassBinding::setupRootLayout adds the rest). And the specular lobe's albedo
+    /// table's constant buffer (PHOTON-3), one past HlmsPbs's own range.
     void setupRootLayout(Ogre::RootLayout &rootLayout, const Ogre::HlmsPropertyVec &properties,
                          size_t tid) const override;
     /// THE PASS-TEXTURE TABLE'S EXACT CHECK (BUGS-1): throws, naming the host, when set 0's
@@ -3350,6 +3351,9 @@ private:
         const Ogre::HlmsSamplerblock *sunVisSampler = nullptr;
         Ogre::TextureGpu             *atmoAerial = nullptr;             // SKY-ATMOSPHERE-1
         const Ogre::HlmsSamplerblock *atmoSampler = nullptr;
+        /// PHOTON-3: the constant-buffer slot of the specular lobe's albedo table
+        /// (PhotonSpecularAlbedoBuffer.h) in this pass, -1 for a pass that declares none.
+        int                           specAlbedoSlot = -1;
     };
     static PassBinds sPass[Ogre::HLMS_MAX];                            // render thread only
     /// The contact job's registration: the texture and its divisor (the pass's
