@@ -71,10 +71,21 @@ void main()
 	uint slot = id.x & 0x00FFFFFFu;
 	uint depth = id.x >> 24u;
 
+	// THE SLOT'S TABLE ROW (bucketTable, AtomComponent::syncViewTable): its BUCKET in mode 3, its MESH ENTRY in mode 1.
+	ivec2 tSize = textureSize( bucketTable, 0 );
+	ivec2 txy = ivec2( int( slot & 1023u ), int( slot >> 10u ) );
+	bool inTable = txy.y < tSize.y;
+	uint row = texelFetch( bucketTable, clamp( txy, ivec2( 0 ), tSize - ivec2( 1 ) ), 0 ).x;
+	row = inTable ? row : 0u;
+
 	vec3 colour = vec3( 0.0 );
 	if( mode == 1u )
 	{
-		colour = atomPalette( atomHash( id.x ^ atomHash( id.y + 0x9E3779B9u ) ) );
+		// MESH-STABLE (ENGINE-POLISH-ATOM-1 stage 6): the mesh entry (the table's row: a slot renumbered by a delete
+		// keeps its mesh), the cluster's index in its mesh's DAG, the triangle in it and the cluster's depth - never
+		// the slot, so deleting an object recolours nothing else; a cut that switches a group still recolours (that
+		// IS the structure changing), and two copies of one mesh show the same colours.
+		colour = atomPalette( atomHash( ( row * 0x9E3779B1u ) ^ ( depth << 24u ) ^ atomHash( id.y + 0x9E3779B9u ) ) );
 	}
 	else if( mode == 2u )
 	{
@@ -93,11 +104,7 @@ void main()
 	}
 	else if( mode == 3u )
 	{
-		ivec2 tSize = textureSize( bucketTable, 0 );
-		ivec2 txy = ivec2( int( slot & 1023u ), int( slot >> 10u ) );
-		bool inTable = txy.y < tSize.y;
-		uint bucket = texelFetch( bucketTable, clamp( txy, ivec2( 0 ), tSize - ivec2( 1 ) ), 0 ).x;
-		bucket = inTable ? bucket : 0u;
+		uint bucket = row;
 		// Bucket ids are SERIAL (1, 2, 3, ...): a golden-ratio walk round the hue
 		// circle keeps neighbouring ids far apart, which a hash does not promise.
 		colour = bucket == 0u ? vec3( 0.3 )

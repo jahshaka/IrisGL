@@ -97,6 +97,7 @@ void AtomComponent::releaseViewTable() {
         mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mViewTable);
     mViewTable = nullptr;
     mViewRows.clear();
+    mViewMode = AtomView::Off;
 }
 
 void AtomComponent::syncViewTable() {
@@ -114,24 +115,34 @@ void AtomComponent::syncViewTable() {
     HlmsAtom *atom = atomHlmsOf(mRoot);
     const unsigned long long bucketGen = atom ? atom->bucketGeneration() : 0ull;
     const bool buckets = mView == AtomView::Buckets;
-    // CHANGE-DRIVEN: the walk runs only in Buckets mode and only when the slot set
+    // ...and the TRIANGLES view's row (ENGINE-POLISH-ATOM-1 stage 6): each slot's MESH ENTRY, so the colour hashes
+    // what stays put under a delete's renumbering (the mesh entry, the cluster, its triangle, its depth), never the
+    // slot (JahAtomView_ps.glsl).
+    const bool meshes = mView == AtomView::Triangles;
+    const bool walks = buckets || meshes;
+    // CHANGE-DRIVEN: the walk runs only in the Buckets and Triangles modes and only when the slot set
     // (the GPU scene's writes) or a bucket's membership (HlmsAtom's generation)
     // moved since the last one; any other mode reads no contents at all.
-    if (mViewTable && mViewTable->getHeight() == rows &&
-        (!buckets || (mViewWrites == gs.writes() && mViewBucketGen == bucketGen)))
+    if (mViewTable && mViewTable->getHeight() == rows && mViewMode == mView &&
+        (!walks || (mViewWrites == gs.writes() && (meshes || mViewBucketGen == bucketGen))))
         return;
+    mViewMode = mView;
     std::vector<uint32_t> table(size_t(rows) * kViewTableWidth, 0u);
-    if (buckets && atom) {
+    if (walks && (atom || meshes)) {
         const GpuInstance *m = gs.mirrorData();
         for (uint32_t i = 0; i < slots; ++i) {
             uint32_t flags = 0u;
             std::memcpy(&flags, &m[i].boundsMax[3], sizeof(flags));
             if (!(flags & kGpuAtom)) continue;
+            if (meshes) {
+                std::memcpy(&table[i], &m[i].boundsMin[3], sizeof(uint32_t));   // the mesh entry (GpuInstance)
+                continue;
+            }
             const Ogre::HlmsDatablock *db = mSlotDatablock(i);
             if (db) table[i] = atom->bucketIdOf(db);
         }
     }
-    if (buckets) {
+    if (walks) {
         mViewWrites = gs.writes();
         mViewBucketGen = bucketGen;
     } else {

@@ -210,6 +210,8 @@ private:
     /// The Buckets walk's witness: the GPU scene's slot writes and HlmsAtom's bucket
     /// generation it last walked at (~0 = walk on the next sync).
     unsigned long long mViewWrites = ~0ull, mViewBucketGen = ~0ull;
+    /// The mode the table was last written for (a Buckets table holds bucket ids, a Triangles one mesh entries).
+    AtomView mViewMode = AtomView::Off;
 
     std::unordered_set<const void *> mStereoViews, mPassthroughViews;
 
