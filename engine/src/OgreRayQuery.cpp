@@ -115,6 +115,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <map>
@@ -2503,6 +2504,22 @@ void RayQueryTier::SceneAs::Feed::take(uint32_t slot, const Rec &r, int sign, bo
     }
 }
 
+namespace {
+/// THE HAND-OVER WIDTH, QUANTISED UPWARD (ENGINE-POLISH-PHOTON-2 fix round): to the next of 64 steps per
+/// octave (the mantissa m in [0.5, 1) on a 1/128 grid: at most +1.56 %, always wider - the far query starts
+/// that much earlier, never later; a monotone ceiling). The width is the coarsest level's bound times the
+/// largest axis scale, a column length of the world matrix: a ROTATING mover's columns move by an ulp from
+/// frame to frame, and an exact width would make every such mover owe the feed's ordered body every frame
+/// (the record compares it exactly). Quantised, a rotation owes nothing unless the width crosses a step.
+/// NO HYSTERESIS: a width within an ulp of a step boundary can flip under rotation and owe every frame (odds
+/// about 2^-17 per mover) - accepted.
+float quantiseHandOver(float w) {
+    int e = 0;
+    const float m = std::frexp(w, &e);   // w = m 2^e, m in [0.5, 1)
+    return std::ldexp(std::ceil(m * 128.0f) / 128.0f, e);
+}
+}   // namespace
+
 /// ONE SLOT'S CONTRIBUTION, from the entry as it is now. The predicates are the
 /// old writer's, read from the same words: `kGpuRayTraced` (the conjunction every
 /// consumer used to recompute), a mesh the table names, `kGpuSkinned` for a rigged
@@ -2532,7 +2549,7 @@ RayQueryTier::SceneAs::Feed::Rec RayQueryTier::SceneAs::Feed::measure(const deta
             const float bound = (b && !b->empty()) ? b->back() : 0.0f;
             if (bound > 0.0f) {
                 const float grown = bound * worldMaxAxisScale(now->world);
-                if (std::isfinite(grown) && grown > 0.0f) next.coarse = grown;
+                if (std::isfinite(grown) && grown > 0.0f) next.coarse = quantiseHandOver(grown);
             }
         }
     }

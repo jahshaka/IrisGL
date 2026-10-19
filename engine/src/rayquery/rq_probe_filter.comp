@@ -110,7 +110,8 @@ shared vec3 gTapP[16];
 /// THE PARALLAX TEST (ENGINE-POLISH-PHOTON-2 stage 3; Lumen's spatial filter): a neighbour's ray in
 /// direction d from its position q hit at distance t, so its sample is the radiance leaving the point
 /// q + t d - which this probe sees in the direction of (q + t d - p), not along d. Its ANGLE ERROR is
-/// the angle between the two. The closed form of the threshold: a texel of solid angle W stands for
+/// the angle between the two, taken at the NEARER of the two rays' distances (t = min of this probe's
+/// and the neighbour's: the test is then symmetric, see the taps). The closed form of the threshold: a texel of solid angle W stands for
 /// the cone of the same solid angle about its centre direction, half-angle a with
 /// 2 pi (1 - cos a) = W, i.e. cos a = 1 - W / (2 pi) (at 8 x 8 over the hemisphere, W = 2 pi / 64 on
 /// average: a = acos(1 - 1/64) = 0.177 rad, 10.1 degrees). A neighbour's hit inside the cone (error
@@ -230,19 +231,32 @@ void main()
 				// THE PARALLAX: the neighbour's hit point as this probe sees it.
 				// A MISS IS AT INFINITY: two misses agree (no parallax at infinity),
 				// a miss and a hit never do (whatever the ray's length happens to be).
+				// Two hits are compared at the NEARER of the two distances (Lumen's
+				// rule): t = min( this probe's, the neighbour's ). At the neighbour's own
+				// distance alone the test is not symmetric: this probe's ray stopped on
+				// a pillar at 0.3 m while the neighbour's, 0.2 m aside, passed it to a
+				// wall at 10 m reads an angle error of 0.02 rad and the wall's radiance
+				// would enter a texel that shows the pillar - and the reverse pair would
+				// be rejected, a weight correlated with which ray is occluded. At the
+				// nearer distance both orders read the same parallax. The test reads the
+				// texel's CENTRE direction dirW, not the direction the neighbour's ray
+				// actually took inside its own texel: a sub-texel error inside the cone.
+				// A distance that is not finite (an fp16 atlas overflow) weighs nothing.
 				float wHit = 0.0;
 				if( own.w < 0.0 || s.w < 0.0 )
 					wHit = ( own.w < 0.0 && s.w < 0.0 ) ? 1.0 : 0.0;
-				else
+				else if( finite1( own.w ) && finite1( s.w ) )
 				{
-					const vec3 seen = gTapP[k] + dirW * s.w - posW.xyz;
+					const float t = min( own.w, s.w );
+					const vec3 seen = gTapP[k] + dirW * t - posW.xyz;
 					const float len = length( seen );
 					const float cosErr = len > 1e-6 ? dot( seen, dirW ) / len : 1.0;
 					const float err = acos( clamp( cosErr, -1.0, 1.0 ) );
-					wHit = clamp( ( kParallaxOut - err / coneHalf ) / ( kParallaxOut - 1.0 ), 0.0, 1.0 );
+					wHit = finite1( err ) ? clamp( ( kParallaxOut - err / coneHalf ) / ( kParallaxOut - 1.0 ), 0.0, 1.0 )
+										  : 0.0;
 				}
 				const float w = wPlane * wHit;
-				if( w <= 0.0 || !finite3( s.xyz ) )
+				if( !( w > 0.0 ) || !finite3( s.xyz ) )
 					continue;
 				sum += s.xyz * w;
 				wsum += w;

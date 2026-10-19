@@ -1,9 +1,8 @@
-// THE GATHER'S PIXEL HISTORY, AS ITS READERS SEE IT (ENGINE-UPGRADE-U5 decision 21): the
+// THE GATHER'S PIXEL HISTORY, AS ITS READER SEES IT (ENGINE-UPGRADE-U5 decision 21): the
 // packed texel's geometry word and the same-surface read of the previous frame's history
-// under a world point. Two readers: the integrate (rq_probe_integrate.comp: the pixel's own
-// running mean) and the filter (rq_probe_filter.comp: the AGE of the history under a probe,
-// which sets the probe-space filter's width). ONE text, so the two read one history the
-// same way.
+// under a world point. One reader: the integrate (rq_probe_integrate.comp: the pixel's own
+// running mean). (The filter read the AGE of the history under a probe until
+// ENGINE-POLISH-PHOTON-2 deleted the age filter.)
 //
 // A CALLER includes this after jah_probe_params.glsl and jah_reproject.glsl and after its
 // own binding of the previous frame's history as `historyPrev` (rg32ui, one layer per eye).
