@@ -81,6 +81,11 @@ struct PhotonPassBinding {
     static void forget(const void *volume);
     /// The field's samplerblock reference, given back before Root (~OgreEngine).
     static void releaseSamplers();
+    /// THE STAND-INS OF A CONFIGURED SHAPE (BISTRO-STREAM-IN-1 stage 3, GiPassShape): one 1x1x1 volume, one 1x1 field
+    /// texel (both zero) and the volumes' sampler, made once (between frames: OgreScene::setGiPassShape) and bound in
+    /// every slot of a pass whose scene's arm (or field) is configured and not built yet; given back before Root.
+    static void ensureStandIns(Ogre::Root *root);
+    static void releaseStandIns();
 
     /// THE GI READERS (ENGINE-UPGRADE-ASYNC-3 stage 2). A pass READS THE GI when its definition says
     /// so (CompositorPassDef::mJahReadsGi, true unless the chain cleared it on a pass whose shaders

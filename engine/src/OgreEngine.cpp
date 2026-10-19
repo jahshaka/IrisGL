@@ -4007,6 +4007,8 @@ void OgreEngine::teardown() {
     // The pass listener's samplerblock references go back to the manager that
     // gave them (PHOTON-ENV-1 audit F10) — it dies with Root.
     try { FogHlmsListener::releaseSamplers(); } catch (...) {}
+    // ...and the GI pass stand-ins (GiPassShape), to the texture manager and the Hlms manager that made them.
+    try { detail::PhotonPassBinding::releaseStandIns(); } catch (...) {}
     // The pooled mip jobs (ENGINE-UPGRADE-ASYNC-3) go back to the compute Hlms that cloned them.
     try { Ogre::PhotonMipChain::releasePool(); } catch (...) {}
     if (mRoot && mInRecordFaultAttached) mRoot->removeFrameListener(mInRecordFault.get());

@@ -747,6 +747,10 @@ public:
     /// Deletes every GI object. Safe to call twice; must run BEFORE the
     /// SceneManager dies (probe workspaces, GI camera).
     void teardownGi();
+    /// THE PASS'S GI SHAPE FROM THE CONFIGURATION (BISTRO-STREAM-IN-1 stage 3; GiPassShape): the cascade table's
+    /// size, the field's wish and the one-cascade SDF skip, handed to the scene's binding whenever the configuration
+    /// (or the view profile the table follows) is applied — before any arm exists.
+    void updateGiPassShape();
     /// THE ONE GI SCHEDULER (U0 3c; OgreGi.cpp): run by the drain once per record that carries the scene's GI.
     void plan(const FrameInputScene &part, bool pushed);
     std::string photonViewRefusal(PhotonView view) const;

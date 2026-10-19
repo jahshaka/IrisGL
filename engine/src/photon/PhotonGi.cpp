@@ -515,6 +515,7 @@ bool PhotonComponent::setGlobalIllumination(const GiParams &p) {
             teardownGi();
             mGi = p;
             mCascadeVoxelLod = p.cascadeVoxelLod;
+            updateGiPassShape();   // no arm: the passes carry no GI properties
             // Switching GI off is the user's own "start over": the hysteresis
             // floor forgets what used to be lit, so switching back on fits the
             // scene as it is now rather than as it was.
@@ -531,6 +532,9 @@ bool PhotonComponent::setGlobalIllumination(const GiParams &p) {
             // back into `mGi`, which must keep comparing equal to what the
             // document pushes or every push under the latch would rebuild.
             mCascadeVoxelLod = p.cascadeVoxelLod;
+            // THE PASS SHAPE NOW, FROM THE CONFIGURATION (BISTRO-STREAM-IN-1 stage 3): the passes draw with the arm's
+            // properties from this frame on, whatever the arm's own waits (a camera, the albedo, the sky, the reveal).
+            updateGiPassShape();
             giDeferrable([this]() { rebuildVct(); });   // ASYNC-SHADERS-1: see applyPendingGiDeferrable
             return true;
         }
@@ -1154,6 +1158,12 @@ GiStatus PhotonComponent::giStatus() const {
         // DDGI, reported the same way pccBound/vctBound are: what this scene's
         // passes bind, not what was requested.
         st.ifdBound          = mIfd && passBinds && passBinds->ifd == mIfd;
+        if (passBinds) {   // the shape the reader passes were prepared with (BISTRO-STREAM-IN-1 stage 3)
+            st.passShapeCascades = passBinds->prepared.cascades;
+            st.passShapeField    = passBinds->prepared.field;
+            st.passShapeStandIn  = passBinds->preparedStandIn;
+            st.passShapeChanges  = passBinds->preparedChanges;
+        }
         st.ifdProbes         = int(mIfdTotalProbes);
         st.ifdProbesPerFrame = mIfd ? int(mIfdProbesPerFrame) : 0;
         if (mIfd) {
@@ -4154,6 +4164,7 @@ bool PhotonComponent::rebuildVct() {
         return false;                    // nothing was built; see the return contract
     }
     mGiCascadeAwaitingCamera = false;
+    updateGiPassShape();   // the table this build reads (the view profile may have moved it)
 
     // AND IT WAITS FOR THE ALBEDO IT IS ABOUT TO VOXELISE (BOOTVOX-1), the same
     // shape as the camera wait above and for the same reason: building now
@@ -6771,6 +6782,19 @@ void PhotonComponent::buildPccFinish() {
 
 unsigned long long PhotonComponent::probeShadowBytes() const {
     return mPccShadowed && mEngine ? mEngine->probeShadowNodeBytes() : 0ull;
+}
+
+void PhotonComponent::updateGiPassShape() {
+    GiPassShape shape;
+    if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
+        const std::vector<GiParams::GiCascadeDesc> table = resolveCascadeTable();
+        shape.cascades = Ogre::int32(table.size());
+        shape.field = shape.cascades > 0 && ddgiWanted();
+        // PhotonVoxelLighting::shouldEnableSpecularSdfQuality for the chain buildCascadeArm makes from this table: a
+        // chain of one (the lighting is made with chainOfOne = table.size() == 1) over more than 32 cells an axis.
+        shape.sdfQuality = table.size() == 1u && table[0].resolution > 32;
+    }
+    mScene.setGiPassShape(shape);
 }
 
 bool PhotonComponent::ddgiWanted() const {

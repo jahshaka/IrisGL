@@ -541,6 +541,12 @@ namespace Ogre
 
         size_t getConstBufferSize() const;
         void fillConstBufferData( const Matrix4 &viewMatrix, float *RESTRICT_ALIAS passBufferPtr ) const;
+        /// THE STAND-IN'S BLOCK (BISTRO-STREAM-IN-1 stage 3, GiPassShape): a field of one probe over
+        /// a 1x1 atlas whose texel holds no irradiance (alpha 0: the cage's valid weight stays 0 and
+        /// it adds nothing). Finite throughout.
+        static void fillEmptyConstBufferData( const Matrix4 &viewMatrix, float *RESTRICT_ALIAS passBufferPtr );
+        /// getConstBufferSize's value, which depends on no member (the stand-in reads it).
+        static size_t constBufferSizeOf() { return sizeof( float ) * ( 4u * 3u + 4u + 4u + 4u ); }
 
         /**
         @param mode

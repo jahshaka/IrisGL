@@ -158,6 +158,10 @@ bool OgreScene::probeSeesItem(const Node &n) const {
 // and unbinds, never the record itself.
 void OgreScene::bindGiVct(Ogre::PhotonVoxelLighting *vct) { mGiBinding.vct = vct; }
 void OgreScene::bindGiIfd(Ogre::PhotonIrradianceField *ifd) { mGiBinding.ifd = ifd; }
+void OgreScene::setGiPassShape(const GiPassShape &shape) {
+    if (shape.cascades > 0 || shape.field) PhotonPassBinding::ensureStandIns(mRoot);
+    mGiBinding.shape = shape;
+}
 void OgreScene::bindGiPcc(Ogre::ParallaxCorrectedCubemapBase *pcc, float minDist, float maxDist) {
     mGiBinding.pcc = pcc;
     if (pcc) { mGiBinding.pccMinDist = minDist; mGiBinding.pccMaxDist = maxDist; }

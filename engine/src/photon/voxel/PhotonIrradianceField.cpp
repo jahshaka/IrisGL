@@ -1064,7 +1064,24 @@ namespace Ogre
         // samples, which simply overrun their map) lands on top of the irradiance
         // atlas parameters and every irradiance UV collapses onto texel 0 — DDGI goes
         // to an almost-black constant, with no error anywhere.
-        return sizeof( float ) * ( 4u * 3u + 4u + 4u + 4u );
+        return constBufferSizeOf();
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::fillEmptyConstBufferData( const Matrix4 &viewMatrix,
+                                                          float *RESTRICT_ALIAS passBufferPtr )
+    {
+        // IrradianceFieldRenderParams (fillConstBufferData below): a 1x1x1 grid a thousand
+        // kilometres away, one probe, a 1x1 atlas for both the depth and the irradiance.
+        Matrix4 xform;
+        xform.makeTransform( -Vector3( 1.0e6f, 1.0e6f, 1.0e6f ), Vector3::UNIT_SCALE, Quaternion::IDENTITY );
+        xform = xform.concatenateAffine( viewMatrix.inverseAffine() );
+        for( size_t i = 0; i < 12u; ++i )
+            *passBufferPtr++ = static_cast<float>( xform[0][i] );
+        const float tail[12] = { 1.0f, 1.0f, 0.0f, 0.0f,    // numProbesAggregated, padding
+                                 1.0f, 1.0f, 1.0f, 1.0f,    // depth: bordered res, full width, 1 / resolution
+                                 1.0f, 1.0f, 1.0f, 1.0f };  // irradiance: the same
+        for( size_t i = 0; i < 12u; ++i )
+            *passBufferPtr++ = tail[i];
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::fillConstBufferData( const Matrix4 &viewMatrix,

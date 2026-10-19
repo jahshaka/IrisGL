@@ -1476,10 +1476,63 @@ namespace Ogre
     //-------------------------------------------------------------------------
     size_t PhotonVoxelLighting::getConstBufferSize() const
     {
+        return constBufferSizeFor( mExtraCascades.size() + 1u );
+    }
+    //-------------------------------------------------------------------------
+    size_t PhotonVoxelLighting::constBufferSizeFor( size_t numCascades )
+    {
         // Jahshaka (CONE-FRAME-2): + xformCube_row0..2, three float4s.
         size_t retVal = 11u * 4u * sizeof( float );
-        retVal += ( 4u + 4u * 2u ) * sizeof( float ) * mExtraCascades.size();
+        retVal += ( 4u + 4u * 2u ) * sizeof( float ) * ( numCascades ? numCascades - 1u : 0u );
         return retVal;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::fillEmptyConstBufferData( size_t numCascades, const Matrix4 &viewMatrix,
+                                                        float *RESTRICT_ALIAS passBufferPtr )
+    {
+        if( !numCascades )
+            return;
+        // float4 vctInvResolution_cascadeMaxLod[numCascades]: a 1x1x1 volume, every LOD past it the last's.
+        for( size_t i = 0u; i < numCascades; ++i )
+        {
+            *passBufferPtr++ = 1.0f;
+            *passBufferPtr++ = 1.0f;
+            *passBufferPtr++ = 1.0f;
+            *passBufferPtr++ = i + 1u == numCascades ? 256.0f : 0.0f;
+        }
+        // float4 fromPreviousProbeToNext[numCascades - 1u][2]: the same space, the same units.
+        for( size_t i = 1u; i < numCascades; ++i )
+        {
+            *passBufferPtr++ = 1.0f;
+            *passBufferPtr++ = 1.0f;
+            *passBufferPtr++ = 1.0f;
+            *passBufferPtr++ = 1.0f;
+            *passBufferPtr++ = 0.0f;
+            *passBufferPtr++ = 0.0f;
+            *passBufferPtr++ = 0.0f;
+            *passBufferPtr++ = 0.0f;
+        }
+        // specSdfMaxMip, specularSdfFactor, blendFade, multiplier: fillConstBufferData's own
+        // formulas at a resolution of 1, and NO light (multiplier 0).
+        const float maxMipmapCount = static_cast<float>( PixelFormatGpuUtils::getMaxMipmapCount( 1u ) );
+        *passBufferPtr++ = 7.0f + ( maxMipmapCount - 8.0f ) * 0.5f;
+        *passBufferPtr++ = 0.1875f;
+        *passBufferPtr++ = 1.0f;
+        *passBufferPtr++ = 0.0f;
+        // xform / invXform: a one-metre volume a thousand kilometres away.
+        const Vector3 origin( 1.0e6f, 1.0e6f, 1.0e6f );
+        Matrix4 xform, invXForm;
+        xform.makeTransform( -origin, Vector3::UNIT_SCALE, Quaternion::IDENTITY );
+        xform = xform.concatenateAffine( viewMatrix.inverseAffine() );
+        invXForm = xform.inverseAffine();
+        for( size_t i = 0; i < 12u; ++i )
+            *passBufferPtr++ = static_cast<float>( xform[0][i] );
+        for( size_t i = 0; i < 12u; ++i )
+            *passBufferPtr++ = static_cast<float>( invXForm[0][i] );
+        // xformCube: the cubemap frame to the probe's (fillConstBufferData's diagonal, unit size).
+        const float rows[12] = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f };
+        for( size_t i = 0; i < 12u; ++i )
+            *passBufferPtr++ = rows[i];
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::getCascadeChainParams( float *RESTRICT_ALIAS outInvResMaxLod,

@@ -451,8 +451,18 @@ namespace Ogre
                                     float *RESTRICT_ALIAS outFromPrev ) const;
 
         size_t getConstBufferSize() const;
+        /// The same block's size for a chain of `numCascades` (BISTRO-STREAM-IN-1: the pass's stand-in).
+        static size_t constBufferSizeFor( size_t numCascades );
 
         void fillConstBufferData( const Matrix4 &viewMatrix, float *RESTRICT_ALIAS passBufferPtr ) const;
+        /** THE STAND-IN'S BLOCK (BISTRO-STREAM-IN-1 stage 3, GiPassShape): the block of a chain of
+            `numCascades` that is not built yet — every cascade a 1x1x1 volume far outside any
+            pixel (every cone leaves it at its first step: transmittance 1, the environment where
+            it escapes) and a multiplier of 0 (the volumes hold no light). Finite throughout: the
+            pass's shaders are the arm's own, and this is what they read until the arm binds.
+        */
+        static void fillEmptyConstBufferData( size_t numCascades, const Matrix4 &viewMatrix,
+                                              float *RESTRICT_ALIAS passBufferPtr );
 
         bool shouldEnableSpecularSdfQuality() const;
 

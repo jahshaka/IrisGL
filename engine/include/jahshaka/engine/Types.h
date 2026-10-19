@@ -4244,6 +4244,15 @@ struct GiStatus {
 
     /// THIS scene's passes sample its irradiance field.
     bool   ifdBound = false;
+    /// THE PASS SHAPE THE SCENE'S GI-READING PASSES WERE LAST PREPARED WITH (BISTRO-STREAM-IN-1 stage 3): the cascades
+    /// and the field they declare — the world's GI configuration's, from the first frame (GiPassShape) — whether they
+    /// bind the configured STAND-INS (the arm or its field not built yet), and how many times that shape CHANGED over
+    /// the scene's life. The arm's arrival changes no pass property: `passShapeChanges` moves only when the GI
+    /// configuration itself does.
+    int    passShapeCascades = 0;
+    bool   passShapeField = false;
+    bool   passShapeStandIn = false;
+    unsigned long long passShapeChanges = 0;
     /// Probes in the field (the product of the three per-axis counts). 0 when
     /// there is no field.
     int    ifdProbes = 0;

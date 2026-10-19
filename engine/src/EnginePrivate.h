@@ -3611,9 +3611,34 @@ void resetSharedTextures();
 // IrradianceField pointers stay null, and the pass reads `vct` / `ifd` below through
 // the listener (PhotonPassBinding, called from FogHlmsListener's hooks), which
 // resolves the same record by the pass's SceneManager.
+/// THE PASS'S GI SHAPE (BISTRO-STREAM-IN-1 stage 3): what the world's GI CONFIGURATION puts in a colour pass —
+/// the cascades the arm will build, whether it carries the irradiance field, and the one-cascade SDF skip — decided
+/// when the GI is configured (PhotonComponent::updateGiPassShape), never when the arm goes live. Until the arm (or
+/// its field) is built the pass binds STAND-INS of the same shape (PhotonPassBinding): every pass property the arm
+/// would set is set from the first frame, so the arm's arrival changes no permutation — the placeholder compiled for
+/// the scene's pass stays valid and the first frames draw (measured before: Showroom 2's first open gained six pass
+/// properties ~66 ms after the open returned and drew its sky alone for ~40 frames while every permutation, the
+/// placeholder's included, compiled again).
+struct GiPassShape {
+    Ogre::int32 cascades = 0;   ///< 0 = no voxel arm in this scene's passes
+    bool        field = false;  ///< the irradiance field rides the arm
+    bool        sdfQuality = false;   ///< PhotonVoxelLighting::shouldEnableSpecularSdfQuality's answer for the table
+    bool operator==(const GiPassShape &o) const {
+        return cascades == o.cascades && field == o.field && sdfQuality == o.sdfQuality;
+    }
+    bool operator!=(const GiPassShape &o) const { return !(*this == o); }
+};
 struct SceneGiBinding {
     Ogre::PhotonVoxelLighting          *vct = nullptr;
     Ogre::PhotonIrradianceField        *ifd = nullptr;
+    /// The configured shape the passes take while `vct` / `ifd` are not built yet (GiPassShape).
+    GiPassShape                         shape;
+    /// ...and the shape this scene's GI-reading passes were last PREPARED with (PhotonPassBinding::preparePassHash,
+    /// render thread), how many times it changed, and whether it was the stand-ins' (GiStatus::passShape*).
+    mutable GiPassShape                 prepared;
+    mutable bool                        preparedOnce = false;
+    mutable bool                        preparedStandIn = false;
+    mutable unsigned long long          preparedChanges = 0;
     Ogre::ParallaxCorrectedCubemapBase *pcc = nullptr;
     /// The PCC-versus-VCT trust window the grid was bound with (buildPccFinish).
     float pccMinDist = 1.0f, pccMaxDist = 2.0f;
@@ -6279,6 +6304,8 @@ public:
     const SceneGiBinding &giBinding() const { return mGiBinding; }
     void bindGiVct(Ogre::PhotonVoxelLighting *vct);
     void bindGiIfd(Ogre::PhotonIrradianceField *ifd);
+    /// The configured pass shape (GiPassShape): its stand-ins are made here, before any pass binds them.
+    void setGiPassShape(const GiPassShape &shape);
     void bindGiPcc(Ogre::ParallaxCorrectedCubemapBase *pcc, float minDist, float maxDist);
     bool unbindGiPcc(const Ogre::ParallaxCorrectedCubemapBase *pcc);   ///< true when it was bound
     bool demoteDragMover(NodeId id, Ogre::Aabb &rest);
