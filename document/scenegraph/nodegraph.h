@@ -27,6 +27,7 @@ For more information see the LICENSE file
 // Ogre-creation hazard they guarded are gone by construction.
 // -----------------------------------------------------------------------------
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <vector>
@@ -92,6 +93,9 @@ struct DocNode
     Trs *riderTag = nullptr;            ///< a rider's TAG world as the engine last drew it (setRiderTag); owned
     PickTable *pickTable = nullptr;     ///< the scene broad-phase table this node has a slot in (PickTable), if any
     int pickSlot = -1;
+    /// THE WRITE JOURNAL'S DEDUPE STAMP (nodegraph.cpp, journalLogLocked): this node's newest entry's sequence per
+    /// kind (moved, posed, written), 0 = never logged. Read and written under the journal's lock only.
+    unsigned long long journalNewest[3] = {};
 
     // ---- the caches (nodegraph.cpp) ----
     // INVARIANT: a node whose world is not valid has no valid world below it (a write invalidates its whole
@@ -126,7 +130,7 @@ public:
     std::size_t slotCount() const { return mNode.size(); }
     SceneNode *node(std::size_t slot) const { return mNode[slot]; }
     State state(std::size_t slot) const { return State(mState[slot]); }
-    const float *box(std::size_t slot) const { return &mBox[6 * slot]; }
+    const float *box(std::size_t slot) const { return mBox[slot].data(); }
     /// The slot's box from the node's world and its LOCAL box (false = an empty box: the slot stays Stale).
     /// Valid only when the world could be cached (never for a socket rider or anything under one).
     bool refresh(std::size_t slot, const Vec3 &localMin, const Vec3 &localMax);
@@ -137,7 +141,7 @@ public:
 private:
     std::vector<SceneNode *> mNode;     ///< null = a free slot
     std::vector<unsigned char> mState;
-    std::vector<float> mBox;            ///< 6 per slot: min xyz, max xyz
+    std::vector<std::array<float, 6>> mBox;   ///< per slot: min xyz, max xyz (contiguous: six floats a slot)
     std::vector<int> mFree;
 };
 

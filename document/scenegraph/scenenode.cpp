@@ -780,7 +780,10 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
     // The world POSE, not a matrix: the re-expression below inverts Ogre's own
     // composition rule exactly (graph::writeGlobalTrs) — a matrix would be
     // decomposed again, losing a negative scale's sign convention and any shear.
-    const graph::Trs initialWorld = graph::world(node->mDoc);
+    // Read only for the re-expression that uses it: a plain attach composed the
+    // node's world (validating its cache) for the attach to invalidate at once —
+    // every node of a document being built (SCENEGRAPH-BASELINE-2).
+    const graph::Trs initialWorld = keepTransform ? graph::world(node->mDoc) : graph::Trs();
 
     // A move inside the same scene keeps its scene membership: tearing the
     // registries down and rebuilding them loses state that only exists at the
@@ -943,10 +946,12 @@ void SceneNode::setScene(ScenePtr scene)
     _setDirtySet(scene->dirtySet());
     scene->addNode(this->sharedFromThis());
 
-    // add children
-    for (const auto &child : children()) {
-        child->setScene(scene);
-    }
+    // add children — RAW (childAt), not children(): that builds a QList of
+    // shared pointers per node joining a scene (SCENEGRAPH-BASELINE-2), and
+    // joining one changes no child list.
+    const int n = childCount();
+    for (int i = 0; i < n; ++i)
+        if (SceneNode *c = childAt(i)) c->setScene(scene);
 }
 
 void SceneNode::removeFromScene()

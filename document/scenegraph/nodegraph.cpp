@@ -93,10 +93,8 @@ void setOwnerById(long long id, SceneNode *owner)
 /// reader that asked for it lives.
 enum class Kind : unsigned char { Moved = 0, Posed = 1, Written = 2 };
 struct JournalEntry { long long id = 0; Kind kind = Kind::Moved; unsigned long long seq = 0; };
-inline unsigned long long journalKey(long long id, Kind k) { return (static_cast<unsigned long long>(id) << 2) | unsigned(k); }
 std::mutex gJournalMutex;
 std::deque<JournalEntry> gJournal;
-std::unordered_map<unsigned long long, unsigned long long> gJournalNewest;   ///< (node, kind) -> its newest entry's seq
 std::atomic<int> gJournalWrittenReaders{0};   ///< readers that asked for the WRITTEN half (noteDocumentWrite)
 std::atomic<int> gJournalPosedReaders{0};     ///< readers that asked for the POSED half (takePoses)
 std::vector<graph::WriteJournalReader *> gJournalReaders;
@@ -114,21 +112,22 @@ inline void journalTrimLocked()
     while (!gJournal.empty() && (gJournal.front().seq < minCursor || gJournal.size() > kJournalCap)) {
         const JournalEntry &e = gJournal.front();
         if (e.seq >= minCursor) gJournalCapFloor = e.seq + 1;   // a reader still owed it
-        auto it = gJournalNewest.find(journalKey(e.id, e.kind));
-        if (it != gJournalNewest.end() && it->second == e.seq) gJournalNewest.erase(it);
         gJournal.pop_front();
     }
 }
 
-/// One entry, the dedupe and the cap (the caller holds gJournalMutex).
-inline void journalLogLocked(long long id, Kind kind)
+/// One entry, the dedupe and the cap (the caller holds gJournalMutex). THE DEDUPE READS THE NODE'S OWN STAMP
+/// (DocNode::journalNewest, SCENEGRAPH-BASELINE-2): a node's newest entry of a kind, by sequence — no global map. An
+/// entry the log has since dropped leaves its stamp behind, and that is exact: a reader trim dropped it below every
+/// cursor (the stamp is below the furthest cursor, so the next write logs again); a CAP drop raised gJournalCapFloor
+/// past every cursor, so every reader's next take is incomplete — its full pass sees the node either way.
+inline void journalLogLocked(DocNode &d, long long id, Kind kind)
 {
-    const unsigned long long key = journalKey(id, kind);
-    auto it = gJournalNewest.find(key);
-    if (it != gJournalNewest.end() && it->second >= gJournalMaxCursor) return;   // every reader still sees that one
+    unsigned long long &newest = d.journalNewest[unsigned(kind)];
+    if (newest != 0 && newest >= gJournalMaxCursor) return;   // every reader still sees that one
     const unsigned long long seq = gJournalNextSeq++;
     gJournal.push_back({ id, kind, seq });
-    gJournalNewest[key] = seq;
+    newest = seq;
     if (gJournal.size() > kJournalCap) journalTrimLocked();
 }
 
@@ -139,7 +138,7 @@ inline void journalWrite(SceneNode *n, Kind kind)
     const long long id = n->getNodeId();
     std::lock_guard<std::mutex> lock(gJournalMutex);
     if (gJournalReaders.empty()) return;          // nobody will ever read it
-    journalLogLocked(id, kind);
+    journalLogLocked(n->docNode(), id, kind);
 }
 
 /// See graph::transformWrites(). Relaxed: a CHANGE TEST, read once a frame.
@@ -242,8 +241,15 @@ void markMoved(DocNode &n)
 /// rider's published world changing moves worlds no write announced.
 void invalidateSubtree(const DocNode &n, bool force = false)
 {
-    std::vector<const DocNode *> stack{ &n };
-    while (!stack.empty()) {
+    // AN INVALID NODE ENDS IT AT ONCE (the invariant), before any stack: a node written again before a read — every
+    // node of a document being built: its scale, its position, its attach — pays a flag test, not a heap allocation
+    // (SCENEGRAPH-BASELINE-2: 3.9 allocations a node built). The stack is the thread's own, reused (graph writes run
+    // on the document's thread; nothing below re-enters), from its depth at entry.
+    if (!n.worldValid && !force) return;
+    thread_local std::vector<const DocNode *> stack;
+    const std::size_t base = stack.size();
+    stack.push_back(&n);
+    while (stack.size() > base) {
         const DocNode *d = stack.back();
         stack.pop_back();
         if (!d->worldValid && !force) continue;
@@ -301,7 +307,7 @@ WriteJournalReader::~WriteJournalReader()
     gJournalReaders.erase(std::remove(gJournalReaders.begin(), gJournalReaders.end(), this), gJournalReaders.end());
     gJournalMaxCursor = 0;
     for (const WriteJournalReader *r : gJournalReaders) gJournalMaxCursor = std::max(gJournalMaxCursor, r->cursor);
-    if (gJournalReaders.empty()) { gJournal.clear(); gJournalNewest.clear(); }
+    if (gJournalReaders.empty()) gJournal.clear();   // (the nodes' stamps stay: every one is below the next cursor)
     else journalTrimLocked();
 }
 
@@ -407,7 +413,7 @@ void noteDocumentWrite(SceneNode *n)
     const long long id = n->getNodeId();
     std::lock_guard<std::mutex> lock(gJournalMutex);
     if (gJournalReaders.empty()) return;
-    journalLogLocked(id, Kind::Written);
+    journalLogLocked(n->docNode(), id, Kind::Written);
 }
 
 void setCountsAsMovement(SceneNode *n, bool counts)
@@ -862,7 +868,7 @@ void PickTable::add(SceneNode *meshNode)
         slot = mNode.size();
         mNode.push_back(nullptr);
         mState.push_back(Stale);
-        mBox.resize(mBox.size() + 6, 0.0f);
+        mBox.push_back({});   // one element a slot (a resize by six floats was a fill loop per mesh node built)
     }
     mNode[slot] = meshNode;
     mState[slot] = Stale;
@@ -897,7 +903,7 @@ bool PickTable::refresh(std::size_t slot, const Vec3 &localMin, const Vec3 &loca
 {
     SceneNode *n = mNode[slot];
     if (!n) return false;
-    float *b = &mBox[6 * slot];
+    float *b = mBox[slot].data();
     if (!worldBox(n->docNode(), localMin, localMax, b, b + 3)) return false;
     // worldBox cached the box only if the world could be cached; the slot follows it exactly (a rider's box is
     // recomputed on every pick, as its world is).
