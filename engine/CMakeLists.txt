@@ -654,8 +654,11 @@ set(JAHSHAKA_OGRE_FORK_COMMIT "${_ogre_fork_commit}" PARENT_SCOPE)
 # against the OLD one in the same run — the binary linked the previous SPIR-V (PHOTON-1 lost two measurements,
 # §2557; FAR-SUN-2's `.comp` edit, BUILD-GRAPH-COMP-LINK) — and every engine edit (a new build id) recompiled
 # OgreTextureCache / OgreShaderCache and relinked in a SECOND build (BUILD-RELINK-TWICE-1). The includes are read from
-# each source at configure (a source that adds one re-configures: it is in the target's sources), and the headers
-# become OBJECT_DEPENDS of exactly those objects: one ninja run orders and rebuilds them, whatever the deps log spells.
+# each source at configure, and the headers become OBJECT_DEPENDS of exactly those objects: one ninja run orders and
+# rebuilds them, whatever the deps log spells. An existing source that NEWLY includes one gets the explicit dependency
+# at the next configure only (an edit of a .cpp does not re-configure); until then the deps log carries it — spelled as
+# the rule's node only when the build runs from its build dir with PWD naming it (the root cause: ccache's base_dir
+# rewrites the depfile against $PWD; spec.sh's builds do, see scripts/lead/lib/util.py build()).
 function(jahshaka_engine_generated_deps target)
     get_target_property(_srcs ${target} SOURCES)
     get_target_property(_sdir ${target} SOURCE_DIR)
