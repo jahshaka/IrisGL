@@ -559,7 +559,7 @@ MaterialPtr PbrMaterial::duplicate() const
     // and the preset/asset guid the material came from — in one line that
     // cannot forget a field added next year. And the ROWS, which it must not
     // share (they are what the panel edits and what SceneWriter saves): the
-    // base's MaterialRows copies by cloning each row, so the copy owns rows
+    // base's iris::PropertyRows copies by cloning each row, so the copy owns rows
     // of its own with every value — a map row's path and asset guid too.
     return PbrMaterialPtr(new PbrMaterial(*this));
 }

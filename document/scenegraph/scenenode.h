@@ -17,6 +17,7 @@ For more information see the LICENSE file
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include "irisglfwd.h"
+#include "core/properties/property.h"
 #include "document/physics/physicsproperties.h"
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/nodedirtyset.h"
@@ -639,7 +640,10 @@ public:
     void deleteAnimation(int index);
     void deleteAnimation(AnimationPtr anim);
 
-    virtual QList<Property*> getProperties();
+    /// The node's reflected rows, a FRESH list that OWNS them (LEAK-1): the
+    /// caller keeps it as long as it reads the rows. They used to be bare
+    /// `new`'d rows every caller had to qDeleteAll — and the timeline did not.
+    virtual PropertyRows getProperties();
     virtual QVariant getPropertyValue(QString valueName);
     /// Mirror of getPropertyValue: applies a value by property name. Returns
     /// false when the node has no such property (callers report, not crash).

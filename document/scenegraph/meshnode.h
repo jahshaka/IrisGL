@@ -87,7 +87,7 @@ public:
         return MeshNodePtr(new MeshNode());
     }
 
-    virtual QList<Property*> getProperties() override;
+    virtual PropertyRows getProperties() override;
     virtual QVariant getPropertyValue(QString valueName) override;
     virtual bool setPropertyValue(QString valueName, const QVariant &value) override;
 

@@ -7,7 +7,10 @@
 #include <QVector3D>
 #include <QVector4D>
 
+#include <QList>
+
 #include <memory>
+#include <vector>
 
 namespace iris
 {
@@ -59,6 +62,43 @@ struct Property
     virtual std::unique_ptr<Property> clone() const = 0;
 
     virtual ~Property() = default;
+};
+
+/// A LIST OF ROWS THAT OWNS THEM (LEAK-1). Every editor-facing row list is one:
+/// a material's (its copy IS the deep copy, each row cloned — the member-wise
+/// copy a material's duplicate() starts from, so two materials never hold the
+/// same row) and the fresh list a scene node reflects itself into
+/// (SceneNode::getProperties, which used to hand back bare `new`'d rows that
+/// nearly every caller leaked). `view()` is the raw, ordered view readers walk;
+/// a pointer in it lives exactly as long as the list. Assignment by copy is
+/// deleted; a list moves.
+class PropertyRows
+{
+public:
+    PropertyRows() = default;
+    PropertyRows(const PropertyRows &other)
+    {
+        mOwned.reserve(other.mOwned.size());
+        mView.reserve(other.mView.size());
+        for (const auto &row : other.mOwned) add(row->clone());
+    }
+    PropertyRows(PropertyRows &&) noexcept = default;
+    PropertyRows &operator=(PropertyRows &&) noexcept = default;
+    PropertyRows &operator=(const PropertyRows &) = delete;
+
+    /// Takes `row` and appends it; returns the row (now owned here).
+    Property *add(std::unique_ptr<Property> row)
+    {
+        Property *raw = row.get();
+        mOwned.push_back(std::move(row));
+        mView.append(raw);
+        return raw;
+    }
+    const QList<Property *> &view() const { return mView; }
+
+private:
+    std::vector<std::unique_ptr<Property>> mOwned;
+    QList<Property *> mView;   // mOwned's pointers, same order
 };
 
 class PropertyListener

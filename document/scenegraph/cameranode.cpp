@@ -208,211 +208,211 @@ bool CameraNode::clearPostOverride(const QString &id)
     return markedParams();
 }
 
-QList<Property*> CameraNode::getProperties()
+PropertyRows CameraNode::getProperties()
 {
     auto props = SceneNode::getProperties();
 
-    auto prop = new FloatProperty();
+    auto prop = std::make_unique<FloatProperty>();
     prop->displayName = "Aspect Ratio";
     prop->name = "aspectRatio";
     prop->value = aspectRatio;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Field of View";
     prop->name = "angle";
     prop->value = angle;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Near Clip";
     prop->name = "nearClip";
     prop->value = nearClip;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Far Clip";
     prop->name = "farClip";
     prop->value = farClip;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Ortho Size";
     prop->name = "orthoSize";
     prop->value = orthoSize;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    auto intProp = new IntProperty();
+    auto intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Projection Mode";
     intProp->name = "projMode";
     intProp->value = static_cast<int>(projMode);
-    props.append(intProp);
+    props.add(std::move(intProp));
 
     // ---- CAMERAS_SPEC §2 -------------------------------------------------
     // The physical-camera rows. Every one of them is keyable through
     // PropertyAnim and writable through node.setProperty for exactly this
     // reason: they are reflected here.
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Focal Length (mm)";
     prop->name = "focalLength";
     prop->value = focalLength();
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Sensor Width (mm)";
     prop->name = "sensorWidth";
     prop->value = sensorWidth;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Sensor Height (mm)";
     prop->name = "sensorHeight";
     prop->value = sensorHeight;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    intProp = new IntProperty();
+    intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Author Mode";
     intProp->name = "authorMode";
     intProp->value = static_cast<int>(authorMode);
-    props.append(intProp);
+    props.add(std::move(intProp));
 
     // ---- CAMERA_LENS_SPEC §3, the filmback rows --------------------------
 
-    intProp = new IntProperty();
+    intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Sensor Fit";
     intProp->name = "sensorFit";
     intProp->value = static_cast<int>(sensorFit);
-    props.append(intProp);
+    props.add(std::move(intProp));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Anamorphic Squeeze";
     prop->name = "anamorphicSqueeze";
     prop->value = anamorphicSqueeze;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Lens Shift X";
     prop->name = "lensShiftX";
     prop->value = lensShiftX;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Lens Shift Y";
     prop->name = "lensShiftY";
     prop->value = lensShiftY;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    auto boolProp = new BoolProperty();
+    auto boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Constrain Aspect Ratio";
     boolProp->name = "constrainAspect";
     boolProp->value = constrainAspect;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
-    boolProp = new BoolProperty();
+    boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Depth of Field";
     boolProp->name = "dofEnabled";
     boolProp->value = dofEnabled;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
-    intProp = new IntProperty();
+    intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Focus Mode";
     intProp->name = "focusMode";
     intProp->value = static_cast<int>(focusMode);
-    props.append(intProp);
+    props.add(std::move(intProp));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Focus Distance";
     prop->name = "focusDistance";
     prop->value = focusDistance;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "F-Stop";
     prop->name = "fStop";
     prop->value = fStop;
-    props.append(prop);
+    props.add(std::move(prop));
 
     // ---- CAMERA_LENS_SPEC §3 P2, the focus rows --------------------------
     // Keyable like everything else here, which is the whole point: a focus pull
     // is a keyframed focusDistance and a stop ramp is a keyframed fStop, both
     // authorable before the DoF pass exists to render them.
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Focus Offset";
     prop->name = "focusOffset";
     prop->value = focusOffset;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    boolProp = new BoolProperty();
+    boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Smooth Focus";
     boolProp->name = "smoothFocus";
     boolProp->value = smoothFocus;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Focus Smoothing Speed";
     prop->name = "focusSmoothingSpeed";
     prop->value = focusSmoothingSpeed;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Min Focus Distance";
     prop->name = "minFocusDistance";
     prop->value = minFocusDistance;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    intProp = new IntProperty();
+    intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Diaphragm Blades";
     intProp->name = "bladeCount";
     intProp->value = bladeCount;
-    props.append(intProp);
+    props.add(std::move(intProp));
 
-    boolProp = new BoolProperty();
+    boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Show Focus Plane";
     boolProp->name = "focusPlaneVisible";
     boolProp->value = focusPlaneVisible;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
-    intProp = new IntProperty();
+    intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Output Height";
     intProp->name = "outputHeight";
     intProp->value = outputHeight;
-    props.append(intProp);
+    props.add(std::move(intProp));
 
-    boolProp = new BoolProperty();
+    boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Show Camera Body";
     boolProp->name = "bodyVisible";
     boolProp->value = bodyVisible;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
     // ---- CAMERA_LENS_SPEC §4, the exposure block -------------------------
     // Keyable like everything else in this list, and for the same reason: an
     // exposure ramp across a shot is a keyframed float, with no animation code.
 
-    intProp = new IntProperty();
+    intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Exposure Mode";
     intProp->name = "exposureMode";
     intProp->value = static_cast<int>(exposureMode);
-    props.append(intProp);
+    props.add(std::move(intProp));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Exposure (stops)";
     prop->name = "exposure";
     prop->value = exposure;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Exposure Min (stops)";
     prop->name = "exposureMin";
     prop->value = exposureMin;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Exposure Max (stops)";
     prop->name = "exposureMax";
     prop->value = exposureMax;
-    props.append(prop);
+    props.add(std::move(prop));
 
     // postOverrides is deliberately NOT a row, the same way focusTarget is not:
     // an override is TRI-STATE and this list has no way to say "inherit" — a

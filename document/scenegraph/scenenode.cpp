@@ -596,79 +596,79 @@ void SceneNode::deleteAnimation(AnimationPtr anim)
     notifyChangedSubtree(NodeChange::Flags);
 }
 
-QList<Property*> SceneNode::getProperties()
+PropertyRows SceneNode::getProperties()
 {
-    auto props = QList<Property*>();
+    PropertyRows props;
 
-    auto prop = new Vec3Property();
+    auto prop = std::make_unique<Vec3Property>();
     prop->displayName = "Position";
     prop->name = "position";
     prop->value = iris::toQt(getLocalPos());
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new Vec3Property();
+    prop = std::make_unique<Vec3Property>();
     prop->displayName = "Rotation";
     prop->name = "rotation";
     prop->value = iris::toQt(getLocalRot().toEulerAngles());
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new Vec3Property();
+    prop = std::make_unique<Vec3Property>();
     prop->displayName = "Scale";
     prop->name = "scale";
     prop->value = iris::toQt(getLocalScale());
-    props.append(prop);
+    props.add(std::move(prop));
 
     // There is no StringProperty in core/properties/property.h; FileProperty is
     // the QString-valued Property, so the name rides on it.
-    auto nameProp = new FileProperty();
+    auto nameProp = std::make_unique<FileProperty>();
     nameProp->displayName = "Name";
     nameProp->name = "name";
     nameProp->value = name;
-    props.append(nameProp);
+    props.add(std::move(nameProp));
 
-    auto boolProp = new BoolProperty();
+    auto boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Visible";
     boolProp->name = "visible";
     boolProp->value = visible;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
-    boolProp = new BoolProperty();
+    boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Cast Shadow";
     boolProp->name = "castShadow";
     boolProp->value = castShadow;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
     // A TOP-LEVEL row beside Cast Shadow, not a buried Reflections section
     // (PLANAR_REFLECTIONS_SPEC.md §7).
-    boolProp = new BoolProperty();
+    boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Planar Reflector";
     boolProp->name = "planarReflector";
     boolProp->value = planarReflector;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
     // Probe-grid placement exclusion (REFLECTIONS_ADOPTION_SPEC.md P1a.2) —
     // beside the other per-object rendering flags, reached from scripts as
     // node.setProperty(id, "probeGridExcluded", true).
-    boolProp = new BoolProperty();
+    boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Exclude From Probe Placement";
     boolProp->name = "probeGridExcluded";
     boolProp->value = probeGridExcluded;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
-    boolProp = new BoolProperty();
+    boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Pickable";
     boolProp->name = "pickable";
     boolProp->value = pickable;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
     // PRESERVE THE SCALE RATIO (SCALE-LOCK-1) — the transform panel's lock
     // icon, reached from a script as node.setScaleLock(id, true) or
     // node.setProperty(id, "scaleLock", true).
-    boolProp = new BoolProperty();
+    boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Lock Scale Ratio";
     boolProp->name = "scaleLock";
     boolProp->value = scaleLock;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
     // LIGHTING CHANNELS as a plain 32-bit row.
     //
@@ -684,11 +684,11 @@ QList<Property*> SceneNode::getProperties()
     //
     // min/max stay 0/0, which the reflection layer reports as UNBOUNDED
     // (nodeapi's row doc) — a bitmask has no meaningful slider range.
-    auto intProp = new IntProperty();
+    auto intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Lighting Channels";
     intProp->name = "lightMask";
     intProp->value = static_cast<int>(lightMask);
-    props.append(intProp);
+    props.add(std::move(intProp));
 
     // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3). An ENUM row on an IntProperty,
     // exactly like a mesh's faceCullingMode: there is no enum Property type,
@@ -697,11 +697,11 @@ QList<Property*> SceneNode::getProperties()
     // movable — never the resolved answer, because the resolution is derived
     // and a derived value in a writable row would be a setting that silently
     // rewrites itself.
-    intProp = new IntProperty();
+    intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Movement";
     intProp->name = "mobility";
     intProp->value = static_cast<int>(mMobility);
-    props.append(intProp);
+    props.add(std::move(intProp));
 
     return props;
 }

@@ -87,7 +87,7 @@ public:
         return dir.toVector3D();
     }
 
-    virtual QList<Property*> getProperties() override;
+    virtual PropertyRows getProperties() override;
     virtual QVariant getPropertyValue(QString valueName) override;
     virtual bool setPropertyValue(QString valueName, const QVariant &value) override;
 

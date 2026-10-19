@@ -396,7 +396,7 @@ public:
      */
     iris::Vec3 calculatePickingDirection(int viewPortWidth, int viewPortHeight, QPointF pos);
 
-    virtual QList<Property*> getProperties() override;
+    virtual PropertyRows getProperties() override;
     virtual QVariant getPropertyValue(QString valueName) override;
     virtual bool setPropertyValue(QString valueName, const QVariant &value) override;
 

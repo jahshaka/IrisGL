@@ -99,7 +99,7 @@ void MeshNode::setFaceCullingMode(const FaceCullingMode &value)
     notifyChanged(NodeChange::Params);
 }
 
-QList<Property*> MeshNode::getProperties()
+PropertyRows MeshNode::getProperties()
 {
     auto props = SceneNode::getProperties();
 
@@ -109,31 +109,31 @@ QList<Property*> MeshNode::getProperties()
     // side effects. setPropertyValue therefore refuses them; use setMesh().
     // There is no StringProperty in core/properties/property.h — FileProperty is
     // the QString-valued Property.
-    auto pathProp = new FileProperty();
+    auto pathProp = std::make_unique<FileProperty>();
     pathProp->displayName = "Mesh Path";
     pathProp->name = "meshPath";
     pathProp->value = meshPath;
     pathProp->readOnly = true;      // matches the setPropertyValue refusal below
-    props.append(pathProp);
+    props.add(std::move(pathProp));
 
-    auto intProp = new IntProperty();
+    auto intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Mesh Index";
     intProp->name = "meshIndex";
     intProp->value = meshIndex;
     intProp->readOnly = true;
-    props.append(intProp);
+    props.add(std::move(intProp));
 
-    intProp = new IntProperty();
+    intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Face Culling Mode";
     intProp->name = "faceCullingMode";
     intProp->value = static_cast<int>(faceCullingMode);
-    props.append(intProp);
+    props.add(std::move(intProp));
 
-    auto boolProp = new BoolProperty();
+    auto boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Default Floor";
     boolProp->name = "defaultFloor";
     boolProp->value = defaultFloor;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
     // @todo: extract properties from material
     return props;

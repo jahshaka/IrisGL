@@ -347,19 +347,19 @@ ParticleOrientation ParticleSystemNode::orientationFromName(const QString &name)
 // they are lists, and Property has no list kind. They travel through the
 // serializer and through the `particles` API module instead.
 
-QList<Property*> ParticleSystemNode::getProperties()
+PropertyRows ParticleSystemNode::getProperties()
 {
     auto props = SceneNode::getProperties();
 
     auto addFloat = [&props](const char *display, const char *name, float value) {
-        auto *p = new FloatProperty();
+        auto p = std::make_unique<FloatProperty>();
         p->displayName = display; p->name = name; p->value = value;
-        props.append(p);
+        props.add(std::move(p));
     };
     auto addBool = [&props](const char *display, const char *name, bool value) {
-        auto *p = new BoolProperty();
+        auto p = std::make_unique<BoolProperty>();
         p->displayName = display; p->name = name; p->value = value;
-        props.append(p);
+        props.add(std::move(p));
     };
 
     addFloat("Particles Per Second", "particlesPerSecond", particlesPerSecond);
@@ -391,25 +391,25 @@ QList<Property*> ParticleSystemNode::getProperties()
     addFloat("Scale Rate",           "scaleRate",          scaleRate);
     addBool ("Scale Rate Multiplies","scaleRateMultiply",  scaleRateMultiply);
 
-    auto *intProp = new IntProperty();
+    auto intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Max Particles";
     intProp->name = "maxParticles";
     intProp->value = maxParticles;
-    props.append(intProp);
+    props.add(std::move(intProp));
 
     auto addVec3 = [&props](const char *display, const char *name, const iris::Vec3 &value) {
-        auto *p = new Vec3Property();
+        auto p = std::make_unique<Vec3Property>();
         p->displayName = display; p->name = name; p->value = iris::toQt(value);
-        props.append(p);
+        props.add(std::move(p));
     };
     addVec3("Extents",       "extents",      extents);
     addVec3("Inner Extents", "innerExtents", innerExtents);
     addVec3("Wind",          "wind",         wind);
 
     auto addColour = [&props](const char *display, const char *name, const QColor &value) {
-        auto *p = new ColorProperty();
+        auto p = std::make_unique<ColorProperty>();
         p->displayName = display; p->name = name; p->value = value;
-        props.append(p);
+        props.add(std::move(p));
     };
     addColour("Colour Fade 1 (rate)", "colourFade1", colourFade1);
     addColour("Colour Fade 2 (rate)", "colourFade2", colourFade2);
@@ -421,10 +421,10 @@ QList<Property*> ParticleSystemNode::getProperties()
     // the texture row has always used.
     auto addString = [&props](const char *display, const char *name, const QString &value,
                               bool readOnly = false) {
-        auto *p = new FileProperty();
+        auto p = std::make_unique<FileProperty>();
         p->displayName = display; p->name = name; p->value = value;
         p->readOnly = readOnly;
-        props.append(p);
+        props.add(std::move(p));
     };
     addString("Emitter Shape", "shape",       shapeName(shape));
     addString("Orientation",   "orientation", orientationName(orientation));

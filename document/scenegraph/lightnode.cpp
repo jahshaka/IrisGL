@@ -11,69 +11,69 @@
 namespace iris
 {
 
-QList<Property*> LightNode::getProperties()
+PropertyRows LightNode::getProperties()
 {
     auto props = SceneNode::getProperties();
 
-    auto colorProp = new ColorProperty();
+    auto colorProp = std::make_unique<ColorProperty>();
     colorProp->displayName = "Light Color";
     colorProp->name = "lightColor";
     colorProp->value = color;
-    props.append(colorProp);
+    props.add(std::move(colorProp));
 
-    auto prop = new FloatProperty();
+    auto prop = std::make_unique<FloatProperty>();
     prop->displayName = "Intensity";
     prop->name = "intensity";
     prop->value = intensity;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Range";
     prop->name = "distance";
     prop->value = distance;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Source Radius";
     prop->name = "sourceRadius";
     prop->value = sourceRadius;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Spot CutOff";
     prop->name = "spotCutOff";
     prop->value = spotCutOff;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Spot CutOff Softness";
     prop->name = "spotCutOffSoftness";
     prop->value = spotCutOffSoftness;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Spot Falloff";
     prop->name = "spotFalloff";
     prop->value = spotFalloff;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Rect Width";
     prop->name = "rectWidth";
     prop->value = rectWidth;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Rect Height";
     prop->name = "rectHeight";
     prop->value = rectHeight;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Icon Size";
     prop->name = "iconSize";
     prop->value = iconSize;
-    props.append(prop);
+    props.add(std::move(prop));
 
     // (THREE PROPERTIES ARE GONE — `shadowAlpha`, `shadowColor` and
     // `shadowBias`, render audit I-6, CRUD law. All three were advertised,
@@ -81,30 +81,30 @@ QList<Property*> LightNode::getProperties()
     // renderer: the mirror never read a shadow alpha or colour — a shadow is
     // the absence of light, not a tinted overlay — and the depth bias is the
     // engine's own per-shadow-node constant.)
-    auto intProp = new IntProperty();
+    auto intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Light Type";
     intProp->name = "lightType";
     intProp->value = static_cast<int>(lightType);
-    props.append(intProp);
+    props.add(std::move(intProp));
 
-    intProp = new IntProperty();
+    intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Shadow Map Type";
     intProp->name = "shadowMapType";
     intProp->value = static_cast<int>(shadowMap.shadowType);
-    props.append(intProp);
+    props.add(std::move(intProp));
 
-    intProp = new IntProperty();
+    intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Shadow Map Resolution";
     intProp->name = "shadowMapResolution";
     intProp->value = shadowMap.resolution;
-    props.append(intProp);
+    props.add(std::move(intProp));
 
     // FOLLOWS ATMOSPHERE (the sun only; lightnode.h says what it means).
-    auto atmoProp = new BoolProperty();
+    auto atmoProp = std::make_unique<BoolProperty>();
     atmoProp->displayName = "Follows Atmosphere";
     atmoProp->name = "followsAtmosphere";
     atmoProp->value = followsAtmosphere;
-    props.append(atmoProp);
+    props.add(std::move(atmoProp));
 
     // FORWARD SHADING PRIORITY — the slot this light takes in the renderer's
     // shadow-casting order, and which directional IS the sun (0 wins).
@@ -114,23 +114,23 @@ QList<Property*> LightNode::getProperties()
     // could not discover the one row that decides which light is the sun
     // (MIRROR_SCALE lane, 2026-09-13 — an API-first discovery gap, not a
     // wiring one).
-    intProp = new IntProperty();
+    intProp = std::make_unique<IntProperty>();
     intProp->displayName = "Forward Shading Priority";
     intProp->name = "forwardShadingPriority";
     intProp->value = forwardShadingPriority;
-    props.append(intProp);
+    props.add(std::move(intProp));
 
-    auto boolProp = new BoolProperty();
+    auto boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Double Sided";
     boolProp->name = "doubleSided";
     boolProp->value = doubleSided;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
-    boolProp = new BoolProperty();
+    boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Accurate";
     boolProp->name = "accurate";
     boolProp->value = accurate;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
     return props;
 }

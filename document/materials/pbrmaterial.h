@@ -530,7 +530,7 @@ public:
 private:
     PbrMaterial();
     /// Member-wise, for duplicate() ALONE: every field is a value, and the
-    /// rows are the base's MaterialRows, whose copy clones each one — the copy
+    /// rows are the base's iris::PropertyRows, whose copy clones each one — the copy
     /// never shares a row with the original. Nobody else may copy.
     PbrMaterial(const PbrMaterial &) = default;
     PbrMaterial &operator=(const PbrMaterial &) = delete;

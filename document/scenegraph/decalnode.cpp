@@ -9,59 +9,59 @@
 namespace iris
 {
 
-QList<Property*> DecalNode::getProperties()
+PropertyRows DecalNode::getProperties()
 {
     auto props = SceneNode::getProperties();
 
-    auto texProp = new TextureProperty();
+    auto texProp = std::make_unique<TextureProperty>();
     texProp->displayName = "Decal Image";
     texProp->name = "decalTexture";
     texProp->value = textureGuid;
-    props.append(texProp);
+    props.add(std::move(texProp));
 
-    auto prop = new FloatProperty();
+    auto prop = std::make_unique<FloatProperty>();
     prop->displayName = "Width";
     prop->name = "width";
     prop->value = width;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Height";
     prop->name = "height";
     prop->value = height;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Depth";
     prop->name = "depth";
     prop->value = depth;
-    props.append(prop);
+    props.add(std::move(prop));
 
     // The only scene-node rows with a range worth declaring: setPropertyValue
     // below qBounds both to 0..1, so this is the setter's own contract written
     // down, not a UI slider's taste. Every other node row leaves min == max ==
     // 0, which readers must take as "no declared range" (property.h).
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Metalness";
     prop->name = "metalness";
     prop->value = metalness;
     prop->minValue = 0.0f;
     prop->maxValue = 1.0f;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    prop = new FloatProperty();
+    prop = std::make_unique<FloatProperty>();
     prop->displayName = "Roughness";
     prop->name = "roughness";
     prop->value = roughness;
     prop->minValue = 0.0f;
     prop->maxValue = 1.0f;
-    props.append(prop);
+    props.add(std::move(prop));
 
-    auto boolProp = new BoolProperty();
+    auto boolProp = std::make_unique<BoolProperty>();
     boolProp->displayName = "Ignore Alpha (Diffuse Only)";
     boolProp->name = "ignoreAlphaDiffuse";
     boolProp->value = ignoreAlphaDiffuse;
-    props.append(boolProp);
+    props.add(std::move(boolProp));
 
     return props;
 }

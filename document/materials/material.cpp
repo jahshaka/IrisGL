@@ -20,21 +20,6 @@ namespace iris
 
 std::atomic<quint64> Material::sGlobalRevision{1};
 
-MaterialRows::MaterialRows(const MaterialRows &other)
-{
-    mOwned.reserve(other.mOwned.size());
-    mView.reserve(other.mView.size());
-    for (const auto &row : other.mOwned) add(row->clone());
-}
-
-Property *MaterialRows::add(std::unique_ptr<Property> row)
-{
-    Property *raw = row.get();
-    mOwned.push_back(std::move(row));
-    mView.append(raw);
-    return raw;
-}
-
 QVariant Material::textureRef(const QString &path, const QString &guid)
 {
     return QVariantMap{ { QStringLiteral("path"), path }, { QStringLiteral("guid"), guid } };

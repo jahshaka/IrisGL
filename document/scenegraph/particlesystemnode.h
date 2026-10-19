@@ -273,7 +273,7 @@ public:
     /// children, and because callers still tick the graph.
     void update(float delta) override;
 
-    QList<Property*> getProperties() override;
+    PropertyRows getProperties() override;
     QVariant getPropertyValue(QString valueName) override;
     bool setPropertyValue(QString valueName, const QVariant &value) override;
 
