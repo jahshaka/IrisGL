@@ -310,9 +310,6 @@ bool surfaceCardsCapturing();
 Ogre::CompositorWorkspace *surfaceCacheWorkspace(const SurfaceCache *cache);
 /// The placeholder draws / pending skips made inside the cache's own captures (ASYNC-SHADERS-1).
 /// Kept per SceneManager across the cache's rebuilds; `forget` drops the entry (scene teardown).
-/// HlmsCompute's deferred-dispatch count when this frame began (OgreEngine::renderOneFrame):
-/// a frame that deferred a compute permutation is a frame with a hole (AsyncHoldListener).
-unsigned long long computeDeferralsAtFrameStart();
 /// How many views compile in the background right now (OgreView::setAsyncShaders); the shader
 /// cache's counter names any compile made off the background compiler while it is non-zero.
 int asyncViewCount();
@@ -5790,9 +5787,6 @@ public:
     void applyPendingGi() { return mPhoton.applyPendingGi(); }
     void applyPendingGiDeferrable() { return mPhoton.applyPendingGiDeferrable(); }
     void giDeferrable(const std::function<void()> &work) { return mPhoton.giDeferrable(work); }
-    /// The arm owes a rebuild because a permutation it dispatched was building: every frame
-    /// until it lands is held.
-    bool giDeferralPending() const { return mPhoton.giDeferralPending(); }
     void applyPendingGiFlush() { return mPhoton.applyPendingGiFlush(); }
     /// The pace of the frame being rendered (OPEN_COVER_SPEC §2.1):
     /// Engine::renderOneFrame pushes it once per frame, to every scene.
@@ -6986,31 +6980,6 @@ private:
     unsigned held() const { return mHeld ? mHeld->load(std::memory_order_acquire) : 0u; }
 };
 
-/// THE HELD FRAME (ASYNC-SHADERS-1), THE SAFETY NET. The grey placeholder (PBS and the Atom
-/// decode) is what a waiting object draws; the placeholders are pass permutations themselves,
-/// and the startup gate builds them for every tier's pass. A frame of an asynchronous view
-/// that still drew a HOLE — an object with neither its shader nor a placeholder yet (unlit,
-/// or a pass nothing prebuilt) — is not presented: the window keeps the last complete picture
-/// (the fork's CompositorWorkspace::setSuppressSwap) until a frame draws no hole, at most
-/// kMaxHeldFrames in a row. Counted (AsyncShaderStats::heldFrames) and rare: measured 0 for a
-/// cold material apply and a cold tier change, 2 at a project create.
-class OgreView;
-class AsyncHoldListener final : public Ogre::CompositorWorkspaceListener {
-public:
-    /// Then it presents anyway. FRAMES, and generous: a frame that is not presented does not
-    /// wait for the display, so a scripted loop runs several times faster while it holds
-    /// (measured before the placeholders were prebuilt: a cold tier change held 382 frames).
-    static constexpr unsigned kMaxHeldFrames = 1200u;
-    explicit AsyncHoldListener(OgreView *view) : mView(view) {}
-    void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override;
-    void workspacePosUpdate(Ogre::CompositorWorkspace *ws) override;
-    OgreView *mView;
-    unsigned long long mSkipsAtStart = 0;
-    unsigned mHeldInARow = 0;
-    unsigned long long mHeldFrames = 0;       ///< frames held, ever
-    unsigned long long mHoleyPresented = 0;   ///< frames with a hole that were presented anyway
-};
-
 class OgreView final : public View, public inspect::ViewEcho {
 public:
     /// On-screen: `window` is set. Offscreen: `texture` is set. Never both.
@@ -7720,15 +7689,6 @@ private:
     /// (CAMERA_LENS_SPEC §4). Null on a passthrough view — every thumbnail,
     /// preview and pixel suite, by construction.
     std::unique_ptr<chain::ViewGlobalsListener> mGlobalsListener;
-    /// The held frame (AsyncHoldListener); made when the view first turns asynchronous.
-    std::unique_ptr<AsyncHoldListener> mAsyncHold;
-public:
-    Ogre::CompositorWorkspace *ogreWorkspace() const { return mWorkspace; }
-    Ogre::CompositorWorkspace *ogrePipWorkspace() const { return mPipWorkspace; }
-    OgreScene *asyncHoldScene() const { return mScene; }
-    const Ogre::HlmsCompute *computeHlms() const;
-    const AsyncHoldListener *asyncHold() const { return mAsyncHold.get(); }
-private:
     /// Owned; registered the same way while this view's chain traces
     /// reflections (PHOTON_SPEC §7 R5). Null everywhere else — on a machine
     /// without ray queries, with the preference off, or on any view whose chain
@@ -8111,8 +8071,23 @@ public:
     }
     bool pendingGiConfiguration(const Scene *scene) const override;
     /// THE ONE DRAIN (U0 3a): the record the hand-over took (`any` false = an EMPTY hand-over), applied at the top of
-    /// the frame.
-    void drainFrameInput(FrameInput &in, bool any);
+    /// the frame. `budgeted` (a FREE frame's own drain, BISTRO-STREAM-IN-1): the structure is applied in its one order
+    /// until its budget is spent (kFreeDrainShare); the rest is carried to the next frame
+    /// (RenderThread::carryForward). Lockstep frames, joins and requests drain whole.
+    void drainFrameInput(FrameInput &in, bool any, bool budgeted = false);
+    /// THE FREE FRAME'S DRAIN BUDGET (BISTRO-STREAM-IN-1, measured on Bistro's first open: one frame drained the
+    /// messages of every tick queued while the previous frame ran — 823 -> 21,304 messages, 0.75 -> 3.9 s of drain, the
+    /// frames growing with the queue). A FREE frame applies the structure for at most what the REST of the last free
+    /// frame took (kFreeDrainShare of it: a load takes at most half of every frame, and so streams in at half the render
+    /// thread), never less than one display period (the driver's; a headset session's own) and never more than
+    /// kFreeDrainCeilingPeriods of them (a slow one-off frame does not buy the next drain its length) — what the budget
+    /// leaves is carried, in order, to the next frame. Under Unlimited pacing (no period sent) the unpaced period
+    /// stands in. At least one message a frame: a load always advances.
+    static constexpr double kFreeDrainShare = 1.0;
+    static constexpr double kFreeDrainCeilingPeriods = 6.0;
+    static constexpr double kFreeDrainUnpacedPeriodMs = 1000.0 / 60.0;
+    /// The last FREE frame's drain (ms): its share of RenderThread::lastFrameWorkNs is not the frame's own work.
+    double mLastFreeDrainMs = 0.0;
     bool mInDrain = false;   ///< inside drainFrameInput: applySceneStream times its parts (U4 stage 3)
     /// A SCENE'S STREAM (U3 stage 3): its structural messages in emission order, then its node records — the drain's
     /// per-scene head, and what updateScene applies of the pending record before it resolves (a resolve answers for

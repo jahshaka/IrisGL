@@ -488,7 +488,6 @@ public:
     Ogre::PhotonIrradianceField *irradianceField() const { return mIfd; }
     size_t cascadeCount() const { return mVctCascades.size(); }
     Ogre::PhotonVoxelLighting *cascadeLighting(size_t i) const { return mVctCascades[i].lighting; }
-    bool giDeferralPending() const { return mGiDeferralRetry; }
     /// HOW MUCH of a staged arm build is still owed, and which stage is next
     /// (OPEN_COVER_SPEC §2.1, lane OPEN-COVER-2b). The public mirror of
     /// `mGiBuildStage`, which names the stage that will run NEXT — so `Field`
@@ -661,12 +660,12 @@ public:
     /// applyPendingGi as an ASYNCHRONOUS scene runs it (ASYNC-SHADERS-1): the lighting arm's
     /// compute permutations are never compiled in the frame. Under the fork's deferred
     /// dispatch a missing one goes to the background compiler and its dispatch is skipped;
-    /// the arm built that frame is then not a result: the frame is HELD (AsyncHoldListener)
-    /// and the arm is rebuilt once the background compiler has drained. A blocking scene
+    /// the arm built that frame is then not a result, and the arm is rebuilt whole once the
+    /// background compiler has drained (the frames between draw what exists). A blocking scene
     /// runs applyPendingGi unchanged.
     void applyPendingGiDeferrable();
     /// Runs `work` (a lighting-arm build) under the deferred dispatch when the scene is
-    /// asynchronous; a deferral owes the arm a whole rebuild (giDeferralPending).
+    /// asynchronous; a deferral owes the arm a whole rebuild (mGiDeferralRetry).
     void giDeferrable(const std::function<void()> &work);
     /// The flush proper — what applyPendingGi was before the staged machine.
     void applyPendingGiFlush();

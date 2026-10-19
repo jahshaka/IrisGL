@@ -74,8 +74,9 @@ void GpuCull::destroy() {
         if (mLevels) mVao->destroyUavBuffer(mLevels);
         if (mVisible) mVao->destroyUavBuffer(mVisible);
         if (mParams) mVao->destroyUavBuffer(mParams);
+        if (mGroups) mVao->destroyUavBuffer(mGroups);
     }
-    mDraws = mCount = mSurvivors = mLevels = mVisible = mParams = mHeld = nullptr;
+    mDraws = mCount = mSurvivors = mLevels = mVisible = mParams = mHeld = mGroups = nullptr;
     mCutStream = mCutTriWords = mCutRecords = mCutSlotBase = nullptr;
     mCutIndexBudget = mCutRecordBudget = mCutSlotCapacity = 0u;
     mVao = nullptr;
@@ -159,6 +160,10 @@ bool GpuCull::ensure(Ogre::VaoManager *vao, uint32_t slotCapacity, std::string &
     mLevels = vao->createUavBuffer(want, sizeof(uint32_t), 0, zeros.data(), false);
     mSurvivors = vao->createUavBuffer(want, sizeof(uint32_t), 0, zeros.data(), false);
     mCount = vao->createUavBuffer(kCountElements, sizeof(uint32_t), 0, zeros.data(), false);
+    {
+        const uint32_t one[3] = { 1u, 1u, 1u };
+        mGroups = vao->createUavBuffer(3u, sizeof(uint32_t), 0, const_cast<uint32_t *>(one), false);
+    }
     // Two ranges of commands: the survivors' and the two-sided range (twoSidedFirst).
     zeros.resize(size_t(want) * kDrawWords * 2u, 0u);
     mDraws = vao->createUavBuffer(size_t(want) * kDrawWords * 2u, sizeof(uint32_t), 0, zeros.data(),
@@ -207,10 +212,14 @@ void unbindCullJobs(Ogre::HlmsComputeJob *test, Ogre::HlmsComputeJob *compact,
                     Ogre::HlmsComputeJob *draws) {
     const Ogre::DescriptorSetUav::BufferSlot empty =
         Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
-    if (test)
+    if (test) {
         for (uint8_t i = 0; i < test->getNumUavUnits(); ++i) test->_setUavBuffer(i, empty);
-    if (compact)
+        test->setIndirectDispatchBuffer(0);
+    }
+    if (compact) {
         for (uint8_t i = 0; i < 4u; ++i) compact->_setUavBuffer(i, empty);
+        compact->setIndirectDispatchBuffer(0);
+    }
     if (draws) {
         for (uint8_t i = 0; i < 6u; ++i) draws->_setUavBuffer(i, empty);
         draws->setIndirectDispatchBuffer(0);
@@ -372,16 +381,22 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         test->_setUavBuffer(5u, cullSlot(cull.levels(), Ogre::ResourceAccess::Write));
         test->_setUavBuffer(6u, cullSlot(cull.held(), Ogre::ResourceAccess::ReadWrite));
         if (prior) test->_setUavBuffer(7u, cullSlot(prior->visible(), Ogre::ResourceAccess::Read));
+        // THE GROUP COUNT IS DATA, NEVER A PERMUTATION (BISTRO-STREAM-IN-1; GpuCull::groups): an indirect dispatch
+        // of the count uploaded here, so one built test and one built compact serve every scene size.
         const uint32_t groups =
-            (instances + GpuCull::kThreadsPerGroup - 1u) / GpuCull::kThreadsPerGroup;
-        test->setNumThreadGroups(std::max(groups, 1u), 1u, 1u);
+            std::max((instances + GpuCull::kThreadsPerGroup - 1u) / GpuCull::kThreadsPerGroup, 1u);
+        {
+            const uint32_t words[3] = { groups, 1u, 1u };
+            cull.groups()->upload(words, 0, 3u);
+        }
+        test->setIndirectDispatchBuffer(cull.groups(), 0);
 
         // ---- job 2: compact ------------------------------------------------
         compact->_setUavBuffer(0u, cullSlot(cull.params(), Ogre::ResourceAccess::Read));
         compact->_setUavBuffer(1u, cullSlot(cull.visible(), Ogre::ResourceAccess::Read));
         compact->_setUavBuffer(2u, cullSlot(cull.survivors(), Ogre::ResourceAccess::Write));
         compact->_setUavBuffer(3u, cullSlot(cull.count(), Ogre::ResourceAccess::ReadWrite));
-        compact->setNumThreadGroups(std::max(groups, 1u), 1u, 1u);
+        compact->setIndirectDispatchBuffer(cull.groups(), 0);
 
         // ---- job 3: the draw commands, sized by the GPU --------------------
         draws->_setUavBuffer(0u, cullSlot(mGpuScene.instanceBuffer(), Ogre::ResourceAccess::Read));

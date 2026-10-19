@@ -6380,11 +6380,6 @@ struct AsyncShaderStats {
     /// Draws inside the surface cache's captures that met a shader still building — those
     /// capture batches are discarded and retried (the atlas never holds a grey card).
     unsigned long long captureDeferredDraws = 0;
-    /// THE HELD FRAME: frames of an asynchronous view NOT presented because they drew a hole
-    /// (the window kept the last complete picture), and frames with a hole presented anyway
-    /// (a hold longer than its cap, or before the view had shown anything). Summed over views.
-    unsigned long long heldFrames = 0;
-    unsigned long long holeyPresented = 0;
     /// Shaders compiled ON THE SERVICE'S THREADS (running total). Subtract it from
     /// `shaderBuildProgress`'s `compiled` and what remains is every compile a frame
     /// waited for — the live-compile sentry's number (SHADER-WARM-2).
@@ -8335,6 +8330,10 @@ struct FrameInputStatus {
     unsigned long long messagesTotal = 0;       ///< ...ever
     unsigned long long messagesRefused = 0;     ///< ...ever refused (each one a completion of its own, decision 34)
     unsigned long long nodeRecordsTotal = 0;    ///< ...ever
+    /// THE FREE FRAME'S BUDGET (BISTRO-STREAM-IN-1): the messages the LAST drain left to the next frame (its budget
+    /// spent), and the drains that were cut, ever. Lockstep frames, joins and requests drain whole (0 here).
+    unsigned           messagesCarried = 0;
+    unsigned long long drainsCut = 0;
     double             drainMicros = 0.0;       ///< what the LAST drain cost (the record's own overhead)
     /// ...THE LAST DRAIN'S PARTS (ENGINE-UPGRADE-U4 stages 1, 3; the monitor's stage `engine.drain` and its children
     /// time the same spans): NAMING the moved subtrees to the scans (applyChangeSet -> nameMovedSubtrees), the NODE

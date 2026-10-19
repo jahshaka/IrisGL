@@ -64,6 +64,11 @@ public:
         std::lock_guard<std::mutex> lock(mSlotLock);
         return f(static_cast<const FrameInput &>(mSlot.record), mSlot.any);
     }
+    /// THE DRAIN'S REMAINDER (BISTRO-STREAM-IN-1): what a free frame's drain did not apply within its budget
+    /// (OgreEngine::drainFrameInput) goes back into the slot AHEAD of everything submitted since — its sequence numbers
+    /// are older — merged by the submit's own rule, so the next hand-over (or a join's or a request's drain) applies
+    /// it first, in the one order. Render side.
+    void carryForward(FrameInput &&rest);
 
     // ---- THE RENDER SIDE ---------------------------------------------------------------------------------------
     /// ONE TURN OF THE LOOP on the caller's thread (stage 1's seam; stage 4's run() loops it on its own thread):

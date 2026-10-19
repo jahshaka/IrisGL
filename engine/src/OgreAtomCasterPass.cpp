@@ -477,6 +477,9 @@ struct LightPyramid {
     bool seen = false;
     /// THE RECEIVER GRID (stage 4b's counting door): its request, its tiles, its counts.
     Ogre::UavBufferPacked *recvParams = nullptr, *recvGrid = nullptr;
+    /// The box job's group count, an indirect dispatch's three words (BISTRO-STREAM-IN-1: a count set on the job is
+    /// a permutation property, and the instance count it follows grows every frame of a load — GpuCull::groups).
+    Ogre::UavBufferPacked *recvGroups = nullptr;
     uint32_t recvGridWords = 0u;   ///< the grid's words: every level of its pyramid
 };
 /// A PYRAMID ITS MAP DID NOT RENDER FOR this many frames is freed (decision 16.3): the sun removed, the
@@ -519,7 +522,7 @@ void destroyPyramid(LightPyramid &p) {
     Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
     if (p.tex && rs && rs->getTextureGpuManager()) rs->getTextureGpuManager()->destroyTexture(p.tex);
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
-    for (Ogre::UavBufferPacked **b : { &p.origin, &p.recvParams, &p.recvGrid }) {
+    for (Ogre::UavBufferPacked **b : { &p.origin, &p.recvParams, &p.recvGrid, &p.recvGroups }) {
         if (*b && vao) vao->destroyUavBuffer(*b);
         *b = nullptr;
     }
@@ -968,6 +971,7 @@ bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreS
             lp.recvGridWords = words;
         }
         if (!lp.recvParams) lp.recvParams = vao->createUavBuffer(1u, sizeof(RecvParams), 0, nullptr, false);
+        if (!lp.recvGroups) lp.recvGroups = vao->createUavBuffer(3u, 4u, 0, nullptr, false);
         RecvParams p;
         const Ogre::Matrix4 inv = rd.drawMatrix.inverse();
         for (int r = 0; r < 4; ++r)
@@ -1037,11 +1041,15 @@ bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreS
             boxJob->_setUavBuffer(1u, uavOf(lp.recvGrid, Ogre::ResourceAccess::ReadWrite));
             boxJob->_setUavBuffer(2u, uavOf(gs.instanceBuffer(), Ogre::ResourceAccess::Read));
             // one workgroup an instance, capped at the device's 65,535 (OgreScreenProbeGather.cpp's rule): a workgroup
-            // strides the slots past it (JahReceiverGrid_cs, mode 1)
-            boxJob->setNumThreadGroups(std::min(65535u, std::max(1u, gs.slotCount())), 1u, 1u);
+            // strides the slots past it (JahReceiverGrid_cs, mode 1) — an INDIRECT count, never the job's own
+            // (lp.recvGroups: the job's count would be a permutation per scene size)
+            const uint32_t groups[3] = { std::min(65535u, std::max(1u, gs.slotCount())), 1u, 1u };
+            lp.recvGroups->upload(groups, 0, 3u);
+            boxJob->setIndirectDispatchBuffer(lp.recvGroups, 0);
             // (the measuring door shadow.receiverBoxesOff skips it: the fixture's negative control, decision 22.3)
             if (boxes) dispatch(boxJob);
             for (Ogre::uint8 u = 0u; u < 3u; ++u) boxJob->_setUavBuffer(u, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+            boxJob->setIndirectDispatchBuffer(0);
         }
         // THE FARTHEST-RECEIVER PYRAMID, a level a dispatch (a 2048 map's 256 x 256 tiles: eight small ones).
         reduceJob->_setUavBuffer(0u, uavOf(lp.recvParams, Ogre::ResourceAccess::Read));

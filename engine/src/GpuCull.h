@@ -74,6 +74,11 @@ public:
     Ogre::UavBufferPacked *levels() const { return mLevels; }
     Ogre::UavBufferPacked *survivors() const { return mSurvivors; }
     Ogre::UavBufferPacked *count() const { return mCount; }
+    /// THE TEST'S AND THE COMPACT'S GROUP COUNT, an indirect dispatch's three words (BISTRO-STREAM-IN-1): uploaded with
+    /// each request. A group count set on the job is one of its PERMUTATION's properties (Ogre's num_thread_groups_x),
+    /// so a scene that grew by one group needed a new compute permutation — under the background compiler a deferred
+    /// cull, every frame of a load that kept adding instances (Bistro: 1,779 deferred tests over a 60-s stream-in).
+    Ogre::UavBufferPacked *groups() const { return mGroups; }
     /// The draw commands: `capacity()` of them at the survivors' indices, then (the
     /// cut, mode 3) THE TWO-SIDED RANGE — `capacity()` more from `twoSidedFirst()`,
     /// count[17] of them written: the commands of the survivors flagged kGpuTwoSided
@@ -180,6 +185,7 @@ private:
     Ogre::UavBufferPacked *mCount = nullptr;
     Ogre::UavBufferPacked *mDraws = nullptr;
     Ogre::UavBufferPacked *mHeld = nullptr;
+    Ogre::UavBufferPacked *mGroups = nullptr;
     uint32_t mCapacity = 0u;
     Ogre::UavBufferPacked *mCutStream = nullptr;
     Ogre::UavBufferPacked *mCutTriWords = nullptr;
