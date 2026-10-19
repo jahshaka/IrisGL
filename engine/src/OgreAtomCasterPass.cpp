@@ -1571,7 +1571,7 @@ void warmCasterPassJobs(OgreScene *scene, Ogre::RenderSystem *rs, const Ogre::Ca
             GpuCull scratch;
             GpuCullRequest req;
             fillCullFrustum(camera, float(std::max(1u, rd.rect[3])), req);
-            req.flagsRequired = kGpuVisible | kGpuAtom;
+            req.flagsRequired = kGpuVisible | kGpuAtomCaster | kGpuCaster;   // the caster cut's own set (its request above)
             req.mode = 3u;
             OgreScene::CullReceivers receivers;
             receivers.params = lp.recvParams;

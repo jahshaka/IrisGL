@@ -404,9 +404,9 @@ bool OgreScene::atomCasterThroughCut(const Node &n, Ogre::uint32 flags, AtomRout
     // A BLENDED ITEM'S CASTER (ENGINE-POLISH-ATOM-1 stage 2): an id buffer has no slot for order-dependent colour,
     // so its main pass stays PBS — but its stock caster is the OPAQUE silhouette (HlmsPbs::calculateHashForPreCaster
     // keeps no blending; the caster's blendblock writes depth), which the caster cut draws exactly. Not when the
-    // blended material is ALSO alpha-tested (its stock caster discards at the mask: the masked ranges' business),
-    // nor skinned (the cut reads the bind pose), nor a caster that culls its FRONT faces (the cut's pipelines cull
-    // back faces or none), nor a row the cut cannot read.
+    // blended material is ALSO alpha-tested (its stock caster discards at the mask, which the cut cannot: the masked
+    // route is stage 3's patch, not shipped), nor skinned (the cut reads the bind pose), nor a caster that culls its
+    // FRONT faces (the cut's pipelines cull back faces or none), nor a row the cut cannot read.
     if (route != AtomRoute::Blended) return false;
     if (flags & (kGpuAlphaTested | kGpuSkinned)) return false;
     const Ogre::HlmsDatablock *db = n.item->getSubItem(0)->getDatablock();

@@ -90,8 +90,6 @@ public:
     /// warm-up's second frame, OgreView.cpp): the screen decode's draws for the words the
     /// Atom items wear, then the Atom view's table. A still frame does nothing.
     void step();
-    /// The scene files any item in the Atom queue.
-    bool hasItems() const { return !mWords.empty(); }
     /// The caster cut has a caster to draw (kGpuAtomCaster: an Atom item, or a caster-only one — the caster pass's
     /// gate; ENGINE-POLISH-ATOM-1 stage 2).
     bool hasCasters() const { return mFeed.casterCount != 0u; }

@@ -627,7 +627,7 @@ constexpr Ogre::uint32 kCardSubjectBit = 1u << 10;
 //     execution-gated by kPhotonSceneExecutionBit), whose mask is this bit alone.
 constexpr Ogre::uint32 kPhotonViewBit  = 1u << 11;
 
-// THE STOCK CASTER CHANNEL (ENGINE-POLISH-ATOM-1 stage 2). The TENTH and ELEVENTH bits, ADDED beside an item's world
+// THE STOCK CASTER CHANNEL (ENGINE-POLISH-ATOM-1 stage 2). Bits 12 and 13 (the THIRTEENTH and FOURTEENTH), ADDED beside an item's world
 // channel (never instead of it): kStockCasterBit beside kVisibleBit, kStockMoverCasterBit beside kMovableBit
 // (stockCasterBits). The shadow nodes' SCENE passes — the stock PBS caster — ask for THESE (shadowPassMask), never for
 // the world channels themselves, so an item whose caster the caster cut draws (kGpuAtomCaster: a blended item whose
