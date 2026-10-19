@@ -16,8 +16,13 @@
 //   1. the survivor's DRAW COMMAND: indexCount = the drawn clusters' indices,
 //      firstIndex = where its contiguous run of the view's stream starts (one
 //      atomic on count[11] per survivor), firstInstance = the slot — at the
-//      survivor's index, or, for a TWO-SIDED survivor, at the next command of the
-//      list's two-sided range (cut.w on, one atomic on count[17]);
+//      survivor's index, or, for a TWO-SIDED or a MASKED survivor, at the next command
+//      of the list's range for it (cut.w on): two-sided at cut.w (count[17]), masked
+//      at 2 cut.w (count[18]), masked two-sided at 3 cut.w (count[19]) — the passes
+//      draw each range with its own pipeline (no cull; a fragment stage that discards
+//      at the cut-out's mask, ENGINE-POLISH-ATOM-1 stage 3). THE FACES ARE THE PASS'S:
+//      a caster request (it asks for kGpuAtomCaster) reads the caster's two-sided bit,
+//      every other the colour's;
 //   2. per drawn cluster a RECORD (slot, the cluster's global index, its first
 //      index in the stream, its depth) — the emit job's work list, one atomic on
 //      count[8] per survivor, the offsets inside the run a workgroup prefix sum;
@@ -111,7 +116,10 @@ uvec2 jahRecvLevelSize( uint k )
 @end
 
 #define JAH_INSTANCE_LANES 10u
-#define JAH_FLAG_TWO_SIDED 0x800u   // GpuScene.h kGpuTwoSided
+#define JAH_FLAG_TWO_SIDED 0x800u          // GpuScene.h kGpuTwoSided (the colour pass's faces)
+#define JAH_FLAG_CASTER_TWO_SIDED 0x4000u  // GpuScene.h kGpuCasterTwoSided (the caster's faces)
+#define JAH_FLAG_ALPHA_TESTED 0x10u        // GpuScene.h kGpuAlphaTested (the masked ranges)
+#define JAH_FLAG_ATOM_CASTER 0x2000u       // GpuScene.h kGpuAtomCaster (a caster request asks for it)
 #define JAH_NO_GROUP 0xFFFFFFFFu
 #define JAH_TERMINAL 3.0e38
 #define JAH_CUT_WIDTH @value( threads_per_group_x )
@@ -436,19 +444,24 @@ void main()
 		if( mode != 0u )
 			atomicAdd( counter[4], drawnIdx / 3u );
 		uint o = i * 5u;
-		// A TWO-SIDED survivor's command (ATOM-TWO-SIDED-1, the flags word's bit 11):
-		// in the list's two-sided range, which the passes draw with their no-cull
-		// pipeline (count[17] its length); its command at the survivor index draws
-		// nothing. The flags word is the instance's lane 7, w.
+		// A TWO-SIDED or MASKED survivor's command (ATOM-TWO-SIDED-1; ENGINE-POLISH-ATOM-1
+		// stage 3): in the list's range for it, which the passes draw with that range's
+		// pipeline (count[17..19] the lengths); its command at the survivor index draws
+		// nothing. The flags word is the instance's lane 7, w; the faces bit is the
+		// request's pass's (a caster request asks for kGpuAtomCaster).
 		uint flags = floatBitsToUint( instanceWords[slot * JAH_INSTANCE_LANES + 7u].w );
-		if( params.cut.w != 0u && ( flags & JAH_FLAG_TWO_SIDED ) != 0u && mode != 0u )
+		const uint facesBit = ( params.counts.y & JAH_FLAG_ATOM_CASTER ) != 0u ? JAH_FLAG_CASTER_TWO_SIDED
+																				: JAH_FLAG_TWO_SIDED;
+		const uint range = ( ( flags & facesBit ) != 0u ? 1u : 0u ) +
+						   ( ( flags & JAH_FLAG_ALPHA_TESTED ) != 0u ? 2u : 0u );
+		if( params.cut.w != 0u && range != 0u && mode != 0u )
 		{
 			draws[o + 0u] = 0u;
 			draws[o + 1u] = 0u;
 			draws[o + 2u] = 0u;
 			draws[o + 3u] = 0u;
 			draws[o + 4u] = slot;
-			o = ( params.cut.w + atomicAdd( counter[17], 1u ) ) * 5u;
+			o = ( range * params.cut.w + atomicAdd( counter[16u + range], 1u ) ) * 5u;
 		}
 		draws[o + 0u] = drawnIdx;
 		draws[o + 1u] = 1u;

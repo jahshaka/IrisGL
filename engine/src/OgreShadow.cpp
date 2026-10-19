@@ -1609,6 +1609,11 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // THE FRAME'S ONE COMMIT: the composed slots and the ray-level patches, in one
         // staging map, into the frame's copy — before the ray tier reads it.
         for (OgreScene *s : drawn) s->commitGpuSceneFrame();
+        // THE CUT-OUTS' MASKS (ENGINE-POLISH-ATOM-1 stage 3): every drawn scene's table after its commit (the flags
+        // word it reads is this frame's), the masks it asks for made on the device, then ONE edge for every address
+        // reader - before the ray tier (which reads the table) and every pass.
+        for (OgreScene *s : drawn) s->updateMaskTable();
+        alphaMaskStore().endFrame(mRoot ? mRoot->getRenderSystem() : nullptr);
         {
             const auto rqStart = std::chrono::steady_clock::now();
             updateRayQuery(drawn);
@@ -1829,6 +1834,198 @@ bool OgreScene::shadowCasterRoutes(std::vector<ShadowRouteShare> &out)
         }
         return false;
     } JAH_CATCH(mError, false);
+}
+
+// THE COVERAGE A/B (Scene::coverageSnapshot / coverageCompare; ENGINE-POLISH-ATOM-1 stage 3's silhouette bound, a
+// measuring door): the first view's FINAL depth (the id pass's depth target, which the scene passes after it test and
+// write: Atom and stock items alike) and its sun maps, read back synchronously (Image2 - a measurement's read, never a
+// frame's) into one of two snapshots; the two compared pixel by pixel.
+namespace {
+/// A depth texel's float (a D32 or a D32S8 texel's first four bytes: the box strides by the format).
+float depthTexel(const Ogre::TextureBox &box, unsigned x, unsigned y) {
+    float v = 0.0f;
+    std::memcpy(&v, static_cast<const unsigned char *>(box.at(x, y, 0)), sizeof(float));
+    return v;
+}
+/// The bands of a mismatch bitmap: per mismatch, the shorter of its horizontal and vertical run.
+void bandsOf(const std::vector<unsigned char> &m, unsigned w, unsigned h, std::vector<float> &out) {
+    std::vector<unsigned> hr(m.size(), 0u), vr(m.size(), 0u);
+    for (unsigned y = 0; y < h; ++y)
+        for (unsigned x = 0; x < w;) {
+            if (!m[size_t(y) * w + x]) { ++x; continue; }
+            unsigned e = x;
+            while (e < w && m[size_t(y) * w + e]) ++e;
+            for (unsigned k = x; k < e; ++k) hr[size_t(y) * w + k] = e - x;
+            x = e;
+        }
+    for (unsigned x = 0; x < w; ++x)
+        for (unsigned y = 0; y < h;) {
+            if (!m[size_t(y) * w + x]) { ++y; continue; }
+            unsigned e = y;
+            while (e < h && m[size_t(e) * w + x]) ++e;
+            for (unsigned k = y; k < e; ++k) vr[size_t(k) * w + x] = e - y;
+            y = e;
+        }
+    out.clear();
+    for (size_t i = 0; i < m.size(); ++i)
+        if (m[i]) out.push_back(float(std::min(hr[i], vr[i])));
+    std::sort(out.begin(), out.end());
+}
+void percentiles(const std::vector<float> &b, float &p50, float &p99, float &mx) {
+    p50 = b.empty() ? 0.0f : b[size_t(double(b.size() - 1) * 0.50)];
+    p99 = b.empty() ? 0.0f : b[size_t(double(b.size() - 1) * 0.99)];
+    mx = b.empty() ? 0.0f : b.back();
+}
+}   // namespace
+
+bool OgreScene::coverageSnapshot(unsigned slot)
+{
+    if (hostPosts()) { bool r = false; requestOnEngine([&] { r = coverageSnapshot(slot); }); return r; }
+    JAH_HOST_CALL("Scene::coverageSnapshot");
+    if (slot > 1u) return false;
+    CoverageShot &shot = mCoverageShots[slot];
+    shot = CoverageShot();
+    JAH_TRY {
+        for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>()) {
+            Ogre::TextureGpu *depth = v ? v->atomReceiverDepth().depth : nullptr;
+            if (!depth) continue;
+            const unsigned *rect = v->atomReceiverDepth().rect;
+            Ogre::Image2 img;
+            img.convertFromTexture(depth, 0u, 0u);
+            const Ogre::TextureBox box = img.getData(0u);
+            shot.w = rect[2];
+            shot.h = rect[3];
+            // THE DEPTH AS A VIEW DISTANCE, by the camera's own depth-range projection (perspective or orthographic
+            // alike: clip z = P22 z + P23, clip w = P32 z + P33 over the view's z).
+            shot.proj = v->camera() ? v->camera()->getProjectionMatrixWithRSDepth() : Ogre::Matrix4::IDENTITY;
+            shot.depth.assign(size_t(shot.w) * shot.h, 0.0f);
+            for (unsigned y = 0; y < shot.h; ++y)
+                for (unsigned x = 0; x < shot.w; ++x)
+                    shot.depth[size_t(y) * shot.w + x] = depthTexel(box, rect[0] + x, rect[1] + y);
+            // THE CUT-OUTS' PIXELS: the id image's slots (x words) whose flags say the id pass drew them masked.
+            shot.masked.assign(size_t(shot.w) * shot.h, 0u);
+            Ogre::CompositorWorkspace *ws0 = v->workspace();
+            Ogre::TextureGpu *idTex = nullptr;
+            for (Ogre::CompositorNode *n : ws0 ? ws0->getNodeSequence() : Ogre::CompositorNodeVec())
+                if ((idTex = n->getDefinedTexture(Ogre::IdString(kAtomIdTexture))) != nullptr) break;
+            const detail::GpuInstance *mirror = mGpuScene.live() ? mGpuScene.mirrorData() : nullptr;
+            if (idTex && mirror) {
+                Ogre::Image2 ii;
+                ii.convertFromTexture(idTex, 0u, 0u);
+                const Ogre::TextureBox ib = ii.getData(0u);
+                for (unsigned y = 0; y < shot.h && rect[1] + y < idTex->getHeight(); ++y)
+                    for (unsigned x = 0; x < shot.w && rect[0] + x < idTex->getWidth(); ++x) {
+                        uint32_t idx = 0u;
+                        std::memcpy(&idx, static_cast<const unsigned char *>(ib.at(rect[0] + x, rect[1] + y, 0)),
+                                    sizeof(idx));
+                        if (idx == 0xFFFFFFFFu) continue;
+                        const uint32_t slot = idx & 0x00FFFFFFu;
+                        if (slot >= mGpuScene.slotCount()) continue;
+                        uint32_t f = 0u;
+                        std::memcpy(&f, &mirror[slot].boundsMax[3], sizeof(f));
+                        shot.masked[size_t(y) * shot.w + x] = (f & kGpuAtom) && (f & kGpuAlphaTested);
+                    }
+            }
+            Ogre::CompositorWorkspace *ws = v->workspace();
+            Ogre::CompositorShadowNode *sn = ws ? ws->findShadowNode(Ogre::IdString(OgreView::kShadowNodeName)) : nullptr;
+            Ogre::TextureGpu *atlas = sn ? sn->getDefinedTexture(Ogre::IdString("atlas0")) : nullptr;
+            if (atlas) {
+                Ogre::Image2 ai;
+                ai.convertFromTexture(atlas, 0u, 0u);
+                const Ogre::TextureBox ab = ai.getData(0u);
+                const unsigned tw = atlas->getWidth(), th = atlas->getHeight();
+                const Ogre::CompositorShadowNodeDef *def = sn->getDefinition();
+                for (size_t i = 0; i < def->getNumShadowTextureDefinitions(); ++i) {
+                    if (!sn->isShadowMapIdxActive(i)) continue;
+                    const Ogre::Light *l = sn->getLightAssociatedWith(i);
+                    if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL) continue;
+                    const Ogre::ShadowTextureDefinition *td = def->getShadowTextureDefinition(i);
+                    CoverageShot::Map m;
+                    m.map = unsigned(i);
+                    const unsigned x0 = unsigned(td->uvOffset.x * Ogre::Real(tw) + Ogre::Real(0.5));
+                    const unsigned y0 = unsigned(td->uvOffset.y * Ogre::Real(th) + Ogre::Real(0.5));
+                    m.w = unsigned(td->uvLength.x * Ogre::Real(tw) + Ogre::Real(0.5));
+                    m.h = unsigned(td->uvLength.y * Ogre::Real(th) + Ogre::Real(0.5));
+                    m.vp = sn->getViewProjectionMatrix(i);
+                    m.atlasW = tw;
+                    m.d.assign(size_t(m.w) * m.h, 0.0f);
+                    for (unsigned y = 0; y < m.h && y0 + y < th; ++y)
+                        for (unsigned x = 0; x < m.w && x0 + x < tw; ++x)
+                            m.d[size_t(y) * m.w + x] = depthTexel(ab, x0 + x, y0 + y);
+                    shot.maps.push_back(std::move(m));
+                }
+            }
+            shot.valid = true;
+            return true;
+        }
+        return false;
+    } JAH_CATCH(mError, false);
+}
+
+bool OgreScene::coverageCompare(float viewRelDepth, float mapDepthTexels, bool maskedOnly, CoverageCompare &out)
+{
+    if (hostPosts()) {
+        bool r = false;
+        requestOnEngine([&] { r = coverageCompare(viewRelDepth, mapDepthTexels, maskedOnly, out); });
+        return r;
+    }
+    JAH_HOST_CALL("Scene::coverageCompare");
+    out = CoverageCompare();
+    const CoverageShot &a = mCoverageShots[0], &b = mCoverageShots[1];
+    if (!a.valid || !b.valid || a.w != b.w || a.h != b.h) return false;
+    out.valid = true;
+    out.width = a.w;
+    out.height = a.h;
+    std::vector<float> bands;
+    {
+        // THE VIEW DISTANCES (the snapshot's own projection: z = (P23 - d P33) / (d P32 - P22)); two differ by more
+        // than `viewRelDepth` of the nearer — a cleared (sky) pixel, at infinity or the far plane, against a surface
+        // included.
+        std::vector<unsigned char> m(a.depth.size(), 0u);
+        const auto dist = [](const Ogre::Matrix4 &P, float d) {
+            const double den = double(d) * double(P[3][2]) - double(P[2][2]);
+            return std::fabs(den) > 1e-30 ? float(std::fabs((double(P[2][3]) - double(d) * double(P[3][3])) / den))
+                                          : 3.0e38f;
+        };
+        for (size_t i = 0; i < m.size(); ++i) {
+            const float da = a.depth[i], db = b.depth[i];
+            const float za = dist(a.proj, da), zb = dist(b.proj, db);
+            m[i] = da != db && std::fabs(za - zb) > viewRelDepth * std::min(za, zb);
+            if (maskedOnly && !(i < a.masked.size() && a.masked[i]) && !(i < b.masked.size() && b.masked[i])) m[i] = 0u;
+            out.viewMismatch += m[i];
+        }
+        bandsOf(m, a.w, a.h, bands);
+        percentiles(bands, out.viewBandP50, out.viewBandP99, out.viewBandMax);
+    }
+    for (const CoverageShot::Map &ma : a.maps)
+        for (const CoverageShot::Map &mb : b.maps) {
+            if (ma.map != mb.map || ma.w != mb.w || ma.h != mb.h) continue;
+            CoverageCompare::Map cm;
+            cm.map = ma.map;
+            cm.width = ma.w;
+            cm.height = ma.h;
+            float diff = 0.0f;
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c) diff = std::max(diff, float(std::fabs(ma.vp[r][c] - mb.vp[r][c])));
+            cm.sameLight = diff < 1e-4f;
+            // ORTHOGRAPHIC (a sun map): a depth difference is a world distance along the light through row 2, counted
+            // in the map's texel footprints (shadow.atom_parity's metric: row 0's length, without the atlas's
+            // translation, over the atlas's width — the map's x scale is its rectangle's share of it).
+            const float r2 = std::sqrt(float(ma.vp[2][0] * ma.vp[2][0] + ma.vp[2][1] * ma.vp[2][1] +
+                                             ma.vp[2][2] * ma.vp[2][2]));
+            const float r0 = std::sqrt(float(ma.vp[0][0] * ma.vp[0][0] + ma.vp[0][1] * ma.vp[0][1] +
+                                             ma.vp[0][2] * ma.vp[0][2]));
+            const float texelWorld = ma.atlasW && r0 > 0.0f ? 1.0f / (r0 * float(ma.atlasW)) : 1.0f;
+            std::vector<unsigned char> m(ma.d.size(), 0u);
+            for (size_t i = 0; i < m.size(); ++i) {
+                m[i] = std::fabs(ma.d[i] - mb.d[i]) / std::max(1e-12f, r2) > mapDepthTexels * texelWorld;
+                cm.mismatch += m[i];
+            }
+            bandsOf(m, ma.w, ma.h, bands);
+            percentiles(bands, cm.bandP50, cm.bandP99, cm.bandMax);
+            out.maps.push_back(cm);
+        }
+    return true;
 }
 
 void OgreScene::setShadowReceiverCull(bool on)

@@ -6,7 +6,8 @@
 //   mode 0, a thread per pixel of the view's id depth of this frame (every surface the Atom decode shades):
 //     the pixel unprojected to the world with the inverse of the matrix it was drawn with, projected into the map;
 //   mode 1, a workgroup per GPU scene instance NOT drawn by the id pass (the stock (PBS) route: blended,
-//     alpha-tested, a helper, a skinned item, one still loading, one with no mesh row - hidden ones too, a superset)
+//     a cut-out still masking, a helper, a skinned item, one still loading, one with no mesh row - hidden ones too,
+//     a superset; an Atom cut-out is in the id depth, holed where its mask is)
 //     in the camera's frustum: its pixels are not in that depth when the maps render, so its whole box is taken as
 //     receiver. A SKINNED item's box is its mesh's bind pose moved with the node, which a pose can leave (a limb
 //     swung out): its receiver is the SPHERE of twice the box's half-diagonal about its centre (decision 19.5).

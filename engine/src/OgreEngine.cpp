@@ -3909,6 +3909,8 @@ void OgreEngine::teardown() {
     // shared job, after every view whose chain dispatched it and before Root.
     try { releaseHzbBuild(); } catch (...) {}
     try { releaseAtomCasterPass(); } catch (...) {}
+    // THE CUT-OUTS' MASKS (AlphaMasks.h): the engine's store, after every scene's table and before Root.
+    try { releaseAlphaMasks(); } catch (...) {}
     // ...and THE PASS PROVIDER comes off the compositor manager (V2-E E9), after every
     // workspace that could instantiate its passes died with the views above. The
     // provider is a process static: left installed, it stayed armed across Root's

@@ -942,6 +942,13 @@ public:
     virtual bool shadowMapDigests(std::vector<ShadowMapDigest> &out) { out.clear(); return false; }
     /// THE SUN MAPS' CASTERS BY ROUTE (ShadowRouteShare; a measuring door). False without a view or a sun.
     virtual bool shadowCasterRoutes(std::vector<ShadowRouteShare> &out) { out.clear(); return false; }
+    /// THE COVERAGE A/B (CoverageCompare; a measuring door, ENGINE-POLISH-ATOM-1 stage 3's silhouette bound): a
+    /// synchronous read of the first view's final depth and of its sun maps into snapshot `slot` (0 or 1), and the
+    /// two snapshots compared. False without a view.
+    virtual bool coverageSnapshot(unsigned slot) { (void)slot; return false; }
+    virtual bool coverageCompare(float viewRelDepth, float mapDepthTexels, bool maskedOnly, CoverageCompare &out) {
+        (void)viewRelDepth; (void)mapDepthTexels; (void)maskedOnly; out = CoverageCompare(); return false;
+    }
     /// THE MEASUREMENT DOOR of the visibility buffer (a tool's A/B, never a mode):
     /// off, every item draws through PBS and every view's chain is rebuilt without
     /// the id pass. On by default.

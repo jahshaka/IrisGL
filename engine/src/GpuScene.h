@@ -214,10 +214,12 @@ enum GpuInstanceFlag : uint32_t {
     kGpuDragMover = 1u << 8,    ///< MOVER-1: the user has hold of it right now
     kGpuAtom = 1u << 9,         ///< ATOM S3-DRAW: the id pass draws it, the decode shades it (OgreScene::atomRouteFor)
     kGpuPlanar = 1u << 10,      ///< a PLANAR MIRROR's renderable (D3-HIT-SHADE-2): a ray hit on it always decodes
-    /// ATOM-TWO-SIDED-1: an Atom item whose material draws BOTH faces (CULL_NONE, its
-    /// caster the same): the cut writes its command into the list's two-sided range
-    /// (GpuCull::twoSidedFirst), which the id pass and the caster cut draw with their
-    /// no-cull pipeline; the decode lights the facing side.
+    /// ATOM-TWO-SIDED-1: an Atom item whose material draws BOTH faces (its colour macroblock
+    /// CULL_NONE): the id pass's cut writes its command into the list's two-sided range
+    /// (GpuCull::rangeFirst(1)), which the id pass draws with its no-cull pipeline; the
+    /// decode lights the facing side. THE COLOUR PASS'S FACES ONLY since ENGINE-POLISH-ATOM-1
+    /// stage 3 — the caster's are kGpuCasterTwoSided (a cut-out's caster draws both faces while
+    /// its colour pass culls the back ones, OgreMaterials.cpp's caster macroblock).
     kGpuTwoSided = 1u << 11,
     /// REFLECT-FIX-1: a METAL (OgreScene::gpuIsMetal: metalness from kGpuMetalFloor, or
     /// F0 above kGpuMetalF0 in a specular workflow). The caches hold a surface's DIFFUSE
@@ -230,8 +232,11 @@ enum GpuInstanceFlag : uint32_t {
     /// Atom item, and an item whose MAIN pass stays on PBS but whose caster the cut can draw (a blended item: its
     /// stock caster is the opaque silhouette, HlmsPbs::calculateHashForPreCaster). The caster cut asks for it
     /// (Visible | Caster | AtomCaster); such an item drops its stock-caster channel (kStockCasterBit), so no stock
-    /// shadow scene pass draws it too. kGpuTwoSided on an AtomCaster-only item names its CASTER's faces.
+    /// shadow scene pass draws it too.
     kGpuAtomCaster = 1u << 13,
+    /// ENGINE-POLISH-ATOM-1 stage 3: the item's CASTER draws BOTH faces (its caster macroblock CULL_NONE): the caster
+    /// cut writes its command into the two-sided range (JahCullCut_cs picks the bit by the request's pass).
+    kGpuCasterTwoSided = 1u << 14,
 };
 /// The metalness from which a hit is a metal's (kGpuMetal). Below it the CARD answers,
 /// from it the metal routes, and the switch is a STEP (REFLECT-FIX-1 fix round,
@@ -710,6 +715,18 @@ public:
     /// geometry on the CPU per build; phase D's raster decode reads the same rows.
     Ogre::UavBufferPacked *geomBuffer() const { return mGeomBuffer; }
 
+    /// THE CUT-OUTS' MASK TABLE (ENGINE-POLISH-ATOM-1 stage 3; AlphaMasks.h has the layout, OgreScene::updateMaskTable
+    /// writes it): per shown alpha-tested slot and per submesh, its mask's address and its base-map UV transform — read
+    /// through its device address by the id pass's and the caster cut's masked ranges and by the ray queries. The
+    /// buffer is RE-CREATED when the words move (a reader re-reads the address before every bind, never caches it);
+    /// `setMaskTable` answers whether they moved.
+    bool setMaskTable(const std::vector<uint32_t> &words);
+    Ogre::UavBufferPacked *maskTableBuffer() const { return mMaskTable; }
+    uint64_t maskTableAddress() const { return mMaskAddress; }
+    /// Moves whenever the table is re-created (a reader's table that names its address is re-written).
+    unsigned long long maskTableSerial() const { return mMaskSerial; }
+    const std::vector<uint32_t> &maskTableWords() const { return mMaskWords; }
+
     /// Writes one geometry row (48 bytes, the caller's `GeometryRow`) into the
     /// mirror and queues it for the device. Called from `acquireMesh`'s caller
     /// while it still holds the mesh; a row nobody writes stays zero, and
@@ -810,6 +827,10 @@ private:
     Ogre::UavBufferPacked *mMeshBuffer = nullptr;
     Ogre::UavBufferPacked *mLevelBuffer = nullptr;
     Ogre::UavBufferPacked *mGeomBuffer = nullptr;
+    Ogre::UavBufferPacked *mMaskTable = nullptr;
+    std::vector<uint32_t> mMaskWords;
+    uint64_t mMaskAddress = 0u;
+    unsigned long long mMaskSerial = 0ull;
     /// The partition list (input to the AABB job: a TEX buffer, which is how
     /// VCT/AabbCalculator binds it) and the partition AABBs it writes.
     Ogre::TexBufferPacked *mPartBuffer = nullptr;

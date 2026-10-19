@@ -5058,6 +5058,30 @@ struct ShadowRouteShare {
     unsigned long long triangles[kRoutes] = {};
 };
 
+/// TWO SNAPSHOTS' COVERAGE, COMPARED (Scene::coverageSnapshot / coverageCompare, a measuring door; ENGINE-POLISH-ATOM-1
+/// stage 3's silhouette bound): the first view's final depth and its sun maps (the PSSM splits) as two arms of one
+/// process drew them. A pixel MISMATCHES where one arm drew a surface the other did not hold there - its view distances
+/// differ by more than `viewRelDepth` of the nearer (a sky pixel against a surface included) - with `maskedOnly`, only
+/// where either snapshot's id names a CUT-OUT the id pass drew (an Atom item through the masked ranges); a map texel
+/// where the depths differ by more than `mapDepthTexels` of that map's texel footprints along the light (a surface
+/// the cut simplified within its bound moves less; an outline that moved jumps to what lies behind it). A mismatch's
+/// BAND is the shorter of the horizontal and the vertical run of mismatches through it, in pixels (texels): a
+/// silhouette moved by s pixels makes bands s wide. The bands' 50th / 99th percentile and maximum; `sameLight` says
+/// both arms' maps were drawn from one light camera.
+struct CoverageCompare {
+    bool valid = false;
+    unsigned width = 0, height = 0;
+    unsigned long long viewMismatch = 0ull;
+    float viewBandP50 = 0.0f, viewBandP99 = 0.0f, viewBandMax = 0.0f;
+    struct Map {
+        unsigned map = 0, width = 0, height = 0;
+        bool sameLight = false;
+        unsigned long long mismatch = 0ull;
+        float bandP50 = 0.0f, bandP99 = 0.0f, bandMax = 0.0f;
+    };
+    std::vector<Map> maps;
+};
+
 struct AtomCasterMapStats {
     unsigned kind = 0, map = 0, face = 0;
     bool lightTested = false;
@@ -5082,6 +5106,10 @@ struct AtomDrawStatus {
     bool     on = false;
     unsigned atomItems = 0;
     unsigned atomTwoSided = 0;
+    /// ...and the CUT-OUTS among them (ENGINE-POLISH-ATOM-1 stage 3): alpha-tested items the id pass and the caster cut
+    /// draw through their MASKED ranges, discarding at the material's mask (a cut-out whose mask is still being made
+    /// is `pending`, one that can never have one `alphaTested`).
+    unsigned atomMasked = 0;
     unsigned pbsItems = 0;
     /// Shown, but in no world channel (a backdrop such as the Ground plane widget's
     /// quad, or a helper): the id pass draws the world channels only.

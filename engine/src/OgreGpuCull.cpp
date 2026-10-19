@@ -159,9 +159,9 @@ bool GpuCull::ensure(Ogre::VaoManager *vao, uint32_t slotCapacity, std::string &
     mLevels = vao->createUavBuffer(want, sizeof(uint32_t), 0, zeros.data(), false);
     mSurvivors = vao->createUavBuffer(want, sizeof(uint32_t), 0, zeros.data(), false);
     mCount = vao->createUavBuffer(kCountElements, sizeof(uint32_t), 0, zeros.data(), false);
-    // Two ranges of commands: the survivors' and the two-sided range (twoSidedFirst).
-    zeros.resize(size_t(want) * kDrawWords * 2u, 0u);
-    mDraws = vao->createUavBuffer(size_t(want) * kDrawWords * 2u, sizeof(uint32_t), 0, zeros.data(),
+    // Four ranges of commands (rangeFirst): the survivors', the two-sided, the masked and the masked two-sided.
+    zeros.resize(size_t(want) * kDrawWords * kRanges, 0u);
+    mDraws = vao->createUavBuffer(size_t(want) * kDrawWords * kRanges, sizeof(uint32_t), 0, zeros.data(),
                                   false);
     {
         // Three words a slot: the held level, and the node id and mesh it was held for.
@@ -338,7 +338,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         p.cut[0] = cutMode ? cull.cutIndexBudget() : 0u;
         p.cut[1] = cutMode ? cull.cutRecordBudget() : 0u;
         p.cut[2] = cutMode ? cull.cutMainBudget() : 0u;
-        p.cut[3] = cutMode ? cull.twoSidedFirst() : 0u;
+        p.cut[3] = cutMode ? cull.rangeFirst(1u) : 0u;   // the ranges' stride (JahCullCut_cs)
         for (int i = 0; i < 4; ++i) p.hzbRect[i] = hzb ? req.hzbRect[i] : 0u;
         cull.params()->upload(&p, 0, 1u);
         const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 1u, 1u, 0u, 1u,
@@ -501,7 +501,7 @@ bool OgreScene::runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, boo
             out.cutEvaluated = counter[14];
             out.cutIndexBudget = mGpuCull.cutIndexBudget();
             // THE FIRST RANGE ONLY: a kGpuTwoSided survivor's command lives in the two-sided
-            // range (GpuCull::twoSidedFirst, count[17]) and reads here as indexCount 0.
+            // range (GpuCull::rangeFirst, count[17..19]) and reads here as indexCount 0.
             if (readBack && out.survivors)
                 readUints(mGpuCull.draws(), 0u, out.survivors * GpuCull::kDrawWords, out.drawCommands);
             if (readBack && out.cutClusters) {

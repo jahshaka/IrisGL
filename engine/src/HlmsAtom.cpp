@@ -286,10 +286,15 @@ uint32_t HlmsAtom::materialWordOf(const Ogre::HlmsDatablock *db) {
 namespace {
 /// A property that does not reach the twin: the twin carries its own opaque
 /// blendblock and its own depth-less CULL_NONE macroblock (decodeTwinForBucket), so the
-/// PBS datablock's are not part of the permutation a decode draw compiles.
+/// PBS datablock's are not part of the permutation a decode draw compiles. NOR THE ALPHA
+/// TEST (ENGINE-POLISH-ATOM-1 stage 3): an Atom cut-out's coverage is the id pass's (its
+/// masked ranges discard at the material's mask, so the ids and the depth are holed by
+/// construction) — a decode that re-tested the alpha at its own sampling would leave a HOLE
+/// where the id pass wrote depth, and a ray hit on a cut-out is confirmed at the same mask.
 bool twinDiscards(const Ogre::IdString &key) {
     return key == Ogre::HlmsPsoProp::Macroblock || key == Ogre::HlmsPsoProp::Blendblock ||
-           key == Ogre::HlmsBaseProp::AlphaBlend || key == Ogre::HlmsBaseProp::AlphaToCoverage;
+           key == Ogre::HlmsBaseProp::AlphaBlend || key == Ogre::HlmsBaseProp::AlphaToCoverage ||
+           key == Ogre::HlmsBaseProp::AlphaTest;
 }
 void fnvMix(uint64_t &h, uint64_t v) {
     for (int b = 0; b < 8; ++b) {
@@ -503,6 +508,10 @@ Ogre::HlmsPbsDatablock *HlmsAtom::decodeTwinForBucket(Ogre::HlmsPbsDatablock *pb
     // material's twin shades its surface as the hit decode's write-back expects
     // (PHOTON-HIT-SHADE-1; the day-one front end is opaque, D1 section 1).
     twin->setBlendblock(Ogre::HlmsBlendblock());
+    // ...and NO ALPHA TEST (ENGINE-POLISH-ATOM-1 stage 3): a cut-out's coverage is the id pass's masked ranges' (and
+    // a ray hit's the mask's), so a decode pixel is always a surface — a re-test here, at the decode's own
+    // sampling, would leave a hole where the id pass wrote depth (twinDiscards keeps it out of the key too).
+    if (twin->getAlphaTest() != Ogre::CMPF_ALWAYS_PASS) twin->setAlphaTest(Ogre::CMPF_ALWAYS_PASS);
     // The decode never casts: its shadow-caster permutation is never requested.
 
     Twin t;

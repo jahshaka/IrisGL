@@ -7,6 +7,7 @@
 // BUCKETS the atom items' materials need — HlmsAtom::BucketKey).
 #include "EnginePrivate.h"
 #include "GpuScene.h"
+#include "AlphaMasks.h"
 #include "HlmsAtom.h"
 
 #include <Compositor/OgreCompositorNode.h>
@@ -366,21 +367,29 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     if (rq == kRefractiveRenderQueue || db->getBlendblock()->isAutoTransparent() ||
         pbs->getTransparencyMode() == Ogre::HlmsPbsDatablock::Refractive)
         return AtomRoute::Blended;
-    // A CUTOUT IS ROUTED BY WHAT IT IS (MAIN-REDS-1 stage 2): alpha-tested, before the faces
-    // rule below. Its CASTER macroblock culls nothing by law (BISTRO-FIXES-3, applyPbr's last
-    // word: a thin card shadows from both sides) while its colour pass keeps its cull — that
-    // mismatch is the shadow's business, and tested first it filed every cutout as cullFront.
-    if (flags & kGpuAlphaTested) return AtomRoute::AlphaTested;
-    // THE FACES (ATOM-TWO-SIDED-1): the id pass and the caster cut draw back-culled
-    // (Ogre's default macroblock) or BOTH faces (CULL_NONE: the item's command rides
-    // the list's two-sided range, kGpuTwoSided, drawn by the no-cull pipelines) — one
-    // flag serves both passes, so the caster macroblock must cull as the material
-    // does. A FRONT-culled material (only back faces drawn: an inverted hull) or a
-    // caster set apart from its material stays on PBS.
+    // A CUT-OUT GOES THROUGH THE MASKED RANGES (ENGINE-POLISH-ATOM-1 stage 3, shipped by ATOM-3 stage 2 with the
+    // mask's coverage-preserving pyramid): the id pass and the caster cut discard at its mask (the engine's store,
+    // AlphaMasks.h; the scene's table names it), so it is an ordinary Atom item once its mask is MADE — while it is
+    // being made the stock shader draws it (Pending), and a texture that can never have one keeps it on the stock
+    // route (AlphaTested). A SKINNED cut-out goes on to the Skinned reason below: the stock route, with Ogre's own
+    // mips (the stage's stated residual; its mask still serves the rays).
+    if (flags & kGpuAlphaTested) {
+        switch (cutoutMaskState(db)) {
+        case AlphaMaskStore::State::Refused: return AtomRoute::AlphaTested;
+        case AlphaMaskStore::State::Pending: return AtomRoute::Pending;
+        case AlphaMaskStore::State::Ready: break;
+        }
+    }
+    // THE FACES, PER PASS (ATOM-TWO-SIDED-1; ENGINE-POLISH-ATOM-1 stage 3): the id pass and the caster cut each draw
+    // back-culled (Ogre's default macroblock) or BOTH faces (CULL_NONE: the item's command rides the list's
+    // two-sided range, drawn by the no-cull pipelines) — the colour macroblock decides the id pass's
+    // (kGpuTwoSided), the caster's the caster cut's (kGpuCasterTwoSided: a cut-out's caster culls nothing by law,
+    // BISTRO-FIXES-3, while its colour pass keeps its cull). A FRONT-culled colour pass or caster (only back faces
+    // drawn: an inverted hull) stays on PBS.
     {
-        const Ogre::CullingMode cull = db->getMacroblock()->mCullMode;
+        const Ogre::CullingMode cull = db->getMacroblock()->mCullMode, casterCull = db->getMacroblock(true)->mCullMode;
         if ((cull != Ogre::CULL_CLOCKWISE && cull != Ogre::CULL_NONE) ||
-            db->getMacroblock(true)->mCullMode != cull)
+            (casterCull != Ogre::CULL_CLOCKWISE && casterCull != Ogre::CULL_NONE))
             return AtomRoute::CullFront;
     }
     // A PLANAR MIRROR: PBS matches the RENDERABLE to its actor at hash time and binds
@@ -395,6 +404,15 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     if (flags & kGpuSkinned) return AtomRoute::Skinned;
     if (!atomRowReadable(n, db, true)) return AtomRoute::NoRow;
     return AtomRoute::Atom;
+}
+
+AlphaMaskStore::State OgreScene::cutoutMaskState(const Ogre::HlmsDatablock *db) const {
+    if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS ||
+        db->getAlphaTest() == Ogre::CMPF_ALWAYS_PASS)
+        return AlphaMaskStore::State::Ready;   // its own surface is solid (another submesh's test: noRow anyway)
+    const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
+    return alphaMaskStore().stateOf(pbs->getTexture(Ogre::PBSM_DIFFUSE), uint32_t(db->getAlphaTest()),
+                                    db->getAlphaTestThreshold());
 }
 
 bool OgreScene::atomRowReadable(const Node &n, const Ogre::HlmsDatablock *db, bool decode) const {
@@ -423,13 +441,16 @@ bool OgreScene::atomCasterThroughCut(const Node &n, Ogre::uint32 flags, AtomRout
     if (route == AtomRoute::Atom) return true;
     // A BLENDED ITEM'S CASTER (ENGINE-POLISH-ATOM-1 stage 2): an id buffer has no slot for order-dependent colour,
     // so its main pass stays PBS — but its stock caster is the OPAQUE silhouette (HlmsPbs::calculateHashForPreCaster
-    // keeps no blending; the caster's blendblock writes depth), which the caster cut draws exactly. Not when the
-    // blended material is ALSO alpha-tested (its stock caster discards at the mask, which the cut cannot: the masked
-    // route is stage 3's patch, not shipped), nor skinned (the cut reads the bind pose), nor a caster that culls its
-    // FRONT faces (the cut's pipelines cull back faces or none), nor a row the cut cannot read.
+    // keeps no blending; the caster's blendblock writes depth), which the caster cut draws exactly. A blended material
+    // that is ALSO alpha-tested casts through the cut's masked ranges once its mask is made (ATOM-3 stage 2). Not
+    // skinned (the cut reads the bind pose), nor a caster that culls its FRONT faces (the cut's pipelines cull back
+    // faces or none), nor a row the cut cannot read.
     if (route != AtomRoute::Blended) return false;
-    if (flags & (kGpuAlphaTested | kGpuSkinned)) return false;
+    if (flags & kGpuSkinned) return false;
     const Ogre::HlmsDatablock *db = n.item->getSubItem(0)->getDatablock();
+    // ...a blended cut-out's stock caster discards at its mask: the cut's masked ranges do the same, once it is made
+    // (stage 3).
+    if ((flags & kGpuAlphaTested) && cutoutMaskState(db) != AlphaMaskStore::State::Ready) return false;
     const Ogre::CullingMode casterCull = db->getMacroblock(true)->mCullMode;
     if (casterCull != Ogre::CULL_CLOCKWISE && casterCull != Ogre::CULL_NONE) return false;
     return atomRowReadable(n, db, false);
@@ -522,6 +543,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         }
         ++st.atomItems;
         if (flags & kGpuTwoSided) ++st.atomTwoSided;
+        if (flags & kGpuAlphaTested) ++st.atomMasked;   // a cut-out through the masked ranges (stage 3)
         const auto *db =
             static_cast<const Ogre::HlmsPbsDatablock *>(n->item->getSubItem(0)->getDatablock());
         if (!words.insert(HlmsAtom::materialWordOf(db)).second) continue;

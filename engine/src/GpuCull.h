@@ -47,7 +47,7 @@ struct GpuCullParams {
     /// THE CUT'S BUDGET (mode 3, ATOM-CLUSTER-CUT): x = the compacted index stream's
     /// capacity in indices, y = the drawn-cluster record capacity, z = where the stream's
     /// COARSE RESERVE begins (the main region is [0, z)), w = the first command of the
-    /// TWO-SIDED RANGE (ATOM-TWO-SIDED-1, GpuCull::twoSidedFirst; 0 = none: every
+    /// TWO-SIDED RANGE (ATOM-TWO-SIDED-1, GpuCull::rangeFirst(1); 0 = none: every
     /// survivor's command is written at its survivor index).
     uint32_t cut[4] = {};
     /// THE VIEWPORT'S RECTANGLE IN THE PYRAMID'S MIP 0 (ATOM-OCCLUSION-1): x0, y0, width,
@@ -75,12 +75,18 @@ public:
     Ogre::UavBufferPacked *survivors() const { return mSurvivors; }
     Ogre::UavBufferPacked *count() const { return mCount; }
     /// The draw commands: `capacity()` of them at the survivors' indices, then (the
-    /// cut, mode 3) THE TWO-SIDED RANGE — `capacity()` more from `twoSidedFirst()`,
+    /// cut, mode 3) THE TWO-SIDED RANGE — `capacity()` more from `rangeFirst(1)`,
     /// count[17] of them written: the commands of the survivors flagged kGpuTwoSided
     /// (their command at the survivor index draws nothing), which the id pass and the
-    /// caster cut draw with their no-cull pipeline (ATOM-TWO-SIDED-1).
+    /// caster cut draw with their no-cull pipeline (ATOM-TWO-SIDED-1); then the two MASKED
+    /// ranges (rangeFirst).
     Ogre::UavBufferPacked *draws() const { return mDraws; }
-    uint32_t twoSidedFirst() const { return mCapacity; }
+    /// THE CUT'S RANGES (ENGINE-POLISH-ATOM-1 stage 3): range r's first command (0 the survivors', 1 two-sided,
+    /// 2 MASKED - a cut-out's command, drawn by the passes' masked pipelines -, 3 masked two-sided), `capacity()`
+    /// each; range r >= 1 counts its commands in count[16 + r] (rangeCountOffsetBytes).
+    static constexpr uint32_t kRanges = 4u;
+    uint32_t rangeFirst(uint32_t r) const { return r * mCapacity; }
+    static constexpr uint32_t rangeCountOffsetBytes(uint32_t r) { return (16u + r) * 4u; }
     /// THE BAND'S DIRECTION STATE (fork 5230c9390+8282f6d70 (was 0075)'s `mHysteresisLod`, per list):
     /// three words a slot — the last level a BANDED request chose, and the node id
     /// and mesh it was chosen for (a slot renumbered by a removal, or a mesh swap,
@@ -160,12 +166,12 @@ public:
     /// THE DEPTH TEST'S (ATOM-OCCLUSION-1): [16] the instances the pyramid REJECTED
     /// (the test's visibility word 2 — the set the disocclusion pass tests again);
     /// [17] THE TWO-SIDED RANGE'S command count (ATOM-TWO-SIDED-1: the draw count of
-    /// the no-cull draw, from `twoSidedFirst()`); [18..19] zero.
+    /// the no-cull draw, from `rangeFirst(1)`); [18..19] THE MASKED RANGES' (ENGINE-POLISH-ATOM-1 stage 3:
+    /// the masked and the masked two-sided commands, from rangeFirst(2) and rangeFirst(3)).
     static constexpr uint32_t kCountElements = 20u;
     static constexpr uint32_t kIndirectOffsetBytes = 4u;
     static constexpr uint32_t kCutIndirectOffsetBytes = 5u * 4u;
     static constexpr uint32_t kEmitIndirectOffsetBytes = 8u * 4u;
-    static constexpr uint32_t kTwoSidedCountOffsetBytes = 17u * 4u;
     /// Threads per group of all three jobs (JahshakaCompute.material.json) and
     /// the width of the compaction's shared-memory scan.
     static constexpr uint32_t kThreadsPerGroup = 64u;

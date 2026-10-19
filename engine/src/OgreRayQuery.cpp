@@ -91,7 +91,6 @@
 #include "rayquery/rq_hit_composite_spv.h"
 #include "rayquery/rq_card_movers_spv.h"
 #include "rayquery/rq_tlas_write_spv.h"
-#include "rayquery/rq_alpha_mask_spv.h"
 // THE SCREEN-PROBE GATHER — a Component of ours (GATHER-1a). Its three compute
 // jobs, its atlases and its pipelines live in OgreScreenProbeGather.cpp; this
 // file is its HOST (the device, the retire window, the frame's command buffer,
@@ -482,13 +481,12 @@ private:
         /// kEvictSweepFrames, never one a frame.
         uint32_t evictSweptAt = 0u;
         /// THE ALPHA AND HIT TABLES' INPUTS as they were last written (stage 3): re-written only when one moves.
-        unsigned long long alphaMaterialSerial = ~0ull, hitMaterialSerial = ~0ull, hitLightSerial = ~0ull,
+        unsigned long long alphaMaskTableSerial = ~0ull, hitMaterialSerial = ~0ull, hitLightSerial = ~0ull,
                            hitLightsRemoved = ~0ull, hitRowsSerial = ~0ull;
         /// The mesh each job record was written for (index = the mesh-table entry): a mesh-set change
         /// re-writes the entries whose mesh changed, never the table.
         std::vector<const Ogre::Mesh *> recordedMeshAt;
         uint64_t alphaRowsAddress = ~0ull;
-        bool alphaPending = true;
         /// The build's primitive count (2 x the slot count it was written for).
         unsigned  tlasPrimitives = 0;
         unsigned  instanceCount = 0;      ///< ACTIVE near + far copies: what the TLAS traces
@@ -505,16 +503,14 @@ private:
         std::vector<uint32_t> geomRowOfSlot;
         /// THE ALPHA TABLE (REFLECT-MOVERS-2; jah_rq_alpha.glsl has the layout): what
         /// every ray query reads a CANDIDATE's cut-out from — per alpha-tested traced
-        /// slot its near/far geometry rows, its mask and its UV transform. A host-
-        /// visible buffer with a device address, re-made (the old one retired) only
-        /// when its words change; `alphaAddress` 0 = no alpha-tested item (the rays
-        /// stay opaque).
+        /// slot its near/far geometry rows, and the address of the GPU SCENE's mask
+        /// table, which names each submesh's mask and UV transform (ENGINE-POLISH-ATOM-1
+        /// stage 3: the masks are the engine's, AlphaMasks.h). A host-visible buffer with
+        /// a device address, re-made (the old one retired) only when its words change;
+        /// `alphaAddress` 0 = no alpha-tested item (the rays stay opaque).
         RawBuffer alphaTable;
         VkDeviceAddress alphaAddress = 0;
         std::vector<uint32_t> alphaWords, alphaScratch;
-        /// The masks this table names (AlphaMask::id), counted in their `users` (stage 3).
-        std::vector<unsigned long long> alphaMaskIds;
-        unsigned long long alphaMaskEpoch = ~0ull, alphaUploadSerial = ~0ull;
         /// THE HIT TABLE (FAR-SUN-2; jah_rq_hit_direct.glsl has the layout): what a
         /// voxel-answered hit computes its DIRECT light and its emissive from AT THE HIT -
         /// the scene's lights (the one light list, world space, the injection's packing) and
@@ -1039,43 +1035,7 @@ private:
     VkShaderModule        mMotionSkinModule = VK_NULL_HANDLE;
     VkDescriptorPool      mMotionPool = VK_NULL_HANDLE;
     bool                  mMotionFailed = false;
-    /// THE CUT-OUT MASKS (REFLECT-MOVERS-2): one per (albedo texture, alpha test),
-    /// shared by every scene — the texture's alpha at its first level no larger
-    /// than kMaxAlphaMask on a side, through the datablock's own test, one bit a
-    /// texel, made on the device by rq_alpha_mask.comp the first frame the texture
-    /// is resident; forgotten kAlphaMaskIdleFrames after its last use.
-    struct AlphaMask {
-        const Ogre::TextureGpu *tex = nullptr;
-        Ogre::IdString name;
-        uint32_t texW = 0, texH = 0, cmp = 0, thresholdBits = 0;
-        /// The texture's upload generation the mask was made from (ALPHA-MASK-IDENTITY-1).
-        uint32_t generation = 0;
-        uint32_t w = 0, h = 0, level = 0;
-        RawBuffer bits;
-        VkDeviceAddress address = 0;
-        uint32_t lastUsed = 0;
-        /// ENGINE-UPGRADE-U5 stage 3: a stable id, and the scenes' alpha tables that name this mask now
-        /// (a table is re-written only when its inputs move, so `lastUsed` alone would expire a mask
-        /// in use; a mask a table names never expires).
-        unsigned long long id = 0ull;
-        uint32_t users = 0u;
-    };
-    std::vector<AlphaMask> mAlphaMasks;
-    unsigned long long mNextAlphaMaskId = 1ull;
-    unsigned long long mAlphaMasksMade = 0ull;   ///< masks made, ever (RayQueryStatus::alphaMasksMade)
-    uint32_t mAlphaSweptAt = 0u;                 ///< the idle-mask sweep's clock (decision 15.4)
-    /// Moves whenever a mask is made or dropped: every scene's table that may name it is re-written.
-    unsigned long long mAlphaMaskEpoch = 0ull;
-    bool makeAlphaMaskPipeline(std::string &err);
-    /// The mask for (tex, cmp, threshold): its index, or -1 while it cannot be made
-    /// yet (the texture not resident, this frame's budget spent, no pipeline).
-    /// The mask's index, or -1 (not made: retried next frame). `stale` = the index is an OLDER content's
-    /// mask, served because this frame's budget is spent (decision 14.2: the caller keeps the table
-    /// pending, so it is remade within ceil(n / budget) frames); `refused` = this device cannot make
-    /// masks at all (retried on the next change, never every frame).
-    int alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float threshold, unsigned &budget, bool &stale,
-                     bool &refused);
-    /// Rebuilds `sa`'s alpha table from the feed's alpha-tested slots.
+    /// Rebuilds `sa`'s alpha table from the feed's alpha-tested slots (the masks: the GPU scene's table).
     void updateAlphaTable(OgreScene *scene, SceneAs &sa);
     /// Rebuilds `sa`'s hit table (FAR-SUN-2) from the scene's lights and material rows.
     void updateHitTable(OgreScene *scene, SceneAs &sa);
@@ -1097,12 +1057,6 @@ private:
     /// MOVER-OCCLUSION-1: does any ray-traced slot carry the mover flag? A hit's mover
     /// gate (jah_rq_hit_radiance.glsl) traces nothing when none does.
     bool rayMoversOf(const OgreScene *scene) const;
-    VkDescriptorSetLayout mAlphaSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout      mAlphaPipeLayout = VK_NULL_HANDLE;
-    VkPipeline            mAlphaPipeline = VK_NULL_HANDLE;
-    VkShaderModule        mAlphaModule = VK_NULL_HANDLE;
-    VkDescriptorPool      mAlphaPool = VK_NULL_HANDLE;
-    bool                  mAlphaFailed = false;
     VkDescriptorSetLayout mReflectSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout      mReflectPipeLayout = VK_NULL_HANDLE;
     VkPipeline            mReflectPipeline = VK_NULL_HANDLE;
@@ -2303,16 +2257,6 @@ void RayQueryTier::close() {
     mMotionPool = VK_NULL_HANDLE; mMotionPipeline = VK_NULL_HANDLE;
     mMotionPipeLayout = VK_NULL_HANDLE; mMotionSetLayout = VK_NULL_HANDLE;
     mMotionModule = VK_NULL_HANDLE; mMotionFailed = false;
-    for (AlphaMask &m : mAlphaMasks) dropBuffer(m.bits);
-    mAlphaMasks.clear();
-    if (mAlphaPool) vkDestroyDescriptorPool(mVk, mAlphaPool, nullptr);
-    if (mAlphaPipeline) vkDestroyPipeline(mVk, mAlphaPipeline, nullptr);
-    if (mAlphaPipeLayout) vkDestroyPipelineLayout(mVk, mAlphaPipeLayout, nullptr);
-    if (mAlphaSetLayout) vkDestroyDescriptorSetLayout(mVk, mAlphaSetLayout, nullptr);
-    if (mAlphaModule) vkDestroyShaderModule(mVk, mAlphaModule, nullptr);
-    mAlphaPool = VK_NULL_HANDLE; mAlphaPipeline = VK_NULL_HANDLE;
-    mAlphaPipeLayout = VK_NULL_HANDLE; mAlphaSetLayout = VK_NULL_HANDLE;
-    mAlphaModule = VK_NULL_HANDLE; mAlphaFailed = false;
     if (mReflectPool) vkDestroyDescriptorPool(mVk, mReflectPool, nullptr);
     if (mReflectPipeline) vkDestroyPipeline(mVk, mReflectPipeline, nullptr);
     if (mFilterPipeline) vkDestroyPipeline(mVk, mFilterPipeline, nullptr);
@@ -2387,9 +2331,6 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     }
     retire(sa.alphaTable);
     sa.alphaAddress = 0;
-    for (AlphaMask &m : mAlphaMasks)   // the masks this scene's table named lose a user (stage 3)
-        if (std::binary_search(sa.alphaMaskIds.begin(), sa.alphaMaskIds.end(), m.id) && m.users) --m.users;
-    sa.alphaMaskIds.clear();
     for (unsigned r = 0; r < kFramesInFlight; ++r) { retire(sa.hitTable[r]); sa.hitTableCap[r] = 0u; }
     sa.hitTableAddress = 0;
     // THE SKIN CACHES (PHOTON-SKIN-1): each hands back its structure, its buffer
@@ -6351,292 +6292,48 @@ bool RayQueryTier::makeMotionPipeline(std::string &err) {
 // structure is shared by every item that wears it, whatever the material — and
 // an ALPHA-TESTED item's instance is FORCE_NO_OPAQUE (rq_tlas_write.comp), so its
 // triangles reach every ray query as candidates. The queries test a candidate
-// through the scene's ALPHA TABLE (jah_rq_alpha.glsl: the layout) and the
-// material's MASK: its albedo texture's alpha through the datablock's own alpha
-// test, one bit a texel, made on the device here once per (texture, test).
-namespace {
-/// The mask's largest side, texels: the texture's first level no larger is the
-/// one thresholded (a 1024 x 1024 mask is 128 KB).
-constexpr uint32_t kMaxAlphaMask = 1024u;
-/// Masks made per frame at most (a scene opened with a forest of foliage
-/// materials makes them over a few frames; a candidate is refused meanwhile).
-constexpr unsigned kAlphaMasksPerFrame = 8u;
-/// A mask no scene asked for in this many frames is forgotten.
-constexpr uint32_t kAlphaMaskIdleFrames = 600u;
-/// Descriptor sets the mask job's pool holds (one per mask made, retired after
-/// the frames in flight).
-constexpr uint32_t kAlphaMaskSets = 64u;
-constexpr uint32_t kAlphaNone = 0xFFFFFFFFu;
-constexpr uint32_t kAlphaConstant = 1u, kAlphaConstantSolid = 2u, kAlphaPending = 4u;
-/// Ogre's alpha test, the raster's way round (800.PixelShader: discard when
-/// `threshold CMP alpha`): is a texel of this alpha KEPT?
-bool alphaKept(Ogre::CompareFunction cmp, float threshold, float alpha) {
-    switch (cmp) {
-    case Ogre::CMPF_LESS: return !(threshold < alpha);
-    case Ogre::CMPF_LESS_EQUAL: return !(threshold <= alpha);
-    case Ogre::CMPF_EQUAL: return !(threshold == alpha);
-    case Ogre::CMPF_NOT_EQUAL: return !(threshold != alpha);
-    case Ogre::CMPF_GREATER_EQUAL: return !(threshold >= alpha);
-    case Ogre::CMPF_GREATER: return !(threshold > alpha);
-    case Ogre::CMPF_ALWAYS_FAIL: return false;
-    default: return true;
-    }
-}
-}   // namespace
-
-bool RayQueryTier::makeAlphaMaskPipeline(std::string &err) {
-    VkDescriptorSetLayoutBinding b{};
-    b.binding = 0;
-    b.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    b.descriptorCount = 1;
-    b.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    DescriptorPoolPlan plan;
-    if (!plan.makeLayout(mVk, &b, 1u, kAlphaMaskSets, mAlphaSetLayout, err, "rayquery/alpha-mask")) return false;
-    VkPushConstantRange pcr{};
-    pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pcr.offset = 0;
-    pcr.size = 32u;
-    VkPipelineLayoutCreateInfo pli{};
-    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pli.setLayoutCount = 1;
-    pli.pSetLayouts = &mAlphaSetLayout;
-    pli.pushConstantRangeCount = 1;
-    pli.pPushConstantRanges = &pcr;
-    if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mAlphaPipeLayout) != VK_SUCCESS) {
-        err = "rayquery/alpha-mask: vkCreatePipelineLayout failed";
-        return false;
-    }
-    VkShaderModuleCreateInfo smi{};
-    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    smi.codeSize = sizeof(krq_alphaMaskSpv);
-    smi.pCode = krq_alphaMaskSpv;
-    if (vkCreateShaderModule(mVk, &smi, nullptr, &mAlphaModule) != VK_SUCCESS) {
-        err = "rayquery/alpha-mask: vkCreateShaderModule failed";
-        return false;
-    }
-    VkComputePipelineCreateInfo cpi{};
-    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    cpi.stage.module = mAlphaModule;
-    cpi.stage.pName = "main";
-    cpi.layout = mAlphaPipeLayout;
-    if (createComputePipeline(cpi, &mAlphaPipeline, "alpha mask") != VK_SUCCESS) {
-        err = "rayquery/alpha-mask: vkCreateComputePipelines failed";
-        return false;
-    }
-    if (!plan.create(mVk, "rayquery/alpha-mask", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mAlphaPool, err))
-        return false;
-    return ensureSamplers(err);
-}
-
-int RayQueryTier::alphaMaskFor(Ogre::TextureGpu *tex, uint32_t cmp, float threshold, unsigned &budget, bool &staleOut,
-                               bool &refused) {
-    staleOut = false;
-    refused = false;
-    uint32_t thresholdBits = 0;
-    std::memcpy(&thresholdBits, &threshold, sizeof(thresholdBits));
-    const uint32_t now = frameNow();
-    // THE IDENTITY: the pointer AND the name and size (a destroyed texture's
-    // address can come back as another texture) — and the CONTENT's: the
-    // texture's upload generation (ALPHA-MASK-IDENTITY-1), which is the only
-    // thing that moves when new texels are written into the same texture.
-    const uint32_t generation = detail::textureUploadGeneration(tex);
-    int stale = -1;
-    for (size_t i = 0; i < mAlphaMasks.size(); ++i) {
-        AlphaMask &m = mAlphaMasks[i];
-        if (m.tex == tex && m.name == tex->getName() && m.texW == tex->getWidth() && m.texH == tex->getHeight() &&
-            m.cmp == cmp && m.thresholdBits == thresholdBits) {
-            m.lastUsed = now;
-            if (m.generation == generation) return int(i);
-            stale = int(i);
-        }
-    }
-    // THE OLD HOLES until a mask can be made - said so: a stale index is not a made mask.
-    if (mAlphaFailed) { refused = true; staleOut = stale >= 0; return stale; }
-    if (!budget) { staleOut = stale >= 0; return stale; }
-    if (stale >= 0) {
-        retire(mAlphaMasks[size_t(stale)].bits);
-        mAlphaMasks.erase(mAlphaMasks.begin() + stale);
-        ++mAlphaMaskEpoch;   // a table naming it is re-written (stage 3)
-    }
-    if (tex->getResidencyStatus() != Ogre::GpuResidency::Resident || !tex->isDataReady()) return -1;
-    if (tex->getTextureType() != Ogre::TextureTypes::Type2D &&
-        tex->getTextureType() != Ogre::TextureTypes::Type2DArray) {
-        refused = true;   // never a mask: the next change asks again, no frame before it
-        return -1;
-    }
-    std::string err;
-    if (!mAlphaPipeline && !makeAlphaMaskPipeline(err)) {
-        mAlphaFailed = true;
-        refused = true;
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka: cut-outs stay out of the rays' reach (" + err + ")");
-        return -1;
-    }
-    AlphaMask m;
-    m.tex = tex;
-    m.name = tex->getName();
-    m.texW = tex->getWidth();
-    m.texH = tex->getHeight();
-    m.cmp = cmp;
-    m.thresholdBits = thresholdBits;
-    m.generation = generation;
-    while (m.level + 1u < tex->getNumMipmaps() &&
-           std::max(m.texW >> m.level, m.texH >> m.level) > kMaxAlphaMask)
-        ++m.level;
-    m.w = std::max(m.texW >> m.level, 1u);
-    m.h = std::max(m.texH >> m.level, 1u);
-    const uint32_t words = (m.w * m.h + 31u) / 32u;
-    if (!makeBuffer(VkDeviceSize(words) * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, true, m.bits, err))
-        return -1;
-    m.address = addressOf(m.bits.buffer);
-    // ITS ONE LAYER AS A 2D-ARRAY VIEW: a pooled texture's slice or a plain 2D
-    // image's only layer — both legal, so one pipeline reads both.
-    auto *vt = static_cast<Ogre::VulkanTextureGpu *>(tex);
-    VkImageViewCreateInfo vci{};
-    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    vci.image = vt->getDisplayTextureName();
-    vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-    vci.format = Ogre::VulkanMappings::get(vt->getWorkaroundedPixelFormat(tex->getPixelFormat()));
-    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    vci.subresourceRange.baseMipLevel = 0u;
-    vci.subresourceRange.levelCount = tex->getNumMipmaps();
-    vci.subresourceRange.baseArrayLayer = tex->getInternalSliceStart();
-    vci.subresourceRange.layerCount = 1u;
-    VkImageView view = VK_NULL_HANDLE;
-    if (vkCreateImageView(mVk, &vci, nullptr, &view) != VK_SUCCESS) {
-        dropBuffer(m.bits);
-        return -1;
-    }
-    retireView(view);
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    {
-        VkDescriptorSetAllocateInfo dai{};
-        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        dai.descriptorPool = mAlphaPool;
-        dai.descriptorSetCount = 1;
-        dai.pSetLayouts = &mAlphaSetLayout;
-        if (vkAllocateDescriptorSets(mVk, &dai, &set) != VK_SUCCESS) {
-            dropBuffer(m.bits);
-            return -1;   // the pool is full this frame: the retire window hands sets back
-        }
-    }
-    retireSet(set, mAlphaPool);
-    VkDescriptorImageInfo ii{};
-    ii.sampler = mPointSampler;
-    ii.imageView = view;
-    ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkWriteDescriptorSet wr{};
-    wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wr.dstSet = set;
-    wr.dstBinding = 0;
-    wr.descriptorCount = 1;
-    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    wr.pImageInfo = &ii;
-    vkUpdateDescriptorSets(mVk, 1, &wr, 0, nullptr);
-    // THE TEXTURE READABLE FROM COMPUTE (Ogre's solver owns its layout), then
-    // the dispatch, then the edge to every ray query that reads the bits later
-    // in this frame (compute; written through an address, so the edge is ours).
-    {
-        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
-        Ogre::ResourceTransitionArray trans;
-        solver.resolveTransition(trans, tex, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
-                                 1u << Ogre::GPT_COMPUTE_PROGRAM);
-        mRs->executeResourceTransition(trans);
-    }
-    VkCommandBuffer cmd = frameCmd();
-    if (!cmd) {
-        dropBuffer(m.bits);
-        return -1;
-    }
-    uint32_t pc[8] = { m.w, m.h, m.level, cmp, uint32_t(m.address & 0xFFFFFFFFu), uint32_t(m.address >> 32u),
-                       thresholdBits, words };
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mAlphaPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mAlphaPipeLayout, 0, 1, &set, 0, nullptr);
-    vkCmdPushConstants(cmd, mAlphaPipeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
-    vkCmdDispatch(cmd, (words + 63u) / 64u, 1u, 1u);
-    VkMemoryBarrier mb{};
-    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb,
-                         0, nullptr, 0, nullptr);
-    --budget;
-    ++mAlphaMasksMade;
-    m.lastUsed = now;
-    m.id = mNextAlphaMaskId++;
-    ++mAlphaMaskEpoch;
-    mAlphaMasks.push_back(std::move(m));
-    return int(mAlphaMasks.size() - 1u);
-}
-
+// through the scene's ALPHA TABLE (jah_rq_alpha.glsl: the layout) — the TLAS's half,
+// the rows each copy was built from — and the GPU SCENE'S MASK TABLE it names: each
+// submesh's MASK (its albedo texture's alpha through the datablock's own alpha test,
+// one bit a texel) and UV transform. The masks are the engine's since
+// ENGINE-POLISH-ATOM-1 stage 3 (AlphaMasks.h: one maker for the rays, the id pass
+// and the caster cut; the tier made its own before).
 void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
-    const uint32_t now = frameNow();
-    struct MadeOut {   // the count read back on every path out
-        SceneAs &sa; const unsigned long long &made;
-        ~MadeOut() { sa.st.alphaMasksMade = made; }
-    } madeOut{ sa, mAlphaMasksMade };
-    // FORGET THE IDLE MASKS (no scene asked for one in kAlphaMaskIdleFrames, and no table names one) - ONE
-    // SWEEP PER 600 FRAMES on its own clock, counted (decision 15.4: it walked every mask every frame, an idle
-    // one included). A mask is forgotten 600 to 1,200 frames past its idle bound.
-    const bool sweepMasks = !mAlphaSweptAt || uint32_t(now - mAlphaSweptAt) >= 600u;
-    if (sweepMasks) mAlphaSweptAt = now ? now : 1u;
-    for (size_t i = 0; sweepMasks && i < mAlphaMasks.size();) {
-        ++sa.st.updateVisits;
-        if (!mAlphaMasks[i].users && uint32_t(now - mAlphaMasks[i].lastUsed) > kAlphaMaskIdleFrames) {
-            retire(mAlphaMasks[i].bits);
-            mAlphaMasks.erase(mAlphaMasks.begin() + ptrdiff_t(i));
-            ++mAlphaMaskEpoch;
-        } else {
-            ++i;
-        }
-    }
-    // THE TABLE IS RE-WRITTEN ONLY WHEN ITS INPUTS MOVED (ENGINE-UPGRADE-U5 stage 3; it was re-derived
-    // every frame - a slot view and every submesh's datablock per alpha-tested slot, 9 % of the tier's
-    // update on Bistro's walk): the alpha-tested slots or their rows (the feed), a material edit (the
-    // writer's serial), a mask made or dropped, a texture's texels (the upload serial: a mask follows
-    // its content), the row buffer's address, or a mask still pending last time.
-    Ogre::VaoManager *vaoMgrGate = mRs ? mRs->getVaoManager() : nullptr;
-    {
-        detail::GpuScene &gsg = scene->gpuScene();
-        const uint64_t rowsGate = (gsg.live() && gsg.geomBuffer() && vaoMgrGate)
-                                      ? vaoMgrGate->getBufferDeviceAddress(gsg.geomBuffer()) : 0u;
-        const unsigned long long matSerial = scene->photon().materialEditSerial();
-        const unsigned long long uploads = scene->textureUploadSerial();
-        if (!sa.feed.alphaDirty && !sa.alphaPending && matSerial == sa.alphaMaterialSerial &&
-            mAlphaMaskEpoch == sa.alphaMaskEpoch && uploads == sa.alphaUploadSerial && rowsGate == sa.alphaRowsAddress)
-            return;
-        sa.feed.alphaDirty = false;
-        sa.alphaMaterialSerial = matSerial;
-        sa.alphaUploadSerial = uploads;
-        sa.alphaRowsAddress = rowsGate;
-    }
-    sa.alphaPending = false;
-    std::vector<unsigned long long> maskIds;
-    std::vector<uint32_t> &w = sa.alphaScratch;
-    w.clear();
-    const std::set<uint32_t> &slots = sa.feed.alpha;
+    sa.st.alphaMasksMade = alphaMaskStore().made();
+    sa.st.alphaStaleServed = scene->maskStaleServed();
+    // THE TABLE IS RE-WRITTEN ONLY WHEN ITS INPUTS MOVED (ENGINE-UPGRADE-U5 stage 3): the alpha-tested
+    // traced slots or their rows (the feed), the row buffer's address, or the GPU scene's mask table (re-made
+    // whenever a mask, a material or a texture's texels moved: its serial).
     detail::GpuScene &gs = scene->gpuScene();
+    Ogre::VaoManager *vaoMgr = mRs ? mRs->getVaoManager() : nullptr;
     // THE ROWS BY ADDRESS (the fable read's D1): a candidate reads its OWN submesh's
     // row, base + geometry index, from the GPU scene's row buffer — which is
     // re-created when the mesh table grows, so its address rides in the words and a
     // grow re-makes the table.
-    Ogre::VaoManager *vaoMgr = mRs ? mRs->getVaoManager() : nullptr;
     const uint64_t rowsAddress =
         (gs.live() && gs.geomBuffer() && vaoMgr) ? vaoMgr->getBufferDeviceAddress(gs.geomBuffer()) : 0u;
-    if (!slots.empty() && gs.live() && rowsAddress) {
+    const uint64_t maskAddress = gs.maskTableAddress();
+    if (!sa.feed.alphaDirty && gs.maskTableSerial() == sa.alphaMaskTableSerial && rowsAddress == sa.alphaRowsAddress)
+        return;
+    sa.feed.alphaDirty = false;
+    sa.alphaMaskTableSerial = gs.maskTableSerial();
+    sa.alphaRowsAddress = rowsAddress;
+    std::vector<uint32_t> &w = sa.alphaScratch;
+    w.clear();
+    const std::set<uint32_t> &slots = sa.feed.alpha;
+    if (!slots.empty() && gs.live() && rowsAddress && maskAddress) {
         const uint32_t n = *slots.rbegin() + 1u;
-        w.assign(4u + ((n + 3u) & ~3u), kAlphaNone);
+        w.assign(8u + ((n + 3u) & ~3u), kMaskNone);
         w[0] = n;
         w[1] = 0u;
         w[2] = uint32_t(rowsAddress & 0xFFFFFFFFu);
         w[3] = uint32_t(rowsAddress >> 32u);
-        unsigned budget = kAlphaMasksPerFrame;
+        w[4] = uint32_t(maskAddress & 0xFFFFFFFFu);
+        w[5] = uint32_t(maskAddress >> 32u);
+        w[6] = w[7] = 0u;
         for (const uint32_t slot : slots) {
-            OgreScene::GpuSlotView node;
-            if (slot >= gs.slotCount() || !scene->gpuSlotView(slot, node)) continue;
-            if (!node.item || !node.item->getNumSubItems()) continue;
+            ++sa.st.updateVisits;
+            if (slot >= gs.slotCount()) continue;
             // THE ROW BASES: submesh 0's row of the level each copy was built from (the
             // feed's near row; the mesh's coarsest level for the far copy; a rigged
             // slot's skin row for both — unknown until its first ready frame, and a
@@ -6646,76 +6343,13 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
             uint32_t farRow = nearRow;
             if (slot < sa.feed.recs.size() && sa.feed.recs[slot].kind == 1u)
                 farRow = detail::GpuScene::geomRowIndex(sa.feed.recs[slot].meshIndex, sa.feed.recs[slot].farLevel, 0u);
-            // ONE RECORD PER SUBMESH, its own datablock (a tree: the trunk opaque, the
-            // leaves cut out). Rows exist for kSubmeshesPerMesh submeshes; a geometry
-            // past them reads solid (the header of jah_rq_alpha.glsl).
-            const uint32_t subs = uint32_t(std::min<size_t>(node.item->getNumSubItems(),
-                                                            detail::GpuScene::kSubmeshesPerMesh));
-            w[4u + slot] = uint32_t(w.size());
+            w[8u + slot] = uint32_t(w.size());
             ++w[1];
             ++sa.st.updateRows;
-            const uint32_t head[4] = { nearRow, farRow, subs, 0u };
+            const uint32_t head[4] = { nearRow, farRow, 0u, 0u };
             w.insert(w.end(), head, head + 4);
-            for (uint32_t g = 0; g < subs; ++g) {
-                const Ogre::HlmsDatablock *db = node.item->getSubItem(g)->getDatablock();
-                uint32_t e[12] = {};
-                uint32_t flags = kAlphaConstant | kAlphaConstantSolid;
-                float uv0[4] = { 1.0f, 1.0f, 0.0f, 0.0f }, uv1[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
-                if (db && db->getCreator() && db->getCreator()->getType() == Ogre::HLMS_PBS &&
-                    db->getAlphaTest() != Ogre::CMPF_ALWAYS_PASS) {
-                    const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
-                    const Ogre::CompareFunction cmp = db->getAlphaTest();
-                    const float thr = db->getAlphaTestThreshold();
-                    Ogre::TextureGpu *tex = pbs->getTexture(Ogre::PBSM_DIFFUSE);
-                    if (!tex) {
-                        // the raster then tests the background diffuse's alpha (800.PixelShader)
-                        flags = kAlphaConstant |
-                                (alphaKept(cmp, thr, pbs->getBackgroundDiffuse().a) ? kAlphaConstantSolid : 0u);
-                    } else {
-                        bool staleServed = false, refused = false;
-                        const int mi = alphaMaskFor(tex, uint32_t(cmp), thr, budget, staleServed, refused);
-                        // RE-WRITTEN NEXT FRAME until it is made - a stale mask served past the budget too
-                        // (decision 14.2: it read as made and was never remade); a refusal waits for the
-                        // next change (decision 14.10).
-                        if (staleServed) { sa.alphaPending = true; ++sa.st.alphaStaleServed; }
-                        if (mi < 0) {
-                            flags = kAlphaPending;
-                            if (!refused) sa.alphaPending = true;
-                        } else {
-                            const AlphaMask &m = mAlphaMasks[size_t(mi)];
-                            maskIds.push_back(m.id);
-                            e[0] = uint32_t(m.address & 0xFFFFFFFFu);
-                            e[1] = uint32_t(m.address >> 32u);
-                            e[2] = (m.w & 0xFFFFu) | ((m.h & 0xFFFFu) << 16u);
-                            flags = 0u;
-                        }
-                    }
-                    // THE BASE-MAP UV TRANSFORM (OgreMaterials.cpp: user values 0 and 1)
-                    const Ogre::Vector4 a = pbs->getUserValue(0), b = pbs->getUserValue(1);
-                    uv0[0] = float(a.x); uv0[1] = float(a.y); uv0[2] = float(a.z); uv0[3] = float(a.w);
-                    uv1[0] = float(b.x); uv1[1] = float(b.y); uv1[2] = float(b.z); uv1[3] = float(b.w);
-                    // an untouched datablock's user values are zero: the identity then
-                    if (uv0[0] == 0.0f && uv0[1] == 0.0f && uv1[0] == 0.0f && uv1[3] == 0.0f) {
-                        uv0[0] = uv0[1] = 1.0f; uv0[2] = uv0[3] = 0.0f;
-                        uv1[0] = uv1[3] = 1.0f; uv1[1] = uv1[2] = 0.0f;
-                    }
-                }
-                e[3] = flags;
-                std::memcpy(e + 4, uv0, sizeof(uv0));
-                std::memcpy(e + 8, uv1, sizeof(uv1));
-                w.insert(w.end(), e, e + 12);
-            }
         }
     }
-    // THE MASKS THE TABLE NAMES, counted (after the build: alphaMaskFor may have made or dropped some).
-    sa.alphaMaskEpoch = mAlphaMaskEpoch;
-    std::sort(maskIds.begin(), maskIds.end());
-    maskIds.erase(std::unique(maskIds.begin(), maskIds.end()), maskIds.end());
-    for (AlphaMask &m : mAlphaMasks) {
-        if (std::binary_search(sa.alphaMaskIds.begin(), sa.alphaMaskIds.end(), m.id) && m.users) --m.users;
-        if (std::binary_search(maskIds.begin(), maskIds.end(), m.id)) ++m.users;
-    }
-    sa.alphaMaskIds.swap(maskIds);
     if (w == sa.alphaWords) return;
     retire(sa.alphaTable);
     sa.alphaAddress = 0;

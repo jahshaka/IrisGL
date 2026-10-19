@@ -1182,6 +1182,11 @@ constexpr ArmDef kArms[] = {
     { ArmId::AtomHitVctSpecular, 1.0, 0.0, 1.0,
       "The VCT specular cone in the ray-hit decode. 0 = compiled out (vct_disable_specular). "
       "gi.hit_shade. Was JAHSHAKA_HIT_VCT_SPECULAR (a per-pass read)." },
+    { ArmId::AtomMaskPyramid, 1.0, 0.0, 1.0,
+      "THE CUT-OUTS' MASK PYRAMID (ATOM-3 stage 2): 1 = shipped, the id pass and the caster cut sample each "
+      "cut-out's 1-bit mask at the level its fragment's UV footprint asks for (a coverage-preserving pyramid: every "
+      "level's set fraction is level 0's). 0 = level 0 alone, nearest (the base's mask): the level-0 reference of "
+      "atom.masked_id's and shadow.caster_route's silhouette bounds. The rays read level 0 either way." },
     { ArmId::GatherHitsReadback, 0.0, 0.0, 1.0,
       "THE GATHER-HITS READBACK (FAR-SUN-1, an instrument): every ray of every uniform probe records "
       "what answered it (the card, the voxels and which cascade, the sky, a decode record, a far one, "

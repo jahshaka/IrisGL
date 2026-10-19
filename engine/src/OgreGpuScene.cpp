@@ -158,7 +158,12 @@ void GpuScene::destroy() {
         if (mPartAabbBuffer) mVao->destroyUavBuffer(mPartAabbBuffer);
         if (mClusterBuffer) mVao->destroyUavBuffer(mClusterBuffer);
         if (mGroupBuffer) mVao->destroyUavBuffer(mGroupBuffer);
+        if (mMaskTable) mVao->destroyUavBuffer(mMaskTable);
     }
+    mMaskTable = nullptr;
+    mMaskWords.clear();
+    mMaskAddress = 0u;
+    ++mMaskSerial;
     mClusterBuffer = mGroupBuffer = nullptr;
     mClusterMirror.clear();
     mGroupMirror.clear();
@@ -929,18 +934,17 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n, bool atomDraw) const {
     // moved is an in-place datablock edit or a bake, which the PBS change log marks.
     if (atomDraw) {
         const AtomRoute route = atomRouteFor(n, f);
+        const Ogre::HlmsDatablock *db0 = n.item->getNumSubItems() ? n.item->getSubItem(0)->getDatablock() : nullptr;
         if (route == AtomRoute::Atom) {
             f |= kGpuAtom | kGpuAtomCaster;
-            // ...BOTH FACES (ATOM-TWO-SIDED-1): the route admits a no-cull material only
-            // with a no-cull caster, so one flag says it for the id pass and the caster cut.
-            if (n.item->getSubItem(0)->getDatablock()->getMacroblock()->mCullMode == Ogre::CULL_NONE)
-                f |= kGpuTwoSided;
+            // ...BOTH FACES, PER PASS (ATOM-TWO-SIDED-1; ENGINE-POLISH-ATOM-1 stage 3): the id pass's from the
+            // colour macroblock, the caster cut's from the caster's (a cut-out's caster draws both faces).
+            if (db0->getMacroblock()->mCullMode == Ogre::CULL_NONE) f |= kGpuTwoSided;
+            if (db0->getMacroblock(true)->mCullMode == Ogre::CULL_NONE) f |= kGpuCasterTwoSided;
         } else if (atomCasterThroughCut(n, f, route)) {
-            // THE CASTER ALONE THROUGH THE CUT (ENGINE-POLISH-ATOM-1 stage 2): its colour stays on PBS; the
-            // faces are its CASTER's (the id pass never draws it, so the flag speaks for the caster cut only).
+            // THE CASTER ALONE THROUGH THE CUT (ENGINE-POLISH-ATOM-1 stage 2): its colour stays on PBS.
             f |= kGpuAtomCaster;
-            if (n.item->getSubItem(0)->getDatablock()->getMacroblock(true)->mCullMode == Ogre::CULL_NONE)
-                f |= kGpuTwoSided;
+            if (db0->getMacroblock(true)->mCullMode == Ogre::CULL_NONE) f |= kGpuCasterTwoSided;
         }
     }
     return f;

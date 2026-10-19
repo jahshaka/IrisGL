@@ -22,6 +22,7 @@
 // MeshPtrs and hands out UavBufferPackeds — but it knows nothing of Vulkan and
 // nothing of OgreScene's Node, which is what keeps it bindable from an
 // HlmsComputeJob and buildable on a platform with no ray queries.
+#include "AlphaMasks.h"   // the cut-outs' masks (ENGINE-POLISH-ATOM-1 stage 3)
 #include "GpuCull.h"
 #include "GpuSceneSubstrate.h"   // the tables' one writer (GpuScene.h inside it)
 #include "photon/PhotonComponent.h"
@@ -1944,6 +1945,7 @@ public:
     X(AtomDiscriminate, "atom.discriminate") /* the decode's failure colour codes (1), the chart (2) */ \
     X(AtomHitWorldLights, "atom.hitWorldLights") /* the hit decode's light list: 0 shipped, 1 off, 2 all */ \
     X(AtomHitVctSpecular, "atom.hitVctSpecular") /* the hit decode's VCT specular cone (0: compiled out) */ \
+    X(AtomMaskPyramid, "atom.maskPyramid") /* the cut-outs' masks sampled at the fragment's level (0: level 0 only, the silhouette rows' reference) */ \
     X(GatherHitsReadback, "gather.hitsReadback") /* every uniform probe's per-ray record read back (FAR-SUN-1) */ \
     X(ReflectMetalDecode, "reflect.metalDecode") /* the reflector roughness below which a metal hit decodes */ \
     X(GiHitDirect, "gi.hitDirect") /* a voxel-answered hit's direct light at the hit (FAR-SUN-2; 0: the store whole) */ \
@@ -4317,6 +4319,8 @@ public:
     }
     bool shadowMapDigests(std::vector<ShadowMapDigest> &out) override;
     bool shadowCasterRoutes(std::vector<ShadowRouteShare> &out) override;
+    bool coverageSnapshot(unsigned slot) override;
+    bool coverageCompare(float viewRelDepth, float mapDepthTexels, bool maskedOnly, CoverageCompare &out) override;
     void setAtomDrawEnabled(bool on) override;
     void setAtomOcclusionEnabled(bool on) override;
     void setShadowReceiverCull(bool on) override;
@@ -6249,6 +6253,57 @@ public:
     /// mark since), then — after the ray levels have patched the mirror — ONE commit.
     void composeGpuSceneFrame() const;
     void commitGpuSceneFrame() const;
+    /// THE CUT-OUTS' MASK TABLE (ENGINE-POLISH-ATOM-1 stage 3; OgreAlphaMasks.cpp): after the frame's commit and
+    /// before the ray tier and every pass — every shown alpha-tested slot's masks asked of the engine's store (made
+    /// on the device the first frame their textures are resident) and named, with their UV transforms, in the GPU
+    /// scene's table (GpuScene::maskTable*). A cut-out whose mask was still being made routes Pending (the stock
+    /// shader draws it); the frame its mask is made, its slot is re-composed.
+    void updateMaskTable();
+    /// The masks the last table build served STALE (an older content's, past the frame's budget): the ray tier's
+    /// RayQueryStatus::alphaStaleServed.
+    unsigned long long maskStaleServed() const { return mMaskStaleServed; }
+private:
+    /// THE CUT-OUTS THE TABLE COVERS, kept by the change feed (a walk over every slot every frame is what the feed
+    /// replaced, ATOM-CPU-WALKS-1): the shown alpha-tested slots, and per member its first sub-item's datablock when
+    /// last told (a material swap on a member re-writes the table; an edit in place moves the material serial).
+    /// REGISTERED BY THE FIRST TABLE BUILD (updateMaskTable: a late observer is primed with every live slot) and
+    /// unregistered by its own destructor (declared after the substrate, so it dies first); the table's reset
+    /// (GpuScene::destroy, the scene's teardown) gives the store back the masks it named.
+    struct MaskFeed final : detail::GpuSceneObserver {
+        OgreScene *scene = nullptr;
+        detail::GpuScene *table = nullptr;
+        std::set<uint32_t> alpha;
+        std::vector<const void *> dbOf;
+        /// The masks the scene's table names (sorted store ids: AlphaMaskStore::retarget's users).
+        std::vector<unsigned long long> ids;
+        bool dirty = true;
+        void gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) override;
+        void gpuSceneReset() override;
+        MaskFeed() = default;
+        MaskFeed(const MaskFeed &) = delete;
+        MaskFeed &operator=(const MaskFeed &) = delete;
+        ~MaskFeed() override;
+    };
+    MaskFeed mMaskFeed;
+    /// THE COVERAGE A/B's TWO SNAPSHOTS (coverageSnapshot, a measuring door; OgreShadow.cpp).
+    struct CoverageShot {
+        bool valid = false;
+        unsigned w = 0, h = 0;
+        std::vector<float> depth;
+        Ogre::Matrix4 proj = Ogre::Matrix4::IDENTITY;   ///< the camera's, with the render system's depth range
+        /// per pixel: the id pass's slot is a cut-out it drew (kGpuAtom | kGpuAlphaTested at the snapshot)
+        std::vector<unsigned char> masked;
+        struct Map { unsigned map = 0, w = 0, h = 0, atlasW = 0; Ogre::Matrix4 vp = Ogre::Matrix4::IDENTITY; std::vector<float> d; };
+        std::vector<Map> maps;
+    };
+    CoverageShot mCoverageShots[2];
+    std::vector<uint32_t> mMaskSet, mMaskReady;
+    unsigned long long mMaskMaterialSerial = ~0ull, mMaskUploadSerial = ~0ull, mMaskEpoch = ~0ull,
+                       mMaskTableSerial = ~0ull, mMaskStaleServed = 0ull;
+    /// The highest level a fragment may sample at the last build (the arm atom.maskPyramid: kMaskAllLevels or 0).
+    uint32_t mMaskLevelCap = ~0u;
+    bool mMaskPending = false;
+public:
     // ---- THE READ-ONLY GPU-SCENE VIEW (ENGINE-UPGRADE-2 stage 2) -----------------------
     // What a reader outside the scene (the ray tier) learns about the GPU scene's slots,
     // without the scene's members: the substrate (the tables it reads; the ray
@@ -6389,6 +6444,10 @@ private:
     /// THE ROW TESTS (atomRouteFor's NoRow): one submesh, a triangle list, a mesh slot with levels, a geometry row
     /// with both device addresses and a float3 normal — and, for the decode (`decode`), a material word.
     bool atomRowReadable(const Node &n, const Ogre::HlmsDatablock *db, bool decode) const;
+    /// A CUT-OUT'S MASK, as the route sees it (ENGINE-POLISH-ATOM-1 stage 3, shipped by ATOM-3 stage 2): Ready
+    /// (made, or an older content's served until remade; or the material has no alpha test of its own), Pending,
+    /// Refused (never: the stock route) — the engine's store, read only (the compose's lanes call it).
+    AlphaMaskStore::State cutoutMaskState(const Ogre::HlmsDatablock *db) const;
 public:
     /// The split is live in this scene: the GPU scene exists, the id pass can run on
     /// this device (OgreAtomIdPass.cpp) and the measurement door is open.

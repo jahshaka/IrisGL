@@ -14,6 +14,10 @@
 // x the shadow camera's constant-bias scale x the pass's depth range — subtracted from
 // clip z for a directional or spot map, ADDED for a point map, whose fragment stage
 // (atom_caster_point.frag) also writes the biased linear distance into the colour.
+//
+// JAH_MASKED (ENGINE-POLISH-ATOM-1 stage 3, the masked ranges): the vertex's texture
+// coordinate and the slot ride to the fragment stage, which discards where the
+// cut-out's mask is clear (atom_caster_masked.frag; atom_caster_point.frag masked).
 #version 460
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
@@ -36,11 +40,15 @@ layout( push_constant ) uniform AtomCasterPc
 	uvec2 instances;        // GpuScene::instanceBuffer: 10 uvec4 per GpuInstance
 	uvec2 meshes;           // GpuScene::meshBuffer: 4 uvec4 per GpuMesh (dag = lane 3)
 	uvec2 rows;             // GpuScene::geomBuffer: 3 uvec4 per geometry row
-	uvec2 pad;
+	uvec2 maskTable;        // GpuScene::maskTableAddress: the cut-outs' masks (JAH_MASKED; 0 otherwise)
 } pc;
 
 layout( location = 0 ) out vec3 outToCamera;
 layout( location = 1 ) flat out float outConstBias;
+#ifdef JAH_MASKED
+layout( location = 2 ) out vec2 outUv;
+layout( location = 3 ) flat out uint outSlot;
+#endif
 
 out gl_PerVertex
 {
@@ -77,4 +85,8 @@ void main()
 
 	outToCamera = w - pc.eyeBias.xyz;
 	outConstBias = constBias;
+#ifdef JAH_MASKED
+	outUv = geomUv( row, uint( gl_VertexIndex ) );
+	outSlot = slot;
+#endif
 }

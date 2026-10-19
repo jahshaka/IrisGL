@@ -12,6 +12,10 @@
 //
 // The transform is the decode's own order — world rows, then the view-projection
 // rows — so the triangle the decode rebuilds from the id lands where this one did.
+//
+// JAH_MASKED (ENGINE-POLISH-ATOM-1 stage 3, the masked ranges): the vertex's texture
+// coordinate rides to the fragment stage, which discards where the cut-out's mask is
+// clear (atom_id.frag).
 #version 460
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
@@ -36,11 +40,14 @@ layout( push_constant ) uniform AtomIdPc
 	uvec2 rows;             // GpuScene::geomBuffer: 3 uvec4 per geometry row
 	uvec2 triWords;         // GpuCull::cutTriWords: two words per stream triangle (the fragment's)
 	uvec2 slotBase;         // GpuCull::cutSlotBase: the slot's first stream triangle
-	uvec2 pad;
+	uvec2 maskTable;        // GpuScene::maskTableAddress: the cut-outs' masks (JAH_MASKED; 0 otherwise)
 } pc;
 
 layout( location = 0 ) flat out uint outSlot;
 layout( location = 1 ) flat out uint outTriBase;
+#ifdef JAH_MASKED
+layout( location = 2 ) out vec2 outUv;
+#endif
 
 out gl_PerVertex
 {
@@ -70,4 +77,7 @@ void main()
 
 	outSlot = slot;
 	outTriBase = AtomWordRef( pc.slotBase ).v[slot];
+#ifdef JAH_MASKED
+	outUv = geomUv( row, uint( gl_VertexIndex ) );
+#endif
 }

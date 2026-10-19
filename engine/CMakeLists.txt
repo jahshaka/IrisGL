@@ -53,6 +53,8 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomIdPass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomDensity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAtomCasterPass.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/AlphaMasks.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAlphaMasks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/HlmsAtom.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/AtomPass.h
@@ -182,6 +184,7 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_rays.comp"
                 # the cut-out candidate test (REFLECT-MOVERS-2)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_alpha_mask.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
         COMMENT "Compiling the ray-query compute shader at SPIR-V 1.4"
         VERBATIM)
@@ -211,6 +214,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_alpha_mask.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_skin_prev.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atmosphere.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_height_fog.glsl"
@@ -234,6 +238,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_alpha_mask.glsl"
                 "${JAH_RQ_FORK_BRDF}"
                 "${JAH_RQ_SPEC_ALBEDO}"
         COMMENT "Compiling the card-read parity compute shader at SPIR-V 1.4"
@@ -329,6 +334,7 @@ if(JAH_RAY_QUERY_OK)
                 "${JAH_RQ_INCLUDE}/jah_rq_hit_record.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
+                "${JAH_RQ_INCLUDE}/jah_alpha_mask.glsl"
                 "${JAH_RQ_INCLUDE}/jah_card_view.glsl"
                 "${JAH_RQ_FORK_BRDF}"
                 "${JAH_RQ_SPEC_ALBEDO}"
@@ -366,6 +372,7 @@ if(JAH_RAY_QUERY_OK)
                 # the sun ray is one text with the hit record's (PHOTON-HIT-SHADE-1)
                 "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
+                "${JAH_RQ_INCLUDE}/jah_alpha_mask.glsl"
                 "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"
         COMMENT "Compiling the sun contact shadow job at SPIR-V 1.4"
         VERBATIM)
@@ -393,18 +400,9 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
                 "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
+                "${JAH_RQ_INCLUDE}/jah_alpha_mask.glsl"
                 "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"
         COMMENT "Compiling the card mover-shadow job at SPIR-V 1.4"
-        VERBATIM)
-    # A CUT-OUT'S MASK FOR THE RAYS (REFLECT-MOVERS-2): a material's albedo alpha
-    # through its alpha test, one bit a texel (jah_rq_alpha.glsl reads it).
-    add_custom_command(
-        OUTPUT "${JAH_RQ_GEN_DIR}/rq_alpha_mask_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
-                --vn krq_alphaMaskSpv -o "${JAH_RQ_GEN_DIR}/rq_alpha_mask_spv.h"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_alpha_mask.comp"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_alpha_mask.comp"
-        COMMENT "Compiling the cut-out mask job at SPIR-V 1.4"
         VERBATIM)
     # THE TOP-LEVEL INSTANCES BY COMPUTE (ATOM-CPU-WALKS-1): one thread per GPU scene
     # slot writes its near and far instance from the table.
@@ -454,16 +452,46 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_caster_point.frag"
         COMMENT "Compiling the caster cut (point frag)"
         VERBATIM)
+    # THE MASKED RANGES (ENGINE-POLISH-ATOM-1 stage 3): the same stages compiled with JAH_MASKED - the vertex stage
+    # carries the texture coordinate, the fragment stage discards where the cut-out's mask is clear
+    # (jah_alpha_mask.glsl) - and the directional/spot maps' masked fragment stage (atom_caster_masked.frag).
+    foreach(_pair "atom_id.vert:vert:katomIdMasked_vertSpv:atom_id_masked_vert_spv.h"
+                  "atom_id.frag:frag:katomIdMasked_fragSpv:atom_id_masked_frag_spv.h"
+                  "atom_caster.vert:vert:katomCasterMasked_vertSpv:atom_caster_masked_vert_spv.h"
+                  "atom_caster_point.frag:frag:katomCasterPointMasked_fragSpv:atom_caster_point_masked_frag_spv.h"
+                  "atom_caster_masked.frag:frag:katomCasterMasked_fragSpv:atom_caster_masked_frag_spv.h")
+        string(REPLACE ":" ";" _p "${_pair}")
+        list(GET _p 0 _src)
+        list(GET _p 1 _stage)
+        list(GET _p 2 _vn)
+        list(GET _p 3 _out)
+        add_custom_command(
+            OUTPUT "${JAH_RQ_GEN_DIR}/${_out}"
+            COMMAND "${JAH_GLSLANG_VALIDATOR}" -V -S ${_stage} -x -DJAH_MASKED=1
+                    "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                    --vn ${_vn} -o "${JAH_RQ_GEN_DIR}/${_out}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/${_src}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/${_src}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_alpha_mask.glsl"
+            COMMENT "Compiling the Atom passes' masked ranges (${_src})"
+            VERBATIM)
+    endforeach()
     add_custom_target(JahshakaRayQuerySpv
                       DEPENDS "${JAH_RQ_GEN_DIR}/atom_id_vert_spv.h"
                               "${JAH_RQ_GEN_DIR}/atom_id_frag_spv.h"
                               "${JAH_RQ_GEN_DIR}/atom_caster_vert_spv.h"
                               "${JAH_RQ_GEN_DIR}/atom_caster_point_frag_spv.h"
+                              "${JAH_RQ_GEN_DIR}/atom_id_masked_vert_spv.h"
+                              "${JAH_RQ_GEN_DIR}/atom_id_masked_frag_spv.h"
+                              "${JAH_RQ_GEN_DIR}/atom_caster_masked_vert_spv.h"
+                              "${JAH_RQ_GEN_DIR}/atom_caster_point_masked_frag_spv.h"
+                              "${JAH_RQ_GEN_DIR}/atom_caster_masked_frag_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_alpha_mask_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"

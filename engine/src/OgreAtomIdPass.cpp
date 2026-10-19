@@ -74,6 +74,8 @@
 #include "AtomVulkan.h"
 
 #include "rayquery/atom_id_frag_spv.h"
+#include "rayquery/atom_id_masked_frag_spv.h"
+#include "rayquery/atom_id_masked_vert_spv.h"
 #include "rayquery/atom_id_vert_spv.h"
 #endif
 
@@ -230,7 +232,7 @@ struct IdPushConstants {
     uint32_t rows[2] = {};
     uint32_t triWords[2] = {};
     uint32_t slotBase[2] = {};
-    uint32_t pad[2] = {};
+    uint32_t maskTable[2] = {};   ///< GpuScene::maskTableAddress (the masked ranges' fragment stage)
 };
 static_assert(sizeof(IdPushConstants) == 112, "atom_id.vert/.frag's push-constant block");
 constexpr VkShaderStageFlags kIdPushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -244,8 +246,10 @@ struct IdPipeline {
     /// [0] culls BACK faces, [1] FRONT faces: the pass that requires texture
     /// flipping gets its y row negated AND its culling inverted (Hlms's own
     /// InvertCullingMode rule, OgreHlms.cpp) — the same pair here. [2] culls NOTHING:
-    /// the list's two-sided range (ATOM-TWO-SIDED-1), flipped or not.
-    VkPipeline pipeline[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    /// the list's two-sided range (ATOM-TWO-SIDED-1), flipped or not. [3..5] the same three
+    /// for the MASKED ranges (ENGINE-POLISH-ATOM-1 stage 3): the vertex stage carries the
+    /// texture coordinate and the fragment stage discards where the cut-out's mask is clear.
+    VkPipeline pipeline[6] = {};
     VkFormat colour = VK_FORMAT_UNDEFINED;
     VkFormat depth = VK_FORMAT_UNDEFINED;
     bool refused = false;   ///< a creation failed; said once, the pass records nothing
@@ -553,9 +557,14 @@ bool ensurePipeline(IdPipeline &ids, Ogre::VulkanRenderSystem *vkRs, VkFormat co
 
     VkShaderModule vs = makeModule(ids.dev, katomId_vertSpv, sizeof(katomId_vertSpv));
     VkShaderModule fs = makeModule(ids.dev, katomId_fragSpv, sizeof(katomId_fragSpv));
-    if (!vs || !fs) {
-        if (vs) vkDestroyShaderModule(ids.dev, vs, nullptr);
-        if (fs) vkDestroyShaderModule(ids.dev, fs, nullptr);
+    VkShaderModule mvs = makeModule(ids.dev, katomIdMasked_vertSpv, sizeof(katomIdMasked_vertSpv));
+    VkShaderModule mfs = makeModule(ids.dev, katomIdMasked_fragSpv, sizeof(katomIdMasked_fragSpv));
+    const auto dropModules = [&] {
+        for (VkShaderModule m : { vs, fs, mvs, mfs })
+            if (m) vkDestroyShaderModule(ids.dev, m, nullptr);
+    };
+    if (!vs || !fs || !mvs || !mfs) {
+        dropModules();
         ids.refused = true;
         logOnce("vkCreateShaderModule failed");
         return false;
@@ -628,8 +637,15 @@ bool ensurePipeline(IdPipeline &ids, Ogre::VulkanRenderSystem *vkRs, VkFormat co
         rast.cullMode = VK_CULL_MODE_NONE;
         r = vkCreateGraphicsPipelines(ids.dev, device->mPipelineCache, 1, &gp, nullptr, &ids.pipeline[2]);
     }
-    vkDestroyShaderModule(ids.dev, vs, nullptr);
-    vkDestroyShaderModule(ids.dev, fs, nullptr);
+    // THE MASKED THREE (ENGINE-POLISH-ATOM-1 stage 3): the same state, the JAH_MASKED stages.
+    stages[0].module = mvs;
+    stages[1].module = mfs;
+    const VkCullModeFlags culls[3] = { VK_CULL_MODE_BACK_BIT, VK_CULL_MODE_FRONT_BIT, VK_CULL_MODE_NONE };
+    for (unsigned k = 0; k < 3u && r == VK_SUCCESS; ++k) {
+        rast.cullMode = culls[k];
+        r = vkCreateGraphicsPipelines(ids.dev, device->mPipelineCache, 1, &gp, nullptr, &ids.pipeline[3u + k]);
+    }
+    dropModules();
     if (r != VK_SUCCESS) {
         destroyPipelineObjects(ids);
         ids.refused = true;
@@ -926,6 +942,9 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         addressOf(D->ids, gs->geomBuffer(), pc.rows);
         addressOf(D->ids, cull.cutTriWords(), pc.triWords);
         addressOf(D->ids, cull.cutSlotBase(), pc.slotBase);
+        const uint64_t masks = gs->maskTableAddress();
+        pc.maskTable[0] = uint32_t(masks & 0xFFFFFFFFu);
+        pc.maskTable[1] = uint32_t(masks >> 32u);
         vkCmdPushConstants(cmd, D->ids.layout, kIdPushStages, 0, sizeof(pc), &pc);
     }
     {
@@ -942,15 +961,19 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         const uint32_t maxDraws = std::min(cull.capacity(), gs->slotCount());
         D->ids.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff, maxDraws,
                                      GpuCull::kDrawWords * sizeof(uint32_t));
-        // THE TWO-SIDED RANGE (ATOM-TWO-SIDED-1): the survivors flagged kGpuTwoSided,
-        // both faces rasterised and resolved by the depth test — the same push
-        // constants, viewport and index buffer (one layout), only the cull differs.
-        // Recorded only while the scene has such an item.
-        if (scene->atom().hasTwoSidedItems()) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, D->ids.pipeline[2]);
+        // THE OTHER RANGES (ATOM-TWO-SIDED-1; ENGINE-POLISH-ATOM-1 stage 3): 1 the survivors flagged
+        // kGpuTwoSided, both faces rasterised and resolved by the depth test; 2 the CUT-OUTS (kGpuAlphaTested),
+        // discarded at their masks, culled as the pass culls; 3 the two-sided cut-outs — the same push constants,
+        // viewport and index buffer (one layout), only the pipeline differs. Each recorded only while the scene has
+        // such an item (AtomComponent::hasIdRange).
+        const bool flip = rpd->requiresTextureFlipping();
+        const unsigned rangePipe[4] = { 0u, 2u, flip ? 4u : 3u, 5u };
+        for (unsigned rg = 1u; rg < GpuCull::kRanges; ++rg) {
+            if (!scene->atom().hasIdRange(rg)) continue;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, D->ids.pipeline[rangePipe[rg]]);
             D->ids.drawIndexedIndirectCount(
-                cmd, drawBuf, drawOff + VkDeviceSize(cull.twoSidedFirst()) * GpuCull::kDrawWords * sizeof(uint32_t),
-                countBuf, countOff + GpuCull::kTwoSidedCountOffsetBytes, maxDraws,
+                cmd, drawBuf, drawOff + VkDeviceSize(cull.rangeFirst(rg)) * GpuCull::kDrawWords * sizeof(uint32_t),
+                countBuf, countOff + GpuCull::rangeCountOffsetBytes(rg), maxDraws,
                 GpuCull::kDrawWords * sizeof(uint32_t));
         }
     }

@@ -333,6 +333,35 @@
 			"params" : [ ["recvLevel", [1], "uint"] ]
 		},
 
+		"Jahshaka/AlphaMask" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahAlphaMask_cs",
+			"inform_shader_of_texture_data_change" : true,
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"textures" : [ {} ],
+			"uav_units" : 1,
+			"params" :
+			[
+				["alphaMaskA", [1, 1, 0, 0], "uint"],
+				["alphaMaskB", [0, 0, 0, 0], "uint"]
+			]
+		},
+
+		"Jahshaka/AlphaMaskPyramid" :
+		{
+			"threads_per_group" : [256, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahAlphaMaskPyramid_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"uav_units" : 1,
+			"params" :
+			[
+				["alphaPyramidA", [1, 1, 1, 0], "uint"]
+			]
+		},
+
 		"Jahshaka/VideoNv12" :
 		{
 			"threads_per_group" : [8, 8, 1],

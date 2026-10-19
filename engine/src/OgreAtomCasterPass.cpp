@@ -86,7 +86,10 @@
 #include "OgreVulkanRenderSystem.h"
 #include "AtomVulkan.h"
 
+#include "rayquery/atom_caster_masked_frag_spv.h"
+#include "rayquery/atom_caster_masked_vert_spv.h"
 #include "rayquery/atom_caster_point_frag_spv.h"
+#include "rayquery/atom_caster_point_masked_frag_spv.h"
 #include "rayquery/atom_caster_vert_spv.h"
 #endif
 
@@ -106,7 +109,7 @@ struct CasterPushConstants {
     uint32_t instances[2] = {};
     uint32_t meshes[2] = {};
     uint32_t rows[2] = {};
-    uint32_t pad[2] = {};
+    uint32_t maskTable[2] = {};   ///< GpuScene::maskTableAddress (the masked ranges' fragment stage)
 };
 static_assert(sizeof(CasterPushConstants) == 128, "atom_caster.vert/_point.frag's push-constant block");
 constexpr VkShaderStageFlags kCasterPushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -117,9 +120,12 @@ struct CasterPipelineKey {
     bool cullFront = false;                  ///< the pass flips: Hlms's InvertCullingMode
     bool cullNone = false;                   ///< the two-sided range (ATOM-TWO-SIDED-1): both faces
     bool depthClamp = false;
+    /// THE MASKED RANGES (ENGINE-POLISH-ATOM-1 stage 3): a fragment stage that discards where the cut-out's mask is
+    /// clear — for a directional or spot map too (atom_caster_masked.frag), whose opaque ranges have none.
+    bool masked = false;
     bool operator==(const CasterPipelineKey &o) const {
         return colour == o.colour && depth == o.depth && cullFront == o.cullFront && cullNone == o.cullNone &&
-               depthClamp == o.depthClamp;
+               depthClamp == o.depthClamp && masked == o.masked;
     }
 };
 
@@ -235,10 +241,15 @@ VkPipeline pipelineFor(CasterPipelines &C, Ogre::VulkanRenderSystem *vkRs, const
         return VK_NULL_HANDLE;
     }
 
-    VkShaderModule vs = makeModule(C.dev, katomCaster_vertSpv, sizeof(katomCaster_vertSpv));
-    VkShaderModule fs = point ? makeModule(C.dev, katomCasterPoint_fragSpv, sizeof(katomCasterPoint_fragSpv))
-                              : VK_NULL_HANDLE;
-    if (!vs || (point && !fs)) {
+    VkShaderModule vs = key.masked ? makeModule(C.dev, katomCasterMasked_vertSpv, sizeof(katomCasterMasked_vertSpv))
+                                   : makeModule(C.dev, katomCaster_vertSpv, sizeof(katomCaster_vertSpv));
+    const bool hasFragment = point || key.masked;
+    VkShaderModule fs = point ? (key.masked ? makeModule(C.dev, katomCasterPointMasked_fragSpv,
+                                                         sizeof(katomCasterPointMasked_fragSpv))
+                                            : makeModule(C.dev, katomCasterPoint_fragSpv, sizeof(katomCasterPoint_fragSpv)))
+                      : key.masked ? makeModule(C.dev, katomCasterMasked_fragSpv, sizeof(katomCasterMasked_fragSpv))
+                                   : VK_NULL_HANDLE;
+    if (!vs || (hasFragment && !fs)) {
         if (vs) vkDestroyShaderModule(C.dev, vs, nullptr);
         if (fs) vkDestroyShaderModule(C.dev, fs, nullptr);
         vkDestroyRenderPass(C.dev, e.compatible, nullptr);
@@ -292,7 +303,7 @@ VkPipeline pipelineFor(CasterPipelines &C, Ogre::VulkanRenderSystem *vkRs, const
     dy.pDynamicStates = dyn;
     VkGraphicsPipelineCreateInfo gp{};
     gp.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    gp.stageCount = point ? 2u : 1u;
+    gp.stageCount = hasFragment ? 2u : 1u;
     gp.pStages = stages;
     gp.pVertexInputState = &vi;
     gp.pInputAssemblyState = &ia;
@@ -314,12 +325,13 @@ VkPipeline pipelineFor(CasterPipelines &C, Ogre::VulkanRenderSystem *vkRs, const
         vkDestroyRenderPass(C.dev, e.compatible, nullptr);
         e.compatible = VK_NULL_HANDLE;
         e.pipeline = VK_NULL_HANDLE;
-        if (key.cullNone) {
-            // THE NO-CULL PIPELINE IS OPTIONAL (ATOM-TWO-SIDED-1): refused, the map still draws
-            // its one-sided Atom casters — only the two-sided range goes undrawn. Remembered as
-            // a null entry, so it is asked of the device once, never per map.
-            logOnce("vkCreateGraphicsPipelines failed for the no-cull (two-sided) caster pipeline: "
-                    "two-sided Atom items cast no shadow on this device");
+        if (key.cullNone || key.masked) {
+            // THE NO-CULL AND THE MASKED PIPELINES ARE OPTIONAL (ATOM-TWO-SIDED-1; ENGINE-POLISH-ATOM-1 stage 3):
+            // refused, the map still draws its one-sided opaque Atom casters — only that range goes undrawn.
+            // Remembered as a null entry, so it is asked of the device once, never per map.
+            logOnce(std::string("vkCreateGraphicsPipelines failed for the ") + (key.masked ? "masked " : "") +
+                    (key.cullNone ? "no-cull (two-sided) " : "") + "caster pipeline: those Atom items cast no "
+                    "shadow on this device");
             C.entries.push_back(e);
             return VK_NULL_HANDLE;
         }
@@ -329,7 +341,8 @@ VkPipeline pipelineFor(CasterPipelines &C, Ogre::VulkanRenderSystem *vkRs, const
     }
     Ogre::LogManager::getSingleton().logMessage(
         "Jahshaka atom caster pass: pipeline (" + std::string(point ? "point" : "depth") +
-            (key.cullNone ? ", no cull" : key.cullFront ? ", front cull" : ", back cull") + ") created in " +
+            (key.cullNone ? ", no cull" : key.cullFront ? ", front cull" : ", back cull") +
+            (key.masked ? ", masked" : "") + ") created in " +
             std::to_string(createMs) + " ms",
         Ogre::LML_NORMAL);
     C.entries.push_back(e);
@@ -1110,13 +1123,16 @@ void recordCasterPass(AtomPassContext &ctx) {
     // the device's pipeline cache, its time in the Ogre log), so the first frame that
     // gains a two-sided caster compiles nothing. A refused one draws the one-sided range
     // alone (pipelineFor logs it once) — never the map's whole Atom set dropped.
-    VkPipeline pipelineTwoSided = VK_NULL_HANDLE;
-    {
-        CasterPipelineKey two = key;
-        two.cullFront = false;
-        two.cullNone = true;
-        const VkPipeline warmed = pipelineFor(C, vkRs, two);
-        if (atom.hasTwoSidedCasters()) pipelineTwoSided = warmed;
+    // ...AND THE MASKED RANGES' PAIR (ENGINE-POLISH-ATOM-1 stage 3), warmed the same way: the cut-outs' casters,
+    // culled as the pass culls (2) and with no cull (3). rangePipeline[r] draws range r, null = not drawn.
+    VkPipeline rangePipeline[GpuCull::kRanges] = { pipeline, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    for (unsigned rg = 1u; rg < GpuCull::kRanges; ++rg) {
+        CasterPipelineKey k = key;
+        k.cullNone = (rg & 1u) != 0u;
+        if (k.cullNone) k.cullFront = false;
+        k.masked = rg >= 2u;
+        const VkPipeline warmed = pipelineFor(C, vkRs, k);
+        if (atom.hasCasterRange(rg)) rangePipeline[rg] = warmed;
     }
 
     // THE CUBE FACE: the scene pass turned the camera to its face for its own length and
@@ -1350,6 +1366,9 @@ void recordCasterPass(AtomPassContext &ctx) {
             atomAddressOf(C.dev, C.bufferDeviceAddress, gs.instanceBuffer(), pc.instances);
             atomAddressOf(C.dev, C.bufferDeviceAddress, gs.meshBuffer(), pc.meshes);
             atomAddressOf(C.dev, C.bufferDeviceAddress, gs.geomBuffer(), pc.rows);
+            const uint64_t masks = gs.maskTableAddress();
+            pc.maskTable[0] = uint32_t(masks & 0xFFFFFFFFu);
+            pc.maskTable[1] = uint32_t(masks >> 32u);
             vkCmdPushConstants(cmd, C.layout, kCasterPushStages, 0, sizeof(pc), &pc);
         }
         {
@@ -1364,12 +1383,12 @@ void recordCasterPass(AtomPassContext &ctx) {
             const uint32_t maxDraws = std::min(list.capacity(), gs.slotCount());
             C.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff, maxDraws,
                                         GpuCull::kDrawWords * sizeof(uint32_t));
-            if (pipelineTwoSided) {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineTwoSided);
+            for (unsigned rg = 1u; rg < GpuCull::kRanges; ++rg) {
+                if (!rangePipeline[rg]) continue;
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rangePipeline[rg]);
                 C.drawIndexedIndirectCount(
-                    cmd, drawBuf,
-                    drawOff + VkDeviceSize(list.twoSidedFirst()) * GpuCull::kDrawWords * sizeof(uint32_t),
-                    countBuf, countOff + GpuCull::kTwoSidedCountOffsetBytes, maxDraws,
+                    cmd, drawBuf, drawOff + VkDeviceSize(list.rangeFirst(rg)) * GpuCull::kDrawWords * sizeof(uint32_t),
+                    countBuf, countOff + GpuCull::rangeCountOffsetBytes(rg), maxDraws,
                     GpuCull::kDrawWords * sizeof(uint32_t));
             }
         }

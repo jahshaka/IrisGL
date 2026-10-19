@@ -93,10 +93,12 @@ public:
     /// The caster cut has a caster to draw (kGpuAtomCaster: an Atom item, or a caster-only one — the caster pass's
     /// gate; ENGINE-POLISH-ATOM-1 stage 2).
     bool hasCasters() const { return mFeed.casterCount != 0u; }
-    /// The GPU scene holds an Atom item drawn from both sides (kGpuTwoSided).
-    bool hasTwoSidedItems() const { return mFeed.twoSidedCount != 0u; }
-    /// ...and the CASTER CUT's: the slots whose caster the cut draws with both faces (kGpuAtomCaster | kGpuTwoSided).
-    bool hasTwoSidedCasters() const { return mFeed.twoSidedCasterCount != 0u; }
+    /// THE CUT'S RANGES (JahCullCut_cs: 1 two-sided, 2 masked, 3 masked two-sided; 0 the one-sided survivors): the
+    /// GPU scene holds an item the id pass draws through range `r` (kGpuAtom, by kGpuTwoSided and kGpuAlphaTested)
+    /// / a caster the caster cut draws through it (kGpuAtomCaster, by kGpuCasterTwoSided and kGpuAlphaTested) — what
+    /// gates each range's draw (ATOM-TWO-SIDED-1; ENGINE-POLISH-ATOM-1 stage 3).
+    bool hasIdRange(unsigned r) const { return r < 4u && mFeed.idRanges[r] != 0u; }
+    bool hasCasterRange(unsigned r) const { return r < 4u && mFeed.casterRanges[r] != 0u; }
     unsigned long long wordSlotVisits() const { return mFeed.words.visits(); }
 
     // --- THE ATOM VIEW ----------------------------------------------------------------------
@@ -166,34 +168,43 @@ private:
     /// this replaces ran on every mover frame (W13: 18-19 ms at 10k).
     struct Words final : GpuSceneObserver {
         WordCounts words;
-        /// THE SLOTS THE PASSES' GATES COUNT, per slot and counted (slotBits): bit 0 a two-sided Atom item
-        /// (kGpuAtom | kGpuTwoSided, ATOM-TWO-SIDED-1: the id pass's no-cull draw of the two-sided range), bit 1 a
-        /// caster the cut draws with both faces (kGpuAtomCaster | kGpuTwoSided: the caster cut's), bit 2 a caster
-        /// the cut draws at all (kGpuAtomCaster: the caster pass's gate; ENGINE-POLISH-ATOM-1 stage 2).
+        /// THE SLOTS THE PASSES' GATES COUNT, per slot (slotBits) and counted: the low nibble the id pass's range
+        /// + 1 (0 = not an Atom item), the high nibble the caster cut's range + 1 (0 = no cut caster) - the range a
+        /// slot's command lands in (JahCullCut_cs: 1 for the pass's two-sided faces, + 2 for a cut-out).
         std::vector<uint8_t> slotBits;
-        unsigned twoSidedCount = 0u, twoSidedCasterCount = 0u, casterCount = 0u;
+        unsigned idRanges[4] = {}, casterRanges[4] = {}, casterCount = 0u;
+        static uint8_t bitsOf(uint32_t flags) {
+            const unsigned masked = (flags & kGpuAlphaTested) ? 2u : 0u;
+            const unsigned id = (flags & kGpuAtom) ? 1u + ((flags & kGpuTwoSided) ? 1u : 0u) + masked : 0u;
+            const unsigned caster =
+                (flags & kGpuAtomCaster) ? 1u + ((flags & kGpuCasterTwoSided) ? 1u : 0u) + masked : 0u;
+            return uint8_t(id | (caster << 4u));
+        }
+        void count(uint8_t bits, int d) {
+            const unsigned id = bits & 0xFu, caster = bits >> 4u;
+            if (id) idRanges[id - 1u] = unsigned(int(idRanges[id - 1u]) + d);
+            if (caster) {
+                casterRanges[caster - 1u] = unsigned(int(casterRanges[caster - 1u]) + d);
+                casterCount = unsigned(int(casterCount) + d);
+            }
+        }
         void gpuSlotChanged(uint32_t slot, const GpuInstance *now) override {
             uint32_t flags = 0u;
             if (now) std::memcpy(&flags, &now->boundsMax[3], sizeof(flags));
             words.set(slot, (now && (flags & kGpuAtom)) ? now->raster[0] : WordCounts::kNone);
-            const bool twoFaces = now && (flags & kGpuTwoSided);
-            const uint8_t bits = uint8_t((twoFaces && (flags & kGpuAtom) ? 1u : 0u) |
-                                        (twoFaces && (flags & kGpuAtomCaster) ? 2u : 0u) |
-                                        (now && (flags & kGpuAtomCaster) ? 4u : 0u));
+            const uint8_t bits = now ? bitsOf(flags) : 0u;
             if (slot >= slotBits.size()) {
                 if (!bits) return;
                 slotBits.resize(size_t(slot) + 1u, 0u);
             }
-            twoSidedCount = twoSidedCount - (slotBits[slot] & 1u) + (bits & 1u);
-            twoSidedCasterCount = twoSidedCasterCount - ((slotBits[slot] >> 1) & 1u) + ((bits >> 1) & 1u);
-            casterCount = casterCount - ((slotBits[slot] >> 2) & 1u) + ((bits >> 2) & 1u);
+            count(slotBits[slot], -1);
+            count(bits, +1);
             slotBits[slot] = bits;
         }
         void gpuSceneReset() override {
             words.reset();
             slotBits.clear();
-            twoSidedCount = 0u;
-            twoSidedCasterCount = 0u;
+            for (unsigned r = 0; r < 4u; ++r) idRanges[r] = casterRanges[r] = 0u;
             casterCount = 0u;
         }
     };
