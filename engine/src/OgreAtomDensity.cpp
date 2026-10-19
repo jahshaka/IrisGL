@@ -381,7 +381,7 @@ bool OgreScene::atomCutProbe(AtomCutProbe &out) {
     const unsigned long long at = st->probeAt;
     st->probeAt = kNever;   // read once
     struct Release {
-        AtomDensityState *s;
+        AtomDensityState *s = nullptr;
         ~Release() { destroyProbe(*s); }
     } release{ st };
     if (at != st->frames) {
