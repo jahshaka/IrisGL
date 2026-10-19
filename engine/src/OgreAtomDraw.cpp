@@ -100,7 +100,11 @@ public:
         // mode 0 (it paints nothing) where the scene's view is Off.
         bool probePaint = false;
         Ogre::TextureGpu *ownTable = own ? atomDensityFrame(mView, scene, view, probePaint) : nullptr;
-        Ogre::TextureGpu *table = ownTable ? ownTable : scene ? scene->atomViewTable() : nullptr;
+        // ...and a Density frame whose count could not be made paints nothing (the scene's table holds no densities).
+        Ogre::TextureGpu *table = ownTable                     ? ownTable
+                                  : view == AtomView::Density ? nullptr
+                                  : scene                     ? scene->atomViewTable()
+                                                              : nullptr;
         Ogre::Pass *pass = ((view != AtomView::Off || probePaint) && table) ? atomViewMaterialPass() : nullptr;
         const bool on = pass && pass->hasFragmentProgram() && pass->getNumTextureUnitStates() >= 4u;
         const Ogre::uint8 mask = ws->getExecutionMask();
