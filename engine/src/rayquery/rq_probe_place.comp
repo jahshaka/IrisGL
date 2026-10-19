@@ -186,13 +186,14 @@ void main()
 
 	// ---- 1. THE PROBE'S PIXEL, jittered inside its own cell ---------------
 	vec2 offset = vec2( 0.5, 0.5 );
-	if( p.plane.w < 0.5 || p.plane.w > 1.5 )
+	if( p.plane.w < 0.5 )
 	{
-		// The pixel CENTRE of a jittered texel, not a continuous position: the
-		// depth and normals are point-sampled, so a sub-pixel position would
-		// read one texel and claim another's place. (plane.w 2, GatherTuning::jitterCommon: one
-		// offset for every cell, the same hash the integrate's bilinear shifts its grid by.)
-		const vec2 j = p.plane.w > 1.5 ? jahSample2( ivec2( 0 ), 0u, frame ) : jahSample2( jahLocalCell( cell ), 0u, frame );
+		// THE GRID'S JITTER (ENGINE-POLISH-PHOTON-2): ONE offset a frame for every
+		// cell, the same hash the integrate's bilinear shifts its grid by, so a
+		// probe is read where it stands. The pixel CENTRE of a jittered texel, not
+		// a continuous position: the depth and normals are point-sampled, so a
+		// sub-pixel position would read one texel and claim another's place.
+		const vec2 j = jahSample2( ivec2( 0 ), 0u, frame );
 		offset = floor( j * stride ) + 0.5;
 	}
 	else

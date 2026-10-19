@@ -1936,9 +1936,8 @@ public:
     X(GpuSerialCompose, "gpuscene.serialCompose") /* the GPU scene's compose after the barrier on the frame's thread (the identity row's other arm, U4 stage 4) */ \
     X(GpuComposeDigest, "gpuscene.composeDigest") /* the compose's digest of every staged row and tail (the identity row, U4 stage 4) */ \
     X(GpuThrowInLane, "gpuscene.throwInLane") /* the GPU scene compose throw door: before the stage, after it, or every time (a test door, U4 decisions 18.3 + 22.4) */ \
-    X(GatherJitter, "gather.jitter") /* the probes' jitter: 0 shipped, 1 off (the centre), 2 one offset for the grid */ \
+    X(GatherJitter, "gather.jitter") /* the probes' jitter: 0 shipped (the grid's one offset a frame), 1 off (the centre) */ \
     X(GatherFilterOff, "gather.filterOff") /* the probe-space filter off (the measuring arm, decision 20) */ \
-    X(GatherFilterByAge, "gather.filterByAge") /* the probe-space filter's width by the probe's age: 0 shipped, N = none from N frames (decision 21) */ \
     X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */ \
     X(ShadowReceiverBoxesOff, "shadow.receiverBoxesOff") /* the receiver grid without the stock route's boxes (the fixture's negative control, U5 decision 22.3) */ \
     X(TexturePumpFault, "textures.pumpFault") /* the host's texture wait: 1 never done, 2 and its step throws (a test door, U5 decision 22.5) */

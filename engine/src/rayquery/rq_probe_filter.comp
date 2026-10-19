@@ -17,20 +17,25 @@
 //        plane and the two normals, the integrate's own test and tolerances
 //        (jahPlaneWeight): a neighbour on another surface saw another
 //        hemisphere and says nothing about this one;
-//      * by HIT-DISTANCE agreement, per texel — a neighbour's ray that hit ten
-//        times nearer (or farther) than this probe's ray in the same direction
-//        found ANOTHER SURFACE (an occluder between the two probes, the edge of
-//        an object), and its radiance is not this direction's. The distance is
-//        the atlas alpha, which is what the trace wrote it for; a miss is at
-//        infinity (two misses agree, a miss never agrees with a hit — and the
-//        ray's length decides nothing). THE TEST IS SYMMETRIC ON PURPOSE, and that is
-//        what keeps the filter unbiased: a weight that depended on which of the
-//        two rays hit (accepting a neighbour's miss beside this probe's hit but
-//        rejecting its nearer hit beside this probe's miss, say) is a weight
-//        correlated with the radiance, and it darkened the analytic gate's
-//        emitter by 7-31 % in the lane's A/B. A hit and a miss beside each
-//        other are two surfaces here, never averaged — the noise of a light's
-//        edge is the pixel history's to remove (rq_probe_integrate.comp).
+//      * by PARALLAX, per texel (ENGINE-POLISH-PHOTON-2 stage 3; Lumen's spatial
+//        filter) — a neighbour's ray in the same direction left from ANOTHER
+//        point, so the radiance it carries leaves its hit point, which this
+//        probe sees in another direction: near an emitter the neighbour's ray
+//        meets the panel elsewhere (or not at all) and passed any test of the
+//        hit DISTANCE alone. The weight is the ANGLE ERROR of the neighbour's
+//        hit point as seen from this probe against the texel's own cone (the
+//        closed form at kParallaxOut): full inside the cone, none at twice its
+//        half-angle. A hit far away has no parallax, a hit across an occluder
+//        between the two probes a large one. A miss is at infinity: two misses
+//        agree, a miss never agrees with a hit (whatever the ray's length).
+//        THE MISS RULE IS SYMMETRIC ON PURPOSE, and that is what keeps the
+//        filter unbiased: a weight that depended on which of the two rays hit
+//        (accepting a neighbour's miss beside this probe's hit but rejecting its
+//        nearer hit beside this probe's miss, say) is a weight correlated with
+//        the radiance, and it darkened the analytic gate's emitter by 7-31 % in
+//        the lane's A/B. A hit and a miss beside each other are two surfaces
+//        here, never averaged — the noise of a light's edge is the pixel
+//        history's to remove (rq_probe_integrate.comp).
 //    THE REACH (GATHER-NOISE-1, p.knobs4.z, the arm "gather.filterRadius"): 1,
 //    the 3 x 3. Reach 2 (plus the ring of eight at two cells, 17 taps, each
 //    under the same two tests) is the measuring arm: it cut the moving floor's
@@ -39,22 +44,10 @@
 //    — and costs 0.14-0.32 ms. With the trace's cross-probe strata
 //    (rq_probe_gather.comp) the 3 x 3 taps of one direction are stratified
 //    samples of the texel, not independent ones.
-//    THE WIDTH BY THE PROBE'S AGE - A MEASURING DOOR (ENGINE-UPGRADE-U5 decision
-//    21; young.w bit 0, GatherTuning::filterByAge, the arm gather.filterByAge;
-//    shipped OFF, the lead's call - the measurement below): the filter exists
-//    for NOISE and the noise of what a pixel shows decays with the frames its
-//    history has averaged, so under the door every neighbour's tap is weighed
-//    by 1 - age / A (clamped): full at an age of 0, NONE from A frames on (A =
-//    young.w >> 2, or the young history's young.x), the age the count of the
-//    previous frame's history where the probe sits, read on the same surface
-//    as the integrate reads it (jah_probe_history.glsl). MEASURED: at A = 12
-//    gi.gather_plane reads 1.041 at two strides (1.0585 shipped) but
-//    gi.gather_estimator's young-pixel noise rises to 0.814 of the pre-lane's
-//    (bar 0.80; 0.605 shipped) and a still view's frame-to-frame residue
-//    trips pool.editor_view_b's outline probes; at A = 24, 1.055 / 0.629;
-//    from 48 on the shipped picture (the history's count saturates at 15).
-//    The pixel history is an EMA past its tenth frame: its noise stops
-//    decaying, so the filter's reason does not vanish under motion.
+//    THE AGE FILTER IS GONE (ENGINE-POLISH-PHOTON-2; U5 decision 21's measuring door): with the
+//    parallax test and the grid's jitter the plane fixture reads within its 5 % at two and three
+//    strides with the constant width, and the width by the probe's age cost the young pixels' noise
+//    bar (gi.gather_estimator 0.825 against 0.80; 0.589 without it).
 //    The probe's own texel always weighs 1. An ADAPTIVE probe filters against
 //    its CELL's neighbours (its own cell's uniform probe fails its plane by
 //    construction — that is why it was appended). The nine taps are read in
@@ -92,11 +85,6 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 layout( std430, set = 0, binding = 1 ) buffer Records { JahProbeRecord r[]; } records;
 layout( rgba16f, set = 0, binding = 2 ) uniform readonly image2D probeAtlas;
-/// THE PREVIOUS FRAME'S PIXEL HISTORY (the integrate's, read only): the AGE under the probe.
-layout( rg32ui, set = 0, binding = 3 ) uniform readonly uimage2DArray historyPrev;
-
-#include "jah_reproject.glsl"
-#include "jah_probe_history.glsl"
 
 
 /// Eight vec4 of partial sums per lane: 27 SH floats (coefficient k, channel c
@@ -116,15 +104,18 @@ shared vec4 gSum[8][64];
 shared vec4 gTapT[16];
 shared vec4 gTapB[16];
 shared vec4 gTapN[16];
-/// THE NEIGHBOURS' SHARE BY THE PROBE'S AGE (lane 0; see the header): 1 = the full filter, 0 = none.
-shared float gAgeWeight;
+/// ...and its position (the ray origin its hit distances are measured from), for the parallax test.
+shared vec3 gTapP[16];
 
-/// A neighbour's ray whose hit distance is this far off this probe's in the
-/// same direction (as the RATIO of the nearer to the farther) is weighed out
-/// entirely; one within this much counts fully. A ratio, so it means the same at
-/// every distance.
-const float kDistanceRatioOut = 0.1;
-const float kDistanceRatioIn = 0.5;
+/// THE PARALLAX TEST (ENGINE-POLISH-PHOTON-2 stage 3; Lumen's spatial filter): a neighbour's ray in
+/// direction d from its position q hit at distance t, so its sample is the radiance leaving the point
+/// q + t d - which this probe sees in the direction of (q + t d - p), not along d. Its ANGLE ERROR is
+/// the angle between the two. The closed form of the threshold: a texel of solid angle W stands for
+/// the cone of the same solid angle about its centre direction, half-angle a with
+/// 2 pi (1 - cos a) = W, i.e. cos a = 1 - W / (2 pi) (at 8 x 8 over the hemisphere, W = 2 pi / 64 on
+/// average: a = acos(1 - 1/64) = 0.177 rad, 10.1 degrees). A neighbour's hit inside the cone (error
+/// <= a) samples this texel's own radiance and counts fully; its weight falls linearly to none at 2 a.
+const float kParallaxOut = 2.0;
 
 ivec2 blockOf( uint probe )
 {
@@ -157,19 +148,6 @@ void main()
 	// centre skipped — the fixed order the taps are summed in; lanes 8..15 the
 	// same eight directions at two cells (the filter's reach 2).
 	const int taps = p.knobs4.z > 1.5 ? 16 : 8;
-	// ---- THE PROBE'S AGE: the frames the history under it holds (none without a
-	// history this frame: the gather's first frame, a reset, the temporal arm off).
-	if( lane == 0u )
-	{
-		uint age = 0u;
-		uvec2 texel;
-		const bool byAge = ( uint( p.young.w ) & 1u ) != 0u;
-		if( byAge && onSurface && p.knobs5.z > 0.5 && p.knobs5.x >= 1.0 )
-			jahHistoryAt( posW.xyz, normalW.xyz, jahEyeOfCell( cell.x ), texel, age );
-		gAgeWeight = !byAge ? 1.0
-							: clamp( 1.0 - float( age ) / max( ( uint( p.young.w ) >> 2u ) > 0u ? float( uint( p.young.w ) >> 2u )
-																									: p.young.x, 1.0 ), 0.0, 1.0 );
-	}
 	if( lane < uint( taps ) )
 	{
 		const int kk = int( lane ) & 7;
@@ -179,6 +157,7 @@ void main()
 		float wPlane = 0.0;
 		vec3 nT = vec3( 0.0 ), nB = vec3( 0.0 ), nN = vec3( 0.0, 0.0, 1.0 );
 		ivec2 nBlock = ivec2( 0 );
+		vec3 nP = vec3( 0.0 );
 		// A NEIGHBOUR IN THE SAME EYE ONLY (PHOTON-GA-VR): past an eye's last
 		// column the probe LIST continues with the OTHER eye's grid.
 		if( onSurface && p.knobs4.z > 0.5 && all( greaterThanEqual( nc, ivec2( 0 ) ) ) &&
@@ -195,11 +174,13 @@ void main()
 															posW.xyz ) );
 				jahTangentFrame( nN, nT, nB );
 				nBlock = blockOf( nb );
+				nP = nbPos.xyz;
 			}
 		}
 		gTapT[lane] = vec4( nT, wPlane );
 		gTapB[lane] = vec4( nB, float( nBlock.x ) );
 		gTapN[lane] = vec4( nN, float( nBlock.y ) );
+		gTapP[lane] = nP;
 	}
 	barrier();
 
@@ -220,13 +201,14 @@ void main()
 		dirW = normalize( T * dLocal.x + B * dLocal.y + n * dLocal.z );
 		solidAngle = jahOctSolidAngle( octPoint, float( octRes ) );
 		cosine = max( dLocal.z, 0.0 );
+		// The texel's cone (the parallax test's closed form, above): cos a = 1 - W / (2 pi).
+		const float coneHalf = max( acos( clamp( 1.0 - solidAngle / 6.28318531, -1.0, 1.0 ) ), 1e-4 );
 
 		const vec4 own = imageLoad( probeAtlas, block + texel );
 		vec3 sum = own.xyz;
 		float wsum = 1.0;
 
-		const float ageWeight = gAgeWeight;
-		if( p.knobs4.z > 0.5 && ageWeight > 0.0 )
+		if( p.knobs4.z > 0.5 )
 		{
 			// THE NINE TAPS, IN ONE FIXED ORDER (row by row); the centre is this
 			// probe itself and is already in the sum. The neighbours' frames and
@@ -245,20 +227,21 @@ void main()
 										ivec2( octRes - 1 ) );
 				const vec4 s = imageLoad( probeAtlas,
 										  ivec2( int( gTapB[k].w ), int( gTapN[k].w ) ) + nt );
-				// THE HIT DISTANCE: the same surface, or another one.
-				// A MISS IS AT INFINITY: two misses agree, a miss and a hit never
-				// do (whatever the ray's length happens to be).
-				float wDist = 0.0;
+				// THE PARALLAX: the neighbour's hit point as this probe sees it.
+				// A MISS IS AT INFINITY: two misses agree (no parallax at infinity),
+				// a miss and a hit never do (whatever the ray's length happens to be).
+				float wHit = 0.0;
 				if( own.w < 0.0 || s.w < 0.0 )
-					wDist = ( own.w < 0.0 && s.w < 0.0 ) ? 1.0 : 0.0;
+					wHit = ( own.w < 0.0 && s.w < 0.0 ) ? 1.0 : 0.0;
 				else
 				{
-					const float ratio = min( own.w, s.w ) / max( max( own.w, s.w ), 1e-6 );
-					wDist = clamp( ( ratio - kDistanceRatioOut ) /
-									   ( kDistanceRatioIn - kDistanceRatioOut ),
-								   0.0, 1.0 );
+					const vec3 seen = gTapP[k] + dirW * s.w - posW.xyz;
+					const float len = length( seen );
+					const float cosErr = len > 1e-6 ? dot( seen, dirW ) / len : 1.0;
+					const float err = acos( clamp( cosErr, -1.0, 1.0 ) );
+					wHit = clamp( ( kParallaxOut - err / coneHalf ) / ( kParallaxOut - 1.0 ), 0.0, 1.0 );
 				}
-				const float w = wPlane * wDist * ageWeight;
+				const float w = wPlane * wHit;
 				if( w <= 0.0 || !finite3( s.xyz ) )
 					continue;
 				sum += s.xyz * w;

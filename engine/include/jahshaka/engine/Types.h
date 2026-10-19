@@ -3479,13 +3479,12 @@ struct GatherTuning {
     /// rests) compares within the rounding's amplitude, not exactly.
     bool     freezeFrameIndex = false;
     /// The probe sits at its cell's CENTRE instead of being jittered inside it
-    /// -- the A/B for what the jitter costs and buys.
+    /// -- the A/B for what the jitter costs and buys. THE SHIPPED JITTER IS THE
+    /// GRID'S (ENGINE-POLISH-PHOTON-2 stage 3; U5 decision 20's arm): one offset a
+    /// frame for every cell's probe, and the integrate's bilinear on the grid so
+    /// shifted - the probes' true positions (a probe jittered alone and read as if
+    /// at its cell's centre biased the interpolation 1-2.6 %).
     bool     jitterOff = false;
-    /// THE GRID'S JITTER, ONE OFFSET A FRAME (GATHER-INTEGRATION-FACTOR's measuring arm, ENGINE-UPGRADE-U5
-    /// decision 20): every cell's probe at the SAME offset inside its cell, and the integrate's bilinear on the
-    /// grid so shifted - the probes' true positions - instead of each probe jittered alone and read as if at its
-    /// cell's centre. (jitterOff wins.)
-    bool     jitterCommon = false;
     /// THE RAYS AT THEIR TEXELS' CENTRES (IMAGE-1): every ray of a probe leaves
     /// through its octahedral texel's centre instead of a jittered point in it —
     /// with jitterOff, a still view's estimate is then the same every frame, the
@@ -3513,12 +3512,6 @@ struct GatherTuning {
     /// is projected from its own 64 rays alone — the A/B that prices the filter
     /// and measures what it buys.
     bool     filterOff = false;
-    /// THE FILTER'S WIDTH BY THE PROBE'S AGE (a measuring door, ENGINE-UPGRADE-U5 decision 21; shipped off):
-    /// the neighbours' taps weighed 1 - age / filterAgeFrames, the age the pixel history's count under the
-    /// probe (rq_probe_filter.comp has the measurement).
-    bool     filterByAge = false;
-    /// ...the age at which it has fallen to none, in frames (0 = the young history's length, kYoungFrames).
-    unsigned filterAgeFrames = 0u;
     /// THE PIXEL HISTORY'S MEMORY (PHOTON-GATHER-1c): the frames after which
     /// its running mean becomes an EMA at 1/historyFrames — a TRUE mean for
     /// that many frames, then each new frame weighs 1/historyFrames. 0 = the

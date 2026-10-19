@@ -1269,18 +1269,14 @@ constexpr ArmDef kArms[] = {
       "every time it composes, lane and recompose. The share's error is recorded and it is redone from its start on "
       "the frame's thread after the barrier; a second throw gives up for the frame (its staged rows replayed, its "
       "other slots marked for the next compose). Every barrier still pairs. A test door; 0 = off." },
-    { ArmId::GatherJitter, 0.0, 0.0, 2.0,
+    { ArmId::GatherJitter, 0.0, 0.0, 1.0,
       "THE GATHER'S PROBE JITTER (GATHER-INTEGRATION-FACTOR, a measuring arm - ENGINE-UPGRADE-U5 decision 20): "
-      "0 = shipped (each cell's probe at its own jittered pixel), 1 = off (every probe at its cell's centre), "
-      "2 = one offset a frame for the whole grid, read by the integrate's bilinear (GatherTuning::jitterCommon). "
-      "Over the scene's own tuning (a tuning's jitterOff wins)." },
+      "0 = shipped (one offset a frame for the whole grid, read by the integrate's bilinear on the shifted grid - "
+      "ENGINE-POLISH-PHOTON-2), 1 = off (every probe at its cell's centre). Over the scene's own tuning (a "
+      "tuning's jitterOff wins)." },
     { ArmId::GatherFilterOff, 0.0, 0.0, 1.0,
       "THE GATHER'S PROBE-SPACE FILTER OFF (GATHER-INTEGRATION-FACTOR, a measuring arm - decision 20): "
       "1 = GatherTuning::filterOff for every scene." },
-    { ArmId::GatherFilterByAge, 0.0, 0.0, 255.0,
-      "THE GATHER'S FILTER BY THE PROBE'S AGE (a measuring arm - ENGINE-UPGRADE-U5 decision 21): N > 0 = "
-      "GatherTuning::filterByAge for every scene, the neighbours' taps weighed 1 - age / N (the pixel history's "
-      "count under the probe). 0 = shipped, the constant width." },
     { ArmId::GatherIrradianceReadback, 0.0, 0.0, 1.0,
       "THE GATHER'S E/PI TO THE HOST (an instrument): GatherTuning::readback for every scene - the verb "
       "world.gatherIrradiance reads it. One image copy a frame while on." },

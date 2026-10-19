@@ -56,7 +56,7 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// depth); y = the smallest normal agreement (a dot product) that still
 	/// counts as the same surface; z = THE FAR QUERY'S tMin (the near length
 	/// less the widest coarse-vs-fine gap, ATOM-FARBLAS-1 audit F2); w = 1 puts the probe at its
-	/// cell's centre instead of jittering it inside the cell.
+	/// cell's centre; 0 = the grid's one jitter offset a frame (every cell's probe at it).
 	vec4 plane;
 	/// The colour an escaping ray reads when no sky cubemap is bound.
 	vec4 skyColour;

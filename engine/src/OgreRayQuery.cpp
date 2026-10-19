@@ -7294,13 +7294,8 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
             in.tuning.youngReach = float(armValue(ArmId::GatherYoungReach));
         // the reconstruction's arms (decision 20) and the E/pi instrument
         const double jitter = armValue(ArmId::GatherJitter);
-        if (jitter > 0.5 && jitter < 1.5) in.tuning.jitterOff = true;
-        if (jitter > 1.5) in.tuning.jitterCommon = true;
+        if (jitter > 0.5) in.tuning.jitterOff = true;
         if (arm(ArmId::GatherFilterOff, false)) in.tuning.filterOff = true;
-        if (armValue(ArmId::GatherFilterByAge) > 0.5) {
-            in.tuning.filterByAge = true;
-            in.tuning.filterAgeFrames = unsigned(armValue(ArmId::GatherFilterByAge) + 0.5);
-        }
         if (arm(ArmId::GatherIrradianceReadback, false)) in.tuning.readback = true;
     }
     in.restKey = gatherRestKeyArmed(scene);
