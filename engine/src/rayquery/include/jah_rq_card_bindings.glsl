@@ -6,12 +6,13 @@
 // Radiance layers there (OgreRayQuery.cpp), or stand-ins with zero slots when
 // the scene holds no cache.
 //
-// THE VIEW TERM'S FIVE (PHOTON-CARDS-5, jah_card_view.glsl) at consecutive
+// THE VIEW TERM'S SIX (PHOTON-CARDS-5, jah_card_view.glsl) at consecutive
 // bindings from JAH_CARD_VIEW_BINDING_BASE, which the caller also defines (each
 // job appends them after its own last binding): the Indirect (the cached
 // diffuse half, or the lobe's share where kD = 0), Flat (the emissive and the specular lobe's re-emission, at the
 // emissive's binding - ENGINE-POLISH-PHOTON-1 stage 3), ShadowRough, Albedo and
-// Normal layers, in SurfaceCache::viewLayers' order.
+// Normal layers, and the Specular layer (F0 and kS: the movers' gate cuts the
+// lobe's indirect share with it), in SurfaceCache::viewLayers' order.
 //
 // Include this file, then define JAH_CARD_SLOTS / JAH_CARD_RECORDS, then
 // include jah_rq_card.glsl.
@@ -59,5 +60,8 @@ layout( set = 0, binding = JAH_CARD_VIEW_BINDING_BASE + 4 ) uniform sampler2D ja
 #define JAH_CARD_SHADOW_ROUGH( t ) texelFetch( jahCardShadowRoughLayer, t, 0 ).xy
 #define JAH_CARD_ALBEDO( t ) texelFetch( jahCardAlbedoLayer, t, 0 )
 #define JAH_CARD_NORMAL( t ) texelFetch( jahCardNormalLayer, t, 0 )
+// THE SPECULAR LAYER (ENGINE-POLISH-PHOTON-1): F0 and kS in the store's encoding, the sixth.
+layout( set = 0, binding = JAH_CARD_VIEW_BINDING_BASE + 5 ) uniform sampler2D jahCardSpecularLayer;
+#define JAH_CARD_SPECULAR( t ) texelFetch( jahCardSpecularLayer, t, 0 )
 
 #endif   // JAH_RQ_CARD_BINDINGS_GLSL

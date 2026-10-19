@@ -127,7 +127,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	///
 	/// y = THE VIEW'S AGE: how many consecutive frames this history has been
 	/// written (0 on a first frame, a resize, a scene bind). See `historyAt`.
-	/// z = 1 writes THE PHOTON VIEW'S Hits overlay (binding 36, PHOTON-VIEW-1).
+	/// z = 1 writes THE PHOTON VIEW'S Hits overlay (binding 37, PHOTON-VIEW-1).
 	vec4 stereo;
 	vec4 camPos2;
 	vec4 rayTL2;
@@ -157,7 +157,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 hitSun;
 	vec4 hitSun2;
 	/// ---- A MOVING OBJECT (REFLECT-MOVERS-1) --------------------------------
-	/// x = 1 when the VIEW'S ID IMAGE is bound (binding 37, the visibility
+	/// x = 1 when the VIEW'S ID IMAGE is bound (binding 38, the visibility
 	/// buffer's `jahAtomIds`: which slot drew each pixel) — then a pixel on a
 	/// moving slot reprojects through that slot's two poses (jah_reproject.glsl).
 	/// 0 = no id pass on this chain (a stereo chain, the split off): every
@@ -276,11 +276,11 @@ layout( set = 0, binding = 29 ) uniform sampler3D voxelBack[kMaxCascades];
 layout( set = 0, binding = 30 ) uniform sampler3D voxelNrm[kMaxCascades];
 // MOVER-OCCLUSION-1: the lamps' direct term per cascade (its own chain), the share a
 // hit keeps when a mover occludes the rest (jah_rq_hit.glsl) — the set's last binding.
-layout( set = 0, binding = 38 ) uniform sampler3D voxelDirect[kMaxCascades];
+layout( set = 0, binding = 39 ) uniform sampler3D voxelDirect[kMaxCascades];
 #define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
 /// THE AIR'S TABLE (PHOTON-I-1 fix 5): the aerial-perspective volume the colour
 /// passes read, or a stand-in while they read none — the set's last binding.
-layout( set = 0, binding = 39 ) uniform sampler3D fogAerial;
+layout( set = 0, binding = 40 ) uniform sampler3D fogAerial;
 
 /// The same ceiling JahSsrResolve_ps.glsl and JahSsrHistory_ps.glsl hold the
 /// SSR loop to, and for the same reason: about twelve stops above white, six
@@ -338,14 +338,14 @@ layout( std430, set = 0, binding = 25 ) readonly buffer JahHitInstances { uvec4 
 layout( rgba32ui, set = 0, binding = 26 ) uniform writeonly uimage2D jahHitIds;
 layout( r32ui, set = 0, binding = 27 ) uniform writeonly uimage2D jahHitDest;
 layout( std430, set = 0, binding = 28 ) buffer JahHitBuf { uint jahHitBuf[]; };
-/// THE PHOTON VIEW'S OVERLAY (PHOTON-VIEW-1, binding 36): with p.stereo.z = 1 (the
+/// THE PHOTON VIEW'S OVERLAY (PHOTON-VIEW-1, binding 37): with p.stereo.z = 1 (the
 /// scene's view is Hits) every traced texel writes, over its block of the full-
 /// resolution overlay, the colour of what shaded its ray — or a dim veil where no
 /// ray was traced. Written ONLY under the knob, and nothing else here reads it:
 /// the reflection's own images and arithmetic are untouched by the view. With the
 /// knob off the binding holds a stand-in (the reflection target's own view) that
 /// is never written.
-layout( rgba16f, set = 0, binding = 36 ) uniform writeonly image2DArray photonOverlay;
+layout( rgba16f, set = 0, binding = 37 ) uniform writeonly image2DArray photonOverlay;
 const vec4 kPhotonNoRay   = vec4( 0.0, 0.0, 0.0, 0.6 );
 const vec4 kPhotonCard    = vec4( 0.1, 0.9, 0.2, 1.0 );
 const vec4 kPhotonVoxel   = vec4( 0.15, 0.35, 1.0, 1.0 );
@@ -393,10 +393,10 @@ void photonHit( ivec2 tc, vec4 c )
 /// THE VIEW'S ID IMAGE (REFLECT-MOVERS-1): x = the slot that drew the pixel
 /// (jah_atom_id.glsl's encoding; 0xFFFFFFFF = nothing, or an item the id pass does
 /// not draw). Read only under p.motion.x; a 1x1 stand-in is bound otherwise.
-layout( set = 0, binding = 37 ) uniform usampler2D atomIds;
+layout( set = 0, binding = 38 ) uniform usampler2D atomIds;
 /// ...AND THE ID PASS'S OWN DEPTH (ID-DEPTH-1, PHOTON-II-1 item 11): the scene depth
 /// copied right after the id pass, before any stock-drawn surface is added to it.
-layout( set = 0, binding = 40 ) uniform sampler2D idDepth;
+layout( set = 0, binding = 41 ) uniform sampler2D idDepth;
 #include "jah_atom_id.glsl"
 #define JAH_FOG_P( k ) p.fog[k]
 #define JAH_FOG_AERIAL( uvw ) textureLod( fogAerial, uvw, 0.0 )
@@ -535,9 +535,9 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 /// trace and by the gather's hits (PHOTON-GATHER-1d, GA-1e), whose header says
 /// what each read does. What this trace hands it is its FOOTPRINT, below.
 // THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): the hit table, the voxeliser's
-// texture pool (binding 41) and the cloud layer's field (42).
-layout( set = 0, binding = 41 ) uniform sampler2DArray jahHitPool;
-layout( set = 0, binding = 42 ) uniform sampler2D jahHitCloud;
+// texture pool (binding 42) and the cloud layer's field (43).
+layout( set = 0, binding = 42 ) uniform sampler2DArray jahHitPool;
+layout( set = 0, binding = 43 ) uniform sampler2D jahHitCloud;
 #define JAH_HIT_TABLE       floatBitsToUint( p.hitTable.xy )
 #define JAH_HIT_POOL_ON     ( p.hitTable.z > 0.5 )
 #define JAH_HIT_CLOUD_ON    ( p.hitTable.w > 0.5 )
@@ -545,6 +545,15 @@ layout( set = 0, binding = 42 ) uniform sampler2D jahHitCloud;
 #define JAH_HIT_CLOUD_SUN   p.cloudSun
 #define JAH_HIT_MOVERS_ON ( p.alpha.w > 0.5 )
 #include "jah_rq_hit_radiance.glsl"
+// THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl, ENGINE-POLISH-PHOTON-1): the store's table, through the hit table.
+void jahCardLobeHemi( float r, out float a, out float b )
+{
+	a = 0.0;
+	b = 0.0;
+	const uvec2 t = JAH_HIT_TABLE;
+	if( ( t.x | t.y ) != 0u )
+		jahSpecularAlbedoHemi( r, a, b );
+}
 
 /// A lobe at or below this GGX alpha is a MIRROR: the card texel-exact, the
 /// containing cascade whole at LOD 0 and no crossfade (a crossfade of two texel

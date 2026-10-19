@@ -98,21 +98,21 @@ constexpr unsigned kPlaceBindings = 6u;
 /// (15-18: the coverage and the surface position per half, PHOTON-VOXEL-4); then
 /// THE HIT RECORD's four (19-22, PHOTON-HIT-SHADE-1); then level 0's back side and
 /// the voxelizer's normal (23, 24: PHOTON-VOXEL-5); then the card read's VIEW
-/// TERM's five (25-29, PHOTON-CARDS-5: jah_rq_card_bindings.glsl at
-/// JAH_CARD_VIEW_BINDING_BASE 25).
-constexpr unsigned kTraceBindings = 35u;
+/// TERM's six (25-30, PHOTON-CARDS-5 + the Specular layer, ENGINE-POLISH-PHOTON-1:
+/// jah_rq_card_bindings.glsl at JAH_CARD_VIEW_BINDING_BASE 25).
+constexpr unsigned kTraceBindings = 36u;
 constexpr unsigned kTraceSideBinding = 23u;
 constexpr unsigned kTraceCardViewBinding = 25u;
-/// ...and THE DIRECT TERM's volume per cascade (30, MOVER-OCCLUSION-1: jah_rq_hit.glsl).
-constexpr unsigned kTraceDirectBinding = 30u;
+/// ...and THE DIRECT TERM's volume per cascade (31, MOVER-OCCLUSION-1: jah_rq_hit.glsl).
+constexpr unsigned kTraceDirectBinding = 31u;
 /// ...and THE GATHER-HITS INSTRUMENT's two (FAR-SUN-1, rq_probe_gather.comp): the per-ray
-/// records (31) and the photon view's overlay (32).
-constexpr unsigned kTraceRaysBinding = 31u;
-constexpr unsigned kTraceOverlayBinding = 32u;
+/// records (32) and the photon view's overlay (33).
+constexpr unsigned kTraceRaysBinding = 32u;
+constexpr unsigned kTraceOverlayBinding = 33u;
 /// ...and THE HIT'S OWN SURFACE's two (FAR-SUN-2, jah_rq_hit_direct.glsl): the voxeliser's texture
-/// pool (33) and the cloud layer's field (34).
-constexpr unsigned kTracePoolBinding = 33u;
-constexpr unsigned kTraceCloudBinding = 34u;
+/// pool (34) and the cloud layer's field (35).
+constexpr unsigned kTracePoolBinding = 34u;
+constexpr unsigned kTraceCloudBinding = 35u;
 static_assert(kTraceRaysBinding == kTraceDirectBinding + 1u && kTraceOverlayBinding == kTraceRaysBinding + 1u &&
                   kTracePoolBinding == kTraceOverlayBinding + 1u && kTraceCloudBinding == kTracePoolBinding + 1u &&
                   kTraceBindings == kTraceCloudBinding + 1u &&
@@ -367,15 +367,16 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 24 voxelNrm[]
             // THE CARD READ'S VIEW TERM (PHOTON-CARDS-5).
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 25 the card Indirect layer
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 26 ...Emissive
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 26 ...Flat (ENGINE-POLISH-PHOTON-1)
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 27 ...ShadowRough
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 28 ...Albedo
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 29 ...Normal
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 30 voxelDirect[] (MOVER-OCCLUSION-1)
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 31 the per-ray records (FAR-SUN-1)
-            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 32 the photon overlay (GatherHits)
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 33 the texture pool (FAR-SUN-2)
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 34 the cloud field (FAR-SUN-2)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 30 ...Specular (ENGINE-POLISH-PHOTON-1)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 31 voxelDirect[] (MOVER-OCCLUSION-1)
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 32 the per-ray records (FAR-SUN-1)
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 33 the photon overlay (GatherHits)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 34 the texture pool (FAR-SUN-2)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 35 the cloud field (FAR-SUN-2)
         };
         const unsigned c[kTraceBindings] = { 1u, 1u, 1u, 1u, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
@@ -384,7 +385,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
                                              kGatherMaxCascades, kGatherMaxCascades,
                                              1u, 1u, 1u, 1u,
                                              kGatherMaxCascades, kGatherMaxCascades,
-                                             1u, 1u, 1u, 1u, 1u, kGatherMaxCascades, 1u, 1u, 1u, 1u };
+                                             1u, 1u, 1u, 1u, 1u, 1u, kGatherMaxCascades, 1u, 1u, 1u, 1u };
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp

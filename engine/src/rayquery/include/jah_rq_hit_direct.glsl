@@ -93,7 +93,7 @@ JahHitSurface jahHitSurf = JahHitSurface( 0u, 0u, 0u, vec2( 0.0 ), mat4x3( 1.0 )
 /// The material the store was voxelised from, at the hit. False where the table, the slot's
 /// material word or its row is missing (an item the store has not converted yet: one rebuild).
 /// `albedo` is the diffuse lobe's, base x (1 - metalness); `metal` the specular lobe, its F0 x kS
-/// (( 0.04 ( 1 - metalness ) + base x metalness ) x kS - a dielectric's too) and Fresnel-90 weight kS -
+/// (( 0.04 + metalness x max( base - 0.04, 0 ) ) x kS - a dielectric's too) and Fresnel-90 weight kS -
 /// the voxeliser's split (Voxelizer_piece_cs.any, METAL-BOUNCE-1, ENGINE-POLISH-PHOTON-1 stage 2).
 bool jahHitMaterial( float footprint, out vec3 albedo, out vec3 emissive, out float roughness, out vec4 metal )
 {
@@ -163,7 +163,9 @@ bool jahHitMaterial( float footprint, out vec3 albedo, out vec3 emissive, out fl
 			emissive = em.xyz * textureLod( jahHitPool, vec3( uv, float( slices >> 16u ) ), lod ).xyz;
 	}
 	albedo = base * ( 1.0 - em.w );
-	metal = vec4( ( vec3( 0.04 ) * ( 1.0 - em.w ) + base * em.w ) * specW, specW );
+	// ONE EXPRESSION ON EVERY ROUTE: kS ( 0.04 + m max( b - 0.04, 0 ) ) - the store's encoding clamps a channel
+	// below the dielectric's F0 at it (Voxelizer_piece_cs.any), so the hit does too.
+	metal = vec4( ( vec3( 0.04 ) + em.w * max( base - vec3( 0.04 ), vec3( 0.0 ) ) ) * specW, specW );
 	return true;
 }
 

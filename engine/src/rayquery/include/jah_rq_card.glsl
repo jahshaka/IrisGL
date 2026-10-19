@@ -159,6 +159,10 @@ JahCardPick jahCardPick( uint slot, vec3 hitPos, vec3 facingDir )
 float jahHitIndirectGate = 1.0;
 #endif
 
+/// THE LOBE'S HEMISPHERICAL INTEGRALS ( A-bar, B-bar ) at roughness r - the store's table. The
+/// INCLUDER defines it after this file (the ray jobs: jahSpecularAlbedoHemi through the hit table).
+void jahCardLobeHemi( float r, out float a, out float b );
+
 vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, float footprint,
 					  out bool ok )
 {
@@ -191,12 +195,31 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, floa
 	// THE INDIRECT LAYER (ENGINE-POLISH-PHOTON-1 stage 3) holds the diffuse half where the channel has a
 	// diffuse albedo and the specular lobe's share where it has none (JahCardLight_cs.glsl's cache): the
 	// diffuse half is the layer where kD > 0, else 0. The EMISSIVE binding is the relight's FLAT layer
-	// (the emissive and the specular lobe's re-emission), added outside the diffuse view restore. Stated:
-	// the movers' gate cuts the diffuse indirect only - the lobe's indirect share rides the flat term.
-	const vec3 indirect = mix( vec3( 0.0 ), JAH_CARD_INDIRECT( pick.texel ), greaterThan( albedo.xyz, vec3( 0.0 ) ) );
+	// (the emissive and the specular lobe's re-emission), added outside the diffuse view restore.
+	const vec3 stored = JAH_CARD_INDIRECT( pick.texel );
+	const bvec3 hasDiffuse = greaterThan( albedo.xyz, vec3( 0.0 ) );
+	const vec3 indirect = mix( vec3( 0.0 ), stored, hasDiffuse );
 	const vec3 cut = ( 1.0 - jahHitIndirectGate ) * indirect;
-	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cut, indirect - cut,
-								JAH_CARD_EMISSIVE( pick.texel ), N, L, r, normalize( viewDir ) );
+	// THE MOVERS' GATE CUTS THE LOBE'S INDIRECT SHARE TOO (the store gates its whole bounce,
+	// jah_rq_hit_radiance.glsl): where kD = 0 the cached texel IS that share; where kD > 0 it is the
+	// cached diffuse half times the lobes' ratio ( F0 A-bar + w B-bar ) / ( kD pi Dd-bar ), the relight's
+	// own recovery. Cut from the radiance and the flat term alike, so the direct half is untouched.
+	vec3 cutLobe = vec3( 0.0 );
+	if( jahHitIndirectGate < 1.0 )
+	{
+		const vec4 spec = JAH_CARD_SPECULAR( pick.texel );
+		if( spec.w > 0.0 )
+		{
+			float sa, sb;
+			jahCardLobeHemi( r, sa, sb );
+			const vec3 specLobe = ( spec.www * 0.04 + spec.xyz * 0.96 ) * sa + spec.w * sb;
+			const vec3 diffuseLobe = albedo.xyz * 3.141592654 * jahDiffuseAlbedoHemi( r );
+			const vec3 lobeShare = mix( stored, stored * specLobe / max( diffuseLobe, vec3( 1e-12 ) ), hasDiffuse );
+			cutLobe = ( 1.0 - jahHitIndirectGate ) * lobeShare;
+		}
+	}
+	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cut - cutLobe, indirect - cut,
+								JAH_CARD_EMISSIVE( pick.texel ) - cutLobe, N, L, r, normalize( viewDir ) );
 }
 
 #endif   // JAH_RQ_CARD_GLSL

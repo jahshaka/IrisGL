@@ -473,15 +473,18 @@ public:
     /// re-emission, ENGINE-POLISH-PHOTON-1 stage 3 — outside the diffuse view
     /// restore), the ShadowRough layer (the roughness), and the Albedo and
     /// Normal layers (the stored normal, and in their alpha the texel's mean
-    /// light direction the relight writes). In the order
-    /// jah_rq_card_bindings.glsl declares them from JAH_CARD_VIEW_BINDING_BASE.
-    static constexpr unsigned kViewLayers = 5u;
+    /// light direction the relight writes), and the SPECULAR layer (F0 and kS:
+    /// the movers' gate cuts the lobe's indirect share with it, which the Flat
+    /// term holds). In the order jah_rq_card_bindings.glsl declares them from
+    /// JAH_CARD_VIEW_BINDING_BASE.
+    static constexpr unsigned kViewLayers = 6u;
     void viewLayers(Ogre::TextureGpu *out[kViewLayers]) const {
         out[0] = mIndirect;
         out[1] = mFlat;
         out[2] = mAtlas[unsigned(CardLayer::ShadowRough)];
         out[3] = mAtlas[unsigned(CardLayer::Albedo)];
         out[4] = mAtlas[unsigned(CardLayer::Normal)];
+        out[5] = mAtlas[unsigned(CardLayer::Specular)];
     }
     /// The item slot of a node's instance, or -1 when it holds no cards.
     long itemSlotOf(NodeId node) const;

@@ -952,7 +952,11 @@
 			@property( metallic_workflow )
 				const float atomKs = clamp( ( float( pixelData.specular.x ) + float( pixelData.specular.y ) +
 											  float( pixelData.specular.z ) ) * ( 1.0 / 3.0 ), 0.0, 1.0 );
-				atomHitMetal = float4( float3( pixelData.F0 ) * atomKs, atomKs );
+				// ONE EXPRESSION ON EVERY ROUTE: kS ( 0.04 + m max( b - 0.04, 0 ) ) = kS ( 0.04 + max( F0 - 0.04, 0 ) ),
+				// the store's encoding clamping a channel below the dielectric's F0 at it.
+				atomHitMetal = float4( ( float3( 0.04, 0.04, 0.04 ) +
+										 max( float3( pixelData.F0 ) - float3( 0.04, 0.04, 0.04 ), float3( 0.0, 0.0, 0.0 ) ) ) * atomKs,
+									   atomKs );
 			@end
 			pixelData.specular.xyz = midf3_c( 0.0, 0.0, 0.0 );
 			@property( clear_coat )
