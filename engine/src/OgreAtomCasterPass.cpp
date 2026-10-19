@@ -1394,7 +1394,6 @@ void recordCasterPass(AtomPassContext &ctx) {
     // after this, and a depth-only draw keeps the nearest whatever the order), so it could have
     // written no texel: the map is the frustum-only map texel for texel (shadow.caster_cull).
     if (lp && lp->tex) {
-        bool lateRan = false;
         bool built = false;
         {
             // THE BUILD'S OWN ROW under the measuring door (decision 16.6: one pyramid build per map measured).
@@ -1421,7 +1420,6 @@ void recordCasterPass(AtomPassContext &ctx) {
                         captureProbe(ctx, C, device, pr, lateList, frameNow, true);
                 }
                 drawCut(lateList);
-                lateRan = true;
             }
         }
         // THE MEASURING DOOR (shadow.casterPbsProbe): the stock casters of this map, counted in its
