@@ -156,6 +156,31 @@ set(_jah_outer_shared_libs "${BUILD_SHARED_LIBS}")
 set(_jah_outer_pic "${CMAKE_POSITION_INDEPENDENT_CODE}")
 set(BUILD_SHARED_LIBS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# BULLET'S PATCH STACK (BULLET-BATCHING-1): the vendored bullet3 is a release tag we track, like assimp, so our
+# changes to it are numbered patches in thirdparty/bullet-patches/ (its README.md), applied HERE by the same
+# applier before the tree is added — a fresh clone cannot build unpatched Bullet. Idempotent; a patch that neither
+# applies nor reverse-applies is a hard error. The patch files and the script are configure inputs (the assimp
+# block's reason: an edited or added patch must re-run CMake).
+execute_process(
+    COMMAND ${CMAKE_COMMAND}
+            -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/bullet3
+            -DPATCHES=${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/bullet-patches
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyVendorPatches.cmake
+    RESULT_VARIABLE _bullet_patch_result
+    OUTPUT_VARIABLE _bullet_patch_output
+    ERROR_VARIABLE  _bullet_patch_output)
+string(REGEX REPLACE "(^|\n)-- " "\\1" _bullet_patch_output "${_bullet_patch_output}")
+string(STRIP "${_bullet_patch_output}" _bullet_patch_output)
+if(_bullet_patch_output)
+    message(STATUS "${_bullet_patch_output}")
+endif()
+if(NOT _bullet_patch_result EQUAL 0)
+    message(FATAL_ERROR "Bullet patches could not be applied — see above")
+endif()
+file(GLOB _bullet_patch_files CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/bullet-patches/*.patch")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_bullet_patch_files}
+             "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyVendorPatches.cmake")
 # BULLET'S MULTI-THREADED WORLD (ENGINE-UPGRADE-U4 stage 6, the owner's word): Bullet built thread-safe (its own
 # -DBT_THREADSAFE=1, its std::thread task scheduler); the define is PUBLIC on IrisGL below, because Bullet's headers
 # change shape under it (btDbvtBroadphase's per-thread ray stacks) and every TU that includes them must agree.

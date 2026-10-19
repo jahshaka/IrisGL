@@ -1,0 +1,54 @@
+btBatchedConstraints: the spatial grid's cell a hair larger than the largest constraint extent
+
+Jahshaka's change, BULLET-BATCHING-1 stage 1 (2026-10-19). A genuine upstream
+defect: bulletphysics/bullet3 at the pinned 3.25 (2c204c49e), file
+src/BulletDynamics/ConstraintSolver/btBatchedConstraints.cpp — unfixed on
+upstream master as far as the pin's history shows; an upstream PR is owed.
+
+The bug
+-------
+setupSpatialGridBatchesMt (btBatchedConstraints.cpp:895) sets the grid's cell
+size to EXACTLY the largest extent of any dynamic-dynamic constraint
+(`btVector3 gridCellSize = consExtent;`, consExtent from
+findMaxDynamicConstraintExtent :653-676), then puts each body in the cell
+`int((p - bboxMin) * invGridCellSize)` (:947-954), invGridCellSize = 1 / size
+rounded. Each factor of that product is rounded, so two bodies whose distance
+on an axis equals the extent to the last ulp can land TWO cells apart.
+assignConstraintsToGridBatches then breaks its premise
+`btAssert(coordMax == coordMin + 1)` (:729):
+  * Debug: an abort. Reproduced on the Jahshaka box with
+    `test_physics_step_cost --bodies 500 --penetrating --island-batching`
+    (a pile exploding apart; every position finite when it fires).
+  * Release: the assert compiles away and the constraint is given a phase
+    whose batches are assumed body-disjoint — two batches of one phase then
+    share a body and are solved on two threads at once: a DATA RACE on the
+    body's velocity.
+
+The fix
+-------
+The cell is the extent times (1 + 1e-3). Two bodies at distance <= extent
+then differ by at most 1/(1 + 1e-3) ~ 0.999 of a cell before rounding; the
+rounding is a few ulps of a cell coordinate, and a coordinate is below ~257
+cells (the grid is held to 128 chunks of 2x2x2 cells, :930-941), so about
+1e-4 of a cell in single precision at the worst — the 1e-3 margin holds it
+with an order of magnitude to spare. A cell 0.1 % larger changes the batch
+count by nothing measurable. One line (plus its comment).
+
+diff --git a/src/BulletDynamics/ConstraintSolver/btBatchedConstraints.cpp b/src/BulletDynamics/ConstraintSolver/btBatchedConstraints.cpp
+index 89bd067a2..6dfa010f0 100644
+--- a/src/BulletDynamics/ConstraintSolver/btBatchedConstraints.cpp
++++ b/src/BulletDynamics/ConstraintSolver/btBatchedConstraints.cpp
+@@ -892,7 +892,12 @@ static void setupSpatialGridBatchesMt(
+ 
+ 	gridExtent.setMax(btVector3(btScalar(1), btScalar(1), btScalar(1)));
+ 
+-	btVector3 gridCellSize = consExtent;
++	// The cell is a hair LARGER than the largest constraint extent (Jahshaka bullet-patches/0001): a body's cell is
++	// int((pos - bboxMin) * (1 / cellSize)), each factor rounded, so two bodies exactly one extent apart could land
++	// two cells apart and break the assert in assignConstraintsToGridBatches (coordMax == coordMin + 1) -- in Release
++	// two batches of one phase then share a body (a data race). 1e-3 of margin dwarfs the rounding (a few ulps of a
++	// coordinate under ~257 cells: about 1e-4 of a cell).
++	btVector3 gridCellSize = consExtent * btScalar(1 + 1e-3);
+ 	int gridDim[3];
+ 	gridDim[0] = int(1.0 + gridExtent.x() / gridCellSize.x());
+ 	gridDim[1] = int(1.0 + gridExtent.y() / gridCellSize.y());
