@@ -254,8 +254,9 @@ constexpr float kGpuMetalFloor = 0.5f;
 /// is 0.02-0.08 — water to gemstone — and a metal's is its colour, 0.5 and up).
 constexpr float kGpuMetalF0 = 0.2f;
 /// ...and the REFLECTOR's perceptual roughness below which a METAL hit is decoded (the
-/// arm "reflect.metalDecode"'s default; rq_reflect.comp's p.metal.x); from it up the voxel
-/// store answers. MEASURED (the same run): the voxel route against the full decode, gold
+/// arm "reflect.metalDecode"'s default; rq_reflect.comp's p.metal.x); from it up the one rule
+/// answers (the card, else the store + the hit's direct light — BUGS-1 item 2 retired the
+/// metal-only voxel route). MEASURED then (REFLECT-FIX-1): the VOXEL route against the full decode, gold
 /// crate in a chrome sphere, by the sphere's roughness 0.02 / 0.10 / 0.15 / 0.20 / 0.25 /
 /// 0.30 / 0.39: 23.9 / 17.7 / 12.5 / 10.9 / 8.4 / 6.3 / 2.2 codes (of ~165). At 0.30 the
 /// reflector's lobe has blurred the difference to the card route's own error for a

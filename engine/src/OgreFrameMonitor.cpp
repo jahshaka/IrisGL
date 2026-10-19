@@ -1196,8 +1196,9 @@ constexpr ArmDef kArms[] = {
     { ArmId::ReflectMetalDecode, kReflectMetalDecodeRoughness, 0.0, 1.0,
       "THE METAL HIT'S ROUTE (REFLECT-FIX-1): a reflection ray from a reflector of perceptual "
       "roughness BELOW this value that hits a metal is decoded (its specular lobe, the pass' second-"
-      "bounce cone); a glossier reflector takes the metal hit from the voxel store (it blurs it "
-      "anyway). 0 = never decoded, 1 = always (the full-decode reference)." },
+      "bounce cone); a glossier reflector takes the metal hit like any other hit - its card, else the "
+      "store with the hit's direct light (it blurs the reflection anyway). 0 = never decoded, 1 = always "
+      "(the full-decode reference)." },
     { ArmId::GiHitDirect, 1.0, 0.0, 1.0,
       "THE HIT'S DIRECT LIGHT AT THE HIT (FAR-SUN-2, jah_rq_hit_direct.glsl): a voxel-answered gather or "
       "reflection hit sums every light's direct term at the hit (its material, its normal, its own shadow "

@@ -978,20 +978,16 @@ void main()
 		// THE HIT, for its direct light at the hit (FAR-SUN-2, jah_rq_hit_direct.glsl).
 		jahHitSurf = JahHitSurface( hitSlot, hitGeom, hitPrim, rayQueryGetIntersectionBarycentricsEXT( rq, true ),
 									hitToWorld, t, false, hitNormalKnown );
-		// A METAL HIT (REFLECT-FIX-1): its card holds its diffuse response — ~0 — so the
-		// card never answers it. A SHARP reflector shows the metal's own reflection and
-		// takes the decode (its specular lobe, the pass' second-bounce cone); a GLOSSY one
-		// blurs that over its lobe anyway and takes the voxel store, which carries the
-		// metal's colour, at the cost of a store read instead of a decode record.
+		// ONE RULE FOR EVERY HIT (BUGS-1 item 2): the card, else the store with the direct
+		// light at the hit (jahHitRadianceSourced) — a metal's card holds its lobe since
+		// PHOTON-1 stage 3, so a metal is no exception. Only a SHARP reflector's metal hit
+		// is decoded (REFLECT-FIX-1): it shows the metal's own reflection (its specular
+		// lobe, the pass' second-bounce cone), which no cache holds.
 		const bool metalHit = jahHitIsMetal( hitSlot );
 		const bool decodeAlways = jahHitAlwaysDecodes( hitSlot ) || ( metalHit && sqrt( lobeAlpha ) < p.metal.x );
 		// The mover gate's rotation: this pixel, this frame (hashed into the set's turn).
 		jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^ uint( p.knobs.z ) * 2654435761u;
-		if( !decodeAlways && metalHit )
-			traced = jahHitRadianceVoxelSourced( world + worldN * bias + L * t, hitN, L,
-												 reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
-												 ok, photonSource );
-		else if( !decodeAlways )
+		if( !decodeAlways )
 			traced = jahHitRadianceSourced( hitSlot, world + worldN * bias + L * t, hitN, L,
 											reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
 											true, ok, photonSource );
