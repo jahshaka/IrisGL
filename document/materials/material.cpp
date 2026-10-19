@@ -20,6 +20,21 @@ namespace iris
 
 std::atomic<quint64> Material::sGlobalRevision{1};
 
+MaterialRows::MaterialRows(const MaterialRows &other)
+{
+    mOwned.reserve(other.mOwned.size());
+    mView.reserve(other.mView.size());
+    for (const auto &row : other.mOwned) add(row->clone());
+}
+
+Property *MaterialRows::add(std::unique_ptr<Property> row)
+{
+    Property *raw = row.get();
+    mOwned.push_back(std::move(row));
+    mView.append(raw);
+    return raw;
+}
+
 QVariant Material::textureRef(const QString &path, const QString &guid)
 {
     return QVariantMap{ { QStringLiteral("path"), path }, { QStringLiteral("guid"), guid } };
@@ -27,7 +42,7 @@ QVariant Material::textureRef(const QString &path, const QString &guid)
 
 QString Material::textureGuid(const QString &row) const
 {
-    for (const Property *prop : properties)
+    for (const Property *prop : properties())
         if (prop && prop->name == row && prop->type == PropertyType::Texture)
             return static_cast<const TextureProperty *>(prop)->assetGuid;
     return QString();
@@ -35,7 +50,7 @@ QString Material::textureGuid(const QString &row) const
 
 QVariant Material::textureRefOf(const QString &row) const
 {
-    for (const Property *prop : properties)
+    for (const Property *prop : properties())
         if (prop && prop->name == row && prop->type == PropertyType::Texture) {
             const auto *texture = static_cast<const TextureProperty *>(prop);
             return textureRef(texture->value, texture->assetGuid);

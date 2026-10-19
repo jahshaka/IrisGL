@@ -529,15 +529,15 @@ public:
 
 private:
     PbrMaterial();
-    /// Member-wise, for duplicate() ALONE: every field is a value, except
-    /// `properties` — the panel's rows, owned by raw pointer — which a
-    /// member-wise copy would SHARE (an edit to either material rewriting the
-    /// other's saved rows). duplicate() rebuilds them; nobody else may copy.
+    /// Member-wise, for duplicate() ALONE: every field is a value, and the
+    /// rows are the base's MaterialRows, whose copy clones each one — the copy
+    /// never shares a row with the original. Nobody else may copy.
     PbrMaterial(const PbrMaterial &) = default;
     PbrMaterial &operator=(const PbrMaterial &) = delete;
 
-    // Property objects exposed to the editor's material panel. Owned by the base
-    // class' `properties` list, which the panel iterates and renders by type.
+    // Property objects exposed to the editor's material panel, registered on
+    // (and owned by) the base through addProperty; the panel iterates
+    // properties() and renders them by type.
     void createProperties();
     /// Writes `value` into the property ROW called `name`, if it exists. The
     /// rows are what SceneWriter serializes, so every field write that does not

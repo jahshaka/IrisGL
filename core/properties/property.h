@@ -7,6 +7,8 @@
 #include <QVector3D>
 #include <QVector4D>
 
+#include <memory>
+
 namespace iris
 {
 
@@ -50,6 +52,12 @@ struct Property
     virtual QVariant    getValue() = 0;
     virtual void        setValue(QVariant val) = 0;
 
+    /// A DEEP COPY of the row, of its own type — every field, the value, the
+    /// range, the labels, a texture row's asset identity. What an owner that
+    /// copies itself (iris::Material, LEAK-1) clones its rows with, so two
+    /// owners never hold the same row.
+    virtual std::unique_ptr<Property> clone() const = 0;
+
     virtual ~Property() = default;
 };
 
@@ -65,6 +73,8 @@ public:
 
 struct BoolProperty : public Property
 {
+    std::unique_ptr<Property> clone() const override { return std::make_unique<BoolProperty>(*this); }
+
     bool value;
 
     BoolProperty () {
@@ -92,6 +102,8 @@ struct BoolProperty : public Property
 // on exactly that condition.
 struct IntProperty : public Property
 {
+    std::unique_ptr<Property> clone() const override { return std::make_unique<IntProperty>(*this); }
+
     int value = 0;
     int minValue = 0;
     int maxValue = 0;
@@ -111,6 +123,8 @@ struct IntProperty : public Property
 
 struct FloatProperty : public Property
 {
+    std::unique_ptr<Property> clone() const override { return std::make_unique<FloatProperty>(*this); }
+
     float value = 0.0f;
     float minValue = 0.0f;
     float maxValue = 0.0f;
@@ -130,6 +144,8 @@ struct FloatProperty : public Property
 
 struct ColorProperty : public Property
 {
+    std::unique_ptr<Property> clone() const override { return std::make_unique<ColorProperty>(*this); }
+
     QColor value;
 
     ColorProperty () {
@@ -147,6 +163,8 @@ struct ColorProperty : public Property
 
 struct TextureProperty : public Property
 {
+    std::unique_ptr<Property> clone() const override { return std::make_unique<TextureProperty>(*this); }
+
     /// The file this session renders from (a store object's path, or a
     /// "live://" reference) — what the panel shows and material.get reports.
     QString value;
@@ -186,6 +204,8 @@ struct TextureProperty : public Property
 
 struct FileProperty : public Property
 {
+    std::unique_ptr<Property> clone() const override { return std::make_unique<FileProperty>(*this); }
+
     QString value;
     QString suffix;
 
@@ -220,6 +240,8 @@ struct FileProperty : public Property
 /// makes that unrepresentable.
 struct ListProperty : public Property
 {
+    std::unique_ptr<Property> clone() const override { return std::make_unique<ListProperty>(*this); }
+
     int value = 0;          ///< the selected enum value == index into `labels`
     QStringList labels;     ///< one label per value, in value order
 
@@ -240,6 +262,8 @@ struct ListProperty : public Property
 
 struct Vec2Property : public Property
 {
+    std::unique_ptr<Property> clone() const override { return std::make_unique<Vec2Property>(*this); }
+
     QVector2D value;
 
     Vec2Property() {
@@ -257,6 +281,8 @@ struct Vec2Property : public Property
 
 struct Vec3Property : public Property
 {
+    std::unique_ptr<Property> clone() const override { return std::make_unique<Vec3Property>(*this); }
+
     QVector3D value;
 
     Vec3Property() {
@@ -274,6 +300,8 @@ struct Vec3Property : public Property
 
 struct Vec4Property : public Property
 {
+    std::unique_ptr<Property> clone() const override { return std::make_unique<Vec4Property>(*this); }
+
 	QVector4D value;
 
 	Vec4Property() {

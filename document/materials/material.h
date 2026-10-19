@@ -13,11 +13,15 @@ For more information see the LICENSE file
 #define MATERIAL_H
 
 #include "irisglfwd.h"
+#include "core/properties/property.h"
 
+#include <QList>
 #include <QString>
 #include <QVariant>
 #include <QtGlobal>
 #include <atomic>
+#include <memory>
+#include <vector>
 
 namespace iris
 {
@@ -31,6 +35,31 @@ struct RenderLayer
 		Overlay = 5000,
 		Gizmo = 6000
 	};
+};
+
+/// A MATERIAL'S ROWS, OWNED (LEAK-1 L1). The rows used to be a bare
+/// QList<Property*> nothing ever freed — every material leaked its ~180 rows
+/// (iris::PbrMaterial::createProperties led every LeakSanitizer report) — and a
+/// destructor alone could not fix it, because the member-wise copy duplicate()
+/// starts from would have handed the SAME rows to two materials. So the owner
+/// is a type whose copy IS the deep copy: each row cloned (Property::clone),
+/// in order, the copy holding rows of its own. Assignment is deleted (nothing
+/// assigns a material). `view()` is the raw, ordered view every reader walks;
+/// a pointer in it lives exactly as long as the material.
+class MaterialRows
+{
+public:
+    MaterialRows() = default;
+    MaterialRows(const MaterialRows &other);
+    MaterialRows &operator=(const MaterialRows &) = delete;
+
+    /// Takes `row` and appends it; returns the row (now owned here).
+    Property *add(std::unique_ptr<Property> row);
+    const QList<Property *> &view() const { return mView; }
+
+private:
+    std::vector<std::unique_ptr<Property>> mOwned;
+    QList<Property *> mView;   // mOwned's pointers, same order
 };
 
 struct MaterialTexture {
@@ -51,9 +80,10 @@ public:
 
     QMap<QString, Texture2DPtr> textures;
 
-    // Editor-facing parameter list. Declared on the base so any material can be
-    // rendered by the material property panel.
-    QList<Property*> properties;
+    /// The editor-facing parameter rows, in order. Declared on the base so any
+    /// material can be rendered by the material property panel. The material
+    /// OWNS them (MaterialRows above); this is the view.
+    const QList<Property *> &properties() const { return mRows.view(); }
 
     /// Display name, and the asset/preset GUID this material came from.
     ///
@@ -190,7 +220,11 @@ public:
 protected:
 	QSet<QString> flags;
 
+    /// Registers a row; the material owns it from here on. Returns the row.
+    Property *addProperty(std::unique_ptr<Property> row) { return mRows.add(std::move(row)); }
+
 private:
+    MaterialRows mRows;
     quint32 mRevision = 1;
     static std::atomic<quint64> sGlobalRevision;
 };

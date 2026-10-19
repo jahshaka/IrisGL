@@ -440,7 +440,7 @@ void PbrMaterial::setValue(const QString& name, const QVariant& in)
     // {path, guid} reference, and a bare path that differs from the held one
     // clears it). From here on the row is driven by its path alone.
     QVariant value = in;
-    for (Property *prop : properties) {
+    for (Property *prop : properties()) {
         if (prop->name != name) continue;
         if (prop->type != PropertyType::Texture) break;
         prop->setValue(in);
@@ -557,34 +557,16 @@ MaterialPtr PbrMaterial::duplicate() const
     // maps and the detail layers (the `textures` map of shared handles), the
     // UV transform, the address modes, the render layer and states, the name
     // and the preset/asset guid the material came from — in one line that
-    // cannot forget a field added next year.
-    PbrMaterialPtr copy(new PbrMaterial(*this));
-    // ...and SHARES the rows, which are the one thing it must not share: they
-    // are what the panel edits and what SceneWriter saves. Fresh rows, then
-    // this material's row values onto them BY NAME, so a row whose value is
-    // not derivable from a field (a map row's path) survives too.
-    copy->properties.clear();
-    copy->createProperties();
-    for (Property *row : copy->properties) {
-        for (Property *mine : properties) {
-            if (mine->name != row->name) continue;
-            // A texture row carries its asset too (TEX-REF-1): the copy names
-            // the same asset, not a file nobody named.
-            if (row->type == PropertyType::Texture)
-                row->setValue(static_cast<TextureProperty *>(mine)->assetGuid.isEmpty()
-                                  ? mine->getValue()
-                                  : textureRefOf(mine->name));
-            else
-                row->setValue(mine->getValue());
-            break;
-        }
-    }
-    return copy;
+    // cannot forget a field added next year. And the ROWS, which it must not
+    // share (they are what the panel edits and what SceneWriter saves): the
+    // base's MaterialRows copies by cloning each row, so the copy owns rows
+    // of its own with every value — a map row's path and asset guid too.
+    return PbrMaterialPtr(new PbrMaterial(*this));
 }
 
 void PbrMaterial::syncProperty(const QString& name, const QVariant& value)
 {
-    for (auto prop : properties)
+    for (auto prop : properties())
         if (prop->name == name) { prop->setValue(value); return; }
 }
 
@@ -598,142 +580,142 @@ void PbrMaterial::createProperties()
 {
     int id = 0;
 
-    auto colProp         = new ColorProperty;
+    auto colProp         = std::make_unique<ColorProperty>();
     colProp->id          = id++;
     colProp->displayName = "Base Color";
     colProp->name        = "baseColor";
     colProp->value       = baseColor;
-    properties.append(colProp);
+    addProperty(std::move(colProp));
 
-    auto metallicProp         = new FloatProperty;
+    auto metallicProp         = std::make_unique<FloatProperty>();
     metallicProp->id          = id++;
     metallicProp->displayName = "Metallic";
     metallicProp->name        = "metallic";
     metallicProp->minValue    = 0.0f;
     metallicProp->maxValue    = 1.0f;
     metallicProp->value       = metallicFactor;
-    properties.append(metallicProp);
+    addProperty(std::move(metallicProp));
 
-    auto roughnessProp         = new FloatProperty;
+    auto roughnessProp         = std::make_unique<FloatProperty>();
     roughnessProp->id          = id++;
     roughnessProp->displayName = "Roughness";
     roughnessProp->name        = "roughness";
     roughnessProp->minValue    = 0.0f;
     roughnessProp->maxValue    = 1.0f;
     roughnessProp->value       = roughnessFactor;
-    properties.append(roughnessProp);
+    addProperty(std::move(roughnessProp));
 
-    auto normalProp         = new FloatProperty;
+    auto normalProp         = std::make_unique<FloatProperty>();
     normalProp->id          = id++;
     normalProp->displayName = "Normal Intensity";
     normalProp->name        = "normalFactor";
     normalProp->minValue    = 0.0f;
     normalProp->maxValue    = 2.0f;
     normalProp->value       = normalFactor;
-    properties.append(normalProp);
+    addProperty(std::move(normalProp));
 
-    auto emissiveColProp         = new ColorProperty;
+    auto emissiveColProp         = std::make_unique<ColorProperty>();
     emissiveColProp->id          = id++;
     emissiveColProp->displayName = "Emissive Color";
     emissiveColProp->name        = "emissiveColor";
     emissiveColProp->value       = emissiveColor;
-    properties.append(emissiveColProp);
+    addProperty(std::move(emissiveColProp));
 
-    auto emissiveProp         = new FloatProperty;
+    auto emissiveProp         = std::make_unique<FloatProperty>();
     emissiveProp->id          = id++;
     emissiveProp->displayName = "Emissive Intensity";
     emissiveProp->name        = "emissiveIntensity";
     emissiveProp->minValue    = 0.0f;
     emissiveProp->maxValue    = 10.0f;
     emissiveProp->value       = emissiveIntensity;
-    properties.append(emissiveProp);
+    addProperty(std::move(emissiveProp));
 
-    auto alphaProp         = new FloatProperty;
+    auto alphaProp         = std::make_unique<FloatProperty>();
     alphaProp->id          = id++;
     alphaProp->displayName = "Alpha";
     alphaProp->name        = "alpha";
     alphaProp->minValue    = 0.0f;
     alphaProp->maxValue    = 1.0f;
     alphaProp->value       = alpha;
-    properties.append(alphaProp);
+    addProperty(std::move(alphaProp));
 
     // The UV transform rows. ORDER MATTERS: "textureScale" sets both axes, so
     // it has to be read before "textureScaleV" overrides V — both material
     // readers iterate this list in order (SceneReader::readPbrMaterial,
     // MaterialReader::parsePbrMaterial).
-    auto scaleProp         = new FloatProperty;
+    auto scaleProp         = std::make_unique<FloatProperty>();
     scaleProp->id          = id++;
     scaleProp->displayName = "Texture Scale U";
     scaleProp->name        = "textureScale";
     scaleProp->minValue    = 0.0f;
     scaleProp->maxValue    = 10.0f;
     scaleProp->value       = textureScale;
-    properties.append(scaleProp);
+    addProperty(std::move(scaleProp));
 
-    auto scaleVProp         = new FloatProperty;
+    auto scaleVProp         = std::make_unique<FloatProperty>();
     scaleVProp->id          = id++;
     scaleVProp->displayName = "Texture Scale V";
     scaleVProp->name        = "textureScaleV";
     scaleVProp->minValue    = 0.0f;
     scaleVProp->maxValue    = 10.0f;
     scaleVProp->value       = textureScaleV;
-    properties.append(scaleVProp);
+    addProperty(std::move(scaleVProp));
 
-    auto offsetUProp         = new FloatProperty;
+    auto offsetUProp         = std::make_unique<FloatProperty>();
     offsetUProp->id          = id++;
     offsetUProp->displayName = "Texture Offset U";
     offsetUProp->name        = "textureOffsetU";
     offsetUProp->minValue    = -10.0f;
     offsetUProp->maxValue    = 10.0f;
     offsetUProp->value       = textureOffsetU;
-    properties.append(offsetUProp);
+    addProperty(std::move(offsetUProp));
 
-    auto offsetVProp         = new FloatProperty;
+    auto offsetVProp         = std::make_unique<FloatProperty>();
     offsetVProp->id          = id++;
     offsetVProp->displayName = "Texture Offset V";
     offsetVProp->name        = "textureOffsetV";
     offsetVProp->minValue    = -10.0f;
     offsetVProp->maxValue    = 10.0f;
     offsetVProp->value       = textureOffsetV;
-    properties.append(offsetVProp);
+    addProperty(std::move(offsetVProp));
 
-    auto rotationProp         = new FloatProperty;
+    auto rotationProp         = std::make_unique<FloatProperty>();
     rotationProp->id          = id++;
     rotationProp->displayName = "Texture Rotation";
     rotationProp->name        = "textureRotation";
     rotationProp->minValue    = -360.0f;
     rotationProp->maxValue    = 360.0f;
     rotationProp->value       = textureRotation;
-    properties.append(rotationProp);
+    addProperty(std::move(rotationProp));
 
     // Remap bounds for a sampled roughness map (see the field comment in the
     // header: lower > upper deliberately inverts a legacy gloss map).
-    auto roughLowerProp         = new FloatProperty;
+    auto roughLowerProp         = std::make_unique<FloatProperty>();
     roughLowerProp->id          = id++;
     roughLowerProp->displayName = "Roughness Lower Bound";
     roughLowerProp->name        = "roughnessLowerBound";
     roughLowerProp->minValue    = 0.0f;
     roughLowerProp->maxValue    = 1.0f;
     roughLowerProp->value       = roughnessLowerBound;
-    properties.append(roughLowerProp);
+    addProperty(std::move(roughLowerProp));
 
-    auto roughUpperProp         = new FloatProperty;
+    auto roughUpperProp         = std::make_unique<FloatProperty>();
     roughUpperProp->id          = id++;
     roughUpperProp->displayName = "Roughness Upper Bound";
     roughUpperProp->name        = "roughnessUpperBound";
     roughUpperProp->minValue    = 0.0f;
     roughUpperProp->maxValue    = 1.0f;
     roughUpperProp->value       = roughnessUpperBound;
-    properties.append(roughUpperProp);
+    addProperty(std::move(roughUpperProp));
 
-    auto cutoffProp         = new FloatProperty;
+    auto cutoffProp         = std::make_unique<FloatProperty>();
     cutoffProp->id          = id++;
     cutoffProp->displayName = "Alpha Cutoff";
     cutoffProp->name        = "alphaCutoff";
     cutoffProp->minValue    = 0.0f;
     cutoffProp->maxValue    = 1.0f;
     cutoffProp->value       = alphaCutoff;
-    properties.append(cutoffProp);
+    addProperty(std::move(cutoffProp));
 
     // 0 opaque, 1 cutout/masked, 2 blend/translucent (glTF's OPAQUE/MASK/BLEND),
     // 3 glass (engine realistic transparency), 4 additive (Src+Dest),
@@ -746,139 +728,139 @@ void PbrMaterial::createProperties()
     // picker cannot disagree with the vocabulary (PUBLISH_AUDIT #4 was exactly
     // that disagreement). ON DISK IT IS STILL AN INT — the enum row's value IS
     // the index — so existing scenes and .material files load unchanged.
-    auto alphaModeProp         = new ListProperty;
+    auto alphaModeProp         = std::make_unique<ListProperty>();
     alphaModeProp->id          = id++;
     alphaModeProp->displayName = "Alpha Mode";
     alphaModeProp->name        = "alphaMode";
     alphaModeProp->labels      = { "Opaque", "Masked", "Translucent", "Glass",
                                    "Additive", "Modulate", "Refractive" };
     alphaModeProp->value       = alphaMode;
-    properties.append(alphaModeProp);
+    addProperty(std::move(alphaModeProp));
 
-    auto refractProp         = new FloatProperty;
+    auto refractProp         = std::make_unique<FloatProperty>();
     refractProp->id          = id++;
     refractProp->displayName = "Refraction Strength";
     refractProp->name        = "refractionStrength";
     refractProp->minValue    = 0.0f;
     refractProp->maxValue    = 1.0f;
     refractProp->value       = refractionStrength;
-    properties.append(refractProp);
+    addProperty(std::move(refractProp));
 
     // ---- MATERIAL_GAPS_SPEC GAP 1: the workflow ----
     // Before the shading model, because it renames a MAP row ("Metallic Map"
     // <-> "Specular Map", sharedMapDisplayName) and greys three others.
-    auto workflowProp         = new ListProperty;
+    auto workflowProp         = std::make_unique<ListProperty>();
     workflowProp->id          = id++;
     workflowProp->displayName = "Workflow";
     workflowProp->name        = "workflow";
     for (const char *n : workflowNames()) workflowProp->labels << QString::fromLatin1(n);
     workflowProp->value       = workflow;
-    properties.append(workflowProp);
+    addProperty(std::move(workflowProp));
 
     // kS. Meaningful in EVERY workflow (white = inert), so it is not on either
     // unused-rows list.
-    auto specColProp         = new ColorProperty;
+    auto specColProp         = std::make_unique<ColorProperty>();
     specColProp->id          = id++;
     specColProp->displayName = "Specular Color";
     specColProp->name        = "specularColor";
     specColProp->value       = specularColor;
-    properties.append(specColProp);
+    addProperty(std::move(specColProp));
 
     // 1.0 (vacuum, F0 = 0) to 3.0 (diamond is 2.42): the authoring range that
     // covers every real dielectric. F0 = ((1-ior)/(1+ior))^2.
-    auto iorProp         = new FloatProperty;
+    auto iorProp         = std::make_unique<FloatProperty>();
     iorProp->id          = id++;
     iorProp->displayName = "Index of Refraction";
     iorProp->name        = "ior";
     iorProp->minValue    = 1.0f;
     iorProp->maxValue    = 3.0f;
     iorProp->value       = ior;
-    properties.append(iorProp);
+    addProperty(std::move(iorProp));
 
-    auto useFresnelProp         = new BoolProperty;
+    auto useFresnelProp         = std::make_unique<BoolProperty>();
     useFresnelProp->id          = id++;
     useFresnelProp->displayName = "Use Fresnel Color";
     useFresnelProp->name        = "useFresnelColor";
     useFresnelProp->value       = useFresnelColor;
-    properties.append(useFresnelProp);
+    addProperty(std::move(useFresnelProp));
 
-    auto fresnelColProp         = new ColorProperty;
+    auto fresnelColProp         = std::make_unique<ColorProperty>();
     fresnelColProp->id          = id++;
     fresnelColProp->displayName = "Fresnel Color (F0)";
     fresnelColProp->name        = "fresnelColor";
     fresnelColProp->value       = fresnelColor;
-    properties.append(fresnelColProp);
+    addProperty(std::move(fresnelColProp));
 
     // Not a slider: flipping it changes the size of the renderer's fresnel term
     // and recompiles the material's shader.
-    auto sepFresnelProp         = new BoolProperty;
+    auto sepFresnelProp         = std::make_unique<BoolProperty>();
     sepFresnelProp->id          = id++;
     sepFresnelProp->displayName = "Per-Channel Fresnel";
     sepFresnelProp->name        = "separateFresnel";
     sepFresnelProp->value       = separateFresnel;
-    properties.append(sepFresnelProp);
+    addProperty(std::move(sepFresnelProp));
 
     // ---- HLMS_ADOPTION P4a: the shading model ----
     // FIRST of the shading rows, because it constrains more of the panel than
     // anything else does: on Unlit, thirteen of the rows below have nothing to
     // reach (rowsUnusedWhenUnlit) and the panel greys them out.
-    auto shadingProp         = new ListProperty;
+    auto shadingProp         = std::make_unique<ListProperty>();
     shadingProp->id          = id++;
     shadingProp->displayName = "Shading Model";
     shadingProp->name        = "shadingModel";
     for (const char *n : shadingModelNames()) shadingProp->labels << QString::fromLatin1(n);
     shadingProp->value       = shadingModel;
-    properties.append(shadingProp);
+    addProperty(std::move(shadingProp));
 
     // ---- HLMS_ADOPTION P1: the cheap PBS knobs ----
     // The BRDF picker comes FIRST because it constrains the two coat rows: the
     // renderer can only carry a clear coat on the Default family, so the panel
     // disables them on any other pick (D-P1b) and the coat values are kept, not
     // destroyed.
-    auto brdfProp         = new ListProperty;
+    auto brdfProp         = std::make_unique<ListProperty>();
     brdfProp->id          = id++;
     brdfProp->displayName = "Shading BRDF";
     brdfProp->name        = "brdf";
     for (const auto &n : brdfNames()) brdfProp->labels << QString::fromLatin1(n.displayName);
     brdfProp->value       = brdf;
-    properties.append(brdfProp);
+    addProperty(std::move(brdfProp));
 
-    auto coatProp         = new FloatProperty;
+    auto coatProp         = std::make_unique<FloatProperty>();
     coatProp->id          = id++;
     coatProp->displayName = "Clear Coat";
     coatProp->name        = "clearCoat";
     coatProp->minValue    = 0.0f;
     coatProp->maxValue    = 1.0f;
     coatProp->value       = clearCoat;
-    properties.append(coatProp);
+    addProperty(std::move(coatProp));
 
-    auto coatRoughProp         = new FloatProperty;
+    auto coatRoughProp         = std::make_unique<FloatProperty>();
     coatRoughProp->id          = id++;
     coatRoughProp->displayName = "Clear Coat Roughness";
     coatRoughProp->name        = "clearCoatRoughness";
     coatRoughProp->minValue    = 0.0f;
     coatRoughProp->maxValue    = 1.0f;
     coatRoughProp->value       = clearCoatRoughness;
-    properties.append(coatRoughProp);
+    addProperty(std::move(coatRoughProp));
 
     // NAMED "receiveShadows" AND NOTHING ELSE. The materials graph used to ship
     // a `receiveShadow` (singular) checkbox in MaterialSettings that reached
     // nothing at all; that ghost is deleted. This row is the real one.
-    auto receiveShadowsProp         = new BoolProperty;
+    auto receiveShadowsProp         = std::make_unique<BoolProperty>();
     receiveShadowsProp->id          = id++;
     receiveShadowsProp->displayName = "Receive Shadows";
     receiveShadowsProp->name        = "receiveShadows";
     receiveShadowsProp->value       = receiveShadows;
-    properties.append(receiveShadowsProp);
+    addProperty(std::move(receiveShadowsProp));
 
     // Only meaningful with an emissive map bound, and the emissive colour
     // should be white or it tints the lightmap.
-    auto lightmapProp         = new BoolProperty;
+    auto lightmapProp         = std::make_unique<BoolProperty>();
     lightmapProp->id          = id++;
     lightmapProp->displayName = "Emissive as Lightmap";
     lightmapProp->name        = "emissiveAsLightmap";
     lightmapProp->value       = emissiveAsLightmap;
-    properties.append(lightmapProp);
+    addProperty(std::move(lightmapProp));
 
     // The six texture maps. Names match the setValue() cases above (paths, not
     // the "u_*Map" sampler names used as Material::textures keys). Declaring
@@ -896,11 +878,11 @@ void PbrMaterial::createProperties()
         { "Emissive Map",   "emissiveMap"  },
     };
     for (const auto &m : kMaps) {
-        auto texProp         = new TextureProperty;
+        auto texProp         = std::make_unique<TextureProperty>();
         texProp->id          = id++;
         texProp->displayName = m.display;
         texProp->name        = m.name;
-        properties.append(texProp);
+        addProperty(std::move(texProp));
     }
 
     // ---- ADDENDUM A-5: the per-material reflection cubemap ---------------
@@ -909,11 +891,11 @@ void PbrMaterial::createProperties()
     // which generates the addressing rows: a cube is sampled by direction and
     // has no U/V wrap to vary. Empty by default, at which the material samples
     // the scene's global reflection exactly as it always has.
-    auto reflectionProp         = new TextureProperty;
+    auto reflectionProp         = std::make_unique<TextureProperty>();
     reflectionProp->id          = id++;
     reflectionProp->displayName = "Reflection Cubemap";
     reflectionProp->name        = "reflectionMap";
-    properties.append(reflectionProp);
+    addProperty(std::move(reflectionProp));
 
     // ---- MATERIAL_GAPS_SPEC GAP 2: the detail layers ---------------------
     // FLAT ROWS, one group per layer, generated from kDetailLayers so raising
@@ -924,25 +906,25 @@ void PbrMaterial::createProperties()
     for (int layer = 0; layer < kDetailLayers; ++layer) {
         const QString label = QStringLiteral("Detail %1 ").arg(layer);
 
-        auto mapProp         = new TextureProperty;
+        auto mapProp         = std::make_unique<TextureProperty>();
         mapProp->id          = id++;
         mapProp->displayName = label + QStringLiteral("Map");
         mapProp->name        = detailRow(layer, "Map");
-        properties.append(mapProp);
+        addProperty(std::move(mapProp));
 
-        auto nmProp         = new TextureProperty;
+        auto nmProp         = std::make_unique<TextureProperty>();
         nmProp->id          = id++;
         nmProp->displayName = label + QStringLiteral("Normal Map");
         nmProp->name        = detailRow(layer, "NormalMap");
-        properties.append(nmProp);
+        addProperty(std::move(nmProp));
 
-        auto blendProp         = new ListProperty;
+        auto blendProp         = std::make_unique<ListProperty>();
         blendProp->id          = id++;
         blendProp->displayName = label + QStringLiteral("Blend");
         blendProp->name        = detailRow(layer, "Blend");
         for (const char *n : detailBlendNames()) blendProp->labels << QString::fromLatin1(n);
         blendProp->value       = detail[layer].blend;
-        properties.append(blendProp);
+        addProperty(std::move(blendProp));
 
         // Offset and scale are FOUR float rows rather than two Vec2s: the panel
         // renders Vec2 rows, but material.set, the reader and the graph baker
@@ -959,31 +941,31 @@ void PbrMaterial::createProperties()
             { "NormalWeight", "Normal Weight", detail[layer].normalWeight,  0.0f, 2.0f },
         };
         for (const Scalar &sc : scalars) {
-            auto p         = new FloatProperty;
+            auto p         = std::make_unique<FloatProperty>();
             p->id          = id++;
             p->displayName = label + QString::fromLatin1(sc.label);
             p->name        = detailRow(layer, sc.suffix);
             p->minValue    = sc.lo;
             p->maxValue    = sc.hi;
             p->value       = sc.value;
-            properties.append(p);
+            addProperty(std::move(p));
         }
     }
 
     // ONE mask for every layer: its R/G/B/A channels scale layers 0/1/2/3.
     // That is the renderer's shape (PBSM_DETAIL_WEIGHT), not a simplification.
-    auto detailWeightProp         = new TextureProperty;
+    auto detailWeightProp         = std::make_unique<TextureProperty>();
     detailWeightProp->id          = id++;
     detailWeightProp->displayName = "Detail Weight Map";
     detailWeightProp->name        = "detailWeightMap";
-    properties.append(detailWeightProp);
+    addProperty(std::move(detailWeightProp));
 
     // ---- ADDENDUM A-2: sampler control -----------------------------------
     // One anisotropy dial for the material, and one addressing row per MAP —
     // generated from mapRowNames() so a new map slot gets its address row for
     // free. Every default is the value the maps were hard-coded to, so this
     // section existing cannot change how an existing material samples.
-    auto anisoProp         = new ListProperty;
+    auto anisoProp         = std::make_unique<ListProperty>();
     anisoProp->id          = id++;
     anisoProp->displayName = "Anisotropic Filtering";
     anisoProp->name        = "anisotropy";
@@ -995,10 +977,10 @@ void PbrMaterial::createProperties()
         for (int i = 0, v = 1; i < 5; ++i, v *= 2) if (int(anisotropy) >= v) idx = i;
         anisoProp->value = idx;
     }
-    properties.append(anisoProp);
+    addProperty(std::move(anisoProp));
 
     for (const QString &mapRow : mapRowNames()) {
-        auto addrProp         = new ListProperty;
+        auto addrProp         = std::make_unique<ListProperty>();
         addrProp->id          = id++;
         // "Base Color Map Address" would be a fifth column of noise; the row
         // sits directly under its map and says only what it varies.
@@ -1006,7 +988,7 @@ void PbrMaterial::createProperties()
         addrProp->name        = addressRow(mapRow);
         for (const char *n : addressModeNames()) addrProp->labels << QString::fromLatin1(n);
         addrProp->value       = addressFor(mapRow);
-        properties.append(addrProp);
+        addProperty(std::move(addrProp));
     }
 }
 
