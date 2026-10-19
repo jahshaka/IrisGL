@@ -13,23 +13,25 @@
 // overrides, so every library that asks gets the same answer.
 //
 // THE TIERS (a 10-core / 20-thread box in brackets):
-//   foreground  the game thread [1] + Bullet's workers beside it [2]: the physics step (Bullet's index 0 is the game
-//               thread). Bullet's share is what the box leaves after the tiers below, at least 1, at most 6 (7 threads
-//               with the game thread: the count every Bullet row measured at — past it one toppled island caps the step).
+//   foreground  the game thread [1] + Bullet's workers beside it [6]: the physics step (Bullet's index 0 is the game
+//               thread). Bullet's workers = hardware - game - render - Ogre's pool, at least 1, at most 6 (7 threads
+//               with the game thread: the measured best, spikes/bullet-batching-1 — past it one toppled island caps
+//               the step).
 //   render      the render thread [1] + the primary scene's SceneManager pool [8] = clamp(hardware, 2, 8), measured.
 //               It runs WHILE the game thread steps (physics.step_overlap), so the two sets never share a thread.
 //   dedicated   the shader cache's writer [1], Ogre's texture streaming thread [1], the texture multiload pool
-//               [6] = min(6, max(2, hardware / 2)). Normal priority, bursts (a load, a write) beside a playing frame.
-//   background  each background pool's width [2] = what the tiers above leave, at least 2: Qt's global pool (the 28
+//               [6] = min(6, max(2, hardware / 2)). BURSTY, NOT PER-FRAME (a texture load, a cache write): sized as
+//               they are and NOT subtracted from the frame's set.
+//   background  each below-normal pool's width [4] = hardware - the active set, at least 2: Qt's global pool (the 28
 //               QtConcurrent sites: parses, bakes, encodes, file I/O), the bake pool's workers (nice 19), the tile
-//               cache's and the bake store's own pools. BELOW-NORMAL PRIORITY is what lets its floor sit beside a full
-//               box: the 2 it is never denied are the only threads of the process the budget lets past the box.
+//               cache's and the bake store's own pools (min(theirs, it)).
 //
-// THE LAW: the normal-priority tiers (foreground + render + dedicated) never exceed the box once it holds their floors
-// (20 of 20 here); only the below-normal background's floor of 2 runs past it. A scheduler of our own is built when a
-// SECOND foreground job beside the step is MEASURED needing one (today the step is the only one: the mirror's extract
-// is ~1 ms at 1,000 movers, the compose and the interpolate run on Ogre's pool inside the render thread's frame, the
-// import and the bakes are background).
+// THE LAW: the per-frame ACTIVE SET (game + render + Ogre's pool + Bullet's workers: 16 here) never exceeds the box,
+// and the background takes what it leaves (20 - 16 = 4 here). A box whose floors (Ogre's pool 2 — clamp(hardware, 2, 8)
+// is the whole box below 9 threads —, Bullet 1, the background 2) exceed it still oversubscribes; no fix: those are
+// the floors. A scheduler of our own is built when a SECOND foreground job beside the step is MEASURED needing one
+// (today the step is the only one: the mirror's extract is ~1 ms at 1,000 movers, the compose and the interpolate run
+// on Ogre's pool inside the render thread's frame, the import and the bakes are background).
 //
 // Overrides (measurement escape hatches, read once, never preferences): JAHSHAKA_SCENE_THREADS (the render tier's
 // pool), JAH_TEXTURE_MULTILOAD (the multiload; 0 = off), JAHSHAKA_PHYSICS_THREADS (Bullet's threads, the game thread
@@ -56,12 +58,13 @@ struct ThreadBudget
     int dedicated() const { return writer + streaming + multiload; }
     /// Bullet's scheduler threads: the game thread + its workers (btITaskScheduler::getNumThreads).
     int bulletThreads() const { return game + foreground; }
-    /// The normal-priority threads that can run at once: the law's left side.
-    int normalPriority() const { return game + foreground + render + ogrePool + dedicated(); }
-    int total() const { return normalPriority() + background; }
+    /// The per-frame active set: the law's left side (the dedicated set is bursty and not in it).
+    int activeSet() const { return game + foreground + render + ogrePool; }
+    /// The active set + the background: the box exactly when the background is above its floor.
+    int total() const { return activeSet() + background; }
 };
 
-/// Bullet's measured ceiling of workers beside the game thread (7 threads in all; see the header's tiers).
+/// Bullet's measured best, as a ceiling of workers beside the game thread (7 threads in all; see the header's tiers).
 constexpr int kBudgetForegroundCap = 6;
 /// The background tier's floor: a parse and a bake progress side by side however full the box is.
 constexpr int kBudgetBackgroundFloor = 2;
@@ -77,8 +80,8 @@ inline ThreadBudget threadBudgetFor(int hardware, int sceneThreads = -1, int mul
     if (physicsThreads > 0)
         b.foreground = std::clamp(physicsThreads, 1, 32) - b.game;
     else
-        b.foreground = std::clamp(b.hardware - b.game - b.render - b.ogrePool - b.dedicated(), 1, kBudgetForegroundCap);
-    b.background = std::max(kBudgetBackgroundFloor, b.hardware - b.normalPriority());
+        b.foreground = std::clamp(b.hardware - b.game - b.render - b.ogrePool, 1, kBudgetForegroundCap);
+    b.background = std::max(kBudgetBackgroundFloor, b.hardware - b.activeSet());
     return b;
 }
 
