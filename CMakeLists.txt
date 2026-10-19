@@ -366,7 +366,6 @@ set(SRCS
 )
 
 set (HEADERS
-    document/animation/nodekeyframe.h
     document/animation/keyframeanimation.h
     document/scenegraph/lightnode.h
     document/scenegraph/decalnode.h

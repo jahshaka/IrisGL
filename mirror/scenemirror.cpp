@@ -1578,16 +1578,16 @@ void SceneMirror::refreshLightAggregates()
         // light can never cast, and None is not a request.
         if (light->lightType == iris::LightType::Sky) continue;
         if (light->lightType == iris::LightType::Area) continue;
-        if (!light->shadowMap || light->shadowMap->shadowType == iris::ShadowMapType::None)
+        if (light->shadowMap.shadowType == iris::ShadowMapType::None)
             continue;
         ShadowFilter f = ShadowFilter::Hard;
-        if (light->shadowMap->shadowType == iris::ShadowMapType::Soft)          f = ShadowFilter::Soft;
-        else if (light->shadowMap->shadowType == iris::ShadowMapType::VerySoft) f = ShadowFilter::VerySoft;
+        if (light->shadowMap.shadowType == iris::ShadowMapType::Soft)          f = ShadowFilter::Soft;
+        else if (light->shadowMap.shadowType == iris::ShadowMapType::VerySoft) f = ShadowFilter::VerySoft;
         if (!mAnyShadowCaster || int(f) > int(mShadowFilter)) mShadowFilter = f;
         mAnyShadowCaster = true;
-        if (light->shadowMap->resolution > 0)
+        if (light->shadowMap.resolution > 0)
             mMaxShadowResolution = std::max(mMaxShadowResolution,
-                                            unsigned(light->shadowMap->resolution));
+                                            unsigned(light->shadowMap.resolution));
     }
 }
 
@@ -5513,7 +5513,7 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
     // Area lights never cast shadows (Ogre-Next limitation; the engine enforces
     // it too — this keeps the mirror's shadow-filter bookkeeping honest).
     d.castShadows = light->lightType != iris::LightType::Area &&
-                    light->shadowMap && light->shadowMap->shadowType != iris::ShadowMapType::None;
+                    light->shadowMap.shadowType != iris::ShadowMapType::None;
     // ---- THE SUN, and the secondary directionals -----------------------
     // Our shadow node declares exactly ONE directional slot (three PSSM splits
     // at slot 0; every focused slot accepts spot/point only — OgreShadow.cpp).

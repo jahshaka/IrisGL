@@ -74,6 +74,11 @@ template <typename T> bool KeyCompare(const Key<T> * const & a, const Key<T> * c
 }
 
 
+/// A TRACK OWNS ITS KEYS (LEAK-1 L5): every Key in `keys` is this track's,
+/// freed when it leaves the track (removeKey, clear) or with the track. The
+/// readers hold raw pointers into it for as long as the key is in the track.
+/// Not copyable: a copy would hand the same keys to two owners (a duplicated
+/// node's track deep-copies them, Animation::clone).
 template<typename T>
 class KeyFrame
 {
@@ -86,6 +91,8 @@ public:
     {
         length = 15;//for now
     }
+    KeyFrame(const KeyFrame &) = delete;
+    KeyFrame &operator=(const KeyFrame &) = delete;
 
     void clear()
     {
@@ -113,9 +120,13 @@ public:
         length = last->time;
     }
 
-    void removeKey(Key<T>* key)
+    /// Takes `key` out of the track and FREES it (the track owns it); a key
+    /// that is not this track's is left alone. True when it was removed.
+    bool removeKey(Key<T>* key)
     {
-        keys.removeOne(key);
+        if (!keys.removeOne(key)) return false;
+        delete key;
+        return true;
     }
 
     Key<T>* addKey(T value,double time)

@@ -21,7 +21,6 @@ For more information see the LICENSE file
 namespace iris
 {
 
-class ShadowMap;
 
 enum class LightType:int
 {
@@ -55,7 +54,10 @@ public:
     // that is the only answer that can be right after a node moves.)
     LightType lightType;
 
-    ShadowMap* shadowMap;
+    /// The light's shadow settings, BY VALUE (LEAK-1 L2): two numbers the light
+    /// alone owns. It was a `new ShadowMap()` nothing freed — 8 bytes leaked per
+    /// light node, every one ever made — behind a pointer nothing shared.
+    ShadowMap shadowMap;
 
     /**
      * THE RANGE of a point or spot light, metres: where its falloff's window
@@ -242,32 +244,27 @@ public:
 
     void updateAnimation(float time) override;
 
-	ShadowMap* getShadowMap()
-	{
-		return shadowMap;
-	}
-
 	void setShadowMapType(ShadowMapType shadowType)
 	{
-		if (shadowMap->shadowType == shadowType) return;
-		shadowMap->shadowType = shadowType;
+		if (shadowMap.shadowType == shadowType) return;
+		shadowMap.shadowType = shadowType;
 		notifyChanged(NodeChange::Params);
 	}
 
 	ShadowMapType getShadowMapType()
 	{
-		return shadowMap->shadowType;
+		return shadowMap.shadowType;
 	}
 
 	void setShadowMapResolution(int size)
 	{
-		shadowMap->setResolution(size);
+		shadowMap.setResolution(size);
 		notifyChanged(NodeChange::Params);
 	}
 
 	int getShadowMapResolution()
 	{
-		return shadowMap->resolution;
+		return shadowMap.resolution;
 	}
 
 	SceneNodePtr createDuplicate() override;

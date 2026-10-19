@@ -90,13 +90,13 @@ QList<Property*> LightNode::getProperties()
     intProp = new IntProperty();
     intProp->displayName = "Shadow Map Type";
     intProp->name = "shadowMapType";
-    intProp->value = static_cast<int>(shadowMap->shadowType);
+    intProp->value = static_cast<int>(shadowMap.shadowType);
     props.append(intProp);
 
     intProp = new IntProperty();
     intProp->displayName = "Shadow Map Resolution";
     intProp->name = "shadowMapResolution";
-    intProp->value = shadowMap->resolution;
+    intProp->value = shadowMap.resolution;
     props.append(intProp);
 
     // FOLLOWS ATMOSPHERE (the sun only; lightnode.h says what it means).
@@ -278,7 +278,6 @@ LightNode::LightNode()
 
 	exportable = false;
 
-    shadowMap = new ShadowMap();
 }
 
 SceneNodePtr LightNode::createDuplicate()
@@ -304,8 +303,7 @@ SceneNodePtr LightNode::createDuplicate()
 	light->iesNormalisation = this->iesNormalisation;
 	light->lightTextureGuid = this->lightTextureGuid;
 	light->lightTexturePath = this->lightTexturePath;
-	light->shadowMap->shadowType = this->shadowMap->shadowType;
-	light->shadowMap->setResolution(this->shadowMap->resolution);
+	light->shadowMap = this->shadowMap;
 	light->icon = this->icon;
 	light->iconSize = this->iconSize;
 
