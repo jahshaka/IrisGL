@@ -935,6 +935,10 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n, bool atomDraw) const {
             // with a no-cull caster, so one flag says it for the id pass and the caster cut.
             if (n.item->getSubItem(0)->getDatablock()->getMacroblock()->mCullMode == Ogre::CULL_NONE)
                 f |= kGpuTwoSided;
+        } else if (route == AtomRoute::Pending && atomClassifierPending() &&
+                   atomRouteBase(n, f) == AtomRoute::Atom) {
+            // WAITING ON THE CLASSIFIER (kGpuAtomWaiting): drawn by PBS, its word kept for the decode.
+            f |= kGpuAtomWaiting;
         } else if (atomCasterThroughCut(n, f, route)) {
             // THE CASTER ALONE THROUGH THE CUT (ENGINE-POLISH-ATOM-1 stage 2): its colour stays on PBS; the
             // faces are its CASTER's (the id pass never draws it, so the flag speaks for the caster cut only).

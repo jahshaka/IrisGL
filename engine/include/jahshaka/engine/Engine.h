@@ -1868,6 +1868,14 @@ public:
     /// there is nothing to warm up or the warm-up pass could not be built; a
     /// failure is never fatal — the shaders simply compile later, as before.
     virtual bool warmUpShaders() = 0;
+    /// THE PASS'S FLOOR, BEFORE THE FIRST FRAME (BISTRO-STREAM-IN-1 stage 4): what a waiting object draws with —
+    /// every placeholder this view's passes need for the bound scene's renderables, and every draw that can have none
+    /// (the Atom classifier, the unlit furniture) — built now, waited for, while nothing of this view is on screen
+    /// (an open's warm-up slice, behind the cover). The view's own frames drawn asynchronously with the background
+    /// compiler in its placeholders-only mode until a round asks for nothing more; the objects' own permutations are
+    /// left to the background compiler (the stream). The view's compile mode is what it was afterwards. A REQUEST.
+    /// Returns false (nothing built) where the background compiler is not running.
+    virtual bool warmUpFloor() = 0;
 
     /// ASYNCHRONOUS SHADERS (ASYNC-SHADERS-1). On: a permutation this view needs and the
     /// engine has not built yet is built by the engine's background compile service while

@@ -333,6 +333,26 @@ void OgreEngine::drainPbsChanges() {
 }
 
 OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) const {
+    const AtomRoute r = atomRouteBase(n, flags);
+    // THE CLASSIFIER NOT BUILT YET: the PENDING route, the stock shader (atomClassifierPending).
+    return (r == AtomRoute::Atom && atomClassifierPending()) ? AtomRoute::Pending : r;
+}
+
+void OgreScene::noteAtomClassifierReadiness() {
+    HlmsAtom *atom = registeredAtom();
+    if (atom && mSceneMgr) {
+        bool shown = false, drawn = false;
+        atom->takeClassifierFrame(mSceneMgr, shown, drawn);
+        if (drawn) mAtomClassifierPending = false;
+        else if (shown) mAtomClassifierPending = true;   // shown, not drawn: its permutation is building
+    }
+    const bool pending = atomClassifierPending();
+    if (pending == mAtomClassifierPendingApplied) return;
+    mAtomClassifierPendingApplied = pending;
+    if (atomDrawOn()) markAllItemsRehashed();   // every route re-composes this frame
+}
+
+OgreScene::AtomRoute OgreScene::atomRouteBase(const Node &n, Ogre::uint32 flags) const {
     Ogre::Item *item = n.item;
     if (!item || !item->getNumSubItems()) return AtomRoute::Stock;
     const Ogre::uint8 rq = item->getRenderQueueGroup();

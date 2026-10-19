@@ -232,6 +232,11 @@ enum GpuInstanceFlag : uint32_t {
     /// (Visible | Caster | AtomCaster); such an item drops its stock-caster channel (kStockCasterBit), so no stock
     /// shadow scene pass draws it too. kGpuTwoSided on an AtomCaster-only item names its CASTER's faces.
     kGpuAtomCaster = 1u << 13,
+    /// BISTRO-STREAM-IN-1 stage 4: an item the route gives to Atom, WAITING on the PENDING route while the scene's
+    /// classifier permutation is not built (OgreScene::atomClassifierPending): its colour and its caster draw
+    /// through PBS this frame, and its word keeps the screen decode's draws — and so the classifier, which must keep
+    /// being drawn to be built — alive (AtomComponent::Words).
+    kGpuAtomWaiting = 1u << 14,
 };
 /// The metalness from which a hit is a metal's (kGpuMetal). Below it the CARD answers,
 /// from it the metal routes, and the switch is a STEP (REFLECT-FIX-1 fix round,

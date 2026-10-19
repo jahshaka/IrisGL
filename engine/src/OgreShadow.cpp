@@ -1577,6 +1577,8 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // every reader of an Item's datablock: a flag test for a scene with none.
         for (OgreScene *s : drawn) s->sweepCullTwins();
         drainPbsChanges();
+        // THE CLASSIFIER'S READINESS FIRST (BISTRO-STREAM-IN-1 stage 4): a route it moves is composed this frame.
+        for (OgreScene *s : drawn) s->noteAtomClassifierReadiness();
         for (OgreScene *s : drawn) s->composeGpuSceneFrame();
         // THE RAY LEVEL (ATOM P3's AT-A8r), immediately after the table it
         // writes into and before the ray tier that will one day read it. The

@@ -16,6 +16,7 @@
 #include <Compositor/Pass/PassScene/OgreCompositorPassScene.h>
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsManager.h>
+#include <OgreHlmsAsyncCompiler.h>
 #include <OgreViewport.h>
 #include <OgreCamera.h>
 #include <OgreRenderPassDescriptor.h>
@@ -2022,6 +2023,35 @@ void OgreView::setAsyncShaders(bool on) {
 }
 
 bool OgreView::asyncShaders() const { return mAsyncShaders; }
+
+bool OgreView::warmUpFloor() {
+    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = warmUpFloor(); }, nullptr); return r; }
+    Ogre::HlmsManager *hm = mRoot ? mRoot->getHlmsManager() : nullptr;
+    Ogre::HlmsAsyncCompiler *compiler = hm ? hm->getAsyncCompiler() : nullptr;
+    if (!compiler || !compiler->isRunning() || !mScene) return false;
+    const bool wasAsync = mAsyncShaders;
+    setAsyncShaders(true);
+    compiler->setPlaceholdersOnly(true);
+    // RESTORED HOWEVER THIS ENDS: the mode is process-wide, and left on every asynchronous object of the session
+    // would wait on its placeholder for ever.
+    struct Restore {
+        OgreView *v;
+        Ogre::HlmsAsyncCompiler *c;
+        bool async;
+        ~Restore() { c->setPlaceholdersOnly(false); v->setAsyncShaders(async); }
+    } restore{ this, compiler, wasAsync };
+    bool built = false;
+    for (int round = 0; round < kFloorRounds; ++round) {
+        const Ogre::uint64 before = compiler->getNumCompleted();
+        // The view's own warm-up frames (composed and routed between them: the classifier's pending route keeps the
+        // decode's words, so its draws — and the classifier — are asked for), then every request waited out.
+        if (!warmUpShaders()) break;
+        compiler->waitForAll();
+        if (compiler->getNumCompleted() == before) break;
+        built = true;
+    }
+    return built;
+}
 
 bool OgreView::warmUpShaders() {
     // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.

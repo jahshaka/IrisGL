@@ -225,6 +225,13 @@ public:
     /// previous pass left in those slots. Counted, and logged once with the camera.
     unsigned long long sourcelessDraws() const { return mSourcelessDraws; }
 
+    /// THE CLASSIFIER'S READINESS (BISTRO-STREAM-IN-1 stage 4): the classifier has no placeholder (a
+    /// classification drawn grey would leave every bucket's depth test empty), so while its permutation for the
+    /// pass is pending the whole Atom world would draw nothing. Recorded per scene for the frame: whether a
+    /// classified pass SHOWED it (showScreenDecodes) and whether it was DRAWN (fillBuffersForV2 runs only for a draw
+    /// that has its PSO). Taken — and reset — once a frame by the scene (OgreScene::noteAtomClassifierReadiness).
+    void takeClassifierFrame(const Ogre::SceneManager *sm, bool &shown, bool &drawn);
+
     /// THE DECODE TWIN of a PBS datablock's BUCKET (bucketKeyOf): the bucket's one
     /// twin, created with the bucket's first member (a JSON round trip through Ogre's
     /// own serialiser, so every permutation-relevant field — textures, samplers,
@@ -549,6 +556,8 @@ private:
         AtomDecodeRenderable *classify = nullptr;
     };
     std::unordered_map<Ogre::SceneManager *, SceneDecodes> mSceneDecodes;
+    /// takeClassifierFrame's record: {shown, drawn} per scene manager since the last take.
+    std::unordered_map<const Ogre::SceneManager *, std::pair<bool, bool>> mClassifierFrame;
     void destroySceneDraw(SceneDecodes &sd, const Ogre::HlmsDatablock *twin);
     void destroyClassifier(SceneDecodes &sd);
     void syncDraws(Ogre::SceneManager *sm, SceneDecodes &sd, SceneDecodes::Set &set,

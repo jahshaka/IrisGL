@@ -175,7 +175,7 @@ private:
         void gpuSlotChanged(uint32_t slot, const GpuInstance *now) override {
             uint32_t flags = 0u;
             if (now) std::memcpy(&flags, &now->boundsMax[3], sizeof(flags));
-            words.set(slot, (now && (flags & kGpuAtom)) ? now->raster[0] : WordCounts::kNone);
+            words.set(slot, (now && (flags & (kGpuAtom | kGpuAtomWaiting))) ? now->raster[0] : WordCounts::kNone);
             const bool twoFaces = now && (flags & kGpuTwoSided);
             const uint8_t bits = uint8_t((twoFaces && (flags & kGpuAtom) ? 1u : 0u) |
                                         (twoFaces && (flags & kGpuAtomCaster) ? 2u : 0u) |

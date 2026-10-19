@@ -6256,6 +6256,9 @@ public:
     /// THE FRAME'S OWN READ (OgreEngine::applyShadowCacheDirties, after updateSceneGraph):
     /// the compose (the frame's walk unless a pre-frame reader already ran it, and every
     /// mark since), then — after the ray levels have patched the mirror — ONE commit.
+    /// THE CLASSIFIER'S READINESS (atomClassifierPending), once a frame before the GPU scene composes: the last
+    /// frame's classifier record taken, the state moved, and every item re-composed when the answer changed.
+    void noteAtomClassifierReadiness();
     void composeGpuSceneFrame() const;
     void commitGpuSceneFrame() const;
     // ---- THE READ-ONLY GPU-SCENE VIEW (ENGINE-UPGRADE-2 stage 2) -----------------------
@@ -6393,6 +6396,17 @@ private:
         Atom, NotWorld, NotPbs, CustomPiece, Blended, CullFront, Planar, Pending, AlphaTested, Skinned, NoRow, Stock
     };
     AtomRoute atomRouteFor(const Node &n, Ogre::uint32 flags) const;
+    /// The route the item's own state gives (atomRouteFor before the classifier's readiness is asked).
+    AtomRoute atomRouteBase(const Node &n, Ogre::uint32 flags) const;
+    /// THE CLASSIFIER'S PENDING ROUTE (BISTRO-STREAM-IN-1 stage 4): in an ASYNCHRONOUS scene, until a classified pass
+    /// has drawn this scene's classifier (HlmsAtom::takeClassifierFrame) — and again whenever one shows it and it does
+    /// not draw (a new pass shape: its permutation went to the background compiler) — every item atomRouteBase gives
+    /// to Atom draws through the PENDING route, the stock PBS shader (its own permutation or the placeholder), exactly
+    /// as an item with pending textures does: the id pass never leaves the whole Atom world undrawn. A blocking scene
+    /// builds the classifier in its frame and never waits.
+    bool atomClassifierPending() const { return mAsyncShaders && mAtomClassifierPending; }
+    bool mAtomClassifierPending = true;          ///< not yet seen drawn (or seen shown and not drawn)
+    bool mAtomClassifierPendingApplied = false;  ///< the answer the composed routes follow
     /// THE CASTER'S ROUTE (ENGINE-POLISH-ATOM-1 stage 2): the caster cut draws this item's caster — an Atom item, or
     /// a Blended one (its colour stays on PBS; its stock caster is the opaque silhouette) with no alpha test, no
     /// skin, a caster that culls back faces or none, and a row the cut reads. gpuFlagsFor's kGpuAtomCaster.
@@ -7205,6 +7219,9 @@ public:
     unsigned long long blankFramesPresented() const;
     PublishedEngineFrame::ViewFrames published() const override;
     bool warmUpShaders() override;
+    bool warmUpFloor() override;
+    /// warmUpFloor's rounds at most: measured, the second asks for nothing more.
+    static constexpr int kFloorRounds = 4;
     void setAsyncShaders(bool on) override;
     bool asyncShaders() const override;
     /// Called by OgreEngine::renderOneFrame AFTER Root::renderOneFrame: counts

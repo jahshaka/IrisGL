@@ -765,6 +765,13 @@ void HlmsAtom::syncScreenDecodes(Ogre::SceneManager *sm, const std::vector<uint3
     }
 }
 
+void HlmsAtom::takeClassifierFrame(const Ogre::SceneManager *sm, bool &shown, bool &drawn) {
+    auto it = mClassifierFrame.find(sm);
+    shown = it != mClassifierFrame.end() && it->second.first;
+    drawn = it != mClassifierFrame.end() && it->second.second;
+    if (it != mClassifierFrame.end()) mClassifierFrame.erase(it);
+}
+
 void HlmsAtom::destroyClassifier(SceneDecodes &sd) {
     if (!sd.classify) return;
     if (sd.node && sd.classify->getParentSceneNode()) sd.node->detachObject(sd.classify);
@@ -805,6 +812,7 @@ void HlmsAtom::showScreenDecodes(Ogre::SceneManager *sm, bool on) {
     for (auto &kv : it->second.screen.draws) kv.second->setVisible(on);
     // The classifier draws only in a CLASSIFIED pass (the source set just before).
     if (it->second.classify) it->second.classify->setVisible(on && mSource.classified);
+    if (on && it->second.classify && mSource.classified) mClassifierFrame[sm].first = true;   // takeClassifierFrame
 }
 
 size_t HlmsAtom::sceneDecodeCount(const Ogre::SceneManager *sm) const {
@@ -1250,6 +1258,10 @@ Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,
     const Ogre::uint32 ret = Ogre::HlmsPbs::fillBuffersForV2(cache, queuedRenderable, casterPass,
                                                              lastCacheHash, commandBuffer);
     if (casterPass) return ret;
+    // THE CLASSIFIER DREW (takeClassifierFrame): this call happens only for a draw whose PSO exists.
+    if (mClassifyDb && queuedRenderable.renderable && queuedRenderable.renderable->getDatablock() == mClassifyDb &&
+        queuedRenderable.movableObject)
+        mClassifierFrame[queuedRenderable.movableObject->_getManager()].second = true;
 
     // THE PASS RESOURCES, on the Hlms-type switch exactly like PBS's own
     // (OgreHlmsPbs.cpp fillBuffersFor), in the slots reserved for them. The GPU
