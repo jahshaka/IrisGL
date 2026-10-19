@@ -383,6 +383,7 @@ set (HEADERS
     document/assets/vertexbuffer.h
     core/viewport.h
     core/keyvaluestore.h
+    core/threadbudget.h
     import/meshprewarm.h
     import/parsecensus.h
     import/meshbake.h

@@ -52,6 +52,8 @@
 #include <execinfo.h>
 #include <algorithm>
 
+#include "core/threadbudget.h"   // the boot apply's width (THREADING-1)
+
 namespace jahshaka { namespace engine {
 namespace detail {
 
@@ -886,18 +888,13 @@ void ShaderCache::load(Ogre::Root *root) {
                 // shader in the disk cache is re-created here, on the critical
                 // path of the first createView.
                 //
-                // WHY THIS COUNT. Nothing better is available at this point in
-                // the boot — the cache loads inside the first createView, and
-                // no Scene (and so no worker pool) exists yet. Studio's
-                // measured Primary tier is clamp(idealThreadCount, 2, 8)
-                // (src/bridge/sceneworkerthreads.h); the engine cannot include
-                // that header (IrisGL and Studio never link each other), so the
-                // policy is reproduced here rather than shared. 8 is the same
-                // measured ceiling, and the floor of 1 keeps a
-                // hardware_concurrency() of 0 (allowed to fail) honest.
-                unsigned threads = std::thread::hardware_concurrency();
-                if (threads == 0u) threads = 1u;
-                if (threads > 8u) threads = 8u;
+                // WHY THIS COUNT. The cache loads inside the first createView, before
+                // any Scene (and so any worker pool) exists and before a frame plays:
+                // the boot's apply borrows the render tier's width from the ONE core
+                // budget (irisgl/core/threadbudget.h, THREADING-1) — the primary
+                // scene's measured pool, clamp(hardware, 2, 8) — the same number
+                // Studio's Tier::Primary reads, never a copy of its policy.
+                const unsigned threads = unsigned(iris::threadBudget().ogrePool);
                 disk.applyTo(h, threads);
                 ++mHlmsLoaded;
             }

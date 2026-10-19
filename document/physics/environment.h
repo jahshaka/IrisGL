@@ -66,7 +66,7 @@ public:
     /// THE PHYSICS STEP'S THREADS AND ITS ONE THREAD (ENGINE-UPGRADE-U4 stage 6, decision 23). Bullet's multi-threaded
     /// world (btDiscreteDynamicsWorldMt: the collision pairs and the simulation islands across Bullet's OWN task
     /// scheduler) steps on `threads` threads, the calling thread included — the host's share of the box's ONE core
-    /// budget (beside Ogre's pool, the render and game threads and the dedicated ones: sceneworkers::physicsThreads),
+    /// budget (core/threadbudget.h: ThreadBudget::bulletThreads, the game thread + the foreground share),
     /// fixed for the process. Called ONCE, on the GAME THREAD, before the first world is stepped:
     ///
     /// THE THREAD-INDEX TRAP. Bullet hands out thread indices from one global counter on first use (whoever asks first
@@ -78,6 +78,8 @@ public:
     ///
     /// A process that never binds (a tool, a test with no physics frame) builds the single-threaded world.
     static void bindGameThread(int threads);
+    /// The app's binding: Bullet's threads from the ONE core budget (ThreadBudget::bulletThreads; THREADING-1).
+    static void bindGameThread();
     /// The thread count of the bound scheduler (1 when unbound, or in a build without BT_THREADSAFE).
     static int taskThreads();
     /// True on the bound game thread (and in a process that never bound).

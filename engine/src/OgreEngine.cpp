@@ -46,6 +46,8 @@
 #include <stdexcept>
 #include <thread>
 
+#include "core/threadbudget.h"   // the multiload's width (THREADING-1)
+
 namespace jahshaka { namespace engine {
 namespace detail {
 namespace {
@@ -4178,13 +4180,9 @@ void OgreEngine::ensureHlms() {
     // (OgreTextureGpu.h:405-418).
     if (Ogre::RenderSystem *rs = mRoot->getRenderSystem()) {
         if (Ogre::TextureGpuManager *tm = rs->getTextureGpuManager()) {
-            unsigned threads = 0;
-            const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
-            threads = std::min(6u, std::max(2u, cores / 2u));
-            if (const char *forced = std::getenv("JAH_TEXTURE_MULTILOAD")) {
-                const long n = std::strtol(forced, nullptr, 10);
-                threads = unsigned(std::max(0l, std::min(32l, n)));
-            }
+            // The ONE core budget's dedicated tier holds it (irisgl/core/threadbudget.h; THREADING-1): min(6, max(2,
+            // hardware / 2)), JAH_TEXTURE_MULTILOAD read there.
+            unsigned threads = unsigned(iris::threadBudget().multiload);
             // Never under the NULL render system: a headless run decodes nothing
             // worth parallelising and the pool would be four idle threads.
             if (mHeadless) threads = 0;

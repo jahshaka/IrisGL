@@ -699,6 +699,10 @@ target_compile_definitions(JahshakaEngine PRIVATE
 target_include_directories(JahshakaEngine
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${JAHSHAKA_ENGINE_BUILD_ID_DIR})
+# THE ONE CORE BUDGET (THREADING-1): the engine sizes its pools (the texture multiload, the shader cache's boot apply)
+# from IrisGL's header-only, Ogre- and Qt-free core/threadbudget.h — by include alone, PRIVATE; the engine still links no
+# IrisGL and includes nothing else of it.
+target_include_directories(JahshakaEngine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 # OgreNext is PRIVATE on purpose: Ogre must not leak into Studio's include path.
 target_link_libraries(JahshakaEngine PRIVATE OgreNext)
 if(UNIX AND NOT APPLE)

@@ -24,6 +24,7 @@
 #include "document/scenegraph/scenenode.h"
 #include "document/assets/mesh.h"
 #include "core/geometry/trimesh.h"
+#include "core/threadbudget.h"
 
 namespace iris
 {
@@ -648,7 +649,8 @@ void Environment::restartPhysics()
 
 // ---- THE TASK SCHEDULER (ENGINE-UPGRADE-U4 stage 6, decision 23) -----------------------------------------------------
 // ONE for the process (Bullet's btSetTaskScheduler is global): Bullet's own std::thread scheduler, created by
-// bindGameThread ON the game thread (index 0), its thread count the host's share of the core budget, fixed. Its
+// bindGameThread ON the game thread (index 0), its thread count the foreground share of the ONE core budget
+// (core/threadbudget.h) + the game thread, fixed. Its
 // workers are told to sleep after every step (sleepWorkerThreadsHint): an idle Bullet worker must not spin on a core
 // Ogre's barrier workers need.
 namespace {
@@ -682,6 +684,8 @@ void Environment::bindGameThread(int threads)
     gBound.store(true);
 #endif
 }
+
+void Environment::bindGameThread() { bindGameThread(threadBudget().bulletThreads()); }
 
 int Environment::taskThreads()
 {

@@ -178,7 +178,10 @@ public:
     /// the cluster DAG's group measurement and the SDF's exact band. 0 (the
     /// default) = 4, measured (BAKE-WIDTH-2: wider bakes hitch the editor's frames),
     /// capped at the hardware's thread count; the pool behind it is ONE process-
-    /// wide set of hardware-size workers, however many bakes run. The OUTPUT does
+    /// wide set of workers at nice 19, the ONE core budget's background width
+    /// (bakePoolThreads; THREADING-1), however many bakes run — a bake's caller
+    /// works its own job too, so a width beyond the pool is slots, never threads.
+    /// The OUTPUT does
     /// not depend on it — every reduction is ordered (meshbake.cpp, `bakepool`) —
     /// which is what `bake.determinism` proves byte for byte (1 thread against the
     /// hardware's).
@@ -188,6 +191,8 @@ public:
     /// be whole. 0 disarms.
     static void failBakeAfterChunksForTest(int chunks);
     static int bakeThreads();   ///< the width a bake started now would use
+    /// The bake pool's worker threads (created once, with the pool): ThreadBudget::background.
+    static int bakePoolThreads();
 
     /// The format this build writes and reads.
     static int formatVersion();

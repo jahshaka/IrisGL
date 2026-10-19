@@ -14,6 +14,7 @@ For more information see the LICENSE file
 #include "core/math/vec.h"
 #include "import/meshbake.h"
 #include "import/parsecensus.h"
+#include "core/threadbudget.h"
 
 #include <algorithm>
 #include <array>
@@ -1147,8 +1148,10 @@ namespace
 //      grid; the answer of one query does not depend on which queries ran before
 //      it on the same scratch.
 //
-// THE POOL IS ONE, PROCESS-WIDE, HARDWARE-SIZE (the memory law: no unbounded
-// fan-out). Its workers start on first use and live for the process. The CALLER
+// THE POOL IS ONE, PROCESS-WIDE, THE BACKGROUND TIER'S WIDTH (the memory law: no
+// unbounded fan-out; THREADING-1: the ONE core budget, core/threadbudget.h —
+// it used to spawn hardware - 1 = 19 workers no budget counted). Its workers are created
+// once, with the pool, and live for the process. The CALLER
 // ALWAYS WORKS ITS OWN JOB, so a job started from inside another job's chunk
 // (the meshes of a model run concurrently, and each mesh's stages call the pool
 // again) finishes even if every worker is busy: nesting cannot deadlock and never
@@ -1205,6 +1208,19 @@ public:
         return *pool;
     }
 
+    /// The workers, all of them started here, once: the background tier's width.
+    Pool()
+    {
+        const int workers = iris::threadBudget().background;
+        std::lock_guard<std::mutex> lock(mMutex);
+        for (int i = 0; i < workers; ++i) {
+            std::thread([this] { worker(); }).detach();
+            ++mThreads;
+        }
+    }
+
+    int threads() const { return int(mThreads); }
+
     /// Runs body(chunk, slot) for every chunk in [0, chunks), on at most `width`
     /// threads (the caller is one of them), and returns when all are done. `slot`
     /// is in [0, width) and unique among the threads working THIS job at once —
@@ -1231,10 +1247,6 @@ public:
         job.maxSlots = width;
         {
             std::lock_guard<std::mutex> lock(mMutex);
-            while (int(mThreads) < hardware() - 1) {
-                std::thread([this] { worker(); }).detach();
-                ++mThreads;
-            }
             mJobs.push_back(&job);
         }
         {
@@ -5734,6 +5746,7 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards,
 }   // namespace
 
 void MeshBake::setBakeThreads(int threads) { bakepool::gWidth.store(std::max(threads, 0)); }
+int MeshBake::bakePoolThreads() { return bakepool::Pool::instance().threads(); }
 
 int MeshBake::bakeThreads() { return bakepool::width(); }
 
