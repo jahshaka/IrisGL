@@ -54,6 +54,13 @@ else()
   set(BUILD_SHARED_LIBS 1)   # shared libs doesn't work with msvc (there aren't any dllexports defined)
 endif()
 
+# ONE COMPILER CACHE CALL, Studio's (TOOLING-2, the reader's third round, measured): assimp's own ccache switch sets the
+# GLOBAL RULE_LAUNCH_COMPILE / RULE_LAUNCH_LINK properties, which prefix EVERY compile and link rule of the whole build —
+# in front of Studio's CMAKE_<LANG>_COMPILER_LAUNCHER (`env PWD=<build dir> ccache`), giving `ccache env PWD=… ccache c++`:
+# the outer ccache sees a compiler of type "other" (multiple_source_files), the inner one is disabled, and NOTHING is
+# cached (4,163 "multiple source files" on the box for a 4,150-object rebuild). A normal variable, not option(): the cache
+# of an older tree holds ON, and assimp's option() honours a normal variable (its CMP0077 is NEW, cmake 3.22).
+set(ASSIMP_BUILD_USE_CCACHE OFF)
 option(ASSIMP_BUILD_ASSIMP_TOOLS                "" OFF)
 option(ASSIMP_BUILD_TESTS                       "" OFF)
 option(ASSIMP_NO_EXPORT                         "" ON)
