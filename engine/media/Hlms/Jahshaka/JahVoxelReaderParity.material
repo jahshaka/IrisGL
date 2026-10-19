@@ -8,7 +8,7 @@
 // fragment half: a pass's two stages must agree on it, and thirty-two textures is
 // past the standard prefab (four) that Ogre/Compositor/Quad_vs carries (thirty-two since
 // PHOTON-VOXEL-4's split coverage and surface position, forty since PHOTON-VOXEL-5's back side
-// and normal - the "max" prefab holds sixty-four).
+// and normal - the "max" prefab holds the fork's whole pass-texture table, 128).
 vertex_program Jahshaka/VoxelReaderParity_vs_VK glslvk
 {
 	source Quad_vs.glsl

@@ -153,9 +153,8 @@ HlmsAtom::HlmsAtom(Ogre::Archive *dataFolder, Ogre::ArchiveVec *libraryFolders)
     // both counters (OgreHlmsPbs.cpp: the registers in notifyPropertiesMergedPre-
     // GenerationStep, the binds in fillBuffersFor), so nothing of PBS's moves onto them.
     mReservedTexBufferSlots = kReservedBufSlots;
-    // The id image (hit mode's record image) — ONE texture: the pass textures
-    // share the pin's 32-slot table (kHitBufSlot, HlmsAtom.h).
-    mReservedTexSlots = 1u;
+    // The id image (hit mode's record image) — ONE texture.
+    mReservedTexSlots = kReservedTexSlots;
 }
 
 HlmsAtom::~HlmsAtom() {
@@ -1241,6 +1240,10 @@ void HlmsAtom::setupRootLayout(Ogre::RootLayout &rootLayout, size_t tid) {
         if (ranges[Ogre::DescBindingTypes::Sampler].start < ranges[Ogre::DescBindingTypes::Texture].start)
             ranges[Ogre::DescBindingTypes::Sampler].start = ranges[Ogre::DescBindingTypes::Texture].start;
     }
+    // THE PASS-TEXTURE TABLE'S EXACT CHECK on the FINAL layout (PBS's listener checked it
+    // before the widening above, which moves only the starts): refused here by name, not
+    // thrown by VulkanRootLayout at PSO creation (OgreFog.cpp: the budget per family).
+    FogHlmsListener::refusePassTableOverflow(rootLayout, "HlmsAtom");
 }
 
 Ogre::uint32 HlmsAtom::fillBuffersForV2(const Ogre::HlmsCache *cache,

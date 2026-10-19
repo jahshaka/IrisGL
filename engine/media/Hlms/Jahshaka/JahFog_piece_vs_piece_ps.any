@@ -192,8 +192,8 @@
 		vulkan_layout( ogre_t@value(jahSunVis) ) uniform texture2D jahSunVis;
 	@end
 	// THE PLANET'S ATMOSPHERE'S AERIAL-PERSPECTIVE VOLUME (SKY-ATMOSPHERE-1),
-	// ONE pass texture (the pin's pass-texture table is 64 slots and a busy
-	// pass is near it): its distance slices and, in its last slice, the sky
+	// ONE pass texture (OgreFog.cpp: the pass-texture budget per family):
+	// its distance slices and, in its last slice, the sky
 	// itself. Read with the environment's trilinear clamped block (bound by
 	// FogHlmsListener::hlmsTypeChanged), then the model's arithmetic (the
 	// piece the build wraps from src/rayquery/include/jah_atmosphere.glsl) and

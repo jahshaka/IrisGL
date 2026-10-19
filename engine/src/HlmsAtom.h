@@ -380,11 +380,7 @@ public:
     static constexpr Ogre::uint8 kGeomRowBufSlot = 3u;
     static constexpr Ogre::uint8 kBucketBufSlot = 4u;
     /// Hit mode's list buffer: the vertex stage covers only the used rows (its
-    /// count), the pixel stage reads each record's sun and footprint. A BUFFER, not
-    /// a second image: the pin's Vulkan table of PASS textures holds 32 slots
-    /// (NUM_BIND_TEXTURES, its bounds assert compiled out), and with a second image
-    /// the hit mode's last pass texture sat at slot 31, its last entry (measured
-    /// from the generated shaders). The read-only buffer table is separate.
+    /// count), the pixel stage reads each record's sun and footprint.
     static constexpr Ogre::uint8 kHitBufSlot = 5u;
     /// THE CUT'S TABLES (ATOM-CLUSTER-CUT): the mesh table (its `dag`) and the
     /// cluster table, read by the screen decode.
@@ -397,6 +393,10 @@ public:
     /// Forward+ cell (outside the camera's frustum) is lit by. uploadWorldLights.
     static constexpr Ogre::uint8 kWorldLightBufSlot = 8u;
     static constexpr Ogre::uint8 kReservedBufSlots = 9u;
+    /// The PASS textures HlmsAtom adds to PBS's (mReservedTexSlots): the id image. Every
+    /// reserved slot — buffer or texture — numbers the pass textures after it in the
+    /// fork's absolute-index table (OgreFog.cpp: the budget per family).
+    static constexpr Ogre::uint8 kReservedTexSlots = 1u;
 
 protected:
     Ogre::Hlms::PropertiesMergeStatus notifyPropertiesMergedPreGenerationStep(

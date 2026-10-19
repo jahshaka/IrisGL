@@ -21,12 +21,15 @@
 // block's own density is 0 there (an identity) and our piece does all of it.
 // The authored colour is only for the other skies.
 #include "EnginePrivate.h"
+#include "HlmsAtom.h"
 #include "Atmosphere.h"
 #include "photon/voxel/PhotonPassBinding.h"
 #include "photon/voxel/PhotonIrradianceField.h"
 #include "photon/voxel/PhotonVoxelLighting.h"
 #include <CommandBuffer/OgreCbTexture.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
+#include <OgreRootLayout.h>
+#include <OgreVulkanGlobalBindingTable.h>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -68,36 +71,51 @@ constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_atmo_ap",      "jahAtmoAerial" },
 };
 constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPassSlots[0]);
-// THE PASS-TEXTURE TABLE HAS A HARD SIZE, AND A PASS OVER IT IS NOT SURVIVABLE
-// (SKY-ATMOSPHERE-1's gate: world_sky.clouds_2d asked for 65 of 64 —
-// VulkanRootLayout threw "set 0 needs 65 texture slots; the global binding table
-// holds 64" and the process died with SIGSEGV). The table is the fork's
-// NUM_BIND_TEXTURES (RenderSystems/Vulkan/include/OgreVulkanGlobalBindingTable.h,
-// 64); the fullest pass this engine builds — Epic, the gather, the sun contact, the
-// cloud field and the environment claimed — holds 59 before these extras, MEASURED as
-// that crash's 65 less its six extras. Since OWN-GI-1 those 59 are Ogre's own 17 and
-// the Photon volumes' 42 (PhotonPassBinding: four cascades x ten anisotropic light
-// volumes + the irradiance field's two), claimed through this same listener just
-// ahead of the extras below — the same slots, numbered at the end of set 0 instead
-// of in its middle. So the extras may never exceed five, and adding a sixth is a
-// BUILD error here rather than a crash in one arm of one pool. Five today: the
-// fullest pass is at 64 of 64 with every extra claimed; the atmosphere's volume is
-// claimed only where it is read (aerialScale > 0 or the World fog), so a default
-// scene's fullest pass is 63.
-constexpr size_t kPassTextureTable = 64u;
+// THE PASS-TEXTURE TABLE (BUGS-1; preflight-atom-3 §A). Set 0 — the pass's
+// dynamic set — lives in the fork's Vulkan EMULATION table, `textures[NUM_BIND_TEXTURES]`
+// (RenderSystems/Vulkan/include/OgreVulkanGlobalBindingTable.h), indexed by ABSOLUTE
+// slot number: the bound is the set's LAST slot, and the Hlms number their buffers and
+// tex buffers in the same slot space ahead of the textures. It is not the device's
+// limit (an RTX 4080's is 1,048,576); the fork sized it 128 when the HlmsAtom passes of
+// an Epic world with sun contact, the 2D clouds and the World fog numbered 65 (66 with
+// the LTC array) against 64 and were refused (atom.pass_table, red at fork fdb715461).
+//
+// THE BUDGET PER FAMILY, from the constants that decide it (a build error, never a
+// refused pass in one arm of one pool):
+//   PBS   = Ogre's own share of the fullest pass (its three buffer slots — worldMatBuf,
+//           the Forward+ grid and list — and its pass textures: the shadow maps, the
+//           prepass's gBuffer pair, SSR, the blue noise ...; MEASURED 17 at the fullest
+//           shipped pass, the one figure here that is not a constant — the exact check
+//           below is what holds it) + the LTC/DFG array (OgreHlmsPbs.cpp:1439-1447: one
+//           unit in every PBS-family pass once an area light loaded it) + the Photon
+//           volumes + this listener's extras;
+//   Atom  = PBS + the buffer slots HlmsAtom reserves beyond PBS's worldMatBuf
+//           (kReservedBufSlots - 1: every texture numbers that much later) + its own
+//           pass textures (kReservedTexSlots, the id image).
+// THE EXACT CHECK is at permutation build: setupRootLayout (this listener's, for every
+// PBS-family pass, and HlmsAtom's after it widens its range) compares the set's texture
+// and sampler ends with the table and refuses the permutation by name
+// (refusePassTableOverflow) before the render system would throw at PSO creation.
+constexpr size_t kPassTextureTable = NUM_BIND_TEXTURES;
+static_assert(NUM_BIND_SAMPLERS == NUM_BIND_TEXTURES,
+              "a PBS-family pass numbers a sampler per texture: the two tables are one budget");
 constexpr size_t kOgrePassTexturesFullest = 17u;
+constexpr size_t kLtcPassTextures = 1u;
 // The Photon share, from the constants that decide it: the longest shipped
 // tier chain x the light volumes per cascade + the field's two.
 constexpr size_t kPhotonPassTexturesFullest =
     size_t(kGiTierMaxCascades) * Ogre::PhotonVoxelLighting::kVolumesPerCascade +
     Ogre::PhotonIrradianceField::kPassTextures;
-static_assert(kPhotonPassTexturesFullest == 42u,
-              "the measured 59 = Ogre's 17 + Photon's 42; a change here re-measures the table");
-static_assert(kOgrePassTexturesFullest + kPhotonPassTexturesFullest + kNumExtraPassSlots <=
-                  kPassTextureTable,
-              "the PBS pass-texture table overflows: the pin's fullest pass plus the Photon volumes "
-              "plus kExtraPassSlots exceeds the fork's 64 slots — fold an extra into an existing "
-              "texture first");
+constexpr size_t kPbsPassFullest =
+    kOgrePassTexturesFullest + kLtcPassTextures + kPhotonPassTexturesFullest + kNumExtraPassSlots;
+constexpr size_t kAtomPassFullest =
+    kPbsPassFullest + (size_t(HlmsAtom::kReservedBufSlots) - 1u) + size_t(HlmsAtom::kReservedTexSlots);
+static_assert(kPbsPassFullest <= kPassTextureTable,
+              "the HlmsPbs pass-texture budget overflows the fork's NUM_BIND_TEXTURES: Ogre's share + "
+              "the LTC array + the Photon volumes + kExtraPassSlots");
+static_assert(kAtomPassFullest <= kPassTextureTable,
+              "the HlmsAtom pass-texture budget overflows the fork's NUM_BIND_TEXTURES: the PBS budget "
+              "+ HlmsAtom's reserved buffer slots (kReservedBufSlots - 1) + kReservedTexSlots");
 /// The slot's property as a hashed IdString, hashed once (these run per
 /// renderable hash, not per frame).
 const Ogre::IdString &extraSlotProperty(size_t i) {
@@ -298,6 +316,25 @@ Ogre::uint16 FogHlmsListener::getNumExtraPassTextures(const Ogre::HlmsPropertyVe
 void FogHlmsListener::setupRootLayout(Ogre::RootLayout &rootLayout,
                                       const Ogre::HlmsPropertyVec &properties, size_t) const {
     PhotonPassBinding::setupRootLayout(rootLayout, properties);
+    // Every PBS-family permutation passes here (HlmsPbs::setupRootLayout ends with this
+    // call, and HlmsAtom's starts with PBS's): the set's ends are final for PBS, and
+    // HlmsAtom's own widening moves only the starts (it checks again after it).
+    static const Ogre::IdString kAtomMarker("atomInstanceBuf");
+    refusePassTableOverflow(rootLayout,
+                            Ogre::Hlms::getProperty(properties, kAtomMarker) != 0 ? "HlmsAtom" : "HlmsPbs");
+}
+
+void FogHlmsListener::refusePassTableOverflow(const Ogre::RootLayout &rootLayout, const char *host) {
+    const Ogre::DescBindingRange *set0 = rootLayout.mDescBindingRanges[0];
+    const size_t texEnd = set0[Ogre::DescBindingTypes::Texture].end;
+    const size_t samplerEnd = set0[Ogre::DescBindingTypes::Sampler].end;
+    if (texEnd <= kPassTextureTable && samplerEnd <= kPassTextureTable) return;
+    OGRE_EXCEPT(Ogre::Exception::ERR_INVALIDPARAMS,
+                std::string("PASS-TEXTURE TABLE: a ") + host + " permutation's set 0 ends at texture slot " +
+                    std::to_string(texEnd) + " / sampler slot " + std::to_string(samplerEnd) +
+                    "; the fork's pass-texture table (NUM_BIND_TEXTURES, absolute slots) holds " +
+                    std::to_string(kPassTextureTable) + " — the permutation is refused (OgreFog.cpp)",
+                "FogHlmsListener::refusePassTableOverflow");
 }
 
 void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *commandBuffer,

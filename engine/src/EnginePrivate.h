@@ -3211,9 +3211,8 @@ public:
     /// THE PLANET'S ATMOSPHERE'S VOLUME (SKY-ATMOSPHERE-1): the aerial
     /// perspective, with the sky in its last slice — ONE more extra pass
     /// texture on the same three-hook route (`jah_atmo_ap`, register
-    /// `jahAtmoAerial`; ONE because the pin's pass-texture table is 64 slots and
-    /// a pass with the gather, the clouds and the sun contact claimed filled it
-    /// with two), claimed by every colour pass of a scene whose sky is the
+    /// `jahAtmoAerial`; ONE: OgreFog.cpp holds the pass-texture budget per
+    /// family), claimed by every colour pass of a scene whose sky is the
     /// atmosphere (FogState::atmosphere) and read by JahFog's piece. Registered
     /// by OgreScene::syncAtmosphere; null = not the sky.
     struct AtmoBind {
@@ -3319,6 +3318,11 @@ public:
     /// (PhotonPassBinding::setupRootLayout adds the rest).
     void setupRootLayout(Ogre::RootLayout &rootLayout, const Ogre::HlmsPropertyVec &properties,
                          size_t tid) const override;
+    /// THE PASS-TEXTURE TABLE'S EXACT CHECK (BUGS-1): throws, naming the host, when set 0's
+    /// texture or sampler range ends past the fork's NUM_BIND_TEXTURES — at permutation
+    /// build, before VulkanRootLayout would refuse it at PSO creation. The budget and why
+    /// the bound is the range's END: OgreFog.cpp.
+    static void refusePassTableOverflow(const Ogre::RootLayout &rootLayout, const char *host);
 
 private:
     /// What the pass BEING BUILT binds in the listener's extra slots — the sky

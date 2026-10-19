@@ -42,12 +42,10 @@
 //                        reflection's decoded light along (PHOTON-I-1: the
 //                        record, not a full-resolution image, carries them; the
 //                        gather's records write them too and nothing reads them).
-// WHY A BUFFER AND NOT A THIRD IMAGE: the decode is a PBS pixel shader, and the
-// pin's Vulkan table of PASS textures holds 32 slots (NUM_BIND_TEXTURES, its
-// bounds assert compiled out; a datablock's own textures are a baked set and do
-// not count). A second decode image put the hit mode's last pass texture at
-// slot 31, the table's last entry — one more pass texture (decals, an area-light
-// mask) and the bind reads past it. The read-only buffer table is separate.
+// WHY A BUFFER AND NOT A THIRD IMAGE: the decode is a PBS pixel shader, and its
+// pass textures number into the fork's absolute-index table (NUM_BIND_TEXTURES;
+// the budget per family is OgreFog.cpp's). The read-only buffer slot it takes
+// numbers the textures one later too, but a record needs no sampler.
 //
 // HOW A CALLER BINDS IT (macros defined first):
 //   JAH_HIT_ON            bool   the list is bound this dispatch
