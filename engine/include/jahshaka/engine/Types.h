@@ -5118,6 +5118,13 @@ struct AtomDrawStatus {
     unsigned skinned = 0;
     unsigned noRow = 0;
     unsigned stockItems = 0;
+    /// THE CAMERA VIEW BY ROUTE (ENGINE-POLISH-ATOM-1 stage 1): the shown items whose world box reaches the first
+    /// view's camera frustum, by route (ShadowRouteShare's order: 0 atom ... 11 stock), and their level-0 triangles
+    /// (every submesh's finest level) - the main pass's share per route, beside the maps' (Scene::shadowCasterRoutes).
+    /// `viewRoutesValid` false without a view.
+    bool     viewRoutesValid = false;
+    unsigned viewRouteItems[ShadowRouteShare::kRoutes] = {};
+    unsigned long long viewRouteTriangles[ShadowRouteShare::kRoutes] = {};
     unsigned materials = 0;
     unsigned buckets = 0;
     unsigned twins = 0;

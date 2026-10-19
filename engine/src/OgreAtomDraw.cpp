@@ -27,7 +27,9 @@
 #include <OgreTextureGpuManager.h>
 #include <OgreTextureUnitState.h>
 #include <OgreGpuProgramParams.h>
+#include <OgreCamera.h>
 #include <OgreMesh2.h>
+#include <OgreSubMesh2.h>
 #include <OgreRoot.h>
 #include <OgreSubItem.h>
 #include <Vao/OgreVaoManager.h>
@@ -393,6 +395,19 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     return AtomRoute::Atom;
 }
 
+unsigned long long itemLevel0Triangles(const Ogre::Item &item) {
+    unsigned long long tris = 0ull;
+    const Ogre::MeshPtr &mesh = item.getMesh();
+    for (size_t sm = 0; mesh && sm < mesh->getNumSubMeshes(); ++sm) {
+        const Ogre::SubMesh *sub = mesh->getSubMesh(sm);
+        if (sub->mVao[Ogre::VpNormal].empty() || !sub->mVao[Ogre::VpNormal][0]) continue;
+        const Ogre::VertexArrayObject *vao = sub->mVao[Ogre::VpNormal][0];
+        // THE VAO'S OWN RANGE (a level's indices, never its whole buffer), and triangles only: a line has none.
+        if (vao->getOperationType() == Ogre::OT_TRIANGLE_LIST) tris += vao->getPrimitiveCount() / 3u;
+    }
+    return tris;
+}
+
 const Ogre::HlmsDatablock *OgreScene::atomSlotDatablock(uint32_t slot) const {
     const Node *nd = slot < mItemNodes.size() ? mItemNodes[slot] : nullptr;
     if (!nd || !nd->item || !nd->item->getNumSubItems()) return nullptr;
@@ -416,11 +431,26 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
     auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
     std::unordered_set<uint32_t> words;
     std::unordered_set<HlmsAtom::BucketKey, HlmsAtom::BucketKeyHash> buckets;
+    // THE CAMERA VIEW'S ROUTES (ENGINE-POLISH-ATOM-1 stage 1): the first enabled view's camera; an item whose
+    // cached world box (the last frame's: this is a read between frames) reaches its frustum is counted under its
+    // route with its level-0 triangles — the main pass's share per route, beside the maps' (shadowCasterRoutes).
+    const Ogre::Camera *viewCam = nullptr;
+    for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>())
+        if (v && v->camera()) { viewCam = v->camera(); break; }
+    st.viewRoutesValid = viewCam != nullptr;
     for (Node *n : mItemNodes) {
         if (!n || !n->item) continue;
         if (!n->shown) continue;
         const Ogre::uint32 flags = gpuFlagsFor(*n);
         const AtomRoute r = atomRouteFor(*n, flags);
+        if (viewCam) {
+            const Ogre::Aabb box = n->item->getWorldAabb();
+            if (viewCam->isVisible(Ogre::AxisAlignedBox(box.getMinimum(), box.getMaximum()))) {
+                const unsigned ri = std::min(unsigned(r), ShadowRouteShare::kRoutes - 1u);
+                ++st.viewRouteItems[ri];
+                st.viewRouteTriangles[ri] += itemLevel0Triangles(*n->item);
+            }
+        }
         switch (r) {
         case AtomRoute::Stock: ++st.stockItems; continue;
         case AtomRoute::NotWorld: ++st.notWorld; break;

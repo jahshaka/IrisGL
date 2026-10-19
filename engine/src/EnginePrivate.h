@@ -941,6 +941,10 @@ void releaseHzbBuild();
 /// listener — null where the view's chain carries no id pass, or for a workspace no
 /// view owns).
 OgreView *atomViewOfPass(const Ogre::CompositorPass *pass);
+/// AN ITEM'S LEVEL-0 TRIANGLES (OgreAtomDraw.cpp): every triangle-list submesh's finest level (VpNormal's first
+/// VAO, its own index range), the
+/// count the route doors report (Scene::atomDrawStatus's camera view, Scene::shadowCasterRoutes' maps).
+unsigned long long itemLevel0Triangles(const Ogre::Item &item);
 /// The listener's own deleter: CompositorWorkspaceListener has no virtual destructor.
 struct AtomDrawListenerDeleter {
     void operator()(Ogre::CompositorWorkspaceListener *l) const;

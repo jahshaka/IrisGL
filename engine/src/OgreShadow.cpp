@@ -1807,17 +1807,8 @@ bool OgreScene::shadowCasterRoutes(std::vector<ShadowRouteShare> &out)
                     }
                     if (b.x < -1.0f || a.x > 1.0f || b.y < -1.0f || a.y > 1.0f) continue;
                     const unsigned route = std::min(unsigned(atomRouteFor(*nd, flags)), ShadowRouteShare::kRoutes - 1u);
-                    unsigned long long tris = 0ull;
-                    const Ogre::MeshPtr &mesh = nd->item->getMesh();
-                    for (size_t sm = 0; mesh && sm < mesh->getNumSubMeshes(); ++sm) {
-                        const Ogre::SubMesh *sub = mesh->getSubMesh(sm);
-                        if (sub->mVao[Ogre::VpNormal].empty()) continue;
-                        const Ogre::VertexArrayObject *vao = sub->mVao[Ogre::VpNormal][0];
-                        tris += vao->getIndexBuffer() ? vao->getIndexBuffer()->getNumElements() / 3u
-                                                      : vao->getBaseVertexBuffer()->getNumElements() / 3u;
-                    }
                     ++share.items[route];
-                    share.triangles[route] += tris;
+                    share.triangles[route] += itemLevel0Triangles(*nd->item);
                 }
                 out.push_back(share);
             }
