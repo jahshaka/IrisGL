@@ -284,6 +284,11 @@ void reassignNodeId(SceneNode *n, long long id)
     if (ownerById(n->getNodeId()) == n) setOwnerById(n->getNodeId(), nullptr);
     n->nodeId = id;
     setOwnerById(id, n);
+    // THE JOURNAL'S STAMPS GO WITH THE OLD ID: the entries they name resolve to nothing now (the owner table moved),
+    // so the node under its new id has logged nothing yet — the dedupe keyed (id, kind) exactly (a replayed fragment:
+    // written under the minted ids, re-id'd, attached in the same frame — its attach must log).
+    std::lock_guard<std::mutex> lock(gJournalMutex);
+    for (unsigned long long &s : n->docNode().journalNewest) s = 0;
 }
 
 unsigned long long transformWrites() { return gTransformWrites.load(std::memory_order_relaxed); }
