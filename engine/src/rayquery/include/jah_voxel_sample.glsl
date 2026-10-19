@@ -266,14 +266,15 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 #if JAH_VOX_HAS_BACK
 		// LEVEL 0 PER SIDE (PHOTON-VOXEL-5): a voxel holding both faces of a slab thinner than the
 		// cell keeps two lights - the isotropic volume their mean, the back beside it - and the
-		// faces looking back at the travel (half ha) are the side the normal's component along the
-		// axis says: along it the front (twice the mean minus the back), against it the back. A
-		// one-sided voxel's back IS its light, so either answer is its light. The normal is read
-		// filtered like the light (the canonical normal of a two-sided voxel agrees between
-		// neighbours: VoxelMerge_piece_cs.any).
+		// travel meets the side its canonical normal FACES (BUGS-1 item 4: the sign of n . -dir,
+		// the whole normal against the whole direction; the normal's component along the travel's
+		// dominant axis alone read a +y normal met along x as the MEAN): facing the travel the
+		// front (twice the mean minus the back), facing away the back. A one-sided voxel's back IS
+		// its light, so either answer is its light. The normal is read filtered like the light
+		// (the canonical normal of a two-sided voxel agrees between neighbours: VoxelMerge_piece_cs.any).
 		{
 			const vec4 bk = JAH_VOX_SAMPLE_BACK( c, posLS, 0.0 );
-			const float along = ( ha == 0 ? 1.0 : -1.0 ) * ( JAH_VOX_SAMPLE_NRM( c, posLS, 0.0 )[axis] * 2.0 - 1.0 );
+			const float along = dot( JAH_VOX_SAMPLE_NRM( c, posLS, 0.0 ).xyz * 2.0 - 1.0, -dir );
 			if( along < 0.0 )
 				s.xyz = bk.xyz;
 			else if( along > 0.0 )
@@ -320,13 +321,15 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 		{
 			if( b == axis || !( ok[b] > 0.0 ) )
 				continue;
-			// rays heading +b meet the faces looking -b (h = 1), rays heading -b the +b ones
+			// rays heading +b meet the faces looking -b (h = 1), rays heading -b the +b ones - a RAY
+			// by its own direction on each axis (BUGS-1 item 4: its one pass read h = 0 on every axis)
+			const bool hb = ray ? dir[b] > 0.0 : h == 1;
 			const float cb = ray ? abs( dir[b] ) : ( h == 1 ? dir[b] : -dir[b] );
 			const float rate = jahVoxelConeRate( cb, tanHalf * sqrt( max( 1.0 - dir[b] * dir[b], 0.0 ) ) );
 			const float xb = ( b == n ? gN : 1.0 ) * ok[b] * ( rate * lenLS / invRes[b] );
 			if( !( xb > 0.0 ) )
 				continue;
-			const vec4 v = jahVoxelReadAxis( c, b, kernelLS, h == 1, max( lk - 1.0, 0.0 ) );
+			const vec4 v = jahVoxelReadAxis( c, b, kernelLS, hb, max( lk - 1.0, 0.0 ) );
 			const vec3 rad = ( v.w > 0.0 ) ? v.xyz * ( 1.0 / v.w ) : vec3( 0.0 );
 			x += xb;
 			colour += xb * rad;
