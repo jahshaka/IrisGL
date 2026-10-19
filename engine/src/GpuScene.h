@@ -319,6 +319,7 @@ void atomTrace(const std::string &what);
 /// per-slot record (the entry's old mesh may already be another mesh's index). A
 /// consumer registered late is PRIMED with every live slot (`addObserver`), once.
 /// `gpuSceneReset` means the table was destroyed: every slot reads as cleared.
+class GpuScene;
 class GpuSceneObserver {
 public:
     virtual ~GpuSceneObserver() = default;
@@ -333,6 +334,12 @@ public:
     virtual void gpuSlotsReserve(uint32_t /*count*/) {}
     virtual bool gpuSlotChangedLane(uint32_t /*slot*/, const GpuInstance * /*now*/) { return true; }
     virtual void gpuSlotChangedOwed(uint32_t slot, const GpuInstance *now) { gpuSlotChanged(slot, now); }
+    /// THE OBSERVER'S STATE, FOLDED into the compose's digest (the identity row, decision 22.6; RAY-FEED-OBSERVER-1):
+    /// what it derived, in a canonical order — the serial compose's whole notifies and the lanes' halves must have
+    /// built the same state. An observer that folds nothing is covered by its notify count only.
+    virtual void gpuDigestInto(GpuScene & /*g*/) const {}
+    /// Its name in the walk's per-observer readout (inspect::SceneEcho::GpuWalk::observers).
+    virtual const char *gpuObserverName() const { return "observer"; }
 };
 
 /// THE MATERIAL WORDS A SCENE'S ITEMS WEAR, kept by the change feed (ATOM-CPU-WALKS-1):
@@ -366,6 +373,15 @@ public:
         if (!mCount.empty()) mChanged = true;
         mCount.clear();
     }
+    /// Pre-sized before a compose task (a lane half reads its slot's word there, never grows the list).
+    void reserve(uint32_t count) {
+        if (count > mOfSlot.size()) mOfSlot.resize(count, kNone);
+    }
+    /// The word the slot contributes now (kNone: none, or a slot the list does not reach).
+    uint32_t wordOf(uint32_t slot) const { return slot < mOfSlot.size() ? mOfSlot[slot] : kNone; }
+    /// The per-slot words and the counts, for a digest (read-only).
+    const std::vector<uint32_t> &ofSlot() const { return mOfSlot; }
+    const std::map<uint32_t, uint32_t> &counts() const { return mCount; }
     bool changed() const { return mChanged; }
     /// The set, ascending (what `syncScreenDecodes` / `syncSceneDecodes` take).
     std::vector<uint32_t> take() {
@@ -488,10 +504,16 @@ public:
         ++mNotifies;
         if (mObservers.empty() || mObserversMuted) { digestNotify(slot); return; }
         const bool whole = laneOwed == kLanesNeverRan;
+        if (mObserverTold.size() < mObservers.size()) {
+            mObserverTold.resize(mObservers.size(), 0ull);
+            mObserverOwed.resize(mObservers.size(), 0ull);
+        }
         for (size_t k = 0; k < mObservers.size(); ++k) {
             GpuSceneObserver *o = mObservers[k];
             const bool lane = o->hasLaneHalf() && !whole;
+            ++mObserverTold[k];
             if (lane && !(k < 32u && (laneOwed >> k) & 1u)) continue;   // its lane half answered the slot
+            ++mObserverOwed[k];
             const auto t0 = mNotifyTiming ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
             if (lane) o->gpuSlotChangedOwed(slot, &mMirror[slot]);
             else o->gpuSlotChanged(slot, &mMirror[slot]);
@@ -508,9 +530,26 @@ public:
         const unsigned char *b = static_cast<const unsigned char *>(p);
         for (size_t j = 0; j < bytes; ++j) { *mDigest ^= b[j]; *mDigest *= 1099511628211ull; }
     }
+    /// EVERY OBSERVER'S STATE, folded after the replay (decision 22.6; RAY-FEED-OBSERVER-1: the card feed's table and
+    /// the ray feed's traced set), in registration order — a tag and the index, then what the observer folds.
+    void digestObservers() {
+        if (!mDigest) return;
+        for (size_t k = 0; k < mObservers.size(); ++k) {
+            const unsigned char tag[2] = { 'O', (unsigned char)k };
+            digestFold(tag, 2u);
+            mObservers[k]->gpuDigestInto(*this);
+        }
+    }
     /// The observers' time per observer in the timed notifies (gpuscene.walkTiming), µs, in registration order.
     const std::vector<double> &observerMicros() const { return mObserverMicros; }
     bool observerHasLaneHalf(size_t k) const { return k < mObservers.size() && mObservers[k]->hasLaneHalf(); }
+    size_t observerCount() const { return mObservers.size(); }
+    const char *observerName(size_t k) const { return k < mObservers.size() ? mObservers[k]->gpuObserverName() : ""; }
+    /// THE REPLAY'S SPLIT, per observer, ever (RAY-FEED-OBSERVER-1): the composed slots the replay handed it, and of
+    /// those the ones it was told in the replay — an ORDERED half its lane half owed, or the whole notify of an
+    /// observer without one. owed / told is the observer's owed fraction.
+    unsigned long long observerTold(size_t k) const { return k < mObserverTold.size() ? mObserverTold[k] : 0ull; }
+    unsigned long long observerOwed(size_t k) const { return k < mObserverOwed.size() ? mObserverOwed[k] : 0ull; }
     /// THE SLOT'S NODE, its full 64-bit id (U3 stage 3 fix round, decision 36): carried beside the mirror and moved
     /// with it, so a host-side walk names a slot's node by index — the GPU row holds only Ogre's 32-bit key.
     uint64_t nodeOfSlot(uint32_t slot) const { return slot < mSlotNode.size() ? mSlotNode[slot] : 0u; }
@@ -869,6 +908,7 @@ private:
     }
     unsigned long long *mDigest = nullptr;
     std::vector<double> mObserverMicros;
+    std::vector<unsigned long long> mObserverTold, mObserverOwed;
     unsigned long long mNotifies = 0ull;
     double mNotifyMicros = 0.0;
     bool mNotifyTiming = false, mObserversMuted = false;

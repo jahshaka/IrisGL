@@ -113,6 +113,7 @@
 #include <OgreSubItem.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <cstdio>
@@ -555,6 +556,8 @@ private:
                     return kind == o.kind && mesh == o.mesh && meshIndex == o.meshIndex &&
                            nearLevel == o.nearLevel && farLevel == o.farLevel && rigged == o.rigged;
                 }
+                /// Every fact, the hand-over width included (a finite positive or 0: never a NaN).
+                bool same(const Rec &o) const { return sameKeys(o) && coarse == o.coarse; }
             };
             std::vector<Rec> recs;
             /// Every (mesh, level) a traced slot references, with the count and a
@@ -585,11 +588,40 @@ private:
             /// The per-slot rows (SceneAs::geomRowOfSlot).
             std::vector<uint32_t> *rows = nullptr;
             OgreScene *scene = nullptr;
-            unsigned long long visits = 0ull;
+            std::atomic<unsigned long long> visits{ 0ull };   ///< the slots told (the lane halves count from the workers)
 
             void gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) override;
             void gpuSceneReset() override;
             void take(uint32_t slot, const Rec &r, int sign, bool withKeys = true);
+            /// THE LANE HALF (RAY-FEED-OBSERVER-1, the card feed's pattern, U4 decision 17.1): inside the compose task,
+            /// on the worker that staged the slot, the slot's NEXT record is measured (pure: the entry and the const
+            /// mesh-table / LOD-bound reads) and compared with what the slot contributes now — its record, its
+            /// material word, its alpha-table membership and its near row. All equal (the common mover: a transform-
+            /// only move changes none of the feed's facts) = the slot owes nothing. Otherwise the record is STASHED
+            /// in the slot's own cell and the slot owes the ordered body (apply), replayed in slot order after the
+            /// join: everything shared (the counts, the sets, the keys and their events, the dirty flags) is written
+            /// there and only there. The lane writes the slot's stash cells alone (pre-sized by gpuSlotsReserve).
+            bool hasLaneHalf() const override { return true; }
+            const char *gpuObserverName() const override { return "rays"; }
+            void gpuSlotsReserve(uint32_t count) override;
+            bool gpuSlotChangedLane(uint32_t slot, const detail::GpuInstance *now) override;
+            void gpuSlotChangedOwed(uint32_t slot, const detail::GpuInstance *now) override;
+            /// THE FEED, FOLDED into the compose's digest (the identity row): per slot of the table its record, word
+            /// and near row; the keys in key order and the pending key events in order; the sets, traced, the coarse
+            /// multiset, the word counts and the dirty flags. Canonical over the table's slot count (a cell past
+            /// it, or not yet sized, folds as the default), so a pre-sized lane arm and the serial arm compare.
+            void gpuDigestInto(detail::GpuScene &g) const override;
+            /// The slot's next record from the entry as it is now (pure).
+            Rec measure(const detail::GpuInstance *now) const;
+            /// The ordered body: the slot's contribution replaced by `next`'s.
+            void apply(uint32_t slot, const detail::GpuInstance *now, const Rec &next);
+            /// THE KEY EVENTS, NETTED PER KEY (before their one consumer, RayQueryTier::update): a key referenced
+            /// and released inside one batch (a mesh swap between two slots, a slot that left and came back) files
+            /// nothing; a net addition keeps its last mesh-table entry. First-occurrence order.
+            void netKeyEvents();
+            /// The lane's stash: the measured record, and whether the cell holds this compose's (1) or nothing (0).
+            std::vector<Rec> laneNext;
+            std::vector<unsigned char> laneStashed;
         };
         Feed feed;
         bool feedOn = false;
@@ -2477,50 +2509,108 @@ void RayQueryTier::SceneAs::Feed::take(uint32_t slot, const Rec &r, int sign, bo
 /// item (its own structure), the near level the RAY RULE's (ids.w, AT-A8r) clamped
 /// to the chain, the far copy the coarsest, and the far copy's hand-over width
 /// (audit F2): the coarsest level's measured bound grown by the largest axis scale.
+RayQueryTier::SceneAs::Feed::Rec RayQueryTier::SceneAs::Feed::measure(const detail::GpuInstance *now) const {
+    Rec next;
+    if (!now || !scene) return next;
+    uint32_t flags = 0u, meshIndex = 0u;
+    std::memcpy(&flags, &now->boundsMax[3], sizeof(flags));
+    std::memcpy(&meshIndex, &now->boundsMin[3], sizeof(meshIndex));
+    if (!(flags & detail::kGpuRayTraced)) return next;
+    next.rigged = (flags & detail::kGpuSkinned) != 0u;
+    const Ogre::MeshPtr &mp = scene->gpuScene().meshAt(meshIndex);
+    if (mp && next.rigged) {
+        next.kind = 2u;
+    } else if (mp) {
+        next.kind = 1u;
+        next.mesh = mp.get();
+        next.meshIndex = meshIndex;
+        const uint32_t coarsest = std::min(coarsestLevelOf(mp.get()), kRayLevels - 1u);
+        next.farLevel = coarsest;
+        next.nearLevel = std::min(now->ids[3], coarsest);
+        if (coarsest > 0u) {
+            const std::vector<float> *b = scene->lodBoundsFor(mp.get());
+            const float bound = (b && !b->empty()) ? b->back() : 0.0f;
+            if (bound > 0.0f) {
+                const float grown = bound * worldMaxAxisScale(now->world);
+                if (std::isfinite(grown) && grown > 0.0f) next.coarse = grown;
+            }
+        }
+    }
+    return next;
+}
+
+namespace {
+/// The slot's alpha-table membership as the entry says it should be: traced and alpha-tested.
+bool alphaWanted(const detail::GpuInstance *now) {
+    uint32_t f = 0u;
+    if (now) std::memcpy(&f, &now->boundsMax[3], sizeof(f));
+    return (f & detail::kGpuRayTraced) && (f & detail::kGpuAlphaTested);
+}
+}   // namespace
+
 void RayQueryTier::SceneAs::Feed::gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) {
-    ++visits;
+    visits.fetch_add(1u, std::memory_order_relaxed);
+    if (slot < laneStashed.size()) laneStashed[slot] = 0u;
+    apply(slot, now, measure(now));
+}
+
+void RayQueryTier::SceneAs::Feed::gpuSlotsReserve(uint32_t count) {
+    // Sized here, before the task, to their default cells (what the whole notify reads past them), so the lane
+    // halves index their own slots and grow nothing.
+    if (recs.size() < count) recs.resize(count);
+    if (laneNext.size() < count) laneNext.resize(count);
+    if (laneStashed.size() < count) laneStashed.resize(count, 0u);
+    words.reserve(count);
+    if (rows && rows->size() < count) rows->resize(count, detail::GpuScene::kNoGeomRow);
+}
+
+bool RayQueryTier::SceneAs::Feed::gpuSlotChangedLane(uint32_t slot, const detail::GpuInstance *now) {
+    // ON A WORKER: reads the slot's own cells and the shared sets (nobody writes them inside the task); writes the
+    // slot's stash cells alone. A slot past the pre-sized cells is the replay's, whole.
+    if (slot >= recs.size() || slot >= laneStashed.size() || (rows && slot >= rows->size())) return true;
+    visits.fetch_add(1u, std::memory_order_relaxed);
+    const Rec next = measure(now);
+    const Rec &was = recs[slot];
+    bool same = was.same(next) && words.wordOf(slot) == (now ? now->raster[0] : detail::WordCounts::kNone) &&
+                alphaWanted(now) == (alpha.count(slot) != 0u);
+    if (same && rows) {
+        // The near row the ordered body would write (a rigged slot keeps the gather's).
+        const uint32_t row = (*rows)[slot];
+        if (next.kind == 1u)
+            same = row == (next.nearLevel < detail::GpuScene::kLevelsPerMesh
+                               ? detail::GpuScene::geomRowIndex(next.meshIndex, next.nearLevel, 0u)
+                               : detail::GpuScene::kNoGeomRow);
+        else if (next.kind != 2u || was.kind != 2u)
+            same = row == detail::GpuScene::kNoGeomRow;
+    }
+    if (same) {
+        laneStashed[slot] = 0u;
+        return false;
+    }
+    laneNext[slot] = next;
+    laneStashed[slot] = 1u;
+    return true;
+}
+
+void RayQueryTier::SceneAs::Feed::gpuSlotChangedOwed(uint32_t slot, const detail::GpuInstance *now) {
+    if (slot >= laneStashed.size() || !laneStashed[slot]) { gpuSlotChanged(slot, now); return; }
+    laneStashed[slot] = 0u;
+    apply(slot, now, laneNext[slot]);   // counted by the lane half
+}
+
+void RayQueryTier::SceneAs::Feed::apply(uint32_t slot, const detail::GpuInstance *now, const Rec &next) {
     {
         // THE CUT-OUTS (REFLECT-MOVERS-2): a traced alpha-tested slot has an alpha
         // table row; any other has none.
-        uint32_t f = 0u;
-        if (now) std::memcpy(&f, &now->boundsMax[3], sizeof(f));
         // DIRTY ONLY WHEN THE SET CHANGES (decision 14.10: an insert of a member set it, so a moving
         // alpha-tested slot re-wrote the whole table every frame) - or, below, when a member's rows did.
-        if ((f & detail::kGpuRayTraced) && (f & detail::kGpuAlphaTested)) { if (alpha.insert(slot).second) alphaDirty = true; }
+        if (alphaWanted(now)) { if (alpha.insert(slot).second) alphaDirty = true; }
         else if (alpha.erase(slot)) alphaDirty = true;
     }
     const bool alphaMember = alpha.count(slot) != 0u;
     const uint32_t rowWas = rows && slot < rows->size() ? (*rows)[slot] : detail::GpuScene::kNoGeomRow;
     const Rec recWas = slot < recs.size() ? recs[slot] : Rec();
     words.set(slot, now ? now->raster[0] : detail::WordCounts::kNone);
-    Rec next;
-    if (now && scene) {
-        uint32_t flags = 0u, meshIndex = 0u;
-        std::memcpy(&flags, &now->boundsMax[3], sizeof(flags));
-        std::memcpy(&meshIndex, &now->boundsMin[3], sizeof(meshIndex));
-        if (flags & detail::kGpuRayTraced) {
-            next.rigged = (flags & detail::kGpuSkinned) != 0u;
-            const Ogre::MeshPtr &mp = scene->gpuScene().meshAt(meshIndex);
-            if (mp && next.rigged) {
-                next.kind = 2u;
-            } else if (mp) {
-                next.kind = 1u;
-                next.mesh = mp.get();
-                next.meshIndex = meshIndex;
-                const uint32_t coarsest = std::min(coarsestLevelOf(mp.get()), kRayLevels - 1u);
-                next.farLevel = coarsest;
-                next.nearLevel = std::min(now->ids[3], coarsest);
-                if (coarsest > 0u) {
-                    const std::vector<float> *b = scene->lodBoundsFor(mp.get());
-                    const float bound = (b && !b->empty()) ? b->back() : 0.0f;
-                    if (bound > 0.0f) {
-                        const float grown = bound * worldMaxAxisScale(now->world);
-                        if (std::isfinite(grown) && grown > 0.0f) next.coarse = grown;
-                    }
-                }
-            }
-        }
-    }
     if (slot >= recs.size()) recs.resize(size_t(slot) + 1u);
     Rec &was = recs[slot];
     if (!was.sameKeys(next)) structDirty = true;
@@ -2550,6 +2640,82 @@ void RayQueryTier::SceneAs::Feed::gpuSlotChanged(uint32_t slot, const detail::Gp
     was = next;
 }
 
+void RayQueryTier::SceneAs::Feed::netKeyEvents() {
+    if (keyEvents.size() < 2u) return;
+    // A key's events alternate (its count crosses zero each time): an even run nets to nothing, an odd one to its
+    // last event.
+    struct Net { KeyEvent ev; int net = 0; };
+    std::vector<Net> nets;
+    std::unordered_map<BlasKey, size_t, BlasKeyHash> at;
+    nets.reserve(keyEvents.size());
+    for (const KeyEvent &ev : keyEvents) {
+        auto it = at.find(ev.key);
+        if (it == at.end()) {
+            at.emplace(ev.key, nets.size());
+            nets.push_back({ ev, ev.added ? 1 : -1 });
+        } else {
+            Net &n = nets[it->second];
+            n.net += ev.added ? 1 : -1;
+            n.ev = ev;
+        }
+    }
+    keyEvents.clear();
+    for (const Net &n : nets)
+        if (n.net != 0) keyEvents.push_back(n.ev);
+}
+
+void RayQueryTier::SceneAs::Feed::gpuDigestInto(detail::GpuScene &g) const {
+    const uint32_t n = g.slotCount();
+    const unsigned char tag = 'F';
+    g.digestFold(&tag, 1u);
+    const Rec none;
+    for (uint32_t s = 0; s < n; ++s) {
+        const Rec &r = s < recs.size() ? recs[s] : none;
+        const uint64_t mesh = uint64_t(reinterpret_cast<uintptr_t>(r.mesh));
+        const uint32_t w[5] = { r.meshIndex, r.nearLevel, r.farLevel, r.kind, r.rigged ? 1u : 0u };
+        g.digestFold(&mesh, sizeof(mesh));
+        g.digestFold(w, sizeof(w));
+        g.digestFold(&r.coarse, sizeof(r.coarse));
+        const uint32_t word = words.wordOf(s);
+        const uint32_t row = rows && s < rows->size() ? (*rows)[s] : detail::GpuScene::kNoGeomRow;
+        g.digestFold(&word, sizeof(word));
+        g.digestFold(&row, sizeof(row));
+    }
+    std::vector<std::pair<BlasKey, KeyRef>> ks(keys.begin(), keys.end());
+    std::sort(ks.begin(), ks.end(), [](const auto &a, const auto &b) {
+        return a.first.mesh != b.first.mesh ? std::less<const Ogre::Mesh *>()(a.first.mesh, b.first.mesh)
+                                            : a.first.level < b.first.level;
+    });
+    for (const auto &kv : ks) {
+        const uint64_t mesh = uint64_t(reinterpret_cast<uintptr_t>(kv.first.mesh));
+        const uint32_t w[3] = { kv.first.level, kv.second.count, kv.second.meshIndex };
+        g.digestFold(&mesh, sizeof(mesh));
+        g.digestFold(w, sizeof(w));
+    }
+    for (const KeyEvent &ev : keyEvents) {
+        const uint64_t mesh = uint64_t(reinterpret_cast<uintptr_t>(ev.key.mesh));
+        const uint32_t w[3] = { ev.key.level, ev.meshIndex, ev.added ? 1u : 0u };
+        g.digestFold(&mesh, sizeof(mesh));
+        g.digestFold(w, sizeof(w));
+    }
+    for (const std::set<uint32_t> *set : { &skinned, &rigged, &alpha }) {
+        const uint32_t size = uint32_t(set->size());
+        g.digestFold(&size, sizeof(size));
+        for (uint32_t s : *set) g.digestFold(&s, sizeof(s));
+    }
+    for (const auto &kv : coarse) {
+        g.digestFold(&kv.first, sizeof(kv.first));
+        g.digestFold(&kv.second, sizeof(kv.second));
+    }
+    for (const auto &kv : words.counts()) {
+        g.digestFold(&kv.first, sizeof(kv.first));
+        g.digestFold(&kv.second, sizeof(kv.second));
+    }
+    const uint32_t tail[6] = { traced, structDirty ? 1u : 0u, alphaDirty ? 1u : 0u, keysReset ? 1u : 0u,
+                               words.changed() ? 1u : 0u, uint32_t(keyEvents.size()) };
+    g.digestFold(tail, sizeof(tail));
+}
+
 void RayQueryTier::SceneAs::Feed::gpuSceneReset() {
     words.reset();
     recs.clear();
@@ -2563,6 +2729,8 @@ void RayQueryTier::SceneAs::Feed::gpuSceneReset() {
     keyEvents.clear();
     keysReset = true;
     alphaDirty = true;
+    laneNext.clear();
+    laneStashed.clear();
     if (rows) rows->clear();
 }
 
@@ -3996,6 +4164,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         // Every hash or map operation is counted (decision 14.4): the event's find, and `missing`'s insert
         // or erase - an erase only when the structure is NOT built (a built key is never missing), so a
         // hide or a show stays one lookup.
+        fd.netKeyEvents();   // RAY-FEED-OBSERVER-1: a key referenced and released inside the batch files nothing
         for (const SceneAs::Feed::KeyEvent &ev : fd.keyEvents) {
             ++sa.st.updateLookups;
             const auto it = sa.blasOf.find(ev.key);
@@ -4206,7 +4375,7 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
         return st;
     }
     RayQueryStatus st = sa->st;
-    st.feedSlotVisits = sa->feed.visits;
+    st.feedSlotVisits = sa->feed.visits.load(std::memory_order_relaxed);
     // THE GPU TIMES are the monitor's rows this scene filed (lane TEST-1): -1
     // outside a capture, and a still scene's last value held, as before.
     const void *owner = sa;

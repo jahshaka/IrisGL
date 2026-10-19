@@ -6430,6 +6430,7 @@ private:
         /// one writer per slot, the arrays pre-sized) inside the compose task; the COLUMN move (a shared map's
         /// erase and insert, ordered) only when the slot changed column, in the replay.
         bool hasLaneHalf() const override { return true; }
+        const char *gpuObserverName() const override { return "cards"; }
         void gpuSlotsReserve(uint32_t count) override { growTo(count); }
         bool gpuSlotChangedLane(uint32_t slot, const detail::GpuInstance *now) override;
         void gpuSlotChangedOwed(uint32_t slot, const detail::GpuInstance *now) override;
@@ -6439,7 +6440,7 @@ private:
         void fileColumn(uint32_t slot, bool want, uint64_t key);
         /// THE TABLE, FOLDED into the compose's digest (the identity row, decision 22.6): the columns in key order with
         /// their slot lists, then per slot its filing, column, index in it and centre.
-        void digestInto(detail::GpuScene &g) const {
+        void gpuDigestInto(detail::GpuScene &g) const override {
             std::vector<uint64_t> keys;
             keys.reserve(columns.size());
             for (const auto &kv : columns) keys.push_back(kv.first);

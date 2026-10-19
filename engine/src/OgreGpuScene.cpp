@@ -1613,10 +1613,11 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
         }
     }
     sub.lastReplayMicros = usSince(tReplay);
-    // ...AND THE CARD FEED'S TABLE AS THE REPLAY LEFT IT (decision 22.6): its columns (in key order — the map's own
-    // order is not the data), each slot's index in its column, filing and centre — the lane halves and the ordered
-    // halves must have built the same table as the serial compose's whole notifies.
-    if (digest) mCardFeed.digestInto(mGpuScene);
+    // ...AND EVERY OBSERVER'S STATE AS THE REPLAY LEFT IT (decision 22.6; RAY-FEED-OBSERVER-1): the card feed's table
+    // (its columns in key order — the map's own order is not the data —, each slot's index in its column, filing and
+    // centre) and the ray feed's traced set (its records, keys, pending key events, sets, words and rows) — the lane
+    // halves and the ordered halves must have built the same state as the serial compose's whole notifies.
+    if (digest) mGpuScene.digestObservers();
     if (digest) sub.lastComposeDigest = h;
     sub.lastComposeMicros = usSince(tCompose);
     sub.lastNotifyMicros = mGpuScene.notifyMicros() - notify0;
@@ -1811,6 +1812,9 @@ inspect::SceneEcho::GpuWalk OgreScene::gpuWalk() const {
     {
         const std::vector<double> &om = mGpuScene.observerMicros();
         for (size_t k = 0; k < om.size(); ++k) (mGpuScene.observerHasLaneHalf(k) ? w.observerLaneMicros : w.observerOtherMicros) += om[k];
+        for (size_t k = 0; k < mGpuScene.observerCount(); ++k)
+            w.observers.push_back({ mGpuScene.observerName(k), mGpuScene.observerHasLaneHalf(k), k < om.size() ? om[k] : 0.0,
+                                    mGpuScene.observerTold(k), mGpuScene.observerOwed(k) });
     }
     w.composeDigest = mSubstrate.lastComposeDigest;
     namedListGuard(w.namedDangling, w.namedNotFlagged, w.namedDuplicates);

@@ -69,6 +69,17 @@ public:
         unsigned long long shareGiveUps = 0;
         unsigned           tailAtoms = 0, tailQueues = 0;
         double             observerLaneMicros = 0.0, observerOtherMicros = 0.0;
+        /// ...AND PER OBSERVER (RAY-FEED-OBSERVER-1), in registration order, ever: its name ("cards", "rays", ...),
+        /// whether it has a lane half, its time in the timed notifies (µs), the composed slots the replay handed it
+        /// (`told`) and of those the ones it was told in the replay (`owed`: an ordered half its lane half owed, or
+        /// the whole notify of an observer without one). Difference two readings for a frame's.
+        struct Observer {
+            std::string        name;
+            bool               laneHalf = false;
+            double             micros = 0.0;
+            unsigned long long told = 0, owed = 0;
+        };
+        std::vector<Observer> observers;
         /// THE NAME LIST'S GUARD (U4 decision 16.2): listed entries that are not a live record (by address, never
         /// dereferenced) — 0 is the law — and the list's length.
         unsigned           namedDangling = 0, namedListed = 0, namedLive = 0;
