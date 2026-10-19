@@ -223,13 +223,20 @@ set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # calls the bake makes — acos, pow — are the platform's; that is not this rule.)
 set(_jah_bake_fp $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-ffp-contract=off>)
 target_compile_options(meshoptimizer PRIVATE $<$<CONFIG:Debug>:-O2> ${_jah_bake_fp})   # all C++ sources
+get_directory_property(_jah_has_parent PARENT_DIRECTORY)
+if(_jah_has_parent)
+    set(_jah_bake_fp "${_jah_bake_fp}" PARENT_SCOPE)   # the Studio tests that inline Bullet's math (physics.step_cost)
+endif()
 # BULLET IS OPTIMISED IN DEBUG TOO (BULLET-BATCHING-1 stage 3), for the bake's reason: Debug is the daily driver and
 # the physics step is Bullet's own solve (U4's profile) — at -O0 its btVector3 arithmetic runs as real calls, measured
 # 279 ms a step single-threaded at 10,000 bodies against 79 at -O2. So Bullet's four targets take -O2 in Debug (-g
 # stays; Bullet's btAssert stays live — it keys on _DEBUG, not the level) and every other configuration keeps its own
-# level; and -ffp-contract=off in EVERY configuration (F3 above): a step's arithmetic must not depend on the build type
-# or the machine's FMA, so Debug = Release by construction. Set from OUR CMake, never Bullet's. The document's physics
-# TUs (environment.cpp) stay at the configuration's level: they are not the hot loop.
+# level; and -ffp-contract=off in EVERY configuration (F3 above): Bullet's own TUs then compute the same a*b+c at every
+# level and on every machine. Our TUs that inline Bullet's header math (btVector3, btTransform: COMDAT copies the
+# compiler would otherwise be free to fuse — on the arm64 Mac, say) are the physics TUs, document/physics/*.cpp, and
+# physics.step_cost's test: they never contract either (the set_source_files_properties below, and the test's own
+# target, which reads _jah_bake_fp from the parent scope). Set from OUR CMake, never Bullet's. The physics TUs stay at
+# the configuration's optimisation level: they are not the hot loop.
 foreach(_bt BulletDynamics BulletCollision LinearMath Bullet3Common)
     target_compile_options(${_bt} PRIVATE $<$<CONFIG:Debug>:-O2> ${_jah_bake_fp})
 endforeach()
@@ -572,6 +579,10 @@ set_source_files_properties(import/meshbake.cpp import/clusterlod.cpp
 # never-contract rule anyway, so it could not even in principle.
 set_source_files_properties(core/geometry/trianglebvh.cpp
     PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>;${_jah_bake_fp}")
+# THE PHYSICS TUs NEVER CONTRACT (BULLET-BATCHING-1): they inline Bullet's header math, which Bullet's own targets
+# compile with -ffp-contract=off (above) — the same rule here, every configuration, at the configuration's level.
+set_source_files_properties(document/physics/avatarmovement.cpp document/physics/environment.cpp
+    document/physics/physicshelper.cpp PROPERTIES COMPILE_OPTIONS "${_jah_bake_fp}")
 add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
 
 # useful to move away from include_directories() - https://stackoverflow.com/a/38158071/996468

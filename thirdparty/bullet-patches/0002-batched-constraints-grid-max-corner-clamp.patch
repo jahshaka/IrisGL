@@ -1,0 +1,50 @@
+btBatchedConstraints: a body at the grid's max corner is clamped into the last cell
+
+Jahshaka's change, BULLET-BATCHING-1 fix round (2026-10-19). A genuine upstream
+defect: bulletphysics/bullet3 at the pinned 3.25 (2c204c49e), file
+src/BulletDynamics/ConstraintSolver/btBatchedConstraints.cpp — the second of
+the batch grid's two rounding faults (0001 is the first); an upstream PR is
+owed for both.
+
+The bug
+-------
+setupSpatialGridBatchesMt sizes the grid as
+`gridDim = int(1.0 + gridExtent / gridCellSize)` (upstream :927-929) and puts
+each dynamic body in `int((p - bboxMin) * invGridCellSize)` (:951-955),
+invGridCellSize = fl(1 / gridCellSize) (:945), then asserts
+`coords < gridDim` (:956-958). For the body AT bboxMax the two are computed
+differently: fl(E / c) for the dimension, fl(E * fl(1 / c)) for the coordinate.
+When E / c falls a few ulps under an integer k, the division rounds under k
+(gridDim = k) while the product rounds up to k (coord = k = gridDim): the
+assert fails.
+  * Debug: an abort. Measured on a float replica of this code
+    (spikes/bullet-batching-1/reader-fuzz/: dim.cpp, rate.cpp): ~3.6e-7 per
+    axis per batch setup for an unstructured pile — about one abort every few
+    hours of one large batched island at 60 Hz. 0001's epsilon neither causes
+    nor fixes it; it surfaced when the shipped world turned batching on.
+  * Release: harmless by accident — assignConstraintsToGridBatches clamps the
+    CHUNK coordinate (:765), folding the overflow cell into the last chunk.
+
+The fix
+-------
+Clamp the three coordinates to gridDim - 1 right after they are computed.
+The clamped body sits at the max corner; its constraint partners lie within
+one cell extent of it (0001), i.e. in the last cell or the one below, so a
+constraint still spans at most one cell and the phase/batch assignment stays
+body-disjoint. The asserts stay (they still guard the lower bound).
+
+--- a/src/BulletDynamics/ConstraintSolver/btBatchedConstraints.cpp
++++ b/src/BulletDynamics/ConstraintSolver/btBatchedConstraints.cpp
+@@ -958,6 +958,12 @@
+ 			coords.m_ints[0] = int(v.x());
+ 			coords.m_ints[1] = int(v.y());
+ 			coords.m_ints[2] = int(v.z());
++			// The body at bboxMax lands ON gridDim when fl(gridExtent / cellSize) (gridDim, above) rounds a few ulps under
++			// an integer while fl(extent * fl(1 / cellSize)) here rounds up to it (Jahshaka bullet-patches/0002): clamp
++			// into the last cell. Its partners are in the last cell or the one below, so a pair still spans <= 1 cell.
++			coords.m_ints[0] = btMin(coords.m_ints[0], gridDim[0] - 1);
++			coords.m_ints[1] = btMin(coords.m_ints[1], gridDim[1] - 1);
++			coords.m_ints[2] = btMin(coords.m_ints[2], gridDim[2] - 1);
+ 			btAssert(coords.m_ints[0] >= 0 && coords.m_ints[0] < gridDim[0]);
+ 			btAssert(coords.m_ints[1] >= 0 && coords.m_ints[1] < gridDim[1]);
+ 			btAssert(coords.m_ints[2] >= 0 && coords.m_ints[2] < gridDim[2]);

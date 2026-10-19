@@ -3,7 +3,8 @@ btBatchedConstraints: the spatial grid's cell a hair larger than the largest con
 Jahshaka's change, BULLET-BATCHING-1 stage 1 (2026-10-19). A genuine upstream
 defect: bulletphysics/bullet3 at the pinned 3.25 (2c204c49e), file
 src/BulletDynamics/ConstraintSolver/btBatchedConstraints.cpp — unfixed on
-upstream master as far as the pin's history shows; an upstream PR is owed.
+upstream master as far as the pin's history shows; an upstream PR is owed (with
+0002, the same grid's second rounding fault).
 
 The bug
 -------
@@ -11,7 +12,7 @@ setupSpatialGridBatchesMt (btBatchedConstraints.cpp:895) sets the grid's cell
 size to EXACTLY the largest extent of any dynamic-dynamic constraint
 (`btVector3 gridCellSize = consExtent;`, consExtent from
 findMaxDynamicConstraintExtent :653-676), then puts each body in the cell
-`int((p - bboxMin) * invGridCellSize)` (:947-954), invGridCellSize = 1 / size
+`int((p - bboxMin) * invGridCellSize)` (:945-955), invGridCellSize = 1 / size
 rounded. Each factor of that product is rounded, so two bodies whose distance
 on an axis equals the extent to the last ulp can land TWO cells apart.
 assignConstraintsToGridBatches then breaks its premise
@@ -29,7 +30,7 @@ The fix
 The cell is the extent times (1 + 1e-3). Two bodies at distance <= extent
 then differ by at most 1/(1 + 1e-3) ~ 0.999 of a cell before rounding; the
 rounding is a few ulps of a cell coordinate, and a coordinate is below ~257
-cells (the grid is held to 128 chunks of 2x2x2 cells, :930-941), so about
+cells (the grid is held to 128 chunks of 2x2x2 cells, :925-941), so about
 1e-4 of a cell in single precision at the worst — the 1e-3 margin holds it
 with an order of magnitude to spare. A cell 0.1 % larger changes the batch
 count by nothing measurable. One line (plus its comment).
