@@ -66,7 +66,7 @@ layout( std430, set = 0, binding = 2 ) readonly buffer Cards { CardRec cards[]; 
 layout( set = 0, binding = 3 ) uniform sampler2D cardDepth;
 layout( set = 0, binding = 4 ) uniform sampler2D cardNormal;
 layout( r8, set = 0, binding = 5 ) uniform writeonly image2D moverVis;
-layout( rg8, set = 0, binding = 6 ) uniform image2D shadowRough;
+layout( rg16, set = 0, binding = 6 ) uniform image2D shadowRough;
 
 void main()
 {

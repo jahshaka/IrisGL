@@ -40,7 +40,7 @@ struct Answer
 layout( std430, set = 0, binding = 1 ) writeonly buffer AnswerBuf { Answer answers[]; };
 
 #define JAH_CARD_BINDING_BASE 2
-// ...and the view term's five after the job's last binding (PHOTON-CARDS-5).
+// ...and the view term's seven after the job's last binding (PHOTON-CARDS-5; PHOTON-3's SunVis the seventh).
 #define JAH_CARD_VIEW_BINDING_BASE 10
 #include "jah_rq_card_bindings.glsl"
 
@@ -48,6 +48,7 @@ layout( set = 0, binding = 6 ) uniform Counts
 {
 	uvec4 counts;	///< x = queries, y = instance slots bound, z = card records bound
 	uvec4 alpha;	///< xy = the alpha table's device address (REFLECT-MOVERS-2), 0 = none
+	uvec4 hit;		///< xy = the ray tier's light table's device address (PHOTON-3: the card read's lights), 0 = none
 } cnt;
 
 #define JAH_CARD_SLOTS cnt.counts.y
@@ -61,6 +62,10 @@ void jahCardLobeHemi( float r, out float a, out float b )
 	a = 0.0;
 	b = 0.0;
 }
+// ...and THE LIGHTS' LOBE (PHOTON-3 stage 2): the reflection's own loop over the ray tier's light table, no cloud
+// sheet (a harness question has none).
+#define JAH_HIT_TABLE cnt.hit.xy
+#include "jah_rq_card_lights.glsl"
 
 layout( set = 0, binding = 7 ) uniform accelerationStructureEXT tlas;
 layout( std430, set = 0, binding = 8 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };

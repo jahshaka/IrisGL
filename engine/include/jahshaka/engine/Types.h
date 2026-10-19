@@ -3844,8 +3844,9 @@ struct CardSample {
     float specularF0[3] = { 0, 0, 0 };
     float specularWeight = 0.0f;
     /// THE FLAT TERM (the relight's, ENGINE-POLISH-PHOTON-1 stage 3): the emissive
-    /// plus the specular lobe's re-emission - what the texel sends the same way to
-    /// every direction; inside `radiance` too.
+    /// plus the specular lobe's re-emission of the GATHERED light (its hemispherical
+    /// integral) - what the texel sends the same way to every direction; inside
+    /// `radiance` too. The lights' lobe is the ray's own read (PHOTON-3: toward the ray).
     float flat[3] = { 0, 0, 0 };
     /// WHICH card and WHICH atlas texel answered (Scene::readCardAt; -1 from
     /// readCardTexel), and whether its radiance carries a marched indirect

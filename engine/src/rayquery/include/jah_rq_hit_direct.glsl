@@ -52,12 +52,9 @@
 #define JAH_CLOUD_TAU( uv ) textureLod( jahHitCloud, uv, 0.0 ).x
 #include "jah_cloud_shadow.glsl"
 
-layout( buffer_reference, std430, buffer_reference_align = 4 ) readonly buffer JahHitTableRef
-{
-	uint u[];
-};
-
-const uint kJahHitLightWords = 32u;
+// the table's reference type and the lights' words (shared with the card read's light loop)
+#define JAH_CARD_CLOUD( P ) ( JAH_HIT_CLOUD_ON ? jahCloudTransmittance( P, JAH_HIT_CLOUD_MAP, JAH_HIT_CLOUD_SUN ) : 1.0 )
+#include "jah_rq_card_lights.glsl"
 const uint kJahHitRowWords = 16u;
 const uint kJahHitRowsPerPool = 1024u;
 const uint kJahHitRowDiffuseTex = 1u;
@@ -224,11 +221,15 @@ float jahHitQuadFormFactor( vec3 N, vec3 P, vec3 c0, vec3 c1, vec3 c2, vec3 c3, 
 	return twoSided ? abs( sum ) : max( 0.0, sum );
 }
 
-/// THE HIT'S DIRECT LIGHT: every light of the table at P about N (the geometric normal facing the
-/// ray's origin), the material's albedo, metal and roughness - the injection's per-light form (the
-/// diffuse lobe's directional albedo, and a metal's specular lobe's, F0 A( mu, r ) + w B( mu, r ):
-/// METAL-BOUNCE-1), the hit's own shadow ray (the casters, the sun's mask and lift).
-vec3 jahHitDirect( vec3 P, vec3 N, vec3 albedo, float roughness, vec4 metal )
+/// THE HIT'S DIRECT LIGHT TOWARD ITS VIEWER V (the reversed ray): every light of the table at P about N
+/// (the geometric normal facing the ray's origin), the material's albedo, metal and roughness - the
+/// injection's per-light form for the diffuse lobe (its directional albedo: the store's convention for a
+/// lobe the ray reads the same from every direction), the hit's own shadow ray (the casters, the sun's mask
+/// and lift). THE SPECULAR LOBE IS EVALUATED TOWARD V (PHOTON-3 stage 2): E mu f_s( L, V ), f_s =
+/// BRDF_Default's D Vis F with the hit's F0 and w (jahSpecularLobe) - what the surface sends along this ray,
+/// where the store re-emits mu ( F0 A( mu, r ) + w B( mu, r ) ) of each light the same way to every direction
+/// (its cosine-weighted integral over V: the energy is the store's, the direction the surface's own).
+vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 metal )
 {
 	JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
 	const uint count = T.u[0];
@@ -236,8 +237,7 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 albedo, float roughness, vec4 metal )
 	const float lift = max( jahHitSurf.far ? JAH_HIT_FAR_LIFT : JAH_HIT_LIFT, 1e-4 * jahHitSurf.t );
 	const vec3 origin = P + N * lift;
 	vec3 sum = vec3( 0.0 );
-	vec3 sumA = vec3( 0.0 );
-	vec3 sumB = vec3( 0.0 );
+	vec3 spec = vec3( 0.0 );
 	for( uint i = 0u; i < count; ++i )
 	{
 		const uint o = base + i * kJahHitLightWords;
@@ -286,17 +286,12 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 albedo, float roughness, vec4 metal )
 		if( !( vis > 0.0 ) )
 			continue;
 		sum += cosL * jahDiffuseAlbedo( clamp( dot( N, L ), 0.0, 1.0 ), roughness ) * ( 0.318309886 * v1.xyz ) * atten * vis;
+		// the light's irradiance E = v1 (pi x its intensity) at cosine cosL, sent toward V by the lobe
 		if( metal.w > 0.0 )
-		{
-			float sa, sb;
-			jahSpecularAlbedo( clamp( dot( N, L ), 0.0, 1.0 ), roughness, sa, sb );
-			const vec3 l = cosL * ( 0.318309886 * v1.xyz ) * atten * vis;
-			sumA += sa * l;
-			sumB += sb * l;
-		}
+			spec += ( cosL * atten * vis ) * v1.xyz * jahSpecularLobe( N, L, V, roughness, metal.xyz, metal.w );
 	}
 	// a surface with no specular lobe (kS = 0) adds exactly zero: its light is the diffuse lobe's, bit for bit
-	return sum * albedo + ( sumA * metal.xyz + sumB * metal.w );
+	return sum * albedo + spec;
 }
 
 #endif   // JAH_RQ_HIT_DIRECT_GLSL

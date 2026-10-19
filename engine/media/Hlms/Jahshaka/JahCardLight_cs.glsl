@@ -39,9 +39,10 @@
 // the read takes the lobe at the ray's own V; THE ENVIRONMENT half at the
 // lobe's HEMISPHERICAL mean albedo, jahDiffuseAlbedoHemi(r) — the bounce job's
 // convention (a voxel re-emits the same mean; PHOTON-CARDS-2 audit F4), which
-// the read turns into the directional albedo at its own N.V. The specular lobe
-// is cached as the STORE caches it - its energy, the same from every direction
-// (the Flat layer, below) - never its view-dependent highlight.
+// the read turns into the directional albedo at its own N.V. The specular lobe of
+// the GATHERED light is cached as the store caches it - its energy, the same from
+// every direction (the Flat layer, below); the lights' lobe is the read's own,
+// evaluated toward its ray (PHOTON-3: jah_rq_card_lights.glsl).
 //
 // VISIBILITY. The SUN's is the stored shadow term (the capture's PSSM term of
 // the first shadow-casting directional light — the prepass writes that one
@@ -69,14 +70,17 @@
 // relight recovers the irradiance from it and a metal's card keeps its indirect lobe too
 // (ENGINE-POLISH-PHOTON-1 stage 3); the read takes the diffuse half where kD > 0 and 0 elsewhere.
 //
-// THE SPECULAR LOBE (ENGINE-POLISH-PHOTON-1 stage 3; U5 decision 22.1's route law): the voxel store
-// re-emits a surface's specular lobe by its integral - a lamp at cosine mu, mu ( F0 A( mu, r ) +
-// w B( mu, r ) ) of it; a gathered irradiance, F0 A-bar( r ) + w B-bar( r ) - and so does the card now,
-// from the capture's Specular layer (F0 and w in the store's encoding) and the SAME table
-// (PhotonSpecularAlbedo.h, the job's constant buffer): the FLAT term, written into its own layer
-// (cardFlat) beside the emissive, because it is the same from every direction by that convention and
-// the read adds it OUTSIDE the diffuse view restore (jah_card_view.glsl). A card's hit then answers
-// what the store answers, for a metal and a dielectric alike - where a metal's card used to re-emit 0.
+// THE SPECULAR LOBE (ENGINE-POLISH-PHOTON-1 stage 3; PHOTON-3 stage 2): of a GATHERED irradiance the
+// card re-emits the lobe's hemispherical integral, F0 A-bar( r ) + w B-bar( r ) (the bounce's convention:
+// correct for a field that arrives from every direction), from the capture's Specular layer (F0 and w in
+// the store's encoding) and the lobe's table (the job's constant buffer): the FLAT term, written into its
+// own layer (cardFlat) beside the emissive, the same from every direction, which the read adds OUTSIDE the
+// diffuse view restore (jah_card_view.glsl). THE LIGHTS' lobe is NOT re-emitted here: the read evaluates it
+// toward its own ray, E mu vis f_s( L, V ) for every light it knows exactly (jah_rq_card_lights.glsl: the
+// ray tier's light table, the lamps unshadowed as this relight takes them) - so a polished metal's card
+// carries the sun toward its mirror direction, not equally everywhere. The one thing the read cannot know is
+// the SUN's visibility at the texel (the still world's traced term times the movers' and the cloud sheet's):
+// the relight writes it, one byte a texel (cardSunVis, the SunVis layer).
 //
 // One term the pixel has that the card does not, stated: a
 // diffuse fresnel (fresnelD — PbsBrdf::Default carries none; the
@@ -195,6 +199,10 @@ uniform restrict image2D cardNormal;
 // re-emission, the part of the radiance the read adds outside the diffuse view restore.
 layout( vulkan( ogre_u8 ) vk_comma @insertpiece( uav8_pf_type ) )
 uniform restrict writeonly image2D cardFlat;
+// THE SUN'S VISIBILITY AT THE TEXEL (PHOTON-3 stage 2): the still world's traced term times the movers' and
+// the cloud sheet's - what the read's specular lobe of the sun is weighted by.
+layout( vulkan( ogre_u9 ) vk_comma @insertpiece( uav9_pf_type ) )
+uniform restrict writeonly image2D cardSunVis;
 
 // THE LOBE'S INTEGRALS (PhotonSpecularAlbedo.h's table, the store's own floats: the job's one
 // constant buffer, SurfaceCache's mSpecAlbedoBuffer).
@@ -357,6 +365,7 @@ void main()
 	vec3 radiance = vec3( 0.0, 0.0, 0.0 );
 	vec3 cached = vec3( 0.0, 0.0, 0.0 );
 	vec3 flatTerm = vec3( 0.0, 0.0, 0.0 );
+	float sunVis = 0.0;
 	float depth = texelFetch( cardDepth, at, 0 ).x;
 	if( depth > 0.0 )
 	{
@@ -393,9 +402,6 @@ void main()
 		// traced one (the movers), where the host traced this card.
 		float moverVis = r.camPos.w > 0.5 ? imageLoad( cardMoverVis, at ).x : 1.0;
 		vec3 direct = vec3( 0.0, 0.0, 0.0 );
-		// ...and the specular lobe's share of each light, by its directional albedo at the
-		// light's cosine (the injection's and the hit's form: mu ( F0 A + w B ) of the light / pi)
-		vec3 specDirect = vec3( 0.0, 0.0, 0.0 );
 		// THE MEAN LIGHT DIRECTION (JahCardView): each light's direction weighted
 		// by its share of the direct half's luminance.
 		vec3 lightMean = vec3( 0.0, 0.0, 0.0 );
@@ -438,13 +444,9 @@ void main()
 			const vec3 share = l.diffuse.xyz * ( jahCardDiffuse( Ncone, L, perceptualRoughness ) * atten * visibility );
 			direct += share;
 			lightMean += L * dot( share, vec3( 0.2126, 0.7152, 0.0722 ) );
-			if( specW > 0.0 )
-			{
-				const float cosL = clamp( dot( Ncone, L ), 0.0, 1.0 );
-				float sa, sb;
-				jahSpecularAlbedo( cosL, perceptualRoughness, sa, sb );
-				specDirect += l.diffuse.xyz * ( 0.318309886 * cosL * atten * visibility ) * ( specF0 * sa + specW * sb );
-			}
+			// ...and the sun's visibility, for the read's specular lobe of the sun
+			if( l.diffuse.w > 0.5 )
+				sunVis = visibility;
 		}
 		// No light reaches the texel: its direct half is zero and the direction is
 		// never used; the normal stands in.
@@ -495,11 +497,12 @@ void main()
 			// the irradiance, recovered from the diffuse half (kD > 0) or the lobe's share itself
 			specIndirect = mix( cached, cached * specLobe / max( diffuseLobe, vec3( 1e-12 ) ), hasDiffuse );
 		}
-		flatTerm = texelFetch( cardEmissive, at, 0 ).xyz + specDirect + specIndirect;
+		flatTerm = texelFetch( cardEmissive, at, 0 ).xyz + specIndirect;
 		radiance = direct * kD + indirect + flatTerm;
 	}
 	if( ( mode & 3u ) != 0u )
 		imageStore( cardIndirect, at, vec4( jahCardRound( cached ), 1.0 ) );
 	imageStore( cardFlat, at, vec4( jahCardRound( flatTerm ), 1.0 ) );
+	imageStore( cardSunVis, at, vec4( sunVis, 0.0, 0.0, 0.0 ) );
 	imageStore( cardRadiance, at, vec4( jahCardRound( radiance ), 1.0 ) );
 }

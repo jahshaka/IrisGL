@@ -237,9 +237,10 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     // R16F depth (2) — against Lumen's 5.25 compressed, and its report named
     // the emissive as the single biggest item. RGB9E5 halves it to 4 bytes with
     // no loss that matters for a radiance channel (a shared 5-bit exponent over
-    // three 9-bit mantissas), and RG8 halves the shadow/roughness pair: 22 -> 16
+    // three 9-bit mantissas), and RG8 halved the shadow/roughness pair: 22 -> 16
     // bytes before any BC encode, which is the number this phase was told to
-    // reach.
+    // reach. (PHOTON-3 took the pair back to RG16: the read's specular lobe needs a
+    // polished surface's alpha, which 8 bits rounded to 0.001.)
     //
     // BUT RGB9E5 IS NOT A MANDATORY COLOUR-ATTACHMENT FORMAT IN VULKAN — only
     // SAMPLED and SAMPLED_FILTER_LINEAR are mandatory for it — and the capture
@@ -260,7 +261,10 @@ bool SurfaceCache::makeAtlas(std::string &err) {
         Ogre::PFG_RGBA8_UNORM,   // normal
         Ogre::PFG_R16_FLOAT,     // depth
         mEmissiveFormat,         // emissive
-        Ogre::PFG_RG8_UNORM,     // shadow + roughness
+        // shadow + roughness: 16 bits a channel (PHOTON-3 stage 2) - the read evaluates the specular lobe toward
+        // its ray from y (the GGX alpha), and 8 bits held a polished surface's alpha to 1/255: r 0.05 (alpha
+        // 0.0025) read as alpha 0.001, its mirror peak 4.9 x too bright (gi.metal_bounce's law). +8 MB at 2048^2.
+        Ogre::PFG_RG16_UNORM,
         Ogre::PFG_RGBA8_UNORM    // the specular lobe: F0 relative to the dielectric's, kS
     };
     const char *name[kCardLayers] = { "cardAlbedo", "cardNormal", "cardDepth", "cardEmissive",
@@ -360,6 +364,19 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     mFlat->setPixelFormat(radFmt);
     mFlat->setNumMipmaps(1u);
     mFlat->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    // ...and THE SUN'S VISIBILITY AT THE TEXEL (PHOTON-3 stage 2): the still world's traced term
+    // times the movers' and the cloud sheet's, as the relight shades the texel - the one quantity
+    // the read's specular lobe of the sun cannot know (jah_rq_card_lights.glsl evaluates every
+    // light's lobe toward its own ray from the ray tier's light table). A UAV the relight writes
+    // and nothing uploads: ManualTexture (never load-from-group), made resident here and never
+    // notified (DOCS/traps/ENGINE.md). R8, +4 MB at 2048 square.
+    mSunVis = tm->createTexture(processUniqueName("cardSunVis"), Ogre::GpuPageOutStrategy::Discard,
+                                Ogre::TextureFlags::ManualTexture | Ogre::TextureFlags::Uav,
+                                Ogre::TextureTypes::Type2D);
+    mSunVis->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
+    mSunVis->setPixelFormat(Ogre::PFG_R8_UNORM);
+    mSunVis->setNumMipmaps(1u);
+    mSunVis->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
     // ...and THE MOVERS' VISIBILITY (PHOTON-CARDS-4): R8 over the atlas, a UAV
     // the ray tier's trace writes and the relight reads (only inside the cards
     // it flags `moverTraced`, so a texel no trace wrote is never read). +4 MB.
@@ -598,6 +615,7 @@ void SurfaceCache::destroyAll() {
         if (mRadiance) { tm->destroyTexture(mRadiance); mRadiance = nullptr; }
         if (mIndirect) { tm->destroyTexture(mIndirect); mIndirect = nullptr; }
         if (mFlat) { tm->destroyTexture(mFlat); mFlat = nullptr; }
+        if (mSunVis) { tm->destroyTexture(mSunVis); mSunVis = nullptr; }
         if (mMoverVis) { tm->destroyTexture(mMoverVis); mMoverVis = nullptr; }
     }
 }
@@ -1651,6 +1669,11 @@ void SurfaceCache::relightCards() {
         uav.access = Ogre::ResourceAccess::Write;
         uav.pixelFormat = mFlat->getPixelFormat();
         mLightJob->_setUavTexture(8u, uav);
+        // THE SUN'S VISIBILITY AT THE TEXEL (PHOTON-3 stage 2), written.
+        uav.texture = mSunVis;
+        uav.access = Ogre::ResourceAccess::Write;
+        uav.pixelFormat = mSunVis->getPixelFormat();
+        mLightJob->_setUavTexture(9u, uav);
     }
     mLightJob->_setUavBuffer(2u, bufSlot(mGiBuffer, Ogre::ResourceAccess::Read));
     // ...and the lobe's integrals: the engine's one table (PhotonSpecularAlbedoBuffer.h), the
@@ -1687,6 +1710,7 @@ void SurfaceCache::relightCards() {
         mLightJob->_setUavTexture(6u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->_setUavTexture(7u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->_setUavTexture(8u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        mLightJob->_setUavTexture(9u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->setConstBuffer(0u, nullptr);
         mLightJob->setNumTexUnits(0u);
     }
@@ -2756,6 +2780,7 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     bytes += bytesOf(mRadiance);
     bytes += bytesOf(mIndirect);
     bytes += bytesOf(mFlat);
+    bytes += bytesOf(mSunVis);
     bytes += bytesOf(mMoverVis);
     if (mRadiance)
         out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mRadiance->getPixelFormat());
@@ -2763,6 +2788,8 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
         out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mIndirect->getPixelFormat());
     if (mFlat)
         out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mFlat->getPixelFormat());
+    if (mSunVis)
+        out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mSunVis->getPixelFormat());
     if (mMoverVis)
         out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mMoverVis->getPixelFormat());
     out.bytes = bytes;

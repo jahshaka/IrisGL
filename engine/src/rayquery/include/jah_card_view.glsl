@@ -19,9 +19,9 @@
 // WHAT THE READ NEEDS, per texel: the three stored terms apart (the Radiance
 // layer = direct + indirect + flat, the indirect diffuse half - the Indirect
 // layer where the channel has a diffuse albedo - and the FLAT layer, the emissive plus
-// the specular lobe's re-emission, which this restore leaves as it is: the lobe
-// is the store's energy convention, the same from every direction - ENGINE-
-// POLISH-PHOTON-1 stage 3; the direct half is the difference), the stored normal
+// the specular lobe's re-emission of the GATHERED light, which this restore leaves as
+// it is (ENGINE-POLISH-PHOTON-1 stage 3; the lights' lobe is evaluated toward the ray
+// beside it, PHOTON-3: jah_rq_card_lights.glsl); the direct half is the difference), the stored normal
 // and roughness, and ONE
 // LIGHT DIRECTION — the light-weighted mean of the lights' directions, the
 // weight each light's share of the direct half's luminance. The relight writes

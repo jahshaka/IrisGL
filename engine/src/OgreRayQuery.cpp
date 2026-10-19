@@ -239,7 +239,7 @@ constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 44u;
+constexpr unsigned kReflectBindings = 45u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -265,30 +265,30 @@ constexpr unsigned kReflectSideKinds = 2u;
 /// back, normal (PHOTON-VOXEL-5), the direct term (MOVER-OCCLUSION-1).
 constexpr int kRayVoxelKinds = 11;
 /// ...then THE CARD READ'S VIEW TERM (PHOTON-CARDS-5): the surface cache's
-/// Indirect, Flat, ShadowRough, Albedo, Normal and Specular layers (31-36,
+/// Indirect, Flat, ShadowRough, Albedo, Normal and Specular layers and the sun's visibility (PHOTON-3) (31-37,
 /// jah_rq_card_bindings.glsl at JAH_CARD_VIEW_BINDING_BASE 31) — the read
 /// restores the diffuse lobe's view term for the ray (jah_card_view.glsl).
 constexpr unsigned kReflectCardViewBinding = 31u;
 /// ...and THE PHOTON VIEW'S OVERLAY (PHOTON-VIEW-1): one storage image the trace
-/// writes the Hits picture into (37, rq_reflect.comp).
+/// writes the Hits picture into (38, rq_reflect.comp).
 constexpr unsigned kReflectPhotonBinding = kReflectCardViewBinding + SurfaceCache::kViewLayers;
 /// ...and THE VIEW'S ID IMAGE (REFLECT-MOVERS-1): the visibility buffer's
 /// `jahAtomIds` (which slot drew each pixel), so a pixel on a MOVING slot finds its
-/// history through that slot's two poses (38, rq_reflect.comp).
+/// history through that slot's two poses (39, rq_reflect.comp).
 constexpr unsigned kReflectIdBinding = kReflectPhotonBinding + 1u;
-/// ...and THE DIRECT TERM's own volume per cascade (39, MOVER-OCCLUSION-1): a hit's
+/// ...and THE DIRECT TERM's own volume per cascade (40, MOVER-OCCLUSION-1): a hit's
 /// store radiance less it is the share a MOVER above the hit occludes and the store
 /// cannot know (jah_rq_hit.glsl); the total stands in where a cascade has none.
 constexpr unsigned kReflectDirectBinding = kReflectIdBinding + 1u;
-/// ...and THE AIR'S TABLE (40, PHOTON-I-1 fix 5): the aerial-perspective volume the
+/// ...and THE AIR'S TABLE (41, PHOTON-I-1 fix 5): the aerial-perspective volume the
 /// colour passes read, for the fog along the reflection (jah_fog_along.glsl).
 constexpr unsigned kReflectFogBinding = kReflectDirectBinding + 1u;
-/// ...and THE ID PASS'S OWN DEPTH (41, ID-DEPTH-1 for the reflection — PHOTON-II-1
+/// ...and THE ID PASS'S OWN DEPTH (42, ID-DEPTH-1 for the reflection — PHOTON-II-1
 /// item 11): the scene depth copied right after the id pass, so a pixel whose final
 /// surface is NEARER than the id's (a stock-drawn character in front of a moving
 /// Atom mover) is not taken for the mover (rq_reflect.comp).
 constexpr unsigned kReflectIdDepthBinding = kReflectFogBinding + 1u;
-/// ...and THE HIT'S OWN SURFACE (42, 43; FAR-SUN-2, jah_rq_hit_direct.glsl): the voxeliser's
+/// ...and THE HIT'S OWN SURFACE (43, 44; FAR-SUN-2, jah_rq_hit_direct.glsl): the voxeliser's
 /// texture pool and the cloud layer's field.
 constexpr unsigned kReflectPoolBinding = kReflectIdDepthBinding + 1u;
 constexpr unsigned kReflectCloudBinding = kReflectPoolBinding + 1u;
@@ -4607,7 +4607,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
 
     // ---- the harness pipeline, once ------------------------------------------
     if (!mCardParityPipeline) {
-        // ...and 10-15: the card read's view term (PHOTON-CARDS-5), the six
+        // ...and 10-16: the card read's view term (PHOTON-CARDS-5), the seven
         // layers of SurfaceCache::viewLayers.
         constexpr unsigned kParityBindings = 10u + SurfaceCache::kViewLayers;
         const VkDescriptorType types[kParityBindings] = {
@@ -4618,7 +4618,8 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER };
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER };
         VkDescriptorSetLayoutBinding b[kParityBindings] = {};
         for (unsigned i = 0; i < kParityBindings; ++i) {
             b[i].binding = i;
@@ -4720,7 +4721,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         dropBuffer(qBuf);
         return false;
     }
-    if (!makeBuffer(8u * sizeof(uint32_t), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, ubo, err)) {
+    if (!makeBuffer(12u * sizeof(uint32_t), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, ubo, err)) {
         dropBuffer(qBuf);
         dropBuffer(aBuf);
         return false;
@@ -4742,8 +4743,11 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
         // ...and the ALPHA TABLE (REFLECT-MOVERS-2): the parity job's trace agrees
         // with the product's on a scene with cut-outs.
         const uint64_t a = alphaTableOf(scene);
-        const uint32_t counts[8] = { uint32_t(n), cache->instanceSlots(), cache->cardRecords(), geomSlots,
-                                     uint32_t(a & 0xFFFFFFFFu), uint32_t(a >> 32u), 0u, 0u };
+        // ...and THE LIGHT TABLE (PHOTON-3 stage 2): the card read evaluates the lights' specular lobe from it.
+        const uint64_t h = hitTableOf(scene);
+        const uint32_t counts[12] = { uint32_t(n), cache->instanceSlots(), cache->cardRecords(), geomSlots,
+                                      uint32_t(a & 0xFFFFFFFFu), uint32_t(a >> 32u), 0u, 0u,
+                                      uint32_t(h & 0xFFFFFFFFu), uint32_t(h >> 32u), 0u, 0u };
         std::memcpy(ubo.mapped, counts, sizeof(counts));
     }
 
@@ -4769,13 +4773,13 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
                              tables[i]->getBytesPerElement();
         bufs[2 + i].range = tables[i]->getTotalSizeBytes();
     }
-    // 4, 5: the Depth and Radiance layers; 10-15: the view term's six.
+    // 4, 5: the Depth and Radiance layers; 10-16: the view term's seven.
     constexpr unsigned kImgs = 2u + SurfaceCache::kViewLayers;
     VkImageView views[kImgs] = {};
     VkDescriptorImageInfo imgs[kImgs] = {};
-    static_assert(SurfaceCache::kViewLayers == 6u, "the harness lists the view term's layers");
-    Ogre::TextureGpu *const layers[kImgs] = { depth, radiance, cardView[0], cardView[1],
-                                              cardView[2], cardView[3], cardView[4], cardView[5] };
+    static_assert(SurfaceCache::kViewLayers == 7u, "the harness lists the view term's layers");
+    Ogre::TextureGpu *const layers[kImgs] = { depth, radiance, cardView[0], cardView[1], cardView[2],
+                                              cardView[3], cardView[4], cardView[5], cardView[6] };
     for (unsigned i = 0; i < kImgs; ++i) {
         Ogre::DescriptorSetTexture2::TextureSlot slot =
             Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
@@ -4787,7 +4791,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     }
     VkDescriptorBufferInfo ub{};
     ub.buffer = ubo.buffer;
-    ub.range = 8u * sizeof(uint32_t);
+    ub.range = 12u * sizeof(uint32_t);
     // 7-9: the TLAS (the scene's, or none when no question traces — a
     // descriptor must still be valid, so the stand-in is only for 8/9), the
     // per-slot rows (copied now), the GPU scene's rows.
@@ -5112,13 +5116,14 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 34 ...Albedo
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 35 ...Normal
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 36 ...Specular (ENGINE-POLISH-PHOTON-1)
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 37 the photon view's overlay (PHOTON-VIEW-1)
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 38 the view's id image (REFLECT-MOVERS-1)
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 39 voxelDirect[] (MOVER-OCCLUSION-1)
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 40 the air's table (PHOTON-I-1 fix 5)
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 41 the id pass's depth (ID-DEPTH-1)
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 42 the texture pool (FAR-SUN-2)
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 43 the cloud field (FAR-SUN-2)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 37 ...the sun's visibility (PHOTON-3)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 38 the photon view's overlay (PHOTON-VIEW-1)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 39 the view's id image (REFLECT-MOVERS-1)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 40 voxelDirect[] (MOVER-OCCLUSION-1)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 41 the air's table (PHOTON-I-1 fix 5)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 42 the id pass's depth (ID-DEPTH-1)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 43 the texture pool (FAR-SUN-2)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 44 the cloud field (FAR-SUN-2)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -6427,6 +6432,8 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     }
     std::vector<uint32_t> &w = sa.hitScratch;
     w.assign(5u, 0u);
+    const SurfaceCache *cardCache = scene->photon().surfaceCache();
+    const Ogre::Light *cardSun = cardCache ? cardCache->readersSun() : nullptr;
     auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, sizeof u); return u; };
     Ogre::SceneManager *sm = scene->sceneManager();
     uint32_t nLights = 0u;
@@ -6458,6 +6465,9 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
                 L[14] = float(light->getSpotlightFalloff());
             }
             if (punctual) L[11] = float(light->getAttenuationLinear());   // the source radius
+            // THE CARDS' TRACED SUN (PHOTON-3 stage 2): the one directional whose visibility a card stores
+            // (SurfaceCache::cardSun, its SunVis layer) - the card read's lobe takes the texel's stored term for it.
+            if (srcType == Ogre::Light::LT_DIRECTIONAL && cardSun && light == cardSun) L[11] = 1.0f;
             L[15] = light->getDoubleSided() ? 1.0f : 0.0f;
             if (area) {
                 const Ogre::Vector3 c(p4.x, p4.y, p4.z);
@@ -7683,9 +7693,9 @@ bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
     }
     {
         VkFormatProperties props{};
-        vkGetPhysicalDeviceFormatProperties(mDev->mPhysicalDevice, VK_FORMAT_R8G8_UNORM, &props);
+        vkGetPhysicalDeviceFormatProperties(mDev->mPhysicalDevice, VK_FORMAT_R16G16_UNORM, &props);
         if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
-            err = "the device cannot store to R8G8_UNORM (the ShadowRough layer's still term)";
+            err = "the device cannot store to R16G16_UNORM (the ShadowRough layer's still term)";
             return false;
         }
     }

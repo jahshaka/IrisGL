@@ -109,7 +109,7 @@ enum class CardLayer : unsigned {
     Normal = 1,       ///< RGBA8_UNORM — the shading normal in the card's view space, *0.5+0.5
     Depth = 2,        ///< R16_FLOAT  — world units from the card's near plane
     Emissive = 3,     ///< RGB9E5 (or R11G11B10F — see emissiveFormatName) — radiance
-    ShadowRough = 4,  ///< RG8_UNORM  — x = the shadow term, y = the GGX alpha
+    ShadowRough = 4,  ///< RG16_UNORM — x = the shadow term, y = the GGX alpha (16 bits: the read's lobe, PHOTON-3)
     /// RGBA8_UNORM — THE SPECULAR LOBE (ENGINE-POLISH-PHOTON-1 stage 3): the voxel
     /// store's encoding (Voxelizer_piece_cs.any), rgb = ( F0 - 0.04 ) kS / 0.96 and
     /// a = kS, so F0 kS = 0.04 a + 0.96 rgb and a dielectric's 0.04 is exact; zero
@@ -333,7 +333,7 @@ struct CardMoverTrace {
     /// lift in float 3).
     const float *records = nullptr;
     unsigned count = 0u;
-    /// `vis` = the R8 mover layer, `shadowRough` = the RG8 ShadowRough layer: both
+    /// `vis` = the R8 mover layer, `shadowRough` = the RG16 ShadowRough layer: both
     /// bound in either mode; `still` picks the one written (rq_card_movers.comp).
     Ogre::TextureGpu *depth = nullptr, *normal = nullptr, *vis = nullptr, *shadowRough = nullptr;
     Ogre::Vector3 toSun;
@@ -474,9 +474,10 @@ public:
     /// Normal layers (the stored normal, and in their alpha the texel's mean
     /// light direction the relight writes), and the SPECULAR layer (F0 and kS:
     /// the movers' gate cuts the lobe's indirect share with it, which the Flat
-    /// term holds). In the order jah_rq_card_bindings.glsl declares them from
-    /// JAH_CARD_VIEW_BINDING_BASE.
-    static constexpr unsigned kViewLayers = 6u;
+    /// term holds, and the lights' lobe reads it), and the SUNVIS layer (the sun's visibility
+    /// the read's specular lobe of the sun takes, PHOTON-3). In the order
+    /// jah_rq_card_bindings.glsl declares them from JAH_CARD_VIEW_BINDING_BASE.
+    static constexpr unsigned kViewLayers = 7u;
     void viewLayers(Ogre::TextureGpu *out[kViewLayers]) const {
         out[0] = mIndirect;
         out[1] = mFlat;
@@ -484,9 +485,14 @@ public:
         out[3] = mAtlas[unsigned(CardLayer::Albedo)];
         out[4] = mAtlas[unsigned(CardLayer::Normal)];
         out[5] = mAtlas[unsigned(CardLayer::Specular)];
+        out[6] = mSunVis;
     }
     /// The item slot of a node's instance, or -1 when it holds no cards.
     long itemSlotOf(NodeId node) const;
+    /// THE SUN THE CARDS STORE THE VISIBILITY OF (cardSun: the first visible shadow-casting
+    /// directional light): the ray tier flags it in its light table, so the card read's specular
+    /// lobe of the sun takes the texel's SunVis term (PHOTON-3).
+    const Ogre::Light *readersSun() const { return cardSun(); }
     /// Is a capture executing right now? The Hlms listener's pass property
     /// (`jah_card_capture`) is set from this and from nothing else.
     static bool capturing();
@@ -627,11 +633,16 @@ private:
     /// the chain's parameter block, and this frame's chain.
     Ogre::TextureGpu *mIndirect = nullptr;
     /// THE FLAT TERM (a UAV, the radiance's format, ENGINE-POLISH-PHOTON-1 stage 3):
-    /// the emissive plus the specular lobe's re-emission, direct and indirect - what
-    /// a texel sends the same way to every direction, by the store's convention (a
-    /// voxel re-emits the lobe's directional albedo). The read adds it outside the
-    /// diffuse view restore; the Radiance holds it too. +16 MB at 2048 square.
+    /// the emissive plus the specular lobe's re-emission of the GATHERED light (its
+    /// hemispherical integral) - what a texel sends the same way to every direction. The
+    /// lights' lobe is evaluated at the read, toward each ray (PHOTON-3). The read adds
+    /// it outside the diffuse view restore; the Radiance holds it too. +16 MB at 2048 square.
     Ogre::TextureGpu *mFlat = nullptr;
+    /// THE SUN'S VISIBILITY AT THE TEXEL (PHOTON-3 stage 2; a UAV, R8): the still world's traced
+    /// term times the movers' and the cloud sheet's, as the relight shades the texel - the weight
+    /// the read's specular lobe of the sun takes (every light's lobe is evaluated at the read,
+    /// toward its own ray: jah_rq_card_lights.glsl). +4 MB at 2048 square.
+    Ogre::TextureGpu *mSunVis = nullptr;
     /// THE MOVERS' VISIBILITY (PHOTON-CARDS-4): R8 over the atlas, written by the
     /// ray tier's trace (rq_card_movers.comp), read by the relight where the card
     /// is `moverTraced`. +4 MB at 2048 square.

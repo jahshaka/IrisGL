@@ -162,6 +162,10 @@ float jahHitIndirectGate = 1.0;
 /// THE LOBE'S HEMISPHERICAL INTEGRALS ( A-bar, B-bar ) at roughness r - the store's table. The
 /// INCLUDER defines it after this file (the ray jobs: jahSpecularAlbedoHemi through the hit table).
 void jahCardLobeHemi( float r, out float a, out float b );
+/// THE LIGHTS' SPECULAR LOBE AT A CARD TEXEL TOWARD V (PHOTON-3 stage 2): E mu vis f_s( L, V ) summed over
+/// the lights the relight shades, the sun weighted by the texel's stored visibility `sunVis`. The INCLUDER
+/// defines it (jah_rq_card_lights.glsl, from the ray tier's light table).
+vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis );
 
 vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, float footprint,
 					  out bool ok )
@@ -218,8 +222,21 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, floa
 			cutLobe = ( 1.0 - jahHitIndirectGate ) * lobeShare;
 		}
 	}
+	// THE LIGHTS' SPECULAR LOBE TOWARD THIS RAY (PHOTON-3 stage 2): where the relight re-emitted the lobe's
+	// integral the same way to every direction, the read evaluates BRDF_Default's own lobe toward viewDir for
+	// every light it knows, E mu vis f_s( L, V ) with the texel's F0 and w (jahCardLightsLobe) - exact per light,
+	// the sun's visibility the texel's own (the SunVis layer). Its V-integral is what the store re-emits: the
+	// energy is unchanged, the direction is the surface's.
+	const vec3 V = normalize( viewDir );
+	vec3 lobe = vec3( 0.0 );
+	{
+		const vec4 spec = JAH_CARD_SPECULAR( pick.texel );
+		if( spec.w > 0.0 )
+			lobe = jahCardLightsLobe( hitPos, N, V, r, spec.www * 0.04 + spec.xyz * 0.96, spec.w,
+									  JAH_CARD_SUN_VIS( pick.texel ) );
+	}
 	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cut - cutLobe, indirect - cut,
-								JAH_CARD_EMISSIVE( pick.texel ) - cutLobe, N, L, r, normalize( viewDir ) );
+								JAH_CARD_EMISSIVE( pick.texel ) - cutLobe, N, L, r, V ) + lobe;
 }
 
 #endif   // JAH_RQ_CARD_GLSL
