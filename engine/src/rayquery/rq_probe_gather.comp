@@ -161,6 +161,9 @@ layout( set = 0, binding = 36 ) uniform sampler2D jahHitCloud;
 #define JAH_HIT_CLOUD_MAP   p.cloudMap
 #define JAH_HIT_CLOUD_SUN   p.cloudSun
 #define JAH_HIT_MOVERS_ON ( p.alpha.w > 0.5 )
+// A GATHER RAY READS A HIT'S SPECULAR LOBE BY ITS INTEGRAL (PHOTON-3, the lead's ruling: an irradiance estimator of
+// a few stochastic rays cannot sample a polished hit's near-delta lobe; jah_rq_hit_direct.glsl's header).
+#define JAH_HIT_LOBE_INTEGRAL
 #include "jah_rq_hit_radiance.glsl"
 // THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl, ENGINE-POLISH-PHOTON-1): the store's table, through the hit table.
 void jahCardLobeHemi( float r, out float a, out float b )

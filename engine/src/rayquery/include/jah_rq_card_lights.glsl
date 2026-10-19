@@ -1,4 +1,6 @@
-// THE LIGHTS' SPECULAR LOBE AT A CARD TEXEL, TOWARD THE READING RAY (PHOTON-3 stage 2).
+// THE LIGHTS' SPECULAR LOBE AT A CARD TEXEL, TOWARD THE READING RAY (PHOTON-3 stage 2) - or, in a GATHER job
+// (JAH_HIT_LOBE_INTEGRAL defined), by the lobe's integral mu ( F0 A + w B ) E / pi (the lead's ruling: a gather of a
+// few stochastic rays cannot sample a polished hit's near-delta lobe; jah_rq_hit_direct.glsl's header).
 //
 // The card relight (JahCardLight_cs.glsl) used to re-emit a surface's specular lobe by its integral -
 // mu ( F0 A( mu, r ) + w B( mu, r ) ) of every light, the same way to every direction - so a polished metal
@@ -33,6 +35,12 @@ const uint kJahHitLightWords = 32u;
 
 #ifndef JAH_CARD_CLOUD
 #define JAH_CARD_CLOUD( P ) 1.0
+#endif
+
+#ifdef JAH_HIT_LOBE_INTEGRAL
+// A GATHER ray's read takes the lobe's integral (the lead's ruling, jah_rq_hit_direct.glsl's header): the table's
+// directional albedo, defined by the includer after this file (jah_spec_albedo.glsl).
+void jahSpecularAlbedo( float v, float r, out float a, out float b );
 #endif
 
 vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis )
@@ -80,7 +88,13 @@ vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float
 		const float mu = dot( N, L );
 		if( !( mu > 0.0 ) || !( vis > 0.0 ) )
 			continue;
+#ifdef JAH_HIT_LOBE_INTEGRAL
+		float sa, sb;
+		jahSpecularAlbedo( mu, r, sa, sb );
+		sum += ( mu * vis * 0.318309886 ) * v1.xyz * ( F0 * sa + w * sb );
+#else
 		sum += ( mu * vis ) * v1.xyz * jahSpecularLobe( N, L, V, r, F0, w );
+#endif
 	}
 	return sum;
 }

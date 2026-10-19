@@ -225,10 +225,12 @@ float jahHitQuadFormFactor( vec3 N, vec3 P, vec3 c0, vec3 c1, vec3 c2, vec3 c3, 
 /// (the geometric normal facing the ray's origin), the material's albedo, metal and roughness - the
 /// injection's per-light form for the diffuse lobe (its directional albedo: the store's convention for a
 /// lobe the ray reads the same from every direction), the hit's own shadow ray (the casters, the sun's mask
-/// and lift). THE SPECULAR LOBE IS EVALUATED TOWARD V (PHOTON-3 stage 2): E mu f_s( L, V ), f_s =
-/// BRDF_Default's D Vis F with the hit's F0 and w (jahSpecularLobe) - what the surface sends along this ray,
-/// where the store re-emits mu ( F0 A( mu, r ) + w B( mu, r ) ) of each light the same way to every direction
-/// (its cosine-weighted integral over V: the energy is the store's, the direction the surface's own).
+/// and lift). THE SPECULAR LOBE, BY THE RAY'S KIND (PHOTON-3 stage 2; the lead's ruling): a REFLECTION ray is
+/// one direction per pixel and takes E mu f_s( L, V ), f_s = BRDF_Default's D Vis F with the hit's F0 and w
+/// (jahSpecularLobe) - what the surface sends along it; a GATHER ray (the job defines JAH_HIT_LOBE_INTEGRAL)
+/// estimates an irradiance integral with a few stochastic rays, which cannot sample a polished hit's near-delta
+/// lobe (a mirror floor's sun glint, gi.id_depth), so it takes the lobe's integral mu ( F0 A( mu, r ) + w B( mu, r ) )
+/// - the store's own re-emission, energy-exact in expectation (Lumen's choice for the same reason).
 vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 metal )
 {
 	JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
@@ -286,9 +288,19 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 		if( !( vis > 0.0 ) )
 			continue;
 		sum += cosL * jahDiffuseAlbedo( clamp( dot( N, L ), 0.0, 1.0 ), roughness ) * ( 0.318309886 * v1.xyz ) * atten * vis;
-		// the light's irradiance E = v1 (pi x its intensity) at cosine cosL, sent toward V by the lobe
+		// the light's irradiance E = v1 (pi x its intensity) at cosine cosL: sent toward V by the lobe (a
+		// reflection ray), or re-emitted by the lobe's integral, mu ( F0 A + w B ) E / pi (a GATHER ray:
+		// JAH_HIT_LOBE_INTEGRAL - the lead's ruling, the header says why)
 		if( metal.w > 0.0 )
+		{
+#ifdef JAH_HIT_LOBE_INTEGRAL
+			float sa, sb;
+			jahSpecularAlbedo( clamp( dot( N, L ), 0.0, 1.0 ), roughness, sa, sb );
+			spec += ( cosL * atten * vis * 0.318309886 ) * v1.xyz * ( metal.xyz * sa + metal.w * sb );
+#else
 			spec += ( cosL * atten * vis ) * v1.xyz * jahSpecularLobe( N, L, V, roughness, metal.xyz, metal.w );
+#endif
+		}
 	}
 	// a surface with no specular lobe (kS = 0) adds exactly zero: its light is the diffuse lobe's, bit for bit
 	return sum * albedo + spec;
