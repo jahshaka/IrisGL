@@ -187,6 +187,25 @@ void PhotonComponent::convertPendingMaterials() {
             for (const auto *np : mScene.itemNodes())
                 if (np->item && (np->item->getVisibilityFlags() & kGiGeometryBit)) restageIfChanged(*np);
     }
+    if (!mVctStaleRows.empty()) {
+        // THE ROWS OF AN EDIT NO GENERATION BUMP COVERED (BUGS-1 item 3): re-written in place
+        // (a converted datablock keeps its slot; one whose texture class changed moves and is
+        // re-composed). A datablock the store never converted has no row to be stale.
+        std::vector<MaterialId> ids;
+        ids.swap(mVctStaleRows);
+        std::sort(ids.begin(), ids.end());
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        for (const auto &kv : mScene.nodeRecords()) {
+            const auto &n = kv.second;
+            if (!n.item || !n.item->getNumSubItems() || !std::binary_search(ids.begin(), ids.end(), n.materialRef))
+                continue;
+            Ogre::HlmsDatablock *db = n.item->getSubItem(0)->getDatablock();
+            if (!db || !store->lookupDatablock(db)) continue;
+            bool moved = false;
+            store->addDatablock(db, &moved);
+            if (moved) restageIfChanged(n);
+        }
+    }
     if (mVctPendingMaterialSlots.empty()) return;
     std::vector<uint32_t> pending;
     pending.swap(mVctPendingMaterialSlots);
@@ -1853,7 +1872,13 @@ void PhotonComponent::noteMaterialChanged(MaterialId id, bool voxelInputsChanged
     // `gi.material_swap`'s.
     if (mSurfaceCache) mSurfaceCache->noteMaterialChanged(id);
     bool bumpVoxels = false;
-    if (!giMaterialChangeEffect(id, voxelInputsChanged, bumpVoxels)) return;
+    const bool seen = giMaterialChangeEffect(id, voxelInputsChanged, bumpVoxels);
+    // A VOXEL INPUT CHANGED AND NO REFRESH COVERS IT (BUGS-1 item 3): the material's row
+    // still goes stale — a mover wears it today and is voxelised from that row the moment
+    // it turns still. Only with a store (no store, no row).
+    if (voxelInputsChanged && !bumpVoxels && !mVctMaterialRefreshOwed && vctMaterialStore())
+        mVctStaleRows.push_back(id);
+    if (!seen) return;
     staleProbeGrid(GiStaleReason::Material);
     if (bumpVoxels) {
         ++mGiMaterialGeneration;

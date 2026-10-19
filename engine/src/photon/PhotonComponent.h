@@ -1580,6 +1580,13 @@ private:
     /// streaming, a from-scratch arm): the next GI build re-reads EVERY converted
     /// datablock in place (PhotonVoxelMaterial::refreshAll) before it gathers.
     bool mVctMaterialRefreshOwed = false;
+    /// THE ROWS A VOXEL-INPUT EDIT STALED WITHOUT A REFRESH (BUGS-1 item 3): an edit on a
+    /// material no GI-geometry item wears (a MOVER's, which is in no voxel) bumps no
+    /// generation and re-voxelises nothing — no voxel holds it — but the store keeps that
+    /// datablock's row by pointer, and the re-voxelisation that follows the mover turning
+    /// still read the row as it was before the edit. Each listed material's converted
+    /// rows are re-written in place at the next GI build (convertPendingMaterials).
+    std::vector<MaterialId> mVctStaleRows;
     /// THE PHOTON VIEW (not saved; a new scene starts Off) and what is up for it.
     PhotonView mPhotonView = PhotonView::Off;
     int mPhotonVoxelCascade = -1;
