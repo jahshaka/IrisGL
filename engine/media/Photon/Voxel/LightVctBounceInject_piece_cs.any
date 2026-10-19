@@ -214,16 +214,19 @@
 		// is the surfaces' area MEAN, and what the voxel re-emits is premultiplied by
 		// how much of it they fill, exactly like the direct term it is added to.
 		float3 reemit = albedoVal.xyz * p_iterationDampening * jahDiffuseAlbedoHemi( voxelRoughness ) * albedoVal.w;
-		// ...AND THE METAL'S SPECULAR LOBE (METAL-BOUNCE-1): of what it gathers, a metal of F0 and
-		// Fresnel-90 weight w re-emits its lobe's HEMISPHERICAL albedo F0 A-bar( r ) + w B-bar( r )
-		// (JahSpecularAlbedo) - a white rough metal ~ its reflectance, where the diffuse-only store
-		// had it re-emit 0. Premultiplied by the opacity like the diffuse term.
+		// ...AND THE SPECULAR LOBE (METAL-BOUNCE-1, ENGINE-POLISH-PHOTON-1 stage 2): of what it gathers,
+		// a surface of F0 and Fresnel-90 weight w - a metal's F0 = b kS, a dielectric's 0.04 kS, w = kS -
+		// re-emits its lobe's HEMISPHERICAL albedo F0 A-bar( r ) + w B-bar( r ) (JahSpecularAlbedo): a
+		// white rough metal ~ its reflectance, a dielectric its 4 % layer's share, where the diffuse-only
+		// store had both re-emit 0. Premultiplied by the opacity like the diffuse term.
+		// (The volume holds F0 relative to the dielectric's, Voxelizer_piece_cs.any: F0 kS = 0.04 w + 0.96 rgb.)
 		const float4 metalVal = OGRE_Load3D( voxelMetalTex, gl_GlobalInvocationID.xyz, 0 );
 		if( metalVal.w > 0.0f )
 		{
 			float sa, sb;
 			jahSpecularAlbedoHemi( voxelRoughness, sa, sb );
-			reemit += ( metalVal.xyz * sa + metalVal.w * sb ) * p_iterationDampening * albedoVal.w;
+			const float3 specF0 = metalVal.www * 0.04f + metalVal.xyz * 0.96f;
+			reemit += ( specF0 * sa + metalVal.w * sb ) * p_iterationDampening * albedoVal.w;
 		}
 		currentLight.xyz += reemit * ( 0.5f * ( vctDiffuse + vctDiffuseBack ) );
 		backLight.xyz += reemit * vctDiffuseBack;

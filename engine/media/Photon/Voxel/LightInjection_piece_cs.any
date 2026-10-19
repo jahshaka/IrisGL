@@ -310,11 +310,15 @@
 	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, gl_GlobalInvocationID.xyz, 0 );
 	float4 normalVal = OGRE_Load3D( voxelNormalTex, gl_GlobalInvocationID.xyz, 0 );
 	float4 emissiveVal = OGRE_Load3D( voxelEmissiveTex, gl_GlobalInvocationID.xyz, 0 );
-	// THE METAL (METAL-BOUNCE-1): its F0 (rgb) and Fresnel-90 weight (alpha), zero where no metal is. A
-	// lamp at cosine mu reaches the metal's specular lobe as well as the diffuse one, and the lobe
-	// re-emits F0 A( mu, r ) + w B( mu, r ) of it - its directional albedo (JahSpecularAlbedo): the
-	// energy a rough metal scatters back into the room, which a diffuse-only store dropped.
-	const float4 metalVal = OGRE_Load3D( voxelMetalTex, gl_GlobalInvocationID.xyz, 0 );
+	// THE SPECULAR LOBE (METAL-BOUNCE-1, ENGINE-POLISH-PHOTON-1 stage 2): its F0 kS (rgb) and Fresnel-90
+	// weight kS (alpha) - EVERY surface's, a dielectric's F0 = 0.04 included (Voxelizer_piece_cs.any);
+	// zero only where nothing is or kS = 0. A lamp at cosine mu reaches the specular lobe as well as the
+	// diffuse one, and the lobe re-emits F0 A( mu, r ) + w B( mu, r ) of it - its directional albedo
+	// (JahSpecularAlbedo): the energy a rough metal, and a dielectric's 4 % layer, scatter back into
+	// the room, which a diffuse-only store dropped.
+	// (The volume holds F0 relative to the dielectric's, Voxelizer_piece_cs.any: F0 kS = 0.04 w + 0.96 rgb.)
+	float4 metalVal = OGRE_Load3D( voxelMetalTex, gl_GlobalInvocationID.xyz, 0 );
+	metalVal.xyz = metalVal.www * 0.04f + metalVal.xyz * 0.96f;
 	const bool metalVoxel = metalVal.w > 0.0f;
 
 	normalVal.xyz = normalVal.xyz * 2.0f - 1.0f;
@@ -449,7 +453,7 @@
 			// exactly what HlmsPbs computes for the direct lighting of the same surface
 			// (NdotL * D * kD); the store below is scaled by p_bakingMultiplier = PI / D_max.
 			const float3 lightCol = c_invPI * light.diffuse.xyz * albedoVal.xyz * lightAtten;
-			// ...and the same light before the diffuse albedo, which the metal's lobe takes
+			// ...and the same light before the diffuse albedo, which the specular lobe takes
 			const float3 lightRaw = c_invPI * light.diffuse.xyz * lightAtten;
 
 			// each half's visibility, marched once per lamp and only where it is needed

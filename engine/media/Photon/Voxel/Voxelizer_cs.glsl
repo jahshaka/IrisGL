@@ -90,7 +90,7 @@ uniform restrict writeonly image3D voxelPositionNTex;
 // at its new cell, and only these exact integers make that re-resolve the voxeliser's own bits.
 layout( vulkan( ogre_u11 ) vk_comma @insertpiece(uav11_pf_type) )
 uniform restrict writeonly uimage3D voxelPositionSums;
-// Jahshaka (METAL-BOUNCE-1): THE METAL - the F0 (rgb) and Fresnel-90 weight (alpha) of the metal's
+// Jahshaka (METAL-BOUNCE-1): THE METAL - the F0 (rgb) and Fresnel-90 weight (alpha) of every surface's
 // specular lobe, area means written by the resolve beside the albedo (VoxelMerge_piece_cs.any).
 layout( vulkan( ogre_u12 ) vk_comma @insertpiece(uav12_pf_type) )
 uniform restrict writeonly image3D voxelMetalTex;

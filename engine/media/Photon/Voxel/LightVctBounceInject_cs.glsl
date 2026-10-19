@@ -60,7 +60,7 @@ vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D directBackVoxel;
 @add( vctTexUnit, 1 )
 
 // Jahshaka (METAL-BOUNCE-1): THE METAL after the back side's direct term (VctLighting::setupBounceTextures):
-// the F0 and Fresnel-90 weight of the metal's specular lobe, re-emitted by the lobe's hemispherical
+// the F0 and Fresnel-90 weight of the specular lobe (every surface's, a dielectric's 0.04 too), re-emitted by the lobe's hemispherical
 // integral. A plain Load3D, no sampler.
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelMetalTex;
 @add( vctTexUnit, 1 )

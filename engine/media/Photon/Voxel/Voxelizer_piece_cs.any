@@ -419,17 +419,27 @@
 														  material.texSlices >> 16u, 0 ).xyz;
 			@end
 
-				// THE TWO LOBES (VOXEL-METAL-ALBEDO-1, METAL-BOUNCE-1): of the base colour b at
-				// metalness m, HlmsPbs's diffuse lobe takes b (1 - m) - the albedo volume - and the
-				// metal's specular lobe F0 = b m kS with its Fresnel-90 weight m kS - the metal
-				// volume, which the injection and the bounce re-emit by the lobe's integral
-				// (JahSpecularAlbedo). Both are area means like every material property here.
-				const float metalW = material.metalness * material.specularWeight;
+				// THE TWO LOBES (VOXEL-METAL-ALBEDO-1, METAL-BOUNCE-1, ENGINE-POLISH-PHOTON-1 stage 2): of
+				// the base colour b at metalness m, HlmsPbs's diffuse lobe takes b (1 - m) - the albedo
+				// volume - and its specular lobe kS ( F0 A + B ) with F0 = lerp( 0.04, b, m ), EVERY
+				// surface's, a dielectric's too (800.PixelShader's metallic workflow): the specular
+				// volume holds F0 kS = kS ( 0.04 ( 1 - m ) + b m ) and the Fresnel-90 weight kS, which
+				// the injection and the bounce re-emit by the lobe's integral (JahSpecularAlbedo).
+				// Both are area means like every material property here.
+				// THE VOLUME HOLDS F0 RELATIVE TO THE DIELECTRIC'S: rgb = ( F0 kS - 0.04 kS ) / 0.96 =
+				// kS m ( b - 0.04 ) / 0.96, alpha = kS, and every reader takes F0 kS = 0.04 alpha +
+				// 0.96 rgb (linear, so the area means stay exact). A dielectric then stores rgb = 0 and
+				// its 0.04 kS is exact, where a plain RGBA8 F0 would round 0.04 to 10 / 255 (-2 % of a
+				// 4 % term); a white metal stores 1 exactly. Stated: a metal darker than 0.04 (b m below
+				// 0.04 m) clamps at the dielectric's F0, an excess of under 0.04 kS.
+				const float specW = material.specularWeight;
+				const float3 specRel = max( finalDiffuse.xyz - float3( 0.04f, 0.04f, 0.04f ),
+											float3( 0.0f, 0.0f, 0.0f ) ) *
+									   ( material.metalness * specW * ( 1.0f / 0.96f ) );
 				cAlbedo		= voxelMergeWeigh3( voxelMergeQuantize3( finalDiffuse.xyz *
 																	 ( 1.0f - material.metalness ) ),
 												weight );
-				cMetal		= voxelMergeWeigh4( voxelMergeQuantize4( float4( finalDiffuse.xyz * metalW,
-																			 metalW ) ),
+				cMetal		= voxelMergeWeigh4( voxelMergeQuantize4( float4( specRel, specW ) ),
 												weight );
 				cEmissive		= voxelMergeWeigh3( voxelMergeQuantize3( finalEmissive ),
 													 weight );

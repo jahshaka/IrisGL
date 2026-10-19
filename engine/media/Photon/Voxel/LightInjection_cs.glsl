@@ -69,7 +69,7 @@ vulkan_layout( ogre_t3 ) uniform texture3D voxelCoveragePTex;
 vulkan_layout( ogre_t4 ) uniform texture3D voxelCoverageNTex;
 vulkan_layout( ogre_t5 ) uniform texture3D voxelPositionPTex;
 vulkan_layout( ogre_t6 ) uniform texture3D voxelPositionNTex;
-// Jahshaka (METAL-BOUNCE-1): THE METAL at t7 - the F0 (rgb) and Fresnel-90 weight (alpha) of the metal's
+// Jahshaka (METAL-BOUNCE-1): THE METAL at t7 - the F0 (rgb) and Fresnel-90 weight (alpha) of every surface's
 // specular lobe, re-emitted by the lobe's directional integral (JahSpecularAlbedo).
 vulkan_layout( ogre_t7 ) uniform texture3D voxelMetalTex;
 // Jahshaka (JUNCTION-NORMAL-1): THE EMISSIVE FACTOR PER HALF-AXIS at t8 (the faces looking +a) and t9

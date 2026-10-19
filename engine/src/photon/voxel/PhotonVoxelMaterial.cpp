@@ -160,13 +160,12 @@ namespace Ogre
             // lerp( F0, base, metalness ) - so a metal's energy leaves by its specular lobe, which
             // a voxel used to drop (a white rough metal re-emitted 0). The row carries the base and
             // the metalness and the voxeliser splits them per piece (Voxelizer_piece_cs.any): the
-            // albedo volume the diffuse lobe, the METAL volume the metal's share of the specular
-            // lobe, F0 = base x metalness x kS and its Fresnel-90 weight metalness x kS. kS is the
-            // datablock's specular colour, which scales the whole lobe (Rs = F x D x G x kS); its MEAN
-            // is the weight (a tinted kS on a metal is not voxelised, nor is a metalness map - the
-            // scalars only, like the roughness). WHAT IS NOT STORED: a dielectric's own specular
-            // lobe (F0 0.04: 2.7 % of a white diffuser's re-emission at roughness 1, 6.5 % at 0.5)
-            // and the specular workflows' F0 - the store's specular term is the metal's.
+            // albedo volume the diffuse lobe, the specular ("metal") volume the WHOLE specular lobe,
+            // F0 = lerp( 0.04, base, metalness ) x kS - a dielectric's 0.04 included
+            // (ENGINE-POLISH-PHOTON-1 stage 2) - and its Fresnel-90 weight kS. kS is the datablock's
+            // specular colour, which scales the whole lobe (Rs = F x D x G x kS); its MEAN is the
+            // weight (a tinted kS is not voxelised, nor is a metalness map - the scalars only, like
+            // the roughness). WHAT IS NOT STORED: the specular workflows' F0 (their weight stays 0).
             if( pbsDatablock->getWorkflow() == HlmsPbsDatablock::MetallicWorkflow )
             {
                 const Vector3 kS = pbsDatablock->getSpecular();

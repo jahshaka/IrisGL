@@ -92,9 +92,9 @@ JahHitSurface jahHitSurf = JahHitSurface( 0u, 0u, 0u, vec2( 0.0 ), mat4x3( 1.0 )
 
 /// The material the store was voxelised from, at the hit. False where the table, the slot's
 /// material word or its row is missing (an item the store has not converted yet: one rebuild).
-/// `albedo` is the diffuse lobe's, base x (1 - metalness); `metal` the metal's specular lobe, its F0
-/// (base x metalness x kS) and Fresnel-90 weight (metalness x kS) - the voxeliser's split
-/// (Voxelizer_piece_cs.any, METAL-BOUNCE-1).
+/// `albedo` is the diffuse lobe's, base x (1 - metalness); `metal` the specular lobe, its F0 x kS
+/// (( 0.04 ( 1 - metalness ) + base x metalness ) x kS - a dielectric's too) and Fresnel-90 weight kS -
+/// the voxeliser's split (Voxelizer_piece_cs.any, METAL-BOUNCE-1, ENGINE-POLISH-PHOTON-1 stage 2).
 bool jahHitMaterial( float footprint, out vec3 albedo, out vec3 emissive, out float roughness, out vec4 metal )
 {
 	albedo = vec3( 0.0 );
@@ -116,7 +116,7 @@ bool jahHitMaterial( float footprint, out vec3 albedo, out vec3 emissive, out fl
 	const vec4 diffuse = uintBitsToFloat( uvec4( T.u[b + 4u], T.u[b + 5u], T.u[b + 6u], T.u[b + 7u] ) );
 	const vec4 em = uintBitsToFloat( uvec4( T.u[b + 8u], T.u[b + 9u], T.u[b + 10u], T.u[b + 11u] ) );
 	const uint slices = T.u[b + 12u];
-	const float metalW = em.w * uintBitsToFloat( T.u[b + 13u] );
+	const float specW = uintBitsToFloat( T.u[b + 13u] );
 	const uint flags = T.u[b + 15u];
 	roughness = uintBitsToFloat( T.u[b + 14u] );
 	vec3 base = diffuse.xyz * bgDiffuse.xyz;
@@ -163,7 +163,7 @@ bool jahHitMaterial( float footprint, out vec3 albedo, out vec3 emissive, out fl
 			emissive = em.xyz * textureLod( jahHitPool, vec3( uv, float( slices >> 16u ) ), lod ).xyz;
 	}
 	albedo = base * ( 1.0 - em.w );
-	metal = vec4( base * metalW, metalW );
+	metal = vec4( ( vec3( 0.04 ) * ( 1.0 - em.w ) + base * em.w ) * specW, specW );
 	return true;
 }
 
@@ -293,7 +293,7 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 albedo, float roughness, vec4 metal )
 			sumB += sb * l;
 		}
 	}
-	// a non-metal adds exactly zero (the metal's terms are zero): its light is the diffuse lobe's, bit for bit
+	// a surface with no specular lobe (kS = 0) adds exactly zero: its light is the diffuse lobe's, bit for bit
 	return sum * albedo + ( sumA * metal.xyz + sumB * metal.w );
 }
 
