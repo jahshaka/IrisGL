@@ -1772,8 +1772,9 @@ bool OgreScene::shadowMapDigests(std::vector<ShadowMapDigest> &out)
 }
 
 // THE SUN MAPS' CASTERS BY ROUTE (Scene::shadowCasterRoutes; decision 15.1's measurement): every shown
-// shadow-casting item whose world box reaches a sun map's light frustum (its view-projection, the depth
-// unbounded: the maps draw with depth clamp), by its route, with its level-0 triangles.
+// shadow-casting item whose world box reaches a sun map's light frustum (its view-projection onto the map's own
+// rectangle of the atlas, the depth unbounded: the maps draw with depth clamp), by its route, with its level-0
+// triangles.
 bool OgreScene::shadowCasterRoutes(std::vector<ShadowRouteShare> &out)
 {
     if (hostPosts()) { bool r = false; requestOnEngine([&] { r = shadowCasterRoutes(out); }); return r; }
@@ -1791,6 +1792,12 @@ bool OgreScene::shadowCasterRoutes(std::vector<ShadowRouteShare> &out)
                 const Ogre::Light *l = sn->getLightAssociatedWith(i);
                 if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL) continue;
                 const Ogre::Matrix4 vp = sn->getViewProjectionMatrix(i);
+                // THE MAP'S OWN RECTANGLE of the atlas: getViewProjectionMatrix lands in IMAGE space with the map's
+                // offset and length in it (clipToImageSpace x proj x view), never [-1, 1] (the verb tested a box
+                // against [-1, 1] there - every map counted everything within a whole image of its rectangle).
+                const Ogre::ShadowTextureDefinition *td = sn->getDefinition()->getShadowTextureDefinition(i);
+                const float u0 = float(td->uvOffset.x), u1 = u0 + float(td->uvLength.x);
+                const float v0 = float(td->uvOffset.y), v1 = v0 + float(td->uvLength.y);
                 ShadowRouteShare share;
                 share.map = unsigned(i);
                 for (Node *nd : mItemNodes) {
@@ -1807,7 +1814,7 @@ bool OgreScene::shadowCasterRoutes(std::vector<ShadowRouteShare> &out)
                         a.x = std::min(a.x, float(q.x) / w); a.y = std::min(a.y, float(q.y) / w);
                         b.x = std::max(b.x, float(q.x) / w); b.y = std::max(b.y, float(q.y) / w);
                     }
-                    if (b.x < -1.0f || a.x > 1.0f || b.y < -1.0f || a.y > 1.0f) continue;
+                    if (b.x < u0 || a.x > u1 || b.y < v0 || a.y > v1) continue;
                     const AtomRoute r = atomRouteFor(*nd, flags);
                     // A CASTER THE CUT DRAWS while its colour stays on PBS (stage 2) is counted as that, not as its reason.
                     const unsigned route = (r != AtomRoute::Atom && (flags & kGpuAtomCaster))
