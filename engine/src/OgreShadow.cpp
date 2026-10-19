@@ -345,7 +345,9 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         Ogre::IdString(name) == Ogre::IdString(OgreView::kReflectShadowNodeName) ? ShadowNodeKind::Reflect
         : Ogre::IdString(name) == Ogre::IdString(OgreView::kProbeShadowNodeName) ? ShadowNodeKind::Probe
                                                                                  : ShadowNodeKind::View;
-    const Ogre::uint32 casterMask = shadowCasterChannels(kind);
+    // THE STOCK CASTER'S CHANNEL (kStockCasterBit, ENGINE-POLISH-ATOM-1 stage 2): the scene passes draw the casters the
+    // caster cut does not (an item whose caster the cut draws drops the pair); within the reserved bits (trap 6).
+    const Ogre::uint32 casterMask = shadowPassMask(kind);
     const Ogre::uint8 directionalMask = Ogre::uint8(1u << Ogre::Light::LT_DIRECTIONAL);
     const Ogre::uint8 pointMask       = Ogre::uint8(1u << Ogre::Light::LT_POINT);
     const Ogre::uint8 spotMask        = Ogre::uint8(1u << Ogre::Light::LT_SPOTLIGHT);
@@ -1806,7 +1808,11 @@ bool OgreScene::shadowCasterRoutes(std::vector<ShadowRouteShare> &out)
                         b.x = std::max(b.x, float(q.x) / w); b.y = std::max(b.y, float(q.y) / w);
                     }
                     if (b.x < -1.0f || a.x > 1.0f || b.y < -1.0f || a.y > 1.0f) continue;
-                    const unsigned route = std::min(unsigned(atomRouteFor(*nd, flags)), ShadowRouteShare::kRoutes - 1u);
+                    const AtomRoute r = atomRouteFor(*nd, flags);
+                    // A CASTER THE CUT DRAWS while its colour stays on PBS (stage 2) is counted as that, not as its reason.
+                    const unsigned route = (r != AtomRoute::Atom && (flags & kGpuAtomCaster))
+                                               ? ShadowRouteShare::kAtomCaster
+                                               : std::min(unsigned(r), ShadowRouteShare::kAtomCaster - 1u);
                     ++share.items[route];
                     share.triangles[route] += itemLevel0Triangles(*nd->item);
                 }

@@ -373,26 +373,56 @@ OgreScene::AtomRoute OgreScene::atomRouteFor(const Node &n, Ogre::uint32 flags) 
     // notes: the next drain re-composes the item and re-routes it.
     if (HlmsAtom::isBucketPending(db)) return AtomRoute::Pending;
     if (flags & kGpuSkinned) return AtomRoute::Skinned;
+    if (!atomRowReadable(n, db, true)) return AtomRoute::NoRow;
+    return AtomRoute::Atom;
+}
+
+bool OgreScene::atomRowReadable(const Node &n, const Ogre::HlmsDatablock *db, bool decode) const {
+    const Ogre::Item *item = n.item;
     // THE ROW IS SUBMESH 0's OF A TRIANGLE LIST: every mesh this engine builds has
     // one submesh (buildMeshV2 is the one createSubMesh a scene mesh meets), and a
     // line mesh has no index buffer and so no row — both are `noRow`.
-    if (item->getNumSubItems() > 1u) return AtomRoute::NoRow;
+    if (!item || item->getNumSubItems() != 1u) return false;
     {
         const Ogre::VertexArrayObjectArray &vaos = item->getSubItem(0)->getSubMesh()->mVao[Ogre::VpNormal];
-        if (vaos.empty() || !vaos[0] || vaos[0]->getOperationType() != Ogre::OT_TRIANGLE_LIST)
-            return AtomRoute::NoRow;
+        if (vaos.empty() || !vaos[0] || vaos[0]->getOperationType() != Ogre::OT_TRIANGLE_LIST) return false;
     }
     if (n.gpuMeshSlot == GpuScene::kNoMesh || !mGpuScene.live() ||
-        n.gpuMeshSlot >= mGpuScene.levelMirrorEntries() / GpuScene::kLevelsPerMesh ||
-        HlmsAtom::materialWordOf(db) == HlmsAtom::kNoMaterialWord)
-        return AtomRoute::NoRow;
+        n.gpuMeshSlot >= mGpuScene.levelMirrorEntries() / GpuScene::kLevelsPerMesh)
+        return false;
+    if (decode && HlmsAtom::materialWordOf(db) == HlmsAtom::kNoMaterialWord) return false;
     // THE ROW MUST BE ONE THE DECODE READS: device addresses for both buffers and a
     // float3 normal (800.Atom_piece_ps.any refuses any other layout, and a refused
-    // pixel would be a hole where the id pass drew).
+    // pixel would be a hole where the id pass drew). The caster cut reads the same row.
     const uint32_t row = mGpuScene.levelAt(n.gpuMeshSlot, 0u).geomRow;
     const uint32_t *r = row == GpuScene::kNoGeomRow ? nullptr : mGpuScene.geomRowAt(row);
-    if (!r || !(r[0] | r[1]) || !(r[2] | r[3]) || (r[8] & 0x70u) != 0x10u) return AtomRoute::NoRow;
-    return AtomRoute::Atom;
+    return r && (r[0] | r[1]) && (r[2] | r[3]) && (r[8] & 0x70u) == 0x10u;
+}
+
+bool OgreScene::atomCasterThroughCut(const Node &n, Ogre::uint32 flags, AtomRoute route) const {
+    if (route == AtomRoute::Atom) return true;
+    // A BLENDED ITEM'S CASTER (ENGINE-POLISH-ATOM-1 stage 2): an id buffer has no slot for order-dependent colour,
+    // so its main pass stays PBS — but its stock caster is the OPAQUE silhouette (HlmsPbs::calculateHashForPreCaster
+    // keeps no blending; the caster's blendblock writes depth), which the caster cut draws exactly. Not when the
+    // blended material is ALSO alpha-tested (its stock caster discards at the mask: the masked ranges' business),
+    // nor skinned (the cut reads the bind pose), nor a caster that culls its FRONT faces (the cut's pipelines cull
+    // back faces or none), nor a row the cut cannot read.
+    if (route != AtomRoute::Blended) return false;
+    if (flags & (kGpuAlphaTested | kGpuSkinned)) return false;
+    const Ogre::HlmsDatablock *db = n.item->getSubItem(0)->getDatablock();
+    const Ogre::CullingMode casterCull = db->getMacroblock(true)->mCullMode;
+    if (casterCull != Ogre::CULL_CLOCKWISE && casterCull != Ogre::CULL_NONE) return false;
+    return atomRowReadable(n, db, false);
+}
+
+void OgreScene::placeAtomCaster(const Node &n, bool casterInCut) const {
+    Ogre::Item *item = n.item;
+    if (!item) return;
+    // The pair follows the world channels the item carries now (stockCasterBits): none for a helper, a backdrop or
+    // a distortion item, which no shadow pass draws either way.
+    const Ogre::uint32 cur = item->getVisibilityFlags();
+    const Ogre::uint32 want = (cur & ~kStockCasterBits) | (casterInCut ? 0u : stockCasterBits(cur));
+    if (want != cur) item->setVisibilityFlags(want);
 }
 
 unsigned long long itemLevel0Triangles(const Ogre::Item &item) {
@@ -446,7 +476,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         if (viewCam) {
             const Ogre::Aabb box = n->item->getWorldAabb();
             if (viewCam->isVisible(Ogre::AxisAlignedBox(box.getMinimum(), box.getMaximum()))) {
-                const unsigned ri = std::min(unsigned(r), ShadowRouteShare::kRoutes - 1u);
+                const unsigned ri = std::min(unsigned(r), ShadowRouteShare::kAtomCaster - 1u);
                 ++st.viewRouteItems[ri];
                 st.viewRouteTriangles[ri] += itemLevel0Triangles(*n->item);
             }
@@ -467,6 +497,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         }
         if (r != AtomRoute::Atom) {
             ++st.pbsItems;
+            if (flags & kGpuAtomCaster) ++st.atomCaster;   // ...whose caster the cut draws (stage 2)
             continue;
         }
         ++st.atomItems;

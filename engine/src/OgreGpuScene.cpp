@@ -927,12 +927,21 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n, bool atomDraw) const {
     // THE RENDER-QUEUE SPLIT (ATOM S3-DRAW): the id pass draws it, the decode
     // shades it (atomRouteFor, OgreAtomDraw.cpp). A route that moves with nothing else
     // moved is an in-place datablock edit or a bake, which the PBS change log marks.
-    if (atomDraw && atomRouteFor(n, f) == AtomRoute::Atom) {
-        f |= kGpuAtom;
-        // ...BOTH FACES (ATOM-TWO-SIDED-1): the route admits a no-cull material only
-        // with a no-cull caster, so one flag says it for the id pass and the caster cut.
-        if (n.item->getSubItem(0)->getDatablock()->getMacroblock()->mCullMode == Ogre::CULL_NONE)
-            f |= kGpuTwoSided;
+    if (atomDraw) {
+        const AtomRoute route = atomRouteFor(n, f);
+        if (route == AtomRoute::Atom) {
+            f |= kGpuAtom | kGpuAtomCaster;
+            // ...BOTH FACES (ATOM-TWO-SIDED-1): the route admits a no-cull material only
+            // with a no-cull caster, so one flag says it for the id pass and the caster cut.
+            if (n.item->getSubItem(0)->getDatablock()->getMacroblock()->mCullMode == Ogre::CULL_NONE)
+                f |= kGpuTwoSided;
+        } else if (atomCasterThroughCut(n, f, route)) {
+            // THE CASTER ALONE THROUGH THE CUT (ENGINE-POLISH-ATOM-1 stage 2): its colour stays on PBS; the
+            // faces are its CASTER's (the id pass never draws it, so the flag speaks for the caster cut only).
+            f |= kGpuAtomCaster;
+            if (n.item->getSubItem(0)->getDatablock()->getMacroblock(true)->mCullMode == Ogre::CULL_NONE)
+                f |= kGpuTwoSided;
+        }
     }
     return f;
 }
@@ -994,7 +1003,8 @@ void OgreScene::applyComposeTail(const Node &n, const ComposeTail &tail) const {
     if (tail.queueMaterial) ++mSubstrate.lastTailQueues;
     // (the identity row's digest: the tail, in the order it is applied — decision 18.4)
     if (n.itemSlot != size_t(-1)) {
-        const unsigned char t[2] = { 'T', (unsigned char)((tail.atom ? 1u : 0u) | (tail.queueMaterial ? 2u : 0u)) };
+        const unsigned char t[2] = { 'T', (unsigned char)((tail.atom ? 1u : 0u) | (tail.queueMaterial ? 2u : 0u) |
+                                                          (tail.casterInCut ? 4u : 0u)) };
         const uint32_t slot = uint32_t(n.itemSlot);
         mGpuScene.digestFold(t, 2u);
         mGpuScene.digestFold(&slot, sizeof(slot));
@@ -1002,6 +1012,8 @@ void OgreScene::applyComposeTail(const Node &n, const ComposeTail &tail) const {
     // THE SPLIT'S QUEUE follows the route: an Atom item lives in kAtomRenderQueue (which a view with an id pass
     // skips), everything else where its material files it (renderQueueFor).
     placeAtomQueue(n, tail.atom);
+    // ...and THE CASTER'S ROUTE: a caster the cut draws leaves the stock shadow passes' channel (kStockCasterBit).
+    placeAtomCaster(n, tail.casterInCut);
     if (tail.queueMaterial) mPhoton.queueMaterialSlot(uint32_t(n.itemSlot));
 }
 
@@ -1024,6 +1036,7 @@ void OgreScene::composeGpuInstanceLane(const Node &n, const Ogre::Matrix4 &world
     std::memcpy(&out.boundsMax[3], &flags, sizeof(uint32_t));
     // (the split's queue — the Atom route's render-queue edit — is the serial tail's: applyComposeTail)
     tail.atom = (flags & kGpuAtom) != 0u;
+    tail.casterInCut = (flags & kGpuAtomCaster) != 0u;   // ...and its stock-caster channel's (placeAtomCaster)
     out.ids[0] = gpuKeyOf(n);   // Ogre's 32-bit key, never the 64-bit id (U3 stage 3, F6)
     out.ids[1] = gpuMaterialWordFor(n, flags, tail.queueMaterial);
     out.ids[2] = uint32_t(n.lightMask);
@@ -1425,7 +1438,7 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
             if (!laneStaged && !mGpuScene.stageRow(i, cand, node.selfId)) continue;
             sub.shareInflight[k] = i;   // staged; its tail and its lane halves not yet collected
             if (throwHere) throw std::runtime_error("gpuscene.throwInLane (after the stage)");
-            done.push_back({ i, tail.atom, tail.queueMaterial, mGpuScene.notifyLanes(i) });
+            done.push_back({ i, tail.atom, tail.queueMaterial, mGpuScene.notifyLanes(i), tail.casterInCut });
             sub.shareInflight[k] = GpuSceneSubstrate::kNoSlot;
         }
     };
@@ -1545,7 +1558,7 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
             } catch (...) {
                 tail = ComposeTail();
             }
-            replay.push_back({ i, tail.atom, tail.queueMaterial, detail::GpuScene::kLanesNeverRan });
+            replay.push_back({ i, tail.atom, tail.queueMaterial, detail::GpuScene::kLanesNeverRan, tail.casterInCut });
         }
         done.swap(replay);
         sub.shareInflight[k] = GpuSceneSubstrate::kNoSlot;
@@ -1592,7 +1605,7 @@ void OgreScene::walkGpuScene(bool graphIsCurrent) const {
         for (const std::vector<GpuSceneSubstrate::Composed> &done : sub.shareComposed) {
             for (const GpuSceneSubstrate::Composed &c : done) {
                 const Node &node = *mItemNodes[c.slot];
-                applyComposeTail(node, ComposeTail{ c.atom, c.queueMaterial });
+                applyComposeTail(node, ComposeTail{ c.atom, c.queueMaterial, c.casterInCut });
                 mGpuScene.noteStagedSplit(c.slot, c.laneOwed);
                 sub.dirty.push_back(c.slot);
                 ++sub.aabbReads;

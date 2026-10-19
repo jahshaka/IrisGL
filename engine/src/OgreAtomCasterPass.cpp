@@ -12,8 +12,10 @@
 //      image — an error under one texel moves no texel's depth by more than the
 //      rasteriser's own quantisation. FRUSTUM ONLY: a light has no depth pyramid.
 //      The predicate is the node kind's caster channel on the GPU scene's flags:
-//      kGpuVisible | kGpuAtom | kGpuCaster, and for the probe kind (probes —
-//      the still world, shadowCasterChannels) not kGpuMover.
+//      kGpuVisible | kGpuAtomCaster | kGpuCaster (every Atom item, and the items whose
+//      colour stays on PBS while the cut draws their caster — a blended item,
+//      ENGINE-POLISH-ATOM-1 stage 2; they leave the stock passes' channel, kStockCasterBit),
+//      and for the probe kind (probes — the still world, shadowCasterChannels) not kGpuMover.
 //   2. THE EDGES the id pass records (the previous use's draw reads before this cut's
 //      writes; the cut's writes before the draw's indirect/index/vertex reads).
 //   3. OGRE'S RENDER PASS for the map (AtomPass::beginRenderPass: the atlas's depth,
@@ -29,7 +31,7 @@
 // views, mirrors and probes render — a list per map would be ~15 MB each at the first
 // budget, up to 59 maps a node.
 //
-// THE PASS'S GATE (AtomPassGate): a scene with no Atom item executes this pass as
+// THE PASS'S GATE (AtomPassGate, casterGate): a scene with no caster for the cut (kGpuAtomCaster) executes this pass as
 // nothing — Ogre's render pass stays open across it, the upstream pass list's cost.
 //
 // THE PIPELINES: no vertex attributes, push constants only (128 bytes), a render pass
@@ -1064,7 +1066,7 @@ bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreS
 }
 
 bool casterGate(const AtomPassContext &ctx) {
-    return ctx.scene && ctx.scene->atomDrawOn() && ctx.scene->atom().hasItems();
+    return ctx.scene && ctx.scene->atomDrawOn() && ctx.scene->atom().hasCasters();
 }
 
 void recordCasterPass(AtomPassContext &ctx) {
@@ -1114,7 +1116,7 @@ void recordCasterPass(AtomPassContext &ctx) {
         two.cullFront = false;
         two.cullNone = true;
         const VkPipeline warmed = pipelineFor(C, vkRs, two);
-        if (atom.hasTwoSidedItems()) pipelineTwoSided = warmed;
+        if (atom.hasTwoSidedCasters()) pipelineTwoSided = warmed;
     }
 
     // THE CUBE FACE: the scene pass turned the camera to its face for its own length and
@@ -1151,7 +1153,7 @@ void recordCasterPass(AtomPassContext &ctx) {
         req.planes[p * 4 + 2] = 0.0f;
         req.planes[p * 4 + 3] = 1.0f;
     }
-    req.flagsRequired = kGpuVisible | kGpuAtom | kGpuCaster;
+    req.flagsRequired = kGpuVisible | kGpuAtomCaster | kGpuCaster;
     // THE NODE KIND'S CHANNEL (shadowCasterChannels): a probe-kind node (the probes)
     // draws the still world only.
     const Ogre::IdString nodeName = pass->getParentNode()->getName();
@@ -1429,7 +1431,7 @@ void recordCasterPass(AtomPassContext &ctx) {
             for (int r = 0; r < 4; ++r)
                 for (int c = 0; c < 4; ++c) pr.viewProj[r * 4 + c] = float(cullM[r][c]);
             pr.flagsRequired = kGpuVisible | kGpuCaster;
-            pr.flagsForbidden = kGpuAtom;
+            pr.flagsForbidden = kGpuAtomCaster;   // the casters the STOCK pass draws (kStockCasterBit's set)
             pr.mode = 2u;
             // ITS OWN PYRAMID REQUEST (decision 16.4: it inherited the first cut's, 0 with the cull off).
             pr.hzbLevels = lp->tex->getNumMipmaps();

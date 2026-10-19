@@ -90,10 +90,15 @@ public:
     /// warm-up's second frame, OgreView.cpp): the screen decode's draws for the words the
     /// Atom items wear, then the Atom view's table. A still frame does nothing.
     void step();
-    /// The scene files any item in the Atom queue (the caster pass's gate).
+    /// The scene files any item in the Atom queue.
     bool hasItems() const { return !mWords.empty(); }
+    /// The caster cut has a caster to draw (kGpuAtomCaster: an Atom item, or a caster-only one — the caster pass's
+    /// gate; ENGINE-POLISH-ATOM-1 stage 2).
+    bool hasCasters() const { return mFeed.casterCount != 0u; }
     /// The GPU scene holds an Atom item drawn from both sides (kGpuTwoSided).
     bool hasTwoSidedItems() const { return mFeed.twoSidedCount != 0u; }
+    /// ...and the CASTER CUT's: the slots whose caster the cut draws with both faces (kGpuAtomCaster | kGpuTwoSided).
+    bool hasTwoSidedCasters() const { return mFeed.twoSidedCasterCount != 0u; }
     unsigned long long wordSlotVisits() const { return mFeed.words.visits(); }
 
     // --- THE ATOM VIEW ----------------------------------------------------------------------
@@ -163,26 +168,35 @@ private:
     /// this replaces ran on every mover frame (W13: 18-19 ms at 10k).
     struct Words final : GpuSceneObserver {
         WordCounts words;
-        /// THE TWO-SIDED ATOM SLOTS (ATOM-TWO-SIDED-1): kGpuAtom | kGpuTwoSided, per slot
-        /// and counted — what gates the passes' no-cull draw of the two-sided range.
-        std::vector<uint8_t> twoSided;
-        unsigned twoSidedCount = 0u;
+        /// THE SLOTS THE PASSES' GATES COUNT, per slot and counted (slotBits): bit 0 a two-sided Atom item
+        /// (kGpuAtom | kGpuTwoSided, ATOM-TWO-SIDED-1: the id pass's no-cull draw of the two-sided range), bit 1 a
+        /// caster the cut draws with both faces (kGpuAtomCaster | kGpuTwoSided: the caster cut's), bit 2 a caster
+        /// the cut draws at all (kGpuAtomCaster: the caster pass's gate; ENGINE-POLISH-ATOM-1 stage 2).
+        std::vector<uint8_t> slotBits;
+        unsigned twoSidedCount = 0u, twoSidedCasterCount = 0u, casterCount = 0u;
         void gpuSlotChanged(uint32_t slot, const GpuInstance *now) override {
             uint32_t flags = 0u;
             if (now) std::memcpy(&flags, &now->boundsMax[3], sizeof(flags));
             words.set(slot, (now && (flags & kGpuAtom)) ? now->raster[0] : WordCounts::kNone);
-            const uint8_t two = (now && (flags & kGpuAtom) && (flags & kGpuTwoSided)) ? 1u : 0u;
-            if (slot >= twoSided.size()) {
-                if (!two) return;
-                twoSided.resize(size_t(slot) + 1u, 0u);
+            const bool twoFaces = now && (flags & kGpuTwoSided);
+            const uint8_t bits = uint8_t((twoFaces && (flags & kGpuAtom) ? 1u : 0u) |
+                                        (twoFaces && (flags & kGpuAtomCaster) ? 2u : 0u) |
+                                        (now && (flags & kGpuAtomCaster) ? 4u : 0u));
+            if (slot >= slotBits.size()) {
+                if (!bits) return;
+                slotBits.resize(size_t(slot) + 1u, 0u);
             }
-            twoSidedCount = twoSidedCount - twoSided[slot] + two;
-            twoSided[slot] = two;
+            twoSidedCount = twoSidedCount - (slotBits[slot] & 1u) + (bits & 1u);
+            twoSidedCasterCount = twoSidedCasterCount - ((slotBits[slot] >> 1) & 1u) + ((bits >> 1) & 1u);
+            casterCount = casterCount - ((slotBits[slot] >> 2) & 1u) + ((bits >> 2) & 1u);
+            slotBits[slot] = bits;
         }
         void gpuSceneReset() override {
             words.reset();
-            twoSided.clear();
+            slotBits.clear();
             twoSidedCount = 0u;
+            twoSidedCasterCount = 0u;
+            casterCount = 0u;
         }
     };
     Words mFeed;

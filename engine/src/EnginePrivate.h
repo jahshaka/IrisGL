@@ -627,6 +627,26 @@ constexpr Ogre::uint32 kCardSubjectBit = 1u << 10;
 //     execution-gated by kPhotonSceneExecutionBit), whose mask is this bit alone.
 constexpr Ogre::uint32 kPhotonViewBit  = 1u << 11;
 
+// THE STOCK CASTER CHANNEL (ENGINE-POLISH-ATOM-1 stage 2). The TENTH and ELEVENTH bits, ADDED beside an item's world
+// channel (never instead of it): kStockCasterBit beside kVisibleBit, kStockMoverCasterBit beside kMovableBit
+// (stockCasterBits). The shadow nodes' SCENE passes — the stock PBS caster — ask for THESE (shadowPassMask), never for
+// the world channels themselves, so an item whose caster the caster cut draws (kGpuAtomCaster: a blended item whose
+// colour stays on PBS) drops the pair and no stock shadow pass draws it a second time, while every other reader of
+// kVisibleBit / kMovableBit — the probe faces, the planar allowlist, the GI gathers, the GPU scene's flags, the caster
+// scans and the shadow node's casters box (Ogre's LAYER_SHADOW_CASTER under the viewport's mask, which sizes the
+// splits) — goes on seeing it exactly as before. Ogre's visibility test is ANY-BIT-SET: a pass cannot EXCLUDE a bit,
+// so the exclusion is this include channel that the cut-routed item does not carry (the inversion idea of the bits
+// above, applied to one pass family only). The pair, not one bit: the PROBE kind's maps draw the still world only.
+// SET by itemVisibilityFlags / the billboard branch (every world-channel item starts stock) and taken away by the GPU
+// scene's compose tail (OgreScene::placeAtomCaster) for kGpuAtomCaster items, the way placeAtomQueue files the queue.
+constexpr Ogre::uint32 kStockCasterBit      = 1u << 12;
+constexpr Ogre::uint32 kStockMoverCasterBit = 1u << 13;
+constexpr Ogre::uint32 kStockCasterBits     = kStockCasterBit | kStockMoverCasterBit;
+/// The stock-caster pair that goes with an item's world channels.
+inline Ogre::uint32 stockCasterBits(Ogre::uint32 channels) {
+    return ((channels & kVisibleBit) ? kStockCasterBit : 0u) | ((channels & kMovableBit) ? kStockMoverCasterBit : 0u);
+}
+
 // ---------------------------------------------------------------------------
 // THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
 // ---------------------------------------------------------------------------
@@ -698,6 +718,12 @@ constexpr unsigned kShadowNodeKinds = 3u;
 /// where they intersect. Never hard-code kVisibleBit as "the casters" elsewhere.
 inline Ogre::uint32 shadowCasterChannels(ShadowNodeKind kind) {
     return kind == ShadowNodeKind::Probe ? kVisibleBit : (kVisibleBit | kMovableBit);
+}
+/// THE SHADOW NODE'S SCENE PASSES' MASK, per kind: the stock-caster channel of shadowCasterChannels(kind)
+/// (kStockCasterBit's note) — the casters the STOCK caster draws; the caster cut draws the kGpuAtomCaster rest.
+/// Within RESERVED_VISIBILITY_FLAGS by construction (trap 6).
+inline Ogre::uint32 shadowPassMask(ShadowNodeKind kind) {
+    return stockCasterBits(shadowCasterChannels(kind)) & Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS;
 }
 inline Ogre::uint32 allShadowCasterChannels() {
     return shadowCasterChannels(ShadowNodeKind::View) |
@@ -6308,6 +6334,13 @@ private:
         Atom, NotWorld, NotPbs, CustomPiece, Blended, CullFront, Planar, Pending, AlphaTested, Skinned, NoRow, Stock
     };
     AtomRoute atomRouteFor(const Node &n, Ogre::uint32 flags) const;
+    /// THE CASTER'S ROUTE (ENGINE-POLISH-ATOM-1 stage 2): the caster cut draws this item's caster — an Atom item, or
+    /// a Blended one (its colour stays on PBS; its stock caster is the opaque silhouette) with no alpha test, no
+    /// skin, a caster that culls back faces or none, and a row the cut reads. gpuFlagsFor's kGpuAtomCaster.
+    bool atomCasterThroughCut(const Node &n, Ogre::uint32 flags, AtomRoute route) const;
+    /// THE ROW TESTS (atomRouteFor's NoRow): one submesh, a triangle list, a mesh slot with levels, a geometry row
+    /// with both device addresses and a float3 normal — and, for the decode (`decode`), a material word.
+    bool atomRowReadable(const Node &n, const Ogre::HlmsDatablock *db, bool decode) const;
 public:
     /// The split is live in this scene: the GPU scene exists, the id pass can run on
     /// this device (OgreAtomIdPass.cpp) and the measurement door is open.
@@ -6349,6 +6382,9 @@ private:
     /// Files the node's Item in kAtomRenderQueue (atom) or back where its material
     /// puts it (renderQueueFor). Called by composeGpuInstance.
     void placeAtomQueue(const Node &n, bool atom) const;
+    /// ...and its stock-caster channel (kStockCasterBit): taken away when the caster cut draws its caster
+    /// (kGpuAtomCaster), given back when it does not. Called by composeGpuInstance beside placeAtomQueue.
+    void placeAtomCaster(const Node &n, bool casterInCut) const;
 public:
     /// OgreView::syncAtomDraw's report, every frame (both false on detach).
     void noteAtomPbsView(const void *view, bool stereo, bool passthrough) {
@@ -6538,7 +6574,7 @@ private:
     /// its datablock, the material store's map, the skin rows) and returns what the serial tail owes — the Atom
     /// route's render-queue edit (Ogre state) and the material store's queue push (a shared vector) — which the walk
     /// replays in slot order after the lanes, the serial compose's order. composeGpuInstance = lane + tail.
-    struct ComposeTail { bool atom = false, queueMaterial = false; };
+    struct ComposeTail { bool atom = false, queueMaterial = false, casterInCut = false; };
     void composeGpuInstanceLane(const Node &n, const Ogre::Matrix4 &world, bool graphIsCurrent,
                                 detail::GpuInstance &out, ComposeTail &tail) const;
     void applyComposeTail(const Node &n, const ComposeTail &tail) const;

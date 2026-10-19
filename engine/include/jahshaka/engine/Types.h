@@ -5069,10 +5069,12 @@ struct ShadowMapDigest {
 /// 15.1, ATOM-ROUTE-COVERAGE-1): the shown shadow-casting items whose world box reaches the map's light
 /// frustum, by the render-queue split's route (AtomDrawStatus's reasons, in its order: 0 atom, 1 notWorld,
 /// 2 notPbs, 3 customPiece, 4 blended, 5 cullFront, 6 planar, 7 pending, 8 alphaTested, 9 skinned, 10 noRow,
-/// 11 stock) - the items and their level-0 triangles. Read on the host from the items' boxes (a door, not
-/// a frame's work).
+/// 11 stock) - the items and their level-0 triangles - and 12 atomCaster: an item whose main pass stays on PBS
+/// (blended) while the caster cut draws its caster (ENGINE-POLISH-ATOM-1 stage 2), so its own reason counts it
+/// no more. Read on the host from the items' boxes (a door, not a frame's work).
 struct ShadowRouteShare {
-    static constexpr unsigned kRoutes = 12u;
+    static constexpr unsigned kAtomCaster = 12u;   ///< the caster-only route (the split's own routes are 0..11)
+    static constexpr unsigned kRoutes = 13u;
     unsigned map = 0;
     unsigned items[kRoutes] = {};
     unsigned long long triangles[kRoutes] = {};
@@ -5117,14 +5119,17 @@ struct AtomDrawStatus {
     unsigned alphaTested = 0;
     unsigned skinned = 0;
     unsigned noRow = 0;
+    /// THE CASTER-ONLY ROUTE (ENGINE-POLISH-ATOM-1 stage 2): PBS items (counted under their reason above) whose
+    /// shadow-map caster the caster cut draws - a blended item: its stock caster is the opaque silhouette.
+    unsigned atomCaster = 0;
     unsigned stockItems = 0;
     /// THE CAMERA VIEW BY ROUTE (ENGINE-POLISH-ATOM-1 stage 1): the shown items whose world box reaches the first
     /// view's camera frustum, by route (ShadowRouteShare's order: 0 atom ... 11 stock), and their level-0 triangles
     /// (every submesh's finest level) - the main pass's share per route, beside the maps' (Scene::shadowCasterRoutes).
     /// `viewRoutesValid` false without a view.
     bool     viewRoutesValid = false;
-    unsigned viewRouteItems[ShadowRouteShare::kRoutes] = {};
-    unsigned long long viewRouteTriangles[ShadowRouteShare::kRoutes] = {};
+    unsigned viewRouteItems[ShadowRouteShare::kAtomCaster] = {};
+    unsigned long long viewRouteTriangles[ShadowRouteShare::kAtomCaster] = {};
     unsigned materials = 0;
     unsigned buckets = 0;
     unsigned twins = 0;

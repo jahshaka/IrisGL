@@ -226,6 +226,12 @@ enum GpuInstanceFlag : uint32_t {
     /// (jahHitIsMetal and rq_reflect.comp's routing). The gather's rays ignore it: their
     /// records stay diffuse-only (SPECKLE-FIX-1).
     kGpuMetal = 1u << 12,
+    /// ENGINE-POLISH-ATOM-1 stage 2: the CASTER CUT draws its caster (OgreScene::atomCasterThroughCut) — every
+    /// Atom item, and an item whose MAIN pass stays on PBS but whose caster the cut can draw (a blended item: its
+    /// stock caster is the opaque silhouette, HlmsPbs::calculateHashForPreCaster). The caster cut asks for it
+    /// (Visible | Caster | AtomCaster); such an item drops its stock-caster channel (kStockCasterBit), so no stock
+    /// shadow scene pass draws it too. kGpuTwoSided on an AtomCaster-only item names its CASTER's faces.
+    kGpuAtomCaster = 1u << 13,
 };
 /// The metalness from which a hit is a metal's (kGpuMetal). Below it the CARD answers,
 /// from it the metal routes, and the switch is a STEP (REFLECT-FIX-1 fix round,

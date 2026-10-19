@@ -1047,7 +1047,9 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // is what a dragged object wants while it is being dragged, and the
     // document's own answer is not touched.
     const bool moving = n.movable || n.dragMover;
-    const Ogre::uint32 channel = moving ? kMovableBit : kVisibleBit;
+    // ...AND THE STOCK CASTER'S CHANNEL beside it (kStockCasterBit): every world item starts on the stock shadow
+    // passes; the GPU scene's compose takes the pair away when the caster cut draws its caster (placeAtomCaster).
+    const Ogre::uint32 channel = (moving ? kMovableBit : kVisibleBit) | stockCasterBits(moving ? kMovableBit : kVisibleBit);
     if (unlit) return channel;
     // A HIDDEN NODE MUST NOT BOUNCE LIGHT (SMOKE_FIX S12). Ogre's own hide —
     // SceneNode::setVisible — toggles the LAYER_VISIBILITY bit, which
@@ -1100,7 +1102,8 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
                                 ? (n.backdrop ? kBackdropBit
                                               : (kHelperBit | (n.vrHelper ? kVrHelperBit : 0u)))
                                 : ((n.movable || n.dragMover) ? kMovableBit : kVisibleBit);
-    if (n.billboards) n.billboards->setVisibilityFlags(n.shown ? on : 0u);
+    // (a billboard set is always a stock caster: the stock-caster pair beside its channel, kStockCasterBit)
+    if (n.billboards) n.billboards->setVisibilityFlags(n.shown ? (on | stockCasterBits(on)) : 0u);
     if (n.billboards) n.billboards->setCastShadows(n.castShadow && (on & allShadowCasterChannels()));
     if (n.particleDef) n.particleDef->setVisibilityFlags(n.shown ? particleVisibilityBits(n) : 0u);
 }

@@ -132,6 +132,7 @@ public:
         bool atom = false;
         bool queueMaterial = false;
         uint32_t laneOwed = 0;
+        bool casterInCut = false;   ///< the tail's stock-caster edit (OgreScene::placeAtomCaster)
     };
     std::vector<std::vector<Composed>> shareComposed;
     /// A share that threw (decision 18.3): its error, and the shares recomposed on the frame's thread, ever.
