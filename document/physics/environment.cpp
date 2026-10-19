@@ -673,7 +673,6 @@ void Environment::bindGameThread(int threads)
     btITaskScheduler *ts = btCreateDefaultTaskScheduler();
     if (!ts) qFatal("iris::Environment::bindGameThread: Bullet's default task scheduler is not built");
     ts->setNumThreads(std::clamp(threads, 1, ts->getMaxNumThreads()));
-    setIslandBatching(false);   // see setIslandBatching: Bullet's grid batching asserts on a float rounding
     btSetTaskScheduler(ts);
     gScheduler = ts;
     gBound.store(true);
@@ -710,7 +709,8 @@ void Environment::setSleepAfterStep(bool sleep) { gSleepAfterStep.store(sleep); 
 void Environment::setIslandBatching(bool on)
 {
 #if BT_THREADSAFE
-    // Bullet's own threshold (250 manifolds by default): an island below it is solved by one solver of the pool.
+    // ON in the shipped world (BULLET-BATCHING-1: Bullet's own threshold, 250 manifolds — an island at or above it is
+    // solved batched across the pool, one below it by one solver of the pool); OFF is the measurement's comparison arm.
     btSequentialImpulseConstraintSolverMt::s_minimumContactManifoldsForBatching = on ? 250 : std::numeric_limits<int>::max();
 #else
     (void)on;
@@ -760,7 +760,7 @@ void Environment::createPhysicsWorld()
 #if BT_THREADSAFE
 	// THE MULTI-THREADED WORLD (U4 stage 6): the narrow phase's pairs across the scheduler (btCollisionDispatcherMt),
 	// the simulation islands across a pool of solvers (btConstraintSolverPoolMt, one per scheduler thread); the
-	// multi-threaded solver's in-island batching stays off (setIslandBatching: Bullet's grid assignment asserts).
+	// multi-threaded solver batches inside an island of 250+ manifolds (Bullet's default; setIslandBatching).
 	// Built on any thread (a scene opened on a loader thread builds its world there): the constructors read the
 	// scheduler's thread count and take no thread index; only the step and a ray test do (bindGameThread).
 	if (gBound.load()) {
