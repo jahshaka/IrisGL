@@ -188,7 +188,12 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, floa
 	// MOVER-OCCLUSION-1: the card's INDIRECT half (the sky and the bounce its relight
 	// gathered) gated by the mover visibility above the hit; the direct half keeps its
 	// own traced mover term (cardMoverVis) and the emissive is the surface's own.
-	const vec3 indirect = JAH_CARD_INDIRECT( pick.texel );
+	// THE INDIRECT LAYER (ENGINE-POLISH-PHOTON-1 stage 3) holds the diffuse half where the channel has a
+	// diffuse albedo and the specular lobe's share where it has none (JahCardLight_cs.glsl's cache): the
+	// diffuse half is the layer where kD > 0, else 0. The EMISSIVE binding is the relight's FLAT layer
+	// (the emissive and the specular lobe's re-emission), added outside the diffuse view restore. Stated:
+	// the movers' gate cuts the diffuse indirect only - the lobe's indirect share rides the flat term.
+	const vec3 indirect = mix( vec3( 0.0 ), JAH_CARD_INDIRECT( pick.texel ), greaterThan( albedo.xyz, vec3( 0.0 ) ) );
 	const vec3 cut = ( 1.0 - jahHitIndirectGate ) * indirect;
 	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cut, indirect - cut,
 								JAH_CARD_EMISSIVE( pick.texel ), N, L, r, normalize( viewDir ) );

@@ -10,7 +10,7 @@
 // render-target-index counter keeps counting) and `custom_ps_posExecution` (inside main(), after
 // DefaultBodyPS, where `pixelData` is still in scope because the body is a
 // PIECE and not a function) -- plus one pass property set by our own
-// HlmsListener are enough to add three more MRT attachments and fill them.
+// HlmsListener are enough to add four more MRT attachments and fill them.
 //
 // THE PASS IS A PREPASS. `Ogre::PrePassCreate` already gives a capture two of
 // the four channels a card wants, exactly and for free:
@@ -33,6 +33,12 @@
 //                                     in world units -- the depth test at the
 //                                     read, and the one channel that makes a
 //                                     card a surface rather than a decal
+//     location 5  outCardSpecular     THE SPECULAR LOBE (ENGINE-POLISH-PHOTON-1
+//                                     stage 3): F0 and the weight kS in the voxel
+//                                     store's encoding -- rgb = ( F0 - 0.04 ) kS /
+//                                     0.96, a = kS (a dielectric's 0.04 exact) --
+//                                     so the relight re-emits the lobe the store
+//                                     does (a metal's card used to re-emit 0)
 //
 // ...and gets the albedo by inserting upstream's own SampleDiffuseMap at
 // `custom_ps_posMaterialLoad`, which is after UnpackTextureIndices (the piece
@@ -76,9 +82,11 @@
 		#define outPs_cardAlbedo outCardAlbedo
 		#define outPs_cardEmissive outCardEmissive
 		#define outPs_cardDepth outCardDepth
+		#define outPs_cardSpecular outCardSpecular
 		layout(location = @counter(rtv_target)) out vec4 outCardAlbedo;
 		layout(location = @counter(rtv_target)) out vec4 outCardEmissive;
 		layout(location = @counter(rtv_target)) out float outCardDepth;
+		layout(location = @counter(rtv_target)) out vec4 outCardSpecular;
 @end
 @end
 
@@ -132,10 +140,24 @@
 			// capture camera makes that a linear world-unit distance along the
 			// card's own axis, which is exactly what the read depth-tests with.
 			outCardDepth = -inPs.pos.z;
+			// THE SPECULAR LOBE, from the prepass's own split (SampleSpecularMap runs in a
+			// prepass): F0 = lerp( 0.04, base, metalness ) and the specular colour kS, its MEAN
+			// the weight, clamped to [0, 1] as the voxel store's row is. The metallic workflow
+			// only: the store stores no lobe for the specular workflows (their weight is 0).
+			@property( metallic_workflow )
+				const float cardKs = clamp( ( float( pixelData.specular.x ) + float( pixelData.specular.y ) +
+											  float( pixelData.specular.z ) ) * ( 1.0 / 3.0 ), 0.0, 1.0 );
+				outCardSpecular = vec4( max( float3( pixelData.F0 ) - float3( 0.04, 0.04, 0.04 ),
+											 float3( 0.0, 0.0, 0.0 ) ) * ( cardKs * ( 1.0 / 0.96 ) ),
+										cardKs );
+			@else
+				outCardSpecular = vec4( 0.0, 0.0, 0.0, 0.0 );
+			@end
 		@else
 			outCardAlbedo = vec4( 0.0, 0.0, 0.0, 1.0 );
 			outCardEmissive = vec4( 0.0, 0.0, 0.0, 1.0 );
 			outCardDepth = 0.0;
+			outCardSpecular = vec4( 0.0, 0.0, 0.0, 0.0 );
 		@end
 @end
 @end

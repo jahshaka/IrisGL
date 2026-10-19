@@ -17,8 +17,12 @@
 // jahDiffuseAlbedoHemi( r ), the pixel reflects jahDiffuseAlbedo( N.V, r ).
 //
 // WHAT THE READ NEEDS, per texel: the three stored terms apart (the Radiance
-// layer = direct + indirect + emissive, the Indirect layer, the Emissive layer:
-// the direct half is the difference), the stored normal and roughness, and ONE
+// layer = direct + indirect + flat, the indirect diffuse half - the Indirect
+// layer where the channel has a diffuse albedo - and the FLAT layer, the emissive plus
+// the specular lobe's re-emission, which this restore leaves as it is: the lobe
+// is the store's energy convention, the same from every direction - ENGINE-
+// POLISH-PHOTON-1 stage 3; the direct half is the difference), the stored normal
+// and roughness, and ONE
 // LIGHT DIRECTION — the light-weighted mean of the lights' directions, the
 // weight each light's share of the direct half's luminance. The relight writes
 // it octahedrally into the two alpha channels no reader used (the Albedo and
@@ -74,7 +78,8 @@ vec3 jahCardOctDecode( vec2 f )
 }
 
 /// THE RADIANCE A CARD TEXEL SENDS TOWARDS `V` (unit, from the surface to the
-/// viewer). `radiance`, `indirect`, `emissive` = the three stored terms; `N` =
+/// viewer). `radiance`, `indirect`, `emissive` = the three stored terms (`emissive`
+/// is the Flat layer: the emissive and the specular lobe's re-emission); `N` =
 /// the stored (shading) normal, world; `L` = the stored mean light direction,
 /// world, unit; `r` = the perceptual roughness. The direct half takes the lobe
 /// at V over the lobe the relight stored (V = N) — the energy factor cancels,

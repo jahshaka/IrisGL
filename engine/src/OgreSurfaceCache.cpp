@@ -17,6 +17,7 @@
 #include <OgreHlmsPbs.h>
 #include "photon/voxel/PhotonVoxelLighting.h"
 #include "photon/voxel/PhotonVoxelizerSourceBase.h"
+#include "photon/voxel/PhotonSpecularAlbedo.h"
 #include <OgreDescriptorSetTexture.h>
 #include <OgreDescriptorSetUav.h>
 #include <OgreMesh2.h>
@@ -30,6 +31,7 @@
 #include <OgrePixelFormatGpuUtils.h>
 #include <Vao/OgreVaoManager.h>
 #include <Vao/OgreUavBufferPacked.h>
+#include <Vao/OgreConstBufferPacked.h>
 #include <Compositor/OgreCompositorManager2.h>
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/OgreCompositorWorkspace.h>
@@ -117,12 +119,13 @@ constexpr unsigned kInstanceSlotsInitial = 1024u;
 /// shading normal and location 1 = (shadow, GGX alpha); `JahCardCapture_piece_ps.any`
 /// appends albedo, emissive and depth at locations 2, 3 and 4 through
 /// `custom_ps_output_types`, in that order, because `@counter(rtv_target)`
-/// counts them in the order they are declared. So the render target view's
-/// colour attachments must be in exactly this order, whatever order the atlas
-/// layers are declared in.
+/// counts them in the order they are declared - and the specular lobe's F0 and
+/// weight at location 5 after them (ENGINE-POLISH-PHOTON-1 stage 3). So the
+/// render target view's colour attachments must be in exactly this order,
+/// whatever order the atlas layers are declared in.
 const CardLayer kShaderOrder[kCardLayers] = { CardLayer::Normal, CardLayer::ShadowRough,
                                               CardLayer::Albedo, CardLayer::Emissive,
-                                              CardLayer::Depth };
+                                              CardLayer::Depth, CardLayer::Specular };
 
 /// The capture camera's standoff from the card's own near plane, so the near
 /// plane is never inside the surface it captures.
@@ -257,10 +260,11 @@ bool SurfaceCache::makeAtlas(std::string &err) {
         Ogre::PFG_RGBA8_UNORM,   // normal
         Ogre::PFG_R16_FLOAT,     // depth
         mEmissiveFormat,         // emissive
-        Ogre::PFG_RG8_UNORM      // shadow + roughness
+        Ogre::PFG_RG8_UNORM,     // shadow + roughness
+        Ogre::PFG_RGBA8_UNORM    // the specular lobe: F0 relative to the dielectric's, kS
     };
     const char *name[kCardLayers] = { "cardAlbedo", "cardNormal", "cardDepth", "cardEmissive",
-                                      "cardShadowRough" };
+                                      "cardShadowRough", "cardSpecular" };
 
     for (unsigned i = 0; i < kCardLayers; ++i) {
         // THE ATLAS IS NEVER A RENDER TARGET. It is written by COPY (see the
@@ -347,6 +351,23 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     mIndirect->setPixelFormat(radFmt);
     mIndirect->setNumMipmaps(1u);
     mIndirect->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    // ...and THE FLAT TERM (ENGINE-POLISH-PHOTON-1 stage 3): the emissive and the
+    // specular lobe's re-emission, what the read adds outside the diffuse view
+    // restore. Same format, written by the same job. +16 MB.
+    mFlat = tm->createTexture(processUniqueName("cardFlat"), Ogre::GpuPageOutStrategy::Discard,
+                              Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
+    mFlat->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
+    mFlat->setPixelFormat(radFmt);
+    mFlat->setNumMipmaps(1u);
+    mFlat->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    // ...and the lobe's integrals, the store's own table (PhotonSpecularAlbedo.h): what
+    // the relight's jahSpecularAlbedo reads, 528 float4s, written once.
+    if (!mSpecAlbedoBuffer) {
+        static_assert(Ogre::PhotonSpecularAlbedo::kFloats == 528u * 4u, "the shader's array is 528 float4s");
+        mSpecAlbedoBuffer = Ogre::Root::getSingleton().getRenderSystem()->getVaoManager()->createConstBuffer(
+            sizeof(Ogre::PhotonSpecularAlbedo::kTable), Ogre::BT_IMMUTABLE,
+            const_cast<float *>(Ogre::PhotonSpecularAlbedo::kTable), false);
+    }
     // ...and THE MOVERS' VISIBILITY (PHOTON-CARDS-4): R8 over the atlas, a UAV
     // the ray tier's trace writes and the relight reads (only inside the cards
     // it flags `moverTraced`, so a texel no trace wrote is never read). +4 MB.
@@ -403,7 +424,7 @@ bool SurfaceCache::makeWorkspace(std::string &err) {
     Ogre::CompositorNodeDef *n = cm->addNodeDefinition(mNodeDef);
     // ONE EXTERNAL PER ATTACHMENT, IN THE SHADER'S ORDER (kShaderOrder above).
     const char *chan[kCardLayers + 1] = { "scr0Normal", "scr1ShadowRough", "scr2Albedo",
-                                          "scr3Emissive", "scr4Depth", "scrDepthBuf" };
+                                          "scr3Emissive", "scr4Depth", "scr5Specular", "scrDepthBuf" };
     for (unsigned i = 0; i < kCardLayers + 1u; ++i)
         n->addTextureSourceName(chan[i], i, Ogre::TextureDefinitionBase::TEXTURE_INPUT);
 
@@ -584,7 +605,12 @@ void SurfaceCache::destroyAll() {
         if (mScratchDepth) { tm->destroyTexture(mScratchDepth); mScratchDepth = nullptr; }
         if (mRadiance) { tm->destroyTexture(mRadiance); mRadiance = nullptr; }
         if (mIndirect) { tm->destroyTexture(mIndirect); mIndirect = nullptr; }
+        if (mFlat) { tm->destroyTexture(mFlat); mFlat = nullptr; }
         if (mMoverVis) { tm->destroyTexture(mMoverVis); mMoverVis = nullptr; }
+        if (mSpecAlbedoBuffer) {
+            rs->getVaoManager()->destroyConstBuffer(mSpecAlbedoBuffer);
+            mSpecAlbedoBuffer = nullptr;
+        }
     }
 }
 
@@ -1144,7 +1170,7 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
             return;
         }
     }
-    // ...AND INTO THE ATLAS, after the whole batch: five small copies a card,
+    // ...AND INTO THE ATLAS, after the whole batch: six small copies a card,
     // from its own slice of the scratch (the reason the scratch exists at all
     // is in SurfaceCache.h — this pin's render-pass clear is whole-target).
     for (unsigned slot = 0; slot < mBatch.size(); ++slot) {
@@ -1559,10 +1585,11 @@ void SurfaceCache::relightCards() {
     const bool cloud = mCloudField && cloudWrap;
     if (mLightJob->getProperty("jah_cloud_shadow") != (cloud ? 1 : 0))
         mLightJob->setProperty("jah_cloud_shadow", cloud ? 1 : 0);
-    // The three layers the job SAMPLES (the Albedo and Normal are its UAVs 6, 7).
-    constexpr unsigned kRelightTexLayers = 3u;
+    // The four layers the job SAMPLES (the Albedo and Normal are its UAVs 6, 7): the
+    // specular lobe's last (ENGINE-POLISH-PHOTON-1 stage 3).
+    constexpr unsigned kRelightTexLayers = 4u;
     const unsigned order[kRelightTexLayers] = { unsigned(CardLayer::Depth), unsigned(CardLayer::Emissive),
-                                                unsigned(CardLayer::ShadowRough) };
+                                                unsigned(CardLayer::ShadowRough), unsigned(CardLayer::Specular) };
     mLightJob->setNumTexUnits(Ogre::uint8(kRelightTexLayers + vctUnits + (cloud ? 1u : 0u)));
     if (cloud) {
         Ogre::DescriptorSetTexture2::TextureSlot slot(
@@ -1630,8 +1657,16 @@ void SurfaceCache::relightCards() {
         uav.texture = mAtlas[unsigned(CardLayer::Normal)];
         uav.pixelFormat = uav.texture->getPixelFormat();
         mLightJob->_setUavTexture(7u, uav);
+        // THE FLAT TERM (ENGINE-POLISH-PHOTON-1 stage 3): the emissive and the specular lobe's
+        // re-emission, written.
+        uav.texture = mFlat;
+        uav.access = Ogre::ResourceAccess::Write;
+        uav.pixelFormat = mFlat->getPixelFormat();
+        mLightJob->_setUavTexture(8u, uav);
     }
     mLightJob->_setUavBuffer(2u, bufSlot(mGiBuffer, Ogre::ResourceAccess::Read));
+    // ...and the lobe's integrals, the store's table (the job's one constant buffer).
+    mLightJob->setConstBuffer(0u, mSpecAlbedoBuffer);
     mLightJob->setThreadsPerGroup(8u, 8u, 1u);
     mLightJob->setNumThreadGroups(kCardPageSize / 8u, kCardPageSize / 8u, unsigned(mRelight.size()));
     // THE RELIGHT NEVER COMPILES IN THE FRAME (ASYNC-SHADERS-1). A permutation this job has
@@ -1661,6 +1696,8 @@ void SurfaceCache::relightCards() {
         mLightJob->_setUavTexture(5u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->_setUavTexture(6u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->_setUavTexture(7u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        mLightJob->_setUavTexture(8u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        mLightJob->setConstBuffer(0u, nullptr);
         mLightJob->setNumTexUnits(0u);
     }
 
@@ -2728,11 +2765,14 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     bytes += bytesOf(mScratchDepth);
     bytes += bytesOf(mRadiance);
     bytes += bytesOf(mIndirect);
+    bytes += bytesOf(mFlat);
     bytes += bytesOf(mMoverVis);
     if (mRadiance)
         out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mRadiance->getPixelFormat());
     if (mIndirect)
         out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mIndirect->getPixelFormat());
+    if (mFlat)
+        out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mFlat->getPixelFormat());
     if (mMoverVis)
         out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mMoverVis->getPixelFormat());
     out.bytes = bytes;
@@ -2863,14 +2903,34 @@ bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &
         tk->unmap();
         tm->destroyAsyncTextureTicket(tk);
     }
+    // ...and THE FLAT TERM (ENGINE-POLISH-PHOTON-1 stage 3).
+    float flat[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    if (mFlat) {
+        Ogre::AsyncTextureTicket *tk = tm->createAsyncTextureTicket(
+            1u, 1u, 1u, Ogre::TextureTypes::Type2D, mFlat->getPixelFormat());
+        Ogre::TextureBox src = mFlat->getEmptyBox(0);
+        src.x = tx; src.y = ty; src.width = 1u; src.height = 1u;
+        tk->download(mFlat, 0, true, &src, true);
+        const Ogre::TextureBox box = tk->map(0);
+        decodeTexel(mFlat->getPixelFormat(), box.at(0, 0, 0), flat);
+        tk->unmap();
+        tm->destroyAsyncTextureTicket(tk);
+    }
+    // THE INDIRECT LAYER (ENGINE-POLISH-PHOTON-1 stage 3): the diffuse half where the channel has a
+    // diffuse albedo, the specular lobe's share where it has none (JahCardLight_cs.glsl).
+    const float *spec = vals[unsigned(CardLayer::Specular)];
     for (int k = 0; k < 3; ++k) {
         out.radiance[k] = rad[k];
-        out.indirect[k] = ind[k];
+        out.indirectStored[k] = ind[k];
+        out.indirect[k] = vals[unsigned(CardLayer::Albedo)][k] > 0.0f ? ind[k] : 0.0f;
+        out.flat[k] = flat[k];
+        out.specularF0[k] = 0.04f * spec[3] + 0.96f * spec[k];
         out.albedo[k] = vals[unsigned(CardLayer::Albedo)][k];
         // The normal is stored *0.5+0.5, as the prepass writes it.
         out.normal[k] = vals[unsigned(CardLayer::Normal)][k] * 2.0f - 1.0f;
         out.emissive[k] = vals[unsigned(CardLayer::Emissive)][k];
     }
+    out.specularWeight = spec[3];
     out.depth = vals[unsigned(CardLayer::Depth)][0];
     out.shadow = vals[unsigned(CardLayer::ShadowRough)][0];
     out.roughness = vals[unsigned(CardLayer::ShadowRough)][1];
@@ -2956,13 +3016,14 @@ bool SurfaceCache::dump(const std::string &prefix, std::string &err) const {
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     rs->flushCommands();
     Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
-    // The five captured layers and the sixth, the radiance.
+    // The six captured layers and the radiance.
     const char *name[kCardLayers + 1] = { "albedo", "normal", "depth", "emissive", "shadowrough",
-                                          "radiance" };
+                                          "specular", "radiance" };
+    static_assert(kCardLayers == 6u, "a layer here needs its name and scale");
     // `scale` turns a layer into something an eye can read: the depth is metres
     // and the emissive and the radiance are radiance, so they are divided by a
     // stated number rather than clipped silently.
-    const float scale[kCardLayers + 1] = { 1.0f, 1.0f, 0.2f, 0.25f, 1.0f, 0.25f };
+    const float scale[kCardLayers + 1] = { 1.0f, 1.0f, 0.2f, 0.25f, 1.0f, 1.0f, 0.25f };
     std::vector<unsigned char> rgba(size_t(kCardAtlasSize) * kCardAtlasSize * 4u);
     for (unsigned i = 0; i < kCardLayers + 1u; ++i) {
         Ogre::TextureGpu *layer = i < kCardLayers ? mAtlas[i] : mRadiance;

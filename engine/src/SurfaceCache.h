@@ -95,23 +95,30 @@ class CompositorPassSceneDef;
 class Node;
 class SceneManager;
 class TextureGpu;
+class ConstBufferPacked;
 }   // namespace Ogre
 
 namespace jahshaka {
 namespace engine {
 
-/// THE FIVE CAPTURED LAYERS, and the order every table here is in. (The
-/// SIXTH, `Radiance`, is not captured — the `Jahshaka/CardLight` job writes it
-/// from these five and the scene's lights; it is its own member, `mRadiance`.)
+/// THE SIX CAPTURED LAYERS, and the order every table here is in. (The lit
+/// layers — `Radiance`, `Indirect`, `Flat` — are not captured: the
+/// `Jahshaka/CardLight` job writes them from these six and the scene's lights;
+/// they are their own members.)
 enum class CardLayer : unsigned {
     Albedo = 0,       ///< RGBA8_UNORM — kD, the datablock's diffuse ALREADY divided by pi
     Normal = 1,       ///< RGBA8_UNORM — the shading normal in the card's view space, *0.5+0.5
     Depth = 2,        ///< R16_FLOAT  — world units from the card's near plane
     Emissive = 3,     ///< RGB9E5 (or R11G11B10F — see emissiveFormatName) — radiance
     ShadowRough = 4,  ///< RG8_UNORM  — x = the shadow term, y = the GGX alpha
-    Count = 5
+    /// RGBA8_UNORM — THE SPECULAR LOBE (ENGINE-POLISH-PHOTON-1 stage 3): the voxel
+    /// store's encoding (Voxelizer_piece_cs.any), rgb = ( F0 - 0.04 ) kS / 0.96 and
+    /// a = kS, so F0 kS = 0.04 a + 0.96 rgb and a dielectric's 0.04 is exact; zero
+    /// for the specular workflows, as in the store.
+    Specular = 5,
+    Count = 6
 };
-constexpr unsigned kCardLayers = 5u;
+constexpr unsigned kCardLayers = 6u;
 
 /// THE PAGE, in texels a side. Lumen's number, and the one the tier budgets are
 /// arithmetic on (a 128-texel card is 16,384 texels; a 327,680-texel budget is
@@ -460,15 +467,18 @@ public:
     Ogre::TextureGpu *radianceLayer() const { return mRadiance; }
     /// THE VIEW TERM'S FIVE (PHOTON-CARDS-5, jah_card_view.glsl): what the read
     /// needs besides the Radiance to restore the diffuse lobe's view term at a
-    /// ray's own direction — the Indirect and Emissive layers (the three stored
-    /// terms apart), the ShadowRough layer (the roughness), and the Albedo and
+    /// ray's own direction — the Indirect layer (the cached irradiance, the
+    /// diffuse indirect half kD pi Dd-bar times it) and the FLAT layer (what is the
+    /// same from every direction: the emissive and the specular lobe's
+    /// re-emission, ENGINE-POLISH-PHOTON-1 stage 3 — outside the diffuse view
+    /// restore), the ShadowRough layer (the roughness), and the Albedo and
     /// Normal layers (the stored normal, and in their alpha the texel's mean
     /// light direction the relight writes). In the order
     /// jah_rq_card_bindings.glsl declares them from JAH_CARD_VIEW_BINDING_BASE.
     static constexpr unsigned kViewLayers = 5u;
     void viewLayers(Ogre::TextureGpu *out[kViewLayers]) const {
         out[0] = mIndirect;
-        out[1] = mAtlas[unsigned(CardLayer::Emissive)];
+        out[1] = mFlat;
         out[2] = mAtlas[unsigned(CardLayer::ShadowRough)];
         out[3] = mAtlas[unsigned(CardLayer::Albedo)];
         out[4] = mAtlas[unsigned(CardLayer::Normal)];
@@ -594,7 +604,7 @@ private:
     Ogre::TextureGpu *mAtlas[kCardLayers] = {};
     Ogre::TextureGpu *mScratch[kCardLayers] = {};
     Ogre::TextureGpu *mScratchDepth = nullptr;
-    /// THE SIXTH LAYER: radiance, written by the `Jahshaka/CardLight` job (a UAV,
+    /// THE RADIANCE: written by the `Jahshaka/CardLight` job (a UAV,
     /// never a render target, never a copy destination).
     Ogre::TextureGpu *mRadiance = nullptr;
     std::string mRadianceFormatName;
@@ -608,9 +618,21 @@ private:
     /// ...and each entry's mode (JahCardLight_cs.glsl): 1 march the indirect,
     /// 0 read it back, 2 none yet.
     std::vector<unsigned> mRelightMode;
-    /// THE CACHED INDIRECT HALF (a UAV, R11G11B10F like the radiance), the
-    /// chain's parameter block, and this frame's chain.
+    /// THE CACHED INDIRECT HALF (a UAV, R11G11B10F like the radiance), per channel:
+    /// the diffuse half where the channel has a diffuse albedo, the specular lobe's
+    /// indirect share where it has none (kD = 0: a metal) - so a relight recovers the
+    /// irradiance and re-emits both lobes from it (ENGINE-POLISH-PHOTON-1 stage 3);
+    /// the chain's parameter block, and this frame's chain.
     Ogre::TextureGpu *mIndirect = nullptr;
+    /// THE FLAT TERM (a UAV, the radiance's format, ENGINE-POLISH-PHOTON-1 stage 3):
+    /// the emissive plus the specular lobe's re-emission, direct and indirect - what
+    /// a texel sends the same way to every direction, by the store's convention (a
+    /// voxel re-emits the lobe's directional albedo). The read adds it outside the
+    /// diffuse view restore; the Radiance holds it too. +16 MB at 2048 square.
+    Ogre::TextureGpu *mFlat = nullptr;
+    /// The lobe's integrals (PhotonSpecularAlbedo.h's table) for the relight, the
+    /// SAME floats the store's jobs and the ray hit read: one immutable buffer.
+    Ogre::ConstBufferPacked *mSpecAlbedoBuffer = nullptr;
     /// THE MOVERS' VISIBILITY (PHOTON-CARDS-4): R8 over the atlas, written by the
     /// ray tier's trace (rq_card_movers.comp), read by the relight where the card
     /// is `moverTraced`. +4 MB at 2048 square.

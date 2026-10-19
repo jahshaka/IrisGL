@@ -8,8 +8,10 @@
 //
 // THE VIEW TERM'S FIVE (PHOTON-CARDS-5, jah_card_view.glsl) at consecutive
 // bindings from JAH_CARD_VIEW_BINDING_BASE, which the caller also defines (each
-// job appends them after its own last binding): the Indirect, Emissive,
-// ShadowRough, Albedo and Normal layers, in SurfaceCache::viewLayers' order.
+// job appends them after its own last binding): the Indirect (the cached
+// diffuse half, or the lobe's share where kD = 0), Flat (the emissive and the specular lobe's re-emission, at the
+// emissive's binding - ENGINE-POLISH-PHOTON-1 stage 3), ShadowRough, Albedo and
+// Normal layers, in SurfaceCache::viewLayers' order.
 //
 // Include this file, then define JAH_CARD_SLOTS / JAH_CARD_RECORDS, then
 // include jah_rq_card.glsl.

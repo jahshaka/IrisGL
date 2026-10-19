@@ -3853,10 +3853,22 @@ struct CardSample {
     /// through `shadow`) plus the indirect below plus the emissive. 0 until
     /// the card has been relit.
     float radiance[3] = { 0, 0, 0 };
-    /// ...and its cached INDIRECT half alone (the voxel march from the texel x
-    /// kD x pi x the lobe's albedo jahDiffuseAlbedo at V = N — BRDF_EnvMap's
-    /// arithmetic); 0 until the card's indirect has been marched.
+    /// ...and its cached INDIRECT diffuse half alone (the voxel march from the texel x
+    /// kD x pi x the lobe's hemispherical albedo — BRDF_EnvMap's arithmetic); 0 until
+    /// the card's indirect has been marched, and 0 in a channel with no diffuse albedo.
     float indirect[3] = { 0, 0, 0 };
+    /// THE INDIRECT LAYER AS STORED (ENGINE-POLISH-PHOTON-1 stage 3): `indirect` where the
+    /// channel has a diffuse albedo, the specular lobe's indirect share where it has none.
+    float indirectStored[3] = { 0, 0, 0 };
+    /// THE SPECULAR LOBE the capture stored (the Specular layer): F0 x kS
+    /// (lerp( 0.04, base, metalness ) x kS; 0 for the specular workflows, as in the
+    /// voxel store) and the Fresnel-90 weight kS.
+    float specularF0[3] = { 0, 0, 0 };
+    float specularWeight = 0.0f;
+    /// THE FLAT TERM (the relight's, ENGINE-POLISH-PHOTON-1 stage 3): the emissive
+    /// plus the specular lobe's re-emission - what the texel sends the same way to
+    /// every direction; inside `radiance` too.
+    float flat[3] = { 0, 0, 0 };
     /// WHICH card and WHICH atlas texel answered (Scene::readCardAt; -1 from
     /// readCardTexel), and whether its radiance carries a marched indirect
     /// half — what gi.card_read_parity holds the ray job's own pick to.

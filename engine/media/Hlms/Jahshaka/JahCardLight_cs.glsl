@@ -1,5 +1,5 @@
 // Jahshaka/CardLight — THE LIT CARD (PHOTON-CARDS-1, SC-1c): one texel of the
-// surface cache's atlas per thread, its RADIANCE written into the sixth layer.
+// surface cache's atlas per thread, its RADIANCE written into the lit layers.
 //
 // WHAT A TEXEL IS. The capture (JahCardCapture_piece_ps.any) stored, per card
 // texel, kD (the datablock's diffuse ALREADY divided by pi), the shading
@@ -40,7 +40,8 @@
 // lobe's HEMISPHERICAL mean albedo, jahDiffuseAlbedoHemi(r) — the bounce job's
 // convention (a voxel re-emits the same mean; PHOTON-CARDS-2 audit F4), which
 // the read turns into the directional albedo at its own N.V. The specular lobe
-// is not cached (Lumen's rule: the surface cache is a diffuse store).
+// is cached as the STORE caches it - its energy, the same from every direction
+// (the Flat layer, below) - never its view-dependent highlight.
 //
 // VISIBILITY. The SUN's is the stored shadow term (the capture's PSSM term of
 // the first shadow-casting directional light — the prepass writes that one
@@ -62,7 +63,22 @@
 // outgoing radiance as BRDF_EnvMap does, envColourD x diffuse x pi x the lobe's
 // albedo, with the albedo taken as its HEMISPHERICAL mean jahDiffuseAlbedoHemi
 // (the fork's JahDiffuseAlbedo piece; above) where the pixel takes it at its own
-// view angle (the read restores that). One term the pixel has that the card does not, stated: a
+// view angle (the read restores that). THE CACHE (the Indirect layer) holds, per channel, that diffuse
+// half where the channel has a diffuse albedo (kD > 0: the layer exactly as it always was) and the
+// SPECULAR lobe's indirect share where it has none (kD = 0: a metal, a black dielectric) - so every
+// relight recovers the irradiance from it and a metal's card keeps its indirect lobe too
+// (ENGINE-POLISH-PHOTON-1 stage 3); the read takes the diffuse half where kD > 0 and 0 elsewhere.
+//
+// THE SPECULAR LOBE (ENGINE-POLISH-PHOTON-1 stage 3; U5 decision 22.1's route law): the voxel store
+// re-emits a surface's specular lobe by its integral - a lamp at cosine mu, mu ( F0 A( mu, r ) +
+// w B( mu, r ) ) of it; a gathered irradiance, F0 A-bar( r ) + w B-bar( r ) - and so does the card now,
+// from the capture's Specular layer (F0 and w in the store's encoding) and the SAME table
+// (PhotonSpecularAlbedo.h, the job's constant buffer): the FLAT term, written into its own layer
+// (cardFlat) beside the emissive, because it is the same from every direction by that convention and
+// the read adds it OUTSIDE the diffuse view restore (jah_card_view.glsl). A card's hit then answers
+// what the store answers, for a metal and a dielectric alike - where a metal's card used to re-emit 0.
+//
+// One term the pixel has that the card does not, stated: a
 // diffuse fresnel (fresnelD — PbsBrdf::Default carries none; the
 // SeparateDiffuseFresnel BRDFs do, and their card is brighter by 1 - F).
 // And the frame is built on the card's PLANE where the stored normal is the
@@ -78,12 +94,14 @@
 vulkan_layout( ogre_t0 ) uniform texture2D cardDepth;
 vulkan_layout( ogre_t1 ) uniform texture2D cardEmissive;
 vulkan_layout( ogre_t2 ) uniform texture2D cardShadowRough;
+// THE SPECULAR LOBE (ENGINE-POLISH-PHOTON-1 stage 3): rgb = ( F0 - 0.04 ) kS / 0.96, a = kS.
+vulkan_layout( ogre_t3 ) uniform texture2D cardSpecular;
 
-@set( jahCloudUnit, 3 )
+@set( jahCloudUnit, 4 )
 @property( hlms_num_vct_cascades )
-	@pset( vctTexUnit, 3 )
+	@pset( vctTexUnit, 4 )
 	@psub( uses_array_bindings, hlms_num_vct_cascades, 1 )
-	vulkan( layout( ogre_s3 ) uniform sampler vSmp );
+	vulkan( layout( ogre_s4 ) uniform sampler vSmp );
 	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbes[@value( hlms_num_vct_cascades )];
 	@add( vctTexUnit, hlms_num_vct_cascades )
 	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeX[@value( hlms_num_vct_cascades )];
@@ -173,6 +191,18 @@ layout( vulkan( ogre_u6 ) vk_comma @insertpiece( uav6_pf_type ) )
 uniform restrict image2D cardAlbedo;
 layout( vulkan( ogre_u7 ) vk_comma @insertpiece( uav7_pf_type ) )
 uniform restrict image2D cardNormal;
+// THE FLAT TERM (ENGINE-POLISH-PHOTON-1 stage 3): the emissive plus the specular lobe's
+// re-emission, the part of the radiance the read adds outside the diffuse view restore.
+layout( vulkan( ogre_u8 ) vk_comma @insertpiece( uav8_pf_type ) )
+uniform restrict writeonly image2D cardFlat;
+
+// THE LOBE'S INTEGRALS (PhotonSpecularAlbedo.h's table, the store's own floats: the job's one
+// constant buffer, SurfaceCache's mSpecAlbedoBuffer).
+CONST_BUFFER( JahSpecularAlbedoBuf, 0 )
+{
+	vec4 jahSpecularAlbedoTable[528];
+};
+#define JAH_SPEC_ALBEDO( k ) jahSpecularAlbedoTable[( k ) >> 2][( k ) & 3]
 
 // THE CHAIN AND THE ENVIRONMENT, as VctLighting hands them to every reader
 // (getCascadeChainParams, the cascade-0 volume's box, getFinalMultiplier,
@@ -298,6 +328,7 @@ vec3 jahCardRound( vec3 v )
 
 @insertpiece( JahBrdf )
 @insertpiece( JahDiffuseAlbedo )
+@insertpiece( JahSpecularAlbedo )
 @insertpiece( JahCardView )
 @property( jah_cloud_shadow )
 	#define JAH_CLOUD_TAU( uv ) textureLod( sampler2D( cloudField, cloudSmp ), uv, 0.0 ).x
@@ -324,7 +355,8 @@ void main()
 	ivec2 at = ivec2( uint( r.rect.x ) + t.x, uint( r.rect.y ) + t.y );
 
 	vec3 radiance = vec3( 0.0, 0.0, 0.0 );
-	vec3 indirect = vec3( 0.0, 0.0, 0.0 );
+	vec3 cached = vec3( 0.0, 0.0, 0.0 );
+	vec3 flatTerm = vec3( 0.0, 0.0, 0.0 );
 	float depth = texelFetch( cardDepth, at, 0 ).x;
 	if( depth > 0.0 )
 	{
@@ -345,6 +377,10 @@ void main()
 		const vec3 jahCardPlaneN = normalize( r.axisD.xyz );
 		const vec3 Ncone = dot( N, jahCardPlaneN ) > 0.99985 ? jahCardPlaneN : N;
 		vec2 sr = texelFetch( cardShadowRough, at, 0 ).xy;
+		// THE SPECULAR LOBE (the capture's encoding: F0 kS = 0.04 w + 0.96 rgb)
+		const vec4 specRaw = texelFetch( cardSpecular, at, 0 );
+		const vec3 specF0 = specRaw.www * 0.04 + specRaw.xyz * 0.96;
+		const float specW = specRaw.w;
 		// fork 16d8e29d4 (was 0043)'s range: stored = (alpha - 0.001) * 1.001001.
 		float alpha = sr.y / 1.001001 + 0.001;
 		float perceptualRoughness = sqrt( max( alpha, 0.0 ) );
@@ -357,6 +393,9 @@ void main()
 		// traced one (the movers), where the host traced this card.
 		float moverVis = r.camPos.w > 0.5 ? imageLoad( cardMoverVis, at ).x : 1.0;
 		vec3 direct = vec3( 0.0, 0.0, 0.0 );
+		// ...and the specular lobe's share of each light, by its directional albedo at the
+		// light's cosine (the injection's and the hit's form: mu ( F0 A + w B ) of the light / pi)
+		vec3 specDirect = vec3( 0.0, 0.0, 0.0 );
 		// THE MEAN LIGHT DIRECTION (JahCardView): each light's direction weighted
 		// by its share of the direct half's luminance.
 		vec3 lightMean = vec3( 0.0, 0.0, 0.0 );
@@ -399,6 +438,13 @@ void main()
 			const vec3 share = l.diffuse.xyz * ( jahCardDiffuse( Ncone, L, perceptualRoughness ) * atten * visibility );
 			direct += share;
 			lightMean += L * dot( share, vec3( 0.2126, 0.7152, 0.0722 ) );
+			if( specW > 0.0 )
+			{
+				const float cosL = clamp( dot( Ncone, L ), 0.0, 1.0 );
+				float sa, sb;
+				jahSpecularAlbedo( cosL, perceptualRoughness, sa, sb );
+				specDirect += l.diffuse.xyz * ( 0.318309886 * cosL * atten * visibility ) * ( specF0 * sa + specW * sb );
+			}
 		}
 		// No light reaches the texel: its direct half is zero and the direction is
 		// never used; the normal stands in.
@@ -407,33 +453,53 @@ void main()
 		imageStore( cardAlbedo, at, vec4( albedoRaw.xyz, lightOct.x ) );
 		imageStore( cardNormal, at, vec4( normalRaw.xyz, lightOct.y ) );
 
-		// THE INDIRECT HALF (mode bit 1 marches, bit 2 says "none yet", else the
-		// cached layer).
+		// THE INDIRECT HALF (mode bit 1 marches, bit 2 says "none yet", else the cached
+		// layer), turned into outgoing radiance as BRDF_EnvMap does: the diffuse lobe,
+		// envColourD x diffuse x pi x its albedo at the HEMISPHERICAL mean (the bounce's
+		// convention); the specular lobe, envColourD x ( F0 A-bar + w B-bar ) (the bounce
+		// job's re-emission).
+		const vec3 diffuseLobe = kD * 3.141592654 * jahDiffuseAlbedoHemi( perceptualRoughness );
+		vec3 specLobe = vec3( 0.0, 0.0, 0.0 );
+		if( specW > 0.0 )
+		{
+			float sa, sb;
+			jahSpecularAlbedoHemi( perceptualRoughness, sa, sb );
+			specLobe = specF0 * sa + specW * sb;
+		}
+		const bvec3 hasDiffuse = greaterThan( kD, vec3( 0.0, 0.0, 0.0 ) );
+		vec3 indirect = vec3( 0.0, 0.0, 0.0 );
+		vec3 specIndirect = vec3( 0.0, 0.0, 0.0 );
 		if( ( mode & 1u ) != 0u )
 		{
 @property( hlms_num_vct_cascades )
-			// BRDF_EnvMap's envColourD x diffuse x pi x the lobe's albedo, at its
-			// hemispherical mean (the bounce's convention; the header says why).
-			indirect = jahCardEnvColourD( P, Ncone ) * kD * 3.141592654 *
-					   jahDiffuseAlbedoHemi( perceptualRoughness );
+			// BRDF_EnvMap's envColourD (the voxels' share times the multiplier plus the
+			// environment's share; the header says why).
+			const vec3 irradiance = jahCardEnvColourD( P, Ncone );
 @else
 			// GI OFF (PHOTON-CARDS-5): the pixel's envColourD is the SH irradiance
 			// at its normal — the sky's SH x the Sky Light's gain, the engine's own
-			// coefficients — so the card's environment half is that, through the
-			// same BRDF_EnvMap arithmetic. Cached like the march: the SH is in the
-			// indirect signature (OgreScene::updateSurfaceCache), so a change
-			// re-runs this branch.
-			indirect = jahEnvIrradiance( Ncone ) * kD * 3.141592654 *
-					   jahDiffuseAlbedoHemi( perceptualRoughness );
+			// coefficients. Cached like the march: the SH is in the indirect
+			// signature (OgreScene::updateSurfaceCache), so a change re-runs this
+			// branch.
+			const vec3 irradiance = jahEnvIrradiance( Ncone );
 @end
+			indirect = irradiance * diffuseLobe;
+			specIndirect = irradiance * specLobe;
+			// THE CACHE: the diffuse half where the channel has one, the lobe's share where not
+			cached = mix( specIndirect, indirect, hasDiffuse );
 		}
 		else if( ( mode & 2u ) == 0u )
 		{
-			indirect = imageLoad( cardIndirect, at ).xyz;
+			cached = imageLoad( cardIndirect, at ).xyz;
+			indirect = mix( vec3( 0.0, 0.0, 0.0 ), cached, hasDiffuse );
+			// the irradiance, recovered from the diffuse half (kD > 0) or the lobe's share itself
+			specIndirect = mix( cached, cached * specLobe / max( diffuseLobe, vec3( 1e-12 ) ), hasDiffuse );
 		}
-		radiance = direct * kD + indirect + texelFetch( cardEmissive, at, 0 ).xyz;
+		flatTerm = texelFetch( cardEmissive, at, 0 ).xyz + specDirect + specIndirect;
+		radiance = direct * kD + indirect + flatTerm;
 	}
 	if( ( mode & 3u ) != 0u )
-		imageStore( cardIndirect, at, vec4( jahCardRound( indirect ), 1.0 ) );
+		imageStore( cardIndirect, at, vec4( jahCardRound( cached ), 1.0 ) );
+	imageStore( cardFlat, at, vec4( jahCardRound( flatTerm ), 1.0 ) );
 	imageStore( cardRadiance, at, vec4( jahCardRound( radiance ), 1.0 ) );
 }
