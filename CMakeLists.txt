@@ -272,6 +272,16 @@ execute_process(
     ERROR_VARIABLE  _clod_patch_output)
 string(REGEX REPLACE "(^|\n)-- " "\\1" _clod_patch_output "${_clod_patch_output}")
 string(STRIP "${_clod_patch_output}" _clod_patch_output)
+# THE STAGE IS FRESH AT EVERY CONFIGURE (the vendored header copied over it above), so the applier applies every
+# patch every time and said "applied" on each reconfigure (TOOLING-2 4e). What the build compiles is the
+# vendor-patched/ copy: when the staged result is that copy's bytes, the stack was already in the build — said so.
+if(_clod_patch_result EQUAL 0 AND EXISTS "${_clod_patched_root}/meshoptimizer-clusterlod/clusterlod.h")
+    file(SHA256 "${_clod_stage}/clusterlod.h" _clod_staged_sha)
+    file(SHA256 "${_clod_patched_root}/meshoptimizer-clusterlod/clusterlod.h" _clod_built_sha)
+    if(_clod_staged_sha STREQUAL _clod_built_sha)
+        string(REPLACE "vendor patch applied:" "vendor patch already applied:" _clod_patch_output "${_clod_patch_output}")
+    endif()
+endif()
 if(_clod_patch_output)
     message(STATUS "${_clod_patch_output}")
 endif()
