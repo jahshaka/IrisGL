@@ -1160,6 +1160,8 @@ void recordCasterPass(AtomPassContext &ctx) {
     const bool probeKind = nodeName == Ogre::IdString(OgreView::kProbeShadowNodeName);
     req.flagsForbidden = probeKind ? kGpuMover : 0u;
     req.hzbLevels = 0u;
+    // ONE TEXEL, never the view's pixel-error row (ATOM-3 stage 1): the map's texel is already
+    // the tier's lever (shadowResolution / shadowFilter), so the row would count it twice.
     req.pixelTolerance = kLodBudgetPixels * scene->lodBias();
     req.lodHysteresis = 0.0f;
     req.mode = 3u;

@@ -1228,6 +1228,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
             const bool authoritative = v->isEnabled() && v->ogreScene() &&
                                        *driverSlot(v->ogreScene()) == v.get();
             v->applyPendingResize(); v->updateParticles();
+            v->syncLodTolerance();   // the view's pixel-error threshold on its cameras (ATOM-3 stage 1)
             if (authoritative) { v->noteGiCamera(); giDrivers.push_back(v.get()); }
             // THE ATMOSPHERE'S OBSERVER is the same driving camera (SKY-ATMOSPHERE-1):
             // its altitude decides the horizon's dip and the air it looks through.
@@ -3144,6 +3145,8 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
         applyIfChanged(part.rayTracing, last.rayTracing, applied, [&](RayTracingMode v) { sc->setRayTracing(v); });
         applyIfChanged(part.sunContact, last.sunContact, applied,
                        [&](const SunContactDesc &v) { sc->setSunContact(v); });
+        applyIfChanged(part.pixelTolerance, last.pixelTolerance, applied,
+                       [&](float v) { sc->setPixelTolerance(v); });
         if (part.gi) {
             // THE TUNING ROW FIRST, then the configuration (GiParams: operator== leaves the tuning out, so a
             // tuning-only change is setGiTuning — nothing torn down — and a configuration change is a rebuild).

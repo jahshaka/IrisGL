@@ -4144,6 +4144,10 @@ public:
     /// ATOM stage 1: the scene-wide LOD dial (OgreMesh.cpp).
     void  setLodBias(float bias) override;
     float lodBias() const override { return mLodBias; }
+    /// ATOM-3 stage 1: the view's pixel-error threshold (Engine.h); read by the id pass's
+    /// request and by every view bound to the scene (OgreView::syncLodTolerance).
+    void  setPixelTolerance(float pixels) override;
+    float pixelTolerance() const override { return mPixelTolerance; }
     void  objectLods(std::vector<ObjectLodDesc> &out) const override;
     bool  meshVaoShape(MeshId mesh, unsigned &levels,
                        unsigned &shadowIndependent) const override;
@@ -6137,6 +6141,8 @@ private:
     /// ATOM stage 1: the scene-wide LOD dial. 1 = the reference budget of one
     /// pixel of geometric error; 0 pins every object at level 0.
     float mLodBias = 1.0f;
+    /// ATOM-3 stage 1: the World Mode's pixel-error row, in pixels (kLodBudgetPixels until pushed).
+    float mPixelTolerance = kLodBudgetPixels;
     std::map<std::string, RigRec> mRigs;
     std::map<NodeId, NodeClips> mClips;
     std::map<MaterialId, MaterialRec> mMaterials;
@@ -7501,6 +7507,12 @@ public:
     /// Registration itself rides addWorkspaceListener, so the listener survives
     /// every workspace rebuild — that is the seam this feature was waiting for.
     void syncPlanarListener();
+    /// ATOM-3 stage 1: THE VIEW'S PIXEL-ERROR THRESHOLD ON ITS CAMERAS. The stock chain's
+    /// world-error strategy multiplies its allowed error by the camera's own LOD factor
+    /// (`_getLodBiasInverse`, OgreMesh.cpp), so the view camera (and the PIP's) carries
+    /// 1 / Scene::pixelTolerance() and a shadow map's camera keeps Ogre's 1 — the maps keep
+    /// the texel. Every frame, before the view's passes walk the levels; two stores.
+    void syncLodTolerance();
     /// Arms or disarms this view's POST-CHAIN GLOBALS listener (CAMERA_LENS_SPEC
     /// §4). Armed while the view is enabled and its chain has any effect, so
     /// the view pushes ITS OWN exposure / bloom threshold / AO projection to

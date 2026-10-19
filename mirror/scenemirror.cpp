@@ -1031,6 +1031,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
     scenePart.reassert = mReassertPending;
     scenePart.shaderTime = mFrameShaderTime;
     scenePart.grid = mFrameGrid;
+    if (mSource) scenePart.pixelTolerance = float(mSource->atomPixelError);   // the World Mode's pixel-error row (ATOM-3)
     // THE CHANGE SET, SECOND TAKE: the writes made DURING this sync (a socket's fallback placement, a settle's
     // re-expression) join the set, so the record carries every write up to its emit — the frame that renders a
     // write is the frame whose scans hear of it.

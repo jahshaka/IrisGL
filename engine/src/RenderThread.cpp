@@ -118,6 +118,7 @@ void RenderThread::submit(FrameInput &&in) {
         if (sc.sky) it->sky = sc.sky;
         if (sc.shaderTime) it->shaderTime = sc.shaderTime;
         if (sc.grid) it->grid = sc.grid;
+        if (sc.pixelTolerance) it->pixelTolerance = sc.pixelTolerance;
         it->reassert = it->reassert || sc.reassert;
         if (sc.giRefreshSerial) it->giRefreshSerial = sc.giRefreshSerial;
         it->materialPreview = it->materialPreview || sc.materialPreview;

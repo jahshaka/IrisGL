@@ -593,8 +593,17 @@ struct MeshData {
 /// one pixel is under the sampling rate of the image it lands in. Half a pixel
 /// would be Nyquist-strict and is not needed — the bound is a MAXIMUM over the
 /// surface while what an eye integrates is the average, and the bound already
-/// carries the sampling-gap margin. Two pixels is visible on a moving silhouette:
-/// that frame-to-frame delta is ATOM-BAKE-2's dolly gate's subject.
+/// carries the sampling-gap margin. Two pixels may be visible on a moving silhouette:
+/// that frame-to-frame delta is ATOM-BAKE-2's dolly gate's subject, and its arms at 2 and
+/// 3 px print it (ATOM-3 stage 1).
+///
+/// THIS IS EPIC'S THRESHOLD, NOT EVERY TIER'S (ATOM-3 stage 1): the view's threshold is the
+/// World Mode's `atomPixelError` row — Low 4, Medium 3, High 2, Epic 1 px (the lead's
+/// numbers, 2026-10-19) — pushed to Scene::setPixelTolerance; a scene that never set one
+/// draws at this. The id pass's cut takes it times the LOD bias, and the stock chain takes
+/// it through the VIEW camera's own LOD factor (Ogre::Camera::setLodBias, which the world-
+/// error strategy reads) so a shadow map's camera keeps one texel: the map's texel is
+/// already its tier's lever (the shadowResolution / shadowFilter rows).
 ///
 /// WHAT IT IS WORTH, measured on the shipped chains: at one pixel on a 1080-line
 /// 45-degree view, the sphere's level 1 (bound 0.032 m) is taken at a bounding-
@@ -3009,27 +3018,6 @@ struct GiQualityFacts {
     /// ceiling; the rows are a quarter / an eighth / a sixteenth of it, NOT YET
     /// MEASURED in GPU milliseconds (locked clocks — the lead's measurement).
     unsigned cardIndirectTexels = 32768u;
-    // ---- THE ATOM COLUMN (ATOM P3's SUB-ERROR) -----------------------------
-    /// THE TIER'S GEOMETRIC TOLERANCE, in SAMPLES of whatever is sampling —
-    /// pixels for a view, cells for a cascade. It is the `tolerance` argument of
-    /// the quality currency (`allowedWorldError`, beside `lodLevelForWorldError`
-    /// at the top of this header) and the only dial in the whole level rule that
-    /// is a matter of taste rather than arithmetic.
-    ///
-    /// WHAT CONSUMES IT TODAY: `CullRequest::pixelTolerance` — the GPU cull's
-    /// level output — and nothing else. The SHIPPED draw path stays on
-    /// `kLodBudgetPixels` (one pixel) at every tier, deliberately: wiring the
-    /// tier in would move the picture of every Low-tier scene, which is a lane
-    /// with a pixel gate of its own and not this one.
-    ///
-    /// THE NUMBERS ARE PROVISIONAL AND SAY SO. `kLodBudgetPixels`' derivation
-    /// (one pixel is the largest deviation that cannot be seen) is the Medium
-    /// row; Low doubles it and High halves it. The honest floor — the tolerance
-    /// below which the triangle saving falls under measurement — is A1's
-    /// draw-call/vertex-bound instrument's to fix, and until it has, 0.5 is a
-    /// claim about the eye and not about the renderer. Epic shares High's row:
-    /// Epic changes no resolution, and the design gives the two the same tolerance.
-    float    pixelTolerance = 1.0f;
     // ---- THE GATHER ROW (PHOTON-GATHER-1d) -----------------------------------
     /// The screen-probe gather at this tier (GiGatherFacts says what and why).
     GiGatherFacts gather;
@@ -3154,7 +3142,6 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardResidencyRadius = 15.0f;
         f.cardLightTexels = 65536u;     // 4 pages a frame
         f.cardIndirectTexels = 16384u;  // 1 page a frame
-        f.pixelTolerance = 2.0f;        // the Atom column; see the field
         f.gather.on = false;            // Low keeps the cone diffuse (T-A)
         f.probeGridBudgetBytes = 64ull << 20;
         break;
@@ -3174,7 +3161,6 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardResidencyRadius = 60.0f;
         f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
         f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
-        f.pixelTolerance = 0.5f;        // ... and Epic reads this row too
         f.gather = { true, 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
@@ -3191,7 +3177,6 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardResidencyRadius = 30.0f;
         f.cardLightTexels = 131072u;    // 8 pages a frame
         f.cardIndirectTexels = 32768u;  // 2 pages a frame
-        f.pixelTolerance = 1.0f;        // = kLodBudgetPixels, the shipped draw budget
         f.gather = { true, 16u, 6u, 4u };   // 36 rays a probe (T-A)
         f.probeGridBudgetBytes = 128ull << 20;
         break;
@@ -7526,9 +7511,10 @@ struct GpuCullRequest {
     /// texels): NDC spans the pass's viewport — a letterboxed view's inset, not its
     /// whole target. Width 0 (the default) = the whole pyramid.
     unsigned hzbRect[4] = { 0u, 0u, 0u, 0u };
-    /// The level rule's input, in SAMPLES (the tier's Atom column,
-    /// `GiQualityFacts::pixelTolerance`, times the session's lodBias). 0 keeps
-    /// every survivor on level 0.
+    /// The level rule's input, in SAMPLES: the consumer's own threshold — the view's is the
+    /// World Mode's `atomPixelError` row (Scene::setPixelTolerance) times the session's lodBias,
+    /// a shadow map's the texel (OgreAtomCasterPass) times the same bias. 0 keeps every
+    /// survivor on level 0.
     float pixelTolerance = 0.0f;
     /// 0 = survivors only; 1 = + the per-instance level; 2 = + one
     /// VkDrawIndexedIndirectCommand per survivor (the level's range); 3 = THE CLUSTER
@@ -8230,6 +8216,9 @@ struct FrameInputScene {
     std::optional<SkyDesc>                sky;
     std::optional<float>                  shaderTime;
     std::optional<GridDesc>               grid;
+    /// THE VIEW'S PIXEL-ERROR THRESHOLD (ATOM-3 stage 1): the World Mode's `atomPixelError` row, in pixels
+    /// (Scene::setPixelTolerance).
+    std::optional<float>                  pixelTolerance;
     /// RE-ASSERT: forget what this scene AND EVERY VIEW SHOWING IT last applied from a record (GI excepted — a GI
     /// push is a from-scratch rebuild, ENGINE_CACHE_POLICY_SPEC P10) so every field present applies again. A host
     /// retaking the screen asks for it: part of what the scene's fields set is process-wide backend state another

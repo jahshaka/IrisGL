@@ -1869,6 +1869,13 @@ bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char
     } JAH_CATCH(mError, false);
 }
 
+void OgreView::syncLodTolerance() {
+    if (!mScene) return;
+    const Ogre::Real factor = Ogre::Real(1) / Ogre::Real(mScene->pixelTolerance());
+    for (Ogre::Camera *cam : { mCamera, mPipCamera })
+        if (cam && cam->getLodBias() != factor) cam->setLodBias(factor);
+}
+
 void OgreView::applyPendingResize() {
     // See the offscreen branch of resize(): the pyramid's level count is part of
     // the graph, so a size change that moves it rebuilds the chain — the view's own

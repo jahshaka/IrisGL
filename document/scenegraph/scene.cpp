@@ -403,6 +403,8 @@ Scene::Scene()
 
     // shadow-map budget: 0 = Auto, i.e. take the World Mode tier's value
     shadowMapBudget = 0;
+    // the view's pixel-error threshold: 1 px (Epic's, the engine's kLodBudgetPixels)
+    atomPixelError = 1;
     particleTimeScale = 1.0f;
 
     // Post chain: everything off. A scene only gets effects when the user picks

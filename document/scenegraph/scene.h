@@ -729,6 +729,13 @@ public:
     // shadowResolution's 0 does.
     int shadowMapBudget;
 
+    // THE VIEW'S PIXEL-ERROR THRESHOLD (ATOM-3 stage 1): how many pixels of geometric
+    // deviation a view affords before a coarser level or cluster group is drawn — the World
+    // Mode's `atomPixelError` row (Low 4, Medium 3, High 2, Epic 1). The mirror pushes it to
+    // the engine scene (Scene::setPixelTolerance); shadow maps keep their own texel. 1..8;
+    // the ctor's 1 is the reader's absent-key default (trap 10).
+    int atomPixelError;
+
     // Particle time scale (PARTICLES_FX2_SPEC.md §10.3). 1 = the simulation
     // clock's own rate, 0 = frozen, 2 = double speed. The DOCUMENT owns the
     // clock (SimulationClock, below) and the ENGINE simulates — the same split

@@ -359,6 +359,14 @@ public:
     /// re-derived in place and every Item reads them through a pointer. Meshes
     /// with no baked chain are unaffected by any value.
     virtual void        setLodBias(float bias) = 0;
+    /// ATOM-3 stage 1: THE VIEW'S PIXEL-ERROR THRESHOLD, in pixels — the World Mode's
+    /// `atomPixelError` row (Low 4, Medium 3, High 2, Epic 1; the mirror pushes it as
+    /// FrameInputScene::pixelTolerance). Every VIEW of the scene affords this many pixels of
+    /// geometric deviation, times the LOD bias: the id pass's cluster cut and the stock
+    /// chain's level walk (through the view camera's own LOD factor). A shadow map keeps one
+    /// texel — its texel is already the tier's lever — so the maps do not move with it.
+    /// A new scene draws at kLodBudgetPixels (1). Values below 0.0625 clamp there.
+    virtual void        setPixelTolerance(float pixels) = 0;
     /// DIAGNOSTIC: the SHAPE of a mesh's LOD and shadow VAO lists (ATOM P1's
     /// AT-A11). `levels` is how many LOD levels the mesh has and
     /// `shadowIndependent` how many of its shadow VAOs are NOT aliases of the

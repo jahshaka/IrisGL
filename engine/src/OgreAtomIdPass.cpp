@@ -790,10 +790,12 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         req.flagsRequired = kGpuVisible | kGpuAtom;
         req.flagsForbidden = 0u;
         req.hzbLevels = testAgainst ? testAgainst->getNumMipmaps() : 0u;
-        // THE VIEW STRATEGY'S OWN BUDGET (kLodBudgetPixels), scaled by the scene's LOD bias
-        // (OgreScene::applyLodValues divides the baked thresholds by it — the same
-        // dial seen from the other side).
-        req.pixelTolerance = kLodBudgetPixels * scene->lodBias();
+        // THE VIEW'S THRESHOLD (ATOM-3 stage 1): the World Mode's pixel-error row
+        // (Scene::setPixelTolerance; kLodBudgetPixels until pushed), scaled by the scene's LOD
+        // bias (OgreScene::applyLodValues divides the baked thresholds by it — the same dial
+        // seen from the other side). The stock chain takes the same row through the view
+        // camera's LOD factor (OgreView::syncLodTolerance), so the two routes cut alike.
+        req.pixelTolerance = scene->pixelTolerance() * scene->lodBias();
         // NO SWITCH BAND (D4): the band exists because a WHOLE OBJECT switching pops;
         // a cut whose every group is judged under one sample of error changes its
         // frontier invisibly by construction (Nanite has none). THE CUT (mode 3).

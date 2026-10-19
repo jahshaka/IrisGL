@@ -216,6 +216,12 @@ private:
     /// COLUMN everywhere since ATOM-VOXEL-2 — `worldMaxAxisScale`). A scaled
     /// instance's picture MOVES with the fix, and correctly so: an unscaled
     /// one's does not, because the ratio is exactly 1 there.
+    ///
+    /// THE THRESHOLD IS THE CAMERA'S (ATOM-3 stage 1): this is ONE pixel's world error; the
+    /// callers multiply it by the camera's own LOD factor (`_getLodBiasInverse`), which a VIEW
+    /// camera carries as the World Mode's pixel-error row (OgreView::syncLodTolerance: Low 4 ..
+    /// Epic 1) and a SHADOW MAP's camera — the pass walks the map's own camera, SHADOW-LOD-1 —
+    /// keeps at Ogre's 1: the view/map split is which camera walks, never a flag here.
     static Ogre::Real worldPerPixel(const Ogre::Camera *camera)
     {
         // A pass whose camera has never been given a viewport cannot be
@@ -831,6 +837,16 @@ void OgreScene::setLodBias(float bias) {
         if (kv.second.lodBounds.empty() || !kv.second.mesh) continue;
         applyLodValues(kv.second.mesh, kv.second.lodBounds);
     }
+}
+
+void OgreScene::setPixelTolerance(float pixels) {
+    if (postScene([=](OgreScene &s) { s.setPixelTolerance(pixels); return true; })) return;
+    JAH_HOST_CALL("Scene::setPixelTolerance");
+    // Not a threshold rewrite (setLodBias's): the tolerance is a per-VIEW quantity, so it rides
+    // each view camera's LOD factor (OgreView::syncLodTolerance, every frame) and the id pass's
+    // request — a shadow map's camera is never given it.
+    if (!(pixels >= 0.0625f)) pixels = 0.0625f;
+    mPixelTolerance = pixels;
 }
 
 void IndexBufferRelease::operator()(Ogre::IndexBufferPacked *b) const {
