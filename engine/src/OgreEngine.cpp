@@ -3038,7 +3038,7 @@ double OgreEngine::freeDrainBudgetMs() const {
     const double periodMs = mRenderThread.displayPeriod() > 0.0f ? double(mRenderThread.displayPeriod()) * 1000.0
                                                                   : kFreeDrainUnpacedPeriodMs;
     const double lastOtherMs = std::max(0.0, double(mRenderThread.lastFrameWorkNs()) / 1e6 - mLastFreeDrainMs);
-    return std::clamp(periodMs - lastOtherMs, periodMs * kFreeDrainFloorPeriods, periodMs);
+    return std::min(std::max(periodMs - lastOtherMs, kFreeDrainShare * lastOtherMs), kFreeDrainCeilingPeriods * periodMs);
 }
 
 

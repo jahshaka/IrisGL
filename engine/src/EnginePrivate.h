@@ -8167,17 +8167,21 @@ public:
     /// frame's drain budget is spent (freeDrainBudgetMs); the rest is carried to the next frame
     /// (RenderThread::carryForward). Lockstep frames, joins and requests drain whole.
     void drainFrameInput(FrameInput &in, bool any, bool budgeted = false);
-    /// THE FREE FRAME'S DRAIN BUDGET (BUGS-7; measured by BUGS-7 on Bistro's first open, §2604: one frame
+    /// THE FREE FRAME'S DRAIN BUDGET (BUGS-7; measured by BISTRO-STREAM-IN-1 on Bistro's first open, §2604: one frame
     /// drained the messages of every tick queued while the previous frame ran — 823 -> 25,515 messages, frames of
     /// 0.8-5 s of render-thread CPU with the GPU idle, growing with the queue). The display period is the budget's
     /// measure: a FREE frame's drain may use the time that still presents the frame at the display rate — the period
-    /// less the rest of the last free frame's work — and the remainder is carried, in order, to the next frame. When
-    /// the frame's own work already fills the period the drain still gets kFreeDrainFloorPeriods of one (a load always
-    /// advances, and the frame stays within 1 + kFreeDrainFloorPeriods of its own length); never more than one period.
-    /// The unit is the MESSAGE (a message is never split; its cost spans orders of magnitude — a mesh create against a
-    /// field write — so a count has no derivation and the clock is the bound). At least one message a frame. Under
-    /// Unlimited pacing (no period sent) the unpaced period stands in.
-    static constexpr double kFreeDrainFloorPeriods = 0.5;
+    /// less the rest of the last free frame's work — and the remainder is carried, in order, to the next frame. When the
+    /// frame's own work already fills the period (a Debug Bistro streaming in: ~70 ms of it) the display rate is out of
+    /// reach whatever the drain does, and the drain takes kFreeDrainShare of that work instead: the frame stays within
+    /// (1 + kFreeDrainShare) of its own length and the load keeps its share of the render thread (BUGS-7's master check:
+    /// a floor of half a period stretched Bistro's stream-in from 8 s to 30 s at the same ~100 ms frames). Never more
+    /// than kFreeDrainCeilingPeriods periods (a slow one-off frame does not buy the next drain its length). The unit is
+    /// the MESSAGE (a message is never split; its cost spans orders of magnitude — a mesh create against a field write —
+    /// so a count has no derivation and the clock is the bound). At least one message a frame. Under Unlimited pacing
+    /// (no period sent) the unpaced period stands in.
+    static constexpr double kFreeDrainShare = 1.0;
+    static constexpr double kFreeDrainCeilingPeriods = 6.0;
     static constexpr double kFreeDrainUnpacedPeriodMs = 1000.0 / 60.0;
     /// The drain budget of the next free frame (ms), from the display period and the last free frame's work.
     double freeDrainBudgetMs() const;
