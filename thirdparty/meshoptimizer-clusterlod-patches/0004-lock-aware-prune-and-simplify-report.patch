@@ -1,0 +1,336 @@
+From: jahshaka <jahshaka@gmail.com>
+Subject: [PATCH] clusterlod: a lock-aware prune of whole components (clodConfig::simplify_prune_unlocked) and a per-group simplify report
+
+ATOM-6, 2026-10-21. An edge collapse never removes a connected component, so a
+group made of many small pieces (a leaf card is two triangles, a railing post a
+closed box) cannot reach half its triangles: it is terminal or falls to the
+sloppy fallback, and the chain ends there (Bistro: 168 of 722 DAG meshes ended
+above 128 triangles, holding 175,151 of the scene's 281,632 coarsest).
+
+clodConfig::simplify_prune_unlocked (default OFF = upstream's behaviour): after
+the collapses, when a group is still above its target, remove WHOLE the
+connected components of the group's input (welded by position) that carry NO
+locked vertex, smallest first by clodMesh::component_extent (the caller's
+per-vertex price; NULL = the component's box diagonal), until the target is met;
+the group's error is raised to the largest price removed. A component touching
+the group's border is locked by lockBoundary and stays (Nanite's
+FCluster::SimplifyTriangles keeps it the same way); the next level's partition
+moves the border. meshopt_SimplifyPrune is NOT used: it prunes by its own
+quadric error regardless of locks (measured, ATOM-6 stage 0: 706 groups lost a
+locked position, the facade's errors x16). A group may come out EMPTY: it is
+output as a group with no clusters (the caller measures it).
+
+The report: clodGroup::simplify_flags (CLOD_SIMPLIFY_SLOPPY, CLOD_SIMPLIFY_PRUNED),
+locked_dropped (the level's locked positions the result no longer uses, by
+weld) and pruned_relocked (vertices of pruned components the verify hook asked
+to lock). The root group reports 0.
+
+Applied at configure (irisgl/CMakeLists.txt) to a copy of the vendored header
+in the build tree; the vendored file itself is never edited.
+---
+--- a/clusterlod.h
++++ b/clusterlod.h
+@@ -55,6 +55,12 @@
+ 	// use regularization during simplification to make triangle density more uniform, at some cost to overall triangle count; recommended for deformable objects
+ 	bool simplify_regularize;
+ 
++	// after the collapses, when a group is still above its target: remove whole connected components of the group (welded by
++	// position) that carry NO locked vertex, smallest first (clodMesh::component_extent), until the target is met; an edge collapse
++	// never removes a component, so a group of small pieces (leaf cards, closed boxes) cannot otherwise reach it; a piece touching
++	// the group's border is locked and stays (the next level's partition moves the border)
++	bool simplify_prune_unlocked;
++
+ 	// should clodCluster::bounds be computed based on the geometry of each cluster
+ 	bool optimize_bounds;
+ 
+@@ -95,6 +101,10 @@
+ 	const unsigned char* (*verify_group)(void* context, int depth, int attempt, const unsigned int* group_indices, size_t group_index_count, const unsigned int* simplified_indices, size_t simplified_index_count, float error);
+ 	void* verify_group_context;
+ 
++	// optional per-vertex removal cost for simplify_prune_unlocked: the extent of the vertex's component (a component costs the
++	// largest of its vertices'); NULL = the component's own box diagonal within the group
++	const float* component_extent;
++
+ 	// attribute weights for attribute-aware simplification; maps to meshopt_simplifyWithAttributes parameters
+ 	const float* attribute_weights;
+ 	size_t attribute_count;
+@@ -143,6 +153,20 @@
+ 	// 1. clodGroup::simplified for the group it's in is over error threshold
+ 	// 2. cluster.refined is -1 *or* clodGroup::simplified for groups[cluster.refined].simplified is at or under error threshold
+ 	clodBounds simplified;
++
++	// how the group's (last) simplification went: CLOD_SIMPLIFY_* bits; how many of the group's locked positions (the level's
++	// boundary, terminal and input locks, by welded position) the result no longer uses; and how many vertices of components the
++	// prune removed the verify hook asked to lock (a pruned piece the caller would not accept)
++	unsigned int simplify_flags;
++	unsigned int locked_dropped;
++	unsigned int pruned_relocked;
++};
++
++// clodGroup::simplify_flags
++enum
++{
++	CLOD_SIMPLIFY_SLOPPY = 1 << 0, // the sloppy fallback produced the result
++	CLOD_SIMPLIFY_PRUNED = 1 << 1, // simplify_prune_unlocked removed at least one component
+ };
+ 
+ // gets called for each group in sequence
+@@ -470,8 +494,131 @@
+ 		lod[i] = subset[lod[i]].id;
+ }
+ 
+-static std::vector<unsigned int> simplify(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, size_t target_count, float* error)
++static void pruneUnlocked(const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& remap, size_t target_count, std::vector<unsigned int>& lod, float* error, std::vector<unsigned int>& pruned)
++{
++	// the group's positions, numbered locally
++	std::vector<unsigned int> pos(indices.size());
++	for (size_t i = 0; i < indices.size(); ++i)
++		pos[i] = remap[indices[i]];
++	std::sort(pos.begin(), pos.end());
++	pos.erase(std::unique(pos.begin(), pos.end()), pos.end());
++
++	struct Local
++	{
++		const std::vector<unsigned int>& pos;
++		unsigned int operator()(unsigned int r) const { return unsigned(std::lower_bound(pos.begin(), pos.end(), r) - pos.begin()); }
++	} local = {pos};
++
++	// components of the group's input, by position
++	std::vector<unsigned int> parent(pos.size());
++	for (size_t i = 0; i < parent.size(); ++i)
++		parent[i] = unsigned(i);
++
++	struct Find
++	{
++		std::vector<unsigned int>& parent;
++		unsigned int operator()(unsigned int x) const
++		{
++			while (parent[x] != x)
++				x = parent[x] = parent[parent[x]];
++			return x;
++		}
++	} find = {parent};
++
++	for (size_t i = 0; i < indices.size(); i += 3)
++	{
++		unsigned int a = find(local(remap[indices[i + 0]]));
++		for (int k = 1; k < 3; ++k)
++		{
++			unsigned int b = find(local(remap[indices[i + k]]));
++			if (a != b)
++				parent[a < b ? b : a] = a < b ? a : b, a = a < b ? a : b;
++		}
++	}
++
++	// per component: locked, cost (the largest component_extent, else the box diagonal), output triangles
++	size_t count = pos.size();
++	std::vector<unsigned char> locked(count, 0);
++	std::vector<float> cost(count, 0.f);
++	std::vector<float> box(count * 6);
++	for (size_t c = 0; c < count; ++c)
++		for (int k = 0; k < 3; ++k)
++			box[c * 6 + k] = FLT_MAX, box[c * 6 + 3 + k] = -FLT_MAX;
++
++	size_t positions_stride = mesh.vertex_positions_stride / sizeof(float);
++
++	for (size_t i = 0; i < indices.size(); ++i)
++	{
++		unsigned int v = indices[i];
++		unsigned int c = find(local(remap[v]));
++
++		if (locks[v] & meshopt_SimplifyVertex_Lock)
++			locked[c] = 1;
++
++		if (mesh.component_extent)
++			cost[c] = std::max(cost[c], mesh.component_extent[v]);
++
++		for (int k = 0; k < 3; ++k)
++		{
++			float x = mesh.vertex_positions[v * positions_stride + k];
++			box[c * 6 + k] = std::min(box[c * 6 + k], x);
++			box[c * 6 + 3 + k] = std::max(box[c * 6 + 3 + k], x);
++		}
++	}
++
++	if (!mesh.component_extent)
++		for (size_t c = 0; c < count; ++c)
++		{
++			float dx = box[c * 6 + 3] - box[c * 6 + 0], dy = box[c * 6 + 4] - box[c * 6 + 1], dz = box[c * 6 + 5] - box[c * 6 + 2];
++			cost[c] = sqrtf(dx * dx + dy * dy + dz * dz);
++		}
++
++	std::vector<unsigned int> outputTris(count, 0);
++	for (size_t i = 0; i < lod.size(); i += 3)
++		outputTris[find(local(remap[lod[i]]))]++;
++
++	// smallest first; ties by component number (deterministic)
++	std::vector<unsigned int> order;
++	for (size_t c = 0; c < count; ++c)
++		if (!locked[c] && outputTris[c] && parent[c] == c)
++			order.push_back(unsigned(c));
++
++	std::sort(order.begin(), order.end(), [&](unsigned int a, unsigned int b) { return cost[a] < cost[b] || (cost[a] == cost[b] && a < b); });
++
++	std::vector<unsigned char> removed(count, 0);
++	size_t remaining = lod.size();
++	for (size_t k = 0; k < order.size() && remaining > target_count; ++k)
++	{
++		unsigned int c = order[k];
++		removed[c] = 1;
++		remaining -= outputTris[c] * 3;
++		*error = std::max(*error, cost[c]);
++	}
++
++	if (remaining == lod.size())
++		return;
++
++	size_t write = 0;
++	for (size_t i = 0; i < lod.size(); i += 3)
++		if (!removed[find(local(remap[lod[i]]))])
++		{
++			lod[write + 0] = lod[i + 0], lod[write + 1] = lod[i + 1], lod[write + 2] = lod[i + 2];
++			write += 3;
++		}
++	lod.resize(write);
++
++	for (size_t i = 0; i < indices.size(); ++i)
++		if (removed[find(local(remap[indices[i]]))])
++			pruned.push_back(indices[i]);
++	std::sort(pruned.begin(), pruned.end());
++	pruned.erase(std::unique(pruned.begin(), pruned.end()), pruned.end());
++}
++
++static std::vector<unsigned int> simplify(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& remap, size_t target_count, float* error, unsigned int* flags, std::vector<unsigned int>& pruned)
+ {
++	*flags = 0;
++	pruned.clear();
++
+ 	if (target_count > indices.size())
+ 		return indices;
+ 
+@@ -490,10 +637,19 @@
+ 		    mesh.vertex_attributes, mesh.vertex_attributes_stride, mesh.attribute_weights, mesh.attribute_count,
+ 		    &locks[0], target_count, FLT_MAX, options | meshopt_SimplifyPermissive, error));
+ 
++	// the collapses could not reach the target: remove whole unlocked components, smallest first
++	if (lod.size() > target_count && config.simplify_prune_unlocked)
++	{
++		pruneUnlocked(mesh, indices, locks, remap, target_count, lod, error, pruned);
++		if (!pruned.empty())
++			*flags |= CLOD_SIMPLIFY_PRUNED;
++	}
++
+ 	// while it's possible to call simplifySloppy directly, it doesn't support sparsity or absolute error, so we need to do some extra work
+ 	if (lod.size() > target_count && config.simplify_fallback_sloppy)
+ 	{
+ 		simplifyFallback(lod, mesh, indices, locks, target_count, error);
++		*flags |= CLOD_SIMPLIFY_SLOPPY;
+ 		*error *= config.simplify_error_factor_sloppy; // scale error up to account for appearance degradation
+ 	}
+ 
+@@ -539,7 +695,7 @@
+ #define CLOD_VERIFY_MAX_RETRIES 4
+ #endif
+ 
+-static void verifyGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& merged, std::vector<unsigned char>& locks, size_t target_size, float merged_error, int depth, std::vector<unsigned int>& simplified, float& error)
++static void verifyGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& merged, std::vector<unsigned char>& locks, size_t target_size, float merged_error, int depth, std::vector<unsigned int>& simplified, float& error, const std::vector<unsigned int>& remap, unsigned int& flags, std::vector<unsigned int>& pruned, unsigned int& pruned_relocked)
+ {
+ 	// locks added for this group only; restored before the next group is simplified
+ 	std::vector<std::pair<unsigned int, unsigned char> > saved;
+@@ -555,6 +711,11 @@
+ 		if (!extra || attempt >= CLOD_VERIFY_MAX_RETRIES)
+ 			break;
+ 
++		// a vertex of a pruned component the caller asks to lock: the prune removed a piece the caller would not accept
++		for (unsigned int v : pruned)
++			if (extra[v] & ~locks[v])
++				pruned_relocked++;
++
+ 		for (size_t k = 0; k < merged.size(); ++k)
+ 		{
+ 			unsigned int v = merged[k];
+@@ -566,7 +727,7 @@
+ 			}
+ 		}
+ 
+-		simplified = simplify(retry_config, mesh, merged, locks, target_size, &error);
++		simplified = simplify(retry_config, mesh, merged, locks, remap, target_size, &error, &flags, pruned);
+ 		if (simplified.size() > merged.size() * config.simplify_threshold)
+ 			break; // the added locks got the group stuck; the caller makes it terminal
+ 	}
+@@ -575,7 +736,7 @@
+ 		locks[saved[k - 1].first] = saved[k - 1].second;
+ }
+ 
+-static int outputGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<Cluster>& clusters, const std::vector<int>& group, const clodBounds& simplified, int depth, void* output_context, clodOutput output_callback)
++static int outputGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<Cluster>& clusters, const std::vector<int>& group, const clodBounds& simplified, int depth, void* output_context, clodOutput output_callback, unsigned int simplify_flags = 0, unsigned int locked_dropped = 0, unsigned int pruned_relocked = 0)
+ {
+ 	std::vector<clodCluster> group_clusters(group.size());
+ 
+@@ -591,7 +752,7 @@
+ 		result.vertex_count = cluster.vertices;
+ 	}
+ 
+-	return output_callback ? output_callback(output_context, {depth, simplified}, group_clusters.data(), group_clusters.size()) : -1;
++	return output_callback ? output_callback(output_context, {depth, simplified, simplify_flags, locked_dropped, pruned_relocked}, group_clusters.data(), group_clusters.size()) : -1;
+ }
+ 
+ static clodNode mergeNodes(const clodNode* nodes, size_t offset, size_t count)
+@@ -635,6 +796,7 @@
+ 	config.simplify_permissive = true;
+ 	config.simplify_fallback_permissive = false; // note: by default we run in permissive mode, but it's also possible to disable that and use it only as a fallback
+ 	config.simplify_fallback_sloppy = true;
++	config.simplify_prune_unlocked = false;
+ 
+ 	return config;
+ }
+@@ -729,16 +891,37 @@
+ 			clodBounds bounds = mergeGroups(clusters, groups[i]);
+ 
+ 			float error = 0.f;
+-			std::vector<unsigned int> simplified = simplify(config, mesh, merged, locks, target_size, &error);
++			unsigned int flags = 0, pruned_relocked = 0;
++			std::vector<unsigned int> pruned;
++			std::vector<unsigned int> simplified = simplify(config, mesh, merged, locks, remap, target_size, &error, &flags, pruned);
+ 
+ 			// let the caller verify the simplified group; it may re-simplify it with more locks (and get it stuck)
+ 			if (mesh.verify_group && simplified.size() <= merged.size() * config.simplify_threshold)
+-				verifyGroup(config, mesh, merged, locks, target_size, bounds.error, depth, simplified, error);
++				verifyGroup(config, mesh, merged, locks, target_size, bounds.error, depth, simplified, error, remap, flags, pruned, pruned_relocked);
++
++			// the group's locked positions its result no longer uses
++			unsigned int locked_dropped = 0;
++			{
++				std::vector<unsigned int> kept;
++				kept.reserve(simplified.size());
++				for (unsigned int v : simplified)
++					kept.push_back(remap[v]);
++				std::sort(kept.begin(), kept.end());
++				std::vector<unsigned int> in;
++				for (unsigned int v : merged)
++					if (locks[v] & meshopt_SimplifyVertex_Lock)
++						in.push_back(remap[v]);
++				std::sort(in.begin(), in.end());
++				in.erase(std::unique(in.begin(), in.end()), in.end());
++				for (unsigned int r : in)
++					if (!std::binary_search(kept.begin(), kept.end(), r))
++						locked_dropped++;
++			}
+ 
+ 			if (simplified.size() > merged.size() * config.simplify_threshold)
+ 			{
+ 				bounds.error = FLT_MAX; // terminal group, won't simplify further
+-				outputGroup(config, mesh, clusters, groups[i], bounds, depth, output_context, output_callback);
++				outputGroup(config, mesh, clusters, groups[i], bounds, depth, output_context, output_callback, flags, locked_dropped, pruned_relocked);
+ 
+ 				for (size_t j = 0; j < groups[i].size(); ++j)
+ 					for (unsigned int v : clusters[groups[i][j]].indices)
+@@ -751,7 +934,7 @@
+ 			bounds.error = std::max(bounds.error * config.simplify_error_merge_previous, error) + error * config.simplify_error_merge_additive;
+ 
+ 			// output the new group with all clusters; the resulting id will be recorded in new clusters as clodCluster::refined
+-			int refined = outputGroup(config, mesh, clusters, groups[i], bounds, depth, output_context, output_callback);
++			int refined = outputGroup(config, mesh, clusters, groups[i], bounds, depth, output_context, output_callback, flags, locked_dropped, pruned_relocked);
+ 
+ 			// discard clusters from the group - they won't be used anymore
+ 			for (size_t j = 0; j < groups[i].size(); ++j)

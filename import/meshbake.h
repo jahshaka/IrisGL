@@ -328,7 +328,6 @@ public:
         PermissiveCharged,     ///< permissive, NOTHING protected: seams paid for in the error (stage 1's choice)
         RegularizedProtectUv,  ///< DefaultProtectUv + simplify_regularize
         Strict,                ///< non-permissive, permissive only as a fallback (seams locked by topology)
-        PermissiveChargedPrune,///< PermissiveCharged + clodConfig::simplify_prune (ATOM-6 stage 0's measurement arm)
         Count
     };
     /// What one build did, for the report and the suites. `clusterRegions`
@@ -405,13 +404,20 @@ public:
         bool   wantRegions = false;
         QVector<QVector<quint32>> clusterRegions;
         /// clusterlod's own report per group, by group id (patch 0004): `groupSimplifyFlags`
-        /// = CLOD_SIMPLIFY_* (1 = the sloppy fallback made the result), `groupLockedDropped` =
-        /// the level's locked vertices the result no longer uses. `sloppyGroups` /
-        /// `lockDroppedGroups` count the groups with either.
+        /// = CLOD_SIMPLIFY_* (1 = the sloppy fallback made the result, 2 = the prune removed a
+        /// component), `groupLockedDropped` = the level's locked positions the result no longer
+        /// uses. `sloppyGroups` / `prunedGroups` / `lockDroppedGroups` count the groups with
+        /// each; `prunedRelocked` = vertices of pruned components the displacement lock asked
+        /// to lock (0 by construction: a pruned piece is charged under the group's error);
+        /// `emptyGroups` = groups the prune emptied (a group with its measured error and no
+        /// output clusters: affordable, the object draws nothing there).
         QVector<quint32> groupSimplifyFlags;
         QVector<quint32> groupLockedDropped;
         int    sloppyGroups = 0;
+        int    prunedGroups = 0;
         int    lockDroppedGroups = 0;
+        int    prunedRelocked = 0;
+        int    emptyGroups = 0;
     };
     static void buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats = nullptr,
                                 ClusterDagVariant variant = ClusterDagVariant::Shipped);

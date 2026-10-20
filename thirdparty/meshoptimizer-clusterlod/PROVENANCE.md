@@ -48,5 +48,6 @@ file re-applies the stack or refuses loudly.
 |---|---|
 | `0002-terminal-group-border-stays-locked.patch` | a terminal (stuck) group's border stays locked at every later level — an upstream defect in v1.2 (`lockBoundary` sees only the current level's groups; 16 open edges on round-bar-40m), an upstream PR candidate |
 | `0003-per-group-verify-hook.patch` | `clodMesh::verify_group` — the caller verifies every simplified group and may re-simplify THAT group with added locks, never through the sloppy fallback; a re-simplification stuck under its locks makes the group terminal (the bake's displacement lock is per group; one `vertex_lock` bound every level up to the root) |
+| `0004-lock-aware-prune-and-simplify-report.patch` | `clodConfig::simplify_prune_unlocked` + `clodMesh::component_extent` — after the collapses, a group still above its target removes WHOLE its components that carry no locked vertex, smallest first by the caller's price (the bake's island extent), so a group of leaf cards or closed boxes reaches its target and may come out empty; plus the per-group report (`clodGroup::simplify_flags` / `locked_dropped` / `pruned_relocked`). `meshopt_SimplifyPrune` is not used: it ignores locks (ATOM-6 stage 0) |
 
 (0001 was CLUSTER-LOCK-2's per-level lock prototype, never landed; the number is retired, never reused.)

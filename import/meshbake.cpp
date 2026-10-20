@@ -244,7 +244,13 @@ namespace
 // two: the Bistro's 0.5528 x 0.737 = 0.41); and separate METALNESS / DIFFUSE_ROUGHNESS
 // maps (OBJ map_Pm / map_Pr, Stingray/Max FBX) bind as themselves — only glTF's one
 // packed image is split. Material bytes change (BAKEKEY-1).
-constexpr int kFormatVersion = 22;
+// v23 (2026-10-21, ATOM-6): THE DAG REACHES ITS ROOT — clusterlod patch 0004's lock-aware prune: a group still
+// above its halving target after the collapses removes its UNLOCKED components whole, smallest island first, so a
+// group of leaf cards or closed boxes keeps simplifying instead of ending terminal or sloppy; a group pruned to
+// nothing is a GROUP with its measured error (the largest removed island's extent) and no clusters, never a
+// terminal. Every mesh with an unlocked component in a stuck group re-bakes: pruned levels, empty groups, the
+// blob's config record (simplify_prune_unlocked). The output changed, so the version is bumped (BAKEKEY-1).
+constexpr int kFormatVersion = 23;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -2207,11 +2213,17 @@ constexpr int   kLockPasses    = 4;
 /// most 2x the simplifier's error, at the same triangle counts. Whatever the pass
 /// budget leaves is charged by the cap, honestly.
 ///
-/// `meshopt_SimplifyPrune` IS NOT THE TOOL, read and rejected: it REMOVES whole
-/// components whose bounding radius is under the simplifier's current error (the
-/// same "an island costs its size" rule as the cap here — simplifier.cpp's
-/// measureComponents), but it does not stop the ordinary edge collapses from
-/// erasing a larger island, which is what happens on the scan.
+/// `meshopt_SimplifyPrune` IS NOT THE TOOL — for the chain on the scan (it does not
+/// stop the edge collapses from erasing a larger island) and for the DAG (ATOM-6
+/// stage 0, measured on the Bistro: it prunes by its own quadric error REGARDLESS
+/// OF LOCKS, so pieces on a group's border vanished — 706 groups lost a locked
+/// position — and the facades' errors rose x16-x26). THE DAG'S PRUNE IS OURS
+/// (clusterlod patch 0004, `simplify_prune_unlocked`): after the collapses, a group
+/// still above its target removes WHOLE the components that carry no locked vertex,
+/// smallest island first — priced by exactly this cap (`capOf`, handed to clusterlod
+/// as `component_extent`), so a pruned piece costs what the measurement charges it,
+/// and a piece on the group's border is locked and stays. The displacement lock
+/// below holds everything the prune does not reach.
 ///
 /// COMPONENTS ARE WELDED BY POSITION (`meshopt_generatePositionRemap`): a scan's
 /// UV seams split vertices everywhere, and a component by index would be cut
@@ -3958,6 +3970,9 @@ Variant resolve(Variant v) { return v == Variant::Shipped ? kShipped : v; }
 clodConfig configFor(Variant v)
 {
     clodConfig c = clodDefaultConfig(size_t(kMaxTriangles));
+    // OUR PRUNE (ATOM-6, patch 0004): after the collapses, the group's unlocked components whole, smallest
+    // island first, until the halving target — see `lodchain::Islands` for why it is the tool now.
+    c.simplify_prune_unlocked = true;
     switch (resolve(v)) {
     case Variant::RegularizedProtectUv:
         c.simplify_regularize = true;
@@ -3965,9 +3980,6 @@ clodConfig configFor(Variant v)
     case Variant::Strict:
         c.simplify_permissive = false;
         c.simplify_fallback_permissive = true;
-        break;
-    case Variant::PermissiveChargedPrune:
-        c.simplify_prune = true;
         break;
     default:
         break;
@@ -4014,7 +4026,7 @@ QVector<float> configRecord(Variant v)
         c.simplify_error_merge_previous, c.simplify_error_merge_additive,
         c.simplify_error_factor_sloppy, c.simplify_error_edge_limit,
         float(c.simplify_permissive), float(c.simplify_fallback_permissive),
-        float(c.simplify_fallback_sloppy), float(c.simplify_regularize),
+        float(c.simplify_fallback_sloppy), float(c.simplify_regularize), float(c.simplify_prune_unlocked),
         float(c.optimize_bounds), float(c.optimize_clusters), float(c.optimize_clusters_level),
         protect, float(kMaxTriangles), lodchain::kNormalWeight, lodchain::kUvWeight,
         lodchain::kBoundMargin, lodchain::kBoundFloorRel };
@@ -4791,6 +4803,8 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
                            extent > 0.0f ? extent * lodchain::kBoundFloorRel : 0.0f);
     cm.verify_group = &GroupVerifier::hook;
     cm.verify_group_context = &verifier;
+    // THE PRUNE'S PRICE is the measurement's: a vertex's island extent (`Islands::capOf`).
+    cm.component_extent = islands.capOf.data();
 
     // ---- the build ------------------------------------------------------
     struct RawCluster
@@ -4811,7 +4825,9 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
                       stats->groupSimplifyFlags.push_back(group.simplify_flags);
                       stats->groupLockedDropped.push_back(group.locked_dropped);
                       if (group.simplify_flags & CLOD_SIMPLIFY_SLOPPY) ++stats->sloppyGroups;
+                      if (group.simplify_flags & CLOD_SIMPLIFY_PRUNED) ++stats->prunedGroups;
                       if (group.locked_dropped) ++stats->lockDroppedGroups;
+                      stats->prunedRelocked += int(group.pruned_relocked);
                   }
                   groups.push_back(group);
                   for (size_t i = 0; i < count; ++i) {
@@ -4944,7 +4960,36 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     const bool termsLog = std::getenv("JAH_BAKE_DAG_TERMS") != nullptr;
     std::vector<QString> termLines(termsLog ? groups.size() : 0);
     const auto measureGroup = [&](size_t g, Scratch &sc) {
-        if (groups[g].simplified.error == FLT_MAX || outputs[g].empty()) return;   // terminal
+        if (groups[g].simplified.error == FLT_MAX) return;   // terminal
+        if (outputs[g].empty()) {
+            // AN EMPTY OUTPUT IS A GROUP, NOT A TERMINAL (ATOM-6): the prune removed every component the
+            // group held, whole. Each level-0 point its members stand for is charged its island's extent
+            // (the cap; the group keeps no surface to be nearer), so the measured error is the largest
+            // of them. Affordable, the group draws nothing: an object under its own extent vanishes.
+            float e = 0.0f;
+            std::vector<unsigned> comps;
+            int regionVertices = 0;
+            for (int m : members[g])
+                for (unsigned v : regionAll[size_t(m)]) {
+                    ++regionVertices;
+                    if (std::isfinite(islands.capOf[v])) e = std::max(e, islands.capOf[v]);
+                    if (islands.compOf[v] < islands.count()) comps.push_back(islands.compOf[v]);
+                }
+            measured[g] = std::max(e, floorLen);
+            if (measured[g] < groups[g].simplified.error) below[g] = 1;
+            if (terms) {
+                std::sort(comps.begin(), comps.end());
+                comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
+                MeshBake::ClusterDagStats::GroupTerms &row = (*terms)[int(g)];
+                row.regionVertices = regionVertices;
+                row.vertex = e;
+                row.bound = measured[g];
+                row.capBound = true;
+                row.islandsDropped = int(comps.size());
+                for (unsigned c : comps) row.droppedMaxExtent = std::max(row.droppedMaxExtent, islands.extent[c]);
+            }
+            return;
+        }
         std::vector<surface::Sample> &pts = sc.pts;
         // S: the group's simplified output.
         std::vector<unsigned> simplifiedIdx, ownerOfTri;
@@ -5375,6 +5420,9 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         stats->groups = int(groups.size());
         stats->depth = maxDepth + 1;
         stats->terminalGroups = terminal;
+        stats->emptyGroups = 0;
+        for (size_t g = 0; g < groups.size(); ++g)
+            if (outputs[g].empty() && dag.groups[int(g)].error != FLT_MAX) ++stats->emptyGroups;
         stats->monotoneFixes = monotoneFixes;
         stats->sphereFixes = sphereFixes;
         stats->measuredBelowEstimate = belowEstimate;
@@ -5419,7 +5467,6 @@ const char *MeshBake::clusterDagVariantName(ClusterDagVariant variant)
     case ClusterDagVariant::PermissiveCharged:    return "permissive-charged";
     case ClusterDagVariant::RegularizedProtectUv: return "regularized+protect-uv";
     case ClusterDagVariant::Strict:               return "strict(fallback-permissive)";
-    case ClusterDagVariant::PermissiveChargedPrune: return "permissive-charged+prune";
     default:                                      return "?";
     }
 }
