@@ -1,0 +1,43 @@
+// THE ID PASS'S DEPTH MERGED INTO THE SCENE'S (ATOM-4 stage 1; OgreChain.cpp addAtomOcclusionPasses,
+// JahAtomDepthMerge_ps.glsl has the contract).
+//
+//   unit 0  the Atom view's depth (the id pass's own: both id passes' surfaces, no stock one)
+//
+// Depth test and write on, NEAREST WINS (less_equal: the render system reverses it under reverse depth), no colour:
+// the target is the depth-only view of the scene's depth. GLSL + Vulkan only.
+fragment_program Jahshaka/AtomDepthMerge_ps_VK glslvk
+{
+	source JahAtomDepthMerge_ps.glsl
+}
+fragment_program Jahshaka/AtomDepthMerge_ps unified
+{
+	delegate Jahshaka/AtomDepthMerge_ps_VK
+}
+
+material Jahshaka/AtomDepthMerge
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write on
+			depth_func less_equal
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/AtomDepthMerge_ps
+			{
+			}
+
+			texture_unit atomIdDepth
+			{
+				filtering none
+				tex_address_mode clamp
+			}
+		}
+	}
+}

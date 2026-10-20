@@ -701,14 +701,19 @@ void viewportRectOf(const Ogre::CompositorPassDef::ViewportRect &r, uint32_t tw,
 /// culls against the PREVIOUS frame's pyramid — still in `jahHzb`, since nothing has
 /// rebuilt it yet this frame — projected with the matrix THAT pyramid's depth was drawn
 /// with (the history), so the pyramid is never misread whatever the camera did since:
-/// a cut only makes its prediction poor, never the answer wrong. The chain then builds
-/// the pyramid from the first pass's depth; the LATE pass tests the set the first cull
-/// rejected against it with THIS frame's matrix and draws the survivors into the same
-/// id image and depth. An instance the late test also rejects lies behind depth that
-/// is in the final picture (the first pass's surfaces are a subset of it), so no pixel
-/// it could have won is lost: the id image equals the frustum-only one (the conservative
-/// test: the farthest depth over every texel of the box's rectangle, the box's nearest
-/// point, a relative margin). With NO usable history — a view's first frame, a rebuilt
+/// a cut only makes its prediction poor, never the answer wrong. Between the two passes
+/// the chain copies the first pass's depth into the Atom view's (kAtomViewDepth) and
+/// draws the STOCK opaque depth into the scene's (ATOM-4 stage 1, OgreChain.cpp
+/// addAtomOcclusionPasses); the LATE pass builds the pyramid from the scene's depth —
+/// the first pass's surfaces and the stock ones — tests the set the first cull rejected
+/// against it with THIS frame's matrix and draws the survivors into the id image and the
+/// Atom view's depth (a merge quad then brings them into the scene's). An instance the
+/// late test also rejects lies behind depth that is in the final picture (the first
+/// pass's surfaces and the stock opaque ones are a subset of it), so no pixel it could
+/// have won is lost: wherever an Atom surface is the picture's, the id image equals the
+/// frustum-only one (the conservative test: the farthest depth over every texel of the
+/// box's rectangle, the box's nearest point, a relative margin) — and a cluster wholly
+/// behind a stock wall is drawn by neither pass. With NO usable history — a view's first frame, a rebuilt
 /// graph, a resized pyramid, another world — the first cull tests nothing and the late
 /// pass records nothing: the frame is the frustum-only frame.
 void recordIdPass(AtomPassContext &ctx, bool late) {
@@ -752,11 +757,24 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         JAH_TRY { hzb = pass->getParentNode()->getDefinedTexture(Ogre::IdString("jahHzb")); }
         catch (const Ogre::Exception &) { hzb = nullptr; }
     }
-    // THE LATE PASS BUILDS THE PYRAMID FIRST, from the depth the first pass just wrote
-    // (every level the texture has: a resize is no new graph). Built every frame the
-    // chain carries the occlusion, drawn or not — it is the next frame's history.
+    // THE SCENE'S DEPTH AND THE ID PASS'S OWN on a chain with the occlusion (ATOM-4 stage 1): the late pass draws
+    // into the Atom view's depth (its RTV's), the pyramid is built from the scene's — the first pass's surfaces and
+    // the stock depth drawn between the passes — and the receivers read the Atom-only one.
+    Ogre::TextureGpu *sceneDepth = depthTex, *atomDepth = depthTex;
+    if (hzb) {
+        JAH_TRY {
+            const Ogre::CompositorNode *node = pass->getParentNode();
+            sceneDepth = node->getDefinedTexture(Ogre::IdString(kSceneDepthTexture));
+            atomDepth = node->getDefinedTexture(Ogre::IdString(kAtomViewDepthTexture));
+        }
+        catch (const Ogre::Exception &) { sceneDepth = atomDepth = nullptr; }
+        if (!sceneDepth || !atomDepth) hzb = nullptr;
+    }
+    // THE LATE PASS BUILDS THE PYRAMID FIRST, from the scene's depth as it stands: the first pass's and the stock
+    // depth (every level the texture has: a resize is no new graph). Built every frame the chain carries the
+    // occlusion, drawn or not — it is the next frame's history, and it holds the stock walls.
     bool pyramidBuilt = false;
-    if (late && hzb) pyramidBuilt = recordOcclusionPyramid(ctx.renderSystem, depthTex, hzb);
+    if (late && hzb) pyramidBuilt = recordOcclusionPyramid(ctx.renderSystem, sceneDepth, hzb);
     if (late && !pyramidBuilt) hzb = nullptr;
     unsigned rect[4] = { 0u, 0u, 0u, 0u };
     viewportRectOf(vpRect, tw, th, rect);
@@ -856,7 +874,7 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         }
         if (late) {
             // THE HISTORY THE NEXT FRAME'S FIRST CULL TESTS AGAINST: the pyramid of this
-            // frame (built from the first pass's depth, drawn with this matrix).
+            // frame (built from the first pass's depth and the stock depth, drawn with this matrix).
             hist.valid = hzb != nullptr;
             const Ogre::Matrix4 cm = cullMatrixOf(vpm);
             for (int r = 0; r < 4; ++r)
@@ -872,9 +890,10 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         view->atomOcclusionHistory().valid = false;
     }
     if (draw && !capture && view) {
-        // THE RECEIVERS' DEPTH (stage 4b): this frame's, for the sun maps that render after.
+        // THE RECEIVERS' DEPTH (stage 4b): this frame's, for the sun maps that render after — the id pass's own
+        // (with the occlusion the Atom view's depth, which holds both passes' surfaces by then).
         AtomReceiverDepth &rd = view->atomReceiverDepth();
-        rd.depth = depthTex;
+        rd.depth = atomDepth;
         rd.drawMatrix = vpm;
         std::copy(rect, rect + 4, rd.rect);
         rd.frame = vkRs->getVaoManager()->getFrameCount();
