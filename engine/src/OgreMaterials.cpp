@@ -664,10 +664,12 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         // what every reflection probe would capture, so the grid goes stale
         // (it used to be refreshed only by an endless sweep). The fields the
         // VOXELIZER converts — diffuse, emissive, transparency, the roughness (the
-        // injection's and the bounce's diffuse albedo read it: PHOTON-WRITER-1) and, in
-        // the metallic workflow, the metalness that scales the diffuse lobe
-        // (PhotonVoxelMaterial writeRow, VOXEL-METAL-ALBEDO-1) — additionally move the
-        // material generation, which re-voxelizes once when the edit settles.
+        // injection's and the bounce's diffuse albedo read it: PHOTON-WRITER-1), in
+        // the metallic workflow the metalness that scales the diffuse lobe
+        // (PhotonVoxelMaterial writeRow, VOXEL-METAL-ALBEDO-1), and the specular lobe's
+        // inputs of every workflow - kS (the row's weight) and, in the specular
+        // workflows, the F0 the IOR or the Fresnel colour sets (PHOTON-4) — additionally
+        // move the material generation, which re-voxelizes once when the edit settles.
         {
             const PbrParams &o = it->second.params;
             const auto sameCol = [](const Colour &a, const Colour &b) {
@@ -677,7 +679,10 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
                 !sameCol(o.albedo, p.albedo) || !sameCol(o.emissive, p.emissive) ||
                 o.alpha != p.alpha || o.alphaMode != p.alphaMode || o.workflow != p.workflow ||
                 (o.metalness != p.metalness && p.workflow == PbrParams::Workflow::Metallic) ||
-                o.roughness != p.roughness;
+                o.roughness != p.roughness || !sameCol(o.specularColour, p.specularColour) ||
+                (p.workflow != PbrParams::Workflow::Metallic &&
+                 (o.ior != p.ior || !sameCol(o.fresnelColour, p.fresnelColour) ||
+                  o.useFresnelColour != p.useFresnelColour || o.separateFresnel != p.separateFresnel));
             mPhoton.noteMaterialChanged(id, voxelInputs);
             // THE LAMP-MAP CACHE'S MATERIAL INPUT (ENGINE_CACHE_POLICY_SPEC §3:
             // "only if it changes depth"). What a caster pass writes depends on
