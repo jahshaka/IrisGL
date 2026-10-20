@@ -878,7 +878,12 @@ void skipAtomQueue(Ogre::CompositorPassSceneDef *p);
 void skipSceneHelpers(Ogre::CompositorPassSceneDef *p);
 
 /// THE TWO-PASS OCCLUSION'S SECOND HALF (ATOM-OCCLUSION-1, ChainDesc::atomOcclusion) AND THE STOCK DEPTH BETWEEN THE
-/// TWO ID PASSES (ATOM-4 stage 1, the owner's approval 2026-10-20), after the first id pass:
+/// TWO ID PASSES (ATOM-4 stages 1 and 1b, the owner's approval 2026-10-20), after the first id pass. Two arms, ONE a
+/// frame (the view's atom listener sets kAtomStockExecutionBit while a stock slot's box is in the camera's view,
+/// kAtomNoStockExecutionBit otherwise — OgreAtomDraw.cpp stockInView):
+///   NO STOCK IN VIEW — today's frame: the LATE ID PASS on (the id image, kDepth), its pyramid built from the first
+///      pass's depth; then the id pass's own depth copied (kAtomViewDepth) for its readers;
+///   STOCK IN VIEW —
 ///   1. THE ID PASS'S OWN DEPTH, copied (kAtomViewDepth): the Atom-only depth, before any stock surface joins kDepth;
 ///   2. THE STOCK DEPTH: a DEPTH-ONLY scene pass over the opaque queue range into kDepth, loading the id depth — the
 ///      stock opaque items' depth (Ogre's hlms_render_depth_only: an RTV with no colour attachment disables the
@@ -891,16 +896,37 @@ void skipSceneHelpers(Ogre::CompositorPassSceneDef *p);
 ///   4. THE MERGE: a depth quad (Jahshaka/AtomDepthMerge) writes kAtomViewDepth into kDepth under the depth test,
 ///      so kDepth holds the nearest of the Atom surfaces and the stock ones — every scene pass after it loads that
 ///      (the opaque pass has its early-Z from the stock draw).
-/// A cluster wholly behind a stock wall is then rejected by BOTH halves (the pyramid it leaves, built from depth that
-/// holds the wall, is the NEXT frame's history): the hidden share is culled, not moved to the late list
-/// (atom.hidden_cut). The id image differs from the frustum-only one only where a stock surface is in front.
+/// The ONE copy serves both arms: it runs right after the first pass in the stock arm, and after the late pass in
+/// the other one wherever its readers need it (the Atom view's bit, or every frame on a chain whose ray tier reads
+/// the ids). A cluster wholly behind a stock wall is rejected by BOTH halves (the pyramid the late pass leaves holds
+/// the wall: the NEXT frame's history): the hidden share is culled, not moved to the late list (atom.hidden_cut).
+/// The id image differs from the frustum-only one only where a stock surface is in front.
 void addAtomOcclusionPasses(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandles &handles,
                             Ogre::uint8 lastStockQueue) {
+    const auto latePass = [&](const char *rtv, Ogre::uint8 bit) {
+        Ogre::CompositorTargetDef *t = n->addTargetPass(rtv);
+        t->setNumPasses(1);
+        Ogre::CompositorPassDef *p = t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(kAtomIdLatePassId));
+        p->mJahReadsGi = false;   // the visibility ids: no GI sampled (PhotonPassBinding::passReadsGi)
+        p->setAllLoadActions(Ogre::LoadAction::Load);
+        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        p->mStoreActionDepth = Ogre::StoreAction::Store;
+        p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        p->mExecutionMask = bit;
+        p->mProfilingId = "Jahshaka atom id late";
+        if (desc.letterbox) inset(handles, p);
+    };
+    // NO STOCK IN VIEW: the late pass on the scene's own depth.
+    latePass(kAtomIdRtv, kAtomNoStockExecutionBit);
     {
         Ogre::CompositorTargetDef *ct = n->addTargetPass(kAtomViewDepth);
         ct->setNumPasses(1);
         auto *c = static_cast<Ogre::CompositorPassDepthCopyDef *>(ct->addPass(Ogre::PASS_DEPTHCOPY));
         c->setDepthTextureCopy(kDepth, kAtomViewDepth);
+        // THE READERS (addAtomIdPass's note): the Atom view's quad, and every frame where the ray tier reads the ids.
+        const bool idReaders = desc.rayReflect && desc.atomDraw;
+        c->mExecutionMask = Ogre::uint8(kAtomStockExecutionBit | kAtomViewExecutionBit |
+                                        (idReaders ? kAtomNoStockExecutionBit : 0u));
         c->mProfilingId = "Jahshaka atom id depth";
     }
     {
@@ -920,6 +946,7 @@ void addAtomOcclusionPasses(Ogre::CompositorNodeDef *n, const ChainDesc &desc, C
         p->mEnableForwardPlus = false; // no light is read
         skipAtomQueue(p);
         skipSceneHelpers(p);
+        p->mExecutionMask = kAtomStockExecutionBit;
         p->mProfilingId = "Jahshaka atom stock depth";
         if (desc.letterbox) inset(handles, p);
     }
@@ -930,17 +957,8 @@ void addAtomOcclusionPasses(Ogre::CompositorNodeDef *n, const ChainDesc &desc, C
         rtv->colourAttachments.push_back(ids);
         rtv->depthAttachment.textureName = kAtomViewDepth;
         rtv->preferDepthTexture = true;
-        Ogre::CompositorTargetDef *t = n->addTargetPass(kAtomIdLateRtv);
-        t->setNumPasses(1);
-        Ogre::CompositorPassDef *p = t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(kAtomIdLatePassId));
-        p->mJahReadsGi = false;   // the visibility ids: no GI sampled (PhotonPassBinding::passReadsGi)
-        p->setAllLoadActions(Ogre::LoadAction::Load);
-        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
-        p->mStoreActionDepth = Ogre::StoreAction::Store;
-        p->mStoreActionStencil = Ogre::StoreAction::DontCare;
-        p->mProfilingId = "Jahshaka atom id late";
-        if (desc.letterbox) inset(handles, p);
     }
+    latePass(kAtomIdLateRtv, kAtomStockExecutionBit);
     {
         Ogre::CompositorTargetDef *t = n->addTargetPass(kAtomStockDepthRtv);
         t->setNumPasses(1);
@@ -950,6 +968,7 @@ void addAtomOcclusionPasses(Ogre::CompositorNodeDef *n, const ChainDesc &desc, C
         q->setAllLoadActions(Ogre::LoadAction::Load);
         q->mStoreActionDepth = Ogre::StoreAction::Store;
         q->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        q->mExecutionMask = kAtomStockExecutionBit;
         q->mProfilingId = "Jahshaka atom id depth merge";
     }
 }
@@ -977,8 +996,8 @@ void addAtomIdPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandl
     p->mProfilingId = "Jahshaka atom id";
     // A letterboxed view's ids line up with its image.
     if (desc.letterbox) inset(handles, p);
-    // THE TWO-PASS OCCLUSION (ChainDesc::atomOcclusion): the id depth copied, the stock depth, the late id pass
-    // over the rejected set, the merge — kAtomViewDepth is the id pass's own depth after it, every frame.
+    // THE TWO-PASS OCCLUSION (ChainDesc::atomOcclusion): the late id pass over the rejected set, with the stock
+    // depth between the passes while a stock item is in view, and the id pass's own depth copied (both arms).
     if (desc.atomOcclusion) {
         addAtomOcclusionPasses(n, desc, handles, lastStockQueue);
         return;

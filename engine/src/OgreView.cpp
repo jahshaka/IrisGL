@@ -1043,7 +1043,10 @@ bool OgreView::attachWorkspace() {
         // THE ATOM VIEW'S PASSES START OFF (kAtomViewExecutionBit): the view's atom
         // listener sets the bit, per frame, only while the scene's view is on.
         // ...AND THE PHOTON VIEW'S (kPhotonExecutionBits), by its listener likewise.
-        mWorkspace->setExecutionMask(Ogre::uint8(0xFFu & ~kAtomViewExecutionBit & ~kPhotonExecutionBits));
+        // ...and the occlusion's no-stock arm (kAtomNoStockExecutionBit) until the listener first decides: the
+        // stock arm is exact in every frame.
+        mWorkspace->setExecutionMask(
+            Ogre::uint8(0xFFu & ~kAtomViewExecutionBit & ~kPhotonExecutionBits & ~kAtomNoStockExecutionBit));
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
             mWorkspace->addListener(l);
         ++mWorkspaceGeneration;

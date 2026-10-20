@@ -757,15 +757,18 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         JAH_TRY { hzb = pass->getParentNode()->getDefinedTexture(Ogre::IdString("jahHzb")); }
         catch (const Ogre::Exception &) { hzb = nullptr; }
     }
-    // THE SCENE'S DEPTH AND THE ID PASS'S OWN on a chain with the occlusion (ATOM-4 stage 1): the late pass draws
-    // into the Atom view's depth (its RTV's), the pyramid is built from the scene's — the first pass's surfaces and
-    // the stock depth drawn between the passes — and the receivers read the Atom-only one.
+    // THE SCENE'S DEPTH AND THE ID PASS'S OWN on a chain with the occlusion (ATOM-4 stages 1 and 1b). In the frame's
+    // STOCK arm (kAtomStockExecutionBit: a stock item in view) the late pass draws into the Atom view's depth (its
+    // RTV's), the pyramid is built from the scene's — the first pass's surfaces and the stock depth drawn between
+    // the passes — and the receivers read the Atom-only one, the Atom view's; in the other arm both are the scene's
+    // depth, as before the stock depth existed.
     Ogre::TextureGpu *sceneDepth = depthTex, *atomDepth = depthTex;
     if (hzb) {
+        const Ogre::CompositorNode *node = pass->getParentNode();
+        const bool stockArm = (node->getWorkspace()->getExecutionMask() & kAtomStockExecutionBit) != 0u;
         JAH_TRY {
-            const Ogre::CompositorNode *node = pass->getParentNode();
             sceneDepth = node->getDefinedTexture(Ogre::IdString(kSceneDepthTexture));
-            atomDepth = node->getDefinedTexture(Ogre::IdString(kAtomViewDepthTexture));
+            if (!late && stockArm) atomDepth = node->getDefinedTexture(Ogre::IdString(kAtomViewDepthTexture));
         }
         catch (const Ogre::Exception &) { sceneDepth = atomDepth = nullptr; }
         if (!sceneDepth || !atomDepth) hzb = nullptr;

@@ -883,6 +883,13 @@ constexpr const char *kAtomIdTexture = "jahAtomIds";
 constexpr Ogre::uint8 kAtomViewExecutionBit = 0x80u;
 /// The quad's material (engine media, Hlms/Jahshaka/JahAtomView.material).
 constexpr const char *kAtomViewMaterial = "Jahshaka/AtomView";
+/// THE STOCK DEPTH BETWEEN THE ID PASSES, PER FRAME (ATOM-4 stage 1b; OgreChain.cpp addAtomOcclusionPasses): on a
+/// chain with the occlusion, the view's atom listener sets exactly one of the two every frame — kAtomStockExecutionBit
+/// while a stock slot's world box reaches the view's camera (the stock depth pass, the late id pass on the Atom view's
+/// depth and the merge run), kAtomNoStockExecutionBit otherwise (the late id pass on the scene's depth, today's
+/// frame: no stock occluder, nothing to draw). The low bits (0x01: a clear pass's default) stay everyone's.
+constexpr Ogre::uint8 kAtomStockExecutionBit   = 0x04u;
+constexpr Ogre::uint8 kAtomNoStockExecutionBit = 0x02u;
 /// THE PHOTON VIEW (PHOTON-VIEW-1, Types.h PhotonView): two gated stages after the
 /// post chain, before the overlays — a depth copy, a PASS_SCENE drawing the
 /// kPhotonViewBit drawables (Voxels, Probes, Cards) into the view's photon layer and

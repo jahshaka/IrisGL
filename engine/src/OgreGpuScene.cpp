@@ -177,6 +177,9 @@ void GpuScene::destroy() {
     mVao = nullptr;
     mMirror.clear();
     mBorn.clear();
+    mStock.clear();
+    mStockSlots.clear();
+    mStockDirty.store(true, std::memory_order_relaxed);
     mSlotNode.clear();
     mStagedAt.clear();
     mFreedSlots.clear();
@@ -199,6 +202,7 @@ void GpuScene::growTo(uint32_t capacity) {
     const uint32_t want = roundUpPow2(capacity, std::max(kInitialSlots, mSlotCapacity ? mSlotCapacity : kInitialSlots));
     mMirror.resize(want);
     mBorn.resize(want, 0u);
+    mStock.resize(want, 0u);
     mSlotNode.resize(want, 0u);
     mStagedAt.resize(want, 0u);
     if (!mTables.empty()) {
@@ -540,7 +544,17 @@ bool GpuScene::stageRow(uint32_t slot, const GpuInstance &in, uint64_t node) {
     std::memcpy(dst.prevWorld, prev, sizeof(prev));
     mBorn[slot] = 1u;
     mSlotNode[slot] = node;
+    markStock(slot, &dst);
     return true;
+}
+
+const std::vector<uint32_t> &GpuScene::stockSlots() {
+    if (mStockDirty.exchange(false, std::memory_order_relaxed)) {
+        mStockSlots.clear();
+        for (uint32_t i = 0; i < mSlotCount && i < uint32_t(mStock.size()); ++i)
+            if (mStock[i]) mStockSlots.push_back(i);
+    }
+    return mStockSlots;
 }
 
 void GpuScene::addObserver(GpuSceneObserver *o) {
@@ -570,6 +584,7 @@ void GpuScene::patchRayLevel(uint32_t slot, uint32_t level) {
 void GpuScene::onSlotFreed(uint32_t slot) {
     if (slot >= mSlotCapacity) return;
     std::memset(&mMirror[slot], 0, sizeof(GpuInstance));
+    markStock(slot, nullptr);
     mBorn[slot] = 0u;
     mSlotNode[slot] = 0u;
     mStagedAt[slot] = 0u;
@@ -585,6 +600,7 @@ void GpuScene::onSlotMoved(uint32_t from, uint32_t to) {
     // previous pose of the object that DIED in that slot.
     std::memcpy(&mMirror[to], &mMirror[from], sizeof(GpuInstance));
     mBorn[to] = mBorn[from];
+    markStock(to, mBorn[to] ? &mMirror[to] : nullptr);
     mSlotNode[to] = mSlotNode[from];
     mStagedAt[to] = 0u;      // it must be re-staged/copied this update
     notify(to, mBorn[to] ? &mMirror[to] : nullptr);

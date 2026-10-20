@@ -43,7 +43,9 @@
 #include <OgrePrerequisites.h>
 #include <Vao/OgreStagingBuffer.h>
 
+#include <atomic>
 #include <chrono>
+#include <cstring>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -585,6 +587,12 @@ public:
 
     const GpuInstance &entry(uint32_t slot) const { return mMirror[slot]; }
 
+    /// THE STOCK SLOTS (ATOM-4 stage 1b): the live slots shown in a world channel that the id pass does not draw
+    /// (kGpuVisible, neither kGpuAtom nor kGpuOverlay) — the items the stock depth pass between the two id passes
+    /// draws. The per-slot mark is written where the mirror is (a lane writes only its own slot); the list is made
+    /// again, once, the first time it is read after any mark changed.
+    const std::vector<uint32_t> &stockSlots();
+
     /// THE CHANGE FEED (GpuSceneObserver): registers and PRIMES `o` with every
     /// live slot (one walk, at registration only); `removeObserver` before `o` dies.
     void addObserver(GpuSceneObserver *o);
@@ -845,6 +853,18 @@ private:
     /// `AsyncTextureTicket`/`flushCommands` trap has no equivalent that is worth
     /// paying inside a frame).
     std::vector<GpuInstance> mMirror;
+    std::vector<unsigned char> mStock;   ///< 1 = the slot is a stock slot (stockSlots)
+    std::atomic<bool> mStockDirty{ true };
+    std::vector<uint32_t> mStockSlots;
+    void markStock(uint32_t slot, const GpuInstance *now) {
+        uint32_t f = 0u;
+        if (now) std::memcpy(&f, &now->boundsMax[3], sizeof(f));
+        const unsigned char want = (now && (f & kGpuVisible) && !(f & (kGpuAtom | kGpuOverlay))) ? 1u : 0u;
+        if (mStock[slot] != want) {
+            mStock[slot] = want;
+            mStockDirty.store(true, std::memory_order_relaxed);
+        }
+    }
     std::vector<unsigned char> mBorn;  ///< 0 = this slot has never been staged
     std::vector<uint64_t> mSlotNode;   ///< the node each slot holds (nodeOfSlot), 0 = none
     /// THE UPDATE THIS SLOT WAS LAST STAGED IN — the stamp that replaces every

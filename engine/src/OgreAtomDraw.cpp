@@ -79,6 +79,21 @@ Ogre::Pass *atomViewMaterialPass() {
     return t && t->getNumPasses() ? t->getPass(0) : nullptr;
 }
 
+/// A STOCK SLOT IN THE CAMERA'S VIEW (ATOM-4 stage 1b): any live slot of the scene's table that the id pass does not
+/// draw (GpuScene::stockSlots) whose world box reaches the camera's frustum — the stock depth pass's subject. No GPU
+/// scene: true (the stock arm is exact whatever the frame holds).
+bool stockInView(OgreScene *scene, Ogre::Camera *cam) {
+    detail::GpuScene &gs = scene->gpuScene();
+    if (!gs.live() || !cam) return true;
+    for (uint32_t slot : gs.stockSlots()) {
+        const detail::GpuInstance &e = gs.entry(slot);
+        const Ogre::AxisAlignedBox box(Ogre::Vector3(e.boundsMin[0], e.boundsMin[1], e.boundsMin[2]),
+                                       Ogre::Vector3(e.boundsMax[0], e.boundsMax[1], e.boundsMax[2]));
+        if (cam->isVisible(box)) return true;
+    }
+    return false;
+}
+
 class AtomDrawListener final : public Ogre::CompositorWorkspaceListener {
 public:
     explicit AtomDrawListener(OgreView *view) : mView(view) {}
@@ -108,9 +123,15 @@ public:
                                                               : nullptr;
         Ogre::Pass *pass = ((view != AtomView::Off || probePaint) && table) ? atomViewMaterialPass() : nullptr;
         const bool on = pass && pass->hasFragmentProgram() && pass->getNumTextureUnitStates() >= 4u;
-        const Ogre::uint8 mask = ws->getExecutionMask();
-        ws->setExecutionMask(on ? Ogre::uint8(mask | kAtomViewExecutionBit)
-                                : Ogre::uint8(mask & ~kAtomViewExecutionBit));
+        Ogre::uint8 mask = ws->getExecutionMask();
+        mask = on ? Ogre::uint8(mask | kAtomViewExecutionBit) : Ogre::uint8(mask & ~kAtomViewExecutionBit);
+        // THE STOCK DEPTH'S ARM (ATOM-4 stage 1b): the pass exists to carry stock occluders into the late pyramid;
+        // with no stock slot's box in the camera's view there is nothing to draw, and the late pass's pyramid of
+        // the Atom depth alone is exact (today's frame). THIS frame's boxes, read before the passes record.
+        const bool stock = !scene || stockInView(scene, mView->camera());
+        mask = Ogre::uint8((mask & ~(kAtomStockExecutionBit | kAtomNoStockExecutionBit)) |
+                           (stock ? kAtomStockExecutionBit : kAtomNoStockExecutionBit));
+        ws->setExecutionMask(mask);
         if (!on) return;
         Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
         ps->setIgnoreMissingParams(true);
