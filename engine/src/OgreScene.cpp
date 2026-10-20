@@ -757,9 +757,16 @@ void OgreScene::interpolate(float alpha) {
     } else {
         const auto share = [&](size_t s) { apply(n * s / shares, n * (s + 1) / shares); };
         InterpolateTask<decltype(share)> task(share);
+        // THE WAIT BY SCOPE (BUGS-1 item 11; walkGpuScene's pattern, OgreGpuScene.cpp): the workers run a task on THIS
+        // stack, so a throw from the frame's own share must still wait for them before the task and its captures go -
+        // a bare wait after share() was skipped by the throw. The barrier is declared after the task, so it is
+        // destroyed (it waits) first.
+        struct Barrier {
+            Ogre::SceneManager *sm = nullptr;
+            ~Barrier() { sm->waitForPendingUserScalableTask(); }
+        } barrier{ mSceneMgr };
         mSceneMgr->executeUserScalableTask(&task, false);
         share(shares - 1u);
-        mSceneMgr->waitForPendingUserScalableTask();
     }
     const auto t1 = std::chrono::steady_clock::now();
     // EVERY POSE WRITTEN IS NAMED (decision 56): the GPU-scene table and the GI / shadow scan boxes follow the raster,
