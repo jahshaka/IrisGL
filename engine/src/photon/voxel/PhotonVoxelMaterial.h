@@ -199,14 +199,17 @@ namespace Ogre
         /// computed AT THE HIT from its own material - jah_rq_hit_direct.glsl). A host copy of every
         /// row this store has written, kRowWords words a row at (bucketIdx * kRowsPerBucket +
         /// slotIdx) - the index GpuInstance::ids.y names - in the const buffers' own layout
-        /// (bgDiffuse, diffuse, emissive, the two pool slices, the roughness) with word 15 the
-        /// row's FLAGS (bit 0: the albedo samples its pool slice, bit 1: the emissive does - the
-        /// bucket's job variant, which the uploaded row does not carry). The ray tier compares the
-        /// words it uploaded last and re-uploads only what changed.
+        /// (bgDiffuse, diffuse, emissive + the metalness, the two pool slices, the specular weight,
+        /// the roughness, the untinted F0 - PhotonVoxelMaterial.cpp's row) with word 15's bits 0-1
+        /// the row's FLAGS (bit 0: the albedo samples its pool slice, bit 1: the emissive does - the
+        /// bucket's job variant, which the uploaded row does not carry) beside the F0's 30 bits
+        /// (kRowF0Shift). The ray tier compares the words it uploaded last and re-uploads only what changed.
         static constexpr uint32 kRowWords = 16u;
         static constexpr uint32 kRowsPerBucket = 1024u;
         static constexpr uint32 kRowHasDiffuseTex = 1u;
         static constexpr uint32 kRowHasEmissiveTex = 2u;
+        /// Word 15: the untinted F0 above the dielectric's, ( F0 - 0.04 ) / 0.96 per channel, 10 bits each from here.
+        static constexpr uint32 kRowF0Shift = 2u;
         const vector<uint32>::type &getRowWords() const { return mRowWords; }
         /// Jahshaka (ENGINE-UPGRADE-U5 stage 3): moves with every row written - the ray tier's hit table
         /// re-copies the rows only when it moved.

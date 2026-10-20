@@ -140,19 +140,17 @@
 			// capture camera makes that a linear world-unit distance along the
 			// card's own axis, which is exactly what the read depth-tests with.
 			outCardDepth = -inPs.pos.z;
-			// THE SPECULAR LOBE, from the prepass's own split (SampleSpecularMap runs in a
-			// prepass): F0 = lerp( 0.04, base, metalness ) and the specular colour kS, its MEAN
-			// the weight, clamped to [0, 1] as the voxel store's row is. The metallic workflow
-			// only: the store stores no lobe for the specular workflows (their weight is 0).
-			@property( metallic_workflow )
+			// THE SPECULAR LOBE OF EVERY WORKFLOW (PHOTON-4), from the prepass's own split
+			// (SampleSpecularMap runs in a prepass): pixelData.F0 - lerp( 0.04, base, metalness )
+			// in the metallic workflow, the datablock's Fresnel in the specular ones - and the
+			// specular colour kS, its MEAN the weight, clamped to [0, 1] as the voxel store's row is.
+			{
 				const float cardKs = clamp( ( float( pixelData.specular.x ) + float( pixelData.specular.y ) +
 											  float( pixelData.specular.z ) ) * ( 1.0 / 3.0 ), 0.0, 1.0 );
 				outCardSpecular = vec4( max( float3( pixelData.F0 ) - float3( 0.04, 0.04, 0.04 ),
 											 float3( 0.0, 0.0, 0.0 ) ) * ( cardKs * ( 1.0 / 0.96 ) ),
 										cardKs );
-			@else
-				outCardSpecular = vec4( 0.0, 0.0, 0.0, 0.0 );
-			@end
+			}
 		@else
 			outCardAlbedo = vec4( 0.0, 0.0, 0.0, 1.0 );
 			outCardEmissive = vec4( 0.0, 0.0, 0.0, 1.0 );

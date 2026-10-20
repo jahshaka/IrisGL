@@ -976,15 +976,17 @@
 			// polished hit's near-delta lobe toward the ray cannot be sampled by them (gi.id_depth: a mirror floor's sun
 			// glint in random probe rays); the integral is energy-exact in expectation - every gather route takes it
 			// (the card read and the hit's direct term in the gather job, the store), a REFLECTION ray the lobe itself.
-			@property( metallic_workflow )
+			// EVERY WORKFLOW (PHOTON-4): pixelData.F0 is lerp( 0.04, base, metalness ) in the metallic workflow and
+			// the datablock's Fresnel in the specular ones, as HlmsPbs's own lobe reads it.
+			{
 				const float atomKs = clamp( ( float( pixelData.specular.x ) + float( pixelData.specular.y ) +
 											  float( pixelData.specular.z ) ) * ( 1.0 / 3.0 ), 0.0, 1.0 );
-				// ONE EXPRESSION ON EVERY ROUTE: kS ( 0.04 + m max( b - 0.04, 0 ) ) = kS ( 0.04 + max( F0 - 0.04, 0 ) ),
-				// the store's encoding clamping a channel below the dielectric's F0 at it.
+				// ONE EXPRESSION ON EVERY ROUTE: kS ( 0.04 + max( F0 - 0.04, 0 ) ) - the metallic workflow's
+				// kS ( 0.04 + m max( b - 0.04, 0 ) ) - the store's encoding clamping a channel below the dielectric's F0 at it.
 				atomHitMetal = float4( ( float3( 0.04, 0.04, 0.04 ) +
 										 max( float3( pixelData.F0 ) - float3( 0.04, 0.04, 0.04 ), float3( 0.0, 0.0, 0.0 ) ) ) * atomKs,
 									   atomKs );
-			@end
+			}
 			pixelData.specular.xyz = midf3_c( 0.0, 0.0, 0.0 );
 			@property( clear_coat )
 				pixelData.clearCoat = _h( 0.0 );
