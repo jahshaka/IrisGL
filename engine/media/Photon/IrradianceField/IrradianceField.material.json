@@ -8,6 +8,7 @@
 
             "source" : "IrradianceFieldGenFromVct_cs",
             "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "sRGB.any", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahEnvironment_piece_all.any", "JahFieldWindow_piece_all.any", "IrradianceFieldGenFromVct_piece_cs.any"],
+            "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
             "uav_units" : 3,
@@ -38,6 +39,7 @@
 
             "source" : "IrradianceFieldBorderMirror_cs",
             "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "IrradianceFieldBorderMirror_piece_cs.any"],
+            "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
             "uav_units" : 1,
@@ -55,6 +57,7 @@
 
             "source" : "IrradianceFieldBorderMirror_cs",
             "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "IrradianceFieldBorderMirror_piece_cs.any"],
+            "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
             "uav_units" : 1,

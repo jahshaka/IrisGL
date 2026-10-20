@@ -7,6 +7,7 @@
 
             "source" : "Voxelizer_cs",
             "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "Matrix_piece_all", "JahGeomRows_piece_all.any", "VoxelMerge_piece_cs.any", "Voxelizer_piece_cs.any"],
+            "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
             "uav_units" : 15,
@@ -48,6 +49,7 @@
 
             "source" : "LightInjection_cs",
             "pieces" : ["CrossPlatformSettings_piece_all", "AreaLights_LTC_piece_ps.any", "sRGB.any", "JahDiffuseAlbedo_piece_all.any", "JahSpecularAlbedo_piece_all.any", "JahBrdf_piece_all.any", "JahCloudShadow_piece_all.any", "JahVoxelSample_piece_all.any", "JahDirectionalComposite_piece_cs.any", "LightInjection_piece_cs.any"],
+            "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
             "thread_groups_based_on_uav" : 0,
@@ -110,6 +112,7 @@
 
             "source" : "AnisotropicMipVctStep0_cs",
             "pieces" : ["CrossPlatformSettings_piece_all", "sRGB.any", "JahDirectionalComposite_piece_cs.any", "AnisotropicMipVctStep0_piece_cs.any"],
+            "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
             "thread_groups_based_on_uav" : { "slot" : 0, "divisor" : [2, 1, 1] },
@@ -150,6 +153,7 @@
 
             "source" : "AnisotropicMipVctStep1_cs",
             "pieces" : ["CrossPlatformSettings_piece_all", "sRGB.any", "AnisotropicMipVctStep1_piece_cs.any"],
+            "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
             "thread_groups_based_on_uav" : { "slot" : 0, "divisor" : [2, 1, 1] },
@@ -185,6 +189,7 @@
 
             "source" : "LightVctBounceInject_cs",
             "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "sRGB.any", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahEnvironment_piece_all.any", "JahVoxelCones_piece_all.any", "JahDiffuseAlbedo_piece_all.any", "JahSpecularAlbedo_piece_all.any", "LightVctBounceInject_piece_cs.any"],
+            "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
             "thread_groups_based_on_uav" : 0,
@@ -223,6 +228,7 @@
 
             "source" : "PhotonMipDown_cs",
             "pieces" : ["CrossPlatformSettings_piece_all"],
+            "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
             "thread_groups_based_on_uav" : 0,
@@ -247,6 +253,7 @@
 
             "source" : "PhotonScrollCopy_cs",
             "pieces" : ["CrossPlatformSettings_piece_all"],
+            "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
             "uav_units" : 2,
@@ -269,6 +276,7 @@
 
             "source" : "PhotonScrollPosition_cs",
             "pieces" : ["CrossPlatformSettings_piece_all", "VoxelMerge_piece_cs.any"],
+            "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
             "uav_units" : 5,
