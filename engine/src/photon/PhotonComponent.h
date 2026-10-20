@@ -1190,9 +1190,11 @@ private:
     void noteScrollEdit(const Ogre::Aabb *box);
     /// The target of a volume size, or null (none built: the chain has no cascade of that size).
     Ogre::PhotonVoxelScroll *scrollTarget(Ogre::uint32 resolution) const;
-    /// Builds one target per size the chain holds (a GRAPHICS region: texture creation).
+    /// Leases one target per size the chain holds (PhotonVoxelScroll::acquire: a GRAPHICS region,
+    /// a texture creation when the pool has none of that size and formats).
     void buildScrollTargets();
-    void destroyScrollTargets();
+    /// Gives the chain's targets back to the pool (the chain's teardown); a scroll in flight ends.
+    void releaseScrollTargets();
     /// ONE VOXEL BUILD, fed on the device (ATOM P4b): the gather and the voxeliser's build over
     /// what the gather wrote. In a GRAPHICS region the inputs are prepared first, in order (the
     /// table composed, the materials converted, the partitions); in the COMPUTE region they are
@@ -1319,8 +1321,10 @@ private:
     unsigned long long mCascadeTornCleared = 0;   ///< GiStatus::cascadeTornCleared
     unsigned long long mMaterialEditSerial = 0;
     /// THE SCROLL TARGETS, one per volume size the chain holds (ENGINE-UPGRADE-U5 stage 1):
-    /// built with the chain, destroyed with it.
-    std::vector<std::unique_ptr<Ogre::PhotonVoxelScroll>> mScrollTargets;
+    /// LEASED from the process's pool with the chain and given back with it (BUGS-6 stage 3 —
+    /// PhotonVoxelScroll.h's note), so a rebuild builds none.
+    struct ScrollLease { void operator()(Ogre::PhotonVoxelScroll *target) const; };
+    std::vector<std::unique_ptr<Ogre::PhotonVoxelScroll, ScrollLease>> mScrollTargets;
     /// One log line per scene for a cascade rebuild that threw (B4).
     bool mCascadeFailureLogged = false;
     /// WHERE THE SCENE CHANGED SINCE THE CHAIN LAST ANSWERED FOR IT (G1) — the

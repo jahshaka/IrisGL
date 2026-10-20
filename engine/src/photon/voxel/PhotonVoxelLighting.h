@@ -110,6 +110,10 @@ namespace Ogre
         /// the injection composites the direct part itself (into mLightDirectDir when a bounce
         /// follows); after every bounce this job adds the bounce's part per half-axis to it.
         /// Created with the bounce textures.
+        /// POOLED, NOT OWNED (BUGS-6 stage 3): one job per (aniso volume size, format, step,
+        /// level), shared by every lighting of that size - every cascade, every rebuild - its
+        /// textures bound per dispatch; see pooledMipStep in the .cpp. Released by
+        /// releaseMipStepPool before the compute Hlms dies.
         HlmsComputeJob             *mAnisoGeneratorStep0;
         FastArray<HlmsComputeJob *> mAnisoGeneratorStep1;
 
@@ -357,6 +361,11 @@ namespace Ogre
 
         /// THE LIGHT SLOTS (P1C-LIGHT-LIST): the const buffer and LightInjection_piece_cs's
         /// array (vct_light_budget) hold kLightSlots lights in every cascade.
+        /// Destroys the pooled anisotropic mip-step jobs (BUGS-6 stage 3) - the engine's teardown.
+        static void releaseMipStepPool();
+        /// Mip-step jobs ever cloned, process-wide (a pooled one is cloned once per kind).
+        static unsigned long long numMipStepJobs();
+
         static constexpr uint32 kLightSlots = 128u;
         /// THE PER-CASCADE LIGHT BUDGET, by measurement (spikes/p1c-light-list): a lamp costs
         /// the injection its march over the voxels inside its range, ~0.06 ms per million

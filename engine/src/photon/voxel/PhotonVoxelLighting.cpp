@@ -53,6 +53,8 @@ THE SOFTWARE.
 #include "Vao/OgreConstBufferPacked.h"
 #include "Vao/OgreVaoManager.h"
 
+#include <map>
+
 namespace Ogre
 {
     struct PhotonShaderVoxelLight
@@ -75,6 +77,73 @@ namespace Ogre
     };
 
     static const IdString NumVctCascadesProp = "hlms_num_vct_cascades";
+
+    namespace
+    {
+        /// THE MIP-STEP JOBS ARE POOLED (BUGS-6 stage 3), the way PhotonMipChain pools its own: one
+        /// clone of VCT/AnisotropicMipStep0 or 1 per (aniso volume size, format, step, level), its
+        /// shader parameters - the level's resolutions, which depend on nothing else - set once at
+        /// its clone, its textures bound per dispatch. Measured before: every lighting cloned its own
+        /// (1 + its mips), destroyed with it - 26 pipelines a chain build at the default world, 381 at
+        /// a cold boot's startup gate (spikes/bugs-6/REPORT.md).
+        struct MipStepKey
+        {
+            uint32 width = 0u, height = 0u, depth = 0u;
+            PixelFormatGpu format = PFG_UNKNOWN;
+            uint8 step = 0u, level = 0u;
+            bool operator<( const MipStepKey &o ) const
+            {
+                if( width != o.width ) return width < o.width;
+                if( height != o.height ) return height < o.height;
+                if( depth != o.depth ) return depth < o.depth;
+                if( format != o.format ) return format < o.format;
+                if( step != o.step ) return step < o.step;
+                return level < o.level;
+            }
+        };
+        HlmsManager *gMipStepPoolManager = nullptr;
+        std::map<MipStepKey, HlmsComputeJob *> gMipStepPool;
+        unsigned long long gMipStepJobs = 0ull;
+        uint32 gMipStepCloneId = 0u;
+
+        /// The pooled job of `key`, cloned from `baseName` on first use (`isNew` says so: the
+        /// caller sets its parameters then).
+        HlmsComputeJob *pooledMipStep( HlmsManager *hlmsManager, const char *baseName, const MipStepKey &key,
+                                       bool &isNew )
+        {
+            if( gMipStepPoolManager && gMipStepPoolManager != hlmsManager )
+                PhotonVoxelLighting::releaseMipStepPool();
+            gMipStepPoolManager = hlmsManager;
+            isNew = false;
+            auto it = gMipStepPool.find( key );
+            if( it != gMipStepPool.end() )
+                return it->second;
+            HlmsCompute *hlmsCompute = hlmsManager->getComputeHlms();
+            HlmsComputeJob *baseJob = hlmsCompute->findComputeJob( baseName );
+            char tmpBuffer[128];
+            LwString name( LwString::FromEmptyPointer( tmpBuffer, sizeof( tmpBuffer ) ) );
+            name.a( baseName, "/", ++gMipStepCloneId );
+            HlmsComputeJob *job = baseJob->clone( name.c_str() );
+            gMipStepPool[key] = job;
+            ++gMipStepJobs;
+            isNew = true;
+            return job;
+        }
+    }  // namespace
+
+    void PhotonVoxelLighting::releaseMipStepPool()
+    {
+        if( gMipStepPoolManager )
+        {
+            HlmsCompute *hlmsCompute = gMipStepPoolManager->getComputeHlms();
+            for( auto &kv : gMipStepPool )
+                hlmsCompute->destroyComputeJob( kv.second->getName() );
+        }
+        gMipStepPool.clear();
+        gMipStepPoolManager = nullptr;
+    }
+
+    unsigned long long PhotonVoxelLighting::numMipStepJobs() { return gMipStepJobs; }
 
     static const size_t c_maxCascades = 8u;
 
@@ -445,12 +514,6 @@ namespace Ogre
             mLightVoxel[normalIndex()] = mVoxelizer->getNormalVox();
 
             // Setup the compute shaders for PhotonVoxelLighting::generateAnisotropicMips()
-            HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
-
-            char tmpBuffer[128];
-            LwString jobName( LwString::FromEmptyPointer( tmpBuffer, sizeof( tmpBuffer ) ) );
-            DescriptorSetTexture2::TextureSlot texSlot(
-                DescriptorSetTexture2::TextureSlot::makeEmpty() );
             ShaderParams *shaderParams = 0;
             ShaderParams::Param *lowerMipResolutionParam = 0;
 
@@ -459,28 +522,23 @@ namespace Ogre
             const uint8 numMipsOnStep1 = mLightVoxel[1]->getNumMipmaps() - 1u;
             mAnisoGeneratorStep1.resize( numMipsOnStep1 );
 
-            HlmsComputeJob *baseJob = hlmsCompute->findComputeJob( "VCT/AnisotropicMipStep1" );
-
             for( uint8 i = 0; i < numMipsOnStep1; ++i )
             {
-                jobName.clear();
-                jobName.a( "VCT/AnisotropicMipStep1/Id", getId(), "/Mip", i + 1u );
-                HlmsComputeJob *mipJob = baseJob->clone( jobName.c_str() );
-
-                for( uint8 axis = 0; axis < 3u; ++axis )
-                {
-                    texSlot.texture = mLightVoxel[axis + 1u];
-                    texSlot.mipmapLevel = i;
-                    texSlot.numMipmaps = 1u;
-                    mipJob->setTexture( axis, texSlot );
-
-                    DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
-                    uavSlot.access = ResourceAccess::Write;
-                    uavSlot.texture = mLightVoxel[axis + 1u];
-                    uavSlot.mipmapLevel = i + 1u;
-                    uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
-                    mipJob->_setUavTexture( axis, uavSlot );
-                }
+                // POOLED (BUGS-6 stage 3): the job of this size and level, its textures bound per
+                // dispatch (generateAnisotropicMips); its parameters below set at its clone only.
+                MipStepKey key;
+                key.width = mLightVoxel[1]->getWidth();
+                key.height = mLightVoxel[1]->getHeight();
+                key.depth = mLightVoxel[1]->getDepth();
+                key.format = jahLightVoxelUavFormat();
+                key.step = 1u;
+                key.level = uint8( i + 1u );
+                bool isNew = false;
+                HlmsComputeJob *mipJob = pooledMipStep( mVoxelizer->getHlmsManager(), "VCT/AnisotropicMipStep1",
+                                                        key, isNew );
+                mAnisoGeneratorStep1[i] = mipJob;
+                if( !isNew )
+                    continue;
 
                 shaderParams = &mipJob->getShaderParams( "default" );
                 // higherMipHalfRes_lowerMipHalfWidth
@@ -495,8 +553,6 @@ namespace Ogre
                     resolutions[j] = std::max( 1, resolutions[j] );
                 lowerMipResolutionParam->setManualValue( resolutions, 4u );
                 shaderParams->setDirty();
-
-                mAnisoGeneratorStep1[i] = mipJob;
             }
         }
 
@@ -532,23 +588,8 @@ namespace Ogre
             }
         }
 
-        HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
-
-        if( mAnisoGeneratorStep0 )
-        {
-            hlmsCompute->destroyComputeJob( mAnisoGeneratorStep0->getName() );
-            mAnisoGeneratorStep0 = 0;
-        }
-
-        FastArray<HlmsComputeJob *>::const_iterator itor = mAnisoGeneratorStep1.begin();
-        FastArray<HlmsComputeJob *>::const_iterator end = mAnisoGeneratorStep1.end();
-
-        while( itor != end )
-        {
-            hlmsCompute->destroyComputeJob( ( *itor )->getName() );
-            ++itor;
-        }
-
+        // The mip-step jobs are the pool's (BUGS-6 stage 3): let go of, never destroyed.
+        mAnisoGeneratorStep0 = 0;
         mAnisoGeneratorStep1.clear();
         setAllowMultipleBounces( false );
 
@@ -874,13 +915,27 @@ namespace Ogre
             jahshaka::engine::detail::photonDispatch( hlmsCompute, mAnisoGeneratorStep0, renderSystem );
         }
 
-        FastArray<HlmsComputeJob *>::const_iterator itor = mAnisoGeneratorStep1.begin();
-        FastArray<HlmsComputeJob *>::const_iterator endt = mAnisoGeneratorStep1.end();
-
-        while( itor != endt )
+        // STEP 1'S JOBS ARE THE POOL'S (BUGS-6 stage 3): this lighting's volumes bound per dispatch,
+        // level i read through the texture slots and level i + 1 written through the UAVs.
+        for( size_t i = 0u; i < mAnisoGeneratorStep1.size(); ++i )
         {
-            jahshaka::engine::detail::photonDispatch( hlmsCompute, *itor, renderSystem );
-            ++itor;
+            HlmsComputeJob *mipJob = mAnisoGeneratorStep1[i];
+            DescriptorSetTexture2::TextureSlot texSlot( DescriptorSetTexture2::TextureSlot::makeEmpty() );
+            DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+            for( uint8 axis = 0; axis < 3u; ++axis )
+            {
+                texSlot.texture = mLightVoxel[axis + 1u];
+                texSlot.mipmapLevel = uint8( i );
+                texSlot.numMipmaps = 1u;
+                mipJob->setTexture( axis, texSlot );
+
+                uavSlot.access = ResourceAccess::Write;
+                uavSlot.texture = mLightVoxel[axis + 1u];
+                uavSlot.mipmapLevel = uint8( i + 1u );
+                uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
+                mipJob->_setUavTexture( axis, uavSlot );
+            }
+            jahshaka::engine::detail::photonDispatch( hlmsCompute, mipJob, renderSystem );
         }
         renderSystem->debugAnnotationPop();
     }
@@ -1155,15 +1210,23 @@ namespace Ogre
                 mLightDirectDir[i] = t;
             }
 
-            HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
-            HlmsComputeJob *baseJob = hlmsCompute->findComputeJob( "VCT/AnisotropicMipStep0" );
-            texName.clear();
-            texName.a( "VCT/AnisotropicMipStep0/Id", getId() );
-            mAnisoGeneratorStep0 = baseJob->clone( texName.c_str() );
-            ShaderParams *shaderParams = &mAnisoGeneratorStep0->getShaderParams( "default" );
-            shaderParams->mParams.back().setManualValue(
-                static_cast<int32>( mLightVoxel[1]->getWidth() >> 1u ) );
-            shaderParams->setDirty();
+            // POOLED (BUGS-6 stage 3): the step-0 job of this size, its textures bound per dispatch.
+            MipStepKey key;
+            key.width = mLightVoxel[1]->getWidth();
+            key.height = mLightVoxel[1]->getHeight();
+            key.depth = mLightVoxel[1]->getDepth();
+            key.format = jahLightVoxelUavFormat();
+            key.step = 0u;
+            bool isNew = false;
+            mAnisoGeneratorStep0 = pooledMipStep( mVoxelizer->getHlmsManager(), "VCT/AnisotropicMipStep0", key,
+                                                  isNew );
+            if( isNew )
+            {
+                ShaderParams *shaderParams = &mAnisoGeneratorStep0->getShaderParams( "default" );
+                shaderParams->mParams.back().setManualValue(
+                    static_cast<int32>( mLightVoxel[1]->getWidth() >> 1u ) );
+                shaderParams->setDirty();
+            }
         }
         else
         {
@@ -1189,12 +1252,7 @@ namespace Ogre
                     mLightDirectDir[i] = 0;
                 }
             }
-            if( mAnisoGeneratorStep0 )
-            {
-                HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
-                hlmsCompute->destroyComputeJob( mAnisoGeneratorStep0->getName() );
-                mAnisoGeneratorStep0 = 0;
-            }
+            mAnisoGeneratorStep0 = 0;   // the pool's (BUGS-6 stage 3): let go of, never destroyed
         }
 
         if( mLightVctBounceInject )

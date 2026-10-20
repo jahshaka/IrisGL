@@ -5,6 +5,8 @@
 // live in EnginePrivate.h, which documents the invariants this backend rests on.
 #include "EnginePrivate.h"
 #include "photon/voxel/PhotonMipChain.h"
+#include "photon/voxel/PhotonVoxelLighting.h"
+#include "photon/voxel/PhotonVoxelScroll.h"
 #include "photon/voxel/PhotonPassBinding.h"
 #include "photon/voxel/PhotonSpecularAlbedoBuffer.h"
 
@@ -3961,6 +3963,10 @@ void OgreEngine::teardown() {
     try { Ogre::PhotonSpecularAlbedo::releaseConstBuffer(); } catch (...) {}
     // The pooled mip jobs (ENGINE-UPGRADE-ASYNC-3) go back to the compute Hlms that cloned them.
     try { Ogre::PhotonMipChain::releasePool(); } catch (...) {}
+    // ...and the pooled scroll targets and anisotropic mip-step jobs (BUGS-6 stage 3), every scene's
+    // chain having given its own back above.
+    try { Ogre::PhotonVoxelScroll::releasePool(); } catch (...) {}
+    try { Ogre::PhotonVoxelLighting::releaseMipStepPool(); } catch (...) {}
     if (mRoot && mInRecordFaultAttached) mRoot->removeFrameListener(mInRecordFault.get());
     mInRecordFaultAttached = false;
     if (mRoot && mSplitPublishAttached) mRoot->removeFrameListener(mSplitPublish.get());

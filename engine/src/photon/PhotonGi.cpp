@@ -5443,19 +5443,26 @@ Ogre::PhotonVoxelScroll *PhotonComponent::scrollTarget(Ogre::uint32 resolution) 
     return nullptr;
 }
 
+void PhotonComponent::ScrollLease::operator()(Ogre::PhotonVoxelScroll *target) const {
+    Ogre::PhotonVoxelScroll::release(target);
+}
+
+// THE TARGETS ARE LEASED, NOT BUILT (BUGS-6 stage 3): a chain rebuilt takes back the targets its
+// teardown gave the pool — the same size and formats — and builds a target only for a size the pool
+// has none of (PhotonVoxelScroll.h's note).
 void PhotonComponent::buildScrollTargets() {
-    destroyScrollTargets();
+    releaseScrollTargets();
     for (const VctCascade &c : mVctCascades) {
         if (!c.voxelizer || scrollTarget(c.resolution)) continue;
-        mScrollTargets.emplace_back(new Ogre::PhotonVoxelScroll(
+        mScrollTargets.emplace_back(Ogre::PhotonVoxelScroll::acquire(
             mRoot->getRenderSystem(), mRoot->getHlmsManager(), mRoot->getRenderSystem()->getTextureGpuManager(),
             c.voxelizer, c.resolution));
     }
 }
 
-void PhotonComponent::destroyScrollTargets() {
+void PhotonComponent::releaseScrollTargets() {
     for (VctCascade &c : mVctCascades) c.scroll = VctCascade::Scroll();
-    mScrollTargets.clear();
+    mScrollTargets.clear();   // each back to the pool (ScrollLease)
 }
 
 void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
@@ -5972,7 +5979,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
 // always. Returns 0 so it can be the value of a JAH_CATCH.
 size_t PhotonComponent::abandonCascadeChain() {
     ++mGiPlacementSerial;
-    destroyScrollTargets();
+    releaseScrollTargets();
     for (size_t i = mVctCascades.size(); i--; ) {
         delete mVctCascades[i].lighting;  mVctCascades[i].lighting = nullptr;
         delete mVctCascades[i].voxelizer; mVctCascades[i].voxelizer = nullptr;
@@ -7395,8 +7402,8 @@ void PhotonComponent::teardownVct() {
     // so the vector's [0] is already dangling and teardownExtraCascades knows
     // not to touch it). After the head, which is the order the arm requires.
     teardownExtraCascades();
-    // The scroll targets go with the chain they were built for (ENGINE-UPGRADE-U5 stage 1).
-    destroyScrollTargets();
+    // The scroll targets go back to the pool with the chain that leased them (BUGS-6 stage 3).
+    releaseScrollTargets();
     // ...and LAST, the one material store they all shared (A5b §2). Its texture pool is
     // bound into the shared compute jobs' descriptors by every dispatch, so it may not
     // die while a voxeliser can still be dispatched — which, after the two lines above,

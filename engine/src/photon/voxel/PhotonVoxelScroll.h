@@ -24,8 +24,20 @@
 //
 // WHY ON COMPUTE: an image copy is a transfer command and the GI region records compute only
 // (gi.region_compute_only). Two jobs: Photon/ScrollCopy (any one volume, float or uint) and
-// Photon/ScrollPosition. ONE TARGET PER VOLUME SIZE, owned by the cascade chain: a scroll in flight
+// Photon/ScrollPosition. ONE TARGET PER VOLUME SIZE, leased by the cascade chain: a scroll in flight
 // holds it until it commits, and the scheduler starts no second scroll of that size meanwhile.
+//
+// THE TARGETS ARE POOLED, PROCESS-WIDE (BUGS-6 stage 3). A target is 12 level-0 volumes, a clone of
+// Photon/ScrollCopy per format and one of Photon/ScrollPosition, with their pipelines built by the
+// one-texel copies of its construction; nothing in it belongs to one chain (begin and commit are
+// handed the live store). A chain LEASES one per size at its build (acquire: a free target of the
+// same size and formats, or a new one) and gives it back at its teardown (release), so a chain
+// REBUILT - a tier change, a scene open or create, the startup gate's warm worlds - takes the
+// targets it gave back and builds nothing. Measured before: every chain build destroyed and rebuilt
+// them (24 3D textures, 14 clones and their pipelines a build; 14 builds at a cold boot,
+// spikes/bugs-6/REPORT.md). A lease is exclusive: two live chains of one size hold two targets, so
+// the pool's peak is the process's peak of concurrent chains, and releasePool (the engine's
+// teardown) destroys every free one before the compute Hlms dies.
 #ifndef JAH_PHOTON_VOXEL_SCROLL_H
 #define JAH_PHOTON_VOXEL_SCROLL_H
 
@@ -49,6 +61,21 @@ namespace Ogre
         PhotonVoxelScroll( RenderSystem *renderSystem, HlmsManager *hlmsManager,
                            TextureGpuManager *textureManager, PhotonVoxelizer *like, uint32 resolution );
         ~PhotonVoxelScroll();
+
+        /// THE LEASE (see the header): a free pooled target that matches `like` at `resolution`, or a
+        /// new one. Give it back with release, never delete it.
+        static PhotonVoxelScroll *acquire( RenderSystem *renderSystem, HlmsManager *hlmsManager,
+                                           TextureGpuManager *textureManager, PhotonVoxelizer *like,
+                                           uint32 resolution );
+        /// Back to the pool, whole (its volumes, clones and pipelines kept for the next lease).
+        static void release( PhotonVoxelScroll *target );
+        /// Destroys every free target - before the compute Hlms and the texture manager die.
+        static void releasePool();
+        /// Targets ever built, process-wide (a lease from the pool builds none).
+        static unsigned long long numBuilt();
+        /// Whether this target serves a chain whose live store is `like` at `resolution`: the size
+        /// and every volume's format and dimensions.
+        bool matches( PhotonVoxelizer *like, uint32 resolution ) const;
 
         uint32 resolution() const { return mResolution; }
         const PhotonVoxelizer::VolumeSet &volumes() const { return mVolumes; }

@@ -21,6 +21,11 @@ namespace Ogre
     namespace
     {
         uint32 gScrollCloneId = 0u;
+        /// THE POOL (the header's note): the free targets, the manager they were built against,
+        /// and how many were ever built.
+        std::vector<PhotonVoxelScroll *> gScrollFree;
+        HlmsManager *gScrollPoolManager = nullptr;
+        unsigned long long gScrollBuilt = 0ull;
 
         /// The live store's volumes, in one fixed order: the copy and the clear walk it.
         constexpr size_t kVolumes = 12u;
@@ -119,6 +124,61 @@ namespace Ogre
         mVolumes = PhotonVoxelizer::VolumeSet();
         delete mComputeTools;
         mComputeTools = 0;
+    }
+    //-------------------------------------------------------------------------
+    PhotonVoxelScroll *PhotonVoxelScroll::acquire( RenderSystem *renderSystem, HlmsManager *hlmsManager,
+                                                   TextureGpuManager *textureManager, PhotonVoxelizer *like,
+                                                   uint32 resolution )
+    {
+        if( gScrollPoolManager && gScrollPoolManager != hlmsManager )
+            releasePool();   // a second engine in the process: the old one's targets are not ours
+        gScrollPoolManager = hlmsManager;
+        for( auto it = gScrollFree.begin(); it != gScrollFree.end(); ++it )
+        {
+            if( ( *it )->matches( like, resolution ) )
+            {
+                PhotonVoxelScroll *target = *it;
+                gScrollFree.erase( it );
+                return target;
+            }
+        }
+        ++gScrollBuilt;
+        return new PhotonVoxelScroll( renderSystem, hlmsManager, textureManager, like, resolution );
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelScroll::release( PhotonVoxelScroll *target )
+    {
+        if( target )
+            gScrollFree.push_back( target );
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelScroll::releasePool()
+    {
+        for( PhotonVoxelScroll *target : gScrollFree )
+            delete target;
+        gScrollFree.clear();
+        gScrollPoolManager = nullptr;
+    }
+    //-------------------------------------------------------------------------
+    unsigned long long PhotonVoxelScroll::numBuilt() { return gScrollBuilt; }
+    //-------------------------------------------------------------------------
+    bool PhotonVoxelScroll::matches( PhotonVoxelizer *like, uint32 resolution ) const
+    {
+        if( !like || resolution != mResolution )
+            return false;
+        const PhotonVoxelizer::VolumeSet live = like->liveVolumes();
+        TextureGpu *src[kVolumes];
+        TextureGpu *dst[kVolumes];
+        volumeList( live, src );
+        volumeList( mVolumes, dst );
+        for( size_t i = 0u; i < kVolumes; ++i )
+        {
+            if( !src[i] || !dst[i] || src[i]->getPixelFormat() != dst[i]->getPixelFormat() ||
+                src[i]->getWidth() != dst[i]->getWidth() || src[i]->getHeight() != dst[i]->getHeight() ||
+                src[i]->getDepth() != dst[i]->getDepth() )
+                return false;
+        }
+        return true;
     }
     //-------------------------------------------------------------------------
     size_t PhotonVoxelScroll::bytes() const
