@@ -24,6 +24,8 @@
 
 #include <Compositor/OgreCompositorNode.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
+#include <Compositor/Pass/PassQuad/OgreCompositorPassQuad.h>
+#include <OgrePass.h>
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsComputeJob.h>
 #include <OgreHlmsManager.h>
@@ -236,17 +238,41 @@ Ogre::TextureGpu *atomDensityFrame(OgreView *view, OgreScene *scene, AtomView mo
     return (density || mode == AtomView::Off) ? st.table : nullptr;
 }
 
+namespace {
+/// A DENSITY FRAME WHOSE TABLE WAS NOT WRITTEN PAINTS NOTHING (BUGS-1 item 6). workspacePreUpdate armed the quad with
+/// the Density mode before this count ran (OgreAtomDraw.cpp); when the count or its resolve cannot record, the quad
+/// would paint the table as an earlier frame left it (or a new UAV texture never written). The mode is set to 0 here
+/// - the quad's values are read at its execute - and countedAt stays unset, so no figure claims the frame. Only for a
+/// Density frame: a probe frame of another mode paints that mode's own table.
+void densityPaintsNothing(const AtomDensityState &st, Ogre::CompositorPass *quad) {
+    if (!st.resolve || !quad || quad->getType() != Ogre::PASS_QUAD) return;
+    Ogre::Pass *pass = static_cast<Ogre::CompositorPassQuad *>(quad)->getPass();
+    if (!pass || !pass->hasFragmentProgram()) return;
+    Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+    ps->setIgnoreMissingParams(true);
+    ps->setNamedConstant("atomViewParams", Ogre::Vector4(0, 0, 0, 0));
+}
+}  // namespace
+
 void atomDensityRecord(OgreView *view, OgreScene *scene, Ogre::CompositorPass *quad) {
     AtomDensityState *st = view ? view->atomDensity().get() : nullptr;
-    if (!st || !st->count || !st->counts || !scene || !quad) return;
+    if (!st || !st->count || !scene || !quad) return;
     st->count = false;
+    if (!st->counts) {
+        densityPaintsNothing(*st, quad);
+        return;
+    }
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
     Ogre::HlmsCompute *hc = root && root->getHlmsManager() ? root->getHlmsManager()->getComputeHlms() : nullptr;
-    Ogre::HlmsComputeJob *countJob = hc ? hc->findComputeJobNoThrow("Jahshaka/AtomDensityCount") : nullptr;
-    Ogre::HlmsComputeJob *resolveJob = hc ? hc->findComputeJobNoThrow("Jahshaka/AtomDensityResolve") : nullptr;
+    const bool jobsMissing = view->mEngine && view->mEngine->armRegistry().on(ArmId::AtomDensityJobsMissing);
+    Ogre::HlmsComputeJob *countJob =
+        hc && !jobsMissing ? hc->findComputeJobNoThrow("Jahshaka/AtomDensityCount") : nullptr;
+    Ogre::HlmsComputeJob *resolveJob =
+        hc && !jobsMissing ? hc->findComputeJobNoThrow("Jahshaka/AtomDensityResolve") : nullptr;
     if (!rs || !countJob || !resolveJob) {
         if (st->probeAt == st->frames) st->probeError = "the density jobs are not staged (JahshakaCompute.material.json)";
+        densityPaintsNothing(*st, quad);
         return;
     }
     Ogre::TextureGpu *ids = nullptr, *idDepth = nullptr, *finalDepth = nullptr;
@@ -261,6 +287,7 @@ void atomDensityRecord(OgreView *view, OgreScene *scene, Ogre::CompositorPass *q
     }
     if (!ids || !idDepth || !finalDepth) {
         if (st->probeAt == st->frames) st->probeError = "the Atom view's node holds no id image or depth";
+        densityPaintsNothing(*st, quad);
         return;
     }
     GpuScene &gs = scene->gpuScene();
@@ -272,6 +299,7 @@ void atomDensityRecord(OgreView *view, OgreScene *scene, Ogre::CompositorPass *q
         countJob->_setUavBuffer(0u, uavSlot(st->counts, Ogre::ResourceAccess::ReadWrite));
         countJob->setNumThreadGroups((ids->getWidth() + 7u) / 8u, (ids->getHeight() + 7u) / 8u, 1u);
         dispatch(rs, hc, countJob);
+        bool resolved = false;
         if (st->resolve && st->table && gs.instanceBuffer() && gs.meshBuffer()) {
             resolveJob->_setUavBuffer(0u, uavSlot(st->counts, Ogre::ResourceAccess::Read));
             resolveJob->_setUavBuffer(1u, uavSlot(gs.instanceBuffer(), Ogre::ResourceAccess::Read));
@@ -282,13 +310,20 @@ void atomDensityRecord(OgreView *view, OgreScene *scene, Ogre::CompositorPass *q
             resolveJob->_setUavTexture(3u, t);
             resolveJob->setNumThreadGroups((st->capacity + 63u) / 64u, 1u, 1u);
             dispatch(rs, hc, resolveJob);
+            resolved = true;
         }
-        st->countedAt = st->frames;
-        st->width = unsigned(ids->getWidth());
-        st->height = unsigned(ids->getHeight());
+        if (st->resolve && !resolved) {
+            // a Density frame whose table could not be resolved: nothing painted, no figures
+            densityPaintsNothing(*st, quad);
+        } else {
+            st->countedAt = st->frames;
+            st->width = unsigned(ids->getWidth());
+            st->height = unsigned(ids->getHeight());
+        }
     }
     catch (Ogre::Exception &e) {
         if (st->probeAt == st->frames) st->probeError = "the density count did not record: " + e.getDescription();
+        densityPaintsNothing(*st, quad);
     }
     // The jobs' descriptor sets hold raw pointers: nothing of this view's outlives the dispatch on them.
     for (Ogre::uint8 i = 0u; i < 3u; ++i)

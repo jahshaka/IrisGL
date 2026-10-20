@@ -1295,6 +1295,10 @@ constexpr ArmDef kArms[] = {
       "THE HOST'S TEXTURE WAIT, FAULTED (ENGINE-UPGRADE-U5 decision 22.5, engine.texture_drain_reset): 1 = the drain "
       "Engine::pumpTextureLoads steps never agrees the queues are empty (the frame's own drain is untouched), 2 = and "
       "its step THROWS - the exception path that must leave the next wait clean. A test door." },
+    { ArmId::AtomDensityJobsMissing, 0.0, 0.0, 1.0,
+      "THE DENSITY COUNT'S FAIL-SAFE (BUGS-1 item 6, atom.cut_probe): 1 = the Atom view's Density count finds its "
+      "compute jobs missing, as on a tree whose media did not stage them - the frame must paint nothing and report no "
+      "figures, never the table a frame before it wrote. A test door." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

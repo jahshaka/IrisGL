@@ -1969,7 +1969,8 @@ public:
     X(GatherFilterOff, "gather.filterOff") /* the probe-space filter off (the measuring arm, decision 20) */ \
     X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */ \
     X(ShadowReceiverBoxesOff, "shadow.receiverBoxesOff") /* the receiver grid without the stock route's boxes (the fixture's negative control, U5 decision 22.3) */ \
-    X(TexturePumpFault, "textures.pumpFault") /* the host's texture wait: 1 never done, 2 and its step throws (a test door, U5 decision 22.5) */
+    X(TexturePumpFault, "textures.pumpFault") /* the host's texture wait: 1 never done, 2 and its step throws (a test door, U5 decision 22.5) */ \
+    X(AtomDensityJobsMissing, "atom.densityJobsMissing") /* the Density count's compute jobs looked up as missing (a test door, BUGS-1 item 6) */
 
 enum class ArmId : unsigned {
 #define JAH_ARM_ENUM(e, n) e,
