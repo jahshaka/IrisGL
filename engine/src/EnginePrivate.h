@@ -6456,8 +6456,9 @@ private:
     AlphaMaskStore::State cutoutMaskState(const Ogre::HlmsDatablock *db) const;
 public:
     /// The split is live in this scene: the GPU scene exists, the id pass can run on
-    /// this device (OgreAtomIdPass.cpp) and the measurement door is open.
-    bool atomDrawOn() const;
+    /// this device (OgreAtomIdPass.cpp) and the measurement door is open. Scene's public read too (a request on the
+    /// host's side, BUGS-1 item 10).
+    bool atomDrawOn() const override;
     /// The split is WANTED here: the door is open and this device runs the id pass.
     /// What a view's chain SHAPE reads — never the GPU scene's liveness, which
     /// arrives during the first frame and would rebuild every new view's workspace

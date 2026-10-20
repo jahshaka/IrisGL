@@ -930,6 +930,10 @@ public:
     /// the atom items' materials need (AtomDrawStatus). Computes the bucket keys
     /// (no shader is compiled); a tool and test read, not a per-frame one.
     virtual AtomDrawStatus atomDrawStatus() { return AtomDrawStatus(); }
+    /// ...its `on` alone (BUGS-1 item 10): the split is live here - the GPU scene exists, this device runs the id
+    /// pass and the measurement door is open - without the status walk (every item's route and bucket key, the cut's
+    /// and the density's reads) a verb that answers only `on` used to pay.
+    virtual bool atomDrawOn() const { return false; }
     /// THE CUT PROBE (ATOM-2 stage 1; AtomCutProbe — a measuring door, never a frame's path): arms the NEXT frame of
     /// the first view of this scene that carries the id pass to record every group decision of its cut, the clusters
     /// it drew and its visible Atom pixels per object; false where nothing can record it (no id pass). `atomCutProbe`

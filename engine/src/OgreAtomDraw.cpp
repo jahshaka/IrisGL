@@ -240,7 +240,15 @@ void OgreView::syncAtomDraw() {
     }
 }
 
-bool OgreScene::atomDrawOn() const { return mGpuScene.live() && atomDrawWanted(); }
+bool OgreScene::atomDrawOn() const {
+    // U3 stage 4a: a read on the host's side is a REQUEST, answered on the engine's side (atomDrawStatus's rule).
+    if (hostPosts()) {
+        bool r = false;
+        const_cast<OgreScene *>(this)->requestOnEngine([&] { r = atomDrawOn(); });
+        return r;
+    }
+    return mGpuScene.live() && atomDrawWanted();
+}
 
 bool OgreScene::atomDrawWanted() const {
     return mAtom.drawEnabled() && mRoot && atomIdPassSupported(mRoot->getRenderSystem());
