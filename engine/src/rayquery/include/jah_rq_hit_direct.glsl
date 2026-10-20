@@ -11,11 +11,12 @@
 //
 //     R(hit) = sum over the lights of D_l(hit) + E(hit) + the store's BOUNCE part
 //
-// D_l(hit) = rho_hit x jahDiffuseAlbedo( cos, roughness_hit ) x (1 / pi) x the light's diffuse x
-// its attenuation x cos( n_hit, L ) x V_l(hit) - THE INJECTION'S OWN PER-LIGHT FORM
-// (LightInjection_piece_cs.any's halfLight: a lamp's one falloff and range window, a spot's cone,
-// an area light's polygon form factor, the sun's cloud-sheet transmittance), with the hit's own
-// shadow ray per light instead of the voxel march. E(hit) the material's emissive. The material is
+// D_l(hit) = rho_hit x Dd( L, V ) x (1 / pi) x the light's diffuse x its attenuation x cos( n_hit, L ) x
+// V_l(hit) - HlmsPbs's OWN DIFFUSE LOBE TOWARD THE HIT'S VIEWER (PHOTON-4 stage 2: jahDisneyDiffuse at
+// N.L, N.V, V.H, BRDF_Default's, the decode's and the card read's), with the injection's per-light
+// falloff (LightInjection_piece_cs.any's halfLight: a lamp's one falloff and range window, a spot's cone,
+// an area light's polygon form factor, the sun's cloud-sheet transmittance) and the hit's own shadow ray
+// per light instead of the voxel march. E(hit) the material's emissive. The material is
 // the VOXELISER'S (PhotonVoxelMaterial's rows, the row GpuInstance::ids.y names: the albedo and
 // emissive colours times their pool maps at the hit's UV, the scalar roughness) - what the store
 // itself was voxelised from. The bounce part is what jah_rq_hit.glsl's jahVoxelRadiance hands back
@@ -30,10 +31,12 @@
 //     1 point, 2 spot, 5 area); 1 the diffuse colour x power, w = the range (0: none);
 //   2 a spot's direction (-z), w = a point/spot's source radius; 3 a spot's (1 / (cos inner -
 //     cos outer), cos outer, falloff), w = 1 for a two-sided area light; 4-7 an area light's corners.
-// A row is 16 words: bgDiffuse, the BASE colour and the transparency, the emissive and the
-// metalness (vec4 each), the albedo and emissive pool slices (16 bits each, one word), the
-// specular weight, the roughness's float bits, the flags (bit 0 the albedo samples its slice, bit 1
-// the emissive does) - PhotonVoxelMaterial::writeRow's row.
+// A row is 16 words: bgDiffuse, the colour the albedo map multiplies (the metallic workflow's base, the
+// specular workflows' diffuse) and the transparency, the emissive and the metalness (vec4 each), the
+// albedo and emissive pool slices (16 bits each, one word), the specular weight, the roughness's float
+// bits, and a word of the flags (bit 0 the albedo samples its slice, bit 1 the emissive does) beside the
+// untinted F0 above the dielectric's, ( F0 - 0.04 ) / 0.96 at 10 bits a channel from bit 2 (the specular
+// workflows' Fresnel, 0 in the metallic one) - PhotonVoxelMaterial::writeRow's row.
 //
 // HOW A CALLER BINDS IT (macros and names defined first): JAH_HIT_TABLE (uvec2), JAH_HIT_POOL_ON and
 // JAH_HIT_CLOUD_ON (bool), JAH_HIT_CLOUD_MAP and JAH_HIT_CLOUD_SUN (vec4: jah_cloud_shadow.glsl's
@@ -89,9 +92,10 @@ JahHitSurface jahHitSurf = JahHitSurface( 0u, 0u, 0u, vec2( 0.0 ), mat4x3( 1.0 )
 
 /// The material the store was voxelised from, at the hit. False where the table, the slot's
 /// material word or its row is missing (an item the store has not converted yet: one rebuild).
-/// `albedo` is the diffuse lobe's, base x (1 - metalness); `metal` the specular lobe, its F0 x kS
-/// (( 0.04 + metalness x max( base - 0.04, 0 ) ) x kS - a dielectric's too) and Fresnel-90 weight kS -
-/// the voxeliser's split (Voxelizer_piece_cs.any, METAL-BOUNCE-1, ENGINE-POLISH-PHOTON-1 stage 2).
+/// `albedo` is the diffuse lobe's, the mapped colour x (1 - metalness); `metal` the specular lobe of EVERY
+/// workflow (PHOTON-4), its F0 x kS (( 0.04 + metalness x max( b - 0.04, 0 ) + ( f - 0.04 ) ) x kS, f the
+/// specular workflows' untinted Fresnel - a dielectric's too) and Fresnel-90 weight kS - the voxeliser's
+/// split (Voxelizer_piece_cs.any, METAL-BOUNCE-1, ENGINE-POLISH-PHOTON-1 stage 2).
 bool jahHitMaterial( float footprint, out vec3 albedo, out vec3 emissive, out float roughness, out vec4 metal )
 {
 	albedo = vec3( 0.0 );
@@ -160,9 +164,11 @@ bool jahHitMaterial( float footprint, out vec3 albedo, out vec3 emissive, out fl
 			emissive = em.xyz * textureLod( jahHitPool, vec3( uv, float( slices >> 16u ) ), lod ).xyz;
 	}
 	albedo = base * ( 1.0 - em.w );
-	// ONE EXPRESSION ON EVERY ROUTE: kS ( 0.04 + m max( b - 0.04, 0 ) ) - the store's encoding clamps a channel
-	// below the dielectric's F0 at it (Voxelizer_piece_cs.any), so the hit does too.
-	metal = vec4( ( vec3( 0.04 ) + em.w * max( base - vec3( 0.04 ), vec3( 0.0 ) ) ) * specW, specW );
+	// ONE EXPRESSION ON EVERY ROUTE: kS ( 0.04 + m max( b - 0.04, 0 ) + ( f - 0.04 ) ) - the store's encoding clamps
+	// a channel below the dielectric's F0 at it (Voxelizer_piece_cs.any), so the hit does too.
+	const vec3 f0Rel = vec3( float( ( flags >> 2u ) & 1023u ), float( ( flags >> 12u ) & 1023u ), float( flags >> 22u ) ) *
+					   ( 1.0 / 1023.0 );
+	metal = vec4( ( vec3( 0.04 ) + em.w * max( base - vec3( 0.04 ), vec3( 0.0 ) ) + 0.96 * f0Rel ) * specW, specW );
 	return true;
 }
 
@@ -222,9 +228,9 @@ float jahHitQuadFormFactor( vec3 N, vec3 P, vec3 c0, vec3 c1, vec3 c2, vec3 c3, 
 }
 
 /// THE HIT'S DIRECT LIGHT TOWARD ITS VIEWER V (the reversed ray): every light of the table at P about N
-/// (the geometric normal facing the ray's origin), the material's albedo, metal and roughness - the
-/// injection's per-light form for the diffuse lobe (its directional albedo: the store's convention for a
-/// lobe the ray reads the same from every direction), the hit's own shadow ray (the casters, the sun's mask
+/// (the geometric normal facing the ray's origin), the material's albedo, metal and roughness - HlmsPbs's
+/// diffuse lobe toward V on EVERY ray kind (PHOTON-4 stage 2: the decode and the card read shade toward the
+/// viewer of a gather ray and a reflection ray alike), the hit's own shadow ray (the casters, the sun's mask
 /// and lift). THE SPECULAR LOBE, BY THE RAY'S KIND (PHOTON-3 stage 2; the lead's ruling): a REFLECTION ray is
 /// one direction per pixel and takes E mu f_s( L, V ), f_s = BRDF_Default's D Vis F with the hit's F0 and w
 /// (jahSpecularLobe) - what the surface sends along it; a GATHER ray (the job defines JAH_HIT_LOBE_INTEGRAL)
@@ -240,6 +246,7 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 	const vec3 origin = P + N * lift;
 	vec3 sum = vec3( 0.0 );
 	vec3 spec = vec3( 0.0 );
+	const float NdotV = clamp( dot( N, V ), 0.0, 1.0 );
 	for( uint i = 0u; i < count; ++i )
 	{
 		const uint o = base + i * kJahHitLightWords;
@@ -287,7 +294,12 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 									: jahSunRay( origin, L, JAH_HIT_SUN_MASK, max( dist - lift, 0.0 ), max( dist - lift, 0.0 ) );
 		if( !( vis > 0.0 ) )
 			continue;
-		sum += cosL * jahDiffuseAlbedo( clamp( dot( N, L ), 0.0, 1.0 ), roughness ) * ( 0.318309886 * v1.xyz ) * atten * vis;
+		// THE DIFFUSE LOBE TOWARD V: BRDF_Default's normalised Disney lobe at ( L, V ). An AREA light (type 5) has no
+		// single L: its lobe is taken at the direction to its CENTRE (L above), its form factor cosL kept whole.
+		const float NdotL = clamp( dot( N, L ), 0.0, 1.0 );
+		const vec3 halfV = L + V;
+		const float VdotH = dot( halfV, halfV ) > 1e-12 ? clamp( dot( V, normalize( halfV ) ), 0.0, 1.0 ) : 0.0;
+		sum += cosL * jahDisneyDiffuse( NdotL, NdotV, VdotH, roughness ) * ( 0.318309886 * v1.xyz ) * atten * vis;
 		// the light's irradiance E = v1 (pi x its intensity) at cosine cosL: sent toward V by the lobe (a
 		// reflection ray), or re-emitted by the lobe's integral, mu ( F0 A + w B ) E / pi (a GATHER ray:
 		// JAH_HIT_LOBE_INTEGRAL - the lead's ruling, the header says why)
@@ -304,6 +316,23 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 	}
 	// a surface with no specular lobe (kS = 0) adds exactly zero: its light is the diffuse lobe's, bit for bit
 	return sum * albedo + spec;
+}
+
+/// THE STORE'S BOUNCE PART TOWARD THE HIT'S VIEWER (PHOTON-4 stage 2). The store re-emits what a surface
+/// gathered by the lobes' HEMISPHERICAL albedos (LightVctBounceInject_piece_cs.any): rho Dd-bar( r ) for the
+/// diffuse lobe and F0 A-bar( r ) + w B-bar( r ) for the specular one, per channel. The diffuse share is sent
+/// toward V by the lobe's directional albedo at N.V over its hemispherical mean (the card's environment half,
+/// jah_card_view.glsl; its lobe split, jah_rq_card.glsl), the specular share kept as its integral (a gathered
+/// field's lobe, the PHOTON-3 ruling): bounce x ( rho Dd( N.V ) + S-bar ) / ( rho Dd-bar + S-bar ).
+vec3 jahHitBounceToward( vec3 bounce, vec3 albedo, float roughness, vec4 metal, float NdotV )
+{
+	float sa = 0.0, sb = 0.0;
+	if( metal.w > 0.0 )
+		jahSpecularAlbedoHemi( roughness, sa, sb );
+	const vec3 specLobe = metal.xyz * sa + metal.w * sb;
+	const vec3 whole = albedo * jahDiffuseAlbedoHemi( roughness ) + specLobe;
+	const vec3 toward = albedo * jahDiffuseAlbedo( NdotV, roughness ) + specLobe;
+	return mix( bounce, bounce * toward / max( whole, vec3( 1e-12 ) ), greaterThan( whole, vec3( 0.0 ) ) );
 }
 
 #endif   // JAH_RQ_HIT_DIRECT_GLSL

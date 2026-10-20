@@ -150,14 +150,17 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 	source = ok ? 2u : 0u;
 	// THE ONE RULE (FAR-SUN-2): the direct light at the hit, the store's bounce part beside it -
 	// gated by the movers above the hit exactly as the store's non-direct share was
-	// (MOVER-OCCLUSION-1: jahHitIndirectGate).
+	// (MOVER-OCCLUSION-1: jahHitIndirectGate) - both toward the ray's viewer (PHOTON-4 stage 2: the
+	// bounce's diffuse share by its directional albedo at N.V, jahHitBounceToward).
 	vec3 albedo, emissive;
 	float roughness;
 	vec4 metal;
 	if( ok && jahHitMaterial( footprint, albedo, emissive, roughness, metal ) )
 	{
-		const vec3 r = jahHitDirect( hitPos, normalize( hitNormal ), -normalize( dir ), albedo, roughness, metal ) + emissive +
-					   jahHitIndirectGate * jahVoxelBounceOut;
+		const vec3 N = normalize( hitNormal ), V = -normalize( dir );
+		const vec3 r = jahHitDirect( hitPos, N, V, albedo, roughness, metal ) + emissive +
+					   jahHitIndirectGate * jahHitBounceToward( jahVoxelBounceOut, albedo, roughness, metal,
+															   clamp( dot( N, V ), 0.0, 1.0 ) );
 		return finite3( r ) ? clamp( r, vec3( 0.0 ), vec3( kMaxRadiance ) ) : voxel;
 	}
 	return voxel;
