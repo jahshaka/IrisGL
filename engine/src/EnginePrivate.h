@@ -1935,6 +1935,7 @@ public:
     X(GiVoxelOctants, "gi.voxelOctants") /* a whole build's octants per axis (1 shipped, 2 = 8 octants; stage 2's measure) */ \
     X(GiRebuildCascade, "gi.rebuildCascade") /* cascade N rebuilt whole every frame while set (-1 = none; a measuring door) */ \
     X(ShadowCasterCull, "shadow.casterCull") /* a sun map's Atom casters culled by the light's own depth (0: frustum only, the parity arm) */ \
+    X(ShadowLightDepth, "shadow.lightDepth") /* a sun map's light-depth path: its pyramid, the late cut, the receiver grid (0: none of them built, the pre-U5 caster pass) */ \
     X(ShadowCasterPbsProbe, "shadow.casterPbsProbe") /* a sun map's PBS casters TESTED against the light's depth and counted (a measuring door) */ \
     X(GiRebuildSettle, "gi.rebuildSettle") /* the rebuild settle runs (0: off, the paired arm) */ \
     X(GiFieldRays, "gi.fieldRays") /* the field's rays per depth texel (0 = shipped) */ \

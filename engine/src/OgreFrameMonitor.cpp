@@ -1147,6 +1147,11 @@ constexpr ArmDef kArms[] = {
       "casters are tested against the previous frame's depth pyramid of that map, the rejected tested again "
       "against this frame's once the map holds the survivors, and only the visible drawn - the map is the "
       "frustum-only map texel for texel. 0 = frustum only (the parity arm: the pyramids are still built)." },
+    { ArmId::ShadowLightDepth, 1.0, 0.0, 1.0,
+      "THE SUN MAPS' LIGHT-DEPTH PATH (ENGINE-UPGRADE-U5 stages 4 + 4b) as one paired arm: 1 = shipped, each sun map "
+      "keeps its depth pyramid, runs the late cut against it and builds its receiver grid. 0 = none of the three is "
+      "built or recorded - the caster pass before U5, frustum-only (scale.shadow_cut's paired arm: the casters' own "
+      "cost apart from U5's per-map term)." },
     { ArmId::ShadowCasterPbsProbe, 0.0, 0.0, 1.0,
       "A MEASURING DOOR (ENGINE-UPGRADE-U5 stage 4): 1 = every sun map's stock (PBS) casters are tested "
       "against the map's final depth pyramid and counted (world.atomStatus casterPerMap: pbsInstances / "

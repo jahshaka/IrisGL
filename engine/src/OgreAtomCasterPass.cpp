@@ -1199,8 +1199,10 @@ void recordCasterPass(AtomPassContext &ctx) {
     // perspective map per face: not measured here) nor the probes' node (re-rendered on demand,
     // its history would always be old).
     const Ogre::Matrix4 cullM = pyramidCullMatrix(vpm);
-    const bool sunMap = light->getType() == Ogre::Light::LT_DIRECTIONAL && !point && !reorient && !probeKind;
     OgreEngine *engine = scene->mEngine;
+    // shadow.lightDepth 0: no map is a sun map here - no pyramid made or built, no late cut, no receiver grid.
+    const bool sunMap = light->getType() == Ogre::Light::LT_DIRECTIONAL && !point && !reorient && !probeKind &&
+                        (!engine || engine->armRegistry().on(ArmId::ShadowLightDepth));
     const bool cullOn = !engine || engine->armRegistry().on(ArmId::ShadowCasterCull);
     const bool probeOn = engine && engine->armRegistry().on(ArmId::ShadowCasterPbsProbe);
     AtomCasterScene &state = atom.casterState();
