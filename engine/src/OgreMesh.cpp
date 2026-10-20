@@ -849,14 +849,6 @@ void OgreScene::setPixelTolerance(float pixels) {
     mPixelTolerance = pixels;
 }
 
-void OgreScene::setDensityCap(float cap) {
-    if (postScene([=](OgreScene &s) { s.setDensityCap(cap); return true; })) return;
-    JAH_HOST_CALL("Scene::setDensityCap");
-    // The VIEW's (the id pass's request, both lists); the caster cut keeps the exact rule.
-    if (!(cap >= 1.0f)) cap = 1.0f;
-    mDensityCap = cap;
-}
-
 void IndexBufferRelease::operator()(Ogre::IndexBufferPacked *b) const {
     if (b && vaoManager) vaoManager->destroyIndexBuffer(b);
 }

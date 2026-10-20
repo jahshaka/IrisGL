@@ -349,7 +349,6 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         p.cut[2] = cutMode ? cull.cutMainBudget() : 0u;
         p.cut[3] = cutMode ? cull.rangeFirst(1u) : 0u;   // the ranges' stride (JahCullCut_cs)
         for (int i = 0; i < 4; ++i) p.hzbRect[i] = hzb ? req.hzbRect[i] : 0u;
-        p.atom[0] = req.densityCap > 1.0f ? req.densityCap : 1.0f;   // ATOM-5: 1 = the exact rule
         cull.params()->upload(&p, 0, 1u);
         const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 1u, 1u, 0u, 1u,
                                                           1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };

@@ -367,12 +367,6 @@ public:
     /// texel — its texel is already the tier's lever — so the maps do not move with it.
     /// A new scene draws at kLodBudgetPixels (1). Values below 0.0625 clamp there.
     virtual void        setPixelTolerance(float pixels) = 0;
-    /// ATOM-5: THE VIEW'S DENSITY CAP — the World Mode's `atomDensityCap` row (Low 4, Medium 3,
-    /// High 2, Epic 1). A view's cluster cut affords a group whose measured error is below the
-    /// pixel tolerance x this factor when every cluster the group replaces is sub-sample (its
-    /// mean triangle smaller than one pixel at the group): Types.h clusterGroupVerdict. 1 = the
-    /// exact rule (a new scene's). Shadow maps never take it. Values below 1 clamp to 1.
-    virtual void        setDensityCap(float cap) = 0;
     /// DIAGNOSTIC: the SHAPE of a mesh's LOD and shadow VAO lists (ATOM P1's
     /// AT-A11). `levels` is how many LOD levels the mesh has and
     /// `shadowIndependent` how many of its shadow VAOs are NOT aliases of the

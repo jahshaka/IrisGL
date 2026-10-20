@@ -736,14 +736,6 @@ public:
     // the ctor's 1 is the reader's absent-key default (trap 10).
     int atomPixelError;
 
-    // THE VIEW'S DENSITY CAP (ATOM-5): below Epic a cluster group whose measured error is under
-    // atomPixelError x this many pixels may stand in for its finer clusters WHEN every cluster it
-    // replaces is already sub-sample (triangles smaller than one pixel) — the World Mode's
-    // `atomDensityCap` row (Low 4, Medium 3, High 2, Epic 1; 1 = the exact rule). The mirror pushes
-    // it to the engine scene (Scene::setDensityCap); shadow maps never take it. 1..8; the ctor's 1
-    // is the reader's absent-key default (trap 10).
-    int atomDensityCap;
-
     // Particle time scale (PARTICLES_FX2_SPEC.md §10.3). 1 = the simulation
     // clock's own rate, 0 = frozen, 2 = double speed. The DOCUMENT owns the
     // clock (SimulationClock, below) and the ENGINE simulates — the same split

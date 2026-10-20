@@ -4162,9 +4162,6 @@ public:
     /// request and by every view bound to the scene (OgreView::syncLodTolerance).
     void  setPixelTolerance(float pixels) override;
     float pixelTolerance() const override { return mPixelTolerance; }
-    /// ATOM-5: the view's density cap (Engine.h); read by the id pass's request.
-    void  setDensityCap(float cap) override;
-    float densityCap() const override { return mDensityCap; }
     void  objectLods(std::vector<ObjectLodDesc> &out) const override;
     bool  meshVaoShape(MeshId mesh, unsigned &levels,
                        unsigned &shadowIndependent) const override;
@@ -6160,8 +6157,6 @@ private:
     float mLodBias = 1.0f;
     /// ATOM-3 stage 1: the World Mode's pixel-error row, in pixels (kLodBudgetPixels until pushed).
     float mPixelTolerance = kLodBudgetPixels;
-    /// ATOM-5: the World Mode's density-cap row (1 = the exact rule until pushed).
-    float mDensityCap = 1.0f;
     std::map<std::string, RigRec> mRigs;
     std::map<NodeId, NodeClips> mClips;
     std::map<MaterialId, MaterialRec> mMaterials;

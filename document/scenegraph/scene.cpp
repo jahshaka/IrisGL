@@ -405,8 +405,6 @@ Scene::Scene()
     shadowMapBudget = 0;
     // the view's pixel-error threshold: 1 px (Epic's, the engine's kLodBudgetPixels)
     atomPixelError = 1;
-    // the view's density cap: 1 = the exact rule (Epic's)
-    atomDensityCap = 1;
     particleTimeScale = 1.0f;
 
     // Post chain: everything off. A scene only gets effects when the user picks

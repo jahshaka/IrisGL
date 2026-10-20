@@ -1393,8 +1393,6 @@ private:
     /// to reach the floor (1 − 32/N of missing it; the Fable read of
     /// PLAYER-FLOOR-1, and mirror.ground_horizon case D fails on it).
     bool mHideFloorPending = false;
-    /// ATOM-5: the density cap last given to the scene (0 = none yet, so the first sync gives it).
-    float mDensityCapGiven = 0.0f;
 
     jahshaka::engine::Scene *mTarget;
     // ---- THE STRUCTURAL MESSAGES (ENGINE-UPGRADE-U3 stage 3) -------------------------------------------------------

@@ -449,7 +449,6 @@ bool OgreScene::atomCutProbe(AtomCutProbe &out) {
         out.projScaleY = p.lod[1];
         out.viewportHeight = p.lod[2];
         out.orthographic = p.lod[3] > 0.5f;
-        out.densityCap = p.atom[0];
         for (int i = 0; i < 3; ++i) out.eye[i] = p.eye[i];
         // ---- THE GROUPS, both lists ----
         const GpuScene &gs = gpuScene();

@@ -24,9 +24,7 @@
 // struct of vec4s, no padding surprises):
 //   JahClusterGroup  sphere = xyz the simplified bounds' centre, w its radius (mesh space)
 //                    error  = x the MEASURED error (mesh units; 3.4e38 = terminal),
-//                             y the header's estimate, z the depth, w THE DENSITY TERM (ATOM-5):
-//                             the largest mean triangle size of the clusters the group replaces,
-//                             monotone up the DAG (Types.h clusterGroupReplacedSizes)
+//                             y the header's estimate, z the depth, w unused
 //   JahCluster       range  = x first index, y index count, z the group it is IN,
 //                             w the group that PRODUCED it (0xFFFFFFFF = level 0)
 //                    sphere = xyz centre, w radius (culling only)
@@ -91,26 +89,14 @@ bool jahClusterGroupAffordable( float error, float allowed )
 	return allowed > 0.0 && error < allowed;
 }
 
-// THE DENSITY CAP (ATOM-5; Types.h clusterGroupAffordableCapped, the rule's text there): the exact
-// rule, OR an error below allowed x cap where every cluster the group replaces is sub-sample (the
-// group's density term x the instance's scale under one sample's footprint). Cap 1 = the exact rule.
-bool jahClusterGroupAffordableCapped( float error, float allowed, float cap, float replaced, float footprint,
-									  float scale )
-{
-	if( jahClusterGroupAffordable( error, allowed ) )
-		return true;
-	return cap > 1.0 && allowed > 0.0 && error < allowed * cap && replaced * scale < footprint;
-}
-
-// ONE GROUP'S VERDICT IN ONE VIEW (Types.h clusterGroupVerdict): the cut job, the parity job and the
-// probe judge a group by this.
+// ONE GROUP'S VERDICT IN ONE VIEW (Types.h clusterGroupVerdict): THE EXACT RULE, error < allowed —
+// the cut job, the parity job and the probe judge a group by this.
 bool jahClusterGroupVerdict( JahClusterGroup gr, vec4 row0, vec4 row1, vec4 row2, float scale, vec3 eye,
-							 float tolerance, float projScaleY, float viewportHeight, bool orthographic, float cap )
+							 float tolerance, float projScaleY, float viewportHeight, bool orthographic )
 {
 	float footprint = jahClusterGroupFootprint( gr.sphere, row0, row1, row2, scale, eye, projScaleY,
 												viewportHeight, orthographic );
-	float allowed = jahAllowedWorldError( tolerance, footprint, scale );
-	return jahClusterGroupAffordableCapped( gr.error.x, allowed, cap, gr.error.w, footprint, scale );
+	return jahClusterGroupAffordable( gr.error.x, jahAllowedWorldError( tolerance, footprint, scale ) );
 }
 
 // THE RENDER TEST over the two answers a cluster needs.

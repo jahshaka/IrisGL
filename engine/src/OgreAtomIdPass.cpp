@@ -833,9 +833,6 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         // seen from the other side). The stock chain takes the same row through the view
         // camera's LOD factor (OgreView::syncLodTolerance), so the two routes cut alike.
         req.pixelTolerance = scene->pixelTolerance() * scene->lodBias();
-        // THE VIEW'S DENSITY CAP (ATOM-5): the World Mode's row (Scene::setDensityCap; 1 until pushed), both
-        // lists alike — the late list re-tests the first's rejects with the same rule.
-        req.densityCap = scene->densityCap();
         // NO SWITCH BAND (D4): the band exists because a WHOLE OBJECT switching pops;
         // a cut whose every group is judged under one sample of error changes its
         // frontier invisibly by construction (Nanite has none). THE CUT (mode 3).

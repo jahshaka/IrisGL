@@ -60,8 +60,6 @@ struct CullParams
 	uvec4 counts;           // x instanceCount, y flagsRequired, z flagsForbidden, w mode
 	uvec4 hzb;
 	uvec4 cut;              // x stream capacity (indices), y record capacity
-	uvec4 hzbRect;          // the depth test's (not read here)
-	vec4  atom;             // x THE DENSITY CAP (ATOM-5; 1 = the exact rule)
 };
 
 struct GpuMesh
@@ -252,7 +250,7 @@ bool jahCutEvaluate( uint g )
 {
 	JahClusterGroup gr = groups[g];
 	return jahClusterGroupVerdict( gr, gRow0, gRow1, gRow2, gScale, params.eye.xyz, params.lod.x, params.lod.y,
-								   params.lod.z, params.lod.w > 0.5, params.atom.x );
+								   params.lod.z, params.lod.w > 0.5 );
 }
 
 bool jahCutAffordable( uint g )

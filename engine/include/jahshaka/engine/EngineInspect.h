@@ -20,7 +20,6 @@ public:
     virtual float          shaderTime() const = 0;
     virtual float          lodBias() const = 0;
     virtual float          pixelTolerance() const = 0;
-    virtual float          densityCap() const = 0;
     virtual bool           isLoading() const = 0;
     virtual bool           atomOcclusionEnabled() const = 0;
     virtual SunContactDesc sunContact() const = 0;
