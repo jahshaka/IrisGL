@@ -396,7 +396,7 @@ public:
         double verifyMs = 0.0;
         /// The lock is by POSITION (CLUSTER-LOCK-1): how many locked positions are held
         /// by several indices (a seam, a pole), and how many are locked on only some of
-        /// their indices — always 0; a split position opens the cut (the sloppy fallback).
+        /// their indices — always 0; a split position would open the cut.
         int    lockedSharedPositions = 0;
         int    lockedSplitPositions = 0;
         double buildMs = 0.0;          ///< clodBuild alone (the verify included)
@@ -404,20 +404,26 @@ public:
         bool   wantRegions = false;
         QVector<QVector<quint32>> clusterRegions;
         /// clusterlod's own report per group, by group id (patch 0004): `groupSimplifyFlags`
-        /// = CLOD_SIMPLIFY_* (1 = the sloppy fallback made the result, 2 = the prune removed a
-        /// component), `groupLockedDropped` = the level's locked positions the result no longer
-        /// uses. `sloppyGroups` / `prunedGroups` / `lockDroppedGroups` count the groups with
-        /// each; `prunedRelocked` = vertices of pruned components the displacement lock asked
+        /// = CLOD_SIMPLIFY_* (2 = the prune removed a component), `groupLockedDropped` = the
+        /// level's locked positions the result no longer uses. `prunedGroups` /
+        /// `lockDroppedGroups` count the groups with each (`lockedDroppedByDepth[d]` = the
+        /// positions lost at depth d, the post-sprint audit's numbers); `prunedRelocked` =
+        /// vertices of pruned components the displacement lock asked
         /// to lock (0 by construction: a pruned piece is charged under the group's error);
         /// `emptyGroups` = groups the prune emptied (a group with its measured error and no
         /// output clusters: affordable, the object draws nothing there).
         QVector<quint32> groupSimplifyFlags;
         QVector<quint32> groupLockedDropped;
-        int    sloppyGroups = 0;
         int    prunedGroups = 0;
         int    lockDroppedGroups = 0;
         int    prunedRelocked = 0;
         int    emptyGroups = 0;
+        QVector<int> lockedDroppedByDepth;
+        /// IN: THE EXHAUSTIVE MEASUREMENT — every removed point of a wholly dropped island
+        /// queried as if it were not (the verify and the measurement skip those queries:
+        /// the point's charge is the island's extent whatever its distance). The answer is
+        /// the same DAG byte for byte; `test_mesh_bake --dag-levels ... --exhaustive` checks it.
+        bool   exhaustiveMeasure = false;
     };
     static void buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats = nullptr,
                                 ClusterDagVariant variant = ClusterDagVariant::Shipped);

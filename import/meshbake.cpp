@@ -4024,9 +4024,9 @@ QVector<float> configRecord(Variant v)
         float(c.cluster_spatial), c.cluster_fill_weight, c.cluster_split_factor,
         c.simplify_ratio, c.simplify_threshold,
         c.simplify_error_merge_previous, c.simplify_error_merge_additive,
-        c.simplify_error_factor_sloppy, c.simplify_error_edge_limit,
+        c.simplify_error_edge_limit,
         float(c.simplify_permissive), float(c.simplify_fallback_permissive),
-        float(c.simplify_fallback_sloppy), float(c.simplify_regularize), float(c.simplify_prune_unlocked),
+        float(c.simplify_regularize), float(c.simplify_prune_unlocked),
         float(c.optimize_bounds), float(c.optimize_clusters), float(c.optimize_clusters_level),
         protect, float(kMaxTriangles), lodchain::kNormalWeight, lodchain::kUvWeight,
         lodchain::kBoundMargin, lodchain::kBoundFloorRel };
@@ -4375,9 +4375,9 @@ class GroupVerifier
 public:
     GroupVerifier(const float *positions, int posComps, size_t nv, const std::vector<unsigned> &base,
                   const std::vector<std::vector<unsigned>> &trisByAnchor, const lodchain::Islands &islands,
-                  float floorLen)
+                  float floorLen, bool exhaustive)
         : mPositions(positions), mPosComps(posComps), mBase(base), mTrisByAnchor(trisByAnchor),
-          mIslands(islands), mFloorLen(floorLen), mWidth(bakepool::width()),
+          mIslands(islands), mFloorLen(floorLen), mExhaustive(exhaustive), mWidth(bakepool::width()),
           mQueries(static_cast<size_t>(mWidth)), mWeld(nv), mRegionAt(nv, 0u), mRegionIdx(nv, 0u),
           mPosLockedAt(nv, 0u), mKeptAt(nv, 0u), mHitAt(nv, 0u), mKeepAt(nv, 0u), mLock(nv, 0u)
     {
@@ -4524,7 +4524,38 @@ private:
             for (const std::vector<unsigned> &f : found) offenders.insert(offenders.end(), f.begin(), f.end());
         };
 
-        // 1. EVERY REMOVED VERTEX against S, exactly and island-capped.
+        // A REMOVED ISLAND COSTS ITS FULL EXTENT (ATOM-6, the lead's decision (a); ATOM-LOD-BOUND-1's rule): a
+        // level-0 component wholly inside the region with no vertex left on S (the level has none of it) shows
+        // what was BEHIND it, not the surface beside it, so the measurement charges every point of it the
+        // island's extent — no distance discount — and the verify knows the same number (`droppedExtent`, folded
+        // into the islands' bound below). The prune removes only islands its price (the extent) already covers,
+        // so rule 3 never re-locks a pruned piece.
+        float droppedExtent = 0.0f;
+        std::vector<unsigned char> droppedAt(removed.size(), 0u);   // per removed vertex: its island is dropped
+        {
+            std::vector<unsigned> comps;
+            for (unsigned ri : removed)
+                if (mIslands.compOf[mRegionV[ri]] < mIslands.count()) comps.push_back(mIslands.compOf[mRegionV[ri]]);
+            std::sort(comps.begin(), comps.end());
+            comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
+            std::vector<unsigned> dropped;
+            for (unsigned comp : comps) {
+                bool whole = true;
+                for (unsigned i = mIslands.vertStart[comp]; i < mIslands.vertStart[comp + 1] && whole; ++i) {
+                    const unsigned v = mIslands.verts[i];
+                    if (mRegionAt[v] != mRegionStamp || mKeptAt[v] == mKeptStamp) whole = false;
+                }
+                if (whole) { dropped.push_back(comp); droppedExtent = std::max(droppedExtent, mIslands.extent[comp]); }
+            }
+            for (size_t i = 0; i < removed.size(); ++i) {
+                const unsigned comp = mIslands.compOf[mRegionV[removed[i]]];
+                droppedAt[i] = std::binary_search(dropped.begin(), dropped.end(), comp) ? 1u : 0u;
+            }
+        }
+
+        // 1. EVERY REMOVED VERTEX against S, exactly and island-capped. A vertex of a DROPPED island whose
+        //    extent is within the lock's bound needs no query (ATOM-6): its charge is the extent (folded in
+        //    below) and min(distance, extent) can neither pass the bound nor raise the term past it.
         //    Max-only: a query stops at anything within the chunk's running maximum or the
         //    lock's bound, whichever is lower (it can neither raise the one nor pass the other).
         float vertexTerm = 0.0f;
@@ -4538,6 +4569,7 @@ private:
                     const unsigned v = mRegionV[removed[i]];
                     const float stop = std::min(local, lockExact);
                     if (!(mIslands.capOf[v] > stop)) continue;
+                    if (!mExhaustive && droppedAt[i] && !(mIslands.capOf[v] > lockExact)) continue;
                     const float d = std::min(gridS.closest(mQueries[size_t(slot)], vertexOf(mPositions, mPosComps, v),
                                                            nullptr, nullptr, nullptr, stop > 0.0f ? stop : -1.0f),
                                              mIslands.capOf[v]);
@@ -4556,26 +4588,7 @@ private:
         // its exact vertex term (a lower bound of the measured error), at most the lock's
         // bound, at least the precision floor — an island bigger than the group's stored
         // error is never dropped (atom.dag_bound_bar's (c)).
-        // A REMOVED ISLAND COSTS ITS FULL EXTENT (ATOM-6, the lead's decision (a); ATOM-LOD-BOUND-1's rule): a
-        // level-0 component wholly inside the region with no vertex left on S (the level has none of it) shows
-        // what was BEHIND it, not the surface beside it, so the measurement charges every point of it the
-        // island's extent — no distance discount — and the verify knows the same number. The prune removes
-        // only islands its price (the extent) already covers, so rule 3 below never re-locks a pruned piece.
-        {
-            std::vector<unsigned> comps;
-            for (unsigned ri : removed)
-                if (mIslands.compOf[mRegionV[ri]] < mIslands.count()) comps.push_back(mIslands.compOf[mRegionV[ri]]);
-            std::sort(comps.begin(), comps.end());
-            comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
-            for (unsigned comp : comps) {
-                bool dropped = true;
-                for (unsigned i = mIslands.vertStart[comp]; i < mIslands.vertStart[comp + 1] && dropped; ++i) {
-                    const unsigned v = mIslands.verts[i];
-                    if (mRegionAt[v] != mRegionStamp || mKeptAt[v] == mKeptStamp) dropped = false;
-                }
-                if (dropped) vertexTerm = std::max(vertexTerm, mIslands.extent[comp]);
-            }
-        }
+        vertexTerm = std::max(vertexTerm, droppedExtent);
         const float islandBound = std::max(std::min(vertexTerm, lockExact), mFloorLen);
         // THE HAND-ON, for the result the group keeps (computed only when the verify
         // answers NULL — a retried result is never kept, a stuck one is terminal): every
@@ -4667,10 +4680,31 @@ private:
         // THE LOCK: an offender still in the group locks its fan; one removed below
         // this depth locks the corners of the input triangle it was handed to.
         ++mHitStamp;
+        // AN OFFENDER HOSTED ON A DROPPED ISLAND (ATOM-6): the input triangle it was handed to no longer exists
+        // (its island has no vertex on S), and a corner of a triangle that is gone cannot hold anything — it is
+        // re-hosted to its nearest SURVIVING triangle (S's; its displacement IS its distance to S, the one the
+        // rules measured) and that triangle's corners are locked.
+        std::unordered_map<unsigned, unsigned char> hostDropped;   // input triangle -> its island is dropped
+        const auto islandDropped = [&](unsigned comp) {
+            if (comp >= mIslands.count()) return false;
+            for (unsigned i = mIslands.vertStart[comp]; i < mIslands.vertStart[comp + 1]; ++i) {
+                const unsigned v = mIslands.verts[i];
+                if (mRegionAt[v] != mRegionStamp || mKeptAt[v] == mKeptStamp) return false;
+            }
+            return true;
+        };
         for (unsigned ri : offenders) {
             const unsigned v = mRegionV[ri];
             if (mHostOf[ri] < 0) { mHitAt[mWeld[v]] = mHitStamp; continue; }
             const unsigned *t = group + size_t(mHostOf[ri]) * 3;
+            auto it = hostDropped.find(unsigned(mHostOf[ri]));
+            if (it == hostDropped.end())
+                it = hostDropped.emplace(unsigned(mHostOf[ri]), islandDropped(mIslands.compOf[t[0]]) ? 1u : 0u).first;
+            if (it->second) {
+                unsigned tri = 0u;
+                gridS.closest(mQueries[0], vertexOf(mPositions, mPosComps, v), nullptr, nullptr, &tri);
+                t = simplified + std::min<size_t>(tri, simplifiedCount / 3 - 1) * 3;
+            }
             for (size_t k = 0; k < 3; ++k) mKeepAt[mWeld[t[k]]] = mHitStamp;
         }
         for (size_t t = 0; t < inputTris; ++t) {
@@ -4694,8 +4728,8 @@ private:
             mLockTouched.push_back(u);
             ++added;
         }
-        // A position locked on only SOME of the group's indices opens the cut (the
-        // sloppy fallback moves the free twin): counted, always 0 by construction.
+        // A position locked on only SOME of the group's indices would open the cut (a
+        // free twin moved): counted, always 0 by construction.
         for (unsigned u : mLockTouched) mPosLockedAt[mWeld[u]] = mRegionStamp;
         for (size_t i = 0; i < groupCount; ++i)
             if (mPosLockedAt[mWeld[group[i]]] == mRegionStamp && !mLock[group[i]]) ++mSplit;
@@ -4710,6 +4744,7 @@ private:
     const std::vector<std::vector<unsigned>> &mTrisByAnchor;
     const lodchain::Islands &mIslands;
     float mFloorLen;
+    bool mExhaustive;
     int mWidth;
     surface::Queries mQueries;
     std::vector<unsigned> mWeld;          ///< vertex -> the first vertex at its position
@@ -4736,8 +4771,10 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     mesh->clusterDag = MeshClusterDag();
     if (stats) {
         const bool want = stats->wantRegions, reference = stats->referenceMeasure,
-                   dense = stats->denseReference, wantTerms = stats->wantTerms;
+                   dense = stats->denseReference, wantTerms = stats->wantTerms,
+                   exhaustive = stats->exhaustiveMeasure;
         *stats = MeshBake::ClusterDagStats();
+        stats->exhaustiveMeasure = exhaustive;
         stats->wantRegions = want;
         stats->referenceMeasure = reference;
         stats->denseReference = dense;
@@ -4820,7 +4857,8 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
                                   ? size_t(lodchain::kBoundSamplesBig) : size_t(lodchain::kBoundSamples);
     // THE DISPLACEMENT LOCK, PER GROUP (patch 0003's hook, `GroupVerifier` above).
     GroupVerifier verifier(positions, posComps, nv, base, trisByAnchor, islands,
-                           extent > 0.0f ? extent * lodchain::kBoundFloorRel : 0.0f);
+                           extent > 0.0f ? extent * lodchain::kBoundFloorRel : 0.0f,
+                           stats && stats->exhaustiveMeasure);
     cm.verify_group = &GroupVerifier::hook;
     cm.verify_group_context = &verifier;
     // THE PRUNE'S PRICE is the measurement's: a vertex's island extent (`Islands::capOf`).
@@ -4844,10 +4882,14 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
                   if (stats) {
                       stats->groupSimplifyFlags.push_back(group.simplify_flags);
                       stats->groupLockedDropped.push_back(group.locked_dropped);
-                      if (group.simplify_flags & CLOD_SIMPLIFY_SLOPPY) ++stats->sloppyGroups;
                       if (group.simplify_flags & CLOD_SIMPLIFY_PRUNED) ++stats->prunedGroups;
                       if (group.locked_dropped) ++stats->lockDroppedGroups;
                       stats->prunedRelocked += int(group.pruned_relocked);
+                      if (group.locked_dropped) {
+                          if (stats->lockedDroppedByDepth.size() <= group.depth)
+                              stats->lockedDroppedByDepth.resize(group.depth + 1);
+                          stats->lockedDroppedByDepth[group.depth] += int(group.locked_dropped);
+                      }
                   }
                   groups.push_back(group);
                   for (size_t i = 0; i < count; ++i) {
@@ -5064,6 +5106,36 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         }
         if (regionV.empty() || simplifiedIdx.empty()) return;
 
+        // A REMOVED ISLAND COSTS ITS FULL EXTENT (ATOM-6 (a)): every level-0 point of a component wholly inside
+        // the region with no vertex left on S (the terms table's "islands dropped") is charged the island's
+        // extent, in the sampled and the removed-vertex terms alike — so the group's error is at least the
+        // largest such extent (`removedExtent`). A surviving island keeps its distance. A dropped island's points
+        // therefore need no distance query where their capped distance cannot pass `removedExtent`: the per-facet
+        // walk skips them, and term 3's samples skip them where margin x extent cannot either (term 2 keeps its
+        // query: it names the output each removed vertex is handed to). The same DAG, byte for byte
+        // (ClusterDagStats::exhaustiveMeasure walks them all).
+        float removedExtent = 0.0f;
+        std::vector<unsigned> droppedComps;
+        {
+            std::vector<unsigned> comps;
+            for (unsigned v : regionV)
+                if (islands.compOf[v] < islands.count()) comps.push_back(islands.compOf[v]);
+            std::sort(comps.begin(), comps.end());
+            comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
+            for (unsigned comp : comps) {
+                bool dropped = true;
+                for (unsigned i = islands.vertStart[comp]; i < islands.vertStart[comp + 1] && dropped; ++i) {
+                    const size_t lw = local(islands.verts[i]);
+                    if (lw == kAbsent || !inRegion[lw] || kept[lw]) dropped = false;
+                }
+                if (dropped) { droppedComps.push_back(comp); removedExtent = std::max(removedExtent, islands.extent[comp]); }
+            }
+        }
+        const bool skipDropped = !(stats && stats->exhaustiveMeasure);
+        const auto droppedPoint = [&](unsigned v) {
+            return skipDropped && std::binary_search(droppedComps.begin(), droppedComps.end(), islands.compOf[v]);
+        };
+
         // The grid over S spans the group, not the mesh (a group is a small patch
         // of a large mesh, and a grid over the mesh's box would file the patch
         // into a handful of cells and walk all of it per query), and its cell is
@@ -5220,6 +5292,7 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             sampled = runningMax(pts.size(), sampled, [&](size_t i, surface::TriangleGrid::Query &q, float stop) {
                 const unsigned v0 = lostIdx[size_t(pts[i].tri) * 3];
                 if (!(islands.capOf[v0] > stop)) return 0.0f;     // this island cannot raise it
+                if (droppedPoint(v0) && islands.capOf[v0] * lodchain::kBoundMargin <= removedExtent) return 0.0f;
                 const float d = whole ? gridS.closest(q, pts[i].pos)
                                       : gridS.closest(q, pts[i].pos, nullptr, nullptr, nullptr, stop);
                 return capped(d, v0);
@@ -5240,6 +5313,7 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         exact = runningMax(lostIdx.size() / 3, exact, [&](size_t t, surface::TriangleGrid::Query &q, float stop) {
             const unsigned v0 = lostIdx[t * 3];
             if (!(islands.capOf[v0] > stop)) return 0.0f;
+            if (droppedPoint(v0)) return 0.0f;   // capped at its extent <= removedExtent
             const auto walk = [&](size_t budget) {
                 return facetMax(corner(lostIdx, t, 0), corner(lostIdx, t, 1), corner(lostIdx, t, 2), stop,
                                 groups[g].simplified.error, floorLen,
@@ -5290,27 +5364,8 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             });
         }
         measured[g] = std::max(std::max(sampled * lodchain::kBoundMargin, exact), floorLen);
-        // A REMOVED ISLAND COSTS ITS FULL EXTENT (ATOM-6 (a)): every level-0 point of a component wholly inside
-        // the region with no vertex left on S (the terms table's "islands dropped") is charged the island's
-        // extent, in the sampled and the removed-vertex terms alike — so the group's error is at least the
-        // largest such extent. A surviving island keeps its distance.
-        {
-            std::vector<unsigned> comps;
-            for (unsigned v : regionV)
-                if (islands.compOf[v] < islands.count()) comps.push_back(islands.compOf[v]);
-            std::sort(comps.begin(), comps.end());
-            comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
-            float removedExtent = 0.0f;
-            for (unsigned comp : comps) {
-                bool dropped = true;
-                for (unsigned i = islands.vertStart[comp]; i < islands.vertStart[comp + 1] && dropped; ++i) {
-                    const size_t lw = local(islands.verts[i]);
-                    if (lw == kAbsent || !inRegion[lw] || kept[lw]) dropped = false;
-                }
-                if (dropped) removedExtent = std::max(removedExtent, islands.extent[comp]);
-            }
-            measured[g] = std::max(measured[g], removedExtent);
-        }
+        // A REMOVED ISLAND COSTS ITS FULL EXTENT (ATOM-6 (a); `removedExtent` above).
+        measured[g] = std::max(measured[g], removedExtent);
         if (measured[g] < groups[g].simplified.error) below[g] = 1;
         if (termsLog)
             termLines[g] = (QStringLiteral("dag terms: group %1 depth %2  R %3 verts  S %4 tris  S->L0 %5  "
