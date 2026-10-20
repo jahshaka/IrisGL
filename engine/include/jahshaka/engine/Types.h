@@ -7729,6 +7729,10 @@ struct ViewOverlayDesc {
 ///   Density    the BASE mesh's level-0 triangles per visible pixel, per object (ATOM-2): green under 1,
 ///              yellow 1 to 4, red over 4 - where the authored geometry is finer than the pixels
 enum class AtomView { Off = 0, Triangles, Levels, Buckets, Objects, Density };
+/// THE COUNT OF ATOM VIEWS, kept beside the enum (as kPhotonViewCount): the F6 cycle, the View Options rows and
+/// world.setAtomView's names read it, never a copied 6 (BUGS-1 item 8).
+constexpr int kAtomViewCount = 6;
+static_assert(int(AtomView::Density) + 1 == kAtomViewCount, "kAtomViewCount is the AtomView enum's count");
 
 /// THE PHOTON VIEW (PHOTON-VIEW-1): the lighting's own debug pictures, one at a
 /// time, over every view of the renderer's SCENE that draws the post chain. A
