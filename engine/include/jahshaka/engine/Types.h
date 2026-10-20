@@ -284,6 +284,10 @@ struct ClusterCutView {
     /// question: the threshold sweeps, the crack proofs).
     bool  cullPlanes = false;
     float planes[6][4] = {};
+    /// THE VIEW'S DENSITY CAP (ATOM-5; the World Mode's `atomDensityCap` row, Scene::setDensityCap):
+    /// a group whose error is below `tolerance` x this factor is affordable where every cluster it
+    /// replaces is SUB-SAMPLE (clusterGroupVerdict). 1 = the exact rule (Epic, every caster cut).
+    float densityCap = 1.0f;
 };
 
 /// THE CLUSTER'S FRUSTUM TEST, spelled operation for operation the way the GLSL twin
@@ -306,9 +310,10 @@ inline bool clusterInFrustum(const MeshCluster &c, const ClusterCutView &v) {
     return true;
 }
 
-/// What the consumer can afford AT ONE GROUP, in mesh units. The arithmetic is
-/// spelled operation for operation the way the GLSL twin spells it.
-inline float clusterGroupAllowed(const MeshClusterGroup &g, const ClusterCutView &v) {
+/// ONE SAMPLE'S WORLD SIZE AT ONE GROUP (the currency's footprint at the group's own
+/// distance). The arithmetic is spelled operation for operation the way the GLSL twin
+/// spells it (JahClusterCut.glsl jahClusterGroupDistance + jahSampleFootprint).
+inline float clusterGroupFootprint(const MeshClusterGroup &g, const ClusterCutView &v) {
     const float cx = v.worldRow[0][0] * g.centre[0] + v.worldRow[0][1] * g.centre[1] +
                      v.worldRow[0][2] * g.centre[2] + v.worldRow[0][3];
     const float cy = v.worldRow[1][0] * g.centre[0] + v.worldRow[1][1] * g.centre[1] +
@@ -318,14 +323,91 @@ inline float clusterGroupAllowed(const MeshClusterGroup &g, const ClusterCutView
     const float dx = cx - v.eye[0], dy = cy - v.eye[1], dz = cz - v.eye[2];
     const float d = v.orthographic ? 1.0f
                                    : std::max(0.0f, std::sqrt(dx * dx + dy * dy + dz * dz) - g.radius * v.scale);
-    return allowedWorldError(v.tolerance,
-                             sampleFootprintPerspective(d, v.projScaleY, v.viewportHeight), v.scale);
+    return sampleFootprintPerspective(d, v.projScaleY, v.viewportHeight);
+}
+
+/// What the consumer can afford AT ONE GROUP, in mesh units (jahClusterGroupAllowed).
+inline float clusterGroupAllowed(const MeshClusterGroup &g, const ClusterCutView &v) {
+    return allowedWorldError(v.tolerance, clusterGroupFootprint(g, v), v.scale);
 }
 
 /// THE COMPARISON, once: the level walk's strictness (a bound EQUAL to what is
 /// afforded is not taken), so `allowed <= 0` affords nothing and the cut is level 0.
 inline bool clusterGroupAffordable(float error, float allowed) {
     return allowed > 0.0f && error < allowed;
+}
+
+// ---- ATOM-5: THE DENSITY CAP ----------------------------------------------------
+//
+// THE RULE WITH THE CAP, for a VIEW's cut (the caster cut keeps cap 1): a group is
+// affordable when
+//
+//     error < allowed                                   (the exact rule), OR
+//     error < allowed x cap  AND  replaced x scale < footprint
+//
+// where `replaced` is the largest MEAN TRIANGLE SIZE (mesh units) of the clusters the
+// group would replace — its member clusters, the finer level the view draws while the
+// group is not affordable — and of every group below it, and `footprint` is one
+// sample's world size at the group (clusterGroupFootprint). In words: where the
+// triangles a coarser group stands in for are already smaller than a pixel, it may
+// deviate up to `cap` times the threshold. At cap 1 the second clause is the first:
+// Epic (both selftest scenes) is exact.
+//
+// A CLUSTER'S MEAN TRIANGLE SIZE comes from what it carries, at run time (no bake
+// field): a flat disc of the cluster's sphere radius tiled by its n triangles has
+// triangles of size ~ 2 r / sqrt(n) (the case that matters — a facade; a curved
+// cluster's is smaller, so the estimate errs coarse-side safe).
+//
+// WHY `replaced` IS MADE MONOTONE: THE ONE CUT needs "a group affordable => every
+// group below it affordable" (the bake's monotone error and nested spheres give it
+// for the exact rule). With the cap the second clause must hold below too: a child's
+// error is at most its parent's, its allowed at least its parent's (its sphere is
+// inside), its footprint at least its parent's — so the child's `replaced` must be at
+// most its parent's, and it is, by the max taken up the DAG here. The GPU table carries
+// the same numbers (OgreGpuScene.cpp, the group's error.w), computed by this function.
+inline float clusterMeanTriangleSize(const MeshCluster &c) {
+    const unsigned n = c.indexCount / 3u;
+    if (n == 0u || !(c.radius > 0.0f)) return 0.0f;
+    return 2.0f * c.radius / std::sqrt(float(n));
+}
+
+/// Per group: the largest mean triangle size of the clusters it replaces (its members)
+/// and of every group below it — monotone up the DAG.
+inline void clusterGroupReplacedSizes(const std::vector<MeshClusterGroup> &groups,
+                                      const std::vector<MeshCluster> &clusters,
+                                      std::vector<float> &out) {
+    out.assign(groups.size(), 0.0f);
+    for (const MeshCluster &c : clusters)
+        if (c.group >= 0 && size_t(c.group) < out.size())
+            out[size_t(c.group)] = std::max(out[size_t(c.group)], clusterMeanTriangleSize(c));
+    // A member's REFINED group is the group below its own: carry the max upward until
+    // nothing moves (at most the DAG's depth passes).
+    for (bool moved = true; moved;) {
+        moved = false;
+        for (const MeshCluster &c : clusters) {
+            if (c.group < 0 || c.refined < 0 || size_t(c.group) >= out.size() || size_t(c.refined) >= out.size())
+                continue;
+            if (out[size_t(c.refined)] > out[size_t(c.group)]) {
+                out[size_t(c.group)] = out[size_t(c.refined)];
+                moved = true;
+            }
+        }
+    }
+}
+
+/// THE COMPARISON WITH THE CAP, spelled as the GLSL twin spells it
+/// (jahClusterGroupAffordableCapped): the exact rule first, then the cap's clause.
+inline bool clusterGroupAffordableCapped(float error, float allowed, float densityCap, float replaced,
+                                         float footprint, float scale) {
+    if (clusterGroupAffordable(error, allowed)) return true;
+    return densityCap > 1.0f && allowed > 0.0f && error < allowed * densityCap && replaced * scale < footprint;
+}
+
+/// ONE GROUP'S VERDICT IN ONE VIEW — the rule the cut job evaluates per group.
+inline bool clusterGroupVerdict(const MeshClusterGroup &g, float replaced, const ClusterCutView &v) {
+    const float footprint = clusterGroupFootprint(g, v);
+    const float allowed = allowedWorldError(v.tolerance, footprint, v.scale);
+    return clusterGroupAffordableCapped(g.error, allowed, v.densityCap, replaced, footprint, v.scale);
 }
 
 /// THE RENDER TEST over per-group answers (`affordable[g]` for every group).
@@ -354,8 +436,10 @@ inline size_t clusterCut(const std::vector<MeshClusterGroup> &groups,
                          const std::vector<MeshCluster> &clusters, const ClusterCutView &view,
                          std::vector<unsigned> &out) {
     std::vector<unsigned char> affordable(groups.size(), 0);
+    std::vector<float> replaced;
+    if (view.densityCap > 1.0f) clusterGroupReplacedSizes(groups, clusters, replaced);
     for (size_t g = 0; g < groups.size(); ++g)
-        affordable[g] = clusterGroupAffordable(groups[g].error, clusterGroupAllowed(groups[g], view)) ? 1 : 0;
+        affordable[g] = clusterGroupVerdict(groups[g], replaced.empty() ? 0.0f : replaced[g], view) ? 1 : 0;
     const size_t triangles = clusterCutFromAffordable(clusters, affordable, out);
     if (!view.cullPlanes) return triangles;
     // ...and the view's frustum, cluster by cluster (the cut job's own test).
@@ -5259,6 +5343,7 @@ struct AtomCutProbe {
     /// THE REQUEST THE FIRST LIST WAS CULLED WITH, read back from the device: the tolerance (pixels), proj[1][1],
     /// the pass's viewport height, the eye, orthographic.
     float       tolerance = 0.0f, projScaleY = 0.0f, viewportHeight = 0.0f;
+    float       densityCap = 1.0f;            ///< the request's density cap (ATOM-5)
     float       eye[3] = { 0.0f, 0.0f, 0.0f };
     bool        orthographic = false;
     unsigned    width = 0, height = 0;        ///< the id image's
@@ -7539,6 +7624,10 @@ struct GpuCullRequest {
     /// a shadow map's the texel (OgreAtomCasterPass) times the same bias. 0 keeps every
     /// survivor on level 0.
     float pixelTolerance = 0.0f;
+    /// THE VIEW'S DENSITY CAP (ATOM-5, the cut's mode 3; Types.h clusterGroupVerdict): the id pass's is
+    /// Scene::setDensityCap's (the World Mode's `atomDensityCap` row), a shadow map's 1 (the exact rule).
+    /// Values below 1 are 1.
+    float densityCap = 1.0f;
     /// 0 = survivors only; 1 = + the per-instance level; 2 = + one
     /// VkDrawIndexedIndirectCommand per survivor (the level's range); 3 = THE CLUSTER
     /// CUT (ATOM-CLUSTER-CUT): no level — the cluster rule per (survivor, cluster),

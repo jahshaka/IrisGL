@@ -194,7 +194,8 @@ static_assert(sizeof(GpuCluster) == 32, "the GPU cluster table's stride is a con
 /// ONE GROUP of a mesh's DAG, std430, 32 bytes — JahClusterCut.glsl's
 /// `JahClusterGroup`: the sphere the bake grew to contain every child group's, and
 /// x = the MEASURED error (mesh units; FLT_MAX = terminal), y = clusterlod's estimate,
-/// z = the DAG depth, w = 0.
+/// z = the DAG depth, w = THE DENSITY TERM (ATOM-5): the largest mean triangle size of the
+/// clusters the group replaces, monotone up the DAG (Types.h clusterGroupReplacedSizes).
 struct GpuClusterGroup {
     float sphere[4] = {};
     float error[4] = {};

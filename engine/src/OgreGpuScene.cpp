@@ -1255,13 +1255,19 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
                 clusters.push_back(g);
             }
             groups.reserve(rec.clusterGroups.size());
-            for (const MeshClusterGroup &gr : rec.clusterGroups) {
+            // THE DENSITY TERM (ATOM-5): the cut's cap clause reads it per group — the same numbers the
+            // C++ twin computes (Types.h clusterGroupReplacedSizes), from what the clusters carry.
+            std::vector<float> replaced;
+            clusterGroupReplacedSizes(rec.clusterGroups, rec.clusters, replaced);
+            for (size_t gi = 0; gi < rec.clusterGroups.size(); ++gi) {
+                const MeshClusterGroup &gr = rec.clusterGroups[gi];
                 detail::GpuClusterGroup g;
                 for (int k = 0; k < 3; ++k) g.sphere[k] = gr.centre[k];
                 g.sphere[3] = gr.radius;
                 g.error[0] = gr.error;
                 g.error[1] = gr.estimate;
                 g.error[2] = float(gr.depth);
+                g.error[3] = replaced[gi];
                 groups.push_back(g);
             }
         } else if (levels[0].indexCount >= 3u) {

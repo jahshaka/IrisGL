@@ -55,8 +55,11 @@ struct GpuCullParams {
     /// inset and not its whole target. Width 0 = the whole pyramid. Read by the depth
     /// test alone; the jobs that declare a shorter struct read its prefix.
     uint32_t hzbRect[4] = {};
+    /// THE CUT'S DENSITY CAP (ATOM-5; GpuCullRequest::densityCap, >= 1): x the cap, yzw 0. Read by
+    /// the cut job alone (JahCullCut_cs.glsl `atom`).
+    float    atom[4] = {};
 };
-static_assert(sizeof(GpuCullParams) == 256, "the cull request's layout is a shader contract");
+static_assert(sizeof(GpuCullParams) == 272, "the cull request's layout is a shader contract");
 
 class GpuCull {
 public:
