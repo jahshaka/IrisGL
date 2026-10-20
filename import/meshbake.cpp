@@ -4556,6 +4556,26 @@ private:
         // its exact vertex term (a lower bound of the measured error), at most the lock's
         // bound, at least the precision floor — an island bigger than the group's stored
         // error is never dropped (atom.dag_bound_bar's (c)).
+        // A REMOVED ISLAND COSTS ITS FULL EXTENT (ATOM-6, the lead's decision (a); ATOM-LOD-BOUND-1's rule): a
+        // level-0 component wholly inside the region with no vertex left on S (the level has none of it) shows
+        // what was BEHIND it, not the surface beside it, so the measurement charges every point of it the
+        // island's extent — no distance discount — and the verify knows the same number. The prune removes
+        // only islands its price (the extent) already covers, so rule 3 below never re-locks a pruned piece.
+        {
+            std::vector<unsigned> comps;
+            for (unsigned ri : removed)
+                if (mIslands.compOf[mRegionV[ri]] < mIslands.count()) comps.push_back(mIslands.compOf[mRegionV[ri]]);
+            std::sort(comps.begin(), comps.end());
+            comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
+            for (unsigned comp : comps) {
+                bool dropped = true;
+                for (unsigned i = mIslands.vertStart[comp]; i < mIslands.vertStart[comp + 1] && dropped; ++i) {
+                    const unsigned v = mIslands.verts[i];
+                    if (mRegionAt[v] != mRegionStamp || mKeptAt[v] == mKeptStamp) dropped = false;
+                }
+                if (dropped) vertexTerm = std::max(vertexTerm, mIslands.extent[comp]);
+            }
+        }
         const float islandBound = std::max(std::min(vertexTerm, lockExact), mFloorLen);
         // THE HAND-ON, for the result the group keeps (computed only when the verify
         // answers NULL — a retried result is never kept, a stuck one is terminal): every
@@ -5270,6 +5290,27 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             });
         }
         measured[g] = std::max(std::max(sampled * lodchain::kBoundMargin, exact), floorLen);
+        // A REMOVED ISLAND COSTS ITS FULL EXTENT (ATOM-6 (a)): every level-0 point of a component wholly inside
+        // the region with no vertex left on S (the terms table's "islands dropped") is charged the island's
+        // extent, in the sampled and the removed-vertex terms alike — so the group's error is at least the
+        // largest such extent. A surviving island keeps its distance.
+        {
+            std::vector<unsigned> comps;
+            for (unsigned v : regionV)
+                if (islands.compOf[v] < islands.count()) comps.push_back(islands.compOf[v]);
+            std::sort(comps.begin(), comps.end());
+            comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
+            float removedExtent = 0.0f;
+            for (unsigned comp : comps) {
+                bool dropped = true;
+                for (unsigned i = islands.vertStart[comp]; i < islands.vertStart[comp + 1] && dropped; ++i) {
+                    const size_t lw = local(islands.verts[i]);
+                    if (lw == kAbsent || !inRegion[lw] || kept[lw]) dropped = false;
+                }
+                if (dropped) removedExtent = std::max(removedExtent, islands.extent[comp]);
+            }
+            measured[g] = std::max(measured[g], removedExtent);
+        }
         if (measured[g] < groups[g].simplified.error) below[g] = 1;
         if (termsLog)
             termLines[g] = (QStringLiteral("dag terms: group %1 depth %2  R %3 verts  S %4 tris  S->L0 %5  "
