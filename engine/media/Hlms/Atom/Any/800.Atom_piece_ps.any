@@ -917,6 +917,31 @@
 	// piece in a hit-mode pass: the fog's is under the fog property (zero here),
 	// the gather's and the card capture's under the prepass.
 	@piece( custom_ps_posExecution )
+		@property( needs_env_brdf )
+			// THE GATHER RECORD'S LOBE OF THE GATHERED LIGHT (PHOTON-3, the lead's ruling: a gather ray reads a hit's
+			// specular lobe by its INTEGRAL on every route). custom_ps_preLights zeroed the record's specular, so
+			// BRDF_EnvMap's Rs dropped the environment's lobe along with its direction, and atomGatherMetalLobe gives
+			// back only the LIGHTS' integral (inside the BRDF, per light). The rest of the lobe is the gathered
+			// light's: its integral over a field arriving from every direction is the hemispherical albedo, the
+			// pixel's own irradiance times F0 A-bar( r ) + w B-bar( r ) - exactly what the card stores for it
+			// (JahCardLight_cs.glsl: specIndirect = envColourD x specLobe, the Flat layer) and what the store's
+			// bounce re-emits. Without it a metal's gather hit read the card's answer less its indirect share
+			// (gi.speckle: a silver box, decode 0.17428 against the cards' 0.21348). Zero for every record but a
+			// gather's (atomHitMetal is written for those alone).
+			if( atomHitMetal.w > 0.0 )
+			{
+				float atomHemiA, atomHemiB;
+				jahSpecularAlbedoHemi( float( pixelData.perceptualRoughness ), atomHemiA, atomHemiB );
+				const float3 atomGatherIndirectLobe = float3( pixelData.envColourD ) *
+					( atomHitMetal.xyz * atomHemiA + atomHitMetal.w * atomHemiB );
+				@property( hw_gamma_write )
+					outPs_colour0.xyz += midf3_c( atomGatherIndirectLobe );
+				@else
+					outPs_colour0.xyz = midf3_c( sqrt( float3( outPs_colour0.xyz ) * float3( outPs_colour0.xyz ) +
+														 atomGatherIndirectLobe ) );
+				@end
+			}
+		@end
 		outPs_colour0.w = midf_c( 1.0 );
 	@end
 	// THE EYE VECTOR IS THE REVERSED RAY. Upstream's LightingHeader computes it from

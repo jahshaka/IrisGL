@@ -4877,7 +4877,11 @@ void PhotonComponent::budgetMaskFor(const VctCascade &c, const Ogre::Vector3 &ce
 // the monitor is off): `vct.cascadeN` one per rebuild (a whole one or a scroll's commit), with the GPU
 // pair; `vct.voxelN` the voxelisation inside it (ENGINE-UPGRADE-U5 stage 1: the gather and build of
 // a whole one, or the scroll's last chunks and its copies); `vct.scrollN` a scroll's chunk frame
-// before its commit.
+// before its commit; `vct.scrollCopyN` the scroll's COPIES inside whichever of the two holds them (the
+// target's clear and the overlap into it at the scroll's first step, the target into the live volumes at
+// its commit) - the part of a scroll that does not scale with the slab: every texel of the store, read
+// and written (70 B a voxel at level 0: 147 MB at 128^3), measured 0.70 - 0.76 ms at 128 cells
+// (gi.scroll_slab's bar subtracts it: spikes/ship-fff575ecb/PHOTON-REPORT.md).
 static const char *const kRowNames[8] = { "vct.cascade0", "vct.cascade1", "vct.cascade2",
                                           "vct.cascade3", "vct.cascade4", "vct.cascade5",
                                           "vct.cascade6", "vct.cascade7" };
@@ -4886,6 +4890,9 @@ static const char *const kVoxelRowNames[8] = { "vct.voxel0", "vct.voxel1", "vct.
 static const char *const kScrollRowNames[8] = { "vct.scroll0", "vct.scroll1", "vct.scroll2",
                                                 "vct.scroll3", "vct.scroll4", "vct.scroll5",
                                                 "vct.scroll6", "vct.scroll7" };
+static const char *const kScrollCopyRowNames[8] = { "vct.scrollCopy0", "vct.scrollCopy1", "vct.scrollCopy2",
+                                                    "vct.scrollCopy3", "vct.scrollCopy4", "vct.scrollCopy5",
+                                                    "vct.scrollCopy6", "vct.scrollCopy7" };
 
 bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *placementCommitted,
                                      bool scroll) {
@@ -5324,6 +5331,8 @@ void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
     const Ogre::Vector3 centre(float(double(sc.lattice[0]) * double(cell)), float(double(sc.lattice[1]) * double(cell)),
                                float(double(sc.lattice[2]) * double(cell)));
     if (!sc.begun) {
+        monitor::CacheScope copy(CacheKind::Gi, WorkReason::Moved, (unsigned long long)idx,
+                                 kScrollCopyRowNames[std::min(idx, size_t(7))], mRoot->getRenderSystem());
         target->begin(c.voxelizer, sc.shift);
         sc.begun = true;
     }
@@ -5359,6 +5368,8 @@ void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
     // WHOLE rebuild (`liveTorn`: nothing of its volume is reusable), never a scroll copying from them.
     try {
         const bool fault = mEngine && mEngine->armRegistry().value(ArmId::GiCascadeFaultCommit) == double(idx);
+        monitor::CacheScope copy(CacheKind::Gi, WorkReason::Moved, (unsigned long long)idx,
+                                 kScrollCopyRowNames[std::min(idx, size_t(7))], mRoot->getRenderSystem());
         target->commit(c.voxelizer, fault);
     } catch (...) {
         c.liveTorn = true;   // outside the placement's revert (recordCascades): only a whole rebuild clears it
