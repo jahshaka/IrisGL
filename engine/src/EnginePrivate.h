@@ -3911,6 +3911,8 @@ public:
     /// atmosphereSunTint, ENGINE-UPGRADE-U3 F-A).
     PublishedFrame::Atmosphere publishedAtmosphere() const;
     AtmosphereStatus atmosphereStatus() const;
+    /// PublishedFrame::environmentPending: a capture, an SH ticket, a convolution or a landed-but-unswapped set is owed.
+    bool environmentPending() const;
     void setReflectionFogEnabled(bool on) override {
         if (postScene([=](OgreScene &s) { s.setReflectionFogEnabled(on); return true; })) return;   // U3 4a: a message
         JAH_HOST_CALL("Scene::setReflectionFogEnabled"); mReflectionFogOn = on; }

@@ -800,6 +800,7 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     // THE SCENE'S STATUS (ENGINE-UPGRADE-U3 stage 2): each the getter's own answer, read once here at the close.
     back.heightFog = heightFogStatus();
     back.skyAmbientShValid = skyAmbientSh(back.skyAmbientSh);
+    back.environmentPending = environmentPending();
     back.clouds = cloudStatus();
     back.atmosphereStatus = atmosphereStatus();
     back.rayQuery = rayQueryStatus();

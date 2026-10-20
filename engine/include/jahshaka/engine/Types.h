@@ -8537,6 +8537,11 @@ struct PublishedFrame {
     HeightFogStatus      heightFog;
     bool                 skyAmbientShValid = false;   ///< skyAmbientSh holds the sky's SH (Scene's old getter's bool)
     float                skyAmbientSh[27] = {};
+    /// THE ENVIRONMENT IS STILL LANDING (2026-10-20): a sky change requests a capture, its SH read and its specular
+    /// convolution; until all three land the PREVIOUS reflection and ambient stay bound by design (SKY-SWAP-1, ASYNC-SHADERS-1:
+    /// an asynchronous scene's convolution permutation may be compiling in the background — wall-clock, not frames). A
+    /// host holds a loading cover, a test counts frames to this clearing, never a guessed count.
+    bool                 environmentPending = false;
     CloudStatus          clouds;
     AtmosphereStatus     atmosphereStatus;
     RayQueryStatus       rayQuery;

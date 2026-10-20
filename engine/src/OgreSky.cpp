@@ -749,6 +749,12 @@ void OgreScene::applySkyAmbient(GiStaleReason why) {
 // synchronous), so the change frame already draws the whole new set. A drag's
 // SH read is deferred a frame (integrateSkyShFromCube), and its set lands at the
 // next frame's top when that read does — the previous set drawn meanwhile.
+// THE ENVIRONMENT IS OWED while any part of the set is: the capture requested, the SH ticket in flight, the convolution
+// deferred to the background compiler, or a convolved cube / fresh SH not yet swapped in (landEnvironmentIfComplete).
+bool OgreScene::environmentPending() const {
+    return mSkyCapturePending || mSkyShTicket != nullptr || mIblPending || mReflPendingTex != nullptr || mSkyShFresh;
+}
+
 void OgreScene::landEnvironmentIfComplete() {
     if (mSkyCapturePending || mSkyShTicket || mIblPending) return;   // a part is owed
     if (mReflPendingTex) {
