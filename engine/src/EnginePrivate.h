@@ -4315,6 +4315,7 @@ public:
     /// THE CUT PROBE (ATOM-2 stage 1; OgreAtomDensity.cpp).
     bool armAtomCutProbe() override;
     bool atomCutProbe(AtomCutProbe &out) override;
+    void disarmAtomCutProbe() override;
     /// ...the arming, TAKEN by the first view of this scene whose next frame draws the id pass (the view's atom
     /// listener): true once, for the frame that records it.
     bool takeAtomCutProbeArm() {

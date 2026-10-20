@@ -393,6 +393,14 @@ bool OgreScene::armAtomCutProbe() {
     return true;
 }
 
+void OgreScene::disarmAtomCutProbe() {
+    if (hostPosts()) { requestOnEngine([&] { disarmAtomCutProbe(); }); return; }
+    JAH_HOST_CALL("Scene::disarmAtomCutProbe");
+    mAtomCutProbeArmed = false;
+    for (OgreView *v : mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>())
+        if (AtomDensityState *st = v ? v->atomDensity().get() : nullptr) st->probeAt = kNever;
+}
+
 bool OgreScene::atomCutProbe(AtomCutProbe &out) {
     if (hostPosts()) { bool r = false; requestOnEngine([&] { r = atomCutProbe(out); }); return r; }
     JAH_HOST_CALL("Scene::atomCutProbe");

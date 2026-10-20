@@ -937,6 +937,9 @@ public:
     /// been drawn and no later frame has overwritten it, false while it is still owed (render a frame and ask again).
     virtual bool armAtomCutProbe() { return false; }
     virtual bool atomCutProbe(AtomCutProbe &out) { out = AtomCutProbe(); return false; }
+    /// ...and the arming taken back (BUGS-1 item 7): a caller that gave up waiting for the armed frame disarms, so no
+    /// LATER frame records a probe nobody reads (and a later read answers "not armed").
+    virtual void disarmAtomCutProbe() {}
     /// THE SUN MAPS' CONTENT (ShadowMapDigest; a test door: a synchronous read of the first view's
     /// shadow atlas). False without a view or an atlas.
     virtual bool shadowMapDigests(std::vector<ShadowMapDigest> &out) { out.clear(); return false; }
