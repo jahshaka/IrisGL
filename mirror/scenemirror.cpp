@@ -1032,6 +1032,15 @@ int SceneMirror::sync(const FrameViews &frameViews)
     scenePart.shaderTime = mFrameShaderTime;
     scenePart.grid = mFrameGrid;
     if (mSource) scenePart.pixelTolerance = float(mSource->atomPixelError);   // the World Mode's pixel-error row (ATOM-3)
+    // THE DENSITY CAP (ATOM-5): a scene message when the World Mode's row changes (Scene::setDensityCap) — never
+    // a record field, whose drain the per-frame budget owns; one message per change, none on a still sync.
+    if (mSource && float(mSource->atomDensityCap) != mDensityCapGiven) {
+        const float cap = float(mSource->atomDensityCap);
+        mDensityCapGiven = cap;
+        ++mMessagesPosted;
+        scenecmd::post(mTarget, std::function<void(jahshaka::engine::Scene &)>(
+                                    [cap](jahshaka::engine::Scene &s) { s.setDensityCap(cap); }));
+    }
     // THE CHANGE SET, SECOND TAKE: the writes made DURING this sync (a socket's fallback placement, a settle's
     // re-expression) join the set, so the record carries every write up to its emit — the frame that renders a
     // write is the frame whose scans hear of it.
