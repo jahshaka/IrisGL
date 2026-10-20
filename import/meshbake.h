@@ -328,6 +328,7 @@ public:
         PermissiveCharged,     ///< permissive, NOTHING protected: seams paid for in the error (stage 1's choice)
         RegularizedProtectUv,  ///< DefaultProtectUv + simplify_regularize
         Strict,                ///< non-permissive, permissive only as a fallback (seams locked by topology)
+        PermissiveChargedPrune,///< PermissiveCharged + clodConfig::simplify_prune (ATOM-6 stage 0's measurement arm)
         Count
     };
     /// What one build did, for the report and the suites. `clusterRegions`
@@ -403,6 +404,14 @@ public:
         double measureMs = 0.0;        ///< the per-group measurement + provenance
         bool   wantRegions = false;
         QVector<QVector<quint32>> clusterRegions;
+        /// clusterlod's own report per group, by group id (patch 0004): `groupSimplifyFlags`
+        /// = CLOD_SIMPLIFY_* (1 = the sloppy fallback made the result), `groupLockedDropped` =
+        /// the level's locked vertices the result no longer uses. `sloppyGroups` /
+        /// `lockDroppedGroups` count the groups with either.
+        QVector<quint32> groupSimplifyFlags;
+        QVector<quint32> groupLockedDropped;
+        int    sloppyGroups = 0;
+        int    lockDroppedGroups = 0;
     };
     static void buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats = nullptr,
                                 ClusterDagVariant variant = ClusterDagVariant::Shipped);

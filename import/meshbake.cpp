@@ -3966,6 +3966,9 @@ clodConfig configFor(Variant v)
         c.simplify_permissive = false;
         c.simplify_fallback_permissive = true;
         break;
+    case Variant::PermissiveChargedPrune:
+        c.simplify_prune = true;
+        break;
     default:
         break;
     }
@@ -4804,6 +4807,12 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
               [&](clodGroup group, const clodCluster *clusters, size_t count) -> int {
                   const int id = int(groups.size());
                   verifier.output(group.simplified.error == FLT_MAX);
+                  if (stats) {
+                      stats->groupSimplifyFlags.push_back(group.simplify_flags);
+                      stats->groupLockedDropped.push_back(group.locked_dropped);
+                      if (group.simplify_flags & CLOD_SIMPLIFY_SLOPPY) ++stats->sloppyGroups;
+                      if (group.locked_dropped) ++stats->lockDroppedGroups;
+                  }
                   groups.push_back(group);
                   for (size_t i = 0; i < count; ++i) {
                       RawCluster rc;
@@ -5410,6 +5419,7 @@ const char *MeshBake::clusterDagVariantName(ClusterDagVariant variant)
     case ClusterDagVariant::PermissiveCharged:    return "permissive-charged";
     case ClusterDagVariant::RegularizedProtectUv: return "regularized+protect-uv";
     case ClusterDagVariant::Strict:               return "strict(fallback-permissive)";
+    case ClusterDagVariant::PermissiveChargedPrune: return "permissive-charged+prune";
     default:                                      return "?";
     }
 }
