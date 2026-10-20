@@ -265,7 +265,8 @@ void dispatchWithBarriers(Ogre::RenderSystem *rs, Ogre::HlmsCompute *hc,
 // frame. The answer stays in the cull's buffers (count, survivors, levels, draws).
 bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
                               std::string &err, double *requestMs, const GpuCull *prior,
-                              CullRows rows, const CullReceivers *receivers, Ogre::UavBufferPacked *probe) {
+                              CullRows rows, const CullReceivers *receivers, Ogre::UavBufferPacked *probe,
+                              Ogre::UavBufferPacked *hzbProbe) {
     // The rows' names, static (a CacheScope keeps the pointer for its sample). A CASTER's
     // cull files NO rows: it runs once per shadow map re-rendered, inside the caster pass
     // whose own row already holds its time: five scopes (ten timestamps) a map would be a
@@ -366,7 +367,10 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         test->setNumTexUnits(hzb ? 1u : 0u);
         // THE DISOCCLUSION PASS's permutation: one more buffer, the first list's words.
         test->setProperty("cull_retest", prior ? 1 : 0);
-        test->setNumUavUnits(prior ? 8u : 7u);
+        // THE HZB PROBE (ATOM-6 stage 3): the probe's frame records what the depth test read, at the next free unit.
+        const bool hzbProbing = hzb && hzbProbe;
+        test->setProperty("cull_probe", hzbProbing ? 1 : 0);
+        test->setNumUavUnits((prior ? 8u : 7u) + (hzbProbing ? 1u : 0u));
         if (hzb) {
             Ogre::DescriptorSetTexture2::TextureSlot ts =
                 Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
@@ -381,6 +385,8 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         test->_setUavBuffer(5u, cullSlot(cull.levels(), Ogre::ResourceAccess::Write));
         test->_setUavBuffer(6u, cullSlot(cull.held(), Ogre::ResourceAccess::ReadWrite));
         if (prior) test->_setUavBuffer(7u, cullSlot(prior->visible(), Ogre::ResourceAccess::Read));
+        if (hzbProbing)
+            test->_setUavBuffer(prior ? 8u : 7u, cullSlot(hzbProbe, Ogre::ResourceAccess::Write));
         // THE GROUP COUNT IS DATA, NEVER A PERMUTATION (BUGS-7; GpuCull::groups): an indirect dispatch
         // of the count uploaded here, so one built test and one built compact serve every scene size.
         const uint32_t groups =

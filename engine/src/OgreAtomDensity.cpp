@@ -65,6 +65,10 @@ struct AtomDensityState {
     Ogre::TextureGpu *table = nullptr;         ///< R32_UINT, kTableWidth x rows, UAV: the Density mode's colours
     Ogre::UavBufferPacked *probe[2] = { nullptr, nullptr };   ///< the first list's records, the late list's
     uint32_t probeCapacity = 0u;               ///< records each buffer holds
+    /// THE HZB PROBE (ATOM-6 stage 3): per slot, what each list's depth test read (JahCullTest_cs.glsl
+    /// `hzbProbe`): the first list's at [slot], the disocclusion list's at [slot + slots].
+    Ogre::UavBufferPacked *hzbProbe = nullptr;
+    uint32_t hzbProbeSlots = 0u;
     unsigned long long frames = 0ull;          ///< the view's own frames, counted at their head
     unsigned long long countedAt = kNever;     ///< the frame whose pixels the counts hold
     unsigned long long probeAt = kNever;       ///< the frame that took the probe's arming
@@ -93,6 +97,8 @@ void destroyProbe(AtomDensityState &st) {
     destroyBuffer(st.probe[0]);
     destroyBuffer(st.probe[1]);
     st.probeCapacity = 0u;
+    destroyBuffer(st.hzbProbe);
+    st.hzbProbeSlots = 0u;
 }
 Ogre::DescriptorSetUav::BufferSlot uavSlot(Ogre::UavBufferPacked *b, Ogre::ResourceAccess::ResourceAccess access) {
     Ogre::DescriptorSetUav::BufferSlot slot = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
@@ -226,6 +232,14 @@ Ogre::TextureGpu *atomDensityFrame(OgreView *view, OgreScene *scene, AtomView mo
             }
             const uint32_t header[4] = { 0u, st.probeCapacity, 0u, 0u };
             for (int k = 0; k < 2; ++k) st.probe[k]->upload(header, 0, 1u);
+            const uint32_t slots = std::max(gs.slotCount(), 1u);
+            if (!st.hzbProbe || st.hzbProbeSlots < slots) {
+                destroyBuffer(st.hzbProbe);
+                st.hzbProbe = vao->createUavBuffer(2u * slots, 4u * sizeof(uint32_t), 0, nullptr, false);
+                st.hzbProbeSlots = slots;
+            }
+            const std::vector<uint32_t> zeros(size_t(st.hzbProbeSlots) * 8u, 0u);
+            st.hzbProbe->upload(zeros.data(), 0, 2u * st.hzbProbeSlots);
         }
     }
     catch (Ogre::Exception &e) {
@@ -338,6 +352,12 @@ Ogre::UavBufferPacked *atomCutProbeBuffer(OgreView *view, bool late) {
     const AtomDensityState *st = view ? view->atomDensity().get() : nullptr;
     if (!st || st->probeAt != st->frames) return nullptr;
     return st->probe[late ? 1 : 0];
+}
+
+Ogre::UavBufferPacked *atomCutProbeHzbBuffer(OgreView *view) {
+    const AtomDensityState *st = view ? view->atomDensity().get() : nullptr;
+    if (!st || st->probeAt != st->frames) return nullptr;
+    return st->hzbProbe;
 }
 
 namespace {
@@ -512,7 +532,25 @@ bool OgreScene::atomCutProbe(AtomCutProbe &out) {
                 const unsigned long long tris = clusters[w[1]].indexCount / 3u;
                 ++o.drawnClusters;
                 o.drawnTriangles += tris;
+                if (k) o.drawnTrianglesLate += tris;
                 o.depthTriangles[std::min(w[3], kDepths - 1u)] += tris;
+            }
+        }
+        // ---- WHAT EACH LIST'S DEPTH TEST READ (ATOM-6 stage 3), for the objects already listed ----
+        if (st->hzbProbe && st->hzbProbeSlots) {
+            std::vector<uint32_t> hw;
+            readElements(st->hzbProbe, 0, 2u * st->hzbProbeSlots, 16u, hw);
+            for (auto &kv : objects) {
+                const uint32_t s = kv.first;
+                if (s >= st->hzbProbeSlots) continue;
+                for (int k = 0; k < 2; ++k) {
+                    const uint32_t *w = &hw[(size_t(s) + (k ? st->hzbProbeSlots : 0u)) * 4u];
+                    AtomCutProbeHzb &h = k ? kv.second.hzbLate : kv.second.hzbFirst;
+                    h.state = w[0];
+                    h.mip = w[1];
+                    h.nearest = bitsToFloat(w[2]);
+                    h.farthest = bitsToFloat(w[3]);
+                }
             }
         }
         // ---- THE FRAME'S VISIBLE PIXELS ----

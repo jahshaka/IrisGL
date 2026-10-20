@@ -91,6 +91,18 @@ layout( std430, ogre_U6 ) restrict buffer heldLayout { uint heldLevel[]; };
 @property( cull_retest )
 layout( std430, ogre_U7 ) readonly restrict buffer priorLayout { uint prior[]; };
 @end
+// THE HZB PROBE (ATOM-6 stage 3; Scene::atomCutProbe, the probe's frame only): per tested slot, what the depth
+// test read - x bit 0 tested, bit 1 occluded, bit 2 not testable (the box crosses the near plane); y the mip;
+// z the box's nearest depth, w the farthest depth under its rectangle. The first list writes slot, the
+// disocclusion list slot + instanceCount. Only with the depth test; the next free unit (7, or 8 after the
+// disocclusion list's prior words).
+@property( cull_probe )
+@property( cull_retest )
+layout( std430, ogre_U8 ) writeonly restrict buffer hzbProbeLayout { uvec4 hzbProbe[]; };
+@else
+layout( std430, ogre_U7 ) writeonly restrict buffer hzbProbeLayout { uvec4 hzbProbe[]; };
+@end
+@end
 
 // THE PYRAMID THIS READS IS A FARTHEST-DEPTH CHAIN, not a closest-depth one, and
 // the difference is the whole correctness of the test (ATOM-SUBSTRATE-1 fix
@@ -275,6 +287,18 @@ void main()
 			nearest = params.hzb.w != 0u ? max( nearest, ndc.z ) : min( nearest, ndc.z );
 		}
 
+@property( cull_probe )
+		if( !testable )
+		{
+@property( cull_retest )
+			uint probeAt = slot + params.counts.x;
+@else
+			uint probeAt = slot;
+@end
+			if( probeAt < uint( hzbProbe.length() ) )
+				hzbProbe[probeAt] = uvec4( 4u, 0u, 0u, 0u );
+		}
+@end
 		if( testable )
 		{
 			vec2 size = vec2( float( params.hzb.y ), float( params.hzb.z ) );
@@ -337,6 +361,18 @@ void main()
 			float margin = abs( nearest ) * 1.52587890625e-5;
 			bool occluded = params.hzb.w != 0u ? ( nearest + margin < farthestUnder )
 											   : ( nearest - margin > farthestUnder );
+@property( cull_probe )
+			{
+@property( cull_retest )
+				uint probeAt = slot + params.counts.x;
+@else
+				uint probeAt = slot;
+@end
+				if( probeAt < uint( hzbProbe.length() ) )
+					hzbProbe[probeAt] = uvec4( 1u | ( occluded ? 2u : 0u ), uint( mip ), floatBitsToUint( nearest ),
+											   floatBitsToUint( farthestUnder ) );
+			}
+@end
 			if( occluded )
 			{
 				// REJECTED BY DEPTH, and SAID SO (the word 2, never a survivor): the

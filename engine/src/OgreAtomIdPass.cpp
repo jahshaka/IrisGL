@@ -870,7 +870,8 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
             } else if (!scene->recordGpuCull(*cullPtr, req, testAgainst, err, nullptr,
                                              late ? &view->atomCull() : nullptr,
                                              OgreScene::CullRows::IdPass, nullptr,
-                                             capture ? nullptr : atomCutProbeBuffer(view, late))) {
+                                             capture ? nullptr : atomCutProbeBuffer(view, late),
+                                             capture ? nullptr : atomCutProbeHzbBuffer(view))) {
                 logOnce("the cull did not record (" + err + ")");
                 draw = false;
             }

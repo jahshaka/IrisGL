@@ -970,6 +970,8 @@ void atomDensityRecord(OgreView *view, OgreScene *scene, Ogre::CompositorPass *q
 /// The view's cut-probe buffer for its first (`late` false) or late list IN THE PROBE'S FRAME, else null
 /// (OgreAtomIdPass.cpp hands it to recordGpuCull).
 Ogre::UavBufferPacked *atomCutProbeBuffer(OgreView *view, bool late);
+/// ATOM-6 stage 3: the probe's frame's HZB record buffer (null outside it) — the test job's `cull_probe`.
+Ogre::UavBufferPacked *atomCutProbeHzbBuffer(OgreView *view);
 /// ...and the Density mode's figures for AtomDrawStatus: the first of `views` whose last frame counted, read back.
 void atomDensityStatus(OgreScene *scene, const std::vector<OgreView *> &views, AtomDrawStatus &out);
 /// THE OCCLUSION'S PYRAMID (ATOM-OCCLUSION-1, OgreAtomIdPass.cpp): `hzb`'s every level
@@ -6682,7 +6684,8 @@ public:
     bool recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::TextureGpu *hzb,
                        std::string &err, double *requestMs = nullptr,
                        const GpuCull *prior = nullptr, CullRows rows = CullRows::Tool,
-                       const CullReceivers *receivers = nullptr, Ogre::UavBufferPacked *probe = nullptr);
+                       const CullReceivers *receivers = nullptr, Ogre::UavBufferPacked *probe = nullptr,
+                       Ogre::UavBufferPacked *hzbProbe = nullptr);
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
                     GpuCullResult &out);
 private:

@@ -5252,6 +5252,15 @@ struct AtomCutProbeGroup {
     float    distance = 0.0f; ///< d: the eye to the transformed sphere minus its radius, metres (1 orthographic)
     float    radius = 0.0f;   ///< the sphere's radius x the instance's largest axis scale, metres
 };
+/// What one list's instance depth test read for one object (ATOM-6 stage 3; JahCullTest_cs.glsl `hzbProbe`):
+/// `state` bit 0 tested, bit 1 occluded (rejected), bit 2 not testable (the box crosses the near plane); 0 = the
+/// list did not test it (no pyramid, outside the frustum, or — the disocclusion list — the first did not reject it).
+struct AtomCutProbeHzb {
+    unsigned state = 0;
+    unsigned mip = 0;         ///< the pyramid level the rectangle was read at
+    float    nearest = 0.0f;  ///< the box's nearest depth (device depth; reverse-Z: larger is nearer)
+    float    farthest = 0.0f; ///< the farthest depth under its rectangle at that mip
+};
 /// One drawn object of the probe's frame (a slot the cut drew or whose groups it judged).
 struct AtomCutProbeObject {
     unsigned slot = 0;
@@ -5263,7 +5272,9 @@ struct AtomCutProbeObject {
     unsigned depthPixels[16] = {};            ///< ...by the DAG depth the pixel was drawn at (15 = 15 and deeper)
     unsigned drawnClusters = 0;
     unsigned long long drawnTriangles = 0ull;
+    unsigned long long drawnTrianglesLate = 0ull;   ///< ...of them drawn by the disocclusion (late) list
     unsigned long long depthTriangles[16] = {};  ///< the cut's drawn triangles by depth
+    AtomCutProbeHzb hzbFirst, hzbLate;           ///< what each list's depth test read (ATOM-6 stage 3)
     unsigned groups = 0, groupsAffordable = 0, groupsTerminal = 0;
 };
 struct AtomCutProbe {
