@@ -8203,8 +8203,26 @@ public:
     }
     bool pendingGiConfiguration(const Scene *scene) const override;
     /// THE ONE DRAIN (U0 3a): the record the hand-over took (`any` false = an EMPTY hand-over), applied at the top of
-    /// the frame.
-    void drainFrameInput(FrameInput &in, bool any);
+    /// the frame. `budgeted` (a FREE frame's own drain, BUGS-7): the structure is applied in its one order until the
+    /// frame's drain budget is spent (freeDrainBudgetMs); the rest is carried to the next frame
+    /// (RenderThread::carryForward). Lockstep frames, joins and requests drain whole.
+    void drainFrameInput(FrameInput &in, bool any, bool budgeted = false);
+    /// THE FREE FRAME'S DRAIN BUDGET (BUGS-7; measured by BISTRO-STREAM-IN-1 on Bistro's first open, §2604: one frame
+    /// drained the messages of every tick queued while the previous frame ran — 823 -> 25,515 messages, frames of
+    /// 0.8-5 s of render-thread CPU with the GPU idle, growing with the queue). The display period is the budget's
+    /// measure: a FREE frame's drain may use the time that still presents the frame at the display rate — the period
+    /// less the rest of the last free frame's work — and the remainder is carried, in order, to the next frame. When
+    /// the frame's own work already fills the period the drain still gets kFreeDrainFloorPeriods of one (a load always
+    /// advances, and the frame stays within 1 + kFreeDrainFloorPeriods of its own length); never more than one period.
+    /// The unit is the MESSAGE (a message is never split; its cost spans orders of magnitude — a mesh create against a
+    /// field write — so a count has no derivation and the clock is the bound). At least one message a frame. Under
+    /// Unlimited pacing (no period sent) the unpaced period stands in.
+    static constexpr double kFreeDrainFloorPeriods = 0.5;
+    static constexpr double kFreeDrainUnpacedPeriodMs = 1000.0 / 60.0;
+    /// The drain budget of the next free frame (ms), from the display period and the last free frame's work.
+    double freeDrainBudgetMs() const;
+    /// The last FREE frame's drain (ms): its share of RenderThread::lastFrameWorkNs is not the frame's own work.
+    double mLastFreeDrainMs = 0.0;
     bool mInDrain = false;   ///< inside drainFrameInput: applySceneStream times its parts (U4 stage 3)
     /// A SCENE'S STREAM (U3 stage 3): its structural messages in emission order, then its node records — the drain's
     /// per-scene head, and what updateScene applies of the pending record before it resolves (a resolve answers for

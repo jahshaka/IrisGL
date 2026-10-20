@@ -984,7 +984,11 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         mPresentBegun = false;
         mDeferNodeWrites = mFreeFrame;
         struct DeferEnds { bool &f; ~DeferEnds() { f = false; } } deferEnds{ mDeferNodeWrites };
-        drainFrameInput(record, any);
+        {
+            const bool budgeted = mFreeFrame && mRenderThread.inFreeFrame();   // a free frame's drain is budgeted
+            drainFrameInput(record, any, budgeted);
+            if (budgeted) mLastFreeDrainMs = mFrameInputStatus.drainMicros / 1000.0;
+        }
         mDeferNodeWrites = false;
         // THE SHADER CACHE'S CHUNKED COPY CONTINUES (FRAME-MONITOR-DOOR-1 stage 4): one step a frame, here at the drain,
         // when the frame's own messages ran none (a save message is a step) — a copy of N new entries costs
@@ -3040,7 +3044,15 @@ void OgreEngine::interpolateFrame() {
 }
 
 
-void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
+double OgreEngine::freeDrainBudgetMs() const {
+    const double periodMs = mRenderThread.displayPeriod() > 0.0f ? double(mRenderThread.displayPeriod()) * 1000.0
+                                                                  : kFreeDrainUnpacedPeriodMs;
+    const double lastOtherMs = std::max(0.0, double(mRenderThread.lastFrameWorkNs()) / 1e6 - mLastFreeDrainMs);
+    return std::clamp(periodMs - lastOtherMs, periodMs * kFreeDrainFloorPeriods, periodMs);
+}
+
+
+void OgreEngine::drainFrameInput(FrameInput &handed, bool any, bool budgeted) {
     // THE DRAIN IS A STAGE (U4 stage 1): `engine.drain` and its three parts, and the same spans on the snapshot
     // (FrameInputStatus::drainMicros and its three parts) — frame-counted, never sampled.
     mFrameInputStatus.drainMicros = 0.0;
@@ -3065,6 +3077,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     mFrameInputStatus.nodeRecords = 0;
     mFrameInputStatus.nodeTransforms = 0;
     mFrameInputStatus.messages = 0;
+    mFrameInputStatus.messagesCarried = 0;
     if (!any) { ++mFrameInputStatus.drainedEmpty; return; }
     FrameInput in = std::move(handed);
     unsigned applied = 0;
@@ -3075,37 +3088,100 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any) {
     // messages and every view's binding, in the order the host posted them (their sequence). A create precedes the
     // commands posted after it; a view unbound before its scene's destroy is unbound first. The scenes' node records,
     // changes and fields, and the views' other fields, follow — the record's state after its structure.
+    // EACH STREAM IS ALREADY IN ITS ORDER (the slot appends, and a carried remainder goes ahead of the newer submits),
+    // so the one order is their MERGE by sequence, taken lazily — a free frame that stops at its budget never touches
+    // the backlog it leaves (BUGS-7: a sort of the whole record each frame cost a 30,000-message backlog
+    // its budget). A tie keeps the streams' order: the engine's, the scenes' in the record's order, the views'.
     {
-        struct Op {
-            unsigned long long   seq = 0;
-            const EngineMessage *engineMessage = nullptr;
-            Scene               *scene = nullptr;
-            const SceneMessage  *sceneMessage = nullptr;
-            View                *view = nullptr;
-            Scene               *bind = nullptr;
-        };
-        std::vector<Op> ops;
-        for (const EngineMessage &m : in.engineMessages) ops.push_back({ m.seq, &m, nullptr, nullptr, nullptr, nullptr });
-        for (const FrameInputScene &part : in.scenes)
-            for (const SceneMessage &m : part.messages) ops.push_back({ m.seq, nullptr, part.scene, &m, nullptr, nullptr });
-        for (const FrameInputView &part : in.views)
-            if (part.scene) ops.push_back({ part.sceneSeq, nullptr, nullptr, nullptr, part.view, *part.scene });
-        std::stable_sort(ops.begin(), ops.end(), [](const Op &a, const Op &b) { return a.seq < b.seq; });
-        for (const Op &op : ops) {
-            if (op.engineMessage) {
-                applyEngineMessage(*op.engineMessage);
-            } else if (op.sceneMessage) {
+        std::vector<size_t> viewOrder;   // the view bindings, by their sequence (few)
+        for (size_t v = 0; v < in.views.size(); ++v) if (in.views[v].scene) viewOrder.push_back(v);
+        std::stable_sort(viewOrder.begin(), viewOrder.end(),
+                         [&](size_t x, size_t y) { return in.views[x].sceneSeq < in.views[y].sceneSeq; });
+        size_t nextEngine = 0, nextView = 0;
+        std::vector<size_t> nextScene(in.scenes.size(), 0u);
+        // THE FREE FRAME'S BUDGET (freeDrainBudgetMs): checked before each op after the first.
+        const double budgetMs = budgeted ? freeDrainBudgetMs() : 0.0;
+        const auto budgetStart = std::chrono::steady_clock::now();
+        unsigned long long cutSeq = 0;
+        bool cut = false;
+        for (unsigned opsApplied = 0;; ++opsApplied) {
+            // the stream whose next op is the oldest
+            constexpr unsigned long long kNone = ~0ull;
+            unsigned long long best = kNone;
+            int kind = -1;   // 0 the engine's, 1 a scene's, 2 a view's binding
+            size_t which = 0;
+            if (nextEngine < in.engineMessages.size()) { best = in.engineMessages[nextEngine].seq; kind = 0; }
+            for (size_t j = 0; j < in.scenes.size(); ++j)
+                if (nextScene[j] < in.scenes[j].messages.size() && in.scenes[j].messages[nextScene[j]].seq < best) {
+                    best = in.scenes[j].messages[nextScene[j]].seq; kind = 1; which = j;
+                }
+            if (nextView < viewOrder.size() && in.views[viewOrder[nextView]].sceneSeq < best) {
+                best = in.views[viewOrder[nextView]].sceneSeq; kind = 2;
+            }
+            if (kind < 0) break;   // the whole structure applied
+            if (budgeted && opsApplied > 0 &&
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - budgetStart).count() >=
+                    budgetMs) {
+                cut = true;
+                cutSeq = best;
+                break;
+            }
+            if (kind == 0) {
+                applyEngineMessage(in.engineMessages[nextEngine++]);
+            } else if (kind == 1) {
+                const FrameInputScene &part = in.scenes[which];
+                const SceneMessage &m = part.messages[nextScene[which]++];
                 OgreScene *sc = nullptr;   // resolved now: a message earlier in the order may have destroyed it
-                for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == op.scene) { sc = q.get(); break; }
-                if (sc) applySceneMessage(sc, *op.sceneMessage);
-            } else if (op.view) {
+                for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
+                if (sc) applySceneMessage(sc, m);
+            } else {
+                const FrameInputView &part = in.views[viewOrder[nextView++]];
                 OgreView *v = nullptr;
-                for (auto &q : mViews) if (static_cast<View *>(q.get()) == op.view) { v = q.get(); break; }
-                if (v && v->boundOgreScene() != static_cast<OgreScene *>(op.bind)) {
+                for (auto &q : mViews) if (static_cast<View *>(q.get()) == part.view) { v = q.get(); break; }
+                OgreScene *bind = static_cast<OgreScene *>(*part.scene);
+                if (v && v->boundOgreScene() != bind) {
                     if (v->boundOgreScene()) v->setScene(nullptr);
-                    if (op.bind) v->setScene(op.bind);
+                    if (bind) v->setScene(bind);
                 }
             }
+        }
+        // THE REMAINDER, CARRIED (BUGS-7): every op from the cut on — the one order is a sequence, so the
+        // remainder is each stream's suffix — and the STATE that follows that structure: a scene whose stream was cut
+        // keeps its whole part (its node records, change set and fields name nodes its carried messages create), a
+        // scene not created yet (its create rides a carried engine message) keeps its part, a view whose binding was
+        // cut keeps its part. Everything else of the record applies now: the frame's own fields, the other scenes, the
+        // views (the camera follows the hand while a load streams). Back into the slot AHEAD of the newer submits.
+        if (cut) {
+            FrameInput carry;
+            unsigned carried = unsigned(in.engineMessages.size() - nextEngine);
+            in.engineMessages.erase(in.engineMessages.begin(), in.engineMessages.begin() + std::ptrdiff_t(nextEngine));
+            carry.engineMessages = std::move(in.engineMessages);
+            const bool engineCarried = !carry.engineMessages.empty();
+            for (size_t j = 0; j < in.scenes.size(); ++j) {
+                FrameInputScene &part = in.scenes[j];
+                bool known = false;
+                for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { known = true; break; }
+                const bool rest = nextScene[j] < part.messages.size();
+                if (!rest && (known || !engineCarried)) continue;   // applied whole (or a dead scene's, dropped below)
+                carried += unsigned(part.messages.size() - nextScene[j]);
+                part.messages.erase(part.messages.begin(), part.messages.begin() + std::ptrdiff_t(nextScene[j]));
+                carry.scenes.push_back(std::move(part));
+                part.scene = nullptr;   // moved: the environment loop below skips it
+            }
+            in.scenes.erase(std::remove_if(in.scenes.begin(), in.scenes.end(),
+                                           [](const FrameInputScene &q) { return q.scene == nullptr; }),
+                            in.scenes.end());
+            for (FrameInputView &part : in.views)
+                if (part.scene && part.sceneSeq >= cutSeq) {
+                    carry.views.push_back(std::move(part));
+                    part.view = nullptr;
+                }
+            in.views.erase(std::remove_if(in.views.begin(), in.views.end(),
+                                          [](const FrameInputView &q) { return q.view == nullptr; }),
+                           in.views.end());
+            mFrameInputStatus.messagesCarried = carried;
+            ++mFrameInputStatus.drainsCut;
+            mRenderThread.carryForward(std::move(carry));
         }
     }
 

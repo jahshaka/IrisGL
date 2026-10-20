@@ -8356,6 +8356,10 @@ struct FrameInputStatus {
     unsigned long long messagesTotal = 0;       ///< ...ever
     unsigned long long messagesRefused = 0;     ///< ...ever refused (each one a completion of its own, decision 34)
     unsigned long long nodeRecordsTotal = 0;    ///< ...ever
+    /// THE FREE FRAME'S BUDGET (BUGS-7): the messages the LAST drain left to the next frame (its budget
+    /// spent), and the drains that were cut, ever. Lockstep frames, joins and requests drain whole (0 here).
+    unsigned           messagesCarried = 0;
+    unsigned long long drainsCut = 0;
     double             drainMicros = 0.0;       ///< what the LAST drain cost (the record's own overhead)
     /// ...THE LAST DRAIN'S PARTS (ENGINE-UPGRADE-U4 stages 1, 3; the monitor's stage `engine.drain` and its children
     /// time the same spans): NAMING the moved subtrees to the scans (applyChangeSet -> nameMovedSubtrees), the NODE

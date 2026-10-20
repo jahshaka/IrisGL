@@ -78,18 +78,15 @@ void RenderThread::post(Scene *scene, SceneMessage &&message) {
     parts[mLastPart].messages.push_back(std::move(message));
 }
 
-void RenderThread::submit(FrameInput &&in) {
-    std::lock_guard<std::mutex> lock(mSlotLock);
-    ++mSubmit.submitted;
-    mSlot.any = true;
-    FrameInput &p = mSlot.record;
-    for (EngineMessage &m : in.engineMessages) m.seq = ++mPostSeq;   // the one order (decision 46)
+namespace {
+/// THE MERGE, ONE RULE (U3 F1; BUGS-7): `in` is the NEWER record and lands on `p` — the streams append in
+/// their order, the change sets and node records append (events), every field the newer record carries wins and one
+/// it does not carry keeps the older value. A submit merges with it, and so does a drain's carried remainder (the
+/// remainder is the OLDER one: it becomes `p` and the slot's newer submits land on it).
+void mergeRecord(FrameInput &p, FrameInput &&in) {
     p.engineMessages.insert(p.engineMessages.end(), std::make_move_iterator(in.engineMessages.begin()),
                             std::make_move_iterator(in.engineMessages.end()));   // the engine's stream, in order
-    for (FrameInputScene &sc : in.scenes) for (SceneMessage &m : sc.messages) m.seq = ++mPostSeq;
-    for (FrameInputView &v : in.views) if (v.scene) v.sceneSeq = ++mPostSeq;
     if (in.frameDelta) p.frameDelta = in.frameDelta;
-    if (in.frameDelta) mEngine.mPushedFrameDelta = *in.frameDelta;   // the host's record (Engine::fixedFrameDelta)
     if (in.cause) p.cause = in.cause;
     if (in.shadowMapBudget) p.shadowMapBudget = in.shadowMapBudget;
     p.refreshShadows = p.refreshShadows || in.refreshShadows;
@@ -123,15 +120,11 @@ void RenderThread::submit(FrameInput &&in) {
         if (sc.giRefreshSerial) it->giRefreshSerial = sc.giRefreshSerial;
         it->materialPreview = it->materialPreview || sc.materialPreview;
         if (sc.gesture) it->gesture = sc.gesture;
-        ++mSubmit.scenePartsMerged;
     }
-    for (const FrameInputView &v : in.views) {
-        // WHAT THE HOST PUSHED, kept on its side (View::pushed*, ENGINE-UPGRADE-U3 stage 2 F5): a part a host builds
-        // on top of its own last push reads it, never the engine's applied state.
-        if (v.view) static_cast<OgreView *>(v.view)->notePushed(v);
+    for (FrameInputView &v : in.views) {
         auto it = std::find_if(p.views.begin(), p.views.end(),
                                [&](const FrameInputView &q) { return q.view == v.view; });
-        if (it == p.views.end()) { p.views.push_back(v); continue; }
+        if (it == p.views.end()) { p.views.push_back(std::move(v)); continue; }
         // A view's fields MERGE: the newest value of each, a reset requested by either.
         if (v.camera) it->camera = v.camera;
         if (v.cameraNode) it->cameraNode = v.cameraNode;
@@ -152,6 +145,34 @@ void RenderThread::submit(FrameInput &&in) {
         it->resetExposure = it->resetExposure || v.resetExposure;
         if (v.seedExposure) it->seedExposure = v.seedExposure;
     }
+}
+}   // namespace
+
+void RenderThread::submit(FrameInput &&in) {
+    std::lock_guard<std::mutex> lock(mSlotLock);
+    ++mSubmit.submitted;
+    mSlot.any = true;
+    for (EngineMessage &m : in.engineMessages) m.seq = ++mPostSeq;   // the one order (decision 46)
+    for (FrameInputScene &sc : in.scenes) for (SceneMessage &m : sc.messages) m.seq = ++mPostSeq;
+    for (FrameInputView &v : in.views) if (v.scene) v.sceneSeq = ++mPostSeq;
+    if (in.frameDelta) mEngine.mPushedFrameDelta = *in.frameDelta;   // the host's record (Engine::fixedFrameDelta)
+    // WHAT THE HOST PUSHED, kept on its side (View::pushed*, ENGINE-UPGRADE-U3 stage 2 F5): a part a host builds on top
+    // of its own last push reads it, never the engine's applied state.
+    for (const FrameInputView &v : in.views) if (v.view) static_cast<OgreView *>(v.view)->notePushed(v);
+    for (const FrameInputScene &sc : in.scenes)
+        if (std::any_of(mSlot.record.scenes.begin(), mSlot.record.scenes.end(),
+                        [&](const FrameInputScene &q) { return q.scene == sc.scene; }))
+            ++mSubmit.scenePartsMerged;
+    mergeRecord(mSlot.record, std::move(in));
+}
+
+void RenderThread::carryForward(FrameInput &&rest) {
+    std::lock_guard<std::mutex> lock(mSlotLock);
+    FrameInput newer = std::move(mSlot.record);
+    mSlot.record = std::move(rest);
+    mergeRecord(mSlot.record, std::move(newer));
+    mSlot.any = true;
+    mLastPart = 0;   // post()'s cached part index: the parts moved
 }
 
 
