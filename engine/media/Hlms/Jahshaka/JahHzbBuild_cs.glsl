@@ -52,20 +52,12 @@ layout( vulkan( ogre_u@n ) vk_comma r32f ) uniform coherent image2D mip@n;
 layout( std430, ogre_U@value( hzb_slots ) ) coherent buffer counterLayout { uint arrivals[]; };
 
 // THE SOURCE RECTANGLE (the job Jahshaka/HzbBuildRect, ENGINE-UPGRADE-U5 stage 4): the pyramid is
-// ONE SHADOW MAP's, and the map is a rectangle of the shadow atlas. Mip 0 is the pyramid's own size
-// (the rectangle's), and its texel uv reads the depth at uv plus the rectangle's corner - the one
-// buffer slot after the counter holds that corner (x, y). The whole-depth build reads at uv.
+// ONE SHADOW MAP's, and the map is a rectangle of the shadow atlas. Its texel uv reads the depth at
+// uv plus the rectangle's corner - the one buffer slot after the counter holds that corner (x, y)
+// and, in z, whether mip 0 is at HALF the rectangle's resolution (depthAt, below). The whole-depth
+// build reads at uv.
 @property( hzb_src_rect )
 layout( std430, ogre_U@value( hzb_origin_slot ) ) readonly restrict buffer originLayout { uvec4 srcOrigin; };
-float depthAt( ivec2 uv )
-{
-	return texelFetch( depthTexture, uv + ivec2( srcOrigin.xy ), 0 ).x;
-}
-@else
-float depthAt( ivec2 uv )
-{
-	return texelFetch( depthTexture, uv, 0 ).x;
-}
 @end
 
 // Reverse-Z makes NEAR = 1, so "keep the nearest" is a max there and a min
@@ -91,6 +83,34 @@ float depthAt( ivec2 uv )
 
 #define HZB_THREADS 256
 #define HZB_TILE_LEVELS 6
+
+// THE DEPTH A MIP-0 TEXEL HOLDS. A shadow map's pyramid starts at HALF the map's resolution
+// (ATOM-4 stage 2a; srcOrigin.z = 1, set for an even-sized rectangle only): texel uv is the
+// farthest of the map's 2 x 2 at 2 uv - exactly the full-resolution pyramid's level 1 - so every
+// level holds the farthest of a footprint that covers the old one's, and a cull that rejects
+// against it rejects only what the full pyramid would also have rejected. A quarter of the
+// texels written; the reads are the same four per output the old level 1 made.
+@property( hzb_src_rect )
+float depthAt( ivec2 uv )
+{
+	ivec2 o = ivec2( srcOrigin.xy );
+	if( srcOrigin.z != 0u )
+	{
+		ivec2 s = uv * 2 + o;
+		float a = texelFetch( depthTexture, s, 0 ).x;
+		float b = texelFetch( depthTexture, s + ivec2( 1, 0 ), 0 ).x;
+		float c = texelFetch( depthTexture, s + ivec2( 0, 1 ), 0 ).x;
+		float d = texelFetch( depthTexture, s + ivec2( 1, 1 ), 0 ).x;
+		return HZB_PICK( HZB_PICK( a, b ), HZB_PICK( c, d ) );
+	}
+	return texelFetch( depthTexture, uv + o, 0 ).x;
+}
+@else
+float depthAt( ivec2 uv )
+{
+	return texelFetch( depthTexture, uv, 0 ).x;
+}
+@end
 
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),

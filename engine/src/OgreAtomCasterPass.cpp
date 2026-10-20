@@ -571,8 +571,14 @@ LightPyramid *lightPyramidFor(Ogre::RenderSystem *rs, AtomCasterScene &state, co
         Ogre::TextureGpuManager *tm = rs ? rs->getTextureGpuManager() : nullptr;
         Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
         if (!tm || !vao) return nullptr;
+        // LEVEL 0 AT HALF THE MAP'S RESOLUTION (ATOM-4 stage 2a): the farthest of each 2 x 2 (JahHzbBuild_cs's
+        // depthAt) — the full pyramid's level 1, a quarter of the texels and the bytes (a 2048 map: 32.5 -> 8.1
+        // MiB over its chain), the late cut's test conservative at any level. An odd-sized rectangle keeps the
+        // full resolution: its halves would not land on whole texels of the cull's rectangle.
+        const bool half = (rect[2] % 2u) == 0u && (rect[3] % 2u) == 0u;
+        const unsigned w0 = half ? rect[2] / 2u : rect[2], h0 = half ? rect[3] / 2u : rect[3];
         unsigned levels = 1u;
-        for (unsigned m = std::max(rect[2], rect[3]); m > 1u; m >>= 1u) ++levels;
+        for (unsigned m = std::max(w0, h0); m > 1u; m >>= 1u) ++levels;
         if (levels > kHzbMaxLevels) return nullptr;
         AtomCasterDevice *dev = casterDev();
         const uint32_t id = dev ? ++dev->pyramidIds : 0u;
@@ -582,10 +588,10 @@ LightPyramid *lightPyramidFor(Ogre::RenderSystem *rs, AtomCasterScene &state, co
                                       Ogre::GpuPageOutStrategy::Discard,
                                       Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
             p.tex->setPixelFormat(Ogre::PFG_R32_FLOAT);
-            p.tex->setResolution(rect[2], rect[3]);
+            p.tex->setResolution(w0, h0);
             p.tex->setNumMipmaps(Ogre::uint8(levels));
             p.tex->scheduleTransitionTo(Ogre::GpuResidency::Resident);
-            const uint32_t corner[4] = { rect[0], rect[1], 0u, 0u };
+            const uint32_t corner[4] = { rect[0], rect[1], half ? 1u : 0u, 0u };   // z: mip 0 at half resolution
             p.origin = vao->createUavBuffer(1u, sizeof(corner), 0, const_cast<uint32_t *>(corner), false);
         }
         catch (const Ogre::Exception &e) {
@@ -1215,8 +1221,8 @@ void recordCasterPass(AtomPassContext &ctx) {
         req.hzbLevels = lp->tex->getNumMipmaps();
         req.hzbRect[0] = 0u;
         req.hzbRect[1] = 0u;
-        req.hzbRect[2] = rect[2];
-        req.hzbRect[3] = rect[3];
+        req.hzbRect[2] = lp->tex->getWidth();    // the pyramid's mip 0 (half the map's: stage 2a)
+        req.hzbRect[3] = lp->tex->getHeight();
     }
 
     GpuCull &cull = atom.casterCull();
@@ -1458,8 +1464,8 @@ void recordCasterPass(AtomPassContext &ctx) {
             pr.hzbLevels = lp->tex->getNumMipmaps();
             pr.hzbRect[0] = 0u;
             pr.hzbRect[1] = 0u;
-            pr.hzbRect[2] = rect[2];
-            pr.hzbRect[3] = rect[3];
+            pr.hzbRect[2] = lp->tex->getWidth();
+            pr.hzbRect[3] = lp->tex->getHeight();
             GpuCull &probeList = state.pbsProbe;
             listWar();
             if (scene->recordGpuCull(probeList, pr, nullptr, err, nullptr, nullptr, OgreScene::CullRows::Caster)) {
