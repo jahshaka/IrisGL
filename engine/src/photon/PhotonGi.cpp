@@ -3419,9 +3419,8 @@ void PhotonComponent::applyPendingGi() {
 // the frame's pace, so under load a permutation the session had not built yet compiled on the
 // UI thread (shader.sample_opens_quiet, red 2 of 7 gate runs). Here the arm runs under the
 // fork's deferred dispatch: a missing permutation is requested in the background and its
-// dispatch skipped. The arm that frame is then incomplete, so the frame is HELD (the view's
-// AsyncHoldListener reads giDeferralPending) and, once the compute permutations in flight have
-// landed, the arm is rebuilt whole.
+// dispatch skipped. The arm that frame is then incomplete and, once the compute permutations in
+// flight have landed, the arm is rebuilt whole.
 void PhotonComponent::applyPendingGiDeferrable() {
     GiRegion region(RegionKind::Graphics);   // Photon's compute work is made inside the GI region
     // THE NEXT GI STEP'S GRAPHICS INPUTS (ENGINE-UPGRADE-ASYNC-3 stage 1): the conversions, the
@@ -3432,7 +3431,7 @@ void PhotonComponent::applyPendingGiDeferrable() {
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
     if (mGiDeferralRetry && mScene.asyncShaders() && hc) {
-        if (hc->getNumAsyncInFlight() != 0u) return;   // still building: the frame stays held
+        if (hc->getNumAsyncInFlight() != 0u) return;   // still building: the rebuild waits
         mGiDeferralRetry = false;
         mGiChainShapeDirty = true;   // the partial arm is rebuilt whole
         mGiCachesDirty = true;
@@ -3467,8 +3466,8 @@ void PhotonComponent::giDeferrable(const std::function<void()> &work) {
         mGiDeferralRetry = true;
         if (mGiDeferrals++ == 0u)
             Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: the lighting arm met a compute permutation still building - the frame "
-                "is held and the arm rebuilt once it lands");
+                "Jahshaka GI: the lighting arm met a compute permutation still building - the arm "
+                "is rebuilt once it lands");
     }
 }
 

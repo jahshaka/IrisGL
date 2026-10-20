@@ -2011,33 +2011,11 @@ void OgreView::updateGi() {
 // still building; a capture, a probe or anything else with a workspace of its own stays
 // blocking because ITS workspace never asked. The planar mirrors are re-rendered every
 // frame and take the view's mode from their listener (OgrePlanar.cpp).
-void AsyncHoldListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
-    if (!mView || ws != mView->ogreWorkspace() || !mView->asyncHoldScene()) return;
-    mSkipsAtStart = ws->getSceneManager()->getRenderQueue()->getNumPendingSkips();
-}
-
-void AsyncHoldListener::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
-    if (!mView || ws != mView->ogreWorkspace()) return;
-    // A HOLE: a draw skipped for a shader still building, a compute dispatch deferred for one
-    // this frame (HlmsCompute's deferred dispatch), or a lighting arm that owes its rebuild.
-    const Ogre::HlmsCompute *hc = mView->computeHlms();
-    const OgreScene *scene = mView->asyncHoldScene();
-    const bool hole = mView->asyncShaders() &&
-                      (ws->getSceneManager()->getRenderQueue()->getNumPendingSkips() != mSkipsAtStart ||
-                       (hc && hc->getNumDeferredDispatches() != computeDeferralsAtFrameStart()) ||
-                       (scene && scene->giDeferralPending()));
-    // Only once the view has shown something: there is no last picture to hold before that.
-    const bool hold = hole && mView->framesPresented() > 0 && mHeldInARow < kMaxHeldFrames;
-    if (hold) { ++mHeldInARow; ++mHeldFrames; }
-    else {
-        if (hole) ++mHoleyPresented;
-        mHeldInARow = 0;
-    }
-    // EVERY workspace drawing into this window says the same (the PiP inset swaps it too).
-    ws->setSuppressSwap(hold);
-    if (Ogre::CompositorWorkspace *pip = mView->ogrePipWorkspace()) pip->setSuppressSwap(hold);
-}
-
+// EVERY FRAME IS PRESENTED (BUGS-7): a frame draws what exists — a waiting object
+// its placeholder, a draw with none yet (unlit) nothing for the frames its permutation takes,
+// a deferred compute its previous result — and what is pending fills in over the frames after.
+// (The held frame that kept "the last complete picture" instead is deleted: on a first open the
+// last complete picture was the empty view's background, held 18-36 s over Bistro's load.)
 void OgreView::setAsyncShaders(bool on) {
     if (postedAsField([&](FrameInputView &p) { p.asyncShaders = on; })) return;   // the host's: a field (U3 4a)
     // THE MODE'S EDGES ARE IN THE LOG: a compile that happened while a view compiled in the
@@ -2048,22 +2026,12 @@ void OgreView::setAsyncShaders(bool on) {
     if (on != mAsyncShaders) detail::noteAsyncView(on);
     mAsyncShaders = on;
     if (mScene) mScene->setAsyncShaders(on);   // its captures follow (SurfaceCache)
-    if (on && !mAsyncHold) {
-        mAsyncHold.reset(new AsyncHoldListener(this));
-        addWorkspaceListener(mAsyncHold.get());
-        excludeFromCapture(mAsyncHold.get());
-    }
     if (mWorkspace) mWorkspace->setAsyncShaderCompile(on);
     if (mPipWorkspace) mPipWorkspace->setAsyncShaderCompile(on);
     if (mBlankWorkspace) mBlankWorkspace->setAsyncShaderCompile(on);
 }
 
 bool OgreView::asyncShaders() const { return mAsyncShaders; }
-
-const Ogre::HlmsCompute *OgreView::computeHlms() const {
-    Ogre::HlmsManager *hm = mRoot ? mRoot->getHlmsManager() : nullptr;
-    return hm ? hm->getComputeHlms() : nullptr;
-}
 
 bool OgreView::warmUpShaders() {
     // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.

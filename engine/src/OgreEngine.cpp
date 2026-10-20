@@ -904,13 +904,6 @@ void frameCloseStep(std::string &sink, Step &&step) {
 }   // namespace
 
 
-namespace {
-/// The compute dispatches deferred before this frame began (AsyncHoldListener's hole test).
-unsigned long long gComputeDeferralsAtFrameStart = 0;
-}  // namespace
-
-unsigned long long computeDeferralsAtFrameStart() { return gComputeDeferralsAtFrameStart; }
-
 namespace { std::atomic<int> gAsyncViews{0}; }
 int asyncViewCount() { return gAsyncViews.load(std::memory_order_relaxed); }
 void noteAsyncView(bool on) { gAsyncViews.fetch_add(on ? 1 : -1, std::memory_order_relaxed); }
@@ -935,9 +928,6 @@ void OgreEngine::renderOneFrame() { mRenderThread.runOn([this] { mRenderThread.t
 
 // THE FRAME'S BODY (ENGINE-UPGRADE-U3 F7): the loop hands it the record the hand-over took.
 bool OgreEngine::runFrame(FrameInput &record, bool any) {
-    if (mRoot && mRoot->getHlmsManager())
-        if (Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms())
-            gComputeDeferralsAtFrameStart = hc->getNumDeferredDispatches();
     // LEGAL AND EMPTY WHEN HEADLESS (Types.h EngineConfig::headless): a
     // headless engine can hold no View, so every loop below iterates nothing
     // and Root::renderOneFrame walks a workspace-less render system. Hosts do
@@ -3457,17 +3447,17 @@ void OgreEngine::startAsyncShaders() {
             if (!atom->installAsyncPlaceholder(pbsPh, err))
                 Ogre::LogManager::getSingleton().logMessage(
                     "Jahshaka async shaders: no Atom placeholder (" + err +
-                        ") - a pending decode bucket is a hole the view holds until it lands",
+                        ") - a pending decode bucket draws nothing until it lands",
                     Ogre::LML_CRITICAL);
         }
     }
     // UNLIT HAS NO PLACEHOLDER, ON PURPOSE. Its set is the editor's furniture (the grid, the
     // gizmos, the wires, the outline, the HUD) plus billboards, and a grey opaque quad would
     // be a lie for every one of them. It still compiles in the background: a pending unlit
-    // draw is a HOLE, and a frame with a hole is held (AsyncHoldListener) — the last complete
-    // picture stays on screen for the ~0.2 s its permutation takes, so nothing is ever seen
-    // vanishing. (Kept in the frame instead, measured: the Mirror Room and Particles samples
-    // compiled unlit permutations on the UI thread after their opens.)
+    // draw is skipped for the ~0.2 s its permutation takes and appears when it lands — the
+    // frame is presented all the same (BUGS-7: no frame is held). (Kept in the frame
+    // instead, measured: the Mirror Room and Particles samples compiled unlit permutations on
+    // the UI thread after their opens.)
     hm->getAsyncCompiler()->setNumThreads(mAsyncShaderThreads, /*nice*/ 10);
 }
 
@@ -3508,11 +3498,6 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
         out.pendingSkips     += rq->getNumPendingSkips() - capSkip;
         out.captureDeferredDraws += capPh + capSkip;
     }
-    for (const auto &v : mViews)
-        if (const AsyncHoldListener *h = v ? v->asyncHold() : nullptr) {
-            out.heldFrames += h->mHeldFrames;
-            out.holeyPresented += h->mHoleyPresented;
-        }
     unsigned background = 0;
     unsigned foreground = 0;
     mShaderCache.backgroundCompiles(background, foreground);

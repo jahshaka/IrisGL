@@ -311,9 +311,6 @@ bool surfaceCardsCapturing();
 Ogre::CompositorWorkspace *surfaceCacheWorkspace(const SurfaceCache *cache);
 /// The placeholder draws / pending skips made inside the cache's own captures (ASYNC-SHADERS-1).
 /// Kept per SceneManager across the cache's rebuilds; `forget` drops the entry (scene teardown).
-/// HlmsCompute's deferred-dispatch count when this frame began (OgreEngine::renderOneFrame):
-/// a frame that deferred a compute permutation is a frame with a hole (AsyncHoldListener).
-unsigned long long computeDeferralsAtFrameStart();
 /// How many views compile in the background right now (OgreView::setAsyncShaders); the shader
 /// cache's counter names any compile made off the background compiler while it is non-zero.
 int asyncViewCount();
@@ -5818,9 +5815,6 @@ public:
     void applyPendingGi() { return mPhoton.applyPendingGi(); }
     void applyPendingGiDeferrable() { return mPhoton.applyPendingGiDeferrable(); }
     void giDeferrable(const std::function<void()> &work) { return mPhoton.giDeferrable(work); }
-    /// The arm owes a rebuild because a permutation it dispatched was building: every frame
-    /// until it lands is held.
-    bool giDeferralPending() const { return mPhoton.giDeferralPending(); }
     void applyPendingGiFlush() { return mPhoton.applyPendingGiFlush(); }
     /// The pace of the frame being rendered (OPEN_COVER_SPEC §2.1):
     /// Engine::renderOneFrame pushes it once per frame, to every scene.
@@ -7072,31 +7066,6 @@ private:
     unsigned held() const { return mHeld ? mHeld->load(std::memory_order_acquire) : 0u; }
 };
 
-/// THE HELD FRAME (ASYNC-SHADERS-1), THE SAFETY NET. The grey placeholder (PBS and the Atom
-/// decode) is what a waiting object draws; the placeholders are pass permutations themselves,
-/// and the startup gate builds them for every tier's pass. A frame of an asynchronous view
-/// that still drew a HOLE — an object with neither its shader nor a placeholder yet (unlit,
-/// or a pass nothing prebuilt) — is not presented: the window keeps the last complete picture
-/// (the fork's CompositorWorkspace::setSuppressSwap) until a frame draws no hole, at most
-/// kMaxHeldFrames in a row. Counted (AsyncShaderStats::heldFrames) and rare: measured 0 for a
-/// cold material apply and a cold tier change, 2 at a project create.
-class OgreView;
-class AsyncHoldListener final : public Ogre::CompositorWorkspaceListener {
-public:
-    /// Then it presents anyway. FRAMES, and generous: a frame that is not presented does not
-    /// wait for the display, so a scripted loop runs several times faster while it holds
-    /// (measured before the placeholders were prebuilt: a cold tier change held 382 frames).
-    static constexpr unsigned kMaxHeldFrames = 1200u;
-    explicit AsyncHoldListener(OgreView *view) : mView(view) {}
-    void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override;
-    void workspacePosUpdate(Ogre::CompositorWorkspace *ws) override;
-    OgreView *mView;
-    unsigned long long mSkipsAtStart = 0;
-    unsigned mHeldInARow = 0;
-    unsigned long long mHeldFrames = 0;       ///< frames held, ever
-    unsigned long long mHoleyPresented = 0;   ///< frames with a hole that were presented anyway
-};
-
 class OgreView final : public View, public inspect::ViewEcho {
 public:
     /// On-screen: `window` is set. Offscreen: `texture` is set. Never both.
@@ -7812,15 +7781,6 @@ private:
     /// (CAMERA_LENS_SPEC §4). Null on a passthrough view — every thumbnail,
     /// preview and pixel suite, by construction.
     std::unique_ptr<chain::ViewGlobalsListener> mGlobalsListener;
-    /// The held frame (AsyncHoldListener); made when the view first turns asynchronous.
-    std::unique_ptr<AsyncHoldListener> mAsyncHold;
-public:
-    Ogre::CompositorWorkspace *ogreWorkspace() const { return mWorkspace; }
-    Ogre::CompositorWorkspace *ogrePipWorkspace() const { return mPipWorkspace; }
-    OgreScene *asyncHoldScene() const { return mScene; }
-    const Ogre::HlmsCompute *computeHlms() const;
-    const AsyncHoldListener *asyncHold() const { return mAsyncHold.get(); }
-private:
     /// Owned; registered the same way while this view's chain traces
     /// reflections (PHOTON_SPEC §7 R5). Null everywhere else — on a machine
     /// without ray queries, with the preference off, or on any view whose chain
@@ -8207,7 +8167,7 @@ public:
     /// frame's drain budget is spent (freeDrainBudgetMs); the rest is carried to the next frame
     /// (RenderThread::carryForward). Lockstep frames, joins and requests drain whole.
     void drainFrameInput(FrameInput &in, bool any, bool budgeted = false);
-    /// THE FREE FRAME'S DRAIN BUDGET (BUGS-7; measured by BISTRO-STREAM-IN-1 on Bistro's first open, §2604: one frame
+    /// THE FREE FRAME'S DRAIN BUDGET (BUGS-7; measured by BUGS-7 on Bistro's first open, §2604: one frame
     /// drained the messages of every tick queued while the previous frame ran — 823 -> 25,515 messages, frames of
     /// 0.8-5 s of render-thread CPU with the GPU idle, growing with the queue). The display period is the budget's
     /// measure: a FREE frame's drain may use the time that still presents the frame at the display rate — the period
