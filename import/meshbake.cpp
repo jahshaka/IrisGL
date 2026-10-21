@@ -4415,7 +4415,9 @@ public:
         if (attempt < 0) {   // THE BEST ATTEMPT WON: commit it (patch 0005's final call)
             const auto t0 = std::chrono::steady_clock::now();
             self->commitWinner(winner, simplified, simplifiedCount);
-            self->mVerifyMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            self->mVerifyMs += ms;
+            self->mRecomputeMs += ms;
             return nullptr;
         }
         return self->verify(attempt, group, groupCount, simplified, simplifiedCount, error, pruneBudget, resultBound);
@@ -4468,6 +4470,8 @@ public:
     {
         stats->groupsKeptEarlier = mKeptEarlier;
         stats->handOnRecomputed = mHandOnRecomputed;
+        stats->handOnQueries = qint64(mHandOnQueries);
+        stats->recomputeMs = mRecomputeMs;
         stats->groupRetries = mTotalRetries;
         stats->groupsUnconverged = mUnconverged;
         stats->groupsMadeTerminal = mTerminal;
@@ -4596,31 +4600,10 @@ private:
         // A REMOVED ISLAND (a level-0 component wholly inside the region with no vertex left on S) is not a
         // deformation: the measurement charges it its full extent (ATOM-6 (a)), so its points stay out of the
         // deformation term below, and the prune's own drops raise the islands' bound by their price.
-        std::vector<unsigned char> droppedAt(removed.size(), 0u);   // per removed vertex: its island is dropped
+        std::vector<unsigned char> droppedAt;   // per removed vertex: its island is dropped
         float droppedMax = 0.0f;   // the largest island the region has lost (here or below): charged its extent
         std::vector<unsigned> dropped;   // the region's wholly dropped islands, sorted
-        {
-            std::vector<unsigned> comps;
-            for (unsigned ri : removed)
-                if (mIslands.compOf[mRegionV[ri]] < mIslands.count()) comps.push_back(mIslands.compOf[mRegionV[ri]]);
-            std::sort(comps.begin(), comps.end());
-            comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
-            for (unsigned comp : comps) {
-                bool whole = true;
-                for (unsigned i = mIslands.vertStart[comp]; i < mIslands.vertStart[comp + 1] && whole; ++i) {
-                    const unsigned v = mIslands.verts[i];
-                    if (mRegionAt[v] != mRegionStamp || mKeptAt[v] == mKeptStamp) whole = false;
-                }
-                if (whole) {
-                    dropped.push_back(comp);
-                    droppedMax = std::max(droppedMax, mIslands.extent[comp]);
-                }
-            }
-            for (size_t i = 0; i < removed.size(); ++i) {
-                const unsigned comp = mIslands.compOf[mRegionV[removed[i]]];
-                droppedAt[i] = std::binary_search(dropped.begin(), dropped.end(), comp) ? 1u : 0u;
-            }
-        }
+        findDropped(removed, droppedAt, dropped, droppedMax);
 
         // A DROPPED ISLAND IS ALLOWED what the group is held to, or what the prune already charged it (ATOM-7): the
         // prune's clause (1) pays an island at any price (the level is accepted) and clause (2) within the verify's
@@ -4689,7 +4672,7 @@ private:
         float bound = 0.0f;   // THE CHILDREN'S ERROR this result hands up (set below, before any answer)
         const auto handOn = [&]() {
             mPendingBound = bound;
-            fillHandOn(gridS, removed, simplified, simplifiedCount);
+            fillHandOn(gridS, removed, droppedAt, simplified, simplifiedCount);
             mPendingFrom = attempt;
             return nullptr;
         };
@@ -4879,27 +4862,79 @@ private:
         gridS.build(mPositions, mPosComps, sIdx, glo, ghi, soupGridRes(mPositions, mPosComps, sIdx, glo, ghi));
     }
 
+    /// THE REGION'S DROPPED ISLANDS for the result whose kept vertices carry `mKeptStamp`: a level-0 component
+    /// wholly inside the region with no vertex left (sorted), the flag per removed vertex, the largest extent.
+    void findDropped(const std::vector<unsigned> &removed, std::vector<unsigned char> &droppedAt,
+                     std::vector<unsigned> &dropped, float &droppedMax) const
+    {
+        droppedAt.assign(removed.size(), 0u);
+        dropped.clear();
+        droppedMax = 0.0f;
+        std::vector<unsigned> comps;
+        for (unsigned ri : removed)
+            if (mIslands.compOf[mRegionV[ri]] < mIslands.count()) comps.push_back(mIslands.compOf[mRegionV[ri]]);
+        std::sort(comps.begin(), comps.end());
+        comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
+        for (unsigned comp : comps) {
+            bool whole = true;
+            for (unsigned i = mIslands.vertStart[comp]; i < mIslands.vertStart[comp + 1] && whole; ++i) {
+                const unsigned v = mIslands.verts[i];
+                if (mRegionAt[v] != mRegionStamp || mKeptAt[v] == mKeptStamp) whole = false;
+            }
+            if (whole) {
+                dropped.push_back(comp);
+                droppedMax = std::max(droppedMax, mIslands.extent[comp]);
+            }
+        }
+        for (size_t i = 0; i < removed.size(); ++i) {
+            const unsigned comp = mIslands.compOf[mRegionV[removed[i]]];
+            droppedAt[i] = std::binary_search(dropped.begin(), dropped.end(), comp) ? 1u : 0u;
+        }
+    }
+
     /// THE HAND-ON of a result the group keeps: every removed region vertex to the result's triangle it stands
-    /// nearest, and the result's triangles (for their `mTriBound` record).
-    void fillHandOn(surface::TriangleGrid &gridS, const std::vector<unsigned> &removed, const unsigned *simplified,
-                    size_t simplifiedCount)
+    /// nearest, and the result's triangles (for their `mTriBound` record). ONE QUERY PER DROPPED ISLAND (ATOM-7
+    /// stage 3): a wholly dropped island is charged its extent wherever it goes, so its provenance is all the query
+    /// served — every removed vertex of it is handed to the triangle nearest its FIRST removed vertex (the exhaustive
+    /// arm queries every point, the reference).
+    void fillHandOn(surface::TriangleGrid &gridS, const std::vector<unsigned> &removed,
+                    const std::vector<unsigned char> &droppedAt, const unsigned *simplified, size_t simplifiedCount)
     {
         mPending.clear();
         mPendingTris.clear();
         mPendingTris.reserve(simplifiedCount / 3);
         for (size_t t = 0; t + 2 < simplifiedCount; t += 3) mPendingTris.push_back(triKeyOf(simplified + t));
+        // per removed vertex: the removed vertex whose query it takes (itself, or its dropped island's first)
+        std::vector<unsigned> askOf(removed.size());
+        std::vector<unsigned> asked;   // the removed vertices that query
+        {
+            std::unordered_map<unsigned, unsigned> firstOf;   // dropped island -> its first removed vertex
+            for (size_t i = 0; i < removed.size(); ++i) {
+                if (!mExhaustive && droppedAt[i]) {
+                    const auto it = firstOf.emplace(mIslands.compOf[mRegionV[removed[i]]], unsigned(i)).first;
+                    askOf[i] = it->second;
+                    if (it->second != unsigned(i)) continue;
+                } else {
+                    askOf[i] = unsigned(i);
+                }
+                asked.push_back(unsigned(i));
+            }
+        }
         std::vector<unsigned> nearestTri(removed.size(), 0u);
-        bakepool::forRange(bakepool::Range(removed.size(), kVerifyGrain), mWidth,
+        bakepool::forRange(bakepool::Range(asked.size(), kVerifyGrain), mWidth,
                            [&](size_t, size_t begin, size_t end, int slot) {
-                               for (size_t i = begin; i < end; ++i)
+                               for (size_t k = begin; k < end; ++k) {
+                                   const unsigned i = asked[k];
                                    gridS.closest(mQueries[size_t(slot)],
                                                  vertexOf(mPositions, mPosComps, mRegionV[removed[i]]), nullptr,
                                                  nullptr, &nearestTri[i]);
+                               }
                            });
         const size_t sTris = simplifiedCount / 3;
         for (size_t i = 0; i < removed.size(); ++i)
-            mPending.emplace_back(triKeyOf(simplified + std::min<size_t>(nearestTri[i], sTris - 1) * 3),
+            mPending.emplace_back(triKeyOf(simplified + std::min<size_t>(nearestTri[askOf[i]], sTris - 1) * 3),
                                   mRegionV[removed[i]]);
+        mHandOnQueries += asked.size();
     }
 
     /// THE BEST ATTEMPT WON (patch 0005's final call): the group outputs attempt `winner`'s result. Its hand-on is
@@ -4926,7 +4961,11 @@ private:
         const std::vector<unsigned> sIdx(simplified, simplified + simplifiedCount);
         surface::TriangleGrid gridS;
         buildGrid(sIdx, gridS);
-        fillHandOn(gridS, removed, simplified, simplifiedCount);
+        std::vector<unsigned char> droppedAt;
+        std::vector<unsigned> dropped;
+        float droppedMax = 0.0f;
+        findDropped(removed, droppedAt, dropped, droppedMax);
+        fillHandOn(gridS, removed, droppedAt, simplified, simplifiedCount);
         mPendingFrom = winner;
     }
 
@@ -4962,6 +5001,8 @@ private:
     std::vector<float> mAttemptBound;
     std::vector<unsigned char> mAttemptOffended, mAttemptEmpty;
     int mPendingFrom = -1, mKeptEarlier = 0, mHandOnRecomputed = 0;
+    size_t mHandOnQueries = 0;   ///< the hand-on's closest queries (stage 3: one per dropped island)
+    double mRecomputeMs = 0.0;   ///< the winners' recomputed hand-ons (part of `mVerifyMs`)
     bool mPendingValid = false, mLastOffended = false, mLastEmpty = false;
     int mRetries = 0, mTotalRetries = 0, mUnconverged = 0, mTerminal = 0, mLockedVertices = 0, mShared = 0, mSplit = 0;
     std::array<int, kGroupRetries + 1> mRetryHistogram {};
@@ -5318,9 +5359,9 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         // extent, in the sampled and the removed-vertex terms alike — so the group's error is at least the
         // largest such extent (`removedExtent`). A surviving island keeps its distance. A dropped island's points
         // therefore need no distance query where their capped distance cannot pass `removedExtent`: the per-facet
-        // walk skips them, and term 3's samples skip them where margin x extent cannot either (term 2 keeps its
-        // query: it names the output each removed vertex is handed to). The same DAG, byte for byte
-        // (ClusterDagStats::exhaustiveMeasure walks them all).
+        // walk skips them, term 3's samples skip them where margin x extent cannot either, and term 2 asks one point
+        // per island for the output the island is handed to (ATOM-7 stage 3). The same stored errors
+        // (ClusterDagStats::exhaustiveMeasure walks them all; only an island's provenance can differ).
         float removedExtent = 0.0f;
         std::vector<unsigned> droppedComps;
         {
@@ -5467,6 +5508,31 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             groupFallbacks[g] = fellBack.load();
         }
         const float termS = sampled;
+        // ONE QUERY PER DROPPED ISLAND (ATOM-7 stage 3): a wholly dropped island's points are charged its extent
+        // (`removedExtent`, which the group's error is at least), so their distances cannot move the maximum and
+        // the query served only provenance — the island's FIRST removed vertex is asked, and every removed vertex
+        // of it is handed to the output that one stands under (an island split over two outputs before is now one
+        // output's: never charged below its extent). The exhaustive arm asks every point (the reference).
+        std::vector<int> islandOwner(droppedComps.size(), -1);
+        if (skipDropped && !droppedComps.empty()) {
+            std::vector<size_t> firstOf(droppedComps.size(), SIZE_MAX);
+            for (size_t i = 0; i < regionV.size(); ++i) {
+                if (kept[regionL[i]] || !droppedPoint(regionV[i])) continue;
+                const size_t k = size_t(std::lower_bound(droppedComps.begin(), droppedComps.end(),
+                                                         islands.compOf[regionV[i]]) - droppedComps.begin());
+                if (firstOf[k] == SIZE_MAX) firstOf[k] = i;
+            }
+            bakepool::forRange(bakepool::Range(firstOf.size(), lodchain::kQueryGrain), int(queries.size()),
+                               [&](size_t, size_t begin, size_t end, int slot) {
+                                   for (size_t k = begin; k < end; ++k) {
+                                       if (firstOf[k] == SIZE_MAX) continue;
+                                       unsigned tri = 0u;
+                                       gridS.closest(queries[size_t(slot)], vertexOf(positions, posComps, regionV[firstOf[k]]),
+                                                     nullptr, nullptr, &tri);
+                                       islandOwner[k] = int(ownerOfTri[std::min<size_t>(tri, ownerOfTri.size() - 1)]);
+                                   }
+                               });
+        }
         // Every removed vertex, exactly and island-capped (it also names the output it
         // stands under: each writes its own `removedOwner` entry).
         exact = runningMax(regionV.size(), exact, [&](size_t i, surface::TriangleGrid::Query &q, float) {
@@ -5474,6 +5540,11 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
             const size_t l = regionL[i];
             removedOwner[l] = -1;
             if (kept[l]) return 0.0f;                              // KEPT: on S, distance 0
+            if (droppedPoint(v)) {                                 // charged its island's extent: provenance only
+                removedOwner[l] = islandOwner[size_t(std::lower_bound(droppedComps.begin(), droppedComps.end(),
+                                                                      islands.compOf[v]) - droppedComps.begin())];
+                return 0.0f;
+            }
             unsigned tri = 0u;
             const float d = gridS.closest(q, vertexOf(positions, posComps, v), nullptr, nullptr, &tri);
             removedOwner[l] = int(ownerOfTri[std::min<size_t>(tri, ownerOfTri.size() - 1)]);

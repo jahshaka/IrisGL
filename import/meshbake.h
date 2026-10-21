@@ -424,6 +424,10 @@ public:
         /// attempt (a retry came out worse); `handOnRecomputed` = winners whose hand-on was recomputed from their indices.
         int    groupsKeptEarlier = 0;
         int    handOnRecomputed = 0;
+        /// The verify's hand-on: its closest queries (ATOM-7 stage 3: one per dropped island) and the time of the
+        /// winners' recomputed hand-ons (a share of `verifyMs`).
+        qint64 handOnQueries = 0;
+        double recomputeMs = 0.0;
         /// THE PROOF STAT (ATOM-7 stage 2): the level-locked positions the DAG's own clusters say a group lost
         /// (recomputed: a position shared with another group of its depth or an earlier terminal one, absent from its
         /// output), the largest distance-to-output / stored error among them, and how many are past their error.
