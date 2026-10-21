@@ -4780,6 +4780,11 @@ private:
         }
 
         if (offenders.empty() && lostLocked.empty()) return handOn();
+        // AN OFFENDING ATTEMPT NEVER BEATS A CLEAN ONE (the merge read, 2026-10-21): a rule-2 or rule-3 offender's bound
+        // is at or under the law, so its score tied its clean retry's and the tie went to the smaller result — the
+        // retry is never smaller, and rules 2-3's work was thrown away (1,901 kept-earlier, 1,936 unconverged on
+        // Bistro). The law's own width on top: two offenders still compare by bound, a clean re-prune still wins by size.
+        *resultBound += mLawBound;
         mLastOffended = true;
         mAttemptOffended[size_t(attempt)] = 1u;
         // Past the retries the measurement charges it. By ATTEMPT (clusterlod's count): a re-prune is an attempt too, and
