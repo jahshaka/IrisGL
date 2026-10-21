@@ -1255,13 +1255,17 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
                 clusters.push_back(g);
             }
             groups.reserve(rec.clusterGroups.size());
-            for (const MeshClusterGroup &gr : rec.clusterGroups) {
+            // THE CLUSTERS EACH GROUP PRODUCED (ATOM-7): the root cut's "last group" test (error.w = 0).
+            const std::vector<unsigned> produced = clusterProducedCounts(rec.clusters, rec.clusterGroups.size());
+            for (size_t gi = 0; gi < rec.clusterGroups.size(); ++gi) {
+                const MeshClusterGroup &gr = rec.clusterGroups[gi];
                 detail::GpuClusterGroup g;
                 for (int k = 0; k < 3; ++k) g.sphere[k] = gr.centre[k];
                 g.sphere[3] = gr.radius;
                 g.error[0] = gr.error;
                 g.error[1] = gr.estimate;
                 g.error[2] = float(gr.depth);
+                g.error[3] = float(produced[gi]);
                 groups.push_back(g);
             }
         } else if (levels[0].indexCount >= 3u) {

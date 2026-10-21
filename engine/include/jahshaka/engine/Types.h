@@ -347,6 +347,26 @@ inline bool clusterDrawn(const MeshCluster &c, const std::vector<unsigned char> 
     return c.refined < 0 || affordable[size_t(c.refined)] != 0;
 }
 
+/// THE ROOT CUT (ATOM-7 stage 4; the GLSL twin JahClusterCut.glsl jahClusterRootDrawn, which the cull's
+/// coarse reserve draws on a stream overflow): the cut at an infinite tolerance, every finite group
+/// affordable. A cluster is drawn when its own group is the LAST of its chain — terminal, or finite and
+/// producing nothing (the empty top the prune leaves: before, the reserve drew nothing for such a chain) —
+/// and it is a leaf or was produced by a finite group. `produced[g]` = the clusters group g produced
+/// (`clusterProducedCounts`; the upload's error[3]). The threshold is the GLSL's literal.
+constexpr float kClusterTerminal = 3.0e38f;
+inline std::vector<unsigned> clusterProducedCounts(const std::vector<MeshCluster> &clusters, size_t groupCount) {
+    std::vector<unsigned> produced(groupCount, 0u);
+    for (const MeshCluster &c : clusters)
+        if (c.refined >= 0 && size_t(c.refined) < groupCount) ++produced[size_t(c.refined)];
+    return produced;
+}
+inline bool clusterRootDrawn(const MeshCluster &c, const std::vector<MeshClusterGroup> &groups,
+                             const std::vector<unsigned> &produced) {
+    const bool last = groups[size_t(c.group)].error >= kClusterTerminal || produced[size_t(c.group)] == 0u;
+    if (!last) return false;
+    return c.refined < 0 || groups[size_t(c.refined)].error < kClusterTerminal;
+}
+
 /// The cut from per-group answers: the drawn clusters' indices, in cluster
 /// order, into `out` (cleared). Returns the number of TRIANGLES drawn.
 inline size_t clusterCutFromAffordable(const std::vector<MeshCluster> &clusters,

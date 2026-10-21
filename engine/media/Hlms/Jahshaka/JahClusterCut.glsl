@@ -24,7 +24,8 @@
 // struct of vec4s, no padding surprises):
 //   JahClusterGroup  sphere = xyz the simplified bounds' centre, w its radius (mesh space)
 //                    error  = x the MEASURED error (mesh units; 3.4e38 = terminal),
-//                             y the header's estimate, z the depth, w unused
+//                             y the header's estimate, z the depth, w the clusters it PRODUCED (0 = the
+//                             last group of its chain: terminal, or the empty top)
 //   JahCluster       range  = x first index, y index count, z the group it is IN,
 //                             w the group that PRODUCED it (0xFFFFFFFF = level 0)
 //                    sphere = xyz centre, w radius (culling only)
@@ -105,5 +106,19 @@ bool jahClusterDrawn( bool ownGroupAffordable, bool isLevel0, bool refinedAfford
 	if( ownGroupAffordable )
 		return false;
 	return isLevel0 || refinedAffordable;
+}
+
+// THE ROOT CUT over the two groups a cluster reads (ATOM-7; Types.h clusterRootDrawn): the cut at an infinite
+// tolerance, every finite group affordable. A cluster is drawn when its own group is the LAST of its chain - terminal,
+// or finite and producing nothing (the empty top: the prune emptied it, error.w = 0) - and it is a leaf or was
+// produced by a finite group. The coarse reserve draws it (JahCullCut_cs.glsl), so a chain whose top is empty still
+// has its last clusters there.
+const float JAH_CLUSTER_TERMINAL = 3.0e38;
+bool jahClusterRootDrawn( vec4 ownError, bool isLevel0, float producerError )
+{
+	bool last = ownError.x >= JAH_CLUSTER_TERMINAL || ownError.w == 0.0;
+	if( !last )
+		return false;
+	return isLevel0 || producerError < JAH_CLUSTER_TERMINAL;
 }
 @end

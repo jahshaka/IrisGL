@@ -271,14 +271,14 @@ bool jahCutDrawn( uvec4 range )
 	return jahClusterDrawn( own, isLevel0, refined );
 }
 
-// THE ROOT CUT: the cut at an infinite tolerance — every finite group affordable, so a
-// cluster is drawn when its own group is TERMINAL and it is a leaf or was produced by
+// THE ROOT CUT: the cut at an infinite tolerance (JahClusterCut.glsl jahClusterRootDrawn, the
+// piece the parity job runs too) — a cluster is drawn when its own group is the LAST of its
+// chain (terminal, or the empty top: it produced nothing) and it is a leaf or was produced by
 // a finite group.
 bool jahRootDrawn( uvec4 range )
 {
-	if( groups[range.z].error.x < JAH_TERMINAL )
-		return false;
-	return range.w == JAH_NO_GROUP || groups[range.w].error.x < JAH_TERMINAL;
+	bool isLevel0 = range.w == JAH_NO_GROUP;
+	return jahClusterRootDrawn( groups[range.z].error, isLevel0, isLevel0 ? 0.0 : groups[range.w].error.x );
 }
 
 void jahScan( uint lane )
