@@ -4385,10 +4385,11 @@ public:
     }
 
     static const unsigned char *hook(void *context, int depth, int attempt, const unsigned *group, size_t groupCount,
-                                     const unsigned *simplified, size_t simplifiedCount, float error)
+                                     const unsigned *simplified, size_t simplifiedCount, float error, float prunedExtent)
     {
         GroupVerifier *self = static_cast<GroupVerifier *>(context);
         self->mDepth = depth;
+        self->mPrunedExtent = prunedExtent;
         return self->verify(attempt, group, groupCount, simplified, simplifiedCount, error);
     }
 
@@ -4524,13 +4525,9 @@ private:
             for (const std::vector<unsigned> &f : found) offenders.insert(offenders.end(), f.begin(), f.end());
         };
 
-        // A REMOVED ISLAND COSTS ITS FULL EXTENT (ATOM-6, the lead's decision (a); ATOM-LOD-BOUND-1's rule): a
-        // level-0 component wholly inside the region with no vertex left on S (the level has none of it) shows
-        // what was BEHIND it, not the surface beside it, so the measurement charges every point of it the
-        // island's extent — no distance discount — and the verify knows the same number (`droppedExtent`, folded
-        // into the islands' bound below). The prune removes only islands its price (the extent) already covers,
-        // so rule 3 never re-locks a pruned piece.
-        float droppedExtent = 0.0f;
+        // A REMOVED ISLAND (a level-0 component wholly inside the region with no vertex left on S) is not a
+        // deformation: the measurement charges it its full extent (ATOM-6 (a)), so its points stay out of the
+        // deformation term below, and the prune's own drops raise the islands' bound by their price.
         std::vector<unsigned char> droppedAt(removed.size(), 0u);   // per removed vertex: its island is dropped
         {
             std::vector<unsigned> comps;
@@ -4545,7 +4542,7 @@ private:
                     const unsigned v = mIslands.verts[i];
                     if (mRegionAt[v] != mRegionStamp || mKeptAt[v] == mKeptStamp) whole = false;
                 }
-                if (whole) { dropped.push_back(comp); droppedExtent = std::max(droppedExtent, mIslands.extent[comp]); }
+                if (whole) dropped.push_back(comp);
             }
             for (size_t i = 0; i < removed.size(); ++i) {
                 const unsigned comp = mIslands.compOf[mRegionV[removed[i]]];
@@ -4553,9 +4550,9 @@ private:
             }
         }
 
-        // 1. EVERY REMOVED VERTEX against S, exactly and island-capped. A vertex of a DROPPED island whose
-        //    extent is within the lock's bound needs no query (ATOM-6): its charge is the extent (folded in
-        //    below) and min(distance, extent) can neither pass the bound nor raise the term past it.
+        // 1. EVERY REMOVED VERTEX against S, exactly and island-capped. A vertex of a DROPPED island is not in the
+        //    deformation term, and where its extent is within the lock's bound it needs no query (ATOM-6):
+        //    min(distance, extent) cannot pass the bound.
         //    Max-only: a query stops at anything within the chunk's running maximum or the
         //    lock's bound, whichever is lower (it can neither raise the one nor pass the other).
         float vertexTerm = 0.0f;
@@ -4570,11 +4567,12 @@ private:
                     const float stop = std::min(local, lockExact);
                     if (!(mIslands.capOf[v] > stop)) continue;
                     if (!mExhaustive && droppedAt[i] && !(mIslands.capOf[v] > lockExact)) continue;
+                    const bool deformation = !droppedAt[i];
                     const float d = std::min(gridS.closest(mQueries[size_t(slot)], vertexOf(mPositions, mPosComps, v),
                                                            nullptr, nullptr, nullptr, stop > 0.0f ? stop : -1.0f),
                                              mIslands.capOf[v]);
                     if (!std::isfinite(d) || d <= stop) continue;
-                    local = std::max(local, d);
+                    if (deformation) local = std::max(local, d);
                     if (d > lockExact) found[c].push_back(removed[i]);
                 }
                 chunkMax[c] = local;
@@ -4588,7 +4586,13 @@ private:
         // its exact vertex term (a lower bound of the measured error), at most the lock's
         // bound, at least the precision floor — an island bigger than the group's stored
         // error is never dropped (atom.dag_bound_bar's (c)).
-        vertexTerm = std::max(vertexTerm, droppedExtent);
+        // THE DEFORMATION BOUND (ATOM-6, the lead's fix round): the islands' bound is the group's DEFORMATION — the
+        // removed vertices of SURVIVING islands — raised by the largest island the PRUNE removed (smallest first, so
+        // its drops are the level's honest island size), never by an island a COLLAPSE erased: the quadric
+        // under-prices an erasure, and a bound the erased island itself raised would let it through. A collapse-erased
+        // island above this bound keeps its largest triangle (rule 3); the measurement still charges every dropped
+        // island its extent.
+        vertexTerm = std::max(vertexTerm, mPrunedExtent);
         const float islandBound = std::max(std::min(vertexTerm, lockExact), mFloorLen);
         // THE HAND-ON, for the result the group keeps (computed only when the verify
         // answers NULL — a retried result is never kept, a stuck one is terminal): every
@@ -4745,6 +4749,7 @@ private:
     const lodchain::Islands &mIslands;
     float mFloorLen;
     bool mExhaustive;
+    float mPrunedExtent = 0.0f;   ///< the largest island the prune removed for the result under verification
     int mWidth;
     surface::Queries mQueries;
     std::vector<unsigned> mWeld;          ///< vertex -> the first vertex at its position
