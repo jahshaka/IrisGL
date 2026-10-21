@@ -347,6 +347,7 @@ set(SRCS
     document/assets/avatardefinition.cpp
     document/scenegraph/looks.cpp
     document/scenegraph/scene.cpp
+    document/scenegraph/worldmodes.cpp
     document/scenegraph/skybake.cpp
     document/scenegraph/scenenode.cpp
     document/scenegraph/nodegraph.cpp
@@ -421,6 +422,7 @@ set (HEADERS
     core/math/trs.h
     document/scenegraph/looks.h
     document/scenegraph/scene.h
+    document/scenegraph/worldmodes.h
     document/scenegraph/simulationclock.h
     document/scenegraph/skybake.h
     document/scenegraph/scenenode.h
