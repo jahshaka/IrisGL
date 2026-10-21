@@ -968,13 +968,14 @@ namespace Ogre
         const uint32 alignFloats = std::max( vaoManager->getUavBufferAlignment(), 16u ) / 4u;
         const uint32 stride = ( groups + alignFloats - 1u ) / alignFloats * alignFloats;
         // kMaxBouncePasses (8) + the base: nine ranges.
+        // The group count is kept whatever the stride did: two counts can share one aligned stride (the merge read).
+        mEnergyGroups = groups;
         if( !mEnergyBuffer || stride != mEnergyStride )
         {
             mEnergyTicket.reset();
             if( mEnergyBuffer )
                 vaoManager->destroyUavBuffer( mEnergyBuffer );
             mEnergyStride = stride;
-            mEnergyGroups = groups;
             std::vector<float> zeros( size_t( stride ) * 9u, 0.0f );
             mEnergyBuffer = vaoManager->createUavBuffer( zeros.size(), sizeof( float ), 0, zeros.data(),
                                                          false );

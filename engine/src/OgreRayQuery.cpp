@@ -9031,9 +9031,16 @@ unsigned long long PhotonComponent::reflectRadianceKey() const {
         key ^= v;
         key *= 1099511628211ull;
     };
+    // THE LAMPS' STATE, NOT THE SCENE'S TRANSFORM EPOCH (the merge read's finding, 2026-10-21): cardLightKey's first word
+    // is transformEpoch(), which moves on EVERY node move — folded raw, the key moved every frame of any animated scene
+    // (an avatar, a turntable, VR hands) and the cap held every still glossy pixel at kWarmupFrames+1 samples for good:
+    // permanent grain. The card path uses that key only as the TRIGGER to re-walk the lamps and folds the WALK's result
+    // (mCardLightFold, refreshed under its two-frame rule); this key folds the same walk, with the lamp edits, removals
+    // and count that are not transforms.
     unsigned long long lights[4];
     mScene.cardLightKey(lights);
-    for (unsigned long long v : lights) fold(v);
+    fold(mCardLightFold);
+    for (int i = 1; i < 4; ++i) fold(lights[i]);
     fold(mScene.cloudGiSerial());
     fold(mGiRestTicks);
     return key;
