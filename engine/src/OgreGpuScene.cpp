@@ -1306,7 +1306,7 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
                 g.sphere[3] = c.radius;
                 clusters.push_back(g);
             }
-            if (rec.clusterBoxes.size() == rec.clusters.size() * 6u)
+            if (!rec.clusterBoxesFlat && rec.clusterBoxes.size() == rec.clusters.size() * 6u)
                 for (size_t ci = 0; ci < rec.clusters.size(); ++ci)
                     boxes.push_back(detail::packClusterBox(&rec.clusterBoxes[ci * 6u], &rec.clusterBoxes[ci * 6u + 3u],
                                                            rec.clusters[ci].radius));
@@ -1345,7 +1345,7 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
             }
             // THE RUNS' OWN BOXES (ATOM-8 stage 2): the record's, when it measured these very runs (level 0 from its
             // first index); the sphere stays the mesh's (the level rule's).
-            if (levels[0].firstIndex == 0u && rec.clusterBoxes.size() == clusters.size() * 6u)
+            if (rec.clusterBoxesFlat && levels[0].firstIndex == 0u && rec.clusterBoxes.size() == clusters.size() * 6u)
                 for (size_t ci = 0; ci < clusters.size(); ++ci)
                     boxes.push_back(detail::packClusterBox(&rec.clusterBoxes[ci * 6u], &rec.clusterBoxes[ci * 6u + 3u],
                                                            g.sphere[3]));

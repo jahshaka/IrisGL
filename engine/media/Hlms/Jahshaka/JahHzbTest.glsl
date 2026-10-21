@@ -74,14 +74,15 @@
 	}
 
 	// A CLUSTER'S OWN BOX in world space (ATOM-8 stage 2; GpuScene.h GpuClusterBox): `box` = its mesh-space AABB's
-	// centre and, bit-cast in w, the three half-extents as 10-bit fractions of the culling sphere's radius rounded UP
+	// centre (float bits in xyz) and, in w, the three half-extents as 10-bit fractions of the culling sphere's radius rounded UP
 	// (all ones = none: the sphere's own box). Carried by the instance's rows (the half-extents along its columns),
 	// widened by 2 to the minus 12 and a micrometre, the frustum test's margin.
-	void jahClusterObb( vec4 box, vec4 sphere, vec4 r0, vec4 r1, vec4 r2, float scale,
+	void jahClusterObb( uvec4 box, vec4 sphere, vec4 r0, vec4 r1, vec4 r2, float scale,
 						out vec3 c, out vec3 ax, out vec3 ay, out vec3 az )
 	{
-		uint q = floatBitsToUint( box.w );
-		vec3 local = q == 0xFFFFFFFFu ? sphere.xyz : box.xyz;
+		// THE BITS, never a float: the sentinel is a uint (trap 5 - a NaN may be canonicalised in transit).
+		uint q = box.w;
+		vec3 local = q == 0xFFFFFFFFu ? sphere.xyz : uintBitsToFloat( box.xyz );
 		c = vec3( dot( r0.xyz, local ) + r0.w, dot( r1.xyz, local ) + r1.w, dot( r2.xyz, local ) + r2.w );
 		if( q == 0xFFFFFFFFu )
 		{

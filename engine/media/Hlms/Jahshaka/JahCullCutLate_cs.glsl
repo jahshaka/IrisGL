@@ -46,7 +46,7 @@ layout( std430, ogre_U5 ) restrict buffer cntLayout { uint counter[]; };
 layout( std430, ogre_U6 ) writeonly restrict buffer recordLayout { uvec4 records[]; };
 layout( std430, ogre_U7 ) writeonly restrict buffer drawLayout { uint clusterDraws[]; };
 layout( std430, ogre_U8 ) writeonly restrict buffer idLayout { uvec2 clusterIds[]; };
-layout( std430, ogre_U9 ) readonly restrict buffer boxLayout { vec4 clusterBoxes[]; };   // the clusters' own boxes
+layout( std430, ogre_U9 ) readonly restrict buffer boxLayout { uvec4 clusterBoxes[]; };   // the clusters' own boxes
 vulkan_layout( ogre_t0 ) uniform texture2D hzbTexture;
 @insertpiece( JahHzbTest )
 

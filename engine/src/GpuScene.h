@@ -193,7 +193,8 @@ static_assert(sizeof(GpuCluster) == 32, "the GPU cluster table's stride is a con
 
 /// A CLUSTER'S OWN BOX (ATOM-8 stage 2), one per GpuCluster at the same index in its own table (clusterBoxBuffer): the
 /// mesh-space AABB of the vertices the cluster's triangles index — the per-cluster depth test's bound (the culling
-/// sphere stays the level rule's). `centre` the AABB's centre; `extent` the three half-extents as 10-bit fractions
+/// sphere stays the level rule's). Read as a uvec4 (the centre's float BITS in xyz; the sentinel a uint - trap 5).
+/// `centre` the AABB's centre; `extent` the three half-extents as 10-bit fractions
 /// of the cluster's sphere radius rounded UP (bits 0-9 x, 10-19 y, 20-29 z), or all ones = no box (the sphere's box).
 struct GpuClusterBox {
     float    centre[3] = {};

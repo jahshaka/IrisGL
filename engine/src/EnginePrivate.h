@@ -5302,6 +5302,9 @@ private:
         /// flat runs of level 0 the GPU scene cuts (GpuScene::kFlatClusterTriangles). Packed at upload
         /// (OgreGpuScene.cpp, GpuClusterBox).
         std::vector<float>            clusterBoxes;
+        /// WHICH CLUSTERS THEY BOUND (the stage 2 read's provenance key): true = level 0's flat runs, false = the DAG's
+        /// clusters - the upload pairs them with the arm it takes by this flag, never by a count that may coincide.
+        bool                          clusterBoxesFlat = false;
     };
     /// A rig, as this scene knows it. The Ogre-side SkeletonDef is cached
     /// PROCESS-wide by SkeletonManager under the same id (GPU_SKINNING_SPEC R6),

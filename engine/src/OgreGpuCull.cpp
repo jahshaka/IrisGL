@@ -51,6 +51,7 @@
 #include <Vao/OgreVaoManager.h>
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstring>
 #include <vector>
@@ -514,7 +515,9 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
             cutJob->setNumTexUnits(cutHzb ? 1u : 0u);
             cutJob->setProperty("cut_rejected", appendRejected ? 1 : 0);
             // THE CLUSTERS' OWN BOXES (ATOM-8 stage 2): the depth test's bound, at the next free unit after those.
-            const bool boxes = occlusion && mGpuScene.clusterBoxBuffer();
+            // ...never beside the receivers (their units are U10 / U11; a caster cut asks no occlusion).
+            const bool boxes = occlusion && !recv && mGpuScene.clusterBoxBuffer();
+            assert(!(occlusion && recv) && "a cut with the receiver test never runs the cluster occlusion");
             cutJob->setProperty("cut_boxes", boxes ? 1 : 0);
             const uint8_t boxUnit = uint8_t((probing ? 11u : 10u) + (appendRejected ? 1u : 0u));
             cutJob->setNumUavUnits(recv ? 12u : boxUnit + (boxes ? 1u : 0u));

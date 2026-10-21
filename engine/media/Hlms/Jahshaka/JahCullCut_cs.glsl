@@ -125,16 +125,16 @@ layout( std430, ogre_U10 ) writeonly restrict buffer rejectedLayout { uvec4 reje
 // THE CLUSTERS' OWN BOXES (ATOM-8 stage 2; GpuScene::clusterBoxBuffer, one vec4 a cluster beside the cluster table):
 // the depth test's bound - the next free unit (after the probe's and the rejected list's).
 @property( cut_probe && cut_rejected )
-layout( std430, ogre_U12 ) readonly restrict buffer boxLayout { vec4 clusterBoxes[]; };
+layout( std430, ogre_U12 ) readonly restrict buffer boxLayout { uvec4 clusterBoxes[]; };
 @end
 @property( cut_probe && !cut_rejected )
-layout( std430, ogre_U11 ) readonly restrict buffer boxLayout { vec4 clusterBoxes[]; };
+layout( std430, ogre_U11 ) readonly restrict buffer boxLayout { uvec4 clusterBoxes[]; };
 @end
 @property( !cut_probe && cut_rejected )
-layout( std430, ogre_U11 ) readonly restrict buffer boxLayout { vec4 clusterBoxes[]; };
+layout( std430, ogre_U11 ) readonly restrict buffer boxLayout { uvec4 clusterBoxes[]; };
 @end
 @property( !cut_probe && !cut_rejected )
-layout( std430, ogre_U10 ) readonly restrict buffer boxLayout { vec4 clusterBoxes[]; };
+layout( std430, ogre_U10 ) readonly restrict buffer boxLayout { uvec4 clusterBoxes[]; };
 @end
 @end
 @property( cut_probe )
@@ -324,8 +324,7 @@ uint jahClusterOcclusion( uint global, vec4 sphere, out bool slack, out bool sky
 @property( cut_boxes )
 	jahClusterObb( clusterBoxes[global], sphere, gRow0, gRow1, gRow2, gScale, c, ax, ay, az );
 @else
-	jahClusterObb( vec4( 0.0, 0.0, 0.0, uintBitsToFloat( 0xFFFFFFFFu ) ), sphere, gRow0, gRow1, gRow2, gScale, c, ax,
-				   ay, az );
+	jahClusterObb( uvec4( 0u, 0u, 0u, 0xFFFFFFFFu ), sphere, gRow0, gRow1, gRow2, gScale, c, ax, ay, az );
 @end
 	bool reverseZ = params.hzb.w != 0u;
 	vec2 lo, hi;

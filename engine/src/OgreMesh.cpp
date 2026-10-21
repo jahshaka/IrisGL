@@ -426,6 +426,7 @@ MeshId OgreScene::createMesh(const MeshData &data, MeshId id) {
             if (clusterStream && !data.clusters.empty()) {
                 for (const MeshCluster &c : data.clusters) boxOf(data.clusterIndices, c.firstIndex, c.indexCount);
             } else if (!data.dynamic && data.indices.size() >= 3u) {
+                rec.clusterBoxesFlat = true;
                 const size_t run = size_t(detail::GpuScene::kFlatClusterTriangles) * 3u;
                 for (size_t first = 0; first + 3u <= data.indices.size(); first += run)
                     boxOf(data.indices, first, std::min(run, (data.indices.size() - first) / 3u * 3u));
