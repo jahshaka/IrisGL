@@ -129,6 +129,7 @@ layout( std430, ogre_U7 ) writeonly restrict buffer hzbProbeLayout { uvec4 hzbPr
 #define JAH_LEVELS_PER_MESH 8u
 
 @insertpiece( JahLevelRuleScale )
+@insertpiece( JahHzbTest )
 
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
@@ -155,13 +156,6 @@ uint jahLevelForAllowed( uint meshIndex, uint levelCount, float allowed )
 		level = i;
 	}
 	return level;
-}
-
-vec4 jahClipOf( vec3 p )
-{
-	vec4 h = vec4( p, 1.0 );
-	return vec4( dot( params.viewProjRow[0], h ), dot( params.viewProjRow[1], h ),
-				 dot( params.viewProjRow[2], h ), dot( params.viewProjRow[3], h ) );
 }
 
 void main()
@@ -262,30 +256,15 @@ void main()
 	// wrong. (No writer sets one today; Ogre's default is 0.01.)
 	if( params.hzb.x > 0u && uintBitsToFloat( instances[slot].raster.w ) >= 0.0 )
 	{
-		// The eight corners, projected. A box that crosses the near plane
-		// (any w at or below zero) is NOT tested: its screen rectangle is not
-		// a rectangle, and a hierarchical test that guesses there rejects
-		// something visible, which is the one error it may never make.
-		vec2 lo = vec2( 1.0e30 );
-		vec2 hi = vec2( -1.0e30 );
-		float nearest = params.hzb.w != 0u ? -1.0e30 : 1.0e30;
-		bool testable = true;
-		for( int c = 0; c < 8; ++c )
-		{
-			vec3 p = vec3( ( c & 1 ) != 0 ? bMax.x : bMin.x,
-						   ( c & 2 ) != 0 ? bMax.y : bMin.y,
-						   ( c & 4 ) != 0 ? bMax.z : bMin.z );
-			vec4 clip = jahClipOf( p );
-			if( clip.w <= 0.0 )
-			{
-				testable = false;
-				break;
-			}
-			vec3 ndc = clip.xyz / clip.w;
-			lo = min( lo, ndc.xy );
-			hi = max( hi, ndc.xy );
-			nearest = params.hzb.w != 0u ? max( nearest, ndc.z ) : min( nearest, ndc.z );
-		}
+		// The eight corners, projected (JahHzbTest.glsl, the ONE box test the cluster cut runs too). A box that
+		// crosses the near plane (any w at or below zero) is NOT tested: its screen rectangle is not a rectangle,
+		// and a hierarchical test that guesses there rejects something visible, which is the one error it may
+		// never make.
+		vec2 lo, hi;
+		float nearest;
+		bool testable = jahHzbBoxRect( bMin.xyz, bMax.xyz, params.viewProjRow[0], params.viewProjRow[1],
+									   params.viewProjRow[2], params.viewProjRow[3], params.hzb.w != 0u, lo, hi,
+									   nearest );
 
 @property( cull_probe )
 		if( !testable )
@@ -301,66 +280,14 @@ void main()
 @end
 		if( testable )
 		{
-			vec2 size = vec2( float( params.hzb.y ), float( params.hzb.z ) );
-			// THE VIEWPORT'S RECTANGLE IN MIP 0: NDC spans the pass's viewport, which
-			// is the whole target except in a letterboxed view (its inset).
-			vec2 org = vec2( 0.0 );
-			vec2 ext = size;
-			if( params.hzbRect.z != 0u )
-			{
-				org = vec2( params.hzbRect.xy );
-				ext = vec2( params.hzbRect.zw );
-			}
-			// NDC to TEXELS. The pyramid's mip 0 is a copy of the depth
-			// ATTACHMENT, whose row 0 is the top, and a depth Ogre drew into a
-			// flipping target through the camera's own matrix has clip-space y
-			// UP: so y inverts here and x does not. A caller whose depth was
-			// drawn another way hands the matrix that makes this true (the id
-			// pass: its draw matrix with the y row negated, cullMatrixOf).
-			vec2 t0 = org + vec2( ( lo.x * 0.5 + 0.5 ) * ext.x, ( 0.5 - hi.y * 0.5 ) * ext.y );
-			vec2 t1 = org + vec2( ( hi.x * 0.5 + 0.5 ) * ext.x, ( 0.5 - lo.y * 0.5 ) * ext.y );
-			t0 = max( t0, org );
-			t1 = min( t1, org + ext );
-			vec2 rect = max( t1 - t0, vec2( 0.0 ) );
-			// THE MIP WHERE THE RECTANGLE IS AT MOST 2 TEXELS WIDE PER AXIS — which a
-			// misaligned rectangle can still spread over THREE texel indices (0.9 to
-			// 2.9 touches texels 0, 1 and 2). ATOM-OCCLUSION-1: the four CORNER
-			// fetches this used to take skipped the middle row and column, and the
-			// test could reject something visible there; every texel from a to b is
-			// fetched now (at most 3 x 3).
-			float widest = max( rect.x, rect.y );
-			int mip = int( ceil( log2( max( widest, 1.0 ) / 2.0 ) ) );
-			mip = clamp( mip, 0, int( params.hzb.x ) - 1 );
-			ivec2 mipSize = ivec2( max( ivec2( params.hzb.yz ) >> mip, ivec2( 1 ) ) );
-			ivec2 a = clamp( ivec2( floor( t0 / float( 1 << mip ) ) ), ivec2( 0 ), mipSize - 1 );
-			ivec2 b = clamp( ivec2( floor( t1 / float( 1 << mip ) ) ), ivec2( 0 ), mipSize - 1 );
-
-			// THE FARTHEST DEPTH ANYWHERE UNDER THE RECTANGLE is the one to
-			// beat. Each texel already holds the farthest of ITS footprint, so
-			// over the texels it is the farthest of those — the smallest value
-			// under reverse-Z. Anything nearer than that, anywhere under the
-			// rectangle, would be a surface this object could still be seen
-			// past, which is why the extreme and not an average is right.
-			float farthestUnder = params.hzb.w != 0u ? 1.0e30 : -1.0e30;
-			for( int yy = a.y; yy <= b.y; ++yy )
-			{
-				for( int xx = a.x; xx <= b.x; ++xx )
-				{
-					float d = texelFetch( hzbTexture, ivec2( xx, yy ), mip ).x;
-					farthestUnder = params.hzb.w != 0u ? min( farthestUnder, d )
-													  : max( farthestUnder, d );
-				}
-			}
-			// OCCLUDED when even the box's NEAREST point is farther than the
-			// FARTHEST thing drawn under it: every pixel of the rectangle then
-			// already holds something in front of this object. In reverse-Z
-			// farther is smaller. THE MARGIN (a relative 2 to the minus 16 of the
-			// depth) keeps a surface lying ON the occluder's depth, within the
-			// rounding of the box against the rasterised vertices, drawn: the
-			// test may keep what is hidden, never drop what is seen.
-			float margin = abs( nearest ) * 1.52587890625e-5;
-			bool occluded = params.hzb.w != 0u ? ( nearest + margin < farthestUnder )
-											   : ( nearest - margin > farthestUnder );
+			// THE VIEWPORT'S RECTANGLE IN MIP 0 (a letterboxed view's inset), the 4-texel mip (ATOM-8 R2: it read
+			// at the 2-texel mip, a texel four times the area, so a sky pixel near the skyline under it kept the
+			// object), the FARTHEST depth under the rectangle against the box's NEAREST point (JahHzbTest.glsl).
+			vec2 t0, t1;
+			jahHzbTexels( lo, hi, params.hzbRect, vec2( float( params.hzb.y ), float( params.hzb.z ) ), t0, t1 );
+			int mip;
+			float farthestUnder = jahHzbFarthestUnder( t0, t1, params.hzb, mip );
+			bool occluded = jahHzbOccluded( nearest, farthestUnder, params.hzb.w != 0u );
 @property( cull_probe )
 			{
 @property( cull_retest )

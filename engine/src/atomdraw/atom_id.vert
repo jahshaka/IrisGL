@@ -4,7 +4,8 @@
 // same rows the decode and the voxeliser read (jah_geom_rows.glsl, the ONE copy of
 // the geometry-row decode). The draw is one VkDrawIndexedIndirectCommand per
 // surviving instance, written by the cull's CUT (ATOM-CLUSTER-CUT, JahCullCut_cs.glsl):
-// firstInstance is the INSTANCE SLOT and [firstIndex, +indexCount) the instance's
+// firstInstance is the INSTANCE SLOT (or, for the late pass's per-cluster draws, an entry of their identity table)
+// and [firstIndex, +indexCount) the instance's
 // run of the view's COMPACTED STREAM (JahCullEmit_cs.glsl), which holds REAL,
 // mesh-local vertex indices — so gl_VertexIndex IS the vertex, the post-transform
 // cache sees the reuse, and the position is read through the mesh's CLUSTER ROW
@@ -41,6 +42,7 @@ layout( push_constant ) uniform AtomIdPc
 	uvec2 triWords;         // GpuCull::cutTriWords: two words per stream triangle (the fragment's)
 	uvec2 slotBase;         // GpuCull::cutSlotBase: the slot's first stream triangle
 	uvec2 maskTable;        // GpuScene::maskTableAddress: the cut-outs' masks (JAH_MASKED; 0 otherwise)
+	uvec2 clusterIds;       // GpuCull::clusterIds: the late pass's per-cluster draws' identity table (0 otherwise)
 } pc;
 
 layout( location = 0 ) flat out uint outSlot;
@@ -56,7 +58,11 @@ out gl_PerVertex
 
 void main()
 {
-	uint slot = uint( gl_InstanceIndex );
+	// THE LATE PASS'S PER-CLUSTER DRAWS (ATOM-8 stage 1): firstInstance is a rejected entry, and the identity table
+	// gives its slot and the cluster's first stream triangle; every other draw's firstInstance is the slot.
+	bool perCluster = ( pc.clusterIds.x | pc.clusterIds.y ) != 0u;
+	uint entry = uint( gl_InstanceIndex );
+	uint slot = perCluster ? AtomWordRef( pc.clusterIds ).v[entry * 2u] : entry;
 	AtomVec4Ref inst = AtomVec4Ref( pc.instances );
 	uint mesh = inst.v[slot * 10u + 6u].w;
 	uint rowIndex = AtomVec4Ref( pc.meshes ).v[mesh * 4u + 3u].w;
@@ -76,7 +82,7 @@ void main()
 						dot( pc.viewProjRow[2], w4 ), dot( pc.viewProjRow[3], w4 ) );
 
 	outSlot = slot;
-	outTriBase = AtomWordRef( pc.slotBase ).v[slot];
+	outTriBase = perCluster ? AtomWordRef( pc.clusterIds ).v[entry * 2u + 1u] : AtomWordRef( pc.slotBase ).v[slot];
 #ifdef JAH_MASKED
 	outUv = geomUv( row, uint( gl_VertexIndex ) );
 #endif

@@ -5204,6 +5204,10 @@ struct AtomDrawStatus {
     unsigned cutClusters = 0, cutIndices = 0, cutEvaluated = 0;
     unsigned cutOverflow = 0, cutMissing = 0, cutOverflowIndices = 0, cutIndexBudget = 0;
     unsigned long long cutTriangles = 0ull;
+    /// THE PER-CLUSTER OCCLUSION (ATOM-8 stage 1; AtomCutStats' figures, the same read).
+    unsigned cutRejected = 0, cutRejectedOverflow = 0, cutPixelCulled = 0, cutLateClusters = 0, cutLateDropped = 0,
+             cutSlackClusters = 0, cutSkyClusters = 0;
+    unsigned long long cutSlackTriangles = 0ull, cutSkyTriangles = 0ull;
     /// THE OCCLUSION (ATOM-OCCLUSION-1), from the same view and the same read: whether
     /// its chain culls against the depth pyramid (the door open and the id pass live),
     /// the instances the frame's depth test REJECTED — in the frustum, not drawn — and
@@ -5260,6 +5264,13 @@ struct AtomDrawStatus {
 struct AtomCutStats {
     unsigned clusters = 0, indices = 0, evaluated = 0, overflow = 0, missing = 0, overflowIndices = 0,
              indexBudget = 0;
+    /// THE PER-CLUSTER OCCLUSION (ATOM-8 stage 1; GpuCull.h's count words 23-35): the clusters the first cut's depth
+    /// test rejected (to the late pass), those past the rejected list's budget (drawn), those culled for covering no
+    /// pixel centre (both lists), those the late pass drew (rejected, then seen), those a late test found behind this
+    /// frame's depth (dropped), and the clusters (and triangles) kept by the sphere's depth slack alone.
+    unsigned rejected = 0, rejectedOverflow = 0, pixelCulled = 0, lateClusters = 0, lateDropped = 0,
+             slackClusters = 0, skyClusters = 0;
+    unsigned long long slackTriangles = 0ull, skyTriangles = 0ull;
 };
 
 /// THE CUT PROBE (ATOM-2 stage 1; Scene::armAtomCutProbe / Scene::atomCutProbe): ONE frame of the first view's id-pass
@@ -7599,6 +7610,15 @@ struct GpuCullRequest {
     /// the drawn clusters' indices compacted into the list's stream and one command
     /// per survivor over its run of it (the id pass's request).
     unsigned mode = 0u;
+    /// THE PER-CLUSTER OCCLUSION (ATOM-8 stage 1; mode 3, a view's own lists): `clusterOcclusion` makes the cut test
+    /// every cluster it would draw against the bound pyramid (a first list appends the hidden ones to its rejected
+    /// list for the late pass; the late list drops them); `pixelCentreCull` culls a cluster whose rectangle, through
+    /// `viewProjNow` (THIS frame's cull matrix - `viewProj` is the pyramid's), covers no pixel centre of `viewRect`
+    /// (the pass's viewport in its target's pixels: x0, y0, width, height).
+    bool clusterOcclusion = false;
+    bool pixelCentreCull = false;
+    float viewProjNow[16] = {};
+    unsigned viewRect[4] = { 0u, 0u, 0u, 0u };
 };
 
 /// WHAT THE CHAIN DID, and what it cost. The buffers themselves stay on the

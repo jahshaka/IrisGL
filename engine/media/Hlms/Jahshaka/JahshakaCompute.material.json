@@ -121,7 +121,7 @@
 			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahCullTest_cs",
-			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any"],
+			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any", "JahHzbTest.glsl"],
 			"textures" : [ {} ],
 			"uav_units" : 7
 		},
@@ -147,8 +147,19 @@
 		{
 			"threads_per_group" : [64, 1, 1],
 			"source" : "JahCullCut_cs",
-			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any", "JahClusterCut.glsl"],
-			"uav_units" : 10
+			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any", "JahClusterCut.glsl", "JahHzbTest.glsl"],
+			"textures" : [ {} ],
+			"uav_units" : 13
+		},
+
+		"Jahshaka/CullCutLate" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"source" : "JahCullCutLate_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any", "JahHzbTest.glsl"],
+			"textures" : [ {} ],
+			"uav_units" : 9,
+			"properties" : { "cull_hzb" : 1 }
 		},
 
 		"Jahshaka/AtomDensityCount" :

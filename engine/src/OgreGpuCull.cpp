@@ -78,6 +78,13 @@ void GpuCull::destroy() {
     }
     mDraws = mCount = mSurvivors = mLevels = mVisible = mParams = mHeld = mGroups = nullptr;
     mCutStream = mCutTriWords = mCutRecords = mCutSlotBase = nullptr;
+    if (mVao) {
+        if (mRejected) mVao->destroyUavBuffer(mRejected);
+        if (mClusterDraws) mVao->destroyUavBuffer(mClusterDraws);
+        if (mClusterIds) mVao->destroyUavBuffer(mClusterIds);
+    }
+    mRejected = mClusterDraws = mClusterIds = nullptr;
+    mRejectedBudget = 0u;
     mCutIndexBudget = mCutRecordBudget = mCutSlotCapacity = 0u;
     mVao = nullptr;
     mCapacity = 0u;
@@ -117,6 +124,36 @@ bool GpuCull::ensureCut(Ogre::VaoManager *vao, std::string &err, uint32_t sceneN
     mCutTriWords = vao->createUavBuffer(size_t(mCutIndexBudget / 3u) * 2u, sizeof(uint32_t), 0, nullptr, false);
     mCutRecords = vao->createUavBuffer(mCutRecordBudget, 4u * sizeof(uint32_t), 0, nullptr, false);
     return mCutStream && mCutTriWords && mCutRecords;
+}
+
+/// THE OCCLUSION'S BUFFERS (ATOM-8 stage 1), at the wanted budget: re-created only when it grew.
+bool GpuCull::ensureOcclusion(Ogre::VaoManager *vao, bool late, std::string &err) {
+    if (!mParams || vao != mVao) {
+        err = "gpucull: the occlusion's buffers need the list's (ensure first)";
+        return false;
+    }
+    const bool have = late ? (mClusterDraws && mClusterIds) : mRejected != nullptr;
+    if (have && mRejectedBudget >= mRejectedWant) return true;
+    if (mRejected) vao->destroyUavBuffer(mRejected);
+    if (mClusterDraws) vao->destroyUavBuffer(mClusterDraws);
+    if (mClusterIds) vao->destroyUavBuffer(mClusterIds);
+    mRejected = mClusterDraws = mClusterIds = nullptr;
+    mRejectedBudget = mRejectedWant;
+    if (!late) {
+        mRejected = vao->createUavBuffer(mRejectedBudget, 4u * sizeof(uint32_t), 0, nullptr, false);
+        return mRejected != nullptr;
+    }
+    mClusterDraws = vao->createUavBuffer(size_t(mRejectedBudget) * kRanges * kDrawWords, sizeof(uint32_t), 0, nullptr,
+                                         false);
+    mClusterIds = vao->createUavBuffer(mRejectedBudget, 2u * sizeof(uint32_t), 0, nullptr, false);
+    return mClusterDraws && mClusterIds;
+}
+
+void GpuCull::noteRejectedOverflow(uint32_t overflowed, uint32_t asked) {
+    if (!overflowed) return;
+    uint32_t want = mRejectedWant;
+    while (want < kRejectedBudgetCeiling && want < asked) want *= 2u;
+    mRejectedWant = std::min(want, kRejectedBudgetCeiling);
 }
 
 void GpuCull::noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAsked, uint32_t recordsAsked) {
@@ -226,13 +263,20 @@ void unbindCullJobs(Ogre::HlmsComputeJob *test, Ogre::HlmsComputeJob *compact,
     }
 }
 
-/// The cut's two jobs, cleared the same way.
-void unbindCutJobs(Ogre::HlmsComputeJob *cut, Ogre::HlmsComputeJob *emit) {
+/// The cut's jobs, cleared the same way - THEIR PYRAMID TOO (ATOM-8: the texture units hold raw pointers like the
+/// buffers; recordPyramid clears its own the same way).
+void unbindCutJobs(Ogre::HlmsComputeJob *cut, Ogre::HlmsComputeJob *emit, Ogre::HlmsComputeJob *late = nullptr) {
     const Ogre::DescriptorSetUav::BufferSlot empty =
         Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
     if (cut) {
         for (uint8_t i = 0; i < uint8_t(cut->getNumUavUnits()); ++i) cut->_setUavBuffer(i, empty);
+        if (cut->getNumTexUnits()) cut->setTexture(0u, Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
         cut->setIndirectDispatchBuffer(0);
+    }
+    if (late) {
+        for (uint8_t i = 0; i < 9u; ++i) late->_setUavBuffer(i, empty);
+        late->setTexture(0u, Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+        late->setIndirectDispatchBuffer(0);
     }
     if (emit) {
         for (uint8_t i = 0; i < 9u; ++i) emit->_setUavBuffer(i, empty);
@@ -308,6 +352,18 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
     const bool cutMode = req.mode >= 3u;
     Ogre::HlmsComputeJob *cutJob = cutMode ? hc->findComputeJobNoThrow("Jahshaka/CullCut") : nullptr;
     Ogre::HlmsComputeJob *emitJob = cutMode ? hc->findComputeJobNoThrow("Jahshaka/CullEmit") : nullptr;
+    // THE PER-CLUSTER OCCLUSION (ATOM-8 stage 1): a first list with a pyramid appends to its rejected list; the late
+    // list (`prior` = the first) with one re-tests the first's rejected list (the late cut job) and drops its own
+    // re-tested objects' hidden clusters. No pyramid = no depth test (the pixel-centre cull still runs).
+    const bool occlusion = cutMode && req.clusterOcclusion;
+    const bool appendRejected = occlusion && hzb && !prior;
+    const bool lateClusters = occlusion && hzb && prior && prior->rejected();
+    Ogre::HlmsComputeJob *lateJob = lateClusters ? hc->findComputeJobNoThrow("Jahshaka/CullCutLate") : nullptr;
+    if (lateClusters && !lateJob) {
+        err = "engine: the late cut's compute job is missing — "
+              "media/Hlms/Jahshaka/JahshakaCompute.material.json is not staged";
+        return false;
+    }
     if (cutMode) {
         if (!cutJob || !emitJob) {
             err = "engine: the cut's compute jobs are missing — "
@@ -317,6 +373,10 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         mGpuScene.flushClusterTables();
         mGpuScene.flushGeomRows();
         if (!cull.ensureCut(rs->getVaoManager(), err, mCutIndexNeed)) return false;
+        if (prior) cull.followRejectedBudget(*prior);
+        if (appendRejected && !cull.ensureOcclusion(rs->getVaoManager(), false, err)) return false;
+        if (lateClusters && !cull.ensureOcclusion(rs->getVaoManager(), true, err)) return false;
+        cull.setClusterStride(lateClusters ? prior->rejectedBudget() : 0u);
         if (!mGpuScene.clusterBuffer() || !mGpuScene.groupBuffer()) {
             err = "the cut's cluster tables could not be created";
             return false;
@@ -350,11 +410,18 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         p.cut[2] = cutMode ? cull.cutMainBudget() : 0u;
         p.cut[3] = cutMode ? cull.rangeFirst(1u) : 0u;   // the ranges' stride (JahCullCut_cs)
         for (int i = 0; i < 4; ++i) p.hzbRect[i] = hzb ? req.hzbRect[i] : 0u;
+        std::memcpy(p.viewProjNowRow, req.viewProjNow, sizeof(p.viewProjNowRow));
+        for (int i = 0; i < 4; ++i) p.viewRect[i] = req.pixelCentreCull ? req.viewRect[i] : 0u;
+        p.occl[0] = occlusion ? 1u : 0u;
+        p.occl[1] = occlusion && req.pixelCentreCull ? 1u : 0u;
+        p.occl[2] = prior ? prior->rejectedBudget() : cull.rejectedBudget();
+        p.occl[3] = appendRejected ? 1u : 0u;
         cull.params()->upload(&p, 0, 1u);
         // [20..22] and [26..28] are dispatch triples (the late cut's, the drawn reduce's): x counted, y z preset 1.
         const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 1u, 1u, 0u, 1u,
                                                           1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
-                                                          0u, 1u, 1u, 0u, 0u, 0u, 0u, 1u, 1u };
+                                                          0u, 1u, 1u, 0u, 0u, 0u, 0u, 1u, 1u, 0u,
+                                                          0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
         cull.count()->upload(reset, 0, GpuCull::kCountElements);
 
         // ---- job 1: test ---------------------------------------------------
@@ -437,7 +504,20 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
             const bool probing = probe && !recv;
             cutJob->setProperty("cut_receivers", recv ? 1 : 0);
             cutJob->setProperty("cut_probe", probing ? 1 : 0);
-            cutJob->setNumUavUnits(recv ? 12u : probing ? 11u : 10u);
+            // THE PYRAMID (ATOM-8 stage 1): a texture permutation, the test job's pattern (an empty texture unit
+            // segfaults Ogre's validity check); THE REJECTED LIST at the next free unit (after the probe's).
+            const bool cutHzb = occlusion && hzb;
+            cutJob->setProperty("cull_hzb", cutHzb ? 1 : 0);
+            cutJob->setNumTexUnits(cutHzb ? 1u : 0u);
+            cutJob->setProperty("cut_rejected", appendRejected ? 1 : 0);
+            cutJob->setNumUavUnits(recv ? 12u : (probing ? 11u : 10u) + (appendRejected ? 1u : 0u));
+            if (cutHzb) {
+                Ogre::DescriptorSetTexture2::TextureSlot ts = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+                ts.texture = hzb;
+                cutJob->setTexture(0u, ts);
+            }
+            if (appendRejected)
+                cutJob->_setUavBuffer(probing ? 11u : 10u, cullSlot(cull.rejected(), Ogre::ResourceAccess::Write));
             if (recv) {
                 cutJob->_setUavBuffer(10u, cullSlot(receivers->params, Ogre::ResourceAccess::Read));
                 cutJob->_setUavBuffer(11u, cullSlot(receivers->grid, Ogre::ResourceAccess::Read));
@@ -454,6 +534,21 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
             emitJob->_setUavBuffer(7u, cullSlot(cull.cutTriWords(), Ogre::ResourceAccess::Write));
             emitJob->_setUavBuffer(8u, cullSlot(cull.count(), Ogre::ResourceAccess::Read));
             emitJob->setIndirectDispatchBuffer(cull.count(), GpuCull::kEmitIndirectOffsetBytes);
+            if (lateClusters) {
+                lateJob->_setUavBuffer(0u, cullSlot(cull.params(), Ogre::ResourceAccess::Read));
+                lateJob->_setUavBuffer(1u, cullSlot(mGpuScene.instanceBuffer(), Ogre::ResourceAccess::Read));
+                lateJob->_setUavBuffer(2u, cullSlot(mGpuScene.clusterBuffer(), Ogre::ResourceAccess::Read));
+                lateJob->_setUavBuffer(3u, cullSlot(prior->count(), Ogre::ResourceAccess::Read));
+                lateJob->_setUavBuffer(4u, cullSlot(prior->rejected(), Ogre::ResourceAccess::Read));
+                lateJob->_setUavBuffer(5u, cullSlot(cull.count(), Ogre::ResourceAccess::ReadWrite));
+                lateJob->_setUavBuffer(6u, cullSlot(cull.cutRecords(), Ogre::ResourceAccess::Write));
+                lateJob->_setUavBuffer(7u, cullSlot(cull.clusterDraws(), Ogre::ResourceAccess::Write));
+                lateJob->_setUavBuffer(8u, cullSlot(cull.clusterIds(), Ogre::ResourceAccess::Write));
+                Ogre::DescriptorSetTexture2::TextureSlot ts = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+                ts.texture = hzb;
+                lateJob->setTexture(0u, ts);
+                lateJob->setIndirectDispatchBuffer(prior->count(), GpuCull::kLateCutIndirectOffsetBytes);
+            }
         }
         if (requestMs)
             *requestMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tRequest)
@@ -464,19 +559,20 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         if (req.mode == 2u) dispatchWithBarriers(rs, hc, draws, row[2]);
         if (cutMode) {
             dispatchWithBarriers(rs, hc, cutJob, row[3]);
+            if (lateClusters) dispatchWithBarriers(rs, hc, lateJob, nullptr);   // before the emit: its records too
             dispatchWithBarriers(rs, hc, emitJob, row[4]);
         }
         // The descriptor sets the dispatches bound were built at dispatch time;
         // the jobs' CPU-side bindings go now (a later grow must not find them).
         unbindCullJobs(test, compact, draws);
-        unbindCutJobs(cutJob, emitJob);
+        unbindCutJobs(cutJob, emitJob, lateJob);
         cull.noteRecorded(rs->getVaoManager()->getFrameCount());
         return true;
     }
     catch (Ogre::Exception &e) {
         err = e.getFullDescription();
         unbindCullJobs(test, compact, draws);
-        unbindCutJobs(cutJob, emitJob);
+        unbindCutJobs(cutJob, emitJob, lateJob);
         return false;
     }
 }

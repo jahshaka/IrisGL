@@ -55,8 +55,16 @@ struct GpuCullParams {
     /// inset and not its whole target. Width 0 = the whole pyramid. Read by the depth
     /// test alone; the jobs that declare a shorter struct read its prefix.
     uint32_t hzbRect[4] = {};
+    /// THE PER-CLUSTER OCCLUSION (ATOM-8 stage 1; JahCullCut_cs.glsl, JahCullCutLate_cs.glsl): THIS frame's cull
+    /// matrix (row-major; the pixel-centre test - viewProjRow is the PYRAMID's, last frame's in a first list), the
+    /// pass's viewport in its target's pixels (x0, y0, w, h; w 0 = no pixel-centre test), and x = the per-cluster
+    /// depth test on, y = the pixel-centre cull on, z = the rejected list's budget (entries), w = 1 a FIRST list
+    /// (the hidden clusters are appended to its rejected list), 0 a late one (they are dropped).
+    float    viewProjNowRow[16] = {};
+    uint32_t viewRect[4] = {};
+    uint32_t occl[4] = {};
 };
-static_assert(sizeof(GpuCullParams) == 256, "the cull request's layout is a shader contract");
+static_assert(sizeof(GpuCullParams) == 352, "the cull request's layout is a shader contract");
 
 class GpuCull {
 public:
@@ -121,6 +129,26 @@ public:
     /// adds gl_PrimitiveID to it).
     Ogre::UavBufferPacked *cutSlotBase() const { return mCutSlotBase; }
     uint32_t cutIndexBudget() const { return mCutIndexBudget; }
+    // ---- THE PER-CLUSTER OCCLUSION (ATOM-8 stage 1) -------------------------------
+    /// A FIRST list's REJECTED CLUSTERS (uvec4 slot, global cluster, depth, 0 an entry) and a LATE list's per-cluster
+    /// draws (kRanges x budget commands: one per cluster drawn late, firstInstance = the entry) and their IDENTITY
+    /// TABLE (uvec2 slot, first stream triangle, at the entry) - made by ensureOcclusion, at the list's budget.
+    Ogre::UavBufferPacked *rejected() const { return mRejected; }
+    Ogre::UavBufferPacked *clusterDraws() const { return mClusterDraws; }
+    Ogre::UavBufferPacked *clusterIds() const { return mClusterIds; }
+    uint32_t rejectedBudget() const { return mRejectedBudget; }
+    /// A late list's per-cluster ranges' stride (commands a range): the first list's rejected budget its request
+    /// read (JahCullCutLate_cs.glsl places range r's commands from r x the stride).
+    uint32_t clusterStride() const { return mClusterStride; }
+    void setClusterStride(uint32_t n) { mClusterStride = n; }
+    /// `late` false: the rejected list; true: the per-cluster draws and the identity table. Sized to the budget the
+    /// list wants (65,536 entries first; doubled from an overflow read back, noteRejectedOverflow, to 1 M).
+    bool ensureOcclusion(Ogre::VaoManager *vao, bool late, std::string &err);
+    void noteRejectedOverflow(uint32_t overflowed, uint32_t asked);
+    /// The late list follows the first's rejected budget (it draws what the first rejected).
+    void followRejectedBudget(const GpuCull &first) { mRejectedWant = std::max(mRejectedWant, first.mRejectedWant); }
+    static constexpr uint32_t kRejectedBudgetFirst = 65536u;
+    static constexpr uint32_t kRejectedBudgetCeiling = 1024u * 1024u;
     /// THE VAOMANAGER FRAME the list last recorded a request in (OgreScene::recordGpuCull): a reader of its buffers
     /// later in a frame (the density instruments, OgreAtomDensity.cpp) knows whether they hold THIS frame's cut.
     uint32_t recordedFrame() const { return mRecordedFrame; }
@@ -182,8 +210,13 @@ public:
     /// [23] the rejected-cluster entries the first cut appended, [24] the entries that overflowed the rejected list
     /// (drawn, never dropped), [25] the clusters the pixel-centre test culled (their rectangle covers no pixel centre),
     /// [26..28] THE DRAWN REDUCE's dispatch (the density instruments, OgreAtomDensity.cpp: x = ceil(records / 64),
-    /// kept by the cut's lane 0 beside the record cursor [8]).
-    static constexpr uint32_t kCountElements = 29u;
+    /// kept by the cut's lane 0 beside the record cursor [8]), [29..32] the late list's PER-CLUSTER ranges' command
+    /// counts (range r at 29 + r: the survivors', two-sided, masked, masked two-sided), [33] the clusters the depth
+    /// test kept although the sphere's CENTRE lies behind the occluders (the sphere's depth slack) and [34] their
+    /// triangles, [35] the clusters a LATE test found behind this frame's depth and dropped, [36] the clusters the
+    /// depth test kept with the FAR PLANE under their rectangle (the sky class) and [37] their triangles.
+    static constexpr uint32_t kCountElements = 38u;
+    static constexpr uint32_t clusterRangeCountOffsetBytes(uint32_t r) { return (29u + r) * 4u; }
     static constexpr uint32_t kIndirectOffsetBytes = 4u;
     static constexpr uint32_t kCutIndirectOffsetBytes = 5u * 4u;
     static constexpr uint32_t kEmitIndirectOffsetBytes = 8u * 4u;
@@ -213,6 +246,10 @@ private:
     uint32_t mCutWantBudget = kCutIndexBudgetFirst;
     bool mCutIgnoreScene = false;
     uint32_t mRecordedFrame = ~0u;
+    Ogre::UavBufferPacked *mRejected = nullptr;
+    Ogre::UavBufferPacked *mClusterDraws = nullptr;
+    Ogre::UavBufferPacked *mClusterIds = nullptr;
+    uint32_t mRejectedBudget = 0u, mRejectedWant = kRejectedBudgetFirst, mClusterStride = 0u;
     bool mCutForceCreate = false;   ///< the test door's budget may be SMALLER than the current one
 };
 

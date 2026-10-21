@@ -601,6 +601,15 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         st.cutOverflowIndices = cs.overflowIndices;
         st.cutIndexBudget = cs.indexBudget;
         st.cutTriangles = tris;
+        st.cutRejected = cs.rejected;
+        st.cutRejectedOverflow = cs.rejectedOverflow;
+        st.cutPixelCulled = cs.pixelCulled;
+        st.cutLateClusters = cs.lateClusters;
+        st.cutLateDropped = cs.lateDropped;
+        st.cutSlackClusters = cs.slackClusters;
+        st.cutSlackTriangles = cs.slackTriangles;
+        st.cutSkyClusters = cs.skyClusters;
+        st.cutSkyTriangles = cs.skyTriangles;
         st.occlusion = v->atomOcclusionStats(st.occluded, st.disoccluded);
         break;
     }

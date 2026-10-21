@@ -233,8 +233,11 @@ struct IdPushConstants {
     uint32_t triWords[2] = {};
     uint32_t slotBase[2] = {};
     uint32_t maskTable[2] = {};   ///< GpuScene::maskTableAddress (the masked ranges' fragment stage)
+    /// THE LATE PASS'S PER-CLUSTER DRAWS (ATOM-8 stage 1): the late list's identity table (GpuCull::clusterIds) -
+    /// non-zero for those draws only: their firstInstance is a rejected entry, the table gives (slot, first triangle).
+    uint32_t clusterIds[2] = {};
 };
-static_assert(sizeof(IdPushConstants) == 112, "atom_id.vert/.frag's push-constant block");
+static_assert(sizeof(IdPushConstants) == 120, "atom_id.vert/.frag's push-constant block");
 constexpr VkShaderStageFlags kIdPushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 struct IdPipeline {
@@ -411,6 +414,20 @@ void cycleStats(const AtomPassContext &ctx, AtomIdDevice &d, Ogre::VulkanDevice 
         cs.missing += w[13];
         cs.overflowIndices += w[11];
         cs.evaluated += w[14];
+        // THE PER-CLUSTER OCCLUSION's words (ATOM-8 stage 1).
+        cs.pixelCulled += w[25];
+        cs.lateDropped += w[35];
+        cs.slackClusters += w[33];
+        cs.slackTriangles += w[34];
+        cs.skyClusters += w[36];
+        cs.skyTriangles += w[37];
+        if (!late) {
+            cs.rejected = w[23];
+            cs.rejectedOverflow = w[24];
+            list.noteRejectedOverflow(w[24], w[23]);
+        } else {
+            cs.lateClusters = w[29] + w[30] + w[31] + w[32];
+        }
         if (!late) {
             cs.indexBudget = list.cutIndexBudget();
             view->setAtomStats(w[4], w[0]);
@@ -838,6 +855,17 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         // frontier invisibly by construction (Nanite has none). THE CUT (mode 3).
         req.lodHysteresis = 0.0f;
         req.mode = 3u;
+        // THE PER-CLUSTER OCCLUSION (ATOM-8 stage 1): every cluster the cut would draw tested against the pyramid this
+        // pass tests its objects against (none = the pixel-centre test alone), and culled where its rectangle,
+        // through THIS frame's matrix, covers no pixel centre of the pass's viewport.
+        req.clusterOcclusion = true;
+        req.pixelCentreCull = true;
+        {
+            const Ogre::Matrix4 cm = cullMatrixOf(vpm);
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c) req.viewProjNow[r * 4 + c] = float(cm[r][c]);
+            std::copy(rect, rect + 4, req.viewRect);
+        }
         cullPtr = capture ? &view->atomCullCapture() : late ? &view->atomCullLate() : &view->atomCull();
         // The capture's list holds the frame the view's first list was sized for.
         if (capture) cullPtr->followCutBudget(view->atomCull());
@@ -998,6 +1026,37 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
                 cmd, drawBuf, drawOff + VkDeviceSize(cull.rangeFirst(rg)) * GpuCull::kDrawWords * sizeof(uint32_t),
                 countBuf, countOff + GpuCull::rangeCountOffsetBytes(rg), maxDraws,
                 GpuCull::kDrawWords * sizeof(uint32_t));
+        }
+        // THE LATE PASS'S PER-CLUSTER DRAWS (ATOM-8 stage 1; JahCullCutLate_cs.glsl): one command per rejected
+        // cluster this frame's depth showed, in the late list's own four ranges (the same pipelines), each command's
+        // firstInstance its rejected entry - the identity table in the push constants gives the vertex stage the slot
+        // and the cluster's first stream triangle (no shaderDrawParameters on the fork: no gl_DrawID).
+        if (late && cull.clusterDraws() && cull.clusterIds() && cull.clusterStride()) {
+            IdPushConstants pcl{};
+            for (int rr = 0; rr < 4; ++rr)
+                for (int c = 0; c < 4; ++c) pcl.viewProjRow[rr * 4 + c] = float(vpm[rr][c]);
+            addressOf(D->ids, gs->instanceBuffer(), pcl.instances);
+            addressOf(D->ids, gs->meshBuffer(), pcl.meshes);
+            addressOf(D->ids, gs->geomBuffer(), pcl.rows);
+            addressOf(D->ids, cull.cutTriWords(), pcl.triWords);
+            addressOf(D->ids, cull.cutSlotBase(), pcl.slotBase);
+            const uint64_t masks = gs->maskTableAddress();
+            pcl.maskTable[0] = uint32_t(masks & 0xFFFFFFFFu);
+            pcl.maskTable[1] = uint32_t(masks >> 32u);
+            addressOf(D->ids, cull.clusterIds(), pcl.clusterIds);
+            vkCmdPushConstants(cmd, D->ids.layout, kIdPushStages, 0, sizeof(pcl), &pcl);
+            VkBuffer cdBuf = VK_NULL_HANDLE;
+            VkDeviceSize cdOff = 0;
+            atomBufferOf(cull.clusterDraws(), cdBuf, cdOff);
+            const uint32_t stride = cull.clusterStride();
+            const unsigned clusterPipe[4] = { flip ? 1u : 0u, 2u, flip ? 4u : 3u, 5u };
+            for (unsigned rg = 0u; rg < GpuCull::kRanges; ++rg) {
+                if (rg != 0u && !scene->atom().hasIdRange(rg)) continue;
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, D->ids.pipeline[clusterPipe[rg]]);
+                D->ids.drawIndexedIndirectCount(
+                    cmd, cdBuf, cdOff + VkDeviceSize(rg) * stride * GpuCull::kDrawWords * sizeof(uint32_t), countBuf,
+                    countOff + GpuCull::clusterRangeCountOffsetBytes(rg), stride, GpuCull::kDrawWords * sizeof(uint32_t));
+            }
         }
     }
     // THE RENDERER'S COUNTERS SEE THIS DRAW TOO: an indirect draw never passes

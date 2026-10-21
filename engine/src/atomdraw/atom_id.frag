@@ -37,6 +37,7 @@ layout( push_constant ) uniform AtomIdPc
 	uvec2 triWords;
 	uvec2 slotBase;
 	uvec2 maskTable;
+	uvec2 clusterIds;
 } pc;
 
 layout( location = 0 ) flat in uint inSlot;
