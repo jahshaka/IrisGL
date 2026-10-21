@@ -690,6 +690,14 @@ int SceneMirror::sync(const FrameViews &frameViews)
         {
             m->mAttachesOwed = m->mAttachesOwedThisSync;
             m->mBudgeted = false;
+            if (m->mBuiltMeshes > 0) {
+                AttachTally &t = m->mAttachTally;
+                ++t.syncs;
+                t.meshes += quint64(m->mBuiltMeshes);
+                t.vertices += quint64(m->mBuiltVertices);
+                t.largestMeshes = qMax(t.largestMeshes, quint64(m->mBuiltMeshes));
+                t.largestVertices = qMax(t.largestVertices, quint64(m->mBuiltVertices));
+            }
         }
     } spend(this);
     if (!mSource || !mSource->getRootNode()) return 0;

@@ -113,6 +113,15 @@ public:
     quint64 attachesOwed() const { return mAttachesOwed; }
     /// Every deferral since the mirror was made (a test instrument).
     quint64 attachesDeferredTotal() const { return mAttachesDeferredTotal; }
+    /// THE STREAM'S SHAPE since the mirror was made (OPEN-PATH-1, a test instrument): the syncs that built at least
+    /// one new engine mesh, the meshes and vertices built in all, and the most ONE sync built — the number the
+    /// budget's law bounds (a budgeted sync stops at its share; the first mesh of a sync is always built).
+    struct AttachTally
+    {
+        quint64 syncs = 0, meshes = 0, vertices = 0;
+        quint64 largestMeshes = 0, largestVertices = 0;
+    };
+    const AttachTally &attachTally() const { return mAttachTally; }
     /// Vertices of the meshes the LAST sync built (a test instrument).
     std::size_t lastSyncBuiltVertices() const { return mBuiltVertices; }
     std::size_t lastSyncBuiltIndices() const { return mBuiltIndices; }
@@ -2277,6 +2286,7 @@ private:
     int mBuiltMeshes = 0;
     std::size_t mBuiltVertices = 0, mBuiltIndices = 0;
     quint64 mAttachesOwed = 0, mAttachesOwedThisSync = 0, mAttachesDeferredTotal = 0;
+    AttachTally mAttachTally;
     /// Is the budget spent? The first mesh of a sync is always built.
     bool attachBudgetSpent() const
     {
