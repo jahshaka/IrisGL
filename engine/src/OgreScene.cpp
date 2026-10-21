@@ -838,6 +838,9 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     }
     back.completions = mCompletionsPublished;
     back.atomViewPaintable = atomViewPaintable();
+    back.atomHidden = PublishedFrame::AtomHidden();
+    back.atomHidden.valid = atomHiddenReading(mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>(),
+                                              back.atomHidden.drawn, back.atomHidden.hidden);
     for (int v = 0; v < kPhotonViewCount; ++v)
         back.photonViewRefusals[v] = v == 0 ? std::string() : photonViewRefusal(static_cast<PhotonView>(v));
     // THE RIGS A HOST SUBSCRIBED (publishBonePoses): a rig whose NODE is gone is dropped from the list; a node whose

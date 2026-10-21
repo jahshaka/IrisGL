@@ -5238,12 +5238,19 @@ struct AtomDrawStatus {
     std::vector<AtomCasterMapStats> casterPerMap;
     /// THE DENSITY (ATOM-2 stage 1, the 'density' Atom view): while the view is on, the first such view's last frame
     /// read back on demand (a measuring read): the visible Atom pixels and the objects they belong to, split by the
-    /// BASE mesh's level-0 triangles per visible pixel — [0] under 1 (green), [1] 1 to 4 (yellow), [2] over 4 (red) —
-    /// and the pixels by the DAG depth the cut drew them at. `densityValid` false while the view is not 'density'.
+    /// triangles the CUT DREW for the object per visible pixel (ATOM-8 stage 0) — [0] under 1 (green), [1] 1 to 4
+    /// (yellow), [2] over 4 (red) — and the pixels by the DAG depth the cut drew them at. `densityValid` false while
+    /// the view is not 'density'.
     bool     densityValid = false;
     unsigned densityPixels = 0, densityObjects = 0;
     unsigned densityClassPixels[3] = {}, densityClassObjects[3] = {};
     unsigned densityDepthPixels[16] = {};
+    /// THE HIDDEN SHARE (ATOM-8 stage 0): while the Atom view is Triangles or Density, the first such view's last
+    /// counted frame (read without a wait, a few frames late): `hiddenDrawnTriangles` every triangle both lists' cuts
+    /// drew (their drawn-cluster records), `drawnHiddenTriangles` those of objects with NO visible pixel in that
+    /// frame. `hiddenValid` false with the view on neither mode.
+    bool     hiddenValid = false;
+    unsigned long long hiddenDrawnTriangles = 0ull, drawnHiddenTriangles = 0ull;
     /// The render system's frame counter at this read — the stamp the engine's
     /// JAHSHAKA_ATOM_TRACE log lines carry (ATOM-BLACK-FRAMES-1's coverage trace).
     unsigned long long frame = 0ull;
@@ -5294,6 +5301,9 @@ struct AtomCutProbeObject {
     unsigned long long drawnTriangles = 0ull;
     unsigned long long drawnTrianglesLate = 0ull;   ///< ...of them drawn by the disocclusion (late) list
     unsigned long long depthTriangles[16] = {};  ///< the cut's drawn triangles by depth
+    /// THE OBJECT'S CLUSTERS WITH A VISIBLE PIXEL this frame (ATOM-8 stage 0): of `drawnClusters`, those whose
+    /// (instance, cluster) pair names at least one pixel the picture shows.
+    unsigned visibleClusters = 0;
     AtomCutProbeHzb hzbFirst, hzbLate;           ///< what each list's depth test read (ATOM-6 stage 3)
     unsigned groups = 0, groupsAffordable = 0, groupsTerminal = 0;
 };
@@ -8591,6 +8601,14 @@ struct PublishedFrame {
     SunContactStatus     sunContact;
     int                  activePlanarReflectors = 0;
     bool                 atomViewPaintable = false;
+    /// THE ATOM CUT'S HIDDEN SHARE as the frame closed it (ATOM-8 stage 0; AtomDrawStatus::hiddenValid's figure, read
+    /// without a wait): valid only while a view of the scene shows the Atom view's Triangles or Density mode — the
+    /// stats overlay's Atom line.
+    struct AtomHidden {
+        bool valid = false;
+        unsigned long long drawn = 0ull, hidden = 0ull;
+    };
+    AtomHidden           atomHidden;
     /// Why each Photon view cannot paint right now ("" = it can), indexed by PhotonView.
     std::string          photonViewRefusals[kPhotonViewCount];
     /// THE SCENE'S MOBILITY AND RIG COUNTS as the frame closed them (U3 stage 2 read 12(b): running totals kept at the

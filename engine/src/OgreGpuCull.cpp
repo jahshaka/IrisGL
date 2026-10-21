@@ -468,6 +468,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         // the jobs' CPU-side bindings go now (a later grow must not find them).
         unbindCullJobs(test, compact, draws);
         unbindCutJobs(cutJob, emitJob);
+        cull.noteRecorded(rs->getVaoManager()->getFrameCount());
         return true;
     }
     catch (Ogre::Exception &e) {

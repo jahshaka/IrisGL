@@ -974,6 +974,12 @@ Ogre::UavBufferPacked *atomCutProbeBuffer(OgreView *view, bool late);
 Ogre::UavBufferPacked *atomCutProbeHzbBuffer(OgreView *view);
 /// ...and the Density mode's figures for AtomDrawStatus: the first of `views` whose last frame counted, read back.
 void atomDensityStatus(OgreScene *scene, const std::vector<OgreView *> &views, AtomDrawStatus &out);
+/// ...and THE HIDDEN SHARE (ATOM-8 stage 0): the first of `views` holding a read of a counted frame (the Atom view's
+/// Triangles or Density mode on) — every triangle its cuts drew, and those of objects with no visible pixel.
+bool atomHiddenReading(const std::vector<OgreView *> &views, unsigned long long &drawn, unsigned long long &hidden);
+/// The view's DENSITY TABLE (the 'density' mode's per-slot drawn triangles per visible pixel, float bits, 1024 slots
+/// a row) — null before the view's first Density frame. A measuring door for the engine suites.
+Ogre::TextureGpu *atomDensityTable(OgreView *view);
 /// THE OCCLUSION'S PYRAMID (ATOM-OCCLUSION-1, OgreAtomIdPass.cpp): `hzb`'s every level
 /// rebuilt from `depth` — ONE dispatch of the single-pass build (JahHzbBuild_cs,
 /// farthest), through HlmsCompute with Ogre's barrier solver. False when the job is not

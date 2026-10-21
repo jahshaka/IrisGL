@@ -121,6 +121,10 @@ public:
     /// adds gl_PrimitiveID to it).
     Ogre::UavBufferPacked *cutSlotBase() const { return mCutSlotBase; }
     uint32_t cutIndexBudget() const { return mCutIndexBudget; }
+    /// THE VAOMANAGER FRAME the list last recorded a request in (OgreScene::recordGpuCull): a reader of its buffers
+    /// later in a frame (the density instruments, OgreAtomDensity.cpp) knows whether they hold THIS frame's cut.
+    uint32_t recordedFrame() const { return mRecordedFrame; }
+    void noteRecorded(uint32_t frame) { mRecordedFrame = frame; }
     uint32_t cutRecordBudget() const { return mCutRecordBudget; }
     /// Where the coarse reserve begins: the main region is the first 7/8 of the stream.
     uint32_t cutMainBudget() const { return mCutIndexBudget - mCutIndexBudget / 8u; }
@@ -201,6 +205,7 @@ private:
     uint32_t mCutIndexBudget = 0u, mCutRecordBudget = 0u, mCutSlotCapacity = 0u;
     uint32_t mCutWantBudget = kCutIndexBudgetFirst;
     bool mCutIgnoreScene = false;
+    uint32_t mRecordedFrame = ~0u;
     bool mCutForceCreate = false;   ///< the test door's budget may be SMALLER than the current one
 };
 

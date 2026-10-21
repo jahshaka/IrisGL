@@ -606,6 +606,9 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
     }
     // THE DENSITY (ATOM-2): while the scene's view is Density, the first view's last frame, read back.
     atomDensityStatus(this, mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>(), st);
+    // THE HIDDEN SHARE (ATOM-8 stage 0): while the view is Triangles or Density.
+    st.hiddenValid = atomHiddenReading(mEngine ? mEngine->viewsOf(this) : std::vector<OgreView *>(),
+                                       st.hiddenDrawnTriangles, st.drawnHiddenTriangles);
     return st;
 }
 
