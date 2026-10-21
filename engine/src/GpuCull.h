@@ -178,10 +178,17 @@ public:
     /// [17] THE TWO-SIDED RANGE'S command count (ATOM-TWO-SIDED-1: the draw count of
     /// the no-cull draw, from `rangeFirst(1)`); [18..19] THE MASKED RANGES' (ENGINE-POLISH-ATOM-1 stage 3:
     /// the masked and the masked two-sided commands, from rangeFirst(2) and rangeFirst(3)).
-    static constexpr uint32_t kCountElements = 20u;
+    /// ATOM-8 (the per-cluster occlusion): [20..22] the LATE CUT's dispatch (x = ceil(rejected entries / 64), 1, 1),
+    /// [23] the rejected-cluster entries the first cut appended, [24] the entries that overflowed the rejected list
+    /// (drawn, never dropped), [25] the clusters the pixel-centre test culled (their rectangle covers no pixel centre),
+    /// [26..28] THE DRAWN REDUCE's dispatch (the density instruments, OgreAtomDensity.cpp: x = ceil(records / 64),
+    /// kept by the cut's lane 0 beside the record cursor [8]).
+    static constexpr uint32_t kCountElements = 29u;
     static constexpr uint32_t kIndirectOffsetBytes = 4u;
     static constexpr uint32_t kCutIndirectOffsetBytes = 5u * 4u;
     static constexpr uint32_t kEmitIndirectOffsetBytes = 8u * 4u;
+    static constexpr uint32_t kLateCutIndirectOffsetBytes = 20u * 4u;
+    static constexpr uint32_t kDrawnIndirectOffsetBytes = 26u * 4u;
     /// Threads per group of all three jobs (JahshakaCompute.material.json) and
     /// the width of the compaction's shared-memory scan.
     static constexpr uint32_t kThreadsPerGroup = 64u;

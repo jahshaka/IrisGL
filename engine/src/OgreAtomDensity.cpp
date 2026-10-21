@@ -82,7 +82,8 @@ struct AtomDensityState {
     /// later frame's head once the device has finished it.
     Ogre::AsyncTicketPtr hiddenTicket;
     uint32_t hiddenTicketFrame = 0u;           ///< the VaoManager frame it was issued in (never polled in it)
-    bool hiddenValid = false;                  ///< the last read belongs to a counted frame, the view still counting
+    bool hiddenRead = false;                   ///< a read of a counted frame has landed (the view still counting)
+    bool hiddenValid = false;                  ///< ...and this frame's lists recorded: the figure the status reports
     unsigned long long hiddenTriangles = 0ull, drawnTriangles = 0ull;
     Ogre::TextureGpu *table = nullptr;         ///< R32_UINT, kTableWidth x rows, UAV: the Density mode's colours
     Ogre::UavBufferPacked *probe[2] = { nullptr, nullptr };   ///< the first list's records, the late list's
@@ -192,7 +193,7 @@ namespace {
 /// THE HIDDEN SHARE'S READ, at the view's frame head: a download issued in an EARLIER frame and finished by the
 /// device is read (never waited on); a frame that stops counting drops the figure, so no stale share is reported.
 void harvestHidden(AtomDensityState &st, bool counting) {
-    if (!counting) st.hiddenValid = false;
+    if (!counting) st.hiddenRead = st.hiddenValid = false;
     if (!st.hiddenTicket) return;
     Ogre::VaoManager *vao = vaoOf();
     if (!vao || vao->getFrameCount() == st.hiddenTicketFrame) return;   // never polled in the frame it was issued in
@@ -202,10 +203,10 @@ void harvestHidden(AtomDensityState &st, bool counting) {
         st.hiddenTriangles = w[kHeaderHidden];
         st.drawnTriangles = w[kHeaderDrawn];
         st.hiddenTicket->unmap();
-        st.hiddenValid = counting;
+        st.hiddenRead = counting;
     }
     catch (Ogre::Exception &) {
-        st.hiddenValid = false;
+        st.hiddenRead = st.hiddenValid = false;
     }
     st.hiddenTicket.reset();
 }
@@ -251,14 +252,19 @@ Ogre::TextureGpu *atomDensityFrame(OgreView *view, OgreScene *scene, AtomView mo
     JAH_TRY {
         // THE COUNTS, zeroed for this frame (the slot capacity in the header: the job's bound).
         if (!st.counts || st.capacity < cap) {
+            // THE READ IN FLIGHT NAMES THE BUFFER (its creator): it goes first, as in the deleter (the stage 0 read's
+            // use-after-free: a slot-capacity grow under the Triangles view freed the buffer an outstanding ticket mapped).
+            st.hiddenTicket.reset();
+            st.hiddenRead = st.hiddenValid = false;
             destroyBuffer(st.counts);
             destroyBuffer(st.clusterBase);
             st.counts = vao->createUavBuffer(kCountHeader + kSlotWords * size_t(cap), sizeof(uint32_t), 0, nullptr, false);
             st.clusterBase = vao->createUavBuffer(cap, sizeof(uint32_t), 0, nullptr, false);
             st.capacity = cap;
         }
-        std::vector<uint32_t> zeros(kCountHeader + kSlotWords * size_t(st.capacity), 0u);
-        zeros[0] = st.capacity;
+        // THE HEADER ONLY (four words): the slot words and the two figures are cleared on the device before the count
+        // (JahAtomDensityClear_cs.glsl) - never a per-frame upload of the whole buffer.
+        uint32_t header[kCountHeader] = { st.capacity, 0u, 0u, 0u };
         // THE VISIBLE CLUSTERS (the probe's frame): one bit an (instance, cluster) - the prefix of the slots' DAG
         // cluster counts (a slot past the count holds the total: its bits are past the bitmap).
         uint32_t bits = 0u;
@@ -283,8 +289,8 @@ Ogre::TextureGpu *atomDensityFrame(OgreView *view, OgreScene *scene, AtomView mo
             const std::vector<uint32_t> none(words, 0u);
             st.seen->upload(none.data(), 0, words);
         }
-        zeros[kHeaderBits] = bits;
-        st.counts->upload(zeros.data(), 0, zeros.size());
+        header[kHeaderBits] = bits;
+        st.counts->upload(header, 0, kCountHeader);
         // THE TABLE the quad binds in this frame: the Density mode's colours, and a texture of the right kind at the
         // quad's fourth unit in the probe's frame (whose mode 0 reads nothing). Kept for the view's life (16 KB at
         // 4,096 slots), regrown with the slot capacity.
@@ -375,7 +381,10 @@ void atomDensityRecord(OgreView *view, OgreScene *scene, Ogre::CompositorPass *q
         hc && !jobsMissing ? hc->findComputeJobNoThrow("Jahshaka/AtomDensityResolve") : nullptr;
     Ogre::HlmsComputeJob *drawnJob =
         hc && !jobsMissing ? hc->findComputeJobNoThrow("Jahshaka/AtomDensityDrawn") : nullptr;
-    if (!rs || !countJob || !resolveJob || !drawnJob) {
+    Ogre::HlmsComputeJob *clearJob =
+        hc && !jobsMissing ? hc->findComputeJobNoThrow("Jahshaka/AtomDensityClear") : nullptr;
+    st->hiddenValid = false;   // until this frame's reduce runs (below): a frame that cannot count reports no figure
+    if (!rs || !countJob || !resolveJob || !drawnJob || !clearJob) {
         if (st->probeAt == st->frames) st->probeError = "the density jobs are not staged (JahshakaCompute.material.json)";
         densityPaintsNothing(*st, quad);
         return;
@@ -398,6 +407,9 @@ void atomDensityRecord(OgreView *view, OgreScene *scene, Ogre::CompositorPass *q
     GpuScene &gs = scene->gpuScene();
     JAH_TRY {
         rs->endRenderPassDescriptor();
+        clearJob->_setUavBuffer(0u, uavSlot(st->counts, Ogre::ResourceAccess::ReadWrite));
+        clearJob->setNumThreadGroups((st->capacity + 63u) / 64u, 1u, 1u);
+        dispatch(rs, hc, clearJob);
         countJob->setTexture(0u, texSlot(ids));
         countJob->setTexture(1u, texSlot(idDepth));
         countJob->setTexture(2u, texSlot(finalDepth));
@@ -423,10 +435,13 @@ void atomDensityRecord(OgreView *view, OgreScene *scene, Ogre::CompositorPass *q
             drawnJob->_setUavBuffer(6u, uavSlot(gs.clusterBuffer(), Ogre::ResourceAccess::Read));
             drawnJob->_setUavBuffer(7u, uavSlot(st->clusterBase, Ogre::ResourceAccess::Read));
             drawnJob->_setUavBuffer(8u, uavSlot(st->seen, Ogre::ResourceAccess::Read));
-            drawnJob->setIndirectDispatchBuffer(list.count(), GpuCull::kEmitIndirectOffsetBytes);
+            drawnJob->setIndirectDispatchBuffer(list.count(), GpuCull::kDrawnIndirectOffsetBytes);
             dispatch(rs, hc, drawnJob);
             drawnAny = true;
         }
+        // THE FIGURE STAYS ONLY WHILE THE LISTS RECORD (the stage 0 read's (c)): a frame whose first list recorded
+        // nothing (no cluster tables yet) has no cut to account - the status reads null, never the last frame's.
+        st->hiddenValid = drawnAny && st->hiddenRead;
         if (!st->hiddenTicket && drawnAny) {
             // THE HEADER'S READ, without a fence or a flush: the frame's own submission carries the copy.
             st->hiddenTicket = st->counts->readRequest(0, kCountHeader, /*accurateTracking=*/false);
@@ -464,6 +479,7 @@ void atomDensityRecord(OgreView *view, OgreScene *scene, Ogre::CompositorPass *q
     for (Ogre::uint8 i = 0u; i < 9u; ++i)
         drawnJob->_setUavBuffer(i, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
     drawnJob->setIndirectDispatchBuffer(0);
+    clearJob->_setUavBuffer(0u, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
     resolveJob->_setUavBuffer(0u, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
     resolveJob->_setUavTexture(1u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
 }

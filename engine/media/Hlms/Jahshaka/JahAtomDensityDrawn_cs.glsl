@@ -3,8 +3,8 @@
 // After the density count (JahAtomDensityCount_cs.glsl: the visible pixels per slot), once per list that drew this
 // frame (the first list's, then the late list's): one thread a drawn-cluster RECORD of that list (the cut's work
 // list, JahCullCut_cs.glsl pass 2: slot, the cluster's global index, its first index in the stream, its depth), the
-// dispatch the list's own emit dispatch (count[8..10]: one workgroup a record, so a group covers 64 records and the
-// groups past the last record leave at once). Per record, into the count words of its slot:
+// dispatch the list's own count[26..28] (the cut's lane 0 keeps x = ceil(records reserved / 64)). Per record, into
+// the count words of its slot:
 //   16 += the cluster's triangles, 17 += 1 (the triangles and clusters the cut drew for the object - both lists);
 //   header 3 += the triangles (the frame's drawn total), and header 2 += them when the slot has NO visible pixel
 //   (an object the picture does not show at all: the hidden share);

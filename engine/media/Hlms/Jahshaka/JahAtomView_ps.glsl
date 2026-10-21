@@ -113,8 +113,9 @@ void main()
 	}
 	else if( mode == 5u )
 	{
-		// THE DENSITY (ATOM-2): the table holds the slot's BASE-mesh level-0 triangles per visible pixel this frame
-		// (float bits, JahAtomDensityResolve_cs.glsl) - green under one a pixel, yellow one to four, red over four.
+		// THE DENSITY (ATOM-2; ATOM-8 stage 0): the table holds the triangles the cut DREW for the slot per visible
+		// pixel this frame (float bits, JahAtomDensityResolve_cs.glsl) - green under one a pixel, yellow one to four,
+		// red over four.
 		float tpp = uintBitsToFloat( row );
 		colour = tpp > 4.0 ? vec3( 1.0, 0.15, 0.1 ) : tpp >= 1.0 ? vec3( 1.0, 0.9, 0.1 ) : vec3( 0.15, 0.85, 0.25 );
 	}

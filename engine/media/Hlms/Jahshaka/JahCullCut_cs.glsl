@@ -403,6 +403,8 @@ void main()
 			if( base + totalIdx <= params.cut.z )
 			{
 				recBase = atomicAdd( counter[8], totalRec );
+				// THE DRAWN REDUCE'S DISPATCH (count[26..28], ATOM-8): one 64-wide group per 64 records reserved.
+				atomicMax( counter[26], ( recBase + totalRec + 63u ) / 64u );
 				if( recBase + totalRec <= params.cut.y )
 				{
 					mode = 1u;
@@ -422,6 +424,7 @@ void main()
 			if( rb + rootIdx <= params.cut.x )
 			{
 				uint rr = atomicAdd( counter[8], rootRec );
+				atomicMax( counter[26], ( rr + rootRec + 63u ) / 64u );
 				if( rr + rootRec <= params.cut.y )
 				{
 					mode = 2u;

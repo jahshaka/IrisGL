@@ -351,8 +351,10 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         p.cut[3] = cutMode ? cull.rangeFirst(1u) : 0u;   // the ranges' stride (JahCullCut_cs)
         for (int i = 0; i < 4; ++i) p.hzbRect[i] = hzb ? req.hzbRect[i] : 0u;
         cull.params()->upload(&p, 0, 1u);
+        // [20..22] and [26..28] are dispatch triples (the late cut's, the drawn reduce's): x counted, y z preset 1.
         const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 1u, 1u, 0u, 1u,
-                                                          1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
+                                                          1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+                                                          0u, 1u, 1u, 0u, 0u, 0u, 0u, 1u, 1u };
         cull.count()->upload(reset, 0, GpuCull::kCountElements);
 
         // ---- job 1: test ---------------------------------------------------

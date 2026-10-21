@@ -7775,8 +7775,8 @@ struct ViewOverlayDesc {
 ///              orange, yellow, lime, green, cyan, blue to level 7 (violet)
 ///   Buckets    a hash of the decode bucket (one colour per decode draw)
 ///   Objects    a hash of the GPU scene slot (one colour per object)
-///   Density    the BASE mesh's level-0 triangles per visible pixel, per object (ATOM-2): green under 1,
-///              yellow 1 to 4, red over 4 - where the authored geometry is finer than the pixels
+///   Density    the triangles the cut DREW per visible pixel, per object (ATOM-2; ATOM-8 stage 0): green under 1,
+///              yellow 1 to 4, red over 4 - where the drawn geometry is finer than the pixels
 enum class AtomView { Off = 0, Triangles, Levels, Buckets, Objects, Density };
 /// THE COUNT OF ATOM VIEWS, kept beside the enum (as kPhotonViewCount): the F6 cycle, the View Options rows and
 /// world.setAtomView's names read it, never a copied 6 (BUGS-1 item 8).

@@ -161,6 +161,15 @@
 			"uav_units" : 3
 		},
 
+		"Jahshaka/AtomDensityClear" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahAtomDensityClear_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"uav_units" : 1
+		},
+
 		"Jahshaka/AtomDensityDrawn" :
 		{
 			"threads_per_group" : [64, 1, 1],
