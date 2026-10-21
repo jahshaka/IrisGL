@@ -32,6 +32,17 @@ the caller's verify, so clause (2) is decided there:
   least one more piece).
 - The edge-limit adjustment moves into a helper (limitErrorByEdges), called after
   either prune.
+- THE BEST ATTEMPT WINS (round 2, the lead's rule after the stage-1 stop): the
+  hook answers a bound for every result (`result_bound`), and the group keeps,
+  among its verified attempts, the one with the LOWEST bound (ties: the smaller
+  result, then the earlier attempt) — never simply the last: a retry under added
+  locks could miss the collapses it needed and have clause (1) pay a whole wall
+  at any price (Bistro: a 16.9 m island at d1 where attempt 0 deviated 4.94 m;
+  the runtime sphere emptied at d1). A retry stuck above simplify_threshold is
+  not verified and an earlier attempt is kept (terminal only when the first
+  result was stuck, as before). After the last attempt the hook is called once
+  more with attempt = -1 and `winner` = the kept attempt's number, with the kept
+  result (its answer is ignored).
 
 Applied at configure (irisgl/CMakeLists.txt) to a copy of the vendored header
 in the build tree, after 0004; the vendored file itself is never edited.
@@ -56,7 +67,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  	// should clodCluster::bounds be computed based on the geometry of each cluster
  	bool optimize_bounds;
  
-@@ -99,7 +98,13 @@
+@@ -99,7 +98,18 @@
  	// at most CLOD_VERIFY_MAX_RETRIES re-simplifications per group: the result after the last one is verified too (so the last call
  	// always saw the result the group keeps), and a lock array returned for it is ignored
  	// pruned_extent is the largest component_extent simplify_prune_unlocked removed for this result (0 when none)
@@ -67,11 +78,16 @@ in the build tree, after 0004; the vendored file itself is never edited.
 +	// that absolute budget — the group is re-pruned from the collapses' result it kept (no second simplification): clause (1) as
 +	// before, then on toward the target while the next piece's component_extent is within the budget; the re-pruned result is
 +	// verified again (it counts as an attempt). At most one re-prune per simplified result; one that removes nothing more is final
-+	const unsigned char* (*verify_group)(void* context, int depth, int attempt, const unsigned int* group_indices, size_t group_index_count, const unsigned int* simplified_indices, size_t simplified_index_count, float error, float pruned_extent, const unsigned char* locks, float* prune_budget);
++	// result_bound (out, FLT_MAX before the call): the caller's bound for this result — THE BEST ATTEMPT WINS: among the attempts
++	// (every one reached simplify_threshold), the group keeps the one with the lowest bound, ties to the smaller result, then to
++	// the earlier attempt; a retry can never replace a result with a worse one. After the last attempt the hook is called ONCE
++	// MORE with attempt = -1 and winner = the kept attempt's number, with the kept result's indices (its answer is ignored);
++	// winner is -1 on every other call
++	const unsigned char* (*verify_group)(void* context, int depth, int attempt, const unsigned int* group_indices, size_t group_index_count, const unsigned int* simplified_indices, size_t simplified_index_count, float error, float pruned_extent, const unsigned char* locks, float* prune_budget, float* result_bound, int winner);
  	void* verify_group_context;
  
  	// optional per-vertex removal cost for simplify_prune_unlocked: the extent of the vertex's component (a component costs the
-@@ -167,6 +172,7 @@
+@@ -167,6 +177,7 @@
  enum
  {
  	CLOD_SIMPLIFY_PRUNED = 1 << 1, // simplify_prune_unlocked removed at least one component
@@ -79,7 +95,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  };
  
  // gets called for each group in sequence
-@@ -457,7 +463,7 @@
+@@ -457,7 +468,7 @@
  // a lock the verify hook added for one group (bit 6: meshoptimizer reads bits 0-2 only, lockBoundary's scratch is bit 7)
  #define CLOD_LOCK_VERIFY (1 << 6)
  
@@ -88,7 +104,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  {
  	// the group's positions, numbered locally
  	std::vector<unsigned int> pos(indices.size());
-@@ -551,18 +557,17 @@
+@@ -551,18 +562,17 @@
  
  	std::sort(order.begin(), order.end(), [&](unsigned int a, unsigned int b) { return cost[a] < cost[b] || (cost[a] == cost[b] && a < b); });
  
@@ -111,7 +127,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  			break;
  		removed[c] = 1;
  		remaining -= outputTris[c] * 3;
-@@ -589,14 +594,58 @@
+@@ -589,14 +599,58 @@
  	pruned.erase(std::unique(pruned.begin(), pruned.end()), pruned.end());
  }
  
@@ -171,7 +187,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  
  	std::vector<unsigned int> lod(indices.size());
  
-@@ -613,44 +662,43 @@
+@@ -613,44 +667,43 @@
  		    mesh.vertex_attributes, mesh.vertex_attributes_stride, mesh.attribute_weights, mesh.attribute_count,
  		    &locks[0], target_count, FLT_MAX, options | meshopt_SimplifyPermissive, error));
  
@@ -241,7 +257,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  	return lod;
  }
  
-@@ -663,17 +711,43 @@
+@@ -663,17 +716,66 @@
  #define CLOD_VERIFY_MAX_RETRIES 4
  #endif
  
@@ -254,12 +270,35 @@ in the build tree, after 0004; the vendored file itself is never edited.
 +	// the current result is the prune's clause (2) of the collapses' result (at most one re-prune per simplified result)
 +	bool repruned = false;
 +
++	// THE BEST ATTEMPT WINS: the kept result is the verified attempt with the lowest bound (ties: the smaller result, then the
++	// earlier attempt), never simply the last one — a retry under added locks can come out worse than what it replaced
++	struct Attempt
++	{
++		std::vector<unsigned int> simplified;
++		std::vector<unsigned int> pruned;
++		float error, pruned_extent, bound;
++		unsigned int flags;
++		int attempt;
++	} best = {std::vector<unsigned int>(), std::vector<unsigned int>(), 0.f, 0.f, FLT_MAX, 0, -1};
++
  	for (int attempt = 0;; ++attempt)
  	{
 -		const unsigned char* extra = mesh.verify_group(mesh.verify_group_context, depth, attempt, &merged[0], merged.size(), simplified.data(), simplified.size(), groupError(config, merged_error, error), pruned_extent);
 -		if (!extra || attempt >= CLOD_VERIFY_MAX_RETRIES)
-+		float budget = -1.f;
-+		const unsigned char* extra = mesh.verify_group(mesh.verify_group_context, depth, attempt, &merged[0], merged.size(), simplified.data(), simplified.size(), groupError(config, merged_error, error), pruned_extent, &locks[0], &budget);
++		float budget = -1.f, bound = FLT_MAX;
++		const unsigned char* extra = mesh.verify_group(mesh.verify_group_context, depth, attempt, &merged[0], merged.size(), simplified.data(), simplified.size(), groupError(config, merged_error, error), pruned_extent, &locks[0], &budget, &bound, -1);
++
++		if (best.attempt < 0 || bound < best.bound || (bound == best.bound && simplified.size() < best.simplified.size()))
++		{
++			best.simplified = simplified;
++			best.pruned = pruned;
++			best.error = error;
++			best.pruned_extent = pruned_extent;
++			best.bound = bound;
++			best.flags = flags;
++			best.attempt = attempt;
++		}
++
 +		if (attempt >= CLOD_VERIFY_MAX_RETRIES)
  			break;
  
@@ -288,7 +327,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  		// a vertex of a pruned component the caller asks to lock: the prune removed a piece the caller would not accept
  		for (unsigned int v : pruned)
  			if (extra[v] & ~locks[v])
-@@ -690,7 +764,8 @@
+@@ -690,13 +792,24 @@
  			}
  		}
  
@@ -296,9 +335,26 @@ in the build tree, after 0004; the vendored file itself is never edited.
 +		simplified = simplify(config, mesh, merged, locks, remap, target_size, &error, &flags, pruned, &pruned_extent, &collapsed);
 +		repruned = false;
  		if (simplified.size() > merged.size() * config.simplify_threshold)
- 			break; // the added locks got the group stuck; the caller makes it terminal
+-			break; // the added locks got the group stuck; the caller makes it terminal
++			break; // the added locks got the group stuck: this attempt is not verified (an earlier one is kept)
  	}
-@@ -758,7 +833,6 @@
+ 
+ 	for (size_t k = saved.size(); k > 0; --k)
+ 		locks[saved[k - 1].first] = saved[k - 1].second;
++
++	// the kept attempt, and the hook told which one it is
++	simplified.swap(best.simplified);
++	pruned.swap(best.pruned);
++	error = best.error;
++	pruned_extent = best.pruned_extent;
++	flags = best.flags;
++
++	float budget = -1.f, bound = FLT_MAX;
++	mesh.verify_group(mesh.verify_group_context, depth, -1, &merged[0], merged.size(), simplified.data(), simplified.size(), groupError(config, merged_error, error), pruned_extent, &locks[0], &budget, &bound, best.attempt);
+ }
+ 
+ static int outputGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<Cluster>& clusters, const std::vector<int>& group, const clodBounds& simplified, int depth, void* output_context, clodOutput output_callback, unsigned int simplify_flags = 0, unsigned int locked_dropped = 0, unsigned int pruned_relocked = 0)
+@@ -758,7 +871,6 @@
  	config.simplify_permissive = true;
  	config.simplify_fallback_permissive = false; // note: by default we run in permissive mode, but it's also possible to disable that and use it only as a fallback
  	config.simplify_prune_unlocked = false;
@@ -306,7 +362,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  
  	return config;
  }
-@@ -856,11 +930,13 @@
+@@ -856,11 +968,13 @@
  			unsigned int flags = 0, pruned_relocked = 0;
  			float pruned_extent = 0.f;
  			std::vector<unsigned int> pruned;

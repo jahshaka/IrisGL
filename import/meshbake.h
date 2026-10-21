@@ -420,6 +420,10 @@ public:
         /// under the verify's budget, removed a piece (CLOD_SIMPLIFY_REPRUNED).
         QVector<quint8> groupVerifyOutcome;
         int    repruneGroups = 0;
+        /// THE BEST ATTEMPT WINS (ATOM-7, patch 0005): `groupsKeptEarlier` = groups whose kept result is not their last
+        /// attempt (a retry came out worse); `handOnRecomputed` = winners whose hand-on was recomputed from their indices.
+        int    groupsKeptEarlier = 0;
+        int    handOnRecomputed = 0;
         int    prunedGroups = 0;
         int    lockDroppedGroups = 0;
         int    prunedRelocked = 0;

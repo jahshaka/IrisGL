@@ -4401,13 +4401,20 @@ public:
 
     static const unsigned char *hook(void *context, int depth, int attempt, const unsigned *group, size_t groupCount,
                                      const unsigned *simplified, size_t simplifiedCount, float error, float prunedExtent,
-                                     const unsigned char *locks, float *pruneBudget)
+                                     const unsigned char *locks, float *pruneBudget, float *resultBound,
+                                     int winner)
     {
         GroupVerifier *self = static_cast<GroupVerifier *>(context);
         self->mDepth = depth;
         self->mPrunedExtent = prunedExtent;
         (void)locks;
-        return self->verify(attempt, group, groupCount, simplified, simplifiedCount, error, pruneBudget);
+        if (attempt < 0) {   // THE BEST ATTEMPT WON: commit it (patch 0005's final call)
+            const auto t0 = std::chrono::steady_clock::now();
+            self->commitWinner(winner, simplified, simplifiedCount);
+            self->mVerifyMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            return nullptr;
+        }
+        return self->verify(attempt, group, groupCount, simplified, simplifiedCount, error, pruneBudget, resultBound);
     }
 
     /// How a group's verify ended (per output group, for the level table).
@@ -4455,6 +4462,8 @@ public:
 
     void fill(MeshBake::ClusterDagStats *stats) const
     {
+        stats->groupsKeptEarlier = mKeptEarlier;
+        stats->handOnRecomputed = mHandOnRecomputed;
         stats->groupRetries = mTotalRetries;
         stats->groupsUnconverged = mUnconverged;
         stats->groupsMadeTerminal = mTerminal;
@@ -4474,18 +4483,18 @@ private:
     }
 
     const unsigned char *verify(int attempt, const unsigned *group, size_t groupCount, const unsigned *simplified,
-                                size_t simplifiedCount, float error, float *pruneBudget)
+                                size_t simplifiedCount, float error, float *pruneBudget, float *resultBound)
     {
         const auto t0 = std::chrono::steady_clock::now();
         const unsigned char *answer = verifyTimed(attempt, group, groupCount, simplified, simplifiedCount, error,
-                                                  pruneBudget);
+                                                  pruneBudget, resultBound);
         mVerifyMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         return answer;
     }
 
     const unsigned char *verifyTimed(int attempt, const unsigned *group, size_t groupCount,
                                      const unsigned *simplified, size_t simplifiedCount, float error,
-                                     float *pruneBudget)
+                                     float *pruneBudget, float *resultBound)
     {
         const size_t inputTris = groupCount / 3;
         if (attempt == 0) {
@@ -4497,6 +4506,9 @@ private:
             mRegionV.clear();
             mHostOf.clear();
             mChildRef = 0.0f;
+            mAttemptBound.clear();
+            mAttemptOffended.clear();
+            mAttemptEmpty.clear();
             for (size_t i = 0; i < groupCount; ++i) {
                 const unsigned v = group[i];
                 if (mRegionAt[v] != mRegionStamp) {
@@ -4525,10 +4537,36 @@ private:
         mPendingValid = true;
         mPending.clear();
         mPendingTris.clear();
+        mPendingFrom = -1;
         mPendingBound = 0.0f;
         mLastOffended = false;
         mLastEmpty = simplifiedCount < 3;
-        if (simplifiedCount < 3 || mRegionV.empty()) return nullptr;
+        if (mAttemptBound.size() <= size_t(attempt)) {
+            mAttemptBound.resize(size_t(attempt) + 1, 0.0f);
+            mAttemptOffended.resize(size_t(attempt) + 1, 0u);
+            mAttemptEmpty.resize(size_t(attempt) + 1, 0u);
+        }
+        mAttemptEmpty[size_t(attempt)] = mLastEmpty ? 1u : 0u;
+
+        // THE DOUBLING LAW's reference: the children's measured error, or at depth 0 clusterlod's estimate.
+        const float reference = std::max(mChildRef > 0.0f ? mChildRef : error, mFloorLen);
+        const float lockExact = kDagLockFactor * reference;
+        const float lockSampled = lockExact / lodchain::kBoundMargin;
+        // THE BEST ATTEMPT WINS (patch 0005): every attempt answers its bound — the error it hands up (`bound` below),
+        // never under the law the group is held to (the first attempt's lock bound), so every result within the law
+        // ties and clusterlod keeps the smaller one; a retry past it is kept only where it is better than what it
+        // replaced.
+        if (attempt == 0) mLawBound = lockExact;
+        if (simplifiedCount < 3 || mRegionV.empty()) {
+            // AN EMPTY RESULT loses every island of its region: it hands up the largest (the measurement's charge).
+            float lost = 0.0f;
+            for (unsigned v : mRegionV)
+                if (mIslands.compOf[v] < mIslands.count()) lost = std::max(lost, mIslands.capOf[v]);
+            mAttemptBound[size_t(attempt)] = mPendingBound = std::max(lost, mPrunedExtent);
+            *resultBound = std::max(mPendingBound, mLawBound);
+            mPendingFrom = attempt;
+            return nullptr;
+        }
 
         ++mKeptStamp;
         for (size_t i = 0; i < simplifiedCount; ++i) mKeptAt[simplified[i]] = mKeptStamp;
@@ -4536,21 +4574,9 @@ private:
         for (size_t i = 0; i < mRegionV.size(); ++i)
             if (mKeptAt[mRegionV[i]] != mKeptStamp) removed.push_back(unsigned(i));
 
-        // THE DOUBLING LAW's reference: the children's measured error, or at depth 0 clusterlod's estimate.
-        const float reference = std::max(mChildRef > 0.0f ? mChildRef : error, mFloorLen);
-        const float lockExact = kDagLockFactor * reference;
-        const float lockSampled = lockExact / lodchain::kBoundMargin;
         const std::vector<unsigned> sIdx(simplified, simplified + simplifiedCount);
-        Vec3 glo = vertexOf(mPositions, mPosComps, sIdx[0]), ghi = glo;
-        const auto grow = [&](unsigned v) {
-            const Vec3 p = vertexOf(mPositions, mPosComps, v);
-            glo = Vec3(std::min(glo.x(), p.x()), std::min(glo.y(), p.y()), std::min(glo.z(), p.z()));
-            ghi = Vec3(std::max(ghi.x(), p.x()), std::max(ghi.y(), p.y()), std::max(ghi.z(), p.z()));
-        };
-        for (unsigned v : mRegionV) grow(v);
-        for (unsigned v : sIdx) grow(v);
         surface::TriangleGrid gridS;
-        gridS.build(mPositions, mPosComps, sIdx, glo, ghi, soupGridRes(mPositions, mPosComps, sIdx, glo, ghi));
+        buildGrid(sIdx, gridS);
 
         // Each loop gathers its offenders per chunk (region indices), in chunk order.
         std::vector<unsigned> offenders;
@@ -4653,23 +4679,11 @@ private:
         // THE HAND-ON, for the result the group keeps (computed only when the verify
         // answers NULL — a retried result is never kept, a stuck one is terminal): every
         // removed vertex goes to the simplified triangle it stands nearest.
+        float bound = 0.0f;   // THE CHILDREN'S ERROR this result hands up (set below, before any answer)
         const auto handOn = [&]() {
-            // THE CHILDREN'S ERROR the result hands up: its deformation, raised by every island it has lost.
-            mPendingBound = std::max(vertexTerm, droppedMax);
-            mPendingTris.reserve(simplifiedCount / 3);
-            for (size_t t = 0; t + 2 < simplifiedCount; t += 3) mPendingTris.push_back(triKeyOf(simplified + t));
-            std::vector<unsigned> nearestTri(removed.size(), 0u);
-            bakepool::forRange(bakepool::Range(removed.size(), kVerifyGrain), mWidth,
-                               [&](size_t, size_t begin, size_t end, int slot) {
-                                   for (size_t i = begin; i < end; ++i)
-                                       gridS.closest(mQueries[size_t(slot)],
-                                                     vertexOf(mPositions, mPosComps, mRegionV[removed[i]]), nullptr,
-                                                     nullptr, &nearestTri[i]);
-                               });
-            const size_t sTris = simplifiedCount / 3;
-            for (size_t i = 0; i < removed.size(); ++i)
-                mPending.emplace_back(triKeyOf(simplified + std::min<size_t>(nearestTri[i], sTris - 1) * 3),
-                                      mRegionV[removed[i]]);
+            mPendingBound = bound;
+            fillHandOn(gridS, removed, simplified, simplifiedCount);
+            mPendingFrom = attempt;
             return nullptr;
         };
 
@@ -4680,6 +4694,7 @@ private:
         //    facet's maximum, so a facet within lockExact / margin keeps both the samples
         //    and the exact walk within the lock's bound, whatever points the samples are.
         std::vector<unsigned> lostIdx;
+        std::vector<float> facetReach;   // per lost facet: what the decision walk reached (island-capped)
         for (unsigned ri : removed)
             for (unsigned t : mTrisByAnchor[mRegionV[ri]]) {
                 const unsigned b = mBase[t * 3 + 1], c = mBase[t * 3 + 2];
@@ -4687,6 +4702,7 @@ private:
                 if (mKeptAt[b] == mKeptStamp || mKeptAt[c] == mKeptStamp) continue;
                 lostIdx.insert(lostIdx.end(), { mBase[t * 3], b, c });
             }
+        facetReach.assign(lostIdx.size() / 3, 0.0f);
         gather(lostIdx.size() / 3, [&](size_t t, surface::TriangleGrid::Query &q, std::vector<unsigned> &found) {
             const unsigned v0 = lostIdx[t * 3];
             if (!(mIslands.capOf[v0] > lockSampled)) return;
@@ -4700,9 +4716,17 @@ private:
                                          return nearestOn(mPositions, mPosComps, gridS, sIdx, q, p, tri, within);
                                      },
                                      SIZE_MAX, /*decideOnly=*/true);   // only the decision is read
+            facetReach[t] = std::isfinite(m) ? std::min(m, mIslands.capOf[v0]) : 0.0f;
             if (std::min(m, mIslands.capOf[v0]) > lockSampled)
                 for (size_t k = 0; k < 3; ++k) found.push_back(mRegionIdx[lostIdx[t * 3 + k]]);
         });
+
+        // THE BOUND THIS RESULT HANDS UP (the children's error of the next level, and its score among the attempts):
+        // its deformation raised by the prune's price, every island it has lost, and what the lost-facet decision reached.
+        bound = std::max(vertexTerm, droppedMax);
+        for (float f : facetReach) bound = std::max(bound, f);
+        mAttemptBound[size_t(attempt)] = bound;
+        *resultBound = std::max(bound, mLawBound);
 
         // 3. AN ISLAND BIGGER THAN THE GROUP'S BOUND IS NOT DROPPED (DAG-LOCK-1, the
         //    chain's rule), PART BY PART: a level-0 component bigger than the bound that
@@ -4742,6 +4766,7 @@ private:
 
         if (offenders.empty()) return handOn();
         mLastOffended = true;
+        mAttemptOffended[size_t(attempt)] = 1u;
         // Past the retries the measurement charges it. By ATTEMPT (clusterlod's count): a re-prune is an attempt too, and
         // the last attempt's answer is the result the group keeps — it must hand on.
         if (attempt >= kGroupRetries) return handOn();
@@ -4807,6 +4832,71 @@ private:
         return mLock.data();
     }
 
+    /// The grid over a result's triangles, its box grown over the group's region (the verify's and the recompute's).
+    void buildGrid(const std::vector<unsigned> &sIdx, surface::TriangleGrid &gridS) const
+    {
+        Vec3 glo = vertexOf(mPositions, mPosComps, sIdx[0]), ghi = glo;
+        const auto grow = [&](unsigned v) {
+            const Vec3 p = vertexOf(mPositions, mPosComps, v);
+            glo = Vec3(std::min(glo.x(), p.x()), std::min(glo.y(), p.y()), std::min(glo.z(), p.z()));
+            ghi = Vec3(std::max(ghi.x(), p.x()), std::max(ghi.y(), p.y()), std::max(ghi.z(), p.z()));
+        };
+        for (unsigned v : mRegionV) grow(v);
+        for (unsigned v : sIdx) grow(v);
+        gridS.build(mPositions, mPosComps, sIdx, glo, ghi, soupGridRes(mPositions, mPosComps, sIdx, glo, ghi));
+    }
+
+    /// THE HAND-ON of a result the group keeps: every removed region vertex to the result's triangle it stands
+    /// nearest, and the result's triangles (for their `mTriBound` record).
+    void fillHandOn(surface::TriangleGrid &gridS, const std::vector<unsigned> &removed, const unsigned *simplified,
+                    size_t simplifiedCount)
+    {
+        mPending.clear();
+        mPendingTris.clear();
+        mPendingTris.reserve(simplifiedCount / 3);
+        for (size_t t = 0; t + 2 < simplifiedCount; t += 3) mPendingTris.push_back(triKeyOf(simplified + t));
+        std::vector<unsigned> nearestTri(removed.size(), 0u);
+        bakepool::forRange(bakepool::Range(removed.size(), kVerifyGrain), mWidth,
+                           [&](size_t, size_t begin, size_t end, int slot) {
+                               for (size_t i = begin; i < end; ++i)
+                                   gridS.closest(mQueries[size_t(slot)],
+                                                 vertexOf(mPositions, mPosComps, mRegionV[removed[i]]), nullptr,
+                                                 nullptr, &nearestTri[i]);
+                           });
+        const size_t sTris = simplifiedCount / 3;
+        for (size_t i = 0; i < removed.size(); ++i)
+            mPending.emplace_back(triKeyOf(simplified + std::min<size_t>(nearestTri[i], sTris - 1) * 3),
+                                  mRegionV[removed[i]]);
+    }
+
+    /// THE BEST ATTEMPT WON (patch 0005's final call): the group outputs attempt `winner`'s result. Its hand-on is
+    /// the one computed when it answered when that attempt was the last to hand on; otherwise (an earlier attempt
+    /// beat the retries after it, or the winner answered with locks) it is recomputed from the winner's indices.
+    void commitWinner(int winner, const unsigned *simplified, size_t simplifiedCount)
+    {
+        if (winner < 0 || size_t(winner) >= mAttemptBound.size()) return;
+        mPendingValid = true;
+        mLastOffended = mAttemptOffended[size_t(winner)] != 0u;
+        mLastEmpty = mAttemptEmpty[size_t(winner)] != 0u;
+        mPendingBound = mAttemptBound[size_t(winner)];
+        if (winner + 1 < int(mAttemptBound.size())) ++mKeptEarlier;
+        if (mPendingFrom == winner) return;
+        ++mHandOnRecomputed;
+        mPending.clear();
+        mPendingTris.clear();
+        if (simplifiedCount < 3) return;   // an empty result hands nothing on
+        ++mKeptStamp;
+        for (size_t i = 0; i < simplifiedCount; ++i) mKeptAt[simplified[i]] = mKeptStamp;
+        std::vector<unsigned> removed;
+        for (size_t i = 0; i < mRegionV.size(); ++i)
+            if (mKeptAt[mRegionV[i]] != mKeptStamp) removed.push_back(unsigned(i));
+        const std::vector<unsigned> sIdx(simplified, simplified + simplifiedCount);
+        surface::TriangleGrid gridS;
+        buildGrid(sIdx, gridS);
+        fillHandOn(gridS, removed, simplified, simplifiedCount);
+        mPendingFrom = winner;
+    }
+
     const float *mPositions;
     int mPosComps;
     const std::vector<unsigned> &mBase;
@@ -4832,7 +4922,12 @@ private:
     /// (`mChildRef`) is the largest over its input triangles.
     std::unordered_map<TriKey, float, TriKeyHash> mTriBound;
     std::vector<TriKey> mPendingTris;
-    float mPendingBound = 0.0f, mChildRef = 0.0f;
+    float mPendingBound = 0.0f, mChildRef = 0.0f, mLawBound = 0.0f;
+    /// Per attempt of the current group (THE BEST ATTEMPT WINS): its bound, whether it offended, whether it was
+    /// empty; `mPendingFrom` = the attempt whose hand-on `mPending` holds (-1: none).
+    std::vector<float> mAttemptBound;
+    std::vector<unsigned char> mAttemptOffended, mAttemptEmpty;
+    int mPendingFrom = -1, mKeptEarlier = 0, mHandOnRecomputed = 0;
     bool mPendingValid = false, mLastOffended = false, mLastEmpty = false;
     int mRetries = 0, mTotalRetries = 0, mUnconverged = 0, mTerminal = 0, mLockedVertices = 0, mShared = 0, mSplit = 0;
     std::array<int, kGroupRetries + 1> mRetryHistogram {};
