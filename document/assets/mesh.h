@@ -78,7 +78,7 @@ struct MeshMaterialData
     float roughnessFactor = 0.5f;
     /// KHR_materials_unlit: the source says this surface is NOT lit. Imports as
     /// PbrMaterial shadingModel 1 (the engine's Unlit family) — see
-    /// BuiltinMaterials::fromMeshData for what carries the colour there.
+    /// iris::materialFromMeshData (document/materials/meshmaterial.h) for what carries the colour there.
     bool unlit = false;
     /// glTF `doubleSided` (and every other format's two-sided flag), as assimp's
     /// AI_MATKEY_TWOSIDED (CULL-MODE-1): the import writes it onto the MeshNode

@@ -336,6 +336,7 @@ set(SRCS
     document/scenegraph/particlesystemnode.cpp
     core/math/mathhelper.cpp
     document/materials/pbrmaterial.cpp
+    document/materials/meshmaterial.cpp
     document/animation/propertyanim.cpp
     document/scenegraph/lightnode.cpp
     document/scenegraph/decalnode.cpp
@@ -409,6 +410,7 @@ set (HEADERS
     core/colorjson.h
     document/scenegraph/particlesystemnode.h
     document/materials/pbrmaterial.h
+    document/materials/meshmaterial.h
     document/animation/propertyanim.h
     document/animation/animableproperty.h
     document/assets/skeleton.h
