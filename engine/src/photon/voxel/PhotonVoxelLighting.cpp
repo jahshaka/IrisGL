@@ -52,6 +52,8 @@ THE SOFTWARE.
 #include "OgreTextureGpuManager.h"
 #include "Vao/OgreConstBufferPacked.h"
 #include "Vao/OgreVaoManager.h"
+#include "Vao/OgreUavBufferPacked.h"
+#include "OgreDescriptorSetUav.h"
 
 #include <map>
 
@@ -273,6 +275,13 @@ namespace Ogre
         HlmsManager *hlmsManager = mVoxelizer->getHlmsManager();
         hlmsManager->destroySamplerblock( mSamplerblockTrilinear );
         mSamplerblockTrilinear = 0;
+
+        mEnergyTicket.reset();
+        if( mEnergyBuffer )
+        {
+            vaoManager->destroyUavBuffer( mEnergyBuffer );
+            mEnergyBuffer = nullptr;
+        }
 
         if( !mVoxelizerListenersRemoved )
         {
@@ -940,6 +949,69 @@ namespace Ogre
         renderSystem->debugAnnotationPop();
     }
     //-------------------------------------------------------------------------
+    // Jahshaka (PHOTON-5 stage 5): one sum of the current light volume (level 0) into range `slot`
+    // of the partials buffer, one float per 8 x 8 x 8 block (PhotonVoxelEnergy_cs.glsl).
+    void PhotonVoxelLighting::dispatchEnergy( uint32 slot )
+    {
+        TextureGpu *volume = mLightVoxel[0];
+        if( !volume )
+            return;
+        RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
+        VaoManager *vaoManager = renderSystem->getVaoManager();
+        HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
+        if( !mEnergyJob )
+            mEnergyJob = hlmsCompute->findComputeJob( "Photon/VoxelEnergy" );
+        const uint32 gx = ( volume->getWidth() + 7u ) / 8u;
+        const uint32 gy = ( volume->getHeight() + 7u ) / 8u;
+        const uint32 gz = ( volume->getDepth() + 7u ) / 8u;
+        const uint32 groups = gx * gy * gz;
+        const uint32 alignFloats = std::max( vaoManager->getUavBufferAlignment(), 16u ) / 4u;
+        const uint32 stride = ( groups + alignFloats - 1u ) / alignFloats * alignFloats;
+        // kMaxBouncePasses (8) + the base: nine ranges.
+        if( !mEnergyBuffer || stride != mEnergyStride )
+        {
+            mEnergyTicket.reset();
+            if( mEnergyBuffer )
+                vaoManager->destroyUavBuffer( mEnergyBuffer );
+            mEnergyStride = stride;
+            mEnergyGroups = groups;
+            std::vector<float> zeros( size_t( stride ) * 9u, 0.0f );
+            mEnergyBuffer = vaoManager->createUavBuffer( zeros.size(), sizeof( float ), 0, zeros.data(),
+                                                         false );
+        }
+        if( slot >= 9u )
+            return;
+        mEnergyJob->setNumThreadGroups( gx, gy, gz );
+        DescriptorSetTexture2::TextureSlot texSlot( DescriptorSetTexture2::TextureSlot::makeEmpty() );
+        texSlot.texture = volume;
+        mEnergyJob->setTexture( 0, texSlot, mSamplerblockTrilinear );
+        DescriptorSetUav::BufferSlot bufSlot = DescriptorSetUav::BufferSlot::makeEmpty();
+        bufSlot.buffer = mEnergyBuffer;
+        bufSlot.offset = size_t( slot ) * stride * sizeof( float );
+        bufSlot.sizeBytes = size_t( groups ) * sizeof( float );
+        bufSlot.access = ResourceAccess::Write;
+        mEnergyJob->_setUavBuffer( 0, bufSlot );
+        jahshaka::engine::detail::photonDispatch( hlmsCompute, mEnergyJob, renderSystem );
+    }
+    //-------------------------------------------------------------------------
+    bool PhotonVoxelLighting::takeBounceEnergy( std::vector<double> &sums )
+    {
+        sums.clear();
+        if( !mEnergyTicket.get() )
+            return false;
+        const float *f = static_cast<const float *>( mEnergyTicket->map() );
+        for( uint32 k = 0u; k < mEnergySums; ++k )
+        {
+            double s = 0.0;
+            for( uint32 g = 0u; g < mEnergyGroups; ++g )
+                s += double( f[size_t( k ) * mEnergyStride + g] );
+            sums.push_back( s );
+        }
+        mEnergyTicket->unmap();
+        mEnergyTicket.reset();
+        return true;
+    }
+    //-------------------------------------------------------------------------
     void PhotonVoxelLighting::runBounce( bool envOnly )
     {
         RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
@@ -1475,6 +1547,13 @@ namespace Ogre
         if( skyPass )
             runBounce( true );
 
+        // Jahshaka (PHOTON-5 stage 5): THE BOUNCE ENERGY, when asked and none is in flight - the
+        // base's sum, then each pass's (setMeasureBounceEnergy).
+        const bool measure = mMeasureEnergy && numBounces > 0u && !mEnergyTicket.get() &&
+                             getAllowMultipleBounces();
+        if( measure )
+            dispatchEnergy( 0u );
+
         if( numBounces > 0u )
         {
             if( !getAllowMultipleBounces() )
@@ -1484,7 +1563,17 @@ namespace Ogre
                              "PhotonVoxelLighting::update" );
             }
             for( uint32 i = 0u; i < numBounces; ++i )
+            {
                 runBounce();
+                if( measure )
+                    dispatchEnergy( i + 1u );
+            }
+        }
+        if( measure && mEnergyBuffer )
+        {
+            mEnergySums = numBounces + 1u;
+            mEnergyTicket = mEnergyBuffer->readRequest( 0u, size_t( mEnergySums ) * mEnergyStride,
+                                                        /*accurateTracking=*/false );
         }
 
         if( mDebugVoxelVisualizer )

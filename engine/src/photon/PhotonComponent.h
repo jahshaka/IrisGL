@@ -363,6 +363,16 @@ public:
         /// when the dirty path marked it (G1), so a capture can separate the
         /// cost of walking around a scene from the cost of changing it.
         GiStaleReason pendingReason = GiStaleReason::Camera;
+        /// BOUNCES TO A RESIDUAL (PHOTON-5 stage 5): the series' MEASURED contraction r = E_2 / E_1
+        /// (the energies the first two bounce passes added, PhotonVoxelLighting::takeBounceEnergy),
+        /// negative until measured; the two energies; the passes the volume's light was last
+        /// injected with; whether a measurement is in flight and the writer frame that recorded it.
+        float bounceContraction = -1.0f;
+        double bounceE1 = 0.0, bounceE2 = 0.0;
+        Ogre::uint32 bouncePassesApplied = 0u;
+        bool bounceFirstPassAdds = true;
+        bool bounceEnergyPending = false;
+        unsigned long long bounceEnergyFrame = 0ull;
         /// THE TABLE THE REBUILD WILL READ (ENGINE-UPGRADE-ASYNC-3 stage 1). The GI step's Compute region
         /// reads the instance table the LAST frame committed, which does not carry an edit made since
         /// (the dirty path: a moved still, a spawn, a converted material). `editSince` = the writer
@@ -1220,12 +1230,19 @@ private:
     /// Re-centres one cascade's region on ITS cell lattice around `camPos` and
     /// records the camera it was placed for. Does not voxelise.
     void recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos);
-    /// Extra bounce passes for cascade `idx` — the DOCUMENT's own count, on
-    /// every cascade alike (PHOTON-M1 retired the pin's "a coarser cell gets
-    /// more bounces" stabilisation: a bounce adds energy, it does not recover
-    /// occlusion). 0 when the document asks for a single indirect bounce,
-    /// which is the default.
+    /// Extra bounce passes for cascade `idx` (PHOTON-5 stage 5: BOUNCES TO A RESIDUAL). The
+    /// document's count is the MINIMUM (numBounces - 1 passes; 0 when it asks for a single
+    /// indirect bounce, the default); the series' measured contraction r (VctCascade::
+    /// bounceContraction) adds passes until what is left of it is under kBounceResidual of the
+    /// first pass's energy: n = ceil( log( eps ( 1 - r ) ) / log r ), at most kMaxBouncePasses.
+    /// A cascade not yet measured runs two (the two increments the measurement needs).
+    /// (PHOTON-M1 retired the pin's "a coarser cell gets more bounces" stabilisation: the count
+    /// follows each cascade's own measured series, not its cell size.)
     Ogre::uint32 cascadeBounces(size_t idx) const;
+    /// The measurements in flight that the device has finished (the dynamic-buffer multiplier's
+    /// frames old - never a wait): each cascade's r from them, and a chain light tick owed when a
+    /// cascade now asks for more passes than its light was injected with (PHOTON-5 stage 5).
+    void harvestBounceEnergy();
     /// A CASCADE REBUILD LEFT THE CHAIN OFF ITS FIXED POINT (LAMPREST-3). A
     /// rebuild injects ONE cascade once, over the radiance it held somewhere
     /// else, and the GI scheduler's cadence never ticks for a camera walk — so the

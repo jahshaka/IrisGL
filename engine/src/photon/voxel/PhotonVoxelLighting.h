@@ -34,8 +34,10 @@ THE SOFTWARE.
 #include "OgreResourceTransition.h"
 #include "OgreShaderParams.h"
 #include "OgreTextureGpuListener.h"
+#include "Vao/OgreAsyncTicket.h"
 
 #include <algorithm>
+#include <vector>
 
 #include "SceneLightList.h"
 
@@ -119,6 +121,20 @@ namespace Ogre
 
         HlmsComputeJob *mLightVctBounceInject;
         TextureGpu     *mLightBounce;
+
+        /// Jahshaka (PHOTON-5 stage 5): THE BOUNCE ENERGY - the light volume's sum after the base
+        /// (the injection and the sky pass) and after each bounce pass, one range of per-workgroup
+        /// partials per sum in mEnergyBuffer, read back through mEnergyTicket (see
+        /// setMeasureBounceEnergy). The job is shared by name ("Photon/VoxelEnergy"), its bindings
+        /// asserted per dispatch.
+        bool              mMeasureEnergy = false;
+        HlmsComputeJob   *mEnergyJob = nullptr;
+        UavBufferPacked  *mEnergyBuffer = nullptr;
+        AsyncTicketPtr    mEnergyTicket;
+        uint32            mEnergyGroups = 0u;     ///< partials per sum (the workgroups of one dispatch)
+        uint32            mEnergyStride = 0u;     ///< floats between two sums' ranges (aligned)
+        uint32            mEnergySums = 0u;       ///< sums the ticket in flight holds
+        void              dispatchEnergy( uint32 slot );
 
         /// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): THE DIRECT TERM, KEPT.
         ///
@@ -524,6 +540,19 @@ namespace Ogre
         uint32       positionIndex( uint32 h ) const { return 6u + h; }
 
         const HlmsSamplerblock *getBindTrilinearSamplerblock() { return mSamplerblockTrilinear; }
+
+        /// Jahshaka (PHOTON-5 stage 5): THE BOUNCE ENERGY. With measuring on, the next update() that
+        /// runs bounce passes sums the light volume after its base (the injection and the sky pass)
+        /// and after every pass and requests the sums' read-back on the frame's own submission -
+        /// nothing waits. The series is Jacobi (new = direct + rho G( total )), so sum[k] - sum[k - 1]
+        /// is the energy pass k ADDED, and the ratio of two increments is the series' contraction.
+        /// No new reading is requested while one is in flight.
+        void setMeasureBounceEnergy( bool on ) { mMeasureEnergy = on; }
+        bool bounceEnergyInFlight() const { return mEnergyTicket.get() != 0; }
+        /** Takes the reading in flight: sums[0] the base, sums[k] after pass k. Call it once the
+            frame that recorded it is at least the VaoManager's dynamic-buffer multiplier old: the
+            device has finished that frame by then, so the map never waits. False when none. */
+        bool takeBounceEnergy( std::vector<double> &sums );
 
         const PhotonVoxelizerSourceBase *getVoxelizer() const { return mVoxelizer; }
 

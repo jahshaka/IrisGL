@@ -222,6 +222,23 @@
             ]
         },
 
+        "Photon/VoxelEnergy" :
+        {
+            "threads_per_group" : [4, 4, 4],
+
+            "source" : "PhotonVoxelEnergy_cs",
+            "pieces" : ["CrossPlatformSettings_piece_all"],
+            "inform_shader_of_texture_size" : false,
+            "inform_shader_of_texture_data_change" : true,
+
+            "uav_units" : 1,
+
+            "textures" :
+            [
+                {}
+            ]
+        },
+
         "Photon/MipDown" :
         {
             "threads_per_group" : [4, 4, 4],

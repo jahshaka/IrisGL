@@ -905,7 +905,19 @@ bool PhotonComponent::injectCascade(size_t i) {
     // numBounces 0 = THE DIRECT STORE ALONE (BOUNCES-ZERO-1): no surface re-emits the sky
     // either (the sky pass is a bounce of the sky's light); 1 = the sky and the lamps once.
     lighting->setStoreSkyLight(mGi.numBounces > 0);
-    lighting->update(mSceneMgr, cascadeBounces(i), true /*autoMultiplier*/);
+    // BOUNCES TO A RESIDUAL (PHOTON-5 stage 5): an injection with two passes or more measures the
+    // series it ran (the energies harvestBounceEnergy reads a few frames later), unless a reading
+    // is still in flight.
+    const Ogre::uint32 passes = cascadeBounces(i);
+    const bool measure = passes >= 2u && !lighting->bounceEnergyInFlight();
+    lighting->setMeasureBounceEnergy(measure);
+    lighting->update(mSceneMgr, passes, true /*autoMultiplier*/);
+    lighting->setMeasureBounceEnergy(false);
+    mVctCascades[i].bouncePassesApplied = passes;
+    if (measure && lighting->bounceEnergyInFlight()) {
+        mVctCascades[i].bounceEnergyPending = true;
+        mVctCascades[i].bounceEnergyFrame = frame;
+    }
     stamp = frame;
     if (mGiInjectionCountFrame != frame) {
         mGiInjectionCountFrame = frame;
@@ -1195,8 +1207,12 @@ GiStatus PhotonComponent::giStatus() const {
             // ...AND A RE-SOLVE THE SCHEDULER HOLDS PENDING IS NOT REST (ENGINE-UPGRADE-2B stage 4): it fires
             // once the change has held still for its window, and a picture taken before it is not the scene's
             // answer. A paused budget follows nothing and keeps what it owes for the un-pause (plan()).
-            const bool injectionOwed = mGiSettleStepsOwed > 0 || mGiTickOwed != GiTickOwed::None ||
-                                       (mGiPlan.pendingRefresh && mGi.updateBudget > 0);
+            bool injectionOwed = mGiSettleStepsOwed > 0 || mGiTickOwed != GiTickOwed::None ||
+                                 (mGiPlan.pendingRefresh && mGi.updateBudget > 0);
+            // ...AND A BOUNCE SERIES STILL BEING MEASURED (PHOTON-5 stage 5): its reading may ask for
+            // more passes than the volume was lit with, and the re-injection that answers it changes
+            // the picture (harvestBounceEnergy).
+            for (const VctCascade &c : mVctCascades) injectionOwed = injectionOwed || c.bounceEnergyPending;
             const bool fieldBusy = mIfd && mIfdTotalProbes > 0u &&
                                    (mIfdFollowOwed != 0 || mIfdProbesDone < mIfdTotalProbes ||
                                     (mIfdProbesPerFrame > 0u && st.ifdRefinesOwed > 0u));
@@ -4527,10 +4543,69 @@ static inline long long jahQuantAxis(float pos, float size) {
 //
 // `base` is the document's EXTRA-bounce count (one total bounce = zero extra
 // passes), so the default leaves every cascade at 0 exactly as before.
+// BOUNCES TO A RESIDUAL (PHOTON-5 stage 5). The voxel chain's multi-bounce is the Jacobi series
+// new = direct + rho G( total ) (PhotonVoxelLighting::runBounce), which contracts by rho f per pass:
+// an open scene's series is spent after a pass, an enclosed room's (f near 1) keeps most of its
+// energy for later passes - measured on gi.bounce_residual's room, one bounce read 49 % short of
+// the series' limit. So the pass count is the series', not the tier's: the tier table's bounces
+// column is the MINIMUM, and the contraction measured on the cascade's own volume decides the rest.
+static const Ogre::uint32 kMaxBouncePasses = 8u;
+static const double kBounceResidual = 0.02;   // of the first pass's energy
+
+// What n passes leave of the series E_k = E_1 r^(k-1): E_1 r^n / (1 - r), at most kBounceResidual E_1.
+// r = 0 (the second pass added nothing: surfaces that do not see each other - a floor under the sky)
+// is ONE pass, the first bounce whole; a first pass that added nothing at all is none.
+static Ogre::uint32 bouncePassesFor(double r, bool firstPassAdds) {
+    if (!firstPassAdds) return 0u;
+    if (!(r > 0.0)) return 1u;
+    if (r >= 0.999) return kMaxBouncePasses;
+    const double n = std::ceil(std::log(kBounceResidual * (1.0 - r)) / std::log(r));
+    return Ogre::uint32(std::min(std::max(n, 1.0), double(kMaxBouncePasses)));
+}
+
 Ogre::uint32 PhotonComponent::cascadeBounces(size_t idx) const {
-    (void)idx;
-    // 0 and 1 both run no extra pass: 0 also skips the sky pass (setStoreSkyLight above)
-    return Ogre::uint32(std::max(std::min(mGi.numBounces, 4) - 1, 0));
+    // 0 = the direct store alone: no pass, no sky pass either (setStoreSkyLight above)
+    if (mGi.numBounces <= 0) return 0u;
+    const Ogre::uint32 minPasses =
+        Ogre::uint32(std::min(mGi.numBounces - 1, int(kMaxBouncePasses)));
+    if (idx >= mVctCascades.size()) return minPasses;
+    const VctCascade &c = mVctCascades[idx];
+    if (!(c.bounceContraction >= 0.0f)) return std::max(minPasses, 2u);
+    return std::max(minPasses, bouncePassesFor(double(c.bounceContraction), c.bounceFirstPassAdds));
+}
+
+void PhotonComponent::harvestBounceEnergy() {
+    if (mVctCascades.empty() || !mRoot) return;
+    Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+    if (!rs || !rs->getVaoManager()) return;
+    const unsigned long long age = rs->getVaoManager()->getDynamicBufferMultiplier();
+    const unsigned long long frame = giWriterFrame();
+    bool owe = false;
+    std::vector<double> sums;
+    for (size_t i = 0; i < mVctCascades.size(); ++i) {
+        VctCascade &c = mVctCascades[i];
+        if (!c.lighting || !c.bounceEnergyPending || frame < c.bounceEnergyFrame + age) continue;
+        c.bounceEnergyPending = false;
+        if (!c.lighting->takeBounceEnergy(sums) || sums.size() < 3u) continue;
+        const double e1 = sums[1] - sums[0], e2 = sums[2] - sums[1];
+        const Ogre::uint32 before = cascadeBounces(i);
+        c.bounceE1 = e1;
+        c.bounceE2 = e2;
+        // A FIRST PASS THAT ADDED UNDER A MILLIONTH OF THE BASE added nothing (the sums are float
+        // partials of the whole volume): no bounce to keep.
+        c.bounceFirstPassAdds = e1 > 1e-6 * std::max(sums[0], 0.0) && e1 > 0.0;
+        c.bounceContraction = c.bounceFirstPassAdds ? float(std::min(std::max(e2 / e1, 0.0), 0.999)) : 0.0f;
+        const Ogre::uint32 now = cascadeBounces(i);
+        if (now != before)
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: cascade " + std::to_string(i) + " bounce series E1 " + std::to_string(e1) +
+                " E2 " + std::to_string(e2) + " r " + std::to_string(c.bounceContraction) + " -> " +
+                std::to_string(now) + " passes");
+        if (now > c.bouncePassesApplied) owe = true;
+    }
+    // THE SERIES ASKS FOR MORE THAN THE VOLUME WAS LIT WITH: the chain's light tick re-injects every
+    // cascade, outermost first, at its own count (the one writer, right below in recordCascades).
+    if (owe) refreshGiLighting(false);
 }
 
 size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
@@ -5889,6 +5964,11 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         if (staleTop >= 0) oweChainSettle(size_t(staleTop));
         else               mGiSettlePayableFrames = 0;
     }
+
+    // ---- 2a'. THE BOUNCE SERIES' MEASUREMENTS (PHOTON-5 stage 5) -------------
+    // Harvested at the writer point, before the tick, so a cascade whose series asks for more
+    // passes than it was lit with owes that tick and gets it in this frame.
+    harvestBounceEnergy();
 
     // ---- 2b. THE HOST'S LIGHT TICK, AFTER THE REBUILD (the one writer) ------
     // (PHOTON-WRITER-1; refreshGiLighting says why it is owed rather than run.)
