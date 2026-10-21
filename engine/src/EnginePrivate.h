@@ -863,6 +863,10 @@ constexpr const char *kAtomIdPassId = "atom_id";
 /// ...and of the LATE id pass, the disocclusion half of the two-pass occlusion
 /// (ChainDesc::atomOcclusion): the same recorder with the rejected set.
 constexpr const char *kAtomIdLatePassId = "atom_id_late";
+/// ...and of THE HISTORY'S REBUILD (ATOM-8, R6): after the late pass (and the merge), the occlusion's pyramid built
+/// again from the scene's depth - the first pass's surfaces, the stock ones AND the late pass's - so the next frame's
+/// first cull tests against everything this frame drew (OgreAtomIdPass.cpp recordHistoryPass).
+constexpr const char *kAtomHistoryPassId = "atom_history";
 /// ...and of THE CASTER CUT (ATOM-SHADOWS-1, OgreAtomCasterPass.cpp): the PASS_CUSTOM that
 /// follows every caster scene pass of a shadow node on a device that runs the id pass
 /// (OgreShadow.cpp) and draws the map's Atom casters from the light's own cluster cut.
@@ -1923,7 +1927,8 @@ public:
     X(GatherTemporal, "gather.temporal") /* the screen-probe gather's pixel history */ \
     X(AtomDecode, "atom.decode") /* the screen decode armed (0: the Atom items drawn by nothing) */ \
     X(AtomClusterOcclusion, "atom.clusterOcclusion") /* the cut tests each cluster against depth and pixel centres (0: neither - the exactness A/B door, ATOM-8) */ \
-    X(AtomClusterFootprint, "atom.clusterFootprint") /* the cluster test's footprint in texels a side (4, or 8: one mip finer - the A/B arm, ATOM-8) */ \
+    X(AtomHistoryRebuild, "atom.historyRebuild") /* the occlusion's history pyramid rebuilt after the late pass (0: the late pass's own, built before its draw - the paired arm of its cost, ATOM-8 R6) */ \
+    X(AtomClusterFootprint, "atom.clusterFootprint") /* the cluster test's footprint in texels a side (8 shipped; 4 = the instance test's - the measured arm, ATOM-8) */ \
     X(CardFootprint, "cards.footprintTexels") /* the card read's footprint gate */ \
     X(FieldScroll, "gi.fieldScroll") /* the irradiance field scrolls (0: re-placed whole) */ \
     X(DiffuseConeSkip, "photon.diffuseConeSkip") /* the pixel's cone diffuse only where the field's fallback weight is > 0 */ \

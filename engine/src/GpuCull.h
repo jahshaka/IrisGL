@@ -114,7 +114,10 @@ public:
     /// `noteCutOverflow`) and `sceneNeed`, the SCENE's high-water mark of the indices a
     /// cut asked for (OgreScene::cutIndexNeed) — so a view born into a heavy scene (a
     /// screenshot, a thumbnail: two frames of life) starts at the size the scene needs.
-    bool ensureCut(Ogre::VaoManager *vao, std::string &err, uint32_t sceneNeed = 0u);
+    /// THE COARSE RESERVE (ATOM-8, R8): `rootCutReserve` = the scene's ROOT CUTS summed over its attached slots
+    /// (GpuScene::rootCutIndices: what every object drawn at its coarsest asks for at once - the honest upper bound of
+    /// the overflow arm's need), and the budget grows until the main region holds `sceneNeed` beside it.
+    bool ensureCut(Ogre::VaoManager *vao, std::string &err, uint32_t sceneNeed = 0u, uint32_t rootCutReserve = 0u);
     /// THE COMPACTED INDEX STREAM: the drawn clusters' corners, mesh-local vertex
     /// indices (32-bit), each surviving instance's run contiguous; the id pass binds
     /// it as its index buffer (the identity buffer it replaced is deleted).
@@ -154,8 +157,10 @@ public:
     uint32_t recordedFrame() const { return mRecordedFrame; }
     void noteRecorded(uint32_t frame) { mRecordedFrame = frame; }
     uint32_t cutRecordBudget() const { return mCutRecordBudget; }
-    /// Where the coarse reserve begins: the main region is the first 7/8 of the stream.
-    uint32_t cutMainBudget() const { return mCutIndexBudget - mCutIndexBudget / 8u; }
+    /// Where the coarse reserve begins: the stream less the reserve (ATOM-8 R8: the scene's root cuts, never more than
+    /// half a budget - the budget doubles until it holds the main need beside it, to the ceiling).
+    uint32_t cutMainBudget() const { return mCutIndexBudget - reserveFor(mCutIndexBudget); }
+    uint32_t reserveFor(uint32_t budget) const { return std::min(mRootCutReserve, budget / 2u); }
     /// A TEST DOOR (the overflow's proof): the next budget is `indices`, the scene's
     /// high-water mark is ignored by this list, and overflows still double it.
     void setCutBudgetForTest(uint32_t indices) {
@@ -247,6 +252,7 @@ private:
     uint32_t mCutWantBudget = kCutIndexBudgetFirst;
     bool mCutIgnoreScene = false;
     uint32_t mRecordedFrame = ~0u;
+    uint32_t mRootCutReserve = 0u;
     Ogre::UavBufferPacked *mRejected = nullptr;
     Ogre::UavBufferPacked *mClusterDraws = nullptr;
     Ogre::UavBufferPacked *mClusterIds = nullptr;

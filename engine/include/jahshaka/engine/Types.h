@@ -5206,7 +5206,7 @@ struct AtomDrawStatus {
     unsigned long long cutTriangles = 0ull;
     /// THE PER-CLUSTER OCCLUSION (ATOM-8 stage 1; AtomCutStats' figures, the same read).
     unsigned cutRejected = 0, cutRejectedOverflow = 0, cutPixelCulled = 0, cutLateClusters = 0, cutLateDropped = 0,
-             cutSlackClusters = 0, cutSkyClusters = 0;
+             cutSlackClusters = 0, cutSkyClusters = 0, cutReserveIndices = 0;
     unsigned long long cutSlackTriangles = 0ull, cutSkyTriangles = 0ull;
     /// THE OCCLUSION (ATOM-OCCLUSION-1), from the same view and the same read: whether
     /// its chain culls against the depth pyramid (the door open and the id pass live),
@@ -5271,6 +5271,9 @@ struct AtomCutStats {
     unsigned rejected = 0, rejectedOverflow = 0, pixelCulled = 0, lateClusters = 0, lateDropped = 0,
              slackClusters = 0, skyClusters = 0;
     unsigned long long slackTriangles = 0ull, skyTriangles = 0ull;
+    /// THE COARSE RESERVE (ATOM-8 R8): the indices of the stream kept for the root cuts (the scene's attached slots'
+    /// root cuts, at most half the budget).
+    unsigned reserve = 0;
 };
 
 /// THE CUT PROBE (ATOM-2 stage 1; Scene::armAtomCutProbe / Scene::atomCutProbe): ONE frame of the first view's id-pass
@@ -7624,8 +7627,8 @@ struct GpuCullRequest {
     bool clusterOcclusion = false;
     bool pixelCentreCull = false;
     /// The cluster test's footprint: the pyramid mip where the cluster's rectangle spans at most this many texels a
-    /// side (4 = at most 25 reads; 8 = 81).
-    unsigned clusterFootprint = 4u;
+    /// side (8 = at most 81 reads, the view lists' shipped value; 4 = 25, the instance test's).
+    unsigned clusterFootprint = 8u;
     float viewProjNow[16] = {};
     unsigned viewRect[4] = { 0u, 0u, 0u, 0u };
 };

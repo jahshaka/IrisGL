@@ -665,6 +665,10 @@ public:
     Ogre::UavBufferPacked *clusterBoxBuffer() const { return mClusterBoxBuffer; }
     Ogre::UavBufferPacked *groupBuffer() const { return mGroupBuffer; }
     uint32_t clusterCount() const { return mClusterCount; }
+    /// THE ROOT CUTS OF THE ATTACHED SLOTS (ATOM-8, R8): every reference to a mesh with a DAG counts its root cut's
+    /// indices (the clusters jahRootDrawn draws: the cut at an infinite tolerance), kept at acquire / release /
+    /// setMeshDag - the coarse reserve's honest size (GpuCull::ensureCut).
+    uint32_t rootCutIndices() const { return uint32_t(std::min<uint64_t>(mRootCutIndices, 0xFFFFFFFFull)); }
     /// The most clusters one live mesh carries (the cut's per-instance loop bound).
     uint32_t maxClustersPerMesh() const { return mMaxClustersPerMesh; }
     const GpuMesh &meshEntry(uint32_t index) const { return mMeshMirror[index]; }
@@ -910,7 +914,9 @@ private:
         std::vector<GpuCluster> clusters;
         std::vector<GpuClusterGroup> groups;
         std::vector<GpuClusterBox> boxes;   ///< one a cluster, or empty (every cluster: the sphere's box)
+        uint32_t rootCut = 0u;              ///< the root cut's indices (R8)
     };
+    uint64_t mRootCutIndices = 0u;
     Ogre::UavBufferPacked *mClusterBuffer = nullptr;
     Ogre::UavBufferPacked *mClusterBoxBuffer = nullptr;
     std::vector<GpuClusterBox> mClusterBoxMirror;

@@ -430,6 +430,7 @@ void cycleStats(const AtomPassContext &ctx, AtomIdDevice &d, Ogre::VulkanDevice 
         }
         if (!late) {
             cs.indexBudget = list.cutIndexBudget();
+            cs.reserve = list.reserveFor(list.cutIndexBudget());
             view->setAtomStats(w[4], w[0]);
             // No late read follows on a frame-only chain: the late share is nothing.
             if (!view->chainAtomOcclusion()) view->setAtomLateStats(0ull, 0u, 0u, 0u);
@@ -860,9 +861,10 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         // through THIS frame's matrix, covers no pixel centre of the pass's viewport.
         req.clusterOcclusion = !view->mEngine || view->mEngine->armRegistry().on(ArmId::AtomClusterOcclusion);
         req.pixelCentreCull = req.clusterOcclusion;
-        // THE CLUSTER TEST'S FOOTPRINT (the A/B arm atom.clusterFootprint: 4 texels a side, or 8 - one mip finer).
+        // THE CLUSTER TEST'S FOOTPRINT (the measured arm atom.clusterFootprint: 8 texels a side shipped - one mip
+        // finer than the instance test's 4; ATOM-8 stage 2's A/B earned it).
         req.clusterFootprint = view->mEngine ? unsigned(view->mEngine->armRegistry().value(ArmId::AtomClusterFootprint))
-                                             : 4u;
+                                             : 8u;
         {
             const Ogre::Matrix4 cm = cullMatrixOf(vpm);
             for (int r = 0; r < 4; ++r)
@@ -1084,6 +1086,32 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
     }
 }
 
+/// THE HISTORY'S REBUILD (ATOM-8, R6; OgreChain.cpp addAtomOcclusionPasses): the late pass built the pyramid BEFORE
+/// it drew, so the history it stamped lacks the late surfaces; here, after the late pass (and the stock arm's merge),
+/// the same pyramid is built again from the scene's depth - the history's matrix and shape stand (stamped by the late
+/// pass: the same camera, the same texture). Only where the late pass ran a test (the first pass tested: it may have
+/// drawn), never in a capture, and under the arm atom.historyRebuild.
+void recordHistoryPass(AtomPassContext &ctx) {
+    auto *pass = static_cast<AtomPass *>(ctx.pass);
+    OgreView *view = pass ? atomViewOfPass(pass) : nullptr;
+    if (!view || !view->chainAtomOcclusion() || !view->atomFirstTested()) return;
+    if (view->isCaptureWorkspace(pass->getParentNode()->getWorkspace())) return;
+    if (view->mEngine && !view->mEngine->armRegistry().on(ArmId::AtomHistoryRebuild)) return;
+    const AtomOcclusionHistory &hist = view->atomOcclusionHistory();
+    if (!hist.valid) return;
+    Ogre::TextureGpu *hzb = nullptr, *depth = nullptr;
+    JAH_TRY {
+        const Ogre::CompositorNode *node = pass->getParentNode();
+        hzb = node->getDefinedTexture(Ogre::IdString("jahHzb"));
+        depth = node->getDefinedTexture(Ogre::IdString(kSceneDepthTexture));
+    }
+    catch (const Ogre::Exception &) { hzb = depth = nullptr; }
+    if (!hzb || !depth || hist.width != hzb->getWidth() || hist.height != hzb->getHeight() ||
+        hist.levels != hzb->getNumMipmaps())
+        return;
+    recordOcclusionPyramid(ctx.renderSystem, depth, hzb);
+}
+
 }  // namespace
 
 /// THE MATRIX A CULL TESTS A PYRAMID WITH (cullMatrixOf above), for the caster pass's own pyramids
@@ -1104,6 +1132,7 @@ void registerAtomIdPass() {
     if (AtomPassProvider *p = AtomPassProvider::instance()) {
         p->setRecorder(kAtomIdPassId, [](AtomPassContext &ctx) { recordIdPass(ctx, false); });
         p->setRecorder(kAtomIdLatePassId, [](AtomPassContext &ctx) { recordIdPass(ctx, true); });
+        p->setRecorder(kAtomHistoryPassId, [](AtomPassContext &ctx) { recordHistoryPass(ctx); });
     }
 }
 
@@ -1113,6 +1142,7 @@ void releaseAtomIdPass() {
     if (AtomPassProvider *p = AtomPassProvider::instance()) {
         p->setRecorder(kAtomIdPassId, AtomPassRecorder());
         p->setRecorder(kAtomIdLatePassId, AtomPassRecorder());
+        p->setRecorder(kAtomHistoryPassId, AtomPassRecorder());
     }
     AtomIdDevice *d = idDev();
     if (!d) return;

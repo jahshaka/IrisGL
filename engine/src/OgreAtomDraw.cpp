@@ -609,6 +609,7 @@ AtomDrawStatus OgreScene::atomDrawStatus() {
         st.cutSlackClusters = cs.slackClusters;
         st.cutSlackTriangles = cs.slackTriangles;
         st.cutSkyClusters = cs.skyClusters;
+        st.cutReserveIndices = cs.reserve;
         st.cutSkyTriangles = cs.skyTriangles;
         st.occlusion = v->atomOcclusionStats(st.occluded, st.disoccluded);
         break;

@@ -971,6 +971,20 @@ void addAtomOcclusionPasses(Ogre::CompositorNodeDef *n, const ChainDesc &desc, C
         q->mExecutionMask = kAtomStockExecutionBit;
         q->mProfilingId = "Jahshaka atom id depth merge";
     }
+    // THE HISTORY'S REBUILD (ATOM-8, R6): the pyramid the late pass built before its draw lacks the late surfaces;
+    // built again here from kDepth (both arms: the late pass's own depth in the no-stock arm, the merge's in the stock
+    // one), it is the next frame's history. A chain whose view builds its own pyramid after the opaque pass
+    // (PostFxDesc::hzb, addHzbBuild) already rebuilds it from the complete depth: no second build.
+    if (!(desc.hzb && desc.hzbLevels > 0u)) {
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kAtomStockDepthRtv);
+        t->setNumPasses(1);
+        Ogre::CompositorPassDef *p = t->addPass(Ogre::PASS_CUSTOM, Ogre::IdString(kAtomHistoryPassId));
+        p->mJahReadsGi = false;
+        p->setAllLoadActions(Ogre::LoadAction::Load);
+        p->mStoreActionDepth = Ogre::StoreAction::Store;
+        p->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        p->mProfilingId = "Jahshaka atom history pyramid";
+    }
 }
 
 /// THE ID PASS (ATOM S3-DRAW; OgreAtomIdPass.cpp records it): a PASS_CUSTOM through

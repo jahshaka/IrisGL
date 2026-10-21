@@ -94,7 +94,7 @@ void GpuCull::destroy() {
 /// the BUDGET (never per frame: re-created only when an overflow raised it), the
 /// per-slot base by the list's slot capacity. Nothing in them is state between
 /// requests — every word a reader reads is written by the request it reads.
-bool GpuCull::ensureCut(Ogre::VaoManager *vao, std::string &err, uint32_t sceneNeed) {
+bool GpuCull::ensureCut(Ogre::VaoManager *vao, std::string &err, uint32_t sceneNeed, uint32_t rootCutReserve) {
     if (!mParams || vao != mVao) {
         err = "gpucull: the cut's buffers need the list's (ensure first)";
         return false;
@@ -104,10 +104,13 @@ bool GpuCull::ensureCut(Ogre::VaoManager *vao, std::string &err, uint32_t sceneN
         mCutSlotBase = vao->createUavBuffer(mCapacity, sizeof(uint32_t), 0, nullptr, false);
         mCutSlotCapacity = mCapacity;
     }
-    if (!mCutIgnoreScene && sceneNeed) {
-        // The main region must hold the scene's need: budget x 7/8 >= need.
+    mRootCutReserve = mCutIgnoreScene ? 0u : rootCutReserve;
+    if (!mCutIgnoreScene) {
+        // The main region must hold the scene's need beside the reserve, and the reserve be whole (<= half a budget).
         uint32_t want = mCutWantBudget;
-        while (want < kCutIndexBudgetCeiling && want - want / 8u < sceneNeed) want *= 2u;
+        while (want < kCutIndexBudgetCeiling &&
+               (want - reserveFor(want) < sceneNeed || reserveFor(want) < mRootCutReserve))
+            want *= 2u;
         mCutWantBudget = std::min(want, kCutIndexBudgetCeiling);
     }
     if (mCutStream && mCutIndexBudget >= mCutWantBudget && !mCutForceCreate) return true;
@@ -163,7 +166,7 @@ void GpuCull::noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAske
     // overshot a 209 k need to 4.4 M (measured, atom.cluster_crack E).
     uint32_t want = mCutWantBudget;
     while (want < kCutIndexBudgetCeiling &&
-           (want - want / 8u < indicesAsked || want / kCutIndicesPerRecord < recordsAsked))
+           (want - reserveFor(want) < indicesAsked || want / kCutIndicesPerRecord < recordsAsked))
         want *= 2u;
     if (atomTraceOn())
         atomTrace("cut overflow read back: " + std::to_string(overflowedInstances) + " instances, " +
@@ -372,7 +375,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         }
         mGpuScene.flushClusterTables();
         mGpuScene.flushGeomRows();
-        if (!cull.ensureCut(rs->getVaoManager(), err, mCutIndexNeed)) return false;
+        if (!cull.ensureCut(rs->getVaoManager(), err, mCutIndexNeed, mGpuScene.rootCutIndices())) return false;
         if (prior) cull.followRejectedBudget(*prior);
         if (appendRejected && !cull.ensureOcclusion(rs->getVaoManager(), false, err)) return false;
         if (lateClusters && !cull.ensureOcclusion(rs->getVaoManager(), true, err)) return false;

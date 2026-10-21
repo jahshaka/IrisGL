@@ -8,10 +8,10 @@
 // box's NEAREST device depth (reverse-Z aware).
 // THE TEXELS: NDC to the viewport's rectangle in mip 0 (y inverted: the pyramid's row 0 is the top - the caller's
 // cull matrix makes that true, OgreAtomIdPass.cpp cullMatrixOf).
-// THE MIP (ATOM-8 correction 2, the owner's rule; the footprint a caller's, 4 by default): the level where the
-// rectangle spans AT MOST 4 texels per axis -
-// at most 5 texel indices a side when misaligned, every one fetched (<= 25 reads) - the receiver test's shape and
-// Nanite's 4 x 4 footprint. The FARTHEST depth under the rectangle (each texel holds its footprint's farthest).
+// THE MIP (ATOM-8 correction 2, the owner's rule; the footprint the caller's): the level where the rectangle spans
+// AT MOST N texels per axis - at most N + 1 texel indices a side when misaligned, every one fetched. The instance
+// test reads at N = 4 (<= 25 reads: the receiver test's shape, Nanite's 4 x 4 footprint); the cluster tests at the
+// view list's footprint, 8 shipped (<= 81 reads: the band of texels reaching a farther surface or the sky halves). The FARTHEST depth under the rectangle (each texel holds its footprint's farthest).
 // OCCLUDED when even the nearest point of the box is farther than that, beyond a relative margin of 2 to the minus 16
 // of its depth (a surface ON the occluder's depth stays drawn: the test may keep what is hidden, never drop what is
 // seen). Sky (the far plane) under the rectangle never occludes.

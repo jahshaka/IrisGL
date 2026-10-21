@@ -192,6 +192,7 @@ void GpuScene::destroy() {
     mGeomMirror.clear();
     mLevelMirror.clear();
     mMeshEntries.clear();
+    mRootCutIndices = 0u;
     mFreeMeshSlots.clear();
     mMeshIndex.clear();
     mSkinRows.clear();
@@ -426,6 +427,23 @@ void GpuScene::setMeshDag(uint32_t meshIndex, std::vector<GpuCluster> clusters,
     if (meshIndex >= mMeshEntries.size()) return;
     if (boxes.size() != clusters.size()) boxes.assign(clusters.size(), GpuClusterBox());
     mMeshEntries[meshIndex].boxes = std::move(boxes);
+    // THE ROOT CUT (R8): Types.h clusterRootDrawn on the uploaded tables (error[0] the group's error, error[3] the
+    // clusters it produced; local group indices) - every current reference counts it.
+    {
+        MeshEntry &me = mMeshEntries[meshIndex];
+        mRootCutIndices -= std::min<uint64_t>(mRootCutIndices, uint64_t(me.rootCut) * me.refs);
+        uint32_t root = 0u;
+        for (const GpuCluster &c : clusters) {
+            if (c.group >= groups.size()) continue;
+            const GpuClusterGroup &g = groups[c.group];
+            const bool last = g.error[0] >= kClusterTerminal || g.error[3] == 0.0f;
+            const bool leafOrFinite = c.refined == kNoGroup ||
+                                      (c.refined < groups.size() && groups[c.refined].error[0] < kClusterTerminal);
+            if (last && leafOrFinite) root += c.indexCount;
+        }
+        me.rootCut = root;
+        mRootCutIndices += uint64_t(root) * me.refs;
+    }
     mMeshEntries[meshIndex].clusters = std::move(clusters);
     mMeshEntries[meshIndex].groups = std::move(groups);
     mMeshMirror[meshIndex].dag[3] = clusterRow;
@@ -788,6 +806,7 @@ uint32_t GpuScene::acquireMesh(const Ogre::MeshPtr &meshPtr, const GpuMesh &desc
     auto it = mMeshIndex.find(mesh);
     if (it != mMeshIndex.end()) {
         ++mMeshEntries[it->second].refs;
+        mRootCutIndices += mMeshEntries[it->second].rootCut;
         return it->second;
     }
     uint32_t index;
@@ -826,6 +845,7 @@ void GpuScene::releaseMesh(const Ogre::Mesh *mesh) {
     auto it = mMeshIndex.find(mesh);
     if (it == mMeshIndex.end()) return;
     const uint32_t index = it->second;
+    mRootCutIndices -= std::min<uint64_t>(mRootCutIndices, mMeshEntries[index].rootCut);
     if (mMeshEntries[index].refs > 1u) {
         --mMeshEntries[index].refs;
         return;

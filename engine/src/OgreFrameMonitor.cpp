@@ -1047,10 +1047,16 @@ constexpr ArmDef kArms[] = {
       "THE PER-CLUSTER OCCLUSION'S A/B DOOR (ATOM-8): 1 = the id pass's cut tests every cluster it would draw against "
       "the depth pyramid (the two passes) and culls one whose bound covers no pixel centre; 0 = it tests no cluster "
       "(the objects' own depth test stands) - the picture must be the same bytes either way." },
-    { ArmId::AtomClusterFootprint, 4.0, 1.0, 16.0,
-      "THE CLUSTER TEST'S FOOTPRINT (ATOM-8 stage 2's A/B): the pyramid mip where a cluster's rectangle spans at most "
-      "N texels a side - 4 (<= 25 reads, the instance test's) or 8 (one mip finer, <= 81 reads: the band of texels "
-      "that reach a sky or a farther surface halves). The instance test stays at 4." },
+    { ArmId::AtomHistoryRebuild, 1.0, 0.0, 1.0,
+      "THE HISTORY'S REBUILD (ATOM-8, R6): 1 = after the late id pass (and the stock arm's merge) the occlusion's "
+      "pyramid is built again from the scene's depth, so the next frame's first cull tests against the late pass's "
+      "surfaces too (one frame fewer of draws behind a revealed surface in motion); 0 = the pyramid the late pass "
+      "built before its draw stands - the paired arm of the rebuild's cost. Exact either way." },
+    { ArmId::AtomClusterFootprint, 8.0, 1.0, 16.0,
+      "THE CLUSTER TEST'S FOOTPRINT (ATOM-8; a measured arm, never a band-aid: it exists so the footprint can be "
+      "measured, as atom.clusterOcclusion is the exactness door): the pyramid mip where a cluster's rectangle spans at "
+      "most N texels a side - 8 shipped (<= 81 reads: Bistro law88's hidden share 13.0 -> 11.8 % against 4, +0.014 ms "
+      "of the cut's GPU time), 4 the instance test's (<= 25 reads). The instance test stays at 4." },
     { ArmId::CardFootprint, 4.0, 0.0, 1e12,
       "The card read's footprint gate in texels (Types.h kCardFootprintTexels = 4): the sweep that "
       "chose it (test_rt_reflect --footprint-sweep) sets it per arm, 1e12 = the gate open, 0 = shut. "
