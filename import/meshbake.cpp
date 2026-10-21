@@ -250,7 +250,12 @@ namespace
 // nothing is a GROUP with its measured error (the largest removed island's extent) and no clusters, never a
 // terminal. Every mesh with an unlocked component in a stuck group re-bakes: pruned levels, empty groups, the
 // blob's config record (simplify_prune_unlocked). The output changed, so the version is bumped (BAKEKEY-1).
-constexpr int kFormatVersion = 23;
+// v24 (2026-10-21, ATOM-7 stage 1): THE LOCK READS THE CHILDREN — the per-group displacement lock's bound is
+// kDagLockFactor x the error the group's CHILDREN carry as the verify measured them (the quadric estimate only at
+// depth 0, where it is honest), and the prune's clause (2) — on toward the halving past 0.85 — is decided by the
+// verify under an absolute budget (clusterlod patch 0005); clodConfig::simplify_prune_budget leaves the config
+// record. Every DAG re-bakes (BAKEKEY-1).
+constexpr int kFormatVersion = 24;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -3967,19 +3972,14 @@ constexpr Variant kShipped = Variant::PermissiveCharged;
 
 Variant resolve(Variant v) { return v == Variant::Shipped ? kShipped : v; }
 
-/// The prune's budget factor (clodConfig::simplify_prune_budget): the displacement lock's own (kDagLockFactor).
-constexpr float kPruneBudget = 2.0f;
-
 clodConfig configFor(Variant v)
 {
     clodConfig c = clodDefaultConfig(size_t(kMaxTriangles));
     // OUR PRUNE (ATOM-6, patch 0004): after the collapses, the group's unlocked components whole, smallest
     // island first, until the halving target — see `lodchain::Islands` for why it is the tool now.
     c.simplify_prune_unlocked = true;
-    // ...and its BUDGET (the lead's last round): past the accepted 0.85 the prune goes on toward the halving target
-    // only while the next island is within the displacement lock's factor x max(the collapses' error, the smallest
-    // island) — the same factor the verify holds a group to (`kDagLockFactor`; asserted equal there).
-    c.simplify_prune_budget = kPruneBudget;
+    // ...to 0.85 of the input at any price (clause 1); on toward the halving target (clause 2) only under the budget
+    // the per-group verify returns for the result (`GroupVerifier`, patch 0005) — the one place the deformation exists.
     switch (resolve(v)) {
     case Variant::RegularizedProtectUv:
         c.simplify_regularize = true;
@@ -4033,7 +4033,7 @@ QVector<float> configRecord(Variant v)
         c.simplify_error_merge_previous, c.simplify_error_merge_additive,
         c.simplify_error_edge_limit,
         float(c.simplify_permissive), float(c.simplify_fallback_permissive),
-        float(c.simplify_regularize), float(c.simplify_prune_unlocked), c.simplify_prune_budget,
+        float(c.simplify_regularize), float(c.simplify_prune_unlocked),
         float(c.optimize_bounds), float(c.optimize_clusters), float(c.optimize_clusters_level),
         protect, float(kMaxTriangles), lodchain::kNormalWeight, lodchain::kUvWeight,
         lodchain::kBoundMargin, lodchain::kBoundFloorRel };
@@ -4325,9 +4325,17 @@ float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float sc
 }
 
 /// THE DAG'S DISPLACEMENT LOCK, PER GROUP (DAG-LOCK-1's rule; CLUSTER-LOCK-3's shape).
-/// A group at depth d may not move any level-0 point past kDagLockFactor x ITS OWN
-/// error — the chain's rule (`lodchain::kDisplacementBudget`) applied to one group at
-/// the moment it is simplified. clusterlod calls `GroupVerifier::verify` for every
+/// THE DOUBLING LAW (ATOM-7): a group may not move or lose any level-0 point past
+/// kDagLockFactor x THE ERROR ITS CHILDREN CARRY — halving a level's triangles grows its
+/// edge by sqrt 2 and a curvature-limited surface's deviation by ~2, so a level that
+/// deviates more than twice the level below lost something the quadric did not price (a
+/// wall, a sliver, an island). The children's error is what the verify MEASURED when it
+/// accepted them (`mTriBound`: per output triangle, the group's exact vertex term raised
+/// by the islands it dropped); at depth 0 there are no children and the bound reads
+/// clusterlod's quadric estimate, honest there (stored / estimate median 0.92 on Bistro)
+/// and 8-100x the measured deviation above it (every merged group crosses UV seams) —
+/// the estimate was the bound until ATOM-7, and the lock never fired on a lost wall.
+/// clusterlod calls `GroupVerifier::verify` for every
 /// group that simplified (patch 0003, `clodMesh::verify_group`); the verifier samples
 /// the group's simplified surface against the level-0 surface the group stands for
 /// and, when a point is past the bound, hands back a lock on the group's own vertices
@@ -4338,7 +4346,6 @@ float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float sc
 /// retries the group keeps what it has and the measurement (after the build) charges
 /// it honestly: the lock shapes the DAG, never the measurement.
 constexpr float kDagLockFactor = 2.0f;
-static_assert(kDagLockFactor == kPruneBudget, "the prune's budget is the displacement lock's factor");
 constexpr int   kGroupRetries = 4;
 /// A verify loop's chunk: the pool's query grain (the verify runs inside clusterlod's
 /// serial level loop, so every group's loops go wide; 512 kept mid-size groups inline
@@ -4393,21 +4400,28 @@ public:
     }
 
     static const unsigned char *hook(void *context, int depth, int attempt, const unsigned *group, size_t groupCount,
-                                     const unsigned *simplified, size_t simplifiedCount, float error, float prunedExtent)
+                                     const unsigned *simplified, size_t simplifiedCount, float error, float prunedExtent,
+                                     const unsigned char *locks, float *pruneBudget)
     {
         GroupVerifier *self = static_cast<GroupVerifier *>(context);
         self->mDepth = depth;
         self->mPrunedExtent = prunedExtent;
-        return self->verify(attempt, group, groupCount, simplified, simplifiedCount, error);
+        (void)locks;
+        return self->verify(attempt, group, groupCount, simplified, simplifiedCount, error, pruneBudget);
     }
+
+    /// How a group's verify ended (per output group, for the level table).
+    enum Outcome : quint8 { NotVerified = 0, Converged = 1, Unconverged = 2, MadeTerminal = 3, Empty = 4 };
 
     /// clusterlod's output callback, for every group in output order: a group that
     /// simplified commits the hand-on of the result its last verify saw; one whose
     /// re-simplification got stuck under its locks is output TERMINAL (patch 0003) — it
     /// cannot simplify within its bound, so it is not simplified.
-    void output(bool terminal)
+    Outcome output(bool terminal)
     {
+        Outcome outcome = NotVerified;
         if (mPendingValid) {
+            outcome = terminal ? MadeTerminal : mLastEmpty ? Empty : mLastOffended ? Unconverged : Converged;
             ++mRetryHistogram[std::min(mRetries, kGroupRetries)];
             mTotalRetries += mRetries;
             if (mRetries) {
@@ -4428,10 +4442,15 @@ public:
             if (!terminal) {
                 for (const TriKey &k : mInputKeys) mHanded.erase(k);
                 for (const auto &p : mPending) mHanded[p.first].push_back(p.second);
+                // THE CHILDREN'S ERROR for the next level: every triangle of the result carries what this verify
+                // measured the result to deviate (`mPendingBound`).
+                for (const TriKey &k : mInputKeys) mTriBound.erase(k);
+                for (const TriKey &k : mPendingTris) mTriBound[k] = mPendingBound;
             }
         }
         mPendingValid = false;
         clearLock();
+        return outcome;
     }
 
     void fill(MeshBake::ClusterDagStats *stats) const
@@ -4455,16 +4474,18 @@ private:
     }
 
     const unsigned char *verify(int attempt, const unsigned *group, size_t groupCount, const unsigned *simplified,
-                                size_t simplifiedCount, float error)
+                                size_t simplifiedCount, float error, float *pruneBudget)
     {
         const auto t0 = std::chrono::steady_clock::now();
-        const unsigned char *answer = verifyTimed(attempt, group, groupCount, simplified, simplifiedCount, error);
+        const unsigned char *answer = verifyTimed(attempt, group, groupCount, simplified, simplifiedCount, error,
+                                                  pruneBudget);
         mVerifyMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         return answer;
     }
 
     const unsigned char *verifyTimed(int attempt, const unsigned *group, size_t groupCount,
-                                     const unsigned *simplified, size_t simplifiedCount, float error)
+                                     const unsigned *simplified, size_t simplifiedCount, float error,
+                                     float *pruneBudget)
     {
         const size_t inputTris = groupCount / 3;
         if (attempt == 0) {
@@ -4475,6 +4496,7 @@ private:
             mInputKeys.resize(inputTris);
             mRegionV.clear();
             mHostOf.clear();
+            mChildRef = 0.0f;
             for (size_t i = 0; i < groupCount; ++i) {
                 const unsigned v = group[i];
                 if (mRegionAt[v] != mRegionStamp) {
@@ -4486,6 +4508,9 @@ private:
             }
             for (size_t t = 0; t < inputTris; ++t) {
                 mInputKeys[t] = triKeyOf(group + t * 3);
+                // THE CHILDREN'S ERROR: the largest any input triangle carries (a level-0 triangle carries none).
+                const auto b = mTriBound.find(mInputKeys[t]);
+                if (b != mTriBound.end()) mChildRef = std::max(mChildRef, b->second);
                 const auto it = mHanded.find(mInputKeys[t]);
                 if (it == mHanded.end()) continue;
                 for (unsigned v : it->second)
@@ -4499,7 +4524,10 @@ private:
         }
         mPendingValid = true;
         mPending.clear();
+        mPendingTris.clear();
+        mPendingBound = 0.0f;
         mLastOffended = false;
+        mLastEmpty = simplifiedCount < 3;
         if (simplifiedCount < 3 || mRegionV.empty()) return nullptr;
 
         ++mKeptStamp;
@@ -4508,7 +4536,9 @@ private:
         for (size_t i = 0; i < mRegionV.size(); ++i)
             if (mKeptAt[mRegionV[i]] != mKeptStamp) removed.push_back(unsigned(i));
 
-        const float lockExact = kDagLockFactor * error;
+        // THE DOUBLING LAW's reference: the children's measured error, or at depth 0 clusterlod's estimate.
+        const float reference = std::max(mChildRef > 0.0f ? mChildRef : error, mFloorLen);
+        const float lockExact = kDagLockFactor * reference;
         const float lockSampled = lockExact / lodchain::kBoundMargin;
         const std::vector<unsigned> sIdx(simplified, simplified + simplifiedCount);
         Vec3 glo = vertexOf(mPositions, mPosComps, sIdx[0]), ghi = glo;
@@ -4537,26 +4567,36 @@ private:
         // deformation: the measurement charges it its full extent (ATOM-6 (a)), so its points stay out of the
         // deformation term below, and the prune's own drops raise the islands' bound by their price.
         std::vector<unsigned char> droppedAt(removed.size(), 0u);   // per removed vertex: its island is dropped
+        float droppedMax = 0.0f;   // the largest island the region has lost (here or below): charged its extent
+        std::vector<unsigned> dropped;   // the region's wholly dropped islands, sorted
         {
             std::vector<unsigned> comps;
             for (unsigned ri : removed)
                 if (mIslands.compOf[mRegionV[ri]] < mIslands.count()) comps.push_back(mIslands.compOf[mRegionV[ri]]);
             std::sort(comps.begin(), comps.end());
             comps.erase(std::unique(comps.begin(), comps.end()), comps.end());
-            std::vector<unsigned> dropped;
             for (unsigned comp : comps) {
                 bool whole = true;
                 for (unsigned i = mIslands.vertStart[comp]; i < mIslands.vertStart[comp + 1] && whole; ++i) {
                     const unsigned v = mIslands.verts[i];
                     if (mRegionAt[v] != mRegionStamp || mKeptAt[v] == mKeptStamp) whole = false;
                 }
-                if (whole) dropped.push_back(comp);
+                if (whole) {
+                    dropped.push_back(comp);
+                    droppedMax = std::max(droppedMax, mIslands.extent[comp]);
+                }
             }
             for (size_t i = 0; i < removed.size(); ++i) {
                 const unsigned comp = mIslands.compOf[mRegionV[removed[i]]];
                 droppedAt[i] = std::binary_search(dropped.begin(), dropped.end(), comp) ? 1u : 0u;
             }
         }
+
+        // A DROPPED ISLAND IS ALLOWED what the group is held to, or what the prune already charged it (ATOM-7): the
+        // prune's clause (1) pays an island at any price (the level is accepted) and clause (2) within the verify's
+        // budget, so an island no larger than the largest the prune removed costs nothing new — the group's error is
+        // a maximum. Only an island past both is an offender (rules 1-3).
+        const float islandAllowed = std::max(lockExact, mPrunedExtent);
 
         // 1. EVERY REMOVED VERTEX against S, exactly and island-capped. A vertex of a DROPPED island is not in the
         //    deformation term, and where its extent is within the lock's bound it needs no query (ATOM-6):
@@ -4574,14 +4614,14 @@ private:
                     const unsigned v = mRegionV[removed[i]];
                     const float stop = std::min(local, lockExact);
                     if (!(mIslands.capOf[v] > stop)) continue;
-                    if (!mExhaustive && droppedAt[i] && !(mIslands.capOf[v] > lockExact)) continue;
+                    if (!mExhaustive && droppedAt[i] && !(mIslands.capOf[v] > islandAllowed)) continue;
                     const bool deformation = !droppedAt[i];
                     const float d = std::min(gridS.closest(mQueries[size_t(slot)], vertexOf(mPositions, mPosComps, v),
                                                            nullptr, nullptr, nullptr, stop > 0.0f ? stop : -1.0f),
                                              mIslands.capOf[v]);
                     if (!std::isfinite(d) || d <= stop) continue;
                     if (deformation) local = std::max(local, d);
-                    if (d > lockExact) found[c].push_back(removed[i]);
+                    if (d > (deformation ? lockExact : islandAllowed)) found[c].push_back(removed[i]);
                 }
                 chunkMax[c] = local;
             });
@@ -4599,13 +4639,25 @@ private:
         // its drops are the level's honest island size), never by an island a COLLAPSE erased: the quadric
         // under-prices an erasure, and a bound the erased island itself raised would let it through. A collapse-erased
         // island above this bound keeps its largest triangle (rule 3); the measurement still charges every dropped
-        // island its extent.
+        // island its extent. The prune's own largest island stays inside the bound even past the lock's (ATOM-7:
+        // `islandAllowed` — what clause (1) paid at any price is never fought by a retry).
+        const float deformation = vertexTerm;
         vertexTerm = std::max(vertexTerm, mPrunedExtent);
-        const float islandBound = std::max(std::min(vertexTerm, lockExact), mFloorLen);
+        const float islandBound = std::max(std::max(std::min(vertexTerm, lockExact), mPrunedExtent), mFloorLen);
+        // THE PRUNE'S CLAUSE (2) (ATOM-7, patch 0005), decided here, the only place the deformation exists: past 0.85
+        // the prune goes on toward the halving only for an island within kDagLockFactor x max(the group's own
+        // deformation, its children's error) — capped at the lock's own bound, so a piece clause (2) pays never trips
+        // rule 3 below and never lifts the group past the doubling law — or at no new cost: an island no larger than
+        // one clause (1) already charged (the group's error is a maximum).
+        *pruneBudget = std::max(std::min(kDagLockFactor * std::max(deformation, mChildRef), lockExact), mPrunedExtent);
         // THE HAND-ON, for the result the group keeps (computed only when the verify
         // answers NULL — a retried result is never kept, a stuck one is terminal): every
         // removed vertex goes to the simplified triangle it stands nearest.
         const auto handOn = [&]() {
+            // THE CHILDREN'S ERROR the result hands up: its deformation, raised by every island it has lost.
+            mPendingBound = std::max(vertexTerm, droppedMax);
+            mPendingTris.reserve(simplifiedCount / 3);
+            for (size_t t = 0; t + 2 < simplifiedCount; t += 3) mPendingTris.push_back(triKeyOf(simplified + t));
             std::vector<unsigned> nearestTri(removed.size(), 0u);
             bakepool::forRange(bakepool::Range(removed.size(), kVerifyGrain), mWidth,
                                [&](size_t, size_t begin, size_t end, int slot) {
@@ -4638,9 +4690,12 @@ private:
         gather(lostIdx.size() / 3, [&](size_t t, surface::TriangleGrid::Query &q, std::vector<unsigned> &found) {
             const unsigned v0 = lostIdx[t * 3];
             if (!(mIslands.capOf[v0] > lockSampled)) return;
+            if (!(mIslands.capOf[v0] > islandAllowed) &&
+                std::binary_search(dropped.begin(), dropped.end(), mIslands.compOf[v0])) return;   // a dropped island allowed
             const float m = facetMax(vertexOf(mPositions, mPosComps, lostIdx[t * 3]),
                                      vertexOf(mPositions, mPosComps, lostIdx[t * 3 + 1]),
-                                     vertexOf(mPositions, mPosComps, lostIdx[t * 3 + 2]), lockSampled, error, mFloorLen,
+                                     vertexOf(mPositions, mPosComps, lostIdx[t * 3 + 2]), lockSampled, reference,
+                                     mFloorLen,
                                      [&](const Vec3 &p, Vec3 *tri, float within) {
                                          return nearestOn(mPositions, mPosComps, gridS, sIdx, q, p, tri, within);
                                      },
@@ -4687,7 +4742,9 @@ private:
 
         if (offenders.empty()) return handOn();
         mLastOffended = true;
-        if (mRetries >= kGroupRetries) return handOn();   // past the retries: the measurement charges it
+        // Past the retries the measurement charges it. By ATTEMPT (clusterlod's count): a re-prune is an attempt too, and
+        // the last attempt's answer is the result the group keeps — it must hand on.
+        if (attempt >= kGroupRetries) return handOn();
 
         // THE LOCK: an offender still in the group locks its fan; one removed below
         // this depth locks the corners of the input triangle it was handed to.
@@ -4770,7 +4827,13 @@ private:
     std::vector<TriKey> mInputKeys;
     std::unordered_map<TriKey, std::vector<unsigned>, TriKeyHash> mHanded;
     std::vector<std::pair<TriKey, unsigned>> mPending;
-    bool mPendingValid = false, mLastOffended = false;
+    /// THE CHILDREN'S ERROR, by triangle (ATOM-7): every live output triangle -> what the verify measured its
+    /// group's result to deviate from level 0 (`mPendingBound` when the group was output); a group's reference
+    /// (`mChildRef`) is the largest over its input triangles.
+    std::unordered_map<TriKey, float, TriKeyHash> mTriBound;
+    std::vector<TriKey> mPendingTris;
+    float mPendingBound = 0.0f, mChildRef = 0.0f;
+    bool mPendingValid = false, mLastOffended = false, mLastEmpty = false;
     int mRetries = 0, mTotalRetries = 0, mUnconverged = 0, mTerminal = 0, mLockedVertices = 0, mShared = 0, mSplit = 0;
     std::array<int, kGroupRetries + 1> mRetryHistogram {};
     std::vector<int> mRetriesByDepth;
@@ -4891,8 +4954,10 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
     clodBuild(configFor(variant), cm,
               [&](clodGroup group, const clodCluster *clusters, size_t count) -> int {
                   const int id = int(groups.size());
-                  verifier.output(group.simplified.error == FLT_MAX);
+                  const GroupVerifier::Outcome outcome = verifier.output(group.simplified.error == FLT_MAX);
                   if (stats) {
+                      stats->groupVerifyOutcome.push_back(quint8(outcome));
+                      if (group.simplify_flags & CLOD_SIMPLIFY_REPRUNED) ++stats->repruneGroups;
                       stats->groupSimplifyFlags.push_back(group.simplify_flags);
                       stats->groupLockedDropped.push_back(group.locked_dropped);
                       if (group.simplify_flags & CLOD_SIMPLIFY_PRUNED) ++stats->prunedGroups;

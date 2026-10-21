@@ -414,6 +414,12 @@ public:
         /// output clusters: affordable, the object draws nothing there).
         QVector<quint32> groupSimplifyFlags;
         QVector<quint32> groupLockedDropped;
+        /// How each group's verify ended, by group id (ATOM-7): 0 not verified (stuck at its first result, or the
+        /// root), 1 converged, 2 unconverged (still past the bound after its retries: the measurement charges it), 3
+        /// made terminal by its locks, 4 empty (pruned to nothing). `repruneGroups` = groups whose prune's clause (2),
+        /// under the verify's budget, removed a piece (CLOD_SIMPLIFY_REPRUNED).
+        QVector<quint8> groupVerifyOutcome;
+        int    repruneGroups = 0;
         int    prunedGroups = 0;
         int    lockDroppedGroups = 0;
         int    prunedRelocked = 0;

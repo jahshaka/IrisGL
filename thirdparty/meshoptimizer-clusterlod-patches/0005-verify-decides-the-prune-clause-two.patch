@@ -1,0 +1,325 @@
+From: jahshaka <jahshaka@gmail.com>
+Subject: [PATCH] clusterlod: the prune's clause (2) is decided by the verify hook (clodMesh::verify_group's prune_budget); the hook sees the group's locks
+
+ATOM-7, 2026-10-21. Patch 0004's prune has two clauses: (1) whole unlocked
+components smallest first up to simplify_threshold x the input at any price (the
+level is accepted, never terminal while an unlocked piece exists), and (2) on
+toward the halving target only within a budget. 0004 priced clause (2) inside the
+library: simplify_prune_budget x max(*error, the smallest piece) — and *error is
+the attribute quadric, 8-100x the measured deviation above depth 0 (every merged
+group crosses UV seams), so every island was "within budget" and the floor
+admitted every island equal to the smallest (Bistro: nine 58 cm shutters pruned
+from a facade whose level deviated 8.6 cm). The deformation exists in one place,
+the caller's verify, so clause (2) is decided there:
+
+- clodMesh::verify_group gains two parameters: `const unsigned char* locks` (the
+  group's lock array as the result was simplified: the level's boundary, terminal
+  and input locks plus the hook's own CLOD_LOCK_VERIFY ones), and
+  `float* prune_budget` (out; -1 before the call). A NULL answer with a budget >= 0
+  asks for clause (2) under that ABSOLUTE budget.
+- simplify() keeps the collapses' result (before the prune) and its error
+  (`Collapsed`); the first prune of every result is clause (1) alone.
+- verifyGroup: after a NULL answer with a budget, the group is RE-PRUNED from the
+  kept collapses' result (`repruneFrom`: no second simplification; clause (1) as
+  before, then clause (2) under the budget) and the re-pruned result is verified
+  again — it counts as an attempt (CLOD_VERIFY_MAX_RETRIES bounds both); at most
+  one re-prune per simplified result, and one that removes nothing more is final
+  (the accepted result stands). A lock answer re-simplifies as before (clause (1)
+  only), then the budget cycle again.
+- clodConfig::simplify_prune_budget is DELETED (the default config never sets a
+  budget: without a hook clause (2) never runs).
+- clodGroup::simplify_flags gains CLOD_SIMPLIFY_REPRUNED (clause (2) removed at
+  least one more piece).
+- The edge-limit adjustment moves into a helper (limitErrorByEdges), called after
+  either prune.
+
+Applied at configure (irisgl/CMakeLists.txt) to a copy of the vendored header
+in the build tree, after 0004; the vendored file itself is never edited.
+---
+--- a/clusterlod.h
++++ b/clusterlod.h
+@@ -55,13 +55,12 @@
+ 	// after the collapses, when a group is still above its target: remove whole connected components of the group (welded by
+ 	// position) that carry NO locked vertex, smallest first (clodMesh::component_extent), until the target is met; an edge collapse
+ 	// never removes a component, so a group of small pieces (leaf cards, closed boxes) cannot otherwise reach it; a piece touching
+-	// the group's border is locked and stays (the next level's partition moves the border)
++	// the group's border is locked and stays (the next level's partition moves the border); two clauses: (1) smallest first up to
++	// simplify_threshold x the input at any price (the level is then accepted, never terminal while an unlocked piece exists), (2)
++	// on toward the target only under the ABSOLUTE budget the verify hook returns for the result of (1) (clodMesh::verify_group's
++	// prune_budget) — without a hook, clause (2) never runs
+ 	bool simplify_prune_unlocked;
+ 
+-	// the prune's budget: past simplify_threshold (the level accepted) the prune continues toward the target only while the next
+-	// piece's extent is within this factor x max(the collapses' own error, the smallest removable piece's extent); 0 = no budget
+-	float simplify_prune_budget;
+-
+ 	// should clodCluster::bounds be computed based on the geometry of each cluster
+ 	bool optimize_bounds;
+ 
+@@ -99,7 +98,13 @@
+ 	// at most CLOD_VERIFY_MAX_RETRIES re-simplifications per group: the result after the last one is verified too (so the last call
+ 	// always saw the result the group keeps), and a lock array returned for it is ignored
+ 	// pruned_extent is the largest component_extent simplify_prune_unlocked removed for this result (0 when none)
+-	const unsigned char* (*verify_group)(void* context, int depth, int attempt, const unsigned int* group_indices, size_t group_index_count, const unsigned int* simplified_indices, size_t simplified_index_count, float error, float pruned_extent);
++	// locks is the group's lock array as the result was simplified with it (vertex_count entries: the level's boundary, terminal
++	// and input locks, plus the hook's own added ones marked CLOD_LOCK_VERIFY)
++	// prune_budget (out, set to -1 before the call): an answer of NULL with *prune_budget >= 0 asks for the prune's clause (2) under
++	// that absolute budget — the group is re-pruned from the collapses' result it kept (no second simplification): clause (1) as
++	// before, then on toward the target while the next piece's component_extent is within the budget; the re-pruned result is
++	// verified again (it counts as an attempt). At most one re-prune per simplified result; one that removes nothing more is final
++	const unsigned char* (*verify_group)(void* context, int depth, int attempt, const unsigned int* group_indices, size_t group_index_count, const unsigned int* simplified_indices, size_t simplified_index_count, float error, float pruned_extent, const unsigned char* locks, float* prune_budget);
+ 	void* verify_group_context;
+ 
+ 	// optional per-vertex removal cost for simplify_prune_unlocked: the extent of the vertex's component (a component costs the
+@@ -167,6 +172,7 @@
+ enum
+ {
+ 	CLOD_SIMPLIFY_PRUNED = 1 << 1, // simplify_prune_unlocked removed at least one component
++	CLOD_SIMPLIFY_REPRUNED = 1 << 2, // the prune's clause (2), under the verify hook's budget, removed at least one more
+ };
+ 
+ // gets called for each group in sequence
+@@ -457,7 +463,7 @@
+ // a lock the verify hook added for one group (bit 6: meshoptimizer reads bits 0-2 only, lockBoundary's scratch is bit 7)
+ #define CLOD_LOCK_VERIFY (1 << 6)
+ 
+-static void pruneUnlocked(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& remap, size_t target_count, std::vector<unsigned int>& lod, float* error, std::vector<unsigned int>& pruned, float* pruned_extent)
++static void pruneUnlocked(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& remap, size_t target_count, std::vector<unsigned int>& lod, float* error, std::vector<unsigned int>& pruned, float* pruned_extent, float budget_abs)
+ {
+ 	// the group's positions, numbered locally
+ 	std::vector<unsigned int> pos(indices.size());
+@@ -551,18 +557,17 @@
+ 
+ 	std::sort(order.begin(), order.end(), [&](unsigned int a, unsigned int b) { return cost[a] < cost[b] || (cost[a] == cost[b] && a < b); });
+ 
+-	// THE BUDGET: smallest first (1) to simplify_threshold x the input at any price — the level is then accepted, never terminal
+-	// while an unlocked piece exists — and (2) on toward the target only while the next piece is within the budget, so a level
+-	// whose collapses moved the surface little does not pay a piece many times that to save a few triangles
++	// THE TWO CLAUSES: smallest first (1) to simplify_threshold x the input at any price — the level is then accepted, never
++	// terminal while an unlocked piece exists — and (2) on toward the target only while the next piece is within budget_abs, the
++	// verify hook's budget for this group (< 0: clause (1) alone), so a level does not pay a piece its caller would not accept
+ 	const size_t accepted = size_t(float(indices.size()) * config.simplify_threshold) / 3 * 3;
+-	const float budget = order.empty() ? 0.f : config.simplify_prune_budget * std::max(*error, cost[order[0]]);
+ 
+ 	std::vector<unsigned char> removed(count, 0);
+ 	size_t remaining = lod.size();
+ 	for (size_t k = 0; k < order.size() && remaining > target_count; ++k)
+ 	{
+ 		unsigned int c = order[k];
+-		if (remaining <= accepted && config.simplify_prune_budget > 0 && cost[c] > budget)
++		if (remaining <= accepted && !(budget_abs >= 0.f && cost[c] <= budget_abs))
+ 			break;
+ 		removed[c] = 1;
+ 		remaining -= outputTris[c] * 3;
+@@ -589,14 +594,58 @@
+ 	pruned.erase(std::unique(pruned.begin(), pruned.end()), pruned.end());
+ }
+ 
+-static std::vector<unsigned int> simplify(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& remap, size_t target_count, float* error, unsigned int* flags, std::vector<unsigned int>& pruned, float* pruned_extent)
++// optionally limit error by edge length, aiming to remove subpixel triangles even if the attribute error is high
++static void limitErrorByEdges(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, float* error)
++{
++	if (config.simplify_error_edge_limit > 0)
++	{
++		float max_edge_sq = 0;
++
++		for (size_t i = 0; i < indices.size(); i += 3)
++		{
++			unsigned int a = indices[i + 0], b = indices[i + 1], c = indices[i + 2];
++			assert(a < mesh.vertex_count && b < mesh.vertex_count && c < mesh.vertex_count);
++
++			const float* va = &mesh.vertex_positions[a * (mesh.vertex_positions_stride / sizeof(float))];
++			const float* vb = &mesh.vertex_positions[b * (mesh.vertex_positions_stride / sizeof(float))];
++			const float* vc = &mesh.vertex_positions[c * (mesh.vertex_positions_stride / sizeof(float))];
++
++			// compute squared edge lengths
++			float eab = (va[0] - vb[0]) * (va[0] - vb[0]) + (va[1] - vb[1]) * (va[1] - vb[1]) + (va[2] - vb[2]) * (va[2] - vb[2]);
++			float eac = (va[0] - vc[0]) * (va[0] - vc[0]) + (va[1] - vc[1]) * (va[1] - vc[1]) + (va[2] - vc[2]) * (va[2] - vc[2]);
++			float ebc = (vb[0] - vc[0]) * (vb[0] - vc[0]) + (vb[1] - vc[1]) * (vb[1] - vc[1]) + (vb[2] - vc[2]) * (vb[2] - vc[2]);
++
++			float emax = std::max(std::max(eab, eac), ebc);
++			float emin = std::min(std::min(eab, eac), ebc);
++
++			// we prefer using min edge length to reduce the number of triangles <1px thick, but need some stopgap for thin and long triangles like wires
++			max_edge_sq = std::max(max_edge_sq, std::max(emin, emax / 4));
++		}
++
++		// adjust the error to limit it for dense clusters based on edge lengths
++		*error = std::min(*error, sqrtf(max_edge_sq) * config.simplify_error_edge_limit);
++	}
++}
++
++// the collapses' result (before the prune) and its error, kept so the prune's clause (2) can run on it without a second simplification
++struct Collapsed
++{
++	std::vector<unsigned int> lod;
++	float error;
++};
++
++static std::vector<unsigned int> simplify(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& remap, size_t target_count, float* error, unsigned int* flags, std::vector<unsigned int>& pruned, float* pruned_extent, Collapsed* collapsed)
+ {
+ 	*flags = 0;
+ 	*pruned_extent = 0.f;
+ 	pruned.clear();
+ 
+ 	if (target_count > indices.size())
++	{
++		collapsed->lod = indices;
++		collapsed->error = *error;
+ 		return indices;
++	}
+ 
+ 	std::vector<unsigned int> lod(indices.size());
+ 
+@@ -613,44 +662,43 @@
+ 		    mesh.vertex_attributes, mesh.vertex_attributes_stride, mesh.attribute_weights, mesh.attribute_count,
+ 		    &locks[0], target_count, FLT_MAX, options | meshopt_SimplifyPermissive, error));
+ 
+-	// the collapses could not reach the target: remove whole unlocked components, smallest first
++	collapsed->lod = lod;
++	collapsed->error = *error;
++
++	// the collapses could not reach the target: remove whole unlocked components, smallest first (clause (1) only: clause (2)'s
++	// budget is the verify hook's, `repruneFrom`)
+ 	if (lod.size() > target_count && config.simplify_prune_unlocked)
+ 	{
+-		pruneUnlocked(config, mesh, indices, locks, remap, target_count, lod, error, pruned, pruned_extent);
++		pruneUnlocked(config, mesh, indices, locks, remap, target_count, lod, error, pruned, pruned_extent, -1.f);
+ 		if (!pruned.empty())
+ 			*flags |= CLOD_SIMPLIFY_PRUNED;
+ 	}
+ 
+-	// optionally limit error by edge length, aiming to remove subpixel triangles even if the attribute error is high
+-	if (config.simplify_error_edge_limit > 0)
+-	{
+-		float max_edge_sq = 0;
+-
+-		for (size_t i = 0; i < indices.size(); i += 3)
+-		{
+-			unsigned int a = indices[i + 0], b = indices[i + 1], c = indices[i + 2];
+-			assert(a < mesh.vertex_count && b < mesh.vertex_count && c < mesh.vertex_count);
++	limitErrorByEdges(config, mesh, indices, error);
+ 
+-			const float* va = &mesh.vertex_positions[a * (mesh.vertex_positions_stride / sizeof(float))];
+-			const float* vb = &mesh.vertex_positions[b * (mesh.vertex_positions_stride / sizeof(float))];
+-			const float* vc = &mesh.vertex_positions[c * (mesh.vertex_positions_stride / sizeof(float))];
+-
+-			// compute squared edge lengths
+-			float eab = (va[0] - vb[0]) * (va[0] - vb[0]) + (va[1] - vb[1]) * (va[1] - vb[1]) + (va[2] - vb[2]) * (va[2] - vb[2]);
+-			float eac = (va[0] - vc[0]) * (va[0] - vc[0]) + (va[1] - vc[1]) * (va[1] - vc[1]) + (va[2] - vc[2]) * (va[2] - vc[2]);
+-			float ebc = (vb[0] - vc[0]) * (vb[0] - vc[0]) + (vb[1] - vc[1]) * (vb[1] - vc[1]) + (vb[2] - vc[2]) * (vb[2] - vc[2]);
++	return lod;
++}
+ 
+-			float emax = std::max(std::max(eab, eac), ebc);
+-			float emin = std::min(std::min(eab, eac), ebc);
++// the prune's clause (2): the group re-pruned from the collapses' result it kept, clause (1) as simplify ran it and on toward the
++// target under the verify hook's absolute budget
++static std::vector<unsigned int> repruneFrom(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& remap, size_t target_count, const Collapsed& collapsed, float budget_abs, float* error, unsigned int* flags, std::vector<unsigned int>& pruned, float* pruned_extent)
++{
++	*flags = 0;
++	*pruned_extent = 0.f;
++	pruned.clear();
++	*error = collapsed.error;
+ 
+-			// we prefer using min edge length to reduce the number of triangles <1px thick, but need some stopgap for thin and long triangles like wires
+-			max_edge_sq = std::max(max_edge_sq, std::max(emin, emax / 4));
+-		}
++	std::vector<unsigned int> lod = collapsed.lod;
+ 
+-		// adjust the error to limit it for dense clusters based on edge lengths
+-		*error = std::min(*error, sqrtf(max_edge_sq) * config.simplify_error_edge_limit);
++	if (lod.size() > target_count && config.simplify_prune_unlocked)
++	{
++		pruneUnlocked(config, mesh, indices, locks, remap, target_count, lod, error, pruned, pruned_extent, budget_abs);
++		if (!pruned.empty())
++			*flags |= CLOD_SIMPLIFY_PRUNED;
+ 	}
+ 
++	limitErrorByEdges(config, mesh, indices, error);
++
+ 	return lod;
+ }
+ 
+@@ -663,17 +711,43 @@
+ #define CLOD_VERIFY_MAX_RETRIES 4
+ #endif
+ 
+-static void verifyGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& merged, std::vector<unsigned char>& locks, size_t target_size, float merged_error, int depth, std::vector<unsigned int>& simplified, float& error, const std::vector<unsigned int>& remap, unsigned int& flags, std::vector<unsigned int>& pruned, unsigned int& pruned_relocked, float& pruned_extent)
++static void verifyGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& merged, std::vector<unsigned char>& locks, size_t target_size, float merged_error, int depth, std::vector<unsigned int>& simplified, float& error, const std::vector<unsigned int>& remap, unsigned int& flags, std::vector<unsigned int>& pruned, unsigned int& pruned_relocked, float& pruned_extent, Collapsed& collapsed)
+ {
+ 	// locks added for this group only; restored before the next group is simplified
+ 	std::vector<std::pair<unsigned int, unsigned char> > saved;
+ 
++	// the current result is the prune's clause (2) of the collapses' result (at most one re-prune per simplified result)
++	bool repruned = false;
++
+ 	for (int attempt = 0;; ++attempt)
+ 	{
+-		const unsigned char* extra = mesh.verify_group(mesh.verify_group_context, depth, attempt, &merged[0], merged.size(), simplified.data(), simplified.size(), groupError(config, merged_error, error), pruned_extent);
+-		if (!extra || attempt >= CLOD_VERIFY_MAX_RETRIES)
++		float budget = -1.f;
++		const unsigned char* extra = mesh.verify_group(mesh.verify_group_context, depth, attempt, &merged[0], merged.size(), simplified.data(), simplified.size(), groupError(config, merged_error, error), pruned_extent, &locks[0], &budget);
++		if (attempt >= CLOD_VERIFY_MAX_RETRIES)
+ 			break;
+ 
++		if (!extra)
++		{
++			// accepted; the hook may ask for the prune's clause (2) under its budget
++			if (repruned || !(budget >= 0.f) || simplified.size() <= target_size)
++				break;
++
++			float reerror = 0.f, reextent = 0.f;
++			unsigned int reflags = 0;
++			std::vector<unsigned int> repruned_set;
++			std::vector<unsigned int> lod = repruneFrom(config, mesh, merged, locks, remap, target_size, collapsed, budget, &reerror, &reflags, repruned_set, &reextent);
++			if (lod.size() >= simplified.size())
++				break; // clause (2) removed nothing more: the result the hook accepted is final
++
++			simplified.swap(lod);
++			error = reerror;
++			flags = reflags | CLOD_SIMPLIFY_REPRUNED;
++			pruned.swap(repruned_set);
++			pruned_extent = reextent;
++			repruned = true;
++			continue; // the re-pruned result is verified too
++		}
++
+ 		// a vertex of a pruned component the caller asks to lock: the prune removed a piece the caller would not accept
+ 		for (unsigned int v : pruned)
+ 			if (extra[v] & ~locks[v])
+@@ -690,7 +764,8 @@
+ 			}
+ 		}
+ 
+-		simplified = simplify(config, mesh, merged, locks, remap, target_size, &error, &flags, pruned, &pruned_extent);
++		simplified = simplify(config, mesh, merged, locks, remap, target_size, &error, &flags, pruned, &pruned_extent, &collapsed);
++		repruned = false;
+ 		if (simplified.size() > merged.size() * config.simplify_threshold)
+ 			break; // the added locks got the group stuck; the caller makes it terminal
+ 	}
+@@ -758,7 +833,6 @@
+ 	config.simplify_permissive = true;
+ 	config.simplify_fallback_permissive = false; // note: by default we run in permissive mode, but it's also possible to disable that and use it only as a fallback
+ 	config.simplify_prune_unlocked = false;
+-	config.simplify_prune_budget = 0.f;
+ 
+ 	return config;
+ }
+@@ -856,11 +930,13 @@
+ 			unsigned int flags = 0, pruned_relocked = 0;
+ 			float pruned_extent = 0.f;
+ 			std::vector<unsigned int> pruned;
+-			std::vector<unsigned int> simplified = simplify(config, mesh, merged, locks, remap, target_size, &error, &flags, pruned, &pruned_extent);
++			Collapsed collapsed;
++			std::vector<unsigned int> simplified = simplify(config, mesh, merged, locks, remap, target_size, &error, &flags, pruned, &pruned_extent, &collapsed);
+ 
+-			// let the caller verify the simplified group; it may re-simplify it with more locks (and get it stuck)
++			// let the caller verify the simplified group; it may re-simplify it with more locks (and get it stuck), and it decides
++			// the prune's clause (2)
+ 			if (mesh.verify_group && simplified.size() <= merged.size() * config.simplify_threshold)
+-				verifyGroup(config, mesh, merged, locks, target_size, bounds.error, depth, simplified, error, remap, flags, pruned, pruned_relocked, pruned_extent);
++				verifyGroup(config, mesh, merged, locks, target_size, bounds.error, depth, simplified, error, remap, flags, pruned, pruned_relocked, pruned_extent, collapsed);
+ 
+ 			// the group's locked positions its result no longer uses
+ 			unsigned int locked_dropped = 0;
