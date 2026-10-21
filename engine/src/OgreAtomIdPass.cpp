@@ -1110,6 +1110,10 @@ void recordHistoryPass(AtomPassContext &ctx) {
         hist.levels != hzb->getNumMipmaps())
         return;
     recordOcclusionPyramid(ctx.renderSystem, depth, hzb);
+    // THE DEPTH GOES BACK TO ITS ATTACHMENT LAYOUT through Ogre's own render pass over this pass's RTV (the late pass's
+    // order: its pyramid, then its begin): the build read the depth as a texture, and the next pass's barriers were
+    // planned for the attachment this pass names (app.engine_selftest_validation: VUID-VkImageMemoryBarrier-oldLayout).
+    pass->beginRenderPass();
 }
 
 }  // namespace
