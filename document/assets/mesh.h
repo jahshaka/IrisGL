@@ -236,104 +236,29 @@ struct MeshCard
     float coverage = 0.0f;
 };
 
-/// THE PER-MESH SIGNED DISTANCE FIELD — a bake product (ATOM P2, SUB-S5-SDF),
-/// in the MESH'S OWN SPACE like the cards and for the same reason: one field
-/// serves every instance at any transform.
+/// THE PER-MESH CLUSTER DAG — a bake product (ATOM-2: irisgl/import/atomdag/, the builder of our own; build.h
+/// states the design, D1-D8), beside the LOD chain: the chain is what the voxeliser, the cards, the far BLAS and the
+/// casters read (until the level table becomes a cut of this DAG, ATOM-2 stage 5); the DAG is what the GPU cut reads.
 ///
-/// WHAT IT IS: a uniform grid of int8 distances, jump-flooded at IMPORT over
-/// LEVEL 0's triangle soup, negative inside and positive outside. `scale` is the
-/// distance `|value| == 127` stands for, so a cell's distance in mesh units is
-/// `value / 127 * scale`, saturating beyond it — the sign stays right out there,
-/// which is all a coarse occupancy test needs, and the band near the surface is
-/// where the resolution goes.
+/// WHAT IT IS: level 0 split into CLUSTERS of at most 128 triangles and 256 vertices; each level's clusters grouped
+/// 8-32, each group simplified to about half and re-split, until one cluster is left, then an EMPTY TOP group. Every
+/// cluster is a member of exactly one group (`group`) and was produced by exactly one group (`refined`, -1 for a
+/// level-0 cluster); a group with no produced cluster draws nothing when it is affordable (the empty top: a thing
+/// under a pixel stops drawing). THE RENDER TEST is stated once in C++ in jahshaka/engine/Types.h (`clusterCut`) and
+/// once in GLSL (JahClusterCut.glsl): a cluster is drawn iff its own group's error is NOT affordable and its
+/// `refined` group's IS (or it is level 0).
 ///
-/// WHY THE RESOLUTION IS TIED TO THE CHAIN: the cell can never be finer than the
-/// geometry is HONEST (`meshbake.cpp`'s `kSdfCellPerBound`, four times level 1's
-/// measured bound). A field finer than the surface it was measured from would
-/// record detail the bake has already said it cannot promise.
+/// THE ERROR THE RULE READS IS MEASURED: a group's `error` = max(its members' stored error, the measured one-step
+/// deviation of its output from its input — exact both ways, island-capped), in mesh units, monotone by
+/// construction; `estimate` is the simplifier's own number (a diagnostic). `centre`/`radius` of a group is its LOD
+/// sphere: the sphere enclosing every member's LOD sphere (a leaf's is its own) — so a parent is never further
+/// from the eye than its child, and the rule selects exactly one cut.
 ///
-/// THE SIGN OF AN OPEN MESH is the nearest triangle's geometric normal, not a
-/// ray-parity test, so a plane or a hemisphere gets a two-sided OFFSET field
-/// rather than a refusal. That is the honest answer for geometry with no inside:
-/// a consumer reading occupancy off such a mesh is asking the wrong question,
-/// and a consumer reading short-range occlusion or a distance to the surface —
-/// which is every consumer named in SUB-S5-SDF — gets exactly what it wants.
+/// THE ON-DISK SHAPE IS MESHLET-LOCAL: per cluster a slice of `vertices` (the mesh vertices it uses, first-use
+/// order) and a slice of `triangles` (three 8-bit indices into that slice per triangle). The engine hand-off expands
+/// it to one global index stream (irisgl/mirror/scenemirror.cpp toMeshData).
 ///
-/// NOTHING READS IT YET. The consumers are Photon's (coarse-cascade occupancy by
-/// min-composite, the field's short-range occlusion, the far occluder past the
-/// last cascade) and they arrive in their own phases; this is the PRODUCT, baked
-/// once under the same format bump as the measured LOD bound.
-struct MeshSdf
-{
-    /// The FORMAT's ceiling on cells per axis, here beside the struct for the
-    /// same reason MeshCard::kAxisCount is: the bake's reader has to refuse a
-    /// bigger grid, and the generator has to stay under the same number.
-    /// 64^3 int8 = 256 KB, the most a per-mesh product may cost.
-    static constexpr int kMaxDim = 64;
-
-    /// Cells per axis. All three zero = this mesh has no field (skinned, not
-    /// triangles, no area) — which costs six bytes and is an honest answer.
-    quint16 dim[3] = { 0, 0, 0 };
-    /// The CENTRE of cell (0, 0, 0), mesh space.
-    Vec3 origin;
-    /// The cell's edge, metres. CUBIC on purpose: a distance field with
-    /// anisotropic cells is not a distance field.
-    float cell = 0.0f;
-    /// The distance `|value| == 127` represents, metres.
-    float scale = 0.0f;
-    /// dim[0]*dim[1]*dim[2] int8 values, x fastest, then y, then z.
-    QByteArray values;
-
-    bool isEmpty() const { return dim[0] == 0 || dim[1] == 0 || dim[2] == 0 || values.isEmpty(); }
-    int cellCount() const { return int(dim[0]) * int(dim[1]) * int(dim[2]); }
-    /// The signed distance stored for one cell, in mesh units. 0 for a cell out
-    /// of range or a mesh with no field.
-    float distanceAt(int x, int y, int z) const
-    {
-        if (isEmpty() || x < 0 || y < 0 || z < 0 || x >= int(dim[0]) || y >= int(dim[1]) ||
-            z >= int(dim[2]))
-            return 0.0f;
-        const int i = (z * int(dim[1]) + y) * int(dim[0]) + x;
-        if (i >= values.size()) return 0.0f;
-        return float(static_cast<signed char>(values.at(i))) / 127.0f * scale;
-    }
-};
-
-/// THE PER-MESH CLUSTER DAG — a bake product (ATOM stage 2, lane ATOM-CLUSTER-1;
-/// SPECS/atom/B2_CLUSTER_DAG_DESIGN.md §1), beside the LOD chain and not instead of
-/// it: the chain stays the product the voxeliser, the cards, the far BLAS and the
-/// cull's per-object path read, and this is the input stage 3's GPU cut reads.
-///
-/// WHAT IT IS: meshoptimizer's `clodBuild` run on LEVEL 0 (the vendored
-/// `thirdparty/meshoptimizer-clusterlod/clusterlod.h`). Level 0 is split into
-/// CLUSTERS of at most 128 triangles; neighbouring clusters are merged into GROUPS,
-/// each group is simplified to half and re-split, and the loop repeats until one
-/// cluster is left. Every cluster is a member of exactly one group (`group`) and
-/// was produced by exactly one group's simplification (`refined`, -1 for a
-/// level-0 cluster). THE RENDER TEST is the header's own (clusterlod.h:129-133),
-/// stated once in C++ in jahshaka/engine/Types.h (`clusterCut`) and once in GLSL
-/// (JahClusterCut.glsl): a cluster is drawn iff its own group's error is NOT
-/// affordable and its `refined` group's IS (or it is level 0).
-///
-/// THE ERROR THE RULE READS IS MEASURED, not the simplifier's estimate — exactly
-/// ATOM P1's AT-A5 finding for the chain's levels, applied per group: `error` is
-/// the two-sided distance between the group's simplified geometry and the LEVEL-0
-/// surface it stands for, under the chain's rule (ATOM-LOD-BOUND-1, applied to the
-/// groups by ATOM-CLUSTER-CUT): the sampled terms x1.25, the removed-vertex and
-/// per-facet terms exact, every level-0 point capped at its island's extent — in
-/// mesh units (the same currency as `Mesh::lodBounds`), forced MONOTONE at bake (a
-/// group's error is never below any child group's). `estimate` is clusterlod.h's own number, kept as the
-/// diagnostic `lodErrors` is. A TERMINAL group (the root, or a group the
-/// simplifier could not reduce) carries FLT_MAX in both — it is never affordable.
-///
-/// THE ON-DISK SHAPE IS MESHLET-LOCAL (`clodLocalIndices`): per cluster a slice of
-/// `vertices` (the mesh vertices it uses) and a slice of `triangles` (three 8-bit
-/// indices into that slice per triangle). The engine hand-off expands it to one
-/// global index stream (irisgl/mirror/scenemirror.cpp toMeshData).
-///
-/// EMPTY for every mesh that gets none: a skinned mesh, a line mesh, and a mesh
-/// under two leaf clusters' worth of triangles (256) — which is exactly one
-/// cluster, i.e. level 0 itself, so a DAG would add nothing.
+/// EMPTY for a mesh that gets none: a skinned mesh, a line mesh, a malformed one.
 struct MeshClusterDag
 {
     struct Cluster
@@ -457,10 +382,6 @@ public:
     /// re-derive it. 0 when there are no cards.
     float cardCoverage = 0.0f;
 
-    /// ATOM P2 / SUB-S5-SDF — the mesh's signed distance field, built at IMPORT
-    /// by MeshBake beside the chain and the cards (see MeshSdf above). Empty for
-    /// every mesh that gets none.
-    MeshSdf sdf;
 
     /// ATOM stage 2 — the mesh's CLUSTER DAG, built at IMPORT by MeshBake beside
     /// the chain (see MeshClusterDag above). Empty for every mesh that gets none.

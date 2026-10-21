@@ -262,7 +262,7 @@ bool Mesh::hasSkeletalAnimations()
 // per added node — with the LOD chain deliberately withheld. They are baked
 // library assets now, imported once through the one pipeline
 // (jahshaka/src/services/primitiveassets.h), so every one of them carries the
-// chain, the cards that name real levels, the SDF and the measured bounds that
+// chain, the cards that name real levels, the cluster DAG and the measured bounds that
 // an imported model has, and nothing in the product parses a model outside an
 // import.)
 

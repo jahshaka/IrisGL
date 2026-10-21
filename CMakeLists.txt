@@ -201,9 +201,9 @@ add_subdirectory_with_folder("Dependencies/Zip" thirdparty/zip)
 # bullet3 and zip — STATIC and position-independent, because it links into the
 # shared libIrisGL — and its own install rules are OFF: it is an implementation
 # detail of the bake, not something a consumer of IrisGL links or includes.
-# MESHOPT_BUILD_DEMO stays OFF; demo/clusterlod.h is vendored separately by COPY
-# (thirdparty/meshoptimizer-clusterlod/, with its provenance) because it is an
-# example file, not part of the library.
+# MESHOPT_BUILD_DEMO stays OFF (its demo/clusterlod.h is read by one test arm only:
+# test_mesh_bake --cut-curve --arm stock, the upstream reference; the cluster DAG is
+# our own builder, import/atomdag/).
 option(MESHOPT_INSTALL "" OFF)
 option(MESHOPT_BUILD_DEMO "" OFF)
 option(MESHOPT_BUILD_GLTFPACK "" OFF)
@@ -215,7 +215,7 @@ set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # call Vec3::operator-, length() and hypot() as real functions: measured on the
 # owner's 233k-triangle scan, the same bake on the same 20 threads is several
 # times faster at -O2 (spikes/import-speed-1/). So the three bake TUs —
-# meshoptimizer (the target below), import/meshbake.cpp and import/clusterlod.cpp
+# meshoptimizer (the target below), import/meshbake.cpp and import/atomdag/*.cpp
 # (set on their sources after the SRCS list) — take -O2 in Debug; -g stays, and
 # every other configuration keeps its own level. The OUTPUT is the same bytes:
 # x86-64 baseline code has no FMA to contract into and GCC does not reassociate
@@ -252,67 +252,20 @@ endforeach()
 set(BUILD_SHARED_LIBS "${_jah_outer_shared_libs}")
 set(CMAKE_POSITION_INDEPENDENT_CODE "${_jah_outer_pic}")
 
-# clusterlod.h's PATCH STACK (CLUSTER-LOCK-3, 2026-09-29). The vendored copy
-# (thirdparty/meshoptimizer-clusterlod/, PROVENANCE.md) is never edited in place;
-# our changes to it are numbered patches in thirdparty/meshoptimizer-clusterlod-patches/
-# (0002: a terminal group's border stays locked; 0003: clodMesh::verify_group,
-# the per-group displacement lock — PROVENANCE.md lists them). Every
-# configure copies the vendored header into a fresh stage in the build tree,
-# applies the stack there (cmake/ApplyVendorPatches.cmake — loud when a patch
-# stops applying) and copies the result to vendor-patched/ only when its bytes
-# changed, so an unrelated re-configure recompiles nothing. The bake's two TUs
-# include "meshoptimizer-clusterlod/clusterlod.h" from vendor-patched/; the
-# header AND every patch are in the bake's producer hash below.
-set(_clod_vendored "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/meshoptimizer-clusterlod/clusterlod.h")
-set(_clod_patch_dir "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/meshoptimizer-clusterlod-patches")
-set(_clod_stage "${CMAKE_CURRENT_BINARY_DIR}/vendor-stage/meshoptimizer-clusterlod")
-set(_clod_patched_root "${CMAKE_CURRENT_BINARY_DIR}/vendor-patched")
-file(REMOVE_RECURSE "${_clod_stage}")
-file(MAKE_DIRECTORY "${_clod_stage}" "${_clod_patched_root}/meshoptimizer-clusterlod")
-file(COPY_FILE "${_clod_vendored}" "${_clod_stage}/clusterlod.h")
-execute_process(
-    COMMAND ${CMAKE_COMMAND}
-            -DSRC=${_clod_stage}
-            -DPATCHES=${_clod_patch_dir}
-            -DMARKER=clusterlod.h
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyVendorPatches.cmake
-    RESULT_VARIABLE _clod_patch_result
-    OUTPUT_VARIABLE _clod_patch_output
-    ERROR_VARIABLE  _clod_patch_output)
-string(REGEX REPLACE "(^|\n)-- " "\\1" _clod_patch_output "${_clod_patch_output}")
-string(STRIP "${_clod_patch_output}" _clod_patch_output)
-# THE STAGE IS FRESH AT EVERY CONFIGURE (the vendored header copied over it above), so the applier applies every
-# patch every time and said "applied" on each reconfigure (TOOLING-2 4e). What the build compiles is the
-# vendor-patched/ copy: when the staged result is that copy's bytes, the stack was already in the build — said so.
-if(_clod_patch_result EQUAL 0 AND EXISTS "${_clod_patched_root}/meshoptimizer-clusterlod/clusterlod.h")
-    file(SHA256 "${_clod_stage}/clusterlod.h" _clod_staged_sha)
-    file(SHA256 "${_clod_patched_root}/meshoptimizer-clusterlod/clusterlod.h" _clod_built_sha)
-    if(_clod_staged_sha STREQUAL _clod_built_sha)
-        string(REPLACE "vendor patch applied:" "vendor patch already applied:" _clod_patch_output "${_clod_patch_output}")
-    endif()
-endif()
-if(_clod_patch_output)
-    message(STATUS "${_clod_patch_output}")
-endif()
-if(NOT _clod_patch_result EQUAL 0)
-    message(FATAL_ERROR "clusterlod.h patches could not be applied — see above")
-endif()
-file(COPY_FILE "${_clod_stage}/clusterlod.h"
-     "${_clod_patched_root}/meshoptimizer-clusterlod/clusterlod.h" ONLY_IF_DIFFERENT)
-file(GLOB _clod_patches CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
-     "${_clod_patch_dir}/*.patch")   # CONFIGURE_DEPENDS: a new patch re-configures (applied AND hashed)
-list(SORT _clod_patches)
-
 set(SRCS
     document/assets/mesh.cpp
     document/scenegraph/meshnode.cpp
     import/meshprewarm.cpp
     import/parsecensus.cpp
     import/meshbake.cpp
-    # ATOM stage 2: the ONE TU that compiles clusterlod.h's implementation
-    # (vendored copy, thirdparty/meshoptimizer-clusterlod/, pinned at meshoptimizer
-    # v1.2 = 9d9890c73011d75920af614485296d1e03e95448 — PROVENANCE.md beside it).
-    import/clusterlod.cpp
+    # ATOM-2: the cluster DAG's builder (build.h states the design)
+    import/atomdag/adjacency.cpp
+    import/atomdag/leaves.cpp
+    import/atomdag/groups.cpp
+    import/atomdag/simplify.cpp
+    import/atomdag/measure.cpp
+    import/atomdag/ladder.cpp
+    import/atomdag/build.cpp
     import/importflags.cpp
     import/importsettings.cpp
     import/scenesource.cpp
@@ -389,6 +342,14 @@ set (HEADERS
     import/meshprewarm.h
     import/parsecensus.h
     import/meshbake.h
+    import/bakeshared.h
+    import/atomdag/adjacency.h
+    import/atomdag/leaves.h
+    import/atomdag/groups.h
+    import/atomdag/simplify.h
+    import/atomdag/measure.h
+    import/atomdag/ladder.h
+    import/atomdag/build.h
     import/importflags.h
     import/clipnaming.h
     import/importsettings.h
@@ -540,32 +501,37 @@ endif()
 #       MESHOPTIMIZER_VERSION plus every signature we call. They are vendored,
 #       so they change only when someone deliberately moves the pin — exactly
 #       when a re-bake is wanted.
-#   thirdparty/meshoptimizer-clusterlod/clusterlod.h and the four library files
-#       it drives — ADDED by ATOM stage 2 (lane ATOM-CLUSTER-1, 2026-09-23). The
-#       bake now writes a CLUSTER DAG, and its bytes are clodBuild's output:
-#       the header (the whole algorithm — partition, lock, simplify, re-split)
-#       plus clusterizer.cpp (the meshlet builder), partition.cpp (the group
-#       partitioner), spatialorder.cpp (partition sort) and meshletutils.cpp
-#       (cluster bounds, local indices, meshlet optimisation) — every file a
-#       DAG byte passes through, and nothing else. indexgenerator.cpp is NOT
-#       here: its position remap is an equality test with one answer.
-#       import/clusterlod.cpp is not either: it is three include lines and a
-#       define, and cannot change a byte without the header changing.
-#   thirdparty/meshoptimizer-clusterlod-patches/*.patch — ADDED by CLUSTER-LOCK-3
-#       (2026-09-29): the header the bake compiles is the vendored copy WITH its
-#       patch stack (above SRCS), so every patch is a producer file too.
+#   import/atomdag/*.{h,cpp} and import/bakeshared.h — ADDED by ATOM-2 stage 1
+#       (2026-10-22): the cluster DAG is our own builder now (clusterlod.h and its
+#       patch stack were deleted) and every DAG byte is its output; bakeshared.h is
+#       the pool and the nearest-surface grid every measurement reads. Of the
+#       meshoptimizer library the DAG reads spatialorder.cpp (the Morton order of
+#       the locality links) and clusterizer.cpp (meshopt_computeSphereBounds, the
+#       spheres) besides the simplifier; indexgenerator.cpp is NOT here: its
+#       position remap is an equality test with one answer.
 set(_mesh_bake_hashed_sources
     import/meshbake.cpp
     import/meshbake.h
     import/materialhelper.cpp
     thirdparty/meshoptimizer/src/meshoptimizer.h
     thirdparty/meshoptimizer/src/simplifier.cpp
-    thirdparty/meshoptimizer-clusterlod/clusterlod.h
-    ${_clod_patches}
+    import/bakeshared.h
+    import/atomdag/adjacency.h
+    import/atomdag/adjacency.cpp
+    import/atomdag/leaves.h
+    import/atomdag/leaves.cpp
+    import/atomdag/groups.h
+    import/atomdag/groups.cpp
+    import/atomdag/simplify.h
+    import/atomdag/simplify.cpp
+    import/atomdag/measure.h
+    import/atomdag/measure.cpp
+    import/atomdag/ladder.h
+    import/atomdag/ladder.cpp
+    import/atomdag/build.h
+    import/atomdag/build.cpp
     thirdparty/meshoptimizer/src/clusterizer.cpp
-    thirdparty/meshoptimizer/src/partition.cpp
-    thirdparty/meshoptimizer/src/spatialorder.cpp
-    thirdparty/meshoptimizer/src/meshletutils.cpp)
+    thirdparty/meshoptimizer/src/spatialorder.cpp)
 # A CONFIGURE-TIME hash goes STALE (found by this lane's own suite, 2026-09-15):
 # editing import/meshbake.cpp does not re-run CMake, so the compiled-in term
 # kept describing the PREVIOUS contents of the file until something unrelated
@@ -592,7 +558,9 @@ string(REPLACE ";" "|" _mesh_bake_hashed_list "${_mesh_bake_hashed_sources}")
 
 # The bake's own TUs at -O2 in Debug, and never contracting (see the meshoptimizer
 # block above for both).
-set_source_files_properties(import/meshbake.cpp import/clusterlod.cpp
+set_source_files_properties(import/meshbake.cpp import/atomdag/adjacency.cpp import/atomdag/leaves.cpp
+    import/atomdag/groups.cpp import/atomdag/simplify.cpp import/atomdag/measure.cpp import/atomdag/ladder.cpp
+    import/atomdag/build.cpp
     PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>;${_jah_bake_fp}")
 # THE PICKING INDEX'S BUILD AND WALK TOO (SPEED-CPU): the bake reader builds a
 # TriangleBvh per picking mesh on every open, and at -O0 a 233k-triangle scan's
@@ -636,12 +604,11 @@ target_compile_definitions(IrisGL PUBLIC BT_THREADSAFE=1)   # Bullet's multi-thr
 target_link_libraries (IrisGL PRIVATE assimp)
 # meshoptimizer is PRIVATE for the same reason assimp is: the LOD chain it builds
 # crosses to the engine as plain data (iris::Mesh::lodIndices), never as one of
-# its types, and no public IrisGL header includes it. import/meshbake.cpp is the
-# only TU that does.
+# its types, and no public IrisGL header includes it. import/meshbake.cpp and the
+# DAG builder's TUs (import/atomdag/*.cpp) are the only ones that do.
 target_link_libraries (IrisGL PRIVATE meshoptimizer)
 target_include_directories(IrisGL PRIVATE
-    "${PROJECT_SOURCE_DIR}/thirdparty/meshoptimizer/src"
-    "${_clod_patched_root}")   # clusterlod.h with its patch stack (above)
+    "${PROJECT_SOURCE_DIR}/thirdparty/meshoptimizer/src")
 
 # NO OGRE. Since ENGINE-UPGRADE-U2 the document's scene graph is its own store
 # (document/scenegraph/nodegraph.h) and the engine owns its own nodes, so this

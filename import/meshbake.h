@@ -111,6 +111,7 @@ For more information see the LICENSE file
 #include "import/modelsceneinfo.h"
 #include "import/scenesource.h"
 #include "document/assets/mesh.h"   // MeshMaterialData
+#include "import/atomdag/build.h"   // ClusterDagStats / Options
 
 struct aiScene;
 
@@ -165,11 +166,11 @@ public:
         /// WHAT THE BAKE COST, per mesh and per stage (IMPORT-SPEED-1): the import's
         /// log line carries it, so the next slow file is diagnosed from the log
         /// alone. Never serialized — it describes the run, not the product.
-        struct StageMs { double lodChain = 0.0, cards = 0.0, sdf = 0.0, dag = 0.0; };
+        struct StageMs { double lodChain = 0.0, cards = 0.0, dag = 0.0; };
         QVector<StageMs> stageMs;   ///< aiScene mesh order, as `meshes`
         double meshesMs = 0.0;      ///< the wall time of all meshes' stages together
         int bakeThreads = 0;        ///< the width this bake ran at (MeshBake::bakeThreads when it started)
-        /// "m0 99875t lod 1234 cards 12 sdf 34 dag 567 | m1 ..." — the per-stage ms.
+        /// "m0 99875t lod 1234 cards 12 dag 567 | m1 ..." — the per-stage ms.
         QString stageSummary() const;
     };
 
@@ -289,167 +290,23 @@ public:
     /// Pure CPU, no assimp, no engine; safe from any thread.
     static void buildCards(const MeshPtr &mesh, int maxCards);
 
-    /// ATOM P2 / SUB-S5-SDF: build `mesh`'s SIGNED DISTANCE FIELD, in place —
-    /// `sdf`, or an empty field when the mesh gets none (it is skinned, it is not
-    /// triangles, or it has no extent).
-    ///
-    /// MUST RUN AFTER buildLodChain on the same mesh: the field's cell size is
-    /// floored at four times LEVEL 1's measured bound, so that the field is never
-    /// finer than the geometry is honest (document/assets/mesh.h MeshSdf). A mesh
-    /// with no chain gets the resolution ceiling instead, which is correct — a
-    /// mesh the simplifier could not touch has no coarser truth to respect.
-    ///
-    /// Public for the same reason buildLodChain and buildCards are: it is a
-    /// PRODUCT of the bake with its own policy, and a caller that builds an
-    /// iris::Mesh by other means must be able to ask for the field the importer
-    /// would have produced rather than grow a second implementation of it.
-    /// Pure CPU, no assimp, no engine; safe from any thread.
-    static void buildSdf(const MeshPtr &mesh);
-
-    /// ATOM stage 2 (SPECS/atom/B2_CLUSTER_DAG_DESIGN.md §1): build `mesh`'s
-    /// CLUSTER DAG, in place — `clusterDag`, or an empty one when the mesh gets
-    /// none (skinned, not triangles, or under two leaf clusters of triangles).
-    ///
-    /// Independent of the chain (it simplifies level 0 itself) and of the cards
-    /// and the field; buildFromScene runs it last. Public for the reason the
-    /// other three products are: a caller that builds an iris::Mesh by other
-    /// means — a procedural fixture, a suite — must get the DAG the importer
-    /// would have produced, not a second implementation of it.
-    /// Pure CPU, no assimp, no engine; safe from any thread.
-    ///
-    /// `variant` exists for the ONE measurement that chose the shipped config
-    /// (tests/atom/cluster_config_measure.cpp); every other caller takes the
-    /// default, which is the only config a bake is ever written with — the blob
-    /// records it, and a blob written under another is refused and re-baked.
-    enum class ClusterDagVariant {
-        Shipped,               ///< what the bake writes (see meshbake.cpp, clusterdag::config)
-        DefaultProtectUv,      ///< clodDefaultConfig(128), permissive, UV seams PROTECTED (the header's pairing)
-        DefaultProtectAll,     ///< ...normal AND UV discontinuities protected
-        PermissiveCharged,     ///< permissive, NOTHING protected: seams paid for in the error (stage 1's choice)
-        RegularizedProtectUv,  ///< DefaultProtectUv + simplify_regularize
-        Strict,                ///< non-permissive, permissive only as a fallback (seams locked by topology)
-        Count
-    };
-    /// What one build did, for the report and the suites. `clusterRegions`
-    /// (filled only when asked) is the PROVENANCE the measurement computed: for
-    /// every cluster, the level-0 triangles (indices into the mesh's index list,
-    /// divided by 3) it stands for — the regions of one group's outputs partition
-    /// the union of its members' regions, which is what makes "exactly one cut
-    /// covers every level-0 triangle" checkable (atom.cluster_cut).
-    struct ClusterDagStats
-    {
-        int    clusters = 0;
-        int    groups = 0;
-        int    depth = 0;              ///< max group depth + 1
-        int    terminalGroups = 0;
-        int    monotoneFixes = 0;      ///< groups whose measured error was raised to a child's
-        int    sphereFixes = 0;        ///< groups whose sphere was grown to contain a child's
-        int    measuredBelowEstimate = 0;  ///< groups where the measurement came in under clusterlod's number
-        int    localFallbacks = 0;     ///< term-1 samples the group's local soup could not answer (exact either way)
-        /// IN: the REFERENCE measurement — term 1 against the WHOLE level-0 grid and
-        /// every area sample's plain nearest distance (no early out) — which the
-        /// shipped path (a local soup + max-only queries) is exact against;
-        /// atom.cluster_cut asserts the two agree.
-        bool   referenceMeasure = false;
-        /// IN: THE DENSE REFERENCE per group (atom.lod_bound_bar's (a) for the DAG,
-        /// ATOM-CLUSTER-CUT): 8x the area samples against the WHOLE level-0 grid, the
-        /// per-facet walk at the reference pattern (corners, midpoints, centroid and
-        /// the 1-to-4 split's centroids), the same island caps, NO margin — written
-        /// to `GroupTerms::reference`. Implies `wantTerms`.
-        bool   denseReference = false;
-        /// IN: one `GroupTerms` row per group into `groupTerms` (the bar's and the
-        /// report's table; `test_mesh_bake --dag-terms <file>` prints it).
-        bool   wantTerms = false;
-        struct GroupTerms
-        {
-            int   depth = 0;
-            int   regionVertices = 0;   ///< level-0 vertices the group stands for
-            int   simplifiedTriangles = 0;
-            float estimate = 0.0f;      ///< clusterlod's own error (FLT_MAX = terminal)
-            float sampled = 0.0f;       ///< the two area terms' maximum, margin APPLIED
-            float vertex = 0.0f;        ///< exact removed-vertex distance (island-capped)
-            float facet = 0.0f;         ///< exact per-facet distance (lost facets capped; S's facets against level 0)
-            float bound = 0.0f;         ///< the group's own measured error (before the monotone fix)
-            float stored = 0.0f;        ///< what the DAG stores (after the monotone fix)
-            float reference = -1.0f;    ///< the dense reference (denseReference), else -1
-            int   islandsDropped = 0;   ///< level-0 components wholly inside the region with no vertex kept
-            float droppedMaxExtent = 0.0f;
-            bool  capBound = false;     ///< an island cap lowered some point's distance
-        };
-        QVector<GroupTerms> groupTerms;
-        /// THE DAG'S DISPLACEMENT LOCK, PER GROUP (DAG-LOCK-1's rule, CLUSTER-LOCK-3's
-        /// shape): every group is verified as clusterlod simplifies it and re-simplified
-        /// with its offenders locked, at most 4 times. `groupRetries` = the
-        /// re-simplifications over all groups; `retryHistogram[k]` = the groups that
-        /// took k; `groupsUnconverged` = groups still past the bound after their last
-        /// attempt (the measurement charges them); `groupsMadeTerminal` = groups whose
-        /// re-simplification got stuck under their locks (output terminal, not
-        /// simplified: they cannot simplify within their bound); `lockedVertices` = the locks summed
-        /// over groups; `verifyMs` = the verify's share of `buildMs`; `retriesByDepth[d]`
-        /// = the re-simplifications of depth-d groups (where the bound binds).
-        int    groupRetries = 0;
-        int    groupsUnconverged = 0;
-        int    groupsMadeTerminal = 0;
-        int    lockedVertices = 0;
-        QVector<int> retryHistogram;
-        QVector<int> retriesByDepth;
-        double verifyMs = 0.0;
-        /// The lock is by POSITION (CLUSTER-LOCK-1): how many locked positions are held
-        /// by several indices (a seam, a pole), and how many are locked on only some of
-        /// their indices — always 0; a split position would open the cut.
-        int    lockedSharedPositions = 0;
-        int    lockedSplitPositions = 0;
-        double buildMs = 0.0;          ///< clodBuild alone (the verify included)
-        double measureMs = 0.0;        ///< the per-group measurement + provenance
-        bool   wantRegions = false;
-        QVector<QVector<quint32>> clusterRegions;
-        /// clusterlod's own report per group, by group id (patch 0004): `groupSimplifyFlags`
-        /// = CLOD_SIMPLIFY_* (2 = the prune removed a component), `groupLockedDropped` = the
-        /// level's locked positions the result no longer uses. `prunedGroups` /
-        /// `lockDroppedGroups` count the groups with each (`lockedDroppedByDepth[d]` = the
-        /// positions lost at depth d, the post-sprint audit's numbers); `prunedRelocked` =
-        /// vertices of pruned components the displacement lock asked
-        /// to lock (0 by construction: a pruned piece is charged under the group's error);
-        /// `emptyGroups` = groups the prune emptied (a group with its measured error and no
-        /// output clusters: affordable, the object draws nothing there).
-        QVector<quint32> groupSimplifyFlags;
-        QVector<quint32> groupLockedDropped;
-        /// How each group's verify ended, by group id (ATOM-7): 0 not verified (stuck at its first result, or the
-        /// root), 1 converged, 2 unconverged (still past the bound after its retries: the measurement charges it), 3
-        /// made terminal by its locks, 4 empty (pruned to nothing). `repruneGroups` = groups whose prune's clause (2),
-        /// under the verify's budget, removed a piece (CLOD_SIMPLIFY_REPRUNED).
-        QVector<quint8> groupVerifyOutcome;
-        int    repruneGroups = 0;
-        /// THE BEST ATTEMPT WINS (ATOM-7, patch 0005): `groupsKeptEarlier` = groups whose kept result is not their last
-        /// attempt (a retry came out worse); `handOnRecomputed` = winners whose hand-on was recomputed from their indices.
-        int    groupsKeptEarlier = 0;
-        int    handOnRecomputed = 0;
-        /// The verify's hand-on: its closest queries (ATOM-7 stage 3: one per dropped island) and the time of the
-        /// winners' recomputed hand-ons (a share of `verifyMs`).
-        qint64 handOnQueries = 0;
-        double recomputeMs = 0.0;
-        /// THE PROOF STAT (ATOM-7 stage 2): the level-locked positions the DAG's own clusters say a group lost
-        /// (recomputed: a position shared with another group of its depth or an earlier terminal one, absent from its
-        /// output), the largest distance-to-output / stored error among them, and how many are past their error.
-        int    lockedLostPositions = 0;
-        float  lockedLostMaxRatio = 0.0f;
-        int    lockedLostPastError = 0;
-        int    prunedGroups = 0;
-        int    lockDroppedGroups = 0;
-        int    prunedRelocked = 0;
-        int    emptyGroups = 0;
-        QVector<int> lockedDroppedByDepth;
-        /// IN: THE EXHAUSTIVE MEASUREMENT — every removed point of a wholly dropped island
-        /// queried as if it were not (the verify and the measurement skip those queries:
-        /// the point's charge is the island's extent whatever its distance). The answer is
-        /// the same DAG byte for byte; `test_mesh_bake --dag-levels ... --exhaustive` checks it.
-        bool   exhaustiveMeasure = false;
-    };
+    /// ATOM-2 (SPECS/ATOM_2_SPEC.md part A): build `mesh`'s CLUSTER DAG, in place — `clusterDag`, or an empty one
+    /// when the mesh gets none (skinned, not triangles, malformed). The builder is import/atomdag/ (build.h states
+    /// D1-D8); every triangle mesh gets one, ending in an empty top. Independent of the chain and the cards.
+    /// Public for the reason the other products are: a caller that builds an iris::Mesh by other means — a
+    /// procedural fixture, a suite — must get the DAG the importer would have produced, not a second implementation.
+    /// Pure CPU, no assimp, no engine; safe from any thread. `options` exists for the tools and the rows (the POSONLY
+    /// arm, the per-group records, the lock sets, the provenance); the bake passes the default.
+    using ClusterDagStats = atomdag::Stats;
+    using ClusterDagOptions = atomdag::Options;
     static void buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats = nullptr,
-                                ClusterDagVariant variant = ClusterDagVariant::Shipped);
-    /// The variant the bake writes (the measurement's pick).
-    static ClusterDagVariant shippedClusterDagVariant();
-    static const char *clusterDagVariantName(ClusterDagVariant variant);
+                                const ClusterDagOptions &options = ClusterDagOptions());
+    /// THE DRIFT (a diagnostic, never stored — `test_mesh_bake --drift`): per depth d, the uniform cut at d (every
+    /// cluster born at or before d whose own group forms at or after d) measured against level 0 both ways (the
+    /// removed vertices and the reference pattern on every lost and every added facet, island-capped on level 0's
+    /// side), beside the largest stored error the cut carries.
+    struct DagDriftRow { int depth = 0; int triangles = 0; float drift = 0.0f; float stored = 0.0f; };
+    static QVector<DagDriftRow> dagDrift(const MeshPtr &mesh);
 
     /// VERIFICATION, and it exists for the same reason `producerHashOf` does: the
     /// claim has to be TESTABLE without re-running the thing that made it.
@@ -474,28 +331,6 @@ public:
     static bool checkLodBounds(const MeshPtr &mesh, int densityMultiple = 8,
                                double *worstRatioOut = nullptr,
                                QVector<float> *referenceOut = nullptr);
-
-    /// ...and whether `mesh`'s SDF agrees with LEVEL 0's surface. Walks the cells
-    /// inside the field's exact band, compares each stored distance with the exact
-    /// nearest-surface distance, and answers whether the worst disagreement is
-    /// under ONE CELL. `worstCellsOut` receives that worst disagreement in cells
-    /// and `probedOut` how many cells were in the band (a field whose band is
-    /// empty has proven nothing, which is why the suite asserts the count too).
-    static bool checkSdfAgainstSurface(const MeshPtr &mesh, double *worstCellsOut = nullptr,
-                                       int *probedOut = nullptr);
-
-    /// ...and whether every cell the GEOMETRY says is OUTSIDE has a POSITIVE stored
-    /// distance. A separate check because `checkSdfAgainstSurface` compares
-    /// MAGNITUDES and is therefore blind to the one defect the field's normal can
-    /// have: at a convex feature sharper than a right angle the nearest point of an
-    /// exterior cell lies ON that feature, and a single face normal there can face
-    /// away from the cell — so the cell reads inside. Inside/outside is decided here
-    /// WITHOUT the field, by ray parity along +X through level 0's triangles, so
-    /// the field is judged against the geometry and not against itself. Cells the
-    /// parity test cannot answer (a ray grazing an edge) are skipped, as are cells
-    /// within a cell of the surface, where the true sign is genuinely ambiguous.
-    static bool checkSdfExteriorSign(const MeshPtr &mesh, int *probedOut = nullptr,
-                                     int *wrongOut = nullptr);
 
     /// The capture resolution a baked card's LOD level was chosen for (Lumen's
     /// 128-texel page). Phase 2's atlas owns the page size it actually
