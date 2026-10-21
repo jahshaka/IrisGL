@@ -105,7 +105,7 @@ bool GpuCull::ensureCut(Ogre::VaoManager *vao, std::string &err, uint32_t sceneN
         mCutSlotBase = vao->createUavBuffer(mCapacity, sizeof(uint32_t), 0, nullptr, false);
         mCutSlotCapacity = mCapacity;
     }
-    mRootCutReserve = mCutIgnoreScene ? 0u : rootCutReserve;
+    mRootCutReserve = rootCutReserve;   // the reserve stands under the test door too (reserveFor caps it at half the forced budget; ATOM-8 merge read F1)
     if (!mCutIgnoreScene) {
         // The main region must hold the scene's need beside the reserve, and the reserve be whole (<= half a budget).
         uint32_t want = mCutWantBudget;
