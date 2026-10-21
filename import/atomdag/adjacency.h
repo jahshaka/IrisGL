@@ -117,7 +117,7 @@ struct Graph
 /// Builds a Graph from an edge list (a, b, weight) over `nodes` nodes: symmetric, duplicates summed, sorted.
 struct EdgeList
 {
-    struct E { unsigned a, b; int w; };
+    struct E { unsigned a = 0, b = 0; int w = 0; };
     std::vector<E> list;
     void add(unsigned a, unsigned b, int w) { if (a != b) list.push_back({ a, b, w }); }
 };

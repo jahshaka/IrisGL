@@ -108,7 +108,7 @@ Graph makeGraph(size_t nodes, const EdgeList &edges, std::vector<Vec3> centres)
 {
     Graph g;
     g.centre = std::move(centres);
-    struct Half { unsigned a, b; int w; };
+    struct Half { unsigned a = 0, b = 0; int w = 0; };
     std::vector<Half> h;
     h.reserve(edges.list.size() * 2);
     for (const EdgeList::E &e : edges.list) {
