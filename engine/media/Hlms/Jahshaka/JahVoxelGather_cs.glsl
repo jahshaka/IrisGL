@@ -73,7 +73,7 @@ struct Record
 	vec4  worldRow[3];
 	vec4  aabb0;        // xyz world AABB centre
 	vec4  aabb1;        // xyz world AABB half size; w = the material SLOT, bit-cast
-	uvec4 meshData;     // geometry row, first index, index count, 1 = a shadow CASTER (FAR-SUN-1)
+	uvec4 meshData;     // geometry row, first index, index count, FLAGS: bit 0 a shadow CASTER (FAR-SUN-1), bit 1 TWO-SIDED (PHOTON-5)
 };
 
 layout( std430, ogre_U0 ) readonly restrict buffer paramsLayout { VoxelGatherParams params; };
@@ -94,6 +94,9 @@ layout( std430, ogre_U9 ) readonly restrict buffer maskLayout { uint budgetMask[
 // set the shadow maps draw, carried to the voxeliser so the light injection's march honours it
 // (FAR-SUN-1, D).
 #define JAH_CASTER 2u
+// GpuScene.h kGpuTwoSided: the colour pass draws both faces (the macroblock's CULL_NONE) - the
+// voxeliser covers both halves of a single-winding sheet's voxels (PHOTON-5 stage 2).
+#define JAH_TWO_SIDED 0x800u
 #define JAH_FLAG_LOD 1u
 #define JAH_FLAG_BUDGETED 2u
 // The readout's word offsets (GpuVoxelGather.h, VoxelReadoutWord).
@@ -228,7 +231,9 @@ void main()
 			rec.worldRow[2] = r2;
 			rec.aabb0 = vec4( wc, 0.0 );
 			rec.aabb1 = vec4( wh, uintBitsToFloat( matSlot ) );
-			rec.meshData = uvec4( L.geomRow, first, num, ( flags & JAH_CASTER ) != 0u ? 1u : 0u );
+			rec.meshData = uvec4( L.geomRow, first, num,
+								  ( ( flags & JAH_CASTER ) != 0u ? 1u : 0u ) |
+								  ( ( flags & JAH_TWO_SIDED ) != 0u ? 2u : 0u ) );
 			records[ranges[p].x + cursor] = rec;
 			atomicAdd( readout[JAH_READ_RECORDS], 1u );
 			wroteAny = true;

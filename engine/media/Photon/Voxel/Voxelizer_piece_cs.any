@@ -93,6 +93,10 @@
 		// GpuScene.h kGpuCaster, written by JahVoxelGather_cs.glsl); 0 = its surfaces bounce
 		// light but occlude no light's march (the light injection's caster share).
 		uint caster;
+		// Jahshaka (PHOTON-5 stage 2): 1 = the instance's colour pass draws BOTH faces
+		// (GpuScene.h kGpuTwoSided, its macroblock's CULL_NONE): a single-winding sheet
+		// covers both halves of its voxels, as the rays and the raster see it.
+		uint twoSided;
 	};
 
 	struct Instance
@@ -122,7 +126,9 @@
 		retVal.mesh.geomRow				= instanceBuffer[instanceIdx].meshData.x;
 		retVal.mesh.firstIndex			= instanceBuffer[instanceIdx].meshData.y;
 		retVal.mesh.numIndices			= instanceBuffer[instanceIdx].meshData.z;
-		retVal.mesh.caster				= instanceBuffer[instanceIdx].meshData.w;
+		// meshData.w is a FLAGS lane (PHOTON-5): bit 0 the caster, bit 1 two-sided.
+		retVal.mesh.caster				= instanceBuffer[instanceIdx].meshData.w & 1u;
+		retVal.mesh.twoSided			= ( instanceBuffer[instanceIdx].meshData.w >> 1u ) & 1u;
 
 		return retVal;
 	}
@@ -490,8 +496,15 @@
 				if( dot( geoN, triNormal ) < 0.0f )
 					geoN = -geoN;
 				const float3 axisScale = invAxisFaceArea * ( pieceArea * saturate( finalDiffuse.w ) );
-				const float3 contribP = max( geoN, float3( 0.0f, 0.0f, 0.0f ) ) * axisScale;
-				const float3 contribN = max( -geoN, float3( 0.0f, 0.0f, 0.0f ) ) * axisScale;
+				// A TWO-SIDED SHEET FACES BOTH WAYS (PHOTON-5 stage 2): its one winding covers
+				// both halves, exactly what the same sheet authored as two opposed windings
+				// writes - a ray meets the faces looking against it (jah_voxel_sample), so a
+				// one-sided half left a leaf card transparent from its back. The caster
+				// copies below follow the same halves.
+				const float3 contribP = ( instance.mesh.twoSided != 0u ? abs( geoN )
+										  : max( geoN, float3( 0.0f, 0.0f, 0.0f ) ) ) * axisScale;
+				const float3 contribN = ( instance.mesh.twoSided != 0u ? abs( geoN )
+										  : max( -geoN, float3( 0.0f, 0.0f, 0.0f ) ) ) * axisScale;
 				cAxisP = voxelMergeAxisQuantize( contribP );
 				cAxisN = voxelMergeAxisQuantize( contribN );
 				if( instance.mesh.caster != 0u )
@@ -511,6 +524,25 @@
 					saturate( ( pieceCentroid - voxelLo ) / p_voxelCellSize );
 				cPosP = voxelMergeAxisQuantize( contribP * cellLocal );
 				cPosN = voxelMergeAxisQuantize( contribN * cellLocal );
+				// THE OTHER WINDING'S SUMS (PHOTON-5 stage 2): a two-sided piece is written as the
+				// two pieces the same sheet authored as two opposed windings writes, sum for sum -
+				// the halves above already hold both, every weighted mean takes the piece twice and
+				// the normal sums take the opposed normal as the second piece's, so the merge
+				// recovers its two groups and the voxel is two-sided (the injection lights its back).
+				if( instance.mesh.twoSided != 0u )
+				{
+					cWeight *= 2u;
+					cAlbedo *= 2u;
+					cMetal *= 2u;
+					cEmissive *= 2u;
+					cRoughness *= 2u;
+					cEmitWeight *= 2u;
+					cNormalRaw += voxelMergeWeighSigned3(
+										voxelMergeQuantizeSigned3( -triNormal ), weight );
+					cNormalFolded += voxelMergeWeighSigned3(
+										voxelMergeQuantizeSigned3(
+											voxelMergeCanonical( -triNormal ) ), weight );
+				}
 			}
 	}
 @end
