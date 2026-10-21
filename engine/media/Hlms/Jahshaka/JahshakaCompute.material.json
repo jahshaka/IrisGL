@@ -149,7 +149,7 @@
 			"source" : "JahCullCut_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any", "JahClusterCut.glsl", "JahHzbTest.glsl"],
 			"textures" : [ {} ],
-			"uav_units" : 13
+			"uav_units" : 14
 		},
 
 		"Jahshaka/CullCutLate" :
@@ -158,7 +158,7 @@
 			"source" : "JahCullCutLate_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any", "JahHzbTest.glsl"],
 			"textures" : [ {} ],
-			"uav_units" : 9,
+			"uav_units" : 10,
 			"properties" : { "cull_hzb" : 1 }
 		},
 

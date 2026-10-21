@@ -424,7 +424,7 @@ void cycleStats(const AtomPassContext &ctx, AtomIdDevice &d, Ogre::VulkanDevice 
         if (!late) {
             cs.rejected = w[23];
             cs.rejectedOverflow = w[24];
-            list.noteRejectedOverflow(w[24], w[23]);
+            list.noteRejectedOverflow(w[24], w[38]);
         } else {
             cs.lateClusters = w[29] + w[30] + w[31] + w[32];
         }
@@ -858,8 +858,11 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         // THE PER-CLUSTER OCCLUSION (ATOM-8 stage 1): every cluster the cut would draw tested against the pyramid this
         // pass tests its objects against (none = the pixel-centre test alone), and culled where its rectangle,
         // through THIS frame's matrix, covers no pixel centre of the pass's viewport.
-        req.clusterOcclusion = true;
-        req.pixelCentreCull = true;
+        req.clusterOcclusion = !view->mEngine || view->mEngine->armRegistry().on(ArmId::AtomClusterOcclusion);
+        req.pixelCentreCull = req.clusterOcclusion;
+        // THE CLUSTER TEST'S FOOTPRINT (the A/B arm atom.clusterFootprint: 4 texels a side, or 8 - one mip finer).
+        req.clusterFootprint = view->mEngine ? unsigned(view->mEngine->armRegistry().value(ArmId::AtomClusterFootprint))
+                                             : 4u;
         {
             const Ogre::Matrix4 cm = cullMatrixOf(vpm);
             for (int r = 0; r < 4; ++r)

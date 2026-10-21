@@ -88,6 +88,10 @@ struct AtomDensityState {
     Ogre::TextureGpu *table = nullptr;         ///< R32_UINT, kTableWidth x rows, UAV: the Density mode's colours
     Ogre::UavBufferPacked *probe[2] = { nullptr, nullptr };   ///< the first list's records, the late list's
     uint32_t probeCapacity = 0u;               ///< records each buffer holds
+    /// THE PROBE'S CLASS BITS (ATOM-8 stage 2): two bits a cut record of each list (sky, depth slack), in uvec4s after
+    /// the group records; and the probe frame's per-slot first-cluster bits (the visible bitmap's prefix, host copy).
+    uint32_t probeClassWords = 0u;
+    std::vector<uint32_t> clusterBaseHost;
     /// THE HZB PROBE (ATOM-6 stage 3): per slot, what each list's depth test read (JahCullTest_cs.glsl
     /// `hzbProbe`): the first list's at [slot], the disocclusion list's at [slot + slots].
     Ogre::UavBufferPacked *hzbProbe = nullptr;
@@ -278,6 +282,7 @@ Ogre::TextureGpu *atomDensityFrame(OgreView *view, OgreScene *scene, AtomView mo
                 if (mi < gs.meshEntryCount()) bits += gs.meshEntry(mi).dag[1];
             }
             st.clusterBase->upload(base.data(), 0, base.size());
+            st.clusterBaseHost = base;
         }
         const uint32_t words = std::max((bits + 31u) / 32u, 1u);
         if (!st.seen || st.seenWords < words) {
@@ -318,15 +323,24 @@ Ogre::TextureGpu *atomDensityFrame(OgreView *view, OgreScene *scene, AtomView mo
                 if (mi >= gs.meshEntryCount()) continue;
                 records += floatToBits(gs.meshEntry(mi).localBoundsMin[3]);
             }
-            if (!st.probe[0] || st.probeCapacity < records) {
+            // ...and the class bits: two a record of the larger list's budget, 128 a uvec4.
+            const uint32_t recordBudget = std::max(view->atomCull().cutRecordBudget(), view->atomCullLate().cutRecordBudget());
+            const uint32_t classWords = std::max((2u * recordBudget + 127u) / 128u, 1u);
+            if (!st.probe[0] || st.probeCapacity < records || st.probeClassWords < classWords) {
                 destroyProbe(st);
                 for (int k = 0; k < 2; ++k)
-                    st.probe[k] = vao->createUavBuffer(kProbeHeader + kProbeRecordElements * records,
+                    st.probe[k] = vao->createUavBuffer(kProbeHeader + kProbeRecordElements * records + classWords,
                                                        4u * sizeof(uint32_t), 0, nullptr, false);
                 st.probeCapacity = uint32_t(records);
+                st.probeClassWords = classWords;
             }
             const uint32_t header[4] = { 0u, st.probeCapacity, 0u, 0u };
-            for (int k = 0; k < 2; ++k) st.probe[k]->upload(header, 0, 1u);
+            const std::vector<uint32_t> noClass(size_t(st.probeClassWords) * 4u, 0u);
+            for (int k = 0; k < 2; ++k) {
+                st.probe[k]->upload(header, 0, 1u);
+                st.probe[k]->upload(noClass.data(), kProbeHeader + kProbeRecordElements * st.probeCapacity,
+                                    st.probeClassWords);
+            }
             const uint32_t slots = std::max(gs.slotCount(), 1u);
             if (!st.hzbProbe || st.hzbProbeSlots < slots) {
                 destroyBuffer(st.hzbProbe);
@@ -678,6 +692,47 @@ bool OgreScene::atomCutProbe(AtomCutProbe &out) {
                 o.drawnTriangles += tris;
                 if (k) o.drawnTrianglesLate += tris;
                 o.depthTriangles[std::min(w[3], kDepths - 1u)] += tris;
+            }
+        }
+        // ---- THE DRAWN CLUSTERS' CLASSES (ATOM-8 stage 2): visible (a pixel), sky / depth-slack kept, per object ----
+        {
+            std::vector<uint32_t> counts, seen;
+            const bool haveCounts = readCounts(*st, counts);
+            const uint32_t bits = haveCounts ? counts[kHeaderBits] : 0u;
+            if (bits && st->seen) readElements(st->seen, 0, (bits + 31u) / 32u, sizeof(uint32_t), seen);
+            for (int k = 0; k < (lateRecorded ? 2 : 1); ++k) {
+                GpuCull &list = k ? view->atomCullLate() : view->atomCull();
+                if (!list.count() || !list.cutRecords()) continue;
+                std::vector<uint32_t> cw;
+                readElements(list.count(), 0, GpuCull::kCountElements, sizeof(uint32_t), cw);
+                const uint32_t n = std::min(cw[8], list.cutRecordBudget());
+                std::vector<uint32_t> rec, cls;
+                readElements(list.cutRecords(), 0, n, 16u, rec);
+                readElements(st->probe[k], kProbeHeader + kProbeRecordElements * st->probeCapacity, st->probeClassWords,
+                             16u, cls);
+                for (uint32_t r = 0; r < n; ++r) {
+                    const uint32_t *w = &rec[size_t(r) * 4u];
+                    if (w[0] == 0xFFFFFFFFu || w[1] >= clusters.size() || w[0] >= gs.slotCount()) continue;
+                    const unsigned long long tris = clusters[w[1]].indexCount / 3u;
+                    const uint32_t bit = 2u * r;
+                    const bool sky = (bit >> 5u) < cls.size() && ((cls[bit >> 5u] >> (bit & 31u)) & 1u);
+                    const bool slack = (bit >> 5u) < cls.size() && ((cls[bit >> 5u] >> (bit & 31u)) & 2u);
+                    bool visible = false;
+                    if (!seen.empty() && w[0] < st->clusterBaseHost.size()) {
+                        const uint32_t mi = meshIndexOf(gs.entry(w[0]));
+                        const uint32_t dagBase = mi < gs.meshEntryCount() ? gs.meshEntry(mi).dag[0] : 0u;
+                        const uint32_t b = st->clusterBaseHost[w[0]] + (w[1] - dagBase);
+                        visible = b < bits && (b >> 5u) < seen.size() && ((seen[b >> 5u] >> (b & 31u)) & 1u);
+                    }
+                    AtomCutProbeObject &o = objectOf(w[0]);
+                    if (sky) o.skyTriangles += tris;
+                    if (slack) o.slackTriangles += tris;
+                    if (!visible) {
+                        out.unseenClusterTriangles += tris;
+                        if (sky) out.unseenSkyTriangles += tris;
+                        if (slack) out.unseenSlackTriangles += tris;
+                    }
+                }
             }
         }
         // ---- WHAT EACH LIST'S DEPTH TEST READ (ATOM-6 stage 3), for the objects already listed ----

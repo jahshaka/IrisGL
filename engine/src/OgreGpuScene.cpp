@@ -157,6 +157,7 @@ void GpuScene::destroy() {
         if (mPartBuffer) mVao->destroyTexBuffer(mPartBuffer);
         if (mPartAabbBuffer) mVao->destroyUavBuffer(mPartAabbBuffer);
         if (mClusterBuffer) mVao->destroyUavBuffer(mClusterBuffer);
+        if (mClusterBoxBuffer) mVao->destroyUavBuffer(mClusterBoxBuffer);
         if (mGroupBuffer) mVao->destroyUavBuffer(mGroupBuffer);
         if (mMaskTable) mVao->destroyUavBuffer(mMaskTable);
     }
@@ -164,7 +165,9 @@ void GpuScene::destroy() {
     mMaskWords.clear();
     mMaskAddress = 0u;
     ++mMaskSerial;
-    mClusterBuffer = mGroupBuffer = nullptr;
+    mClusterBuffer = mGroupBuffer = mClusterBoxBuffer = nullptr;
+    mClusterBoxMirror.clear();
+    mClusterBoxCapacity = 0u;
     mClusterMirror.clear();
     mGroupMirror.clear();
     mClusterCapacity = mGroupCapacity = mClusterCount = mMaxClustersPerMesh = 0u;
@@ -396,9 +399,33 @@ bool GpuScene::ensurePartitions(Ogre::HlmsManager *hlmsManager, Ogre::RenderSyst
 // THE CLUSTER TABLES (ATOM-CLUSTER-CUT): every live mesh's DAG, concatenated. Rebuilt
 // WHOLE when the mesh set changes, exactly like the partitions above — a DAG cannot
 // change while its mesh lives, and the rebuild is O(clusters) once per attach batch.
+GpuClusterBox packClusterBox(const float bmin[3], const float bmax[3], float radius) {
+    GpuClusterBox b;
+    float e[3];
+    for (int k = 0; k < 3; ++k) {
+        b.centre[k] = 0.5f * (bmin[k] + bmax[k]);
+        e[k] = std::max(0.0f, 0.5f * (bmax[k] - bmin[k]));
+    }
+    // ROUNDED UP against the centre's own rounding too: the decoded half-extent covers every vertex. A box whose
+    // half-extent the sphere's radius cannot carry (a sphere that is not the vertices' bound) keeps the sphere's box.
+    if (!(radius > 0.0f)) return GpuClusterBox();
+    uint32_t q[3];
+    for (int k = 0; k < 3; ++k) {
+        const float need = e[k] + std::abs(b.centre[k]) * 1.0e-6f;
+        const double frac = std::ceil(double(need) / double(radius) * 1023.0);
+        if (frac > 1023.0) return GpuClusterBox();
+        q[k] = uint32_t(std::max(0.0, frac));
+    }
+    b.extent = q[0] | (q[1] << 10u) | (q[2] << 20u);
+    return b;
+}
+
 void GpuScene::setMeshDag(uint32_t meshIndex, std::vector<GpuCluster> clusters,
-                          std::vector<GpuClusterGroup> groups, uint32_t clusterRow) {
+                          std::vector<GpuClusterGroup> groups, uint32_t clusterRow,
+                          std::vector<GpuClusterBox> boxes) {
     if (meshIndex >= mMeshEntries.size()) return;
+    if (boxes.size() != clusters.size()) boxes.assign(clusters.size(), GpuClusterBox());
+    mMeshEntries[meshIndex].boxes = std::move(boxes);
     mMeshEntries[meshIndex].clusters = std::move(clusters);
     mMeshEntries[meshIndex].groups = std::move(groups);
     mMeshMirror[meshIndex].dag[3] = clusterRow;
@@ -416,6 +443,7 @@ void GpuScene::flushClusterTables() {
     if (!mClusterDirty || !mVao) return;
     mClusterDirty = false;
     mClusterMirror.clear();
+    mClusterBoxMirror.clear();
     mGroupMirror.clear();
     mMaxClustersPerMesh = 0u;
     for (uint32_t e = 0; e < uint32_t(mMeshEntries.size()); ++e) {
@@ -432,6 +460,7 @@ void GpuScene::flushClusterTables() {
             if (c.refined != kNoGroup) c.refined += gBase;
             mClusterMirror.push_back(c);
         }
+        mClusterBoxMirror.insert(mClusterBoxMirror.end(), me.boxes.begin(), me.boxes.end());
         mGroupMirror.insert(mGroupMirror.end(), me.groups.begin(), me.groups.end());
         gm.dag[0] = cBase;
         gm.dag[1] = uint32_t(me.clusters.size());
@@ -461,6 +490,8 @@ void GpuScene::flushClusterTables() {
     };
     const uint32_t clusterCapWas = mClusterCapacity, groupCapWas = mGroupCapacity;
     grow(mClusterBuffer, mClusterCapacity, mClusterMirror.size(), sizeof(GpuCluster), mClusterMirror.data());
+    grow(mClusterBoxBuffer, mClusterBoxCapacity, mClusterBoxMirror.size(), sizeof(GpuClusterBox),
+         mClusterBoxMirror.data());
     grow(mGroupBuffer, mGroupCapacity, mGroupMirror.size(), sizeof(GpuClusterGroup), mGroupMirror.data());
     if (atomTraceOn())
         atomTrace("cluster tables rebuilt: " + std::to_string(mClusterMirror.size()) + " clusters, " +
@@ -1228,6 +1259,7 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
     if (base0 && vaoMgr) {
         std::vector<detail::GpuCluster> clusters;
         std::vector<detail::GpuClusterGroup> groups;
+        std::vector<detail::GpuClusterBox> boxes;   // ATOM-8 stage 2: the record's own boxes, packed per cluster
         Ogre::PhotonVoxelizer::GeometryRow crow = base0->row;
         const Ogre::IndexBufferPacked *stream = rec.clusterStream.get();
         const uint64_t rawIdx = stream ? vaoMgr->getBufferDeviceAddress(stream) : 0u;
@@ -1254,6 +1286,10 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
                 g.sphere[3] = c.radius;
                 clusters.push_back(g);
             }
+            if (rec.clusterBoxes.size() == rec.clusters.size() * 6u)
+                for (size_t ci = 0; ci < rec.clusters.size(); ++ci)
+                    boxes.push_back(detail::packClusterBox(&rec.clusterBoxes[ci * 6u], &rec.clusterBoxes[ci * 6u + 3u],
+                                                           rec.clusters[ci].radius));
             groups.reserve(rec.clusterGroups.size());
             // THE CLUSTERS EACH GROUP PRODUCED (ATOM-7): the root cut's "last group" test (error.w = 0).
             const std::vector<unsigned> produced = clusterProducedCounts(rec.clusters, rec.clusterGroups.size());
@@ -1287,11 +1323,17 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
                 std::memcpy(k.sphere, g.sphere, sizeof(k.sphere));
                 clusters.push_back(k);
             }
+            // THE RUNS' OWN BOXES (ATOM-8 stage 2): the record's, when it measured these very runs (level 0 from its
+            // first index); the sphere stays the mesh's (the level rule's).
+            if (levels[0].firstIndex == 0u && rec.clusterBoxes.size() == clusters.size() * 6u)
+                for (size_t ci = 0; ci < clusters.size(); ++ci)
+                    boxes.push_back(detail::packClusterBox(&rec.clusterBoxes[ci * 6u], &rec.clusterBoxes[ci * 6u + 3u],
+                                                           g.sphere[3]));
         }
         if (!clusters.empty()) {
             const uint32_t crowIndex = detail::GpuScene::clusterRowIndex(index);
             mGpuScene.stageGeomRow(crowIndex, &crow);
-            mGpuScene.setMeshDag(index, std::move(clusters), std::move(groups), crowIndex);
+            mGpuScene.setMeshDag(index, std::move(clusters), std::move(groups), crowIndex, std::move(boxes));
         }
     }
     return index;

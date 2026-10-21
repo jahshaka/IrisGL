@@ -191,6 +191,18 @@ struct GpuCluster {
 };
 static_assert(sizeof(GpuCluster) == 32, "the GPU cluster table's stride is a contract");
 
+/// A CLUSTER'S OWN BOX (ATOM-8 stage 2), one per GpuCluster at the same index in its own table (clusterBoxBuffer): the
+/// mesh-space AABB of the vertices the cluster's triangles index — the per-cluster depth test's bound (the culling
+/// sphere stays the level rule's). `centre` the AABB's centre; `extent` the three half-extents as 10-bit fractions
+/// of the cluster's sphere radius rounded UP (bits 0-9 x, 10-19 y, 20-29 z), or all ones = no box (the sphere's box).
+struct GpuClusterBox {
+    float    centre[3] = {};
+    uint32_t extent = 0xFFFFFFFFu;
+};
+static_assert(sizeof(GpuClusterBox) == 16, "the GPU cluster box table's stride is a contract");
+/// Packs a mesh-space AABB (min, max) against a cluster sphere's radius (JahHzbTest.glsl's jahClusterObb decodes it).
+GpuClusterBox packClusterBox(const float bmin[3], const float bmax[3], float radius);
+
 /// ONE GROUP of a mesh's DAG, std430, 32 bytes — JahClusterCut.glsl's
 /// `JahClusterGroup`: the sphere the bake grew to contain every child group's, and
 /// x = the MEASURED error (mesh units; FLT_MAX = terminal), y = clusterlod's estimate,
@@ -641,13 +653,16 @@ public:
     /// changes — like the partitions, a DAG cannot change while its mesh lives — and
     /// `dag` x/y/z of the entry are written then (w, the cluster row, by the caller).
     void setMeshDag(uint32_t meshIndex, std::vector<GpuCluster> clusters,
-                    std::vector<GpuClusterGroup> groups, uint32_t clusterRow);
+                    std::vector<GpuClusterGroup> groups, uint32_t clusterRow,
+                    std::vector<GpuClusterBox> boxes = std::vector<GpuClusterBox>());
     /// Uploads the cluster tables if the mesh set moved (update() calls it; a
     /// consumer binding the tables outside the frame's scan calls it first).
     void flushClusterTables();
     /// The cluster tables wait for a rebuild (the next flush rebases every `dag`).
     bool clusterDirty() const { return mClusterDirty; }
     Ogre::UavBufferPacked *clusterBuffer() const { return mClusterBuffer; }
+    /// THE CLUSTERS' OWN BOXES (ATOM-8 stage 2), index for index with clusterBuffer (16 B a cluster).
+    Ogre::UavBufferPacked *clusterBoxBuffer() const { return mClusterBoxBuffer; }
     Ogre::UavBufferPacked *groupBuffer() const { return mGroupBuffer; }
     uint32_t clusterCount() const { return mClusterCount; }
     /// The most clusters one live mesh carries (the cut's per-instance loop bound).
@@ -894,8 +909,12 @@ private:
         /// rebuilt from these.
         std::vector<GpuCluster> clusters;
         std::vector<GpuClusterGroup> groups;
+        std::vector<GpuClusterBox> boxes;   ///< one a cluster, or empty (every cluster: the sphere's box)
     };
     Ogre::UavBufferPacked *mClusterBuffer = nullptr;
+    Ogre::UavBufferPacked *mClusterBoxBuffer = nullptr;
+    std::vector<GpuClusterBox> mClusterBoxMirror;
+    uint32_t mClusterBoxCapacity = 0;
     Ogre::UavBufferPacked *mGroupBuffer = nullptr;
     std::vector<GpuCluster> mClusterMirror;
     std::vector<GpuClusterGroup> mGroupMirror;

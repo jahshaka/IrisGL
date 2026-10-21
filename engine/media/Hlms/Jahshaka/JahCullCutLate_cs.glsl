@@ -1,12 +1,12 @@
 // Jahshaka — ATOM-8 stage 1: THE LATE CUT, the rejected clusters re-tested against THIS frame's pyramid.
 //
 // The first list's cut (JahCullCut_cs.glsl) appended every cluster last frame's pyramid hid to its REJECTED LIST
-// (slot, global cluster, depth; a skip's slot all ones; count[23] entries of the first list, the dispatch its
+// (slot, global cluster, depth; a skip's slot all ones; count[38] the first list's cursor, the dispatch its
 // count[20..22]: one thread an entry, 64 a group). Here, in the LATE list's request (this frame's cull matrix and
 // pyramid - built from the first pass's depth and the stock depth - in params), each entry is tested again by the
-// SAME box test (JahHzbTest.glsl) without the frustum (the first cut's planes were this frame's): still hidden =
-// dropped, exactly (it lies behind depth of this frame's picture, count[35]); a rectangle covering no pixel centre =
-// culled (count[25]); otherwise it is DRAWN LATE - the stream run it needs (the late list's counter[11], inside the
+// SAME box test (JahHzbTest.glsl) without the frustum (the first cut's planes were this frame's) and without the
+// pixel-centre test (the first cut's used this frame's matrix too): still hidden = dropped, exactly (it lies behind
+// depth of this frame's picture, count[35]); otherwise it is DRAWN LATE - the stream run it needs (the late list's counter[11], inside the
 // main region; a cluster that cannot fit is counted missing, count[13], and the budget grows), ONE RECORD (counter[8],
 // the emit job's work list, counter[26] the drawn reduce's dispatch) and ONE DRAW COMMAND OF ITS OWN in the late
 // list's per-cluster ranges (two-sided / masked by the slot's flags, the cut's ranges' rule; counter[29 + range]),
@@ -46,6 +46,7 @@ layout( std430, ogre_U5 ) restrict buffer cntLayout { uint counter[]; };
 layout( std430, ogre_U6 ) writeonly restrict buffer recordLayout { uvec4 records[]; };
 layout( std430, ogre_U7 ) writeonly restrict buffer drawLayout { uint clusterDraws[]; };
 layout( std430, ogre_U8 ) writeonly restrict buffer idLayout { uvec2 clusterIds[]; };
+layout( std430, ogre_U9 ) readonly restrict buffer boxLayout { vec4 clusterBoxes[]; };   // the clusters' own boxes
 vulkan_layout( ogre_t0 ) uniform texture2D hzbTexture;
 @insertpiece( JahHzbTest )
 
@@ -61,7 +62,7 @@ void main()
 {
 	uint e = gl_GlobalInvocationID.x;
 	uint budget = params.occl.z;
-	if( e >= min( firstCounter[23], budget ) )
+	if( e >= min( firstCounter[38], budget ) )   // the rejected list's cursor
 		return;
 	uvec4 entry = rejected[e];
 	uint slot = entry.x;
@@ -73,31 +74,20 @@ void main()
 	float scale = jahWorldMaxAxisScale( r0, r1, r2 );
 	uvec4 range = clusters[entry.y].range;
 	vec4 sphere = clusters[entry.y].sphere;
-	vec3 c = vec3( dot( r0.xyz, sphere.xyz ) + r0.w, dot( r1.xyz, sphere.xyz ) + r1.w, dot( r2.xyz, sphere.xyz ) + r2.w );
-	float r = sphere.w * scale;
-	r += r * ( 1.0 / 4096.0 ) + 1.0e-6;
-	vec3 bMin = c - vec3( r ), bMax = c + vec3( r );
+	vec3 c, ax, ay, az;
+	jahClusterObb( clusterBoxes[entry.y], sphere, r0, r1, r2, scale, c, ax, ay, az );
 	bool reverseZ = params.hzb.w != 0u;
 	vec2 lo, hi;
 	float nearest;
-	bool testable = jahHzbBoxRect( bMin, bMax, params.viewProjRow[0], params.viewProjRow[1], params.viewProjRow[2],
+	bool testable = jahHzbObbRect( c, ax, ay, az, params.viewProjRow[0], params.viewProjRow[1], params.viewProjRow[2],
 								   params.viewProjRow[3], reverseZ, lo, hi, nearest );
+	// (No pixel-centre test here: every entry passed it in the first cut - the same box through this frame's matrix.)
 	vec2 t0, t1;
-	if( testable && params.occl.y != 0u && params.viewRect.z != 0u )
-	{
-		// the late list's pyramid matrix IS this frame's: the pixel-centre rectangle is the same box's
-		jahHzbTexels( lo, hi, params.viewRect, vec2( params.viewRect.zw ), t0, t1 );
-		if( !jahHzbCoversPixelCentre( t0, t1 ) )
-		{
-			atomicAdd( counter[25], 1u );
-			return;
-		}
-	}
 	if( testable && params.hzb.x != 0u )
 	{
 		jahHzbTexels( lo, hi, params.hzbRect, vec2( float( params.hzb.y ), float( params.hzb.z ) ), t0, t1 );
 		int mip;
-		if( jahHzbOccluded( nearest, jahHzbFarthestUnder( t0, t1, params.hzb, mip ), reverseZ ) )
+		if( jahHzbOccluded( nearest, jahHzbFarthestUnder( t0, t1, params.hzb, float( params.occl.x ), mip ), reverseZ ) )
 		{
 			atomicAdd( counter[35], 1u );
 			return;

@@ -1922,6 +1922,8 @@ public:
     X(TlasRefit, "rayquery.tlasRefit") /* refit the TLAS instead of rebuilding it */ \
     X(GatherTemporal, "gather.temporal") /* the screen-probe gather's pixel history */ \
     X(AtomDecode, "atom.decode") /* the screen decode armed (0: the Atom items drawn by nothing) */ \
+    X(AtomClusterOcclusion, "atom.clusterOcclusion") /* the cut tests each cluster against depth and pixel centres (0: neither - the exactness A/B door, ATOM-8) */ \
+    X(AtomClusterFootprint, "atom.clusterFootprint") /* the cluster test's footprint in texels a side (4, or 8: one mip finer - the A/B arm, ATOM-8) */ \
     X(CardFootprint, "cards.footprintTexels") /* the card read's footprint gate */ \
     X(FieldScroll, "gi.fieldScroll") /* the irradiance field scrolls (0: re-placed whole) */ \
     X(DiffuseConeSkip, "photon.diffuseConeSkip") /* the pixel's cone diffuse only where the field's fallback weight is > 0 */ \
@@ -5290,6 +5292,11 @@ private:
         /// them at the mesh's first attach; a suite reads them to check the stream).
         std::vector<MeshCluster>      clusters;
         std::vector<MeshClusterGroup> clusterGroups;
+        /// THE CLUSTERS' OWN BOXES (ATOM-8 stage 2), measured at creation from the positions their triangles index:
+        /// six floats a cluster (mesh-space min xyz, max xyz) — the DAG's clusters, or for a mesh with no DAG the
+        /// flat runs of level 0 the GPU scene cuts (GpuScene::kFlatClusterTriangles). Packed at upload
+        /// (OgreGpuScene.cpp, GpuClusterBox).
+        std::vector<float>            clusterBoxes;
     };
     /// A rig, as this scene knows it. The Ogre-side SkeletonDef is cached
     /// PROCESS-wide by SkeletonManager under the same id (GPU_SKINNING_SPEC R6),

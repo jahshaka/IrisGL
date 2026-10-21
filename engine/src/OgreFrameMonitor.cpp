@@ -1043,6 +1043,14 @@ constexpr ArmDef kArms[] = {
       "The screen decode armed in the decode pass. 0 = unarmed: the Atom items are drawn by NOTHING "
       "in that pass (engine.atom_draw's proof that the view's passes skip their queue; scale's "
       "negative control). Was JAHSHAKA_ATOM_DECODE_OFF (a per-frame read)." },
+    { ArmId::AtomClusterOcclusion, 1.0, 0.0, 1.0,
+      "THE PER-CLUSTER OCCLUSION'S A/B DOOR (ATOM-8): 1 = the id pass's cut tests every cluster it would draw against "
+      "the depth pyramid (the two passes) and culls one whose bound covers no pixel centre; 0 = it tests no cluster "
+      "(the objects' own depth test stands) - the picture must be the same bytes either way." },
+    { ArmId::AtomClusterFootprint, 4.0, 1.0, 16.0,
+      "THE CLUSTER TEST'S FOOTPRINT (ATOM-8 stage 2's A/B): the pyramid mip where a cluster's rectangle spans at most "
+      "N texels a side - 4 (<= 25 reads, the instance test's) or 8 (one mip finer, <= 81 reads: the band of texels "
+      "that reach a sky or a farther surface halves). The instance test stays at 4." },
     { ArmId::CardFootprint, 4.0, 0.0, 1e12,
       "The card read's footprint gate in texels (Types.h kCardFootprintTexels = 4): the sweep that "
       "chose it (test_rt_reflect --footprint-sweep) sets it per arm, 1e12 = the gate open, 0 = shut. "

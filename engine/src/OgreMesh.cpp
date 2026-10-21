@@ -1,5 +1,6 @@
 // Mesh creation, update and destruction, plus the v2 geometry builder.
 #include "EnginePrivate.h"
+#include "GpuScene.h"
 #include "SkinCache.h"
 #include <OgreItem.h>
 #include <OgreSubItem.h>
@@ -405,6 +406,30 @@ MeshId OgreScene::createMesh(const MeshData &data, MeshId id) {
                 clusterStream, IndexBufferRelease(mRoot->getRenderSystem()->getVaoManager()));
             rec.clusters = data.clusters;
             rec.clusterGroups = data.clusterGroups;
+        }
+        // THE CLUSTERS' OWN BOXES (ATOM-8 stage 2; the per-cluster depth test's bound): the AABB of the positions each
+        // cluster's triangles index - the DAG's clusters over the cluster stream, or level 0's flat runs.
+        {
+            const auto boxOf = [&](const std::vector<unsigned> &idx, size_t first, size_t count) {
+                float b[6] = { 3.4e38f, 3.4e38f, 3.4e38f, -3.4e38f, -3.4e38f, -3.4e38f };
+                for (size_t i = first; i < first + count && i < idx.size(); ++i) {
+                    const size_t v = size_t(idx[i]) * 3u;
+                    if (v + 2u >= data.positions.size()) continue;
+                    for (int k = 0; k < 3; ++k) {
+                        b[k] = std::min(b[k], data.positions[v + size_t(k)]);
+                        b[3 + k] = std::max(b[3 + k], data.positions[v + size_t(k)]);
+                    }
+                }
+                if (b[0] > b[3]) for (float &f : b) f = 0.0f;
+                rec.clusterBoxes.insert(rec.clusterBoxes.end(), b, b + 6);
+            };
+            if (clusterStream && !data.clusters.empty()) {
+                for (const MeshCluster &c : data.clusters) boxOf(data.clusterIndices, c.firstIndex, c.indexCount);
+            } else if (!data.dynamic && data.indices.size() >= 3u) {
+                const size_t run = size_t(detail::GpuScene::kFlatClusterTriangles) * 3u;
+                for (size_t first = 0; first + 3u <= data.indices.size(); first += run)
+                    boxOf(data.indices, first, std::min(run, (data.indices.size() - first) / 3u * 3u));
+            }
         }
         // ATOM stage 1: kept so a LOD-bias change can re-derive the switch
         // distances. Exactly as many entries as the mesh got extra VAOs — which

@@ -60,6 +60,13 @@
 // of what a tighter bound would add), and one kept with the far plane under its rectangle (count[36], [37]: the sky
 // class). The root cut (the overflow arm) tests nothing.
 //
+// THE SHARED-MEMORY LAW (the stage 1 read): the job holds 30,720 B of group mask + six 64-word scan arrays + the
+// lane-0 words = 32,300 of the 32,768 B every device offers; the NEXT 64-word array breaks it - add none.
+//
+// THE DEPTH TEST RUNS IN BOTH PASSES (pass 1 counts, pass 2 writes): its verdict per cluster is not stored (no shared
+// memory is left for it), and the two evaluations take the same inputs; pass 2 never writes past lane 0's
+// reservations (recEnd, rejEnd).
+//
 // No Hlms directive mark appears in any comment of this file.
 @insertpiece( SetCrossPlatformSettings )
 @insertpiece( JahLevelRuleScale )
@@ -78,7 +85,8 @@ struct CullParams
 	uvec4 hzbRect;          // the viewport's rectangle in the pyramid's mip 0 (w 0 = all of it)
 	vec4  viewProjNowRow[4];// THIS frame's cull matrix (the pixel-centre test; viewProjRow is the pyramid's)
 	uvec4 viewRect;         // the pass's viewport in its target's pixels (x0, y0, w, h; w 0 = no pixel test)
-	uvec4 occl;             // x per-cluster occlusion, y the pixel-centre cull, z the rejected budget, w 1 = first list
+	uvec4 occl;             // x the cluster test's footprint (texels; 0 = no test), y the pixel-centre cull, z the
+	                        // rejected budget, w 1 = first list
 };
 
 struct GpuMesh
@@ -111,6 +119,22 @@ vulkan_layout( ogre_t0 ) uniform texture2D hzbTexture;
 layout( std430, ogre_U11 ) writeonly restrict buffer rejectedLayout { uvec4 rejected[]; };
 @else
 layout( std430, ogre_U10 ) writeonly restrict buffer rejectedLayout { uvec4 rejected[]; };
+@end
+@end
+@property( cut_boxes )
+// THE CLUSTERS' OWN BOXES (ATOM-8 stage 2; GpuScene::clusterBoxBuffer, one vec4 a cluster beside the cluster table):
+// the depth test's bound - the next free unit (after the probe's and the rejected list's).
+@property( cut_probe && cut_rejected )
+layout( std430, ogre_U12 ) readonly restrict buffer boxLayout { vec4 clusterBoxes[]; };
+@end
+@property( cut_probe && !cut_rejected )
+layout( std430, ogre_U11 ) readonly restrict buffer boxLayout { vec4 clusterBoxes[]; };
+@end
+@property( !cut_probe && cut_rejected )
+layout( std430, ogre_U11 ) readonly restrict buffer boxLayout { vec4 clusterBoxes[]; };
+@end
+@property( !cut_probe && !cut_rejected )
+layout( std430, ogre_U10 ) readonly restrict buffer boxLayout { vec4 clusterBoxes[]; };
 @end
 @end
 @property( cut_probe )
@@ -289,23 +313,25 @@ bool jahClusterReceived( vec4 sphere )
 // THE CLUSTER'S DEPTH TEST (ATOM-8 stage 1): 0 drawn, 1 hidden by the pyramid, 2 covers no pixel centre. `slack`:
 // kept although the sphere's centre lies behind the occluders under its rectangle; `sky`: kept with the far plane
 // (nothing drawn) somewhere under its rectangle.
-uint jahClusterOcclusion( vec4 sphere, out bool slack, out bool sky )
+uint jahClusterOcclusion( uint global, vec4 sphere, out bool slack, out bool sky )
 {
 	slack = false;
 	sky = false;
 	if( params.occl.x == 0u )
 		return 0u;
-	vec3 c = vec3( dot( gRow0.xyz, sphere.xyz ) + gRow0.w,
-				   dot( gRow1.xyz, sphere.xyz ) + gRow1.w,
-				   dot( gRow2.xyz, sphere.xyz ) + gRow2.w );
-	float r = sphere.w * gScale;
-	r += r * ( 1.0 / 4096.0 ) + 1.0e-6;
-	vec3 bMin = c - vec3( r ), bMax = c + vec3( r );
+	// THE BOUND (ATOM-8 stage 2): the cluster's own box, the instance's rows carrying it (the sphere stays the LOD's).
+	vec3 c, ax, ay, az;
+@property( cut_boxes )
+	jahClusterObb( clusterBoxes[global], sphere, gRow0, gRow1, gRow2, gScale, c, ax, ay, az );
+@else
+	jahClusterObb( vec4( 0.0, 0.0, 0.0, uintBitsToFloat( 0xFFFFFFFFu ) ), sphere, gRow0, gRow1, gRow2, gScale, c, ax,
+				   ay, az );
+@end
 	bool reverseZ = params.hzb.w != 0u;
 	vec2 lo, hi;
 	float nearest;
 	if( params.occl.y != 0u && params.viewRect.z != 0u &&
-		jahHzbBoxRect( bMin, bMax, params.viewProjNowRow[0], params.viewProjNowRow[1], params.viewProjNowRow[2],
+		jahHzbObbRect( c, ax, ay, az, params.viewProjNowRow[0], params.viewProjNowRow[1], params.viewProjNowRow[2],
 					   params.viewProjNowRow[3], reverseZ, lo, hi, nearest ) )
 	{
 		vec2 t0, t1;
@@ -316,13 +342,13 @@ uint jahClusterOcclusion( vec4 sphere, out bool slack, out bool sky )
 @property( cull_hzb )
 	if( params.hzb.x == 0u || gNegativeBias )
 		return 0u;
-	if( !jahHzbBoxRect( bMin, bMax, params.viewProjRow[0], params.viewProjRow[1], params.viewProjRow[2],
+	if( !jahHzbObbRect( c, ax, ay, az, params.viewProjRow[0], params.viewProjRow[1], params.viewProjRow[2],
 						params.viewProjRow[3], reverseZ, lo, hi, nearest ) )
 		return 0u;   // the box crosses the near plane: not testable, kept
 	vec2 t0, t1;
 	jahHzbTexels( lo, hi, params.hzbRect, vec2( float( params.hzb.y ), float( params.hzb.z ) ), t0, t1 );
 	int mip;
-	float farthestUnder = jahHzbFarthestUnder( t0, t1, params.hzb, mip );
+	float farthestUnder = jahHzbFarthestUnder( t0, t1, params.hzb, float( params.occl.x ), mip );
 	if( jahHzbOccluded( nearest, farthestUnder, reverseZ ) )
 		return 1u;
 	vec4 cc = jahHzbClip( params.viewProjRow[0], params.viewProjRow[1], params.viewProjRow[2], params.viewProjRow[3], c );
@@ -463,7 +489,7 @@ void main()
 		{
 			// THE CLUSTER'S DEPTH TEST (ATOM-8 stage 1)
 			bool slack, sky;
-			uint v = jahClusterOcclusion( clusters[dag.x + c].sphere, slack, sky );
+			uint v = jahClusterOcclusion( dag.x + c, clusters[dag.x + c].sphere, slack, sky );
 			if( v == 2u )
 			{
 				cutHere = false;
@@ -549,7 +575,7 @@ void main()
 		if( occRec != 0u )
 		{
 			uint budget = params.occl.z;
-			uint rb = atomicAdd( counter[23], occRec );
+			uint rb = atomicAdd( counter[38], occRec );
 			atomicMax( counter[20], min( ( rb + occRec + 63u ) / 64u, ( budget + 63u ) / 64u ) );
 			gRejBase = rb;
 			gRejCount = occRec;
@@ -560,7 +586,6 @@ void main()
 			else
 			{
 				gRejMode = 2u;
-				atomicAdd( counter[24], occRec );
 			}
 		}
 		if( gRejMode == 2u )
@@ -624,6 +649,11 @@ void main()
 			gRejMode = 3u;
 		if( gRejMode == 2u && mode != 1u )
 			gRejMode = 3u;
+		// THE COUNTS, EXACT (the stage 1 read): [23] the entries this cut wrote, [24] the overflowed ones it drew.
+		if( gRejMode == 1u )
+			atomicAdd( counter[23], occRec );
+		if( gRejMode == 2u )
+			atomicAdd( counter[24], occRec );
 		uint o = i * 5u;
 		// A TWO-SIDED or MASKED survivor's command (ATOM-TWO-SIDED-1; ENGINE-POLISH-ATOM-1
 		// stage 3): in the list's range for it, which the passes draw with that range's
@@ -709,10 +739,10 @@ void main()
 		if( !jahClusterReceived( clusters[dag.x + c].sphere ) )
 			continue;
 		uint depth = range.w == JAH_NO_GROUP ? 0u : uint( groups[range.w].error.z ) + 1u;
+		bool slack = false, sky = false;
 		if( mode != 2u )
 		{
-			bool slack, sky;
-			uint v = jahClusterOcclusion( clusters[dag.x + c].sphere, slack, sky );
+			uint v = jahClusterOcclusion( dag.x + c, clusters[dag.x + c].sphere, slack, sky );
 			if( v == 2u )
 				continue;
 			if( v == 1u && !firstList )
@@ -730,7 +760,27 @@ void main()
 				continue;   // nothing of the object drawn: only its rejected entries
 		}
 		if( rec < recEnd )
+		{
 			records[rec] = uvec4( slot, dag.x + c, idx, depth );
+@property( cut_probe )
+			// THE PROBE'S CLASS BITS (ATOM-8 stage 2): per record of this list, after the group records - the sky
+			// class (bit 2r) and the depth-slack class (bit 2r + 1) of the cluster the record draws.
+			if( sky || slack )
+			{
+				uint bit = 2u * rec;
+				uint at = 1u + 2u * probe[0].y + ( bit >> 7u );
+				uint lane4 = ( bit >> 5u ) & 3u;
+				uint mask = ( sky ? 1u : 0u ) << ( bit & 31u ) | ( slack ? 2u : 0u ) << ( bit & 31u );
+				if( at < uint( probe.length() ) )
+				{
+					if( lane4 == 0u ) atomicOr( probe[at].x, mask );
+					else if( lane4 == 1u ) atomicOr( probe[at].y, mask );
+					else if( lane4 == 2u ) atomicOr( probe[at].z, mask );
+					else atomicOr( probe[at].w, mask );
+				}
+			}
+@end
+		}
 		idx += range.y;
 		++rec;
 	}

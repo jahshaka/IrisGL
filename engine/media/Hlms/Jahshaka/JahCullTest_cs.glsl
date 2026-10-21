@@ -286,7 +286,7 @@ void main()
 			vec2 t0, t1;
 			jahHzbTexels( lo, hi, params.hzbRect, vec2( float( params.hzb.y ), float( params.hzb.z ) ), t0, t1 );
 			int mip;
-			float farthestUnder = jahHzbFarthestUnder( t0, t1, params.hzb, mip );
+			float farthestUnder = jahHzbFarthestUnder( t0, t1, params.hzb, 4.0, mip );
 			bool occluded = jahHzbOccluded( nearest, farthestUnder, params.hzb.w != 0u );
 @property( cull_probe )
 			{

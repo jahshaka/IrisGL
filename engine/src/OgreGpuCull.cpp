@@ -274,7 +274,7 @@ void unbindCutJobs(Ogre::HlmsComputeJob *cut, Ogre::HlmsComputeJob *emit, Ogre::
         cut->setIndirectDispatchBuffer(0);
     }
     if (late) {
-        for (uint8_t i = 0; i < 9u; ++i) late->_setUavBuffer(i, empty);
+        for (uint8_t i = 0; i < 10u; ++i) late->_setUavBuffer(i, empty);
         late->setTexture(0u, Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
         late->setIndirectDispatchBuffer(0);
     }
@@ -357,7 +357,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
     // re-tested objects' hidden clusters. No pyramid = no depth test (the pixel-centre cull still runs).
     const bool occlusion = cutMode && req.clusterOcclusion;
     const bool appendRejected = occlusion && hzb && !prior;
-    const bool lateClusters = occlusion && hzb && prior && prior->rejected();
+    const bool lateClusters = occlusion && hzb && prior && prior->rejected() && mGpuScene.clusterBoxBuffer();
     Ogre::HlmsComputeJob *lateJob = lateClusters ? hc->findComputeJobNoThrow("Jahshaka/CullCutLate") : nullptr;
     if (lateClusters && !lateJob) {
         err = "engine: the late cut's compute job is missing — "
@@ -412,7 +412,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         for (int i = 0; i < 4; ++i) p.hzbRect[i] = hzb ? req.hzbRect[i] : 0u;
         std::memcpy(p.viewProjNowRow, req.viewProjNow, sizeof(p.viewProjNowRow));
         for (int i = 0; i < 4; ++i) p.viewRect[i] = req.pixelCentreCull ? req.viewRect[i] : 0u;
-        p.occl[0] = occlusion ? 1u : 0u;
+        p.occl[0] = occlusion ? std::max(req.clusterFootprint, 1u) : 0u;
         p.occl[1] = occlusion && req.pixelCentreCull ? 1u : 0u;
         p.occl[2] = prior ? prior->rejectedBudget() : cull.rejectedBudget();
         p.occl[3] = appendRejected ? 1u : 0u;
@@ -421,7 +421,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         const uint32_t reset[GpuCull::kCountElements] = { 0u, 0u, 1u, 1u, 0u, 0u, 1u, 1u, 0u, 1u,
                                                           1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
                                                           0u, 1u, 1u, 0u, 0u, 0u, 0u, 1u, 1u, 0u,
-                                                          0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
+                                                          0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
         cull.count()->upload(reset, 0, GpuCull::kCountElements);
 
         // ---- job 1: test ---------------------------------------------------
@@ -510,7 +510,12 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
             cutJob->setProperty("cull_hzb", cutHzb ? 1 : 0);
             cutJob->setNumTexUnits(cutHzb ? 1u : 0u);
             cutJob->setProperty("cut_rejected", appendRejected ? 1 : 0);
-            cutJob->setNumUavUnits(recv ? 12u : (probing ? 11u : 10u) + (appendRejected ? 1u : 0u));
+            // THE CLUSTERS' OWN BOXES (ATOM-8 stage 2): the depth test's bound, at the next free unit after those.
+            const bool boxes = occlusion && mGpuScene.clusterBoxBuffer();
+            cutJob->setProperty("cut_boxes", boxes ? 1 : 0);
+            const uint8_t boxUnit = uint8_t((probing ? 11u : 10u) + (appendRejected ? 1u : 0u));
+            cutJob->setNumUavUnits(recv ? 12u : boxUnit + (boxes ? 1u : 0u));
+            if (boxes) cutJob->_setUavBuffer(boxUnit, cullSlot(mGpuScene.clusterBoxBuffer(), Ogre::ResourceAccess::Read));
             if (cutHzb) {
                 Ogre::DescriptorSetTexture2::TextureSlot ts = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
                 ts.texture = hzb;
@@ -544,6 +549,7 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
                 lateJob->_setUavBuffer(6u, cullSlot(cull.cutRecords(), Ogre::ResourceAccess::Write));
                 lateJob->_setUavBuffer(7u, cullSlot(cull.clusterDraws(), Ogre::ResourceAccess::Write));
                 lateJob->_setUavBuffer(8u, cullSlot(cull.clusterIds(), Ogre::ResourceAccess::Write));
+                lateJob->_setUavBuffer(9u, cullSlot(mGpuScene.clusterBoxBuffer(), Ogre::ResourceAccess::Read));
                 Ogre::DescriptorSetTexture2::TextureSlot ts = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
                 ts.texture = hzb;
                 lateJob->setTexture(0u, ts);

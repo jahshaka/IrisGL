@@ -206,16 +206,17 @@ public:
     /// [17] THE TWO-SIDED RANGE'S command count (ATOM-TWO-SIDED-1: the draw count of
     /// the no-cull draw, from `rangeFirst(1)`); [18..19] THE MASKED RANGES' (ENGINE-POLISH-ATOM-1 stage 3:
     /// the masked and the masked two-sided commands, from rangeFirst(2) and rangeFirst(3)).
-    /// ATOM-8 (the per-cluster occlusion): [20..22] the LATE CUT's dispatch (x = ceil(rejected entries / 64), 1, 1),
-    /// [23] the rejected-cluster entries the first cut appended, [24] the entries that overflowed the rejected list
-    /// (drawn, never dropped), [25] the clusters the pixel-centre test culled (their rectangle covers no pixel centre),
+    /// ATOM-8 (the per-cluster occlusion): [20..22] the LATE CUT's dispatch (x = ceil(entries reserved / 64), 1, 1),
+    /// [23] the rejected-cluster entries the first cut wrote, [24] the rejected clusters past the list's budget that
+    /// it drew instead (never dropped), [25] the clusters the pixel-centre test culled (their rectangle covers no pixel centre),
     /// [26..28] THE DRAWN REDUCE's dispatch (the density instruments, OgreAtomDensity.cpp: x = ceil(records / 64),
     /// kept by the cut's lane 0 beside the record cursor [8]), [29..32] the late list's PER-CLUSTER ranges' command
     /// counts (range r at 29 + r: the survivors', two-sided, masked, masked two-sided), [33] the clusters the depth
     /// test kept although the sphere's CENTRE lies behind the occluders (the sphere's depth slack) and [34] their
     /// triangles, [35] the clusters a LATE test found behind this frame's depth and dropped, [36] the clusters the
-    /// depth test kept with the FAR PLANE under their rectangle (the sky class) and [37] their triangles.
-    static constexpr uint32_t kCountElements = 38u;
+    /// depth test kept with the FAR PLANE under their rectangle (the sky class) and [37] their triangles, [38] the
+    /// rejected list's CURSOR (entries reserved: [23] is the accepted count, [24] the overflowed-and-drawn).
+    static constexpr uint32_t kCountElements = 39u;
     static constexpr uint32_t clusterRangeCountOffsetBytes(uint32_t r) { return (29u + r) * 4u; }
     static constexpr uint32_t kIndirectOffsetBytes = 4u;
     static constexpr uint32_t kCutIndirectOffsetBytes = 5u * 4u;

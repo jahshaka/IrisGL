@@ -5315,6 +5315,9 @@ struct AtomCutProbeObject {
     /// THE OBJECT'S CLUSTERS WITH A VISIBLE PIXEL this frame (ATOM-8 stage 0): of `drawnClusters`, those whose
     /// (instance, cluster) pair names at least one pixel the picture shows.
     unsigned visibleClusters = 0;
+    /// Of the drawn triangles (ATOM-8 stage 2), those of clusters the depth test kept with the far plane under their
+    /// box's rectangle (the sky class) and those it kept by the box's depth slack alone.
+    unsigned long long skyTriangles = 0ull, slackTriangles = 0ull;
     AtomCutProbeHzb hzbFirst, hzbLate;           ///< what each list's depth test read (ATOM-6 stage 3)
     unsigned groups = 0, groupsAffordable = 0, groupsTerminal = 0;
 };
@@ -5330,6 +5333,9 @@ struct AtomCutProbe {
     unsigned    atomPixels = 0;               ///< visible Atom pixels in the frame
     unsigned    depthPixels[16] = {};
     unsigned    groupsDropped = 0;            ///< records past the probe buffer's capacity (0 is the invariant)
+    /// THE DRAWN CLUSTERS WITH NO VISIBLE PIXEL (ATOM-8 stage 2): their triangles, and of them the sky class and the
+    /// depth-slack class (the depth test's reading of the cluster's own box).
+    unsigned long long unseenClusterTriangles = 0ull, unseenSkyTriangles = 0ull, unseenSlackTriangles = 0ull;
     std::vector<AtomCutProbeGroup>  groups;
     std::vector<AtomCutProbeObject> objects;  ///< by slot
 };
@@ -7617,6 +7623,9 @@ struct GpuCullRequest {
     /// (the pass's viewport in its target's pixels: x0, y0, width, height).
     bool clusterOcclusion = false;
     bool pixelCentreCull = false;
+    /// The cluster test's footprint: the pyramid mip where the cluster's rectangle spans at most this many texels a
+    /// side (4 = at most 25 reads; 8 = 81).
+    unsigned clusterFootprint = 4u;
     float viewProjNow[16] = {};
     unsigned viewRect[4] = { 0u, 0u, 0u, 0u };
 };
