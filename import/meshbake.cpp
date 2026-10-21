@@ -3967,12 +3967,19 @@ constexpr Variant kShipped = Variant::PermissiveCharged;
 
 Variant resolve(Variant v) { return v == Variant::Shipped ? kShipped : v; }
 
+/// The prune's budget factor (clodConfig::simplify_prune_budget): the displacement lock's own (kDagLockFactor).
+constexpr float kPruneBudget = 2.0f;
+
 clodConfig configFor(Variant v)
 {
     clodConfig c = clodDefaultConfig(size_t(kMaxTriangles));
     // OUR PRUNE (ATOM-6, patch 0004): after the collapses, the group's unlocked components whole, smallest
     // island first, until the halving target — see `lodchain::Islands` for why it is the tool now.
     c.simplify_prune_unlocked = true;
+    // ...and its BUDGET (the lead's last round): past the accepted 0.85 the prune goes on toward the halving target
+    // only while the next island is within the displacement lock's factor x max(the collapses' error, the smallest
+    // island) — the same factor the verify holds a group to (`kDagLockFactor`; asserted equal there).
+    c.simplify_prune_budget = kPruneBudget;
     switch (resolve(v)) {
     case Variant::RegularizedProtectUv:
         c.simplify_regularize = true;
@@ -4026,7 +4033,7 @@ QVector<float> configRecord(Variant v)
         c.simplify_error_merge_previous, c.simplify_error_merge_additive,
         c.simplify_error_edge_limit,
         float(c.simplify_permissive), float(c.simplify_fallback_permissive),
-        float(c.simplify_regularize), float(c.simplify_prune_unlocked),
+        float(c.simplify_regularize), float(c.simplify_prune_unlocked), c.simplify_prune_budget,
         float(c.optimize_bounds), float(c.optimize_clusters), float(c.optimize_clusters_level),
         protect, float(kMaxTriangles), lodchain::kNormalWeight, lodchain::kUvWeight,
         lodchain::kBoundMargin, lodchain::kBoundFloorRel };
@@ -4331,6 +4338,7 @@ float facetMax(const Vec3 &a, const Vec3 &b, const Vec3 &c, float stop, float sc
 /// retries the group keeps what it has and the measurement (after the build) charges
 /// it honestly: the lock shapes the DAG, never the measurement.
 constexpr float kDagLockFactor = 2.0f;
+static_assert(kDagLockFactor == kPruneBudget, "the prune's budget is the displacement lock's factor");
 constexpr int   kGroupRetries = 4;
 /// A verify loop's chunk: the pool's query grain (the verify runs inside clusterlod's
 /// serial level loop, so every group's loops go wide; 512 kept mid-size groups inline

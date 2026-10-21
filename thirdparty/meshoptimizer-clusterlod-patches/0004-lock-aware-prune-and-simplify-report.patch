@@ -19,7 +19,12 @@ the group's border is locked by lockBoundary and stays (Nanite's
 FCluster::SimplifyTriangles keeps it the same way); the next level's partition
 moves the border. meshopt_SimplifyPrune is NOT used: it prunes by its own
 quadric error regardless of locks (measured, ATOM-6 stage 0: 706 groups lost a
-locked position, the facade's errors x16). A group may come out EMPTY: it is
+locked position, the facade's errors x16). THE PRUNE'S BUDGET (clodConfig::simplify_prune_budget, 0 = none): the pieces
+go smallest first up to simplify_threshold x the input at any price (the level
+is then accepted, never terminal while an unlocked piece exists), and on toward
+the target only while the next piece's extent is within the budget factor x
+max(the collapses' own error, the smallest removable piece's extent).
+A group may come out EMPTY: it is
 output as a group with no clusters (the caller measures it).
 
 THE SLOPPY FALLBACK IS REMOVED (simplify_fallback_sloppy, simplify_error_factor_sloppy,
@@ -44,7 +49,7 @@ in the build tree; the vendored file itself is never edited.
 ---
 --- a/clusterlod.h
 +++ b/clusterlod.h
-@@ -39,22 +39,25 @@
+@@ -39,22 +39,29 @@
  	float simplify_error_merge_previous;
  	float simplify_error_merge_additive;
  
@@ -72,10 +77,14 @@ in the build tree; the vendored file itself is never edited.
 +	// the group's border is locked and stays (the next level's partition moves the border)
 +	bool simplify_prune_unlocked;
 +
++	// the prune's budget: past simplify_threshold (the level accepted) the prune continues toward the target only while the next
++	// piece's extent is within this factor x max(the collapses' own error, the smallest removable piece's extent); 0 = no budget
++	float simplify_prune_budget;
++
  	// should clodCluster::bounds be computed based on the geometry of each cluster
  	bool optimize_bounds;
  
-@@ -88,13 +91,17 @@
+@@ -88,13 +95,17 @@
  	// for the first result of the group and counts the re-simplifications after it
  	// returns NULL to accept the result, or a lock array (vertex_count entries, same flags as vertex_lock) to re-simplify the group
  	// with these locks added to the ones the group already has; the array must stay valid until the next call
@@ -96,7 +105,7 @@ in the build tree; the vendored file itself is never edited.
  	// attribute weights for attribute-aware simplification; maps to meshopt_simplifyWithAttributes parameters
  	const float* attribute_weights;
  	size_t attribute_count;
-@@ -143,6 +150,19 @@
+@@ -143,6 +154,19 @@
  	// 1. clodGroup::simplified for the group it's in is over error threshold
  	// 2. cluster.refined is -1 *or* clodGroup::simplified for groups[cluster.refined].simplified is at or under error threshold
  	clodBounds simplified;
@@ -116,7 +125,7 @@ in the build tree; the vendored file itself is never edited.
  };
  
  // gets called for each group in sequence
-@@ -430,48 +450,139 @@
+@@ -430,48 +454,147 @@
  	}
  }
  
@@ -129,7 +138,7 @@ in the build tree; the vendored file itself is never edited.
 +#define CLOD_LOCK_VERIFY (1 << 6)
  
 -static void simplifyFallback(std::vector<unsigned int>& lod, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, size_t target_count, float* error)
-+static void pruneUnlocked(const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& remap, size_t target_count, std::vector<unsigned int>& lod, float* error, std::vector<unsigned int>& pruned, float* pruned_extent)
++static void pruneUnlocked(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& remap, size_t target_count, std::vector<unsigned int>& lod, float* error, std::vector<unsigned int>& pruned, float* pruned_extent)
  {
 -	std::vector<SloppyVertex> subset(indices.size());
 -	std::vector<unsigned char> subset_locks(indices.size());
@@ -191,22 +200,22 @@ in the build tree; the vendored file itself is never edited.
  		unsigned int v = indices[i];
 -		assert(v < mesh.vertex_count);
 +		unsigned int c = find(local(remap[v]));
- 
--		subset[i].x = mesh.vertex_positions[v * positions_stride + 0];
--		subset[i].y = mesh.vertex_positions[v * positions_stride + 1];
--		subset[i].z = mesh.vertex_positions[v * positions_stride + 2];
--		subset[i].id = v;
++
 +		// a piece is held by the level's locks (the group border, a terminal neighbour, the caller's vertex_lock), never by
 +		// the verify's: those hold a vertex against a COLLAPSE that would move it, and removing the whole piece is
 +		// priced by its own extent
 +		if ((locks[v] & meshopt_SimplifyVertex_Lock) && !(locks[v] & CLOD_LOCK_VERIFY))
 +			locked[c] = 1;
  
--		subset_locks[i] = locks[v];
--		lod[i] = unsigned(i);
+-		subset[i].x = mesh.vertex_positions[v * positions_stride + 0];
+-		subset[i].y = mesh.vertex_positions[v * positions_stride + 1];
+-		subset[i].z = mesh.vertex_positions[v * positions_stride + 2];
+-		subset[i].id = v;
 +		if (mesh.component_extent)
 +			cost[c] = std::max(cost[c], mesh.component_extent[v]);
-+
+ 
+-		subset_locks[i] = locks[v];
+-		lod[i] = unsigned(i);
 +		for (int k = 0; k < 3; ++k)
 +		{
 +			float x = mesh.vertex_positions[v * positions_stride + k];
@@ -222,9 +231,7 @@ in the build tree; the vendored file itself is never edited.
 +			float dx = box[c * 6 + 3] - box[c * 6 + 0], dy = box[c * 6 + 4] - box[c * 6 + 1], dz = box[c * 6 + 5] - box[c * 6 + 2];
 +			cost[c] = sqrtf(dx * dx + dy * dy + dz * dz);
 +		}
- 
--	// convert error to absolute
--	*error *= meshopt_simplifyScale(&subset[0].x, subset.size(), sizeof(SloppyVertex));
++
 +	std::vector<unsigned int> outputTris(count, 0);
 +	for (size_t i = 0; i < lod.size(); i += 3)
 +		outputTris[find(local(remap[lod[i]]))]++;
@@ -237,17 +244,27 @@ in the build tree; the vendored file itself is never edited.
 +
 +	std::sort(order.begin(), order.end(), [&](unsigned int a, unsigned int b) { return cost[a] < cost[b] || (cost[a] == cost[b] && a < b); });
 +
++	// THE BUDGET: smallest first (1) to simplify_threshold x the input at any price — the level is then accepted, never terminal
++	// while an unlocked piece exists — and (2) on toward the target only while the next piece is within the budget, so a level
++	// whose collapses moved the surface little does not pay a piece many times that to save a few triangles
++	const size_t accepted = size_t(float(indices.size()) * config.simplify_threshold) / 3 * 3;
++	const float budget = order.empty() ? 0.f : config.simplify_prune_budget * std::max(*error, cost[order[0]]);
++
 +	std::vector<unsigned char> removed(count, 0);
 +	size_t remaining = lod.size();
 +	for (size_t k = 0; k < order.size() && remaining > target_count; ++k)
 +	{
 +		unsigned int c = order[k];
++		if (remaining <= accepted && config.simplify_prune_budget > 0 && cost[c] > budget)
++			break;
 +		removed[c] = 1;
 +		remaining -= outputTris[c] * 3;
 +		*error = std::max(*error, cost[c]);
 +		*pruned_extent = std::max(*pruned_extent, cost[c]);
 +	}
-+
+ 
+-	// convert error to absolute
+-	*error *= meshopt_simplifyScale(&subset[0].x, subset.size(), sizeof(SloppyVertex));
 +	if (remaining == lod.size())
 +		return;
 +
@@ -280,7 +297,7 @@ in the build tree; the vendored file itself is never edited.
  	if (target_count > indices.size())
  		return indices;
  
-@@ -490,11 +601,12 @@
+@@ -490,11 +613,12 @@
  		    mesh.vertex_attributes, mesh.vertex_attributes_stride, mesh.attribute_weights, mesh.attribute_count,
  		    &locks[0], target_count, FLT_MAX, options | meshopt_SimplifyPermissive, error));
  
@@ -291,13 +308,13 @@ in the build tree; the vendored file itself is never edited.
  	{
 -		simplifyFallback(lod, mesh, indices, locks, target_count, error);
 -		*error *= config.simplify_error_factor_sloppy; // scale error up to account for appearance degradation
-+		pruneUnlocked(mesh, indices, locks, remap, target_count, lod, error, pruned, pruned_extent);
++		pruneUnlocked(config, mesh, indices, locks, remap, target_count, lod, error, pruned, pruned_extent);
 +		if (!pruned.empty())
 +			*flags |= CLOD_SIMPLIFY_PRUNED;
  	}
  
  	// optionally limit error by edge length, aiming to remove subpixel triangles even if the attribute error is high
-@@ -539,22 +651,22 @@
+@@ -539,22 +663,22 @@
  #define CLOD_VERIFY_MAX_RETRIES 4
  #endif
  
@@ -327,7 +344,7 @@ in the build tree; the vendored file itself is never edited.
  		for (size_t k = 0; k < merged.size(); ++k)
  		{
  			unsigned int v = merged[k];
-@@ -562,11 +674,11 @@
+@@ -562,11 +686,11 @@
  			if (extra[v] & ~locks[v])
  			{
  				saved.push_back(std::make_pair(v, locks[v]));
@@ -341,7 +358,7 @@ in the build tree; the vendored file itself is never edited.
  		if (simplified.size() > merged.size() * config.simplify_threshold)
  			break; // the added locks got the group stuck; the caller makes it terminal
  	}
-@@ -575,7 +687,7 @@
+@@ -575,7 +699,7 @@
  		locks[saved[k - 1].first] = saved[k - 1].second;
  }
  
@@ -350,7 +367,7 @@ in the build tree; the vendored file itself is never edited.
  {
  	std::vector<clodCluster> group_clusters(group.size());
  
-@@ -591,7 +703,7 @@
+@@ -591,7 +715,7 @@
  		result.vertex_count = cluster.vertices;
  	}
  
@@ -359,7 +376,7 @@ in the build tree; the vendored file itself is never edited.
  }
  
  static clodNode mergeNodes(const clodNode* nodes, size_t offset, size_t count)
-@@ -631,10 +743,9 @@
+@@ -631,10 +755,10 @@
  	config.simplify_ratio = 0.5f;
  	config.simplify_threshold = 0.85f;
  	config.simplify_error_merge_previous = 1.0f;
@@ -368,10 +385,11 @@ in the build tree; the vendored file itself is never edited.
  	config.simplify_fallback_permissive = false; // note: by default we run in permissive mode, but it's also possible to disable that and use it only as a fallback
 -	config.simplify_fallback_sloppy = true;
 +	config.simplify_prune_unlocked = false;
++	config.simplify_prune_budget = 0.f;
  
  	return config;
  }
-@@ -729,16 +840,38 @@
+@@ -729,16 +853,38 @@
  			clodBounds bounds = mergeGroups(clusters, groups[i]);
  
  			float error = 0.f;
@@ -413,7 +431,7 @@ in the build tree; the vendored file itself is never edited.
  
  				for (size_t j = 0; j < groups[i].size(); ++j)
  					for (unsigned int v : clusters[groups[i][j]].indices)
-@@ -751,7 +884,7 @@
+@@ -751,7 +897,7 @@
  			bounds.error = std::max(bounds.error * config.simplify_error_merge_previous, error) + error * config.simplify_error_merge_additive;
  
  			// output the new group with all clusters; the resulting id will be recorded in new clusters as clodCluster::refined
