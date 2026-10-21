@@ -330,29 +330,29 @@ static bool resolveToggle(GiToggle t, bool autoValue) {
 // anyway) and tight enough that a fit which escaped the room is caught.
 static const float kProbeShapeCellAllowance = 8.0f;
 
-// HOW BIG A PROBE'S PHOTOGRAPHED BOX MAY BE, AS A FRACTION OF THE VOLUME THE
-// RENDERER LIT, AND STILL BE WORTH BUILDING (buildPcc's depth rule, R5-ROOM).
-// At 1 the box the probe's six faces measured IS the lit world; below it the
-// probe photographed a smaller space, i.e. something is near it. Measured on
-// the suites' scenes: probes inside a room 0.10 - 0.55, probes with nothing
-// near them 1.3 - 6.0.
+// WHEN A PROBE IS WORTH BUILDING (buildPcc's depth rule; PHOTON-5 stage 1).
+// The placement hands back one depth ratio per cube face (fork
+// PccPerPixelGridPlacement::processProbeDepth): 1 = on the region's face, and
+// kProbeDepthSaturation is the encoding's ceiling — "nothing within twice that
+// distance", which is what a face full of sky returns. A probe is kept when at
+// least kProbeFacesOfGeometry of its six faces read under the ceiling: it
+// photographed geometry in two directions (a floor and a wall, a floor and the
+// facade across a street). A probe that saw one direction of geometry and sky
+// in the other five IS the sky, which answers wherever no probe's box does
+// (SKY-FALLBACK-1). How many of the kept a tier pays for is the VRAM budget's
+// question, never this rule's (the budget ranks them below).
 //
-// SAID HONESTLY: THE COMPARISON IS AGAINST THE LIT VOLUME'S OWN EXTENT, so a
-// room's verdict depends on how much slack the fit leaves around its walls.
-// The same roofless 10 m room keeps its four probes over the automatic +-7.43
-// fit and loses them over a +-5.5 volume pinned tight around it (measured; it
-// is why gi.probe_open case 13 pins the room's own +-8), and a 30 m yard with
-// 6 m walls keeps none of the shipped grid's 18 while the 10 m room keeps all
-// four — from inside the yard, most of what a probe sees is sky.
-//
-// That coupling is a STOPGAP and is stated as one. It exists because a grid,
-// once it exists at all, takes the sky cubemap off EVERY material in the scene
-// (one environment slot — the defect SKY-FALLBACK-1 is about), so the cost of
-// keeping a marginal probe is paid scene-wide; with the sky kept as the
-// fallback where no probe covers a pixel, the line could be drawn far more
-// generously. R2's rays retire the question altogether by making the probe
-// fallback rare.
-static const float kProbeSeesGeometry = 1.0f;
+// MEASURED AT THE RULE'S BASE (spikes/photon-5/stage1/BASE_RATIOS.txt): the
+// ratio is ONE averaged texel per face, so a horizontal face over a floor reads
+// ~1.1 whether or not a wall stands there — an open 20 m court with 3 m walls
+// reads 5 faces under the ceiling, a bare 20 m floor also 5, a sealed room 6.
+// The rule cannot tell a court from a bare floor and need not: a probe over a
+// floor photographs the floor and the sky, which is what a reflective thing on
+// that floor must reflect. What it must not do is the volume rule it replaced
+// did: drop every probe with one sky-facing face (the court kept 0 of 18; a
+// street, an atrium — Bistro Exterior at Low/Medium had no grid at all).
+static const float kProbeDepthSaturation = 2.0f;
+static const int   kProbeFacesOfGeometry = 2;
 
 // WHAT THE SCOUT PASS CAPTURES AT (buildPcc). The placement's shrink-fit reads
 // ONE 1x1 AVERAGED TEXEL per cube face — the smallest mip — so the only thing
@@ -6402,43 +6402,21 @@ void PhotonComponent::buildPccFit() {
     // have been clamped. So it happens below instead, over the survivors, once.
     placement.buildEnd(false);   // reads probe depth back and re-fits probe shapes
     mPccPhaseMs[1] = pccPhaseSplit();
-    // ---- WHICH OF THESE PROBES IS WORTH BUILDING (lane R5-ROOM) ------------
+    // ---- WHICH OF THESE PROBES IS WORTH BUILDING (lane R5-ROOM; PHOTON-5) --
     //
-    // The rule this replaced measured the SCENE — facing slabs, covering faces,
-    // an enclosed-axis count — and built the whole grid or none of it. It is
-    // deleted, not patched: no lighting decision may test for a room, an
-    // enclosure, a wall or an axis count (PHOTON_SPEC §13, owner+lead joint
-    // decision 2026-09-14). The unit is the PROBE now, and the instrument is
-    // the probe itself.
-    //
-    // The placement has just read one averaged depth value per cube face and
-    // fork 618d95cca (was 0047) hands those six numbers back: each is the distance that
-    // face could see as a multiple of the distance from this probe's camera to
-    // the region's face in the same direction: 1 means "on the region's face",
-    // and 2 is the encoding's SATURATION — the compressor stores
-    // min(0.5 * dist / approxDist, 1) and the decode doubles it, so 2 means
-    // "nothing within twice that distance", which is what a face full of sky
-    // returns and is the largest value there is. From them the box follows
-    // (the placement's own arithmetic): on each axis it reaches
+    // The unit is the PROBE, and the instrument is the probe itself: no
+    // lighting decision may test for a room, an enclosure, a wall or an axis
+    // count (PHOTON_SPEC §13, owner+lead joint decision 2026-09-14). The
+    // placement has just read one averaged depth value per cube face and the
+    // fork hands those six numbers back (kProbeDepthSaturation's note). The
+    // KEEP is the count of faces under the ceiling (kProbeFacesOfGeometry);
+    // the RANK the budget below needs is the box the six measure: on each axis
+    // it reaches
     //     (H - cam) * ratio(+face) + (H + cam) * ratio(-face)
     // with H the region's half size and cam the probe's camera in the region's
-    // frame. That is a LENGTH IN WORLD UNITS on each axis, and dividing the
-    // three by the extents of THE VOLUME THE RENDERER LIT gives the probe's box
-    // as a fraction of that world: their product is its VOLUME RATIO. Below 1
-    // this probe photographed a space materially smaller than the world it
-    // stands in — something is near it — and at 1 or above it saw nothing that
-    // the world does not already hold.
-    //
-    // THE READING IS RELATIVE TO THE BOX THE PROBE WAS PLACED IN, which is the
-    // scene's own fitted volume, and that is what makes it scale-free: the same
-    // room measures the same at any size, anywhere in the world, in any units.
-    // It is NOT independent of that box — a scene whose author pins very tight
-    // bounds is telling the renderer that its whole world is that box, and a
-    // probe in it then has less "inside the world" left to see. Measured, with
-    // the same roofless 10 m room: at the automatic +-7.4 volume the grid is
-    // kept (worst span 0.53), with bounds pinned at +-5.5 it is dropped (1.37)
-    // — the walls of a roofless room subtend less of a probe's view than a
-    // first reading suggests, and most of what those probes see is sky.
+    // frame, and the three over the extents of THE VOLUME THE RENDERER LIT,
+    // multiplied, are its volume ratio — the smaller, the more of the world
+    // near it the probe photographed.
     //
     // It is per probe, positionless, scale-free, and costs no capture of its
     // own: the measurement is a by-product of the placement that already ran.
@@ -6469,44 +6447,11 @@ void PhotonComponent::buildPccFit() {
                 span[ax] = reach / std::max(W[ax], 1e-6f);
                 spanVol *= span[ax];
             }
-            // THE PRODUCT OF THE THREE, i.e. the box against the world BY
-            // VOLUME, and the alternative was built and measured twice — once
-            // when this was written, once again by lane SKY-FALLBACK-1 with
-            // both forms switchable on one binary. Taking the SMALLEST of the
-            // three instead — "smaller on any one axis" — keeps every probe
-            // that stands near a FLOOR, because every scene has one, it fills
-            // the lower half of every probe's view and it shrinks exactly one
-            // axis. A volume answers "is the space this probe measured smaller
-            // than the world the renderer lit?" in all three directions at
-            // once: a floor alone does not make it so.
-            //
-            // WHAT SKY-FALLBACK-1 MEASURED, and it closes half of the original
-            // argument. That argument had two halves, and the SECOND is gone:
-            // a scene that gains a grid no longer loses the sky, because the
-            // sky has its own pass-level slot now (fork 4d5fbef16+8f09c0cd4 (was 0048)) and answers
-            // wherever no probe's box does. What it does NOT close is the
-            // avatar preview reading r3 g3 b4 under the any-axis form: that was
-            // never the missing sky. Measured on this binary, it is upstream's
-            // one-occupant trap firing in a SECOND scene — the PCC binding was
-            // PROCESS-WIDE while the sky cube's binding is per scene and per
-            // material, so a preview scene's datablocks kept their manual cube
-            // while the editor scene's grid owned the env slot, and the pixel
-            // shader that generated did not compile (`SampleEnvProbe` against
-            // a textureCubeArray; OgreSky.cpp's note lists the three ways).
-            // The character was black because there was no shader, not because
-            // there was no sky. The binding is per scene and per pass since
-            // PHOTON-SCENE-SWITCH-1 (SceneGiBinding), which closes it.
-            //
-            // The counts, both forms, same binary, with 0048 in: gi.probe_open
-            // is IDENTICAL on every case but the 30 m yard (0 vs 3 of 18 at the
-            // shipped grid, 4 vs 8 of 32 at the denser one); LocalCubemaps is
-            // 3 of 3 kept either way with identical pixels; a new project with
-            // a cube and a mirror sphere keeps 2 of 18 by volume and 4 of 18 by
-            // axis, and the mirror's pixels are IDENTICAL between them (229 216
-            // 230) because the sky now answers either way. So the two forms
-            // differ only in how many probes a nearly-open scene PAYS for, and
-            // the volume form pays less for the same picture.
-            const bool keep = spanVol < kProbeSeesGeometry;
+            // THE KEEP: geometry in at least two directions.
+            int facesOfGeometry = 0;
+            for (size_t f = 0; f < 6u; ++f)
+                if (r[f] < kProbeDepthSaturation) ++facesOfGeometry;
+            const bool keep = facesOfGeometry >= kProbeFacesOfGeometry;
             if (!keep) drop.push_back(built[i]);
             else       keptBy.push_back({ spanVol, built[i] });
         }
@@ -6515,7 +6460,7 @@ void PhotonComponent::buildPccFit() {
         // cubes — must fit the tier's budget (GiQualityFacts::probeGridBudgetBytes),
         // so the count is DERIVED from it at this grid's face size, format and
         // shadowing (giProbeGridBudgetCount). A scene whose placement keeps more
-        // keeps the probes that photographed the most (the smallest volume ratio)
+        // keeps the probes whose faces measured the smallest box (the volume ratio)
         // and the rest are cut here, before stage 3 sizes the array — with a log
         // line, not a toast: nothing a user can fix, a budget the tier states.
         mProbesOverBudget = 0;
@@ -6538,7 +6483,8 @@ void PhotonComponent::buildPccFit() {
                     (mPccShadowed ? ", shadowed" : "") + ") holds " + std::to_string(cap) +
                     " probes: " + std::to_string(mProbesOverBudget) + " of " +
                     std::to_string(keptBy.size()) +
-                    " that saw geometry were cut, the ones that saw the least");
+                    " that photographed geometry in two directions were cut, ranked by the box "
+                    "their faces measured (the largest first)");
             }
         }
         for (Ogre::CubemapProbe *p : drop) mPcc->destroyProbe(p);
@@ -6551,8 +6497,8 @@ void PhotonComponent::buildPccFit() {
             // (2026-09-13 Q3) measured per probe instead of per scene.
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka GI: no probe grid — all " + std::to_string(mProbesDropped) +
-                " probes photographed nothing inside the lit volume, so reflections come "
-                "from the sky and cone tracing");
+                " probes photographed geometry in fewer than two directions, so reflections "
+                "come from the sky and cone tracing");
             mPccPhaseMs[2] = pccPhaseSplit();
             notePlacementPhases(mPccPhaseMs[0], mPccPhaseMs[1], mPccPhaseMs[2], 0.0, 0.0,
                                 unsigned(mProbesDropped), 0u);
