@@ -43,6 +43,9 @@ the caller's verify, so clause (2) is decided there:
   result was stuck, as before). After the last attempt the hook is called once
   more with attempt = -1 and `winner` = the kept attempt's number, with the kept
   result (its answer is ignored).
+- CLOD_LOCK_VERIFY moves to the public part of the header (stage 2: the hook
+  tells the level's own locks in `locks` from the ones it added — a position
+  the LEVEL locked that a result lost is the hook's rule 4).
 
 Applied at configure (irisgl/CMakeLists.txt) to a copy of the vendored header
 in the build tree, after 0004; the vendored file itself is never edited.
@@ -87,24 +90,33 @@ in the build tree, after 0004; the vendored file itself is never edited.
  	void* verify_group_context;
  
  	// optional per-vertex removal cost for simplify_prune_unlocked: the extent of the vertex's component (a component costs the
-@@ -167,6 +177,7 @@
+@@ -167,8 +177,13 @@
  enum
  {
  	CLOD_SIMPLIFY_PRUNED = 1 << 1, // simplify_prune_unlocked removed at least one component
 +	CLOD_SIMPLIFY_REPRUNED = 1 << 2, // the prune's clause (2), under the verify hook's budget, removed at least one more
  };
  
++// a lock the verify hook added for one group (bit 6: meshoptimizer reads bits 0-2 only, lockBoundary's scratch is bit 7);
++// public so a hook can tell the level's own locks (clodMesh::verify_group's locks) from the ones it added
++#define CLOD_LOCK_VERIFY (1 << 6)
++
  // gets called for each group in sequence
-@@ -457,7 +468,7 @@
- // a lock the verify hook added for one group (bit 6: meshoptimizer reads bits 0-2 only, lockBoundary's scratch is bit 7)
- #define CLOD_LOCK_VERIFY (1 << 6)
+ // returned value gets saved for clusters emitted from this group (clodCluster::refined)
+ typedef int (*clodOutput)(void* output_context, clodGroup group, const clodCluster* clusters, size_t cluster_count);
+@@ -454,10 +469,7 @@
+ 	}
+ }
  
+-// a lock the verify hook added for one group (bit 6: meshoptimizer reads bits 0-2 only, lockBoundary's scratch is bit 7)
+-#define CLOD_LOCK_VERIFY (1 << 6)
+-
 -static void pruneUnlocked(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& remap, size_t target_count, std::vector<unsigned int>& lod, float* error, std::vector<unsigned int>& pruned, float* pruned_extent)
 +static void pruneUnlocked(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& remap, size_t target_count, std::vector<unsigned int>& lod, float* error, std::vector<unsigned int>& pruned, float* pruned_extent, float budget_abs)
  {
  	// the group's positions, numbered locally
  	std::vector<unsigned int> pos(indices.size());
-@@ -551,18 +562,17 @@
+@@ -551,18 +563,17 @@
  
  	std::sort(order.begin(), order.end(), [&](unsigned int a, unsigned int b) { return cost[a] < cost[b] || (cost[a] == cost[b] && a < b); });
  
@@ -127,7 +139,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  			break;
  		removed[c] = 1;
  		remaining -= outputTris[c] * 3;
-@@ -589,14 +599,58 @@
+@@ -589,14 +600,58 @@
  	pruned.erase(std::unique(pruned.begin(), pruned.end()), pruned.end());
  }
  
@@ -187,7 +199,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  
  	std::vector<unsigned int> lod(indices.size());
  
-@@ -613,44 +667,43 @@
+@@ -613,44 +668,43 @@
  		    mesh.vertex_attributes, mesh.vertex_attributes_stride, mesh.attribute_weights, mesh.attribute_count,
  		    &locks[0], target_count, FLT_MAX, options | meshopt_SimplifyPermissive, error));
  
@@ -214,12 +226,12 @@ in the build tree, after 0004; the vendored file itself is never edited.
 -		{
 -			unsigned int a = indices[i + 0], b = indices[i + 1], c = indices[i + 2];
 -			assert(a < mesh.vertex_count && b < mesh.vertex_count && c < mesh.vertex_count);
-+	limitErrorByEdges(config, mesh, indices, error);
- 
+-
 -			const float* va = &mesh.vertex_positions[a * (mesh.vertex_positions_stride / sizeof(float))];
 -			const float* vb = &mesh.vertex_positions[b * (mesh.vertex_positions_stride / sizeof(float))];
 -			const float* vc = &mesh.vertex_positions[c * (mesh.vertex_positions_stride / sizeof(float))];
--
++	limitErrorByEdges(config, mesh, indices, error);
+ 
 -			// compute squared edge lengths
 -			float eab = (va[0] - vb[0]) * (va[0] - vb[0]) + (va[1] - vb[1]) * (va[1] - vb[1]) + (va[2] - vb[2]) * (va[2] - vb[2]);
 -			float eac = (va[0] - vc[0]) * (va[0] - vc[0]) + (va[1] - vc[1]) * (va[1] - vc[1]) + (va[2] - vc[2]) * (va[2] - vc[2]);
@@ -257,7 +269,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  	return lod;
  }
  
-@@ -663,17 +716,66 @@
+@@ -663,17 +717,66 @@
  #define CLOD_VERIFY_MAX_RETRIES 4
  #endif
  
@@ -327,7 +339,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  		// a vertex of a pruned component the caller asks to lock: the prune removed a piece the caller would not accept
  		for (unsigned int v : pruned)
  			if (extra[v] & ~locks[v])
-@@ -690,13 +792,24 @@
+@@ -690,13 +793,24 @@
  			}
  		}
  
@@ -354,7 +366,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  }
  
  static int outputGroup(const clodConfig& config, const clodMesh& mesh, const std::vector<Cluster>& clusters, const std::vector<int>& group, const clodBounds& simplified, int depth, void* output_context, clodOutput output_callback, unsigned int simplify_flags = 0, unsigned int locked_dropped = 0, unsigned int pruned_relocked = 0)
-@@ -758,7 +871,6 @@
+@@ -758,7 +872,6 @@
  	config.simplify_permissive = true;
  	config.simplify_fallback_permissive = false; // note: by default we run in permissive mode, but it's also possible to disable that and use it only as a fallback
  	config.simplify_prune_unlocked = false;
@@ -362,7 +374,7 @@ in the build tree, after 0004; the vendored file itself is never edited.
  
  	return config;
  }
-@@ -856,11 +968,13 @@
+@@ -856,11 +969,13 @@
  			unsigned int flags = 0, pruned_relocked = 0;
  			float pruned_extent = 0.f;
  			std::vector<unsigned int> pruned;

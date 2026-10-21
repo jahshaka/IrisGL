@@ -255,7 +255,10 @@ namespace
 // depth 0, where it is honest), and the prune's clause (2) — on toward the halving past 0.85 — is decided by the
 // verify under an absolute budget (clusterlod patch 0005); clodConfig::simplify_prune_budget leaves the config
 // record. Every DAG re-bakes (BAKEKEY-1).
-constexpr int kFormatVersion = 24;
+// v25 (2026-10-21, ATOM-7 stage 2): A LOCKED POSITION SURVIVES — the verify's rule 4: a position the level locked
+// that a group's result no longer uses locks its fan and the group is retried (an attempt that keeps its border wins
+// the best-attempt tie); CLOD_LOCK_VERIFY public in patch 0005. Every DAG re-bakes (BAKEKEY-1).
+constexpr int kFormatVersion = 25;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -4394,7 +4397,8 @@ public:
         : mPositions(positions), mPosComps(posComps), mBase(base), mTrisByAnchor(trisByAnchor),
           mIslands(islands), mFloorLen(floorLen), mExhaustive(exhaustive), mWidth(bakepool::width()),
           mQueries(static_cast<size_t>(mWidth)), mWeld(nv), mRegionAt(nv, 0u), mRegionIdx(nv, 0u),
-          mPosLockedAt(nv, 0u), mKeptAt(nv, 0u), mHitAt(nv, 0u), mKeepAt(nv, 0u), mLock(nv, 0u)
+          mPosLockedAt(nv, 0u), mKeptAt(nv, 0u), mHitAt(nv, 0u), mKeepAt(nv, 0u), mKeptPosAt(nv, 0u),
+          mLostPosAt(nv, 0u), mLock(nv, 0u)
     {
         meshopt_generatePositionRemap(mWeld.data(), positions, nv, sizeof(float) * size_t(posComps));
     }
@@ -4407,7 +4411,7 @@ public:
         GroupVerifier *self = static_cast<GroupVerifier *>(context);
         self->mDepth = depth;
         self->mPrunedExtent = prunedExtent;
-        (void)locks;
+        self->mLevelLocks = locks;
         if (attempt < 0) {   // THE BEST ATTEMPT WON: commit it (patch 0005's final call)
             const auto t0 = std::chrono::steady_clock::now();
             self->commitWinner(winner, simplified, simplifiedCount);
@@ -4647,7 +4651,10 @@ private:
                                              mIslands.capOf[v]);
                     if (!std::isfinite(d) || d <= stop) continue;
                     if (deformation) local = std::max(local, d);
-                    if (d > (deformation ? lockExact : islandAllowed)) found[c].push_back(removed[i]);
+                    // (a vertex of an island no larger than the prune already paid cannot cost anything new: a pruned
+                    // PART of an island straddling two groups is not "wholly dropped" here, ATOM-7 stage 2)
+                    if (d > (deformation && mIslands.capOf[v] > mPrunedExtent ? lockExact : islandAllowed))
+                        found[c].push_back(removed[i]);
                 }
                 chunkMax[c] = local;
             });
@@ -4706,8 +4713,9 @@ private:
         gather(lostIdx.size() / 3, [&](size_t t, surface::TriangleGrid::Query &q, std::vector<unsigned> &found) {
             const unsigned v0 = lostIdx[t * 3];
             if (!(mIslands.capOf[v0] > lockSampled)) return;
-            if (!(mIslands.capOf[v0] > islandAllowed) &&
-                std::binary_search(dropped.begin(), dropped.end(), mIslands.compOf[v0])) return;   // a dropped island allowed
+            if (!(mIslands.capOf[v0] > mPrunedExtent) ||
+                (!(mIslands.capOf[v0] > islandAllowed) &&
+                 std::binary_search(dropped.begin(), dropped.end(), mIslands.compOf[v0]))) return;   // an island allowed
             const float m = facetMax(vertexOf(mPositions, mPosComps, lostIdx[t * 3]),
                                      vertexOf(mPositions, mPosComps, lostIdx[t * 3 + 1]),
                                      vertexOf(mPositions, mPosComps, lostIdx[t * 3 + 2]), lockSampled, reference,
@@ -4725,8 +4733,32 @@ private:
         // its deformation raised by the prune's price, every island it has lost, and what the lost-facet decision reached.
         bound = std::max(vertexTerm, droppedMax);
         for (float f : facetReach) bound = std::max(bound, f);
+
+        // 4. A LOCKED POSITION SURVIVES (ATOM-7 stage 2): a position the LEVEL locked (a group border, a terminal
+        //    neighbour — not this hook's own CLOD_LOCK_VERIFY) that the result no longer uses leaves a sliver of
+        //    background along the border (its width <= d(L, S) <= the stored error, ~1 px when drawn). It is an
+        //    offender: its fan's corners are locked (a locked vertex leaves the index list only when the collapses of
+        //    its NEIGHBOURS degenerate every triangle it is in — the chain's fan law) and the group is retried. Each
+        //    lost position raises the attempt's bound by its distance to S, so among the attempts an attempt that keeps
+        //    its border wins the tie (the best-attempt rule).
+        std::vector<unsigned> lostLocked;   // one input vertex per lost locked position
+        float lostMax = 0.0f, lostSum = 0.0f;
+        if (mLevelLocks) {
+            ++mPosStamp;
+            for (size_t i = 0; i < simplifiedCount; ++i) mKeptPosAt[mWeld[simplified[i]]] = mPosStamp;
+            for (size_t i = 0; i < groupCount; ++i) {
+                const unsigned v = group[i], w = mWeld[v];
+                if (!(mLevelLocks[v] & meshopt_SimplifyVertex_Lock) || (mLevelLocks[v] & CLOD_LOCK_VERIFY)) continue;
+                if (mKeptPosAt[w] == mPosStamp || mLostPosAt[w] == mPosStamp) continue;
+                mLostPosAt[w] = mPosStamp;
+                lostLocked.push_back(v);
+                const float dl = gridS.closest(mQueries[0], vertexOf(mPositions, mPosComps, v));
+                if (std::isfinite(dl)) { lostMax = std::max(lostMax, dl); lostSum += dl; }
+            }
+        }
+        bound = std::max(bound, lostMax);
         mAttemptBound[size_t(attempt)] = bound;
-        *resultBound = std::max(bound, mLawBound);
+        *resultBound = std::max(bound, mLawBound) + lostSum;
 
         // 3. AN ISLAND BIGGER THAN THE GROUP'S BOUND IS NOT DROPPED (DAG-LOCK-1, the
         //    chain's rule), PART BY PART: a level-0 component bigger than the bound that
@@ -4764,7 +4796,7 @@ private:
                     for (size_t c = 0; c < 3; ++c) offenders.push_back(mRegionIdx[group[size_t(islandTri[k]) * 3 + c]]);
         }
 
-        if (offenders.empty()) return handOn();
+        if (offenders.empty() && lostLocked.empty()) return handOn();
         mLastOffended = true;
         mAttemptOffended[size_t(attempt)] = 1u;
         // Past the retries the measurement charges it. By ATTEMPT (clusterlod's count): a re-prune is an attempt too, and
@@ -4774,6 +4806,7 @@ private:
         // THE LOCK: an offender still in the group locks its fan; one removed below
         // this depth locks the corners of the input triangle it was handed to.
         ++mHitStamp;
+        for (unsigned v : lostLocked) mHitAt[mWeld[v]] = mHitStamp;   // rule 4: the lost position's fan
         // AN OFFENDER HOSTED ON A DROPPED ISLAND (ATOM-6): the input triangle it was handed to no longer exists
         // (its island has no vertex on S), and a corner of a triangle that is gone cannot hold anything — it is
         // re-hosted to its nearest SURVIVING triangle (S's; its displacement IS its distance to S, the one the
@@ -4908,8 +4941,9 @@ private:
     int mWidth;
     surface::Queries mQueries;
     std::vector<unsigned> mWeld;          ///< vertex -> the first vertex at its position
-    std::vector<unsigned> mRegionAt, mRegionIdx, mPosLockedAt, mKeptAt, mHitAt, mKeepAt;
-    unsigned mRegionStamp = 0, mKeptStamp = 0, mHitStamp = 0;
+    std::vector<unsigned> mRegionAt, mRegionIdx, mPosLockedAt, mKeptAt, mHitAt, mKeepAt, mKeptPosAt, mLostPosAt;
+    unsigned mRegionStamp = 0, mKeptStamp = 0, mHitStamp = 0, mPosStamp = 0;
+    const unsigned char *mLevelLocks = nullptr;   ///< the group's lock array as clusterlod simplified it (rule 4)
     std::vector<unsigned char> mLock;     ///< the current group's lock (vertex-indexed)
     std::vector<unsigned> mLockTouched;
     std::vector<unsigned> mRegionV;       ///< the group's region (level-0 vertices)
@@ -5698,6 +5732,70 @@ void build(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, Variant varian
         stats->localFallbacks = int(fallbacks);
         stats->buildMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
         stats->measureMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        // THE PROOF STAT (ATOM-7 stage 2): the locked positions the DAG ITSELF says a group lost, recomputed from its
+        // cluster indices — clusterlod's level lock is a position its group shares with another group of the same
+        // depth (lockBoundary) or with a terminal group of an earlier depth (patch 0002) — that its output no longer
+        // uses; each one's distance to the group's output against the group's stored error. Past 1, a lost border
+        // position opens a crack wider than the law.
+        {
+            std::vector<unsigned> weld(nv);
+            meshopt_generatePositionRemap(weld.data(), positions, nv, posStride);
+            std::vector<int> ownerAt(nv, -1), ownerDepth(nv, -1);
+            std::vector<unsigned char> stuckPos(nv, 0u);
+            std::vector<std::vector<size_t>> byDepth(size_t(maxDepth) + 1);
+            for (size_t g = 0; g < groups.size(); ++g) byDepth[size_t(groups[g].depth)].push_back(g);
+            surface::TriangleGrid::Query q;
+            for (int d = 0; d <= maxDepth; ++d) {
+                for (size_t g : byDepth[size_t(d)])
+                    for (int m : members[g])
+                        for (unsigned v : raw[size_t(m)].indices) {
+                            const unsigned w = weld[v];
+                            if (ownerDepth[w] != d) { ownerDepth[w] = d; ownerAt[w] = int(g); }
+                            else if (ownerAt[w] != int(g)) ownerAt[w] = -2;
+                        }
+                for (size_t g : byDepth[size_t(d)]) {
+                    if (groups[g].simplified.error == FLT_MAX) continue;   // terminal: its clusters stay as they are
+                    std::vector<unsigned> in, out, soup;
+                    for (int m : members[g])
+                        for (unsigned v : raw[size_t(m)].indices)
+                            if (ownerAt[weld[v]] == -2 || stuckPos[weld[v]]) in.push_back(weld[v]);
+                    for (int c : outputs[g])
+                        for (unsigned v : raw[size_t(c)].indices) { out.push_back(weld[v]); soup.push_back(v); }
+                    std::sort(in.begin(), in.end());
+                    in.erase(std::unique(in.begin(), in.end()), in.end());
+                    std::sort(out.begin(), out.end());
+                    std::vector<unsigned> lost;
+                    for (unsigned w : in)
+                        if (!std::binary_search(out.begin(), out.end(), w)) lost.push_back(w);
+                    if (lost.empty()) continue;
+                    stats->lockedLostPositions += int(lost.size());
+                    surface::TriangleGrid grid;
+                    if (!soup.empty()) {
+                        Vec3 lo = vertexOf(positions, posComps, soup[0]), hi = lo;
+                        const auto grow = [&](unsigned v) {
+                            const Vec3 pt = vertexOf(positions, posComps, v);
+                            lo = Vec3(std::min(lo.x(), pt.x()), std::min(lo.y(), pt.y()), std::min(lo.z(), pt.z()));
+                            hi = Vec3(std::max(hi.x(), pt.x()), std::max(hi.y(), pt.y()), std::max(hi.z(), pt.z()));
+                        };
+                        for (unsigned v : soup) grow(v);
+                        for (unsigned w : lost) grow(w);
+                        grid.build(positions, posComps, soup, lo, hi, soupGridRes(positions, posComps, soup, lo, hi));
+                    }
+                    const float err = dag.groups[int(g)].error;
+                    for (unsigned w : lost) {
+                        const float dist = soup.empty() ? std::numeric_limits<float>::infinity()
+                                                        : grid.closest(q, vertexOf(positions, posComps, w));
+                        const float ratio = err > 0.0f ? dist / err : (dist > 0.0f ? std::numeric_limits<float>::infinity() : 0.0f);
+                        stats->lockedLostMaxRatio = std::max(stats->lockedLostMaxRatio, ratio);
+                        if (!(ratio <= 1.0f)) ++stats->lockedLostPastError;
+                    }
+                }
+                for (size_t g : byDepth[size_t(d)])
+                    if (groups[g].simplified.error == FLT_MAX)
+                        for (int m : members[g])
+                            for (unsigned v : raw[size_t(m)].indices) stuckPos[weld[v]] = 1u;
+            }
+        }
         if (stats->wantRegions) {
             stats->clusterRegions.resize(int(raw.size()));
             for (size_t c = 0; c < raw.size(); ++c) {

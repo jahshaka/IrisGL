@@ -424,6 +424,12 @@ public:
         /// attempt (a retry came out worse); `handOnRecomputed` = winners whose hand-on was recomputed from their indices.
         int    groupsKeptEarlier = 0;
         int    handOnRecomputed = 0;
+        /// THE PROOF STAT (ATOM-7 stage 2): the level-locked positions the DAG's own clusters say a group lost
+        /// (recomputed: a position shared with another group of its depth or an earlier terminal one, absent from its
+        /// output), the largest distance-to-output / stored error among them, and how many are past their error.
+        int    lockedLostPositions = 0;
+        float  lockedLostMaxRatio = 0.0f;
+        int    lockedLostPastError = 0;
         int    prunedGroups = 0;
         int    lockDroppedGroups = 0;
         int    prunedRelocked = 0;
