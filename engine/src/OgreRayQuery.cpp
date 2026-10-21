@@ -989,6 +989,13 @@ private:
         /// warm-up exists for, the first is an ordinary frame of an ordinary
         /// pan. Restarts with `havePrev`.
         unsigned historyFrames = 0;
+        /// THE RADIANCE KEY the last recorded frame saw (OgreScene::reflectRadianceKey,
+        /// PHOTON-5 stage 4) and whether it moved then: the frame it moves AND the one
+        /// after carry the flag (a lamp's derived pose lands at the frame's scene-graph
+        /// update, the card path's two-frame rule).
+        unsigned long long radianceKey = 0ull;
+        bool radianceKeyKnown = false;
+        bool radianceMovedLast = false;
         /// Was the LAST recorded frame a stereo one? A view that changes shape
         /// (a session beginning or ending on it) has a history whose halves mean
         /// something else, so the mean starts again — the same rule as a resize.
@@ -5733,6 +5740,17 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // `stereo.y`; 0 on a first frame, a resize, a scene bind and a change of
     // stereo shape, exactly where the previous basis is withheld above).
     pp.stereo[1] = float(rv.historyFrames);
+    // THE RADIANCE MOVED (PHOTON-5 stage 4): knobs2.x = 1 on the frame the scene's reflection
+    // radiance key moved and the one after — rq_reflect.comp caps a warm mean's count there, the
+    // arrival rule's form, so the new light is not drained in over the floor's thirty-two frames.
+    {
+        const unsigned long long key = scene->reflectRadianceKey();
+        const bool moved = rv.radianceKeyKnown && key != rv.radianceKey;
+        pp.knobs2[0] = (moved || rv.radianceMovedLast) ? 1.0f : 0.0f;
+        rv.radianceMovedLast = moved;
+        rv.radianceKey = key;
+        rv.radianceKeyKnown = true;
+    }
     // THE PHOTON VIEW'S Hits (PHOTON-VIEW-1): the view's overlay, written by this
     // trace when the scene's view asks and the view holds one at the full size.
     Ogre::TextureGpu *photon =
@@ -8999,6 +9017,25 @@ unsigned long long PhotonComponent::gatherRestartKey() const {
         fold(cs.invalidMaterial);
         fold(cs.invalidSun);
     }
+    return key;
+}
+
+/// THE REFLECTION HISTORY'S RADIANCE KEY (PHOTON-5 stage 4). A still glossy surface's temporal mean
+/// remembers about thirty-two frames; when what it reflects changes BRIGHTNESS with nothing moving —
+/// a lamp's intensity, its pose, the cloud layer, the chain's re-injection at rest — no reprojection
+/// test fires and the old radiance drained out over the floor's whole memory. The ray pass compares
+/// this key per view and tells rq_reflect.comp the frame it moved (Params knobs2.x).
+unsigned long long PhotonComponent::reflectRadianceKey() const {
+    unsigned long long key = 1469598103934665603ull;
+    const auto fold = [&key](unsigned long long v) {
+        key ^= v;
+        key *= 1099511628211ull;
+    };
+    unsigned long long lights[4];
+    mScene.cardLightKey(lights);
+    for (unsigned long long v : lights) fold(v);
+    fold(mScene.cloudGiSerial());
+    fold(mGiRestTicks);
     return key;
 }
 

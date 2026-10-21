@@ -4469,6 +4469,7 @@ public:
     unsigned long long giLightingSerial() const { return mPhoton.giLightingSerial(); }
     unsigned long long gatherRestKey() const { return mPhoton.gatherRestKey(); }
     unsigned long long gatherRestartKey() const { return mPhoton.gatherRestartKey(); }
+    unsigned long long reflectRadianceKey() const { return mPhoton.reflectRadianceKey(); }
     void gatherStatusInto(GatherStatus &out) const;
     /// The test-and-tool knobs (Engine.h's `setGatherTuning`): every zero means
     /// "what the tier derives", so the default is the shipped configuration.

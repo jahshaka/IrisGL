@@ -791,6 +791,11 @@ public:
     unsigned long long gatherRestKey() const;
     /// The settle's key: the discontinuities only (OgreRayQuery.cpp).
     unsigned long long gatherRestartKey() const;
+    /// THE REFLECTION HISTORY'S RADIANCE KEY (PHOTON-5 stage 4, OgreRayQuery.cpp): moves when what a
+    /// reflected surface EMITS can have changed with the surface standing still — the lamps' key
+    /// (cardLightKey: a light write, a lamp's pose), the cloud layer's GI serial and the chain's
+    /// at-rest light ticks that landed an injection (mGiRestTicks).
+    unsigned long long reflectRadianceKey() const;
     /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1). The row is stored here and
     /// read by the view (the chain's prepass) and the ray tier (the job);
     /// `sunContactWanted` is the row resolved against the machine, defined in

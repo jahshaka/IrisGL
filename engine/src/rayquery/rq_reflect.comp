@@ -87,7 +87,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// world units, z = the frame index (the sample sequence's only input),
 	/// w = how many cascades are bound.
 	vec4 knobs;
-	/// x spare (0), y = the
+	/// x = 1 on a frame THE RADIANCE MOVED (PHOTON-5 stage 4: the scene's reflection radiance
+	/// key, OgreRayQuery.cpp; rq_reflect.comp caps a warm mean's count there), y = the
 	/// surface bias in world units (a ray starts this far off its own surface),
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).
@@ -1163,6 +1164,16 @@ void main()
 			}
 		}
 	}
+
+	// THE RADIANCE MOVED (PHOTON-5 stage 4). A lamp's step, its pose, the cloud layer, the
+	// chain's re-injection at rest: what this texel reflects changed BRIGHTNESS while the
+	// surface and the reflected thing stood still, so no test above fired and the old
+	// radiance drained out of a still glossy mean over the floor's whole memory (24 frames
+	// to 95 % on rtreflect.history_detectors' lamp step, 11 with this cap). The host flags the frame the
+	// scene's radiance key moved (knobs2.x); a warm mean's count is capped there - the
+	// arrival rule's form above - so the new light takes over at the warm seed's 1/n.
+	if( p.knobs2.x > 0.5 && prev.w > 0.0 && p.stereo.y >= kWarmupFrames )
+		prev.w = min( prev.w, kWarmupFrames + 1.0 );
 
 	// THE EDGE-CLASS OVERLAY (REFLECT-EDGE-2's measuring instrument, gi.reflect_mover
 	// --edge): with alpha.z set (the arm "reflect.edgeClasses") on the Hits photon view, a traced
