@@ -16,7 +16,6 @@ For more information see the LICENSE file
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
-#include <functional>
 #include <unordered_map>
 
 namespace iris
@@ -26,48 +25,11 @@ namespace atomdag
 namespace
 {
 
-constexpr float kUvTriSizeMin = 1.0f / 1024.0f;   ///< Nanite's THRESH_UVS_ARE_SAME
-constexpr float kNanitePositionScale = 4.0f;       ///< 1 / Nanite's DesiredSize 0.25
-constexpr float kNaniteUvDivisor = 128.0f;         ///< Nanite's UV weight 1 / (128 uvTriSize)
-
-Vec3 at(const std::vector<float> &p, unsigned i) { return Vec3(p[size_t(i) * 3], p[size_t(i) * 3 + 1], p[size_t(i) * 3 + 2]); }
-
-/// The weights' algebra over the scratch (positions and the UV slot).
-Weights weightsOf(const GroupScratch &sc)
-{
-    Weights w;
-    const size_t triCount = sc.tris.size() / 3;
-    if (triCount == 0) return w;
-    double area = 0.0, uvArea = 0.0;
-    std::vector<double> fan(sc.size(), 0.0);
-    for (size_t t = 0; t < triCount; ++t) {
-        const unsigned a = sc.tris[t * 3], b = sc.tris[t * 3 + 1], c = sc.tris[t * 3 + 2];
-        const Vec3 pa = at(sc.pos, a);
-        const double ar = double(Vec3::crossProduct(at(sc.pos, b) - pa, at(sc.pos, c) - pa).length()) * 0.5;
-        area += ar;
-        fan[a] += ar; fan[b] += ar; fan[c] += ar;
-        if (sc.uvAt >= 0) {
-            const float *ua = &sc.attr[size_t(a) * sc.attrCount + size_t(sc.uvAt)],
-                        *ub = &sc.attr[size_t(b) * sc.attrCount + size_t(sc.uvAt)],
-                        *uc = &sc.attr[size_t(c) * sc.attrCount + size_t(sc.uvAt)];
-            uvArea += 0.5 * std::fabs(double((ub[0] - ua[0]) * (uc[1] - ua[1]) - (ub[1] - ua[1]) * (uc[0] - ua[0])));
-        }
-    }
-    double sum = 0.0;
-    for (double f : fan) sum += std::sqrt(f);   // every scratch vertex is a wedge of the input
-    w.tGroup = float(std::sqrt(area / double(triCount)));
-    w.sGroup = sc.size() ? float(sum / double(sc.size())) : 0.0f;
-    w.uvTriSize = std::max(float(std::sqrt(uvArea / double(triCount))), kUvTriSizeMin);
-    if (w.sGroup > 0.0f) {
-        w.normal = kNanitePositionScale * w.tGroup / w.sGroup;
-        w.uv = kNanitePositionScale * w.tGroup / (kNaniteUvDivisor * w.uvTriSize * w.sGroup);
-    }
-    return w;
-}
+constexpr float kAttributeWeight = 1e-6f;   ///< every attribute's weight: the positions decide (simplify.h)
 
 }   // namespace
 
-GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris, WeightArm arm)
+GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris)
 {
     GroupScratch sc;
     std::unordered_map<unsigned, unsigned> localOf;
@@ -91,16 +53,7 @@ GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris
         if (sc.nrmAt >= 0) for (int k = 0; k < 3; ++k) dst[sc.nrmAt + k] = mesh.normals[g * size_t(mesh.nrmComps) + size_t(k)];
         if (sc.uvAt >= 0) for (int k = 0; k < 2; ++k) dst[sc.uvAt + k] = mesh.uvs[g * size_t(mesh.uvComps) + size_t(k)];
     }
-    sc.weights = weightsOf(sc);
-    sc.weightOf.assign(sc.attrCount, 0.0f);
-    // EVERY WEIGHED ATTRIBUTE AT A POSITIVE WEIGHT (correction 3c): a zero weight is remapped out of the quadrics;
-    // POSONLY = every attribute at the floor.
-    const float floorW = 1e-6f;
-    const bool nanite = arm == WeightArm::Nanite;
-    if (sc.nrmAt >= 0)
-        for (int k = 0; k < 3; ++k) sc.weightOf[size_t(sc.nrmAt + k)] = nanite ? std::max(sc.weights.normal, floorW) : floorW;
-    if (sc.uvAt >= 0)
-        for (int k = 0; k < 2; ++k) sc.weightOf[size_t(sc.uvAt + k)] = nanite ? std::max(sc.weights.uv, floorW) : floorW;
+    sc.weightOf.assign(sc.attrCount, kAttributeWeight);
     return sc;
 }
 
@@ -138,79 +91,6 @@ Simplified simplifyGroup(const GroupScratch &sc, const std::vector<unsigned char
     out.tris.assign(dst.begin(), dst.begin() + std::ptrdiff_t(count));
     if (!std::isfinite(out.resultError) || out.resultError < 0.0f) out.resultError = 0.0f;
     return out;
-}
-
-size_t weldWithin(GroupScratch &sc, LocalSpace &space, const std::vector<unsigned char> &lock, float radius)
-{
-    const size_t n = sc.size();
-    if (!(radius > 0.0f) || !std::isfinite(radius) || n == 0) return 0;
-    // the group's positions: per weld id its first scratch vertex, in first-use order
-    std::unordered_map<unsigned, unsigned> slotOf;
-    slotOf.reserve(n);
-    std::vector<unsigned> posOf(n), first;
-    for (size_t v = 0; v < n; ++v) {
-        const auto it = slotOf.emplace(space.weld[v], unsigned(first.size())).first;
-        if (it->second == first.size()) first.push_back(unsigned(v));
-        posOf[v] = it->second;
-    }
-    const size_t np = first.size();
-    std::vector<unsigned char> held(np, 0u);
-    for (size_t v = 0; v < n; ++v) if (lock[v]) held[posOf[v]] = 1u;
-    const auto island = [&](unsigned p) { return space.comp[first[p]]; };
-    const auto at = [&](unsigned p) { return Vec3(sc.pos[size_t(first[p]) * 3], sc.pos[size_t(first[p]) * 3 + 1], sc.pos[size_t(first[p]) * 3 + 2]); };
-    // the anchors in a hash grid of cell = radius (the 27 cells around a position cover its radius)
-    struct Cell { long long x = 0, y = 0, z = 0; bool operator==(const Cell &o) const { return x == o.x && y == o.y && z == o.z; } };
-    struct CellHash { size_t operator()(const Cell &c) const { return size_t(c.x * 73856093LL) ^ size_t(c.y * 19349663LL) ^ size_t(c.z * 83492791LL); } };
-    const auto cellOf = [&](const Vec3 &q) {
-        const auto k = [&](float x) { return (long long)std::floor(std::clamp(double(x) / double(radius), -1e15, 1e15)); };
-        return Cell { k(q.x()), k(q.y()), k(q.z()) };
-    };
-    std::unordered_map<Cell, std::vector<unsigned>, CellHash> grid;
-    std::vector<std::vector<unsigned>> joined(np);   // per anchor: the islands snapped onto it
-    std::vector<int> target(np, -1);
-    // the islands a snap joins: union-find over island ids
-    std::unordered_map<unsigned, unsigned> parent;
-    const std::function<unsigned(unsigned)> root = [&](unsigned c) {
-        auto it = parent.find(c);
-        if (it == parent.end() || it->second == c) return c;
-        const unsigned r = root(it->second);
-        parent[c] = r;
-        return r;
-    };
-    size_t snapped = 0;
-    for (unsigned p = 0; p < np; ++p) {
-        const unsigned c = island(p);
-        if (held[p] || c >= space.islandCount) continue;
-        const Vec3 q = at(p);
-        const Cell k = cellOf(q);
-        int best = -1;
-        float bestD = radius;
-        for (long long dx = -1; dx <= 1; ++dx)
-            for (long long dy = -1; dy <= 1; ++dy)
-                for (long long dz = -1; dz <= 1; ++dz) {
-                    const auto it = grid.find(Cell { k.x + dx, k.y + dy, k.z + dz });
-                    if (it == grid.end()) continue;
-                    for (unsigned a : it->second) {
-                        if (island(a) == c) continue;
-                        if (std::find(joined[a].begin(), joined[a].end(), c) != joined[a].end()) continue;
-                        const float d = (at(a) - q).length();
-                        if (d < bestD || (d == bestD && (best < 0 || int(a) < best))) { bestD = d; best = int(a); }
-                    }
-                }
-        if (best < 0) { grid[k].push_back(p); continue; }
-        target[p] = best;
-        joined[size_t(best)].push_back(c);
-        const unsigned ra = root(c), rb = root(island(unsigned(best)));
-        if (ra != rb) parent[std::max(ra, rb)] = std::min(ra, rb);
-        ++snapped;
-    }
-    if (!snapped) return 0;
-    for (size_t v = 0; v < n; ++v) {
-        const int t = target[posOf[v]];
-        if (t >= 0) for (int k = 0; k < 3; ++k) sc.pos[v * 3 + size_t(k)] = sc.pos[size_t(first[size_t(t)]) * 3 + size_t(k)];
-        if (space.comp[v] < space.islandCount) space.comp[v] = root(space.comp[v]);
-    }
-    return snapped;
 }
 
 float positionEstimate(const GroupScratch &sc, const std::vector<unsigned char> &lock, size_t targetTris)

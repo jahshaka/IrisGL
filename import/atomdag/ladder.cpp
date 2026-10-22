@@ -56,11 +56,11 @@ std::vector<unsigned> islandsAtRisk(const LocalSpace &space, const std::vector<u
 
 GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
                         const std::vector<unsigned> &inTris, const std::vector<unsigned> &externalWelds, float ask,
-                        float floorLen, WeightArm arm, size_t targetTris)
+                        float floorLen, size_t targetTris)
 {
     GroupResult r;
-    r.scratch = makeScratch(mesh, inTris, arm);
-    GroupScratch &sc = r.scratch;
+    r.scratch = makeScratch(mesh, inTris);
+    const GroupScratch &sc = r.scratch;
     r.space = makeSpace(sc, weld, islands.compOf, islands.capOf, islands.count());
     const size_t n = sc.size();
     const size_t inCount = inTris.size() / 3;
@@ -86,9 +86,6 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
     // THE BUDGET: the largest ask; a group of leaves never granted one asks 2 x the position quadric's estimate.
     if (!(ask > 0.0f)) r.depth0Estimate = positionEstimate(sc, lock, target);
     r.budget = std::max(ask > 0.0f ? ask : kLadderFactor * std::max(r.depth0Estimate, 0.0f), floorLen);
-
-    // THE WELD (D5), in the scratch the simplifier reads (the estimate above saw the unsnapped surface).
-    r.welded = weldWithin(sc, r.space, lock, 0.5f * r.budget);
 
     // per position: the input triangles at it (the fan a lock holds)
     std::vector<std::pair<unsigned, unsigned>> byWeld;   // (weld, input triangle)

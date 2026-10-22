@@ -17,7 +17,7 @@ For more information see the LICENSE file
 // physics; ours where the owner's law is stricter:
 //   D1 adjacency by position (adjacency.h)       D2 128-triangle / 256-vertex leaves by bisection (leaves.h)
 //   D3 groups of 8-32 per level, borders recomputed every level (groups.h)
-//   D4 a group simplified to half, re-indexing in stage 1, Nanite-scale attribute weights (simplify.h)
+//   D4 a group simplified to half, re-indexing, every attribute at a tiny weight (simplify.h)
 //   D6 the measured one-step price and the ladder: no forced halving, a group that cannot is carried (measure.h,
 //      ladder.h)
 //   D7 every parent of a group shares the group's error = max(children's stored, the step), and the group's LOD
@@ -29,7 +29,6 @@ For more information see the LICENSE file
 
 #include "document/assets/mesh.h"   // MeshClusterDag
 #include "import/atomdag/adjacency.h"
-#include "import/atomdag/simplify.h"
 
 #include <QVector>
 #include <vector>
@@ -43,7 +42,6 @@ constexpr int kMaxLevels = 24;   ///< the hard depth cap: a chain still going pa
 
 struct Options
 {
-    WeightArm weights = WeightArm::Nanite;   ///< stage 3's weight arms (simplify.h)
     bool wantGroups = false;   ///< one GroupRecord per group ATTEMPTED (accepted and carried)
     bool wantLocks = false;    ///< ...with its external positions (atom2.borders_move)
     bool wantRegions = false;  ///< the level-0 provenance partition per cluster (engine.lod_rule_parity)
@@ -66,8 +64,6 @@ struct GroupRecord
     float stored = 0.0f, estimate = 0.0f, depth0Estimate = -1.0f;
     float removedVertex = 0.0f, lostFacet = 0.0f, addedFacet = 0.0f, droppedIsland = 0.0f, lostLocked = 0.0f;
     int attempts = 0, pruned = 0, islandsDropped = 0, lockedLost = 0;   ///< attempts: every simplify of every shrink
-    int welded = 0;             ///< positions the weld snapped (D5; the last shrink's)
-    float weightNormal = 0.0f, weightUv = 0.0f;
     std::vector<int> memberClusters;  ///< the DAG cluster ids it was given (the law's children)
     std::vector<unsigned> external;   ///< wantLocks: its external positions (weld ids)
 };
@@ -78,7 +74,6 @@ struct Stats
     int depth = 0;               ///< the deepest group's level (the empty top included)
     int levels = 0;              ///< loop iterations
     int reductions = 0, carried = 0, notSimplified = 0, retries = 0, prunedPieces = 0;
-    long long welded = 0;        ///< positions the weld snapped over the accepted groups
     int levelsAllCarried = 0;    ///< re-runs of a level where every group was carried (the whole pool's budget doubled in place)
     int sphereGrown = 0;         ///< groups whose enclosing sphere was grown by float rounding to hold a member's
     bool depthCapHit = false;

@@ -23,10 +23,10 @@ For more information see the LICENSE file
 // ladder's offender fans); a lock on any wedge locks them all. The survivors keep their ids
 // (meshopt_simplifyWithAttributes): every output index is a vertex of the input.
 //
-// THE WEIGHTS (correction 4): an attribute change da costs the distance W * da * sqrt(sum of the fan's area) in
-// meshoptimizer's metric and w * da * t / 0.25 in Nanite's, so per group, with S = the mean over the group's wedges of
-// sqrt(the incident area) and t = sqrt(area / triangles):
-//     W_normal = 4 t / S      W_uv = 4 t / (128 uvTriSize S), uvTriSize = max(sqrt(uvArea / triangles), 1/1024)
+// THE WEIGHTS (the lead's pick at stage 3's STOP, measured): EVERY ATTRIBUTE AT A TINY POSITIVE WEIGHT (1e-6) — the
+// positions decide, the attributes ride re-indexed (a zero weight would be remapped out of the quadrics, correction
+// 3c). Nanite's scale translated per group (correction 4) drew 1.6x the hard 7's triangles at E = 16 (42,228 against
+// 27,015) for no visible difference in the owner's picture pairs (spikes/atom-2/stage3/pictures, NOTES.txt); deleted.
 
 #include "import/atomdag/adjacency.h"
 
@@ -37,36 +37,21 @@ namespace iris
 namespace atomdag
 {
 
-/// THE WEIGHT ARMS (stage 3; the lead picks one at its STOP): Nanite's scale translated per group (correction 4), or
-/// POSONLY — every attribute at a tiny positive weight (the positions decide; the attributes ride, re-indexed).
-enum class WeightArm { Nanite, PosOnly };
-
-struct Weights
-{
-    float normal = 0.0f;
-    float uv = 0.0f;
-    float tGroup = 0.0f;     ///< sqrt(area / triangles), mesh units
-    float sGroup = 0.0f;     ///< mean over the wedges of sqrt(sum of incident area)
-    float uvTriSize = 0.0f;
-};
-
 /// One group's dense scratch.
 struct GroupScratch
 {
     std::vector<unsigned> globalOf;   ///< scratch id -> mesh vertex
     std::vector<unsigned> tris;       ///< the input, in scratch ids
-    std::vector<float> pos;           ///< n * 3: the positions the SIMPLIFIER reads (the weld's snaps applied, D5;
-                                      ///< the originals are the local space's)
+    std::vector<float> pos;           ///< n * 3, the positions
     std::vector<float> attr;          ///< n * attrCount, the original attributes
     size_t attrCount = 0;
     int nrmAt = -1, uvAt = -1;        ///< offsets in an attribute record (-1: absent)
-    Weights weights;
     std::vector<float> weightOf;      ///< per attribute component
     size_t size() const { return globalOf.size(); }
 };
 
-/// The scratch of `tris` (global ids) under the weight arm `arm`.
-GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris, WeightArm arm);
+/// The scratch of `tris` (global ids).
+GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris);
 
 /// The group's local space (adjacency.h LocalSpace) over the scratch.
 LocalSpace makeSpace(const GroupScratch &sc, const std::vector<unsigned> &weld, const std::vector<unsigned> &compOf,
@@ -82,17 +67,6 @@ struct Simplified
 /// flagged in `lock` locked.
 Simplified simplifyGroup(const GroupScratch &sc, const std::vector<unsigned char> &lock, size_t targetTris,
                          float targetError);
-
-/// D5 THE WELD WITHIN THE BUDGET (ours; Nanite never merges shells — dossier 1.1, 3.7): the scratch positions of
-/// DIFFERENT islands within `radius` (E / 2) of each other are SNAPPED onto one another before the collapse, so kit-
-/// bashed shells become one surface the simplifier can reduce. Greedy and deterministic, in the scratch's first-use
-/// order over its positions (weld ids): a position takes the NEAREST earlier anchor of another island within the
-/// radius that holds no position of its own island yet, else becomes an anchor itself; every snap moves a position at
-/// most `radius`. The locked positions (the external border, any lock round's fans) are neither moved nor anchors.
-/// The mesh's data is untouched (re-indexing: a snapped survivor keeps its own position), so the gap is a deviation
-/// the measurement prices on the REAL output; the islands a snap joins become one in `space` (the island rules see one
-/// surface; each vertex keeps its own island's cap). Returns the positions snapped.
-size_t weldWithin(GroupScratch &sc, LocalSpace &space, const std::vector<unsigned char> &lock, float radius);
 
 /// The position-quadric estimate of the halving (positions only): the depth-0 reference.
 float positionEstimate(const GroupScratch &sc, const std::vector<unsigned char> &lock, size_t targetTris);

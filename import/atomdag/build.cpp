@@ -110,8 +110,7 @@ QVector<float> configRecord()
         float(kClusterTriangles), float(kClusterVertices), float(kClusterTarget), float(kSharedEdgeWeight),
         float(kLocalityWeight), float(kGroupMin), float(kGroupMax), float(kGroupTarget), float(kGroupEdgeWeight),
         float(kGroupSiblingWeight), float(kGroupEdgeBase), kLadderFactor, float(kRetries), 1.0f /* fewer clusters */,
-        float(kMaxLevels), 4.0f /* Nanite's position scale 1/0.25 */, 128.0f /* Nanite's UV divisor */, kFloorRel,
-        0.5f /* the weld radius, E / 2 (D5) */ };
+        float(kMaxLevels), 1e-6f /* every attribute's weight */, kFloorRel };
 }
 
 bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterDag *out, Stats *stats,
@@ -223,9 +222,6 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
             rec.islandsDropped = r.terms.islandsDropped;
             rec.lockedLost = r.terms.lockedLost;
             rec.countCarry = countCarry[g] != 0u;
-            rec.welded = int(r.welded);
-            rec.weightNormal = r.scratch.weights.normal;
-            rec.weightUv = r.scratch.weights.uv;
             if (options.wantLocks) rec.external = grouping.external[g];
             return rec;
         };
@@ -271,8 +267,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
                     int attempts = 0;
                     double msSimplify = 0.0, msMeasure = 0.0, msExact = 0.0;
                     for (int shrink = 0;; ++shrink) {
-                        results[g] = reduceGroup(mesh, weld, islands, in, grouping.external[g], ask[g], floorLen,
-                                                 options.weights, target);
+                        results[g] = reduceGroup(mesh, weld, islands, in, grouping.external[g], ask[g], floorLen, target);
                         GroupResult &r = results[g];
                         attempts += r.attempts;
                         msSimplify += r.msSimplify; msMeasure += r.msMeasure; msExact += r.msExact;
@@ -293,12 +288,9 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
                     r.attempts = attempts;
                     r.msSimplify = msSimplify; r.msMeasure = msMeasure; r.msExact = msExact;
                     if (!r.accepted && within) countCarry[g] = 1u;
-                    // the output in MESH ids; the group's scratch and local space are released here (only the
-                    // weights stay, for the record)
+                    // the output in MESH ids; the group's scratch and local space are released here
                     if (r.accepted) for (unsigned &v : r.out) v = r.scratch.globalOf[v];
-                    const Weights w = r.scratch.weights;
                     r.scratch = GroupScratch();
-                    r.scratch.weights = w;
                     r.space = LocalSpace();
                 }
             });
@@ -367,7 +359,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
             rec.dagGroup = id;
             rec.stored = G.error;
             rec.outTris = int(r.out.size() / 3);
-            if (stats) { if (r.simplified) ++stats->reductions; else ++stats->notSimplified; stats->welded += (long long)r.welded; }
+            if (stats) { if (r.simplified) ++stats->reductions; else ++stats->notSimplified; }
 
             const std::vector<unsigned> &outGlobal = r.out;   // mesh ids (released above)
             // The parents.
