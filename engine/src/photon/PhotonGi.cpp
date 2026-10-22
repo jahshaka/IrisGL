@@ -410,8 +410,9 @@ static const Ogre::uint8 kIfdIrradRes  = 6u;
 // K passes anyway (a per-probe variance stop is the recorded saving, F7). The cost
 // is time, not frames: K whole-grid passes at the update budget after an event
 // (about 8 K = 200 frames at budget 1), a pass skipping every probe already at K.
-// Every event's own pass - a build's included - is the first sample everywhere
-// (unbiased, every probe valid); a PAUSED field (budget 0) targets one sample.
+// Every event's own pass - a build's and a re-placement's included - is the first
+// kIfdChangeSamples samples everywhere (unbiased, every probe valid; PHOTON-2 K2: never a
+// one-sample probe); a PAUSED field (budget 0) targets one sample.
 static const Ogre::uint32 kIfdTargetSamples = 25u;
 // THE PER-PROBE VARIANCE STOP (ENGINE-UPGRADE-2B stage 4): the same precision e, PER PROBE. A
 // probe whose estimate is already inside it pays none of the samples after: the generation job
@@ -990,7 +991,7 @@ void PhotonComponent::reintegrateFieldAfterInjection() {
                                          mRoot->getRenderSystem());
                 mIfd->update(mIfdTotalProbes);
                 mIfdProbesDone = mIfdTotalProbes;
-                work.setUnits(mIfdTotalProbes);
+                work.setUnits(mIfdTotalProbes * mIfd->getChangeSamples());
             }
         }
     }}
@@ -7131,10 +7132,11 @@ void PhotonComponent::buildIrradianceField() {
         // over the PREVIOUS converged atlas and so has nothing ugly to show.
         mIfd->update(mIfdTotalProbes);
         mIfdProbesDone = mIfdTotalProbes;
-        // THE FIRST SAMPLE, NOT THE MEAN (PHOTON-FIELD-ROTATE-1). The field is a mean
-        // over rotated integrations now: this pass is its first sample everywhere -
-        // unbiased, every probe valid, so "bound" is still a whole field - and the
-        // kIfdTargetSamples - 1 refinements it owes run at the update budget
+        // THE FIRST SAMPLES, NOT THE MEAN (PHOTON-FIELD-ROTATE-1). The field is a mean
+        // over rotated integrations now: this pass is its first kIfdChangeSamples samples
+        // everywhere (PHOTON-2 K2: a fresh integration is as deep as a change - never a
+        // one-sample probe; 4 x the one-sample pass's ~5 ms, once) - unbiased, every probe
+        // valid, so "bound" is still a whole field - and the refinements it owes run at the update budget
         // (updateIrradianceField; GiStatus::ifdRefinesOwed reaches 0 when the field
         // has CONVERGED and stops). Paying them here was measured: 64 passes inline
         // blocked a new project's thumbnail build for 1.8 s at Epic
@@ -7230,8 +7232,8 @@ void PhotonComponent::planField(FrameWork &w) {
     // this path.
     if (!mIfdProbesPerFrame) return;
     if (mIfdProbesDone >= mIfdTotalProbes) {
-        // THE FIRST SAMPLE IS EVERYWHERE; THE FIELD REFINES (PHOTON-FIELD-ROTATE-1).
-        // Each whole-grid refinement gives every probe below the target one more
+        // THE FIRST SAMPLES ARE EVERYWHERE (kIfdChangeSamples deep, PHOTON-2 K2); THE FIELD
+        // REFINES (PHOTON-FIELD-ROTATE-1). Each whole-grid refinement gives every probe below the target one more
         // sample under a new ray rotation, at the budget's rate; the field stops
         // (and costs nothing) once none is owed.
         // THE VARIANCE STOP (ENGINE-UPGRADE-2B stage 4): a refinement skips the probes already at the
@@ -7262,11 +7264,15 @@ void PhotonComponent::planField(FrameWork &w) {
     // history) are filed as "ifd.replace", a change's as "ifd.converge".
     w.field = FrameWork::Field::Integrate;
     w.fieldReplacing = mIfd->getWorkMode() == Ogre::PhotonIrradianceField::IntegrateFresh;
-    // THE BUDGET IS INTEGRATIONS A FRAME (PHOTON-2 stage 2a): a change's batch integrates each of its probes
-    // kIfdChangeSamples deep, so it takes that many times fewer probes - the frame's GPU stays the budget's.
-    // ...AND AT REST THE REST BUDGET (H2: kIfdRestIntegrations).
-    const Ogre::uint32 deep =
-        mIfd->getWorkMode() == Ogre::PhotonIrradianceField::IntegrateChange ? std::max(kIfdChangeSamples, 1u) : 1u;
+    // THE BUDGET IS INTEGRATIONS A FRAME (PHOTON-2 stage 2a): a change's (and a re-placement's) batch integrates
+    // each of its probes kIfdChangeSamples deep, so it takes that many times fewer probes - the frame's GPU stays
+    // the budget's.
+    // ...AND AT REST THE REST BUDGET (H2: kIfdRestIntegrations). A re-placement's fresh slabs are as deep (K2).
+    const Ogre::PhotonIrradianceField::IntegrationMode mode = mIfd->getWorkMode();
+    const Ogre::uint32 deep = (mode == Ogre::PhotonIrradianceField::IntegrateChange ||
+                               mode == Ogre::PhotonIrradianceField::IntegrateFresh)
+                                  ? mIfd->getChangeSamples()
+                                  : 1u;
     const Ogre::uint32 integrations =
         mGiCamStillFrames ? std::max(mIfdProbesPerFrame, kIfdRestIntegrations) : mIfdProbesPerFrame;
     w.fieldBatch = std::min(std::max(integrations / deep, 1u), mIfdTotalProbes - mIfdProbesDone);
@@ -7280,7 +7286,9 @@ void PhotonComponent::recordField(const FrameWork &w) {
         {
             monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, row, mRoot->getRenderSystem());
             mIfd->update(w.fieldBatch);
-            work.setUnits(w.fieldBatch);
+            // THE ROW COUNTS INTEGRATIONS (K2): a change's or a re-placement's probe is getChangeSamples() of them.
+            work.setUnits(w.field == FrameWork::Field::Integrate ? w.fieldBatch * mIfd->getChangeSamples()
+                                                                 : w.fieldBatch);
         }
         if (w.field == FrameWork::Field::Integrate)
             mIfdProbesDone = std::min(mIfdTotalProbes, mIfdProbesDone + w.fieldBatch);
@@ -7411,7 +7419,7 @@ void PhotonComponent::followCascade0Field(GiStaleReason reason) {
                                          mRoot->getRenderSystem());
                 mIfd->update(mIfdTotalProbes);
                 mIfdProbesDone = mIfdTotalProbes;
-                work.setUnits(mIfdTotalProbes);
+                work.setUnits(mIfdTotalProbes * mIfd->getChangeSamples());
             }
         }
     } JAH_CATCH(mError, );
@@ -7448,7 +7456,7 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
                                          mRoot->getRenderSystem());
                 mIfd->update(mIfdTotalProbes);
                 mIfdProbesDone = mIfdTotalProbes;
-                work.setUnits(mIfdTotalProbes);
+                work.setUnits(mIfdTotalProbes * mIfd->getChangeSamples());
             }
         }
         return true;
@@ -7470,7 +7478,7 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
                                      mRoot->getRenderSystem());
             mIfd->update(mIfdTotalProbes);
             mIfdProbesDone = mIfdTotalProbes;
-            work.setUnits(mIfdTotalProbes);
+            work.setUnits(mIfdTotalProbes * mIfd->getChangeSamples());
         }
         return true;
     }
@@ -7485,20 +7493,17 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
     {
         // THE STEP FRAME'S WHOLE COST: the entered planes, inline, before any
         // pass reads them (their tiles held the planes that left) — kIfdChangeSamples
-        // DEEP (PHOTON-2 stage 2a, its round's H3): the entered band's first
-        // integration and three refinements in this frame, so a probe that enters
-        // the window is never read as a one-sample value; the band's refinements to
-        // the target stay owed to the budget. (To the target inline, the stage's first
-        // cut, cost 17.1 ms GPU on each follow frame on photon-court and 20.4 on
-        // Bistro - a hitch every c0 re-centre.) PRICED by the row's GPU time
-        // ("ifd.follow").
+        // DEEP (PHOTON-2 stage 2a, its round's H3 and K2: a fresh integration is four
+        // samples deep, PhotonIrradianceField::setChangeSamples), so a probe that
+        // enters the window is never read as a one-sample value; the band's
+        // refinements to the target stay owed to the budget. (To the target inline,
+        // the stage's first cut, cost 17.1 ms GPU on each follow frame on
+        // photon-court and 20.4 on Bistro.) PRICED by the row's GPU time ("ifd.follow").
         const Ogre::uint32 entered = mIfd->getWorkProbeCount();
         monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
                                  mRoot->getRenderSystem());
         mIfd->update(entered);
-        Ogre::uint32 units = entered;
-        if (mIfdProbesPerFrame) units += mIfd->refineEnteredInline(kIfdChangeSamples - 1u);
-        work.setUnits(units);
+        work.setUnits(entered * mIfd->getChangeSamples());
         mIfdScrolledProbes = entered;
     }
     if (progressivePending) {

@@ -440,16 +440,6 @@ namespace Ogre
             The move, in probe spacings, per axis.
         */
         void scrollWindow( const int32 delta[3] );
-        /** Jahshaka (PHOTON-2 stage 2a, its round's H3): THE ENTERED PLANES DEEPER, NOW - after
-            the caller's update() of a scrollWindow's fresh work, `passes` refinements of the
-            same boxes in the same frame (a probe already stopped by the variance test, or at
-            the target, exits at its history read), then the work is done. A probe that enters
-            the window is never read as a one-sample value; the schedule scrollWindow raised
-            (the band's refinements to the target) stands for the budget to finish.
-        @return
-            The probe integrations dispatched (the passes times the boxes' probes).
-        */
-        uint32 refineEnteredInline( uint32 passes );
         /// Jahshaka (PHOTON-2 stage 2's round, H1): every generation dispatch this field has recorded,
         /// counted on the CPU when it is recorded - the gather's "an input was written" with no readback
         /// latency (getIntegrations is the variance readback's, four frames late).
@@ -518,6 +508,7 @@ namespace Ogre
             may then end the probe at once (its minimum is 4).
         */
         void setChangeSamples( uint32 samples ) { mChangeSamples = std::max( 1u, samples ); }
+        uint32 getChangeSamples() const { return mChangeSamples; }
         uint32 getTargetSamples() const { return mTargetSamples; }
         IntegrationMode getWorkMode() const { return mWorkMode; }
         /// Every probe of the current work has been integrated once.

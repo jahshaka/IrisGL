@@ -667,21 +667,6 @@ namespace Ogre
         noteEstimatesReplaced();
     }
     //-------------------------------------------------------------------------
-    uint32 PhotonIrradianceField::refineEnteredInline( uint32 passes )
-    {
-        // The boxes are the entered planes' (scrollWindow's work, just integrated fresh).
-        uint32 dispatched = 0u;
-        for( uint32 i = 0u; i < passes && i + 1u < mTargetSamples; ++i )
-        {
-            mNumProbesProcessed = 0u;
-            mWorkMode = IntegrateRefine;
-            update( mWorkTotal );
-            dispatched += mWorkTotal;
-        }
-        mNumProbesProcessed = mWorkTotal;
-        return dispatched;
-    }
-    //-------------------------------------------------------------------------
     void PhotonIrradianceField::reset()
     {
         setWholeWork();
@@ -1034,10 +1019,13 @@ namespace Ogre
 
         mNumProbesProcessed += probesPerFrame;
 
-        // Jahshaka (PHOTON-2 stage 2a): A CHANGE'S BATCH TAKES mChangeSamples INTEGRATIONS NOW
-        // (setChangeSamples): the same probes, refined in place, before the batch is read.
-        if( mWorkMode == IntegrateChange && mChangeSamples > 1u )
+        // Jahshaka (PHOTON-2 stage 2a; its round's K2): A CHANGE'S OR A FRESH INTEGRATION'S BATCH TAKES
+        // mChangeSamples INTEGRATIONS NOW (setChangeSamples) - the same probes, refined in place, before the
+        // batch is read: a re-placement, a build, an entering plane and a change alike never leave a
+        // one-sample probe.
+        if( ( mWorkMode == IntegrateChange || mWorkMode == IntegrateFresh ) && mChangeSamples > 1u )
         {
+            const IntegrationMode mode = mWorkMode;
             const uint32 start = mNumProbesProcessed - probesPerFrame;
             for( uint32 i = 1u; i < mChangeSamples; ++i )
             {
@@ -1045,7 +1033,7 @@ namespace Ogre
                 mWorkMode = IntegrateRefine;
                 update( probesPerFrame );
             }
-            mWorkMode = IntegrateChange;
+            mWorkMode = mode;
             mNumProbesProcessed = start + probesPerFrame;
         }
     }
