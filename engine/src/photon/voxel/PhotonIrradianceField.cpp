@@ -667,11 +667,11 @@ namespace Ogre
         noteEstimatesReplaced();
     }
     //-------------------------------------------------------------------------
-    uint32 PhotonIrradianceField::refineEnteredInline()
+    uint32 PhotonIrradianceField::refineEnteredInline( uint32 passes )
     {
         // The boxes are the entered planes' (scrollWindow's work, just integrated fresh).
         uint32 dispatched = 0u;
-        for( uint32 i = 1u; i < mTargetSamples; ++i )
+        for( uint32 i = 0u; i < passes && i + 1u < mTargetSamples; ++i )
         {
             mNumProbesProcessed = 0u;
             mWorkMode = IntegrateRefine;
@@ -840,7 +840,7 @@ namespace Ogre
         }
     }
     //-------------------------------------------------------------------------
-    void PhotonIrradianceField::scrollWindow( const int32 delta[3], bool enteredToTarget )
+    void PhotonIrradianceField::scrollWindow( const int32 delta[3] )
     {
         const Vector3 spacing = getProbeSpacing();
         uint32 enteredLo[3];   // per axis: the first ENTERED slot (valid where delta != 0)
@@ -865,9 +865,7 @@ namespace Ogre
         // scroll still owes, when the window kept moving the same way — never the whole
         // grid, whose kept probes are at the target already. A schedule that cannot be
         // a band (an unfinished whole-grid one, a reversal, a band around the grid)
-        // stays whole. (Not when the caller integrates the entered planes to the target
-        // inline: then they owe nothing, and the schedule owed before stands.)
-        if( !enteredToTarget )
+        // stays whole.
         {
             const bool pending = mRefinesOwed > 0u || !isWorkDone();
             if( !pending )
@@ -909,12 +907,10 @@ namespace Ogre
         setBoxesFromBands( enteredLo, enteredNum );
         mNumProbesProcessed = 0u;
         // The entered planes have no history (PHOTON-FIELD-ROTATE-1), and they owe the
-        // refinements that bring them to the target (inline, refineEnteredInline, when the
-        // caller said so).
+        // refinements that bring them to the target.
         mWorkMode = IntegrateFresh;
         noteEstimatesReplaced();
-        if( !enteredToTarget )
-            mRefinesOwed = mTargetSamples - 1u;
+        mRefinesOwed = mTargetSamples - 1u;
         // The probe-to-voxel transform reads the (moved) origin.
         if( mVctLighting )
             setIrradianceFieldGenParams();

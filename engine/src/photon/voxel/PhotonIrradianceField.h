@@ -437,23 +437,22 @@ namespace Ogre
             moves by exactly d spacings; the caller owns snapping a target to it.
         @param delta
             The move, in probe spacings, per axis.
-        @param enteredToTarget
-            Jahshaka (PHOTON-2 stage 2a): the caller integrates the entered planes to the
-            field's target INLINE (refineEnteredInline after its update): the refinement
-            schedule a scroll would owe them is not raised, and whatever the field owed
-            before the scroll (a whole grid's refinements, an earlier band) stands as it was.
         */
-        void scrollWindow( const int32 delta[3], bool enteredToTarget = false );
-        /** Jahshaka (PHOTON-2 stage 2a): THE ENTERED PLANES TO THE TARGET, NOW - after the
-            caller's update() of a scrollWindow( d, true )'s fresh work, the same boxes'
-            remaining refinements (target - 1 passes; a probe already stopped by the variance
-            test, or at the target, exits at its history read), then the work is done.
-            Lumen's bucket 0 (a never-traced probe is traced whole the frame it enters):
-            a probe that enters the window is never read as a one-sample value.
+        void scrollWindow( const int32 delta[3] );
+        /** Jahshaka (PHOTON-2 stage 2a, its round's H3): THE ENTERED PLANES DEEPER, NOW - after
+            the caller's update() of a scrollWindow's fresh work, `passes` refinements of the
+            same boxes in the same frame (a probe already stopped by the variance test, or at
+            the target, exits at its history read), then the work is done. A probe that enters
+            the window is never read as a one-sample value; the schedule scrollWindow raised
+            (the band's refinements to the target) stands for the budget to finish.
         @return
             The probe integrations dispatched (the passes times the boxes' probes).
         */
-        uint32 refineEnteredInline();
+        uint32 refineEnteredInline( uint32 passes );
+        /// Jahshaka (PHOTON-2 stage 2's round, H1): every generation dispatch this field has recorded,
+        /// counted on the CPU when it is recorded - the gather's "an input was written" with no readback
+        /// latency (getIntegrations is the variance readback's, four frames late).
+        uint64 getDispatches() const { return mDispatches; }
         /// The slot of the window's first probe per axis (a reader's modulo offset).
         const uint32 *getWindowOffset() const { return mWindowOffset; }
         /// The probe spacing (the enlarged volume's size over the probe counts).

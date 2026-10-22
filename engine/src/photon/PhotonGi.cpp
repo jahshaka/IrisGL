@@ -7470,30 +7470,27 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
     // A whole re-integration still running (a settle's, a light's) is restarted
     // after the scroll's own planes: the kept probes it had not reached still owe it.
     const bool progressivePending = mIfdProbesDone < mIfdTotalProbes;
-    const bool toTarget = mIfdProbesPerFrame != 0u;   // a paused field refines nothing: one sample, as before
-    mIfd->scrollWindow(d, toTarget);
+    mIfd->scrollWindow(d);
     for (int a = 0; a < 3; ++a) mIfdVolumeOrigin[a] += float(d[a]) * spacing[a];
     ++mIfdFollows;
     ++mIfdScrolls;              // (never counted before PHOTON-FIELD-ROTATE-1: the status read 0)
     pushIfdState(mIfdProbeCounts);                      // the reader's modulo offset
     {
         // THE STEP FRAME'S WHOLE COST: the entered planes, inline, before any
-        // pass reads them (their tiles held the planes that left) — AND TO THE
-        // FIELD'S PRECISION (PHOTON-2 stage 2a; Lumen's bucket 0, a never-traced
-        // probe is traced whole the frame it is allocated [L §2]): the entered
-        // band's first integration and then its refinements, all of them, in this
-        // frame — a probe that enters the window is never read as a one-sample
-        // value. The count is the law here (the variance stop reads back on a
-        // 4-frame latency, so the CPU cannot end the run early): kIfdTargetSamples
-        // dispatches over the band, each probe that already stopped (its variance
-        // flag, written on the GPU by the dispatch before) or reached the target
-        // exiting at its history read. PRICED by the row's GPU time ("ifd.follow").
+        // pass reads them (their tiles held the planes that left) — kIfdChangeSamples
+        // DEEP (PHOTON-2 stage 2a, its round's H3): the entered band's first
+        // integration and three refinements in this frame, so a probe that enters
+        // the window is never read as a one-sample value; the band's refinements to
+        // the target stay owed to the budget. (To the target inline, the stage's first
+        // cut, cost 17.1 ms GPU on each follow frame on photon-court and 20.4 on
+        // Bistro - a hitch every c0 re-centre.) PRICED by the row's GPU time
+        // ("ifd.follow").
         const Ogre::uint32 entered = mIfd->getWorkProbeCount();
         monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
                                  mRoot->getRenderSystem());
         mIfd->update(entered);
         Ogre::uint32 units = entered;
-        if (toTarget) units += mIfd->refineEnteredInline();
+        if (mIfdProbesPerFrame) units += mIfd->refineEnteredInline(kIfdChangeSamples - 1u);
         work.setUnits(units);
         mIfdScrolledProbes = entered;
     }
@@ -7502,10 +7499,8 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
         mIfdProbesDone = 0u;
     } else {
         mIfdProbesDone = mIfdTotalProbes;
-        // The entered planes are at the field's precision already (above); what the field
-        // owed before the scroll (refinements of the grid, of an earlier band) stands; a
-        // paused field refines nothing. Nothing owed: this was the field's last write.
-        if (!mIfd->getRefinesOwed()) noteFieldSettled();
+        // The entered planes' refinements run at the budget (the kept probes that
+        // hold the target are skipped); a paused field refines nothing.
     }
     return true;
 }
