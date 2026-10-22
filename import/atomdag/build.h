@@ -29,6 +29,7 @@ For more information see the LICENSE file
 
 #include "document/assets/mesh.h"   // MeshClusterDag
 #include "import/atomdag/adjacency.h"
+#include "import/atomdag/cards.h"
 
 #include <QVector>
 #include <vector>
@@ -55,6 +56,11 @@ struct GroupRecord
     int dagGroup = -1;          ///< the DAG group it became; -1 = carried (or the empty top: kind 2)
     int kind = 0;               ///< 0 a reduction, 1 carried, 2 the empty top, 3 not simplified (at its target)
     bool countCarry = false;    ///< carried after a result within its budget (the cluster count, not the budget)
+    bool cards = false;         ///< a card group (D9): merged, not collapsed
+    int cardSets = 0, cardsMerged = 0;           ///< its quads, and the cards they stand for
+    float cardSourceArea = 0.0f, cardQuadArea = 0.0f;   ///< the merged cards' summed area, the quads' (coverage)
+    float cardReach = 0.0f;     ///< the largest seed-to-card centre distance it merged
+    float cardPrice = 0.0f;     ///< the largest measured price of its merged sets (its step is at least this)
     int members = 0;
     int inTris = 0, outTris = 0;
     float childStored = 0.0f;   ///< max over the members of their stored error
@@ -76,6 +82,9 @@ struct Stats
     int levels = 0;              ///< loop iterations
     int reductions = 0, carried = 0, notSimplified = 0, retries = 0, prunedPieces = 0;
     int memoHits = 0;            ///< count-carried groups met again with the same input (looked up, not recomputed)
+    int cardSets = 0, cardsMerged = 0, quadsShrunk = 0;   ///< D9: the quads, the cards they stand for, the quads shrunk
+    size_t appendedVertices = 0;  ///< the quads' corners appended to the mesh
+    int cornersOutsideBox = 0;    ///< corners outside level 0's box (a defect: buildQuad keeps its sources' box)
     int levelsAllCarried = 0;    ///< re-runs of a level where every group was carried (the whole pool's budget doubled in place)
     int sphereGrown = 0;         ///< groups whose enclosing sphere was grown by float rounding to hold a member's
     bool depthCapHit = false;    ///< the chain met the depth cap and closed with the empty top over its pool
@@ -90,11 +99,23 @@ struct Stats
     QVector<QVector<quint32>> clusterRegions;   ///< wantRegions: per DAG cluster, the level-0 triangles it stands for
 };
 
+/// THE VERTICES THE BUILD APPENDED (D9's card quads): ids nv0.. of the DAG's indices, four per quad; per vertex its
+/// SOURCE (an original mesh vertex: every buffer but the position, the normal and the first UV set copies it) and its
+/// corner (position, normal, the first UV set's u and v).
+struct Appended
+{
+    size_t nv0 = 0;
+    std::vector<unsigned> source;
+    std::vector<CardCorner> corners;
+    size_t count() const { return source.size(); }
+};
+
 /// Builds `out` for the triangle list `base` (vertex ids into `mesh`). False (and `out` empty) when the input is
-/// unusable; a chain at the depth cap closes with the empty top over its pool (stats->depthCapHit). Every index of the
-/// DAG is a vertex of the mesh (re-indexing).
+/// unusable; a chain at the depth cap closes with the empty top over its pool (stats->depthCapHit). The DAG's
+/// indices may name APPENDED vertices (ids >= mesh.nv, the card quads): the caller grows the mesh's buffers from
+/// `appended` before the DAG is read.
 bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterDag *out, Stats *stats,
-           const Options &options);
+           const Options &options, Appended *appended);
 
 /// THE CONFIG RECORD the blob carries (the builder's constants): a blob written under any other is refused.
 QVector<float> configRecord();

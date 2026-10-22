@@ -278,7 +278,10 @@ namespace
 // v30 (2026-10-22, ATOM-2 the lead's word on stage 3): ONE BAKE — every attribute at a tiny weight (POSONLY, the
 // picked arm: 27,015 against 42,228 on the hard 7 at E = 16); the Nanite-scale arm, its switch and D5's weld deleted
 // (the weld laid shells onto each other as coincident sheets the simplifier cannot reduce). Every bake re-bakes.
-constexpr int kFormatVersion = 30;
+// v31 (2026-10-22, ATOM-2 stage 4): D9 FOLIAGE'S AGGREGATE — a group mostly of cards (islands under 12 triangles)
+// merges neighbouring cards into quads of their summed area, priced by the measured deviation; each quad is four
+// vertices appended to the mesh (the only vertices the DAG adds). Every bake re-bakes (BAKEKEY-1).
+constexpr int kFormatVersion = 31;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -2763,18 +2766,67 @@ bool dagInput(const MeshPtr &mesh, atomdag::MeshView *view, std::vector<unsigned
     return true;
 }
 
-}   // namespace
-
-void MeshBake::buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats, const ClusterDagOptions &options)
+/// THE CARD QUADS' VERTICES INTO THE MESH (D9): every per-vertex float buffer grows by the appended corners — the
+/// position, the normal and the first UV set's u and v as the build placed them, every other component and buffer (the
+/// second UV set, the tangent, the bitangent's handedness) copied from the corner's source vertex. The quads lie inside
+/// their sources' box, so the mesh's box and sphere do not move — checked here, loud if ever not.
+void applyAppended(const MeshPtr &mesh, const atomdag::Appended &a)
 {
-    if (stats) *stats = ClusterDagStats();
+    if (mesh.isNull() || a.count() == 0) return;
+    for (const VertexBufferPtr &vb : mesh->getVertexBuffers()) {
+        if (!vb || !vb->data || vb->dataSize <= 0) continue;
+        const QList<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
+        if (attribs.size() != 1) continue;
+        const VertexAttribute &at = attribs.first();
+        const size_t comps = size_t(at.count > 0 ? at.count : 3);
+        const size_t nv = size_t(vb->dataSize) / (sizeof(float) * comps);
+        if (nv != a.nv0) continue;   // not a per-vertex float buffer of this mesh
+        const float *src = reinterpret_cast<const float *>(vb->data);
+        std::vector<float> data(src, src + nv * comps);
+        data.reserve((nv + a.count()) * comps);
+        for (size_t i = 0; i < a.count(); ++i) {
+            const size_t base = data.size();
+            data.insert(data.end(), src + size_t(a.source[i]) * comps, src + (size_t(a.source[i]) + 1) * comps);
+            const atomdag::CardCorner &c = a.corners[i];
+            const float *placed = at.usage == VertexAttribUsage::Position ? c.pos
+                                : at.usage == VertexAttribUsage::Normal ? c.nrm
+                                : at.usage == VertexAttribUsage::TexCoord0 ? c.uv : nullptr;
+            const size_t placedComps = at.usage == VertexAttribUsage::TexCoord0 ? 2u : 3u;
+            if (placed) for (size_t k = 0; k < std::min(comps, placedComps); ++k) data[base + k] = placed[k];
+        }
+        vb->setData(data.data(), unsigned(data.size() * sizeof(float)));
+    }
+    mesh->numVerts = int(a.nv0 + a.count());
+    int outside = 0;
+    for (const atomdag::CardCorner &c : a.corners)
+        for (int k = 0; k < 3; ++k)
+            if (c.pos[k] < mesh->aabb.getMin()[k] || c.pos[k] > mesh->aabb.getMax()[k]) { ++outside; break; }
+    if (outside)
+        irisLog(QStringLiteral("mesh bake: DEFECT %1 card-quad corners outside the mesh's box (it was not grown)").arg(outside));
+}
+
+/// The DAG of `mesh` without growing its buffers: the bake's stages read the mesh concurrently, so the card quads'
+/// vertices land after them (bakeStages); every other caller applies them at once.
+void buildDagDeferred(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, const MeshBake::ClusterDagOptions &options,
+                      atomdag::Appended *appended)
+{
+    if (stats) *stats = MeshBake::ClusterDagStats();
+    *appended = atomdag::Appended();
     if (mesh.isNull()) return;
     mesh->clusterDag = MeshClusterDag();
     atomdag::MeshView view;
     std::vector<unsigned> base;
     if (!dagInput(mesh, &view, &base)) return;
-    if (!atomdag::build(view, base, &mesh->clusterDag, stats, options))
+    if (!atomdag::build(view, base, &mesh->clusterDag, stats, options, appended))
         irisLog(QStringLiteral("mesh bake: cluster DAG NOT BUILT (%1 triangles) — the mesh draws level 0").arg(base.size() / 3));
+}
+}   // namespace
+
+void MeshBake::buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats, const ClusterDagOptions &options)
+{
+    atomdag::Appended appended;
+    buildDagDeferred(mesh, stats, options, &appended);
+    applyAppended(mesh, appended);
 }
 
 QVector<MeshBake::DagDriftRow> MeshBake::dagDrift(const MeshPtr &mesh)
@@ -2968,6 +3020,7 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards,
     model.stageMs = QVector<MeshBake::Model::StageMs>(int(meshes));
     model.bakeThreads = bakepool::width();
     std::vector<MeshBake::ClusterDagStats> dagStats(meshes);
+    std::vector<atomdag::Appended> appended(meshes);   // the card quads' vertices, applied after every stage
     const Clock::time_point start = Clock::now();
     // Tasks [0, meshes) are the chains (the longest work, handed out first), then
     // [meshes, 2 * meshes) the DAGs.
@@ -2989,11 +3042,12 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards,
             } else {
                 cancelPoint(cancel);
                 const Clock::time_point t = Clock::now();
-                MeshBake::buildClusterDag(mesh, &dagStats[i]);
+                buildDagDeferred(mesh, &dagStats[i], MeshBake::ClusterDagOptions(), &appended[i]);
                 ms.dag = msSince(t);
             }
         }
     });
+    for (size_t i = 0; i < meshes; ++i) applyAppended(model.meshes.at(int(i)), appended[i]);
     // THE DEPTH CAP, named (the chain closed with the empty top over its remaining pool — a DAG all the same).
     for (size_t i = 0; i < meshes; ++i)
         if (dagStats[i].depthCapHit)

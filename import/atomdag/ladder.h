@@ -28,6 +28,10 @@ For more information see the LICENSE file
 // recorded pass of its own. The group's E = the largest ask (floored). Every group, accepted or carried, is a GroupRecord
 // with its granted E, its measured step and its members (atom2.ladder_never_forced replays (a) and (b)).
 //
+// A CARD GROUP (D9, cards.h) — more than half its input in islands under kCardTriangles — merges its neighbouring
+// cards into quads, each set priced within E; the rest of its input (the branches, the cards no set took) is reduced
+// the ordinary way under the same E; the attempts are the sets priced and the rest's simplifies.
+//
 // THE ATTEMPTS: the group is simplified to half (126 x ceil(T / 256) triangles, Nanite's parent count) with E as the
 // simplifier's first guess, its pieces with no locked position pruned within E, and MEASURED (measure.h); a result
 // within the budget that is not at the target is tried again with the guess raised (8 E, then unbounded) — the smaller
@@ -37,6 +41,7 @@ For more information see the LICENSE file
 // it when it needs FEWER CLUSTERS than the group's input (a true level step). A group already at or under its target is
 // not simplified (step 0).
 
+#include "import/atomdag/cards.h"
 #include "import/atomdag/measure.h"
 #include "import/atomdag/simplify.h"
 
@@ -68,6 +73,8 @@ struct GroupResult
     int pruned = 0;
     size_t lockedPositions = 0;   ///< external + ladder positions locked at the kept attempt
     StepMeasure terms;            ///< the kept (or the last) attempt's terms
+    bool cards = false;           ///< a card group (cards.h): merged, not collapsed
+    CardMerge merge;              ///< ...its sets, its quads' corners (local ids space.n + i) and its coverage
     double msSimplify = 0.0, msMeasure = 0.0;   ///< this group's time in the simplifier and in the measurement
     double msExact = 0.0;                       ///< ...of which the kept result's exact measurement
 };
@@ -77,7 +84,8 @@ struct GroupResult
 /// merge into fewer clusters).
 GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
                         const std::vector<unsigned> &inTris, const std::vector<unsigned> &externalWelds, float ask,
-                        float floorLen, size_t targetTris);
+                        float floorLen, size_t targetTris, const Vec3 &boxLo, const Vec3 &boxHi,
+                        bool cardsAllowed = true);
 
 }   // namespace atomdag
 }   // namespace iris

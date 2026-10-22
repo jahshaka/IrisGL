@@ -265,6 +265,7 @@ set(SRCS
     import/atomdag/simplify.cpp
     import/atomdag/measure.cpp
     import/atomdag/ladder.cpp
+    import/atomdag/cards.cpp
     import/atomdag/build.cpp
     import/importflags.cpp
     import/importsettings.cpp
@@ -349,6 +350,7 @@ set (HEADERS
     import/atomdag/simplify.h
     import/atomdag/measure.h
     import/atomdag/ladder.h
+    import/atomdag/cards.h
     import/atomdag/build.h
     import/importflags.h
     import/clipnaming.h
@@ -526,6 +528,8 @@ set(_mesh_bake_hashed_sources
     import/atomdag/simplify.cpp
     import/atomdag/measure.h
     import/atomdag/measure.cpp
+    import/atomdag/cards.h
+    import/atomdag/cards.cpp
     import/atomdag/ladder.h
     import/atomdag/ladder.cpp
     import/atomdag/build.h
@@ -560,7 +564,7 @@ string(REPLACE ";" "|" _mesh_bake_hashed_list "${_mesh_bake_hashed_sources}")
 # block above for both).
 set_source_files_properties(import/meshbake.cpp import/atomdag/adjacency.cpp import/atomdag/leaves.cpp
     import/atomdag/groups.cpp import/atomdag/simplify.cpp import/atomdag/measure.cpp import/atomdag/ladder.cpp
-    import/atomdag/build.cpp
+    import/atomdag/cards.cpp import/atomdag/build.cpp
     PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>;${_jah_bake_fp}")
 # THE PICKING INDEX'S BUILD AND WALK TOO (SPEED-CPU): the bake reader builds a
 # TriangleBvh per picking mesh on every open, and at -O0 a 233k-triangle scan's

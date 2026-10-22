@@ -14,6 +14,8 @@ For more information see the LICENSE file
 #include <algorithm>
 #include <cfloat>
 #include <chrono>
+#include <climits>
+#include <unordered_map>
 
 namespace iris
 {
@@ -56,7 +58,7 @@ std::vector<unsigned> islandsAtRisk(const LocalSpace &space, const std::vector<u
 
 GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
                         const std::vector<unsigned> &inTris, const std::vector<unsigned> &externalWelds, float ask,
-                        float floorLen, size_t targetTris)
+                        float floorLen, size_t targetTris, const Vec3 &boxLo, const Vec3 &boxHi, bool cardsAllowed)
 {
     GroupResult r;
     r.scratch = makeScratch(mesh, inTris);
@@ -86,6 +88,61 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
     // THE BUDGET: the largest ask; a group of leaves never granted one asks 2 x the position quadric's estimate.
     if (!(ask > 0.0f)) r.depth0Estimate = positionEstimate(sc, lock, target);
     r.budget = std::max(ask > 0.0f ? ask : kLadderFactor * std::max(r.depth0Estimate, 0.0f), floorLen);
+
+    // D9: A CARD GROUP MERGES ITS CARDS (cards.h), then the rest of its input — the branches, the cards no set took —
+    // is reduced the ordinary way under the SAME budget (its own target); the step is the larger of the two. The
+    // corners join the local space for the re-split.
+    if (cardsAllowed && isCardGroup(sc, r.space, islands.triangles)) {
+        r.cards = true;
+        const Clock::time_point tc = Clock::now();
+        r.merge = mergeCards(sc, r.space, lock, r.budget, floorLen, boxLo, boxHi);
+        r.msMeasure += msSince(tc);
+        r.attempts = r.merge.pricings;
+        r.estimate = 0.0f;
+        std::vector<unsigned> out;        // local ids
+        std::vector<unsigned> restLocal;  // the input the sets did not take
+        const std::vector<unsigned> &mo = r.merge.sets > 0 ? r.merge.out : sc.tris;
+        for (size_t t = 0; t < mo.size() / 3; ++t) {
+            const bool corner = mo[t * 3] >= n || mo[t * 3 + 1] >= n || mo[t * 3 + 2] >= n;
+            (corner ? out : restLocal).insert(corner ? out.end() : restLocal.end(), { mo[t * 3], mo[t * 3 + 1], mo[t * 3 + 2] });
+        }
+        float step = r.merge.sets > 0 ? r.merge.step : 0.0f;
+        bool reduced = r.merge.sets > 0;
+        if (!restLocal.empty()) {
+            std::vector<unsigned> restGlobal(restLocal.size());
+            for (size_t i = 0; i < restLocal.size(); ++i) restGlobal[i] = sc.globalOf[restLocal[i]];
+            const GroupResult rest = reduceGroup(mesh, weld, islands, restGlobal, externalWelds, r.budget, floorLen,
+                                                 parentTarget(restGlobal.size() / 3), boxLo, boxHi, false);
+            r.attempts += rest.attempts;
+            r.msSimplify += rest.msSimplify; r.msMeasure += rest.msMeasure; r.msExact += rest.msExact;
+            r.pruned = rest.pruned;
+            if (rest.accepted && rest.simplified) {
+                // its output back in this group's scratch ids (its vertices are this group's)
+                std::unordered_map<unsigned, unsigned> localOf;
+                localOf.reserve(n);
+                for (size_t v = 0; v < n; ++v) localOf.emplace(sc.globalOf[v], unsigned(v));
+                for (unsigned v : rest.out) out.push_back(localOf.at(rest.scratch.globalOf[v]));
+                step = std::max(step, rest.step);
+                r.terms = rest.terms;
+                reduced = true;
+            } else {
+                out.insert(out.end(), restLocal.begin(), restLocal.end());
+            }
+        }
+        if (reduced && out.size() < sc.tris.size()) {
+            r.accepted = true;
+            r.out = std::move(out);
+            r.step = std::max(step, floorLen);
+            r.terms.step = r.step;
+            for (const CardCorner &c : r.merge.corners) {
+                r.space.pos.insert(r.space.pos.end(), { c.pos[0], c.pos[1], c.pos[2] });
+                r.space.weld.push_back(UINT_MAX - 1u - unsigned(r.space.weld.size()));   // a new position, its own
+                r.space.comp.push_back(UINT_MAX - 1u - unsigned((r.space.comp.size() - sc.size()) / 4));   // per quad
+                r.space.cap.push_back(c.diagonal);
+            }
+        }
+        return r;
+    }
 
     // per position: the input triangles at it (the fan a lock holds)
     std::vector<std::pair<unsigned, unsigned>> byWeld;   // (weld, input triangle)

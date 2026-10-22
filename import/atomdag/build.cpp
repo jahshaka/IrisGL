@@ -112,6 +112,60 @@ struct MemoKey
     }
 };
 
+/// THE CARD QUADS' VERTICES (D9, the only vertices the DAG adds): the mesh's positions, normals and first UV set are
+/// copied the first time a card group merges (never for a mesh without one), and every quad corner is appended to them;
+/// `source` names each appended vertex's original mesh vertex (its other buffers copy that one's).
+struct Store
+{
+    const MeshView base;
+    bool active = false;
+    size_t nv = 0;
+    std::vector<float> P, N, U;
+    std::vector<unsigned> source;   ///< per appended vertex: its original mesh vertex
+    std::vector<CardCorner> corners;
+
+    explicit Store(const MeshView &m) : base(m), nv(m.nv) {}
+    MeshView view() const
+    {
+        if (!active) return base;
+        MeshView v = base;
+        v.positions = P.data();
+        v.posComps = 3;
+        v.nv = nv;
+        v.normals = N.empty() ? nullptr : N.data();
+        v.nrmComps = 3;
+        v.uvs = U.empty() ? nullptr : U.data();
+        return v;
+    }
+    unsigned append(const CardCorner &c, unsigned sourceVertex)
+    {
+        if (!active) {
+            active = true;
+            P.resize(base.nv * 3);
+            for (size_t v = 0; v < base.nv; ++v)
+                for (int k = 0; k < 3; ++k) P[v * 3 + size_t(k)] = base.positions[v * size_t(base.posComps) + size_t(k)];
+            if (base.normals) {
+                N.resize(base.nv * 3);
+                for (size_t v = 0; v < base.nv; ++v)
+                    for (int k = 0; k < 3; ++k) N[v * 3 + size_t(k)] = base.normals[v * size_t(base.nrmComps) + size_t(k)];
+            }
+            if (base.uvs) U.assign(base.uvs, base.uvs + base.nv * size_t(base.uvComps));
+        }
+        const unsigned id = unsigned(nv++);
+        P.insert(P.end(), c.pos, c.pos + 3);
+        if (!N.empty()) N.insert(N.end(), c.nrm, c.nrm + 3);
+        if (!U.empty()) {
+            const size_t at = U.size();
+            for (int k = 0; k < base.uvComps; ++k) U.push_back(U[size_t(sourceVertex) * size_t(base.uvComps) + size_t(k)]);
+            U[at] = c.uv[0];
+            U[at + 1] = c.uv[1];
+        }
+        source.push_back(sourceVertex < base.nv ? sourceVertex : source[sourceVertex - base.nv]);
+        corners.push_back(c);
+        return id;
+    }
+};
+
 /// The parent clusters of an accepted group's output (D4's re-split: the leaves' bisection on the output).
 struct Split
 {
@@ -130,32 +184,35 @@ QVector<float> configRecord()
         float(kMaxLevels), 1e-6f /* every attribute's weight */, kFloorRel };
 }
 
-bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterDag *out, Stats *stats,
-           const Options &options)
+bool build(const MeshView &input, const std::vector<unsigned> &base, MeshClusterDag *out, Stats *stats,
+           const Options &options, Appended *appended)
 {
     *out = MeshClusterDag();
+    if (appended) *appended = Appended();
     const Clock::time_point t0 = Clock::now();
     const size_t baseTris = base.size() / 3;
-    if (baseTris == 0 || !mesh.positions || mesh.nv == 0) return false;
-    const float extent = meshopt_simplifyScale(mesh.positions, mesh.nv, sizeof(float) * size_t(mesh.posComps));
+    if (baseTris == 0 || !input.positions || input.nv == 0) return false;
+    const float extent = meshopt_simplifyScale(input.positions, input.nv, sizeof(float) * size_t(input.posComps));
     if (!(extent > 0.0f) || !std::isfinite(extent)) return false;
     const float floorLen = extent * kFloorRel;
     if (stats) stats->floorLen = floorLen;
 
-    const std::vector<unsigned> weld = weldByPosition(mesh);
-    const Islands islands = findIslands(weld, mesh.positions, mesh.posComps, mesh.nv, base);
+    Store store(input);
+    MeshView mesh = store.view();
+    std::vector<unsigned> weld = weldByPosition(mesh);
+    Islands islands = findIslands(weld, mesh.positions, mesh.posComps, mesh.nv, base);
     // THE MESH'S OWN EXTENT (D8: the empty top is priced at the island rule on the WHOLE mesh — the level-0 box's
     // diagonal, never the last cluster's: with nothing locked at the top the extreme corners collapse away, and a
     // 10 m tree whose root box is 3 m would stop drawing while it still covers pixels — a pop out; the read's finding 1)
     float meshDiagonal = 0.0f;
+    Vec3 boxLo = mesh.position(base[0]), boxHi = boxLo;   // level 0's box: a card quad never leaves it
     {
-        Vec3 lo = mesh.position(base[0]), hi = lo;
         for (unsigned v : base) {
             const Vec3 p = mesh.position(v);
-            lo = Vec3(std::min(lo.x(), p.x()), std::min(lo.y(), p.y()), std::min(lo.z(), p.z()));
-            hi = Vec3(std::max(hi.x(), p.x()), std::max(hi.y(), p.y()), std::max(hi.z(), p.z()));
+            boxLo = Vec3(std::min(boxLo.x(), p.x()), std::min(boxLo.y(), p.y()), std::min(boxLo.z(), p.z()));
+            boxHi = Vec3(std::max(boxHi.x(), p.x()), std::max(boxHi.y(), p.y()), std::max(boxHi.z(), p.z()));
         }
-        meshDiagonal = (hi - lo).length();
+        meshDiagonal = (boxHi - boxLo).length();
     }
     const auto islandsOf = [&](const std::vector<unsigned> &tris) {
         std::vector<unsigned> is(tris.size() / 3);
@@ -243,6 +300,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
             rec.islandsDropped = r.terms.islandsDropped;
             rec.lockedLost = r.terms.lockedLost;
             rec.countCarry = countCarry[g] != 0u;
+            rec.cards = r.cards;
             if (options.wantLocks) rec.external = grouping.external[g];
             return rec;
         };
@@ -303,7 +361,8 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
                     int attempts = 0;
                     double msSimplify = 0.0, msMeasure = 0.0, msExact = 0.0;
                     for (int shrink = 0;; ++shrink) {
-                        results[g] = reduceGroup(mesh, weld, islands, in, grouping.external[g], ask[g], floorLen, target);
+                        results[g] = reduceGroup(mesh, weld, islands, in, grouping.external[g], ask[g], floorLen, target,
+                                                 boxLo, boxHi);
                         GroupResult &r = results[g];
                         attempts += r.attempts;
                         msSimplify += r.msSimplify; msMeasure += r.msMeasure; msExact += r.msExact;
@@ -316,6 +375,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
                         splitMs[g] += msSince(ts);
                         if (splits[g].parts.size() < grouping.groups[g].size()) break;
                         splits[g].parts.clear();
+                        if (r.cards) { r.accepted = false; break; }   // a card merge is not re-targeted
                         const size_t outCount = r.out.size() / 3;
                         if (shrink >= kMaxShrinks || outCount <= 1) { r.accepted = false; break; }
                         target = std::max<size_t>(1, outCount * 3 / 4);
@@ -324,9 +384,10 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
                     r.attempts = attempts;
                     r.msSimplify = msSimplify; r.msMeasure = msMeasure; r.msExact = msExact;
                     if (!r.accepted && within) countCarry[g] = 1u;
-                    // the output in MESH ids; the group's scratch and local space are released here
-                    if (r.accepted) for (unsigned &v : r.out) v = r.scratch.globalOf[v];
-                    r.scratch = GroupScratch();
+                    // the output in MESH ids; the group's scratch and local space are released here (a card
+                    // group's corners get their ids in the serial outcome below, from its scratch's map)
+                    if (r.accepted && !r.cards) for (unsigned &v : r.out) v = r.scratch.globalOf[v];
+                    if (!r.cards) r.scratch = GroupScratch();
                     r.space = LocalSpace();
                 }
             });
@@ -399,7 +460,42 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
             rec.outTris = int(r.out.size() / 3);
             if (stats) { if (r.simplified) ++stats->reductions; else ++stats->notSimplified; }
 
-            const std::vector<unsigned> &outGlobal = r.out;   // mesh ids (released above)
+            // THE OUTPUT IN MESH IDS: a card group's quad corners are appended to the mesh here, in group order
+            // (deterministic ids), each its own position class and every quad its own island.
+            std::vector<unsigned> outGlobal = r.out;
+            if (r.cards) {
+                const size_t n = r.scratch.size();
+                std::vector<unsigned> cornerId(r.merge.corners.size());
+                for (size_t c = 0; c < r.merge.corners.size(); ++c) {
+                    const CardCorner &k = r.merge.corners[c];
+                    for (int a = 0; a < 3; ++a)
+                        if (k.pos[a] < boxLo[a] || k.pos[a] > boxHi[a]) {   // never: buildQuad keeps its sources' box
+                            if (stats) ++stats->cornersOutsideBox;
+                        }
+                    if (c % 4 == 0) {
+                        islands.extent.push_back(k.diagonal);
+                        islands.triangles.push_back(2);
+                    }
+                    cornerId[c] = store.append(k, r.scratch.globalOf[k.source]);
+                    weld.push_back(cornerId[c]);
+                    islands.compOf.push_back(unsigned(islands.extent.size() - 1));
+                    islands.capOf.push_back(k.diagonal);
+                }
+                for (unsigned &v : outGlobal) v = v < n ? r.scratch.globalOf[v] : cornerId[v - n];
+                mesh = store.view();
+                rec.cardSets = r.merge.sets;
+                rec.cardsMerged = r.merge.cardsMerged;
+                rec.cardSourceArea = float(r.merge.sourceArea);
+                rec.cardQuadArea = float(r.merge.quadArea);
+                rec.cardReach = r.merge.maxCentreDistance;
+                rec.cardPrice = r.merge.step;
+                if (stats) {
+                    stats->cardSets += r.merge.sets;
+                    stats->cardsMerged += r.merge.cardsMerged;
+                    stats->quadsShrunk += r.merge.shrunk;
+                    stats->appendedVertices += r.merge.corners.size();
+                }
+            }
             // The parents.
             const size_t firstParent = cl.size();
             for (const std::vector<unsigned> &part : splits[g].parts) {
@@ -513,6 +609,11 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
         o.radius = x.cull.r;
     }
     *out = dag;
+    if (appended && !store.source.empty()) {
+        appended->nv0 = store.base.nv;
+        appended->source = store.source;
+        appended->corners = store.corners;
+    }
     if (stats) {
         stats->clusters = int(cl.size());
         stats->groups = int(groups.size());

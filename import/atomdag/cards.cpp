@@ -1,0 +1,333 @@
+/**************************************************************************
+This file is part of IrisGL
+http://www.irisgl.org
+Copyright (c) 2016-2026 EXEDOS LLC (www.exedos.com)
+
+This is free software: you may copy, redistribute
+and/or modify it under the terms of the MIT License
+
+For more information see the LICENSE file
+*************************************************************************/
+
+#include "import/atomdag/cards.h"
+
+#include "import/atomdag/measure.h"
+
+#include <algorithm>
+#include <cfloat>
+#include <climits>
+#include <cmath>
+#include <unordered_map>
+
+namespace iris
+{
+namespace atomdag
+{
+namespace
+{
+
+Vec3 posOf(const GroupScratch &sc, unsigned v)
+{
+    return Vec3(sc.pos[size_t(v) * 3], sc.pos[size_t(v) * 3 + 1], sc.pos[size_t(v) * 3 + 2]);
+}
+
+struct Card
+{
+    unsigned comp = 0;
+    std::vector<unsigned> tris;   ///< triangle indices into the scratch's input
+    Vec3 centre, normal, lo, hi;  ///< area-weighted centre, summed (unnormalised) normal, box
+    float area = 0.0f;
+    bool locked = false;
+    bool taken = false;
+};
+
+/// The quad of a set (its four corners and two triangles' winding), or false when the seed's UV frame is degenerate.
+struct Quad
+{
+    CardCorner c[4];
+    bool flip = false;
+    float area = 0.0f;
+    bool shrunk = false;
+};
+
+/// Solves the 3 x 3 system a x = b (Cramer); false when singular.
+bool solve3(const double a[3][3], const double b[3], double x[3])
+{
+    const double det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+                       a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    if (!(std::fabs(det) > 1e-18)) return false;
+    for (int k = 0; k < 3; ++k) {
+        double m[3][3];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) m[i][j] = j == k ? b[i] : a[i][j];
+        x[k] = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+                m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])) / det;
+    }
+    return true;
+}
+
+bool buildQuad(const GroupScratch &sc, const std::vector<Card> &cards, const std::vector<unsigned> &set, const Vec3 &lo,
+               const Vec3 &hi, Quad &q)
+{
+    // THE SEED: the set's largest card.
+    unsigned seed = set[0];
+    for (unsigned c : set) if (cards[c].area > cards[seed].area) seed = c;
+    const Card &S = cards[seed];
+    const Vec3 nSeed = S.normal.lengthSquared() > 0.0f ? S.normal.normalized() : Vec3(0, 0, 1);
+    // THE PLANE: through the area-weighted centre, its normal the sources' (each triangle turned to the seed's side).
+    Vec3 nSum(0, 0, 0), centre(0, 0, 0);
+    double area = 0.0;
+    for (unsigned c : set)
+        for (unsigned t : cards[c].tris) {
+            const Vec3 a = posOf(sc, sc.tris[size_t(t) * 3]), b = posOf(sc, sc.tris[size_t(t) * 3 + 1]),
+                       d = posOf(sc, sc.tris[size_t(t) * 3 + 2]);
+            const Vec3 x = Vec3::crossProduct(b - a, d - a);
+            nSum += Vec3::dotProduct(x, nSeed) < 0.0f ? -x : x;
+            const float ar = 0.5f * x.length();
+            centre += (a + b + d) * (ar / 3.0f);
+            area += double(ar);
+        }
+    if (!(area > 0.0)) return false;
+    centre = centre * float(1.0 / area);
+    const Vec3 n = nSum.lengthSquared() > 0.0f ? nSum.normalized() : nSeed;
+    // THE SEED'S OWN FRAME and its affine map to its first UV set (least squares over its vertices).
+    if (sc.uvAt < 0) return false;
+    std::vector<unsigned> sv;
+    for (unsigned t : S.tris) for (int k = 0; k < 3; ++k) sv.push_back(sc.tris[size_t(t) * 3 + size_t(k)]);
+    std::sort(sv.begin(), sv.end());
+    sv.erase(std::unique(sv.begin(), sv.end()), sv.end());
+    Vec3 a1 = posOf(sc, sv.back()) - posOf(sc, sv.front());
+    a1 = a1 - nSeed * Vec3::dotProduct(a1, nSeed);
+    if (!(a1.lengthSquared() > 0.0f)) return false;
+    a1 = a1.normalized();
+    const Vec3 a2 = Vec3::crossProduct(nSeed, a1);
+    const Vec3 cs = S.centre;
+    double m[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } }, ru[3] = { 0, 0, 0 }, rv[3] = { 0, 0, 0 };
+    float u0 = FLT_MAX, u1 = -FLT_MAX, v0 = FLT_MAX, v1 = -FLT_MAX;
+    for (unsigned v : sv) {
+        const Vec3 d = posOf(sc, v) - cs;
+        const double row[3] = { double(Vec3::dotProduct(d, a1)), double(Vec3::dotProduct(d, a2)), 1.0 };
+        const float *uv = &sc.attr[size_t(v) * sc.attrCount + size_t(sc.uvAt)];
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) m[i][j] += row[i] * row[j];
+            ru[i] += row[i] * double(uv[0]);
+            rv[i] += row[i] * double(uv[1]);
+        }
+        u0 = std::min(u0, uv[0]); u1 = std::max(u1, uv[0]); v0 = std::min(v0, uv[1]); v1 = std::max(v1, uv[1]);
+    }
+    double cu[3], cv[3];
+    if (!solve3(m, ru, cu) || !solve3(m, rv, cv)) return false;
+    // the seed's UV rectangle back in its frame: (x, y) = M^-1 (uv - b)
+    const double det = cu[0] * cv[1] - cu[1] * cv[0];
+    if (!(std::fabs(det) > 1e-18) || !(u1 > u0) || !(v1 > v0)) return false;
+    const float rect[4][2] = { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } };
+    Vec3 d[4], mid(0, 0, 0);
+    Vec3 seedPoint[4];
+    for (int i = 0; i < 4; ++i) {
+        const double du = double(rect[i][0]) - cu[2], dv = double(rect[i][1]) - cv[2];
+        const double x = (du * cv[1] - dv * cu[1]) / det, y = (cu[0] * dv - cv[0] * du) / det;
+        seedPoint[i] = cs + a1 * float(x) + a2 * float(y);
+        d[i] = a1 * float(x) + a2 * float(y);
+        d[i] = d[i] - n * Vec3::dotProduct(d[i], n);   // onto the merged plane
+        mid += d[i] * 0.25f;
+    }
+    for (Vec3 &x : d) x = x - mid;
+    const float parArea = Vec3::crossProduct(d[1] - d[0], d[3] - d[0]).length();
+    if (!(parArea > 0.0f)) return false;
+    // AREA = the sources' summed area, shrunk only to keep every corner inside the mesh's level-0 box
+    float f = std::sqrt(float(area) / parArea);
+    float t = 1.0f;
+    for (const Vec3 &x : d)
+        for (int k = 0; k < 3; ++k) {
+            const float off = f * x[k];
+            if (off > 0.0f) t = std::min(t, (hi[k] - centre[k]) / off);
+            else if (off < 0.0f) t = std::min(t, (lo[k] - centre[k]) / off);
+        }
+    t = std::max(t, 0.0f);
+    q.shrunk = t < 1.0f;
+    f *= t;
+    for (int i = 0; i < 4; ++i) {
+        Vec3 p = centre + d[i] * f;
+        for (int k = 0; k < 3; ++k) p[k] = std::clamp(p[k], lo[k], hi[k]);   // the rounding of the last ulp
+        CardCorner &c = q.c[i];
+        c.pos[0] = p.x(); c.pos[1] = p.y(); c.pos[2] = p.z();
+        c.nrm[0] = n.x(); c.nrm[1] = n.y(); c.nrm[2] = n.z();
+        c.uv[0] = rect[i][0]; c.uv[1] = rect[i][1];
+        // the seed's vertex nearest this corner of its own rectangle carries every other buffer
+        unsigned best = sv[0];
+        float bestD = FLT_MAX;
+        for (unsigned v : sv) {
+            const float dd = (posOf(sc, v) - seedPoint[i]).lengthSquared();
+            if (dd < bestD) { bestD = dd; best = v; }
+        }
+        c.source = best;
+    }
+    const Vec3 p0(q.c[0].pos[0], q.c[0].pos[1], q.c[0].pos[2]), p1(q.c[1].pos[0], q.c[1].pos[1], q.c[1].pos[2]),
+               p2(q.c[2].pos[0], q.c[2].pos[1], q.c[2].pos[2]), p3(q.c[3].pos[0], q.c[3].pos[1], q.c[3].pos[2]);
+    q.area = 0.5f * (Vec3::crossProduct(p1 - p0, p2 - p0).length() + Vec3::crossProduct(p2 - p0, p3 - p0).length());
+    if (!(q.area > 0.0f)) return false;
+    q.flip = Vec3::dotProduct(Vec3::crossProduct(p1 - p0, p3 - p0), n) < 0.0f;
+    for (CardCorner &c : q.c) c.diagonal = (p2 - p0).length();
+    return true;
+}
+
+/// The measured price of a set's quad (measure.h, exact both ways; the quad stands for its sources' islands).
+float priceOf(const GroupScratch &sc, const LocalSpace &space, const std::vector<Card> &cards,
+              const std::vector<unsigned> &set, const Quad &q, float budget, float floorLen)
+{
+    LocalSpace s;
+    std::unordered_map<unsigned, unsigned> local;
+    std::vector<unsigned> in;
+    unsigned rep = UINT_MAX;
+    for (unsigned c : set) rep = std::min(rep, cards[c].comp);
+    for (unsigned c : set)
+        for (unsigned t : cards[c].tris)
+            for (int k = 0; k < 3; ++k) {
+                const unsigned v = sc.tris[size_t(t) * 3 + size_t(k)];
+                const auto it = local.emplace(v, unsigned(local.size())).first;
+                if (it->second == s.weld.size()) {
+                    s.pos.insert(s.pos.end(), { sc.pos[size_t(v) * 3], sc.pos[size_t(v) * 3 + 1], sc.pos[size_t(v) * 3 + 2] });
+                    s.weld.push_back(space.weld[v]);
+                    s.comp.push_back(rep);
+                    s.cap.push_back(space.cap[v]);
+                }
+                in.push_back(it->second);
+            }
+    const unsigned m = unsigned(s.weld.size());
+    for (int i = 0; i < 4; ++i) {
+        s.pos.insert(s.pos.end(), { q.c[i].pos[0], q.c[i].pos[1], q.c[i].pos[2] });
+        s.weld.push_back(UINT_MAX - 1u - unsigned(i));
+        s.comp.push_back(rep);
+        s.cap.push_back(q.c[i].diagonal);
+    }
+    s.islandCount = space.islandCount;
+    const std::vector<unsigned> out = q.flip ? std::vector<unsigned> { m, m + 2, m + 1, m, m + 3, m + 2 }
+                                             : std::vector<unsigned> { m, m + 1, m + 2, m, m + 2, m + 3 };
+    const StepMeasure r = measureStep(s, in, out, {}, budget, floorLen, true);
+    return r.step;
+}
+
+}   // namespace
+
+bool isCardGroup(const GroupScratch &sc, const LocalSpace &space, const std::vector<size_t> &islandTriangles)
+{
+    const size_t tris = sc.tris.size() / 3;
+    size_t card = 0;
+    for (size_t t = 0; t < tris; ++t) {
+        const unsigned c = space.comp[sc.tris[t * 3]];
+        if (c < islandTriangles.size() && islandTriangles[c] < size_t(kCardTriangles)) ++card;
+    }
+    return card * 2 > tris;
+}
+
+CardMerge mergeCards(const GroupScratch &sc, const LocalSpace &space, const std::vector<unsigned char> &lock,
+                     float budget, float floorLen, const Vec3 &boxLo, const Vec3 &boxHi)
+{
+    CardMerge r;
+    const size_t tris = sc.tris.size() / 3, n = sc.size();
+    // THE CARDS: the input's islands under kCardTriangles level-0 triangles... read here as every island of the input
+    // with fewer than kCardTriangles triangles IN the input (a card split across groups holds a locked position).
+    std::vector<Card> cards;
+    std::unordered_map<unsigned, unsigned> cardOf;
+    std::vector<int> triCard(tris, -1);
+    for (size_t t = 0; t < tris; ++t) {
+        const unsigned c = space.comp[sc.tris[t * 3]];
+        if (c >= space.islandCount) continue;
+        const auto it = cardOf.emplace(c, unsigned(cards.size())).first;
+        if (it->second == cards.size()) { cards.emplace_back(); cards.back().comp = c; }
+        cards[it->second].tris.push_back(unsigned(t));
+        triCard[t] = int(it->second);
+    }
+    for (Card &c : cards) {
+        if (c.tris.size() >= size_t(kCardTriangles)) { c.locked = true; continue; }
+        double area = 0.0;
+        Vec3 centre(0, 0, 0), normal(0, 0, 0);
+        bool first = true;
+        for (unsigned t : c.tris) {
+            const Vec3 a = posOf(sc, sc.tris[size_t(t) * 3]), b = posOf(sc, sc.tris[size_t(t) * 3 + 1]),
+                       d = posOf(sc, sc.tris[size_t(t) * 3 + 2]);
+            const Vec3 x = Vec3::crossProduct(b - a, d - a);
+            normal += x;
+            const float ar = 0.5f * x.length();
+            area += double(ar);
+            centre += (a + b + d) * (ar / 3.0f);
+            for (int k = 0; k < 3; ++k) {
+                const unsigned v = sc.tris[size_t(t) * 3 + size_t(k)];
+                if (lock[v]) c.locked = true;
+                const Vec3 p = posOf(sc, v);
+                if (first) { c.lo = c.hi = p; first = false; }
+                c.lo = Vec3(std::min(c.lo.x(), p.x()), std::min(c.lo.y(), p.y()), std::min(c.lo.z(), p.z()));
+                c.hi = Vec3(std::max(c.hi.x(), p.x()), std::max(c.hi.y(), p.y()), std::max(c.hi.z(), p.z()));
+            }
+        }
+        c.area = float(area);
+        c.normal = normal;
+        c.centre = area > 0.0 ? centre * float(1.0 / area) : (c.lo + c.hi) * 0.5f;
+        if (!(area > 0.0)) c.locked = true;
+    }
+    // THE NEIGHBOURS: a hash grid of the card centres, cell = the budget (the 27 cells around a seed cover it).
+    struct Cell { long long x = 0, y = 0, z = 0; bool operator==(const Cell &o) const { return x == o.x && y == o.y && z == o.z; } };
+    struct CellHash { size_t operator()(const Cell &c) const { return size_t(c.x * 73856093LL) ^ size_t(c.y * 19349663LL) ^ size_t(c.z * 83492791LL); } };
+    const auto cellOf = [&](const Vec3 &p) {
+        const auto k = [&](float x) { return (long long)std::floor(std::clamp(double(x) / double(budget), -1e15, 1e15)); };
+        return Cell { k(p.x()), k(p.y()), k(p.z()) };
+    };
+    std::unordered_map<Cell, std::vector<unsigned>, CellHash> grid;
+    if (budget > 0.0f && std::isfinite(budget))
+        for (unsigned c = 0; c < cards.size(); ++c) if (!cards[c].locked) grid[cellOf(cards[c].centre)].push_back(c);
+    std::vector<Quad> quads;
+    std::vector<unsigned char> merged(cards.size(), 0u);
+    for (unsigned s = 0; s < cards.size() && !grid.empty(); ++s) {
+        if (cards[s].locked || cards[s].taken) continue;
+        const Cell k = cellOf(cards[s].centre);
+        std::vector<std::pair<float, unsigned>> near;
+        for (long long dx = -1; dx <= 1; ++dx)
+            for (long long dy = -1; dy <= 1; ++dy)
+                for (long long dz = -1; dz <= 1; ++dz) {
+                    const auto it = grid.find(Cell { k.x + dx, k.y + dy, k.z + dz });
+                    if (it == grid.end()) continue;
+                    for (unsigned c : it->second) {
+                        if (c == s || cards[c].taken) continue;
+                        const float d = (cards[c].centre - cards[s].centre).length();
+                        if (d <= budget) near.push_back({ d, c });
+                    }
+                }
+        if (near.empty()) continue;
+        std::sort(near.begin(), near.end());
+        if (near.size() > size_t(kCardsPerSet - 1)) near.resize(size_t(kCardsPerSet - 1));
+        // the set, priced; past the budget it drops its farthest card, down to a pair
+        for (size_t take = near.size(); take >= 1; --take) {
+            std::vector<unsigned> set { s };
+            for (size_t i = 0; i < take; ++i) set.push_back(near[i].second);
+            Quad q;
+            if (!buildQuad(sc, cards, set, boxLo, boxHi, q)) break;
+            ++r.pricings;
+            const float price = priceOf(sc, space, cards, set, q, budget, floorLen);
+            if (!(price <= budget)) continue;
+            for (unsigned c : set) { cards[c].taken = true; merged[c] = 1u; r.sourceArea += double(cards[c].area); }
+            r.quadArea += double(q.area);
+            r.step = std::max(r.step, price);
+            r.maxCentreDistance = std::max(r.maxCentreDistance, near[take - 1].first);
+            r.cardsMerged += int(set.size());
+            if (q.shrunk) ++r.shrunk;
+            quads.push_back(q);
+            break;
+        }
+    }
+    r.sets = int(quads.size());
+    if (quads.empty()) return r;
+    for (size_t t = 0; t < tris; ++t)
+        if (triCard[t] < 0 || !merged[size_t(triCard[t])])
+            r.out.insert(r.out.end(), { sc.tris[t * 3], sc.tris[t * 3 + 1], sc.tris[t * 3 + 2] });
+    for (const Quad &q : quads) {
+        const unsigned b = unsigned(n + r.corners.size());
+        for (const CardCorner &c : q.c) r.corners.push_back(c);
+        if (q.flip) r.out.insert(r.out.end(), { b, b + 2, b + 1, b, b + 3, b + 2 });
+        else r.out.insert(r.out.end(), { b, b + 1, b + 2, b, b + 2, b + 3 });
+    }
+    r.step = std::max(r.step, floorLen);
+    return r;
+}
+
+}   // namespace atomdag
+}   // namespace iris
