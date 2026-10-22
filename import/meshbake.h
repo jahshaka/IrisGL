@@ -166,11 +166,11 @@ public:
         /// WHAT THE BAKE COST, per mesh and per stage (IMPORT-SPEED-1): the import's
         /// log line carries it, so the next slow file is diagnosed from the log
         /// alone. Never serialized — it describes the run, not the product.
-        struct StageMs { double lodChain = 0.0, cards = 0.0, dag = 0.0; };
+        struct StageMs { double levels = 0.0, cards = 0.0, dag = 0.0; };
         QVector<StageMs> stageMs;   ///< aiScene mesh order, as `meshes`
         double meshesMs = 0.0;      ///< the wall time of all meshes' stages together
         int bakeThreads = 0;        ///< the width this bake ran at (MeshBake::bakeThreads when it started)
-        /// "m0 99875t lod 1234 cards 12 dag 567 | m1 ..." — the per-stage ms.
+        /// "m0 99875t levels 12 cards 12 dag 567 | m1 ..." — the per-stage ms.
         QString stageSummary() const;
     };
 
@@ -239,50 +239,30 @@ public:
     /// The role bakes are recorded under in the CAS (`asset_files.role`).
     static QString casRole();
 
-    /// ATOM stage 1 (SPECS/NANITE_SPEC.md §7): build `mesh`'s automatic LOD
-    /// chain, in place — `lodIndices` + `lodErrors`, or both cleared when the
-    /// mesh gets no chain (it is skinned, it is not triangles, it is too small
-    /// to be worth a level, or its topology stopped the simplifier early).
-    ///
-    /// buildFromScene calls this for every mesh it bakes; it is public because
-    /// the chain is a PRODUCT of the bake with its own policy, and a caller that
-    /// builds an iris::Mesh by other means (a procedural mesh, a benchmark
-    /// fixture, a re-bake path) must be able to ask for the same levels the
-    /// importer would have produced rather than a second implementation of them.
+    /// ATOM-2 D10 — ONE SIMPLIFIER: build `mesh`'s WHOLE-MESH LEVEL TABLE (`lodIndices`, `lodBounds`, `lodErrors` —
+    /// the stock casters, the voxeliser's level, the surface cache, the ray BLAS and the cards read it, unchanged) from
+    /// its cluster DAG: at most kLevelTableMax UNIFORM-DEPTH CUTS — the level at depth d is every cluster born at or
+    /// before d whose own group forms at or after d (the builder's pool at that level: a crack-free surface, its
+    /// borders the locked ones), its triangles as one index list over the SAME vertex buffer, its bound the largest
+    /// stored error among those clusters (a length in mesh units, non-decreasing with depth), its error the largest
+    /// estimate of the groups that made them (a diagnostic). Depths 1 .. the root's, evenly spaced when there are more
+    /// than kLevelTableMax; cleared when the mesh has no DAG. MUST RUN AFTER buildClusterDag on the same mesh.
     /// Pure CPU, no assimp, no engine; safe from any thread.
-    ///
-    /// `terms`, when given, receives ONE ROW PER STORED LEVEL: how its bound was
-    /// made (the bound's two measured terms and the island rule's work). It is the
-    /// test-time window on the rule — the suites print it; the bake passes null.
-    struct LodLevelTerms
-    {
-        int   triangles = 0;
-        float quadric = 0.0f;        ///< the simplifier's own error (lodErrors)
-        float areaTerm = 0.0f;       ///< sampled two-sided distance, margin applied
-        float vertexTerm = 0.0f;     ///< exact removed-vertex distance (island-capped)
-        float facetTerm = 0.0f;      ///< exact per-facet distance: dropped/added facets' centroid + edge midpoints (at least vertexTerm)
-        float bound = 0.0f;          ///< what lodBounds stores
-        int   islandsDropped = 0;    ///< components level 0 has and this level has none of
-        float droppedMaxExtent = 0.0f;  ///< the largest of those (its bbox diagonal)
-        int   verticesLocked = 0;    ///< removed vertices the displacement lock kept (displaced past the budget)
-        int   passes = 0;            ///< simplifier runs this level took (1 = no island had to be kept)
-        int   worstComponentTriangles = 0;   ///< level-0 triangles of the component the vertex term came from
-        float worstComponentExtent = 0.0f;   ///< ...and its extent
-    };
-    static void buildLodChain(const MeshPtr &mesh, QVector<LodLevelTerms> *terms = nullptr);
+    static constexpr int kLevelTableMax = 8;
+    static void buildLevelTable(const MeshPtr &mesh);
 
     /// SURFACE-CACHE phase 1 (SPECS/SURFACE_CACHE_ASSESSMENT.md §7): build
     /// `mesh`'s SURFACE CARD LIST, in place — `cards` + `cardCoverage`, or both
     /// cleared when the mesh gets none (it is skinned, it is not triangles, it
     /// has no area, or `maxCards` is zero).
     ///
-    /// MUST RUN AFTER buildLodChain on the same mesh: a card records the LOD
-    /// level its own texel picks, and a mesh with no chain yet would have every
+    /// MUST RUN AFTER buildLevelTable on the same mesh: a card records the LOD
+    /// level its own texel picks, and a mesh with no table yet would have every
     /// card name level 0.
     ///
     /// `maxCards` is the budget (ImportTransform::maxCards, default 12 — Epic's
     /// "Max Lumen Mesh Cards"); it is clamped to the format's ceiling of 64.
-    /// Public for the same reason buildLodChain is: the card list is a PRODUCT
+    /// Public for the same reason buildLevelTable is: the card list is a PRODUCT
     /// of the bake with its own policy, and a caller that builds an iris::Mesh by
     /// other means — a procedural mesh, a re-bake path, a suite — must be able to
     /// ask for the cards the importer would have produced rather than grow a
@@ -292,7 +272,7 @@ public:
 
     /// ATOM-2 (SPECS/ATOM_2_SPEC.md part A): build `mesh`'s CLUSTER DAG, in place — `clusterDag`, or an empty one
     /// when the mesh gets none (skinned, not triangles, malformed). The builder is import/atomdag/ (build.h states
-    /// D1-D8); every triangle mesh gets one, ending in an empty top. Independent of the chain and the cards.
+    /// D1-D9); every triangle mesh gets one, ending in an empty top. The level table and the cards follow from it.
     /// Public for the reason the other products are: a caller that builds an iris::Mesh by other means — a
     /// procedural fixture, a suite — must get the DAG the importer would have produced, not a second implementation.
     /// Pure CPU, no assimp, no engine; safe from any thread. `options` exists for the tools and the rows (the POSONLY
@@ -307,30 +287,6 @@ public:
     /// side), beside the largest stored error the cut carries.
     struct DagDriftRow { int depth = 0; int triangles = 0; float drift = 0.0f; float stored = 0.0f; };
     static QVector<DagDriftRow> dagDrift(const MeshPtr &mesh);
-
-    /// VERIFICATION, and it exists for the same reason `producerHashOf` does: the
-    /// claim has to be TESTABLE without re-running the thing that made it.
-    ///
-    /// `checkLodBounds` re-measures every level of `mesh` against level 0 — PER
-    /// FACET (every dropped level-0 facet and every level facet at its corners,
-    /// edge midpoints, centroid and the centroids of its 1-to-4 split: strictly
-    /// denser than the bake's centroid + midpoints), plus `densityMultiple` times
-    /// the bake's area samples and the exact removed-vertex walk, under the same
-    /// represented-surface rule (island caps) and WITHOUT the sampling margin —
-    /// and answers whether every stored `lodBounds[k]` is at least that. On a mesh with no islands (one
-    /// component: every shipped primitive, the dragon) the reference IS the
-    /// sampled two-sided Hausdorff distance.
-    ///
-    /// WHAT IT IS AND IS NOT. The exact vertex term is the same computation the
-    /// bake made, so where it carries the maximum the check reproduces the stored
-    /// number and passes at ratio 1.0000; what it genuinely tests is that the area
-    /// margin covers what 8x the samples find inside facets, and the whole
-    /// pipeline (sampler, grid, floor, monotonicity). A mesh with no chain
-    /// trivially passes. `worstRatioOut` receives the largest (reference / stored)
-    /// seen, and `referenceOut` one reference per level.
-    static bool checkLodBounds(const MeshPtr &mesh, int densityMultiple = 8,
-                               double *worstRatioOut = nullptr,
-                               QVector<float> *referenceOut = nullptr);
 
     /// The capture resolution a baked card's LOD level was chosen for (Lumen's
     /// 128-texel page). Phase 2's atlas owns the page size it actually

@@ -54,7 +54,7 @@ struct MeshView
 /// Per vertex: the first vertex at its exact position (+0 and -0 are one position).
 std::vector<unsigned> weldByPosition(const MeshView &mesh);
 
-/// THE ISLANDS OF A MESH (moved from meshbake.cpp's lodchain, ATOM-LOD-BOUND-1's represented-surface rule): level-0
+/// THE ISLANDS OF A MESH (ATOM-LOD-BOUND-1's represented-surface rule): level-0
 /// connected components, welded by position. A removed point of an island is charged at most its island's extent
 /// (the box diagonal); a wholly dropped island costs its extent. The chain and the DAG builder read the same one.
 struct Islands

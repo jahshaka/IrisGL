@@ -35,7 +35,7 @@ Vec3 vertexOf(const float *positions, int posComps, unsigned v)
 }
 
 /// CELLS ALONG THE LONGEST AXIS for a grid over a GROUP-sized soup — sized by the
-/// soup's own triangles, not by `lodchain::boundGridRes`'s cube root. The grid's
+/// soup's own triangles, not by a cube root of the count. The grid's
 /// cells are cubic (the longest axis over this number), so a cube-root count on a
 /// long thin box — a slice of a 40 m bar — gives cells as wide as the bar and every
 /// query walks a whole ring of it. The cell here is the soup's mean triangle size

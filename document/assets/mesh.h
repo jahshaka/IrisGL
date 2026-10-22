@@ -326,38 +326,25 @@ public:
 
     TriMesh* triMesh;
 
-    /// ATOM stage 1 — the automatic LOD chain, built at IMPORT by MeshBake and
-    /// carried in the .jmb bake (SPECS/NANITE_SPEC.md §7). Empty for every mesh
-    /// that has none, which is today's behaviour exactly.
+    /// THE WHOLE-MESH LEVEL TABLE (ATOM-2 D10, ONE SIMPLIFIER): at most eight UNIFORM-DEPTH CUTS of the cluster DAG
+    /// (`clusterDag` below), built at IMPORT by MeshBake::buildLevelTable and carried in the .jmb bake; empty for a mesh
+    /// with no DAG. The stock casters, the voxeliser, the surface cache, the ray BLAS and the cards read it.
     ///
-    /// `lodIndices[i]` is LEVEL i+1 and indexes the SAME vertex buffers as
-    /// `idxBuffer` (level 0). meshopt_simplify REMOVES vertices, it never
-    /// creates them, and nothing re-orders the vertex buffer per level on
-    /// purpose: one vertex buffer, N index buffers is what keeps every level of
-    /// a mesh inside ONE draw call downstream (finding B).
+    /// `lodIndices[i]` is LEVEL i+1: the triangles of every DAG cluster alive at one depth (born at or before it, its
+    /// own group forming at or after it — the builder's pool there, a crack-free surface), as one index list over the
+    /// SAME vertex buffers as `idxBuffer` (level 0; a card quad's corners are vertices the DAG appended): one vertex
+    /// buffer, N index buffers keeps every level of a mesh inside ONE draw call downstream.
     ///
-    /// `lodBounds[i]` is level i+1's MEASURED TWO-SIDED DISTANCE from level 0 —
-    /// the displacement of REPRESENTED surface: an exact walk of the removed
-    /// vertices plus area samples (the sampling-gap margin on the samples only),
-    /// every level-0 point capped at its own island's extent, so a debris island
-    /// the level dropped costs its size and not its distance to unrelated surface
-    /// (ATOM-LOD-BOUND-1) — as a LENGTH in mesh units, monotonically non-decreasing. THIS is the currency
-    /// the whole program is judged in and the only one any consumer reads:
-    /// divided by the view distance it is a screen-space error, and compared
-    /// against a world-space cell size it answers "is this level fine enough for
-    /// a voxel of that size". The measurement is `meshbake.cpp`'s
-    /// `lodchain::build` (areaDistance + removedVertexDistance); the one selection rule over it is
-    /// `lodLevelForWorldError` (jahshaka/engine/Types.h).
+    /// `lodBounds[i]` is level i+1's BOUND: the largest stored error among those clusters — each the measured
+    /// one-step deviation chain of the DAG (import/atomdag/measure.h), monotone by construction — as a LENGTH in mesh
+    /// units, positive and non-decreasing with i. Divided by the view distance it is a screen-space error; compared
+    /// against a world-space cell size it answers "is this level fine enough for a voxel of that size". The one
+    /// selection rule over it is `lodLevelForWorldError` (jahshaka/engine/Types.h).
     ///
-    /// `lodErrors[i]` is what the SIMPLIFIER said about that level — its
-    /// combined position+attribute quadric. It is a DIAGNOSTIC and nothing
-    /// reads it to choose a level (ATOM P1's AT-A5): it is an estimate, not a
-    /// bound, and the reasons are listed at the measurement in meshbake.cpp.
-    /// Kept because "what the simplifier claimed" beside "what the surface
-    /// measures" is how the margin and the knobs stay honest.
+    /// `lodErrors[i]` is a DIAGNOSTIC: the largest simplifier estimate of the groups that made level i+1's clusters.
+    /// Nothing reads it to choose a level.
     ///
-    /// Both arrays have one entry per level above 0 and the same length as
-    /// `lodIndices`.
+    /// The three arrays have one entry per level above 0.
     QVector<QVector<quint32>> lodIndices;
     QVector<float>            lodErrors;
     QVector<float>            lodBounds;
