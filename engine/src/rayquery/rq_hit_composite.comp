@@ -9,20 +9,19 @@
 // scatters that radiance back to where each ray's answer lives, through the SAME
 // arithmetic a card- or voxel-lit hit takes:
 //
-//   * THE REFLECTION: the texel's temporal mean. The trace wrote the texel's
-//     history CARRIED (the previous radiance and count) and this frame's
-//     distances; here it becomes mix( prev, decoded, blend ) at count
-//     min( max( prev.w, the warm-held seed ) + 1, 4096 ) — rq_reflect.comp's own
-//     two lines, with `blend` from the record (negated when the history was
-//     warm-held). The spatial filter runs after this, so it reads the completed
-//     mean.
+//   * THE REFLECTION: the texel's SAMPLE of this frame (PHOTON-2 1b). The trace
+//     wrote the texel's history CARRIED (the previous radiance and its seeded count)
+//     and this frame's distances, and left the sample empty; here the decoded
+//     radiance becomes that sample, with the record's weight as its `w` (the
+//     trace's blend floor and flag — rq_reflect.comp's `sampleW`). The temporal pass
+//     (rq_reflect_temporal.comp) runs after this and blends it like a traced one.
 //   * THE GATHER: the ray's atlas texel, radiance x the texel re-weight from the
 //     record (rq_probe_gather.comp's `reweight`), its distance kept.
 //
 // A record the decode could not shade (w = 0: a material HlmsAtom serves no twin
-// for, a stale slot) takes the dropped record's answer: the reflection keeps its
-// history and withholds this frame's distance where it had none; the gather's ray
-// stays at zero radiance.
+// for, a stale slot) takes the dropped record's answer: the reflection's sample
+// stays empty (its history kept) and this frame's distance is withheld where it
+// had none; the gather's ray stays at zero radiance.
 //
 // ONE THREAD PER RECORD SLOT, records [0, min( count, capacity )). Every record owns
 // its destination texel (a texel traces one ray per frame), so nothing races.
@@ -52,6 +51,8 @@ layout( rgba16f, set = 0, binding = 6 ) uniform image2D probeAtlas;
 /// table — the reflection's fog along its ray (PHOTON-I-1 fix 5).
 layout( rgba32ui, set = 0, binding = 7 ) uniform readonly uimage2D jahHitIds;
 layout( set = 0, binding = 8 ) uniform sampler3D fogAerial;
+/// THE REFLECTION'S SAMPLE (PHOTON-2 1b): what a shaded record writes (rq_reflect.comp's `reflectSample`).
+layout( rgba16f, set = 0, binding = 9 ) uniform writeonly image2DArray reflectSample;
 #define JAH_FOG_P( k ) p.fog[k]
 #define JAH_FOG_AERIAL( uvw ) textureLod( fogAerial, uvw, 0.0 )
 #define JAH_FOG_HAS_AIR
@@ -69,10 +70,8 @@ vec3 jahOctDecodeDir( vec2 e )
 	return normalize( n );
 }
 
-/// rq_reflect.comp's ceiling and warm-up, the same numbers (jah_rq_hit.glsl's
-/// kMaxRadiance; rq_reflect.comp's kWarmupFrames).
+/// rq_reflect.comp's ceiling, the same number (jah_rq_hit.glsl's kMaxRadiance).
 const float kMaxRadiance = 1024.0;
-const float kWarmupFrames = 8.0;
 const uint kDestGather = 0x80000000u;
 
 bool finite3( vec3 v )
@@ -117,10 +116,6 @@ void main()
 	const vec4 prev = imageLoad( historyCur, at3 );
 	if( shaded )
 	{
-		const bool warmHeld = weight < 0.0;
-		const float blend = clamp( abs( weight ), 0.0, 1.0 );
-		const float seed = max( prev.w, warmHeld ? kWarmupFrames : 0.0 );
-		const float count = min( seed + 1.0, 4096.0 );
 		// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1): the decoded light crossed the
 		// ray's length before the surface reflected it — the RECORD carries the ray's
 		// origin height and length — and rq_reflect.comp fogs a card's, a voxel's
@@ -129,7 +124,7 @@ void main()
 		const float originY = uintBitsToFloat( jahHitBuf[aux + 2u] );
 		const vec2 lengths = unpackHalf2x16( jahHitBuf[aux + 3u] );
 		const vec3 fogged = jahFogAlong( radiance, originY, dir, lengths.x, lengths.y );
-		imageStore( historyCur, at3, vec4( mix( prev.xyz, fogged, blend ), count ) );
+		imageStore( reflectSample, at3, vec4( fogged, weight ) );
 	}
 	else
 	{

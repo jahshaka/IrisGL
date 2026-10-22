@@ -33,8 +33,9 @@
 //                        map, which covers the camera's frustum only), the ray's
 //                        FOOTPRINT at the hit in metres (the decode's texture
 //                        LOD) ), [1] the write-back weight's float bits (the
-//                        reflection's temporal blend, negated when the history is
-//                        warm-held; the gather's texel re-weight), [2] the ray's
+//                        reflection's sample weight — the trace's blend floor and
+//                        its surface-only flag, PHOTON-2 1b; the gather's texel
+//                        re-weight), [2] the ray's
 //                        ORIGIN HEIGHT's float bits (world Y) and [3]
 //                        packHalf2x16( the ray's LENGTH to the hit, the EYE'S
 //                        DISTANCE to the ray's origin ), both in metres and held

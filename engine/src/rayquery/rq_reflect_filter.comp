@@ -78,8 +78,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// world units, z = the frame index (the sample sequence's only input),
 	/// w = how many cascades are bound.
 	vec4 knobs;
-	/// x = 1 on a frame THE RADIANCE MOVED (PHOTON-5 stage 4: the scene's reflection radiance
-	/// key, OgreRayQuery.cpp; rq_reflect.comp caps a warm mean's count there), y = the
+	/// x = 1 on a frame the view RESTS (PHOTON-2 1e: the floor lifted, the clamp off — rq_reflect_temporal.comp), y = the
 	/// surface bias in world units (a ray starts this far off its own surface),
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).

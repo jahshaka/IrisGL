@@ -84,6 +84,7 @@
 #include "rayquery/rq_rays_spv.h"
 #include "rayquery/rq_reflect_spv.h"
 #include "rayquery/rq_reflect_filter_spv.h"
+#include "rayquery/rq_reflect_temporal_spv.h"
 #include "rayquery/rq_motion_spv.h"
 #include "rayquery/rq_motion_skin_spv.h"
 #include "rayquery/rq_card_parity_spv.h"
@@ -228,6 +229,8 @@ struct ScratchArena {
 /// pixel of the fixture still moved 16/255 after sixteen frames; at 1/32 it is
 /// half that and the 99th percentile is inside 2/255. Half a second of lag at
 /// 60 Hz on a light that moves, which is the other side of the same number.
+/// (PHOTON-2 1b: the temporal pass's clamp and confidence shorten it where the
+/// light or the reflected thing changed; it no longer decides convergence alone.)
 constexpr float kReflectHistoryFloor = 1.0f / 32.0f;
 /// HOW MANY CASCADES THE HIT SHADING READS — the shader's `kMaxCascades`, and
 /// the two must agree.
@@ -239,7 +242,7 @@ constexpr unsigned kReflectRing = 3u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 45u;
+constexpr unsigned kReflectBindings = 46u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -292,13 +295,17 @@ constexpr unsigned kReflectIdDepthBinding = kReflectFogBinding + 1u;
 /// texture pool and the cloud layer's field.
 constexpr unsigned kReflectPoolBinding = kReflectIdDepthBinding + 1u;
 constexpr unsigned kReflectCloudBinding = kReflectPoolBinding + 1u;
-static_assert(kReflectBindings == kReflectCloudBinding + 1u,
-              "the hit surface's two are the reflection set's last bindings");
+/// ...and THIS FRAME'S RAW SAMPLE (45, PHOTON-2 1b): the trace's (or the write-back's) one ray of the frame, which the
+/// temporal pass (rq_reflect_temporal.comp) clamps the history against and blends in.
+constexpr unsigned kReflectSampleBinding = kReflectCloudBinding + 1u;
+static_assert(kReflectBindings == kReflectSampleBinding + 1u,
+              "the raw sample is the reflection set's last binding");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's mean and
 /// distance, the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the
-/// ray's direction) and the air's table, the reflection's fog along its ray.
-constexpr unsigned kHitCompositeBindings = 9u;
+/// ray's direction) and the air's table, the reflection's fog along its ray — and (PHOTON-2 1b) the reflection's
+/// raw SAMPLE a shaded record becomes.
+constexpr unsigned kHitCompositeBindings = 10u;
 
 /// A storage image this file owns outright — the temporal mean and the distance
 /// beside it. Not an Ogre texture: nothing but this compute pass ever reads or
@@ -968,6 +975,9 @@ private:
         /// [frame & 1], written to [~frame & 1]. See rq_reflect.comp's note on
         /// why one buffer is a race.
         ReflectImage hist[2], dist[2];
+        /// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b): one image (not a pair — written and read within the frame), the
+        /// temporal pass' neighbourhood and blend input. 8 bytes a trace texel.
+        ReflectImage sample;
         unsigned w = 0, h = 0, layers = 1;
         unsigned frame = 0;              ///< the sample sequence's input
         bool     imagesReady = false;
@@ -989,13 +999,6 @@ private:
         /// warm-up exists for, the first is an ordinary frame of an ordinary
         /// pan. Restarts with `havePrev`.
         unsigned historyFrames = 0;
-        /// THE RADIANCE KEY the last recorded frame saw (OgreScene::reflectRadianceKey,
-        /// PHOTON-5 stage 4) and whether it moved then: the frame it moves AND the one
-        /// after carry the flag (a lamp's derived pose lands at the frame's scene-graph
-        /// update, the card path's two-frame rule).
-        unsigned long long radianceKey = 0ull;
-        bool radianceKeyKnown = false;
-        bool radianceMovedLast = false;
         /// Was the LAST recorded frame a stereo one? A view that changes shape
         /// (a session beginning or ending on it) has a history whose halves mean
         /// something else, so the mean starts again — the same rule as a resize.
@@ -1091,6 +1094,10 @@ private:
     /// it is a second dispatch and not more code in the first.
     VkPipeline            mFilterPipeline = VK_NULL_HANDLE;
     VkShaderModule        mFilterModule = VK_NULL_HANDLE;
+    /// THE TEMPORAL PASS (PHOTON-2 1b, rq_reflect_temporal.comp): between the trace's write-back and the filter, on
+    /// the same layout and set — the history clamped to this frame's samples, the sample blended in.
+    VkPipeline            mTemporalPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mTemporalModule = VK_NULL_HANDLE;
     VkDescriptorPool      mReflectPool = VK_NULL_HANDLE;
     /// gi.card_read_parity's harness (cardPickBlocking), made on first use.
     VkDescriptorSetLayout mCardParitySetLayout = VK_NULL_HANDLE;
@@ -2290,6 +2297,8 @@ void RayQueryTier::close() {
     if (mReflectPipeline) vkDestroyPipeline(mVk, mReflectPipeline, nullptr);
     if (mFilterPipeline) vkDestroyPipeline(mVk, mFilterPipeline, nullptr);
     if (mFilterModule) vkDestroyShaderModule(mVk, mFilterModule, nullptr);
+    if (mTemporalPipeline) vkDestroyPipeline(mVk, mTemporalPipeline, nullptr);
+    if (mTemporalModule) vkDestroyShaderModule(mVk, mTemporalModule, nullptr);
     if (mReflectPipeLayout) vkDestroyPipelineLayout(mVk, mReflectPipeLayout, nullptr);
     if (mReflectSetLayout) vkDestroyDescriptorSetLayout(mVk, mReflectSetLayout, nullptr);
     if (mReflectModule) vkDestroyShaderModule(mVk, mReflectModule, nullptr);
@@ -2301,6 +2310,7 @@ void RayQueryTier::close() {
     mReflectPipeLayout = VK_NULL_HANDLE; mReflectSetLayout = VK_NULL_HANDLE;
     mReflectModule = VK_NULL_HANDLE;
     mFilterPipeline = VK_NULL_HANDLE; mFilterModule = VK_NULL_HANDLE;
+    mTemporalPipeline = VK_NULL_HANDLE; mTemporalModule = VK_NULL_HANDLE;
     mPointSampler = VK_NULL_HANDLE; mLinearSampler = VK_NULL_HANDLE;
     if (mDescPool) vkDestroyDescriptorPool(mVk, mDescPool, nullptr);
     if (mPipeline) vkDestroyPipeline(mVk, mPipeline, nullptr);
@@ -5153,6 +5163,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 42 the id pass's depth (ID-DEPTH-1)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 43 the texture pool (FAR-SUN-2)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 44 the cloud field (FAR-SUN-2)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 45 this frame's raw sample (PHOTON-2 1b)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -5228,6 +5239,27 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
             return false;
         }
     }
+    {
+        VkShaderModuleCreateInfo tsmi{};
+        tsmi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        tsmi.codeSize = sizeof(krq_reflectTemporalSpv);
+        tsmi.pCode = krq_reflectTemporalSpv;
+        if (vkCreateShaderModule(mVk, &tsmi, nullptr, &mTemporalModule) != VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateShaderModule (temporal) failed";
+            return false;
+        }
+        VkComputePipelineCreateInfo tcpi{};
+        tcpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        tcpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        tcpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        tcpi.stage.module = mTemporalModule;
+        tcpi.stage.pName = "main";
+        tcpi.layout = mReflectPipeLayout;
+        if (createComputePipeline(tcpi, &mTemporalPipeline, "reflect temporal") != VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateComputePipelines (temporal) failed";
+            return false;
+        }
+    }
     // The pool its layout planned: kMaxTimedScenes views' worth of rings (far
     // more views than a product frame draws), two modes a scene (the movers'
     // view and the still view), a ring each.
@@ -5247,6 +5279,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
         retireImage(rv.hist[i]);
         retireImage(rv.dist[i]);
     }
+    retireImage(rv.sample);
     rv.imagesReady = false;
     rv.havePrev = false;
     rv.historyFrames = 0;
@@ -5263,6 +5296,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
         if (!makeStorageImage(w, h, formats[0], rv.hist[i], err, layers)) return false;
         if (!makeStorageImage(w, h, formats[1], rv.dist[i], err, layers)) return false;
     }
+    if (!makeStorageImage(w, h, formats[0], rv.sample, err, layers)) return false;
     rv.imagesReady = true;
     rv.needsClear = true;
     return true;
@@ -5274,9 +5308,9 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
     // UNDEFINED -> GENERAL, and CLEARED: a distance of zero is what
     // rq_reflect.comp reads as "no history here", so a freshly made pair is
     // rejected by the reprojection test rather than believed.
-    VkImageMemoryBarrier toGeneral[4] = {};
-    ReflectImage *imgs[4] = { &rv.hist[0], &rv.hist[1], &rv.dist[0], &rv.dist[1] };
-    for (int i = 0; i < 4; ++i) {
+    VkImageMemoryBarrier toGeneral[5] = {};
+    ReflectImage *imgs[5] = { &rv.hist[0], &rv.hist[1], &rv.dist[0], &rv.dist[1], &rv.sample };
+    for (int i = 0; i < 5; ++i) {
         toGeneral[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         toGeneral[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         toGeneral[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -5288,13 +5322,13 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
         toGeneral[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     }
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, 4, toGeneral);
+                         0, nullptr, 0, nullptr, 5, toGeneral);
     VkClearColorValue zero{};
     VkImageSubresourceRange range{};
     range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     range.levelCount = 1;
     range.layerCount = VK_REMAINING_ARRAY_LAYERS;
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 5; ++i)
         vkCmdClearColorImage(cmd, imgs[i]->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
     VkMemoryBarrier toCompute{};
     toCompute.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -5318,6 +5352,7 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
         retire(rv.geomRowOfSlot[i]);
     }
     for (int i = 0; i < 2; ++i) { retireImage(rv.hist[i]); retireImage(rv.dist[i]); }
+    retireImage(rv.sample);
     retire(rv.histReadback);
     for (ReflectView::HistPending &p : rv.histPending) p = ReflectView::HistPending();
     rv.histHost.clear();
@@ -5341,8 +5376,9 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         // The views' GPU times are the monitor's rows (lane TEST-1): the worst view.
         const float tr = monitor::lastGpuMs("rq.reflect.trace", kv.first);
         const float fi = monitor::lastGpuMs("rq.reflect.filter", kv.first);
-        if (tr >= 0.0f || fi >= 0.0f)
-            st.reflectMs = std::max(st.reflectMs, std::max(tr, 0.0f) + std::max(fi, 0.0f));
+        const float te = monitor::lastGpuMs("rq.reflect.temporal", kv.first);
+        if (tr >= 0.0f || fi >= 0.0f || te >= 0.0f)
+            st.reflectMs = std::max(st.reflectMs, std::max(tr, 0.0f) + std::max(te, 0.0f) + std::max(fi, 0.0f));
         st.reflectMotionMs = std::max(st.reflectMotionMs, monitor::lastGpuMs("rq.reflect.motion", kv.first));
         // THE HISTORY COUNT (PHOTON-2 stage 0): the view that holds a decoded copy (one view per scene in the
         // stillness door's use; with several, the last in the map's order that holds one).
@@ -5774,17 +5810,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // `stereo.y`; 0 on a first frame, a resize, a scene bind and a change of
     // stereo shape, exactly where the previous basis is withheld above).
     pp.stereo[1] = float(rv.historyFrames);
-    // THE RADIANCE MOVED (PHOTON-5 stage 4): knobs2.x = 1 on the frame the scene's reflection
-    // radiance key moved and the one after — rq_reflect.comp caps a warm mean's count there, the
-    // arrival rule's form, so the new light is not drained in over the floor's thirty-two frames.
-    {
-        const unsigned long long key = scene->reflectRadianceKey();
-        const bool moved = rv.radianceKeyKnown && key != rv.radianceKey;
-        pp.knobs2[0] = (moved || rv.radianceMovedLast) ? 1.0f : 0.0f;
-        rv.radianceMovedLast = moved;
-        rv.radianceKey = key;
-        rv.radianceKeyKnown = true;
-    }
+    // knobs2.x: THE REST (PHOTON-2 1e), set below once every parameter is known; a lamp's step, a cloud or a
+    // re-injection is the temporal pass' clamp's (the radiance-key cap is deleted with its key, PHOTON-2 1b).
+    pp.knobs2[0] = 0.0f;
     // THE PHOTON VIEW'S Hits (PHOTON-VIEW-1): the view's overlay, written by this
     // trace when the scene's view asks and the view holds one at the full size.
     Ogre::TextureGpu *photon =
@@ -6147,6 +6175,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     w[kReflectPoolBinding].pImageInfo = &poolImg;
     w[kReflectCloudBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[kReflectCloudBinding].pImageInfo = &cloudImg;
+    // THIS FRAME'S RAW SAMPLE (45, PHOTON-2 1b).
+    VkDescriptorImageInfo sampleImg{};
+    sampleImg.imageView = rv.sample.view;
+    sampleImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!sampleImg.imageView) { bail("the sample view is null"); return; }
+    w[kReflectSampleBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[kReflectSampleBinding].pImageInfo = &sampleImg;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -6869,6 +6904,23 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &meanReady, 0, nullptr, 0,
                              nullptr);
+    }
+    // THE TEMPORAL PASS (PHOTON-2 1b): the carried history clamped to this frame's samples and the sample blended in —
+    // after the write-back (records' samples are complete), before the filter reads the mean's neighbours.
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTemporalPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
+                            &rv.sets[ring], 0, nullptr);
+    {
+        monitor::CacheScope temporalRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.temporal", mRs, key);
+        vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, rv.layers);   // z = the eye
+    }
+    {
+        VkMemoryBarrier meanBlended{};
+        meanBlended.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        meanBlended.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        meanBlended.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                             &meanBlended, 0, nullptr, 0, nullptr);
     }
     // THE FILTER AND THE COMPOSITE — the same descriptor set, a different
     // pipeline. Its time is the SAME row as the trace's, deliberately:
@@ -8717,6 +8769,7 @@ bool RayQueryTier::makeCompositePipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 6 the gather's atlas
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 7 the list's records (PHOTON-I-1 fix 5)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 8 the air's table
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 9 the reflection's raw sample (PHOTON-2 1b)
     };
     for (unsigned i = 0; i < kHitCompositeBindings; ++i) {
         b[i].binding = i;
@@ -8795,10 +8848,12 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     // pair the trace wrote), the gather's atlas the trace wrote — or stand-ins
     // with the consumer's flag down (its records, if any, are skipped).
     VkImageView histView = mHitDummyHist.view, distView = mHitDummyDist.view, atlasView = mHitDummyColour.view;
+    VkImageView sampleView = mHitDummyHist.view;   // the same rgba16f stand-in shape
     bool reflectBound = false, gatherBound = false;
     if (auto rit = mReflects.find(key); rit != mReflects.end() && rit->second.finishPending) {
         histView = rit->second.hist[rit->second.curIdx].view;
         distView = rit->second.dist[rit->second.curIdx].view;
+        sampleView = rit->second.sample.view;
         reflectBound = true;
     }
     if (mGather) {
@@ -8875,6 +8930,12 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     w[7].pImageInfo = &idsImg;
     w[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[8].pImageInfo = &fogImg;
+    VkDescriptorImageInfo sampleImg{};
+    sampleImg.imageView = sampleView;
+    sampleImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!sampleImg.imageView) return;
+    w[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[9].pImageInfo = &sampleImg;
     vkUpdateDescriptorSets(mVk, kHitCompositeBindings, w, 0, nullptr);
 
     {
@@ -9140,32 +9201,6 @@ unsigned long long PhotonComponent::gatherRestartKey() const {
         fold(cs.invalidMaterial);
         fold(cs.invalidSun);
     }
-    return key;
-}
-
-/// THE REFLECTION HISTORY'S RADIANCE KEY (PHOTON-5 stage 4). A still glossy surface's temporal mean
-/// remembers about thirty-two frames; when what it reflects changes BRIGHTNESS with nothing moving —
-/// a lamp's intensity, its pose, the cloud layer, the chain's re-injection at rest — no reprojection
-/// test fires and the old radiance drained out over the floor's whole memory. The ray pass compares
-/// this key per view and tells rq_reflect.comp the frame it moved (Params knobs2.x).
-unsigned long long PhotonComponent::reflectRadianceKey() const {
-    unsigned long long key = 1469598103934665603ull;
-    const auto fold = [&key](unsigned long long v) {
-        key ^= v;
-        key *= 1099511628211ull;
-    };
-    // THE LAMPS' STATE, NOT THE SCENE'S TRANSFORM EPOCH (the merge read's finding, 2026-10-21): cardLightKey's first word
-    // is transformEpoch(), which moves on EVERY node move — folded raw, the key moved every frame of any animated scene
-    // (an avatar, a turntable, VR hands) and the cap held every still glossy pixel at kWarmupFrames+1 samples for good:
-    // permanent grain. The card path uses that key only as the TRIGGER to re-walk the lamps and folds the WALK's result
-    // (mCardLightFold, refreshed under its two-frame rule); this key folds the same walk, with the lamp edits, removals
-    // and count that are not transforms.
-    unsigned long long lights[4];
-    mScene.cardLightKey(lights);
-    fold(mCardLightFold);
-    for (int i = 1; i < 4; ++i) fold(lights[i]);
-    fold(mScene.cloudGiSerial());
-    fold(mGiRestTicks);
     return key;
 }
 

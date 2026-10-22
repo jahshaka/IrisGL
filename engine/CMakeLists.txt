@@ -283,6 +283,17 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
         COMMENT "Compiling the reflection filter/composite compute shader at SPIR-V 1.4"
         VERBATIM)
+    # ...and the reflection's TEMPORAL pass (PHOTON-2 1b), with the shared reprojection header.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                --vn krq_reflectTemporalSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_temporal.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_temporal.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
+        COMMENT "Compiling the reflection temporal compute shader at SPIR-V 1.4"
+        VERBATIM)
     # THE SCREEN-PROBE GATHER'S FOUR JOBS (GATHER-1a; the filter PHOTON-GATHER-1b), same rule plus ONE
     # addition: `-I src/rayquery/include`, so the hit-radiance functions and the
     # parameter block are SHARED with the reflection trace rather than copied
@@ -498,6 +509,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"

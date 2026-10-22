@@ -87,8 +87,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// world units, z = the frame index (the sample sequence's only input),
 	/// w = how many cascades are bound.
 	vec4 knobs;
-	/// x = 1 on a frame THE RADIANCE MOVED (PHOTON-5 stage 4: the scene's reflection radiance
-	/// key, OgreRayQuery.cpp; rq_reflect.comp caps a warm mean's count there), y = the
+	/// x = 1 on a frame the view RESTS (PHOTON-2 1e: the floor lifted, the clamp off — rq_reflect_temporal.comp), y = the
 	/// surface bias in world units (a ray starts this far off its own surface),
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).
@@ -282,6 +281,10 @@ layout( set = 0, binding = 40 ) uniform sampler3D voxelDirect[kMaxCascades];
 /// THE AIR'S TABLE (PHOTON-I-1 fix 5): the aerial-perspective volume the colour
 /// passes read, or a stand-in while they read none — the set's last binding.
 layout( set = 0, binding = 41 ) uniform sampler3D fogAerial;
+/// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b; the set's last binding): the ray's radiance and, in w, the texel's blend
+/// FLOOR plus 2 where only the surface history may be used (rq_reflect_temporal.comp reads it); 0 = no sample. A
+/// record's radiance is written here by the write-back (rq_hit_composite.comp).
+layout( rgba16f, set = 0, binding = 45 ) uniform writeonly image2DArray reflectSample;
 
 /// The same ceiling JahSsrResolve_ps.glsl and JahSsrHistory_ps.glsl hold the
 /// SSR loop to, and for the same reason: about twelve stops above white, six
@@ -1165,16 +1168,6 @@ void main()
 		}
 	}
 
-	// THE RADIANCE MOVED (PHOTON-5 stage 4). A lamp's step, its pose, the cloud layer, the
-	// chain's re-injection at rest: what this texel reflects changed BRIGHTNESS while the
-	// surface and the reflected thing stood still, so no test above fired and the old
-	// radiance drained out of a still glossy mean over the floor's whole memory (24 frames
-	// to 95 % on rtreflect.history_detectors' lamp step, 11 with this cap). The host flags the frame the
-	// scene's radiance key moved (knobs2.x); a warm mean's count is capped there - the
-	// arrival rule's form above - so the new light takes over at the warm seed's 1/n.
-	if( p.knobs2.x > 0.5 && prev.w > 0.0 && p.stereo.y >= kWarmupFrames )
-		prev.w = min( prev.w, kWarmupFrames + 1.0 );
-
 	// THE EDGE-CLASS OVERLAY (REFLECT-EDGE-2's measuring instrument, gi.reflect_mover
 	// --edge): with alpha.z set (the arm "reflect.edgeClasses") on the Hits photon view, a traced
 	// texel writes its HISTORY CLASS instead of its ray's source — mode 1: r = the ray
@@ -1194,6 +1187,7 @@ void main()
 		// carried through unchanged, and a texel that has never had an answer
 		// (prev.w == 0) writes a zero distance so the filter skips it this frame.
 		imageStore( historyCur, ivec3( tc, gEye ), prev );
+		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );
 		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( prev.w > 0.0 ? dist : 0.0,
 											  jahPackMeanLength( wasHitT, wasMoverAge + 1.0 ), 0.0, 0.0 ) );
 		photonHit( tc, kPhotonDropped );
@@ -1206,6 +1200,12 @@ void main()
 	// which is what converges fastest — with a floor so it keeps following a
 	// scene that changes. A mirror (alpha at the clamp) converges on the first
 	// frame anyway: every sample is the same ray.
+	// THE FLOOR IS THE TEMPORAL PASS' TO APPLY (PHOTON-2 1b): this pass carries the history and its count, and
+	// rq_reflect_temporal.comp clamps it to this frame's neighbourhood and blends the sample in at
+	// max( 1/N, `blendFloor` ). The floor here is everything that is the TEXEL's: the history's memory (the
+	// floor on 1/n), the mirror ramp below, a moving reflector's eighth; 1 where there is no history. `blend` is the
+	// estimate the mean ray length below follows.
+	float blendFloor = prev.w > 0.0 ? p.knobs2.w : 1.0;
 	const float n = min( prev.w, 1.0 / max( p.knobs2.w, 1e-3 ) );
 	float blend = prev.w > 0.0 ? max( 1.0 / ( n + 1.0 ), p.knobs2.w ) : 1.0;
 	// THE MEAN IS FOR VARIANCE, AND A MIRROR HAS NONE (second reader, H1). The
@@ -1231,7 +1231,8 @@ void main()
 	// sharpest surface this renderer can express a blend of 0.972 rather than
 	// 1: a mirror in a two-frame view would show 2.8 % probe, and a
 	// perceptual-0.08 surface 30 % of it on its first frame.
-	blend = max( blend, 1.0 - smoothstep( 0.001, kMirrorAlpha, lobeAlpha ) );
+	blendFloor = max( blendFloor, 1.0 - smoothstep( 0.001, kMirrorAlpha, lobeAlpha ) );
+	blend = max( blend, blendFloor );
 	// A MOVING REFLECTOR'S MEAN IS AN EIGHT-FRAME MEAN (REFLECT-CONVERGE-1, measured on
 	// gi.reflect_mover's glossy sphere). The floor's thirty-two frames are bought for
 	// the noise of one ray on a STILL surface; a surface that moves sees the world from
@@ -1248,93 +1249,39 @@ void main()
 	// checkpoint at 4.6. A PARKED mover is not moving (motion vectors), so a still
 	// picture keeps its thirty-two frames and its grain; a mirror is at 1 already.
 	if( ownMoving )
+	{
+		blendFloor = max( blendFloor, kMovingReflectorFloor );
 		blend = max( blend, kMovingReflectorFloor );
-	// THE SURFACE IS THE SAME; WHAT IT REFLECTS IS NOT (PAN-SMEAR-1). The
-	// reprojection above validates the SURFACE — same floor, same distance — and
-	// under a camera that TRANSLATES that is not enough for any lobe, only
-	// fastest to show on a sharp one: the floor beside a pillar's reflection was
-	// reflecting the pillar a frame ago and reflects the sky now, its history
-	// passes the distance test, and thirty frames of pillar drain out of the
-	// mean one frame at a time — a stepped coloured trail behind every
-	// reflection while the camera slides (3.4 codes over the floor on the pillar
-	// fixture, after the two warm-up cases above were closed).
-	//
-	// The evidence that the reflected thing changed is in the ray itself: it
-	// went a different DISTANCE than the rays in the mean did. So the mean keeps
-	// the mean of that distance beside the surface's, and a moved camera whose
-	// ray disagrees with it by more than the lobe could explain gives the memory
-	// up — whole on a sharp lobe, most of it on a wide one, whose single sample
-	// is noise and whose ghost is already a blur. ONLY WHEN THE CAMERA MOVED:
-	// under a still camera the rays at a reflection's edge land on both sides of
-	// it frame by frame, and that disagreement is the antialiased edge
-	// converging, not evidence of anything. (A pure turn moves no reflection on
-	// its surface — the eye has not moved — and the test is on position.)
-	//
-	// "MOVED" IS PARALLAX, NOT METRES. What changes a reflection is the angle the
-	// eye's step subtends at the thing reflected, and the threshold is the angle
-	// of half a trace pixel: below it the reflected image has not moved by
-	// anything this buffer can show. An absolute step would be permanently
-	// exceeded by a tracked VR head (a fraction of a millimetre of jitter every
-	// frame), which would leave every reflected silhouette single-sample for
-	// ever; at half a millimetre over two metres the parallax is a third of this
-	// threshold, and a 0.25 m slide is ten times over it. An ORTHOGRAPHIC view
-	// has one view direction for every pixel — a slide moves no reflection on
-	// its surface — so the rule does not apply to it at all.
+	}
+	// THE MEAN RAY LENGTH follows the mean (the distance the rays in it travelled). THE PARALLAX DROP that stood here
+	// (PAN-SMEAR-1: a moved eye whose ray disagreed with the mean's length gave the memory up, and kept the count —
+	// the stage-0 read's R1) is deleted with the radiance-key cap (PHOTON-2 1b): rq_reflect_temporal.comp clamps the
+	// history to this frame's neighbourhood instead, one mechanism for motion and for a change of light.
 	float hitMean = hitT;
 	if( prev.w > 0.0 && wasHitT > 0.0 )
-	{
-		const vec3 stepped = thisEye.camPos - before.camPos;
-		const float nearer = max( min( hitT, wasHitT ), 1e-3 );
-		const float apart  = abs( hitT - wasHitT ) / nearer;
-		const float wide   = smoothstep( kMirrorAlpha, 0.25, lobeAlpha );
-		const float eyePixels = float( traceRes.x );
-		const float halfPixelAngle = 0.5 * length( thisEye.rayRight ) / max( eyePixels, 1.0 );
-		bool moved = thisEye.perspective > 0.5 && length( stepped ) > nearer * halfPixelAngle;
-		float drop = mix( 1.0, 0.35, wide );
-		// A MOVING REFLECTOR (REFLECT-MOVERS-1) sees the world from a new place just
-		// as a moved eye does: the step that matters is the eye's RELATIVE to the
-		// surface. But its reflection is not a new picture to be restarted — what
-		// it reflects slid by the parallax of that step, and a lobe as wide as the
-		// slide still integrates nearly the same things. So the memory given up is
-		// the slide measured against the lobe's width (about 2 alpha, the header's
-		// kMirrorAlpha note): a sharp lobe gives up all of it, a wide one little —
-		// "the memory is bought with the lobe's width", as the mirror ramp above
-		// has it. (Given up whole on every frame, a glossy moving sphere's horizon
-		// — where a lobe's rays land on both the floor and the sky, so every ray
-		// "disagrees" with the mean — sparkled.)
-		if( ownMoving )
-		{
-			const vec3 rel = ( thisEye.perspective > 0.5 ? stepped : vec3( 0.0 ) ) - ( world - prevSurf );
-			const float slide = length( rel ) / nearer;
-			moved = slide > halfPixelAngle;
-			drop *= clamp( slide / max( 2.0 * lobeAlpha, halfPixelAngle ), 0.0, 1.0 );
-		}
-		// (What it reflects moving by itself is the restart above, or a history
-		// found through the reflected image — validated as the same thing, so one
-		// glossy sample's length is no evidence against it.)
-		if( moved && apart > mix( 0.25, 4.0, wide ) )
-			blend = max( blend, drop );
 		hitMean = mix( wasHitT, hitT, blend );
-	}
 	// THE MOVER AGE rides the mean length's low bits: 0 when this ray hit a mover
 	// (moving or parked), one frame older otherwise (saturating at 63).
 	const float hitMeanStored = jahPackMeanLength( hitMean, hitMover ? 0.0 : wasMoverAge + 1.0 );
+	// THE CARRIED COUNT: the samples in the history this frame's sample joins (a motion-caused restart in a warm view
+	// is seeded at the warm-up, DRAG-1); the temporal pass adds this frame's and shortens it by its confidence.
 	const float seed = max( prev.w, warmHeld * kWarmupFrames );
-	const float count = min( seed + 1.0, 4096.0 );
+	// WHICH HISTORY the temporal pass may use: the surface's only, where it is a moving thing's — the reflector
+	// moved, the hit moved, or the history came through the moving hit's reflected image (rq_reflect_temporal's flag).
+	const float sampleW = clamp( blendFloor, 1e-3, 1.0 ) + ( ( ownMoving || hitMoving || virtualHeld ) ? 2.0 : 0.0 );
 	if( record )
 	{
-		// THE RECORD: this texel's history is CARRIED (radiance and count as they
-		// were) with this frame's distances, and the write-back (rq_hit_composite)
-		// replaces it with mix( prev, decoded, blend ) at count = min( max( prev.w,
-		// warm-held seed ) + 1, 4096 ) — the same mean as the lines below, the
-		// radiance arriving one pass later. The blend travels negated when the
-		// history is warm-held, which is the seed's only other input.
-		imageStore( historyCur, ivec3( tc, gEye ), prev );
+		// THE RECORD: this texel's history is CARRIED with its seeded count and this
+		// frame's distances, exactly as below; the write-back (rq_hit_composite) writes
+		// the decoded radiance as this frame's SAMPLE with the record's `sampleW`, and the
+		// temporal pass blends it like any other — the radiance arriving one pass later.
+		imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, seed ) );
+		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );   // the write-back fills it
 		const vec3 hitPos = world + worldN * bias + L * hitT;
 		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, false );
 		if( jahHitAppend( recSlot, jahHitNearLevel( recSlot ), false, recPrim, recBary, L, sunVis,
 						  reflectFootprint( lobeAlpha, hitT ),
-						  warmHeld > 0.5 ? -blend : blend, jahHitDestPack( tc, false, gEye ),
+						  sampleW, jahHitDestPack( tc, false, gEye ),
 						  world.y, length( hitPos - world ), length( world - thisEye.camPos ) ) )
 		{
 			imageStore( historyDistCur, ivec3( tc, gEye ), vec4( dist, hitMeanStored, 0.0, 0.0 ) );
@@ -1350,13 +1297,12 @@ void main()
 		}
 		return;
 	}
-	const vec3 mean = mix( prev.xyz, traced, blend );
-	// THE COUNT, AND THE ONE PLACE IT IS SEEDED (DRAG-1). Ordinarily it is
-	// exactly "how many samples are in this mean", which is what the blend
-	// above and the filter's warm-up both read. On a MOTION-CAUSED rejection
-	// (`warmHeld`) the mean restarts from this frame's sample — `blend` is 1,
-	// `prev` is zero — but the pixel is seeded at the warm-up's own threshold
-	// rather than at 1, so the filter composites the ray at full confidence
+	// THE SAMPLE AND THE CARRIED HISTORY (PHOTON-2 1b): the blend is the temporal pass'.
+	// THE COUNT'S SEED (DRAG-1). Ordinarily it is exactly "how many samples are in
+	// this mean", which is what the blend and the filter's warm-up both read. On a
+	// MOTION-CAUSED rejection (`warmHeld`) the mean restarts from this frame's sample
+	// (`prev` is zero, the floor 1) — but the pixel is seeded at the warm-up's own
+	// threshold rather than at 1, so the filter composites the ray at full confidence
 	// from the first frame instead of fading it out and back.
 	//
 	// It costs a little adaptation speed at that pixel: the running mean
@@ -1368,13 +1314,14 @@ void main()
 	// own history is kWarmupFrames old (`historyAt`) — so a freshly created view
 	// (a graded screenshot's, which lives about two frames) still fades in
 	// exactly as before, which is the guarantee the warm-up exists for.
-	imageStore( historyCur, ivec3( tc, gEye ), vec4( mean, count ) );
+	imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, seed ) );
+	imageStore( reflectSample, ivec3( tc, gEye ), vec4( traced, sampleW ) );
 	imageStore( historyDistCur, ivec3( tc, gEye ), vec4( dist, hitMeanStored, 0.0, 0.0 ) );
 	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel : kPhotonSky );
 
-	// THE COMPOSITE IS THE FILTER PASS' (round C). This shader now ends at the
-	// temporal mean: `rq_reflect_filter.comp` reads it back through a
-	// lobe-guided bilateral kernel and writes `jahSsrReflection`. Splitting
-	// them is what makes a SPATIAL filter possible at all — a pixel cannot
-	// blur with neighbours its own dispatch has not finished writing.
+	// THE TEMPORAL MEAN IS THE NEXT PASS' (PHOTON-2 1b): rq_reflect_temporal.comp
+	// clamps the carried history to this frame's samples and blends; the filter
+	// (`rq_reflect_filter.comp`, round C) then reads the mean through a lobe-guided
+	// bilateral kernel and writes `jahSsrReflection`. Each is its own dispatch
+	// because each reads neighbours the previous one wrote.
 }

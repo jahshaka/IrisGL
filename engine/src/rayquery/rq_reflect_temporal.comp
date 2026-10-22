@@ -1,0 +1,331 @@
+#version 460
+// PHOTON-2 STAGE 1b — THE REFLECTION'S TEMPORAL PASS: the history is CLAMPED to this frame's neighbourhood and the
+// sample blended in at a confidence, between the trace (rq_reflect.comp) and the spatial filter + composite
+// (rq_reflect_filter.comp). Lumen's mechanism (LumenReflectionDenoiserTemporal.usf, SPECS/research/
+// NANITE_SOURCE_FACTS_2026-10-21_B.md:1057-1121), our pass order: TRACE -> the decode's write-back -> THIS -> the filter.
+//
+// WHAT IT REPLACES. The trace used to blend its one ray into the reprojected mean itself, and two detectors decided when
+// the mean was wrong: the PARALLAX DROP (a moved eye whose ray length disagreed with the mean's by > 25 % gave the
+// memory up — whole on a sharp lobe) and the RADIANCE-KEY CAP (a lamp, cloud or rest tick capped the count at the warm
+// seed). Both are deleted. One mechanism answers motion AND a change of light: the history is pulled into the box this
+// frame's own samples span, and the further it had to be pulled, the shorter its memory.
+//
+//   THE NEIGHBOURHOOD: 21 taps — a 5 x 5 minus its corners (Lumen's kernel) — of THIS FRAME'S RAW SAMPLES
+//   (`reflectSample`, written by the trace and, for a record, by the write-back), in YCoCg: the mean and the
+//   standard deviation per channel; the box is mean +- kClampSigma x sigma. Only taps traced this frame count
+//   (the distance flag, as in the filter).
+//   TWO HISTORIES (Lumen's): the SURFACE history the trace carried (its reprojection with every motion rule of the
+//   trace: the mover's poses, the reflected image of a moving hit, the arrival and departure rules), and the HIT
+//   history — the screen position reprojected at the VIRTUAL POINT, the surface's depth plus the mean ray length
+//   along the camera's ray (where a mirror's image lies) — for a lobe whose dominant direction is the reflection's
+//   (Lumen's GetSpecularDominantDirFactor > 0.5: perceptual roughness under 0.594; every texel this tier traces).
+//   Each is clamped; their distances to the box's centre choose: the hit history alone unless it is worse than the
+//   surface's by more than kHitErrorMargin (then 0.8 surface / 0.2 hit), the surface alone where no hit history is
+//   valid or the trace said the surface's history is a moving thing's (sample.w's flag).
+//   THE CONFIDENCE: how far the clamp moved the history, over the box's extent — saturate(1 - d), then
+//   0.75 c + 0.25 (a little history even at none) — scales the frame count: N = min(N_prev c + 1, the floor's
+//   memory). The blend is max(1/N, the trace's floor for this texel: the mirror ramp, a moving reflector's eighth,
+//   1 where the texel had no history).
+//
+// A WARM VIEW KEEPS ITS WARM-UP: the filter fades a texel whose count is under kWarmupFrames to the probe (its
+// screenshot rule), so a shortened memory is stored no younger than the warm seed (kWarmupFrames + 1) — the blend
+// of THIS frame is the confidence's; the count only says the texel's answer is shown (DRAG-1's rule).
+//
+// COMPILED AT BUILD TIME by glslangValidator at --target-env spirv1.4, like the trace and the filter beside it; the
+// same descriptor set and the same Params (declared identically up to `motion`).
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+const int kMaxCascades = 4;
+layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+
+layout( set = 0, binding = 1 ) uniform Params
+{
+	/// xyz = the camera in world space, w = 1 for a perspective camera and 0
+	/// for an orthographic one (the reconstruction differs — see worldAt()).
+	vec4 camPos;
+	/// The world-space ray basis: worldDir(u,v) = rayTL + rayRight*u + rayDown*v,
+	/// scaled so its component along the camera's forward axis is exactly 1.
+	/// Then `camPos + worldDir * viewDistance` is the surface. Under an
+	/// orthographic camera rayTL/rayRight/rayDown carry the image PLANE instead
+	/// (an offset, not a ray) and `fwd` is the one view direction.
+	vec4 rayTL;
+	vec4 rayRight;
+	vec4 rayDown;
+	vec4 fwd;
+	/// x = A, y = B of Camera::getProjectionParamsAB() (reverse-Z safe),
+	/// z = the far plane (the orthographic depth scale), w = the roughness
+	/// gate's FEATHER half-width (kRayReflectFeather).
+	vec4 projParams;
+	/// xy = the trace resolution in pixels, zw = the full-resolution size of
+	/// jahSsrReflection.
+	vec4 resolution;
+	/// x = the roughness gate — the PROJECT's dial, not a renderer constant:
+	/// above it the probe/field photograph is a good enough integral of a wide
+	/// lobe and a ray is spent for nothing. The transition is FEATHERED over
+	/// projParams.w either side of it. y = the ray's maximum length in
+	/// world units, z = the frame index (the sample sequence's only input),
+	/// w = how many cascades are bound.
+	vec4 knobs;
+	/// x = 1 on a frame the view RESTS (PHOTON-2 1e: the floor lifted, the clamp off — rq_reflect_temporal.comp), y = the
+	/// surface bias in world units (a ray starts this far off its own surface),
+	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
+	/// weight (the floor on 1/n — how long the temporal mean remembers).
+	vec4 knobs2;
+	/// The colour an escaping ray reads when no sky cubemap is bound.
+	vec4 skyColour;
+	/// The VIEW space's three axes in world space (the camera's orientation as
+	/// a rotation): what turns the G-buffer's view-space normal back into one.
+	vec4 viewAxisX;
+	vec4 viewAxisY;
+	vec4 viewAxisZ;
+	/// Per cascade: xyz = the voxel box's world origin, w = the box's largest
+	/// side in world units (the cell size times the resolution).
+	vec4 voxelOrigin[kMaxCascades];
+	/// Per cascade: xyz = 1 / the voxel box's world size, w = one cell in world
+	/// units (the sample point's bias along the ray).
+	vec4 voxelInvSize[kMaxCascades];
+	/// THE PREVIOUS FRAME'S CAMERA, in exactly the same five numbers as this
+	/// frame's (camPos, rayTL, rayRight, rayDown, fwd). Not a view-projection
+	/// matrix, deliberately: inverting the basis above is the same arithmetic
+	/// forwards and backwards, so the reprojection cannot disagree with the
+	/// reconstruction about a handedness, a y-flip or a depth convention — and
+	/// each of those is a silent half-pixel-to-whole-image error that only shows
+	/// up as a smear while the camera moves.
+	vec4 prevCamPos;
+	vec4 prevRayTL;
+	vec4 prevRayRight;
+	vec4 prevRayDown;
+	vec4 prevFwd;
+	/// ---- THE SECOND EYE (lane REFLECT-VR-1, LAYERED-STEREO-1) ------------
+	/// x = 1 when this target carries TWO EYES, one per LAYER of every screen
+	/// image here (the dispatch's z). Then the five basis vectors above are the
+	/// LEFT eye's and the five below the right eye's, each over its own layer
+	/// as a 0..1 image; with x = 0 the block below is unread and the basis
+	/// above is the one camera's, exactly as before. One dispatch, one
+	/// descriptor set, one history ring: the eye is the layer (gEye).
+	vec4 stereo;
+	vec4 camPos2;
+	vec4 rayTL2;
+	vec4 rayRight2;
+	vec4 rayDown2;
+	vec4 fwd2;
+	vec4 prevCamPos2;
+	vec4 prevRayTL2;
+	vec4 prevRayRight2;
+	vec4 prevRayDown2;
+	vec4 prevFwd2;
+	/// ...the trace's surface-cache and hit-record blocks (unread here), then
+	/// REFLECT-MOVERS-1's `motion`: w = 1 with the lane's rules on — the restart
+	/// band below reads it.
+	vec4 cards;
+	vec4 hitList;
+	vec4 hitSun;
+	vec4 hitSun2;
+	vec4 motion;
+} p;
+
+int gEye = 0;
+layout( set = 0, binding = 3 ) uniform sampler2DArray gBufShadowRoughness;
+layout( set = 0, binding = 4 ) uniform sampler2DArray sceneDepth;
+layout( rgba16f, set = 0, binding = 6 ) uniform readonly image2DArray historyPrev;
+layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray historyCur;
+layout( rg32f, set = 0, binding = 8 ) uniform readonly image2DArray historyDistPrev;
+layout( rg32f, set = 0, binding = 9 ) uniform readonly image2DArray historyDistCur;
+/// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b): rgb = the ray's radiance, w = the trace's blend FLOOR for the texel
+/// (0 < w <= 1) plus 2 when only the SURFACE history may be used; w = 0 = no sample this frame (a record the decode
+/// did not shade, a non-finite answer): the carried history stays as it is.
+layout( rgba16f, set = 0, binding = 45 ) uniform readonly image2DArray reflectSample;
+
+#include "jah_reproject.glsl"
+
+const float kMaxRadiance = 1024.0;
+const float kWarmupFrames = 8.0;
+/// The box's half-extent in standard deviations (Lumen's r.Lumen.Reflections.Temporal.NeighborhoodClampScale, 1).
+const float kClampSigma = 1.0;
+/// How much worse (relative to the box centre's luminance) the hit history's error may be before the surface
+/// history takes 0.8 of the blend (Lumen's 0.01, in its tonemapped units: one per cent of the centre here).
+const float kHitErrorMargin = 0.01;
+
+bool finite1( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
+bool finite3( vec3 v ) { return finite1( v.x ) && finite1( v.y ) && finite1( v.z ); }
+
+vec3 toYCoCg( vec3 c )
+{
+	return vec3( dot( c, vec3( 0.25, 0.5, 0.25 ) ), dot( c, vec3( 0.5, 0.0, -0.5 ) ), dot( c, vec3( -0.25, 0.5, -0.25 ) ) );
+}
+vec3 fromYCoCg( vec3 y )
+{
+	return vec3( y.x + y.y - y.z, y.x + y.z, y.x - y.y - y.z );
+}
+
+float viewDistance( float rawDepth )
+{
+	if( p.camPos.w < 0.5 )
+		return abs( ( rawDepth - p.projParams.x ) / p.projParams.y );
+	return p.projParams.y / ( rawDepth - p.projParams.x );
+}
+
+struct EyeImage { vec3 camPos; float perspective; vec3 rayTL; vec3 rayRight; vec3 rayDown; vec3 fwd; };
+EyeImage eyeNow( int eye )
+{
+	EyeImage e;
+	if( eye == 1 ) { e.camPos = p.camPos2.xyz; e.perspective = p.camPos2.w; e.rayTL = p.rayTL2.xyz;
+					 e.rayRight = p.rayRight2.xyz; e.rayDown = p.rayDown2.xyz; e.fwd = p.fwd2.xyz; }
+	else { e.camPos = p.camPos.xyz; e.perspective = p.camPos.w; e.rayTL = p.rayTL.xyz;
+		   e.rayRight = p.rayRight.xyz; e.rayDown = p.rayDown.xyz; e.fwd = p.fwd.xyz; }
+	return e;
+}
+EyeImage eyeBefore( int eye )
+{
+	EyeImage e;
+	if( eye == 1 ) { e.camPos = p.prevCamPos2.xyz; e.perspective = p.prevCamPos2.w; e.rayTL = p.prevRayTL2.xyz;
+					 e.rayRight = p.prevRayRight2.xyz; e.rayDown = p.prevRayDown2.xyz; e.fwd = p.prevFwd2.xyz; }
+	else { e.camPos = p.prevCamPos.xyz; e.perspective = p.prevCamPos.w; e.rayTL = p.prevRayTL.xyz;
+		   e.rayRight = p.prevRayRight.xyz; e.rayDown = p.prevRayDown.xyz; e.fwd = p.prevFwd.xyz; }
+	return e;
+}
+vec3 worldAt( EyeImage e, vec2 uv, float dist )
+{
+	const vec3 plane = e.rayTL + e.rayRight * uv.x + e.rayDown * uv.y;
+	if( e.perspective < 0.5 )
+		return e.camPos + plane + e.fwd * dist;
+	return e.camPos + plane * dist;
+}
+/// rq_reflect.comp's mean-length packing: the length without its six low mantissa bits (the mover age).
+float jahMeanLength( float y ) { return uintBitsToFloat( floatBitsToUint( y ) & ~63u ); }
+
+/// THE TILE: the group's 8 x 8 and the 2-texel ring the 5 x 5 reaches, this frame's samples in YCoCg (w = 1 where a
+/// sample exists).
+const int kReach = 2;
+const int kTileSide = 8 + 2 * kReach;
+shared vec4 sTap[kTileSide * kTileSide];
+
+void main()
+{
+	const ivec2 traceRes = ivec2( p.resolution.xy );
+	const ivec2 tc = ivec2( gl_GlobalInvocationID.xy );
+	gEye = int( gl_GlobalInvocationID.z );
+	const ivec2 tileOrigin = ivec2( gl_WorkGroupID.xy ) * 8 - ivec2( kReach );
+	for( int i = int( gl_LocalInvocationIndex ); i < kTileSide * kTileSide; i += 64 )
+	{
+		const ivec2 t = tileOrigin + ivec2( i % kTileSide, i / kTileSide );
+		vec4 v = vec4( 0.0 );
+		if( all( greaterThanEqual( t, ivec2( 0 ) ) ) && all( lessThan( t, traceRes ) ) &&
+			imageLoad( historyDistCur, ivec3( t, gEye ) ).x > 0.0 )
+		{
+			const vec4 s = imageLoad( reflectSample, ivec3( t, gEye ) );
+			if( s.w > 0.0 && finite3( s.xyz ) )
+				v = vec4( toYCoCg( clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ), 1.0 );
+		}
+		sTap[i] = v;
+	}
+	barrier();
+	if( any( greaterThanEqual( tc, traceRes ) ) )
+		return;
+	// A texel the trace declined this frame (the distance flag) keeps what it holds; so does one with no sample.
+	if( imageLoad( historyDistCur, ivec3( tc, gEye ) ).x <= 0.0 )
+		return;
+	const vec4 s = imageLoad( reflectSample, ivec3( tc, gEye ) );
+	if( !( s.w > 0.0 ) || !finite3( s.xyz ) )
+		return;
+	const bool surfaceOnly = s.w > 1.5;
+	const float blendFloor = clamp( surfaceOnly ? s.w - 2.0 : s.w, 0.0, 1.0 );
+	const vec3 sample1 = clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
+	const vec4 carried = imageLoad( historyCur, ivec3( tc, gEye ) );   // the surface history and its count (seeded)
+	const float seed = carried.w;
+	const bool atRest = p.knobs2.x > 0.5;
+	const bool warmView = p.stereo.y >= kWarmupFrames;
+	// THE MEMORY'S LENGTH: the floor's (thirty-two frames) while moving; unbounded at rest (stage 1e: the floor is a
+	// law for a moving eye, not for a still one) — the count's own 4096.
+	const float maxN = atRest ? 4096.0 : 1.0 / max( p.knobs2.w, 1e-3 );
+	if( seed <= 0.0 || blendFloor >= 1.0 || !finite3( carried.xyz ) )
+	{
+		imageStore( historyCur, ivec3( tc, gEye ), vec4( sample1, min( max( seed, 0.0 ) + 1.0, 4096.0 ) ) );
+		return;
+	}
+	vec3 history = clamp( carried.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
+	float confidence = 1.0;
+	if( !atRest )
+	{
+		// ---- THE BOX: 21 taps of this frame's samples (the 5 x 5 without its corners) ----
+		vec3 m1 = vec3( 0.0 ), m2 = vec3( 0.0 );
+		float n = 0.0;
+		const ivec2 l = ivec2( gl_LocalInvocationID.xy ) + ivec2( kReach );
+		for( int dy = -kReach; dy <= kReach; ++dy )
+			for( int dx = -kReach; dx <= kReach; ++dx )
+			{
+				if( abs( dx ) == kReach && abs( dy ) == kReach )
+					continue;
+				const vec4 v = sTap[( l.y + dy ) * kTileSide + l.x + dx];
+				if( v.w <= 0.0 )
+					continue;
+				m1 += v.xyz;
+				m2 += v.xyz * v.xyz;
+				n += 1.0;
+			}
+		if( n >= 3.0 )
+		{
+			const vec3 centre = m1 / n;
+			const vec3 sigma = sqrt( max( m2 / n - centre * centre, vec3( 0.0 ) ) );
+			const vec3 extent = max( kClampSigma * sigma, vec3( 1e-4 ) );
+			const vec3 lo = centre - extent, hi = centre + extent;
+			const vec3 surfY = toYCoCg( history );
+			const vec3 surfC = clamp( surfY, lo, hi );
+			vec3 histY = surfY, histC = surfC;
+			// ---- THE HIT HISTORY: the virtual point (Lumen's hit history; no depth test, as Lumen's) ----
+			if( !surfaceOnly )
+			{
+				const ivec2 fullRes = ivec2( p.resolution.zw );
+				const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
+				const vec2 uv = ( vec2( tc * scale ) + 0.5 * vec2( scale ) ) / vec2( fullRes );
+				const float rawDepth = texture( sceneDepth, vec3( uv, float( gEye ) ) ).x;
+				const float meanT = jahMeanLength( imageLoad( historyDistCur, ivec3( tc, gEye ) ).y );
+				const float alpha = max( texture( gBufShadowRoughness, vec3( uv, float( gEye ) ) ).y * 0.999 + 0.001, 1e-6 );
+				const float rough = sqrt( alpha );
+				const float sDom = clamp( 1.0 - rough, 0.0, 1.0 );
+				const bool dominant = sDom * ( sqrt( sDom ) + rough ) > 0.5;   // GetSpecularDominantDirFactor
+				if( dominant && rawDepth > 0.0 && rawDepth < 1.0 && meanT > 0.0 && finite1( meanT ) )
+				{
+					const EyeImage now = eyeNow( gEye );
+					const vec3 world = worldAt( now, uv, viewDistance( rawDepth ) );
+					const vec3 viewDir = now.perspective < 0.5 ? now.fwd : normalize( world - now.camPos );
+					const vec3 virtualPoint = world + viewDir * meanT;
+					const EyeImage before = eyeBefore( gEye );
+					vec2 puv;
+					float pz;
+					if( jahReproject( virtualPoint, before.camPos, before.perspective, before.rayTL, before.rayRight,
+									  before.rayDown, before.fwd, puv, pz ) == 0 )
+					{
+						const ivec2 pc = clamp( ivec2( puv * vec2( traceRes ) ), ivec2( 0 ), traceRes - 1 );
+						const vec4 h = imageLoad( historyPrev, ivec3( pc, gEye ) );
+						if( h.w > 0.0 && finite3( h.xyz ) &&
+							imageLoad( historyDistPrev, ivec3( pc, gEye ) ).x > 0.0 )
+						{
+							const vec3 hitY = toYCoCg( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) );
+							const vec3 hitC = clamp( hitY, lo, hi );
+							const float surfErr = length( surfC - centre );
+							const float hitErr = length( hitC - centre );
+							const float a = hitErr > surfErr + kHitErrorMargin * max( centre.x, 1e-4 ) ? 0.8 : 0.0;
+							histY = mix( hitY, surfY, a );
+							histC = mix( hitC, surfC, a );
+						}
+					}
+				}
+			}
+			// ---- THE CONFIDENCE: how far the clamp moved the history, over the box ----
+			const float d = length( abs( histC - histY ) / max( extent, vec3( 1e-3 * max( centre.x, 1e-4 ) ) ) );
+			confidence = 0.75 * clamp( 1.0 - d, 0.0, 1.0 ) + 0.25;
+			history = clamp( fromYCoCg( histC ), vec3( 0.0 ), vec3( kMaxRadiance ) );
+		}
+	}
+	const float frames = min( seed * confidence + 1.0, maxN );
+	const float blend = max( 1.0 / frames, blendFloor );
+	const vec3 mean = mix( history, sample1, blend );
+	// The count says how much of an integral the answer holds (the filter's warm-up and fresh widening read it): a
+	// warm view's shortened memory is stored no younger than the warm seed.
+	const float count = warmView ? max( frames, min( seed + 1.0, kWarmupFrames + 1.0 ) ) : frames;
+	imageStore( historyCur, ivec3( tc, gEye ), vec4( mean, min( count, 4096.0 ) ) );
+}
