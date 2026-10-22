@@ -1288,8 +1288,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             in.photonOverlay ? in.photonOverlayGeneration * 2u + (in.photonOverlayGatherHits ? 1u : 0u) : 0u;
         // ...and never while the gather-hits readback runs (FAR-SUN-1): a held view traces
         // nothing, and the instrument reads the trace.
+        // ...and THE INPUTS QUIET (PHOTON-2 stage 2's round, H1): a write this frame (the key) or work still owed
+        // keeps the view SETTLING - its EMA takes the inputs' change at its rate and no rest mean starts - so the
+        // rest mean and the hold come only once every input has finished, and nothing lands on a held picture.
         const bool still = temporal && !in.tuning.restOff && !in.stereo && sameCamera &&
-                           in.restKey == v.restKey && photon == v.photonLast && !in.hitsReadback;
+                           in.restKey == v.restKey && !in.inputsBusy && photon == v.photonLast && !in.hitsReadback;
         v.photonLast = photon;
         v.restKey = in.restKey;
         // THE SETTLE: a restart zeroes it (the view's birth or an estimator change

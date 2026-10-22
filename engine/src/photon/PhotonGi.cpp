@@ -449,6 +449,18 @@ static const float kIfdStopMeanFloor = 1e-6f;
 // variance stop (minimum 4) can end a probe in the change's own pass.
 static const Ogre::uint32 kIfdKeepOnChange  = 0u;
 static const Ogre::uint32 kIfdChangeSamples = kPhotonBlendFrames;
+// THE REST BUDGET (PHOTON-2 stage 2's round, H2; R1's principle for the field): while the authoritative camera
+// stands still the held gather and the held reflections dispatch nothing, so the field spends that GPU to finish
+// its owed work fast — kIfdRestIntegrations probe integrations a frame, calibrated on Bistro Exterior at Epic 1080p
+// (an integration measured 3.3 us there: 1,792 of them = 5.9 ms, under the round's 6 ms). A change integrates every
+// probe of its batch kIfdChangeSamples deep, so its batch is a quarter of that; a REFINEMENT integrates only the
+// probes the variance stop has not stopped (a stopped probe's group exits at its history read), so its batch is
+// that over the open share of the grid (the stop's reading, four frames late) — the same GPU, a larger batch as the
+// field converges. Moving: the budget's own batch.
+static const Ogre::uint32 kIfdRestIntegrations = 1792u;
+// ...A REFINEMENT'S open probe measured cheaper there (an unstopped probe's sample beside the change's four: Bistro's
+// refinement frames ran 1.5 ms at the change's count), so its count is six times the change's - still under 6 ms.
+static const Ogre::uint32 kIfdRestRefineIntegrations = 6u * kIfdRestIntegrations;
 
 // HOW FAST A RE-CONVERGE RUNS, in "field fractions per frame" at update budget
 // 1. The P0 spike's cost table is the argument for converging FAST rather than
@@ -980,7 +992,6 @@ void PhotonComponent::reintegrateFieldAfterInjection() {
                 mIfdProbesDone = mIfdTotalProbes;
                 work.setUnits(mIfdTotalProbes);
             }
-            noteFieldSettled();   // a paused field's whole integration: its last write
         }
     }}
 
@@ -1211,24 +1222,8 @@ GiStatus PhotonComponent::giStatus() const {
         st.ifdRefinesOwed   = mIfd ? unsigned(mIfd->getRefinesOwed() +
                                               (mIfd->isWorkDone() ? 0u : 1u)) : 0u;
         {
-            // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest).
-            bool cascadePending = mGiCascadeDirtyAll || !mGiCascadeDirtyBoxes.empty();
-            for (const VctCascade &c : mVctCascades) cascadePending = cascadePending || c.pending > 0;
-            const bool rebuildPending = mGiCachesDirty || mGiChainShapeDirty ||
-                                        mGiBuildStage != GiBuildStage::Idle || cascadePending;
-            // ...AND A RE-SOLVE THE SCHEDULER HOLDS PENDING IS NOT REST (ENGINE-UPGRADE-2B stage 4): it fires
-            // once the change has held still for its window, and a picture taken before it is not the scene's
-            // answer. A paused budget follows nothing and keeps what it owes for the un-pause (plan()).
-            bool injectionOwed = mGiSettleStepsOwed > 0 || mGiTickOwed != GiTickOwed::None ||
-                                 (mGiPlan.pendingRefresh && mGi.updateBudget > 0);
-            // ...AND A BOUNCE SERIES STILL BEING MEASURED (PHOTON-5 stage 5): its reading may ask for
-            // more passes than the volume was lit with, and the re-injection that answers it changes
-            // the picture (harvestBounceEnergy).
-            for (const VctCascade &c : mVctCascades) injectionOwed = injectionOwed || c.bounceEnergyPending;
-            const bool fieldBusy = mIfd && mIfdTotalProbes > 0u &&
-                                   (mIfdFollowOwed != 0 || mIfdProbesDone < mIfdTotalProbes ||
-                                    (mIfdProbesPerFrame > 0u && st.ifdRefinesOwed > 0u));
-            st.giAtRest = !rebuildPending && !injectionOwed && !fieldBusy;
+            // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest; giInputsOwed).
+            st.giAtRest = !giInputsOwed();
         }
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
         st.probeCapturesLastFrame = mPcc ? mProbeCapturesLastFrame : 0;
@@ -3782,7 +3777,8 @@ void PhotonComponent::forwardPlusLightCensus(unsigned &lights, unsigned &budget)
 // the scene graph now (the boxes it reads are the frame's own there), but what these two OWE — a rebuild through the
 // ordinary pending-GI flush — must be owed before that flush runs, in this frame, as before; and the cards' residency
 // centres on this camera before planFrame has run.
-void PhotonComponent::noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo) {
+void PhotonComponent::noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo, bool still) {
+    mGiCamStillFrames = still ? std::min(mGiCamStillFrames + 1u, 1u << 20) : 0u;
     // THE VR CASCADE PROFILE FOLLOWS THE DRIVER (V1-RIG item 4). The view that
     // places the chain is the one that reads it, and in a session that is the
     // headset's — five times the pixels for half the frame. A change of driver
@@ -7189,6 +7185,28 @@ void PhotonComponent::teardownIrradianceField() {
     mIfd = nullptr;
 }
 
+// THE ONE SETTLE PREDICATE (GiStatus::giAtRest = its negation; the gather's inputsBusy reads it too, PHOTON-2 stage
+// 2's round): the chain's own owed work.
+bool PhotonComponent::giInputsOwed() const {
+    bool cascadePending = mGiCascadeDirtyAll || !mGiCascadeDirtyBoxes.empty();
+    for (const VctCascade &c : mVctCascades) cascadePending = cascadePending || c.pending > 0;
+    const bool rebuildPending = mGiCachesDirty || mGiChainShapeDirty ||
+                                mGiBuildStage != GiBuildStage::Idle || cascadePending;
+    // ...AND A RE-SOLVE THE SCHEDULER HOLDS PENDING IS NOT REST (ENGINE-UPGRADE-2B stage 4): it fires
+    // once the change has held still for its window, and a picture taken before it is not the scene's
+    // answer. A paused budget follows nothing and keeps what it owes for the un-pause (plan()).
+    bool injectionOwed = mGiSettleStepsOwed > 0 || mGiTickOwed != GiTickOwed::None ||
+                         (mGiPlan.pendingRefresh && mGi.updateBudget > 0);
+    // ...AND A BOUNCE SERIES STILL BEING MEASURED (PHOTON-5 stage 5): its reading may ask for
+    // more passes than the volume was lit with, and the re-injection that answers it changes
+    // the picture (harvestBounceEnergy).
+    for (const VctCascade &c : mVctCascades) injectionOwed = injectionOwed || c.bounceEnergyPending;
+    const bool fieldBusy = mIfd && mIfdTotalProbes > 0u &&
+                           (mIfdFollowOwed != 0 || mIfdProbesDone < mIfdTotalProbes ||
+                            (mIfdProbesPerFrame > 0u && (mIfd->getRefinesOwed() > 0u || !mIfd->isWorkDone())));
+    return rebuildPending || injectionOwed || fieldBusy;
+}
+
 void PhotonComponent::planField(FrameWork &w) {
     if (!mIfd) return;
     // The variance stop's counters, read back from an earlier frame's integrations - and the frame the field's
@@ -7223,15 +7241,20 @@ void PhotonComponent::planField(FrameWork &w) {
         // 2.8x the budget's integrations in one frame (the stage 4 read) - the hitch the stop exists to
         // remove. So the stop saves the work and the frames its early end cuts, never more per frame.
         JAH_TRY {
-            if (mIfd->allProbesStopped()) { mIfd->endRefinements(); noteFieldIdle(); return; }   // converged early
-            if (mIfd->isWorkDone() && !mIfd->beginOwedRefinement()) { noteFieldIdle(); return; }   // converged
+            if (mIfd->allProbesStopped()) { mIfd->endRefinements(); return; }   // converged early
+            if (mIfd->isWorkDone() && !mIfd->beginOwedRefinement()) return;   // converged
             w.field = FrameWork::Field::Refine;
-            w.fieldBatch = std::min(mIfdProbesPerFrame, mIfd->getWorkRemaining());
-            mIfdBusy = true;
+            Ogre::uint32 batch = mIfdProbesPerFrame;
+            if (mGiCamStillFrames) {
+                const float open = mIfdTotalProbes
+                    ? 1.0f - float(std::min(mIfd->getProbesStopped(), mIfdTotalProbes)) / float(mIfdTotalProbes)
+                    : 1.0f;
+                batch = std::max(batch, Ogre::uint32(float(kIfdRestRefineIntegrations) / std::max(open, 1.0f / 16.0f)));
+            }
+            w.fieldBatch = std::min(batch, mIfd->getWorkRemaining());
         } JAH_CATCH(mError, );
         return;
     }
-    mIfdBusy = true;
     // THE FIELD'S PROGRESSIVE RE-INTEGRATION (ENGINE-5 item 2) — the
     // budget's turn, one batch of probes a frame, so `Sweep` is its
     // reason: nothing changed, this is the cache catching up. A
@@ -7241,21 +7264,13 @@ void PhotonComponent::planField(FrameWork &w) {
     w.fieldReplacing = mIfd->getWorkMode() == Ogre::PhotonIrradianceField::IntegrateFresh;
     // THE BUDGET IS INTEGRATIONS A FRAME (PHOTON-2 stage 2a): a change's batch integrates each of its probes
     // kIfdChangeSamples deep, so it takes that many times fewer probes - the frame's GPU stays the budget's.
+    // ...AND AT REST THE REST BUDGET (H2: kIfdRestIntegrations).
     const Ogre::uint32 deep =
         mIfd->getWorkMode() == Ogre::PhotonIrradianceField::IntegrateChange ? std::max(kIfdChangeSamples, 1u) : 1u;
-    w.fieldBatch = std::min(std::max(mIfdProbesPerFrame / deep, 1u), mIfdTotalProbes - mIfdProbesDone);
+    const Ogre::uint32 integrations =
+        mGiCamStillFrames ? std::max(mIfdProbesPerFrame, kIfdRestIntegrations) : mIfdProbesPerFrame;
+    w.fieldBatch = std::min(std::max(integrations / deep, 1u), mIfdTotalProbes - mIfdProbesDone);
 }
-
-// THE FIELD'S LAST WRITE (PHOTON-2 stage 2c): the frame its owed work runs out — the refinements done or every
-// probe stopped — after a frame that wrote it. The gather's rest key folds the count (gatherRestKey): a held view
-// takes the field's final answer once, never every intermediate write (the budget's ticks leave the key).
-void PhotonComponent::noteFieldIdle() {
-    if (!mIfdBusy) return;
-    mIfdBusy = false;
-    noteFieldSettled();
-}
-
-void PhotonComponent::noteFieldSettled() { ++mIfdSettles; }
 
 void PhotonComponent::recordField(const FrameWork &w) {
     if (w.field == FrameWork::Field::None) return;
@@ -7267,14 +7282,8 @@ void PhotonComponent::recordField(const FrameWork &w) {
             mIfd->update(w.fieldBatch);
             work.setUnits(w.fieldBatch);
         }
-        if (w.field == FrameWork::Field::Integrate) {
+        if (w.field == FrameWork::Field::Integrate)
             mIfdProbesDone = std::min(mIfdTotalProbes, mIfdProbesDone + w.fieldBatch);
-            // A CHANGE'S (or a re-placement's) LAST WRITE: every probe holds the new light now (kIfdChangeSamples
-            // deep) and what is still owed is refinement - noise inside the field's precision. The gather's held
-            // view takes this answer (stage 2c) rather than waiting out the refinements to the target (a texel
-            // that has read no light never stops its probe: photon-room's lamp step refined to frame 144).
-            if (mIfdProbesDone >= mIfdTotalProbes) noteFieldSettled();
-        }
     } JAH_CATCH(mError, );
 }
 
@@ -7404,7 +7413,6 @@ void PhotonComponent::followCascade0Field(GiStaleReason reason) {
                 mIfdProbesDone = mIfdTotalProbes;
                 work.setUnits(mIfdTotalProbes);
             }
-            noteFieldSettled();   // a paused field's whole integration: its last write
         }
     } JAH_CATCH(mError, );
 }
@@ -7442,7 +7450,6 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
                 mIfdProbesDone = mIfdTotalProbes;
                 work.setUnits(mIfdTotalProbes);
             }
-            noteFieldSettled();   // a paused field's whole integration: its last write
         }
         return true;
     }

@@ -7264,6 +7264,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         if (arm(ArmId::GatherHistoryReadback, false)) in.tuning.historyReadback = true;
     }
     in.restKey = gatherRestKeyArmed(scene);
+    in.inputsBusy = scene->photon().gatherInputsBusy();
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
     in.alphaTable = alphaTableOf(scene);
@@ -9258,18 +9259,17 @@ bool PhotonComponent::probeGatherWanted() const {
     return mScene.rayTracingResolved();
 }
 
-/// THE GATHER'S REST KEY (PHOTON-GATHER-1d; PHOTON-2 stage 2c): what BREAKS a still view's rest — a frame whose
-/// key and camera equal the last frame's is a REST frame (ScreenProbeGather: the rest mean, the hold). It folds the
-/// EDITS that change what the gather answers and the field's LAST write, and nothing the caches do on their own
-/// budget: a light or environment write and a light removed (the host's edits; a light moved included), a node
-/// moved (the transform epoch: a held view would composite its old answer under the moved pixels), a material
-/// edit, and the irradiance field's last write (its owed work ran out: the held view takes the field's final
-/// answer once). LEFT OUT (the budget's ticks — the stage-0 base measured the rest restarting at their cadence and
-/// never reaching its hold while they ran, G1): the field's integration count (every refinement's readback), the
-/// cards' captures and relights, the chain's settle injections and cascade re-lattices (giLightingSerial), the
-/// shadow scan's per-frame writes and the ray rule's refits. A break is not a restart: the pixel histories go on
-/// (the restart key is gatherRestartKey). The reflection reads more of the caches and keeps them in ITS rest key
-/// (RayQueryTier::reflectRestKey, reflectionReadsKey below — PHOTON-2 F5).
+/// THE GATHER'S REST KEY (PHOTON-GATHER-1d; PHOTON-2 stage 2's round, H1): what PREVENTS THE HOLD — every write to an
+/// input of the gather's answer, the frame it is recorded: a light or environment write and a light removed, a node
+/// moved (the transform epoch with the shadow scan's writes), a material edit, an injection landing or a cascade
+/// rebuilt (giLightingSerial, the settle's steps included), the ray rule's refits, a field dispatch (counted on the
+/// CPU as it is recorded: no readback latency) and the surface cache's captures and relights. With the camera still
+/// and this key moving, the gather is SETTLING: its EMA goes on taking every input's change at its rate, no rest
+/// mean starts and nothing holds — the stage-2 key that left these out held the picture over changing inputs, and
+/// they landed later as BURSTS (Bistro after the 4 m dolly: 385k px at frames 29-45, 273k at 188-205). The key and
+/// gatherInputsBusy (work still OWED between two writes) together decide RESTING. What RESTARTS is another key
+/// (gatherRestartKey: restart-class events only) — a write never restarts a history. The reflection folds what its
+/// rays read beside these (reflectionReadsKey, the field's every integration included).
 unsigned long long PhotonComponent::gatherRestKey() const {
     unsigned long long key = 1469598103934665603ull;
     const auto fold = [&key](unsigned long long v) {
@@ -9278,10 +9278,34 @@ unsigned long long PhotonComponent::gatherRestKey() const {
     };
     fold(mScene.lightWriteSerial());
     fold(mScene.lightsRemoved());
-    fold(mScene.transformEpoch());
+    fold(mScene.shadowEpoch() + mScene.rayLevelRefits());
     fold(mMaterialEditSerial);
-    fold(mIfdSettles);
+    fold(giLightingSerial());
+    fold(mIfd ? mIfd->getDispatches() : 0ull);
+    if (mSurfaceCache) {
+        CardCacheStatus cs;
+        mSurfaceCache->fillStatus(cs);
+        fold(cs.captures);
+        fold(cs.stillTraces);
+        fold(cs.relights);
+        fold(cs.indirectRelights);
+    }
     return key;
+}
+
+/// THE GATHER'S INPUTS STILL OWE WORK (PHOTON-2 stage 2's round, H1): a cascade rebuild or a chain re-solve pending,
+/// a settle step or a light tick owed, a bounce series being measured, the field's integration or refinements owed,
+/// and the surface cache's capture queue or stale sun terms. Between two writes of a cache that runs at a cadence
+/// the rest key stands still for a frame or more; this is what keeps a view SETTLING through those gaps, so its rest
+/// mean starts only once every input has finished (the hold = the last write + the settle).
+bool PhotonComponent::gatherInputsBusy() const {
+    if (giInputsOwed()) return true;
+    if (mSurfaceCache) {
+        CardCacheStatus cs;
+        mSurfaceCache->fillStatus(cs);
+        if (cs.queueLength > 0u || cs.stillPending > 0u) return true;
+    }
+    return false;
 }
 
 /// EVERYTHING A REFLECTION RAY READS BESIDE THE EDITS (PHOTON-2 F5; the gather's rest key before stage 2c): the

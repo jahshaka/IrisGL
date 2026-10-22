@@ -266,6 +266,7 @@ namespace Ogre
         /// Jahshaka (PHOTON-2 stage 2a): the samples a CHANGE integrates per probe in the
         /// pass that replaces its estimate (setChangeSamples; 1 = upstream's one).
         uint32          mChangeSamples;
+        uint64          mDispatches = 0u;
         bool            mRotateRays;
         /// Refinements owed after the current work (every event - a build, a
         /// re-placement, a scroll, a change - owes mTargetSamples - 1 of them), each

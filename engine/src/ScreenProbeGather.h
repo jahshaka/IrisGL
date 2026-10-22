@@ -229,11 +229,16 @@ struct GatherInputs {
     /// the view's SSR row (GA-TIERROW). ...and the test door's overrides.
     GiGatherFacts facts;
     GatherTuning tuning;
-    /// THE SCENE'S REST KEY (OgreScene::gatherRestKey): moves on a light write,
-    /// wherever an injection LANDS, when the scene's geometry moves and when the
-    /// surface cache captures or relights. With the camera's basis it decides
-    /// whether this frame is a REST frame (the rest mean, then the hold).
+    /// THE SCENE'S REST KEY (OgreScene::gatherRestKey): moves on every write to an
+    /// input — a light write, an injection landing, a field dispatch, a capture or
+    /// relight, a node moved. With the camera's basis and `inputsBusy` it decides
+    /// the view's state (PHOTON-2 stage 2's round, H1): MOVING (the camera moved),
+    /// SETTLING (the camera still, an input written or owed: the EMA goes on, no
+    /// rest mean, no hold), RESTING (still and quiet: the rest mean, then the hold).
     unsigned long long restKey = 0ull;
+    /// The scene's GI inputs still owe work (PhotonComponent::gatherInputsBusy): a view
+    /// settles, never rests, until none is owed.
+    bool inputsBusy = false;
     /// THE SCENE'S RESTART KEY (OgreScene::gatherRestartKey, PHOTON-GATHER-1d fix
     /// round): moves only on a DISCONTINUITY the history cannot follow per pixel
     /// — a light, sky or material write, an injection landing. A continuous

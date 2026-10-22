@@ -1988,7 +1988,17 @@ void OgreView::updateParticles() {
 }
 
 void OgreView::noteGiCamera() {
-    if (drawing() && mScene && mCamera) mScene->noteGiCamera(cameraWorldPosition(mCamera), mStereo);
+    if (drawing() && mScene && mCamera) {
+        // STILL = the same derived pose as the last note, bit for bit (the gather's own rest test reads the
+        // basis the same way); a tracked head is never still.
+        const Ogre::Vector3 pos = cameraWorldPosition(mCamera);
+        const Ogre::Quaternion rot = mCamera->getDerivedOrientation();
+        const bool still = mGiNoteKnown && !mStereo && pos == mGiNotePos && rot == mGiNoteRot;
+        mGiNotePos = pos;
+        mGiNoteRot = rot;
+        mGiNoteKnown = true;
+        mScene->noteGiCamera(pos, mStereo, still);
+    }
 }
 
 void OgreView::updateGi() {

@@ -5888,7 +5888,9 @@ public:
     bool iblReadPending() const { return mIblPending; }
     void latchProbeCaptures(bool drawn) { return mPhoton.latchProbeCaptures(drawn); }
     void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) { return mPhoton.updateGiTracking(camPos, driverStereo); }
-    void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo) { mPhoton.noteGiCamera(camPos, driverStereo); }
+    void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo, bool still) {
+        mPhoton.noteGiCamera(camPos, driverStereo, still);
+    }
     /// THE PCC'S DIRTY-PROBE COLLECTION (U4 decision 14.3; the fork's ParallaxCorrectedCubemapAuto::collectDirtyProbes):
     /// the engine's, once a frame after its probe budget — the PCC's own frameStarted collection is switched off at
     /// its build (setCollectsExternally). A paused PCC (an undrawn scene) collects nothing, as frameStarted did.
@@ -7565,6 +7567,11 @@ public:
     /// The authoritative view's camera to its scene's GI at the frame's head (U4 stage 3: updateGi runs after the
     /// scene graph; the driver's profile and the first camera owe the pending flush before it runs).
     void noteGiCamera();
+    /// The pose noteGiCamera last saw (PHOTON-2 stage 2's round, H2: the camera STILL since the last frame - the
+    /// field's rest budget runs only then).
+    Ogre::Vector3    mGiNotePos = Ogre::Vector3::ZERO;
+    Ogre::Quaternion mGiNoteRot = Ogre::Quaternion::IDENTITY;
+    bool             mGiNoteKnown = false;
     /// Per-frame maintenance of everything derived from the TARGET's size:
     /// the letterbox rectangle and the inset's. Free when neither is in use.
     void applyLetterboxAndPip();

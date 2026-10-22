@@ -1060,6 +1060,7 @@ namespace Ogre
         // Photon dispatch (photon/PhotonDispatch.h).
         RenderSystem *renderSystem = mRoot->getRenderSystem();
         HlmsCompute *hlmsCompute = mRoot->getHlmsManager()->getComputeHlms();
+        ++mDispatches;
         DescriptorSetUav::TextureSlot uav( DescriptorSetUav::TextureSlot::makeEmpty() );
         uav.access = ResourceAccess::ReadWrite;
         uav.texture = mIrradianceTex;

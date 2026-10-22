@@ -624,6 +624,11 @@ public:
     unsigned long long giLightingSerial() const;
     /// What a reflection ray reads beside the edits (OgreRayQuery.cpp; the reflection's rest key, PHOTON-2 F5).
     unsigned long long reflectionReadsKey() const;
+    /// The gather's inputs still owe work (PHOTON-2 stage 2's round, H1: a view SETTLES, never rests, until none is).
+    bool gatherInputsBusy() const;
+    /// The GI chain's own owed work (GiStatus::giAtRest's predicate, PhotonGi.cpp): a rebuild or re-solve pending, an
+    /// injection owed, the field's integration or refinements owed.
+    bool giInputsOwed() const;
     /// EVERY MATERIAL EDIT the scene's writer reports (noteMaterialChanged), counted (ENGINE-UPGRADE-U5
     /// stage 3): the ray tier re-writes its alpha table only when this, its slots or its masks moved.
     unsigned long long materialEditSerial() const { return mMaterialEditSerial; }
@@ -733,7 +738,7 @@ public:
     FrameWork planFrame(const Ogre::Vector3 &camPos, bool driverStereo);
     /// The authoritative camera and the driver's profile, at the frame's head (U4 stage 3; planFrame is after the
     /// scene graph): what they owe the pending flush is owed before it runs.
-    void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo);
+    void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo, bool still);
     void recordFrame(const FrameWork &w);
     /// Re-derives the Forward+ clustered depth-slice range from this camera and
     /// the scene's own extent (LIGHTING_FIX fix 8 / F-F1). Rate-limited AND
@@ -1144,10 +1149,6 @@ private:
     /// The field re-integrates once, after the LAST injection of a tick or of a
     /// settle — never per injection.
     void reintegrateFieldAfterInjection();
-    /// The field's owed work ran out (planField): a last write, once per busy spell (PHOTON-2 stage 2c).
-    void noteFieldIdle();
-    /// A last write the caller knows of (an inline integration that leaves nothing owed).
-    void noteFieldSettled();
     /// One injection of an owed settle, out of the scheduler's frame slot.
     void payChainSettleStep();
     /// Remember the light-write serial an owed settle's steps must all see: a
@@ -1452,6 +1453,9 @@ private:
     /// (audit B3).
     Ogre::Vector3 mGiCamPos = Ogre::Vector3::ZERO;
     bool mGiCamPosKnown = false;
+    /// Consecutive frames the authoritative camera has stood STILL (PHOTON-2 stage 2's round, H2): the field's rest
+    /// budget runs while it is not 0.
+    unsigned mGiCamStillFrames = 0u;
     /// A cascade arm was asked for while no camera was known. The next tracking
     /// update flags the caches dirty, and that frame's own applyPendingGi
     /// builds the chain where the camera actually is.
@@ -1480,11 +1484,6 @@ private:
     /// count last read back, and the engine frame it moved on. The gather's rest key folds the count (its rest mean
     /// restarts after the field's last write) and giAtRest waits the gather's settle frames after that frame.
     unsigned long long                mIfdIntegrationsSeen = 0;
-    /// THE FIELD'S LAST WRITES (PHOTON-2 stage 2c): +1 each time its owed work runs out after it wrote (the budget's
-    /// refinements done or every probe stopped; an inline integration that leaves nothing owed). The gather's rest
-    /// key folds it — the field's last write is a restart-class event, its intermediate writes are not.
-    unsigned long long                mIfdSettles          = 0;
-    bool                              mIfdBusy             = false;   ///< the field wrote since it was last idle
     unsigned long long                mIfdWriteFrame       = 0;
     Ogre::uint32                      mIfdProbesDone      = 0;
     Ogre::uint32                      mIfdProbesPerFrame  = 0;
