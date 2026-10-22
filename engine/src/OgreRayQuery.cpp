@@ -1668,19 +1668,30 @@ void RayQueryTier::evictStaleBlas(SceneAs &sa) {
     const uint32_t now = frameNow();
     if (sa.evictSweptAt && uint32_t(now - sa.evictSweptAt) < kEvictSweepFrames) return;
     sa.evictSweptAt = now ? now : 1u;
+    // THE MAP'S ENTRIES GO IN ONE PASS (PHOTON-2 round 2, the hitch law): erasing each evicted slot's entries with its
+    // own walk of the map was slots x entries - on Bistro the sweep after a walk was an 11 ms frame (engine.rayquery).
+    std::vector<char> evicted(sa.blas.size(), 0);
+    bool any = false;
     for (size_t i = 0; i < sa.blas.size(); ++i) {
         ++sa.st.updateVisits;
-        Blas &bl = sa.blas[i];
+        const Blas &bl = sa.blas[i];
         if (!bl.as || bl.compactState == 1u) continue;        // a size query is still owed
         // STILL REFERENCED = never stale (stage 3: the feed's key events keep `referenced`; `lastSeen`
         // is the frame the last reference went).
         if (bl.referenced || bl.lastSeen == 0u || uint32_t(now - bl.lastSeen) < kEvictAfterFrames) continue;
+        evicted[i] = 1;
+        any = true;
+    }
+    if (!any) return;
+    for (auto it = sa.blasOf.begin(); it != sa.blasOf.end();) {
+        if (it->second < evicted.size() && evicted[it->second]) it = sa.blasOf.erase(it); else ++it;
+    }
+    for (size_t i = 0; i < sa.blas.size(); ++i) {
+        if (!evicted[i]) continue;
+        Blas &bl = sa.blas[i];
         // The slot stays (indices are referenced by blasOf and by the
         // instance patches); only its contents go, and the map entry with them,
         // so the next sighting rebuilds into a fresh slot.
-        for (auto it = sa.blasOf.begin(); it != sa.blasOf.end();) {
-            if (it->second == i) it = sa.blasOf.erase(it); else ++it;
-        }
         retire(bl.as, bl.storage);
         sa.dirtyMeshRows.push_back(bl.mesh.get());   // its record loses this level's address
         bl.mesh.reset();
@@ -1984,10 +1995,20 @@ VkImageView RayQueryTier::layerView(Ogre::TextureGpu *t, bool storage) {
 
 void RayQueryTier::drainRetired() {
     const uint32_t now = frameNow(), keep = framesInFlight() + 1u;
-    for (size_t i = 0; i < mRetireBin.size();) {
+    // ONE PASS, AT MOST kRetireStructuresPerFrame ACCELERATION STRUCTURES A FRAME (PHOTON-2 round 2, the hitch law):
+    // erasing each destroyed entry from the vector's middle was entries x bin size, and an eviction sweep's few hundred
+    // structures destroyed in one frame made a 14 ms one on Bistro (engine.rayquery); the rest wait a frame - they are
+    // only memory. Views, sets and buffers go as they fall due (a view and a set are retired EVERY frame, and a backlog
+    // of sets exhausts their pool).
+    static constexpr size_t kRetireStructuresPerFrame = 48u;
+    size_t structures = 0u, out = 0u;
+    for (size_t i = 0; i < mRetireBin.size(); ++i) {
         // Unsigned subtraction: the pin's counter wraps, and "now - then" is
         // the elapsed count either way as long as the gap is small.
-        if (uint32_t(now - mRetireBin[i].frame) >= keep) {
+        const bool due = uint32_t(now - mRetireBin[i].frame) >= keep;
+        const bool structure = mRetireBin[i].as != VK_NULL_HANDLE;
+        if (due && (!structure || structures < kRetireStructuresPerFrame)) {
+            if (structure) ++structures;
             if (mRetireBin[i].as) mFn.destroyAccelerationStructure(mVk, mRetireBin[i].as, nullptr);
             dropBuffer(mRetireBin[i].buf);
             if (mRetireBin[i].set && mRetireBin[i].setPool)
@@ -1998,11 +2019,12 @@ void RayQueryTier::drainRetired() {
             if (mRetireBin[i].img.view) vkDestroyImageView(mVk, mRetireBin[i].img.view, nullptr);
             if (mRetireBin[i].img.image) vkDestroyImage(mVk, mRetireBin[i].img.image, nullptr);
             if (mRetireBin[i].img.memory) vkFreeMemory(mVk, mRetireBin[i].img.memory, nullptr);
-            mRetireBin.erase(mRetireBin.begin() + long(i));
         } else {
-            ++i;
+            if (out != i) mRetireBin[out] = mRetireBin[i];
+            ++out;
         }
     }
+    mRetireBin.resize(out);
 }
 
 VkResult RayQueryTier::createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out,
