@@ -225,7 +225,7 @@ ChainDesc OgreView::chainDesc() const {
         d.refractions = mPostFx.refractions;
         // THE HIT DECODE (PHOTON-HIT-SHADE-1): the prepass' own rule, below.
         d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
-        d.hitListRows = mHitListRows;   // the list's demand-sized rows (sizeHitList), not graph shape
+        d.hitListRows = std::max(mHitListRows, hitListCreateRows());   // the list's rows (sizeHitList), not graph shape
         d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
         finishAtomOcclusion(d);
         return d;   // displayEncode stays false: the Plain instrument (ChainDesc::displayEncode)
@@ -341,8 +341,9 @@ ChainDesc OgreView::chainDesc() const {
     // hits that no cache can shade are decoded — and NOT tied to which row
     // traces, so toggling the gather where the prepass runs is no new graph.
     d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
-    // ...its rows are the view's demand-sized list (sizeHitList): not graph shape, so a rebuilt graph keeps them.
-    d.hitListRows = mHitListRows;
+    // ...its rows are the view's list as it grew, at least its creation size (sizeHitList): not graph shape, so a
+    // rebuilt graph keeps them.
+    d.hitListRows = std::max(mHitListRows, hitListCreateRows());
     // THE PASSTHROUGH SHAPE ON A WINDOW OR A MULTISAMPLED TARGET has no id pass: its
     // scene pass renders straight into that target, and the id pass's depth cannot be
     // that pass's depth — Ogre pairs a window's colour with the window's own depth

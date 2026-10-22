@@ -1114,7 +1114,7 @@ constexpr ArmDef kArms[] = {
       "the GI's flicker under motion (the stillness door's moving window). 0 = shipped." },
     { ArmId::HitListCap, 0.0, 0.0, 16777216.0,
       "THE OVERFLOW ARM (PHOTON-2 stage 2's tail, a test door): the traces and the hit write-back hold at most this many "
-      "hit records a frame, so a fixture FORCES drops whatever the list's demand-sized capacity - a dropped record is NO "
+      "hit records a frame, so a fixture FORCES drops whatever the list's own capacity - a dropped record is NO "
       "SAMPLE for its ray (the gather's filter and SH sums leave it out; the reflection's frame has none), never black. "
       "0 = the list's own capacity (shipped)." },
     { ArmId::ReflectRestReference, 0.0, 0.0, 2.0,
@@ -1138,10 +1138,10 @@ constexpr ArmDef kArms[] = {
       "never read from the cards or the voxels (SPECKLE-FIX-1). The route-agreement instrument: "
       "the decode answers a gather hit with the diffuse response only, exactly what the caches "
       "store, so the two routes on the same hit agree within the caches' own quantisation "
-      "(gi.speckle). The hit list is sized by its demand (kHitListWidth's law), so it grows to every "
-      "gather ray within a few frames of the arm going on; a drop before that is no sample (never "
-      "black), and any drop left is giStatus rayQuery.hitDropped, which a measurement that reads it "
-      "refuses." },
+      "(gi.speckle). The hit list grows on a frame that overflowed it (kHitListWidth's law), so it "
+      "holds every gather ray within a few frames of the arm going on; a drop before that is no "
+      "sample (never black), and any drop left is giStatus rayQuery.hitDropped, which a measurement "
+      "that reads it refuses." },
     { ArmId::GatherOctRes, 0.0, 0.0, 8.0,
       "The screen-probe gather's probe map resolution: rays per probe = octRes^2 (GATHER-NOISE-1's "
       "noise lever; GatherTuning::octRes). 0 = the tier's (8: 64 rays). At most 8 - one ray is one "

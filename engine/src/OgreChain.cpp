@@ -2117,10 +2117,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
         }   // if (ssr)
         // THE HIT LIST (PHOTON-HIT-SHADE-1): two UAVs the ray jobs append to and
-        // the decode's target, kHitListWidth x the view's demand-sized rows — FIXED
-        // SIZE textures (a list, not a picture: a window resize does not touch them,
-        // and applyStereo leaves them single-layer); OgreView::sizeHitList re-makes
-        // them in place when the demand moves — see ChainDesc::hitDecode.
+        // the decode's target, kHitListWidth x the view's rows — FIXED SIZE textures
+        // (a list, not a picture: a window resize does not touch them, and
+        // applyStereo leaves them single-layer); OgreView::sizeHitList re-makes them
+        // in place, larger, when the list overflowed — see kHitListWidth's law.
         if (desc.hitDecode) {
             const Ogre::uint32 rows = std::max(desc.hitListRows, 1u);
             for (const auto &t : { std::make_pair(kHitIds, Ogre::PFG_RGBA32_UINT),

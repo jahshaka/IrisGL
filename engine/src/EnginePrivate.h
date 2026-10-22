@@ -1185,24 +1185,18 @@ constexpr Ogre::uint32 kScreenDecodePassIdentifier = 25003u;
 /// motion the resolve reads (`jahSsrVelocity`, rq_motion.comp) in this pass' early
 /// pre-execute. Stamped on exactly that pass.
 constexpr Ogre::uint32 kSsrResolvePassIdentifier = 25004u;
-/// THE HIT LIST IS SIZED BY ITS DEMAND (PHOTON-2 stage 2's tail, 1.6 A2; ChainDesc::hitDecode,
-/// OgreView::sizeHitList): never a factor of the target. Its records are a LIST, not a picture,
-/// so its width is a layout choice (kHitListWidth records a row, fixed) and its ROWS follow the
-/// records the view's traces asked for (the list buffer's counter word 0, which counts past the
-/// capacity), read back a few frames late from a frame that traced: the list GROWS to
-/// kHitListHeadroom x that demand as soon as the demand passes kHitListGrowShare of it, and
-/// SHRINKS to the same only after kHitListShrinkReadings readings in a row under
-/// kHitListShrinkShare of it (a frame that appended nothing is no reading - a held view, or one
-/// whose rays all found a cache - so a rest never shrinks the list the next walk needs). One stereo view's two eyes append to one list, so its
-/// demand is both eyes' and so is its size. A record the list cannot hold before it grows is NO
-/// SAMPLE for its ray (the reflection's rule; the gather's kAtlasNoSample), never black.
-/// The resize re-makes the three list textures in place (Ogre's own window-resize path:
+/// THE HIT LIST (PHOTON-7 stage 0, the clean form of PHOTON-2's demand-sized list; ChainDesc::hitDecode,
+/// OgreView::sizeHitList). Its records are a LIST, not a picture: kHitListWidth records a row (a layout choice, fixed).
+/// It is CREATED at kHitListCreateShare x W x H x the eyes records (the old fixed list's capacity for the target, which
+/// normal use never overflowed; one stereo view's two eyes append to ONE list, and OgreView::width() is the eye pair's) -
+/// so a new view's first frames hold their records - and it only GROWS: a retired frame whose traces appended more
+/// records than that frame's list held (the buffer's counter word 0 counts past the capacity) doubles the rows until the
+/// list holds that frame's demand. It is never shrunk and its size is in no key (a ray finds the same thing in a list of
+/// any size). A record a full list cannot hold is NO SAMPLE for its ray (the reflection's rule; the gather's
+/// kAtlasNoSample), never black. The growth re-makes the three list textures in place (Ogre's own window-resize path:
 /// re-create, then CompositorNode::notifyRecreated), never the graph: no other history moves.
 constexpr unsigned kHitListWidth = 1024u;
-constexpr unsigned kHitListHeadroom = 2u;
-constexpr float kHitListGrowShare = 0.75f;
-constexpr float kHitListShrinkShare = 0.125f;
-constexpr unsigned kHitListShrinkReadings = 120u;
+constexpr float kHitListCreateShare = 0.5625f;
 
 struct ChainDesc {
     Colour   background;
@@ -1365,11 +1359,11 @@ struct ChainDesc {
     /// buffer (the counters and 8 bytes a record: the sun, footprint, weight) —
     /// and one PASS_SCENE, "Jahshaka hit decode" (RQ kHitDecodeRenderQueue only,
     /// into `jahHitRadiance`, RGBA16F), between the SSR resolve and the opaque
-    /// pass: HlmsAtom's decode shading every record. THE LIST'S SIZE is its
-    /// DEMAND's (kHitListWidth): `hitListRows` rows of kHitListWidth records, 28
-    /// bytes each of texture (+ 16 of the ray tier's buffer) - the view resizes it
-    /// in place (OgreView::sizeHitList), so its size is NOT graph shape and a
-    /// rebuilt graph takes the view's current rows. Not tied to the rows that trace
+    /// pass: HlmsAtom's decode shading every record. THE LIST'S SIZE (kHitListWidth's
+    /// law): `hitListRows` rows of kHitListWidth records, 28 bytes each of texture
+    /// (+ 16 of the ray tier's buffer), created at its share of the target and grown
+    /// in place on an overflow (OgreView::sizeHitList), so its size is NOT graph shape
+    /// and a rebuilt graph takes the view's current rows. Not tied to the rows that trace
     /// (a toggle of the gather where the prepass already runs is not a new graph).
     bool  hitDecode = false;
     /// The list's rows when the graph is built (the view's current size; not part of sameShape).
@@ -7643,9 +7637,12 @@ public:
     /// above, and for the same reason: every one of those can change between
     /// frames. Defined in OgreRayQuery.cpp (both halves of it).
     void syncReflectListener();
-    /// THE HIT LIST SIZED BY ITS DEMAND (kHitListWidth's law), once a frame from syncReflectListener, before the
-    /// workspace runs: the list's three textures re-made in place when the ray tier's newest demand reading asks.
+    /// THE HIT LIST'S GROWTH (kHitListWidth's law), once a frame from syncReflectListener, before the workspace runs:
+    /// the list's three textures re-made in place, larger, when the target outgrew its creation size or a retired frame
+    /// overflowed the list - never smaller.
     void sizeHitList();
+    /// THE LIST'S CREATION SIZE in rows: kHitListCreateShare x the target's W x H (the eye pair's for a stereo view).
+    unsigned hitListCreateRows() const;
     /// THE VISIBILITY BUFFER'S VIEW HALF (ATOM S3-DRAW, OgreAtomDraw.cpp), once a
     /// frame beside syncReflectListener and for its reason: ChainDesc::atomDraw
     /// reads the SCENE (a view has none when its chain is first built), so the
@@ -7957,11 +7954,9 @@ private:
     bool                       mChainPrepass = false;
     /// ...and ChainDesc::hitDecode (PHOTON-HIT-SHADE-1): the hit list + its pass.
     bool                       mChainHitDecode = false;
-    /// THE HIT LIST'S SIZE (sizeHitList, kHitListWidth): its rows now, the ray tier's demand readings
-    /// seen, and the readings in a row under the shrink share.
-    unsigned                   mHitListRows = 1u;
-    unsigned long long         mHitListReadingsSeen = 0ull;
-    unsigned                   mHitListLowReadings = 0u;
+    /// THE HIT LIST'S SIZE (sizeHitList, kHitListWidth): the rows the list holds (0 until the first sizeHitList reads the
+    /// built list; a graph is built at max(this, hitListCreateRows())). Never decreases.
+    unsigned                   mHitListRows = 0u;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
     /// workspace rebuild.

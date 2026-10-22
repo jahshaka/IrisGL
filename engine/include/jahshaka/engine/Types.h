@@ -5059,11 +5059,13 @@ struct RayQueryStatus {
     /// THE HIT DECODE (PHOTON-HIT-SHADE-1): a ray hit no cache can shade (a
     /// mover, a rigged item, a static hit neither card nor cascade answers, the
     /// gather's far copies) is appended to the view's hit list and shaded by
-    /// HlmsAtom's decode. `hitRecords`: records the ray jobs appended in the last
-    /// read-back frame (every view of the scene summed; may pass the capacity),
-    /// `hitDropped`: of those, dropped because the list was full (their rays have
-    /// no sample that frame — a stat, never a crash), `hitCapacity`: the list's
-    /// size (the largest view's), `hitDecodeDraws`: the decode draws the scene
+    /// HlmsAtom's decode. Over the scene's LIVE views (a view whose read-backs
+    /// stopped is left out): `hitRecords`: records the ray jobs appended in the
+    /// last read-back frame (summed; may pass the capacity), `hitDropped`: of
+    /// those, dropped because a view's own list was full (their rays have no sample
+    /// that frame — a stat, never a crash; 0 = every live view's list held its own
+    /// demand), `hitCapacity`: the list's size (the largest view's; the list grows
+    /// on an overflow, kHitListWidth's law), `hitDecodeDraws`: the decode draws the scene
     /// holds (one per decode BUCKET — HlmsAtom::BucketKey, S3-DRAW). Read several
     /// frames late, never with a wait.
     unsigned long long hitRecords = 0;

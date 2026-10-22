@@ -1436,10 +1436,10 @@ public:
     void forgetHits(const ReflectPassListener *key);
     /// The hit list's counters (read back several frames late) for a scene.
     void hitStatsInto(const OgreScene *scene, RayQueryStatus &st) const;
-    /// THE LIST'S DEMAND for a view's listener (OgreView::sizeHitList): the records its traces asked for in the newest
-    /// retired frame that traced (counter word 0, past the capacity) and how many such readings have arrived. False
-    /// when the key has no list.
-    bool hitDemand(const ReflectPassListener *key, unsigned long long &appended, unsigned long long &readings) const;
+    /// THE LIST'S OVERFLOW for a view's listener (OgreView::sizeHitList, kHitListWidth's law): the largest demand (the
+    /// counter word 0, past the capacity) of a retired frame whose traces appended more records than that frame's list
+    /// held, since the last call - 0 when none did. Taking it clears it.
+    unsigned long long takeHitOverflow(const ReflectPassListener *key);
 
 private:
     struct HitView {
@@ -1463,12 +1463,19 @@ private:
         /// The buffer's two counter words, copied per frame into a host ring and read once
         /// the frame retired (never a wait).
         RawBuffer readback;
-        struct Pending { uint32_t frame = 0; bool live = false; uint32_t restTag = 0u; };
+        /// ...with the records that frame's LIST held (its rows x width, never the overflow arm's cap: the list's own
+        /// overflow is what grows it).
+        struct Pending { uint32_t frame = 0; bool live = false; uint32_t restTag = 0u; uint32_t listRecords = 0u; };
         Pending pending[kFramesInFlight];
         unsigned frame = 0;
         OgreScene *scene = nullptr;
+        /// The newest retired frame's counters (RayQueryStatus) and its frame (a view whose readings stopped is STALE:
+        /// the status counts live views only).
         unsigned long long appended = 0ull, dropped = 0ull;
-        unsigned long long readings = 0ull;   ///< counter readings of traced frames so far (sizeHitList's cadence)
+        uint32_t readFrame = 0u;
+        bool everRead = false;
+        /// The largest demand of a retired frame that overflowed its list, not yet taken (takeHitOverflow).
+        unsigned long long overflowDemand = 0ull;
         /// THE REFLECTION'S REST COUNT (PHOTON-2 round 2, R1): the trace's tag for this frame (the rest's serial in
         /// the top 12 bits, its rest frame below; 0 = the trace counted nothing) and, read back, the newest retired
         /// frame's count of active resting texels (counter word 2) with its tag.
@@ -6215,9 +6222,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         std::memset(key.restMoverBox, 0, sizeof(key.restMoverBox));
         // (motion.w says "a mover moved in the last two frames": a move, which breaks per texel - not a parameter)
         key.motion[3] = 0.0f;
-        // (the hit list's CAPACITY follows its demand - OgreView::sizeHitList re-makes the per-frame list in place - and a
-        // ray finds the same thing in a list of any size: never a parameter. Folded, a shrink at rest broke the rest, the
-        // burst re-grew the list with drops, and photon-glass's view never held - a 240-frame cycle, PHOTON-2 stage 1b A1)
+        // (the hit list's CAPACITY is the per-frame list's size - it grows in place on an overflow, kHitListWidth's law -
+        // and a ray finds the same thing in a list of any size: it is in no key)
         key.hitList[0] = 0.0f;
         unsigned long long paramsKey = 1469598103934665603ull;
         const unsigned char *bytes = reinterpret_cast<const unsigned char *>(&key);
@@ -8731,55 +8737,51 @@ void OgreView::syncReflectListener() {
     mReflectListener->mRoot = mRoot;
 }
 
-// THE HIT LIST SIZED BY ITS DEMAND (PHOTON-2 stage 2's tail, 1.6 A2; kHitListWidth's law in EnginePrivate.h). Before
-// the workspace runs, so no pass of this frame has touched the list yet: the newest demand reading of this view's
-// traces (the counter word 0 of a retired frame that traced - it counts past the capacity) decides the rows; a change
-// re-makes the three list textures IN PLACE the way Ogre re-makes a window's resizable textures (OnStorage, the new
-// resolution, Resident, then CompositorNode::notifyRecreated for the passes that render into them) - never the graph,
-// so no other texture and no history moves. The ray tier re-reads the textures (and re-makes its buffer to the new
-// size) at its next prepare.
+// THE HIT LIST'S GROWTH (kHitListWidth's law in EnginePrivate.h). Before the workspace runs, so no pass of this frame has
+// touched the list yet. The list is created at its share of the target (hitListCreateRows: the graph builds it at
+// max(the rows it has, that)); it GROWS when the target outgrew its creation size or a retired frame overflowed it - the
+// rows double until the list holds that frame's demand (the counter word 0, which counts past the capacity) - and is
+// never shrunk. A growth re-makes the three list textures IN PLACE the way Ogre re-makes a window's resizable textures
+// (OnStorage, the new resolution, Resident, then CompositorNode::notifyRecreated for the passes that render into them) -
+// never the graph, so no other texture and no history moves. The ray tier re-reads the textures (and re-makes its
+// buffer to the new size) at its next prepare.
+unsigned OgreView::hitListCreateRows() const {
+    const unsigned long long records =
+        (unsigned long long)std::ceil(double(kHitListCreateShare) * double(width()) * double(height()));
+    return unsigned(std::max<unsigned long long>((records + kHitListWidth - 1u) / kHitListWidth, 1u));
+}
+
 void OgreView::sizeHitList() {
     if (!mWorkspace || !mChainHitDecode || !mReflectListener || !mEngine || !mEngine->mRayTier) return;
-    unsigned long long demand = 0ull, readings = 0ull;
-    if (!mEngine->mRayTier->hitDemand(mReflectListener.get(), demand, readings)) return;
-    if (readings == mHitListReadingsSeen) return;   // no new reading: a still or held view decides nothing
-    mHitListReadingsSeen = readings;
-    const unsigned long long capacity = (unsigned long long)kHitListWidth * mHitListRows;
-    const auto rowsFor = [&](unsigned long long records) {
-        const unsigned long long want = (records * kHitListHeadroom + kHitListWidth - 1u) / kHitListWidth;
-        const unsigned long long maxRows = std::max<unsigned long long>(
-            mRoot->getRenderSystem()->getCapabilities()->getMaximumResolution2D(), 1u);
-        return unsigned(std::clamp<unsigned long long>(want, 1u, maxRows));
-    };
-    unsigned rows = mHitListRows;
-    if (double(demand) > kHitListGrowShare * double(capacity)) {
-        rows = rowsFor(demand);
-        mHitListLowReadings = 0u;
-    } else if (double(demand) < kHitListShrinkShare * double(capacity)) {
-        if (++mHitListLowReadings >= kHitListShrinkReadings) {
-            rows = rowsFor(demand);
-            mHitListLowReadings = 0u;
-        }
-    } else {
-        mHitListLowReadings = 0u;
-    }
-    if (rows == mHitListRows) return;
+    const unsigned create = hitListCreateRows();
+    const unsigned long long demand = mEngine->mRayTier->takeHitOverflow(mReflectListener.get());
+    if (demand == 0ull && mHitListRows >= create) return;   // nothing overflowed and the target did not grow
     const Ogre::IdString names[] = { Ogre::IdString("jahHitIds"), Ogre::IdString("jahHitDest"),
                                      Ogre::IdString("jahHitRadiance") };
+    struct List { Ogre::CompositorNode *node; Ogre::TextureGpu *tex[3]; };
+    std::vector<List> lists;
     for (Ogre::CompositorNode *node : mWorkspace->getNodeSequence()) {
-        Ogre::TextureGpu *tex[3] = {};
+        List l{ node, {} };
         try {
-            for (int i = 0; i < 3; ++i) tex[i] = node->getDefinedTexture(names[i]);
+            for (int i = 0; i < 3; ++i) l.tex[i] = node->getDefinedTexture(names[i]);
         } catch (Ogre::Exception &) { continue; }
-        if (!tex[0] || !tex[1] || !tex[2]) continue;
-        for (Ogre::TextureGpu *t : tex) {
-            t->_transitionTo(Ogre::GpuResidency::OnStorage, nullptr);
-            t->setResolution(kHitListWidth, rows, 1u);
-            t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
-            node->notifyRecreated(t);
-        }
+        if (l.tex[0] && l.tex[1] && l.tex[2]) lists.push_back(l);
     }
+    if (lists.empty()) return;
+    // THE LIST AS BUILT (the textures' own height is the truth: a graph built before the target grew holds fewer)
+    const unsigned built = lists.front().tex[0]->getHeight();
+    const unsigned maxRows = std::max<unsigned>(mRoot->getRenderSystem()->getCapabilities()->getMaximumResolution2D(), 1u);
+    unsigned rows = std::max(built, create);
+    while ((unsigned long long)rows * kHitListWidth < demand && rows < maxRows) rows = std::min(rows * 2u, maxRows);
     mHitListRows = rows;
+    if (rows == built) return;
+    for (const List &l : lists)
+        for (Ogre::TextureGpu *tx : l.tex) {
+            tx->_transitionTo(Ogre::GpuResidency::OnStorage, nullptr);
+            tx->setResolution(kHitListWidth, rows, 1u);
+            tx->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+            l.node->notifyRecreated(tx);
+        }
 }
 
 // ---------------------------------------------------------------------------
@@ -8872,9 +8874,11 @@ void RayQueryTier::readHitCounters(HitView &hv) {
     for (unsigned i = 0; i < kFramesInFlight; ++i) {
         HitView::Pending &pd = hv.pending[i];
         if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
+        const uint32_t *w = reinterpret_cast<const uint32_t *>(
+            static_cast<const unsigned char *>(hv.readback.mapped) + i * 16u);
+        // EVERY retired frame's overflow, the newest or not (kHitListWidth's law: the list grows to hold it)
+        if (w[0] > pd.listRecords) hv.overflowDemand = std::max<unsigned long long>(hv.overflowDemand, w[0]);
         if (!any || int32_t(pd.frame - newest) > 0) {
-            const uint32_t *w = reinterpret_cast<const uint32_t *>(
-                static_cast<const unsigned char *>(hv.readback.mapped) + i * 16u);
             hv.appended = w[0];
             hv.dropped = w[1];
             hv.restActive = w[2];
@@ -8884,20 +8888,18 @@ void RayQueryTier::readHitCounters(HitView &hv) {
         }
         pd.live = false;
     }
-    // (a frame that appended nothing - a held view, a still one whose traces all answered from the caches - says
-    // nothing about the list's need: it is not a reading, and neither is a frame the reflection traced AT REST (its
-    // texels stop one by one, so its demand falls to a few per cent of a walk's): a rest never shrinks the list the next
-    // walk needs)
-    if (any && hv.appended > 0ull && hv.restActiveTag == 0u) ++hv.readings;
+    if (any) {
+        hv.readFrame = newest;
+        hv.everRead = true;
+    }
 }
 
-bool RayQueryTier::hitDemand(const ReflectPassListener *key, unsigned long long &appended,
-                             unsigned long long &readings) const {
+unsigned long long RayQueryTier::takeHitOverflow(const ReflectPassListener *key) {
     const auto it = mHits.find(key);
-    if (it == mHits.end()) return false;
-    appended = it->second.appended;
-    readings = it->second.readings;
-    return true;
+    if (it == mHits.end()) return 0ull;
+    const unsigned long long d = it->second.overflowDemand;
+    it->second.overflowDemand = 0ull;
+    return d;
 }
 
 bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view,
@@ -8927,7 +8929,7 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     // frame in flight; every reader re-reads `hv.buf` before it binds).
     {
         const size_t words = 4u + 4u * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
-        // (a list that SHRANK gives its buffer back too: OgreView::sizeHitList re-makes the list either way)
+        // (the list only grows: OgreView::sizeHitList re-makes it in place, larger)
         if (hv.buf && hv.buf->getNumElements() != words) {
             vao->destroyUavBuffer(hv.buf);
             hv.buf = nullptr;
@@ -9196,11 +9198,16 @@ void RayQueryTier::forgetHits(const ReflectPassListener *key) {
 void RayQueryTier::hitStatsInto(const OgreScene *scene, RayQueryStatus &st) const {
     Ogre::HlmsManager *hm = Ogre::Root::getSingletonPtr() ? Ogre::Root::getSingleton().getHlmsManager() : nullptr;
     auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
+    // LIVE VIEWS ONLY: a view whose readings stopped (its decode left the chain, its window closed) keeps its last
+    // counters, which name records and drops nobody has now. A view's drops are its OWN list's overflow, so
+    // hitDropped == 0 says every live view's list held its own demand.
+    const uint32_t now = frameNow(), stale = 2u * kFramesInFlight + 2u;
     for (const auto &kv : mHits) {
-        if (kv.second.scene != scene) continue;
-        st.hitRecords += kv.second.appended;
-        st.hitDropped += kv.second.dropped;
-        st.hitCapacity = std::max<unsigned long long>(st.hitCapacity, kv.second.capacity);
+        const HitView &hv = kv.second;
+        if (hv.scene != scene || !hv.everRead || uint32_t(now - hv.readFrame) > stale) continue;
+        st.hitRecords += hv.appended;
+        st.hitDropped += hv.dropped;
+        st.hitCapacity = std::max<unsigned long long>(st.hitCapacity, hv.capacity);
     }
     if (atom && scene) st.hitDecodeDraws = int(atom->sceneDecodeCount(scene->sceneManager()));
 }
@@ -9455,6 +9462,7 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
         pd.frame = frameNow();
         pd.live = true;
         pd.restTag = hv.restTag;
+        pd.listRecords = hv.ids->getWidth() * hv.ids->getHeight();
         hv.restTag = 0u;
     }
     ++hv.frame;
