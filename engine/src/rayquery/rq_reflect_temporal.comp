@@ -323,9 +323,12 @@ void main()
 	// the older H it would otherwise pop back to (the gather writes its history the same way). A texel with no
 	// moving history (a disocclusion at the stop) or a fixed estimator takes the plain mean of its rest samples.
 	// THE FIREFLY BOUND: a sample entering the rest mean is held to the luma of this frame's 21 RAW neighbours'
-	// mean + 3 sigma or four times the texel's answer so far, whichever is larger — a ray far outside both its
-	// neighbourhood's spread and its own history cannot freeze into the held picture at 1/N, and a genuine bright
-	// lobe (its neighbours' rays see it too, or its history holds it) passes; a fixed estimator has no fireflies.
+	// mean + 3 sigma or THE HISTORY'S MEMORY (1 / its floor, 32) times the texel's answer so far, whichever is larger
+	// — a ray brighter than anything this texel's moving mean could have absorbed (a sample weighs at least 1/32
+	// there) and outside its neighbourhood's spread cannot freeze into the held picture at 1/N; a genuine bright tail
+	// (a small emitter seen through the lobe, its samples ~1/p times its mean: its history holds it at its rate)
+	// passes — a bound of a few times the answer would clamp every tail rarer than that and bias it dark. A fixed
+	// estimator has no fireflies.
 	const float restK = p.knobs2.x;
 	if( restK >= 0.5 )
 	{
@@ -363,7 +366,7 @@ void main()
 				const float m = y1 / yn;
 				bound = m + 3.0 * sqrt( max( y2 / yn - m * m, 0.0 ) );
 			}
-			bound = max( bound, 4.0 * lumaOf( sofar ) );
+			bound = max( bound, lumaOf( sofar ) / max( p.knobs2.w, 1e-3 ) );
 			const float ys = lumaOf( sk );
 			if( ys > bound )
 				sk *= bound / ys;
