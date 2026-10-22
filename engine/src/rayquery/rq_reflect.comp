@@ -268,11 +268,12 @@ layout( rgba16f, set = 0, binding = 5 ) uniform image2DArray ssrReflection;
 /// one extra image of 8 bytes per traced pixel.
 layout( rgba16f, set = 0, binding = 6 ) uniform readonly  image2DArray historyPrev;
 layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray historyCur;
-/// ...and the distance beside it, which is what makes the reprojection a TEST
-/// rather than a hope: the surface found at the reprojected pixel is the same
-/// surface only if it was the same distance away.
-layout( rg32f, set = 0, binding = 8 ) uniform readonly  image2DArray historyDistPrev;
-layout( rg32f, set = 0, binding = 9 ) uniform image2DArray historyDistCur;
+/// ...and THE STATE TEXEL beside it (jah_reflect_state.glsl, PHOTON-7 stage 6 L8), ping-ponged with it: the surface's
+/// distance, which is what makes the reprojection a TEST rather than a hope (the surface found at the reprojected
+/// pixel is the same surface only if it was the same distance away), the mean ray length, the counts, the rest's stop
+/// and this frame's estimator - explicit integer fields.
+layout( rg32ui, set = 0, binding = 8 ) uniform readonly  uimage2DArray statePrev;
+layout( rg32ui, set = 0, binding = 9 ) uniform uimage2DArray stateCur;
 layout( set = 0, binding = 10 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
@@ -293,10 +294,9 @@ layout( set = 0, binding = 40 ) uniform sampler3D voxelDirect[kMaxCascades];
 /// THE AIR'S TABLE (PHOTON-I-1 fix 5): the aerial-perspective volume the colour
 /// passes read, or a stand-in while they read none — the set's last binding.
 layout( set = 0, binding = 41 ) uniform sampler3D fogAerial;
-/// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b; the set's last binding): the ray's radiance and, in w, the texel's blend
-/// FLOOR plus 2 where only the surface history may be used (rq_reflect_temporal.comp reads it); 0 = no sample. A
-/// record's radiance is written here by the write-back (rq_hit_composite.comp).
-layout( rgba16f, set = 0, binding = 45 ) uniform image2DArray reflectSample;   // read: the texel's last estimator (G5)
+/// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b): the ray's radiance, w = 1 a sample this frame, 0 = none (the texel's flags
+/// are its state texel's). A record's radiance is written here by the write-back (rq_hit_composite.comp).
+layout( rgba16f, set = 0, binding = 45 ) uniform writeonly image2DArray reflectSample;
 
 /// The same ceiling JahSsrResolve_ps.glsl and JahSsrHistory_ps.glsl hold the
 /// SSR loop to, and for the same reason: about twelve stops above white, six
@@ -408,6 +408,7 @@ void photonHit( ivec2 tc, vec4 c )
 /// with the gather's histories (PHOTON-GATHER-1c).
 #include "jah_reproject.glsl"
 #include "jah_reflect_rest.glsl"
+#include "jah_reflect_state.glsl"
 /// A SEGMENT A MOVED INSTANCE CROSSED THIS FRAME (G6): origin o, unit direction d, length t, against the swept boxes.
 bool restSegmentMoved( vec3 o, vec3 d, float t )
 {
@@ -622,28 +623,15 @@ vec3 skyRadiance( vec3 dir, float lobeAlpha, bool fixedEstimator )
 	return jahSkyRadiance( dir, tanHalf );
 }
 
-/// THE MEAN'S MOVER AGE (REFLECT-MOVERS-1), carried in the six low mantissa bits
-/// of the mean ray length (historyDist .y — a relative error of 2^-17 on a length
-/// only ever compared at 25 %): how many frames ago a ray of this texel last hit a
-/// MOVING slot, saturating at 63, stored inverted so a cleared texel reads "never".
-/// A single sample's coin toss is not evidence about a glossy mean — its lobe's
-/// tail misses a moving object inside the object's own reflection, and its blurred
-/// edge hits it on some frames only — so the rules below read the age, never one
-/// sample's flag.
+/// THE MEAN'S MOVER AGE (REFLECT-MOVERS-1), the state texel's own field: how many
+/// frames ago a ray of this texel last hit a MOVING slot, saturating (31 - every
+/// reader below compares under kMoverMeanFrames). A single sample's coin toss is
+/// not evidence about a glossy mean — its lobe's tail misses a moving object
+/// inside the object's own reflection, and its blurred edge hits it on some frames
+/// only — so the rules below read the age, never one sample's flag.
 const float kMoverMeanFrames = 16.0;
-float jahPackMeanLength( float len, float moverAge )
-{
-	const uint bits = floatBitsToUint( max( len, 1e-3 ) ) & ~63u;
-	return uintBitsToFloat( bits | ( 63u - uint( clamp( moverAge, 0.0, 63.0 ) ) ) );
-}
-float jahMeanLength( float y )
-{
-	return uintBitsToFloat( floatBitsToUint( y ) & ~63u );
-}
-float jahMeanMoverAge( float y )
-{
-	return float( 63u - ( floatBitsToUint( y ) & 63u ) );
-}
+/// The mean length as it was stored (a floor: a zero length is "no mean").
+float jahStoredLength( float len ) { return max( len, 1e-3 ); }
 
 /// THE TEMPORAL MEAN'S PREVIOUS VALUE, reprojected and VALIDATED. The history
 /// is a screen-space buffer, so last frame's texel at this pixel belongs to
@@ -705,8 +693,8 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 	}
 	const ivec2 pc = clamp( ivec2( uv * vec2( traceRes ) ),
 							ivec2( 0 ), traceRes - 1 );
-	const vec2 wasPair = imageLoad( historyDistPrev, ivec3( pc, gEye ) ).xy;
-	const float wasDist = wasPair.x;
+	const JahReflectState was = jahStateUnpack( imageLoad( statePrev, ivec3( pc, gEye ) ).xy );
+	const float wasDist = was.surfDist;
 	const float dist = z;   // what THIS surface's distance was last frame
 	// THE 5 % TEST (jah_reproject.glsl): far enough not to reject a surface the
 	// camera merely moved along, tight enough that a silhouette's far side is a
@@ -723,12 +711,8 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 		// for every frame of a drag: that is a visible pulse on the reflection,
 		// and it is the third of the flicker's three mechanisms. So a texel
 		// that HAD a warm history hands its warm-up on, and nothing else.
-		if( wasDist > 0.0 )
-		{
-			const vec4 hj = imageLoad( historyPrev, ivec3( pc, gEye ) );
-			if( finite1( hj.w ) && hj.w >= kWarmupFrames )
-				warmHeld = 1.0;
-		}
+		if( wasDist > 0.0 && was.N >= kWarmupFrames )
+			warmHeld = 1.0;
 		// ...AND A TEXEL THAT HELD NO ANSWER AT ALL (PAN-SMEAR-1): floor that a
 		// sideways move has just brought out from behind a pillar reprojects
 		// onto the PILLAR, which is too rough to trace and has never stored a
@@ -740,15 +724,15 @@ vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float 
 		warmHeld = max( warmHeld, viewIsWarm );
 		return vec4( 0.0 );
 	}
-	const vec4 h = imageLoad( historyPrev, ivec3( pc, gEye ) );
-	if( !finite3( h.xyz ) || !finite1( h.w ) || h.w <= 0.0 )
+	const vec3 h = imageLoad( historyPrev, ivec3( pc, gEye ) ).xyz;
+	if( !finite3( h ) || was.N <= 0.0 )
 		return vec4( 0.0 );
-	// HOW FAR AWAY the thing in this mean was (the second channel): what main()
-	// compares this frame's ray against when the camera has moved — with the
-	// texel's MOVER AGE in its six low mantissa bits (jahPackMeanLength).
-	wasHitT = finite1( wasPair.y ) && wasPair.y > 0.0 ? jahMeanLength( wasPair.y ) : 0.0;
-	wasMoverAge = wasHitT > 0.0 ? jahMeanMoverAge( wasPair.y ) : 63.0;
-	return vec4( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), h.w );
+	// HOW FAR AWAY the thing in this mean was (the state's mean length): what main()
+	// compares this frame's ray against when the camera has moved — and the
+	// texel's MOVER AGE.
+	wasHitT = was.hitT > 0.0 ? was.hitT : 0.0;
+	wasMoverAge = wasHitT > 0.0 ? float( was.moverAge ) : 63.0;
+	return vec4( clamp( h, vec3( 0.0 ), vec3( kMaxRadiance ) ), was.N );
 }
 
 /// THE REFLECTED IMAGE'S HISTORY (REFLECT-MOVERS-1): the mean at a CONTINUOUS
@@ -779,15 +763,15 @@ vec4 historyAtImage( EyeImage before, int eye, vec3 world, ivec2 traceRes, out f
 		const ivec2 o = ivec2( k & 1, k >> 1 );
 		const ivec2 pc = clamp( base + o, ivec2( 0 ), traceRes - 1 );
 		const float bw = ( o.x == 1 ? fr.x : 1.0 - fr.x ) * ( o.y == 1 ? fr.y : 1.0 - fr.y );
-		const vec2 pair = imageLoad( historyDistPrev, ivec3( pc, gEye ) ).xy;
-		if( bw <= 0.0 || !jahSameDistance( pair.x, z ) || !finite1( pair.y ) || pair.y <= 0.0 ||
-			jahMeanMoverAge( pair.y ) >= kMoverMeanFrames )
+		const JahReflectState st = jahStateUnpack( imageLoad( statePrev, ivec3( pc, gEye ) ).xy );
+		if( bw <= 0.0 || !jahSameDistance( st.surfDist, z ) || st.hitT <= 0.0 ||
+			float( st.moverAge ) >= kMoverMeanFrames )
 			continue;
-		const vec4 h = imageLoad( historyPrev, ivec3( pc, gEye ) );
-		if( !finite3( h.xyz ) || !finite1( h.w ) || h.w <= 0.0 )
+		const vec3 h = imageLoad( historyPrev, ivec3( pc, gEye ) ).xyz;
+		if( !finite3( h ) || st.N <= 0.0 )
 			continue;
-		sum += vec4( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), h.w ) * bw;
-		sumT += jahMeanLength( pair.y ) * bw;
+		sum += vec4( clamp( h, vec3( 0.0 ), vec3( kMaxRadiance ) ), st.N ) * bw;
+		sumT += st.hitT * bw;
 		sumW += bw;
 	}
 	gImageCover = sumW;
@@ -828,7 +812,7 @@ void main()
 	// and without reverse Z, the same test the march makes.
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
 	{
-		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( 0.0 ) );
+		imageStore( stateCur, ivec3( tc, gEye ), uvec4( 0u ) );
 		photonHit( tc, kPhotonNoRay );
 		return;
 	}
@@ -853,14 +837,14 @@ void main()
 	// in it with no ray would make the crossfade a step again.
 	if( roughness > roughGate + feather )
 	{
-		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( 0.0 ) );
+		imageStore( stateCur, ivec3( tc, gEye ), uvec4( 0u ) );
 		photonHit( tc, kPhotonNoRay );
 		return;
 	}
 	vec3 normalVS = texture( gBufNormals, vec3( uv, float( gEye ) ) ).xyz * 2.0 - 1.0;
 	if( dot( normalVS, normalVS ) < 1e-6 )
 	{
-		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( 0.0 ) );
+		imageStore( stateCur, ivec3( tc, gEye ), uvec4( 0u ) );
 		photonHit( tc, kPhotonNoRay );
 		return;
 	}
@@ -881,7 +865,7 @@ void main()
 												: normalize( thisEye.camPos - world );
 	if( dot( worldN, V ) <= 0.0 )
 	{
-		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( 0.0 ) );
+		imageStore( stateCur, ivec3( tc, gEye ), uvec4( 0u ) );
 		photonHit( tc, kPhotonNoRay );
 		return;
 	}
@@ -896,18 +880,19 @@ void main()
 	const bool atRest = restK >= 0.5;
 	const bool restInPlace = restK >= 1.5;
 	const bool breakFrame = restK < -0.5;
-	const vec2 inPlacePair = restInPlace ? imageLoad( historyDistCur, ivec3( tc, gEye ) ).xy : vec2( 0.0 );
-	const uint restStop = restInPlace ? jahRestStop( inPlacePair.x ) : 0u;
+	// THE TEXEL'S STATE IN PLACE at rest (its rest half: the counts, the stop, the mean length so far).
+	const JahReflectState inPlace = restInPlace ? jahStateUnpack( imageLoad( stateCur, ivec3( tc, gEye ) ).xy )
+												: jahStateNone();
+	const uint restStop = restInPlace ? inPlace.stop : 0u;
 	bool resume = false;
 	if( restStop >= kReflectStopFrames )
 	{
-		const float meanT = jahMeanLength( inPlacePair.y );
+		const float meanT = inPlace.hitT;
 		if( !( meanT > 0.0 ) || !restSegmentMoved( world + worldN * p.knobs2.y, reflect( -V, worldN ), meanT ) )
 		{
-			// No sample - but the texel's last ESTIMATOR is kept, negated (w < 0 is "no sample" to every reader): the
-			// cut's hysteresis below reads it on the frame the texel resumes or the rest breaks.
-			const float lastW = imageLoad( reflectSample, ivec3( tc, gEye ) ).w;
-			imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0, 0.0, 0.0, lastW > 0.0 ? -lastW : lastW ) );
+			// No sample - and the texel's state is left as it is: its last ESTIMATOR is the cut's hysteresis below on the
+			// frame the texel resumes or the rest breaks.
+			imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );
 			photonHit( tc, kPhotonRest );
 			return;
 		}
@@ -944,14 +929,15 @@ void main()
 	// (jahReflectFootprint, the filter reads the same), with a HYSTERESIS BAND - the texel's own last estimator
 	// (its sample's flag, last frame) decides which side of [kFixedEnter, kFixedLeave] it must cross - so a texel at
 	// the cut never flips on its own frozen mean length.
-	const vec4 lastSample = imageLoad( reflectSample, ivec3( tc, gEye ) );
-	const bool lastKnown = lastSample.w != 0.0;   // (negative: a stopped texel's kept flags)
-	const bool wasFixed = lastKnown && jahReflectFlags( abs( lastSample.w ) ).fixedEstimator;
+	// (the texel's LAST frame: its rest half in place, else the half the ping-pong hands this frame)
+	const JahReflectState ownState = jahStateUnpack( imageLoad( statePrev, ivec3( tc, gEye ) ).xy );
+	const JahReflectState last = restInPlace ? inPlace : ownState;
+	const bool lastKnown = last.surfDist > 0.0;
+	const bool wasFixed = lastKnown && last.fixedEstimator;
 	bool fixedEstimator = lobeAlpha <= kMirrorPackAlpha;
 	if( !fixedEstimator )
 	{
-		const vec2 ownPair = imageLoad( historyDistPrev, ivec3( tc, gEye ) ).xy;
-		const float throwT = ownPair.x > 0.0 && finite1( ownPair.y ) ? jahMeanLength( ownPair.y ) : 0.0;
+		const float throwT = ownState.surfDist > 0.0 ? ownState.hitT : 0.0;
 		const float footprint = jahReflectFootprint( lobeAlpha, throwT, length( world - thisEye.camPos ),
 													 length( thisEye.rayDown ) / float( traceRes.y ),
 													 thisEye.perspective > 0.5 );
@@ -1158,7 +1144,7 @@ void main()
 	// a texel whose normal — and so whose reflected direction — is another. What
 	// the reflector's step does to its reflection is the temporal pass' to answer
 	// (rq_reflect_temporal.comp: the surface history alone, clamped to this frame's
-	// neighbourhood — sampleW's flag below).)
+	// neighbourhood — the state's surfaceOnly below).)
 	if( hitMoving )
 	{
 		// AT THE MEAN'S DISTANCE, NOT THIS SAMPLE'S: one GGX sample's length and
@@ -1294,9 +1280,18 @@ void main()
 				 ( wasHitT > 0.0 && restSegmentMoved( o, reflect( -V, worldN ), wasHitT ) ) ||
 				 ( hitT < maxT && p.hitSun.w > 0.5 && restSegmentMoved( o + L * hitT, p.hitSun.xyz, p.hitSun2.z ) );
 	}
-	// THE DISTANCE THIS FRAME STORES: at rest in place it carries the texel's stop count on (the temporal pass moves
-	// it); a resuming texel's count restarts.
-	const float restDist = restInPlace && !resume ? jahPackRestStop( dist, restStop ) : dist;
+	// THE STATE THIS FRAME STORES (jah_reflect_state.glsl): the surface's distance, this frame's estimator, and - at
+	// rest in place - the counts and the stop the temporal pass keeps (a resuming texel's stop restarts).
+	JahReflectState st = jahStateNone();
+	st.surfDist = dist;
+	st.N = restInPlace ? inPlace.N : max( prev.w, 0.0 );
+	st.v = restInPlace ? inPlace.v : 0u;
+	st.stop = restInPlace && !resume ? restStop : 0u;
+	st.resume = atRest && resume;
+	st.fixedEstimator = fixedEstimator;
+	st.surfaceOnly = ownMoving || hitMoving || virtualHeld;
+	st.ownMoving = ownMoving;
+	st.noHistory = prev.w <= 0.0;
 	// THE REST'S ACTIVE TEXELS, counted into the hit list's third counter word (read back several frames late): the
 	// view holds once a rest frame counted none (OgreRayQuery.cpp).
 	if( atRest && JAH_HIT_ON )
@@ -1305,14 +1300,16 @@ void main()
 	{
 		// A NON-FINITE ESCAPE IS NOT EVIDENCE ABOUT THIS PIXEL: the history is
 		// carried through unchanged, and a texel that has never had an answer
-		// (prev.w == 0) writes a zero distance so the filter skips it this frame.
+		// (no carried count) writes a zero distance so the filter skips it this frame.
 		// (At rest from k = 2 the answer so far stays where it is, in place.)
 		if( !restInPlace )
-			imageStore( historyCur, ivec3( tc, gEye ), prev );
+			imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, 0.0 ) );
 		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );
-		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( prev.w > 0.0 ? restDist : 0.0,
-											  restInPlace ? inPlacePair.y : jahPackMeanLength( wasHitT, wasMoverAge + 1.0 ),
-											  0.0, 0.0 ) );
+		st.surfDist = prev.w > 0.0 ? dist : 0.0;
+		st.stop = prev.w > 0.0 ? st.stop : 0u;
+		st.hitT = restInPlace ? inPlace.hitT : jahStoredLength( wasHitT );
+		st.moverAge = uint( restInPlace ? float( inPlace.moverAge ) : min( wasMoverAge + 1.0, 63.0 ) );
+		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 		photonHit( tc, kPhotonDropped );
 		return;
 	}
@@ -1386,61 +1383,56 @@ void main()
 	{
 		// AT REST the mean length is the rest samples' own running mean (R1/G2's rule for the length): the samples the
 		// texel's rest mean holds (its in-place half's count over its frozen history's), the length so far in place.
-		const float vPrev = restInPlace && !resume ? jahRestSamples( prev, imageLoad( historyCur, ivec3( tc, gEye ) ) ) : 0.0;
-		const float sofar = restInPlace && !resume ? jahMeanLength( inPlacePair.y ) : 0.0;
+		const float vPrev = restInPlace && !resume ? float( inPlace.v ) : 0.0;
+		const float sofar = restInPlace && !resume ? inPlace.hitT : 0.0;
 		hitMean = vPrev > 0.0 && sofar > 0.0 ? max( sofar + ( hitT - sofar ) / ( vPrev + 1.0 ), 1e-3 ) : hitT;
 	}
 	else if( prev.w > 0.0 && wasHitT > 0.0 )
 		hitMean = mix( wasHitT, hitT, blend );
-	// THE MOVER AGE rides the mean length's low bits: 0 when this ray hit a mover
-	// (moving or parked), one frame older otherwise (saturating at 63). AT REST IT ADVANCES IN THE ANSWER'S HALF (G4):
-	// read in place, never from the frozen half (a 1,000-frame hold left it at the stop's age + 1).
-	const float ageBefore = restInPlace ? jahMeanMoverAge( inPlacePair.y ) : wasMoverAge;
-	const float hitMeanStored = jahPackMeanLength( hitMean, hitMover ? 0.0 : ageBefore + 1.0 );
+	// THE MOVER AGE: 0 when this ray hit a mover (moving or parked), one frame older otherwise (saturating). AT REST IT
+	// ADVANCES IN THE ANSWER'S HALF (G4): read in place, never from the frozen half (a 1,000-frame hold left it at the
+	// stop's age + 1).
+	const float ageBefore = restInPlace ? float( inPlace.moverAge ) : wasMoverAge;
 	// THE CARRIED COUNT: the samples in the history this frame's sample joins (a motion-caused restart in a warm view
-	// is seeded at the warm-up, DRAG-1); the temporal pass adds this frame's and shortens it by its confidence.
+	// is seeded at the warm-up, DRAG-1); the temporal pass adds this frame's and shortens it by its confidence. AT REST
+	// the first frame carries the frozen history WITH ITS OWN COUNT - the rest mean's samples are counted beside it, v -
+	// never the warm seed. A record's carried count is the seed too: one the decode leaves unshaded is withheld by the
+	// write-back on the state's `noHistory` (a texel with no answer, skipped) - never a black one at count 8.
 	const float seed = max( prev.w, warmHeld * kWarmupFrames );
-	// WHICH HISTORY the temporal pass may use: the surface's only, where it is a moving thing's — the reflector
-	// moved, the hit moved, or the history came through the moving hit's reflected image (rq_reflect_temporal's flag,
-	// + 2). A WARM RESTART (+ 4, PHOTON-2 fix F3): the mean restarted on motion in a warm view, so the temporal pass
-	// seeds this sample's count at the warm-up — the record's history is stored with ITS count (0), never the seed,
-	// so a record the decode leaves unshaded is a texel with no answer (skipped), never a black one at count 8.
-	// THE FIXED ESTIMATOR (+ 8, F4): its samples are one ray, the same every still frame — no firefly to bound at rest.
-	const bool warmRestart = prev.w <= 0.0 && warmHeld > 0.5;
-	const float sampleW = clamp( blendFloor, 1e-3, 1.0 ) + ( ( ownMoving || hitMoving || virtualHeld ) ? 2.0 : 0.0 ) +
-						  ( warmRestart ? 4.0 : 0.0 ) + ( fixedEstimator ? 8.0 : 0.0 ) + ( atRest && resume ? 16.0 : 0.0 );
+	st.hitT = jahStoredLength( hitMean );
+	st.moverAge = uint( hitMover ? 0.0 : min( ageBefore + 1.0, 63.0 ) );
+	if( !restInPlace )
+		st.N = atRest ? max( prev.w, 0.0 ) : seed;
 	if( record )
 	{
-		// THE RECORD: this texel's history is CARRIED with ITS OWN count (not the seed: a
-		// warm restart's seed rides `sampleW`, PHOTON-2 fix F3) and this frame's distances;
-		// the write-back (rq_hit_composite) writes the decoded radiance as this frame's
-		// SAMPLE with the record's `sampleW`, and the temporal pass blends it like any
-		// other — the radiance arriving one pass later. A record the decode leaves
-		// unshaded then finds count 0 here and the write-back withholds the distance:
-		// the texel has no answer this frame (the filter skips it) — never (0, 0, 0, 8)
-		// composited black, which the seed stored here made of every warm restart.
-		// (At rest from k = 2 the answer so far stays in place: fix F1.)
+		// THE RECORD: this texel's history is CARRIED (its count in the state) with this frame's
+		// distances; the write-back (rq_hit_composite) writes the decoded radiance as this
+		// frame's SAMPLE, and the temporal pass blends it like any other — the radiance
+		// arriving one pass later. (At rest from k = 2 the answer so far stays in place: fix F1.)
 		if( !restInPlace )
-			imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, max( prev.w, 0.0 ) ) );
+			imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, 0.0 ) );
 		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );   // the write-back fills it
 		const vec3 hitPos = world + worldN * bias + L * hitT;
 		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, false );
 		if( jahHitAppend( recSlot, jahHitNearLevel( recSlot ), false, recPrim, recBary, L, sunVis,
 						  reflectFootprint( lobeAlpha, hitT ),
-						  sampleW, jahHitDestPack( tc, false, gEye ),
+						  1.0, jahHitDestPack( tc, false, gEye ),
 						  world.y, length( hitPos - world ), length( world - thisEye.camPos ) ) )
 		{
-			imageStore( historyDistCur, ivec3( tc, gEye ), vec4( restDist, hitMeanStored, 0.0, 0.0 ) );
+			imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 			photonHit( tc, kPhotonList );
 		}
 		else
 		{
 			// THE LIST WAS FULL (a dropped record, counted): this frame has no
 			// sample for the texel, which keeps what it had.
-			imageStore( historyDistCur, ivec3( tc, gEye ), vec4( prev.w > 0.0 ? restDist : 0.0,
-												  restInPlace ? inPlacePair.y
-															  : jahPackMeanLength( wasHitT, wasMoverAge + 1.0 ),
-												  0.0, 0.0 ) );
+			st.surfDist = prev.w > 0.0 ? dist : 0.0;
+			st.stop = prev.w > 0.0 ? st.stop : 0u;
+			st.hitT = restInPlace ? inPlace.hitT : jahStoredLength( wasHitT );
+			st.moverAge = uint( restInPlace ? float( inPlace.moverAge ) : min( wasMoverAge + 1.0, 63.0 ) );
+			if( !restInPlace )
+				st.N = max( prev.w, 0.0 );
+			imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 			photonHit( tc, kPhotonDropped );
 		}
 		return;
@@ -1462,12 +1454,11 @@ void main()
 	// own history is kWarmupFrames old (`historyAt`) — so a freshly created view
 	// (a graded screenshot's, which lives about two frames) still fades in
 	// exactly as before, which is the guarantee the warm-up exists for.
-	// (AT REST the first frame carries the frozen history WITH ITS OWN COUNT - the rest mean's samples are counted
-	// over it, jahRestSamples - never the warm seed.)
+	// (AT REST the first frame carries the frozen history WITH ITS OWN COUNT - the state's N above.)
 	if( !restInPlace )
-		imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, atRest ? max( prev.w, 0.0 ) : seed ) );
-	imageStore( reflectSample, ivec3( tc, gEye ), vec4( traced, sampleW ) );
-	imageStore( historyDistCur, ivec3( tc, gEye ), vec4( restDist, hitMeanStored, 0.0, 0.0 ) );
+		imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, 0.0 ) );
+	imageStore( reflectSample, ivec3( tc, gEye ), vec4( traced, 1.0 ) );
+	imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel : kPhotonSky );
 
 	// THE TEMPORAL MEAN IS THE NEXT PASS' (PHOTON-2 1b): rq_reflect_temporal.comp

@@ -5100,7 +5100,7 @@ struct RayQueryStatus {
     float reflectMotionMs = -1.0f;
     /// THE REFLECTION HISTORY'S COUNT (PHOTON-2 stage 0; the arm "reflect.historyReadback") — an INSTRUMENT:
     /// per texel of the trace's grid, row-major (reflectHistoryW x reflectHistoryH, the eye layers side by side),
-    /// the temporal mean's sample count rq_reflect.comp wrote (its history w; 0 = no answer yet, capped at 4096)
+    /// the temporal mean's sample count (its state texel's N + v, whole; 0 = no answer this frame, capped at 4096)
     /// on traced frame `reflectHistoryFrame` of the view. Empty with the arm off and until a frame traced under it
     /// has retired. `reflectFrame` is the view's traced-frame counter NOW (the frame just traced is one below it),
     /// so a caller that steps frames knows which copy is which frame.

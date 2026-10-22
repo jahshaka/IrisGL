@@ -6,7 +6,8 @@
 // composition cannot happen there - this pass writes it at each texel's own place (no texel reads another's), and the
 // moving rules resume from the answer that was on screen, never from H or M alone.
 // The set and the Params are the trace's (declared here up to `stereo`); binding 6 is the half that held M (now the
-// trace's `historyPrev`), binding 7 the half that held H.
+// trace's `historyPrev`), binding 7 the half that held H; binding 8 the M half's state (jah_reflect_state.glsl: the rest
+// samples v), which takes the composed count - a moving history's - and binding 9 the H half's (its count).
 #extension GL_GOOGLE_include_directive : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
@@ -83,9 +84,11 @@ layout( set = 0, binding = 1 ) uniform Params
 
 layout( rgba16f, set = 0, binding = 6 ) uniform image2DArray historyPrev;
 layout( rgba16f, set = 0, binding = 7 ) uniform readonly image2DArray historyCur;
-layout( rg32f, set = 0, binding = 8 ) uniform readonly image2DArray historyDistPrev;
+layout( rg32ui, set = 0, binding = 8 ) uniform uimage2DArray statePrev;
+layout( rg32ui, set = 0, binding = 9 ) uniform readonly uimage2DArray stateCur;
 
 #include "jah_reflect_rest.glsl"
+#include "jah_reflect_state.glsl"
 
 // NaN AND INF BY THEIR BITS (trap 5: x == x is folded away): the one copy.
 #include "jah_rq_finite.glsl"
@@ -97,14 +100,21 @@ void main()
 	const int eye = int( gl_GlobalInvocationID.z );
 	if( any( greaterThanEqual( tc, traceRes ) ) )
 		return;
-	if( !( imageLoad( historyDistPrev, ivec3( tc, eye ) ).x > 0.0 ) )
+	JahReflectState st = jahStateUnpack( imageLoad( statePrev, ivec3( tc, eye ) ).xy );
+	if( !( st.surfDist > 0.0 ) )
 		return;   // no answer here (the texel was declined at rest): the trace finds none either
-	const vec4 M = imageLoad( historyPrev, ivec3( tc, eye ) );
-	const vec4 H = imageLoad( historyCur, ivec3( tc, eye ) );
-	if( !( M.w > 0.0 ) || !finite3( M.xyz ) )
+	const vec3 M = imageLoad( historyPrev, ivec3( tc, eye ) ).xyz;
+	const vec3 H = imageLoad( historyCur, ivec3( tc, eye ) ).xyz;
+	const float v = float( st.v );
+	const float Hn = jahStateUnpack( imageLoad( stateCur, ivec3( tc, eye ) ).xy ).N;
+	// (the composed answer's count: H's plus the rest samples; a texel holding neither has no answer to compose)
+	if( !( Hn + v > 0.0 ) || !finite3( M ) )
 		return;
-	const vec4 Hs = finite3( H.xyz ) ? H : vec4( 0.0 );
-	const float v = jahRestSamples( Hs, M );
+	const bool hasH = finite3( H ) && Hn > 0.0;
 	imageStore( historyPrev, ivec3( tc, eye ),
-				vec4( jahRestAnswer( Hs, M, max( p.stereo.w, 1.0 ) ), min( max( Hs.w, 0.0 ) + v, 4096.0 ) ) );
+				vec4( jahRestAnswer( hasH ? H : vec3( 0.0 ), hasH, M, v, max( p.stereo.w, 1.0 ) ), 0.0 ) );
+	st.N = ( hasH ? Hn : 0.0 ) + v;
+	st.v = 0u;
+	st.stop = 0u;
+	imageStore( statePrev, ivec3( tc, eye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 }

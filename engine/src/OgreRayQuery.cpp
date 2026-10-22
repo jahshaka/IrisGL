@@ -261,7 +261,7 @@ constexpr unsigned kReflectRestMovers = 16u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 48u;
+constexpr unsigned kReflectBindings = 47u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -320,17 +320,15 @@ constexpr unsigned kReflectSampleBinding = kReflectCloudBinding + 1u;
 /// ...and THE REST'S REFERENCE (46, PHOTON-2 round 2, R1 (f)'s arm "reflect.restReference"): a 32-bit running mean of
 /// each texel's raw rest samples, 1 x 1 unless the arm is on.
 constexpr unsigned kReflectReferenceBinding = kReflectSampleBinding + 1u;
-/// ...and THE REST'S SECOND MOMENT (47, PHOTON-2 rev 12, P1): R16F, the root mean square of the luma of each texel's
-/// rest samples - the standard error the rest's stop and the filter's reach at rest read (2 bytes a trace texel).
-constexpr unsigned kReflectMomentBinding = kReflectReferenceBinding + 1u;
-static_assert(kReflectBindings == kReflectMomentBinding + 1u,
-              "the rest's second moment is the reflection set's last binding");
+// (THE REST'S SECOND MOMENT rides the rest half's alpha since PHOTON-7 stage 6 - its R16F image is deleted.)
+static_assert(kReflectBindings == kReflectReferenceBinding + 1u,
+              "the rest's reference is the reflection set's last binding");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
-/// buffer, the destinations, the decoded radiance, the reflection's mean and
-/// distance, the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the
-/// ray's direction) and the air's table, the reflection's fog along its ray — and (PHOTON-2 1b) the reflection's
-/// raw SAMPLE a shaded record becomes.
-constexpr unsigned kHitCompositeBindings = 10u;
+/// buffer, the destinations, the decoded radiance, the reflection's STATE texel (an unshaded record's distance is
+/// withheld there), the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the ray's direction) and the
+/// air's table, the reflection's fog along its ray — and (PHOTON-2 1b) the reflection's raw SAMPLE a shaded record
+/// becomes.
+constexpr unsigned kHitCompositeBindings = 9u;
 
 /// A storage image this file owns outright — the temporal mean and the distance
 /// beside it. Not an Ogre texture: nothing but this compute pass ever reads or
@@ -1022,10 +1020,10 @@ private:
         /// THE PER-SLOT GEOMETRY ROW the scene's TLAS was written with, copied
         /// per frame in flight (the scene's vector moves under a later frame).
         RawBuffer       geomRowOfSlot[kReflectRing];
-        /// The temporal mean and the distance beside it, ping-ponged: read from
-        /// [frame & 1], written to [~frame & 1]. See rq_reflect.comp's note on
-        /// why one buffer is a race.
-        ReflectImage hist[2], dist[2];
+        /// The temporal mean and the STATE TEXEL beside it (rg32ui, jah_reflect_state.glsl: the distances, the counts,
+        /// the rest's stop, this frame's estimator), ping-ponged: read from [frame & 1], written to [~frame & 1]. See
+        /// rq_reflect.comp's note on why one buffer is a race.
+        ReflectImage hist[2], state[2];
         /// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b): one image (not a pair — written and read within the frame), the
         /// temporal pass' neighbourhood and blend input. 8 bytes a trace texel.
         ReflectImage sample;
@@ -1033,8 +1031,6 @@ private:
         /// count; the trace's size under the arm, 1 x 1 otherwise (`referenceFull`).
         ReflectImage reference;
         bool referenceFull = false;
-        /// THE REST'S SECOND MOMENT (P1, rq_reflect_temporal.comp): R16F, one per trace texel and eye.
-        ReflectImage moment;
         unsigned w = 0, h = 0, layers = 1;
         unsigned frame = 0;              ///< the sample sequence's input
         bool     imagesReady = false;
@@ -1105,8 +1101,8 @@ private:
         /// handed-over answer is written in place — and a held frame binds the same pair.
         unsigned flip = 0u;
         /// THE HISTORY-COUNT READBACK (PHOTON-2 stage 0, the arm "reflect.historyReadback"): a host ring of
-        /// kReflectRing copies of the temporal mean the filter has read, the slot of the frame's ring; each
-        /// decoded once its frame retired into `histHost` (the w channel, the count) for RayQueryStatus.
+        /// kReflectRing copies of the state texel the filter has read, the slot of the frame's ring; each
+        /// decoded once its frame retired into `histHost` (the count: N + v) for RayQueryStatus.
         RawBuffer histReadback;
         struct HistPending {
             uint32_t frame = 0u;          ///< frameNow() at the copy
@@ -1508,10 +1504,10 @@ private:
     bool                  mCompFailed = false;
     /// 1x1 storage stand-ins in GENERAL (a set's every view must be real): the
     /// list's two formats, the RGBA16F of the reflection's mean and the gather's
-    /// atlas, and the reflection's distance format.
-    ReflectImage mHitDummyIds, mHitDummyColour, mHitDummyDest, mHitDummyDist;
+    /// atlas, and the reflection's state-texel format.
+    ReflectImage mHitDummyIds, mHitDummyColour, mHitDummyDest, mHitDummyState;
     /// The reflection history's stand-in: a SCREEN image (one layer, an array
-    /// view — what the composite declares since LAYERED-STEREO-1). mHitDummyDist
+    /// view — what the composite declares since LAYERED-STEREO-1). mHitDummyState
     /// is one too; mHitDummyColour stays the probe atlas's 2D stand-in.
     ReflectImage mHitDummyHist;
     bool mHitDummiesReady = false;
@@ -2299,7 +2295,7 @@ void RayQueryTier::close() {
         dropBuffer(hv.readback);
     }
     mHits.clear();
-    for (ReflectImage *d : { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyDist,
+    for (ReflectImage *d : { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyState,
                              &mHitDummyHist }) {
         if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
         if (d->image) vkDestroyImage(mVk, d->image, nullptr);
@@ -5338,7 +5334,6 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 44 the cloud field (FAR-SUN-2)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 45 this frame's raw sample (PHOTON-2 1b)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 46 the rest's reference (PHOTON-2 round 2, R1 (f))
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 47 the rest's second moment (PHOTON-2 rev 12, P1)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -5473,26 +5468,24 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
     // still reference them are in flight.
     for (int i = 0; i < 2; ++i) {
         retireImage(rv.hist[i]);
-        retireImage(rv.dist[i]);
+        retireImage(rv.state[i]);
     }
     retireImage(rv.sample);
     retireImage(rv.reference);
-    retireImage(rv.moment);
     rv.imagesReady = false;
     rv.havePrev = false;
     rv.historyFrames = 0;
     rv.w = w; rv.h = h;
     rv.layers = layers;
-    // The second image: x = the surface's distance (the reprojection's validity
-    // test), y = the mean distance the rays in the mean travelled (what a moved
-    // camera's ray is compared against — rq_reflect.comp, PAN-SMEAR-1). 8 bytes a
-    // trace texel: a record's ray length and origin height ride the RECORD
-    // (jah_rq_hit_record.glsl), never a full-resolution image.
-    const VkFormat formats[2] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32_SFLOAT };
+    // The second image, THE STATE TEXEL (PHOTON-7 stage 6, L8; jah_reflect_state.glsl): the surface's distance (the
+    // reprojection's validity test) and the mean distance the rays in the mean travelled as halves, the counts, the
+    // rest's stop and this frame's estimator as integer fields. 8 bytes a trace texel: a record's ray length and origin
+    // height ride the RECORD (jah_rq_hit_record.glsl), never a full-resolution image.
+    const VkFormat formats[2] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32_UINT };
     for (int i = 0; i < 2; ++i) {
         // ONE LAYER PER EYE (LAYERED-STEREO-1): the trace's z is the eye.
         if (!makeStorageImage(w, h, formats[0], rv.hist[i], err, layers)) return false;
-        if (!makeStorageImage(w, h, formats[1], rv.dist[i], err, layers)) return false;
+        if (!makeStorageImage(w, h, formats[1], rv.state[i], err, layers)) return false;
     }
     if (!makeStorageImage(w, h, formats[0], rv.sample, err, layers)) return false;
     // (the arm toggled re-makes the whole set: a measuring arm, set before the session's measurement)
@@ -5500,7 +5493,6 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
                           layers))
         return false;
     rv.referenceFull = reference;
-    if (!makeStorageImage(w, h, VK_FORMAT_R16_SFLOAT, rv.moment, err, layers)) return false;
     rv.imagesReady = true;
     rv.needsClear = true;
     return true;
@@ -5518,10 +5510,9 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
     // clear waits for those stages and makes their writes available before it writes;
     // a freshly made image has no earlier access and the same barrier costs it nothing.
     // The old contents are discarded (UNDEFINED): they are cleared.
-    constexpr int kImages = 7;
+    constexpr int kImages = 6;
     VkImageMemoryBarrier toGeneral[kImages] = {};
-    ReflectImage *imgs[kImages] = { &rv.hist[0], &rv.hist[1], &rv.dist[0], &rv.dist[1], &rv.sample, &rv.reference,
-                                    &rv.moment };
+    ReflectImage *imgs[kImages] = { &rv.hist[0], &rv.hist[1], &rv.state[0], &rv.state[1], &rv.sample, &rv.reference };
     for (int i = 0; i < kImages; ++i) {
         toGeneral[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         toGeneral[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -5564,10 +5555,9 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
         retire(rv.params[i]);
         retire(rv.geomRowOfSlot[i]);
     }
-    for (int i = 0; i < 2; ++i) { retireImage(rv.hist[i]); retireImage(rv.dist[i]); }
+    for (int i = 0; i < 2; ++i) { retireImage(rv.hist[i]); retireImage(rv.state[i]); }
     retireImage(rv.sample);
     retireImage(rv.reference);
-    retireImage(rv.moment);
     retire(rv.histReadback);
     for (ReflectView::HistPending &p : rv.histPending) p = ReflectView::HistPending();
     rv.histHost.clear();
@@ -6344,8 +6334,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     storage[0].imageView = layerView(ssrTex, true);
     storage[1].imageView = rv.hist[prev].view;
     storage[2].imageView = rv.hist[cur].view;
-    storage[3].imageView = rv.dist[prev].view;
-    storage[4].imageView = rv.dist[cur].view;
+    storage[3].imageView = rv.state[prev].view;
+    storage[4].imageView = rv.state[cur].view;
     for (int i = 0; i < 5; ++i) storage[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     for (int axis = 0; axis < kRayVoxelKinds; ++axis)
         for (unsigned c = 0; c < kMaxReflectCascades; ++c) {
@@ -6551,13 +6541,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!referenceImg.imageView) { bail("the reference view is null"); return; }
     w[kReflectReferenceBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectReferenceBinding].pImageInfo = &referenceImg;
-    // THE REST'S SECOND MOMENT (47, P1).
-    VkDescriptorImageInfo momentImg{};
-    momentImg.imageView = rv.moment.view;
-    momentImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    if (!momentImg.imageView) { bail("the moment view is null"); return; }
-    w[kReflectMomentBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    w[kReflectMomentBinding].pImageInfo = &momentImg;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -7338,8 +7321,9 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
 
 // THE REFLECTION HISTORY'S COUNT TO THE HOST (PHOTON-2 stage 0, the arm "reflect.historyReadback") — the stillness
 // door's count histogram. The retired copies are decoded first (a slot is reused only after its frame retired: the
-// ring is the trace's own, kReflectRing >= the frames in flight), then this frame's mean — written by the trace and
-// the decode's write-back, read by the filter above — is copied into its slot. Nothing the renderer reads changes.
+// ring is the trace's own, kReflectRing >= the frames in flight), then this frame's STATE TEXEL — written by the trace,
+// the decode's write-back and the temporal pass, read by the filter above — is copied into its slot (the counts are
+// the state's since PHOTON-7 stage 6). Nothing the renderer reads changes.
 void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
     const uint32_t now = frameNow(), inFlight = framesInFlight();
     for (ReflectView::HistPending &p : rv.histPending) {
@@ -7347,8 +7331,8 @@ void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
         const size_t slot = size_t(&p - rv.histPending);
         const size_t layerTexels = size_t(p.w) * p.h;
         const size_t slotBytes = layerTexels * p.layers * 8u;
-        const uint16_t *src =
-            reinterpret_cast<const uint16_t *>(static_cast<const char *>(rv.histReadback.mapped) + slot * slotBytes);
+        const uint32_t *src =
+            reinterpret_cast<const uint32_t *>(static_cast<const char *>(rv.histReadback.mapped) + slot * slotBytes);
         const size_t pairW = size_t(p.w) * p.layers;
         detail::decodeReflectHistory(src, p.w, p.h, p.layers, rv.histHost);   // -O2 (ReadbackDecode.h)
         rv.histHostW = unsigned(pairW);
@@ -7365,7 +7349,7 @@ void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
         return;
     }
     const unsigned w = rv.traceW, h = rv.traceH;
-    if (!w || !h || !rv.hist[rv.curIdx].image) return;
+    if (!w || !h || !rv.state[rv.curIdx].image) return;
     const VkDeviceSize slotBytes = VkDeviceSize(w) * h * rv.layers * 8u;
     if (rv.histReadback.buffer && rv.histReadback.size < slotBytes * kReflectRing) {
         retire(rv.histReadback);
@@ -7391,7 +7375,7 @@ void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.layerCount = rv.layers;
     region.imageExtent = { w, h, 1u };
-    vkCmdCopyImageToBuffer(cmd, rv.hist[rv.curIdx].image, VK_IMAGE_LAYOUT_GENERAL, rv.histReadback.buffer, 1, &region);
+    vkCmdCopyImageToBuffer(cmd, rv.state[rv.curIdx].image, VK_IMAGE_LAYOUT_GENERAL, rv.histReadback.buffer, 1, &region);
     // ...ordered before the host's read AND before the trace that writes this half again two frames on.
     VkMemoryBarrier toHost{};
     toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -8837,7 +8821,7 @@ bool RayQueryTier::ensureHitDummies(std::string &err) {
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32B32A32_UINT, mHitDummyIds, err)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, mHitDummyColour, err)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R32_UINT, mHitDummyDest, err)) return false;
-    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32_SFLOAT, mHitDummyDist, err, 1u)) return false;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32_UINT, mHitDummyState, err, 1u)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, mHitDummyHist, err, 1u)) return false;
     mHitDummiesReady = true;
     mHitDummiesNeedInit = true;
@@ -8848,7 +8832,7 @@ void RayQueryTier::initHitDummies(VkCommandBuffer cmd) {
     if (!mHitDummiesNeedInit || !cmd) return;
     mHitDummiesNeedInit = false;
     VkImageMemoryBarrier b[5] = {};
-    ReflectImage *imgs[5] = { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyDist,
+    ReflectImage *imgs[5] = { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyState,
                               &mHitDummyHist };
     for (int i = 0; i < 5; ++i) {
         b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -9226,12 +9210,11 @@ bool RayQueryTier::makeCompositePipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 1 the list's buffer (counters + aux)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 the destinations
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 3 the decoded radiance
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 the reflection's mean
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 5 ...its distances
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 6 the gather's atlas
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 7 the list's records (PHOTON-I-1 fix 5)
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 8 the air's table
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 9 the reflection's raw sample (PHOTON-2 1b)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 the reflection's state texel
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 5 the gather's atlas
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 6 the list's records (PHOTON-I-1 fix 5)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 7 the air's table
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 8 the reflection's raw sample (PHOTON-2 1b)
     };
     for (unsigned i = 0; i < kHitCompositeBindings; ++i) {
         b[i].binding = i;
@@ -9306,15 +9289,14 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
             return;
         }
     }
-    // THE DESTINATIONS: the reflection's mean and distance of THIS frame (the
-    // pair the trace wrote), the gather's atlas the trace wrote — or stand-ins
+    // THE DESTINATIONS: the reflection's state texel of THIS frame (the half the
+    // trace wrote) and its sample, the gather's atlas the trace wrote — or stand-ins
     // with the consumer's flag down (its records, if any, are skipped).
-    VkImageView histView = mHitDummyHist.view, distView = mHitDummyDist.view, atlasView = mHitDummyColour.view;
-    VkImageView sampleView = mHitDummyHist.view;   // the same rgba16f stand-in shape
+    VkImageView stateView = mHitDummyState.view, atlasView = mHitDummyColour.view;
+    VkImageView sampleView = mHitDummyHist.view;   // the rgba16f stand-in shape
     bool reflectBound = false, gatherBound = false;
     if (auto rit = mReflects.find(key); rit != mReflects.end() && rit->second.finishPending) {
-        histView = rit->second.hist[rit->second.curIdx].view;
-        distView = rit->second.dist[rit->second.curIdx].view;
+        stateView = rit->second.state[rit->second.curIdx].view;
         sampleView = rit->second.sample.view;
         reflectBound = true;
     }
@@ -9339,7 +9321,7 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     ub.buffer = hv.params[ring].buffer;
     ub.range = sizeof(CompositeParams);
     const VkDescriptorBufferInfo bufInfo = rawBufferInfo(hv.buf);
-    VkDescriptorImageInfo sampled[2] = {}, storage[3] = {};
+    VkDescriptorImageInfo sampled[2] = {}, storage[2] = {};
     Ogre::TextureGpu *const src[2] = { hv.dest, hv.radiance };
     for (int i = 0; i < 2; ++i) {
         sampled[i].sampler = mPointSampler;
@@ -9347,8 +9329,8 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
         sampled[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         if (!sampled[i].imageView) return;
     }
-    const VkImageView dst[3] = { histView, distView, atlasView };
-    for (int i = 0; i < 3; ++i) {
+    const VkImageView dst[2] = { stateView, atlasView };
+    for (int i = 0; i < 2; ++i) {
         storage[i].imageView = dst[i];
         storage[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         if (!storage[i].imageView) return;
@@ -9368,11 +9350,11 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
         w[2 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[2 + i].pImageInfo = &sampled[i];
     }
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 2; ++i) {
         w[4 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[4 + i].pImageInfo = &storage[i];
     }
-    // THE RECORDS (7) and THE AIR'S TABLE (8): the reflection's fog along its ray.
+    // THE RECORDS (6) and THE AIR'S TABLE (7): the reflection's fog along its ray.
     VkDescriptorImageInfo idsImg{}, fogImg{};
     {
         Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
@@ -9388,16 +9370,16 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     fogImg.imageView = fogAerial ? sampledView(fogAerial) : mDummyVolume.view;
     fogImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (!fogImg.imageView) return;
-    w[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    w[7].pImageInfo = &idsImg;
-    w[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    w[8].pImageInfo = &fogImg;
+    w[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[6].pImageInfo = &idsImg;
+    w[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[7].pImageInfo = &fogImg;
     VkDescriptorImageInfo sampleImg{};
     sampleImg.imageView = sampleView;
     sampleImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     if (!sampleImg.imageView) return;
-    w[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    w[9].pImageInfo = &sampleImg;
+    w[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[8].pImageInfo = &sampleImg;
     vkUpdateDescriptorSets(mVk, kHitCompositeBindings, w, 0, nullptr);
 
     {
@@ -9495,8 +9477,8 @@ void OgreEngine::setRayTracing(bool on) {
 // THE TIER'S STORAGE FORMATS, ASKED OF THE DEVICE (RAY-FMT-CHECK, PHOTON P3).
 //
 // Every image the tier writes from a compute shader is a STORAGE image: the
-// reflection's temporal pair (the radiance mean, RGBA16F, and the distances,
-// RG32F — `ensureReflectImages`) and the gather's atlas (RGBA16F). BOTH ARE
+// reflection's temporal pair (the radiance mean, RGBA16F, and the state texel,
+// RG32UI — `ensureReflectImages`) and the gather's atlas (RGBA16F). BOTH ARE
 // CORE-MANDATORY STORAGE FORMATS in Vulkan 1.0 (the spec's Required Format
 // Support; shaderStorageImageExtendedFormats covers the R16G16*, R16*, R8*,
 // A2B10G10R10 and B10G11R11 family, not these), so on a conformant driver this
@@ -9508,14 +9490,14 @@ void OgreEngine::setRayTracing(bool on) {
 // rayReflect, the cards' Auto, the status) reads that same answer.
 //
 // JAHSHAKA_RAY_DENY_STORAGE_FORMAT names a format (R16G16B16A16_SFLOAT or
-// R32G32_SFLOAT) to treat as unsupported: FAULT INJECTION, the refusal path's
+// R32G32_UINT) to treat as unsupported: FAULT INJECTION, the refusal path's
 // only door on conformant hardware (a measurement switch for
 // gi.rt_reflect_format_refused_lavapipe, not a mode).
 namespace {
 struct RayStorageFormat { VkFormat format{}; const char *name{}; };
 constexpr RayStorageFormat kRayStorageFormats[] = {
     { VK_FORMAT_R16G16B16A16_SFLOAT, "R16G16B16A16_SFLOAT" },   // the reflection mean, the gather atlas
-    { VK_FORMAT_R32G32_SFLOAT,       "R32G32_SFLOAT" },         // the reflection's distance pair
+    { VK_FORMAT_R32G32_UINT,         "R32G32_UINT" },           // the reflection's state texel
 };
 
 /// Empty when every format stores; otherwise the first one that does not.

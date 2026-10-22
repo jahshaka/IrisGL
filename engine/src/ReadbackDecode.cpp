@@ -30,24 +30,21 @@ void decodeGatherHistory(const uint32_t *src, unsigned w, unsigned h, unsigned l
         }
 }
 
-void decodeReflectHistory(const uint16_t *src, unsigned w, unsigned h, unsigned layers,
+void decodeReflectHistory(const uint32_t *src, unsigned w, unsigned h, unsigned layers,
                           std::vector<unsigned short> &out) {
     const size_t layerTexels = size_t(w) * h;
     const size_t pairW = size_t(w) * layers;
     out.assign(pairW * h, 0u);
-    // THE COUNT FROM THE HALF'S BITS: a half holds every whole number up to 2048 exactly (11 significant bits) and
-    // only even ones above it, so a count past 2048 reads to within one — the histogram's edges (9, 17, 33) are far
-    // below that. A value under one (a subnormal, zero, a sign) or not finite is no count; else the mantissa with
-    // its hidden bit, shifted.
     for (unsigned k = 0; k < layers; ++k)
         for (unsigned y = 0; y < h; ++y) {
-            const uint16_t *row = src + (size_t(k) * layerTexels + size_t(y) * w) * 4u + 3u;
+            const uint32_t *row = src + (size_t(k) * layerTexels + size_t(y) * w) * 2u;
             unsigned short *dst = out.data() + size_t(y) * pairW + size_t(k) * w;
-            for (unsigned x = 0; x < w; ++x, row += 4) {
-                const unsigned hv = *row, e = (hv >> 10u) & 31u;
-                dst[x] = (hv & 0x8000u) || e < 15u || e == 31u
-                             ? (unsigned short)0u
-                             : (unsigned short)std::min(((1024u + (hv & 1023u)) << (e - 15u)) >> 10u, 4096u);
+            for (unsigned x = 0; x < w; ++x, row += 2) {
+                // the surface distance's half: positive and non-zero (no sign, an exponent or mantissa bit set)
+                const unsigned dist = row[0] & 0xFFFFu;
+                if (!dist || (dist & 0x8000u)) continue;
+                const unsigned n4 = row[1] & 0xFFu, v = (row[1] >> 8u) & 0x3FFu;
+                dst[x] = (unsigned short)std::min(n4 / 4u + v, 4096u);
             }
         }
 }

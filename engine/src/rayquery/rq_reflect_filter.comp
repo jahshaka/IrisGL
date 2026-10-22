@@ -176,21 +176,17 @@ layout( rgba16f, set = 0, binding = 5 ) uniform image2DArray ssrReflection;
 /// how a stable picture acquires a shimmer nobody can reproduce. The pair costs
 /// one extra image of 8 bytes per traced pixel.
 layout( rgba16f, set = 0, binding = 6 ) uniform readonly  image2DArray historyPrev;   // at rest: the frozen H (R1)
-layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray historyCur;
-/// ...and the distance beside it, which is what makes the reprojection a TEST
-/// rather than a hope: the surface found at the reprojected pixel is the same
-/// surface only if it was the same distance away.
-// x = the surface's distance (all this pass reads), y = the mean distance the
-// rays in the mean travelled (rq_reflect.comp's).
-layout( rg32f, set = 0, binding = 8 ) uniform readonly  image2DArray historyDistPrev;
-layout( rg32f, set = 0, binding = 9 ) uniform image2DArray historyDistCur;
-/// THIS FRAME'S RAW SAMPLE (rq_reflect_temporal.comp): read for its w's FIXED flag (+ 8, PHOTON-2 fix F4) alone — a
-/// texel whose lobe is under one texel at its hit took its one ray whole, and is never blurred here.
+/// ...whose rest half's alpha holds the rest samples' luma root mean square (rq_reflect_temporal.comp, P1): the reach
+/// at rest follows its variance.
+layout( rgba16f, set = 0, binding = 7 ) uniform readonly image2DArray historyCur;
+/// ...and THE STATE TEXEL beside it (jah_reflect_state.glsl): the surface's distance (the "answered this frame" flag),
+/// the mean ray length, the counts and this frame's estimator.
+layout( rg32ui, set = 0, binding = 8 ) uniform readonly uimage2DArray statePrev;
+layout( rg32ui, set = 0, binding = 9 ) uniform readonly uimage2DArray stateCur;
+/// THIS FRAME'S RAW SAMPLE (rq_reflect_temporal.comp): w > 0 = the texel had a sample this frame.
 layout( rgba16f, set = 0, binding = 45 ) uniform readonly image2DArray reflectSample;
 /// THE REST'S REFERENCE (PHOTON-2 round 2, R1 (f)'s arm, rest.y): composited UNFILTERED at rest under the arm.
 layout( rgba32f, set = 0, binding = 46 ) uniform readonly image2DArray restReference;
-/// THE REST'S SECOND MOMENT (PHOTON-2 rev 12, P1; rq_reflect_temporal.comp): the reach at rest follows its variance.
-layout( r16f, set = 0, binding = 47 ) uniform readonly image2DArray restMoment;
 layout( set = 0, binding = 10 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
@@ -247,20 +243,24 @@ const float kDepthFloorRel = 0.002;
 const float kNormalPower = 32.0;
 
 #include "jah_reflect_rest.glsl"
-/// THE ANSWER AT A TEXEL (PHOTON-2 round 2, G2): moving, the mean `historyCur` holds; AT REST (knobs2.x >= 1, the hold
-/// included) the frozen history and the rest mean composed - lerp( H, M, w( v ) ), jah_reflect_rest.glsl - with the count the
-/// warm-up reads: H's (or the warm seed for a texel with none, in a warm view: G3) plus the rest samples.
+#include "jah_reflect_state.glsl"
+/// THE ANSWER AT A TEXEL (PHOTON-2 round 2, G2): moving, the mean `historyCur` holds with its count; AT REST (knobs2.x
+/// >= 1, the hold included) the frozen history and the rest mean composed - lerp( H, M, w( v ) ), jah_reflect_rest.glsl
+/// - with the count the warm-up reads: H's (or the warm seed for a texel with none, in a warm view: G3) plus the rest
+/// samples.
 vec4 answerAt( ivec2 t )
 {
-	const vec4 M = imageLoad( historyCur, ivec3( t, gEye ) );
+	const vec3 M = imageLoad( historyCur, ivec3( t, gEye ) ).xyz;
+	const JahReflectState sc = jahStateUnpack( imageLoad( stateCur, ivec3( t, gEye ) ).xy );
 	if( p.knobs2.x < 0.5 )
-		return M;
-	vec4 H = imageLoad( historyPrev, ivec3( t, gEye ) );
-	if( !finite3( H.xyz ) || !( H.w > 0.0 ) )
-		H = vec4( 0.0 );
-	const float v = jahRestSamples( H, M );
-	const float base = H.w > 0.0 ? H.w : ( p.stereo.y >= kWarmupFrames ? kWarmupFrames : 0.0 );
-	return vec4( jahRestAnswer( H, M, max( p.stereo.w, 1.0 ) ), base + v );
+		return vec4( M, sc.N );
+	const vec3 Hr = imageLoad( historyPrev, ivec3( t, gEye ) ).xyz;
+	const float Hn = jahStateUnpack( imageLoad( statePrev, ivec3( t, gEye ) ).xy ).N;
+	const bool hasH = finite3( Hr ) && Hn > 0.0;
+	const vec3 H = hasH ? Hr : vec3( 0.0 );
+	const float v = float( sc.v );
+	const float base = hasH ? Hn : ( p.stereo.y >= kWarmupFrames ? kWarmupFrames : 0.0 );
+	return vec4( jahRestAnswer( H, hasH, M, v, max( p.stereo.w, 1.0 ) ), base + v );
 }
 
 float viewDistance( float rawDepth )
@@ -334,10 +334,11 @@ void main()
 	// two history buffers PING-PONG, so `historyCur` at a texel the trace
 	// declined this frame still holds the value from TWO frames ago — with a
 	// live count — and compositing it would silently reverse the one thing the
-	// decline is for: handing that pixel back to the probe. `historyDistCur` is
-	// zeroed by every decline and written by every answer, so it is exactly the
-	// "this texel has an answer this frame" bit, and it costs one r32 load.
-	if( texelLive && imageLoad( historyDistCur, ivec3( tc, gEye )).x <= 0.0 )
+	// decline is for: handing that pixel back to the probe. The state's surface
+	// distance is zeroed by every decline and written by every answer, so it is
+	// exactly the "this texel has an answer this frame" bit.
+	const JahReflectState own = jahStateUnpack( imageLoad( stateCur, ivec3( tc, gEye ) ).xy );
+	if( texelLive && own.surfDist <= 0.0 )
 		texelLive = false;
 	vec4 centre = texelLive ? answerAt( tc ) : vec4( 0.0 );
 	// THE REST'S REFERENCE (R1 (f)'s arm): the texel's 32-bit mean of its raw rest samples, composited unfiltered.
@@ -376,25 +377,23 @@ void main()
 		if( fresh )
 			reach = max( reach, ceil( float( kFreshRadius ) * ( 1.0 - sinceRestart / kFreshFrames ) ) );
 	}
-	// THE FIXED ESTIMATOR (the trace's flag on this texel's sample, or the G-buffer's floor) is never filtered.
-	const float sampleFlags = texelLive ? imageLoad( reflectSample, ivec3( tc, gEye ) ).w : 0.0;
-	const bool fixedTexel = lobeAlpha <= kMirrorPackAlpha ||
-							( texelLive && sampleFlags > 0.0 && jahReflectFlags( sampleFlags ).fixedEstimator );
+	// THE FIXED ESTIMATOR (the trace's flag in this texel's state - kept by a stopped texel - or the G-buffer's floor) is
+	// never filtered.
+	const bool sampled = texelLive && imageLoad( reflectSample, ivec3( tc, gEye ) ).w > 0.0;
+	const bool fixedTexel = lobeAlpha <= kMirrorPackAlpha || ( texelLive && own.fixedEstimator );
 	// ONE VARIABLE AT THE CUT (PHOTON-2 round 2, G5): the reach is continuous in the lobe's footprint at its hit (the
 	// trace's own jahReflectFootprint, from this texel's mean length) and ZERO at the cut - it rises from footprint 1 to
 	// 2 - so the filter never steps from 0 to the lobe's reach where the estimator turns fixed.
 	if( texelLive )
 	{
-		const vec2 ownPair = imageLoad( historyDistCur, ivec3( tc, gEye ) ).xy;
-		const float throwT = finite1( ownPair.y ) && ownPair.y > 0.0
-								 ? uintBitsToFloat( floatBitsToUint( ownPair.y ) & ~63u ) : 0.0;
+		const float throwT = own.hitT > 0.0 ? own.hitT : 0.0;
 		const float footprint = jahReflectFootprint( lobeAlpha, throwT, viewDistance( rawDepth ),
 													 length( p.rayDown.xyz ) / float( traceRes.y ), p.camPos.w > 0.5 );
 		if( throwT > 0.0 )
 			reach *= smoothstep( 1.0, 2.0, footprint );
 		// ...AND A FIXED TEXEL WHOSE RECORD WENT UNSHADED IS SKIPPED, not filtered (no sample this frame, moving: the
 		// estimator its footprint names is the centre ray, which this frame did not deliver).
-		if( p.knobs2.x < 0.5 && !( sampleFlags > 0.0 ) && throwT > 0.0 && footprint < kFixedEnter )
+		if( p.knobs2.x < 0.5 && !sampled && throwT > 0.0 && footprint < kFixedEnter )
 			texelLive = false;
 		// AT REST THE REACH FOLLOWS THE REST MEAN'S VARIANCE (R1, P1: its second moment) - the texels its standard error
 		// needs to fall under a code, never further than the moving reach - blended in with the hand-over's weight (the
@@ -405,11 +404,8 @@ void main()
 		// does its reach: the stop changes nothing on screen.
 		if( p.knobs2.x >= 0.5 )
 		{
-			vec4 H = imageLoad( historyPrev, ivec3( tc, gEye ) );
-			if( !finite3( H.xyz ) || !( H.w > 0.0 ) )
-				H = vec4( 0.0 );
-			const vec4 M = imageLoad( historyCur, ivec3( tc, gEye ) );
-			const float v = jahRestSamples( H, M );
+			const vec4 M = imageLoad( historyCur, ivec3( tc, gEye ) );   // the rest mean, its moment in alpha
+			const float v = float( own.v );
 			if( v >= 1.0 )
 			{
 				float nbr = 0.0, nn = 0.0;
@@ -426,7 +422,7 @@ void main()
 						nn += 1.0;
 					}
 				}
-				const float e = jahRestErrorCodes( imageLoad( restMoment, ivec3( tc, gEye ) ).x, jahRestLuma( M.xyz ), v,
+				const float e = jahRestErrorCodes( M.w, jahRestLuma( M.xyz ), v,
 												   max( jahRestLuma( centre.xyz ), nn > 0.0 ? nbr / nn : 0.0 ) );
 				reach = jahRestReach( reach, e, jahRestHandOverWeight( v, p.stereo.w ) );
 			}
@@ -462,7 +458,7 @@ void main()
 			vec3 tn = vec3( 0.0 );
 			if( all( greaterThanEqual( t, ivec2( 0 ) ) ) && all( lessThan( t, traceRes ) ) )
 			{
-				tapDist = imageLoad( historyDistCur, ivec3( t, gEye )).x;
+				tapDist = jahStateUnpack( imageLoad( stateCur, ivec3( t, gEye ) ).xy ).surfDist;
 				h = answerAt( t );
 				const vec2 tuv = traceUv( t, scale, fullRes );
 				td = texture( sceneDepth, vec3( tuv, float( gEye ) )).x;

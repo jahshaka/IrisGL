@@ -10,18 +10,18 @@
 // arithmetic a card- or voxel-lit hit takes:
 //
 //   * THE REFLECTION: the texel's SAMPLE of this frame (PHOTON-2 1b). The trace
-//     wrote the texel's history CARRIED (the previous radiance and its seeded count)
-//     and this frame's distances, and left the sample empty; here the decoded
-//     radiance becomes that sample, with the record's weight as its `w` (the
-//     trace's blend floor and flag — rq_reflect.comp's `sampleW`). The temporal pass
-//     (rq_reflect_temporal.comp) runs after this and blends it like a traced one.
+//     wrote the texel's history CARRIED (the previous radiance; its seeded count,
+//     this frame's distances and estimator in the state texel, jah_reflect_state.glsl)
+//     and left the sample empty; here the decoded radiance becomes that sample
+//     (w = 1). The temporal pass (rq_reflect_temporal.comp) runs after this and
+//     blends it like a traced one.
 //   * THE GATHER: the ray's atlas texel, radiance x the texel re-weight from the
 //     record (rq_probe_gather.comp's `reweight`), its distance kept.
 //
 // A record the decode could not shade (w = 0: a material HlmsAtom serves no twin
 // for, a stale slot) takes the dropped record's answer: the reflection's sample
 // stays empty (its history kept) and this frame's distance is withheld where it
-// had none; the gather's ray stays at zero radiance.
+// carried none (the state's noHistory); the gather's ray stays at zero radiance.
 //
 // ONE THREAD PER RECORD SLOT, records [0, min( count, capacity )). Every record owns
 // its destination texel (a texel traces one ray per frame), so nothing races.
@@ -39,20 +39,22 @@ layout( set = 0, binding = 0 ) uniform Params
 	/// eight, the reflection's own (jah_fog_along.glsl).
 	vec4 fog[8];
 } p;
-/// The list's buffer: [0] the records appended, then two words per record from
-/// word 4 (jah_rq_hit_record.glsl) — this job reads the second, the weight.
+/// The list's buffer: [0] the records appended, then the records' words from
+/// word 4 (jah_rq_hit_record.glsl) — this job reads the weight (the gather's
+/// re-weight; the reflection's records carry 1) and the fog's two.
 layout( std430, set = 0, binding = 1 ) readonly buffer JahHitBuf { uint jahHitBuf[]; };
 layout( set = 0, binding = 2 ) uniform usampler2D jahHitDest;
 layout( set = 0, binding = 3 ) uniform sampler2D jahHitRadiance;
-layout( rgba16f, set = 0, binding = 4 ) uniform image2DArray historyCur;
-layout( rg32f, set = 0, binding = 5 ) uniform image2DArray historyDistCur;
-layout( rgba16f, set = 0, binding = 6 ) uniform image2D probeAtlas;
+/// THE REFLECTION'S STATE TEXEL (jah_reflect_state.glsl): an unshaded record's distance is withheld here.
+layout( rg32ui, set = 0, binding = 4 ) uniform uimage2DArray stateCur;
+layout( rgba16f, set = 0, binding = 5 ) uniform image2D probeAtlas;
 /// The list's records (the ray's direction, jah_rq_hit_record.glsl) and the air's
 /// table — the reflection's fog along its ray (PHOTON-I-1 fix 5).
-layout( rgba32ui, set = 0, binding = 7 ) uniform readonly uimage2D jahHitIds;
-layout( set = 0, binding = 8 ) uniform sampler3D fogAerial;
+layout( rgba32ui, set = 0, binding = 6 ) uniform readonly uimage2D jahHitIds;
+layout( set = 0, binding = 7 ) uniform sampler3D fogAerial;
 /// THE REFLECTION'S SAMPLE (PHOTON-2 1b): what a shaded record writes (rq_reflect.comp's `reflectSample`).
-layout( rgba16f, set = 0, binding = 9 ) uniform writeonly image2DArray reflectSample;
+layout( rgba16f, set = 0, binding = 8 ) uniform writeonly image2DArray reflectSample;
+#include "jah_reflect_state.glsl"
 #define JAH_FOG_P( k ) p.fog[k]
 #define JAH_FOG_AERIAL( uvw ) textureLod( fogAerial, uvw, 0.0 )
 #define JAH_FOG_HAS_AIR
@@ -109,10 +111,9 @@ void main()
 	// THE EYE'S LAYER (bit 30, LAYERED-STEREO-1): the reflection's history is an
 	// array with one layer per eye.
 	const ivec3 at3 = ivec3( xy, int( ( dest >> 30u ) & 1u ) );
-	if( p.list.z < 0.5 || any( greaterThanEqual( at3, imageSize( historyCur ) ) ) ||
-		any( greaterThanEqual( at3, imageSize( historyDistCur ) ) ) )
+	if( p.list.z < 0.5 || any( greaterThanEqual( at3, imageSize( stateCur ) ) ) ||
+		any( greaterThanEqual( at3, imageSize( reflectSample ) ) ) )
 		return;
-	const vec4 prev = imageLoad( historyCur, at3 );
 	if( shaded )
 	{
 		// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1): the decoded light crossed the
@@ -123,11 +124,15 @@ void main()
 		const float originY = uintBitsToFloat( jahHitBuf[aux + 2u] );
 		const vec2 lengths = unpackHalf2x16( jahHitBuf[aux + 3u] );
 		const vec3 fogged = jahFogAlong( radiance, originY, dir, lengths.x, lengths.y );
-		imageStore( reflectSample, at3, vec4( fogged, weight ) );
+		imageStore( reflectSample, at3, vec4( fogged, 1.0 ) );
 	}
 	else
 	{
-		const vec4 d = imageLoad( historyDistCur, at3 );
-		imageStore( historyDistCur, at3, vec4( prev.w > 0.0 ? d.x : 0.0, d.y, 0.0, 0.0 ) );
+		JahReflectState st = jahStateUnpack( imageLoad( stateCur, at3 ).xy );
+		if( st.noHistory )
+		{
+			st.surfDist = 0.0;
+			imageStore( stateCur, at3, uvec4( jahStatePack( st ), 0u, 0u ) );
+		}
 	}
 }

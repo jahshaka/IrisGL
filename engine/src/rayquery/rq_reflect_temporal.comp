@@ -155,25 +155,25 @@ int gEye = 0;
 layout( set = 0, binding = 2 ) uniform sampler2DArray gBufNormals;
 layout( set = 0, binding = 3 ) uniform sampler2DArray gBufShadowRoughness;
 layout( set = 0, binding = 4 ) uniform sampler2DArray sceneDepth;
-layout( rgba16f, set = 0, binding = 6 ) uniform image2DArray historyPrev;   // written at rest, own texel only (R1)
+/// THE HISTORY: rgb = the mean; at rest the REST half's alpha holds the rest samples' luma root mean square (the second
+/// moment its stop reads, PHOTON-2 rev 12 P1), every other alpha 0. Written at rest and on a resume, own texel only (R1).
+layout( rgba16f, set = 0, binding = 6 ) uniform image2DArray historyPrev;
 layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray historyCur;
-layout( rg32f, set = 0, binding = 8 ) uniform readonly image2DArray historyDistPrev;
-layout( rg32f, set = 0, binding = 9 ) uniform image2DArray historyDistCur;   // the rest's stop count (R1)
-/// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b): rgb = the ray's radiance, w = the trace's blend FLOOR for the texel
-/// (0 < w <= 1) plus 2 when only the SURFACE history may be used, plus 4 on a WARM RESTART (the mean restarted on
-/// motion in a warm view: the count is seeded at the warm-up here, fix F3), plus 8 for a FIXED estimator (the lobe under
-/// one texel at its hit: one ray, the same every still frame — fix F4); w = 0 = no sample this frame (a record the
-/// decode did not shade, a non-finite answer): the carried history stays as it is.
+/// THE STATE TEXEL (jah_reflect_state.glsl): the counts, the stop, this frame's estimator. The previous half is written
+/// on a resume at rest, own texel only.
+layout( rg32ui, set = 0, binding = 8 ) uniform uimage2DArray statePrev;
+layout( rg32ui, set = 0, binding = 9 ) uniform uimage2DArray stateCur;
+/// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b): rgb = the ray's radiance, w = 1 a sample, 0 = no sample this frame (a record
+/// the decode did not shade, a non-finite answer, a stopped texel): the carried history stays as it is. The trace's
+/// flags for the texel are its state's.
 layout( rgba16f, set = 0, binding = 45 ) uniform readonly image2DArray reflectSample;
 /// THE REST'S REFERENCE (PHOTON-2 round 2, R1 (f)'s arm "reflect.restReference", rest.y): the texel's raw rest samples'
 /// running mean in 32 bits (rgb) and their count (w) - 1 x 1 and never touched unless the arm is on.
 layout( rgba32f, set = 0, binding = 46 ) uniform image2DArray restReference;
-/// THE REST'S SECOND MOMENT (PHOTON-2 rev 12, P1): the root mean square of the luma of the texel's rest samples, beside
-/// its rest mean M - the standard error its stop reads (jah_reflect_rest.glsl). Own texel only.
-layout( r16f, set = 0, binding = 47 ) uniform image2DArray restMoment;
 
 #include "jah_reproject.glsl"
 #include "jah_reflect_rest.glsl"
+#include "jah_reflect_state.glsl"
 /// kMaxRadiance, finite1, finite3: the one copy.
 #include "jah_rq_finite.glsl"
 
@@ -228,9 +228,6 @@ vec3 worldAt( EyeImage e, vec2 uv, float dist )
 		return e.camPos + plane + e.fwd * dist;
 	return e.camPos + plane * dist;
 }
-/// rq_reflect.comp's mean-length packing: the length without its six low mantissa bits (the mover age).
-float jahMeanLength( float y ) { return uintBitsToFloat( floatBitsToUint( y ) & ~63u ); }
-
 /// THE TILES (PHOTON-2 fix F2). THE RAW TILE: the group's 8 x 8, the 2-texel ring the 5 x 5 box reaches and one more
 /// ring the box's own reconstruction reaches — this frame's samples in YCoCg (LINEAR radiance), w = the
 /// sample's LINEAR luma (-1: no sample), and beside it the G-buffer's view normal and view distance the
@@ -249,6 +246,22 @@ shared vec4 sBox[kBoxSide * kBoxSide];
 const float kReconDepth = 0.05;
 const float kReconNormal = 0.9;
 
+/// THE MOVING RULE'S STORE: the mean into this half with its count in the state - and, for a texel RESUMING at rest,
+/// into the frozen half too (H = M: its rest restarts from here; the frozen half's state keeps its distances).
+void storeMoving( ivec2 tc, vec3 mean, float count, bool resumed, JahReflectState st )
+{
+	imageStore( historyCur, ivec3( tc, gEye ), vec4( mean, 0.0 ) );
+	st.N = count;
+	imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
+	if( resumed )
+	{
+		imageStore( historyPrev, ivec3( tc, gEye ), vec4( mean, 0.0 ) );
+		JahReflectState h = jahStateUnpack( imageLoad( statePrev, ivec3( tc, gEye ) ).xy );
+		h.N = count;
+		imageStore( statePrev, ivec3( tc, gEye ), uvec4( jahStatePack( h ), 0u, 0u ) );
+	}
+}
+
 void main()
 {
 	const ivec2 traceRes = ivec2( p.resolution.xy );
@@ -263,7 +276,7 @@ void main()
 		vec4 v = vec4( 0.0, 0.0, 0.0, -1.0 );
 		vec4 g = vec4( 0.0 );
 		if( all( greaterThanEqual( t, ivec2( 0 ) ) ) && all( lessThan( t, traceRes ) ) &&
-			imageLoad( historyDistCur, ivec3( t, gEye ) ).x > 0.0 )
+			jahStateUnpack( imageLoad( stateCur, ivec3( t, gEye ) ).xy ).surfDist > 0.0 )
 		{
 			const vec4 s = imageLoad( reflectSample, ivec3( t, gEye ) );
 			if( s.w > 0.0 && finite3( s.xyz ) )
@@ -307,26 +320,29 @@ void main()
 	if( any( greaterThanEqual( tc, traceRes ) ) )
 		return;
 	// A texel the trace declined this frame (the distance flag) keeps what it holds; so does one with no sample.
-	if( imageLoad( historyDistCur, ivec3( tc, gEye ) ).x <= 0.0 )
+	JahReflectState st = jahStateUnpack( imageLoad( stateCur, ivec3( tc, gEye ) ).xy );
+	if( st.surfDist <= 0.0 )
 		return;
 	const vec4 s = imageLoad( reflectSample, ivec3( tc, gEye ) );
 	if( !( s.w > 0.0 ) || !finite3( s.xyz ) )
 		return;
-	const JahReflectFlags flags = jahReflectFlags( s.w );
-	const bool fixedEstimator = flags.fixedEstimator;
-	const bool warmRestart = flags.warmRestart;
-	const bool surfaceOnly = flags.surfaceOnly;
-	const float blendFloor = flags.floorBlend;
+	const bool fixedEstimator = st.fixedEstimator;
+	const bool surfaceOnly = st.surfaceOnly;
+	// THE TEXEL'S BLEND FLOOR, the trace's rule: the history's memory where it carried one, 1 where it did not or for a
+	// fixed estimator, a moving reflector's eighth (rq_reflect.comp: kMovingReflectorFloor).
+	float blendFloor = st.noHistory || fixedEstimator ? 1.0 : p.knobs2.w;
+	if( st.ownMoving )
+		blendFloor = max( blendFloor, 0.125 );
 	const vec3 sample1 = clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
 
 	// ---- AT REST: THE REST CONVERGES PER TEXEL, THEN HOLDS (PHOTON-2 round 2: R1, G1-G3, G6; jah_reflect_rest.glsl) ----
 	// The frozen moving history H is this texel's `historyPrev` (from the second rest frame the ping-pong does not flip)
-	// and its rest mean M lives in place in `historyCur` (w = H.w + v, v the rest samples it holds). Every rest frame
+	// and its rest mean M lives in place in `historyCur` (the state's v = the rest samples it holds). Every rest frame
 	// that gives the texel a SAMPLE (G1: a frame with none - an unshaded record, a full list, a non-finite answer - adds
 	// none: this pass returned above) takes it into M (M + (s - M) / v: a running mean, whose fp16 error does not
 	// accumulate - G2); the ANSWER is composed at every read, lerp( H, M, w( v ) ): the hand-over drains the
 	// motion lag over 2N samples (eased out: jah_reflect_rest.glsl), then the answer IS the rest mean, which goes on
-	// converging. Once the rest mean's STANDARD ERROR (its luma's second moment kept beside it, `restMoment`: P1) has
+	// converging. Once the rest mean's STANDARD ERROR (its luma's second moment kept beside it, its alpha: P1) has
 	// stayed under one output code (kReflectStopRel) for kReflectStopFrames frames after the hand-over, the texel
 	// STOPS - the trace skips it; the view holds when no texel is left or at kReflectRestMax frames (OgreRayQuery.cpp).
 	// The rest frames' samples are the rest frame's own sequence (kReflectRestSequence + k): the held answer is a
@@ -338,19 +354,20 @@ void main()
 	// THE FIREFLY BOUND: a sample entering the rest mean is held to the luma of this frame's 21 RAW neighbours' mean +
 	// 3 sigma or THE HISTORY'S MEMORY (1 / its floor, 32) times the answer so far, whichever is larger (fix F1's rule).
 	const float restK = p.knobs2.x;
-	vec4 carried = imageLoad( historyCur, ivec3( tc, gEye ) );   // the surface history and its count (seeded)
+	// the surface history and its count (seeded; the state's)
+	vec4 carried = vec4( imageLoad( historyCur, ivec3( tc, gEye ) ).xyz, st.N );
 	bool resumed = false;
 	if( restK >= 0.5 )
 	{
 		const float N = max( p.stereo.w, 1.0 );
-		vec4 H = imageLoad( historyPrev, ivec3( tc, gEye ) );
-		if( !finite3( H.xyz ) || !( H.w > 0.0 ) )
-			H = vec4( 0.0 );
-		H.xyz = clamp( H.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
-		vec4 Mp = imageLoad( historyCur, ivec3( tc, gEye ) );   // the first rest frame: the trace's carried H (v = 0)
-		if( !finite3( Mp.xyz ) )
-			Mp = H;
-		const vec2 dpair = imageLoad( historyDistCur, ivec3( tc, gEye ) ).xy;
+		// H = the frozen moving history (its count: the frozen half's state); M = the rest half in place, its v rest
+		// samples the state's (the first rest frame: the trace's carried H, v = 0).
+		const float Hn = jahStateUnpack( imageLoad( statePrev, ivec3( tc, gEye ) ).xy ).N;
+		vec3 H = imageLoad( historyPrev, ivec3( tc, gEye ) ).xyz;
+		const bool hasH = finite3( H ) && Hn > 0.0;
+		H = hasH ? clamp( H, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
+		const vec4 Mt = imageLoad( historyCur, ivec3( tc, gEye ) );
+		vec3 Mp = finite3( Mt.xyz ) ? Mt.xyz : H;
 		const bool reference = p.rest.y > 0.5;
 		if( reference )
 		{
@@ -360,8 +377,8 @@ void main()
 			const float n = R0.w + 1.0;
 			imageStore( restReference, ivec3( tc, gEye ), vec4( R0.xyz + ( sample1 - R0.xyz ) / n, n ) );
 		}
-		const float vPrev = jahRestSamples( H, Mp );
-		const vec3 sofar = jahRestAnswer( H, Mp, N );
+		const float vPrev = float( st.v );
+		const vec3 sofar = jahRestAnswer( H, hasH, Mp, vPrev, N );
 		vec3 sk = sample1;
 		float nbrLuma = -1.0;
 		if( !fixedEstimator )
@@ -387,16 +404,17 @@ void main()
 				nbrLuma = m;
 				bound = m + 3.0 * sqrt( max( y2 / yn - m * m, 0.0 ) );
 			}
-			bound = max( bound, lumaOf( vPrev > 0.0 || H.w > 0.0 ? sofar : sk ) / max( p.knobs2.w, 1e-3 ) );
+			bound = max( bound, lumaOf( vPrev > 0.0 || hasH ? sofar : sk ) / max( p.knobs2.w, 1e-3 ) );
 			const float ys = lumaOf( sk );
 			if( ys > bound )
 				sk *= bound / ys;
 		}
-		if( flags.resume )
+		if( st.resume )
 		{
-			carried = vPrev > 0.0 || H.w > 0.0 ? vec4( sofar, max( H.w, 0.0 ) + vPrev ) : vec4( 0.0 );
+			carried = vPrev > 0.0 || hasH ? vec4( sofar, ( hasH ? Hn : 0.0 ) + vPrev ) : vec4( 0.0 );
 			resumed = true;
-			imageStore( historyDistCur, ivec3( tc, gEye ), vec4( jahPackRestStop( dpair.x, 0u ), dpair.y, 0.0, 0.0 ) );
+			st.stop = 0u;
+			st.v = 0u;
 		}
 		else
 		{
@@ -406,29 +424,28 @@ void main()
 			return;
 		const float v = min( vPrev + 1.0, kReflectRestMax );
 		// (stored rounded stochastically: an fp16 running mean past a few hundred samples otherwise drifts - P1)
-		const vec3 M = jahRestStoreMean( vPrev > 0.0 ? Mp.xyz + ( sk - Mp.xyz ) / v : sk, tc, gEye, p.knobs.z );
-		const bool handOver = H.w > 0.0 && !fixedEstimator && blendFloor < 1.0;
-		const vec4 Hc = handOver ? H : vec4( M, H.w );
-		const vec4 Mn = vec4( M, H.w + v );
-		const vec3 answer = jahRestAnswer( Hc, Mn, N );
+		const vec3 M = jahRestStoreMean( vPrev > 0.0 ? Mp + ( sk - Mp ) / v : sk, tc, gEye, p.knobs.z );
+		const bool handOver = hasH && !fixedEstimator && blendFloor < 1.0;
+		const vec3 answer = jahRestAnswer( handOver ? H : M, hasH, M, v, N );
 		// THE SECOND MOMENT (P1): the running mean of the samples' squared luma, beside M (the same v, the same sample),
-		// kept as its root (R16F holds radiance, not its square).
+		// kept as its root (the half holds radiance, not its square) in the rest half's alpha.
 		const float ls = jahRestLuma( sk );
-		const float rmsPrev = vPrev > 0.0 ? imageLoad( restMoment, ivec3( tc, gEye ) ).x : 0.0;
+		const float rmsPrev = vPrev > 0.0 ? Mt.w : 0.0;
 		const float q = vPrev > 0.0 ? rmsPrev * rmsPrev + ( ls * ls - rmsPrev * rmsPrev ) / v : ls * ls;
 		// (stored rounded stochastically like M - P1: round to nearest drifted it, and the stop fired early)
 		const float rms = jahRestStoreMoment( sqrt( max( q, 0.0 ) ), tc, gEye, p.knobs.z );
-		imageStore( restMoment, ivec3( tc, gEye ), vec4( rms, 0.0, 0.0, 0.0 ) );
 		// THE STOP (R1, P1): the rest mean's standard error under a code (its own luma's 1 %, or its neighbourhood's for
 		// a dark texel), counted over consecutive frames once the hand-over is done; kReflectStopFrames of them stop it.
 		const float e = jahRestErrorCodes( rms, jahRestLuma( M ), v, max( jahRestLuma( answer ), max( nbrLuma, 0.0 ) ) );
 		const bool still = e <= 1.0;
 		const bool settled = v >= ( handOver ? jahRestHandOverLength( N ) : kWarmupFrames );
-		const uint stopCount = still && settled && !reference ? min( jahRestStop( dpair.x ) + 1u, kReflectStopFrames ) : 0u;
-		if( !handOver && H.w > 0.0 )
-			imageStore( historyPrev, ivec3( tc, gEye ), Hc );   // the plain mean: every reader composes M
-		imageStore( historyCur, ivec3( tc, gEye ), vec4( M, min( max( H.w, 0.0 ) + v, 4096.0 ) ) );
-		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( jahPackRestStop( dpair.x, stopCount ), dpair.y, 0.0, 0.0 ) );
+		const uint stopCount = still && settled && !reference ? min( st.stop + 1u, kReflectStopFrames ) : 0u;
+		if( !handOver && hasH )
+			imageStore( historyPrev, ivec3( tc, gEye ), vec4( M, 0.0 ) );   // the plain mean: every reader composes M
+		imageStore( historyCur, ivec3( tc, gEye ), vec4( M, rms ) );
+		st.v = uint( v );
+		st.stop = stopCount;
+		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 		return;
 		}
 	}
@@ -451,14 +468,11 @@ void main()
 	if( !frozen && ( seed <= 0.0 || blendFloor >= 1.0 || !finite3( carried.xyz ) ) )
 	{
 		// A WARM RESTART is seeded at the warm-up (DRAG-1's rule: the filter shows the ray at once), whichever path
-		// carried it (the trace stores the seed; a record stores count 0 and says so in its flag).
-		const float from = warmRestart ? max( seed, kWarmupFrames ) : max( seed, 0.0 );
+		// carried it: the trace stores the seed as the carried count, a record's too.
+		const float from = max( seed, 0.0 );
 		// (a fixed estimator's count stops at the memory's length: it says the answer is shown, never that a GGX mean
 		// converged - G3's switch restarts at the warm seed.)
-		const vec4 fresh = vec4( sample1, min( from + 1.0, maxN + 1.0 ) );
-		imageStore( historyCur, ivec3( tc, gEye ), fresh );
-		if( resumed )
-			imageStore( historyPrev, ivec3( tc, gEye ), fresh );
+		storeMoving( tc, sample1, min( from + 1.0, maxN + 1.0 ), resumed, st );
 		return;
 	}
 	vec3 history = clamp( carried.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
@@ -504,7 +518,7 @@ void main()
 				const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
 				const vec2 uv = ( vec2( tc * scale ) + 0.5 * vec2( scale ) ) / vec2( fullRes );
 				const float rawDepth = texture( sceneDepth, vec3( uv, float( gEye ) ) ).x;
-				const float meanT = jahMeanLength( imageLoad( historyDistCur, ivec3( tc, gEye ) ).y );
+				const float meanT = st.hitT;
 				const float alpha = max( texture( gBufShadowRoughness, vec3( uv, float( gEye ) ) ).y * 0.999 + 0.001, 1e-6 );
 				const float rough = sqrt( alpha );
 				const float sDom = clamp( 1.0 - rough, 0.0, 1.0 );
@@ -523,8 +537,8 @@ void main()
 					{
 						const ivec2 pc = clamp( ivec2( puv * vec2( traceRes ) ), ivec2( 0 ), traceRes - 1 );
 						const vec4 h = imageLoad( historyPrev, ivec3( pc, gEye ) );
-						if( h.w > 0.0 && finite3( h.xyz ) &&
-							imageLoad( historyDistPrev, ivec3( pc, gEye ) ).x > 0.0 )
+						const JahReflectState hs = jahStateUnpack( imageLoad( statePrev, ivec3( pc, gEye ) ).xy );
+						if( hs.N > 0.0 && finite3( h.xyz ) && hs.surfDist > 0.0 )
 						{
 							const vec3 hitY = toYCoCg( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) );
 							const vec3 hitC = clamp( hitY, lo, hi );
@@ -546,10 +560,7 @@ void main()
 	}
 	if( frozen )
 	{
-		const vec4 kept = vec4( frozenHistory, min( seed, 4096.0 ) );
-		imageStore( historyCur, ivec3( tc, gEye ), kept );
-		if( resumed )
-			imageStore( historyPrev, ivec3( tc, gEye ), kept );
+		storeMoving( tc, frozenHistory, seed, resumed, st );
 		return;
 	}
 	const float frames = min( seed * confidence + 1.0, maxN );
@@ -558,7 +569,5 @@ void main()
 	// The count says how much of an integral the answer holds (the filter's warm-up and fresh widening read it): a
 	// warm view's shortened memory is stored no younger than the warm seed.
 	const float count = warmView ? max( frames, min( seed + 1.0, kWarmupFrames + 1.0 ) ) : frames;
-	imageStore( historyCur, ivec3( tc, gEye ), vec4( mean, min( count, 4096.0 ) ) );
-	if( resumed )
-		imageStore( historyPrev, ivec3( tc, gEye ), vec4( mean, min( count, 4096.0 ) ) );   // both halves: H = M
+	storeMoving( tc, mean, count, resumed, st );   // a resume: both halves, H = M
 }

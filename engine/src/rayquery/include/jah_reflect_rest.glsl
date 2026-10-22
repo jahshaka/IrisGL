@@ -2,8 +2,9 @@
 // filter and the break's compose pass.
 //
 // AT REST the moving history H stays FROZEN in the half the trace reads (`historyPrev`) and the other half
-// (`historyCur`) holds the REST MEAN M of the texel's own rest samples, rgb = M, w = H.w + v (v = the rest samples
-// it holds - a frame that gave the texel no sample adds none: G1). The answer is COMPOSED AT THE READ (G2):
+// (`historyCur`) holds the REST MEAN M of the texel's own rest samples (rgb = M); the counts are the state texel's
+// (jah_reflect_state.glsl): H's moving count N, carried into the rest half, and v = the rest samples M holds - a frame
+// that gave the texel no sample adds none (G1). The answer is COMPOSED AT THE READ (G2):
 //   O = lerp( H, M, w( v ) ),  w( v ) = 1 - ( 1 - v / 2N )^2 for v < 2N, then 1
 // (N = the gather's settle of the 32-frame history, 51) - the hand-over drains the motion lag at fix F1's starting
 // rate (w'( 0 ) = 1 / N) and EASES OUT over 2N samples: the answer's per-frame change, (M - H) w'( v ) + (s - M) w( v )
@@ -13,12 +14,11 @@
 // M is a running mean (M + (s - M) / v), so its fp16 error does not accumulate (the in-place O + (s - H) / N of fix
 // F1 held texels up to 1.4 % off: the fix round's read #6).
 // After the hand-over M goes on accumulating PER TEXEL until ITS STANDARD ERROR - sqrt( (E[l^2] - E[l]^2) / v ), the
-// luma's second moment kept beside M (`restMoment`, R16F, its root mean square: PHOTON-2 rev 12, P1) - has stayed under
-// one output code for kReflectStopFrames frames - then the texel STOPS tracing (R1); the view holds when every texel has
-// stopped or at kReflectRestMax rest frames. (The stop on the per-frame change could not see a heavy tail: one rare
-// bright sample froze into a texel that stopped near 110 samples - round 2's (f) blotches.) The stop's count rides
-// the four low mantissa bits of the texel's distance (historyDist .x - a relative error of 2^-19 on a length only
-// compared at 5 %).
+// luma's second moment kept beside M (the rest half's alpha: its root mean square, PHOTON-2 rev 12, P1) - has stayed
+// under one output code for kReflectStopFrames frames - then the texel STOPS tracing (R1); the view holds when every
+// texel has stopped or at kReflectRestMax rest frames. (The stop on the per-frame change could not see a heavy tail:
+// one rare bright sample froze into a texel that stopped near 110 samples - round 2's (f) blotches.) The stop's count is
+// the state texel's own field.
 #ifndef JAH_REFLECT_REST_GLSL
 #define JAH_REFLECT_REST_GLSL
 
@@ -29,16 +29,6 @@ const uint kReflectStopFrames = 8u;
 /// every tone the eye sees.
 const float kReflectStopRel = 0.01;
 
-uint jahRestStop( float distX )
-{
-	return distX > 0.0 ? ( floatBitsToUint( distX ) & 15u ) : 0u;
-}
-float jahPackRestStop( float dist, uint n )
-{
-	if( !( dist > 0.0 ) )
-		return dist;
-	return uintBitsToFloat( ( floatBitsToUint( dist ) & ~15u ) | min( n, 15u ) );
-}
 /// The luma the rest's second moment is kept for (the temporal pass' own weights).
 float jahRestLuma( vec3 c )
 {
@@ -123,11 +113,6 @@ float jahRestStoreMoment( float rms, ivec2 tc, int eye, float restFrame )
 	s = jahRestHash( s + 3u );
 	return jahHalfStochastic( rms, float( s >> 8u ) * ( 1.0 / 16777216.0 ) );
 }
-/// The rest samples a texel holds: its M half's count over its frozen history's.
-float jahRestSamples( vec4 H, vec4 M )
-{
-	return max( M.w - max( H.w, 0.0 ), 0.0 );
-}
 /// THE HAND-OVER'S LENGTH in rest samples (2N) and its eased weight.
 float jahRestHandOverLength( float N )
 {
@@ -138,33 +123,15 @@ float jahRestHandOverWeight( float v, float N )
 	const float x = 1.0 - min( v / jahRestHandOverLength( N ), 1.0 );
 	return 1.0 - x * x;
 }
-/// THE COMPOSED ANSWER (G2): the hand-over from the frozen history to the rest mean, the rest mean after it.
-vec3 jahRestAnswer( vec4 H, vec4 M, float N )
+/// THE COMPOSED ANSWER (G2): the hand-over from the frozen history H (`hasH`: the texel carried one) to the rest mean
+/// M of v samples, the rest mean after it.
+vec3 jahRestAnswer( vec3 H, bool hasH, vec3 M, float v, float N )
 {
-	const float v = jahRestSamples( H, M );
 	if( v <= 0.0 )
-		return H.xyz;
-	if( H.w > 0.0 && v < jahRestHandOverLength( N ) )
-		return mix( H.xyz, M.xyz, jahRestHandOverWeight( v, N ) );
-	return M.xyz;
-}
-
-/// THE SAMPLE'S FLAGS (reflectSample .w): the trace's blend floor (0 < f <= 1) + 2 surface history only + 4 a warm
-/// restart + 8 a fixed estimator + 16 a texel that RESUMES at rest (G6: a moved instance crossed its ray, or its
-/// estimator switched). w = 0: no sample this frame.
-struct JahReflectFlags { float floorBlend; bool surfaceOnly; bool warmRestart; bool fixedEstimator; bool resume; };
-JahReflectFlags jahReflectFlags( float w )
-{
-	JahReflectFlags f;
-	f.resume = w > 15.5;
-	w -= f.resume ? 16.0 : 0.0;
-	f.fixedEstimator = w > 7.5;
-	w -= f.fixedEstimator ? 8.0 : 0.0;
-	f.warmRestart = w > 3.5;
-	w -= f.warmRestart ? 4.0 : 0.0;
-	f.surfaceOnly = w > 1.5;
-	f.floorBlend = clamp( f.surfaceOnly ? w - 2.0 : w, 0.0, 1.0 );
-	return f;
+		return H;
+	if( hasH && v < jahRestHandOverLength( N ) )
+		return mix( H, M, jahRestHandOverWeight( v, N ) );
+	return M;
 }
 
 /// THE LOBE'S FOOTPRINT AT ITS HIT, IN TRACE TEXELS (G5: the one variable at the fixed cut) - the lobe's angular width
