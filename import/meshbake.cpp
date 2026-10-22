@@ -1710,17 +1710,18 @@ void build(const MeshPtr &mesh, int maxCards)
     // not an optimisation, and it is applied in TWO steps because the first one
     // does not always fire:
     //
-    //   1. the COARSEST BAKED LEVEL, when the mesh has a chain — the geometry a
-    //      far-field capture would use anyway, and its own simplifier error is
-    //      added to the depth tolerance because the level's surface really does
-    //      sit that far from the authored one;
+    //   1. the COARSEST BAKED LEVEL, when the mesh has a level table — the
+    //      geometry a far-field capture would use anyway, and its own stored
+    //      error is added to the depth tolerance because the level's surface
+    //      really does sit that far from the authored one;
     //   2. a UNIFORM STRIDE through whatever step 1 left, when that is STILL
-    //      above the ceiling. Step 1 misses two whole classes and they are not
-    //      rare: a mesh whose topology stopped the simplifier before it shed
-    //      anything (`kAcceptRatio`, documented by ATOM-1) has no chain at all,
-    //      and neither does a mesh built outside the bake and handed to this
-    //      generator directly (a procedural mesh, a suite). Those took the full
-    //      index list, per card, per round.
+    //      above the ceiling. Step 1 misses two whole classes: a mesh whose
+    //      level table is EMPTY (D10: a level is a cut of the DAG that draws
+    //      fewer triangles than the one before it — a DAG that is one leaf plus
+    //      the empty top, or whose every group was carried, appends none), and
+    //      a mesh built outside the bake and handed to this generator directly
+    //      (a procedural mesh, a suite). Those took the full index list, per
+    //      card, per round.
     //
     // WHY THE SUBSAMPLE IS A GOLDEN-RATIO SEQUENCE AND NOT A UNIFORM STRIDE —
     // MEASURED, because a uniform stride was written first and it was WRONG.

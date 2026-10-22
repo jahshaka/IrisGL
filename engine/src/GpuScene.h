@@ -164,9 +164,10 @@ static_assert(sizeof(GpuInstance) == 160, "the GPU instance table's stride is a 
 /// z = its first group in `GpuScene::groupBuffer`, w = THE CLUSTER ROW — the geometry
 /// row whose index address is the mesh's cluster stream (GpuScene::kClusterRow), so a
 /// cluster's triangle t reads its corners at `firstIndex + 3t` through the same row
-/// decode every other reader uses. A mesh the bake gave no DAG (a small one, a
-/// runtime primitive) gets a FLAT one: level 0 cut into runs of kFlatClusterTriangles,
-/// all leaves of one terminal group, over level 0's own index buffer.
+/// decode every other reader uses. Every BAKED mesh carries a DAG (ATOM-2: a small
+/// one is one leaf plus the empty top); a mesh that never passed the bake (a hand-made
+/// iris::Mesh — a suite's, a runtime primitive) gets a FLAT one: level 0 cut into runs of
+/// kFlatClusterTriangles, all leaves of one terminal group, over level 0's own index buffer.
 struct GpuMesh {
     uint32_t counts[4] = {};  ///< x vertices, y level-0 indices, z level count, w submesh count
     float    localBoundsMin[4] = {};

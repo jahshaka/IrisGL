@@ -1268,10 +1268,11 @@ uint32_t OgreScene::acquireGpuMesh(const MeshRec &rec) {
     }
 
     // THE CLUSTER DAG AND ITS ROW (ATOM-CLUSTER-CUT). The row is level 0's with the
-    // CLUSTER STREAM as its index buffer (the same vertices, ATOM rule 1); a mesh the
-    // bake gave no DAG gets a FLAT one over level 0's own indices (runs of
-    // kFlatClusterTriangles, every one a leaf of one terminal group), so every Atom
-    // item is drawn by the one cut and nothing reads a level on the id pass.
+    // CLUSTER STREAM as its index buffer (the same vertices, ATOM rule 1); a mesh that
+    // never passed the bake (a hand-made iris::Mesh: a suite's, a runtime primitive —
+    // every baked mesh carries a DAG since ATOM-2) gets a FLAT one over level 0's own
+    // indices (runs of kFlatClusterTriangles, every one a leaf of one terminal group),
+    // so every Atom item is drawn by the one cut and nothing reads a level on the id pass.
     const StagedRow *base0 = nullptr;
     for (const StagedRow &sr : rows)
         if (sr.level == 0u && sr.submesh == 0u) base0 = &sr;
