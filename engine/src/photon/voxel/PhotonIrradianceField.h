@@ -266,6 +266,19 @@ namespace Ogre
         /// Jahshaka (PHOTON-2 stage 2a): the samples a CHANGE integrates per probe in the
         /// pass that replaces its estimate (setChangeSamples; 1 = upstream's one).
         uint32          mChangeSamples;
+        /// Jahshaka (K1): the whole-grid work list's ROTATION - list position p is probe position
+        /// (p + mWorkRotate) mod the total; a change resumes at its cursor (reset). 0 for a band.
+        uint32          mWorkRotate = 0u;
+        /// Jahshaka (K1): the work is the whole grid (setWholeWork), not a scroll's bands.
+        bool            mWorkWhole = true;
+        /// Jahshaka (K1): THE INPUTS' SERIAL - moved by reset() (the inputs changed); the light age
+        /// ledger's (below) stamp of a fresh or a change integration. An invalidation stamps 0.
+        uint32          mChangeSerial = 1u;
+        /// Jahshaka (K1): THE LIGHT AGE LEDGER - the serial each slot's estimate integrates (recorded in
+        /// dispatch order) and the frame each of the last 256 serials was issued: lightAgeBySlab's reading.
+        vector<uint32>::type mSlotSerial;
+        uint32          mSerialFrame[256] = {};
+        void noteStamps( uint32 listStart, uint32 count );
         uint64          mDispatches = 0u;
         bool            mRotateRays;
         /// Refinements owed after the current work (every event - a build, a
@@ -477,9 +490,36 @@ namespace Ogre
         ///
         /// If major changes happens to PhotonVoxelLighting, then call initialize() again
         ///
-        /// Jahshaka (PHOTON-FIELD-ROTATE-1): the whole grid, as a CHANGE (the history
-        /// keeps at most keepOnChange samples' weight).
+        /** Jahshaka (PHOTON-FIELD-ROTATE-1): the whole grid, as a CHANGE (the history
+            keeps at most keepOnChange samples' weight) - THE INPUTS CHANGED: the change's serial
+            moves, so every probe owes the new integration.
+            Jahshaka (PHOTON-2 stage 2's round, the read's K1): A CHANGE THAT CONTINUES. A change
+            restarted at probe 0 by every injection never reached the far end of the work list under
+            a light that ticks faster than a change completes (an animated lamp ticks every 10 frames,
+            a change takes 32 at budget 1: the list's last 69 % kept the old light for ever, a z-seam).
+            The work list is ROTATED: a change that resets one still in flight starts at that one's
+            cursor and wraps round, so every probe takes a light at most one change period old
+            whatever the reset cadence.
+        */
         void reset();
+        /** Jahshaka (K1, K4): THE SAME INPUTS, THE WORK IN FLIGHT CONTINUES - after a scroll's
+            entered planes (scrollWindow, integrated by the caller): the change (or a re-placement's
+            lap) resumes at `cursor` with `remaining` probes still owed, both read before the scroll
+            (changeCursor, changeRemaining). The work list is a list of atlas SLOTS and a kept probe
+            keeps its slot, so the probes it owed are the ones it still owes.
+        */
+        void resumeChange( uint32 cursor, uint32 remaining );
+        /// Where the whole-grid work IN FLIGHT (a change, or a re-placement's fresh lap) integrates
+        /// next, as a list position (the rotation plus its progress, mod the total); 0 when none is.
+        uint32 changeCursor() const;
+        /// The probes that work still owes; 0 when none is in flight.
+        uint32 changeRemaining() const;
+        /** Jahshaka (K1): THE AGE OF THE LIGHT THE FIELD HOLDS, per z-slab of the window (window-local z,
+            near to far): the largest, over the slab's probes, of the frames since the inputs its estimate
+            integrates were superseded (0 = it holds the current inputs). From the CPU's record of the
+            dispatches (the job integrates exactly those); saturates past 255 serials.
+        */
+        void lightAgeBySlab( vector<uint32>::type &out ) const;
 
         /** Jahshaka (PHOTON-FIELD-ROTATE-1): the whole grid again, as a REFINEMENT: every
             probe below the target sample count takes one more sample under a new ray

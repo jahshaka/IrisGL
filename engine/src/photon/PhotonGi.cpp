@@ -1222,6 +1222,12 @@ GiStatus PhotonComponent::giStatus() const {
         st.ifdTargetSamples = mIfd ? unsigned(mIfd->getTargetSamples()) : 0u;
         st.ifdRefinesOwed   = mIfd ? unsigned(mIfd->getRefinesOwed() +
                                               (mIfd->isWorkDone() ? 0u : 1u)) : 0u;
+        st.ifdLightAgeBySlab.clear();
+        if (mIfd) {
+            Ogre::vector<Ogre::uint32>::type age;
+            mIfd->lightAgeBySlab(age);
+            st.ifdLightAgeBySlab.assign(age.begin(), age.end());
+        }
         {
             // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest; giInputsOwed).
             st.giAtRest = !giInputsOwed();
@@ -7482,9 +7488,14 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
         }
         return true;
     }
-    // A whole re-integration still running (a settle's, a light's) is restarted
-    // after the scroll's own planes: the kept probes it had not reached still owe it.
+    // A whole re-integration still running (a settle's, a light's, a re-placement's) CONTINUES
+    // after the scroll's own planes WHERE IT WAS (PHOTON-2 stage 2's round, K1/K4): the kept
+    // probes it had not reached still owe it and keep their slots, so the same cursor and the
+    // same count owed. (A restart at probe 0 on every follow never reached the far end of the
+    // list on a walk.)
     const bool progressivePending = mIfdProbesDone < mIfdTotalProbes;
+    const Ogre::uint32 cursor = mIfd->changeCursor();
+    const Ogre::uint32 owed = progressivePending ? mIfd->changeRemaining() : 0u;
     mIfd->scrollWindow(d);
     for (int a = 0; a < 3; ++a) mIfdVolumeOrigin[a] += float(d[a]) * spacing[a];
     ++mIfdFollows;
@@ -7506,9 +7517,9 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
         work.setUnits(entered * mIfd->getChangeSamples());
         mIfdScrolledProbes = entered;
     }
-    if (progressivePending) {
-        mIfd->reset();
-        mIfdProbesDone = 0u;
+    if (owed) {
+        mIfd->resumeChange(cursor, owed);
+        mIfdProbesDone = mIfdTotalProbes - owed;
     } else {
         mIfdProbesDone = mIfdTotalProbes;
         // The entered planes' refinements run at the budget (the kept probes that

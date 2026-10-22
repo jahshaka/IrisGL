@@ -427,6 +427,8 @@ namespace Ogre
             const size_t words = 4u + probes + probes * res * res;
             vector<uint32>::type zeros( words, 0u );
             mVarianceBuffer = vaoManager->createUavBuffer( words, sizeof( uint32 ), 0, zeros.data(), false );
+            mSlotSerial.assign( probes, 0u );
+            mSerialFrame[mChangeSerial & 255u] = vaoManager->getFrameCount();
             mVarianceTicket.reset();
             ++mStopEpoch;
             mProbesStopped = 0u;
@@ -667,12 +669,96 @@ namespace Ogre
         noteEstimatesReplaced();
     }
     //-------------------------------------------------------------------------
+    uint32 PhotonIrradianceField::changeCursor() const
+    {
+        if( !changeRemaining() )
+            return 0u;
+        return ( mWorkRotate + mNumProbesProcessed ) % mWorkTotal;
+    }
+    //-------------------------------------------------------------------------
+    uint32 PhotonIrradianceField::changeRemaining() const
+    {
+        const bool inFlight = mWorkWhole && mWorkTotal &&
+                              ( mWorkMode == IntegrateChange || mWorkMode == IntegrateFresh );
+        return inFlight && !isWorkDone() ? mWorkTotal - mNumProbesProcessed : 0u;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::noteStamps( uint32 listStart, uint32 count )
+    {
+        // The job's slots, list position for list position (jahFieldWorkSlot): an invalidation stamps 0, a
+        // fresh or a change integration stamps the serial.
+        if( mSlotSerial.size() != mSettings.getTotalNumProbes() )
+            return;
+        const uint32 nx = mSettings.mNumProbes[0], ny = mSettings.mNumProbes[1], nz = mSettings.mNumProbes[2];
+        for( uint32 p = listStart; p < listStart + count; ++p )
+        {
+            uint32 first = 0u, i = 0u;
+            for( ; i + 1u < mNumWorkBoxes; ++i )
+            {
+                const ProbeBox &b = mWorkBoxes[i];
+                const uint32 n = b.size[0] * b.size[1] * b.size[2];
+                if( p < first + n )
+                    break;
+                first += n;
+            }
+            const ProbeBox &b = mWorkBoxes[i];
+            const uint32 q = p - first;
+            const uint32 x = ( b.lo[0] + q % b.size[0] ) & ( nx - 1u );
+            const uint32 y = ( b.lo[1] + ( q / b.size[0] ) % b.size[1] ) & ( ny - 1u );
+            const uint32 z = ( b.lo[2] + q / ( b.size[0] * b.size[1] ) ) & ( nz - 1u );
+            uint32 &held = mSlotSerial[x + y * nx + z * nx * ny];
+            held = mWorkMode == IntegrateInvalidate ? 0u : mChangeSerial;
+        }
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::lightAgeBySlab( vector<uint32>::type &out ) const
+    {
+        const uint32 nx = mSettings.mNumProbes[0], ny = mSettings.mNumProbes[1], nz = mSettings.mNumProbes[2];
+        out.assign( nz, 0u );
+        if( mSlotSerial.size() != size_t( nx ) * ny * nz || !mRoot )
+            return;
+        const uint32 now = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
+        for( uint32 z = 0u; z < nz; ++z )
+        {
+            const uint32 local = ( z + nz - mWindowOffset[2] % nz ) % nz;
+            for( uint32 i = 0u; i < nx * ny; ++i )
+            {
+                const uint32 held = mSlotSerial[z * nx * ny + i];
+                if( held == mChangeSerial )
+                    continue;
+                // Superseded when the serial after it was issued (the oldest the ring holds, past 255).
+                const uint32 next = mChangeSerial - held > 255u ? mChangeSerial - 255u : held + 1u;
+                out[local] = std::max( out[local], now - mSerialFrame[next & 255u] );
+            }
+        }
+    }
+    //-------------------------------------------------------------------------
     void PhotonIrradianceField::reset()
     {
+        const uint32 cursor = changeCursor();
+        ++mChangeSerial;
+        mSerialFrame[mChangeSerial & 255u] = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
         setWholeWork();
+        mWorkRotate = mWorkTotal ? cursor % mWorkTotal : 0u;
         mNumProbesProcessed = 0u;
         mWorkMode = IntegrateChange;
         noteEstimatesReplaced();
+        mRefinesOwed = mTargetSamples - 1u;
+        mRefineWhole = true;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::resumeChange( uint32 cursor, uint32 remaining )
+    {
+        setWholeWork();
+        if( !mWorkTotal )
+            return;
+        remaining = std::min( remaining, mWorkTotal );
+        mNumProbesProcessed = mWorkTotal - remaining;
+        // The rotation that puts the cursor `processed` positions into the list.
+        mWorkRotate = ( cursor % mWorkTotal + mWorkTotal - mNumProbesProcessed % mWorkTotal ) % mWorkTotal;
+        mWorkMode = IntegrateChange;
+        noteEstimatesReplaced();
+        // The refinements the change owes after it: the whole grid (reset's), whatever the scroll joined.
         mRefinesOwed = mTargetSamples - 1u;
         mRefineWhole = true;
     }
@@ -767,6 +853,8 @@ namespace Ogre
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::setWholeWork()
     {
+        mWorkRotate = 0u;
+        mWorkWhole = true;
         mNumWorkBoxes = 1u;
         for( size_t i = 0u; i < 3u; ++i )
         {
@@ -783,6 +871,8 @@ namespace Ogre
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::setBoxesFromBands( const uint32 enteredLo[3], const uint32 enteredNum[3] )
     {
+        mWorkRotate = 0u;
+        mWorkWhole = false;
         // ONE BOX PER AXIS WITH A BAND, DISJOINT (an integration job convolves a
         // probe's tile in place, so no probe may be integrated twice by one
         // dispatch). Box x takes the x band's planes whole; box y the y band's planes
@@ -914,6 +1004,17 @@ namespace Ogre
             return;
 
         probesPerFrame = std::min( totalNumProbes - mNumProbesProcessed, probesPerFrame );
+        // Jahshaka (K1): THE ROTATED LIST - the dispatch's first list position is the probe position
+        // (rotation + progress) mod the total; a range across the list's end is two dispatches.
+        const uint32 listStart = mWorkRotate ? ( mWorkRotate + mNumProbesProcessed ) % totalNumProbes
+                                             : mNumProbesProcessed;
+        if( listStart + probesPerFrame > totalNumProbes )
+        {
+            const uint32 first = totalNumProbes - listStart;
+            update( first );
+            update( probesPerFrame - first );
+            return;
+        }
 
         // THIS DISPATCH'S OWN PARAMETER BUFFER (the ring's reason is at its declaration).
         VaoManager *vaoManager = mRoot->getRenderSystem()->getVaoManager();
@@ -956,7 +1057,7 @@ namespace Ogre
             fillEnvironmentParams();
         }
 
-        mIfGenParams.numProcessedProbes = mNumProbesProcessed;
+        mIfGenParams.numProcessedProbes = listStart;
         {
             // Jahshaka (PHOTON-WRITER-1): the work's boxes and the window's offset.
             uint32 firstPos = 0u;
@@ -980,8 +1081,10 @@ namespace Ogre
             mIfGenParams.windowOffset.z = mWindowOffset[2];
             // THE WORK'S END for this dispatch, in list positions: a group past it
             // writes nothing (the dispatch is rounded up to whole rows).
-            mIfGenParams.windowOffset.w = mNumProbesProcessed + probesPerFrame;
+            mIfGenParams.windowOffset.w = listStart + probesPerFrame;
         }
+        if( mWorkMode != IntegrateRefine )
+            noteStamps( listStart, probesPerFrame );
         {
             // Jahshaka (PHOTON-FIELD-ROTATE-1): THE RAY ROTATION IS A FUNCTION OF THE
             // PROBE'S PLACE IN THE WORLD AND ITS OWN SAMPLE INDEX (the job hashes the

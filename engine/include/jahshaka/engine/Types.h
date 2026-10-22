@@ -4343,6 +4343,12 @@ struct GiStatus {
     /// own pass runs inline and nothing is owed after it.
     unsigned ifdTargetSamples = 0;
     unsigned ifdRefinesOwed = 0;
+    /// THE AGE OF THE LIGHT THE FIELD HOLDS (PHOTON-2 K1), per z-slab of its window (near to far in the
+    /// field's own z): the largest, over the slab's probes, of the frames since the inputs its estimate
+    /// integrates were superseded by a light change or a settle (0 = every probe holds the current inputs).
+    /// A change reaches every probe within one change period whatever the reset cadence - a slab that
+    /// grows without bound is a field starved under a moving lamp.
+    std::vector<unsigned> ifdLightAgeBySlab;
     /// GI IS AT REST (PHOTON-FIELD-ROTATE-1): nothing this scene's GI owes will
     /// change the picture - no rebuild or re-voxelisation pending (the flush, a
     /// staged build, a cascade step, a chain-shape change, a dirty box), no light
