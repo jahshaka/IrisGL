@@ -43,9 +43,6 @@ constexpr int kMaxLevels = 24;   ///< the hard depth cap: a chain still going pa
 struct Options
 {
     bool attributes = true;    ///< false = positions only (the cut curve's POSONLY arm)
-    /// D4 stage 2: survivors PLACED (appended vertices). Off: stage 2's memory rule measured it a no-go (the hard 7 at
-    /// E = 16 44,220 placed against 37,986 re-indexed, +106 % of level 0's vertex bytes) — the lead decides at the STOP.
-    bool placement = false;
     bool wantGroups = false;   ///< one GroupRecord per group ATTEMPTED (accepted and carried)
     bool wantLocks = false;    ///< ...with its external positions (atom2.borders_move)
     bool wantRegions = false;  ///< the level-0 provenance partition per cluster (engine.lod_rule_parity)
@@ -63,7 +60,6 @@ struct GroupRecord
     float budget = 0.0f, step = 0.0f, stored = 0.0f, estimate = 0.0f, depth0Estimate = -1.0f;
     float removedVertex = 0.0f, lostFacet = 0.0f, addedFacet = 0.0f, droppedIsland = 0.0f, lostLocked = 0.0f;
     int attempts = 0, pruned = 0, islandsDropped = 0, lockedLost = 0;
-    int placed = 0;             ///< placed survivors this group appended to the mesh
     float weightNormal = 0.0f, weightUv = 0.0f;
     std::vector<unsigned> external;   ///< wantLocks: its external positions (weld ids)
     std::vector<int> memberClusters;  ///< wantLocks: the DAG cluster ids it merged
@@ -72,7 +68,6 @@ struct GroupRecord
 struct Stats
 {
     int clusters = 0, groups = 0, leaves = 0;
-    size_t appendedVertices = 0; ///< placed survivors appended to the mesh (stage 2)
     int depth = 0;               ///< the deepest group's level (the empty top included)
     int levels = 0;              ///< loop iterations
     int reductions = 0, carried = 0, notSimplified = 0, retries = 0, prunedPieces = 0;
@@ -89,24 +84,10 @@ struct Stats
     QVector<QVector<quint32>> clusterRegions;   ///< wantRegions: per DAG cluster, the level-0 triangles it stands for
 };
 
-/// THE VERTICES THE BUILD APPENDED (stage 2, placement): ids nv0.. of the DAG's indices. Per appended vertex its
-/// SOURCE (an original mesh vertex: its other buffers — the second UV set, the bitangent's handedness — are copied from
-/// it) and its solved position, normal (renormalised), first UV set (the solved u, v; the source's other components)
-/// and tangent (orthonormalised to the normal), each array empty when the mesh has no such buffer.
-struct Appended
-{
-    size_t nv0 = 0;
-    int uvComps = 0;
-    std::vector<unsigned> source;
-    std::vector<float> pos, nrm, uv, tan;
-    size_t count() const { return source.size(); }
-};
-
 /// Builds `out` for the triangle list `base` (vertex ids into `mesh`). False (and `out` empty) when the input is
-/// unusable or the chain passed kMaxLevels. The DAG's indices may name APPENDED vertices (ids >= mesh.nv): the caller
-/// grows the mesh's buffers from `appended` before the DAG is read.
+/// unusable or the chain passed kMaxLevels. Every index of the DAG is a vertex of the mesh (re-indexing).
 bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterDag *out, Stats *stats,
-           const Options &options, Appended *appended);
+           const Options &options);
 
 /// THE CONFIG RECORD the blob carries (the builder's constants): a blob written under any other is refused.
 QVector<float> configRecord();

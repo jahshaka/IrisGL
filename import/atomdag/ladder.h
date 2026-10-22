@@ -49,10 +49,9 @@ struct GroupResult
 {
     bool accepted = false;        ///< a result within the budget (the builder still carries it if it needs as many clusters)
     bool simplified = false;      ///< false: at or under its target already (step 0)
-    std::vector<unsigned> out;    ///< the accepted output, LOCAL ids of `space` (>= n: a placed vertex)
-    GroupScratch scratch;         ///< the group's scratch (globalOf maps a local id < n to the mesh)
-    LocalSpace space;             ///< the group's local space, the kept result's placed positions in its upper half
-    std::vector<float> placedAttr;   ///< n * attrCount: the kept result's solved attributes (placement)
+    std::vector<unsigned> out;    ///< the accepted output, LOCAL ids of `space` (scratch ids)
+    GroupScratch scratch;         ///< the group's scratch (globalOf maps a local id to the mesh)
+    LocalSpace space;             ///< the group's local space
     float budget = 0.0f;
     float step = 0.0f;            ///< the accepted (or the last) attempt's measured step
     float estimate = 0.0f;        ///< the simplifier's own result_error of the kept attempt
@@ -60,7 +59,6 @@ struct GroupResult
     int attempts = 0;
     int pruned = 0;
     size_t lockedPositions = 0;   ///< external + ladder positions locked at the kept attempt
-    size_t placedVertices = 0;    ///< distinct placed survivors in the accepted output
     StepMeasure terms;            ///< the kept (or the last) attempt's terms
     double msSimplify = 0.0, msMeasure = 0.0;   ///< this group's time in the simplifier and in the measurement
     double msExact = 0.0;                       ///< ...of which the kept result's exact measurement
@@ -68,11 +66,10 @@ struct GroupResult
 
 /// `inTris` global ids; `childError` = max over the members of (stored, carried budget), 0 for a group of leaves;
 /// `targetTris` = the output's target (parentTarget, or less when the input at its target would not merge into fewer
-/// clusters); `placement` false = re-indexing (stage 1).
+/// clusters).
 GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
                         const std::vector<unsigned> &inTris, const std::vector<unsigned> &externalWelds,
-                        float childError, float childStored, float floorLen, bool attributes, bool placement,
-                        size_t targetTris);
+                        float childError, float childStored, float floorLen, bool attributes, size_t targetTris);
 
 }   // namespace atomdag
 }   // namespace iris

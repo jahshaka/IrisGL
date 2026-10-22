@@ -261,8 +261,8 @@ namespace
 // the best-attempt tie); CLOD_LOCK_VERIFY public in patch 0005. Every DAG re-bakes (BAKEKEY-1).
 // v27 (2026-10-22, ATOM-2 stage 2 + the stage-1 read): the empty top priced at the mesh's level-0 extent; a group's
 // result accepted when it fits its budget and needs FEWER CLUSTERS (the 15 % shed rule deleted); the islands over the
-// adjacency's weld ids (+-0 folded); the partitioner's part count vertex-aware; placement built as an arm, off (its
-// memory rule a measured no-go). Every bake re-bakes (BAKEKEY-1).
+// adjacency's weld ids (+-0 folded); the partitioner's part count vertex-aware (stage 2's placement — survivors
+// appended at their quadric optimum — measured a no-go by the memory rule and deleted). Every bake re-bakes (BAKEKEY-1).
 // v26 (2026-10-22, ATOM-2 stage 1): THE CLUSTER DAG IS OUR OWN BUILDER (import/atomdag/; clusterlod.h, its patch
 // stack 0002-0005 and the old verify/measure deleted): adjacency by position, 128-triangle / 256-vertex leaves and
 // 8-32 groups by our own bisection, borders recomputed every level, Nanite-scale attribute weights, the measured
@@ -2751,75 +2751,23 @@ bool dagInput(const MeshPtr &mesh, atomdag::MeshView *view, std::vector<unsigned
     int uvComps = 2; size_t uvCount = 0;
     const float *uvs = lodchain::attribData(mesh, VertexAttribUsage::TexCoord0, &uvComps, &uvCount);
     if (uvs && uvCount >= nv && uvComps >= 2) { view->uvs = uvs; view->uvComps = uvComps; }
-    int tanComps = 3; size_t tanCount = 0;
-    const float *tangents = lodchain::attribData(mesh, VertexAttribUsage::Tangent, &tanComps, &tanCount);
-    if (tangents && tanCount >= nv && tanComps >= 3) { view->tangents = tangents; view->tanComps = tanComps; }
     return true;
 }
 
-/// THE DAG's APPENDED VERTICES INTO THE MESH (ATOM-2 stage 2, placement): every vertex buffer grows by the placed
-/// survivors — position, normal, first UV set and tangent as the build solved them, every other buffer (the second
-/// UV set, the bitangent that carries the frame's handedness) copied from the survivor's source vertex — and the
-/// document's box and sphere are recomputed over the grown positions (picking and the node bounds read them; the
-/// engine takes its box from the uploaded positions). Level 0 and the chain's levels keep their ids.
-void applyAppended(const MeshPtr &mesh, const atomdag::Appended &a)
-{
-    if (mesh.isNull() || a.count() == 0) return;
-    for (const VertexBufferPtr &vb : mesh->getVertexBuffers()) {
-        if (!vb || !vb->data || vb->dataSize <= 0) continue;
-        const QList<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
-        if (attribs.size() != 1) continue;
-        const VertexAttribute &at = attribs.first();
-        const size_t comps = size_t(at.count > 0 ? at.count : 3);
-        const size_t nv = size_t(vb->dataSize) / (sizeof(float) * comps);
-        if (nv != a.nv0) continue;   // not a per-vertex float buffer of this mesh
-        const float *src = reinterpret_cast<const float *>(vb->data);
-        std::vector<float> data(src, src + nv * comps);
-        data.reserve((nv + a.count()) * comps);
-        const std::vector<float> *solved = nullptr;
-        size_t solvedComps = 0;
-        if (at.usage == VertexAttribUsage::Position) { solved = &a.pos; solvedComps = 3; }
-        else if (at.usage == VertexAttribUsage::Normal && !a.nrm.empty()) { solved = &a.nrm; solvedComps = 3; }
-        else if (at.usage == VertexAttribUsage::TexCoord0 && !a.uv.empty()) { solved = &a.uv; solvedComps = size_t(a.uvComps); }
-        else if (at.usage == VertexAttribUsage::Tangent && !a.tan.empty()) { solved = &a.tan; solvedComps = 3; }
-        for (size_t i = 0; i < a.count(); ++i) {
-            const size_t base = data.size();
-            data.insert(data.end(), src + size_t(a.source[i]) * comps, src + (size_t(a.source[i]) + 1) * comps);
-            if (solved)
-                for (size_t k = 0; k < std::min(comps, solvedComps); ++k) data[base + k] = (*solved)[i * solvedComps + k];
-        }
-        vb->setData(data.data(), unsigned(data.size() * sizeof(float)));
-    }
-    AABB box = mesh->aabb;
-    for (size_t i = 0; i < a.count(); ++i) box.merge(Vec3(a.pos[i * 3], a.pos[i * 3 + 1], a.pos[i * 3 + 2]));
-    mesh->aabb = box;
-    mesh->boundingSphere = box.getMinimalEnclosingSphere();
-}
+}   // namespace
 
-/// The DAG of `mesh` without growing its buffers: the bake's stages read the mesh concurrently, so the appended
-/// vertices land after them (bakeStages); every other caller applies them at once.
-void buildDagDeferred(const MeshPtr &mesh, MeshBake::ClusterDagStats *stats, const MeshBake::ClusterDagOptions &options,
-                      atomdag::Appended *appended)
+void MeshBake::buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats, const ClusterDagOptions &options)
 {
-    if (stats) *stats = MeshBake::ClusterDagStats();
-    *appended = atomdag::Appended();
+    if (stats) *stats = ClusterDagStats();
     if (mesh.isNull()) return;
     mesh->clusterDag = MeshClusterDag();
     atomdag::MeshView view;
     std::vector<unsigned> base;
     if (!dagInput(mesh, &view, &base)) return;
-    if (!atomdag::build(view, base, &mesh->clusterDag, stats, options, appended))
+    if (!atomdag::build(view, base, &mesh->clusterDag, stats, options))
         irisLog(QStringLiteral("mesh bake: cluster DAG NOT BUILT (%1 triangles%2) — the mesh draws level 0")
                     .arg(base.size() / 3)
                     .arg(stats && stats->depthCapHit ? QStringLiteral(": the chain passed the depth cap") : QString()));
-}
-}   // namespace
-
-void MeshBake::buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats, const ClusterDagOptions &options)
-{
-    atomdag::Appended appended;
-    buildDagDeferred(mesh, stats, options, &appended);
-    applyAppended(mesh, appended);
 }
 
 QVector<MeshBake::DagDriftRow> MeshBake::dagDrift(const MeshPtr &mesh)
@@ -3013,7 +2961,6 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards,
     model.stageMs = QVector<MeshBake::Model::StageMs>(int(meshes));
     model.bakeThreads = bakepool::width();
     std::vector<MeshBake::ClusterDagStats> dagStats(meshes);
-    std::vector<atomdag::Appended> appended(meshes);   // the DAGs' placed vertices, applied after every stage
     const Clock::time_point start = Clock::now();
     // Tasks [0, meshes) are the chains (the longest work, handed out first), then
     // [meshes, 2 * meshes) the DAGs.
@@ -3035,12 +2982,11 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards,
             } else {
                 cancelPoint(cancel);
                 const Clock::time_point t = Clock::now();
-                buildDagDeferred(mesh, &dagStats[i], MeshBake::ClusterDagOptions(), &appended[i]);
+                MeshBake::buildClusterDag(mesh, &dagStats[i]);
                 ms.dag = msSince(t);
             }
         }
     });
-    for (size_t i = 0; i < meshes; ++i) applyAppended(model.meshes.at(int(i)), appended[i]);
     model.meshesMs = msSince(start);
 #if defined(__GLIBC__)
     // THE POOL'S FREED MEMORY GOES BACK. glibc gives every thread its own malloc

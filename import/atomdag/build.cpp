@@ -22,9 +22,6 @@ For more information see the LICENSE file
 #include <cfloat>
 #include <chrono>
 #include <cmath>
-#include <cstdint>
-#include <cstring>
-#include <unordered_map>
 
 namespace iris
 {
@@ -97,113 +94,6 @@ Sphere enclose(const std::vector<Sphere> &s, int *grown)
     return out;
 }
 
-/// THE VERTEX STORE (stage 2): the mesh's four solved buffers, copied once, and the placed survivors appended.
-struct PosKey
-{
-    float p[3] = { 0.0f, 0.0f, 0.0f };
-    bool operator==(const PosKey &o) const { return p[0] == o.p[0] && p[1] == o.p[1] && p[2] == o.p[2]; }
-};
-struct PosKeyHash
-{
-    size_t operator()(const PosKey &k) const
-    {
-        std::uint32_t b[3];
-        std::memcpy(b, k.p, sizeof(b));
-        return (size_t(b[0]) * 0x9E3779B97F4A7C15ull) ^ (size_t(b[1]) * 0xC2B2AE3D27D4EB4Full) ^ (size_t(b[2]) * 0x165667B19E3779F9ull);
-    }
-};
-PosKey keyOf(const float *p)
-{
-    PosKey k;
-    for (int i = 0; i < 3; ++i) k.p[i] = p[i] == 0.0f ? 0.0f : p[i];   // +-0 folded, as the weld
-    return k;
-}
-
-struct Store
-{
-    size_t nv0 = 0, nv = 0;
-    int uvComps = 0;
-    std::vector<float> P, N, U, T;
-    std::vector<unsigned> source;   ///< per appended vertex: its original mesh vertex
-    std::unordered_map<PosKey, unsigned, PosKeyHash> weldAt;
-
-    explicit Store(const MeshView &m) : nv0(m.nv), nv(m.nv), uvComps(m.uvs ? m.uvComps : 0)
-    {
-        const auto copy = [&](const float *src, int comps, std::vector<float> &dst) {
-            if (!src) return;
-            dst.resize(m.nv * 3);
-            for (size_t v = 0; v < m.nv; ++v)
-                for (int k = 0; k < 3; ++k) dst[v * 3 + size_t(k)] = src[v * size_t(comps) + size_t(k)];
-        };
-        copy(m.positions, m.posComps, P);
-        copy(m.normals, m.nrmComps, N);
-        copy(m.tangents, m.tanComps, T);
-        if (m.uvs) U.assign(m.uvs, m.uvs + m.nv * size_t(m.uvComps));
-    }
-    MeshView view() const
-    {
-        MeshView v;
-        v.positions = P.data();
-        v.posComps = 3;
-        v.nv = nv;
-        v.normals = N.empty() ? nullptr : N.data();
-        v.nrmComps = 3;
-        v.uvs = U.empty() ? nullptr : U.data();
-        v.uvComps = uvComps;
-        v.tangents = T.empty() ? nullptr : T.data();
-        v.tanComps = 3;
-        return v;
-    }
-    void indexWelds(const std::vector<unsigned> &weld)
-    {
-        weldAt.reserve(nv);
-        for (size_t v = 0; v < nv; ++v) weldAt.emplace(keyOf(&P[v * 3]), weld[v]);
-    }
-    /// Appends scratch vertex `sId`'s PLACED copy; returns its mesh id.
-    unsigned append(const GroupScratch &sc, const LocalSpace &space, const std::vector<float> &attr, unsigned sId,
-                    std::vector<unsigned> &weld, Islands &islands)
-    {
-        const size_t n = sc.size();
-        const unsigned g = sc.globalOf[sId];
-        const unsigned id = unsigned(nv++);
-        const float *p = &space.pos[(n + sId) * 3];
-        P.insert(P.end(), p, p + 3);
-        const float *a = attr.empty() ? nullptr : &attr[size_t(sId) * sc.attrCount];
-        Vec3 nrm(0, 0, 1);
-        if (!N.empty()) {
-            nrm = Vec3(N[g * 3], N[g * 3 + 1], N[g * 3 + 2]);
-            if (a && sc.nrmAt >= 0) {
-                const Vec3 s(a[sc.nrmAt], a[sc.nrmAt + 1], a[sc.nrmAt + 2]);
-                if (s.lengthSquared() > 1e-12f) nrm = s.normalized();   // components are solved, not the length
-            }
-            N.insert(N.end(), { nrm.x(), nrm.y(), nrm.z() });
-        }
-        if (!U.empty()) {
-            const size_t at = U.size();
-            float src[4] = { 0, 0, 0, 0 };
-            for (int k = 0; k < uvComps && k < 4; ++k) src[k] = U[size_t(g) * size_t(uvComps) + size_t(k)];
-            U.insert(U.end(), src, src + std::min(uvComps, 4));
-            if (a && sc.uvAt >= 0) { U[at] = a[sc.uvAt]; U[at + 1] = a[sc.uvAt + 1]; }
-        }
-        if (!T.empty()) {
-            Vec3 t(T[g * 3], T[g * 3 + 1], T[g * 3 + 2]);
-            if (a && sc.tanAt >= 0) {
-                Vec3 s(a[sc.tanAt], a[sc.tanAt + 1], a[sc.tanAt + 2]);
-                if (!N.empty()) s = s - nrm * Vec3::dotProduct(s, nrm);   // orthonormal to the normal
-                if (s.lengthSquared() > 1e-12f) t = s.normalized();
-            }
-            T.insert(T.end(), { t.x(), t.y(), t.z() });
-        }
-        const unsigned root = g < nv0 ? g : source[g - nv0];
-        source.push_back(root);
-        const auto it = weldAt.emplace(keyOf(p), id).first;
-        weld.push_back(it->second);
-        islands.compOf.push_back(islands.compOf[g]);
-        islands.capOf.push_back(islands.capOf[g]);
-        return id;
-    }
-};
-
 /// The parent clusters of an accepted group's output (D4's re-split: the leaves' bisection on the output).
 struct Split
 {
@@ -222,26 +112,19 @@ QVector<float> configRecord()
         float(kMaxLevels), 4.0f /* Nanite's position scale 1/0.25 */, 128.0f /* Nanite's UV divisor */, kFloorRel };
 }
 
-bool build(const MeshView &input, const std::vector<unsigned> &base, MeshClusterDag *out, Stats *stats,
-           const Options &options, Appended *appended)
+bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterDag *out, Stats *stats,
+           const Options &options)
 {
     *out = MeshClusterDag();
-    if (appended) *appended = Appended();
     const Clock::time_point t0 = Clock::now();
     const size_t baseTris = base.size() / 3;
-    if (baseTris == 0 || !input.positions || input.nv == 0) return false;
-    const float extent = meshopt_simplifyScale(input.positions, input.nv, sizeof(float) * size_t(input.posComps));
+    if (baseTris == 0 || !mesh.positions || mesh.nv == 0) return false;
+    const float extent = meshopt_simplifyScale(mesh.positions, mesh.nv, sizeof(float) * size_t(mesh.posComps));
     if (!(extent > 0.0f) || !std::isfinite(extent)) return false;
     const float floorLen = extent * kFloorRel;
 
-    // THE VERTEX STORE (stage 2): the mesh's positions, normals, UVs and tangents, copied once, and every PLACED
-    // survivor appended to them as a new vertex (its id past the mesh's); `source` names each appended vertex's
-    // original mesh vertex (its other buffers copy that one's). The view is re-read after every append batch.
-    Store store(input);
-    MeshView mesh = store.view();
-    std::vector<unsigned> weld = weldByPosition(mesh);
-    store.indexWelds(weld);
-    Islands islands = findIslands(weld, mesh.positions, mesh.posComps, mesh.nv, base);
+    const std::vector<unsigned> weld = weldByPosition(mesh);
+    const Islands islands = findIslands(weld, mesh.positions, mesh.posComps, mesh.nv, base);
     // THE MESH'S OWN EXTENT (D8: the empty top is priced at the island rule on the WHOLE mesh — the level-0 box's
     // diagonal, never the last cluster's: with nothing locked at the top the extreme corners collapse away, and a
     // 10 m tree whose root box is 3 m would stop drawing while it still covers pixels — a pop out; the read's finding 1)
@@ -345,7 +228,7 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
                     // budget does — then the group is carried.
                     for (int shrink = 0;; ++shrink) {
                         results[g] = reduceGroup(mesh, weld, islands, in, grouping.external[g], childError[g],
-                                                 childStored[g], floorLen, options.attributes, options.placement, target);
+                                                 childStored[g], floorLen, options.attributes, target);
                         GroupResult &r = results[g];
                         if (!r.accepted || !r.simplified) break;   // carried, or merged as it was (split above)
                         const Clock::time_point ts = Clock::now();
@@ -444,25 +327,9 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
             rec.outTris = int(r.out.size() / 3);
             if (stats) { if (r.simplified) ++stats->reductions; else ++stats->notSimplified; }
 
-            // THE OUTPUT IN MESH IDS: a local id below n is its scratch vertex's mesh vertex; a PLACED survivor is
-            // appended to the store as a new vertex (once per survivor), in group order — deterministic ids.
+            // THE OUTPUT IN MESH IDS.
             std::vector<unsigned> outGlobal(r.out.size());
-            {
-                const size_t n = r.scratch.size();
-                std::vector<unsigned> placedId(n, ~0u);
-                for (size_t i = 0; i < r.out.size(); ++i) {
-                    const unsigned v = r.out[i];
-                    if (v < n) { outGlobal[i] = r.scratch.globalOf[v]; continue; }
-                    const unsigned sId = unsigned(v - n);
-                    if (placedId[sId] == ~0u) {
-                        placedId[sId] = store.append(r.scratch, r.space, r.placedAttr, sId, weld, islands);
-                        rec.placed++;
-                    }
-                    outGlobal[i] = placedId[sId];
-                }
-                if (stats) stats->appendedVertices += rec.placed;
-                mesh = store.view();
-            }
+            for (size_t i = 0; i < r.out.size(); ++i) outGlobal[i] = r.scratch.globalOf[r.out[i]];
             // The parents.
             const size_t firstParent = cl.size();
             for (const std::vector<unsigned> &part : splits[g].parts) {
@@ -563,19 +430,6 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
         o.radius = x.cull.r;
     }
     *out = dag;
-    if (appended) {
-        appended->nv0 = store.nv0;
-        appended->uvComps = store.uvComps;
-        appended->source = store.source;
-        const size_t a = store.source.size();
-        const auto tail = [&](const std::vector<float> &v, size_t comps, std::vector<float> &dst) {
-            if (!v.empty()) dst.assign(v.end() - std::ptrdiff_t(a * comps), v.end());
-        };
-        tail(store.P, 3, appended->pos);
-        tail(store.N, 3, appended->nrm);
-        tail(store.U, size_t(std::max(store.uvComps, 0)), appended->uv);
-        tail(store.T, 3, appended->tan);
-    }
     if (stats) {
         stats->clusters = int(cl.size());
         stats->groups = int(groups.size());

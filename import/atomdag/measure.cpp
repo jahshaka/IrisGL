@@ -299,7 +299,6 @@ StepMeasure measureStep(const LocalSpace &space,
     // The grids: the output (rules 1, 2, 4) and the input (rule 5), each over the group's box.
     Vec3 lo = vertexOf(P, pc, inTris[0]), hi = lo;
     for (unsigned v : inV) growBox(vertexOf(P, pc, v), lo, hi);
-    for (unsigned v : keptV) growBox(vertexOf(P, pc, v), lo, hi);   // a placed survivor may sit outside the input's box
     surface::TriangleGrid gridO, gridI;
     if (!outTris.empty()) gridO.build(P, pc, outTris, lo, hi, soupGridRes(P, pc, outTris, lo, hi));
     gridI.build(P, pc, inTris, lo, hi, soupGridRes(P, pc, inTris, lo, hi));

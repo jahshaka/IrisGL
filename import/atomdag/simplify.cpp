@@ -16,7 +16,6 @@ For more information see the LICENSE file
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
-#include <cstring>
 #include <unordered_map>
 
 namespace iris
@@ -29,7 +28,6 @@ namespace
 constexpr float kUvTriSizeMin = 1.0f / 1024.0f;   ///< Nanite's THRESH_UVS_ARE_SAME
 constexpr float kNanitePositionScale = 4.0f;       ///< 1 / Nanite's DesiredSize 0.25
 constexpr float kNaniteUvDivisor = 128.0f;         ///< Nanite's UV weight 1 / (128 uvTriSize)
-constexpr float kNaniteTangentWeight = 0.0625f;    ///< Nanite's TangentX weight, relative to the normal's
 
 Vec3 at(const std::vector<float> &p, unsigned i) { return Vec3(p[size_t(i) * 3], p[size_t(i) * 3 + 1], p[size_t(i) * 3 + 2]); }
 
@@ -62,14 +60,13 @@ Weights weightsOf(const GroupScratch &sc)
     if (w.sGroup > 0.0f) {
         w.normal = kNanitePositionScale * w.tGroup / w.sGroup;
         w.uv = kNanitePositionScale * w.tGroup / (kNaniteUvDivisor * w.uvTriSize * w.sGroup);
-        w.tangent = kNaniteTangentWeight * w.normal;
     }
     return w;
 }
 
 }   // namespace
 
-GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris, bool attributes, bool tangents)
+GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris, bool attributes)
 {
     GroupScratch sc;
     std::unordered_map<unsigned, unsigned> localOf;
@@ -87,7 +84,6 @@ GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris
     if (attributes) {
         if (mesh.normals) { sc.nrmAt = int(sc.attrCount); sc.attrCount += 3; }
         if (mesh.uvs) { sc.uvAt = int(sc.attrCount); sc.attrCount += 2; }
-        if (mesh.tangents && tangents) { sc.tanAt = int(sc.attrCount); sc.attrCount += 3; }
     }
     sc.attr.resize(n * sc.attrCount);
     for (size_t v = 0; v < n && sc.attrCount; ++v) {
@@ -95,15 +91,13 @@ GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris
         const size_t g = sc.globalOf[v];
         if (sc.nrmAt >= 0) for (int k = 0; k < 3; ++k) dst[sc.nrmAt + k] = mesh.normals[g * size_t(mesh.nrmComps) + size_t(k)];
         if (sc.uvAt >= 0) for (int k = 0; k < 2; ++k) dst[sc.uvAt + k] = mesh.uvs[g * size_t(mesh.uvComps) + size_t(k)];
-        if (sc.tanAt >= 0) for (int k = 0; k < 3; ++k) dst[sc.tanAt + k] = mesh.tangents[g * size_t(mesh.tanComps) + size_t(k)];
     }
     sc.weights = weightsOf(sc);
     sc.weightOf.assign(sc.attrCount, 0.0f);
-    // EVERY STORED ATTRIBUTE AT A POSITIVE WEIGHT (correction 3c): a zero weight is never solved.
+    // EVERY WEIGHED ATTRIBUTE AT A POSITIVE WEIGHT (correction 3c): a zero weight is remapped out of the quadrics.
     const float floorW = 1e-6f;
     if (sc.nrmAt >= 0) for (int k = 0; k < 3; ++k) sc.weightOf[size_t(sc.nrmAt + k)] = std::max(sc.weights.normal, floorW);
     if (sc.uvAt >= 0) for (int k = 0; k < 2; ++k) sc.weightOf[size_t(sc.uvAt + k)] = std::max(sc.weights.uv, floorW);
-    if (sc.tanAt >= 0) for (int k = 0; k < 3; ++k) sc.weightOf[size_t(sc.tanAt + k)] = std::max(sc.weights.tangent, floorW);
     return sc;
 }
 
@@ -112,67 +106,33 @@ LocalSpace makeSpace(const GroupScratch &sc, const std::vector<unsigned> &weld, 
 {
     LocalSpace s;
     const size_t n = sc.size();
-    s.n = n;
     s.islandCount = islandCount;
-    s.pos.resize(n * 6);
-    std::copy(sc.pos.begin(), sc.pos.end(), s.pos.begin());
-    std::copy(sc.pos.begin(), sc.pos.end(), s.pos.begin() + std::ptrdiff_t(n * 3));
-    s.weld.resize(2 * n);
-    s.comp.resize(2 * n);
-    s.cap.resize(2 * n);
+    s.pos = sc.pos;
+    s.weld.resize(n);
+    s.comp.resize(n);
+    s.cap.resize(n);
     for (size_t v = 0; v < n; ++v) {
         const unsigned g = sc.globalOf[v];
-        s.weld[v] = s.weld[n + v] = weld[g];
-        s.comp[v] = s.comp[n + v] = compOf[g];
-        s.cap[v] = s.cap[n + v] = capOf[g];
+        s.weld[v] = weld[g];
+        s.comp[v] = compOf[g];
+        s.cap[v] = capOf[g];
     }
     return s;
 }
 
 Simplified simplifyGroup(const GroupScratch &sc, const std::vector<unsigned char> &lock, size_t targetTris,
-                         float targetError, bool placement)
+                         float targetError)
 {
     Simplified out;
-    const size_t n = sc.size();
     bool anyLock = false;
     for (unsigned char l : lock) anyLock = anyLock || l;
-    const unsigned options = meshopt_SimplifyErrorAbsolute | meshopt_SimplifyPermissive;
-    if (!placement) {
-        std::vector<unsigned> dst(sc.tris.size());
-        const size_t count = meshopt_simplifyWithAttributes(
-            dst.data(), sc.tris.data(), sc.tris.size(), sc.pos.data(), n, sizeof(float) * 3,
-            sc.attrCount ? sc.attr.data() : nullptr, sizeof(float) * sc.attrCount,
-            sc.attrCount ? sc.weightOf.data() : nullptr, sc.attrCount, anyLock ? lock.data() : nullptr,
-            targetTris * 3, targetError, options, &out.resultError);
-        out.tris.assign(dst.begin(), dst.begin() + std::ptrdiff_t(count));
-    } else {
-        out.pos = sc.pos;
-        out.attr = sc.attr;
-        std::vector<unsigned> idx = sc.tris;
-        const size_t count = meshopt_simplifyWithUpdate(
-            idx.data(), idx.size(), out.pos.data(), n, sizeof(float) * 3,
-            sc.attrCount ? out.attr.data() : nullptr, sizeof(float) * sc.attrCount,
-            sc.attrCount ? sc.weightOf.data() : nullptr, sc.attrCount, anyLock ? lock.data() : nullptr,
-            targetTris * 3, targetError, options, &out.resultError);
-        idx.resize(count);
-        // Per referenced scratch vertex: locked, or left bitwise unchanged by the solve -> the original; else its
-        // placed copy.
-        std::vector<signed char> moved(n, -1);
-        for (unsigned &i : idx) {
-            if (moved[i] < 0) {
-                bool changed = false;
-                if (!lock[i]) {
-                    changed = std::memcmp(&out.pos[size_t(i) * 3], &sc.pos[size_t(i) * 3], sizeof(float) * 3) != 0;
-                    if (!changed && sc.attrCount)
-                        changed = std::memcmp(&out.attr[size_t(i) * sc.attrCount], &sc.attr[size_t(i) * sc.attrCount],
-                                              sizeof(float) * sc.attrCount) != 0;
-                }
-                moved[i] = changed ? 1 : 0;
-            }
-            if (moved[i]) i += unsigned(n);
-        }
-        out.tris = std::move(idx);
-    }
+    std::vector<unsigned> dst(sc.tris.size());
+    const size_t count = meshopt_simplifyWithAttributes(
+        dst.data(), sc.tris.data(), sc.tris.size(), sc.pos.data(), sc.size(), sizeof(float) * 3,
+        sc.attrCount ? sc.attr.data() : nullptr, sizeof(float) * sc.attrCount,
+        sc.attrCount ? sc.weightOf.data() : nullptr, sc.attrCount, anyLock ? lock.data() : nullptr,
+        targetTris * 3, targetError, meshopt_SimplifyErrorAbsolute | meshopt_SimplifyPermissive, &out.resultError);
+    out.tris.assign(dst.begin(), dst.begin() + std::ptrdiff_t(count));
     if (!std::isfinite(out.resultError) || out.resultError < 0.0f) out.resultError = 0.0f;
     return out;
 }

@@ -56,11 +56,10 @@ std::vector<unsigned> islandsAtRisk(const LocalSpace &space, const std::vector<u
 
 GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
                         const std::vector<unsigned> &inTris, const std::vector<unsigned> &externalWelds,
-                        float childError, float childStored, float floorLen, bool attributes, bool placement,
-                        size_t targetTris)
+                        float childError, float childStored, float floorLen, bool attributes, size_t targetTris)
 {
     GroupResult r;
-    r.scratch = makeScratch(mesh, inTris, attributes, placement);
+    r.scratch = makeScratch(mesh, inTris, attributes);
     const GroupScratch &sc = r.scratch;
     r.space = makeSpace(sc, weld, islands.compOf, islands.capOf, islands.count());
     const size_t n = sc.size();
@@ -97,15 +96,13 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
 
     bool haveBest = false;
     std::vector<unsigned> best;
-    std::vector<float> bestPos, bestAttr;
     std::vector<unsigned> atRisk;   // the largest input triangle of every island part bigger than the budget (lazy)
     const auto attempt = [&](float guess, StepMeasure &m) {
         ++r.attempts;
         const Clock::time_point ta = Clock::now();
-        Simplified s = simplifyGroup(sc, lock, target, guess, placement);
+        Simplified s = simplifyGroup(sc, lock, target, guess);
         r.msSimplify += msSince(ta);
         const Clock::time_point tb = Clock::now();
-        if (placement) std::copy(s.pos.begin(), s.pos.end(), r.space.pos.begin() + std::ptrdiff_t(n * 3));
         const int pruned = int(pruneUnlocked(r.space, locks, target, r.budget, s.tris));
         m = measureStep(r.space, sc.tris, s.tris, externalWelds, r.budget, floorLen, false);
         r.msMeasure += msSince(tb);
@@ -113,8 +110,6 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
         if (within && (!haveBest || s.tris.size() < best.size())) {
             haveBest = true;
             best = std::move(s.tris);
-            bestPos = std::move(s.pos);
-            bestAttr = std::move(s.attr);
             r.estimate = s.resultError;
             r.pruned = pruned;
             r.lockedPositions = locks.size();
@@ -168,7 +163,6 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
     }
     if (haveBest) {   // THE KEPT RESULT, measured exactly (its stored step)
         const Clock::time_point tm = Clock::now();
-        if (placement) std::copy(bestPos.begin(), bestPos.end(), r.space.pos.begin() + std::ptrdiff_t(n * 3));
         r.terms = measureStep(r.space, sc.tris, best, externalWelds, r.budget, floorLen, true);
         // (the decision proved every term within the budget; the exact walk's upper bound may sit up to its 5 %
         // tolerance above the true maximum, so the budget is the tighter bound when it is lower)
@@ -181,11 +175,6 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
     if (haveBest && best.size() < sc.tris.size()) {
         r.accepted = true;
         r.out = std::move(best);
-        r.placedAttr = std::move(bestAttr);
-        std::vector<unsigned> placed;
-        for (unsigned v : r.out) if (v >= n) placed.push_back(v);
-        std::sort(placed.begin(), placed.end());
-        r.placedVertices = size_t(std::unique(placed.begin(), placed.end()) - placed.begin());
     }
     return r;
 }

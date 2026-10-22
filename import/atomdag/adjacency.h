@@ -43,8 +43,6 @@ struct MeshView
     int nrmComps = 3;
     const float *uvs = nullptr;       ///< null = none
     int uvComps = 2;
-    const float *tangents = nullptr;  ///< null = none (stage 2: a solved attribute of a placed vertex)
-    int tanComps = 3;
 
     Vec3 position(unsigned v) const
     {
@@ -75,17 +73,14 @@ Islands findIslands(const float *positions, int posComps, size_t nv, const std::
 Islands findIslands(const std::vector<unsigned> &weld, const float *positions, int posComps, size_t nv,
                     const std::vector<unsigned> &base);
 
-/// A GROUP'S OWN VERTEX SPACE (ATOM-2 stage 2, placement): local ids 0..n-1 are the group's input vertices with their
-/// original positions; n..2n-1 are the same vertices as a placed simplification left them (n + the scratch id: a
-/// survivor the solve moved). Each local id carries the weld id, the island and the island cap of the vertex it came
-/// from — a moved survivor stays on its source's position class and island for every rule that reads them.
+/// A GROUP'S OWN VERTEX SPACE: local id = the group's scratch id, with its original position, and the weld id, the
+/// island and the island cap of its mesh vertex — what the measurement, the prune and the re-split read.
 struct LocalSpace
 {
-    size_t n = 0;
-    std::vector<float> pos;         ///< 2n * 3
-    std::vector<unsigned> weld;     ///< 2n: the source vertex's weld id (global)
-    std::vector<unsigned> comp;     ///< 2n: the source vertex's island (UINT_MAX: none)
-    std::vector<float> cap;         ///< 2n: the source vertex's island cap
+    std::vector<float> pos;         ///< n * 3
+    std::vector<unsigned> weld;     ///< n: the vertex's weld id (global)
+    std::vector<unsigned> comp;     ///< n: the vertex's island (UINT_MAX: none)
+    std::vector<float> cap;         ///< n: the vertex's island cap
     size_t islandCount = 0;
     MeshView view() const
     {
