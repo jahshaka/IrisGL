@@ -315,13 +315,11 @@
 		float4 jahOrigin;
 		float3 posLS = jahVctPixelStart( pos, TBN, probeParams, biasDirLS, jahOrigin );
 
-		@property( vct_num_probes > 1 )
-			/*float3 blendv = abs( posLS * 2.0f - 1.0f );
-			float blend = saturate( 1.0f - max3( blendv.x, blendv.y, blendv.z ) );*/
-			float blend = 1.0f;
-		@else
-			float blend = 1.0f;
-		@end
+		// NO EDGE FADE (PHOTON-7 stage 1, AB A17): a cone hands over at a cascade's face contiguously (jah_voxel_march.glsl),
+		// and the picture's step across cascade 0's face on a uniformly sun-lit floor measured +0.03 / -0.02 / +0.36 codes
+		// at Epic / Medium / Low (spikes/photon-7/stage1/facestep) - under one code, so no band is built and upstream's
+		// commented-out fade is deleted.
+		const float blend = 1.0f;
 
 		@property( !vct_disable_diffuse && !irradiance_field )
 			jahVctDiffuse( outDiffuse, posLS, jahOrigin, TBN, probeParams );
