@@ -72,6 +72,7 @@
             "properties" :
             {
                 "hlms_lights_area_ltc" : 1,
+                "hlms_num_vct_cascades" : 1,
                 "jah_cloud_shadow" : 0,
                 "vct_keep_direct" : 0
             },
@@ -85,7 +86,10 @@
                 ["jahCloudMap",             [0,0,0,0],  "float"],
                 ["jahCloudSun",             [0,0,0,1],  "float"],
                 ["jahCloudOrigin",          [0,0,0,0],  "float"],
-                ["higherMipHalfWidth",      [1],        "int"]
+                ["higherMipHalfWidth",      [1],        "int"],
+                ["chainSelf",               [0],        "uint"],
+                ["chainOrigin",             [0,0,0,1],  "float"],
+                ["chainRes",                [1,1,1,1e30], "float"]
             ],
 
             "params_glsl" :
@@ -93,13 +97,9 @@
                 ["voxelAlbedoTex",          [0], "int"],
                 ["voxelNormalTex",          [1], "int"],
                 ["voxelEmissiveTex",        [2], "int"],
-                ["voxelCoveragePTex",       [3], "int"],
-                ["voxelCoverageNTex",       [4], "int"],
-                ["voxelPositionPTex",       [5], "int"],
-                ["voxelPositionNTex",       [6], "int"],
-                ["voxelMetalTex",           [7], "int"],
-                ["voxelEmitPTex",           [8], "int"],
-                ["voxelEmitNTex",           [9], "int"],
+                ["voxelMetalTex",           [3], "int"],
+                ["voxelEmitPTex",           [4], "int"],
+                ["voxelEmitNTex",           [5], "int"],
 
                 ["lightVoxel",              [0], "int"]
             ]

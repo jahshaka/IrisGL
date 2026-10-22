@@ -4864,6 +4864,8 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
         gatherAndBuild(*c.feed, c.voxelizer, in);
         c.lighting = new Ogre::PhotonVoxelLighting(Ogre::Id::generateNewId<Ogre::PhotonVoxelLighting>(),
                                            c.voxelizer, table.size() == 1u);
+        // ITS PLACE IN THE CHAIN (PHOTON-7 stage 1): the injection marches from it through every cascade outside it.
+        c.lighting->setChainIndex(Ogre::uint32(i));
         // THE BOUNCE VOLUMES AT EVERY BOUNCE COUNT (CONTACT-OCCLUSION-1): the sky's
         // direct term is a bounce-job pass (PhotonVoxelLighting::update's sky pass, fork), so a
         // one-bounce document needs them too — without them a surface lit only by the

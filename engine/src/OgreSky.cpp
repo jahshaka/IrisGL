@@ -2767,11 +2767,12 @@ void OgreScene::bindCloudInjection(Ogre::PhotonVoxelLighting *lighting) {
             st.field ? FogHlmsListener::acquireWrapSampler(mRoot->getHlmsManager()) : nullptr;
         const bool on = st.field && wrap && lighting && lighting->getVoxelizer();
         // CHANGE-GUARDED: setNumTexUnits invalidates the PSO hash whatever it is
-        // told, and a scene without a layer must leave the job exactly as the
-        // fork's JSON built it (ten textures - albedo, normal, emissive, the
-        // coverage per half-axis (PHOTON-VOXEL-3/-4), the surface position per half,
-        // the metal (METAL-BOUNCE-1), the emissive factor per half (JUNCTION-NORMAL-1) - and the property 0).
-        const Ogre::uint8 units = on ? 11u : 10u;
+        // told, and a scene without a layer leaves the job at the lighting's own units
+        // (PhotonVoxelLighting::injectionTexUnits: the albedo, normal, emissive, metal and
+        // emissive factor per half, then the chain's coverage and position per half -
+        // PHOTON-7 stage 1 - and the property 0); the field is the unit after them.
+        const Ogre::uint8 base = lighting ? lighting->injectionTexUnits() : Ogre::uint8(10u);
+        const Ogre::uint8 units = Ogre::uint8(base + (on ? 1u : 0u));
         if (job->getNumTexUnits() != units) job->setNumTexUnits(units);
         if (job->getProperty("jah_cloud_shadow") != (on ? 1 : 0))
             job->setProperty("jah_cloud_shadow", on ? 1 : 0);
@@ -2779,7 +2780,7 @@ void OgreScene::bindCloudInjection(Ogre::PhotonVoxelLighting *lighting) {
         Ogre::DescriptorSetTexture2::TextureSlot slot(
             Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
         slot.texture = st.field;
-        job->setTexture(10u, slot, wrap);   // after the surface position at t5, t6, the metal at t7, the emit at t8, t9
+        job->setTexture(base, slot, wrap);   // after the chain's geometry (LightInjection_cs.glsl)
         Ogre::ShaderParams &params = job->getShaderParams("default");
         const Ogre::Vector3 origin = lighting->getVoxelizer()->getVoxelOrigin();
         if (Ogre::ShaderParams::Param *p = params.findParameter("jahCloudMap"))

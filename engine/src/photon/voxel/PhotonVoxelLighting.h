@@ -164,6 +164,14 @@ namespace Ogre
         TextureGpu *mLightDirectBack;
         TextureGpu *mLightDirectDir[3];
         ShaderParams::Param *mInjectHigherMipHalfWidth;
+        /// Jahshaka (PHOTON-7 stage 1): the injection's chain - this cascade's entry and, per entry, its box
+        /// corner relative to this one's with its cell and its resolution with its shell's end (setChainIndex).
+        ShaderParams::Param *mInjectChainSelf = nullptr;
+        ShaderParams::Param *mInjectChainOrigin = nullptr;
+        ShaderParams::Param *mInjectChainRes = nullptr;
+        /// This cascade's place in the scene's chain (0 = the innermost; the cascades outside it are
+        /// mExtraCascades): the injection binds the whole chain and marches from this entry outward.
+        uint32 mChainIndex = 0u;
 
         float mBakingMultiplier;
         float mInvBakingMultiplier;
@@ -479,6 +487,18 @@ namespace Ogre
         void resetTexturesFromBuildRelative();
 
         size_t getNumCascades() const { return mExtraCascades.size() + 1u; }
+
+        /// THE INJECTION'S CHAIN (PHOTON-7 stage 1, L1): this cascade's place in the scene's chain, innermost 0
+        /// (the chain's builder sets it; a lone cascade is 0). The injection binds the WHOLE chain's geometry - its
+        /// cascades inside this one too, never read - so one permutation serves every cascade of a chain length.
+        void setChainIndex( uint32 index ) { mChainIndex = index; }
+        uint32 getChainIndex() const { return mChainIndex; }
+        /// The chain's length: the cascades inside this one, this one and those outside it.
+        uint32 getChainLength() const { return mChainIndex + 1u + static_cast<uint32>( mExtraCascades.size() ); }
+        /// The injection job's texture units before the cloud field's (OgreScene::bindCloudInjection binds that
+        /// one at this unit): the albedo, normal, emissive, metal and emissive factor per half, then the chain's
+        /// coverage and position per half, four arrays of getChainLength().
+        uint8 injectionTexUnits() const { return static_cast<uint8>( 6u + 4u * getChainLength() ); }
 
         /** THE CASCADE CHAIN'S PARAMETERS, the one definition every reader of the chain
             takes them from (Jahshaka, PHOTON-READER-1): the pixel shader's pass buffer

@@ -7,6 +7,10 @@
 
 @insertpiece( PreBindingsHeaderCS )
 
+/// Jahshaka (PHOTON-7 stage 1): the chain's geometry is bound as arrays (the bounce job's pattern): array
+/// bindings are reflected when the chain holds more than one cascade (hlms_num_vct_cascades is never 0).
+@psub( uses_array_bindings, hlms_num_vct_cascades, 1 )
+
 vulkan_layout( ogre_t0 ) uniform texture3D voxelAlbedoTex;
 vulkan_layout( ogre_t1 ) uniform texture3D voxelNormalTex;
 vulkan_layout( ogre_t2 ) uniform texture3D voxelEmissiveTex;
@@ -62,30 +66,35 @@ uniform restrict writeonly image3D backVoxel;
 	uniform restrict writeonly image3D dirOut2;
 @end
 
-// Jahshaka (PHOTON-VOXEL-3/-4): THE PER-HALF-AXIS COVERAGE at t3 (the faces looking +a) and
-// t4 (looking -a), and THE SURFACE POSITION per half at t5 / t6 (VctLighting::update binds
-// them with the other voxelizer volumes): the shadow march's opacity and its origin plane.
-vulkan_layout( ogre_t3 ) uniform texture3D voxelCoveragePTex;
-vulkan_layout( ogre_t4 ) uniform texture3D voxelCoverageNTex;
-vulkan_layout( ogre_t5 ) uniform texture3D voxelPositionPTex;
-vulkan_layout( ogre_t6 ) uniform texture3D voxelPositionNTex;
-// Jahshaka (METAL-BOUNCE-1): THE METAL at t7 - the F0 (rgb) and Fresnel-90 weight (alpha) of every surface's
+// Jahshaka (METAL-BOUNCE-1): THE METAL at t3 - the F0 (rgb) and Fresnel-90 weight (alpha) of every surface's
 // specular lobe, re-emitted by the lobe's directional integral (JahSpecularAlbedo).
-vulkan_layout( ogre_t7 ) uniform texture3D voxelMetalTex;
-// Jahshaka (JUNCTION-NORMAL-1): THE EMISSIVE FACTOR PER HALF-AXIS at t8 (the faces looking +a) and t9
+vulkan_layout( ogre_t3 ) uniform texture3D voxelMetalTex;
+// Jahshaka (JUNCTION-NORMAL-1): THE EMISSIVE FACTOR PER HALF-AXIS at t4 (the faces looking +a) and t5
 // (looking -a): what each half's faces emit over the voxel's area mean (VoxelMerge_piece_cs.any).
-vulkan_layout( ogre_t8 ) uniform texture3D voxelEmitPTex;
-vulkan_layout( ogre_t9 ) uniform texture3D voxelEmitNTex;
+vulkan_layout( ogre_t4 ) uniform texture3D voxelEmitPTex;
+vulkan_layout( ogre_t5 ) uniform texture3D voxelEmitNTex;
 
-// JAHSHAKA (CLOUDS-2D-2): THE CLOUD LAYER'S FIELD -- the host binds it at t10 (after the
-// surface position, PHOTON-VOXEL-4, the metal, METAL-BOUNCE-1, and the emissive factors, JUNCTION-NORMAL-1)
-// and sets `jah_cloud_shadow` when a 2D cloud layer shades the sun
-// (OgreScene::bindCloudInjection). Its three parameters are declared in the
-// Params block below whether or not it is bound, so the job's parameter list
-// is one list; without the property nothing reads them.
+// Jahshaka (PHOTON-7 stage 1, L1: LIGHT IS A WORLD FUNCTION): THE CHAIN'S GEOMETRY - every cascade's coverage per
+// half-axis (the faces looking +a, -a) and surface position per half, level 0, as four arrays over the WHOLE tier
+// chain (one permutation per chain length; this cascade is entry chainSelf, the ones inside it bound but never read):
+// the shadow march runs through the chain on fixed shells (JahInjectionReader's jahInjectVisibility).
+@pset( jahInjTex, 6 )
+vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainCovP[@value( hlms_num_vct_cascades )];
+@add( jahInjTex, hlms_num_vct_cascades )
+vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainCovN[@value( hlms_num_vct_cascades )];
+@add( jahInjTex, hlms_num_vct_cascades )
+vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainPosP[@value( hlms_num_vct_cascades )];
+@add( jahInjTex, hlms_num_vct_cascades )
+vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainPosN[@value( hlms_num_vct_cascades )];
+@add( jahInjTex, hlms_num_vct_cascades )
+
+// JAHSHAKA (CLOUDS-2D-2): THE CLOUD LAYER'S FIELD -- the host binds it at the unit after the chain's geometry
+// (PhotonVoxelLighting::injectionTexUnits) and sets `jah_cloud_shadow` when a 2D cloud layer shades the sun
+// (OgreScene::bindCloudInjection). Its three parameters are declared in the Params block below whether or not it
+// is bound, so the job's parameter list is one list; without the property nothing reads them.
 @property( jah_cloud_shadow )
-	vulkan_layout( ogre_t10 ) uniform texture2D jahCloudField;
-	vulkan( layout( ogre_s10 ) uniform sampler jahCloudSampler );
+	vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture2D jahCloudField;
+	vulkan( layout( ogre_s@value(jahInjTex) ) uniform sampler jahCloudSampler );
 @end
 
 layout( local_size_x = @value( threads_per_group_x ),
@@ -118,6 +127,12 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform float4 jahCloudOrigin;
 	// Jahshaka (PHOTON-VOXEL-5): the directional volumes' half width - where a +a texel lives.
 	uniform int higherMipHalfWidth;
+	// Jahshaka (PHOTON-7 stage 1): THE CHAIN - this cascade's entry, and per entry j its box corner relative to this
+	// cascade's (metres; w its cell, metres) and its resolution (xyz) with the world distance its shell ends at (w,
+	// from the march's start: the sum of 8 cells of every cascade up to j; the last one's past any march).
+	uniform uint chainSelf;
+	uniform float4 chainOrigin[@value( hlms_num_vct_cascades )];
+	uniform float4 chainRes[@value( hlms_num_vct_cascades )];
 vulkan( }; )
 
 #define p_numLights numLights
@@ -126,6 +141,10 @@ vulkan( }; )
 #define p_voxelCellSize voxelCellSize
 #define p_invVoxelResolution invVoxelResolution
 #define p_higherMipHalfWidth higherMipHalfWidth
+#define p_chainSelf chainSelf
+#define p_chainOrigin chainOrigin
+#define p_chainRes chainRes
+#define JAH_INJ_CHAIN @value( hlms_num_vct_cascades )
 
 // Jahshaka (PHOTON-VOXEL-5; the VOXEL-4 audit's F3): THE ONE READER'S RULES for the shadow
 // march - after the parameters, which its functions read.

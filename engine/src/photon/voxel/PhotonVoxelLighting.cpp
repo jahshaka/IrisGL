@@ -243,6 +243,9 @@ namespace Ogre
         mVoxelCellSize = mShaderParams->findParameter( "voxelCellSize" );
         mInvVoxelResolution = mShaderParams->findParameter( "invVoxelResolution" );
         mInjectHigherMipHalfWidth = mShaderParams->findParameter( "higherMipHalfWidth" );
+        mInjectChainSelf = mShaderParams->findParameter( "chainSelf" );
+        mInjectChainOrigin = mShaderParams->findParameter( "chainOrigin" );
+        mInjectChainRes = mShaderParams->findParameter( "chainRes" );
 
         RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
         VaoManager *vaoManager = renderSystem->getVaoManager();
@@ -1383,25 +1386,65 @@ namespace Ogre
         mLightInjectionJob->setTexture( 1, texSlot );
         texSlot.texture = mVoxelizer->getEmissiveVox();
         mLightInjectionJob->setTexture( 2, texSlot );
-        // Jahshaka (PHOTON-VOXEL-3/-4): the coverage per half-axis at units 3 (+a) and 4
-        // (-a) - the shadow march's opacity along the lamp's direction, the half that looks
-        // back at it - and the surface position per half at 5 and 6 (its origin plane).
-        // (METAL-BOUNCE-1) The metal at unit 7; (JUNCTION-NORMAL-1) the emissive factor per half at 8
-        // (+a) and 9 (-a). The host's cloud field is at unit 10.
-        for( uint8 h = 0u; h < 2u; ++h )
-        {
-            texSlot.texture = mVoxelizer->getCoverageVox( h );
-            mLightInjectionJob->setTexture( uint8( 3u + h ), texSlot );
-            texSlot.texture = mVoxelizer->getPositionVox( h );
-            mLightInjectionJob->setTexture( uint8( 5u + h ), texSlot );
-        }
+        // (METAL-BOUNCE-1) The metal at unit 3; (JUNCTION-NORMAL-1) the emissive factor per half at 4 (+a) and 5 (-a).
         texSlot.texture = mVoxelizer->getMetalVox();
-        mLightInjectionJob->setTexture( 7u, texSlot );
+        mLightInjectionJob->setTexture( 3u, texSlot );
         for( uint8 h = 0u; h < 2u; ++h )
         {
             texSlot.texture = mVoxelizer->getEmitVox( h );
-            mLightInjectionJob->setTexture( uint8( 8u + h ), texSlot );
+            mLightInjectionJob->setTexture( uint8( 4u + h ), texSlot );
         }
+        // Jahshaka (PHOTON-7 stage 1, L1: LIGHT IS A WORLD FUNCTION): THE CHAIN'S GEOMETRY - every cascade's coverage per
+        // half-axis (+a, -a) and surface position per half, four arrays of the chain's length from unit 6
+        // (LightInjection_cs.glsl): the shadow march runs from this cascade's entry through every cascade outside it on
+        // fixed shells. The entries inside this cascade are bound to its own volumes (never read: one permutation per
+        // chain length, the job's unit count fixed for every cascade of a chain). The property and the unit count are
+        // change-guarded - setNumTexUnits voids the PSO hash whatever it is told; the cloud field (OgreScene::
+        // bindCloudInjection, run before this) holds the unit after the chain when it is on.
+        const uint32 chainLength = getChainLength();
+        {
+            const int32 n = static_cast<int32>( chainLength );
+            if( mLightInjectionJob->getProperty( NumVctCascadesProp ) != n )
+                mLightInjectionJob->setProperty( NumVctCascadesProp, n );
+            const uint8 units = static_cast<uint8>(
+                injectionTexUnits() + ( mLightInjectionJob->getProperty( "jah_cloud_shadow" ) != 0 ? 1u : 0u ) );
+            if( mLightInjectionJob->getNumTexUnits() != units )
+                mLightInjectionJob->setNumTexUnits( units );
+        }
+        float chainOrigin[4u * c_maxCascades] = {};
+        float chainRes[4u * c_maxCascades] = {};
+        {
+            OGRE_ASSERT_LOW( chainLength <= c_maxCascades );
+            const Vector3 selfOrigin = mVoxelizer->getVoxelOrigin();
+            double shellEnd = 0.0;   // THE SHELLS: D_j, the sum of 8 cells of every cascade up to j, from the start
+            for( uint32 j = 0u; j < chainLength && j < c_maxCascades; ++j )
+            {
+                const PhotonVoxelLighting *cj =
+                    j <= mChainIndex ? this : mExtraCascades[size_t( j - mChainIndex - 1u )];
+                const Vector3 cell = cj->mVoxelizer->getVoxelCellSize();
+                const Vector3 res = cj->mVoxelizer->getVoxelResolution();
+                // (an inner entry is this cascade's own: bound and described, never marched)
+                const Vector3 rel = cj->mVoxelizer->getVoxelOrigin() - selfOrigin;
+                chainOrigin[4u * j + 0u] = static_cast<float>( rel.x );
+                chainOrigin[4u * j + 1u] = static_cast<float>( rel.y );
+                chainOrigin[4u * j + 2u] = static_cast<float>( rel.z );
+                chainOrigin[4u * j + 3u] = static_cast<float>( cell.x );
+                chainRes[4u * j + 0u] = static_cast<float>( res.x );
+                chainRes[4u * j + 1u] = static_cast<float>( res.y );
+                chainRes[4u * j + 2u] = static_cast<float>( res.z );
+                shellEnd += 8.0 * double( cell.x );
+                chainRes[4u * j + 3u] = j + 1u < chainLength ? static_cast<float>( shellEnd ) : 1e30f;
+                for( uint32 k = 0u; k < 4u; ++k )
+                {
+                    const uint32 h = k & 1u;
+                    texSlot.texture = k >= 2u ? cj->mVoxelizer->getPositionVox( h ) : cj->mVoxelizer->getCoverageVox( h );
+                    mLightInjectionJob->setTexture( static_cast<uint8>( 6u + k * chainLength + j ), texSlot );
+                }
+            }
+        }
+        mInjectChainSelf->setManualValue( mChainIndex );
+        mInjectChainOrigin->setManualValue( chainOrigin, 4u * chainLength );
+        mInjectChainRes->setManualValue( chainRes, 4u * chainLength );
 
         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
         uavSlot.access = ResourceAccess::Write;
