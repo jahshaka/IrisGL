@@ -375,7 +375,6 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
                         splitMs[g] += msSince(ts);
                         if (splits[g].parts.size() < grouping.groups[g].size()) break;
                         splits[g].parts.clear();
-                        if (r.cards) { r.accepted = false; break; }   // a card merge is not re-targeted
                         const size_t outCount = r.out.size() / 3;
                         if (shrink >= kMaxShrinks || outCount <= 1) { r.accepted = false; break; }
                         target = std::max<size_t>(1, outCount * 3 / 4);

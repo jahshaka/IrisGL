@@ -111,8 +111,13 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
         if (!restLocal.empty()) {
             std::vector<unsigned> restGlobal(restLocal.size());
             for (size_t i = 0; i < restLocal.size(); ++i) restGlobal[i] = sc.globalOf[restLocal[i]];
+            // its target: its own parent count, and never more than what the group's target leaves beside the quads
+            // (the builder's shrink lowers the group's target when the output would not need fewer clusters)
+            const size_t quadTris = out.size() / 3;
+            const size_t restTarget = std::min(parentTarget(restGlobal.size() / 3),
+                                               target > quadTris + 1 ? target - quadTris : size_t(1));
             const GroupResult rest = reduceGroup(mesh, weld, islands, restGlobal, externalWelds, r.budget, floorLen,
-                                                 parentTarget(restGlobal.size() / 3), boxLo, boxHi, false);
+                                                 restTarget, boxLo, boxHi, false);
             r.attempts += rest.attempts;
             r.msSimplify += rest.msSimplify; r.msMeasure += rest.msMeasure; r.msExact += rest.msExact;
             r.pruned = rest.pruned;
