@@ -160,7 +160,8 @@ struct StillnessRun::Impl {
         Vec3 eye, target;
         Part part = Part::Move;
         int window = -1;        ///< which window (Part::Window); for a Move / Bridge frame, the window it leads to
-        unsigned index = 0;     ///< its frame in the window (0 = the stop)
+        unsigned index = 0;     ///< its frame in the window (0 = the stop); for a trail frame, frames before the stop
+        bool trail = false;     ///< a move frame inside the window's trail (StillnessSpec::moveTrail)
     };
     std::vector<std::vector<unsigned long long>> moveFrames;   ///< per window: the engine frames of its move
     std::vector<Planned> plan;
@@ -181,18 +182,21 @@ struct StillnessRun::Impl {
     std::vector<bool> stopGatherFrameKnown;
     std::vector<bool> stopSeen;                       ///< per window: its stop frame has been rendered
     Image prev;                                       ///< the previous frame's picture (inside a window)
+    Image trailPrev;                                  ///< ...and inside a move's trail
+    unsigned long long lastRefits = 0;                ///< GpuSceneStatus::rayLevelRefits after the last frame
+    bool refitsSeen = false;
     unsigned picW = 0, picH = 0;
     std::vector<unsigned char> classAt;               ///< per picture pixel: its class (0 = unclassified)
     /// A window frame's per-pixel change, held until the window's mask is known (the history count arrives a few
     /// frames after the stop).
     struct Queued { int window; size_t frame; std::vector<unsigned char> change; };
     std::vector<Queued> queued;
-    /// Engine frame -> (window, frame) and the traced reflection frame -> (window, frame).
-    std::map<unsigned long long, std::pair<int, size_t>> byEngineFrame;
+    /// The traced reflection frame -> (window, frame).
     std::map<unsigned, std::pair<int, size_t>> byTraced;
     unsigned lastTraced = 0u;                         ///< the reflection's traced-frame counter last seen
     std::map<unsigned long long, std::vector<std::pair<std::string, unsigned>>> rowsByFrame;
     std::vector<MonitorRecord> records;
+    std::map<std::string, std::pair<double, unsigned>> gpuSum;   ///< row -> (GPU ms summed, frames)
 
     Impl(Engine &e, Scene &s, View &v) : engine(e), scene(s), view(v) {}
 
@@ -271,6 +275,13 @@ struct StillnessRun::Impl {
         std::vector<MonitorRecord> got;
         engine.popMonitorRecords(got);
         for (MonitorRecord &r : got) {
+            std::map<std::string, double> frameMs;
+            for (const CacheWork &w : r.cacheWork)
+                if (w.gpuMs >= 0.0f) frameMs[w.detail] += w.gpuMs;
+            for (const auto &f : frameMs) {
+                gpuSum[f.first].first += f.second;
+                ++gpuSum[f.first].second;
+            }
             auto &rows = rowsByFrame[r.frame];
             for (const CacheWork &w : r.cacheWork) {
                 const std::string &n = w.detail;
@@ -421,6 +432,16 @@ struct StillnessRun::Impl {
         w.settleFromLastGiRow.assign(n + 1, 0);
         w.lastGiRowFrame = -1;
         w.holdFrame = -1;
+        for (StillnessFrame &f : w.trail) {
+            const auto it = rowsByFrame.find(f.engineFrame);
+            if (it == rowsByFrame.end()) continue;
+            std::map<std::string, unsigned> sum;
+            for (const auto &r : it->second) sum[r.first] += r.second;
+            for (const auto &s2 : sum) {
+                f.giRows += (f.giRows.empty() ? "" : ",") + s2.first + ":" + std::to_string(s2.second);
+                ++f.giRowCount;
+            }
+        }
         for (size_t i = 0; i < w.frames.size(); ++i) {
             StillnessFrame &f = w.frames[i];
             const auto it = rowsByFrame.find(f.engineFrame);
@@ -520,9 +541,29 @@ bool StillnessRun::begin(const StillnessSpec &spec, std::string &err)
     }
     {
         int nextWin = -1;
+        unsigned before = 0;
         for (size_t i = m.plan.size(); i-- > 0;) {
-            if (m.plan[i].part == Impl::Part::Window) nextWin = m.plan[i].window;
-            else m.plan[i].window = nextWin;
+            if (m.plan[i].part == Impl::Part::Window) {
+                nextWin = m.plan[i].window;
+                before = 0;
+            } else {
+                m.plan[i].window = nextWin;
+                ++before;
+                if (nextWin >= 0 && before <= m.spec.moveTrail) {
+                    m.plan[i].trail = true;
+                    m.plan[i].index = before;
+                }
+            }
+        }
+        for (StillnessWindow &w : m.report.windows) {
+            unsigned n = 0;
+            for (const Impl::Planned &pl : m.plan)
+                if (pl.trail && pl.window == int(&w - m.report.windows.data())) ++n;
+            w.trail.resize(n);
+            for (unsigned i = 0; i < n; ++i) {
+                w.trail[i].index = n - i;
+                w.trail[i].classes.resize(m.report.classNames.size() + 1);
+            }
         }
     }
     m.moveFrames.assign(m.report.windows.size(), {});
@@ -566,7 +607,7 @@ bool StillnessRun::nextPose(Vec3 &eye, Vec3 &target)
         if (!m.gatherArmOn) m.gatherArmOn = m.setArm("gather.historyReadback", 1.0);
         if (!m.reflectArmOn) m.reflectArmOn = m.setArm("reflect.historyReadback", 1.0);
     }
-    if (m.onscreen && p.part == Impl::Part::Window) m.view.requestFrameCapture(true);
+    if (m.onscreen && (p.part == Impl::Part::Window || p.trail)) m.view.requestFrameCapture(true);
     return true;
 }
 
@@ -581,15 +622,57 @@ bool StillnessRun::frameDone(std::string &err)
     const GatherStatus &g = pub.gi.gather;
 
     if (p.part != Impl::Part::Window && p.window >= 0) m.moveFrames[size_t(p.window)].push_back(engineFrame);
+    const unsigned long long refitsNow = pub.gpuScene.rayLevelRefits;
+    const unsigned refits = m.refitsSeen ? unsigned(refitsNow - m.lastRefits) : 0u;
+    m.lastRefits = refitsNow;
+    m.refitsSeen = true;
+    // THE MOVE'S TRAIL (1d): every pixel, the change from the frame before (none on its first frame).
+    if (p.trail) {
+        StillnessWindow &w = m.report.windows[size_t(p.window)];
+        StillnessFrame &f = w.trail[w.trail.size() - p.index];
+        f.engineFrame = engineFrame;
+        f.rayLevelRefits = refits;
+        f.restFrames = g.restFrames;
+        f.sinceRestart = g.sinceRestart;
+        f.settleFrames = g.settleFrames;
+        Image pic;
+        if (!m.readPicture(pic, err)) return false;
+        if (!m.picW) {
+            m.picW = pic.width;
+            m.picH = pic.height;
+            m.buildClassAt(m.picW, m.picH);
+        }
+        if (m.trailPrev.width == pic.width && m.trailPrev.height == pic.height && p.index < m.spec.moveTrail) {
+            const unsigned n = m.classes();
+            std::vector<double> sum(n + 1, 0.0);
+            const unsigned char *a = pic.rgba.data(), *b = m.trailPrev.rgba.data(), *ca = m.classAt.data();
+            for (size_t i = 0, np = size_t(m.picW) * m.picH; i < np; ++i, a += 4, b += 4) {
+                const unsigned v = unsigned(std::max(std::abs(int(a[0]) - int(b[0])),
+                                                     std::max(std::abs(int(a[1]) - int(b[1])), std::abs(int(a[2]) - int(b[2])))));
+                const unsigned c = ca[i];
+                const unsigned ks[2] = { 0u, c };
+                for (unsigned j = 0; j < (c ? 2u : 1u); ++j) {
+                    StillnessClassFrame &cf = f.classes[ks[j]];
+                    ++cf.pixels;
+                    cf.maxCodes = std::max(cf.maxCodes, v);
+                    if (v >= 1u) ++cf.changed;
+                    sum[ks[j]] += v;
+                }
+            }
+            for (unsigned k = 0; k <= n; ++k)
+                f.classes[k].meanCodes = f.classes[k].pixels ? sum[k] / f.classes[k].pixels : 0.0;
+        }
+        m.trailPrev = std::move(pic);
+    }
     if (p.part == Impl::Part::Window) {
         StillnessWindow &w = m.report.windows[size_t(p.window)];
         StillnessFrame &f = w.frames[p.index];
         f.engineFrame = engineFrame;
+        f.rayLevelRefits = refits;
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
         f.held = g.running && g.settleFrames && g.restFrames > g.settleFrames;
-        m.byEngineFrame[engineFrame] = { p.window, p.index };
         // THE TRACE THIS FRAME DID (when it did: a frame the reflection skipped leaves the counter where it was, and
         // its copy is the earlier frame's — never re-labelled as this one).
         if (pub.rayQuery.reflectFrame > m.lastTraced) {
@@ -702,6 +785,8 @@ bool StillnessRun::finish(StillnessReport &out, std::string &err)
                                             ? (a.cascadeCentre[c] == b.cascadeCentre[c] ? 1 : 0) : -1);
         }
     }
+    for (const auto &g : m.gpuSum)
+        if (g.second.second) r.gpuMs.push_back({ g.first, { g.second.first / g.second.second, g.second.second } });
     out = r;
     return true;
 }
@@ -717,10 +802,12 @@ std::string StillnessReport::tsv() const
     for (const std::string &n : names)
         o << "\t" << n << "_px\t" << n << "_max\t" << n << "_mean\t" << n << "_changed\t" << n << "_refl_none\t" << n
           << "_refl_le9\t" << n << "_refl_le17\t" << n << "_refl_le33\t" << n << "_refl_gt33";
-    o << "\trest_frames\tsince_restart\tsettle_frames\theld\tgi_rows\n";
+    o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\n";
     for (const StillnessWindow &w : windows)
-        for (const StillnessFrame &f : w.frames) {
-            o << w.name << "\t" << f.index << "\t" << f.engineFrame;
+        for (int part = 0; part < 2; ++part)
+        for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
+            o << w.name << ( part == 0 ? "-move" : "" ) << "\t" << ( part == 0 ? -int( f.index ) : int( f.index ) )
+              << "\t" << f.engineFrame;
             for (const StillnessClassFrame &c : f.classes) {
                 char mean[32];
                 std::snprintf(mean, sizeof(mean), "%.4f", c.meanCodes);
@@ -728,7 +815,7 @@ std::string StillnessReport::tsv() const
                 for (int b : c.reflectBins) o << "\t" << b;
             }
             o << "\t" << f.restFrames << "\t" << f.sinceRestart << "\t" << f.settleFrames << "\t" << (f.held ? 1 : 0)
-              << "\t" << (f.giRows.empty() ? "-" : f.giRows) << "\n";
+              << "\t" << f.rayLevelRefits << "\t" << (f.giRows.empty() ? "-" : f.giRows) << "\n";
         }
     return o.str();
 }
@@ -748,6 +835,18 @@ std::string StillnessReport::summary() const
               << w.visiblePixels[k] << "px)";
         o << " | the move (" << w.lastMoveRowAgo << " frames before the stop): " << (w.moveRows.empty() ? "-" : w.moveRows)
           << "\n";
+    }
+    if (!gpuMs.empty()) {
+        o << "STILLNESS gpu ms (mean over the frames each ran):";
+        char buf[64];
+        for (const auto &g : gpuMs) {
+            if (g.first.rfind("rq.", 0) != 0 && g.first.rfind("gather.", 0) != 0 && g.first.rfind("vct.", 0) != 0 &&
+                g.first.rfind("ifd.", 0) != 0 && g.first.rfind("cards.", 0) != 0)
+                continue;
+            std::snprintf(buf, sizeof(buf), " %s=%.3f(%u)", g.first.c_str(), g.second.first, g.second.second);
+            o << buf;
+        }
+        o << "\n";
     }
     if (pathChecked) {
         o << "STILLNESS path walk-vs-teleport | picture max codes / pixels >= 1:";

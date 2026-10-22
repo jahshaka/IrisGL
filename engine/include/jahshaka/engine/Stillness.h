@@ -79,6 +79,10 @@ struct StillnessSpec {
     std::string script;            ///< the move (the grammar above)
     unsigned    frames = 120;      ///< the window: frames measured after the stop
     bool        path = false;      ///< + the teleport window and the walk-vs-teleport comparison
+    /// THE MOVE'S TRAIL (PHOTON-2 1d): the last `moveTrail` frames before each stop measured too — every pixel (the
+    /// eye moves, so no surface is "the same"), the change from the frame before, the GI rows and the ray levels the
+    /// frame re-fitted — so a step DURING the move (a ray-level band crossing, a commit) is seen at its frame. 0 = none.
+    unsigned    moveTrail = 0;
     /// A pixel is VISIBLE AT THE STOP when the gather's history count on the stop frame is at least this (the count
     /// is 1 on a frame the history was refused, n when it carried n - 1 frames; 10 = a full history at the shipped
     /// kHistoryFrames). At most 15 (the packed count's bits).
@@ -113,6 +117,8 @@ struct StillnessFrame {
     /// The gather's rest (GatherStatus): consecutive rest frames, frames since its last restart, the settle N,
     /// and whether the view HELD this frame (restFrames > settleFrames: nothing dispatched).
     unsigned           restFrames = 0, sinceRestart = 0, settleFrames = 0;
+    /// The ray tier's per-instance levels this frame re-fitted (GpuSceneStatus::rayLevelRefits' step).
+    unsigned           rayLevelRefits = 0;
     bool               held = false;
 };
 
@@ -122,6 +128,9 @@ struct StillnessWindow {
     Vec3        eye, target;               ///< the stop's pose
     bool        visibleFromGather = false; ///< the mask is the gather's history count (false: every pixel)
     std::vector<StillnessFrame> frames;
+    /// THE MOVE'S TRAIL (StillnessSpec::moveTrail): the frames before the stop, oldest first, `index` counting down
+    /// to 1 (the frame just before the stop); every pixel counted.
+    std::vector<StillnessFrame> trail;
     /// THE TWO ORIGINS: the stop is frame 0; the last frame with a GI row (-1: none fired after the stop).
     int lastGiRowFrame = -1;
     /// Per class ([0] = all): the last window frame whose max change was >= 1 code (0: still from frame 1 on; the
@@ -156,6 +165,10 @@ struct StillnessReport {
     std::vector<unsigned> pathMaxCodes;
     std::vector<unsigned> pathPixelsDiffering;
     std::vector<int>      pathDirectEqual, pathLightEqual, pathCentreEqual;   ///< per cascade: 1 equal, 0 not, -1 unread
+    /// THE COST, from the same records: per monitor row whose GPU time was measured (the ray tier's `rq.*`, the
+    /// gather's `gather.*`, the cache rows), the mean GPU milliseconds over the frames it ran and how many — the
+    /// whole run's (the move, the windows), a frame being one row's sum.
+    std::vector<std::pair<std::string, std::pair<double, unsigned>>> gpuMs;
     /// One TSV: a header line and a row per window frame.
     std::string tsv() const;
     /// The one-line-per-window summary (plus the path line), each starting "STILLNESS".
