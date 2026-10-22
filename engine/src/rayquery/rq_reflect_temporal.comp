@@ -10,10 +10,14 @@
 // seed). Both are deleted. One mechanism answers motion AND a change of light: the history is pulled into the box this
 // frame's own samples span, and the further it had to be pulled, the shorter its memory.
 //
-//   THE NEIGHBOURHOOD: 21 taps — a 5 x 5 minus its corners (Lumen's kernel) — of THIS FRAME'S RAW SAMPLES
-//   (`reflectSample`, written by the trace and, for a record, by the write-back), in YCoCg: the mean and the
-//   standard deviation per channel; the box is mean +- kClampSigma x sigma. Only taps traced this frame count
-//   (the distance flag, as in the filter).
+//   THE NEIGHBOURHOOD (PHOTON-2 fix F2): 21 taps — a 5 x 5 minus its corners (Lumen's kernel) — of THIS FRAME
+//   RECONSTRUCTED: each tap the bilateral 3 x 3 mean of the raw samples on its own surface (`reflectSample`,
+//   written by the trace and, for a record, by the write-back), in YCoCg of the luma-COMPRESSED radiance (x / (1 +
+//   Y), Lumen's denoiser space): the mean and the standard deviation per channel; the box is mean +- kClampSigma x
+//   sigma, widened to hold THIS texel's own raw sample. Only taps traced this frame count (the distance flag, as
+//   in the filter). The box of RAW one-ray linear samples it replaces was biased dark (a skewed distribution's
+//   few bright rays fall outside mean + sigma, so the history was clamped down far more often than up — the
+//   mover pose's floor 4.0 codes darker) and pulled a highlight narrower than the box to ~0.49 of itself.
 //   TWO HISTORIES (Lumen's): the SURFACE history the trace carried (its reprojection with every motion rule of the
 //   trace: the mover's poses, the reflected image of a moving hit, the arrival and departure rules), and the HIT
 //   history — the screen position reprojected at the VIRTUAL POINT, the surface's depth plus the mean ray length
@@ -128,6 +132,7 @@ layout( set = 0, binding = 1 ) uniform Params
 } p;
 
 int gEye = 0;
+layout( set = 0, binding = 2 ) uniform sampler2DArray gBufNormals;
 layout( set = 0, binding = 3 ) uniform sampler2DArray gBufShadowRoughness;
 layout( set = 0, binding = 4 ) uniform sampler2DArray sceneDepth;
 layout( rgba16f, set = 0, binding = 6 ) uniform readonly image2DArray historyPrev;
@@ -161,6 +166,17 @@ vec3 toYCoCg( vec3 c )
 vec3 fromYCoCg( vec3 y )
 {
 	return vec3( y.x + y.y - y.z, y.x + y.z, y.x - y.y - y.z );
+}
+/// THE CLAMP'S SPACE (PHOTON-2 fix F2; Lumen's "denoiser space", LumenReflectionDenoiserCommon.ush:14-23): radiance
+/// compressed on its luminance, x / (1 + Y) — every value under one, so a few bright rays in a neighbourhood cannot
+/// stretch its box over the rest, and a mean and a sigma of a skewed one-ray distribution are not a dark-biased box.
+/// Y is YCoCg's luma (the box's own first channel). expand() is the exact inverse.
+float lumaOf( vec3 c ) { return dot( c, vec3( 0.25, 0.5, 0.25 ) ); }
+vec3 compressed( vec3 c ) { return c / ( 1.0 + lumaOf( c ) ); }
+vec3 expanded( vec3 q )
+{
+	q = max( q, vec3( 0.0 ) );
+	return q / max( 1.0 - min( lumaOf( q ), 0.9999 ), 1e-4 );
 }
 
 float viewDistance( float rawDepth )
@@ -199,30 +215,77 @@ vec3 worldAt( EyeImage e, vec2 uv, float dist )
 /// rq_reflect.comp's mean-length packing: the length without its six low mantissa bits (the mover age).
 float jahMeanLength( float y ) { return uintBitsToFloat( floatBitsToUint( y ) & ~63u ); }
 
-/// THE TILE: the group's 8 x 8 and the 2-texel ring the 5 x 5 reaches, this frame's samples in YCoCg (w = 1 where a
-/// sample exists).
+/// THE TILES (PHOTON-2 fix F2). THE RAW TILE: the group's 8 x 8, the 2-texel ring the 5 x 5 box reaches and one more
+/// ring the box's own reconstruction reaches — this frame's samples COMPRESSED (compressed()) in YCoCg, w = the
+/// sample's LINEAR luma (-1: no sample), and beside it the G-buffer's view normal and view distance the
+/// reconstruction compares. THE BOX TILE: per texel of the group and its 2-texel ring, THE RECONSTRUCTED SAMPLE —
+/// the bilateral 3 x 3 mean of the raw tile (the taps on this texel's surface: the view distance within 5 %, the
+/// normals within ~25 degrees), w = 1 where any tap answered.
 const int kReach = 2;
-const int kTileSide = 8 + 2 * kReach;
-shared vec4 sTap[kTileSide * kTileSide];
+const int kRecon = 1;
+const int kRawSide = 8 + 2 * ( kReach + kRecon );
+const int kBoxSide = 8 + 2 * kReach;
+shared vec4 sRaw[kRawSide * kRawSide];
+shared vec4 sGeo[kRawSide * kRawSide];
+shared vec4 sBox[kBoxSide * kBoxSide];
+/// The reconstruction's bilateral limits: one surface is within kReconDepth of the centre's view distance (relative)
+/// and its normal within kReconNormal (cosine) of the centre's.
+const float kReconDepth = 0.05;
+const float kReconNormal = 0.9;
 
 void main()
 {
 	const ivec2 traceRes = ivec2( p.resolution.xy );
 	const ivec2 tc = ivec2( gl_GlobalInvocationID.xy );
 	gEye = int( gl_GlobalInvocationID.z );
-	const ivec2 tileOrigin = ivec2( gl_WorkGroupID.xy ) * 8 - ivec2( kReach );
-	for( int i = int( gl_LocalInvocationIndex ); i < kTileSide * kTileSide; i += 64 )
+	const ivec2 fullResT = ivec2( p.resolution.zw );
+	const ivec2 scaleT = max( fullResT / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
+	const ivec2 rawOrigin = ivec2( gl_WorkGroupID.xy ) * 8 - ivec2( kReach + kRecon );
+	for( int i = int( gl_LocalInvocationIndex ); i < kRawSide * kRawSide; i += 64 )
 	{
-		const ivec2 t = tileOrigin + ivec2( i % kTileSide, i / kTileSide );
-		vec4 v = vec4( 0.0 );
+		const ivec2 t = rawOrigin + ivec2( i % kRawSide, i / kRawSide );
+		vec4 v = vec4( 0.0, 0.0, 0.0, -1.0 );
+		vec4 g = vec4( 0.0 );
 		if( all( greaterThanEqual( t, ivec2( 0 ) ) ) && all( lessThan( t, traceRes ) ) &&
 			imageLoad( historyDistCur, ivec3( t, gEye ) ).x > 0.0 )
 		{
 			const vec4 s = imageLoad( reflectSample, ivec3( t, gEye ) );
 			if( s.w > 0.0 && finite3( s.xyz ) )
-				v = vec4( toYCoCg( clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ), 1.0 );
+			{
+				const vec3 c = clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
+				v = vec4( toYCoCg( compressed( c ) ), lumaOf( c ) );
+			}
+			const vec2 tuv = ( vec2( t * scaleT ) + 0.5 * vec2( scaleT ) ) / vec2( fullResT );
+			const float d = texture( sceneDepth, vec3( tuv, float( gEye ) ) ).x;
+			const vec3 n = texture( gBufNormals, vec3( tuv, float( gEye ) ) ).xyz * 2.0 - 1.0;
+			if( d > 0.0 && d < 1.0 && dot( n, n ) > 1e-6 )
+				g = vec4( normalize( n ), viewDistance( d ) );
 		}
-		sTap[i] = v;
+		sRaw[i] = v;
+		sGeo[i] = g;
+	}
+	barrier();
+	// THE RECONSTRUCTION, once per box texel: the bilateral 3 x 3 mean of the raw samples on its surface.
+	for( int i = int( gl_LocalInvocationIndex ); i < kBoxSide * kBoxSide; i += 64 )
+	{
+		const ivec2 r = ivec2( i % kBoxSide, i / kBoxSide ) + ivec2( kRecon );
+		const vec4 gc = sGeo[r.y * kRawSide + r.x];
+		vec3 sum = vec3( 0.0 );
+		float n = 0.0;
+		if( gc.w > 0.0 )
+			for( int dy = -kRecon; dy <= kRecon; ++dy )
+				for( int dx = -kRecon; dx <= kRecon; ++dx )
+				{
+					const int j = ( r.y + dy ) * kRawSide + r.x + dx;
+					const vec4 v = sRaw[j];
+					const vec4 g = sGeo[j];
+					if( v.w < 0.0 || g.w <= 0.0 || abs( g.w - gc.w ) > kReconDepth * gc.w ||
+						dot( g.xyz, gc.xyz ) < kReconNormal )
+						continue;
+					sum += v.xyz;
+					n += 1.0;
+				}
+		sBox[i] = n > 0.0 ? vec4( sum / n, 1.0 ) : vec4( 0.0 );
 	}
 	barrier();
 	if( any( greaterThanEqual( tc, traceRes ) ) )
@@ -260,7 +323,7 @@ void main()
 	float confidence = 1.0;
 	if( !atRest )
 	{
-		// ---- THE BOX: 21 taps of this frame's samples (the 5 x 5 without its corners) ----
+		// ---- THE BOX (fix F2): 21 RECONSTRUCTED taps (the 5 x 5 without its corners), compressed ----
 		vec3 m1 = vec3( 0.0 ), m2 = vec3( 0.0 );
 		float n = 0.0;
 		const ivec2 l = ivec2( gl_LocalInvocationID.xy ) + ivec2( kReach );
@@ -269,7 +332,7 @@ void main()
 			{
 				if( abs( dx ) == kReach && abs( dy ) == kReach )
 					continue;
-				const vec4 v = sTap[( l.y + dy ) * kTileSide + l.x + dx];
+				const vec4 v = sBox[( l.y + dy ) * kBoxSide + l.x + dx];
 				if( v.w <= 0.0 )
 					continue;
 				m1 += v.xyz;
@@ -280,9 +343,14 @@ void main()
 		{
 			const vec3 centre = m1 / n;
 			const vec3 sigma = sqrt( max( m2 / n - centre * centre, vec3( 0.0 ) ) );
-			const vec3 extent = max( kClampSigma * sigma, vec3( 1e-4 ) );
-			const vec3 lo = centre - extent, hi = centre + extent;
-			const vec3 surfY = toYCoCg( history );
+			// THE BOX HOLDS THIS TEXEL'S OWN SAMPLE (this frame's evidence at the pixel is never clamped away): a
+			// highlight narrower than the box — one bright texel of 21 — sits outside mean +- sigma by construction
+			// (a raw box pulled it to ~0.49 of itself at steady state, the read's finding 2), and only the texel's
+			// own ray can vouch for it.
+			const vec3 own = sRaw[( l.y + kRecon ) * kRawSide + l.x + kRecon].xyz;
+			const vec3 lo = min( centre - kClampSigma * sigma, own ), hi = max( centre + kClampSigma * sigma, own );
+			const vec3 extent = max( 0.5 * ( hi - lo ), vec3( 1e-4 ) );
+			const vec3 surfY = toYCoCg( compressed( history ) );
 			const vec3 surfC = clamp( surfY, lo, hi );
 			vec3 histY = surfY, histC = surfC;
 			// ---- THE HIT HISTORY: the virtual point (Lumen's hit history; no depth test, as Lumen's) ----
@@ -314,7 +382,7 @@ void main()
 						if( h.w > 0.0 && finite3( h.xyz ) &&
 							imageLoad( historyDistPrev, ivec3( pc, gEye ) ).x > 0.0 )
 						{
-							const vec3 hitY = toYCoCg( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) );
+							const vec3 hitY = toYCoCg( compressed( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) );
 							const vec3 hitC = clamp( hitY, lo, hi );
 							const float surfErr = length( surfC - centre );
 							const float hitErr = length( hitC - centre );
@@ -328,7 +396,7 @@ void main()
 			// ---- THE CONFIDENCE: how far the clamp moved the history, over the box ----
 			const float d = length( abs( histC - histY ) / max( extent, vec3( 1e-3 * max( centre.x, 1e-4 ) ) ) );
 			confidence = 0.75 * clamp( 1.0 - d, 0.0, 1.0 ) + 0.25;
-			history = clamp( fromYCoCg( histC ), vec3( 0.0 ), vec3( kMaxRadiance ) );
+			history = clamp( expanded( fromYCoCg( histC ) ), vec3( 0.0 ), vec3( kMaxRadiance ) );
 		}
 	}
 	const float frames = min( seed * confidence + 1.0, maxN );
