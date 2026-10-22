@@ -1012,6 +1012,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
 // a still scene's frames reads the held answer, not a stall).
 void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
     Ogre::RenderSystem *rs = mHost.gatherRenderSystem();
+    bool irradianceCopied = false, historyCopied = false;
     if (in.tuning.readback && v.irrReadback) {
         {
             Ogre::BarrierSolver &solver = rs->getBarrierSolver();
@@ -1060,15 +1061,56 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                  0, 1, &toHost, 0, nullptr, 0, nullptr);
-            View::Pending &pd = v.pending[v.frame % kFramesInFlight];
-            pd.frame = mHost.gatherFrameNow();
-            pd.live = true;
-            pd.irradiance = true;
-            pd.history = false;   // a held frame writes no history and copies none (PHOTON-2 stage 0)
-            pd.held = true;
-            pd.gatherFrame = v.frame;
-            ++v.frame;
+            irradianceCopied = true;
         }
+    }
+    // THE HISTORY COUNT OF A HELD FRAME (PHOTON-2 stage 0's fix round, the read's finding 1): a held frame writes no
+    // history, so what it HOLDS is the last traced frame's — the half that frame's integrate wrote (the flip after it
+    // made it the previous half), unchanged since. Copied under the arm like a traced frame's, so a stop the view
+    // already holds (a still camera, a lamp step at rest) has its count too: the stillness door's mask, never a wait
+    // for a frame that will not trace.
+    if (in.tuning.historyReadback && temporal && v.age > 0u) {
+        const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * v.layers * 8u;
+        if (!v.histReadback) {
+            std::string rerr;
+            if (!mHost.gatherMakeBuffer(slotBytes * kFramesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true,
+                                        v.histReadback, v.histReadbackMemory, &v.histReadbackMapped, rerr))
+                v.histReadback = VK_NULL_HANDLE;
+        }
+        VkCommandBuffer cmd = v.histReadback ? mHost.gatherFrameCmd() : VK_NULL_HANDLE;
+        if (cmd) {
+            VkMemoryBarrier toCopy{};
+            toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+            toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
+                                 &toCopy, 0, nullptr, 0, nullptr);
+            VkBufferImageCopy region{};
+            region.bufferOffset = VkDeviceSize(v.frame % kFramesInFlight) * slotBytes;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = v.layers;
+            region.imageExtent = { v.w, v.h, 1u };
+            vkCmdCopyImageToBuffer(cmd, v.history[(v.flip & 1u) ^ 1u], VK_IMAGE_LAYOUT_GENERAL, v.histReadback, 1,
+                                   &region);
+            VkMemoryBarrier toHost{};
+            toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &toHost, 0,
+                                 nullptr, 0, nullptr);
+            historyCopied = true;
+        }
+    }
+    if (irradianceCopied || historyCopied) {
+        View::Pending &pd = v.pending[v.frame % kFramesInFlight];
+        pd.frame = mHost.gatherFrameNow();
+        pd.live = true;
+        pd.irradiance = irradianceCopied;
+        pd.history = historyCopied;
+        pd.held = true;
+        pd.gatherFrame = v.frame;
+        ++v.frame;
     }
     {
         Ogre::BarrierSolver &solver = rs->getBarrierSolver();
