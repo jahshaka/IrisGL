@@ -670,6 +670,12 @@ namespace Ogre
         noteEstimatesReplaced();
     }
     //-------------------------------------------------------------------------
+    void PhotonIrradianceField::beginEnteringWhole()
+    {
+        invalidateAllProbes();   // the whole grid to count 0, then the whole grid fresh from its start
+        mEnterDepth = 1u;
+    }
+    //-------------------------------------------------------------------------
     void PhotonIrradianceField::invalidateWork()
     {
         // The current work's probes (a scroll's entered planes) to value 0, count 0 - the same

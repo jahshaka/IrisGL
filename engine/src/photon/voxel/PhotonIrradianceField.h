@@ -571,6 +571,8 @@ namespace Ogre
             getChangeSamples() deep now (a paused budget, which runs no later pass).
         */
         void invalidateWork();
+        /// The whole grid invalidated and its entering passes begun (PHOTON-2 L3: a build fades in).
+        void beginEnteringWhole();
         void enterInline() { mEnterDepth = 0u; }
         bool entering() const { return mEnterDepth != 0u && !( isWorkDone() && mEnterDepth >= mChangeSamples ); }
         uint32 getChangeSamples() const { return mChangeSamples; }

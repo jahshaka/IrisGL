@@ -7140,29 +7140,25 @@ void PhotonComponent::buildIrradianceField() {
         mIfdResumeOwed     = 0u;
         mIfdProbesPerFrame = ifdProbesPerFrame(settings, mGi.updateBudget, total);
 
-        // CONVERGE NOW, in one dispatch, BEFORE binding. Two reasons and both
-        // are load-bearing. (1) A freshly created atlas holds whatever the
-        // recycled VRAM held (the stale-VRAM fact, in its texture guise) — a
-        // bound half-converged field can therefore show another texture's
-        // contents, not black. (2) It makes "bound" and "converged" the same
-        // state for every caller and every pixel gate: a suite never has to
-        // guess how many frames a build needs. The whole field costs ~5 ms of
-        // GPU work once, against the ~2.1 ms a single live PCC probe costs
-        // every frame, so paying it at build time is not a trade worth making
-        // progressive (spike §6). Progressive convergence is kept for exactly
-        // the case it is right for: the light-only cheap path, which re-converges
-        // over the PREVIOUS converged atlas and so has nothing ugly to show.
-        mIfd->update(mIfdTotalProbes);
+        // THE FIELD FADES IN (PHOTON-2 round 2, L3: J1's rule for the build). A freshly created atlas holds whatever
+        // the recycled VRAM held (the stale-VRAM fact, in its texture guise), so before anything reads it every probe
+        // is INVALIDATED - count 0, no weight in the reader, whose pixels fall back as outside the field - and the
+        // probes take their first samples at the budget, one a pass (the entering passes), the reader's weight
+        // min( samples / kIfdChangeSamples, 1 ) fading the field in over them. (It converged inline, four samples deep
+        // since K2: ~93 ms of GPU in one frame on Bistro at 2.84 us an integration - on every GI-arm build: an open, a
+        // tier change, a whole-arm rebuild. "Bound" and "converged" are no longer the same state: giAtRest waits for
+        // the field's passes, which is what every suite and screenshot reads.) A PAUSED field runs no later pass: it
+        // converges inline, one sample (its target), as it always did.
+        if (!mIfdProbesPerFrame) {
+            mIfd->update(mIfdTotalProbes);
+        } else {
+            monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0, "ifd.build", mRoot->getRenderSystem());
+            mIfd->beginEnteringWhole();
+            work.setUnits(mIfdTotalProbes);
+        }
+        // The planner's refinement branch runs the entering passes, then the refinements the build owes (to the
+        // target, at the update budget; GiStatus::ifdRefinesOwed reaches 0 when the field has CONVERGED and stops).
         mIfdProbesDone = mIfdTotalProbes;
-        // THE FIRST SAMPLES, NOT THE MEAN (PHOTON-FIELD-ROTATE-1). The field is a mean
-        // over rotated integrations now: this pass is its first kIfdChangeSamples samples
-        // everywhere (PHOTON-2 K2: a fresh integration is as deep as a change - never a
-        // one-sample probe; 4 x the one-sample pass's ~5 ms, once) - unbiased, every probe
-        // valid, so "bound" is still a whole field - and the refinements it owes run at the update budget
-        // (updateIrradianceField; GiStatus::ifdRefinesOwed reaches 0 when the field
-        // has CONVERGED and stops). Paying them here was measured: 64 passes inline
-        // blocked a new project's thumbnail build for 1.8 s at Epic
-        // (threading.newproject_stall).
 
         // Our two scalars, and the two probe counts the shader's sky-visibility
         // threshold needs but upstream's own IrradianceField block does not
