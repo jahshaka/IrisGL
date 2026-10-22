@@ -1239,6 +1239,7 @@ GiStatus PhotonComponent::giStatus() const {
             st.ifdLightAgeBySlab.assign(age.begin(), age.end());
             st.ifdChangeSkips = mIfd->getChangeSkips();
             st.ifdRestWindow = mIfdRestWindow;
+            st.ifdIntegrations = mIfd->getIntegrations();
             st.ifdDispatchedLastFrame = mIfdLastUnitsFrame + 1u >= giWriterFrame() ? mIfdLastUnits : 0u;
         }
         {
@@ -7354,10 +7355,18 @@ void PhotonComponent::recordField(const FrameWork &w) {
                         : w.fieldReplacing ? "ifd.replace" : "ifd.converge";
         {
             monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, row, mRoot->getRenderSystem());
+            const unsigned long long skips0 = mIfd->getChangeSkips();
             mIfd->update(w.fieldBatch);
-            // THE ROW COUNTS INTEGRATIONS (K2): a change's or a re-placement's probe is getChangeSamples() of them.
-            const unsigned units = w.field == FrameWork::Field::Integrate ? w.fieldBatch * mIfd->getChangeSamples()
-                                                                          : w.fieldBatch;
+            // THE ROW COUNTS INTEGRATIONS (K2; the round-2 read's F6): a change's or a re-placement's probe is
+            // getChangeSamples() of them, and a probe the change SKIPPED (K4: it holds the inputs already - the CPU's
+            // mirror counts it exactly) none. A refinement's row counts the probes it dispatched: one whose group
+            // exits at its history read (at the target, or stopped by the variance stop - a GPU verdict the CPU
+            // learns four frames late) integrates nothing, so that row is an upper bound; the GPU's own count is
+            // GiStatus::ifdIntegrations.
+            const unsigned skipped = unsigned(mIfd->getChangeSkips() - skips0);
+            const unsigned units = w.field == FrameWork::Field::Integrate
+                                       ? (w.fieldBatch - std::min(skipped, w.fieldBatch)) * mIfd->getChangeSamples()
+                                       : w.fieldBatch;
             work.setUnits(units);
             mIfdLastUnits = units;
             mIfdLastUnitsFrame = giWriterFrame();

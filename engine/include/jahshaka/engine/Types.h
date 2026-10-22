@@ -4365,6 +4365,10 @@ struct GiStatus {
     /// GPU's - a skipped or stopped probe's group exits early).
     unsigned ifdRestWindow = 0;
     unsigned ifdDispatchedLastFrame = 0;
+    /// THE GPU'S OWN COUNT (PHOTON-2 L6): every probe integration the generation job has made since the field's build,
+    /// as its last readback found it (four frames late) - differenced over a window, the true integrations a per-
+    /// integration price divides by (a skipped or stopped probe's group exits without one).
+    unsigned long long ifdIntegrations = 0;
     /// GI IS AT REST (PHOTON-FIELD-ROTATE-1): nothing this scene's GI owes will
     /// change the picture - no rebuild or re-voxelisation pending (the flush, a
     /// staged build, a cascade step, a chain-shape change, a dirty box), no light
