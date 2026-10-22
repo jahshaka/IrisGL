@@ -365,12 +365,17 @@
 	/// holds sum( coverage contribution x c_a ) with c_a the piece's centroid in the voxel's
 	/// own cell coordinate [0, 1], on the coverage's 1/512 grid (the same packing and the
 	/// same per-field saturation; c_a <= 1, so it never saturates before the coverage).
-	/// Stored ABSOLUTE in the volume's normalised coordinate and O-PREMULTIPLIED, pO_a =
-	/// O_a x ( ( cell_a + p_a ) / res_a ), RGBA16_UNORM: a box filter and a trilinear fetch
-	/// then give sum O p / sum O - the coverage-weighted mean position exactly, at every
-	/// mip (a texel with O = 0 has no say). A voxel no surface reaches stores 0.
-	INLINE float3 voxelMergePositionResolve( uint packedPos, uint packedAxis, uint3 voxelCel,
-											 float3 invRes )
+	/// Stored RELATIVE TO THE VOXEL'S OWN CELL and O-PREMULTIPLIED, pO_a = O_a x p_a, RGBA16_UNORM
+	/// (PHOTON-7 stage 1, L1: the bits of a voxel are the same at every placement of its box - a
+	/// face on a cell plane can no longer round to two places - and a scroll copies them as they
+	/// are). Its readers add the voxel's cell: the light injection's march per voxel, a plane read
+	/// on its own texel centre, and the one read filtered across two cells at level 0 restores
+	/// each texel's index from its coverage (jah_voxel_sample.glsl). EVERY COARSER LEVEL is
+	/// absolute in the volume's normalised box, sum O p / sum O - the coverage-weighted mean
+	/// position exactly - which the chain's first level makes from the children's cells
+	/// (PhotonMipChain's cell-relative level 1; a texel with O = 0 has no say). A voxel no
+	/// surface reaches stores 0.
+	INLINE float3 voxelMergePositionResolve( uint packedPos, uint packedAxis )
 	{
 		float3 sumAxis = float3( voxelMergeAxisUnpack( packedAxis ) );
 		float3 sumPos = float3( voxelMergeAxisUnpack( packedPos ) );
@@ -380,7 +385,7 @@
 			if( sumAxis[a] > 0.0f )
 				local[a] = min( sumPos[a] / sumAxis[a], 1.0f );
 		}
-		return voxelMergeAxisResolve( packedAxis ) * ( ( float3( voxelCel ) + local ) * invRes );
+		return voxelMergeAxisResolve( packedAxis ) * local;
 	}
 
 	INLINE float4 voxelMergeNormal( uint4 sumNormal, uint4 sumFolded, uint totalWeight )

@@ -89,9 +89,8 @@ namespace Ogre
             voxelise dispatch writes, and what a scroll copies. This voxeliser's own (liveVolumes) or
             a scroll's target of the same size (PhotonVoxelScroll): the voxelise jobs bind whichever
             they are given, so the entering slab of a scroll is built by the same dispatches, the
-            same shader and the same merge as a whole build. `positionSums` is the merge's four
-            packed sums the surface position is resolved from (Voxelizer_cs.glsl), kept so a
-            scrolled voxel can be re-resolved at its new cell.
+            same shader and the same merge as a whole build. Every volume is copied texel for texel
+            by a scroll: the surface position is stored relative to its own cell (PHOTON-7 stage 1).
         */
         struct VolumeSet
         {
@@ -102,7 +101,6 @@ namespace Ogre
             TextureGpu *accumVal = nullptr;
             TextureGpu *coverage[2] = {};
             TextureGpu *position[2] = {};
-            TextureGpu *positionSums = nullptr;
             TextureGpu *emit[2] = {};   ///< JUNCTION-NORMAL-1: the emissive factor per half-axis
         };
         /// A box of the volume's cells: [x, x + w) x [y, y + h) x [z, z + d).
@@ -299,11 +297,6 @@ namespace Ogre
 
         ResourceTransitionArray mResourceTransitions;
 
-        /// Jahshaka (ENGINE-UPGRADE-U5 stage 1): THE POSITION SUMS (Voxelizer_cs.glsl), PFG_R32_UINT,
-        /// (mWidth, mHeight, mDepth * 4): sixteen bytes a voxel, resident for the voxeliser's life,
-        /// cleared and written by every build. A scroll re-resolves a copied voxel's position from
-        /// them (PhotonScrollPosition_cs.glsl).
-        TextureGpu *mPositionSumsTex;
 
         /// Binds `v` and the host's buffers into every voxelise variant, then dispatches one job per
         /// (octant, bucket) - build()'s loop, shared with buildChunks().

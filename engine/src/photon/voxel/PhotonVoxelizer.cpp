@@ -188,7 +188,6 @@ namespace Ogre
         mNumOctantsZ( 0u )
     {
         memset( mComputeJobs, 0, sizeof( mComputeJobs ) );
-        mPositionSumsTex = 0;
         createComputeJobs();
 
         // A device with no buffer device addresses cannot voxelize at all any more:
@@ -472,11 +471,6 @@ namespace Ogre
             releaseMergeAccum( mTextureGpuManager, mMergeAccumTex );
             mMergeAccumTex = 0;
         }
-        if( mPositionSumsTex )
-        {
-            mTextureGpuManager->destroyTexture( mPositionSumsTex );
-            mPositionSumsTex = 0;
-        }
         PhotonVoxelizerSourceBase::destroyVoxelTextures();
     }
     //-------------------------------------------------------------------------
@@ -612,21 +606,6 @@ namespace Ogre
             releaseMergeAccum( mTextureGpuManager, mMergeAccumTex );
         mMergeAccumTex = acquireMergeAccum( mTextureGpuManager, mWidth, mHeight, mDepth );
 
-        // Jahshaka (ENGINE-UPGRADE-U5 stage 1): THE POSITION SUMS, this voxeliser's own (a scroll
-        // reads them after other cascades' builds have reused the shared accumulator above).
-        if( !mPositionSumsTex )
-        {
-            mPositionSumsTex = mTextureGpuManager->createTexture(
-                "VctVoxelizer" + StringConverter::toString( getId() ) + "/PositionSums",
-                GpuPageOutStrategy::Discard, TextureFlags::NotTexture | TextureFlags::Uav,
-                TextureTypes::Type3D );
-        }
-        mPositionSumsTex->scheduleTransitionTo( GpuResidency::OnStorage );
-        mPositionSumsTex->setPixelFormat( PFG_R32_UINT );
-        mPositionSumsTex->setResolution( mWidth, mHeight, mDepth * 4u );
-        mPositionSumsTex->setNumMipmaps( 1u );
-        mPositionSumsTex->scheduleTransitionTo( GpuResidency::Resident );
-
         // Jahshaka (PHOTON-VOXEL-4): THE CHAIN STOPS WHERE THE SHORTEST AXIS REACHES ONE TEXEL.
         // A cell is a cube and every level halves every axis, so every texel stays a cube -
         // one level is one footprint in every direction (the reader's kernels). A volume of
@@ -638,8 +617,9 @@ namespace Ogre
 
         // Jahshaka (PHOTON-VOXEL-3/-4): the coverage per half-axis, 10 bits a component
         // (the merge resolves it on a 1/512 grid) - 2 x 4 bytes a voxel; the surface
-        // position per half, 16 bits a component ABSOLUTE in the volume's normalised
-        // coordinate (1/65535 of the box: 0.002 cells at 128^3) - 2 x 8 bytes. With the
+        // position per half, 16 bits a component - level 0 RELATIVE TO ITS OWN CELL (PHOTON-7
+        // stage 1: 1/65535 of a cell, the same bits at every placement), every coarser level
+        // absolute in the volume's normalised box (generateMips) - 2 x 8 bytes. With the
         // mips (+1/7): 27.4 B a voxel, 57 MB at 128^3, 7.2 MB at 64^3, 0.9 MB at 32^3 per
         // cascade.
         for( size_t h = 0u; h < 2u; ++h )
@@ -765,7 +745,6 @@ namespace Ogre
         mComputeTools->prepareForUavClear( mResourceTransitions, mAccumValVox );
         // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the sums start at zero, every build.
         mComputeTools->prepareForUavClear( mResourceTransitions, mMergeAccumTex );
-        mComputeTools->prepareForUavClear( mResourceTransitions, mPositionSumsTex );
         for( size_t h = 0u; h < 2u; ++h )
         {
             mComputeTools->prepareForUavClear( mResourceTransitions, mCoverageVox[h] );
@@ -780,7 +759,6 @@ namespace Ogre
         jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mNormalVox, fClearNormals );
         jahshaka::engine::detail::photonClearUavUint( mComputeTools, mAccumValVox, uClearValue );
         jahshaka::engine::detail::photonClearUavUint( mComputeTools, mMergeAccumTex, uClearValue );
-        jahshaka::engine::detail::photonClearUavUint( mComputeTools, mPositionSumsTex, uClearValue );
         for( size_t h = 0u; h < 2u; ++h )
         {
             jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mCoverageVox[h], fClearValue );
@@ -875,7 +853,6 @@ namespace Ogre
             v.position[h] = mPositionVox[h];
             v.emit[h] = mEmitVox[h];
         }
-        v.positionSums = mPositionSumsTex;
         return v;
     }
     //-------------------------------------------------------------------------
@@ -964,28 +941,22 @@ namespace Ogre
                 mComputeJobs[i]->_setUavTexture( uint8( 9u + h ), uavSlot );
             }
 
-            // Jahshaka (ENGINE-UPGRADE-U5 stage 1): the position sums (11).
-            uavSlot.texture = v.positionSums;
-            uavSlot.pixelFormat = v.positionSums->getPixelFormat();
-            uavSlot.access = ResourceAccess::Write;
-            mComputeJobs[i]->_setUavTexture( 11u, uavSlot );
-
-            // Jahshaka (METAL-BOUNCE-1): the metal (12), written by the resolve beside the albedo.
+            // Jahshaka (METAL-BOUNCE-1): the metal (11), written by the resolve beside the albedo.
             uavSlot.texture = v.metal;
             if( hasTypedUavs )
                 uavSlot.pixelFormat = v.metal->getPixelFormat();
             else
                 uavSlot.pixelFormat = PFG_R32_UINT;
             uavSlot.access = ResourceAccess::Write;
-            mComputeJobs[i]->_setUavTexture( 12u, uavSlot );
+            mComputeJobs[i]->_setUavTexture( 11u, uavSlot );
 
-            // Jahshaka (JUNCTION-NORMAL-1): the emissive factor per half-axis (13, 14), written by the resolve.
+            // Jahshaka (JUNCTION-NORMAL-1): the emissive factor per half-axis (12, 13), written by the resolve.
             for( size_t h = 0u; h < 2u; ++h )
             {
                 uavSlot.texture = v.emit[h];
                 uavSlot.pixelFormat = v.emit[h]->getPixelFormat();
                 uavSlot.access = ResourceAccess::Write;
-                mComputeJobs[i]->_setUavTexture( uint8( 13u + h ), uavSlot );
+                mComputeJobs[i]->_setUavTexture( uint8( 12u + h ), uavSlot );
             }
 
             DescriptorSetTexture2::BufferSlot texBufSlot(
@@ -1240,7 +1211,8 @@ namespace Ogre
         for( size_t h = 0u; h < 2u; ++h )
         {
             PhotonMipChain::generate( mHlmsManager, mRenderSystem, mCoverageVox[h] );
-            PhotonMipChain::generate( mHlmsManager, mRenderSystem, mPositionVox[h] );
+            // (level 0 is cell-relative: level 1 restores each child's cell index from its coverage)
+            PhotonMipChain::generate( mHlmsManager, mRenderSystem, mPositionVox[h], mCoverageVox[h] );
         }
         PhotonMipChain::generate( mHlmsManager, mRenderSystem, mEmissiveVox );
         PhotonMipChain::generate( mHlmsManager, mRenderSystem, mNormalVox );

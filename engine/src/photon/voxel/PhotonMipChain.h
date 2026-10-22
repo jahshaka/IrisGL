@@ -28,7 +28,13 @@ namespace Ogre
     public:
         /// Writes levels 1..n of `texture` from level 0 (each from the one below), n + 1 being
         /// the texture's mip count. A one-level texture writes nothing.
-        static void generate( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *texture );
+        /// `cellRelativeCoverage` (PHOTON-7 stage 1): `texture` is a SURFACE POSITION volume whose level 0
+        /// holds O x f, f the surface's place in its OWN cell, and this is the coverage volume holding
+        /// that O - level 1 is then the mean of the children's O x p, p absolute in the box's [0, 1]
+        /// (each child's cell index restored), so every coarser level is the coverage-weighted mean
+        /// position the readers filter, as before.
+        static void generate( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *texture,
+                              TextureGpu *cellRelativeCoverage = nullptr );
         /// Destroys the pooled jobs - before the compute Hlms dies (the engine's teardown).
         static void releasePool();
         /// Dispatches made and jobs ever pooled, process-wide (the region row reads them).

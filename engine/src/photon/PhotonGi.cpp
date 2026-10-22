@@ -1704,12 +1704,12 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
             // build writes - level 0 of the albedo, emissive, normal, coverage and position per half.
             if (voxelizer) {
                 const Ogre::PhotonVoxelizer::VolumeSet vs = voxelizer->liveVolumes();
-                // ALL TWELVE (decision 12.2): the raw integers too - the area weight and the position sums, the two
-                // volumes a build's integer sums write directly - the metal (METAL-BOUNCE-1) and the emissive factor
-                // per half (JUNCTION-NORMAL-1).
-                Ogre::TextureGpu *store[12] = { vs.albedo, vs.emissive, vs.normal, vs.coverage[0], vs.coverage[1],
-                                                vs.position[0], vs.position[1], vs.accumVal, vs.positionSums,
-                                                vs.metal, vs.emit[0], vs.emit[1] };
+                // ALL ELEVEN (decision 12.2): the raw integer area weight too - the volume a build's integer sums
+                // write directly - the metal (METAL-BOUNCE-1) and the emissive factor per half (JUNCTION-NORMAL-1).
+                // (The position sums are gone with the cell-relative position, PHOTON-7 stage 1.)
+                Ogre::TextureGpu *store[11] = { vs.albedo, vs.emissive, vs.normal, vs.coverage[0], vs.coverage[1],
+                                                vs.position[0], vs.position[1], vs.accumVal, vs.metal, vs.emit[0],
+                                                vs.emit[1] };
                 Ogre::uint64 hs = 1469598103934665603ull;
                 bool ok = true;
                 for (Ogre::TextureGpu *tex : store) {
@@ -1931,7 +1931,7 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
                 tm->destroyAsyncTextureTicket(ticket);
                 return ok;
             };
-            if (!grabUint(vs.accumVal, out.accumWeight) || !grabUint(vs.positionSums, out.positionSums)) return false;
+            if (!grabUint(vs.accumVal, out.accumWeight)) return false;
         }
         // FAR-SUN-2: the DIRECT volume beside the total (level 0; empty where the cascade keeps none)
         out.direct.clear();

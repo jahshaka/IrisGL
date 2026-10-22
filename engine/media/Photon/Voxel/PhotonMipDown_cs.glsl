@@ -16,6 +16,11 @@
 
 vulkan_layout( ogre_t0 ) uniform texture3D srcLevel;
 vulkan( layout( ogre_s0 ) uniform sampler srcSampler );
+// Jahshaka (PHOTON-7 stage 1): THE CELL-RELATIVE LEVEL 0 of a surface-position volume (PhotonMipChain.h):
+// the coverage the children's O x f is premultiplied by, at slot 1, level 0.
+@property( jah_cell_relative )
+	vulkan_layout( ogre_t1 ) uniform texture3D srcCoverage;
+@end
 
 layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
 uniform restrict writeonly image3D dstLevel;
@@ -30,6 +35,22 @@ void main()
 	ivec3 iuvw = ivec3( gl_GlobalInvocationID.xyz );
 	if( iuvw.x >= dstSize.x || iuvw.y >= dstSize.y || iuvw.z >= dstSize.z )
 		return;
+@property( jah_cell_relative )
+	// level 0 holds O x f per axis (f in the child's own cell, xyz) and the caster share (w); level 1 the mean of the
+	// children's O x p, p = ( cell + f ) / size the box's coordinate - the mean the blit took of the absolute store
+	ivec3 srcSize = textureSize( srcLevel, 0 );
+	vec3 invSrc = vec3( 1.0 ) / vec3( srcSize );
+	vec4 acc = vec4( 0.0 );
+	for( int k = 0; k < 8; ++k )
+	{
+		ivec3 s = min( iuvw * 2 + ivec3( k & 1, ( k >> 1 ) & 1, k >> 2 ), srcSize - 1 );
+		vec4 p = OGRE_Load3D( srcLevel, s, 0 );
+		vec3 o = OGRE_Load3D( srcCoverage, s, 0 ).xyz;
+		acc += vec4( ( p.xyz + o * vec3( s ) ) * invSrc, p.w );
+	}
+	imageStore( dstLevel, iuvw, acc * 0.125 );
+@else
 	vec3 uvw = ( vec3( iuvw ) + 0.5 ) / vec3( dstSize );
 	imageStore( dstLevel, iuvw, OGRE_SampleLevel( srcLevel, srcSampler, uvw, 0.0 ) );
+@end
 }

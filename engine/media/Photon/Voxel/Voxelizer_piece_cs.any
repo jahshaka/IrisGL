@@ -928,17 +928,12 @@
 			// unused - VoxelMerge_piece_cs.any).
 			const float casterShareP = voxelMergeCasterShare( sumCasterP, sumAxisP );
 			const float casterShareN = voxelMergeCasterShare( sumCasterN, sumAxisN );
-			// PHOTON-VOXEL-4: the surface position per half-axis, O-premultiplied, absolute.
-			const float3 invRes = float3( 1.0f, 1.0f, 1.0f ) / float3( imageSize( voxelPositionPTex ) );
+			// PHOTON-VOXEL-4: the surface position per half-axis, O-premultiplied, relative to the voxel's own cell
+			// (PHOTON-7 stage 1: the same bits at every placement of the box).
 			OGRE_imageWrite3D4( voxelPositionPTex, voxelCelUvw,
-								float4( voxelMergePositionResolve( sumPosP, sumAxisP, voxelCel, invRes ), casterShareP ) );
+								float4( voxelMergePositionResolve( sumPosP, sumAxisP ), casterShareP ) );
 			OGRE_imageWrite3D4( voxelPositionNTex, voxelCelUvw,
-								float4( voxelMergePositionResolve( sumPosN, sumAxisN, voxelCel, invRes ), casterShareN ) );
-			// ENGINE-UPGRADE-U5 stage 1: the four sums the two writes above resolved, kept (Voxelizer_cs.glsl).
-			OGRE_imageWrite3D1( voxelPositionSums, uint3( voxelCel.xy, voxelCel.z * 4u + 0u ), uint4( sumAxisP, 0u, 0u, 0u ) );
-			OGRE_imageWrite3D1( voxelPositionSums, uint3( voxelCel.xy, voxelCel.z * 4u + 1u ), uint4( sumAxisN, 0u, 0u, 0u ) );
-			OGRE_imageWrite3D1( voxelPositionSums, uint3( voxelCel.xy, voxelCel.z * 4u + 2u ), uint4( sumPosP, 0u, 0u, 0u ) );
-			OGRE_imageWrite3D1( voxelPositionSums, uint3( voxelCel.xy, voxelCel.z * 4u + 3u ), uint4( sumPosN, 0u, 0u, 0u ) );
+								float4( voxelMergePositionResolve( sumPosN, sumAxisN ), casterShareN ) );
 		@else
 			// JAHSHAKA fork ad452604a+155a56bf8 (was 0087): THE BRANCH THAT CANNOT FOLLOW THE FLOAT STORE.
 			// This is D3D11 without typed UAV loads, where each texel is packed

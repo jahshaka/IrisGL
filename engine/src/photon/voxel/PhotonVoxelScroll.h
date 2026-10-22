@@ -7,9 +7,8 @@
 //
 //   1. BEGIN - this target is cleared and the overlap of the live volumes is COPIED into it,
 //      shifted by the scroll (a voxel at new cell n is the old cell n + shift). Every level-0 volume
-//      is copied texel for texel except the surface position, which is stored absolute in the box's
-//      normalised coordinate and is RE-RESOLVED at its new cell from the merge's own integer sums
-//      (PhotonScrollPosition_cs.glsl) - the bits a whole build at the new place writes.
+//      is copied texel for texel - the surface position too, stored relative to its own cell (PHOTON-7
+//      stage 1) - the bits a whole build at the new place writes.
 //   2. THE ENTERING SLAB, voxelised into this target over as many frames as the per-frame budget
 //      needs (PhotonVoxelizer::buildChunks: the same dispatches, shader and merge as a whole build).
 //   3. COMMIT - this target is copied into the live volumes, the region moves and the mip chains
@@ -23,12 +22,12 @@
 // mix the box's opposite edges. The copy changes no reader.
 //
 // WHY ON COMPUTE: an image copy is a transfer command and the GI region records compute only
-// (gi.region_compute_only). Two jobs: Photon/ScrollCopy (any one volume, float or uint) and
-// Photon/ScrollPosition. ONE TARGET PER VOLUME SIZE, leased by the cascade chain: a scroll in flight
+// (gi.region_compute_only). One job: Photon/ScrollCopy (any one volume, float or uint). ONE TARGET PER
+// VOLUME SIZE, leased by the cascade chain: a scroll in flight
 // holds it until it commits, and the scheduler starts no second scroll of that size meanwhile.
 //
-// THE TARGETS ARE POOLED, PROCESS-WIDE (BUGS-6 stage 3). A target is 12 level-0 volumes, a clone of
-// Photon/ScrollCopy per format and one of Photon/ScrollPosition, with their pipelines built by the
+// THE TARGETS ARE POOLED, PROCESS-WIDE (BUGS-6 stage 3). A target is 11 level-0 volumes and a clone of
+// Photon/ScrollCopy per format, with their pipelines built by the
 // one-texel copies of its construction; nothing in it belongs to one chain (begin and commit are
 // handed the live store). A chain LEASES one per size at its build (acquire: a free target of the
 // same size and formats, or a new one) and gives it back at its teardown (release), so a chain
@@ -93,8 +92,6 @@ namespace Ogre
     private:
         void copyBox( TextureGpu *src, TextureGpu *dst, const uint32 srcOrigin[3],
                       const uint32 dstOrigin[3], const uint32 size[3] );
-        void copyPositions( const PhotonVoxelizer::VolumeSet &src, const PhotonVoxelizer::VolumeSet &dst,
-                            const uint32 srcOrigin[3], const uint32 dstOrigin[3], const uint32 size[3] );
         HlmsComputeJob *copyJob( PixelFormatGpu format );
 
         RenderSystem      *mRenderSystem;
@@ -103,10 +100,9 @@ namespace Ogre
         ComputeTools      *mComputeTools;
         uint32             mResolution;
         PhotonVoxelizer::VolumeSet mVolumes;
-        /// One clone of Photon/ScrollCopy per format (the store qualifier is the bound volume's),
-        /// and one of Photon/ScrollPosition - this object's, destroyed with it.
+        /// One clone of Photon/ScrollCopy per format (the store qualifier is the bound volume's) - this
+        /// object's, destroyed with it.
         std::map<PixelFormatGpu, HlmsComputeJob *> mCopyJobs;
-        HlmsComputeJob *mPositionJob;
         ResourceTransitionArray mResourceTransitions;
     };
 }  // namespace Ogre

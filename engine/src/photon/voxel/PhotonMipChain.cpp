@@ -31,8 +31,10 @@ namespace Ogre
             PixelFormatGpu format = PFG_UNKNOWN;
             uint32 width = 0u, height = 0u, depth = 0u;
             uint8 level = 0u;
+            bool cellRelative = false;   ///< level 1 of a cell-relative position volume (generate's note)
             bool operator<( const Key &o ) const
             {
+                if( cellRelative != o.cellRelative ) return cellRelative < o.cellRelative;
                 if( format != o.format ) return format < o.format;
                 if( width != o.width ) return width < o.width;
                 if( height != o.height ) return height < o.height;
@@ -43,13 +45,14 @@ namespace Ogre
         HlmsManager *gPoolManager = nullptr;
         std::map<Key, HlmsComputeJob *> gPool;
 
-        HlmsComputeJob *pooledJob( HlmsManager *hlmsManager, const TextureGpu *texture, uint8 level )
+        HlmsComputeJob *pooledJob( HlmsManager *hlmsManager, const TextureGpu *texture, uint8 level,
+                                   bool cellRelative )
         {
             if( gPoolManager && gPoolManager != hlmsManager )
                 PhotonMipChain::releasePool();
             gPoolManager = hlmsManager;
             const Key key = { texture->getPixelFormat(), texture->getWidth(), texture->getHeight(),
-                              texture->getDepth(), level };
+                              texture->getDepth(), level, cellRelative };
             auto it = gPool.find( key );
             if( it != gPool.end() )
                 return it->second;
@@ -66,6 +69,13 @@ namespace Ogre
             samplerblock.mMipFilter = FO_POINT;
             samplerblock.setAddressingMode( TAM_CLAMP );
             job->setSamplerblock( 0, samplerblock );
+            if( cellRelative )
+            {
+                // THE CELL-RELATIVE LEVEL 0 (PhotonMipDown_cs.glsl's jah_cell_relative): the children are
+                // fetched, not filtered, beside their coverage at slot 1.
+                job->setNumTexUnits( 2u );
+                job->setProperty( "jah_cell_relative", 1 );
+            }
             gPool[key] = job;
             ++gMipJobs;
             return job;
@@ -88,7 +98,7 @@ namespace Ogre
     }
 
     void PhotonMipChain::generate( HlmsManager *hlmsManager, RenderSystem *renderSystem,
-                                   TextureGpu *texture )
+                                   TextureGpu *texture, TextureGpu *cellRelativeCoverage )
     {
         if( !texture || texture->getNumMipmaps() <= 1u )
             return;
@@ -97,13 +107,19 @@ namespace Ogre
         renderSystem->debugAnnotationPush( "Photon mips" );
         for( uint8 level = 1u; level < numMips; ++level )
         {
-            HlmsComputeJob *job = pooledJob( hlmsManager, texture, level );
+            const bool cellRelative = cellRelativeCoverage && level == 1u;
+            HlmsComputeJob *job = pooledJob( hlmsManager, texture, level, cellRelative );
 
             DescriptorSetTexture2::TextureSlot texSlot( DescriptorSetTexture2::TextureSlot::makeEmpty() );
             texSlot.texture = texture;
             texSlot.mipmapLevel = uint8( level - 1u );
             texSlot.numMipmaps = 1u;
             job->setTexture( 0, texSlot );
+            if( cellRelative )
+            {
+                texSlot.texture = cellRelativeCoverage;   // its level 0, the O each child is premultiplied by
+                job->setTexture( 1, texSlot );
+            }
 
             DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
             uavSlot.texture = texture;

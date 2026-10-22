@@ -10,9 +10,9 @@
             "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
-            "uav_units" : 15,
+            "uav_units" : 14,
 
-            "gl_tex_slot_start" : 15,
+            "gl_tex_slot_start" : 14,
 			
 			"params" :
             [
@@ -29,10 +29,9 @@
                 ["voxelCoverageNTex",		[7], "int"],
                 ["voxelPositionPTex",		[8], "int"],
                 ["voxelPositionNTex",		[9], "int"],
-                ["voxelPositionSums",		[10], "int"],
-                ["voxelMetalTex",			[11], "int"],
-                ["voxelEmitPTex",			[12], "int"],
-                ["voxelEmitNTex",			[13], "int"]
+                ["voxelMetalTex",			[10], "int"],
+                ["voxelEmitPTex",			[11], "int"],
+                ["voxelEmitNTex",			[12], "int"]
 			],
 
 			"properties" :
@@ -285,27 +284,6 @@
             {
                 "copy_uint" : 0
             }
-        },
-
-        "Photon/ScrollPosition" :
-        {
-            "threads_per_group" : [4, 4, 4],
-
-            "source" : "PhotonScrollPosition_cs",
-            "pieces" : ["CrossPlatformSettings_piece_all", "VoxelMerge_piece_cs.any"],
-            "inform_shader_of_texture_size" : false,
-            "inform_shader_of_texture_data_change" : true,
-
-            "uav_units" : 5,
-
-            "params_glsl" :
-            [
-                ["srcSums",                 [0], "int"],
-                ["srcPositionP",            [1], "int"],
-                ["srcPositionN",            [2], "int"],
-                ["dstPositionP",            [3], "int"],
-                ["dstPositionN",            [4], "int"]
-            ]
         },
 
         "VCT/AabbCalculator" :

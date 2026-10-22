@@ -35,11 +35,13 @@
 		tCross = 0.0f;
 		if( !( o > 0.0f ) )
 			return 0.0f;
-		// The surfaces of this half lie in THIS voxel: the stored position (16-bit) is clamped into
-		// the voxel's extent along b, and the crossing is tested in position space with the store's
-		// quantum as the tolerance - a face ON a texel plane (a wall one cell thick, whose faces are
-		// both texel planes) sits exactly where the ray enters or leaves its voxel.
-		const float pp = clamp( pO / o, vLo, vHi );
+		// The surfaces of this half lie in THIS voxel: the stored position is their place in the
+		// voxel's own cell (16-bit, PHOTON-7 stage 1: the same bits at every placement), so the plane
+		// is the voxel's low face plus that share of its extent along b; the crossing is tested in
+		// position space with the store's quantum as the tolerance - a face ON a texel plane (a wall
+		// one cell thick, whose faces are both texel planes) sits exactly where the ray enters or
+		// leaves its voxel.
+		const float pp = clamp( vLo + ( pO / o ) * ( vHi - vLo ), vLo, vHi );
 		if( !( pp >= lo - 2e-5f && pp <= hi + 2e-5f ) )
 			return 0.0f;
 		// where along the ray the plane is crossed (the march takes a voxel's faces in that order)
@@ -493,7 +495,9 @@
 					if( visH[q] < 0.0f )
 					{
 						float3 s = voxelUvwPos;
-						const float pa = ( h == 0 ? posP0[a] : posN0[a] ) / o;
+						// the half's face: its place in this voxel's own cell (PHOTON-7 stage 1), on the box's scale
+						const float pa = ( float( voxelId[a] ) + ( h == 0 ? posP0[a] : posN0[a] ) / o ) *
+										 p_invVoxelResolution[a];
 						s[a] = pa;
 						visH[q] = jahInjectVisibility( s, marchD, marchEnd, voxelId, a, pa, hs );
 					}

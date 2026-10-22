@@ -29,9 +29,11 @@
 //     JAH_VOX_SAMPLE_COVP(c,u,l) vec4: cascade c's COVERAGE of the faces looking +a (xyz = O_x+,
 //     JAH_VOX_SAMPLE_COVN(c,u,l)   O_y+, O_z+) and of those looking -a (PHOTON-VOXEL-3/-4;
 //                                VctLighting's coverageIndex(0 / 1))
-//     JAH_VOX_SAMPLE_POSP(c,u,l) vec4: cascade c's SURFACE POSITION per half (xyz = O_a x p_a,
-//     JAH_VOX_SAMPLE_POSN(c,u,l)   p absolute in the cascade's normalised space; positionIndex(0 / 1))
-//                                - the origin plane's test
+//     JAH_VOX_SAMPLE_POSP(c,u,l) vec4: cascade c's SURFACE POSITION per half (xyz = O_a x p_a;
+//     JAH_VOX_SAMPLE_POSN(c,u,l)   positionIndex(0 / 1)) - the origin plane's test. LEVEL 0 holds p
+//                                RELATIVE TO THE TEXEL'S OWN CELL (PHOTON-7 stage 1: the same bits at
+//                                every placement), every coarser level p absolute in the cascade's
+//                                normalised space; the readers below add a level-0 texel's cell
 //     JAH_VOX_INVRES(c)          vec3: 1 / cascade c's resolution, per axis
 //     JAH_VOX_HAS_BACK           0 or 1, a PREPROCESSOR constant (PHOTON-VOXEL-5): the level-0
 //                                BACK side and the voxeliser's normal are bound (the bounce job
@@ -176,6 +178,38 @@ vec4 jahVoxelPos( int c, int h, vec3 u, float l )
 	return h == 0 ? JAH_VOX_SAMPLE_POSP( c, u, l ) : JAH_VOX_SAMPLE_POSN( c, u, l );
 }
 
+/// LEVEL 0'S POSITION IS RELATIVE TO ITS OWN CELL (PHOTON-7 stage 1, L1; VoxelMerge_piece_cs.any's THE SURFACE
+/// POSITION): O x f, f the surfaces' place in the texel's cell. A read whose point lies on a texel CENTRE along axis
+/// a (a plane's own axis: the march fetches every plane at its centre) holds that one texel along a - its cell index
+/// restores the absolute O x p the gates compare (the cascade's normalised space, as every coarser level stores it).
+float jahVoxelPos0Centred( float pORel, float o, float coordA, float invResA )
+{
+	const float resA = 1.0 / invResA;
+	return ( pORel + o * min( floor( coordA * resA ), resA - 1.0 ) ) * invResA;
+}
+
+/// ...and a level-0 read FILTERED across two cells along a (the kernel's lateral read on a level-0 plane): with u =
+/// coord x res - 1/2, i0 = floor(u), t = u - i0 the upper cell's weight, the filtered O x f is V = sum w O f and its
+/// coverage C = sum w O; the absolute sum w O (i + f) = V + i0 C + t C1 (i1 - i0), C1 the upper cell's own coverage
+/// (one fetch at its centre, the same lateral weights) - both cells clamped to the box as the sampler clamps them.
+float jahVoxelPos0Filtered( int c, int h, vec3 u, int a, float pORel, float o, float invResA )
+{
+	const float resA = 1.0 / invResA;
+	const float x = u[a] * resA - 0.5;
+	const float i0 = floor( x );
+	const float t = x - i0;
+	const float i0c = clamp( i0, 0.0, resA - 1.0 );
+	const float i1c = clamp( i0 + 1.0, 0.0, resA - 1.0 );
+	float up = 0.0;
+	if( i1c > i0c && t > 0.0 )
+	{
+		vec3 uUp = u;
+		uUp[a] = ( i1c + 0.5 ) * invResA;
+		up = t * jahVoxelCov( c, h, uUp, 0.0 )[a] * ( i1c - i0c );
+	}
+	return ( pORel + i0c * o + up ) * invResA;
+}
+
 /// The packed-halves coordinate of an anisotropic read: x is saturated into the
 /// box and folded into the first half (the sign half is added per axis by the
 /// read below).
@@ -288,7 +322,9 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 		cA = ( s.w > 0.0 ) ? s.xyz * ( aA / s.w ) : vec3( 0.0 );
 		if( n == axis || w < 1.0 )
 		{
-			const float pO = jahVoxelPos( c, ha, posLS, 0.0 )[axis];
+			// (level 0: the plane's own texel along the axis, its cell added - jahVoxelPos0Centred)
+			const float pO = jahVoxelPos0Centred( jahVoxelPos( c, ha, posLS, 0.0 )[axis], oBack, posLS[axis],
+												   invRes[axis] );
 			if( n == axis )
 				gA = jahVoxelOriginGate( pO, oBack, org, invRes[ni] );
 			if( w < 1.0 )
@@ -316,7 +352,13 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 		const vec3 ok = ray ? okBoth : jahVoxelCov( c, h, kernelLS, lk ).xyz;
 		float gN = 1.0;
 		if( n >= 0 && n != axis )
-			gN = jahVoxelOriginGate( jahVoxelPos( c, h, kernelLS, lk )[ni], ok[ni], org, invRes[ni] );
+		{
+			float pON = jahVoxelPos( c, h, kernelLS, lk )[ni];
+			// a level-0 plane reads its kernel at level 0 (lk = 0): cell-relative, filtered across two cells
+			if( !directional )
+				pON = jahVoxelPos0Filtered( c, h, kernelLS, ni, pON, ok[ni], invRes[ni] );
+			gN = jahVoxelOriginGate( pON, ok[ni], org, invRes[ni] );
+		}
 		for( int b = 0; b < 3; ++b )
 		{
 			if( b == axis || !( ok[b] > 0.0 ) )

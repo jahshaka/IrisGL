@@ -5562,7 +5562,7 @@ struct GiVoxelStats {
     std::string lightDigest;
     /// THE VOXELISER'S STORE, hashed the same way (ENGINE-UPGRADE-U5 stage 2): level 0 of the albedo,
     /// the emissive, the normal, the coverage and the surface position per half, the area weight, the
-    /// position sums and the metal (all ten volumes a build writes) - what a build WRITES,
+    /// metal and the emissive factor per half (all eleven volumes a build writes) - what a build WRITES,
     /// independent of the light's history - so two builds of one place compare by 16 hex digits (the
     /// voxeliser's work partition proved bit for bit on a real scene, ENGINE-UPGRADE-U5 stage 2).
     std::string storeDigest;
@@ -5595,8 +5595,9 @@ struct GiVoxelVolume {
     /// the faces looking +a (P) and -a (N): the fraction of the voxel's face along
     /// that axis they cover - a ray travelling +a sees the N half; a unused) and the
     /// SURFACE POSITION per half (rgb = O_a x p_a, p_a where along axis a those faces
-    /// lie, in the cascade's normalised [0, 1] box - O-premultiplied, so
-    /// p_a = rgb / O_a; a unused).
+    /// lie IN THE VOXEL'S OWN CELL, [0, 1] across it (PHOTON-7 stage 1: the same at every
+    /// placement of the box; the cascade-normalised place is (i_a + p_a) / res_a) -
+    /// O-premultiplied, so p_a = rgb / O_a; a the caster share's packed bits).
     std::vector<float> light;
     std::vector<float> albedo;
     std::vector<float> coverageP, coverageN;
@@ -5609,17 +5610,15 @@ struct GiVoxelVolume {
     std::vector<float> lightBack;
     std::vector<float> normal;
     /// THE REST OF THE VOXELISER'S LEVEL 0 (ENGINE-UPGRADE-U5, the reader's decision 11 g): the emissive
-    /// (rgb, the material roughness in a), decoded like `albedo`; and the raw integers a build keeps - the
-    /// area weight per voxel (`accumWeight`, width*height*depth) and the four packed position sums per voxel
-    /// (`positionSums`, width*height*depth*4, z-interleaved as the volume holds them: z*4 + k). With the
-    /// arrays above, every level-0 volume a build writes: the mips are regenerated from level 0.
+    /// (rgb, the material roughness in a), decoded like `albedo`; and the raw integer area weight a build
+    /// keeps per voxel (`accumWeight`, width*height*depth). With the arrays above, every level-0 volume a
+    /// build writes: the mips are regenerated from level 0.
     std::vector<float> emissive;
     /// THE EMISSIVE FACTOR PER HALF-AXIS (JUNCTION-NORMAL-1), rgb per axis of the faces looking +a (P) and -a (N),
     /// as stored: u = f / (1 + f) on 1022 steps of the 10-bit UNORM (f = c / (1022 - c), c = round(u x 1023)) - a
     /// half emits `emissive` x f.
     std::vector<float> emitP, emitN;
     std::vector<unsigned> accumWeight;
-    std::vector<unsigned> positionSums;
     /// THE DIRECT VOLUME (FAR-SUN-2), level 0, premultiplied like `light`: every lamp's direct
     /// term and the emissive - what a hit's read takes out of the store (jah_rq_hit.glsl's bounce
     /// share 1 - D / T). Empty where the cascade keeps none (no bounce texture).
