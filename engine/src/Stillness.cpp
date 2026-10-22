@@ -193,6 +193,7 @@ struct StillnessRun::Impl {
     std::vector<bool> stopSeen;                       ///< per window: its stop frame has been rendered
     Image prev;                                       ///< the previous frame's picture (inside a window)
     Image trailPrev;                                  ///< ...and inside a move's trail
+    std::vector<unsigned char> trailPrevChange;       ///< ...and its per-pixel change from the one before (J1's steps)
     unsigned long long lastRefits = 0;                ///< GpuSceneStatus::rayLevelRefits after the last frame
     bool refitsSeen = false;
     unsigned picW = 0, picH = 0;
@@ -756,13 +757,16 @@ bool StillnessRun::frameDone(std::string &err)
         }
         // NOT THE WINDOW'S FIRST TRAIL FRAME (p.index == the trail's length: the read's finding 7 — a later window's
         // first trail frame diffed against the PREVIOUS window's last picture, the bogus row at its trail's start).
+        std::vector<unsigned char> change;
         if (m.trailPrev.width == pic.width && m.trailPrev.height == pic.height && p.index < w.trail.size()) {
             const unsigned n = m.classes();
             std::vector<double> sum(n + 1, 0.0);
             const unsigned char *a = pic.rgba.data(), *b = m.trailPrev.rgba.data(), *ca = m.classAt.data();
+            change.assign(size_t(m.picW) * m.picH, 0u);
             for (size_t i = 0, np = size_t(m.picW) * m.picH; i < np; ++i, a += 4, b += 4) {
                 const unsigned v = unsigned(std::max(std::abs(int(a[0]) - int(b[0])),
                                                      std::max(std::abs(int(a[1]) - int(b[1])), std::abs(int(a[2]) - int(b[2])))));
+                change[i] = (unsigned char)std::min(v, 255u);
                 const unsigned c = ca[i];
                 const unsigned ks[2] = { 0u, c };
                 for (unsigned j = 0; j < (c ? 2u : 1u); ++j) {
@@ -775,7 +779,24 @@ bool StillnessRun::frameDone(std::string &err)
             }
             for (unsigned k = 0; k <= n; ++k)
                 f.classes[k].meanCodes = f.classes[k].pixels ? sum[k] / f.classes[k].pixels : 0.0;
+            // THE STEPS (J1): a pixel's change beyond the largest its 3x3 neighbourhood showed the frame before.
+            if (m.trailPrevChange.size() == change.size()) {
+                int steps = 0;
+                const int W = int(m.picW), H = int(m.picH);
+                for (int y = 0; y < H; ++y)
+                    for (int x = 0; x < W; ++x) {
+                        unsigned around = 0u;
+                        for (int dy = -1; dy <= 1; ++dy)
+                            for (int dx = -1; dx <= 1; ++dx) {
+                                const int xx = std::clamp(x + dx, 0, W - 1), yy = std::clamp(y + dy, 0, H - 1);
+                                around = std::max(around, unsigned(m.trailPrevChange[size_t(yy) * W + xx]));
+                            }
+                        if (unsigned(change[size_t(y) * W + x]) > around + kStillnessStepCodes) ++steps;
+                    }
+                f.stepPixels = steps;
+            }
         }
+        m.trailPrevChange = std::move(change);
         m.trailPrev = std::move(pic);
     }
     if (p.part == Impl::Part::Window) {
@@ -946,7 +967,7 @@ std::string StillnessReport::tsv() const
         o << "\t" << n << "_px\t" << n << "_max\t" << n << "_mean\t" << n << "_changed\t" << n << "_refl_none\t" << n
           << "_refl_le9\t" << n << "_refl_le17\t" << n << "_refl_le33\t" << n << "_refl_gt33";
     o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\tframe_gpu_ms\tframe_ms"
-      << "\tclass_px\tclass_restart\n";
+      << "\tclass_px\tclass_restart\tstep_px\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -961,8 +982,8 @@ std::string StillnessReport::tsv() const
             o << "\t" << f.restFrames << "\t" << f.sinceRestart << "\t" << f.settleFrames << "\t" << (f.held ? 1 : 0)
               << "\t" << f.rayLevelRefits << "\t" << (f.giRows.empty() ? "-" : f.giRows);
             char ms[64];
-            std::snprintf(ms, sizeof(ms), "\t%.3f\t%.3f\t%d\t%d\n", f.frameGpuMs, f.frameMs, f.classPixels,
-                          f.classRestarts);
+            std::snprintf(ms, sizeof(ms), "\t%.3f\t%.3f\t%d\t%d\t%d\n", f.frameGpuMs, f.frameMs, f.classPixels,
+                          f.classRestarts, f.stepPixels);
             o << ms;
         }
     return o.str();

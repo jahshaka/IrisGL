@@ -183,6 +183,7 @@ public:
         enum class Field : unsigned char { None, Refine, Integrate };
         Field field = Field::None;
         bool fieldReplacing = false;          ///< Integrate: a fresh pass (ifd.replace), else ifd.converge
+        bool fieldEntering = false;           ///< Refine: a scroll's entering pass (ifd.enter, J1)
         Ogre::uint32 fieldBatch = 0u;
         Ogre::Vector3 camPos = Ogre::Vector3::ZERO;
         bool cascadeStage = false;             ///< the cascade stage runs (a built chain, no flush owed)
@@ -1505,6 +1506,10 @@ private:
     unsigned long long                mIfdFollows = 0;
     /// The probes the last scroll integrated in its step frame (GiStatus::ifdScrollProbes).
     unsigned                          mIfdScrolledProbes = 0;
+    /// THE CHANGE A SCROLL INTERRUPTED (PHOTON-2 J1): its cursor and the probes it still owed, resumed once the
+    /// entered planes' entering passes are done (planField); 0 = none. A reset (a new change) supersedes it.
+    Ogre::uint32                      mIfdResumeCursor = 0u;
+    Ogre::uint32                      mIfdResumeOwed = 0u;
     /// ...and how the follows split: window scrolls (the kept probes stand) and
     /// whole re-placements (a resize or a jump of the whole grid; nothing kept).
     unsigned long long                mIfdScrolls = 0;

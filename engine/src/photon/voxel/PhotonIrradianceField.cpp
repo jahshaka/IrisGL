@@ -670,6 +670,21 @@ namespace Ogre
         noteEstimatesReplaced();
     }
     //-------------------------------------------------------------------------
+    void PhotonIrradianceField::invalidateWork()
+    {
+        // The current work's probes (a scroll's entered planes) to value 0, count 0 - the same
+        // Invalidate dispatch, over the work's boxes - then that work, fresh, from its start.
+        if( !mIrradianceTex || !mVctLighting || !mGenerationJob || !mWorkTotal )
+            return;
+        const IntegrationMode mode = mWorkMode;
+        mNumProbesProcessed = 0u;
+        mWorkMode = IntegrateInvalidate;
+        update( mWorkTotal );
+        mNumProbesProcessed = 0u;
+        mWorkMode = mode;
+        noteEstimatesReplaced();
+    }
+    //-------------------------------------------------------------------------
     uint32 PhotonIrradianceField::changeCursor() const
     {
         if( !changeRemaining() )
@@ -833,8 +848,9 @@ namespace Ogre
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::endRefinements()
     {
-        // Only a REFINEMENT ends early: work that replaces estimates always runs whole.
-        if( mWorkMode != IntegrateRefine && !isWorkDone() )
+        // Only a REFINEMENT ends early: work that replaces estimates always runs whole - and an
+        // ENTERING pass (J1) is the probes' first samples, not a refinement.
+        if( ( mWorkMode != IntegrateRefine && !isWorkDone() ) || entering() )
             return;
         mRefinesOwed = 0u;
         mNumProbesProcessed = mWorkTotal;
@@ -842,6 +858,18 @@ namespace Ogre
     //-------------------------------------------------------------------------
     bool PhotonIrradianceField::beginOwedRefinement()
     {
+        // THE ENTERING PASSES (J1): the same boxes again, one sample deeper, before the schedule.
+        if( mEnterDepth && isWorkDone() )
+        {
+            if( mEnterDepth < mChangeSamples )
+            {
+                ++mEnterDepth;
+                mNumProbesProcessed = 0u;
+                mWorkMode = IntegrateRefine;
+                return true;
+            }
+            mEnterDepth = 0u;
+        }
         if( !isWorkDone() || !mRefinesOwed )
             return false;
         --mRefinesOwed;
@@ -861,6 +889,7 @@ namespace Ogre
     {
         mWorkRotate = 0u;
         mWorkWhole = true;
+        mEnterDepth = 0u;
         mNumWorkBoxes = 1u;
         for( size_t i = 0u; i < 3u; ++i )
         {
@@ -986,9 +1015,11 @@ namespace Ogre
                 }
             }
         }
-        // THE WORK: the entered planes, fresh.
+        // THE WORK: the entered planes, fresh - the first ENTERING pass (J1: one sample a pass, to
+        // mChangeSamples, unless the caller integrates them inline: enterInline).
         setBoxesFromBands( enteredLo, enteredNum );
         mNumProbesProcessed = 0u;
+        mEnterDepth = 1u;
         // The entered planes have no history (PHOTON-FIELD-ROTATE-1), and they owe the
         // refinements that bring them to the target.
         mWorkMode = IntegrateFresh;
@@ -1112,7 +1143,10 @@ namespace Ogre
             // w: THE INPUTS' SERIAL a fresh or change integration stamps (K4: mChangeSerial).
             mIfGenParams.latticeOrigin.w = mChangeSerial;
             mIfGenParams.sweep.x = static_cast<uint32>( mWorkMode );
-            mIfGenParams.sweep.y = mTargetSamples;
+            // An ENTERING refinement (J1) lifts its probes to mEnterDepth samples and no further.
+            mIfGenParams.sweep.y = mEnterDepth >= 2u && mWorkMode == IntegrateRefine
+                                       ? std::min( mTargetSamples, mEnterDepth )
+                                       : mTargetSamples;
             mIfGenParams.sweep.z = mKeepOnChange;
             mIfGenParams.sweep.w = mRotateRays ? 1u : 0u;
             mIfGenParams.varianceStop = float4(
@@ -1135,7 +1169,8 @@ namespace Ogre
         // mChangeSamples INTEGRATIONS NOW (setChangeSamples) - the same probes, refined in place, before the
         // batch is read: a re-placement, a build, an entering plane and a change alike never leave a
         // one-sample probe.
-        if( ( mWorkMode == IntegrateChange || mWorkMode == IntegrateFresh ) && mChangeSamples > 1u )
+        if( ( mWorkMode == IntegrateChange || ( mWorkMode == IntegrateFresh && !mEnterDepth ) ) &&
+            mChangeSamples > 1u )
         {
             // Sub-pass i lifts a probe to i + 1 samples and no further (its target, for the pass): a probe
             // the first pass skipped (K4: it holds the inputs already, at least as deep) exits at its

@@ -271,6 +271,12 @@ namespace Ogre
         uint32          mWorkRotate = 0u;
         /// Jahshaka (K1): the work is the whole grid (setWholeWork), not a scroll's bands.
         bool            mWorkWhole = true;
+        /// Jahshaka (PHOTON-2 J1): THE ENTERING PASSES - a scroll's entered planes, invalidated in the
+        /// follow frame (count 0: no weight in the reader), take one sample a pass at the budget: pass k
+        /// (1 = fresh, 2.. = a refinement to k samples) lifts every entered probe to k samples, to
+        /// mChangeSamples, and the reader's weight min( samples / mChangeSamples, 1 ) fades them in
+        /// over those passes. 0 = no entering work.
+        uint32          mEnterDepth = 0u;
         /// Jahshaka (K4): THE INPUTS' SERIAL - moved by reset() (the inputs changed); a fresh or a
         /// change integration stamps its probe with it (the job's JAH_IFD_STAMP) and a CHANGE skips a
         /// probe already stamped (it holds these inputs: a scroll's entered plane, or a probe the
@@ -558,6 +564,15 @@ namespace Ogre
             may then end the probe at once (its minimum is 4).
         */
         void setChangeSamples( uint32 samples ) { mChangeSamples = std::max( 1u, samples ); }
+        /** Jahshaka (PHOTON-2 J1): a scroll's entered planes FADE IN. In the follow frame the caller
+            invalidates them (invalidateWork: count 0, weight 0 in the reader) and their work runs at
+            the budget one sample a pass (the entering passes, mEnterDepth); entering() is true until
+            the last pass (to getChangeSamples() samples) is done. enterInline() instead integrates them
+            getChangeSamples() deep now (a paused budget, which runs no later pass).
+        */
+        void invalidateWork();
+        void enterInline() { mEnterDepth = 0u; }
+        bool entering() const { return mEnterDepth != 0u && !( isWorkDone() && mEnterDepth >= mChangeSamples ); }
         uint32 getChangeSamples() const { return mChangeSamples; }
         uint32 getTargetSamples() const { return mTargetSamples; }
         IntegrationMode getWorkMode() const { return mWorkMode; }

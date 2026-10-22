@@ -136,6 +136,9 @@
 	// bias needs (the paper's normal/view offset, in probe spacings), and what any
 	// declaration the two hooks inside the cage loop need. The grid origin below moved
 	// one line down for it; nothing between the two reads it.
+	// Jahshaka (PHOTON-2 J1): THE COUNT THAT IS A WHOLE PROBE - a probe's weight rises with its samples,
+	// min( samples * ifdCountFade, 1 ); a host sets the fade to 1 / its full count (1 = upstream's rule).
+	float ifdCountFade = 1.0;
 	@insertpiece( custom_ps_ifdCagePrologue )
 
 	// A HOST PIECE MAY DECLINE THE WHOLE CAGE FOR THIS PIXEL, which is the one thing
@@ -268,7 +271,7 @@
 		// probe in front of the surface reads as having no probe there, which is what
 		// hands its pixel to the host's fallback. A converged field (every count >= 1)
 		// computes exactly what it always did.
-		weight *= saturate( irrSample.w );
+		weight *= saturate( irrSample.w * ifdCountFade );
 		ifdIrradiance += irrColour * weight;
 		sumIfdValidWeight += weight;
 

@@ -136,7 +136,14 @@ struct StillnessFrame {
     /// how many, and how many of them restarted their history (count 1: refused or absent). -1 = no copy of this
     /// frame came back (or the gather held: a held frame writes no history).
     int                classPixels = -1, classRestarts = -1;
+    /// THE STEPS (PHOTON-2 J1; a trail frame's): pixels whose change from the frame before exceeds by more than
+    /// kStillnessStepCodes the largest change its 3x3 neighbourhood showed the frame before - a jump the motion around
+    /// it does not explain (a field's entering planes landing in one frame). -1 = not measured (the trail's first
+    /// two frames, a window frame).
+    int                stepPixels = -1;
 };
+/// The margin of StillnessFrame::stepPixels, in 8-bit codes.
+constexpr unsigned kStillnessStepCodes = 4u;
 
 /// What one window measured.
 struct StillnessWindow {

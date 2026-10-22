@@ -1101,6 +1101,10 @@ constexpr ArmDef kArms[] = {
       "The irradiance field SCROLLS on a cascade-0 step (keeps the probes that stay inside). 0 = the "
       "same snapped window re-placed WHOLE, the behaviour the scroll replaced (gi.field_scroll walks "
       "one path both ways). Was JAHSHAKA_GI_FIELD_NO_SCROLL (a per-step read)." },
+    { ArmId::FieldEnterInline, 0.0, 0.0, 1.0,
+      "A MEASUREMENT arm (PHOTON-2 J1): a scroll's entered planes integrated in the follow frame, four samples "
+      "deep (H3's rule, 16.7 ms GPU on photon-court's crossing), instead of invalidated and faded in one sample "
+      "a pass at the budget. 0 = the shipped fade." },
     { ArmId::DiffuseConeSkip, 1.0, 0.0, 1.0,
       "The pixel's four-cone diffuse is marched only where the irradiance field's fallback weight "
       "(1 - confidence) is above zero - the only pixels it reaches (SPEED-GPU, audit PH-2). 0 = "

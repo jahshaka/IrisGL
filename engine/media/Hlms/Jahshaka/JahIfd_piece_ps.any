@@ -228,6 +228,9 @@
 	float3 ifdProbeCounts = float3( passBuf.irradianceField.numProbesAggregated.x,
 									passBuf.jahIfd.y, passBuf.jahIfd.z );
 	bool  ifdHaveCounts = passBuf.jahIfd.y > 0.5;
+	// THE FADE-IN (PHOTON-2 J1): jahIfd.w = 1 / the samples a probe holds when whole (the field's
+	// change depth) - a probe a scroll entered fades in over its first samples; 0 = no state: upstream's rule.
+	ifdCountFade = passBuf.jahIfd.w > 0.0 ? passBuf.jahIfd.w : 1.0;
 	float3 ifdMaxProbe = ifdHaveCounts ? ifdProbeCounts - float3( 1.0, 1.0, 1.0 )
 									   : float3( 1e9, 1e9, 1e9 );
 	// How much of the cage's final weight comes from probes IN FRONT of the
@@ -419,6 +422,11 @@
 	// The counts are absent only in a state the host cannot produce (the GI arm
 	// writes them before it binds the field); there, the box fade is skipped.
 	float ifdConfidence = min( ifdHaveCounts ? ifdEdgeFade : 1.0, ifdFrontFade );
+	// ...TIMES THE CAGE'S VALID SHARE (PHOTON-2 J1): the weight its probes hold over the weight they would
+	// hold whole - 1 exactly in a field whose probes are whole (the two sums are the same numbers added in
+	// the same order), less where a scroll's entered probes are still fading in, so the pixel hands over
+	// from the fallback to the field as they fill, never in one step.
+	ifdConfidence *= sumIfdWeight > 0.0 ? sumIfdValidWeight / sumIfdWeight : 1.0;
 
 	// (c) OURS, AND THE SECOND HALF OF ENGINE-6 ITEM 1: NO PROBE OF THIS CAGE
 	// CAN SEE ME.

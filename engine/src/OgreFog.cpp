@@ -858,13 +858,13 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     // intensity dial's float is deleted, PHOTON-GATHER-1d): x is the field's
     // window offset, packed (PHOTON-WRITER-1's scroll: the reader's modulo), yz
     // are the field's Y and Z probe counts, which upstream's own
-    // IrradianceField block does not carry and the cage clamp needs. Then the
-    // std140 pad before jahEnv's 16-byte alignment.
+    // IrradianceField block does not carry and the cage clamp needs; w the
+    // fade-in's 1 / the samples a whole probe holds (PHOTON-2 J1; it was the pad).
     const IfdState ifd = ifdState(sceneManager);
     *passBufferPtr++ = ifd.windowOffsetPacked;     // the field's window (PHOTON-WRITER-1)
     *passBufferPtr++ = ifd.numProbesY;
     *passBufferPtr++ = ifd.numProbesZ;
-    *passBufferPtr++ = 0.0f;                       // std140 pad
+    *passBufferPtr++ = ifd.countFade;              // w: the fade-in's 1 / whole samples (PHOTON-2 J1)
     // jahEnv (PHOTON-ENV-1): rgb = the environment light's gain per channel on
     // the cube, w = the cube's own mip count. Written unconditionally like every
     // field above — the shader declares it only when it claimed the slot, and a

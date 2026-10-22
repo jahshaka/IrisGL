@@ -1931,6 +1931,7 @@ public:
     X(AtomClusterFootprint, "atom.clusterFootprint") /* the cluster test's footprint in texels a side (8 shipped; 4 = the instance test's - the measured arm, ATOM-8) */ \
     X(CardFootprint, "cards.footprintTexels") /* the card read's footprint gate */ \
     X(FieldScroll, "gi.fieldScroll") /* the irradiance field scrolls (0: re-placed whole) */ \
+    X(FieldEnterInline, "gi.fieldEnterInline") /* a scroll's entered planes integrated inline, 4 deep (the H3 arm) */ \
     X(DiffuseConeSkip, "photon.diffuseConeSkip") /* the pixel's cone diffuse only where the field's fallback weight is > 0 */ \
     X(SpecularConeSkip, "photon.specularConeSkip") /* the pixel's specular cone only where the reflection's w < 1 */ \
     X(GatherDecodeHits, "gather.decodeHits") /* every gather hit a record (the decode route), never the caches */ \
@@ -3208,6 +3209,9 @@ public:
         /// 16384 z - exact in a float, each below the 128-probe axis cap - for
         /// the reader's JahFieldWindow modulo (JahIfd_piece_ps.any).
         float windowOffsetPacked = 0.0f;
+        /// THE FADE-IN (PHOTON-2 J1): 1 / the samples a probe holds when whole (the field's change depth) - the
+        /// reader's weight is min( samples / that, 1 ). 0 = no field state.
+        float countFade = 0.0f;
     };
     static void     setIfdState(const Ogre::SceneManager *sm, const IfdState &state);
     static IfdState ifdState(const Ogre::SceneManager *sm);

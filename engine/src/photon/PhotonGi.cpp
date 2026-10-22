@@ -983,6 +983,7 @@ void PhotonComponent::reintegrateFieldAfterInjection() {
         // IS cascade 0's lighting under a chain.
         if (mVctLighting) mIfd->setVctLighting(mVctLighting);
         mIfd->reset();
+        mIfdResumeOwed = 0u;   // the new change covers every probe (J1)
         mIfdProbesDone = 0u;
         // Paused budget: the field converges inline (5 ms of GPU).
         if (!mIfdProbesPerFrame) {
@@ -7125,6 +7126,7 @@ void PhotonComponent::buildIrradianceField() {
         mIfdScrolls = mIfdReplacements = 0;
         mIfdTotalProbes    = total;
         mIfdProbesDone     = 0u;
+        mIfdResumeOwed     = 0u;
         mIfdProbesPerFrame = ifdProbesPerFrame(settings, mGi.updateBudget, total);
 
         // CONVERGE NOW, in one dispatch, BEFORE binding. Two reasons and both
@@ -7168,6 +7170,7 @@ void PhotonComponent::pushIfdState(const Ogre::uint32 numProbes[3]) {
     if (mIfd) {
         const Ogre::uint32 *o = mIfd->getWindowOffset();
         st.windowOffsetPacked = float(o[0] + 128u * o[1] + 16384u * o[2]);
+        st.countFade = 1.0f / float(std::max(mIfd->getChangeSamples(), 1u));
     }
     FogHlmsListener::setIfdState(mSceneMgr, st);
 }
@@ -7179,6 +7182,7 @@ void PhotonComponent::teardownIrradianceField() {
     // one — which converges WHOLE at its build and owes nothing.
     mIfdFollowOwed = 0;
     mIfdTotalProbes = mIfdProbesDone = mIfdProbesPerFrame = 0u;
+    mIfdResumeOwed = 0u;
     mIfdVolumeOrigin = mIfdVolumeSize = Ogre::Vector3::ZERO;
     mIfdProbeCounts[0] = mIfdProbeCounts[1] = mIfdProbeCounts[2] = 0u;
     mIfdFollows = 0;
@@ -7213,7 +7217,7 @@ bool PhotonComponent::giInputsOwed() const {
     // the picture (harvestBounceEnergy).
     for (const VctCascade &c : mVctCascades) injectionOwed = injectionOwed || c.bounceEnergyPending;
     const bool fieldBusy = mIfd && mIfdTotalProbes > 0u &&
-                           (mIfdFollowOwed != 0 || mIfdProbesDone < mIfdTotalProbes ||
+                           (mIfdFollowOwed != 0 || mIfdProbesDone < mIfdTotalProbes || mIfdResumeOwed != 0u ||
                             (mIfdProbesPerFrame > 0u && (mIfd->getRefinesOwed() > 0u || !mIfd->isWorkDone())));
     return rebuildPending || injectionOwed || fieldBusy;
 }
@@ -7240,6 +7244,14 @@ void PhotonComponent::planField(FrameWork &w) {
     // all — which is also what keeps the zero-work-group abort unreachable on
     // this path.
     if (!mIfdProbesPerFrame) return;
+    // A CHANGE A SCROLL INTERRUPTED resumes once the entered planes have faded in (J1).
+    if (mIfdResumeOwed && !mIfd->entering()) {
+        JAH_TRY {
+            mIfd->resumeChange(mIfdResumeCursor, mIfdResumeOwed);
+            mIfdProbesDone = mIfdTotalProbes - std::min(mIfdResumeOwed, mIfdTotalProbes);
+        } JAH_CATCH(mError, );
+        mIfdResumeOwed = 0u;
+    }
     if (mIfdProbesDone >= mIfdTotalProbes) {
         // THE FIRST SAMPLES ARE EVERYWHERE (kIfdChangeSamples deep, PHOTON-2 K2); THE FIELD
         // REFINES (PHOTON-FIELD-ROTATE-1). Each whole-grid refinement gives every probe below the target one more
@@ -7255,6 +7267,7 @@ void PhotonComponent::planField(FrameWork &w) {
             if (mIfd->allProbesStopped()) { mIfd->endRefinements(); return; }   // converged early
             if (mIfd->isWorkDone() && !mIfd->beginOwedRefinement()) return;   // converged
             w.field = FrameWork::Field::Refine;
+            w.fieldEntering = mIfd->entering();
             Ogre::uint32 batch = mIfdProbesPerFrame;
             if (mGiCamStillFrames) {
                 const float open = mIfdTotalProbes
@@ -7290,7 +7303,7 @@ void PhotonComponent::planField(FrameWork &w) {
 void PhotonComponent::recordField(const FrameWork &w) {
     if (w.field == FrameWork::Field::None) return;
     JAH_TRY {
-        const char *row = w.field == FrameWork::Field::Refine ? "ifd.refine"
+        const char *row = w.field == FrameWork::Field::Refine ? (w.fieldEntering ? "ifd.enter" : "ifd.refine")
                         : w.fieldReplacing ? "ifd.replace" : "ifd.converge";
         {
             monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, row, mRoot->getRenderSystem());
@@ -7416,6 +7429,7 @@ void PhotonComponent::followCascade0Field(GiStaleReason reason) {
                 ? Ogre::Vector3(mPlacementPin.fieldOrigin.x, mPlacementPin.fieldOrigin.y, mPlacementPin.fieldOrigin.z)
                 : origin;
         mIfd->setFieldVolume(placeAt, size);
+        mIfdResumeOwed = 0u;   // a re-placement keeps nothing to resume (J1)
         mIfdVolumeOrigin = placeAt;
         mIfdVolumeSize   = size;
         ++mIfdFollows;
@@ -7458,6 +7472,7 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
         // radiance changed, the probes did not move - progressive, over the
         // converged atlas, exactly as a light move re-integrates.
         mIfd->reset();
+        mIfdResumeOwed = 0u;   // the new change covers every probe (J1)
         mIfdProbesDone = 0u;
         if (!mIfdProbesPerFrame) {
             {
@@ -7478,6 +7493,7 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
         Ogre::Vector3 target = mIfdVolumeOrigin;
         for (int a = 0; a < 3; ++a) target[a] += float(d[a]) * spacing[a];
         mIfd->setFieldVolume(target, size);
+        mIfdResumeOwed = 0u;   // a re-placement keeps nothing to resume (J1)
         mIfdVolumeOrigin = target;
         ++mIfdFollows;
         ++mIfdReplacements;     // ifdFollows = ifdScrolls + ifdReplacements, this arm included
@@ -7505,25 +7521,37 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
     ++mIfdFollows;
     ++mIfdScrolls;              // (never counted before PHOTON-FIELD-ROTATE-1: the status read 0)
     pushIfdState(mIfdProbeCounts);                      // the reader's modulo offset
+    // THE STEP FRAME (PHOTON-2 J1): the entered planes' tiles held the planes that left, so before any pass
+    // reads them they are INVALIDATED - count 0, no weight in the reader, whose pixels there fall back as outside
+    // the window - and FADED IN at the budget: one sample a pass to kIfdChangeSamples (the entering passes,
+    // PhotonIrradianceField::entering), the reader's weight min( samples / kIfdChangeSamples, 1 ) (PhotonIfd_
+    // piece_ps.any, JahIfd's validity share), so the hand-over from the fallback to the field is a four-step fade,
+    // never a step, and the follow frame pays an invalidation. (H3 integrated them four deep inline: 16.7 ms GPU on
+    // each follow frame of photon-court's crossing, 11.3 on Bistro - the arm gi.fieldEnterInline keeps it, to
+    // measure.) A PAUSED field runs no later pass: its planes integrate inline. PRICED by "ifd.follow".
+    const bool inlineEnter = !mIfdProbesPerFrame || (mEngine && mEngine->armRegistry().on(ArmId::FieldEnterInline));
     {
-        // THE STEP FRAME'S WHOLE COST: the entered planes, inline, before any
-        // pass reads them (their tiles held the planes that left) — kIfdChangeSamples
-        // DEEP (PHOTON-2 stage 2a, its round's H3 and K2: a fresh integration is four
-        // samples deep, PhotonIrradianceField::setChangeSamples), so a probe that
-        // enters the window is never read as a one-sample value; the band's
-        // refinements to the target stay owed to the budget. (To the target inline,
-        // the stage's first cut, cost 17.1 ms GPU on each follow frame on
-        // photon-court and 20.4 on Bistro.) PRICED by the row's GPU time ("ifd.follow").
         const Ogre::uint32 entered = mIfd->getWorkProbeCount();
         monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
                                  mRoot->getRenderSystem());
-        mIfd->update(entered);
-        work.setUnits(entered * mIfd->getChangeSamples());
+        if (inlineEnter) {
+            mIfd->enterInline();
+            mIfd->update(entered);
+            work.setUnits(entered * mIfd->getChangeSamples());
+        } else {
+            mIfd->invalidateWork();
+            work.setUnits(entered);
+        }
         mIfdScrolledProbes = entered;
     }
-    if (owed) {
+    if (owed && inlineEnter) {
         mIfd->resumeChange(cursor, owed);
         mIfdProbesDone = mIfdTotalProbes - owed;
+    } else if (owed) {
+        // ...THE CHANGE IN FLIGHT RESUMES AFTER THE ENTERING PASSES (planField), where it was.
+        mIfdResumeCursor = cursor;
+        mIfdResumeOwed = owed;
+        mIfdProbesDone = mIfdTotalProbes;
     } else {
         mIfdProbesDone = mIfdTotalProbes;
         // THE REFINEMENTS THE SCROLL OWES (scrollWindow, K3): target - 1 passes over the entered
