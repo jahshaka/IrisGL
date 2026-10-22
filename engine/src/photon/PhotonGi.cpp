@@ -455,9 +455,10 @@ static const Ogre::uint32 kIfdChangeSamples = kPhotonBlendFrames;
 // its owed work fast — kIfdRestIntegrations probe integrations a frame, calibrated on Bistro Exterior at Epic 1080p
 // (an integration measured 3.3 us there: 1,792 of them = 5.9 ms, under the round's 6 ms). A change integrates every
 // probe of its batch kIfdChangeSamples deep, so its batch is a quarter of that; a REFINEMENT integrates only the
-// probes the variance stop has not stopped (a stopped probe's group exits at its history read), so its batch is
-// that over the open share of the grid (the stop's reading, four frames late) — the same GPU, a larger batch as the
-// field converges. Moving: the budget's own batch.
+// probes the variance stop has not stopped (a stopped probe's group exits at its history read), so once no more
+// than kIfdRestIntegrations probes are open (the stop's reading, four frames late: high, never low) its batch is the
+// whole remaining pass, else kIfdRestIntegrations probes - the cap held whatever the open probes' places (L1).
+// Moving: the budget's own batch.
 // (A refinement's batch was six times that, from a misread calibration: the first pass after a change finds every
 // probe open, and Bistro's frame 17 refined all 8,192 at once - a 41 ms GPU frame, ~19 ms of it the field: an
 // open probe's sample costs what a change's does, ~2.3 us there.)
@@ -7270,10 +7271,14 @@ void PhotonComponent::planField(FrameWork &w) {
             w.fieldEntering = mIfd->entering();
             Ogre::uint32 batch = mIfdProbesPerFrame;
             if (mGiCamStillFrames) {
-                const float open = mIfdTotalProbes
-                    ? 1.0f - float(std::min(mIfd->getProbesStopped(), mIfdTotalProbes)) / float(mIfdTotalProbes)
-                    : 1.0f;
-                batch = std::max(batch, Ogre::uint32(float(kIfdRestIntegrations) / std::max(open, 1.0f / 16.0f)));
+                // THE REST BATCH IS BOUNDED BY THE OPEN COUNT (PHOTON-2 round 2, L1; the round's read F1): the open
+                // probes of the grid by the last reading (stops only rise inside one epoch, so the reading is high,
+                // never low) bound the pass's integrations whatever their place - the whole remaining pass when no
+                // more than the rest budget are open, else the rest budget's probes. (The share's widening, budget /
+                // open share, assumed the open probes spread evenly; they cluster - a texel that reads no light keeps
+                // its probe open for ever, inside walls and under floors - and it reached 2.1x the cap.)
+                const Ogre::uint32 open = mIfdTotalProbes - std::min(mIfd->getProbesStopped(), mIfdTotalProbes);
+                batch = open <= kIfdRestIntegrations ? mIfd->getWorkRemaining() : std::max(batch, kIfdRestIntegrations);
             }
             w.fieldBatch = std::min(batch, mIfd->getWorkRemaining());
         } JAH_CATCH(mError, );
