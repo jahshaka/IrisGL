@@ -868,7 +868,15 @@ void main()
 	const vec3 T = vec3( 1.0 + sg * worldN.x * worldN.x * a0, sg * b0, -sg * worldN.x );
 	const vec3 B = vec3( b0, sg + worldN.y * worldN.y * a0, -worldN.y );
 	const vec3 Ve = vec3( dot( V, T ), dot( V, B ), dot( V, worldN ) );
-	const vec3 Ht = sampleGgxVndf( Ve, lobeAlpha, sample2( seedPix, uint( p.knobs.z ) ) );
+	// A MIRROR'S ESTIMATOR HAS NO VARIANCE (PHOTON-2 1c): a texel whose lobe is at or under the mirror cut takes
+	// each frame's sample (nearly) whole — the floor's ramp, below — so no history averages what a per-frame random
+	// term adds there, and the picture showed it raw: the mirror's speckle (1.24 codes a frame at rest on
+	// photon-glass, the owner's "white speckle"). So under the cut every random input is fixed: the ray is the lobe's
+	// centre (the exact mirror direction — a lobe this narrow is under a degree), and the hit's mover-visibility
+	// rays (below) turn per texel, never per frame. Above it the history averages them, as before.
+	const bool fixedEstimator = lobeAlpha <= kMirrorAlpha;
+	const vec3 Ht = fixedEstimator ? vec3( 0.0, 0.0, 1.0 )
+								   : sampleGgxVndf( Ve, lobeAlpha, sample2( seedPix, uint( p.knobs.z ) ) );
 	const vec3 H = normalize( Ht.x * T + Ht.y * B + Ht.z * worldN );
 	vec3 L = reflect( -V, H );
 	if( dot( L, worldN ) <= 0.0 )
@@ -990,7 +998,9 @@ void main()
 		const bool metalHit = jahHitIsMetal( hitSlot );
 		const bool decodeAlways = jahHitAlwaysDecodes( hitSlot ) || ( metalHit && sqrt( lobeAlpha ) < p.metal.x );
 		// The mover gate's rotation: this pixel, this frame (hashed into the set's turn).
-		jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^ uint( p.knobs.z ) * 2654435761u;
+		// ...per texel only under the mirror cut (PHOTON-2 1c, above).
+		jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^
+					 ( fixedEstimator ? 0u : uint( p.knobs.z ) * 2654435761u );
 		if( !decodeAlways )
 			traced = jahHitRadianceSourced( hitSlot, world + worldN * bias + L * t, hitN, L,
 											reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
