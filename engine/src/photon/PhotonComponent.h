@@ -1455,9 +1455,22 @@ private:
     /// (audit B3).
     Ogre::Vector3 mGiCamPos = Ogre::Vector3::ZERO;
     bool mGiCamPosKnown = false;
-    /// Consecutive frames the authoritative camera has stood STILL (PHOTON-2 stage 2's round, H2): the field's rest
-    /// budget runs while it is not 0.
+    /// Consecutive frames the authoritative camera has stood STILL (PHOTON-2 stage 2's round, H2).
     unsigned mGiCamStillFrames = 0u;
+    /// THE FIELD'S REST WINDOW (PHOTON-2 round 2, L2): the rest budget runs only here - opened by a camera stop or by
+    /// an edit after a quiet spell (no input write for kIfdRestQuietFrames), closed when the field's work that came
+    /// in it is done, when the camera moves, or after kIfdRestWindowMax frames: never for ever under animation (a
+    /// mover or a ticking lamp under a still camera keeps the moving budget). The window's age in frames (0 = shut),
+    /// whether the field worked in it, the non-field input key and the frames it has stood still.
+    unsigned mIfdRestWindow = 0u;
+    bool mIfdRestWindowWorked = false;
+    unsigned long long mIfdRestInputKey = 0ull;
+    bool mIfdRestInputKnown = false;
+    unsigned mIfdQuietFrames = 0u;
+    /// The integrations the field's last recorded frame dispatched (GiStatus::ifdDispatchedLastFrame) and that frame.
+    unsigned mIfdLastUnits = 0u;
+    unsigned long long mIfdLastUnitsFrame = 0ull;
+    void stepFieldRestWindow();
     /// A cascade arm was asked for while no camera was known. The next tracking
     /// update flags the caches dirty, and that frame's own applyPendingGi
     /// builds the chain where the camera actually is.

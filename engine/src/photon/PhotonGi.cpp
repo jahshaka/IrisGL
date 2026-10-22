@@ -463,6 +463,14 @@ static const Ogre::uint32 kIfdChangeSamples = kPhotonBlendFrames;
 // probe open, and Bistro's frame 17 refined all 8,192 at once - a 41 ms GPU frame, ~19 ms of it the field: an
 // open probe's sample costs what a change's does, ~2.3 us there.)
 static const Ogre::uint32 kIfdRestIntegrations = 1792u;
+// ...AND ONLY IN THE REST WINDOW (PHOTON-2 round 2, L2; the round's read F2: gated on the camera alone it ran for ever
+// under a still camera while a mover or a ticking lamp kept the gather from holding, ~+2 ms a frame): a camera stop
+// opens it, and so does an edit after kIfdRestQuietFrames frames with no input write; it shuts once the field's work
+// that came in it is done, when the camera moves, or after kIfdRestWindowMax frames (two seconds at 60 Hz: Bistro's
+// field finishes 53 frames after a 4 m dolly). A ticking lamp's later ticks are no edit (no quiet before them): the
+// moving budget, which K1's cursor already makes fair.
+static const unsigned kIfdRestQuietFrames = 30u;
+static const unsigned kIfdRestWindowMax = 120u;
 
 // HOW FAST A RE-CONVERGE RUNS, in "field fractions per frame" at update budget
 // 1. The P0 spike's cost table is the argument for converging FAST rather than
@@ -1230,6 +1238,8 @@ GiStatus PhotonComponent::giStatus() const {
             mIfd->lightAgeBySlab(age);
             st.ifdLightAgeBySlab.assign(age.begin(), age.end());
             st.ifdChangeSkips = mIfd->getChangeSkips();
+            st.ifdRestWindow = mIfdRestWindow;
+            st.ifdDispatchedLastFrame = mIfdLastUnitsFrame + 1u >= giWriterFrame() ? mIfdLastUnits : 0u;
         }
         {
             // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest; giInputsOwed).
@@ -7234,6 +7244,7 @@ void PhotonComponent::planField(FrameWork &w) {
             mIfdWriteFrame = giWriterFrame();
         }
     } JAH_CATCH(mError, );
+    stepFieldRestWindow();
     // A DEFERRED FOLLOW IS OWED: nothing integrates until it is paid
     // (mIfdFollowOwed). Cascade 0's rebuild last frame may have re-created the
     // light voxel textures this job binds, and `followCascade0Field` is what
@@ -7270,7 +7281,7 @@ void PhotonComponent::planField(FrameWork &w) {
             w.field = FrameWork::Field::Refine;
             w.fieldEntering = mIfd->entering();
             Ogre::uint32 batch = mIfdProbesPerFrame;
-            if (mGiCamStillFrames) {
+            if (mIfdRestWindow) {
                 // THE REST BATCH IS BOUNDED BY THE OPEN COUNT (PHOTON-2 round 2, L1; the round's read F1): the open
                 // probes of the grid by the last reading (stops only rise inside one epoch, so the reading is high,
                 // never low) bound the pass's integrations whatever their place - the whole remaining pass when no
@@ -7301,8 +7312,43 @@ void PhotonComponent::planField(FrameWork &w) {
                                   ? mIfd->getChangeSamples()
                                   : 1u;
     const Ogre::uint32 integrations =
-        mGiCamStillFrames ? std::max(mIfdProbesPerFrame, kIfdRestIntegrations) : mIfdProbesPerFrame;
+        mIfdRestWindow ? std::max(mIfdProbesPerFrame, kIfdRestIntegrations) : mIfdProbesPerFrame;
     w.fieldBatch = std::min(std::max(integrations / deep, 1u), mIfdTotalProbes - mIfdProbesDone);
+}
+
+void PhotonComponent::stepFieldRestWindow() {
+    // THE INPUTS BUT THE FIELD'S OWN (and the cards', which follow them): the lights, the geometry, the edits, the
+    // lighting serial (an injection landing, a settle step, a cascade rebuild) and the cloud layer's GI.
+    unsigned long long key = 1469598103934665603ull;
+    const auto fold = [&key](unsigned long long v) {
+        key ^= v;
+        key *= 1099511628211ull;
+    };
+    fold(mScene.lightWriteSerial());
+    fold(mScene.lightsRemoved());
+    fold(mScene.shadowEpoch() + mScene.rayLevelRefits());
+    fold(mMaterialEditSerial);
+    fold(giLightingSerial());
+    fold(mScene.cloudGiSerial());
+    const bool wrote = mIfdRestInputKnown && key != mIfdRestInputKey;
+    if (!mGiCamStillFrames) {
+        mIfdRestWindow = 0u;                                    // moving: the moving budget
+    } else if (mGiCamStillFrames == 1u || (wrote && mIfdQuietFrames >= kIfdRestQuietFrames)) {
+        mIfdRestWindow = 1u;                                    // a camera stop, or an edit after a quiet spell
+        mIfdRestWindowWorked = false;
+    } else if (mIfdRestWindow) {
+        ++mIfdRestWindow;
+    }
+    mIfdQuietFrames = wrote ? 0u : std::min(mIfdQuietFrames + 1u, 1u << 20);
+    mIfdRestInputKey = key;
+    mIfdRestInputKnown = true;
+    if (mIfdRestWindow && mIfd) {
+        const bool busy = mIfdFollowOwed != 0 || mIfdProbesDone < mIfdTotalProbes || mIfdResumeOwed != 0u ||
+                          mIfd->getRefinesOwed() > 0u || !mIfd->isWorkDone();
+        if (busy) mIfdRestWindowWorked = true;
+        // ...SHUT once the work that came in it is done, or at its length.
+        if ((mIfdRestWindowWorked && !busy) || mIfdRestWindow > kIfdRestWindowMax) mIfdRestWindow = 0u;
+    }
 }
 
 void PhotonComponent::recordField(const FrameWork &w) {
@@ -7314,8 +7360,11 @@ void PhotonComponent::recordField(const FrameWork &w) {
             monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, row, mRoot->getRenderSystem());
             mIfd->update(w.fieldBatch);
             // THE ROW COUNTS INTEGRATIONS (K2): a change's or a re-placement's probe is getChangeSamples() of them.
-            work.setUnits(w.field == FrameWork::Field::Integrate ? w.fieldBatch * mIfd->getChangeSamples()
-                                                                 : w.fieldBatch);
+            const unsigned units = w.field == FrameWork::Field::Integrate ? w.fieldBatch * mIfd->getChangeSamples()
+                                                                          : w.fieldBatch;
+            work.setUnits(units);
+            mIfdLastUnits = units;
+            mIfdLastUnitsFrame = giWriterFrame();
         }
         if (w.field == FrameWork::Field::Integrate)
             mIfdProbesDone = std::min(mIfdTotalProbes, mIfdProbesDone + w.fieldBatch);
