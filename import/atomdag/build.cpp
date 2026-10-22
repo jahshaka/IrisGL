@@ -100,7 +100,7 @@ Sphere enclose(const std::vector<Sphere> &s, int *grown)
 /// THE VERTEX STORE (stage 2): the mesh's four solved buffers, copied once, and the placed survivors appended.
 struct PosKey
 {
-    float p[3];
+    float p[3] = { 0.0f, 0.0f, 0.0f };
     bool operator==(const PosKey &o) const { return p[0] == o.p[0] && p[1] == o.p[1] && p[2] == o.p[2]; }
 };
 struct PosKeyHash
