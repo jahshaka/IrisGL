@@ -5512,6 +5512,12 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
     // UNDEFINED -> GENERAL, and CLEARED: a distance of zero is what
     // rq_reflect.comp reads as "no history here", so a freshly made pair is
     // rejected by the reprojection test rather than believed.
+    // AFTER WHAT TOUCHED THEM (PHOTON-7 stage 0, AB E19): a CAMERA CUT clears images
+    // the frames before wrote and read - the trace, the temporal, the filter and the
+    // hit write-back (compute) and the history readback's copy (transfer) - so the
+    // clear waits for those stages and makes their writes available before it writes;
+    // a freshly made image has no earlier access and the same barrier costs it nothing.
+    // The old contents are discarded (UNDEFINED): they are cleared.
     constexpr int kImages = 7;
     VkImageMemoryBarrier toGeneral[kImages] = {};
     ReflectImage *imgs[kImages] = { &rv.hist[0], &rv.hist[1], &rv.dist[0], &rv.dist[1], &rv.sample, &rv.reference,
@@ -5525,10 +5531,11 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
         toGeneral[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         toGeneral[i].subresourceRange.levelCount = 1;
         toGeneral[i].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+        toGeneral[i].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
         toGeneral[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     }
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, kImages, toGeneral);
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, kImages, toGeneral);
     VkClearColorValue zero{};
     VkImageSubresourceRange range{};
     range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
