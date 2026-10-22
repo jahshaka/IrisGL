@@ -88,6 +88,7 @@
                 ["jahCloudOrigin",          [0,0,0,0],  "float"],
                 ["higherMipHalfWidth",      [1],        "int"],
                 ["chainSelf",               [0],        "uint"],
+                ["lightsPerVoxel",          [16],       "uint"],
                 ["chainOrigin",             [0,0,0,1],  "float"],
                 ["chainRes",                [1,1,1,1e30], "float"]
             ],

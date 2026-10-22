@@ -79,6 +79,9 @@ namespace Ogre
     };
 
     static const IdString NumVctCascadesProp = "hlms_num_vct_cascades";
+    /// The source radius's store floor (addLight): the lobes' ceiling 2 x the bounce's gain at r = 0.875.
+    static const float kSourceStoreHeadroom = 16.0f;
+    static float maxPeak( const ColourValue &c ) { return std::max( std::max( c.r, c.g ), c.b ); }
 
     namespace
     {
@@ -239,6 +242,7 @@ namespace Ogre
 
         mShaderParams = &mLightInjectionJob->getShaderParams( "default" );
         mNumLights = mShaderParams->findParameter( "numLights" );
+        mLightsPerVoxel = mShaderParams->findParameter( "lightsPerVoxel" );
         mBakingMultiplierParam = mShaderParams->findParameter( "bakingMultiplier" );
         mVoxelCellSize = mShaderParams->findParameter( "voxelCellSize" );
         mInvVoxelResolution = mShaderParams->findParameter( "invVoxelResolution" );
@@ -416,8 +420,20 @@ namespace Ogre
                 rectPoints[1].y = cosf( outerAngle.valueRadians() * 0.5f );
                 rectPoints[1].z = light->getSpotlightFalloff();
             }
+            // THE SOURCE RADIUS (PHOTON-7 stage 1): the store holds radiance (k = 1) in RGBA16F, and a point or spot
+            // light's peak irradiance is I / rSrc^2 (JahBrdf's falloff) - a 1 mm source of 8 is 8e6, past the
+            // format's 65504: +inf in the store, spread by every pass and mip. So the voxel list holds a source at no
+            // less than its STORE FLOOR rMin = sqrt( 16 I / 65504 ), I the peak intensity (D / pi): the lobes' ceiling
+            // (a surface re-emits at most its diffuse plus its specular albedo, 2) times the bounce's gain at r = 0.875
+            // (8; the measured cascades reach 0.22 and the sealed room 0.50) - 0.0156 sqrt( I ) m, 4.4 cm for the
+            // default lamp of 8 (whose default 0.1 m radius is above it; the document's 1 mm floor is not). Only the
+            // voxel store's near field of such a lamp changes; the pixel's own light is the lamp's as authored.
             if( punctual )
-                rectPoints[2].x = light->getAttenuationLinear();  // the source radius
+            {
+                const float peakI = static_cast<float>( maxPeak( diffuseColour ) ) / Math::PI;
+                const float rMin = std::sqrt( kSourceStoreHeadroom * std::max( peakI, 0.0f ) / 65504.0f );
+                rectPoints[2].x = std::max( static_cast<float>( light->getAttenuationLinear() ), rMin );
+            }
         }
 
         const float isDoubleSided = light->getDoubleSided() ? 1.0f : 0.0f;
@@ -1510,28 +1526,27 @@ namespace Ogre
 
         PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight = reinterpret_cast<PhotonShaderVoxelLight *>(
             mLightsConstBuffer->map( 0, mLightsConstBuffer->getNumElements() ) );
-        // THE CASCADE'S LIGHTS (P1C-LIGHT-LIST): the scene's one light list
-        // (SceneLightList.h), range-culled against this cascade's box — a point, spot
-        // or area light whose range sphere misses it lights none of its voxels (the
-        // falloff is zero past the range), so it takes no slot and costs no march —
-        // and, when more reach it than the budget holds, the budget's worth with the
-        // most irradiance delivered to the box (SceneLightList's rank),
-        // emitted in the light memory manager's order. The lights over the budget are
-        // counted (getLastLightsOverBudget, GiStatus) and logged, never dropped silently.
+        // THE CASCADE'S LIGHTS (P1C-LIGHT-LIST; PHOTON-7 stage 1, L1): the scene's one light list (SceneLightList.h)
+        // range-culled against this cascade's box - a point, spot or area light whose range sphere misses it lights
+        // none of its voxels (the falloff is zero past the range), so it takes no slot and costs no march - IN THE
+        // LIST'S ONE ORDER (peak intensity x range^2, directional first, then the id), up to the kLightSlots the buffer
+        // holds; and each VOXEL is lit by the FIRST mLightBudget of them that reach IT (LightInjection's per-voxel
+        // count: lightBudgetFor, 16 at 128^3, 128 at 64^3), so which lights a voxel holds is a function of the world
+        // point, never of where the box stands (the per-box rank by the irradiance delivered to the box is deleted).
+        // The lights over the slots are counted (getLastLightsOverBudget, GiStatus) and logged, never dropped silently.
         jahshaka::engine::SceneLightList::Consumer consumer;
         consumer.boxMin = voxelOrigin;
         consumer.boxMax = voxelOrigin + cascadeSize;
         const Vector3 res = mVoxelizer->getVoxelResolution();
         mLightBudget = lightBudgetFor( static_cast<uint32>( res.x * res.y * res.z ) );
-        consumer.budget = mLightBudget;
+        consumer.budget = kLightSlots;
         consumer.lightMask = _lightMask;
         jahshaka::engine::sceneLightListOf( sceneManager ).select( sceneManager, consumer, mSelection );
 
         uint32 numCollectedLights = 0;
         for( Light *light : mSelection.lights )
         {
-            const float maxVal = addLight( vctLight, light, voxelOrigin, invVoxelSize );
-            autoMultiplierValue = std::max( autoMultiplierValue, maxVal );
+            addLight( vctLight, light, voxelOrigin, invVoxelSize );
             ++vctLight;
             ++numCollectedLights;
         }
@@ -1544,35 +1559,25 @@ namespace Ogre
             LogManager::getSingleton().logMessage(
                 "Jahshaka GI: " + StringConverter::toString( mSelection.overBudget ) + " of the " +
                 StringConverter::toString( mSelection.inRange ) +
-                " lights in range of a voxel cascade are over its budget of " +
-                StringConverter::toString( mLightBudget ) +
-                " (the dimmest at the cascade; GiStatus::cascades[].lightsOverBudget)" );
+                " lights in range of a voxel cascade are over its " +
+                StringConverter::toString( kLightSlots ) +
+                " light slots (the last of the scene's light order; GiStatus::cascades[].lightsOverBudget)" );
         }
 
         mLightsConstBuffer->unmap( UO_KEEP_PERSISTENT );
 
-        autoMultiplierValue /= Math::PI;
-        // A SCENE WITH NO VISIBLE LIGHTS HAS NOTHING TO NORMALISE AGAINST, and the
-        // arithmetic below turned that into "the VCT arm contributes nothing": the
-        // maximum radiance collected above is exactly 0, its inverse is +inf, so
-        // mInvBakingMultiplier comes out 0 and the shader's
-        // blendWeight = blendFade * blend * multiplier is 0 for every voxel. That used
-        // to be invisible (no lights, nothing to inject) but it is not any more: a
-        // bound PhotonVoxelLighting switches the PBS ambient pieces off inside its volume, so an
-        // AMBIENT-LIT scene whose only lamp is switched off goes black the moment VCT is
-        // enabled. The fallback for "no measurement available" is the same one
-        // autoMultiplier == false asks for -- mBakingMultiplier -- so the zero case is
-        // folded into that branch. Note the collection loop above gathers only
-        // LAYER_VISIBILITY lights, so a hidden lamp is this case too.
-        if( !autoMultiplier || autoMultiplierValue <= 0.0f )
-            autoMultiplierValue = mBakingMultiplier;
-        else
-            autoMultiplierValue = 1.0f / autoMultiplierValue;
-        mInvBakingMultiplier = 1.0f / autoMultiplierValue;
+        // THE STORE HOLDS RADIANCE, k = 1 (PHOTON-7 stage 1, L1): a voxel's value is the surface's outgoing radiance, the
+        // same at every placement - the per-box normalisation k = pi / D_max (the brightest light in range of the BOX)
+        // made the bytes depend on which lights the box held (a lamp of 8 in range at one placement: every voxel 8x).
+        // The float store holds it with headroom (Bistro Interior, cascade 0 at a lamp of 8: the direct term's peak
+        // 229.1, 286x under the RGBA16F ceiling); a lamp too small for the ceiling is held at its floor radius (addLight).
+        autoMultiplierValue = 1.0f;
+        mInvBakingMultiplier = 1.0f;
 
         const Vector3 voxelCellSize( mVoxelizer->getVoxelCellSize() );
 
         mNumLights->setManualValue( numCollectedLights );
+        mLightsPerVoxel->setManualValue( mLightBudget );
         mBakingMultiplierParam->setManualValue( autoMultiplierValue );
         mVoxelCellSize->setManualValue( voxelCellSize );
         mInvVoxelResolution->setManualValue( invVoxelRes );

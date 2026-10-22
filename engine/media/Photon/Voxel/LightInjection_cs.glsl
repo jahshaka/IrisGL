@@ -131,6 +131,8 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// cascade's (metres; w its cell, metres) and its resolution (xyz) with the world distance its shell ends at (w,
 	// from the march's start: the sum of 8 cells of every cascade up to j; the last one's past any march).
 	uniform uint chainSelf;
+	// Jahshaka (PHOTON-7 stage 1): THE LIGHTS A VOXEL TAKES - the first this many of the list's one order that reach it.
+	uniform uint lightsPerVoxel;
 	uniform float4 chainOrigin[@value( hlms_num_vct_cascades )];
 	uniform float4 chainRes[@value( hlms_num_vct_cascades )];
 vulkan( }; )
@@ -142,6 +144,7 @@ vulkan( }; )
 #define p_invVoxelResolution invVoxelResolution
 #define p_higherMipHalfWidth higherMipHalfWidth
 #define p_chainSelf chainSelf
+#define p_lightsPerVoxel lightsPerVoxel
 #define p_chainOrigin chainOrigin
 #define p_chainRes chainRes
 #define JAH_INJ_CHAIN @value( hlms_num_vct_cascades )

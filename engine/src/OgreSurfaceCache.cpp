@@ -1433,8 +1433,8 @@ void SurfaceCache::relightCards() {
     // range-culled against the box of THIS FRAME'S RELIT CARDS (each card's capture
     // volume; a light whose range misses every one of them lights no texel the job
     // writes — the shader's own per-texel range test says the same) and, past the
-    // job's 64, the 64 that deliver the most irradiance to that box (SceneLightList's
-    // rank), the rest COUNTED (lightsDropped).
+    // job's 64, the first 64 of the list's one order (peak intensity x range^2: SceneLightList),
+    // the rest COUNTED (lightsDropped).
     // P2d makes it per card. ONE source, the sun included: the one light whose
     // visibility is the captured shadow term is the light the capture's shadow
     // node gave its PSSM maps, which is the frame's rule applied to the same list

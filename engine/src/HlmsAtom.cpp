@@ -910,8 +910,8 @@ void HlmsAtom::uploadBucketTable() {
 /// (the shader moves it through the pass's view), Forward+'s six float4 a light
 /// (fillGlobalLightListBuffer's layout: position + type, diffuse + the light mask's
 /// bits, specular, attenuation, spot direction + profile, spot parameters) behind one
-/// header float4 (the count, the per-hit cap). ORDERED BY CONTRIBUTION — the peak
-/// channel of the light's power, brightest first, the id as the tie — and the hit
+/// header float4 (the count, the per-hit cap). IN THE SCENE'S ONE LIGHT ORDER — peak
+/// intensity x range^2, the id as the tie (SceneLightList; PHOTON-7 stage 1) — and the hit
 /// shades at most Forward+'s lights-per-cell of the ones whose range contains it:
 /// the bound the forward list keeps on screen. A light is visible by Ogre's own
 /// test (the visibility layer and the scene's light mask). Area lights and
@@ -920,8 +920,8 @@ void HlmsAtom::uploadBucketTable() {
 void HlmsAtom::buildWorldLights(Ogre::SceneManager *sm, WorldLights &out) {
     const std::vector<const Ogre::Light *> &casting = out.casting;
     const Ogre::uint32 cap = out.cap;
-    // THE SCENE'S ONE LIGHT LIST (P1C-LIGHT-LIST, SceneLightList.h) in its shared
-    // order — brightest first, the id as the tie — filtered to what this list holds.
+    // THE SCENE'S ONE LIGHT LIST (P1C-LIGHT-LIST, SceneLightList.h) in its one
+    // order — peak intensity x range^2, the id as the tie — filtered to what this list holds.
     // No range cull and no budget: a hit can be anywhere in the world, and the
     // shader takes at most `cap` of the ones whose range contains it.
     std::vector<const Ogre::Light *> lights;

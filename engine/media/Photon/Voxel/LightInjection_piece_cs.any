@@ -419,7 +419,11 @@
 
 	if( anyInvocationARB( c > 0 ) )
 	{
-		for( uint lightIdx=0u; lightIdx<p_numLights; ++lightIdx )
+		// THE FIRST p_lightsPerVoxel OF THE LIST'S ONE ORDER THAT REACH THIS VOXEL (PHOTON-7 stage 1, L1): the lights
+		// arrive in the scene's order (peak intensity x range^2, directional first - SceneLightList), so which lights a
+		// voxel takes is a function of the world point, never of the box's other lights.
+		uint lightsTaken = 0u;
+		for( uint lightIdx=0u; lightIdx<p_numLights && lightsTaken < p_lightsPerVoxel; ++lightIdx )
 		{
 			Light light = lights[lightIdx];
 
@@ -467,6 +471,7 @@
 			// inside its range, not the whole volume.
 			if( !( lightAtten > 0.0f ) )
 				continue;
+			++lightsTaken;
 			@property( hlms_lights_area_ltc )
 				bool isLtc = light.lightType == LT_AREA_LTC;
 				bool doubleSidedLtc = light.points[0].w != 0.0f;

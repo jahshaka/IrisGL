@@ -4597,14 +4597,14 @@ struct GiStatus {
         /// (a submit is where a Vulkan read-back used to wait for the whole GPU).
         /// Cumulative; 0 is the invariant (gi.readout_async).
         long long voxelReadoutFlushes = 0;
-        /// THE CASCADE'S LIGHTS (P1C-LIGHT-LIST), as its last light injection selected
-        /// them from the scene's one light list: the lights whose range reaches its
-        /// box (a directional always does; a point/spot/area light whose range
-        /// sphere misses the box lights nothing in it and is not counted), how many
-        /// of those took a slot, `lightCapacity` = THE CASCADE'S BUDGET (<= 128:
-        /// PhotonVoxelLighting::lightBudgetFor, 16 at 128^3, 128 at 64^3), and the ones
-        /// OVER it — the dimmest at the cascade by the one falloff, whose bounce is
-        /// missing from this cascade's voxels (the engine log says so once a cascade).
+        /// THE CASCADE'S LIGHTS (P1C-LIGHT-LIST; PHOTON-7 stage 1), as its last light injection selected
+        /// them from the scene's one light list, in its ONE ORDER (peak intensity x range^2, a
+        /// directional first): the lights whose range reaches its box (a directional always does; a
+        /// point/spot/area light whose range sphere misses the box lights nothing in it and is not
+        /// counted), how many of those took one of the 128 slots (the rest - `lightsOverBudget`, the
+        /// last of the order - missing from this cascade's voxels; the engine log says so once a
+        /// cascade), and `lightCapacity` = the lights A VOXEL takes, the first of the order that reach
+        /// it (PhotonVoxelLighting::lightBudgetFor, 16 at 128^3, 128 at 64^3).
         int lightsInRange = 0;
         int lightsInjected = 0;
         int lightCapacity = 0;

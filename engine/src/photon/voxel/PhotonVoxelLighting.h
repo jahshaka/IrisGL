@@ -194,6 +194,8 @@ namespace Ogre
         FastArray<PhotonVoxelLighting *> mExtraCascades;
 
         ShaderParams::Param *mNumLights;
+        /// Jahshaka (PHOTON-7 stage 1): the injection's per-voxel light count (the first of the order that reach it).
+        ShaderParams::Param *mLightsPerVoxel = nullptr;
         /// THE LAST INJECTION'S LIGHTS (P1C-LIGHT-LIST): the selection from the scene's
         /// one light list, and its counts — the lights whose range reaches this
         /// cascade's box, how many took a slot, how many the budget could not hold.
