@@ -22,6 +22,7 @@ For more information see the LICENSE file
 #include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <map>
 
 namespace iris
 {
@@ -95,6 +96,22 @@ Sphere enclose(const std::vector<Sphere> &s, int *grown)
     return out;
 }
 
+/// THE COUNT-CARRY MEMO (the stage-3 read's finding 3): a group carried for its cluster count meets the same members,
+/// the same ask and the same external positions again when the pool around it regroups without touching it — the same
+/// input, so the same result; it is looked up, never recomputed.
+struct MemoKey
+{
+    std::vector<int> members;          ///< the DAG cluster ids, in the group's order (the scratch's order follows it)
+    float ask = 0.0f;
+    std::vector<unsigned> external;
+    bool operator<(const MemoKey &o) const
+    {
+        if (members != o.members) return members < o.members;
+        if (ask != o.ask) return ask < o.ask;
+        return external < o.external;
+    }
+};
+
 /// The parent clusters of an accepted group's output (D4's re-split: the leaves' bisection on the output).
 struct Split
 {
@@ -165,15 +182,18 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
     }
 
     std::vector<MeshClusterDag::Group> groups;
+    std::map<MemoKey, GroupResult> countMemo;
     std::vector<int> pool(cl.size());
     for (size_t c = 0; c < cl.size(); ++c) pool[c] = int(c);
     int level = 0;
     const int width = bakepool::width();
     while (pool.size() > 1) {
-        if (level >= kMaxLevels) {
+        // THE DEPTH CAP NEVER MEANS "NO DAG" (the stage-3 read's finding 1: a mesh without one draws its level 0 at
+        // every distance): the chain closes here with the empty top over the WHOLE remaining pool (below); the bake
+        // logs the cap (stats->depthCapHit).
+        if (level >= options.maxLevels) {
             if (stats) stats->depthCapHit = true;
-            *out = MeshClusterDag();
-            return false;
+            break;
         }
         // D3: THE GROUPS of this level.
         const Clock::time_point tg = Clock::now();
@@ -192,7 +212,8 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
         std::vector<GroupResult> results(ng);
         std::vector<Split> splits(ng);
         std::vector<float> childStored(ng, 0.0f), ask(ng, 0.0f);
-        std::vector<unsigned char> countCarry(ng, 0u);
+        std::vector<unsigned char> countCarry(ng, 0u), memoHit(ng, 0u);
+        std::vector<MemoKey> keys(ng);
         std::vector<double> splitMs(ng, 0.0);
         // THE RECORD of a group in pass `pass` of this level (the members are the DAG cluster ids it was given).
         const auto recordOf = [&](size_t g, int pass) {
@@ -234,15 +255,30 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
             std::fill(childStored.begin(), childStored.end(), 0.0f);
             std::fill(ask.begin(), ask.end(), 0.0f);
             std::fill(countCarry.begin(), countCarry.end(), 0u);
+            std::fill(memoHit.begin(), memoHit.end(), 0u);
             for (Split &sp : splits) sp.parts.clear();
             bakepool::forRange(bakepool::Range(ng, 1), width, [&](size_t, size_t begin, size_t end, int) {
                 for (size_t g = begin; g < end; ++g) {
                     std::vector<unsigned> in;
+                    MemoKey &key = keys[g];
+                    key = MemoKey();
                     for (unsigned p : grouping.groups[g]) {
                         const Cl &c = cl[size_t(pool[p])];
                         in.insert(in.end(), c.tris.begin(), c.tris.end());
                         childStored[g] = std::max(childStored[g], c.stored);
                         ask[g] = std::max(ask[g], c.ask);
+                        key.members.push_back(pool[p]);
+                    }
+                    key.ask = ask[g];
+                    key.external = grouping.external[g];
+                    const auto hit = countMemo.find(key);
+                    if (hit != countMemo.end()) {   // the same input as a count carry already computed
+                        results[g] = hit->second;
+                        results[g].attempts = 0;
+                        results[g].msSimplify = results[g].msMeasure = results[g].msExact = 0.0;
+                        countCarry[g] = 1u;
+                        memoHit[g] = 1u;
+                        continue;
                     }
                     // THE TARGET: Nanite's parent count — and a group already at it that would not merge into FEWER
                     // clusters (the vertex cap: 126 loose triangles are 378 vertices, two clusters again) halves instead,
@@ -331,6 +367,8 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
             }
             if (!r.accepted) {
                 rec.kind = 1;
+                if (countCarry[g] && !memoHit[g]) countMemo.emplace(keys[g], r);
+                if (stats && memoHit[g]) ++stats->memoHits;
                 for (unsigned p : grouping.groups[g]) {
                     Cl &c = cl[size_t(pool[p])];
                     c.ask = countCarry[g] ? r.budget : kLadderFactor * r.budget;
@@ -407,28 +445,40 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
         ++level;
     }
 
-    // D8: THE EMPTY TOP over the last cluster.
-    if (pool.size() == 1) {
-        Cl &root = cl[size_t(pool[0])];
+    // D8: THE EMPTY TOP over the last cluster — or, at the depth cap, over every cluster the pool still holds: its
+    // error the island rule on the whole mesh (at least the largest stored error it closes over), its LOD sphere the
+    // one enclosing theirs.
+    if (!pool.empty()) {
         const int id = int(groups.size());
         MeshClusterDag::Group G;
         G.depth = level;
-        G.error = std::max(std::max(root.stored, meshDiagonal), floorLen);
+        float stored = 0.0f;
+        int rootTris = 0;
+        std::vector<Sphere> lods;
+        for (int p : pool) {
+            Cl &c = cl[size_t(p)];
+            stored = std::max(stored, c.stored);
+            rootTris += int(c.tris.size() / 3);
+            lods.push_back(c.lod);
+            c.group = id;
+        }
+        G.error = std::max(std::max(stored, meshDiagonal), floorLen);
         G.estimate = 0.0f;
-        for (int k = 0; k < 3; ++k) G.centre[k] = k == 0 ? root.lod.c.x() : (k == 1 ? root.lod.c.y() : root.lod.c.z());
-        G.radius = root.lod.r;
-        root.group = id;
+        const Sphere lod = pool.size() == 1 ? lods[0] : enclose(lods, stats ? &stats->sphereGrown : nullptr);
+        for (int k = 0; k < 3; ++k) G.centre[k] = k == 0 ? lod.c.x() : (k == 1 ? lod.c.y() : lod.c.z());
+        G.radius = lod.r;
         groups.push_back(G);
         if (stats) {
             stats->rootError = G.error;
-            stats->rootTriangles = int(root.tris.size() / 3);
+            stats->rootTriangles = rootTris;
             if (options.wantGroups) {
                 GroupRecord rec;
                 rec.level = level;
                 rec.dagGroup = id;
                 rec.kind = 2;
-                rec.members = 1;
-                rec.inTris = int(root.tris.size() / 3);
+                rec.members = int(pool.size());
+                for (int p : pool) rec.memberClusters.push_back(p);
+                rec.inTris = rootTris;
                 rec.stored = G.error;
                 rec.step = G.error;
                 stats->records.push_back(std::move(rec));

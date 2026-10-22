@@ -273,9 +273,8 @@ namespace
 // its budget that cannot reduce its cluster count is carried at the SAME budget (only a budget failure, or a level
 // where every group carried, doubles); carried leaf groups no longer take a depth-0 estimate. Every bake re-bakes
 // (BAKEKEY-1).
-// v29 (2026-10-22, ATOM-2 stage 3): D5 THE WELD — positions of different islands within E / 2 snapped in the scratch
-// the simplifier reads (the data untouched); the weight arms (Nanite's scale / POSONLY, JAH_ATOM2_WEIGHTS for stage 3's
-// picture pairs); the config record carries the weld radius. Every bake re-bakes (BAKEKEY-1).
+// v29 (2026-10-22, ATOM-2 stage 3): D5 THE WELD (snapped positions of different islands within E / 2) and two weight
+// arms, measured; both resolved in v30. Every bake re-bakes (BAKEKEY-1).
 // v30 (2026-10-22, ATOM-2 the lead's word on stage 3): ONE BAKE — every attribute at a tiny weight (POSONLY, the
 // picked arm: 27,015 against 42,228 on the hard 7 at E = 16); the Nanite-scale arm, its switch and D5's weld deleted
 // (the weld laid shells onto each other as coincident sheets the simplifier cannot reduce). Every bake re-bakes.
@@ -2775,9 +2774,7 @@ void MeshBake::buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats, cons
     std::vector<unsigned> base;
     if (!dagInput(mesh, &view, &base)) return;
     if (!atomdag::build(view, base, &mesh->clusterDag, stats, options))
-        irisLog(QStringLiteral("mesh bake: cluster DAG NOT BUILT (%1 triangles%2) — the mesh draws level 0")
-                    .arg(base.size() / 3)
-                    .arg(stats && stats->depthCapHit ? QStringLiteral(": the chain passed the depth cap") : QString()));
+        irisLog(QStringLiteral("mesh bake: cluster DAG NOT BUILT (%1 triangles) — the mesh draws level 0").arg(base.size() / 3));
 }
 
 QVector<MeshBake::DagDriftRow> MeshBake::dagDrift(const MeshPtr &mesh)
@@ -2997,6 +2994,12 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards,
             }
         }
     });
+    // THE DEPTH CAP, named (the chain closed with the empty top over its remaining pool — a DAG all the same).
+    for (size_t i = 0; i < meshes; ++i)
+        if (dagStats[i].depthCapHit)
+            irisLog(QStringLiteral("mesh bake: WARNING %1 mesh %2 (%3 clusters, %4 groups) met the cluster DAG's depth cap of %5 — "
+                                   "closed with the empty top over the clusters it still held")
+                        .arg(filePath).arg(i).arg(dagStats[i].clusters).arg(dagStats[i].groups).arg(atomdag::kMaxLevels));
     model.meshesMs = msSince(start);
 #if defined(__GLIBC__)
     // THE POOL'S FREED MEMORY GOES BACK. glibc gives every thread its own malloc

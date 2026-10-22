@@ -38,10 +38,11 @@ namespace iris
 namespace atomdag
 {
 
-constexpr int kMaxLevels = 24;   ///< the hard depth cap: a chain still going past it is a defect (logged, no DAG)
+constexpr int kMaxLevels = 24;   ///< the depth cap: a chain still going closes with the empty top over its pool (logged)
 
 struct Options
 {
+    int maxLevels = kMaxLevels;   ///< the depth cap (a test lowers it to reach the cap on a fixture)
     bool wantGroups = false;   ///< one GroupRecord per group ATTEMPTED (accepted and carried)
     bool wantLocks = false;    ///< ...with its external positions (atom2.borders_move)
     bool wantRegions = false;  ///< the level-0 provenance partition per cluster (engine.lod_rule_parity)
@@ -74,9 +75,10 @@ struct Stats
     int depth = 0;               ///< the deepest group's level (the empty top included)
     int levels = 0;              ///< loop iterations
     int reductions = 0, carried = 0, notSimplified = 0, retries = 0, prunedPieces = 0;
+    int memoHits = 0;            ///< count-carried groups met again with the same input (looked up, not recomputed)
     int levelsAllCarried = 0;    ///< re-runs of a level where every group was carried (the whole pool's budget doubled in place)
     int sphereGrown = 0;         ///< groups whose enclosing sphere was grown by float rounding to hold a member's
-    bool depthCapHit = false;
+    bool depthCapHit = false;    ///< the chain met the depth cap and closed with the empty top over its pool
     float rootError = 0.0f;      ///< the empty top's error
     float floorLen = 0.0f;       ///< the arithmetic floor of a measured length (1e-5 of the largest axis)
     int rootTriangles = 0;       ///< triangles of the last cluster before the empty top (0 if the chain emptied)
@@ -89,7 +91,8 @@ struct Stats
 };
 
 /// Builds `out` for the triangle list `base` (vertex ids into `mesh`). False (and `out` empty) when the input is
-/// unusable or the chain passed kMaxLevels. Every index of the DAG is a vertex of the mesh (re-indexing).
+/// unusable; a chain at the depth cap closes with the empty top over its pool (stats->depthCapHit). Every index of the
+/// DAG is a vertex of the mesh (re-indexing).
 bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterDag *out, Stats *stats,
            const Options &options);
 
