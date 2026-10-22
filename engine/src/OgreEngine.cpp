@@ -110,8 +110,13 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     // extensions and feature bits only while this static says so, so a no-rays
     // process runs on exactly the device a machine without the hardware gets.
     // Before the render system loads (and before the OpenXR route builds its
-    // device request, which reads the same static).
+    // device request, which reads the same static). A build without the ray
+    // tier (the Mac, a Linux box without glslang or the Vulkan headers) has no
+    // ray extension to ask for and does not see the device's header
+    // (PHOTON-7 stage 0's read R1, the no-ray arm's build).
+#if JAH_RAY_QUERY
     Ogre::VulkanDevice::msRayQueryAllowed = mRayTracingWanted;
+#endif
     // Process-wide static, read by Mesh::prepareForShadowMapping at mesh-build
     // time (POST_CHAIN_SPEC.md §11). Setting it before Root exists is fine — it
     // is a plain static, not engine state.

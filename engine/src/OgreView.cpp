@@ -68,6 +68,16 @@ OgreView::OgreView(HostShell, Ogre::Root *root, const std::string &name, unsigne
     mIdentityOffscreen = true;
 }
 
+// THE HIT LIST'S CREATION SIZE (kHitListWidth's law in EnginePrivate.h): kHitListCreateShare x W x H records (width() is
+// an eye pair's for a stereo view), in rows of kHitListWidth - W x H arithmetic, so it is defined here for EVERY build:
+// chainDesc() asks for it with or without the ray tier (a build without JAH_RAY_QUERY linked no definition, PHOTON-7
+// stage 0's read R1; the growth, OgreView::sizeHitList, is the ray tier's, OgreRayQuery.cpp).
+unsigned OgreView::hitListCreateRows() const {
+    const unsigned long long records =
+        (unsigned long long)std::ceil(double(kHitListCreateShare) * double(width()) * double(height()));
+    return unsigned(std::max<unsigned long long>((records + kHitListWidth - 1u) / kHitListWidth, 1u));
+}
+
 void OgreView::adoptTarget(Ogre::TextureGpu *texture) {
     mTexture = texture;
     buildChain();

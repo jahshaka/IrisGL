@@ -8745,19 +8745,13 @@ void OgreView::syncReflectListener() {
 }
 
 // THE HIT LIST'S GROWTH (kHitListWidth's law in EnginePrivate.h). Before the workspace runs, so no pass of this frame has
-// touched the list yet. The list is created at its share of the target (hitListCreateRows: the graph builds it at
-// max(the rows it has, that)); it GROWS when the target outgrew its creation size or a retired frame overflowed it - the
-// rows double until the list holds that frame's demand (the counter word 0, which counts past the capacity) - and is
-// never shrunk. A growth re-makes the three list textures IN PLACE the way Ogre re-makes a window's resizable textures
-// (OnStorage, the new resolution, Resident, then CompositorNode::notifyRecreated for the passes that render into them) -
-// never the graph, so no other texture and no history moves. The ray tier re-reads the textures (and re-makes its
-// buffer to the new size) at its next prepare.
-unsigned OgreView::hitListCreateRows() const {
-    const unsigned long long records =
-        (unsigned long long)std::ceil(double(kHitListCreateShare) * double(width()) * double(height()));
-    return unsigned(std::max<unsigned long long>((records + kHitListWidth - 1u) / kHitListWidth, 1u));
-}
-
+// touched the list yet. The list is created at its share of the target (OgreView::hitListCreateRows, OgreView.cpp: the
+// graph builds it at max(the rows it has, that)); it GROWS when the target outgrew its creation size or a retired frame
+// overflowed it - the rows double until the list holds that frame's demand (the counter word 0, which counts past the
+// capacity) - and is never shrunk. A growth re-makes the three list textures IN PLACE the way Ogre re-makes a window's
+// resizable textures (OnStorage, the new resolution, Resident, then CompositorNode::notifyRecreated for the passes that
+// render into them) - never the graph, so no other texture and no history moves. The ray tier re-reads the textures (and
+// re-makes its buffer to the new size) at its next prepare.
 void OgreView::sizeHitList() {
     if (!mWorkspace || !mChainHitDecode || !mReflectListener || !mEngine || !mEngine->mRayTier) return;
     const unsigned create = hitListCreateRows();
