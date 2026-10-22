@@ -501,8 +501,9 @@ void main()
 	//      and their SH read at the PIXEL's normal (the band-2 SH carries the
 	//      irradiance's variation with the normal; a probe a few centimetres
 	//      round the edge is a far closer estimate than the field's cage).
-	// (a pixel whose own probes are starved this frame does not go looking further: it takes no sample, below)
-	const bool noSample = starved && wsum < weightFloor;
+	// (a pixel whose own probes are starved this frame does not go looking further: it takes no sample, below - when it
+	// HAS a history to keep; one with none takes the geometric no-answer path with its fallbacks: PHOTON-2 1b H2)
+	const bool noSample = starved && wsum < weightFloor && prevCount > 0u;
 	if( wsum < weightFloor && !noSample )
 	{
 		for( int dy = -2; dy <= 2; ++dy )
@@ -611,12 +612,18 @@ void main()
 	const float restK = p.knobs6.x;
 	if( restK >= 1.0 )
 	{
-		// (no sample this frame: the rest mean takes none - it starts from the history on a first rest frame)
-		const vec4 rest = noSample ? ( restK < 1.5 ? prev : imageLoad( restMean, at ) )
-								   : restK < 1.5 ? sample1
-												 : mix( imageLoad( restMean, at ), sample1, 1.0 / restK );
+		// NO SAMPLE THIS FRAME: the rest mean takes none, and is never SEEDED from the history (PHOTON-2 1b H2: the EMA is
+		// path-dependent and the held answer would keep its share) - a starved first rest frame stores "no rest sample
+		// yet" (w -1) and the rest mean starts at the pixel's first SAMPLED rest frame, whole. (Until then the answer is
+		// the history; the later samples weigh 1 / k of the rest frame - a starved frame is a full list's, rare.)
+		const bool restTakes = !noSample;
+		const vec4 stored = restK < 1.5 ? vec4( 0.0, 0.0, 0.0, -1.0 ) : imageLoad( restMean, at );
+		const bool empty = stored.w < -0.5;
+		const vec4 rest = !restTakes ? stored : empty ? sample1 : mix( stored, sample1, 1.0 / restK );
 		imageStore( restMean, at, rest );
-		mean = mix( mix( prev, rest, blend ), rest, clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 ) );
+		const vec4 restAnswer = rest.w < -0.5 ? prev : rest;
+		mean = mix( mix( prev, restAnswer, blend ), restAnswer,
+					clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 ) );
 	}
 	imageStore( historyCur, at,
 				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
