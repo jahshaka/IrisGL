@@ -164,6 +164,7 @@ struct StillnessRun::Impl {
         int window = -1;        ///< which window (Part::Window); for a Move / Bridge frame, the window it leads to
         unsigned index = 0;     ///< its frame in the window (0 = the stop); for a trail frame, frames before the stop
         bool trail = false;     ///< a move frame inside the window's trail (StillnessSpec::moveTrail)
+        bool walkStart = false; ///< the script's first walk frame (StillnessSpec::freezeWalk engages there)
     };
     std::vector<std::vector<unsigned long long>> moveFrames;   ///< per window: the engine frames of its move
     std::vector<Planned> plan;
@@ -188,8 +189,9 @@ struct StillnessRun::Impl {
     /// The tail's engine frames: their records are read (a window frame's may ride them) but their GPU work is not the
     /// run's - the cost line (gpuSum) leaves them out (G7).
     std::set<unsigned long long> tailEngineFrames;
-    double gatherArmWas = 0.0, reflectArmWas = 0.0;
+    double gatherArmWas = 0.0, reflectArmWas = 0.0, freezeArmWas = 0.0;
     bool gatherArmOn = false, reflectArmOn = false;   ///< the run has switched it on (and not off since)
+    bool freezeArmOn = false;                         ///< the frozen walk's arm (StillnessSpec::freezeWalk) is on
     bool pinned = false;                              ///< the path's placement pin is on (released at the end)
     bool onscreen = false;
 
@@ -308,6 +310,7 @@ struct StillnessRun::Impl {
         finished = true;
         setArm("gather.historyReadback", gatherArmWas);
         setArm("reflect.historyReadback", reflectArmWas);
+        if (freezeArmOn) setArm("gi.freeze", freezeArmWas);
         if (pinned) scene.setGiPlacementPin(GiPlacementPin());   // released (a message: the host's next frame)
         // flushes everything waiting into the queue (and the tee); a level the host set since is the host's
         if (monitorOurs && engine.published().monitor.level == monitorSet) setMonitor(monitorWas);
@@ -652,9 +655,12 @@ bool StillnessRun::begin(const StillnessSpec &spec, std::string &err)
             m.plan.push_back({ eye, target, Impl::Part::Move, -1, 0 });
         } else if (mv.kind == StillnessMove::Kind::Walk) {
             const Vec3 e0 = eye, t0 = target;
+            bool first = true;
+            for (const Impl::Planned &pl : m.plan) first = first && !pl.walkStart;
             for (unsigned i = 1; i <= mv.frames; ++i) {
                 const float t = float(i) / float(mv.frames);
                 m.plan.push_back({ lerp(e0, mv.eye, t), lerp(t0, mv.target, t), Impl::Part::Move, -1, 0 });
+                if (i == 1 && first) m.plan.back().walkStart = true;
             }
             eye = mv.eye;
             target = mv.target;
@@ -733,6 +739,20 @@ bool StillnessRun::begin(const StillnessSpec &spec, std::string &err)
     }
     m.gatherArmWas = m.armNow("gather.historyReadback");
     m.reflectArmWas = m.armNow("reflect.historyReadback");
+    if (spec.freezeWalk) {
+        bool walks = false;
+        for (const Impl::Planned &pl : m.plan) walks = walks || pl.walkStart;
+        // the walk's first frame needs a frame before it: the converged state is read there
+        if (!walks || m.plan.front().walkStart) {
+            err = "stillness: freeze needs a walk after the script's first frame";
+            return false;
+        }
+        m.freezeArmWas = m.armNow("gi.freeze");
+        if (m.freezeArmWas > 0.5) {
+            err = "stillness: freeze asked with the arm gi.freeze already on (the walk would start frozen, not converged)";
+            return false;
+        }
+    }
     // THE TEE BEFORE THE MONITOR (no record of the run is missed); the monitor switched on only when it is off — a
     // host's running capture is left exactly as it was (and its records in the host's own queue).
     m.tee = m.engine.openMonitorTee();
@@ -970,6 +990,30 @@ bool StillnessRun::frameDone(std::string &err)
     }
     m.lastKeyMoves = g.keyMoves;
     m.lastFoliageRule = g.foliageRuleAccepts;
+    // THE FROZEN WALK (StillnessSpec::freezeWalk): the next frame is the walk's first - the freeze is switched on for
+    // it (an arm latches at the top of the next frame) only when THIS frame is converged: the gather HELD (its true rest
+    // mean) and the reflection HELD (every texel stopped on its rest mean) where one traces.
+    if (m.spec.freezeWalk && !m.freezeArmOn && m.next < m.plan.size() && m.plan[m.next].walkStart) {
+        const bool held = g.running && g.settleFrames && g.restFrames > g.settleFrames;
+        const bool reflHeld = !pub.rayQuery.reflect || pub.rayQuery.reflectHeld;
+        if (!held || !reflHeld) {
+            err = "stillness: freeze - the view had not converged at the walk's start (the gather " +
+                  std::string(held ? "held" : "not held") + ": rest " + std::to_string(g.restFrames) + " of settle " +
+                  std::to_string(g.settleFrames) + (g.running ? "" : ", no gather") + "; the reflection " +
+                  (reflHeld ? "held" : "not held") + ": rest " + std::to_string(pub.rayQuery.reflectRestFrames) +
+                  "): settle longer before the run";
+            return false;
+        }
+        m.freezeArmOn = m.setArm("gi.freeze", 1.0);
+        if (!m.freezeArmOn) {
+            err = "stillness: freeze - the engine refused the arm gi.freeze";
+            return false;
+        }
+        m.report.freezeEngineFrame = engineFrame + 1u;
+        m.report.freezeRestFrames = g.restFrames;
+        m.report.freezeSettleFrames = g.settleFrames;
+        m.report.freezeReflRestFrames = pub.rayQuery.reflectRestFrames;
+    }
     // THE LATE READINGS of any window: the stop's history count, the reflection counts.
     bool masksPending = false;
     for (int win = 0; win < int(m.report.windows.size()); ++win) {
@@ -1142,6 +1186,10 @@ std::string StillnessReport::summary() const
         }
         o << "\n";
     }
+    if (freezeEngineFrame)
+        o << "STILLNESS freeze: gi.freeze on from engine frame " << freezeEngineFrame
+          << " (the walk's first), converged there: the gather held (rest " << freezeRestFrames << " of settle "
+          << freezeSettleFrames << "), the reflection held (rest " << freezeReflRestFrames << ")\n";
     if (pathChecked) {
         o << "STILLNESS path walk-vs-teleport (at equal placements) | picture mean/p99/max codes, pixels >= 1:";
         for (size_t k = 0; k < names.size() && k < pathMaxCodes.size(); ++k) {

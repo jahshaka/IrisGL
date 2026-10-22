@@ -105,6 +105,13 @@ struct StillnessSpec {
     std::string dumpDir;
     std::string dumpName;
     float       fovYDegrees = 45.0f;   ///< the view's vertical field of view (the cams file's)
+    /// THE FROZEN WALK (M1's baseline, PHOTON-2 round 4 - the read's P2-1): the run switches the arm "gi.freeze" on
+    /// at the script's FIRST WALK FRAME, and only from a CONVERGED state - on the frame before, the gather HELD (its
+    /// rest past the settle: the answer is the true rest mean) and the reflection HELD where one traces (every texel
+    /// stopped on its rest mean) - else the run fails with the reason (settle longer before it); the arm is restored
+    /// at the end. The walk then measures the motion's own resampling of the
+    /// converged picture, which the live walk's residual less is the GI's stepping.
+    bool        freezeWalk = false;
     /// The material classes at a pose (the same encoding as `classes`), for the dump's per-frame .cls.
     std::function<std::vector<unsigned char>(const Vec3 &eye, const Vec3 &target, unsigned w, unsigned h)> classesAt;
     /// THE MATERIAL CLASSES at the stop pose, per pixel of the view (row-major, classW x classH; resampled nearest
@@ -194,10 +201,10 @@ struct StillnessWindow {
     std::vector<int> settleFromStop;
     std::vector<int> settleFromLastGiRow;
     std::vector<unsigned> visiblePixels;   ///< per class: the counted pixels
-    int holdFrame = -1;
+    int holdFrame = -1;                           ///< the first window frame the gather HELD (-1: never)
     /// ...and the last window frame the hold waited on (StillnessFrame::holdKey; -1: none after the stop) - the bars'
     /// "last input write", rows or none.
-    int lastHoldKeyFrame = -1;                    ///< the first window frame the gather HELD (-1: never)
+    int lastHoldKeyFrame = -1;
     /// THE MOVE BEFORE THE STOP: the GI rows that fired on its frames ("name:frames/units", ',' joined) and how
     /// many frames before the stop the last of them landed (-1: none) — a commit that lands inside the move is the
     /// origin of every debt the window then pays.
@@ -229,6 +236,11 @@ struct StillnessReport {
     std::vector<unsigned> pathP99Codes;         ///< ...and its 99th percentile
     int                   pathFieldEqual = -1;  ///< the field's origin equal under the two paths (1), not (0), none (-1)
     std::vector<int>      pathDirectEqual, pathLightEqual, pathCentreEqual;   ///< per cascade: 1 equal, 0 not, -1 unread
+    /// THE FROZEN WALK (StillnessSpec::freezeWalk): the engine frame the freeze took effect on (0: not asked) and the
+    /// gather's rest frames / settle and the reflection's rest frames on the frame before it (the converged state it
+    /// froze).
+    unsigned long long    freezeEngineFrame = 0;
+    unsigned              freezeRestFrames = 0, freezeSettleFrames = 0, freezeReflRestFrames = 0;
     /// THE COST, from the same records: per monitor row whose GPU time was measured (the ray tier's `rq.*`, the
     /// gather's `gather.*`, the cache rows), the mean GPU milliseconds over the frames it ran and how many — the
     /// whole run's (the move, the windows), a frame being one row's sum.

@@ -260,9 +260,12 @@ unsigned filterRadiusOf(const GatherTuning &t) {
 constexpr unsigned kRestSequenceBase = 0x10000u;
 
 /// Does a tuning change CHANGE THE ESTIMATOR? Every field but the readback (a
-/// test door that only copies the answer out). A changed estimator is a new
-/// history: its first frame takes its own estimate whole, so an A/B across a
-/// tuning push is never an average of its two arms.
+/// test door that only copies the answer out) and THE GI FREEZE (M1's measuring
+/// arm: it changes no estimator - the integrate's blend 0 only KEEPS the history
+/// it holds - and a restart on its switch froze the walk on that frame's one
+/// estimate instead of the converged answer: PHOTON-2 round 4, the read's P2-1).
+/// A changed estimator is a new history: its first frame takes its own estimate
+/// whole, so an A/B across a tuning push is never an average of its two arms.
 bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
     return a.probeStride == b.probeStride && a.octRes == b.octRes && a.rayLength == b.rayLength &&
            a.adaptiveCap == b.adaptiveCap && a.freezeFrameIndex == b.freezeFrameIndex &&
@@ -271,7 +274,7 @@ bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
            a.shBands == b.shBands && a.filterOff == b.filterOff &&
            a.historyFrames == b.historyFrames &&
            a.historyValidationOff == b.historyValidationOff && a.restOff == b.restOff &&
-           a.classOff == b.classOff && a.freezeHistory == b.freezeHistory &&
+           a.classOff == b.classOff &&
            a.filterRadius == b.filterRadius && a.restFrames == b.restFrames &&
            a.restSeed == b.restSeed && a.youngFrames == b.youngFrames &&
            a.youngReach == b.youngReach && a.crossStrata == b.crossStrata;
