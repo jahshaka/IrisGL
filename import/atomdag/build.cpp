@@ -51,7 +51,8 @@ struct Cl
     int refined = -1;
     int group = -1;
     float stored = 0.0f;          ///< its generating group's error (0 for a leaf)
-    float carriedBudget = 0.0f;   ///< the largest budget it was carried at
+    float ask = 0.0f;             ///< the budget it asks of its next group (ladder.h): 2 x stored for a new parent;
+                                  ///< after a carry its group's E (cluster count) or 2E (budget); 0 = a leaf never granted one
     Vec3 lo, hi;                  ///< its box
     Sphere cull;                  ///< its own bounding sphere
     Sphere lod;                   ///< its generating group's LOD sphere (its own for a leaf)
@@ -122,6 +123,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
     const float extent = meshopt_simplifyScale(mesh.positions, mesh.nv, sizeof(float) * size_t(mesh.posComps));
     if (!(extent > 0.0f) || !std::isfinite(extent)) return false;
     const float floorLen = extent * kFloorRel;
+    if (stats) stats->floorLen = floorLen;
 
     const std::vector<unsigned> weld = weldByPosition(mesh);
     const Islands islands = findIslands(weld, mesh.positions, mesh.posComps, mesh.nv, base);
@@ -189,15 +191,51 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
         const size_t ng = grouping.groups.size();
         std::vector<GroupResult> results(ng);
         std::vector<Split> splits(ng);
-        std::vector<float> childStored(ng, 0.0f), childError(ng, 0.0f);
+        std::vector<float> childStored(ng, 0.0f), ask(ng, 0.0f);
+        std::vector<unsigned char> countCarry(ng, 0u);
         std::vector<double> splitMs(ng, 0.0);
+        // THE RECORD of a group in pass `pass` of this level (the members are the DAG cluster ids it was given).
+        const auto recordOf = [&](size_t g, int pass) {
+            const GroupResult &r = results[g];
+            GroupRecord rec;
+            rec.level = level;
+            rec.pass = pass;
+            rec.members = int(grouping.groups[g].size());
+            for (unsigned p : grouping.groups[g]) {
+                rec.inTris += int(cl[size_t(pool[p])].tris.size() / 3);
+                rec.memberClusters.push_back(pool[p]);
+            }
+            rec.childStored = childStored[g];
+            rec.ask = ask[g];
+            rec.budget = r.budget;
+            rec.step = r.step;
+            rec.measured = r.terms.step;
+            rec.estimate = r.estimate;
+            rec.depth0Estimate = r.depth0Estimate;
+            rec.attempts = r.attempts;
+            rec.pruned = r.pruned;
+            rec.removedVertex = r.terms.removedVertex;
+            rec.lostFacet = r.terms.lostFacet;
+            rec.addedFacet = r.terms.addedFacet;
+            rec.droppedIsland = r.terms.droppedIsland;
+            rec.lostLocked = r.terms.lostLocked;
+            rec.islandsDropped = r.terms.islandsDropped;
+            rec.lockedLost = r.terms.lockedLost;
+            rec.countCarry = countCarry[g] != 0u;
+            rec.weightNormal = r.scratch.weights.normal;
+            rec.weightUv = r.scratch.weights.uv;
+            if (options.wantLocks) rec.external = grouping.external[g];
+            return rec;
+        };
         const Clock::time_point tr = Clock::now();
-        // A LEVEL WHERE EVERY GROUP IS CARRIED is not emitted: the pool and therefore its grouping would be the same
-        // at the next level, so the level re-runs here with every member's budget doubled (the ladder's carry,
-        // without an identical level in the DAG) — until some group reduces.
-        for (int rerun = 0;; ++rerun) {
+        // AN ALL-CARRIED LEVEL is not emitted to the DAG: the pool and therefore its grouping would be the same at the
+        // next level, so the level re-runs here with every member asking twice its group's budget — the one place a
+        // level's budgets double — and each such pass is RECORDED (GroupRecord::pass) so the law sees every doubling.
+        int pass = 0;
+        for (;; ++pass) {
             std::fill(childStored.begin(), childStored.end(), 0.0f);
-            std::fill(childError.begin(), childError.end(), 0.0f);
+            std::fill(ask.begin(), ask.end(), 0.0f);
+            std::fill(countCarry.begin(), countCarry.end(), 0u);
             for (Split &sp : splits) sp.parts.clear();
             bakepool::forRange(bakepool::Range(ng, 1), width, [&](size_t, size_t begin, size_t end, int) {
                 for (size_t g = begin; g < end; ++g) {
@@ -206,7 +244,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
                         const Cl &c = cl[size_t(pool[p])];
                         in.insert(in.end(), c.tris.begin(), c.tris.end());
                         childStored[g] = std::max(childStored[g], c.stored);
-                        childError[g] = std::max(childError[g], std::max(c.stored, c.carriedBudget));
+                        ask[g] = std::max(ask[g], c.ask);
                     }
                     // THE TARGET: Nanite's parent count — and a group already at it that would not merge into FEWER
                     // clusters (the vertex cap: 126 loose triangles are 378 vertices, two clusters again) halves instead,
@@ -225,12 +263,19 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
                     // still needs as many (the 256-vertex cap binds before the 128-triangle one on seamed or boxy
                     // content) is simplified again to three quarters of its own count, as Nanite answers a failed
                     // split with a smaller target (dossier 1.5), until it fits fewer clusters or nothing within the
-                    // budget does — then the group is carried.
+                    // budget does. A group carried after a result within its budget is carried for its CLUSTER COUNT
+                    // (its members ask the same budget again); one with none is carried for its BUDGET (they ask 2E).
+                    bool within = false;
+                    int attempts = 0;
+                    double msSimplify = 0.0, msMeasure = 0.0, msExact = 0.0;
                     for (int shrink = 0;; ++shrink) {
-                        results[g] = reduceGroup(mesh, weld, islands, in, grouping.external[g], childError[g],
-                                                 childStored[g], floorLen, options.attributes, target);
+                        results[g] = reduceGroup(mesh, weld, islands, in, grouping.external[g], ask[g], floorLen,
+                                                 options.attributes, target);
                         GroupResult &r = results[g];
+                        attempts += r.attempts;
+                        msSimplify += r.msSimplify; msMeasure += r.msMeasure; msExact += r.msExact;
                         if (!r.accepted || !r.simplified) break;   // carried, or merged as it was (split above)
+                        within = true;
                         const Clock::time_point ts = Clock::now();
                         std::vector<unsigned> isl(r.out.size() / 3);
                         for (size_t t = 0; t < isl.size(); ++t) isl[t] = r.space.comp[r.out[t * 3]];
@@ -242,17 +287,37 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
                         if (shrink >= kMaxShrinks || outCount <= 1) { r.accepted = false; break; }
                         target = std::max<size_t>(1, outCount * 3 / 4);
                     }
+                    GroupResult &r = results[g];
+                    r.attempts = attempts;
+                    r.msSimplify = msSimplify; r.msMeasure = msMeasure; r.msExact = msExact;
+                    if (!r.accepted && within) countCarry[g] = 1u;
+                    // the output in MESH ids; the group's scratch and local space are released here (only the
+                    // weights stay, for the record)
+                    if (r.accepted) for (unsigned &v : r.out) v = r.scratch.globalOf[v];
+                    const Weights w = r.scratch.weights;
+                    r.scratch = GroupScratch();
+                    r.scratch.weights = w;
+                    r.space = LocalSpace();
                 }
             });
             bool any = false;
             for (const GroupResult &r : results) any = any || r.accepted;
-            if (any || rerun >= kMaxReruns) break;
-            if (stats) ++stats->levelsAllCarried;
-            for (size_t g = 0; g < ng; ++g)
-                for (unsigned p : grouping.groups[g]) {
-                    Cl &c = cl[size_t(pool[p])];
-                    c.carriedBudget = std::max(c.carriedBudget, results[g].budget);
+            if (any || pass >= kMaxReruns) break;
+            if (stats) {
+                ++stats->levelsAllCarried;
+                for (size_t g = 0; g < ng; ++g) {
+                    stats->retries += std::max(0, results[g].attempts - 1);
+                    stats->msSimplify += results[g].msSimplify; stats->msMeasure += results[g].msMeasure;
+                    stats->msExact += results[g].msExact;
+                    if (options.wantGroups) {
+                        GroupRecord rec = recordOf(g, pass);
+                        rec.kind = 1;
+                        stats->records.push_back(std::move(rec));
+                    }
                 }
+            }
+            for (size_t g = 0; g < ng; ++g)
+                for (unsigned p : grouping.groups[g]) cl[size_t(pool[p])].ask = kLadderFactor * results[g].budget;
         }
         if (stats) {
             if (ng <= 2) stats->msFewGroups += msSince(tr);
@@ -265,32 +330,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
         std::vector<int> next;
         for (size_t g = 0; g < ng; ++g) {
             const GroupResult &r = results[g];
-            GroupRecord rec;
-            rec.level = level;
-            rec.members = int(grouping.groups[g].size());
-            rec.inTris = 0;
-            for (unsigned p : grouping.groups[g]) rec.inTris += int(cl[size_t(pool[p])].tris.size() / 3);
-            rec.childError = childError[g];
-            rec.childStored = childStored[g];
-            rec.budget = r.budget;
-            rec.step = r.step;
-            rec.estimate = r.estimate;
-            rec.depth0Estimate = r.depth0Estimate;
-            rec.attempts = r.attempts;
-            rec.pruned = r.pruned;
-            rec.removedVertex = r.terms.removedVertex;
-            rec.lostFacet = r.terms.lostFacet;
-            rec.addedFacet = r.terms.addedFacet;
-            rec.droppedIsland = r.terms.droppedIsland;
-            rec.lostLocked = r.terms.lostLocked;
-            rec.islandsDropped = r.terms.islandsDropped;
-            rec.lockedLost = r.terms.lockedLost;
-            rec.weightNormal = r.scratch.weights.normal;
-            rec.weightUv = r.scratch.weights.uv;
-            if (options.wantLocks) {
-                rec.external = grouping.external[g];
-                for (unsigned p : grouping.groups[g]) rec.memberClusters.push_back(pool[p]);
-            }
+            GroupRecord rec = recordOf(g, pass);
             if (stats) {
                 stats->retries += std::max(0, r.attempts - 1);
                 stats->prunedPieces += r.pruned;
@@ -299,7 +339,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
                 rec.kind = 1;
                 for (unsigned p : grouping.groups[g]) {
                     Cl &c = cl[size_t(pool[p])];
-                    c.carriedBudget = std::max(c.carriedBudget, r.budget);
+                    c.ask = countCarry[g] ? r.budget : kLadderFactor * r.budget;
                     next.push_back(pool[p]);
                 }
                 if (stats) { ++stats->carried; if (options.wantGroups) stats->records.push_back(std::move(rec)); }
@@ -327,9 +367,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
             rec.outTris = int(r.out.size() / 3);
             if (stats) { if (r.simplified) ++stats->reductions; else ++stats->notSimplified; }
 
-            // THE OUTPUT IN MESH IDS.
-            std::vector<unsigned> outGlobal(r.out.size());
-            for (size_t i = 0; i < r.out.size(); ++i) outGlobal[i] = r.scratch.globalOf[r.out[i]];
+            const std::vector<unsigned> &outGlobal = r.out;   // mesh ids (released above)
             // The parents.
             const size_t firstParent = cl.size();
             for (const std::vector<unsigned> &part : splits[g].parts) {
@@ -338,6 +376,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
                     c.tris.insert(c.tris.end(), { outGlobal[size_t(t) * 3], outGlobal[size_t(t) * 3 + 1], outGlobal[size_t(t) * 3 + 2] });
                 c.refined = id;
                 c.stored = G.error;
+                c.ask = kLadderFactor * G.error;
                 boundsOf(mesh, c);
                 c.lod = lod;
                 cl.push_back(std::move(c));

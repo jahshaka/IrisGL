@@ -259,17 +259,21 @@ namespace
 // v25 (2026-10-21, ATOM-7 stage 2): A LOCKED POSITION SURVIVES — the verify's rule 4: a position the level locked
 // that a group's result no longer uses locks its fan and the group is retried (an attempt that keeps its border wins
 // the best-attempt tie); CLOD_LOCK_VERIFY public in patch 0005. Every DAG re-bakes (BAKEKEY-1).
-// v27 (2026-10-22, ATOM-2 stage 2 + the stage-1 read): the empty top priced at the mesh's level-0 extent; a group's
-// result accepted when it fits its budget and needs FEWER CLUSTERS (the 15 % shed rule deleted); the islands over the
-// adjacency's weld ids (+-0 folded); the partitioner's part count vertex-aware (stage 2's placement — survivors
-// appended at their quadric optimum — measured a no-go by the memory rule and deleted). Every bake re-bakes (BAKEKEY-1).
 // v26 (2026-10-22, ATOM-2 stage 1): THE CLUSTER DAG IS OUR OWN BUILDER (import/atomdag/; clusterlod.h, its patch
 // stack 0002-0005 and the old verify/measure deleted): adjacency by position, 128-triangle / 256-vertex leaves and
 // 8-32 groups by our own bisection, borders recomputed every level, Nanite-scale attribute weights, the measured
 // one-step price (output vs the group's input, exact both ways) and the ladder (2x the children; a group that cannot
 // is carried, never forced), every triangle mesh with a DAG ending in an empty top. The per-mesh SDF is gone (nothing
 // read it). The blob's DAG config record is the builder's. Every bake re-bakes (BAKEKEY-1).
-constexpr int kFormatVersion = 27;
+// v27 (2026-10-22, ATOM-2 stage 2 + the stage-1 read): the empty top priced at the mesh's level-0 extent; a group's
+// result accepted when it fits its budget and needs FEWER CLUSTERS (the 15 % shed rule deleted); the islands over the
+// adjacency's weld ids (+-0 folded); the partitioner's part count vertex-aware (stage 2's placement — survivors
+// appended at their quadric optimum — measured a no-go by the memory rule and deleted). Every bake re-bakes (BAKEKEY-1).
+// v28 (2026-10-22, ATOM-2 the stage-2 read): A CLUSTER-COUNT CARRY KEEPS ITS BUDGET — a group with a result within
+// its budget that cannot reduce its cluster count is carried at the SAME budget (only a budget failure, or a level
+// where every group carried, doubles); carried leaf groups no longer take a depth-0 estimate. Every bake re-bakes
+// (BAKEKEY-1).
+constexpr int kFormatVersion = 28;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 

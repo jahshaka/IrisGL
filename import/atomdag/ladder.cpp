@@ -55,8 +55,8 @@ std::vector<unsigned> islandsAtRisk(const LocalSpace &space, const std::vector<u
 }   // namespace
 
 GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
-                        const std::vector<unsigned> &inTris, const std::vector<unsigned> &externalWelds,
-                        float childError, float childStored, float floorLen, bool attributes, size_t targetTris)
+                        const std::vector<unsigned> &inTris, const std::vector<unsigned> &externalWelds, float ask,
+                        float floorLen, bool attributes, size_t targetTris)
 {
     GroupResult r;
     r.scratch = makeScratch(mesh, inTris, attributes);
@@ -65,8 +65,10 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
     const size_t n = sc.size();
     const size_t inCount = inTris.size() / 3;
     const size_t target = targetTris;
-    if (inCount <= target) {
+    if (inCount <= target) {   // merged as it is: no simplification, no estimate
         r.accepted = true;
+        r.withinBudget = true;
+        r.budget = std::max(ask, floorLen);
         r.out = sc.tris;
         r.step = floorLen;
         return r;
@@ -82,10 +84,9 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
     };
     lockMask();
 
-    // THE BUDGET.
-    if (!(childStored > 0.0f)) r.depth0Estimate = positionEstimate(sc, lock, target);   // a group of leaves (D6)
-    r.budget = kLadderFactor * (childError > 0.0f ? childError : std::max(r.depth0Estimate, 0.0f));
-    r.budget = std::max(r.budget, floorLen);
+    // THE BUDGET: the largest ask; a group of leaves never granted one asks 2 x the position quadric's estimate.
+    if (!(ask > 0.0f)) r.depth0Estimate = positionEstimate(sc, lock, target);
+    r.budget = std::max(ask > 0.0f ? ask : kLadderFactor * std::max(r.depth0Estimate, 0.0f), floorLen);
 
     // per position: the input triangles at it (the fan a lock holds)
     std::vector<std::pair<unsigned, unsigned>> byWeld;   // (weld, input triangle)
@@ -107,6 +108,7 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
         m = measureStep(r.space, sc.tris, s.tris, externalWelds, r.budget, floorLen, false);
         r.msMeasure += msSince(tb);
         const bool within = m.step <= r.budget && m.lockedLost == 0;
+        r.withinBudget = r.withinBudget || within;
         if (within && (!haveBest || s.tris.size() < best.size())) {
             haveBest = true;
             best = std::move(s.tris);

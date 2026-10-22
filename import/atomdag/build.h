@@ -51,18 +51,23 @@ struct Options
 struct GroupRecord
 {
     int level = 0;
+    int pass = 0;               ///< the level's pass: > 0 = a re-run of an all-carried level (its budgets doubled)
     int dagGroup = -1;          ///< the DAG group it became; -1 = carried (or the empty top: kind 2)
     int kind = 0;               ///< 0 a reduction, 1 carried, 2 the empty top, 3 not simplified (at its target)
+    bool countCarry = false;    ///< carried after a result within its budget (the cluster count, not the budget)
     int members = 0;
     int inTris = 0, outTris = 0;
-    float childError = 0.0f;    ///< max over the members of (stored, carried budget)
-    float childStored = 0.0f;   ///< max over the members of their stored error (the spec's law reads this)
-    float budget = 0.0f, step = 0.0f, stored = 0.0f, estimate = 0.0f, depth0Estimate = -1.0f;
+    float childStored = 0.0f;   ///< max over the members of their stored error
+    float ask = 0.0f;           ///< max over the members of their asks (ladder.h); 0 = leaves never granted a budget
+    float budget = 0.0f;        ///< THE GRANTED BUDGET E the group was simplified under
+    float step = 0.0f;          ///< the measured step (the kept result's exact maximum, bounded by E)
+    float measured = 0.0f;      ///< the exact walk's own value (its upper bound: within 5 % above the true maximum)
+    float stored = 0.0f, estimate = 0.0f, depth0Estimate = -1.0f;
     float removedVertex = 0.0f, lostFacet = 0.0f, addedFacet = 0.0f, droppedIsland = 0.0f, lostLocked = 0.0f;
-    int attempts = 0, pruned = 0, islandsDropped = 0, lockedLost = 0;
+    int attempts = 0, pruned = 0, islandsDropped = 0, lockedLost = 0;   ///< attempts: every simplify of every shrink
     float weightNormal = 0.0f, weightUv = 0.0f;
+    std::vector<int> memberClusters;  ///< the DAG cluster ids it was given (the law's children)
     std::vector<unsigned> external;   ///< wantLocks: its external positions (weld ids)
-    std::vector<int> memberClusters;  ///< wantLocks: the DAG cluster ids it merged
 };
 
 struct Stats
@@ -75,6 +80,7 @@ struct Stats
     int sphereGrown = 0;         ///< groups whose enclosing sphere was grown by float rounding to hold a member's
     bool depthCapHit = false;
     float rootError = 0.0f;      ///< the empty top's error
+    float floorLen = 0.0f;       ///< the arithmetic floor of a measured length (1e-5 of the largest axis)
     int rootTriangles = 0;       ///< triangles of the last cluster before the empty top (0 if the chain emptied)
     double msTotal = 0.0, msLeaves = 0.0, msGroups = 0.0, msReduce = 0.0, msSplit = 0.0;
     double msSimplify = 0.0, msMeasure = 0.0;   ///< summed over the groups (thread time, not wall)
