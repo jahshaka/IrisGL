@@ -783,6 +783,29 @@ private:
     unsigned long long gatherRestKeyArmed(const detail::OgreScene *scene) const {
         return scene->gatherRestKey() ^ (arm(ArmId::GiHitDirect, true) ? 0ull : 0x9E3779B97F4A7C15ull);
     }
+    /// THE REFLECTION'S REST KEY (PHOTON-2 fix F5): the gather's (the lighting serial - a light write, an injection
+    /// landing, a cascade rebuild -, the transform epoch, the ray rule's refits, the field's integrations, the cards'
+    /// captures and relights) and EVERY OTHER WRITE TO WHAT A REFLECTION RAY READS: a material edit (the material
+    /// store's rows and the edit serial - a reflected object's albedo is read at the hit, a reflector's roughness
+    /// shapes the lobe, and neither moves the gather's key), a light write or removal (the hit table's direct light),
+    /// and any acceleration-structure build or refit (an item added, removed, hidden or moved re-builds the TLAS). A
+    /// held reflection then never shows stale inputs: the rest BREAKS (the moving rules resume from the handed-over
+    /// answer, the history kept) and restarts once they are still again.
+    unsigned long long reflectRestKey(const detail::OgreScene *scene, const SceneAs &sa) const {
+        unsigned long long key = gatherRestKeyArmed(scene);
+        const auto fold = [&key](unsigned long long v) {
+            key ^= v;
+            key *= 1099511628211ull;
+        };
+        fold(scene->photon().materialEditSerial());
+        const Ogre::PhotonVoxelMaterial *store = scene->photon().materials();
+        fold(store ? store->getRowsSerial() : 0ull);
+        fold(scene->lightWriteSerial());
+        fold(scene->lightsRemoved());
+        fold(sa.st.tlasBuilds);
+        fold(sa.st.tlasRefits);
+        return key;
+    }
     /// THE REFIT, off by default. A full TLAS rebuild is NVIDIA's own recommendation
     /// ("consider PREFER_FAST_TRACE and perform only rebuilds") and it measures
     /// 0.21-0.35 ms GPU at 8,001 instances on this rig — inside any budget — while
@@ -5984,7 +6007,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             paramsKey ^= bytes[b];
             paramsKey *= 1099511628211ull;
         }
-        const unsigned long long restKey = gatherRestKeyArmed(scene);
+        const unsigned long long restKey = reflectRestKey(scene, sa);
         const bool sameEye = rv.havePrev && rv.prevStereo == stereo &&
                              std::memcmp(&rv.prev[0], &eyeB[0], sizeof(EyeBasisF)) == 0;
         const bool still = !stereo && !photon && sameEye && rv.restKnown && restKey == rv.restKey &&
