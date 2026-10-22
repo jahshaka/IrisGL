@@ -160,12 +160,6 @@ namespace Ogre
         pass->getVertexProgramParameters()->setNamedConstant( "windowOffset", offset, 1u, 3u );
     }
     //-----------------------------------------------------------------------------------
-    void PhotonIfdProbeVisualizer::setColourScale( float scale )
-    {
-        Pass *pass = mMaterial->getTechnique( 0 )->getPass( 0 );
-        pass->getFragmentProgramParameters()->setNamedConstant( "rangeMult", Vector2( scale, scale ) );
-    }
-    //-----------------------------------------------------------------------------------
     const String &PhotonIfdProbeVisualizer::getMovableType() const { return BLANKSTRING; }
     //-----------------------------------------------------------------------------------
     const LightList &PhotonIfdProbeVisualizer::getLights() const

@@ -173,8 +173,6 @@ namespace Ogre
         /// mExtraCascades): the injection binds the whole chain and marches from this entry outward.
         uint32 mChainIndex = 0u;
 
-        float mBakingMultiplier;
-        float mInvBakingMultiplier;
         /// The scene's chain is this one cascade (the constructor's; the SDF skip's condition).
         bool  mChainOfOne;
 
@@ -205,7 +203,6 @@ namespace Ogre
         uint32 mLastLightsOverBudget = 0u;
         uint32 mLightBudget = 16u;   ///< this cascade's budget (lightBudgetFor), set by update()
         bool   mOverBudgetLogged = false;
-        ShaderParams::Param *mBakingMultiplierParam;
         ShaderParams::Param *mVoxelCellSize;
         ShaderParams::Param *mInvVoxelResolution;
         ShaderParams        *mShaderParams;
@@ -254,18 +251,6 @@ namespace Ogre
         */
         float mSpecularSdfQuality;
 
-        /** Sets the intensity/brightness of the GI. e.g. to make the GI 2x brighter, set it to 2.0
-            To make the GI darker, set it to 0.5
-
-            Default value is 1.0
-
-            Valid range is (0; inf)
-
-            @remark	 PUBLIC VARIABLE. This variable can be altered directly.
-                     Changes are reflected immediately.
-        */
-        float mMultiplier;
-
     protected:
         PhotonVoxelVisualizer *mDebugVoxelVisualizer;
 
@@ -273,8 +258,7 @@ namespace Ogre
 
         void restoreSwappedTextures();
 
-        float addLight( PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight, Light *light,
-                        const Vector3 &voxelOrigin, const Vector3 &invVoxelSize );
+        void addLight( PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight, Light *light, const Vector3 &voxelOrigin );
 
         void createTextures();
         void destroyTextures();
@@ -347,44 +331,6 @@ namespace Ogre
         void setStoreSkyLight( bool on ) { mStoreSkyLight = on; }
         bool getStoreSkyLight() const { return mStoreSkyLight; }
 
-        /** Sets baking multiplier for HDR rendering.
-
-            Internally the lighting data is stored in RGBA8_UNORM_sRGB, which is not enough
-            for HDR. More precise formats would allow for native HDR, however it's memory cost
-            and bandwidth could be prohibtive.
-
-            Hence bakingMult is used to bring down the lighting data to usable levels without
-            saturation (however beware areas with very low lighting conditions may round to 0).
-
-            During rendering, we use 1.0 / bakingMult to bring back the values its original range.
-
-            For LDR rendering, you probably would want to set this value to 1.0.
-        @remarks
-            This value will be ignored if PhotonVoxelLighting::update is not called after setting this value
-            or if PhotonVoxelLighting::update gets called again but autoMultiplier = true
-
-            This function is different from PhotonVoxelLighting::mMultiplier.
-            That variable controls the GI strength/brightness.
-            This function only controls precision and accuracy.
-        @param bakingMult
-            Value to multiply against GI lighting during baking.
-            Use values >= 1 when all your lights are too dim,
-            but could saturate quickly if that's not the case
-
-            Values <= 1 make when your lights are very bright,
-            but can cause low light to become 0 (too dark)
-
-            Changes to this value take effect after calling PhotonVoxelLighting::update
-            and autoMultiplier must be set to false
-        */
-        void  setBakingMultiplier( float bakingMult );
-        float getBakingMultiplier() const { return mBakingMultiplier; }
-
-        /// If you've set setBakingMultiplier but haven't yet called PhotonVoxelLighting::update
-        /// with autoMultiplier = false, this function returns the baking multiplier that
-        /// is currently in use (beware of floating point accuracy differences)
-        float getCurrentBakingMultiplier() const { return 1.0f / mInvBakingMultiplier; }
-
         /// THE LIGHT SLOTS (P1C-LIGHT-LIST): the const buffer and LightInjection_piece_cs's
         /// array (vct_light_budget) hold kLightSlots lights in every cascade.
         /// Destroys the pooled anisotropic mip-step jobs (BUGS-6 stage 3) - the engine's teardown.
@@ -415,17 +361,13 @@ namespace Ogre
         @param sceneManager
         @param numBounces
             Number of GI bounces. This value must be 0 if getAllowMultipleBounces() == false
-        @param autoMultiplier
-            Whether we should calculate the ideal multiplier based on lights on scene.
-            See PhotonVoxelLighting::setMultiplier
         @param lightMask
         @remarks
             Jahshaka (PHOTON-VOXEL-5): the injection's shadow march is exact - a 3D-DDA over
             the level-0 voxels from each half's face - so upstream's thinWallCounter and
             rayMarchStepScale (a stepped march's wall counter and step length) are gone.
         */
-        void update( SceneManager *sceneManager, uint32 numBounces, bool autoMultiplier = true,
-                     uint32 lightMask = 0xffffffff );
+        void update( SceneManager *sceneManager, uint32 numBounces, uint32 lightMask = 0xffffffff );
 
         /// THE INJECTION'S PARTS, NAMED AS THEY ARE RECORDED (PHOTON-7 stage 1, the split rows): a
         /// host that times an injection hands a listener, and update() opens each part before it
@@ -514,9 +456,9 @@ namespace Ogre
             256 for the last cascade).
         @param outFromPrev
             8 * ( getNumCascades() - 1 ) floats: per cascade i >= 1, two float4s -
-            ( cascade i-1's normalised space to cascade i's: the scale xyz, and cascade
-            i's radiance over cascade 0's stored units ), then ( the offset xyz, and the
-            specular walk's weight slope 1 / numMips^3 ).
+            ( cascade i-1's normalised space to cascade i's: the scale xyz ), then ( the
+            offset xyz ); both w are padding (0). (Every cascade stores radiance, k = 1:
+            PHOTON-7 stage 1 deleted the hop's unit conversion that sat in the first w.)
             May be null when there is one cascade.
         */
         void getCascadeChainParams( float *RESTRICT_ALIAS outInvResMaxLod,
@@ -559,9 +501,6 @@ namespace Ogre
         TextureGpu  *getEnvironmentCube() const { return mEnvCube; }
         const float *getEnvironmentGain() const { return mEnvGain; }
         const float *getEnvironmentSh() const { return mEnvSh; }
-        /// The decode multiplier the pixel shader applies to this volume's stored
-        /// radiance (fillConstBufferData's `multiplier`): D_max / pi.
-        float getFinalMultiplier() const { return mInvBakingMultiplier * mMultiplier; }
 
         TextureGpu **getLightVoxelTextures() { return mLightVoxel; }
         /// JAHSHAKA PATCH: THE DIRECT TERM'S VOLUME (fork ae2ed529f+155a56bf8 (was 0076)'s D term), or null

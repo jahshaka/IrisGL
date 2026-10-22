@@ -5466,12 +5466,11 @@ struct AtomCutProbe {
 /// (PHOTON-M2's finding F1, where a saturated gather read as a "contraction").
 /// What a guard needs is the histogram's top bin, and that is this.
 ///
-/// EVERY VALUE IS IN THE STORE'S OWN NORMALISED UNITS — the units the volume
-/// holds, i.e. scene radiance times `multiplier`. `formatMax` is the ceiling
-/// that format can represent in those units (1.0 for the UNORM formats, 0 for
-/// a float one: unbounded), so `peak` against `formatMax` and `voxelsAtMax`
-/// against `voxelsLit` are the whole question. Multiply by
-/// `1 / multiplier` for scene radiance.
+/// EVERY VALUE IS SCENE RADIANCE — what the volume holds (PHOTON-7 stage 1
+/// deleted the per-box normalisation). `formatMax` is the ceiling that format
+/// can represent (1.0 for the UNORM formats, 0 for a float one: unbounded), so
+/// `peak` against `formatMax` and `voxelsAtMax` against `voxelsLit` are the
+/// whole question.
 /// THE IRRADIANCE FIELD'S ATLASES, AS BYTES (PHOTON-WRITER-1) — a TEST AND TOOL
 /// readback (Scene::giFieldAtlas): the irradiance and depth-moment atlases
 /// exactly as the GPU holds them, with what it takes to find one probe's tile.
@@ -5504,14 +5503,10 @@ struct GiVoxelStats {
     /// The largest value that format can hold in the store's units — 1.0 for
     /// UNORM, 0.0 for a float format (no ceiling worth naming).
     float formatMax = 0.0f;
-    /// The store's normalisation `k`: a voxel holds `k` times the surface's
-    /// outgoing radiance (`PhotonVoxelLighting`'s baking multiplier, k = pi /
-    /// (headroom * D_max) in this engine).
-    float multiplier = 0.0f;
     /// The peak channel over the whole TOTAL volume, and over the DIRECT
-    /// volume beside it when the cascade bounces (the fixed point's D term,
-    /// which is <= 1/headroom by construction — a peak above that is a defect
-    /// in the normalisation, not a bright scene).
+    /// volume beside it when the cascade bounces (the fixed point's D term) - in
+    /// radiance: a voxel holds the surface's outgoing radiance (PHOTON-7 stage 1
+    /// deleted the per-box normalisation k).
     float peak = 0.0f;
     float peakDirect = 0.0f;
     /// The mean of the channel maximum over LIT voxels — what the picture's
@@ -5539,8 +5534,7 @@ struct GiVoxelStats {
     /// is what the cones read; the EMISSIVE VOXEL STORE is what the injection
     /// SEEDS it from, so a clip there cannot be told from a dim emitter anywhere
     /// downstream. These read the voxeliser's own emissive volume, in SCENE
-    /// RADIANCE (no normalisation: the voxeliser writes the material's emissive
-    /// as authored — `multiplier` does not apply to them).
+    /// RADIANCE (the voxeliser writes the material's emissive as authored).
     ///
     /// `emissiveFormat` is empty when this cascade has no voxeliser to read.
     /// `peakEmissive` is the largest channel in the volume — for a scene with
@@ -5586,10 +5580,8 @@ struct GiVoxelVolume {
     /// Cascade's voxel origin (the corner of voxel 0,0,0) and cell, world metres.
     float origin[3] = { 0.f, 0.f, 0.f };
     float cell[3] = { 0.f, 0.f, 0.f };
-    /// The store's normalisation k (a voxel holds k x the surface's radiance).
-    float multiplier = 0.0f;
     /// width*height*depth RGBA, x fastest: the TOTAL light (premultiplied by
-    /// the voxel's conservative opacity c, k units), the voxeliser's albedo
+    /// the voxel's conservative opacity c; radiance), the voxeliser's albedo
     /// volume (rgb = the surfaces' area-mean albedo, a = c = max of the six
     /// per-half-axis coverages), the COVERAGE PER HALF-AXIS (rgb = O_x, O_y, O_z of
     /// the faces looking +a (P) and -a (N): the fraction of the voxel's face along

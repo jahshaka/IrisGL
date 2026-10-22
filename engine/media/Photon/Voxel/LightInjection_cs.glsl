@@ -115,7 +115,6 @@ layout( local_size_x = @value( threads_per_group_x ),
 
 vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform uint numLights;
-	uniform float bakingMultiplier;
 	//uniform float3 voxelOrigin;
 	uniform float3 voxelCellSize;
 	uniform float3 invVoxelResolution;
@@ -138,7 +137,6 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 vulkan( }; )
 
 #define p_numLights numLights
-#define p_bakingMultiplier bakingMultiplier
 //#define p_voxelOrigin voxelOrigin
 #define p_voxelCellSize voxelCellSize
 #define p_invVoxelResolution invVoxelResolution

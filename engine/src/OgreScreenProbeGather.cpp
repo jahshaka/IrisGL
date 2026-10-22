@@ -1456,7 +1456,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         pp.voxelOrigin[c][0] = have ? in.voxelOrigin[src][0] : 0.0f;
         pp.voxelOrigin[c][1] = have ? in.voxelOrigin[src][1] : 0.0f;
         pp.voxelOrigin[c][2] = have ? in.voxelOrigin[src][2] : 0.0f;
-        pp.voxelOrigin[c][3] = have ? in.voxelMultiplier[src] : 1.0f;
+        pp.voxelOrigin[c][3] = 0.0f;   // padding (the per-cascade multiplier, deleted: the voxels hold radiance)
         pp.voxelInvSize[c][0] = sx > 0.0f ? 1.0f / sx : 0.0f;
         pp.voxelInvSize[c][1] = sy > 0.0f ? 1.0f / sy : 0.0f;
         pp.voxelInvSize[c][2] = sz > 0.0f ? 1.0f / sz : 0.0f;

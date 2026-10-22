@@ -5757,18 +5757,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     Ogre::TextureGpu *vox[kMaxReflectCascades][kRayVoxelKinds] = {};   // kRayVoxelKinds' order
     Ogre::Vector3 voxOrigin[kMaxReflectCascades], voxSize[kMaxReflectCascades],
                   voxCell[kMaxReflectCascades];
-    /// THE CASCADE'S RADIANCE MULTIPLIER (DRAG-1, RENDER_AUDIT PHOTON F2).
-    /// `PhotonVoxelLighting::update` with autoMultiplier normalises everything it
-    /// injects by the brightest light's radiance over pi, and the PIXEL path
-    /// multiplies it back out (`finalMultiplier = mInvBakingMultiplier *
-    /// mMultiplier`, PhotonVoxelLighting.cpp; read in Vct_piece_ps.any as
-    /// `probeParams.multiplier`). The ray arm read the voxel raw, so a traced
-    /// reflection was in baking units — right only when the brightest light has
-    /// radiance pi, which is a sun at intensity 1 and every fixture the suites
-    /// use. No patch is needed for it: `mMultiplier` is a public member and
-    /// `getCurrentBakingMultiplier()` is a public accessor for the inverse of
-    /// the other half, so the product is available from outside.
-    float voxMultiplier[kMaxReflectCascades];
     unsigned voxCount = 0;
     const auto takeVolume = [&](Ogre::PhotonVoxelLighting *lighting,
                                 Ogre::PhotonVoxelizer *voxelizer) {
@@ -5791,11 +5779,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         voxOrigin[voxCount] = voxelizer->getVoxelOrigin();
         voxSize[voxCount]   = voxelizer->getVoxelSize();
         voxCell[voxCount]   = voxelizer->getVoxelCellSize();
-        {
-            const float baking = lighting->getCurrentBakingMultiplier();
-            voxMultiplier[voxCount] =
-                baking > 1e-6f ? lighting->mMultiplier / baking : lighting->mMultiplier;
-        }
         ++voxCount;
     };
     std::vector<PhotonComponent::Volume> builtCascades;
@@ -6007,13 +5990,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const Ogre::Vector3 og = voxCount ? voxOrigin[src] : Ogre::Vector3::ZERO;
         const Ogre::Vector3 cl = voxCount ? voxCell[src] : Ogre::Vector3(1.0f);
         pp.voxelOrigin[c][0] = og.x; pp.voxelOrigin[c][1] = og.y; pp.voxelOrigin[c][2] = og.z;
-        // ...AND THE RADIANCE MULTIPLIER in `.w` (DRAG-1). The slot held this
-        // cascade's largest extent, which no shader ever read; see voxMultiplier.
-        pp.voxelOrigin[c][3] = voxCount ? voxMultiplier[src] : 1.0f;
-        // MEASURED (DRAG-1) on tests/rtreflect's fixture (brightest light
-        // radiance 2.0, so the factor is 2/pi = 0.6366): the mirror's red excess
-        // read 0.0737 without it and 0.0434 with it — the ray used to show that
-        // fixture 57 % too bright, which is what a voxel read in baking units means.
+        // `.w` is padding: it held the cascade's radiance multiplier (DRAG-1), which undid the per-box
+        // normalisation PHOTON-7 stage 1 deleted - the voxels hold radiance.
+        pp.voxelOrigin[c][3] = 0.0f;
         pp.voxelInvSize[c][0] = sz.x > 0.0f ? 1.0f / sz.x : 0.0f;
         pp.voxelInvSize[c][1] = sz.y > 0.0f ? 1.0f / sz.y : 0.0f;
         pp.voxelInvSize[c][2] = sz.z > 0.0f ? 1.0f / sz.z : 0.0f;
@@ -7578,9 +7557,6 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         in.voxelOrigin[c][0] = og.x; in.voxelOrigin[c][1] = og.y; in.voxelOrigin[c][2] = og.z;
         in.voxelSize[c][0] = sz.x;   in.voxelSize[c][1] = sz.y;   in.voxelSize[c][2] = sz.z;
         in.voxelCell[c] = std::max(std::max(cl.x, cl.y), cl.z);
-        const float baking = lighting->getCurrentBakingMultiplier();
-        in.voxelMultiplier[c] =
-            baking > 1e-6f ? lighting->mMultiplier / baking : lighting->mMultiplier;
         ++in.cascadeCount;
     };
     std::vector<PhotonComponent::Volume> builtCascades;

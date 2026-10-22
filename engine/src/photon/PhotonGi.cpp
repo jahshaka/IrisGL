@@ -980,7 +980,7 @@ bool PhotonComponent::injectCascade(size_t i) {
             Ogre::PhotonVoxelLighting *l;
             ~Unhook() { l->setPhaseListener(nullptr); }
         } unhook{ lighting };
-        lighting->update(mSceneMgr, passes, true /*autoMultiplier*/);
+        lighting->update(mSceneMgr, passes);
     }
     lighting->setMeasureBounceEnergy(false);
     mVctCascades[i].bouncePassesApplied = passes;
@@ -1652,7 +1652,6 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
         st.depth  = int(total->getDepth());
         st.format = Ogre::PixelFormatGpuUtils::toString(total->getPixelFormat());
         st.formatMax = (total->getPixelFormat() == Ogre::PFG_RGBA16_FLOAT) ? 0.0f : 1.0f;
-        st.multiplier = lighting->getCurrentBakingMultiplier();
         st.peak = wt.peak;
         st.meanLit = wt.lit ? wt.sum / double(wt.lit) : 0.0;
         st.voxelsLit = wt.lit;
@@ -1947,7 +1946,6 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
         out.depth = int(total->getDepth());
         const Ogre::Vector3 o = voxelizer->getVoxelOrigin(), c = voxelizer->getVoxelCellSize();
         for (int k = 0; k < 3; ++k) { out.origin[k] = o[size_t(k)]; out.cell[k] = c[size_t(k)]; }
-        out.multiplier = lighting->getCurrentBakingMultiplier();
         out.available = true;
         return true;
     } JAH_CATCH(mError, false);

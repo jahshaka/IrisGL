@@ -209,7 +209,6 @@ struct GatherInputs {
     float voxelOrigin[kGatherMaxCascades][3] = {};
     float voxelSize[kGatherMaxCascades][3] = {};
     float voxelCell[kGatherMaxCascades] = {};
-    float voxelMultiplier[kGatherMaxCascades] = {};
     unsigned cascadeCount = 0u;
 
     /// The camera's basis, in the five vectors the shaders reconstruct with.

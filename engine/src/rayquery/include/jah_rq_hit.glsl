@@ -17,9 +17,9 @@
 // binding number:
 //
 //     JAH_VOX_COUNT        int    how many cascades are bound
-//     JAH_VOX_ORIGIN(c)    vec4   xyz = the box's world origin, w = the
-//                                 cascade's radiance multiplier (the bake's
-//                                 normalisation undone — DRAG-1)
+//     JAH_VOX_ORIGIN(c)    vec4   xyz = the box's world origin, w padding (the
+//                                 voxels hold radiance: PHOTON-7 stage 1 deleted
+//                                 the per-cascade multiplier DRAG-1 undid)
 //     JAH_VOX_INVSIZE(c)   vec4   xyz = 1/the box's world size, w = one cell
 //     JAH_SKY_ON           bool   the environment cube is bound
 //     JAH_SKY_COLOUR       vec3   with the cube bound, the environment light's
@@ -35,8 +35,7 @@
 // THE ARITHMETIC IS rq_reflect.comp's, UNCHANGED, and the long rationale for
 // every term of it lives at the call site in that file (the anisotropic slot
 // blend in the ray's own direction, the six-cell crossfade at a cascade's face,
-// the half-cell step into the surface's own cell, the per-cascade multiplier
-// that undoes VctLighting's baking normalisation, the opacity divide). What
+// the half-cell step into the surface's own cell, the opacity divide). What
 // moved here is the CODE, not a decision: the reflection path passes the
 // footprint its lobe implies and asks for no crossfade when it is a mirror; the
 // gather passes the footprint ONE RAY of its probe covers. Both get the same
@@ -52,7 +51,7 @@
 // and the usable-sample guard live in jah_voxel_sample.glsl, which the pixel
 // shader's cone march, the bounce job and the irradiance field read too. This
 // file keeps what is the HIT's own: which cascade answers, the step into the
-// hit's cell, the six-cell crossfade, the multiplier and the opacity divide.
+// hit's cell, the six-cell crossfade and the opacity divide.
 // The ray jobs declare combined sampler arrays under the names below, so the
 // sample macros default to them.
 #ifndef JAH_VOX_SAMPLE_ISO
@@ -220,7 +219,7 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 			// share is 0, not 1 (1 handed the whole read back as bounce: 0.02 of the lit floor on
 			// shaded faces at bounces 0; spikes/far-sun-2/NOTES.md section 16).
 			const vec3 share = clamp( ( tIso.xyz - dIso.xyz ) / max( tIso.xyz, vec3( 1e-8 ) ), vec3( 0.0 ), vec3( 1.0 ) );
-			accBounce += rad * share * ( w * max( origin.w, 0.0 ) );
+			accBounce += rad * share * w;
 		}
 		// MOVER-OCCLUSION-1: THE SHARE A MOVER ABOVE THE HIT OCCLUDES. The store holds the
 		// lamps' direct term (D, its own volume and chain) plus what the sky and the bounce
@@ -234,7 +233,7 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 			rad -= ( 1.0 - jahHitIndirectGate ) * max( rad - dRad, vec3( 0.0 ) );
 		}
 #endif
-		acc += rad * ( w * max( origin.w, 0.0 ) );
+		acc += rad * w;
 		accW += w;
 		if( !ok )
 			jahVoxelAnswerCascade = c;

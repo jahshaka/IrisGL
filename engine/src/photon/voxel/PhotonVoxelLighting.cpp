@@ -202,11 +202,8 @@ namespace Ogre
         mLightDirect( 0 ),  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076)
         mLightDirectBack( 0 ),
         mInjectHigherMipHalfWidth( 0 ),
-        mBakingMultiplier( 1.0f ),
-        mInvBakingMultiplier( 1.0f ),
         mChainOfOne( chainOfOne ),
         mNumLights( 0 ),
-        mBakingMultiplierParam( 0 ),
         mVoxelCellSize( 0 ),
         mInvVoxelResolution( 0 ),
         mShaderParams( 0 ),
@@ -219,7 +216,6 @@ namespace Ogre
         mBounceEnvSh( 0 ),
         mBounceShaderParams( 0 ),
         mSpecularSdfQuality( 0.875f ),
-        mMultiplier( 1.0f ),
         mDebugVoxelVisualizer( 0 )
     {
         memset( mLightVoxel, 0, sizeof( mLightVoxel ) );
@@ -243,7 +239,6 @@ namespace Ogre
         mShaderParams = &mLightInjectionJob->getShaderParams( "default" );
         mNumLights = mShaderParams->findParameter( "numLights" );
         mLightsPerVoxel = mShaderParams->findParameter( "lightsPerVoxel" );
-        mBakingMultiplierParam = mShaderParams->findParameter( "bakingMultiplier" );
         mVoxelCellSize = mShaderParams->findParameter( "voxelCellSize" );
         mInvVoxelResolution = mShaderParams->findParameter( "invVoxelResolution" );
         mInjectHigherMipHalfWidth = mShaderParams->findParameter( "higherMipHalfWidth" );
@@ -348,8 +343,8 @@ namespace Ogre
         }
     }
     //-------------------------------------------------------------------------
-    float PhotonVoxelLighting::addLight( PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight, Light *light,
-                                 const Vector3 &voxelOrigin, const Vector3 &invVoxelSize )
+    void PhotonVoxelLighting::addLight( PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight, Light *light,
+                                        const Vector3 &voxelOrigin )
     {
         const ColourValue diffuseColour = light->getDiffuseColour() * light->getPowerScale();
         for( size_t i = 0; i < 3u; ++i )
@@ -378,10 +373,10 @@ namespace Ogre
         for( size_t i = 0; i < 4u; ++i )
             vctLight->pos[i] = static_cast<float>( light4dVec[i] );
 
-        Vector3 uvwPos = light->getParentNode()->_getDerivedPosition();
-        uvwPos = ( uvwPos - voxelOrigin ) * invVoxelSize;
+        // (uvwPos.xyz was the light in this box's normalised space, which the box-bound march read; PHOTON-7 stage 1's
+        // march runs in metres through the chain and reads pos. Only the type is left in it.)
         for( size_t i = 0; i < 3u; ++i )
-            vctLight->uvwPos[i] = static_cast<float>( uvwPos[i] );
+            vctLight->uvwPos[i] = 0.0f;
         vctLight->uvwPos[3] = static_cast<float>( lightType );
 
         Vector3 rectPoints[4];
@@ -443,15 +438,7 @@ namespace Ogre
                 vctLight->points[i][j] = rectPoints[i][j];
             vctLight->points[i][3u] = isDoubleSided;
         }
-
-        vctLight->points[1][3u] = static_cast<float>( lightDir.x );
-        vctLight->points[2][3u] = static_cast<float>( lightDir.y );
-        vctLight->points[3][3u] = static_cast<float>( lightDir.z );
-
-        float maxValue;
-        maxValue = std::max( diffuseColour.r, diffuseColour.g );
-        maxValue = std::max( maxValue, diffuseColour.b );
-        return maxValue;
+        // (points[1..3].w held the area light's straight direction, which only the deleted march blend read.)
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::createTextures()
@@ -1122,22 +1109,17 @@ namespace Ogre
             mBounceFromPreviousProbeToNext->setManualValue( 0.0f );
             mBounceFromPreviousProbeToNext->isDirty = false;
         }
-        // THE ENVIRONMENT, in this volume's STORED units (Jahshaka, PHOTON-ENV-1): the
-        // voxels hold radiance divided by the decode multiplier the pixel shader
-        // applies (fillConstBufferData's `multiplier`), so the sky an escaping bounce
-        // cone adds is divided by the same number here and decodes to radiance.
+        // THE ENVIRONMENT, in radiance (Jahshaka, PHOTON-ENV-1): the voxels hold radiance (PHOTON-7 stage 1: no
+        // per-box normalisation to divide the sky by), so an escaping bounce cone adds the sky as it is.
         {
-            const float finalMultiplier = mInvBakingMultiplier * mMultiplier;
-            const float invFinal = finalMultiplier > 0.0f ? 1.0f / finalMultiplier : 0.0f;
             const float mips = mEnvCube ? float( mEnvCube->getNumMipmaps() ) : 1.0f;
-            const float gainMips[4] = { mEnvGain[0] * invFinal, mEnvGain[1] * invFinal,
-                                        mEnvGain[2] * invFinal, mips };
+            const float gainMips[4] = { mEnvGain[0], mEnvGain[1], mEnvGain[2], mips };
             mBounceEnvGainMips->setManualValue( gainMips, 4u );
             float sh[36];
             for( size_t i = 0u; i < 9u; ++i )
             {
                 for( size_t c = 0u; c < 3u; ++c )
-                    sh[i * 4u + c] = mEnvSh[i * 3u + c] * invFinal;
+                    sh[i * 4u + c] = mEnvSh[i * 3u + c];
                 sh[i * 4u + 3u] = 0.0f;
             }
             mBounceEnvSh->setManualValue( sh, 36u );
@@ -1380,10 +1362,7 @@ namespace Ogre
     //-------------------------------------------------------------------------
     bool PhotonVoxelLighting::getAllowMultipleBounces() const { return mLightBounce != 0; }
     //-------------------------------------------------------------------------
-    void PhotonVoxelLighting::setBakingMultiplier( float bakingMult ) { mBakingMultiplier = bakingMult; }
-    //-------------------------------------------------------------------------
-    void PhotonVoxelLighting::update( SceneManager *sceneManager, uint32 numBounces, bool autoMultiplier,
-                              uint32 _lightMask )
+    void PhotonVoxelLighting::update( SceneManager *sceneManager, uint32 numBounces, uint32 _lightMask )
     {
         checkTextures();
 
@@ -1517,11 +1496,8 @@ namespace Ogre
         }
         mInjectHigherMipHalfWidth->setManualValue( static_cast<int32>( mLightVoxel[1]->getWidth() >> 1u ) );
 
-        float autoMultiplierValue = 0.0f;
-
         const Vector3 voxelOrigin = mVoxelizer->getVoxelOrigin();
         const Vector3 invVoxelRes = 1.0f / mVoxelizer->getVoxelResolution();
-        const Vector3 invVoxelSize = 1.0f / mVoxelizer->getVoxelSize();
         const Vector3 cascadeSize = mVoxelizer->getVoxelSize();
 
         PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight = reinterpret_cast<PhotonShaderVoxelLight *>(
@@ -1546,7 +1522,7 @@ namespace Ogre
         uint32 numCollectedLights = 0;
         for( Light *light : mSelection.lights )
         {
-            addLight( vctLight, light, voxelOrigin, invVoxelSize );
+            addLight( vctLight, light, voxelOrigin );
             ++vctLight;
             ++numCollectedLights;
         }
@@ -1566,19 +1542,18 @@ namespace Ogre
 
         mLightsConstBuffer->unmap( UO_KEEP_PERSISTENT );
 
-        // THE STORE HOLDS RADIANCE, k = 1 (PHOTON-7 stage 1, L1): a voxel's value is the surface's outgoing radiance, the
-        // same at every placement - the per-box normalisation k = pi / D_max (the brightest light in range of the BOX)
-        // made the bytes depend on which lights the box held (a lamp of 8 in range at one placement: every voxel 8x).
-        // The float store holds it with headroom (Bistro Interior, cascade 0 at a lamp of 8: the direct term's peak
-        // 229.1, 286x under the RGBA16F ceiling); a lamp too small for the ceiling is held at its floor radius (addLight).
-        autoMultiplierValue = 1.0f;
-        mInvBakingMultiplier = 1.0f;
+        // THE STORE HOLDS RADIANCE (PHOTON-7 stage 1, L1): a voxel's value is the surface's outgoing radiance, the same
+        // at every placement - upstream's per-box normalisation k = pi / D_max (the brightest light in range of the BOX)
+        // made the bytes depend on which lights the box held (a lamp of 8 in range at one placement: every voxel 8x),
+        // and is DELETED with every multiply and divide by it (the injection's, the pixel's decode, the hop's unit
+        // conversion, the bounce's and the field's environment rescales, the cards', the ray tier's). The float store
+        // holds it with headroom (Bistro Interior, cascade 0 at a lamp of 8: the direct term's peak 229.1, 286x under
+        // the RGBA16F ceiling); a lamp too small for the ceiling is held at its floor radius (addLight).
 
         const Vector3 voxelCellSize( mVoxelizer->getVoxelCellSize() );
 
         mNumLights->setManualValue( numCollectedLights );
         mLightsPerVoxel->setManualValue( mLightBudget );
-        mBakingMultiplierParam->setManualValue( autoMultiplierValue );
         mVoxelCellSize->setManualValue( voxelCellSize );
         mInvVoxelResolution->setManualValue( invVoxelRes );
         mShaderParams->setDirty();
@@ -1705,7 +1680,6 @@ namespace Ogre
         // Moved out of fillConstBufferData VERBATIM (Jahshaka, PHOTON-READER-1): the pass
         // buffer's chain block is exactly these two arrays, back to back, and the
         // irradiance field's generation job reads the same chain through the same march.
-        const float finalMultiplier = mInvBakingMultiplier * mMultiplier;
 
         const size_t numCascades = mExtraCascades.size() + 1u;
 
@@ -1765,22 +1739,18 @@ namespace Ogre
                 ( prevCascade->mVoxelizer->getVoxelOrigin() - cascade->mVoxelizer->getVoxelOrigin() ) /
                 cascadeVoxelSize;
 
-            const float cascadeFinalMultiplier =
-                cascade->mInvBakingMultiplier * cascade->mMultiplier / finalMultiplier;
-
             *outFromPrev++ = static_cast<float>( vScale.x );
             *outFromPrev++ = static_cast<float>( vScale.y );
             *outFromPrev++ = static_cast<float>( vScale.z );
-            *outFromPrev++ = cascadeFinalMultiplier;
+            // PADDING (PHOTON-7 stage 1): it held the hop's unit conversion, cascade i's decode multiplier over cascade
+            // 0's - every cascade stores radiance now, so a hop adds the next cascade's colour as it is.
+            *outFromPrev++ = 0.0f;
 
             *outFromPrev++ = static_cast<float>( vPos.x );
             *outFromPrev++ = static_cast<float>( vPos.y );
             *outFromPrev++ = static_cast<float>( vPos.z );
-            // Jahshaka (PHOTON-PHYSICS-1, CONE-EMITTER-1): UNUSED. It held upstream's specular
-            // "brightness equalisation" slope (1 / mips^3) for a hop weight of
-            // mix( 0.5, cascadeFinalMultiplier, lod x slope ) - a near-mirror cone read every
-            // cascade past the first at half its radiance. The walk converts a hop's units by
-            // cascadeFinalMultiplier alone now (jah_voxel_march.glsl, jahConeMarch).
+            // PADDING (PHOTON-PHYSICS-1, CONE-EMITTER-1): it held upstream's specular "brightness equalisation"
+            // slope (1 / mips^3) - a near-mirror cone read every cascade past the first at half its radiance.
             *outFromPrev++ = 0.0f;
         }
     }
@@ -1799,8 +1769,6 @@ namespace Ogre
 
         const float mipDiff = ( maxMipmapCount - 8.0f ) * 0.5f;
 
-        const float finalMultiplier = mInvBakingMultiplier * mMultiplier;
-
         const size_t numCascades = mExtraCascades.size() + 1u;
 
         // float4 vctInvResolution_cascadeMaxLod[numCascades];
@@ -1812,7 +1780,7 @@ namespace Ogre
         // float specSdfMaxMip;
         // float specularSdfFactor;
         // float blendFade;
-        // float multiplier;
+        // float padding0; (PHOTON-7 stage 1: it was the decode multiplier D_max / pi - the voxels hold radiance)
         *passBufferPtr++ = 7.0f + mipDiff;
         // Where did 0.1875f & 0.3125f come from? Empirically obtained.
         // At 128x128x128, values in range [24; 40] gave good results.
@@ -1821,7 +1789,7 @@ namespace Ogre
         // Thus 24 / 128 and 40 / 128 = 0.1875f and 0.3125f
         *passBufferPtr++ = Math::lerp( 0.1875f, 0.3125f, mSpecularSdfQuality ) * smallestRes;
         *passBufferPtr++ = 1.0f;
-        *passBufferPtr++ = finalMultiplier;
+        *passBufferPtr++ = 0.0f;
 
         Matrix4 xform, invXForm;
         xform.makeTransform( -mVoxelizer->getVoxelOrigin() / mVoxelizer->getVoxelSize(),

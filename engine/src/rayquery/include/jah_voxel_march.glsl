@@ -30,9 +30,8 @@
 //                               this one's, as a mip; the last one's is past
 //                               any mip)
 //     JAH_VOX_FROM_PREV_SCALE(c)  vec4, c >= 1: xyz = cascade c-1's normalised
-//                               space to cascade c's (the scale), w = cascade
-//                               c's radiance over cascade 0's (the stored units
-//                               of each cascade differ by its own multiplier)
+//                               space to cascade c's (the scale), w padding
+//                               (every cascade stores radiance: PHOTON-7 stage 1)
 //     JAH_VOX_FROM_PREV_OFFSET(c) vec4, c >= 1: xyz = the offset of that map,
 //                               w unused
 //     JAH_VOX_SDF_MAXMIP, JAH_VOX_SDF_FACTOR   (only with JAH_MARCH_SDF) the
@@ -127,7 +126,7 @@
 /// THE WALK'S VARIANTS, as literal flags a caller passes (the compiler folds
 /// every branch on them).
 ///   DIFFUSE is the default: the per-cascade hand-over mip, the age carried at
-///   a hop, the colour hop weighted by the cascade multiplier.
+///   a hop.
 const uint JAH_MARCH_SPECULAR = 1u;	///< maxLod 11 per cascade, no age carry, the specular hop weight
 const uint JAH_MARCH_SDF = 2u;		///< the specular empty-space skip (a single volume only, as upstream)
 /// Stop after the FIRST plane, read WHOLE (the parity harness's "the march at zero
@@ -137,7 +136,7 @@ const uint JAH_MARCH_ONE_STEP = 32u;
 
 struct JahConeResult
 {
-	vec3 colour;		///< cascade 0's stored units (JAH_VOX_FROM_PREV_SCALE(c).w converts)
+	vec3 colour;		///< radiance (every cascade stores radiance: PHOTON-7 stage 1)
 	float alpha;		///< the composite's opacity along the cone - what the escape rides
 	float lodLevel;
 	vec3 posLS;			///< the point the march has read up to, in lastCascade's normalised space
@@ -393,16 +392,13 @@ JahConeResult jahConeMarchAged( vec3 posLS0, vec3 dirLS, float tanHalfAngle, vec
 			specular ? 0.0 : max( result.lodLevel - prevCascadeMaxLod, 0.0 ), result.alpha,
 			specular ? 0.0 : result.travelled * hopScale, origin, flags );
 
-		// THE HOP'S UNITS, ONE RULE FOR EVERY CONE (PHOTON-PHYSICS-1, CONE-EMITTER-1): the new
-		// cascade's colour is in ITS stored units, and fromPrevScale.w is exactly its radiance over
-		// cascade 0's - the conversion, nothing else. The specular walk used to take upstream's
-		// "hacky" brightness ramp instead, mix( 0.5, w, lod / mips^3 ): a near-mirror cone's lod
-		// stays near 0, so everything a specular cone read past cascade 0 came back at HALF its
-		// radiance (gi.cone_emitter: a 1 m panel of L = 5 in a roughness-0.05 lobe read 1.000 L
-		// with the panel in cascade 0 and 0.450 L with the same panel in cascade 1; gi.hit_planar's
-		// screen cone 0.39 of the true picture). The ramp dated from the store's PI-too-bright
-		// injection, since fixed at its source (fork 8f09c0cd4+155a56bf8).
-		result.colour += newRes.colour * fromPrevScale.w;
+		// THE HOP'S UNITS, ONE RULE FOR EVERY CONE (PHOTON-PHYSICS-1, CONE-EMITTER-1; PHOTON-7 stage 1):
+		// every cascade stores radiance, so the new cascade's colour is added as it is. (It was in ITS
+		// stored units, k = pi / D_max of its own box, and a hop converted by the ratio; and before
+		// that the specular walk took upstream's "hacky" brightness ramp, mix( 0.5, w, lod / mips^3 ),
+		// which read everything a near-mirror cone met past cascade 0 at HALF its radiance -
+		// gi.cone_emitter's 0.450 L.)
+		result.colour += newRes.colour;
 		const float hopToC0 = toC0 * hopScale;
 		if( specular )
 		{

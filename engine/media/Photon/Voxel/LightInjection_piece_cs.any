@@ -273,14 +273,11 @@
 		//For directional lights, pos.xyz contains -dir.xyz and pos.w = 0;
 		//For the rest of lights, pos.xyz contains pos.xyz and pos.w = 1;
 		float4 pos;
-		//uvwPos.w contains the light type
+		//uvwPos.w contains the light type (xyz unused: the chain march reads pos, in metres)
 		float4 uvwPos;
 
-		//Used by area lights
+		//Used by area lights: the rectangle's corners (xyz)
 		//points[0].w contains double sided info
-		//points[1].w contains lightStraightDir.x
-		//points[2].w contains lightStraightDir.y
-		//points[3].w contains lightStraightDir.z
 		float4 points[4];
 	};
 
@@ -490,7 +487,7 @@
 			// JAHSHAKA fork 8f09c0cd4+155a56bf8 (was 0077): THE VOXEL STORES RADIANCE. What a face reflects of this lamp
 			// is rho * E / PI = rho * NdotL * D / PI (light.diffuse = D = PI * I in this tree),
 			// exactly what HlmsPbs computes for the direct lighting of the same surface
-			// (NdotL * D * kD); the store below is scaled by p_bakingMultiplier = PI / D_max.
+			// (NdotL * D * kD) - stored as it is (PHOTON-7 stage 1: no per-box normalisation).
 			const float3 lightCol = c_invPI * light.diffuse.xyz * albedoVal.xyz * lightAtten;
 			// ...and the same light before the diffuse albedo, which the specular lobe takes
 			const float3 lightRaw = c_invPI * light.diffuse.xyz * lightAtten;
@@ -596,12 +593,11 @@
 	if( !twoSided )
 		back = front;
 
-	const float bm = p_bakingMultiplier;
 	const float3 emissive = emissiveVal.xyz;
 	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz );
 	// LEVEL 0 HOLDS THE SIDES' MEAN (a one-sided voxel's light unchanged; the bounce's march reads
 	// it) and the back side beside it (backVoxel, below).
-	float4 injectedVoxel = float4( ( ( front + back ) * 0.5f + emissive ) * ( bm * c ), c );
+	float4 injectedVoxel = float4( ( ( front + back ) * 0.5f + emissive ) * c, c );
 	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( injectedVoxel ) );
 	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): the same value, kept apart as the bounce iteration's
 	// D term. One extra image store; no copy and no second dispatch.
@@ -611,7 +607,7 @@
 		OGRE_imageWrite3D4( directVoxel, voxelCelUvw, jahStoreDirect( injectedVoxel ) );
 	@end
 
-	const float4 backVoxelVal = float4( ( back + emissive ) * ( bm * c ), c );
+	const float4 backVoxelVal = float4( ( back + emissive ) * c, c );
 	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, backVoxelVal );
 	@property( vct_keep_direct )
 		OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, backVoxelVal );
@@ -626,7 +622,7 @@
 			const float k = min( h == 0 ? covP0[a] : covN0[a], 1.0f );
 			jahHalfLight[li * 6u + uint( h * 3 + a )] =
 				k > 0.0f && c > 0.0f ? float4( ( halfLight[h * 3 + a] +
-												 emissive * ( emitU[h][a] / ( 1.0f - emitU[h][a] ) ) ) * ( bm * k ), k )
+												 emissive * ( emitU[h][a] / ( 1.0f - emitU[h][a] ) ) ) * k, k )
 									 : float4( 0.0f, 0.0f, 0.0f, 0.0f );
 		}
 	}

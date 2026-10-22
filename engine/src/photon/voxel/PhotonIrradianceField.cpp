@@ -582,30 +582,15 @@ namespace Ogre
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::fillEnvironmentParams()
     {
-        // In CASCADE 0's STORED units: the march returns the rays' colour in them and
-        // the pixel decodes the atlas with cascade 0's multiplier, so the sky an
-        // escaping ray adds is divided by the same number (the bounce job does the
-        // same for its own volume, PhotonVoxelLighting::runBounce).
-        const float finalMultiplier = mVctLighting->getFinalMultiplier();
-        const float invFinal = finalMultiplier > 0.0f ? 1.0f / finalMultiplier : 0.0f;
+        // In RADIANCE: the march returns the rays' colour in it (the voxels hold radiance, PHOTON-7 stage 1), so the sky
+        // an escaping ray adds is added as it is (the bounce job does the same, PhotonVoxelLighting::runBounce).
         TextureGpu *envCube = mVctLighting->getEnvironmentCube();
         const float *gain = mVctLighting->getEnvironmentGain();
         const float *sh = mVctLighting->getEnvironmentSh();
-        mIfGenParams.envGainMips =
-            float4( Vector4( gain[0] * invFinal, gain[1] * invFinal, gain[2] * invFinal,
-                             envCube ? Real( envCube->getNumMipmaps() ) : Real( 1 ) ) );
+        mIfGenParams.envGainMips = float4(
+            Vector4( gain[0], gain[1], gain[2], envCube ? Real( envCube->getNumMipmaps() ) : Real( 1 ) ) );
         for( size_t i = 0u; i < 9u; ++i )
-        {
-            mIfGenParams.envSh[i] = float4( Vector4( sh[i * 3u + 0u] * invFinal,
-                                                     sh[i * 3u + 1u] * invFinal,
-                                                     sh[i * 3u + 2u] * invFinal, 0.0f ) );
-        }
-        // Jahshaka (D4-PHOTON-TIERS, PROBE-NAN-1): the DEBUG PROBES are shaded in the unit
-        // the pixel decodes (stored x the decode multiplier), refreshed with it here - the
-        // multiplier moves with the brightest light, and a probe drawn in stored units went
-        // black under a bright lamp (PhotonIfdProbeVisualizer::setColourScale).
-        if( mDebugIfdProbeVisualizer && mDebugVisualizationMode == DebugVisualizationColour )
-            mDebugIfdProbeVisualizer->setColourScale( finalMultiplier );
+            mIfGenParams.envSh[i] = float4( Vector4( sh[i * 3u + 0u], sh[i * 3u + 1u], sh[i * 3u + 2u], 0.0f ) );
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::fillChainParams()
@@ -1366,9 +1351,9 @@ namespace Ogre
         }
         else if( mVctLighting )
         {
-            // Jahshaka (D4-PHOTON-TIERS, PROBE-NAN-1): the colour probes in the pixel's
-            // unit - the atlas is in the voxels' stored units; see setColourScale.
-            rangeMult = Vector2( mVctLighting->getFinalMultiplier() );
+            // Jahshaka (D4-PHOTON-TIERS, PROBE-NAN-1): the colour probes in the pixel's unit - the atlas holds
+            // radiance (PHOTON-7 stage 1: the decode multiplier the probes were scaled by is deleted).
+            rangeMult = Vector2( 1.0f, 1.0f );
         }
         else
         {

@@ -15,15 +15,14 @@
 		// .w = cascadeMaxLod
 		float4 vctInvResolution_cascadeMaxLod[@value( vct_num_probes )];
 @property( vct_num_probes > 1 )
-		// fromPreviousProbeToNext[probeIdx-1][0].w = cascadeFinalMultiplier
-		// fromPreviousProbeToNext[probeIdx-1][1].w unused
+		// fromPreviousProbeToNext[probeIdx-1][0].w and [1].w: padding
 		float4 fromPreviousProbeToNext[@value( vct_num_probes ) - 1][2];
 @end
 
 		float specSdfMaxMip;
 		float specularSdfFactor;
 		float blendFade;
-		float multiplier;
+		float padding0;	// (the decode multiplier D_max / pi, deleted: the voxels hold radiance - PHOTON-7 stage 1)
 
 		float4 xform_row0;
 		float4 xform_row1;

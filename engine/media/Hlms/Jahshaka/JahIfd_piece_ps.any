@@ -487,37 +487,10 @@
 	// needs none, and at a ray tier the field is not the diffuse). Inside the field every factor is
 	// exactly 1 and the line is bit-for-bit upstream's.
 	//
-	// ...TIMES THE VOXEL VOLUME'S OWN DECODE MULTIPLIER (PHOTON-M2, F-C), which
-	// is the unit that was missing from this line.
-	//
-	// The field's atlas holds the mean of LIGHT-VOXEL SAMPLES IN THE VOLUME'S
-	// STORED UNITS: the light injection scales everything by
-	// `bakingMultiplier = PI / D_max`, D_max being the brightest light in the
-	// scene (VctLighting::update's autoMultiplier), and the Gen job stores the
-	// ray average with no scale of its own — the sky an escaping ray reads is
-	// divided by the same decode multiplier before it is added
-	// (IrradianceField::update, envGainMips / envSh). The cone-traced diffuse
-	// undoes the normalisation on the way out (`vctProbeParams.multiplier` =
-	// D_max / PI, Vct_piece_ps.any), and so does this line: ONE unit convention
-	// for the voxels, the cones and the field. (PHOTON-M2 measured what the
-	// missing multiplier cost: a field 13.4x too bright under a 0.03 lamp.)
-	//
-	// THE ATLAS IS RGBA16_FLOAT since PHOTON-ENV-1 (it was R10G10B10A2_UNORM, and
-	// that ceiling — radiance D_max / PI, i.e. 1.0 in a scene with no light — is
-	// what a sky brighter than the brightest lamp clipped against once the sky
-	// entered the atlas; PHOTON-M2's F-C, probes pinned at 253-255 of 255, was the
-	// same ceiling). The normalisation is therefore no longer a range device; it
-	// stays because it is the voxels' own unit and the field is their integral.
-	// GUARDED (the lead, from the Fable read at merge): `irradiance_field` is set
-	// from the field alone while `vctProbeParams` exists only with a VctLighting
-	// bound. Every path today tears the field down before the volume, so the
-	// unguarded read was unreachable; the guard makes it impossible.
-	@property( vct_num_probes )
-	ifdIrradianceScale = float3( ifdConfidence * ifdWeightFade *
-								 passBuf.vctProbeParams.multiplier );
-	@else
+	// The field's atlas holds the mean of the voxels' radiance (RGBA16_FLOAT since PHOTON-ENV-1) and the sky an
+	// escaping ray reads as it is - the voxels hold radiance (PHOTON-7 stage 1: the decode multiplier D_max / pi that
+	// this line and the cones' undid is deleted with the per-box normalisation it undid).
 	ifdIrradianceScale = float3( ifdConfidence * ifdWeightFade );
-	@end
 @end
 
 // ---- THE TERMS THAT COMPLEMENT THE FIELD -------------------------------

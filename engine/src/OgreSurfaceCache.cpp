@@ -1536,8 +1536,7 @@ void SurfaceCache::relightCards() {
         const Ogre::Vector3 size = vct->getVoxelizer()->getVoxelSize();
         g[88] = origin.x; g[89] = origin.y; g[90] = origin.z;
         g[92] = 1.0f / size.x; g[93] = 1.0f / size.y; g[94] = 1.0f / size.z;
-        g[96] = float(numCascades);
-        g[97] = vct->getFinalMultiplier();
+        g[96] = float(numCascades);   // (97: padding - the decode multiplier, deleted: the voxels hold radiance)
         envCube = vct->getEnvironmentCube();
         const float *gain = vct->getEnvironmentGain();
         g[100] = gain[0]; g[101] = gain[1]; g[102] = gain[2];

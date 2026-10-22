@@ -80,7 +80,6 @@
             "params" :
             [
                 ["numLights",               [0],        "uint"],
-                ["bakingMultiplier",        [1],        "float"],
                 ["voxelCellSize",           [1,1,1],    "float"],
                 ["invVoxelResolution",      [1,1,1],    "float"],
                 ["jahCloudMap",             [0,0,0,0],  "float"],

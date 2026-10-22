@@ -66,8 +66,7 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	vec4 viewAxisX;
 	vec4 viewAxisY;
 	vec4 viewAxisZ;
-	/// Per cascade: xyz = the voxel box's world origin, w = the cascade's
-	/// radiance multiplier (the bake's normalisation undone — DRAG-1).
+	/// Per cascade: xyz = the voxel box's world origin, w padding (the voxels hold radiance).
 	vec4 voxelOrigin[kMaxCascades];
 	/// Per cascade: xyz = 1 / the box's world size, w = one cell in world units.
 	vec4 voxelInvSize[kMaxCascades];

@@ -289,9 +289,8 @@
 		float3 jahEnvD;
 		jahDiffuseCones( posLS, jahOrigin, TBN, light, jahEnvD );
 		const float blend = 1.0f;
-		float blendWeight = probeParams.blendFade * blend * probeParams.multiplier;
-		// The voxels' share decoded by the volume's multiplier; the
-		// environment's share is radiance already.
+		float blendWeight = probeParams.blendFade * blend;
+		// The voxels' share and the environment's are both radiance (PHOTON-7 stage 1: no decode multiplier).
 		outDiffuse.xyz += light.xyz * blendWeight + jahEnvD * ( probeParams.blendFade * blend );
 	}
 	@end
@@ -328,7 +327,7 @@
 			jahVctDiffuse( outDiffuse, posLS, jahOrigin, TBN, probeParams );
 		@end
 
-		float blendWeight = probeParams.blendFade * blend * probeParams.multiplier;
+		float blendWeight = probeParams.blendFade * blend;
 
 		//Irradiance / specular
 		@property( !vct_disable_specular )

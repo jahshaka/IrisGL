@@ -52,15 +52,6 @@ namespace Ogre
         /// that probe stands. All zeros until the field scrolls.
         void setWindowOffset( const uint32 offset[3] );
 
-        /// Jahshaka (D4-PHOTON-TIERS, PROBE-NAN-1): the COLOUR scale the probes are shaded
-        /// with (the fragment program's rangeMult). The irradiance atlas holds the field in
-        /// the voxels' STORED units (radiance over the decode multiplier D_max / pi, D_max
-        /// the brightest light), so a sphere shaded by the raw texel darkens as a lamp gets
-        /// brighter - measured: a point light of intensity 20 at 0.3 m over a ground turned
-        /// every probe black, the field itself finite and correct. The field sets this to
-        /// its PhotonVoxelLighting's decode multiplier on every update, so a probe is drawn with the
-        /// radiance a white Lambertian surface there receives - the unit the pixel decodes.
-        void setColourScale( float scale );
 
         // Overrides from MovableObject
         const String &getMovableType() const override;

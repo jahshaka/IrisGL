@@ -213,7 +213,7 @@ CONST_BUFFER( JahSpecularAlbedoBuf, 0 )
 #define JAH_SPEC_ALBEDO( k ) jahSpecularAlbedoTable[( k ) >> 2][( k ) & 3]
 
 // THE CHAIN AND THE ENVIRONMENT, as VctLighting hands them to every reader
-// (getCascadeChainParams, the cascade-0 volume's box, getFinalMultiplier,
+// (getCascadeChainParams, the cascade-0 volume's box,
 // getEnvironmentCube / Gain / Sh).
 struct CardGiParams
 {
@@ -221,7 +221,7 @@ struct CardGiParams
 	vec4 chainFromPrev[14];
 	vec4 volumeOrigin;		// xyz = cascade 0's volume origin, world
 	vec4 volumeInvSize;		// xyz = 1 / its size, world
-	vec4 counts;			// x = cascades, y = the decode multiplier
+	vec4 counts;			// x = cascades, yzw padding (y was the decode multiplier: the voxels hold radiance, PHOTON-7 stage 1)
 	vec4 envGainMips;		// xyz = the Sky Light's gain on the cube, w = its mips
 	vec4 envSh[9];			// the environment's nine SH coefficients, world axes
 	vec4 cloudMap;			// the cloud shadow: 1 / tile, strength, scroll xz (CLOUDS-2D-2)
@@ -288,7 +288,7 @@ layout( local_size_x = @value( threads_per_group_x ),
 	@insertpiece( JahVoxelCones )
 
 	// THE PIXEL'S DIFFUSE GI at world point P with normal N: envColourD, i.e.
-	// the voxels' share times the multiplier plus the environment's share.
+	// the voxels' share plus the environment's share (both radiance).
 	vec3 jahCardEnvColourD( vec3 P, vec3 N )
 	{
 		vec3 posLS = ( P - gp.volumeOrigin.xyz ) * gp.volumeInvSize.xyz;
@@ -302,7 +302,7 @@ layout( local_size_x = @value( threads_per_group_x ),
 		// a card is relit once per event, and the four-cone set under-read a vertical
 		// surface's sky by half.
 		envD = jahSkyShareFine( posLS, jahConeOrigin( posLS, biasDirLS ), jahConeBasisWorld( N ) );
-		return light * gp.counts.y + envD;
+		return light + envD;
 	}
 @end
 
@@ -474,8 +474,8 @@ void main()
 		if( ( mode & 1u ) != 0u )
 		{
 @property( hlms_num_vct_cascades )
-			// BRDF_EnvMap's envColourD (the voxels' share times the multiplier plus the
-			// environment's share; the header says why).
+			// BRDF_EnvMap's envColourD (the voxels' share plus the environment's share;
+			// the header says why).
 			const vec3 irradiance = jahCardEnvColourD( P, Ncone );
 @else
 			// GI OFF (PHOTON-CARDS-5): the pixel's envColourD is the SH irradiance
