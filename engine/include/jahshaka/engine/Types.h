@@ -3770,6 +3770,10 @@ struct GatherStatus {
     /// ones that file no GI row included: a ray-level refit, a shadow scan, a light write), and whether the inputs owed
     /// work on the last gathered frame. A frame where either moved is one the hold waited on.
     unsigned long long keyMoves = 0ull;
+    /// THE CAMERA CUTS (PHOTON-2 round 2, N3): the frames a view of the gather detected a cut on (a view axis turned
+    /// more than 75 degrees or the eye moved more than 100 m between two frames - Lumen's rule) and restarted its
+    /// history; the most any view counted.
+    unsigned cameraCuts = 0u;
     bool inputsBusy = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS (PHOTON-2 L8, K5's guard): the pixels whose history only the foliage class's
     /// looser test accepted (a depth delta between the 1 % and the 3 % bounds), summed over the gathered frames since
@@ -5102,6 +5106,17 @@ struct RayQueryStatus {
     unsigned reflectHistoryW = 0u, reflectHistoryH = 0u;
     unsigned reflectHistoryFrame = 0u;
     unsigned reflectFrame = 0u;
+    /// THE REFLECTION'S REST (PHOTON-2 round 2: R1, G6) - a view's (the last in the map's order): its consecutive rest
+    /// frames (0 = moving or broken), the frame was HELD (nothing traced), the newest read-back count of its texels
+    /// still converging at rest (-1: none read for this rest since it began or a moved instance last crossed it), the
+    /// rests it has begun, and the rest frames on which a moved instance's swept box was handed to the trace.
+    unsigned reflectRestFrames = 0u;
+    bool     reflectHeld = false;
+    int      reflectRestActive = -1;
+    unsigned reflectRests = 0u;
+    unsigned reflectRestMoverFrames = 0u;
+    /// THE CAMERA CUTS a reflection view detected (N3, the gather's rule) - each one its histories cleared.
+    unsigned reflectCameraCuts = 0u;
 };
 
 /// THE VISIBILITY BUFFER'S SPLIT AND ITS BUCKETS (ATOM S3-DRAW,

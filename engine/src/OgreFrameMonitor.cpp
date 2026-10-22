@@ -1110,6 +1110,12 @@ constexpr ArmDef kArms[] = {
       "work is planned, no card is captured or relit - and the gather and the reflections keep every history they hold "
       "(no new sample enters). A walk under it measures the motion's own resampling; the walk without it minus that is "
       "the GI's flicker under motion (the stillness door's moving window). 0 = shipped." },
+    { ArmId::ReflectRestReference, 0.0, 0.0, 2.0,
+      "THE REFLECTION'S REFERENCE AT REST (PHOTON-2 round 2, R1 (f)'s measuring arm): from the first rest frame each "
+      "texel's raw samples are averaged in a 32-bit image (an fp16 running mean stalls past a few hundred samples) "
+      "for 4,096 rest frames - no texel stops, the view holds after them - and the filter composites that mean "
+      "unfiltered (reach 0): the per-texel integral the held picture is compared against; 2 = the same over a disjoint "
+      "rest sequence (two references measure the reference's own noise). 0 = shipped (the image is 1 x 1)." },
     { ArmId::DiffuseConeSkip, 1.0, 0.0, 1.0,
       "The pixel's four-cone diffuse is marched only where the irradiance field's fallback weight "
       "(1 - confidence) is above zero - the only pixels it reaches (SPEED-GPU, audit PH-2). 0 = "

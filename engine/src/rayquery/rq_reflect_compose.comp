@@ -1,0 +1,111 @@
+#version 460
+// PHOTON-2 round 2, G2 — THE BREAK'S COMPOSE: on the first frame that leaves a rest (a camera move, a write), before
+// the trace, every texel's ANSWER is composed into the half the trace is about to read. At rest the frozen moving
+// history H and the rest mean M live in the two halves and the answer is composed at the read (jah_reflect_rest.glsl:
+// lerp( H, M, w( v ) )); the trace reprojects its history from ONE half, at another texel than its own, so the
+// composition cannot happen there - this pass writes it at each texel's own place (no texel reads another's), and the
+// moving rules resume from the answer that was on screen, never from H or M alone.
+// The set and the Params are the trace's (declared here up to `stereo`); binding 6 is the half that held M (now the
+// trace's `historyPrev`), binding 7 the half that held H.
+#extension GL_GOOGLE_include_directive : require
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+const int kMaxCascades = 4;
+layout( set = 0, binding = 1 ) uniform Params
+{
+	/// xyz = the camera in world space, w = 1 for a perspective camera and 0
+	/// for an orthographic one (the reconstruction differs — see worldAt()).
+	vec4 camPos;
+	/// The world-space ray basis: worldDir(u,v) = rayTL + rayRight*u + rayDown*v,
+	/// scaled so its component along the camera's forward axis is exactly 1.
+	/// Then `camPos + worldDir * viewDistance` is the surface. Under an
+	/// orthographic camera rayTL/rayRight/rayDown carry the image PLANE instead
+	/// (an offset, not a ray) and `fwd` is the one view direction.
+	vec4 rayTL;
+	vec4 rayRight;
+	vec4 rayDown;
+	vec4 fwd;
+	/// x = A, y = B of Camera::getProjectionParamsAB() (reverse-Z safe),
+	/// z = the far plane (the orthographic depth scale), w = the roughness
+	/// gate's FEATHER half-width (kRayReflectFeather).
+	vec4 projParams;
+	/// xy = the trace resolution in pixels, zw = the full-resolution size of
+	/// jahSsrReflection.
+	vec4 resolution;
+	/// x = the roughness gate — the PROJECT's dial, not a renderer constant:
+	/// above it the probe/field photograph is a good enough integral of a wide
+	/// lobe and a ray is spent for nothing. The transition is FEATHERED over
+	/// projParams.w either side of it. y = the ray's maximum length in
+	/// world units, z = the frame index (the sample sequence's only input),
+	/// w = how many cascades are bound.
+	vec4 knobs;
+	/// x = THE REST FRAME k, 1..N on a frame the view rests (PHOTON-2 1e, fix F1: the gather's rule — a rest mean handed
+	/// over from the frozen moving history, rq_reflect_temporal.comp), 0 while it moves, y = the
+	/// surface bias in world units (a ray starts this far off its own surface),
+	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
+	/// weight (the floor on 1/n — how long the temporal mean remembers).
+	vec4 knobs2;
+	/// The colour an escaping ray reads when no sky cubemap is bound.
+	vec4 skyColour;
+	/// The VIEW space's three axes in world space (the camera's orientation as
+	/// a rotation): what turns the G-buffer's view-space normal back into one.
+	vec4 viewAxisX;
+	vec4 viewAxisY;
+	vec4 viewAxisZ;
+	/// Per cascade: xyz = the voxel box's world origin, w = the box's largest
+	/// side in world units (the cell size times the resolution).
+	vec4 voxelOrigin[kMaxCascades];
+	/// Per cascade: xyz = 1 / the voxel box's world size, w = one cell in world
+	/// units (the sample point's bias along the ray).
+	vec4 voxelInvSize[kMaxCascades];
+	/// THE PREVIOUS FRAME'S CAMERA, in exactly the same five numbers as this
+	/// frame's (camPos, rayTL, rayRight, rayDown, fwd). Not a view-projection
+	/// matrix, deliberately: inverting the basis above is the same arithmetic
+	/// forwards and backwards, so the reprojection cannot disagree with the
+	/// reconstruction about a handedness, a y-flip or a depth convention — and
+	/// each of those is a silent half-pixel-to-whole-image error that only shows
+	/// up as a smear while the camera moves.
+	vec4 prevCamPos;
+	vec4 prevRayTL;
+	vec4 prevRayRight;
+	vec4 prevRayDown;
+	vec4 prevFwd;
+	/// ---- THE SECOND EYE (lane REFLECT-VR-1, LAYERED-STEREO-1) ------------
+	/// x = 1 when this target carries TWO EYES, one per LAYER of every screen
+	/// image here (the dispatch's z). Then the five basis vectors above are the
+	/// LEFT eye's and the five below the right eye's, each over its own layer
+	/// as a 0..1 image; with x = 0 the block below is unread and the basis
+	/// above is the one camera's, exactly as before. One dispatch, one
+	/// descriptor set, one history ring: the eye is the layer (gEye).
+	vec4 stereo;
+} p;
+
+layout( rgba16f, set = 0, binding = 6 ) uniform image2DArray historyPrev;
+layout( rgba16f, set = 0, binding = 7 ) uniform readonly image2DArray historyCur;
+layout( rg32f, set = 0, binding = 8 ) uniform readonly image2DArray historyDistPrev;
+
+#include "jah_reflect_rest.glsl"
+
+// NaN AND INF BY THEIR BITS (trap 5: x == x is folded away).
+bool finite1( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
+bool finite3( vec3 v ) { return finite1( v.x ) && finite1( v.y ) && finite1( v.z ); }
+
+void main()
+{
+	const ivec2 traceRes = ivec2( p.resolution.xy );
+	const ivec2 tc = ivec2( gl_GlobalInvocationID.xy );
+	const int eye = int( gl_GlobalInvocationID.z );
+	if( any( greaterThanEqual( tc, traceRes ) ) )
+		return;
+	if( !( imageLoad( historyDistPrev, ivec3( tc, eye ) ).x > 0.0 ) )
+		return;   // no answer here (the texel was declined at rest): the trace finds none either
+	const vec4 M = imageLoad( historyPrev, ivec3( tc, eye ) );
+	const vec4 H = imageLoad( historyCur, ivec3( tc, eye ) );
+	if( !( M.w > 0.0 ) || !finite3( M.xyz ) )
+		return;
+	const vec4 Hs = finite3( H.xyz ) ? H : vec4( 0.0 );
+	const float v = jahRestSamples( Hs, M );
+	imageStore( historyPrev, ivec3( tc, eye ),
+				vec4( jahRestAnswer( Hs, M, max( p.stereo.w, 1.0 ) ), min( max( Hs.w, 0.0 ) + v, 4096.0 ) ) );
+}

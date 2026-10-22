@@ -1933,7 +1933,7 @@ void PhotonComponent::settleTextureResidency() {
     // the material generation once per material, which is what the host re-reads
     // to re-inject the voxel bounce. Ten maps landing together used to buy ten
     // re-injects; they buy one.
-    bool stale = false, bumpVoxels = false;
+    bool stale = false, bumpVoxels = false, arrived = false;
     for (size_t i = 0; i < mMaterialsAwaitingTexture.size();) {
         const MaterialId mat = mMaterialsAwaitingTexture[i].first;
         const bool voxelInput = mMaterialsAwaitingTexture[i].second;
@@ -1949,6 +1949,7 @@ void PhotonComponent::settleTextureResidency() {
             }
         }
         if (waiting) { ++i; continue; }
+        arrived = true;
         // The material (or the whole entry) is settled. A material that died
         // while waiting simply leaves, having staled nothing.
         if (mit != mScene.materialRecords().end()) {
@@ -1958,6 +1959,7 @@ void PhotonComponent::settleTextureResidency() {
         mMaterialsAwaitingTexture[i] = mMaterialsAwaitingTexture.back();
         mMaterialsAwaitingTexture.pop_back();
     }
+    if (arrived) ++mTextureArrivals;   // one event a frame, as the stale below (G6: the reflection's rest key)
     if (stale) staleProbeGrid(GiStaleReason::Material);
     if (bumpVoxels) {
         ++mGiMaterialGeneration;

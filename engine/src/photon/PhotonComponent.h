@@ -537,6 +537,9 @@ public:
     unsigned materialsAwaitingTexture() const { return unsigned(mMaterialsAwaitingTexture.size()); }
     unsigned long long giRebuildCount() const { return mGiRebuilds; }
     unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
+    /// Moves on every frame a bound texture that was still streaming became resident (settleTextureResidency): the
+    /// hit decode reads the map from then on - the reflection's rest key folds it (PHOTON-2 round 2, G6).
+    unsigned long long textureArrivals() const { return mTextureArrivals; }
     SunContactDesc sunContact() const { return mSunContact; }
     void setPhotonView(PhotonView view) { mPhotonView = view; }
     PhotonView photonView() const { return mPhotonView; }
@@ -623,7 +626,8 @@ public:
     /// from what moves when an injection LANDS (the chain's settles, each
     /// cascade's rebuilds and lattice cell).
     unsigned long long giLightingSerial() const;
-    /// What a reflection ray reads beside the edits (OgreRayQuery.cpp; the reflection's rest key, PHOTON-2 F5).
+    /// What breaks a reflection's rest view-wide: the lighting writes and edits its rays read, never a move
+    /// (OgreRayQuery.cpp; the reflection's rest key, PHOTON-2 F5, round 2 G6).
     unsigned long long reflectionReadsKey() const;
     /// The gather's inputs still owe work (PHOTON-2 stage 2's round, H1: a view SETTLES, never rests, until none is).
     bool gatherInputsBusy() const;
@@ -1839,6 +1843,7 @@ private:
     /// slider drag into one re-voxelize when it stops WITHOUT running the
     /// light re-inject cadence a material cannot need.
     unsigned long long mGiMaterialGeneration      = 0;
+    unsigned long long mTextureArrivals           = 0;   ///< textureArrivals()
     /// BOOTVOX-1: how many consecutive frames the GI flush has waited for a
     /// voxel-input texture, and the cap past which it builds anyway. One frame
     /// or two is the normal case (the default scene's ground tile); the cap
