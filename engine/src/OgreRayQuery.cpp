@@ -796,10 +796,14 @@ private:
     const ArmRegistry *mArms = nullptr;
     bool arm(ArmId a, bool otherwise) const { return mArms ? mArms->on(a) : otherwise; }
     double armValue(ArmId a) const { return mArms ? mArms->value(a) : 0.0; }
-    /// THE GATHER'S REST KEY with the measuring arm "gi.hitDirect" in it (FAR-SUN-2): a paired
-    /// A/B in one process flips the arm on a still view, and a held view traces nothing.
+    /// THE GATHER'S REST KEY with the measuring arms "gi.hitDirect" and "gi.freeze" in it (FAR-SUN-2; PHOTON-7 stage
+    /// 0's read W1): a paired A/B in one process flips the arm on a still view, and a held view traces nothing. Under the
+    /// freeze no rest sample enters (W4u), so a view still past its rest length HOLDS on the frozen walk's EMA picture
+    /// (measured on the court: held from the stop's 15th frame); lifting the arm must break that hold, or a lift with no
+    /// GI work owed (a walk inside one lattice cell) leaves the view held on the walk's picture until something moves.
     unsigned long long gatherRestKeyArmed(const detail::OgreScene *scene) const {
-        return scene->gatherRestKey() ^ (arm(ArmId::GiHitDirect, true) ? 0ull : 0x9E3779B97F4A7C15ull);
+        return scene->gatherRestKey() ^ (arm(ArmId::GiHitDirect, true) ? 0ull : 0x9E3779B97F4A7C15ull) ^
+               (arm(ArmId::GiFreeze, false) ? 0xC2B2AE3D27D4EB4Full : 0ull);
     }
     /// THE REFLECTION'S REST KEY (PHOTON-2 fix F5; round 2, G6): what breaks a reflection's rest VIEW-WIDE - every
     /// lighting write and edit a reflection ray reads (PhotonComponent::reflectionReadsKey), the measuring arm
