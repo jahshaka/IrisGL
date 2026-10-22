@@ -32,6 +32,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreClips.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSockets.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFrameMonitor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Stillness.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVideoReadback.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVoxelReaderParity.cpp
@@ -719,6 +720,11 @@ function(jahshaka_engine_generated_deps target)
     endforeach()
 endfunction()
 
+# THE STILLNESS DOOR AT -O2 IN DEBUG (PHOTON-2 stage 0; the bake's TUs' precedent, irisgl/CMakeLists.txt): it diffs
+# and classifies every pixel of every frame of its window — integer work whose answer no optimisation level changes —
+# and at -O0 that alone is ~0.2 s a 1080p frame, the lab's whole budget.
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/Stillness.cpp
+    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>")
 add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
 add_dependencies(JahshakaEngine JahshakaEngineBuildId)
 jahshaka_engine_generated_deps(JahshakaEngine)

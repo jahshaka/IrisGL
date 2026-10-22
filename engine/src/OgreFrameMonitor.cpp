@@ -1318,6 +1318,18 @@ constexpr ArmDef kArms[] = {
       "THE DENSITY COUNT'S FAIL-SAFE (BUGS-1 item 6, atom.cut_probe): 1 = the Atom view's Density count finds its "
       "compute jobs missing, as on a tree whose media did not stage them - the frame must paint nothing and report no "
       "figures, never the table a frame before it wrote. A test door." },
+    { ArmId::GatherHistoryReadback, 0.0, 0.0, 1.0,
+      "THE GATHER'S PIXEL-HISTORY COUNT TO THE HOST (PHOTON-2 stage 0, an instrument): every gathered frame's "
+      "per-pixel history count (1 = the pixel's history was refused or absent that frame, n = it carried n - 1 frames, "
+      "15 saturates: jah_probe_history.glsl's packed word) copied out of the history the integrate wrote, decoded once the frame retires into "
+      "GatherStatus::historyCount - the gather's OWN same-surface test, read by the stillness door (Stillness.h) as "
+      "'was this pixel's surface visible before the stop'. One image copy a frame while on; nothing it copies is read "
+      "back by the renderer." },
+    { ArmId::ReflectHistoryReadback, 0.0, 0.0, 1.0,
+      "THE REFLECTION HISTORY'S COUNT TO THE HOST (PHOTON-2 stage 0, an instrument): every traced frame's "
+      "per-texel temporal-mean count (rq_reflect.comp's history w, 0 = no answer yet) copied out after the filter and "
+      "decoded once the frame retires into RayQueryStatus::reflectHistoryCount - the stillness door's count histogram "
+      "(how young each glossy pixel's mean is after a stop). One image copy a frame while on." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

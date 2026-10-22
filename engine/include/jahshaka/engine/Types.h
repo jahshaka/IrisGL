@@ -3521,6 +3521,12 @@ struct GatherTuning {
     /// or tonemap touches it -- and how determinism is asserted on the estimate
     /// itself rather than on a picture.
     bool     readback = false;
+    /// THE PIXEL HISTORY'S COUNT TO THE HOST (PHOTON-2 stage 0; the arm "gather.historyReadback") -- an
+    /// INSTRUMENT, never a frame path: each gathered frame also copies the history the integrate wrote, and
+    /// `GatherStatus::historyCount` carries the last retired frame's per-pixel count. The count is the gather's
+    /// OWN same-surface verdict (jah_probe_history.glsl's jahHistoryAt): 1 = the pixel's history was refused or
+    /// absent this frame (a surface new to the screen), n > 1 = it carried n - 1 frames. Not an estimator change.
+    bool     historyReadback = false;
     /// THE SH BANDS THE INTEGRATE EVALUATES (PHOTON-GATHER-1b item 3's
     /// measurement arm): 9 = the whole record (L0..L2, the shipped value), 4 =
     /// L0 and L1 only (the stated fallback, whose memory traffic is what the
@@ -3746,6 +3752,14 @@ struct GatherStatus {
     /// carries this number (GATHER-NOISE-1), so a suite that moves the camera
     /// every frame knows which readback is which pose.
     unsigned frame = 0u;
+    /// THE PIXEL HISTORY'S COUNT (GatherTuning::historyReadback; PHOTON-2 stage 0): per pixel, row-major
+    /// (historyCountW x historyCountH, the eye pair side by side like `irradiance`), the count the integrate wrote
+    /// on gather frame `historyCountFrame` (0..15: 1 = no usable history that frame, n = n - 1 frames carried).
+    /// Empty with the arm off and until a frame recorded under it has retired; a HELD frame writes no history and
+    /// copies none.
+    std::vector<unsigned char> historyCount;
+    unsigned historyCountW = 0u, historyCountH = 0u;
+    unsigned historyCountFrame = 0u;
     /// THE GATHER-HITS READBACK (FAR-SUN-1; the arm "gather.hitsReadback"): what answered EVERY
     /// RAY of every uniform probe of the last retired traced frame, row-major over the probe
     /// grid (probesX x probesY) and, inside a probe, by ray (raysPerProbe each). Empty with the
@@ -5013,6 +5027,16 @@ struct RayQueryStatus {
     /// rq_motion.comp, in front of the SSR resolve): the "rq.reflect.motion" row,
     /// the same reading; -1 too on a chain that carries no march or no id pass.
     float reflectMotionMs = -1.0f;
+    /// THE REFLECTION HISTORY'S COUNT (PHOTON-2 stage 0; the arm "reflect.historyReadback") — an INSTRUMENT:
+    /// per texel of the trace's grid, row-major (reflectHistoryW x reflectHistoryH, the eye layers side by side),
+    /// the temporal mean's sample count rq_reflect.comp wrote (its history w; 0 = no answer yet, capped at 4096)
+    /// on traced frame `reflectHistoryFrame` of the view. Empty with the arm off and until a frame traced under it
+    /// has retired. `reflectFrame` is the view's traced-frame counter NOW (the frame just traced is one below it),
+    /// so a caller that steps frames knows which copy is which frame.
+    std::vector<unsigned short> reflectHistoryCount;
+    unsigned reflectHistoryW = 0u, reflectHistoryH = 0u;
+    unsigned reflectHistoryFrame = 0u;
+    unsigned reflectFrame = 0u;
 };
 
 /// THE VISIBILITY BUFFER'S SPLIT AND ITS BUCKETS (ATOM S3-DRAW,
@@ -5455,6 +5479,12 @@ struct GiVoxelStats {
     /// independent of the light's history - so two builds of one place compare by 16 hex digits (the
     /// voxeliser's work partition proved bit for bit on a real scene, ENGINE-UPGRADE-U5 stage 2).
     std::string storeDigest;
+    /// THE DIRECT TERM ALONE, hashed the same way (PHOTON-2 stage 0): mip 0 of the cascade's DIRECT volume (the
+    /// injection's sun, lamps and emission before any bounce — what the bounce iterates from; fork ae2ed529f's D
+    /// term), so "is a voxel's injected light a function of the world point" is read without the bounce folded in
+    /// (lightDigest folds every bounce, which reads the other cascades as they stand). Empty on a cascade with no
+    /// direct volume (one that does not bounce) or a download the device refused.
+    std::string directDigest;
 };
 
 /// ONE CASCADE'S VOXELS, WHOLE (PHOTON-VOXEL-3) — the test and tool readback of

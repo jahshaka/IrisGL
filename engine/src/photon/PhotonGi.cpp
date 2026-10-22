@@ -1615,6 +1615,35 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
                 st.peakDirect = wd.peak;
                 st.directAtMax = wd.atMax;
             }
+            // ...AND ITS BYTES (PHOTON-2 stage 0, directDigest): the light-is-a-world-function instrument.
+            if (direct->getResidencyStatus() == Ogre::GpuResidency::Resident) {
+                Ogre::uint64 hd = 1469598103934665603ull;
+                bool ok = true;
+                Ogre::AsyncTextureTicket *ticket = tm->createAsyncTextureTicket(
+                    direct->getWidth(), direct->getHeight(), direct->getDepth(), Ogre::TextureTypes::Type3D,
+                    direct->getPixelFormat());
+                try {
+                    ticket->download(direct, 0u, true);
+                    const Ogre::TextureBox box = ticket->map(0);
+                    const size_t rowBytes = size_t(direct->getWidth()) * box.bytesPerPixel;
+                    for (Ogre::uint32 z = 0; z < direct->getDepth(); ++z)
+                        for (Ogre::uint32 y = 0; y < direct->getHeight(); ++y) {
+                            const Ogre::uint8 *row = reinterpret_cast<const Ogre::uint8 *>(box.at(0, y, z));
+                            for (size_t b = 0; b < rowBytes; ++b) {
+                                hd ^= row[b];
+                                hd *= 1099511628211ull;
+                            }
+                        }
+                    ticket->unmap();
+                } catch (Ogre::Exception &e) { mError = e.getFullDescription(); ok = false; }
+                  catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); ok = false; }
+                tm->destroyAsyncTextureTicket(ticket);
+                if (ok) {
+                    char buf[17];
+                    std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)hd);
+                    st.directDigest = buf;
+                }
+            }
         }
 
         // AND THE SOURCE THE INJECTION SEEDS FROM (VOXEL-CLIP-1, fork ad452604a+155a56bf8

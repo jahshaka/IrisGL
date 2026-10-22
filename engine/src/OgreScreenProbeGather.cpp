@@ -650,6 +650,12 @@ void ScreenProbeGather::drop(View &v) {
     v.irrReadbackMapped = nullptr;
     v.irrHost.clear();
     v.irrHostFrame = 0u;
+    mHost.gatherRetireBuffer(v.histReadback, v.histReadbackMemory);
+    v.histReadback = VK_NULL_HANDLE;
+    v.histReadbackMemory = VK_NULL_HANDLE;
+    v.histReadbackMapped = nullptr;
+    v.histHost.clear();
+    v.histHostFrame = 0u;
     mHost.gatherRetireBuffer(v.rays, v.raysMemory);
     mHost.gatherRetireBuffer(v.raysReadback, v.raysReadbackMemory);
     mHost.gatherRetireBuffer(v.raysAtlasReadback, v.raysAtlasReadbackMemory);
@@ -696,6 +702,23 @@ void ScreenProbeGather::readPending(View &v) {
             // smaller of the two.
             v.adaptiveAsked = appended;
             v.adaptiveLast = std::min(appended, v.adaptiveCap);
+            }
+            // ...AND THE HISTORY COUNT of the same retired frame (PHOTON-2 stage 0): the second word's
+            // bits 22-25 of each rg32ui texel (jah_probe_history.glsl packGeom), the eye layers side by side.
+            if (v.pending[i].history && v.histReadbackMapped) {
+                const size_t layerTexels = size_t(v.w) * v.h;
+                const uint32_t *src = reinterpret_cast<const uint32_t *>(
+                    static_cast<const char *>(v.histReadbackMapped) + size_t(i) * layerTexels * v.layers * 8u);
+                const size_t pairW = size_t(v.w) * v.layers;
+                v.histHost.assign(pairW * v.h, 0u);
+                for (unsigned k = 0; k < v.layers; ++k)
+                    for (unsigned y = 0; y < v.h; ++y)
+                        for (unsigned x = 0; x < v.w; ++x) {
+                            const uint32_t g = src[(size_t(k) * layerTexels + size_t(y) * v.w + x) * 2u + 1u];
+                            v.histHost[size_t(y) * pairW + size_t(k) * v.w + x] = (unsigned char)((g >> 22u) & 15u);
+                        }
+                v.histHostFrame = v.pending[i].gatherFrame;
+                v.pending[i].history = false;
             }
             // ...AND THE IRRADIANCE READBACK of the same retired frame, decoded
             // from half floats (a test door; see GatherTuning::readback).
@@ -953,6 +976,10 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.adaptiveCells = v.adaptiveHost;
     out.rays = v.raysHost;
     out.raysFrame = v.raysHostFrame;
+    out.historyCount = v.histHost;
+    out.historyCountW = v.histHost.empty() ? 0u : v.w * v.layers;
+    out.historyCountH = v.histHost.empty() ? 0u : v.h;
+    out.historyCountFrame = v.histHostFrame;
     // THE SETTLED HISTORY (GatherStatus says what and why): every latest view's
     // history N frames past its last RESTART. The rest (and its hold) is
     // reported beside it and is NOT part of the predicate: a scene with a
@@ -1037,6 +1064,7 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
             pd.frame = mHost.gatherFrameNow();
             pd.live = true;
             pd.irradiance = true;
+            pd.history = false;   // a held frame writes no history and copies none (PHOTON-2 stage 0)
             pd.held = true;
             pd.gatherFrame = v.frame;
             ++v.frame;
@@ -1096,6 +1124,14 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // frame after it decoded one (ready for a frame the arm no longer covered).
     // ...AND THE IRRADIANCE'S (ENGINE-UPGRADE-U5 stage 5, world.gatherIrradiance): a host copy of a frame the readback
     // no longer covers is no reading either - it stood after the door closed and answered as the gather's.
+    if (!in.tuning.historyReadback) {
+        for (unsigned i = 0; i < kFramesInFlight; ++i) v.pending[i].history = false;
+        if (!v.histHost.empty()) {
+            v.histHost.clear();
+            v.histHost.shrink_to_fit();
+            v.histHostFrame = 0u;
+        }
+    }
     if (!in.tuning.readback) {
         for (unsigned i = 0; i < kFramesInFlight; ++i) v.pending[i].irradiance = false;
         if (!v.irrHost.empty()) {
@@ -2122,9 +2158,46 @@ void ScreenProbeGather::finish(const void *key) {
             raysThisFrame = true;
         }
     }
+    // THE HISTORY-COUNT READBACK (PHOTON-2 stage 0, the arm "gather.historyReadback"): this frame's pixel
+    // history — the half the integrate just wrote, in GENERAL — copied into this frame's slot of a host ring;
+    // readPending decodes its count. The barrier after it also orders the copy's read before the integrate that
+    // writes this half again two frames on.
+    bool historyThisFrame = false;
+    if (in.tuning.historyReadback && temporal) {
+        const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * v.layers * 8u;
+        if (!v.histReadback) {
+            std::string rerr;
+            if (!mHost.gatherMakeBuffer(slotBytes * kFramesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true,
+                                        v.histReadback, v.histReadbackMemory, &v.histReadbackMapped, rerr))
+                v.histReadback = VK_NULL_HANDLE;
+        }
+        if (v.histReadback) {
+            VkMemoryBarrier toCopy{};
+            toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
+                                 &toCopy, 0, nullptr, 0, nullptr);
+            VkBufferImageCopy region{};
+            region.bufferOffset = VkDeviceSize(v.frame % kFramesInFlight) * slotBytes;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = v.layers;
+            region.imageExtent = { v.w, v.h, 1u };
+            vkCmdCopyImageToBuffer(cmd, v.history[v.flip & 1u], VK_IMAGE_LAYOUT_GENERAL, v.histReadback, 1, &region);
+            VkMemoryBarrier toHost{};
+            toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &toHost, 0,
+                                 nullptr, 0, nullptr);
+            historyThisFrame = true;
+        }
+    }
     {
         // The pending record is what retires this frame's adaptive-count readback.
         View::Pending &pd = v.pending[v.frame % kFramesInFlight];
+        pd.history = historyThisFrame;
         pd.rays = raysThisFrame;
         pd.frame = mHost.gatherFrameNow();
         pd.live = true;

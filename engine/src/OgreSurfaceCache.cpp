@@ -1176,6 +1176,10 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
             return;
         }
     }
+    // THE CAPTURE'S MONITOR ROW (PHOTON-2 stage 0, the stillness door's (ii)): the cards this batch copied into the
+    // atlas — each a step of the radiance its hits read once relit. Its GPU time is the card workspace's own pass
+    // rows (the copies are six small transfers a card), so the row carries the count and no time of its own.
+    detail::monitor::noteCacheWork(CacheKind::Gi, WorkReason::Added, 0, "cards.capture", unsigned(mBatch.size()));
     // ...AND INTO THE ATLAS, after the whole batch: six small copies a card,
     // from its own slice of the scratch (the reason the scratch exists at all
     // is in SurfaceCache.h — this pin's render-pass clear is whole-target).
@@ -1697,6 +1701,12 @@ void SurfaceCache::relightCards() {
         // private ring (absent at the no-ray tier). One row at every tier now.
         detail::monitor::CacheScope relight(CacheKind::Gi, WorkReason::Light, 0, "cards.relight", rs, this);
         relight.setUnits(unsigned(mRelight.size()));
+        // ...AND ITS INDIRECT SHARE (PHOTON-2 stage 0): the cards whose indirect half this dispatch re-marches
+        // (mode 1, the march through the cascades) — the per-card steps every commit or settle owes the whole
+        // resident set (OgreSurfaceCache.cpp planRelights' indirect signature). Inside the relight's own time.
+        unsigned indirect = 0u;
+        for (unsigned m : mRelightMode) indirect += m == 1u ? 1u : 0u;
+        if (indirect) detail::monitor::noteCacheWork(CacheKind::Gi, WorkReason::Sweep, 0, "cards.indirect", indirect);
         detail::photonDispatch(hc, mLightJob, rs);   // the one door: its barriers, the witness
     }
     {

@@ -1016,6 +1016,19 @@ private:
         /// the trace bound, its grid, and which of the pair is this frame's mean.
         bool     finishPending = false;
         unsigned finishRing = 0, traceW = 0, traceH = 0, curIdx = 0;
+        /// THE HISTORY-COUNT READBACK (PHOTON-2 stage 0, the arm "reflect.historyReadback"): a host ring of
+        /// kReflectRing copies of the temporal mean the filter has read, the slot of the frame's ring; each
+        /// decoded once its frame retired into `histHost` (the w channel, the count) for RayQueryStatus.
+        RawBuffer histReadback;
+        struct HistPending {
+            uint32_t frame = 0u;          ///< frameNow() at the copy
+            bool     live = false;
+            unsigned w = 0u, h = 0u, layers = 1u;
+            unsigned traced = 0u;         ///< which traced frame (the view's `frame` counter) it copied
+        };
+        HistPending histPending[kReflectRing];
+        std::vector<unsigned short> histHost;
+        unsigned histHostW = 0u, histHostH = 0u, histHostFrame = 0u;
     };
 
     bool makeReflectPipeline(std::string &err);
@@ -1029,6 +1042,8 @@ private:
     /// note on the transitions in recordReflect).
     void clearReflectImages(ReflectView &rv, VkCommandBuffer cmd);
     void dropReflect(ReflectView &rv);
+    /// The history-count readback (PHOTON-2 stage 0): decode the retired copies, copy this frame's.
+    void readReflectHistory(ReflectView &rv, VkCommandBuffer cmd);
 
     std::unordered_map<const ReflectPassListener *, ReflectView> mReflects;
     bool makeMotionPipeline(std::string &err);
@@ -1492,10 +1507,17 @@ bool RayQueryTier::makeBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool 
     mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     mai.pNext = deviceAddress ? &flags : nullptr;
     mai.allocationSize = req.size;
-    mai.memoryTypeIndex = memoryType(
-        req.memoryTypeBits,
-        hostVisible ? (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-                    : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    // A READBACK (host-visible, written by copies only) IS READ BY THE HOST: CACHED memory where the device has it
+    // (PHOTON-2 stage 0, measured: an uncached, write-combined 16 MB readback of a history image read back at
+    // ~0.1-0.2 s a frame in the stillness door; a cached one at memory speed). The upload buffers keep the first
+    // coherent type (a host write never reads it back).
+    const VkMemoryPropertyFlags coherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    const bool readback = hostVisible && (usage & ~VkBufferUsageFlags(VK_BUFFER_USAGE_TRANSFER_DST_BIT)) == 0u;
+    mai.memoryTypeIndex = readback ? memoryType(req.memoryTypeBits, coherent | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+                                   : uint32_t(-1);
+    if (mai.memoryTypeIndex == uint32_t(-1))
+        mai.memoryTypeIndex =
+            memoryType(req.memoryTypeBits, hostVisible ? coherent : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (mai.memoryTypeIndex == uint32_t(-1)) {
         err = "rayquery: no suitable memory type";
         vkDestroyBuffer(mVk, out.buffer, nullptr);
@@ -5296,6 +5318,9 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
         retire(rv.geomRowOfSlot[i]);
     }
     for (int i = 0; i < 2; ++i) { retireImage(rv.hist[i]); retireImage(rv.dist[i]); }
+    retire(rv.histReadback);
+    for (ReflectView::HistPending &p : rv.histPending) p = ReflectView::HistPending();
+    rv.histHost.clear();
     rv.imagesReady = false;
     rv.needsClear = false;
 }
@@ -5319,6 +5344,15 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         if (tr >= 0.0f || fi >= 0.0f)
             st.reflectMs = std::max(st.reflectMs, std::max(tr, 0.0f) + std::max(fi, 0.0f));
         st.reflectMotionMs = std::max(st.reflectMotionMs, monitor::lastGpuMs("rq.reflect.motion", kv.first));
+        // THE HISTORY COUNT (PHOTON-2 stage 0): the view that holds a decoded copy (one view per scene in the
+        // stillness door's use; with several, the last in the map's order that holds one).
+        if (!kv.second.histHost.empty()) {
+            st.reflectHistoryCount = kv.second.histHost;
+            st.reflectHistoryW = kv.second.histHostW;
+            st.reflectHistoryH = kv.second.histHostH;
+            st.reflectHistoryFrame = kv.second.histHostFrame;
+        }
+        st.reflectFrame = std::max(st.reflectFrame, kv.second.frame);
     }
 }
 
@@ -6849,6 +6883,92 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
         monitor::CacheScope filterRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.filter", mRs, key);
         vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, rv.layers);   // z = the eye
     }
+    readReflectHistory(rv, cmd);
+}
+
+// THE REFLECTION HISTORY'S COUNT TO THE HOST (PHOTON-2 stage 0, the arm "reflect.historyReadback") — the stillness
+// door's count histogram. The retired copies are decoded first (a slot is reused only after its frame retired: the
+// ring is the trace's own, kReflectRing >= the frames in flight), then this frame's mean — written by the trace and
+// the decode's write-back, read by the filter above — is copied into its slot. Nothing the renderer reads changes.
+void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    for (ReflectView::HistPending &p : rv.histPending) {
+        if (!p.live || !rv.histReadback.mapped || uint32_t(now - p.frame) < inFlight) continue;
+        const size_t slot = size_t(&p - rv.histPending);
+        const size_t layerTexels = size_t(p.w) * p.h;
+        const size_t slotBytes = layerTexels * p.layers * 8u;
+        const uint16_t *src =
+            reinterpret_cast<const uint16_t *>(static_cast<const char *>(rv.histReadback.mapped) + slot * slotBytes);
+        const size_t pairW = size_t(p.w) * p.layers;
+        rv.histHost.assign(pairW * p.h, 0u);
+        // THE COUNT FROM THE HALF'S BITS (a whole number <= 4096, exact in a half): a value under one (a subnormal,
+        // zero, a sign) or not finite is no count; else the mantissa with its hidden bit, shifted.
+        for (unsigned k = 0; k < p.layers; ++k)
+            for (unsigned y = 0; y < p.h; ++y) {
+                const uint16_t *row = src + (size_t(k) * layerTexels + size_t(y) * p.w) * 4u + 3u;
+                unsigned short *dst = &rv.histHost[size_t(y) * pairW + size_t(k) * p.w];
+                for (unsigned x = 0; x < p.w; ++x, row += 4) {
+                    const unsigned h = *row, e = (h >> 10u) & 31u;
+                    dst[x] = (h & 0x8000u) || e < 15u || e == 31u
+                                 ? (unsigned short)0u
+                                 : (unsigned short)std::min(((1024u + (h & 1023u)) << (e - 15u)) >> 10u, 4096u);
+                }
+            }
+        rv.histHostW = unsigned(pairW);
+        rv.histHostH = p.h;
+        rv.histHostFrame = p.traced;
+        p.live = false;
+    }
+    if (!arm(ArmId::ReflectHistoryReadback, false)) {
+        for (ReflectView::HistPending &p : rv.histPending) p.live = false;
+        if (!rv.histHost.empty()) {
+            rv.histHost.clear();
+            rv.histHost.shrink_to_fit();
+        }
+        return;
+    }
+    const unsigned w = rv.traceW, h = rv.traceH;
+    if (!w || !h || !rv.hist[rv.curIdx].image) return;
+    const VkDeviceSize slotBytes = VkDeviceSize(w) * h * rv.layers * 8u;
+    if (rv.histReadback.buffer && rv.histReadback.size < slotBytes * kReflectRing) {
+        retire(rv.histReadback);
+        for (ReflectView::HistPending &p : rv.histPending) p.live = false;
+    }
+    if (!rv.histReadback.buffer) {
+        std::string err;
+        if (!makeBuffer(slotBytes * kReflectRing, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, rv.histReadback, err))
+            return;
+    }
+    const unsigned slot = rv.finishRing % kReflectRing;
+    // A SLOT STILL IN FLIGHT is never overwritten (a ring as deep as the frames in flight never has one; a deeper
+    // pipeline skips this frame's copy rather than race the host's read).
+    if (rv.histPending[slot].live) return;
+    VkMemoryBarrier toCopy{};
+    toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toCopy, 0,
+                         nullptr, 0, nullptr);
+    VkBufferImageCopy region{};
+    region.bufferOffset = VkDeviceSize(slot) * slotBytes;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = rv.layers;
+    region.imageExtent = { w, h, 1u };
+    vkCmdCopyImageToBuffer(cmd, rv.hist[rv.curIdx].image, VK_IMAGE_LAYOUT_GENERAL, rv.histReadback.buffer, 1, &region);
+    // ...ordered before the host's read AND before the trace that writes this half again two frames on.
+    VkMemoryBarrier toHost{};
+    toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &toHost, 0, nullptr, 0, nullptr);
+    ReflectView::HistPending &p = rv.histPending[slot];
+    p.frame = now;
+    p.live = true;
+    p.w = w;
+    p.h = h;
+    p.layers = rv.layers;
+    p.traced = rv.frame - 1u;   // the trace's ++rv.frame ran before this half
 }
 
 // ---------------------------------------------------------------------------
@@ -6976,6 +7096,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         if (jitter > 0.5) in.tuning.jitterOff = true;
         if (arm(ArmId::GatherFilterOff, false)) in.tuning.filterOff = true;
         if (arm(ArmId::GatherIrradianceReadback, false)) in.tuning.readback = true;
+        if (arm(ArmId::GatherHistoryReadback, false)) in.tuning.historyReadback = true;
     }
     in.restKey = gatherRestKeyArmed(scene);
     in.restartKey = scene->gatherRestartKey();

@@ -462,6 +462,13 @@ private:
         void *irrReadbackMapped = nullptr;
         std::vector<float> irrHost;
         unsigned irrHostFrame = 0u;
+        /// THE HISTORY-COUNT READBACK (GatherTuning::historyReadback, PHOTON-2 stage 0): the same ring shape
+        /// over the pixel history the integrate wrote, its count decoded for GatherStatus::historyCount.
+        VkBuffer histReadback = VK_NULL_HANDLE;
+        VkDeviceMemory histReadbackMemory = VK_NULL_HANDLE;
+        void *histReadbackMapped = nullptr;
+        std::vector<unsigned char> histHost;
+        unsigned histHostFrame = 0u;
         /// THE GATHER-HITS READBACK (FAR-SUN-1): the trace's per-ray records (device, one
         /// uvec4 per ray of every uniform probe), a host ring of them and of the atlas rows the
         /// uniform probes occupy (the radiance each ray returned, after the decode's write-back),
@@ -487,6 +494,7 @@ private:
             bool live = false;
             bool irradiance = false;     ///< this slot of the readback ring was written
             bool rays = false;           ///< ...and of the gather-hits ring (FAR-SUN-1)
+            bool history = false;        ///< ...and of the history-count ring (PHOTON-2 stage 0)
             unsigned gatherFrame = 0u;   ///< ...by this gather frame
             /// A HELD frame (the rest, PHOTON-GATHER-1d): only the readback was
             /// recorded — no counter copy to read back.
