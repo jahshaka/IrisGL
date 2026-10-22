@@ -434,22 +434,18 @@ void main()
 	const bool warmView = p.stereo.y >= kWarmupFrames;
 	// THE MEMORY'S LENGTH: the floor's (thirty-two frames).
 	const float maxN = 1.0 / max( p.knobs2.w, 1e-3 );
-	// THE GI FREEZE (M1's measuring arm, rest.x; PHOTON-2 round 4, the preflight's P2-1 sibling): a texel with a moving
-	// history KEEPS IT AS CARRIED - no sample enters and no clamp moves it (the box is built from THIS frame's raw
-	// samples, so a clamped "frozen" history followed the live samples and M1's glossy live-minus-frozen read low); its
-	// count stays. The fixed estimator (blendFloor 1: a mirror's centre ray IS its answer, exact on its first frame, and
-	// the old radiance is wrong at the new pose however well it is reprojected - rq_reflect.comp's floor note) and a
-	// texel with no history take this frame's ray as they do live: with the caches frozen that is the motion's own
-	// resampling, which is what the frozen walk measures.
-	if( p.rest.x > 0.5 && seed > 0.0 && blendFloor < 1.0 && finite3( carried.xyz ) )
-	{
-		const vec4 kept = vec4( clamp( carried.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), min( seed, 4096.0 ) );
-		imageStore( historyCur, ivec3( tc, gEye ), kept );
-		if( resumed )
-			imageStore( historyPrev, ivec3( tc, gEye ), kept );
-		return;
-	}
-	if( seed <= 0.0 || blendFloor >= 1.0 || !finite3( carried.xyz ) )
+	// THE GI FREEZE (M1's measuring arm, rest.x): a texel with a moving history KEEPS THE LIVE ESTIMATOR'S OWN
+	// REPROJECTION and nothing else - no sample enters and no clamp moves it (PHOTON-2 stage 1b A1). The history it keeps
+	// is the one the live blend starts from: the surface history the trace carried (every motion rule of the trace), or
+	// the HIT history through the virtual point under the dominant-direction gate with its validity tests, chosen by the
+	// same rule as live (the box below only decides which reprojection; its clamp is never applied) - so M1's glossy
+	// live-minus-frozen measures the GI's stepping, not a reprojection the frozen arm lacked (round 4: the surface path
+	// alone read -0.361 codes). Its count stays. The fixed estimator (blendFloor 1: a mirror's centre ray IS its answer,
+	// exact on its first frame, and the old radiance is wrong at the new pose however well it is reprojected -
+	// rq_reflect.comp's floor note) and a texel with no history take this frame's ray as they do live: with the caches
+	// frozen that is the motion's own resampling, which is what the frozen walk measures.
+	const bool frozen = p.rest.x > 0.5 && seed > 0.0 && blendFloor < 1.0 && finite3( carried.xyz );
+	if( !frozen && ( seed <= 0.0 || blendFloor >= 1.0 || !finite3( carried.xyz ) ) )
 	{
 		// A WARM RESTART is seeded at the warm-up (DRAG-1's rule: the filter shows the ray at once), whichever path
 		// carried it (the trace stores the seed; a record stores count 0 and says so in its flag).
@@ -463,6 +459,7 @@ void main()
 		return;
 	}
 	vec3 history = clamp( carried.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
+	vec3 frozenHistory = history;   // the freeze's: the live estimator's reprojection, unclamped
 	float confidence = 1.0;
 	{
 		// ---- THE BOX (fix F2): 21 RECONSTRUCTED taps (the 5 x 5 without its corners), linear ----
@@ -533,6 +530,7 @@ void main()
 							const float a = hitErr > surfErr + kHitErrorMargin * max( centre.x, 1e-4 ) ? 0.8 : 0.0;
 							histY = mix( hitY, surfY, a );
 							histC = mix( hitC, surfC, a );
+							frozenHistory = clamp( fromYCoCg( histY ), vec3( 0.0 ), vec3( kMaxRadiance ) );
 						}
 					}
 				}
@@ -542,6 +540,14 @@ void main()
 			confidence = 0.75 * clamp( 1.0 - d, 0.0, 1.0 ) + 0.25;
 			history = clamp( fromYCoCg( histC ), vec3( 0.0 ), vec3( kMaxRadiance ) );
 		}
+	}
+	if( frozen )
+	{
+		const vec4 kept = vec4( frozenHistory, min( seed, 4096.0 ) );
+		imageStore( historyCur, ivec3( tc, gEye ), kept );
+		if( resumed )
+			imageStore( historyPrev, ivec3( tc, gEye ), kept );
+		return;
 	}
 	const float frames = min( seed * confidence + 1.0, maxN );
 	const float blend = max( 1.0 / frames, blendFloor );
