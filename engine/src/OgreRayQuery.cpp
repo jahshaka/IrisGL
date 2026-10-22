@@ -6901,8 +6901,10 @@ void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
             reinterpret_cast<const uint16_t *>(static_cast<const char *>(rv.histReadback.mapped) + slot * slotBytes);
         const size_t pairW = size_t(p.w) * p.layers;
         rv.histHost.assign(pairW * p.h, 0u);
-        // THE COUNT FROM THE HALF'S BITS (a whole number <= 4096, exact in a half): a value under one (a subnormal,
-        // zero, a sign) or not finite is no count; else the mantissa with its hidden bit, shifted.
+        // THE COUNT FROM THE HALF'S BITS: a half holds every whole number up to 2048 exactly (11 significant bits) and
+        // only even ones above it, so a count past 2048 reads to within one — the histogram's edges (9, 17, 33) are far
+        // below that. A value under one (a subnormal, zero, a sign) or not finite is no count; else the mantissa with
+        // its hidden bit, shifted.
         for (unsigned k = 0; k < p.layers; ++k)
             for (unsigned y = 0; y < p.h; ++y) {
                 const uint16_t *row = src + (size_t(k) * layerTexels + size_t(y) * p.w) * 4u + 3u;

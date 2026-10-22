@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <sstream>
 
 namespace jahshaka {
@@ -189,6 +190,7 @@ struct StillnessRun::Impl {
     /// Engine frame -> (window, frame) and the traced reflection frame -> (window, frame).
     std::map<unsigned long long, std::pair<int, size_t>> byEngineFrame;
     std::map<unsigned, std::pair<int, size_t>> byTraced;
+    unsigned lastTraced = 0u;                         ///< the reflection's traced-frame counter last seen
     std::map<unsigned long long, std::vector<std::pair<std::string, unsigned>>> rowsByFrame;
     std::vector<MonitorRecord> records;
 
@@ -588,7 +590,12 @@ bool StillnessRun::frameDone(std::string &err)
         f.settleFrames = g.settleFrames;
         f.held = g.running && g.settleFrames && g.restFrames > g.settleFrames;
         m.byEngineFrame[engineFrame] = { p.window, p.index };
-        if (pub.rayQuery.reflectFrame > 0u) m.byTraced[pub.rayQuery.reflectFrame - 1u] = { p.window, p.index };
+        // THE TRACE THIS FRAME DID (when it did: a frame the reflection skipped leaves the counter where it was, and
+        // its copy is the earlier frame's — never re-labelled as this one).
+        if (pub.rayQuery.reflectFrame > m.lastTraced) {
+            m.byTraced[pub.rayQuery.reflectFrame - 1u] = { p.window, p.index };
+            m.lastTraced = pub.rayQuery.reflectFrame;
+        }
         Image pic;
         if (!m.readPicture(pic, err)) return false;
         if (p.index == 0) {
