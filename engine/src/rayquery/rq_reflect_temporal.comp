@@ -168,6 +168,9 @@ layout( rgba16f, set = 0, binding = 45 ) uniform readonly image2DArray reflectSa
 /// THE REST'S REFERENCE (PHOTON-2 round 2, R1 (f)'s arm "reflect.restReference", rest.y): the texel's raw rest samples'
 /// running mean in 32 bits (rgb) and their count (w) - 1 x 1 and never touched unless the arm is on.
 layout( rgba32f, set = 0, binding = 46 ) uniform image2DArray restReference;
+/// THE REST'S SECOND MOMENT (PHOTON-2 rev 12, P1): the root mean square of the luma of the texel's rest samples, beside
+/// its rest mean M - the standard error its stop reads (jah_reflect_rest.glsl). Own texel only.
+layout( r16f, set = 0, binding = 47 ) uniform image2DArray restMoment;
 
 #include "jah_reproject.glsl"
 #include "jah_reflect_rest.glsl"
@@ -325,8 +328,8 @@ void main()
 	// none: this pass returned above) takes it into M (M + (s - M) / v: a running mean, whose fp16 error does not
 	// accumulate - G2); the ANSWER is composed at every read, lerp( H, M, w( v ) ): the hand-over drains the
 	// motion lag over 2N samples (eased out: jah_reflect_rest.glsl), then the answer IS the rest mean, which goes on
-	// converging. Once the answer's change
-	// has stayed under one output code (kReflectStopRel) for kReflectStopFrames frames after the hand-over, the texel
+	// converging. Once the rest mean's STANDARD ERROR (its luma's second moment kept beside it, `restMoment`: P1) has
+	// stayed under one output code (kReflectStopRel) for kReflectStopFrames frames after the hand-over, the texel
 	// STOPS - the trace skips it; the view holds when no texel is left or at kReflectRestMax frames (OgreRayQuery.cpp).
 	// The rest frames' samples are the rest frame's own sequence (kReflectRestSequence + k): the held answer is a
 	// function of the scene and the eye, never of the path. A texel with no moving history (a disocclusion at the stop)
@@ -400,15 +403,23 @@ void main()
 		else
 		{
 		const float v = min( vPrev + 1.0, kReflectRestMax );
-		const vec3 M = vPrev > 0.0 ? Mp.xyz + ( sk - Mp.xyz ) / v : sk;
+		// (stored rounded stochastically: an fp16 running mean past a few hundred samples otherwise drifts - P1)
+		const vec3 M = jahRestStoreMean( vPrev > 0.0 ? Mp.xyz + ( sk - Mp.xyz ) / v : sk, tc, gEye, p.knobs.z );
 		const bool handOver = H.w > 0.0 && !fixedEstimator && blendFloor < 1.0;
 		const vec4 Hc = handOver ? H : vec4( M, H.w );
 		const vec4 Mn = vec4( M, H.w + v );
 		const vec3 answer = jahRestAnswer( Hc, Mn, N );
-		// THE STOP (R1): the answer's change this frame within a code (its own luma's 1 %, or its neighbourhood's for a
-		// dark texel), counted over consecutive frames once the hand-over is done; kReflectStopFrames of them stop it.
-		const float change = abs( lumaOf( answer ) - lumaOf( vPrev > 0.0 || H.w > 0.0 ? sofar : answer ) );
-		const bool still = change <= kReflectStopRel * max( lumaOf( answer ), max( nbrLuma, 0.0 ) );
+		// THE SECOND MOMENT (P1): the running mean of the samples' squared luma, beside M (the same v, the same sample),
+		// kept as its root (R16F holds radiance, not its square).
+		const float ls = jahRestLuma( sk );
+		const float rmsPrev = vPrev > 0.0 ? imageLoad( restMoment, ivec3( tc, gEye ) ).x : 0.0;
+		const float q = vPrev > 0.0 ? rmsPrev * rmsPrev + ( ls * ls - rmsPrev * rmsPrev ) / v : ls * ls;
+		const float rms = sqrt( max( q, 0.0 ) );
+		imageStore( restMoment, ivec3( tc, gEye ), vec4( rms, 0.0, 0.0, 0.0 ) );
+		// THE STOP (R1, P1): the rest mean's standard error under a code (its own luma's 1 %, or its neighbourhood's for
+		// a dark texel), counted over consecutive frames once the hand-over is done; kReflectStopFrames of them stop it.
+		const float e = jahRestErrorCodes( rms, jahRestLuma( M ), v, max( jahRestLuma( answer ), max( nbrLuma, 0.0 ) ) );
+		const bool still = e <= 1.0;
 		const bool settled = v >= ( handOver ? jahRestHandOverLength( N ) : kWarmupFrames );
 		const uint stopCount = still && settled && !reference ? min( jahRestStop( dpair.x ) + 1u, kReflectStopFrames ) : 0u;
 		if( !handOver && H.w > 0.0 )

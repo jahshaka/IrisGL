@@ -261,7 +261,7 @@ constexpr unsigned kReflectRestMovers = 16u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 47u;
+constexpr unsigned kReflectBindings = 48u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -320,8 +320,11 @@ constexpr unsigned kReflectSampleBinding = kReflectCloudBinding + 1u;
 /// ...and THE REST'S REFERENCE (46, PHOTON-2 round 2, R1 (f)'s arm "reflect.restReference"): a 32-bit running mean of
 /// each texel's raw rest samples, 1 x 1 unless the arm is on.
 constexpr unsigned kReflectReferenceBinding = kReflectSampleBinding + 1u;
-static_assert(kReflectBindings == kReflectReferenceBinding + 1u,
-              "the rest's reference is the reflection set's last binding");
+/// ...and THE REST'S SECOND MOMENT (47, PHOTON-2 rev 12, P1): R16F, the root mean square of the luma of each texel's
+/// rest samples - the standard error the rest's stop and the filter's reach at rest read (2 bytes a trace texel).
+constexpr unsigned kReflectMomentBinding = kReflectReferenceBinding + 1u;
+static_assert(kReflectBindings == kReflectMomentBinding + 1u,
+              "the rest's second moment is the reflection set's last binding");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's mean and
 /// distance, the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the
@@ -1030,6 +1033,8 @@ private:
         /// count; the trace's size under the arm, 1 x 1 otherwise (`referenceFull`).
         ReflectImage reference;
         bool referenceFull = false;
+        /// THE REST'S SECOND MOMENT (P1, rq_reflect_temporal.comp): R16F, one per trace texel and eye.
+        ReflectImage moment;
         unsigned w = 0, h = 0, layers = 1;
         unsigned frame = 0;              ///< the sample sequence's input
         bool     imagesReady = false;
@@ -5321,6 +5326,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 44 the cloud field (FAR-SUN-2)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 45 this frame's raw sample (PHOTON-2 1b)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 46 the rest's reference (PHOTON-2 round 2, R1 (f))
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 47 the rest's second moment (PHOTON-2 rev 12, P1)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -5459,6 +5465,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
     }
     retireImage(rv.sample);
     retireImage(rv.reference);
+    retireImage(rv.moment);
     rv.imagesReady = false;
     rv.havePrev = false;
     rv.historyFrames = 0;
@@ -5481,6 +5488,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
                           layers))
         return false;
     rv.referenceFull = reference;
+    if (!makeStorageImage(w, h, VK_FORMAT_R16_SFLOAT, rv.moment, err, layers)) return false;
     rv.imagesReady = true;
     rv.needsClear = true;
     return true;
@@ -5492,9 +5500,10 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
     // UNDEFINED -> GENERAL, and CLEARED: a distance of zero is what
     // rq_reflect.comp reads as "no history here", so a freshly made pair is
     // rejected by the reprojection test rather than believed.
-    constexpr int kImages = 6;
+    constexpr int kImages = 7;
     VkImageMemoryBarrier toGeneral[kImages] = {};
-    ReflectImage *imgs[kImages] = { &rv.hist[0], &rv.hist[1], &rv.dist[0], &rv.dist[1], &rv.sample, &rv.reference };
+    ReflectImage *imgs[kImages] = { &rv.hist[0], &rv.hist[1], &rv.dist[0], &rv.dist[1], &rv.sample, &rv.reference,
+                                    &rv.moment };
     for (int i = 0; i < kImages; ++i) {
         toGeneral[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         toGeneral[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -5539,6 +5548,7 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
     for (int i = 0; i < 2; ++i) { retireImage(rv.hist[i]); retireImage(rv.dist[i]); }
     retireImage(rv.sample);
     retireImage(rv.reference);
+    retireImage(rv.moment);
     retire(rv.histReadback);
     for (ReflectView::HistPending &p : rv.histPending) p = ReflectView::HistPending();
     rv.histHost.clear();
@@ -6519,6 +6529,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!referenceImg.imageView) { bail("the reference view is null"); return; }
     w[kReflectReferenceBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectReferenceBinding].pImageInfo = &referenceImg;
+    // THE REST'S SECOND MOMENT (47, P1).
+    VkDescriptorImageInfo momentImg{};
+    momentImg.imageView = rv.moment.view;
+    momentImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!momentImg.imageView) { bail("the moment view is null"); return; }
+    w[kReflectMomentBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[kReflectMomentBinding].pImageInfo = &momentImg;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------

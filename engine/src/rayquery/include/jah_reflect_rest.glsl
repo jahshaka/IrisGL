@@ -12,10 +12,13 @@
 // M alone, the path drained. A texel with no moving history, or a fixed estimator, takes M from its first rest sample.
 // M is a running mean (M + (s - M) / v), so its fp16 error does not accumulate (the in-place O + (s - H) / N of fix
 // F1 held texels up to 1.4 % off: the fix round's read #6).
-// After the hand-over M goes on accumulating PER TEXEL until its per-frame change has stayed under one output code
-// for kReflectStopFrames frames - then the texel STOPS tracing (R1); the view holds when every texel has stopped or at
-// kReflectRestMax rest frames. The stop's count rides the four low mantissa bits of the texel's distance
-// (historyDist .x - a relative error of 2^-19 on a length only compared at 5 %).
+// After the hand-over M goes on accumulating PER TEXEL until ITS STANDARD ERROR - sqrt( (E[l^2] - E[l]^2) / v ), the
+// luma's second moment kept beside M (`restMoment`, R16F, its root mean square: PHOTON-2 rev 12, P1) - has stayed under
+// one output code for kReflectStopFrames frames - then the texel STOPS tracing (R1); the view holds when every texel has
+// stopped or at kReflectRestMax rest frames. (The stop on the per-frame change could not see a heavy tail: one rare
+// bright sample froze into a texel that stopped near 110 samples - round 2's (f) blotches.) The stop's count rides
+// the four low mantissa bits of the texel's distance (historyDist .x - a relative error of 2^-19 on a length only
+// compared at 5 %).
 #ifndef JAH_REFLECT_REST_GLSL
 #define JAH_REFLECT_REST_GLSL
 
@@ -35,6 +38,77 @@ float jahPackRestStop( float dist, uint n )
 	if( !( dist > 0.0 ) )
 		return dist;
 	return uintBitsToFloat( ( floatBitsToUint( dist ) & ~15u ) | min( n, 15u ) );
+}
+/// The luma the rest's second moment is kept for (the temporal pass' own weights).
+float jahRestLuma( vec3 c )
+{
+	return dot( c, vec3( 0.25, 0.5, 0.25 ) );
+}
+/// THE REST MEAN'S STANDARD ERROR in output codes (P1): the luma variance from the kept root mean square `rms` and the
+/// mean's luma, over v samples, against one code of `reference` (kReflectStopRel of the texel's luma, or its
+/// neighbourhood's for a dark texel). 0 for v < 1.
+float jahRestErrorCodes( float rms, float meanLuma, float v, float reference )
+{
+	if( !( v >= 1.0 ) )
+		return 0.0;
+	const float variance = max( rms * rms - meanLuma * meanLuma, 0.0 );
+	return sqrt( variance / v ) / max( kReflectStopRel * reference, 1e-8 );
+}
+/// THE FILTER'S REACH AT REST (P1): the texels a mean of standard error `e` codes must be averaged over for the
+/// filtered answer to fall under HALF a code (n ~ 4 e^2 of them under the filter's soft weights: a reach of ~1.2 e
+/// texels; a stop's e <= 1 keeps ~1 texel - the per-texel noise of a mean under one code shown raw measured 1.06 codes
+/// mean against the reference with 0.6 e), never further than the moving reach - blended in with the hand-over's weight,
+/// so the rest's first frame keeps the moving reach and a stopped texel's (v and its moment frozen) never moves.
+const float kRestReachPerCode = 1.2;
+float jahRestReach( float movingReach, float e, float handOverWeight )
+{
+	return mix( movingReach, min( movingReach, kRestReachPerCode * e ), clamp( handOverWeight, 0.0, 1.0 ) );
+}
+/// THE REST MEAN'S STORE, ROUNDED STOCHASTICALLY TO HALF PRECISION (P1): the running mean M + (s - M) / v lives in an
+/// rgba16f half, and from a few hundred samples on the increment falls under half a unit in the last place - round to
+/// nearest then drops it, and drops it UNEVENLY (a reflection whose samples are mostly a little above the mean and rarely
+/// far below loses only the small ones): measured on photon-glass, every texel running to 512 samples held 0.71 codes
+/// dark of the 4,096-sample reference over 24 % of the glossy pixels. Rounding up with the probability of the remainder
+/// keeps the stored mean unbiased (its noise: a random walk of ~0.3 ulp a step - 7 ulp, 0.35 %, at 512). The draw is a
+/// hash of the texel and the rest frame: the held answer stays a function of the scene and the eye.
+uint jahRestHash( uint x )
+{
+	x ^= x >> 16u;
+	x *= 0x7feb352du;
+	x ^= x >> 15u;
+	x *= 0x846ca68bu;
+	x ^= x >> 16u;
+	return x;
+}
+float jahHalfStochastic( float x, float u )
+{
+	if( !( x > 0.0 ) )
+		return x;
+	const uint bits = packHalf2x16( vec2( x, 0.0 ) ) & 0xFFFFu;
+	const float h = unpackHalf2x16( bits ).x;
+	if( x > h && bits < 0x7BFFu )
+	{
+		const float up = unpackHalf2x16( bits + 1u ).x;
+		return u < ( x - h ) / ( up - h ) ? up : h;
+	}
+	if( x < h && bits > 0u )
+	{
+		const float down = unpackHalf2x16( bits - 1u ).x;
+		return u < ( h - x ) / ( h - down ) ? down : h;
+	}
+	return h;
+}
+vec3 jahRestStoreMean( vec3 m, ivec2 tc, int eye, float restFrame )
+{
+	uint s = jahRestHash( uint( tc.x ) * 73856093u ^ uint( tc.y ) * 19349663u ^ uint( eye ) * 83492791u ^
+						  uint( restFrame ) * 2654435761u );
+	vec3 r;
+	for( int c = 0; c < 3; ++c )
+	{
+		s = jahRestHash( s + uint( c ) );
+		r[c] = jahHalfStochastic( m[c], float( s >> 8u ) * ( 1.0 / 16777216.0 ) );
+	}
+	return r;
 }
 /// The rest samples a texel holds: its M half's count over its frozen history's.
 float jahRestSamples( vec4 H, vec4 M )

@@ -189,6 +189,8 @@ layout( rg32f, set = 0, binding = 9 ) uniform image2DArray historyDistCur;
 layout( rgba16f, set = 0, binding = 45 ) uniform readonly image2DArray reflectSample;
 /// THE REST'S REFERENCE (PHOTON-2 round 2, R1 (f)'s arm, rest.y): composited UNFILTERED at rest under the arm.
 layout( rgba32f, set = 0, binding = 46 ) uniform readonly image2DArray restReference;
+/// THE REST'S SECOND MOMENT (PHOTON-2 rev 12, P1; rq_reflect_temporal.comp): the reach at rest follows its variance.
+layout( r16f, set = 0, binding = 47 ) uniform readonly image2DArray restMoment;
 layout( set = 0, binding = 10 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
@@ -397,20 +399,40 @@ void main()
 		// estimator its footprint names is the centre ray, which this frame did not deliver).
 		if( p.knobs2.x < 0.5 && !( sampleFlags > 0.0 ) && throwT > 0.0 && footprint < kFixedEnter )
 			texelLive = false;
-		// AT REST THE REACH SHRINKS WITH THE REST'S SAMPLES (R1: the count is the variance proxy) - once the hand-over
-		// is done: the answer is then a mean of v samples, whose spatial support needs sqrt( K / v ) of the moving
-		// history's (K = the hand-over's length, where the answer's variance is the moving history's order). Shrunk
-		// DURING the hand-over it raised the filtered picture's per-frame change while the texel's own stayed flat
-		// (measured: 0.055 -> 0.060 codes over frames 21-50 on photon-glass). A STOPPED texel's v no longer moves, so
-		// neither does its reach: the stop changes nothing on screen.
+		// AT REST THE REACH FOLLOWS THE REST MEAN'S VARIANCE (R1, P1: its second moment) - the texels its standard error
+		// needs to fall under a code, never further than the moving reach - blended in with the hand-over's weight (the
+		// rest's first frame keeps the moving reach: shrunk DURING the hand-over it raised the filtered picture's
+		// per-frame change, round 2's measurement). A heavy tail (one rare bright sample in the mean) keeps its reach
+		// wide instead of freezing as a blotch. The reference's "one code" is the texel's answer or its four
+		// neighbours' (the temporal pass' dark-texel rule). A STOPPED texel's v and moment no longer move, so neither
+		// does its reach: the stop changes nothing on screen.
 		if( p.knobs2.x >= 0.5 )
 		{
 			vec4 H = imageLoad( historyPrev, ivec3( tc, gEye ) );
 			if( !finite3( H.xyz ) || !( H.w > 0.0 ) )
 				H = vec4( 0.0 );
-			const float v = jahRestSamples( H, imageLoad( historyCur, ivec3( tc, gEye ) ) );
-			const float K = jahRestHandOverLength( p.stereo.w );
-			reach *= sqrt( K / max( v, K ) );
+			const vec4 M = imageLoad( historyCur, ivec3( tc, gEye ) );
+			const float v = jahRestSamples( H, M );
+			if( v >= 1.0 )
+			{
+				float nbr = 0.0, nn = 0.0;
+				const ivec2 d4[4] = ivec2[4]( ivec2( 1, 0 ), ivec2( -1, 0 ), ivec2( 0, 1 ), ivec2( 0, -1 ) );
+				for( int i = 0; i < 4; ++i )
+				{
+					const ivec2 t = tc + d4[i];
+					if( any( lessThan( t, ivec2( 0 ) ) ) || any( greaterThanEqual( t, traceRes ) ) )
+						continue;
+					const vec4 a = answerAt( t );
+					if( a.w > 0.0 && finite3( a.xyz ) )
+					{
+						nbr += jahRestLuma( a.xyz );
+						nn += 1.0;
+					}
+				}
+				const float e = jahRestErrorCodes( imageLoad( restMoment, ivec3( tc, gEye ) ).x, jahRestLuma( M.xyz ), v,
+												   max( jahRestLuma( centre.xyz ), nn > 0.0 ? nbr / nn : 0.0 ) );
+				reach = jahRestReach( reach, e, jahRestHandOverWeight( v, p.stereo.w ) );
+			}
 		}
 	}
 	if( referenceShown )
