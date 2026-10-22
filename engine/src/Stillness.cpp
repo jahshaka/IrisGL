@@ -651,6 +651,17 @@ bool StillnessRun::finish(StillnessReport &out, std::string &err)
               std::to_string(m.queued.size()) + " frames unread)";
         return false;
     }
+    // ONE COUNTER (the read's finding 2): the monitor files a record for EVERY frame while it is on, keyed by its
+    // frame; the door keys its frames by Engine::published().frame. The two are one count today — if they ever part
+    // (an engine whose record stamp stands still), every frame's rows would silently read "none fired": refuse.
+    for (const StillnessWindow &w : m.report.windows)
+        for (const StillnessFrame &f : w.frames)
+            if (!m.rowsByFrame.count(f.engineFrame)) {
+                err = "stillness: no frame-monitor record carries engine frame " + std::to_string(f.engineFrame) +
+                      " (the " + w.name + " window's frame " + std::to_string(f.index) +
+                      "): the records' frame stamp and Engine::published().frame disagree";
+                return false;
+            }
     for (size_t i = 0; i < m.report.windows.size(); ++i) m.completeWindow(m.report.windows[i], i);
     StillnessReport &r = m.report;
     if (r.windows.size() == 2) {
