@@ -7203,8 +7203,14 @@ void PhotonComponent::recordField(const FrameWork &w) {
             mIfd->update(w.fieldBatch);
             work.setUnits(w.fieldBatch);
         }
-        if (w.field == FrameWork::Field::Integrate)
+        if (w.field == FrameWork::Field::Integrate) {
             mIfdProbesDone = std::min(mIfdTotalProbes, mIfdProbesDone + w.fieldBatch);
+            // A CHANGE'S (or a re-placement's) LAST WRITE: every probe holds the new light now (kIfdChangeSamples
+            // deep) and what is still owed is refinement - noise inside the field's precision. The gather's held
+            // view takes this answer (stage 2c) rather than waiting out the refinements to the target (a texel
+            // that has read no light never stops its probe: photon-room's lamp step refined to frame 144).
+            if (mIfdProbesDone >= mIfdTotalProbes) noteFieldSettled();
+        }
     } JAH_CATCH(mError, );
 }
 

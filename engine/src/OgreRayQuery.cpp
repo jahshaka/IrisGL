@@ -783,9 +783,10 @@ private:
     unsigned long long gatherRestKeyArmed(const detail::OgreScene *scene) const {
         return scene->gatherRestKey() ^ (arm(ArmId::GiHitDirect, true) ? 0ull : 0x9E3779B97F4A7C15ull);
     }
-    /// THE REFLECTION'S REST KEY (PHOTON-2 fix F5): the gather's (the lighting serial - a light write, an injection
-    /// landing, a cascade rebuild -, the transform epoch, the ray rule's refits, the field's integrations, the cards'
-    /// captures and relights) and EVERY OTHER WRITE TO WHAT A REFLECTION RAY READS: a material edit (the material
+    /// THE REFLECTION'S REST KEY (PHOTON-2 fix F5): the gather's (the edits and the field's last write, stage 2c),
+    /// what a reflection ray reads beside them (PhotonComponent::reflectionReadsKey: the lighting serial - a light
+    /// write, an injection landing, a cascade rebuild -, the transform epoch, the ray rule's refits, the field's every
+    /// integration, the cards' captures and relights) and EVERY OTHER WRITE TO WHAT A REFLECTION RAY READS: a material edit (the material
     /// store's rows and the edit serial - a reflected object's albedo is read at the hit, a reflector's roughness
     /// shapes the lobe, and neither moves the gather's key), a light write or removal (the hit table's direct light),
     /// and any acceleration-structure build or refit (an item added, removed, hidden or moved re-builds the TLAS). A
@@ -793,6 +794,8 @@ private:
     /// answer, the history kept) and restarts once they are still again.
     unsigned long long reflectRestKey(const detail::OgreScene *scene, const SceneAs &sa) const {
         unsigned long long key = gatherRestKeyArmed(scene);
+        key ^= scene->photon().reflectionReadsKey();
+        key *= 1099511628211ull;
         const auto fold = [&key](unsigned long long v) {
             key ^= v;
             key *= 1099511628211ull;
@@ -9255,13 +9258,38 @@ bool PhotonComponent::probeGatherWanted() const {
     return mScene.rayTracingResolved();
 }
 
-/// THE GATHER'S REST KEY (PHOTON-GATHER-1d): everything the gather's answer
-/// depends on besides the camera — the lighting (giLightingSerial: a light
-/// write, an injection landing), the geometry (the ray tier's own gate: the
-/// movement epoch and the ray rule's refits) and the surface cache the hits read
-/// first (its captures and relights). A frame whose key and camera equal the
-/// last frame's is a REST frame (ScreenProbeGather: the rest mean, the hold).
+/// THE GATHER'S REST KEY (PHOTON-GATHER-1d; PHOTON-2 stage 2c): what BREAKS a still view's rest — a frame whose
+/// key and camera equal the last frame's is a REST frame (ScreenProbeGather: the rest mean, the hold). It folds the
+/// EDITS that change what the gather answers and the field's LAST write, and nothing the caches do on their own
+/// budget: a light or environment write and a light removed (the host's edits; a light moved included), a node
+/// moved (the transform epoch: a held view would composite its old answer under the moved pixels), a material
+/// edit, and the irradiance field's last write (its owed work ran out: the held view takes the field's final
+/// answer once). LEFT OUT (the budget's ticks — the stage-0 base measured the rest restarting at their cadence and
+/// never reaching its hold while they ran, G1): the field's integration count (every refinement's readback), the
+/// cards' captures and relights, the chain's settle injections and cascade re-lattices (giLightingSerial), the
+/// shadow scan's per-frame writes and the ray rule's refits. A break is not a restart: the pixel histories go on
+/// (the restart key is gatherRestartKey). The reflection reads more of the caches and keeps them in ITS rest key
+/// (RayQueryTier::reflectRestKey, reflectionReadsKey below — PHOTON-2 F5).
 unsigned long long PhotonComponent::gatherRestKey() const {
+    unsigned long long key = 1469598103934665603ull;
+    const auto fold = [&key](unsigned long long v) {
+        key ^= v;
+        key *= 1099511628211ull;
+    };
+    fold(mScene.lightWriteSerial());
+    fold(mScene.lightsRemoved());
+    fold(mScene.transformEpoch());
+    fold(mMaterialEditSerial);
+    fold(mIfdSettles);
+    return key;
+}
+
+/// EVERYTHING A REFLECTION RAY READS BESIDE THE EDITS (PHOTON-2 F5; the gather's rest key before stage 2c): the
+/// lighting (giLightingSerial: a light write, an injection landing, a cascade rebuild), the geometry (the ray tier's
+/// own gate: the movement epoch and the ray rule's refits), the irradiance field's every write (its integration count:
+/// a hit the field shades changes with it) and the surface cache the hits read first (its captures and relights).
+/// RayQueryTier::reflectRestKey folds it with the edits: a held reflection never shows a stale input.
+unsigned long long PhotonComponent::reflectionReadsKey() const {
     unsigned long long key = 1469598103934665603ull;
     const auto fold = [&key](unsigned long long v) {
         key ^= v;
@@ -9269,13 +9297,6 @@ unsigned long long PhotonComponent::gatherRestKey() const {
     };
     fold(giLightingSerial());
     fold(mScene.shadowEpoch() + mScene.rayLevelRefits());
-    // THE IRRADIANCE FIELD'S GENERATION (ENGINE-UPGRADE-2B stage 4): the generation job's own integration count,
-    // which advances only on frames the field writes. A gather pixel reads the field (its fallback, and through
-    // the hits it shades), so a REST MEAN held while the field still refined averaged the field's last passes in -
-    // under the variance stop a probe's last sample moves it by 1/n of its noise, n from 4 - and two at-rest shots
-    // differed (pool.world_sky_b's height_fog, 1.4e-4). In the REST key, not the restart key: the rest mean
-    // restarts and holds after the field's last write while the pixel history is untouched (a restart on every
-    // field write threw a moving lamp's history away each frame: the selftest's mover pose, up to 85 codes).
     if (mIfd) fold(mIfd->getIntegrations());
     if (mSurfaceCache) {
         CardCacheStatus cs;

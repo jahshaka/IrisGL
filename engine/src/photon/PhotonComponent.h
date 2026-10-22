@@ -622,6 +622,8 @@ public:
     /// from what moves when an injection LANDS (the chain's settles, each
     /// cascade's rebuilds and lattice cell).
     unsigned long long giLightingSerial() const;
+    /// What a reflection ray reads beside the edits (OgreRayQuery.cpp; the reflection's rest key, PHOTON-2 F5).
+    unsigned long long reflectionReadsKey() const;
     /// EVERY MATERIAL EDIT the scene's writer reports (noteMaterialChanged), counted (ENGINE-UPGRADE-U5
     /// stage 3): the ray tier re-writes its alpha table only when this, its slots or its masks moved.
     unsigned long long materialEditSerial() const { return mMaterialEditSerial; }
