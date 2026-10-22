@@ -13,9 +13,9 @@
 // fragment per record) costs what the records cost and nothing per screen pixel.
 // The list is two images of one layout, a grid LIST_W wide, record i at
 // (i % LIST_W, i / LIST_W), and one buffer:
-//   jahHitIds  RGBA32UI  x = the item slot | the LEVEL the hit BLAS was built
-//                            from << 24 (bit 27: "the far copy — the mesh's
-//                            coarsest level", which the decode resolves; bit 28:
+//   jahHitIds  RGBA32UI  x = the item slot (bits 0-23; bit 27: "the far copy —
+//                            the mesh's coarsest level", which the decode resolves,
+//                            else the near copy, level 0 since PHOTON-7 stage 6; bit 28:
 //                            "the DIFFUSE response only" — every gather record,
 //                            set by jahHitAppend from the destination), y = the
 //                            primitive (the triangle within that level), z = the
@@ -119,18 +119,6 @@ bool jahHitIsMetal( uint slot )
 	return ( jahHitFlags( slot ) & kJahHitGpuMetal ) != 0u;
 }
 
-/// The LEVEL the NEAR copy of `slot` was built from — the level its per-slot
-/// geometry row names (GpuScene::geomRowIndex: mesh * 64 + level * 8 + submesh).
-/// A rigged item's near copy is its skin cache, level 0 (the decode reads the
-/// instance's skin row).
-uint jahHitNearLevel( uint slot )
-{
-	if( ( jahHitFlags( slot ) & kJahHitGpuSkinned ) != 0u || slot >= JAH_GEOM_SLOTS )
-		return 0u;
-	const uint row = JAH_GEOM_ROW_OF( slot );
-	return row == 0xFFFFFFFFu ? 0u : ( ( row >> 3u ) & 0x7u );
-}
-
 vec2 jahOctEncode( vec3 n )
 {
 	n /= max( abs( n.x ) + abs( n.y ) + abs( n.z ), 1e-20 );
@@ -166,7 +154,7 @@ float jahHitSunVisibility( vec3 hitPos, vec3 liftDir, float t, bool far )
 /// Appends one record. False when the list is full (the record is dropped and
 /// counted) or not bound this dispatch — the caller then treats the hit as the
 /// write-back's "unshaded" case.
-bool jahHitAppend( uint slot, uint level, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
+bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
 				   float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance )
 {
 	if( !( JAH_HIT_ON ) || JAH_HIT_CAPACITY == 0u )
@@ -178,7 +166,7 @@ bool jahHitAppend( uint slot, uint level, bool far, uint prim, vec2 bary, vec3 d
 		return false;
 	}
 	const ivec2 at = ivec2( int( i % JAH_HIT_LIST_W ), int( i / JAH_HIT_LIST_W ) );
-	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( ( level & 0x7u ) << 24u ) | ( far ? kJahHitFarBit : 0u ) |
+	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( far ? kJahHitFarBit : 0u ) |
 						   ( ( dest & kJahHitDestGather ) != 0u ? kJahHitDiffuseOnlyBit : 0u );
 	imageStore( jahHitIds, at,
 				uvec4( slotLevel, prim, packUnorm2x16( clamp( bary, vec2( 0.0 ), vec2( 1.0 ) ) ),

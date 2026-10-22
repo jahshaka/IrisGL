@@ -1792,13 +1792,14 @@ namespace {
 /// lift: a card's footprint is grown by its own still-trace lift plus one texel
 /// (cardFootprint's `margin`, sunLiftOf) — the ray starts that far off the card.
 constexpr float kFootprintMargin = 0.05f;
-/// THE STILL TRACE'S LIFT, in footprints (rq_card_movers.comp's head): the origin
-/// moves off the receiver along its normal by this many of the larger of the
-/// card's texel and the ray tier's footprint at the card (the near copy it may hit
-/// lies up to one footprint off the captured level — the sun-contact job's rule,
-/// kSunContactLiftFootprints), plus the Depth layer's R16F quantum at the card's
-/// far end.
-constexpr float kSunLiftFootprints = 2.0f;
+/// THE STILL TRACE'S LIFT, in card texels (rq_card_movers.comp's head): the origin moves off the receiver along its
+/// normal by this many of the card's texel, plus the Depth layer's R16F quantum at the card's far end. The near copy a
+/// sun ray hits is the mesh's LEVEL 0 (PHOTON-7 stage 6: ONE RAY LEVEL PER MESH) and the card is captured at the
+/// bake's level for its texel (cards::levelForTexel: that level's measured bound is under the nominal page's texel),
+/// so the traced surface lies within about one texel of the captured one; the second texel is the margin the split
+/// card's finer texel needs (a level chosen for the nominal page, gi.card_capture). The ray tier's footprint at the
+/// card that this lift also cleared (a coarser near level re-fitted per view) is gone with the level.
+constexpr float kSunLiftTexels = 2.0f;
 /// A ray's length: the sun is at infinity; a mover beyond the residency radius
 /// casts onto no resident card anyway.
 constexpr float kMoverRayRange = 10000.0f;
@@ -2026,11 +2027,9 @@ const Ogre::Light *SurfaceCache::cardSun() const {
 
 float SurfaceCache::sunLiftOf(const CardRec &c) const {
     const float texel = 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size));
-    const float dist = (c.centre - mViewerPos).length();
-    const float rayFootprint = mRayFootprintPerMetre * dist;
     // R16F keeps 11 bits: the depth quantum at the card's far end.
     const float depthQuantum = (2.0f * c.halfDepth + 2.0f * captureMargin(c.halfDepth)) / 1024.0f;
-    return kSunLiftFootprints * std::max(texel, rayFootprint) + depthQuantum;
+    return kSunLiftTexels * texel + depthQuantum;
 }
 
 void SurfaceCache::traceSun() {
@@ -2332,11 +2331,7 @@ void SurfaceCache::traceSun() {
             job.toSun = toSun;   // ZERO without a sun: every texel lit
             job.range = kMoverRayRange;
             job.still = true;
-            // THE LIFT NEEDS THE RAY RULE'S FOOTPRINT: before the ray tier has
-            // chosen its levels once (a scene's first frames, rays just turned on)
-            // the near copy's error is not known — the trace waits, as it waits
-            // for a structure.
-            if (mRayFootprintPerMetre > 0.0f && mMoverHooks.trace && mMoverHooks.trace(job)) {
+            if (mMoverHooks.trace && mMoverHooks.trace(job)) {
                 for (unsigned idx : still) {
                     CardRec &c = mCards[idx];
                     c.stillPending = false;
@@ -2687,7 +2682,6 @@ void SurfaceCache::update(const CardSceneView &view) {
     mStillTracedLastFrame = 0u;
     mStillTexelsLastFrame = 0u;
     mViewerPos = view.viewerPos;
-    mRayFootprintPerMetre = view.rayFootprintPerMetre;
     mBudget = view.budgetTexels;
     mLightBudget = view.lightBudgetTexels;
     mIndirectBudget = view.indirectBudgetTexels;

@@ -89,15 +89,10 @@ struct GpuInstance {
     float    prevWorld[12] = {};
     float    boundsMin[4] = {};  ///< xyz world AABB min; [3] = mesh table index (bit-cast uint)
     float    boundsMax[4] = {};  ///< xyz world AABB max; [3] = the flags word (bit-cast uint)
-    /// x = the engine NodeId, y = THE MATERIAL WORD, z = light mask,
-    /// w = THE RAY LEVEL (ATOM P3's SUB-ERROR, AT-A8r): the mesh level this
-    /// instance's bottom-level acceleration structure should be built from,
-    /// re-evaluated only when the instance's distance from the camera changes by
-    /// 2x (the hysteresis is what keeps a BLAS refit rare — `OgreScene::
-    /// updateRayLevels`, PATCHED in place: patchRayLevel). ITS CONSUMER IS THE RAY
-    /// TIER'S NEAR COPY (ATOM-FARBLAS-1; the instance job rq_tlas_write.comp reads it here):
-    /// the instance's near BLAS is built from this level, its far copy from the
-    /// mesh's coarsest.
+    /// x = the engine NodeId, y = THE MATERIAL WORD, z = light mask, w = SPARE (0): it
+    /// held the ray level a per-view 2x distance band chose for the near copy until
+    /// PHOTON-7 stage 6 - ONE RAY LEVEL PER MESH, level 0 (the near copy traces the
+    /// authored triangles: exact contacts, camera-free), the far copy the coarsest.
     ///
     /// y = THE MATERIAL WORD (ATOM P4b): {pool : 16 | slot : 16} in the chain's ONE
     /// shared `PhotonVoxelMaterial` store — the bucket whose const buffer holds this item's
@@ -613,16 +608,8 @@ public:
     void addObserver(GpuSceneObserver *o);
     void removeObserver(GpuSceneObserver *o);
 
-    /// THE RAY LEVEL, PATCHED IN PLACE (ATOM-CPU-WALKS-1). `OgreScene::
-    /// updateRayLevels` runs AFTER the frame's scan, so a re-stage would reach the
-    /// device a frame late — and a second stage in the same frame would take this
-    /// frame's pose as the previous one. A patch writes `ids[3]` alone into the
-    /// mirror (prevWorld untouched), tells the observers, and queues the slot; the
-    /// frame's one commit (`update`, right after the ray levels and before the ray
-    /// tier reads the table) copies it with everything else the frame staged.
-    void patchRayLevel(uint32_t slot, uint32_t level);
-    /// Copies owed without a compose: a freed slot's clear, a ray-level patch.
-    bool hasPendingCopies() const { return !mFreedSlots.empty() || !mPatched.empty(); }
+    /// Copies owed without a compose: a freed slot's clear.
+    bool hasPendingCopies() const { return !mFreedSlots.empty(); }
     /// The mirror as a raw pointer. The dirty scan reads it once per item, and
     /// in a Debug build (which is the daily driver) an accessor call per item is
     /// a measurable part of the walk.
@@ -991,8 +978,6 @@ public:
     void setNotifyTiming(bool on) { mNotifyTiming = on; }
     void setObserversMuted(bool on) { mObserversMuted = on; }
 private:
-    /// Slots whose ray level was patched since their last copy (patchRayLevel).
-    std::vector<uint32_t> mPatched;
     /// Copies `mCopySet` (sorted, unique, in range) to the device: one staging map,
     /// one Destination per contiguous run.
     void copySet();

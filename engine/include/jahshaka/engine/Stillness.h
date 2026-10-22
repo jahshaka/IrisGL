@@ -149,8 +149,6 @@ struct StillnessFrame {
     /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2
     /// L8: a few frames late, so a window's SUM is the reading).
     unsigned long long foliageRule = 0;
-    /// The ray tier's per-instance levels this frame re-fitted (GpuSceneStatus::rayLevelRefits' step).
-    unsigned           rayLevelRefits = 0;
     bool               held = false;
     /// THE REFLECTION'S REST this frame (RayQueryStatus, PHOTON-2 round 2 R1/G6): its rest frames (0 = moving or
     /// broken), held, the newest count of its texels still converging (-1 = none read for this rest) and the rest

@@ -133,15 +133,11 @@ void main()
 			const float dist = viewDistance( rawDepth );
 			const vec3 world = worldAt( uv, dist );
 			// THE BIAS RULE, for a ray that reads no voxel: the origin is lifted
-			// along the normal by TWO full-resolution pixel footprints at its own
-			// depth (knobs.x, OgreRayQuery.cpp kSunContactLiftFootprints) and
-			// tMin is zero. One footprint is the ray tier's own TOLERANCE
-			// (Types.h kRayFootprintTolerance: the near copy it traces may lie a
-			// footprint off the drawn surface, the level the ray rule chose
-			// being coarser than the drawn one) — a lift of exactly that has no
-			// margin, and a curved caster under a grazing sun starts rays under
-			// its own triangles; the second footprint is the margin (measured
-			// on the sphere lattice of gi.sun_contact). The reflection's rule
+			// along the normal by THE DRAWN CUT'S ERROR in full-resolution pixel
+			// footprints at its own depth (knobs.x: the view's pixel tolerance -
+			// the ray traces the mesh's level 0, PHOTON-7 stage 6, and the pixel
+			// shows the drawn cut, which lies within that tolerance of it) and
+			// tMin is zero. The reflection's rule
 			// (half a voxel cell, tMin = the bias) clears the VOXEL grid's
 			// quantisation, which a geometry-only question never reads, and at
 			// a contact it would miss every occluder closer than the bias. The

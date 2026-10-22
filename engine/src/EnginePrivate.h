@@ -4493,9 +4493,6 @@ public:
     bool mAsyncShaders = false;
     /// IBL convolutions deferred because a permutation was building (ASYNC-SHADERS-1).
     unsigned long long mIblDeferrals = 0;
-    /// The ray rule's footprint per metre of distance, as updateRayLevels last
-    /// computed it (the surface cache's still-trace lift, CardSceneView).
-    float mRayFootprintPerMetre = 0.0f;
     bool probeGatherWanted() const { return mPhoton.probeGatherWanted(); }
     bool probeGridByRays() const { return mPhoton.probeGridByRays(); }
     bool probeGridWanted() const { return mPhoton.probeGridWanted(); }
@@ -4599,6 +4596,7 @@ public:
     GpuWalk gpuWalk() const override;
     TraceSun traceSun() const override;
     GiPlan giPlan() const override;
+    bool rayNearLevels(std::vector<int> &levels) const override;
     void setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) override;
     unsigned vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) const override;
     bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;
@@ -6399,7 +6397,8 @@ public:
     /// The node's slot is re-composed by the next compose (no-op for a node with no Item).
     void markGpuNodeDirty(uint32_t node);
     /// What the ray structures are current against: the caster epoch (a transform, a
-    /// pose, a caster input) plus the ray levels' refits.
+    /// pose, a caster input) - the ray tier's read-only view of it. (A near copy's level
+    /// never changes since PHOTON-7 stage 6: level 0, so no refit enters it.)
     unsigned long long rayStructureEpoch() const;
     /// PHOTON (photon/PhotonComponent.h): the GI's products, read through its interface.
     const PhotonComponent &photon() const { return mPhoton; }
@@ -6480,21 +6479,6 @@ private:
     /// tables it reads are owned by; a consumer that wants two culls of one
     /// scene in a frame is stage 3's problem and gets a second instance.
     detail::GpuCull mGpuCull;
-    // --- THE RAY LEVEL (ATOM P3's AT-A8r; OgreGpuScene.cpp) ----------------
-    /// The level each slot's bottom-level structure should be built from, and
-    /// the DISTANCE that answer was computed at (-1 = never). The second array
-    /// is the hysteresis: the rule is asked again only when the live distance
-    /// leaves the 2x band around the recorded one. Both are indexed by item
-    /// slot and both are cleared for a slot the index frees or renumbers, so a
-    /// recycled slot never inherits the dead object's band.
-    std::vector<uint32_t> mRayLevel;
-    std::vector<float>    mRayEvalDistance;
-    Ogre::Vector3 mRayEye = Ogre::Vector3::ZERO;
-    bool mRayEyeValid = false;
-    unsigned long long mRayLevelScanSeen = 0ull;   ///< the scan count the last walk saw
-    unsigned long long mRayLevelEvals = 0ull;
-    unsigned long long mRayLevelRefits = 0ull;
-    unsigned long long mRayLevelWalks = 0ull;
     /// THE ONE PLACE the per-item predicates are computed (GpuInstanceFlag).
     Ogre::uint32 gpuFlagsFor(const Node &n) const;
     /// THE RENDER-QUEUE SPLIT'S ONE DECISION (ATOM S3-DRAW, OgreAtomDraw.cpp):
@@ -6694,24 +6678,6 @@ public:
         for (Node *n : mItemNodes)
             if (n) markGpuSlotDirty(*n);
     }
-    /// THE RAY LEVEL'S PASS (ATOM P3's AT-A8r). Called once per frame per drawn
-    /// scene with the eye and the projection of the view that draws it; runs
-    /// nothing when neither the camera nor the table moved.
-    void updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, float viewportHeight);
-    /// How many times the rule has CHANGED a slot's level, ever. The ray tier
-    /// adds it to its movement epoch (a still scene whose camera crossed a band
-    /// owes one instance write: the near copy's BLAS changed).
-    unsigned long long rayLevelRefits() const { return mRayLevelRefits; }
-    /// THE RULE'S LEVEL FOR A SLOT, as the walk left it THIS frame. The ray
-    /// tier's writer reads this and NOT `GpuInstance::ids[3]`: the walk runs
-    /// after the table's scan, so the mirror's copy of the word is restaged only
-    /// by the NEXT frame's scan — and a writer reading it would build the TLAS
-    /// with the previous level on exactly the frame the epoch said it changed,
-    /// then skip the following (still) frame (ATOM-FARBLAS-1 audit F1). `ids.w`
-    /// stays in the table for the device-side instance writer A3 §1.3 owes.
-    uint32_t rayLevelOf(uint32_t slot) const {
-        return slot < mRayLevel.size() ? mRayLevel[slot] : 0u;
-    }
     /// ATOM P3's CULL, run once over this scene's table (OgreGpuCull.cpp). `hzb`
     /// null (or a request with hzbLevels 0) is the frustum-only mode.
     /// The recording half of runGpuCull: the request uploaded and the jobs
@@ -6745,9 +6711,6 @@ public:
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
                     GpuCullResult &out);
 private:
-    /// A slot left the index or was renumbered: its ray-level band is no longer
-    /// about the object that now lives there.
-    void forgetRayLevel(uint32_t slot);
     void composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bool graphIsCurrent,
                             detail::GpuInstance &out) const;
     /// THE COMPOSER, SPLIT FOR THE WORKERS (ENGINE-UPGRADE-U4 stage 4): the lane half READS only (the node, its Item,

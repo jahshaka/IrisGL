@@ -511,8 +511,8 @@
 		uint atomRowSrc = 0u;
 		uint atomFirstIdx = 0u;
 		@property( atom_hit_mode )
-			// A HIT NAMES A LEVEL (the structure the ray hit was built from).
-			uint atomLevel = ( atomIds.x >> 24u ) & 0x7u;
+			// A HIT NAMES A COPY: the near copy is the mesh's level 0 (ONE RAY LEVEL PER MESH, PHOTON-7 stage 6).
+			uint atomLevel = 0u;
 			uint atomTri = atomIds.y;
 			// THE FAR COPY (bit 27): the mesh's coarsest level, the last one with an
 			// index range - the level the far BLAS was built from.

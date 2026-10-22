@@ -235,11 +235,6 @@ struct CardSceneView {
     Ogre::Vector3 viewerPos;
     unsigned budgetTexels = 0u;
     float    radius = 0.0f;
-    /// THE RAY TIER'S FOOTPRINT PER METRE of distance from the viewer (the ray
-    /// rule's `sampleFootprintPerspective` at one metre, OgreScene::updateRayLevels):
-    /// the near copy a sun ray hits may lie one footprint off the captured level,
-    /// so the still trace's lift is sized by it (kSunLiftFootprints).
-    float rayFootprintPerMetre = 0.0f;
     /// THE RADIANCE SIGNATURE (PHOTON-CARDS-1): every light's pose and shadow key
     /// plus what only a card's LIT radiance depends on (colour, power, reach,
     /// cone) — a change
@@ -599,7 +594,7 @@ private:
     /// their sun-projected footprints reach) — records both traces and hands the
     /// traced and the retired cards to the relight.
     void traceSun();
-    /// The still trace's lift for `card` (kSunLiftFootprints; CardSample::sunLift).
+    /// The still trace's lift for `card` (kSunLiftTexels; CardSample::sunLift).
     float sunLiftOf(const CardRec &card) const;
     /// The first visible shadow-casting directional light of the scene's one light
     /// list (SceneLightList.h; the relight's sun, the traces' direction), or null.
@@ -668,7 +663,6 @@ private:
     bool mStillSunKnown = false;
     bool mSunMovingLastFrame = false;
     std::vector<float> mStillCpu;
-    float mRayFootprintPerMetre = 0.0f;
     float mStillCpuMs = 0.0f;   ///< the still trace's CPU this frame (in captureMs with a batch)
     TraceSunCost mTraceSunCost;
     CardSunGrid mSunGrid;

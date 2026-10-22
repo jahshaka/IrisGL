@@ -1414,7 +1414,7 @@ void main()
 		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );   // the write-back fills it
 		const vec3 hitPos = world + worldN * bias + L * hitT;
 		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, false );
-		if( jahHitAppend( recSlot, jahHitNearLevel( recSlot ), false, recPrim, recBary, L, sunVis,
+		if( jahHitAppend( recSlot, false, recPrim, recBary, L, sunVis,
 						  reflectFootprint( lobeAlpha, hitT ),
 						  1.0, jahHitDestPack( tc, false, gEye ),
 						  world.y, length( hitPos - world ), length( world - thisEye.camPos ) ) )

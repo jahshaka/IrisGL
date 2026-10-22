@@ -646,16 +646,14 @@ struct MeshData {
 /// savings arrive only once the object is 4 px across would not be a tolerance.
 constexpr float kLodBudgetPixels = 1.0f;
 
-/// THE RAY TIER'S TOLERANCE, in ray footprints (ATOM P3's AT-A8r). ONE, and the
-/// reason it is not the eye's half or double: a ray is cast through a pixel, so
-/// its footprint IS that pixel's, and a deviation under one footprint cannot
-/// change which surface the ray finds. The tier that spends it is the ray
-/// tier's NEAR copy of every instance (ATOM-FARBLAS-1): its bottom-level
-/// structure is built from the level this rule leaves in `GpuInstance.ids.w`.
-constexpr float kRayFootprintTolerance = 1.0f;
+// THE RAY TIER'S NEAR COPY IS LEVEL 0 (PHOTON-7 stage 6, ONE RAY LEVEL PER MESH): every ray - the gather's, the sun
+// contact's, the cards' sun, the reflections' - traces the authored triangles near, so a contact meets its
+// reflection and the traced geometry is a function of the world, never of where a camera stands (law L1). The 2x
+// distance band that re-fitted a coarser level per view (one footprint of tolerance) is deleted; measured on Bistro
+// Exterior at the owner's pose: 211.8 MB of bottom levels against the band's 138.5 MB (1.53x), 0 refits on a walk.
 
 /// THE RAY INSTANCE MASK (ATOM-FARBLAS-1, A5b §4). ONE top-level structure holds
-/// every traced object TWICE: a NEAR copy over the level the ray rule chose,
+/// every traced object TWICE: a NEAR copy over the mesh's level 0,
 /// carrying the per-consumer bits (audit C-15) plus `kRayMaskNear`, and a FAR
 /// copy over the mesh's coarsest level carrying `kRayMaskFar` ALONE. A launch
 /// names what it may hit with its cull mask, so the split costs a bit, not a
@@ -8607,16 +8605,6 @@ struct GpuSceneStatus {
     unsigned long long aabbReads = 0;  ///< world AABBs the scan asked Ogre for, ever
     double   lastCopyMs = 0.0;         ///< CPU cost of the last update's staging + copies
     double   lastScanMicros = 0.0;     ///< ...of the last TIMED scan (0 when never timed)
-    // ---- THE RAY LEVEL's own cost (ATOM P3, AT-A8r) ------------------------
-    /// Slots whose ray level was RE-EVALUATED, ever: the 2x distance band was
-    /// left and the rule was asked again.
-    unsigned long long rayLevelEvals = 0;
-    /// ...of those, the ones whose ANSWER CHANGED — one BLAS refit each, and
-    /// the number the hysteresis exists to keep small.
-    unsigned long long rayLevelRefits = 0;
-    /// Walks of the ray-level pass (one per frame in which the camera or the
-    /// scene moved; a still frame runs none).
-    unsigned long long rayLevelWalks = 0;
     /// THE CHANGE FEED's notifications, ever (ATOM-CPU-WALKS-1): slot changes told to
     /// the consumers that derive from the table (the split's words, the ray tier's
     /// traced set, the card candidates) — each one is that many visits for each. A
@@ -9259,10 +9247,6 @@ struct GpuSceneEntry {
     unsigned flags = 0u;
     NodeId   nodeId = 0u;      ///< the slot's node (the GPU holds Ogre's key for it; read back to the node's id)
     unsigned lightMask = 0u;
-    /// THE RAY LEVEL (`GpuInstance.ids.w`, ATOM P3's AT-A8r): the mesh level
-    /// this instance's NEAR bottom-level structure is built from at its
-    /// current distance. 0 until a camera has been seen.
-    unsigned rayLevel = 0u;
     /// THE PBS MATERIAL WORD (`GpuInstance.raster.x`, ATOM-S3-PARITY): {pool : 16 |
     /// slot : 16} of the item's material in the PBS const-buffer pool — what the
     /// visibility-buffer decode indexes materials with. 0xFFFFFFFF when the item's

@@ -148,7 +148,6 @@ void GpuScene::destroy() {
     // THE FEED'S CONSUMERS HEAR IT FIRST: every slot they derived from is gone.
     // They stay registered — a re-created table starts empty and they follow it.
     for (GpuSceneObserver *o : mObservers) o->gpuSceneReset();
-    mPatched.clear();
     if (mVao) {
         destroyTables();
         if (mMeshBuffer) mVao->destroyUavBuffer(mMeshBuffer);
@@ -622,14 +621,6 @@ void GpuScene::removeObserver(GpuSceneObserver *o) {
     mObservers.erase(std::remove(mObservers.begin(), mObservers.end(), o), mObservers.end());
 }
 
-void GpuScene::patchRayLevel(uint32_t slot, uint32_t level) {
-    if (slot >= mSlotCapacity || !mBorn[slot] || mMirror[slot].ids[3] == level) return;
-    mMirror[slot].ids[3] = level;
-    mPatched.push_back(slot);
-    ++mWrites;
-    notify(slot, &mMirror[slot]);
-}
-
 void GpuScene::onSlotFreed(uint32_t slot) {
     if (slot >= mSlotCapacity) return;
     std::memset(&mMirror[slot], 0, sizeof(GpuInstance));
@@ -689,9 +680,6 @@ void GpuScene::update(const std::vector<uint32_t> &dirtySlots) {
     for (uint32_t slot : mFreedSlots)
         if (slot < mSlotCapacity && !stagedThisUpdate(slot)) mCopySet.push_back(slot);
     mFreedSlots.clear();
-    // RAY-LEVEL PATCHES nobody flushed yet (patchRayLevel) ride along too.
-    mCopySet.insert(mCopySet.end(), mPatched.begin(), mPatched.end());
-    mPatched.clear();
 
     // LAST FRAME'S MOVERS THAT DID NOT MOVE AGAIN. Their previous pose is now
     // their current one; without this a mover that stops carries a stale
@@ -1111,11 +1099,6 @@ void OgreScene::composeGpuInstanceLane(const Node &n, const Ogre::Matrix4 &world
     out.ids[0] = gpuKeyOf(n);   // Ogre's 32-bit key, never the 64-bit id (U3 stage 3, F6)
     out.ids[1] = gpuMaterialWordFor(n, flags, tail.queueMaterial);
     out.ids[2] = uint32_t(n.lightMask);
-    // THE RAY LEVEL (AT-A8r) travels with the entry rather than being poked
-    // into the mirror: every write to this table goes through one composer, so
-    // a slot re-staged for any other reason keeps the level it was given.
-    if (n.itemSlot != size_t(-1) && n.itemSlot < mRayLevel.size())
-        out.ids[3] = mRayLevel[n.itemSlot];
     // THE RASTER WORDS (see GpuInstance::raster): sub-item 0's PBS material word, and
     // the tangent's place in the vertex of the mesh's level-0 VAO — submesh 0, like
     // every other geometry fact this table carries.
@@ -1986,6 +1969,8 @@ bool OgreScene::gpuNodeView(uint32_t node, GpuSlotView &out) const {
     return true;
 }
 
+unsigned long long OgreScene::rayStructureEpoch() const { return shadowEpoch(); }
+
 bool OgreScene::gpuSlotView(uint32_t slot, GpuSlotView &out) const {
     out = GpuSlotView();
     if (slot >= mItemNodes.size() || !mItemNodes[slot]) return false;
@@ -1997,117 +1982,12 @@ void OgreScene::markGpuNodeDirty(uint32_t node) {
     if (it != mNodes.end()) markGpuSlotDirty(it->second);
 }
 
-unsigned long long OgreScene::rayStructureEpoch() const { return shadowEpoch() + rayLevelRefits(); }
-
 /// The scan with its cost recorded for a caller that wants the number without a
 /// frame — the suite's premise table, which needs the PRE-FRAME form's cost and
 /// has nowhere else to take it. `ensureGpuScene` times itself, so this only
 /// forces the pass.
 void OgreScene::ensureGpuSceneTimed(bool graphIsCurrent) const {
     ensureGpuScene(graphIsCurrent);
-}
-
-// ---------------------------------------------------------------------------
-// THE RAY LEVEL (ATOM P3's SUB-ERROR, AT-A8r) — the level a BLAS should be
-// built from, and the hysteresis that keeps the build rare.
-//
-// THE RULE IS THE QUALITY CURRENCY'S, with the ray's own sample. A ray traced
-// from the camera through a pixel diverges exactly as that pixel's footprint
-// does, so "the ray footprint at the instance's distance" IS
-// `sampleFootprintPerspective(d, proj[1][1], height)` — the same number the
-// view's LOD strategy spends, and the tolerance is ONE of them. Four consumers,
-// one derivation (Types.h): the view in pixels, the cascade in cells, the card
-// in texels, the ray in footprints.
-//
-// WHY THE ANSWER IS STICKY. Rebuilding a bottom-level structure is not a
-// per-frame cost anybody wants at 8,001 instances, so the level is not a
-// function of the live distance but of the distance it was LAST EVALUATED at:
-// the rule is asked again only when the instance has moved into a band twice as
-// far or half as near. Between those crossings the answer cannot change and no
-// distance test is even close to one — which is why the walk below is a compare
-// against one float per slot and nothing else.
-//
-// WHAT IT IS NOT: a draw-time LOD. The picture's level is Ogre's own strategy
-// per pass (OgreMesh.cpp), evaluated every frame with no hysteresis but with
-// fork 5230c9390+8282f6d70 (was 0075)'s band; this is the RAY tier's, evaluated at build time, and the
-// two are allowed to differ — a shadow ray does not need the silhouette the eye
-// does.
-void OgreScene::forgetRayLevel(uint32_t slot) {
-    if (slot < mRayLevel.size()) mRayLevel[slot] = 0u;
-    if (slot < mRayEvalDistance.size()) mRayEvalDistance[slot] = -1.0f;
-}
-
-void OgreScene::updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, float viewportHeight) {
-    if (!mGpuScene.live()) return;
-    const float footprintPerMetre = sampleFootprintPerspective(1.0f, projScaleY, viewportHeight);
-    if (!(footprintPerMetre > 0.0f)) return;
-    // ...kept for the surface cache's still trace, whose lift is sized by it.
-    mRayFootprintPerMetre = footprintPerMetre;
-    const uint32_t n = mGpuScene.slotCount();
-    if (!n) return;
-    // A STILL CAMERA IN A STILL SCENE RUNS NOTHING. The eye is compared
-    // exactly: it is the same float3 the view wrote, not a derived quantity, so
-    // "did not move" is a memcmp and not a tolerance.
-    const bool eyeMoved = mRayEyeValid == false || eye != mRayEye;
-    const bool tableMoved = mSubstrate.composes != mRayLevelScanSeen;
-    if (!eyeMoved && !tableMoved) return;
-    mRayEye = eye;
-    mRayEyeValid = true;
-    mRayLevelScanSeen = mSubstrate.composes;
-    ++mRayLevelWalks;
-
-    if (mRayEvalDistance.size() < n) mRayEvalDistance.resize(n, -1.0f);
-    if (mRayLevel.size() < n) mRayLevel.resize(n, 0u);
-    const detail::GpuInstance *mirror = mGpuScene.mirrorData();
-    for (uint32_t i = 0; i < n; ++i) {
-        const detail::GpuInstance &e = mirror[i];
-        uint32_t meshIndex = 0u;
-        std::memcpy(&meshIndex, &e.boundsMin[3], sizeof(uint32_t));
-        if (meshIndex == detail::GpuScene::kNoMesh) continue;
-        const Ogre::MeshPtr &mesh = mGpuScene.meshAt(meshIndex);
-        if (!mesh) continue;
-        const std::vector<float> *bounds = lodBoundsFor(mesh.get());
-        if (!bounds || bounds->empty()) continue;   // no chain: level 0 for ever
-
-        // The distance Ogre's own strategies use: to the bounding SPHERE, whose
-        // world radius is the local one times the largest axis scale - the longest
-        // COLUMN of the row-major 3x4 (worldMaxAxisScale says why not a row).
-        const Ogre::Vector3 centre(0.5f * (e.boundsMin[0] + e.boundsMax[0]),
-                                   0.5f * (e.boundsMin[1] + e.boundsMax[1]),
-                                   0.5f * (e.boundsMin[2] + e.boundsMax[2]));
-        const float scale = worldMaxAxisScale(e.world);
-        if (!(scale > 0.0f) || !std::isfinite(scale)) continue;
-        const float radius = float(mesh->getBoundingSphereRadius()) * scale;
-        const float d = std::max(0.0f, float((centre - eye).length()) - radius);
-
-        const float was = mRayEvalDistance[i];
-        // THE 2x BAND. A never-evaluated slot (-1) always evaluates; a slot at
-        // distance 0 would make every band degenerate, so it re-evaluates only
-        // when it leaves 0.
-        if (was >= 0.0f && d <= was * 2.0f && d * 2.0f >= was) continue;
-        mRayEvalDistance[i] = d;
-        ++mRayLevelEvals;
-        // THE CURRENCY, with the ray's sample: ONE footprint of tolerance, the
-        // footprint being the pixel this ray was cast through, grown to the
-        // instance's distance. `sampleFootprintPerspective` is called with the
-        // real distance so the reader sees the derivation rather than a
-        // pre-multiplied constant; the multiply is the same either way.
-        const float allowed = allowedWorldError(
-            kRayFootprintTolerance, sampleFootprintPerspective(d, projScaleY, viewportHeight),
-            scale);
-        const uint32_t want = uint32_t(lodLevelForWorldError(*bounds, allowed, bounds->size()));
-        if (want == mRayLevel[i]) continue;
-        ++mRayLevelRefits;
-        mRayLevel[i] = want;
-        // THE TABLE IS PATCHED IN PLACE (ATOM-CPU-WALKS-1): ids[3] alone, prevWorld
-        // untouched, the feed told, the entry queued. This pass runs AFTER the
-        // frame's scan, so a re-stage (what this used to do) reached the device a
-        // frame late — the ray tier, which now writes its instances on the device
-        // from this table, would have built from the previous level.
-        mGpuScene.patchRayLevel(i, want);
-    }
-    // ...and on the device before the ray tier reads it, this frame: with the frame's
-    // own commit, which runs next (OgreShadow.cpp, commitGpuSceneFrame).
 }
 
 // ---------------------------------------------------------------------------
@@ -2124,7 +2004,6 @@ void toPublic(const detail::GpuInstance &in, GpuSceneEntry &out) {
     std::memcpy(&out.flags, &in.boundsMax[3], sizeof(unsigned));
     out.nodeId = in.ids[0];
     out.lightMask = in.ids[2];
-    out.rayLevel = in.ids[3];
     out.pbsMaterialWord = in.raster[0];
     out.tangentOffset = in.raster[1];
     out.skinRow = in.raster[2];
@@ -2146,9 +2025,6 @@ GpuSceneStatus OgreScene::gpuSceneStatus() const {
     st.aabbReads = mGpuAabbReads;
     st.lastCopyMs = mGpuScene.lastCopyMs();
     st.lastScanMicros = mGpuScanMicros;
-    st.rayLevelEvals = mRayLevelEvals;
-    st.rayLevelRefits = mRayLevelRefits;
-    st.rayLevelWalks = mRayLevelWalks;
     st.feedNotifies = mGpuScene.notifies();
     return st;
 }

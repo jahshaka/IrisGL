@@ -206,10 +206,8 @@ struct StillnessRun::Impl {
     Image prev;                                       ///< the previous frame's picture (inside a window)
     Image trailPrev;                                  ///< ...and inside a move's trail
     std::vector<unsigned char> trailPrevChange;       ///< ...and its per-pixel change from the one before (J1's steps)
-    unsigned long long lastRefits = 0;                ///< GpuSceneStatus::rayLevelRefits after the last frame
     unsigned long long lastKeyMoves = 0;              ///< GatherStatus::keyMoves after the last frame (L7)
     unsigned long long lastFoliageRule = 0;           ///< GatherStatus::foliageRuleAccepts after the last frame (L8)
-    bool refitsSeen = false;
     unsigned picW = 0, picH = 0;
     std::vector<unsigned char> classAt;               ///< per picture pixel: its class (0 = unclassified)
     /// A window frame's per-pixel change, held until the window's mask is known (the history count arrives a few
@@ -864,19 +862,14 @@ bool StillnessRun::frameDone(std::string &err)
     const GatherStatus &g = pub.gi.gather;
 
     if (p.part != Impl::Part::Window && p.window >= 0) m.moveFrames[size_t(p.window)].push_back(engineFrame);
-    const unsigned long long refitsNow = pub.gpuScene.rayLevelRefits;
     // THE HOLD'S REASONS, this frame (L7): the rest key moved since the last frame, or the inputs owed work. Read
     // before the trail and window parts write the frame; the key's count is taken once, below them.
-    const unsigned refits = m.refitsSeen ? unsigned(refitsNow - m.lastRefits) : 0u;
-    m.lastRefits = refitsNow;
-    m.refitsSeen = true;
     // THE MOVE'S TRAIL (1d): every pixel, the change from the frame before (none on its first frame).
     if (p.trail) {
         StillnessWindow &w = m.report.windows[size_t(p.window)];
         StillnessFrame &f = w.trail[w.trail.size() - p.index];
         m.mapGatherFrame(g, p.window, true, w.trail.size() - p.index);
         f.engineFrame = engineFrame;
-        f.rayLevelRefits = refits;
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
@@ -970,7 +963,6 @@ bool StillnessRun::frameDone(std::string &err)
         StillnessFrame &f = w.frames[p.index];
         m.mapGatherFrame(g, p.window, false, p.index);
         f.engineFrame = engineFrame;
-        f.rayLevelRefits = refits;
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
@@ -1174,7 +1166,7 @@ std::string StillnessReport::tsv() const
     for (const std::string &n : names)
         o << "\t" << n << "_px\t" << n << "_max\t" << n << "_mean\t" << n << "_changed\t" << n << "_refl_none\t" << n
           << "_refl_le9\t" << n << "_refl_le17\t" << n << "_refl_le33\t" << n << "_refl_gt33";
-    o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\tframe_gpu_ms\tframe_ms"
+    o << "\trest_frames\tsince_restart\tsettle_frames\theld\tgi_rows\tframe_gpu_ms\tframe_ms"
       << "\tclass_px\tclass_restart\tstep_px\tslow_stage\thold_key\tfoliage_rule"
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
       << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\n";
@@ -1190,7 +1182,7 @@ std::string StillnessReport::tsv() const
                 for (int b : c.reflectBins) o << "\t" << b;
             }
             o << "\t" << f.restFrames << "\t" << f.sinceRestart << "\t" << f.settleFrames << "\t" << (f.held ? 1 : 0)
-              << "\t" << f.rayLevelRefits << "\t" << (f.giRows.empty() ? "-" : f.giRows);
+              << "\t" << (f.giRows.empty() ? "-" : f.giRows);
             char ms[64];
             std::snprintf(ms, sizeof(ms), "\t%.3f\t%.3f\t%d\t%d\t%d\t", f.frameGpuMs, f.frameMs, f.classPixels,
                           f.classRestarts, f.stepPixels);

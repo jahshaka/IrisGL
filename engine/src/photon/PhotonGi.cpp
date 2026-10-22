@@ -7326,7 +7326,7 @@ void PhotonComponent::stepFieldRestWindow() {
     };
     fold(mScene.lightWriteSerial());
     fold(mScene.lightsRemoved());
-    fold(mScene.shadowEpoch() + mScene.rayLevelRefits());
+    fold(mScene.shadowEpoch());
     fold(mMaterialEditSerial);
     fold(giLightingSerial());
     fold(mScene.cloudGiSerial());

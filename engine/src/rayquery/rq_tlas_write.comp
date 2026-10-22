@@ -18,17 +18,17 @@
 // the first real frame after a warm-up compiles nothing).
 //
 // EVERY INPUT IS ALREADY ON THE DEVICE except what is per MESH: the instance table
-// (world rows, the flags word, the mesh index, the ray level in ids.w) is the GPU
-// scene's own; the host writes, per frame it traces, the bottom-level address of
-// every (mesh, level) and every mesh's coarsest level, and the ready rigged slots.
+// (world rows, the flags word, the mesh index) is the GPU scene's own; the host
+// writes, per frame it traces, every mesh's two bottom-level addresses - the near
+// copy's LEVEL 0 (ONE RAY LEVEL PER MESH, PHOTON-7 stage 6) and the far copy's
+// coarsest - and the ready rigged slots.
 //
 // THE ARITHMETIC IS THE OLD CPU WRITER'S, field for field (engine.tlas_compute
 // holds the array byte-equal to a reference writer): the transform is the table's
 // world rows (row-major 3x4 is exactly VkTransformMatrixKHR), the custom index the
 // slot, the near mask near | caster | mover-or-still | mover-caster | still-caster, the far mask
 // far alone, the flags TRIANGLE_FACING_CULL_DISABLE (| FORCE_NO_OPAQUE for an
-// alpha-tested slot), the near level
-// min(ray level, coarsest).
+// alpha-tested slot), the near copy level 0, the far copy the coarsest.
 
 layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
 
@@ -39,7 +39,7 @@ struct GpuInstance
 	vec4 prevWorld[3];
 	vec4 boundsMin;		// w = the mesh table index (bit-cast)
 	vec4 boundsMax;		// w = the flags word (bit-cast)
-	uvec4 ids;			// w = the ray level
+	uvec4 ids;			// w = spare
 	uvec4 raster;
 };
 
@@ -52,9 +52,9 @@ struct AsInstance
 };
 
 layout( std430, set = 0, binding = 0 ) readonly buffer InstanceTable { GpuInstance instances[]; };
-// THE INPUTS (RayQueryTier::writeTlasInputs): a 16-word header, then a 20-word
-// record per mesh-table entry (eight uvec2 level addresses — the levels the rays
-// trace — and the coarsest level),
+// THE INPUTS (RayQueryTier::writeTlasInputs): a 16-word header, then a 4-word
+// record per mesh-table entry (two uvec2 addresses: the near copy's level 0, the
+// far copy's coarsest),
 // then a 4-word record per ready rigged slot (slot, address lo, address hi, 0),
 // ascending by slot.
 layout( std430, set = 0, binding = 1 ) readonly buffer Inputs { uint words[]; };
@@ -76,8 +76,7 @@ layout( std430, set = 0, binding = 2 ) writeonly buffer Out { AsInstance outInst
 #define HDR_MASK_STILLCAST	14u
 #define HDR_FLAG_ALPHA		15u
 #define HDR_WORDS			16u
-#define LEVEL_SLOTS			8u
-#define MESH_WORDS			20u
+#define MESH_WORDS			4u
 // VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
 #define INSTANCE_FLAGS		1u
 // ...and for an ALPHA-TESTED slot VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR
@@ -158,10 +157,8 @@ void main()
 		else if( meshIndex < words[HDR_MESHES] )
 		{
 			const uint rec = HDR_WORDS + meshIndex * MESH_WORDS;
-			const uint coarsest = min( words[rec + LEVEL_SLOTS * 2u], LEVEL_SLOTS - 1u );
-			const uint nearLevel = min( instances[slot].ids.w, coarsest );
-			nearAddress = uvec2( words[rec + nearLevel * 2u], words[rec + nearLevel * 2u + 1u] );
-			farAddress = uvec2( words[rec + coarsest * 2u], words[rec + coarsest * 2u + 1u] );
+			nearAddress = uvec2( words[rec], words[rec + 1u] );
+			farAddress = uvec2( words[rec + 2u], words[rec + 3u] );
 		}
 	}
 

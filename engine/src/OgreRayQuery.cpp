@@ -342,8 +342,8 @@ struct ReflectImage {
 
 /// ONE BOTTOM-LEVEL STRUCTURE PER (MESH, LEVEL) — ATOM-FARBLAS-1, A5b §4. A mesh
 /// used to have exactly one, over level 0. Now every instance is written TWICE
-/// into the one TLAS: a NEAR copy over the level the ray rule chose for it
-/// (`GpuInstance::ids[3]`, AT-A8r) and a FAR copy over the mesh's COARSEST level,
+/// into the one TLAS: a NEAR copy over level 0 (ONE RAY LEVEL PER MESH, PHOTON-7
+/// stage 6) and a FAR copy over the mesh's COARSEST level,
 /// so the table is keyed by the level too. A mesh with one level asks for (mesh,
 /// 0) twice and gets ONE structure — the "no second build" of the decision falls
 /// out of the key rather than being a special case.
@@ -575,13 +575,13 @@ private:
             struct Rec {
                 const Ogre::Mesh *mesh = nullptr;
                 uint32_t meshIndex = detail::GpuScene::kNoMesh;
-                uint32_t nearLevel = 0u, farLevel = 0u;
+                uint32_t farLevel = 0u;   ///< the far copy's (the coarsest); the near copy's is level 0
                 uint32_t kind = 0u;
                 bool rigged = false;   ///< traced + skinned, mesh or not (the skin pass' want)
                 float coarse = 0.0f;
                 bool sameKeys(const Rec &o) const {
                     return kind == o.kind && mesh == o.mesh && meshIndex == o.meshIndex &&
-                           nearLevel == o.nearLevel && farLevel == o.farLevel && rigged == o.rigged;
+                           farLevel == o.farLevel && rigged == o.rigged;
                 }
                 /// Every fact, the hand-over width included (a finite positive or 0: never a NaN).
                 bool same(const Rec &o) const { return sameKeys(o) && coarse == o.coarse; }
@@ -2538,8 +2538,9 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
 // EVERY TRACED OBJECT IS WRITTEN TWICE (ATOM-FARBLAS-1, A5b §4 — ONE TLAS with
 // explicit masks; two TLASes would double the build every frame). The masks
 // (Types.h, `kRayMask*`):
-//   * THE NEAR COPY over the level the RAY RULE chose (`GpuInstance::ids[3]`,
-//     AT-A8r, `OgreScene::updateRayLevels`; clamped to the chain), carrying the
+//   * THE NEAR COPY over the mesh's LEVEL 0 (PHOTON-7 stage 6: ONE RAY LEVEL PER
+//     MESH - the authored triangles, so a contact meets its reflection and the
+//     traced geometry is the same wherever the camera stands), carrying the
 //     per-consumer bits of audit C-15 — a shadow caster, a mover or still world —
 //     and "near"; a shadow-casting mover's also kRayMaskMoverCaster (the surface
 //     cache's mover-shadow launch, PHOTON-CARDS-4), a shadow-casting still
@@ -2553,21 +2554,15 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
 // `instanceCustomIndex` is the SLOT on both copies: a hit reads the object's entry
 // with one fetch whichever copy it hit; the copy is told apart by the launch's MASK.
 namespace {
-/// THE LEVELS THE RAYS MAY TRACE, and the level slots per mesh record in the job's
-/// inputs (rq_tlas_write.comp's LEVEL_SLOTS — the record's LAYOUT). No deeper than
-/// the GPU scene keeps (architecture audit D1): its level table, its geometry rows
-/// (geomRowIndex: eight a mesh) and the hit record's 3-bit level. A chain deeper
-/// than eight is traced at level 7 at most: more triangles than its error allows,
-/// the right ones. Past it a near copy had no geometry row and a far copy indexed
-/// the NEXT mesh's rows (gi.ray_levels). The record carries exactly these slots:
-/// it used to carry sixteen, and the eight past the cap were written and never
-/// read (no BLAS is ever built past it).
-constexpr uint32_t kTlasLevels = detail::GpuScene::kLevelsPerMesh;
-static_assert(kTlasLevels == 8u, "rq_tlas_write.comp's LEVEL_SLOTS and MESH_WORDS");
-constexpr uint32_t kRayLevels = kTlasLevels;
-/// The inputs' layout (the shader's HDR_* / MESH_WORDS).
+/// THE LEVELS THE RAYS MAY TRACE: the near copy's level 0 and the far copy's coarsest, no deeper than the GPU scene
+/// keeps (architecture audit D1): its level table, its geometry rows (geomRowIndex: eight a mesh) and the hit record's
+/// 3-bit level. A chain deeper than eight takes level 7 as its far copy: more triangles than its error allows, the
+/// right ones. Past it a far copy indexed the NEXT mesh's rows (gi.ray_levels).
+constexpr uint32_t kRayLevels = detail::GpuScene::kLevelsPerMesh;
+/// The inputs' layout (the shader's HDR_* / MESH_WORDS): a mesh's record is its two structures' addresses - the near
+/// copy's (level 0) and the far copy's (the coarsest) - since PHOTON-7 stage 6 (it carried every level's).
 constexpr uint32_t kTlasHeaderWords = 16u;
-constexpr uint32_t kTlasMeshWords = kTlasLevels * 2u + 4u;
+constexpr uint32_t kTlasMeshWords = 4u;
 constexpr uint32_t kTlasSkinWords = 4u;
 constexpr uint32_t kTlasThreadsPerGroup = 64u;   // rq_tlas_write.comp's local_size_x
 VkDescriptorBufferInfo rawBufferInfo(Ogre::UavBufferPacked *b);   // below, with the hit list's
@@ -2582,7 +2577,7 @@ void RayQueryTier::SceneAs::Feed::take(uint32_t slot, const Rec &r, int sign, bo
     }
     if (r.kind == 1u) {
         traced = sign > 0 ? traced + 1u : (traced ? traced - 1u : 0u);
-        for (const uint32_t level : { r.nearLevel, r.farLevel }) {
+        for (const uint32_t level : { 0u, r.farLevel }) {   // the near copy's level 0, the far copy's
             if (!withKeys) break;
             const BlasKey key{ r.mesh, level };
             if (sign > 0) {
@@ -2629,8 +2624,7 @@ float quantiseHandOver(float w) {
 /// ONE SLOT'S CONTRIBUTION, from the entry as it is now. The predicates are the
 /// old writer's, read from the same words: `kGpuRayTraced` (the conjunction every
 /// consumer used to recompute), a mesh the table names, `kGpuSkinned` for a rigged
-/// item (its own structure), the near level the RAY RULE's (ids.w, AT-A8r) clamped
-/// to the chain, the far copy the coarsest, and the far copy's hand-over width
+/// item (its own structure), the near copy level 0, the far copy the coarsest, and the far copy's hand-over width
 /// (audit F2): the coarsest level's measured bound grown by the largest axis scale.
 RayQueryTier::SceneAs::Feed::Rec RayQueryTier::SceneAs::Feed::measure(const detail::GpuInstance *now) const {
     Rec next;
@@ -2649,7 +2643,6 @@ RayQueryTier::SceneAs::Feed::Rec RayQueryTier::SceneAs::Feed::measure(const deta
         next.meshIndex = meshIndex;
         const uint32_t coarsest = std::min(coarsestLevelOf(mp.get()), kRayLevels - 1u);
         next.farLevel = coarsest;
-        next.nearLevel = std::min(now->ids[3], coarsest);
         if (coarsest > 0u) {
             const std::vector<float> *b = scene->lodBoundsFor(mp.get());
             const float bound = (b && !b->empty()) ? b->back() : 0.0f;
@@ -2700,9 +2693,7 @@ bool RayQueryTier::SceneAs::Feed::gpuSlotChangedLane(uint32_t slot, const detail
         // The near row the ordered body would write (a rigged slot keeps the gather's).
         const uint32_t row = (*rows)[slot];
         if (next.kind == 1u)
-            same = row == (next.nearLevel < detail::GpuScene::kLevelsPerMesh
-                               ? detail::GpuScene::geomRowIndex(next.meshIndex, next.nearLevel, 0u)
-                               : detail::GpuScene::kNoGeomRow);
+            same = row == detail::GpuScene::geomRowIndex(next.meshIndex, 0u, 0u);
         else if (next.kind != 2u || was.kind != 2u)
             same = row == detail::GpuScene::kNoGeomRow;
     }
@@ -2741,7 +2732,7 @@ void RayQueryTier::SceneAs::Feed::apply(uint32_t slot, const detail::GpuInstance
     // and its levels references the same structures - taking them out and back would pass their count
     // through zero and file a removal and an addition for nothing.
     const bool keysSame = was.kind == 1u && next.kind == 1u && was.mesh == next.mesh &&
-                          was.nearLevel == next.nearLevel && was.farLevel == next.farLevel;
+                          was.farLevel == next.farLevel;
     take(slot, was, -1, !keysSame);
     take(slot, next, +1, !keysSame);
     // THE NEAR COPY'S ROW. A rigged slot's row is its skin cache's, written by the
@@ -2749,9 +2740,7 @@ void RayQueryTier::SceneAs::Feed::apply(uint32_t slot, const detail::GpuInstance
     if (rows) {
         if (slot >= rows->size()) rows->resize(size_t(slot) + 1u, detail::GpuScene::kNoGeomRow);
         if (next.kind == 1u)
-            (*rows)[slot] = next.nearLevel < detail::GpuScene::kLevelsPerMesh
-                                ? detail::GpuScene::geomRowIndex(next.meshIndex, next.nearLevel, 0u)
-                                : detail::GpuScene::kNoGeomRow;
+            (*rows)[slot] = detail::GpuScene::geomRowIndex(next.meshIndex, 0u, 0u);
         else if (next.kind != 2u || was.kind != 2u)
             (*rows)[slot] = detail::GpuScene::kNoGeomRow;
     }
@@ -2795,7 +2784,7 @@ void RayQueryTier::SceneAs::Feed::gpuDigestInto(detail::GpuScene &g) const {
     for (uint32_t s = 0; s < n; ++s) {
         const Rec &r = s < recs.size() ? recs[s] : none;
         const uint64_t mesh = uint64_t(reinterpret_cast<uintptr_t>(r.mesh));
-        const uint32_t w[5] = { r.meshIndex, r.nearLevel, r.farLevel, r.kind, r.rigged ? 1u : 0u };
+        const uint32_t w[4] = { r.meshIndex, r.farLevel, r.kind, r.rigged ? 1u : 0u };
         g.digestFold(&mesh, sizeof(mesh));
         g.digestFold(w, sizeof(w));
         g.digestFold(&r.coarse, sizeof(r.coarse));
@@ -2858,8 +2847,8 @@ void RayQueryTier::SceneAs::Feed::gpuSceneReset() {
 }
 
 /// THE JOB'S INPUTS: a header (counts, the mask and flag bits — the C++ constants
-/// are the one source), one record per mesh-table entry (every level's structure
-/// address, the coarsest level) re-written only when the BLAS set or the mesh set
+/// are the one source), one record per mesh-table entry (the near copy's level-0
+/// structure address and the far copy's coarsest) re-written only when the BLAS set or the mesh set
 /// moved, and the READY rigged slots (their skin structures, ascending by slot) —
 /// the old writer's "a rigged slot whose cache is not ready is NOT WRITTEN".
 bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skinReady, bool &changed,
@@ -2868,21 +2857,21 @@ bool RayQueryTier::writeTlasInputs(OgreScene *scene, SceneAs &sa, unsigned &skin
     SceneAs::Feed &fd = sa.feed;
     const uint32_t meshes = gs.meshEntryCount();
     const size_t meshWords = size_t(kTlasHeaderWords) + size_t(meshes) * kTlasMeshWords;
-    // ONE MESH'S RECORD: every level's structure address and the coarsest level. A hash find per level.
+    // ONE MESH'S RECORD: the near copy's structure address (level 0) and the far copy's (the coarsest). A hash
+    // find each.
     const auto writeRecord = [&](uint32_t m, uint32_t *rec) {
         const Ogre::MeshPtr &mp = gs.meshAt(m);
         // THE ZERO-FILLED RECORD IS A ROW WRITTEN (decision 14.4: it returned before the count).
         if (!mp) { std::fill(rec, rec + kTlasMeshWords, 0u); ++sa.st.updateRows; return; }
-        for (uint32_t l = 0; l < kTlasLevels; ++l) {
+        const uint32_t levels[2] = { 0u, std::min(coarsestLevelOf(mp.get()), kRayLevels - 1u) };
+        for (uint32_t c = 0; c < 2u; ++c) {
             ++sa.st.updateLookups;
-            auto it = sa.blasOf.find(BlasKey{ mp.get(), l });
+            auto it = sa.blasOf.find(BlasKey{ mp.get(), levels[c] });
             const VkDeviceAddress a =
                 (it != sa.blasOf.end() && it->second < sa.blas.size()) ? sa.blas[it->second].address : 0u;
-            rec[2u * l] = uint32_t(a & 0xFFFFFFFFu);
-            rec[2u * l + 1u] = uint32_t(a >> 32u);
+            rec[2u * c] = uint32_t(a & 0xFFFFFFFFu);
+            rec[2u * c + 1u] = uint32_t(a >> 32u);
         }
-        rec[2u * kTlasLevels] = std::min(coarsestLevelOf(mp.get()), kRayLevels - 1u);
-        for (uint32_t k = 2u * kTlasLevels + 1u; k < kTlasMeshWords; ++k) rec[k] = 0u;
         ++sa.st.updateRows;
     };
     // THE PER-MESH RECORDS ARE PATCHED, NOT REBUILT (ENGINE-UPGRADE-U5 stage 3). They used to be
@@ -7695,9 +7684,6 @@ struct SunContactParams {
     float alpha[4] = {};
 };
 constexpr unsigned kSunContactBindings = 5u;
-/// THE LIFT, in full-resolution pixel footprints: the near copy's tolerance
-/// (kRayFootprintTolerance, one) plus one of margin — see rq_sun_contact.comp.
-constexpr float kSunContactLiftFootprints = 2.0f;
 /// THE FADE BAND: the last 20 % of the range hands the ray's answer over to the
 /// map (the design's 10-20 %; the SSR rim's shape) — rq_sun_contact.comp.
 /// Measured on the side edge of a 5 cm board's shadow at 15 m (gi.sun_contact,
@@ -8102,17 +8088,19 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     pp.resolution[1] = float(h);
     pp.resolution[2] = float(fullW);
     pp.resolution[3] = float(fullH);
-    // THE BIAS RULE's lift: kSunContactLiftFootprints FULL-RESOLUTION pixel
-    // footprints — per unit of view distance for a perspective camera (the
-    // basis is a ray whose forward component is 1), in world units for an
-    // orthographic one. Full resolution whatever the divisor: what the lift
-    // clears is the near copy's own tolerance, which the ray rule states in the
-    // VIEW's pixels (kRayFootprintTolerance), not in this job's texels.
+    // THE BIAS RULE's lift: THE DRAWN CUT'S ERROR in FULL-RESOLUTION pixel footprints — per unit of view distance for
+    // a perspective camera (the basis is a ray whose forward component is 1), in world units for an orthographic one.
+    // The ray traces the mesh's LEVEL 0 (PHOTON-7 stage 6: ONE RAY LEVEL PER MESH) while the pixel's surface is the
+    // drawn one - Atom's cut, or a stock item's LOD - which lies within the view's pixel tolerance of level 0 (the
+    // cut's law: Scene::pixelTolerance, the World Mode's atomPixelError row, times the LOD bias the id pass and the
+    // stock thresholds both take). A lift of that error starts the ray outside the traced surface for a convex
+    // caster; the second footprint the old rule added was the 2x band's (its near copy could lie two footprints off).
+    // Full resolution whatever the divisor: the error is the view's, in the view's pixels, not this job's texels.
     {
         const float span = std::sqrt(eye.rayRight[0] * eye.rayRight[0] +
                                      eye.rayRight[1] * eye.rayRight[1] +
                                      eye.rayRight[2] * eye.rayRight[2]);
-        pp.knobs[0] = kSunContactLiftFootprints * span / float(fullW);
+        pp.knobs[0] = scene->pixelTolerance() * scene->lodBias() * span / float(fullW);
     }
     pp.knobs[1] = kSunContactMinBias;
     // THE MASK: the shadow CASTERS' near copies (kRayMaskCaster) — a subset of
@@ -9598,7 +9586,7 @@ bool PhotonComponent::probeGatherWanted() const {
 /// input of the gather's answer, the frame it is recorded: a light or environment write and a light removed, a node
 /// moved (the transform epoch with the shadow scan's writes), a material edit, an injection landing or a cascade
 /// rebuilt (giLightingSerial, the settle's steps included), the cloud layer's GI (cloudGiSerial - a restart-class
-/// change that also breaks the hold), the ray rule's refits, a field dispatch (counted on the
+/// change that also breaks the hold), a field dispatch (counted on the
 /// CPU as it is recorded: no readback latency) and the surface cache's captures and relights. With the camera still
 /// and this key moving, the gather is SETTLING: its EMA goes on taking every input's change at its rate, no rest
 /// mean starts and nothing holds — the stage-2 key that left these out held the picture over changing inputs, and
@@ -9614,7 +9602,7 @@ unsigned long long PhotonComponent::gatherRestKey() const {
     };
     fold(mScene.lightWriteSerial());
     fold(mScene.lightsRemoved());
-    fold(mScene.shadowEpoch() + mScene.rayLevelRefits());
+    fold(mScene.shadowEpoch());
     fold(mMaterialEditSerial);
     fold(giLightingSerial());
     fold(mScene.cloudGiSerial());
@@ -9649,8 +9637,8 @@ bool PhotonComponent::gatherInputsBusy() const {
 /// a light write or removal (the hit's direct light), giLightingSerial (an injection landing, a cascade rebuild, the
 /// settle's steps), the cloud layer's GI, the irradiance field's every dispatch (counted on the CPU as recorded) and the
 /// surface cache's captures and relights - every material EDIT, every TEXTURE that arrived (a streamed map the hit
-/// decode reads from then on: settleTextureResidency) and the ray rule's level refits (an instance's traced geometry
-/// changed under a still node). NOT A MOVE: the transform and shadow epochs are out - a moved instance breaks the rest
+/// decode reads from then on: settleTextureResidency). (The traced geometry no longer changes under a still node: the
+/// near copy is level 0, PHOTON-7 stage 6.) NOT A MOVE: the transform and shadow epochs are out - a moved instance breaks the rest
 /// PER TEXEL (the swept boxes RayQueryTier hands rq_reflect.comp: a texel whose ray, mean segment or sun leg crosses
 /// one resumes; the sun leg is the hit's shadow ray, so a mover's shadow at a hit is caught there). The field's late
 /// integration count stays out (the round-2 read's W3: its every dispatch is counted here as recorded).
@@ -9663,7 +9651,6 @@ unsigned long long PhotonComponent::reflectionReadsKey() const {
     };
     fold(mScene.lightWriteSerial());
     fold(mScene.lightsRemoved());
-    fold(mScene.rayLevelRefits());
     fold(mMaterialEditSerial);
     fold(giLightingSerial());
     fold(mScene.cloudGiSerial());
@@ -9808,6 +9795,33 @@ bool OgreScene::readTlasInstances(TlasReadback &out, std::string &err) {
     return mEngine->mRayTier->readTlasBlocking(this, out, err);
 }
 
+bool OgreScene::rayNearLevels(std::vector<int> &levels) const {
+    // A read on the host's side is a REQUEST, answered on the engine's side (traceRays' rule, U3 stage 4a).
+    OgreScene *self = const_cast<OgreScene *>(this);
+    if (self->hostPosts()) { bool r = false; self->requestOnEngine([&] { r = rayNearLevels(levels); }); return r; }
+    levels.clear();
+    // A TOOL PATH (it submits and waits): the instance array as the device wrote it this frame.
+    TlasReadback rb;
+    std::string err;
+    if (!self->readTlasInstances(rb, err)) return false;
+    constexpr size_t kInstanceBytes = 64u, kReferenceAt = 56u;   // VkAccelerationStructureInstanceKHR
+    if (rb.instances.size() < size_t(rb.slots) * 2u * kInstanceBytes) return false;
+    levels.assign(rb.slots, -1);
+    for (unsigned slot = 0; slot < rb.slots; ++slot) {
+        uint64_t ref = 0u;
+        std::memcpy(&ref, rb.instances.data() + size_t(2u * slot) * kInstanceBytes + kReferenceAt, sizeof(ref));
+        if (!ref) continue;
+        int level = -2;
+        for (const TlasReadback::Structure &st : rb.structures)
+            if (st.address == ref) { level = int(st.level); break; }
+        if (level == -2)
+            for (const TlasReadback::Skin &sk : rb.skins)
+                if (sk.address == ref) { level = 0; break; }
+        levels[slot] = level;
+    }
+    return true;
+}
+
 bool OgreScene::rayReflectionsWanted() const {
     // The project's own World row (world.rayTracing: off / auto / on — owner,
     // ledger §425) resolved against the machine: OgreScene::rayTracingResolved
@@ -9884,6 +9898,10 @@ bool OgreScene::traceRays(const std::vector<float> &, std::vector<float> &hits) 
 void OgreScene::forgetRayQuery() {}
 bool OgreScene::readTlasInstances(TlasReadback &, std::string &err) {
     err = "rayquery: not built";
+    return false;
+}
+bool OgreScene::rayNearLevels(std::vector<int> &levels) const {
+    levels.clear();
     return false;
 }
 bool PhotonComponent::probeGatherWanted() const { return false; }

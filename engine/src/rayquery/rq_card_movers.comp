@@ -30,10 +30,9 @@
 //
 // THE LIFT (still mode only): the receiver IS a still caster, so the ray starts on
 // a surface it can hit. The origin moves along the normal by the record's lift
-// (rect.w, OgreSurfaceCache.cpp kSunLiftFootprints: two of the larger of the
-// card's texel and the ray tier's footprint at the card — the near copy traced
-// may lie a footprint off the captured level — plus the depth layer's quantum),
-// tMin zero: the sun-contact job's rule. The movers' mode lifts nothing: a
+// (rect.w, OgreSurfaceCache.cpp kSunLiftTexels: two card texels — the near copy
+// traced is the mesh's level 0, the card captured at the bake's level for its
+// texel — plus the depth layer's quantum), tMin zero: the sun-contact job's rule. The movers' mode lifts nothing: a
 // receiver is never a mover (movers carry no cards).
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;

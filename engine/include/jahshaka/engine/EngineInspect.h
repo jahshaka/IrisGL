@@ -143,6 +143,11 @@ public:
         unsigned           pccCollectLights = 0;
     };
     virtual GiPlan giPlan() const = 0;
+    /// THE NEAR COPIES' LEVELS (PHOTON-7 stage 6, gi.ray_level_fixed: ONE RAY LEVEL PER MESH): per GPU-scene slot, the
+    /// level of the bottom-level structure its NEAR copy in the top-level structure references, read back from the
+    /// device-written instance array (a TOOL path: it submits and waits - never a frame's) - -1 for an untraced slot,
+    /// 0 for a rigged slot's own structure, -2 for a reference no structure holds (a defect). False with no ray tier.
+    virtual bool rayNearLevels(std::vector<int> &levels) const = 0;
 };
 /// The scene's record; null for a scene this engine did not make.
 const SceneEcho *scene(const Scene *s);

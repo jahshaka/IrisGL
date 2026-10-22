@@ -429,7 +429,7 @@ void main()
 				const vec3 hitPos = origin + dir * tHit;
 				const float sunVis = jahHitSunVisibility( hitPos, hitN, tHit, far );
 				const ivec2 dest = block + texel;
-				recorded = jahHitAppend( hitSlot, far ? 0u : jahHitNearLevel( hitSlot ), far, hitPrim,
+				recorded = jahHitAppend( hitSlot, far, hitPrim,
 										 hitBary, dir, sunVis, max( tHit * spread, 1e-4 ), reweight,
 										 jahHitDestPack( dest, true, 0 ), origin.y, tHit, 0.0 );
 				// THE COMPOSITE writes the radiance; a DROPPED record (the list was

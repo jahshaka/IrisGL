@@ -2573,7 +2573,6 @@ void OgreScene::cardLightKey(unsigned long long out[4]) const {
 }
 
 void OgreScene::cardSceneFacts(CardSceneView &view) const {
-    view.rayFootprintPerMetre = mRayFootprintPerMetre;
     if (mCloudGiState.field) {
         const FogHlmsListener::CloudShadowState &cs = mCloudGiState;
         view.cloudField = cs.field;
