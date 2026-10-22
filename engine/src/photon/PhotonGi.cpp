@@ -458,10 +458,10 @@ static const Ogre::uint32 kIfdChangeSamples = kPhotonBlendFrames;
 // probes the variance stop has not stopped (a stopped probe's group exits at its history read), so its batch is
 // that over the open share of the grid (the stop's reading, four frames late) — the same GPU, a larger batch as the
 // field converges. Moving: the budget's own batch.
+// (A refinement's batch was six times that, from a misread calibration: the first pass after a change finds every
+// probe open, and Bistro's frame 17 refined all 8,192 at once - a 41 ms GPU frame, ~19 ms of it the field: an
+// open probe's sample costs what a change's does, ~2.3 us there.)
 static const Ogre::uint32 kIfdRestIntegrations = 1792u;
-// ...A REFINEMENT'S open probe measured cheaper there (an unstopped probe's sample beside the change's four: Bistro's
-// refinement frames ran 1.5 ms at the change's count), so its count is six times the change's - still under 6 ms.
-static const Ogre::uint32 kIfdRestRefineIntegrations = 6u * kIfdRestIntegrations;
 
 // HOW FAST A RE-CONVERGE RUNS, in "field fractions per frame" at update budget
 // 1. The P0 spike's cost table is the argument for converging FAST rather than
@@ -7260,7 +7260,7 @@ void PhotonComponent::planField(FrameWork &w) {
                 const float open = mIfdTotalProbes
                     ? 1.0f - float(std::min(mIfd->getProbesStopped(), mIfdTotalProbes)) / float(mIfdTotalProbes)
                     : 1.0f;
-                batch = std::max(batch, Ogre::uint32(float(kIfdRestRefineIntegrations) / std::max(open, 1.0f / 16.0f)));
+                batch = std::max(batch, Ogre::uint32(float(kIfdRestIntegrations) / std::max(open, 1.0f / 16.0f)));
             }
             w.fieldBatch = std::min(batch, mIfd->getWorkRemaining());
         } JAH_CATCH(mError, );
