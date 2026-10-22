@@ -1027,7 +1027,10 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
             bool onscreen = false;
             for (auto &v : mViews)
                 if (v->isEnabled() && !v->isOffscreen()) { onscreen = true; break; }
-            monitor::gMonitor->beginFrame(mShadowFrame + 1ull, mNextFrameCause, onscreen);
+            // THE RECORD'S FRAME IS THE FRAME THIS CALL PUBLISHES (PublishedFrame::frame: the publish after the close
+            // counts it), the stamp every reader joins the record to - never the shadow cache's counter, which a
+            // headless engine (no Hlms) never ticks (PHOTON-7 stage 0, AB G3).
+            monitor::gMonitor->beginFrame(mPublishedFrames + 1ull, mNextFrameCause, onscreen);
             // The record this frame applied: the host's half of the monitor's record rode the same hand-over
             // (RenderThread::tickInline folded it in before this frame opened), so the two halves are joined by it.
             monitor::gMonitor->current().serial = mRenderThread.serial();
