@@ -12,9 +12,13 @@
 //
 //   THE NEIGHBOURHOOD (PHOTON-2 fix F2): 21 taps — a 5 x 5 minus its corners (Lumen's kernel) — of THIS FRAME
 //   RECONSTRUCTED: each tap the bilateral 3 x 3 mean of the raw samples on its own surface (`reflectSample`,
-//   written by the trace and, for a record, by the write-back), in YCoCg of the luma-COMPRESSED radiance (x / (1 +
-//   Y), Lumen's denoiser space): the mean and the standard deviation per channel; the box is mean +- kClampSigma x
-//   sigma, widened to hold THIS texel's own raw sample. Only taps traced this frame count (the distance flag, as
+//   written by the trace and, for a record, by the write-back), in YCoCg of LINEAR radiance: the mean and the
+//   standard deviation per channel; the box is mean +- kClampSigma x sigma, widened to hold THIS texel's own raw
+//   sample. NOT in a compressed space (x / (1 + Y), Lumen's denoiser space; the lead's F2 named it): the history
+//   here is a LINEAR mean, and the mean of compressed samples sits under the compressed mean (Jensen), so a box
+//   centred there clamps a converged history DOWN — measured on the selftest's mover pose against the same pose
+//   parked and converged, the floor 5.7 codes dark compressed, 3.7 linear (the raw box, stage 1: 4.0). Lumen's
+//   whole denoiser runs in its space (its history included), so its box and its history agree. Only taps traced this frame count (the distance flag, as
 //   in the filter). The box of RAW one-ray linear samples it replaces was biased dark (a skewed distribution's
 //   few bright rays fall outside mean + sigma, so the history was clamped down far more often than up — the
 //   mover pose's floor 4.0 codes darker) and pulled a highlight narrower than the box to ~0.49 of itself.
@@ -173,17 +177,8 @@ vec3 fromYCoCg( vec3 y )
 {
 	return vec3( y.x + y.y - y.z, y.x + y.z, y.x - y.y - y.z );
 }
-/// THE CLAMP'S SPACE (PHOTON-2 fix F2; Lumen's "denoiser space", LumenReflectionDenoiserCommon.ush:14-23): radiance
-/// compressed on its luminance, x / (1 + Y) — every value under one, so a few bright rays in a neighbourhood cannot
-/// stretch its box over the rest, and a mean and a sigma of a skewed one-ray distribution are not a dark-biased box.
-/// Y is YCoCg's luma (the box's own first channel). expand() is the exact inverse.
+/// YCoCg's luma (the box's own first channel; the rest's firefly bound reads it).
 float lumaOf( vec3 c ) { return dot( c, vec3( 0.25, 0.5, 0.25 ) ); }
-vec3 compressed( vec3 c ) { return c / ( 1.0 + lumaOf( c ) ); }
-vec3 expanded( vec3 q )
-{
-	q = max( q, vec3( 0.0 ) );
-	return q / max( 1.0 - min( lumaOf( q ), 0.9999 ), 1e-4 );
-}
 
 float viewDistance( float rawDepth )
 {
@@ -222,7 +217,7 @@ vec3 worldAt( EyeImage e, vec2 uv, float dist )
 float jahMeanLength( float y ) { return uintBitsToFloat( floatBitsToUint( y ) & ~63u ); }
 
 /// THE TILES (PHOTON-2 fix F2). THE RAW TILE: the group's 8 x 8, the 2-texel ring the 5 x 5 box reaches and one more
-/// ring the box's own reconstruction reaches — this frame's samples COMPRESSED (compressed()) in YCoCg, w = the
+/// ring the box's own reconstruction reaches — this frame's samples in YCoCg (LINEAR radiance), w = the
 /// sample's LINEAR luma (-1: no sample), and beside it the G-buffer's view normal and view distance the
 /// reconstruction compares. THE BOX TILE: per texel of the group and its 2-texel ring, THE RECONSTRUCTED SAMPLE —
 /// the bilateral 3 x 3 mean of the raw tile (the taps on this texel's surface: the view distance within 5 %, the
@@ -259,7 +254,7 @@ void main()
 			if( s.w > 0.0 && finite3( s.xyz ) )
 			{
 				const vec3 c = clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
-				v = vec4( toYCoCg( compressed( c ) ), lumaOf( c ) );
+				v = vec4( toYCoCg( c ), lumaOf( c ) );
 			}
 			const vec2 tuv = ( vec2( t * scaleT ) + 0.5 * vec2( scaleT ) ) / vec2( fullResT );
 			const float d = texture( sceneDepth, vec3( tuv, float( gEye ) ) ).x;
@@ -397,7 +392,7 @@ void main()
 	vec3 history = clamp( carried.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
 	float confidence = 1.0;
 	{
-		// ---- THE BOX (fix F2): 21 RECONSTRUCTED taps (the 5 x 5 without its corners), compressed ----
+		// ---- THE BOX (fix F2): 21 RECONSTRUCTED taps (the 5 x 5 without its corners), linear ----
 		vec3 m1 = vec3( 0.0 ), m2 = vec3( 0.0 );
 		float n = 0.0;
 		const ivec2 l = ivec2( gl_LocalInvocationID.xy ) + ivec2( kReach );
@@ -424,7 +419,7 @@ void main()
 			const vec3 own = sRaw[( l.y + kRecon ) * kRawSide + l.x + kRecon].xyz;
 			const vec3 lo = min( centre - kClampSigma * sigma, own ), hi = max( centre + kClampSigma * sigma, own );
 			const vec3 extent = max( 0.5 * ( hi - lo ), vec3( 1e-4 ) );
-			const vec3 surfY = toYCoCg( compressed( history ) );
+			const vec3 surfY = toYCoCg( history );
 			const vec3 surfC = clamp( surfY, lo, hi );
 			vec3 histY = surfY, histC = surfC;
 			// ---- THE HIT HISTORY: the virtual point (Lumen's hit history; no depth test, as Lumen's) ----
@@ -456,7 +451,7 @@ void main()
 						if( h.w > 0.0 && finite3( h.xyz ) &&
 							imageLoad( historyDistPrev, ivec3( pc, gEye ) ).x > 0.0 )
 						{
-							const vec3 hitY = toYCoCg( compressed( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) );
+							const vec3 hitY = toYCoCg( clamp( h.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) );
 							const vec3 hitC = clamp( hitY, lo, hi );
 							const float surfErr = length( surfC - centre );
 							const float hitErr = length( hitC - centre );
@@ -470,7 +465,7 @@ void main()
 			// ---- THE CONFIDENCE: how far the clamp moved the history, over the box ----
 			const float d = length( abs( histC - histY ) / max( extent, vec3( 1e-3 * max( centre.x, 1e-4 ) ) ) );
 			confidence = 0.75 * clamp( 1.0 - d, 0.0, 1.0 ) + 0.25;
-			history = clamp( expanded( fromYCoCg( histC ) ), vec3( 0.0 ), vec3( kMaxRadiance ) );
+			history = clamp( fromYCoCg( histC ), vec3( 0.0 ), vec3( kMaxRadiance ) );
 		}
 	}
 	const float frames = min( seed * confidence + 1.0, maxN );
