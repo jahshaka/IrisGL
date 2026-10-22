@@ -125,6 +125,7 @@ namespace Ogre
         mWorkMode( IntegrateFresh ),
         mTargetSamples( 1u ),
         mKeepOnChange( 0u ),
+        mChangeSamples( 1u ),
         mRotateRays( true ),
         mRefinesOwed( 0u ),
         mRefineWhole( true ),
@@ -666,6 +667,21 @@ namespace Ogre
         noteEstimatesReplaced();
     }
     //-------------------------------------------------------------------------
+    uint32 PhotonIrradianceField::refineEnteredInline()
+    {
+        // The boxes are the entered planes' (scrollWindow's work, just integrated fresh).
+        uint32 dispatched = 0u;
+        for( uint32 i = 1u; i < mTargetSamples; ++i )
+        {
+            mNumProbesProcessed = 0u;
+            mWorkMode = IntegrateRefine;
+            update( mWorkTotal );
+            dispatched += mWorkTotal;
+        }
+        mNumProbesProcessed = mWorkTotal;
+        return dispatched;
+    }
+    //-------------------------------------------------------------------------
     void PhotonIrradianceField::reset()
     {
         setWholeWork();
@@ -824,7 +840,7 @@ namespace Ogre
         }
     }
     //-------------------------------------------------------------------------
-    void PhotonIrradianceField::scrollWindow( const int32 delta[3] )
+    void PhotonIrradianceField::scrollWindow( const int32 delta[3], bool enteredToTarget )
     {
         const Vector3 spacing = getProbeSpacing();
         uint32 enteredLo[3];   // per axis: the first ENTERED slot (valid where delta != 0)
@@ -849,7 +865,9 @@ namespace Ogre
         // scroll still owes, when the window kept moving the same way — never the whole
         // grid, whose kept probes are at the target already. A schedule that cannot be
         // a band (an unfinished whole-grid one, a reversal, a band around the grid)
-        // stays whole.
+        // stays whole. (Not when the caller integrates the entered planes to the target
+        // inline: then they owe nothing, and the schedule owed before stands.)
+        if( !enteredToTarget )
         {
             const bool pending = mRefinesOwed > 0u || !isWorkDone();
             if( !pending )
@@ -891,10 +909,12 @@ namespace Ogre
         setBoxesFromBands( enteredLo, enteredNum );
         mNumProbesProcessed = 0u;
         // The entered planes have no history (PHOTON-FIELD-ROTATE-1), and they owe the
-        // refinements that bring them to the target.
+        // refinements that bring them to the target (inline, refineEnteredInline, when the
+        // caller said so).
         mWorkMode = IntegrateFresh;
         noteEstimatesReplaced();
-        mRefinesOwed = mTargetSamples - 1u;
+        if( !enteredToTarget )
+            mRefinesOwed = mTargetSamples - 1u;
         // The probe-to-voxel transform reads the (moved) origin.
         if( mVctLighting )
             setIrradianceFieldGenParams();
@@ -1017,6 +1037,21 @@ namespace Ogre
         dispatchGeneration();
 
         mNumProbesProcessed += probesPerFrame;
+
+        // Jahshaka (PHOTON-2 stage 2a): A CHANGE'S BATCH TAKES mChangeSamples INTEGRATIONS NOW
+        // (setChangeSamples): the same probes, refined in place, before the batch is read.
+        if( mWorkMode == IntegrateChange && mChangeSamples > 1u )
+        {
+            const uint32 start = mNumProbesProcessed - probesPerFrame;
+            for( uint32 i = 1u; i < mChangeSamples; ++i )
+            {
+                mNumProbesProcessed = start;
+                mWorkMode = IntegrateRefine;
+                update( probesPerFrame );
+            }
+            mWorkMode = IntegrateChange;
+            mNumProbesProcessed = start + probesPerFrame;
+        }
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::dispatchGeneration()

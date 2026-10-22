@@ -263,6 +263,9 @@ namespace Ogre
         IntegrationMode mWorkMode;
         uint32          mTargetSamples;
         uint32          mKeepOnChange;
+        /// Jahshaka (PHOTON-2 stage 2a): the samples a CHANGE integrates per probe in the
+        /// pass that replaces its estimate (setChangeSamples; 1 = upstream's one).
+        uint32          mChangeSamples;
         bool            mRotateRays;
         /// Refinements owed after the current work (every event - a build, a
         /// re-placement, a scroll, a change - owes mTargetSamples - 1 of them), each
@@ -434,8 +437,23 @@ namespace Ogre
             moves by exactly d spacings; the caller owns snapping a target to it.
         @param delta
             The move, in probe spacings, per axis.
+        @param enteredToTarget
+            Jahshaka (PHOTON-2 stage 2a): the caller integrates the entered planes to the
+            field's target INLINE (refineEnteredInline after its update): the refinement
+            schedule a scroll would owe them is not raised, and whatever the field owed
+            before the scroll (a whole grid's refinements, an earlier band) stands as it was.
         */
-        void scrollWindow( const int32 delta[3] );
+        void scrollWindow( const int32 delta[3], bool enteredToTarget = false );
+        /** Jahshaka (PHOTON-2 stage 2a): THE ENTERED PLANES TO THE TARGET, NOW - after the
+            caller's update() of a scrollWindow( d, true )'s fresh work, the same boxes'
+            remaining refinements (target - 1 passes; a probe already stopped by the variance
+            test, or at the target, exits at its history read), then the work is done.
+            Lumen's bucket 0 (a never-traced probe is traced whole the frame it enters):
+            a probe that enters the window is never read as a one-sample value.
+        @return
+            The probe integrations dispatched (the passes times the boxes' probes).
+        */
+        uint32 refineEnteredInline();
         /// The slot of the window's first probe per axis (a reader's modulo offset).
         const uint32 *getWindowOffset() const { return mWindowOffset; }
         /// The probe spacing (the enlarged volume's size over the probe counts).
@@ -491,6 +509,15 @@ namespace Ogre
             static set's aliasing).
         */
         void setIntegrationPolicy( uint32 targetSamples, uint32 keepOnChange, bool rotateRays );
+        /** Jahshaka (PHOTON-2 stage 2a): A CHANGE NEVER LEAVES A ONE-SAMPLE PROBE. The pass that
+            integrates a change gives each probe of its batch `samples` integrations in the same
+            update() (the change's own, then samples - 1 refinements over the same probes, each
+            under its own ray rotation), so the probe's first answer after the change is the
+            mean of that many samples of the NEW light - never one sample's noise, and never a
+            weighted remnant of the old light either (keepOnChange 0 with it). The variance stop
+            may then end the probe at once (its minimum is 4).
+        */
+        void setChangeSamples( uint32 samples ) { mChangeSamples = std::max( 1u, samples ); }
         uint32 getTargetSamples() const { return mTargetSamples; }
         IntegrationMode getWorkMode() const { return mWorkMode; }
         /// Every probe of the current work has been integrated once.

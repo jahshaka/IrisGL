@@ -434,13 +434,21 @@ static const Ogre::uint32 kIfdTargetSamples = 25u;
 static const Ogre::uint32 kIfdStopMinSamples = 4u;
 static const float kIfdStopPrecision = 0.16f;
 static const float kIfdStopMeanFloor = 1e-6f;
-// A LIGHT CHANGE REPLACES (keep 0): the history integrated the OLD light, so the
-// first integration after a change is the probe's value - the latency of the old
-// re-converge (one pass) - and the refinements then average the new light. What the
-// field shows in between is one integration's noise: 2 % median on the leak room
-// (gi.field_alias item 5); keeping k samples would divide that by sqrt(k + 1) at the
-// price of showing the old light at weight k / (k + j) for j more integrations.
+// A LIGHT CHANGE IS INTEGRATED kPhotonBlendFrames DEEP (PHOTON-2 stage 2a): the pass that
+// integrates a change gives every probe of its batch four samples of the NEW light at
+// once (PhotonIrradianceField::setChangeSamples), so a probe NEVER shows a one-sample
+// value — one integration's noise is 2 % median on the leak room (gi.field_alias item 5),
+// four halve it, the noise the old one-sample replace put on every wall after every
+// injection at the cadence the settles and the light ticks land (the owner's "dancing")
+// — and none of the OLD light is kept (keep 0). MEASURED against the blend the spec named
+// first (keep kPhotonBlendFrames - 1 = 3 samples of the old answer, the old light weighing
+// 3 / (3 + j) after j new integrations): on photon-room's lamp step 8 -> 12 the kept
+// samples' bias inflated every probe's variance estimate and the field refined for 17
+// passes (frames 23-160 after the step); on photon-court's crossing its refinements ran
+// to frame 58 after the stop (keep 0: 45). Four fresh samples carry no bias, and the
+// variance stop (minimum 4) can end a probe in the change's own pass.
 static const Ogre::uint32 kIfdKeepOnChange  = 0u;
+static const Ogre::uint32 kIfdChangeSamples = kPhotonBlendFrames;
 
 // HOW FAST A RE-CONVERGE RUNS, in "field fractions per frame" at update budget
 // 1. The P0 spike's cost table is the argument for converging FAST rather than
@@ -929,6 +937,10 @@ bool PhotonComponent::injectCascade(size_t i) {
 // THE FIELD IS AN INTEGRAL OF THE CHAIN, so it re-integrates after the chain's
 // radiance has finished moving — once, after the LAST injection of a tick or of
 // an incremental settle, never per injection (LAMPREST-3 fix round).
+// NEVER A ONE-SAMPLE PROBE (PHOTON-2 stage 2a): the change's integration gives each
+// probe kIfdChangeSamples samples of the new light in its pass (setChangeSamples) — the
+// one-sample replace after every injection, one integration's noise on every wall after
+// every settle, is gone.
 void PhotonComponent::reintegrateFieldAfterInjection() {
     // THE ONE PLACE `reset()` IS CORRECT (spike §8): the same PhotonVoxelLighting
     // object, same voxel textures, same field geometry — only the radiance
@@ -968,6 +980,7 @@ void PhotonComponent::reintegrateFieldAfterInjection() {
                 mIfdProbesDone = mIfdTotalProbes;
                 work.setUnits(mIfdTotalProbes);
             }
+            noteFieldSettled();   // a paused field's whole integration: its last write
         }
     }}
 
@@ -7027,6 +7040,7 @@ void PhotonComponent::buildIrradianceField() {
         // upstream for "major changes to the voxel lighting" is exactly this call.
         if (!mIfd) mIfd = new Ogre::PhotonIrradianceField(mRoot, mSceneMgr);
         mIfd->setIntegrationPolicy(targetSamples, kIfdKeepOnChange, rotateRays);
+        mIfd->setChangeSamples(std::min(kIfdChangeSamples, targetSamples));
         mIfd->setVarianceStop(arms && arms->on(ArmId::GiFieldStopOff) ? 0u : kIfdStopMinSamples,
                               kIfdStopPrecision, kIfdStopMeanFloor);
         mIfd->initialize(settings, origin, size, mVctLighting);
@@ -7145,13 +7159,15 @@ void PhotonComponent::planField(FrameWork &w) {
         // 2.8x the budget's integrations in one frame (the stage 4 read) - the hitch the stop exists to
         // remove. So the stop saves the work and the frames its early end cuts, never more per frame.
         JAH_TRY {
-            if (mIfd->allProbesStopped()) { mIfd->endRefinements(); return; }   // converged early
-            if (mIfd->isWorkDone() && !mIfd->beginOwedRefinement()) return;   // converged
+            if (mIfd->allProbesStopped()) { mIfd->endRefinements(); noteFieldIdle(); return; }   // converged early
+            if (mIfd->isWorkDone() && !mIfd->beginOwedRefinement()) { noteFieldIdle(); return; }   // converged
             w.field = FrameWork::Field::Refine;
             w.fieldBatch = std::min(mIfdProbesPerFrame, mIfd->getWorkRemaining());
+            mIfdBusy = true;
         } JAH_CATCH(mError, );
         return;
     }
+    mIfdBusy = true;
     // THE FIELD'S PROGRESSIVE RE-INTEGRATION (ENGINE-5 item 2) — the
     // budget's turn, one batch of probes a frame, so `Sweep` is its
     // reason: nothing changed, this is the cache catching up. A
@@ -7159,8 +7175,23 @@ void PhotonComponent::planField(FrameWork &w) {
     // history) are filed as "ifd.replace", a change's as "ifd.converge".
     w.field = FrameWork::Field::Integrate;
     w.fieldReplacing = mIfd->getWorkMode() == Ogre::PhotonIrradianceField::IntegrateFresh;
-    w.fieldBatch = std::min(mIfdProbesPerFrame, mIfdTotalProbes - mIfdProbesDone);
+    // THE BUDGET IS INTEGRATIONS A FRAME (PHOTON-2 stage 2a): a change's batch integrates each of its probes
+    // kIfdChangeSamples deep, so it takes that many times fewer probes - the frame's GPU stays the budget's.
+    const Ogre::uint32 deep =
+        mIfd->getWorkMode() == Ogre::PhotonIrradianceField::IntegrateChange ? std::max(kIfdChangeSamples, 1u) : 1u;
+    w.fieldBatch = std::min(std::max(mIfdProbesPerFrame / deep, 1u), mIfdTotalProbes - mIfdProbesDone);
 }
+
+// THE FIELD'S LAST WRITE (PHOTON-2 stage 2c): the frame its owed work runs out — the refinements done or every
+// probe stopped — after a frame that wrote it. The gather's rest key folds the count (gatherRestKey): a held view
+// takes the field's final answer once, never every intermediate write (the budget's ticks leave the key).
+void PhotonComponent::noteFieldIdle() {
+    if (!mIfdBusy) return;
+    mIfdBusy = false;
+    noteFieldSettled();
+}
+
+void PhotonComponent::noteFieldSettled() { ++mIfdSettles; }
 
 void PhotonComponent::recordField(const FrameWork &w) {
     if (w.field == FrameWork::Field::None) return;
@@ -7303,6 +7334,7 @@ void PhotonComponent::followCascade0Field(GiStaleReason reason) {
                 mIfdProbesDone = mIfdTotalProbes;
                 work.setUnits(mIfdTotalProbes);
             }
+            noteFieldSettled();   // a paused field's whole integration: its last write
         }
     } JAH_CATCH(mError, );
 }
@@ -7340,6 +7372,7 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
                 mIfdProbesDone = mIfdTotalProbes;
                 work.setUnits(mIfdTotalProbes);
             }
+            noteFieldSettled();   // a paused field's whole integration: its last write
         }
         return true;
     }
@@ -7367,19 +7400,31 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
     // A whole re-integration still running (a settle's, a light's) is restarted
     // after the scroll's own planes: the kept probes it had not reached still owe it.
     const bool progressivePending = mIfdProbesDone < mIfdTotalProbes;
-    mIfd->scrollWindow(d);
+    const bool toTarget = mIfdProbesPerFrame != 0u;   // a paused field refines nothing: one sample, as before
+    mIfd->scrollWindow(d, toTarget);
     for (int a = 0; a < 3; ++a) mIfdVolumeOrigin[a] += float(d[a]) * spacing[a];
     ++mIfdFollows;
     ++mIfdScrolls;              // (never counted before PHOTON-FIELD-ROTATE-1: the status read 0)
     pushIfdState(mIfdProbeCounts);                      // the reader's modulo offset
     {
         // THE STEP FRAME'S WHOLE COST: the entered planes, inline, before any
-        // pass reads them (their tiles held the planes that left).
+        // pass reads them (their tiles held the planes that left) — AND TO THE
+        // FIELD'S PRECISION (PHOTON-2 stage 2a; Lumen's bucket 0, a never-traced
+        // probe is traced whole the frame it is allocated [L §2]): the entered
+        // band's first integration and then its refinements, all of them, in this
+        // frame — a probe that enters the window is never read as a one-sample
+        // value. The count is the law here (the variance stop reads back on a
+        // 4-frame latency, so the CPU cannot end the run early): kIfdTargetSamples
+        // dispatches over the band, each probe that already stopped (its variance
+        // flag, written on the GPU by the dispatch before) or reached the target
+        // exiting at its history read. PRICED by the row's GPU time ("ifd.follow").
         const Ogre::uint32 entered = mIfd->getWorkProbeCount();
         monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
                                  mRoot->getRenderSystem());
         mIfd->update(entered);
-        work.setUnits(entered);
+        Ogre::uint32 units = entered;
+        if (toTarget) units += mIfd->refineEnteredInline();
+        work.setUnits(units);
         mIfdScrolledProbes = entered;
     }
     if (progressivePending) {
@@ -7387,8 +7432,10 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
         mIfdProbesDone = 0u;
     } else {
         mIfdProbesDone = mIfdTotalProbes;
-        // The entered planes' refinements run at the budget (the kept probes that
-        // hold the target are skipped); a paused field refines nothing.
+        // The entered planes are at the field's precision already (above); what the field
+        // owed before the scroll (refinements of the grid, of an earlier band) stands; a
+        // paused field refines nothing. Nothing owed: this was the field's last write.
+        if (!mIfd->getRefinesOwed()) noteFieldSettled();
     }
     return true;
 }

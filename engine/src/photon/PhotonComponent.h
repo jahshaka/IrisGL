@@ -129,6 +129,16 @@ void registerPhotonRayPasses(AtomPassProvider *provider);
 void registerPhotonUpdatePass(AtomPassProvider *provider);
 
 
+/// THE ONE SHARED BLEND RATE OF PHOTON'S CACHES (PHOTON-2 stage 2a; Lumen's radiosity accumulation,
+/// r.LumenScene.Radiosity.Temporal.MaxFramesAccumulated = 4, SPECS/research/LUMEN_TEMPORAL_FACTS §8): a cache
+/// that learns a new light never REPLACES what it held with ONE sample — it integrates the new light this many
+/// samples deep before anything reads it. Its readers, and the curve each runs (the spec's
+/// preflight line 3): the irradiance field's change integration (PhotonGi.cpp kIfdChangeSamples = this: a
+/// change gives each probe this many samples of the NEW light in its own pass — measured better than keeping
+/// this - 1 samples of the old light, whose bias held the field refining for 17 passes after a lamp step).
+/// Not the reflections (the clamp's confidence decides) and not the gather (its 1/10 floor stands).
+constexpr unsigned kPhotonBlendFrames = 4u;
+
 class PhotonComponent {
 public:
     /// One built voxel cascade, innermost first: what a ray reads the cascade chain by.
@@ -1132,6 +1142,10 @@ private:
     /// The field re-integrates once, after the LAST injection of a tick or of a
     /// settle — never per injection.
     void reintegrateFieldAfterInjection();
+    /// The field's owed work ran out (planField): a last write, once per busy spell (PHOTON-2 stage 2c).
+    void noteFieldIdle();
+    /// A last write the caller knows of (an inline integration that leaves nothing owed).
+    void noteFieldSettled();
     /// One injection of an owed settle, out of the scheduler's frame slot.
     void payChainSettleStep();
     /// Remember the light-write serial an owed settle's steps must all see: a
@@ -1462,6 +1476,11 @@ private:
     /// count last read back, and the engine frame it moved on. The gather's rest key folds the count (its rest mean
     /// restarts after the field's last write) and giAtRest waits the gather's settle frames after that frame.
     unsigned long long                mIfdIntegrationsSeen = 0;
+    /// THE FIELD'S LAST WRITES (PHOTON-2 stage 2c): +1 each time its owed work runs out after it wrote (the budget's
+    /// refinements done or every probe stopped; an inline integration that leaves nothing owed). The gather's rest
+    /// key folds it — the field's last write is a restart-class event, its intermediate writes are not.
+    unsigned long long                mIfdSettles          = 0;
+    bool                              mIfdBusy             = false;   ///< the field wrote since it was last idle
     unsigned long long                mIfdWriteFrame       = 0;
     Ogre::uint32                      mIfdProbesDone      = 0;
     Ogre::uint32                      mIfdProbesPerFrame  = 0;
