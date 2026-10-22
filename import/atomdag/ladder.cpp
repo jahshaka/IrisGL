@@ -19,20 +19,25 @@ namespace iris
 {
 namespace atomdag
 {
-
 namespace
 {
+
+using Clock = std::chrono::steady_clock;
+double msSince(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
+
 /// Per island part of the input with a box diagonal past `budget`: its largest triangle (an index into the input).
-std::vector<unsigned> islandsAtRisk(const MeshView &mesh, const Islands &islands, const std::vector<unsigned> &inTris,
-                                    float budget)
+std::vector<unsigned> islandsAtRisk(const LocalSpace &space, const std::vector<unsigned> &tris, float budget)
 {
     struct Part { Vec3 lo, hi; float area = -1.0f; unsigned tri = 0; };
     std::vector<std::pair<unsigned, Part>> parts;   // sorted by island
-    for (size_t t = 0; t < inTris.size() / 3; ++t) {
-        const unsigned c = islands.compOf[inTris[t * 3]];
+    const auto at = [&](unsigned v) {
+        return Vec3(space.pos[size_t(v) * 3], space.pos[size_t(v) * 3 + 1], space.pos[size_t(v) * 3 + 2]);
+    };
+    for (size_t t = 0; t < tris.size() / 3; ++t) {
+        const unsigned c = space.comp[tris[t * 3]];
         auto it = std::lower_bound(parts.begin(), parts.end(), c,
                                    [](const std::pair<unsigned, Part> &p, unsigned k) { return p.first < k; });
-        const Vec3 a = mesh.position(inTris[t * 3]), b = mesh.position(inTris[t * 3 + 1]), d = mesh.position(inTris[t * 3 + 2]);
+        const Vec3 a = at(tris[t * 3]), b = at(tris[t * 3 + 1]), d = at(tris[t * 3 + 2]);
         if (it == parts.end() || it->first != c) it = parts.insert(it, { c, Part { a, a, -1.0f, 0 } });
         Part &p = it->second;
         for (const Vec3 *x : { &a, &b, &d }) {
@@ -46,115 +51,141 @@ std::vector<unsigned> islandsAtRisk(const MeshView &mesh, const Islands &islands
     for (const auto &p : parts) if ((p.second.hi - p.second.lo).length() > budget) out.push_back(p.second.tri);
     return out;
 }
+
 }   // namespace
 
 GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
                         const std::vector<unsigned> &inTris, const std::vector<unsigned> &externalWelds,
-                        float childError, float floorLen, bool attributes, size_t targetTris)
+                        float childError, float childStored, float floorLen, bool attributes, bool placement,
+                        size_t targetTris)
 {
     GroupResult r;
+    r.scratch = makeScratch(mesh, inTris, attributes, placement);
+    const GroupScratch &sc = r.scratch;
+    r.space = makeSpace(sc, weld, islands.compOf, islands.capOf, islands.count());
+    const size_t n = sc.size();
     const size_t inCount = inTris.size() / 3;
     const size_t target = targetTris;
     if (inCount <= target) {
         r.accepted = true;
-        r.out = inTris;
+        r.out = sc.tris;
         r.step = floorLen;
         return r;
     }
     r.simplified = true;
-    r.weights = groupWeights(mesh, inTris);
+
+    // THE LOCKS, by position: a scratch vertex at a locked weld id.
+    std::vector<unsigned> locks = externalWelds;
+    std::vector<unsigned char> lock(n, 0u);
+    const auto lockMask = [&]() {
+        for (size_t v = 0; v < n; ++v)
+            lock[v] = std::binary_search(locks.begin(), locks.end(), r.space.weld[v]) ? 1u : 0u;   // meshopt_SimplifyVertex_Lock
+    };
+    lockMask();
+
     // THE BUDGET.
-    if (childError > 0.0f) {
-        r.budget = kLadderFactor * childError;
-    } else {
-        const Simplified est = simplifyGroup(mesh, weld, inTris, externalWelds, target, FLT_MAX, false, r.weights);
-        r.depth0Estimate = est.resultError;
-        r.budget = kLadderFactor * est.resultError;
-    }
+    if (!(childStored > 0.0f)) r.depth0Estimate = positionEstimate(sc, lock, target);   // a group of leaves (D6)
+    r.budget = kLadderFactor * (childError > 0.0f ? childError : std::max(r.depth0Estimate, 0.0f));
     r.budget = std::max(r.budget, floorLen);
 
-    std::vector<unsigned> locks = externalWelds;
     // per position: the input triangles at it (the fan a lock holds)
     std::vector<std::pair<unsigned, unsigned>> byWeld;   // (weld, input triangle)
-    byWeld.reserve(inTris.size());
-    for (size_t i = 0; i < inTris.size(); ++i) byWeld.push_back({ weld[inTris[i]], unsigned(i / 3) });
+    byWeld.reserve(sc.tris.size());
+    for (size_t i = 0; i < sc.tris.size(); ++i) byWeld.push_back({ r.space.weld[sc.tris[i]], unsigned(i / 3) });
     std::sort(byWeld.begin(), byWeld.end());
     byWeld.erase(std::unique(byWeld.begin(), byWeld.end()), byWeld.end());
 
-    // THE ATTEMPTS. meshoptimizer's own error limit compares E_k with its MIXED collapse error (position + attribute):
-    // as a first guess it stops a faceted or seamed group long before its geometry reaches E_k. So the guess is RAISED
-    // (x8, then unbounded) while the measured step stays within the budget and the target is not reached; a result
-    // PAST the budget locks its offenders and is simplified again at the same guess (at most kRetries lock rounds).
-    // The group keeps the most reduced result that was within its budget — only the measurement judges. Every attempt
-    // is DECIDED (each query stops at the budget); the kept one is then measured exactly for its stored step.
-    constexpr int kRaises = 2;
-    float guess = r.budget;
-    int lockRounds = 0, raises = 0;
     bool haveBest = false;
     std::vector<unsigned> best;
+    std::vector<float> bestPos, bestAttr;
     std::vector<unsigned> atRisk;   // the largest input triangle of every island part bigger than the budget (lazy)
-    for (int attempt = 0;; ++attempt) {
-        r.attempts = attempt + 1;
-        const auto ta = std::chrono::steady_clock::now();
-        Simplified s = simplifyGroup(mesh, weld, inTris, locks, target, guess, attributes, r.weights);
-        const auto tb = std::chrono::steady_clock::now();
-        const int pruned = int(pruneUnlocked(mesh, weld, locks, target, r.budget, s.tris));
-        const StepMeasure m = measureStep(mesh, weld, islands, inTris, s.tris, externalWelds, r.budget, floorLen, false);
-        r.msSimplify += std::chrono::duration<double, std::milli>(tb - ta).count();
-        r.msMeasure += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tb).count();
+    const auto attempt = [&](float guess, StepMeasure &m) {
+        ++r.attempts;
+        const Clock::time_point ta = Clock::now();
+        Simplified s = simplifyGroup(sc, lock, target, guess, placement);
+        r.msSimplify += msSince(ta);
+        const Clock::time_point tb = Clock::now();
+        if (placement) std::copy(s.pos.begin(), s.pos.end(), r.space.pos.begin() + std::ptrdiff_t(n * 3));
+        const int pruned = int(pruneUnlocked(r.space, locks, target, r.budget, s.tris));
+        m = measureStep(r.space, sc.tris, s.tris, externalWelds, r.budget, floorLen, false);
+        r.msMeasure += msSince(tb);
         const bool within = m.step <= r.budget && m.lockedLost == 0;
-        if (within) {
-            if (!haveBest || s.tris.size() < best.size()) {
-                haveBest = true;
-                best = s.tris;
-                r.estimate = s.resultError;
-                r.pruned = pruned;
-                r.lockedPositions = locks.size();
-            }
-            if (s.tris.size() / 3 <= target || raises >= kRaises) break;
+        if (within && (!haveBest || s.tris.size() < best.size())) {
+            haveBest = true;
+            best = std::move(s.tris);
+            bestPos = std::move(s.pos);
+            bestAttr = std::move(s.attr);
+            r.estimate = s.resultError;
+            r.pruned = pruned;
+            r.lockedPositions = locks.size();
+        } else if (!haveBest) {
+            r.terms = m; r.step = m.step; r.estimate = s.resultError; r.pruned = pruned; r.lockedPositions = locks.size();
+        }
+        return within;
+    };
+
+    // THE ATTEMPTS, RAISED: E_k is the first guess (meshoptimizer compares it to its MIXED position + attribute error,
+    // so a faceted or seamed group stops early under it); a result within the budget that is not at the target is
+    // simplified again with the guess raised — 8 E_k, then unbounded — so the smaller count is always tried; a result
+    // PAST the budget locks its offenders' fans (and every island at risk) and is simplified again at the same guess,
+    // at most kRetries lock rounds. The group keeps the MOST REDUCED result that came within its budget.
+    // (MEASURED, stage 2: trying the unbounded target first and locking ITS offenders over-constrains every later
+    // attempt — the hard 7 at E = 16 drew 52,346 that way against 37,986 raised.)
+    StepMeasure m;
+    int raises = 0, lockRounds = 0;
+    float guess = r.budget;
+    for (;;) {
+        if (attempt(guess, m)) {
+            if (best.size() / 3 <= target || raises >= 2) break;
             ++raises;
-            guess = raises < kRaises ? guess * 8.0f : FLT_MAX;
+            guess = raises < 2 ? guess * 8.0f : FLT_MAX;
             continue;
         }
-        if (!haveBest) { r.terms = m; r.step = m.step; r.estimate = s.resultError; r.pruned = pruned; r.lockedPositions = locks.size(); }
         if (lockRounds >= kRetries) break;
         ++lockRounds;
-        // THE LOCKS: every offender position's fan, every too-big island's largest triangle.
+        // THE LOCKS: every offender position's fan, every too-big island's largest triangle — EVERY ISLAND AT RISK AT
+        // ONCE once one was dropped (the old verify's lesson, DAG-LOCK-1: held one at a time, a debris field is
+        // whack-a-mole).
         std::vector<unsigned> add;
         for (unsigned w : m.fanWelds) {
             auto it = std::lower_bound(byWeld.begin(), byWeld.end(), std::make_pair(w, 0u));
             for (; it != byWeld.end() && it->first == w; ++it)
-                for (int k = 0; k < 3; ++k) add.push_back(weld[inTris[size_t(it->second) * 3 + size_t(k)]]);
+                for (int k = 0; k < 3; ++k) add.push_back(r.space.weld[sc.tris[size_t(it->second) * 3 + size_t(k)]]);
         }
-        // EVERY ISLAND AT RISK AT ONCE (the old verify's lesson, DAG-LOCK-1): once one island too big to drop was
-        // dropped, every island part of the input bigger than the budget keeps its largest triangle — held one at a
-        // time, a debris field is whack-a-mole (the next attempt reaches its target by dropping the next island).
         if (!m.keepTris.empty()) {
-            if (atRisk.empty()) atRisk = islandsAtRisk(mesh, islands, inTris, r.budget);
+            if (atRisk.empty()) atRisk = islandsAtRisk(r.space, sc.tris, r.budget);
             for (unsigned t : atRisk)
-                for (int k = 0; k < 3; ++k) add.push_back(weld[inTris[size_t(t) * 3 + size_t(k)]]);
+                for (int k = 0; k < 3; ++k) add.push_back(r.space.weld[sc.tris[size_t(t) * 3 + size_t(k)]]);
         }
         for (unsigned t : m.keepTris)
-            for (int k = 0; k < 3; ++k) add.push_back(weld[inTris[size_t(t) * 3 + size_t(k)]]);
+            for (int k = 0; k < 3; ++k) add.push_back(r.space.weld[sc.tris[size_t(t) * 3 + size_t(k)]]);
         const size_t before = locks.size();
         locks.insert(locks.end(), add.begin(), add.end());
         std::sort(locks.begin(), locks.end());
         locks.erase(std::unique(locks.begin(), locks.end()), locks.end());
         if (locks.size() == before) break;   // nothing new to hold: another attempt would be the same
+        lockMask();
     }
     if (haveBest) {   // THE KEPT RESULT, measured exactly (its stored step)
-        const auto tm = std::chrono::steady_clock::now();
-        r.terms = measureStep(mesh, weld, islands, inTris, best, externalWelds, r.budget, floorLen, true);
+        const Clock::time_point tm = Clock::now();
+        if (placement) std::copy(bestPos.begin(), bestPos.end(), r.space.pos.begin() + std::ptrdiff_t(n * 3));
+        r.terms = measureStep(r.space, sc.tris, best, externalWelds, r.budget, floorLen, true);
         // (the decision proved every term within the budget; the exact walk's upper bound may sit up to its 5 %
         // tolerance above the true maximum, so the budget is the tighter bound when it is lower)
         r.step = std::min(r.terms.step, r.budget);
-        r.msMeasure += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tm).count();
-        r.msExact += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tm).count();
+        r.msMeasure += msSince(tm);
+        r.msExact += msSince(tm);
     }
-    // A LEVEL: the target reached, or at least 15 % shed (a small group's target can be above 0.85 x its input).
-    if (haveBest && (best.size() / 3 <= target || float(best.size() / 3) <= kAcceptRatio * float(inCount))) {
+    // THE BUDGET IS THE ACCEPTANCE: the most reduced result within it (the builder carries one that needs as many
+    // clusters as the input).
+    if (haveBest && best.size() < sc.tris.size()) {
         r.accepted = true;
         r.out = std::move(best);
+        r.placedAttr = std::move(bestAttr);
+        std::vector<unsigned> placed;
+        for (unsigned v : r.out) if (v >= n) placed.push_back(v);
+        std::sort(placed.begin(), placed.end());
+        r.placedVertices = size_t(std::unique(placed.begin(), placed.end()) - placed.begin());
     }
     return r;
 }

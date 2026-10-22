@@ -279,13 +279,14 @@ void growBox(const Vec3 &p, Vec3 &lo, Vec3 &hi)
 
 }   // namespace
 
-StepMeasure measureStep(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
+StepMeasure measureStep(const LocalSpace &space,
                         const std::vector<unsigned> &inTris, const std::vector<unsigned> &outTris,
                         const std::vector<unsigned> &externalWelds, float budget, float floorLen, bool exact)
 {
     StepMeasure m;
-    const float *P = mesh.positions;
-    const int pc = mesh.posComps;
+    const float *P = space.pos.data();
+    const int pc = 3;
+    const std::vector<unsigned> &weld = space.weld;
     std::vector<unsigned> keptV(outTris.begin(), outTris.end());
     std::sort(keptV.begin(), keptV.end());
     keptV.erase(std::unique(keptV.begin(), keptV.end()), keptV.end());
@@ -298,6 +299,7 @@ StepMeasure measureStep(const MeshView &mesh, const std::vector<unsigned> &weld,
     // The grids: the output (rules 1, 2, 4) and the input (rule 5), each over the group's box.
     Vec3 lo = vertexOf(P, pc, inTris[0]), hi = lo;
     for (unsigned v : inV) growBox(vertexOf(P, pc, v), lo, hi);
+    for (unsigned v : keptV) growBox(vertexOf(P, pc, v), lo, hi);   // a placed survivor may sit outside the input's box
     surface::TriangleGrid gridO, gridI;
     if (!outTris.empty()) gridO.build(P, pc, outTris, lo, hi, soupGridRes(P, pc, outTris, lo, hi));
     gridI.build(P, pc, inTris, lo, hi, soupGridRes(P, pc, inTris, lo, hi));
@@ -305,12 +307,12 @@ StepMeasure measureStep(const MeshView &mesh, const std::vector<unsigned> &weld,
 
     // 3. THE ISLANDS: an island with input vertices and no output vertex is DROPPED here.
     std::vector<unsigned> survivingComps;
-    for (unsigned v : keptV) if (islands.compOf[v] < islands.count()) survivingComps.push_back(islands.compOf[v]);
+    for (unsigned v : keptV) if (space.comp[v] < space.islandCount) survivingComps.push_back(space.comp[v]);
     std::sort(survivingComps.begin(), survivingComps.end());
     survivingComps.erase(std::unique(survivingComps.begin(), survivingComps.end()), survivingComps.end());
     const auto dropped = [&](unsigned v) {
-        const unsigned c = islands.compOf[v];
-        return c < islands.count() && !std::binary_search(survivingComps.begin(), survivingComps.end(), c);
+        const unsigned c = space.comp[v];
+        return c < space.islandCount && !std::binary_search(survivingComps.begin(), survivingComps.end(), c);
     };
     {
         struct Part { Vec3 lo, hi; float bestArea = -1.0f; unsigned bestTri = 0; bool seen = false; };
@@ -320,7 +322,7 @@ StepMeasure measureStep(const MeshView &mesh, const std::vector<unsigned> &weld,
         for (size_t t = 0; t < inTris.size() / 3; ++t) {
             const unsigned v0 = inTris[t * 3];
             if (!dropped(v0)) continue;
-            const unsigned c = islands.compOf[v0];
+            const unsigned c = space.comp[v0];
             auto it = std::lower_bound(index.begin(), index.end(), std::make_pair(c, size_t(0)));
             size_t k;
             if (it == index.end() || it->first != c) {
@@ -380,7 +382,7 @@ StepMeasure measureStep(const MeshView &mesh, const std::vector<unsigned> &weld,
             const unsigned v = inV[i];
             if (kept(v) || dropped(v)) return;
             const float d = std::min(gridO.closest(qq, vertexOf(P, pc, v), nullptr, nullptr, nullptr,
-                                                   exact ? -1.0f : budget), islands.capOf[v]);
+                                                   exact ? -1.0f : budget), space.cap[v]);
             if (!std::isfinite(d)) return;
             ch.max = std::max(ch.max, d);
             if (d > budget) ch.fan.push_back(weld[v]);
@@ -417,7 +419,7 @@ StepMeasure measureStep(const MeshView &mesh, const std::vector<unsigned> &weld,
             if (std::binary_search(outSet.begin(), outSet.end(), sortedTri(inTris, t))) return;
             const unsigned v0 = inTris[t * 3];
             if (dropped(v0)) return;
-            const float cap = islands.capOf[v0];
+            const float cap = space.cap[v0];
             const float stop = exact ? std::min(ch.max, budget) : budget;
             if (!(cap > stop)) return;   // its island cannot pass it
             const float d = std::min(walk(vertexOf(P, pc, inTris[t * 3]), vertexOf(P, pc, inTris[t * 3 + 1]),

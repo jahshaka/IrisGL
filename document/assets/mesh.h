@@ -277,8 +277,8 @@ struct MeshClusterDag
         qint32 depth = 0;             ///< the DAG level the group was formed at
         float  centre[3] = { 0.0f, 0.0f, 0.0f };    ///< the simplified bounds' sphere, mesh space —
         float  radius = 0.0f;         ///< ...grown at bake to CONTAIN every child group's sphere
-        float  error = 0.0f;          ///< MEASURED, mesh units, monotone; FLT_MAX = terminal
-        float  estimate = 0.0f;       ///< clusterlod.h's own error (a diagnostic); FLT_MAX = terminal
+        float  error = 0.0f;          ///< MEASURED, mesh units, monotone, finite (the reader refuses anything else)
+        float  estimate = 0.0f;       ///< the simplifier's own error (a diagnostic)
     };
 
     QVector<Cluster> clusters;

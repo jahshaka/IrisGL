@@ -49,7 +49,8 @@ struct StepMeasure
     std::vector<unsigned> keepTris;   ///< offender islands: the input triangle (index into the input) to lock whole
 };
 
-StepMeasure measureStep(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
+/// `inTris` and `outTris` are LOCAL ids of `space` (the input: 0..n-1; the output: any, a placed survivor n + id).
+StepMeasure measureStep(const LocalSpace &space,
                         const std::vector<unsigned> &inTris, const std::vector<unsigned> &outTris,
                         const std::vector<unsigned> &externalWelds, float budget, float floorLen, bool exact);
 

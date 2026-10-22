@@ -37,12 +37,22 @@ std::vector<unsigned> weldByPosition(const MeshView &mesh)
     return weld;
 }
 
-Islands findIslands(const float *positions, int posComps, size_t nv,
+Islands findIslands(const float *positions, int posComps, size_t nv, const std::vector<unsigned> &base)
+{
+    MeshView view;
+    view.positions = positions;
+    view.posComps = posComps;
+    view.nv = nv;
+    return findIslands(weldByPosition(view), positions, posComps, nv, base);
+}
+
+Islands findIslands(const std::vector<unsigned> &weld, const float *positions, int posComps, size_t nv,
                     const std::vector<unsigned> &base)
 {
+    // ONE POSITION CLASS FOR EVERY RULE (the stage-1 read's finding 2): the islands are unions over the adjacency's own
+    // weld ids (+-0 folded), so a mirrored seam at x = +-0 is one surface to D1 AND one island to the cap and drop rules.
     Islands is;
-    std::vector<unsigned> remap(nv);
-    meshopt_generatePositionRemap(remap.data(), positions, nv, sizeof(float) * size_t(posComps));
+    const std::vector<unsigned> &remap = weld;
     std::vector<unsigned> parent(nv);
     for (size_t v = 0; v < nv; ++v) parent[v] = unsigned(v);
     const auto root = [&](unsigned x) {

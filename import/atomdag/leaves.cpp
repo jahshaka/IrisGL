@@ -26,12 +26,14 @@ namespace atomdag
 namespace
 {
 
-/// How many final parts `n` nodes make: at least two, at least n / maxSize, about n / targetSize.
-size_t partsFor(size_t n, const PartitionRule &rule)
+/// How many final parts `n` nodes make: at least two, at least n / maxSize, about n / targetSize — and at least
+/// vertices / maxVertices when the rule counts vertices (`vertices` = the part's own count, 0 when it does not).
+size_t partsFor(size_t n, const PartitionRule &rule, size_t vertices = 0)
 {
     const size_t byMax = (n + rule.maxSize - 1) / rule.maxSize;
     const size_t byTarget = size_t(std::llround(double(n) / double(rule.targetSize)));
-    return std::max<size_t>(2, std::max(byMax, byTarget));
+    const size_t byVertices = rule.maxVertices ? (vertices + rule.maxVertices - 1) / rule.maxVertices : 0;
+    return std::max<size_t>(2, std::max(std::max(byMax, byTarget), std::min(byVertices, n)));
 }
 
 bool fits(const std::vector<unsigned> &part, const PartitionRule &rule)
@@ -95,7 +97,7 @@ void bisect(const Graph &g, const std::vector<unsigned> &nodes, const PartitionR
     for (size_t r = 0; r < n; ++r) rank[order[r]] = unsigned(r);
 
     // THE BALANCE WINDOW: half A holds KL of the K final parts.
-    const size_t K = partsFor(n, rule), KL = K / 2, KR = K - KL;
+    const size_t K = partsFor(n, rule, rule.vertexCount ? rule.vertexCount(nodes) : 0), KL = K / 2, KR = K - KL;
     const size_t targetA = size_t(std::llround(double(n) * double(KL) / double(K)));
     const double perPart = double(n) / double(K);
     const size_t tol = std::max<size_t>(1, size_t(rule.imbalance * perPart * double(std::min(KL, KR))));
@@ -269,13 +271,15 @@ std::vector<std::vector<unsigned>> buildClusters(const MeshView &mesh, const std
     rule.targetSize = kClusterTarget;
     rule.minSize = 1;
     rule.imbalance = 0.005;
-    rule.fits = [&](const std::vector<unsigned> &part) {
+    rule.vertexCount = [&](const std::vector<unsigned> &part) {
         std::vector<unsigned> v;
         v.reserve(part.size() * 3);
         for (unsigned t : part) v.insert(v.end(), { tris[size_t(t) * 3], tris[size_t(t) * 3 + 1], tris[size_t(t) * 3 + 2] });
         std::sort(v.begin(), v.end());
-        return size_t(std::unique(v.begin(), v.end()) - v.begin()) <= kClusterVertices;
+        return size_t(std::unique(v.begin(), v.end()) - v.begin());
     };
+    rule.maxVertices = kClusterVertices;
+    rule.fits = [&](const std::vector<unsigned> &part) { return rule.vertexCount(part) <= kClusterVertices; };
     return partition(graph, rule);
 }
 

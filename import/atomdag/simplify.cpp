@@ -16,7 +16,7 @@ For more information see the LICENSE file
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
-#include <numeric>
+#include <cstring>
 #include <unordered_map>
 
 namespace iris
@@ -26,108 +26,172 @@ namespace atomdag
 namespace
 {
 
-float triangleArea(const MeshView &m, unsigned a, unsigned b, unsigned c)
-{
-    const Vec3 pa = m.position(a);
-    return Vec3::crossProduct(m.position(b) - pa, m.position(c) - pa).length() * 0.5f;
-}
-
 constexpr float kUvTriSizeMin = 1.0f / 1024.0f;   ///< Nanite's THRESH_UVS_ARE_SAME
 constexpr float kNanitePositionScale = 4.0f;       ///< 1 / Nanite's DesiredSize 0.25
 constexpr float kNaniteUvDivisor = 128.0f;         ///< Nanite's UV weight 1 / (128 uvTriSize)
+constexpr float kNaniteTangentWeight = 0.0625f;    ///< Nanite's TangentX weight, relative to the normal's
 
-}   // namespace
+Vec3 at(const std::vector<float> &p, unsigned i) { return Vec3(p[size_t(i) * 3], p[size_t(i) * 3 + 1], p[size_t(i) * 3 + 2]); }
 
-Weights groupWeights(const MeshView &mesh, const std::vector<unsigned> &tris)
+/// The weights' algebra over the scratch (positions and the UV slot).
+Weights weightsOf(const GroupScratch &sc)
 {
     Weights w;
-    const size_t triCount = tris.size() / 3;
+    const size_t triCount = sc.tris.size() / 3;
     if (triCount == 0) return w;
     double area = 0.0, uvArea = 0.0;
-    std::unordered_map<unsigned, double> fan;   // wedge -> sum of incident area
-    fan.reserve(tris.size());
+    std::vector<double> fan(sc.size(), 0.0);
     for (size_t t = 0; t < triCount; ++t) {
-        const unsigned a = tris[t * 3], b = tris[t * 3 + 1], c = tris[t * 3 + 2];
-        const double ar = triangleArea(mesh, a, b, c);
+        const unsigned a = sc.tris[t * 3], b = sc.tris[t * 3 + 1], c = sc.tris[t * 3 + 2];
+        const Vec3 pa = at(sc.pos, a);
+        const double ar = double(Vec3::crossProduct(at(sc.pos, b) - pa, at(sc.pos, c) - pa).length()) * 0.5;
         area += ar;
         fan[a] += ar; fan[b] += ar; fan[c] += ar;
-        if (mesh.uvs) {
-            const float *ua = mesh.uvs + size_t(a) * size_t(mesh.uvComps), *ub = mesh.uvs + size_t(b) * size_t(mesh.uvComps),
-                        *uc = mesh.uvs + size_t(c) * size_t(mesh.uvComps);
+        if (sc.uvAt >= 0) {
+            const float *ua = &sc.attr[size_t(a) * sc.attrCount + size_t(sc.uvAt)],
+                        *ub = &sc.attr[size_t(b) * sc.attrCount + size_t(sc.uvAt)],
+                        *uc = &sc.attr[size_t(c) * sc.attrCount + size_t(sc.uvAt)];
             uvArea += 0.5 * std::fabs(double((ub[0] - ua[0]) * (uc[1] - ua[1]) - (ub[1] - ua[1]) * (uc[0] - ua[0])));
         }
     }
-    // The mean over the wedges, in first-use order (deterministic; the map is only the accumulator).
     double sum = 0.0;
-    size_t wedges = 0;
-    for (unsigned v : tris) {
-        auto it = fan.find(v);
-        if (it == fan.end() || it->second < 0.0) continue;
-        sum += std::sqrt(it->second);
-        it->second = -1.0;   // counted
-        ++wedges;
-    }
+    for (double f : fan) sum += std::sqrt(f);   // every scratch vertex is a wedge of the input
     w.tGroup = float(std::sqrt(area / double(triCount)));
-    w.sGroup = wedges ? float(sum / double(wedges)) : 0.0f;
+    w.sGroup = sc.size() ? float(sum / double(sc.size())) : 0.0f;
     w.uvTriSize = std::max(float(std::sqrt(uvArea / double(triCount))), kUvTriSizeMin);
     if (w.sGroup > 0.0f) {
         w.normal = kNanitePositionScale * w.tGroup / w.sGroup;
         w.uv = kNanitePositionScale * w.tGroup / (kNaniteUvDivisor * w.uvTriSize * w.sGroup);
+        w.tangent = kNaniteTangentWeight * w.normal;
     }
     return w;
 }
 
-Simplified simplifyGroup(const MeshView &mesh, const std::vector<unsigned> &weld, const std::vector<unsigned> &tris,
-                         const std::vector<unsigned> &lockedWelds, size_t targetTris, float targetError,
-                         bool attributes, const Weights &weights)
+}   // namespace
+
+GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris, bool attributes, bool tangents)
 {
-    Simplified out;
-    // THE DENSE SCRATCH: the group's vertices in first-use order.
+    GroupScratch sc;
     std::unordered_map<unsigned, unsigned> localOf;
     localOf.reserve(tris.size());
-    std::vector<unsigned> globalOf, local(tris.size());
+    sc.tris.resize(tris.size());
     for (size_t i = 0; i < tris.size(); ++i) {
-        auto it = localOf.emplace(tris[i], unsigned(globalOf.size())).first;
-        if (it->second == globalOf.size()) globalOf.push_back(tris[i]);
-        local[i] = it->second;
+        auto it = localOf.emplace(tris[i], unsigned(sc.globalOf.size())).first;
+        if (it->second == sc.globalOf.size()) sc.globalOf.push_back(tris[i]);
+        sc.tris[i] = it->second;
     }
-    const size_t n = globalOf.size();
-    std::vector<float> pos(n * 3);
+    const size_t n = sc.size();
+    sc.pos.resize(n * 3);
     for (size_t v = 0; v < n; ++v)
-        for (int k = 0; k < 3; ++k) pos[v * 3 + size_t(k)] = mesh.positions[size_t(globalOf[v]) * size_t(mesh.posComps) + size_t(k)];
-    const bool nrm = attributes && mesh.normals && weights.normal > 0.0f;
-    const bool uv = attributes && mesh.uvs && weights.uv > 0.0f;
-    const size_t attrCount = (nrm ? 3u : 0u) + (uv ? 2u : 0u);
-    std::vector<float> attr(n * attrCount), aw;
-    if (nrm) aw.insert(aw.end(), 3, weights.normal);
-    if (uv) aw.insert(aw.end(), 2, weights.uv);
-    for (size_t v = 0; v < n && attrCount; ++v) {
-        float *dst = &attr[v * attrCount];
-        const size_t g = globalOf[v];
-        if (nrm) { for (int k = 0; k < 3; ++k) dst[k] = mesh.normals[g * size_t(mesh.nrmComps) + size_t(k)]; dst += 3; }
-        if (uv) { dst[0] = mesh.uvs[g * size_t(mesh.uvComps)]; dst[1] = mesh.uvs[g * size_t(mesh.uvComps) + 1]; }
+        for (int k = 0; k < 3; ++k) sc.pos[v * 3 + size_t(k)] = mesh.positions[size_t(sc.globalOf[v]) * size_t(mesh.posComps) + size_t(k)];
+    if (attributes) {
+        if (mesh.normals) { sc.nrmAt = int(sc.attrCount); sc.attrCount += 3; }
+        if (mesh.uvs) { sc.uvAt = int(sc.attrCount); sc.attrCount += 2; }
+        if (mesh.tangents && tangents) { sc.tanAt = int(sc.attrCount); sc.attrCount += 3; }
     }
-    std::vector<unsigned char> lock(n, 0u);
+    sc.attr.resize(n * sc.attrCount);
+    for (size_t v = 0; v < n && sc.attrCount; ++v) {
+        float *dst = &sc.attr[v * sc.attrCount];
+        const size_t g = sc.globalOf[v];
+        if (sc.nrmAt >= 0) for (int k = 0; k < 3; ++k) dst[sc.nrmAt + k] = mesh.normals[g * size_t(mesh.nrmComps) + size_t(k)];
+        if (sc.uvAt >= 0) for (int k = 0; k < 2; ++k) dst[sc.uvAt + k] = mesh.uvs[g * size_t(mesh.uvComps) + size_t(k)];
+        if (sc.tanAt >= 0) for (int k = 0; k < 3; ++k) dst[sc.tanAt + k] = mesh.tangents[g * size_t(mesh.tanComps) + size_t(k)];
+    }
+    sc.weights = weightsOf(sc);
+    sc.weightOf.assign(sc.attrCount, 0.0f);
+    // EVERY STORED ATTRIBUTE AT A POSITIVE WEIGHT (correction 3c): a zero weight is never solved.
+    const float floorW = 1e-6f;
+    if (sc.nrmAt >= 0) for (int k = 0; k < 3; ++k) sc.weightOf[size_t(sc.nrmAt + k)] = std::max(sc.weights.normal, floorW);
+    if (sc.uvAt >= 0) for (int k = 0; k < 2; ++k) sc.weightOf[size_t(sc.uvAt + k)] = std::max(sc.weights.uv, floorW);
+    if (sc.tanAt >= 0) for (int k = 0; k < 3; ++k) sc.weightOf[size_t(sc.tanAt + k)] = std::max(sc.weights.tangent, floorW);
+    return sc;
+}
+
+LocalSpace makeSpace(const GroupScratch &sc, const std::vector<unsigned> &weld, const std::vector<unsigned> &compOf,
+                     const std::vector<float> &capOf, size_t islandCount)
+{
+    LocalSpace s;
+    const size_t n = sc.size();
+    s.n = n;
+    s.islandCount = islandCount;
+    s.pos.resize(n * 6);
+    std::copy(sc.pos.begin(), sc.pos.end(), s.pos.begin());
+    std::copy(sc.pos.begin(), sc.pos.end(), s.pos.begin() + std::ptrdiff_t(n * 3));
+    s.weld.resize(2 * n);
+    s.comp.resize(2 * n);
+    s.cap.resize(2 * n);
+    for (size_t v = 0; v < n; ++v) {
+        const unsigned g = sc.globalOf[v];
+        s.weld[v] = s.weld[n + v] = weld[g];
+        s.comp[v] = s.comp[n + v] = compOf[g];
+        s.cap[v] = s.cap[n + v] = capOf[g];
+    }
+    return s;
+}
+
+Simplified simplifyGroup(const GroupScratch &sc, const std::vector<unsigned char> &lock, size_t targetTris,
+                         float targetError, bool placement)
+{
+    Simplified out;
+    const size_t n = sc.size();
     bool anyLock = false;
-    for (size_t v = 0; v < n; ++v)
-        if (std::binary_search(lockedWelds.begin(), lockedWelds.end(), weld[globalOf[v]])) {
-            lock[v] = meshopt_SimplifyVertex_Lock;
-            anyLock = true;
-        }
-    std::vector<unsigned> dst(tris.size());
+    for (unsigned char l : lock) anyLock = anyLock || l;
     const unsigned options = meshopt_SimplifyErrorAbsolute | meshopt_SimplifyPermissive;
-    const size_t count = meshopt_simplifyWithAttributes(
-        dst.data(), local.data(), local.size(), pos.data(), n, sizeof(float) * 3,
-        attrCount ? attr.data() : nullptr, sizeof(float) * attrCount, attrCount ? aw.data() : nullptr, attrCount,
-        anyLock ? lock.data() : nullptr, targetTris * 3, targetError, options, &out.resultError);
-    out.tris.resize(count);
-    for (size_t i = 0; i < count; ++i) out.tris[i] = globalOf[dst[i]];
+    if (!placement) {
+        std::vector<unsigned> dst(sc.tris.size());
+        const size_t count = meshopt_simplifyWithAttributes(
+            dst.data(), sc.tris.data(), sc.tris.size(), sc.pos.data(), n, sizeof(float) * 3,
+            sc.attrCount ? sc.attr.data() : nullptr, sizeof(float) * sc.attrCount,
+            sc.attrCount ? sc.weightOf.data() : nullptr, sc.attrCount, anyLock ? lock.data() : nullptr,
+            targetTris * 3, targetError, options, &out.resultError);
+        out.tris.assign(dst.begin(), dst.begin() + std::ptrdiff_t(count));
+    } else {
+        out.pos = sc.pos;
+        out.attr = sc.attr;
+        std::vector<unsigned> idx = sc.tris;
+        const size_t count = meshopt_simplifyWithUpdate(
+            idx.data(), idx.size(), out.pos.data(), n, sizeof(float) * 3,
+            sc.attrCount ? out.attr.data() : nullptr, sizeof(float) * sc.attrCount,
+            sc.attrCount ? sc.weightOf.data() : nullptr, sc.attrCount, anyLock ? lock.data() : nullptr,
+            targetTris * 3, targetError, options, &out.resultError);
+        idx.resize(count);
+        // Per referenced scratch vertex: locked, or left bitwise unchanged by the solve -> the original; else its
+        // placed copy.
+        std::vector<signed char> moved(n, -1);
+        for (unsigned &i : idx) {
+            if (moved[i] < 0) {
+                bool changed = false;
+                if (!lock[i]) {
+                    changed = std::memcmp(&out.pos[size_t(i) * 3], &sc.pos[size_t(i) * 3], sizeof(float) * 3) != 0;
+                    if (!changed && sc.attrCount)
+                        changed = std::memcmp(&out.attr[size_t(i) * sc.attrCount], &sc.attr[size_t(i) * sc.attrCount],
+                                              sizeof(float) * sc.attrCount) != 0;
+                }
+                moved[i] = changed ? 1 : 0;
+            }
+            if (moved[i]) i += unsigned(n);
+        }
+        out.tris = std::move(idx);
+    }
     if (!std::isfinite(out.resultError) || out.resultError < 0.0f) out.resultError = 0.0f;
     return out;
 }
 
-size_t pruneUnlocked(const MeshView &mesh, const std::vector<unsigned> &weld, const std::vector<unsigned> &lockedWelds,
-                     size_t targetTris, float budget, std::vector<unsigned> &tris)
+float positionEstimate(const GroupScratch &sc, const std::vector<unsigned char> &lock, size_t targetTris)
+{
+    bool anyLock = false;
+    for (unsigned char l : lock) anyLock = anyLock || l;
+    std::vector<unsigned> dst(sc.tris.size());
+    float err = 0.0f;
+    meshopt_simplifyWithAttributes(dst.data(), sc.tris.data(), sc.tris.size(), sc.pos.data(), sc.size(),
+                                   sizeof(float) * 3, nullptr, 0, nullptr, 0, anyLock ? lock.data() : nullptr,
+                                   targetTris * 3, FLT_MAX, meshopt_SimplifyErrorAbsolute | meshopt_SimplifyPermissive,
+                                   &err);
+    return std::isfinite(err) && err > 0.0f ? err : 0.0f;
+}
+
+size_t pruneUnlocked(const LocalSpace &space, const std::vector<unsigned> &lockedWelds, size_t targetTris,
+                     float budget, std::vector<unsigned> &tris)
 {
     size_t triCount = tris.size() / 3;
     if (triCount <= targetTris) return 0;
@@ -144,7 +208,7 @@ size_t pruneUnlocked(const MeshView &mesh, const std::vector<unsigned> &weld, co
         return x;
     };
     std::vector<unsigned> triWeld(tris.size());
-    for (size_t i = 0; i < tris.size(); ++i) triWeld[i] = idOf(weld[tris[i]]);
+    for (size_t i = 0; i < tris.size(); ++i) triWeld[i] = idOf(space.weld[tris[i]]);
     for (size_t t = 0; t < triCount; ++t) {
         const unsigned a = root(triWeld[t * 3]);
         for (int k = 1; k < 3; ++k) {
@@ -154,16 +218,19 @@ size_t pruneUnlocked(const MeshView &mesh, const std::vector<unsigned> &weld, co
     }
     struct Piece { Vec3 lo, hi; size_t tris = 0; bool locked = false; size_t first = 0; bool seen = false; };
     std::vector<Piece> pieces(parent.size());
+    const auto position = [&](unsigned v) {
+        return Vec3(space.pos[size_t(v) * 3], space.pos[size_t(v) * 3 + 1], space.pos[size_t(v) * 3 + 2]);
+    };
     for (size_t t = 0; t < triCount; ++t) {
         Piece &p = pieces[root(triWeld[t * 3])];
-        if (!p.seen) { p.seen = true; p.first = t; p.lo = p.hi = mesh.position(tris[t * 3]); }
+        if (!p.seen) { p.seen = true; p.first = t; p.lo = p.hi = position(tris[t * 3]); }
         ++p.tris;
         for (int k = 0; k < 3; ++k) {
             const unsigned v = tris[t * 3 + size_t(k)];
-            const Vec3 q = mesh.position(v);
+            const Vec3 q = position(v);
             p.lo = Vec3(std::min(p.lo.x(), q.x()), std::min(p.lo.y(), q.y()), std::min(p.lo.z(), q.z()));
             p.hi = Vec3(std::max(p.hi.x(), q.x()), std::max(p.hi.y(), q.y()), std::max(p.hi.z(), q.z()));
-            if (std::binary_search(lockedWelds.begin(), lockedWelds.end(), weld[v])) p.locked = true;
+            if (std::binary_search(lockedWelds.begin(), lockedWelds.end(), space.weld[v])) p.locked = true;
         }
     }
     std::vector<unsigned> order;

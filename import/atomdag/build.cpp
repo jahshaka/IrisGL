@@ -22,6 +22,9 @@ For more information see the LICENSE file
 #include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <unordered_map>
 
 namespace iris
 {
@@ -35,6 +38,9 @@ namespace
 constexpr float kFloorRel = 1e-5f;
 /// The re-runs of a level where every group was carried (each doubles the budgets): 2^48 x the floor passes any extent.
 constexpr int kMaxReruns = 48;
+/// A within-budget result that needs as many clusters as its input is re-simplified at 3/4 of its count at most this
+/// many times (0.75^8 = a tenth) before the group is carried.
+constexpr int kMaxShrinks = 8;
 
 using Clock = std::chrono::steady_clock;
 double msSince(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
@@ -91,6 +97,113 @@ Sphere enclose(const std::vector<Sphere> &s, int *grown)
     return out;
 }
 
+/// THE VERTEX STORE (stage 2): the mesh's four solved buffers, copied once, and the placed survivors appended.
+struct PosKey
+{
+    float p[3];
+    bool operator==(const PosKey &o) const { return p[0] == o.p[0] && p[1] == o.p[1] && p[2] == o.p[2]; }
+};
+struct PosKeyHash
+{
+    size_t operator()(const PosKey &k) const
+    {
+        std::uint32_t b[3];
+        std::memcpy(b, k.p, sizeof(b));
+        return (size_t(b[0]) * 0x9E3779B97F4A7C15ull) ^ (size_t(b[1]) * 0xC2B2AE3D27D4EB4Full) ^ (size_t(b[2]) * 0x165667B19E3779F9ull);
+    }
+};
+PosKey keyOf(const float *p)
+{
+    PosKey k;
+    for (int i = 0; i < 3; ++i) k.p[i] = p[i] == 0.0f ? 0.0f : p[i];   // +-0 folded, as the weld
+    return k;
+}
+
+struct Store
+{
+    size_t nv0 = 0, nv = 0;
+    int uvComps = 0;
+    std::vector<float> P, N, U, T;
+    std::vector<unsigned> source;   ///< per appended vertex: its original mesh vertex
+    std::unordered_map<PosKey, unsigned, PosKeyHash> weldAt;
+
+    explicit Store(const MeshView &m) : nv0(m.nv), nv(m.nv), uvComps(m.uvs ? m.uvComps : 0)
+    {
+        const auto copy = [&](const float *src, int comps, std::vector<float> &dst) {
+            if (!src) return;
+            dst.resize(m.nv * 3);
+            for (size_t v = 0; v < m.nv; ++v)
+                for (int k = 0; k < 3; ++k) dst[v * 3 + size_t(k)] = src[v * size_t(comps) + size_t(k)];
+        };
+        copy(m.positions, m.posComps, P);
+        copy(m.normals, m.nrmComps, N);
+        copy(m.tangents, m.tanComps, T);
+        if (m.uvs) U.assign(m.uvs, m.uvs + m.nv * size_t(m.uvComps));
+    }
+    MeshView view() const
+    {
+        MeshView v;
+        v.positions = P.data();
+        v.posComps = 3;
+        v.nv = nv;
+        v.normals = N.empty() ? nullptr : N.data();
+        v.nrmComps = 3;
+        v.uvs = U.empty() ? nullptr : U.data();
+        v.uvComps = uvComps;
+        v.tangents = T.empty() ? nullptr : T.data();
+        v.tanComps = 3;
+        return v;
+    }
+    void indexWelds(const std::vector<unsigned> &weld)
+    {
+        weldAt.reserve(nv);
+        for (size_t v = 0; v < nv; ++v) weldAt.emplace(keyOf(&P[v * 3]), weld[v]);
+    }
+    /// Appends scratch vertex `sId`'s PLACED copy; returns its mesh id.
+    unsigned append(const GroupScratch &sc, const LocalSpace &space, const std::vector<float> &attr, unsigned sId,
+                    std::vector<unsigned> &weld, Islands &islands)
+    {
+        const size_t n = sc.size();
+        const unsigned g = sc.globalOf[sId];
+        const unsigned id = unsigned(nv++);
+        const float *p = &space.pos[(n + sId) * 3];
+        P.insert(P.end(), p, p + 3);
+        const float *a = attr.empty() ? nullptr : &attr[size_t(sId) * sc.attrCount];
+        Vec3 nrm(0, 0, 1);
+        if (!N.empty()) {
+            nrm = Vec3(N[g * 3], N[g * 3 + 1], N[g * 3 + 2]);
+            if (a && sc.nrmAt >= 0) {
+                const Vec3 s(a[sc.nrmAt], a[sc.nrmAt + 1], a[sc.nrmAt + 2]);
+                if (s.lengthSquared() > 1e-12f) nrm = s.normalized();   // components are solved, not the length
+            }
+            N.insert(N.end(), { nrm.x(), nrm.y(), nrm.z() });
+        }
+        if (!U.empty()) {
+            const size_t at = U.size();
+            float src[4] = { 0, 0, 0, 0 };
+            for (int k = 0; k < uvComps && k < 4; ++k) src[k] = U[size_t(g) * size_t(uvComps) + size_t(k)];
+            U.insert(U.end(), src, src + std::min(uvComps, 4));
+            if (a && sc.uvAt >= 0) { U[at] = a[sc.uvAt]; U[at + 1] = a[sc.uvAt + 1]; }
+        }
+        if (!T.empty()) {
+            Vec3 t(T[g * 3], T[g * 3 + 1], T[g * 3 + 2]);
+            if (a && sc.tanAt >= 0) {
+                Vec3 s(a[sc.tanAt], a[sc.tanAt + 1], a[sc.tanAt + 2]);
+                if (!N.empty()) s = s - nrm * Vec3::dotProduct(s, nrm);   // orthonormal to the normal
+                if (s.lengthSquared() > 1e-12f) t = s.normalized();
+            }
+            T.insert(T.end(), { t.x(), t.y(), t.z() });
+        }
+        const unsigned root = g < nv0 ? g : source[g - nv0];
+        source.push_back(root);
+        const auto it = weldAt.emplace(keyOf(p), id).first;
+        weld.push_back(it->second);
+        islands.compOf.push_back(islands.compOf[g]);
+        islands.capOf.push_back(islands.capOf[g]);
+        return id;
+    }
+};
+
 /// The parent clusters of an accepted group's output (D4's re-split: the leaves' bisection on the output).
 struct Split
 {
@@ -105,23 +218,43 @@ QVector<float> configRecord()
         2.0f,   // the builder: atomdag (1 was clusterlod's record shape)
         float(kClusterTriangles), float(kClusterVertices), float(kClusterTarget), float(kSharedEdgeWeight),
         float(kLocalityWeight), float(kGroupMin), float(kGroupMax), float(kGroupTarget), float(kGroupEdgeWeight),
-        float(kGroupSiblingWeight), float(kGroupEdgeBase), kLadderFactor, float(kRetries), kAcceptRatio,
+        float(kGroupSiblingWeight), float(kGroupEdgeBase), kLadderFactor, float(kRetries), 1.0f /* fewer clusters */,
         float(kMaxLevels), 4.0f /* Nanite's position scale 1/0.25 */, 128.0f /* Nanite's UV divisor */, kFloorRel };
 }
 
-bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterDag *out, Stats *stats,
-           const Options &options)
+bool build(const MeshView &input, const std::vector<unsigned> &base, MeshClusterDag *out, Stats *stats,
+           const Options &options, Appended *appended)
 {
     *out = MeshClusterDag();
+    if (appended) *appended = Appended();
     const Clock::time_point t0 = Clock::now();
     const size_t baseTris = base.size() / 3;
-    if (baseTris == 0 || !mesh.positions || mesh.nv == 0) return false;
-    const float extent = meshopt_simplifyScale(mesh.positions, mesh.nv, sizeof(float) * size_t(mesh.posComps));
+    if (baseTris == 0 || !input.positions || input.nv == 0) return false;
+    const float extent = meshopt_simplifyScale(input.positions, input.nv, sizeof(float) * size_t(input.posComps));
     if (!(extent > 0.0f) || !std::isfinite(extent)) return false;
     const float floorLen = extent * kFloorRel;
 
-    const std::vector<unsigned> weld = weldByPosition(mesh);
-    const Islands islands = findIslands(mesh.positions, mesh.posComps, mesh.nv, base);
+    // THE VERTEX STORE (stage 2): the mesh's positions, normals, UVs and tangents, copied once, and every PLACED
+    // survivor appended to them as a new vertex (its id past the mesh's); `source` names each appended vertex's
+    // original mesh vertex (its other buffers copy that one's). The view is re-read after every append batch.
+    Store store(input);
+    MeshView mesh = store.view();
+    std::vector<unsigned> weld = weldByPosition(mesh);
+    store.indexWelds(weld);
+    Islands islands = findIslands(weld, mesh.positions, mesh.posComps, mesh.nv, base);
+    // THE MESH'S OWN EXTENT (D8: the empty top is priced at the island rule on the WHOLE mesh — the level-0 box's
+    // diagonal, never the last cluster's: with nothing locked at the top the extreme corners collapse away, and a
+    // 10 m tree whose root box is 3 m would stop drawing while it still covers pixels — a pop out; the read's finding 1)
+    float meshDiagonal = 0.0f;
+    {
+        Vec3 lo = mesh.position(base[0]), hi = lo;
+        for (unsigned v : base) {
+            const Vec3 p = mesh.position(v);
+            lo = Vec3(std::min(lo.x(), p.x()), std::min(lo.y(), p.y()), std::min(lo.z(), p.z()));
+            hi = Vec3(std::max(hi.x(), p.x()), std::max(hi.y(), p.y()), std::max(hi.z(), p.z()));
+        }
+        meshDiagonal = (hi - lo).length();
+    }
     const auto islandsOf = [&](const std::vector<unsigned> &tris) {
         std::vector<unsigned> is(tris.size() / 3);
         for (size_t t = 0; t < is.size(); ++t) is[t] = islands.compOf[tris[t * 3]];
@@ -205,14 +338,26 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
                             target = std::max<size_t>(1, inCount / 2);
                         }
                     }
-                    results[g] = reduceGroup(mesh, weld, islands, in, grouping.external[g], childError[g], floorLen,
-                                             options.attributes, target);
-                    if (results[g].accepted && !results[g].simplified) {
-                        // not simplified: its output is its input, already split above
-                    } else if (results[g].accepted && !results[g].out.empty()) {
+                    // A TRUE LEVEL STEP needs fewer clusters than the group's input: a result within the budget that
+                    // still needs as many (the 256-vertex cap binds before the 128-triangle one on seamed or boxy
+                    // content) is simplified again to three quarters of its own count, as Nanite answers a failed
+                    // split with a smaller target (dossier 1.5), until it fits fewer clusters or nothing within the
+                    // budget does — then the group is carried.
+                    for (int shrink = 0;; ++shrink) {
+                        results[g] = reduceGroup(mesh, weld, islands, in, grouping.external[g], childError[g],
+                                                 childStored[g], floorLen, options.attributes, options.placement, target);
+                        GroupResult &r = results[g];
+                        if (!r.accepted || !r.simplified) break;   // carried, or merged as it was (split above)
                         const Clock::time_point ts = Clock::now();
-                        splits[g].parts = buildClusters(mesh, weld, results[g].out, islandsOf(results[g].out));
-                        splitMs[g] = msSince(ts);
+                        std::vector<unsigned> isl(r.out.size() / 3);
+                        for (size_t t = 0; t < isl.size(); ++t) isl[t] = r.space.comp[r.out[t * 3]];
+                        splits[g].parts = buildClusters(r.space.view(), r.space.weld, r.out, isl);
+                        splitMs[g] += msSince(ts);
+                        if (splits[g].parts.size() < grouping.groups[g].size()) break;
+                        splits[g].parts.clear();
+                        const size_t outCount = r.out.size() / 3;
+                        if (shrink >= kMaxShrinks || outCount <= 1) { r.accepted = false; break; }
+                        target = std::max<size_t>(1, outCount * 3 / 4);
                     }
                 }
             });
@@ -243,6 +388,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
             rec.inTris = 0;
             for (unsigned p : grouping.groups[g]) rec.inTris += int(cl[size_t(pool[p])].tris.size() / 3);
             rec.childError = childError[g];
+            rec.childStored = childStored[g];
             rec.budget = r.budget;
             rec.step = r.step;
             rec.estimate = r.estimate;
@@ -256,8 +402,8 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
             rec.lostLocked = r.terms.lostLocked;
             rec.islandsDropped = r.terms.islandsDropped;
             rec.lockedLost = r.terms.lockedLost;
-            rec.weightNormal = r.weights.normal;
-            rec.weightUv = r.weights.uv;
+            rec.weightNormal = r.scratch.weights.normal;
+            rec.weightUv = r.scratch.weights.uv;
             if (options.wantLocks) {
                 rec.external = grouping.external[g];
                 for (unsigned p : grouping.groups[g]) rec.memberClusters.push_back(pool[p]);
@@ -298,12 +444,31 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
             rec.outTris = int(r.out.size() / 3);
             if (stats) { if (r.simplified) ++stats->reductions; else ++stats->notSimplified; }
 
+            // THE OUTPUT IN MESH IDS: a local id below n is its scratch vertex's mesh vertex; a PLACED survivor is
+            // appended to the store as a new vertex (once per survivor), in group order — deterministic ids.
+            std::vector<unsigned> outGlobal(r.out.size());
+            {
+                const size_t n = r.scratch.size();
+                std::vector<unsigned> placedId(n, ~0u);
+                for (size_t i = 0; i < r.out.size(); ++i) {
+                    const unsigned v = r.out[i];
+                    if (v < n) { outGlobal[i] = r.scratch.globalOf[v]; continue; }
+                    const unsigned sId = unsigned(v - n);
+                    if (placedId[sId] == ~0u) {
+                        placedId[sId] = store.append(r.scratch, r.space, r.placedAttr, sId, weld, islands);
+                        rec.placed++;
+                    }
+                    outGlobal[i] = placedId[sId];
+                }
+                if (stats) stats->appendedVertices += rec.placed;
+                mesh = store.view();
+            }
             // The parents.
             const size_t firstParent = cl.size();
             for (const std::vector<unsigned> &part : splits[g].parts) {
                 Cl c;
                 for (unsigned t : part)
-                    c.tris.insert(c.tris.end(), { r.out[size_t(t) * 3], r.out[size_t(t) * 3 + 1], r.out[size_t(t) * 3 + 2] });
+                    c.tris.insert(c.tris.end(), { outGlobal[size_t(t) * 3], outGlobal[size_t(t) * 3 + 1], outGlobal[size_t(t) * 3 + 2] });
                 c.refined = id;
                 c.stored = G.error;
                 boundsOf(mesh, c);
@@ -315,17 +480,17 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
             // parent nearest its centroid (a partition per group is what makes "one cut covers every level-0
             // triangle once" countable).
             if (options.wantRegions && cl.size() > firstParent) {
-                std::vector<unsigned> parentOf(r.out.size() / 3, 0u);
+                std::vector<unsigned> parentOf(outGlobal.size() / 3, 0u);
                 for (size_t k = 0; k < splits[g].parts.size(); ++k)
                     for (unsigned t : splits[g].parts[k]) parentOf[t] = unsigned(k);
-                Vec3 lo = mesh.position(r.out[0]), hi = lo;
-                for (unsigned v : r.out) {
+                Vec3 lo = mesh.position(outGlobal[0]), hi = lo;
+                for (unsigned v : outGlobal) {
                     const Vec3 p = mesh.position(v);
                     lo = Vec3(std::min(lo.x(), p.x()), std::min(lo.y(), p.y()), std::min(lo.z(), p.z()));
                     hi = Vec3(std::max(hi.x(), p.x()), std::max(hi.y(), p.y()), std::max(hi.z(), p.z()));
                 }
                 surface::TriangleGrid grid;
-                grid.build(mesh.positions, mesh.posComps, r.out, lo, hi, 32);
+                grid.build(mesh.positions, mesh.posComps, outGlobal, lo, hi, 32);
                 surface::TriangleGrid::Query q;
                 for (unsigned p : grouping.groups[g])
                     for (quint32 t : cl[size_t(pool[p])].region) {
@@ -348,7 +513,7 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
         const int id = int(groups.size());
         MeshClusterDag::Group G;
         G.depth = level;
-        G.error = std::max(std::max(root.stored, (root.hi - root.lo).length()), floorLen);
+        G.error = std::max(std::max(root.stored, meshDiagonal), floorLen);
         G.estimate = 0.0f;
         for (int k = 0; k < 3; ++k) G.centre[k] = k == 0 ? root.lod.c.x() : (k == 1 ? root.lod.c.y() : root.lod.c.z());
         G.radius = root.lod.r;
@@ -398,6 +563,19 @@ bool build(const MeshView &mesh, const std::vector<unsigned> &base, MeshClusterD
         o.radius = x.cull.r;
     }
     *out = dag;
+    if (appended) {
+        appended->nv0 = store.nv0;
+        appended->uvComps = store.uvComps;
+        appended->source = store.source;
+        const size_t a = store.source.size();
+        const auto tail = [&](const std::vector<float> &v, size_t comps, std::vector<float> &dst) {
+            if (!v.empty()) dst.assign(v.end() - std::ptrdiff_t(a * comps), v.end());
+        };
+        tail(store.P, 3, appended->pos);
+        tail(store.N, 3, appended->nrm);
+        tail(store.U, size_t(std::max(store.uvComps, 0)), appended->uv);
+        tail(store.T, 3, appended->tan);
+    }
     if (stats) {
         stats->clusters = int(cl.size());
         stats->groups = int(groups.size());

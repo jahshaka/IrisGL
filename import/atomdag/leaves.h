@@ -41,6 +41,11 @@ struct PartitionRule
     double imbalance = 0.005;  ///< per final part: the fraction of its size a bisection may be off by
     /// An extra cap a part of at most maxSize nodes must also meet (the leaves' vertex cap); null = none.
     std::function<bool(const std::vector<unsigned> &part)> fits;
+    /// The part's own size in the extra cap's currency (its unique vertices) and that cap: a part is cut into at least
+    /// ceil(vertices / maxVertices) final parts, so a vertex-bound part is not halved into half-empty clusters
+    /// (128 simplified kit-bash triangles carry 288 vertices: two parts of 64 against one of 113 and one of 15).
+    std::function<size_t(const std::vector<unsigned> &part)> vertexCount;
+    size_t maxVertices = 0;
 };
 
 /// Partitions the graph's nodes into parts (each a sorted list of node ids), in a deterministic order.
