@@ -229,8 +229,9 @@ struct ScratchArena {
 /// pixel of the fixture still moved 16/255 after sixteen frames; at 1/32 it is
 /// half that and the 99th percentile is inside 2/255. Half a second of lag at
 /// 60 Hz on a light that moves, which is the other side of the same number.
-/// (PHOTON-2 1b: the temporal pass's clamp and confidence shorten it where the
-/// light or the reflected thing changed; it no longer decides convergence alone.)
+/// (PHOTON-2 1b/1e: it is the MOVING eye's memory only — the temporal pass's clamp
+/// and confidence shorten it where the light or the reflected thing changed, and a
+/// still eye lifts it to a true mean that holds; it no longer decides convergence.)
 constexpr float kReflectHistoryFloor = 1.0f / 32.0f;
 /// HOW MANY CASCADES THE HIT SHADING READS — the shader's `kMaxCascades`, and
 /// the two must agree.
@@ -239,6 +240,10 @@ constexpr unsigned kMaxReflectCascades = 4u;
 /// command buffer that has not retired may not be rewritten, and this set is
 /// rewritten every frame (every input can be recreated behind our back).
 constexpr unsigned kReflectRing = 3u;
+/// THE REFLECTION'S REST LENGTH (PHOTON-2 1e): the frames a still view accumulates its true mean before it holds —
+/// the gather's own settle (settleFramesOf(kHistoryFrames) = 16, OgreScreenProbeGather.cpp), so the diffuse and the
+/// specular of one still picture hold on the same frame.
+constexpr unsigned kReflectRestFrames = 16u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
@@ -1019,6 +1024,20 @@ private:
         /// the trace bound, its grid, and which of the pair is this frame's mean.
         bool     finishPending = false;
         unsigned finishRing = 0, traceW = 0, traceH = 0, curIdx = 0;
+        /// THE REST (PHOTON-2 1e) — the gather's rule (OgreScreenProbeGather.cpp's "THE REST") applied to the
+        /// reflection: consecutive recorded frames with the eye basis bit-identical, the scene's rest key unchanged
+        /// (the gather's: the lighting, the geometry, the surface cache) and the pass's own parameters unchanged.
+        /// At rest the history is a TRUE MEAN (rq_reflect_temporal.comp: the floor lifted, the clamp off); past
+        /// kReflectRestFrames the view HOLDS — the trace and the temporal pass dispatch nothing and the filter
+        /// composites the held mean — until anything above moves.
+        unsigned restFrames = 0u;
+        unsigned long long restKey = 0ull, restParams = 0ull;
+        bool restKnown = false;
+        /// This frame is a held one (finishReflect skips the temporal pass).
+        bool held = false;
+        /// The descriptor and parameter ring's own counter: every RECORDED frame takes the next slot (a held frame
+        /// traces nothing, so `frame` — the traced frames, the ping-pong's parity and the sample sequence — stands).
+        unsigned ringFrame = 0u;
         /// THE HISTORY-COUNT READBACK (PHOTON-2 stage 0, the arm "reflect.historyReadback"): a host ring of
         /// kReflectRing copies of the temporal mean the filter has read, the slot of the frame's ring; each
         /// decoded once its frame retired into `histHost` (the w channel, the count) for RayQueryStatus.
@@ -5624,7 +5643,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         Ogre::LogManager::getSingleton().logMessage("Jahshaka: ray-traced reflections off — " + err);
         return;
     }
-    const unsigned ring = rv.frame % kReflectRing;
+    const unsigned ring = rv.ringFrame++ % kReflectRing;
     if (!rv.params[ring].buffer &&
         !makeBuffer(sizeof(ReflectParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false,
                     rv.params[ring], err))
@@ -5926,6 +5945,45 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.alpha[3] = rayMoversOf(scene) ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
+    // ---- THE REST (PHOTON-2 1e) -------------------------------------------------------------------------------
+    // The eye basis BIT for bit (a tracked head is never at rest: stereo never rests, as the gather's), the scene's
+    // rest key (the gather's own, with its arm), and every parameter of the pass but the ones a still frame changes
+    // by construction (the frame index, the previous basis, the view's age, the rest flag itself). A Hits photon
+    // view keeps tracing (it is the trace's picture).
+    bool hold = false;
+    {
+        ReflectParams key = pp;
+        key.knobs[2] = 0.0f;
+        key.knobs2[0] = 0.0f;
+        key.stereo[1] = 0.0f;
+        std::memset(key.prevCamPos, 0, sizeof(key.prevCamPos));
+        std::memset(key.prevRayTL, 0, sizeof(key.prevRayTL));
+        std::memset(key.prevRayRight, 0, sizeof(key.prevRayRight));
+        std::memset(key.prevRayDown, 0, sizeof(key.prevRayDown));
+        std::memset(key.prevFwd, 0, sizeof(key.prevFwd));
+        std::memset(key.prevCamPos2, 0, sizeof(key.prevCamPos2));
+        std::memset(key.prevRayTL2, 0, sizeof(key.prevRayTL2));
+        std::memset(key.prevRayRight2, 0, sizeof(key.prevRayRight2));
+        std::memset(key.prevRayDown2, 0, sizeof(key.prevRayDown2));
+        std::memset(key.prevFwd2, 0, sizeof(key.prevFwd2));
+        unsigned long long paramsKey = 1469598103934665603ull;
+        const unsigned char *bytes = reinterpret_cast<const unsigned char *>(&key);
+        for (size_t b = 0; b < sizeof(key); ++b) {
+            paramsKey ^= bytes[b];
+            paramsKey *= 1099511628211ull;
+        }
+        const unsigned long long restKey = gatherRestKeyArmed(scene);
+        const bool sameEye = rv.havePrev && rv.prevStereo == stereo &&
+                             std::memcmp(&rv.prev[0], &eyeB[0], sizeof(EyeBasisF)) == 0;
+        const bool still = !stereo && !photon && sameEye && rv.restKnown && restKey == rv.restKey &&
+                           paramsKey == rv.restParams && rv.historyFrames >= 1u;
+        rv.restFrames = still ? std::min(rv.restFrames + 1u, 1u << 20) : 0u;
+        rv.restKey = restKey;
+        rv.restParams = paramsKey;
+        rv.restKnown = true;
+        pp.knobs2[0] = rv.restFrames > 0u ? 1.0f : 0.0f;
+        hold = rv.restFrames > kReflectRestFrames;
+    }
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
@@ -5958,7 +6016,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         retireView(v);
         return v;
     };
-    const unsigned prev = rv.frame & 1u, cur = 1u - prev;
+    // THE PING-PONG: a traced frame reads [frame & 1] and writes the other; a HELD frame writes nothing and binds the
+    // last written half as "cur" (the filter composites it), which the next traced frame then reads as "prev".
+    const unsigned last = rv.frame & 1u;
+    const unsigned prev = hold ? 1u - last : last, cur = hold ? last : 1u - last;
 
     VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
     asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
@@ -6262,14 +6323,16 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!cmd) { bail("frameCmd"); return; }   // device lost: record nothing
     clearDummyImages(cmd);
     clearReflectImages(rv, cmd);
-    monitor::CacheScope traceRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.trace", mRs, key);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
-                            &rv.sets[ring], 0, nullptr);
-    vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, eyeLayers);   // z = the eye
-    // The overlay holds this frame's picture from here; the photon listener takes it
-    // to the texture layout in front of its composite.
-    if (photon) view->notePhotonOverlayWritten();
+    if (!hold) {
+        monitor::CacheScope traceRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.trace", mRs, key);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
+                                &rv.sets[ring], 0, nullptr);
+        vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, eyeLayers);   // z = the eye
+        // The overlay holds this frame's picture from here; the photon listener takes it
+        // to the texture layout in front of its composite.
+        if (photon) view->notePhotonOverlayWritten();
+    }
     // ---- THE FIRST HALF ENDS HERE (PHOTON-HIT-SHADE-1): the hits no cache
     // shades are in the hit list; the decode pass shades them and the write-back
     // completes their texels' means before finishReflect filters.
@@ -6278,8 +6341,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     rv.traceW = traceW;
     rv.traceH = traceH;
     rv.curIdx = cur;
-    rv.rays = traceW * traceH;
-    ++rv.frame;
+    rv.held = hold;
+    rv.rays = hold ? 0u : traceW * traceH;
+    if (!hold) ++rv.frame;
 }
 
 // ---- THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1) ----------------------
@@ -6906,7 +6970,9 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
                              nullptr);
     }
     // THE TEMPORAL PASS (PHOTON-2 1b): the carried history clamped to this frame's samples and the sample blended in —
-    // after the write-back (records' samples are complete), before the filter reads the mean's neighbours.
+    // after the write-back (records' samples are complete), before the filter reads the mean's neighbours. A HELD
+    // frame (1e) has no sample: the filter composites the held mean.
+    if (!rv.held) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTemporalPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                             &rv.sets[ring], 0, nullptr);
@@ -6921,6 +6987,7 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
         meanBlended.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                              &meanBlended, 0, nullptr, 0, nullptr);
+    }
     }
     // THE FILTER AND THE COMPOSITE — the same descriptor set, a different
     // pipeline. Its time is the SAME row as the trace's, deliberately:

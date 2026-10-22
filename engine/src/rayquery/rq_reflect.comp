@@ -1215,7 +1215,9 @@ void main()
 	// max( 1/N, `blendFloor` ). The floor here is everything that is the TEXEL's: the history's memory (the
 	// floor on 1/n), the mirror ramp below, a moving reflector's eighth; 1 where there is no history. `blend` is the
 	// estimate the mean ray length below follows.
-	float blendFloor = prev.w > 0.0 ? p.knobs2.w : 1.0;
+	// AT REST (PHOTON-2 1e, knobs2.x) the history's floor is lifted: a still eye's mean is a true mean (1/n), which the
+	// temporal pass accumulates until the view holds.
+	float blendFloor = prev.w > 0.0 ? ( p.knobs2.x > 0.5 ? 0.0 : p.knobs2.w ) : 1.0;
 	const float n = min( prev.w, 1.0 / max( p.knobs2.w, 1e-3 ) );
 	float blend = prev.w > 0.0 ? max( 1.0 / ( n + 1.0 ), p.knobs2.w ) : 1.0;
 	// THE MEAN IS FOR VARIANCE, AND A MIRROR HAS NONE (second reader, H1). The
