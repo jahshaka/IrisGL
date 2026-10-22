@@ -1108,7 +1108,9 @@ constexpr ArmDef kArms[] = {
     { ArmId::GiFreeze, 0.0, 0.0, 1.0,
       "THE GI FROZEN (PHOTON-2 round 2, M1's measuring arm): no GI cache works - no field, cascade, settle, tick or card "
       "work is planned, no card is captured or relit - and the gather and the reflections keep every history they hold "
-      "(no new sample enters). A walk under it measures the motion's own resampling; the walk without it minus that is "
+      "(no new sample enters - their moving histories AND their rest means: a texel or pixel at rest keeps its rest "
+      "mean as it is; a glossy reflection keeps the live estimator's own reprojection, the virtual point's or the "
+      "surface's, unclamped). A walk under it measures the motion's own resampling; the walk without it minus that is "
       "the GI's flicker under motion (the stillness door's moving window). 0 = shipped." },
     { ArmId::HitListCap, 0.0, 0.0, 16777216.0,
       "THE OVERFLOW ARM (PHOTON-2 stage 2's tail, a test door): the traces and the hit write-back hold at most this many "

@@ -616,7 +616,9 @@ void main()
 		// path-dependent and the held answer would keep its share) - a starved first rest frame stores "no rest sample
 		// yet" (w -1) and the rest mean starts at the pixel's first SAMPLED rest frame, whole. (Until then the answer is
 		// the history; the later samples weigh 1 / k of the rest frame - a starved frame is a full list's, rare.)
-		const bool restTakes = !noSample;
+		// ...and UNDER THE GI FREEZE (stereo.w, PHOTON-2 1b W4) a pixel with a history takes no rest sample either: it keeps
+		// its history (the rest mean holds none yet) or its rest mean as it is - no new sample enters anywhere.
+		const bool restTakes = !noSample && !( p.stereo.w > 0.5 && prevCount > 0u );
 		const vec4 stored = restK < 1.5 ? vec4( 0.0, 0.0, 0.0, -1.0 ) : imageLoad( restMean, at );
 		const bool empty = stored.w < -0.5;
 		const vec4 rest = !restTakes ? stored : empty ? sample1 : mix( stored, sample1, 1.0 / restK );

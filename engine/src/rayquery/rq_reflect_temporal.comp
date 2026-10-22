@@ -402,6 +402,10 @@ void main()
 		}
 		else
 		{
+		// THE GI FREEZE AT REST (PHOTON-2 1b W4): no new sample enters the rest either - the texel keeps its rest mean, its
+		// second moment and its stop count as they are (a texel can rest while the camera walks: its ray never moved).
+		if( p.rest.x > 0.5 )
+			return;
 		const float v = min( vPrev + 1.0, kReflectRestMax );
 		// (stored rounded stochastically: an fp16 running mean past a few hundred samples otherwise drifts - P1)
 		const vec3 M = jahRestStoreMean( vPrev > 0.0 ? Mp.xyz + ( sk - Mp.xyz ) / v : sk, tc, gEye, p.knobs.z );
