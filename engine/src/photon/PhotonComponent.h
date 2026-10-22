@@ -813,8 +813,9 @@ public:
     /// With the row off the tier records no dispatch, the Component allocates
     /// nothing, the Hlms listener sets no property and no pixel moves.
     bool probeGatherWanted() const;
-    /// ...and the gather's REST KEY (OgreRayQuery.cpp): that serial, the
-    /// geometry's movement epoch and the surface cache's captures and relights.
+    /// ...and the gather's REST KEY (OgreRayQuery.cpp; PHOTON-2 stage 2's round, H1): every write to an
+    /// input of its answer - the lights, the geometry, the material edits, the lighting serial, the cloud
+    /// layer's GI, the field's dispatches, the surface cache's captures and relights.
     unsigned long long gatherRestKey() const;
     /// The settle's key: the discontinuities only (OgreRayQuery.cpp).
     unsigned long long gatherRestartKey() const;
@@ -1480,9 +1481,10 @@ private:
     /// keep every dispatch a whole multiple of the batch size (the last batch
     /// of an uneven split is where the zero-work-group abort lives).
     Ogre::uint32                      mIfdTotalProbes     = 0;
-    /// THE FIELD'S LAST WRITE, as the gather sees it (ENGINE-UPGRADE-2B stage 4): the generation job's integration
-    /// count last read back, and the engine frame it moved on. The gather's rest key folds the count (its rest mean
-    /// restarts after the field's last write) and giAtRest waits the gather's settle frames after that frame.
+    /// THE FIELD'S LAST WRITE, as the readback sees it (ENGINE-UPGRADE-2B stage 4): the generation job's integration
+    /// count last read back (up to four frames late), and the engine frame it moved on. giAtRest waits the gather's
+    /// settle frames after that frame; the reflection's reads key folds the count. (The gather's rest key folds the
+    /// field's DISPATCHES, counted on the CPU as they are recorded - PHOTON-2 H1.)
     unsigned long long                mIfdIntegrationsSeen = 0;
     unsigned long long                mIfdWriteFrame       = 0;
     Ogre::uint32                      mIfdProbesDone      = 0;

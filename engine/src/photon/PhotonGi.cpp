@@ -1345,9 +1345,10 @@ GiStatus PhotonComponent::giStatus() const {
         // poses, gi.ddgi — waits for it with no change of its own.
         if (st.gather.running && !st.gather.settled) st.giAtRest = false;
         // ...AND THE FIELD'S LAST WRITE IS A LIGHTING STEP FOR IT (ENGINE-UPGRADE-2B stage 4): a gather pixel reads
-        // the field, and the gather's rest mean restarts on the field's writes (its rest key), so rest waits the
-        // gather's settle frames after the last one - the held picture is then a mean of the finished field only
-        // (pool.world_sky_b's height_fog: two at-rest shots 1.4e-4 apart without it).
+        // the field, and every field dispatch breaks the gather's rest (its rest key, PHOTON-2 H1: no rest mean
+        // starts while the field writes), so rest waits the gather's settle frames after the last write the readback
+        // saw - the held picture is then a mean of the finished field only (pool.world_sky_b's height_fog: two
+        // at-rest shots 1.4e-4 apart without it).
         if (st.gather.running && mIfd && giWriterFrame() - mIfdWriteFrame < st.gather.settleFrames) st.giAtRest = false;
     } JAH_CATCH(mError, st);
     return st;
@@ -6100,10 +6101,11 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         // THE SETTLE IS PAID AT ONCE (PHOTON-2 stage 2b): one step a frame from the first payable frame, so
         // a walk's last commit is settled within the chain's size in frames of the stop, not after it. (It was
         // paid on the LAST top+1 of the frames the whole sweep would have taken — PHOTON-GATHER-1b item 6 —
-        // because every finished settle re-integrated the field with keep 0: 22 one-sample field restarts in
-        // gi.field_follows' 200-frame walk. The field keeps on a change now (stage 2a, kIfdKeepOnChange), so a
-        // finished settle's re-integration is a blend, and the reason is gone. THE PRICE, measured: each step
-        // is one cascade's injection inside the walk — the walk's frame cost, reported.)
+        // because every finished settle re-integrated the field with keep 0 and one sample: 22 one-sample field
+        // restarts in gi.field_follows' 200-frame walk. A change is four fresh samples deep now (stage 2a,
+        // kIfdChangeSamples) and continues from its cursor (K1), never a one-sample restart, so the reason is
+        // gone. THE PRICE, measured: each step is one cascade's injection inside the walk — the walk's frame
+        // cost, reported.)
         if (!pending) {
             // A LIGHT THAT MOVED WHILE THE SETTLE WAS RUNNING RESTARTS IT, and this
             // is not caution: an injection reads the lights' DERIVED poses at the
