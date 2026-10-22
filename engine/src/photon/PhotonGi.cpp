@@ -7524,8 +7524,10 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
         mIfdProbesDone = mIfdTotalProbes - owed;
     } else {
         mIfdProbesDone = mIfdTotalProbes;
-        // The entered planes' refinements run at the budget (the kept probes that
-        // hold the target are skipped); a paused field refines nothing.
+        // THE REFINEMENTS THE SCROLL OWES (scrollWindow, K3): target - 1 passes over the entered
+        // planes - joined to the band of a refinement still running, or the whole grid when that
+        // cannot be a band - so a pass the follow interrupted is owed again in full; at the budget
+        // (a probe at the target or stopped exits at its history read); a paused field refines nothing.
     }
     return true;
 }

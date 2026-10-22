@@ -946,7 +946,9 @@ namespace Ogre
         // scroll still owes, when the window kept moving the same way — never the whole
         // grid, whose kept probes are at the target already. A schedule that cannot be
         // a band (an unfinished whole-grid one, a reversal, a band around the grid)
-        // stays whole.
+        // stays whole. A pass this scroll interrupts is owed again in full (PHOTON-2 K3:
+        // mRefinesOwed restarts at target - 1 below over the joined band or the grid,
+        // and every probe that pass had reached exits at its history read).
         {
             const bool pending = mRefinesOwed > 0u || !isWorkDone();
             if( !pending )
