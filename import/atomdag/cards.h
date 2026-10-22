@@ -22,8 +22,8 @@ For more information see the LICENSE file
 // THE QUAD of a set: in the plane through the sources' area-weighted centre, its normal the sources' area-weighted
 // normal (each triangle's turned to the seed's side — cards are two-sided); its axes the SEED's (the set's largest
 // card: its own in-plane frame, projected onto the plane); its aspect the seed's UV rectangle's in that frame and its
-// AREA THE SOURCES' SUMMED AREA (coverage kept) — shrunk about its centre only as far as keeps every corner inside the
-// mesh's level-0 box (the mesh's box never grows; an overhang past the sources is priced like any deviation). Its UVs: the seed's rectangle corners under the seed's own affine map
+// AREA THE SOURCES' SUMMED AREA (coverage kept), never shrunk — the quads may extend the level-0 box, which the bake
+// recomputes after the build (an overhang past the sources is priced like any deviation). Its UVs: the seed's rectangle corners under the seed's own affine map
 // from its frame to its first UV set (no new texture); every other buffer copies the seed's vertex nearest each corner.
 // THE PRICE: the set's sources against its quad, MEASURED both ways (measure.h's one-step deviation, exact, for this
 // shape — cards.cpp priceOf: the sources' vertices and facets against the convex quad, the quad against the sources by
@@ -63,7 +63,7 @@ struct CardMerge
     int sets = 0;                     ///< sets merged
     int cardsMerged = 0;
     int pricings = 0;                 ///< sets measured (the attempts)
-    int shrunk = 0;                   ///< quads shrunk to stay inside their sources' box
+    float measured = 0.0f;            ///< the largest exact walk of a merged set (its upper bound, up to 5 % above)
     double sourceArea = 0.0, quadArea = 0.0;   ///< summed over the merged sets (coverage)
     float maxCentreDistance = 0.0f;   ///< the largest seed-to-card centre distance merged
 };
@@ -71,10 +71,10 @@ struct CardMerge
 /// Whether more than half the input's triangles belong to cards (`islandTriangles` = per island its triangles).
 bool isCardGroup(const GroupScratch &sc, const LocalSpace &space, const std::vector<size_t> &islandTriangles);
 
-/// The merge of the scratch's cards under the budget `budget`; `lock` flags the locked scratch vertices; every quad
-/// stays inside [boxLo, boxHi] (the mesh's level-0 box).
+/// The merge of the scratch's cards under the budget `budget`; `lock` flags the locked scratch vertices. The quads may
+/// extend the level-0 box; the mesh's box and sphere are recomputed after the build.
 CardMerge mergeCards(const GroupScratch &sc, const LocalSpace &space, const std::vector<unsigned char> &lock,
-                     float budget, float floorLen, const Vec3 &boxLo, const Vec3 &boxHi);
+                     float budget, float floorLen);
 
 }   // namespace atomdag
 }   // namespace iris

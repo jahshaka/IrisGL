@@ -58,7 +58,7 @@ std::vector<unsigned> islandsAtRisk(const LocalSpace &space, const std::vector<u
 
 GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
                         const std::vector<unsigned> &inTris, const std::vector<unsigned> &externalWelds, float ask,
-                        float floorLen, size_t targetTris, const Vec3 &boxLo, const Vec3 &boxHi, bool cardsAllowed)
+                        float floorLen, size_t targetTris, bool cardsAllowed)
 {
     GroupResult r;
     r.scratch = makeScratch(mesh, inTris);
@@ -95,7 +95,7 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
     if (cardsAllowed && isCardGroup(sc, r.space, islands.triangles)) {
         r.cards = true;
         const Clock::time_point tc = Clock::now();
-        r.merge = mergeCards(sc, r.space, lock, r.budget, floorLen, boxLo, boxHi);
+        r.merge = mergeCards(sc, r.space, lock, r.budget, floorLen);
         r.msMeasure += msSince(tc);
         r.attempts = r.merge.pricings;
         r.estimate = 0.0f;
@@ -107,6 +107,7 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
             (corner ? out : restLocal).insert(corner ? out.end() : restLocal.end(), { mo[t * 3], mo[t * 3 + 1], mo[t * 3 + 2] });
         }
         float step = r.merge.sets > 0 ? r.merge.step : 0.0f;
+        float restMeasured = 0.0f;
         bool reduced = r.merge.sets > 0;
         if (!restLocal.empty()) {
             std::vector<unsigned> restGlobal(restLocal.size());
@@ -117,7 +118,7 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
             const size_t restTarget = std::min(parentTarget(restGlobal.size() / 3),
                                                target > quadTris + 1 ? target - quadTris : size_t(1));
             const GroupResult rest = reduceGroup(mesh, weld, islands, restGlobal, externalWelds, r.budget, floorLen,
-                                                 restTarget, boxLo, boxHi, false);
+                                                 restTarget, false);
             r.attempts += rest.attempts;
             r.msSimplify += rest.msSimplify; r.msMeasure += rest.msMeasure; r.msExact += rest.msExact;
             r.pruned = rest.pruned;
@@ -129,6 +130,7 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
                 for (unsigned v : rest.out) out.push_back(localOf.at(rest.scratch.globalOf[v]));
                 step = std::max(step, rest.step);
                 r.terms = rest.terms;
+                restMeasured = rest.terms.step;
                 reduced = true;
             } else {
                 out.insert(out.end(), restLocal.begin(), restLocal.end());
@@ -138,7 +140,7 @@ GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld,
             r.accepted = true;
             r.out = std::move(out);
             r.step = std::max(step, floorLen);
-            r.terms.step = r.step;
+            r.terms.step = std::max(std::max(r.merge.measured, restMeasured), r.step);   // the walks' own values
             for (const CardCorner &c : r.merge.corners) {
                 r.space.pos.insert(r.space.pos.end(), { c.pos[0], c.pos[1], c.pos[2] });
                 r.space.weld.push_back(UINT_MAX - 1u - unsigned(r.space.weld.size()));   // a new position, its own

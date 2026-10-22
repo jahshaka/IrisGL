@@ -47,7 +47,6 @@ struct Quad
     CardCorner c[4];
     bool flip = false;
     float area = 0.0f;
-    bool shrunk = false;
 };
 
 /// Solves the 3 x 3 system a x = b (Cramer); false when singular.
@@ -66,8 +65,7 @@ bool solve3(const double a[3][3], const double b[3], double x[3])
     return true;
 }
 
-bool buildQuad(const GroupScratch &sc, const std::vector<Card> &cards, const std::vector<unsigned> &set, const Vec3 &lo,
-               const Vec3 &hi, Quad &q)
+bool buildQuad(const GroupScratch &sc, const std::vector<Card> &cards, const std::vector<unsigned> &set, Quad &q)
 {
     // THE SEED: the set's largest card.
     unsigned seed = set[0];
@@ -134,21 +132,10 @@ bool buildQuad(const GroupScratch &sc, const std::vector<Card> &cards, const std
     for (Vec3 &x : d) x = x - mid;
     const float parArea = Vec3::crossProduct(d[1] - d[0], d[3] - d[0]).length();
     if (!(parArea > 0.0f)) return false;
-    // AREA = the sources' summed area, shrunk only to keep every corner inside the mesh's level-0 box
-    float f = std::sqrt(float(area) / parArea);
-    float t = 1.0f;
-    for (const Vec3 &x : d)
-        for (int k = 0; k < 3; ++k) {
-            const float off = f * x[k];
-            if (off > 0.0f) t = std::min(t, (hi[k] - centre[k]) / off);
-            else if (off < 0.0f) t = std::min(t, (lo[k] - centre[k]) / off);
-        }
-    t = std::max(t, 0.0f);
-    q.shrunk = t < 1.0f;
-    f *= t;
+    // AREA = the sources' summed area, NEVER SHRUNK (the coverage law; the mesh's box is recomputed after the build)
+    const float f = std::sqrt(float(area) / parArea);
     for (int i = 0; i < 4; ++i) {
-        Vec3 p = centre + d[i] * f;
-        for (int k = 0; k < 3; ++k) p[k] = std::clamp(p[k], lo[k], hi[k]);   // the rounding of the last ulp
+        const Vec3 p = centre + d[i] * f;
         CardCorner &c = q.c[i];
         c.pos[0] = p.x(); c.pos[1] = p.y(); c.pos[2] = p.z();
         c.nrm[0] = n.x(); c.nrm[1] = n.y(); c.nrm[2] = n.z();
@@ -176,11 +163,12 @@ bool buildQuad(const GroupScratch &sc, const std::vector<Card> &cards, const std
 ///   the SOURCES against the quad (measure.h's removed vertices and lost facets): the distance to a convex polygon is a
 ///   convex function, so over every source facet it peaks at a corner — the maximum over the source vertices is exact;
 ///   each charged at most its own island's extent (the quad stands for its sources' islands: none is dropped);
-///   the QUAD against the sources (the added facets): a branch-and-bound walk over the quad's two triangles — a piece
-///   is bounded below by its corners' distances and above by its centre's plus its circumradius (the distance is
-///   1-Lipschitz), split in four until the bounds close within 5 % (the walk's tolerance), charged at most the quad's
-///   diagonal. `exact` false = THE DECISION: it stops the moment the price passes the budget or every piece is proven
-///   under it (the value is then a bound, not the price).
+///   the QUAD against the sources (the added facets, uncapped as measure.h's): a branch-and-bound walk over the quad's
+///   two triangles — a piece is bounded below by its corners' distances and above by its centre's plus its
+///   circumradius (the distance is 1-Lipschitz), split in four until the bounds close within 5 %; the exact answer is
+///   the UPPER bound over the closed pieces (CLUSTER-LOCK-3's rule: never the sampled lower one). `exact` false = THE
+///   DECISION: past the budget the moment a lower bound passes it (or a piece at the depth limit is not proven under
+///   it), within it once every piece's upper bound is.
 float priceOf(const GroupScratch &sc, const LocalSpace &space, const std::vector<Card> &cards,
               const std::vector<unsigned> &set, const Quad &q, float budget, float floorLen, bool exact)
 {
@@ -202,18 +190,18 @@ float priceOf(const GroupScratch &sc, const LocalSpace &space, const std::vector
                 price = std::max(price, std::min(toQuad(p), space.cap[v]));
                 if (!exact && price > budget) return price;
             }
-    // the quad against the sources (branch and bound)
-    const float cap = q.c[0].diagonal;
+    // the quad against the sources (branch and bound; no cap — measure.h's added facets carry none)
     const auto toSources = [&](const Vec3 &p) {
         float d = FLT_MAX;
         for (size_t i = 0; i < src.size(); i += 3)
             d = std::min(d, (p - surface::closestOnTriangle(p, src[i], src[i + 1], src[i + 2])).length());
-        return std::min(d, cap);
+        return d;
     };
     struct Piece { Vec3 a, b, c; int depth = 0; };
     std::vector<Piece> stack { { Q[0], Q[1], Q[2], 0 }, { Q[0], Q[2], Q[3], 0 } };
     constexpr float kTolerance = 0.05f;
     constexpr int kMaxDepth = 12;
+    float upper = 0.0f;   // the exact mode's answer: the UPPER bound over the closed pieces (CLUSTER-LOCK-3's rule)
     while (!stack.empty()) {
         const Piece pc = stack.back();
         stack.pop_back();
@@ -222,17 +210,23 @@ float priceOf(const GroupScratch &sc, const LocalSpace &space, const std::vector
         if (!exact && price > budget) return price;
         const Vec3 g = (pc.a + pc.b + pc.c) * (1.0f / 3.0f);
         const float r = std::max((pc.a - g).length(), std::max((pc.b - g).length(), (pc.c - g).length()));
-        const float up = std::min(toSources(g) + r, cap);
-        if (up <= price * (1.0f + kTolerance)) continue;   // this piece cannot raise the price past the tolerance
-        if (!exact && up <= budget) continue;               // proven under the budget
-        if (pc.depth >= kMaxDepth) { price = std::max(price, up); continue; }   // the bound stands
+        const float up = toSources(g) + r;
+        if (!exact) {
+            if (up <= budget) continue;                                       // proven under the budget
+            if (pc.depth >= kMaxDepth) return up;                             // not proven: past it
+        } else {
+            if (up <= price * (1.0f + kTolerance) || pc.depth >= kMaxDepth) {   // closed: its bound stands
+                upper = std::max(upper, up);
+                continue;
+            }
+        }
         const Vec3 ab = (pc.a + pc.b) * 0.5f, bc = (pc.b + pc.c) * 0.5f, ca = (pc.c + pc.a) * 0.5f;
         stack.push_back({ pc.a, ab, ca, pc.depth + 1 });
         stack.push_back({ ab, pc.b, bc, pc.depth + 1 });
         stack.push_back({ ca, bc, pc.c, pc.depth + 1 });
         stack.push_back({ ab, bc, ca, pc.depth + 1 });
     }
-    return price;
+    return exact ? std::max(price, upper) : price;
 }
 
 }   // namespace
@@ -249,7 +243,7 @@ bool isCardGroup(const GroupScratch &sc, const LocalSpace &space, const std::vec
 }
 
 CardMerge mergeCards(const GroupScratch &sc, const LocalSpace &space, const std::vector<unsigned char> &lock,
-                     float budget, float floorLen, const Vec3 &boxLo, const Vec3 &boxHi)
+                     float budget, float floorLen)
 {
     CardMerge r;
     const size_t tris = sc.tris.size() / 3, n = sc.size();
@@ -328,18 +322,19 @@ CardMerge mergeCards(const GroupScratch &sc, const LocalSpace &space, const std:
             std::vector<unsigned> set { s };
             for (size_t i = 0; i < take; ++i) set.push_back(near[i].second);
             Quad q;
-            if (!buildQuad(sc, cards, set, boxLo, boxHi, q)) break;
+            if (!buildQuad(sc, cards, set, q)) break;
             ++r.pricings;
             // THE DECISION first (every walk stops at the budget: a set past it costs little), then the kept set's
             // exact price (the stored step)
             if (!(priceOf(sc, space, cards, set, q, budget, floorLen, false) <= budget)) continue;
-            const float price = std::min(priceOf(sc, space, cards, set, q, budget, floorLen, true), budget);
+            const float walked = priceOf(sc, space, cards, set, q, budget, floorLen, true);   // its upper bound
+            const float price = std::min(walked, budget);   // the decision proved it within the budget
+            r.measured = std::max(r.measured, walked);
             for (unsigned c : set) { cards[c].taken = true; merged[c] = 1u; r.sourceArea += double(cards[c].area); }
             r.quadArea += double(q.area);
             r.step = std::max(r.step, price);
             r.maxCentreDistance = std::max(r.maxCentreDistance, near[take - 1].first);
             r.cardsMerged += int(set.size());
-            if (q.shrunk) ++r.shrunk;
             quads.push_back(q);
             break;
         }

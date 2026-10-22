@@ -2157,8 +2157,9 @@ bool dagInput(const MeshPtr &mesh, atomdag::MeshView *view, std::vector<unsigned
 
 /// THE CARD QUADS' VERTICES INTO THE MESH (D9): every per-vertex float buffer grows by the appended corners — the
 /// position, the normal and the first UV set's u and v as the build placed them, every other component and buffer (the
-/// second UV set, the tangent, the bitangent's handedness) copied from the corner's source vertex. The quads lie inside
-/// their sources' box, so the mesh's box and sphere do not move — checked here, loud if ever not.
+/// second UV set, the tangent, the bitangent's handedness) copied from the corner's source vertex — and the mesh's box
+/// and sphere RECOMPUTED over them (a quad keeps its cards' summed area and may reach past level 0's box; picking and
+/// the node bounds read the document's box, the engine takes its own from the uploaded positions).
 void applyAppended(const MeshPtr &mesh, const atomdag::Appended &a)
 {
     if (mesh.isNull() || a.count() == 0) return;
@@ -2186,12 +2187,10 @@ void applyAppended(const MeshPtr &mesh, const atomdag::Appended &a)
         vb->setData(data.data(), unsigned(data.size() * sizeof(float)));
     }
     mesh->numVerts = int(a.nv0 + a.count());
-    int outside = 0;
-    for (const atomdag::CardCorner &c : a.corners)
-        for (int k = 0; k < 3; ++k)
-            if (c.pos[k] < mesh->aabb.getMin()[k] || c.pos[k] > mesh->aabb.getMax()[k]) { ++outside; break; }
-    if (outside)
-        irisLog(QStringLiteral("mesh bake: DEFECT %1 card-quad corners outside the mesh's box (it was not grown)").arg(outside));
+    AABB box = mesh->aabb;
+    for (const atomdag::CardCorner &c : a.corners) box.merge(Vec3(c.pos[0], c.pos[1], c.pos[2]));
+    mesh->aabb = box;
+    mesh->boundingSphere = box.getMinimalEnclosingSphere();
 }
 
 }   // namespace
@@ -2321,7 +2320,7 @@ private:
 /// contain a child's, is the bake correcting its own measurement, and a count that
 /// is suddenly large is the thing to see (shipped content: 0-3 per mesh, 17 spheres
 /// on the dragon).
-void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards,
+void bakeStages(MeshBake::Model &model, const QString &filePath, const QStringList &meshNames, int maxCards,
                 const std::atomic<bool> *cancel)
 {
     using Clock = std::chrono::steady_clock;
@@ -2367,9 +2366,10 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards,
     // THE DEPTH CAP, named (the chain closed with the empty top over its remaining pool — a DAG all the same).
     for (size_t i = 0; i < meshes; ++i)
         if (dagStats[i].depthCapHit)
-            irisLog(QStringLiteral("mesh bake: WARNING %1 mesh %2 (%3 clusters, %4 groups) met the cluster DAG's depth cap of %5 — "
-                                   "closed with the empty top over the clusters it still held")
-                        .arg(filePath).arg(i).arg(dagStats[i].clusters).arg(dagStats[i].groups).arg(atomdag::kMaxLevels));
+            irisLog(QStringLiteral("mesh bake: WARNING %1 mesh %2 \"%3\" (%4 clusters, %5 groups) met the cluster DAG's depth "
+                                   "cap of %6 — closed with the empty top over the clusters it still held")
+                        .arg(filePath).arg(i).arg(i < size_t(meshNames.size()) ? meshNames.at(int(i)) : QString())
+                        .arg(dagStats[i].clusters).arg(dagStats[i].groups).arg(atomdag::kMaxLevels));
     model.meshesMs = msSince(start);
 #if defined(__GLIBC__)
     // THE POOL'S FREED MEMORY GOES BACK. glibc gives every thread its own malloc
@@ -2474,7 +2474,9 @@ MeshBake::Model MeshBake::buildFromSceneUnguarded(const aiScene *scene, const QS
         model.meshes.append(mesh);
     }
     cancelPoint(cancel);   // between the mesh conversion and the stages
-    bakeStages(model, filePath, xf.maxCards, cancel);
+    QStringList meshNames;
+    for (unsigned i = 0; i < scene->mNumMeshes; ++i) meshNames << QString::fromUtf8(scene->mMeshes[i]->mName.C_Str());
+    bakeStages(model, filePath, meshNames, xf.maxCards, cancel);
     for (unsigned i = 0; i < scene->mNumMeshes; ++i) {
         const aiMesh *m = scene->mMeshes[i];
         const unsigned aiMatIndex = m->mMaterialIndex;

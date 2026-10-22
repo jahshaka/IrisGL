@@ -84,8 +84,7 @@ struct GroupResult
 /// merge into fewer clusters).
 GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
                         const std::vector<unsigned> &inTris, const std::vector<unsigned> &externalWelds, float ask,
-                        float floorLen, size_t targetTris, const Vec3 &boxLo, const Vec3 &boxHi,
-                        bool cardsAllowed = true);
+                        float floorLen, size_t targetTris, bool cardsAllowed = true);
 
 }   // namespace atomdag
 }   // namespace iris

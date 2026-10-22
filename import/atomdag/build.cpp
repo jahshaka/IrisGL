@@ -22,7 +22,6 @@ For more information see the LICENSE file
 #include <cfloat>
 #include <chrono>
 #include <cmath>
-#include <map>
 
 namespace iris
 {
@@ -95,22 +94,6 @@ Sphere enclose(const std::vector<Sphere> &s, int *grown)
     if (g) { out.r *= 1.0f + 1e-6f; if (grown) ++*grown; }
     return out;
 }
-
-/// THE COUNT-CARRY MEMO (the stage-3 read's finding 3): a group carried for its cluster count meets the same members,
-/// the same ask and the same external positions again when the pool around it regroups without touching it — the same
-/// input, so the same result; it is looked up, never recomputed.
-struct MemoKey
-{
-    std::vector<int> members;          ///< the DAG cluster ids, in the group's order (the scratch's order follows it)
-    float ask = 0.0f;
-    std::vector<unsigned> external;
-    bool operator<(const MemoKey &o) const
-    {
-        if (members != o.members) return members < o.members;
-        if (ask != o.ask) return ask < o.ask;
-        return external < o.external;
-    }
-};
 
 /// THE CARD QUADS' VERTICES (D9, the only vertices the DAG adds): the mesh's positions, normals and first UV set are
 /// copied the first time a card group merges (never for a mesh without one), and every quad corner is appended to them;
@@ -205,7 +188,7 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
     // diagonal, never the last cluster's: with nothing locked at the top the extreme corners collapse away, and a
     // 10 m tree whose root box is 3 m would stop drawing while it still covers pixels — a pop out; the read's finding 1)
     float meshDiagonal = 0.0f;
-    Vec3 boxLo = mesh.position(base[0]), boxHi = boxLo;   // level 0's box: a card quad never leaves it
+    Vec3 boxLo = mesh.position(base[0]), boxHi = boxLo;   // level 0's box (the empty top's price)
     {
         for (unsigned v : base) {
             const Vec3 p = mesh.position(v);
@@ -239,7 +222,6 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
     }
 
     std::vector<MeshClusterDag::Group> groups;
-    std::map<MemoKey, GroupResult> countMemo;
     std::vector<int> pool(cl.size());
     for (size_t c = 0; c < cl.size(); ++c) pool[c] = int(c);
     int level = 0;
@@ -269,8 +251,7 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
         std::vector<GroupResult> results(ng);
         std::vector<Split> splits(ng);
         std::vector<float> childStored(ng, 0.0f), ask(ng, 0.0f);
-        std::vector<unsigned char> countCarry(ng, 0u), memoHit(ng, 0u);
-        std::vector<MemoKey> keys(ng);
+        std::vector<unsigned char> countCarry(ng, 0u);
         std::vector<double> splitMs(ng, 0.0);
         // THE RECORD of a group in pass `pass` of this level (the members are the DAG cluster ids it was given).
         const auto recordOf = [&](size_t g, int pass) {
@@ -313,30 +294,15 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
             std::fill(childStored.begin(), childStored.end(), 0.0f);
             std::fill(ask.begin(), ask.end(), 0.0f);
             std::fill(countCarry.begin(), countCarry.end(), 0u);
-            std::fill(memoHit.begin(), memoHit.end(), 0u);
             for (Split &sp : splits) sp.parts.clear();
             bakepool::forRange(bakepool::Range(ng, 1), width, [&](size_t, size_t begin, size_t end, int) {
                 for (size_t g = begin; g < end; ++g) {
                     std::vector<unsigned> in;
-                    MemoKey &key = keys[g];
-                    key = MemoKey();
                     for (unsigned p : grouping.groups[g]) {
                         const Cl &c = cl[size_t(pool[p])];
                         in.insert(in.end(), c.tris.begin(), c.tris.end());
                         childStored[g] = std::max(childStored[g], c.stored);
                         ask[g] = std::max(ask[g], c.ask);
-                        key.members.push_back(pool[p]);
-                    }
-                    key.ask = ask[g];
-                    key.external = grouping.external[g];
-                    const auto hit = countMemo.find(key);
-                    if (hit != countMemo.end()) {   // the same input as a count carry already computed
-                        results[g] = hit->second;
-                        results[g].attempts = 0;
-                        results[g].msSimplify = results[g].msMeasure = results[g].msExact = 0.0;
-                        countCarry[g] = 1u;
-                        memoHit[g] = 1u;
-                        continue;
                     }
                     // THE TARGET: Nanite's parent count — and a group already at it that would not merge into FEWER
                     // clusters (the vertex cap: 126 loose triangles are 378 vertices, two clusters again) halves instead,
@@ -361,8 +327,7 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
                     int attempts = 0;
                     double msSimplify = 0.0, msMeasure = 0.0, msExact = 0.0;
                     for (int shrink = 0;; ++shrink) {
-                        results[g] = reduceGroup(mesh, weld, islands, in, grouping.external[g], ask[g], floorLen, target,
-                                                 boxLo, boxHi);
+                        results[g] = reduceGroup(mesh, weld, islands, in, grouping.external[g], ask[g], floorLen, target);
                         GroupResult &r = results[g];
                         attempts += r.attempts;
                         msSimplify += r.msSimplify; msMeasure += r.msMeasure; msExact += r.msExact;
@@ -427,8 +392,6 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
             }
             if (!r.accepted) {
                 rec.kind = 1;
-                if (countCarry[g] && !memoHit[g]) countMemo.emplace(keys[g], r);
-                if (stats && memoHit[g]) ++stats->memoHits;
                 for (unsigned p : grouping.groups[g]) {
                     Cl &c = cl[size_t(pool[p])];
                     c.ask = countCarry[g] ? r.budget : kLadderFactor * r.budget;
@@ -467,10 +430,6 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
                 std::vector<unsigned> cornerId(r.merge.corners.size());
                 for (size_t c = 0; c < r.merge.corners.size(); ++c) {
                     const CardCorner &k = r.merge.corners[c];
-                    for (int a = 0; a < 3; ++a)
-                        if (k.pos[a] < boxLo[a] || k.pos[a] > boxHi[a]) {   // never: buildQuad keeps its sources' box
-                            if (stats) ++stats->cornersOutsideBox;
-                        }
                     if (c % 4 == 0) {
                         islands.extent.push_back(k.diagonal);
                         islands.triangles.push_back(2);
@@ -491,7 +450,6 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
                 if (stats) {
                     stats->cardSets += r.merge.sets;
                     stats->cardsMerged += r.merge.cardsMerged;
-                    stats->quadsShrunk += r.merge.shrunk;
                     stats->appendedVertices += r.merge.corners.size();
                 }
             }

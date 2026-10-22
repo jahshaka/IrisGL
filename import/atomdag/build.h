@@ -81,10 +81,8 @@ struct Stats
     int depth = 0;               ///< the deepest group's level (the empty top included)
     int levels = 0;              ///< loop iterations
     int reductions = 0, carried = 0, notSimplified = 0, retries = 0, prunedPieces = 0;
-    int memoHits = 0;            ///< count-carried groups met again with the same input (looked up, not recomputed)
-    int cardSets = 0, cardsMerged = 0, quadsShrunk = 0;   ///< D9: the quads, the cards they stand for, the quads shrunk
+    int cardSets = 0, cardsMerged = 0;   ///< D9: the quads and the cards they stand for
     size_t appendedVertices = 0;  ///< the quads' corners appended to the mesh
-    int cornersOutsideBox = 0;    ///< corners outside level 0's box (a defect: buildQuad keeps its sources' box)
     int levelsAllCarried = 0;    ///< re-runs of a level where every group was carried (the whole pool's budget doubled in place)
     int sphereGrown = 0;         ///< groups whose enclosing sphere was grown by float rounding to hold a member's
     bool depthCapHit = false;    ///< the chain met the depth cap and closed with the empty top over its pool
