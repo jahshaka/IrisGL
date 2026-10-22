@@ -1431,6 +1431,70 @@ bool PhotonComponent::giFieldAtlas(GiFieldAtlas &out) {
     } JAH_CATCH(mError, false);
 }
 
+// THE CASCADES' VOXEL DIGESTS ALONE (PHOTON-2 stage 2's round, H5): the light volumes' and the direct volume's bytes,
+// hashed a 64-bit word at a time (FNV-1a over words: an eighth of giVoxelStats' byte walk), run on the render thread
+// from Scene::requestGiVoxelDigests' message — the host that asked renders on and polls `ready`, where giVoxelStats'
+// caller waits out every download (the stillness door's path check stalled Studio's UI thread 2.1 s).
+void PhotonComponent::giVoxelDigests(GiVoxelDigests &out) {
+    out.light.clear();
+    out.direct.clear();
+    JAH_TRY {
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        rs->flushCommands();   // (the AsyncTextureTicket trap: a download reads stale VRAM without it)
+        Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+        const auto hashInto = [&](Ogre::TextureGpu *tex, Ogre::uint64 &h) -> bool {
+            if (!tex || tex->getResidencyStatus() != Ogre::GpuResidency::Resident) return false;
+            Ogre::AsyncTextureTicket *ticket = tm->createAsyncTextureTicket(
+                tex->getWidth(), tex->getHeight(), tex->getDepth(), Ogre::TextureTypes::Type3D, tex->getPixelFormat());
+            bool ok = true;
+            try {
+                ticket->download(tex, 0u, true);
+                const Ogre::TextureBox box = ticket->map(0);
+                const size_t rowBytes = size_t(tex->getWidth()) * box.bytesPerPixel;
+                for (Ogre::uint32 z = 0; z < tex->getDepth(); ++z)
+                    for (Ogre::uint32 y = 0; y < tex->getHeight(); ++y) {
+                        const Ogre::uint8 *row = reinterpret_cast<const Ogre::uint8 *>(box.at(0, y, z));
+                        size_t b = 0;
+                        for (; b + 8u <= rowBytes; b += 8u) {
+                            Ogre::uint64 word;
+                            std::memcpy(&word, row + b, 8u);
+                            h ^= word;
+                            h *= 1099511628211ull;
+                        }
+                        for (; b < rowBytes; ++b) {
+                            h ^= row[b];
+                            h *= 1099511628211ull;
+                        }
+                    }
+                ticket->unmap();
+            } catch (Ogre::Exception &e) { mError = e.getFullDescription(); ok = false; }
+              catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); ok = false; }
+            tm->destroyAsyncTextureTicket(ticket);
+            return ok;
+        };
+        const auto hex = [](Ogre::uint64 h) {
+            char buf[17];
+            std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)h);
+            return std::string(buf);
+        };
+        for (const VctCascade &c : mVctCascades) {
+            std::string light, direct;
+            if (Ogre::PhotonVoxelLighting *lighting = c.lighting) {
+                Ogre::uint64 h = 1469598103934665603ull;
+                bool all = lighting->getNumVoxelTextures() > 0u;
+                for (size_t v = 0; v < lighting->getNumVoxelTextures() && all; ++v)
+                    all = hashInto(lighting->getLightVoxelTextures()[v], h);
+                if (all) light = hex(h);
+                Ogre::uint64 hd = 1469598103934665603ull;
+                if (lighting->getLightDirectTexture() && hashInto(lighting->getLightDirectTexture(), hd))
+                    direct = hex(hd);
+            }
+            out.light.push_back(light);
+            out.direct.push_back(direct);
+        }
+    } JAH_CATCH(mError, );
+}
+
 GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
     GiVoxelStats st;
     st.cascade = cascadeIdx;

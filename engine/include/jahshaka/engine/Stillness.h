@@ -124,6 +124,9 @@ struct StillnessFrame {
     /// The ray tier's per-instance levels this frame re-fitted (GpuSceneStatus::rayLevelRefits' step).
     unsigned           rayLevelRefits = 0;
     bool               held = false;
+    /// THE FRAME'S COST (PHOTON-2 stage 2's round, H4 (e)): the monitor record's BUSY frame GPU milliseconds (its span
+    /// less the gaps the GPU waited on a submission) and the whole renderOneFrame's wall milliseconds (-1: unmeasured).
+    float              frameGpuMs = -1.0f, frameMs = -1.0f;
 };
 
 /// What one window measured.

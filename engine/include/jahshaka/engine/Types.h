@@ -3626,6 +3626,15 @@ struct GiPlacementPin {
     Vec3 fieldOrigin;
 };
 
+/// THE CASCADES' VOXEL DIGESTS, ASKED FOR WITHOUT WAITING (PHOTON-2 stage 2's round, H5; Scene::requestGiVoxelDigests):
+/// per cascade, innermost first, the hash of every light volume a reader samples (`light`) and of the direct volume
+/// (`direct`, empty on a cascade that does not bounce) — GiVoxelStats' two digests' purpose, under a word-wise hash
+/// (comparable only with each other). `ready` turns true on the render thread once they are filled; the host polls it.
+struct GiVoxelDigests {
+    std::vector<std::string> light, direct;
+    std::atomic<bool> ready{ false };
+};
+
 /// An offscreen view's declared contract (View::setOffscreenContract).
 enum class OffscreenContract { Undeclared, StillPicture, Live };
 

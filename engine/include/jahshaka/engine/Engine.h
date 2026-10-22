@@ -1064,6 +1064,13 @@ public:
     /// and the field's placements taken from a recorded state at their next re-placement, until a pin with `on`
     /// false. A message: it applies at the next frame's drain.
     virtual void setGiPlacementPin(const GiPlacementPin &) {}
+    /// THE CASCADES' VOXEL DIGESTS WITHOUT A WAIT (Types.h GiVoxelDigests; the stillness door's path check, PHOTON-2
+    /// stage 2's round H5): a MESSAGE - the render thread fills `out` at its next frame's drain and sets `ready`; the
+    /// host renders on and polls. (giVoxelStats answers the same digests with every statistic, synchronously: a host
+    /// waits for its downloads.)
+    virtual void requestGiVoxelDigests(const std::shared_ptr<GiVoxelDigests> &out) {
+        if (out) out->ready = true;
+    }
 
     /// HARD SUN CONTACT SHADOWS (Types.h `SunContactDesc`; PHOTON P5 RY-R3).
     /// The project's row, pushed by the host from the document like the ray

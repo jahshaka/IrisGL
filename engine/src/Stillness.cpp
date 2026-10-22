@@ -173,9 +173,10 @@ struct StillnessRun::Impl {
     /// THE RECORDS COME THROUGH A TEE (PHOTON-2 F7; Engine::openMonitorTee): never the host's pop, which Studio's
     /// frame monitor owns while it records (framemonitor.cpp) — the door reads its own copy of every record.
     unsigned tee = 0u;
-    /// A HOST'S CAPTURE STAYS ON (the monitor was on before the run: not ours to stop), so nothing flushes the last
-    /// frames' records: the run renders TAIL frames at the final pose, unmeasured, until every window frame's record
-    /// has come back (at most kTailFrames — the monitor's holding queue publishes within its kMaxHeldFrames).
+    /// THE TAIL: the run renders frames at the final pose, unmeasured, while something it reads is still owed - a
+    /// window frame's record when a HOST'S CAPTURE stays on (the monitor was on before the run: not ours to stop, so
+    /// nothing flushes the last frames' records), or a window's voxel digests (asked for without a wait, filled at a
+    /// frame's drain: H5). At most kTailFrames (the monitor's holding queue publishes within its kMaxHeldFrames).
     static constexpr unsigned kTailFrames = 24u;
     unsigned tailFrames = 0u;
     double gatherArmWas = 0.0, reflectArmWas = 0.0;
@@ -206,6 +207,7 @@ struct StillnessRun::Impl {
     std::map<unsigned long long, std::vector<std::pair<std::string, unsigned>>> rowsByFrame;
     std::vector<MonitorRecord> records;
     std::map<std::string, std::pair<double, unsigned>> gpuSum;   ///< row -> (GPU ms summed, frames)
+    std::map<unsigned long long, std::pair<float, float>> frameTimes;   ///< record frame -> (frame GPU ms, wall ms)
 
     Impl(Engine &e, Scene &s, View &v) : engine(e), scene(s), view(v) {}
 
@@ -303,6 +305,9 @@ struct StillnessRun::Impl {
                 gpuSum[f.first].first += f.second;
                 ++gpuSum[f.first].second;
             }
+            // the frame's BUSY GPU (its span less the gaps the GPU waited on a submission) and its wall time
+            frameTimes[r.frame] = { r.frameGpuMs >= 0.0f && r.gpuIdleMs >= 0.0f ? r.frameGpuMs - r.gpuIdleMs : -1.0f,
+                                    r.totalMs };
             auto &rows = rowsByFrame[r.frame];
             for (const CacheWork &w : r.cacheWork) {
                 const std::string &n = w.detail;
@@ -416,18 +421,28 @@ struct StillnessRun::Impl {
         maskKnown[size_t(win)] = true;
     }
 
-    void snapshotWindow(StillnessWindow &w, const Image &pic)
+    void snapshotWindow(StillnessWindow &w, size_t win, const Image &pic)
     {
         w.lastPicture = pic;
         const GiStatus &gi = scene.published().gi;
         for (size_t c = 0; c < gi.cascades.size(); ++c) {
-            const GiVoxelStats st = scene.giVoxelStats(int(c));
-            w.directDigest.push_back(st.available ? st.directDigest : std::string());
-            w.lightDigest.push_back(st.available ? st.lightDigest : std::string());
             w.cascadeCentre.push_back(gi.cascades[c].centre);
             w.cascadeBuiltCam.push_back(gi.cascades[c].builtCam);
         }
         w.fieldOrigin = gi.ifdMin;
+        // THE DIGESTS WITHOUT A WAIT (PHOTON-2 stage 2's round, H5): asked for here, filled on the render thread at
+        // the next frame's drain, taken in finish() (the run renders tail frames at the final pose while one is owed).
+        if (digests.size() <= win) digests.resize(win + 1);
+        digests[win] = std::make_shared<GiVoxelDigests>();
+        scene.requestGiVoxelDigests(digests[win]);
+    }
+    /// Per window: its digests, asked for at its last frame (snapshotWindow).
+    std::vector<std::shared_ptr<GiVoxelDigests>> digests;
+    bool digestsPending() const
+    {
+        for (const auto &d : digests)
+            if (d && !d->ready) return true;
+        return false;
     }
 
     void completeWindow(StillnessWindow &w, size_t win)
@@ -456,6 +471,10 @@ struct StillnessRun::Impl {
         w.lastGiRowFrame = -1;
         w.holdFrame = -1;
         for (StillnessFrame &f : w.trail) {
+            if (const auto t = frameTimes.find(f.engineFrame); t != frameTimes.end()) {
+                f.frameGpuMs = t->second.first;
+                f.frameMs = t->second.second;
+            }
             const auto it = rowsByFrame.find(f.engineFrame);
             if (it == rowsByFrame.end()) continue;
             std::map<std::string, unsigned> sum;
@@ -467,6 +486,10 @@ struct StillnessRun::Impl {
         }
         for (size_t i = 0; i < w.frames.size(); ++i) {
             StillnessFrame &f = w.frames[i];
+            if (const auto t = frameTimes.find(f.engineFrame); t != frameTimes.end()) {
+                f.frameGpuMs = t->second.first;
+                f.frameMs = t->second.second;
+            }
             const auto it = rowsByFrame.find(f.engineFrame);
             if (it != rowsByFrame.end()) {
                 std::map<std::string, unsigned> sum;
@@ -628,7 +651,8 @@ bool StillnessRun::nextPose(Vec3 &eye, Vec3 &target)
     if (!m.begun || m.finished) return false;
     if (m.next >= m.plan.size()) {
         // THE TAIL (a host's capture on: see kTailFrames): the final pose again, unmeasured, while a record is owed.
-        if (m.monitorOurs || m.plan.empty() || m.tailFrames >= Impl::kTailFrames || !m.recordsMissing()) return false;
+        const bool owed = (!m.monitorOurs && m.recordsMissing()) || m.digestsPending();
+        if (m.plan.empty() || m.tailFrames >= Impl::kTailFrames || !owed) return false;
         eye = m.plan.back().eye;
         target = m.plan.back().target;
         return true;
@@ -664,7 +688,7 @@ bool StillnessRun::frameDone(std::string &err)
     Impl &m = *d;
     if (!m.begun) { err = "stillness: no frame was planned"; return false; }
     if (m.next >= m.plan.size()) {
-        if (m.monitorOurs || m.tailFrames >= Impl::kTailFrames) { err = "stillness: no frame was planned"; return false; }
+        if (m.tailFrames >= Impl::kTailFrames) { err = "stillness: no frame was planned"; return false; }
         ++m.tailFrames;   // a tail frame: its records only
         m.drainRecords();
         return true;
@@ -773,7 +797,7 @@ bool StillnessRun::frameDone(std::string &err)
             m.queued.push_back(std::move(q));
         }
         m.prev = std::move(pic);
-        if (p.index == m.spec.frames) m.snapshotWindow(w, m.prev);
+        if (p.index == m.spec.frames) m.snapshotWindow(w, size_t(p.window), m.prev);
     }
     // THE LATE READINGS of any window: the stop's history count, the reflection counts.
     bool masksPending = false;
@@ -792,6 +816,16 @@ bool StillnessRun::finish(StillnessReport &out, std::string &err)
     Impl &m = *d;
     if (!m.begun) { err = "stillness: never begun"; return false; }
     m.restore();
+    for (size_t i = 0; i < m.digests.size() && i < m.report.windows.size(); ++i) {
+        const auto &dg = m.digests[i];
+        if (!dg) continue;
+        if (!dg->ready) {
+            err = "stillness: the " + m.report.windows[i].name + " window's voxel digests never came back";
+            return false;
+        }
+        m.report.windows[i].lightDigest = dg->light;
+        m.report.windows[i].directDigest = dg->direct;
+    }
     if (!m.queued.empty()) {
         err = "stillness: the stop frame's history count never came back (the gather's readback; " +
               std::to_string(m.queued.size()) + " frames unread)";
@@ -874,7 +908,7 @@ std::string StillnessReport::tsv() const
     for (const std::string &n : names)
         o << "\t" << n << "_px\t" << n << "_max\t" << n << "_mean\t" << n << "_changed\t" << n << "_refl_none\t" << n
           << "_refl_le9\t" << n << "_refl_le17\t" << n << "_refl_le33\t" << n << "_refl_gt33";
-    o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\n";
+    o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\tframe_gpu_ms\tframe_ms\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -887,7 +921,10 @@ std::string StillnessReport::tsv() const
                 for (int b : c.reflectBins) o << "\t" << b;
             }
             o << "\t" << f.restFrames << "\t" << f.sinceRestart << "\t" << f.settleFrames << "\t" << (f.held ? 1 : 0)
-              << "\t" << f.rayLevelRefits << "\t" << (f.giRows.empty() ? "-" : f.giRows) << "\n";
+              << "\t" << f.rayLevelRefits << "\t" << (f.giRows.empty() ? "-" : f.giRows);
+            char ms[64];
+            std::snprintf(ms, sizeof(ms), "\t%.3f\t%.3f\n", f.frameGpuMs, f.frameMs);
+            o << ms;
         }
     return o.str();
 }

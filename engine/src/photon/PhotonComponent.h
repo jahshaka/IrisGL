@@ -1243,6 +1243,8 @@ private:
     void recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos);
 public:
     /// THE PLACEMENT PIN (Engine.h Scene::setGiPlacementPin, a measuring door).
+    /// The cascades' voxel digests (Types.h GiVoxelDigests), word-wise: Scene::requestGiVoxelDigests' render-thread half.
+    void giVoxelDigests(GiVoxelDigests &out);
     void setPlacementPin(const GiPlacementPin &pin) { mPlacementPin = pin; }
 private:
     GiPlacementPin mPlacementPin;
