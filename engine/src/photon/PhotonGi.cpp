@@ -4685,11 +4685,22 @@ std::vector<GiParams::GiCascadeDesc> PhotonComponent::resolveCascadeTable() cons
     return table;
 }
 
-// The lattice cell a position falls in, for a lattice of `size` metres. The
-// pin's `quantizePosition` semantics (floor, signed), kept identical so a
-// cascade of ours lands where upstream's would.
+// The lattice cell a position falls in, for a lattice of `size` metres (floor, signed) - the STEP lattice's
+// (kStepHysteresis's planes and the hold: holdCascade, planCascades' step test).
 static inline long long jahQuantAxis(float pos, float size) {
     return (long long)std::floor(double(pos) / double(size));
+}
+
+// THE PLACEMENT QUANTUM, Q = 2 (PHOTON-7 stage 1; AB A10, PF34 §2): a cascade's centre is the camera ROUNDED to the
+// nearest EVEN multiple of its cell - the cell index returned is even. The directional volumes' level 0 is composited
+// from 2 x 2 x 2 blocks of voxels (LightInjection_piece_cs.any's fused step 0), and with the box's corner an even cell
+// (the centre even, the half-size res / 2 cells, res a multiple of 4) every block sits on the same WORLD lattice at
+// every placement: a one-cell move no longer re-blocks the whole directional store (<= 3/255, ENGINE.md). ONE quantiser
+// for the three sites that must agree: recentreCascade, planScroll's target and the jump guard. The offset it leaves the
+// camera at is <= one cell on each axis (it was [0, 1) cell with the floor), so the near-field guarantee's `- cell`
+// (giCascadeGuaranteedRadius) covers it unchanged.
+static inline long long jahQuantEven(float pos, float cell) {
+    return 2ll * (long long)std::floor(double(pos) / (2.0 * double(cell)) + 0.5);
 }
 
 // EVERY CASCADE RUNS THE DOCUMENT'S BOUNCE COUNT (PHOTON-M1, 2026-09-17).
@@ -4907,9 +4918,9 @@ void PhotonComponent::recentreCascade(VctCascade &c, const Ogre::Vector3 &eyePos
     ++mGiPlacementSerial;
     const Ogre::Vector3 camPos = placementCam(size_t(&c - mVctCascades.data()), eyePos);
     const float cell = c.cell();
-    c.latticeX = jahQuantAxis(camPos.x, cell);
-    c.latticeY = jahQuantAxis(camPos.y, cell);
-    c.latticeZ = jahQuantAxis(camPos.z, cell);
+    c.latticeX = jahQuantEven(camPos.x, cell);
+    c.latticeY = jahQuantEven(camPos.y, cell);
+    c.latticeZ = jahQuantEven(camPos.z, cell);
     c.centre = Ogre::Vector3(float(double(c.latticeX) * double(cell)),
                              float(double(c.latticeY) * double(cell)),
                              float(double(c.latticeZ) * double(cell)));
@@ -5394,8 +5405,8 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
     const int res = int(c.resolution);
     if (cell <= 0.0f || res <= 0) return false;
     VctCascade::Scroll sc;
-    const long long target[3] = { jahQuantAxis(camPos.x, cell), jahQuantAxis(camPos.y, cell),
-                                  jahQuantAxis(camPos.z, cell) };
+    const long long target[3] = { jahQuantEven(camPos.x, cell), jahQuantEven(camPos.y, cell),
+                                  jahQuantEven(camPos.z, cell) };
     const long long live[3] = { c.latticeX, c.latticeY, c.latticeZ };
     for (int a = 0; a < 3; ++a) {
         const long long d = target[a] - live[a];
@@ -5790,9 +5801,9 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
         // budget like any other) - so it is COUNTED (`cascadeDirtyMajority`): the
         // walking speed at which the copy stops saving anything.
         const long long diff[3] = {
-            std::llabs(jahQuantAxis(camPos.x, cell) - jahQuantAxis(c.builtCam.x, cell)),
-            std::llabs(jahQuantAxis(camPos.y, cell) - jahQuantAxis(c.builtCam.y, cell)),
-            std::llabs(jahQuantAxis(camPos.z, cell) - jahQuantAxis(c.builtCam.z, cell)) };
+            std::llabs(jahQuantEven(camPos.x, cell) - jahQuantEven(c.builtCam.x, cell)),
+            std::llabs(jahQuantEven(camPos.y, cell) - jahQuantEven(c.builtCam.y, cell)),
+            std::llabs(jahQuantEven(camPos.z, cell) - jahQuantEven(c.builtCam.z, cell)) };
         const long long res = (long long)c.resolution;
         const bool jumped = diff[0] >= res || diff[1] >= res || diff[2] >= res;
         double reusable = 1.0;
