@@ -1164,6 +1164,10 @@ constexpr ArmDef kArms[] = {
       "THE HISTORY'S VALIDATION OFF (GatherTuning::historyValidationOff, a test door): every "
       "reprojected texel on the previous picture is accepted, the distance and normal tests off - "
       "what separates a pixel new to the screen from one the tests rejected (GATHER-NOISE-1)." },
+    { ArmId::GatherClassOff, 0.0, 0.0, 1.0,
+      "THE SURFACE CLASS OUT OF THE HISTORY TEST (GatherTuning::classOff, a test door; PHOTON-2 K5): every "
+      "pixel is held to the 1 % rule and a foliage (cut-out) history may blend a non-foliage one - the gather "
+      "without its class, the guard's base arm. The class bit is still written (the door counts by it)." },
     { ArmId::GatherCrossStrata, 0.0, 0.0, 8.0,
       "THE RAYS STRATIFIED ACROSS NEIGHBOURING PROBES (GatherTuning::crossStrata): a ray's jitter in "
       "its octahedral texel is confined to one of N x N sub-cells, any N x N block of probes covering "

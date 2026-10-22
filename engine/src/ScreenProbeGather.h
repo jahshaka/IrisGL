@@ -479,6 +479,7 @@ private:
         VkDeviceMemory histReadbackMemory = VK_NULL_HANDLE;
         void *histReadbackMapped = nullptr;
         std::vector<unsigned char> histHost;
+        std::vector<unsigned char> histClassHost;   ///< ...its class bit (bit 21), the same layout
         unsigned histHostFrame = 0u;
         /// THE GATHER-HITS READBACK (FAR-SUN-1): the trace's per-ray records (device, one
         /// uvec4 per ray of every uniform probe), a host ring of them and of the atlas rows the

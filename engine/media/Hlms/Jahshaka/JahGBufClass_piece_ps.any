@@ -1,17 +1,18 @@
 // THE G-BUFFER'S SURFACE CLASS (PHOTON-2 stage 2d): the prepass writes the normals target
 // (R10G10B10A2, OgreChain.cpp) with its two-bit alpha at 1 - upstream's constant. FOLIAGE
-// (an alpha-tested cut-out or a two-sided surface: Lumen's bHasBackfaceDiffuse class) writes
-// 0 there instead, so the screen-probe gather's pixel history (rq_probe_integrate.comp,
-// jah_probe_history.glsl) can hold a foliage pixel to its own looser depth test and never
-// blend it with a non-foliage history. The hook runs after the body has written the target.
-// Atom's decode carries the class in its own properties: atom_two_sided (PBS's two-sided
-// lighting, moved by HlmsAtom) and atom_cutout (the bucket's members are alpha-tested; its
-// twin tests nothing, the id pass masked the coverage). DISJOINT from every other definition
+// - an ALPHA-TESTED (cut-out) surface, and only that (PHOTON-2 K5: a double-sided OPAQUE
+// material is not foliage; the cull is no class, and UE derives its foliage class from the
+// shading model, not from culling) - writes 0 there instead, so the screen-probe gather's
+// pixel history (rq_probe_integrate.comp, jah_probe_history.glsl) can hold a foliage pixel
+// to its own looser depth test and never blend it with a non-foliage history. The hook runs
+// after the body has written the target. Atom's decode carries the class in its own
+// property atom_cutout (the bucket's members are alpha-tested; its twin tests nothing, the
+// id pass masked the coverage). DISJOINT from every other definition
 // of this hook: the gather's blended-prepass discard (alpha blend), the card capture's (its
 // own property), the fog's and the photon view's (not the prepass), the hit decode's (its own
 // property). A depth-only prepass writes no normals target.
 @property( hlms_prepass && !hlms_alphablend && !hlms_shadowcaster && !hlms_render_depth_only && !jah_card_capture && !atom_hit_mode )
-@property( alpha_test || two_sided_lighting || atom_two_sided || atom_cutout )
+@property( alpha_test || atom_cutout )
 @piece( custom_ps_posExecution )
 	outPs_normals.w = _h( 0.0 );
 @end

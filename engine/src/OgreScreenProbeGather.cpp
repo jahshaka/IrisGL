@@ -270,6 +270,7 @@ bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
            a.shBands == b.shBands && a.filterOff == b.filterOff &&
            a.historyFrames == b.historyFrames &&
            a.historyValidationOff == b.historyValidationOff && a.restOff == b.restOff &&
+           a.classOff == b.classOff &&
            a.filterRadius == b.filterRadius && a.restFrames == b.restFrames &&
            a.restSeed == b.restSeed && a.youngFrames == b.youngFrames &&
            a.youngReach == b.youngReach && a.crossStrata == b.crossStrata;
@@ -657,6 +658,7 @@ void ScreenProbeGather::drop(View &v) {
     v.histReadbackMemory = VK_NULL_HANDLE;
     v.histReadbackMapped = nullptr;
     v.histHost.clear();
+    v.histClassHost.clear();
     v.histHostFrame = 0u;
     mHost.gatherRetireBuffer(v.rays, v.raysMemory);
     mHost.gatherRetireBuffer(v.raysReadback, v.raysReadbackMemory);
@@ -713,11 +715,13 @@ void ScreenProbeGather::readPending(View &v) {
                     static_cast<const char *>(v.histReadbackMapped) + size_t(i) * layerTexels * v.layers * 8u);
                 const size_t pairW = size_t(v.w) * v.layers;
                 v.histHost.assign(pairW * v.h, 0u);
+                v.histClassHost.assign(pairW * v.h, 0u);
                 for (unsigned k = 0; k < v.layers; ++k)
                     for (unsigned y = 0; y < v.h; ++y)
                         for (unsigned x = 0; x < v.w; ++x) {
                             const uint32_t g = src[(size_t(k) * layerTexels + size_t(y) * v.w + x) * 2u + 1u];
                             v.histHost[size_t(y) * pairW + size_t(k) * v.w + x] = (unsigned char)((g >> 22u) & 15u);
+                            v.histClassHost[size_t(y) * pairW + size_t(k) * v.w + x] = (unsigned char)((g >> 21u) & 1u);
                         }
                 v.histHostFrame = v.pending[i].gatherFrame;
                 v.pending[i].history = false;
@@ -979,6 +983,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.rays = v.raysHost;
     out.raysFrame = v.raysHostFrame;
     out.historyCount = v.histHost;
+    out.historyClass = v.histClassHost;
     out.historyCountW = v.histHost.empty() ? 0u : v.w * v.layers;
     out.historyCountH = v.histHost.empty() ? 0u : v.h;
     out.historyCountFrame = v.histHostFrame;
@@ -1173,6 +1178,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         if (!v.histHost.empty()) {
             v.histHost.clear();
             v.histHost.shrink_to_fit();
+            v.histClassHost.clear();
+            v.histClassHost.shrink_to_fit();
             v.histHostFrame = 0u;
         }
     }
@@ -1395,6 +1402,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // 1e-4 of the view distance (well above a float depth's reconstruction
     // error) keep a ray off its own triangle; a hit's shading owns its own
     // footprint.
+    pp.knobs2[0] = in.tuning.classOff ? 1.0f : 0.0f;   // the class out of the history test (a test door)
     pp.knobs2[1] = 0.001f;
     pp.knobs2[2] = in.sky ? 1.0f : 0.0f;
     pp.knobs2[3] = float(octRes);

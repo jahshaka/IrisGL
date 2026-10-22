@@ -16,8 +16,8 @@ const uint kHistoryCountMax = 15u;
 
 /// THE GEOMETRY WORD (PHOTON-2 stage 2d): the view distance in bits 0-20 (a float without its sign
 /// and its ten low mantissa bits, rounded: 13 bits of mantissa, 0.006 % - under the depth test's
-/// 0.5 % floor by two orders), the surface CLASS in bit 21 (1 = foliage: an alpha-tested or two-sided
-/// surface, the prepass's normals alpha, JahGBufClass_piece_ps.any), the count in 22-25 and the
+/// 0.5 % floor by two orders), the surface CLASS in bit 21 (1 = foliage: an alpha-tested - cut-out -
+/// surface, the prepass's normals alpha, JahGBufClass_piece_ps.any; PHOTON-2 K5), the count in 22-25 and the
 /// mean coverage (6 bits, rounded like the mean, with `u`) in 26-31. (It held an octahedral normal
 /// in 12-21 for a 25-degree test, which Lumen's rule does not make: its 10 bits went to the
 /// distance and the class.) Zero words are "no surface here", which the distance test rejects.
@@ -42,14 +42,17 @@ void unpackGeom( uint g, out float dist, out bool foliage, out uint count, out f
 /// reprojected depth moves most per pixel, may differ by up to ten times as much - and the SAME CLASS
 /// (a foliage pixel never blends a non-foliage history, nor the reverse). NO NORMAL TEST (Lumen's
 /// RejectBasedOnNormal is 0): the class and the depth decide; the 5 % / 25-degree rule it replaces
-/// restarted a canopy's pixels on every leaf's facing.
+/// restarted a canopy's pixels on every leaf's facing. knobs2.x = 1 is the test door that takes the
+/// CLASS out of the test (GatherTuning::classOff, PHOTON-2 K5's guard: every pixel the 1 % rule, no
+/// class split; the class bit is still written, so a reader can tell the foliage pixels apart).
 const float kGatherDepthThreshold = 0.01;
 const float kGatherDepthThresholdFoliage = 0.03;
 bool jahGatherSameSurface( float wasDist, bool wasFoliage, float dist, bool foliage, float NoV, float noise )
 {
-	const float t = ( foliage ? kGatherDepthThresholdFoliage : kGatherDepthThreshold ) * mix( 0.5, 1.5, noise ) /
-					mix( 0.1, 1.0, clamp( NoV, 0.0, 1.0 ) );
-	return wasDist > 0.0 && wasFoliage == foliage && abs( wasDist - dist ) < dist * t;
+	const bool classTest = p.knobs2.x < 0.5;
+	const float t = ( classTest && foliage ? kGatherDepthThresholdFoliage : kGatherDepthThreshold ) *
+					mix( 0.5, 1.5, noise ) / mix( 0.1, 1.0, clamp( NoV, 0.0, 1.0 ) );
+	return wasDist > 0.0 && ( !classTest || wasFoliage == foliage ) && abs( wasDist - dist ) < dist * t;
 }
 
 /// THE HISTORY UNDER A WORLD POINT: the previous frame's packed texel of eye `eye` where

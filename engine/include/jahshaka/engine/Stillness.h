@@ -91,6 +91,10 @@ struct StillnessSpec {
     /// is 1 on a frame the history was refused, n when it carried n - 1 frames; 10 = a full history at the shipped
     /// kHistoryFrames). At most 15 (the packed count's bits).
     unsigned    visibleAge = 10;
+    /// THE GATHER'S CLASS RESTARTS (PHOTON-2 K5): the gather's history readback on from the first trail frame (or
+    /// the stop) to the end, and every frame's StillnessFrame::classPixels / classRestarts from it. Off = the
+    /// readback only until the masks are known.
+    bool        classRestarts = false;
     /// THE MATERIAL CLASSES at the stop pose, per pixel of the view (row-major, classW x classH; resampled nearest
     /// when the picture's size differs): 0 = unclassified, k = classNames[k - 1]. Empty = one class "all".
     std::vector<std::string>   classNames;
@@ -127,6 +131,11 @@ struct StillnessFrame {
     /// THE FRAME'S COST (PHOTON-2 stage 2's round, H4 (e)): the monitor record's BUSY frame GPU milliseconds (its span
     /// less the gaps the GPU waited on a submission) and the whole renderOneFrame's wall milliseconds (-1: unmeasured).
     float              frameGpuMs = -1.0f, frameMs = -1.0f;
+    /// THE FOLIAGE CLASS'S RESTARTS (StillnessSpec::classRestarts; PHOTON-2 K5): over the pixels the gather wrote as
+    /// foliage this frame (its history word's class bit - the cut-out class, written under the class-off arm too),
+    /// how many, and how many of them restarted their history (count 1: refused or absent). -1 = no copy of this
+    /// frame came back (or the gather held: a held frame writes no history).
+    int                classPixels = -1, classRestarts = -1;
 };
 
 /// What one window measured.

@@ -3560,6 +3560,10 @@ struct GatherTuning {
     /// (gi.gather_reference, gi.gather_plane) or that measures the history's own
     /// floor at rest (gi.gather_stable's trade) sets it.
     bool     restOff = false;
+    /// THE SURFACE CLASS OUT OF THE HISTORY TEST (PHOTON-2 K5) - a TEST door, never shipped: every pixel is
+    /// held to the 1 % depth rule and the class match is off (jah_probe_history.glsl), the gather as it would
+    /// be without its foliage class - the base arm of the class's guard (gi.hold_after_stop's canopy).
+    bool     classOff = false;
     /// THE FILTER IN PROBE SPACE'S REACH (GATHER-NOISE-1): 0 = the shipped
     /// reach, 1 = the 3 x 3 neighbourhood alone, 2 = that plus the ring of eight
     /// at two cells (17 taps). Each tap is weighed by the plane and hit-distance
@@ -3779,6 +3783,9 @@ struct GatherStatus {
     /// Empty with the arm off and until a frame recorded under it has retired; a HELD frame writes no history and
     /// copies none.
     std::vector<unsigned char> historyCount;
+    /// ...and per pixel the SURFACE CLASS the integrate wrote with it (PHOTON-2 K5: 1 = foliage, the cut-out
+    /// class of the prepass's normals alpha - written under GatherTuning::classOff too), the same layout.
+    std::vector<unsigned char> historyClass;
     unsigned historyCountW = 0u, historyCountH = 0u;
     unsigned historyCountFrame = 0u;
     /// THE GATHER-HITS READBACK (FAR-SUN-1; the arm "gather.hitsReadback"): what answered EVERY

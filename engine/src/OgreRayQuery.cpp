@@ -7254,6 +7254,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         if (arm(ArmId::GatherFreezeFrame, false)) in.tuning.freezeFrameIndex = true;
         take(ArmId::GatherYoungFrames, in.tuning.youngFrames);
         if (arm(ArmId::GatherValidationOff, false)) in.tuning.historyValidationOff = true;
+        if (arm(ArmId::GatherClassOff, false)) in.tuning.classOff = true;
         take(ArmId::GatherCrossStrata, in.tuning.crossStrata);
         if (armValue(ArmId::GatherYoungReach) > 0.0)
             in.tuning.youngReach = float(armValue(ArmId::GatherYoungReach));

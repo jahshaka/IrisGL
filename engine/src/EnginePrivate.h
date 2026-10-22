@@ -1946,6 +1946,7 @@ public:
     X(GatherYoungFrames, "gather.youngFrames") /* the history length below which a pixel reads wider (0 = shipped) */ \
     X(GatherYoungReach, "gather.youngReach") /* that reach in pixels at a history of 0 (0 = shipped) */ \
     X(GatherValidationOff, "gather.validationOff") /* every reprojected history texel accepted (a test door) */ \
+    X(GatherClassOff, "gather.classOff") /* the surface class out of the history test (a test door, PHOTON-2 K5) */ \
     X(GatherCrossStrata, "gather.crossStrata") /* rays stratified across N x N probes (0 = shipped, 1 = off) */ \
     X(GiCascadeFault, "gi.cascadeFault") /* cascade N's rebuild throws before its build (-1 = none) */ \
     X(GiCascadeFaultPost, "gi.cascadeFaultPost") /* cascade N's rebuild throws after its build (-1 = none) */ \

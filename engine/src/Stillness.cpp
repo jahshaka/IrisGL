@@ -203,6 +203,37 @@ struct StillnessRun::Impl {
     std::vector<Queued> queued;
     /// The traced reflection frame -> (window, frame).
     std::map<unsigned, std::pair<int, size_t>> byTraced;
+    /// THE GATHER FRAME -> (window, trail?, frame) (StillnessSpec::classRestarts): each frame the gather recorded.
+    struct FrameRef { int window; bool trail; size_t index; };
+    std::map<unsigned, FrameRef> byGather;
+    unsigned lastGatherMapped = 0u;                   ///< the gather's published frame counter last mapped
+    /// The class restarts of the gather frame the readback holds now, into the frame it maps to (once).
+    void takeClassRestarts(const GatherStatus &g)
+    {
+        if (!spec.classRestarts || g.historyCount.empty() || g.historyClass.size() != g.historyCount.size()) return;
+        const auto it = byGather.find(g.historyCountFrame);
+        if (it == byGather.end()) return;
+        StillnessWindow &w = report.windows[size_t(it->second.window)];
+        std::vector<StillnessFrame> &fs = it->second.trail ? w.trail : w.frames;
+        if (it->second.index >= fs.size()) return;
+        StillnessFrame &f = fs[it->second.index];
+        if (f.classPixels >= 0) return;
+        int px = 0, rs = 0;
+        for (size_t i = 0; i < g.historyCount.size(); ++i)
+            if (g.historyClass[i]) {
+                ++px;
+                if (g.historyCount[i] <= 1u) ++rs;
+            }
+        f.classPixels = px;
+        f.classRestarts = rs;
+    }
+    /// This frame's gather frame, when the gather recorded one (its published counter moved: one past it).
+    void mapGatherFrame(const GatherStatus &g, int window, bool trail, size_t index)
+    {
+        if (!spec.classRestarts || !g.running || g.frame == 0u || g.frame <= lastGatherMapped) return;
+        byGather[g.frame - 1u] = { window, trail, index };
+        lastGatherMapped = g.frame;
+    }
     unsigned lastTraced = 0u;                         ///< the reflection's traced-frame counter last seen
     std::map<unsigned long long, std::vector<std::pair<std::string, unsigned>>> rowsByFrame;
     std::vector<MonitorRecord> records;
@@ -663,6 +694,8 @@ bool StillnessRun::nextPose(Vec3 &eye, Vec3 &target)
     // THE READBACKS RUN ONLY WHERE THEY ARE READ (each is an image copy and a host decode a frame): the gather's
     // history count from a window's stop frame until its mask is known (frameDone turns it off), the reflection's
     // count from the first stop to the end. An arm latches at the top of the next frame — this one.
+    if (m.spec.classRestarts && (p.trail || p.part == Impl::Part::Window) && !m.gatherArmOn)
+        m.gatherArmOn = m.setArm("gather.historyReadback", 1.0);
     if (p.part == Impl::Part::Window && p.index == 0) {
         if (!m.gatherArmOn) m.gatherArmOn = m.setArm("gather.historyReadback", 1.0);
         if (!m.reflectArmOn) m.reflectArmOn = m.setArm("reflect.historyReadback", 1.0);
@@ -708,6 +741,7 @@ bool StillnessRun::frameDone(std::string &err)
     if (p.trail) {
         StillnessWindow &w = m.report.windows[size_t(p.window)];
         StillnessFrame &f = w.trail[w.trail.size() - p.index];
+        m.mapGatherFrame(g, p.window, true, w.trail.size() - p.index);
         f.engineFrame = engineFrame;
         f.rayLevelRefits = refits;
         f.restFrames = g.restFrames;
@@ -747,6 +781,7 @@ bool StillnessRun::frameDone(std::string &err)
     if (p.part == Impl::Part::Window) {
         StillnessWindow &w = m.report.windows[size_t(p.window)];
         StillnessFrame &f = w.frames[p.index];
+        m.mapGatherFrame(g, p.window, false, p.index);
         f.engineFrame = engineFrame;
         f.rayLevelRefits = refits;
         f.restFrames = g.restFrames;
@@ -805,7 +840,9 @@ bool StillnessRun::frameDone(std::string &err)
         m.tryMask(win, g);
         if (m.stopSeen[size_t(win)] && !m.maskKnown[size_t(win)]) masksPending = true;
     }
-    if (m.gatherArmOn && !masksPending) m.gatherArmOn = !m.setArm("gather.historyReadback", m.gatherArmWas);
+    m.takeClassRestarts(g);
+    if (m.gatherArmOn && !masksPending && !m.spec.classRestarts)
+        m.gatherArmOn = !m.setArm("gather.historyReadback", m.gatherArmWas);
     m.flushQueued();
     m.takeReflectHistory(pub.rayQuery);
     return true;
@@ -908,7 +945,8 @@ std::string StillnessReport::tsv() const
     for (const std::string &n : names)
         o << "\t" << n << "_px\t" << n << "_max\t" << n << "_mean\t" << n << "_changed\t" << n << "_refl_none\t" << n
           << "_refl_le9\t" << n << "_refl_le17\t" << n << "_refl_le33\t" << n << "_refl_gt33";
-    o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\tframe_gpu_ms\tframe_ms\n";
+    o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\tframe_gpu_ms\tframe_ms"
+      << "\tclass_px\tclass_restart\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -923,7 +961,8 @@ std::string StillnessReport::tsv() const
             o << "\t" << f.restFrames << "\t" << f.sinceRestart << "\t" << f.settleFrames << "\t" << (f.held ? 1 : 0)
               << "\t" << f.rayLevelRefits << "\t" << (f.giRows.empty() ? "-" : f.giRows);
             char ms[64];
-            std::snprintf(ms, sizeof(ms), "\t%.3f\t%.3f\n", f.frameGpuMs, f.frameMs);
+            std::snprintf(ms, sizeof(ms), "\t%.3f\t%.3f\t%d\t%d\n", f.frameGpuMs, f.frameMs, f.classPixels,
+                          f.classRestarts);
             o << ms;
         }
     return o.str();
