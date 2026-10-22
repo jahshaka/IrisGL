@@ -5992,6 +5992,16 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // from scratch instead of reading a buffer that means something else. A
     // view that has just BECOME stereo (or stopped being) is the same case: its
     // history's two halves were one picture, or its one picture is now two.
+    // ...AND A CAMERA CUT (PHOTON-2 round 2, N3: isCameraCut, the gather's rule - Lumen's): the histories restart - the
+    // images cleared this frame (a distance of zero is "no history here") and the view's age back to 0 (the young
+    // view's fade-in) - instead of ghosting through what the reprojection's tests happened to accept.
+    if (rv.havePrev && rv.prevStereo == stereo &&
+        isCameraCut(rv.prev[0].camPos, rv.prev[0].rayRight, rv.prev[0].rayDown, rv.prev[0].fwd, eyeB[0].camPos,
+                    eyeB[0].rayRight, eyeB[0].rayDown, eyeB[0].fwd)) {
+        rv.havePrev = false;   // the branch below withholds the previous basis and zeroes the age
+        rv.needsClear = true;
+        ++rv.cameraCuts;
+    }
     if (rv.havePrev && rv.prevStereo == stereo) {
         memcpy(pp.prevCamPos, rv.prev[0].camPos, sizeof(pp.prevCamPos));
         memcpy(pp.prevRayTL, rv.prev[0].rayTL, sizeof(pp.prevRayTL));

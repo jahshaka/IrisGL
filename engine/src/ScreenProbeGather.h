@@ -43,6 +43,7 @@
 #include "SurfaceCache.h"   // kViewLayers: the card read's view-term layers (PHOTON-CARDS-5)
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -64,6 +65,28 @@ namespace engine {
 
 namespace detail {
 class OgreScene;
+}
+
+/// A CAMERA CUT (PHOTON-2 round 2, N3 - Lumen's IsLargeCameraMovement, adopted as is): between two frames' bases one of
+/// the view's axes (right, down, forward - each normalised here: the ray basis carries the field of view in its length)
+/// turned more than kCameraCutDegrees, or the eye moved more than kCameraCutMetres. A view's histories RESTART on it
+/// (the gather's age 0, the reflection's images cleared): a teleport across the map or a snap turn would otherwise
+/// ghost through whatever pixels the reprojection's tests happened to accept. Under that a move is a walk, followed by
+/// the reprojection pixel by pixel.
+constexpr float kCameraCutDegrees = 75.0f, kCameraCutMetres = 100.0f;
+inline bool isCameraCut(const float *prevPos, const float *prevRight, const float *prevDown, const float *prevFwd,
+                        const float *pos, const float *right, const float *down, const float *fwd)
+{
+    const auto dot3 = [](const float *a, const float *b) { return double(a[0]) * b[0] + double(a[1]) * b[1] + double(a[2]) * b[2]; };
+    const double cosCut = std::cos(double(kCameraCutDegrees) * 3.14159265358979323846 / 180.0);
+    const float *was[3] = { prevRight, prevDown, prevFwd }, *now[3] = { right, down, fwd };
+    for (int i = 0; i < 3; ++i) {
+        const double la = std::sqrt(dot3(was[i], was[i])), lb = std::sqrt(dot3(now[i], now[i]));
+        if (!(la > 0.0) || !(lb > 0.0)) continue;
+        if (dot3(was[i], now[i]) / (la * lb) < cosCut) return true;
+    }
+    const float d[3] = { pos[0] - prevPos[0], pos[1] - prevPos[1], pos[2] - prevPos[2] };
+    return dot3(d, d) > double(kCameraCutMetres) * kCameraCutMetres;
 }
 
 #ifdef JAH_RAY_QUERY
@@ -403,6 +426,8 @@ private:
         /// and whether the inputs owed work on the last gathered frame - what the stillness door reads as "the last
         /// frame the hold waited on", rows or none (a ray-level refit, a shadow scan, a light write file no GI row).
         unsigned long long keyMoves = 0ull;
+        /// THE CAMERA CUTS this view detected (N3: isCameraCut) - each one a history restart.
+        unsigned cameraCuts = 0u;
         /// PHOTON-2 L8: the pixels whose history the foliage rule ALONE accepted (between the 1 % and 3 % depth
         /// bounds), summed over the retired frames.
         unsigned long long foliageRuleAccepts = 0ull;

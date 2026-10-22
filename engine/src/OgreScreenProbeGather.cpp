@@ -1006,6 +1006,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
         out.keyMoves = std::max(out.keyMoves, o.keyMoves + (o.restKey == restKey ? 0ull : 1ull));
         out.inputsBusy = out.inputsBusy || o.inputsBusyLast;
         out.foliageRuleAccepts = std::max(out.foliageRuleAccepts, o.foliageRuleAccepts);
+        out.cameraCuts = std::max(out.cameraCuts, o.cameraCuts);
         const unsigned since = o.restartKey == restartKey ? o.sinceRestart : 0u;
         out.sinceRestart = std::min(out.sinceRestart, since);
         if (o.lastTemporal && since < n) out.settled = false;
@@ -1252,6 +1253,12 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // tuning field that changes the estimator (an A/B arm).
     if (temporal && !v.temporalLast) v.age = 0u;
     if (!sameEstimator(in.tuning, v.tuningLast)) v.age = 0u;
+    // ...and on A CAMERA CUT (PHOTON-2 round 2, N3: isCameraCut, Lumen's rule) - the previous basis is last frame's here.
+    if (v.age > 0u && isCameraCut(v.prevCamPos, v.prevRayRight, v.prevRayDown, v.prevFwd, in.camPos, in.rayRight,
+                                  in.rayDown, in.fwd)) {
+        v.age = 0u;
+        ++v.cameraCuts;
+    }
     // (A change of STEREO SHAPE re-makes the targets in ensureTargets, which
     // restarts the history with them: its halves were one picture, or its one
     // picture is now two.)
