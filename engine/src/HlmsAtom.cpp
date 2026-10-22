@@ -1197,6 +1197,21 @@ void HlmsAtom::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::Pie
         setProperty(kNoTid, Ogre::PbsProperty::TwoSidedLighting, 0);
         setProperty(kNoTid, Ogre::IdString("atom_two_sided"), 1);
     }
+    // A CUT-OUT BUCKET (PHOTON-2 stage 2d): the twin tests no alpha (the id pass masked the coverage), so the
+    // decode cannot know a cut-out from its own state - the bucket says it. The KEY's probe wears the source PBS
+    // datablock (bucketKeyOf: its alpha test still set), the decode wears the twin, whose members all share that
+    // key; the property splits cut-outs into buckets of their own and reaches the prepass's surface class
+    // (JahGBufClass_piece_ps.any: foliage = alpha-tested or two-sided, the gather's pixel history).
+    if (renderable) {
+        const Ogre::HlmsDatablock *db = renderable->getDatablock();
+        bool cutout = false;
+        if (auto t = mTwins.find(db); t != mTwins.end()) {
+            cutout = t->second.pbs && t->second.pbs->getAlphaTest() != Ogre::CMPF_ALWAYS_PASS;
+        } else if (db && db->getAlphaTest() != Ogre::CMPF_ALWAYS_PASS) {
+            cutout = true;
+        }
+        if (cutout) setProperty(kNoTid, Ogre::IdString("atom_cutout"), 1);
+    }
     if (mClassifyDb && renderable && renderable->getDatablock() == mClassifyDb)
         setProperty(kNoTid, Ogre::IdString("atom_classify"), 1);
     // The asynchronous placeholder's permutation (installAsyncPlaceholder): every pixel reads

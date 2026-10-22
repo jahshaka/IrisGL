@@ -14,55 +14,52 @@
 /// 1 / the floor (GatherTuning::historyFrames, 1..15; 10 shipped).
 const uint kHistoryCountMax = 15u;
 
-/// THE HISTORY'S GEOMETRY WORD's normal: an octahedral pair at 5 bits each
-/// (about 3 degrees; the test is at 25). Zero words are "no surface here",
-/// which the distance test rejects.
-vec2 octEncode( vec3 n )
+/// THE GEOMETRY WORD (PHOTON-2 stage 2d): the view distance in bits 0-20 (a float without its sign
+/// and its ten low mantissa bits, rounded: 13 bits of mantissa, 0.006 % - under the depth test's
+/// 0.5 % floor by two orders), the surface CLASS in bit 21 (1 = foliage: an alpha-tested or two-sided
+/// surface, the prepass's normals alpha, JahGBufClass_piece_ps.any), the count in 22-25 and the
+/// mean coverage (6 bits, rounded like the mean, with `u`) in 26-31. (It held an octahedral normal
+/// in 12-21 for a 25-degree test, which Lumen's rule does not make: its 10 bits went to the
+/// distance and the class.) Zero words are "no surface here", which the distance test rejects.
+uint packGeom( float dist, bool foliage, uint count, float coverage, float u )
 {
-	vec2 o = n.xy / max( abs( n.x ) + abs( n.y ) + abs( n.z ), 1e-6 );
-	if( n.z < 0.0 )
-		o = ( 1.0 - abs( o.yx ) ) * vec2( o.x >= 0.0 ? 1.0 : -1.0, o.y >= 0.0 ? 1.0 : -1.0 );
-	return o;
-}
-vec3 octDecode( vec2 o )
-{
-	vec3 n = vec3( o, 1.0 - abs( o.x ) - abs( o.y ) );
-	if( n.z < 0.0 )
-		n.xy = ( 1.0 - abs( n.yx ) ) * vec2( n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0 );
-	return normalize( n );
-}
-
-/// THE GEOMETRY WORD: the distance (a half without its sign, its mantissa
-/// rounded to 7 bits: 0.4 % against the 5 % test) in bits 0-11, the normal's
-/// octahedral pair in 12-21, the count in 22-25 and the mean coverage (6 bits,
-/// rounded like the mean, with `u`) in 26-31.
-uint packGeom( float dist, vec3 n, uint count, float coverage, float u )
-{
-	const uint h = packHalf2x16( vec2( dist, 0.0 ) ) & 0x7FFFu;
-	const uint d = min( ( h + 4u ) >> 3u, 0xFFFu );
-	const uvec2 q = uvec2( clamp( round( ( octEncode( n ) * 0.5 + 0.5 ) * 31.0 ), vec2( 0.0 ),
-								  vec2( 31.0 ) ) );
+	const uint d = min( ( floatBitsToUint( max( dist, 0.0 ) ) + 512u ) >> 10u, 0x1FFFFFu );
 	const uint cov = uint( min( floor( clamp( coverage, 0.0, 1.0 ) * 63.0 + u ), 63.0 ) );
-	return d | ( q.x << 12u ) | ( q.y << 17u ) | ( min( count, kHistoryCountMax ) << 22u ) | ( cov << 26u );
+	return d | ( foliage ? ( 1u << 21u ) : 0u ) | ( min( count, kHistoryCountMax ) << 22u ) | ( cov << 26u );
 }
-void unpackGeom( uint g, out float dist, out vec3 n, out uint count, out float coverage )
+void unpackGeom( uint g, out float dist, out bool foliage, out uint count, out float coverage )
 {
-	dist = unpackHalf2x16( ( g & 0xFFFu ) << 3u ).x;
-	n = octDecode( vec2( float( ( g >> 12u ) & 31u ), float( ( g >> 17u ) & 31u ) ) / 31.0 * 2.0 -
-				   1.0 );
+	dist = uintBitsToFloat( ( g & 0x1FFFFFu ) << 10u );
+	foliage = ( g & ( 1u << 21u ) ) != 0u;
 	count = ( g >> 22u ) & 15u;
 	coverage = float( g >> 26u ) / 63.0;
 }
 
+/// THE SAME-SURFACE TEST, LUMEN'S (PHOTON-2 stage 2d; LumenScreenProbeGatherTemporal.usf, the facts
+/// file's item 4): the history's distance within `threshold` of this frame's, relative - 1 % of the
+/// distance (3 % for FOLIAGE, whose cards and leaves shimmer at the 1 % test), jittered per pixel and
+/// frame by lerp( 0.5, 1.5, noise ) and divided by lerp( 0.1, 1.0, NoV ) so a grazing surface, whose
+/// reprojected depth moves most per pixel, may differ by up to ten times as much - and the SAME CLASS
+/// (a foliage pixel never blends a non-foliage history, nor the reverse). NO NORMAL TEST (Lumen's
+/// RejectBasedOnNormal is 0): the class and the depth decide; the 5 % / 25-degree rule it replaces
+/// restarted a canopy's pixels on every leaf's facing.
+const float kGatherDepthThreshold = 0.01;
+const float kGatherDepthThresholdFoliage = 0.03;
+bool jahGatherSameSurface( float wasDist, bool wasFoliage, float dist, bool foliage, float NoV, float noise )
+{
+	const float t = ( foliage ? kGatherDepthThresholdFoliage : kGatherDepthThreshold ) * mix( 0.5, 1.5, noise ) /
+					mix( 0.1, 1.0, clamp( NoV, 0.0, 1.0 ) );
+	return wasDist > 0.0 && wasFoliage == foliage && abs( wasDist - dist ) < dist * t;
+}
+
 /// THE HISTORY UNDER A WORLD POINT: the previous frame's packed texel of eye `eye` where
 /// `world` lay (through that eye's PREVIOUS camera, onto that eye's own layer - an eye's mean
-/// is never read from the other eye's texels), accepted only on THE SAME SURFACE: the same
-/// distance (the 5 % test) AND the same facing (the plane test's normal dot, p.plane.y) - a
-/// corner or a crease reprojects onto a surface at the same distance facing elsewhere, which
-/// the distance alone would pass. knobs5.w = 1 is the test door that turns BOTH tests off
-/// (GatherTuning::historyValidationOff; never shipped). False = no usable history (a first
-/// frame, off the previous image, behind its camera, another surface, an empty texel).
-bool jahHistoryAt( vec3 world, vec3 normal, int eye, out uvec2 texel, out uint count )
+/// is never read from the other eye's texels), accepted only on THE SAME SURFACE
+/// (jahGatherSameSurface: the jittered relative depth over NoV and the class). knobs5.w = 1 is
+/// the test door that turns the test off (GatherTuning::historyValidationOff; never shipped).
+/// False = no usable history (a first frame, off the previous image, behind its camera, another
+/// surface, an empty texel).
+bool jahHistoryAt( vec3 world, bool foliage, float NoV, float noise, int eye, out uvec2 texel, out uint count )
 {
 	texel = uvec2( 0u );
 	count = 0u;
@@ -76,12 +73,11 @@ bool jahHistoryAt( vec3 world, vec3 normal, int eye, out uvec2 texel, out uint c
 	const ivec2 pc = clamp( ivec2( was * vec2( size ) ), ivec2( 0 ), size - 1 );
 	const uvec2 t = imageLoad( historyPrev, ivec3( pc, eye ) ).xy;
 	float wasDist;
-	vec3 wasNormal;
+	bool wasFoliage;
 	uint wasCount;
 	float wasCoverage;
-	unpackGeom( t.y, wasDist, wasNormal, wasCount, wasCoverage );
-	const bool accept = p.knobs5.w > 0.5 ||
-						( jahSameDistance( wasDist, z ) && dot( wasNormal, normal ) >= p.plane.y );
+	unpackGeom( t.y, wasDist, wasFoliage, wasCount, wasCoverage );
+	const bool accept = p.knobs5.w > 0.5 || jahGatherSameSurface( wasDist, wasFoliage, z, foliage, NoV, noise );
 	if( wasCount == 0u || !accept )
 		return false;
 	texel = t;

@@ -35,9 +35,9 @@
 // temporal mean at pixel resolution both possible and cheap: last frame's mean
 // at THIS surface point is found through the previous camera
 // (jah_reproject.glsl, rq_reflect.comp's arithmetic, one text), VALIDATED as
-// the same surface — its stored distance within the 5 % test AND its stored
-// normal within the gather's own same-surface tolerance (p.plane.y, the plane
-// test's) — and blended with this frame's estimate by the COUNT kept in the
+// the same surface — Lumen's rule (PHOTON-2 stage 2d, jah_probe_history.glsl):
+// its stored distance within a jittered 1 % over NoV (3 % for foliage) and its
+// stored surface class the same — and blended with this frame's estimate by the COUNT kept in the
 // history (a true running mean while young, then a floor so it follows a
 // changing scene). NEVER A NEIGHBOURHOOD CLAMP: a clamp to this frame's local
 // range is a statement that the history is WRONG wherever it disagrees with
@@ -58,10 +58,10 @@
 //       the history's own rate — as a SHARED-EXPONENT 9-9-9-5 word (the
 //       E5B9G9R9 layout, packed by hand because that format is not a storage
 //       format): 9 bits of mantissa against the brightest channel.
-//   .y  the surface's view distance (a half's exponent and its top 7 mantissa
-//       bits: 0.4 % against the 5 % test), its normal (octahedral, 5 + 5 bits —
-//       the test is at 25 degrees), the count (4 bits: the blend reads it only
-//       up to the floor, 1/10 shipped) and the mean COVERAGE (6 bits).
+//   .y  the surface's view distance (21 bits: a float's exponent and its top 13
+//       mantissa bits, 0.006 % against the test's 0.5 % floor), its CLASS (1 bit:
+//       foliage), the count (4 bits: the blend reads it only up to the floor,
+//       1/10 shipped) and the mean COVERAGE (6 bits).
 // THE ROUNDING OF THE TWO ACCUMULATED QUANTITIES IS STOCHASTIC (`roundingDither`,
 // keyed on the view's ADVANCING frame counter): an EMA at a 1/10 blend stored
 // round-to-nearest cannot move while a tenth of its innovation is under half a
@@ -307,9 +307,14 @@ void main()
 	vec3 pixelWorld = vec3( 0.0 );
 	float pixelDist = 0.0;
 	bool pixelValid = false;
+	bool pixelFoliage = false;
 	if( rawDepth > 0.0 && rawDepth < 1.0 )
 	{
-		vec3 normalVS = texture( gBufNormals, uv ).xyz * 2.0 - 1.0;
+		const vec4 gN = texture( gBufNormals, uv );
+		// THE SURFACE CLASS (PHOTON-2 stage 2d): the prepass writes 0 in the normals' alpha for foliage
+		// (JahGBufClass_piece_ps.any), upstream's 1 elsewhere.
+		pixelFoliage = gN.w < 0.5;
+		vec3 normalVS = gN.xyz * 2.0 - 1.0;
 		if( dot( normalVS, normalVS ) > 1e-6 )
 		{
 			normalVS = normalize( normalVS );
@@ -346,7 +351,12 @@ void main()
 		// reader of the same history).
 		uvec2 texel;
 		uint wasCount;
-		if( jahHistoryAt( pixelWorld, pixelNormal, eye, texel, wasCount ) )
+		// Lumen's test (jah_probe_history.glsl): the jitter is the pixel's and the view's frame's (the rounding's
+		// own PCG, its own salt), the facing the eye's.
+		const vec3 toEye = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
+		const float NoV = dot( pixelNormal, toEye );
+		if( jahHistoryAt( pixelWorld, pixelFoliage, NoV, roundingDither( ivec2( lx, pix.y ), 3u ), eye, texel,
+						  wasCount ) )
 		{
 			const vec4 h = vec4( unpackRgbShared( texel.x ), float( texel.y >> 26u ) / 63.0 );
 			if( finite3( h.xyz ) && finite1( h.w ) )
@@ -610,7 +620,7 @@ void main()
 	}
 	imageStore( historyCur, at,
 				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
-					   packGeom( pixelDist, pixelNormal, prevCount + 1u, mean.w,
+					   packGeom( pixelDist, pixelFoliage, prevCount + 1u, mean.w,
 								 roundingDither( ivec2( lx, pix.y ), 2u ) ),
 					   0u, 0u ) );
 	// The pixel's answer: the answered frames' mean irradiance at the fraction
