@@ -195,6 +195,8 @@ struct StillnessRun::Impl {
     Image trailPrev;                                  ///< ...and inside a move's trail
     std::vector<unsigned char> trailPrevChange;       ///< ...and its per-pixel change from the one before (J1's steps)
     unsigned long long lastRefits = 0;                ///< GpuSceneStatus::rayLevelRefits after the last frame
+    unsigned long long lastKeyMoves = 0;              ///< GatherStatus::keyMoves after the last frame (L7)
+    unsigned long long lastFoliageRule = 0;           ///< GatherStatus::foliageRuleAccepts after the last frame (L8)
     bool refitsSeen = false;
     unsigned picW = 0, picH = 0;
     std::vector<unsigned char> classAt;               ///< per picture pixel: its class (0 = unclassified)
@@ -436,8 +438,14 @@ struct StillnessRun::Impl {
     }
 
     /// The window's mask once the stop frame's history count is back (or every pixel with no gather).
+    /// The gather frames whose history copies the door has seen (the diagnosis of a copy that never came back).
+    unsigned histSeenLo = ~0u, histSeenHi = 0u;
     void tryMask(int win, const GatherStatus &g)
     {
+        if (!g.historyCount.empty()) {
+            histSeenLo = std::min(histSeenLo, g.historyCountFrame);
+            histSeenHi = std::max(histSeenHi, g.historyCountFrame);
+        }
         if (maskKnown[size_t(win)] || !stopSeen[size_t(win)]) return;   // its stop frame first (the picture's size)
         StillnessWindow &w = report.windows[size_t(win)];
         std::vector<unsigned char> &mask = masks[size_t(win)];
@@ -473,6 +481,9 @@ struct StillnessRun::Impl {
         w.fieldOrigin = gi.ifdMin;
         // THE DIGESTS WITHOUT A WAIT (PHOTON-2 stage 2's round, H5): asked for here, filled on the render thread at
         // the next frame's drain, taken in finish() (the run renders tail frames at the final pose while one is owed).
+        // ONLY FOR THE PATH CHECK, which alone reads them (the round-2 read's W4: every window downloaded and hashed
+        // every light volume on the render thread for nothing).
+        if (!spec.path) return;
         if (digests.size() <= win) digests.resize(win + 1);
         digests[win] = std::make_shared<GiVoxelDigests>();
         scene.requestGiVoxelDigests(digests[win]);
@@ -510,6 +521,7 @@ struct StillnessRun::Impl {
         w.settleFromStop.assign(n + 1, 0);
         w.settleFromLastGiRow.assign(n + 1, 0);
         w.lastGiRowFrame = -1;
+        w.lastHoldKeyFrame = -1;
         w.holdFrame = -1;
         for (StillnessFrame &f : w.trail) {
             if (const auto ss = slowStages.find(f.engineFrame); ss != slowStages.end()) f.slowStage = ss->second;
@@ -543,6 +555,7 @@ struct StillnessRun::Impl {
                 }
             }
             if (i > 0 && f.giRowCount) w.lastGiRowFrame = int(i);
+            if (i > 0 && f.holdKey) w.lastHoldKeyFrame = int(i);
             if (w.holdFrame < 0 && f.held) w.holdFrame = int(i);
         }
         for (unsigned k = 0; k <= n; ++k) {
@@ -746,6 +759,8 @@ bool StillnessRun::frameDone(std::string &err)
 
     if (p.part != Impl::Part::Window && p.window >= 0) m.moveFrames[size_t(p.window)].push_back(engineFrame);
     const unsigned long long refitsNow = pub.gpuScene.rayLevelRefits;
+    // THE HOLD'S REASONS, this frame (L7): the rest key moved since the last frame, or the inputs owed work. Read
+    // before the trail and window parts write the frame; the key's count is taken once, below them.
     const unsigned refits = m.refitsSeen ? unsigned(refitsNow - m.lastRefits) : 0u;
     m.lastRefits = refitsNow;
     m.refitsSeen = true;
@@ -759,6 +774,8 @@ bool StillnessRun::frameDone(std::string &err)
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
+        f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy;
+        f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         Image pic;
         if (!m.readPicture(pic, err)) return false;
         if (!m.picW) {
@@ -819,6 +836,8 @@ bool StillnessRun::frameDone(std::string &err)
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
+        f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy;
+        f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         f.held = g.running && g.settleFrames && g.restFrames > g.settleFrames;
         // THE TRACE THIS FRAME DID (when it did: a frame the reflection skipped leaves the counter where it was, and
         // its copy is the earlier frame's — never re-labelled as this one).
@@ -866,6 +885,8 @@ bool StillnessRun::frameDone(std::string &err)
         m.prev = std::move(pic);
         if (p.index == m.spec.frames) m.snapshotWindow(w, size_t(p.window), m.prev);
     }
+    m.lastKeyMoves = g.keyMoves;
+    m.lastFoliageRule = g.foliageRuleAccepts;
     // THE LATE READINGS of any window: the stop's history count, the reflection counts.
     bool masksPending = false;
     for (int win = 0; win < int(m.report.windows.size()); ++win) {
@@ -896,8 +917,14 @@ bool StillnessRun::finish(StillnessReport &out, std::string &err)
         m.report.windows[i].directDigest = dg->direct;
     }
     if (!m.queued.empty()) {
+        std::string stops;
+        for (size_t i = 0; i < m.report.windows.size(); ++i)
+            if (!m.maskKnown[i] && m.stopSeen[i])
+                stops += " " + m.report.windows[i].name + "'s stop is gather frame " +
+                         (m.stopGatherFrameKnown[i] ? std::to_string(m.stopGatherFrame[i]) : std::string("(none)")) + ";";
         err = "stillness: the stop frame's history count never came back (the gather's readback; " +
-              std::to_string(m.queued.size()) + " frames unread)";
+              std::to_string(m.queued.size()) + " frames unread;" + stops + " the copies seen: gather frames " +
+              (m.histSeenLo == ~0u ? std::string("none") : std::to_string(m.histSeenLo) + ".." + std::to_string(m.histSeenHi)) + ")";
         return false;
     }
     // ONE COUNTER (the read's finding 2): the monitor files a record for EVERY frame while it is on, keyed by its
@@ -978,7 +1005,7 @@ std::string StillnessReport::tsv() const
         o << "\t" << n << "_px\t" << n << "_max\t" << n << "_mean\t" << n << "_changed\t" << n << "_refl_none\t" << n
           << "_refl_le9\t" << n << "_refl_le17\t" << n << "_refl_le33\t" << n << "_refl_gt33";
     o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\tframe_gpu_ms\tframe_ms"
-      << "\tclass_px\tclass_restart\tstep_px\tslow_stage\n";
+      << "\tclass_px\tclass_restart\tstep_px\tslow_stage\thold_key\tfoliage_rule\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -995,7 +1022,8 @@ std::string StillnessReport::tsv() const
             char ms[64];
             std::snprintf(ms, sizeof(ms), "\t%.3f\t%.3f\t%d\t%d\t%d\t", f.frameGpuMs, f.frameMs, f.classPixels,
                           f.classRestarts, f.stepPixels);
-            o << ms << (f.slowStage.empty() ? "-" : f.slowStage) << "\n";
+            o << ms << (f.slowStage.empty() ? "-" : f.slowStage) << "\t" << (f.holdKey ? 1 : 0) << "\t"
+              << f.foliageRule << "\n";
         }
     return o.str();
 }
@@ -1008,7 +1036,7 @@ std::string StillnessReport::summary() const
     for (const StillnessWindow &w : windows) {
         o << "STILLNESS " << w.name << " stop=(" << w.eye.x << "," << w.eye.y << "," << w.eye.z << ") frames="
           << (w.frames.empty() ? 0 : w.frames.size() - 1) << " visible="
-          << (w.visibleFromGather ? "gather" : "all") << " lastGiRow=" << w.lastGiRowFrame << " hold=" << w.holdFrame
+          << (w.visibleFromGather ? "gather" : "all") << " lastGiRow=" << w.lastGiRowFrame << " lastHoldKey=" << w.lastHoldKeyFrame << " hold=" << w.holdFrame
           << " | frames to <1 code (from stop / from last GI row; = the window: never):";
         for (size_t k = 0; k < names.size() && k < w.settleFromStop.size(); ++k)
             o << " " << names[k] << "=" << w.settleFromStop[k] << "/" << w.settleFromLastGiRow[k] << "("

@@ -6136,12 +6136,10 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             // right: nothing finishes while the scene is still changing, and the
             // mirror's own at-rest tick — which fires one frame after the motion
             // ends and clears the debt outright — is what finishes a light gesture.
-            // THE CHECK LIVES HERE, BEFORE THE TIMING GATE (fix round, audit F7):
-            // inside the payer it ran only on the frames a step is paid, so a
-            // partial debt's idle frames missed a light write for up to n - 1
-            // frames, and the restart then zeroed the timing AFTER that frame's
-            // payment — one idle frame more. Restarting before the count makes a
-            // whole-chain restart pay on the very frame it is seen.
+            // THE CHECK LIVES HERE, BEFORE THE STEP (fix round, audit F7): a
+            // whole-chain restart pays on the very frame it is seen. (The timing
+            // gate it once had to precede is gone: the settle is paid at once,
+            // PHOTON-2 stage 2b, one step a frame.)
             if (mGiSettleSerial != mScene.lightWriteSerial()) oweChainSettle();   // a light: the whole chain
             payChainSettleStep();                // one injection, this frame
         }

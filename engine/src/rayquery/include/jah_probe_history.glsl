@@ -47,12 +47,18 @@ void unpackGeom( uint g, out float dist, out bool foliage, out uint count, out f
 /// class split; the class bit is still written, so a reader can tell the foliage pixels apart).
 const float kGatherDepthThreshold = 0.01;
 const float kGatherDepthThresholdFoliage = 0.03;
+/// Set by the last jahGatherSameSurface that accepted: only the FOLIAGE class's looser bound let it through (its
+/// depth delta between the 1 % and the 3 % bounds) - PHOTON-2 L8's count (rq_probe_integrate.comp).
+bool gFoliageRuleOnly = false;
 bool jahGatherSameSurface( float wasDist, bool wasFoliage, float dist, bool foliage, float NoV, float noise )
 {
 	const bool classTest = p.knobs2.x < 0.5;
-	const float t = ( classTest && foliage ? kGatherDepthThresholdFoliage : kGatherDepthThreshold ) *
-					mix( 0.5, 1.5, noise ) / mix( 0.1, 1.0, clamp( NoV, 0.0, 1.0 ) );
-	return wasDist > 0.0 && ( !classTest || wasFoliage == foliage ) && abs( wasDist - dist ) < dist * t;
+	const float scale = mix( 0.5, 1.5, noise ) / mix( 0.1, 1.0, clamp( NoV, 0.0, 1.0 ) );
+	const float t = ( classTest && foliage ? kGatherDepthThresholdFoliage : kGatherDepthThreshold ) * scale;
+	const float delta = abs( wasDist - dist );
+	const bool same = wasDist > 0.0 && ( !classTest || wasFoliage == foliage ) && delta < dist * t;
+	gFoliageRuleOnly = same && classTest && foliage && !( delta < dist * kGatherDepthThreshold * scale );
+	return same;
 }
 
 /// THE HISTORY UNDER A WORLD POINT: the previous frame's packed texel of eye `eye` where

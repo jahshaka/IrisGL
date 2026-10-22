@@ -787,8 +787,8 @@ private:
     /// THE REFLECTION'S REST KEY (PHOTON-2 fix F5): the gather's (the edits and the field's last write, stage 2c),
     /// what a reflection ray reads beside them (PhotonComponent::reflectionReadsKey: the lighting serial - a light
     /// write, an injection landing, a cascade rebuild -, the cloud layer's GI, the shadow epoch - the transform epoch
-    /// with the shadow scan's writes - and the ray rule's refits, the field's every integration, the cards' captures
-    /// and relights) and EVERY OTHER WRITE TO WHAT A REFLECTION RAY READS: a material edit (the material
+    /// with the shadow scan's writes - and the ray rule's refits, the cards' captures and relights; the field's every
+    /// dispatch rides the gather's key) and EVERY OTHER WRITE TO WHAT A REFLECTION RAY READS: a material edit (the material
     /// store's rows and the edit serial - a reflected object's albedo is read at the hit, a reflector's roughness
     /// shapes the lobe, and neither moves the gather's key), a light write or removal (the hit table's direct light),
     /// and any acceleration-structure build or refit (an item added, removed, hidden or moved re-builds the TLAS). A
@@ -9280,7 +9280,7 @@ bool PhotonComponent::probeGatherWanted() const {
 /// they landed later as BURSTS (Bistro after the 4 m dolly: 385k px at frames 29-45, 273k at 188-205). The key and
 /// gatherInputsBusy (work still OWED between two writes) together decide RESTING. What RESTARTS is another key
 /// (gatherRestartKey: restart-class events only) — a write never restarts a history. The reflection folds what its
-/// rays read beside these (reflectionReadsKey, the field's every integration included).
+/// rays read beside these (reflectionReadsKey).
 unsigned long long PhotonComponent::gatherRestKey() const {
     unsigned long long key = 1469598103934665603ull;
     const auto fold = [&key](unsigned long long v) {
@@ -9323,8 +9323,8 @@ bool PhotonComponent::gatherInputsBusy() const {
 /// EVERYTHING A REFLECTION RAY READS BESIDE THE EDITS (PHOTON-2 F5; the gather's rest key before stage 2c): the
 /// lighting (giLightingSerial: a light write, an injection landing, a cascade rebuild; the cloud layer's GI), the
 /// geometry (the ray tier's own gate: the shadow epoch - the transform epoch with the shadow scan's writes - and the
-/// ray rule's refits), the irradiance field's every write (its integration count:
-/// a hit the field shades changes with it) and the surface cache the hits read first (its captures and relights).
+/// ray rule's refits) and the surface cache the hits read first (its captures and relights). The irradiance field's
+/// every write (a hit the field shades changes with it) is the gather's key's: its dispatches, counted on the CPU.
 /// RayQueryTier::reflectRestKey folds it with the edits: a held reflection never shows a stale input.
 unsigned long long PhotonComponent::reflectionReadsKey() const {
     unsigned long long key = 1469598103934665603ull;
@@ -9335,7 +9335,9 @@ unsigned long long PhotonComponent::reflectionReadsKey() const {
     fold(giLightingSerial());
     fold(mScene.cloudGiSerial());
     fold(mScene.shadowEpoch() + mScene.rayLevelRefits());
-    if (mIfd) fold(mIfd->getIntegrations());
+    // (The field's integration count, a readback up to two ticket periods late, is out (the round-2 read's W3): the
+    // gather's key the reflection folds already carries the field's every dispatch, counted on the CPU as recorded,
+    // and the late count only re-broke a reflection's rest ~8 frames after the field's last dispatch.)
     if (mSurfaceCache) {
         CardCacheStatus cs;
         mSurfaceCache->fillStatus(cs);

@@ -983,7 +983,9 @@ namespace Ogre
         // a band (an unfinished whole-grid one, a reversal, a band around the grid)
         // stays whole. A pass this scroll interrupts is owed again in full (PHOTON-2 K3:
         // mRefinesOwed restarts at target - 1 below over the joined band or the grid,
-        // and every probe that pass had reached exits at its history read).
+        // so the probes it had not reached take their sample - and the ones it had reached
+        // are refined again toward the target: a probe's group exits only at the target or
+        // stopped by the variance stop).
         {
             const bool pending = mRefinesOwed > 0u || !isWorkDone();
             if( !pending )

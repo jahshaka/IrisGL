@@ -3763,6 +3763,15 @@ struct GatherStatus {
     unsigned sinceRestart = 0u;
     unsigned settleFrames = 0u;
     bool settled = true;
+    /// THE HOLD'S REASONS (PHOTON-2 round 2, L7): the frames the gather's rest key has moved (every input write, the
+    /// ones that file no GI row included: a ray-level refit, a shadow scan, a light write), and whether the inputs owed
+    /// work on the last gathered frame. A frame where either moved is one the hold waited on.
+    unsigned long long keyMoves = 0ull;
+    bool inputsBusy = false;
+    /// THE FOLIAGE RULE'S OWN ACCEPTS (PHOTON-2 L8, K5's guard): the pixels whose history only the foliage class's
+    /// looser test accepted (a depth delta between the 1 % and the 3 % bounds), summed over the gathered frames since
+    /// the view began (a few frames late). 0 under gather.classOff by construction.
+    unsigned long long foliageRuleAccepts = 0ull;
     /// THE READBACK (`GatherTuning::readback`): the last retired frame's
     /// `probeIrradiance`, row-major, four floats per pixel (rgb = E/pi, the
     /// mean radiance over the cosine-weighted hemisphere of the pixel's own

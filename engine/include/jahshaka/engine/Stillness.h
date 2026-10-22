@@ -125,6 +125,11 @@ struct StillnessFrame {
     /// The gather's rest (GatherStatus): consecutive rest frames, frames since its last restart, the settle N,
     /// and whether the view HELD this frame (restFrames > settleFrames: nothing dispatched).
     unsigned           restFrames = 0, sinceRestart = 0, settleFrames = 0;
+    /// THE HOLD WAITED ON THIS FRAME (PHOTON-2 round 2, L7): the gather's rest key moved, or its inputs owed work.
+    bool               holdKey = false;
+    /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2
+    /// L8: a few frames late, so a window's SUM is the reading).
+    unsigned long long foliageRule = 0;
     /// The ray tier's per-instance levels this frame re-fitted (GpuSceneStatus::rayLevelRefits' step).
     unsigned           rayLevelRefits = 0;
     bool               held = false;
@@ -164,7 +169,10 @@ struct StillnessWindow {
     std::vector<int> settleFromStop;
     std::vector<int> settleFromLastGiRow;
     std::vector<unsigned> visiblePixels;   ///< per class: the counted pixels
-    int holdFrame = -1;                    ///< the first window frame the gather HELD (-1: never)
+    int holdFrame = -1;
+    /// ...and the last window frame the hold waited on (StillnessFrame::holdKey; -1: none after the stop) - the bars'
+    /// "last input write", rows or none.
+    int lastHoldKeyFrame = -1;                    ///< the first window frame the gather HELD (-1: never)
     /// THE MOVE BEFORE THE STOP: the GI rows that fired on its frames ("name:frames/units", ',' joined) and how
     /// many frames before the stop the last of them landed (-1: none) — a commit that lands inside the move is the
     /// origin of every debt the window then pays.

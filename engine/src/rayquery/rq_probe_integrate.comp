@@ -120,6 +120,9 @@ layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray restMean;
 /// by nothing here: the integrate's answer and its histories are the view's none
 /// of its business. With the knob off the binding holds a stand-in, never written.
 layout( rgba16f, set = 0, binding = 8 ) uniform writeonly image2DArray photonOverlay;
+/// THE FRAME'S COUNTER (the placement's buffer, zeroed at the frame's head): word 1 counts the pixels whose history only
+/// the foliage rule accepted (PHOTON-2 L8, K5's guard; read back with the placement's word 0).
+layout( std430, set = 0, binding = 9 ) buffer GatherCounter { uint words[]; } gatherCounter;
 
 #include "jah_reproject.glsl"
 #include "jah_probe_history.glsl"
@@ -358,6 +361,8 @@ void main()
 		if( jahHistoryAt( pixelWorld, pixelFoliage, NoV, roundingDither( ivec2( lx, pix.y ), 3u ), eye, texel,
 						  wasCount ) )
 		{
+			if( gFoliageRuleOnly )
+				atomicAdd( gatherCounter.words[1], 1u );
 			const vec4 h = vec4( unpackRgbShared( texel.x ), float( texel.y >> 26u ) / 63.0 );
 			if( finite3( h.xyz ) && finite1( h.w ) )
 			{

@@ -399,6 +399,14 @@ private:
         /// frame saw. Past N (settleFramesOf) the view HOLDS: nothing is dispatched.
         unsigned restFrames = 0u;
         unsigned long long restKey = 0ull;
+        /// THE HOLD'S TWO REASONS, counted (PHOTON-2 round 2, L7): the frames the rest key moved (an input written)
+        /// and whether the inputs owed work on the last gathered frame - what the stillness door reads as "the last
+        /// frame the hold waited on", rows or none (a ray-level refit, a shadow scan, a light write file no GI row).
+        unsigned long long keyMoves = 0ull;
+        /// PHOTON-2 L8: the pixels whose history the foliage rule ALONE accepted (between the 1 % and 3 % depth
+        /// bounds), summed over the retired frames.
+        unsigned long long foliageRuleAccepts = 0ull;
+        bool inputsBusyLast = false;
         /// THE SETTLE (the fix round's split): frames drawn since the history's
         /// last RESTART — its birth, a resize, a scene bind, the lever, an
         /// estimator-changing tuning, or a move of the scene's restart key.
