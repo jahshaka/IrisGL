@@ -85,6 +85,10 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 layout( std430, set = 0, binding = 1 ) buffer Records { JahProbeRecord r[]; } records;
 layout( rgba16f, set = 0, binding = 2 ) uniform readonly image2D probeAtlas;
+/// THE EYE'S DEPTH (PHOTON-2 stage 2's tail): the 3 x 3 taps' depth walk (jah_probe_seen.glsl).
+layout( set = 0, binding = 3 ) uniform sampler2DArray sceneDepth;
+#include "jah_reproject.glsl"
+#include "jah_probe_seen.glsl"
 
 
 /// Eight vec4 of partial sums per lane: 27 SH floats (coefficient k, channel c
@@ -174,9 +178,19 @@ void main()
 			{
 				nN = records.r[nb].normalW.xyz;
 				// THE PLANE: the neighbour against THIS probe's plane.
-				wPlane = jahPlaneWeight( posW.xyz, normalW.xyz, nbPos.xyz, nN,
-										 jahViewDistanceOf( jahEyeNow( jahEyeOfCell( cell.x ) ),
-															posW.xyz ) );
+				const JahEye tapEye = jahEyeNow( jahEyeOfCell( cell.x ) );
+				wPlane = jahPlaneWeight( posW.xyz, normalW.xyz, nbPos.xyz, nN, jahViewDistanceOf( tapEye, posW.xyz ) );
+				// ...AND SEEN ALONG THE SURFACE (PHOTON-2 stage 2's tail; 1.6 B4, DEEP_AUDIT photon-diffuse F13): the
+				// depth walk from this probe to the neighbour in the eye's picture - no light through a wall thinner than
+				// a probe stride on screen (the plane test alone joins the coplanar floors on its two sides).
+				vec2 ownUv;
+				float ownZ;
+				if( wPlane > 0.0 &&
+					( jahReproject( posW.xyz, tapEye.camPos, tapEye.perspective, tapEye.rayTL, tapEye.rayRight,
+									tapEye.rayDown, tapEye.fwd, ownUv, ownZ ) != 0 ||
+					  !seenAlongSurface( posW.xyz, ownUv, nbPos.xyz, tapEye, jahEyeOfCell( cell.x ),
+										 vec2( float( jahEyeWidth() ), p.resolution.w ) ) ) )
+					wPlane = 0.0;
 				jahTangentFrame( nN, nT, nB );
 				nBlock = blockOf( nb );
 				nP = nbPos.xyz;

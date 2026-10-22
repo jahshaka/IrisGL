@@ -324,6 +324,7 @@ if(JAH_RAY_QUERY_OK)
                        "${JAH_RQ_INCLUDE}/jah_probe_params.glsl"
                        "${JAH_RQ_INCLUDE}/jah_reproject.glsl"
                        "${JAH_RQ_INCLUDE}/jah_probe_history.glsl"
+                       "${JAH_RQ_INCLUDE}/jah_probe_seen.glsl"
                        "${JAH_RQ_INCLUDE}/jah_rq_hit_direct.glsl"
                        "${JAH_RQ_INCLUDE}/jah_cloud_shadow.glsl")
     add_custom_command(

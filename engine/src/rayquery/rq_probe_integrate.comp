@@ -126,6 +126,7 @@ layout( std430, set = 0, binding = 9 ) buffer GatherCounter { uint words[]; } ga
 
 #include "jah_reproject.glsl"
 #include "jah_probe_history.glsl"
+#include "jah_probe_seen.glsl"
 
 /// THE ROUNDING'S NUMBER on [0,1): a pure function of (the pixel IN ITS EYE'S
 /// OWN IMAGE, the view's ADVANCING frame counter p.knobs6.z, which quantity) —
@@ -194,38 +195,6 @@ vec3 shEvalAt( uint i, vec3 n, int bands )
 		e += vec3( c[3 * k], c[3 * k + 1], c[3 * k + 2] ) * y[k];
 	}
 	return max( e, vec3( 0.0 ) );
-}
-
-/// THE WIDE READ'S OCCLUSION TEST (GATHER-NOISE-1's fix round): is the probe at
-/// `probe` reached from the pixel's surface point `x` WITHOUT anything standing
-/// between them? The segment is walked in the eye's own picture, one sample
-/// every 3 pixels of its length on screen (2 to 16): at each, the depth buffer
-/// must not hold a surface NEARER the eye than the segment itself (beyond a 3 %
-/// tolerance: the segment lies on the surface, whose own depth matches it). A
-/// partition, a column or a step between the two is exactly such a nearer
-/// surface — a 0.1 m partition seen from above is a few pixels wide, which a
-/// fixed four samples stepped over (gi.flythrough_noise.Leak).
-bool seenAlongSurface( vec3 x, vec2 xUv, vec3 probe, JahEye e, int eye, vec2 size )
-{
-	vec2 pUv;
-	float pz;
-	if( jahReproject( probe, e.camPos, e.perspective, e.rayTL, e.rayRight, e.rayDown, e.fwd, pUv, pz ) != 0 )
-		return false;
-	const int n = clamp( int( length( ( pUv - xUv ) * size ) / 3.0 ), 2, 16 );
-	for( int i = 1; i < n; ++i )
-	{
-		const vec3 w = mix( x, probe, float( i ) / float( n ) );
-		vec2 uvS;
-		float z;
-		if( jahReproject( w, e.camPos, e.perspective, e.rayTL, e.rayRight, e.rayDown, e.fwd, uvS, z ) != 0 )
-			return false;
-		const float raw = texture( sceneDepth, vec3( uvS, float( eye ) ) ).x;
-		if( raw <= 0.0 || raw >= 1.0 )
-			continue;		// nothing drawn there: the sky stands behind every surface
-		if( jahViewDistance( raw ) < z * 0.97 )
-			return false;
-	}
-	return true;
 }
 
 /// THE DISCS (PHOTON-VIEW-1): the probes of the 3 x 3 cells around the pixel's
@@ -405,6 +374,11 @@ void main()
 	vec3 sum = vec3( 0.0 );
 	float wsum = 0.0;
 	float ownCellWeight = 0.0;
+	// THE DEPTH WALK ON EVERY READ (PHOTON-2 stage 2's tail; 1.6 B4, DEEP_AUDIT photon-diffuse F13): no LIGHT THROUGH
+	// A WALL on any read of a neighbouring probe - the bilinear four, the twin and both silhouette steps as the wide
+	// young read always did (jah_probe_seen.glsl). A wall thinner than one probe stride on screen (0.1 m at 30 m is
+	// ~2.6 px at 1080p) left the coplanar floors on its two sides one plane to the plane test alone.
+	const vec2 eyeSize = vec2( float( eyeW ), float( full.y ) );
 	// A PROBE WITH NO SAMPLE THIS FRAME (PHOTON-2 stage 2's tail, 1.6 A2): a ray of it was a record a full hit
 	// list dropped (rq_probe_filter.comp's irradiance.w -1). It is no reading at all - neither an answer nor the absence
 	// of one - so a pixel whose own probes are starved and that no other of them answers takes NO SAMPLE this frame
@@ -460,8 +434,7 @@ void main()
 					// LIGHT THROUGH A WALL. A floor that runs on under a thin
 					// partition is one plane on both sides, so the plane test alone
 					// would hand the lit side's probes to the dark side's pixels.
-					if( w > 0.0 && !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye,
-														vec2( float( eyeW ), float( full.y ) ) ) )
+					if( w > 0.0 && !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
 						w = 0.0;
 					if( w <= 0.0 )
 						continue;
@@ -485,7 +458,7 @@ void main()
 			continue;
 		const float w = wb * jahPlaneWeight( posW.xyz, records.r[probeIndex].normalW.xyz, pixelWorld,
 											 pixelNormal, pixelDist );
-		if( w <= 0.0 )
+		if( w <= 0.0 || !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
 			continue;
 		sum += shEvalAt( probeIndex, pixelNormal, bands ) * w;
 		wsum += w;
@@ -505,7 +478,7 @@ void main()
 			{
 				const float w = ownCellWeight * jahPlaneWeight( posW.xyz, records.r[twin].normalW.xyz,
 																pixelWorld, pixelNormal, pixelDist );
-				if( w > 0.0 )
+				if( w > 0.0 && seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
 				{
 					sum += shEvalAt( twin, pixelNormal, bands ) * w;
 					wsum += w;
@@ -551,7 +524,7 @@ void main()
 					const float w = jahPlaneWeight( posW.xyz, records.r[pi].normalW.xyz, pixelWorld,
 													pixelNormal, pixelDist ) /
 									( 1.0 + float( dx * dx + dy * dy ) );
-					if( w <= 0.0 )
+					if( w <= 0.0 || !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
 						continue;
 					sum += shEvalAt( pi, pixelNormal, bands ) * w;
 					wsum += w;
@@ -583,7 +556,7 @@ void main()
 							continue;
 						const float d = length( posW.xyz - pixelWorld );
 						const float w = clamp( 1.0 - d / reach, 0.0, 1.0 );
-						if( w <= 0.0 )
+						if( w <= 0.0 || !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
 							continue;
 						sum += shEvalAt( pi, pixelNormal, bands ) * w;
 						wsum += w;

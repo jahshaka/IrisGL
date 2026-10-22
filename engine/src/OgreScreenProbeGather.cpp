@@ -119,8 +119,8 @@ static_assert(kTraceRaysBinding == kTraceDirectBinding + 1u && kTraceOverlayBind
                   kTraceBindings == kTraceCloudBinding + 1u &&
                   kTraceDirectBinding == kTraceCardViewBinding + SurfaceCache::kViewLayers,
               "the direct volume follows the card read's view-term layers, the instrument's two follow it");
-/// The filter's three: params, records and the raw atlas.
-constexpr unsigned kFilterBindings = 3u;
+/// The filter's four: params, records, the raw atlas and the eye's depth (its taps' depth walk, PHOTON-2 stage 2's tail).
+constexpr unsigned kFilterBindings = 4u;
 /// The integrate's nine: params, records, normals, depth, the irradiance, the
 /// history's two halves (one packed texel each, PHOTON-GA-VR), the rest mean and
 /// the photon view's overlay (PHOTON-VIEW-1).
@@ -399,6 +399,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 1 records
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 2 the raw atlas
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 3 depth (the taps' depth walk)
         };
         if (!makeLayout(kFilterBindings, t, nullptr, mFilterLayout, "filter")) return false;
     }
@@ -1840,6 +1841,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[1].pBufferInfo = &recordsInfo;
         w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[2].pImageInfo = &filterRaw;
+        w[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[3].pImageInfo = &depth;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kFilterBindings, w, 0, nullptr);
     }
 
