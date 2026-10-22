@@ -136,7 +136,8 @@ layout( rg32f, set = 0, binding = 8 ) uniform readonly image2DArray historyDistP
 layout( rg32f, set = 0, binding = 9 ) uniform readonly image2DArray historyDistCur;
 /// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b): rgb = the ray's radiance, w = the trace's blend FLOOR for the texel
 /// (0 < w <= 1) plus 2 when only the SURFACE history may be used, plus 4 on a WARM RESTART (the mean restarted on
-/// motion in a warm view: the count is seeded at the warm-up here, fix F3); w = 0 = no sample this frame (a record the
+/// motion in a warm view: the count is seeded at the warm-up here, fix F3), plus 8 for a FIXED estimator (the lobe under
+/// one texel at its hit: one ray, the same every still frame — fix F4); w = 0 = no sample this frame (a record the
 /// decode did not shade, a non-finite answer): the carried history stays as it is.
 layout( rgba16f, set = 0, binding = 45 ) uniform readonly image2DArray reflectSample;
 
@@ -233,6 +234,8 @@ void main()
 	if( !( s.w > 0.0 ) || !finite3( s.xyz ) )
 		return;
 	float sw = s.w;
+	const bool fixedEstimator = sw > 7.5;
+	sw -= fixedEstimator ? 8.0 : 0.0;
 	const bool warmRestart = sw > 3.5;
 	sw -= warmRestart ? 4.0 : 0.0;
 	const bool surfaceOnly = sw > 1.5;

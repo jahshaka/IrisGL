@@ -564,6 +564,9 @@ void jahCardLobeHemi( float r, out float a, out float b )
 /// sizes is still a blur, and a mirror is the one surface that must not be
 /// blurred — LOD 0 is still two cells, so only hit lighting sharpens it).
 const float kMirrorAlpha = 0.01;
+/// THE G-BUFFER'S FLOOR (fork 16d8e29d4 packs alpha over [0.001, 1]): an alpha this low IS a roughness-0 mirror —
+/// the renderer's sharpest surface — and its estimator is the lobe's centre at every throw (PHOTON-2 F4, main()).
+const float kMirrorPackAlpha = 0.0011;
 /// A MOVING REFLECTOR'S MEAN REMEMBERS EIGHT FRAMES (REFLECT-CONVERGE-1; main()).
 const float kMovingReflectorFloor = 0.125;
 
@@ -868,13 +871,35 @@ void main()
 	const vec3 T = vec3( 1.0 + sg * worldN.x * worldN.x * a0, sg * b0, -sg * worldN.x );
 	const vec3 B = vec3( b0, sg + worldN.y * worldN.y * a0, -worldN.y );
 	const vec3 Ve = vec3( dot( V, T ), dot( V, B ), dot( V, worldN ) );
-	// A MIRROR'S ESTIMATOR HAS NO VARIANCE (PHOTON-2 1c): a texel whose lobe is at or under the mirror cut takes
-	// each frame's sample (nearly) whole — the floor's ramp, below — so no history averages what a per-frame random
-	// term adds there, and the picture showed it raw: the mirror's speckle (1.24 codes a frame at rest on
-	// photon-glass, the owner's "white speckle"). So under the cut every random input is fixed: the ray is the lobe's
-	// centre (the exact mirror direction — a lobe this narrow is under a degree), and the hit's mover-visibility
-	// rays (below) turn per texel, never per frame. Above it the history averages them, as before.
-	const bool fixedEstimator = lobeAlpha <= kMirrorAlpha;
+	// A LOBE UNDER ONE TEXEL HAS NO VARIANCE TO AVERAGE (PHOTON-2 1c, its cut by fix F4). A texel whose lobe lands,
+	// at the hit, inside the footprint ONE TRACE TEXEL has there takes each frame's sample whole (blendFloor 1,
+	// below): what the lobe spreads is under the texel, so the GGX blur shows nothing, and a per-frame random term
+	// would show raw — the mirror's speckle (1.24 codes a frame at rest on photon-glass, the owner's "white
+	// speckle"). There every random input is fixed: the ray is the lobe's centre (the exact mirror direction) and
+	// the hit's mover-visibility rays (below) turn per texel, never per frame. Where the lobe is WIDER than the
+	// texel at its hit, the GGX sample keeps the blur and the history averages it (the temporal pass, the rest).
+	// The cut was the lobe's alpha alone (kMirrorAlpha, perceptual 0.1): it took the centre ray on perceptual
+	// 0.03-0.1 surfaces whose lobe is many texels wide at a long throw — the GGX blur removed and a sharp/soft seam
+	// at the cut on a roughness map (the stage-1 read's worth-a-look, F4). THE TEST, before the ray: the lobe's
+	// angular width at the hit, ~4 alpha (twice the half-vector's spread, both sides), over the throw t — the
+	// texel's mean ray length (its own last mean, unreprojected: an estimate of where the lobe lands, exact at
+	// rest) — against one trace texel's width at the reflected image, the camera's pixel angle over (eye distance
+	// + t) (perspective), the image plane's texel (orthographic). No mean yet: the lobe's width is unknown and the
+	// sample is stochastic. The G-buffer's floor (alpha 0.001, the packing's: a roughness-0 mirror) is always
+	// the centre ray — the renderer's sharpest surface is exact at every throw.
+	bool fixedEstimator = lobeAlpha <= kMirrorPackAlpha;
+	if( !fixedEstimator )
+	{
+		const vec2 ownPair = imageLoad( historyDistPrev, ivec3( tc, gEye ) ).xy;
+		const float throwT = ownPair.x > 0.0 && finite1( ownPair.y ) ? jahMeanLength( ownPair.y ) : 0.0;
+		if( throwT > 0.0 )
+		{
+			const float texelAngle = length( thisEye.rayDown ) / float( traceRes.y );
+			const float texelAtImage = thisEye.perspective < 0.5 ? texelAngle
+																 : texelAngle * ( length( world - thisEye.camPos ) + throwT );
+			fixedEstimator = 4.0 * lobeAlpha * throwT < texelAtImage;
+		}
+	}
 	const vec3 Ht = fixedEstimator ? vec3( 0.0, 0.0, 1.0 )
 								   : sampleGgxVndf( Ve, lobeAlpha, sample2( seedPix, uint( p.knobs.z ) ) );
 	const vec3 H = normalize( Ht.x * T + Ht.y * B + Ht.z * worldN );
@@ -1232,20 +1257,18 @@ void main()
 	// VIEW, so the old radiance is wrong at the new pose however well it is
 	// reprojected. That is a visible smear behind any camera motion.
 	//
-	// So the memory is bought with the lobe's width and not given away: at
-	// alpha 0 the blend is 1 (take this frame's answer whole), and it falls to
-	// the floor over kMirrorAlpha — the alpha at which one sample stops being
-	// the whole integral. 0.01 is perceptual 0.1, the roughness at which the
-	// reflected lobe's half-width (~2*alpha) first exceeds a pixel of a 1080p
-	// frame at a typical field of view (the file's kMirrorAlpha, the hit read's
-	// mirror cut — one number).
-	// FROM THE PACKING FLOOR, not from zero (third reader, item 3). The
-	// G-buffer cannot hold an alpha below 0.001 — fork 16d8e29d4 (was 0043) packs over
-	// [0.001, 1] — so 0.001 IS a mirror, and a ramp starting at 0 gives the
-	// sharpest surface this renderer can express a blend of 0.972 rather than
-	// 1: a mirror in a two-frame view would show 2.8 % probe, and a
-	// perceptual-0.08 surface 30 % of it on its first frame.
-	blendFloor = max( blendFloor, 1.0 - smoothstep( 0.001, kMirrorAlpha, lobeAlpha ) );
+	// So the memory is bought with the lobe's width and not given away — and the
+	// width that decides it is the lobe's AT ITS HIT against one texel there, the
+	// same test that fixes the estimator (PHOTON-2 F4, above): a texel whose lobe is
+	// under one texel takes this frame's answer whole (its centre ray IS the
+	// integral), one whose lobe is wider keeps the floor's memory, which the
+	// temporal pass clamps and the virtual-point history reprojects as a mirror's.
+	// (The ramp that stood here — 1 at the packing floor down to the floor at
+	// kMirrorAlpha, by alpha alone — gave a stochastic near-mirror texel at a long
+	// throw a blend near 1: its one GGX sample shown nearly raw, the speckle F4
+	// keeps out.)
+	if( fixedEstimator )
+		blendFloor = 1.0;
 	blend = max( blend, blendFloor );
 	// A MOVING REFLECTOR'S MEAN IS AN EIGHT-FRAME MEAN (REFLECT-CONVERGE-1, measured on
 	// gi.reflect_mover's glossy sphere). The floor's thirty-two frames are bought for
@@ -1287,9 +1310,10 @@ void main()
 	// + 2). A WARM RESTART (+ 4, PHOTON-2 fix F3): the mean restarted on motion in a warm view, so the temporal pass
 	// seeds this sample's count at the warm-up — the record's history is stored with ITS count (0), never the seed,
 	// so a record the decode leaves unshaded is a texel with no answer (skipped), never a black one at count 8.
+	// THE FIXED ESTIMATOR (+ 8, F4): its samples are one ray, the same every still frame — no firefly to bound at rest.
 	const bool warmRestart = prev.w <= 0.0 && warmHeld > 0.5;
 	const float sampleW = clamp( blendFloor, 1e-3, 1.0 ) + ( ( ownMoving || hitMoving || virtualHeld ) ? 2.0 : 0.0 ) +
-						  ( warmRestart ? 4.0 : 0.0 );
+						  ( warmRestart ? 4.0 : 0.0 ) + ( fixedEstimator ? 8.0 : 0.0 );
 	if( record )
 	{
 		// THE RECORD: this texel's history is CARRIED with ITS OWN count (not the seed: a
