@@ -285,6 +285,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
         COMMENT "Compiling the reflection filter/composite compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and the reflection's TEMPORAL pass (PHOTON-2 1b), with the shared reprojection header.
@@ -297,6 +298,7 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_temporal.comp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
         COMMENT "Compiling the reflection temporal compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and THE BREAK'S COMPOSE (PHOTON-2 round 2, G2): the rest's answer composed into the half the trace reads.
@@ -308,6 +310,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_compose.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_compose.comp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
         COMMENT "Compiling the reflection rest's compose compute shader at SPIR-V 1.4"
         VERBATIM)
     # THE SCREEN-PROBE GATHER'S FOUR JOBS (GATHER-1a; the filter PHOTON-GATHER-1b), same rule plus ONE
@@ -417,6 +420,7 @@ if(JAH_RAY_QUERY_OK)
                 --vn krq_hitCompositeSpv -o "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_hit_composite.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_hit_composite.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atmosphere.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_height_fog.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_fog_along.glsl"
@@ -967,6 +971,12 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DRAW=1
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahFogAlong.glsl
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_fog_along.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE ONE RADIANCE CEILING AND THE NaN TESTS (PHOTON-7 stage 6, D12): the ray jobs include the file through
+    # glslang, the screen reflection's raster history copy and resolve include this raw copy.
+    COMMAND ${CMAKE_COMMAND} -DRAW=1
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahRqFinite.glsl
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # A CARD READ FROM A DIRECTION (PHOTON-CARDS-5): the relight writes the mean
     # light direction the ray jobs' card read restores the lobe's view term with.

@@ -174,17 +174,15 @@ layout( r16f, set = 0, binding = 47 ) uniform image2DArray restMoment;
 
 #include "jah_reproject.glsl"
 #include "jah_reflect_rest.glsl"
+/// kMaxRadiance, finite1, finite3: the one copy.
+#include "jah_rq_finite.glsl"
 
-const float kMaxRadiance = 1024.0;
 const float kWarmupFrames = 8.0;
 /// The box's half-extent in standard deviations (Lumen's r.Lumen.Reflections.Temporal.NeighborhoodClampScale, 1).
 const float kClampSigma = 1.0;
 /// How much worse (relative to the box centre's luminance) the hit history's error may be before the surface
 /// history takes 0.8 of the blend (Lumen's 0.01, in its tonemapped units: one per cent of the centre here).
 const float kHitErrorMargin = 0.01;
-
-bool finite1( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
-bool finite3( vec3 v ) { return finite1( v.x ) && finite1( v.y ) && finite1( v.z ); }
 
 vec3 toYCoCg( vec3 c )
 {

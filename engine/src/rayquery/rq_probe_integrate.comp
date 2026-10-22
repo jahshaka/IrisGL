@@ -150,7 +150,7 @@ float roundingDither( ivec2 localPix, uint salt )
 /// channel's mantissa could round to 512.
 uint packRgbShared( vec3 c, float u )
 {
-	c = clamp( c, vec3( 0.0 ), vec3( 1024.0 ) );
+	c = clamp( c, vec3( 0.0 ), vec3( kMaxRadiance ) );
 	const float maxc = max( c.r, max( c.g, c.b ) );
 	if( !( maxc >= 1.0 / 16777216.0 ) )
 		return 0u;
@@ -335,7 +335,7 @@ void main()
 			const vec4 h = vec4( unpackRgbShared( texel.x ), float( texel.y >> 26u ) / 63.0 );
 			if( finite3( h.xyz ) && finite1( h.w ) )
 			{
-				prev = clamp( h, vec4( 0.0 ), vec4( 1024.0, 1024.0, 1024.0, 1.0 ) );
+				prev = clamp( h, vec4( 0.0 ), vec4( vec3( kMaxRadiance ), 1.0 ) );
 				prevCount = wasCount;
 			}
 		}
@@ -567,7 +567,7 @@ void main()
 	}
 	vec4 answer = vec4( 0.0 );
 	if( wsum >= weightFloor )
-		answer = vec4( clamp( sum / wsum, vec3( 0.0 ), vec3( 1024.0 ) ), 1.0 );
+		answer = vec4( clamp( sum / wsum, vec3( 0.0 ), vec3( kMaxRadiance ) ), 1.0 );
 	if( !temporal )
 	{
 		// THE MEASUREMENT LEVER (the arm "gather.temporal"): this frame's
@@ -637,7 +637,7 @@ void main()
 	// the coverage, so a fraction hands that share to the fallback).
 	vec4 outV = vec4( 0.0 );
 	if( mean.w > 1e-3 )
-		outV = vec4( clamp( mean.xyz / mean.w, vec3( 0.0 ), vec3( 1024.0 ) ), mean.w );
+		outV = vec4( clamp( mean.xyz / mean.w, vec3( 0.0 ), vec3( kMaxRadiance ) ), mean.w );
 	// THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument; p.stereo.z):
 	// magenta where the reprojected history held fewer than N frames.
 	if( p.stereo.z > 0.5 )

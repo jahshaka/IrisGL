@@ -302,9 +302,9 @@ layout( rgba16f, set = 0, binding = 45 ) uniform image2DArray reflectSample;   /
 /// SSR loop to, and for the same reason: about twelve stops above white, six
 /// below the half-float format's own ceiling. A reflection clamped here is
 /// still white after any exposure the tonemapper arrives at.
-/// ...and it lives in the shared hit header now, with the two NaN predicates
-/// and the voxel/sky functions this file used to own outright (GATHER-1a):
-/// `kMaxRadiance`, `finite1`, `finite3`, `jahVoxelRadiance`, `jahSkyRadiance`.
+/// ...and it is the ONE copy now (jah_rq_finite.glsl, which the shared hit
+/// header includes), with the two NaN predicates; the voxel/sky functions this
+/// file used to own outright live in the hit header (GATHER-1a).
 /// HOW MANY SAMPLES THE FILTER'S CONFIDENCE RAMP WANTS before it composites a
 /// traced reflection at full weight. Declared in BOTH stages because the two
 /// are separate GLSL translation units sharing one descriptor set, and the
@@ -312,8 +312,9 @@ layout( rgba16f, set = 0, binding = 45 ) uniform image2DArray reflectSample;   /
 /// rq_reflect_filter.comp's kWarmupFrames. Change one, change the other.
 const float kWarmupFrames = 8.0;
 
-/// THE SHARED HIT HEADER — `kMaxRadiance`, the two NaN predicates (`x == x` is
-/// not a NaN test in this tree: CLAUDE.md, HDR-1), `jahVoxelRadiance` and
+/// THE SHARED HIT HEADER — `kMaxRadiance` and the two NaN predicates through
+/// jah_rq_finite.glsl (`x == x` is not a NaN test in this tree: CLAUDE.md,
+/// HDR-1), `jahVoxelRadiance` and
 /// `jahSkyRadiance`. It reads this file's own bindings through the macros
 /// below, so nothing about the descriptor set moved when the functions did
 /// (GATHER-1a; the gather traces the same cache and two consumers of one cache

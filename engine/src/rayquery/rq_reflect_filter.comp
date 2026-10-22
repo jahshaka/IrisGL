@@ -197,8 +197,8 @@ layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
 layout( set = 0, binding = 13 ) uniform sampler3D voxelZ[kMaxCascades];
 layout( set = 0, binding = 14 ) uniform samplerCube skyCube;
 
-/// The same ceiling the trace and the SSR loop hold their radiance to.
-const float kMaxRadiance = 1024.0;
+/// The same ceiling the trace and the SSR loop hold their radiance to, and the NaN tests: the one copy.
+#include "jah_rq_finite.glsl"
 /// THE G-BUFFER'S FLOOR (rq_reflect.comp's kMirrorPackAlpha): a roughness-0 mirror, always the fixed estimator.
 const float kMirrorPackAlpha = 0.0011;
 /// How many frames a glossy lobe warms up over before its answer is shown
@@ -245,9 +245,6 @@ const float kFreshFrames = 8.0;
 const int   kFreshRadius = 3;
 const float kDepthFloorRel = 0.002;
 const float kNormalPower = 32.0;
-
-bool finite1( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
-bool finite3( vec3 v ) { return finite1( v.x ) && finite1( v.y ) && finite1( v.z ); }
 
 #include "jah_reflect_rest.glsl"
 /// THE ANSWER AT A TEXEL (PHOTON-2 round 2, G2): moving, the mean `historyCur` holds; AT REST (knobs2.x >= 1, the hold

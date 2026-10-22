@@ -165,8 +165,9 @@ out vec4 fragColour;
 // below the format's own ceiling: far above anything a scene legitimately
 // reflects, far below the overflow that turns the history into +Inf. A
 // reflection clamped here is still white after any exposure the tonemapper
-// arrives at, so the ceiling costs no picture and buys a bounded loop.
-const float kSsrMaxRadiance = 1024.0;
+// arrives at, so the ceiling costs no picture and buys a bounded loop. The one
+// copy (kMaxRadiance), staged raw from the ray jobs' header.
+#include "JahRqFinite.glsl"
 
 /// One history tap, with its own verdict attached: .xyz is a radiance this
 /// shader can do arithmetic on, and .w is 1 only when the texel really was
@@ -264,11 +265,11 @@ vec4 ssrHistorySanitize( vec3 c )
 	// FALSE for a NaN, so `all(...)` is false for a NaN in any channel and
 	// false for an Inf, and a value that passes both really is finite and in
 	// range. A pixel that passes comes out untouched, bit for bit.
-	if( all( lessThanEqual( abs( c ), vec3( kSsrMaxRadiance ) ) ) )
+	if( all( lessThanEqual( abs( c ), vec3( kMaxRadiance ) ) ) )
 		return vec4( c, 1.0 );							// the ordinary texel, untouched
 	if( all( lessThan( abs( c ), vec3( 3.0e38 ) ) ) )
-		// clamp, not min: a channel BELOW -kSsrMaxRadiance must come back too.
-		return vec4( clamp( c, vec3( -kSsrMaxRadiance ), vec3( kSsrMaxRadiance ) ), 0.0 );
+		// clamp, not min: a channel BELOW -kMaxRadiance must come back too.
+		return vec4( clamp( c, vec3( -kMaxRadiance ), vec3( kMaxRadiance ) ), 0.0 );
 	// NOT A COLOUR AT ALL, and it contributes NOTHING — neither to this pixel
 	// (.w says so, and the caller takes the neighbourhood instead) nor to the
 	// neighbourhood mean. MEASURED, because the alternative is tempting and

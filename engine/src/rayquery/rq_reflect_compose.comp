@@ -87,9 +87,8 @@ layout( rg32f, set = 0, binding = 8 ) uniform readonly image2DArray historyDistP
 
 #include "jah_reflect_rest.glsl"
 
-// NaN AND INF BY THEIR BITS (trap 5: x == x is folded away).
-bool finite1( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
-bool finite3( vec3 v ) { return finite1( v.x ) && finite1( v.y ) && finite1( v.z ); }
+// NaN AND INF BY THEIR BITS (trap 5: x == x is folded away): the one copy.
+#include "jah_rq_finite.glsl"
 
 void main()
 {

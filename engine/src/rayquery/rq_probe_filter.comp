@@ -371,7 +371,7 @@ void main()
 			const vec3 band = jahProbeShEval9Raw( rec, normalW.xyz );
 			const vec3 dc = ( anchor - band ) / 0.282095;
 			rec.sh[0].xyz += dc;
-			e = clamp( anchor, vec3( 0.0 ), vec3( 1024.0 ) );
+			e = clamp( anchor, vec3( 0.0 ), vec3( kMaxRadiance ) );
 			if( !( finite3( rec.sh[0].xyz ) && finite3( e ) ) )
 			{
 				for( int v = 0; v < 7; ++v )

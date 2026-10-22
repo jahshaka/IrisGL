@@ -71,14 +71,9 @@ vec3 jahOctDecodeDir( vec2 e )
 	return normalize( n );
 }
 
-/// rq_reflect.comp's ceiling, the same number (jah_rq_hit.glsl's kMaxRadiance).
-const float kMaxRadiance = 1024.0;
+/// kMaxRadiance and finite3: the one copy (jah_rq_finite.glsl).
+#include "jah_rq_finite.glsl"
 const uint kDestGather = 0x80000000u;
-
-bool finite3( vec3 v )
-{
-	return all( lessThan( floatBitsToUint( v ) & uvec3( 0x7FFFFFFFu ), uvec3( 0x7F800000u ) ) );
-}
 
 void main()
 {

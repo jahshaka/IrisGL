@@ -236,6 +236,7 @@ material Jahshaka/SsrResolve
 fragment_program Jahshaka/SsrHistory_ps_GLSL glsl
 {
 	source JahSsrHistory_ps.glsl
+	enable_include_header true
 	default_params
 	{
 		param_named tex int 0
@@ -245,6 +246,8 @@ fragment_program Jahshaka/SsrHistory_ps_GLSL glsl
 fragment_program Jahshaka/SsrHistory_ps_VK glslvk
 {
 	source JahSsrHistory_ps.glsl
+	// the ceiling is the ray jobs' one copy, included raw (JahRqFinite.glsl)
+	enable_include_header true
 }
 
 fragment_program Jahshaka/SsrHistory_ps unified
