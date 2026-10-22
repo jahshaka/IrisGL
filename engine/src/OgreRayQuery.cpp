@@ -6215,6 +6215,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         std::memset(key.restMoverBox, 0, sizeof(key.restMoverBox));
         // (motion.w says "a mover moved in the last two frames": a move, which breaks per texel - not a parameter)
         key.motion[3] = 0.0f;
+        // (the hit list's CAPACITY follows its demand - OgreView::sizeHitList re-makes the per-frame list in place - and a
+        // ray finds the same thing in a list of any size: never a parameter. Folded, a shrink at rest broke the rest, the
+        // burst re-grew the list with drops, and photon-glass's view never held - a 240-frame cycle, PHOTON-2 stage 1b A1)
+        key.hitList[0] = 0.0f;
         unsigned long long paramsKey = 1469598103934665603ull;
         const unsigned char *bytes = reinterpret_cast<const unsigned char *>(&key);
         for (size_t b = 0; b < sizeof(key); ++b) {
@@ -8881,8 +8885,10 @@ void RayQueryTier::readHitCounters(HitView &hv) {
         pd.live = false;
     }
     // (a frame that appended nothing - a held view, a still one whose traces all answered from the caches - says
-    // nothing about the list's need: it is not a reading, so a rest never shrinks the list the next walk needs)
-    if (any && hv.appended > 0ull) ++hv.readings;
+    // nothing about the list's need: it is not a reading, and neither is a frame the reflection traced AT REST (its
+    // texels stop one by one, so its demand falls to a few per cent of a walk's): a rest never shrinks the list the next
+    // walk needs)
+    if (any && hv.appended > 0ull && hv.restActiveTag == 0u) ++hv.readings;
 }
 
 bool RayQueryTier::hitDemand(const ReflectPassListener *key, unsigned long long &appended,
