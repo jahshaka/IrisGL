@@ -60,6 +60,7 @@ layout( rgba16f, set = 0, binding = 9 ) uniform writeonly image2DArray reflectSa
 #include "jah_atmosphere.glsl"
 #include "jah_height_fog.glsl"
 #include "jah_fog_along.glsl"
+#include "jah_atlas_sample.glsl"
 
 /// The record's direction (jah_rq_hit_record.glsl jahOctEncode, inverted).
 vec3 jahOctDecodeDir( vec2 e )
@@ -101,8 +102,11 @@ void main()
 	{
 		if( p.list.w < 0.5 || any( greaterThanEqual( xy, imageSize( probeAtlas ) ) ) )
 			return;
+		// AN UNSHADED RECORD IS NO SAMPLE (PHOTON-2 1b H3), never a black ray at its hit's distance: the texel's distance
+		// becomes kAtlasNoSample, which keeps it out of the filter and the SH sums like a dropped record.
 		const vec4 texel = imageLoad( probeAtlas, xy );
-		imageStore( probeAtlas, xy, vec4( min( radiance * weight, vec3( kMaxRadiance ) ), texel.w ) );
+		imageStore( probeAtlas, xy, shaded ? vec4( min( radiance * weight, vec3( kMaxRadiance ) ), texel.w )
+										   : vec4( 0.0, 0.0, 0.0, kAtlasNoSample ) );
 		return;
 	}
 	// A texel outside the image is never written (no robustness on this device:

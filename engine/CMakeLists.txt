@@ -322,6 +322,7 @@ if(JAH_RAY_QUERY_OK)
                        "${JAH_RQ_INCLUDE}/jah_rq_finite.glsl"
                        "${JAH_RQ_INCLUDE}/jah_environment.glsl"
                        "${JAH_RQ_INCLUDE}/jah_probe_params.glsl"
+                       "${JAH_RQ_INCLUDE}/jah_atlas_sample.glsl"
                        "${JAH_RQ_INCLUDE}/jah_reproject.glsl"
                        "${JAH_RQ_INCLUDE}/jah_probe_history.glsl"
                        "${JAH_RQ_INCLUDE}/jah_probe_seen.glsl"
@@ -419,6 +420,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atmosphere.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_height_fog.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_fog_along.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atlas_sample.glsl"
         COMMENT "Compiling the hit write-back at SPIR-V 1.4"
         VERBATIM)
     # THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4): sun rays from the texels
