@@ -15,13 +15,16 @@
 // WHAT IT IS. One à-trous / bilateral pass at the trace's own resolution over
 // the temporal mean, guided by three things and nothing else:
 //
-//   * THE LOBE. A MIRROR IS NOT FILTERED AT ALL — radius 0 at or below
-//     kMirrorAlpha. There is no variance to remove there (every sample is the
-//     same ray) and any blur would be a real loss of a real image: a mirror
-//     shows the world at the world's own sharpness. The radius grows with
-//     sqrt(alpha), i.e. with the PERCEPTUAL roughness, because that is what the
-//     reflected lobe's angular width goes as — the blur tracks the blur the
-//     surface itself is applying.
+//   * THE LOBE. A FIXED ESTIMATOR IS NOT FILTERED AT ALL (PHOTON-2 fix F4: the
+//     lobe under one texel at its hit, the trace's flag; the G-buffer's floor).
+//     There is no variance to remove there (every sample is the same ray) and
+//     any blur would be a real loss of a real image: a mirror shows the world at
+//     the world's own sharpness. The reach grows CONTINUOUSLY with sqrt(alpha),
+//     i.e. with the PERCEPTUAL roughness, because that is what the reflected
+//     lobe's angular width goes as — the blur tracks the blur the surface itself
+//     is applying, and steps nowhere (the integer radius and the alpha cut at
+//     kMirrorAlpha it replaces stepped from no filter to a 3 x 3 between
+//     perceptual 0.10 and 0.11: 9 -> 12 rows of edge on the ramp fixture).
 //   * DEPTH. A tap on the other side of a silhouette is a different surface and
 //     its reflection is a different integral; the weight falls off with the
 //     relative depth difference, so the filter never leaks across an edge.
@@ -170,6 +173,9 @@ layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray historyCur;
 // rays in the mean travelled (rq_reflect.comp's).
 layout( rg32f, set = 0, binding = 8 ) uniform readonly  image2DArray historyDistPrev;
 layout( rg32f, set = 0, binding = 9 ) uniform image2DArray historyDistCur;
+/// THIS FRAME'S RAW SAMPLE (rq_reflect_temporal.comp): read for its w's FIXED flag (+ 8, PHOTON-2 fix F4) alone — a
+/// texel whose lobe is under one texel at its hit took its one ray whole, and is never blurred here.
+layout( rgba16f, set = 0, binding = 45 ) uniform readonly image2DArray reflectSample;
 layout( set = 0, binding = 10 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
@@ -178,9 +184,8 @@ layout( set = 0, binding = 14 ) uniform samplerCube skyCube;
 
 /// The same ceiling the trace and the SSR loop hold their radiance to.
 const float kMaxRadiance = 1024.0;
-/// The alpha at or below which nothing is filtered (rq_reflect.comp's own
-/// kMirrorAlpha: perceptual 0.1, where the reflected lobe first exceeds a pixel).
-const float kMirrorAlpha = 0.01;
+/// THE G-BUFFER'S FLOOR (rq_reflect.comp's kMirrorPackAlpha): a roughness-0 mirror, always the fixed estimator.
+const float kMirrorPackAlpha = 0.0011;
 /// How many frames a glossy lobe warms up over before its answer is shown
 /// (rq_reflect.comp's kWarmupFrames).
 const float kWarmupFrames = 8.0;
@@ -323,18 +328,22 @@ void main()
 	// for four times the relative cost — 0.222 ms against a 0.2 ms bar on the
 	// saturated fixture, while full-res sat at 0.634 against 0.8.
 	const float texelsPerPixel = max( float( scale.x ), 1.0 );
-	int radius = int( min( float( kMaxRadius ),
-						   floor( kFilterScale * sqrt( max( lobeAlpha, 0.0 ) ) / texelsPerPixel ) ) );
+	// THE REACH, CONTINUOUS (fix F4): the tent below weighs a tap 1 - |d| / (reach + 1), so a reach rising from 0
+	// fades the neighbours in from weight 0 — the loop's integer bound is only the reach's ceiling.
+	float reach = min( float( kMaxRadius ), kFilterScale * sqrt( max( lobeAlpha, 0.0 ) ) / texelsPerPixel );
 	bool fresh = false;
 	{
 		const float sinceRestart = count - ( kWarmupFrames + 1.0 );
 		fresh = p.motion.w > 0.5 && p.stereo.y >= kWarmupFrames + kFreshFrames + 1.0 && sinceRestart >= 0.0 &&
 				sinceRestart < kFreshFrames;
 		if( fresh )
-			radius = max( radius, int( ceil( float( kFreshRadius ) *
-											 ( 1.0 - sinceRestart / kFreshFrames ) ) ) );
+			reach = max( reach, ceil( float( kFreshRadius ) * ( 1.0 - sinceRestart / kFreshFrames ) ) );
 	}
-	const bool filters = texelLive && radius > 0 && lobeAlpha > kMirrorAlpha;
+	// THE FIXED ESTIMATOR (the trace's flag on this texel's sample, or the G-buffer's floor) is never filtered.
+	const bool fixedTexel = lobeAlpha <= kMirrorPackAlpha ||
+							( texelLive && imageLoad( reflectSample, ivec3( tc, gEye ) ).w > 7.5 );
+	const int radius = int( ceil( reach ) );
+	const bool filters = texelLive && reach > 0.0 && !fixedTexel;
 
 	// THE TILE (above): loaded by the whole group, only when some texel of it filters.
 	if( gl_LocalInvocationIndex == 0u )
@@ -447,7 +456,7 @@ void main()
 				const float ndot = max( dot( tn, centreN ), 0.0 );
 				// SPATIAL: a plain tent over the kernel, which is what an
 				// à-trous step of 1 is at this radius.
-				const float sw = max( 0.0, 1.0 - length( vec2( dx, dy ) ) / float( radius + 1 ) );
+				const float sw = max( 0.0, 1.0 - length( vec2( dx, dy ) ) / ( reach + 1.0 ) );
 				const float w = sw * pow( ndot, kNormalPower ) * ( 1.0 - dz / tol );
 
 				if( w <= 0.0 )
@@ -516,9 +525,9 @@ void main()
 			// surface, which is the point.
 			// FROM THE PACKING FLOOR (third reader, item 3): 0.001 is the
 			// sharpest alpha the G-buffer can hold, so it IS a mirror and must
-			// warm up instantly rather than to 97.2 %.
-			const float warm = max( 1.0 - smoothstep( 0.001, kMirrorAlpha, lobeAlpha ),
-									min( count * ( 1.0 / kWarmupFrames ), 1.0 ) );
+			// warm up instantly rather than to 97.2 %. A FIXED ESTIMATOR (fix F4)
+			// is one ray, the whole integral: no warm-up either.
+			const float warm = max( fixedTexel ? 1.0 : 0.0, min( count * ( 1.0 / kWarmupFrames ), 1.0 ) );
 			gate *= warm;
 			if( gate <= 0.0 )
 				continue;

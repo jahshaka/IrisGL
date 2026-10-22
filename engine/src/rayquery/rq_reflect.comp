@@ -562,10 +562,12 @@ void jahCardLobeHemi( float r, out float a, out float b )
 		jahSpecularAlbedoHemi( r, a, b );
 }
 
-/// A lobe at or below this GGX alpha is a MIRROR: the card texel-exact, the
-/// containing cascade whole at LOD 0 and no crossfade (a crossfade of two texel
-/// sizes is still a blur, and a mirror is the one surface that must not be
-/// blurred — LOD 0 is still two cells, so only hit lighting sharpens it).
+/// THE ALPHA THE MIRROR CUT WAS (perceptual 0.1): it only shapes a mover's departure tolerance now (main()). What is
+/// read as a MIRROR at the hit — the card texel-exact, the containing cascade whole at LOD 0 and no crossfade (a
+/// crossfade of two texel sizes is still a blur, and a mirror is the one surface that must not be blurred — LOD 0 is
+/// still two cells, so only hit lighting sharpens it), the sky's finest mip — is the FIXED ESTIMATOR's texel (PHOTON-2
+/// fix F4: the lobe under one texel at its hit), never an alpha: the alpha cut stepped the ramp fixture's reflected
+/// edge from 9 to 12 rows between perceptual 0.10 and 0.11, where the read switched from LOD 0 to the footprint's.
 const float kMirrorAlpha = 0.01;
 /// THE G-BUFFER'S FLOOR (fork 16d8e29d4 packs alpha over [0.001, 1]): an alpha this low IS a roughness-0 mirror —
 /// the renderer's sharpest surface — and its estimator is the lobe's centre at every throw (PHOTON-2 F4, main()).
@@ -590,13 +592,12 @@ float reflectFootprint( float lobeAlpha, float t )
 
 /// An escaping sample, read at the SAME honest footprint as a hit (GA-SKY): the
 /// spacing between the samples the temporal mean holds, as a half-angle —
-/// lobeAlpha / sqrt(N) — and a mirror (lobeAlpha at or below the mirror cut)
+/// lobeAlpha / sqrt(N) — and a fixed estimator (the lobe under one texel: F4)
 /// reads the environment's finest mip.
-vec3 skyRadiance( vec3 dir, float lobeAlpha )
+vec3 skyRadiance( vec3 dir, float lobeAlpha, bool fixedEstimator )
 {
 	const float meanSamples = 1.0 / max( p.knobs2.w, 1e-3 );
-	const float tanHalf = lobeAlpha <= kMirrorAlpha ? 0.0
-													: lobeAlpha / sqrt( max( meanSamples, 1.0 ) );
+	const float tanHalf = fixedEstimator ? 0.0 : lobeAlpha / sqrt( max( meanSamples, 1.0 ) );
 	return jahSkyRadiance( dir, tanHalf );
 }
 
@@ -1031,7 +1032,7 @@ void main()
 					 ( fixedEstimator ? 0u : uint( p.knobs.z ) * 2654435761u );
 		if( !decodeAlways )
 			traced = jahHitRadianceSourced( hitSlot, world + worldN * bias + L * t, hitN, L,
-											reflectFootprint( lobeAlpha, t ), lobeAlpha <= kMirrorAlpha,
+											reflectFootprint( lobeAlpha, t ), fixedEstimator,
 											true, ok, photonSource );
 		record = decodeAlways || !ok || !finite3( traced );
 		// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1, the one law jah_fog_along.glsl):
@@ -1052,7 +1053,7 @@ void main()
 	}
 	else
 	{
-		traced = jahFogAlongSky( skyRadiance( L, lobeAlpha ), world.y, L, length( world - thisEye.camPos ) );   // route C: the escape
+		traced = jahFogAlongSky( skyRadiance( L, lobeAlpha, fixedEstimator ), world.y, L, length( world - thisEye.camPos ) );   // route C: the escape
 		ok = true;
 		photonSource = 3u;
 	}
