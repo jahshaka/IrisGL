@@ -291,6 +291,8 @@ constexpr float kNormalTolerance = 0.9f;
 
 }   // namespace
 
+unsigned gatherSettleFramesOf(unsigned historyFrames) { return settleFramesOf(historyFrames); }
+
 // ---------------------------------------------------------------------------
 ScreenProbeGather::~ScreenProbeGather() { close(); }
 

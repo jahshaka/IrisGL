@@ -87,7 +87,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// world units, z = the frame index (the sample sequence's only input),
 	/// w = how many cascades are bound.
 	vec4 knobs;
-	/// x = 1 on a frame the view RESTS (PHOTON-2 1e: the floor lifted, the clamp off — rq_reflect_temporal.comp), y = the
+	/// x = THE REST FRAME k, 1..N on a frame the view rests (PHOTON-2 1e, fix F1: the gather's rule — a rest mean handed
+	/// over from the frozen moving history, rq_reflect_temporal.comp), 0 while it moves, y = the
 	/// surface bias in world units (a ray starts this far off its own surface),
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).
@@ -128,6 +129,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// y = THE VIEW'S AGE: how many consecutive frames this history has been
 	/// written (0 on a first frame, a resize, a scene bind). See `historyAt`.
 	/// z = 1 writes THE PHOTON VIEW'S Hits overlay (binding 37, PHOTON-VIEW-1).
+	/// w = THE REST'S LENGTH N (PHOTON-2 fix F1): the frames the rest mean is handed over in, the gather's own
+	/// settleFramesOf(the reflection's 32-frame history) — after which the view holds.
 	vec4 stereo;
 	vec4 camPos2;
 	vec4 rayTL2;
@@ -1063,6 +1066,14 @@ void main()
 	float wasHitT;
 	float wasMoverAge;
 	vec4 prev = historyAt( before, eye, prevSurf, traceRes, warmHeld, wasHitT, wasMoverAge );
+	// AT REST (PHOTON-2 fix F1, knobs2.x = the rest frame k, 1..N): the moving history is FROZEN in the half the
+	// trace reads (`historyPrev`, at rest the texel itself) and the handed-over answer lives IN PLACE in the half it
+	// writes (`historyCur`) — the ping-pong does not flip from the second rest frame on (OgreRayQuery.cpp). So from
+	// k = 2 the trace leaves `historyCur` to the temporal pass (it holds the answer so far), and the mean ray length
+	// below is handed over the same way, in place.
+	const float restK = p.knobs2.x;
+	const bool restInPlace = restK >= 1.5;
+	const vec2 inPlacePair = restInPlace ? imageLoad( historyDistCur, ivec3( tc, gEye ) ).xy : vec2( 0.0 );
 	// A RAY THAT HIT A MOVING SLOT: the reflection of that slot moved with it, so
 	// the texel whose reflection showed the same point of it last frame is where
 	// the point's REFLECTED IMAGE was — the virtual point on this pixel's view
@@ -1223,10 +1234,13 @@ void main()
 		// A NON-FINITE ESCAPE IS NOT EVIDENCE ABOUT THIS PIXEL: the history is
 		// carried through unchanged, and a texel that has never had an answer
 		// (prev.w == 0) writes a zero distance so the filter skips it this frame.
-		imageStore( historyCur, ivec3( tc, gEye ), prev );
+		// (At rest from k = 2 the answer so far stays where it is, in place.)
+		if( !restInPlace )
+			imageStore( historyCur, ivec3( tc, gEye ), prev );
 		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );
 		imageStore( historyDistCur, ivec3( tc, gEye ), vec4( prev.w > 0.0 ? dist : 0.0,
-											  jahPackMeanLength( wasHitT, wasMoverAge + 1.0 ), 0.0, 0.0 ) );
+											  restInPlace ? inPlacePair.y : jahPackMeanLength( wasHitT, wasMoverAge + 1.0 ),
+											  0.0, 0.0 ) );
 		photonHit( tc, kPhotonDropped );
 		return;
 	}
@@ -1240,11 +1254,10 @@ void main()
 	// THE FLOOR IS THE TEMPORAL PASS' TO APPLY (PHOTON-2 1b): this pass carries the history and its count, and
 	// rq_reflect_temporal.comp clamps it to this frame's neighbourhood and blends the sample in at
 	// max( 1/N, `blendFloor` ). The floor here is everything that is the TEXEL's: the history's memory (the
-	// floor on 1/n), the mirror ramp below, a moving reflector's eighth; 1 where there is no history. `blend` is the
-	// estimate the mean ray length below follows.
-	// AT REST (PHOTON-2 1e, knobs2.x) the history's floor is lifted: a still eye's mean is a true mean (1/n), which the
-	// temporal pass accumulates until the view holds.
-	float blendFloor = prev.w > 0.0 ? ( p.knobs2.x > 0.5 ? 0.0 : p.knobs2.w ) : 1.0;
+	// floor on 1/n), the fixed estimator's 1 below, a moving reflector's eighth; 1 where there is no history.
+	// `blend` is the estimate the mean ray length below follows. AT REST the temporal pass keeps the gather's
+	// rule instead (a rest mean handed over from the frozen history, fix F1): the floor only says "fixed" or "none".
+	float blendFloor = prev.w > 0.0 ? p.knobs2.w : 1.0;
 	const float n = min( prev.w, 1.0 / max( p.knobs2.w, 1e-3 ) );
 	float blend = prev.w > 0.0 ? max( 1.0 / ( n + 1.0 ), p.knobs2.w ) : 1.0;
 	// THE MEAN IS FOR VARIANCE, AND A MIRROR HAS NONE (second reader, H1). The
@@ -1297,7 +1310,19 @@ void main()
 	// the stage-0 read's R1) is deleted with the radiance-key cap (PHOTON-2 1b): rq_reflect_temporal.comp clamps the
 	// history to this frame's neighbourhood instead, one mechanism for motion and for a change of light.
 	float hitMean = hitT;
-	if( prev.w > 0.0 && wasHitT > 0.0 )
+	if( restK >= 0.5 )
+	{
+		// AT REST the mean length is handed over like the radiance (fix F1; the read's worth-a-look: it went on
+		// blending at the moving floor): from the frozen history's length to the rest frames' own mean over N
+		// frames, the answer so far in place — L_k = L_(k-1) + (t_k - L_stop) / N, which is the rest mean at k = N.
+		const float N = max( p.stereo.w, 1.0 );
+		const float sofar = restInPlace ? jahMeanLength( inPlacePair.y ) : wasHitT;
+		if( wasHitT > 0.0 )
+			hitMean = max( ( sofar > 0.0 ? sofar : wasHitT ) + ( hitT - wasHitT ) / N, 1e-3 );
+		else if( restInPlace && sofar > 0.0 )
+			hitMean = mix( sofar, hitT, 1.0 / restK );
+	}
+	else if( prev.w > 0.0 && wasHitT > 0.0 )
 		hitMean = mix( wasHitT, hitT, blend );
 	// THE MOVER AGE rides the mean length's low bits: 0 when this ray hit a mover
 	// (moving or parked), one frame older otherwise (saturating at 63).
@@ -1324,7 +1349,9 @@ void main()
 		// unshaded then finds count 0 here and the write-back withholds the distance:
 		// the texel has no answer this frame (the filter skips it) — never (0, 0, 0, 8)
 		// composited black, which the seed stored here made of every warm restart.
-		imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, max( prev.w, 0.0 ) ) );
+		// (At rest from k = 2 the answer so far stays in place: fix F1.)
+		if( !restInPlace )
+			imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, max( prev.w, 0.0 ) ) );
 		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );   // the write-back fills it
 		const vec3 hitPos = world + worldN * bias + L * hitT;
 		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, false );
@@ -1341,7 +1368,9 @@ void main()
 			// THE LIST WAS FULL (a dropped record, counted): this frame has no
 			// sample for the texel, which keeps what it had.
 			imageStore( historyDistCur, ivec3( tc, gEye ), vec4( prev.w > 0.0 ? dist : 0.0,
-												  jahPackMeanLength( wasHitT, wasMoverAge + 1.0 ), 0.0, 0.0 ) );
+												  restInPlace ? inPlacePair.y
+															  : jahPackMeanLength( wasHitT, wasMoverAge + 1.0 ),
+												  0.0, 0.0 ) );
 			photonHit( tc, kPhotonDropped );
 		}
 		return;
@@ -1363,7 +1392,8 @@ void main()
 	// own history is kWarmupFrames old (`historyAt`) — so a freshly created view
 	// (a graded screenshot's, which lives about two frames) still fades in
 	// exactly as before, which is the guarantee the warm-up exists for.
-	imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, seed ) );
+	if( !restInPlace )
+		imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, seed ) );
 	imageStore( reflectSample, ivec3( tc, gEye ), vec4( traced, sampleW ) );
 	imageStore( historyDistCur, ivec3( tc, gEye ), vec4( dist, hitMeanStored, 0.0, 0.0 ) );
 	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel : kPhotonSky );

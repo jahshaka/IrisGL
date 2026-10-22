@@ -28,8 +28,13 @@
 //   valid or the trace said the surface's history is a moving thing's (sample.w's flag).
 //   THE CONFIDENCE: how far the clamp moved the history, over the box's extent — saturate(1 - d), then
 //   0.75 c + 0.25 (a little history even at none) — scales the frame count: N = min(N_prev c + 1, the floor's
-//   memory). The blend is max(1/N, the trace's floor for this texel: the mirror ramp, a moving reflector's eighth,
-//   1 where the texel had no history).
+//   memory). The blend is max(1/N, the trace's floor for this texel: 1 for a fixed estimator, a moving reflector's
+//   eighth, 1 where the texel had no history).
+//
+// AT REST (PHOTON-2 fix F1): THE GATHER'S RULE, not a blend — a rest mean restarted at the first rest frame on the
+// rest frames' own samples, the answer handed over linearly from the frozen moving history over N frames, then the
+// hold (main(), the block "AT REST"). The ping-pong pair holds both: the moving history frozen in one half, the
+// answer in place in the other.
 //
 // A WARM VIEW KEEPS ITS WARM-UP: the filter fades a texel whose count is under kWarmupFrames to the probe (its
 // screenshot rule), so a shortened memory is stored no younger than the warm seed (kWarmupFrames + 1) — the blend
@@ -73,7 +78,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// world units, z = the frame index (the sample sequence's only input),
 	/// w = how many cascades are bound.
 	vec4 knobs;
-	/// x = 1 on a frame the view RESTS (PHOTON-2 1e: the floor lifted, the clamp off — rq_reflect_temporal.comp), y = the
+	/// x = THE REST FRAME k, 1..N on a frame the view rests (PHOTON-2 1e, fix F1: the gather's rule — a rest mean handed
+	/// over from the frozen moving history, rq_reflect_temporal.comp), 0 while it moves, y = the
 	/// surface bias in world units (a ray starts this far off its own surface),
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).
@@ -304,13 +310,79 @@ void main()
 	const bool surfaceOnly = sw > 1.5;
 	const float blendFloor = clamp( surfaceOnly ? sw - 2.0 : sw, 0.0, 1.0 );
 	const vec3 sample1 = clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
+
+	// ---- AT REST: THE GATHER'S RULE (PHOTON-2 fix F1; rq_probe_integrate.comp's rest mean) ----------------------
+	// At the first rest frame a REST MEAN restarts, on the rest frames' own samples (their sequence is the rest
+	// frame's index, OgreRayQuery.cpp: a function of the scene and the eye, of nothing that happened before), and the
+	// answer is handed over LINEARLY from the moving history to it over N frames (stereo.w, the gather's own
+	// settleFramesOf of the reflection's 32-frame history) — at k = N it IS the mean of the N rest samples, and the view
+	// holds. The moving history H is frozen in the half the trace reads (the ping-pong does not flip from k = 2) and
+	// the answer O lives in place in this half, so no image is added and the rest mean itself is never stored:
+	//   O_k = (1 - k/N) H + (k/N) R_k,  R_k the mean of k samples  =>  O_k = O_(k-1) + (s_k - H) / N.
+	// A break (a move, a change of what is reflected) resumes the moving rules from O — the handed-over value, not
+	// the older H it would otherwise pop back to (the gather writes its history the same way). A texel with no
+	// moving history (a disocclusion at the stop) or a fixed estimator takes the plain mean of its rest samples.
+	// THE FIREFLY BOUND: a sample entering the rest mean is held to the luma of this frame's 21 RAW neighbours'
+	// mean + 3 sigma or four times the texel's answer so far, whichever is larger — a ray far outside both its
+	// neighbourhood's spread and its own history cannot freeze into the held picture at 1/N, and a genuine bright
+	// lobe (its neighbours' rays see it too, or its history holds it) passes; a fixed estimator has no fireflies.
+	const float restK = p.knobs2.x;
+	if( restK >= 0.5 )
+	{
+		const float N = max( p.stereo.w, 1.0 );
+		const vec4 H = imageLoad( historyPrev, ivec3( tc, gEye ) );
+		const bool handOver = H.w > 0.0 && finite3( H.xyz ) && !fixedEstimator && blendFloor < 1.0;
+		const vec3 Hc = handOver ? clamp( H.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
+		vec3 sofar = Hc;
+		if( restK >= 1.5 )
+		{
+			const vec4 c = imageLoad( historyCur, ivec3( tc, gEye ) );
+			if( c.w > 0.0 && finite3( c.xyz ) )
+				sofar = clamp( c.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
+		}
+		vec3 sk = sample1;
+		if( !fixedEstimator )
+		{
+			float y1 = 0.0, y2 = 0.0, yn = 0.0;
+			const ivec2 r = ivec2( gl_LocalInvocationID.xy ) + ivec2( kReach + kRecon );
+			for( int dy = -kReach; dy <= kReach; ++dy )
+				for( int dx = -kReach; dx <= kReach; ++dx )
+				{
+					if( abs( dx ) == kReach && abs( dy ) == kReach )
+						continue;
+					const float y = sRaw[( r.y + dy ) * kRawSide + r.x + dx].w;
+					if( y < 0.0 )
+						continue;
+					y1 += y;
+					y2 += y * y;
+					yn += 1.0;
+				}
+			float bound = kMaxRadiance;
+			if( yn >= 3.0 )
+			{
+				const float m = y1 / yn;
+				bound = m + 3.0 * sqrt( max( y2 / yn - m * m, 0.0 ) );
+			}
+			bound = max( bound, 4.0 * lumaOf( sofar ) );
+			const float ys = lumaOf( sk );
+			if( ys > bound )
+				sk *= bound / ys;
+		}
+		vec3 answer;
+		if( handOver )
+			answer = max( ( restK < 1.5 ? Hc : sofar ) + ( sk - Hc ) / N, vec3( 0.0 ) );
+		else
+			answer = restK < 1.5 ? sk : mix( sofar, sk, 1.0 / restK );
+		// The count: the frozen history's and the rest frames' (the filter's warm-up and fresh widening read it).
+		imageStore( historyCur, ivec3( tc, gEye ), vec4( answer, min( max( H.w, 0.0 ) + restK, 4096.0 ) ) );
+		return;
+	}
+
 	const vec4 carried = imageLoad( historyCur, ivec3( tc, gEye ) );   // the surface history and its count (seeded)
 	const float seed = carried.w;
-	const bool atRest = p.knobs2.x > 0.5;
 	const bool warmView = p.stereo.y >= kWarmupFrames;
-	// THE MEMORY'S LENGTH: the floor's (thirty-two frames) while moving; unbounded at rest (stage 1e: the floor is a
-	// law for a moving eye, not for a still one) — the count's own 4096.
-	const float maxN = atRest ? 4096.0 : 1.0 / max( p.knobs2.w, 1e-3 );
+	// THE MEMORY'S LENGTH: the floor's (thirty-two frames).
+	const float maxN = 1.0 / max( p.knobs2.w, 1e-3 );
 	if( seed <= 0.0 || blendFloor >= 1.0 || !finite3( carried.xyz ) )
 	{
 		// A WARM RESTART is seeded at the warm-up (DRAG-1's rule: the filter shows the ray at once), whichever path
@@ -321,7 +393,6 @@ void main()
 	}
 	vec3 history = clamp( carried.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
 	float confidence = 1.0;
-	if( !atRest )
 	{
 		// ---- THE BOX (fix F2): 21 RECONSTRUCTED taps (the 5 x 5 without its corners), compressed ----
 		vec3 m1 = vec3( 0.0 ), m2 = vec3( 0.0 );

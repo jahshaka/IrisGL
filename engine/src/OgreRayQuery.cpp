@@ -240,10 +240,14 @@ constexpr unsigned kMaxReflectCascades = 4u;
 /// command buffer that has not retired may not be rewritten, and this set is
 /// rewritten every frame (every input can be recreated behind our back).
 constexpr unsigned kReflectRing = 3u;
-/// THE REFLECTION'S REST LENGTH (PHOTON-2 1e): the frames a still view accumulates its true mean before it holds —
-/// the gather's own settle (settleFramesOf(kHistoryFrames) = 16, OgreScreenProbeGather.cpp), so the diffuse and the
-/// specular of one still picture hold on the same frame.
-constexpr unsigned kReflectRestFrames = 16u;
+/// THE REFLECTION'S REST (PHOTON-2 1e, fix F1): the gather's rule — a rest mean restarted at the first rest frame and
+/// handed over from the moving history over N frames, then the hold. N is the gather's own function of the history's
+/// length (gatherSettleFramesOf: a 5-code step under one code through the 32-frame EMA, 51 frames).
+unsigned reflectRestLength() { return gatherSettleFramesOf(unsigned(std::lround(1.0f / kReflectHistoryFloor))); }
+/// THE REST FRAMES' SAMPLE SEQUENCE: the rest frame's index k past every moving frame's (`frame & 0xFFFF`), so the N
+/// samples a held picture averages are the same N at every stop at one pose — the rest mean is a function of the
+/// scene and the eye, never of the path (the gather's rest mean's law, rq_probe_integrate.comp).
+constexpr unsigned kReflectRestSequence = 0x10000u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
@@ -1024,20 +1028,26 @@ private:
         /// the trace bound, its grid, and which of the pair is this frame's mean.
         bool     finishPending = false;
         unsigned finishRing = 0, traceW = 0, traceH = 0, curIdx = 0;
-        /// THE REST (PHOTON-2 1e) — the gather's rule (OgreScreenProbeGather.cpp's "THE REST") applied to the
-        /// reflection: consecutive recorded frames with the eye basis bit-identical, the scene's rest key unchanged
-        /// (the gather's: the lighting, the geometry, the surface cache) and the pass's own parameters unchanged.
-        /// At rest the history is a TRUE MEAN (rq_reflect_temporal.comp: the floor lifted, the clamp off); past
-        /// kReflectRestFrames the view HOLDS — the trace and the temporal pass dispatch nothing and the filter
-        /// composites the held mean — until anything above moves.
+        /// THE REST (PHOTON-2 1e, fix F1) — the gather's rule (OgreScreenProbeGather.cpp's "THE REST") applied to the
+        /// reflection: consecutive recorded frames with the eye basis bit-identical, the reflection's rest key
+        /// unchanged (the gather's — the lighting, the geometry, the surface cache, the field — and every write to
+        /// what a reflection ray reads: reflectRestKey) and the pass's own parameters unchanged. Rest frame k = 1..N
+        /// hands the answer over from the frozen moving history to a rest mean of the rest frames' own samples
+        /// (rq_reflect_temporal.comp); past N the view HOLDS — the trace and the temporal pass dispatch nothing and
+        /// the filter composites the held answer — until anything above moves (a break: the moving rules resume from
+        /// the handed-over answer).
         unsigned restFrames = 0u;
         unsigned long long restKey = 0ull, restParams = 0ull;
         bool restKnown = false;
         /// This frame is a held one (finishReflect skips the temporal pass).
         bool held = false;
         /// The descriptor and parameter ring's own counter: every RECORDED frame takes the next slot (a held frame
-        /// traces nothing, so `frame` — the traced frames, the ping-pong's parity and the sample sequence — stands).
+        /// traces nothing, so `frame` — the traced frames and the moving sample sequence — stands).
         unsigned ringFrame = 0u;
+        /// THE PING-PONG'S PARITY (fix F1): `flip & 1` is the half last written. It advances on every traced frame
+        /// but the rest's from k = 2 — there the frozen moving history stays in the half the trace reads and the
+        /// handed-over answer is written in place — and a held frame binds the same pair.
+        unsigned flip = 0u;
         /// THE HISTORY-COUNT READBACK (PHOTON-2 stage 0, the arm "reflect.historyReadback"): a host ring of
         /// kReflectRing copies of the temporal mean the filter has read, the slot of the frame's ring; each
         /// decoded once its frame retired into `histHost` (the w channel, the count) for RayQueryStatus.
@@ -5945,7 +5955,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.alpha[3] = rayMoversOf(scene) ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
-    // ---- THE REST (PHOTON-2 1e) -------------------------------------------------------------------------------
+    // ---- THE REST (PHOTON-2 1e, fix F1) ------------------------------------------------------------------------
+    const unsigned restN = reflectRestLength();
+    pp.stereo[3] = float(restN);
     // The eye basis BIT for bit (a tracked head is never at rest: stereo never rests, as the gather's), the scene's
     // rest key (the gather's own, with its arm), and every parameter of the pass but the ones a still frame changes
     // by construction (the frame index, the previous basis, the view's age, the rest flag itself). A Hits photon
@@ -5981,8 +5993,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         rv.restKey = restKey;
         rv.restParams = paramsKey;
         rv.restKnown = true;
-        pp.knobs2[0] = rv.restFrames > 0u ? 1.0f : 0.0f;
-        hold = rv.restFrames > kReflectRestFrames;
+        hold = rv.restFrames > restN;
+        pp.knobs2[0] = float(std::min(rv.restFrames, restN));
+        // THE REST'S SAMPLES ARE THE REST FRAME'S OWN SEQUENCE (path-independent: kReflectRestSequence).
+        if (rv.restFrames > 0u) pp.knobs[2] = float(kReflectRestSequence + std::min(rv.restFrames, restN));
     }
     if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
@@ -6016,10 +6030,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         retireView(v);
         return v;
     };
-    // THE PING-PONG: a traced frame reads [frame & 1] and writes the other; a HELD frame writes nothing and binds the
-    // last written half as "cur" (the filter composites it), which the next traced frame then reads as "prev".
-    const unsigned last = rv.frame & 1u;
-    const unsigned prev = hold ? 1u - last : last, cur = hold ? last : 1u - last;
+    // THE PING-PONG: a traced frame reads [flip & 1] and writes the other; a HELD frame writes nothing and binds the
+    // last written half as "cur" (the filter composites it), which the next traced frame then reads as "prev". A REST
+    // frame from k = 2 (fix F1) binds as a held one — the frozen moving history in "prev", the handed-over answer in
+    // place in "cur" — and traces.
+    const unsigned last = rv.flip & 1u;
+    const bool inPlace = hold || rv.restFrames >= 2u;
+    const unsigned prev = inPlace ? 1u - last : last, cur = inPlace ? last : 1u - last;
 
     VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
     asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
@@ -6344,6 +6361,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     rv.held = hold;
     rv.rays = hold ? 0u : traceW * traceH;
     if (!hold) ++rv.frame;
+    if (!inPlace) ++rv.flip;
 }
 
 // ---- THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1) ----------------------

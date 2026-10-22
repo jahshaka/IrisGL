@@ -280,6 +280,12 @@ struct GatherInputs {
 };
 
 /// The Component.
+/// THE REST'S LENGTH (OgreScreenProbeGather.cpp settleFramesOf): N — the frames a step of kGatherSettleCodes codes takes
+/// to fall under one code through an EMA of `historyFrames` frames, ceil(ln(1/D) / ln(1 - 1/h)); the gather's rest mean
+/// is that long at its 10-frame history (16), and the reflection's (rq_reflect_temporal.comp, PHOTON-2 fix F1) at its
+/// 32-frame history (51). One function, so the diffuse and the specular rests are one rule.
+unsigned gatherSettleFramesOf(unsigned historyFrames);
+
 class ScreenProbeGather {
 public:
     explicit ScreenProbeGather(GatherHost &host) : mHost(host) {}
