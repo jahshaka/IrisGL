@@ -3987,6 +3987,9 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
     // against; nothing is constructed while the monitor is off - CacheScope's own rule).
     monitor::CacheScope stepRow(CacheKind::Gi, WorkReason::None, 0ull, "gi.step", mRoot->getRenderSystem(), this);
     harvest();     // before any of this frame's GI work is recorded
+    // THE GI FREEZE (M1's measuring arm, "gi.freeze"): no cache work is planned - the field, the cascades, the settle,
+    // the ticks stand as they are.
+    if (mEngine && mEngine->armRegistry().on(ArmId::GiFreeze)) return;
     recordFrame(planFrame(camPos, driverStereo));
     // A STILL FRAME FILES NO GI ROW (gi.coalesce): the row exists only when the step dispatched.
     if (!computeRegionDispatched()) stepRow.cancel();
@@ -7945,6 +7948,11 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // channel is released by the cache and must come back as itself (mReturning).
     view.gestureHeld = mDragMovers;
     mScene.cardCandidates(mGiCamPos, view.radius, view);
+    // THE GI FREEZE (M1's measuring arm): no card is captured, relit or traced.
+    if (mEngine && mEngine->armRegistry().on(ArmId::GiFreeze)) {
+        mSurfaceCache->freezeFrame();
+        return;
+    }
     mSurfaceCache->update(view);
 }
 

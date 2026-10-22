@@ -15,7 +15,8 @@ namespace jahshaka { namespace engine { namespace detail {
 /// The gather's packed history (rg32ui, `layers` eye layers of w x h, layer after layer): per texel the second word's
 /// count (bits 22-25) and class (bit 21), the eye layers side by side (w x layers wide).
 void decodeGatherHistory(const uint32_t *src, unsigned w, unsigned h, unsigned layers,
-                         std::vector<unsigned char> &count, std::vector<unsigned char> &cls);
+                         std::vector<unsigned char> &count, std::vector<unsigned char> &cls,
+                         std::vector<float> &dist);
 /// The reflection's history (rgba16f): per texel its w channel as a whole count (0 = no count; <= 4096), the eye
 /// layers side by side.
 void decodeReflectHistory(const uint16_t *src, unsigned w, unsigned h, unsigned layers,

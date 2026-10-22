@@ -1226,6 +1226,7 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
 void SurfaceCache::photonUpdate() {
     if (!mPosUpdated) return;
     mPosUpdated = false;
+    if (mFrozen) return;   // THE GI FREEZE (M1): nothing traced or relit
     // THE MOVERS' TERM of the cards just captured and of every card a mover's
     // footprint reaches — after the copies (the trace reads the new Depth and
     // Normal) and before the relight that multiplies it in. The batch's STILL sun
@@ -2657,8 +2658,19 @@ void SurfaceCache::syncBuffers() {
         mInstanceBuffer->upload(mInstanceBufferCpu.data(), 0, slots);
 }
 
+void SurfaceCache::freezeFrame() {
+    mFrozen = true;
+    mBatch.clear();
+    mRelight.clear();
+    mRelightMode.clear();
+    mCapturesLastFrame = mRelitLastFrame = mIndirectLastFrame = 0u;
+    mStillTracedLastFrame = mMoverTracedLastFrame = 0u;
+    if (mWs) mWs->setExecutionMask(0u);
+}
+
 void SurfaceCache::update(const CardSceneView &view) {
     if (!mBuilt) return;
+    mFrozen = false;
     ++mFrame;
     mCapturesLastFrame = 0u;
     mTexelsLastFrame = 0u;

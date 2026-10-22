@@ -139,6 +139,16 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 hitSun;
 	vec4 hitSun2;
 	vec4 motion;
+	/// ...the trace's alpha, media, metal and hit-surface blocks (unread here), then THE REST block (PHOTON-2 round 2):
+	/// x = 1 = THE GI FREEZE (the arm "gi.freeze", M1's measuring arm: every texel with a history keeps it - no new
+	/// sample enters, the motion's own resampling measured alone).
+	vec4 alpha;
+	vec4 fog[8];
+	vec4 metal;
+	vec4 hitTable;
+	vec4 cloudMap;
+	vec4 cloudSun;
+	vec4 rest;
 } p;
 
 int gEye = 0;
@@ -469,7 +479,8 @@ void main()
 		}
 	}
 	const float frames = min( seed * confidence + 1.0, maxN );
-	const float blend = max( 1.0 / frames, blendFloor );
+	// THE GI FREEZE (M1's measuring arm, rest.x): the history as it stands - no new sample enters.
+	const float blend = p.rest.x > 0.5 ? 0.0 : max( 1.0 / frames, blendFloor );
 	const vec3 mean = mix( history, sample1, blend );
 	// The count says how much of an integral the answer holds (the filter's warm-up and fresh widening read it): a
 	// warm view's shortened memory is stored no younger than the warm seed.

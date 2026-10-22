@@ -138,6 +138,16 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 hitSun;
 	vec4 hitSun2;
 	vec4 motion;
+	/// ...the trace's alpha, media, metal and hit-surface blocks (unread here), then THE REST block (PHOTON-2 round 2):
+	/// x = 1 = THE GI FREEZE (the arm "gi.freeze", M1's measuring arm: every texel with a history keeps it - no new
+	/// sample enters, the motion's own resampling measured alone).
+	vec4 alpha;
+	vec4 fog[8];
+	vec4 metal;
+	vec4 hitTable;
+	vec4 cloudMap;
+	vec4 cloudSun;
+	vec4 rest;
 } p;
 
 /// THE PER-EYE BASIS IS THE TRACE'S, NOT THIS PASS'. `rq_reflect.comp` shares

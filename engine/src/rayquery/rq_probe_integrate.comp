@@ -596,7 +596,8 @@ void main()
 	// it keeps following a scene that changes. A pixel with no usable history
 	// (count 0) takes this frame's estimate whole.
 	const float floorBlend = clamp( p.knobs5.y, 1.0 / float( kHistoryCountMax ), 1.0 );
-	const float blend = prevCount > 0u ? max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend )
+	// THE GI FREEZE (M1's measuring arm, stereo.w): a pixel with a history keeps it, no new sample enters.
+	const float blend = prevCount > 0u ? ( p.stereo.w > 0.5 ? 0.0 : max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend ) )
 									   : 1.0;
 	const vec4 sample1 = vec4( answer.xyz * answer.w, answer.w );
 	vec4 mean = mix( prev, sample1, blend );

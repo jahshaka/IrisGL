@@ -1932,6 +1932,7 @@ public:
     X(CardFootprint, "cards.footprintTexels") /* the card read's footprint gate */ \
     X(FieldScroll, "gi.fieldScroll") /* the irradiance field scrolls (0: re-placed whole) */ \
     X(FieldEnterInline, "gi.fieldEnterInline") /* a scroll's entered planes integrated inline, 4 deep (the H3 arm) */ \
+    X(GiFreeze, "gi.freeze") /* the GI frozen: no cache work, every history kept (M1's measuring arm) */ \
     X(DiffuseConeSkip, "photon.diffuseConeSkip") /* the pixel's cone diffuse only where the field's fallback weight is > 0 */ \
     X(SpecularConeSkip, "photon.specularConeSkip") /* the pixel's specular cone only where the reflection's w < 1 */ \
     X(GatherDecodeHits, "gather.decodeHits") /* every gather hit a record (the decode route), never the caches */ \

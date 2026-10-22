@@ -391,6 +391,8 @@ public:
     /// invalidation signatures, sorts the queue by Lumen's priority, and
     /// captures until the texel budget is spent.
     void update(const CardSceneView &view);
+    /// THE GI FREEZE (PHOTON-2 round 2, M1's measuring arm): this frame captures, relights and traces nothing.
+    void freezeFrame();
 
     /// Everything a host, a monitor or a suite can see.
     void fillStatus(CardCacheStatus &out) const;
@@ -734,6 +736,8 @@ private:
     /// THIS FRAME'S BATCH: indices into mCards, slot i = pass i. Planned by
     /// `update()`, executed by Ogre's frame, consumed by `workspacePosUpdate`.
     std::vector<unsigned> mBatch;
+    /// THE GI FREEZE's frame (freezeFrame): photonUpdate does nothing.
+    bool mFrozen = false;
     /// The compositor frame the batch was planned for — a batch never runs in
     /// any other frame.
     size_t mBatchFrame = size_t(-1);

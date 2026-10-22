@@ -54,6 +54,7 @@
 
 #include "jahshaka/engine/Types.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -95,6 +96,17 @@ struct StillnessSpec {
     /// the stop) to the end, and every frame's StillnessFrame::classPixels / classRestarts from it. Off = the
     /// readback only until the masks are known.
     bool        classRestarts = false;
+    /// THE MOVING WINDOW'S RAW MATERIAL (PHOTON-2 round 2, M1): a directory - every trail frame's picture
+    /// (<out>-t<NNN>.rgb, RGB8), the gather's own per-pixel view distance and surface test of that frame (.dist
+    /// float32 linear depth along the view axis; .flg u8: bit 0 = the history was accepted - the pixel was visible
+    /// the frame before by the gather's own test - bit 1 = the foliage class), its material classes (.cls u8, when
+    /// classesAt is set) and every trail frame's camera (<out>-cams.txt) - what the motion's residual (this frame
+    /// against the frame before reprojected) is computed from, offline. Implies the history readback over the trail.
+    std::string dumpDir;
+    std::string dumpName;
+    float       fovYDegrees = 45.0f;   ///< the view's vertical field of view (the cams file's)
+    /// The material classes at a pose (the same encoding as `classes`), for the dump's per-frame .cls.
+    std::function<std::vector<unsigned char>(const Vec3 &eye, const Vec3 &target, unsigned w, unsigned h)> classesAt;
     /// THE MATERIAL CLASSES at the stop pose, per pixel of the view (row-major, classW x classH; resampled nearest
     /// when the picture's size differs): 0 = unclassified, k = classNames[k - 1]. Empty = one class "all".
     std::vector<std::string>   classNames;

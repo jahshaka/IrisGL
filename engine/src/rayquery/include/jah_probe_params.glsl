@@ -133,7 +133,7 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// is the whole grid, and every helper below reduces to the one-camera
 	/// arithmetic exactly. z = THE HISTORY-AGE VIEW (GatherTuning::ageView, an
 	/// instrument: N > 0 paints the pixels whose history held fewer than N
-	/// frames; 0 off). w unused.
+	/// frames; 0 off). w = 1: THE GI FREEZE (M1's measuring arm "gi.freeze": a pixel with a history keeps it).
 	vec4 stereo;
 	vec4 camPos2;
 	vec4 rayTL2;

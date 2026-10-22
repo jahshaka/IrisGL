@@ -271,7 +271,7 @@ bool sameEstimator(const GatherTuning &a, const GatherTuning &b) {
            a.shBands == b.shBands && a.filterOff == b.filterOff &&
            a.historyFrames == b.historyFrames &&
            a.historyValidationOff == b.historyValidationOff && a.restOff == b.restOff &&
-           a.classOff == b.classOff &&
+           a.classOff == b.classOff && a.freezeHistory == b.freezeHistory &&
            a.filterRadius == b.filterRadius && a.restFrames == b.restFrames &&
            a.restSeed == b.restSeed && a.youngFrames == b.youngFrames &&
            a.youngReach == b.youngReach && a.crossStrata == b.crossStrata;
@@ -661,6 +661,7 @@ void ScreenProbeGather::drop(View &v) {
     v.histReadbackMapped = nullptr;
     v.histHost.clear();
     v.histClassHost.clear();
+    v.histDistHost.clear();
     v.histHostFrame = 0u;
     mHost.gatherRetireBuffer(v.rays, v.raysMemory);
     mHost.gatherRetireBuffer(v.raysReadback, v.raysReadbackMemory);
@@ -719,7 +720,8 @@ void ScreenProbeGather::readPending(View &v) {
                 const size_t layerTexels = size_t(v.w) * v.h;
                 const uint32_t *src = reinterpret_cast<const uint32_t *>(
                     static_cast<const char *>(v.histReadbackMapped) + size_t(i) * layerTexels * v.layers * 8u);
-                detail::decodeGatherHistory(src, v.w, v.h, v.layers, v.histHost, v.histClassHost);   // -O2 (ReadbackDecode.h)
+                detail::decodeGatherHistory(src, v.w, v.h, v.layers, v.histHost, v.histClassHost,
+                                            v.histDistHost);   // -O2 (ReadbackDecode.h)
                 v.histHostFrame = v.pending[i].gatherFrame;
                 v.pending[i].history = false;
             }
@@ -981,6 +983,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.raysFrame = v.raysHostFrame;
     out.historyCount = v.histHost;
     out.historyClass = v.histClassHost;
+    out.historyDist = v.histDistHost;
     out.historyCountW = v.histHost.empty() ? 0u : v.w * v.layers;
     out.historyCountH = v.histHost.empty() ? 0u : v.h;
     out.historyCountFrame = v.histHostFrame;
@@ -1180,6 +1183,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             v.histHost.shrink_to_fit();
             v.histClassHost.clear();
             v.histClassHost.shrink_to_fit();
+            v.histDistHost.clear();
+            v.histDistHost.shrink_to_fit();
             v.histHostFrame = 0u;
         }
     }
@@ -1555,6 +1560,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.stereo[0] = v.stereo ? 1.0f : 0.0f;
     pp.stereo[1] = float(v.eyeGridW);
     pp.stereo[2] = float(in.tuning.ageView);   // THE HISTORY-AGE VIEW (an instrument; 0 = off)
+    pp.stereo[3] = in.tuning.freezeHistory ? 1.0f : 0.0f;   // THE GI FREEZE (M1's measuring arm)
     // THE YOUNG HISTORY'S REACH (GATHER-NOISE-1).
     pp.young[0] = float(in.tuning.youngFrames ? in.tuning.youngFrames : kYoungFrames);
     pp.young[1] = std::max(1.0f, (in.tuning.youngReach > 0.0f ? in.tuning.youngReach : kYoungReachPixels) /

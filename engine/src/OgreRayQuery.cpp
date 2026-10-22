@@ -5145,6 +5145,8 @@ struct ReflectParams {
     float hitTable[4] = {};
     float cloudMap[4] = {};
     float cloudSun[4] = {};
+    /// THE REST BLOCK (PHOTON-2 round 2): [0] = 1 = the GI freeze (the arm "gi.freeze": M1's measuring arm).
+    float rest[4] = {};
 };
 
 
@@ -5842,6 +5844,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.knobs2[1] = voxCount ? std::max(0.01f, 0.5f * voxCell[0].length()) : 0.02f;
     pp.knobs2[2] = skyTex ? 1.0f : 0.0f;
     pp.knobs2[3] = kReflectHistoryFloor;
+    pp.rest[0] = arm(ArmId::GiFreeze, false) ? 1.0f : 0.0f;   // THE GI FREEZE (M1's measuring arm)
     // The cube's gain, or the flat environment with no cube (jah_rq_hit.glsl's
     // JAH_SKY_COLOUR contract).
     for (int i = 0; i < 3; ++i) pp.skyColour[i] = rayEnv.colour[i];
@@ -7263,6 +7266,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         take(ArmId::GatherYoungFrames, in.tuning.youngFrames);
         if (arm(ArmId::GatherValidationOff, false)) in.tuning.historyValidationOff = true;
         if (arm(ArmId::GatherClassOff, false)) in.tuning.classOff = true;
+        if (arm(ArmId::GiFreeze, false)) in.tuning.freezeHistory = true;
         take(ArmId::GatherCrossStrata, in.tuning.crossStrata);
         if (armValue(ArmId::GatherYoungReach) > 0.0)
             in.tuning.youngReach = float(armValue(ArmId::GatherYoungReach));

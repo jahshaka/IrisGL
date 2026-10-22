@@ -6,6 +6,7 @@
 #include "jahshaka/engine/Engine.h"
 
 #include <algorithm>
+#include <fstream>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -211,9 +212,18 @@ struct StillnessRun::Impl {
     std::map<unsigned, FrameRef> byGather;
     unsigned lastGatherMapped = 0u;                   ///< the gather's published frame counter last mapped
     /// The class restarts of the gather frame the readback holds now, into the frame it maps to (once).
+    bool readsHistory() const { return spec.classRestarts || !spec.dumpDir.empty(); }
+    /// THE MOVING WINDOW'S DUMP (M1): a file of the dump directory.
+    std::string dumpPath(const std::string &suffix) const { return spec.dumpDir + "/" + spec.dumpName + suffix; }
+    static std::string trailTag(size_t i)
+    {
+        char b[16];
+        std::snprintf(b, sizeof(b), "-t%03u", unsigned(i));
+        return b;
+    }
     void takeClassRestarts(const GatherStatus &g)
     {
-        if (!spec.classRestarts || g.historyCount.empty() || g.historyClass.size() != g.historyCount.size()) return;
+        if (!readsHistory() || g.historyCount.empty() || g.historyClass.size() != g.historyCount.size()) return;
         const auto it = byGather.find(g.historyCountFrame);
         if (it == byGather.end()) return;
         StillnessWindow &w = report.windows[size_t(it->second.window)];
@@ -221,6 +231,19 @@ struct StillnessRun::Impl {
         if (it->second.index >= fs.size()) return;
         StillnessFrame &f = fs[it->second.index];
         if (f.classPixels >= 0) return;
+        // THE DUMP (M1): the gather's own view distance and surface test of this trail frame.
+        if (!spec.dumpDir.empty() && it->second.trail && g.historyDist.size() == g.historyCount.size()) {
+            const std::string tag = trailTag(it->second.index);
+            std::ofstream d(dumpPath(tag + ".dist"), std::ios::binary);
+            d.write(reinterpret_cast<const char *>(g.historyDist.data()), std::streamsize(g.historyDist.size() * 4u));
+            std::vector<unsigned char> flags(g.historyCount.size());
+            for (size_t i = 0; i < flags.size(); ++i)
+                flags[i] = (unsigned char)((g.historyCount[i] >= 2u ? 1u : 0u) | (g.historyClass[i] ? 2u : 0u));
+            std::ofstream fl(dumpPath(tag + ".flg"), std::ios::binary);
+            fl.write(reinterpret_cast<const char *>(flags.data()), std::streamsize(flags.size()));
+            std::ofstream sz(dumpPath(tag + ".gsize"));
+            sz << g.historyCountW << " " << g.historyCountH << "\n";
+        }
         int px = 0, rs = 0;
         for (size_t i = 0; i < g.historyCount.size(); ++i)
             if (g.historyClass[i]) {
@@ -233,7 +256,7 @@ struct StillnessRun::Impl {
     /// This frame's gather frame, when the gather recorded one (its published counter moved: one past it).
     void mapGatherFrame(const GatherStatus &g, int window, bool trail, size_t index)
     {
-        if (!spec.classRestarts || !g.running || g.frame == 0u || g.frame <= lastGatherMapped) return;
+        if (!readsHistory() || !g.running || g.frame == 0u || g.frame <= lastGatherMapped) return;
         byGather[g.frame - 1u] = { window, trail, index };
         lastGatherMapped = g.frame;
     }
@@ -719,7 +742,7 @@ bool StillnessRun::nextPose(Vec3 &eye, Vec3 &target)
     // THE READBACKS RUN ONLY WHERE THEY ARE READ (each is an image copy and a host decode a frame): the gather's
     // history count from a window's stop frame until its mask is known (frameDone turns it off), the reflection's
     // count from the first stop to the end. An arm latches at the top of the next frame — this one.
-    if (m.spec.classRestarts && (p.trail || p.part == Impl::Part::Window) && !m.gatherArmOn)
+    if (m.readsHistory() && (p.trail || p.part == Impl::Part::Window) && !m.gatherArmOn)
         m.gatherArmOn = m.setArm("gather.historyReadback", 1.0);
     if (p.part == Impl::Part::Window && p.index == 0) {
         if (!m.gatherArmOn) m.gatherArmOn = m.setArm("gather.historyReadback", 1.0);
@@ -782,6 +805,30 @@ bool StillnessRun::frameDone(std::string &err)
             m.picW = pic.width;
             m.picH = pic.height;
             m.buildClassAt(m.picW, m.picH);
+        }
+        // THE DUMP (M1): this trail frame's picture, its classes and its camera.
+        if (!m.spec.dumpDir.empty()) {
+            const size_t ti = w.trail.size() - p.index;
+            const std::string tag = Impl::trailTag(ti);
+            std::vector<unsigned char> rgb(size_t(pic.width) * pic.height * 3u);
+            for (size_t i = 0, n = size_t(pic.width) * pic.height; i < n; ++i) {
+                rgb[i * 3u] = pic.rgba[i * 4u];
+                rgb[i * 3u + 1u] = pic.rgba[i * 4u + 1u];
+                rgb[i * 3u + 2u] = pic.rgba[i * 4u + 2u];
+            }
+            std::ofstream o(m.dumpPath(tag + ".rgb"), std::ios::binary);
+            o.write(reinterpret_cast<const char *>(rgb.data()), std::streamsize(rgb.size()));
+            if (m.spec.classesAt) {
+                const std::vector<unsigned char> cls = m.spec.classesAt(p.eye, p.target, pic.width, pic.height);
+                std::ofstream c(m.dumpPath(tag + ".cls"), std::ios::binary);
+                c.write(reinterpret_cast<const char *>(cls.data()), std::streamsize(cls.size()));
+            }
+            std::ofstream cams(m.dumpPath("-cams.txt"), std::ios::app);
+            if (ti == 0)
+                cams << "# trail eye.x eye.y eye.z target.x target.y target.z | " << pic.width << " " << pic.height
+                     << " fovY " << m.spec.fovYDegrees << "\n";
+            cams << ti << " " << p.eye.x << " " << p.eye.y << " " << p.eye.z << " " << p.target.x << " " << p.target.y
+                 << " " << p.target.z << "\n";
         }
         // NOT THE WINDOW'S FIRST TRAIL FRAME (p.index == the trail's length: the read's finding 7 — a later window's
         // first trail frame diffed against the PREVIOUS window's last picture, the bogus row at its trail's start).
@@ -894,7 +941,7 @@ bool StillnessRun::frameDone(std::string &err)
         if (m.stopSeen[size_t(win)] && !m.maskKnown[size_t(win)]) masksPending = true;
     }
     m.takeClassRestarts(g);
-    if (m.gatherArmOn && !masksPending && !m.spec.classRestarts)
+    if (m.gatherArmOn && !masksPending && !m.readsHistory())
         m.gatherArmOn = !m.setArm("gather.historyReadback", m.gatherArmWas);
     m.flushQueued();
     m.takeReflectHistory(pub.rayQuery);

@@ -188,6 +188,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 hitTable;
 	vec4 cloudMap;
 	vec4 cloudSun;
+	/// THE REST BLOCK (PHOTON-2 round 2): x = 1 = THE GI FREEZE (the arm "gi.freeze", M1's measuring arm: the temporal
+	/// pass keeps every history - no new sample enters; rq_reflect_temporal.comp).
+	vec4 rest;
 } p;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,

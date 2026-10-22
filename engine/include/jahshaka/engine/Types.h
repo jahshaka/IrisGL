@@ -3564,6 +3564,9 @@ struct GatherTuning {
     /// held to the 1 % depth rule and the class match is off (jah_probe_history.glsl), the gather as it would
     /// be without its foliage class - the base arm of the class's guard (gi.hold_after_stop's canopy).
     bool     classOff = false;
+    /// THE GI FREEZE (PHOTON-2 round 2, M1's measuring arm "gi.freeze") - never shipped: a pixel with a history keeps
+    /// it (no new sample enters the integrate's mean), so a walk measures the motion's own resampling.
+    bool     freezeHistory = false;
     /// THE FILTER IN PROBE SPACE'S REACH (GATHER-NOISE-1): 0 = the shipped
     /// reach, 1 = the 3 x 3 neighbourhood alone, 2 = that plus the ring of eight
     /// at two cells (17 taps). Each tap is weighed by the plane and hit-distance
@@ -3795,6 +3798,9 @@ struct GatherStatus {
     /// ...and per pixel the SURFACE CLASS the integrate wrote with it (PHOTON-2 K5: 1 = foliage, the cut-out
     /// class of the prepass's normals alpha - written under GatherTuning::classOff too), the same layout.
     std::vector<unsigned char> historyClass;
+    /// ...and per pixel the VIEW DISTANCE the integrate wrote (the history word's bits 0-20: linear depth along the
+    /// view axis; 0 = no surface), the same layout (PHOTON-2 round 2, M1's moving window).
+    std::vector<float> historyDist;
     unsigned historyCountW = 0u, historyCountH = 0u;
     unsigned historyCountFrame = 0u;
     /// THE GATHER-HITS READBACK (FAR-SUN-1; the arm "gather.hitsReadback"): what answered EVERY
