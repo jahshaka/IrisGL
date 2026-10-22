@@ -11,7 +11,7 @@ For more information see the LICENSE file
 
 #include "import/atomdag/cards.h"
 
-#include "import/atomdag/measure.h"
+#include "import/bakeshared.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -171,40 +171,68 @@ bool buildQuad(const GroupScratch &sc, const std::vector<Card> &cards, const std
     return true;
 }
 
-/// The measured price of a set's quad (measure.h, exact both ways; the quad stands for its sources' islands).
+/// THE MEASURED PRICE of a set's quad — the one-step deviation of measure.h for this shape, exact, both ways, without
+/// its general machinery (a set is a few dozen triangles against two):
+///   the SOURCES against the quad (measure.h's removed vertices and lost facets): the distance to a convex polygon is a
+///   convex function, so over every source facet it peaks at a corner — the maximum over the source vertices is exact;
+///   each charged at most its own island's extent (the quad stands for its sources' islands: none is dropped);
+///   the QUAD against the sources (the added facets): a branch-and-bound walk over the quad's two triangles — a piece
+///   is bounded below by its corners' distances and above by its centre's plus its circumradius (the distance is
+///   1-Lipschitz), split in four until the bounds close within 5 % (the walk's tolerance), charged at most the quad's
+///   diagonal. `exact` false = THE DECISION: it stops the moment the price passes the budget or every piece is proven
+///   under it (the value is then a bound, not the price).
 float priceOf(const GroupScratch &sc, const LocalSpace &space, const std::vector<Card> &cards,
-              const std::vector<unsigned> &set, const Quad &q, float budget, float floorLen)
+              const std::vector<unsigned> &set, const Quad &q, float budget, float floorLen, bool exact)
 {
-    LocalSpace s;
-    std::unordered_map<unsigned, unsigned> local;
-    std::vector<unsigned> in;
-    unsigned rep = UINT_MAX;
-    for (unsigned c : set) rep = std::min(rep, cards[c].comp);
+    const Vec3 Q[4] = { Vec3(q.c[0].pos[0], q.c[0].pos[1], q.c[0].pos[2]), Vec3(q.c[1].pos[0], q.c[1].pos[1], q.c[1].pos[2]),
+                        Vec3(q.c[2].pos[0], q.c[2].pos[1], q.c[2].pos[2]), Vec3(q.c[3].pos[0], q.c[3].pos[1], q.c[3].pos[2]) };
+    const auto toQuad = [&](const Vec3 &p) {
+        return std::min((p - surface::closestOnTriangle(p, Q[0], Q[1], Q[2])).length(),
+                        (p - surface::closestOnTriangle(p, Q[0], Q[2], Q[3])).length());
+    };
+    // the sources against the quad (exact at the vertices)
+    float price = floorLen;
+    std::vector<Vec3> src;   // the sources' triangles, three corners each
     for (unsigned c : set)
         for (unsigned t : cards[c].tris)
             for (int k = 0; k < 3; ++k) {
                 const unsigned v = sc.tris[size_t(t) * 3 + size_t(k)];
-                const auto it = local.emplace(v, unsigned(local.size())).first;
-                if (it->second == s.weld.size()) {
-                    s.pos.insert(s.pos.end(), { sc.pos[size_t(v) * 3], sc.pos[size_t(v) * 3 + 1], sc.pos[size_t(v) * 3 + 2] });
-                    s.weld.push_back(space.weld[v]);
-                    s.comp.push_back(rep);
-                    s.cap.push_back(space.cap[v]);
-                }
-                in.push_back(it->second);
+                const Vec3 p = posOf(sc, v);
+                src.push_back(p);
+                price = std::max(price, std::min(toQuad(p), space.cap[v]));
+                if (!exact && price > budget) return price;
             }
-    const unsigned m = unsigned(s.weld.size());
-    for (int i = 0; i < 4; ++i) {
-        s.pos.insert(s.pos.end(), { q.c[i].pos[0], q.c[i].pos[1], q.c[i].pos[2] });
-        s.weld.push_back(UINT_MAX - 1u - unsigned(i));
-        s.comp.push_back(rep);
-        s.cap.push_back(q.c[i].diagonal);
+    // the quad against the sources (branch and bound)
+    const float cap = q.c[0].diagonal;
+    const auto toSources = [&](const Vec3 &p) {
+        float d = FLT_MAX;
+        for (size_t i = 0; i < src.size(); i += 3)
+            d = std::min(d, (p - surface::closestOnTriangle(p, src[i], src[i + 1], src[i + 2])).length());
+        return std::min(d, cap);
+    };
+    struct Piece { Vec3 a, b, c; int depth = 0; };
+    std::vector<Piece> stack { { Q[0], Q[1], Q[2], 0 }, { Q[0], Q[2], Q[3], 0 } };
+    constexpr float kTolerance = 0.05f;
+    constexpr int kMaxDepth = 12;
+    while (!stack.empty()) {
+        const Piece pc = stack.back();
+        stack.pop_back();
+        const float lo = std::max(toSources(pc.a), std::max(toSources(pc.b), toSources(pc.c)));
+        price = std::max(price, lo);
+        if (!exact && price > budget) return price;
+        const Vec3 g = (pc.a + pc.b + pc.c) * (1.0f / 3.0f);
+        const float r = std::max((pc.a - g).length(), std::max((pc.b - g).length(), (pc.c - g).length()));
+        const float up = std::min(toSources(g) + r, cap);
+        if (up <= price * (1.0f + kTolerance)) continue;   // this piece cannot raise the price past the tolerance
+        if (!exact && up <= budget) continue;               // proven under the budget
+        if (pc.depth >= kMaxDepth) { price = std::max(price, up); continue; }   // the bound stands
+        const Vec3 ab = (pc.a + pc.b) * 0.5f, bc = (pc.b + pc.c) * 0.5f, ca = (pc.c + pc.a) * 0.5f;
+        stack.push_back({ pc.a, ab, ca, pc.depth + 1 });
+        stack.push_back({ ab, pc.b, bc, pc.depth + 1 });
+        stack.push_back({ ca, bc, pc.c, pc.depth + 1 });
+        stack.push_back({ ab, bc, ca, pc.depth + 1 });
     }
-    s.islandCount = space.islandCount;
-    const std::vector<unsigned> out = q.flip ? std::vector<unsigned> { m, m + 2, m + 1, m, m + 3, m + 2 }
-                                             : std::vector<unsigned> { m, m + 1, m + 2, m, m + 2, m + 3 };
-    const StepMeasure r = measureStep(s, in, out, {}, budget, floorLen, true);
-    return r.step;
+    return price;
 }
 
 }   // namespace
@@ -302,8 +330,10 @@ CardMerge mergeCards(const GroupScratch &sc, const LocalSpace &space, const std:
             Quad q;
             if (!buildQuad(sc, cards, set, boxLo, boxHi, q)) break;
             ++r.pricings;
-            const float price = priceOf(sc, space, cards, set, q, budget, floorLen);
-            if (!(price <= budget)) continue;
+            // THE DECISION first (every walk stops at the budget: a set past it costs little), then the kept set's
+            // exact price (the stored step)
+            if (!(priceOf(sc, space, cards, set, q, budget, floorLen, false) <= budget)) continue;
+            const float price = std::min(priceOf(sc, space, cards, set, q, budget, floorLen, true), budget);
             for (unsigned c : set) { cards[c].taken = true; merged[c] = 1u; r.sourceArea += double(cards[c].area); }
             r.quadArea += double(q.area);
             r.step = std::max(r.step, price);

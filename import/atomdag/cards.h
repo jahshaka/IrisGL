@@ -25,9 +25,9 @@ For more information see the LICENSE file
 // AREA THE SOURCES' SUMMED AREA (coverage kept) — shrunk about its centre only as far as keeps every corner inside the
 // mesh's level-0 box (the mesh's box never grows; an overhang past the sources is priced like any deviation). Its UVs: the seed's rectangle corners under the seed's own affine map
 // from its frame to its first UV set (no new texture); every other buffer copies the seed's vertex nearest each corner.
-// THE PRICE: the set's sources against its quad, MEASURED both ways (measure.h, exact: every source vertex and facet
-// against the quad, the quad's facets against the sources; the quad stands for its sources' islands, each vertex
-// charged at most its own island's extent). A set past E drops its farthest card and is priced again; a seed whose
+// THE PRICE: the set's sources against its quad, MEASURED both ways (measure.h's one-step deviation, exact, for this
+// shape — cards.cpp priceOf: the sources' vertices and facets against the convex quad, the quad against the sources by
+// a bounded walk; the quad stands for its sources' islands, each vertex charged at most its own island's extent). A set past E drops its farthest card and is priced again; a seed whose
 // pair is past E stays as it is. The group's step = the largest price of its merged sets (the rest is unchanged).
 // THE VERTICES: each quad is FOUR NEW VERTICES appended to the mesh (build.cpp; the owner's memory rule decides the
 // stage) — the only vertices the DAG ever adds.
