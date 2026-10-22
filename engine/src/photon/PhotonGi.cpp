@@ -917,6 +917,37 @@ bool PhotonComponent::injectedThisFrame(size_t i) const {
     return i < mVctCascades.size() && mVctCascades[i].injectedFrame == frame;
 }
 
+// THE INJECTION'S PARTS AS ROWS (PHOTON-7 stage 1, the split rows): a light tick of cascade N is
+// `vct.inject.directN` (the injection dispatch: every lamp's and the sun's march), `vct.inject.mipsN`
+// (the directional levels and the mip chains after it), `vct.inject.skyN` (the sky pass) and
+// `vct.inject.bounceN` (the bounce passes, each with its own levels) - nested in whatever row holds the
+// injection (vct.cascadeN, vct.light.settle, ...). The names are compile-time constants per cascade
+// index for the reason the rows above them give (nothing is constructed while the monitor is off).
+static const char *const kInjectRowNames[4][8] = {
+    { "vct.inject.direct0", "vct.inject.direct1", "vct.inject.direct2", "vct.inject.direct3",
+      "vct.inject.direct4", "vct.inject.direct5", "vct.inject.direct6", "vct.inject.direct7" },
+    { "vct.inject.mips0", "vct.inject.mips1", "vct.inject.mips2", "vct.inject.mips3",
+      "vct.inject.mips4", "vct.inject.mips5", "vct.inject.mips6", "vct.inject.mips7" },
+    { "vct.inject.sky0", "vct.inject.sky1", "vct.inject.sky2", "vct.inject.sky3",
+      "vct.inject.sky4", "vct.inject.sky5", "vct.inject.sky6", "vct.inject.sky7" },
+    { "vct.inject.bounce0", "vct.inject.bounce1", "vct.inject.bounce2", "vct.inject.bounce3",
+      "vct.inject.bounce4", "vct.inject.bounce5", "vct.inject.bounce6", "vct.inject.bounce7" } };
+
+namespace {
+/// The listener PhotonVoxelLighting::update names its parts to: one CacheScope per part, filed as it closes.
+struct InjectionRows final : Ogre::PhotonVoxelLighting::PhaseListener {
+    Ogre::RenderSystem *rs = nullptr;
+    size_t cascade = 0;
+    std::optional<monitor::CacheScope> row;
+    void phaseBegin(Ogre::PhotonVoxelLighting::Phase phase) override {
+        row.reset();
+        row.emplace(CacheKind::Gi, WorkReason::Light, (unsigned long long)cascade,
+                    kInjectRowNames[size_t(phase)][std::min(cascade, size_t(7))], rs);
+    }
+    void phaseEnd() override { row.reset(); }
+};
+}   // namespace
+
 bool PhotonComponent::injectCascade(size_t i) {
     Ogre::PhotonVoxelLighting *lighting = i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr;
     if (!lighting) return false;
@@ -940,7 +971,17 @@ bool PhotonComponent::injectCascade(size_t i) {
     const Ogre::uint32 passes = cascadeBounces(i);
     const bool measure = passes >= 2u && !lighting->bounceEnergyInFlight();
     lighting->setMeasureBounceEnergy(measure);
-    lighting->update(mSceneMgr, passes, true /*autoMultiplier*/);
+    {
+        InjectionRows rows;
+        rows.rs = mRoot->getRenderSystem();
+        rows.cascade = i;
+        lighting->setPhaseListener(&rows);
+        struct Unhook {
+            Ogre::PhotonVoxelLighting *l;
+            ~Unhook() { l->setPhaseListener(nullptr); }
+        } unhook{ lighting };
+        lighting->update(mSceneMgr, passes, true /*autoMultiplier*/);
+    }
     lighting->setMeasureBounceEnergy(false);
     mVctCascades[i].bouncePassesApplied = passes;
     if (measure && lighting->bounceEnergyInFlight()) {
@@ -1245,6 +1286,7 @@ GiStatus PhotonComponent::giStatus() const {
         {
             // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest; giInputsOwed).
             st.giAtRest = !giInputsOwed();
+            st.chainOwed = chainWorkOwed();
         }
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
         st.probeCapturesLastFrame = mPcc ? mProbeCapturesLastFrame : 0;
@@ -7214,6 +7256,15 @@ void PhotonComponent::teardownIrradianceField() {
 // THE ONE SETTLE PREDICATE (GiStatus::giAtRest = its negation; the gather's inputsBusy reads it too, PHOTON-2 stage
 // 2's round): the chain's own owed work.
 bool PhotonComponent::giInputsOwed() const {
+    const bool fieldBusy = mIfd && mIfdTotalProbes > 0u &&
+                           (mIfdFollowOwed != 0 || mIfdProbesDone < mIfdTotalProbes || mIfdResumeOwed != 0u ||
+                            (mIfdProbesPerFrame > 0u && (mIfd->getRefinesOwed() > 0u || !mIfd->isWorkDone())));
+    return chainWorkOwed() || fieldBusy;
+}
+
+// THE CHAIN'S OWN OWED WORK (GiStatus::chainOwed, PHOTON-7 stage 1's voxel door): a rebuild, a re-voxelisation or an
+// injection the cascades still owe - the field's integration aside.
+bool PhotonComponent::chainWorkOwed() const {
     bool cascadePending = mGiCascadeDirtyAll || !mGiCascadeDirtyBoxes.empty();
     for (const VctCascade &c : mVctCascades) cascadePending = cascadePending || c.pending > 0;
     const bool rebuildPending = mGiCachesDirty || mGiChainShapeDirty ||
@@ -7227,10 +7278,7 @@ bool PhotonComponent::giInputsOwed() const {
     // more passes than the volume was lit with, and the re-injection that answers it changes
     // the picture (harvestBounceEnergy).
     for (const VctCascade &c : mVctCascades) injectionOwed = injectionOwed || c.bounceEnergyPending;
-    const bool fieldBusy = mIfd && mIfdTotalProbes > 0u &&
-                           (mIfdFollowOwed != 0 || mIfdProbesDone < mIfdTotalProbes || mIfdResumeOwed != 0u ||
-                            (mIfdProbesPerFrame > 0u && (mIfd->getRefinesOwed() > 0u || !mIfd->isWorkDone())));
-    return rebuildPending || injectionOwed || fieldBusy;
+    return rebuildPending || injectionOwed;
 }
 
 void PhotonComponent::planField(FrameWork &w) {

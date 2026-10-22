@@ -417,6 +417,34 @@ namespace Ogre
         void update( SceneManager *sceneManager, uint32 numBounces, bool autoMultiplier = true,
                      uint32 lightMask = 0xffffffff );
 
+        /// THE INJECTION'S PARTS, NAMED AS THEY ARE RECORDED (PHOTON-7 stage 1, the split rows): a
+        /// host that times an injection hands a listener, and update() opens each part before it
+        /// records it and closes it after - the direct term's dispatch, the directional levels and
+        /// the mip chains after it, the sky pass, the bounce passes (each with its own levels). A
+        /// host files each as a row of its own (PhotonComponent::injectCascade: vct.inject.*N),
+        /// which is how a cascade's light tick is priced part by part. Null: nothing is named.
+        enum class Phase
+        {
+            Direct,
+            Mips,
+            Sky,
+            Bounce
+        };
+        class PhaseListener
+        {
+        public:
+            virtual ~PhaseListener() {}
+            virtual void phaseBegin( Phase phase ) = 0;
+            virtual void phaseEnd() = 0;
+        };
+        void setPhaseListener( PhaseListener *listener ) { mPhaseListener = listener; }
+
+    protected:
+        /// setPhaseListener (PHOTON-7 stage 1): who names the injection's parts, or null.
+        PhaseListener *mPhaseListener = nullptr;
+
+    public:
+
         /** Points this PhotonVoxelLighting at a DIFFERENT voxelizer, in place.
 
             A PhotonVoxelLighting is normally bound to the voxelizer it was constructed with for

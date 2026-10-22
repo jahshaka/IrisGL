@@ -4397,6 +4397,11 @@ struct GiStatus {
     /// "the picture has stopped moving" check wait on it, in frames. True with
     /// GI off. (Reflection-probe captures are `staleProbes`, separately.)
     bool giAtRest = true;
+    /// THE CHAIN STILL OWES VOXEL WORK (PHOTON-7 stage 1's voxel door): a rebuild, a re-voxelisation, a cascade step or an
+    /// injection (a light tick, a settle step, a bounce series being measured) - giAtRest's predicate without the
+    /// irradiance field's integration. A readback of the voxels (giVoxelVolume, giVoxelStats) taken while it is false
+    /// reads the chain's answer for the placements it stands at. False with GI off.
+    bool chainOwed = false;
     /// SSAO IS REFUSED IN THIS SCENE (SSAO-DOUBLE-1; giCarriesOcclusion): true
     /// whenever the mode is not Off — every view that draws this scene builds its
     /// chain without the SSAO passes, whatever its PostFxDesc::ssao asks — with

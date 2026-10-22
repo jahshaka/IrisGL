@@ -82,6 +82,26 @@ namespace Ogre
 
     namespace
     {
+        /// ONE PART OF AN INJECTION, named to the host's listener for as long as it records (the
+        /// split rows, PhotonVoxelLighting::PhaseListener).
+        struct InjectionPhase
+        {
+            PhotonVoxelLighting::PhaseListener *listener;
+            InjectionPhase( PhotonVoxelLighting::PhaseListener *l, PhotonVoxelLighting::Phase phase ) :
+                listener( l )
+            {
+                if( listener )
+                    listener->phaseBegin( phase );
+            }
+            ~InjectionPhase()
+            {
+                if( listener )
+                    listener->phaseEnd();
+            }
+            InjectionPhase( const InjectionPhase & ) = delete;
+            InjectionPhase &operator=( const InjectionPhase & ) = delete;
+        };
+
         /// THE MIP-STEP JOBS ARE POOLED (BUGS-6 stage 3), the way PhotonMipChain pools its own: one
         /// clone of VCT/AnisotropicMipStep0 or 1 per (aniso volume size, format, step, level), its
         /// shader parameters - the level's resolutions, which depend on nothing else - set once at
@@ -1518,15 +1538,21 @@ namespace Ogre
         renderSystem->endCopyEncoder();
 
         HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
-        jahshaka::engine::detail::photonDispatch( hlmsCompute, mLightInjectionJob, renderSystem );
+        {
+            const InjectionPhase phase( mPhaseListener, Phase::Direct );
+            jahshaka::engine::detail::photonDispatch( hlmsCompute, mLightInjectionJob, renderSystem );
+        }
 
-        generateAnisotropicMips();
+        {
+            const InjectionPhase phase( mPhaseListener, Phase::Mips );
+            generateAnisotropicMips();
 
-        // Jahshaka (MOVER-OCCLUSION-1): D's own chain, read by the ray tier's hits.
-        if( mLightDirect )
-            PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightDirect );
-        // (the total's levels exist under the specular SDF quality only: otherwise a no-op)
-        PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
+            // Jahshaka (MOVER-OCCLUSION-1): D's own chain, read by the ray tier's hits.
+            if( mLightDirect )
+                PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightDirect );
+            // (the total's levels exist under the specular SDF quality only: otherwise a no-op)
+            PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
+        }
 
         // Jahshaka (CONTACT-OCCLUSION-1, SKY-BOUNCE-1): THE SKY IS A LIGHT. Its direct term
         // enters the store first - total = direct + rho * E_sky, E_sky the environment
@@ -1546,7 +1572,10 @@ namespace Ogre
         // environment that carries light; a store without either is unchanged.
         const bool skyPass = mStoreSkyLight && getAllowMultipleBounces() && hasEnvironmentLight();
         if( skyPass )
+        {
+            const InjectionPhase phase( mPhaseListener, Phase::Sky );
             runBounce( true );
+        }
 
         // Jahshaka (PHOTON-5 stage 5): THE BOUNCE ENERGY, when asked and none is in flight - the
         // base's sum, then each pass's (setMeasureBounceEnergy).
@@ -1563,6 +1592,7 @@ namespace Ogre
                              "numBounces must be 0, else call setAllowMultipleBounces first!",
                              "PhotonVoxelLighting::update" );
             }
+            const InjectionPhase phase( mPhaseListener, Phase::Bounce );
             for( uint32 i = 0u; i < numBounces; ++i )
             {
                 runBounce();
