@@ -145,6 +145,19 @@ struct StillnessFrame {
     /// The ray tier's per-instance levels this frame re-fitted (GpuSceneStatus::rayLevelRefits' step).
     unsigned           rayLevelRefits = 0;
     bool               held = false;
+    /// THE REFLECTION'S REST this frame (RayQueryStatus, PHOTON-2 round 2 R1/G6): its rest frames (0 = moving or
+    /// broken), held, the newest count of its texels still converging (-1 = none read for this rest) and the rest
+    /// frames so far on which a moved instance crossed it.
+    unsigned           reflRestFrames = 0, reflRestMovers = 0;
+    /// THE CAMERA CUTS so far (PHOTON-2 round 2, N3; GatherStatus::cameraCuts, RayQueryStatus::reflectCameraCuts): the
+    /// frames the gather's / the reflection's view detected a cut on (a view axis turned > 75 deg or the eye moved
+    /// > 100 m) and restarted its histories.
+    unsigned           cameraCuts = 0, reflCuts = 0;
+    /// THE FRAME'S GPU ROWS (M1 + N1): the monitor rows over 0.05 ms, "row:ms" joined by ',' ("" = no record) - the
+    /// walking cost per cache (vct.scrollN, vct.cascadeN, vct.light.settle ...).
+    std::string        gpuRows;
+    bool               reflHeld = false;
+    int                reflRestActive = -1;
     /// THE FRAME'S COST (PHOTON-2 stage 2's round, H4 (e)): the monitor record's BUSY frame GPU milliseconds (its span
     /// less the gaps the GPU waited on a submission) and the whole renderOneFrame's wall milliseconds (-1: unmeasured).
     float              frameGpuMs = -1.0f, frameMs = -1.0f;

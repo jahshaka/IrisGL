@@ -270,6 +270,9 @@ struct StillnessRun::Impl {
     }
     unsigned lastTraced = 0u;                         ///< the reflection's traced-frame counter last seen
     std::map<unsigned long long, std::vector<std::pair<std::string, unsigned>>> rowsByFrame;
+    /// THE FRAME'S GPU ROWS (PHOTON-2 round 2, M1 + N1: the walking cost per cache - vct.scrollN, vct.cascadeN,
+    /// vct.light.settle, ifd.*, cards.*, the ray tier's rq.* and the gather's): "row:ms" over 0.05 ms, joined by ','.
+    std::map<unsigned long long, std::string> gpuRowsByFrame;
     std::vector<MonitorRecord> records;
     std::map<std::string, std::pair<double, unsigned>> gpuSum;   ///< row -> (GPU ms summed, frames)
     std::map<unsigned long long, std::pair<float, float>> frameTimes;   ///< record frame -> (frame GPU ms, wall ms)
@@ -383,6 +386,15 @@ struct StillnessRun::Impl {
                 char b[160];
                 std::snprintf(b, sizeof(b), "%s:%.2f", slow->name.c_str(), slow->ms);
                 slowStages[r.frame] = b;
+            }
+            {
+                std::string &g = gpuRowsByFrame[r.frame];
+                for (const auto &fm : frameMs) {
+                    if (fm.second < 0.05) continue;
+                    char b[96];
+                    std::snprintf(b, sizeof(b), "%s%s:%.2f", g.empty() ? "" : ",", fm.first.c_str(), fm.second);
+                    g += b;
+                }
             }
             auto &rows = rowsByFrame[r.frame];
             for (const CacheWork &w : r.cacheWork) {
@@ -558,6 +570,7 @@ struct StillnessRun::Impl {
         w.holdFrame = -1;
         for (StillnessFrame &f : w.trail) {
             if (const auto ss = slowStages.find(f.engineFrame); ss != slowStages.end()) f.slowStage = ss->second;
+            if (const auto gr = gpuRowsByFrame.find(f.engineFrame); gr != gpuRowsByFrame.end()) f.gpuRows = gr->second;
             if (const auto t = frameTimes.find(f.engineFrame); t != frameTimes.end()) {
                 f.frameGpuMs = t->second.first;
                 f.frameMs = t->second.second;
@@ -574,6 +587,7 @@ struct StillnessRun::Impl {
         for (size_t i = 0; i < w.frames.size(); ++i) {
             StillnessFrame &f = w.frames[i];
             if (const auto ss = slowStages.find(f.engineFrame); ss != slowStages.end()) f.slowStage = ss->second;
+            if (const auto gr = gpuRowsByFrame.find(f.engineFrame); gr != gpuRowsByFrame.end()) f.gpuRows = gr->second;
             if (const auto t = frameTimes.find(f.engineFrame); t != frameTimes.end()) {
                 f.frameGpuMs = t->second.first;
                 f.frameMs = t->second.second;
@@ -809,6 +823,12 @@ bool StillnessRun::frameDone(std::string &err)
         f.settleFrames = g.settleFrames;
         f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
+        f.reflRestFrames = pub.rayQuery.reflectRestFrames;
+        f.reflRestMovers = pub.rayQuery.reflectRestMoverFrames;
+        f.reflHeld = pub.rayQuery.reflectHeld;
+        f.reflRestActive = pub.rayQuery.reflectRestActive;
+        f.cameraCuts = g.cameraCuts;
+        f.reflCuts = pub.rayQuery.reflectCameraCuts;
         Image pic;
         if (!m.readPicture(pic, err)) return false;
         if (!m.picW) {
@@ -895,6 +915,12 @@ bool StillnessRun::frameDone(std::string &err)
         f.settleFrames = g.settleFrames;
         f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
+        f.reflRestFrames = pub.rayQuery.reflectRestFrames;
+        f.reflRestMovers = pub.rayQuery.reflectRestMoverFrames;
+        f.reflHeld = pub.rayQuery.reflectHeld;
+        f.reflRestActive = pub.rayQuery.reflectRestActive;
+        f.cameraCuts = g.cameraCuts;
+        f.reflCuts = pub.rayQuery.reflectCameraCuts;
         f.held = g.running && g.settleFrames && g.restFrames > g.settleFrames;
         // THE TRACE THIS FRAME DID (when it did: a frame the reflection skipped leaves the counter where it was, and
         // its copy is the earlier frame's — never re-labelled as this one).
@@ -1062,7 +1088,8 @@ std::string StillnessReport::tsv() const
         o << "\t" << n << "_px\t" << n << "_max\t" << n << "_mean\t" << n << "_changed\t" << n << "_refl_none\t" << n
           << "_refl_le9\t" << n << "_refl_le17\t" << n << "_refl_le33\t" << n << "_refl_gt33";
     o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\tframe_gpu_ms\tframe_ms"
-      << "\tclass_px\tclass_restart\tstep_px\tslow_stage\thold_key\tfoliage_rule\n";
+      << "\tclass_px\tclass_restart\tstep_px\tslow_stage\thold_key\tfoliage_rule"
+      << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -1080,7 +1107,9 @@ std::string StillnessReport::tsv() const
             std::snprintf(ms, sizeof(ms), "\t%.3f\t%.3f\t%d\t%d\t%d\t", f.frameGpuMs, f.frameMs, f.classPixels,
                           f.classRestarts, f.stepPixels);
             o << ms << (f.slowStage.empty() ? "-" : f.slowStage) << "\t" << (f.holdKey ? 1 : 0) << "\t"
-              << f.foliageRule << "\n";
+              << f.foliageRule << "\t" << f.reflRestFrames << "\t" << (f.reflHeld ? 1 : 0) << "\t" << f.reflRestActive
+              << "\t" << f.reflRestMovers << "\t" << f.cameraCuts << "\t" << f.reflCuts << "\t"
+              << (f.gpuRows.empty() ? "-" : f.gpuRows) << "\n";
         }
     return o.str();
 }
