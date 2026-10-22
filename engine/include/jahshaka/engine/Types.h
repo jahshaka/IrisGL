@@ -4349,6 +4349,10 @@ struct GiStatus {
     /// A change reaches every probe within one change period whatever the reset cadence - a slab that
     /// grows without bound is a field starved under a moving lamp.
     std::vector<unsigned> ifdLightAgeBySlab;
+    /// The probes a change SKIPPED as holding its inputs already (PHOTON-2 K4) since the field's build: a c0
+    /// follow's entered planes inside the range the change still owed (integrated fresh in the follow frame,
+    /// never re-integrated).
+    unsigned long long ifdChangeSkips = 0;
     /// GI IS AT REST (PHOTON-FIELD-ROTATE-1): nothing this scene's GI owes will
     /// change the picture - no rebuild or re-voxelisation pending (the flush, a
     /// staged build, a cascade step, a chain-shape change, a dirty box), no light

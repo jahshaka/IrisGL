@@ -1227,6 +1227,7 @@ GiStatus PhotonComponent::giStatus() const {
             Ogre::vector<Ogre::uint32>::type age;
             mIfd->lightAgeBySlab(age);
             st.ifdLightAgeBySlab.assign(age.begin(), age.end());
+            st.ifdChangeSkips = mIfd->getChangeSkips();
         }
         {
             // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest; giInputsOwed).
@@ -7491,8 +7492,9 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
     // A whole re-integration still running (a settle's, a light's, a re-placement's) CONTINUES
     // after the scroll's own planes WHERE IT WAS (PHOTON-2 stage 2's round, K1/K4): the kept
     // probes it had not reached still owe it and keep their slots, so the same cursor and the
-    // same count owed. (A restart at probe 0 on every follow never reached the far end of the
-    // list on a walk.)
+    // same count owed; an entered plane in that range holds the inputs already (stamped) and is
+    // skipped, never re-integrated. (A restart at probe 0 on every follow never reached the far
+    // end of the list on a walk, and threw the entered planes' integration away.)
     const bool progressivePending = mIfdProbesDone < mIfdTotalProbes;
     const Ogre::uint32 cursor = mIfd->changeCursor();
     const Ogre::uint32 owed = progressivePending ? mIfd->changeRemaining() : 0u;

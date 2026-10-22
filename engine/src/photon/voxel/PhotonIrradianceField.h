@@ -271,13 +271,18 @@ namespace Ogre
         uint32          mWorkRotate = 0u;
         /// Jahshaka (K1): the work is the whole grid (setWholeWork), not a scroll's bands.
         bool            mWorkWhole = true;
-        /// Jahshaka (K1): THE INPUTS' SERIAL - moved by reset() (the inputs changed); the light age
-        /// ledger's (below) stamp of a fresh or a change integration. An invalidation stamps 0.
+        /// Jahshaka (K4): THE INPUTS' SERIAL - moved by reset() (the inputs changed); a fresh or a
+        /// change integration stamps its probe with it (the job's JAH_IFD_STAMP) and a CHANGE skips a
+        /// probe already stamped (it holds these inputs: a scroll's entered plane, or a probe the
+        /// change reached before the work was re-defined). An invalidation stamps 0.
         uint32          mChangeSerial = 1u;
-        /// Jahshaka (K1): THE LIGHT AGE LEDGER - the serial each slot's estimate integrates (recorded in
-        /// dispatch order) and the frame each of the last 256 serials was issued: lightAgeBySlab's reading.
+        /// Jahshaka (K1): THE LIGHT AGE LEDGER - the CPU's mirror of the job's stamps (the serial each
+        /// slot's estimate integrates, by the same rule as the job: recorded in dispatch order) and the
+        /// frame each of the last 256 serials was issued: lightAgeBySlab's reading.
         vector<uint32>::type mSlotSerial;
         uint32          mSerialFrame[256] = {};
+        /// Jahshaka (K4): the probes a change skipped as holding its inputs already (since the build).
+        uint64          mChangeSkips = 0u;
         void noteStamps( uint32 listStart, uint32 count );
         uint64          mDispatches = 0u;
         bool            mRotateRays;
@@ -506,7 +511,9 @@ namespace Ogre
             entered planes (scrollWindow, integrated by the caller): the change (or a re-placement's
             lap) resumes at `cursor` with `remaining` probes still owed, both read before the scroll
             (changeCursor, changeRemaining). The work list is a list of atlas SLOTS and a kept probe
-            keeps its slot, so the probes it owed are the ones it still owes.
+            keeps its slot, so the probes it owed are the ones it still owes; an entered plane in that
+            range already holds the inputs (its fresh integration stamped the change's serial) and its
+            group exits at the history read - the scroll's inline work is never thrown away.
         */
         void resumeChange( uint32 cursor, uint32 remaining );
         /// Where the whole-grid work IN FLIGHT (a change, or a re-placement's fresh lap) integrates
@@ -516,10 +523,13 @@ namespace Ogre
         uint32 changeRemaining() const;
         /** Jahshaka (K1): THE AGE OF THE LIGHT THE FIELD HOLDS, per z-slab of the window (window-local z,
             near to far): the largest, over the slab's probes, of the frames since the inputs its estimate
-            integrates were superseded (0 = it holds the current inputs). From the CPU's record of the
-            dispatches (the job integrates exactly those); saturates past 255 serials.
+            integrates were superseded (0 = it holds the current inputs). From the CPU's mirror of the
+            stamps (the job applies the same rule to the same dispatches); saturates past 255 serials.
         */
         void lightAgeBySlab( vector<uint32>::type &out ) const;
+        /// Jahshaka (K4): the probes a change skipped as holding its inputs already - a scroll's entered
+        /// plane, a probe the change reached before a follow re-defined its work (the ledger's count).
+        uint64 getChangeSkips() const { return mChangeSkips; }
 
         /** Jahshaka (PHOTON-FIELD-ROTATE-1): the whole grid again, as a REFINEMENT: every
             probe below the target sample count takes one more sample under a new ray

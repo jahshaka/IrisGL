@@ -420,11 +420,12 @@ namespace Ogre
 
         // Jahshaka (ENGINE-UPGRADE-2B stage 4): THE VARIANCE STATE, zeroed (no probe stopped,
         // every moment 0): four counters, a flag per probe, an M2 per interior irradiance
-        // texel (the generation job's JAH_IFD_ layout).
+        // texel, the inputs' stamp per probe (K4; 0 = none: mChangeSerial starts at 1) - the
+        // generation job's JAH_IFD_ layout.
         {
             const size_t probes = mSettings.getTotalNumProbes();
             const size_t res = mSettings.mIrradianceResolution;
-            const size_t words = 4u + probes + probes * res * res;
+            const size_t words = 4u + probes + probes * res * res + probes;   // ... and a stamp per probe (K4)
             vector<uint32>::type zeros( words, 0u );
             mVarianceBuffer = vaoManager->createUavBuffer( words, sizeof( uint32 ), 0, zeros.data(), false );
             mSlotSerial.assign( probes, 0u );
@@ -685,8 +686,8 @@ namespace Ogre
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::noteStamps( uint32 listStart, uint32 count )
     {
-        // The job's slots, list position for list position (jahFieldWorkSlot): an invalidation stamps 0, a
-        // fresh or a change integration stamps the serial.
+        // The job's rule, slot for slot (jahFieldWorkSlot, the history read): an invalidation stamps 0, a
+        // change skips a slot already stamped with the serial, a fresh or a change integration stamps it.
         if( mSlotSerial.size() != mSettings.getTotalNumProbes() )
             return;
         const uint32 nx = mSettings.mNumProbes[0], ny = mSettings.mNumProbes[1], nz = mSettings.mNumProbes[2];
@@ -707,7 +708,12 @@ namespace Ogre
             const uint32 y = ( b.lo[1] + ( q / b.size[0] ) % b.size[1] ) & ( ny - 1u );
             const uint32 z = ( b.lo[2] + q / ( b.size[0] * b.size[1] ) ) & ( nz - 1u );
             uint32 &held = mSlotSerial[x + y * nx + z * nx * ny];
-            held = mWorkMode == IntegrateInvalidate ? 0u : mChangeSerial;
+            if( mWorkMode == IntegrateInvalidate )
+                held = 0u;
+            else if( mWorkMode == IntegrateChange && held == mChangeSerial )
+                ++mChangeSkips;
+            else
+                held = mChangeSerial;
         }
     }
     //-------------------------------------------------------------------------
@@ -1101,7 +1107,8 @@ namespace Ogre
                 static_cast<uint32>( static_cast<int32>( Math::Floor( mFieldOrigin.y / spacing.y + 0.5f ) ) );
             mIfGenParams.latticeOrigin.z =
                 static_cast<uint32>( static_cast<int32>( Math::Floor( mFieldOrigin.z / spacing.z + 0.5f ) ) );
-            mIfGenParams.latticeOrigin.w = 0u;
+            // w: THE INPUTS' SERIAL a fresh or change integration stamps (K4: mChangeSerial).
+            mIfGenParams.latticeOrigin.w = mChangeSerial;
             mIfGenParams.sweep.x = static_cast<uint32>( mWorkMode );
             mIfGenParams.sweep.y = mTargetSamples;
             mIfGenParams.sweep.z = mKeepOnChange;
@@ -1128,14 +1135,20 @@ namespace Ogre
         // one-sample probe.
         if( ( mWorkMode == IntegrateChange || mWorkMode == IntegrateFresh ) && mChangeSamples > 1u )
         {
+            // Sub-pass i lifts a probe to i + 1 samples and no further (its target, for the pass): a probe
+            // the first pass skipped (K4: it holds the inputs already, at least as deep) exits at its
+            // history read in every one.
             const IntegrationMode mode = mWorkMode;
+            const uint32 target = mTargetSamples;
             const uint32 start = mNumProbesProcessed - probesPerFrame;
             for( uint32 i = 1u; i < mChangeSamples; ++i )
             {
                 mNumProbesProcessed = start;
                 mWorkMode = IntegrateRefine;
+                mTargetSamples = std::min( target, i + 1u );
                 update( probesPerFrame );
             }
+            mTargetSamples = target;
             mWorkMode = mode;
             mNumProbesProcessed = start + probesPerFrame;
         }

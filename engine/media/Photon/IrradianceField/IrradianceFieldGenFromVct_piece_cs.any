@@ -36,7 +36,8 @@
 		float4 envSh[9];
 
 		// Jahshaka (PHOTON-FIELD-ROTATE-1): the world lattice coordinate of the
-		// window's first probe (xyz, two's complement), and the history rule: x = the
+		// window's first probe (xyz, two's complement; w = THE INPUTS' SERIAL a fresh or a
+		// change integration stamps its probe with, PHOTON-2 K4), and the history rule: x = the
 		// mode (IrradianceField::IntegrationMode, as the job properties ifd_mode_fresh / _change / _refine / _invalidate), y = the target sample
 		// count, z = the samples a change keeps, w = 1 to rotate the rays
 		// (IrradianceField::update).
@@ -185,13 +186,16 @@
 	// mVarianceBuffer): four counters (the stops made, the stops cleared, the integrations
 	// made, a pad), then one stopped flag per probe slot, then one running second moment
 	// (M2, the luminance's sum of squared deviations from the running mean - Welford) per
-	// interior texel of the irradiance tile.
+	// interior texel of the irradiance tile, then one INPUTS STAMP per probe slot (PHOTON-2 K4:
+	// the serial of the inputs its estimate integrates; 0 = none).
 	#define JAH_IFD_STOPS 0u
 	#define JAH_IFD_UNSTOPS 1u
 	#define JAH_IFD_INTEGRATIONS 2u
 	#define JAH_IFD_FLAG( probe ) ( 4u + ( probe ) )
 	#define JAH_IFD_M2( probe, t ) ( 4u + p.numProbes.x * p.numProbes.y * p.numProbes.z + \
 		( probe ) * @value( irrad_resolution )u * @value( irrad_resolution )u + ( t ) )
+	#define JAH_IFD_STAMP( probe ) ( 4u + p.numProbes.x * p.numProbes.y * p.numProbes.z * \
+		( 1u + @value( irrad_resolution )u * @value( irrad_resolution )u ) + ( probe ) )
 
 	// THE INTERVAL'S WIDTH FROM AN ESTIMATED DEVIATION (Student's t): the standard error a
 	// stop reads is itself estimated from the probe's n samples, so the two-sided 95 % interval
@@ -248,7 +252,10 @@
 	if( p.sweep.x == @value( ifd_mode_invalidate )u )
 	{
 		if( lid == 0u )
+		{
 			jahIfdClearStop( probeIdx );
+			ifdVariance[JAH_IFD_STAMP( probeIdx )] = 0u;
+		}
 		for( uint t = lid; t < @value( irrad_resolution )u * @value( irrad_resolution )u;
 			 t += @value( threads_per_group_x )u )
 		{
@@ -263,7 +270,10 @@
 	// included - the pixel's reader reads it as the probe's validity). A FRESH
 	// integration keeps nothing, a CHANGE keeps at most sweep.z samples' weight, a
 	// REFINEMENT skips a probe that already holds sweep.y samples - or that STOPPED (the
-	// variance stop, below: its estimate met the precision before the target).
+	// variance stop, below: its estimate met the precision before the target). A CHANGE skips
+	// a probe already stamped with its inputs' serial (PHOTON-2 K4: a scroll's entered plane, or
+	// a probe the change reached before its work was re-defined - integrated already, never
+	// thrown away); a fresh or change integration stamps the serial.
 	if( lid == 0u )
 	{
 		float held = OGRE_imageLoad2D( irradianceField, irradTile ).w;
@@ -272,9 +282,14 @@
 						 : ( p.sweep.x == @value( ifd_mode_change )u ? min( held, float( p.sweep.z ) ) : held );
 		bool refine = p.sweep.x == @value( ifd_mode_refine )u;
 		bool stopped = ifdVariance[JAH_IFD_FLAG( probeIdx )] != 0u;
-		float skip = ( refine && ( held >= float( p.sweep.y ) || stopped ) ) ? 1.0 : 0.0;
-		if( !refine )
+		bool current = p.sweep.x == @value( ifd_mode_change )u &&
+					   ifdVariance[JAH_IFD_STAMP( probeIdx )] == p.latticeOrigin.w;
+		float skip = ( ( refine && ( held >= float( p.sweep.y ) || stopped ) ) || current ) ? 1.0 : 0.0;
+		if( !refine && !current )
+		{
 			jahIfdClearStop( probeIdx );
+			ifdVariance[JAH_IFD_STAMP( probeIdx )] = p.latticeOrigin.w;
+		}
 		g_probeHistory = float4( kept, skip, held, 0.0 );
 		g_probeUnconverged = 0u;
 	}
