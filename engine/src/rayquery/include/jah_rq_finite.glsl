@@ -20,4 +20,15 @@ bool finite3( vec3 v ) { return finite1( v.x ) && finite1( v.y ) && finite1( v.z
 // (JahRqFinite.glsl, staged by engine/CMakeLists.txt), so no shader carries a literal of its own.
 const float kMaxRadiance = 1024.0;
 
+// THE FLOAT ERROR OF A POINT (PHOTON-7 stage 6, AB E15: the ray origin's first term): a point reconstructed from a
+// depth buffer, or a hit a ray query returned, lies within a few units in the last place of its largest coordinate (and
+// of the distance it was carried along) of the surface it names - the depth's own quantum, the reconstruction's three
+// multiply-adds, the traced triangle's transform. kRayFloatUlps of them: the bound a ray's start is lifted by so it never
+// begins on the wrong side of the surface it leaves.
+const float kRayFloatUlps = 4.0;
+float jahRayFloatBound( vec3 p, float carried )
+{
+	return kRayFloatUlps * 1.1920929e-7 * ( max( max( abs( p.x ), abs( p.y ) ), abs( p.z ) ) + abs( carried ) );
+}
+
 #endif   // JAH_RQ_FINITE_GLSL

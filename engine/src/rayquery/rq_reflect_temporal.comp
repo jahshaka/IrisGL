@@ -84,7 +84,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 knobs;
 	/// x = THE REST FRAME k, 1..N on a frame the view rests (PHOTON-2 1e, fix F1: the gather's rule — a rest mean handed
 	/// over from the frozen moving history, rq_reflect_temporal.comp), 0 while it moves, y = the
-	/// surface bias in world units (a ray starts this far off its own surface),
+	/// drawn cut's error per unit of view distance (the view's pixel tolerance x the LOD bias x one full-resolution
+	/// pixel; world units under an orthographic camera) - rq_reflect.comp's RAY ORIGIN,
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).
 	vec4 knobs2;
@@ -284,9 +285,9 @@ void main()
 				const vec3 c = clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
 				v = vec4( toYCoCg( c ), lumaOf( c ) );
 			}
-			const vec2 tuv = ( vec2( t * scaleT ) + 0.5 * vec2( scaleT ) ) / vec2( fullResT );
-			const float d = texture( sceneDepth, vec3( tuv, float( gEye ) ) ).x;
-			const vec3 n = texture( gBufNormals, vec3( tuv, float( gEye ) ) ).xyz * 2.0 - 1.0;
+			const ivec2 tpx = jahTexelPixel( t, scaleT, fullResT );   // the texel's own pixel (the trace's)
+			const float d = texelFetch( sceneDepth, ivec3( tpx, gEye ), 0 ).x;
+			const vec3 n = texelFetch( gBufNormals, ivec3( tpx, gEye ), 0 ).xyz * 2.0 - 1.0;
 			if( d > 0.0 && d < 1.0 && dot( n, n ) > 1e-6 )
 				g = vec4( normalize( n ), viewDistance( d ) );
 		}
@@ -516,10 +517,11 @@ void main()
 			{
 				const ivec2 fullRes = ivec2( p.resolution.zw );
 				const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
-				const vec2 uv = ( vec2( tc * scale ) + 0.5 * vec2( scale ) ) / vec2( fullRes );
-				const float rawDepth = texture( sceneDepth, vec3( uv, float( gEye ) ) ).x;
+				const ivec2 tpx = jahTexelPixel( tc, scale, fullRes );   // the texel's own pixel (the trace's)
+				const vec2 uv = jahTexelUv( tc, scale, fullRes );
+				const float rawDepth = texelFetch( sceneDepth, ivec3( tpx, gEye ), 0 ).x;
 				const float meanT = st.hitT;
-				const float alpha = max( texture( gBufShadowRoughness, vec3( uv, float( gEye ) ) ).y * 0.999 + 0.001, 1e-6 );
+				const float alpha = max( texelFetch( gBufShadowRoughness, ivec3( tpx, gEye ), 0 ).y * 0.999 + 0.001, 1e-6 );
 				const float rough = sqrt( alpha );
 				const float sDom = clamp( 1.0 - rough, 0.0, 1.0 );
 				const bool dominant = sDom * ( sqrt( sDom ) + rough ) > 0.5;   // GetSpecularDominantDirFactor

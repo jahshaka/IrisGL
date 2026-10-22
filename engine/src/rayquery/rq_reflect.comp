@@ -89,7 +89,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 knobs;
 	/// x = THE REST FRAME k, 1..N on a frame the view rests (PHOTON-2 1e, fix F1: the gather's rule — a rest mean handed
 	/// over from the frozen moving history, rq_reflect_temporal.comp), 0 while it moves, y = the
-	/// surface bias in world units (a ray starts this far off its own surface),
+	/// drawn cut's error per unit of view distance (the view's pixel tolerance x the LOD bias x one full-resolution
+	/// pixel; world units under an orthographic camera) - rq_reflect.comp's RAY ORIGIN,
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).
 	vec4 knobs2;
@@ -781,6 +782,41 @@ vec4 historyAtImage( EyeImage before, int eye, vec3 world, ivec2 traceRes, out f
 	return sum / sumW;
 }
 
+/// THE GEOMETRIC NORMAL AT A PIXEL (the ray origin's direction): from the depth buffer - the cross of the two screen
+/// axes' neighbour points, each axis taking the side nearer in view distance (a silhouette's far side is another
+/// surface) - facing the eye. The shaded normal where an axis has no neighbour on a drawn surface.
+vec3 geometricNormalAt( EyeImage e, ivec2 px, ivec2 fullRes, vec3 world, float dist, vec3 shadedN, vec3 V )
+{
+	vec3 axisStep[2];
+	for( int a = 0; a < 2; ++a )
+	{
+		float best = 3.0e38;
+		bool found = false;
+		for( int s = -1; s <= 1; s += 2 )
+		{
+			const ivec2 q = px + ( a == 0 ? ivec2( s, 0 ) : ivec2( 0, s ) );
+			if( any( lessThan( q, ivec2( 0 ) ) ) || any( greaterThanEqual( q, fullRes ) ) )
+				continue;
+			const float raw = texelFetch( sceneDepth, ivec3( q, gEye ), 0 ).x;
+			if( raw <= 0.0 || raw >= 1.0 )
+				continue;
+			const float dq = viewDistance( raw );
+			if( abs( dq - dist ) >= best )
+				continue;
+			best = abs( dq - dist );
+			axisStep[a] = ( worldAt( e, ( vec2( q ) + 0.5 ) / vec2( fullRes ), dq ) - world ) * float( s );
+			found = true;
+		}
+		if( !found )
+			return shadedN;
+	}
+	vec3 n = cross( axisStep[0], axisStep[1] );
+	if( !( dot( n, n ) > 0.0 ) || !finite3( n ) )
+		return shadedN;
+	n = normalize( n );
+	return dot( n, V ) >= 0.0 ? n : -n;
+}
+
 void main()
 {
 	const ivec2 traceRes = ivec2( p.resolution.xy );
@@ -788,12 +824,12 @@ void main()
 	if( any( greaterThanEqual( tc, traceRes ) ) )
 		return;
 
-	// The pixel this ray is traced FOR is the centre of its block at full
-	// resolution, so a half-resolution trace is not offset by half a pixel.
+	// The pixel this ray is traced FOR is its block's centre pixel at full resolution (jahTexelPixel: read exactly, so
+	// the point reconstructed is on that pixel's drawn surface - the ray origin's law, below).
 	const ivec2 fullRes = ivec2( p.resolution.zw );
 	const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
-	const ivec2 blockOrigin = tc * scale;
-	const vec2 uv = ( vec2( blockOrigin ) + 0.5 * vec2( scale ) ) / vec2( fullRes );
+	const ivec2 px = jahTexelPixel( tc, scale, fullRes );
+	const vec2 uv = jahTexelUv( tc, scale, fullRes );
 	// WHICH EYE THIS PIXEL BELONGS TO (lane REFLECT-VR-1, LAYERED-STEREO-1): the
 	// dispatch's z, the layer of every screen image; `uv` is that eye's own
 	// image coordinate, and every RAY below is built through that eye's basis.
@@ -807,7 +843,7 @@ void main()
 	// which eye it is. With layers the pixel IS the eye's own.
 	const ivec2 seedPix = tc;
 
-	const float rawDepth = texture( sceneDepth, vec3( uv, float( gEye ) ) ).x;
+	const float rawDepth = texelFetch( sceneDepth, ivec3( px, gEye ), 0 ).x;
 	// Cleared depth at EITHER extreme is "nothing was drawn here" — correct with
 	// and without reverse Z, the same test the march makes.
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
@@ -830,7 +866,7 @@ void main()
 	// The gate and the feather below are compared in PERCEPTUAL roughness,
 	// because that is the number the World row shows and the owner states the
 	// dial in. alpha 0.4 would be perceptual 0.63 — a different surface.
-	const float alpha = max( texture( gBufShadowRoughness, vec3( uv, float( gEye ) ) ).y * 0.999 + 0.001, 1e-6 );
+	const float alpha = max( texelFetch( gBufShadowRoughness, ivec3( px, gEye ), 0 ).y * 0.999 + 0.001, 1e-6 );
 	const float roughness = sqrt( alpha );
 	// TRACED UP TO THE FEATHER'S FAR EDGE, not to the cutoff: the band above the
 	// cutoff is exactly where the two answers are being crossfaded, and a pixel
@@ -841,7 +877,7 @@ void main()
 		photonHit( tc, kPhotonNoRay );
 		return;
 	}
-	vec3 normalVS = texture( gBufNormals, vec3( uv, float( gEye ) ) ).xyz * 2.0 - 1.0;
+	vec3 normalVS = texelFetch( gBufNormals, ivec3( px, gEye ), 0 ).xyz * 2.0 - 1.0;
 	if( dot( normalVS, normalVS ) < 1e-6 )
 	{
 		imageStore( stateCur, ivec3( tc, gEye ), uvec4( 0u ) );
@@ -869,6 +905,18 @@ void main()
 		photonHit( tc, kPhotonNoRay );
 		return;
 	}
+	// ---- THE RAY ORIGIN (PHOTON-7 stage 6, AB E15; ONE_PICTURE C3) --------------------------------------------------
+	// The ray starts on the pixel's DRAWN surface - Atom's cut or a stock item's LOD - and traces the meshes' LEVEL 0
+	// (ONE RAY LEVEL PER MESH), so it must start outside the traced surface by exactly the two errors between them:
+	// THE FLOAT ERROR of the reconstructed point (jahRayFloatBound) and THE DRAWN CUT'S ERROR, the view's pixel tolerance
+	// in footprints at the pixel's depth (knobs2.y: the tolerance x the LOD bias x one full-resolution pixel per unit of
+	// view distance - the world size, orthographic). The traced level's own bound is level 0's: zero. Along the GEOMETRIC
+	// normal (the G-buffer's is the shaded one, normal maps included), tMin 0. The 1/2-cell bias it replaces (3.9 cm at
+	// Epic, also as tMin) lifted the ray over a post's foot: the contact's reflection was missing for 99 rows at 1 m.
+	const vec3 geomN = geometricNormalAt( thisEye, px, fullRes, world, dist, worldN, V );
+	const float originLift = jahRayFloatBound( world, dist ) +
+							 p.knobs2.y * ( thisEye.perspective > 0.5 ? dist : 1.0 );
+	const vec3 origin = world + geomN * originLift;
 
 	// ---- AT REST, PER TEXEL (PHOTON-2 round 2: R1, G6; jah_reflect_rest.glsl) ----------------------------------
 	// knobs2.x = the rest frame k (1..kReflectRestMax), 0 while moving, -1 on the frame that BREAKS a rest (the compose
@@ -888,7 +936,7 @@ void main()
 	if( restStop >= kReflectStopFrames )
 	{
 		const float meanT = inPlace.hitT;
-		if( !( meanT > 0.0 ) || !restSegmentMoved( world + worldN * p.knobs2.y, reflect( -V, worldN ), meanT ) )
+		if( !( meanT > 0.0 ) || !restSegmentMoved( origin, reflect( -V, worldN ), meanT ) )
 		{
 			// No sample - and the texel's state is left as it is: its last ESTIMATOR is the cut's hysteresis below on the
 			// frame the texel resumes or the rest breaks.
@@ -1020,16 +1068,13 @@ void main()
 		}
 	}
 
-	// THE RAY. The origin is lifted off its own surface along the NORMAL rather
-	// than along the ray, so a grazing reflection cannot re-enter the surface it
-	// started on; tMin carries the same bias again for the same reason.
-	const float bias = p.knobs2.y;
+	// THE RAY, from the origin above (lifted along the geometric normal by the float error and the drawn cut's error;
+	// tMin 0).
 	const float maxT = p.knobs.y;
 	rayQueryEXT rq;
 	// NEAR COPIES ONLY (0x0F, Types.h kRayMaskNearField): a reflection traces the
-	// level the ray rule chose, never the far field's coarse copies (A5b §4).
-	rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, world + worldN * bias,
-						   bias, L, maxT );
+	// meshes' level 0, never the far field's coarse copies (A5b §4).
+	rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, L, maxT );
 	JAH_RQ_PROCEED( rq )
 
 	vec3 traced = vec3( 0.0 );
@@ -1075,7 +1120,7 @@ void main()
 		jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^
 					 ( fixedEstimator ? 0u : uint( p.knobs.z ) * 2654435761u );
 		if( !decodeAlways )
-			traced = jahHitRadianceSourced( hitSlot, world + worldN * bias + L * t, hitN, L,
+			traced = jahHitRadianceSourced( hitSlot, origin + L * t, hitN, L,
 											reflectFootprint( lobeAlpha, t ), fixedEstimator,
 											true, ok, photonSource );
 		record = decodeAlways || !ok || !finite3( traced );
@@ -1087,7 +1132,7 @@ void main()
 		// A record is fogged at its write-back, which has the decoded radiance
 		// (rq_hit_composite.comp; the record carries the same three numbers).
 		if( !record )
-			traced = jahFogAlong( traced, world.y, L, length( world + worldN * bias + L * t - world ),
+			traced = jahFogAlong( traced, world.y, L, length( origin + L * t - world ),
 								  length( world - thisEye.camPos ) );
 		recSlot = hitSlot;
 		recPrim = hitPrim;
@@ -1126,7 +1171,7 @@ void main()
 	bool hitMoving = false;
 	bool hitMover = false;   // a mover-flagged slot, moving or parked (the age's input)
 	bool virtualHeld = false;   // the history was found through the reflected image
-	vec3 prevHit = world + worldN * bias + L * hitT;   // an escape: a point beyond every hit
+	vec3 prevHit = origin + L * hitT;   // an escape: a point beyond every hit
 	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 	{
 		// a POSED item is a mover of the reflection's (its limbs move under a still node)
@@ -1162,7 +1207,7 @@ void main()
 		// leading band's texels every frame, gi.reflect_mover --edge). A mean that
 		// held no mover lately, or whose length is more than the ray's own apart from
 		// this hit's, is keyed on this hit.
-		const vec3 step = prevHit - ( world + worldN * bias + L * hitT );
+		const vec3 step = prevHit - ( origin + L * hitT );
 		const bool meanIsTheMover = wasHitT > 0.0 && wasMoverAge < kMoverMeanFrames &&
 									abs( hitT - wasHitT ) / max( min( hitT, wasHitT ), 1e-3 ) < 1.0;
 		const float imageT = meanIsTheMover ? wasHitT : hitT;
@@ -1274,7 +1319,7 @@ void main()
 	// moved instance's swept box across any of them, or the hit itself on a moving slot, resumes the texel.
 	if( atRest && !resume )
 	{
-		const vec3 o = world + worldN * bias;
+		const vec3 o = origin;
 		const float t = min( hitT, maxT );
 		resume = hitMoving || restSegmentMoved( o, L, t ) ||
 				 ( wasHitT > 0.0 && restSegmentMoved( o, reflect( -V, worldN ), wasHitT ) ) ||
@@ -1412,7 +1457,7 @@ void main()
 		if( !restInPlace )
 			imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, 0.0 ) );
 		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );   // the write-back fills it
-		const vec3 hitPos = world + worldN * bias + L * hitT;
+		const vec3 hitPos = origin + L * hitT;
 		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, false );
 		if( jahHitAppend( recSlot, false, recPrim, recBary, L, sunVis,
 						  reflectFootprint( lobeAlpha, hitT ),

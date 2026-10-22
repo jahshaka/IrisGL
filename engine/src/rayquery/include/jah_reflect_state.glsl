@@ -93,4 +93,18 @@ uvec2 jahStatePack( JahReflectState s )
 	return w;
 }
 
+/// THE TRACE TEXEL'S PIXEL (PHOTON-7 stage 6, the ray origin): the full-resolution pixel whose surface a trace texel
+/// reflects - its block's centre pixel, (scale / 2) in (the block itself at full resolution), clamped into an odd-sized
+/// target - read with texelFetch by every pass, so the trace, the temporal pass and the filter reconstruct the SAME
+/// surface point (a point-sampled read at the block's centre, a corner between four pixels at half resolution, picked
+/// one of them by rounding while the reconstruction used the corner: up to half a pixel of slope off the surface).
+ivec2 jahTexelPixel( ivec2 tc, ivec2 scale, ivec2 fullRes )
+{
+	return min( tc * scale + scale / 2, fullRes - 1 );
+}
+vec2 jahTexelUv( ivec2 tc, ivec2 scale, ivec2 fullRes )
+{
+	return ( vec2( jahTexelPixel( tc, scale, fullRes ) ) + 0.5 ) / vec2( fullRes );
+}
+
 #endif

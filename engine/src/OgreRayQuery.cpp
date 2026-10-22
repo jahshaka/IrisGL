@@ -5963,11 +5963,18 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                          cam->getFarClipDistance());
     pp.knobs[2] = float(rv.frame & 0xFFFFu);
     pp.knobs[3] = float(voxCount);
-    // THE SURFACE BIAS, in world units, derived from the finest cell rather than
-    // chosen: it has to clear the voxel grid's own quantisation (a ray that
-    // starts inside the cell holding its own surface reads that surface back as
-    // the reflection) and nothing else in the scene has a length scale to offer.
-    pp.knobs2[1] = voxCount ? std::max(0.01f, 0.5f * voxCell[0].length()) : 0.02f;
+    // THE RAY ORIGIN'S DRAWN-CUT TERM (PHOTON-7 stage 6, AB E15): the view's pixel tolerance (the World Mode's
+    // atomPixelError, Scene::pixelTolerance) x the LOD bias - what the id pass's cut and the stock thresholds both
+    // take - in FULL-RESOLUTION pixel footprints per unit of view distance (rayDown spans the target's height with a
+    // forward component of 1; under an orthographic camera it is the plane, and this is world units). rq_reflect.comp
+    // lifts the ray off the pixel's drawn surface by it plus the point's float error: the near copies are level 0, and
+    // the drawn cut lies within the tolerance of them. (It was half a c0 cell, 3.9 cm at Epic, also as tMin: a voxel
+    // rule on a ray that reads geometry - the contact's reflection was missing at 1 m.)
+    {
+        const float down = std::sqrt(eyeB[0].rayDown[0] * eyeB[0].rayDown[0] + eyeB[0].rayDown[1] * eyeB[0].rayDown[1] +
+                                     eyeB[0].rayDown[2] * eyeB[0].rayDown[2]);
+        pp.knobs2[1] = scene->pixelTolerance() * scene->lodBias() * down / float(fullH);
+    }
     pp.knobs2[2] = skyTex ? 1.0f : 0.0f;
     pp.knobs2[3] = kReflectHistoryFloor;
     pp.rest[0] = arm(ArmId::GiFreeze, false) ? 1.0f : 0.0f;   // THE GI FREEZE (M1's measuring arm)

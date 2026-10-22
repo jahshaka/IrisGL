@@ -43,7 +43,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 knobs;
 	/// x = THE REST FRAME k, 1..N on a frame the view rests (PHOTON-2 1e, fix F1: the gather's rule — a rest mean handed
 	/// over from the frozen moving history, rq_reflect_temporal.comp), 0 while it moves, y = the
-	/// surface bias in world units (a ray starts this far off its own surface),
+	/// drawn cut's error per unit of view distance (the view's pixel tolerance x the LOD bias x one full-resolution
+	/// pixel; world units under an orthographic camera) - rq_reflect.comp's RAY ORIGIN,
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).
 	vec4 knobs2;

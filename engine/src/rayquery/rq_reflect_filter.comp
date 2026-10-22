@@ -84,7 +84,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 knobs;
 	/// x = THE REST FRAME k, 1..N on a frame the view rests (PHOTON-2 1e, fix F1: the gather's rule — a rest mean handed
 	/// over from the frozen moving history, rq_reflect_temporal.comp), 0 while it moves, y = the
-	/// surface bias in world units (a ray starts this far off its own surface),
+	/// drawn cut's error per unit of view distance (the view's pixel tolerance x the LOD bias x one full-resolution
+	/// pixel; world units under an orthographic camera) - rq_reflect.comp's RAY ORIGIN,
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).
 	vec4 knobs2;
@@ -270,10 +271,14 @@ float viewDistance( float rawDepth )
 	return p.projParams.y / ( rawDepth - p.projParams.x );
 }
 
-/// This trace texel's own full-resolution sample point, in uv.
-vec2 traceUv( ivec2 tc, ivec2 scale, ivec2 fullRes )
+/// This trace texel's own full-resolution pixel (the trace's: jahTexelPixel), read exactly.
+float depthAt( ivec2 t, ivec2 scale, ivec2 fullRes )
 {
-	return ( vec2( tc * scale ) + 0.5 * vec2( scale ) ) / vec2( fullRes );
+	return texelFetch( sceneDepth, ivec3( jahTexelPixel( t, scale, fullRes ), gEye ), 0 ).x;
+}
+vec3 normalAt( ivec2 t, ivec2 scale, ivec2 fullRes )
+{
+	return normalize( texelFetch( gBufNormals, ivec3( jahTexelPixel( t, scale, fullRes ), gEye ), 0 ).xyz * 2.0 - 1.0 );
 }
 
 /// THE TAPS' NEIGHBOURHOOD, ONCE PER GROUP (SPEED-GPU, audit MA-10). A tap reads four
@@ -310,14 +315,14 @@ void main()
 	const ivec2 fullRes = ivec2( p.resolution.zw );
 	const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
 	const ivec2 blockOrigin = tc * scale;
-	const vec2 uv = traceUv( tc, scale, fullRes );
+	const ivec2 px = jahTexelPixel( tc, scale, fullRes );
 	// THE KERNEL STAYS IN ITS EYE'S PICTURE (lane REFLECT-VR-1, LAYERED-STEREO-1):
 	// each eye is its own layer, so the tap range is the layer's whole width.
 	gEye = int( gl_GlobalInvocationID.z );
 	const int eyeX0 = 0;
 	const int eyeX1 = traceRes.x;
 
-	const float rawDepth = texelLive ? texture( sceneDepth, vec3( uv, float( gEye ) )).x : 0.0;
+	const float rawDepth = texelLive ? texelFetch( sceneDepth, ivec3( px, gEye ), 0 ).x : 0.0;
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
 		texelLive = false;				// nothing was drawn here; the trace wrote nothing either
 
@@ -325,7 +330,7 @@ void main()
 	const float feather = p.projParams.w;
 	// The SAME decode as the trace: fork 16d8e29d4 (was 0043) packs the GGX ALPHA over
 	// [0.001, 1], and the gate is stated in PERCEPTUAL roughness.
-	const float lobeAlpha = texelLive ? max( texture( gBufShadowRoughness, vec3( uv, float( gEye ) )).y * 0.999 + 0.001, 1e-6 ) : 1.0;
+	const float lobeAlpha = texelLive ? max( texelFetch( gBufShadowRoughness, ivec3( px, gEye ), 0 ).y * 0.999 + 0.001, 1e-6 ) : 1.0;
 	const float roughness = sqrt( lobeAlpha );
 	if( roughness > roughGate + feather )
 		texelLive = false;
@@ -460,9 +465,8 @@ void main()
 			{
 				tapDist = jahStateUnpack( imageLoad( stateCur, ivec3( t, gEye ) ).xy ).surfDist;
 				h = answerAt( t );
-				const vec2 tuv = traceUv( t, scale, fullRes );
-				td = texture( sceneDepth, vec3( tuv, float( gEye ) )).x;
-				tn = normalize( texture( gBufNormals, vec3( tuv, float( gEye ) )).xyz * 2.0 - 1.0 );
+				td = depthAt( t, scale, fullRes );
+				tn = normalAt( t, scale, fullRes );
 			}
 			sTapMean[entry] = uvec2( packHalf2x16( h.xy ), packHalf2x16( h.zw ) );
 			sTapDepth[entry] = tapDist > 0.0 ? td : 0.0;
@@ -474,7 +478,7 @@ void main()
 	if( filters )
 	{
 		const float centreDist = viewDistance( rawDepth );
-		const vec3 centreN = normalize( texture( gBufNormals, vec3( uv, float( gEye ) )).xyz * 2.0 - 1.0 );
+		const vec3 centreN = normalAt( tc, scale, fullRes );
 		// THE DEPTH GRADIENT, per trace texel, by central difference. Four
 		// depth taps once per pixel — not per tap — and they are what makes the
 		// kernel slope-aware. A tap off the edge of the buffer contributes a
@@ -488,10 +492,10 @@ void main()
 			const ivec2 xl = clamp( tc - ivec2( 1, 0 ), lo, lim );
 			const ivec2 yu = clamp( tc + ivec2( 0, 1 ), lo, lim );
 			const ivec2 yd = clamp( tc - ivec2( 0, 1 ), lo, lim );
-			const float dxr = texture( sceneDepth, vec3( traceUv( xr, scale, fullRes ), float( gEye ) )).x;
-			const float dxl = texture( sceneDepth, vec3( traceUv( xl, scale, fullRes ), float( gEye ) )).x;
-			const float dyu = texture( sceneDepth, vec3( traceUv( yu, scale, fullRes ), float( gEye ) )).x;
-			const float dyd = texture( sceneDepth, vec3( traceUv( yd, scale, fullRes ), float( gEye ) )).x;
+			const float dxr = depthAt( xr, scale, fullRes );
+			const float dxl = depthAt( xl, scale, fullRes );
+			const float dyu = depthAt( yu, scale, fullRes );
+			const float dyd = depthAt( yd, scale, fullRes );
 			const float sx = float( max( xr.x - xl.x, 1 ) ), sy = float( max( yu.y - yd.y, 1 ) );
 			// A neighbour that drew nothing contributes no gradient rather than
 			// a gradient to the far plane.
