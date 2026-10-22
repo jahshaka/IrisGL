@@ -6,6 +6,7 @@
 #include "jahshaka/engine/Engine.h"
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <cctype>
 #include <cmath>
@@ -277,7 +278,26 @@ struct StillnessRun::Impl {
     std::map<unsigned long long, std::string> gpuRowsByFrame;
     std::vector<MonitorRecord> records;
     std::map<std::string, std::pair<double, unsigned>> gpuSum;   ///< row -> (GPU ms summed, frames)
-    std::map<unsigned long long, std::pair<float, float>> frameTimes;   ///< record frame -> (frame GPU ms, wall ms)
+    /// record frame -> the frame clock's readings (StillnessFrame::frameGpuMs .. gpuRowsMs)
+    struct FrameClock { float busy = -1.0f, wall = -1.0f, span = -1.0f, idle = -1.0f, unattributed = -1.0f,
+                        passes = -1.0f, rows = -1.0f; };
+    std::map<unsigned long long, FrameClock> frameTimes;
+    /// THE HOST'S PERIOD (PHOTON-7 stage 0): the previous frameDone's entry, and this frame's read of its picture.
+    std::chrono::steady_clock::time_point lastDone;
+    bool haveLastDone = false;
+    float readMsNow = -1.0f;
+    void applyClock(StillnessFrame &f) const
+    {
+        const auto t = frameTimes.find(f.engineFrame);
+        if (t == frameTimes.end()) return;
+        f.frameGpuMs = t->second.busy;
+        f.frameMs = t->second.wall;
+        f.gpuSpanMs = t->second.span;
+        f.gpuIdleMs = t->second.idle;
+        f.gpuUnattributedMs = t->second.unattributed;
+        f.gpuPassesMs = t->second.passes;
+        f.gpuRowsMs = t->second.rows;
+    }
     std::map<unsigned long long, std::string> slowStages;               ///< record frame -> its slowest stage
 
     Impl(Engine &e, Scene &s, View &v) : engine(e), scene(s), view(v) {}
@@ -334,6 +354,12 @@ struct StillnessRun::Impl {
 
     bool readPicture(Image &img, std::string &err)
     {
+        // (timed: the read waits for the GPU to finish the frame - StillnessFrame::readMs)
+        const auto t0 = std::chrono::steady_clock::now();
+        struct Timed {
+            float &out; std::chrono::steady_clock::time_point t0;
+            ~Timed() { out = float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count()); }
+        } timed{ readMsNow, t0 };
         if (!onscreen) {
             if (!view.readPixels(img)) {
                 err = "stillness: readPixels refused: " + engine.lastError();
@@ -379,9 +405,22 @@ struct StillnessRun::Impl {
                     gpuSum[f.first].first += f.second;
                     ++gpuSum[f.first].second;
                 }
-            // the frame's BUSY GPU (its span less the gaps the GPU waited on a submission) and its wall time
-            frameTimes[r.frame] = { r.frameGpuMs >= 0.0f && r.gpuIdleMs >= 0.0f ? r.frameGpuMs - r.gpuIdleMs : -1.0f,
-                                    r.totalMs };
+            // the frame's BUSY GPU (its span less the gaps the GPU waited on a submission), its wall time and the
+            // clock's parts (StillnessFrame::periodMs ..): the span, the idle, the gaps no row names, the passes, the rows
+            {
+                FrameClock c;
+                c.busy = r.frameGpuMs >= 0.0f && r.gpuIdleMs >= 0.0f ? r.frameGpuMs - r.gpuIdleMs : -1.0f;
+                c.wall = r.totalMs;
+                c.span = r.frameGpuMs;
+                c.idle = r.gpuIdleMs;
+                c.unattributed = r.unattributedGpuMs;
+                c.passes = r.gpuMs;
+                double rowsMs = 0.0;
+                bool anyRow = false;
+                for (const auto &f : frameMs) { rowsMs += f.second; anyRow = true; }
+                c.rows = anyRow ? float(rowsMs) : -1.0f;
+                frameTimes[r.frame] = c;
+            }
             const FrameStage *slow = nullptr;
             for (const FrameStage &st : r.stages)
                 if (!slow || st.ms > slow->ms) slow = &st;
@@ -574,10 +613,7 @@ struct StillnessRun::Impl {
         for (StillnessFrame &f : w.trail) {
             if (const auto ss = slowStages.find(f.engineFrame); ss != slowStages.end()) f.slowStage = ss->second;
             if (const auto gr = gpuRowsByFrame.find(f.engineFrame); gr != gpuRowsByFrame.end()) f.gpuRows = gr->second;
-            if (const auto t = frameTimes.find(f.engineFrame); t != frameTimes.end()) {
-                f.frameGpuMs = t->second.first;
-                f.frameMs = t->second.second;
-            }
+            applyClock(f);
             const auto it = rowsByFrame.find(f.engineFrame);
             if (it == rowsByFrame.end()) continue;
             std::map<std::string, unsigned> sum;
@@ -591,10 +627,7 @@ struct StillnessRun::Impl {
             StillnessFrame &f = w.frames[i];
             if (const auto ss = slowStages.find(f.engineFrame); ss != slowStages.end()) f.slowStage = ss->second;
             if (const auto gr = gpuRowsByFrame.find(f.engineFrame); gr != gpuRowsByFrame.end()) f.gpuRows = gr->second;
-            if (const auto t = frameTimes.find(f.engineFrame); t != frameTimes.end()) {
-                f.frameGpuMs = t->second.first;
-                f.frameMs = t->second.second;
-            }
+            applyClock(f);
             const auto it = rowsByFrame.find(f.engineFrame);
             if (it != rowsByFrame.end()) {
                 std::map<std::string, unsigned> sum;
@@ -819,6 +852,12 @@ bool StillnessRun::frameDone(std::string &err)
         return true;
     }
     const Impl::Planned p = m.plan[m.next++];
+    // THE HOST'S PERIOD (StillnessFrame::periodMs): from the previous frameDone's entry to this one's.
+    const auto doneAt = std::chrono::steady_clock::now();
+    const float periodMs =
+        m.haveLastDone ? float(std::chrono::duration<double, std::milli>(doneAt - m.lastDone).count()) : -1.0f;
+    m.lastDone = doneAt;
+    m.haveLastDone = true;
     const unsigned long long engineFrame = m.engine.published().frame;
     m.drainRecords();
     const PublishedFrame &pub = m.scene.published();
@@ -851,6 +890,8 @@ bool StillnessRun::frameDone(std::string &err)
         f.reflCuts = pub.rayQuery.reflectCameraCuts;
         Image pic;
         if (!m.readPicture(pic, err)) return false;
+        f.periodMs = periodMs;
+        f.readMs = m.readMsNow;
         if (!m.picW) {
             m.picW = pic.width;
             m.picH = pic.height;
@@ -950,6 +991,8 @@ bool StillnessRun::frameDone(std::string &err)
         }
         Image pic;
         if (!m.readPicture(pic, err)) return false;
+        f.periodMs = periodMs;
+        f.readMs = m.readMsNow;
         if (p.index == 0) {
             if (m.picW && (m.picW != pic.width || m.picH != pic.height)) {
                 err = "stillness: the view changed size between the windows";
@@ -1133,7 +1176,8 @@ std::string StillnessReport::tsv() const
           << "_refl_le9\t" << n << "_refl_le17\t" << n << "_refl_le33\t" << n << "_refl_gt33";
     o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\tframe_gpu_ms\tframe_ms"
       << "\tclass_px\tclass_restart\tstep_px\tslow_stage\thold_key\tfoliage_rule"
-      << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows\n";
+      << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
+      << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -1153,7 +1197,11 @@ std::string StillnessReport::tsv() const
             o << ms << (f.slowStage.empty() ? "-" : f.slowStage) << "\t" << (f.holdKey ? 1 : 0) << "\t"
               << f.foliageRule << "\t" << f.reflRestFrames << "\t" << (f.reflHeld ? 1 : 0) << "\t" << f.reflRestActive
               << "\t" << f.reflRestMovers << "\t" << f.cameraCuts << "\t" << f.reflCuts << "\t"
-              << (f.gpuRows.empty() ? "-" : f.gpuRows) << "\n";
+              << (f.gpuRows.empty() ? "-" : f.gpuRows);
+            char clk[160];
+            std::snprintf(clk, sizeof(clk), "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\n", f.periodMs, f.readMs,
+                          f.gpuSpanMs, f.gpuIdleMs, f.gpuUnattributedMs, f.gpuPassesMs, f.gpuRowsMs);
+            o << clk;
         }
     return o.str();
 }

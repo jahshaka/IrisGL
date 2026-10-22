@@ -165,9 +165,21 @@ struct StillnessFrame {
     std::string        gpuRows;
     bool               reflHeld = false;
     int                reflRestActive = -1;
-    /// THE FRAME'S COST (PHOTON-2 stage 2's round, H4 (e)): the monitor record's BUSY frame GPU milliseconds (its span
-    /// less the gaps the GPU waited on a submission) and the whole renderOneFrame's wall milliseconds (-1: unmeasured).
+    /// THE FRAME'S COST (PHOTON-2 stage 2's round, H4 (e); THE FRAME CLOCK, PHOTON-7 stage 0): the monitor record's BUSY
+    /// frame GPU milliseconds (its span less the gaps the GPU waited on a submission - THE one per-frame GPU time the
+    /// hitch law reads) and the whole renderOneFrame's wall milliseconds - the CPU's frame, which in a lockstep host
+    /// never contains the GPU's: the GPU's frame is waited for where the host reads it (readMs), outside the call
+    /// (-1: unmeasured).
     float              frameGpuMs = -1.0f, frameMs = -1.0f;
+    /// THE FRAME CLOCK'S PARTS (PHOTON-7 stage 0, AB §2's question): the host's period (wall milliseconds from the
+    /// previous frame's frameDone to this one's: the render, the door's read and its dump of the frame before), the
+    /// door's own read of this frame's picture (readPixels waits for the GPU to finish the frame), and from the record:
+    /// the GPU span (first command to last, frameGpuMs before the idle is taken out), the GPU's idle gaps inside it, the
+    /// gaps no row names, the top-level passes' sum (MonitorRecord::gpuMs) and the cache rows' sum (the door's gpuRows,
+    /// summed: they nest inside passes, so never add them to the passes). -1 = unmeasured.
+    float              periodMs = -1.0f, readMs = -1.0f;
+    float              gpuSpanMs = -1.0f, gpuIdleMs = -1.0f, gpuUnattributedMs = -1.0f, gpuPassesMs = -1.0f,
+                       gpuRowsMs = -1.0f;
     /// THE FRAME'S SLOWEST CPU STAGE (PHOTON-2 round 2, the hitch law): the monitor record's longest stage, "name:ms"
     /// ("-": no record) - where a wall-clock hitch spent its time.
     std::string        slowStage;
