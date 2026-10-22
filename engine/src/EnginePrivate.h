@@ -4494,6 +4494,11 @@ public:
     }
     const GatherTuning &gatherTuning() const { return mGatherTuning; }
     GatherTuning mGatherTuning;
+    void setGiPlacementPin(const GiPlacementPin &pin) override {
+        if (postScene([=](OgreScene &s) { s.setGiPlacementPin(pin); return true; })) return;   // a message
+        JAH_HOST_CALL("Scene::setGiPlacementPin");
+        mPhoton.setPlacementPin(pin);
+    }
     void setSunContact(const SunContactDesc &d) override {
         if (postScene([=](OgreScene &s) { s.setSunContact(d); return true; })) return;   // U3 4a: a message
         JAH_HOST_CALL("Scene::setSunContact"); return mPhoton.setSunContact(d); }

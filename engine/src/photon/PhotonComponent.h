@@ -1225,6 +1225,11 @@ private:
     /// Re-centres one cascade's region on ITS cell lattice around `camPos` and
     /// records the camera it was placed for. Does not voxelise.
     void recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos);
+public:
+    /// THE PLACEMENT PIN (Engine.h Scene::setGiPlacementPin, a measuring door).
+    void setPlacementPin(const GiPlacementPin &pin) { mPlacementPin = pin; }
+private:
+    GiPlacementPin mPlacementPin;
     /// Extra bounce passes for cascade `idx` (PHOTON-5 stage 5: BOUNCES TO A RESIDUAL). The
     /// document's count is the MINIMUM (numBounces - 1 passes; 0 when it asks for a single
     /// indirect bounce, the default); the series' measured contraction r (VctCascade::

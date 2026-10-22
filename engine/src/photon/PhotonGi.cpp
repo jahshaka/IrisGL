@@ -1249,6 +1249,7 @@ GiStatus PhotonComponent::giStatus() const {
             shape.stepCells  = c.stepCells;
             cs.guaranteedRadius = giCascadeGuaranteedRadius(shape);
             cs.centre     = toV(c.centre);
+            cs.builtCam   = toV(c.builtCam);
             cs.rebuilds   = c.rebuilds;
             cs.pending    = c.pending;
             cs.scrolls      = c.scrolls;
@@ -4749,8 +4750,17 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
 
 // Re-centres one cascade's region on the cell lattice around `camPos` and
 // records the camera it was placed for. Does NOT voxelise.
-void PhotonComponent::recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos) {
+void PhotonComponent::recentreCascade(VctCascade &c, const Ogre::Vector3 &eyePos) {
     ++mGiPlacementSerial;
+    // THE PLACEMENT PIN (a measuring door, Types.h GiPlacementPin): the recorded camera, not the eye.
+    Ogre::Vector3 camPos = eyePos;
+    {
+        const size_t idx = size_t(&c - mVctCascades.data());
+        if (mPlacementPin.on && idx < mVctCascades.size() && idx < mPlacementPin.cascadeBuiltCam.size()) {
+            const Vec3 &p = mPlacementPin.cascadeBuiltCam[idx];
+            camPos = Ogre::Vector3(p.x, p.y, p.z);
+        }
+    }
     const float cell = c.cell();
     c.latticeX = jahQuantAxis(camPos.x, cell);
     c.latticeY = jahQuantAxis(camPos.y, cell);
@@ -7288,8 +7298,13 @@ void PhotonComponent::followCascade0Field(GiStaleReason reason) {
         // reader's fallback, JahIfd_piece_ps.any) - never the old placement's
         // values, which describe another place. A PAUSED budget integrates the whole
         // placement inline (one sample a probe; a paused field refines nothing).
-        mIfd->setFieldVolume(origin, size);
-        mIfdVolumeOrigin = origin;
+        // ...at the PINNED origin when a placement pin says so (a measuring door, GiPlacementPin).
+        const Ogre::Vector3 placeAt =
+            mPlacementPin.on && mPlacementPin.field
+                ? Ogre::Vector3(mPlacementPin.fieldOrigin.x, mPlacementPin.fieldOrigin.y, mPlacementPin.fieldOrigin.z)
+                : origin;
+        mIfd->setFieldVolume(placeAt, size);
+        mIfdVolumeOrigin = placeAt;
         mIfdVolumeSize   = size;
         ++mIfdFollows;
         ++mIfdReplacements;

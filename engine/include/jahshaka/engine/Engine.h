@@ -1060,6 +1060,10 @@ public:
     /// determinism arm that holds the frame index, the ray length. It is not
     /// a document row and never reaches a panel: a person tunes the TIER.
     virtual void setGatherTuning(const GatherTuning &) {}
+    /// THE GI PLACEMENT PIN (Types.h GiPlacementPin; PHOTON-2's stillness door) — a MEASURING DOOR: the cascades'
+    /// and the field's placements taken from a recorded state at their next re-placement, until a pin with `on`
+    /// false. A message: it applies at the next frame's drain.
+    virtual void setGiPlacementPin(const GiPlacementPin &) {}
 
     /// HARD SUN CONTACT SHADOWS (Types.h `SunContactDesc`; PHOTON P5 RY-R3).
     /// The project's row, pushed by the host from the document like the ray

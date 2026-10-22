@@ -172,6 +172,7 @@ struct StillnessRun::Impl {
     bool monitorOurs = false;
     double gatherArmWas = 0.0, reflectArmWas = 0.0;
     bool gatherArmOn = false, reflectArmOn = false;   ///< the run has switched it on (and not off since)
+    bool pinned = false;                              ///< the path's placement pin is on (released at the end)
     bool onscreen = false;
 
     // ---- the readings ---------------------------------------------------------------------------------------------
@@ -228,6 +229,7 @@ struct StillnessRun::Impl {
         finished = true;
         setArm("gather.historyReadback", gatherArmWas);
         setArm("reflect.historyReadback", reflectArmWas);
+        if (pinned) scene.setGiPlacementPin(GiPlacementPin());   // released (a message: the host's next frame)
         if (monitorOurs) {
             setMonitor(MonitorLevel::Off);   // flushes everything waiting into the queue
             drainRecords();
@@ -404,7 +406,9 @@ struct StillnessRun::Impl {
             w.directDigest.push_back(st.available ? st.directDigest : std::string());
             w.lightDigest.push_back(st.available ? st.lightDigest : std::string());
             w.cascadeCentre.push_back(gi.cascades[c].centre);
+            w.cascadeBuiltCam.push_back(gi.cascades[c].builtCam);
         }
+        w.fieldOrigin = gi.ifdMin;
     }
 
     void completeWindow(StillnessWindow &w, size_t win)
@@ -608,6 +612,18 @@ bool StillnessRun::nextPose(Vec3 &eye, Vec3 &target)
         if (!m.reflectArmOn) m.reflectArmOn = m.setArm("reflect.historyReadback", 1.0);
     }
     if (m.onscreen && (p.part == Impl::Part::Window || p.trail)) m.view.requestFrameCapture(true);
+    // THE TELEPORT'S RETURN IS PLACED WHERE THE WALK LEFT THE CHAIN (the path check at equal placements): the pin is a
+    // message, applied at this frame's drain, before the frame re-places anything.
+    if (p.part == Impl::Part::Window && p.window == 1 && p.index == 0 && !m.report.windows.empty()) {
+        const StillnessWindow &walk = m.report.windows[0];
+        GiPlacementPin pin;
+        pin.on = true;
+        pin.cascadeBuiltCam = walk.cascadeBuiltCam;
+        pin.field = true;
+        pin.fieldOrigin = walk.fieldOrigin;
+        m.scene.setGiPlacementPin(pin);
+        m.pinned = true;
+    }
     return true;
 }
 
@@ -760,7 +776,10 @@ bool StillnessRun::finish(StillnessReport &out, std::string &err)
         r.pathChecked = true;
         r.pathMaxCodes.assign(n + 1, 0u);
         r.pathPixelsDiffering.assign(n + 1, 0u);
+        r.pathMeanCodes.assign(n + 1, 0.0);
+        r.pathP99Codes.assign(n + 1, 0u);
         if (a.lastPicture.width == b.lastPicture.width && a.lastPicture.height == b.lastPicture.height) {
+            std::vector<std::vector<unsigned>> hist(n + 1, std::vector<unsigned>(256, 0u));
             for (size_t i = 0; i < size_t(a.lastPicture.width) * a.lastPicture.height; ++i) {
                 const unsigned char *x = &a.lastPicture.rgba[i * 4u], *y = &b.lastPicture.rgba[i * 4u];
                 unsigned v = 0;
@@ -770,9 +789,22 @@ bool StillnessRun::finish(StillnessReport &out, std::string &err)
                 for (unsigned j = 0; j < (cls ? 2u : 1u); ++j) {
                     r.pathMaxCodes[ks[j]] = std::max(r.pathMaxCodes[ks[j]], v);
                     if (v >= 1u) ++r.pathPixelsDiffering[ks[j]];
+                    ++hist[ks[j]][v];
+                }
+            }
+            for (unsigned k = 0; k <= n; ++k) {
+                unsigned long long total = 0, sum = 0;
+                for (unsigned v = 0; v < 256; ++v) { total += hist[k][v]; sum += (unsigned long long)v * hist[k][v]; }
+                if (!total) continue;
+                r.pathMeanCodes[k] = double(sum) / double(total);
+                unsigned long long acc = 0;
+                for (unsigned v = 0; v < 256; ++v) {
+                    acc += hist[k][v];
+                    if (acc * 100ull >= total * 99ull) { r.pathP99Codes[k] = v; break; }
                 }
             }
         }
+        r.pathFieldEqual = a.fieldOrigin == b.fieldOrigin ? 1 : 0;
         const size_t cascades = std::max(a.directDigest.size(), b.directDigest.size());
         for (size_t c = 0; c < cascades; ++c) {
             const auto eq = [&](const std::vector<std::string> &x, const std::vector<std::string> &y) {
@@ -849,9 +881,14 @@ std::string StillnessReport::summary() const
         o << "\n";
     }
     if (pathChecked) {
-        o << "STILLNESS path walk-vs-teleport | picture max codes / pixels >= 1:";
-        for (size_t k = 0; k < names.size() && k < pathMaxCodes.size(); ++k)
-            o << " " << names[k] << "=" << pathMaxCodes[k] << "/" << pathPixelsDiffering[k];
+        o << "STILLNESS path walk-vs-teleport (at equal placements) | picture mean/p99/max codes, pixels >= 1:";
+        for (size_t k = 0; k < names.size() && k < pathMaxCodes.size(); ++k) {
+            char b[96];
+            std::snprintf(b, sizeof(b), " %s=%.3f/%u/%u,%u", names[k].c_str(), pathMeanCodes[k], pathP99Codes[k],
+                          pathMaxCodes[k], pathPixelsDiffering[k]);
+            o << b;
+        }
+        o << " | field origin equal " << pathFieldEqual;
         o << " | cascade direct/total/placement equal:";
         for (size_t c = 0; c < pathDirectEqual.size(); ++c)
             o << " c" << c << "=" << pathDirectEqual[c] << "/" << pathLightEqual[c] << "/" << pathCentreEqual[c];

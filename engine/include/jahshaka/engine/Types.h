@@ -3614,6 +3614,18 @@ struct GatherTuning {
 /// PHOTON-GATHER-1c; a full-range step would need 53). `giAtRest` waits for it.
 constexpr float kGatherSettleCodes = 5.0f;
 
+/// A GI PLACEMENT PIN (PHOTON-2: the stillness door's path check judges walk vs teleport at EQUAL PLACEMENTS — the
+/// spec's rev-4 correction 3: a cascade's placement may depend on the path, its values may not). While `on`, every
+/// re-centre of cascade i takes its placement from `cascadeBuiltCam[i]` (a CascadeStatus::builtCam recorded
+/// elsewhere) instead of the eye, and a re-placement of the irradiance field (a jump of the whole grid) puts its window
+/// at `fieldOrigin` (GiStatus::ifdMin recorded) when `field` is set. A MEASURING DOOR, never a picture path.
+struct GiPlacementPin {
+    bool on = false;
+    std::vector<Vec3> cascadeBuiltCam;
+    bool field = false;
+    Vec3 fieldOrigin;
+};
+
 /// An offscreen view's declared contract (View::setOffscreenContract).
 enum class OffscreenContract { Undeclared, StillPicture, Live };
 
@@ -4427,6 +4439,9 @@ struct GiStatus {
         /// The world-space centre it is currently built at (quantised to its
         /// own lattice, so it is NOT the camera position).
         Vec3  centre;
+        /// The camera position that placement was TAKEN from (the cascade's last re-centre: its lattice cell and the
+        /// hysteresis of its next step both read it) — what a placement pin restores (GiPlacementPin, PHOTON-2).
+        Vec3  builtCam;
         /// How many times this cascade has been (re)voxelised since the arm was
         /// built. At rest it does not move: a still camera scrolls nothing.
         unsigned long long rebuilds = 0;

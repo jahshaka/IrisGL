@@ -33,8 +33,12 @@
 //
 // PATH-INDEPENDENCE (`spec.path`): after the first window the door teleports the camera far away (beyond every cascade's
 // box) and back to the same final pose, then measures a second window — the pose reached by a WALK (the script) and by
-// a TELEPORT. The two windows' last pictures (max |diff| in codes) and each cascade's light bytes (the DIRECT digest and
-// the total, GiVoxelStats) and placements are compared.
+// a TELEPORT. AT EQUAL PLACEMENTS (the spec's rev-4 correction 3: a cascade's placement may depend on the path — the
+// lattice and its hysteresis are an extent rule — its values may not): the return re-places every cascade and the
+// irradiance field's window where the walk left them (Scene::setGiPlacementPin with the walk's recorded
+// CascadeStatus::builtCam and GiStatus::ifdMin). The two windows' last pictures (per class: max, mean and the 99th
+// percentile of |diff| in codes) and each cascade's light bytes (the DIRECT digest and the total, GiVoxelStats), its
+// placement and the field's origin are compared.
 //
 // THE MOVE SCRIPT (one word or one line per segment; segments separated by '/', ';' or a newline):
 //     teleport:x,y,z,tx,ty,tz      one frame at that pose (eye x,y,z looking at tx,ty,tz, metres)
@@ -152,6 +156,8 @@ struct StillnessWindow {
     Image                    lastPicture;
     std::vector<std::string> directDigest, lightDigest;
     std::vector<Vec3>        cascadeCentre;
+    std::vector<Vec3>        cascadeBuiltCam;   ///< the placements' cameras (the pin the teleport window takes)
+    Vec3                     fieldOrigin;       ///< the irradiance field's window (GiStatus::ifdMin)
 };
 
 /// The run's report.
@@ -164,6 +170,9 @@ struct StillnessReport {
     bool                  pathChecked = false;
     std::vector<unsigned> pathMaxCodes;
     std::vector<unsigned> pathPixelsDiffering;
+    std::vector<double>   pathMeanCodes;        ///< per class ([0] = all): the mean |diff| over the class's pixels
+    std::vector<unsigned> pathP99Codes;         ///< ...and its 99th percentile
+    int                   pathFieldEqual = -1;  ///< the field's origin equal under the two paths (1), not (0), none (-1)
     std::vector<int>      pathDirectEqual, pathLightEqual, pathCentreEqual;   ///< per cascade: 1 equal, 0 not, -1 unread
     /// THE COST, from the same records: per monitor row whose GPU time was measured (the ray tier's `rq.*`, the
     /// gather's `gather.*`, the cache rows), the mean GPU milliseconds over the frames it ran and how many — the
