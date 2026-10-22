@@ -1283,15 +1283,24 @@ void main()
 	// is seeded at the warm-up, DRAG-1); the temporal pass adds this frame's and shortens it by its confidence.
 	const float seed = max( prev.w, warmHeld * kWarmupFrames );
 	// WHICH HISTORY the temporal pass may use: the surface's only, where it is a moving thing's — the reflector
-	// moved, the hit moved, or the history came through the moving hit's reflected image (rq_reflect_temporal's flag).
-	const float sampleW = clamp( blendFloor, 1e-3, 1.0 ) + ( ( ownMoving || hitMoving || virtualHeld ) ? 2.0 : 0.0 );
+	// moved, the hit moved, or the history came through the moving hit's reflected image (rq_reflect_temporal's flag,
+	// + 2). A WARM RESTART (+ 4, PHOTON-2 fix F3): the mean restarted on motion in a warm view, so the temporal pass
+	// seeds this sample's count at the warm-up — the record's history is stored with ITS count (0), never the seed,
+	// so a record the decode leaves unshaded is a texel with no answer (skipped), never a black one at count 8.
+	const bool warmRestart = prev.w <= 0.0 && warmHeld > 0.5;
+	const float sampleW = clamp( blendFloor, 1e-3, 1.0 ) + ( ( ownMoving || hitMoving || virtualHeld ) ? 2.0 : 0.0 ) +
+						  ( warmRestart ? 4.0 : 0.0 );
 	if( record )
 	{
-		// THE RECORD: this texel's history is CARRIED with its seeded count and this
-		// frame's distances, exactly as below; the write-back (rq_hit_composite) writes
-		// the decoded radiance as this frame's SAMPLE with the record's `sampleW`, and the
-		// temporal pass blends it like any other — the radiance arriving one pass later.
-		imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, seed ) );
+		// THE RECORD: this texel's history is CARRIED with ITS OWN count (not the seed: a
+		// warm restart's seed rides `sampleW`, PHOTON-2 fix F3) and this frame's distances;
+		// the write-back (rq_hit_composite) writes the decoded radiance as this frame's
+		// SAMPLE with the record's `sampleW`, and the temporal pass blends it like any
+		// other — the radiance arriving one pass later. A record the decode leaves
+		// unshaded then finds count 0 here and the write-back withholds the distance:
+		// the texel has no answer this frame (the filter skips it) — never (0, 0, 0, 8)
+		// composited black, which the seed stored here made of every warm restart.
+		imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, max( prev.w, 0.0 ) ) );
 		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );   // the write-back fills it
 		const vec3 hitPos = world + worldN * bias + L * hitT;
 		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, false );
