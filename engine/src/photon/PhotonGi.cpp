@@ -803,7 +803,6 @@ void PhotonComponent::oweChainSettle(size_t top) {
     mGiSettleCascades  = n;
     mGiSettleTop       = top;
     mGiSettleStepsOwed = kAtRestSweeps * int(top + 1u);
-    mGiSettlePayableFrames = 0;          // a restarted debt restarts its timing
     noteSettleInputs();
 }
 
@@ -5996,13 +5995,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
     // rebuild's own injection read the cascades outside it as they stand, so
     // the cascades inside it are what read a light that has since changed. A
     // rebuild of cascade 0 therefore owes nothing.
-    // A rebuild that owes nothing new (cascade 0's) still RESTARTS the timing
-    // of a debt already owed, exactly as the whole sweep restarted on every
-    // rebuild (the payment's note below).
-    if (rebuilt && mVctCascades.size() > 1u) {
-        if (staleTop >= 0) oweChainSettle(size_t(staleTop));
-        else               mGiSettlePayableFrames = 0;
-    }
+    if (rebuilt && mVctCascades.size() > 1u && staleTop >= 0) oweChainSettle(size_t(staleTop));
 
     // ---- 2a'. THE BOUNCE SERIES' MEASUREMENTS (PHOTON-5 stage 5) -------------
     // Harvested at the writer point, before the tick, so a cascade whose series asks for more
@@ -6023,19 +6016,13 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         bool pending = false;
         for (const VctCascade &c : mVctCascades)
             if (c.pending) { pending = true; break; }
-        // THE SETTLE KEEPS THE WHOLE SWEEP'S TIMING (PHOTON-GATHER-1b item 6).
-        // A debt restarts whenever something owes it again (every rebuild), so
-        // the whole-chain sweep this replaced could only FINISH after the chain's
-        // size in payable frames with no rebuild between — never inside a fast
-        // walk, where a cascade re-voxelises every few frames. A partial debt of
-        // top+1 steps paid on the first payable frames would finish between two
-        // rebuilds instead, and every finished settle re-integrates the
-        // irradiance field (its running mean restarted): measured, 22 field
-        // restarts in gi.field_follows' 200-frame walk against the base's 0.
-        // So the steps are paid on the LAST top+1 of those frames: the settle
-        // finishes exactly when the whole sweep would have — same timing, fewer
-        // injections.
-        const int n = int(mVctCascades.size());
+        // THE SETTLE IS PAID AT ONCE (PHOTON-2 stage 2b): one step a frame from the first payable frame, so
+        // a walk's last commit is settled within the chain's size in frames of the stop, not after it. (It was
+        // paid on the LAST top+1 of the frames the whole sweep would have taken — PHOTON-GATHER-1b item 6 —
+        // because every finished settle re-integrated the field with keep 0: 22 one-sample field restarts in
+        // gi.field_follows' 200-frame walk. The field keeps on a change now (stage 2a, kIfdKeepOnChange), so a
+        // finished settle's re-integration is a blend, and the reason is gone. THE PRICE, measured: each step
+        // is one cascade's injection inside the walk — the walk's frame cost, reported.)
         if (!pending) {
             // A LIGHT THAT MOVED WHILE THE SETTLE WAS RUNNING RESTARTS IT, and this
             // is not caution: an injection reads the lights' DERIVED poses at the
@@ -6060,9 +6047,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             // payment — one idle frame more. Restarting before the count makes a
             // whole-chain restart pay on the very frame it is seen.
             if (mGiSettleSerial != mScene.lightWriteSerial()) oweChainSettle();   // a light: the whole chain
-            ++mGiSettlePayableFrames;
-            if (mGiSettlePayableFrames >= kAtRestSweeps * n - mGiSettleStepsOwed + 1)
-                payChainSettleStep();            // one injection, this frame
+            payChainSettleStep();                // one injection, this frame
         }
     }
     // THE END OF A DRAG GESTURE'S OWN DEBT (MOVER-1), paid last and only once
