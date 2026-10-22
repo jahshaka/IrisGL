@@ -1685,7 +1685,11 @@ bool OgreEngine::captureSnapshot(EngineSnapshot &out, const std::string &label,
     out = EngineSnapshot();
     out.label = label;
     out.atMs = monitor::nowMs();
-    out.frame = mShadowFrame;   // the last frame that closed before the request ran (MonitorRecord::frame's numbering)
+    // THE LAST FRAME THAT CLOSED before the request ran, in MonitorRecord::frame's numbering: records are numbered by
+    // the frame their renderOneFrame publishes (mPublishedFrames + 1 at the open, OgreEngine.cpp), so a capture's start
+    // and end snapshots bracket its records by frame (PHOTON-7 stage 0's read R6: the shadow cache's frame counter is
+    // 0 on a headless engine and drifts wherever the cache is skipped - G3's sibling).
+    out.frame = mPublishedFrames;
     if (!mRoot) return false;
     JAH_TRY {
         // THE SCENE THE SNAPSHOT DESCRIBES: the caller's, or the first enabled
