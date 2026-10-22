@@ -140,8 +140,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 hitSun2;
 	vec4 motion;
 	/// ...the trace's alpha, media, metal and hit-surface blocks (unread here), then THE REST block (PHOTON-2 round 2):
-	/// x = 1 = THE GI FREEZE (the arm "gi.freeze", M1's measuring arm: every texel with a history keeps it - no new
-	/// sample enters, the motion's own resampling measured alone).
+	/// x = 1 = THE GI FREEZE (the arm "gi.freeze", M1's measuring arm: every texel with a moving history keeps it as
+	/// carried - no new sample, no clamp; a fixed estimator takes its ray - the motion's own resampling measured alone).
 	vec4 alpha;
 	vec4 fog[8];
 	vec4 metal;
@@ -434,6 +434,21 @@ void main()
 	const bool warmView = p.stereo.y >= kWarmupFrames;
 	// THE MEMORY'S LENGTH: the floor's (thirty-two frames).
 	const float maxN = 1.0 / max( p.knobs2.w, 1e-3 );
+	// THE GI FREEZE (M1's measuring arm, rest.x; PHOTON-2 round 4, the preflight's P2-1 sibling): a texel with a moving
+	// history KEEPS IT AS CARRIED - no sample enters and no clamp moves it (the box is built from THIS frame's raw
+	// samples, so a clamped "frozen" history followed the live samples and M1's glossy live-minus-frozen read low); its
+	// count stays. The fixed estimator (blendFloor 1: a mirror's centre ray IS its answer, exact on its first frame, and
+	// the old radiance is wrong at the new pose however well it is reprojected - rq_reflect.comp's floor note) and a
+	// texel with no history take this frame's ray as they do live: with the caches frozen that is the motion's own
+	// resampling, which is what the frozen walk measures.
+	if( p.rest.x > 0.5 && seed > 0.0 && blendFloor < 1.0 && finite3( carried.xyz ) )
+	{
+		const vec4 kept = vec4( clamp( carried.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), min( seed, 4096.0 ) );
+		imageStore( historyCur, ivec3( tc, gEye ), kept );
+		if( resumed )
+			imageStore( historyPrev, ivec3( tc, gEye ), kept );
+		return;
+	}
 	if( seed <= 0.0 || blendFloor >= 1.0 || !finite3( carried.xyz ) )
 	{
 		// A WARM RESTART is seeded at the warm-up (DRAG-1's rule: the filter shows the ray at once), whichever path
@@ -529,8 +544,7 @@ void main()
 		}
 	}
 	const float frames = min( seed * confidence + 1.0, maxN );
-	// THE GI FREEZE (M1's measuring arm, rest.x): the history as it stands - no new sample enters.
-	const float blend = p.rest.x > 0.5 ? 0.0 : max( 1.0 / frames, blendFloor );
+	const float blend = max( 1.0 / frames, blendFloor );
 	const vec3 mean = mix( history, sample1, blend );
 	// The count says how much of an integral the answer holds (the filter's warm-up and fresh widening read it): a
 	// warm view's shortened memory is stored no younger than the warm seed.
