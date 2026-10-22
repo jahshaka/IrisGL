@@ -1067,7 +1067,9 @@ void main()
 	// (A MOVING REFLECTOR over a still world keeps its SURFACE's history: the
 	// virtual point is a flat mirror's construction, and on a curved one it names
 	// a texel whose normal — and so whose reflected direction — is another. What
-	// the reflector's step does to its reflection is the "moved" rule's, below.)
+	// the reflector's step does to its reflection is the temporal pass' to answer
+	// (rq_reflect_temporal.comp: the surface history alone, clamped to this frame's
+	// neighbourhood — sampleW's flag below).)
 	if( hitMoving )
 	{
 		// AT THE MEAN'S DISTANCE, NOT THIS SAMPLE'S: one GGX sample's length and
@@ -1250,10 +1252,12 @@ void main()
 	// the noise of one ray on a STILL surface; a surface that moves sees the world from
 	// a new place every frame, and what its lobe integrates changes with it — after the
 	// sky pass brightened the floor the sphere reflects, its moving reflection trailed
-	// the settled one by 4.7 codes at the first checkpoint. The slide rule below (the
-	// step against the lobe's width, at the MEAN's ray length) never fired there: a
-	// glossy lobe's mean length is dominated by its far rays (sky, the far floor) while
-	// its near tail moves, so the parallax it measures is the far content's. Tried and
+	// the settled one by 4.7 codes at the first checkpoint. The slide rule that stood
+	// beside the parallax drop then (the step against the lobe's width, at the MEAN's
+	// ray length; both deleted by PHOTON-2 1b for the temporal pass' clamp) never fired
+	// there: a glossy lobe's mean length is dominated by its far rays (sky, the far
+	// floor) while its near tail moves, so the parallax it measures is the far
+	// content's. Tried and
 	// refused, measured: a variance-driven floor (the mean's own second moment: a glossy
 	// lobe's per-ray sigma is 20-30 % of its mean, so no arrival weight above the floor
 	// follows from it) and a fast/slow history clamp (an eight-frame luminance mean,

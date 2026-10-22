@@ -170,6 +170,14 @@ struct StillnessRun::Impl {
 
     // ---- what the run switched, restored at the end -----------------------------------------------------------
     bool monitorOurs = false;
+    /// THE RECORDS COME THROUGH A TEE (PHOTON-2 F7; Engine::openMonitorTee): never the host's pop, which Studio's
+    /// frame monitor owns while it records (framemonitor.cpp) — the door reads its own copy of every record.
+    unsigned tee = 0u;
+    /// A HOST'S CAPTURE STAYS ON (the monitor was on before the run: not ours to stop), so nothing flushes the last
+    /// frames' records: the run renders TAIL frames at the final pose, unmeasured, until every window frame's record
+    /// has come back (at most kTailFrames — the monitor's holding queue publishes within its kMaxHeldFrames).
+    static constexpr unsigned kTailFrames = 24u;
+    unsigned tailFrames = 0u;
     double gatherArmWas = 0.0, reflectArmWas = 0.0;
     bool gatherArmOn = false, reflectArmOn = false;   ///< the run has switched it on (and not off since)
     bool pinned = false;                              ///< the path's placement pin is on (released at the end)
@@ -230,10 +238,21 @@ struct StillnessRun::Impl {
         setArm("gather.historyReadback", gatherArmWas);
         setArm("reflect.historyReadback", reflectArmWas);
         if (pinned) scene.setGiPlacementPin(GiPlacementPin());   // released (a message: the host's next frame)
-        if (monitorOurs) {
-            setMonitor(MonitorLevel::Off);   // flushes everything waiting into the queue
-            drainRecords();
+        if (monitorOurs) setMonitor(MonitorLevel::Off);   // flushes everything waiting into the queue (and the tee)
+        drainRecords();
+        if (tee) {
+            engine.closeMonitorTee(tee);
+            tee = 0u;
         }
+    }
+
+    /// A window frame whose monitor record has not come back yet.
+    bool recordsMissing() const
+    {
+        for (const StillnessWindow &w : report.windows)
+            for (const StillnessFrame &f : w.frames)
+                if (f.engineFrame && !rowsByFrame.count(f.engineFrame)) return true;
+        return false;
     }
 
     unsigned classes() const { return unsigned(report.classNames.size()); }
@@ -275,7 +294,7 @@ struct StillnessRun::Impl {
     void drainRecords()
     {
         std::vector<MonitorRecord> got;
-        engine.popMonitorRecords(got);
+        if (tee) engine.popMonitorTee(tee, got);
         for (MonitorRecord &r : got) {
             std::map<std::string, double> frameMs;
             for (const CacheWork &w : r.cacheWork)
@@ -591,8 +610,14 @@ bool StillnessRun::begin(const StillnessSpec &spec, std::string &err)
     }
     m.gatherArmWas = m.armNow("gather.historyReadback");
     m.reflectArmWas = m.armNow("reflect.historyReadback");
-    m.setMonitor(MonitorLevel::Review);
-    m.monitorOurs = true;
+    // THE TEE BEFORE THE MONITOR (no record of the run is missed); the monitor switched on only when it is off — a
+    // host's running capture is left exactly as it was (and its records in the host's own queue).
+    m.tee = m.engine.openMonitorTee();
+    if (!m.tee) { err = "stillness: the engine opened no monitor tee"; return false; }
+    if (m.engine.published().monitor.level == MonitorLevel::Off) {
+        m.setMonitor(MonitorLevel::Review);
+        m.monitorOurs = true;
+    }
     m.begun = true;
     return true;
 }
@@ -600,7 +625,14 @@ bool StillnessRun::begin(const StillnessSpec &spec, std::string &err)
 bool StillnessRun::nextPose(Vec3 &eye, Vec3 &target)
 {
     Impl &m = *d;
-    if (!m.begun || m.next >= m.plan.size()) return false;
+    if (!m.begun || m.finished) return false;
+    if (m.next >= m.plan.size()) {
+        // THE TAIL (a host's capture on: see kTailFrames): the final pose again, unmeasured, while a record is owed.
+        if (m.monitorOurs || m.plan.empty() || m.tailFrames >= Impl::kTailFrames || !m.recordsMissing()) return false;
+        eye = m.plan.back().eye;
+        target = m.plan.back().target;
+        return true;
+    }
     const Impl::Planned &p = m.plan[m.next];
     eye = p.eye;
     target = p.target;
@@ -630,7 +662,13 @@ bool StillnessRun::nextPose(Vec3 &eye, Vec3 &target)
 bool StillnessRun::frameDone(std::string &err)
 {
     Impl &m = *d;
-    if (!m.begun || m.next >= m.plan.size()) { err = "stillness: no frame was planned"; return false; }
+    if (!m.begun) { err = "stillness: no frame was planned"; return false; }
+    if (m.next >= m.plan.size()) {
+        if (m.monitorOurs || m.tailFrames >= Impl::kTailFrames) { err = "stillness: no frame was planned"; return false; }
+        ++m.tailFrames;   // a tail frame: its records only
+        m.drainRecords();
+        return true;
+    }
     const Impl::Planned p = m.plan[m.next++];
     const unsigned long long engineFrame = m.engine.published().frame;
     m.drainRecords();
@@ -658,7 +696,9 @@ bool StillnessRun::frameDone(std::string &err)
             m.picH = pic.height;
             m.buildClassAt(m.picW, m.picH);
         }
-        if (m.trailPrev.width == pic.width && m.trailPrev.height == pic.height && p.index < m.spec.moveTrail) {
+        // NOT THE WINDOW'S FIRST TRAIL FRAME (p.index == the trail's length: the read's finding 7 — a later window's
+        // first trail frame diffed against the PREVIOUS window's last picture, the bogus row at its trail's start).
+        if (m.trailPrev.width == pic.width && m.trailPrev.height == pic.height && p.index < w.trail.size()) {
             const unsigned n = m.classes();
             std::vector<double> sum(n + 1, 0.0);
             const unsigned char *a = pic.rgba.data(), *b = m.trailPrev.rgba.data(), *ca = m.classAt.data();

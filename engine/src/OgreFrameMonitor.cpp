@@ -119,11 +119,47 @@ void resetEpoch() { gEpoch = std::chrono::steady_clock::now(); }
 
 bool HandBack::pushRecord(MonitorRecord &&r) {
     std::lock_guard<std::mutex> l(mLock);
+    // THE TEES FIRST (a copy each; the host's queue takes the record itself), each bounded like the host's.
+    for (Tee &t : mTees) {
+        if (t.records.size() >= size_t(kRingCapacity)) t.records.pop_front();
+        t.records.push_back(r);
+    }
     // FULL: the OLDEST goes (the ring's policy — a host that stops popping keeps the most recent window), counted.
     const bool dropped = mRecords.size() >= size_t(kRingCapacity);
     if (dropped) mRecords.pop_front();
     mRecords.push_back(std::move(r));
     return dropped;
+}
+
+unsigned HandBack::openTee() {
+    std::lock_guard<std::mutex> l(mLock);
+    Tee t;
+    t.id = mNextTee++;
+    if (!mNextTee) mNextTee = 1u;   // 0 is never an id
+    mTees.push_back(std::move(t));
+    return mTees.back().id;
+}
+
+unsigned HandBack::popTee(unsigned id, std::vector<MonitorRecord> &out) {
+    std::deque<MonitorRecord> taken;
+    {
+        std::lock_guard<std::mutex> l(mLock);
+        for (Tee &t : mTees)
+            if (t.id == id) { taken.swap(t.records); break; }
+    }
+    for (MonitorRecord &r : taken) out.push_back(std::move(r));
+    return unsigned(taken.size());
+}
+
+void HandBack::closeTee(unsigned id) {
+    std::deque<MonitorRecord> gone;   // freed outside the lock
+    std::lock_guard<std::mutex> l(mLock);
+    for (size_t i = 0; i < mTees.size(); ++i)
+        if (mTees[i].id == id) {
+            gone.swap(mTees[i].records);
+            mTees.erase(mTees.begin() + std::ptrdiff_t(i));
+            break;
+        }
 }
 
 bool HandBack::pushEvent(MonitorEvent &&e) {
@@ -1416,6 +1452,12 @@ MonitorStatus OgreEngine::monitorStatus() const {
 // THE MONITOR'S DOOR (FRAME-MONITOR-DOOR-1): a POP of the hand-back, never a request and never counted (a door, like
 // published()): it touches only the queue, under its lock, and returns what is there now — 0 when it is empty.
 unsigned OgreEngine::popMonitorRecords(std::vector<MonitorRecord> &out) { return mMonitorOut.popRecords(out); }
+
+unsigned OgreEngine::openMonitorTee() { return mMonitorOut.openTee(); }
+
+unsigned OgreEngine::popMonitorTee(unsigned tee, std::vector<MonitorRecord> &out) { return mMonitorOut.popTee(tee, out); }
+
+void OgreEngine::closeMonitorTee(unsigned tee) { mMonitorOut.closeTee(tee); }
 
 unsigned OgreEngine::popMonitorEvents(std::vector<MonitorEvent> &out) { return mMonitorOut.popEvents(out); }
 

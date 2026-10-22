@@ -2890,6 +2890,15 @@ public:
     ///    the natural host order — stop the capture, then pop — lossless. The
     ///    pop after that returns 0; the storage goes with the pop.
     virtual unsigned popMonitorRecords(std::vector<MonitorRecord> &out) = 0;
+    /// THE MONITOR'S TEE (PHOTON-2 F7): a SECOND READER of the finished records that never competes with the host's
+    /// pop. `openMonitorTee` returns a tee id (never 0); from then every record the engine hands back is ALSO copied
+    /// into the tee's own queue (bounded like the host's: a tee that is not popped loses its oldest), and
+    /// `popMonitorTee` pops that queue alone — the host's queue, and so Studio's frame-monitor recording, is
+    /// untouched. A measuring instrument (the stillness door, Stillness.h) reads its frames through a tee while the
+    /// host records. Any thread, never waits on a frame (the host queue's lock); `closeMonitorTee` drops the queue.
+    virtual unsigned openMonitorTee() = 0;
+    virtual unsigned popMonitorTee(unsigned tee, std::vector<MonitorRecord> &out) = 0;
+    virtual void closeMonitorTee(unsigned tee) = 0;
     /// The same for discrete events (GI rebuilds, atlas changes, compiles,
     /// texture loads, VRAM flushes, device-lost, and the host's own); the
     /// queue holds kEventCapacity and a full one drops the NEW event, counted

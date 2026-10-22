@@ -2114,12 +2114,23 @@ public:
     unsigned popEvents(std::vector<MonitorEvent> &out);
     unsigned records() const { std::lock_guard<std::mutex> l(mLock); return unsigned(mRecords.size()); }
     unsigned events() const { std::lock_guard<std::mutex> l(mLock); return unsigned(mEvents.size()); }
-    /// A capture starts: what is queued is the previous capture's.
+    /// A capture starts: what is queued is the previous capture's. The tees keep theirs (a tee's reader decides).
     void clear();
+    /// THE TEES (Engine::openMonitorTee, PHOTON-2 F7): each a reader's own copy of every record pushed while it is
+    /// open, bounded at kRingCapacity (the oldest goes).
+    unsigned openTee();
+    unsigned popTee(unsigned id, std::vector<MonitorRecord> &out);
+    void closeTee(unsigned id);
 private:
     mutable std::mutex        mLock;
     std::deque<MonitorRecord> mRecords;
     std::deque<MonitorEvent>  mEvents;
+    struct Tee {
+        unsigned                  id = 0u;
+        std::deque<MonitorRecord> records;
+    };
+    std::vector<Tee> mTees;
+    unsigned         mNextTee = 1u;
 };
 
 /// THE MONITOR ITSELF: the frame being built, the holding queue (frames waiting for their GPU samples) and the pass
@@ -8715,6 +8726,9 @@ public:
     const ArmRegistry &armRegistry() const { return mArms; }
     MonitorStatus monitorStatus() const;
     unsigned popMonitorRecords(std::vector<MonitorRecord> &out) override;
+    unsigned openMonitorTee() override;
+    unsigned popMonitorTee(unsigned tee, std::vector<MonitorRecord> &out) override;
+    void closeMonitorTee(unsigned tee) override;
     unsigned popMonitorEvents(std::vector<MonitorEvent> &out) override;
     void noteMonitorEvent(const MonitorEvent &event) override;
     void noteHostStage(const std::string &name, float ms) override;
