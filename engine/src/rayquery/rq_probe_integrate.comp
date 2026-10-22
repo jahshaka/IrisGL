@@ -593,7 +593,8 @@ void main()
 	const float floorBlend = clamp( p.knobs5.y, 1.0 / float( kHistoryCountMax ), 1.0 );
 	const float blend = prevCount > 0u ? max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend )
 									   : 1.0;
-	vec4 mean = mix( prev, vec4( answer.xyz * answer.w, answer.w ), blend );
+	const vec4 sample1 = vec4( answer.xyz * answer.w, answer.w );
+	vec4 mean = mix( prev, sample1, blend );
 	// ---- AT REST, THE REST MEAN (PHOTON-GATHER-1d) ------------------------------
 	// The history above is an EMA past its tenth frame, and an EMA never stops:
 	// its state is a function of EVERY frame it has seen, so two pictures of one
@@ -609,14 +610,20 @@ void main()
 	// costs the gather nothing. THE HISTORY IS WRITTEN WITH THE HANDED-OVER
 	// VALUE, so when the camera moves again the EMA continues from the rest mean
 	// and not from the older EMA state it would otherwise pop back to.
+	// ...AND THE EMA FEEDS ON THE REST MEAN, NOT THIS FRAME'S SAMPLE (PHOTON-2 stage 2's round, H4 (a)): the
+	// hand-over's per-frame change then FALLS as the rest mean converges (its step is 1/k of a sample's deviation),
+	// where an EMA still taking each raw sample at its floor kept the settling phase's per-frame noise and added the
+	// hand-over's own step on top - the change ROSE at the rest's start (photon-court: 0.12 -> 0.14 codes a frame,
+	// Bistro 0.19 -> 0.23). The hand-over's weight starts at 0 on the first rest frame ((k - 1) / (N - 1): that frame
+	// steps exactly as a settling one, Bistro's first rest frame jumped 0.18 -> 0.26 at k / N) and reaches 1 at k = N,
+	// where the answer is still the rest mean exactly.
 	const float restK = p.knobs6.x;
 	if( restK >= 1.0 )
 	{
-		const vec4 sample1 = vec4( answer.xyz * answer.w, answer.w );
 		const vec4 rest = restK < 1.5 ? sample1
 									  : mix( imageLoad( restMean, at ), sample1, 1.0 / restK );
 		imageStore( restMean, at, rest );
-		mean = mix( mean, rest, clamp( restK / max( p.knobs6.y, 1.0 ), 0.0, 1.0 ) );
+		mean = mix( mix( prev, rest, blend ), rest, clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 ) );
 	}
 	imageStore( historyCur, at,
 				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
