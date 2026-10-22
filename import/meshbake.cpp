@@ -273,7 +273,10 @@ namespace
 // its budget that cannot reduce its cluster count is carried at the SAME budget (only a budget failure, or a level
 // where every group carried, doubles); carried leaf groups no longer take a depth-0 estimate. Every bake re-bakes
 // (BAKEKEY-1).
-constexpr int kFormatVersion = 28;
+// v29 (2026-10-22, ATOM-2 stage 3): D5 THE WELD — positions of different islands within E / 2 snapped in the scratch
+// the simplifier reads (the data untouched); the weight arms (Nanite's scale / POSONLY, JAH_ATOM2_WEIGHTS for stage 3's
+// picture pairs); the config record carries the weld radius. Every bake re-bakes (BAKEKEY-1).
+constexpr int kFormatVersion = 29;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -2965,6 +2968,10 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards,
     model.stageMs = QVector<MeshBake::Model::StageMs>(int(meshes));
     model.bakeThreads = bakepool::width();
     std::vector<MeshBake::ClusterDagStats> dagStats(meshes);
+    // STAGE 3's WEIGHT ARMS (ATOM-2): the import bakes Nanite's scale unless JAH_ATOM2_WEIGHTS=posonly — the switch
+    // the owner's picture pairs are rendered with (each arm in its own data root); deleted when the lead picks the arm.
+    MeshBake::ClusterDagOptions dagOptions;
+    if (qEnvironmentVariable("JAH_ATOM2_WEIGHTS") == QStringLiteral("posonly")) dagOptions.weights = atomdag::WeightArm::PosOnly;
     const Clock::time_point start = Clock::now();
     // Tasks [0, meshes) are the chains (the longest work, handed out first), then
     // [meshes, 2 * meshes) the DAGs.
@@ -2986,7 +2993,7 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, int maxCards,
             } else {
                 cancelPoint(cancel);
                 const Clock::time_point t = Clock::now();
-                MeshBake::buildClusterDag(mesh, &dagStats[i]);
+                MeshBake::buildClusterDag(mesh, &dagStats[i], dagOptions);
                 ms.dag = msSince(t);
             }
         }

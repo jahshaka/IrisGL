@@ -16,6 +16,7 @@ For more information see the LICENSE file
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <functional>
 #include <unordered_map>
 
 namespace iris
@@ -66,7 +67,7 @@ Weights weightsOf(const GroupScratch &sc)
 
 }   // namespace
 
-GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris, bool attributes)
+GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris, WeightArm arm)
 {
     GroupScratch sc;
     std::unordered_map<unsigned, unsigned> localOf;
@@ -81,10 +82,8 @@ GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris
     sc.pos.resize(n * 3);
     for (size_t v = 0; v < n; ++v)
         for (int k = 0; k < 3; ++k) sc.pos[v * 3 + size_t(k)] = mesh.positions[size_t(sc.globalOf[v]) * size_t(mesh.posComps) + size_t(k)];
-    if (attributes) {
-        if (mesh.normals) { sc.nrmAt = int(sc.attrCount); sc.attrCount += 3; }
-        if (mesh.uvs) { sc.uvAt = int(sc.attrCount); sc.attrCount += 2; }
-    }
+    if (mesh.normals) { sc.nrmAt = int(sc.attrCount); sc.attrCount += 3; }
+    if (mesh.uvs) { sc.uvAt = int(sc.attrCount); sc.attrCount += 2; }
     sc.attr.resize(n * sc.attrCount);
     for (size_t v = 0; v < n && sc.attrCount; ++v) {
         float *dst = &sc.attr[v * sc.attrCount];
@@ -94,10 +93,14 @@ GroupScratch makeScratch(const MeshView &mesh, const std::vector<unsigned> &tris
     }
     sc.weights = weightsOf(sc);
     sc.weightOf.assign(sc.attrCount, 0.0f);
-    // EVERY WEIGHED ATTRIBUTE AT A POSITIVE WEIGHT (correction 3c): a zero weight is remapped out of the quadrics.
+    // EVERY WEIGHED ATTRIBUTE AT A POSITIVE WEIGHT (correction 3c): a zero weight is remapped out of the quadrics;
+    // POSONLY = every attribute at the floor.
     const float floorW = 1e-6f;
-    if (sc.nrmAt >= 0) for (int k = 0; k < 3; ++k) sc.weightOf[size_t(sc.nrmAt + k)] = std::max(sc.weights.normal, floorW);
-    if (sc.uvAt >= 0) for (int k = 0; k < 2; ++k) sc.weightOf[size_t(sc.uvAt + k)] = std::max(sc.weights.uv, floorW);
+    const bool nanite = arm == WeightArm::Nanite;
+    if (sc.nrmAt >= 0)
+        for (int k = 0; k < 3; ++k) sc.weightOf[size_t(sc.nrmAt + k)] = nanite ? std::max(sc.weights.normal, floorW) : floorW;
+    if (sc.uvAt >= 0)
+        for (int k = 0; k < 2; ++k) sc.weightOf[size_t(sc.uvAt + k)] = nanite ? std::max(sc.weights.uv, floorW) : floorW;
     return sc;
 }
 
@@ -135,6 +138,79 @@ Simplified simplifyGroup(const GroupScratch &sc, const std::vector<unsigned char
     out.tris.assign(dst.begin(), dst.begin() + std::ptrdiff_t(count));
     if (!std::isfinite(out.resultError) || out.resultError < 0.0f) out.resultError = 0.0f;
     return out;
+}
+
+size_t weldWithin(GroupScratch &sc, LocalSpace &space, const std::vector<unsigned char> &lock, float radius)
+{
+    const size_t n = sc.size();
+    if (!(radius > 0.0f) || !std::isfinite(radius) || n == 0) return 0;
+    // the group's positions: per weld id its first scratch vertex, in first-use order
+    std::unordered_map<unsigned, unsigned> slotOf;
+    slotOf.reserve(n);
+    std::vector<unsigned> posOf(n), first;
+    for (size_t v = 0; v < n; ++v) {
+        const auto it = slotOf.emplace(space.weld[v], unsigned(first.size())).first;
+        if (it->second == first.size()) first.push_back(unsigned(v));
+        posOf[v] = it->second;
+    }
+    const size_t np = first.size();
+    std::vector<unsigned char> held(np, 0u);
+    for (size_t v = 0; v < n; ++v) if (lock[v]) held[posOf[v]] = 1u;
+    const auto island = [&](unsigned p) { return space.comp[first[p]]; };
+    const auto at = [&](unsigned p) { return Vec3(sc.pos[size_t(first[p]) * 3], sc.pos[size_t(first[p]) * 3 + 1], sc.pos[size_t(first[p]) * 3 + 2]); };
+    // the anchors in a hash grid of cell = radius (the 27 cells around a position cover its radius)
+    struct Cell { long long x = 0, y = 0, z = 0; bool operator==(const Cell &o) const { return x == o.x && y == o.y && z == o.z; } };
+    struct CellHash { size_t operator()(const Cell &c) const { return size_t(c.x * 73856093LL) ^ size_t(c.y * 19349663LL) ^ size_t(c.z * 83492791LL); } };
+    const auto cellOf = [&](const Vec3 &q) {
+        const auto k = [&](float x) { return (long long)std::floor(std::clamp(double(x) / double(radius), -1e15, 1e15)); };
+        return Cell { k(q.x()), k(q.y()), k(q.z()) };
+    };
+    std::unordered_map<Cell, std::vector<unsigned>, CellHash> grid;
+    std::vector<std::vector<unsigned>> joined(np);   // per anchor: the islands snapped onto it
+    std::vector<int> target(np, -1);
+    // the islands a snap joins: union-find over island ids
+    std::unordered_map<unsigned, unsigned> parent;
+    const std::function<unsigned(unsigned)> root = [&](unsigned c) {
+        auto it = parent.find(c);
+        if (it == parent.end() || it->second == c) return c;
+        const unsigned r = root(it->second);
+        parent[c] = r;
+        return r;
+    };
+    size_t snapped = 0;
+    for (unsigned p = 0; p < np; ++p) {
+        const unsigned c = island(p);
+        if (held[p] || c >= space.islandCount) continue;
+        const Vec3 q = at(p);
+        const Cell k = cellOf(q);
+        int best = -1;
+        float bestD = radius;
+        for (long long dx = -1; dx <= 1; ++dx)
+            for (long long dy = -1; dy <= 1; ++dy)
+                for (long long dz = -1; dz <= 1; ++dz) {
+                    const auto it = grid.find(Cell { k.x + dx, k.y + dy, k.z + dz });
+                    if (it == grid.end()) continue;
+                    for (unsigned a : it->second) {
+                        if (island(a) == c) continue;
+                        if (std::find(joined[a].begin(), joined[a].end(), c) != joined[a].end()) continue;
+                        const float d = (at(a) - q).length();
+                        if (d < bestD || (d == bestD && (best < 0 || int(a) < best))) { bestD = d; best = int(a); }
+                    }
+                }
+        if (best < 0) { grid[k].push_back(p); continue; }
+        target[p] = best;
+        joined[size_t(best)].push_back(c);
+        const unsigned ra = root(c), rb = root(island(unsigned(best)));
+        if (ra != rb) parent[std::max(ra, rb)] = std::min(ra, rb);
+        ++snapped;
+    }
+    if (!snapped) return 0;
+    for (size_t v = 0; v < n; ++v) {
+        const int t = target[posOf[v]];
+        if (t >= 0) for (int k = 0; k < 3; ++k) sc.pos[v * 3 + size_t(k)] = sc.pos[size_t(first[size_t(t)]) * 3 + size_t(k)];
+        if (space.comp[v] < space.islandCount) space.comp[v] = root(space.comp[v]);
+    }
+    return snapped;
 }
 
 float positionEstimate(const GroupScratch &sc, const std::vector<unsigned char> &lock, size_t targetTris)

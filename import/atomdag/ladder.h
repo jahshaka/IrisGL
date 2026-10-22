@@ -28,6 +28,10 @@ For more information see the LICENSE file
 // recorded pass of its own. The group's E = the largest ask (floored). Every group, accepted or carried, is a GroupRecord
 // with its granted E, its measured step and its members (atom2.ladder_never_forced replays (a) and (b)).
 //
+// THE WELD (D5, simplify.h weldWithin): before the collapses, positions of DIFFERENT islands within E / 2 of each other
+// (the locked border excluded) are snapped in the scratch the simplifier reads — kit-bashed shells become one surface;
+// the mesh's data is untouched, so the gap is inside the measured step.
+//
 // THE ATTEMPTS: the group is simplified to half (126 x ceil(T / 256) triangles, Nanite's parent count) with E as the
 // simplifier's first guess, its pieces with no locked position pruned within E, and MEASURED (measure.h); a result
 // within the budget that is not at the target is tried again with the guess raised (8 E, then unbounded) — the smaller
@@ -60,8 +64,8 @@ struct GroupResult
     std::vector<unsigned> out;    ///< the accepted output, LOCAL ids of `space` (scratch ids)
     GroupScratch scratch;         ///< the group's scratch (globalOf maps a local id to the mesh)
     LocalSpace space;             ///< the group's local space
-    bool withinBudget = false;    ///< some attempt came within the budget (a carry is then for the CLUSTER COUNT)
     float budget = 0.0f;          ///< the granted E
+    size_t welded = 0;            ///< positions the weld snapped (D5)
     float step = 0.0f;            ///< the accepted (or the last) attempt's measured step
     float estimate = 0.0f;        ///< the simplifier's own result_error of the kept attempt
     float depth0Estimate = -1.0f; ///< the position quadric's estimate of a group of leaves (children stored 0)
@@ -78,7 +82,7 @@ struct GroupResult
 /// merge into fewer clusters).
 GroupResult reduceGroup(const MeshView &mesh, const std::vector<unsigned> &weld, const Islands &islands,
                         const std::vector<unsigned> &inTris, const std::vector<unsigned> &externalWelds, float ask,
-                        float floorLen, bool attributes, size_t targetTris);
+                        float floorLen, WeightArm arm, size_t targetTris);
 
 }   // namespace atomdag
 }   // namespace iris
