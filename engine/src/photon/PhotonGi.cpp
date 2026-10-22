@@ -4891,17 +4891,21 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
 
 // Re-centres one cascade's region on the cell lattice around `camPos` and
 // records the camera it was placed for. Does NOT voxelise.
+// THE CAMERA A CASCADE IS PLACED FOR: the eye, or under a placement pin (a measuring door, Types.h GiPlacementPin) the
+// pin's recorded camera - for EVERY placement decision the cascade takes (its step test and the jump guard, a scroll's
+// target, a rebuild's recentre), never the pin for one and the eye for another (PHOTON-7 stage 1, PREFLIGHT_1_2 W2: the
+// scroll aimed at the eye while its commit recentred at the pin - an assert in Debug, the store misplaced in Release).
+Ogre::Vector3 PhotonComponent::placementCam(size_t idx, const Ogre::Vector3 &eyePos) const {
+    if (mPlacementPin.on && idx < mVctCascades.size() && idx < mPlacementPin.cascadeBuiltCam.size()) {
+        const Vec3 &p = mPlacementPin.cascadeBuiltCam[idx];
+        return Ogre::Vector3(p.x, p.y, p.z);
+    }
+    return eyePos;
+}
+
 void PhotonComponent::recentreCascade(VctCascade &c, const Ogre::Vector3 &eyePos) {
     ++mGiPlacementSerial;
-    // THE PLACEMENT PIN (a measuring door, Types.h GiPlacementPin): the recorded camera, not the eye.
-    Ogre::Vector3 camPos = eyePos;
-    {
-        const size_t idx = size_t(&c - mVctCascades.data());
-        if (mPlacementPin.on && idx < mVctCascades.size() && idx < mPlacementPin.cascadeBuiltCam.size()) {
-            const Vec3 &p = mPlacementPin.cascadeBuiltCam[idx];
-            camPos = Ogre::Vector3(p.x, p.y, p.z);
-        }
-    }
+    const Ogre::Vector3 camPos = placementCam(size_t(&c - mVctCascades.data()), eyePos);
     const float cell = c.cell();
     c.latticeX = jahQuantAxis(camPos.x, cell);
     c.latticeY = jahQuantAxis(camPos.y, cell);
@@ -5382,9 +5386,10 @@ static const size_t kScrollChunksPerFrame = 8u;
 /// The triangles one record carries at most (a partition: PhotonVoxelizer::kIndicesPerPartition / 3).
 static const double kScrollRecordTriangles = 667.0;
 
-bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &camPos) {
+bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
     if (idx >= mVctCascades.size()) return false;
     VctCascade &c = mVctCascades[idx];
+    const Ogre::Vector3 camPos = placementCam(idx, eyePos);   // the target the commit's recentre will place it at
     const float cell = c.cell();
     const int res = int(c.resolution);
     if (cell <= 0.0f || res <= 0) return false;
@@ -5664,7 +5669,8 @@ void PhotonComponent::clearTornCascade(size_t idx) {
                  : std::string("its volumes could not be cleared (") + mError + "); it stands down"));
 }
 
-void PhotonComponent::holdCascade(VctCascade &c, const Ogre::Vector3 &camPos) {
+void PhotonComponent::holdCascade(VctCascade &c, const Ogre::Vector3 &eyePos) {
+    const Ogre::Vector3 camPos = placementCam(size_t(&c - mVctCascades.data()), eyePos);   // what the step test reads
     const float lattice = c.step() * (1.0f - kStepHysteresis);
     if (!(lattice > 0.0f)) return;
     c.held = true;
@@ -5719,7 +5725,8 @@ void PhotonComponent::releaseScrollTargets() {
     mScrollTargets.clear();   // each back to the pool (ScrollLease)
 }
 
-void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
+void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w) {
+    const Ogre::Vector3 &camPos = eyeCamPos;
     if (mVctCascades.size() < 1u || !mVctCascades[0].built) return;
     w.cascadeStage = true;
     // CASCADE 0'S FIELD FOLLOW, when owed, is paid first and spends the frame (recordCascades).
@@ -5746,6 +5753,8 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &camPos, FrameWork &w) {
         const float cell = c.cell();
         const float step = c.step();
         if (cell <= 0.0f || step <= 0.0f) continue;
+        // (the camera this cascade is placed for: the eye, or its pin - placementCam)
+        const Ogre::Vector3 camPos = placementCam(size_t(&c - mVctCascades.data()), eyeCamPos);
         // THE HYSTERETIC STEP TEST (kStepHysteresis, above): the planes are
         // `lattice` apart and the camera must be `band` past the one it left.
         const float lattice = step * (1.0f - kStepHysteresis);

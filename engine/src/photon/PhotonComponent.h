@@ -1250,6 +1250,9 @@ private:
     /// Re-centres one cascade's region on ITS cell lattice around `camPos` and
     /// records the camera it was placed for. Does not voxelise.
     void recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos);
+    /// The camera cascade `idx` is placed for: `eyePos`, or under a placement pin the pin's (every placement decision
+    /// reads it: the step test, the jump guard, a scroll's target and a rebuild's recentre).
+    Ogre::Vector3 placementCam(size_t idx, const Ogre::Vector3 &eyePos) const;
 public:
     /// THE PLACEMENT PIN (Engine.h Scene::setGiPlacementPin, a measuring door).
     /// The cascades' voxel digests (Types.h GiVoxelDigests), word-wise: Scene::requestGiVoxelDigests' render-thread half.
