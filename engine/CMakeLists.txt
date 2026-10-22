@@ -33,6 +33,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSockets.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFrameMonitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Stillness.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ReadbackDecode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVideoReadback.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVoxelReaderParity.cpp
@@ -736,6 +737,10 @@ endfunction()
 # and classifies every pixel of every frame of its window — integer work whose answer no optimisation level changes —
 # and at -O0 that alone is ~0.2 s a 1080p frame, the lab's whole budget.
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/Stillness.cpp
+    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>")
+# ...AND THE INSTRUMENTS' READBACK DECODES (PHOTON-2 round 2): at -O0 a 1080p history decode was a 15 ms hitch inside
+# the frame after a stop (ReadbackDecode.h).
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/ReadbackDecode.cpp
     PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>")
 add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
 add_dependencies(JahshakaEngine JahshakaEngineBuildId)

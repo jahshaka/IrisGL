@@ -240,6 +240,7 @@ struct StillnessRun::Impl {
     std::vector<MonitorRecord> records;
     std::map<std::string, std::pair<double, unsigned>> gpuSum;   ///< row -> (GPU ms summed, frames)
     std::map<unsigned long long, std::pair<float, float>> frameTimes;   ///< record frame -> (frame GPU ms, wall ms)
+    std::map<unsigned long long, std::string> slowStages;               ///< record frame -> its slowest stage
 
     Impl(Engine &e, Scene &s, View &v) : engine(e), scene(s), view(v) {}
 
@@ -340,6 +341,14 @@ struct StillnessRun::Impl {
             // the frame's BUSY GPU (its span less the gaps the GPU waited on a submission) and its wall time
             frameTimes[r.frame] = { r.frameGpuMs >= 0.0f && r.gpuIdleMs >= 0.0f ? r.frameGpuMs - r.gpuIdleMs : -1.0f,
                                     r.totalMs };
+            const FrameStage *slow = nullptr;
+            for (const FrameStage &st : r.stages)
+                if (!slow || st.ms > slow->ms) slow = &st;
+            if (slow) {
+                char b[160];
+                std::snprintf(b, sizeof(b), "%s:%.2f", slow->name.c_str(), slow->ms);
+                slowStages[r.frame] = b;
+            }
             auto &rows = rowsByFrame[r.frame];
             for (const CacheWork &w : r.cacheWork) {
                 const std::string &n = w.detail;
@@ -503,6 +512,7 @@ struct StillnessRun::Impl {
         w.lastGiRowFrame = -1;
         w.holdFrame = -1;
         for (StillnessFrame &f : w.trail) {
+            if (const auto ss = slowStages.find(f.engineFrame); ss != slowStages.end()) f.slowStage = ss->second;
             if (const auto t = frameTimes.find(f.engineFrame); t != frameTimes.end()) {
                 f.frameGpuMs = t->second.first;
                 f.frameMs = t->second.second;
@@ -518,6 +528,7 @@ struct StillnessRun::Impl {
         }
         for (size_t i = 0; i < w.frames.size(); ++i) {
             StillnessFrame &f = w.frames[i];
+            if (const auto ss = slowStages.find(f.engineFrame); ss != slowStages.end()) f.slowStage = ss->second;
             if (const auto t = frameTimes.find(f.engineFrame); t != frameTimes.end()) {
                 f.frameGpuMs = t->second.first;
                 f.frameMs = t->second.second;
@@ -967,7 +978,7 @@ std::string StillnessReport::tsv() const
         o << "\t" << n << "_px\t" << n << "_max\t" << n << "_mean\t" << n << "_changed\t" << n << "_refl_none\t" << n
           << "_refl_le9\t" << n << "_refl_le17\t" << n << "_refl_le33\t" << n << "_refl_gt33";
     o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\tframe_gpu_ms\tframe_ms"
-      << "\tclass_px\tclass_restart\tstep_px\n";
+      << "\tclass_px\tclass_restart\tstep_px\tslow_stage\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -982,9 +993,9 @@ std::string StillnessReport::tsv() const
             o << "\t" << f.restFrames << "\t" << f.sinceRestart << "\t" << f.settleFrames << "\t" << (f.held ? 1 : 0)
               << "\t" << f.rayLevelRefits << "\t" << (f.giRows.empty() ? "-" : f.giRows);
             char ms[64];
-            std::snprintf(ms, sizeof(ms), "\t%.3f\t%.3f\t%d\t%d\t%d\n", f.frameGpuMs, f.frameMs, f.classPixels,
+            std::snprintf(ms, sizeof(ms), "\t%.3f\t%.3f\t%d\t%d\t%d\t", f.frameGpuMs, f.frameMs, f.classPixels,
                           f.classRestarts, f.stepPixels);
-            o << ms;
+            o << ms << (f.slowStage.empty() ? "-" : f.slowStage) << "\n";
         }
     return o.str();
 }

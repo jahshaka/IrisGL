@@ -131,6 +131,9 @@ struct StillnessFrame {
     /// THE FRAME'S COST (PHOTON-2 stage 2's round, H4 (e)): the monitor record's BUSY frame GPU milliseconds (its span
     /// less the gaps the GPU waited on a submission) and the whole renderOneFrame's wall milliseconds (-1: unmeasured).
     float              frameGpuMs = -1.0f, frameMs = -1.0f;
+    /// THE FRAME'S SLOWEST CPU STAGE (PHOTON-2 round 2, the hitch law): the monitor record's longest stage, "name:ms"
+    /// ("-": no record) - where a wall-clock hitch spent its time.
+    std::string        slowStage;
     /// THE FOLIAGE CLASS'S RESTARTS (StillnessSpec::classRestarts; PHOTON-2 K5): over the pixels the gather wrote as
     /// foliage this frame (its history word's class bit - the cut-out class, written under the class-off arm too),
     /// how many, and how many of them restarted their history (count 1: refused or absent). -1 = no copy of this

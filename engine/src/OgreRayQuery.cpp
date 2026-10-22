@@ -52,6 +52,7 @@
 // (JAH_RAY_QUERY, set by CMake — macOS takes that path, because MoltenVK
 // exposes neither extension: SPECS/research/MOLTENVK_RAY_QUERY_2026-09-14.md).
 #include "AtomPass.h"
+#include "ReadbackDecode.h"
 #include "EnginePrivate.h"
 #include "SceneLightList.h"
 #include "photon/voxel/PhotonVoxelMaterial.h"
@@ -7064,22 +7065,7 @@ void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
         const uint16_t *src =
             reinterpret_cast<const uint16_t *>(static_cast<const char *>(rv.histReadback.mapped) + slot * slotBytes);
         const size_t pairW = size_t(p.w) * p.layers;
-        rv.histHost.assign(pairW * p.h, 0u);
-        // THE COUNT FROM THE HALF'S BITS: a half holds every whole number up to 2048 exactly (11 significant bits) and
-        // only even ones above it, so a count past 2048 reads to within one — the histogram's edges (9, 17, 33) are far
-        // below that. A value under one (a subnormal, zero, a sign) or not finite is no count; else the mantissa with
-        // its hidden bit, shifted.
-        for (unsigned k = 0; k < p.layers; ++k)
-            for (unsigned y = 0; y < p.h; ++y) {
-                const uint16_t *row = src + (size_t(k) * layerTexels + size_t(y) * p.w) * 4u + 3u;
-                unsigned short *dst = &rv.histHost[size_t(y) * pairW + size_t(k) * p.w];
-                for (unsigned x = 0; x < p.w; ++x, row += 4) {
-                    const unsigned h = *row, e = (h >> 10u) & 31u;
-                    dst[x] = (h & 0x8000u) || e < 15u || e == 31u
-                                 ? (unsigned short)0u
-                                 : (unsigned short)std::min(((1024u + (h & 1023u)) << (e - 15u)) >> 10u, 4096u);
-                }
-            }
+        detail::decodeReflectHistory(src, p.w, p.h, p.layers, rv.histHost);   // -O2 (ReadbackDecode.h)
         rv.histHostW = unsigned(pairW);
         rv.histHostH = p.h;
         rv.histHostFrame = p.traced;

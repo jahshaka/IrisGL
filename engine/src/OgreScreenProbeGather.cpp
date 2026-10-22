@@ -40,6 +40,7 @@
 // code in the tier, and it is what makes phases 2 and 3 (a filter, an SH
 // record, history pairs) edits to this file alone.
 #include "ScreenProbeGather.h"
+#include "ReadbackDecode.h"
 
 #ifdef JAH_RAY_QUERY
 
@@ -713,16 +714,7 @@ void ScreenProbeGather::readPending(View &v) {
                 const size_t layerTexels = size_t(v.w) * v.h;
                 const uint32_t *src = reinterpret_cast<const uint32_t *>(
                     static_cast<const char *>(v.histReadbackMapped) + size_t(i) * layerTexels * v.layers * 8u);
-                const size_t pairW = size_t(v.w) * v.layers;
-                v.histHost.assign(pairW * v.h, 0u);
-                v.histClassHost.assign(pairW * v.h, 0u);
-                for (unsigned k = 0; k < v.layers; ++k)
-                    for (unsigned y = 0; y < v.h; ++y)
-                        for (unsigned x = 0; x < v.w; ++x) {
-                            const uint32_t g = src[(size_t(k) * layerTexels + size_t(y) * v.w + x) * 2u + 1u];
-                            v.histHost[size_t(y) * pairW + size_t(k) * v.w + x] = (unsigned char)((g >> 22u) & 15u);
-                            v.histClassHost[size_t(y) * pairW + size_t(k) * v.w + x] = (unsigned char)((g >> 21u) & 1u);
-                        }
+                detail::decodeGatherHistory(src, v.w, v.h, v.layers, v.histHost, v.histClassHost);   // -O2 (ReadbackDecode.h)
                 v.histHostFrame = v.pending[i].gatherFrame;
                 v.pending[i].history = false;
             }
