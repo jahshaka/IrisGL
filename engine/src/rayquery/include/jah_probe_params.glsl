@@ -18,6 +18,10 @@ const int kMaxCascades = 4;
 /// probe traces at most 64 rays, one per thread. The C++ constant
 /// `kGatherOctResMax` and this must agree.
 const int kOctResMax = 8;
+/// THE ATLAS TEXEL'S DISTANCE (w) when the ray has NO SAMPLE this frame (PHOTON-2 stage 2's tail, 1.6 A2): its record
+/// was dropped by a full hit list. -1 is a MISS (the sky, a sample at infinity); this is no reading at all - the filter
+/// and the SH projection leave the texel out (rq_probe_filter.comp), so a drop never darkens a probe.
+const float kAtlasNoSample = -2.0;
 
 layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 {

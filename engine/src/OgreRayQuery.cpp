@@ -1436,6 +1436,10 @@ public:
     void forgetHits(const ReflectPassListener *key);
     /// The hit list's counters (read back several frames late) for a scene.
     void hitStatsInto(const OgreScene *scene, RayQueryStatus &st) const;
+    /// THE LIST'S DEMAND for a view's listener (OgreView::sizeHitList): the records its traces asked for in the newest
+    /// retired frame that traced (counter word 0, past the capacity) and how many such readings have arrived. False
+    /// when the key has no list.
+    bool hitDemand(const ReflectPassListener *key, unsigned long long &appended, unsigned long long &readings) const;
 
 private:
     struct HitView {
@@ -1464,6 +1468,7 @@ private:
         unsigned frame = 0;
         OgreScene *scene = nullptr;
         unsigned long long appended = 0ull, dropped = 0ull;
+        unsigned long long readings = 0ull;   ///< counter readings of traced frames so far (sizeHitList's cadence)
         /// THE REFLECTION'S REST COUNT (PHOTON-2 round 2, R1): the trace's tag for this frame (the rest's serial in
         /// the top 12 bits, its rest frame below; 0 = the trace counted nothing) and, read back, the newest retired
         /// frame's count of active resting texels (counter word 2) with its tag.
@@ -8676,8 +8681,9 @@ void OgreView::syncReflectListener() {
     // gather or sun-contact toggle where the prepass already runs is not a new
     // graph and rebuilds nothing.
     if (mChainRayReflect != chainDesc().rayReflect || mChainPrepass != chainDesc().prepass() ||
-        mChainHitDecode != chainDesc().hitDecode || mChainHitDecodeAll != chainDesc().hitDecodeAll)
+        mChainHitDecode != chainDesc().hitDecode)
         rebuildWorkspaceDef();
+    sizeHitList();
     // The same arming rule as the planar and globals listeners, and the same
     // reason it is re-evaluated every frame: the shape above can change, and a
     // view can gain or lose its scene.
@@ -8719,6 +8725,57 @@ void OgreView::syncReflectListener() {
     }
     mReflectListener->mView = this;
     mReflectListener->mRoot = mRoot;
+}
+
+// THE HIT LIST SIZED BY ITS DEMAND (PHOTON-2 stage 2's tail, 1.6 A2; kHitListWidth's law in EnginePrivate.h). Before
+// the workspace runs, so no pass of this frame has touched the list yet: the newest demand reading of this view's
+// traces (the counter word 0 of a retired frame that traced - it counts past the capacity) decides the rows; a change
+// re-makes the three list textures IN PLACE the way Ogre re-makes a window's resizable textures (OnStorage, the new
+// resolution, Resident, then CompositorNode::notifyRecreated for the passes that render into them) - never the graph,
+// so no other texture and no history moves. The ray tier re-reads the textures (and re-makes its buffer to the new
+// size) at its next prepare.
+void OgreView::sizeHitList() {
+    if (!mWorkspace || !mChainHitDecode || !mReflectListener || !mEngine || !mEngine->mRayTier) return;
+    unsigned long long demand = 0ull, readings = 0ull;
+    if (!mEngine->mRayTier->hitDemand(mReflectListener.get(), demand, readings)) return;
+    if (readings == mHitListReadingsSeen) return;   // no new reading: a still or held view decides nothing
+    mHitListReadingsSeen = readings;
+    const unsigned long long capacity = (unsigned long long)kHitListWidth * mHitListRows;
+    const auto rowsFor = [&](unsigned long long records) {
+        const unsigned long long want = (records * kHitListHeadroom + kHitListWidth - 1u) / kHitListWidth;
+        const unsigned long long maxRows = std::max<unsigned long long>(
+            mRoot->getRenderSystem()->getCapabilities()->getMaximumResolution2D(), 1u);
+        return unsigned(std::clamp<unsigned long long>(want, 1u, maxRows));
+    };
+    unsigned rows = mHitListRows;
+    if (double(demand) > kHitListGrowShare * double(capacity)) {
+        rows = rowsFor(demand);
+        mHitListLowReadings = 0u;
+    } else if (double(demand) < kHitListShrinkShare * double(capacity)) {
+        if (++mHitListLowReadings >= kHitListShrinkReadings) {
+            rows = rowsFor(demand);
+            mHitListLowReadings = 0u;
+        }
+    } else {
+        mHitListLowReadings = 0u;
+    }
+    if (rows == mHitListRows) return;
+    const Ogre::IdString names[] = { Ogre::IdString("jahHitIds"), Ogre::IdString("jahHitDest"),
+                                     Ogre::IdString("jahHitRadiance") };
+    for (Ogre::CompositorNode *node : mWorkspace->getNodeSequence()) {
+        Ogre::TextureGpu *tex[3] = {};
+        try {
+            for (int i = 0; i < 3; ++i) tex[i] = node->getDefinedTexture(names[i]);
+        } catch (Ogre::Exception &) { continue; }
+        if (!tex[0] || !tex[1] || !tex[2]) continue;
+        for (Ogre::TextureGpu *t : tex) {
+            t->_transitionTo(Ogre::GpuResidency::OnStorage, nullptr);
+            t->setResolution(kHitListWidth, rows, 1u);
+            t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+            node->notifyRecreated(t);
+        }
+    }
+    mHitListRows = rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -8823,6 +8880,18 @@ void RayQueryTier::readHitCounters(HitView &hv) {
         }
         pd.live = false;
     }
+    // (a frame that appended nothing - a held view, a still one whose traces all answered from the caches - says
+    // nothing about the list's need: it is not a reading, so a rest never shrinks the list the next walk needs)
+    if (any && hv.appended > 0ull) ++hv.readings;
+}
+
+bool RayQueryTier::hitDemand(const ReflectPassListener *key, unsigned long long &appended,
+                             unsigned long long &readings) const {
+    const auto it = mHits.find(key);
+    if (it == mHits.end()) return false;
+    appended = it->second.appended;
+    readings = it->second.readings;
+    return true;
 }
 
 bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view,
@@ -8852,7 +8921,8 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     // frame in flight; every reader re-reads `hv.buf` before it binds).
     {
         const size_t words = 4u + 4u * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
-        if (hv.buf && hv.buf->getNumElements() < words) {
+        // (a list that SHRANK gives its buffer back too: OgreView::sizeHitList re-makes the list either way)
+        if (hv.buf && hv.buf->getNumElements() != words) {
             vao->destroyUavBuffer(hv.buf);
             hv.buf = nullptr;
         }
@@ -8864,6 +8934,12 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
                     hv.readback, err))
         return false;
     hv.capacity = hv.ids->getWidth() * hv.ids->getHeight();
+    // THE OVERFLOW ARM (rq.hitListCap, a test door): the traces and the write-back hold at most that many records, so
+    // a fixture FORCES drops and measures that they are no sample, never black (PHOTON-2 stage 2's tail).
+    {
+        const double cap = armValue(ArmId::HitListCap);
+        if (cap >= 1.0) hv.capacity = std::min(hv.capacity, uint32_t(cap));
+    }
     hv.width = hv.ids->getWidth();
 
     // THE LAYOUTS through Ogre's solver, before the command buffer is taken (the
@@ -8974,7 +9050,7 @@ void RayQueryTier::beginHitDecode(const ReflectPassListener *key, OgreView *view
     if (!view || !pass) return;
     HitView &hv = mHits[key];
     // THE CAMERA'S AUTO ASPECT IS HELD OFF FOR THE DECODE PASS, ARMED OR NOT: the
-    // pass renders into the list (W x 0.5625 H) whether or not it decodes, and an
+    // pass renders into the list (kHitListWidth x its rows) whether or not it decodes, and an
     // auto-aspect camera is re-aspected by every PASS_SCENE it renders
     // (OgreCompositorPassScene.cpp) — the projection the pass' shaders read, and
     // the aspect Ogre's PlanarReflections matches cameras by (measured: a frame

@@ -682,7 +682,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.ssrScreenMarch == b.ssrScreenMarch &&
            a.rayReflect == b.rayReflect && a.hitDecode == b.hitDecode &&
-           a.hitDecodeAll == b.hitDecodeAll &&
+           // (hitListRows is NOT shape: the view resizes the list in place, OgreView::sizeHitList)
            a.atomDraw == b.atomDraw && a.atomOcclusion == b.atomOcclusion &&
            // THE PREPASS'S SHAPE, not the rows that ask for it (PHOTON-GATHER-1d;
            // RAYS-1's F4): the gather's and the sun contact's rows add NOTHING
@@ -2117,18 +2117,21 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
         }   // if (ssr)
         // THE HIT LIST (PHOTON-HIT-SHADE-1): two UAVs the ray jobs append to and
-        // the decode's target, W x kHitListHeightFactor H — see ChainDesc::hitDecode.
+        // the decode's target, kHitListWidth x the view's demand-sized rows — FIXED
+        // SIZE textures (a list, not a picture: a window resize does not touch them,
+        // and applyStereo leaves them single-layer); OgreView::sizeHitList re-makes
+        // them in place when the demand moves — see ChainDesc::hitDecode.
         if (desc.hitDecode) {
-            const float listFactor = desc.hitDecodeAll ? kHitListHeightFactorDecodeAll : kHitListHeightFactor;
+            const Ogre::uint32 rows = std::max(desc.hitListRows, 1u);
             for (const auto &t : { std::make_pair(kHitIds, Ogre::PFG_RGBA32_UINT),
                                    std::make_pair(kHitDest, Ogre::PFG_R32_UINT) }) {
-                auto *td = addTex(n, t.first, t.second, 0u, 0u, 1.0f, listFactor);
+                auto *td = addTex(n, t.first, t.second, kHitListWidth, rows);
                 // RenderToTexture as well: a node texture carries the compositor's
                 // depth-buffer defaults, which Ogre sets on render targets only
                 // (jahSsrReflection's shape: RTT | Uav).
                 td->textureFlags = Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::Uav;
             }
-            auto *td = addTex(n, kHitRadiance, Ogre::PFG_RGBA16_FLOAT, 0u, 0u, 1.0f, listFactor);
+            auto *td = addTex(n, kHitRadiance, Ogre::PFG_RGBA16_FLOAT, kHitListWidth, rows);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
     }

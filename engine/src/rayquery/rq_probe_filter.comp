@@ -106,6 +106,8 @@ shared vec4 gTapB[16];
 shared vec4 gTapN[16];
 /// ...and its position (the ray origin its hit distances are measured from), for the parallax test.
 shared vec3 gTapP[16];
+/// THE PROBE'S TEXELS WITH NO SAMPLE this frame (PHOTON-2 stage 2's tail): any makes the whole probe NO SAMPLE.
+shared uint gUnsampled;
 
 /// THE PARALLAX TEST (ENGINE-POLISH-PHOTON-2 stage 3; Lumen's spatial filter): a neighbour's ray in
 /// direction d from its position q hit at distance t, so its sample is the radiance leaving the point
@@ -144,6 +146,8 @@ void main()
 	const bool adaptive = probe >= uniformProbes;
 	const uint cellIndex = adaptive ? uint( max( normalW.w - 1.0, 0.0 ) ) : probe;
 	const ivec2 cell = ivec2( int( cellIndex ) % max( grid.x, 1 ), int( cellIndex ) / max( grid.x, 1 ) );
+	if( lane == 0u )
+		gUnsampled = 0u;		// (ordered before every lane's count by the tap table's barrier)
 
 	// ---- THE TAP TABLE: lane k (0..7) fills neighbour k, row by row with the
 	// centre skipped — the fixed order the taps are summed in; lanes 8..15 the
@@ -189,6 +193,14 @@ void main()
 	vec3 dirW = vec3( 0.0, 0.0, 1.0 );
 	float solidAngle = 0.0;
 	float cosine = 0.0;
+	// THE TEXEL HAS A SAMPLE (PHOTON-2 stage 2's tail, 1.6 A2): a ray whose record a full hit list dropped is NO SAMPLE
+	// (kAtlasNoSample, rq_probe_gather.comp) - never a black ray: left out of the filter (a neighbour's tap) and of the
+	// SH sums below. AND A PROBE THAT LOST ANY RAY IS NO SAMPLE AS A WHOLE (irradiance.w -1, below): a list overflows
+	// at its END, so a probe in flight when it filled loses a WARP of its lanes - a contiguous half of its octahedral
+	// map, one side of the hemisphere - and the ratio estimator over the other half is the brighter (or darker) side's
+	// mean, not the hemisphere's (measured: photon-room's floor +13 to +26 codes under the overflow arm); its pixels
+	// keep their history instead (rq_probe_integrate.comp), exactly as for a probe that lost every ray.
+	bool sampled = false;
 
 	if( onSurface && lane < rays )
 	{
@@ -206,10 +218,14 @@ void main()
 		const float coneHalf = max( acos( clamp( 1.0 - solidAngle / 6.28318531, -1.0, 1.0 ) ), 1e-4 );
 
 		const vec4 own = imageLoad( probeAtlas, block + texel );
-		vec3 sum = own.xyz;
-		float wsum = 1.0;
+		sampled = !( own.w <= kAtlasNoSample + 0.5 );
+		if( !sampled )
+			atomicAdd( gUnsampled, 1u );
+		vec3 sum = sampled ? own.xyz : vec3( 0.0 );
+		float wsum = sampled ? 1.0 : 0.0;
 
-		if( p.knobs4.z > 0.5 )
+		// (a texel with no sample takes no neighbour either: the parallax test reads its own ray's length)
+		if( sampled && p.knobs4.z > 0.5 )
 		{
 			// THE NINE TAPS, IN ONE FIXED ORDER (row by row); the centre is this
 			// probe itself and is already in the sum. The neighbours' frames and
@@ -228,6 +244,8 @@ void main()
 										ivec2( octRes - 1 ) );
 				const vec4 s = imageLoad( probeAtlas,
 										  ivec2( int( gTapB[k].w ), int( gTapN[k].w ) ) + nt );
+				if( s.w <= kAtlasNoSample + 0.5 )
+					continue;		// the neighbour's ray has no sample this frame
 				// THE PARALLAX: the neighbour's hit point as this probe sees it.
 				// A MISS IS AT INFINITY: two misses agree (no parallax at infinity),
 				// a miss and a hit never do (whatever the ray's length happens to be).
@@ -262,13 +280,15 @@ void main()
 				wsum += w;
 			}
 		}
-		filtered = sum / wsum;
+		filtered = sampled ? sum / wsum : vec3( 0.0 );
 	}
 
 	// ---- THE SH PROJECTION, one texel per lane -------------------------------
 	float y[9];
 	jahShBasis9( dirW, y );
-	const float dw = solidAngle;
+	const float dw = sampled ? solidAngle : 0.0;
+	if( !sampled )
+		cosine = 0.0;
 	float part[28];
 	for( int k = 0; k < 9; ++k )
 	{
@@ -346,6 +366,9 @@ void main()
 			}
 		}
 		records.r[probe].sh = rec.sh;
-		records.r[probe].irradiance = vec4( e, answered ? 1.0 : 0.0 );
+		// w: 1 answered; -1 NO SAMPLE (on a surface, a ray's record dropped by a full hit list: the integrate's pixels
+		// keep their history rather than read a part of the hemisphere or hand the frame to the fallback); 0 no answer.
+		const bool noSample = onSurface && gUnsampled > 0u;
+		records.r[probe].irradiance = vec4( e, noSample ? -1.0 : answered ? 1.0 : 0.0 );
 	}
 }

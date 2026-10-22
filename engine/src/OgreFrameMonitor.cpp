@@ -1110,6 +1110,11 @@ constexpr ArmDef kArms[] = {
       "work is planned, no card is captured or relit - and the gather and the reflections keep every history they hold "
       "(no new sample enters). A walk under it measures the motion's own resampling; the walk without it minus that is "
       "the GI's flicker under motion (the stillness door's moving window). 0 = shipped." },
+    { ArmId::HitListCap, 0.0, 0.0, 16777216.0,
+      "THE OVERFLOW ARM (PHOTON-2 stage 2's tail, a test door): the traces and the hit write-back hold at most this many "
+      "hit records a frame, so a fixture FORCES drops whatever the list's demand-sized capacity - a dropped record is NO "
+      "SAMPLE for its ray (the gather's filter and SH sums leave it out; the reflection's frame has none), never black. "
+      "0 = the list's own capacity (shipped)." },
     { ArmId::ReflectRestReference, 0.0, 0.0, 2.0,
       "THE REFLECTION'S REFERENCE AT REST (PHOTON-2 round 2, R1 (f)'s measuring arm): from the first rest frame each "
       "texel's raw samples are averaged in a 32-bit image (an fp16 running mean stalls past a few hundred samples) "
@@ -1131,10 +1136,10 @@ constexpr ArmDef kArms[] = {
       "never read from the cards or the voxels (SPECKLE-FIX-1). The route-agreement instrument: "
       "the decode answers a gather hit with the diffuse response only, exactly what the caches "
       "store, so the two routes on the same hit agree within the caches' own quantisation "
-      "(gi.speckle). While on, the hit list is SIZED for every gather ray of an 8-px stride "
-      "(kHitListHeightFactorDecodeAll; toggling it rebuilds the view's graph) - at the shipped size "
-      "it dropped 46 % of Showroom 2's hits as black; any drop left is giStatus rayQuery.hitDropped "
-      "and a measurement that reads it refuses." },
+      "(gi.speckle). The hit list is sized by its demand (kHitListWidth's law), so it grows to every "
+      "gather ray within a few frames of the arm going on; a drop before that is no sample (never "
+      "black), and any drop left is giStatus rayQuery.hitDropped, which a measurement that reads it "
+      "refuses." },
     { ArmId::GatherOctRes, 0.0, 0.0, 8.0,
       "The screen-probe gather's probe map resolution: rays per probe = octRes^2 (GATHER-NOISE-1's "
       "noise lever; GatherTuning::octRes). 0 = the tier's (8: 64 rays). At most 8 - one ray is one "

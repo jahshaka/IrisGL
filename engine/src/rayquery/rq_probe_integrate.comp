@@ -405,6 +405,12 @@ void main()
 	vec3 sum = vec3( 0.0 );
 	float wsum = 0.0;
 	float ownCellWeight = 0.0;
+	// A PROBE WITH NO SAMPLE THIS FRAME (PHOTON-2 stage 2's tail, 1.6 A2): a ray of it was a record a full hit
+	// list dropped (rq_probe_filter.comp's irradiance.w -1). It is no reading at all - neither an answer nor the absence
+	// of one - so a pixel whose own probes are starved and that no other of them answers takes NO SAMPLE this frame
+	// (below: it keeps its history, as a reflection texel with no sample keeps what it holds), never the fallback's
+	// share a geometric "no answer" hands on.
+	bool starved = false;
 	if( reach > 1.0 )
 	{
 		// THE WIDE READ: every cell whose centre lies within `reach` cells of the
@@ -445,6 +451,7 @@ void main()
 						break;
 					const uint pi = k == 0 ? ui : uint( link ) - 1u;
 					const vec4 posW = records.r[pi].posW;
+					starved = starved || ( posW.w > 0.5 && records.r[pi].irradiance.w < -0.5 );
 					if( posW.w < 0.5 || records.r[pi].irradiance.w < 0.5 )
 						continue;
 					float w = wt * jahPlaneWeight( posW.xyz, records.r[pi].normalW.xyz, pixelWorld,
@@ -473,6 +480,7 @@ void main()
 			ownCellWeight += wb;
 		const uint probeIndex = uint( c.y * grid.x + c.x );
 		const vec4 posW = records.r[probeIndex].posW;
+		starved = starved || ( posW.w > 0.5 && wb > 0.0 && records.r[probeIndex].irradiance.w < -0.5 );
 		if( posW.w < 0.5 || records.r[probeIndex].irradiance.w < 0.5 || wb <= 0.0 )
 			continue;
 		const float w = wb * jahPlaneWeight( posW.xyz, records.r[probeIndex].normalW.xyz, pixelWorld,
@@ -492,6 +500,7 @@ void main()
 		{
 			const uint twin = uint( link ) - 1u;
 			const vec4 posW = records.r[twin].posW;
+			starved = starved || ( posW.w > 0.5 && records.r[twin].irradiance.w < -0.5 );
 			if( posW.w > 0.5 && records.r[twin].irradiance.w > 0.5 )
 			{
 				const float w = ownCellWeight * jahPlaneWeight( posW.xyz, records.r[twin].normalW.xyz,
@@ -519,7 +528,9 @@ void main()
 	//      and their SH read at the PIXEL's normal (the band-2 SH carries the
 	//      irradiance's variation with the normal; a probe a few centimetres
 	//      round the edge is a far closer estimate than the field's cage).
-	if( wsum < weightFloor )
+	// (a pixel whose own probes are starved this frame does not go looking further: it takes no sample, below)
+	const bool noSample = starved && wsum < weightFloor;
+	if( wsum < weightFloor && !noSample )
 	{
 		for( int dy = -2; dy <= 2; ++dy )
 			for( int dx = -2; dx <= 2; ++dx )
@@ -597,7 +608,8 @@ void main()
 	// (count 0) takes this frame's estimate whole.
 	const float floorBlend = clamp( p.knobs5.y, 1.0 / float( kHistoryCountMax ), 1.0 );
 	// THE GI FREEZE (M1's measuring arm, stereo.w): a pixel with a history keeps it, no new sample enters.
-	const float blend = prevCount > 0u ? ( p.stereo.w > 0.5 ? 0.0 : max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend ) )
+	// ...and A PIXEL WITH NO SAMPLE THIS FRAME (its probes starved by a full hit list, above) keeps it too.
+	const float blend = prevCount > 0u ? ( p.stereo.w > 0.5 || noSample ? 0.0 : max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend ) )
 									   : 1.0;
 	const vec4 sample1 = vec4( answer.xyz * answer.w, answer.w );
 	vec4 mean = mix( prev, sample1, blend );
@@ -626,14 +638,16 @@ void main()
 	const float restK = p.knobs6.x;
 	if( restK >= 1.0 )
 	{
-		const vec4 rest = restK < 1.5 ? sample1
-									  : mix( imageLoad( restMean, at ), sample1, 1.0 / restK );
+		// (no sample this frame: the rest mean takes none - it starts from the history on a first rest frame)
+		const vec4 rest = noSample ? ( restK < 1.5 ? prev : imageLoad( restMean, at ) )
+								   : restK < 1.5 ? sample1
+												 : mix( imageLoad( restMean, at ), sample1, 1.0 / restK );
 		imageStore( restMean, at, rest );
 		mean = mix( mix( prev, rest, blend ), rest, clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 ) );
 	}
 	imageStore( historyCur, at,
 				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
-					   packGeom( pixelDist, pixelFoliage, prevCount + 1u, mean.w,
+					   packGeom( pixelDist, pixelFoliage, noSample && prevCount > 0u ? prevCount : prevCount + 1u, mean.w,
 								 roundingDither( ivec2( lx, pix.y ), 2u ) ),
 					   0u, 0u ) );
 	// The pixel's answer: the answered frames' mean irradiance at the fraction
