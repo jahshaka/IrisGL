@@ -210,13 +210,18 @@ float jahVoxelPos0Filtered( int c, int h, vec3 u, int a, float pORel, float o, f
 	return ( pORel + i0c * o + up ) * invResA;
 }
 
-/// The packed-halves coordinate of an anisotropic read: x is saturated into the
-/// box and folded into the first half (the sign half is added per axis by the
-/// read below).
-vec3 jahVoxelAnisoUvw( vec3 posLS )
+/// The packed-halves coordinate of an anisotropic read: x folded into the first half (the
+/// sign half is added per axis by the read below) and CLAMPED PER HALF like CLAMP_TO_EDGE on
+/// the half's own texels (PHOTON-7 stage 1, AB A11): the sample's centre stays half a texel
+/// `texelU` (the read's coarser level, in the packed u) inside the half, so a bilinear
+/// footprint never straddles the seam into the OTHER SIGN's texel at the box's far end (a
+/// read at the box's -x face took a quarter of it: gi.directional_seam, 0.75 of the lit
+/// floor). Every read off the seam is bit-identical (a clamp that does not bind).
+vec3 jahVoxelAnisoUvw( vec3 posLS, float texelU )
 {
 	vec3 uvw = posLS;
-	uvw.x = clamp( uvw.x, 0.0, 1.0 ) * 0.5;
+	const float h = 0.5 * texelU;
+	uvw.x = clamp( uvw.x * 0.5, h, 0.5 - h );
 	return uvw;
 }
 
@@ -224,7 +229,9 @@ vec3 jahVoxelAnisoUvw( vec3 posLS )
 /// reader travelling +b (`positive`) or -b - composited from the faces that look back at it.
 vec4 jahVoxelReadAxis( int c, int b, vec3 posLS, bool positive, float mip )
 {
-	const vec3 anisoUvw = jahVoxelAnisoUvw( posLS );
+	// the packed width is the cascade's resolution (two halves of res / 2 two-cell texels): a level-m texel is
+	// 2^m / res of u - at a fractional level the coarser one's, which the trilinear filter reads too
+	const vec3 anisoUvw = jahVoxelAnisoUvw( posLS, exp2( ceil( mip ) ) * JAH_VOX_INVRES( c ).x );
 	const vec3 u = anisoUvw + vec3( positive ? 0.0 : 0.5, 0.0, 0.0 );
 	if( b == 0 )
 		return JAH_VOX_SAMPLE_X( c, u, mip );
