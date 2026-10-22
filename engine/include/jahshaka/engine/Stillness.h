@@ -233,8 +233,9 @@ public:
     StillnessRun(const StillnessRun &) = delete;
     StillnessRun &operator=(const StillnessRun &) = delete;
 
-    /// Parses the script, plans the frames, switches the frame monitor on (refused while a capture already runs: its
-    /// records would be taken from it) and the readback arms. False with the reason.
+    /// Parses the script, plans the frames, opens its monitor tee and switches the frame monitor on when it is off (a
+    /// host's running capture is left as it is: the tee reads a copy of every record) and the readback arms. False
+    /// with the reason.
     bool begin(const StillnessSpec &spec, std::string &err);
     /// The pose of the NEXT frame to render; false when every planned frame has been rendered.
     bool nextPose(Vec3 &eye, Vec3 &target);

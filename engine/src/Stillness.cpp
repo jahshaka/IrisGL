@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 #include <map>
 #include <sstream>
 
@@ -171,6 +172,10 @@ struct StillnessRun::Impl {
 
     // ---- what the run switched, restored at the end -----------------------------------------------------------
     bool monitorOurs = false;
+    /// THE MONITOR AS THE RUN FOUND IT (G7): restore() returns it to this level - only while it still stands at the
+    /// level the run set (a host that changed it during the run owns it then; one that started a capture at the very
+    /// level the run set cannot be told apart, and is stopped with the run).
+    MonitorLevel monitorWas = MonitorLevel::Off, monitorSet = MonitorLevel::Off;
     /// THE RECORDS COME THROUGH A TEE (PHOTON-2 F7; Engine::openMonitorTee): never the host's pop, which Studio's
     /// frame monitor owns while it records (framemonitor.cpp) — the door reads its own copy of every record.
     unsigned tee = 0u;
@@ -180,6 +185,9 @@ struct StillnessRun::Impl {
     /// frame's drain: H5). At most kTailFrames (the monitor's holding queue publishes within its kMaxHeldFrames).
     static constexpr unsigned kTailFrames = 24u;
     unsigned tailFrames = 0u;
+    /// The tail's engine frames: their records are read (a window frame's may ride them) but their GPU work is not the
+    /// run's - the cost line (gpuSum) leaves them out (G7).
+    std::set<unsigned long long> tailEngineFrames;
     double gatherArmWas = 0.0, reflectArmWas = 0.0;
     bool gatherArmOn = false, reflectArmOn = false;   ///< the run has switched it on (and not off since)
     bool pinned = false;                              ///< the path's placement pin is on (released at the end)
@@ -298,7 +306,8 @@ struct StillnessRun::Impl {
         setArm("gather.historyReadback", gatherArmWas);
         setArm("reflect.historyReadback", reflectArmWas);
         if (pinned) scene.setGiPlacementPin(GiPlacementPin());   // released (a message: the host's next frame)
-        if (monitorOurs) setMonitor(MonitorLevel::Off);   // flushes everything waiting into the queue (and the tee)
+        // flushes everything waiting into the queue (and the tee); a level the host set since is the host's
+        if (monitorOurs && engine.published().monitor.level == monitorSet) setMonitor(monitorWas);
         drainRecords();
         if (tee) {
             engine.closeMonitorTee(tee);
@@ -359,10 +368,11 @@ struct StillnessRun::Impl {
             std::map<std::string, double> frameMs;
             for (const CacheWork &w : r.cacheWork)
                 if (w.gpuMs >= 0.0f) frameMs[w.detail] += w.gpuMs;
-            for (const auto &f : frameMs) {
-                gpuSum[f.first].first += f.second;
-                ++gpuSum[f.first].second;
-            }
+            if (!tailEngineFrames.count(r.frame))   // a tail frame's work is not the run's (G7)
+                for (const auto &f : frameMs) {
+                    gpuSum[f.first].first += f.second;
+                    ++gpuSum[f.first].second;
+                }
             // the frame's BUSY GPU (its span less the gaps the GPU waited on a submission) and its wall time
             frameTimes[r.frame] = { r.frameGpuMs >= 0.0f && r.gpuIdleMs >= 0.0f ? r.frameGpuMs - r.gpuIdleMs : -1.0f,
                                     r.totalMs };
@@ -699,11 +709,8 @@ bool StillnessRun::begin(const StillnessSpec &spec, std::string &err)
     m.stopSeen.assign(m.report.windows.size(), false);
 
     // ---- THE INSTRUMENTS -----------------------------------------------------------------------------------------
-    // A CAPTURE ALREADY RUNNING keeps its records: the door would pop them from under it.
-    if (m.engine.published().monitor.level != MonitorLevel::Off) {
-        err = "stillness: the frame monitor is already on (a capture runs) - stop it first";
-        return false;
-    }
+    // A CAPTURE ALREADY RUNNING keeps its records: the door reads its own copy through the tee below and never pops
+    // the host's queue, so the run goes ahead beside it (G7: the stage-0 refusal left the tee's path unreachable).
     // ON-SCREEN OR OFFSCREEN: an offscreen view reads its pixels; a window is read through its frame capture
     // (the presented bytes, requested before each frame).
     {
@@ -716,8 +723,10 @@ bool StillnessRun::begin(const StillnessSpec &spec, std::string &err)
     // host's running capture is left exactly as it was (and its records in the host's own queue).
     m.tee = m.engine.openMonitorTee();
     if (!m.tee) { err = "stillness: the engine opened no monitor tee"; return false; }
-    if (m.engine.published().monitor.level == MonitorLevel::Off) {
-        m.setMonitor(MonitorLevel::Review);
+    m.monitorWas = m.engine.published().monitor.level;
+    if (m.monitorWas == MonitorLevel::Off) {
+        m.monitorSet = MonitorLevel::Review;
+        m.setMonitor(m.monitorSet);
         m.monitorOurs = true;
     }
     m.begun = true;
@@ -771,6 +780,7 @@ bool StillnessRun::frameDone(std::string &err)
     if (m.next >= m.plan.size()) {
         if (m.tailFrames >= Impl::kTailFrames) { err = "stillness: no frame was planned"; return false; }
         ++m.tailFrames;   // a tail frame: its records only
+        m.tailEngineFrames.insert(m.engine.published().frame);
         m.drainRecords();
         return true;
     }
