@@ -110,6 +110,19 @@ vec3 jahRestStoreMean( vec3 m, ivec2 tc, int eye, float restFrame )
 	}
 	return r;
 }
+/// THE SECOND MOMENT'S STORE, STOCHASTICALLY ROUNDED TOO (PHOTON-2 1b P1; the rule: EVERY fp16 running statistic is): the
+/// root mean square of the luma, rms' = sqrt( rms^2 + (l^2 - rms^2) / v ), makes nearly the same small step every frame
+/// for a skewed texel - round to nearest rounds it the SAME way each time, the moment drifts, rms^2 - M^2 reads the
+/// variance LOW and the standard-error stop fired at about half the samples (the round-4 read simulated it: 5 % rare
+/// bright samples stopped at v 167 with a true standard error of 1.31 codes; stochastic rounding stops at 323 / 0.97, the
+/// exact moment's 315 / 0.96). A fourth draw of the same hash (the texel, the eye, the rest frame).
+float jahRestStoreMoment( float rms, ivec2 tc, int eye, float restFrame )
+{
+	uint s = jahRestHash( uint( tc.x ) * 73856093u ^ uint( tc.y ) * 19349663u ^ uint( eye ) * 83492791u ^
+						  uint( restFrame ) * 2654435761u );
+	s = jahRestHash( s + 3u );
+	return jahHalfStochastic( rms, float( s >> 8u ) * ( 1.0 / 16777216.0 ) );
+}
 /// The rest samples a texel holds: its M half's count over its frozen history's.
 float jahRestSamples( vec4 H, vec4 M )
 {

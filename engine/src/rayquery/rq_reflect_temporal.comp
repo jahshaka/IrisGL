@@ -414,7 +414,8 @@ void main()
 		const float ls = jahRestLuma( sk );
 		const float rmsPrev = vPrev > 0.0 ? imageLoad( restMoment, ivec3( tc, gEye ) ).x : 0.0;
 		const float q = vPrev > 0.0 ? rmsPrev * rmsPrev + ( ls * ls - rmsPrev * rmsPrev ) / v : ls * ls;
-		const float rms = sqrt( max( q, 0.0 ) );
+		// (stored rounded stochastically like M - P1: round to nearest drifted it, and the stop fired early)
+		const float rms = jahRestStoreMoment( sqrt( max( q, 0.0 ) ), tc, gEye, p.knobs.z );
 		imageStore( restMoment, ivec3( tc, gEye ), vec4( rms, 0.0, 0.0, 0.0 ) );
 		// THE STOP (R1, P1): the rest mean's standard error under a code (its own luma's 1 %, or its neighbourhood's for
 		// a dark texel), counted over consecutive frames once the hand-over is done; kReflectStopFrames of them stop it.
