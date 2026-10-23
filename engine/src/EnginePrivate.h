@@ -4355,6 +4355,9 @@ public:
     bool giChangedRegions(GiChangedRegions &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giChangedRegions(out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::giChangedRegions"); out = mPhoton.changedRegions(); return out.available; }
+    bool takeGiBrickMask(int cascade, GiBrickMask &out) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = takeGiBrickMask(cascade, out); }); return r; }   // a REQUEST (U3 4b)
+        JAH_HOST_CALL("Scene::takeGiBrickMask"); return mPhoton.takeGiBrickMask(cascade, out); }
     /// THE CHANGED-REGION LIST'S CLOSE (PHOTON-7 stage 3): once a frame per drawn scene, before the frame's submit
     /// (renderOneFrame) - every producer of the frame has appended by then.
     void closeGiRegions() { mPhoton.closeRegions(); }

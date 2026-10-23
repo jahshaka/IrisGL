@@ -81,6 +81,9 @@ uniform restrict writeonly image3D lightVoxel;
 // it: the march's level-0 read here takes the sides' mean).
 layout( vulkan( ogre_u1 ) vk_comma rgba16f )
 uniform restrict writeonly image3D backVoxel;
+// PHOTON-7 stage 3, THE BRICK MASK (LightInjection_cs.glsl's buffer, word [1] of a brick): the most the update's LAST pass
+// moved a voxel's total - the solver's residual where it stops - max-reduced per 8^3 brick.
+layout( std430, ogre_U2 ) restrict coherent buffer jahBrickLayout { uint jahBrickMask[]; };
 
 layout( local_size_x = @value( threads_per_group_x ),
         local_size_y = @value( threads_per_group_y ),
@@ -107,6 +110,8 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform float4 envSh[9];
 	// PHOTON-7 stage 2: THE REGION a pass covers - its first cell (the dispatch covers the region from it).
 	uniform uint4 regionOrigin;
+	// PHOTON-7 stage 3: x = this pass marks the brick mask (the update's last pass), yz = the bricks along x and y.
+	uniform uint4 brickMark;
 vulkan( }; )
 
 #define p_voxelCellSize voxelCellSize
@@ -117,8 +122,22 @@ vulkan( }; )
 #define p_envGainMips envGainMips
 #define p_envSh envSh
 #define p_regionOrigin regionOrigin
+#define p_brickMark brickMark
 
 @insertpiece( HeaderCS )
+
+// THE BRICK MASK'S CHANGE (PHOTON-7 stage 3; LightInjection_cs.glsl's twin, the same text): how far a voxel's light moved,
+// per channel, relative to the larger of its old and new value - one code is 1 % - over the float store's absolute floor.
+float jahBrickChange( float3 a, float3 b )
+{
+	const float3 d = abs( b - a );
+	const float3 m = max( max( abs( a ), abs( b ) ), float3( 5.9604645e-6, 5.9604645e-6, 5.9604645e-6 ) );
+	float r = max( max( d.x / m.x, d.y / m.y ), d.z / m.z );
+	if( ( floatBitsToUint( r ) & 0x7F800000u ) == 0x7F800000u )
+		r = 1.0e30;
+	return r;
+}
+shared uint jahBrickShared;
 
 //in uvec3 gl_NumWorkGroups;
 //in uvec3 gl_WorkGroupID;

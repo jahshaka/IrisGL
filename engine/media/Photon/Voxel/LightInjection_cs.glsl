@@ -18,14 +18,10 @@ vulkan_layout( ogre_t2 ) uniform texture3D voxelEmissiveTex;
 vulkan( layout( ogre_s0 ) uniform sampler voxelAlbedoSampler );
 
 // PHOTON-7 stage 2: AT A SCROLL'S COMMIT THE DIRECT TERM IS RE-INJECTED AS A DELTA (jah_inject_delta): the total, its
-// back side and the direct terms are READ as well (total += D_new - D_old), so they are read-write.
-@property( jah_inject_delta )
-	layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
-	uniform restrict image3D lightVoxel;
-@else
-	layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
-	uniform restrict writeonly image3D lightVoxel;
-@end
+// back side and the direct terms are READ as well (total += D_new - D_old), so they are read-write. PHOTON-7 stage 3: so
+// they are at every injection - the brick mask compares each voxel's direct term with the one it replaces.
+layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
+uniform restrict image3D lightVoxel;
 
 // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): the DIRECT term's own volume, written by the same dispatch.
 // The bounce's fixed point is L = D + rho * G( L ) and needs D at every pass; the
@@ -35,13 +31,8 @@ vulkan( layout( ogre_s0 ) uniform sampler voxelAlbedoSampler );
 // binds the slot per injection, because this job is shared by name process-wide.
 @pset( jahInjUav, 1 )
 @property( vct_keep_direct )
-	@property( jah_inject_delta )
-		layout( vulkan( ogre_u1 ) vk_comma @insertpiece(uav1_pf_type) )
-		uniform restrict image3D directVoxel;
-	@else
-		layout( vulkan( ogre_u1 ) vk_comma @insertpiece(uav1_pf_type) )
-		uniform restrict writeonly image3D directVoxel;
-	@end
+	layout( vulkan( ogre_u1 ) vk_comma @insertpiece(uav1_pf_type) )
+	uniform restrict image3D directVoxel;
 	@add( jahInjUav, 1 )
 @end
 
@@ -52,22 +43,12 @@ vulkan( layout( ogre_s0 ) uniform sampler voxelAlbedoSampler );
 // pass adds its own part in the anisotropic mip step 0); `directBackVoxel` the back side's
 // direct term for the bounce's fixed point. The slots follow u0 and the direct term in this
 // order (VctLighting::update binds them so).
-@property( jah_inject_delta )
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict image3D backVoxel;
-@else
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict writeonly image3D backVoxel;
-@end
+layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+uniform restrict image3D backVoxel;
 @add( jahInjUav, 1 )
 @property( vct_keep_direct )
-	@property( jah_inject_delta )
-		layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-		uniform restrict image3D directBackVoxel;
-	@else
-		layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-		uniform restrict writeonly image3D directBackVoxel;
-	@end
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict image3D directBackVoxel;
 	@add( jahInjUav, 1 )
 	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
 	uniform restrict writeonly image3D dirOut0;
@@ -93,7 +74,13 @@ vulkan( layout( ogre_s0 ) uniform sampler voxelAlbedoSampler );
 // the band), word 2 the injections. A UAV buffer after the textures, read back by a routed buffer copy.
 @property( jah_inject_delta )
 	layout( std430, ogre_U@value(jahInjUav) ) restrict coherent buffer jahCommitLayout { uint jahCommitCount[]; };
+	@add( jahInjUav, 1 )
 @end
+// PHOTON-7 stage 3, THE BRICK MASK: two words per 8^3 brick of this cascade's cells - [0] the most a voxel's DIRECT term
+// changed in this injection, [1] the most the update's last pass moved its total (LightVctBounceInject) - each the float
+// bits of a relative change (jahBrickChange), max-reduced. Cleared before every update (PhotonVoxelLighting::update), the
+// last UAV.
+layout( std430, ogre_U@value(jahInjUav) ) restrict coherent buffer jahBrickLayout { uint jahBrickMask[]; };
 
 // Jahshaka (METAL-BOUNCE-1): THE METAL at t3 - the F0 (rgb) and Fresnel-90 weight (alpha) of every surface's
 // specular lobe, re-emitted by the lobe's directional integral (JahSpecularAlbedo).
@@ -168,6 +155,8 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// PHOTON-7 stage 2: THE REGION a dispatch covers starts at this cell (a multiple of the 4^3 group; 0 = the whole
 	// volume, the groups set by the host); w = 1 on the dispatch that counts the injection (word 2).
 	uniform uint4 injectOrigin;
+	// PHOTON-7 stage 3: the brick mask's bricks per axis (xyz; w unused).
+	uniform uint4 brickDims;
 	uniform float4 chainOrigin[@value( hlms_num_vct_cascades )];
 	uniform float4 chainRes[@value( hlms_num_vct_cascades )];
 vulkan( }; )
@@ -184,11 +173,27 @@ vulkan( }; )
 #define p_keepLo keepLo
 #define p_keepHi keepHi
 #define p_injectOrigin injectOrigin
+#define p_brickDims brickDims
 #define JAH_INJ_CHAIN @value( hlms_num_vct_cascades )
 
 // Jahshaka (PHOTON-VOXEL-5; the VOXEL-4 audit's F3): THE ONE READER'S RULES for the shadow
 // march - after the parameters, which its functions read.
 @insertpiece( JahInjectionReader )
+
+// THE BRICK MASK'S CHANGE (PHOTON-7 stage 3; its twin is LightVctBounceInject_cs.glsl's): how far a voxel's light moved, per
+// channel, relative to the larger of its old and new value - one code is 1 % (the reflection rest's rule) - over the float
+// store's absolute floor (Types.h kGiBrickFloor: its subnormal step is one code there). A non-finite value is a change.
+float jahBrickChange( float3 a, float3 b )
+{
+	const float3 d = abs( b - a );
+	const float3 m = max( max( abs( a ), abs( b ) ), float3( 5.9604645e-6, 5.9604645e-6, 5.9604645e-6 ) );
+	float r = max( max( d.x / m.x, d.y / m.y ), d.z / m.z );
+	if( ( floatBitsToUint( r ) & 0x7F800000u ) == 0x7F800000u )
+		r = 1.0e30;
+	return r;
+}
+// ...and the work group's most, reduced in shared memory before one atomic per group.
+shared uint jahBrickShared;
 
 //in uvec3 gl_NumWorkGroups;
 //in uvec3 gl_WorkGroupID;

@@ -4196,6 +4196,27 @@ struct GiChangedRegions {
     std::vector<GiChangedRegion> regions;   ///< <= kGiRegionCap, in append order
 };
 
+/// ONE CASCADE'S BRICK MASK (PHOTON-7 stage 3; Scene::takeGiBrickMask): per 8^3 brick of the cascade's cells, what its
+/// LIGHT PASSES changed, in CODES (one code = 1 % of the voxel's own radiance, per channel; the absolute floor is the
+/// float store's quantum: kGiBrickFloor), the most over the readings landed since the last take - `direct`: the
+/// injection's change of the direct term (exact: the store's own bits compared); `bounce`: how far the update's LAST
+/// pass (the sky's or a bounce's) moved the total, within the store's half-ulp (1/40 of a code). Read back a few
+/// frames late, never waited on. Bricks x fastest, `dims` per axis, at the box corner `origin` the readings were taken
+/// at (a cascade that moved between two readings starts a new mask).
+struct GiBrickMask {
+    bool available = false;
+    int cascade = -1;
+    int dims[3] = { 0, 0, 0 };
+    Vec3 origin;
+    float brickMetres = 0.0f;
+    std::vector<float> direct;
+    std::vector<float> bounce;
+    unsigned readings = 0;           ///< landed readings folded in since the last take
+};
+/// The brick mask's absolute floor (radiance): the float store's subnormal step (2^-24) is one code (1 %) here, so a
+/// change the store can hold is never read below its quantum (R3).
+constexpr float kGiBrickFloor = 5.9604645e-08f / 0.01f;
+
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
 /// "the renderer beats the request" contract as View::sampleCount() and
 /// Scene::activePlanarReflectors().
@@ -4720,6 +4741,13 @@ struct GiStatus {
         /// it holds depends on the box (L1 broken there). Measured on the three Bistros: at most 5 lights in a model.
         int lightsInRangeMax = 0;
         unsigned long long injectionsOverSlots = 0;
+        /// THE BRICK MASK (PHOTON-7 stage 3; GiBrickMask): the cascade's 8^3 bricks; of the LAST landed reading, the
+        /// bricks whose direct term changed by at least one code, whose last pass moved the total by one, and either
+        /// (the ACTIVE bricks); over the cascade's life the light updates that wrote a mask, the readings that landed
+        /// and the updates whose reading was skipped (every read-back slot in flight).
+        unsigned bricks = 0;
+        unsigned bricksDirectLast = 0, bricksBounceLast = 0, bricksActiveLast = 0;
+        unsigned long long brickUpdates = 0, brickReadings = 0, brickReadingsSkipped = 0;
     };
     /// The live cascade chain, innermost first — the voxels of every Vct and
     /// VctPccHybrid scene. Empty while GI is off or the chain waits for a camera

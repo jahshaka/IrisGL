@@ -536,6 +536,14 @@ public:
         /// a placement it has not listed (a first build, a jump, a whole rebuild elsewhere) lists the whole box.
         bool regionListed = false;
         Ogre::Vector3 regionPlacement = Ogre::Vector3::ZERO;
+        /// THE BRICK MASK'S READINGS (PHOTON-7 stage 3; harvestBrickMasks): the most each brick's two words read over the
+        /// readings landed since the door last took them (a new placement starts it again), and the last reading's counts.
+        std::vector<Ogre::uint32> brickUnion;
+        Ogre::Vector3 brickOrigin = Ogre::Vector3::ZERO;
+        Ogre::uint32 brickDims[3] = { 0u, 0u, 0u };
+        unsigned brickUnionReadings = 0u;
+        unsigned bricksDirectLast = 0u, bricksBounceLast = 0u, bricksActiveLast = 0u;
+        unsigned long long brickReadings = 0u;
         unsigned long long scrollFrames = 0;   ///< frames spent building scrolls' chunks
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
         float cell() const { return halfSize * 2.0f / float(resolution); }
@@ -605,6 +613,10 @@ public:
     /// Does a scroll commit's delta-injection shader come from the background compiler (and the commit wait for it)?
     /// Only in an asynchronous scene on a frame that owes no complete picture (PhotonGi.cpp).
     bool commitShaderAsync() const;
+    /// THE BRICK MASKS' LANDED READINGS, folded (harvest, once a frame).
+    void harvestBrickMasks();
+    /// THE DOOR (Scene::takeGiBrickMask): cascade `cascade`'s folded mask in codes, and the fold started again.
+    bool takeGiBrickMask(int cascade, GiBrickMask &out);
     /// "CANNOT SAY WHERE" (kGiRegionOverflow* bits): the sun, the sky, a change with no box.
     void noteRegionOverflow(uint32_t why) { mRegionOverflowOpen |= why; }
     /// A MOVER (the ray tier's moved or skin-posed slot, OgreEngine::listRayMovers): its swept box (kind Mover), and for

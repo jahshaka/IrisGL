@@ -1378,6 +1378,14 @@ GiStatus PhotonComponent::giStatus() const {
             cs.commitSlabCells   = c.commitSlabCells;
             cs.lagLast           = c.lagLast;
             cs.lagMax            = c.lagMax;
+            // THE BRICK MASK (PHOTON-7 stage 3)
+            cs.bricks = c.lighting ? c.lighting->getNumBricks() : 0u;
+            cs.bricksDirectLast = c.bricksDirectLast;
+            cs.bricksBounceLast = c.bricksBounceLast;
+            cs.bricksActiveLast = c.bricksActiveLast;
+            cs.brickUpdates = c.lighting ? c.lighting->getBrickUpdates() : 0ull;
+            cs.brickReadings = c.brickReadings;
+            cs.brickReadingsSkipped = c.lighting ? c.lighting->getBrickReadingsSkipped() : 0ull;
             cs.commitInjectCells = c.commitInjectCells;
             cs.commitRegionCells = c.commitRegionCells;
             cs.commitPasses      = c.commitPasses;
@@ -4139,7 +4147,75 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
 
 // THE FRAME'S RESULTS, HARVESTED: the voxel feeds' device readouts that have landed (the
 // cascades' readings giStatus reports), never waited on.
-void PhotonComponent::harvest() { serviceVoxelReadouts(); }
+void PhotonComponent::harvest() {
+    serviceVoxelReadouts();
+    harvestBrickMasks();
+}
+
+// THE BRICK MASK (PHOTON-7 stage 3): every cascade's landed readings, oldest first, folded into the brick-wise most since the
+// door last took them; a reading taken at another box corner starts the fold again (its bricks are other cells). The last
+// reading's counts are the status's: a brick is ACTIVE when a word reads one code or more (a relative change of 1 %).
+void PhotonComponent::harvestBrickMasks() {
+    std::vector<Ogre::uint32> words;
+    for (VctCascade &c : mVctCascades) {
+        if (!c.lighting) continue;
+        Ogre::Vector3 origin;
+        Ogre::uint32 dims[3];
+        while (c.lighting->takeBrickReading(words, origin, dims)) {
+            ++c.brickReadings;
+            if (c.brickUnion.size() != words.size() || c.brickOrigin != origin || c.brickDims[0] != dims[0] ||
+                c.brickDims[1] != dims[1] || c.brickDims[2] != dims[2]) {
+                c.brickUnion.assign(words.size(), 0u);
+                c.brickOrigin = origin;
+                for (int a = 0; a < 3; ++a) c.brickDims[a] = dims[a];
+                c.brickUnionReadings = 0u;
+            }
+            unsigned direct = 0u, bounce = 0u, active = 0u;
+            const auto codes = [](Ogre::uint32 bits) {
+                float f;
+                std::memcpy(&f, &bits, sizeof f);
+                return f / 0.01f;
+            };
+            for (size_t i = 0; i + 1u < words.size(); i += 2u) {
+                c.brickUnion[i] = std::max(c.brickUnion[i], words[i]);
+                c.brickUnion[i + 1u] = std::max(c.brickUnion[i + 1u], words[i + 1u]);
+                const bool d = codes(words[i]) >= 1.0f, b = codes(words[i + 1u]) >= 1.0f;
+                direct += d ? 1u : 0u;
+                bounce += b ? 1u : 0u;
+                active += (d || b) ? 1u : 0u;
+            }
+            ++c.brickUnionReadings;
+            c.bricksDirectLast = direct;
+            c.bricksBounceLast = bounce;
+            c.bricksActiveLast = active;
+        }
+    }
+}
+
+bool PhotonComponent::takeGiBrickMask(int cascade, GiBrickMask &out) {
+    out = GiBrickMask();
+    if (cascade < 0 || size_t(cascade) >= mVctCascades.size()) return false;
+    VctCascade &c = mVctCascades[size_t(cascade)];
+    out.cascade = cascade;
+    for (int a = 0; a < 3; ++a) out.dims[a] = int(c.brickDims[a]);
+    out.origin = Vec3(float(c.brickOrigin.x), float(c.brickOrigin.y), float(c.brickOrigin.z));
+    out.brickMetres = 8.0f * c.cell();
+    out.readings = c.brickUnionReadings;
+    const size_t n = c.brickUnion.size() / 2u;
+    out.direct.resize(n);
+    out.bounce.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        float d, b;
+        std::memcpy(&d, &c.brickUnion[2u * i], sizeof d);
+        std::memcpy(&b, &c.brickUnion[2u * i + 1u], sizeof b);
+        out.direct[i] = d / 0.01f;
+        out.bounce[i] = b / 0.01f;
+    }
+    out.available = n > 0u;
+    std::fill(c.brickUnion.begin(), c.brickUnion.end(), 0u);   // the fold starts again
+    c.brickUnionReadings = 0u;
+    return out.available;
+}
 
 // THE PROBE UPDATE BUDGET (FIX WAVE B2) — what replaced P5a's "keep the nearest
 // N probes live for ever".

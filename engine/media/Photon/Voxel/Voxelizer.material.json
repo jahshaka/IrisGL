@@ -92,7 +92,8 @@
                 ["chainRes",                [1,1,1,1e30], "float"],
                 ["keepLo",                  [0,0,0,0],    "int"],
                 ["keepHi",                  [0,0,0,0],    "int"],
-                ["injectOrigin",            [0,0,0,0],    "uint"]
+                ["injectOrigin",            [0,0,0,0],    "uint"],
+                ["brickDims",               [1,1,1,0],    "uint"]
             ],
 
             "params_glsl" :

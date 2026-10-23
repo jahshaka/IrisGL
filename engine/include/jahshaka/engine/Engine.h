@@ -1111,6 +1111,10 @@ public:
     /// THE CHANGED-REGION LIST AS IT LAST CLOSED (PHOTON-7 stage 3; Types.h GiChangedRegions) - the CPU copy of the
     /// one buffer the consumers bind, no GPU read. False before a list has closed (no frame has drawn the scene).
     virtual bool giChangedRegions(GiChangedRegions &out) { out = GiChangedRegions(); return false; }
+    /// ONE CASCADE'S BRICK MASK (PHOTON-7 stage 3; Types.h GiBrickMask), TAKEN: the brick-wise most of the readings
+    /// landed since the last take, in codes; the fold starts again. No GPU wait (the readings land a few frames late).
+    /// False without that cascade or before a reading landed.
+    virtual bool takeGiBrickMask(int cascade, GiBrickMask &out) { (void)cascade; out = GiBrickMask(); return false; }
     /// TRACE A BATCH OF RAYS against this scene's acceleration structure and
     /// wait for the answer — a TEST AND TOOL path, never a per-frame one.
     ///

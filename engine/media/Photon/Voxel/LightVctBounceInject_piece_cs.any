@@ -235,4 +235,26 @@
 	wshort3 voxelCelUvw = wshort3( jahCell );
 	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( currentLight ) );  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
 	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, float4( backLight.xyz, currentLight.w ) );
+	// THE BRICK MASK, word 1 (PHOTON-7 stage 3): on the update's LAST pass, how far this pass moved the voxel's total -
+	// the total it gathered from (the previous iterate, a linear read) against what it writes (the float the store
+	// rounds: within its half-ulp, 1/40 of a code) - the group's most, then one atomic per group. The condition is the
+	// dispatch's (a uniform): the barriers stay in uniform control flow.
+	if( p_brickMark.x != 0u )
+	{
+		const float jahMoved = jahBrickChange( OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz, currentLight.xyz );
+		if( gl_LocalInvocationIndex == 0u )
+			jahBrickShared = 0u;
+		memoryBarrierShared();
+		barrier();
+		if( jahMoved > 0.0f )
+			atomicMax( jahBrickShared, floatBitsToUint( jahMoved ) );
+		memoryBarrierShared();
+		barrier();
+		if( gl_LocalInvocationIndex == 0u && jahBrickShared != 0u )
+		{
+			const uint3 jahBrick = jahCell >> 3u;
+			atomicMax( jahBrickMask[2u * ( jahBrick.x + p_brickMark.y * ( jahBrick.y + p_brickMark.z * jahBrick.z ) ) + 1u],
+					   jahBrickShared );
+		}
+	}
 @end

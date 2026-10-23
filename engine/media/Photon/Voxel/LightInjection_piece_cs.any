@@ -345,6 +345,9 @@
 //in uint  gl_LocalInvocationIndex;
 
 @piece( BodyCS )
+	// THE BRICK MASK'S GROUP MAXIMUM starts at zero (PHOTON-7 stage 3): visible to the group after the step-0 barrier below.
+	if( gl_LocalInvocationIndex == 0u )
+		jahBrickShared = 0u;
 	//All lights are offsetted by p_voxelOrigin so that we don't
 	//have to do this calculation per cell
 	// PHOTON-7 stage 2: the cell this invocation lights - its id in the dispatch's region plus the region's first cell.
@@ -628,6 +631,16 @@
 	if( p_injectOrigin.w != 0u && all( equal( gl_GlobalInvocationID.xyz, uint3( 0u, 0u, 0u ) ) ) )
 		atomicAdd( jahCommitCount[2], 1u );
 @else
+	// THE DIRECT TERM IT REPLACES, for the brick mask (PHOTON-7 stage 3): read before the writes and read back after them,
+	// the store's own conversion compared (the delta's rule above) - the direct volumes, or the total where the cascade
+	// keeps none (no bounce: the total IS the direct term).
+	@property( vct_keep_direct )
+		const float4 dOld = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
+		const float4 dbOld = OGRE_imageLoad3D( directBackVoxel, voxelCelUvw );
+	@else
+		const float4 dOld = OGRE_imageLoad3D( lightVoxel, voxelCelUvw );
+		const float4 dbOld = OGRE_imageLoad3D( backVoxel, voxelCelUvw );
+	@end
 	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( injectedVoxel ) );
 	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): the same value, kept apart as the bounce iteration's
 	// D term. One extra image store; no copy and no second dispatch.
@@ -639,7 +652,16 @@
 	@property( vct_keep_direct )
 		OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, backVoxelVal );
 	@end
+	@property( vct_keep_direct )
+		const float4 dNew = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
+		const float4 dbNew = OGRE_imageLoad3D( directBackVoxel, voxelCelUvw );
+	@else
+		const float4 dNew = OGRE_imageLoad3D( lightVoxel, voxelCelUvw );
+		const float4 dbNew = OGRE_imageLoad3D( backVoxel, voxelCelUvw );
+	@end
 @end
+	// THE BRICK MASK (PHOTON-7 stage 3): the most this voxel's direct term (either side) changed, relative.
+	const float jahDirChange = max( jahBrickChange( dOld.xyz, dNew.xyz ), jahBrickChange( dbOld.xyz, dbNew.xyz ) );
 
 	// THE FUSED STEP 0: the directional level 0 from the block's children per half-axis.
 	const uint li = gl_LocalInvocationIndex;
@@ -687,5 +709,18 @@
 			OGRE_imageWrite3D4( dirOut1, outIUvw, accumVal );
 		else
 			OGRE_imageWrite3D4( dirOut2, outIUvw, accumVal );
+	}
+	// THE BRICK MASK, word 0 of this group's brick (PHOTON-7 stage 3): the group's most (shared, after the barrier above
+	// made its zero visible), then one atomic per group - a 4^3 group lies inside one 8^3 brick (the dispatch's regions are
+	// 4-aligned). A non-negative float's bits order as the float does.
+	if( jahDirChange > 0.0f )
+		atomicMax( jahBrickShared, floatBitsToUint( jahDirChange ) );
+	memoryBarrierShared();
+	barrier();
+	if( li == 0u && jahBrickShared != 0u )
+	{
+		const uint3 jahBrick = jahInjCell >> 3u;
+		atomicMax( jahBrickMask[2u * ( jahBrick.x + p_brickDims.x * ( jahBrick.y + p_brickDims.y * jahBrick.z ) )],
+				   jahBrickShared );
 	}
 @end

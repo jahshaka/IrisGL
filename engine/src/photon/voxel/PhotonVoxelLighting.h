@@ -209,6 +209,27 @@ namespace Ogre
         AsyncTicketPtr   mCommitTicket;                ///< the read-back in flight
         bool             mCommitDownloadOwed = false;  ///< a delta injection ran while a read-back was in flight
         uint32           mCommitSeen[3] = { 0u, 0u, 0u };   ///< the counter's words at the last landed reading
+        /// THE BRICK MASK (PHOTON-7 stage 3; GiBrickMask): two words per 8^3 brick of this cascade's cells - [0] the most
+        /// a voxel's direct term changed in the update's injection, [1] the most its last pass (the sky's or a bounce's)
+        /// moved the total - each the float bits of a relative change (LightInjection_cs.glsl's jahBrickChange), cleared
+        /// at every update() and read back without a wait through a ring of tickets (an update whose reading finds every
+        /// slot in flight is counted, not read).
+        UavBufferPacked *mBrickBuffer = nullptr;
+        uint32 mBrickDims[3] = { 0u, 0u, 0u };
+        std::vector<uint32> mBrickZeros;
+        static constexpr uint32 kBrickReadingSlots = 4u;
+        struct BrickReading
+        {
+            AsyncTicketPtr ticket;
+            Vector3 origin = Vector3::ZERO;
+        };
+        BrickReading mBrickReadings[kBrickReadingSlots];
+        uint32 mBrickNextIssue = 0u, mBrickNextTake = 0u;
+        uint64 mBrickUpdates = 0u, mBrickReadingsSkipped = 0u;
+        ShaderParams::Param *mInjectBrickDims = nullptr;
+        ShaderParams::Param *mBounceBrickMark = nullptr;
+        void ensureBrickMask();
+        void requestBrickReading();
         ShaderParams::Param *mInjectKeepLo = nullptr;
         ShaderParams::Param *mInjectKeepHi = nullptr;
         ShaderParams::Param *mInjectOrigin = nullptr;
@@ -342,7 +363,8 @@ namespace Ogre
         /// used to exist only from the second bounce on (and not at all at one).
         /// PHOTON-7 stage 2: over the cells [regionLo, regionHi) only (aligned to 8 cells), or whole - written into
         /// mLightBounce and that region copied back into the total.
-        void runBounce( bool envOnly = false, const uint32 *regionLo = nullptr, const uint32 *regionHi = nullptr );
+        void runBounce( bool envOnly = false, const uint32 *regionLo = nullptr, const uint32 *regionHi = nullptr,
+                        bool markBricks = false );
         /// The injection job's UAV slots, its slot count and its two properties, as update() dispatches it - the
         /// delta's (a scroll's commit: four slots read-write, the counter last) or a whole injection's.
         void bindInjectionUavs( bool delta );
@@ -437,6 +459,13 @@ namespace Ogre
         /** THE DIRECTIONAL LEVELS, WHOLE, FROM THE LEVEL-0 LIGHT AS IT STANDS (PHOTON-7 stage 2's read D1; the test door
             gi.regenerateDirectional): step 0 (with a bounce) and step 1 over the whole volume - nothing else written. */
         void regenerateDirectional() { generateAnisotropicMips(); }
+        /** THE BRICK MASK'S OLDEST LANDED READING (PHOTON-7 stage 3), taken: `words` two per brick (x fastest over `dims`),
+            `origin` the box corner the update ran at. False while none has landed. */
+        bool takeBrickReading( std::vector<uint32> &words, Vector3 &origin, uint32 dims[3] );
+        uint32 getNumBricks() const { return mBrickDims[0] * mBrickDims[1] * mBrickDims[2]; }
+        /// Updates that wrote a mask, and those whose reading was skipped (every slot in flight).
+        uint64 getBrickUpdates() const { return mBrickUpdates; }
+        uint64 getBrickReadingsSkipped() const { return mBrickReadingsSkipped; }
         /// Is the delta injection's shader built (never compiled in the frame: a permutation not built is handed to the
         /// background compiler and the answer is false until it is)? Asked when a scroll is planned and at its commit.
         bool commitLightReady();
