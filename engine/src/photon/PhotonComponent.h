@@ -61,6 +61,8 @@
 namespace Ogre {
 class Camera;
 class CompositorWorkspace;
+class ConstBufferPacked;
+class Light;
 class ManualObject;
 class ParallaxCorrectedCubemapAuto;
 class PhotonIrradianceField;
@@ -529,6 +531,10 @@ public:
         /// first owed this cascade a move (0 = none owed), and the frames from it to the rebuild that served it.
         unsigned long long lagFrom = 0, lagLast = 0, lagMax = 0;
         bool commitShaderAsked = false;   ///< the delta injection's permutation requested (its first whole build)
+        /// THE PLACEMENT THE CHANGED-REGION LIST LAST HEARD OF (PHOTON-7 stage 3; listInjectionRegion): an injection at
+        /// a placement it has not listed (a first build, a jump, a whole rebuild elsewhere) lists the whole box.
+        bool regionListed = false;
+        Ogre::Vector3 regionPlacement = Ogre::Vector3::ZERO;
         unsigned long long scrollFrames = 0;   ///< frames spent building scrolls' chunks
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
         float cell() const { return halfSize * 2.0f / float(resolution); }
@@ -585,6 +591,35 @@ public:
     /// (an incomplete change set cannot say which one moved).
     void noteLampChanged(bool movable) { (movable ? mGiPlan.movableLampOwed : mGiPlan.stillLampOwed) = true; }
     void noteLampsChanged() { mGiPlan.stillLampOwed = mGiPlan.movableLampOwed = true; }
+    // ---- THE CHANGED-REGION LIST (PHOTON-7 stage 3, AB S1; Types.h GiChangedRegions; PhotonComponent.cpp) ----------
+    /// A PRODUCER'S APPEND, at its point of the frame: a world box of `kind`. `cascadeMask` 0 = the cascades whose box
+    /// meets it, taken at the close (a Slab names its own). At the cap the box MERGES into the entry of its kind whose
+    /// margin grows least (the dirty path's metric) - never an overflow. An empty box lists nothing.
+    void appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uint32_t cascadeMask = 0u);
+    /// THE INJECTION'S REGION (injectCascade, the one writer): a scroll commit's delta lists the boxes its direct was
+    /// computed over (the faces the shift moved: the slab and its band; the whole box where it has none - the
+    /// outermost, an inner cascade re-injected as a delta), a whole injection at a placement the list has not heard of
+    /// the whole box; a light tick at a listed placement lists nothing (its cause is listed where it happened).
+    void listInjectionRegion(size_t i, const Ogre::PhotonCommitLight *commit);
+    /// "CANNOT SAY WHERE" (kGiRegionOverflow* bits): the sun, the sky, a change with no box.
+    void noteRegionOverflow(uint32_t why) { mRegionOverflowOpen |= why; }
+    /// A MOVER (the ray tier's moved or skin-posed slot, OgreEngine::listRayMovers): its swept box (kind Mover), and for
+    /// a caster its sun shadow (kind MoverShadow, the same box: the header's toSun extrudes it) and its lamp shadows - the
+    /// range sphere of each lamp whose range reaches the box, once a frame per lamp (kind LampShadow).
+    void listMover(const Ogre::Aabb &swept, bool casts);
+    /// A LAMP'S EVENT (OgreScene::listLampChange): its range sphere as listed last and as it stands - the old box joined
+    /// with the new (a lamp that came or went lists the one it has).
+    void listLamp(bool hadSphere, const Ogre::Vector3 &oldCentre, float oldRange, bool hasSphere,
+                  const Ogre::Vector3 &centre, float range);
+    /// THE CLOSE, once a frame per drawn scene before the submit (OgreScene::closeGiRegions): the masks, the sun's
+    /// direction, the restart test against the last close, the GPU list written, the door's copy taken, the open list
+    /// emptied for the next frame.
+    void closeRegions();
+    const GiChangedRegions &changedRegions() const { return mRegionsClosed; }
+    /// THE ONE BUFFER EVERY CONSUMER BINDS (a const buffer, std140): a header uvec4 {count, overflow bits, restart,
+    /// the frame's low word} and vec4 {toSun.xyz, sun ? 1 : 0}, then per region vec4 {lo.xyz, kind's bits} and vec4
+    /// {hi.xyz, cascade mask's bits}. Null before the first close. Re-written at every close.
+    Ogre::ConstBufferPacked *regionBuffer() const { return mRegionBuffer; }
     /// An item the GI walk has seen changed its mobility class (setNodeMovable).
     void noteMobilityFlipped() { mGiPlan.mobilityFlipped = true; }
     /// Would an invalidation now cost a rebuild? (an arm is built and none is owed yet)
@@ -619,6 +654,7 @@ public:
     void noteEnvironmentChanged() {
         oweChainSettle();
         if (mIfd) reintegrateFieldAfterInjection();
+        noteRegionOverflow(kGiRegionOverflowSky);   // every sky-lit cache changed: the list cannot say where (PHOTON-7 stage 3)
     }
     // --- THE STEPS the scene and the engine call by name (the scene's GI interface forwards to
     // them; stage 2's plan() / harvest() take over the per-frame ones) ---------------------------
@@ -1885,6 +1921,9 @@ private:
     /// slider drag into one re-voxelize when it stops WITHOUT running the
     /// light re-inject cadence a material cannot need.
     unsigned long long mGiMaterialGeneration      = 0;
+    /// ...and the materials whose voxel inputs moved it since the last refresh: their wearers' boxes are what the
+    /// refresh dirties (PHOTON-7 stage 3: the whole-chain dirty, AB A19, deleted).
+    std::vector<MaterialId> mGiMaterialEdits;
     unsigned long long mTextureArrivals           = 0;   ///< textureArrivals()
     /// BOOTVOX-1: how many consecutive frames the GI flush has waited for a
     /// voxel-input texture, and the cap past which it builds anyway. One frame
@@ -1920,6 +1959,26 @@ private:
     unsigned           mProbeReplacements = 0;   // GiStatus::probeReplacements
     unsigned long long mProbeCapturesTotal = 0;
     unsigned long long mGiRebuilds = 0;
+    /// THE CHANGED-REGION LIST'S STATE (PHOTON-7 stage 3): the open list the producers append to, its overflow bits and
+    /// merges, the lamps whose shadow sphere it already holds; the list as it last closed (the door's copy); the sun's
+    /// and the sky's peak channels at the last close (the restart test; negative = not yet read); the closes; the GPU
+    /// buffer and its CPU image.
+    struct RegionEntry {
+        Ogre::Aabb box;
+        GiRegionKind kind = GiRegionKind::Edit;
+        uint32_t mask = 0u;
+    };
+    std::vector<RegionEntry> mRegionsOpen;
+    uint32_t mRegionOverflowOpen = 0u;
+    uint32_t mRegionMergesOpen = 0u;
+    std::vector<const Ogre::Light *> mRegionLampShadows;
+    GiChangedRegions mRegionsClosed;
+    float mRegionSunPeak = -1.0f, mRegionSkyPeak = -1.0f;
+    unsigned long long mRegionCloses = 0, mRegionClosesListing = 0;
+    Ogre::ConstBufferPacked *mRegionBuffer = nullptr;
+    std::vector<float> mRegionCpu;
+    /// The GPU list goes with the scene's GI objects (teardownGi; the close makes it again).
+    void releaseRegionBuffer();
     /// The lighting showing the Voxels picture is still one of the chain's and
     /// still shows it (checked by pointer before any dereference).
     bool photonVoxelLive() const;

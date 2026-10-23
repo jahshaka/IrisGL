@@ -404,9 +404,15 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
             if (!n.light) continue;
             any = true;
             if (Ogre::Node *ln = n.light->getParentNode()) {
-                n.lightPos = ln->_getDerivedPositionUpdated();
-                n.lightRot = ln->_getDerivedOrientationUpdated();
+                // COMPARED BEFORE IT IS OVERWRITTEN (PHOTON-7 stage 3): the set cannot say which lamp moved, but each
+                // lamp's own pose key can - the changed-region list takes exactly the lamps whose pose changed.
+                const Ogre::Vector3 p = ln->_getDerivedPositionUpdated();
+                const Ogre::Quaternion q = ln->_getDerivedOrientationUpdated();
+                const bool moved = n.lightPoseKnown && !(p == n.lightPos && q == n.lightRot);
+                n.lightPos = p;
+                n.lightRot = q;
                 n.lightPoseKnown = true;
+                if (moved) listLampChange(n);
             }
         }
         if (!any) return 0u;
@@ -472,16 +478,41 @@ bool OgreScene::nameMovedNode(Node &rec, Ogre::Node *on, std::vector<Ogre::Node 
         Ogre::Node *ln = rec.light->getParentNode();
         const Ogre::Vector3 p = ln->_getDerivedPositionUpdated();
         const Ogre::Quaternion q = ln->_getDerivedOrientationUpdated();
-        if (rec.lightPoseKnown && !(p == rec.lightPos && q == rec.lightRot)) {
+        const bool moved = rec.lightPoseKnown && !(p == rec.lightPos && q == rec.lightRot);
+        rec.lightPos = p; rec.lightRot = q; rec.lightPoseKnown = true;
+        if (moved) {
             light = true;
             noteLampChanged(rec);
+            listLampChange(rec);
         }
-        rec.lightPos = p; rec.lightRot = q; rec.lightPoseKnown = true;
     }
     for (NodeId rider : rec.boneRiders)   // the direct index, counted (decision 22.7): never the ordered map's descent
         if (Node *r = record(rider); r && r->node) stack.push_back(r->node);
     for (size_t i = 0, e = on->numChildren(); i < e; ++i) stack.push_back(on->getChild(i));
     return light;
+}
+
+/// THE LAMP'S REGION (PHOTON-7 stage 3): every lamp event the scheduler hears (a pose that changed, a description whose GI
+/// key changed, a shown flip, an arrival, a removal) lists the lamp's range sphere as last listed JOINED with its sphere
+/// now into the frame's changed-region list - the injection lights nothing past the range (JahBrdf's window), so the
+/// voxels and cards its change reaches lie in that box. A directional light is the SUN: it reaches everything, so its
+/// event is the list's overflow (and the close's restart test reads its peak) - never a box.
+void OgreScene::listLampChange(Node &n, bool gone) {
+    Ogre::Light *l = n.light;
+    if (l && l->getType() == Ogre::Light::LT_DIRECTIONAL) {
+        mPhoton.noteRegionOverflow(kGiRegionOverflowSun);
+        // (a lamp that was a ranged one until this description leaves its last sphere)
+        if (n.lightListed) mPhoton.listLamp(true, n.lightListedCentre, n.lightListedRange, false, Ogre::Vector3::ZERO, 0.0f);
+        n.lightListed = false;
+        return;
+    }
+    const bool has = !gone && l && l->getVisible() && l->getParentNode();
+    const Ogre::Vector3 centre = has ? l->getParentNode()->_getDerivedPositionUpdated() : Ogre::Vector3::ZERO;
+    const float range = has ? float(l->getAttenuationRange()) : 0.0f;
+    mPhoton.listLamp(n.lightListed, n.lightListedCentre, n.lightListedRange, has, centre, range);
+    n.lightListed = has;
+    n.lightListedCentre = centre;
+    n.lightListedRange = range;
 }
 
 bool OgreScene::nameMovedSubtrees(std::vector<Ogre::Node *> &stack, uint32_t rootSlot) {

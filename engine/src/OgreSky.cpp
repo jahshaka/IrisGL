@@ -2583,6 +2583,7 @@ void OgreScene::destroyCloudLayer() {
     // down or its sky replaced, and both re-inject on their own).
     mCloudGiState = FogHlmsListener::CloudShadowState();
     ++mCloudGiSerial;
+    mPhoton.noteRegionOverflow(kGiRegionOverflowSun);   // the sun's shadow changed everywhere (PHOTON-7 stage 3)
     if (mCloudQuad) { mSceneMgr->destroyRectangle2D(mCloudQuad); mCloudQuad = nullptr; }
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     // The clones keep their units: a destroyed texture nulls itself out of every
@@ -2751,6 +2752,8 @@ void OgreScene::snapshotCloudGi(bool fieldRebaked) {
     if (same && !(fieldRebaked && st.field)) return;
     mCloudGiState = st;
     ++mCloudGiSerial;
+    // THE CLOUD LAYER SHADES THE SUN (PHOTON-7 stage 3): its change is the sun's, everywhere - the list's overflow.
+    mPhoton.noteRegionOverflow(kGiRegionOverflowSun);
     // The voxels hold the direct term, so a change re-injects them (the light
     // tick's path: one injection over the voxels already there, or an owed tick
     // under a chain); the field re-integrates from them.

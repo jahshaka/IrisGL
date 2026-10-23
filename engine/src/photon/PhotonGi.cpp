@@ -997,6 +997,7 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
         mGiInjectionsThisFrame = 0;
     }
     mGiInjectionsPeak = std::max(mGiInjectionsPeak, ++mGiInjectionsThisFrame);
+    listInjectionRegion(i, commit);   // where its light changed (PHOTON-7 stage 3)
     // THE COMMIT'S SHADER, ASKED FOR AT THE CASCADE'S FIRST INJECTION (ASYNC-SHADERS-1): the delta injection's
     // permutation goes to the background compiler long before a walk's first commit needs it (a commit that finds it
     // still building waits a frame: recordCascades). Once per cascade.
@@ -1005,6 +1006,34 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
         mVctCascades[i].commitShaderAsked = true;
     }
     return true;
+}
+
+void PhotonComponent::listInjectionRegion(size_t i, const Ogre::PhotonCommitLight *commit) {
+    VctCascade &c = mVctCascades[i];
+    const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+    const uint32_t bit = i < 32u ? 1u << i : 0u;
+    if (commit && commit->delta) {
+        // A COMMIT'S DELTA: the cells its direct was computed over, in the new placement's cells - the changed direct
+        // set lies in them, the rest kept every bit (gi.scroll_slab G). None = the whole box.
+        const Ogre::uint32 n = std::min(commit->numInjectBoxes, Ogre::PhotonCommitLight::kMaxInjectBoxes);
+        if (n) {
+            const Ogre::Vector3 corner = box.getMinimum();
+            const float cell = c.cell();
+            for (Ogre::uint32 b = 0; b < n; ++b) {
+                const Ogre::Vector3 lo(corner.x + cell * float(commit->injectLo[b][0]), corner.y + cell * float(commit->injectLo[b][1]),
+                                       corner.z + cell * float(commit->injectLo[b][2]));
+                const Ogre::Vector3 hi(corner.x + cell * float(commit->injectHi[b][0]), corner.y + cell * float(commit->injectHi[b][1]),
+                                       corner.z + cell * float(commit->injectHi[b][2]));
+                appendRegion(GiRegionKind::Slab, Ogre::Aabb::newFromExtents(lo, hi), bit);
+            }
+        } else {
+            appendRegion(GiRegionKind::Slab, box, bit);
+        }
+    } else if (!c.regionListed || c.regionPlacement != c.centre) {
+        appendRegion(GiRegionKind::Slab, box, bit);   // the whole box at a new placement
+    }
+    c.regionListed = true;
+    c.regionPlacement = c.centre;
 }
 
 // THE FIELD IS AN INTEGRAL OF THE CHAIN, so it re-integrates after the chain's
@@ -1168,6 +1197,16 @@ GiStatus PhotonComponent::giStatus() const {
     // and leaves the struct's zeroed defaults when there is no cache, which is
     // every scene with the card row off.
     if (mSurfaceCache) mSurfaceCache->fillStatus(st.cards);
+    // THE CHANGED-REGION LIST as it last closed (PHOTON-7 stage 3): counters the component holds, no Ogre object.
+    st.regionFrame = mRegionsClosed.frame;
+    st.regionCount = unsigned(mRegionsClosed.regions.size());
+    for (const GiChangedRegion &r : mRegionsClosed.regions)
+        if (unsigned(r.kind) < kGiRegionKindCount) ++st.regionsByKind[unsigned(r.kind)];
+    st.regionOverflow = mRegionsClosed.overflow;
+    st.regionRestart = mRegionsClosed.restart;
+    st.regionMerges = mRegionsClosed.merges;
+    st.regionCloses = mRegionCloses;
+    st.regionClosesListing = mRegionClosesListing;
     JAH_TRY {
         if (mPcc) st.probeCount = int(mPcc->getProbes().size());
         // "Bound" means THIS scene's passes sample the arm (SceneGiBinding): a
@@ -2008,6 +2047,7 @@ void PhotonComponent::settleTextureResidency() {
         if (mit != mScene.materialRecords().end()) {
             bool bump = false;
             if (giMaterialChangeEffect(mat, voxelInput, bump)) { stale = true; bumpVoxels |= bump; }
+            if (bump) mGiMaterialEdits.push_back(mat);   // its wearers' boxes owe the rebuild (refreshCascadesFast)
         }
         mMaterialsAwaitingTexture[i] = mMaterialsAwaitingTexture.back();
         mMaterialsAwaitingTexture.pop_back();
@@ -2077,6 +2117,7 @@ void PhotonComponent::noteMaterialChanged(MaterialId id, bool voxelInputsChanged
     if (bumpVoxels) {
         ++mGiMaterialGeneration;
         mVctMaterialRefreshOwed = true;   // see the sibling above
+        mGiMaterialEdits.push_back(id);   // its wearers' boxes owe the rebuild (refreshCascadesFast)
     }
 }
 
@@ -2990,6 +3031,10 @@ void PhotonComponent::clearCascadeDirty() {
 
 void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box) {
     if (mVctCascades.empty()) return;          // no chain: nothing to describe
+    // THE EDIT'S REGION (PHOTON-7 stage 3): every box the dirty path is told is the changed-region list's, as told -
+    // never a merged or collapsed one; "somewhere" is the list's overflow.
+    if (box) appendRegion(GiRegionKind::Edit, *box);
+    else noteRegionOverflow(kGiRegionOverflowSomewhere);
     if (mGiCascadeDirtyAll) return;            // already the strongest statement
     if (!box) { clearCascadeDirty(); mGiCascadeDirtyAll = true; return; }
     // THE RUNNING UNION AND THE COLLAPSE (ENGINE-UPGRADE-U4 decision 12.2). The voxeliser's cost is the VOLUME a box
@@ -3122,6 +3167,7 @@ void PhotonComponent::noteGiDatablockDied(Ogre::HlmsDatablock *dying) {
         // cascade re-voxelises in place.
         mVctMaterialRefreshOwed = true;
         mGiCascadeDirtyAll = true;
+        noteRegionOverflow(kGiRegionOverflowSomewhere);   // the list cannot say where (PHOTON-7 stage 3)
         return;
     }
     // Evict from every voxeliser that may hold it (each cascade's). Erasing an entry twice is
@@ -3286,9 +3332,21 @@ bool PhotonComponent::refreshCascadesFast() {
         const bool materialGen = mGiBuiltMaterialGeneration != mGiMaterialGeneration;
         if (materialGen) {
             // A PLAIN DIRTY HIT (A5b fix round): the store re-reads the edited rows in
-            // place at the next build, so every cascade owes a rebuild of the SAME
-            // voxeliser - spread one per frame like any other dirty region.
-            mGiCascadeDirtyAll = true;
+            // place at the next build, so the cascades that hold a WEARER owe a rebuild of the SAME
+            // voxeliser - spread one per frame like any other dirty region. THE WEARERS' BOXES, never the
+            // whole chain (PHOTON-7 stage 3, AB A19 deleted): a voxel input of a material changes the voxels
+            // of the GI items that wear it and nothing else - each item's box as the GI walk last saw it (an
+            // item the walk has not met yet arrives with its own box), into the dirty path and the scroll in
+            // flight like any other edit, and so into the changed-region list.
+            for (const auto &kv : mScene.nodeRecords()) {
+                const auto &n = kv.second;
+                if (!n.item || !n.scan.giKnown || !(n.item->getVisibilityFlags() & kGiGeometryBit)) continue;
+                if (std::find(mGiMaterialEdits.begin(), mGiMaterialEdits.end(), n.materialRef) == mGiMaterialEdits.end())
+                    continue;
+                noteGiCascadeDirty(&n.scan.giBox);
+                noteScrollEdit(&n.scan.giBox);
+            }
+            mGiMaterialEdits.clear();
             mGiBuiltMaterialGeneration = mGiMaterialGeneration;
         }
         // WHY this refresh is about to mark what it marks (BOOTVOX-1's
@@ -4926,6 +4984,7 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
     mVctVoxelizer = mVctCascades[0].voxelizer;
     mVctLighting  = mVctCascades[0].lighting;
     mGiBuiltMaterialGeneration = mGiMaterialGeneration;
+    mGiMaterialEdits.clear();   // a whole build read every material
     // A FROM-SCRATCH CHAIN OWES NOTHING: every cascade was just built from the
     // live scene, so whatever the dirty path had recorded is answered (G1).
     clearCascadeDirty();   // the list, the union's state and its members (decision 18.1)
@@ -8066,6 +8125,7 @@ void PhotonComponent::teardownGi() {
     mCascadeFullRebuilds = 0;
     mCascadeDirtyMajority = 0;
     mCascadeFailureLogged = false;
+    releaseRegionBuffer();   // the list's GPU buffer (the next close makes it again)
 }
 
 // ---------------------------------------------------------------------------
@@ -8306,7 +8366,15 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
         mSurfaceCache->freezeFrame();
         return;
     }
+    // THE CARDS' REGIONS (PHOTON-7 stage 3): the instances the last frame's trace relit after its plan, then the
+    // instances whose cards this frame's plan relights - one box per instance.
+    {
+        std::vector<Ogre::Aabb> late;
+        mSurfaceCache->takeLateRelitBoxes(late);
+        for (const Ogre::Aabb &b : late) appendRegion(GiRegionKind::Card, b);
+    }
     mSurfaceCache->update(view);
+    for (const Ogre::Aabb &b : mSurfaceCache->relitInstanceBoxes()) appendRegion(GiRegionKind::Card, b);
 }
 
 }}}  // namespace jahshaka::engine::detail

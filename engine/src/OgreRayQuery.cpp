@@ -384,6 +384,12 @@ inline uint32_t coarsestLevelOf(const Ogre::Mesh *mesh) {
 class RayQueryTier final : public GatherHost {
 public:
     ~RayQueryTier() { close(); }
+    /// THE SLOTS THE SKIN PASS POSED THIS FRAME (`vaoFrame`; the changed-region list's movers, OgreEngine::
+    /// listRayMovers), or null: a scene with no ray structures, or no pose moved on that frame.
+    static const std::vector<uint32_t> *posedSlotsOf(const OgreScene *scene, uint32_t vaoFrame) {
+        const SceneAs *sa = asOf(scene);
+        return sa && sa->skinPosedFrame == vaoFrame ? &sa->skinPosedSlots : nullptr;
+    }
     /// A texture a VIEW owns and this tier's sets may still name (the photon
     /// view's overlay, PHOTON-VIEW-1): destroyed through the retire window.
     void retireViewTexture(Ogre::TextureGpu *&t) { retireTexture(t); }
@@ -9583,6 +9589,38 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     }
 }
 
+/// THE CHANGED-REGION LIST'S MOVERS (PHOTON-7 stage 3), after the GPU scene's commit and the skin pass
+/// (applyShadowCacheDirties): every slot the frame's update staged (a transform write, a flags change, a birth) and every
+/// pose the skin pass moved, ONCE, as its SWEPT box - its world bounds this frame joined with last frame's (sweptBoundsOf,
+/// the reflection's own rule) - with its shadow when it casts (OgreScene::listGiMover).
+void OgreEngine::listRayMovers(const std::vector<OgreScene *> &drawn) {
+    if (!mRoot || !mRoot->getRenderSystem() || !mRoot->getRenderSystem()->getVaoManager()) return;
+    const uint32_t vaoFrame = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
+    for (OgreScene *s : drawn) {
+        const detail::GpuScene &gs = s->gpuScene();
+        if (!gs.live()) continue;
+        const detail::GpuInstance *mirror = gs.mirrorData();
+        const auto list = [&](uint32_t slot) {
+            if (slot >= gs.slotCount()) return;
+            const detail::GpuInstance &g = mirror[slot];
+            float lo[3], hi[3];
+            sweptBoundsOf(g, lo, hi);
+            uint32_t flags;
+            std::memcpy(&flags, &g.boundsMax[3], sizeof(flags));
+            s->listGiMover(Ogre::Aabb::newFromExtents(Ogre::Vector3(lo[0], lo[1], lo[2]), Ogre::Vector3(hi[0], hi[1], hi[2])),
+                           (flags & detail::kGpuCaster) != 0u);
+        };
+        std::vector<uint32_t> moved;
+        if (gs.movedThisFrame(vaoFrame)) moved = gs.movedSlots();
+        for (uint32_t slot : moved) list(slot);
+        if (const std::vector<uint32_t> *posed = detail::RayQueryTier::posedSlotsOf(s, vaoFrame)) {
+            std::sort(moved.begin(), moved.end());
+            for (uint32_t slot : *posed)
+                if (!std::binary_search(moved.begin(), moved.end(), slot)) list(slot);   // a moved slot once
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 /// IS THE SCREEN-PROBE GATHER ON FOR THIS SCENE? The project's row resolved
 /// against the TIER TABLE and the machine (PHOTON-GATHER-1d, the rule T-A), the
@@ -9883,6 +9921,9 @@ namespace detail {
 void OgreEngine::setRayTracing(bool on) { mRayTracingWanted = on; mHostRayTracing = on; }
 bool OgreEngine::deviceRayQuery() const { return false; }
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &) {}
+// (no ray tier: no swept box and no posed slot, and none of the list's mover consumers - the cards, the gather, the
+// reflection, the hits - runs without it; movers are not voxel geometry)
+void OgreEngine::listRayMovers(const std::vector<OgreScene *> &) {}
 void OgreEngine::shutdownRayQuery() {}
 void registerPhotonRayPasses(AtomPassProvider *) {}
 struct RaySceneStructures {};

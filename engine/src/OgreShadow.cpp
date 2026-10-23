@@ -1622,6 +1622,9 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                                          std::chrono::duration<double, std::milli>(
                                              std::chrono::steady_clock::now() - rqStart).count());
         }
+        // THE MOVERS INTO THE CHANGED-REGION LIST (PHOTON-7 stage 3): the commit's moved slots and the skin pass's posed
+        // ones, here where both are this frame's (the list closes before the submit).
+        listRayMovers(drawn);
         // THE VISIBILITY BUFFER'S FRAME HALF (ATOM S3-DRAW), ONCE: the screen
         // decode's draws follow the words the split's items wear, here, outside the
         // compositor, after the table the split writes into and after the ray tier

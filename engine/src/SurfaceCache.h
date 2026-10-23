@@ -393,6 +393,13 @@ public:
     void update(const CardSceneView &view);
     /// THE GI FREEZE (PHOTON-2 round 2, M1's measuring arm): this frame captures, relights and traces nothing.
     void freezeFrame();
+    /// THE CHANGED-REGION LIST'S CARD PRODUCER (PHOTON-7 stage 3): the world box of every instance this frame's plan
+    /// relights a card of, once per instance (planRelights; empty before the frame's update or after a freeze).
+    const std::vector<Ogre::Aabb> &relitInstanceBoxes() const { return mRelitBoxes; }
+    /// ...and the instances whose cards the frame's own sun and mover trace added to the relight AFTER the plan (inside
+    /// photon_update, after the list closed): taken by the next frame's plan, which lists them (the frame their light
+    /// is first read in).
+    void takeLateRelitBoxes(std::vector<Ogre::Aabb> &out) { out.swap(mLateRelitBoxes); mLateRelitBoxes.clear(); }
 
     /// Everything a host, a monitor or a suite can see.
     void fillStatus(CardCacheStatus &out) const;
@@ -625,6 +632,9 @@ private:
     Ogre::UavBufferPacked *mRelightBuffer = nullptr;
     Ogre::UavBufferPacked *mLightBuffer = nullptr;
     std::vector<unsigned> mRelight;          ///< this frame's relight list: indices into mCards
+    std::vector<Ogre::Aabb> mRelitBoxes;     ///< relitInstanceBoxes(): the plan's instances, one box each
+    std::vector<unsigned> mRelitInstances;   ///< ...their instance indices (the late relights' filter)
+    std::vector<Ogre::Aabb> mLateRelitBoxes; ///< takeLateRelitBoxes()
     /// ...and each entry's mode (JahCardLight_cs.glsl): 1 march the indirect,
     /// 0 read it back, 2 none yet.
     std::vector<unsigned> mRelightMode;

@@ -1562,6 +1562,11 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                 // where it does: it wants "nothing has rendered yet", and this
                 // renders six 128^2 faces.
                 for (OgreScene *s : updated) s->applyPendingSkyCapture();
+                // THE CHANGED-REGION LIST CLOSES HERE (PHOTON-7 stage 3), once per drawn scene: every producer of the
+                // frame has appended - the drain's lamps, the GI step's slabs and edits, the cards' plan, the GPU scene's
+                // commit and the skin pass (applyShadowCacheDirties, above) - and nothing has been submitted. A scene
+                // this frame did not draw keeps its list open for the frame that draws it.
+                for (OgreScene *s : updated) s->closeGiRegions();
                 // THE RECORD/SWAP SPLIT. One call does both; the frame listener
                 // marks the instant between them (see FrameSplitListener).
                 const auto monFrameStart = std::chrono::steady_clock::now();

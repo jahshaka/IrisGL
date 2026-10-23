@@ -1396,6 +1396,16 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
             spent += cost;
         }
     }
+    // 3. THE CHANGED-REGION LIST'S BOXES (PHOTON-7 stage 3): each instance this plan relights a card of, ONCE - its
+    // world box (the transform signature's: where its cards were cut).
+    for (unsigned idx : mRelight) {
+        const unsigned inst = mCards[idx].instance;
+        if (inst >= mInstances.size() ||
+            std::find(mRelitInstances.begin(), mRelitInstances.end(), inst) != mRelitInstances.end())
+            continue;
+        mRelitInstances.push_back(inst);
+        mRelitBoxes.push_back(Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize));
+    }
 }
 
 void SurfaceCache::relightCards() {
@@ -1727,6 +1737,12 @@ void SurfaceCache::relightCards() {
 
     for (size_t i = 0; shaderReady && i < mRelight.size(); ++i) {
         CardRec &c = mCards[mRelight[i]];
+        // A CARD THE TRACE ADDED AFTER THE PLAN (PHOTON-7 stage 3): its instance is the next frame's region.
+        if (c.instance < mInstances.size() &&
+            std::find(mRelitInstances.begin(), mRelitInstances.end(), c.instance) == mRelitInstances.end()) {
+            mRelitInstances.push_back(c.instance);
+            mLateRelitBoxes.push_back(Ogre::Aabb(mInstances[c.instance].centre, mInstances[c.instance].halfSize));
+        }
         c.relight = false;
         c.lastRelit = mFrame;
         ++mRelights;
@@ -2658,6 +2674,8 @@ void SurfaceCache::syncBuffers() {
 }
 
 void SurfaceCache::freezeFrame() {
+    mRelitBoxes.clear();
+    mRelitInstances.clear();
     mFrozen = true;
     mBatch.clear();
     mRelight.clear();
@@ -2668,6 +2686,8 @@ void SurfaceCache::freezeFrame() {
 }
 
 void SurfaceCache::update(const CardSceneView &view) {
+    mRelitBoxes.clear();
+    mRelitInstances.clear();
     if (!mBuilt) return;
     mFrozen = false;
     ++mFrame;

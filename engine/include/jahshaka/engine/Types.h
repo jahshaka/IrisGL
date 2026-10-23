@@ -4144,6 +4144,58 @@ struct CardCacheStatus {
     float relightGpuMs = -1.0f;
 };
 
+// ---------------------------------------------------------------------------
+// THE CHANGED-REGION LIST (PHOTON-7 stage 3, AB S1; law L2: change drives work). ONE list a frame per scene says WHERE
+// the world changed: the producers APPEND at their four points of the frame (the drain, the GI step, the cards' plan,
+// the GPU scene's commit and the skin pass) and the list CLOSES before the frame's submit, into the one buffer every
+// consumer binds (PhotonComponent::regionBuffer) and this door. Its consumers are re-pointed onto it in the stages that
+// move them (4, 5, 6, 8); until then nothing reads it but the door.
+// ---------------------------------------------------------------------------
+/// WHAT CHANGED IN A LISTED BOX. The value is the kind's word in the GPU list.
+enum class GiRegionKind : uint32_t {
+    /// a scroll's commit: the cells whose light it re-injected (the entering slab and its band - the faces the shift
+    /// moved), or the whole box of a cascade placed anew (a whole build, a jump) or re-injected as a delta inside a
+    /// committed one
+    Slab = 1,
+    Card = 2,          ///< a relit card's instance box (the cards' plan), one per instance however many of its cards
+    Edit = 3,          ///< the dirty path's box: geometry or a voxel input changed there (a move, an arrival, a material)
+    Mover = 4,         ///< a moved or skin-posed ray-tier slot's SWEPT box: its bounds this frame joined with last frame's
+    /// ...a shadow-casting mover's swept box again, as the occluder of the SUN: its shadow lies along -toSun from it
+    /// (GiChangedRegions::toSun) - an AABB of the extrusion would inflate by up to the shadow's 60 m length
+    MoverShadow = 5,
+    LampShadow = 6,    ///< the range sphere's box of a lamp whose range meets a casting mover (its shadow cannot leave it)
+    Lamp = 7,          ///< a lamp's old range sphere joined with its new one (its pose, colour or range changed; it came or went)
+};
+constexpr unsigned kGiRegionKindCount = 8u;   ///< indexed by the kind's value (0 unused)
+constexpr unsigned kGiRegionCap = 128u;       ///< regions a list holds; past it boxes MERGE (never an overflow)
+/// "CANNOT SAY WHERE" (GiChangedRegions::overflow, bits): the sun changed (a directional light, the cloud layer's
+/// shadow on it) or the sky did (the environment, the ambient, the fog) - every sun- or sky-lit cache changed - or a
+/// change came with no box (a texture's death, a null dirty box).
+constexpr uint32_t kGiRegionOverflowSun = 1u;
+constexpr uint32_t kGiRegionOverflowSky = 2u;
+constexpr uint32_t kGiRegionOverflowSomewhere = 4u;
+/// ONE REGION: a world AABB, its kind, and the cascades whose light it may have changed (bit i = cascade i: a box test
+/// against each cascade's box at the close; a Slab's own cascade).
+struct GiChangedRegion {
+    Vec3 lo, hi;
+    GiRegionKind kind = GiRegionKind::Edit;
+    uint32_t cascadeMask = 0u;
+};
+/// THE LIST AS IT CLOSED (Scene::giChangedRegions): the last frame that drew the scene.
+struct GiChangedRegions {
+    bool available = false;          ///< a list has closed since the scene was made
+    unsigned long long frame = 0;    ///< the engine frame it closed in
+    uint32_t overflow = 0u;          ///< kGiRegionOverflow* bits
+    /// THE LIGHTING RESTART (Lumen's only one, LR §2.9): the peak channel of the sun (the first directional light of the
+    /// scene's order, colour x power) or of the sky (the ambient's constant band) moved by more than 4x or under 1/4
+    /// since the last close. Always with an overflow.
+    bool restart = false;
+    bool sun = false;                ///< the scene has a sun: `toSun` is its direction
+    Vec3 toSun;                      ///< the unit vector from a surface toward the sun, at the close
+    uint32_t merges = 0u;            ///< boxes merged into another of their kind at the cap (the dirty path's metric)
+    std::vector<GiChangedRegion> regions;   ///< <= kGiRegionCap, in append order
+};
+
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
 /// "the renderer beats the request" contract as View::sampleCount() and
 /// Scene::activePlanarReflectors().
@@ -4425,6 +4477,17 @@ struct GiStatus {
     /// irradiance field's integration. A readback of the voxels (giVoxelVolume, giVoxelStats) taken while it is false
     /// reads the chain's answer for the placements it stands at. False with GI off.
     bool chainOwed = false;
+    /// THE CHANGED-REGION LIST (PHOTON-7 stage 3) as it last CLOSED (GiChangedRegions; the regions themselves:
+    /// Scene::giChangedRegions): the frame, its regions and their count per kind (by the kind's value), its overflow
+    /// bits and restart flag, the merges its cap made; over the scene's life the closes and those that listed anything
+    /// (a region or a flag).
+    unsigned long long regionFrame = 0;
+    unsigned regionCount = 0;
+    unsigned regionsByKind[kGiRegionKindCount] = {};
+    uint32_t regionOverflow = 0u;
+    bool regionRestart = false;
+    unsigned regionMerges = 0;
+    unsigned long long regionCloses = 0, regionClosesListing = 0;
     /// SSAO IS REFUSED IN THIS SCENE (SSAO-DOUBLE-1; giCarriesOcclusion): true
     /// whenever the mode is not Off — every view that draws this scene builds its
     /// chain without the SSAO passes, whatever its PostFxDesc::ssao asks — with

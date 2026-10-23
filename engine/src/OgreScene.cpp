@@ -1187,18 +1187,28 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, Node *rec, bool inherited
         // without) the decal on it for ever. Same shape as the light: the
         // decal rides the projector-box child, one unregistered level down,
         // and is reached by this same loop there.
+        Node *lampOwner = nullptr;
+        bool lampFlipped = false;
         if (obj->getVisible() != shown) {
             if (dynamic_cast<Ogre::Light *>(obj)) {
                 ++mGiLightWriteSerial;
                 staleProbeGrid(GiStaleReason::Light);
                 // ...and a lamp event for the GI scheduler (U0 3c): the lamp rides its -Y adapter, whose parent
                 // is the registered node.
-                if (const Node *owner = rec ? rec : registryNode(sn->getParent())) noteLampChanged(*owner);
+                lampFlipped = true;
+                lampOwner = rec ? rec : registryNode(sn->getParent());
+                if (lampOwner) noteLampChanged(*lampOwner);
                 else mPhoton.noteLampChanged(false);
             }
             else if (dynamic_cast<Ogre::Decal *>(obj)) staleProbeGrid(GiStaleReason::Moved);
         }
         obj->setVisible(shown);
+        // THE LAMP'S REGION once the flag is applied (PHOTON-7 stage 3): shown, its sphere; hidden, the one it lit. A
+        // light no registered node owns cannot be placed: the list's overflow.
+        if (lampFlipped) {
+            if (lampOwner && lampOwner->light == obj) listLampChange(*lampOwner);
+            else mPhoton.noteRegionOverflow(kGiRegionOverflowSomewhere);
+        }
     }
     if (rec) {
         // OURS: the Item's kGiGeometryBit and the billboard / PFX2 flags,
@@ -2015,6 +2025,7 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
                 n.lightGiKey = gk;
                 n.lightGiKnown = true;
                 noteLampChanged(n);
+                listLampChange(n);   // ...and its region: the old sphere and the new (PHOTON-7 stage 3)
             }
             if (!n.lightPoseKnown && n.lightNode) {
                 n.lightPos = n.lightNode->_getDerivedPositionUpdated();
@@ -2052,6 +2063,8 @@ bool OgreScene::removeLight(NodeId id) {
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.light) return false;
     JAH_TRY {
+        // THE LAMP'S LAST REGION, while the light still is (PHOTON-7 stage 3): the sphere it lit, listed as gone.
+        listLampChange(it->second, true);
         // Untied from every cached shadow map first: a fixed light is
         // dereferenced by its node on every update (releaseShadowLamp).
         if (mEngine) mEngine->releaseShadowLamp(this, it->second.light);

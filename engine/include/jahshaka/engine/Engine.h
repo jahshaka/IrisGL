@@ -1108,6 +1108,9 @@ public:
     /// GiVoxelVolume). False
     /// without a VCT arm or that cascade.
     virtual bool giVoxelVolume(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
+    /// THE CHANGED-REGION LIST AS IT LAST CLOSED (PHOTON-7 stage 3; Types.h GiChangedRegions) - the CPU copy of the
+    /// one buffer the consumers bind, no GPU read. False before a list has closed (no frame has drawn the scene).
+    virtual bool giChangedRegions(GiChangedRegions &out) { out = GiChangedRegions(); return false; }
     /// TRACE A BATCH OF RAYS against this scene's acceleration structure and
     /// wait for the answer — a TEST AND TOOL path, never a per-frame one.
     ///

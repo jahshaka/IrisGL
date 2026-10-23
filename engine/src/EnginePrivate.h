@@ -4351,6 +4351,20 @@ public:
     bool giVoxelVolume(int cascade, GiVoxelVolume &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelVolume(cascade, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::giVoxelVolume"); return mPhoton.giVoxelVolume(cascade, out); }
+    bool giChangedRegions(GiChangedRegions &out) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giChangedRegions(out); }); return r; }   // a REQUEST on the host's side (U3 4b)
+        JAH_HOST_CALL("Scene::giChangedRegions"); out = mPhoton.changedRegions(); return out.available; }
+    /// THE CHANGED-REGION LIST'S CLOSE (PHOTON-7 stage 3): once a frame per drawn scene, before the frame's submit
+    /// (renderOneFrame) - every producer of the frame has appended by then.
+    void closeGiRegions() { mPhoton.closeRegions(); }
+    /// ...and the ray tier's producer (OgreEngine::listRayMovers, after the GPU scene's commit and the skin pass): one
+    /// moved or posed slot's swept box, and whether it casts shadows.
+    void listGiMover(const Ogre::Aabb &swept, bool casts) { mPhoton.listMover(swept, casts); }
+    /// THE SKY'S PEAK CHANNEL as the GI reads it (the list's restart test): the ambient SH's constant band - the sky
+    /// lit by its Sky Light, or the host's own ambient - 0 before one was given.
+    float ambientPeakForGi() const {
+        return mAmbientShKnown ? std::max(mLastAmbientSh[0], std::max(mLastAmbientSh[1], mLastAmbientSh[2])) : 0.0f;
+    }
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
     /// OgreRayQuery.cpp — like the tier's own members, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
@@ -4880,6 +4894,11 @@ private:
         Ogre::Vector3      lightPos = Ogre::Vector3::ZERO;
         Ogre::Quaternion   lightRot = Ogre::Quaternion::IDENTITY;
         bool               lightPoseKnown = false;
+        /// THE LAMP AS THE CHANGED-REGION LIST LAST LISTED IT (PHOTON-7 stage 3; listLampChange): its range sphere -
+        /// the old half of the next event's old-and-new box - or none (a lamp hidden, removed or never listed).
+        Ogre::Vector3      lightListedCentre = Ogre::Vector3::ZERO;
+        float              lightListedRange = 0.0f;
+        bool               lightListed = false;
         /// Bumped by noteNodePosed (clip time / bone pose pushes): the caster
         /// scan re-renders the lamps around a skinned item whose pose moved.
         unsigned long long poseEpoch = 0;
@@ -6916,6 +6935,10 @@ public:   // (a seam PhotonComponent calls)
 private:
     /// A lamp event for the scheduler (setLight, removeLight, a shown flip, a pose that moved, a class flip).
     void noteLampChanged(const Node &n) { mPhoton.noteLampChanged(n.movable); }
+    /// ...AND THE LAMP'S REGION (PHOTON-7 stage 3; OgreGi.cpp): its range sphere as last listed joined with its sphere
+    /// now - a light hidden, detached or about to be destroyed (`gone`) has none - into the frame's changed-region
+    /// list; a DIRECTIONAL light's event is the sun's: an overflow, never a box.
+    void listLampChange(Node &n, bool gone = false);
     /// The movement scan has run at least once: before that, every item is
     /// seen for the first time and none of them is an arrival.
     bool mGiScannedOnce = false;
@@ -8474,6 +8497,9 @@ public:
     /// point (applyShadowCacheDirties, after updateSceneGraph and before any
     /// workspace renders). No private submit, no fence wait, no stall.
     void updateRayQuery(const std::vector<OgreScene *> &drawn);
+    /// THE CHANGED-REGION LIST'S MOVERS (PHOTON-7 stage 3; OgreRayQuery.cpp): the moved and skin-posed slots' swept
+    /// boxes into each drawn scene's list, after the GPU scene's commit and the skin pass.
+    void listRayMovers(const std::vector<OgreScene *> &drawn);
     /// Drops every acceleration structure and the tier's device objects. MUST
     /// run while the VkDevice is still alive — i.e. before Root is deleted, on
     /// the same rule as every MeshPtr the engine holds.
