@@ -236,7 +236,7 @@ constexpr unsigned kReflectRing = 3u;
 /// THE REFLECTION'S REST (PHOTON-2 1e, fix F1): the gather's rule — a rest mean restarted at the first rest frame and
 /// handed over from the moving history over N frames, then the hold. N is the gather's own function of the history's
 /// length (gatherSettleFramesOf: a 5-code step under one code through the MaxFrames-12 window, 19 frames).
-unsigned reflectRestLength() { return gatherSettleFramesOf(kReflectMaxFrames); }
+unsigned reflectRestLength(unsigned window) { return gatherSettleFramesOf(window); }
 /// THE REST'S SAMPLE SEQUENCE (commit 8): a rest sample's index is this base plus the sample's own number v (the
 /// shader adds it: per SAMPLE, never per frame - a frame's batch of k and a dropped record's retry are each the
 /// sequence's next), past every moving frame's (`frame & 0xFFFF`), so the samples a held picture averages are the same at
@@ -6199,7 +6199,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // rq_reflect.comp turns it into metres at the point's Euclidean distance from its own eye (jah_ray_origin.glsl).
     pp.knobs2[1] = drawnFootprintsOf(scene, chainD.lodHysteresis);
     pp.knobs2[2] = skyTex ? 1.0f : 0.0f;
-    pp.knobs2[3] = 1.0f / float(kReflectMaxFrames);   // the moving memory (the shaders' 1 / knobs2.w)
+    // THE MOVING WINDOW (kReflectMaxFrames; the measuring arm reflect.window N, every reader with it)
+    const unsigned reflectWindow = std::lround(armValue(ArmId::ReflectWindow)) > 0
+                                       ? unsigned(std::lround(armValue(ArmId::ReflectWindow))) : kReflectMaxFrames;
+    pp.knobs2[3] = 1.0f / float(reflectWindow);   // the moving memory (the shaders' 1 / knobs2.w)
     // THE DENOISER SPACE'S EXPOSURE (PHOTON-7 stage 6 commit 6: Lumen's space is on PRE-EXPOSED colour): the multiplier
     // the tonemapper scales the scene by - the chain's measured history (its 1 x 1: last frame's, read on the GPU, never
     // a readback), the fixed tonemap's constant, or 1 where nothing tonemaps.
@@ -6215,6 +6218,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.denoiser[1] = exposureTex ? 1.0f : 0.0f;
     // THE LOBE DRAW'S SEED OFFSET (the measuring arm reflect.seedOffset: 0 shipped).
     pp.denoiser[2] = float(std::lround(armValue(ArmId::ReflectSeedOffset)));
+    pp.denoiser[3] = arm(ArmId::ReflectFlatHits, false) ? 1.0f : 0.0f;   // the measuring arm reflect.flatHits
     // THE GI FREEZE (M1's measuring arm): the reflection keeps its histories under 1; under 2 (THE WORLD HELD) the caches
     // and the gather are held and the reflection runs live - its own estimator measured alone.
     pp.rest[0] = std::lround(armValue(ArmId::GiFreeze)) == 1 ? 1.0f : 0.0f;
@@ -6393,7 +6397,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
     // ---- THE REST (PHOTON-2 1e, fix F1; round 2: R1, G1-G6) -----------------------------------------------------
-    const unsigned restN = reflectRestLength();
+    const unsigned restN = reflectRestLength(reflectWindow);
     pp.stereo[3] = float(restN);
     // THE MOVED INSTANCES (G6): every slot the frame's update staged (a transform write, a flags change, a birth) and
     // every pose the skin pass moved, as a SWEPT BOX - its world bounds this frame joined with last frame's (the same

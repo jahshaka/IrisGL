@@ -1920,6 +1920,8 @@ public:
     X(RaysOriginCut, "rays.originCut") /* the scale on every view ray job's drawn-surface lift (1 shipped; 0 the float bound alone, 0.5 half: the origin rows' controls) */ \
     X(RaysOriginPoint, "rays.originPoint") /* every view ray job's lift carries the depth-rebuilt point's own error - its depth quantum and the rasteriser's sub-pixel snap (0: the float bound alone - the float-only control) */ \
     X(ReflectSeedOffset, "reflect.seedOffset") /* the lobe draw's frame index offset (a second, independent noise) */ \
+    X(ReflectFlatHits, "reflect.flatHits") /* every reflection ray's hit answered by a constant of its instance (the estimator and denoiser measured alone) */ \
+    X(ReflectWindow, "reflect.window") /* the moving window MaxFrames N (0 = shipped kReflectMaxFrames) and every reader of it */ \
     X(ReflectPosed, "reflect.posed") /* the posed (skinned) identification */ \
     X(ReflectAlphaTested, "reflect.alphaTested") /* cut-out geometry traced as cut-out */ \
     X(ReflectMonoEyes, "reflect.monoEyes") /* a stereo trace with the mono basis */ \

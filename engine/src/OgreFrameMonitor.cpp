@@ -1069,6 +1069,16 @@ constexpr ArmDef kArms[] = {
       "THE LOBE DRAW'S SEED OFFSET (PHOTON-7 stage 6, the walk's noise/signal split): added to the frame index the "
       "reflection's lobe draw and its resolve's re-derivation take - two walks identical but for it carry independent "
       "ray noise and the same signal (var( rA - rB ) / 2 is the noise). 0 = shipped." },
+    { ArmId::ReflectFlatHits, 0.0, 0.0, 1.0,
+      "THE HITS FLATTENED (PHOTON-7 stage 6, the lead's attribution arm (H), a measuring arm): 1 = every reflection "
+      "ray's hit answered by a constant of its instance (0.2 + 0.6 x the slot's golden-ratio fraction), no cache read, "
+      "no footprint or mip, no fog, no record - the reflection's estimator and denoiser measured alone (the hit caches "
+      "owned ~half the glossy noise map and a third of the lag law). 0 = shipped." },
+    { ArmId::ReflectWindow, 0.0, 0.0, 64.0,
+      "THE MOVING WINDOW (PHOTON-7 stage 6, the lead's window measurement, a measuring arm): the reflection's "
+      "MaxFrames N while moving - and with it every reader of N, the hit's footprint and the sky's mip (1 / sqrt N), "
+      "the rest's hand-over length (gatherSettleFramesOf N) and the temporal pass' window. 0 = shipped "
+      "(kReflectMaxFrames, Lumen's 12)." },
     { ArmId::ReflectPosed, 1.0, 0.0, 1.0,
       "The POSED identification (SKINNED-VELOCITY-1): the trace and the march's velocity take "
       "the posed geometry rows. 0 = the id image alone, the pre-lane motion for a character. "

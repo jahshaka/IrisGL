@@ -204,7 +204,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 screen;
 	vec4 screen2;
 	/// x, y: the denoiser space's exposure (the resolve's, the temporal pass'); z = THE LOBE DRAW'S SEED OFFSET (the arm
-	/// reflect.seedOffset, 0 shipped): added to the frame index the draw takes.
+	/// reflect.seedOffset, 0 shipped): added to the frame index the draw takes; w = 1 under the measuring arm
+	/// reflect.flatHits (every hit answered by a constant of its instance).
 	vec4 denoiser;
 	/// (the filter's display table, beside: this pass reads none of it)
 	vec4 display[16];
@@ -985,6 +986,15 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			if( !record )
 				traced = jahFogAlong( traced, world.y, L, length( origin + L * t - world ),
 									  length( world - thisEye.camPos ) );
+			// THE MEASURING ARM reflect.flatHits (denoiser.w): the hit answered by a constant of its instance - no cache,
+			// no footprint, no fog, no record (the estimator and the denoiser measured alone).
+			if( p.denoiser.w > 0.5 )
+			{
+				traced = vec3( 0.2 + 0.6 * fract( float( recSlot ) * 0.6180339 ) );
+				ok = true;
+				record = false;
+				photonSource = 2u;
+			}
 			recN = hitN;
 		}
 		else
