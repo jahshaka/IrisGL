@@ -782,40 +782,12 @@ vec4 historyAtImage( EyeImage before, int eye, vec3 world, ivec2 traceRes, out f
 	return sum / sumW;
 }
 
-/// THE GEOMETRIC NORMAL AT A PIXEL (the ray origin's direction): from the depth buffer - the cross of the two screen
-/// axes' neighbour points, each axis taking the side nearer in view distance (a silhouette's far side is another
-/// surface) - facing the eye. The shaded normal where an axis has no neighbour on a drawn surface.
-vec3 geometricNormalAt( EyeImage e, ivec2 px, ivec2 fullRes, vec3 world, float dist, vec3 shadedN, vec3 V )
-{
-	vec3 axisStep[2];
-	for( int a = 0; a < 2; ++a )
-	{
-		float best = 3.0e38;
-		bool found = false;
-		for( int s = -1; s <= 1; s += 2 )
-		{
-			const ivec2 q = px + ( a == 0 ? ivec2( s, 0 ) : ivec2( 0, s ) );
-			if( any( lessThan( q, ivec2( 0 ) ) ) || any( greaterThanEqual( q, fullRes ) ) )
-				continue;
-			const float raw = texelFetch( sceneDepth, ivec3( q, gEye ), 0 ).x;
-			if( raw <= 0.0 || raw >= 1.0 )
-				continue;
-			const float dq = viewDistance( raw );
-			if( abs( dq - dist ) >= best )
-				continue;
-			best = abs( dq - dist );
-			axisStep[a] = ( worldAt( e, ( vec2( q ) + 0.5 ) / vec2( fullRes ), dq ) - world ) * float( s );
-			found = true;
-		}
-		if( !found )
-			return shadedN;
-	}
-	vec3 n = cross( axisStep[0], axisStep[1] );
-	if( !( dot( n, n ) > 0.0 ) || !finite3( n ) )
-		return shadedN;
-	n = normalize( n );
-	return dot( n, V ) >= 0.0 ? n : -n;
-}
+/// THE GEOMETRIC NORMAL AT A PIXEL (the ray origin's direction, READ_A finding 1): jah_geometric_normal.glsl, the one
+/// text the sun contact reads too - this eye's own layer and basis.
+EyeImage gNormalEye;
+#define JAH_GN_RAW( q ) texelFetch( sceneDepth, ivec3( ( q ), gEye ), 0 ).x
+#define JAH_GN_WORLD( q, raw ) worldAt( gNormalEye, ( vec2( q ) + 0.5 ) / vec2( fullRes ), viewDistance( raw ) )
+#include "jah_geometric_normal.glsl"
 
 void main()
 {
@@ -913,7 +885,8 @@ void main()
 	// view distance - the world size, orthographic). The traced level's own bound is level 0's: zero. Along the GEOMETRIC
 	// normal (the G-buffer's is the shaded one, normal maps included), tMin 0. The 1/2-cell bias it replaces (3.9 cm at
 	// Epic, also as tMin) lifted the ray over a post's foot: the contact's reflection was missing for 99 rows at 1 m.
-	const vec3 geomN = geometricNormalAt( thisEye, px, fullRes, world, dist, worldN, V );
+	gNormalEye = thisEye;
+	const vec3 geomN = jahGeometricNormal( px, fullRes, rawDepth, world, worldN, V );
 	const float originLift = jahRayFloatBound( world, dist ) +
 							 p.knobs2.y * ( thisEye.perspective > 0.5 ? dist : 1.0 );
 	const vec3 origin = world + geomN * originLift;
@@ -1002,6 +975,13 @@ void main()
 	vec3 L = reflect( -V, H );
 	if( dot( L, worldN ) <= 0.0 )
 		L = reflect( -V, worldN );		// the lobe left the surface: take the mirror
+	// ...AND THE GEOMETRIC PLANE (READ_A W4): a normal-mapped lobe seen at grazing can point below the surface the ray
+	// actually leaves (L above the shaded plane, under the geometric one), and from an origin lifted along the geometric
+	// normal with tMin 0 it would hit its own surface at lift / |L . geomN|. Such a direction is REFLECTED about the
+	// geometric plane - deterministic (no rejection loop), the lobe's mass kept on the side the surface reflects into
+	// (Lumen clamps its rays to the geometric hemisphere the same way).
+	if( dot( L, geomN ) < 0.0 )
+		L -= 2.0 * dot( L, geomN ) * geomN;
 
 	// THIS SURFACE, LAST FRAME (REFLECT-MOVERS-1). A pixel the id pass drew for a
 	// slot that MOVED this frame was at that slot's previous pose: its point and
@@ -1336,7 +1316,11 @@ void main()
 	st.fixedEstimator = fixedEstimator;
 	st.surfaceOnly = ownMoving || hitMoving || virtualHeld;
 	st.ownMoving = ownMoving;
-	st.noHistory = prev.w <= 0.0;
+	// HAS AN ANSWER (READ_A finding 4): the history this frame's sample joins - at rest in place the texel's own rest
+	// half, its frozen moving count AND its rest samples (N + v: a texel whose frozen half held nothing at the rest's
+	// start but has rest samples since holds an answer); moving, the carried count.
+	const bool hasAnswer = restInPlace ? inPlace.N + float( inPlace.v ) > 0.0 : prev.w > 0.0;
+	st.noHistory = !hasAnswer;
 	// THE REST'S ACTIVE TEXELS, counted into the hit list's third counter word (read back several frames late): the
 	// view holds once a rest frame counted none (OgreRayQuery.cpp).
 	if( atRest && JAH_HIT_ON )
@@ -1350,8 +1334,8 @@ void main()
 		if( !restInPlace )
 			imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, 0.0 ) );
 		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );
-		st.surfDist = prev.w > 0.0 ? dist : 0.0;
-		st.stop = prev.w > 0.0 ? st.stop : 0u;
+		st.surfDist = hasAnswer ? dist : 0.0;
+		st.stop = hasAnswer ? st.stop : 0u;
 		st.hitT = restInPlace ? inPlace.hitT : jahStoredLength( wasHitT );
 		st.moverAge = uint( restInPlace ? float( inPlace.moverAge ) : min( wasMoverAge + 1.0, 63.0 ) );
 		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
@@ -1471,8 +1455,8 @@ void main()
 		{
 			// THE LIST WAS FULL (a dropped record, counted): this frame has no
 			// sample for the texel, which keeps what it had.
-			st.surfDist = prev.w > 0.0 ? dist : 0.0;
-			st.stop = prev.w > 0.0 ? st.stop : 0u;
+			st.surfDist = hasAnswer ? dist : 0.0;
+			st.stop = hasAnswer ? st.stop : 0u;
 			st.hitT = restInPlace ? inPlace.hitT : jahStoredLength( wasHitT );
 			st.moverAge = uint( restInPlace ? float( inPlace.moverAge ) : min( wasMoverAge + 1.0, 63.0 ) );
 			if( !restInPlace )

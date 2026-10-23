@@ -201,6 +201,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geometric_normal.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_voxel_sample.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_environment.glsl"
@@ -408,6 +409,7 @@ if(JAH_RAY_QUERY_OK)
                 --vn krq_sunContactSpv -o "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geometric_normal.glsl"
                 # the sun ray is one text with the hit record's (PHOTON-HIT-SHADE-1)
                 "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
