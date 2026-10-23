@@ -72,6 +72,7 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 #define JAH_PROBE_PARAMS_BINDING 1
 #include "jah_probe_params.glsl"
+#include "jah_ray_origin.glsl"
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 layout( std430, set = 0, binding = 2 ) readonly buffer Records { JahProbeRecord r[]; } records;
@@ -329,19 +330,19 @@ void main()
 		const float reweight = ( max( dLocal.z, 0.0 ) * jahOctSolidAngle( octPoint, float( octRes ) ) ) /
 							   max( centreCos * jahOctSolidAngle( centrePoint, float( octRes ) ), 1e-9 );
 
-		// THE ORIGIN LAW (PHOTON-7 stage 6, READ_A W2 - the reflection's and the sun contact's): the probe sits on the
-		// DRAWN surface and its rays trace each mesh's level 0, so the ray starts off it by the point's float error
-		// plus the drawn cut's error (knobs2.y: the view's pixel tolerance x the LOD bias, in full-resolution pixel
-		// footprints - here at the probe's distance, from the EYE that placed it: its cell names it, PHOTON-GA-VR),
-		// tMin 0. (Along the probe's shading normal: its record carries no other; its hemisphere is the shaded one.)
+		// THE ORIGIN LAW (PHOTON-7 stage 6, READ_A W2, READ_B F3 - the one law of every ray job, jah_ray_origin.glsl):
+		// the probe sits on the DRAWN surface and its rays trace each mesh's level 0, so the ray starts off it along
+		// the drawn surface's GEOMETRIC normal (geomW, found at the placement; the hemisphere stays the shaded one) by
+		// the point's float bound plus the drawn surface's bound against level 0 (knobs2.y: Types.h
+		// rayOriginDrawnFootprints) at the probe's Euclidean distance from the EYE that placed it (its cell names it,
+		// PHOTON-GA-VR), tMin 0.
 		const JahEye placedBy = jahEyeNow( jahEyeOfCell( cell.x ) );
 		const float probeDist = jahViewDistanceOf( placedBy, posW.xyz );
-		const float footprint = length( placedBy.rayDown ) / max( p.resolution.w, 1.0 );
-		const float bias = jahRayFloatBound( posW.xyz, probeDist ) +
-						   p.knobs2.y * footprint * ( placedBy.perspective > 0.5 ? probeDist : 1.0 );
 		const float maxT = p.knobs.y;
 		const float farT = p.knobs3.w;
-		const vec3 origin = posW.xyz + n * bias;
+		const vec3 origin = jahRayOrigin( posW.xyz, records.r[probe].geomW.xyz, probeDist,
+										  jahViewDrawnBound( p.knobs2.y, posW.xyz, placedBy.camPos, placedBy.rayDown,
+															 p.resolution.w, placedBy.perspective > 0.5 ) );
 		// THE NEAR QUERY: the near copies (Types.h kRayMaskNearField).
 		rayQueryEXT rq;
 		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, dir, maxT );

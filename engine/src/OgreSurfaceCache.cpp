@@ -1799,11 +1799,13 @@ namespace {
 /// lift: a card's footprint is grown by its own still-trace lift plus one texel
 /// (cardFootprint's `margin`, sunLiftOf) — the ray starts that far off the card.
 constexpr float kFootprintMargin = 0.05f;
-/// THE STILL TRACE'S LIFT (rq_card_movers.comp's head; READ_A finding 3): the origin moves off the receiver along its
-/// normal by THE CAPTURED LEVEL'S MEASURED BOUND (CardRec::levelBound: the surface the card captured lies within it of
-/// level 0, which every sun ray traces - PHOTON-7 stage 6, ONE RAY LEVEL PER MESH), plus ONE TEXEL (the texel's own
-/// reconstruction: its depth and normal are a texel's average) and the Depth layer's R16F quantum at the card's far
-/// end. Derived, never a texel count: the bake picks the level for its NOMINAL 128-texel page while a split card's
+/// THE STILL TRACE'S LIFT (rq_card_movers.comp's head; READ_A finding 3, READ_B finding 3 - the ORIGIN LAW every ray job
+/// keeps, Types.h rayOriginLevelLift): the origin moves off the receiver along the captured surface's GEOMETRIC normal by
+/// THE CAPTURED LEVEL'S BOUND against level 0 (CardRec::levelBound, the stored bound, times the bake's drift ratio
+/// kLevelDriftOverBound: the surface the card captured lies within it of level 0, which every sun ray traces -
+/// PHOTON-7 stage 6, ONE RAY LEVEL PER MESH), plus ONE TEXEL (the texel's own reconstruction: its depth and normal
+/// are a texel's average) and the Depth layer's R16F quantum at the card's far end; the shader adds the point's
+/// float bound. Derived, never a texel count: the bake picks the level for its NOMINAL 128-texel page while a split card's
 /// texel is that page's / the split (up to kCardMaxSplit 4), so a fixed "2 texels" let a convex card wider than 4 m
 /// start its sun rays inside level 0 (self-shadowed texels). The ray tier's footprint at the card that the old lift
 /// also cleared (a coarser near level re-fitted per view) is gone with the level.
@@ -2037,7 +2039,7 @@ float SurfaceCache::sunLiftOf(const CardRec &c) const {
     const float texel = 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size));
     // R16F keeps 11 bits: the depth quantum at the card's far end.
     const float depthQuantum = (2.0f * c.halfDepth + 2.0f * captureMargin(c.halfDepth)) / 1024.0f;
-    return c.levelBound + kSunLiftTexels * texel + depthQuantum;
+    return rayOriginLevelLift(c.levelBound) + kSunLiftTexels * texel + depthQuantum;
 }
 
 void SurfaceCache::traceSun() {

@@ -64,14 +64,25 @@ layout( std430, set = 0, binding = 4 ) buffer Counter { uint appended; uint pad[
 layout( std430, set = 0, binding = 5 ) buffer Args { uint x; uint y; uint z; } args;
 
 /// The surface a pixel drew, or `valid` false where it drew none (the sky, a
-/// pixel the prepass never touched).
-struct Surface { vec3 world; vec3 normal; float dist; bool valid; };
+/// pixel the prepass never touched); `geomN` = its GEOMETRIC normal (the ray
+/// origin's direction, jah_ray_origin.glsl), the shading one where the depth has
+/// no plane through the pixel.
+struct Surface { vec3 world; vec3 normal; vec3 geomN; float dist; bool valid; };
+
+/// THE GEOMETRIC NORMAL (READ_B F3: every ray job's origin is lifted along the drawn surface's geometric normal): the
+/// one text over the eye's own layer of the depth, at the pixel's centre.
+int gnEye = 0;
+#define JAH_GN_RAW( q ) texelFetch( sceneDepth, ivec3( ( q ), gnEye ), 0 ).x
+#define JAH_GN_WORLD( q, raw ) jahWorldAt( jahEyeNow( gnEye ), ( vec2( q ) + 0.5 ) / p.resolution.zw, \
+										   jahViewDistance( raw ) )
+#include "jah_geometric_normal.glsl"
 
 Surface surfaceAt( vec2 pix, int eye )
 {
 	Surface s;
 	s.world = vec3( 0.0 );
 	s.normal = vec3( 0.0 );
+	s.geomN = vec3( 0.0 );
 	s.dist = 0.0;
 	s.valid = false;
 	// CLAMPED TO THE EYE'S OWN IMAGE: the grid is a ceiling division, so the
@@ -93,6 +104,18 @@ Surface surfaceAt( vec2 pix, int eye )
 	s.dist = jahViewDistance( rawDepth );
 	s.world = jahWorldAt( jahEyeNow( eye ), local, s.dist );
 	s.valid = finite3( s.world ) && finite3( s.normal ) && finite1( s.dist );
+	if( s.valid )
+	{
+		// At the TEXEL the point-sampled depth was read from, through the eye that drew it, facing that eye.
+		const ivec2 res = ivec2( p.resolution.zw );
+		const ivec2 q = min( ivec2( local * vec2( res ) ), res - 1 );
+		gnEye = eye;
+		const JahEye e = jahEyeNow( eye );
+		const vec3 centre = JAH_GN_WORLD( q, rawDepth );
+		const vec3 V = e.perspective < 0.5 ? -e.fwd : normalize( e.camPos - centre );
+		s.geomN = jahGeometricNormal( q, res, rawDepth, centre, s.normal, V );
+		s.valid = finite3( s.geomN );
+	}
 	return s;
 }
 
@@ -100,6 +123,7 @@ void writeRecord( uint index, Surface s, float adaptiveLink )
 {
 	records.r[index].posW = vec4( s.world, s.valid ? 1.0 : 0.0 );
 	records.r[index].normalW = vec4( s.normal, adaptiveLink );
+	records.r[index].geomW = vec4( s.geomN, 0.0 );
 	// The trace overwrites this; zeroing it here is what makes a probe that the
 	// trace declines (no surface) read as "no answer" rather than as last
 	// frame's answer at a place the camera has left.
@@ -159,6 +183,7 @@ void main()
 	w.world = records.r[index].sh[0].xyz;
 	w.dist = records.r[index].sh[0].w;
 	w.normal = records.r[index].sh[1].xyz;
+	w.geomN = records.r[index].sh[2].xyz;
 	w.valid = true;
 	// ITS SOURCE CELL travels with it, in the same float the uniform records use for
 	// their link: the trace keys an adaptive probe's ray directions on the CELL it was
@@ -256,5 +281,6 @@ void main()
 	// THE STASH for pass 2: the worst pixel's surface, and whether the cell asks.
 	records.r[index].sh[0] = vec4( worstSurface.world, worstSurface.dist );
 	records.r[index].sh[1] = vec4( worstSurface.normal, wants ? 1.0 : 0.0 );
+	records.r[index].sh[2] = vec4( worstSurface.geomN, 0.0 );
 }
 #endif   // JAH_PLACE_SELECT

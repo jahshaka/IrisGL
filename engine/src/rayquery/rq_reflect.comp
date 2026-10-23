@@ -76,8 +76,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 knobs;
 	/// x = THE REST FRAME k, 1..N on a frame the view rests (PHOTON-2 1e, fix F1: the gather's rule — a rest mean handed
 	/// over from the frozen moving history, rq_reflect_temporal.comp), 0 while it moves, y = the
-	/// drawn cut's error per unit of view distance (the view's pixel tolerance x the LOD bias x one full-resolution
-	/// pixel; world units under an orthographic camera) - rq_reflect.comp's RAY ORIGIN,
+	/// drawn surface's bound in sample footprints (Types.h rayOriginDrawnFootprints) - the RAY ORIGIN's
+	/// (jah_ray_origin.glsl, at the point's Euclidean distance from its eye),
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).
 	vec4 knobs2;
@@ -728,6 +728,7 @@ EyeImage gNormalEye;
 #define JAH_GN_RAW( q ) texelFetch( sceneDepth, ivec3( ( q ), gEye ), 0 ).x
 #define JAH_GN_WORLD( q, raw ) worldAt( gNormalEye, ( vec2( q ) + 0.5 ) / vec2( fullRes ), viewDistance( raw ) )
 #include "jah_geometric_normal.glsl"
+#include "jah_ray_origin.glsl"
 
 void main()
 {
@@ -817,19 +818,18 @@ void main()
 		photonHit( tc, kPhotonNoRay );
 		return;
 	}
-	// ---- THE RAY ORIGIN (PHOTON-7 stage 6, AB E15; ONE_PICTURE C3) --------------------------------------------------
+	// ---- THE RAY ORIGIN (PHOTON-7 stage 6, AB E15, READ_B F3; the one law of every ray job, jah_ray_origin.glsl) -----
 	// The ray starts on the pixel's DRAWN surface - Atom's cut or a stock item's LOD - and traces the meshes' LEVEL 0
-	// (ONE RAY LEVEL PER MESH), so it must start outside the traced surface by exactly the two errors between them:
-	// THE FLOAT ERROR of the reconstructed point (jahRayFloatBound) and THE DRAWN CUT'S ERROR, the view's pixel tolerance
-	// in footprints at the pixel's depth (knobs2.y: the tolerance x the LOD bias x one full-resolution pixel per unit of
-	// view distance - the world size, orthographic). The traced level's own bound is level 0's: zero. Along the GEOMETRIC
-	// normal (the G-buffer's is the shaded one, normal maps included), tMin 0. The 1/2-cell bias it replaces (3.9 cm at
-	// Epic, also as tMin) lifted the ray over a post's foot: the contact's reflection was missing for 99 rows at 1 m.
+	// (ONE RAY LEVEL PER MESH): it is lifted along the GEOMETRIC normal (the G-buffer's is the shaded one, normal maps
+	// included) by the reconstructed point's float bound plus the drawn surface's bound against level 0 at the point's
+	// EUCLIDEAN distance from THIS eye (knobs2.y: Types.h rayOriginDrawnFootprints - the tolerance x the LOD bias over
+	// the view's band, x the bake's drift ratio), tMin 0. The 1/2-cell bias it replaces (3.9 cm at Epic, also as tMin)
+	// lifted the ray over a post's foot: the contact's reflection was missing for 99 rows at 1 m.
 	gNormalEye = thisEye;
 	const vec3 geomN = jahGeometricNormal( px, fullRes, rawDepth, world, worldN, V );
-	const float originLift = jahRayFloatBound( world, dist ) +
-							 p.knobs2.y * ( thisEye.perspective > 0.5 ? dist : 1.0 );
-	const vec3 origin = world + geomN * originLift;
+	const vec3 origin = jahRayOrigin( world, geomN, dist,
+									  jahViewDrawnBound( p.knobs2.y, world, thisEye.camPos, thisEye.rayDown,
+														 float( fullRes.y ), thisEye.perspective > 0.5 ) );
 
 	// ---- AT REST, PER TEXEL (PHOTON-2 round 2: R1, G6; jah_reflect_rest.glsl) ----------------------------------
 	// knobs2.x = the rest frame k (1..kReflectRestMax), 0 while moving, -1 on the frame that BREAKS a rest (the compose

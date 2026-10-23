@@ -6032,19 +6032,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         pp.screen2[2] = std::max(0.001f, pp.knobs[1] - std::max(0.0f, sa.farOverlap));
         pp.screen2[3] = farPlane > pp.knobs[1] ? farPlane : 0.0f;
     }
-    // THE RAY ORIGIN'S DRAWN-CUT TERM (PHOTON-7 stage 6, AB E15): the view's pixel tolerance (the World Mode's
-    // atomPixelError, Scene::pixelTolerance) x the LOD bias - what the id pass's cut and the stock thresholds both
-    // take - in FULL-RESOLUTION pixel footprints per unit of view distance (rayDown spans the target's height with a
-    // forward component of 1; under an orthographic camera it is the plane, and this is world units). rq_reflect.comp
-    // lifts the ray off the pixel's drawn surface by it plus the point's float error: the near copies are level 0, and
-    // the drawn cut lies within the tolerance of them. (It was half a c0 cell, 3.9 cm at Epic, also as tMin: a voxel
-    // rule on a ray that reads geometry - the contact's reflection was missing at 1 m.)
-    {
-        const float down = std::sqrt(eyeB[0].rayDown[0] * eyeB[0].rayDown[0] + eyeB[0].rayDown[1] * eyeB[0].rayDown[1] +
-                                     eyeB[0].rayDown[2] * eyeB[0].rayDown[2]);
-        pp.knobs2[1] = arm(ArmId::RaysOriginCut, true)
-                           ? scene->pixelTolerance() * scene->lodBias() * down / float(fullH) : 0.0f;
-    }
+    // THE RAY ORIGIN'S DRAWN TERM (PHOTON-7 stage 6, AB E15, READ_B F3 - the one law, Types.h): the view's pixel
+    // tolerance (the World Mode's atomPixelError, Scene::pixelTolerance) x the LOD bias - what the id pass's cut and
+    // the stock thresholds both take - over this view's switch band, x the bake's drift ratio, in sample footprints;
+    // rq_reflect.comp turns it into metres at the point's Euclidean distance from its own eye (jah_ray_origin.glsl).
+    pp.knobs2[1] = arm(ArmId::RaysOriginCut, true)
+                       ? rayOriginDrawnFootprints(scene->pixelTolerance() * scene->lodBias(), chainD.lodHysteresis)
+                       : 0.0f;
     pp.knobs2[2] = skyTex ? 1.0f : 0.0f;
     pp.knobs2[3] = 1.0f / float(kReflectMaxFrames);   // the moving memory (the shaders' 1 / knobs2.w)
     // THE DENOISER SPACE'S EXPOSURE (PHOTON-7 stage 6 commit 6: Lumen's space is on PRE-EXPOSED colour): the multiplier
@@ -7655,7 +7649,10 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.inputsBusy = scene->photon().gatherInputsBusy();
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
-    in.drawnCutFootprints = arm(ArmId::RaysOriginCut, true) ? scene->pixelTolerance() * scene->lodBias() : 0.0f;
+    in.drawnCutFootprints = arm(ArmId::RaysOriginCut, true)
+                                ? rayOriginDrawnFootprints(scene->pixelTolerance() * scene->lodBias(),
+                                                           view->chainDesc().lodHysteresis)
+                                : 0.0f;
     in.alphaTable = alphaTableOf(scene);
     in.hitTable = hitTableOf(scene);
     {
@@ -8226,23 +8223,17 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     pp.resolution[1] = float(h);
     pp.resolution[2] = float(fullW);
     pp.resolution[3] = float(fullH);
-    // THE ORIGIN LAW's lift (PHOTON-7 stage 6; READ_A W1): THE DRAWN CUT'S ERROR WITH ITS MARGIN, in FULL-RESOLUTION
-    // pixel footprints — per unit of view distance for a perspective camera (the basis is a ray whose forward component
-    // is 1), in world units for an orthographic one; rq_sun_contact.comp adds the point's float error and lifts along
-    // the GEOMETRIC normal. The ray traces the mesh's LEVEL 0 (ONE RAY LEVEL PER MESH) while the pixel's surface is the
-    // drawn one - Atom's cut, or a stock item's LOD - which lies within the view's pixel tolerance of level 0 (the cut's
-    // law: Scene::pixelTolerance, the World Mode's atomPixelError row, times the LOD bias the id pass and the stock
-    // thresholds both take). On a CONVEX caster the cut lies INSIDE level 0, so a lift of the tolerance alone starts
-    // the ray on level 0 at worst: ONE MORE FOOTPRINT is the margin for that sign (the base's second footprint was this
-    // margin, ledger section 1093 F2 - not the 2x band's). Full resolution whatever the divisor: the error is the
-    // view's, in the view's pixels, not this job's texels.
-    {
-        const float span = std::sqrt(eye.rayRight[0] * eye.rayRight[0] +
-                                     eye.rayRight[1] * eye.rayRight[1] +
-                                     eye.rayRight[2] * eye.rayRight[2]);
-        pp.knobs[0] = arm(ArmId::RaysOriginCut, true)
-                          ? (scene->pixelTolerance() * scene->lodBias() + 1.0f) * span / float(fullW) : 0.0f;
-    }
+    // THE ORIGIN LAW's drawn term (PHOTON-7 stage 6; READ_A W1, READ_B F3 - the one law, Types.h): the view's pixel
+    // tolerance x the LOD bias over this view's switch band, x the bake's drift ratio, in sample footprints;
+    // rq_sun_contact.comp turns it into metres at the point's Euclidean distance (jah_ray_origin.glsl), adds the
+    // point's float bound and lifts along the GEOMETRIC normal. The "+1 footprint" that stood here as the margin for a
+    // convex caster's sign (ledger section 1093 F2) is the drift ratio's now: at Epic's 1 px the term is 2.2 footprints
+    // on axis, and a start exactly on level 0 is the float bound's. Full resolution whatever the divisor: the error is
+    // the view's, in the view's pixels, not this job's texels.
+    pp.knobs[0] = arm(ArmId::RaysOriginCut, true)
+                      ? rayOriginDrawnFootprints(scene->pixelTolerance() * scene->lodBias(),
+                                                 view->chainDesc().lodHysteresis)
+                      : 0.0f;
     pp.knobs[1] = 0.0f;
     // THE MASK: the shadow CASTERS' near copies (kRayMaskCaster) — a subset of
     // the near field, which is the one field a ray this short lives in (A5b §4:

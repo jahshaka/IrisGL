@@ -1,5 +1,7 @@
-// THE GEOMETRIC NORMAL AT A PIXEL (PHOTON-7 stage 6, the ray origin's direction; READ_A finding 1) - one text for every
-// ray job that leaves a surface the depth buffer shows (the reflection's trace, the sun contact).
+// THE GEOMETRIC NORMAL AT A PIXEL (PHOTON-7 stage 6, the ray origin's direction; READ_A finding 1, READ_B finding 3) -
+// one text for every ray job that leaves a surface a depth image shows (the reflection's trace, the sun contact, the
+// gather's probes at their placement, the card sun on its card's Depth layer): the direction jah_ray_origin.glsl lifts
+// along.
 //
 // The G-buffer's normal is the SHADED one (normal maps, smoothed vertex normals); a ray must leave the surface the
 // depth buffer actually drew, so the lift that keeps it outside the traced geometry runs along the GEOMETRIC normal -
@@ -24,6 +26,9 @@
 // THE HOST DEFINES, before including this file:
 //   JAH_GN_RAW( q )           the raw depth at the full-resolution pixel q (ivec2); <= 0 or >= 1 = nothing drawn
 //   JAH_GN_WORLD( q, raw )    the world point the pixel q shows at that raw depth (its centre)
+// and MAY define, for a depth that is not a 32-bit [0, 1] buffer (a card's R16F Depth layer in metres):
+//   JAH_GN_DRAWN( raw )       whether a raw value is a drawn surface (default: 0 < raw < 1)
+//   JAH_GN_MANTISSA_BITS      the depth's stored mantissa bits, its quantum's unit (default 23: a 32-bit float)
 // No at-sign anywhere in this file (the house rule for every shared include).
 #ifndef JAH_GEOMETRIC_NORMAL_GLSL
 #define JAH_GEOMETRIC_NORMAL_GLSL
@@ -31,9 +36,15 @@
 /// The rasteriser's depth rounding in units in the last place: an affine depth evaluated at three pixel centres of one
 /// triangle has a second difference of a few units at most.
 const float kGnQuantumUlps = 8.0;
+#ifndef JAH_GN_MANTISSA_BITS
+#define JAH_GN_MANTISSA_BITS 23.0
+#endif
+#ifndef JAH_GN_DRAWN
+#define JAH_GN_DRAWN( raw ) ( ( raw ) > 0.0 && ( raw ) < 1.0 )
+#endif
 float jahGnUlp( float x )
 {
-	return exp2( floor( log2( max( abs( x ), 1e-30 ) ) ) - 23.0 );
+	return exp2( floor( log2( max( abs( x ), 1e-30 ) ) ) - JAH_GN_MANTISSA_BITS );
 }
 bool jahGnDrawn( ivec2 q, ivec2 fullRes, out float raw )
 {
@@ -41,7 +52,7 @@ bool jahGnDrawn( ivec2 q, ivec2 fullRes, out float raw )
 	if( any( lessThan( q, ivec2( 0 ) ) ) || any( greaterThanEqual( q, fullRes ) ) )
 		return false;
 	raw = JAH_GN_RAW( q );
-	return raw > 0.0 && raw < 1.0;
+	return JAH_GN_DRAWN( raw );
 }
 
 /// The geometric normal at the pixel `px` of a `fullRes` target whose surface point is `world` at raw depth `raw0`,

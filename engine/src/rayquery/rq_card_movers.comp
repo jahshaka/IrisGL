@@ -29,12 +29,15 @@
 // A HARD term: one ray, no filter; an edge is one card texel wide.
 //
 // THE LIFT (still mode only): the receiver IS a still caster, so the ray starts on
-// a surface it can hit. The origin moves along the normal by the record's lift
-// (rect.w, OgreSurfaceCache.cpp sunLiftOf: the captured level's measured bound -
-// the near copy traced is the mesh's level 0, the card captured at the bake's
-// level for its texel - plus one card texel and the depth layer's quantum), tMin
-// zero: the sun-contact job's rule. The movers' mode lifts nothing: a
-// receiver is never a mover (movers carry no cards).
+// a surface it can hit - the ORIGIN LAW every ray job keeps (jah_ray_origin.glsl,
+// READ_B finding 3). The origin moves along the CAPTURED surface's GEOMETRIC normal
+// (the card's Depth layer, jah_geometric_normal.glsl: the Normal layer is the shaded
+// one, and a lift along a tilted shading normal clears the surface by cos(tilt) of
+// itself) by the point's float bound plus the record's lift (rect.w,
+// OgreSurfaceCache.cpp sunLiftOf: the texel's own reconstruction - one card texel
+// and the depth layer's quantum - plus the captured level's bound against level 0,
+// the near copy traced, times the bake's drift ratio), tMin zero. The movers' mode
+// lifts nothing: a receiver is never a mover (movers carry no cards).
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -68,6 +71,26 @@ layout( set = 0, binding = 4 ) uniform sampler2D cardNormal;
 layout( r8, set = 0, binding = 5 ) uniform writeonly image2D moverVis;
 layout( rg16, set = 0, binding = 6 ) uniform image2D shadowRough;
 
+/// THE CARD TEXEL'S WORLD POINT at depth `depth` (the relight's reconstruction): image row 0 is the card's +v side (the
+/// capture camera's +Y), the ortho window on axisU/axisV, the depth back along axisD.
+vec3 cardPoint( CardRec r, ivec2 t, float depth )
+{
+	const vec2 f = ( vec2( t ) + 0.5 ) / max( r.rect.z, 1.0 );
+	return r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) + r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) -
+		   r.axisD.xyz * depth;
+}
+
+/// THE CAPTURED SURFACE'S GEOMETRIC NORMAL: the one text (jah_geometric_normal.glsl) over the card's own block of the
+/// Depth layer - metres from the capture's near plane, R16F (10 stored mantissa bits), 0 = nothing captured; the
+/// depth is linear under the capture's orthographic camera, so a plane is affine in it as the include requires.
+#include "jah_ray_origin.glsl"
+CardRec gnCard;
+#define JAH_GN_RAW( q ) texelFetch( cardDepth, ivec2( gnCard.rect.xy ) + ( q ), 0 ).x
+#define JAH_GN_WORLD( q, raw ) cardPoint( gnCard, ( q ), ( raw ) )
+#define JAH_GN_DRAWN( raw ) ( ( raw ) > 0.0 )
+#define JAH_GN_MANTISSA_BITS 10.0
+#include "jah_geometric_normal.glsl"
+
 void main()
 {
 	const CardRec r = cards[gl_WorkGroupID.z];
@@ -86,12 +109,15 @@ void main()
 		const vec3 L = p.toSun.xyz;
 		if( dot( N, L ) > 0.0 )
 		{
-			// Image row 0 is the card's +v side (the capture camera's +Y).
-			const vec2 f = ( vec2( t ) + 0.5 ) / float( size );
-			const vec3 P = r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) +
-						   r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) - r.axisD.xyz * depth;
-			// THE LIFT (the head of this file): the still mode's, from the record.
-			const vec3 origin = p.knobs.y > 0.5 ? P + N * r.rect.w : P;
+			const vec3 P = cardPoint( r, ivec2( t ), depth );
+			// THE LIFT (the head of this file): the still mode's, from the record, along the captured surface's
+			// geometric normal - facing the capture camera, which looks down -axisD.
+			gnCard = r;
+			const vec3 origin = p.knobs.y > 0.5
+									? jahRayOrigin( P, jahGeometricNormal( ivec2( t ), ivec2( int( size ) ), depth, P, N,
+																		   r.axisD.xyz ),
+													depth, r.rect.w )
+									: P;
 			rayQueryEXT rq;
 			rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
 								   uint( p.knobs.x ), origin, 0.0, L, p.toSun.w );

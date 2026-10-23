@@ -135,10 +135,11 @@ constexpr unsigned kIntegrateStorageImages = 5u;
 static_assert(kIntegrateBindings == 5u + kIntegrateStorageImages,
               "the integrate set: four inputs, five storage images, the counter");
 
-/// One probe's record: ten vec4s — position, normal, the irradiance at its own
-/// normal and the SH9 (27 floats in seven vec4s; see JahProbeRecord in the
-/// shaders). PHOTON-GATHER-1b grew it from three vec4s.
-constexpr unsigned kRecordBytes = 160u;
+/// One probe's record: eleven vec4s — position, normal, the irradiance at its own
+/// normal, the SH9 (27 floats in seven vec4s) and the drawn surface's geometric
+/// normal its rays lift along (READ_B F3); see JahProbeRecord in the shaders.
+/// PHOTON-GATHER-1b grew it from three vec4s.
+constexpr unsigned kRecordBytes = 176u;
 /// THE WEIGHT FLOOR under which a pixel's plane-weighted probes are not an
 /// answer (w = 0: the fallback owns the pixel). A pixel whose ONLY agreeing probe
 /// is a corner cell's at a sixteenth of the bilinear weight still clears it; one
@@ -1411,11 +1412,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                                                  v.restFrames   // a rest mean holds by 4097: < 2^21, exact
                                            : (v.frame & 0xFFFFu));
     pp.knobs[3] = float(in.cascadeCount);
-    // THE RAY'S START: THE ORIGIN LAW (PHOTON-7 stage 6, READ_A W2 - the reflection's and the sun contact's, one law
-    // for every ray: L1/L5) - off the probe's DRAWN surface by the point's float error plus the drawn cut's error, the
-    // view's pixel tolerance x the LOD bias in full-resolution footprints at the probe's distance (this knob; the
-    // shader turns it into metres, rq_probe_gather.comp), tMin 0: the probe sits on Atom's cut or a stock item's LOD
-    // and its rays trace each mesh's level 0. Never half a voxel (the fix round, gi.gather_cards' near-foot chase: a
+    // THE RAY'S START: THE ORIGIN LAW (PHOTON-7 stage 6, READ_A W2, READ_B F3 - one law for every ray, Types.h
+    // rayOriginDrawnFootprints / jah_ray_origin.glsl) - off the probe's DRAWN surface along its geometric normal by the
+    // point's float bound plus the drawn surface's bound against level 0 in full-resolution footprints at the probe's
+    // Euclidean distance (this knob; the shader turns it into metres), tMin 0: the probe sits on Atom's cut or a stock
+    // item's LOD and its rays trace each mesh's level 0. Never half a voxel (the fix round, gi.gather_cards' near-foot chase: a
     // start lifted 4 cm measured the irradiance 4 cm up - +7 % at a floating panel's foot, -11 % at 1.6 m).
     pp.knobs2[0] = in.tuning.classOff ? 1.0f : 0.0f;   // the class out of the history test (a test door)
     pp.knobs2[1] = std::max(0.0f, in.drawnCutFootprints);

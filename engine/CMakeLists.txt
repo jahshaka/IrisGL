@@ -202,6 +202,7 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geometric_normal.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_ray_origin.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_ssr_march.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_voxel_sample.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
@@ -347,6 +348,9 @@ if(JAH_RAY_QUERY_OK)
     # named in DEPENDS or a change to one would not rebuild the SPIR-V.
     set(JAH_RQ_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include")
     set(JAH_RQ_HEADERS "${JAH_RQ_INCLUDE}/jah_rq_hit.glsl"
+                       # the ray origin's one law and its direction (READ_B F3: the placement and the gather)
+                       "${JAH_RQ_INCLUDE}/jah_ray_origin.glsl"
+                       "${JAH_RQ_INCLUDE}/jah_geometric_normal.glsl"
                        "${JAH_RQ_INCLUDE}/jah_voxel_sample.glsl"
                        "${JAH_RQ_INCLUDE}/jah_rq_finite.glsl"
                        "${JAH_RQ_INCLUDE}/jah_environment.glsl"
@@ -431,6 +435,8 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geometric_normal.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_ray_origin.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_finite.glsl"
                 # the sun ray is one text with the hit record's (PHOTON-HIT-SHADE-1)
                 "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
@@ -464,6 +470,10 @@ if(JAH_RAY_QUERY_OK)
                 --vn krq_cardMoversSpv -o "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
+                # the origin law and its direction on the card's Depth layer (READ_B F3)
+                "${JAH_RQ_INCLUDE}/jah_ray_origin.glsl"
+                "${JAH_RQ_INCLUDE}/jah_geometric_normal.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_finite.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
                 "${JAH_RQ_INCLUDE}/jah_alpha_mask.glsl"
                 "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"

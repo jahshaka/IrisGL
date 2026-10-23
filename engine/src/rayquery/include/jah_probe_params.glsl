@@ -39,9 +39,9 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// w = how many cascades are bound.
 	vec4 knobs;
 	/// x = 1 takes the surface class out of the history test (GatherTuning::classOff, a test door;
-	/// 0 shipped: jah_probe_history.glsl), y = THE DRAWN CUT'S ERROR in
-	/// full-resolution pixel footprints (the view's pixel tolerance x the LOD
-	/// bias: the ray origin's law, rq_probe_gather.comp), z = 1
+	/// 0 shipped: jah_probe_history.glsl), y = THE DRAWN SURFACE'S BOUND in
+	/// full-resolution sample footprints (Types.h rayOriginDrawnFootprints: the
+	/// ray origin's law, jah_ray_origin.glsl), z = 1
 	/// when a sky cubemap is bound,
 	/// w = the octahedral map's resolution (rays per probe = w*w).
 	vec4 knobs2;
@@ -258,6 +258,10 @@ struct JahProbeRecord
 	/// the normal n. Coefficient k, channel c lives at flat float 3k + c of the
 	/// seven vec4s (27 floats; the 28th is unused).
 	vec4 sh[7];
+	/// xyz = THE DRAWN SURFACE'S GEOMETRIC NORMAL at the probe (jah_geometric_normal.glsl at its placement; the shading
+	/// normal where the depth has no plane through the pixel): the direction its rays' origin is lifted along
+	/// (jah_ray_origin.glsl, READ_B F3) - the hemisphere stays the shaded one, normalW. w unused.
+	vec4 geomW;
 };
 
 /// THE NINE REAL SPHERICAL HARMONICS L0..L2 at a unit direction, in the

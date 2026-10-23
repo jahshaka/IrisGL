@@ -518,11 +518,14 @@ struct MeshData {
     // (the VAO is matched on {opType, indexBufferVbo, indexType, vertexBuffers},
     // so a per-level vertex remap would break the auto-instancing merge).
     //
-    // `lodBounds[i]` is level i+1's MEASURED TWO-SIDED DISTANCE from level 0, as
-    // a LENGTH IN MESH UNITS: a sampled Hausdorff estimate taken at bake time
-    // with the sampling-gap margin applied (ATOM P1's AT-A5 — before it, what
-    // stood here was the simplifier's own quadric relabelled as a bound, and it
-    // was not one). Monotonically non-decreasing. It is the currency of the whole
+    // `lodBounds[i]` is level i+1's BOUND, a LENGTH IN MESH UNITS: the largest
+    // STORED error among its clusters (document/assets/mesh.h) - each the DAG's
+    // max(children, this step) over a step's measured deviation from its INPUT
+    // (import/atomdag/measure.h), NOT a distance from level 0: the level's drift
+    // from level 0 is within kLevelDriftOverBound times it (the bake's ship law,
+    // atom2.one_step_drift_bound), which is what a consumer needing a distance
+    // from level 0 multiplies by (the ray origin, below). Monotonically
+    // non-decreasing. It is the currency of the whole
     // program, and every consumer spends it the same way — by stating the
     // world-space deviation IT can afford and taking the coarsest level below it:
     //   * the VIEW turns a PIXEL budget into that deviation at its own live
@@ -651,6 +654,44 @@ constexpr float kLodBudgetPixels = 1.0f;
 // reflection and the traced geometry is a function of the world, never of where a camera stands (law L1). The 2x
 // distance band that re-fitted a coarser level per view (one footprint of tolerance) is deleted; measured on Bistro
 // Exterior at the owner's pose: 211.8 MB of bottom levels against the band's 138.5 MB (1.53x), 0 refits on a walk.
+
+// THE RAY ORIGIN - ONE LAW FOR EVERY RAY THAT LEAVES A SURFACE (PHOTON-7 stage 6, READ_B finding 3; the GLSL half is
+// src/rayquery/include/jah_ray_origin.glsl). A ray traces level 0 (above) while the surface it starts on is the one the
+// VIEW DREW (Atom's cut, a stock item's level: the reflection, the gather's probes, the sun contact) or a CARD CAPTURED
+// (the bake's level for its texel: the card sun), so with tMin 0 the origin is lifted along that surface's GEOMETRIC
+// normal by the point's own error (its float bound; a card texel's reconstruction) plus THE SURFACE'S BOUND AGAINST
+// LEVEL 0, measured the way the LOD rule measures it:
+//   * A VIEW'S PIXEL: the tolerance (Scene::pixelTolerance x the LOD bias - what the id pass's cut and the stock
+//     thresholds both take) x one sample's footprint per metre (sampleFootprintPerspective at 1 m: |rayDown| / H) x the
+//     point's EUCLIDEAN distance from the eye. The strategy (OgreMesh.cpp) and the cut (JahClusterCut.glsl) both judge
+//     an object at its bounding sphere's nearest distance |centre - eye| - radius, and every point of the object is at
+//     least that far; the forward depth the old lifts used is 1.24x short at a 16:9 45-degree frame's side edge and
+//     1.31x at its corner. A STOCK level is HELD down to (1 - band) of its threshold on a watched view
+//     (OgreLodStrategyPrivate.inl: finer only once the value falls under threshold - band), so the bound is over
+//     (1 - band); Atom's cut has no band (OgreAtomIdPass.cpp, D4) and lies inside the same bound.
+//   * A CARD: its captured level's bound in world units (CardRec::levelBound).
+// THE BOUND IS THE STORED ERROR x kLevelDriftOverBound. What the LOD rule spends is the bake's STORED error, Nanite's
+// max(children, this step) over each step's measured deviation from its INPUT (import/atomdag/measure.h), not a
+// distance from level 0: the uniform cut's drift from level 0 measured 1.154x its stored error on the rough sheet and
+// 1.117x on the curved shell (atom2.one_step_drift_bound's fixtures, 2026-10-23), and the bake's SHIP law is that it
+// stays within 2x at every depth. That law is this constant; the row asserts it (tests/meshbake/atom2_rows.h).
+// At Epic's 1 px the view's term is 2.2 footprints on axis (the sun contact's tolerance + 1 was 2, and its "+1"
+// margin for a convex caster's sign is this term now - the float bound covers a start exactly on level 0).
+constexpr float kLevelDriftOverBound = 2.0f;
+
+/// The view's drawn-surface term, in sample FOOTPRINTS at the point's Euclidean distance (the shaders multiply by
+/// |rayDown| / H and the distance - jahViewDrawnBound): `tolerance` = pixel tolerance x LOD bias, `lodBand` = the
+/// view's switch band (ChainDesc::lodHysteresis: 0 on a capture, jahLodHysteresis on a watched view).
+inline float rayOriginDrawnFootprints(float tolerance, float lodBand) {
+    if (!(tolerance > 0.0f)) return 0.0f;
+    const float band = (lodBand > 0.0f && lodBand < 1.0f) ? lodBand : 0.0f;
+    return kLevelDriftOverBound * tolerance / (1.0f - band);
+}
+
+/// A captured level's term (the card sun): its stored bound in world units, as a bound against level 0.
+inline float rayOriginLevelLift(float levelBoundWorld) {
+    return levelBoundWorld > 0.0f ? kLevelDriftOverBound * levelBoundWorld : 0.0f;
+}
 
 /// THE RAY INSTANCE MASK (ATOM-FARBLAS-1, A5b §4). ONE top-level structure holds
 /// every traced object TWICE: a NEAR copy over the mesh's level 0,
