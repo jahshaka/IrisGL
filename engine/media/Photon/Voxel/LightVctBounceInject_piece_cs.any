@@ -242,10 +242,20 @@
 	// brick the most relative move (the mask, codes), the most absolute move and the sensitivity - the re-emission over
 	// the voxel's own code, per channel (the state) - each the group's most, then one atomic per group. Every invocation
 	// of a group is in one brick and reaches the barriers (the list's bricks are whole).
+	// THE ABSOLUTE MOVE - what the stopped bricks' resume accumulates (ACCUM) and the cards' (JahCardIndirect) - LESS
+	// ONE STEP OF THE STORE (PHOTON-7 stage 5, measured): an iteration whose contraction r exceeds 1/2 can round into a
+	// one-step orbit around its fixed point (r x a step rounds to a step), and those flips, summed by the resume's bound
+	// over every touching brick at weight 1, resumed the stopped bricks for ever (a sealed room after a teleport: 92
+	// bricks active 1500 frames on, 162,515 stops and 154,415 resumes, the chain never at rest). A step is the half-float
+	// store's 2^-10 of the value, a tenth of a code: the store's rounding, never a change. The relative move (the stop
+	// rule's, the mask's) keeps the whole difference - the stop rule measures the brick's own series with it.
 	const float3 jahOld = OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz;
 	const float3 jahNew = imageLoad( lightVoxel, int3( jahCell ) ).xyz;
 	const float jahMoved = jahBrickChange( jahOld, jahNew );
-	const float3 jahAbs3 = abs( jahNew - jahOld );
+	// one step of the store at the larger of the two (the half float's 10 mantissa bits; its smallest normal below)
+	const float3 jahStep = exp2( floor( log2( max( max( abs( jahNew ), abs( jahOld ) ),
+											 float3( 6.1035156e-5, 6.1035156e-5, 6.1035156e-5 ) ) ) ) - 10.0 );
+	const float3 jahAbs3 = max( abs( jahNew - jahOld ) - jahStep, float3( 0.0, 0.0, 0.0 ) );
 	float jahAbs = max( max( jahAbs3.x, jahAbs3.y ), jahAbs3.z );
 	if( ( floatBitsToUint( jahAbs ) & 0x7F800000u ) == 0x7F800000u )
 		jahAbs = 1.0e30;
