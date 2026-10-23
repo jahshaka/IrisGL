@@ -261,11 +261,14 @@ struct CardSceneView {
     unsigned itemSlots = 0u;
     /// THE MEASURING ARM "cards.demandCount": the readers count their carded and uncarded hits.
     bool demandCount = false;
+    /// THE TEST DOOR "cards.gatherLate" (N): the gather's stamps within N frames of a demand change dropped (takeDemand).
+    unsigned demandGatherLate = 0u;
     /// THE DEMAND'S CHANGE (PHOTON-7 stage 5, 5-2): what the readers' rays can hit changed this frame - an eye moved
     /// a card texel or turned a pixel's angle from the pose at the last change, geometry changed (an Edit, a Mover, a
     /// change with no box) or the cache was built (PhotonComponent::updateSurfaceCacheFrame). The demand stays OPEN
-    /// for `demandSettleFrames` READING frames after it (GiQualityFacts::cardDemandSettleFrames: the readers' stamps
-    /// the cache has harvested since the change, so a reader that has not run yet keeps it open); closed, the resident
+    /// for `demandSettleFrames` READING frames after it (GiQualityFacts::cardDemandSettleFrames), counted by EACH READER
+    /// from its own first stamp after the change - so a reader that first reads within the settle keeps it open for its
+    /// own S, and one that never reads holds nothing (OgreSurfaceCache.cpp's demand open); closed, the resident
     /// set holds (a moved instance's own cards excepted): at a still pose over a still world the demand was sampled for
     /// the settle and a later grazing hit is that sampling's noise, never new demand - every capture breaks the
     /// reflection's rest view-wide (reflectionReadsKey), and a face first grazed 500 frames into a still pose broke
@@ -437,7 +440,7 @@ public:
     /// THE READERS' DEMAND, TAKEN (PHOTON-7 stage 5, 5-2), before the frame's candidates are asked for: the read-backs
     /// that landed (a fixed lag of the cache's frames) folded into each card's `lastRead` and the face marks, and the
     /// item slots the cache wants offered - its resident instances' and every slot a reader marked within the window.
-    void takeDemand(std::vector<uint32_t> &slots, unsigned window);   // window: the settle's S (the demand's window)
+    void takeDemand(std::vector<uint32_t> &slots, const CardSceneView &view);
     /// THE GI FREEZE (PHOTON-2 round 2, M1's measuring arm): this frame captures, relights and traces nothing.
     void freezeFrame();
     /// THE CHANGED-REGION LIST'S CARD PRODUCER (PHOTON-7 stage 3): the world box of every instance this frame's plan
@@ -921,6 +924,9 @@ private:
     unsigned long long mDemandChangeFrame = 0ull;
     /// THE DEMAND'S WINDOW in reader frames (takeDemand: the settle's S, GiQualityFacts::cardDemandSettleFrames).
     unsigned long long mDemandWindow = 10ull;
+    /// Each reader's FIRST stamp after the last demand change (0: it has not read since): its own settle's start.
+    unsigned long long mDemandFirst[2] = { 0ull, 0ull };
+    unsigned mDemandGatherLate = 0u;   // the test door cards.gatherLate
     unsigned long long mAdmitted = 0ull, mEvicted = 0ull, mCompactionMoves = 0ull;
     unsigned long long mDemandHits[4] = { 0ull, 0ull, 0ull, 0ull };
 };

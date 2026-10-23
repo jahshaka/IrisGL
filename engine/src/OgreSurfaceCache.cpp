@@ -929,8 +929,17 @@ void SurfaceCache::issueDemandRead() {
 // cardDemandSettleFrames, S): a face the readers hit lambda_min times a frame is marked twice in different read-backs
 // within S frames at P >= 1 - 1e-3 (its demand persists, `twice`), and a card read lambda_min a frame goes S frames
 // unread with P = e^-S (4.5e-5 at S = 10) - so the window IS S. (The 60 frames it replaced had no law.)
-void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, unsigned window) {
-    mDemandWindow = std::max(1u, window);
+void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, const CardSceneView &view) {
+    mDemandWindow = std::max(1u, view.demandSettleFrames);
+    mDemandGatherLate = view.demandGatherLate;
+    // A STAMP COUNTED: its reader's clock, and - after the last demand change - its reader's first (the settle's start).
+    // (The test door cards.gatherLate drops the gather's within N frames of the change: a reader not run yet.)
+    const auto counted = [this](unsigned r, unsigned long long stamp) {
+        if (r == 1u && mDemandGatherLate && stamp <= mDemandChangeFrame + mDemandGatherLate) return false;
+        mDemandNewest[r] = std::max(mDemandNewest[r], stamp);
+        if (stamp > mDemandChangeFrame) mDemandFirst[r] = mDemandFirst[r] ? std::min(mDemandFirst[r], stamp) : stamp;
+        return true;
+    };
     slots.clear();
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
@@ -946,8 +955,7 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, unsigned window) {
         for (unsigned c = 0; c < kDemandCells; ++c)
             for (unsigned r = 0; r < kDemandReaders; ++r) {
                 const unsigned long long stamp = cell[kDemandReaders * c + r];
-                if (!stamp) continue;
-                mDemandNewest[r] = std::max(mDemandNewest[r], stamp);
+                if (!stamp || !counted(r, stamp)) continue;
                 if (c >= mSlotCard.size() || mSlotCard[c] < 0 || size_t(mSlotCard[c]) >= mCards.size()) continue;
                 CardRec &card = mCards[size_t(mSlotCard[c])];
                 if (stamp < card.since) continue;   // older: the cell's last card's
@@ -960,11 +968,9 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, unsigned window) {
             mFacePrev.resize(size_t(t.slots) * 16u, 0ull);
         }
         for (size_t k = 0; k < size_t(t.slots) * 16u; ++k)
-            if (face[k] > mFaceMarks[k]) {
+            if (face[k] > mFaceMarks[k] && counted(unsigned((k % 16u) / 8u), face[k])) {
                 mFacePrev[k] = mFaceMarks[k];
                 mFaceMarks[k] = face[k];
-                const size_t r = (k % 16u) / 8u;
-                mDemandNewest[r] = std::max(mDemandNewest[r], (unsigned long long)face[k]);
             }
         // THE HIT COUNTS (the measuring arm cards.demandCount): each resident card's cell's, cumulative
         if (mDemandCount) {
@@ -1072,10 +1078,25 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         }
     }
 
-    // THE DEMAND OPEN: until a reader's harvested stamp passes the last change by the settle (reading frames).
-    if (view.demandChanged) mDemandChangeFrame = mFrame;
-    const bool demandOpen =
-        std::max(mDemandNewest[0], mDemandNewest[1]) < mDemandChangeFrame + view.demandSettleFrames;
+    // THE DEMAND OPEN (PHOTON-7 stage 5's read W3): EACH READER SETTLES FROM ITS OWN FIRST STAMP since the last change -
+    // reader r holds the demand open while its first falls within the settle S of the change and its clock has not
+    // passed that first by S; and it is open while no reader has read since the change. So a reader that reads first
+    // a few frames after the other keeps it open for its own S (the faster reader's clock closed it before: a gather
+    // reading 8 frames late lost its faces), a reader that never reads holds nothing (the reflection with no card in
+    // view: the readers' least clock never closed it), and a first graze long after the change cannot reopen it.
+    // "Within S" allows ONE READ-BACK PERIOD (kDemandReadEvery): a cell keeps its newest stamp, so the first read-back
+    // after a reader's first read shows that read's frame or a later one, at most a period later (without it a gather
+    // first reading 8 frames after the change was excluded - its first harvested stamp past the settle - and the read
+    // set of gi.card_residency (5) lost whole: 106 of 106).
+    if (view.demandChanged) {
+        mDemandChangeFrame = mFrame;
+        mDemandFirst[0] = mDemandFirst[1] = 0ull;
+    }
+    const unsigned long long settleS = view.demandSettleFrames;
+    bool demandOpen = !mDemandFirst[0] && !mDemandFirst[1];
+    for (unsigned r = 0; r < kDemandReaders && !demandOpen; ++r)
+        demandOpen = mDemandFirst[r] && mDemandFirst[r] < mDemandChangeFrame + settleS + kDemandReadEvery &&
+                     mDemandNewest[r] < mDemandFirst[r] + settleS;
     // 2. THE CARDS, PER INSTANCE, while the set changes (flattened back once at the end; a card's `size` 0 = evicted).
     std::vector<std::vector<CardRec>> per(mInstances.size());
     for (size_t i = 0; i < mInstances.size(); ++i)

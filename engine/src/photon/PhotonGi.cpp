@@ -8597,6 +8597,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // list) changes only through a re-staged slot (a material edit reaches it
     // through the PBS change log).
     view.demandCount = mEngine && mEngine->armRegistry().on(ArmId::CardDemandCount);
+    view.demandGatherLate = mEngine ? unsigned(std::max(0.0, mEngine->armRegistry().value(ArmId::CardGatherLate))) : 0u;
     // THE DEMAND'S CHANGE (CardSceneView::demandChanged): what the readers' rays can hit changed - AN EYE MOVED from the
     // reference pose (the poses at the last change) by more than one card texel (1/64 m: the residency's own density)
     // or TURNED by more than one pixel's angle of its projection, per eye (a tracked head never repeats a pose bit for
@@ -8620,7 +8621,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
         view.demandChanged = hitChanged;
         view.demandSettleFrames = facts.cardDemandSettleFrames;
     }
-    mSurfaceCache->takeDemand(mCardSlots, view.demandSettleFrames);
+    mSurfaceCache->takeDemand(mCardSlots, view);
     mScene.cardCandidates(mCardSlots, view);
     // THE GI FREEZE (M1's measuring arm): no card is captured, relit or traced.
     if (mEngine && mEngine->armRegistry().on(ArmId::GiFreeze)) {

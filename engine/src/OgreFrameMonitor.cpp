@@ -1412,6 +1412,10 @@ constexpr ArmDef kArms[] = {
       "THE CARD READERS' HITS COUNTED (PHOTON-7 stage 5, 5-2's acceptance: photon-glass's uncarded share): 1 = every "
       "hit the reflection and the gather read a card at counts, as one that found a card or one that found none "
       "(CardCacheStatus::demandHits). A measuring arm: one atomic a hit while on." },
+    { ArmId::CardGatherLate, 0.0, 0.0, 64.0,
+      "A TEST DOOR (PHOTON-7 stage 5's read W3, gi.card_residency (5)): while set to N, the cache drops the GATHER's "
+      "demand stamps (its cards' reads and its face marks) made within N frames of each demand change - the gather "
+      "reads for the first time N frames after the change, a late first reader. 0 = shipped." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");
