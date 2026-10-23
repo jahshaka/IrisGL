@@ -82,7 +82,7 @@ void SceneLightList::refresh(Ogre::SceneManager *sm) const {
                 if (!(flags & Ogre::VisibilityFlags::LAYER_VISIBILITY)) continue;
                 Ogre::Light *light = static_cast<Ogre::Light *>(objData.mOwner[k]);
                 if (!light || !light->getParentNode()) continue;
-                mEntries.push_back({ light, 0u });
+                mEntries.push_back({ light });
             }
             objData.advancePack();
         }
@@ -116,10 +116,7 @@ void SceneLightList::refresh(Ogre::SceneManager *sm) const {
         return documentId(la) < documentId(lb);
     });
     mByRank.reserve(order.size());
-    for (std::uint32_t r = 0; r < order.size(); ++r) {
-        mEntries[order[r]].rank = r;
-        mByRank.push_back(mEntries[order[r]].light);
-    }
+    for (std::uint32_t r = 0; r < order.size(); ++r) mByRank.push_back(mEntries[order[r]].light);
 }
 
 const std::vector<SceneLightList::Entry> &SceneLightList::entries(Ogre::SceneManager *sm) const {

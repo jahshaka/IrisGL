@@ -44,9 +44,8 @@
 	// leave: the SKY PASS first (jah_env_only, run by VctLighting::update at every bounce
 	// count, CONTACT-OCCLUSION-1) writes the sky's direct term, and every bounce pass after
 	// it builds on the lamps' direct volume, so a pixel's own escape (the sky it sees) and
-	// a hit on the store (the surface's sky-lit radiance) never count it twice. The gain and the SH arrive already
-	// divided by this volume's decode multiplier, so the result is in the volume's
-	// stored units like the cone's own colour.
+	// a hit on the store (the surface's sky-lit radiance) never count it twice. The gain and the SH arrive as
+	// radiance, the store's own units (PHOTON-7 stage 1), like the cone's own colour.
 	@property( jah_env )
 		#define JAH_ENV_CUBE_ON true
 		#define JAH_ENV_SAMPLE( d, l ) OGRE_SampleLevel( envCube, vctProbeSampler, d, l ).xyz
@@ -97,9 +96,8 @@
 	// too); the voxels' share (the bounce proper) keeps the pixel's own cone set.
 
 	/// The bounce gathered at a voxel: posLS = the voxel's centre in the volume's
-	/// normalised space, nWorld = its (unit) world normal. The result is in the
-	/// volume's stored units: the environment's gain and SH arrive divided by the
-	/// decode multiplier (VctLighting::runBounce).
+	/// normalised space, nWorld = its (unit) world normal. The result is radiance,
+	/// the store's units: the environment's gain and SH arrive as radiance too.
 	INLINE void computeVctProbe( OGRE_INOUT_REF( float3, outDiffuse ),
 								 float3 posLS, float3 nWorld )
 	{

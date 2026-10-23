@@ -5582,8 +5582,9 @@ struct GiVoxelStats {
     /// asked for, in a hue the clip has shifted.
     long long voxelsLit = 0;
     long long voxelsAtMax = 0;
-    /// The same count on the DIRECT volume (0 unless the normalisation itself
-    /// is wrong), and the total voxel count for the record.
+    /// The same count on the DIRECT volume (radiance since PHOTON-7 stage 1: on a
+    /// UNORM store any light brighter than 1 sits there), and the total voxel
+    /// count for the record.
     long long directAtMax = 0;
     long long voxels = 0;
     /// Voxels whose peak channel is ABOVE 1.0 in the store's units — zero by

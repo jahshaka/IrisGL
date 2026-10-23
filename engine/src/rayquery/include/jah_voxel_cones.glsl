@@ -136,8 +136,8 @@ vec4 jahSpecularConeStart( vec3 surfaceLS, vec3 dirLS, vec3 biasDirLS )
 /// THE DIFFUSE GI AT A SURFACE POINT: the cone set walked from `posLS` (already
 /// off the surface: jahConeStart), in the frame `basis` (third axis = the
 /// normal, in the caller's space).
-///   `light`  the voxels' share, weighted — in cascade 0's STORED units (the
-///            caller decodes it by the volume's multiplier)
+///   `light`  the voxels' share, weighted — radiance, as the store holds it
+///            (PHOTON-7 stage 1: nothing to decode)
 ///   `envD`   the environment's share: each cone's ESCAPE (the part of the cone
 ///            the voxels did not stop, the march's escape estimate, not the
 ///            colour's opacity — they differ only where the anisotropic volumes

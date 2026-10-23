@@ -29,8 +29,8 @@
 		float4 vctFromPrev[14];
 
 		// Jahshaka (PHOTON-ENV-1): THE ONE ENVIRONMENT an escaping probe ray sees,
-		// in cascade 0's STORED units (IrradianceField::update divides by its
-		// decode multiplier): rgb = the environment light's gain on the cube,
+		// as radiance, the store's own units (PHOTON-7 stage 1): rgb = the
+		// environment light's gain on the cube,
 		// w = the cube's mip count; and its nine-band SH, world axes.
 		float4 envGainMips;
 		float4 envSh[9];

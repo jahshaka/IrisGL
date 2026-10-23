@@ -267,8 +267,8 @@ namespace Ogre
         ShaderParams::Param                      *mBounceIterationDampening;
         ShaderParams::Param                      *mBounceInvResMaxLod;
         ShaderParams::Param *mBounceFromPreviousProbeToNext;  ///< Used when cascades > 1
-        ShaderParams::Param *mBounceEnvGainMips;  ///< Jahshaka (PHOTON-ENV-1): rgb gain / multiplier, w mips
-        ShaderParams::Param *mBounceEnvSh;        ///< Jahshaka (PHOTON-ENV-1): nine float4, / multiplier
+        ShaderParams::Param *mBounceEnvGainMips;  ///< Jahshaka (PHOTON-ENV-1): rgb gain (radiance), w mips
+        ShaderParams::Param *mBounceEnvSh;        ///< Jahshaka (PHOTON-ENV-1): nine float4 (radiance)
         ShaderParams::Param *mBounceRegionOrigin = nullptr;   ///< PHOTON-7 stage 2: a region pass's first cell
         ShaderParams        *mBounceShaderParams;
 

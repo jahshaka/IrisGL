@@ -176,8 +176,8 @@ namespace Ogre
     // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): THE FORMAT OF THE TOTAL VOLUME.
     //
     // The volume holds the fixed point of L = D + rho * G( L ). The DIRECT term D
-    // is normalised to <= 1 by PhotonVoxelLighting::update's auto multiplier; the FIXED
-    // POINT is not bounded by 1 at all -- it is D * sum( (rho*f)^i ), i.e. up to
+    // is RADIANCE (PHOTON-7 stage 1: no per-box normalisation - a lamp is as bright as it
+    // is authored), and the FIXED POINT is not bounded by D at all -- it is D * sum( (rho*f)^i ), i.e. up to
     // D / (1 - rho*f), which for a white enclosure has no useful bound (measured:
     // 2.05x the direct term at albedo 0.79, 2.76x and climbing at albedo 1.0, 3.5x
     // in a shipped sample). An 8-bit UNORM store clips it, per channel, which
@@ -1261,11 +1261,10 @@ namespace Ogre
             texture->scheduleTransitionTo( GpuResidency::Resident );
             mLightBounce = texture;
 
-            // Jahshaka (CONTACT-OCCLUSION-1): THE DIRECT STORES ARE FLOAT, like the total. They
-            // were 8-bit sRGB on the claim that D is normalised to the ceiling by construction
-            // (the auto multiplier's brightest LAMP) - which an EMISSIVE surface is not: its
-            // radiance x the multiplier exceeds 1 wherever it outshines the brightest lamp, and
-            // every bounce pass rebuilt the total from the clipped D. The sky pass runs at every
+            // Jahshaka (CONTACT-OCCLUSION-1): THE DIRECT STORES ARE FLOAT, like the total: D is
+            // radiance (PHOTON-7 stage 1), above 1 wherever a lamp or an emissive surface is
+            // brighter than that - an 8-bit store clipped it, and every bounce pass rebuilt the
+            // total from the clipped D. The sky pass runs at every
             // bounce count, so the clip reached every tier (gi.hit_planar: an emissive panel of
             // 2.0 read 0.99 in the mirror). A float D holds what the float total holds: 8 bytes
             // a voxel instead of 4 on the five direct volumes.

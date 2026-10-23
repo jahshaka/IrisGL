@@ -425,8 +425,8 @@
 			// fork 4d5fbef16+8f09c0cd4 (was 0048) used to apply downstream as a swap (the cone added a
 			// flat ambient, exported what it added, and the probe piece traded it
 			// for the sky). Radiance, weighted by the share of the cone the voxels
-			// did not stop, beside the voxels' own share decoded by the volume's
-			// multiplier.
+			// did not stop, beside the voxels' own share (radiance, as the store
+			// holds it).
 			// AT THE SURFACE'S OWN ROUGHNESS, not at the cone's aperture: the
 			// prefiltered chain holds exactly this GGX lobe (jahEnvLobe), the mip
 			// the convolution stored this roughness at and HlmsPbs reads (audit F3).
@@ -485,7 +485,7 @@
 				// SET's occlusion (a facade filling a grazing lobe over an open hemisphere read
 				// 0.36x a uniform world, gi.rough_sky_once's wall arm) and averaged over the
 				// SET's directions (a red panel to the side lit a dark slab's underside,
-				// gi.gather_glass). Decoded by the volume's multiplier like the cone's colour.
+				// gi.gather_glass). Radiance as stored, like the cone's colour.
 				const float jahBelowR = jahSpecOrigin.w;
 				const float jahAboveR = saturate( ( irrLight.alpha - jahBelowR ) / max( 1.0f - jahBelowR, 1e-4f ) );
 				if( jahAboveR > 0.0f )

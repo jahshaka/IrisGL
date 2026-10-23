@@ -382,11 +382,9 @@ namespace Ogre
         mSettings.getIrradProbeFullResolution( irradWidth, irradHeight );
         mIrradianceTex->setResolution( irradWidth, irradHeight );
         // Jahshaka (PHOTON-ENV-1): FLOAT, not upstream's R10G10B10A2_UNORM. The atlas
-        // holds the probe's irradiance in the voxels' stored units (radiance over the
-        // decode multiplier D_max / pi, D_max the brightest LIGHT), and since the sky
-        // entered it - every escaping probe ray reads the environment - a sky
-        // brighter than that ceiling (any sky in a scene with no lamp brighter than
-        // it) clipped at 1.0. Half floats hold it; the cost is 4 bytes a texel here,
+        // holds the probe's irradiance as radiance (the voxels hold radiance since
+        // PHOTON-7 stage 1), and since the sky entered it - every escaping probe ray
+        // reads the environment - any sky or lamp brighter than 1 clipped at 1.0. Half floats hold it; the cost is 4 bytes a texel here,
         // against the 8 the depth atlas gives back below.
         mIrradianceTex->setPixelFormat( PFG_RGBA16_FLOAT );
 

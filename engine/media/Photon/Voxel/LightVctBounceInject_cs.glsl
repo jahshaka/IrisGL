@@ -100,9 +100,9 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 		uniform float4 fromPreviousProbeToNext[1][2];
 	@end
 
-	// JAHSHAKA (PHOTON-ENV-1): the environment in THIS volume's stored units
-	// (VctLighting::runBounce divides by the decode multiplier): rgb = the cube's
-	// gain, w = its mip count; and the nine-band SH in world axes.
+	// JAHSHAKA (PHOTON-ENV-1): the environment as radiance, the store's units
+	// (PHOTON-7 stage 1): rgb = the cube's gain, w = its mip count; and the
+	// nine-band SH in world axes.
 	uniform float4 envGainMips;
 	uniform float4 envSh[9];
 	// PHOTON-7 stage 2: THE REGION a pass covers - its first cell (the dispatch covers the region from it).

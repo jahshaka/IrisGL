@@ -10,8 +10,10 @@
 //     SceneManager that is visible (LAYER_VISIBILITY) and attached, ranked by PEAK
 //     INTENSITY x RANGE^2 — the peak channel of diffuse x power scale times the square of
 //     its range, the light's reach — brightest first, a directional light (no range: it
-//     reaches everything) before every ranged one, the id as the tie. It depends on the
-//     lights alone, never on a box or a camera.
+//     reaches everything) before every ranged one, an exact tie broken BY THE WORLD (the
+//     position, type, peak, range, colour, direction, then the document's id - never the
+//     creation order; stage 1's read F3). It depends on the lights alone, never on a box,
+//     a camera or the order they were made in.
 //   * PER CONSUMER (select): the lights whose range reaches the consumer's box — a
 //     directional light always does; a point, spot or area light whose range sphere misses
 //     the box lights nothing in it (JahBrdf's window is 0 past the range), so it is CULLED,
@@ -19,7 +21,7 @@
 //     holds none of the box's corners) — in THE ORDER, and when more reach the box than the
 //     consumer's BUDGET holds, the budget's FIRST of the order; the rest are COUNTED
 //     (Selection::overBudget) and every consumer reports the count — a named overflow,
-//     never a silent drop. (The per-box rank by the irradiance a light delivers to the box
+//     never a silent drop. (A per-box ranking by the irradiance a light delivers to the box
 //     is DELETED, PHOTON-7 stage 1: which lights a box held depended on where the box stood.)
 //     The voxel injection then lights each voxel with the FIRST K of its lights that reach
 //     the VOXEL (LightInjection's per-voxel count): a function of the world point.
@@ -48,8 +50,6 @@ class SceneLightList {
 public:
     struct Entry {
         Ogre::Light *light = nullptr;
-        /// Its index in THE ORDER (peak intensity x range^2 desc, directional first, the world's ties): 0 = the first.
-        std::uint32_t rank = 0u;
     };
     /// THE DOCUMENT'S ID OF A LIGHT (the last tie of THE ORDER): the node id OgreScene binds on the Light it creates
     /// (bindDocumentId; Ogre's UserObjectBindings), 0 for a light no document made.
