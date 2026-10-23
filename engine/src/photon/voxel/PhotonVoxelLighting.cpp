@@ -1885,7 +1885,7 @@ namespace Ogre
 
         // NO BOUNCE RUNS HERE (PHOTON-7 stage 4): the total is never restarted from the direct term and re-solved - a
         // delta keeps what the feedback built, a whole injection (a new placement) starts it from D, and the bricks
-        // whose direct term changed (the mask's word 0) resume the feedback's passes (feedbackPass), which converge the
+        // whose direct term changed (the mask's word 0) resume the feedback's passes (feedbackSelect / feedbackRun), which converge the
         // bounces and the sky's light - the escape of every pass - together. (The sky pass, the per-update Jacobi passes,
         // their count and the energy measurement that chose it are deleted.)
         // (the brick mask read back without a wait, PHOTON-7 stage 3: by the frame's feedback, or here when none runs)

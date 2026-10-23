@@ -49,12 +49,16 @@
 // term and nothing else; its casters are the still world) times the MOVERS'
 // term, traced by the ray tier into cardMoverVis for the cards a mover's
 // footprint reaches (PHOTON-CARDS-4). A point or spot light's is TRACED (PHOTON-7 stage
-// 5, 5-3): one finite ray per lamp per texel against every shadow caster, folded into
-// one byte - the SunVis layer's green, each lamp weighted by its share of the texel's
-// direct luminance (rq_card_movers.comp's lamps mode). Area lights ARE summed (PHOTON-7
-// stage 5, 5-3): the pixel's own LTC form factor (AreaLights_LTC's LTC_Evaluate with the
-// identity: BRDF_Default's area diffuse) over the light's rectangle, in JahBrdf's range
-// window, by the same traced lamp visibility (one ray toward its centre). Stated, all three.
+// 5, 5-3): one finite ray per lamp per texel against every shadow caster - each lamp of
+// the card's LAMP TABLE (16 world ids a card) one bit of a 16-bit mask in the SunVis
+// layer's g (the low byte) and a (the high), exact per lamp; the lamps past the table
+// one visibility in its b, weighted by their shares of the texel's direct luminance
+// (rq_card_movers.comp's lamps mode). Area lights ARE summed (PHOTON-7 stage 5, 5-3):
+// the pixel's own LTC form factor (AreaLights_LTC's LTC_Evaluate with the identity:
+// BRDF_Default's area diffuse) over the light's rectangle, in JahBrdf's range window, by
+// its FRACTIONAL visibility in the b byte - the ratio of n x n stratified rays over its
+// rectangle (GiQualityFacts::cardAreaStrata by tier), exact for one such lamp a card,
+// never in the table. Stated, all three.
 //
 // INDIRECT = THE PIXEL'S OWN DIFFUSE ENVIRONMENT TERM, from the texel. With GI
 // OFF it is the SH ambient at the texel's normal (the engine's SH x gain, the

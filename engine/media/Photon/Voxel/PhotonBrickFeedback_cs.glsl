@@ -10,9 +10,11 @@
 // gain 1 / (1 - r) is then a code. A code is 1 % of a voxel's own radiance per channel over the float store's
 // absolute floor (Types.h kGiBrickFloor), never the display's: this is a world cache (L1).
 //
-// THE BUDGET (PHOTON-7 stage 4's hitch fix; Types.h GiQualityFacts::feedbackBrickPasses): the passes a frame are a COUNT
-// per tier, spent over the chain innermost cascade first; an active brick the count does not reach is CARRIED (active, no
-// pass, its series untouched) and taken first by its cascade's next selection, which starts where the last one stopped
+// THE BUDGET (PHOTON-7 stage 4's hitch fix; Types.h GiQualityFacts::lightWorkFrames): the passes a frame are a COUNT
+// per tier (the chain's bricks over lightWorkFrames) - every cascade that runs takes its FLOOR first (half its share,
+// stage 5's read A2), the rest a POOL spent over the chain outermost cascade first; an active brick the count does not
+// reach is CARRIED (active, no pass, its series untouched; one its injection moved this frame is listed in SELECT's
+// carried section for ACCUM) and taken first by its cascade's next selection, which starts where the last one stopped
 // (a rotating cursor over the bricks' index): every active brick is passed once in ceil(active / its share) frames, and
 // the choice is a function of the state alone (a scan in index order, never an atomic's order).
 // THE STATE, 8 words a brick (x fastest over the cascade's bricks):

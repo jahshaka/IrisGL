@@ -6498,7 +6498,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
 //     directional light, the cloud layer's shadow on it - the list's sun overflow) or the host's whole relight owes every
 //     cascade a delta over its whole volume. A cascade the one-writer latch holds this frame is owed until the next (a
 //     whole injection this frame read the lights already: answered).
-// (2) THE FEEDBACK, OUTERMOST FIRST: one bounce pass over each cascade's ACTIVE bricks (PhotonVoxelLighting::feedbackPass:
+// (2) THE FEEDBACK, OUTERMOST FIRST: one bounce pass over each cascade's ACTIVE bricks (PhotonVoxelLighting::feedbackSelect:
 //     the bricks whose direct term changed this frame, the ones a listed lamp or edit meets, every brick after a whole
 //     injection or a sky change - plus those still converging), then each cascade's stopped bricks accumulate what this
 //     frame's moves - its own and every outer cascade's that ran - could move them by, and the stop and resume rules run

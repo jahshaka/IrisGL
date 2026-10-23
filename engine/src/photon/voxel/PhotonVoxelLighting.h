@@ -75,7 +75,7 @@ namespace Ogre
         uint32 injectLo[kMaxInjectBoxes][3] = {}, injectHi[kMaxInjectBoxes][3] = {};
     };
 
-    /** THE FEEDBACK'S ACTIVATIONS for one frame's pass (PHOTON-7 stage 4; PhotonVoxelLighting::feedbackPass): every
+    /** THE FEEDBACK'S ACTIVATIONS for one frame's pass (PHOTON-7 stage 4; PhotonVoxelLighting::feedbackSelect): every
         brick (`all`: a new placement, the sky or the sun changed), or the bricks [lo, hi) of up to kMaxBoxes boxes a
         listed region meets - beside the bricks whose direct term an injection changed this frame (the mask's own
         word, always). */
@@ -94,7 +94,7 @@ namespace Ogre
         uint64 frame = 0u;
         uint32 ran = 0u, activeAfter = 0u, stops = 0u, resumes = 0u, saturated = 0u;
         /// ...and the active bricks the frame's budget CARRIED (active at the selection, not passed: PHOTON-7 stage 4's
-        /// hitch fix, GiQualityFacts::feedbackBrickPasses).
+        /// hitch fix, GiQualityFacts::lightWorkFrames).
         uint32 carried = 0u;
         /// ...and the bricks STOPPED ON THE OPERATOR'S BOUND after it: their r was never measured (PHOTON-7 stage 5's read
         /// A2; PhotonBrickFeedback_cs.glsl's word 2) - a door.
