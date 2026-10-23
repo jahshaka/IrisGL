@@ -367,7 +367,8 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
 
         // Skinned geometry deforms every frame; GI must not try to cache it.
         // (Item MOVES already don't invalidate GI — this keeps that property.)
-        if (!tit->second.unlit) invalidateGiCaches();
+        // (the list gets the item's box, the voxeliser "somewhere": PHOTON-7 stage 3's read F3)
+        if (!tit->second.unlit) invalidateGiCachesListed(n.item->getWorldAabbUpdated());
         return true;
     } JAH_CATCH(mError, false);
 }

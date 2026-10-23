@@ -6481,6 +6481,11 @@ private:
     void invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged) {
         mPhoton.invalidateGiCaches(where, geometryVoxelsChanged);
     }
+    /// The voxeliser told "somewhere", the changed-region list `listed` (PhotonComponent::invalidateGiCachesListed).
+    void invalidateGiCachesListed(const Ogre::Aabb &listed) { mPhoton.invalidateGiCachesListed(listed); }
+    /// THE WORLD BOX OF EVERY ITEM UNDER `sn` (itself included): a subtree's edit box for the list (an empty box when
+    /// none holds an item).
+    Ogre::Aabb subtreeItemBox(Ogre::SceneNode *sn) const;
     void staleProbeGrid(GiStaleReason why) { mPhoton.staleProbeGrid(why); }
     /// ATOM (atom/AtomComponent.h), on the substrate it reads; its one input from the scene
     /// (the adapter until the frame's record): the datablock a slot's Item wears.

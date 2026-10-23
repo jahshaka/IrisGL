@@ -508,7 +508,14 @@ bool OgreScene::destroyMesh(MeshId id) {
     auto it = mMeshes.find(id);
     if (it == mMeshes.end()) return false;
     JAH_TRY {
-        invalidateGiCaches();   // a request (frees nothing): at once, or once at the end of an open structure edit
+        // a request (frees nothing): at once, or once at the end of an open structure edit - the list gets the wearers'
+        // box, the voxeliser "somewhere" (PHOTON-7 stage 3's read F3)
+        {
+            Ogre::Aabb wearers = Ogre::Aabb::BOX_NULL;
+            for (const auto &kv : mNodes)
+                if (kv.second.meshRef == id && kv.second.item) wearers.merge(kv.second.item->getWorldAabbUpdated());
+            invalidateGiCachesListed(wearers);
+        }
         for (auto &kv : mNodes) if (kv.second.meshRef == id) detachItem(kv.first, kv.second);
         if (it->second.mesh) { mMeshIdByOgreMesh.erase(it->second.mesh.get()); mCardsByMesh.erase(it->second.mesh.get()); }
         it->second.mesh.reset();

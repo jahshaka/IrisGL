@@ -191,8 +191,9 @@ void OgreScene::setNodeProbeGridExcluded(NodeId id, bool excluded) {
     it->second.probeGridExcluded = excluded;
     // The flag changes where the probe grid is placed, so it is as much of a
     // change as moving the geometry: flag the caches and let the frame-time
-    // flush answer once, however many nodes the caller toggles in a burst.
-    invalidateGiCaches();
+    // flush answer once, however many nodes the caller toggles in a burst. (The list gets the node's box, the
+    // voxeliser "somewhere": PHOTON-7 stage 3's read F3.)
+    invalidateGiCachesListed(it->second.node ? subtreeItemBox(it->second.node) : Ogre::Aabb::BOX_NULL);
 }
 
 bool OgreScene::nodeProbeGridExcluded(NodeId id) const {

@@ -602,6 +602,18 @@ unsigned OgreScene::applyNodeRecords(const std::vector<NodeRecord> &records, uns
     return applied;
 }
 
+Ogre::Aabb OgreScene::subtreeItemBox(Ogre::SceneNode *sn) const {
+    Ogre::Aabb box = Ogre::Aabb::BOX_NULL;
+    if (!sn) return box;
+    for (size_t i = 0; i < sn->numAttachedObjects(); ++i) {
+        Ogre::MovableObject *o = sn->getAttachedObject(i);
+        if (o && dynamic_cast<Ogre::Item *>(o)) box.merge(o->getWorldAabbUpdated());
+    }
+    for (size_t i = 0; i < sn->numChildren(); ++i)
+        if (Ogre::SceneNode *c = dynamic_cast<Ogre::SceneNode *>(sn->getChild(i))) box.merge(subtreeItemBox(c));
+    return box;
+}
+
 bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSerial) {
     JAH_TRY {
         Node *rec = record(r.id);
@@ -619,7 +631,7 @@ bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSeri
                 // A move under a hidden parent hides the subtree, a move out from under one shows it again.
                 bool giChanged = false;
                 applyShownSubtree(sn, inheritedShown(sn), giChanged);
-                if (giChanged) invalidateGiCaches(nullptr);
+                if (giChanged) invalidateGiCachesListed(subtreeItemBox(sn));   // (stage 3's read F3: the subtree's box)
                 classOwed = reparented = true;
                 // A STATIC node that keeps its class under its new parent moved all the same (its local is kept,
                 // its parent changed): one static dirty re-derives it and its subtree.
@@ -915,7 +927,7 @@ bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
         applyShownSubtree(n, inheritedShown(n), giChanged);
         // A REPARENT IS A VISIBILITY EDGE HERE TOO (DRAG-1): the node moved
         // under or out from under a hidden parent. Nothing died.
-        if (giChanged) invalidateGiCaches(nullptr);
+        if (giChanged) invalidateGiCachesListed(subtreeItemBox(n));   // (stage 3's read F3: the subtree's box)
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1522,8 +1534,10 @@ void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
     recountNode(n);
     applyNodeVisibilityFlags(n);
     const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+    // (a flip's box is its item's: the list gets it, the voxeliser "somewhere" - PHOTON-7 stage 3's read F3)
+    const Ogre::Aabb flipBox = n.item ? n.item->getWorldAabbUpdated() : Ogre::Aabb::BOX_NULL;
     if (healing && giBefore != giAfter) {
-        invalidateGiCaches();
+        invalidateGiCachesListed(flipBox);
         ++mMobilityRebuilds;
     } else if (giBefore != giAfter && change == MobilityChange::Authoring) {
         // COUNT WHAT IT ACTUALLY COSTS. A scene with no GI arm built yet — the
@@ -1533,7 +1547,7 @@ void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
         // me rebuilds?"). `mGiCachesDirty` already true means one is owed for
         // another reason and this change rides it.
         const bool wouldRebuild = mPhoton.giArmWouldRebuild();
-        invalidateGiCaches();
+        invalidateGiCachesListed(flipBox);
         if (wouldRebuild) ++mMobilityRebuilds;
     }
     if (probeSeesItem(n) != probeBefore) staleProbeGrid(GiStaleReason::Mobility);
@@ -1779,7 +1793,7 @@ void OgreScene::setNodeVisibleImpl(NodeId id, bool visible, const bool *parentSh
                 const Ogre::Aabb box = n.item->getWorldAabb();
                 invalidateGiCaches(&box);
             } else {
-                invalidateGiCaches(nullptr);
+                invalidateGiCachesListed(n.node ? subtreeItemBox(n.node) : Ogre::Aabb::BOX_NULL);   // (F3: the subtree's)
             }
         }
     } JAH_CATCH(mError, );

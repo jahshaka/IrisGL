@@ -2983,6 +2983,18 @@ void PhotonComponent::invalidateGiCaches(const Ogre::Aabb *where, bool geometryV
     }
 }
 
+void PhotonComponent::invalidateGiCachesListed(const Ogre::Aabb &listed) {
+    const bool restart = !mInGiStage;
+    if (mScene.inStructureEdit()) {
+        mGiInvalidationPending = true;
+        mGiRestartPending = mGiRestartPending || restart;
+    } else {
+        applyGiInvalidation(restart);
+    }
+    noteGiCascadeDirty(nullptr, &listed);
+    noteScrollEdit(nullptr);
+}
+
 // THE WALK, ABSORBED (ENGINE-UPGRADE-2B stage 2): the scene's walk records what it found
 // (PhotonComponent::WalkRecord) and the component folds it into its own state — the flags its
 // consumers clear when they spend them, the promoted movers, the boxes the cascades owe (merged
@@ -3057,11 +3069,13 @@ void PhotonComponent::clearCascadeDirty() {
     clearCascadeDirtyUnion();
 }
 
-void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box) {
+void PhotonComponent::noteGiCascadeDirty(const Ogre::Aabb *box, const Ogre::Aabb *listed) {
     if (mVctCascades.empty()) return;          // no chain: nothing to describe
     // THE EDIT'S REGION (PHOTON-7 stage 3): every box the dirty path is told is the changed-region list's, as told -
-    // never a merged or collapsed one; "somewhere" is the list's overflow.
+    // never a merged or collapsed one; "somewhere" is the list's overflow - unless the caller knows where (`listed`:
+    // the voxeliser is told "somewhere" for its own reasons, the list the box - stage 3's read F3).
     if (box) appendRegion(GiRegionKind::Edit, *box);
+    else if (listed) appendRegion(GiRegionKind::Edit, *listed);
     else noteRegionOverflow(kGiRegionOverflowSomewhere);
     if (mGiCascadeDirtyAll) return;            // already the strongest statement
     if (!box) { clearCascadeDirty(); mGiCascadeDirtyAll = true; return; }

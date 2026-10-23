@@ -830,7 +830,13 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
         // conversions by raw datablock pointer, so the dying one is EVICTED by
         // name (a recycled address would alias, and the store's in-place refresh
         // would read freed memory).
-        invalidateGiCaches();
+        // (the list gets the wearers' box, the voxeliser "somewhere": PHOTON-7 stage 3's read F3)
+        {
+            Ogre::Aabb wearers = Ogre::Aabb::BOX_NULL;
+            for (const auto &kv : mNodes)
+                if (kv.second.materialRef == id && kv.second.item) wearers.merge(kv.second.item->getWorldAabbUpdated());
+            invalidateGiCachesListed(wearers);
+        }
         mPhoton.noteGiDatablockDied(hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
 
         // Remember who was rendering with this material, then take the
@@ -1236,7 +1242,8 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         n.meshRef = meshId; n.materialRef = matId;
         // New lit geometry must join the voxel volume / next trace; unlit
         // overlays (outlines, wires) never participate in GI.
-        if (!tit->second.unlit) invalidateGiCaches();
+        // (the list gets the item's box, the voxeliser "somewhere": PHOTON-7 stage 3's read F3)
+        if (!tit->second.unlit) invalidateGiCachesListed(n.item->getWorldAabbUpdated());
         // An UNLIT item the probes capture (kVisibleBit, RQ inside the probe
         // face's range): arriving is a probe input only (P7). Overlays at RQ
         // 210+ (gizmos, outlines) and helpers fail probeSeesItem.

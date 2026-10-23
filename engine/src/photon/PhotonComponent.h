@@ -777,6 +777,10 @@ public:
     /// answered by a re-injection, which is what the dirty path does when
     /// nothing geometric is marked (G1).
     void invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged);
+    /// ...and "somewhere" for the VOXELISER (the whole chain owes its rebuild, for its own reasons) while the CHANGED-
+    /// REGION LIST knows where: `listed` (an attach's item, a flip's, a subtree's or a mesh's wearers' box) is its Edit
+    /// box, never an overflow - the list's law: overflow only for "cannot say where" (PHOTON-7 stage 3's read F3).
+    void invalidateGiCachesListed(const Ogre::Aabb &listed);
     /// Called by Engine::renderOneFrame before rendering.
     void applyPendingGi();
     /// applyPendingGi as an ASYNCHRONOUS scene runs it (ASYNC-SHADERS-1): the lighting arm's
@@ -1263,7 +1267,7 @@ private:
     /// call it unconditionally. NOT called at all where nothing a voxel holds
     /// moved — a light leaving the scene — which is what makes that a
     /// re-injection and nothing else.
-    void noteGiCascadeDirty(const Ogre::Aabb *box);
+    void noteGiCascadeDirty(const Ogre::Aabb *box, const Ogre::Aabb *listed = nullptr);
     /// Marks every cascade whose box intersects the recorded dirty region (or
     /// all of them when the region is unknown) `pending`, and clears the region.
     /// `why` is the reason the monitor row will carry. Returns how many cascades
