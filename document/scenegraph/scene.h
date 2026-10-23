@@ -524,7 +524,7 @@ public:
     // `world.giStatus()` reports what the renderer built.
     GiMode giMode;
     GiQuality giQuality;
-    int giNumBounces;          // 0 / 1: the light bounces off (the direct store alone, BOUNCES-ZERO-1) / on (PHOTON-7 stage 4: converged by feedback)
+    bool giBounces;            // the light bounces (PHOTON-7 stage 4: the series converged by feedback); off = the direct store alone (BOUNCES-ZERO-1)
     /// PHOTON — THE VOXELS ARE ALWAYS CAMERA-CENTRED CASCADES (PHOTON_SPEC P0;
     /// the single scene-fitted volume and its `giCascades` switch are deleted,
     /// D4-PHOTON-TIERS). `giCascadeSet` optionally pins the table, one entry per
@@ -644,7 +644,7 @@ public:
     /// (GI_UNIFIED_SPEC.md §2 / P2). 0 Low, 1 Medium, 2 High, 3 Epic.
     ///
     /// It is a REQUEST, never a second source of truth: the tier resolves
-    /// WRITE-THROUGH into giMode / giQuality / giDdgi / giNumBounces
+    /// WRITE-THROUGH into giMode / giQuality / giDdgi / giBounces
     /// (services/worldmodes.cpp, setPhoton) exactly the way a World Mode resolves into its rows, so the
     /// mirror, the serializer, the engine and every existing verb keep reading
     /// the one field they always read. A field the user pinned deviates from

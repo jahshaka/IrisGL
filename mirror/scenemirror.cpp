@@ -7784,7 +7784,7 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // region is the engine's own fit (GiParams::testProbeRegion* are suite
         // levers); the voxels are the camera's cascade chain.
         // THE BOUNCES ARE ON OR OFF (PHOTON-7 stage 4: the feedback converges the series, no count of passes exists).
-        gi.bounces = mSource->giNumBounces > 0;
+        gi.bounces = mSource->giBounces;
         gi.pccProbesX = qBound(1, qRound(mSource->giPccGrid.x()), 8);
         gi.pccProbesY = qBound(1, qRound(mSource->giPccGrid.y()), 8);
         gi.pccProbesZ = qBound(1, qRound(mSource->giPccGrid.z()), 8);

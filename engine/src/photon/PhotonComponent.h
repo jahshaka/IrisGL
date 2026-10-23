@@ -940,8 +940,7 @@ private:
     std::string &mError;
     // Photon's constants.
     static const size_t kGiCascadeDirtyBoxCap = 16;
-    /// HOW STILL IS STILL. Ten frames — the same 1/6 s the GI scheduler's
-    /// in-motion cadence (GiPlan::kLightOnlyEveryN) uses, and chosen from the
+    /// HOW STILL IS STILL. Ten frames — 1/6 s, chosen from the
     /// movement quantum rather than from taste: a box counts as moved when its
     /// AABB steps a 64th of its own largest extent (giAabbQuantum), so a 1 m
     /// object dragged as slowly as 20 cm/s still records a move about every

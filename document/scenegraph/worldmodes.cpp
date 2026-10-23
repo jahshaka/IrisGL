@@ -1056,8 +1056,8 @@ QVector<Row> buildRows()
                                 "THE DIRECT STORE ALONE: the voxels hold the lamps' direct light and nothing a "
                                 "surface re-emits (a measurement setting). At %1 voxels per axis (High and Epic).")
                      .arg(photonTierVoxelPhrase(PhotonTier::High));
-        r.get = [](const iris::ScenePtr &s) { return qBound(0, s->giNumBounces, 1); };
-        r.set = [](const iris::ScenePtr &s, int v) { s->giNumBounces = qBound(0, v, 1); };
+        r.get = [](const iris::ScenePtr &s) { return s->giBounces ? 1 : 0; };
+        r.set = [](const iris::ScenePtr &s, int v) { s->giBounces = v != 0; };
         out.append(r);
     }
     // ---- Sky ---------------------------------------------------------------
@@ -1845,7 +1845,7 @@ void photonHave(const iris::ScenePtr &s, int have[kPhotonRowCount])
     have[0] = int(s->giMode);
     have[1] = int(s->giQuality);
     have[2] = s->giDdgi < 0 ? (photonFieldAuto(s) ? 1 : 0) : (s->giDdgi > 0 ? 1 : 0);
-    have[3] = qBound(0, s->giNumBounces, 1);
+    have[3] = s->giBounces ? 1 : 0;
     have[4] = qBound(0, s->giProbeCaptureSize, 1024);
 }
 }   // namespace
@@ -1875,7 +1875,7 @@ void setPhoton(const iris::ScenePtr &scene, bool enabled, PhotonTier tier)
     // through GiQualityFacts::fieldDefault of the quality it runs at — the one
     // resolution; a tier writes no concrete copy of its column for it to part from.
     if (!pinned(scene, "giDdgi"))    scene->giDdgi = -1;
-    if (!pinned(scene, "giBounces")) scene->giNumBounces = row.bounces;
+    if (!pinned(scene, "giBounces")) scene->giBounces = row.bounces != 0;
     if (!pinned(scene, "giProbeSize")) scene->giProbeCaptureSize = qBound(0, row.probeSize, 1024);
     if (!pinned(scene, "giMode")) scene->giMode = iris::GiMode(qBound(1, row.technique, 2));
     else if (scene->giMode == iris::GiMode::OFF) {

@@ -628,9 +628,8 @@ bool PhotonComponent::setGiTuning(const GiParams &p) {
 // document knows, carried by the record (world.refreshGi()'s serial, a material hover preview, a mobility flip).
 //
 // THE RULES (PHOTON-7 stage 4: a LIGHT is no longer the scheduler's - a lamp's old and new spheres are the changed-region
-// list's, and the writer point re-injects their direct term as a delta while the feedback converges the bounces; the
-// cheap light re-inject cadence every kLightOnlyEveryN frames, the moving lamp's cadence and its owed at-rest tick, and
-// their counters are deleted with the whole-chain tick they ran):
+// list's, and the writer point re-injects their direct term as a delta while the feedback converges the bounces; no
+// light cadence, no moving lamp's cadence and no owed at-rest tick exist):
 //  * a configuration PUSH answers everything: the state restarts from it;
 //  * a geometry or material change ARMS a pending re-solve until it has held still for kStableFrames, then ONE re-solve
 //    (Settle: the dirty path's marks, the probe grid's staleness); a hover preview is no change;
@@ -4255,11 +4254,10 @@ void PhotonComponent::updateProbeBudget(const Ogre::Vector3 &camPos) {
 // computing it cannot disturb the movement scan above (the two ran into each other
 // in an earlier draft: whichever consumer looked first consumed the movement).
 //
-// What it buys: geometry that moves ARMS the scheduler's stability window like
-// a dragged light does, so the CHEAP paths run during the drag — the probes the
-// object is inside re-capture on their next turn in the sweep, and the lights are
-// re-injected into the voxels every GiPlan::kLightOnlyEveryN frames — and exactly ONE
-// full re-solve lands when the movement stops. Before this, moving an object
+// What it buys: geometry that moves ARMS the scheduler's stability window, so the
+// CHEAP paths run during the drag — the probes the object is inside re-capture on
+// their next turn in the sweep — and exactly ONE re-solve lands when the movement
+// stops. Before this, moving an object
 // changed nothing at all until somebody pressed Refresh.
 //
 // Quantized to a 64th of the ITEM'S OWN largest extent: a settling physics body or an idle sway must not hold the mirror's

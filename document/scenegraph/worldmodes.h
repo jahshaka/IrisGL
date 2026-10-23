@@ -269,7 +269,7 @@ bool applyComboItem(const iris::ScenePtr &scene, const Row &r, const ComboItem &
 // it no longer collapses onto High). ONE table, ONE owner: `kPhotonTable` in
 // worldmodes.cpp; the engine's GiQuality has an Epic row of its own
 // (D4-PHOTON-TIERS: High's resolutions plus four times the gather's probes),
-// and the bounce column is an ordinary document field (giNumBounces: 0 off, 1 on - PHOTON-7 stage 4).
+// and the bounce column is an ordinary document field (giBounces, a bool: the column's 0 off, 1 on - PHOTON-7 stage 4).
 //
 //   tier    technique             voxels             ddgi  DDGI grid  bounces  probe faces/HDR/shadows  budget
 //   Low     VCT, 2 cascades       64^3               ON    8192 fit   1        — (no probes)            (dial)
