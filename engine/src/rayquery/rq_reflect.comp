@@ -204,7 +204,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 screen;
 	vec4 screen2;
 	/// x, y: the denoiser space's exposure (the resolve's, the temporal pass'); z = THE LOBE DRAW'S SEED OFFSET (the arm
-	/// reflect.seedOffset, 0 shipped): added to the frame index the draw takes.
+	/// reflect.seedOffset, 0 shipped): added to the frame index the draw takes; w = THE REST'S BASE BATCH k0 (the
+	/// tier's rest rays a texel: rq_reflect.comp's per-warp round budget).
 	vec4 denoiser;
 } p;
 
@@ -1368,7 +1369,18 @@ void main()
 	// The batch's rays are DEALT across the subgroup's lanes (below), its folds made in this order all the same.
 	const bool restBatch = live && restInPlace && !resume && p.rest.x < 0.5 && p.rest.y < 0.5 && centreChance < 1.0 &&
 						   p.rest.z > 1.5;
-	const uint batchRays = restBatch ? uint( p.rest.z ) : 1u;
+	// THE WARP'S ROUND BUDGET (RED 2, the lead's rule): the deal's rounds a frame never exceed what every warp ran at
+	// the rest's first batching frame - k0 rounds of the subgroup's lanes, and the round that finishes the texels -
+	// so a warp's batching texels share k0 x lanes samples: k_t = min( k_active, k0 x lanes / m ). Measured why: the
+	// active texels CLUSTER (an edge is a line - m median 5-6 a warp, up to 32), the busiest warp's rounds are the
+	// dispatch's critical path, and on a near-idle GPU that path is latency (a tail ray cost 31-39 ns at 233 busy
+	// warps against 1.7 ns on the first frame's 5,800). The tail's texels were in those same warps on that frame, so
+	// the tail's critical path is never longer than it was. m from the ballot: deterministic (L7, L8).
+	const uint warpBatching = subgroupBallotBitCount( subgroupBallot( restBatch ) );
+	const uint warpLanes = subgroupBallotBitCount( subgroupBallot( true ) );
+	const uint batchRays = restBatch ? max( 1u, min( uint( p.rest.z ),
+													 ( uint( max( p.denoiser.w, 1.0 ) ) * warpLanes ) / max( warpBatching, 1u ) ) )
+									 : 1u;
 	uint vNow = restInPlace ? inPlace.v : 0u;   // the samples the rest mean holds
 	float restT = restInPlace ? inPlace.hitT : throwT;   // the rest's mean length
 	uint folds = 0u;
@@ -1438,7 +1450,7 @@ void main()
 	// before. allowance = min( k_active, capacity / batching ) (the host's, p.rest.w): the list's existing capacity is
 	// the count. A texel's run is the records of ONE round of the deal (one reservation): the rounds after it end at a
 	// record.
-	const uint allowance = uint( p.rest.w );
+	const uint allowance = min( uint( p.rest.w ), batchRays );
 	uint runUsed = 0u;                               // this texel's records in its run this frame
 	uint dealt = 0u;                                 // this texel's samples dealt so far
 	uint remaining = restBatch ? batchRays : 0u;     // ...and still to deal

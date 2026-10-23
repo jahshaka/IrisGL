@@ -6173,6 +6173,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.denoiser[1] = exposureTex ? 1.0f : 0.0f;
     // THE LOBE DRAW'S SEED OFFSET (the measuring arm reflect.seedOffset: 0 shipped).
     pp.denoiser[2] = float(std::lround(armValue(ArmId::ReflectSeedOffset)));
+    // THE REST'S BASE BATCH k0 (rq_reflect.comp, the warp's round budget): the tier's rest rays a texel at the rest's
+    // first batching frame.
+    pp.denoiser[3] = float(std::max(1u, giQualityFacts(scene->giParams().quality).reflectRestRays));
     // THE GI FREEZE (M1's measuring arm): the reflection keeps its histories under 1; under 2 (THE WORLD HELD) the caches
     // and the gather are held and the reflection runs live - its own estimator measured alone.
     pp.rest[0] = std::lround(armValue(ArmId::GiFreeze)) == 1 ? 1.0f : 0.0f;
