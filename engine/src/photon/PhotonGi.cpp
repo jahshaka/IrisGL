@@ -977,8 +977,8 @@ bool PhotonComponent::injectCascade(size_t i) {
         rows.cascade = i;
         lighting->setPhaseListener(&rows);
         struct Unhook {
-            Ogre::PhotonVoxelLighting *l;
-            ~Unhook() { l->setPhaseListener(nullptr); }
+            Ogre::PhotonVoxelLighting *l = nullptr;
+            ~Unhook() { if (l) l->setPhaseListener(nullptr); }
         } unhook{ lighting };
         lighting->update(mSceneMgr, passes);
     }

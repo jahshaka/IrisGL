@@ -214,12 +214,12 @@ struct StillnessRun::Impl {
     std::vector<unsigned char> classAt;               ///< per picture pixel: its class (0 = unclassified)
     /// A window frame's per-pixel change, held until the window's mask is known (the history count arrives a few
     /// frames after the stop).
-    struct Queued { int window; size_t frame; std::vector<unsigned char> change; };
+    struct Queued { int window = 0; size_t frame = 0; std::vector<unsigned char> change; };
     std::vector<Queued> queued;
     /// The traced reflection frame -> (window, frame).
     std::map<unsigned, std::pair<int, size_t>> byTraced;
     /// THE GATHER FRAME -> (window, trail?, frame) (StillnessSpec::classRestarts): each frame the gather recorded.
-    struct FrameRef { int window; bool trail; size_t index; };
+    struct FrameRef { int window = 0; bool trail = false; size_t index = 0; };
     std::map<unsigned, FrameRef> byGather;
     unsigned lastGatherMapped = 0u;                   ///< the gather's published frame counter last mapped
     /// The class restarts of the gather frame the readback holds now, into the frame it maps to (once).
