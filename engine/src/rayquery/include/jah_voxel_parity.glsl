@@ -67,7 +67,7 @@ vec4 jahParityAnswer( int cone, int part )
 			return jahVoxelSample( cascade, at, c1.xyz, c3.x );
 		// The march from that centre, one plane, read whole.
 		JahConeResult one = jahConeMarchCascade( cascade, at, c1.xyz, 0.0, c3.x, 0.0, 0.0,
-												 kJahVoxelNoOrigin, JAH_MARCH_ONE_STEP );
+												 kJahVoxelNoOrigin, JAH_MARCH_ONE_STEP, -1.0 );
 		return vec4( one.colour, one.alpha );
 	}
 	JahConeResult r = jahConeMarch( c0.xyz, c1.xyz, c0.w, jahConeOrigin( c0.xyz, c2.xyz ), flags );

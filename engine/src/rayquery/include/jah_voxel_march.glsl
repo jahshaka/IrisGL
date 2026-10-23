@@ -149,6 +149,8 @@ struct JahConeResult
 	/// (a reflection's leg through the fog law, PhotonVct). A cascade's own march
 	/// hands its sum in ITS units from its own start age; the walk converts.
 	float takeAtC0;
+	/// How far along dirLS (this cascade's normalised units) the march read from its start (the walk's apex distance).
+	float tEnd;
 };
 
 /// THE ORIGIN PLANE of a cone set that starts at `startLS` (jahConeStart's point) biased
@@ -216,7 +218,7 @@ vec2 jahMarchPlane( float b, float texelLS, float sgn )
 /// this cascade's space (jahVoxelReadPlane; kJahVoxelNoOrigin for a ray in free space).
 JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfAngle,
 								   float startingLodLevel, float startingAlpha,
-								   float startingTravelled, vec4 origin, uint flags )
+								   float startingTravelled, vec4 origin, uint flags, float shellEnd )
 {
 	const bool specular = ( flags & JAH_MARCH_SPECULAR ) != 0u;
 	const bool oneStep = ( flags & JAH_MARCH_ONE_STEP ) != 0u;
@@ -335,6 +337,11 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 		readTo = nextReadTo;
 		if( sgn > 0.0 ? readTo >= 1.0 : readTo <= 0.0 )
 			done = true;	// the box's far face along the axis
+		// THE SHELL'S END (PHOTON-7 stage 5, the cone shells): the plane that reads past the shell's world distance
+		// from the apex is the cascade's last - a function of the world point, the direction and the lattices, never of
+		// the box (the box's face before it: the band)
+		if( shellEnd > 0.0 && ( readTo - startA ) * sgn * invAbsDa >= shellEnd )
+			done = true;
 		if( oneStep )
 			break;
 	}
@@ -349,12 +356,22 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 	result.travelledC0 = result.travelled;
 	result.lastCascade = c;
 	result.takeAtC0 = takeAt;
+	result.tEnd = tEnd;
 	return result;
 }
 
 /// THE WALK: cascade 0 from `posLS0` (already off the surface - the caller's own start
 /// bias, jahConeStart: one cell of cascade 0 along the normal), then every cascade out
 /// while the cone is not yet opaque.
+/// THE CONE SHELLS (PHOTON-7 stage 5; stage 1's direct march, LightInjection's jahInjectVisibility, has the same
+/// shells): cascade j carries the cone over the apex distances [D_(j-1), D_j), D_j the sum of eight cells of every
+/// cascade up to j, and hands over on the plane that reads past D_j - or earlier, where its footprint outgrows the
+/// cascade's hand-over mip (a world function too) - the last cascade to its box's exit. So what a cone gathers is a
+/// function of the world point, the direction and the lattices, never of where a box stands, wherever the shells lie
+/// inside their boxes; a cascade whose box ends first (THE BAND: a start within its shell's reach of the face) hands
+/// over at the face, and that cone is the placement's. (A cone ended at its cascade's box face: a card's indirect at
+/// one pose differed by up to 24 codes after a walk and a teleport - the outer cascades placed apart by the scroll's
+/// hysteresis.) The distances are taken along the x axis's scale: the chain's cascades are cubes.
 /// ...from a start `startingTravelled` along its own axis from the apex (cascade 0's normalised
 /// units; the specular cone's start, jahSpecularConeStart): the footprint grows from the apex.
 JahConeResult jahConeMarchAged( vec3 posLS0, vec3 dirLS, float tanHalfAngle, vec4 origin, uint flags,
@@ -363,9 +380,19 @@ JahConeResult jahConeMarchAged( vec3 posLS0, vec3 dirLS, float tanHalfAngle, vec
 	const bool specular = ( flags & JAH_MARCH_SPECULAR ) != 0u;
 	// THE SHARE OF THE CONE BELOW ITS SURFACE (origin.w, the caller's jahConeBelow) is stopped
 	// by the surface - the hemisphere's boundary is opaque from above - and starts the composite.
-	JahConeResult result = jahConeMarchCascade( 0, posLS0, dirLS, tanHalfAngle, 0.0, origin.w,
-												startingTravelled, origin, flags );
 #if JAH_VOX_MAX_CASCADES > 1
+	// THE SHELLS' ENDS in cascade 0's normalised units from the apex (8 cells of every cascade up to j, each cascade's
+	// cells over cascade 0's: its scale from cascade 0, s0j), and the apex distance the walk has read up to
+	float shellC0 = 8.0 * JAH_VOX_INVRES( 0 ).x;
+	float s0j = 1.0;
+	const float shell0 = JAH_VOX_COUNT > 1 ? max( shellC0 - startingTravelled, 1e-6 ) : -1.0;
+#else
+	const float shell0 = -1.0;
+#endif
+	JahConeResult result = jahConeMarchCascade( 0, posLS0, dirLS, tanHalfAngle, 0.0, origin.w,
+												startingTravelled, origin, flags, shell0 );
+#if JAH_VOX_MAX_CASCADES > 1
+	float apexC0 = startingTravelled + result.tEnd;
 	float toC0 = 1.0;	// cascade j's normalised units to cascade 0's, along dirLS
 	// Where the walk has read up to, from the apex, in cascade 0's units (a specular
 	// hop starts its own age at 0; a diffuse one carries the age across).
@@ -387,10 +414,15 @@ JahConeResult jahConeMarchAged( vec3 posLS0, vec3 dirLS, float tanHalfAngle, vec
 		}
 
 		const float hopScale = dot( abs( dirLS ), fromPrevScale.xyz );
+		// this cascade's shell's end, from the point the walk has read up to (in ITS units); the last one's: its box
+		s0j *= fromPrevScale.x;
+		shellC0 += 8.0 * JAH_VOX_INVRES( j ).x / s0j;
+		const float shellJ = j + 1 < JAH_VOX_COUNT ? max( ( shellC0 - apexC0 ) * s0j, 1e-6 ) : -1.0;
 		JahConeResult newRes = jahConeMarchCascade(
 			j, newPosLS, dirLS, tanHalfAngle,
 			specular ? 0.0 : max( result.lodLevel - prevCascadeMaxLod, 0.0 ), result.alpha,
-			specular ? 0.0 : result.travelled * hopScale, origin, flags );
+			specular ? 0.0 : result.travelled * hopScale, origin, flags, shellJ );
+		apexC0 += newRes.tEnd / s0j;
 
 		// THE HOP'S UNITS, ONE RULE FOR EVERY CONE (PHOTON-PHYSICS-1, CONE-EMITTER-1; PHOTON-7 stage 1):
 		// every cascade stores radiance, so the new cascade's colour is added as it is. (It was in ITS
