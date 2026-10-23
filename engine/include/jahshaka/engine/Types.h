@@ -3030,8 +3030,10 @@ struct GiQualityFacts {
     /// e^-(lambda S) (1 + lambda S), at most 1e-3 when lambda S >= 9.23. The faces it must catch hold at least ONE HIT A
     /// FRAME - one pixel's reflection ray, or 1.6 % of one probe's 64 gather rays (2.8 % of Medium's 36): a face hit
     /// less is read by less than one pixel or one probe's code - so S = 10 at every tier (S >= two read-backs, 8, too).
-    /// (The 120 frames this replaced had no law.)
+    /// (The 120 frames this replaced had no law.) `cardDemandHitFloor` is the law's lambda_min (hits a frame), the
+    /// one constant the settle is derived from and its rows bar on (gi.card_residency).
     unsigned cardDemandSettleFrames = 10u;
+    float    cardDemandHitFloor = 1.0f;
     /// THE LIT CARD'S PER-FRAME BUDGET (PHOTON-CARDS-1, SC-1c), in atlas TEXELS
     /// relit a frame by the `Jahshaka/CardLight` job — a second budget beside the
     /// capture's, because a light's colour or intensity changes every card's
