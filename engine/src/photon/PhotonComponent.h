@@ -457,7 +457,7 @@ public:
         /// readings.
         bool fbForce = false;
         unsigned long long fbActivatedFrame = 0, fbLastFrame = 0;
-        unsigned fbLastActive = 0;
+        unsigned fbLastActive = 0, fbLastOnPrior = 0;
         unsigned long long fbPasses = 0, fbBricksRan = 0, fbStops = 0, fbResumes = 0, fbSaturated = 0, fbReadings = 0,
                            fbCarried = 0;
         float        lastCpuMs = -1.0f;

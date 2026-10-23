@@ -1410,6 +1410,7 @@ namespace Ogre
         out.stops = w[13];
         out.resumes = w[14];
         out.saturated = w[15];
+        out.onPrior = w[10];
         out.carried = w[9] > w[8] ? w[9] - w[8] : 0u;
         r.ticket->unmap();
         r.ticket.reset();

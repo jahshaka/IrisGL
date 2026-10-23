@@ -4729,6 +4729,9 @@ struct GiStatus {
         /// their gather could see moved them a code), the bricks whose pass count reached 255 (a door, never a stop) and the
         /// readings that landed.
         unsigned feedbackActive = 0;
+        /// ...and of that reading, the bricks STOPPED ON THE OPERATOR'S BOUND: their contraction was never measured from
+        /// two real moves, so they resume and stop by the most they re-emit (PHOTON-7 stage 5's read A2) - a door.
+        unsigned feedbackOnPrior = 0;
         bool feedbackOwed = false;
         unsigned long long feedbackPasses = 0, feedbackBricksRan = 0, feedbackStops = 0, feedbackResumes = 0,
                            feedbackSaturated = 0, feedbackReadings = 0;

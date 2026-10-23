@@ -96,6 +96,9 @@ namespace Ogre
         /// ...and the active bricks the frame's budget CARRIED (active at the selection, not passed: PHOTON-7 stage 4's
         /// hitch fix, GiQualityFacts::feedbackBrickPasses).
         uint32 carried = 0u;
+        /// ...and the bricks STOPPED ON THE OPERATOR'S BOUND after it: their r was never measured (PHOTON-7 stage 5's read
+        /// A2; PhotonBrickFeedback_cs.glsl's word 2) - a door.
+        uint32 onPrior = 0u;
     };
 
     class PhotonVoxelLighting : public IdObject, public TextureGpuListener

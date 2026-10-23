@@ -20,9 +20,14 @@
 //       selection's pick, cleared by POST: an active brick without it was carried); bit 10 CLEARED (PHOTON-7 stage 5,
 //       5-4: the shift brought it in, or a whole injection wrote it - its old store words are not this world point's;
 //       its first pass measures its move against what a reader read there before, the next cascade out's total: the
-//       pass clears it)
+//       pass clears it); bit 11 r MEASURED (PHOTON-7 stage 5's read A2: [2] holds a ratio of two real moves, not the prior)
 //   [1] its last pass's move (relative: the brick mask's word 1, float bits)
-//   [2] r, its measured contraction (float bits; kept over a stop for the resume test)
+//   [2] r, its contraction (float bits; kept over a stop for the resume test): MEASURED, the ratio of its last two moves
+//       both above zero (under the write hold a nonzero move is at least a store step), else the last measured value
+//       stands; before any measurement, THE OPERATOR'S BOUND - the most the brick's voxels re-emit of what they gather,
+//       any channel (the pass's atomicMax at each pass until bit 11): a bounce's gain never exceeds it (the gather returns
+//       at most what reaches it), so the prior only resumes a brick earlier and stops it more strictly - passes, never
+//       error. Never 0 for a brick that re-emits: 0 set the resume threshold 1 - r to a full code (the deaf brick)
 //   [3] the would-move ACCUMULATED since its stop, in FIXED POINT: FB_ACC_ONE units a code (uint, saturating). It
 //       decides the resume, so it is an integer sum across the frames' accumulations - exact, and each accumulation's
 //       float sum runs over a list in the selection's brick-index order (SELECT), never an atomic's order (a float sum
@@ -37,8 +42,9 @@
 //       from the total the delta already wrote), read by the cards' accumulation (PHOTON-7 stage 5, JahCardIndirect)
 // THE ARGUMENTS, 16 words: [0..2] the bounce's and the copy's groups (8 x the bricks: group y is the brick), [4..6]
 // the directional levels' (1 x the bricks), [8] the bricks listed (passed) this frame, [9] the bricks active at the
-// selection (passed or carried), [12] the bricks active after the frame, [13] stops, [14] resumes, [15] the bricks whose
-// pass count saturated (a door, never a condition).
+// selection (passed or carried), [10] the bricks stopped on the operator's bound (r never measured: a door), [12] the
+// bricks active after the frame, [13] stops, [14] resumes, [15] the bricks whose pass count saturated (a door, never a
+// condition).
 // THE CHAIN'S WORDS (U8, the innermost cascade's buffer, bound by every cascade of the chain): [0] the brick-passes left
 // this frame, [1 + k] cascade k's selection cursor (the brick index its next selection starts from).
 // THE MODES (fbDims.w): 0 CLEAR (the frame's mask and arguments), 1 PRE (activation), 5 SELECT (the frame's list under
@@ -102,6 +108,7 @@ vulkan( }; )
 // the cursor and the brick after the last one taken.
 #define FB_RAN 512u
 #define FB_CLEARED 1024u
+#define FB_R_MEASURED 2048u
 @property( !jah_brick_copy )
 shared uint fbSScan[64];
 shared uint fbSTaken;
@@ -229,7 +236,7 @@ void main()
 				fbState[s + 3u] = 0u;
 				fbState[s + 6u] = 0u;
 			}
-			flags = 1u | ( flags & FB_CLEARED );
+			flags = 1u | ( flags & ( FB_CLEARED | FB_R_MEASURED ) );
 		}
 		if( ( flags & 1u ) != 0u )
 			atomicAdd( fbArgs[9], 1u );
@@ -253,22 +260,31 @@ void main()
 				atomicAdd( fbArgs[15], 1u );
 			n = min( n + 1u, 255u );
 			float r = fbF( fbState[s + 2u] );
-			if( n >= 2u )
-				r = prev > 0.0 ? clamp( d / prev, 0.0, 0.999 ) : ( d > 0.0 ? 0.999 : 0.0 );
+			// THE CONTRACTION IS THE OPERATOR'S (PHOTON-7 stage 5's read A2, measured): measured only from two moves BOTH
+			// above one store step - under the write hold a move is 0 or at least a step - else the last measured value
+			// stands, and before any, the operator's bound the pass wrote ([2] above). At an exact fixed point the last
+			// move is 0, and the ratio collapsed r to 0, which raised the resume threshold 1 - r from ~0.1 code to a full
+			// code: gi.bounce_series (4)'s walls rested 2.3 codes off once a schedule passed the moving bricks slower (0
+			// resumes) - a brick's resume hung on whether its last move happened to be zero.
+			if( n >= 2u && d > 0.0 && prev > 0.0 )
+			{
+				r = clamp( d / prev, 0.0, 0.999 );
+				flags |= FB_R_MEASURED;
+			}
 			fbState[s + 1u] = fbU( d );
 			fbState[s + 2u] = fbU( r );
 			// (a move is the store's own: the pass reads back what it wrote, so a voxel at the store's fixed point moves 0)
 			const bool stop = !( d > 0.0 ) || ( n >= 2u && 100.0 * d * r < 1.0 - r );
 			if( stop )
 			{
-				flags = n << 1u;
+				flags = ( n << 1u ) | ( flags & FB_R_MEASURED );
 				fbState[s + 3u] = 0u;
 				fbState[s + 6u] = 0u;
 				atomicAdd( fbArgs[13], 1u );
 			}
 			else
 			{
-				flags = 1u | ( n << 1u );
+				flags = 1u | ( n << 1u ) | ( flags & FB_R_MEASURED );
 			}
 		}
 		else
@@ -277,7 +293,7 @@ void main()
 			const float r = fbF( fbState[s + 2u] );
 			if( accum >= 1.0 - r )
 			{
-				flags = 1u;
+				flags = 1u | ( flags & FB_R_MEASURED );
 				fbState[s + 3u] = 0u;
 				fbState[s + 6u] = 0u;
 				atomicAdd( fbArgs[14], 1u );
@@ -285,6 +301,8 @@ void main()
 		}
 		if( ( flags & 1u ) != 0u )
 			atomicAdd( fbArgs[12], 1u );
+		else if( ( flags & FB_R_MEASURED ) == 0u && fbF( fbState[s + 2u] ) > 0.0 )
+			atomicAdd( fbArgs[10], 1u );   // a stopped brick on the operator's bound (a door)
 		fbState[s] = flags;
 		return;
 	}
@@ -360,7 +378,7 @@ void main()
 				fbState[s + k] = 0u;
 			return;
 		}
-		uint anyActive = 0u, nMin = 255u;
+		uint anyActive = 0u, anyMeasured = 0u, nMin = 255u;
 		uint acc = 0u;
 		float mv = 0.0, rr = 0.0, sn = 0.0;
 		for( int z = bl.z; z <= bh.z; ++z )
@@ -370,13 +388,14 @@ void main()
 					const uint oi = 8u * ( uint( x ) + fbDims.x * ( uint( y ) + fbDims.y * uint( z ) ) );
 					const uint f = fbOldState[oi];
 					anyActive |= f & 1u;
+					anyMeasured |= f & FB_R_MEASURED;
 					nMin = min( nMin, ( f >> 1u ) & 255u );
 					mv = max( mv, fbF( fbOldState[oi + 1u] ) );
 					rr = max( rr, fbF( fbOldState[oi + 2u] ) );
 					acc = max( acc, fbOldState[oi + 3u] );
 					sn = max( sn, fbF( fbOldState[oi + 5u] ) );
 				}
-		fbState[s] = anyActive | ( nMin << 1u );
+		fbState[s] = anyActive | anyMeasured | ( nMin << 1u );
 		fbState[s + 1u] = fbU( mv );
 		fbState[s + 2u] = fbU( rr );
 		fbState[s + 3u] = acc;

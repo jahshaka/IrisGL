@@ -301,11 +301,16 @@
 	float jahSens = max( max( jahSens3.x, jahSens3.y ), jahSens3.z );
 	if( !( jahSens < 1.0e30 ) )
 		jahSens = jahReemit.x + jahReemit.y + jahReemit.z > 0.0 ? 1.0e30 : 0.0;
+	// THE OPERATOR'S BOUND (PHOTON-7 stage 5's read A2): the most this voxel re-emits of what it gathers, any channel - a
+	// bounce's gain here never exceeds it, so the brick's most bounds its contraction: the prior r of a brick whose r was
+	// never measured (PhotonBrickFeedback_cs.glsl's word 2, bit 11 of word 0 unset).
+	const float jahPrior = min( max( max( jahReemit.x, jahReemit.y ), jahReemit.z ), 0.999 );
 	if( gl_LocalInvocationIndex == 0u )
 	{
 		jahBrickShared = 0u;
 		jahAbsShared = 0u;
 		jahSensShared = 0u;
+		jahPriorShared = 0u;
 	}
 	memoryBarrierShared();
 	barrier();
@@ -315,6 +320,8 @@
 		atomicMax( jahAbsShared, floatBitsToUint( jahAbs ) );
 	if( jahSens > 0.0f )
 		atomicMax( jahSensShared, floatBitsToUint( jahSens ) );
+	if( jahPrior > 0.0f )
+		atomicMax( jahPriorShared, floatBitsToUint( jahPrior ) );
 	memoryBarrierShared();
 	barrier();
 	if( gl_LocalInvocationIndex == 0u )
@@ -326,5 +333,7 @@
 			atomicMax( jahFbState[8u * jahIdx + 4u], jahAbsShared );
 		if( jahSensShared != 0u )
 			atomicMax( jahFbState[8u * jahIdx + 5u], jahSensShared );
+		if( jahPriorShared != 0u && ( jahFbState[8u * jahIdx] & 2048u ) == 0u )
+			atomicMax( jahFbState[8u * jahIdx + 2u], jahPriorShared );
 	}
 @end

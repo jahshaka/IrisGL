@@ -1095,6 +1095,7 @@ GiStatus PhotonComponent::giStatus() const {
             cs.deltaMarched      = c.deltaMarched;
             // THE FEEDBACK (PHOTON-7 stage 4): its last landed reading and its books
             cs.feedbackActive    = c.fbLastActive;
+            cs.feedbackOnPrior   = c.fbLastOnPrior;
             cs.feedbackPasses    = c.fbPasses;
             cs.feedbackBricksRan = c.fbBricksRan;
             cs.feedbackStops     = c.fbStops;
@@ -6865,6 +6866,7 @@ void PhotonComponent::harvestFeedback() {
         while (c.lighting->takeFeedbackReading(r, giWriterFrame())) {
             c.fbLastFrame = std::max(c.fbLastFrame, (unsigned long long)r.frame);
             c.fbLastActive = r.activeAfter;
+            c.fbLastOnPrior = r.onPrior;
             c.fbBricksRan += r.ran;
             c.fbStops += r.stops;
             c.fbResumes += r.resumes;

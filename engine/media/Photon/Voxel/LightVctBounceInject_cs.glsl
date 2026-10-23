@@ -144,6 +144,7 @@ float jahBrickChange( float3 a, float3 b )
 shared uint jahBrickShared;
 shared uint jahAbsShared;
 shared uint jahSensShared;
+shared uint jahPriorShared;
 
 //in uvec3 gl_NumWorkGroups;
 //in uvec3 gl_WorkGroupID;
