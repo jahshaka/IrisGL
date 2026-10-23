@@ -3,6 +3,11 @@
 # The backend is split across Ogre-private translation units; EnginePrivate.h
 # holds the shared declarations and is never installed. The list is exported so
 # the sanitised copy in tests/engine builds exactly the same sources.
+# THE SPIR-V RULES READ GLSLANG'S DEPFILES (below) as CMake transforms them for Ninja (3.20's CMP0116; this directory is
+# added from Studio's root, whose 3.16 minimum leaves it unset).
+if(POLICY CMP0116)
+    cmake_policy(SET CMP0116 NEW)
+endif()
 set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/EnginePrivate.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreEngine.cpp
@@ -181,274 +186,204 @@ if(JAH_RAY_QUERY_OK)
     # apiVersion >= 1.2 and which no reviewer can read: audit C-7/C-10).
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_rays_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                 --vn krq_raysSpv -o "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_rays.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_rays.comp"
-                # the cut-out candidate test (REFLECT-MOVERS-2)
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_alpha_mask.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_rays_spv.h.d"
         COMMENT "Compiling the ray-query compute shader at SPIR-V 1.4"
         VERBATIM)
     # R5's reflection trace, same rule (PHOTON_SPEC §7 R5).
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_reflectSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_voxel_sample.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_environment.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_lights.glsl"   # the cards' lamp lobe (was no dependency: PHOTON-7 stage 5)
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit_radiance.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit_direct.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_cloud_shadow.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit_record.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_sun_ray.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_alpha_mask.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_skin_prev.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atmosphere.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_height_fog.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_fog_along.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
                 "${JAH_RQ_FORK_BRDF}"
                 "${JAH_RQ_SPEC_ALBEDO}"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h.d"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
         VERBATIM)
     # gi.card_read_parity's harness: the reflection's card read (jah_rq_card.glsl),
     # asked at a list of points - a test-only job, same rule.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_cardParitySpv -o "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_parity.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_parity.comp"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_lights.glsl"   # the cards' lamp lobe (was no dependency: PHOTON-7 stage 5)
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_alpha.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_alpha_mask.glsl"
                 "${JAH_RQ_FORK_BRDF}"
                 "${JAH_RQ_SPEC_ALBEDO}"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h.d"
         COMMENT "Compiling the card-read parity compute shader at SPIR-V 1.4"
         VERBATIM)
     # REFLECT-MOVERS-1's object motion for the screen march's resolve, same rule.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_motion_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                 --vn krq_motionSpv -o "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion.comp"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_motion_spv.h.d"
         COMMENT "Compiling the screen march's object-motion compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and its POSED twin (SKINNED-VELOCITY-1, REFLECT-EDGE-2): the pixels the id
     # pass does not draw, identified through the TLAS while a pose moves; same rule.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                 --vn krq_motionSkinSpv -o "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion_skin.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion_skin.comp"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_skin_prev.glsl"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h.d"
         COMMENT "Compiling the march's posed object-motion compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and R5's spatial filter + composite (round C), same rule.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                 --vn krq_reflectFilterSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h.d"
         COMMENT "Compiling the reflection filter/composite compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and the reflection's TEMPORAL pass (PHOTON-2 1b), with the shared reprojection header.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                 --vn krq_reflectTemporalSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_temporal.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_temporal.comp"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h.d"
         COMMENT "Compiling the reflection temporal compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and THE BREAK'S COMPOSE (PHOTON-2 round 2, G2): the rest's answer composed into the half the trace reads.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_compose_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_reflect_compose_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                 --vn krq_reflectComposeSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_compose_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_compose.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_compose.comp"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_reflect_compose_spv.h.d"
         COMMENT "Compiling the reflection rest's compose compute shader at SPIR-V 1.4"
         VERBATIM)
     # THE SCREEN-PROBE GATHER'S FOUR JOBS (GATHER-1a; the filter PHOTON-GATHER-1b), same rule plus ONE
     # addition: `-I src/rayquery/include`, so the hit-radiance functions and the
     # parameter block are SHARED with the reflection trace rather than copied
     # (spec section 10 item 7 — glslang resolves `#include` under
-    # GL_GOOGLE_include_directive, which each shader requires). The headers are
-    # named in DEPENDS or a change to one would not rebuild the SPIR-V.
+    # GL_GOOGLE_include_directive, which each shader requires). EVERY RULE'S INCLUDES COME FROM GLSLANG'S OWN
+    # DEPFILE (--depfile, DEPFILE: PHOTON-7 stage 5, the urgent list's #29 - a hand-listed include that was missing
+    # rebuilt nothing on an edit and voided a negative control); DEPENDS keeps the source and the GENERATED inputs,
+    # which a first build must order.
     set(JAH_RQ_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include")
-    set(JAH_RQ_HEADERS "${JAH_RQ_INCLUDE}/jah_rq_hit.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_voxel_sample.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_rq_finite.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_environment.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_probe_params.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_atlas_sample.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_reproject.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_probe_history.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_probe_seen.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_rq_hit_direct.glsl"
-                       "${JAH_RQ_INCLUDE}/jah_cloud_shadow.glsl")
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${JAH_RQ_INCLUDE}"
                 --vn krq_probePlaceSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_place.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_place.comp"
-                ${JAH_RQ_HEADERS}
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h.d"
         COMMENT "Compiling the screen-probe placement job at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x -DJAH_PLACE_SELECT
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h.d" --target-env spirv1.4 -S comp -x -DJAH_PLACE_SELECT
                 "-I${JAH_RQ_INCLUDE}"
                 --vn krq_probePlaceSelectSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_place.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_place.comp"
-                ${JAH_RQ_HEADERS}
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h.d"
         COMMENT "Compiling the screen-probe placement's select pass at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${JAH_RQ_INCLUDE}" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_probeGatherSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_gather.comp"
-                ${JAH_RQ_HEADERS}
-                # ...and the hit read it shares with the reflection (GA-1e).
-                "${JAH_RQ_INCLUDE}/jah_rq_hit_radiance.glsl"
-                "${JAH_RQ_INCLUDE}/jah_rq_card.glsl"
-                "${JAH_RQ_INCLUDE}/jah_rq_card_bindings.glsl"
-                "${JAH_RQ_INCLUDE}/jah_rq_card_lights.glsl"
-                "${JAH_RQ_INCLUDE}/jah_rq_geom.glsl"
-                "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"
-                # ...and the hit record + the sun ray (PHOTON-HIT-SHADE-1).
-                "${JAH_RQ_INCLUDE}/jah_rq_hit_record.glsl"
-                "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
-                "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
-                "${JAH_RQ_INCLUDE}/jah_alpha_mask.glsl"
-                "${JAH_RQ_INCLUDE}/jah_card_view.glsl"
                 "${JAH_RQ_FORK_BRDF}"
                 "${JAH_RQ_SPEC_ALBEDO}"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h.d"
         COMMENT "Compiling the screen-probe gather trace at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${JAH_RQ_INCLUDE}"
                 --vn krq_probeFilterSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_filter.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_filter.comp"
-                ${JAH_RQ_HEADERS}
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h.d"
         COMMENT "Compiling the screen-probe filter + SH projection at SPIR-V 1.4"
         VERBATIM)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${JAH_RQ_INCLUDE}"
                 --vn krq_probeIntegrateSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_integrate.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_integrate.comp"
-                ${JAH_RQ_HEADERS}
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h.d"
         COMMENT "Compiling the screen-probe integrate at SPIR-V 1.4"
         VERBATIM)
     # HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1, RY-R3): one ray per pixel towards
     # the sun from the prepass' surface, geometry only — rq_rays.comp's shape.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${JAH_RQ_INCLUDE}"
                 --vn krq_sunContactSpv -o "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_sun_contact.comp"
-                # the sun ray is one text with the hit record's (PHOTON-HIT-SHADE-1)
-                "${JAH_RQ_INCLUDE}/jah_rq_sun_ray.glsl"
-                "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
-                "${JAH_RQ_INCLUDE}/jah_alpha_mask.glsl"
-                "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h.d"
         COMMENT "Compiling the sun contact shadow job at SPIR-V 1.4"
         VERBATIM)
     # THE HIT WRITE-BACK (PHOTON-HIT-SHADE-1): the decoded radiance of every hit
     # record, scattered back into the reflection's mean and the gather's atlas.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                 --vn krq_hitCompositeSpv -o "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_hit_composite.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_hit_composite.comp"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atmosphere.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_height_fog.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_fog_along.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atlas_sample.glsl"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h.d"
         COMMENT "Compiling the hit write-back at SPIR-V 1.4"
         VERBATIM)
     # THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4): sun rays from the texels
     # of the cards a shadow-casting mover's footprint reaches, against the movers.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h.d" --target-env spirv1.4 -S comp -x
                 "-I${JAH_RQ_INCLUDE}" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_cardMoversSpv -o "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
                 "${JAH_RQ_FORK_BRDF}"
-                "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
-                "${JAH_RQ_INCLUDE}/jah_alpha_mask.glsl"
-                "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h.d"
         COMMENT "Compiling the card mover-shadow job at SPIR-V 1.4"
         VERBATIM)
     # THE TOP-LEVEL INSTANCES BY COMPUTE (ATOM-CPU-WALKS-1): one thread per GPU scene
     # slot writes its near and far instance from the table.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h.d" --target-env spirv1.4 -S comp -x
                 --vn krq_tlasWriteSpv -o "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_tlas_write.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_tlas_write.comp"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h.d"
         COMMENT "Compiling the top-level instance job at SPIR-V 1.4"
         VERBATIM)
     # THE VISIBILITY BUFFER'S ID PASS (ATOM S3-DRAW, OgreAtomIdPass.cpp): a
@@ -459,13 +394,12 @@ if(JAH_RAY_QUERY_OK)
     foreach(_stage vert frag)
         add_custom_command(
             OUTPUT "${JAH_RQ_GEN_DIR}/atom_id_${_stage}_spv.h"
-            COMMAND "${JAH_GLSLANG_VALIDATOR}" -V -S ${_stage} -x
+            COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/atom_id_${_stage}_spv.h.d" -S ${_stage} -x
                     "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                     --vn katomId_${_stage}Spv -o "${JAH_RQ_GEN_DIR}/atom_id_${_stage}_spv.h"
                     "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_id.${_stage}"
             DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_id.${_stage}"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
+            DEPFILE "${JAH_RQ_GEN_DIR}/atom_id_${_stage}_spv.h.d"
             COMMENT "Compiling the visibility buffer's id pass (${_stage})"
             VERBATIM)
     endforeach()
@@ -473,20 +407,21 @@ if(JAH_RAY_QUERY_OK)
     # stock caster's bias; a fragment stage for a point light's cube face only.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/atom_caster_vert_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V -S vert -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/atom_caster_vert_spv.h.d" -S vert -x
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                 --vn katomCaster_vertSpv -o "${JAH_RQ_GEN_DIR}/atom_caster_vert_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_caster.vert"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_caster.vert"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
+        DEPFILE "${JAH_RQ_GEN_DIR}/atom_caster_vert_spv.h.d"
         COMMENT "Compiling the caster cut (vert)"
         VERBATIM)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/atom_caster_point_frag_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V -S frag -x
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/atom_caster_point_frag_spv.h.d" -S frag -x
                 --vn katomCasterPoint_fragSpv -o "${JAH_RQ_GEN_DIR}/atom_caster_point_frag_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_caster_point.frag"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/atom_caster_point.frag"
+        DEPFILE "${JAH_RQ_GEN_DIR}/atom_caster_point_frag_spv.h.d"
         COMMENT "Compiling the caster cut (point frag)"
         VERBATIM)
     # THE MASKED RANGES (ENGINE-POLISH-ATOM-1 stage 3): the same stages compiled with JAH_MASKED - the vertex stage
@@ -504,14 +439,12 @@ if(JAH_RAY_QUERY_OK)
         list(GET _p 3 _out)
         add_custom_command(
             OUTPUT "${JAH_RQ_GEN_DIR}/${_out}"
-            COMMAND "${JAH_GLSLANG_VALIDATOR}" -V -S ${_stage} -x -DJAH_MASKED=1
+            COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/${_out}.d" -S ${_stage} -x -DJAH_MASKED=1
                     "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
                     --vn ${_vn} -o "${JAH_RQ_GEN_DIR}/${_out}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/${_src}"
             DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/atomdraw/${_src}"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_atom_id.glsl"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_alpha_mask.glsl"
+            DEPFILE "${JAH_RQ_GEN_DIR}/${_out}.d"
             COMMENT "Compiling the Atom passes' masked ranges (${_src})"
             VERBATIM)
     endforeach()
