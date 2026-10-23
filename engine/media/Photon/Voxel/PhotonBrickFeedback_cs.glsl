@@ -283,8 +283,13 @@ void main()
 	if( mode == 3u )
 	{
 		// ACCUM: a stopped brick adds what the source's listed bricks' moves this frame could move it by - each move
-		// weighted by the share of the brick's gather it can fill, min( 1, A / ( pi d^2 ) ) (a source brick of face A at
-		// distance d; occlusion ignored: a bound), times its sensitivity (codes per unit of radiance).
+		// weighted by a BOUND of the share of the brick's gather it can fill, times its sensitivity (codes per unit of
+		// radiance). THE BOUND (PHOTON-7 stage 4's read R3): a source brick of side a moving by m changes the irradiance a
+		// receiver point gathers by at most m x its projected solid angle / pi; the brick's silhouette from any direction is
+		// at most sqrt(3) a^2 (a cube's largest) and every point of this brick is at least the two boxes' NEAREST distance d
+		// away, so the share is at most min( 1, sqrt(3) a^2 / ( pi d^2 ) ) - 1 for bricks that touch (the distance between
+		// CENTRES with one face's area gave a neighbour 1 / pi: it resumed ~3x late and rested ~2-3 codes off, measured by
+		// gi.bounce_series' resume arm). Occlusion ignored: a bound.
 		if( ( flags & 1u ) != 0u )
 			return;
 		const float sens = fbF( fbState[s + 5u] );
@@ -293,7 +298,8 @@ void main()
 		const float3 selfLo = fbSelf.xyz;
 		const float3 selfHi = fbSelf.xyz + float3( fbDims.xyz ) * fbSelf.w;
 		const float3 centre = fbSelf.xyz + ( float3( b ) + 0.5 ) * fbSelf.w;
-		const float area = fbSrc.w * fbSrc.w;
+		const float area = 1.7320508 * fbSrc.w * fbSrc.w;   // sqrt(3) a^2: the source brick's largest silhouette
+		const float halfSum = 0.5 * ( fbSelf.w + fbSrc.w );
 		const bool own = fbFlags.w != 0u;
 		const uint count = own ? fbArgs[8] : fbSrcArgs[8];
 		float sum = 0.0;   // codes, over the list in its order
@@ -308,9 +314,9 @@ void main()
 			const float3 oHi = oLo + fbSrc.w;
 			if( fbFlags.z != 0u && all( greaterThanEqual( oLo, selfLo ) ) && all( lessThanEqual( oHi, selfHi ) ) )
 				continue;
-			const float3 dv = centre - ( oLo + 0.5 * fbSrc.w );
-			const float d2 = max( dot( dv, dv ), area );
-			sum += sens * m * min( 1.0, area / ( FB_PI * d2 ) );
+			const float3 gap = max( abs( centre - ( oLo + 0.5 * fbSrc.w ) ) - halfSum, float3( 0.0, 0.0, 0.0 ) );
+			const float d2 = dot( gap, gap );
+			sum += sens * m * ( d2 > 0.0 ? min( 1.0, area / ( FB_PI * d2 ) ) : 1.0 );
 		}
 		// THE FIXED POINT, ROUNDED ONCE: the sum in units plus the fraction the last rounding left, floored; the new
 		// fraction kept (word 6). Saturating (a sensitivity of 1e30 - a voxel with no radiance of its own - saturates).
