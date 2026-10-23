@@ -4807,7 +4807,8 @@ struct GiStatus {
     /// cascade then rebuilds (an edit of its live box) or scrolls again from where it stands.
     unsigned long long cascadeScrollAborts = 0;
     /// Frames a scroll's commit waited for its delta injection's shader, built in the background (PHOTON-7 stage 2:
-    /// never compiled in the commit's frame; 0 where no background compiler runs).
+    /// never compiled in the commit's frame of an ASYNCHRONOUS scene - View::setAsyncShaders - on a frame that owes no
+    /// complete picture; 0 in every other scene, which compiles it in its frame: the selftest asserts it, read D3).
     unsigned long long cascadeCommitShaderWaits = 0;
     /// Torn cascades stood down with their volumes cleared (decision 14.8; CascadeStatus::tornCleared).
     unsigned long long cascadeTornCleared = 0;

@@ -601,6 +601,9 @@ public:
     /// outermost, an inner cascade re-injected as a delta), a whole injection at a placement the list has not heard of
     /// the whole box; a light tick at a listed placement lists nothing (its cause is listed where it happened).
     void listInjectionRegion(size_t i, const Ogre::PhotonCommitLight *commit);
+    /// Does a scroll commit's delta-injection shader come from the background compiler (and the commit wait for it)?
+    /// Only in an asynchronous scene on a frame that owes no complete picture (PhotonGi.cpp).
+    bool commitShaderAsync() const;
     /// "CANNOT SAY WHERE" (kGiRegionOverflow* bits): the sun, the sky, a change with no box.
     void noteRegionOverflow(uint32_t why) { mRegionOverflowOpen |= why; }
     /// A MOVER (the ray tier's moved or skin-posed slot, OgreEngine::listRayMovers): its swept box (kind Mover), and for

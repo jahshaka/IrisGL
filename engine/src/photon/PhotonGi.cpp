@@ -948,6 +948,17 @@ struct InjectionRows final : Ogre::PhotonVoxelLighting::PhaseListener {
 };
 }   // namespace
 
+// THE COMMIT'S SHADER IS ASYNCHRONOUS ONLY WHERE THE SCENE IS (PHOTON-7 stage 2's read D3): the delta injection's permutation
+// goes to the background compiler, and a commit waits a frame for it, only in a scene whose views compile in the background
+// (View::setAsyncShaders), on a frame that does not owe the whole picture (FramePace::Complete), with the compiler running -
+// giDeferrable's rule. Everywhere else the commit compiles in its own frame, so when a commit lands is a function of the
+// frames, never of a compile's wall time (the selftest and every fixture: cascadeCommitShaderWaits 0).
+bool PhotonComponent::commitShaderAsync() const {
+    if (!mScene.asyncShaders() || mScene.framePace() == FramePace::Complete) return false;
+    Ogre::HlmsManager *hm = mRoot ? mRoot->getHlmsManager() : nullptr;
+    return hm && hm->getComputeHlms() && hm->getAsyncCompiler() && hm->getAsyncCompiler()->isRunning();
+}
+
 bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *commit) {
     Ogre::PhotonVoxelLighting *lighting = i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr;
     if (!lighting) return false;
@@ -1001,7 +1012,7 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
     // THE COMMIT'S SHADER, ASKED FOR AT THE CASCADE'S FIRST INJECTION (ASYNC-SHADERS-1): the delta injection's
     // permutation goes to the background compiler long before a walk's first commit needs it (a commit that finds it
     // still building waits a frame: recordCascades). Once per cascade.
-    if (!commit && !mVctCascades[i].commitShaderAsked) {
+    if (!commit && !mVctCascades[i].commitShaderAsked && commitShaderAsync()) {
         lighting->commitLightReady();
         mVctCascades[i].commitShaderAsked = true;
     }
@@ -5858,7 +5869,7 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
     c.scroll = std::move(sc);
     // THE COMMIT'S SHADER, ASKED FOR NOW (ASYNC-SHADERS-1): the delta injection's permutation is built in the background
     // over the chunk frames, never in the commit's frame (the commit waits a frame while it is still building).
-    if (c.lighting) c.lighting->commitLightReady();
+    if (c.lighting && commitShaderAsync()) c.lighting->commitLightReady();
     return true;
 }
 
@@ -6321,7 +6332,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         }
         // A SCROLL'S COMMIT WAITS FOR ITS SHADER (ASYNC-SHADERS-1): the delta injection's permutation is the background
         // compiler's while it is building - the commit, and nothing of it, is held a frame (the slot is not spent).
-        if (slotScroll && c.scroll.active && c.lighting && !c.lighting->commitLightReady()) {
+        if (slotScroll && c.scroll.active && c.lighting && commitShaderAsync() && !c.lighting->commitLightReady()) {
             ++mCascadeDeferrals;
             ++mCommitShaderWaits;
             continue;
