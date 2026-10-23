@@ -5246,6 +5246,30 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
             // changed on a surface with no direct light changes its bounces with no direct term moving (the mask's word 0
             // cannot see it).
             if (samePlace && mGi.bounces) c.fbForce = true;
+            // THE CASCADES INSIDE A WHOLE REBUILD (an edit at the same placement, a new placement; PHOTON-7 stage 4): an
+            // inner voxel's visibility march reads this cascade's cells past its own shell end, so a re-voxelised cascade
+            // changes the inner cascades' direct terms wherever their marches reach it - a roof over an inner cascade's
+            // floor, an occluder the outer cascade alone holds (gi.directional_seam (4), gi.light_is_world's pinned
+            // scroll). Re-marched as whole-volume deltas (a voxel whose direct did not change keeps its bits; the changed
+            // bricks resume the feedback through the mask's word 0). The chain's settle used to re-solve them; a scroll's
+            // commit re-marches only what its moved faces reach (below). An inner cascade already injected this frame
+            // (the latch: one writer a frame) is re-marched on the next.
+            if (!scrollLight) {
+                bool any = false;
+                for (size_t j = idx; j-- > 0;) {
+                    VctCascade &inner = mVctCascades[j];
+                    if (!inner.lighting || !inner.built) continue;
+                    if (injectedThisFrame(j)) {
+                        inner.remarchOwedFrame = giWriterFrame();
+                        continue;
+                    }
+                    Ogre::PhotonCommitLight innerLight;
+                    innerLight.delta = true;
+                    for (int a = 0; a < 3; ++a) innerLight.keepHi[a] = Ogre::uint32(inner.resolution);
+                    any = injectCascade(j, &innerLight) || any;
+                }
+                if (any) reintegrateFieldAfterInjection();
+            }
             if (scrollLight) {
                 // THE COUNTS (the work law's door): the slab's cells and the cells the direct was computed over now, the
                 // voxels lit and marched when the read-back lands (harvestCommitCounts).
@@ -6355,6 +6379,11 @@ void PhotonComponent::relightAndFeedback() {
             VctCascade &c = mVctCascades[i];
             if (!c.lighting || !c.built) continue;
             const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+            if (c.remarchOwedFrame && c.remarchOwedFrame < frame) {   // an outer whole rebuild after its injection
+                c.remarchOwedFrame = 0ull;
+                c.relightOwed = true;
+                c.relightWhole = true;
+            }
             if (sun || mGiRelightAllOwed) {
                 c.relightOwed = true;
                 c.relightWhole = true;
@@ -6405,6 +6434,14 @@ void PhotonComponent::relightAndFeedback() {
                     c.relightBox = Ogre::Aabb::BOX_NULL;
                     continue;
                 }
+            }
+            // A LAMP'S DELTA WAITS FOR ITS SHADER (ASYNC-SHADERS-1), as a scroll's commit does: the delta injection's
+            // permutation (asked for at the cascade's first injection) is the background compiler's while it builds -
+            // the relight stays owed a frame, never compiled in the frame (shader.async_after_open: a lamp change after an
+            // open compiled VCT/LightInjection on the UI thread, 673 ms).
+            if (commitShaderAsync() && !c.lighting->commitLightReady()) {
+                ++mCommitShaderWaits;
+                continue;
             }
             if (!sceneGraphCurrent) {
                 giUpdateSceneGraph(mSceneMgr);   // an injection reads the lights' DERIVED poses

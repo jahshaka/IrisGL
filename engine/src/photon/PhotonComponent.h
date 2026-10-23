@@ -409,6 +409,10 @@ public:
         /// world) or the whole volume (`relightWhole`: the sun, the host's relight), the direct term re-injected as a delta
         /// at the next writer point the one-writer latch allows; and the relights paid.
         bool relightOwed = false, relightWhole = false;
+        /// THE INNER RE-MARCH OWED (PHOTON-7 stage 4): an outer cascade was rebuilt whole (an edit at its placement, a
+        /// new placement) in a frame this one had already been injected in, so its marches read the outer's old cells -
+        /// re-marched whole on the next frame (`relightWhole`), the latch allowing. The frame it was owed in; 0 none.
+        unsigned long long remarchOwedFrame = 0ull;
         Ogre::Aabb relightBox = Ogre::Aabb::BOX_NULL;
         unsigned long long relights = 0;
         /// THE FEEDBACK'S BOOKS (PHOTON-7 stage 4; GiStatus::CascadeStatus::feedback*): every brick at its next pass
