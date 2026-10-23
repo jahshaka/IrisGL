@@ -243,6 +243,16 @@ unsigned reflectRestLength() { return gatherSettleFramesOf(kReflectMaxFrames); }
 /// every stop at one pose - the rest mean is a function of the scene and the eye, never of the path (the gather's rest
 /// mean's law, rq_probe_integrate.comp). The reference arm's value 2 offsets it by 0x8000 (+ a 16-bit v: < 2^18, exact).
 constexpr unsigned kReflectRestSequence = 0x10000u;
+/// THE REST'S RAYS A FRAME, A COUNT PER VIEW (L7; the lead's ruling after the hold's tail): the rest's first frame costs
+/// GiQualityFacts::reflectRestRays (k) rays a resting texel; that COUNT - k x the texels resting at its start - is then
+/// SHARED by the texels still converging, k_active = min(kReflectRestRaysCap, count / active), so a rest frame never
+/// traces more RAYS than its first, fewer as texels stop; the work goes where the change still is. The cap is DERIVED:
+/// the worst tail measured on photon-glass needs 12,363 samples (its displayed SE 1.82 codes at 2,378), which takes
+/// >= 25 a frame to finish inside ~500 frames after the rest's first hundred - 32. MEASURED (photon-glass, the hold at
+/// rest frame 527): the trace's GPU ms do NOT follow the rays - a texel's share is a SERIAL loop in its thread, so while
+/// ~16,000 scattered texels converge (rest frames 22-36) every warp runs 32 iterations for a few lanes (1.9 ms against
+/// the first frame's 1.03), and two texels' 32 serial rays cost 0.5-1.1 ms of latency to the end.
+constexpr unsigned kReflectRestRaysCap = 32u;
 /// THE MOVED INSTANCES A REST FOLLOWS PER TEXEL (G6, rq_reflect.comp's restMoverBox): more moved in one frame breaks
 /// the view's rest whole.
 constexpr unsigned kReflectRestMovers = 16u;
@@ -1105,6 +1115,9 @@ private:
         /// The rest's serial (one a rest begun), the rest frame a moved instance last crossed it (0: none), and the
         /// latch "a rest frame since then counted no active texel" (the hit list's third counter word, read late).
         unsigned restSession = 0u, restMoverFrame = 0u;
+        /// THE REST'S RAY COUNT (kReflectRestRaysCap's note): k x the texels resting at the rest's start, from the
+        /// rest's first active count read back (0 until it arrives: the first frames run k a texel).
+        unsigned long long restRayCount = 0ull;
         bool restAllStopped = false;
         unsigned restMoverCrossings = 0u;   ///< rest frames a moved instance's box was handed to the trace (status)
         unsigned cameraCuts = 0u;           ///< camera cuts detected (N3: each one the histories cleared)
@@ -6389,7 +6402,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         fold4(pp.alpha);
         foldBytes(pp.fog, sizeof(pp.fog));
         fold4(pp.metal); fold4(pp.hitTable); fold4(pp.cloudMap); fold4(pp.cloudSun);
-        fold4(pp.rest);
+        // (the rest block's freeze and reference arms; NOT its ray count, rest.z - the rest's own budget, which moves
+        // inside a rest by design - nor rest.w, unused)
+        foldF(pp.rest[0]); foldF(pp.rest[1]);
         fold4(pp.screen); fold4(pp.screen2);
         fold4(pp.denoiser);
         const unsigned long long restKey = reflectRestKey(scene, sa);
@@ -6420,6 +6435,22 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             (restHits->restActiveTag >> 20u) == (rv.restSession & 0xFFFu) &&
             (restHits->restActiveTag & 0xFFFFFu) > rv.restMoverFrame && restHits->restActive == 0u)
             rv.restAllStopped = true;
+        // THE REST'S RAY COUNT, SHARED (kReflectRestRaysCap's note): fixed from this rest's first active count read back
+        // (every resting texel is active then), then divided among the texels still active - read back a few frames
+        // late, which only lowers the share a frame or two after texels stop (never raises the cost above the first
+        // frame's); a texel resumed by a moved instance joins the active count and the share falls.
+        {
+            const unsigned kBase = std::max(1u, giQualityFacts(scene->giParams().quality).reflectRestRays);
+            if (rv.restFrames <= 1u) rv.restRayCount = 0ull;
+            unsigned share = kBase;
+            if (rv.restFrames > 0u && restHits && restHits->restActiveTag != 0u &&
+                (restHits->restActiveTag >> 20u) == (rv.restSession & 0xFFFu) && restHits->restActive > 0u) {
+                if (rv.restRayCount == 0ull) rv.restRayCount = (unsigned long long)kBase * restHits->restActive;
+                share = unsigned(std::min<unsigned long long>(
+                    kReflectRestRaysCap, std::max<unsigned long long>(1ull, rv.restRayCount / restHits->restActive)));
+            }
+            pp.rest[2] = float(share);
+        }
         // THE HOLD: every texel has stopped (its standard error under a code - a capped texel stops too, counted as the
         // defect it is: RayQueryStatus::reflectRestCapped). No frame count holds a rest (K_max 512 deleted, commit 8).
         // (under the reference arm no texel stops: the view holds after its 4,096 samples)
