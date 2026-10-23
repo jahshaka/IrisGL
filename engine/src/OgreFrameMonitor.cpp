@@ -1401,9 +1401,9 @@ constexpr ArmDef kArms[] = {
       "per-pixel history count (1 = the pixel's history was refused or absent that frame, n = it carried n - 1 frames, "
       "15 saturates: jah_probe_history.glsl's packed word) copied out of the history the integrate wrote, decoded once the frame retires into "
       "GatherStatus::historyCount - the gather's OWN same-surface test, read by the stillness door (Stillness.h) as "
-      "'was this pixel's surface visible before the stop'. One image copy a frame while on. AN INPUT, NOT A DOOR "
-      "(measured, PHOTON-7 stage 5): on a HELD frame its copy advances the view's frame counter, the sample sequence's "
-      "and the stochastic rounding's key, so every later frame's picture differs with it on (OgreScreenProbeGather.cpp)." },
+      "'was this pixel's surface visible before the stop'. One image copy a frame while on; nothing it copies is read "
+      "back by the renderer, and a held frame's copy rides the host's frame, never the view's counter (PHOTON-7 stage 5: "
+      "it advanced it, and every later frame's picture differed with the arm on)." },
     { ArmId::ReflectHistoryReadback, 0.0, 0.0, 1.0,
       "THE REFLECTION HISTORY'S COUNT TO THE HOST (PHOTON-2 stage 0, an instrument): every traced frame's "
       "per-texel temporal-mean count (rq_reflect.comp's history w, 0 = no answer yet) copied out after the filter and "

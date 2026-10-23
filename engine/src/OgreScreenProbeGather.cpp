@@ -1028,6 +1028,14 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
 void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
     Ogre::RenderSystem *rs = mHost.gatherRenderSystem();
     bool irradianceCopied = false, historyCopied = false;
+    // A HELD FRAME'S COPIES TAKE THE HOST'S FRAME'S SLOT, NEVER THE VIEW'S COUNTER (PHOTON-7 stage 5, the lead's ruling:
+    // a measuring arm must not change the engine's state). The view's frame counter - the sample sequence's key (knobs[2]
+    // off the rest) and the packed history's stochastic rounding's (knobs6[2]) - advances only on a frame that traces;
+    // a held copy rides the host's frame number into the ring (a slot it shares with a traced frame's record holds the
+    // same held state: the history half and the irradiance a held frame copies are the last traced frame's, unchanged)
+    // and names that last traced frame as its gather frame. (It advanced the counter: with gather.historyReadback on,
+    // every later frame's picture differed - gi.walk's second frozen walk on 59 of 60 frames.)
+    const unsigned heldSlot = unsigned(mHost.gatherFrameNow() % kFramesInFlight);
     if (in.tuning.readback && v.irrReadback) {
         {
             Ogre::BarrierSolver &solver = rs->getBarrierSolver();
@@ -1047,7 +1055,7 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toCopy, 0, nullptr, 0, nullptr);
             const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * v.layers * 8u;
             VkBufferImageCopy region{};
-            region.bufferOffset = VkDeviceSize(v.frame % kFramesInFlight) * slotBytes;
+            region.bufferOffset = VkDeviceSize(heldSlot) * slotBytes;
             region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             region.imageSubresource.layerCount = v.layers;
             region.imageExtent = { v.w, v.h, 1u };
@@ -1065,7 +1073,7 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
             }
             if (v.recReadback) {
                 VkBufferCopy rc{};
-                rc.dstOffset = VkDeviceSize(v.frame % kFramesInFlight) * recBytes;
+                rc.dstOffset = VkDeviceSize(heldSlot) * recBytes;
                 rc.size = recBytes;
                 vkCmdCopyBuffer(cmd, v.records, v.recReadback, 1, &rc);
             }
@@ -1101,7 +1109,7 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
                                  &toCopy, 0, nullptr, 0, nullptr);
             VkBufferImageCopy region{};
-            region.bufferOffset = VkDeviceSize(v.frame % kFramesInFlight) * slotBytes;
+            region.bufferOffset = VkDeviceSize(heldSlot) * slotBytes;
             region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             region.imageSubresource.layerCount = v.layers;
             region.imageExtent = { v.w, v.h, 1u };
@@ -1117,20 +1125,14 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
             historyCopied = true;
         }
     }
-    // AN INPUT, NOT A DOOR (PHOTON-7 stage 5, measured): a held frame's copy takes a pending slot and ADVANCES the view's
-    // frame counter below - the sample sequence's key (knobs[2] off the rest) and the packed history's stochastic
-    // rounding's (knobs6[2]) - so the arms gather.historyReadback and the irradiance readback change every later
-    // frame's picture: gi.walk's second frozen walk differed from the first on 59 of 60 frames without it. (On the
-    // leftover list: a held frame's copy must not advance the counter.)
     if (irradianceCopied || historyCopied) {
-        View::Pending &pd = v.pending[v.frame % kFramesInFlight];
+        View::Pending &pd = v.pending[heldSlot];
         pd.frame = mHost.gatherFrameNow();
         pd.live = true;
         pd.irradiance = irradianceCopied;
         pd.history = historyCopied;
         pd.held = true;
-        pd.gatherFrame = v.frame;
-        ++v.frame;
+        pd.gatherFrame = v.frame ? v.frame - 1u : 0u;   // the last traced frame: its state is what a held frame holds
     }
     {
         Ogre::BarrierSolver &solver = rs->getBarrierSolver();

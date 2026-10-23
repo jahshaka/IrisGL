@@ -223,9 +223,9 @@ struct StillnessRun::Impl {
     std::map<unsigned, FrameRef> byGather;
     unsigned lastGatherMapped = 0u;                   ///< the gather's published frame counter last mapped
     /// The class restarts of the gather frame the readback holds now, into the frame it maps to (once).
-    // (the pictures-only dump keeps the history readback: without it the walk's pictures differ - measured, gi.walk's
-    // second frozen walk on 59 of 60 frames - so its files are skipped, never its readback)
-    bool readsHistory() const { return spec.classRestarts || !spec.dumpDir.empty(); }
+    // (the pictures-only dump reads no history: gi.walk's L1 then compares a frozen walk WITH the gather's history
+    // readback against one WITHOUT it - the readback must not change a picture, PHOTON-7 stage 5)
+    bool readsHistory() const { return spec.classRestarts || (!spec.dumpDir.empty() && !spec.dumpRgbOnly); }
     /// THE MOVING WINDOW'S DUMP (M1): a file of the dump directory.
     std::string dumpPath(const std::string &suffix) const { return spec.dumpDir + "/" + spec.dumpName + suffix; }
     static std::string trailTag(size_t i)
