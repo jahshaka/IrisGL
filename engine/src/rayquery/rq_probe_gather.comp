@@ -144,7 +144,6 @@ layout( std430, set = 0, binding = 22 ) buffer JahHitBuf { uint jahHitBuf[]; };
 #define JAH_HIT_SUN         p.hitSun
 #define JAH_HIT_SUN_MASK    uint( p.hitSun2.x )
 #define JAH_HIT_SUN_RANGE   p.hitSun2.z
-#define JAH_HIT_LIFT        p.hitSun2.y
 #define JAH_HIT_FAR_LIFT    p.hitSun2.w
 #define JAH_ALPHA_TABLE     floatBitsToUint( p.alpha.xy )
 #include "jah_rq_sun_ray.glsl"
@@ -340,9 +339,11 @@ void main()
 		const float probeDist = jahViewDistanceOf( placedBy, posW.xyz );
 		const float maxT = p.knobs.y;
 		const float farT = p.knobs3.w;
-		const vec3 origin = jahRayOrigin( posW.xyz, records.r[probe].geomW.xyz, probeDist,
-										  jahViewDrawnBound( p.knobs2.y, posW.xyz, placedBy.camPos, placedBy.rayDown,
-															 p.resolution.w, placedBy.perspective > 0.5 ) );
+		const vec4 geomW = records.r[probe].geomW;   // the geometric normal, and the point's own error (placement's)
+		const vec3 origin = jahRayOrigin( posW.xyz, geomW.xyz, probeDist,
+										  geomW.w + jahViewDrawnBound( p.knobs2.y, posW.xyz, placedBy.camPos,
+																	   placedBy.rayDown, p.resolution.w,
+																	   placedBy.perspective > 0.5 ) );
 		// THE NEAR QUERY: the near copies (Types.h kRayMaskNearField).
 		rayQueryEXT rq;
 		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, dir, maxT );

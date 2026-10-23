@@ -57,15 +57,17 @@
 //   JAH_HIT_SUN           vec4   xyz = towards the sun, w = 1 when the pass has one
 //   JAH_HIT_SUN_MASK      uint   the TLAS mask the sun ray asks for (the casters)
 //   JAH_HIT_SUN_RANGE     float  the sun ray's length
-//   JAH_HIT_LIFT          float  the shadow ray's minimum lift off the hit, metres
-//   JAH_HIT_FAR_LIFT      float  ...and off a FAR copy's hit (the widest coarse-vs-
-//                                fine gap of the traced set, the gather's farOverlap)
+//   JAH_HIT_FAR_LIFT      float  the shadow ray's surface term off a FAR copy's hit: the
+//                                traced set's coarsest level's bound against level 0
+//                                (Types.h rayOriginLevelLift of the gather's farOverlap);
+//                                a near hit is ON level 0, so its surface term is 0
 // ...the images `jahHitIds`, `jahHitDest` and the buffer member `jahHitBuf[]`, and jah_rq_geom.glsl + jah_rq_sun_ray.glsl included before.
 //
 // No Hlms directive mark anywhere in this file.
 
 #ifndef JAH_RQ_HIT_RECORD_GLSL
 #define JAH_RQ_HIT_RECORD_GLSL
+#include "jah_ray_origin.glsl"
 
 const uint kJahHitEmpty = 0xFFFFFFFFu;
 const uint kJahHitFarBit = 1u << 27u;
@@ -137,18 +139,17 @@ uint jahHitDestPack( ivec2 xy, bool gather, int layer )
 		   ( uint( layer & 1 ) << 30u ) | ( gather ? kJahHitDestGather : 0u );
 }
 
-/// THE SUN AT A HIT: a shadow ray from the hit, lifted along `liftDir` (the hit
-/// triangle's geometric normal facing the ray's origin, or the reversed ray where
-/// there is none) by the larger of the floor and 1e-4 of the distance (the hit
-/// point's own float precision), towards the pass' sun, against the casters' near
-/// copies, the whole sun range with no fade band. 1 where the pass has no sun.
+/// THE SUN AT A HIT: a shadow ray from the hit under THE ONE ORIGIN LAW (jah_ray_origin.glsl; the lead's round-7
+/// ruling: the 1 mm / 1e-4 t floor is deleted) - lifted along `liftDir` (the hit triangle's geometric normal facing
+/// the ray's origin, or the reversed ray where there is none) by the hit's own float bound (its position and the
+/// distance `t` it was carried) plus its surface term (0 on level 0, which the casters' near copies are; a far copy's
+/// JAH_HIT_FAR_LIFT), towards the pass' sun, the whole sun range with no fade band. 1 where the pass has no sun.
 float jahHitSunVisibility( vec3 hitPos, vec3 liftDir, float t, bool far )
 {
 	if( JAH_HIT_SUN.w < 0.5 )
 		return 1.0;
-	const float lift = max( far ? JAH_HIT_FAR_LIFT : JAH_HIT_LIFT, 1e-4 * t );
-	return jahSunRay( hitPos + liftDir * lift, JAH_HIT_SUN.xyz, JAH_HIT_SUN_MASK,
-					  JAH_HIT_SUN_RANGE, JAH_HIT_SUN_RANGE );
+	return jahSunRay( jahRayOrigin( hitPos, liftDir, t, far ? JAH_HIT_FAR_LIFT : 0.0 ), JAH_HIT_SUN.xyz,
+					  JAH_HIT_SUN_MASK, JAH_HIT_SUN_RANGE, JAH_HIT_SUN_RANGE );
 }
 
 /// Appends one record. False when the list is full (the record is dropped and

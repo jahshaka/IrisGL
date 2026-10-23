@@ -49,6 +49,7 @@
 
 #ifndef JAH_RQ_HIT_DIRECT_GLSL
 #define JAH_RQ_HIT_DIRECT_GLSL
+#include "jah_ray_origin.glsl"
 
 #include "jah_fork_brdf.glsl"
 
@@ -242,8 +243,10 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 	JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
 	const uint count = T.u[0];
 	const uint base = T.u[2];
-	const float lift = max( jahHitSurf.far ? JAH_HIT_FAR_LIFT : JAH_HIT_LIFT, 1e-4 * jahHitSurf.t );
-	const vec3 origin = P + N * lift;
+	// THE ONE ORIGIN LAW (jah_ray_origin.glsl): the hit's own float bound (its position, the distance it was carried)
+	// plus its surface term - 0 on level 0, which the casters' near copies are; a far copy's JAH_HIT_FAR_LIFT.
+	const vec3 origin = jahRayOrigin( P, N, jahHitSurf.t, jahHitSurf.far ? JAH_HIT_FAR_LIFT : 0.0 );
+	const float lift = length( origin - P );
 	vec3 sum = vec3( 0.0 );
 	vec3 spec = vec3( 0.0 );
 	const float NdotV = clamp( dot( N, V ), 0.0, 1.0 );

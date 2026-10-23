@@ -132,9 +132,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// hitList: x = the list's capacity in records, y = its grid width, z = the
 	/// GPU scene instance entries bound (the flags a hit reads: mover, rigged),
 	/// w = 1 when the list is bound. hitSun: xyz = towards the sun, w = 1 when the
-	/// pass has one. hitSun2: x = the sun ray's TLAS mask (the casters), y = its
-	/// minimum lift off a hit, z = its length, w = the far copies' lift (unused
-	/// here: a reflection traces the near copies only).
+	/// pass has one. hitSun2: x = the sun ray's TLAS mask (the casters), y unused
+	/// (a near hit is ON level 0: its sun leg's surface term is 0, the one origin law), z = its length, w = a FAR
+	/// copy's hit's surface term (Types.h rayOriginLevelLift of the traced set's coarsest-level bound).
 	vec4 hitList;
 	vec4 hitSun;
 	vec4 hitSun2;

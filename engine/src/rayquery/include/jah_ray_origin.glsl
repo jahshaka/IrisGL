@@ -7,9 +7,13 @@
 // CAPTURED (the bake's level for its texel - the card sun). With tMin 0 and no back-face cull, a start inside level 0
 // hits it at t ~ 0, so the origin is lifted along the drawn surface's GEOMETRIC normal (jah_geometric_normal.glsl:
 // never a normal map's tilt, which shrinks the lift's geometric component) by
-//     the POINT'S OWN ERROR   - its float bound (jahRayFloatBound) plus what its reconstruction adds (a card texel's
-//                               average and its depth layer's quantum; nothing for a depth-buffer pixel)
-//   + the SURFACE'S BOUND     - how far the drawn surface may lie from level 0, measured as the LOD rule measures it.
+//     the POINT'S OWN ERROR   - its float bound (jahRayFloatBound: the unprojection's, or a ray-query hit's own
+//                               position with the distance it was carried) plus what its reconstruction adds: a card
+//                               texel's average and its depth layer's quantum; for a DEPTH-BUFFER point the depth's
+//                               quantum through the inverse projection and the rasteriser's sub-pixel snap
+//                               (jahDepthPointError, below)
+//   + the SURFACE'S BOUND     - how far the drawn surface may lie from level 0, measured as the LOD rule measures it
+//                               (0 for a ray leaving a hit ON level 0: it starts on the surface it traces).
 // THE VIEW'S BOUND (jahViewDrawnBound) is the rule's own arithmetic: the host's footprint count (the tolerance x the
 // LOD bias over one minus the view's switch band, times the bake's drift ratio) x one sample's footprint per metre of
 // THIS EYE (|rayDown| / the full target's height: 2 / (proj11 x H), the strategy's sampleFootprintPerspective) x the
@@ -30,6 +34,35 @@ float jahViewDrawnBound( float drawnFootprints, vec3 world, vec3 eyePos, vec3 ra
 {
 	const float footprint = length( rayDown ) / max( height, 1.0 );
 	return drawnFootprints * footprint * ( perspective ? length( world - eyePos ) : 1.0 );
+}
+
+/// THE DEPTH-REBUILT POINT'S OWN ERROR along its surface's normal (READ_B F5 finding (b); the lead's round-7 derivation):
+/// a point rebuilt at pixel p from its stored depth `raw` (a 32-bit float, reverse or forward) at view distance `dist`
+/// is off its surface by
+///   (1) THE DEPTH'S QUANTUM. The stored value lies within kRayDepthUlps of the rasterised plane's (the quantum
+///       jah_geometric_normal.glsl accepts as one plane's rounding); through the inverse projection that is
+///       e = q x |d dist / d raw| of FORWARD distance - perspective dist = B / (raw - A), so dist^2 / |B|; orthographic
+///       dist = |(raw - A) / B|, so 1 / |B| - which moves the point along its view ray `ray` (forward component 1,
+///       perspective; the eye's forward, orthographic): e x |N . ray| off the surface.
+///   (2) THE RASTERISER'S SUB-PIXEL SNAP. A vertex's framebuffer position is rounded to the device's
+///       subPixelPrecisionBits, so the drawn triangle is the true one with each corner moved by up to `snapPx` pixels
+///       (sqrt 2 x 2^-(bits + 1)); the depth a covered pixel stores is the true surface's at a screen point within snapPx
+///       of the pixel (a convex combination of the corners' moves), and the rebuild puts it on the pixel's own ray at
+///       that depth: a move IN THE IMAGE PLANE of snapPx x one pixel's world size there (`footprint`), whose normal
+///       component is at most that x sqrt(1 - (N . fwd)^2).
+/// The unprojection's own float bound is the caller's jahRayFloatBound. `snapPx` <= 0 = the term off (the arm
+/// rays.originPoint 0: the float-only control).
+const float kRayDepthUlps = 8.0;
+float jahDepthPointError( float raw, float dist, float projB, bool perspective, vec3 ray, vec3 fwd, vec3 geomN,
+						  float footprint, float snapPx )
+{
+	if( !( snapPx > 0.0 ) )
+		return 0.0;
+	const float ulp = exp2( floor( log2( max( abs( raw ), 1e-30 ) ) ) - 23.0 );
+	const float b = max( abs( projB ), 1e-30 );
+	const float e = kRayDepthUlps * ulp * ( perspective ? dist * dist / b : 1.0 / b );
+	const float nf = dot( geomN, fwd );
+	return e * abs( dot( geomN, ray ) ) + snapPx * footprint * sqrt( max( 1.0 - nf * nf, 0.0 ) );
 }
 
 /// THE ORIGIN: the point `surface` lifted along `geomN` (its surface's geometric normal, on the side the ray leaves

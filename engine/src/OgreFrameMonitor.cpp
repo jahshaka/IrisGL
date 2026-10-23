@@ -1058,6 +1058,13 @@ constexpr ArmDef kArms[] = {
       "tolerance x the LOD bias over the view's band, x the bake's drift ratio, at the point's Euclidean distance). The "
       "origin rows' controls: 0 = the float bound alone, 0.5 = half the term - a drawn surface that lies inside level 0 "
       "by more than that starts its rays inside it, and the rows must read red." },
+    { ArmId::RaysOriginPoint, 1.0, 0.0, 1.0,
+      "THE DEPTH-REBUILT POINT'S OWN ERROR IN THE RAY ORIGIN (PHOTON-7 stage 6, READ_B F5 finding (b); the lead's "
+      "round-7 derivation, jah_ray_origin.glsl jahDepthPointError): 1 = shipped, a ray leaving a point rebuilt from "
+      "the depth buffer - the reflection's, the sun contact's, the gather's probes' - is lifted by the depth format's "
+      "quantum through the inverse projection and the rasteriser's sub-pixel snap, both along the surface's normal, "
+      "besides the float bound. 0 = the float bound alone: with rays.originCut 0 the float-only control on a flat "
+      "level-0 floor (rtreflect.contact), which must read red there and green with this on." },
     { ArmId::ReflectSeedOffset, 0.0, 0.0, 65535.0,
       "THE LOBE DRAW'S SEED OFFSET (PHOTON-7 stage 6, the walk's noise/signal split): added to the frame index the "
       "reflection's lobe draw and its resolve's re-derivation take - two walks identical but for it carry independent "

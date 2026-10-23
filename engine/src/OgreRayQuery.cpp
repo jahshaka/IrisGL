@@ -798,6 +798,12 @@ private:
         const double k = mArms ? mArms->value(ArmId::RaysOriginCut) : 1.0;
         return float(k) * rayOriginDrawnFootprints(scene->pixelTolerance() * scene->lodBias(), lodBand);
     }
+    /// THE DEPTH-REBUILT POINT'S TERM's knob for a view's ray jobs (jah_ray_origin.glsl jahDepthPointError): the
+    /// device's sub-pixel snap in pixels, which also switches the term (the measuring arm rays.originPoint 0 sends 0:
+    /// the float bound alone - the float-only control).
+    float pointSnapKnob() const { return arm(ArmId::RaysOriginPoint, true) ? mSubPixelSnapPx : 0.0f; }
+    /// subPixelPrecisionBits' snap (init; Vulkan's minimum is 4 bits, a 1/32-pixel worst case when unknown).
+    float mSubPixelSnapPx = float(1.4142135623730951 / 32.0);
     /// THE GATHER'S REST KEY with the measuring arm "gi.hitDirect" in it (FAR-SUN-2): a paired
     /// A/B in one process flips the arm on a still view, and a held view traces nothing.
     unsigned long long gatherRestKeyArmed(const detail::OgreScene *scene) const {
@@ -2130,6 +2136,10 @@ bool RayQueryTier::open(Ogre::RenderSystem *rs, std::string &err) {
         // it. Refusing here is a supported no-rays boot, not a failure.
         VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(mDev->mPhysicalDevice, &props);
+        // THE RASTERISER'S SUB-PIXEL SNAP (the ray origin's point term, jah_ray_origin.glsl jahDepthPointError): a
+        // vertex's framebuffer position is rounded to subPixelPrecisionBits fractional bits, so each corner moves by up
+        // to half a step per axis - sqrt 2 x 2^-(bits + 1) pixels.
+        mSubPixelSnapPx = float(std::sqrt(2.0) * std::ldexp(1.0, -int(props.limits.subPixelPrecisionBits) - 1));
         if (props.apiVersion < VK_API_VERSION_1_2) {
             err = "rayquery: the device reports Vulkan " +
                   std::to_string(VK_VERSION_MAJOR(props.apiVersion)) + "." +
@@ -6167,7 +6177,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.hitSun[2] = hit.toSun[2];
     pp.hitSun[3] = hit.sun ? 1.0f : 0.0f;
     pp.hitSun2[0] = float(hit.sunMask);
-    pp.hitSun2[1] = hit.lift;
+    pp.hitSun2[1] = 0.0f;   // unused: a near hit's surface term is 0
     pp.hitSun2[2] = hit.sunRange;
     pp.hitSun2[3] = hit.farLift;
     // THE ARM THAT RE-MEASURES THE CLAIM (the shape of "reflect.monoEyes" beside it):
@@ -6233,6 +6243,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         std::memcpy(pp.cloudSun, hitSurf.cloudSun, sizeof(pp.cloudSun));
     }
     pp.alpha[3] = rayMoversOf(scene) ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
+    pp.alpha[2] = pointSnapKnob();   // the ray origin's depth-rebuilt point term (READ_B F5 (b))
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
     // ---- THE REST (PHOTON-2 1e, fix F1; round 2: R1, G1-G6) -----------------------------------------------------
@@ -7656,6 +7667,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
     in.drawnCutFootprints = drawnFootprintsOf(scene, view->chainDesc().lodHysteresis);
+    in.pointSnapPx = pointSnapKnob();
     in.alphaTable = alphaTableOf(scene);
     in.hitTable = hitTableOf(scene);
     {
@@ -8234,7 +8246,7 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     // on axis, and a start exactly on level 0 is the float bound's. Full resolution whatever the divisor: the error is
     // the view's, in the view's pixels, not this job's texels.
     pp.knobs[0] = drawnFootprintsOf(scene, view->chainDesc().lodHysteresis);
-    pp.knobs[1] = 0.0f;
+    pp.knobs[1] = pointSnapKnob();   // the ray origin's depth-rebuilt point term (READ_B F5 (b))
     // THE MASK: the shadow CASTERS' near copies (kRayMaskCaster) — a subset of
     // the near field, which is the one field a ray this short lives in (A5b §4:
     // one field per ray; the far copies are the coarse levels past the near
@@ -8922,10 +8934,6 @@ VkDescriptorBufferInfo rawBufferInfo(Ogre::UavBufferPacked *b) {
     info.range = b->getTotalSizeBytes();
     return info;
 }
-/// The shadow ray's minimum lift off a hit (metres): the hit point is exact on
-/// the traced triangle to float precision, so a millimetre floor (and 1e-4 of the
-/// distance, jah_rq_hit_record.glsl) clears it.
-constexpr float kHitSunLift = 0.001f;
 }   // namespace
 
 bool RayQueryTier::ensureHitDummies(std::string &err) {
@@ -9116,10 +9124,13 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
         const float farClip = float(cam->getFarClipDistance());
         out.sunRange = farClip > 0.0f ? std::max(farClip, 100.0f) : 10000.0f;
     }
-    out.lift = kHitSunLift;
+    // THE HIT'S SUN LEG UNDER THE ONE ORIGIN LAW (jah_ray_origin.glsl; the lead's round-7 ruling - the 1 mm / 1e-4 t
+    // floor is deleted): the shader lifts by the hit's own float bound; a near hit is ON level 0, which the casters'
+    // near copies are, so its surface term is 0, and a FAR copy's hit is on the coarsest level, within
+    // rayOriginLevelLift of the traced set's widest coarsest-level bound (farOverlap) of level 0.
     {
         const SceneAs *sa = asOf(scene);
-        out.farLift = sa ? std::max(sa->farOverlap, kHitSunLift) : kHitSunLift;
+        out.farLift = sa ? rayOriginLevelLift(sa->farOverlap) : 0.0f;
     }
     hv.live = true;
     return true;

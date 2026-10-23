@@ -95,11 +95,13 @@ float jahMoverSkyVisibility( vec3 hitP, vec3 n )
 		const float phi = phi0 + 3.1415927 * float( k & 1 ) + 1.5707963 * float( k >> 1 );
 		const vec3 d = normalize( n * z + ( t * cos( phi ) + b * sin( phi ) ) * r );
 		rayQueryEXT q;
-		// THE ORIGIN LAW (PHOTON-7 stage 6, AB E15 / W15): these rays meet MOVERS alone (kRayMaskMover) and a hit that
-		// asks is never on one, so nothing of its own surface can answer them - the start is lifted by the hit point's
-		// float error alone (it was a fixed 2 cm).
+		// THE ONE ORIGIN LAW (jah_ray_origin.glsl): these rays meet MOVERS alone (kRayMaskMover) and a hit that asks
+		// is never on one, so nothing of its own surface is in the mask - its surface term is 0 and the start is
+		// lifted by the hit's own float bound, its position and the distance it was carried (jahHitSurf.t, which the
+		// caller sets before the read; 0 where it describes no hit).
 		rayQueryInitializeEXT( q, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ), 0x02u,
-							   hitP + n * jahRayFloatBound( hitP, 0.0 ), 0.0, d, JAH_MOVER_SKY_LENGTH );
+							   jahRayOrigin( hitP, n, jahHitSurf.valid ? jahHitSurf.t : 0.0, 0.0 ), 0.0, d,
+							   JAH_MOVER_SKY_LENGTH );
 		JAH_RQ_PROCEED( q )
 		if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
 			open += 0.25;

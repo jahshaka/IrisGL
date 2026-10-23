@@ -67,7 +67,7 @@ layout( std430, set = 0, binding = 5 ) buffer Args { uint x; uint y; uint z; } a
 /// pixel the prepass never touched); `geomN` = its GEOMETRIC normal (the ray
 /// origin's direction, jah_ray_origin.glsl), the shading one where the depth has
 /// no plane through the pixel.
-struct Surface { vec3 world; vec3 normal; vec3 geomN; float dist; bool valid; };
+struct Surface { vec3 world; vec3 normal; vec3 geomN; float pointError; float dist; bool valid; };
 
 /// THE GEOMETRIC NORMAL (READ_B F3: every ray job's origin is lifted along the drawn surface's geometric normal): the
 /// one text over the eye's own layer of the depth, at the pixel's centre.
@@ -76,6 +76,7 @@ int gnEye = 0;
 #define JAH_GN_WORLD( q, raw ) jahWorldAt( jahEyeNow( gnEye ), ( vec2( q ) + 0.5 ) / p.resolution.zw, \
 										   jahViewDistance( raw ) )
 #include "jah_geometric_normal.glsl"
+#include "jah_ray_origin.glsl"
 
 Surface surfaceAt( vec2 pix, int eye )
 {
@@ -83,6 +84,7 @@ Surface surfaceAt( vec2 pix, int eye )
 	s.world = vec3( 0.0 );
 	s.normal = vec3( 0.0 );
 	s.geomN = vec3( 0.0 );
+	s.pointError = 0.0;
 	s.dist = 0.0;
 	s.valid = false;
 	// CLAMPED TO THE EYE'S OWN IMAGE: the grid is a ceiling division, so the
@@ -114,7 +116,14 @@ Surface surfaceAt( vec2 pix, int eye )
 		const vec3 centre = JAH_GN_WORLD( q, rawDepth );
 		const vec3 V = e.perspective < 0.5 ? -e.fwd : normalize( e.camPos - centre );
 		s.geomN = jahGeometricNormal( q, res, rawDepth, centre, s.normal, V );
-		s.valid = finite3( s.geomN );
+		// THE POINT'S OWN ERROR beyond the float bound (READ_B F5 (b), jahDepthPointError: projParams.w = the snap in
+		// pixels, 0 = off) - the depth this probe was rebuilt from is only here
+		const bool perspective = e.perspective > 0.5;
+		const float pixelSize = length( e.rayDown ) / p.resolution.w * ( perspective ? s.dist : 1.0 );
+		s.pointError = jahDepthPointError( rawDepth, s.dist, p.projParams.y, perspective,
+										   perspective ? ( s.world - e.camPos ) / s.dist : e.fwd, e.fwd, s.geomN,
+										   pixelSize, p.projParams.w );
+		s.valid = finite3( s.geomN ) && finite1( s.pointError );
 	}
 	return s;
 }
@@ -123,7 +132,7 @@ void writeRecord( uint index, Surface s, float adaptiveLink )
 {
 	records.r[index].posW = vec4( s.world, s.valid ? 1.0 : 0.0 );
 	records.r[index].normalW = vec4( s.normal, adaptiveLink );
-	records.r[index].geomW = vec4( s.geomN, 0.0 );
+	records.r[index].geomW = vec4( s.geomN, s.pointError );
 	// The trace overwrites this; zeroing it here is what makes a probe that the
 	// trace declines (no surface) read as "no answer" rather than as last
 	// frame's answer at a place the camera has left.
@@ -184,6 +193,7 @@ void main()
 	w.dist = records.r[index].sh[0].w;
 	w.normal = records.r[index].sh[1].xyz;
 	w.geomN = records.r[index].sh[2].xyz;
+	w.pointError = records.r[index].sh[2].w;
 	w.valid = true;
 	// ITS SOURCE CELL travels with it, in the same float the uniform records use for
 	// their link: the trace keys an adaptive probe's ray directions on the CELL it was
@@ -281,6 +291,6 @@ void main()
 	// THE STASH for pass 2: the worst pixel's surface, and whether the cell asks.
 	records.r[index].sh[0] = vec4( worstSurface.world, worstSurface.dist );
 	records.r[index].sh[1] = vec4( worstSurface.normal, wants ? 1.0 : 0.0 );
-	records.r[index].sh[2] = vec4( worstSurface.geomN, 0.0 );
+	records.r[index].sh[2] = vec4( worstSurface.geomN, worstSurface.pointError );
 }
 #endif   // JAH_PLACE_SELECT

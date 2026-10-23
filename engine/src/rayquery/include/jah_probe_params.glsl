@@ -30,7 +30,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	vec4 rayDown;
 	vec4 fwd;
 	/// x = A, y = B of Camera::getProjectionParamsAB() (reverse-Z safe),
-	/// z = the far clip.
+	/// z = the far clip, w = the ray origin's point term: the rasteriser's sub-pixel snap in pixels
+	/// (jah_ray_origin.glsl jahDepthPointError; 0 = the term off, rays.originPoint 0).
 	vec4 projParams;
 	/// xy = the PROBE GRID in probes, zw = the full-resolution target size.
 	vec4 resolution;
@@ -119,7 +120,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// hitList: x = the list's capacity, y = its grid width, z = the GPU scene
 	/// instance entries bound, w = 1 when the list is bound. hitSun: xyz = towards
 	/// the sun, w = 1 when the pass has one. hitSun2: x = the sun ray's TLAS mask,
-	/// y = its minimum lift, z = its length, w = the far copies' lift (farOverlap).
+	/// y unused (a near hit is ON level 0: its sun leg's surface term is 0, the one origin law), z = its length,
+	/// w = a FAR copy's hit's surface term (Types.h rayOriginLevelLift of farOverlap).
 	vec4 hitList;
 	vec4 hitSun;
 	vec4 hitSun2;
@@ -260,7 +262,8 @@ struct JahProbeRecord
 	vec4 sh[7];
 	/// xyz = THE DRAWN SURFACE'S GEOMETRIC NORMAL at the probe (jah_geometric_normal.glsl at its placement; the shading
 	/// normal where the depth has no plane through the pixel): the direction its rays' origin is lifted along
-	/// (jah_ray_origin.glsl, READ_B F3) - the hemisphere stays the shaded one, normalW. w unused.
+	/// (jah_ray_origin.glsl, READ_B F3) - the hemisphere stays the shaded one, normalW. w = the point's own error
+	/// beyond its float bound (jahDepthPointError at the placement: the depth's quantum and the sub-pixel snap).
 	vec4 geomW;
 };
 

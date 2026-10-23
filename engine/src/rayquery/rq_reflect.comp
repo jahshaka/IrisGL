@@ -141,9 +141,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// hitList: x = the list's capacity in records, y = its grid width, z = the
 	/// GPU scene instance entries bound (the flags a hit reads: mover, rigged),
 	/// w = 1 when the list is bound. hitSun: xyz = towards the sun, w = 1 when the
-	/// pass has one. hitSun2: x = the sun ray's TLAS mask (the casters), y = its
-	/// minimum lift off a hit, z = its length, w = the far copies' lift (unused
-	/// here: a reflection traces the near copies only).
+	/// pass has one. hitSun2: x = the sun ray's TLAS mask (the casters), y unused
+	/// (a near hit is ON level 0: its sun leg's surface term is 0, the one origin law), z = its length, w = a FAR
+	/// copy's hit's surface term (Types.h rayOriginLevelLift of the traced set's coarsest-level bound).
 	vec4 hitList;
 	vec4 hitSun;
 	vec4 hitSun2;
@@ -161,8 +161,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// history of before.
 	vec4 motion;
 	/// THE ALPHA TABLE (REFLECT-MOVERS-2, jah_rq_alpha.glsl): xy = its device
-	/// address, float bits (0 = none: the rays stay opaque). z: unused (the edge-class overlay is deleted with the
-	/// moving hit's history, PHOTON-7 stage 6). w = 1: the hit's mover gate runs.
+	/// address, float bits (0 = none: the rays stay opaque). z = THE RAY ORIGIN'S POINT TERM: the rasteriser's
+	/// sub-pixel snap in pixels (jah_ray_origin.glsl jahDepthPointError; 0 = the term off, rays.originPoint 0).
+	/// w = 1: the hit's mover gate runs.
 	vec4 alpha;
 	/// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong's eight
 	/// (jah_fog_along.glsl states them).
@@ -397,7 +398,6 @@ void photonHit( ivec2 tc, vec4 c )
 #define JAH_HIT_SUN         p.hitSun
 #define JAH_HIT_SUN_MASK    uint( p.hitSun2.x )
 #define JAH_HIT_SUN_RANGE   p.hitSun2.z
-#define JAH_HIT_LIFT        p.hitSun2.y
 #define JAH_HIT_FAR_LIFT    p.hitSun2.w
 #define JAH_ALPHA_TABLE     floatBitsToUint( p.alpha.xy )
 #include "jah_rq_sun_ray.glsl"
@@ -825,11 +825,18 @@ void main()
 	// EUCLIDEAN distance from THIS eye (knobs2.y: Types.h rayOriginDrawnFootprints - the tolerance x the LOD bias over
 	// the view's band, x the bake's drift ratio), tMin 0. The 1/2-cell bias it replaces (3.9 cm at Epic, also as tMin)
 	// lifted the ray over a post's foot: the contact's reflection was missing for 99 rows at 1 m.
+	// THE POINT'S OWN ERROR beyond the float bound (READ_B F5 (b)): the depth's quantum and the sub-pixel snap
+	// (jahDepthPointError; alpha.z = the snap in pixels, 0 = the term off: rays.originPoint).
 	gNormalEye = thisEye;
 	const vec3 geomN = jahGeometricNormal( px, fullRes, rawDepth, world, worldN, V );
+	const bool perspective = thisEye.perspective > 0.5;
+	const float pixelSize = length( thisEye.rayDown ) / float( fullRes.y ) * ( perspective ? dist : 1.0 );
+	const float pointError = jahDepthPointError( rawDepth, dist, p.projParams.y, perspective,
+												 perspective ? ( world - thisEye.camPos ) / dist : thisEye.fwd,
+												 thisEye.fwd, geomN, pixelSize, p.alpha.z );
 	const vec3 origin = jahRayOrigin( world, geomN, dist,
-									  jahViewDrawnBound( p.knobs2.y, world, thisEye.camPos, thisEye.rayDown,
-														 float( fullRes.y ), thisEye.perspective > 0.5 ) );
+									  pointError + jahViewDrawnBound( p.knobs2.y, world, thisEye.camPos, thisEye.rayDown,
+																	  float( fullRes.y ), perspective ) );
 
 	// ---- AT REST, PER TEXEL (PHOTON-2 round 2: R1, G6; jah_reflect_rest.glsl) ----------------------------------
 	// knobs2.x = the rest frame k (1..kReflectRestMax), 0 while moving, -1 on the frame that BREAKS a rest (the compose
