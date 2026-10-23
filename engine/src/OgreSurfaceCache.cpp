@@ -1219,6 +1219,10 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             if (nextEvict >= evictable.size()) break;
             const Evictable &e = evictable[nextEvict++];
             CardRec &gone = per[e.inst][e.pos];
+            // (the list was built before this loop's compaction: a card it MOVED waits for its re-capture - never
+            // evicted while waiting, the rule above; measured, gi.card_residency (4)'s crowded arrival evicted 36 cards
+            // its own compaction had just moved, the move wasted - PHOTON-7 stage 5's read W5)
+            if (!gone.size || !gone.lastUpdated) continue;
             freeRect(gone.atlasX, gone.atlasY, gone.size);
             gone.size = 0u;
             ++mEvicted;
