@@ -9185,7 +9185,7 @@ void OgreView::sizeHitList() {
     if (demand == 0ull && mHitListRows >= create) return;   // nothing overflowed and the target did not grow
     const Ogre::IdString names[] = { Ogre::IdString("jahHitIds"), Ogre::IdString("jahHitDest"),
                                      Ogre::IdString("jahHitRadiance") };
-    struct List { Ogre::CompositorNode *node; Ogre::TextureGpu *tex[3]; };
+    struct List { Ogre::CompositorNode *node = nullptr; Ogre::TextureGpu *tex[3] = {}; };
     std::vector<List> lists;
     for (Ogre::CompositorNode *node : mWorkspace->getNodeSequence()) {
         List l{ node, {} };
