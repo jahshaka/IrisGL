@@ -26,6 +26,8 @@
 fragment_program Jahshaka/SsrRayMarch_ps_GLSL glsl
 {
 	source JahSsrRayMarch_ps.glsl
+	// the march's core is the screen trace's, included raw (JahSsrMarch.glsl, PHOTON-7 stage 6)
+	enable_include_header true
 	default_params
 	{
 		param_named depthTexture			int 0
@@ -37,6 +39,7 @@ fragment_program Jahshaka/SsrRayMarch_ps_GLSL glsl
 fragment_program Jahshaka/SsrRayMarch_ps_VK glslvk
 {
 	source JahSsrRayMarch_ps.glsl
+	enable_include_header true
 }
 
 fragment_program Jahshaka/SsrRayMarch_ps unified

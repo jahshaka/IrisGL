@@ -1,36 +1,26 @@
 #version 460
-// PHOTON R5 — RAY-TRACED REFLECTIONS. Screen first, rays for the rest.
+// PHOTON R5 — RAY-TRACED REFLECTIONS: THE ONE ESTIMATOR (PHOTON-7 stage 6, law L5; AB E2, S5).
 //
-// WHAT THIS SHADER IS FOR, in one sentence: the screen-space march already
-// answers most reflective pixels exactly (it reflects SHADED pixels, which is
-// the sharpest and cheapest source there is), and this shader answers only the
-// ones it could not — off screen, behind an occluder, past the edge fade, or in
-// the roughness band the march declines. That ordering is Lumen's and it is the
-// right one here for a measurable reason: a ray's hit is shaded from the
-// surface cache or the Photon voxels (whose finest directional mip is HALF the
-// voxel grid) — or, where neither holds it (a mover, a rigged item, outside
-// every cascade), by the visibility-buffer decode (PHOTON-HIT-SHADE-1) — while a
-// screen hit is a real pixel of this scene. Where the screen has an answer it
-// is the better answer.
+// ONE DIRECTION A PIXEL A FRAME, ONE ANSWER FOR IT, from the first source that has it (Lumen's order):
+//   1. THE SCREEN TRACE along that direction through this frame's depth (jah_ssr_march.glsl, the raster march's own
+//      core), answered from the PREVIOUS frame's picture at the hit's reprojected point where the screen vouches for
+//      it - a screen hit is a real shaded pixel of this scene, the sharpest source there is;
+//   2. THE TLAS near ray (the meshes' level 0) where the screen has no answer - off screen, behind an occluder, past
+//      the screen's fades - its hit shaded from the surface cache or the Photon voxels, or, where neither holds it (a
+//      mover, a rigged item, outside every cascade), by the visibility-buffer decode (PHOTON-HIT-SHADE-1);
+//   3. THE FAR COPIES (each mesh's coarsest level) for a ray that escaped the near length, as the gather continues;
+//   4. THE SKY.
+// The screen's fades (the frame's edge, the ray's range, the thickness margin, the arrival angle) are the PROBABILITY
+// that the screen answers this sample, else the ray does: an unbiased mixture of two estimates of one radiance, and
+// no weight is left to composite. There is no second image: the raster march and its resolve do not run on a ray
+// chain (OgreChain.cpp), and the filter writes the mean alone (rq_reflect_filter.comp).
 //
-// WHERE THE ANSWER GOES. Straight into `jahSsrReflection`, the RGBA16F texture
-// HlmsPbs samples as `ssrTexture` and composites with fork 16d8e29d4 (was 0036)'s single
-// lerp:
+// WHERE THE ANSWER GOES. Into `jahSsrReflection`, the RGBA16F texture HlmsPbs samples as `ssrTexture` and composites
+// with fork 16d8e29d4 (was 0036)'s single lerp:
 //     envColourS = lerp( envColourS, ssrReflection.rgb, ssrReflection.w )
-// so `w` is literally "how much of the probe/sky answer does the trace
-// replace". NEVER an add: the same lobe twice, through a history loop, is what
-// fork 16d8e29d4 (was 0036) exists to stop (PHOTON_SPEC §11 rule 3). Where this shader writes
-// nothing, the texture still holds exactly what JahSsrResolve wrote, which is
-// exactly today's picture.
-//
-// THE SCREEN'S SHARE IS KEPT, NOT OVERWRITTEN. A pixel whose march came back
-// with a PARTIAL weight (the resolve's envelope, its roughness ramp, its hit
-// mask's antialiased edge) is not a pixel with no answer — it is a pixel with
-// a fraction of one. The composite is linear in that fraction, so this shader
-// writes `rgb = mix( traced, screen, screenW )` with `w` = its own gate: the
-// screen keeps its share, the ray fills the remainder, and the sum is one
-// answer at one weight rather than two images fighting (lane SSR-2's rule,
-// arrived at from the other side).
+// so `w` is literally "how much of the probe/sky answer does the trace replace". NEVER an add: the same lobe twice,
+// through a history loop, is what fork 16d8e29d4 (was 0036) exists to stop (PHOTON_SPEC §11 rule 3). The chain clears
+// it every frame; the filter writes the texels this trace answered.
 //
 // ONE RAY PER PIXEL PER FRAME, and a temporal mean behind it. The lobe is
 // sampled with the GGX VNDF (Heitz 2018), which is the distribution of visible
@@ -198,6 +188,14 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// a resting texel resumes when its ray, its lobe's mean segment or its hit's sun leg crosses one.
 	vec4 restMovers;
 	vec4 restMoverBox[32];   // per box: [2i] = min, [2i + 1] = max (xyz)
+	/// THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6): screen.x = 1 when the SCREEN TRACE runs (the chain's screen
+	/// sources are bound: PostFxDesc::reflectSources Both or Screen, a mono view), y = 1 for THE SCREEN ALONE (Screen: a
+	/// miss is no sample - no ray follows it), z = the march's step count, w = its phase rule (PostFxDesc::ssrMarchPhase);
+	/// screen2.x = the march's length (ssrMaxDistance), y = its thickness (ssrThickness), z = where the FAR COPIES' query
+	/// starts (the near length less the far copies' widest hand-over gap, the gather's rule), w = where it ends (the far
+	/// plane; 0 = no far query).
+	vec4 screen;
+	vec4 screen2;
 } p;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
@@ -298,6 +296,14 @@ layout( set = 0, binding = 41 ) uniform sampler3D fogAerial;
 /// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b): the ray's radiance, w = 1 a sample this frame, 0 = none (the texel's flags
 /// are its state texel's). A record's radiance is written here by the write-back (rq_hit_composite.comp).
 layout( rgba16f, set = 0, binding = 45 ) uniform writeonly image2DArray reflectSample;
+/// THE SCREEN TRACE'S PICTURE (PHOTON-7 stage 6, the one estimator's first source): the previous frame's linear radiance
+/// (`jahSsrPrev`) and the depth it was drawn at (`jahSsrPrevDepth`, -1 under an editor helper: no surface), both the
+/// end-of-frame copies, and the object motion at a pixel of a moving slot (`jahSsrVelocity`, rq_motion.comp, recorded
+/// in front of this trace; w = 0 the camera path). MONO 2D images - a stereo chain builds no screen source - and 1 x 1
+/// stand-ins wherever the chain runs no screen trace (p.screen.x = 0).
+layout( set = 0, binding = 47 ) uniform sampler2D ssrPrevColour;
+layout( set = 0, binding = 48 ) uniform sampler2D ssrPrevDepth;
+layout( set = 0, binding = 49 ) uniform sampler2D ssrVelocity;
 
 /// The same ceiling JahSsrResolve_ps.glsl and JahSsrHistory_ps.glsl hold the
 /// SSR loop to, and for the same reason: about twelve stops above white, six
@@ -371,6 +377,7 @@ const vec4 kPhotonSky     = vec4( 0.2, 0.95, 1.0, 1.0 );
 const vec4 kPhotonList    = vec4( 1.0, 0.2, 1.0, 1.0 );
 const vec4 kPhotonDropped = vec4( 1.0, 0.1, 0.05, 1.0 );
 const vec4 kPhotonRest    = vec4( 0.35, 0.35, 0.35, 1.0 );   // a texel that STOPPED at rest (R1): no ray
+const vec4 kPhotonScreen  = vec4( 1.0, 0.85, 0.1, 1.0 );    // the screen trace answered (PHOTON-7 stage 6)
 /// (Under the edge-class overlay the source colours give way to the class colour,
 /// written with w = 2.5 so it passes here, and stored at 1.)
 void photonHit( ivec2 tc, vec4 c )
@@ -506,6 +513,161 @@ vec3 worldAt( EyeImage e, vec2 uv, float dist )
 	if( e.perspective < 0.5 )
 		return e.camPos + plane + e.fwd * dist;		// an offset, not a ray
 	return e.camPos + plane * dist;
+}
+
+/// ---- THE SCREEN TRACE (PHOTON-7 stage 6, THE ONE ESTIMATOR's first source) ------------------------------------------
+/// The march's core is the raster march's own text (jah_ssr_march.glsl): this file hosts it through the depth it reads
+/// - this frame's, at the eye's own layer, point-sampled - and the view distance.
+#define JAH_SSR_SCENE_DEPTH( uv ) textureLod( sceneDepth, vec3( ( uv ), float( gEye ) ), 0.0 ).x
+#define JAH_SSR_VIEW_DISTANCE( d ) viewDistance( d )
+#include "jah_ssr_march.glsl"
+/// THE SAME SURFACE IN THE PREVIOUS PICTURE (the no-ray resolve's test, JahSsrResolve_ps.glsl "THE SAME SURFACE", in
+/// view distance): a texel of the previous picture shows the hit only if the depth it was drawn at is the hit's, within
+/// twice the hit's local depth slope plus 0.2 % of its distance, never more than 3 %.
+const float kSsrSameSurfaceRel = 2e-3;
+const float kSsrSameSurfaceCeil = 3e-2;
+/// ...and the previous picture's frame edge, faded over 3 % of it (the resolve's kHistoryEdgeFade).
+const float kSsrHistoryEdgeFade = 0.03;
+
+/// THE SCREEN'S ANSWER FOR DIRECTION `L` from the surface `world` this pixel `px` shows: the march along L in the
+/// eye's own frame (right / down / forward: z the view distance, the image coordinate h.xy / h.w through the eye's
+/// basis - worldAt's inverse), then at a crossing the resolve's tests on the hit: its point last frame (the object
+/// motion at the hit, a moving slot's previous pose), reprojected through the previous camera (jah_reproject.glsl),
+/// the previous picture's texels around it that show the SAME SURFACE, bilinear over those, re-fogged for the
+/// reflection's leg (jahSsrRefog). `coin` takes it with the probability the screen vouches for it - the envelope, the
+/// arrival angle and the previous picture's edge (jah_ssr_march.glsl); false hands the sample to the ray. `travelled`
+/// is the hit's distance along L; `moving` / `was` say whether the hit moved and where it was.
+bool screenAnswer( EyeImage e, EyeImage before, vec3 world, vec3 L, vec3 V, ivec2 px, ivec2 fullRes, float coin,
+				   out vec3 radiance, out float travelled, out vec3 hitPos, out bool moving, out vec3 was )
+{
+	radiance = vec3( 0.0 );
+	travelled = 0.0;
+	hitPos = world;
+	moving = false;
+	was = world;
+	// THE MARCH'S SPACE: the eye's right / down / forward axes; the image coordinate of a point (x, y, z) of it is
+	// ((x / z - rTL) / |rayRight|, (y / z - dTL) / |rayDown|) through a perspective eye (rTL, dTL: the top-left ray's
+	// components), ((x - rTL) / |rayRight|, ...) through an orthographic one - the matrix below, column by column.
+	const float rR = length( e.rayRight ), rD = length( e.rayDown );
+	const vec3 right = e.rayRight / max( rR, 1e-20 ), down = e.rayDown / max( rD, 1e-20 );
+	const float rTL = dot( e.rayTL, right ), dTL = dot( e.rayTL, down );
+	const mat4 viewToTex = e.perspective > 0.5
+		? mat4( vec4( 1.0 / rR, 0.0, 0.0, 0.0 ), vec4( 0.0, 1.0 / rD, 0.0, 0.0 ),
+				vec4( -rTL / rR, -dTL / rD, 1.0, 1.0 ), vec4( 0.0 ) )
+		: mat4( vec4( 1.0 / rR, 0.0, 0.0, 0.0 ), vec4( 0.0, 1.0 / rD, 0.0, 0.0 ),
+				vec4( 0.0, 0.0, 1.0, 0.0 ), vec4( -rTL / rR, -dTL / rD, 0.0, 1.0 ) );
+	const vec3 rel = world - e.camPos;
+	const vec3 o = vec3( dot( rel, right ), dot( rel, down ), dot( rel, e.fwd ) );
+	const vec3 d = vec3( dot( L, right ), dot( L, down ), dot( L, e.fwd ) );
+	const vec3 toSurface = -vec3( dot( V, right ), dot( V, down ), dot( V, e.fwd ) );
+	const float maxDistance = p.screen2.x;
+	const JahSsrMarch m = jahSsrMarch( viewToTex, o, d, maxDistance, p.screen2.y, p.screen.z,
+									   jahSsrJitter( vec2( px ), p.screen.w ), p.screen.w );
+	if( m.hit <= 0.0 )
+		return false;
+	// THE CROSSING ITSELF (jahSsrSecant): this trace answers the crossing's own point - one estimator, its hit is the
+	// pixel's reflection - not the bisection's back end a fraction of a step past it (~10 px at 1 m on a face met steeply).
+	float tCross;
+	const vec2 hitUv = jahSsrSecant( viewToTex, o, d, m, tCross );
+	// THE HIT: the depth of the texel the crossing landed in (the resolve's), its point and its normal.
+	const ivec2 hitPx = clamp( ivec2( hitUv * vec2( fullRes ) ), ivec2( 0 ), fullRes - 1 );
+	const float hitRaw = texelFetch( sceneDepth, ivec3( hitPx, gEye ), 0 ).x;
+	if( hitRaw <= 0.0 || hitRaw >= 1.0 )
+		return false;
+	const float hitDist = viewDistance( hitRaw );
+	hitPos = worldAt( e, hitUv, hitDist );
+	// THE HIT'S LOCAL DEPTH SLOPE in this frame: per axis the smaller one-sided step to a neighbour (a silhouette's
+	// texel keeps its own surface's), the two axes summed.
+	float slope = 0.0;
+	{
+		const ivec2 dMax = fullRes - 1;
+		float s[4];
+		const ivec2 nb[4] = ivec2[4]( ivec2( -1, 0 ), ivec2( 1, 0 ), ivec2( 0, -1 ), ivec2( 0, 1 ) );
+		for( int k = 0; k < 4; ++k )
+		{
+			const float r = texelFetch( sceneDepth, ivec3( clamp( hitPx + nb[k], ivec2( 0 ), dMax ), gEye ), 0 ).x;
+			s[k] = r > 0.0 && r < 1.0 ? abs( viewDistance( r ) - hitDist ) : 3.0e38;
+		}
+		slope = min( min( s[0], s[1] ), 1.0e30 ) + min( min( s[2], s[3] ), 1.0e30 );
+	}
+	// THE CROSSING LIES ON THE SURFACE THE SCREEN SHOWS - or the screen does not answer. The march's own acceptance
+	// is the raster march's (a crossing up to ssrThickness, 0.5 m, behind the depth: a screen-only estimator's hole
+	// filler), so a ray that passed BEHIND an object - the wall beyond a pillar, hidden from the eye by it - "hit" the
+	// object and took its colour. Here a miss costs nothing (the ray answers it, from the origin), so the screen
+	// vouches only for a crossing whose own depth is the hit texel's within the depth buffer's resolution there: its
+	// local slope (twice, the texel's centre against the crossing's point inside it) plus 0.2 % of the distance, never
+	// more than 3 % - the same-surface tolerance below. A crossing at a depth discontinuity lies between the two
+	// surfaces, on neither, and goes to the ray.
+	if( !( abs( o.z + d.z * tCross - hitDist ) <=
+		   min( 2.0 * slope + kSsrSameSurfaceRel * hitDist, kSsrSameSurfaceCeil * hitDist ) ) )
+		return false;
+	float arrival = 0.0;
+	{
+		vec3 hn = texelFetch( gBufNormals, ivec3( hitPx, gEye ), 0 ).xyz * 2.0 - 1.0;
+		if( dot( hn, hn ) > 1e-6 )
+		{
+			hn = normalize( hn );
+			arrival = -dot( L, normalize( p.viewAxisX.xyz * hn.x + p.viewAxisY.xyz * hn.y + p.viewAxisZ.xyz * hn.z ) );
+		}
+	}
+	float vouch = jahSsrEnvelope( m, d, toSurface, maxDistance, 0.0 ) * jahSsrFaceFade( arrival );
+	if( !( vouch > coin ) )
+		return false;
+	// THE HIT LAST FRAME: a moving slot's previous pose (the object motion at the hit's texel, in this image), else
+	// where it is.
+	{
+		const vec4 vel = texelFetch( ssrVelocity, min( hitPx, textureSize( ssrVelocity, 0 ) - 1 ), 0 );
+		if( vel.w > 0.5 )
+		{
+			const float wasRaw = hitRaw + vel.z;
+			if( wasRaw > 0.0 && wasRaw < 1.0 )
+			{
+				was = worldAt( e, hitUv + vel.xy, viewDistance( wasRaw ) );
+				moving = true;
+			}
+		}
+		if( !moving )
+			was = hitPos;
+	}
+	vec2 puv;
+	float pz;
+	if( jahReproject( was, before.camPos, before.perspective, before.rayTL, before.rayRight, before.rayDown,
+					  before.fwd, puv, pz ) != 0 )
+		return false;
+	const vec2 inside = min( puv, vec2( 1.0 ) - puv );
+	vouch *= smoothstep( 0.0, kSsrHistoryEdgeFade, min( inside.x, inside.y ) );
+	if( !( vouch > coin ) )
+		return false;
+	// THE SAME SURFACE, PER TAP of the bilinear footprint: the previous picture's depth at each against the hit's
+	// distance there, the tolerance from the hit's local depth slope in THIS frame (above).
+	const float tol = min( 2.0 * slope + kSsrSameSurfaceRel * pz, kSsrSameSurfaceCeil * pz );
+	const ivec2 prevRes = textureSize( ssrPrevColour, 0 );
+	const vec2 at = puv * vec2( prevRes ) - 0.5;
+	const ivec2 base = ivec2( floor( at ) );
+	const vec2 f = at - vec2( base );
+	vec3 sum = vec3( 0.0 );
+	float wSame = 0.0;
+	for( int k = 0; k < 4; ++k )
+	{
+		const ivec2 o4 = ivec2( k & 1, k >> 1 );
+		const ivec2 tc = clamp( base + o4, ivec2( 0 ), prevRes - 1 );
+		const float w = ( o4.x == 1 ? f.x : 1.0 - f.x ) * ( o4.y == 1 ? f.y : 1.0 - f.y );
+		if( w <= 0.0 )
+			continue;
+		const float wasRaw = texelFetch( ssrPrevDepth, tc, 0 ).x;
+		if( !( wasRaw > 0.0 && wasRaw < 1.0 ) || abs( viewDistance( wasRaw ) - pz ) > tol )
+			continue;
+		const vec3 c = texelFetch( ssrPrevColour, tc, 0 ).xyz;
+		if( !finite3( c ) )
+			continue;
+		sum += clamp( c, vec3( 0.0 ), vec3( kMaxRadiance ) ) * w;
+		wSame += w;
+	}
+	if( !( wSame > 0.0 ) )
+		return false;
+	radiance = jahSsrRefog( sum / wSame, e.camPos, world, hitPos );
+	travelled = tCross;
+	return finite3( radiance );
 }
 
 /// A cheap, well-distributed per-pixel-per-frame pair. PCG's mixing step; the
@@ -1048,15 +1210,9 @@ void main()
 		}
 	}
 
-	// THE RAY, from the origin above (lifted along the geometric normal by the float error and the drawn cut's error;
-	// tMin 0).
+	// ---- THE ONE ESTIMATOR (PHOTON-7 stage 6): the screen, the TLAS near ray, the far copies, the sky ----------------
 	const float maxT = p.knobs.y;
-	rayQueryEXT rq;
-	// NEAR COPIES ONLY (0x0F, Types.h kRayMaskNearField): a reflection traces the
-	// meshes' level 0, never the far field's coarse copies (A5b §4).
-	rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, L, maxT );
-	JAH_RQ_PROCEED( rq )
-
+	const EyeImage before = eyeBefore( eye );
 	vec3 traced = vec3( 0.0 );
 	bool ok = false;
 	// How far this frame's ray went: the hit's distance, or — for a ray that
@@ -1070,68 +1226,125 @@ void main()
 	// temporal mean below with that radiance. There is no hand-back to the
 	// probe: a hit is always shaded (a card, a voxel, or the decode).
 	bool record = false;
+	bool recFar = false;      // the hit is a FAR copy's (each mesh's coarsest level: no card, no near row)
+	bool slotHit = false;     // a TLAS triangle answered: recSlot / recPrim / recGeom / recBary name it
 	uint recSlot = 0u, recPrim = 0u, recGeom = 0u;
 	vec2 recBary = vec2( 0.0 );
 	vec3 recN = -L;
-	uint photonSource = 0u;   // 1 card, 2 voxels (jahHitRadianceSourced); 3 the sky
-	if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
-		gl_RayQueryCommittedIntersectionTriangleEXT )
+	uint photonSource = 0u;   // 1 card, 2 voxels (jahHitRadianceSourced); 3 the sky; 4 the screen
+	// (1) THE SCREEN TRACE, where the chain runs one: the answer with the probability the screen vouches for it. Its
+	// coin is the sample's own - a fresh draw a frame for a stochastic lobe (the temporal mean averages the mixture),
+	// a FIXED one-half for the lobe's centre ray (the mirror takes each frame's sample whole: a per-frame coin would
+	// show raw).
+	bool screenHit = false, screenMoving = false;
+	vec3 screenWas = world, screenPos = world;
+	if( p.screen.x > 0.5 )
 	{
-		const float t = rayQueryGetIntersectionTEXT( rq, true );
-		hitT = t;
-		const uint hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
-		const uint hitPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
-		vec3 hitN;
-		const uint hitGeom = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
-		const mat4x3 hitToWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
-		const bool hitNormalKnown = jahHitGeometricNormal( hitSlot, hitGeom, hitPrim, hitToWorld, L, hitN );
-		// THE HIT, for its direct light at the hit (FAR-SUN-2, jah_rq_hit_direct.glsl).
-		jahHitSurf = JahHitSurface( hitSlot, hitGeom, hitPrim, rayQueryGetIntersectionBarycentricsEXT( rq, true ),
-									hitToWorld, t, false, hitNormalKnown );
-		// ONE RULE FOR EVERY HIT (BUGS-1 item 2): the card, else the store with the direct
-		// light at the hit (jahHitRadianceSourced) — a metal's card holds its lobe since
-		// PHOTON-1 stage 3, so a metal is no exception. Only a SHARP reflector's metal hit
-		// is decoded (REFLECT-FIX-1): it shows the metal's own reflection (its specular
-		// lobe, the pass' second-bounce cone), which no cache holds.
-		const bool metalHit = jahHitIsMetal( hitSlot );
-		const bool decodeAlways = jahHitAlwaysDecodes( hitSlot ) || ( metalHit && sqrt( lobeAlpha ) < p.metal.x );
-		// The mover gate's rotation: this pixel, this frame (hashed into the set's turn).
-		// ...per texel only under the mirror cut (PHOTON-2 1c, above).
-		jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^
-					 ( fixedEstimator ? 0u : uint( p.knobs.z ) * 2654435761u );
-		if( !decodeAlways )
-			traced = jahHitRadianceSourced( hitSlot, origin + L * t, hitN, L,
-											reflectFootprint( lobeAlpha, t ), fixedEstimator,
-											true, ok, photonSource );
-		record = decodeAlways || !ok || !finite3( traced );
-		// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1, the one law jah_fog_along.glsl):
-		// the hit's light crossed the leg from the hit to the REFLECTING SURFACE — not
-		// to the ray's biased origin (`bias` along the normal, a metre at the shipped
-		// knob: measured as a metre of fog missing from every reflection) — and the
-		// colour pass fogs the eye's leg, which the height fog's start already spent.
-		// A record is fogged at its write-back, which has the decoded radiance
-		// (rq_hit_composite.comp; the record carries the same three numbers).
-		if( !record )
-			traced = jahFogAlong( traced, world.y, L, length( origin + L * t - world ),
-								  length( world - thisEye.camPos ) );
-		recSlot = hitSlot;
-		recPrim = hitPrim;
-		recGeom = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
-		recBary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
-		recN = hitN;
+		const float coin = fixedEstimator
+			? 0.5
+			: float( pcg( uint( seedPix.x ) * 7919u + uint( seedPix.y ) * 104729u + uint( p.knobs.z ) * 15485863u +
+						  0x9E3779B9u ) & 0xFFFFFFu ) * ( 1.0 / 16777216.0 );
+		float screenT;
+		screenHit = screenAnswer( thisEye, before, world, L, V, px, fullRes, coin, traced, screenT, screenPos,
+								  screenMoving, screenWas );
+		if( screenHit )
+		{
+			ok = true;
+			hitT = screenT;
+			photonSource = 4u;
+		}
 	}
-	else
+	// THE SCREEN ALONE (PostFxDesc::reflectSources Screen): a sample the screen does not answer is NO SAMPLE - no ray
+	// follows it (biased by construction: the measuring arm the agreement row reads Both against Rays beside).
+	const bool noSample = !screenHit && p.screen.y > 0.5;
+	if( !screenHit && !noSample )
 	{
-		traced = jahFogAlongSky( skyRadiance( L, lobeAlpha, fixedEstimator ), world.y, L, length( world - thisEye.camPos ) );   // route C: the escape
-		ok = true;
-		photonSource = 3u;
+		// (2) THE TLAS NEAR RAY from the origin above (lifted along the geometric normal by the float error and the
+		// drawn cut's error; tMin 0) - NEAR COPIES ONLY (0x0F, Types.h kRayMaskNearField): the meshes' level 0.
+		rayQueryEXT rq;
+		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, L, maxT );
+		JAH_RQ_PROCEED( rq )
+		float t = 0.0;
+		vec3 hitN = -L;
+		bool hitNormalKnown = false;
+		mat4x3 hitToWorld = mat4x3( 1.0 );
+		if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+		{
+			slotHit = true;
+			t = rayQueryGetIntersectionTEXT( rq, true );
+			recSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+			recPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
+			recGeom = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
+			recBary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
+			hitToWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
+			hitNormalKnown = jahHitGeometricNormal( recSlot, recGeom, recPrim, hitToWorld, L, hitN );
+		}
+		else if( p.screen2.w > maxT )
+		{
+			// (3) THE FAR COPIES for an escape (kRayMaskFar, each mesh's coarsest level), from the near length less
+			// the widest coarse-vs-fine hand-over gap to the far plane - the gather's continuation (rq_probe_gather.comp):
+			// a coarse surface just inside the near length whose fine one lies just outside is not passed by both
+			// queries, and a coarse hit in that overlap is honest (the near query proved no fine surface lies there).
+			// A far hit names no near row and no card: the cascades answer it, else the decode.
+			rayQueryEXT rqFar;
+			rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, p.screen2.z, L,
+								   p.screen2.w );
+			JAH_RQ_PROCEED( rqFar )
+			if( rayQueryGetIntersectionTypeEXT( rqFar, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+			{
+				slotHit = true;
+				recFar = true;
+				t = rayQueryGetIntersectionTEXT( rqFar, true );
+				recSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rqFar, true ) );
+				recPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rqFar, true ) );
+				recBary = rayQueryGetIntersectionBarycentricsEXT( rqFar, true );
+			}
+		}
+		if( slotHit )
+		{
+			hitT = t;
+			// THE HIT, for its direct light at the hit (FAR-SUN-2, jah_rq_hit_direct.glsl).
+			jahHitSurf = JahHitSurface( recSlot, recGeom, recPrim, recBary, hitToWorld, t, recFar,
+										!recFar && hitNormalKnown );
+			// ONE RULE FOR EVERY HIT (BUGS-1 item 2): the card, else the store with the direct
+			// light at the hit (jahHitRadianceSourced) — a metal's card holds its lobe since
+			// PHOTON-1 stage 3, so a metal is no exception. Only a SHARP reflector's metal hit
+			// is decoded (REFLECT-FIX-1): it shows the metal's own reflection (its specular
+			// lobe, the pass' second-bounce cone), which no cache holds.
+			const bool metalHit = jahHitIsMetal( recSlot );
+			const bool decodeAlways = jahHitAlwaysDecodes( recSlot ) || ( metalHit && sqrt( lobeAlpha ) < p.metal.x );
+			// The mover gate's rotation: this pixel, this frame (hashed into the set's turn).
+			// ...per texel only under the mirror cut (PHOTON-2 1c, above).
+			jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^
+						 ( fixedEstimator ? 0u : uint( p.knobs.z ) * 2654435761u );
+			if( !decodeAlways )
+				traced = jahHitRadianceSourced( recFar ? 0xFFFFFFFFu : recSlot, origin + L * t, hitN, L,
+												reflectFootprint( lobeAlpha, t ), fixedEstimator,
+												true, ok, photonSource );
+			record = decodeAlways || !ok || !finite3( traced );
+			// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1, the one law jah_fog_along.glsl):
+			// the hit's light crossed the leg from the hit to the REFLECTING SURFACE — not
+			// to the ray's lifted origin — and the colour pass fogs the eye's leg, which the
+			// height fog's start already spent. A record is fogged at its write-back, which has
+			// the decoded radiance (rq_hit_composite.comp; the record carries the same three numbers).
+			if( !record )
+				traced = jahFogAlong( traced, world.y, L, length( origin + L * t - world ),
+									  length( world - thisEye.camPos ) );
+			recN = hitN;
+		}
+		else
+		{
+			// (4) THE SKY: nothing near, nothing far.
+			traced = jahFogAlongSky( skyRadiance( L, lobeAlpha, fixedEstimator ), world.y, L, length( world - thisEye.camPos ) );
+			ok = true;
+			photonSource = 3u;
+		}
 	}
 	// THE REPROJECTED HISTORY, read once the ray is known (REFLECT-MOVERS-1: a
 	// ray that hit a MOVING slot finds its history through the reflected image,
 	// below). The temporal mean is computed from it whether this frame's radiance
 	// comes from the caches (now) or from the hit decode (rq_hit_composite.comp,
 	// after the decode pass — PHOTON-HIT-SHADE-1).
-	const EyeImage before = eyeBefore( eye );
 	float warmHeld;
 	float wasHitT;
 	float wasMoverAge;
@@ -1152,7 +1365,15 @@ void main()
 	bool hitMover = false;   // a mover-flagged slot, moving or parked (the age's input)
 	bool virtualHeld = false;   // the history was found through the reflected image
 	vec3 prevHit = origin + L * hitT;   // an escape: a point beyond every hit
-	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+	if( screenHit && screenMoving && p.motion.w > 0.5 )
+	{
+		// A SCREEN HIT ON A MOVING SLOT (the object motion at the hit's pixel): the hit moved by its step from where it
+		// was (the step the moving-hit rules below read off prevHit).
+		hitMover = true;
+		hitMoving = true;
+		prevHit += screenWas - screenPos;
+	}
+	if( slotHit && !recFar )
 	{
 		// a POSED item is a mover of the reflection's (its limbs move under a still node)
 		hitMover = p.motion.w > 0.5 &&
@@ -1325,9 +1546,10 @@ void main()
 	// view holds once a rest frame counted none (OgreRayQuery.cpp).
 	if( atRest && JAH_HIT_ON )
 		atomicAdd( jahHitBuf[2], 1u );
-	if( !record && !finite3( traced ) )
+	if( noSample || ( !record && !finite3( traced ) ) )
 	{
-		// A NON-FINITE ESCAPE IS NOT EVIDENCE ABOUT THIS PIXEL: the history is
+		// A NON-FINITE ESCAPE IS NOT EVIDENCE ABOUT THIS PIXEL - nor is a sample the screen alone left unanswered
+		// (noSample): the history is
 		// carried through unchanged, and a texel that has never had an answer
 		// (no carried count) writes a zero distance so the filter skips it this frame.
 		// (At rest from k = 2 the answer so far stays where it is, in place.)
@@ -1488,7 +1710,8 @@ void main()
 		imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, 0.0 ) );
 	imageStore( reflectSample, ivec3( tc, gEye ), vec4( traced, 1.0 ) );
 	imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
-	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel : kPhotonSky );
+	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel :
+				   photonSource == 4u ? kPhotonScreen : kPhotonSky );
 
 	// THE TEMPORAL MEAN IS THE NEXT PASS' (PHOTON-2 1b): rq_reflect_temporal.comp
 	// clamps the carried history to this frame's samples and blends; the filter

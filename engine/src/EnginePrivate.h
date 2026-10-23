@@ -360,10 +360,6 @@ public:
     /// piece (a pass with no `hlms_screen_pos_int` has no `iFragCoord`, one
     /// with no `needs_env_brdf` has no `envColourD`), which loses the frame.
     void passPosExecute(Ogre::CompositorPass *pass) override;
-    /// THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1): in front of the SSR
-    /// resolve (kSsrResolvePassIdentifier), BEFORE the pass analyses its barriers,
-    /// so the velocity the job writes as a UAV is transitioned to the resolve's read.
-    void passEarlyPreExecute(Ogre::CompositorPass *pass) override;
     /// THE OPAQUE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) shades with the prepass
     /// too, in front of the opaque pass: the ray jobs finish in front of IT, and its
     /// pass-scoped registrations stand until the opaque pass is over — one window
@@ -1181,10 +1177,6 @@ constexpr Ogre::uint32 kHitDecodePassIdentifier = 25002u;
 /// them; the ray tier's finishes its jobs in front of the first one that shades with
 /// the prepass. Stamped on exactly those passes.
 constexpr Ogre::uint32 kScreenDecodePassIdentifier = 25003u;
-/// THE SCREEN MARCH'S RESOLVE (REFLECT-MOVERS-1): the ray tier writes the object
-/// motion the resolve reads (`jahSsrVelocity`, rq_motion.comp) in this pass' early
-/// pre-execute. Stamped on exactly that pass.
-constexpr Ogre::uint32 kSsrResolvePassIdentifier = 25004u;
 /// THE HIT LIST (PHOTON-7 stage 0, the clean form of PHOTON-2's demand-sized list; ChainDesc::hitDecode,
 /// OgreView::sizeHitList). Its records are a LIST, not a picture: kHitListWidth records a row (a layout choice, fixed).
 /// It is CREATED at kHitListCreateShare x W x H x the eyes records (the old fixed list's capacity for the target, which
@@ -1295,13 +1287,10 @@ struct ChainDesc {
     bool  displayEncode = false;
     int   smaaPreset = -1;          ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
-    /// Does the screen-space MARCH contribute (PostFxDesc::ssrScreenMarch)?
-    /// False leaves the `ssr` row meaning the reflection's RESOLUTION alone and
-    /// the rays its only source — the shape a STEREO chain is forced into, and
-    /// the shape a mono control of one eye must be asked for to be comparable.
-    /// A GRAPH change: the march's two textures and three quad passes are not
-    /// built at all, and `jahSsrReflection` is CLEARED instead of resolved into.
-    bool  ssrScreenMarch = true;
+    /// WHERE THE REFLECTION'S ANSWER COMES FROM (PostFxDesc::reflectSources): Both, Rays or Screen. A GRAPH field:
+    /// rasterMarch() and screenSources() below read it (with the stereo shape and the rays) for which passes and
+    /// textures exist.
+    ReflectSources reflectSources = ReflectSources::Both;
     float ssrMaxDistance = 25.0f;   ///< ray length, world units
     int   ssrSteps = 0;             ///< 0 = the row's 48/96 (PostFxDesc::ssrSteps)
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
@@ -1544,6 +1533,14 @@ struct ChainDesc {
     /// rays, the gather, the sun contact)? `build` builds it on this answer and
     /// `sameShape` compares it in place of the rows that ask for it.
     bool prepass() const;
+    /// THE SCREEN SOURCES (PHOTON-7 stage 6): does the chain carry this view's previous picture, the depth it was drawn
+    /// at, the editor helpers' mask and the object motion - the screen trace's inputs (the one estimator on a ray chain,
+    /// rq_reflect.comp) and the raster march's? The SSR stage, reflectSources Both or Screen, never STEREO (the copies
+    /// are not per layer). `build` declares them on this answer and the ray tier binds them on it.
+    bool screenSources() const;
+    /// THE RASTER MARCH (the no-ray chain's screen-space reflection: JahSsrRayMarch + JahSsrResolve): the screen
+    /// sources on a chain that traces NO rays. A ray chain answers its screen hits in the trace itself.
+    bool rasterMarch() const;
     /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
     /// are uniforms — changing one must never rebuild a workspace.
     static bool sameShape(const ChainDesc &a, const ChainDesc &b);

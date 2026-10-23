@@ -202,6 +202,7 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_hit.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geometric_normal.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_ssr_march.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_voxel_sample.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_environment.glsl"
@@ -871,6 +872,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_height_fog.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_fog_along.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_ssr_march.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
 set(JAH_WRAP_HLMS_PIECE "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake")
@@ -984,6 +986,13 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DRAW=1
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahRqFinite.glsl
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE SCREEN TRACE'S CORE (PHOTON-7 stage 6, the one estimator): the march along a reflected ray through the depth
+    # buffer and its fades, pure functions - the ray tier's trace includes the file through glslang, the no-ray chain's
+    # raster march and its resolve (the fog law on a screen hit) include this raw copy.
+    COMMAND ${CMAKE_COMMAND} -DRAW=1
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahSsrMarch.glsl
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_ssr_march.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # A CARD READ FROM A DIRECTION (PHOTON-CARDS-5): the relight writes the mean
     # light direction the ray jobs' card read restores the lobe's view term with.

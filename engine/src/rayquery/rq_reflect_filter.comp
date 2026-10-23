@@ -31,9 +31,9 @@
 //   * THE NORMAL. Two texels of the same wall at different orientations reflect
 //     different directions. The weight is a power of the cosine between them.
 //
-// AND IT ALSO DOES THE COMPOSITE, for one reason: the composite has to read the
-// FILTERED mean, and a third dispatch to move one value would cost another
-// full-resolution read of everything the composite already has in registers.
+// AND IT ALSO DOES THE WRITE into `jahSsrReflection`, the texture HlmsPbs reads:
+// the FILTERED mean with its gate (PHOTON-7 stage 6: the mean is the one
+// estimator's, so there is nothing to composite it with).
 //
 // SAME DESCRIPTOR SET as rq_reflect.comp — the same layout, the same bound set,
 // the same Params — so the second pipeline costs a module and a bind, not a
@@ -569,9 +569,10 @@ void main()
 
 	// ---- THE WRITE, per full-resolution texel of this block ------------------
 	// Every texel decides for ITSELF whether the ray answers for it: its own
-	// roughness, its own screen confidence, its own depth. A half-resolution
-	// trace must not hand its neighbours' pixels an answer their own march
-	// already had, and must not paint a ray over the sky.
+	// roughness, its own depth. A half-resolution trace must not paint a ray over
+	// the sky. THE MEAN IS THE ONE ESTIMATOR'S (PHOTON-7 stage 6): the screen
+	// trace answered inside the trace, so there is no second image here to
+	// composite with, and no pixel another pass owns.
 	for( int dy = 0; dy < scale.y; ++dy )
 	{
 		for( int dx = 0; dx < scale.x; ++dx )
@@ -589,10 +590,6 @@ void main()
 										1e-6 ) );
 			if( fr > roughGate + feather )
 				continue;
-			const vec4 screen = imageLoad( ssrReflection, ivec3( fc, gEye ));
-			const float screenW = clamp( screen.w, 0.0, 1.0 );
-			if( screenW >= 1.0 )
-				continue;				// the march owns this pixel outright
 			// THE FEATHER (owner, ledger §426). Full confidence up to
 			// `cutoff - feather`, none at `cutoff + feather`, smooth between —
 			// and what the ray gives up the probe takes through the SAME
@@ -623,8 +620,7 @@ void main()
 			gate *= warm;
 			if( gate <= 0.0 )
 				continue;
-			const vec3 rgb = mix( mean, screen.xyz, screenW );
-			imageStore( ssrReflection, ivec3( fc, gEye ), vec4( rgb, mix( screenW, 1.0, gate ) ) );
+			imageStore( ssrReflection, ivec3( fc, gEye ), vec4( mean, gate ) );
 		}
 	}
 }

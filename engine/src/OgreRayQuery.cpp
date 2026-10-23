@@ -261,7 +261,7 @@ constexpr unsigned kReflectRestMovers = 16u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 47u;
+constexpr unsigned kReflectBindings = 50u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -321,8 +321,11 @@ constexpr unsigned kReflectSampleBinding = kReflectCloudBinding + 1u;
 /// each texel's raw rest samples, 1 x 1 unless the arm is on.
 constexpr unsigned kReflectReferenceBinding = kReflectSampleBinding + 1u;
 // (THE REST'S SECOND MOMENT rides the rest half's alpha since PHOTON-7 stage 6 - its R16F image is deleted.)
-static_assert(kReflectBindings == kReflectReferenceBinding + 1u,
-              "the rest's reference is the reflection set's last binding");
+/// ...and THE SCREEN TRACE'S PICTURE (47-49, PHOTON-7 stage 6, the one estimator): the chain's previous picture, the
+/// depth it was drawn at and the object motion (rq_reflect.comp's screenAnswer), or 1 x 1 stand-ins with `screen.x` 0.
+constexpr unsigned kReflectScreenBinding = kReflectReferenceBinding + 1u;   // then 48 the depth, 49 the motion
+static_assert(kReflectBindings == kReflectScreenBinding + 3u,
+              "the screen trace's three are the reflection set's last bindings");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's STATE texel (an unshaded record's distance is
 /// withheld there), the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the ray's direction) and the
@@ -969,10 +972,11 @@ public:
     /// the composite, in front of the opaque pass — after the hit write-back has
     /// completed the temporal mean of every texel whose ray the decode shaded.
     void finishReflect(const ReflectPassListener *key);
-    /// THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1): writes `jahSsrVelocity`
+    /// THE SCREEN SOURCES' OBJECT MOTION (REFLECT-MOVERS-1): writes `jahSsrVelocity`
     /// at every pixel of a slot that moved this frame (rq_motion.comp), in front of
-    /// the resolve that reads it. Does nothing — the chain's clear stands, the
-    /// camera path — when the chain carries no id pass or the switch is off.
+    /// the trace whose screen hits read it (traceRayJobs, PHOTON-7 stage 6). Does
+    /// nothing — the chain's clear stands, the camera path — when the chain carries
+    /// no id pass or the switch is off.
     void recordMotion(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
     /// Frees a view's reflection resources. Called from ~ReflectPassListener.
     void forgetReflect(const ReflectPassListener *key);
@@ -995,8 +999,8 @@ private:
     };
 
     struct ReflectView {
-        /// THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1, rq_motion.comp): its
-        /// own ring of sets and parameter buffers, recorded in front of the resolve.
+        /// THE SCREEN SOURCES' OBJECT MOTION (REFLECT-MOVERS-1, rq_motion.comp): its
+        /// own ring of sets and parameter buffers, recorded in front of the trace.
         VkDescriptorSet motionSets[3] = {};
         RawBuffer       motionParams[3];
         /// The per-slot geometry rows the POSED motion job reads (SKINNED-VELOCITY-1),
@@ -5191,6 +5195,11 @@ struct ReflectParams {
     /// [2i + 1] max, its world bounds this frame joined with last frame's.
     float restMovers[4] = {};
     float restMoverBox[2 * kReflectRestMovers][4] = {};
+    /// THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6; rq_reflect.comp's screen, screen2): [0] = 1 the screen trace runs,
+    /// [1] = 1 the screen alone (reflectSources Screen), [2] its steps, [3] its phase rule; screen2: the march's length
+    /// and thickness, the far copies' query from / to (0 = none).
+    float screen[4] = {};
+    float screen2[4] = {};
 };
 
 
@@ -5323,6 +5332,9 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 44 the cloud field (FAR-SUN-2)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 45 this frame's raw sample (PHOTON-2 1b)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 46 the rest's reference (PHOTON-2 round 2, R1 (f))
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 47 the previous picture (PHOTON-7 stage 6)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 48 ...the depth it was drawn at
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 49 ...the object motion
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -5650,12 +5662,12 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             mReflectFailed = true;
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka: ray-traced reflections off — " + err +
-                " (the screen-space march alone renders this frame)");
+                " (the probe and the sky answer the reflection this frame)");
             return;
         }
         Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka: ray-traced reflections ON (PHOTON R5) — the screen-space march keeps "
-            "what it can see, rays answer the rest");
+            "Jahshaka: ray-traced reflections ON (PHOTON R5) — one estimator: the screen trace "
+            "answers what it can vouch for, rays answer the rest");
     }
 
     // THE CHAIN'S TEXTURES, by the names OgreChain.cpp declares them under. A
@@ -5699,6 +5711,25 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             idDepthTex->getHeight() != idTex->getHeight())
             idTex = idDepthTex = nullptr;
     }
+    // THE SCREEN TRACE'S PICTURE (PHOTON-7 stage 6, the one estimator's first source): this view's previous picture,
+    // the depth it was drawn at and the object motion — declared only where the chain carries its SCREEN SOURCES
+    // (ChainDesc::screenSources: reflectSources Both or Screen, a mono view), and asked only of such a chain (Ogre logs
+    // every getDefinedTexture miss). All three present and the picture the view's size, or the screen trace is off this
+    // frame and the rays answer alone.
+    const ChainDesc chainD = view->chainDesc();
+    Ogre::TextureGpu *prevColourTex = nullptr, *prevDepthTex = nullptr, *velocityTex = nullptr;
+    if (chainD.screenSources() && !view->stereo()) {
+        try {
+            prevColourTex = node->getDefinedTexture(Ogre::IdString("jahSsrPrev"));
+            prevDepthTex = node->getDefinedTexture(Ogre::IdString("jahSsrPrevDepth"));
+            velocityTex = node->getDefinedTexture(Ogre::IdString("jahSsrVelocity"));
+        } catch (Ogre::Exception &) { prevColourTex = prevDepthTex = velocityTex = nullptr; }
+        if (!prevColourTex || !prevDepthTex || !velocityTex || prevColourTex->getWidth() != ssrTex->getWidth() ||
+            prevColourTex->getHeight() != ssrTex->getHeight() || prevDepthTex->getWidth() != ssrTex->getWidth() ||
+            prevDepthTex->getHeight() != ssrTex->getHeight())
+            prevColourTex = prevDepthTex = velocityTex = nullptr;
+    }
+    const bool screenTrace = prevColourTex != nullptr;
     // THE UAV FLAG IS THE CONTRACT (OgreChain.cpp, ChainDesc::rayReflect). A
     // texture declared without it has no storage-image usage and the view
     // creation below would be a validation error, so a chain built while the
@@ -5963,6 +5994,22 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                          cam->getFarClipDistance());
     pp.knobs[2] = float(rv.frame & 0xFFFFu);
     pp.knobs[3] = float(voxCount);
+    // THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6): the screen trace (its march: the chain's length, thickness, steps
+    // and phase rule - the raster march's own numbers, PostFxDesc::ssr*), the screen alone, and the FAR COPIES' query
+    // for an escape (from the near length less the far copies' widest hand-over gap to the far plane: the gather's
+    // continuation, OgreScreenProbeGather.cpp).
+    pp.screen[0] = screenTrace ? 1.0f : 0.0f;
+    pp.screen[1] = screenTrace && chainD.reflectSources == ReflectSources::Screen ? 1.0f : 0.0f;
+    pp.screen[2] = chainD.ssrSteps > 0 ? float(std::min(std::max(chainD.ssrSteps, 8), 128))
+                                       : (chainD.ssr >= 2 ? 96.0f : 48.0f);
+    pp.screen[3] = float(chainD.ssrMarchPhase);
+    pp.screen2[0] = chainD.ssrMaxDistance;
+    pp.screen2[1] = chainD.ssrThickness;
+    {
+        const float farPlane = cam->getFarClipDistance() > 0.0f ? float(cam->getFarClipDistance()) : 1000.0f;
+        pp.screen2[2] = std::max(0.001f, pp.knobs[1] - std::max(0.0f, sa.farOverlap));
+        pp.screen2[3] = farPlane > pp.knobs[1] ? farPlane : 0.0f;
+    }
     // THE RAY ORIGIN'S DRAWN-CUT TERM (PHOTON-7 stage 6, AB E15): the view's pixel tolerance (the World Mode's
     // atomPixelError, Scene::pixelTolerance) x the LOD bias - what the id pass's cut and the stock thresholds both
     // take - in FULL-RESOLUTION pixel footprints per unit of view distance (rayDown spans the target's height with a
@@ -6538,6 +6585,20 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!referenceImg.imageView) { bail("the reference view is null"); return; }
     w[kReflectReferenceBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectReferenceBinding].pImageInfo = &referenceImg;
+    // THE SCREEN TRACE'S PICTURE (47-49, PHOTON-7 stage 6): the chain's three, point-sampled (the trace reads them by
+    // texel), or the flat stand-in with `screen.x` 0.
+    VkDescriptorImageInfo screenImgs[3] = {};
+    {
+        Ogre::TextureGpu *const src[3] = { prevColourTex, prevDepthTex, velocityTex };
+        for (int i = 0; i < 3; ++i) {
+            screenImgs[i].sampler = mPointSampler;
+            screenImgs[i].imageView = screenTrace ? sampledView(src[i]) : mDummyFlat.view;
+            screenImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            if (!screenImgs[i].imageView) { bail("a screen-trace binding is null"); return; }
+            w[kReflectScreenBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[kReflectScreenBinding + i].pImageInfo = &screenImgs[i];
+        }
+    }
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -6578,6 +6639,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         if (idDepthTex)
             solver.resolveTransition(trans, idDepthTex, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
+        // THE SCREEN TRACE'S PICTURE: the copies the last frame wrote, the motion this frame's job wrote (a UAV) ahead.
+        if (screenTrace)
+            for (Ogre::TextureGpu *t : { prevColourTex, prevDepthTex, velocityTex })
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < voxCount; ++c)
             for (int axis = 0; axis < kRayVoxelKinds; ++axis)
                 if (vox[c][axis])
@@ -8591,14 +8657,6 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     mRayJobsFinished = def->mIdentifier == kScreenDecodePassIdentifier;
 }
 
-void ReflectPassListener::passEarlyPreExecute(Ogre::CompositorPass *pass) {
-    if (!pass || !mView || !mView->mEngine || !mView->mEngine->mRayTier) return;
-    if (pass->getType() != Ogre::PASS_QUAD) return;
-    if (mView->isCaptureWorkspace(pass->getParentNode()->getWorkspace())) return;   // no motion job twice
-    if (pass->getDefinition()->mIdentifier != kSsrResolvePassIdentifier) return;
-    mView->mEngine->mRayTier->recordMotion(this, mView, pass);
-}
-
 /// GATHER-0 (fix round, D2). The registration made in `passPreExecute` names
 /// this view's full-resolution irradiance texture and is read by every colour
 /// pass of the same SceneManager; it is valid for exactly ONE pass — the one
@@ -9125,6 +9183,14 @@ void RayQueryTier::traceRayJobs(const ReflectPassListener *key, OgreView *view, 
     } else {
         hitStandIns(hit);
         hv.live = false;
+    }
+    // THE OBJECT MOTION FIRST (REFLECT-MOVERS-1; moved here from the raster resolve's pass with PHOTON-7 stage 6's one
+    // estimator): `jahSsrVelocity` at every pixel of a slot that moved this frame, which the trace's screen hits read
+    // (rq_reflect.comp's screenAnswer) - on a ray chain whose screen sources exist (ChainDesc::screenSources: no
+    // capture workspace reaches here, so no job runs twice).
+    {
+        const ChainDesc cd = view->chainDesc();
+        if (cd.rayReflect && cd.screenSources() && cd.atomDraw && !view->stereo()) recordMotion(key, view, next);
     }
     // THE TRACES (their records are what the decode shades). The sun contact rides
     // the same pass: it reads the camera before the next pass re-aspects anything,
@@ -9965,7 +10031,6 @@ bool OgreEngine::cardReadParity(Scene *, const std::vector<CardReadQuery> &,
 ReflectPassListener::~ReflectPassListener() {}
 void ReflectPassListener::passPreExecute(Ogre::CompositorPass *) {}
 void ReflectPassListener::passPosExecute(Ogre::CompositorPass *) {}
-void ReflectPassListener::passEarlyPreExecute(Ogre::CompositorPass *) {}
 void OgreView::syncReflectListener() {
     // No tier on this platform: the chain is built with `rayReflect` false by
     // construction (the predicate above answers false), so there is nothing to

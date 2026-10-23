@@ -194,34 +194,10 @@ out vec4 fragColour;
 #include "JahHeightFog.glsl"
 #include "JahFogAlong.glsl"
 
-/// THE SCREEN HIT, RE-FOGGED (PHOTON-I-1: one fog law on every reflection path).
-/// The history holds the hit as the EYE saw it — the fog law along the eye's ray
-/// to the hit (upstream's distance block, then jahFogMedia) — and the reflection
-/// must carry it as the mirror's virtual eye sees it: the law along the ray from
-/// the reflecting surface to the hit, the height fog's start spent by the eye's
-/// leg (jahFogAlong). The eye's law is affine in the surface's radiance but for
-/// the breakthrough's luminance, so it is undone by its affine pair (the law at 0
-/// and at 1) and one correction step through the law itself; a channel the eye's
-/// medium all but hid (transmittance under 1e-3) carries what the screen holds.
-vec3 jahSsrRefog( vec3 screen, vec3 surface, vec3 hit )
-{
-	if( JAH_FOG_P( 3 ).w < 0.5 && JAH_FOG_P( 7 ).w < 0.5 )
-		return screen;
-	const vec3 toHit = hit - eyePos.xyz;
-	const float le = length( toHit );
-	const vec3 dirE = toHit / max( le, 1e-6 );
-	const vec3 s0 = jahFogAlong( vec3( 0.0 ), eyePos.y, dirE, le, 0.0 );
-	const vec3 t1 = jahFogAlong( vec3( 1.0 ), eyePos.y, dirE, le, 0.0 ) - s0;
-	const bvec3 seen = greaterThan( t1, vec3( 1e-3 ) );
-	vec3 c = mix( screen, ( screen - s0 ) / max( t1, vec3( 1e-3 ) ), vec3( seen ) );
-	c = max( c, vec3( 0.0 ) );
-	c = max( c + mix( vec3( 0.0 ), ( screen - jahFogAlong( c, eyePos.y, dirE, le, 0.0 ) ) /
-										  max( t1, vec3( 1e-3 ) ), vec3( seen ) ),
-			 vec3( 0.0 ) );
-	const vec3 leg = hit - surface;
-	const float l1 = length( leg );
-	return jahFogAlong( c, surface.y, leg / max( l1, 1e-6 ), l1, length( surface - eyePos.xyz ) );
-}
+/// THE SCREEN HIT, RE-FOGGED (PHOTON-I-1: one fog law on every reflection path): jahSsrRefog, the screen trace's own
+/// text (JahSsrMarch.glsl, staged from the ray tier's jah_ssr_march.glsl - the trace answers a screen hit with it too),
+/// from this view's eye.
+#include "JahSsrMarch.glsl"
 
 /// The shot's image point (u, v, depth) in world space.
 vec3 jahSsrWorldAt( vec2 shotUv, float depth )
@@ -811,7 +787,8 @@ void main()
 		const vec2 shotUv = ( inPs.uv0 - shotInset.xy ) / max( vec2( 1.0 ) - shotInset.zw, vec2( 1e-6 ) );
 		const ivec2 here = min( ivec2( inPs.uv0 * prevFrameRes.xy ), ivec2( prevFrameRes.xy ) - ivec2( 1 ) );
 		const float hereDepth = texelFetch( vkSampler2D( depthTexture, pointSampler ), here, 0 ).x;
-		reflected = jahSsrRefog( reflected, jahSsrWorldAt( shotUv, hereDepth ), jahSsrWorldAt( ray.xy, hitDepth ) );
+		reflected = jahSsrRefog( reflected, eyePos.xyz, jahSsrWorldAt( shotUv, hereDepth ),
+								 jahSsrWorldAt( ray.xy, hitDepth ) );
 	}
 	fragColour = vec4( reflected, weight * historyFade );
 }
