@@ -1359,6 +1359,8 @@ GiStatus PhotonComponent::giStatus() const {
                 cs.lightsInjected = int(c.lighting->getLastLightsInjected());
                 cs.lightCapacity = int(c.lighting->getLightCapacity());
                 cs.lightsOverBudget = int(c.lighting->getLastLightsOverBudget());
+                cs.lightsInRangeMax = int(c.lighting->getLightsInRangeMax());
+                cs.injectionsOverSlots = (unsigned long long)c.lighting->getInjectionsOverSlots();
             }
             st.cascades.push_back(cs);
         }

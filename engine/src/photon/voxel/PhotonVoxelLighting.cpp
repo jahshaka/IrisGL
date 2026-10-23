@@ -1537,6 +1537,9 @@ namespace Ogre
         mLastLightsInRange = mSelection.inRange;
         mLastLightsInjected = numCollectedLights;
         mLastLightsOverBudget = mSelection.overBudget;
+        mLightsInRangeMax = std::max( mLightsInRangeMax, mSelection.inRange );
+        if( mSelection.inRange > kLightSlots )
+            ++mInjectionsOverSlots;   // THE BOX OVER ITS LIGHT SLOTS (the read's F4): counted, never silent
         if( mSelection.overBudget && !mOverBudgetLogged )
         {
             mOverBudgetLogged = true;

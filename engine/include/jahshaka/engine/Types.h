@@ -4646,6 +4646,12 @@ struct GiStatus {
         int lightsInjected = 0;
         int lightCapacity = 0;
         int lightsOverBudget = 0;
+        /// THE BOX OVER ITS LIGHT SLOTS (PHOTON-7 stage 1's read F4), over the cascade's life: the most lights in range
+        /// of its box at any injection, and the injections whose box held more than its 128 slots - there a coarse
+        /// voxel (64^3: its budget IS the slots) takes the box's first 128 rather than its own first K, so the light
+        /// it holds depends on the box (L1 broken there). Measured on the three Bistros: at most 5 lights in a model.
+        int lightsInRangeMax = 0;
+        unsigned long long injectionsOverSlots = 0;
     };
     /// The live cascade chain, innermost first — the voxels of every Vct and
     /// VctPccHybrid scene. Empty while GI is off or the chain waits for a camera

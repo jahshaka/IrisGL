@@ -248,6 +248,12 @@ namespace Ogre
         uint32 mLastLightsInRange = 0u;
         uint32 mLastLightsInjected = 0u;
         uint32 mLastLightsOverBudget = 0u;
+        /// THE BOX OVER ITS LIGHT SLOTS (PHOTON-7 stage 1's read F4), over this lighting's life: the most lights in
+        /// range of its box at any injection, and the injections whose box held more than kLightSlots - where a coarse
+        /// voxel (its budget the slots: lightBudgetFor) takes the box's first 128 rather than its own first K (L1 broken
+        /// there).
+        uint32 mLightsInRangeMax = 0u;
+        uint64 mInjectionsOverSlots = 0u;
         uint32 mLightBudget = 16u;   ///< this cascade's budget (lightBudgetFor), set by update()
         bool   mOverBudgetLogged = false;
         ShaderParams::Param *mVoxelCellSize;
@@ -409,6 +415,8 @@ namespace Ogre
         uint32 getLastLightsInRange() const { return mLastLightsInRange; }
         uint32 getLastLightsInjected() const { return mLastLightsInjected; }
         uint32 getLastLightsOverBudget() const { return mLastLightsOverBudget; }
+        uint32 getLightsInRangeMax() const { return mLightsInRangeMax; }
+        uint64 getInjectionsOverSlots() const { return mInjectionsOverSlots; }
         uint32 getLightCapacity() const { return mLightBudget; }
 
         /**
