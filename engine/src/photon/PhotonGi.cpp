@@ -8578,14 +8578,30 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // WHOLE this frame (a new placement: every voxel new) every card's indirect. The rest of the indirect is the GPU's
     // accumulation (runFeedback: accumulateIndirect).
     view.frame = giWriterFrame();
+    // ...and THE LAMPS' SHADOWS (PHOTON-7 stage 5, 5-3: the cards' lamps are traced, so a caster that changed inside a
+    // lamp's range changed that lamp's light on the cards there): a LampShadow region (a casting mover's lamp, listMover)
+    // stales its sphere's box; an EDIT (a still thing moved, arrived, left or re-materialled) stales the sphere box of
+    // every lamp whose range reaches it, by the light list's own test.
     // THE LIST IS READ WHOLE (PHOTON-7 stage 5, 5-1 fix, measured in 5-3: the movers are listed after this plan - at
     // the shadow caches' dirties, OgreShadow.cpp listRayMovers - and the sun's and sky's jumps at the close, so a plan
     // that read only the open list never saw a late producer's region): the LAST CLOSED list, once (its late
     // producers), and this frame's open one so far (its early ones). A region in both is taken twice: a card staled
     // twice is relit once.
+    const SceneLightList *lampList = mSceneMgr ? &sceneLightListOf(mSceneMgr) : nullptr;
     const auto take = [&](GiRegionKind kind, const Ogre::Aabb &box) {
-        if (kind == GiRegionKind::Lamp) view.directBoxes.push_back(box);
+        if (kind == GiRegionKind::Lamp || kind == GiRegionKind::LampShadow) view.directBoxes.push_back(box);
         else if (kind == GiRegionKind::Slab) view.indirectBoxes.push_back(box);
+        else if (kind == GiRegionKind::Edit && lampList) {
+            SceneLightList::Consumer c;
+            c.boxMin = box.getMinimum();
+            c.boxMax = box.getMaximum();
+            for (Ogre::Light *l : lampList->byRank(mSceneMgr)) {
+                if (l->getType() == Ogre::Light::LT_DIRECTIONAL || !l->getParentNode()) continue;
+                if (!SceneLightList::reaches(l, c)) continue;
+                view.directBoxes.push_back(Ogre::Aabb(l->getParentNode()->_getDerivedPosition(),
+                                                      Ogre::Vector3(std::max(float(l->getAttenuationRange()), 0.0f))));
+            }
+        }
     };
     uint32_t overflow = mRegionOverflowOpen;
     std::vector<GiRegionKind> lateKinds;   // the closed list's kinds (the demand's reopeners read them too)

@@ -48,9 +48,13 @@
 // the first shadow-casting directional light — the prepass writes that one
 // term and nothing else; its casters are the still world) times the MOVERS'
 // term, traced by the ray tier into cardMoverVis for the cards a mover's
-// footprint reaches (PHOTON-CARDS-4). A point or spot light is UNSHADOWED here: its
-// visibility is the traced residue's, where rays exist (PHOTON P5). Area
-// lights are not summed (their LTC path is not transcribed). Stated, all three.
+// footprint reaches (PHOTON-CARDS-4). A point or spot light's is TRACED (PHOTON-7 stage
+// 5, 5-3): one finite ray per lamp per texel against every shadow caster, folded into
+// one byte - the SunVis layer's green, each lamp weighted by its share of the texel's
+// direct luminance (rq_card_movers.comp's lamps mode). Area lights ARE summed (PHOTON-7
+// stage 5, 5-3): the pixel's own LTC form factor (AreaLights_LTC's LTC_Evaluate with the
+// identity: BRDF_Default's area diffuse) over the light's rectangle, in JahBrdf's range
+// window, by the same traced lamp visibility (one ray toward its centre). Stated, all three.
 //
 // INDIRECT = THE PIXEL'S OWN DIFFUSE ENVIRONMENT TERM, from the texel. With GI
 // OFF it is the SH ambient at the texel's normal (the engine's SH x gain, the
@@ -153,15 +157,27 @@ struct CardRelight
 	vec4 axisU;
 	vec4 axisV;
 	vec4 axisD;
+	// THE CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3): the world ids of the lamps whose visibility the texels' lamp bits
+	// carry, bit j = lamp j (0 = no lamp)
+	uvec4 lampIds[4];
 };
 layout( std430, ogre_U0 ) readonly restrict buffer relightLayout { CardRelight relights[]; };
+/// The table slot of a lamp's world id, or -1: the lamp is past the table (its visibility the overflow's byte).
+int jahCardLampSlot( uvec4 ids[4], uint id )
+{
+	for( int k = 0; k < 16; ++k )
+		if( ids[k >> 2][k & 3] == id )
+			return k;
+	return -1;
+}
 
 // ONE LIGHT, in WORLD space, in the pass buffer's own layout (OgreHlmsPbs.cpp's
 // light0Buf writer): position.xyz = the position, or the direction TOWARDS a
-// directional light; position.w = the type (0 directional, 1 point, 2 spot);
+// directional light; position.w = the type (0 directional, 1 point, 2 spot, 3 AREA: PHOTON-7 stage 5, 5-3);
 // diffuse.xyz = colour times power; diffuse.w = 1 when its visibility is the
 // captured shadow term; attenuation = (range, linear, quadratic, 1 / range);
-// spotParams = (1 / (cos inner/2 - cos outer/2), cos outer/2, falloff).
+// spotParams = (1 / (cos inner/2 - cos outer/2), cos outer/2, falloff); points = an area light's rectangle (its
+// corners, the first's w its double-sidedness).
 struct CardLight
 {
 	vec4 position;
@@ -169,6 +185,7 @@ struct CardLight
 	vec4 attenuation;
 	vec4 spotDirection;
 	vec4 spotParams;
+	vec4 points[4];
 };
 layout( std430, ogre_U1 ) readonly restrict buffer lightLayout
 {
@@ -200,9 +217,10 @@ uniform restrict image2D cardNormal;
 layout( vulkan( ogre_u8 ) vk_comma @insertpiece( uav8_pf_type ) )
 uniform restrict writeonly image2D cardFlat;
 // THE SUN'S VISIBILITY AT THE TEXEL (PHOTON-3 stage 2): the still world's traced term times the movers' and
-// the cloud sheet's - what the read's specular lobe of the sun is weighted by.
+// the cloud sheet's - what the read's specular lobe of the sun is weighted by - in red; THE LAMPS' (PHOTON-7 stage 5,
+// 5-3) in green, blue and alpha: traced before this job (rq_card_movers.comp's lamps mode), read here, kept.
 layout( vulkan( ogre_u9 ) vk_comma @insertpiece( uav9_pf_type ) )
-uniform restrict writeonly image2D cardSunVis;
+uniform restrict image2D cardSunVis;
 
 // THE LOBE'S INTEGRALS (PhotonSpecularAlbedo.h's table, the store's own floats: the job's one
 // constant buffer, SurfaceCache's mSpecAlbedoBuffer).
@@ -335,6 +353,7 @@ vec3 jahCardRound( vec3 v )
 }
 
 @insertpiece( JahBrdf )
+@insertpiece( DeclAreaLtcLightFuncs )
 @insertpiece( JahDiffuseAlbedo )
 @insertpiece( JahSpecularAlbedo )
 @insertpiece( JahCardView )
@@ -366,6 +385,11 @@ void main()
 	vec3 cached = vec3( 0.0, 0.0, 0.0 );
 	vec3 flatTerm = vec3( 0.0, 0.0, 0.0 );
 	float sunVis = 0.0;
+	// THE LAMPS' TRACED VISIBILITY (PHOTON-7 stage 5, 5-3; rq_card_movers.comp's lamps mode), the SunVis layer's g,
+	// a and b: a 16-bit MASK (g the low byte, a the high), bit j the visibility of the card's lamp table's lamp j
+	// (exact per lamp), and the lamps past the table one visibility weighted by their shares of the texel's direct
+	// luminance (b) - kept as traced. Untraced (no structure yet): every lamp visible.
+	vec4 lampTex = vec4( 0.0, 1.0, 1.0, 1.0 );
 	float depth = texelFetch( cardDepth, at, 0 ).x;
 	if( depth > 0.0 )
 	{
@@ -401,6 +425,16 @@ void main()
 		// THE SUN'S TWO TERMS: the captured one (the still world) times the
 		// traced one (the movers), where the host traced this card.
 		float moverVis = r.camPos.w > 0.5 ? imageLoad( cardMoverVis, at ).x : 1.0;
+		// THE LAMPS' TERM (PHOTON-7 stage 5, 5-3): every point, spot and area light's direct times ITS OWN traced
+		// visibility - the bit of its slot in the card's lamp table (its world id, the light record's spotParams.w),
+		// the overflow's weighted byte for a lamp past the table - where the host traced this relight (axisD.w), else
+		// unshadowed.
+		if( r.axisD.w > 0.5 )
+		{
+			const vec4 was = imageLoad( cardSunVis, at );
+			lampTex = vec4( 0.0, was.yzw );
+		}
+		const uint lampMask = uint( lampTex.y * 255.0 + 0.5 ) | ( uint( lampTex.w * 255.0 + 0.5 ) << 8u );
 		vec3 direct = vec3( 0.0, 0.0, 0.0 );
 		// THE MEAN LIGHT DIRECTION (JahCardView): each light's direction weighted
 		// by its share of the direct half's luminance.
@@ -415,6 +449,27 @@ void main()
 			if( type < 0.5 )
 			{
 				L = l.position.xyz;
+			}
+			else if( type > 2.5 )
+			{
+				// AN AREA LIGHT (PHOTON-7 stage 5, 5-3): the pixel's DoAreaLtcLights diffuse at V = N - the LTC form
+				// factor with the identity matrix over its rectangle (a frame built from any direction off the normal:
+				// the identity's integral is rotation-free) - in JahBrdf's range window, by the traced lamp visibility.
+				L = l.position.xyz - P;
+				float d = length( L );
+				if( d > l.attenuation.x || d <= 0.0 )
+					continue;
+				L *= 1.0 / d;
+				const int slot = jahCardLampSlot( r.lampIds, floatBitsToUint( l.spotParams.w ) );
+				const float lampVis = slot >= 0 ? float( ( lampMask >> uint( slot ) ) & 1u ) : lampTex.z;
+				const vec3 frameV = abs( Ncone.y ) < 0.9 ? vec3( 0.0, 1.0, 0.0 ) : vec3( 1.0, 0.0, 0.0 );
+				const float ff = LTC_Evaluate( Ncone, frameV, P,
+											   buildFloat3x3( vec3( 1, 0, 0 ), vec3( 0, 1, 0 ), vec3( 0, 0, 1 ) ),
+											   l.points, l.points[0].w != 0.0 );
+				const vec3 share = l.diffuse.xyz * ( ff * jahLightWindow( d, l.attenuation.x ) * lampVis );
+				direct += share;
+				lightMean += L * dot( share, vec3( 0.2126, 0.7152, 0.0722 ) );
+				continue;
 			}
 			else
 			{
@@ -432,7 +487,14 @@ void main()
 					atten *= jahSpotAttenuation( spotCosAngle, l.spotParams.xyz );
 				}
 			}
-			float visibility = l.diffuse.w > 0.5 ? sr.x * moverVis : 1.0;
+			// (a point or a spot: the bit of its table slot)
+			float lampVis = 1.0;
+			if( type > 0.5 )
+			{
+				const int slot = jahCardLampSlot( r.lampIds, floatBitsToUint( l.spotParams.w ) );
+				lampVis = slot >= 0 ? float( ( lampMask >> uint( slot ) ) & 1u ) : lampTex.z;
+			}
+			float visibility = l.diffuse.w > 0.5 ? sr.x * moverVis : ( type < 0.5 ? 1.0 : lampVis );
 @property( jah_cloud_shadow )
 			// A DIRECTIONAL LIGHT CROSSES THE CLOUD SHEET (CLOUDS-2D-2): the
 			// pixel's own factor, at this texel's world point.
@@ -503,6 +565,6 @@ void main()
 	if( ( mode & 3u ) != 0u )
 		imageStore( cardIndirect, at, vec4( jahCardRound( cached ), 1.0 ) );
 	imageStore( cardFlat, at, vec4( jahCardRound( flatTerm ), 1.0 ) );
-	imageStore( cardSunVis, at, vec4( sunVis, 0.0, 0.0, 0.0 ) );
+	imageStore( cardSunVis, at, vec4( sunVis, lampTex.yzw ) );
 	imageStore( cardRadiance, at, vec4( jahCardRound( radiance ), 1.0 ) );
 }

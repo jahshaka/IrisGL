@@ -204,6 +204,12 @@ struct CardRec {
     /// took its atlas cell: a stamp older than that is the cell's previous card's.
     unsigned long long lastRead = 0ull;
     unsigned long long readBy[2] = { 0ull, 0ull };
+    /// THE CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3): the world ids (SceneLightList::documentId) of the lamps its last
+    /// relight shaded, up to 16 - in the scene's one world order, the 16 with the largest share of the card's direct
+    /// when more reach it - each texel's lamp bit j the traced visibility of lamp j (the SunVis layer's green and
+    /// alpha); carried in the card's GPU record so every reader maps its own lamps to the bits by id.
+    unsigned lampIds[16] = {};
+    unsigned lampCount = 0u;
     /// Under the measuring arm cards.demandCount: the hits that read its cell, cumulative (the cell's, a row's rate).
     unsigned long long hits = 0ull;
     unsigned long long lastUpdated = 0ull;
@@ -360,9 +366,15 @@ struct CardMoverTrace {
     /// `vis` = the R8 mover layer, `shadowRough` = the RG16 ShadowRough layer: both
     /// bound in either mode; `still` picks the one written (rq_card_movers.comp).
     Ogre::TextureGpu *depth = nullptr, *normal = nullptr, *vis = nullptr, *shadowRough = nullptr;
+    /// ...the relight's light list and the SunVis layer (RG8: the sun's in r, the lamps' in g), bound in every mode;
+    /// `lamps` (PHOTON-7 stage 5, 5-3) writes the lamps' traced visibility (the records' float 3 the lift, as the
+    /// still mode's).
+    Ogre::UavBufferPacked *lights = nullptr;
+    Ogre::TextureGpu *sunVis = nullptr;
     Ogre::Vector3 toSun;
     float range = 0.0f;
     bool still = false;
+    bool lamps = false;
 };
 struct CardMoverHooks {
     std::function<bool(CardMoverFrame &)> frame;
@@ -790,6 +802,16 @@ private:
     std::vector<int> mSlotCard;
     unsigned long long mIndirectReported = 0ull, mIndirectByRegion = 0ull, mIndirectOverflows = 0ull;
     bool ensureIndirectBuffers();
+    /// The relight's light list, made (empty) before a trace binds it (rq_card_movers.comp binds it in every mode).
+    Ogre::UavBufferPacked *ensureLightBuffer();
+    /// THE LAMPS' TRACE (PHOTON-7 stage 5, 5-3): its records (the relight's, the lift in float 3), and its counts.
+    std::vector<float> mLampCpu;
+    unsigned long long mLampTraces = 0ull;
+    unsigned mLampTracedLastFrame = 0u;
+    /// The most lamps that reached one relit card, and the largest share of a card's direct its table could not hold
+    /// (past its 16), since the cache was built.
+    unsigned mCardLampsMax = 0u;
+    float mLampOverflowShareMax = 0.0f;
     void harvestIndirectReports(unsigned long long frame);
     unsigned mLightBudget = 0u;
     unsigned mRelitLastFrame = 0u, mRelitTexelsLastFrame = 0u;

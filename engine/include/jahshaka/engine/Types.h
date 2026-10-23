@@ -3989,6 +3989,12 @@ struct CardSample {
     /// plus the specular lobe's re-emission - what the texel sends the same way to
     /// every direction; inside `radiance` too.
     float flat[3] = { 0, 0, 0 };
+    /// THE LAMPS' TRACED VISIBILITY AT THE TEXEL (PHOTON-7 stage 5, 5-3): bit j of `lampMask` = lamp j of the card's
+    /// table (`lampIds`, world ids: SceneLightList::documentId's 31 bits), `lampOverflowVis` the lamps past it.
+    unsigned lampMask = 0u;
+    float lampOverflowVis = 1.0f;
+    unsigned lampIds[16] = {};
+    unsigned lampCount = 0u;
     /// WHICH card and WHICH atlas texel answered (Scene::readCardAt; -1 from
     /// readCardTexel), and whether its radiance carries a marched indirect
     /// half — what gi.card_read_parity holds the ray job's own pick to.
@@ -4063,6 +4069,14 @@ struct CardCacheStatus {
     /// "cards.demandCount", the readers' hits ( the reflection's that found a card, that found none, the gather's
     /// found, none ).
     unsigned long long admitted = 0ull, evicted = 0ull, compactionMoves = 0ull;
+    /// THE LAMPS' TRACE (PHOTON-7 stage 5, 5-3): the relights whose cards were traced toward their lamps (cumulative)
+    /// and the cards traced the last frame.
+    unsigned long long lampTraces = 0ull;
+    unsigned lampTracedLastFrame = 0u;
+    /// ...the most lamps that reached one relit card (its table holds 16), and the largest share of a card's direct
+    /// past them (the lamps the table could not hold: their visibility one weighted byte), since the cache was built.
+    unsigned cardLampsMax = 0u;
+    float lampOverflowShareMax = 0.0f;
     unsigned long long demandHits[4] = { 0ull, 0ull, 0ull, 0ull };
     /// The queue: cards waiting for a capture, and the texel budget a frame
     /// spends on them.

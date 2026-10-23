@@ -4,8 +4,8 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 
-// THE SUN'S VISIBILITY ON THE CARDS: one ray per card texel towards the sun, in
-// two modes of one job (knobs.y).
+// THE SUN'S AND THE LAMPS' VISIBILITY ON THE CARDS: one ray per card texel towards the sun, in
+// two modes of one job (knobs.y), and one per lamp in a third.
 //
 // A card's sun visibility has two halves, both TRACED:
 //   * THE STILL WORLD's (ATOM-S3-CARDCAP, mode 1): every texel of a card just
@@ -20,6 +20,18 @@
 //     shadow-casting mover's sun-projected footprint reaches, against the movers
 //     alone (kRayMaskMoverCaster), into the cache's R8 mover-visibility layer.
 // The relight job (JahCardLight_cs.glsl) multiplies the two into the sun's term.
+//   * THE LAMPS' (PHOTON-7 stage 5, 5-3; mode 2): every texel of a card the relight is about to light, one FINITE ray
+//     per point or spot light of the relight's own list (binding 7, the light buffer the relight reads) that reaches
+//     the texel, from the lifted point toward the lamp and stopping short of it by its source radius and kLampEnd
+//     (a lamp's own bulb is not its shadow), against every shadow caster, still and moving (the voxel injection's
+//     lamp visibility is a voxel march of the same law, never bit-equal). Into the SunVis layer (r the sun's, kept):
+//     g and a = a 16-bit mask (g the low byte), bit j the visibility of lamp j of the CARD'S LAMP TABLE (its record's
+//     world ids: each light record carries its id in spotParams.w) - exact per lamp, whatever its colour, and the
+//     relight and the hit read's lobe find their lamps' bits by id; b = the lamps past the table, their visibilities
+//     weighted by their shares of the texel's direct luminance (the relight's diffuse shape, jahCardDiffuse) - the
+//     overflow's colour error bounded by its share. ONE BYTE FOR EVERY LAMP multiplied each lamp's light by the
+//     luminance mean - exact in luminance, wrong in colour: gi.leak_room's red lamp passed a wall at 98 % onto a face
+//     the green lamp lit, the green dimmed as much (measured, PHOTON-7 stage 5).
 //
 // The texel's world point and normal are the relight's own reconstruction
 // (JahCardLight_cs.glsl main: the capture camera's position, the ortho window
@@ -49,6 +61,8 @@ layout( set = 0, binding = 1 ) uniform Params
 /// A CUT-OUT CASTS ITS HOLES ON A CARD TOO (REFLECT-MOVERS-2, jah_rq_alpha.glsl).
 #define JAH_ALPHA_TABLE floatBitsToUint( p.knobs.zw )
 #include "jah_rq_alpha.glsl"
+// the lamps' falloff, cone and the relight's diffuse shape: the fork's own text (unwrapped at build)
+#include "jah_fork_brdf.glsl"
 
 // ONE CARD, the relight's record layout (CardRelight): rect = (atlasX, atlasY,
 // size, the still mode's lift in metres); camPos; axisU.xyz/axisV.xyz with the ortho window's width /
@@ -60,6 +74,7 @@ struct CardRec
 	vec4 axisU;
 	vec4 axisV;
 	vec4 axisD;
+	uvec4 lampIds[4];   // THE CARD'S LAMP TABLE (the lamps mode): bit j of the mask = lamp j's visibility
 };
 layout( std430, set = 0, binding = 2 ) readonly buffer Cards { CardRec cards[]; };
 
@@ -67,6 +82,37 @@ layout( set = 0, binding = 3 ) uniform sampler2D cardDepth;
 layout( set = 0, binding = 4 ) uniform sampler2D cardNormal;
 layout( r8, set = 0, binding = 5 ) uniform writeonly image2D moverVis;
 layout( rg16, set = 0, binding = 6 ) uniform image2D shadowRough;
+// THE LAMPS' MODE: the relight's light list (OgreSurfaceCache.cpp relightCards, JahCardLight_cs.glsl's layout: the
+// count, then nine vec4 a light - position (w the type: 0 directional, 1 point, 2 spot, 3 area), diffuse (w the sun's
+// flag), attenuation, spot direction, spot parameters, an area light's four corners) and the SunVis layer (r the
+// sun's, kept; g the lamps', written). An AREA light is one ray toward its rectangle's centre, weighted by its cosine
+// there in the range window (the relight's LTC form factor is not transcribed here: the weight only mixes lamps).
+struct CardLightRec
+{
+	vec4 position;
+	vec4 diffuse;
+	vec4 attenuation;
+	vec4 spotDirection;
+	vec4 spotParams;
+	vec4 points[4];   // an area light's rectangle (the relight's LTC form factor; unread here)
+};
+layout( std430, set = 0, binding = 7 ) readonly buffer Lamps
+{
+	uvec4 lampCount;
+	CardLightRec lamps[];
+};
+layout( rgba8, set = 0, binding = 8 ) uniform image2D sunVis;
+/// A lamp's ray stops this far short of its source (beyond its source radius): its own bulb is not its shadow.
+const float kLampEnd = 0.05;
+/// THE RELIGHT'S DIFFUSE SHAPE (JahCardLight_cs.glsl's jahCardDiffuse, the same text - BRDF_Default's diffuse at
+/// V = N, times NdotL): the weight a lamp's visibility takes in the byte is its share of the relight's own sum.
+float jahCardLampShape( vec3 N, vec3 L, float perceptualRoughness )
+{
+	float NdotL = clamp( dot( N, L ), 0.0, 1.0 );
+	vec3 H = normalize( L + N );
+	float VdotH = clamp( dot( N, H ), 0.0, 1.0 );
+	return NdotL * jahDisneyDiffuse( NdotL, 1.0, VdotH, perceptualRoughness );
+}
 
 void main()
 {
@@ -79,6 +125,82 @@ void main()
 
 	float vis = 1.0;
 	const float depth = texelFetch( cardDepth, at, 0 ).x;
+	if( p.knobs.y > 1.5 )
+	{
+		// THE LAMPS' MODE (the head of this file)
+		float wRest = 0.0, vRest = 0.0;
+		uint mask = 0xFFFFu;
+		if( depth > 0.0 )
+		{
+			const vec3 nV = texelFetch( cardNormal, at, 0 ).xyz * 2.0 - 1.0;
+			const vec3 N = normalize( r.axisU.xyz * nV.x + r.axisV.xyz * nV.y + r.axisD.xyz * nV.z );
+			// the relight's plane-snapped normal and roughness (JahCardLight_cs.glsl main), for its diffuse shape
+			const vec3 planeN = normalize( r.axisD.xyz );
+			const vec3 Ncone = dot( N, planeN ) > 0.99985 ? planeN : N;
+			const float alpha = imageLoad( shadowRough, at ).y / 1.001001 + 0.001;
+			const float roughness = sqrt( max( alpha, 0.0 ) );
+			const vec2 f = ( vec2( t ) + 0.5 ) / float( size );
+			const vec3 P = r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) +
+						   r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) - r.axisD.xyz * depth;
+			const vec3 origin = P + N * r.rect.w;
+			for( uint i = 0u; i < lampCount.x; ++i )
+			{
+				const CardLightRec l = lamps[i];
+				if( l.position.w < 0.5 )
+					continue;   // a directional light: the sun's modes
+				const vec3 toLamp = l.position.xyz - P;
+				const float d = length( toLamp );
+				if( d > l.attenuation.x || !( d > 0.0 ) )
+					continue;
+				const vec3 L = toLamp / d;
+				const bool area = l.position.w > 2.5;
+				float atten = area ? jahLightWindow( d, l.attenuation.x ) : jahLightAttenuation( d, l.attenuation );
+				if( !area && l.position.w > 1.5 )
+				{
+					const float spotCos = dot( -L, l.spotDirection.xyz );
+					if( spotCos < l.spotParams.y )
+						continue;
+					atten *= jahSpotAttenuation( spotCos, l.spotParams.xyz );
+				}
+				// its slot in the card's table, by its world id (-1: past the table, the overflow's)
+				int slot = -1;
+				const uint id = floatBitsToUint( l.spotParams.w );
+				for( int q = 0; q < 16 && slot < 0; ++q )
+					if( r.lampIds[q >> 2][q & 3] == id )
+						slot = q;
+				const float w = dot( l.diffuse.xyz, vec3( 0.2126, 0.7152, 0.0722 ) ) *
+								( area ? max( dot( Ncone, L ), 0.0 ) : jahCardLampShape( Ncone, L, roughness ) ) * atten;
+				if( !( w > 0.0 ) )
+					continue;   // lights nothing here: its bit stays set
+				float v = 1.0;
+				const vec3 toFromOrigin = l.position.xyz - origin;
+				const float reach = length( toFromOrigin ) - ( area ? 0.0 : max( l.attenuation.y, 0.0 ) ) - kLampEnd;
+				if( reach > 0.0 )
+				{
+					rayQueryEXT rq;
+					rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
+										   uint( p.knobs.x ), origin, 0.0, normalize( toFromOrigin ), reach );
+					JAH_RQ_PROCEED( rq )
+					if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+						v = 0.0;
+				}
+				if( slot >= 0 )
+				{
+					if( !( v > 0.5 ) )
+						mask &= ~( 1u << uint( slot ) );
+				}
+				else
+				{
+					wRest += w;
+					vRest += w * v;
+				}
+			}
+		}
+		const vec4 was = imageLoad( sunVis, at );
+		imageStore( sunVis, at, vec4( was.x, float( mask & 0xFFu ) / 255.0, wRest > 0.0 ? vRest / wRest : 1.0,
+									  float( mask >> 8u ) / 255.0 ) );
+		return;
+	}
 	if( depth > 0.0 )
 	{
 		const vec3 nV = texelFetch( cardNormal, at, 0 ).xyz * 2.0 - 1.0;

@@ -227,9 +227,11 @@ float jahHitIndirectGate = 1.0;
 /// INCLUDER defines it after this file (the ray jobs: jahSpecularAlbedoHemi through the hit table).
 void jahCardLobeHemi( float r, out float a, out float b );
 /// THE LIGHTS' SPECULAR LOBE AT A CARD TEXEL TOWARD V (PHOTON-3 stage 2): E mu vis f_s( L, V ) summed over
-/// the lights the relight shades, the sun weighted by the texel's stored visibility `sunVis`. The INCLUDER
-/// defines it (jah_rq_card_lights.glsl, from the ray tier's light table).
-vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis );
+/// the lights the relight shades, the sun weighted by the texel's stored visibility `sunVis`, each lamp by its own bit
+/// of the texel's lamp mask (`lampBits`: the SunVis texel; `lampIds` the card's lamp table - PHOTON-7 stage 5, 5-3).
+/// The INCLUDER defines it (jah_rq_card_lights.glsl, from the ray tier's light table).
+vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis, vec4 lampBits,
+						uvec4 lampIds[4] );
 
 vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, float footprint,
 					  out bool ok )
@@ -300,7 +302,7 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, floa
 		const vec4 spec = JAH_CARD_SPECULAR( pick.texel );
 		if( spec.w > 0.0 )
 			lobe = jahCardLightsLobe( hitPos, N, V, r, spec.www * 0.04 + spec.xyz * 0.96, spec.w,
-									  JAH_CARD_SUN_VIS( pick.texel ) );
+									  JAH_CARD_SUN_VIS( pick.texel ), JAH_CARD_LAMP_BITS( pick.texel ), c.lamps );
 	}
 	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cut - cutLobe, indirect - cut,
 								JAH_CARD_EMISSIVE( pick.texel ) - cutLobe, N, L, r, V ) + lobe;

@@ -206,6 +206,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_environment.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_lights.glsl"   # the cards' lamp lobe (was no dependency: PHOTON-7 stage 5)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
@@ -239,6 +240,7 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_parity.comp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_bindings.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_card_lights.glsl"   # the cards' lamp lobe (was no dependency: PHOTON-7 stage 5)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_geom.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geom_rows.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_card_view.glsl"
@@ -360,6 +362,7 @@ if(JAH_RAY_QUERY_OK)
                 "${JAH_RQ_INCLUDE}/jah_rq_hit_radiance.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_card.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_card_bindings.glsl"
+                "${JAH_RQ_INCLUDE}/jah_rq_card_lights.glsl"
                 "${JAH_RQ_INCLUDE}/jah_rq_geom.glsl"
                 "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"
                 # ...and the hit record + the sun ray (PHOTON-HIT-SHADE-1).
@@ -428,10 +431,11 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
-                "-I${JAH_RQ_INCLUDE}"
+                "-I${JAH_RQ_INCLUDE}" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_cardMoversSpv -o "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_movers.comp"
+                "${JAH_RQ_FORK_BRDF}"
                 "${JAH_RQ_INCLUDE}/jah_rq_alpha.glsl"
                 "${JAH_RQ_INCLUDE}/jah_alpha_mask.glsl"
                 "${JAH_RQ_INCLUDE}/jah_geom_rows.glsl"

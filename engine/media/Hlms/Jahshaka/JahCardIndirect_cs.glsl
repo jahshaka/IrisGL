@@ -29,7 +29,7 @@
 @property( jah_card_sens )
 	vulkan_layout( ogre_t0 ) uniform texture2D cardRadiance;
 	vulkan_layout( ogre_t1 ) uniform texture2D cardDepth;
-	// THE RELIGHT LIST (OgreSurfaceCache.cpp relightCards): five vec4 a card, the first (atlasX, atlasY, size, mode)
+	// THE RELIGHT LIST (OgreSurfaceCache.cpp relightCards): nine vec4 a card, the first (atlasX, atlasY, size, mode)
 	layout( std430, ogre_U0 ) restrict readonly buffer csRelightLayout { vec4 csRelights[]; };
 	layout( std430, ogre_U1 ) restrict coherent buffer csSlotLayout { uint csSlot[]; };
 @else
@@ -75,7 +75,7 @@ void main()
 	const uint e = gl_WorkGroupID.x;
 	if( e >= caMode.y )
 		return;
-	const vec4 rect = csRelights[5u * e];
+	const vec4 rect = csRelights[9u * e];
 	const uint ax = uint( rect.x ), ay = uint( rect.y ), size = uint( rect.z ), mode = uint( rect.w );
 	const uint lid = gl_LocalInvocationIndex;
 	if( lid == 0u )

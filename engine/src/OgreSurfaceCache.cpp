@@ -192,8 +192,8 @@ void decodeTexel(Ogre::PixelFormatGpu fmt, const void *src, float out[4]) {
 }
 
 /// ONE CARD AS THE RAY JOB READS IT (PHOTON-CARDS-2; rayquery/include/jah_rq_card.glsl's
-/// JahCardRecord). std430, 80 bytes: the world frame's three rows, the axis and
-/// the texel, and the atlas rect with the card's two flags. Built here because
+/// JahCardRecord). std430, 144 bytes: the world frame's three rows, the axis and
+/// the texel, the atlas rect with the card's two flags, and its lamp table. Built here because
 /// the layout is a contract between this Component and the ray job, and a
 /// contract written in two places is a contract that drifts.
 ///
@@ -209,8 +209,11 @@ struct CardGpuRec {
     /// flags: kGpuCardCaptured (captured at least once), kGpuCardLit (its
     /// radiance carries a marched indirect half — `indirectValid`).
     unsigned atlas[4] = {};
+    /// THE CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3): up to 16 world lamp ids (SceneLightList::documentId, 0 = none),
+    /// bit j of each texel's lamp mask the visibility of lamp j (jah_rq_card_lights.glsl maps its own lamps by id).
+    unsigned lamps[16] = {};
 };
-static_assert(sizeof(CardGpuRec) == 80u, "the card record's layout is a contract with the ray job");
+static_assert(sizeof(CardGpuRec) == 144u, "the card record's layout is a contract with the ray job");
 constexpr unsigned kGpuCardCaptured = 1u;
 constexpr unsigned kGpuCardLit = 2u;
 
@@ -370,12 +373,15 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     // the read's specular lobe of the sun cannot know (jah_rq_card_lights.glsl evaluates every
     // light's lobe toward its own ray from the ray tier's light table). A UAV the relight writes
     // and nothing uploads: ManualTexture (never load-from-group), made resident here and never
-    // notified (DOCS/traps/ENGINE.md). R8, +4 MB at 2048 square.
+    // notified (DOCS/traps/ENGINE.md). RGBA8, +16 MB at 2048 square: G, B and A are THE LAMPS' traced visibility
+    // (PHOTON-7 stage 5, 5-3: rq_card_movers.comp's lamps mode) - the first eight reaching lamps' bits and the rest's
+    // weighted mean, which the relight takes per lamp, and every lamp's weighted mean, the read's lamp lobe's - in
+    // this layer's channels rather than a ninth view binding.
     mSunVis = tm->createTexture(processUniqueName("cardSunVis"), Ogre::GpuPageOutStrategy::Discard,
                                 Ogre::TextureFlags::ManualTexture | Ogre::TextureFlags::Uav,
                                 Ogre::TextureTypes::Type2D);
     mSunVis->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
-    mSunVis->setPixelFormat(Ogre::PFG_R8_UNORM);
+    mSunVis->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
     mSunVis->setNumMipmaps(1u);
     mSunVis->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
     // ...and THE MOVERS' VISIBILITY (PHOTON-CARDS-4): R8 over the atlas, a UAV
@@ -1481,15 +1487,25 @@ void SurfaceCache::photonUpdate() {
 namespace {
 /// The most cards one frame relights (the relight list's size, 80 B a card).
 constexpr unsigned kMaxRelights = 1024u;
-/// The most lights the job sums (80 B a light after a 16 B count).
+/// The most lights the job sums (144 B a light after a 16 B count).
 constexpr unsigned kMaxCardLights = 64u;
-constexpr unsigned kRelightFloats = 20u;
+/// A relight record: rect, the capture camera, the three axes, and THE CARD'S LAMP TABLE (16 world ids: PHOTON-7
+/// stage 5, 5-3) - 144 B.
+constexpr unsigned kRelightFloats = 36u;
+/// A lamp's world id, as every lamp table and light record carries it (32 bits of the document's node id; a light no
+/// document made takes its Ogre id in the upper half's own range).
+unsigned lampIdOf(const Ogre::Light *l) {
+    const unsigned long long d = SceneLightList::documentId(l);
+    return d ? unsigned(d & 0x7FFFFFFFull) : unsigned(0x80000000u | (l->getId() & 0x7FFFFFFFu));
+}
 /// The chain's parameter block (CardGiParams in the shader): chainInvRes[8],
 /// chainFromPrev[14], the volume's origin and inverse size, the counts, the
 /// environment's gain and mips, its nine SH coefficients — 35 vec4.
 constexpr unsigned kGiParamFloats = 37u * 4u;   // ... + the cloud shadow's map and sun (CLOUDS-2D-2)
 constexpr unsigned kMaxCardCascades = 8u;
-constexpr unsigned kLightFloats = 20u;
+/// A light's record: position, diffuse, attenuation, spot direction, spot parameters, and an AREA light's rectangle
+/// (its four corners, the first's w its double-sidedness: PHOTON-7 stage 5, 5-3).
+constexpr unsigned kLightFloats = 36u;
 }   // namespace
 
 void SurfaceCache::planRelights(const CardSceneView &view) {
@@ -1680,10 +1696,10 @@ void SurfaceCache::relightCards() {
     // node gave its PSSM maps, which is the frame's rule applied to the same list
     // — the first visible shadow-casting directional light in creation order
     // (SceneManager::quickSortDirectionalLights: casters first, then by id).
-    // Area lights are not summed (JahCardLight_cs.glsl says so).
+    // AREA lights ARE summed (PHOTON-7 stage 5, 5-3): the pixel's own LTC form factor, its rectangle in the record.
     const Ogre::Light *sun = cardSun();
     SceneLightList::Consumer consumer;
-    consumer.area = false;
+    consumer.area = true;
     consumer.budget = kMaxCardLights;
     {
         Ogre::Vector3 lo(std::numeric_limits<float>::max()), hi(-std::numeric_limits<float>::max());
@@ -1709,13 +1725,28 @@ void SurfaceCache::relightCards() {
         const Ogre::Light::LightTypes type = l->getType();
         float *o = &mLightCpu[4u + size_t(numLights) * kLightFloats];
         const Ogre::ColourValue c = l->getDiffuseColour() * l->getPowerScale();
+        const bool area = type == Ogre::Light::LT_AREA_APPROX || type == Ogre::Light::LT_AREA_LTC;
         if (type == Ogre::Light::LT_DIRECTIONAL) {
             const Ogre::Vector3 toLight = -l->getDerivedDirection();
             o[0] = toLight.x; o[1] = toLight.y; o[2] = toLight.z; o[3] = 0.0f;
         } else {
             const Ogre::Vector3 p = l->getParentNode()->_getDerivedPosition();
             o[0] = p.x; o[1] = p.y; o[2] = p.z;
-            o[3] = type == Ogre::Light::LT_POINT ? 1.0f : 2.0f;
+            o[3] = area ? 3.0f : type == Ogre::Light::LT_POINT ? 1.0f : 2.0f;
+            if (area) {
+                // THE RECTANGLE, as HlmsPbs and the voxel injection build it (PhotonVoxelLighting.cpp): the node's x and
+                // y axes times the light's half extents, the corners counter-clockwise from -x -y.
+                const Ogre::Vector2 half = l->getDerivedRectSize() * 0.5f;
+                const Ogre::Quaternion q = l->getParentNode()->_getDerivedOrientation();
+                const Ogre::Vector3 xA = q.xAxis() * half.x, yA = q.yAxis() * half.y;
+                const Ogre::Vector3 corner[4] = { p - xA - yA, p + xA - yA, p + xA + yA, p - xA + yA };
+                for (unsigned k = 0; k < 4u; ++k) {
+                    o[20u + 4u * k] = corner[k].x;
+                    o[21u + 4u * k] = corner[k].y;
+                    o[22u + 4u * k] = corner[k].z;
+                }
+                o[23] = l->getDoubleSided() ? 1.0f : 0.0f;
+            }
         }
         o[4] = c.r; o[5] = c.g; o[6] = c.b; o[7] = (l == sun) ? 1.0f : 0.0f;
         const float range = l->getAttenuationRange();
@@ -1729,8 +1760,73 @@ void SurfaceCache::relightCards() {
         o[16] = std::fabs(denom) > 1e-6f ? 1.0f / denom : 1e6f;
         o[17] = std::cos(outer * 0.5f);
         o[18] = l->getSpotlightFalloff();
-        o[19] = 0.0f;
+        const unsigned id = lampIdOf(l);   // THE LAMP'S WORLD ID (the cards' lamp tables name it), as bits
+        std::memcpy(&o[19], &id, sizeof(id));
         ++numLights;
+    }
+    // ---- EACH RELIT CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3): the list's lamps (points, spots, areas) that reach the
+    // card's box - the list's own test, in its one world order - the first 16, or when more reach it the 16 with the
+    // largest share of its direct (the lamp's peak channel through its falloff and cosine at the card's centre),
+    // kept in the world order. The bits the trace writes and the relight and the readers read index it. The cards'
+    // GPU records carry it, so a table that changed re-syncs them before the readers run this frame.
+    {
+        bool tableChanged = false;
+        std::vector<std::pair<float, unsigned>> reach;   // (share, the light's index in the list)
+        for (size_t i = 0; i < mRelight.size(); ++i) {
+            CardRec &c = mCards[mRelight[i]];
+            const float hd = c.halfDepth + captureMargin(c.halfDepth);
+            const Ogre::Vector3 ext(std::fabs(c.u.x) * c.halfU + std::fabs(c.v.x) * c.halfV + std::fabs(c.d.x) * hd,
+                                    std::fabs(c.u.y) * c.halfU + std::fabs(c.v.y) * c.halfV + std::fabs(c.d.y) * hd,
+                                    std::fabs(c.u.z) * c.halfU + std::fabs(c.v.z) * c.halfV + std::fabs(c.d.z) * hd);
+            SceneLightList::Consumer box;
+            box.boxMin = c.centre - ext;
+            box.boxMax = c.centre + ext;
+            reach.clear();
+            double total = 0.0;
+            for (unsigned li = 0; li < numLights; ++li) {
+                const Ogre::Light *l = chosen.lights[li];
+                if (l->getType() == Ogre::Light::LT_DIRECTIONAL || !SceneLightList::reaches(l, box)) continue;
+                const float *o = &mLightCpu[4u + size_t(li) * kLightFloats];
+                const Ogre::Vector3 toL = Ogre::Vector3(o[0], o[1], o[2]) - c.centre;
+                const float d = std::max(toL.length(), 1e-3f);
+                const float peak = std::max(o[4], std::max(o[5], o[6]));
+                const float share = peak * std::max(0.0f, c.d.dotProduct(toL / d)) / std::max(d * d, 1e-6f);
+                reach.emplace_back(share, li);
+                total += double(share);
+            }
+            mCardLampsMax = std::max(mCardLampsMax, unsigned(reach.size()));
+            if (reach.size() > 16u) {
+                std::vector<std::pair<float, unsigned>> byShare = reach;
+                std::stable_sort(byShare.begin(), byShare.end(),
+                                 [](const std::pair<float, unsigned> &a, const std::pair<float, unsigned> &b) {
+                                     return a.first > b.first;
+                                 });
+                double over = 0.0;
+                for (size_t k = 16; k < byShare.size(); ++k) over += double(byShare[k].first);
+                byShare.resize(16u);
+                std::sort(byShare.begin(), byShare.end(),
+                          [](const std::pair<float, unsigned> &a, const std::pair<float, unsigned> &b) {
+                              return a.second < b.second;   // back into the world order
+                          });
+                reach.swap(byShare);
+                if (total > 0.0) mLampOverflowShareMax = std::max(mLampOverflowShareMax, float(over / total));
+            }
+            unsigned ids[16] = {};
+            for (size_t k = 0; k < reach.size(); ++k) {
+                std::memcpy(&ids[k], &mLightCpu[4u + size_t(reach[k].second) * kLightFloats + 19u], sizeof(unsigned));
+            }
+            const unsigned n = unsigned(reach.size());
+            if (n != c.lampCount || std::memcmp(ids, c.lampIds, sizeof(ids)) != 0) {
+                c.lampCount = n;
+                std::memcpy(c.lampIds, ids, sizeof(ids));
+                tableChanged = true;
+            }
+            std::memcpy(&mRelightCpu[i * kRelightFloats + 20u], ids, sizeof(ids));
+        }
+        if (tableChanged) {
+            mTableDirty = true;
+            syncBuffers();
+        }
     }
     // A LIGHT THE JOB CANNOT HOLD is counted every frame and SAID once per cache.
     mLightsInRange = chosen.inRange;
@@ -1755,6 +1851,47 @@ void SurfaceCache::relightCards() {
         mLightBuffer = vao->createUavBuffer(lightElems, 16u, 0, mLightCpu.data(), false);
     else
         mLightBuffer->upload(mLightCpu.data(), 0, 1u + size_t(numLights) * kLightFloats / 4u);
+
+    // ---- THE LAMPS' VISIBILITY (PHOTON-7 stage 5, 5-3): every relit card's texels traced toward the list's point and
+    // spot lights (rq_card_movers.comp's lamps mode, from the lifted point the still sun trace uses), into the SunVis
+    // layer's green, before the relight multiplies its lamps by it. A card the trace could not reach this frame (no
+    // structure yet, the ray rule's footprint not chosen) is lit unshadowed by its lamps, flagged in its record's
+    // float 19 - never by a visibility another frame wrote - and its direct half STAYS STALE (relit again the next
+    // frame, until a trace lands: measured, gi.leak_room's carded far wall kept the outside lamp's unshadowed red of
+    // its first relight - before the ray rule chose its levels - for as long as the lamp held still).
+    bool lampsUntraced = false;
+    {
+        unsigned lamps = 0u;
+        for (unsigned i = 0; i < numLights; ++i) lamps += mLightCpu[4u + size_t(i) * kLightFloats + 3u] > 0.5f ? 1u : 0u;
+        bool traced = false;
+        if (lamps && mRayFootprintPerMetre > 0.0f && mMoverHooks.trace) {
+            mLampCpu.assign(mRelight.size() * kRelightFloats, 0.0f);
+            for (size_t i = 0; i < mRelight.size(); ++i) {
+                std::memcpy(&mLampCpu[i * kRelightFloats], &mRelightCpu[i * kRelightFloats], kRelightFloats * sizeof(float));
+                mLampCpu[i * kRelightFloats + 3u] = sunLiftOf(mCards[mRelight[i]]);   // the lift, as the still mode's
+            }
+            CardMoverTrace job;
+            job.records = mLampCpu.data();
+            job.count = unsigned(mRelight.size());
+            job.depth = mAtlas[unsigned(CardLayer::Depth)];
+            job.normal = mAtlas[unsigned(CardLayer::Normal)];
+            job.vis = mMoverVis;
+            job.shadowRough = mAtlas[unsigned(CardLayer::ShadowRough)];
+            job.lights = mLightBuffer;
+            job.sunVis = mSunVis;
+            job.lamps = true;
+            traced = mMoverHooks.trace(job);
+        }
+        // (only the ray rule's levels not chosen yet is a wait: a trace the device refuses with them chosen - the ray
+        // tier logged it - lights the lamps unshadowed for good, never a relight a frame)
+        lampsUntraced = lamps && !traced && !(mRayFootprintPerMetre > 0.0f);
+        if (traced) {
+            for (size_t i = 0; i < mRelight.size(); ++i) mRelightCpu[i * kRelightFloats + 19u] = 1.0f;
+            mRelightBuffer->upload(mRelightCpu.data(), 0, mRelight.size() * kRelightFloats / 4u);
+            ++mLampTraces;
+            mLampTracedLastFrame = unsigned(mRelight.size());
+        }
+    }
 
     // ---- THE CHAIN AND THE ENVIRONMENT, from the one PhotonVoxelLighting every reader
     // takes them from (the pixel's pass buffer is filled from the same calls).
@@ -1913,9 +2050,10 @@ void SurfaceCache::relightCards() {
         uav.access = Ogre::ResourceAccess::Write;
         uav.pixelFormat = mFlat->getPixelFormat();
         mLightJob->_setUavTexture(8u, uav);
-        // THE SUN'S VISIBILITY AT THE TEXEL (PHOTON-3 stage 2), written.
+        // THE SUN'S VISIBILITY AT THE TEXEL (PHOTON-3 stage 2), written - and the lamps' (its green, PHOTON-7 stage
+        // 5, 5-3), read and kept.
         uav.texture = mSunVis;
-        uav.access = Ogre::ResourceAccess::Write;
+        uav.access = Ogre::ResourceAccess::ReadWrite;
         uav.pixelFormat = mSunVis->getPixelFormat();
         mLightJob->_setUavTexture(9u, uav);
     }
@@ -2017,7 +2155,7 @@ void SurfaceCache::relightCards() {
             mRelitInstances.push_back(c.instance);
             mLateRelitBoxes.push_back(Ogre::Aabb(mInstances[c.instance].centre, mInstances[c.instance].halfSize));
         }
-        c.relight = false;
+        c.relight = lampsUntraced;   // its lamps unshadowed this once: relit again when the trace can run
         c.lastRelit = mFrame;
         ++mRelights;
         ++mRelitLastFrame;
@@ -2054,6 +2192,15 @@ constexpr unsigned kCardSlots = (kCardAtlasSize / kCardMinSize) * (kCardAtlasSiz
 constexpr unsigned kReportCapacity = 4096u;
 constexpr unsigned kMaxCardClusters = 4096u;   ///< 4^3 bricks a cluster (two words each): a 512^3 cascade's 16^3
 }   // namespace
+
+Ogre::UavBufferPacked *SurfaceCache::ensureLightBuffer() {
+    if (mLightBuffer) return mLightBuffer;
+    Ogre::VaoManager *vao = Ogre::Root::getSingleton().getRenderSystem()->getVaoManager();
+    if (!vao) return nullptr;
+    std::vector<float> zeros(4u + size_t(kMaxCardLights) * kLightFloats, 0.0f);   // a count of 0
+    mLightBuffer = vao->createUavBuffer(1u + size_t(kMaxCardLights) * kLightFloats / 4u, 16u, 0, zeros.data(), false);
+    return mLightBuffer;
+}
 
 bool SurfaceCache::ensureIndirectBuffers() {
     if (mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster) return true;
@@ -2774,6 +2921,8 @@ void SurfaceCache::traceSun() {
             job.normal = mAtlas[unsigned(CardLayer::Normal)];
             job.vis = mMoverVis;
             job.shadowRough = mAtlas[unsigned(CardLayer::ShadowRough)];
+            job.lights = ensureLightBuffer();   // bound, not read, in this mode
+            job.sunVis = mSunVis;
             job.toSun = toSun;   // ZERO without a sun: every texel lit
             job.range = kMoverRayRange;
             job.still = true;
@@ -3000,6 +3149,8 @@ void SurfaceCache::traceSun() {
     job.normal = mAtlas[unsigned(CardLayer::Normal)];
     job.vis = mMoverVis;
     job.shadowRough = mAtlas[unsigned(CardLayer::ShadowRough)];   // bound, not written, in this mode
+    job.lights = ensureLightBuffer();   // bound, not read, in this mode
+    job.sunVis = mSunVis;
     job.toSun = toSun;
     job.range = kMoverRayRange;
     step4Timer.reset();
@@ -3072,6 +3223,7 @@ void SurfaceCache::syncBuffers() {
         rec.atlas[1] = c.atlasY;
         rec.atlas[2] = c.size;
         rec.atlas[3] = (c.lastUpdated ? kGpuCardCaptured : 0u) | (c.indirectValid ? kGpuCardLit : 0u);
+        for (unsigned k = 0; k < 16u; ++k) rec.lamps[k] = k < c.lampCount ? c.lampIds[k] : 0u;
         std::memcpy(&mCardBufferCpu[size_t(i) * kCardGpuFloats], &rec, sizeof(rec));
     }
     mCardRecords = records;
@@ -3173,6 +3325,7 @@ void SurfaceCache::update(const CardSceneView &view) {
     mMoverTracedLastFrame = 0u;
     mMoverTexelsLastFrame = 0u;
     mStillTracedLastFrame = 0u;
+    mLampTracedLastFrame = 0u;
     mStillTexelsLastFrame = 0u;
     mViewerPos = view.viewerPos;
     mRayFootprintPerMetre = view.rayFootprintPerMetre;
@@ -3328,6 +3481,10 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.admitted = mAdmitted;
     out.evicted = mEvicted;
     out.compactionMoves = mCompactionMoves;
+    out.lampTraces = mLampTraces;
+    out.lampTracedLastFrame = mLampTracedLastFrame;
+    out.cardLampsMax = mCardLampsMax;
+    out.lampOverflowShareMax = mLampOverflowShareMax;
     for (unsigned k = 0; k < 4u; ++k) out.demandHits[k] = mDemandHits[k];
     out.queueLength = 0u;
     for (const CardRec &c : mCards) out.queueLength += c.queued ? 1u : 0u;
@@ -3492,6 +3649,24 @@ bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &
         tk->unmap();
         tm->destroyAsyncTextureTicket(tk);
     }
+    // THE LAMPS' TRACED BITS (PHOTON-7 stage 5, 5-3): the SunVis texel's mask (g low, a high) and overflow byte (b),
+    // and the card's lamp table they index.
+    if (mSunVis) {
+        Ogre::AsyncTextureTicket *tk = tm->createAsyncTextureTicket(
+            1u, 1u, 1u, Ogre::TextureTypes::Type2D, mSunVis->getPixelFormat());
+        Ogre::TextureBox src = mSunVis->getEmptyBox(0);
+        src.x = tx; src.y = ty; src.width = 1u; src.height = 1u;
+        tk->download(mSunVis, 0, true, &src, true);
+        const Ogre::TextureBox box = tk->map(0);
+        float sv[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        decodeTexel(mSunVis->getPixelFormat(), box.at(0, 0, 0), sv);
+        tk->unmap();
+        tm->destroyAsyncTextureTicket(tk);
+        out.lampMask = unsigned(std::lround(sv[1] * 255.0f)) | (unsigned(std::lround(sv[3] * 255.0f)) << 8u);
+        out.lampOverflowVis = sv[2];
+    }
+    out.lampCount = rec.lampCount;
+    for (unsigned k = 0; k < 16u; ++k) out.lampIds[k] = rec.lampIds[k];
     // THE INDIRECT LAYER (ENGINE-POLISH-PHOTON-1 stage 3): the diffuse half where the channel has a
     // diffuse albedo, the specular lobe's share where it has none (JahCardLight_cs.glsl).
     const float *spec = vals[unsigned(CardLayer::Specular)];

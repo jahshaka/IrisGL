@@ -8,10 +8,12 @@
 // sum over the lights of E_i mu_i vis_i f_s( L_i, V = -dir ), f_s = BRDF_Default's D Vis F; the read knows V,
 // and every light it needs is in the ray tier's light table (RayQueryTier::updateHitTable,
 // jah_rq_hit_direct.glsl's layout) - so it evaluates the lobe here, exactly, per light, as the relight takes
-// them: the directionals, points and spots (no area light: the relight sums none), a lamp unshadowed (the
-// relight's rule), a directional through the cloud sheet, and THE SUN (the light the table flags, the
-// cards' traced sun: SurfaceCache::cardSun) by the texel's own stored visibility (the SunVis layer: the
-// still world's traced term times the movers' and the cloud's). Its cosine-weighted integral over V is
+// them: the directionals, points and spots (no area light's lobe), a lamp by ITS OWN traced visibility (PHOTON-7
+// stage 5, 5-3: the bit of its slot in the card's lamp table, found by the lamp's world id - the table's word 31 -
+// or, past the table, the overflow's weighted byte), a
+// directional through the cloud sheet, and THE SUN (the light the table flags, the cards' traced sun:
+// SurfaceCache::cardSun) by the texel's own stored visibility (the SunVis layer: the still world's traced term
+// times the movers' and the cloud's). Its cosine-weighted integral over V is
 // what the relight re-emitted: the energy is unchanged, only the direction moves.
 //
 // HOW A CALLER BINDS IT: JAH_HIT_TABLE (uvec2: the table's device address, zero = none), and optionally
@@ -43,8 +45,10 @@ const uint kJahHitLightWords = 32u;
 void jahSpecularAlbedo( float v, float r, out float a, out float b );
 #endif
 
-vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis )
+vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis, vec4 lampBits,
+						uvec4 lampIds[4] )
 {
+	const uint lampMask = uint( lampBits.y * 255.0 + 0.5 ) | ( uint( lampBits.w * 255.0 + 0.5 ) << 8u );
 	const uvec2 a = JAH_HIT_TABLE;
 	if( ( a.x | a.y ) == 0u )
 		return vec3( 0.0 );
@@ -76,7 +80,16 @@ vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float
 			if( !( dist > 0.0 ) || ( v1.w > 0.0 && dist > v1.w ) )
 				continue;
 			L = d / dist;
-			vis = jahLightAttenuation( dist, v1.w, v2.w );
+			// ITS OWN BIT: its world id (word 31) in the card's lamp table, or the overflow's byte past it
+			const uint id = T.u[o + 31u];
+			float lampVis = lampBits.z;
+			for( int q = 0; q < 16; ++q )
+				if( lampIds[q >> 2][q & 3] == id )
+				{
+					lampVis = float( ( lampMask >> uint( q ) ) & 1u );
+					break;
+				}
+			vis = lampVis * jahLightAttenuation( dist, v1.w, v2.w );
 			if( type == 2 )
 			{
 				const float spotCos = dot( -L, v2.xyz );
