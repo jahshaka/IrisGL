@@ -55,6 +55,9 @@
 // on its own segment at the lift's height, lift / cos from the texel (the same clearance from the receiver's near
 // copy), so the segment tested is the texel's own; a grazing ray's start may pass its lamp (unshadowed, at a cosine
 // that weighs it next to nothing).
+// KNOWN, A MERGE ITEM (the lead, 2026-10-23): this is a SECOND ray-origin form beside stage 6's one law on photon-7r
+// (jah_ray_origin.glsl: P + geomN x bound, tMin 0); at the photon-7r merge one form survives - decided on
+// rtreflect.contact, gi.sun_contact_acne and gi.card_lamp_shadow measured under both - and the other is deleted.
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
