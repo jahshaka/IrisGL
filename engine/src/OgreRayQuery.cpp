@@ -247,12 +247,12 @@ constexpr unsigned kReflectRestSequence = 0x10000u;
 /// GiQualityFacts::reflectRestRays (k) rays a resting texel; that COUNT - k x the texels resting at its start - is then
 /// SHARED by the texels still converging, k_active = min(kReflectRestRaysCap, count / active), so a rest frame never
 /// traces more RAYS than its first, fewer as texels stop; the work goes where the change still is. The cap is DERIVED:
-/// the worst tail measured on photon-glass needs 12,363 samples (its displayed SE 1.82 codes at 2,378), which takes
-/// >= 25 a frame to finish inside ~500 frames after the rest's first hundred - 32. MEASURED (photon-glass, the hold at
-/// rest frame 527): the trace's GPU ms do NOT follow the rays - a texel's share is a SERIAL loop in its thread, so while
-/// ~16,000 scattered texels converge (rest frames 22-36) every warp runs 32 iterations for a few lanes (1.9 ms against
-/// the first frame's 1.03), and two texels' 32 serial rays cost 0.5-1.1 ms of latency to the end.
-constexpr unsigned kReflectRestRaysCap = 32u;
+/// the worst texel measured on photon-glass (displayed SE 1.15 codes at v 18,352) needs v (SE / 1)^2 = 24.3k samples,
+/// ~2.5k of them in by rest frame 100, so >= 44 a frame over the remaining 500 - 64, the next power of two. The GPU ms
+/// follow the rays because the trace DEALS a subgroup's samples one per lane (rq_reflect.comp, the rest's spread
+/// lanes): as a serial loop per thread, ~16,000 scattered converging texels made every warp run the whole share for a
+/// few lanes (1.9 ms against the first frame's 1.03) and two texels' 32 serial rays were a millisecond of latency.
+constexpr unsigned kReflectRestRaysCap = 64u;
 /// THE MOVED INSTANCES A REST FOLLOWS PER TEXEL (G6, rq_reflect.comp's restMoverBox): more moved in one frame breaks
 /// the view's rest whole.
 constexpr unsigned kReflectRestMovers = 16u;
@@ -2186,10 +2186,27 @@ bool RayQueryTier::open(Ogre::RenderSystem *rs, std::string &err) {
     }
 
     mAsProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+    // THE SUBGROUP OPERATIONS THE REFLECTION'S TRACE DEALS ITS REST RAYS WITH (rq_reflect.comp, the rest's spread
+    // lanes: a ballot, a prefix sum, a vote and shuffles, in compute) - core since Vulkan 1.1, but each a device's own
+    // claim; a device without them is a supported no-rays boot, like one without ray queries.
+    VkPhysicalDeviceSubgroupProperties subgroupProps{};
+    subgroupProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+    mAsProps.pNext = &subgroupProps;
     VkPhysicalDeviceProperties2 props2{};
     props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     props2.pNext = &mAsProps;
     vkGetPhysicalDeviceProperties2(mDev->mPhysicalDevice, &props2);
+    mAsProps.pNext = nullptr;
+    const VkSubgroupFeatureFlags kSubgroupOps = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
+                                                VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
+                                                VK_SUBGROUP_FEATURE_SHUFFLE_BIT;
+    if (!(subgroupProps.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) ||
+        (subgroupProps.supportedOperations & kSubgroupOps) != kSubgroupOps) {
+        mVk = VK_NULL_HANDLE;
+        err = "rayquery: the device's compute subgroups lack the ballot / vote / arithmetic / shuffle operations the "
+              "reflection's rest rays are dealt with";
+        return false;
+    }
 
     // COMPACTED SIZES. One slot per in-flight frame; a BLAS asks for its
     // compacted size in the frame it is built and reads the answer back later
