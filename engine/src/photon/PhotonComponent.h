@@ -190,12 +190,16 @@ public:
         bool cascadeStage = false;             ///< the cascade stage runs (a built chain, no flush owed)
         bool follow = false;                  ///< cascade 0's field follow, paid first
         GiStaleReason followReason = GiStaleReason::Camera;
-        int rebuild = -1;                     ///< the ONE cascade re-voxelised this frame
+        int rebuild = -1;                     ///< the cascade the GENERAL slot re-voxelises this frame (c1..cN)
         /// ...by its SCROLL (ENGINE-UPGRADE-U5 stage 1): a step of the incremental scroll - the
         /// entering slab's chunks this frame's budget holds, and the commit when they are the last -
         /// instead of a whole rebuild.
         bool scroll = false;
-        bool spent = false;                   ///< the follow or the rebuild spends the frame
+        /// THE RESERVED SLOT (PHOTON-7 stage 2; PREFLIGHT_1_2 §5.5): cascade 0's work, every frame it owes any - a
+        /// scroll's chunks, its commit, an edit's whole rebuild - beside the general slot, never behind it.
+        bool reserved0 = false;
+        bool scroll0 = false;                 ///< ...by its scroll (else a whole rebuild)
+        bool spent = false;                   ///< the follow or the general slot's rebuild spends the frame
         bool aborted = false;                 ///< the walk threw: nothing past the field this frame
     };
     /// THE WALK'S GI RECORD — what one GI walk found (OgreScene::walkItems: the scene's one
@@ -515,9 +519,13 @@ public:
         /// THE WORK LAW'S DOOR (PHOTON-7 stage 2; GiStatus::CascadeStatus): over every commit, cumulative - the voxels
         /// the delta injections lit inside the slabs and outside them (the changed direct set; read back), the slabs'
         /// cells, the cells one pass of the commit covered, the passes, and the commits whose counts landed.
-        unsigned long long commitLitSlab = 0, commitLitBand = 0, commitSlabCells = 0, commitRegionCells = 0,
-                           commitPasses = 0, commitCounted = 0;
+        unsigned long long commitLitSlab = 0, commitLitBand = 0, commitSlabCells = 0, commitInjectCells = 0,
+                           commitRegionCells = 0, commitPasses = 0, commitCounted = 0;
         unsigned long long scrolls = 0;        ///< camera scrolls committed by the slab path
+        /// THE LAG (PHOTON-7 stage 2; GiStatus::CascadeStatus::lagLast/lagMax): the frame the camera's step test
+        /// first owed this cascade a move (0 = none owed), and the frames from it to the rebuild that served it.
+        unsigned long long lagFrom = 0, lagLast = 0, lagMax = 0;
+        bool commitShaderAsked = false;   ///< the delta injection's permutation requested (its first whole build)
         unsigned long long scrollFrames = 0;   ///< frames spent building scrolls' chunks
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
         float cell() const { return halfSize * 2.0f / float(resolution); }
@@ -1302,6 +1310,8 @@ private:
     void harvestBounceEnergy();
     /// The commits' work counts that landed (PHOTON-7 stage 2, the work law's door).
     void harvestCommitCounts();
+    /// The frames a scroll's commit waited for its delta injection's shader (built in the background).
+    unsigned long long mCommitShaderWaits = 0;
     /// A CASCADE REBUILD LEFT THE CHAIN OFF ITS FIXED POINT (LAMPREST-3). A
     /// rebuild injects ONE cascade once, over the radiance it held somewhere
     /// else, and the GI scheduler's cadence never ticks for a camera walk — so the

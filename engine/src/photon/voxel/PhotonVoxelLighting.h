@@ -56,6 +56,10 @@ namespace Ogre
         direct did not change keeps every bit; a slab voxel's old terms are the shift's zeros. The voxels written
         are COUNTED (takeCommitCount): those outside [keepLo, keepHi) (the slab) and those inside (the changed
         direct set: the band).
+        `injectBoxes`: the direct term is computed over these boxes of cells only (each aligned to the injection's
+        4^3 groups; they may overlap - a delta is idempotent): the committed cascade's CHANGED-DIRECT SET lies
+        within its own-cell march of the two faces a shift moved (the slab's side and the trailing face); none =
+        the whole volume (a cascade inside the committed one: its outer shells cross the committed cells anywhere).
         `region`: the sky pass and the bounce passes run over the cells [regionLo, regionHi) only (the slab and
         its bounce reach, aligned to 8 cells), each written into the bounce target and copied back, and the
         directional levels regenerated over what covers the region.
@@ -64,6 +68,9 @@ namespace Ogre
     {
         bool delta = false;
         uint32 keepLo[3] = { 0u, 0u, 0u }, keepHi[3] = { 0u, 0u, 0u };
+        static constexpr uint32 kMaxInjectBoxes = 6u;   ///< two faces per moved axis
+        uint32 numInjectBoxes = 0u;
+        uint32 injectLo[kMaxInjectBoxes][3] = {}, injectHi[kMaxInjectBoxes][3] = {};
         bool region = false;
         uint32 regionLo[3] = { 0u, 0u, 0u }, regionHi[3] = { 0u, 0u, 0u };
     };
@@ -195,10 +202,7 @@ namespace Ogre
         struct CommitLightState
         {
             bool on = false;
-            bool delta = false;
-            uint32 keepLo[3] = { 0u, 0u, 0u }, keepHi[3] = { 0u, 0u, 0u };
-            bool region = false;
-            uint32 regionLo[3] = { 0u, 0u, 0u }, regionHi[3] = { 0u, 0u, 0u };
+            PhotonCommitLight light;
         } mCommit;
         UavBufferPacked *mCommitCountBuf = nullptr;    ///< four words, cumulative (created zeroed)
         AsyncTicketPtr   mCommitTicket;                ///< the read-back in flight
@@ -206,6 +210,7 @@ namespace Ogre
         uint32           mCommitSeen[3] = { 0u, 0u, 0u };   ///< the counter's words at the last landed reading
         ShaderParams::Param *mInjectKeepLo = nullptr;
         ShaderParams::Param *mInjectKeepHi = nullptr;
+        ShaderParams::Param *mInjectOrigin = nullptr;
         /// This cascade's place in the scene's chain (0 = the innermost; the cascades outside it are
         /// mExtraCascades): the injection binds the whole chain and marches from this entry outward.
         uint32 mChainIndex = 0u;
@@ -331,6 +336,9 @@ namespace Ogre
         /// PHOTON-7 stage 2: over the cells [regionLo, regionHi) only (aligned to 8 cells), or whole - written into
         /// mLightBounce and that region copied back into the total.
         void runBounce( bool envOnly = false, const uint32 *regionLo = nullptr, const uint32 *regionHi = nullptr );
+        /// The injection job's UAV slots, its slot count and its two properties, as update() dispatches it - the
+        /// delta's (a scroll's commit: four slots read-write, the counter last) or a whole injection's.
+        void bindInjectionUavs( bool delta );
         /// True when the environment setEnvironment was handed carries any light.
         bool hasEnvironmentLight() const;
 
@@ -417,6 +425,9 @@ namespace Ogre
 
         /// THE COMMIT'S LIGHT for the next update() (PhotonCommitLight); null a whole injection.
         void setCommitLight( const PhotonCommitLight *commit );
+        /// Is the delta injection's shader built (never compiled in the frame: a permutation not built is handed to the
+        /// background compiler and the answer is false until it is)? Asked when a scroll is planned and at its commit.
+        bool commitLightReady();
         /// THE DELTA INJECTIONS' COUNTS since the last reading that landed (never a wait; the counter on the device is
         /// cumulative, so no injection's count is lost to a read-back in flight): voxels lit outside the kept box (the
         /// slab), inside it (the changed direct set) and the injections. False while no new reading landed.

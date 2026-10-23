@@ -1206,10 +1206,10 @@ constexpr ArmDef kArms[] = {
       "FAULT INJECTION (a test door, gi.scroll_slab case F; ENGINE-UPGRADE-U5 decision 11 a): cascade N's "
       "scroll commit throws after copying the first half of its volumes into the live store - the torn-store "
       "path (the cascade owes a whole rebuild, never a scroll). -1 = none." },
-    { ArmId::GiScrollBudget, 0.0, 0.0, 1000.0,
-      "THE INCREMENTAL SCROLL'S PER-FRAME BUDGET (ENGINE-UPGRADE-U5 stage 1) in milliseconds of "
-      "voxelisation, read when a scroll is planned: a small value spreads a fixture's slab over "
-      "many frames (gi.scroll_slab's spread arm). 0 = the shipped budget (kScrollBudgetMs)." },
+    { ArmId::GiScrollFrames, 0.0, 0.0, 1000.0,
+      "THE INCREMENTAL SCROLL'S SPREAD (PHOTON-7 stage 2): the chunk frames a scroll is planned over, read "
+      "when it is planned - a fixture's slab spread over many frames (gi.scroll_slab's spread arms). "
+      "0 = the tier's count (giCascadeScrollFrames: the cascade's motion slack at 1.4 m/s)." },
     { ArmId::GiVoxelOctants, 1.0, 1.0, 2.0,
       "THE VOXELISER'S WORK PARTITION (ENGINE-UPGRADE-U5 stage 2, measured first): a whole cascade "
       "build divided into N x N x N octants - each octant's dispatches loop only the records the "

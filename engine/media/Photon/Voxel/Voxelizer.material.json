@@ -91,7 +91,8 @@
                 ["chainOrigin",             [0,0,0,1],  "float"],
                 ["chainRes",                [1,1,1,1e30], "float"],
                 ["keepLo",                  [0,0,0,0],    "int"],
-                ["keepHi",                  [0,0,0,0],    "int"]
+                ["keepHi",                  [0,0,0,0],    "int"],
+                ["injectOrigin",            [0,0,0,0],    "uint"]
             ],
 
             "params_glsl" :

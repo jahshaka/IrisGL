@@ -1956,7 +1956,7 @@ public:
     X(GiCascadeFault, "gi.cascadeFault") /* cascade N's rebuild throws before its build (-1 = none) */ \
     X(GiCascadeFaultPost, "gi.cascadeFaultPost") /* cascade N's rebuild throws after its build (-1 = none) */ \
     X(GiCascadeFaultCommit, "gi.cascadeFaultCommit") /* cascade N's scroll commit throws half way through its copies (-1 = none) */ \
-    X(GiScrollBudget, "gi.scrollBudgetMs") /* a scroll's per-frame voxelisation budget in ms (0 = shipped) */ \
+    X(GiScrollFrames, "gi.scrollFrames") /* a scroll's chunk frames (0 = the tier's count) */ \
     X(GiVoxelOctants, "gi.voxelOctants") /* a whole build's octants per axis (1 shipped, 2 = 8 octants; stage 2's measure) */ \
     X(GiRebuildCascade, "gi.rebuildCascade") /* cascade N rebuilt whole every frame while set (-1 = none; a measuring door) */ \
     X(ShadowCasterCull, "shadow.casterCull") /* a sun map's Atom casters culled by the light's own depth (0: frustum only, the parity arm) */ \

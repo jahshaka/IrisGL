@@ -997,6 +997,13 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
         mGiInjectionsThisFrame = 0;
     }
     mGiInjectionsPeak = std::max(mGiInjectionsPeak, ++mGiInjectionsThisFrame);
+    // THE COMMIT'S SHADER, ASKED FOR AT THE CASCADE'S FIRST INJECTION (ASYNC-SHADERS-1): the delta injection's
+    // permutation goes to the background compiler long before a walk's first commit needs it (a commit that finds it
+    // still building waits a frame: recordCascades). Once per cascade.
+    if (!commit && !mVctCascades[i].commitShaderAsked) {
+        lighting->commitLightReady();
+        mVctCascades[i].commitShaderAsked = true;
+    }
     return true;
 }
 
@@ -1319,6 +1326,9 @@ GiStatus PhotonComponent::giStatus() const {
             cs.commitLitSlab     = c.commitLitSlab;
             cs.commitLitBand     = c.commitLitBand;
             cs.commitSlabCells   = c.commitSlabCells;
+            cs.lagLast           = c.lagLast;
+            cs.lagMax            = c.lagMax;
+            cs.commitInjectCells = c.commitInjectCells;
             cs.commitRegionCells = c.commitRegionCells;
             cs.commitPasses      = c.commitPasses;
             cs.commitCounted     = c.commitCounted;
@@ -1366,6 +1376,7 @@ GiStatus PhotonComponent::giStatus() const {
         st.cascadeDeferrals    = mCascadeDeferrals;
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
         st.cascadeScrollAborts  = mCascadeScrollAborts;
+        st.cascadeCommitShaderWaits = mCommitShaderWaits;
         st.cascadeTornCleared   = mCascadeTornCleared;
         st.chainInjectionRefusals   = mGiInjectionRefusals;
         st.chainInjectionsPeakFrame = mGiInjectionsPeak;
@@ -3985,7 +3996,8 @@ PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPo
         if (!mGiCachesDirty) planCascades(camPos, w);
         mPlanLog.pickMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tPick).count();
     }
-    mPlanLog.rebuild = w.rebuild;
+    // (the general slot's cascade, else the reserved slot's cascade 0)
+    mPlanLog.rebuild = w.rebuild >= 0 ? w.rebuild : (w.reserved0 ? 0 : -1);
     return w;
 }
 
@@ -5297,6 +5309,40 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                     commitLight.regionLo[a] = c.scroll.passLo[a];
                     commitLight.regionHi[a] = c.scroll.passHi[a];
                 }
+                // THE CELLS WHOSE DIRECT CAN CHANGE (the injection's boxes): a voxel's visibility march reads this
+                // cascade's own cells out to its shell end D_idx (the chain's sum of 8 cells per cascade) plus the next
+                // cascade's first cell, and nothing inside it - so only the voxels that close to a face the shift moved
+                // see another march: the slab's side (the slab and the kept cells next to it) and the TRAILING face
+                // (measured in gi.scroll_slab G: the whole band of a one-axis step sat in the trailing face's first two
+                // cells). The outermost marches its own cells to the lamp: whole.
+                if (idx + 1 < mVctCascades.size()) {
+                    double shellEnd = 0.0;
+                    for (size_t k = 0; k <= idx; ++k) shellEnd += 8.0 * double(mVctCascades[k].cell());
+                    shellEnd += double(mVctCascades[idx + 1].cell());
+                    const int res = c.resolution;
+                    const int reach = int(std::ceil(shellEnd / double(c.cell()))) + 1;
+                    const auto box = [&](int axis, int lo, int hi) {
+                        Ogre::uint32 &n = commitLight.numInjectBoxes;
+                        if (n >= Ogre::PhotonCommitLight::kMaxInjectBoxes) return;
+                        for (int a = 0; a < 3; ++a) {
+                            const int l = a == axis ? std::max(0, lo) : 0, h = a == axis ? std::min(res, hi) : res;
+                            commitLight.injectLo[n][a] = Ogre::uint32(l / 4 * 4);
+                            commitLight.injectHi[n][a] = Ogre::uint32(std::min(res, (h + 3) / 4 * 4));
+                        }
+                        ++n;
+                    };
+                    for (int a = 0; a < 3; ++a) {
+                        if (c.scroll.shift[a] == 0) continue;
+                        const int kLo = int(c.scroll.keepLo[a]), kHi = int(c.scroll.keepHi[a]);
+                        if (kHi < res) {   // the slab at the far end, the trailing face at 0
+                            box(a, kHi - reach, res);
+                            box(a, 0, reach);
+                        } else {           // the slab at 0, the trailing face at the far end
+                            box(a, 0, kLo + reach);
+                            box(a, res - reach, res);
+                        }
+                    }
+                }
             }
             if (!injectCascade(idx, scrollLight ? &commitLight : nullptr))
                 OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
@@ -5309,7 +5355,15 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                 for (const VctCascade::Scroll::Slab &sl : c.scroll.slabs)
                     slabCells += (unsigned long long)(sl.hi[0] - sl.lo[0]) * (sl.hi[1] - sl.lo[1]) * (sl.hi[2] - sl.lo[2]);
                 for (int a = 0; a < 3; ++a) regionCells *= (unsigned long long)(c.scroll.passHi[a] - c.scroll.passLo[a]);
+                unsigned long long injectCells = 0;
+                for (Ogre::uint32 b = 0; b < commitLight.numInjectBoxes; ++b) {
+                    unsigned long long v = 1;
+                    for (int a = 0; a < 3; ++a) v *= (unsigned long long)(commitLight.injectHi[b][a] - commitLight.injectLo[b][a]);
+                    injectCells += v;
+                }
+                if (!commitLight.numInjectBoxes) injectCells = (unsigned long long)c.resolution * c.resolution * c.resolution;
                 c.commitSlabCells += slabCells;
+                c.commitInjectCells += injectCells;
                 c.commitRegionCells += regionCells;
                 c.commitPasses += (unsigned long long)cascadeBounces(idx) + (mGi.numBounces > 0 ? 1u : 0u);
                 // ...AND EVERY CASCADE INSIDE IT, AS A DELTA, WITH NO PASS: their shadow marches cross this cascade's
@@ -5422,46 +5476,24 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
 // (how far the volume is from describing where the camera is), a clock is not.
 static const float kStepHysteresis = 0.1f;
 
-// THE INCREMENTAL SCROLL'S BUDGET (ENGINE-UPGRADE-U5 stage 1; the lead's decision 1: "<= 16 ms of
-// voxelisation per frame in Debug on Bistro"). A scroll's entering slab is cut into chunks and the
-// chunks into frames so that no frame's voxelisation exceeds kScrollBudgetMs of GPU time - a cost
-// ESTIMATED ON THE CPU before anything is dispatched, from what the scene is, never from a clock, so
-// the same scene and the same walk cut the same chunks into the same frames on every run (the
-// hashes, and "tests count frames"). The estimate is the voxeliser's own loop (Voxelizer_piece_cs.any):
-// every 4^3 group of a dispatch walks the records whose box reaches it and votes over their
-// triangles in batches of 64. An instance spanning G groups of the volume, cut into partitions of at
-// most kIndicesPerPartition / 3 = 667 triangles, costs each of its groups at least one partition's
-// worth and, all together, at least all of its triangles once - a dense mesh inside a few groups of a
-// coarse cascade pays its whole count in each (measured on Bistro's walk: the first form alone put a
+// THE INCREMENTAL SCROLL'S SPREAD (PHOTON-7 stage 2; PREFLIGHT_1_2 §5.6): a scroll's entering slab is cut into chunks
+// and the chunks into A COUNT of frames - giCascadeScrollFrames: the cascade's motion slack walked at 1.4 m/s, the
+// commit's frame after them - its units split EVENLY over them (no per-frame cap: a frame's GPU is the walking row's
+// measurement). The 16 ms budget that preceded it (a millisecond model of the units, a clock in all but name) is gone.
+// THE UNITS ARE THE FORM THAT SPLITS A SLAB, estimated on the CPU from what the scene is, never from a clock, so the
+// same scene and the same walk cut the same chunks into the same frames on every run (the hashes, "tests count
+// frames"). The estimate is the voxeliser's own loop (Voxelizer_piece_cs.any): every 4^3 group of a dispatch walks
+// the records whose box reaches it and votes over their triangles in batches of 64. An instance spanning G groups of
+// the volume, cut into partitions of at most kIndicesPerPartition / 3 = 667 triangles, costs each of its groups at
+// least one partition's worth and, all together, at least all of its triangles once - a dense mesh inside a few
+// groups of a coarse cascade pays its whole count in each (measured on Bistro's walk: the first form alone put a
 // 440 ms slab of cascade 2 into one frame):
 //
 //     units(box) = sum over the GI instances reaching `box` of
 //                  max( g x min(T, 667), T x g / G ),   g = its groups inside `box`, G = all of them
 //
-// with T the instance's finest level's triangle count (the gather's level rule only coarsens, so this
-// is an upper bound). A unit's GPU cost then GROWS WITH THE CELL: a coarse cascade's group holds more
-// of every triangle, so more of each triangle's clips land in it. MEASURED on Bistro's walk with the
-// stage-2 partition (a triangle per lane; 1,422 chunk rows of all four cascades, GPU ms against
-// units): the 90th percentile of ms per unit is 9.13e-6 / 2.33e-5 / 5.34e-5 / 2.22e-4 at cells of
-// 0.078 / 0.156 / 0.469 / 1.875 m, which is
-//
-//     ms per unit = kScrollMsPerUnit x ( cell / kScrollCellRef ) ^ kScrollCellPower     (a log fit)
-//
-// THE UNIT COST IS THAT FORMULA OF THE CELL SIZE AND NEVER A CLOCK (the reader's ruling, decision 11 e):
-// the spread is a pure function of the scene and the camera's path - deterministic per scene - which
-// is why every selftest scroll lands in the frame it always did and the six hashes hold. A GPU time
-// fed back into the budget would make the frames a scroll takes depend on the box's load: a review red.
-//
-// The 90th percentile and not the median: the budget is a ceiling - a frame above it is the jerk this
-// exists to remove. The commit's copies and the census gather are outside it (well under a
-// millisecond); the light injection of the commit frame is whole (12-26 ms on Bistro), as it is for a
-// whole rebuild.
-static const double kScrollBudgetMs = 16.0;
-static const double kScrollMsPerUnit = 1.01e-5;
-static const double kScrollCellRef = 0.078125;
-static const double kScrollCellPower = 0.97;
-/// The gather's octant cap: a frame's chunks are one gather's octants.
-static const size_t kScrollChunksPerFrame = 8u;
+// with T the instance's finest level's triangle count (the gather's level rule only coarsens, so this is an upper
+// bound).
 /// The triangles one record carries at most (a partition: PhotonVoxelizer::kIndicesPerPartition / 3).
 static const double kScrollRecordTriangles = 667.0;
 
@@ -5625,13 +5657,23 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
     // single groups raised the frames over 100 ms (29 -> 47), the spread (c3: 16 -> 206 frames) and
     // the total GPU per scroll, and left the tail where it was: the dense group's serial loop is
     // the voxeliser's per-voxel cost, stage 2's subject.
-    double budgetMs = kScrollBudgetMs;
-    if (mEngine && mEngine->armRegistry().value(ArmId::GiScrollBudget) > 0.0)
-        budgetMs = mEngine->armRegistry().value(ArmId::GiScrollBudget);
-    const double budget =
-        budgetMs / (kScrollMsPerUnit * std::pow(double(cell) / kScrollCellRef, kScrollCellPower));
+    // THE COUNT: the chunk frames this cascade's scroll spreads over (gi.scrollFrames forces one: the spread arms),
+    // at most one per 4-cell layer of its slabs.
+    int frameCount = 0;
+    {
+        GiParams::GiCascadeDesc desc;
+        desc.halfSize = c.halfSize;
+        desc.resolution = c.resolution;
+        desc.stepCells = c.stepCells;
+        frameCount = giCascadeScrollFrames(desc);
+        if (mEngine && mEngine->armRegistry().value(ArmId::GiScrollFrames) >= 1.0)
+            frameCount = int(mEngine->armRegistry().value(ArmId::GiScrollFrames));
+    }
     const auto groupsOf = [](const Box &b, int k) { return (b.hi[k] + 3) / 4 - b.lo[k] / 4; };
-    const auto cut = [&](const Box &b) {
+    // THE LAYERS: each slab cut along its longest axis into layers one 4-cell group thick (on the volume's own group
+    // lattice), each with its units.
+    struct Layers { int axis = -1; int g0 = 0; std::vector<double> units; };
+    const auto layersOf = [&](const Box &b) {
         int ax = -1;
         for (int k = 0; k < 3; ++k)
             if (groupsOf(b, k) > 1 && (ax < 0 || b.hi[k] - b.lo[k] > b.hi[ax] - b.lo[ax])) ax = k;
@@ -5660,53 +5702,80 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
             const long long first = std::max<long long>(gl[axis], g0), last = std::min<long long>(gh[axis], g1 - 1);
             for (long long q = first; q <= last; ++q) layer[size_t(q - g0)] += w;
         }
-        const auto emit = [&](const Box &cb, double units) {
-            VctCascade::Scroll::Chunk ch;
-            ch.x = Ogre::uint32(cb.lo[0]); ch.y = Ogre::uint32(cb.lo[1]); ch.z = Ogre::uint32(cb.lo[2]);
-            ch.w = Ogre::uint32(cb.hi[0] - cb.lo[0]); ch.h = Ogre::uint32(cb.hi[1] - cb.lo[1]);
-            ch.d = Ogre::uint32(cb.hi[2] - cb.lo[2]);
-            ch.units = units;
-            // WHERE ITS VOXELS GO: its slab's layout in the scratch - the cell (its slab's axis first, the two others
-            // in increasing order) minus the slab's corner, from the slab's first layer (PhotonVoxelScroll.h).
-            const int pa = b.axis, pb = b.axis == 0 ? 1 : 0, pc = b.axis == 2 ? 1 : 2;
-            ch.storeAxis = Ogre::uint32(b.axis);
-            ch.storeBase[0] = b.layer - b.lo[pa];
-            ch.storeBase[1] = -b.lo[pb];
-            ch.storeBase[2] = -b.lo[pc];
-            sc.units += units;
-            sc.chunks.push_back(ch);
-        };
-        if (ax < 0) { emit(b, layer[0]); return; }   // one group: the grain
-        for (size_t jl = 0; jl < layer.size();) {
+        Layers out;
+        out.axis = ax;
+        out.g0 = g0;
+        out.units = std::move(layer);
+        return out;
+    };
+    std::vector<Layers> slabLayers;
+    double totalUnits = 0.0;
+    size_t totalLayers = 0;
+    for (const Box &b : slabs) {
+        slabLayers.push_back(layersOf(b));
+        for (double u : slabLayers.back().units) totalUnits += u;
+        totalLayers += slabLayers.back().units.size();
+    }
+    frameCount = std::max(1, std::min(frameCount, int(std::max<size_t>(totalLayers, 1u))));
+    // THE CHUNKS AND THEIR FRAMES: a layer goes to the frame its slab's units reach by the time it starts -
+    // frame = floor( frameCount x (units before it) / total ) - so the units split evenly over the count and no
+    // scroll takes more frames than it; consecutive layers of a slab in one frame are one chunk (at most one chunk
+    // per slab a frame: within the gather's eight). THE COMMIT IS THE FRAME AFTER THE LAST CHUNK FRAME, its own.
+    // A scroll with nothing to voxelise (no units) builds its chunks in the commit's frame: one frame.
+    std::vector<size_t> chunkFrame;
+    const auto emit = [&](const Box &b, const Box &cb, double units, size_t frame) {
+        VctCascade::Scroll::Chunk ch;
+        ch.x = Ogre::uint32(cb.lo[0]); ch.y = Ogre::uint32(cb.lo[1]); ch.z = Ogre::uint32(cb.lo[2]);
+        ch.w = Ogre::uint32(cb.hi[0] - cb.lo[0]); ch.h = Ogre::uint32(cb.hi[1] - cb.lo[1]);
+        ch.d = Ogre::uint32(cb.hi[2] - cb.lo[2]);
+        ch.units = units;
+        // WHERE ITS VOXELS GO: its slab's layout in the scratch - the cell (its slab's axis first, the two others
+        // in increasing order) minus the slab's corner, from the slab's first layer (PhotonVoxelScroll.h).
+        const int pa = b.axis, pb = b.axis == 0 ? 1 : 0, pc = b.axis == 2 ? 1 : 2;
+        ch.storeAxis = Ogre::uint32(b.axis);
+        ch.storeBase[0] = b.layer - b.lo[pa];
+        ch.storeBase[1] = -b.lo[pb];
+        ch.storeBase[2] = -b.lo[pc];
+        sc.units += units;
+        sc.chunks.push_back(ch);
+        chunkFrame.push_back(frame);
+    };
+    const auto frameAt = [&](double unitsBefore) {
+        if (!(totalUnits > 0.0)) return size_t(0);
+        return size_t(std::min<double>(double(frameCount - 1), std::floor(double(frameCount) * unitsBefore / totalUnits)));
+    };
+    double before = 0.0;
+    for (size_t si = 0; si < slabs.size(); ++si) {
+        const Box &b = slabs[si];
+        const Layers &L = slabLayers[si];
+        if (L.axis < 0) {   // one group: the grain
+            emit(b, b, L.units[0], frameAt(before));
+            before += L.units[0];
+            continue;
+        }
+        for (size_t jl = 0; jl < L.units.size();) {
+            const size_t f = frameAt(before);
             double units = 0.0;
             size_t j1 = jl;
-            while (j1 < layer.size() && (j1 == jl || units + layer[j1] <= budget)) units += layer[j1++];
+            for (; j1 < L.units.size() && frameAt(before + units) == f; ++j1) units += L.units[j1];
             Box cb = b;
-            cb.lo[axis] = std::max(b.lo[axis], (g0 + int(jl)) * 4);
-            cb.hi[axis] = std::min(b.hi[axis], (g0 + int(j1)) * 4);
-            emit(cb, units);
+            cb.lo[L.axis] = std::max(b.lo[L.axis], (L.g0 + int(jl)) * 4);
+            cb.hi[L.axis] = std::min(b.hi[L.axis], (L.g0 + int(j1)) * 4);
+            emit(b, cb, units, f);
+            before += units;
             jl = j1;
         }
-    };
-    for (const Box &b : slabs) cut(b);
-    // THE FRAMES: consecutive chunks while their units fit the budget, at most the gather's eight.
-    // A scroll with no slab (a shift of nothing) is one frame: the copy and the commit.
-    {
-        double units = 0.0;
-        size_t n = 0;
-        for (size_t k = 0; k < sc.chunks.size(); ++k) {
-            if (n && (units + sc.chunks[k].units > budget || n == kScrollChunksPerFrame)) {
-                sc.frameEnd.push_back(k);
-                units = 0.0;
-                n = 0;
-            }
-            units += sc.chunks[k].units;
-            ++n;
-        }
-        sc.frameEnd.push_back(sc.chunks.size());
     }
+    // THE FRAMES: the chunks come in frame order (the units before them only grow); a frame no layer starts in is
+    // skipped, then the commit's own frame (none when there was nothing to voxelise: the chunks are its).
+    for (size_t k = 0; k < sc.chunks.size(); ++k)
+        if (k + 1 == sc.chunks.size() || chunkFrame[k + 1] != chunkFrame[k]) sc.frameEnd.push_back(k + 1);
+    if (totalUnits > 0.0 || sc.frameEnd.empty()) sc.frameEnd.push_back(sc.chunks.size());
     sc.active = true;
     c.scroll = std::move(sc);
+    // THE COMMIT'S SHADER, ASKED FOR NOW (ASYNC-SHADERS-1): the delta injection's permutation is built in the background
+    // over the chunk frames, never in the commit's frame (the commit waits a frame while it is still building).
+    if (c.lighting) c.lighting->commitLightReady();
     return true;
 }
 
@@ -5972,6 +6041,7 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
             c.held = false;
         }
         if (moved || jumped) {
+            if (!c.lagFrom) c.lagFrom = giWriterFrame();   // the lag's first frame (served at the rebuild)
             // A SCROLL CLAIMS A PENDING FLAG AN EDIT MAY ALREADY HAVE RAISED —
             // and the work is the same one rebuild either way. The REASON,
             // though, is the edit's: a capture must not read "the camera did
@@ -6029,10 +6099,35 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
     // the innermost - so with N cascades pending each is served within N frames of its mark, a scroll's
     // chunks and an edit's rebuild alike; and a cascade served while it stays owed (a drag re-marks it
     // every frame; a scroll in flight) is re-stamped, so it waits its turn behind the others.
+    // THE RESERVED SLOT (PHOTON-7 stage 2; PREFLIGHT_1_2 §5.5): CASCADE 0 FIRST, INTO ITS OWN SLOT, whenever it owes
+    // work - a scroll's chunks, its commit, an edit's whole rebuild - so the box the walker stands in is never queued
+    // behind the outer cascades (its lag is its scroll's own count: giCascadeScrollFrames). c1..cN by age into the
+    // general slot; the field's follow and the settle take the general slot only.
+    // THE ONE-WRITER RULE between the slots: an outer COMMIT re-injects cascade 0 (a delta, the same frame), so a frame
+    // whose reserved slot commits or rebuilds cascade 0 gives the general slot only an outer scroll's CHUNK frame
+    // (an outer commit or whole rebuild waits a frame).
+    bool c0Writes = false;
+    if (mVctPendingMaterialSlots.empty() && !mVctCascades.empty()) {
+        VctCascade &c = mVctCascades[0];
+        if (c.pending && c.editSince != giWriterFrame()) {
+            const bool cameraOnly = c.built && !c.jumped && !c.liveTorn && c.pendingReason == GiStaleReason::Camera;
+            if (c.scroll.active || cameraOnly) {
+                if (!mVctMaterialRefreshOwed && (c.scroll.active || planScroll(0, camPos))) {
+                    w.reserved0 = true;
+                    w.scroll0 = true;
+                } else if (!mVctMaterialRefreshOwed) {
+                    w.reserved0 = true;   // a camera move no scroll can carry: a whole rebuild
+                }
+            } else {
+                w.reserved0 = true;
+            }
+            c0Writes = w.reserved0 && (!w.scroll0 || c.scroll.frame + 1u >= c.scroll.frames());
+        }
+    }
     if (!w.follow && mVctPendingMaterialSlots.empty()) {
         // The candidates, oldest first (a stable sort keeps the innermost first among equals).
         std::vector<size_t> order;
-        for (size_t i = 0; i < mVctCascades.size(); ++i)
+        for (size_t i = 1; i < mVctCascades.size(); ++i)
             if (mVctCascades[i].pending && mVctCascades[i].editSince != giWriterFrame()) order.push_back(i);
         std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
             return mVctCascades[a].pendingSince < mVctCascades[b].pendingSince;
@@ -6041,10 +6136,12 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
             VctCascade &c = mVctCascades[i];
             if (c.scroll.active) {
                 if (mVctMaterialRefreshOwed) continue;
+                if (c0Writes && c.scroll.frame + 1u >= c.scroll.frames()) continue;   // its commit waits a frame
                 w.rebuild = int(i);
                 w.scroll = true;
                 break;
             }
+            if (c0Writes) continue;   // a new scroll's plan or a whole rebuild waits a frame
             const bool cameraOnly = c.built && !c.jumped && !c.liveTorn &&
                                     c.pendingReason == GiStaleReason::Camera;
             if (cameraOnly) {
@@ -6072,7 +6169,8 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
     }
 
     // ---- 1. WHO MOVED, AND DID ANYTHING JUMP? ------------------------------
-    bool spent = followPaid;
+    bool spent = followPaid;          // the GENERAL slot
+    bool reservedWork = false;        // cascade 0's reserved slot did work this frame
     // ...AND WHETHER A CASCADE REALLY WAS RE-VOXELISED (fix round item 4): a
     // rebuild that threw BEFORE its swap put its placement back and voxelised
     // nothing, so it owes no settle even though the frame was spent on it.
@@ -6086,14 +6184,18 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         if (!c.pending) continue;
         // AN EDIT IS VOXELISED ONCE THE TABLE CARRIES IT (editSince): not in the frame that first
         // marked it - this frame's table is the last frame's commit.
-        if (spent || int(i) != w.rebuild || c.editSince == giWriterFrame() || !mVctPendingMaterialSlots.empty()) {
+        // THE TWO SLOTS: cascade 0's reserved one (planCascades), and the general one (the follow may have spent it).
+        const bool reserved = i == 0u && w.reserved0;
+        if ((!reserved && (spent || int(i) != w.rebuild)) || c.editSince == giWriterFrame() ||
+            !mVctPendingMaterialSlots.empty()) {
             ++mCascadeDeferrals;
             continue;
         }
+        const bool slotScroll = reserved ? w.scroll0 : w.scroll;
         // A SCROLL'S CHUNK FRAME (ENGINE-UPGRADE-U5 stage 1): the chunks the budget holds this frame,
         // built into the target. Nothing the readers sample changes; the frame is spent. The LAST
         // frame of a scroll is its commit and takes the rebuild below, like a whole rebuild.
-        if (w.scroll && c.scroll.active && c.scroll.frame + 1u < c.scroll.frames()) {
+        if (slotScroll && c.scroll.active && c.scroll.frame + 1u < c.scroll.frames()) {
             const auto t0 = std::chrono::steady_clock::now();
             monitor::CacheScope row(CacheKind::Gi, monitor::reasonOf(GiStaleReason::Camera),
                                     (unsigned long long)i, kScrollRowNames[std::min(i, size_t(7))],
@@ -6127,7 +6229,15 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
                 // (A TORN STORE IS NEVER STOOD DOWN, decision 12.1: it stays owed its whole rebuild.)
                 if (++c.failures >= 2u && !c.liveTorn) { c.pending = 0; c.pendingSince = 0; holdCascade(c, camPos); }
             }
-            spent = true;
+            if (!reserved) spent = true;
+            reservedWork = reservedWork || reserved;
+            continue;
+        }
+        // A SCROLL'S COMMIT WAITS FOR ITS SHADER (ASYNC-SHADERS-1): the delta injection's permutation is the background
+        // compiler's while it is building - the commit, and nothing of it, is held a frame (the slot is not spent).
+        if (slotScroll && c.scroll.active && c.lighting && !c.lighting->commitLightReady()) {
+            ++mCascadeDeferrals;
+            ++mCommitShaderWaits;
             continue;
         }
         // THE PLACEMENT, SAVED BEFORE IT MOVES (audit B4). recentreCascade
@@ -6140,7 +6250,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         const bool wasJumped = c.jumped;
         // A SCROLL'S COMMIT places the cascade itself, at the target it was planned for and only once
         // the target is in the live volumes (stepScroll); a whole rebuild is placed here.
-        const bool scrollCommit = w.scroll && c.scroll.active;
+        const bool scrollCommit = slotScroll && c.scroll.active;
         if (!scrollCommit) recentreCascade(c, camPos);
         // THE MONITOR'S REASON IS THE CAMERA (audit B12/D5): this work was
         // caused by walking, not by an edit, and `mLastStaleReason` — the last
@@ -6183,7 +6293,8 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
                 rebuilt = true;                        // those voxels ARE new...
                 staleTop = std::max(staleTop, (long long)i);   // ...and their light is not
             }
-            spent = true;                          // the frame paid for it either way
+            if (!reserved) spent = true;           // the slot paid for it either way
+            reservedWork = reservedWork || reserved;
             // ...otherwise `pending` stays set. A TORN store is never stood down AS IT IS (decision 12.1): after
             // its second failed whole rebuild its volumes are CLEARED and it stands down then (decision 14.8:
             // bounded - a rebuild that cannot succeed no longer spends the GI budget every frame for ever;
@@ -6231,8 +6342,15 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         // in between reads probes integrated where the field still says it is:
         // one step of staleness, never a wrong place.
         if (i == 0u) oweCascade0FieldFollow(reason);
-        spent = true;
+        if (!reserved) spent = true;
+        reservedWork = reservedWork || reserved;
         rebuilt = true;
+        // THE LAG SERVED: the cascade is placed for the camera (a camera debt still owed starts a new one).
+        if (c.lagFrom) {
+            c.lagLast = giWriterFrame() - c.lagFrom;
+            c.lagMax = std::max(c.lagMax, c.lagLast);
+            c.lagFrom = 0;
+        }
         // A SCROLL'S COMMIT OWES NO SETTLE (PHOTON-7 stage 2): the cascades inside it were re-injected as deltas in
         // its own frame (rebuildCascade) - a settle's whole re-injections would reset their bounces.
         if (!scrollCommit) staleTop = std::max(staleTop, (long long)i - 1);
@@ -6242,7 +6360,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
     // build time and went stale on the first scroll, which made every reader
     // (the status verb, the mirror's GI-volume box, a capture) describe where
     // the lighting used to be.
-    if (spent && !mVctCascades.empty())
+    if ((spent || reservedWork) && !mVctCascades.empty())
         mGiLitVolume = Ogre::Aabb(mVctCascades.back().centre,
                                   Ogre::Vector3(mVctCascades.back().halfSize));
 

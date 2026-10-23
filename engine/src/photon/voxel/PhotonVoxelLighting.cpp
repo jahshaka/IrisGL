@@ -248,6 +248,7 @@ namespace Ogre
         mInjectChainRes = mShaderParams->findParameter( "chainRes" );
         mInjectKeepLo = mShaderParams->findParameter( "keepLo" );
         mInjectKeepHi = mShaderParams->findParameter( "keepHi" );
+        mInjectOrigin = mShaderParams->findParameter( "injectOrigin" );
 
         RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
         VaoManager *vaoManager = renderSystem->getVaoManager();
@@ -907,9 +908,9 @@ namespace Ogre
         /// `levelRes` - its first texel as the job's regionOrigin and its 4^3 groups set by hand (the jobs are shared:
         /// the count is asserted per dispatch).
         void setRegionGrid( HlmsComputeJob *job, ShaderParams::Param *origin, const uint32 *regionLo,
-                            const uint32 *regionHi, uint32 cellsPerTexel, const uint32 levelRes[3] )
+                            const uint32 *regionHi, uint32 cellsPerTexel, const uint32 levelRes[3], uint32 w = 0u )
         {
-            uint32 lo[4] = { 0u, 0u, 0u, 0u }, n[3];
+            uint32 lo[4] = { 0u, 0u, 0u, w }, n[3];
             for( int a = 0; a < 3; ++a )
             {
                 uint32 l = 0u, h = levelRes[a];
@@ -1486,87 +1487,16 @@ namespace Ogre
         mInjectChainOrigin->setManualValue( chainOrigin, 4u * chainLength );
         mInjectChainRes->setManualValue( chainRes, 4u * chainLength );
 
-        // PHOTON-7 stage 2: A SCROLL'S COMMIT re-injects the direct term AS A DELTA (setCommitLight): the total, the
-        // back and both direct terms are READ as well as written (their old values are the shift's), so those four
-        // slots are bound read-write - the barrier solver then makes the shift's writes visible to the reads (a
-        // write-only slot gets no read visibility); the voxels lit are counted into the commit counter, the last UAV.
-        const bool delta = mCommit.on && mCommit.delta && mLightDirect && mCommitCountBuf;
-        const ResourceAccess::ResourceAccess deltaAccess = delta ? ResourceAccess::ReadWrite : ResourceAccess::Write;
-
-        DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
-        uavSlot.access = deltaAccess;
-        uavSlot.texture = mLightVoxel[0];
-        uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
-        mLightInjectionJob->_setUavTexture( 0, uavSlot );
-
-        // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): THE SAME DISPATCH WRITES THE DIRECT TERM TWICE -- once
-        // into the running total the bounce gathers from, once into the volume the
-        // bounce's fixed point needs as its D term. It is one extra image store per
-        // voxel inside a job that already walks every light's shadow ray per voxel;
-        // no copy, no second dispatch, no encoder switch.
-        //
-        // RE-ASSERTED PER INJECTION, both the property and the slot:
-        // "VCT/LightInjection" is ONE
-        // HlmsComputeJob shared by name by every PhotonVoxelLighting in the process, and the
-        // state in force belongs to whoever touched it last. A cascade with bounces
-        // and a volume without them would otherwise take each other's UAV count --
-        // and an unbound u1 on a shader that declares it is a dead descriptor.
-        // The count is change-guarded because setNumUavUnits() invalidates the PSO
-        // cache hash unconditionally.
-        //
-        // Jahshaka (PHOTON-VOXEL-5; every tier since PHOTON-MARCH-1): the same dispatch writes level 0's
-        // BACK side, the back's direct term (with a bounce) and the directional volumes' level 0
-        // (the fused step 0: from each voxel's light per half-axis) - into the volumes themselves
-        // without a bounce, into the direct part's own volumes with one (step 0 adds the bounce's
-        // part after every bounce). The slots follow u0 in LightInjection_cs.glsl's order.
-        const uint8 numUavsNeeded =
-            uint8( 1u + ( mLightDirect ? 1u : 0u ) + ( mLightDirect ? 5u : 4u ) + ( delta ? 1u : 0u ) );
-        if( mLightInjectionJob->getNumUavUnits() != numUavsNeeded )
-            mLightInjectionJob->setNumUavUnits( numUavsNeeded );
-        mLightInjectionJob->setProperty( "vct_keep_direct", mLightDirect ? 1 : 0 );
-        {
-            const int32 d = delta ? 1 : 0;
-            if( mLightInjectionJob->getProperty( "jah_inject_delta" ) != d )
-                mLightInjectionJob->setProperty( "jah_inject_delta", d );
-        }
-        uint8 uavIdx = 1u;
-        if( mLightDirect )
-        {
-            uavSlot.texture = mLightDirect;
-            uavSlot.pixelFormat = jahLightVoxelUavFormat();
-            mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
-        }
-        uavSlot.texture = mLightVoxel[backIndex()];
-        uavSlot.pixelFormat = jahLightVoxelUavFormat();
-        mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
-        if( mLightDirect )
-        {
-            uavSlot.texture = mLightDirectBack;
-            uavSlot.pixelFormat = jahLightVoxelUavFormat();
-            mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
-        }
-        uavSlot.access = ResourceAccess::Write;   // the directional level 0: written whole
-        for( uint8 i = 0u; i < 3u; ++i )
-        {
-            uavSlot.texture = mLightDirect ? mLightDirectDir[i] : mLightVoxel[i + 1u];
-            uavSlot.pixelFormat = jahLightVoxelUavFormat();
-            mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
-        }
+        const bool delta = mCommit.on && mCommit.light.delta && mLightDirect && mCommitCountBuf;
+        bindInjectionUavs( delta );
         {
             int32 keepLo[4] = { 0, 0, 0, 0 }, keepHi[4] = { 0, 0, 0, 0 };
             if( delta )
             {
-                // the counter: cumulative (the readings take differences), the last UAV
-                DescriptorSetUav::BufferSlot bufSlot = DescriptorSetUav::BufferSlot::makeEmpty();
-                bufSlot.buffer = mCommitCountBuf;
-                bufSlot.offset = 0u;
-                bufSlot.sizeBytes = 4u * sizeof( uint32 );
-                bufSlot.access = ResourceAccess::ReadWrite;
-                mLightInjectionJob->_setUavBuffer( uavIdx++, bufSlot );
                 for( int a = 0; a < 3; ++a )
                 {
-                    keepLo[a] = int32( mCommit.keepLo[a] );
-                    keepHi[a] = int32( mCommit.keepHi[a] );
+                    keepLo[a] = int32( mCommit.light.keepLo[a] );
+                    keepHi[a] = int32( mCommit.light.keepHi[a] );
                 }
             }
             mInjectKeepLo->setManualValue( keepLo, 4u );
@@ -1641,7 +1571,18 @@ namespace Ogre
         HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
         {
             const InjectionPhase phase( mPhaseListener, Phase::Direct );
-            jahshaka::engine::detail::photonDispatch( hlmsCompute, mLightInjectionJob, renderSystem );
+            // THE CELLS LIT (PHOTON-7 stage 2): a commit's boxes (the faces its shift moved), else the whole volume.
+            // The groups are set by hand for every dispatch (the job is shared by name).
+            const uint32 res[3] = { mLightVoxel[0]->getWidth(), mLightVoxel[0]->getHeight(),
+                                    mLightVoxel[0]->getDepth() };
+            const uint32 boxes = delta ? mCommit.light.numInjectBoxes : 0u;
+            for( uint32 b = 0u; b < std::max( boxes, 1u ); ++b )
+            {
+                setRegionGrid( mLightInjectionJob, mInjectOrigin, boxes ? mCommit.light.injectLo[b] : nullptr,
+                               boxes ? mCommit.light.injectHi[b] : nullptr, 1u, res, delta && b == 0u ? 1u : 0u );
+                mShaderParams->setDirty();
+                jahshaka::engine::detail::photonDispatch( hlmsCompute, mLightInjectionJob, renderSystem );
+            }
         }
         // THE WORK LAW'S DOOR: the delta injection's count, read back without a wait (takeCommitCount).
         if( delta )
@@ -1683,13 +1624,13 @@ namespace Ogre
         // PHOTON-7 stage 2: at a scroll's commit the sky and the bounces are re-solved over THE SLAB AND ITS BOUNCE REACH
         // only (setCommitLight) - the region's voxels from the sky's direct term up, the rest holding what the shift
         // carried; elsewhere the whole volume.
-        const bool regionPasses = mCommit.on && mCommit.region;
+        const bool regionPasses = mCommit.on && mCommit.light.region;
         // (an empty region - a cascade inside the committed one, re-injected as a delta - runs no pass)
-        const bool noPasses = regionPasses && ( mCommit.regionHi[0] <= mCommit.regionLo[0] ||
-                                                mCommit.regionHi[1] <= mCommit.regionLo[1] ||
-                                                mCommit.regionHi[2] <= mCommit.regionLo[2] );
-        const uint32 *passLo = regionPasses ? mCommit.regionLo : nullptr;
-        const uint32 *passHi = regionPasses ? mCommit.regionHi : nullptr;
+        const bool noPasses = regionPasses && ( mCommit.light.regionHi[0] <= mCommit.light.regionLo[0] ||
+                                                mCommit.light.regionHi[1] <= mCommit.light.regionLo[1] ||
+                                                mCommit.light.regionHi[2] <= mCommit.light.regionLo[2] );
+        const uint32 *passLo = regionPasses ? mCommit.light.regionLo : nullptr;
+        const uint32 *passHi = regionPasses ? mCommit.light.regionHi : nullptr;
         if( skyPass && !noPasses )
         {
             const InjectionPhase phase( mPhaseListener, Phase::Sky );
@@ -1741,21 +1682,108 @@ namespace Ogre
         renderSystem->debugAnnotationPop();
     }
     //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::bindInjectionUavs( bool delta )
+    {
+        // PHOTON-7 stage 2: A SCROLL'S COMMIT re-injects the direct term AS A DELTA (setCommitLight): the total, the
+        // back and both direct terms are READ as well as written (their old values are the shift's), so those four
+        // slots are bound read-write - the barrier solver then makes the shift's writes visible to the reads (a
+        // write-only slot gets no read visibility); the voxels lit are counted into the commit counter, the last UAV.
+        const ResourceAccess::ResourceAccess deltaAccess = delta ? ResourceAccess::ReadWrite : ResourceAccess::Write;
+
+        DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+        uavSlot.access = deltaAccess;
+        uavSlot.texture = mLightVoxel[0];
+        uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
+        mLightInjectionJob->_setUavTexture( 0, uavSlot );
+
+        // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): THE SAME DISPATCH WRITES THE DIRECT TERM TWICE -- once
+        // into the running total the bounce gathers from, once into the volume the
+        // bounce's fixed point needs as its D term. It is one extra image store per
+        // voxel inside a job that already walks every light's shadow ray per voxel;
+        // no copy, no second dispatch, no encoder switch.
+        //
+        // RE-ASSERTED PER INJECTION, both the property and the slot:
+        // "VCT/LightInjection" is ONE
+        // HlmsComputeJob shared by name by every PhotonVoxelLighting in the process, and the
+        // state in force belongs to whoever touched it last. A cascade with bounces
+        // and a volume without them would otherwise take each other's UAV count --
+        // and an unbound u1 on a shader that declares it is a dead descriptor.
+        // The count is change-guarded because setNumUavUnits() invalidates the PSO
+        // cache hash unconditionally.
+        //
+        // Jahshaka (PHOTON-VOXEL-5; every tier since PHOTON-MARCH-1): the same dispatch writes level 0's
+        // BACK side, the back's direct term (with a bounce) and the directional volumes' level 0
+        // (the fused step 0: from each voxel's light per half-axis) - into the volumes themselves
+        // without a bounce, into the direct part's own volumes with one (step 0 adds the bounce's
+        // part after every bounce). The slots follow u0 in LightInjection_cs.glsl's order.
+        const uint8 numUavsNeeded =
+            uint8( 1u + ( mLightDirect ? 1u : 0u ) + ( mLightDirect ? 5u : 4u ) + ( delta ? 1u : 0u ) );
+        if( mLightInjectionJob->getNumUavUnits() != numUavsNeeded )
+            mLightInjectionJob->setNumUavUnits( numUavsNeeded );
+        mLightInjectionJob->setProperty( "vct_keep_direct", mLightDirect ? 1 : 0 );
+        {
+            const int32 d = delta ? 1 : 0;
+            if( mLightInjectionJob->getProperty( "jah_inject_delta" ) != d )
+                mLightInjectionJob->setProperty( "jah_inject_delta", d );
+        }
+        uint8 uavIdx = 1u;
+        if( mLightDirect )
+        {
+            uavSlot.texture = mLightDirect;
+            uavSlot.pixelFormat = jahLightVoxelUavFormat();
+            mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
+        }
+        uavSlot.texture = mLightVoxel[backIndex()];
+        uavSlot.pixelFormat = jahLightVoxelUavFormat();
+        mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
+        if( mLightDirect )
+        {
+            uavSlot.texture = mLightDirectBack;
+            uavSlot.pixelFormat = jahLightVoxelUavFormat();
+            mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
+        }
+        uavSlot.access = ResourceAccess::Write;   // the directional level 0: written whole
+        for( uint8 i = 0u; i < 3u; ++i )
+        {
+            uavSlot.texture = mLightDirect ? mLightDirectDir[i] : mLightVoxel[i + 1u];
+            uavSlot.pixelFormat = jahLightVoxelUavFormat();
+            mLightInjectionJob->_setUavTexture( uavIdx++, uavSlot );
+        }
+        if( delta )
+        {
+            // the counter: cumulative (the readings take differences), the last UAV
+            DescriptorSetUav::BufferSlot bufSlot = DescriptorSetUav::BufferSlot::makeEmpty();
+            bufSlot.buffer = mCommitCountBuf;
+            bufSlot.offset = 0u;
+            bufSlot.sizeBytes = 4u * sizeof( uint32 );
+            bufSlot.access = ResourceAccess::ReadWrite;
+            mLightInjectionJob->_setUavBuffer( uavIdx++, bufSlot );
+        }
+    }
+    //-------------------------------------------------------------------------
+    bool PhotonVoxelLighting::commitLightReady()
+    {
+        // THE COMMIT'S PERMUTATION NEVER COMPILES IN THE FRAME (ASYNC-SHADERS-1): the delta injection's permutation
+        // (jah_inject_delta, the counter's slot) is asked for with the job bound as that injection binds it - and handed
+        // to the background compiler when it is not built. Asked when a scroll is planned (its chunk frames are the
+        // compile's time) and again at its commit, which waits a frame while it is still building. With no
+        // background service the answer is "ready": the dispatch compiles as it always did. (The job's bindings are
+        // the next injection's to re-assert: every update binds every slot.)
+        if( !mLightDirect || !mCommitCountBuf || !mLightInjectionJob )
+            return true;
+        bindInjectionUavs( true );
+        HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
+        return hlmsCompute->requestAsync( mLightInjectionJob ) != HlmsCompute::AsyncPending;
+    }
+    //-------------------------------------------------------------------------
     void PhotonVoxelLighting::setCommitLight( const PhotonCommitLight *commit )
     {
         mCommit = CommitLightState();
         if( !commit )
             return;
         mCommit.on = true;
-        mCommit.delta = commit->delta;
-        mCommit.region = commit->region;
-        for( int a = 0; a < 3; ++a )
-        {
-            mCommit.keepLo[a] = commit->keepLo[a];
-            mCommit.keepHi[a] = commit->keepHi[a];
-            mCommit.regionLo[a] = commit->regionLo[a];
-            mCommit.regionHi[a] = commit->regionHi[a];
-        }
+        mCommit.light = *commit;
+        mCommit.light.numInjectBoxes = std::min( commit->numInjectBoxes, PhotonCommitLight::kMaxInjectBoxes );
     }
     //-------------------------------------------------------------------------
     bool PhotonVoxelLighting::takeCommitCount( uint32 &litInSlab, uint32 &litOutside, uint32 &injections )

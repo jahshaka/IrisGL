@@ -3388,6 +3388,24 @@ inline float giCascadeGuaranteedRadius(const GiParams::GiCascadeDesc &c)
     return c.halfSize - c.stepCells * cell - cell;
 }
 
+/// THE WALKING PACE a scroll is sized for: 1.4 m/s at the engine's fixed 1/60 s frame.
+inline constexpr float kGiWalkMetresPerFrame = 1.4f / 60.0f;
+
+/// THE SCROLL'S SPREAD AS A COUNT (PHOTON-7 stage 2; PREFLIGHT_1_2 §5.6): the chunk frames a scroll of this cascade
+/// may spread its entering slab over before the frame that commits it - as long as the walker stays inside the radius
+/// the cascade must guarantee: its MOTION SLACK (guaranteed - required radius) walked at 1.4 m/s, less the commit's
+/// frame - and the chunk frames and the commit's within one STEP at that pace (the next step must not arrive before
+/// the commit). At least one. Epic / High 3 / 7 / 31 / 641, Medium 9 / 20 / 31 / 641, Low 9 / 213 (gi.scroll_lag
+/// prints them from each tier's resolved chain). It replaces a per-frame millisecond budget (16 ms, a clock): the
+/// spread is a function of the table and the walk, never of the card.
+inline int giCascadeScrollFrames(const GiParams::GiCascadeDesc &c)
+{
+    const float slack = giCascadeGuaranteedRadius(c) - giNearFieldRadius(c);
+    const int bySlack = int(std::floor(slack / kGiWalkMetresPerFrame)) - 1;
+    const int byStep = int(std::floor(c.stepCells * giCascadeCell(c) / kGiWalkMetresPerFrame)) - 1;
+    return std::max(1, std::min(bySlack, byStep));
+}
+
 /// The most cells a cascade may step and still honour the rule, floored at one
 /// cell (a step below one cell re-centres the volume for a fraction of a voxel)
 /// and ceiled by the pin's own guard at half the resolution.
@@ -4532,11 +4550,16 @@ struct GiStatus {
         /// delta injections LIT (wrote: their direct changed) inside the entering slabs (`commitLitSlab`) and outside
         /// them (`commitLitBand`: the changed direct set), read back a few frames late (`commitCounted` = the commits
         /// whose counts landed; a commit of a cascade INSIDE a committed one, re-injected as a delta, counts too); the
-        /// slabs' cells (`commitSlabCells`), the cells one pass of a commit covers (the slab and its bounce reach,
-        /// `commitRegionCells`) and the passes run (`commitPasses`: the sky's and the bounces'). The old commit lit and
-        /// re-solved the whole cascade, resolution^3 a commit.
-        unsigned long long commitLitSlab = 0, commitLitBand = 0, commitSlabCells = 0, commitRegionCells = 0,
-                           commitPasses = 0, commitCounted = 0;
+        /// slabs' cells (`commitSlabCells`), the cells the commit's direct term was COMPUTED over (`commitInjectCells`:
+        /// the faces the shift moved, within the cascade's own-cell march), the cells one pass of a commit covers (the
+        /// slab and its bounce reach, `commitRegionCells`) and the passes run (`commitPasses`: the sky's and the
+        /// bounces'). The old commit lit and re-solved the whole cascade, resolution^3 a commit.
+        unsigned long long commitLitSlab = 0, commitLitBand = 0, commitSlabCells = 0, commitInjectCells = 0,
+                           commitRegionCells = 0, commitPasses = 0, commitCounted = 0;
+        /// THE LAG (PHOTON-7 stage 2): the frames from the frame the camera's step test first owed this cascade a
+        /// move to the rebuild (a scroll's commit, or a whole rebuild) that placed it for the camera - the last one
+        /// and the most since the chain was built.
+        unsigned long long lagLast = 0, lagMax = 0;
         /// THE READINGS BELOW ARE THE DEVICE'S OWN COUNTS (ATOM P4b, A5b §3): the
         /// gather that writes the voxeliser's records on the GPU counts as it
         /// writes, into a small readout collected without a stall and read here.
@@ -4709,6 +4732,9 @@ struct GiStatus {
     /// reached the scroll's target box while its slab was being built, or a step threw. The
     /// cascade then rebuilds (an edit of its live box) or scrolls again from where it stands.
     unsigned long long cascadeScrollAborts = 0;
+    /// Frames a scroll's commit waited for its delta injection's shader, built in the background (PHOTON-7 stage 2:
+    /// never compiled in the commit's frame; 0 where no background compiler runs).
+    unsigned long long cascadeCommitShaderWaits = 0;
     /// Torn cascades stood down with their volumes cleared (decision 14.8; CascadeStatus::tornCleared).
     unsigned long long cascadeTornCleared = 0;
     /// THE SCREEN-PROBE GATHER's own reading (see GatherStatus). `on` false is

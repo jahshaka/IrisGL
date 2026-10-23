@@ -165,6 +165,9 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// a delta injection's count (declared in every permutation, so the job's parameter list is one list).
 	uniform int4 keepLo;
 	uniform int4 keepHi;
+	// PHOTON-7 stage 2: THE REGION a dispatch covers starts at this cell (a multiple of the 4^3 group; 0 = the whole
+	// volume, the groups set by the host); w = 1 on the dispatch that counts the injection (word 2).
+	uniform uint4 injectOrigin;
 	uniform float4 chainOrigin[@value( hlms_num_vct_cascades )];
 	uniform float4 chainRes[@value( hlms_num_vct_cascades )];
 vulkan( }; )
@@ -180,6 +183,7 @@ vulkan( }; )
 #define p_chainRes chainRes
 #define p_keepLo keepLo
 #define p_keepHi keepHi
+#define p_injectOrigin injectOrigin
 #define JAH_INJ_CHAIN @value( hlms_num_vct_cascades )
 
 // Jahshaka (PHOTON-VOXEL-5; the VOXEL-4 audit's F3): THE ONE READER'S RULES for the shadow

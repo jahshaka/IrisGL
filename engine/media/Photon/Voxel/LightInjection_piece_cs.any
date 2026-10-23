@@ -347,12 +347,14 @@
 @piece( BodyCS )
 	//All lights are offsetted by p_voxelOrigin so that we don't
 	//have to do this calculation per cell
-	float3 voxelAabbCenter = p_voxelCellSize * (float3( gl_GlobalInvocationID.xyz ) + 0.5f);
-	const int3 voxelId = int3( gl_GlobalInvocationID.xyz );
+	// PHOTON-7 stage 2: the cell this invocation lights - its id in the dispatch's region plus the region's first cell.
+	const uint3 jahInjCell = gl_GlobalInvocationID.xyz + p_injectOrigin.xyz;
+	float3 voxelAabbCenter = p_voxelCellSize * (float3( jahInjCell ) + 0.5f);
+	const int3 voxelId = int3( jahInjCell );
 
-	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, gl_GlobalInvocationID.xyz, 0 );
-	float4 normalVal = OGRE_Load3D( voxelNormalTex, gl_GlobalInvocationID.xyz, 0 );
-	float4 emissiveVal = OGRE_Load3D( voxelEmissiveTex, gl_GlobalInvocationID.xyz, 0 );
+	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, jahInjCell, 0 );
+	float4 normalVal = OGRE_Load3D( voxelNormalTex, jahInjCell, 0 );
+	float4 emissiveVal = OGRE_Load3D( voxelEmissiveTex, jahInjCell, 0 );
 	// THE SPECULAR LOBE (METAL-BOUNCE-1, ENGINE-POLISH-PHOTON-1 stage 2): its F0 kS (rgb) and Fresnel-90
 	// weight kS (alpha) - EVERY surface's, a dielectric's F0 = 0.04 included (Voxelizer_piece_cs.any);
 	// zero only where nothing is or kS = 0. A lamp at cosine mu reaches the specular lobe as well as the
@@ -360,7 +362,7 @@
 	// (JahSpecularAlbedo): the energy a rough metal, and a dielectric's 4 % layer, scatter back into
 	// the room, which a diffuse-only store dropped.
 	// (The volume holds F0 relative to the dielectric's, Voxelizer_piece_cs.any: F0 kS = 0.04 w + 0.96 rgb.)
-	float4 metalVal = OGRE_Load3D( voxelMetalTex, gl_GlobalInvocationID.xyz, 0 );
+	float4 metalVal = OGRE_Load3D( voxelMetalTex, jahInjCell, 0 );
 	metalVal.xyz = metalVal.www * 0.04f + metalVal.xyz * 0.96f;
 	const bool metalVoxel = metalVal.w > 0.0f;
 
@@ -594,7 +596,7 @@
 		back = front;
 
 	const float3 emissive = emissiveVal.xyz;
-	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz );
+	wshort3 voxelCelUvw = wshort3( jahInjCell );
 	// LEVEL 0 HOLDS THE SIDES' MEAN (a one-sided voxel's light unchanged; the bounce's march reads
 	// it) and the back side beside it (backVoxel, below).
 	float4 injectedVoxel = float4( ( ( front + back ) * 0.5f + emissive ) * c, c );
@@ -623,7 +625,7 @@
 		atomicAdd( jahCommitCount[kept ? 1u : 0u], 1u );
 	}
 	// (word 2: the delta injections themselves - the counter is cumulative, read back without a wait)
-	if( all( equal( voxelId, int3( 0, 0, 0 ) ) ) )
+	if( p_injectOrigin.w != 0u && all( equal( gl_GlobalInvocationID.xyz, uint3( 0u, 0u, 0u ) ) ) )
 		atomicAdd( jahCommitCount[2], 1u );
 @else
 	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( injectedVoxel ) );
@@ -676,7 +678,7 @@
 											jahHalfLight[lb * 6u + hIdx * 3u + axis] );
 		}
 		accumVal *= 0.25f;
-		wshort3 outIUvw = wshort3( gl_WorkGroupID.xyz * 2u + bl );
+		wshort3 outIUvw = wshort3( ( gl_WorkGroupID.xyz + ( p_injectOrigin.xyz >> 2u ) ) * 2u + bl );
 		if( ( dir & 1u ) != 0u )
 			outIUvw.x += p_higherMipHalfWidth;
 		if( axis == 0u )
