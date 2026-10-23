@@ -674,7 +674,7 @@ public:
     /// flush and a whole-volume download — a test and tool path (Engine.h).
     GiVoxelStats giVoxelStats(int cascade);
     bool giFieldAtlas(GiFieldAtlas &out);
-    bool giVoxelVolume(int cascade, GiVoxelVolume &out);
+    bool giVoxelVolume(int cascade, GiVoxelVolume &out, bool lightOnly = false);
     /// AT A RAY TIER THE PROBE GRID IS NOT BUILT (PHOTON-F12-PCC; OgreGi.cpp).
     /// `probeGridByRays` is the rule — the tier's facts say its reflections
     /// are traced (GiQualityFacts::rayReflections) AND this scene traces on
@@ -1185,7 +1185,7 @@ private:
     /// the sun, a sky change, the host's whole relight) re-injected as deltas where the latch allows, then the feedback's
     /// pass over every cascade that owes one (runFeedback: outermost first, then the accumulations and the rules).
     void relightAndFeedback();
-    void runFeedback(bool forceAll, unsigned long long frame);
+    void runFeedback(bool forceAll, unsigned long long frame, size_t forceInner = ~size_t(0));
     /// The feedback's readings that landed (harvest): each cascade's active count and books, and the chain's REST.
     void harvestFeedback();
     /// The feedback owes work: a relight owed, an activation no landed reading answered, or active bricks.

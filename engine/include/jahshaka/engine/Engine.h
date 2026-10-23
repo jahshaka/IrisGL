@@ -1090,6 +1090,11 @@ public:
     /// GiVoxelVolume). False
     /// without a VCT arm or that cascade.
     virtual bool giVoxelVolume(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
+    /// ...ITS TOTAL LIGHT ALONE (PHOTON-7 stage 4) - the same TEST AND TOOL readback (flushes and BLOCKS), one volume:
+    /// `light` (mip 0 of the total, decoded) and the placement (`width`/`height`/`depth`, `origin`, `cell`,
+    /// `available`); every other member left empty. For a law that reads the light of several cascades and arms (the
+    /// whole door decodes a dozen volumes and every directional level).
+    virtual bool giVoxelLight(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
     /// THE CHANGED-REGION LIST AS IT LAST CLOSED (PHOTON-7 stage 3; Types.h GiChangedRegions) - the CPU copy of the
     /// one buffer the consumers bind, no GPU read. False before a list has closed (no frame has drawn the scene).
     virtual bool giChangedRegions(GiChangedRegions &out) { out = GiChangedRegions(); return false; }

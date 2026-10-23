@@ -1960,7 +1960,7 @@ public:
     X(GiVoxelOctants, "gi.voxelOctants") /* a whole build's octants per axis (1 shipped, 2 = 8 octants; stage 2's measure) */ \
     X(GiRebuildCascade, "gi.rebuildCascade") /* cascade N rebuilt whole every frame while set (-1 = none; a measuring door) */ \
     X(GiRegenerateDirectional, "gi.regenerateDirectional") /* cascade N's directional levels regenerated whole from its level 0 every frame while set (-1 = none; a test door) */ \
-    X(GiBounceJacobi, "gi.bounceJacobi") /* the bounces' JACOBI reference: the store restarted from its direct terms where the arm comes on, then every brick a pass every frame while set (a measuring door) */ \
+    X(GiBounceJacobi, "gi.bounceJacobi") /* the bounces' JACOBI reference: the innermost N cascades restarted from their direct terms where the arm comes on (set to N), then every brick of them a pass every frame while set (a measuring door) */ \
     X(ShadowCasterCull, "shadow.casterCull") /* a sun map's Atom casters culled by the light's own depth (0: frustum only, the parity arm) */ \
     X(ShadowLightDepth, "shadow.lightDepth") /* a sun map's light-depth path: its pyramid, the late cut, the receiver grid (0: none of them built, the pre-U5 caster pass) */ \
     X(ShadowCasterPbsProbe, "shadow.casterPbsProbe") /* a sun map's PBS casters TESTED against the light's depth and counted (a measuring door) */ \
@@ -4352,6 +4352,9 @@ public:
     bool giVoxelVolume(int cascade, GiVoxelVolume &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelVolume(cascade, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::giVoxelVolume"); return mPhoton.giVoxelVolume(cascade, out); }
+    bool giVoxelLight(int cascade, GiVoxelVolume &out) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelLight(cascade, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
+        JAH_HOST_CALL("Scene::giVoxelLight"); return mPhoton.giVoxelVolume(cascade, out, true); }
     bool giChangedRegions(GiChangedRegions &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giChangedRegions(out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::giChangedRegions"); out = mPhoton.changedRegions(); return out.available; }

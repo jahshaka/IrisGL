@@ -1222,10 +1222,12 @@ constexpr ArmDef kArms[] = {
       "A TEST DOOR (PHOTON-7 stage 2's read D1, gi.scroll_slab case D): while set to N, cascade N's directional "
       "volumes - every level - are regenerated whole from its level-0 light as it stands (step 0 and step 1), every "
       "frame, nothing else written: a commit's own levels must already equal them. -1 = none." },
-    { ArmId::GiBounceJacobi, 0.0, 0.0, 1.0,
-      "A MEASURING DOOR (PHOTON-7 stage 4, gi.bounce_series): the bounces' JACOBI REFERENCE - on the frame the arm comes "
-      "on every cascade's total is restarted from its direct term (a whole injection), and every frame while it is set "
-      "EVERY brick runs the feedback's pass (no stop): N frames set = N Jacobi passes from the direct term. 0 = shipped." },
+    { ArmId::GiBounceJacobi, 0.0, 0.0, 16.0,
+      "A MEASURING DOOR (PHOTON-7 stage 4, gi.bounce_series): the bounces' JACOBI REFERENCE over the innermost N cascades "
+      "(set to N; the chain's count or more = every cascade) - on the frame the arm comes on their totals are restarted "
+      "from their direct terms (a whole injection), and every frame while it is set EVERY brick of them runs the "
+      "feedback's pass (no stop): F frames set = F Jacobi passes from the direct term; the cascades outside them hold "
+      "their state. 0 = shipped." },
     { ArmId::ShadowCasterCull, 1.0, 0.0, 1.0,
       "THE CASTER CULL BY THE LIGHT'S OWN DEPTH (ENGINE-UPGRADE-U5 stage 4): 1 = shipped, a sun map's Atom "
       "casters are tested against the previous frame's depth pyramid of that map, the rejected tested again "

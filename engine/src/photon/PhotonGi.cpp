@@ -1640,7 +1640,7 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
 
 // ONE CASCADE'S VOXELS, WHOLE (PHOTON-VOXEL-3) — Engine.h. The same blocking
 // contract as giVoxelStats: flush, then a synchronous download of mip 0.
-bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
+bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, bool lightOnly) {
     out = GiVoxelVolume();
     JAH_TRY {
         Ogre::PhotonVoxelLighting *lighting = nullptr;
@@ -1720,7 +1720,20 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
             tm->destroyAsyncTextureTicket(ticket);
             return ok;
         };
-        if (!grab(total, out.light) || !grab(albedo, out.albedo) || !grab(coverage[0], out.coverageP) ||
+        const auto placement = [&]() {
+            out.width = int(total->getWidth());
+            out.height = int(total->getHeight());
+            out.depth = int(total->getDepth());
+            const Ogre::Vector3 o = voxelizer->getVoxelOrigin(), c = voxelizer->getVoxelCellSize();
+            for (int k = 0; k < 3; ++k) { out.origin[k] = o[size_t(k)]; out.cell[k] = c[size_t(k)]; }
+            out.available = true;
+        };
+        if (!grab(total, out.light)) return false;
+        if (lightOnly) {   // Scene::giVoxelLight: the total alone
+            placement();
+            return true;
+        }
+        if (!grab(albedo, out.albedo) || !grab(coverage[0], out.coverageP) ||
             !grab(coverage[1], out.coverageN) || !grab(position[0], out.positionP) ||
             !grab(position[1], out.positionN))
             return false;
@@ -1787,12 +1800,7 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
             for (Ogre::uint8 mip = 0u; mip < dir->getNumMipmaps(); ++mip)
                 if (!grab(dir, out.directional[a][mip], mip)) return false;
         }
-        out.width = int(total->getWidth());
-        out.height = int(total->getHeight());
-        out.depth = int(total->getDepth());
-        const Ogre::Vector3 o = voxelizer->getVoxelOrigin(), c = voxelizer->getVoxelCellSize();
-        for (int k = 0; k < 3; ++k) { out.origin[k] = o[size_t(k)]; out.cell[k] = c[size_t(k)]; }
-        out.available = true;
+        placement();
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -6462,21 +6470,27 @@ void PhotonComponent::relightAndFeedback() {
                 ++c.relights;
             }
         }
-        // THE JACOBI REFERENCE (the measuring door gi.bounceJacobi): restarted from the direct terms where it comes on,
-        // then every brick a pass every frame while it is set.
-        const bool jacobi = mEngine && mEngine->armRegistry().on(ArmId::GiBounceJacobi);
+        // THE JACOBI REFERENCE (the measuring door gi.bounceJacobi, set to N): the innermost N cascades (every one when N
+        // is the chain's count or more) restarted from their direct terms where it comes on, then every brick of them a
+        // pass every frame while it is set; the cascades outside them hold their state (their feedback, at its rest).
+        const double jacobiArm = mEngine ? mEngine->armRegistry().value(ArmId::GiBounceJacobi) : 0.0;
+        const bool jacobi = jacobiArm >= 1.0;
+        const size_t jacobiInner = jacobi ? std::min(n, size_t(jacobiArm)) : 0u;
         if (jacobi && !mJacobiOn) {
-            for (size_t i = 0; i < n; ++i)
+            for (size_t i = 0; i < jacobiInner; ++i)
                 if (mVctCascades[i].lighting && mVctCascades[i].built && !injectedThisFrame(i)) injectCascade(i, nullptr);
         }
         mJacobiOn = jacobi;
         // (3) THE FEEDBACK
-        if (mGi.bounces) runFeedback(sky || mGiFeedbackForceAll || jacobi, frame);
+        if (mGi.bounces) {
+            if (sky || mGiFeedbackForceAll) runFeedback(true, frame);
+            else runFeedback(jacobi, frame, jacobiInner);
+        }
         mGiFeedbackForceAll = false;
     } JAH_CATCH(mError, );
 }
 
-void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame) {
+void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_t forceInner) {
     const size_t n = mVctCascades.size();
     std::vector<char> ran(n, 0);
     bool outerRan = false;
@@ -6484,7 +6498,7 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame) {
         VctCascade &c = mVctCascades[i];
         if (!c.lighting || !c.built) continue;
         Ogre::PhotonFeedbackActivation act;
-        act.all = forceAll || c.fbForce;
+        act.all = (forceAll && i < forceInner) || c.fbForce;
         if (!act.all) {
             // THE REGIONS THAT MEET IT: a lamp's spheres (its direct changed there; whatever sees those walls changes) and
             // an edit's box. (A commit's Slab boxes are not activations - the commit's changed direct terms are the mask's
