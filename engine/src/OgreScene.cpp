@@ -1800,6 +1800,7 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             n.lightNode = n.node->createChildSceneNode();
             n.lightNode->setOrientation(Ogre::Quaternion(Ogre::Radian(-Ogre::Math::HALF_PI), Ogre::Vector3::UNIT_X));
             n.light = mSceneMgr->createLight();
+            SceneLightList::bindDocumentId(n.light, id);   // the light order's last tie (SceneLightList.cpp)
             n.lightNode->attachObject(n.light);
             recountNode(n);
             // Born HIDDEN on a hidden node (or under a hidden ancestor): the

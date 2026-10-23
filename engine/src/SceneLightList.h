@@ -48,9 +48,13 @@ class SceneLightList {
 public:
     struct Entry {
         Ogre::Light *light = nullptr;
-        /// Its index in THE ORDER (peak intensity x range^2 desc, directional first, id asc): 0 = the first.
+        /// Its index in THE ORDER (peak intensity x range^2 desc, directional first, the world's ties): 0 = the first.
         std::uint32_t rank = 0u;
     };
+    /// THE DOCUMENT'S ID OF A LIGHT (the last tie of THE ORDER): the node id OgreScene binds on the Light it creates
+    /// (bindDocumentId; Ogre's UserObjectBindings), 0 for a light no document made.
+    static void bindDocumentId(Ogre::Light *l, unsigned long long id);
+    static unsigned long long documentId(const Ogre::Light *l);
     /// What one consumer reads the list as.
     struct Consumer {
         /// The box the consumer lights (world space); `boxMin > boxMax` on any axis

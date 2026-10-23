@@ -29,6 +29,24 @@ bool isArea(Ogre::Light::LightTypes t) {
 }
 }   // namespace
 
+namespace {
+const Ogre::String &documentIdKey() {
+    static const Ogre::String kKey("jahshaka.node");
+    return kKey;
+}
+}   // namespace
+
+void SceneLightList::bindDocumentId(Ogre::Light *l, unsigned long long id) {
+    if (l) l->getUserObjectBindings().setUserAny(documentIdKey(), Ogre::Any(id));
+}
+
+unsigned long long SceneLightList::documentId(const Ogre::Light *l) {
+    // getUserObjectBindings is not const in Ogre; the read changes nothing.
+    const Ogre::Any &a = const_cast<Ogre::Light *>(l)->getUserObjectBindings().getUserAny(documentIdKey());
+    const unsigned long long *p = a.has_value() ? Ogre::any_cast<unsigned long long>(&a) : nullptr;
+    return p ? *p : 0ull;
+}
+
 float SceneLightList::orderKey(const Ogre::Light *l) {
     if (l->getType() == Ogre::Light::LT_DIRECTIONAL) return std::numeric_limits<float>::infinity();
     const float range = float(l->getAttenuationRange());
@@ -69,17 +87,33 @@ void SceneLightList::refresh(Ogre::SceneManager *sm) const {
             objData.advancePack();
         }
     }
-    // THE ORDER (PHOTON-7 stage 1): peak intensity x range^2 - a directional light first, at +inf - then among
-    // directional lights their peak, the id as the tie. A function of the lights alone.
+    // THE ORDER (PHOTON-7 stage 1): peak intensity x range^2 - a directional light first, at +inf - and its TIES BY
+    // THE WORLD (stage 1's read F3): the world position (x, y, z), then the type, the peak, the range, the colour, the
+    // world direction, and last the document's persistent id (bound on the light by OgreScene) - never Ogre's movable
+    // id, which is creation order: a deleted-and-undone light, or a reload in another node order, flipped an exact tie
+    // and with it the first-K pick and the sum's order. A function of the lights alone; two lights equal in all of it
+    // are the same light twice, and their order changes nothing.
     std::vector<std::uint32_t> order(mEntries.size());
     for (std::uint32_t i = 0; i < order.size(); ++i) order[i] = i;
     std::sort(order.begin(), order.end(), [this](std::uint32_t a, std::uint32_t b) {
         const Ogre::Light *la = mEntries[a].light, *lb = mEntries[b].light;
         const float ka = orderKey(la), kb = orderKey(lb);
         if (ka != kb) return ka > kb;
+        const Ogre::Vector3 xa = la->getParentNode()->_getDerivedPosition(), xb = lb->getParentNode()->_getDerivedPosition();
+        for (int k = 0; k < 3; ++k)
+            if (xa[k] != xb[k]) return xa[k] < xb[k];
+        if (la->getType() != lb->getType()) return la->getType() < lb->getType();
         const float pa = peakPower(la), pb = peakPower(lb);
         if (pa != pb) return pa > pb;
-        return la->getId() < lb->getId();
+        const float ra = float(la->getAttenuationRange()), rb = float(lb->getAttenuationRange());
+        if (ra != rb) return ra < rb;
+        const Ogre::ColourValue ca = la->getDiffuseColour(), cb = lb->getDiffuseColour();
+        for (int k = 0; k < 3; ++k)
+            if (ca[k] != cb[k]) return ca[k] < cb[k];
+        const Ogre::Vector3 da = la->getDerivedDirection(), db = lb->getDerivedDirection();
+        for (int k = 0; k < 3; ++k)
+            if (da[k] != db[k]) return da[k] < db[k];
+        return documentId(la) < documentId(lb);
     });
     mByRank.reserve(order.size());
     for (std::uint32_t r = 0; r < order.size(); ++r) {
