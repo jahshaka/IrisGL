@@ -21,13 +21,14 @@
 //   [1] its last pass's move (relative: the brick mask's word 1, float bits)
 //   [2] r, its measured contraction (float bits; kept over a stop for the resume test)
 //   [3] the would-move ACCUMULATED since its stop, in FIXED POINT: FB_ACC_ONE units a code (uint, saturating). It
-//       decides the resume, so it is an integer sum - exact and independent of the order the source's list was
-//       written in (an atomic counter's order, which differs between runs): a float sum over that order put a
-//       borderline brick's resume on a different frame in another process (gi.walk L1/L2, PHOTON-7 stage 4).
+//       decides the resume, so it is an integer sum across the frames' accumulations - exact, and each accumulation's
+//       float sum runs over a list in the selection's brick-index order (SELECT), never an atomic's order (a float sum
+//       over an atomic's order put a borderline brick's resume on another frame in another process: gi.walk L1/L2).
 //   [4] this frame's pass: the most a voxel's total moved, absolute radiance (float bits; atomicMax by the pass)
 //   [5] the brick's SENSITIVITY: the most of its voxels' re-emission over their own code, codes per unit of radiance
 //       an input moves (float bits; atomicMax by the pass, kept over a stop)
-//   [6], [7] unused
+//   [6] the FRACTION of a unit the last accumulation's rounding left (float bits, in units: carried into the next, so
+//       the fixed point rounds once a brick and never biases - PHOTON-7 stage 4's read R6); [7] unused
 // THE ARGUMENTS, 16 words: [0..2] the bounce's and the copy's groups (8 x the bricks: group y is the brick), [4..6]
 // the directional levels' (1 x the bricks), [8] the bricks listed (passed) this frame, [9] the bricks active at the
 // selection (passed or carried), [12] the bricks active after the frame, [13] stops, [14] resumes, [15] the bricks whose
@@ -86,8 +87,9 @@ vulkan( }; )
 #define FB_PI 3.14159265358979
 // THE RESUME'S FIXED POINT: 2^16 units a code. A code (1 % of the voxel's own radiance over the store's floor) is the
 // rule's own unit and the threshold (1 - r) codes is at least 0.001 of one (r <= 0.999), so a unit is 1/65 of the
-// finest threshold; each term is rounded UP (the sum stays a bound: a resume is never later than the exact rule's)
-// and the 32-bit sum saturates at 65,536 codes, far past every threshold.
+// finest threshold; an accumulation is FLOORED once a brick with the fraction carried (word 6: unbiased - a term
+// rounded up per source brick added a unit a frame per active brick, a resume by age after ~165 frames of activity
+// anywhere, PHOTON-7 stage 4's read R6) and the 32-bit sum saturates at 65,536 codes, far past every threshold.
 #define FB_ACC_ONE 65536.0
 
 // THE SELECTION'S SCRATCH (SELECT, one workgroup of 64): the chunk's prefix sums, the bricks taken so far, the budget,
@@ -215,7 +217,10 @@ void main()
 		if( start )
 		{
 			if( ( flags & 1u ) == 0u )
+			{
 				fbState[s + 3u] = 0u;
+				fbState[s + 6u] = 0u;
+			}
 			flags = 1u;
 		}
 		if( ( flags & 1u ) != 0u )
@@ -250,6 +255,7 @@ void main()
 			{
 				flags = n << 1u;
 				fbState[s + 3u] = 0u;
+				fbState[s + 6u] = 0u;
 				atomicAdd( fbArgs[13], 1u );
 			}
 			else
@@ -265,6 +271,7 @@ void main()
 			{
 				flags = 1u;
 				fbState[s + 3u] = 0u;
+				fbState[s + 6u] = 0u;
 				atomicAdd( fbArgs[14], 1u );
 			}
 		}
@@ -289,7 +296,7 @@ void main()
 		const float area = fbSrc.w * fbSrc.w;
 		const bool own = fbFlags.w != 0u;
 		const uint count = own ? fbArgs[8] : fbSrcArgs[8];
-		uint sum = 0u;
+		float sum = 0.0;   // codes, over the list in its order
 		for( uint k = 0u; k < count; ++k )
 		{
 			const uint3 o = fbUnpack( own ? fbList[k] : fbSrcList[k] );
@@ -303,15 +310,24 @@ void main()
 				continue;
 			const float3 dv = centre - ( oLo + 0.5 * fbSrc.w );
 			const float d2 = max( dot( dv, dv ), area );
-			// this source brick's term, in the fixed point (each a function of its own words only): saturating
-			const float term = ceil( sens * m * min( 1.0, area / ( FB_PI * d2 ) ) * FB_ACC_ONE );
-			const uint q = term < 4294967040.0 ? uint( term ) : 0xFFFFFFFFu;
-			sum = q > 0xFFFFFFFFu - sum ? 0xFFFFFFFFu : sum + q;
+			sum += sens * m * min( 1.0, area / ( FB_PI * d2 ) );
 		}
-		if( sum > 0u )
+		// THE FIXED POINT, ROUNDED ONCE: the sum in units plus the fraction the last rounding left, floored; the new
+		// fraction kept (word 6). Saturating (a sensitivity of 1e30 - a voxel with no radiance of its own - saturates).
+		const float units = sum * FB_ACC_ONE + fbF( fbState[s + 6u] );
+		if( !( units < 4294967040.0 ) )
+		{
+			fbState[s + 3u] = 0xFFFFFFFFu;
+			fbState[s + 6u] = 0u;
+			return;
+		}
+		const float whole = floor( units );
+		fbState[s + 6u] = fbU( units - whole );
+		const uint q = uint( whole );
+		if( q > 0u )
 		{
 			const uint a = fbState[s + 3u];
-			fbState[s + 3u] = sum > 0xFFFFFFFFu - a ? 0xFFFFFFFFu : a + sum;
+			fbState[s + 3u] = q > 0xFFFFFFFFu - a ? 0xFFFFFFFFu : a + q;
 		}
 		return;
 	}
