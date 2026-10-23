@@ -611,6 +611,19 @@ void OgreScene::unindexItemNode(Node &n) {
     // as its PREVIOUS world, i.e. a newborn reprojecting out of another
     // object's grave. Either way the freed entry is copied to the device, so the
     // region past `slotCount()` never holds a traceable ghost.
+    // A SLOT'S DEPARTURE IS A REMOVE (PHOTON-7 stage 3's read F2): the object leaving slot i - deleted, its item
+    // detached or replaced - is listed GONE at its last box with its shadows (the changed-region list's Mover kind and
+    // its MoverShadow / LampShadow: listMover), whatever its class, before the slot is freed or the tail moves into it -
+    // the ray tier's consumers key on the slot and the world it held. (A slot the tail's object moves into is that
+    // object's ADD at its own box: the GPU scene's compose re-stages it this frame and the ray tier lists it.)
+    if (mGpuScene.live() && i < mGpuScene.slotCount()) {
+        const detail::GpuInstance &g = mGpuScene.mirrorData()[i];
+        uint32_t flags;
+        std::memcpy(&flags, &g.boundsMax[3], sizeof(flags));
+        listGiMover(Ogre::Aabb::newFromExtents(Ogre::Vector3(g.boundsMin[0], g.boundsMin[1], g.boundsMin[2]),
+                                               Ogre::Vector3(g.boundsMax[0], g.boundsMax[1], g.boundsMax[2])),
+                    (flags & detail::kGpuCaster) != 0u);
+    }
     if (mGpuScene.live()) {
         if (last != &n) {
             mGpuScene.onSlotMoved(uint32_t(mItemNodes.size()), uint32_t(i));
