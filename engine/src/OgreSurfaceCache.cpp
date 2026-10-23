@@ -1893,17 +1893,22 @@ void SurfaceCache::relightCards() {
 
     // ---- THE LAMPS' VISIBILITY (PHOTON-7 stage 5, 5-3): every relit card's texels traced toward the list's point and
     // spot lights (rq_card_movers.comp's lamps mode, from the lifted point the still sun trace uses), into the SunVis
-    // layer's green, before the relight multiplies its lamps by it. A card the trace could not reach this frame (no
-    // structure yet, the ray rule's footprint not chosen) is lit unshadowed by its lamps, flagged in its record's
-    // float 19 - never by a visibility another frame wrote - and its direct half STAYS STALE (relit again the next
-    // frame, until a trace lands: measured, gi.leak_room's carded far wall kept the outside lamp's unshadowed red of
-    // its first relight - before the ray rule chose its levels - for as long as the lamp held still).
+    // layer's green, before the relight multiplies its lamps by it. A card the trace could not reach this frame (the
+    // scene's structure not built yet, its lift's footprint not chosen, a refused dispatch) is lit unshadowed by its
+    // lamps, flagged in its record's float 19 - never by a visibility another frame wrote - and its direct half STAYS
+    // STALE (relit again the next frame, until a trace lands: measured, gi.leak_room's carded far wall kept the outside
+    // lamp's unshadowed red of its first relight - before the ray rule chose its levels - for as long as the lamp held
+    // still) - for as long as the ray tier can trace at all (PHOTON-7 stage 5's read W4: keyed on the tier's presence,
+    // CardMoverHooks::present, never on the footprint alone, which a later residency change may stop setting).
     bool lampsUntraced = false;
     {
         unsigned lamps = 0u;
         for (unsigned i = 0; i < numLights; ++i) lamps += mLightCpu[4u + size_t(i) * kLightFloats + 3u] > 0.5f ? 1u : 0u;
         bool traced = false;
-        if (lamps && mRayFootprintPerMetre > 0.0f && mMoverHooks.trace) {
+        // (the lift - sunLiftOf, the still trace's - is sized by the ray rule's footprint: before it is chosen the trace
+        // waits, as for a structure)
+        const bool liftKnown = mRayFootprintPerMetre > 0.0f;
+        if (lamps && liftKnown && mMoverHooks.trace) {
             mLampCpu.assign(mRelight.size() * kRelightFloats, 0.0f);
             for (size_t i = 0; i < mRelight.size(); ++i) {
                 std::memcpy(&mLampCpu[i * kRelightFloats], &mRelightCpu[i * kRelightFloats], kRelightFloats * sizeof(float));
@@ -1929,9 +1934,10 @@ void SurfaceCache::relightCards() {
                 }
             }
         }
-        // (only the ray rule's levels not chosen yet is a wait: a trace the device refuses with them chosen - the ray
-        // tier logged it - lights the lamps unshadowed for good, never a relight a frame)
-        lampsUntraced = lamps && !traced && !(mRayFootprintPerMetre > 0.0f);
+        // (a wait while the ray tier can trace - its structure or the lift's footprint not there yet; a tier that
+        // cannot trace at all - closed, its pipeline refused and logged - lights the lamps unshadowed for good, never a
+        // relight a frame)
+        lampsUntraced = lamps && !traced && mMoverHooks.present && mMoverHooks.present();
         if (traced) {
             for (size_t i = 0; i < mRelight.size(); ++i) mRelightCpu[i * kRelightFloats + 19u] = 1.0f;
             mRelightBuffer->upload(mRelightCpu.data(), 0, mRelight.size() * kRelightFloats / 4u);

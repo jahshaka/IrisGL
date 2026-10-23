@@ -4489,6 +4489,9 @@ public:
     bool asyncShaders() const { return mAsyncShaders; }
     bool cardMoverFrame(CardMoverFrame &out) { return mPhoton.cardMoverFrame(out); }
     bool traceCardMovers(const CardMoverTrace &job);
+    /// The ray tier can trace the cards at all: open, its card-trace pipeline not refused (a scene whose structure is not
+    /// built yet is still a trace that WAITS - SurfaceCache's lamps stay stale for it, never lit unshadowed for good).
+    bool cardTracePresent() const;
     void cardMoverTimes(float &traceMs, float &stillMs);
     using CardMoverRec = PhotonComponent::CardMoverRec;
     using CardCasterRec = PhotonComponent::CardCasterRec;

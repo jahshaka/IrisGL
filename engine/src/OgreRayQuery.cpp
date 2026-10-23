@@ -1539,6 +1539,7 @@ private:
     // (updateScene, before any render target).
 public:
     bool traceCardMovers(OgreScene *scene, const CardMoverTrace &job);
+    bool cardTracePresent() const { return isOpen() && !mCmFailed; }
     /// The two traces' last GPU milliseconds (the monitor's rows, owner = the scene).
     void cardMoverTimes(OgreScene *scene, float &traceMs, float &stillMs);
     void forgetCardMovers(OgreScene *scene);
@@ -8560,6 +8561,9 @@ void RayQueryTier::forgetCardMovers(OgreScene *scene) {
 bool OgreScene::traceCardMovers(const CardMoverTrace &job) {
     return mEngine && mEngine->mRayTier && mEngine->mRayTier->traceCardMovers(this, job);
 }
+bool OgreScene::cardTracePresent() const {
+    return mEngine && mEngine->mRayTier && mEngine->mRayTier->cardTracePresent();
+}
 void OgreScene::cardMoverTimes(float &traceMs, float &stillMs) {
     if (mEngine && mEngine->mRayTier) mEngine->mRayTier->cardMoverTimes(this, traceMs, stillMs);
 }
@@ -10008,6 +10012,7 @@ bool OgreScene::readTlasInstances(TlasReadback &, std::string &err) {
 }
 bool PhotonComponent::probeGatherWanted() const { return false; }
 bool OgreScene::traceCardMovers(const CardMoverTrace &) { return false; }
+bool OgreScene::cardTracePresent() const { return false; }
 void OgreScene::cardMoverTimes(float &, float &) {}
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }
 void PhotonComponent::setSunContact(const SunContactDesc &d) { mSunContact = d; }

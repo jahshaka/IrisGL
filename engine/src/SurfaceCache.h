@@ -389,6 +389,8 @@ struct CardMoverTrace {
 struct CardMoverHooks {
     std::function<bool(CardMoverFrame &)> frame;
     std::function<bool(const CardMoverTrace &)> trace;
+    /// The ray tier can trace the cards at all (open, its pipeline not refused): a refused trace while it can WAITS.
+    std::function<bool()> present;
     /// The ray tier's two traces' last GPU milliseconds — the movers' and the
     /// still world's monitor rows ("cards.movers" / "cards.still"; -1 outside a
     /// capture). The relight's own row ("cards.relight") is this cache's.

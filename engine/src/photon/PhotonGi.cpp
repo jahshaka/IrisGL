@@ -8512,6 +8512,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
         CardMoverHooks hooks;
         hooks.frame = [this](CardMoverFrame &f) { return cardMoverFrame(f); };
         hooks.trace = [this](const CardMoverTrace &t) { return mScene.traceCardMovers(t); };
+        hooks.present = [this]() { return mScene.cardTracePresent(); };
         hooks.readTimes = [this](float &a, float &b) { mScene.cardMoverTimes(a, b); };
         mSurfaceCache->setMoverHooks(hooks);
         built = true;
