@@ -514,6 +514,12 @@ struct StillnessRun::Impl {
                 h.write(reinterpret_cast<const char *>(n.data()), std::streamsize(n.size()));
                 std::ofstream sz(dumpPath(tag + ".rsize"));
                 sz << rq.reflectHistoryW << " " << rq.reflectHistoryH << "\n";
+                // ...and its moving SE in display codes (the lag law's SE_walk: float32 a texel, the same grid)
+                if (rq.reflectHistorySe.size() == rq.reflectHistoryCount.size()) {
+                    std::ofstream se(dumpPath(tag + ".rse"), std::ios::binary);
+                    se.write(reinterpret_cast<const char *>(rq.reflectHistorySe.data()),
+                             std::streamsize(rq.reflectHistorySe.size() * sizeof(float)));
+                }
             }
             byTracedTrail.erase(tt);
             return;

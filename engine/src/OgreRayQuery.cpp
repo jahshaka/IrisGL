@@ -263,7 +263,7 @@ constexpr unsigned kReflectRestMovers = 16u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 53u;
+constexpr unsigned kReflectBindings = 54u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -340,7 +340,13 @@ constexpr unsigned kReflectShareBinding = kReflectExposureBinding + 1u;
 /// texel indices and their counts - the tile pass lists, in the half of this frame, each texel still converging, and
 /// when last frame's list fit (at most kReflectCompactTexels) leaves them to the COMPACT PASS, one warp a texel.
 constexpr unsigned kReflectCompactBinding = kReflectShareBinding + 1u;
-static_assert(kReflectBindings == kReflectCompactBinding + 1u, "the rest's compact list is the reflection set's last binding");
+/// ...and THE MOVING SE INSTRUMENT (53, PHOTON-7 stage 6, the lag law's row): a float a trace texel - the temporal pass'
+/// standard error of the texel's moving mean in DISPLAY CODES (its luma variance over its frames, carried through the
+/// denoiser space's slope to the display table) - copied beside the state by the history readback (the arm
+/// reflect.historyReadback) into RayQueryStatus::reflectHistorySe. Sized only while the arm is on: a 16-byte stand-in
+/// else, and the pass writes nothing past its length.
+constexpr unsigned kReflectMovingSeBinding = kReflectCompactBinding + 1u;
+static_assert(kReflectBindings == kReflectMovingSeBinding + 1u, "the moving SE instrument is the reflection set's last binding");
 /// THE COMPACT PATH'S LIST LENGTH L (the lead's ruling): 16,384 texels - 64 KB a half - below which the rest's tail runs
 /// one warp a texel, its samples dealt over that warp's lanes, so the busiest warp is one texel's (clustered edge
 /// texels made it ceil( m k / 32 ) rounds, the dispatch's critical path on a near-idle GPU).
@@ -1159,10 +1165,16 @@ private:
             bool     live = false;
             unsigned w = 0u, h = 0u, layers = 1u;
             unsigned traced = 0u;         ///< which traced frame (the view's `frame` counter) it copied
+            bool     se = false;          ///< the moving SE instrument was copied beside it
         };
         HistPending histPending[kReflectRing];
         std::vector<unsigned short> histHost;
         unsigned histHostW = 0u, histHostH = 0u, histHostFrame = 0u;
+        /// THE MOVING SE INSTRUMENT (binding 53): the temporal pass' buffer (the arm's size, else 16 bytes), its host
+        /// ring beside histReadback (a slot a frame, the state's slot) and the decoded copy (the state's grid).
+        RawBuffer movingSe;
+        RawBuffer seReadback;
+        std::vector<float> histHostSe;
     };
 
     bool makeReflectPipeline(std::string &err);
@@ -5470,6 +5482,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 50 the exposure history (PHOTON-7 stage 6 commit 6)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 51 the rest's stop share
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 52 the rest's compact list
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 53 the moving SE instrument
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -5740,6 +5753,8 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
     retireImage(rv.share);
     retire(rv.compactList);
     retire(rv.histReadback);
+    retire(rv.movingSe);
+    retire(rv.seReadback);
     for (ReflectView::HistPending &p : rv.histPending) p = ReflectView::HistPending();
     rv.histHost.clear();
     rv.imagesReady = false;
@@ -5775,6 +5790,7 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
             st.reflectHistoryW = kv.second.histHostW;
             st.reflectHistoryH = kv.second.histHostH;
             st.reflectHistoryFrame = kv.second.histHostFrame;
+            st.reflectHistorySe = kv.second.histHostSe;
         }
         st.reflectFrame = std::max(st.reflectFrame, kv.second.frame);
         // THE REST (R1, G6)
@@ -6870,6 +6886,25 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     compactInfo.range = VK_WHOLE_SIZE;
     w[kReflectCompactBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[kReflectCompactBinding].pBufferInfo = &compactInfo;
+    // THE MOVING SE INSTRUMENT (53): a float a texel while the readback's arm is on, else the 16-byte stand-in
+    {
+        const VkDeviceSize need = arm(ArmId::ReflectHistoryReadback, false)
+                                      ? VkDeviceSize(traceW) * traceH * rv.layers * 4u : VkDeviceSize(16u);
+        if (rv.movingSe.buffer && rv.movingSe.size != need) retire(rv.movingSe);
+        if (!rv.movingSe.buffer) {
+            std::string serr;
+            // (host-visible, made zero: a texel the temporal pass never stores - declined, or at rest since the arm
+            // came on - reads 0, never a stale allocation)
+            if (!makeBuffer(need, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, false,
+                            rv.movingSe, serr)) { bail("the moving SE instrument could not be made"); return; }
+            if (rv.movingSe.mapped) std::memset(rv.movingSe.mapped, 0, size_t(need));
+        }
+    }
+    VkDescriptorBufferInfo movingSeInfo{};
+    movingSeInfo.buffer = rv.movingSe.buffer;
+    movingSeInfo.range = VK_WHOLE_SIZE;
+    w[kReflectMovingSeBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[kReflectMovingSeBinding].pBufferInfo = &movingSeInfo;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -7721,6 +7756,17 @@ void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
             reinterpret_cast<const uint32_t *>(static_cast<const char *>(rv.histReadback.mapped) + slot * slotBytes);
         const size_t pairW = size_t(p.w) * p.layers;
         detail::decodeReflectHistory(src, p.w, p.h, p.layers, rv.histHost);   // -O2 (ReadbackDecode.h)
+        // (the moving SE, the instrument's: layer-major on the device, the eyes side by side here like the count)
+        rv.histHostSe.clear();
+        if (p.se && rv.seReadback.mapped) {
+            const float *se = reinterpret_cast<const float *>(static_cast<const char *>(rv.seReadback.mapped) +
+                                                              slot * layerTexels * p.layers * 4u);
+            rv.histHostSe.assign(pairW * p.h, 0.0f);
+            for (unsigned k = 0; k < p.layers; ++k)
+                for (unsigned y = 0; y < p.h; ++y)
+                    std::memcpy(rv.histHostSe.data() + size_t(y) * pairW + size_t(k) * p.w,
+                                se + (size_t(k) * p.h + y) * p.w, size_t(p.w) * 4u);
+        }
         rv.histHostW = unsigned(pairW);
         rv.histHostH = p.h;
         rv.histHostFrame = p.traced;
@@ -7732,6 +7778,11 @@ void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
             rv.histHost.clear();
             rv.histHost.shrink_to_fit();
         }
+        if (!rv.histHostSe.empty()) {
+            rv.histHostSe.clear();
+            rv.histHostSe.shrink_to_fit();
+        }
+        if (rv.seReadback.buffer) retire(rv.seReadback);
         return;
     }
     const unsigned w = rv.traceW, h = rv.traceH;
@@ -7762,6 +7813,21 @@ void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
     region.imageSubresource.layerCount = rv.layers;
     region.imageExtent = { w, h, 1u };
     vkCmdCopyImageToBuffer(cmd, rv.state[rv.curIdx].image, VK_IMAGE_LAYOUT_GENERAL, rv.histReadback.buffer, 1, &region);
+    // ...and THE MOVING SE beside it (the instrument at the arm's size: the temporal pass wrote this frame's)
+    const VkDeviceSize seBytes = VkDeviceSize(w) * h * rv.layers * 4u;
+    bool seCopied = false;
+    if (rv.movingSe.buffer && rv.movingSe.size == seBytes) {
+        if (rv.seReadback.buffer && rv.seReadback.size < seBytes * kReflectRing) retire(rv.seReadback);
+        std::string serr;
+        if (rv.seReadback.buffer ||
+            makeBuffer(seBytes * kReflectRing, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, rv.seReadback, serr)) {
+            VkBufferCopy sc{};
+            sc.dstOffset = VkDeviceSize(slot) * seBytes;
+            sc.size = seBytes;
+            vkCmdCopyBuffer(cmd, rv.movingSe.buffer, rv.seReadback.buffer, 1, &sc);
+            seCopied = true;
+        }
+    }
     // ...ordered before the host's read AND before the trace that writes this half again two frames on.
     VkMemoryBarrier toHost{};
     toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -7776,6 +7842,7 @@ void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
     p.h = h;
     p.layers = rv.layers;
     p.traced = rv.frame - 1u;   // the trace's ++rv.frame ran before this half
+    p.se = seCopied;
 }
 
 // ---------------------------------------------------------------------------

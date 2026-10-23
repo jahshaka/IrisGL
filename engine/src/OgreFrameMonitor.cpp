@@ -1414,7 +1414,9 @@ constexpr ArmDef kArms[] = {
       "THE REFLECTION HISTORY'S COUNT TO THE HOST (PHOTON-2 stage 0, an instrument): every traced frame's "
       "per-texel temporal-mean count (rq_reflect.comp's history w, 0 = no answer yet) copied out after the filter and "
       "decoded once the frame retires into RayQueryStatus::reflectHistoryCount - the stillness door's count histogram "
-      "(how young each glossy pixel's mean is after a stop). One image copy a frame while on." },
+      "(how young each glossy pixel's mean is after a stop) - and the moving mean's standard error in display codes, "
+      "RayQueryStatus::reflectHistorySe (the lag law's SE_walk, PHOTON-7 stage 6). One image and one buffer copy a frame "
+      "while on." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

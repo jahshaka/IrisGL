@@ -5133,6 +5133,11 @@ struct RayQueryStatus {
     /// has retired. `reflectFrame` is the view's traced-frame counter NOW (the frame just traced is one below it),
     /// so a caller that steps frames knows which copy is which frame.
     std::vector<unsigned short> reflectHistoryCount;
+    /// ...and THE MOVING SE (PHOTON-7 stage 6, the lag law's instrument), on the same grid and frame: each texel's moving
+    /// mean's standard error in DISPLAY CODES (its luma variance over its frame count, through the denoiser space's
+    /// slope and the display table) as the temporal pass left it on its last moving frame; empty where the copy is not
+    /// there (the arm off, a frame before its size).
+    std::vector<float> reflectHistorySe;
     unsigned reflectHistoryW = 0u, reflectHistoryH = 0u;
     unsigned reflectHistoryFrame = 0u;
     unsigned reflectFrame = 0u;
