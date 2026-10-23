@@ -40,6 +40,10 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
+/// THE WORK A SAMPLE COSTS (the rest's budget, OgreRayQuery.cpp kReflectRestRaysCap's note): every ray query and each
+/// of its alpha candidates (jah_rq_alpha.glsl's JAH_RQ_COUNT), plus the screen march's steps - counts, never clocks.
+uint gWork = 0u;
+#define JAH_RQ_COUNT ++gWork
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -578,6 +582,7 @@ bool screenAnswer( EyeImage e, EyeImage before, vec3 world, vec3 L, vec3 V, ivec
 	const float maxDistance = p.screen2.x;
 	const JahSsrMarch m = jahSsrMarch( viewToTex, o, d, maxDistance, p.screen2.y, p.screen.z,
 									   jahSsrJitter( vec2( px ), p.screen.w ), p.screen.w );
+	gWork += uint( ceil( m.travelled / max( m.stepLen, 1e-6 ) ) ) + ( m.hit > 0.0 ? 5u : 0u );   // its steps (+ the bisection's)
 	if( m.hit <= 0.0 )
 		return false;
 	// THE CROSSING ITSELF (jahSsrSecant): this trace answers the crossing's own point - one estimator, its hit is the
@@ -1419,6 +1424,7 @@ void main()
 	// subgroups the workgroup does not fill) by walking its lanes - the same deal, the same order.
 	const bool whole = laneCount == gl_SubgroupSize;
 	const uint vStart = vNow;
+	uint restWork = 0u, restRays = 0u;
 	uint dealt = 0u;                                 // this texel's samples dealt so far
 	uint remaining = restBatch ? batchRays : 0u;     // ...and still to deal
 	while( subgroupAny( remaining > 0u || phase == 1u ) )
@@ -1473,11 +1479,17 @@ void main()
 		const bool mine = !job && phase == 1u;
 		JahReflectSample s = jahReflectSampleNone( x );
 		s.resume = mine && resume;
+		gWork = 0u;
 		if( job || ( mine && !batchFull ) )
 			reflectSampleAt( x, thisEye, before, fullRes, atRest,
 							 job ? uint( p.knobs.z ) + first + index
 								 : atRest ? uint( p.knobs.z ) + vNow : uint( p.knobs.z ),
 							 s );
+		if( job )
+		{
+			restWork += gWork;   // the rest's dealt rays and their work, this lane's share (the budget's reading)
+			++restRays;
+		}
 		// THE ANSWERS BACK, in the deal's order (each texel's run of slots: its sequence order).
 		if( total > 0u )
 		{
@@ -1556,6 +1568,17 @@ void main()
 			reflectFinish( tc, dist, world, origin, prevSurf, ownMoving, lobeAlpha, thisEye, atRest, restInPlace,
 						   restBatch, batchRays, inPlace, restStop, throwT, rs, restHasH, restN, vNow, folds, restT, s );
 			phase = 2u;
+		}
+	}
+	// THE REST'S WORK THIS FRAME (the budget's reading, read back with the active count): the subgroup's sums, one
+	// atomic each.
+	if( JAH_HIT_ON && subgroupAny( restRays > 0u ) )
+	{
+		const uint w = subgroupAdd( restWork ), r = subgroupAdd( restRays );
+		if( subgroupElect() )
+		{
+			atomicAdd( jahHitBuf[4], w );
+			atomicAdd( jahHitBuf[5], r );
 		}
 	}
 }

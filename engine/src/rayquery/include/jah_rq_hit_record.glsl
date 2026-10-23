@@ -26,8 +26,12 @@
 //                        reflection's history)
 //   jahHitBuf[] (uint)   [0] = records appended (may pass the capacity), [1] =
 //                        records DROPPED because the list was full (a stat, never
-//                        a crash), [2..3] unused; then kJahHitAuxWords (FOUR)
-//                        WORDS PER RECORD from word kJahHitAuxBase:
+//                        a crash), [2] = the reflection's active resting texels,
+//                        [3] = its CAPPED texels, [4] = the WORK of its rest
+//                        rays (ray queries and their alpha candidates, plus the
+//                        screen march's steps), [5] = those rays, [6..7] unused;
+//                        then kJahHitAuxWords (FOUR) WORDS PER RECORD from word
+//                        kJahHitAuxBase:
 //                        [0] packHalf2x16( the SUN'S VISIBILITY at the hit (a
 //                        shadow ray, jah_rq_sun_ray.glsl — replacing the shadow
 //                        map, which covers the camera's frustum only), the ray's
@@ -84,7 +88,7 @@ const uint kJahHitFarBit = 1u << 27u;
 const uint kJahHitDiffuseOnlyBit = 1u << 28u;
 const uint kJahHitDestGather = 0x80000000u;
 /// The first per-record word of `jahHitBuf`, and the words per record.
-const uint kJahHitAuxBase = 4u;
+const uint kJahHitAuxBase = 8u;
 const uint kJahHitAuxWords = 4u;
 /// GpuScene.h GpuInstanceFlag: kGpuMover | kGpuSkinned | kGpuPlanar.
 const uint kJahHitGpuMover = 1u << 2u;

@@ -85,8 +85,8 @@ void main()
 	const uint w = max( uint( p.list.y ), 1u );
 	const ivec2 at = ivec2( int( i % w ), int( i / w ) );
 	const uint dest = texelFetch( jahHitDest, at, 0 ).x;
-	// The record's words (jah_rq_hit_record.glsl: kJahHitAuxBase 4, four a record).
-	const uint aux = 4u + 4u * i;
+	// The record's words (jah_rq_hit_record.glsl: kJahHitAuxBase 8, four a record).
+	const uint aux = 8u + 4u * i;
 	const float weight = uintBitsToFloat( jahHitBuf[aux + 1u] );
 	const vec4 rad = texelFetch( jahHitRadiance, at, 0 );
 	const bool shaded = rad.w > 0.5 && finite3( rad.xyz );

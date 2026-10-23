@@ -17,11 +17,17 @@
 // under half a unit in the last place, and drops it UNEVENLY: 0.71 codes dark at 512 samples, P1) - the residual lives in
 // the FROZEN HALF once the hand-over is done (no reader composes H past 2N: zero bytes, PREFLIGHT_R section 9 W5), and
 // a texel with no moving history keeps it there from its first sample.
-// THE STOP (the lead's levers (i) + (ii)): M goes on accumulating PER TEXEL until the standard error OF WHAT IS
-// DISPLAYED at the texel's own pixel - the spatial filter's fixed rest taps combined, sqrt( sum w_i^2 SE_i^2 ) / sum w_i,
-// each SE_i the tap's rest mean's in the denoiser space - IN DISPLAY CODES (the exact slope of the view's exposure,
-// grade, film curve and sRGB encode at the pixel's value: jahDisplayCodes) has stayed under ONE CODE for
-// kReflectStopFrames frames; then the texel STOPS tracing (R1), and the view holds when every texel has stopped. There
+// THE STOP (the lead's levers (i) + (ii), and the share rule after the SE floor's diagnostic): M goes on accumulating
+// PER TEXEL until ITS OWN rest mean's standard error, IN DISPLAY CODES (the exact slope of the view's exposure, grade,
+// film curve and sRGB encode at the pixel's value: jahDisplayCodes), is within ITS SHARE of the one-code display budget
+// for kReflectStopFrames frames - SE_t <= 1 code x W / sqrt( Q ) at its own pixel, W = 1 + sum w_i the spatial filter's
+// rest taps' weights (the centre at 1), Q = 1 + sum w_i^2 over the taps whose answer has a variance (a centre ray's has
+// none and needs no share): sqrt( n_eff ), the filter's effective tap count there. When every tap meets its own share
+// the displayed variance sum w_i^2 SE_i^2 / W^2 <= 1 code^2 (exact where the neighbours' n_eff and display slope match
+// the pixel's, as on a smooth surface), and NO TEXEL WAITS ON ANOTHER: the rule (ii) it replaces stopped a texel on its
+// pixel's combined SE, and a texel whose stopped neighbours kept a 4-7 code SE (their own share met against wide
+// filters) never could - measured on photon-glass, its own SE 0.09 codes at v 35,901 under a displayed 1.18.
+// Then the texel STOPS tracing (R1), and the view holds when every texel has stopped. There
 // is NO SAMPLE CAP (K_max 512 deleted): a texel's count saturates only at its 16-bit field, a CAPPED texel - stopped,
 // counted (the hit list's word 3, RayQueryStatus::reflectRestCapped) as the defect reading it is, never a deadline (the
 // denoiser bound's guarantee, sigma^2 <= mu (10 - mu), needs 10^4 (10 - mu) / mu samples: 42 s to 38 min at four a
