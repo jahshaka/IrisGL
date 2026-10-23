@@ -58,8 +58,8 @@
 //   JAH_HIT_SUN_MASK      uint   the TLAS mask the sun ray asks for (the casters)
 //   JAH_HIT_SUN_RANGE     float  the sun ray's length
 //   JAH_HIT_FAR_LIFT      float  the shadow ray's surface term off a FAR copy's hit: the
-//                                traced set's coarsest level's bound against level 0
-//                                (Types.h rayOriginLevelLift of the gather's farOverlap);
+//                                traced set's coarsest level's gap from level 0 (farOverlap,
+//                                the drift law's: Types.h rayOriginLevelLift at its source);
 //                                a near hit is ON level 0, so its surface term is 0
 // ...the images `jahHitIds`, `jahHitDest` and the buffer member `jahHitBuf[]`, and jah_rq_geom.glsl + jah_rq_sun_ray.glsl included before.
 //

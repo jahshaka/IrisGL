@@ -518,8 +518,10 @@ private:
         unsigned  instanceCount = 0;      ///< ACTIVE near + far copies: what the TLAS traces
         unsigned  farInstanceCount = 0;   ///< ...of which the far copies
         /// The widest coarse-vs-fine gap of the set this TLAS was written from
-        /// (world units): the gather's far query starts this far BEFORE its near
-        /// length (audit F2). Held with the TLAS, so a still frame keeps it.
+        /// (world units; each slot's coarsest-level bound under the drift law,
+        /// rayOriginLevelLift): the far queries start this far BEFORE their near
+        /// length (audit F2), and a far copy's hit lifts its sun leg by it. Held
+        /// with the TLAS, so a still frame keeps it.
         float     farOverlap = 0.0f;
         /// THE GEOMETRY ROW OF EACH SLOT'S NEAR COPY (PHOTON-CARDS-2 fix round):
         /// GpuScene::geomRowIndex(mesh, the level its near BLAS was built from,
@@ -2663,7 +2665,10 @@ RayQueryTier::SceneAs::Feed::Rec RayQueryTier::SceneAs::Feed::measure(const deta
             const std::vector<float> *b = scene->lodBoundsFor(mp.get());
             const float bound = (b && !b->empty()) ? b->back() : 0.0f;
             if (bound > 0.0f) {
-                const float grown = bound * worldMaxAxisScale(now->world);
+                // THE GAP IS A DISTANCE FROM LEVEL 0 (the one origin law, Types.h rayOriginLevelLift): the coarsest
+                // level's STORED bound bounds each simplification step against its input, and its drift from level 0
+                // is within kLevelDriftOverBound of it (atom2.one_step_drift_bound, per cut and per cluster).
+                const float grown = rayOriginLevelLift(bound * worldMaxAxisScale(now->world));
                 if (std::isfinite(grown) && grown > 0.0f) next.coarse = quantiseHandOver(grown);
             }
         }
@@ -9126,11 +9131,11 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     }
     // THE HIT'S SUN LEG UNDER THE ONE ORIGIN LAW (jah_ray_origin.glsl; the lead's round-7 ruling - the 1 mm / 1e-4 t
     // floor is deleted): the shader lifts by the hit's own float bound; a near hit is ON level 0, which the casters'
-    // near copies are, so its surface term is 0, and a FAR copy's hit is on the coarsest level, within
-    // rayOriginLevelLift of the traced set's widest coarsest-level bound (farOverlap) of level 0.
+    // near copies are, so its surface term is 0, and a FAR copy's hit is on the coarsest level, within the traced
+    // set's widest coarse-vs-fine gap of level 0 (farOverlap: already the drift law's distance, rayOriginLevelLift).
     {
         const SceneAs *sa = asOf(scene);
-        out.farLift = sa ? rayOriginLevelLift(sa->farOverlap) : 0.0f;
+        out.farLift = sa ? sa->farOverlap : 0.0f;
     }
     hv.live = true;
     return true;

@@ -121,7 +121,7 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// instance entries bound, w = 1 when the list is bound. hitSun: xyz = towards
 	/// the sun, w = 1 when the pass has one. hitSun2: x = the sun ray's TLAS mask,
 	/// y unused (a near hit is ON level 0: its sun leg's surface term is 0, the one origin law), z = its length,
-	/// w = a FAR copy's hit's surface term (Types.h rayOriginLevelLift of farOverlap).
+	/// w = a FAR copy's hit's surface term (farOverlap: the drift law's coarse-vs-fine gap).
 	vec4 hitList;
 	vec4 hitSun;
 	vec4 hitSun2;

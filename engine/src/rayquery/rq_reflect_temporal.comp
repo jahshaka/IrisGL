@@ -143,7 +143,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// w = 1 when the list is bound. hitSun: xyz = towards the sun, w = 1 when the
 	/// pass has one. hitSun2: x = the sun ray's TLAS mask (the casters), y unused
 	/// (a near hit is ON level 0: its sun leg's surface term is 0, the one origin law), z = its length, w = a FAR
-	/// copy's hit's surface term (Types.h rayOriginLevelLift of the traced set's coarsest-level bound).
+	/// copy's hit's surface term (the traced set's widest coarse-vs-fine gap under the drift law, farOverlap).
 	vec4 hitList;
 	vec4 hitSun;
 	vec4 hitSun2;

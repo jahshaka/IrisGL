@@ -1550,7 +1550,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.hitSun2[0] = float(in.hit.sunMask);
     pp.hitSun2[1] = 0.0f;   // unused: a near hit's surface term is 0 (the one origin law)
     pp.hitSun2[2] = in.hit.sunRange;
-    pp.hitSun2[3] = in.hit.farLift;   // rayOriginLevelLift(farOverlap): a far copy's hit
+    pp.hitSun2[3] = in.hit.farLift;   // farOverlap (the drift law's gap): a far copy's hit
     {
         const uint32_t hlo = uint32_t(in.hitTable & 0xFFFFFFFFu), hhi = uint32_t(in.hitTable >> 32u);
         std::memcpy(&pp.hitTable[0], &hlo, sizeof(hlo));

@@ -186,7 +186,7 @@ struct HitListBinding {
     bool sun = false;
     float toSun[3] = { 0.0f, 1.0f, 0.0f };
     uint32_t sunMask = 0u;
-    /// farLift: a FAR copy's hit's sun-leg surface term (Types.h rayOriginLevelLift of farOverlap); a near hit has
+    /// farLift: a FAR copy's hit's sun-leg surface term (farOverlap, the drift law's gap); a near hit has
     /// none (it is ON level 0) - the one origin law, jah_ray_origin.glsl.
     float sunRange = 0.0f, farLift = 0.0f;
 };
