@@ -1315,6 +1315,8 @@ private:
     bool mGiFeedbackOwedLast = false;
     unsigned long long mGiFeedbackRests = 0;
     unsigned long long mInnerMarchesSkipped = 0;
+    /// ...and those an inner cascade latched in its outer's commit frame OWES to the relight path (stage 4's read R1).
+    unsigned long long mInnerMarchesOwed = 0;
     /// The irradiance field's pass-buffer block (JahIfd_piece_ps.any).
     void          pushIfdState(const Ogre::uint32 numProbes[3]);
     /// THE FIELD SCROLLS (PHOTON-WRITER-1, FIELD-SCROLL): moves the field's window

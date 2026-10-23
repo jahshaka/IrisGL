@@ -5310,10 +5310,11 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                 reachWorld += double(c.cell()) + (outermost ? 0.0 : double(mVctCascades[idx + 1].cell()));
                 for (size_t j = idx; j-- > 0;) {
                     VctCascade &inner = mVctCascades[j];
-                    if (!inner.lighting || injectedThisFrame(j)) continue;
+                    if (!inner.lighting || !inner.built) continue;
                     Ogre::PhotonCommitLight innerLight;
                     innerLight.delta = true;
                     for (int a = 0; a < 3; ++a) innerLight.keepHi[a] = inner.resolution;
+                    std::vector<Ogre::Aabb> innerWorld;   // the boxes in the world (an owed re-march takes them)
                     if (!outermost) {
                         const Ogre::Aabb ib(inner.centre, Ogre::Vector3(inner.halfSize));
                         const Ogre::Vector3 corner = ib.getMinimum();
@@ -5337,10 +5338,23 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                                 innerLight.injectHi[n][a] = Ogre::uint32(std::min(ires, (h[a] + 3) / 4 * 4));
                             }
                             ++n;
+                            innerWorld.push_back(Ogre::Aabb::newFromExtents(lo, hi));
                         }
                         if (!innerLight.numInjectBoxes) { ++mInnerMarchesSkipped; continue; }   // no inner voxel sees a face
                     }
-                    injectCascade(j, &innerLight);
+                    // AN INNER CASCADE ALREADY INJECTED THIS FRAME (the one-writer latch: cascade 0's own commit in its
+                    // reserved slot, the same frame) OWES ITS RE-MARCH (PHOTON-7 stage 4's read R1): the relight path
+                    // takes it from the next frame - the boxes, or the whole volume after an outermost commit - as the
+                    // whole-rebuild path owes it (remarchOwedFrame). Skipped and owed nothing, the inner cascade kept the
+                    // outer's old visibility for good once the camera stopped. A refused injection owes it the same way.
+                    if (injectedThisFrame(j) || !injectCascade(j, &innerLight)) {
+                        if (!inner.relightOwed) inner.relightBox = Ogre::Aabb::BOX_NULL;
+                        inner.relightOwed = true;
+                        inner.relightSwept = 0;
+                        if (outermost) inner.relightWhole = true;
+                        for (const Ogre::Aabb &w : innerWorld) inner.relightBox.merge(w);
+                        ++mInnerMarchesOwed;
+                    }
                 }
                 // The field integrates cascade 0's light: an outer commit changed its band (cascade 0's own commit
                 // moves the field and re-integrates it: oweCascade0FieldFollow).
