@@ -204,10 +204,20 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 screen;
 	vec4 screen2;
 	/// x, y: the denoiser space's exposure (the resolve's, the temporal pass'); z = THE LOBE DRAW'S SEED OFFSET (the arm
-	/// reflect.seedOffset, 0 shipped): added to the frame index the draw takes; w = THE REST'S BASE BATCH k0 (the
-	/// tier's rest rays a texel: rq_reflect.comp's per-warp round budget).
+	/// reflect.seedOffset, 0 shipped): added to the frame index the draw takes.
 	vec4 denoiser;
+	/// (the filter's display table, beside: this pass reads none of it)
+	vec4 display[16];
+	/// THE REST'S COMPACT PATH (OgreRayQuery.cpp kReflectCompactTexels): x = the half of the list this frame fills (last
+	/// frame's count, in the other half, decides the path), y = the tail's rays a frame (the rest's count / 8), z = L,
+	/// w = 1 when the compact pass runs this frame.
+	vec4 compact;
 } p;
+/// THE COMPACT PASS (this module with constant 0 true): one subgroup a listed texel - its first lane the texel, the
+/// others its workers - instead of the 8 x 8 tile.
+layout( constant_id = 0 ) const bool kCompactPass = false;
+/// THE REST'S COMPACT LIST (binding 52): [0..1] the halves' counts, then the halves' texel indices (x | y << 16).
+layout( std430, set = 0, binding = 52 ) buffer JahCompactList { uint compactWords[]; };
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
 /// and the world-space ray (or image-plane offset) of its own 0..1 image.
@@ -1140,8 +1150,28 @@ void main()
 	// A LANE WHOSE TEXEL TRACES NOTHING STAYS TO THE REST'S DEAL (below) as a worker - one past the image's edge too
 	// (its reads clamped inside): its outcome stored, `live` false, and every later side effect guarded by it - the
 	// values computed past this point on its texel are never used.
-	bool live = all( lessThan( ivec2( gl_GlobalInvocationID.xy ), traceRes ) );
-	const ivec2 tc = min( ivec2( gl_GlobalInvocationID.xy ), traceRes - 1 );
+	// THE REST'S COMPACT PATH: the list this frame's tile pass fills (its half), and whether last frame's fit - then the
+	// texels it lists are the compact pass's (the converging set only shrinks at rest: a resumed texel is not listed).
+	const uint compactL = uint( p.compact.z );
+	const uint compactHalf = uint( p.compact.x ) & 1u;
+	const uint compactPrev = compactWords[compactHalf ^ 1u];
+	const bool compactOn = p.compact.w > 0.5 && compactPrev > 0u && compactPrev <= compactL;
+	ivec2 gid = ivec2( gl_GlobalInvocationID.xy );
+	bool compactOwner = true;
+	uint compactN = 0u;
+	if( kCompactPass )
+	{
+		// a subgroup a listed texel (the slot uniform in the subgroup: the whole subgroup leaves together)
+		compactN = min( compactWords[compactHalf], compactL );
+		const uint slot = gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID;
+		if( !compactOn || slot >= compactN )
+			return;
+		const uint packed = compactWords[2u + compactHalf * compactL + slot];
+		gid = ivec2( int( packed & 0xFFFFu ), int( packed >> 16u ) );
+		compactOwner = gl_SubgroupInvocationID == 0u;
+	}
+	bool live = all( lessThan( gid, traceRes ) ) && compactOwner;
+	const ivec2 tc = min( gid, traceRes - 1 );
 
 	// The pixel this ray is traced FOR is its block's centre pixel at full resolution (jahTexelPixel: read exactly, so
 	// the point reconstructed is on that pixel's drawn surface - the ray origin's law, below).
@@ -1258,6 +1288,16 @@ void main()
 	const JahReflectState inPlace = restInPlace ? jahStateUnpack( imageLoad( stateCur, ivec3( tc, gEye ) ).xy )
 												: jahStateNone();
 	const uint restStop = restInPlace ? inPlace.stop : 0u;
+	// THE TILE PASS LISTS each texel still converging (the stop's own state, as the trace reads it) into this frame's
+	// half, and leaves it to the compact pass when last frame's list fit.
+	if( !kCompactPass && live && p.compact.w > 0.5 && restInPlace && inPlace.v >= 1u && restStop < kReflectStopFrames )
+	{
+		const uint at = atomicAdd( compactWords[compactHalf], 1u );
+		if( at < compactL )
+			compactWords[2u + compactHalf * compactL + at] = uint( tc.x ) | ( uint( tc.y ) << 16u );
+		if( compactOn )
+			live = false;   // the compact pass's (this lane works in the tile's deal)
+	}
 	bool resume = false;
 	if( live && restStop >= kReflectStopFrames )
 	{
@@ -1369,18 +1409,10 @@ void main()
 	// The batch's rays are DEALT across the subgroup's lanes (below), its folds made in this order all the same.
 	const bool restBatch = live && restInPlace && !resume && p.rest.x < 0.5 && p.rest.y < 0.5 && centreChance < 1.0 &&
 						   p.rest.z > 1.5;
-	// THE WARP'S ROUND BUDGET (RED 2, the lead's rule): the deal's rounds a frame never exceed what every warp ran at
-	// the rest's first batching frame - k0 rounds of the subgroup's lanes, and the round that finishes the texels -
-	// so a warp's batching texels share k0 x lanes samples: k_t = min( k_active, k0 x lanes / m ). Measured why: the
-	// active texels CLUSTER (an edge is a line - m median 5-6 a warp, up to 32), the busiest warp's rounds are the
-	// dispatch's critical path, and on a near-idle GPU that path is latency (a tail ray cost 31-39 ns at 233 busy
-	// warps against 1.7 ns on the first frame's 5,800). The tail's texels were in those same warps on that frame, so
-	// the tail's critical path is never longer than it was. m from the ballot: deterministic (L7, L8).
-	const uint warpBatching = subgroupBallotBitCount( subgroupBallot( restBatch ) );
-	const uint warpLanes = subgroupBallotBitCount( subgroupBallot( true ) );
-	const uint batchRays = restBatch ? max( 1u, min( uint( p.rest.z ),
-													 ( uint( max( p.denoiser.w, 1.0 ) ) * warpLanes ) / max( warpBatching, 1u ) ) )
-									 : 1u;
+	// THE BATCH: the tile pass's k (the rest's first frame's), the compact pass's the tail's rays a frame shared by the
+	// listed texels, k = min( 64, ( count / 8 ) / listed ) - each texel's samples over its own warp's lanes.
+	const uint compactK = kCompactPass ? clamp( uint( p.compact.y ) / max( compactN, 1u ), 1u, 64u ) : 0u;
+	const uint batchRays = restBatch ? ( kCompactPass ? compactK : uint( p.rest.z ) ) : 1u;
 	uint vNow = restInPlace ? inPlace.v : 0u;   // the samples the rest mean holds
 	float restT = restInPlace ? inPlace.hitT : throwT;   // the rest's mean length
 	uint folds = 0u;
@@ -1450,7 +1482,8 @@ void main()
 	// before. allowance = min( k_active, capacity / batching ) (the host's, p.rest.w): the list's existing capacity is
 	// the count. A texel's run is the records of ONE round of the deal (one reservation): the rounds after it end at a
 	// record.
-	const uint allowance = min( uint( p.rest.w ), batchRays );
+	const uint allowance = kCompactPass ? min( batchRays, JAH_HIT_CAPACITY / max( compactN, 1u ) )
+									   : min( uint( p.rest.w ), batchRays );
 	uint runUsed = 0u;                               // this texel's records in its run this frame
 	uint dealt = 0u;                                 // this texel's samples dealt so far
 	uint remaining = restBatch ? batchRays : 0u;     // ...and still to deal
