@@ -93,6 +93,9 @@
                 ["keepLo",                  [0,0,0,0],    "int"],
                 ["keepHi",                  [0,0,0,0],    "int"],
                 ["injectOrigin",            [0,0,0,0],    "uint"],
+                ["injectPrior",             [0,0,0,0],    "uint"],
+                ["injectBoxLo",             [0,0,0,0],    "uint"],
+                ["injectBoxHi",             [0,0,0,0],    "uint"],
                 ["brickDims",               [1,1,1,0],    "uint"]
             ],
 

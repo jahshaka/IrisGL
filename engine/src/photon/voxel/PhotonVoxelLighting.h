@@ -68,7 +68,9 @@ namespace Ogre
     {
         bool delta = false;
         uint32 keepLo[3] = { 0u, 0u, 0u }, keepHi[3] = { 0u, 0u, 0u };
-        static constexpr uint32 kMaxInjectBoxes = 6u;   ///< two faces per moved axis
+        /// two faces per moved axis, or an inner re-march's regions (PHOTON-7 stage 4's read R4); the dispatches mark each
+        /// 4^3 group once (LightInjection's union: a group an earlier box covered is skipped)
+        static constexpr uint32 kMaxInjectBoxes = 16u;
         uint32 numInjectBoxes = 0u;
         uint32 injectLo[kMaxInjectBoxes][3] = {}, injectHi[kMaxInjectBoxes][3] = {};
     };
@@ -275,6 +277,9 @@ namespace Ogre
         ShaderParams::Param *mInjectKeepLo = nullptr;
         ShaderParams::Param *mInjectKeepHi = nullptr;
         ShaderParams::Param *mInjectOrigin = nullptr;
+        ShaderParams::Param *mInjectPrior = nullptr;
+        ShaderParams::Param *mInjectBoxLo = nullptr;
+        ShaderParams::Param *mInjectBoxHi = nullptr;
         /// This cascade's place in the scene's chain (0 = the innermost; the cascades outside it are
         /// mExtraCascades): the injection binds the whole chain and marches from this entry outward.
         uint32 mChainIndex = 0u;

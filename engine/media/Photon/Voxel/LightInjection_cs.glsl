@@ -155,6 +155,11 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// PHOTON-7 stage 2: THE REGION a dispatch covers starts at this cell (a multiple of the 4^3 group; 0 = the whole
 	// volume, the groups set by the host); w = 1 on the dispatch that counts the injection (word 2).
 	uniform uint4 injectOrigin;
+	// PHOTON-7 stage 4's read R4: THE UNION OF AN INJECTION'S BOXES - x the boxes dispatched before this one (a 4^3 group one
+	// of them covered is not marched again), and every box of the injection in cells (aligned to the groups).
+	uniform uint4 injectPrior;
+	uniform uint4 injectBoxLo[16];
+	uniform uint4 injectBoxHi[16];
 	// PHOTON-7 stage 3: the brick mask's bricks per axis (xyz; w unused).
 	uniform uint4 brickDims;
 	uniform float4 chainOrigin[@value( hlms_num_vct_cascades )];
@@ -173,6 +178,9 @@ vulkan( }; )
 #define p_keepLo keepLo
 #define p_keepHi keepHi
 #define p_injectOrigin injectOrigin
+#define p_injectPrior injectPrior
+#define p_injectBoxLo injectBoxLo
+#define p_injectBoxHi injectBoxHi
 #define p_brickDims brickDims
 #define JAH_INJ_CHAIN @value( hlms_num_vct_cascades )
 

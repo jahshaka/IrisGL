@@ -345,6 +345,18 @@
 //in uint  gl_LocalInvocationIndex;
 
 @piece( BodyCS )
+	// THE UNION OF THE INJECTION'S BOXES (PHOTON-7 stage 4's read R4): a 4^3 group a box dispatched earlier in this
+	// injection already covered is neither marched nor counted again - the boxes are aligned to the groups, so a group is
+	// inside one or outside it whole, and the whole group leaves before any barrier.
+	{
+		const uint3 jahGroupCell = gl_WorkGroupID.xyz * 4u + p_injectOrigin.xyz;
+		for( uint jahK = 0u; jahK < p_injectPrior.x; ++jahK )
+		{
+			if( all( greaterThanEqual( jahGroupCell, p_injectBoxLo[jahK].xyz ) ) &&
+				all( lessThan( jahGroupCell, p_injectBoxHi[jahK].xyz ) ) )
+				return;
+		}
+	}
 	// THE BRICK MASK'S GROUP MAXIMUM starts at zero (PHOTON-7 stage 3): visible to the group after the step-0 barrier below.
 	if( gl_LocalInvocationIndex == 0u )
 		jahBrickShared = 0u;

@@ -415,6 +415,11 @@ public:
         /// re-marched whole on the next frame (`relightWhole`), the latch allowing. The frame it was owed in; 0 none.
         unsigned long long remarchOwedFrame = 0ull;
         Ogre::Aabb relightBox = Ogre::Aabb::BOX_NULL;
+        /// THE EDIT'S REGION (PHOTON-7 stage 4's read R4): the dirty path's boxes that met this cascade since its last
+        /// answered rebuild (markDirtyCascadesPending; at most kEditRegionBoxes, past it their union), or ALL (a change with
+        /// no box: the dirty-all path, a forced rebuild) - a same-placement rebuild re-marches the inner cascades over it.
+        std::vector<Ogre::Aabb> editRegionBoxes;
+        bool editRegionAll = false;
         /// THE RELIGHT'S SWEEP (PHOTON-7 stage 4's hitch fix: the voxels a frame relights are the tier's count,
         /// GiQualityFacts::lightWorkFrames): the owed box is relit in slabs of 4-cell planes along z, one sweep from the
         /// cursor (`relightCursor`, the world z of the next plane; NaN = the box's first) round the box once
@@ -1184,6 +1189,12 @@ private:
     /// `commit` (PHOTON-7 stage 2): a scroll's commit light - the direct term as a delta, the passes over a region
     /// (Ogre::PhotonCommitLight); null a whole injection.
     bool injectCascade(size_t i, const Ogre::PhotonCommitLight *commit = nullptr);
+    /// THE INNER RE-MARCH'S REGION (PHOTON-7 stage 4's read R4): the boxes of inner cascade `j`'s cells whose direct
+    /// visibility march can read a change of outer cascade `idx` inside the world boxes `changed` (a commit's moved
+    /// faces, a whole rebuild's edit) - into `light` (a delta, its boxes) and `world` (the same boxes in the world).
+    /// False when no voxel of `j` can read one: nothing to march.
+    bool innerRemarchRegion(size_t idx, size_t j, const std::vector<Ogre::Aabb> &changed, Ogre::PhotonCommitLight &light,
+                            std::vector<Ogre::Aabb> &world);
     /// Whether cascade `i` was injected in the
     /// current writer frame.
     bool injectedThisFrame(size_t i) const;

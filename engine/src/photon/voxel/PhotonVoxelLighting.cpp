@@ -249,6 +249,9 @@ namespace Ogre
         mInjectKeepLo = mShaderParams->findParameter( "keepLo" );
         mInjectKeepHi = mShaderParams->findParameter( "keepHi" );
         mInjectOrigin = mShaderParams->findParameter( "injectOrigin" );
+        mInjectPrior = mShaderParams->findParameter( "injectPrior" );
+        mInjectBoxLo = mShaderParams->findParameter( "injectBoxLo" );
+        mInjectBoxHi = mShaderParams->findParameter( "injectBoxHi" );
         mInjectBrickDims = mShaderParams->findParameter( "brickDims" );
 
         RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
@@ -1806,9 +1809,24 @@ namespace Ogre
             // The groups are set by hand for every dispatch (the job is shared by name).
             const uint32 res[3] = { mLightVoxel[0]->getWidth(), mLightVoxel[0]->getHeight(),
                                     mLightVoxel[0]->getDepth() };
-            const uint32 boxes = delta ? mCommit.light.numInjectBoxes : 0u;
+            const uint32 boxes = delta ? std::min( mCommit.light.numInjectBoxes, PhotonCommitLight::kMaxInjectBoxes ) : 0u;
+            // THE UNION (PHOTON-7 stage 4's read R4): every box of the injection, so a dispatch skips the 4^3 groups an
+            // earlier one covered - overlapping boxes are marched, written and counted once.
+            {
+                uint32 lo[4u * PhotonCommitLight::kMaxInjectBoxes] = {}, hi[4u * PhotonCommitLight::kMaxInjectBoxes] = {};
+                for( uint32 b = 0u; b < boxes; ++b )
+                    for( int a = 0; a < 3; ++a )
+                    {
+                        lo[4u * b + uint32( a )] = mCommit.light.injectLo[b][a];
+                        hi[4u * b + uint32( a )] = mCommit.light.injectHi[b][a];
+                    }
+                mInjectBoxLo->setManualValue( lo, 4u * PhotonCommitLight::kMaxInjectBoxes );
+                mInjectBoxHi->setManualValue( hi, 4u * PhotonCommitLight::kMaxInjectBoxes );
+            }
             for( uint32 b = 0u; b < std::max( boxes, 1u ); ++b )
             {
+                const uint32 prior[4] = { b, 0u, 0u, 0u };
+                mInjectPrior->setManualValue( prior, 4u );
                 setRegionGrid( mLightInjectionJob, mInjectOrigin, boxes ? mCommit.light.injectLo[b] : nullptr,
                                boxes ? mCommit.light.injectHi[b] : nullptr, 1u, res, delta && b == 0u ? 1u : 0u );
                 mShaderParams->setDirty();

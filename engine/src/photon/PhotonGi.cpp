@@ -22,6 +22,7 @@
 #include "photon/voxel/PhotonVoxelScroll.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -32,6 +33,7 @@
 #include <optional>
 
 #include <OgreHlmsManager.h>
+#include <OgreLight.h>
 #include <OgreAsyncTextureTicket.h>
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsAsyncCompiler.h>
@@ -3030,10 +3032,21 @@ size_t PhotonComponent::markDirtyCascadesPending(GiStaleReason why) {
         // whole chain - the removed light's bounce would vanish cascade by
         // cascade over N frames.
         bool hit = mGiCascadeDirtyAll;
+        if (hit) c.editRegionAll = true;   // no box: the whole chain
         if (!hit) {
             const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
             for (const Ogre::Aabb &d : boxes)
-                if (box.intersects(d)) { hit = true; break; }
+                if (box.intersects(d)) {
+                    hit = true;
+                    // THE EDIT'S REGION (PHOTON-7 stage 4's read R4), kept for the rebuild's inner re-march
+                    if (c.editRegionBoxes.size() < Ogre::PhotonCommitLight::kMaxInjectBoxes) {
+                        c.editRegionBoxes.push_back(d);
+                    } else {
+                        Ogre::Aabb u = d;
+                        for (const Ogre::Aabb &e : c.editRegionBoxes) u.merge(e);
+                        c.editRegionBoxes.assign(1u, u);
+                    }
+                }
         }
         if (!hit) continue;
         c.pending = 1;
@@ -5070,6 +5083,137 @@ static const char *const kScrollCopyRowNames[8] = { "vct.scrollCopy0", "vct.scro
                                                     "vct.scrollCopy3", "vct.scrollCopy4", "vct.scrollCopy5",
                                                     "vct.scrollCopy6", "vct.scrollCopy7" };
 
+// THE INNER RE-MARCH'S REGION (PHOTON-7 stage 4's read R4; D4: only the voxels whose march reaches the changed cells are
+// re-marched). A voxel of inner cascade j marches its lights on fixed world shells: cascade k's level-0 cells for the
+// distances [D_{k-1}, D_k), the OUTERMOST's from D_{n-2} to its box's exit, then the sun unoccluded or the lamp. So a change
+// of cascade idx's cells inside a world box F reaches:
+//   - idx not the outermost: the voxels within D_idx of F (its shell's end; plus a cell of idx and of the next, the march's
+//     last sample) - F grown by that reach;
+//   - the OUTERMOST, toward the SUN (direction u): the voxels p with p + t u in F for some t >= 0 - F swept against u, the
+//     t-range where the swept box meets cascade j's box (per axis), its two ends' boxes' hull; toward a LAMP at q of range R:
+//     the voxels p within R whose segment to q crosses F - the cone from q through F beyond it, inside the frustum between
+//     F and its copy scaled about q by R / (q's nearest distance to F) (every such point is q + s (f - q), s <= R / |f - q|),
+//     a lamp inside F its range's box; an area light its range's box (its rectangle is not a point).
+// Every region grows by a cell of idx and of j (the march's samples and the voxel's own extent), is cut to j's box and
+// aligned to the injection's 4^3 groups; past the injection's box count the regions fold into their union (a bound). The
+// injection marches each group once (LightInjection's union).
+bool PhotonComponent::innerRemarchRegion(size_t idx, size_t j, const std::vector<Ogre::Aabb> &changed,
+                                         Ogre::PhotonCommitLight &light, std::vector<Ogre::Aabb> &world) {
+    const VctCascade &outer = mVctCascades[idx];
+    const VctCascade &inner = mVctCascades[j];
+    const bool outermost = idx + 1 >= mVctCascades.size();
+    const Ogre::Aabb ib(inner.centre, Ogre::Vector3(inner.halfSize));
+    const Ogre::Vector3 bLo = ib.getMinimum(), bHi = ib.getMaximum();
+    std::vector<std::pair<Ogre::Vector3, Ogre::Vector3>> regions;   // world (lo, hi)
+    if (!outermost) {
+        double reach = 0.0;
+        for (size_t k = 0; k <= idx; ++k) reach += 8.0 * double(mVctCascades[k].cell());
+        reach += double(outer.cell()) + double(mVctCascades[idx + 1].cell());
+        for (const Ogre::Aabb &f : changed)
+            regions.push_back({ f.getMinimum() - Ogre::Vector3(float(reach)), f.getMaximum() + Ogre::Vector3(float(reach)) });
+    } else {
+        SceneLightList::Consumer consumer;
+        consumer.boxMin = bLo;
+        consumer.boxMax = bHi;
+        SceneLightList::Selection chosen;
+        sceneLightListOf(mSceneMgr).select(mSceneMgr, consumer, chosen);
+        for (const Ogre::Light *l : chosen.lights) {
+            const Ogre::Light::LightTypes type = l->getType();
+            for (const Ogre::Aabb &f : changed) {
+                const Ogre::Vector3 fLo = f.getMinimum(), fHi = f.getMaximum();
+                if (type == Ogre::Light::LT_DIRECTIONAL) {
+                    const Ogre::Vector3 u = -l->getDerivedDirection().normalisedCopy();
+                    double t0 = 0.0, t1 = std::numeric_limits<double>::infinity();
+                    bool meets = true;
+                    for (int a = 0; a < 3 && meets; ++a) {
+                        const double ua = double(u[a]);
+                        if (std::fabs(ua) < 1e-6) {
+                            meets = !(fHi[a] < bLo[a] || fLo[a] > bHi[a]);
+                            continue;
+                        }
+                        // (F - t u) meets B on this axis: fLo - t ua <= bHi and fHi - t ua >= bLo
+                        const double ta = (double(fLo[a]) - double(bHi[a])) / ua, tb = (double(fHi[a]) - double(bLo[a])) / ua;
+                        t0 = std::max(t0, std::min(ta, tb));
+                        t1 = std::min(t1, std::max(ta, tb));
+                    }
+                    if (!meets || t0 > t1) continue;
+                    const Ogre::Vector3 s0 = u * float(t0), s1 = u * float(t1);
+                    Ogre::Vector3 lo = fLo - s0, hi = fHi - s0;
+                    lo.makeFloor(fLo - s1);
+                    hi.makeCeil(fHi - s1);
+                    regions.push_back({ lo, hi });
+                } else {
+                    const Ogre::Vector3 q = l->getParentNode() ? l->getParentNode()->_getDerivedPosition() : Ogre::Vector3::ZERO;
+                    const float R = l->getAttenuationRange();
+                    const Ogre::Vector3 rLo = q - Ogre::Vector3(R), rHi = q + Ogre::Vector3(R);
+                    if (fHi.x < rLo.x || fLo.x > rHi.x || fHi.y < rLo.y || fLo.y > rHi.y || fHi.z < rLo.z || fLo.z > rHi.z)
+                        continue;   // the change is out of the lamp's reach
+                    Ogre::Vector3 near = q;
+                    near.makeCeil(fLo);
+                    near.makeFloor(fHi);
+                    const float dMin = (near - q).length();
+                    if (type != Ogre::Light::LT_POINT && type != Ogre::Light::LT_SPOTLIGHT) {
+                        regions.push_back({ rLo, rHi });   // an area light: its range
+                        continue;
+                    }
+                    if (!(dMin > 1e-4f)) {
+                        regions.push_back({ rLo, rHi });   // the lamp inside the change
+                        continue;
+                    }
+                    const float k = std::max(1.0f, R / dMin);
+                    Ogre::Vector3 lo = fLo, hi = fHi;
+                    lo.makeFloor(q + (fLo - q) * k);
+                    lo.makeFloor(q + (fHi - q) * k);
+                    hi.makeCeil(q + (fLo - q) * k);
+                    hi.makeCeil(q + (fHi - q) * k);
+                    lo.makeCeil(rLo);
+                    hi.makeFloor(rHi);
+                    regions.push_back({ lo, hi });
+                }
+            }
+        }
+    }
+    // THE CELLS: grown by a cell of each cascade, cut to j's box, aligned to the groups
+    const float pad = outer.cell() + inner.cell();
+    const Ogre::Vector3 corner = bLo;
+    const float icell = inner.cell();
+    const int ires = inner.resolution;
+    std::vector<std::array<int, 6>> cells;
+    for (const auto &r : regions) {
+        std::array<int, 6> c{};
+        bool empty = false;
+        for (int a = 0; a < 3; ++a) {
+            const int l = std::max(0, int(std::floor((r.first[a] - pad - corner[a]) / icell)));
+            const int h = std::min(ires, int(std::ceil((r.second[a] + pad - corner[a]) / icell)));
+            if (h <= l) empty = true;
+            c[size_t(a)] = l / 4 * 4;
+            c[size_t(a) + 3u] = std::min(ires, (h + 3) / 4 * 4);
+        }
+        if (!empty) cells.push_back(c);
+    }
+    if (cells.empty()) { light.numInjectBoxes = 0u; return false; }
+    if (cells.size() > Ogre::PhotonCommitLight::kMaxInjectBoxes) {   // past the count: their union (a bound)
+        std::array<int, 6> u = cells[0];
+        for (const auto &c : cells)
+            for (int a = 0; a < 3; ++a) {
+                u[size_t(a)] = std::min(u[size_t(a)], c[size_t(a)]);
+                u[size_t(a) + 3u] = std::max(u[size_t(a) + 3u], c[size_t(a) + 3u]);
+            }
+        cells.assign(1u, u);
+    }
+    light.numInjectBoxes = 0u;
+    for (const auto &c : cells) {
+        const Ogre::uint32 n = light.numInjectBoxes++;
+        for (int a = 0; a < 3; ++a) {
+            light.injectLo[n][a] = Ogre::uint32(c[size_t(a)]);
+            light.injectHi[n][a] = Ogre::uint32(c[size_t(a) + 3u]);
+        }
+        world.push_back(Ogre::Aabb::newFromExtents(corner + Ogre::Vector3(float(c[0]), float(c[1]), float(c[2])) * icell,
+                                                   corner + Ogre::Vector3(float(c[3]), float(c[4]), float(c[5])) * icell));
+    }
+    return true;
+}
+
 bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *placementCommitted,
                                      bool scroll) {
     if (placementCommitted) *placementCommitted = false;
@@ -5217,8 +5361,24 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                 // cascade's first cell, and nothing inside it - so only the voxels that close to a face the shift moved
                 // see another march: the slab's side (the slab and the kept cells next to it) and the TRAILING face
                 // (measured in gi.scroll_slab G: the whole band of a one-axis step sat in the trailing face's first two
-                // cells). The outermost marches its own cells to the lamp: whole.
-                if (idx + 1 < mVctCascades.size()) {
+                // cells). The OUTERMOST marches its own cells to its exit (PHOTON-7 stage 4's read R4): its voxels whose
+                // march meets a moved face toward a light - the faces swept against each light (innerRemarchRegion) -
+                // and its entering slabs.
+                if (idx + 1 >= mVctCascades.size()) {
+                    std::vector<Ogre::Aabb> ownWorld;
+                    innerRemarchRegion(idx, idx, movedFaces, commitLight, ownWorld);
+                    for (const VctCascade::Scroll::Slab &sl : c.scroll.slabs) {
+                        if (commitLight.numInjectBoxes >= Ogre::PhotonCommitLight::kMaxInjectBoxes) {
+                            commitLight.numInjectBoxes = 0u;   // past the count: the whole volume (a bound)
+                            break;
+                        }
+                        const Ogre::uint32 n = commitLight.numInjectBoxes++;
+                        for (int a = 0; a < 3; ++a) {
+                            commitLight.injectLo[n][a] = sl.lo[a] / 4u * 4u;
+                            commitLight.injectHi[n][a] = std::min(Ogre::uint32(c.resolution), (sl.hi[a] + 3u) / 4u * 4u);
+                        }
+                    }
+                } else {
                     double shellEnd = 0.0;
                     for (size_t k = 0; k <= idx; ++k) shellEnd += 8.0 * double(mVctCascades[k].cell());
                     shellEnd += double(mVctCascades[idx + 1].cell());
@@ -5265,18 +5425,35 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
             // bricks resume the feedback through the mask's word 0). The chain's settle used to re-solve them; a scroll's
             // commit re-marches only what its moved faces reach (below). An inner cascade already injected this frame
             // (the latch: one writer a frame) is re-marched on the next.
+            // BY REGION (PHOTON-7 stage 4's read R4): a rebuild at the SAME placement whose change the dirty path boxed (the
+            // edit's boxes that met this cascade, editRegion) re-marches only the inner voxels whose march reaches them
+            // (innerRemarchRegion); a new placement, or a change with no box, the whole inner cascade.
             if (!scrollLight) {
+                const bool region = samePlace && !c.editRegionAll && !c.editRegionBoxes.empty();
                 bool any = false;
                 for (size_t j = idx; j-- > 0;) {
                     VctCascade &inner = mVctCascades[j];
                     if (!inner.lighting || !inner.built) continue;
-                    if (injectedThisFrame(j)) {
-                        inner.remarchOwedFrame = giWriterFrame();
-                        continue;
-                    }
                     Ogre::PhotonCommitLight innerLight;
                     innerLight.delta = true;
                     for (int a = 0; a < 3; ++a) innerLight.keepHi[a] = Ogre::uint32(inner.resolution);
+                    std::vector<Ogre::Aabb> innerWorld;
+                    if (region && !innerRemarchRegion(idx, j, c.editRegionBoxes, innerLight, innerWorld)) {
+                        ++mInnerMarchesSkipped;
+                        continue;
+                    }
+                    if (injectedThisFrame(j)) {
+                        if (region) {   // owed by region (the relight path, next frame)
+                            if (!inner.relightOwed) inner.relightBox = Ogre::Aabb::BOX_NULL;
+                            inner.relightOwed = true;
+                            inner.relightSwept = 0;
+                            for (const Ogre::Aabb &w : innerWorld) inner.relightBox.merge(w);
+                            ++mInnerMarchesOwed;
+                        } else {
+                            inner.remarchOwedFrame = giWriterFrame();
+                        }
+                        continue;
+                    }
                     any = injectCascade(j, &innerLight) || any;
                 }
                 if (any) reintegrateFieldAfterInjection();
@@ -5287,11 +5464,18 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                 unsigned long long slabCells = 0;
                 for (const VctCascade::Scroll::Slab &sl : c.scroll.slabs)
                     slabCells += (unsigned long long)(sl.hi[0] - sl.lo[0]) * (sl.hi[1] - sl.lo[1]) * (sl.hi[2] - sl.lo[2]);
+                // (THE UNION of the boxes, in the injection's 4^3 groups: an overlap is computed once - stage 4's read R4)
                 unsigned long long injectCells = 0;
-                for (Ogre::uint32 b = 0; b < commitLight.numInjectBoxes; ++b) {
-                    unsigned long long v = 1;
-                    for (int a = 0; a < 3; ++a) v *= (unsigned long long)(commitLight.injectHi[b][a] - commitLight.injectLo[b][a]);
-                    injectCells += v;
+                {
+                    const int g = (c.resolution + 3) / 4;
+                    std::vector<char> seen(size_t(g) * size_t(g) * size_t(g), 0);
+                    for (Ogre::uint32 b = 0; b < commitLight.numInjectBoxes; ++b)
+                        for (Ogre::uint32 z = commitLight.injectLo[b][2] / 4u; z < (commitLight.injectHi[b][2] + 3u) / 4u; ++z)
+                            for (Ogre::uint32 y = commitLight.injectLo[b][1] / 4u; y < (commitLight.injectHi[b][1] + 3u) / 4u; ++y)
+                                for (Ogre::uint32 x = commitLight.injectLo[b][0] / 4u; x < (commitLight.injectHi[b][0] + 3u) / 4u; ++x) {
+                                    char &k = seen[(size_t(z) * size_t(g) + y) * size_t(g) + x];
+                                    if (!k) { k = 1; injectCells += 64ull; }
+                                }
                 }
                 if (!commitLight.numInjectBoxes) injectCells = (unsigned long long)c.resolution * c.resolution * c.resolution;
                 c.commitSlabCells += slabCells;
@@ -5304,10 +5488,6 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                 // counted by the work door's marches (deltaMarched), none where no inner voxel is that close. An
                 // OUTERMOST commit's inner marches leave the chain through its moved faces at any distance (the sun's
                 // rays): whole. Their bounces through this cascade are the feedback's (their bricks resume on its moves).
-                const bool outermost = idx + 1 >= mVctCascades.size();
-                double reachWorld = 0.0;
-                for (size_t k = 0; k <= idx; ++k) reachWorld += 8.0 * double(mVctCascades[k].cell());
-                reachWorld += double(c.cell()) + (outermost ? 0.0 : double(mVctCascades[idx + 1].cell()));
                 for (size_t j = idx; j-- > 0;) {
                     VctCascade &inner = mVctCascades[j];
                     if (!inner.lighting || !inner.built) continue;
@@ -5315,32 +5495,11 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                     innerLight.delta = true;
                     for (int a = 0; a < 3; ++a) innerLight.keepHi[a] = inner.resolution;
                     std::vector<Ogre::Aabb> innerWorld;   // the boxes in the world (an owed re-march takes them)
-                    if (!outermost) {
-                        const Ogre::Aabb ib(inner.centre, Ogre::Vector3(inner.halfSize));
-                        const Ogre::Vector3 corner = ib.getMinimum();
-                        const float icell = inner.cell();
-                        const int ires = inner.resolution;
-                        for (const Ogre::Aabb &f : movedFaces) {
-                            if (innerLight.numInjectBoxes >= Ogre::PhotonCommitLight::kMaxInjectBoxes) break;
-                            const Ogre::Vector3 lo = f.getMinimum() - Ogre::Vector3(float(reachWorld));
-                            const Ogre::Vector3 hi = f.getMaximum() + Ogre::Vector3(float(reachWorld));
-                            int l[3], h[3];
-                            bool empty = false;
-                            for (int a = 0; a < 3; ++a) {
-                                l[a] = std::max(0, int(std::floor((lo[a] - corner[a]) / icell)));
-                                h[a] = std::min(ires, int(std::ceil((hi[a] - corner[a]) / icell)));
-                                if (h[a] <= l[a]) empty = true;
-                            }
-                            if (empty) continue;
-                            Ogre::uint32 &n = innerLight.numInjectBoxes;
-                            for (int a = 0; a < 3; ++a) {
-                                innerLight.injectLo[n][a] = Ogre::uint32(l[a] / 4 * 4);
-                                innerLight.injectHi[n][a] = Ogre::uint32(std::min(ires, (h[a] + 3) / 4 * 4));
-                            }
-                            ++n;
-                            innerWorld.push_back(Ogre::Aabb::newFromExtents(lo, hi));
-                        }
-                        if (!innerLight.numInjectBoxes) { ++mInnerMarchesSkipped; continue; }   // no inner voxel sees a face
+                    // THE REGION THE MOVED FACES REACH (stage 4's read R4: an outermost commit too - the faces swept
+                    // against each light - never the whole inner cascade)
+                    if (!innerRemarchRegion(idx, j, movedFaces, innerLight, innerWorld)) {
+                        ++mInnerMarchesSkipped;   // no inner voxel's march reads a face
+                        continue;
                     }
                     // AN INNER CASCADE ALREADY INJECTED THIS FRAME (the one-writer latch: cascade 0's own commit in its
                     // reserved slot, the same frame) OWES ITS RE-MARCH (PHOTON-7 stage 4's read R1): the relight path
@@ -5351,7 +5510,6 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                         if (!inner.relightOwed) inner.relightBox = Ogre::Aabb::BOX_NULL;
                         inner.relightOwed = true;
                         inner.relightSwept = 0;
-                        if (outermost) inner.relightWhole = true;
                         for (const Ogre::Aabb &w : innerWorld) inner.relightBox.merge(w);
                         ++mInnerMarchesOwed;
                     }
@@ -5948,6 +6106,7 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
             abortScroll(size_t(forced));
             c.pending = 1;
             c.pendingReason = GiStaleReason::Refresh;
+            c.editRegionAll = true;   // a rebuild with no box: its inner re-march is whole
         }
     }
     // THE AGES (decision 7): a cascade that owes nothing has none; one the dirty path marked since the
@@ -6314,6 +6473,8 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             c.pendingSince = giWriterFrame();
         } else {
             c.pending = 0;
+            c.editRegionBoxes.clear();   // the rebuild answered the edit's region (R4)
+            c.editRegionAll = false;
             // Owes nothing: the age goes with the debt (a mark later this frame starts a new one - the
             // dirty path raises `pending` before the scheduler's own stamping can see it was clear).
             c.pendingSince = 0;
