@@ -837,6 +837,7 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
     // THE BOUNCES ARE THE FEEDBACK'S (PHOTON-7 stage 4): bounces off is THE DIRECT STORE ALONE (BOUNCES-ZERO-1) - no
     // pass ever runs, so no surface re-emits the sky or another surface.
     lighting->setFeedbackOn(mGi.bounces);
+    lighting->setLightFrame(frame);
     // A WHOLE INJECTION (a first build, a jump, a new placement) WRITES THE TOTAL FROM ITS DIRECT TERM: the volume's
     // light starts there and every brick resumes the feedback; a DELTA keeps what the feedback built (setCommitLight).
     if (!commit) lighting->resetBrickState();
@@ -6608,6 +6609,7 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
     bool first = true;
     for (size_t i = n; i-- > 0;) {
         if (!ran[i]) continue;
+        mVctCascades[i].lighting->setLightFrame(frame);
         mVctCascades[i].lighting->feedbackSelect(acts[i], chain, Ogre::uint32(i), first, budget);
         first = false;
     }
@@ -6641,7 +6643,7 @@ void PhotonComponent::harvestFeedback() {
     for (VctCascade &c : mVctCascades) {
         if (!c.lighting) continue;
         Ogre::PhotonFeedbackReading r;
-        while (c.lighting->takeFeedbackReading(r)) {
+        while (c.lighting->takeFeedbackReading(r, giWriterFrame())) {
             c.fbLastFrame = std::max(c.fbLastFrame, (unsigned long long)r.frame);
             c.fbLastActive = r.activeAfter;
             c.fbBricksRan += r.ran;

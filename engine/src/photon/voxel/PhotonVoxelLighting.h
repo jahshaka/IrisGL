@@ -190,15 +190,16 @@ namespace Ogre
         struct FeedbackTicket
         {
             AsyncTicketPtr ticket;
+            /// the host's frame it was issued in: the reading is TAKEN a fixed count of host frames later
             uint64 frame = 0u;
-            /// the VaoManager's frame count it was issued in: the reading is TAKEN a fixed count of frames later
-            uint32 vaoFrame = 0u;
         };
         /// (the readings in flight: the take's lag - the dynamic buffer multiplier + 1 - and one spare)
         static constexpr uint32 kFeedbackReadingSlots = 8u;
         FeedbackTicket    mFeedbackReadings[kFeedbackReadingSlots];
         uint32            mFeedbackNextIssue = 0u, mFeedbackNextTake = 0u;
         uint64            mBrickClearFrame = ~0ull;
+        /// THE HOST'S FRAME (setLightFrame): the frame the CLEAR and the readings' lag are counted in.
+        uint64            mLightFrame = 0u;
         bool              mFeedbackOn = true;
         /// One dispatch of the feedback job in `mode` (PhotonBrickFeedback_cs.glsl), one thread per brick unless the
         /// mode says otherwise; `source` and `activation` for ACCUM and PRE, `shift` for SHIFT.
@@ -495,7 +496,10 @@ namespace Ogre
         /// The oldest reading of the feedback's counts, taken once its frame is past the frame fences (a fixed lag of
         /// the dynamic buffer multiplier + 1 frames: the host decides on it, so it never depends on the GPU's pace);
         /// false while none is that old.
-        bool takeFeedbackReading( PhotonFeedbackReading &out );
+        bool takeFeedbackReading( PhotonFeedbackReading &out, uint64 frame );
+        /// THE HOST'S FRAME (PHOTON-7 stage 4's read R2): the engine frame this volume's light work is in - set by the host
+        /// before an injection and before the feedback; the once-a-frame CLEAR and the readings' lag count it.
+        void setLightFrame( uint64 frame ) { mLightFrame = frame; }
 
         /// THE COMMIT'S LIGHT for the next update() (PhotonCommitLight); null a whole injection.
         void setCommitLight( const PhotonCommitLight *commit );

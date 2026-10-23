@@ -1336,10 +1336,12 @@ namespace Ogre
     void PhotonVoxelLighting::beginLightFrame()
     {
         ensureBrickMask();
-        const uint64 frame = mVoxelizer->getRenderSystem()->getVaoManager()->getFrameCount();
-        if( frame == mBrickClearFrame )
+        // ONCE AN ENGINE FRAME (PHOTON-7 stage 4's read R2): the host's frame (setLightFrame), never the VaoManager's -
+        // a texture wait inside a frame (the voxeliser's waitForData) advances that count, and a second CLEAR between a
+        // cascade's injection and its feedback pass erased the bricks whose direct term changed.
+        if( mLightFrame == mBrickClearFrame )
             return;
-        mBrickClearFrame = frame;
+        mBrickClearFrame = mLightFrame;
         ++mBrickUpdates;
         dispatchFeedback( 0u );   // CLEAR: this frame's mask and arguments
     }
@@ -1377,25 +1379,25 @@ namespace Ogre
         {
             r.ticket = mBrickArgs->readRequest( 0u, 16u, /*accurateTracking=*/false );
             r.frame = frame;
-            r.vaoFrame = mVoxelizer->getRenderSystem()->getVaoManager()->getFrameCount();
             mFeedbackNextIssue = ( mFeedbackNextIssue + 1u ) % kFeedbackReadingSlots;
         }
         requestBrickReading();   // the frame's mask (stage 3's door)
     }
     //-------------------------------------------------------------------------
-    bool PhotonVoxelLighting::takeFeedbackReading( PhotonFeedbackReading &out )
+    bool PhotonVoxelLighting::takeFeedbackReading( PhotonFeedbackReading &out, uint64 frame )
     {
         // TAKEN AT A FIXED LAG, NEVER "WHEN IT LANDED" (gi.walk L1/L2, PHOTON-7 stage 4): the host DECIDES on a reading
         // (a cascade still owes passes; the chain's rest re-integrates the field and moves the lighting serial), and a
         // reading polled for landing arrives 1 to 4 frames after its frame depending on the GPU's pace - so the rest fell
-        // on a different frame in another process. A reading is taken exactly when its frame is past the dynamic buffer
-        // multiplier: the VaoManager has then waited its fence (isFrameFinished's no-stall branch), so the take is a
-        // function of the frame count alone, and the map below never waits.
+        // on a different frame in another process. A reading is taken exactly when the HOST'S frame is past its own by the
+        // dynamic buffer multiplier (PHOTON-7 stage 4's read R2: the engine's frame, never the VaoManager's count, which a
+        // texture wait advances mid-frame - a lag fixed in time, not in frames). Every engine frame advances the
+        // VaoManager at least once, so its fence is waited by then (the map's own fence, never a stall).
         FeedbackTicket &r = mFeedbackReadings[mFeedbackNextTake];
         if( !r.ticket.get() )
             return false;
         VaoManager *vao = mVoxelizer->getRenderSystem()->getVaoManager();
-        if( vao->getFrameCount() - r.vaoFrame <= vao->getDynamicBufferMultiplier() )
+        if( frame < r.frame || frame - r.frame <= vao->getDynamicBufferMultiplier() )
             return false;
         const uint32 *w = static_cast<const uint32 *>( r.ticket->map() );
         out.frame = r.frame;
