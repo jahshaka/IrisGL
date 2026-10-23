@@ -465,6 +465,9 @@ public:
             };
             bool active = false;
             bool begun = false;          ///< the scratch is cleared for this scroll (PhotonVoxelScroll::begin)
+            /// AN AXIS WAS CUT to the scratch's layers (planScroll): the commit leaves the cascade OWED, so the next
+            /// scroll takes the remainder (it is below the step test's band: nothing else would ask for it).
+            bool cut = false;
             /// An edit reached the target box outside the live one (noteScrollEdit): the chunks
             /// already built may hold the scene before it, so the scroll restarts.
             bool stale = false;

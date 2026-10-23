@@ -3390,6 +3390,11 @@ inline float giCascadeGuaranteedRadius(const GiParams::GiCascadeDesc &c)
 
 /// THE WALKING PACE a scroll is sized for: 1.4 m/s at the engine's fixed 1/60 s frame.
 inline constexpr float kGiWalkMetresPerFrame = 1.4f / 60.0f;
+/// THE FASTEST CAMERA A SCROLL'S SCRATCH IS SIZED FOR (PHOTON-7 stage 2): 0.25 m a frame (15 m/s, a fly). A cascade's
+/// step test fires up to one frame's travel after the camera crossed its band, so a scroll's shift is at most a step,
+/// the even placement's cell and a frame of travel: the scratch holds that at this speed. A faster camera is carried by
+/// CUT scrolls (each leaves its remainder owed) or, past a whole box, a jump's whole rebuild.
+inline constexpr float kGiFlyMetresPerFrame = 0.25f;
 
 /// THE SCROLL'S SPREAD AS A COUNT (PHOTON-7 stage 2; PREFLIGHT_1_2 §5.6): the chunk frames a scroll of this cascade
 /// may spread its entering slab over before the frame that commits it - as long as the walker stays inside the radius

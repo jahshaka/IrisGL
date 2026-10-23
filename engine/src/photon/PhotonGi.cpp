@@ -5519,8 +5519,10 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
     // (buildScrollScratches: one step on one axis), and every slab enters along its own axis as |shift| layers. The
     // axes go by the size of their shift, largest first: the first is cut to the layers when it alone is wider, every
     // other rides along while its slab fits what is left. An axis left out keeps its lattice AND its builtCam, so its
-    // own step test asks again - a diagonal step is two scrolls; a cut axis is placed at its box's centre, so the
-    // camera is still past its band and the next scroll carries the rest. The layers and every shift are even (Q = 2).
+    // own step test asks again - a diagonal step is two scrolls; a CUT axis is placed at its box's centre and the
+    // scroll marked `cut`: its commit leaves the cascade owed and the next scroll carries the rest (the remainder is
+    // under the step test's band - a step past the layers by a cell or two - so the test alone never asked again:
+    // gi.light_is_world's pinned scroll stopped two cells short of its pin). The layers and every shift are even (Q = 2).
     const int layers = c.scratch ? int(c.scratch->layers()) : 0;
     if (layers < 2) return false;
     int order[3] = { 0, 1, 2 };
@@ -5536,7 +5538,10 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
         sc.shift[a] = int(sh);
         sc.lattice[a] = live[a] + sh;
         if (sh == d[a]) placedFor[a] = camPos[a];                                         // the whole of it (or none owed)
-        else if (sh != 0) placedFor[a] = float(double(sc.lattice[a]) * double(cell));   // cut: the box's centre
+        else if (sh != 0) {
+            placedFor[a] = float(double(sc.lattice[a]) * double(cell));                   // cut: the box's centre
+            sc.cut = true;
+        }
     }
     sc.cam = placedFor;
     sc.editMark = c.editLast;
@@ -5932,15 +5937,18 @@ void PhotonComponent::ScrollScratchDelete::operator()(Ogre::PhotonVoxelScroll *s
 
 // THE SCROLL SCRATCHES, ONE PER CASCADE (PHOTON-7 stage 2; PhotonVoxelScroll.h): built with the chain's volumes (a
 // graphics region: texture creations), each `layers` layers of the volume's cells - what ONE step on one axis enters:
-// the step plus the cell the even placement adds, rounded up to even (the shift at the step test's firing is at most
-// that: |quantEven(cam) - quantEven(builtCam)| < step + 2 cells, and even), at most the resolution. A scroll carries
-// the shifts that fit (planScroll). Every cascade owns its own, so no scroll waits for another of its size.
+// the step, the cell the even placement adds and ONE FRAME'S TRAVEL at the fastest camera it is sized for
+// (kGiFlyMetresPerFrame: the step test fires up to a frame after the camera crossed - measured on gi.scroll_lag's fly:
+// without it a 0.25 m/frame scroll was cut and its remainder cost a second scroll, cascade 0's lag 11 frames against
+// its one step of 10), rounded up to even, at most the resolution. A scroll carries the shifts that fit (planScroll);
+// a cut leaves the remainder owed. Every cascade owns its own, so no scroll waits for another of its size.
 void PhotonComponent::buildScrollScratches() {
     releaseScrollScratches();
     for (VctCascade &c : mVctCascades) {
         if (!c.voxelizer) continue;
+        const double travel = std::ceil(double(kGiFlyMetresPerFrame) / double(c.cell()));
         const Ogre::uint32 layers = std::min<Ogre::uint32>(
-            c.resolution, 2u * Ogre::uint32(std::ceil((double(c.stepCells) + 1.0) * 0.5)));
+            c.resolution, 2u * Ogre::uint32(std::ceil((double(c.stepCells) + 1.0 + travel) * 0.5)));
         c.scratch.reset(new Ogre::PhotonVoxelScroll(mRoot->getRenderSystem(), mRoot->getHlmsManager(),
                                                     mRoot->getRenderSystem()->getTextureGpuManager(), c.voxelizer,
                                                     std::max<Ogre::uint32>(layers, 2u)));
@@ -6253,6 +6261,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         // A SCROLL'S COMMIT places the cascade itself, at the target it was planned for and only once
         // the target is in the live volumes (stepScroll); a whole rebuild is placed here.
         const bool scrollCommit = slotScroll && c.scroll.active;
+        const bool cutCommit = scrollCommit && c.scroll.cut;   // its remainder stays owed (planScroll's `cut`)
         if (!scrollCommit) recentreCascade(c, camPos);
         // THE MONITOR'S REASON IS THE CAMERA (audit B12/D5): this work was
         // caused by walking, not by an edit, and `mLastStaleReason` — the last
@@ -6327,6 +6336,12 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             // takes every slot (simulated: [238, 0, 0, 0] rebuilds; edited every other frame, gaps of 7 > N);
             // re-stamped, every dirty cascade is served within N frames (gi.cascade_drag_age's four-dirty case).
             c.pendingSince = c.editLast;
+        } else if (cutCommit) {
+            // A CUT SCROLL'S REMAINDER (planScroll's `cut`): still owed, for the camera, from this frame - the next
+            // scroll plans the rest (it is under the step test's band: the test alone would never ask).
+            c.pending = 1;
+            c.pendingReason = GiStaleReason::Camera;
+            c.pendingSince = giWriterFrame();
         } else {
             c.pending = 0;
             // Owes nothing: the age goes with the debt (a mark later this frame starts a new one - the
@@ -6347,8 +6362,9 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         if (!reserved) spent = true;
         reservedWork = reservedWork || reserved;
         rebuilt = true;
-        // THE LAG SERVED: the cascade is placed for the camera (a camera debt still owed starts a new one).
-        if (c.lagFrom) {
+        // THE LAG SERVED: the cascade is placed for the camera (a camera debt still owed starts a new one) - not by a
+        // CUT scroll, whose remainder is still owed (below).
+        if (c.lagFrom && !cutCommit) {
             c.lagLast = giWriterFrame() - c.lagFrom;
             c.lagMax = std::max(c.lagMax, c.lagLast);
             c.lagFrom = 0;
