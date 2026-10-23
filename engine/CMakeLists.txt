@@ -229,6 +229,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_state.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_draw.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_denoise.glsl"
                 "${JAH_RQ_FORK_BRDF}"
                 "${JAH_RQ_SPEC_ALBEDO}"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"

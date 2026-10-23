@@ -167,6 +167,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// THE REST BLOCK (PHOTON-2 round 2): x = 1 = THE GI FREEZE (the arm "gi.freeze", M1's measuring arm: the temporal
 	/// pass keeps every moving history as carried - no new sample, no clamp; a fixed estimator takes its ray;
 	/// rq_reflect_temporal.comp).
+	/// z = THE REST'S RAYS A FRAME (commit 8: the trace's batch at rest, GiQualityFacts::reflectRestRays).
 	vec4 rest;
 	/// THE REST BREAKS PER TEXEL FOR MOVERS (PHOTON-2 round 2, G6): x = how many moved instances' SWEPT BOXES follow
 	/// (their bounds this frame and last, joined; at most 16 - more moved breaks the view's rest whole, on the host);

@@ -170,6 +170,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// THE REST BLOCK (PHOTON-2 round 2): x = 1 = THE GI FREEZE (the arm "gi.freeze", M1's measuring arm: the temporal
 	/// pass keeps every moving history as carried - no new sample, no clamp; a fixed estimator takes its ray;
 	/// rq_reflect_temporal.comp).
+	/// z = THE REST'S RAYS A FRAME (commit 8: the trace's batch at rest, GiQualityFacts::reflectRestRays).
 	vec4 rest;
 	/// THE REST BREAKS PER TEXEL FOR MOVERS (PHOTON-2 round 2, G6): x = how many moved instances' SWEPT BOXES follow
 	/// (their bounds this frame and last, joined; at most 16 - more moved breaks the view's rest whole, on the host);
@@ -299,8 +300,8 @@ Answer answerAt( ivec2 t )
 		return a;
 	}
 	// AT REST: the frozen moving history H and the rest mean M composed; sigma from H's second moment handed over to
-	// the rest mean's standard error (its luma's root mean square kept beside it, over its v samples), in the denoiser
-	// space by the space's slope at the answer.
+	// the rest mean's standard error (the second moment of its samples' denoiser-space luma kept beside it, over its v
+	// samples - both in the denoiser space, commit 8).
 	const vec4 Hr = imageLoad( historyPrev, ivec3( t, gEye ) );
 	const float Hn = jahStateUnpack( imageLoad( statePrev, ivec3( t, gEye ) ).xy ).N;
 	const bool hasH = finite3( Hr.xyz ) && Hn > 0.0;
@@ -322,10 +323,9 @@ Answer answerAt( ivec2 t )
 	float se = 0.0;
 	if( v >= 1.0 )
 	{
-		const float lm = jahRestLuma( M.xyz );
-		const float slope = 1.0 / ( ( 1.0 + jahDenoiseLuma( answer ) * ( gExposure / kDenoiserTonemapRange ) ) *
-									( 1.0 + jahDenoiseLuma( answer ) * ( gExposure / kDenoiserTonemapRange ) ) );
-		se = sqrt( max( M.w * M.w - lm * lm, 0.0 ) / v ) * slope;
+		// (the rest half's w is the second moment of the samples' denoiser-space luma, commit 8: the SE is in the space)
+		const float lm = jahDenoiseLuma( jahToDenoise( clamp( M.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) );
+		se = sqrt( max( M.w - lm * lm, 0.0 ) / v );
 	}
 	a.sigma = hasH ? mix( sigmaH, se, jahRestHandOverWeight( v, N ) ) : se;
 	a.n = ( hasH ? Hn : 0.0 ) + v;

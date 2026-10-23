@@ -3103,6 +3103,11 @@ struct GiQualityFacts {
     /// reads "traced" (worldmodes). The values are the SSR row's own High/Epic
     /// columns, so the shipped pictures do not move.
     int  reflectTrace = 0;
+    /// THE REST'S RAYS A FRAME (PHOTON-7 stage 6 commit 8, PREFLIGHT_R section 3): at rest a texel still converging
+    /// traces this many of its rest sequence's samples a frame (the batch: up to the first that needs a record) - the
+    /// rest converges in about (2N + its measured samples) / k + 8 frames, then holds. 4 where the rays are the
+    /// reflection (the preflight's simulated stop: ~100 frames on photon-glass against the deleted K_max's 513), 1 else.
+    unsigned reflectRestRays = 1u;
     /// THE IRRADIANCE FIELD, what `GiParams::ddgi`'s Auto resolves to: ON at every
     /// quality (owner option (b), 2026-09-09 — the field is the one diffuse arm
     /// that is right in open and sealed scenes alike). The Studio tier table's
@@ -3219,6 +3224,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.gather = { true, 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
+        f.reflectRestRays = 4u;
         f.probeGridBudgetBytes = quality == GiQuality::Epic ? (1024ull << 20) : (512ull << 20);
         break;
     default:   // Medium: the same reach as High, at its own resolution
@@ -5137,6 +5143,9 @@ struct RayQueryStatus {
     unsigned reflectRestFrames = 0u;
     bool     reflectHeld = false;
     int      reflectRestActive = -1;
+    /// ...and of them the CAPPED texels (commit 8): stopped at their sample count's 16-bit ceiling rather than by their
+    /// standard error - the rest's defect reading (0 on a healthy rest; -1: none read, as reflectRestActive).
+    int      reflectRestCapped = -1;
     unsigned reflectRests = 0u;
     unsigned reflectRestMoverFrames = 0u;
     /// THE CAMERA CUTS a reflection view detected (N3, the gather's rule) - each one its histories cleared.

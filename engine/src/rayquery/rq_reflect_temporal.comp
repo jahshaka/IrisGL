@@ -179,6 +179,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// THE REST BLOCK (PHOTON-2 round 2): x = 1 = THE GI FREEZE (the arm "gi.freeze", M1's measuring arm: the temporal
 	/// pass keeps every moving history as carried - no new sample, no clamp; a fixed estimator takes its ray;
 	/// rq_reflect_temporal.comp).
+	/// z = THE REST'S RAYS A FRAME (commit 8: the trace's batch at rest, GiQualityFacts::reflectRestRays).
 	vec4 rest;
 	/// THE REST BREAKS PER TEXEL FOR MOVERS (PHOTON-2 round 2, G6): x = how many moved instances' SWEPT BOXES follow
 	/// (their bounds this frame and last, joined; at most 16 - more moved breaks the view's rest whole, on the host);
@@ -225,14 +226,15 @@ layout( rgba32f, set = 0, binding = 46 ) uniform image2DArray restReference;
 layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
 
 #include "jah_reproject.glsl"
-#include "jah_reflect_rest.glsl"
-#include "jah_reflect_state.glsl"
 /// kMaxRadiance, finite1, finite3: the one copy.
 #include "jah_rq_finite.glsl"
-#include "jah_reflect_draw.glsl"
 float gExposure = 1.0;
 #define JAH_DENOISE_EXPOSURE gExposure
 #include "jah_reflect_denoise.glsl"
+/// (after the denoiser space: the rest's fold is a denoiser-space mean)
+#include "jah_reflect_rest.glsl"
+#include "jah_reflect_state.glsl"
+#include "jah_reflect_draw.glsl"
 
 /// The box's half-extent in standard deviations (Lumen's r.Lumen.Reflections.Temporal.NeighborhoodClampScale, 1).
 const float kClampSigma = 1.0;
@@ -425,42 +427,40 @@ void main()
 	const float maxFrames = jahReflectMaxFrames( centreChance, maxFramesLobe );
 	const vec3 curD = hasCurrent ? jahToDenoise( clamp( resolved.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) : vec3( 0.0 );
 
-	// ---- AT REST: THE REST CONVERGES PER TEXEL, THEN HOLDS (PHOTON-2 round 2: R1, G1-G3, G6; jah_reflect_rest.glsl) ----
+	// ---- AT REST: THE REST CONVERGES PER TEXEL, THEN HOLDS (PHOTON-2 round 2: R1, G1-G3, G6; commit 8; jah_reflect_rest.glsl)
 	// The frozen moving history H is this texel's `historyPrev` (from the second rest frame the ping-pong does not flip)
-	// and its rest mean M lives in place in `historyCur` (the state's v = the rest samples it holds). Every rest frame
-	// that gives the texel a SAMPLE (G1: a frame with none adds none) takes it into M (a running mean, whose fp16 error
-	// does not accumulate - G2); the ANSWER is composed at every read, lerp( H, M, w( v ) ): the hand-over drains the
-	// motion lag over 2N samples (eased out), then the answer IS the rest mean, which goes on converging. Once the rest
-	// mean's STANDARD ERROR (its luma's second moment kept beside it, its alpha: P1) has stayed under one output code for
-	// kReflectStopFrames frames after the hand-over, the texel STOPS - the trace skips it; the view holds when no texel
-	// is left or at kReflectRestMax frames (OgreRayQuery.cpp). The rest frames' samples are the rest frame's own
-	// sequence: the held answer is a function of the scene and the eye, never of the path. A texel with no moving
-	// history (a disocclusion at the stop) or whose draw is the centre ray every frame takes the plain mean of its rest
-	// samples. A RESUMING texel (G6: a moved instance crossed its ray) takes THE MOVING RULE this frame from its composed
-	// answer (the count it holds, the box's clamp and confidence - never one raw sample: G4) into both halves, its stop
-	// count cleared: its rest restarts from there.
-	// THE FIREFLY BOUND: a sample entering the rest mean is held to the luma of this frame's 21 neighbours' mean + 3
-	// sigma or THE HISTORY'S MEMORY (MaxFrames, 12) times the answer so far, whichever is larger (fix F1's rule).
+	// and its rest mean M lives in place in `historyCur` (the state's v = the rest samples it holds). THE TRACE FOLDS ITS
+	// BATCH (the rest's k rays a frame) into M in place, up to the first ray that needs a RECORD; this pass folds the
+	// frame's SAMPLE - that record's, or the one ray of a frame without a batch (the first rest frame, a fixed estimator,
+	// the reference arm) - by the same fold (G1: a frame with none adds none), and then, for every texel still
+	// converging, makes the frame's STOP test: the rest mean's standard error under one output code for
+	// kReflectStopFrames frames in a row (once the hand-over is done) stops it - the trace skips it; the view holds when
+	// no texel is left (OgreRayQuery.cpp). The ANSWER is composed at every read, lerp( H, M, w( v ) ). A texel with no
+	// moving history (a disocclusion at the stop) or whose draw is the centre ray every frame takes the plain mean of its
+	// rest samples. A RESUMING texel (G6: a moved instance crossed its ray) takes THE MOVING RULE this frame from its
+	// composed answer (the count it holds, the box's clamp and confidence - never one raw sample: G4) into both halves,
+	// its stop count cleared: its rest restarts from there. No firefly bound: the denoiser space bounds a sample's weight
+	// (every sample's luma in [0, 10)).
 	const float restK = p.knobs2.x;
 	History hs = historyNone(), hh = historyNone();
 	bool resumed = false;
 	if( restK >= 0.5 )
 	{
+		if( st.stop >= kReflectStopFrames && !st.resume )
+			return;   // a stopped texel: its rest is held as it is
 		const vec4 s = imageLoad( reflectSample, ivec3( tc, gEye ) );
-		if( !( s.w > 0.0 ) || !finite3( s.xyz ) )
-			return;   // no sample this rest frame: the texel keeps its rest as it is
-		const vec3 sample1 = clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
+		const bool hasSample = s.w > 0.0 && finite3( s.xyz );
+		const vec3 sample1 = hasSample ? clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
 		const float N = max( p.stereo.w, 1.0 );
 		// H = the frozen moving history (its count: the frozen half's state); M = the rest half in place, its v rest
 		// samples the state's (the first rest frame: v = 0).
 		const float Hn = ownPrev.N;
-		vec3 H = imageLoad( historyPrev, ivec3( tc, gEye ) ).xyz;
-		const bool hasH = finite3( H ) && Hn > 0.0;
-		H = hasH ? clamp( H, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
+		const vec4 Hr = imageLoad( historyPrev, ivec3( tc, gEye ) );
+		const bool hasH = finite3( Hr.xyz ) && Hn > 0.0;
+		const vec3 H = hasH ? clamp( Hr.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
 		const vec4 Mt = imageLoad( historyCur, ivec3( tc, gEye ) );
-		const vec3 Mp = finite3( Mt.xyz ) ? Mt.xyz : H;
 		const bool reference = p.rest.y > 0.5;
-		if( reference )
+		if( reference && hasSample )
 		{
 			// THE REFERENCE (R1 (f)): the raw sample, unbounded but for the radiance cap - the integral, not the held
 			// estimate - restarted at the first rest frame.
@@ -469,42 +469,17 @@ void main()
 			imageStore( restReference, ivec3( tc, gEye ), vec4( R0.xyz + ( sample1 - R0.xyz ) / n, n ) );
 		}
 		const float vPrev = float( st.v );
-		const vec3 sofar = jahRestAnswer( H, hasH, Mp, vPrev, N );
 		const bool centreOnly = centreChance >= 1.0;
-		vec3 sk = sample1;
-		float nbrLuma = -1.0;
-		if( !centreOnly )
-		{
-			float y1 = 0.0, y2 = 0.0, yn = 0.0;
-			const ivec2 r = ivec2( gl_LocalInvocationID.xy ) + ivec2( kReach );
-			for( int dy = -kReach; dy <= kReach; ++dy )
-				for( int dx = -kReach; dx <= kReach; ++dx )
-				{
-					if( abs( dx ) == kReach && abs( dy ) == kReach )
-						continue;
-					const vec4 v = sTile[( r.y + dy ) * kTileSide + r.x + dx];
-					if( v.w <= 0.0 )
-						continue;
-					const float y = lumaOf( jahFromDenoise( jahFromYCoCg( v.xyz ) ) );
-					y1 += y;
-					y2 += y * y;
-					yn += 1.0;
-				}
-			float bound = kMaxRadiance;
-			if( yn >= 3.0 )
-			{
-				const float m = y1 / yn;
-				nbrLuma = m;
-				bound = m + 3.0 * sqrt( max( y2 / yn - m * m, 0.0 ) );
-			}
-			bound = max( bound, lumaOf( vPrev > 0.0 || hasH ? sofar : sk ) * maxFramesLobe );
-			const float ys = lumaOf( sk );
-			if( ys > bound )
-				sk *= bound / ys;
-		}
+		JahRestStats rs;
+		rs.M = vPrev > 0.0 && finite3( Mt.xyz ) ? Mt.xyz : H;
+		rs.m2 = vPrev > 0.0 && finite1( Mt.w ) ? Mt.w : 0.0;
+		rs.res = jahRestHasResidual( vPrev, hasH, centreOnly, N ) && finite3( Hr.xyz ) && finite1( Hr.w ) ? Hr : vec4( 0.0 );
 		if( st.resume )
 		{
+			if( !hasSample )
+				return;   // a resume with no answer: the texel's rest restarts next frame, as it stands
 			// THE COMPOSED ANSWER IS THIS TEXEL'S HISTORY for the moving rule below (the surface's, in place).
+			const vec3 sofar = jahRestAnswer( H, hasH, rs.M, vPrev, N );
 			if( vPrev > 0.0 || hasH )
 			{
 				hs.ok = true;
@@ -523,29 +498,54 @@ void main()
 			// mean, its second moment and its stop count as they are.
 			if( p.rest.x > 0.5 )
 				return;
-			const float v = min( vPrev + 1.0, kReflectRestMax );
-			// (stored rounded stochastically: an fp16 running mean past a few hundred samples otherwise drifts - P1)
-			const vec3 M = jahRestStoreMean( vPrev > 0.0 ? Mp + ( sk - Mp ) / v : sk, tc, gEye, p.knobs.z );
-			const bool handOver = hasH && !centreOnly;
-			const vec3 answer = jahRestAnswer( handOver ? H : M, hasH, M, v, N );
-			// THE SECOND MOMENT (P1): the running mean of the samples' squared luma, beside M, kept as its root.
-			const float ls = jahRestLuma( sk );
-			const float rmsPrev = vPrev > 0.0 ? Mt.w : 0.0;
-			const float q = vPrev > 0.0 ? rmsPrev * rmsPrev + ( ls * ls - rmsPrev * rmsPrev ) / v : ls * ls;
-			const float rms = jahRestStoreMoment( sqrt( max( q, 0.0 ) ), tc, gEye, p.knobs.z );
+			float v = vPrev;
+			if( hasSample && st.v < kReflectRestVCap )
+			{
+				jahRestFold( rs, sample1, vPrev );
+				v = vPrev + 1.0;
+				// (the rest's mean length: the rest samples' own running mean)
+				st.hitT = vPrev > 0.0 && st.hitT > 0.0 ? max( st.hitT + ( s.w - st.hitT ) / v, 1e-3 ) : s.w;
+				st.v = uint( v );
+				imageStore( historyCur, ivec3( tc, gEye ), vec4( rs.M, rs.m2 ) );
+				const bool handOver = hasH && !centreOnly;
+				if( !handOver && hasH )
+					imageStore( historyPrev, ivec3( tc, gEye ), vec4( rs.M, 0.0 ) );   // the plain mean: every reader composes M
+				else if( jahRestHasResidual( v, hasH, centreOnly, N ) )
+					imageStore( historyPrev, ivec3( tc, gEye ), rs.res );   // the stores' residual (jahRestFold)
+			}
+			if( !( v >= 1.0 ) )
+				return;   // nothing in the rest mean yet
 			// THE STOP (R1, P1): the rest mean's standard error under a code, counted over consecutive frames once the
-			// hand-over is done (a texel with no hand-over: once kReflectStopFrames samples are in).
-			const float e = jahRestErrorCodes( rms, jahRestLuma( M ), v, max( jahRestLuma( answer ), max( nbrLuma, 0.0 ) ) );
-			const bool still = e <= 1.0;
+			// hand-over is done (a texel with no hand-over: once kReflectStopFrames samples are in); against the
+			// texel's answer or, for a dark one, its neighbourhood's mean luma (this frame's 21 resolved neighbours),
+			// never under ONE CODE NEAR BLACK - about 3 % of the exposure's white (sRGB's first code, 1/255 / 12.92 of
+			// display white, over the 1 % rule): 0.03 / E (a dark texel's 1 % would otherwise ask finer than a code
+			// and run to its cap).
+			float nbrLuma = 0.0;
+			{
+				float y1 = 0.0, yn = 0.0;
+				const ivec2 r = ivec2( gl_LocalInvocationID.xy ) + ivec2( kReach );
+				for( int dy = -kReach; dy <= kReach; ++dy )
+					for( int dx = -kReach; dx <= kReach; ++dx )
+					{
+						if( abs( dx ) == kReach && abs( dy ) == kReach )
+							continue;
+						const vec4 t = sTile[( r.y + dy ) * kTileSide + r.x + dx];
+						if( t.w <= 0.0 )
+							continue;
+						y1 += jahDenoiseLuma( jahFromDenoise( jahFromYCoCg( t.xyz ) ) );
+						yn += 1.0;
+					}
+				nbrLuma = yn > 0.0 ? y1 / yn : 0.0;
+			}
+			const bool handOver = hasH && !centreOnly;
+			const vec3 answer = jahRestAnswer( handOver ? H : rs.M, hasH, rs.M, v, N );
+			const float e = jahRestErrorCodes( rs, v, max( max( jahDenoiseLuma( answer ), nbrLuma ), 0.03 / gExposure ) );
 			const bool settled = v >= ( handOver ? jahRestHandOverLength( N ) : float( kReflectStopFrames ) );
-			const uint stopCount = still && settled && !reference ? min( st.stop + 1u, kReflectStopFrames ) : 0u;
-			if( !handOver && hasH )
-				imageStore( historyPrev, ivec3( tc, gEye ), vec4( M, 0.0 ) );   // the plain mean: every reader composes M
-			imageStore( historyCur, ivec3( tc, gEye ), vec4( M, rms ) );
-			// (the rest's mean length: the rest samples' own running mean)
-			st.hitT = vPrev > 0.0 && st.hitT > 0.0 ? max( st.hitT + ( s.w - st.hitT ) / v, 1e-3 ) : s.w;
-			st.v = uint( v );
-			st.stop = stopCount;
+			// A CAPPED TEXEL (its count at the field's ceiling) stops as it stands - the defect the trace counts.
+			const bool capped = st.v >= kReflectRestVCap;
+			st.stop = capped ? kReflectStopFrames
+							 : ( e <= 1.0 && settled && !reference ? min( st.stop + 1u, kReflectStopFrames ) : 0u );
 			imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 			return;
 		}

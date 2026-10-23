@@ -237,14 +237,12 @@ constexpr unsigned kReflectRing = 3u;
 /// handed over from the moving history over N frames, then the hold. N is the gather's own function of the history's
 /// length (gatherSettleFramesOf: a 5-code step under one code through the MaxFrames-12 window, 19 frames).
 unsigned reflectRestLength() { return gatherSettleFramesOf(kReflectMaxFrames); }
-/// THE REST FRAMES' SAMPLE SEQUENCE: the rest frame's index k past every moving frame's (`frame & 0xFFFF`), so the N
-/// samples a held picture averages are the same N at every stop at one pose — the rest mean is a function of the
-/// scene and the eye, never of the path (the gather's rest mean's law, rq_probe_integrate.comp).
+/// THE REST'S SAMPLE SEQUENCE (commit 8): a rest sample's index is this base plus the sample's own number v (the
+/// shader adds it: per SAMPLE, never per frame - a frame's batch of k and a dropped record's retry are each the
+/// sequence's next), past every moving frame's (`frame & 0xFFFF`), so the samples a held picture averages are the same at
+/// every stop at one pose - the rest mean is a function of the scene and the eye, never of the path (the gather's rest
+/// mean's law, rq_probe_integrate.comp). The reference arm's value 2 offsets it by 0x8000 (+ a 16-bit v: < 2^18, exact).
 constexpr unsigned kReflectRestSequence = 0x10000u;
-/// THE REST'S LONGEST RUN (PHOTON-2 round 2, R1): a texel's rest mean takes at most this many samples (the shader's
-/// kReflectRestMax) and the view holds at this many rest frames after the rest began or a moved instance last crossed
-/// it, whichever texels are still converging; most stop long before (jah_reflect_rest.glsl: the stop).
-constexpr unsigned kReflectRestMaxFrames = 512u;
 /// THE MOVED INSTANCES A REST FOLLOWS PER TEXEL (G6, rq_reflect.comp's restMoverBox): more moved in one frame breaks
 /// the view's rest whole.
 constexpr unsigned kReflectRestMovers = 16u;
@@ -1084,12 +1082,13 @@ private:
         unsigned fullW = 0, fullH = 0;
         /// THE REST (PHOTON-2 1e, fix F1; round 2: R1, G1-G6): consecutive recorded frames with the eye basis
         /// bit-identical, the reflection's rest key unchanged (reflectRestKey: the lighting writes and edits its rays
-        /// read and the traced set - never a move) and the pass's own parameters unchanged. At rest each texel's frozen
-        /// moving history and its own rest mean live in the two halves, composed at every read (jah_reflect_rest.glsl:
-        /// the hand-over over N samples, then the mean); a texel STOPS tracing once its answer has changed under a code
-        /// for kReflectStopFrames frames, and the view HOLDS - the trace and the temporal pass dispatch nothing, the
-        /// filter composites - once a rest frame's count of active texels read back zero or kReflectRestMaxFrames
-        /// frames passed since the rest began or a moved instance last crossed it. A MOVED INSTANCE breaks the rest per
+        /// read and the traced set - never a move) and the pass's own parameters unchanged (the NAMED key, commit 8). At
+        /// rest each texel's frozen moving history and its own rest mean live in the two halves, composed at every read
+        /// (jah_reflect_rest.glsl: the hand-over over 2N samples, then the mean); a texel traces the tier's rest count of
+        /// rays a frame and STOPS once its rest mean's standard error has stayed under a code for kReflectStopFrames
+        /// frames, and the view HOLDS - the trace and the temporal pass dispatch nothing, the filter composites - once a
+        /// rest frame's count of active texels read back zero (no frame count holds it: K_max deleted, commit 8). A
+        /// MOVED INSTANCE breaks the rest per
         /// texel (its swept box: the texels its ray segments cross resume); a BREAK of the key composes every texel's
         /// answer into the half the trace reads (rq_reflect_compose.comp) and the moving rules resume from it.
         unsigned restFrames = 0u;
@@ -1490,6 +1489,9 @@ private:
         /// the top 12 bits, its rest frame below; 0 = the trace counted nothing) and, read back, the newest retired
         /// frame's count of active resting texels (counter word 2) with its tag.
         uint32_t restTag = 0u, restActive = 0u, restActiveTag = 0u;
+        /// ...and that frame's CAPPED texels (counter word 3, commit 8): stopped at their count's 16-bit ceiling, not by
+        /// their standard error - the rest's defect reading.
+        uint32_t restCapped = 0u;
         /// Armed for the decode pass: the SceneManager whose draws are shown, and
         /// the camera whose auto aspect is held off for the pass (the decode's
         /// target is the list, not a picture — F7).
@@ -5648,10 +5650,13 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         st.reflectRestMoverFrames = rv.restMoverCrossings;
         st.reflectCameraCuts = std::max(st.reflectCameraCuts, rv.cameraCuts);
         st.reflectRestActive = -1;
+        st.reflectRestCapped = -1;
         if (const auto h = mHits.find(kv.first); h != mHits.end() && rv.restFrames > 0u) {
             const uint32_t tag = h->second.restActiveTag;
-            if (tag && (tag >> 20u) == (rv.restSession & 0xFFFu) && (tag & 0xFFFFFu) > rv.restMoverFrame)
+            if (tag && (tag >> 20u) == (rv.restSession & 0xFFFu) && (tag & 0xFFFFFu) > rv.restMoverFrame) {
                 st.reflectRestActive = int(h->second.restActive);
+                st.reflectRestCapped = int(h->second.restCapped);
+            }
         }
     }
 }
@@ -6081,6 +6086,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.rest[0] = std::lround(armValue(ArmId::GiFreeze)) == 1 ? 1.0f : 0.0f;
     const bool restReference = arm(ArmId::ReflectRestReference, false);
     pp.rest[1] = restReference ? 1.0f : 0.0f;   // THE REST'S 4,096-SAMPLE REFERENCE (R1 (f)'s measuring arm)
+    // THE REST'S RAYS A FRAME (commit 8: the trace's batch at rest, GiQualityFacts::reflectRestRays)
+    pp.rest[2] = float(std::max(1u, giQualityFacts(scene->giParams().quality).reflectRestRays));
     // The cube's gain, or the flat environment with no cube (jah_rq_hit.glsl's
     // JAH_SKY_COLOUR contract).
     for (int i = 0; i < 3; ++i) pp.skyColour[i] = rayEnv.colour[i];
@@ -6295,33 +6302,43 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
     bool hold = false, restBreak = false;
     {
-        ReflectParams key = pp;
-        key.knobs[2] = 0.0f;
-        key.knobs2[0] = 0.0f;
-        key.stereo[1] = 0.0f;
-        std::memset(key.prevCamPos, 0, sizeof(key.prevCamPos));
-        std::memset(key.prevRayTL, 0, sizeof(key.prevRayTL));
-        std::memset(key.prevRayRight, 0, sizeof(key.prevRayRight));
-        std::memset(key.prevRayDown, 0, sizeof(key.prevRayDown));
-        std::memset(key.prevFwd, 0, sizeof(key.prevFwd));
-        std::memset(key.prevCamPos2, 0, sizeof(key.prevCamPos2));
-        std::memset(key.prevRayTL2, 0, sizeof(key.prevRayTL2));
-        std::memset(key.prevRayRight2, 0, sizeof(key.prevRayRight2));
-        std::memset(key.prevRayDown2, 0, sizeof(key.prevRayDown2));
-        std::memset(key.prevFwd2, 0, sizeof(key.prevFwd2));
-        std::memset(key.restMovers, 0, sizeof(key.restMovers));
-        std::memset(key.restMoverBox, 0, sizeof(key.restMoverBox));
-        // (motion.w says "a mover moved in the last two frames": a move, which breaks per texel - not a parameter)
-        key.motion[3] = 0.0f;
-        // (the hit list's CAPACITY is the per-frame list's size - it grows in place on an overflow, kHitListWidth's law -
-        // and a ray finds the same thing in a list of any size: it is in no key)
-        key.hitList[0] = 0.0f;
+        // THE NAMED KEY (commit 8, PREFLIGHT_R section 3: E12's whole-struct hash deleted - it took every member a
+        // later lane added, a per-frame one included, and broke the rest on it): what a ray's answer depends on, member
+        // by member - the projection and the targets, the gate and the reach, the cascades, the sky, the card and hit
+        // tables, the sun legs, the id pass's image, the alpha table, the origin's terms, the fog, the metal route, the
+        // clouds, the rest's own arms, the screen trace's and the denoiser's. NOT the eye (`sameEye` compares its basis
+        // bit for bit), nor what a still frame changes by construction: the frame index (knobs.z), the rest frame
+        // (knobs2.x), the view's age (stereo.y), the previous basis, the moved instances' boxes, the recent-move flag
+        // (motion.w: a move, which breaks per texel) and the list's capacity (hitList.x: it grows in place).
         unsigned long long paramsKey = 1469598103934665603ull;
-        const unsigned char *bytes = reinterpret_cast<const unsigned char *>(&key);
-        for (size_t b = 0; b < sizeof(key); ++b) {
-            paramsKey ^= bytes[b];
-            paramsKey *= 1099511628211ull;
-        }
+        const auto foldBytes = [&paramsKey](const void *d, size_t n) {
+            const unsigned char *b = static_cast<const unsigned char *>(d);
+            for (size_t i = 0; i < n; ++i) {
+                paramsKey ^= b[i];
+                paramsKey *= 1099511628211ull;
+            }
+        };
+        const auto fold4 = [&](const float (&v)[4]) { foldBytes(v, sizeof(v)); };
+        const auto foldF = [&](float v) { foldBytes(&v, sizeof(v)); };
+        fold4(pp.projParams);
+        fold4(pp.resolution);
+        foldF(pp.knobs[0]); foldF(pp.knobs[1]); foldF(pp.knobs[3]);
+        foldF(pp.knobs2[1]); foldF(pp.knobs2[2]); foldF(pp.knobs2[3]);
+        fold4(pp.skyColour);
+        fold4(pp.viewAxisX); fold4(pp.viewAxisY); fold4(pp.viewAxisZ);
+        foldBytes(pp.voxelOrigin, sizeof(pp.voxelOrigin));
+        foldBytes(pp.voxelInvSize, sizeof(pp.voxelInvSize));
+        foldF(pp.stereo[0]); foldF(pp.stereo[2]); foldF(pp.stereo[3]);
+        fold4(pp.cards);
+        foldF(pp.hitList[1]); foldF(pp.hitList[2]); foldF(pp.hitList[3]);
+        fold4(pp.hitSun); fold4(pp.hitSun2);
+        foldF(pp.motion[0]); foldF(pp.motion[1]); foldF(pp.motion[2]);
+        fold4(pp.alpha);
+        foldBytes(pp.fog, sizeof(pp.fog));
+        fold4(pp.metal); fold4(pp.hitTable); fold4(pp.cloudMap); fold4(pp.cloudSun);
+        fold4(pp.rest);
+        fold4(pp.screen); fold4(pp.screen2);
+        fold4(pp.denoiser);
         const unsigned long long restKey = reflectRestKey(scene, sa);
         const bool sameEye = rv.havePrev && rv.prevStereo == stereo &&
                              std::memcmp(&rv.prev[0], &eyeB[0], sizeof(EyeBasisF)) == 0;
@@ -6350,16 +6367,16 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             (restHits->restActiveTag >> 20u) == (rv.restSession & 0xFFFu) &&
             (restHits->restActiveTag & 0xFFFFFu) > rv.restMoverFrame && restHits->restActive == 0u)
             rv.restAllStopped = true;
+        // THE HOLD: every texel has stopped (its standard error under a code - a capped texel stops too, counted as the
+        // defect it is: RayQueryStatus::reflectRestCapped). No frame count holds a rest (K_max 512 deleted, commit 8).
         // (under the reference arm no texel stops: the view holds after its 4,096 samples)
         hold = rv.restFrames > 0u && movedBoxes == 0u &&
-               (restReference ? rv.restFrames > 4096u
-                              : rv.restAllStopped || rv.restFrames - rv.restMoverFrame > kReflectRestMaxFrames);
-        pp.knobs2[0] = restBreak ? -1.0f : float(std::min(rv.restFrames, kReflectRestMaxFrames));
-        // THE REST'S SAMPLES ARE THE REST FRAME'S OWN SEQUENCE (path-independent: kReflectRestSequence).
+               (restReference ? rv.restFrames > 4096u : rv.restAllStopped);
+        pp.knobs2[0] = restBreak ? -1.0f : float(rv.restFrames);   // (< 2^20: exact)
+        // THE REST'S SEQUENCE BASE (the shader adds each sample's number v; kReflectRestSequence).
         // (the reference arm's value 2 takes a disjoint rest sequence: two references measure their own noise)
         if (rv.restFrames > 0u)
-            pp.knobs[2] = float(kReflectRestSequence + (rv.restFrames & 0x7FFFu) +
-                                (armValue(ArmId::ReflectRestReference) > 1.5 ? 0x8000u : 0u));
+            pp.knobs[2] = float(kReflectRestSequence + (armValue(ArmId::ReflectRestReference) > 1.5 ? 0x8000u : 0u));
         // The trace counts this frame's active resting texels into the hit list (read back late, tagged).
         if (restHits)
             restHits->restTag = rv.restFrames > 0u && !hold && hit.on
@@ -8996,6 +9013,7 @@ void RayQueryTier::readHitCounters(HitView &hv) {
             hv.appended = w[0];
             hv.dropped = w[1];
             hv.restActive = w[2];
+            hv.restCapped = w[3];
             hv.restActiveTag = pd.restTag;
             newest = pd.frame;
             any = true;
