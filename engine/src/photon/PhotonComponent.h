@@ -1331,6 +1331,8 @@ private:
     /// The camera cascade `idx` is placed for: `eyePos`, or under a placement pin the pin's (every placement decision
     /// reads it: the step test, the jump guard, a scroll's target and a rebuild's recentre).
     Ogre::Vector3 placementCam(size_t idx, const Ogre::Vector3 &eyePos) const;
+    /// The cascade already stands on the lattice the camera asks of it (a move owed and taken back: W2).
+    bool placedForCamera(size_t idx, const Ogre::Vector3 &eyePos) const;
 public:
     /// THE PLACEMENT PIN (Engine.h Scene::setGiPlacementPin, a measuring door).
     /// The cascades' voxel digests (Types.h GiVoxelDigests), word-wise: Scene::requestGiVoxelDigests' render-thread half.

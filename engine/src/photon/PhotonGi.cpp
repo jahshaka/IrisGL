@@ -5586,6 +5586,19 @@ static const float kStepHysteresis = 0.1f;
 /// The triangles one record carries at most (a partition: PhotonVoxelizer::kIndicesPerPartition / 3).
 static const double kScrollRecordTriangles = 667.0;
 
+// A CAMERA DEBT THE CAMERA TOOK BACK (PHOTON-7 stage 2's read W2): a cascade owed a move (a cut scroll's remainder, a step)
+// whose target lattice is, by the time it is served, the one it stands on - the camera came back - owes nothing: a scroll
+// planned for it would shift by zero and still re-inject the whole cascade as a delta (and the cascades inside it).
+bool PhotonComponent::placedForCamera(size_t idx, const Ogre::Vector3 &eyePos) const {
+    if (idx >= mVctCascades.size()) return false;
+    const VctCascade &c = mVctCascades[idx];
+    const float cell = c.cell();
+    if (!(cell > 0.0f)) return false;
+    const Ogre::Vector3 camPos = placementCam(idx, eyePos);
+    return jahQuantEven(camPos.x, cell) == c.latticeX && jahQuantEven(camPos.y, cell) == c.latticeY &&
+           jahQuantEven(camPos.z, cell) == c.latticeZ;
+}
+
 bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
     if (idx >= mVctCascades.size()) return false;
     VctCascade &c = mVctCascades[idx];
@@ -6208,7 +6221,11 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
         VctCascade &c = mVctCascades[0];
         if (c.pending && c.editSince != giWriterFrame()) {
             const bool cameraOnly = c.built && !c.jumped && !c.liveTorn && c.pendingReason == GiStaleReason::Camera;
-            if (c.scroll.active || cameraOnly) {
+            if (cameraOnly && !c.scroll.active && placedForCamera(0, camPos)) {
+                c.pending = 0;          // the camera took its move back: nothing is owed (W2)
+                c.pendingSince = 0;
+                c.lagFrom = 0;
+            } else if (c.scroll.active || cameraOnly) {
                 if (!mVctMaterialRefreshOwed && (c.scroll.active || planScroll(0, camPos))) {
                     w.reserved0 = true;
                     w.scroll0 = true;
@@ -6241,6 +6258,12 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
             if (c0Writes) continue;   // a new scroll's plan or a whole rebuild waits a frame
             const bool cameraOnly = c.built && !c.jumped && !c.liveTorn &&
                                     c.pendingReason == GiStaleReason::Camera;
+            if (cameraOnly && placedForCamera(i, camPos)) {
+                c.pending = 0;          // the camera took its move back: nothing is owed (W2)
+                c.pendingSince = 0;
+                c.lagFrom = 0;
+                continue;
+            }
             if (cameraOnly) {
                 if (mVctMaterialRefreshOwed) continue;
                 if (planScroll(i, camPos)) {
