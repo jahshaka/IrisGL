@@ -269,13 +269,13 @@ bool applyComboItem(const iris::ScenePtr &scene, const Row &r, const ComboItem &
 // it no longer collapses onto High). ONE table, ONE owner: `kPhotonTable` in
 // worldmodes.cpp; the engine's GiQuality has an Epic row of its own
 // (D4-PHOTON-TIERS: High's resolutions plus four times the gather's probes),
-// and Epic's bounce column is an ordinary document field (numBounces).
+// and the bounce column is an ordinary document field (giNumBounces: 0 off, 1 on - PHOTON-7 stage 4).
 //
 //   tier    technique             voxels             ddgi  DDGI grid  bounces  probe faces/HDR/shadows  budget
 //   Low     VCT, 2 cascades       64^3               ON    8192 fit   1        — (no probes)            (dial)
 //   Medium  VCT, 4 cascades       64^3               ON    8192 fit   1        — (no probes)            (dial)
 //   High    the hybrid            128^3 near, 64^3   ON    8192 fit   1        512 / HDR / shadowed *   (dial)
-//   Epic    the hybrid            128^3 near, 64^3   ON    8192 fit   3        512 / HDR / shadowed *   (dial)
+//   Epic    the hybrid            128^3 near, 64^3   ON    8192 fit   1        512 / HDR / shadowed *   (dial)
 //
 // * The hybrid is "VCT + rays" wherever the scene traces rays on this machine
 //   (High's rayReflections: the rays are the reflection and NO probe grid is
@@ -284,9 +284,8 @@ bool applyComboItem(const iris::ScenePtr &scene, const Row &r, const ComboItem &
 //
 // Derived columns (not rows): the cascade chain and probe faces/HDR/shadows
 // follow `giQuality` (giQualityFacts / buildPcc); the DDGI grid is the
-// engine's fixed 8192-probe aspect fit (kIfdTotalProbes). Epic's bounce column
-// is measured:
-// bounces 1 -> 3 raises the DDGI-fed floor bounce (gi.ddgi case 7).
+// engine's fixed 8192-probe aspect fit (kIfdTotalProbes). The bounce column is ON at every tier: the voxel store
+// converges the series by feedback (PHOTON-7 stage 4), so a count of bounces no longer exists.
 //
 // THE FIFTH COLUMN IS GONE (lane R2, 2026-09-12). "Dynamic probes" reserved
 // extra probe re-captures per frame for the probes a MOVING object was inside;
@@ -319,7 +318,7 @@ bool      photonEnabled(const iris::ScenePtr &scene);
 
 /// What the tier resolves each of its rows to — THE TABLE, read one column at
 /// a time. `technique` is a GiMode ordinal, `quality` a GiQuality ordinal,
-/// `ddgi` 0/1, `bounces` the total light bounces (1..4).
+/// `ddgi` 0/1, `bounces` 0/1 (the light bounces, converged by feedback; 0 the direct store alone).
 int photonTechnique(PhotonTier t);
 int photonQuality(PhotonTier t);
 int photonDdgi(PhotonTier t);

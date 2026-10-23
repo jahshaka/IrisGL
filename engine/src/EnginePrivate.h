@@ -1960,10 +1960,10 @@ public:
     X(GiVoxelOctants, "gi.voxelOctants") /* a whole build's octants per axis (1 shipped, 2 = 8 octants; stage 2's measure) */ \
     X(GiRebuildCascade, "gi.rebuildCascade") /* cascade N rebuilt whole every frame while set (-1 = none; a measuring door) */ \
     X(GiRegenerateDirectional, "gi.regenerateDirectional") /* cascade N's directional levels regenerated whole from its level 0 every frame while set (-1 = none; a test door) */ \
+    X(GiBounceJacobi, "gi.bounceJacobi") /* the bounces' JACOBI reference: the store restarted from its direct terms where the arm comes on, then every brick a pass every frame while set (a measuring door) */ \
     X(ShadowCasterCull, "shadow.casterCull") /* a sun map's Atom casters culled by the light's own depth (0: frustum only, the parity arm) */ \
     X(ShadowLightDepth, "shadow.lightDepth") /* a sun map's light-depth path: its pyramid, the late cut, the receiver grid (0: none of them built, the pre-U5 caster pass) */ \
     X(ShadowCasterPbsProbe, "shadow.casterPbsProbe") /* a sun map's PBS casters TESTED against the light's depth and counted (a measuring door) */ \
-    X(GiRebuildSettle, "gi.rebuildSettle") /* the rebuild settle runs (0: off, the paired arm) */ \
     X(GiFieldRays, "gi.fieldRays") /* the field's rays per depth texel (0 = shipped) */ \
     X(GiFieldSamples, "gi.fieldSamples") /* the field's sample target (0 = shipped) */ \
     X(GiFieldStatic, "gi.fieldStatic") /* the field's rays NOT rotated per frame */ \
@@ -4596,9 +4596,9 @@ public:
     /// lane changes an input and not a pass.
     bool rayReflectionsWanted() const;
     bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) override;
-    bool refreshGiLighting(bool inMotion) override {
-        if (postScene([=](OgreScene &s) { return s.refreshGiLighting(inMotion); })) return true;   // U3 4a: a message
-        JAH_HOST_CALL("Scene::refreshGiLighting"); return mPhoton.refreshGiLighting(inMotion); }
+    bool refreshGiLighting() override {
+        if (postScene([=](OgreScene &s) { return s.refreshGiLighting(); })) return true;   // U3 4a: a message
+        JAH_HOST_CALL("Scene::refreshGiLighting"); return mPhoton.refreshGiLighting(); }
     void setNodeProbeGridExcluded(NodeId id, bool excluded) override;
     bool nodeProbeGridExcluded(NodeId id) const override;
     void setNodeHelper(NodeId id, bool helper) override;
@@ -6945,7 +6945,6 @@ public:   // (a seam PhotonComponent calls)
     unsigned long long walkCardLights() const;
 private:
     /// A lamp event for the scheduler (setLight, removeLight, a shown flip, a pose that moved, a class flip).
-    void noteLampChanged(const Node &n) { mPhoton.noteLampChanged(n.movable); }
     /// ...AND THE LAMP'S REGION (PHOTON-7 stage 3; OgreGi.cpp): its range sphere as last listed joined with its sphere
     /// now - a light hidden, detached or about to be destroyed (`gone`) has none - into the frame's changed-region
     /// list; a DIRECTIONAL light's event is the sun's: an overflow, never a box.

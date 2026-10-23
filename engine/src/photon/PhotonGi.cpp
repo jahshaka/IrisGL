@@ -45,8 +45,7 @@
 namespace jahshaka { namespace engine { namespace detail {
 
 // THE GI SIDE'S OWN SCENE-GRAPH UPDATES, COUNTED (lane D1-SCALE-FIXTURES, the owed
-// "extra updateSceneGraph calls per frame during a drag" row): the light re-inject
-// (refreshGiLighting, runChainTick), the chain's settle step and the
+// "extra updateSceneGraph calls per frame during a drag" row): the frame's relight (relightAndFeedback) and the
 // arm / cascade builds each update the graph themselves, on top of the frame's own
 // update. Each call files a `gi.sceneGraph` monitor stage — one record
 // per call, so a frame's count and cost are readable — but only INSIDE a frame: a
@@ -621,20 +620,18 @@ bool PhotonComponent::setGiTuning(const GiParams &p) {
     } JAH_CATCH(mError, false);
 }
 
-// THE ONE GI SCHEDULER (ENGINE-UPGRADE-1 U0 3c) — what decides WHEN this scene's GI answers a change. It was the
-// mirror's debounce (the host asking the engine, every sync, through two signatures and three light hashes); it is
-// the engine's own now, run by the drain once per record that carries the scene's GI (an environment frame), over
-// facts the engine holds itself — the geometry term (giGeometryKey), the material generation, the lamp events the
-// drained change set and the light seams raised (mGiPlan.*LampOwed) — and the few only the document knows, carried
-// by the record (world.refreshGi()'s serial, a material hover preview, a mobility flip). PhotonComponent::plan() takes
-// it at EU-2's stage 4, with the orchestration it calls (refreshGlobalIllumination, refreshGiLighting).
+// THE ONE GI SCHEDULER (ENGINE-UPGRADE-1 U0 3c) — what decides WHEN this scene's GI RE-SOLVES. It was the mirror's
+// debounce; it is the engine's own, run by the drain once per record that carries the scene's GI (an environment frame),
+// over facts the engine holds itself — the geometry term (giGeometryKey), the material generation — and the few only the
+// document knows, carried by the record (world.refreshGi()'s serial, a material hover preview, a mobility flip).
 //
-// THE RULES, unchanged from the debounce (its comments' reasons stand; REFLECTIONS_ADOPTION_SPEC §5 / P2):
+// THE RULES (PHOTON-7 stage 4: a LIGHT is no longer the scheduler's - a lamp's old and new spheres are the changed-region
+// list's, and the writer point re-injects their direct term as a delta while the feedback converges the bounces; the
+// cheap light re-inject cadence every kLightOnlyEveryN frames, the moving lamp's cadence and its owed at-rest tick, and
+// their counters are deleted with the whole-chain tick they ran):
 //  * a configuration PUSH answers everything: the state restarts from it;
-//  * a lamp or geometry change ARMS a pending re-solve and the cheap light re-inject cadence (every
-//    kLightOnlyEveryN frames) until the change has held still for kStableFrames, then ONE re-solve (Settle);
-//  * a material change arms the re-solve only (nothing a re-inject reads changed); a hover preview is no change;
-//  * a MOVING lamp (decision O2) arms the cadence and nothing else, and owes one at-rest tick after its motion;
+//  * a geometry or material change ARMS a pending re-solve until it has held still for kStableFrames, then ONE re-solve
+//    (Settle: the dirty path's marks, the probe grid's staleness); a hover preview is no change;
 //  * a mobility FLIP's geometry move is adopted, never armed (MobilityChange::Soft's promise);
 //  * world.refreshGi() re-solves at once;
 //  * a paused budget (updateBudget 0) follows nothing and keeps what it owes for the un-pause.
@@ -651,9 +648,7 @@ void PhotonComponent::plan(const FrameInputScene &part, bool pushed) {
         g.pushed = true;
         g.geometrySig = geometryNow();
         g.materialSig = materialNow();
-        g.stillLampOwed = g.movableLampOwed = false;   // a from-scratch push answers every lamp
-        g.movableLightsMoving = g.movableSettleOwed = false;
-        g.pendingRefresh = g.pendingInject = false;
+        g.pendingRefresh = false;
         g.stableFrames = 0;
         g.refreshSerialSeen = serial;
         g.mobilityFlipped = false;
@@ -664,12 +659,8 @@ void PhotonComponent::plan(const FrameInputScene &part, bool pushed) {
     const bool live = mGi.updateBudget > 0;
     const unsigned long long geomSig = geometryNow();
     const unsigned long long matSig = materialNow();
-    const bool sigChanged = vctLike && (geomSig != g.geometrySig || g.stillLampOwed);
+    const bool sigChanged = vctLike && geomSig != g.geometrySig;
     const bool explicitRefresh = serial != g.refreshSerialSeen;
-    if (vctLike && g.movableLampOwed && live) {
-        g.movableLampOwed = false;
-        g.movableLightsMoving = true;
-    }
     const bool matChanged = matSig != g.materialSig;
     if (matChanged && live) {
         g.materialSig = matSig;
@@ -679,29 +670,20 @@ void PhotonComponent::plan(const FrameInputScene &part, bool pushed) {
     const bool flipped = g.mobilityFlipped;
     g.mobilityFlipped = false;              // per environment frame, like the mirror's flag it replaced
     if (sigChanged && flipped) {
-        if (live) { g.geometrySig = geomSig; g.stillLampOwed = false; }
+        if (live) g.geometrySig = geomSig;
     } else if (sigChanged) {
         if (live) {
             g.geometrySig = geomSig;
-            g.stillLampOwed = false;
-            if (!g.pendingInject) g.framesSinceLightOnly = 0;
             g.pendingRefresh = true;
-            g.pendingInject = true;      // lights/geometry: the cheap path runs
             g.stableFrames = 0;
         }
     } else if (g.pendingRefresh && !matChanged) {
         ++g.stableFrames;
     }
-    // A re-solve IS the rest frame: it answers every owed tick and lamp (LAMPREST-2: an owed moving tick after it
-    // would overwrite the full-count picture with the cheap one).
+    // A re-solve answers the geometry and the material it saw.
     const auto answered = [&]() {
         if (vctLike) g.geometrySig = giGeometryKey();
-        g.stillLampOwed = false;
         g.materialSig = materialNow();
-        g.pendingInject = false;
-        g.movableSettleOwed = false;
-        g.movableLampOwed = false;
-        g.movableLightsMoving = false;
     };
     if (explicitRefresh) {
         g.refreshSerialSeen = serial;
@@ -716,17 +698,6 @@ void PhotonComponent::plan(const FrameInputScene &part, bool pushed) {
         refreshGlobalIllumination(GiRefreshReason::Settle);   // the cheapest correct step, never a drained stage
         ++g.resolves;
         answered();
-    } else if ((g.pendingRefresh && g.pendingInject) || g.movableLightsMoving || g.movableSettleOwed) {
-        if (++g.framesSinceLightOnly >= GiPlan::kLightOnlyEveryN) {
-            g.framesSinceLightOnly = 0;
-            const bool inMotion = g.movableLightsMoving || (g.pendingRefresh && g.pendingInject);
-            g.movableLightsMoving = false;   // re-armed by the next move
-            g.movableSettleOwed = inMotion && !(g.pendingRefresh && g.pendingInject);
-            if (refreshGiLighting(inMotion)) {
-                ++g.lightTicks;
-                if (!inMotion) ++g.lightTicksAtRest;
-            }
-        }
     }
 }
 
@@ -775,136 +746,26 @@ void PhotonComponent::refreshGlobalIllumination(GiRefreshReason reason) {
             giDeferrable([this, reason]() {   // ASYNC-SHADERS-1: see applyPendingGiDeferrable
                 if (reason == GiRefreshReason::Explicit)
                     while (mGiBuildStage != GiBuildStage::Idle) stepStagedGiBuild();
-                if (mVctCascades.empty() || !refreshCascadesFast()) rebuildVct();
+                if (mVctCascades.empty() || !refreshCascadesFast(reason == GiRefreshReason::Explicit)) rebuildVct();
             });
         }
     } JAH_CATCH(mError, );
 }
 
-// The LIGHT-ONLY refresh (REFLECTIONS_ADOPTION_SPEC.md P2). VERIFIED AGAINST
-// THE PIN by this lane, because the spec listed it as unproven: PhotonVoxelLighting::
-// update() re-collects the scene's lights, re-maps its const buffer and
-// re-dispatches the injection compute job against the voxelizer's EXISTING
-// albedo/normal/emissive textures (PhotonVoxelLighting.cpp). It touches neither the
-// PhotonVoxelizer's raw Item* cache nor PhotonVoxelMaterial's datablock cache, which is
-// what the "always from scratch" rule in rebuildVct exists to protect — and
-// upstream's own Voxelizer sample re-calls it on a keypress without rebuilding
-// anything (Samples/2.0/Tests/Voxelizer, the F4/F5 handlers). So it is safe to
-// re-run, and the from-scratch rule stays exactly as strict for the voxelizer.
-//
-// updateSceneGraph() first: light injection reads each light's DERIVED position
-// (PhotonVoxelLighting::addLight -> getParentNode()->_getDerivedPosition()), and the
-// whole point of this call is that a light just moved.
-// THE CHAIN IS SETTLED FOR THESE INPUTS (LAMPREST-3 fix round item 3). Recorded
-// by WHOEVER pays a full at-rest chain injection — the light tick, or the last
-// step of an incremental settle — and consulted by the GI scheduler's stability-window
-// tick, so one gesture costs one settle instead of two or three.
-void PhotonComponent::noteChainSettled() {
-    mGiSettleStepsOwed = 0;
-    noteSettleInputs();
-}
-
-// WHAT AN INJECTION READS, remembered so an unfinished settle can tell that it
-// changed underneath it (and so `chainCleanNow` can tell the same thing about a
-// finished one).
-void PhotonComponent::noteSettleInputs() {
-    mGiSettleSerial = mScene.lightWriteSerial();
-}
-
-// THE DEBT, raised in one place: a rebuild, an environment change and a tick
-// the one-writer latch refused all owe the chain's at-rest answer over its
-// current inputs — FROM THE OUTERMOST STALE CASCADE INWARD (PHOTON-GATHER-1b
-// item 6, WRITER-1's audit F5). Each cascade reads only the cascades outside it,
-// so a stale cascade k stales k-1 .. 0 and nothing outside it: a refused at-rest
-// tick (the frame's rebuild injected k over the outer cascades' OLD light before
-// the tick re-injected them) owes k .. 0, and a rebuild of k (its injection read
-// the outer cascades as they stand) owes k-1 .. 0. The whole chain is owed only
-// when the whole chain is stale (a light, the environment). Injecting the outer
-// cascades again would change no byte of them — a cascade-2 rebuild at rest
-// costs 3 injections, not 4 (gi.settle_partial, which also proves the partial
-// settle leaves the whole sweep's bytes).
-void PhotonComponent::oweChainSettle(size_t top) {
-    const size_t n = mVctCascades.size();
-    if (n < 2u) return;
-    top = std::min(top, n - 1u);
-    // AN UNFINISHED DEBT MERGES by restarting from the outermost of the two: the
-    // new sweep covers every cascade either debt named, in the tick's order.
-    if (mGiSettleStepsOwed > 0 && mGiSettleCascades == n) top = std::max(top, mGiSettleTop);
-    mGiSettleCascades  = n;
-    mGiSettleTop       = top;
-    mGiSettleStepsOwed = kAtRestSweeps * int(top + 1u);
-    noteSettleInputs();
-}
-
-
-// ONE INJECTION OF AN OWED SETTLE (LAMPREST-3 fix round item 2), out of the
-// scheduler's own one-slot-per-frame budget and in the EXACT order the whole
-// tick uses: cascades OUTERMOST-FIRST. That order
-// is why the bytes agree — the same injections, over the same voxels, in the
-// same sequence — and it is verified as such (sha256 of every cascade's light
-// voxel texture after an incremental settle against the same scene after one
-// whole `refreshGiLighting(false)`).
-void PhotonComponent::payChainSettleStep() {
-    const size_t n = mVctCascades.size();
-    if (mGiSettleStepsOwed <= 0 || n < 2u || n != mGiSettleCascades || mGiSettleTop >= n) {
-        mGiSettleStepsOwed = 0;                 // the chain changed shape under it
-        return;
-    }
-    JAH_TRY {
-        monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "vct.light.settle",
-                                 mRoot->getRenderSystem());
-        giUpdateSceneGraph(mSceneMgr);
-        // (A LIGHT THAT MOVED WHILE THE SETTLE WAS OWED restarted it before this
-        // step was chosen — the scheduler's check, which runs on every payable
-        // frame, idle ones included: see updateCascades.)
-        // THE SWEEP IS OVER THE STALE CASCADES ONLY: top, top-1, ..., 0.
-        const size_t span = mGiSettleTop + 1u;
-        const int total = kAtRestSweeps * int(span);
-        unsigned injections = 0;
-        // A cascade with no lighting is skipped exactly as the tick skips it,
-        // and without spending the frame: the loop walks on to the next step.
-        // A cascade ALREADY INJECTED THIS FRAME (the mirror's tick ran before
-        // the scheduler) is not injected twice: the step waits for the next
-        // frame, unspent, so the sequence stays the tick's own.
-        while (mGiSettleStepsOwed > 0 && injections == 0u) {
-            const int step = total - mGiSettleStepsOwed;
-            const size_t i = mGiSettleTop - size_t(step % int(span));
-            if (mVctCascades[i].lighting && injectedThisFrame(i)) break;
-            --mGiSettleStepsOwed;
-            if (!mVctCascades[i].lighting) continue;
-            if (injectCascade(i)) ++injections;
-        }
-        work.setUnits(injections);
-        if (mGiSettleStepsOwed == 0) {
-            // The tick's own closing bookkeeping, once, after the LAST
-            // injection: the per-tick skip is spent and the field integrates a
-            // chain that has finished moving.
-            for (VctCascade &c : mVctCascades) c.injectedSinceTick = false;
-            reintegrateFieldAfterInjection();
-            ++mGiChainSettles;
-            noteChainSettled();
-        }
-    } JAH_CATCH(mError, );
-}
-
-// THE ONE WRITER (PHOTON-WRITER-1; render audit F3/F13). Every write to a voxel
-// volume's light in this engine is this function: the from-scratch arm's
-// closing injection, a cascade rebuild's,
-// the light tick (moving and at rest) and the incremental settle. What an
-// injection IS therefore has one definition — the environment the bounce job
-// reads where its cones escape, then `PhotonVoxelLighting::update` at the document's
-// own bounce count with the scene's own ray march — and no path can hand a
-// volume a different answer from another (DRAG-1: the flicker was two writers
-// with two answers alternating on cascade 0).
+// THE ONE WRITER (PHOTON-WRITER-1; render audit F3/F13). Every write to a voxel volume's DIRECT light in this engine is
+// this function: the from-scratch arm's closing injection, a cascade rebuild's, a scroll commit's delta and its inner
+// cascades', and a lamp's (or the sun's) delta at the writer point (relightAndFeedback). What an injection IS therefore
+// has one definition - `PhotonVoxelLighting::update` with the scene's own lights and ray march - and no path can hand a
+// volume a different answer from another (DRAG-1: the flicker was two writers with two answers alternating on cascade 0).
+// The BOUNCES are not an injection's (PHOTON-7 stage 4): the feedback converges them, a pass a frame over the active bricks.
 //
 // THE LATCH. A volume is injected at most once per writer frame. The second
 // injection of one cascade in one frame was always one of two things: WASTED
-// (a tick over voxels a rebuild is about to replace in the same frame) or a
+// (an injection over voxels a rebuild is about to replace in the same frame) or a
 // symptom of two paths not knowing about each other (F3's residue). So it is
 // refused here, counted, and every caller that can meet a refusal keeps its
 // work OWED rather than dropped: the scheduler leaves a latched cascade's
-// rebuild pending, the settle leaves its step unspent, and a refused tick owes
-// the chain a settle. A refusal is not asserted in Debug on purpose: Debug is
+// rebuild pending, and a lamp's delta waits for the next frame. A refusal is not asserted in Debug on purpose: Debug is
 // the daily driver, and an owed injection one frame late is a correct picture
 // one frame late, whereas an abort is not a picture at all; `gi.one_writer`
 // asserts the counter stays 0 on a drag + settle.
@@ -962,7 +823,8 @@ bool PhotonComponent::commitShaderAsync() const {
 bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *commit) {
     Ogre::PhotonVoxelLighting *lighting = i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr;
     if (!lighting) return false;
-    unsigned long long &stamp = mVctCascades[i].injectedFrame;
+    VctCascade &c = mVctCascades[i];
+    unsigned long long &stamp = c.injectedFrame;
     const unsigned long long frame = giWriterFrame();
     if (stamp == frame) {
         ++mGiInjectionRefusals;
@@ -972,18 +834,12 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
                 std::to_string(i) + " in one frame (left owed; GiStatus::chainInjectionRefusals)");
         return false;
     }
-    mScene.applyCascadeEnvironment(lighting);
-    // numBounces 0 = THE DIRECT STORE ALONE (BOUNCES-ZERO-1): no surface re-emits the sky
-    // either (the sky pass is a bounce of the sky's light); 1 = the sky and the lamps once.
-    lighting->setStoreSkyLight(mGi.numBounces > 0);
-    // BOUNCES TO A RESIDUAL (PHOTON-5 stage 5): an injection with two passes or more measures the
-    // series it ran (the energies harvestBounceEnergy reads a few frames later), unless a reading
-    // is still in flight.
-    const Ogre::uint32 passes = cascadeBounces(i);
-    // (a commit's passes cover a region: they measure no series of the whole volume)
-    const bool measure = passes >= 2u && !lighting->bounceEnergyInFlight() && !commit;
-    lighting->setMeasureBounceEnergy(measure);
-    // THE COMMIT'S LIGHT (PHOTON-7 stage 2), for this update only.
+    // THE BOUNCES ARE THE FEEDBACK'S (PHOTON-7 stage 4): bounces off is THE DIRECT STORE ALONE (BOUNCES-ZERO-1) - no
+    // pass ever runs, so no surface re-emits the sky or another surface.
+    lighting->setFeedbackOn(mGi.bounces);
+    // A WHOLE INJECTION (a first build, a jump, a new placement) WRITES THE TOTAL FROM ITS DIRECT TERM: the volume's
+    // light starts there and every brick resumes the feedback; a DELTA keeps what the feedback built (setCommitLight).
+    if (!commit) lighting->resetBrickState();
     lighting->setCommitLight(commit);
     {
         InjectionRows rows;
@@ -994,27 +850,30 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
             Ogre::PhotonVoxelLighting *l = nullptr;
             ~Unhook() { if (l) l->setPhaseListener(nullptr); }
         } unhook{ lighting };
-        lighting->update(mSceneMgr, passes);
-    }
-    lighting->setMeasureBounceEnergy(false);
-    mVctCascades[i].bouncePassesApplied = passes;
-    if (measure && lighting->bounceEnergyInFlight()) {
-        mVctCascades[i].bounceEnergyPending = true;
-        mVctCascades[i].bounceEnergyFrame = frame;
+        lighting->update(mSceneMgr);
     }
     stamp = frame;
+    // (a whole volume's injection - whole, or a delta with no boxes - read every lamp as it stands)
+    if (!commit || commit->numInjectBoxes == 0u) c.injectedWholeFrame = frame;
+    // THE FEEDBACK OWES THIS FRAME A PASS: the bricks whose direct term changed resume (the mask's word 0), and after a
+    // whole injection every brick does.
+    if (mGi.bounces) {
+        c.fbActivatedFrame = frame;
+        if (!commit) c.fbForce = true;
+    }
     if (mGiInjectionCountFrame != frame) {
         mGiInjectionCountFrame = frame;
         mGiInjectionsThisFrame = 0;
     }
     mGiInjectionsPeak = std::max(mGiInjectionsPeak, ++mGiInjectionsThisFrame);
-    listInjectionRegion(i, commit);   // where its light changed (PHOTON-7 stage 3)
-    // THE COMMIT'S SHADER, ASKED FOR AT THE CASCADE'S FIRST INJECTION (ASYNC-SHADERS-1): the delta injection's
-    // permutation goes to the background compiler long before a walk's first commit needs it (a commit that finds it
-    // still building waits a frame: recordCascades). Once per cascade.
-    if (!commit && !mVctCascades[i].commitShaderAsked && commitShaderAsync()) {
+    // where its light changed (PHOTON-7 stage 3) - a lamp's relight is the Lamp region its spheres already are
+    if (!mInjectingRelight) listInjectionRegion(i, commit);
+    // THE DELTA'S SHADER, ASKED FOR AT THE CASCADE'S FIRST INJECTION (ASYNC-SHADERS-1): the delta injection's
+    // permutation goes to the background compiler long before a walk's first commit or a lamp's delta needs it (a commit
+    // that finds it still building waits a frame: recordCascades). Once per cascade.
+    if (!commit && !c.commitShaderAsked && commitShaderAsync()) {
         lighting->commitLightReady();
-        mVctCascades[i].commitShaderAsked = true;
+        c.commitShaderAsked = true;
     }
     return true;
 }
@@ -1083,118 +942,17 @@ void PhotonComponent::reintegrateFieldAfterInjection() {
         }
     }}
 
-// THE LIGHT TICK, ASKED FOR. Under a CHAIN the tick is not run here: it is OWED
-// and run by the cascade scheduler at the frame's one writer point
-// (updateCascades), AFTER the frame's rebuild. That order is the one-writer rule
-// made structural (PHOTON-WRITER-1): the host's tick arrives before the render
-// (the mirror's push), the scheduler's rebuild inside it, and a tick that ran
-// first injected a cascade over voxels the rebuild then replaced — a wasted
-// injection at best, and the latch would have had to refuse the rebuild's own
-// (whose volume MUST be lit). Run after the rebuild, the tick skips the cascade
-// the rebuild has just injected (the latch; while moving that IS the answer, at
-// rest it owes the chain a settle) and injects the others once each: a frame
-// never injects a cascade twice and never more than the chain's size.
-// A moving and an at-rest request in one frame run as the at-rest tick (it is
-// the superset).
-bool PhotonComponent::refreshGiLighting(bool inMotion) {
+// THE WHOLE RELIGHT, ASKED FOR (Scene::refreshGiLighting; an explicit refresh with nothing geometric to mark): every
+// cascade's direct term re-injected as a DELTA over its whole volume at the next writer point (a voxel whose direct did not
+// change keeps every bit) and every brick resumed by the feedback - the store converges to the fixed point of the scene's
+// current inputs, whatever it held. PHOTON-7 stage 4: there is no light tick any more (the whole chain re-solved from its
+// direct terms, outermost first, on a cadence) - a lamp is the changed-region list's, relit over its spheres.
+bool PhotonComponent::refreshGiLighting() {
     JAH_TRY {
         if (!mVctLighting || !mVctVoxelizer || mVctCascades.empty()) return false;
-        const GiTickOwed ask = inMotion ? GiTickOwed::Moving : GiTickOwed::Rest;
-        if (int(ask) > int(mGiTickOwed)) mGiTickOwed = ask;
+        mGiRelightAllOwed = true;
         return true;
     } JAH_CATCH(mError, false);
-}
-
-// THE CHAIN'S LIGHT TICK, run at the writer point (updateCascades) or by the
-// drag's own settle there.
-void PhotonComponent::runChainTick(bool inMotion) {
-    JAH_TRY {
-        if (mVctCascades.empty()) return;
-        giUpdateSceneGraph(mSceneMgr);
-        bool refused = false;
-        // The OUTERMOST cascade this tick could not inject: the settle it owes
-        // starts there (oweChainSettle's note).
-        size_t refusedTop = 0;
-        {
-            // THE LIGHT-ONLY TICK (ENGINE-5 item 2). The cheap path a drag runs
-            // every few frames: one injection dispatch per bounce over the
-            // voxels that are already there. `units` = injections actually run.
-            monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0,
-                                     inMotion ? "vct.light.moving" : "vct.light",
-                                     mRoot->getRenderSystem());
-            // EVERY CASCADE, OUTERMOST FIRST — a light move changes the radiance
-            // in all of them, and a chain where only the head was re-injected
-            // would bounce yesterday's light in from outside. Injection is the
-            // cheap half (0.1-0.3 ms per cascade, S1 §3); it is the
-            // VOXELISATION that is expensive, and nothing here re-voxelises.
-            //
-            // ONE ANSWER PER VOLUME, WHOEVER COMPUTES IT (DRAG-1, PHOTON-M2 F-D):
-            // every injection is `injectCascade`, the call a rebuild ends with,
-            // so the moving tick, the at-rest tick and the rebuild hand a volume
-            // one answer. (The moving tick's zero-bounce coarse march and its
-            // measurement switch went with the one writer: nothing measured with
-            // them any more.)
-            //
-            // ONE SWEEP, at rest as while moving: it IS the chain's fixed point
-            // (derived beside kAtRestSweeps, EnginePrivate.h; proved byte for byte
-            // by gi.chain_converge).
-            //
-            // HOW MANY CASCADE INJECTIONS THIS TICK ACTUALLY RAN, reported as the
-            // work row's `units` (DRAG-1): a chain of four with cascade 0 rebuilt
-            // since the last moving tick reads 3.
-            unsigned injections = 0;
-            for (size_t i = mVctCascades.size(); i--; ) {
-                if (!mVctCascades[i].lighting) continue;
-                // WHILE MOVING, a cascade a REBUILD has injected since the last
-                // tick already holds this tick's answer — the same injection,
-                // over current voxels — as long as the lights it was injected
-                // with are still the scene's (F5). This skip spans frames (ticks
-                // run every few), so it is the rebuild's flag and not the
-                // per-frame latch.
-                if (inMotion && mVctCascades[i].injectedSinceTick &&
-                    mVctCascades[i].injectedAtLightSerial == mScene.lightWriteSerial())
-                    continue;
-                // ...and a cascade the rebuild injected THIS frame is the latch's,
-                // not a refusal: that is the order working.
-                if (injectedThisFrame(i)) {
-                    if (!inMotion) {                  // it read the outer light before this tick
-                        refused = true;
-                        refusedTop = std::max(refusedTop, i);
-                    }
-                    continue;
-                }
-                if (injectCascade(i)) ++injections;
-                else {
-                    refused = true;
-                    refusedTop = std::max(refusedTop, i);
-                }
-            }
-            // The skip is per TICK, not for ever: a cascade that was rebuilt
-            // before this tick has paid for this tick, and owes the next one
-            // unless it is rebuilt again.
-            for (VctCascade &c : mVctCascades) c.injectedSinceTick = false;
-            work.setUnits(injections);
-            // AN AT-REST TICK THAT LANDED is a new radiance the cards' indirect must
-            // re-march (the surface cache's signature, OgreScene.cpp): counted per
-            // tick, never per injection and never for a moving tick, so a drag
-            // re-marches nothing and its closing at-rest tick re-marches once. The
-            // single volume's per-injection count did this job until D4-PHOTON-TIERS
-            // deleted that arm; the chain's settles alone missed a tick that paid
-            // the debt without a settle of its own (gi.card_lighting_indirect).
-            if (!inMotion && injections > 0u) ++mGiRestTicks;
-        }
-        reintegrateFieldAfterInjection();
-        // WHOEVER PAYS THE INJECTION PAYS THE DEBT (LAMPREST-3 fix round item 3).
-        // An at-rest tick over the chain IS the settle the scheduler owes, so an
-        // unfinished incremental one is abandoned rather than run on top of the
-        // answer this tick has just computed — UNLESS a cascade was not injected
-        // by it (the frame's rebuild injected it first, before this tick's outer
-        // cascades), in which case the chain is owed its settle.
-        if (!inMotion && mVctCascades.size() > 1u) {
-            if (refused) oweChainSettle(refusedTop);   // the refused cascade and those inside it
-            else         noteChainSettled();
-        }
-    } JAH_CATCH(mError, );
 }
 
 GiStatus PhotonComponent::giStatus() const {
@@ -1387,9 +1145,17 @@ GiStatus PhotonComponent::giStatus() const {
             cs.brickReadings = c.brickReadings;
             cs.brickReadingsSkipped = c.lighting ? c.lighting->getBrickReadingsSkipped() : 0ull;
             cs.commitInjectCells = c.commitInjectCells;
-            cs.commitRegionCells = c.commitRegionCells;
-            cs.commitPasses      = c.commitPasses;
             cs.commitCounted     = c.commitCounted;
+            cs.deltaMarched      = c.deltaMarched;
+            // THE FEEDBACK (PHOTON-7 stage 4): its last landed reading and its books
+            cs.feedbackActive    = c.fbLastActive;
+            cs.feedbackPasses    = c.fbPasses;
+            cs.feedbackBricksRan = c.fbBricksRan;
+            cs.feedbackStops     = c.fbStops;
+            cs.feedbackResumes   = c.fbResumes;
+            cs.feedbackSaturated = c.fbSaturated;
+            cs.feedbackReadings  = c.fbReadings;
+            cs.feedbackOwed      = cascadeFeedbackOwed(c);
             // WHAT THIS CASCADE VOXELISED - A READING of the device's own counts,
             // written as the gather wrote the records (ATOM P4b, A5b §3). They
             // used to be CPU walks: `items` an AABB test per GI item per rebuild,
@@ -1440,14 +1206,13 @@ GiStatus PhotonComponent::giStatus() const {
         st.cascadeTornCleared   = mCascadeTornCleared;
         st.chainInjectionRefusals   = mGiInjectionRefusals;
         st.chainInjectionsPeakFrame = mGiInjectionsPeak;
-        st.chainSettles         = mGiChainSettles;
+        st.feedbackRests        = mGiFeedbackRests;
+        st.feedbackOwed         = feedbackOwed();
         st.dragMovers           = int(mDragMovers.size());     // MOVER-1
         st.dragMoverGestures    = mDragMoverGestures;
         st.gestureActive        = mScene.gestureActive();
         st.schedulerPushes      = mGiPlan.pushes;            // THE ONE GI SCHEDULER (U0 3c)
         st.schedulerResolves    = mGiPlan.resolves;
-        st.schedulerLightTicks  = mGiPlan.lightTicks;
-        st.schedulerLightTicksAtRest = mGiPlan.lightTicksAtRest;
         st.settlePending        = mGiPlan.pendingRefresh;
         st.settleStableFrames   = mGiPlan.stableFrames;
         // THE SCREEN-PROBE GATHER (GATHER-1a): the row resolved against the
@@ -1478,7 +1243,8 @@ GiStatus PhotonComponent::giStatus() const {
 
 // THE LIGHTING SERIAL (PHOTON-GATHER-1d). What the gather's hits read — the
 // voxels' radiance, the environment the misses read, the cards the hits read
-// first — changes at a light write and where an injection LANDS; the settled
+// first — changes at a light write and where the chain's radiance finishes moving (the feedback's rest, PHOTON-7
+// stage 4: the bounces converge over frames, and gatherInputsBusy holds the gather meanwhile); the settled
 // history counts its frames from the last change. Folded from the same terms as
 // the surface cache's re-injection signature (OgreScene::updateSurfaceCache) plus
 // the write-time light serial: here a write MUST restart the count (the history
@@ -1490,7 +1256,7 @@ unsigned long long PhotonComponent::giLightingSerial() const {
         sig *= 1099511628211ull;
     };
     fold(mScene.lightWriteSerial());
-    fold((unsigned long long)mGiChainSettles);
+    fold(mGiFeedbackRests);   // the feedback came to rest: the chain's radiance finished moving (PHOTON-7 stage 4)
     for (const VctCascade &c : mVctCascades) {
         fold(c.rebuilds);
         fold((unsigned long long)c.latticeX);
@@ -3321,20 +3087,17 @@ void PhotonComponent::endDragGesture() {
 //     that needs a new voxeliser, and it gets one per cascade per frame with
 //     the chain's lighting objects (and so its raw `mExtraCascades` pointers)
 //     untouched (`PhotonVoxelLighting::setVoxelizer`, fork ae2ed529f+822d538f5 (was 0037)).
-//   * and, when nothing geometric moved at all, that a LIGHT changed — which is
-//     a re-INJECTION over the voxels that are already there, on every cascade,
-//     and never a re-voxelisation.
+//   * and, when nothing geometric moved at all and the host asked, a whole RELIGHT — a re-INJECTION of every
+//     cascade's direct term over the voxels that are already there, never a re-voxelisation (a lamp is the
+//     changed-region list's: PHOTON-7 stage 4).
 //
-// BOUNCE ORDERING. With `numBounces > 1` a partial refresh lets an inner cascade
-// read outer light from a cascade that has not caught up yet; the scheduler
-// spends innermost-first, so the outer one is a frame or two behind and the next
-// spend heals it. At the shipped default of one bounce `cascadeBounces` is 0 for
-// every cascade and the order carries no meaning at all.
+// BOUNCE ORDERING carries no meaning: the feedback converges every cascade's bounces from the outer cascades' current
+// light, whatever order the rebuilds came in (PHOTON-7 stage 4).
 //
 // Returns FALSE when there is no chain to mark — the caller then takes the
 // from-scratch `rebuildVct`, which is where a chain gets built in the first
 // place.
-bool PhotonComponent::refreshCascadesFast() {
+bool PhotonComponent::refreshCascadesFast(bool explicitAsk) {
     if (mVctCascades.empty() || !mVctCascades[0].built || !mVctCascades[0].lighting)
         return false;
     if (mGi.mode != GiMode::Vct && mGi.mode != GiMode::VctPccHybrid) return false;
@@ -3420,26 +3183,13 @@ bool PhotonComponent::refreshCascadesFast() {
         // "mark the whole chain".)
         const size_t marked = markDirtyCascadesPending(
             mLastStaleReason == GiStaleReason::None ? GiStaleReason::Refresh : mLastStaleReason);
-        // NOTHING GEOMETRIC CHANGED — so this refresh was asked for by a LIGHT
-        // (or by the host's explicit Refresh with nothing moved). Re-inject over
-        // the voxels that are already there, on every cascade, at the full
-        // bounce count: the picture the user is left looking at is the one a
-        // full solve would have produced, and not one voxel was re-written.
-        // AND IT IS NEVER SKIPPED, however settled the chain looks (LAMPREST-3
-        // fix round, measured). Skipping it when the engine believed the chain
-        // was already at its fixed point for the scene's lights — keyed on the
-        // light-write serial and the ambient — turned
-        // `scripting.e2e.movable_lamp_rest` red at 3/255, 10 runs of 10: the
-        // suite's reference arm moves a MOVABLE lamp and asks for a refresh,
-        // and the engine's serial does not see that pose change the way an
-        // injection does, so the refresh injected NOTHING and the lamp's move
-        // never reached the voxels at all (`chainSweeps` 0 for the whole arm).
-        // A skipped injection that was needed is a wrong picture; the one it
-        // would have saved is ~12 ms once per gesture. The saving belongs where
-        // the signature actually lives — the mirror, which already decides
-        // whether to ask — and is recorded for the lead rather than guessed at
-        // here.
-        if (!marked) refreshGiLighting(false);
+        // NOTHING GEOMETRIC CHANGED AND THE HOST ASKED (an explicit Refresh with nothing moved): every cascade's direct
+        // term is re-injected as a whole delta and every brick resumes the feedback (refreshGiLighting) - the store
+        // converges to the scene's current inputs whatever it held. A SETTLE that marks nothing owes no light: a lamp is
+        // the changed-region list's, relit over its spheres at the writer point (PHOTON-7 stage 4; LAMPREST-3's
+        // "never skipped" re-injection existed because the scheduler could not see a movable lamp's pose - the list
+        // compares the poses, stage 3).
+        if (!marked && explicitAsk) refreshGiLighting();
         mGiReusedLastRefresh = true;
         if (replaceProbes) {
             // THE GRID, RE-PLACED IN THE MOVED REGION — rebuildVct's probe half
@@ -3818,7 +3568,7 @@ void PhotonComponent::applyPendingGiFlush() {
                 // cascade set for its whole life. The flush itself stays armed
                 // through `mGiCachesDirty` either way.
                 if (rebuildVct()) mGiChainShapeDirty = false;
-            } else if (mVctCascades.empty() || !refreshCascadesFast())
+            } else if (mVctCascades.empty() || !refreshCascadesFast(false))
                 rebuildVct();  // fresh voxelizer over the LIVE scene
         }
     } JAH_CATCH(mError, );
@@ -4056,7 +3806,7 @@ PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPo
             // itself at its OLD pose, because a geometry move restarts BOTH of
             // the GI scheduler's stability gates on every frame of the gesture, so
             // the full re-solve never fires during it; the every-tenth-frame
-            // `refreshGiLighting(inMotion)` then re-injects light over those
+            // light tick (deleted by PHOTON-7 stage 4) then re-injected light over those
             // stale voxels and the cone's self-occlusion start bias paints
             // vertical stripes on the lit face (a 15 degree turn of a 2 m cube
             // displaces its corners 4.4 voxels at High).
@@ -4179,6 +3929,7 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
 void PhotonComponent::harvest() {
     serviceVoxelReadouts();
     harvestBrickMasks();
+    harvestFeedback();
 }
 
 // THE BRICK MASK (PHOTON-7 stage 3): every cascade's landed readings, oldest first, folded into the brick-wise most since the
@@ -4763,7 +4514,7 @@ bool PhotonComponent::rebuildVct() {
 // What we DO use is everything underneath it: `PhotonVoxelizer` (the rasteriser),
 // `PhotonVoxelLighting`, and `PhotonVoxelLighting::addCascade` — the chaining that makes
 // HlmsPbs sample N volumes with the pin's own cone-continuation (its
-// per-cascade brightness stabilisation is NOT used: see cascadeBounces, and
+// per-cascade brightness stabilisation is NOT used: the bounces converge by feedback, PHOTON-7 stage 4, and
 // fork 8f09c0cd4+155a56bf8+5230c9390+8282f6d70 (was 0074/0075) for the two defects it was compensating for). The
 // cascade transforms reach the shader
 // from the LIVE voxelisers every frame (`PhotonVoxelLighting::fillConstBufferData`
@@ -4906,104 +4657,18 @@ static inline long long jahQuantEven(float pos, float cell) {
     return 2ll * (long long)std::floor(double(pos) / (2.0 * double(cell)) + 0.5);
 }
 
-// EVERY CASCADE RUNS THE DOCUMENT'S BOUNCE COUNT (PHOTON-M1, 2026-09-17).
-//
-// The pin gives a coarser cascade MORE bounces — `round(sqrt((b+1) * cellRatio
-// - 1))`, which is 1/2/4/8 at Epic's three bounces — and calls it a brightness
-// stabilisation: "as cell volume increases, we get darker results ... more
-// bounces means brighter cascade" (upstream's VctCascadedVoxelizer::update, not in
-// our fork). It is
-// not physics. A bounce is a TRANSPORT step: it adds light everywhere, in
-// proportion to what is already there, and cannot recover the occlusion a
-// bigger cell loses (a coarse cell over-occludes a thin wall — that is a
-// resolution term, SEAM-1 §3). The pin reached for it because the OTHER half of
-// the same stabilisation, the shader's `( 1 - alpha )` de-amplification, and the
-// bounce's own extra 1/pi were both making the outer cascades too dark —
-// fork 8f09c0cd4+155a56bf8+5230c9390+8282f6d70 (was 0074 and 0075) fix those at the cause, so the compensation goes
-// with them.
-//
-// It also priced: eight injection passes on Epic's outermost 64^3 volume per
-// rebuild, 1 + 2 + 4 + 8 = 15 passes per chain, against 2 + 2 + 2 + 2 = 8 for
-// the document's own count.
-//
-// `base` is the document's EXTRA-bounce count (one total bounce = zero extra
-// passes), so the default leaves every cascade at 0 exactly as before.
-// BOUNCES TO A RESIDUAL (PHOTON-5 stage 5). The voxel chain's multi-bounce is the Jacobi series
-// new = direct + rho G( total ) (PhotonVoxelLighting::runBounce), which contracts by rho f per pass:
-// an open scene's series is spent after a pass, an enclosed room's (f near 1) keeps most of its
-// energy for later passes - measured on gi.bounce_residual's room, one bounce read 49 % short of
-// the series' limit. So the pass count is the series', not the tier's: the tier table's bounces
-// column is the MINIMUM, and the contraction measured on the cascade's own volume decides the rest.
-static const Ogre::uint32 kMaxBouncePasses = 8u;
-static const double kBounceResidual = 0.02;   // of the first pass's energy
-
-// What n passes leave of the series E_k = E_1 r^(k-1): E_1 r^n / (1 - r), at most kBounceResidual E_1.
-// r = 0 (the second pass added nothing: surfaces that do not see each other - a floor under the sky)
-// is ONE pass, the first bounce whole; a first pass that added nothing at all is none.
-static Ogre::uint32 bouncePassesFor(double r, bool firstPassAdds) {
-    if (!firstPassAdds) return 0u;
-    if (!(r > 0.0)) return 1u;
-    if (r >= 0.999) return kMaxBouncePasses;
-    const double n = std::ceil(std::log(kBounceResidual * (1.0 - r)) / std::log(r));
-    return Ogre::uint32(std::min(std::max(n, 1.0), double(kMaxBouncePasses)));
-}
-
-Ogre::uint32 PhotonComponent::cascadeBounces(size_t idx) const {
-    // 0 = the direct store alone: no pass, no sky pass either (setStoreSkyLight above)
-    if (mGi.numBounces <= 0) return 0u;
-    const Ogre::uint32 minPasses =
-        Ogre::uint32(std::min(mGi.numBounces - 1, int(kMaxBouncePasses)));
-    if (idx >= mVctCascades.size()) return minPasses;
-    const VctCascade &c = mVctCascades[idx];
-    if (!(c.bounceContraction >= 0.0f)) return std::max(minPasses, 2u);
-    return std::max(minPasses, bouncePassesFor(double(c.bounceContraction), c.bounceFirstPassAdds));
-}
-
 // THE WORK LAW'S DOOR (PHOTON-7 stage 2): every cascade's commit count whose read-back has landed, folded into its
-// cumulative counters (GiStatus::CascadeStatus::commitLit*), never waited on.
+// cumulative counters (GiStatus::CascadeStatus::commitLit*, deltaMarched: stage 4's marches), never waited on.
 void PhotonComponent::harvestCommitCounts() {
     for (VctCascade &c : mVctCascades) {
         if (!c.lighting) continue;
-        Ogre::uint32 inSlab = 0, outside = 0, injections = 0;
-        if (!c.lighting->takeCommitCount(inSlab, outside, injections)) continue;
+        Ogre::uint32 inSlab = 0, outside = 0, injections = 0, marched = 0;
+        if (!c.lighting->takeCommitCount(inSlab, outside, injections, marched)) continue;
         c.commitLitSlab += inSlab;
         c.commitLitBand += outside;
         c.commitCounted += injections;
+        c.deltaMarched += marched;
     }
-}
-
-void PhotonComponent::harvestBounceEnergy() {
-    if (mVctCascades.empty() || !mRoot) return;
-    Ogre::RenderSystem *rs = mRoot->getRenderSystem();
-    if (!rs || !rs->getVaoManager()) return;
-    const unsigned long long age = rs->getVaoManager()->getDynamicBufferMultiplier();
-    const unsigned long long frame = giWriterFrame();
-    bool owe = false;
-    std::vector<double> sums;
-    for (size_t i = 0; i < mVctCascades.size(); ++i) {
-        VctCascade &c = mVctCascades[i];
-        if (!c.lighting || !c.bounceEnergyPending || frame < c.bounceEnergyFrame + age) continue;
-        c.bounceEnergyPending = false;
-        if (!c.lighting->takeBounceEnergy(sums) || sums.size() < 3u) continue;
-        const double e1 = sums[1] - sums[0], e2 = sums[2] - sums[1];
-        const Ogre::uint32 before = cascadeBounces(i);
-        c.bounceE1 = e1;
-        c.bounceE2 = e2;
-        // A FIRST PASS THAT ADDED UNDER A MILLIONTH OF THE BASE added nothing (the sums are float
-        // partials of the whole volume): no bounce to keep.
-        c.bounceFirstPassAdds = e1 > 1e-6 * std::max(sums[0], 0.0) && e1 > 0.0;
-        c.bounceContraction = c.bounceFirstPassAdds ? float(std::min(std::max(e2 / e1, 0.0), 0.999)) : 0.0f;
-        const Ogre::uint32 now = cascadeBounces(i);
-        if (now != before)
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: cascade " + std::to_string(i) + " bounce series E1 " + std::to_string(e1) +
-                " E2 " + std::to_string(e2) + " r " + std::to_string(c.bounceContraction) + " -> " +
-                std::to_string(now) + " passes");
-        if (now > c.bouncePassesApplied) owe = true;
-    }
-    // THE SERIES ASKS FOR MORE THAN THE VOLUME WAS LIT WITH: the chain's light tick re-injects every
-    // cascade, outermost first, at its own count (the one writer, right below in recordCascades).
-    if (owe) refreshGiLighting(false);
 }
 
 size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
@@ -5020,7 +4685,7 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
 
     mVctCascades.clear();
     mVctCascades.resize(table.size());
-    mGiTickOwed = GiTickOwed::None;      // every cascade is injected by this build
+    mGiRelightAllOwed = false;   // every cascade is injected by this build
     // WHICH COLUMN OF THE TIER TABLE THIS CHAIN IS (V1-RIG fix round item 4).
     // Recorded at the build and not read back from the driver flag: the flag is
     // a live reading of who is driving and the CHAIN is what was built, and the
@@ -5087,10 +4752,8 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
             for (const VctCascade &o : mVctCascades) cells.push_back(o.cell());
             c.lighting->setChainIndex(Ogre::uint32(i), cells);
         }
-        // THE BOUNCE VOLUMES AT EVERY BOUNCE COUNT (CONTACT-OCCLUSION-1): the sky's
-        // direct term is a bounce-job pass (PhotonVoxelLighting::update's sky pass, fork), so a
-        // one-bounce document needs them too — without them a surface lit only by the
-        // sky re-emitted nothing (gi.contact_occlusion's arm B).
+        // THE BOUNCE VOLUMES (the bounce's target, the direct terms) AT EVERY TIER: the delta injection keeps the direct
+        // term to replace it (PHOTON-7 stages 2 and 4), bounces on or off.
         c.lighting->setAllowMultipleBounces(true);
         if (i + 1u < table.size()) {
             c.lighting->reserveExtraCascades(table.size() - i - 1u);
@@ -5098,6 +4761,8 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
                 c.lighting->addCascade(mVctCascades[j].lighting);
         }
         injectCascade(i);                 // a fresh VctCascade: never latched
+        c.lightPlaced = true;             // its light is this placement's (a same-placement rebuild is a delta)
+        c.lightPlacement = c.centre;
         c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - tCascade).count());
         c.built = true;
@@ -5458,6 +5123,12 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                         voxelise.setUnits(unsigned(std::min(units * 1e-3, 4.0e9)));
                     }
                     stepScroll(idx, true, &built);
+                    // THE FEEDBACK'S STATE MOVES WITH THE STORE (PHOTON-7 stage 4): every brick takes the state of the
+                    // bricks its cells came from, and a brick the shift brought in (the slab) starts fresh and active.
+                    if (built) {
+                        const Ogre::int32 shift[3] = { c.scroll.shift[0], c.scroll.shift[1], c.scroll.shift[2] };
+                        c.lighting->shiftBrickState(shift);
+                    }
                 } else {
                     // THE WORK PARTITION (gi.voxelOctants, stage 2's measurement): 1 x 1 x 1 shipped.
                     Ogre::uint32 octants = 1u;
@@ -5489,20 +5160,47 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
             c.injectedFrame = ~0ull;
             // WHAT IS LIT AT A SCROLL'S COMMIT (PHOTON-7 stage 2; PREFLIGHT_1_2 W1 / §5.4): the light was shifted with the
             // store, so the direct term is re-injected AS A DELTA (total += D_new - D_old: the bounces the shifted total
-            // holds are kept, a voxel whose direct did not change keeps its bits) and the sky and the bounces re-solved
-            // over the slab and its bounce reach only - never the whole cascade (the old commit wrote total = D at every
-            // voxel and re-ran the Jacobi: 9.9 ms of c1's 12.93). A whole rebuild injects whole.
+            // holds are kept, a voxel whose direct did not change keeps its bits); the slab's and the band's bounces are the
+            // FEEDBACK's (PHOTON-7 stage 4: their bricks resume - the shift's fresh slab bricks, the mask's changed direct
+            // terms - and converge a pass a frame; the commit runs no pass of its own any more). A WHOLE REBUILD AT THE SAME
+            // PLACEMENT (an edit) is a delta over the whole volume too - its voxels changed where the edit was, and the light
+            // the feedback built elsewhere is kept; at a new placement (a first build, a jump) it is a whole injection.
             Ogre::PhotonCommitLight commitLight;
             const bool scrollLight = scroll && c.scroll.active;
-            if (scrollLight) {
+            const bool samePlace = !scrollLight && c.lightPlaced && c.lightPlacement == c.centre;
+            if (scrollLight || samePlace) {
                 commitLight.delta = true;
-                commitLight.region = true;
                 for (int a = 0; a < 3; ++a) {
-                    commitLight.keepLo[a] = c.scroll.keepLo[a];
-                    commitLight.keepHi[a] = c.scroll.keepHi[a];
-                    commitLight.regionLo[a] = c.scroll.passLo[a];
-                    commitLight.regionHi[a] = c.scroll.passHi[a];
+                    commitLight.keepLo[a] = scrollLight ? c.scroll.keepLo[a] : 0u;
+                    commitLight.keepHi[a] = scrollLight ? c.scroll.keepHi[a] : Ogre::uint32(c.resolution);
                 }
+            }
+            // THE MOVED FACES IN THE WORLD (a scroll's commit): per moved axis the entering slab (the new box's cells the
+            // old one did not hold) and the trailing region (the old box's cells the new one does not hold).
+            std::vector<Ogre::Aabb> movedFaces;
+            if (scrollLight) {
+                const float cell = c.cell();
+                const Ogre::Vector3 nMin = c.centre - Ogre::Vector3(c.halfSize), nMax = c.centre + Ogre::Vector3(c.halfSize);
+                Ogre::Vector3 oMin = nMin, oMax = nMax;
+                for (int a = 0; a < 3; ++a) {
+                    oMin[a] -= float(c.scroll.shift[a]) * cell;
+                    oMax[a] -= float(c.scroll.shift[a]) * cell;
+                }
+                for (int a = 0; a < 3; ++a) {
+                    if (c.scroll.shift[a] == 0) continue;
+                    Ogre::Vector3 sLo = nMin, sHi = nMax, tLo = oMin, tHi = oMax;
+                    for (int k = 0; k < 3; ++k) {
+                        if (k == a) continue;
+                        tLo[k] = std::min(oMin[k], nMin[k]);
+                        tHi[k] = std::max(oMax[k], nMax[k]);
+                    }
+                    if (c.scroll.shift[a] > 0) { sLo[a] = oMax[a]; tHi[a] = nMin[a]; }
+                    else                       { sHi[a] = oMin[a]; tLo[a] = nMax[a]; }
+                    movedFaces.push_back(Ogre::Aabb::newFromExtents(sLo, sHi));
+                    movedFaces.push_back(Ogre::Aabb::newFromExtents(tLo, tHi));
+                }
+            }
+            if (scrollLight) {
                 // THE CELLS WHOSE DIRECT CAN CHANGE (the injection's boxes): a voxel's visibility march reads this
                 // cascade's own cells out to its shell end D_idx (the chain's sum of 8 cells per cascade) plus the next
                 // cascade's first cell, and nothing inside it - so only the voxels that close to a face the shift moved
@@ -5538,17 +5236,22 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                     }
                 }
             }
-            if (!injectCascade(idx, scrollLight ? &commitLight : nullptr))
+            if (!injectCascade(idx, (scrollLight || samePlace) ? &commitLight : nullptr))
                 OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
                             "a rebuilt cascade was refused its injection",
                             "OgreScene::rebuildCascade");
+            c.lightPlaced = true;
+            c.lightPlacement = c.centre;
+            // A SAME-PLACEMENT REBUILD RESUMES EVERY BRICK: its voxels changed where the edit was, and an albedo that
+            // changed on a surface with no direct light changes its bounces with no direct term moving (the mask's word 0
+            // cannot see it).
+            if (samePlace && mGi.bounces) c.fbForce = true;
             if (scrollLight) {
-                // THE COUNTS (the work law's door): the slab's cells and one pass's cells now, the voxels lit when the
-                // read-back lands (harvestCommitCounts).
-                unsigned long long slabCells = 0, regionCells = 1;
+                // THE COUNTS (the work law's door): the slab's cells and the cells the direct was computed over now, the
+                // voxels lit and marched when the read-back lands (harvestCommitCounts).
+                unsigned long long slabCells = 0;
                 for (const VctCascade::Scroll::Slab &sl : c.scroll.slabs)
                     slabCells += (unsigned long long)(sl.hi[0] - sl.lo[0]) * (sl.hi[1] - sl.lo[1]) * (sl.hi[2] - sl.lo[2]);
-                for (int a = 0; a < 3; ++a) regionCells *= (unsigned long long)(c.scroll.passHi[a] - c.scroll.passLo[a]);
                 unsigned long long injectCells = 0;
                 for (Ogre::uint32 b = 0; b < commitLight.numInjectBoxes; ++b) {
                     unsigned long long v = 1;
@@ -5558,29 +5261,56 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                 if (!commitLight.numInjectBoxes) injectCells = (unsigned long long)c.resolution * c.resolution * c.resolution;
                 c.commitSlabCells += slabCells;
                 c.commitInjectCells += injectCells;
-                c.commitRegionCells += regionCells;
-                c.commitPasses += (unsigned long long)cascadeBounces(idx) + (mGi.numBounces > 0 ? 1u : 0u);
-                // ...AND EVERY CASCADE INSIDE IT, AS A DELTA, WITH NO PASS: their shadow marches cross this cascade's
-                // geometry past their own shells, so the band's direct changed where this cascade's store moved (their
-                // bounce through it is stage 4's feedback). This replaces the inner cascades' settle (whole re-solves).
+                // ...AND THE CASCADES INSIDE IT, AS DELTAS OVER WHAT THEIR MARCHES CAN SEE OF THE MOVED FACES (PHOTON-7 stage
+                // 2's read D4): an inner voxel's march reads this cascade's level-0 cells only for world distances
+                // [D_{idx-1}, D_idx) - the kept cells are bit-exact after the shift - so only the inner voxels within D_idx
+                // (plus a cell of this cascade and the next's first cell: the march's last sample) of the slab or the
+                // trailing region can see another march; their boxes, in each inner cascade's cells, are re-marched and
+                // counted by the work door's marches (deltaMarched), none where no inner voxel is that close. An
+                // OUTERMOST commit's inner marches leave the chain through its moved faces at any distance (the sun's
+                // rays): whole. Their bounces through this cascade are the feedback's (their bricks resume on its moves).
+                const bool outermost = idx + 1 >= mVctCascades.size();
+                double reachWorld = 0.0;
+                for (size_t k = 0; k <= idx; ++k) reachWorld += 8.0 * double(mVctCascades[k].cell());
+                reachWorld += double(c.cell()) + (outermost ? 0.0 : double(mVctCascades[idx + 1].cell()));
                 for (size_t j = idx; j-- > 0;) {
                     VctCascade &inner = mVctCascades[j];
                     if (!inner.lighting || injectedThisFrame(j)) continue;
                     Ogre::PhotonCommitLight innerLight;
                     innerLight.delta = true;
-                    innerLight.region = true;   // an empty region: no pass
                     for (int a = 0; a < 3; ++a) innerLight.keepHi[a] = inner.resolution;
+                    if (!outermost) {
+                        const Ogre::Aabb ib(inner.centre, Ogre::Vector3(inner.halfSize));
+                        const Ogre::Vector3 corner = ib.getMinimum();
+                        const float icell = inner.cell();
+                        const int ires = inner.resolution;
+                        for (const Ogre::Aabb &f : movedFaces) {
+                            if (innerLight.numInjectBoxes >= Ogre::PhotonCommitLight::kMaxInjectBoxes) break;
+                            const Ogre::Vector3 lo = f.getMinimum() - Ogre::Vector3(float(reachWorld));
+                            const Ogre::Vector3 hi = f.getMaximum() + Ogre::Vector3(float(reachWorld));
+                            int l[3], h[3];
+                            bool empty = false;
+                            for (int a = 0; a < 3; ++a) {
+                                l[a] = std::max(0, int(std::floor((lo[a] - corner[a]) / icell)));
+                                h[a] = std::min(ires, int(std::ceil((hi[a] - corner[a]) / icell)));
+                                if (h[a] <= l[a]) empty = true;
+                            }
+                            if (empty) continue;
+                            Ogre::uint32 &n = innerLight.numInjectBoxes;
+                            for (int a = 0; a < 3; ++a) {
+                                innerLight.injectLo[n][a] = Ogre::uint32(l[a] / 4 * 4);
+                                innerLight.injectHi[n][a] = Ogre::uint32(std::min(ires, (h[a] + 3) / 4 * 4));
+                            }
+                            ++n;
+                        }
+                        if (!innerLight.numInjectBoxes) { ++mInnerMarchesSkipped; continue; }   // no inner voxel sees a face
+                    }
                     injectCascade(j, &innerLight);
                 }
                 // The field integrates cascade 0's light: an outer commit changed its band (cascade 0's own commit
                 // moves the field and re-integrates it: oweCascade0FieldFollow).
                 if (idx > 0) reintegrateFieldAfterInjection();
             }
-            // ...AND THAT IS THE MOVING TICK'S ANSWER TOO (DRAG-1): the one
-            // writer's injection, which is exactly what refreshGiLighting would
-            // compute for it, so the next in-motion tick skips it. See the tick.
-            c.injectedSinceTick = true;
-            c.injectedAtLightSerial = mScene.lightWriteSerial();
             return true;
         } JAH_CATCH(mError, false);
     };
@@ -5787,26 +5517,12 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
         sc.slabs.push_back(sl);
     }
     assert(layer <= layers && "a scroll's slabs fit its scratch");
-    // THE BOX THE SCROLL KEEPS and THE COMMIT'S PASS REGION (PHOTON-7 stage 2): the slabs' bounding box dilated by the
-    // cascade's bounce reach (PhotonVoxelLighting::regionReachCells: how far a pass of this cascade gathers a changed
-    // voxel), aligned out to 8 cells (the directional levels' blocks) - the whole box for the outermost, whose cones
-    // cross it; empty for a scroll with no slab.
+    // THE BOX THE SCROLL KEEPS (PHOTON-7 stage 2): the overlap, in the target's cells (the slabs are outside it). (The
+    // commit's pass region - the slabs' box dilated by the bounce reach - is deleted with the commit's passes: the
+    // feedback converges the slab's bounces, PHOTON-7 stage 4.)
     for (int a = 0; a < 3; ++a) {
         sc.keepLo[a] = Ogre::uint32(ovLo[a]);
         sc.keepHi[a] = Ogre::uint32(ovHi[a]);
-    }
-    {
-        const Ogre::uint32 reach = c.lighting ? c.lighting->regionReachCells() : 0u;
-        int lo[3] = { res, res, res }, hi[3] = { 0, 0, 0 };
-        for (const Box &b : slabs)
-            for (int a = 0; a < 3; ++a) { lo[a] = std::min(lo[a], b.lo[a]); hi[a] = std::max(hi[a], b.hi[a]); }
-        for (int a = 0; a < 3; ++a) {
-            if (slabs.empty()) { sc.passLo[a] = sc.passHi[a] = 0u; continue; }
-            if (reach == 0u) { sc.passLo[a] = 0u; sc.passHi[a] = Ogre::uint32(res); continue; }
-            const int l = std::max(0, lo[a] - int(reach)), h = std::min(res, hi[a] + int(reach));
-            sc.passLo[a] = Ogre::uint32(l / 8 * 8);
-            sc.passHi[a] = Ogre::uint32(std::min(res, (h + 7) / 8 * 8));
-        }
     }
 
     // THE INSTANCES THE ESTIMATE WALKS: the gather's own predicates that the CPU can read (the GI
@@ -6396,14 +6112,6 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
     // ---- 1. WHO MOVED, AND DID ANYTHING JUMP? ------------------------------
     bool spent = followPaid;          // the GENERAL slot
     bool reservedWork = false;        // cascade 0's reserved slot did work this frame
-    // ...AND WHETHER A CASCADE REALLY WAS RE-VOXELISED (fix round item 4): a
-    // rebuild that threw BEFORE its swap put its placement back and voxelised
-    // nothing, so it owes no settle even though the frame was spent on it.
-    bool rebuilt = false;
-    // ...and the outermost cascade the rebuild left STALE (oweChainSettle's note):
-    // the one inside a cascade that re-voxelised and injected, or the cascade
-    // itself when its voxels changed and its injection did not happen. -1 = none.
-    long long staleTop = -1;
     for (size_t i = 0; i < mVctCascades.size(); ++i) {
         VctCascade &c = mVctCascades[i];
         if (!c.pending) continue;
@@ -6516,10 +6224,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             // its volume follows (the voxels there are current — only the light
             // injection is missing, which the next rebuild supplies).
             if (i == 0u && placementCommitted) oweCascade0FieldFollow(reason);
-            if (placementCommitted) {
-                rebuilt = true;                        // those voxels ARE new...
-                staleTop = std::max(staleTop, (long long)i);   // ...and their light is not
-            }
+            // (those voxels ARE new and their light is not: the cascade stays pending, and its next rebuild injects it)
             if (!reserved) spent = true;           // the slot paid for it either way
             reservedWork = reservedWork || reserved;
             // ...otherwise `pending` stays set. A TORN store is never stood down AS IT IS (decision 12.1): after
@@ -6577,7 +6282,6 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         if (i == 0u) oweCascade0FieldFollow(reason);
         if (!reserved) spent = true;
         reservedWork = reservedWork || reserved;
-        rebuilt = true;
         // THE LAG SERVED: the cascade is placed for the camera (a camera debt still owed starts a new one) - not by a
         // CUT scroll, whose remainder is still owed (below).
         if (c.lagFrom && !cutCommit) {
@@ -6585,9 +6289,6 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             c.lagMax = std::max(c.lagMax, c.lagLast);
             c.lagFrom = 0;
         }
-        // A SCROLL'S COMMIT OWES NO SETTLE (PHOTON-7 stage 2): the cascades inside it were re-injected as deltas in
-        // its own frame (rebuildCascade) - a settle's whole re-injections would reset their bounces.
-        if (!scrollCommit) staleTop = std::max(staleTop, (long long)i - 1);
     }
     // WHAT THE ARM LIT, KEPT CURRENT (audit B9). `giStatus().boundsMin/Max` is
     // the outermost cascade's box, and that box MOVES — it was written once at
@@ -6598,142 +6299,233 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         mGiLitVolume = Ogre::Aabb(mVctCascades.back().centre,
                                   Ogre::Vector3(mVctCascades.back().halfSize));
 
-    // ---- 3. A REBUILT CHAIN IS OFF ITS FIXED POINT UNTIL SOMETHING SAYS SO --
-    //
-    // THE DEFECT (LAMPREST-3, 2026-09-18, measured at full resolution). A
-    // cascade rebuild ends with ONE injection of THAT cascade
-    // (`rebuildCascade`'s closing `PhotonVoxelLighting::update`) over the radiance that
-    // cascade happened to hold — which, after a scroll, is the light of
-    // wherever it was standing before. That is one Jacobi pass of a fixed point
-    // over COUPLED volumes (the same mathematics `refreshGiLighting`'s at-rest
-    // rule is written from): the cascades inside and outside it still hold the
-    // answer they had, and nothing in this engine then ran the chain's at-rest
-    // injection, because the GI scheduler's cadence only ticks while a LIGHT or a
-    // piece of GEOMETRY is moving and a camera walk moves neither.
-    //
-    // So the chain simply STAYED off its fixed point, for ever. Measured on the
-    // sealed 12 m room of `scripting.e2e.movable_lamp_rest` (Medium, 4 cascades,
-    // 4 bounces, the lamp at 0.45): the camera walked 35 m away and back to the
-    // SAME pose — the cascade placements returned exactly and the albedo voxels
-    // came back byte-identical — and cascade 0's light voxels came back
-    // 60,852 of its 82,176 lit bytes different, by up to 55/255 (mean 12.326 →
-    // 13.072), the picture 5/255 brighter at six probes, and it never healed.
-    // ONE `world.refreshGi()` — the at-rest chain injection, nothing else —
-    // put every byte back (spikes/lamprest-3). A from-scratch rebuild of the
-    // whole arm at the same pose reproduces the boot answer to 30 bytes of a
-    // million, so the fixed point is not in doubt: the scrolled chain was the
-    // wrong one.
-    //
-    // THE RULE. A rebuild raises a DEBT of injections — one sweep over the
-    // cascades INSIDE the rebuilt one, outermost first (the rebuilt cascade's
-    // own injection read current outer light; PHOTON-GATHER-1b item 6) — and
-    // the scheduler pays it
-    // ONE INJECTION PER FRAME out of the same one-slot budget the rebuilds come
-    // from, the rebuild queue keeping priority. It is not a settle "at the
-    // stop": there is no camera-still gate at all, deliberately. THE VR CASE IS
-    // WHY (fix round item 1): in a session the GI driver is the headset's view
-    // and its camera is the tracked HEAD, written every frame, so a rule that
-    // waited for two frames at the same position would never fire for a wearer
-    // — room-scale walking re-voxelises (cascade 0's step is 5 m at EVERY tier:
-    // the derived step is clamped to resolution/2 cells, which is 32 cells of a
-    // 64^3 cascade over 10 m and 64 of a 128^3 one over the same 10 m — corrected
-    // 2026-09-18, lane V1-RIG; the 0.625 m here was a cell, not a step)
-    // and the 55/255 error would simply live in the headset until something
-    // else moved. With no gate, a walk that never ends keeps paying one cheap
-    // injection per idle slot and never starves.
-    //
-    // THE COST: spread, one injection a frame (~1 ms in Debug) instead of the
-    // whole at-rest tick in one frame. THE BYTES ARE THE SAME: the steps run in
-    // the tick's own order (cascades outermost-first), and one sweep IS the
-    // fixed point (kAtRestSweeps, EnginePrivate.h; gi.chain_converge).
-    //
-    // the arm `gi.rebuildSettle` (0) stands the rule down for measurement:
-    // gi.chain_converge drives it so the suite proves the defect it guards against rather than
-    // asserting a number that happens to pass (13.00/255 with it set, 0.00
-    // without, measured on that suite's room).
-    // FROM THE CASCADE INSIDE THE REBUILT ONE (PHOTON-GATHER-1b item 6): the
-    // rebuild's own injection read the cascades outside it as they stand, so
-    // the cascades inside it are what read a light that has since changed. A
-    // rebuild of cascade 0 therefore owes nothing.
-    if (rebuilt && mVctCascades.size() > 1u && staleTop >= 0) oweChainSettle(size_t(staleTop));
-
-    // ---- 2a'. THE BOUNCE SERIES' MEASUREMENTS (PHOTON-5 stage 5) -------------
-    // Harvested at the writer point, before the tick, so a cascade whose series asks for more
-    // passes than it was lit with owes that tick and gets it in this frame.
-    harvestBounceEnergy();
+    // ---- 3. THE READINGS THAT LANDED, BEFORE THIS FRAME'S LIGHT WORK --------------------------------------------
     harvestCommitCounts();
 
-    // ---- 2b. THE HOST'S LIGHT TICK, AFTER THE REBUILD (the one writer) ------
-    // (PHOTON-WRITER-1; refreshGiLighting says why it is owed rather than run.)
-    // After the rebuild so the tick never lights voxels the rebuild replaces,
-    // and before the settle step so the step finds the cascades it would inject
-    // already injected this frame and waits.
-    if (mGiTickOwed != GiTickOwed::None) {
-        const bool rest = mGiTickOwed == GiTickOwed::Rest;
-        mGiTickOwed = GiTickOwed::None;
-        runChainTick(!rest);
-    }
-    if (!spent && mGiSettleStepsOwed > 0 && (!mEngine || mEngine->armRegistry().on(ArmId::GiRebuildSettle))) {
-        bool pending = false;
-        for (const VctCascade &c : mVctCascades)
-            if (c.pending) { pending = true; break; }
-        // THE SETTLE IS PAID AT ONCE (PHOTON-2 stage 2b): one step a frame from the first payable frame, so
-        // a walk's last commit is settled within the chain's size in frames of the stop, not after it. (It was
-        // paid on the LAST top+1 of the frames the whole sweep would have taken — PHOTON-GATHER-1b item 6 —
-        // because every finished settle re-integrated the field with keep 0 and one sample: 22 one-sample field
-        // restarts in gi.field_follows' 200-frame walk. A change is four fresh samples deep now (stage 2a,
-        // kIfdChangeSamples) and continues from its cursor (K1), never a one-sample restart, so the reason is
-        // gone. THE PRICE, measured: each step is one cascade's injection inside the walk — the walk's frame
-        // cost, reported.)
-        if (!pending) {
-            // A LIGHT THAT MOVED WHILE THE SETTLE WAS RUNNING RESTARTS IT, and this
-            // is not caution: an injection reads the lights' DERIVED poses at the
-            // moment it runs, so a settle whose first steps saw one lamp pose and
-            // its last steps another leaves the chain a MIXTURE of the two and is
-            // not the fixed point of either — and `noteChainSettled` would then
-            // record that mixture as clean and let the next refresh skip the
-            // injection that would have fixed it. Measured:
-            // scripting.e2e.movable_lamp_rest read 3/255, 10/10, the moment the
-            // settle was allowed to absorb a light write (the lamp's push landed
-            // between two steps, the settle finished over it, and the suite's
-            // reference refresh was then skipped as clean).
-            //
-            // A lamp that keeps moving therefore keeps restarting this, which is
-            // right: nothing finishes while the scene is still changing, and the
-            // mirror's own at-rest tick — which fires one frame after the motion
-            // ends and clears the debt outright — is what finishes a light gesture.
-            // THE CHECK LIVES HERE, BEFORE THE STEP (fix round, audit F7): a
-            // whole-chain restart pays on the very frame it is seen. (The timing
-            // gate it once had to precede is gone: the settle is paid at once,
-            // PHOTON-2 stage 2b, one step a frame.)
-            if (mGiSettleSerial != mScene.lightWriteSerial()) oweChainSettle();   // a light: the whole chain
-            payChainSettleStep();                // one injection, this frame
-        }
-    }
-    // THE END OF A DRAG GESTURE'S OWN DEBT (MOVER-1), paid last and only once
-    // everything else has: every re-voxelisation drained and the incremental
-    // settle finished. It is the same call the host's explicit Refresh makes —
-    // the full at-rest tick, at the scene's own bounce count, followed by the
-    // field's re-integration — and it is what makes the picture a gesture ends
-    // on identical to the picture the same pose reaches without the promotion.
-    // One per gesture, never one per frame.
-    if (mDragSettleOwed && !spent && mGiSettleStepsOwed == 0) {
-        bool pending = false;
-        // ...and on a frame nothing has injected yet: the drag settle is a
-        // whole at-rest tick, and the one writer injects a cascade once a frame.
-        for (size_t i = 0; i < mVctCascades.size(); ++i)
-            if (mVctCascades[i].pending || injectedThisFrame(i)) { pending = true; break; }
+    // ---- 4. THE FRAME'S LIGHT CHANGES AND THE FEEDBACK (PHOTON-7 stage 4) ------------------------------------------
+    // After the rebuilds and the commits (their injections are this frame's), so a lamp's delta never lights voxels a
+    // rebuild replaces and the feedback's pass sees every direct term the frame changed. (THE CHAIN'S SETTLE, the light
+    // tick and the drag's closing whole tick are deleted with the Jacobi restart they existed for: no cascade is ever
+    // off a fixed point the feedback does not converge - a rebuild's bricks resume, a commit's slab and band resume, a
+    // lamp's spheres resume.)
+    relightAndFeedback();
+
+    // THE END OF A DRAG GESTURE'S OWN DEBT (MOVER-1), paid last and only once the re-voxelisations have drained and the
+    // feedback has nothing owed: the PHOTOGRAPHS. The object is GI geometry again, at its new pose, in a chain that has
+    // been re-voxelised and whose light has converged; this is the first frame a capture can hold the room as it actually
+    // is. The sweep drains at the tier's own budget like every other staleness - a rate, not a hitch. One per gesture.
+    if (mDragSettleOwed && !spent) {
+        bool pending = feedbackOwed();
+        for (size_t i = 0; i < mVctCascades.size() && !pending; ++i) pending = mVctCascades[i].pending != 0;
         if (!pending) {
             mDragSettleOwed = false;
-            runChainTick(false);
-            // ...AND ONLY NOW THE PHOTOGRAPHS. The object is GI geometry again,
-            // at its new pose, in a chain that has been re-voxelised and
-            // re-injected; this is the first frame a capture can hold the room
-            // as it actually is. The sweep drains at the tier's own budget like
-            // every other staleness — a rate, not a hitch.
             staleProbeGrid(GiStaleReason::Mobility);
         }
     }
+}
+
+// THE FRAME'S LIGHT CHANGES, RELIT; THE FEEDBACK'S PASS (PHOTON-7 stage 4; SPECS/PHOTON_7_SPEC.md stage 4, L2, L3).
+//
+// (1) THE CHANGES, FROM THE LIST as it stands at the writer point (the drain's lamps and edits, this frame's commits): a
+//     lamp's old and new range spheres owe each cascade they meet a DELTA of its direct term over them (total += D_new -
+//     D_old: past its range a lamp lights nothing, and a voxel whose direct did not change keeps every bit); the sun (a
+//     directional light, the cloud layer's shadow on it - the list's sun overflow) or the host's whole relight owes every
+//     cascade a delta over its whole volume. A cascade the one-writer latch holds this frame is owed until the next (a
+//     whole injection this frame read the lights already: answered).
+// (2) THE FEEDBACK, OUTERMOST FIRST: one bounce pass over each cascade's ACTIVE bricks (PhotonVoxelLighting::feedbackPass:
+//     the bricks whose direct term changed this frame, the ones a listed lamp or edit meets, every brick after a whole
+//     injection or a sky change - plus those still converging), then each cascade's stopped bricks accumulate what this
+//     frame's moves - its own and every outer cascade's that ran - could move them by, and the stop and resume rules run
+//     (feedbackEnd). A cascade owes a frame while an activation is unanswered by a landed reading or its last reading
+//     counts active bricks; every cascade inside one that ran runs its accumulation and rules too (its cones read it).
+static const char *const kRelightRowNames[8] = { "vct.relight0", "vct.relight1", "vct.relight2", "vct.relight3",
+                                                 "vct.relight4", "vct.relight5", "vct.relight6", "vct.relight7" };
+static const char *const kFeedbackRowNames[8] = { "vct.feedback0", "vct.feedback1", "vct.feedback2", "vct.feedback3",
+                                                  "vct.feedback4", "vct.feedback5", "vct.feedback6", "vct.feedback7" };
+
+void PhotonComponent::relightAndFeedback() {
+    if (mVctCascades.empty() || !mVctCascades[0].built) return;
+    JAH_TRY {
+        const unsigned long long frame = giWriterFrame();
+        const bool sun = (mRegionOverflowOpen & kGiRegionOverflowSun) != 0u;
+        const bool sky = (mRegionOverflowOpen & kGiRegionOverflowSky) != 0u;
+        const size_t n = mVctCascades.size();
+        // (1) THE CHANGES THE LIST SAYS, so far this frame
+        for (size_t i = 0; i < n; ++i) {
+            VctCascade &c = mVctCascades[i];
+            if (!c.lighting || !c.built) continue;
+            const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+            if (sun || mGiRelightAllOwed) {
+                c.relightOwed = true;
+                c.relightWhole = true;
+            }
+            for (const RegionEntry &e : mRegionsOpen) {
+                if (e.kind != GiRegionKind::Lamp || !box.intersects(e.box)) continue;
+                Ogre::Vector3 lo = e.box.getMinimum(), hi = e.box.getMaximum();
+                lo.makeCeil(box.getMinimum());
+                hi.makeFloor(box.getMaximum());
+                const Ogre::Aabb part = Ogre::Aabb::newFromExtents(lo, hi);
+                if (c.relightOwed) c.relightBox.merge(part);
+                else c.relightBox = part;
+                c.relightOwed = true;
+            }
+        }
+        mGiRelightAllOwed = false;
+        // (2) PAID where the latch allows
+        bool sceneGraphCurrent = false;
+        for (size_t i = 0; i < n; ++i) {
+            VctCascade &c = mVctCascades[i];
+            if (!c.relightOwed || !c.lighting || !c.built) continue;
+            if (injectedThisFrame(i)) {
+                if (c.injectedWholeFrame == frame) {   // a whole volume's injection read the lights as they are
+                    c.relightOwed = c.relightWhole = false;
+                    c.relightBox = Ogre::Aabb::BOX_NULL;
+                }
+                continue;
+            }
+            Ogre::PhotonCommitLight d;
+            d.delta = true;
+            for (int a = 0; a < 3; ++a) d.keepHi[a] = Ogre::uint32(c.resolution);
+            if (!c.relightWhole) {
+                const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+                const Ogre::Vector3 corner = box.getMinimum();
+                const float cell = c.cell();
+                const int res = c.resolution;
+                bool empty = false;
+                for (int a = 0; a < 3; ++a) {
+                    const int l = std::max(0, int(std::floor((c.relightBox.getMinimum()[a] - corner[a]) / cell)));
+                    const int h = std::min(res, int(std::ceil((c.relightBox.getMaximum()[a] - corner[a]) / cell)));
+                    if (h <= l) empty = true;
+                    d.injectLo[0][a] = Ogre::uint32(l / 4 * 4);
+                    d.injectHi[0][a] = Ogre::uint32(std::min(res, (h + 3) / 4 * 4));
+                }
+                d.numInjectBoxes = 1u;
+                if (empty) {
+                    c.relightOwed = false;
+                    c.relightBox = Ogre::Aabb::BOX_NULL;
+                    continue;
+                }
+            }
+            if (!sceneGraphCurrent) {
+                giUpdateSceneGraph(mSceneMgr);   // an injection reads the lights' DERIVED poses
+                sceneGraphCurrent = true;
+            }
+            bool ok = false;
+            {
+                monitor::CacheScope row(CacheKind::Gi, WorkReason::Light, (unsigned long long)i,
+                                        kRelightRowNames[std::min(i, size_t(7))], mRoot->getRenderSystem());
+                mInjectingRelight = true;
+                ok = injectCascade(i, &d);
+                mInjectingRelight = false;
+                row.setUnits(ok ? 1u : 0u);
+            }
+            if (ok) {
+                c.relightOwed = c.relightWhole = false;
+                c.relightBox = Ogre::Aabb::BOX_NULL;
+                ++c.relights;
+            }
+        }
+        // THE JACOBI REFERENCE (the measuring door gi.bounceJacobi): restarted from the direct terms where it comes on,
+        // then every brick a pass every frame while it is set.
+        const bool jacobi = mEngine && mEngine->armRegistry().on(ArmId::GiBounceJacobi);
+        if (jacobi && !mJacobiOn) {
+            for (size_t i = 0; i < n; ++i)
+                if (mVctCascades[i].lighting && mVctCascades[i].built && !injectedThisFrame(i)) injectCascade(i, nullptr);
+        }
+        mJacobiOn = jacobi;
+        // (3) THE FEEDBACK
+        if (mGi.bounces) runFeedback(sky || mGiFeedbackForceAll || jacobi, frame);
+        mGiFeedbackForceAll = false;
+    } JAH_CATCH(mError, );
+}
+
+void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame) {
+    const size_t n = mVctCascades.size();
+    std::vector<char> ran(n, 0);
+    bool outerRan = false;
+    for (size_t i = n; i-- > 0;) {
+        VctCascade &c = mVctCascades[i];
+        if (!c.lighting || !c.built) continue;
+        Ogre::PhotonFeedbackActivation act;
+        act.all = forceAll || c.fbForce;
+        if (!act.all) {
+            // THE REGIONS THAT MEET IT: a lamp's spheres (its direct changed there; whatever sees those walls changes) and
+            // an edit's box. (A commit's Slab boxes are not activations - the commit's changed direct terms are the mask's
+            // word 0, its fresh slab bricks start active, and a whole placement activates every brick: stage 3's read F4.)
+            const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+            const Ogre::Vector3 corner = box.getMinimum();
+            const float brick = 8.0f * c.cell();
+            const int dims = (c.resolution + 7) / 8;
+            Ogre::Aabb all = Ogre::Aabb::BOX_NULL;
+            bool collapse = false;
+            for (const RegionEntry &e : mRegionsOpen) {
+                if (e.kind != GiRegionKind::Lamp && e.kind != GiRegionKind::Edit) continue;
+                if (!box.intersects(e.box)) continue;
+                all.merge(e.box);
+                if (act.numBoxes >= Ogre::PhotonFeedbackActivation::kMaxBoxes) { collapse = true; continue; }
+                Ogre::uint32 *lo = act.lo[act.numBoxes], *hi = act.hi[act.numBoxes];
+                for (int a = 0; a < 3; ++a) {
+                    lo[a] = Ogre::uint32(std::min(dims, std::max(0, int(std::floor((e.box.getMinimum()[a] - corner[a]) / brick)))));
+                    hi[a] = Ogre::uint32(std::min(dims, std::max(0, int(std::ceil((e.box.getMaximum()[a] - corner[a]) / brick)))));
+                }
+                ++act.numBoxes;
+            }
+            if (collapse) {   // more boxes than the pass holds: their union, one box (conservative)
+                act.numBoxes = 1u;
+                for (int a = 0; a < 3; ++a) {
+                    act.lo[0][a] = Ogre::uint32(std::min(dims, std::max(0, int(std::floor((all.getMinimum()[a] - corner[a]) / brick)))));
+                    act.hi[0][a] = Ogre::uint32(std::min(dims, std::max(0, int(std::ceil((all.getMaximum()[a] - corner[a]) / brick)))));
+                }
+            }
+        }
+        const bool activated = act.all || act.numBoxes > 0u || c.injectedFrame == frame;
+        if (activated) c.fbActivatedFrame = frame;
+        const bool owes = activated || outerRan || c.fbActivatedFrame > c.fbLastFrame || c.fbLastActive > 0u;
+        if (!owes) continue;
+        mScene.applyCascadeEnvironment(c.lighting);   // the sky the pass's escapes read
+        {
+            monitor::CacheScope row(CacheKind::Gi, WorkReason::Light, (unsigned long long)i,
+                                    kFeedbackRowNames[std::min(i, size_t(7))], mRoot->getRenderSystem());
+            c.lighting->feedbackPass(act);
+        }
+        c.fbForce = false;
+        ran[i] = 1;
+        outerRan = true;
+        ++c.fbPasses;
+    }
+    for (size_t i = n; i-- > 0;) {
+        if (!ran[i]) continue;
+        VctCascade &c = mVctCascades[i];
+        c.lighting->feedbackAccumulate(c.lighting);
+        for (size_t s = i + 1; s < n; ++s)
+            if (ran[s]) c.lighting->feedbackAccumulate(mVctCascades[s].lighting);
+        c.lighting->feedbackEnd(frame);
+    }
+}
+
+// THE FEEDBACK'S READINGS THAT LANDED (never waited on): each cascade's newest count of its bricks still active, its
+// books - and the chain's REST: the frame the feedback stops owing work, the chain's radiance has finished moving, so
+// the field re-integrates from it once (as it did after the settle it replaces) and the lighting serial moves once.
+void PhotonComponent::harvestFeedback() {
+    for (VctCascade &c : mVctCascades) {
+        if (!c.lighting) continue;
+        Ogre::PhotonFeedbackReading r;
+        while (c.lighting->takeFeedbackReading(r)) {
+            c.fbLastFrame = std::max(c.fbLastFrame, (unsigned long long)r.frame);
+            c.fbLastActive = r.activeAfter;
+            c.fbBricksRan += r.ran;
+            c.fbStops += r.stops;
+            c.fbResumes += r.resumes;
+            c.fbSaturated += r.saturated;
+            ++c.fbReadings;
+        }
+    }
+    const bool owed = feedbackOwed();
+    if (mGiFeedbackOwedLast && !owed) {
+        ++mGiFeedbackRests;
+        reintegrateFieldAfterInjection();
+    }
+    mGiFeedbackOwedLast = owed;
 }
 
 // The FAILED-BUILD path: nothing is bound yet (mVctVoxelizer/mVctLighting are
@@ -7791,13 +7583,26 @@ bool PhotonComponent::chainWorkOwed() const {
     // ...AND A RE-SOLVE THE SCHEDULER HOLDS PENDING IS NOT REST (ENGINE-UPGRADE-2B stage 4): it fires
     // once the change has held still for its window, and a picture taken before it is not the scene's
     // answer. A paused budget follows nothing and keeps what it owes for the un-pause (plan()).
-    bool injectionOwed = mGiSettleStepsOwed > 0 || mGiTickOwed != GiTickOwed::None ||
-                         (mGiPlan.pendingRefresh && mGi.updateBudget > 0);
-    // ...AND A BOUNCE SERIES STILL BEING MEASURED (PHOTON-5 stage 5): its reading may ask for
-    // more passes than the volume was lit with, and the re-injection that answers it changes
-    // the picture (harvestBounceEnergy).
-    for (const VctCascade &c : mVctCascades) injectionOwed = injectionOwed || c.bounceEnergyPending;
-    return rebuildPending || injectionOwed;
+    const bool resolvePending = mGiPlan.pendingRefresh && mGi.updateBudget > 0;
+    // ...AND THE FEEDBACK'S OWED WORK (PHOTON-7 stage 4): a relight owed (a lamp's delta, the sun's, the host's), or a
+    // cascade whose bricks are active by its last landed reading - or activated since: its bounces are still converging.
+    return rebuildPending || resolvePending || feedbackOwed();
+}
+
+// THE FEEDBACK OWES CASCADE `c` WORK (PHOTON-7 stage 4): an activation the readings have not answered yet (a frame's
+// injection, a listed region, a forced pass: no reading taken at or after that frame has landed), or active bricks by
+// the newest landed reading - the GPU's own count of the bricks still converging after its frame's pass.
+bool PhotonComponent::cascadeFeedbackOwed(const VctCascade &c) const {
+    if (c.relightOwed) return true;
+    if (!mGi.bounces || !c.lighting) return false;
+    return c.fbForce || c.fbActivatedFrame > c.fbLastFrame || c.fbLastActive > 0u;
+}
+
+bool PhotonComponent::feedbackOwed() const {
+    if (mGiRelightAllOwed || mGiFeedbackForceAll) return !mVctCascades.empty();
+    for (const VctCascade &c : mVctCascades)
+        if (cascadeFeedbackOwed(c)) return true;
+    return false;
 }
 
 void PhotonComponent::planField(FrameWork &w) {
@@ -8219,14 +8024,11 @@ void PhotonComponent::teardownVct() {
     // across would mark every cascade of the NEXT chain pending on its first
     // frame.
     clearCascadeDirty();   // the list, the union's state and its members (decision 18.1)
-    // ...AND IT OWES NO SETTLE EITHER (LAMPREST-3 fix round item 4). The debt is
-    // a count of injections into cascades that are about to stop existing; a
-    // tier change after a walk would otherwise pay it into the FRESH chain,
-    // which has just been injected by its own build.
-    mGiSettleStepsOwed = 0;
-    mGiSettleCascades  = 0;
-    // ...AND NO LIGHT TICK: the next chain's build injects every cascade.
-    mGiTickOwed = GiTickOwed::None;
+    // ...AND NO RELIGHT OR FEEDBACK (PHOTON-7 stage 4): the next chain's build injects every cascade whole, which
+    // activates every brick of it.
+    mGiRelightAllOwed = false;
+    mGiFeedbackForceAll = false;
+    mGiFeedbackOwedLast = false;
     // ...AND IT OWES NO FIELD FOLLOW (V1-RIG item 2): the debt names a field
     // and a cascade that are about to stop existing, and whatever chain comes
     // next converges its field WHOLE in `buildIrradianceField`.
@@ -8473,7 +8275,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // SIGNATURE — folded ONLY from what moves when an injection LANDS, never
     // from the write-time serials (a light write or a material generation
     // bumps at the WRITE, and a dragged light re-marched the whole resident set
-    // against voxels that had not moved, every frame): the chain's settles, each
+    // against voxels that had not moved, every frame): the feedback's rests (PHOTON-7 stage 4), each
     // cascade's rebuilds and lattice cell, the PhotonVoxelLighting objects themselves,
     // and the environment the escapes read (below).
     view.vct = mVctLighting;
@@ -8486,8 +8288,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
             sig ^= v;
             sig *= 1099511628211ull;
         };
-        foldI((unsigned long long)mGiChainSettles);
-        foldI(mGiRestTicks);
+        foldI(mGiFeedbackRests);   // the feedback came to rest (PHOTON-7 stage 4; C5 until stage 5 deletes it)
         // ...AND THE ENVIRONMENT THE MARCH'S ESCAPES READ, which is not an
         // injection at all: noteEnvironmentChanged hands the new sky to every
         // PhotonVoxelLighting at once (applyVctEnvironment) and the pixel reads it the

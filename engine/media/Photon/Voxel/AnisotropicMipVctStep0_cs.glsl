@@ -25,6 +25,11 @@ uniform restrict writeonly image3D outLightHigherMip1;
 layout( vulkan( ogre_u2 ) vk_comma @insertpiece(uav2_pf_type) )
 uniform restrict writeonly image3D outLightHigherMip2;
 
+// PHOTON-7 stage 4: THE FEEDBACK'S BRICK LIST (jah_brick_list) - the levels regenerated over the active bricks only.
+@property( jah_brick_list )
+	layout( std430, ogre_U3 ) restrict readonly buffer jahFbListLayout { uint jahFbList[]; };
+@end
+
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
 		local_size_z = @value( threads_per_group_z ) ) in;

@@ -227,20 +227,43 @@
             ]
         },
 
-        "Photon/VoxelEnergy" :
+        "Photon/BrickFeedback" :
         {
             "threads_per_group" : [4, 4, 4],
 
-            "source" : "PhotonVoxelEnergy_cs",
+            "source" : "PhotonBrickFeedback_cs",
+            "pieces" : ["CrossPlatformSettings_piece_all"],
+            "inform_shader_of_texture_size" : false,
+            "inform_shader_of_texture_data_change" : false,
+
+            "uav_units" : 8,
+
+            "properties" :
+            {
+                "jah_brick_copy" : 0
+            }
+        },
+
+        "Photon/BrickCopy" :
+        {
+            "threads_per_group" : [4, 4, 4],
+
+            "source" : "PhotonBrickFeedback_cs",
             "pieces" : ["CrossPlatformSettings_piece_all"],
             "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
-            "uav_units" : 1,
+            "uav_units" : 3,
 
-            "textures" :
+            "properties" :
+            {
+                "jah_brick_copy" : 1
+            },
+
+            "params_glsl" :
             [
-                {}
+                ["fbFrom",                  [0], "int"],
+                ["fbTo",                    [1], "int"]
             ]
         },
 

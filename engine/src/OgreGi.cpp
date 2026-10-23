@@ -418,7 +418,6 @@ unsigned OgreScene::applyChangeSet(const ChangeSet &cs) {
         }
         if (!any) return 0u;
         ++mGiLightWriteSerial;
-        mPhoton.noteLampsChanged();   // it cannot say which lamp moved
         return 1u;
     }
     if (cs.moved.empty()) return 0u;
@@ -483,7 +482,6 @@ bool OgreScene::nameMovedNode(Node &rec, Ogre::Node *on, std::vector<Ogre::Node 
         rec.lightPos = p; rec.lightRot = q; rec.lightPoseKnown = true;
         if (moved) {
             light = true;
-            noteLampChanged(rec);
             listLampChange(rec);
         }
     }

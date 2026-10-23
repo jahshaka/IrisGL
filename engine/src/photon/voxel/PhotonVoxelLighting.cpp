@@ -280,8 +280,11 @@ namespace Ogre
         mBounceFromPreviousProbeToNext = addLocalBounceShaderParam( "fromPreviousProbeToNext" );
         mBounceEnvGainMips = addLocalBounceShaderParam( "envGainMips" );
         mBounceEnvSh = addLocalBounceShaderParam( "envSh" );
-        mBounceRegionOrigin = addLocalBounceShaderParam( "regionOrigin" );
         mBounceBrickMark = addLocalBounceShaderParam( "brickMark" );
+
+        // THE FEEDBACK'S JOBS (PHOTON-7 stage 4; Voxelizer.material.json), shared by name like the bounce's.
+        mFeedbackJob = hlmsCompute->findComputeJob( "Photon/BrickFeedback" );
+        mFeedbackCopyJob = hlmsCompute->findComputeJob( "Photon/BrickCopy" );
 
         createTextures();
     }
@@ -312,19 +315,17 @@ namespace Ogre
             mCommitCountBuf = nullptr;
         }
 
-        mEnergyTicket.reset();
-        if( mEnergyBuffer )
-        {
-            vaoManager->destroyUavBuffer( mEnergyBuffer );
-            mEnergyBuffer = nullptr;
-        }
-
         for( uint32 k = 0u; k < kBrickReadingSlots; ++k )
             mBrickReadings[k].ticket.reset();
-        if( mBrickBuffer )
+        for( uint32 k = 0u; k < kFeedbackReadingSlots; ++k )
+            mFeedbackReadings[k].ticket.reset();
+        for( UavBufferPacked **b : { &mBrickBuffer, &mBrickState[0], &mBrickState[1], &mBrickList, &mBrickArgs } )
         {
-            vaoManager->destroyUavBuffer( mBrickBuffer );
-            mBrickBuffer = nullptr;
+            if( *b )
+            {
+                vaoManager->destroyUavBuffer( *b );
+                *b = nullptr;
+            }
         }
 
         if( !mVoxelizerListenersRemoved )
@@ -707,7 +708,7 @@ namespace Ogre
         const RenderSystemCapabilities *caps = hlmsManager->getRenderSystem()->getCapabilities();
         const bool bSetSampler = !caps->hasCapability( RSC_SEPARATE_SAMPLERS_FROM_TEXTURES );
         // The samplerblocks are bound ONCE and never move; the textures move on every
-        // bounce. So a re-assert (runBounce, below) writes the textures and leaves the
+        // bounce. So a re-assert (runFeedbackPass) writes the textures and leaves the
         // sampler reference counting alone, which is the only reason this call is cheap
         // enough to repeat per dispatch.
         const bool bSetSamplerNow = bSetSampler && bSetSamplerRefs;
@@ -833,15 +834,18 @@ namespace Ogre
         // nothing here reads it. Measured: a back that ping-pongs and is read per side moved the
         // roof fixture's two-bounce underside by nothing (gi.voxel_coverage, 0.02193 both), at
         // 8 B a voxel on every bouncing tier.
-        // (+ the brick mask, u2: PHOTON-7 stage 3 - bound by runBounce, which every dispatch goes through)
-        if( mLightVctBounceInject->getNumUavUnits() != 3u )
-            mLightVctBounceInject->setNumUavUnits( 3u );
+        // (+ the brick mask u2, the feedback's list u3 and its state u4: PHOTON-7 stages 3 and 4 - bound by
+        // runFeedbackPass, which every dispatch goes through)
+        if( mLightVctBounceInject->getNumUavUnits() != 5u )
+            mLightVctBounceInject->setNumUavUnits( 5u );
 
         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
-        uavSlot.access = ResourceAccess::Write;
+        // (READ-WRITE: the pass reads back what it wrote - its move is the store's own, PHOTON-7 stage 4)
+        uavSlot.access = ResourceAccess::ReadWrite;
         uavSlot.texture = mLightBounce;
         uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
         mLightVctBounceInject->_setUavTexture( 0, uavSlot );
+        uavSlot.access = ResourceAccess::Write;
         uavSlot.texture = mLightVoxel[backIndex()];
         mLightVctBounceInject->_setUavTexture( 1, uavSlot );
     }
@@ -946,9 +950,36 @@ namespace Ogre
             OGRE_ASSERT_LOW( p && "the job's regionOrigin parameter (Voxelizer.material.json)" );
             return p;
         }
+        /// THE FEEDBACK'S BRICK LIST ON A DIRECTIONAL-LEVEL JOB (PHOTON-7 stage 4): `list` binds it after the job's
+        /// `textureUavs` image UAVs and sizes the dispatch from `args` (one group a listed brick: the arguments' words
+        /// 4..6); null puts the job back as every other caller dispatches it (the jobs are shared). Each piece is
+        /// change-guarded: setNumUavUnits and setProperty void the PSO hash whatever they are told.
+        void setBrickListMode( HlmsComputeJob *job, UavBufferPacked *list, UavBufferPacked *args, uint8 textureUavs )
+        {
+            const int32 on = list ? 1 : 0;
+            if( job->getProperty( "jah_brick_list" ) != on )
+                job->setProperty( "jah_brick_list", on );
+            const uint8 units = static_cast<uint8>( textureUavs + ( list ? 1u : 0u ) );
+            if( job->getNumUavUnits() != units )
+                job->setNumUavUnits( units );
+            if( list )
+            {
+                DescriptorSetUav::BufferSlot bufSlot = DescriptorSetUav::BufferSlot::makeEmpty();
+                bufSlot.buffer = list;
+                bufSlot.offset = 0u;
+                bufSlot.sizeBytes = list->getTotalSizeBytes();
+                bufSlot.access = ResourceAccess::Read;
+                job->_setUavBuffer( textureUavs, bufSlot );
+                job->setIndirectDispatchBuffer( args, 4u * sizeof( uint32 ) );
+            }
+            else
+            {
+                job->setIndirectDispatchBuffer( 0 );
+            }
+        }
     }  // namespace
 
-    void PhotonVoxelLighting::generateAnisotropicMips( const uint32 *regionLo, const uint32 *regionHi )
+    void PhotonVoxelLighting::generateAnisotropicMips( const uint32 *regionLo, const uint32 *regionHi, bool brickList )
     {
         RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
         renderSystem->debugAnnotationPush( "VctLighting Anisotropic Mips" );
@@ -990,9 +1021,20 @@ namespace Ogre
             }
             // (one thread per directional level-0 texel of a half: two cells)
             ShaderParams::Param *origin = regionOriginParam( mAnisoGeneratorStep0 );
-            setRegionGrid( mAnisoGeneratorStep0, origin, regionLo, regionHi, 2u, dirRes );
+            setBrickListMode( mAnisoGeneratorStep0, brickList ? mBrickList : nullptr, brickList ? mBrickArgs : nullptr,
+                              3u );
+            if( brickList )
+            {
+                const uint32 lo[4] = { 0u, 0u, 0u, 1u };   // w: a texel covers 2^1 cells
+                origin->setManualValue( lo, 4u );
+            }
+            else
+            {
+                setRegionGrid( mAnisoGeneratorStep0, origin, regionLo, regionHi, 2u, dirRes );
+            }
             mAnisoGeneratorStep0->getShaderParams( "default" ).setDirty();
             jahshaka::engine::detail::photonDispatch( hlmsCompute, mAnisoGeneratorStep0, renderSystem );
+            setBrickListMode( mAnisoGeneratorStep0, nullptr, nullptr, 3u );
         }
 
         // STEP 1'S JOBS ARE THE POOL'S (BUGS-6 stage 3): this lighting's volumes bound per dispatch,
@@ -1019,90 +1061,31 @@ namespace Ogre
             const uint32 levelRes[3] = { std::max( 1u, dirRes[0] >> ( i + 1u ) ), std::max( 1u, dirRes[1] >> ( i + 1u ) ),
                                          std::max( 1u, dirRes[2] >> ( i + 1u ) ) };
             ShaderParams::Param *origin = regionOriginParam( mipJob );
-            setRegionGrid( mipJob, origin, regionLo, regionHi, 2u << ( i + 1u ), levelRes );
+            setBrickListMode( mipJob, brickList ? mBrickList : nullptr, brickList ? mBrickArgs : nullptr, 3u );
+            if( brickList )
+            {
+                const uint32 lo[4] = { 0u, 0u, 0u, uint32( i ) + 2u };   // w: a texel covers 2^(i + 2) cells
+                origin->setManualValue( lo, 4u );
+            }
+            else
+            {
+                setRegionGrid( mipJob, origin, regionLo, regionHi, 2u << ( i + 1u ), levelRes );
+            }
             mipJob->getShaderParams( "default" ).setDirty();
             jahshaka::engine::detail::photonDispatch( hlmsCompute, mipJob, renderSystem );
+            setBrickListMode( mipJob, nullptr, nullptr, 3u );
         }
         renderSystem->debugAnnotationPop();
     }
     //-------------------------------------------------------------------------
-    // Jahshaka (PHOTON-5 stage 5): one sum of the current light volume (level 0) into range `slot`
-    // of the partials buffer, one float per 8 x 8 x 8 block (PhotonVoxelEnergy_cs.glsl).
-    void PhotonVoxelLighting::dispatchEnergy( uint32 slot )
-    {
-        TextureGpu *volume = mLightVoxel[0];
-        if( !volume )
-            return;
-        RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
-        VaoManager *vaoManager = renderSystem->getVaoManager();
-        HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
-        if( !mEnergyJob )
-            mEnergyJob = hlmsCompute->findComputeJob( "Photon/VoxelEnergy" );
-        const uint32 gx = ( volume->getWidth() + 7u ) / 8u;
-        const uint32 gy = ( volume->getHeight() + 7u ) / 8u;
-        const uint32 gz = ( volume->getDepth() + 7u ) / 8u;
-        const uint32 groups = gx * gy * gz;
-        const uint32 alignFloats = std::max( vaoManager->getUavBufferAlignment(), 16u ) / 4u;
-        const uint32 stride = ( groups + alignFloats - 1u ) / alignFloats * alignFloats;
-        // kMaxBouncePasses (8) + the base: nine ranges.
-        // The group count is kept whatever the stride did: two counts can share one aligned stride (the merge read).
-        mEnergyGroups = groups;
-        if( !mEnergyBuffer || stride != mEnergyStride )
-        {
-            mEnergyTicket.reset();
-            if( mEnergyBuffer )
-                vaoManager->destroyUavBuffer( mEnergyBuffer );
-            mEnergyStride = stride;
-            std::vector<float> zeros( size_t( stride ) * 9u, 0.0f );
-            mEnergyBuffer = vaoManager->createUavBuffer( zeros.size(), sizeof( float ), 0, zeros.data(),
-                                                         false );
-        }
-        if( slot >= 9u )
-            return;
-        mEnergyJob->setNumThreadGroups( gx, gy, gz );
-        DescriptorSetTexture2::TextureSlot texSlot( DescriptorSetTexture2::TextureSlot::makeEmpty() );
-        texSlot.texture = volume;
-        mEnergyJob->setTexture( 0, texSlot, mSamplerblockTrilinear );
-        DescriptorSetUav::BufferSlot bufSlot = DescriptorSetUav::BufferSlot::makeEmpty();
-        bufSlot.buffer = mEnergyBuffer;
-        bufSlot.offset = size_t( slot ) * stride * sizeof( float );
-        bufSlot.sizeBytes = size_t( groups ) * sizeof( float );
-        bufSlot.access = ResourceAccess::Write;
-        mEnergyJob->_setUavBuffer( 0, bufSlot );
-        jahshaka::engine::detail::photonDispatch( hlmsCompute, mEnergyJob, renderSystem );
-    }
-    //-------------------------------------------------------------------------
-    bool PhotonVoxelLighting::takeBounceEnergy( std::vector<double> &sums )
-    {
-        sums.clear();
-        if( !mEnergyTicket.get() )
-            return false;
-        const float *f = static_cast<const float *>( mEnergyTicket->map() );
-        for( uint32 k = 0u; k < mEnergySums; ++k )
-        {
-            double s = 0.0;
-            for( uint32 g = 0u; g < mEnergyGroups; ++g )
-                s += double( f[size_t( k ) * mEnergyStride + g] );
-            sums.push_back( s );
-        }
-        mEnergyTicket->unmap();
-        mEnergyTicket.reset();
-        return true;
-    }
-    //-------------------------------------------------------------------------
-    void PhotonVoxelLighting::runBounce( bool envOnly, const uint32 *regionLo, const uint32 *regionHi, bool markBricks )
+    // THE FEEDBACK (PHOTON-7 stage 4; PhotonBrickFeedback_cs.glsl). The bounce pass of one frame, over the bricks the PRE
+    // mode listed: the bounce job reads the CURRENT total and writes its target, the target is copied back over the same
+    // bricks and the directional levels regenerated over them - three indirect dispatches sized by the list's count, so
+    // a frame with nothing active costs their launches and no texel.
+    void PhotonVoxelLighting::runFeedbackPass()
     {
         RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
-        renderSystem->debugAnnotationPush( envOnly ? "VctLighting Sky" : "VctLighting Bounce" );
-
-        // Jahshaka (CONTACT-OCCLUSION-1): the sky's direct term is this pass with the
-        // voxels' share of the gather compiled out (the job's `jah_env_only`). The job is
-        // shared by name, so the property is re-asserted per dispatch like its bindings.
-        {
-            const int32 envOnlyI32 = envOnly ? 1 : 0;
-            if( mLightVctBounceInject->getProperty( "jah_env_only" ) != envOnlyI32 )
-                mLightVctBounceInject->setProperty( "jah_env_only", envOnlyI32 );
-        }
+        renderSystem->debugAnnotationPush( "VctLighting Feedback" );
 
         mBounceVoxelCellSize->setManualValue( mVoxelizer->getVoxelCellSize() );
         mBounceInvVoxelResolution->setManualValue( 1.0f / mVoxelizer->getVoxelResolution() );
@@ -1161,7 +1144,8 @@ namespace Ogre
             mBounceFromPreviousProbeToNext->isDirty = false;
         }
         // THE ENVIRONMENT, in radiance (Jahshaka, PHOTON-ENV-1): the voxels hold radiance (PHOTON-7 stage 1: no
-        // per-box normalisation to divide the sky by), so an escaping bounce cone adds the sky as it is.
+        // per-box normalisation to divide the sky by), so an escaping bounce cone adds the sky as it is - IN EVERY PASS
+        // (PHOTON-7 stage 4: the separate sky pass is deleted; the sky is a light the feedback converges like a lamp's).
         {
             const float mips = mEnvCube ? float( mEnvCube->getNumMipmaps() ) : 1.0f;
             const float gainMips[4] = { mEnvGain[0], mEnvGain[1], mEnvGain[2], mips };
@@ -1175,11 +1159,8 @@ namespace Ogre
             }
             mBounceEnvSh->setManualValue( sh, 36u );
         }
-
-        // THE BRICK MASK (PHOTON-7 stage 3): the update's last pass marks how far it moved each brick (word 1).
-        ensureBrickMask();
         {
-            const uint32 mark[4] = { markBricks ? 1u : 0u, mBrickDims[0], mBrickDims[1], 0u };
+            const uint32 mark[4] = { 1u, mBrickDims[0], mBrickDims[1], 0u };
             mBounceBrickMark->setManualValue( mark, 4u );
         }
 
@@ -1197,42 +1178,226 @@ namespace Ogre
         setupBounceTextures( false );
         {
             DescriptorSetUav::BufferSlot bufSlot = DescriptorSetUav::BufferSlot::makeEmpty();
-            bufSlot.buffer = mBrickBuffer;
             bufSlot.offset = 0u;
-            bufSlot.sizeBytes = mBrickZeros.size() * sizeof( uint32 );
             bufSlot.access = ResourceAccess::ReadWrite;
+            bufSlot.buffer = mBrickBuffer;
+            bufSlot.sizeBytes = mBrickBuffer->getTotalSizeBytes();
             mLightVctBounceInject->_setUavBuffer( 2u, bufSlot );
+            bufSlot.access = ResourceAccess::Read;
+            bufSlot.buffer = mBrickList;
+            bufSlot.sizeBytes = mBrickList->getTotalSizeBytes();
+            mLightVctBounceInject->_setUavBuffer( 3u, bufSlot );
+            bufSlot.access = ResourceAccess::ReadWrite;
+            bufSlot.buffer = mBrickState[mBrickStateCur];
+            bufSlot.sizeBytes = mBrickState[mBrickStateCur]->getTotalSizeBytes();
+            mLightVctBounceInject->_setUavBuffer( 4u, bufSlot );
         }
 
-        // THE PASS'S CELLS (PHOTON-7 stage 2): the region [regionLo, regionHi) (aligned to the 4^3 groups), or whole.
-        const uint32 res[3] = { mLightVoxel[0]->getWidth(), mLightVoxel[0]->getHeight(), mLightVoxel[0]->getDepth() };
-        setRegionGrid( mLightVctBounceInject, mBounceRegionOrigin, regionLo, regionHi, 1u, res );
-
+        // THE ACTIVE BRICKS: the arguments' words 0..2 (8 x the bricks the PRE mode listed).
         HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
+        mLightVctBounceInject->setIndirectDispatchBuffer( mBrickArgs, 0u );
         jahshaka::engine::detail::photonDispatch( hlmsCompute, mLightVctBounceInject, renderSystem );
+        mLightVctBounceInject->setIndirectDispatchBuffer( 0 );
 
-        // THE COPY-BACK: what the pass wrote into the bounce target becomes the total over the same cells (the
-        // Jacobi pass read the total and wrote the target; the total's identity never changes - no reader rebinds).
+        // THE COPY-BACK over the same bricks: the target becomes the total there (its identity never changes).
         {
-            uint32 lo[3], size[3];
-            for( int a = 0; a < 3; ++a )
-            {
-                lo[a] = regionLo && regionHi ? std::min( regionLo[a], res[a] ) : 0u;
-                const uint32 hi = regionLo && regionHi ? std::min( regionHi[a], res[a] ) : res[a];
-                size[a] = hi > lo[a] ? hi - lo[a] : 0u;
-            }
-            PhotonVoxelScroll::copyBox( mVoxelizer->getHlmsManager(), renderSystem, mLightBounce, mLightVoxel[0], lo,
-                                        lo, size );
+            DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+            uavSlot.pixelFormat = jahLightVoxelUavFormat();
+            uavSlot.access = ResourceAccess::Read;
+            uavSlot.texture = mLightBounce;
+            mFeedbackCopyJob->_setUavTexture( 0u, uavSlot );
+            uavSlot.access = ResourceAccess::Write;
+            uavSlot.texture = mLightVoxel[0];
+            mFeedbackCopyJob->_setUavTexture( 1u, uavSlot );
+            DescriptorSetUav::BufferSlot bufSlot = DescriptorSetUav::BufferSlot::makeEmpty();
+            bufSlot.buffer = mBrickList;
+            bufSlot.offset = 0u;
+            bufSlot.sizeBytes = mBrickList->getTotalSizeBytes();
+            bufSlot.access = ResourceAccess::Read;
+            mFeedbackCopyJob->_setUavBuffer( 2u, bufSlot );
+            mFeedbackCopyJob->setIndirectDispatchBuffer( mBrickArgs, 0u );
+            jahshaka::engine::detail::photonDispatch( hlmsCompute, mFeedbackCopyJob, renderSystem );
+            mFeedbackCopyJob->setIndirectDispatchBuffer( 0 );
         }
 
-        generateAnisotropicMips( regionLo, regionHi );
+        generateAnisotropicMips( nullptr, nullptr, true );
 
-        // (the total's levels exist under the specular SDF quality only: otherwise a no-op)
+        // (the total's levels exist under the specular SDF quality only: otherwise a no-op - whole, as at an injection)
         PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
 
         mBounceShaderParams->mParams.swap( mLocalBounceShaderParams );
 
         renderSystem->debugAnnotationPop();
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::dispatchFeedback( uint32 mode, const PhotonVoxelLighting *source,
+                                                const PhotonFeedbackActivation *activation, const int32 *shift )
+    {
+        RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
+        HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
+        HlmsComputeJob *job = mFeedbackJob;
+        // THE BINDINGS (the job is shared by name): this cascade's state, mask, list and arguments read-write; the
+        // source's list, state and arguments (ACCUM from an OUTER cascade) and the state before a SHIFT read-only. A
+        // slot a mode does not read is bound to this cascade's OTHER state buffer (a distinct buffer, read-only), never
+        // to one already bound read-write.
+        UavBufferPacked *other = mBrickState[mBrickStateCur ^ 1u];
+        const bool outer = mode == 3u && source && source != this;
+        UavBufferPacked *slots[8] = { mBrickState[mBrickStateCur],
+                                      mBrickBuffer,
+                                      mBrickList,
+                                      mBrickArgs,
+                                      outer ? source->mBrickList : other,
+                                      outer ? source->mBrickState[source->mBrickStateCur] : other,
+                                      outer ? source->mBrickArgs : other,
+                                      other };
+        for( uint8 k = 0u; k < 8u; ++k )
+        {
+            DescriptorSetUav::BufferSlot bufSlot = DescriptorSetUav::BufferSlot::makeEmpty();
+            bufSlot.buffer = slots[k];
+            bufSlot.offset = 0u;
+            bufSlot.sizeBytes = slots[k]->getTotalSizeBytes();
+            bufSlot.access = k < 4u ? ResourceAccess::ReadWrite : ResourceAccess::Read;
+            job->_setUavBuffer( k, bufSlot );
+        }
+        // THE PARAMETERS, written whole per dispatch (PhotonVoxelScroll::copyBox's rule).
+        const uint32 dims[4] = { mBrickDims[0], mBrickDims[1], mBrickDims[2], mode };
+        uint32 flags[4] = { 0u, 0u, 0u, 0u };
+        uint32 boxLo[4u * PhotonFeedbackActivation::kMaxBoxes] = {};
+        uint32 boxHi[4u * PhotonFeedbackActivation::kMaxBoxes] = {};
+        if( activation )
+        {
+            flags[0] = activation->all ? 1u : 0u;
+            flags[1] = std::min( activation->numBoxes, PhotonFeedbackActivation::kMaxBoxes );
+            for( uint32 b = 0u; b < flags[1]; ++b )
+                for( int a = 0; a < 3; ++a )
+                {
+                    boxLo[4u * b + a] = activation->lo[b][a];
+                    boxHi[4u * b + a] = activation->hi[b][a];
+                }
+        }
+        flags[2] = outer ? 1u : 0u;
+        flags[3] = mode == 3u && !outer ? 1u : 0u;
+        const PhotonVoxelLighting *src = source ? source : this;
+        const Vector3 selfOrigin = mVoxelizer->getVoxelOrigin();
+        const Vector3 srcOrigin = src->mVoxelizer->getVoxelOrigin();
+        const float self4[4] = { float( selfOrigin.x ), float( selfOrigin.y ), float( selfOrigin.z ),
+                                 8.0f * float( mVoxelizer->getVoxelCellSize().x ) };
+        const float src4[4] = { float( srcOrigin.x ), float( srcOrigin.y ), float( srcOrigin.z ),
+                                8.0f * float( src->mVoxelizer->getVoxelCellSize().x ) };
+        const uint32 srcDims[4] = { src->mBrickDims[0], src->mBrickDims[1], src->mBrickDims[2], 0u };
+        const int32 shift4[4] = { shift ? shift[0] : 0, shift ? shift[1] : 0, shift ? shift[2] : 0, 0 };
+        ShaderParams::Param pDims, pFlags, pLo, pHi, pSelf, pSrc, pSrcDims, pShift;
+        pDims.name = "fbDims";
+        pFlags.name = "fbFlags";
+        pLo.name = "fbBoxLo";
+        pHi.name = "fbBoxHi";
+        pSelf.name = "fbSelf";
+        pSrc.name = "fbSrc";
+        pSrcDims.name = "fbSrcDims";
+        pShift.name = "fbShift";
+        pDims.setManualValue( dims, 4u );
+        pFlags.setManualValue( flags, 4u );
+        pLo.setManualValue( boxLo, 4u * PhotonFeedbackActivation::kMaxBoxes );
+        pHi.setManualValue( boxHi, 4u * PhotonFeedbackActivation::kMaxBoxes );
+        pSelf.setManualValue( self4, 4u );
+        pSrc.setManualValue( src4, 4u );
+        pSrcDims.setManualValue( srcDims, 4u );
+        pShift.setManualValue( shift4, 4u );
+        ShaderParams &params = job->getShaderParams( "default" );
+        params.mParams.clear();
+        for( const ShaderParams::Param *p : { &pDims, &pFlags, &pLo, &pHi, &pSelf, &pSrc, &pSrcDims, &pShift } )
+            params.mParams.push_back( *p );
+        params.setDirty();
+        // ONE THREAD A BRICK, 64 a group along x.
+        const uint32 bricks = mBrickDims[0] * mBrickDims[1] * mBrickDims[2];
+        job->setNumThreadGroupsBasedOn( HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u );
+        job->setNumThreadGroups( std::max( 1u, ( bricks + 63u ) / 64u ), 1u, 1u );
+        jahshaka::engine::detail::photonDispatch( hlmsCompute, job, renderSystem );
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::beginLightFrame()
+    {
+        ensureBrickMask();
+        const uint64 frame = mVoxelizer->getRenderSystem()->getVaoManager()->getFrameCount();
+        if( frame == mBrickClearFrame )
+            return;
+        mBrickClearFrame = frame;
+        ++mBrickUpdates;
+        dispatchFeedback( 0u );   // CLEAR: this frame's mask and arguments
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::feedbackPass( const PhotonFeedbackActivation &activation )
+    {
+        beginLightFrame();
+        dispatchFeedback( 1u, nullptr, &activation );   // PRE: the activations and the list
+        runFeedbackPass();
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::feedbackAccumulate( const PhotonVoxelLighting *source )
+    {
+        if( !source || !source->mBrickArgs || !mBrickBuffer )
+            return;
+        dispatchFeedback( 3u, source );
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::feedbackEnd( uint64 frame )
+    {
+        dispatchFeedback( 2u );   // POST: the stop and resume rules
+        // THE COUNTS, read back without a wait (a ring; a frame whose reading finds every slot in flight is not read -
+        // a later one answers for it: the counts after a frame are the state's, cumulative in the host's books).
+        FeedbackTicket &r = mFeedbackReadings[mFeedbackNextIssue];
+        if( !r.ticket.get() )
+        {
+            r.ticket = mBrickArgs->readRequest( 0u, 16u, /*accurateTracking=*/false );
+            r.frame = frame;
+            r.vaoFrame = mVoxelizer->getRenderSystem()->getVaoManager()->getFrameCount();
+            mFeedbackNextIssue = ( mFeedbackNextIssue + 1u ) % kFeedbackReadingSlots;
+        }
+        requestBrickReading();   // the frame's mask (stage 3's door)
+    }
+    //-------------------------------------------------------------------------
+    bool PhotonVoxelLighting::takeFeedbackReading( PhotonFeedbackReading &out )
+    {
+        // TAKEN AT A FIXED LAG, NEVER "WHEN IT LANDED" (gi.walk L1/L2, PHOTON-7 stage 4): the host DECIDES on a reading
+        // (a cascade still owes passes; the chain's rest re-integrates the field and moves the lighting serial), and a
+        // reading polled for landing arrives 1 to 4 frames after its frame depending on the GPU's pace - so the rest fell
+        // on a different frame in another process. A reading is taken exactly when its frame is past the dynamic buffer
+        // multiplier: the VaoManager has then waited its fence (isFrameFinished's no-stall branch), so the take is a
+        // function of the frame count alone, and the map below never waits.
+        FeedbackTicket &r = mFeedbackReadings[mFeedbackNextTake];
+        if( !r.ticket.get() )
+            return false;
+        VaoManager *vao = mVoxelizer->getRenderSystem()->getVaoManager();
+        if( vao->getFrameCount() - r.vaoFrame <= vao->getDynamicBufferMultiplier() )
+            return false;
+        const uint32 *w = static_cast<const uint32 *>( r.ticket->map() );
+        out.frame = r.frame;
+        out.ran = w[8];
+        out.activeAfter = w[12];
+        out.stops = w[13];
+        out.resumes = w[14];
+        out.saturated = w[15];
+        r.ticket->unmap();
+        r.ticket.reset();
+        mFeedbackNextTake = ( mFeedbackNextTake + 1u ) % kFeedbackReadingSlots;
+        return true;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::shiftBrickState( const int32 shift[3] )
+    {
+        ensureBrickMask();
+        // SHIFT reads the current state (bound as the "other" slot after the swap) and writes the new one.
+        mBrickStateCur ^= 1u;
+        dispatchFeedback( 4u, nullptr, nullptr, shift );
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::resetBrickState()
+    {
+        ensureBrickMask();
+        std::vector<uint32> zeros( size_t( 8u ) * getNumBricks(), 0u );
+        for( UavBufferPacked *b : mBrickState )
+            b->upload( zeros.data(), 0u, zeros.size() );
+        mVoxelizer->getRenderSystem()->endCopyEncoder();
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::reserveExtraCascades( size_t numExtraCascades )
@@ -1245,7 +1410,7 @@ namespace Ogre
         mExtraCascades.push_back( cascade );
 
         // THE CHAIN DECIDES HOW MANY TEXTURES THE BOUNCE SHADER DECLARES, so the job has
-        // to be told the moment the chain grows. runBounce() sets
+        // to be told the moment the chain grows. runFeedbackPass() sets
         // hlms_num_vct_cascades from mExtraCascades.size() + 1 on every injection, and
         // the generated compute shader declares one light-voxel texture per cascade
         // (four with anisotropy) — but the job's TEXTURE UNIT COUNT and its bindings are
@@ -1426,14 +1591,13 @@ namespace Ogre
     //-------------------------------------------------------------------------
     bool PhotonVoxelLighting::getAllowMultipleBounces() const { return mLightBounce != 0; }
     //-------------------------------------------------------------------------
-    void PhotonVoxelLighting::update( SceneManager *sceneManager, uint32 numBounces, uint32 _lightMask )
+    void PhotonVoxelLighting::update( SceneManager *sceneManager, uint32 _lightMask )
     {
         checkTextures();
 
-        // THE BRICK MASK STARTS EMPTY (PHOTON-7 stage 3): this update's changes alone.
-        ensureBrickMask();
-        mBrickBuffer->upload( mBrickZeros.data(), 0u, mBrickZeros.size() );
-        ++mBrickUpdates;
+        // THE BRICK MASK STARTS EMPTY ONCE A FRAME (PHOTON-7 stages 3 and 4): the frame's changes - this injection's,
+        // any other of the frame's, and the feedback pass's after them.
+        beginLightFrame();
         {
             const uint32 dims[4] = { mBrickDims[0], mBrickDims[1], mBrickDims[2], 0u };
             mInjectBrickDims->setManualValue( dims, 4u );
@@ -1647,72 +1811,14 @@ namespace Ogre
             PhotonMipChain::generate( mVoxelizer->getHlmsManager(), renderSystem, mLightVoxel[0] );
         }
 
-        // Jahshaka (CONTACT-OCCLUSION-1, SKY-BOUNCE-1): THE SKY IS A LIGHT. Its direct term
-        // enters the store first - total = direct + rho * E_sky, E_sky the environment
-        // through the escape of each voxel's own cones (its sky visibility: a floor under
-        // a roof gets none) - and every bounce pass after it is the Jacobi step it always
-        // was: new = direct + rho * ( G_voxels( total ) + E_sky ), whose base is the lamps'
-        // direct volume, so the sky's term is counted ONCE whatever the pass count, and a
-        // sky-lit surface gets as many bounces as a lamp-lit one.
-        //
-        // Before this, the sky reached the store ONLY through a bounce pass's escaping
-        // cones, and a document asking for one bounce runs none: a white wall under the
-        // sky reflected NOTHING onto the floor beside it at High, Medium and Low
-        // (gi.contact_occlusion's arm B: white minus black exactly 0), and one pass behind
-        // at Epic. It is not a double count with a reader's own escape: a MISS reads the
-        // sky, a HIT reads the surface - and the surface's radiance includes the sky that
-        // lights it. It needs the bounce volumes (setAllowMultipleBounces) and an
-        // environment that carries light; a store without either is unchanged.
-        const bool skyPass = mStoreSkyLight && getAllowMultipleBounces() && hasEnvironmentLight();
-        // PHOTON-7 stage 2: at a scroll's commit the sky and the bounces are re-solved over THE SLAB AND ITS BOUNCE REACH
-        // only (setCommitLight) - the region's voxels from the sky's direct term up, the rest holding what the shift
-        // carried; elsewhere the whole volume.
-        const bool regionPasses = mCommit.on && mCommit.light.region;
-        // (an empty region - a cascade inside the committed one, re-injected as a delta - runs no pass)
-        const bool noPasses = regionPasses && ( mCommit.light.regionHi[0] <= mCommit.light.regionLo[0] ||
-                                                mCommit.light.regionHi[1] <= mCommit.light.regionLo[1] ||
-                                                mCommit.light.regionHi[2] <= mCommit.light.regionLo[2] );
-        const uint32 *passLo = regionPasses ? mCommit.light.regionLo : nullptr;
-        const uint32 *passHi = regionPasses ? mCommit.light.regionHi : nullptr;
-        // (the update's LAST pass marks the brick mask's word 1: the last bounce, else the sky's)
-        const bool bouncePasses = numBounces > 0u && !noPasses;
-        if( skyPass && !noPasses )
-        {
-            const InjectionPhase phase( mPhaseListener, Phase::Sky );
-            runBounce( true, passLo, passHi, !bouncePasses );
-        }
-
-        // Jahshaka (PHOTON-5 stage 5): THE BOUNCE ENERGY, when asked and none is in flight - the
-        // base's sum, then each pass's (setMeasureBounceEnergy).
-        const bool measure = mMeasureEnergy && numBounces > 0u && !mEnergyTicket.get() &&
-                             getAllowMultipleBounces();
-        if( measure )
-            dispatchEnergy( 0u );
-
-        if( numBounces > 0u && !noPasses )
-        {
-            if( !getAllowMultipleBounces() )
-            {
-                OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS,
-                             "numBounces must be 0, else call setAllowMultipleBounces first!",
-                             "PhotonVoxelLighting::update" );
-            }
-            const InjectionPhase phase( mPhaseListener, Phase::Bounce );
-            for( uint32 i = 0u; i < numBounces; ++i )
-            {
-                runBounce( false, passLo, passHi, i + 1u == numBounces );
-                if( measure )
-                    dispatchEnergy( i + 1u );
-            }
-        }
-        if( measure && mEnergyBuffer )
-        {
-            mEnergySums = numBounces + 1u;
-            mEnergyTicket = mEnergyBuffer->readRequest( 0u, size_t( mEnergySums ) * mEnergyStride,
-                                                        /*accurateTracking=*/false );
-        }
-
-        requestBrickReading();          // the brick mask read back without a wait (PHOTON-7 stage 3)
+        // NO BOUNCE RUNS HERE (PHOTON-7 stage 4): the total is never restarted from the direct term and re-solved - a
+        // delta keeps what the feedback built, a whole injection (a new placement) starts it from D, and the bricks
+        // whose direct term changed (the mask's word 0) resume the feedback's passes (feedbackPass), which converge the
+        // bounces and the sky's light - the escape of every pass - together. (The sky pass, the per-update Jacobi passes,
+        // their count and the energy measurement that chose it are deleted.)
+        // (the brick mask read back without a wait, PHOTON-7 stage 3: by the frame's feedback, or here when none runs)
+        if( !mFeedbackOn )
+            requestBrickReading();
         mCommit = CommitLightState();   // the commit's light shapes ONE update
 
         if( mDebugVoxelVisualizer )
@@ -1829,12 +1935,30 @@ namespace Ogre
         for( uint32 k = 0u; k < kBrickReadingSlots; ++k )
             mBrickReadings[k].ticket.reset();
         mBrickNextIssue = mBrickNextTake = 0u;
-        if( mBrickBuffer )
-            vaoManager->destroyUavBuffer( mBrickBuffer );
+        for( uint32 k = 0u; k < kFeedbackReadingSlots; ++k )
+            mFeedbackReadings[k].ticket.reset();
+        mFeedbackNextIssue = mFeedbackNextTake = 0u;
+        for( UavBufferPacked **b : { &mBrickBuffer, &mBrickState[0], &mBrickState[1], &mBrickList, &mBrickArgs } )
+        {
+            if( *b )
+                vaoManager->destroyUavBuffer( *b );
+            *b = nullptr;
+        }
         for( int a = 0; a < 3; ++a )
             mBrickDims[a] = dims[a];
-        mBrickZeros.assign( size_t( 2u ) * dims[0] * dims[1] * dims[2], 0u );
+        const size_t bricks = size_t( dims[0] ) * dims[1] * dims[2];
+        mBrickZeros.assign( size_t( 2u ) * bricks, 0u );
         mBrickBuffer = vaoManager->createUavBuffer( mBrickZeros.size(), sizeof( uint32 ), 0, mBrickZeros.data(), false );
+        // THE FEEDBACK'S BUFFERS (PHOTON-7 stage 4), created zeroed: every brick inactive with no sensitivity (a new
+        // volume's first injection activates them all: the host's whole activation), an empty list, empty arguments.
+        std::vector<uint32> zeros( size_t( 8u ) * bricks, 0u );
+        for( uint32 k = 0u; k < 2u; ++k )
+            mBrickState[k] = vaoManager->createUavBuffer( zeros.size(), sizeof( uint32 ), 0, zeros.data(), false );
+        mBrickStateCur = 0u;
+        mBrickList = vaoManager->createUavBuffer( std::max<size_t>( bricks, 1u ), sizeof( uint32 ), 0, zeros.data(), false );
+        const uint32 args[16] = { 8u, 0u, 1u, 0u, 1u, 0u, 1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
+        mBrickArgs = vaoManager->createUavBuffer( 16u, sizeof( uint32 ), 0, const_cast<uint32 *>( args ), false );
+        mBrickClearFrame = ~0ull;
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::requestBrickReading()
@@ -1891,9 +2015,10 @@ namespace Ogre
         mCommit.light.numInjectBoxes = std::min( commit->numInjectBoxes, PhotonCommitLight::kMaxInjectBoxes );
     }
     //-------------------------------------------------------------------------
-    bool PhotonVoxelLighting::takeCommitCount( uint32 &litInSlab, uint32 &litOutside, uint32 &injections )
+    bool PhotonVoxelLighting::takeCommitCount( uint32 &litInSlab, uint32 &litOutside, uint32 &injections,
+                                               uint32 &marched )
     {
-        litInSlab = litOutside = injections = 0u;
+        litInSlab = litOutside = injections = marched = 0u;
         if( !mCommitTicket.get() || !mCommitTicket->queryIsTransferDone() )
             return false;
         const uint32 *words = static_cast<const uint32 *>( mCommitTicket->map() );
@@ -1901,7 +2026,8 @@ namespace Ogre
         litInSlab = words[0] - mCommitSeen[0];    // x 0: the voxels outside the kept box (the slab)
         litOutside = words[1] - mCommitSeen[1];   // x 1: inside it (the changed direct set)
         injections = words[2] - mCommitSeen[2];   // x 2: the delta injections
-        for( int i = 0; i < 3; ++i )
+        marched = words[3] - mCommitSeen[3];      // x 3: the voxels the deltas marched (PHOTON-7 stage 4)
+        for( int i = 0; i < 4; ++i )
             mCommitSeen[i] = words[i];
         mCommitTicket->unmap();
         mCommitTicket.reset();
@@ -1911,17 +2037,6 @@ namespace Ogre
             mCommitDownloadOwed = false;
         }
         return true;
-    }
-    //-------------------------------------------------------------------------
-    uint32 PhotonVoxelLighting::regionReachCells() const
-    {
-        float4 invResMaxLod[c_maxCascades];
-        float4 fromPrev[c_maxCascades][2];
-        getCascadeChainParams( &invResMaxLod[0].x, mExtraCascades.empty() ? nullptr : &fromPrev[0][0].x );
-        const float maxLod = invResMaxLod[0].w;
-        if( !( maxLod < 64.0f ) )
-            return 0u;   // the outermost: its cones cross the whole box
-        return static_cast<uint32>( std::ceil( std::exp2( maxLod + 1.0f ) ) ) + 1u;
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::resetTexturesFromBuildRelative()
@@ -2169,18 +2284,6 @@ namespace Ogre
             memcpy( mEnvSh, sh, sizeof( mEnvSh ) );
         else
             memset( mEnvSh, 0, sizeof( mEnvSh ) );
-    }
-    //-------------------------------------------------------------------------
-    bool PhotonVoxelLighting::hasEnvironmentLight() const
-    {
-        if( mEnvCube )
-            return mEnvGain[0] > 0.0f || mEnvGain[1] > 0.0f || mEnvGain[2] > 0.0f;
-        for( size_t i = 0u; i < 27u; ++i )
-        {
-            if( mEnvSh[i] != 0.0f )
-                return true;
-        }
-        return false;
     }
     //-------------------------------------------------------------------------
     size_t PhotonVoxelLighting::scrollLightTextures( TextureGpu *out[7], bool halfRes[7] ) const

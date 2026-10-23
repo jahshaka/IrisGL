@@ -49,8 +49,9 @@ namespace Ogre
     class PhotonVoxelVisualizer;
     struct PhotonShaderVoxelLight;
 
-    /** THE COMMIT'S LIGHT (PHOTON-7 stage 2, AB S4/A7; PREFLIGHT_1_2 W1): what the next update() does at a scroll's
-        commit, after the store and the light were shifted in place.
+    /** THE DELTA'S LIGHT (PHOTON-7 stage 2, AB S4/A7; PREFLIGHT_1_2 W1; stage 4): what the next update() does when it
+        re-injects the direct term over a part of a volume whose light is kept - at a scroll's commit (after the store
+        and the light were shifted in place), in the cascades inside a committed one, and where a lamp changed.
         `delta`: the direct term is re-injected AS A DELTA - total += D_new - D_old and back += Db_new - Db_old (the
         direct terms written whole as always) - so the bounces the shifted total holds are kept and a voxel whose
         direct did not change keeps every bit; a slab voxel's old terms are the shift's zeros. The voxels written
@@ -58,12 +59,11 @@ namespace Ogre
         direct set: the band).
         `injectBoxes`: the direct term is computed over these boxes of cells only (each aligned to the injection's
         4^3 groups; they may overlap - a delta is idempotent): the committed cascade's CHANGED-DIRECT SET lies
-        within its own-cell march of the two faces a shift moved (the slab's side and the trailing face); none =
-        the whole volume (a cascade inside the committed one: its outer shells cross the committed cells anywhere).
-        `region`: the sky pass and the bounce passes run over the cells [regionLo, regionHi) only (the slab and
-        its bounce reach, aligned to 8 cells), each written into the bounce target and copied back, and the
-        directional levels regenerated over what covers the region.
-        Null: a whole injection (every other update). Cleared by the update it shapes. */
+        within its own-cell march of the two faces a shift moved (the slab's side and the trailing face); a cascade
+        inside it, within ITS march's reach of those faces; a lamp's, inside its old and new range spheres. None =
+        the whole volume. No bounce runs in an update: the bricks whose direct term changed resume the feedback
+        (PhotonBrickFeedback_cs.glsl).
+        Null: a whole injection (a new placement, a first build). Cleared by the update it shapes. */
     struct PhotonCommitLight
     {
         bool delta = false;
@@ -71,8 +71,26 @@ namespace Ogre
         static constexpr uint32 kMaxInjectBoxes = 6u;   ///< two faces per moved axis
         uint32 numInjectBoxes = 0u;
         uint32 injectLo[kMaxInjectBoxes][3] = {}, injectHi[kMaxInjectBoxes][3] = {};
-        bool region = false;
-        uint32 regionLo[3] = { 0u, 0u, 0u }, regionHi[3] = { 0u, 0u, 0u };
+    };
+
+    /** THE FEEDBACK'S ACTIVATIONS for one frame's pass (PHOTON-7 stage 4; PhotonVoxelLighting::feedbackPass): every
+        brick (`all`: a new placement, the sky or the sun changed), or the bricks [lo, hi) of up to kMaxBoxes boxes a
+        listed region meets - beside the bricks whose direct term an injection changed this frame (the mask's own
+        word, always). */
+    struct PhotonFeedbackActivation
+    {
+        bool all = false;
+        static constexpr uint32 kMaxBoxes = 16u;
+        uint32 numBoxes = 0u;
+        uint32 lo[kMaxBoxes][3] = {}, hi[kMaxBoxes][3] = {};
+    };
+    /// ONE LANDED READING OF THE FEEDBACK'S COUNTS (PhotonVoxelLighting::takeFeedbackReading): the frame it was taken in
+    /// (the host's number), the bricks the frame's pass ran, those active after it, its stops and resumes, and the
+    /// bricks whose pass count saturated (255: a door for a brick that never stops, never a stop condition).
+    struct PhotonFeedbackReading
+    {
+        uint64 frame = 0u;
+        uint32 ran = 0u, activeAfter = 0u, stops = 0u, resumes = 0u, saturated = 0u;
     };
 
     class PhotonVoxelLighting : public IdObject, public TextureGpuListener
@@ -151,19 +169,35 @@ namespace Ogre
         /// every reader had to be rebound).
         TextureGpu     *mLightBounce;
 
-        /// Jahshaka (PHOTON-5 stage 5): THE BOUNCE ENERGY - the light volume's sum after the base
-        /// (the injection and the sky pass) and after each bounce pass, one range of per-workgroup
-        /// partials per sum in mEnergyBuffer, read back through mEnergyTicket (see
-        /// setMeasureBounceEnergy). The job is shared by name ("Photon/VoxelEnergy"), its bindings
-        /// asserted per dispatch.
-        bool              mMeasureEnergy = false;
-        HlmsComputeJob   *mEnergyJob = nullptr;
-        UavBufferPacked  *mEnergyBuffer = nullptr;
-        AsyncTicketPtr    mEnergyTicket;
-        uint32            mEnergyGroups = 0u;     ///< partials per sum (the workgroups of one dispatch)
-        uint32            mEnergyStride = 0u;     ///< floats between two sums' ranges (aligned)
-        uint32            mEnergySums = 0u;       ///< sums the ticket in flight holds
-        void              dispatchEnergy( uint32 slot );
+        /// THE FEEDBACK (PHOTON-7 stage 4; PhotonBrickFeedback_cs.glsl): the bricks' solver state (8 words a brick, two
+        /// buffers - a scroll commit's SHIFT reads one and writes the other), the frame's list of ACTIVE bricks, the
+        /// indirect arguments and counts (16 words), their read-backs (a ring, never waited on), the two jobs (shared by
+        /// name, their bindings asserted per dispatch) and the frame the mask and the arguments were last cleared in.
+        HlmsComputeJob   *mFeedbackJob = nullptr;
+        HlmsComputeJob   *mFeedbackCopyJob = nullptr;
+        UavBufferPacked  *mBrickState[2] = { nullptr, nullptr };
+        uint32            mBrickStateCur = 0u;
+        UavBufferPacked  *mBrickList = nullptr;
+        UavBufferPacked  *mBrickArgs = nullptr;
+        struct FeedbackTicket
+        {
+            AsyncTicketPtr ticket;
+            uint64 frame = 0u;
+            /// the VaoManager's frame count it was issued in: the reading is TAKEN a fixed count of frames later
+            uint32 vaoFrame = 0u;
+        };
+        /// (the readings in flight: the take's lag - the dynamic buffer multiplier + 1 - and one spare)
+        static constexpr uint32 kFeedbackReadingSlots = 8u;
+        FeedbackTicket    mFeedbackReadings[kFeedbackReadingSlots];
+        uint32            mFeedbackNextIssue = 0u, mFeedbackNextTake = 0u;
+        uint64            mBrickClearFrame = ~0ull;
+        bool              mFeedbackOn = true;
+        /// One dispatch of the feedback job in `mode` (PhotonBrickFeedback_cs.glsl), one thread per brick unless the
+        /// mode says otherwise; `source` and `activation` for ACCUM and PRE, `shift` for SHIFT.
+        void dispatchFeedback( uint32 mode, const PhotonVoxelLighting *source = nullptr,
+                               const PhotonFeedbackActivation *activation = nullptr, const int32 *shift = nullptr );
+        /// The frame's brick mask and arguments, cleared once a frame before the first light work that writes them.
+        void beginLightFrame();
 
         /// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): THE DIRECT TERM, KEPT.
         ///
@@ -185,8 +219,6 @@ namespace Ogre
         /// exactly as long as mLightBounce does (see setAllowMultipleBounces): a
         /// volume that cannot bounce has no use for it.
         TextureGpu *mLightDirect;
-        /// setStoreSkyLight (BOUNCES-ZERO-1).
-        bool mStoreSkyLight = true;
         /// Jahshaka (PHOTON-VOXEL-5), with a bounce: the BACK side's direct
         /// term and the directional level 0's direct part per axis (float like mLightDirect and
         /// the total since CONTACT-OCCLUSION-1 - an emitter exceeds the lamps' ceiling; level 0 only; both signs packed along x like mLightVoxel[1..3]) - what
@@ -208,12 +240,12 @@ namespace Ogre
         UavBufferPacked *mCommitCountBuf = nullptr;    ///< four words, cumulative (created zeroed)
         AsyncTicketPtr   mCommitTicket;                ///< the read-back in flight
         bool             mCommitDownloadOwed = false;  ///< a delta injection ran while a read-back was in flight
-        uint32           mCommitSeen[3] = { 0u, 0u, 0u };   ///< the counter's words at the last landed reading
+        uint32           mCommitSeen[4] = { 0u, 0u, 0u, 0u };   ///< the counter's words at the last landed reading
         /// THE BRICK MASK (PHOTON-7 stage 3; GiBrickMask): two words per 8^3 brick of this cascade's cells - [0] the most
-        /// a voxel's direct term changed in the update's injection, [1] the most its last pass (the sky's or a bounce's)
-        /// moved the total - each the float bits of a relative change (LightInjection_cs.glsl's jahBrickChange), cleared
-        /// at every update() and read back without a wait through a ring of tickets (an update whose reading finds every
-        /// slot in flight is counted, not read).
+        /// a voxel's direct term changed in the frame's injections, [1] the most the frame's feedback pass moved the
+        /// total (PHOTON-7 stage 4: the per-brick change) - each the float bits of a relative change
+        /// (LightInjection_cs.glsl's jahBrickChange), cleared once a frame (beginLightFrame) and read back without a wait
+        /// through a ring of tickets (a frame whose reading finds every slot in flight is counted, not read).
         UavBufferPacked *mBrickBuffer = nullptr;
         uint32 mBrickDims[3] = { 0u, 0u, 0u };
         std::vector<uint32> mBrickZeros;
@@ -291,7 +323,6 @@ namespace Ogre
         ShaderParams::Param *mBounceFromPreviousProbeToNext;  ///< Used when cascades > 1
         ShaderParams::Param *mBounceEnvGainMips;  ///< Jahshaka (PHOTON-ENV-1): rgb gain (radiance), w mips
         ShaderParams::Param *mBounceEnvSh;        ///< Jahshaka (PHOTON-ENV-1): nine float4 (radiance)
-        ShaderParams::Param *mBounceRegionOrigin = nullptr;   ///< PHOTON-7 stage 2: a region pass's first cell
         ShaderParams        *mBounceShaderParams;
 
         ResourceTransitionArray mResourceTransitions;
@@ -346,30 +377,20 @@ namespace Ogre
         void setupGlslTextureUnits();
 
         /// The directional levels from level 0 (step 0 with a bounce, then step 1 per level) - over the cells
-        /// [regionLo, regionHi) of level 0 and what covers them at every coarser level (PHOTON-7 stage 2), or whole.
-        void generateAnisotropicMips( const uint32 *regionLo = nullptr, const uint32 *regionHi = nullptr );
+        /// [regionLo, regionHi) of level 0 and what covers them at every coarser level (PHOTON-7 stage 2), or whole;
+        /// or (`brickList`, PHOTON-7 stage 4) over the feedback's listed bricks, an indirect dispatch per level.
+        void generateAnisotropicMips( const uint32 *regionLo = nullptr, const uint32 *regionHi = nullptr,
+                                      bool brickList = false );
 
-        /// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): the pass index is gone with the per-iteration
-        /// dampening it fed (upstream's commented-out 1 / ( pi * ( n/2 + 1 ) )).
-        /// Every pass of a Jacobi iteration is the same operator; nothing about it
-        /// depends on which pass it is.
-        ///
-        /// Jahshaka (CONTACT-OCCLUSION-1, SKY-BOUNCE-1): `envOnly` runs the same pass with
-        /// the voxels' share of the gather left out - new = direct + rho * E_sky, the
-        /// ENVIRONMENT'S DIRECT TERM at every voxel (the sky through the escape of the
-        /// voxel's own cones: its visibility). update() runs it first, whenever an
-        /// environment carries light, so the sky is a light like any lamp: a surface it
-        /// lights re-emits albedo x its sky irradiance at EVERY bounce count, where it
-        /// used to exist only from the second bounce on (and not at all at one).
-        /// PHOTON-7 stage 2: over the cells [regionLo, regionHi) only (aligned to 8 cells), or whole - written into
-        /// mLightBounce and that region copied back into the total.
-        void runBounce( bool envOnly = false, const uint32 *regionLo = nullptr, const uint32 *regionHi = nullptr,
-                        bool markBricks = false );
+        /// THE FEEDBACK'S BOUNCE PASS (PHOTON-7 stage 4): new = direct + rho * ( G( total ) + the sky in the cones'
+        /// escape ) over the frame's ACTIVE bricks only (an indirect dispatch, 8 groups of 4^3 a brick), from the
+        /// CURRENT total, written into mLightBounce and copied back over the same bricks (in place would race: the
+        /// hashes would stop being reproducible), the directional levels regenerated over them. JAHSHAKA fork
+        /// ae2ed529f+155a56bf8 (was 0076): every pass is the same operator - no pass index, no dampening.
+        void runFeedbackPass();
         /// The injection job's UAV slots, its slot count and its two properties, as update() dispatches it - the
         /// delta's (a scroll's commit: four slots read-write, the counter last) or a whole injection's.
         void bindInjectionUavs( bool delta );
-        /// True when the environment setEnvironment was handed carries any light.
-        bool hasEnvironmentLight() const;
 
     public:
         /// `chainOfOne`: the scene's cascade chain is this one cascade (the specular SDF skip's
@@ -389,17 +410,8 @@ namespace Ogre
         /// with extra info
         void addCascade( PhotonVoxelLighting *cascade );
 
-        /** This function allows PhotonVoxelLighting::update to pass numBounces > 0 as argument.
-            Note however, that multiple bounces requires creating another RGBA32_UNORM texture
-            of the same resolution as the voxel texture.
-
-            This can cause increase memory consumption.
-        @remarks
-            It is valid to call setAllowMultipleBounces( false ) right after calling
-            update( sceneManager, numBounces > 0 ) in order to release the extra memory.
-
-            However remember to call setAllowMultipleBounces( true ) before calling update()
-            again with numBounces > 0.
+        /** The bounce volumes: the feedback pass's target and the direct terms a delta injection replaces (PHOTON-7
+            stages 2 and 4) - created here, the size of the light volume each. Every cascade of a chain holds them.
         @param bAllowMultipleBounces
             True to allow multiple bounces, and consume more memory.
             False to no longer allow multiple bounces, and release memory.
@@ -407,12 +419,11 @@ namespace Ogre
         void setAllowMultipleBounces( bool bAllowMultipleBounces );
         bool getAllowMultipleBounces() const;
 
-        /// Jahshaka (BOUNCES-ZERO-1): whether update() stores the SKY's light on the surfaces
-        /// (the sky pass). True by default: the sky is a light like any lamp. False is the
-        /// document's numBounces 0 - THE DIRECT STORE ALONE: the lamps' direct light and
-        /// nothing a surface re-emits of the sky or of another surface.
-        void setStoreSkyLight( bool on ) { mStoreSkyLight = on; }
-        bool getStoreSkyLight() const { return mStoreSkyLight; }
+        /// Jahshaka (BOUNCES-ZERO-1; PHOTON-7 stage 4): whether this volume's bounces run (the feedback). Off is the
+        /// document's bounces off - THE DIRECT STORE ALONE: the lamps' direct light and nothing a surface re-emits of
+        /// the sky or of another surface (no pass ever runs, and update() reads the brick mask back itself).
+        void setFeedbackOn( bool on ) { mFeedbackOn = on; }
+        bool getFeedbackOn() const { return mFeedbackOn; }
 
         /// THE LIGHT SLOTS (P1C-LIGHT-LIST): the const buffer and LightInjection_piece_cs's
         /// array (vct_light_budget) hold kLightSlots lights in every cascade.
@@ -442,17 +453,35 @@ namespace Ogre
         uint64 getInjectionsOverSlots() const { return mInjectionsOverSlots; }
         uint32 getLightCapacity() const { return mLightBudget; }
 
-        /**
-        @param sceneManager
-        @param numBounces
-            Number of GI bounces. This value must be 0 if getAllowMultipleBounces() == false
-        @param lightMask
+        /** THE DIRECT TERM'S INJECTION (PHOTON-7 stage 4: never a bounce - the feedback converges those): whole
+            (total := D, a new placement) or, under setCommitLight, a DELTA over its boxes (total += D_new - D_old),
+            then the directional levels and the mip chains.
         @remarks
             Jahshaka (PHOTON-VOXEL-5): the injection's shadow march is exact - a 3D-DDA over
             the level-0 voxels from each half's face - so upstream's thinWallCounter and
             rayMarchStepScale (a stepped march's wall counter and step length) are gone.
         */
-        void update( SceneManager *sceneManager, uint32 numBounces, uint32 lightMask = 0xffffffff );
+        void update( SceneManager *sceneManager, uint32 lightMask = 0xffffffff );
+
+        /** THE FEEDBACK, ONE FRAME (PHOTON-7 stage 4; PhotonBrickFeedback_cs.glsl). The host calls, per frame, for every
+            cascade that owes it, outermost first: feedbackPass (the activations, the list of active bricks, the bounce
+            pass over them, the copy-back, the directional levels), then - after every cascade's pass - feedbackAccumulate
+            once with this cascade as the source and once per OUTER cascade that ran a pass this frame (what their moves
+            could move this cascade's stopped bricks by), then feedbackEnd (the stop and resume rules, the read-backs).
+            The host has set the environment the pass's escapes read (setEnvironment). */
+        void feedbackPass( const PhotonFeedbackActivation &activation );
+        void feedbackAccumulate( const PhotonVoxelLighting *source );
+        void feedbackEnd( uint64 frame );
+        /** A SCROLL COMMIT'S STATE (PHOTON-7 stage 4): the store moved so that the new cell n holds the old cell n +
+            shift; every brick's state takes the old bricks its cells came from (merged conservatively), and a brick the
+            shift brought in starts fresh and active. Called after the store's shift, before the commit's injection. */
+        void shiftBrickState( const int32 shift[3] );
+        /// A NEW PLACEMENT'S STATE (a whole build): every brick fresh (the host activates them all at its next pass).
+        void resetBrickState();
+        /// The oldest reading of the feedback's counts, taken once its frame is past the frame fences (a fixed lag of
+        /// the dynamic buffer multiplier + 1 frames: the host decides on it, so it never depends on the GPU's pace);
+        /// false while none is that old.
+        bool takeFeedbackReading( PhotonFeedbackReading &out );
 
         /// THE COMMIT'S LIGHT for the next update() (PhotonCommitLight); null a whole injection.
         void setCommitLight( const PhotonCommitLight *commit );
@@ -463,7 +492,7 @@ namespace Ogre
             `origin` the box corner the update ran at. False while none has landed. */
         bool takeBrickReading( std::vector<uint32> &words, Vector3 &origin, uint32 dims[3] );
         uint32 getNumBricks() const { return mBrickDims[0] * mBrickDims[1] * mBrickDims[2]; }
-        /// Updates that wrote a mask, and those whose reading was skipped (every slot in flight).
+        /// Frames that wrote a mask, and those whose reading was skipped (every slot in flight).
         uint64 getBrickUpdates() const { return mBrickUpdates; }
         uint64 getBrickReadingsSkipped() const { return mBrickReadingsSkipped; }
         /// Is the delta injection's shader built (never compiled in the frame: a permutation not built is handed to the
@@ -471,25 +500,20 @@ namespace Ogre
         bool commitLightReady();
         /// THE DELTA INJECTIONS' COUNTS since the last reading that landed (never a wait; the counter on the device is
         /// cumulative, so no injection's count is lost to a read-back in flight): voxels lit outside the kept box (the
-        /// slab), inside it (the changed direct set) and the injections. False while no new reading landed.
-        bool takeCommitCount( uint32 &litInSlab, uint32 &litOutside, uint32 &injections );
-        /// THE BOUNCE REACH in cells (PHOTON-7 stage 2): how far from a changed voxel a bounce pass of THIS cascade
-        /// gathers it - a cone reads until it hands over at the chain's max level, a footprint of 2^(maxLod + 1)
-        /// cells at most, plus the cell itself; the outermost cascade's cones cross its whole box (0 = whole).
-        uint32 regionReachCells() const;
+        /// slab), inside it (the changed direct set), the injections and (PHOTON-7 stage 4) the voxels MARCHED - every
+        /// voxel a delta computed, changed or not. False while no new reading landed.
+        bool takeCommitCount( uint32 &litInSlab, uint32 &litOutside, uint32 &injections, uint32 &marched );
 
         /// THE INJECTION'S PARTS, NAMED AS THEY ARE RECORDED (PHOTON-7 stage 1, the split rows): a
         /// host that times an injection hands a listener, and update() opens each part before it
         /// records it and closes it after - the direct term's dispatch, the directional levels and
-        /// the mip chains after it, the sky pass, the bounce passes (each with its own levels). A
-        /// host files each as a row of its own (PhotonComponent::injectCascade: vct.inject.*N),
-        /// which is how a cascade's light tick is priced part by part. Null: nothing is named.
+        /// the mip chains after it. A host files each as a row of its own (PhotonComponent::injectCascade:
+        /// vct.inject.*N), which is how an injection is priced part by part. Null: nothing is named. (The sky
+        /// pass and the bounce passes left update() with PHOTON-7 stage 4: the feedback's pass is its own row.)
         enum class Phase
         {
             Direct,
-            Mips,
-            Sky,
-            Bounce
+            Mips
         };
         class PhaseListener
         {
@@ -600,10 +624,9 @@ namespace Ogre
             upstream's setAmbient hemisphere pair, which the pixel shader used to add
             wherever a cone escaped: the pixel shader now reads the environment itself
             (the host binds the cube per pass), and this class keeps only what its own
-            BOUNCE job needs - the sky enters the voxels once per injection, as what the
-            escaping cones of the sky pass and of every bounce pass see (update(): the
-            sky pass writes the sky's direct term, the bounce passes build on the lamps'
-            direct volume, so the sky is counted once and bounced like a lamp).
+            BOUNCE job needs - the sky enters the voxels as what the escaping cones of every
+            feedback pass see, on the lamps' direct volume (PHOTON-7 stage 4), so the sky is
+            counted once and bounced like a lamp.
         @param cube
             The disc-free, GGX-prefiltered environment cube, or null (no sky: the SH
             below is the whole environment). Not owned; the host keeps it alive and
@@ -657,19 +680,6 @@ namespace Ogre
         uint32       positionIndex( uint32 h ) const { return 6u + h; }
 
         const HlmsSamplerblock *getBindTrilinearSamplerblock() { return mSamplerblockTrilinear; }
-
-        /// Jahshaka (PHOTON-5 stage 5): THE BOUNCE ENERGY. With measuring on, the next update() that
-        /// runs bounce passes sums the light volume after its base (the injection and the sky pass)
-        /// and after every pass and requests the sums' read-back on the frame's own submission -
-        /// nothing waits. The series is Jacobi (new = direct + rho G( total )), so sum[k] - sum[k - 1]
-        /// is the energy pass k ADDED, and the ratio of two increments is the series' contraction.
-        /// No new reading is requested while one is in flight.
-        void setMeasureBounceEnergy( bool on ) { mMeasureEnergy = on; }
-        bool bounceEnergyInFlight() const { return mEnergyTicket.get() != 0; }
-        /** Takes the reading in flight: sums[0] the base, sums[k] after pass k. Call it once the
-            frame that recorded it is at least the VaoManager's dynamic-buffer multiplier old: the
-            device has finished that frame by then, so the map never waits. False when none. */
-        bool takeBounceEnergy( std::vector<double> &sums );
 
         const PhotonVoxelizerSourceBase *getVoxelizer() const { return mVoxelizer; }
 

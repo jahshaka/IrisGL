@@ -41,11 +41,10 @@
 	// THE ONE ENVIRONMENT (Jahshaka, PHOTON-ENV-1; jah_environment.glsl, wrapped
 	// into the piece JahEnvironment): what an escaping cone sees. The sky enters the
 	// store HERE and only here, as the light the escaping cones bring to the voxel they
-	// leave: the SKY PASS first (jah_env_only, run by VctLighting::update at every bounce
-	// count, CONTACT-OCCLUSION-1) writes the sky's direct term, and every bounce pass after
-	// it builds on the lamps' direct volume, so a pixel's own escape (the sky it sees) and
-	// a hit on the store (the surface's sky-lit radiance) never count it twice. The gain and the SH arrive as
-	// radiance, the store's own units (PHOTON-7 stage 1), like the cone's own colour.
+	// leave - IN THE ESCAPE OF EVERY PASS (PHOTON-7 stage 4: the separate sky pass is deleted; the feedback's
+	// passes converge the sky's light with every other bounce), always on the lamps' direct volume, so a pixel's own
+	// escape (the sky it sees) and a hit on the store (the surface's sky-lit radiance) never count it twice. The gain
+	// and the SH arrive as radiance, the store's own units (PHOTON-7 stage 1), like the cone's own colour.
 	@property( jah_env )
 		#define JAH_ENV_CUBE_ON true
 		#define JAH_ENV_SAMPLE( d, l ) OGRE_SampleLevel( envCube, vctProbeSampler, d, l ).xyz
@@ -112,20 +111,14 @@
 		}
 
 		// Jahshaka (CONTACT-OCCLUSION-1): the sky's share on the finer sky set
-		// (jahSkyShareFine). The SKY PASS (VctLighting::update runs it first, jah_env_only)
-		// gathers that alone - the sky's direct term; every other pass adds the voxels'
-		// share on the pixel's own cone set, which the sky pass does not march at all.
+		// (jahSkyShareFine) - the escape's; the voxels' share on the pixel's own cone set.
 		const float3 envD =
 			jahSkyShareFine( posLS, jahConeOrigin( posLS, normalLS ), jahConeBasisWorld( nWorld ) );
-		@property( jah_env_only )
-			outDiffuse.xyz = envD;
-		@else
-			float3 light;
-			float3 envCoarse;
-			jahDiffuseCones( posLS, jahConeOrigin( posLS, normalLS ), jahConeBasisWorld( nWorld ), light,
-							 envCoarse );
-			outDiffuse.xyz = light + envD;
-		@end
+		float3 light;
+		float3 envCoarse;
+		jahDiffuseCones( posLS, jahConeOrigin( posLS, normalLS ), jahConeBasisWorld( nWorld ), light,
+						 envCoarse );
+		outDiffuse.xyz = light + envD;
 	}
 
 	@insertpiece( DeclSRgbFuncs )
@@ -152,8 +145,13 @@
 //in uint  gl_LocalInvocationIndex;
 
 @piece( BodyCS )
-	// THE PASS'S CELL (PHOTON-7 stage 2): a region pass starts at p_regionOrigin (a whole pass at 0).
-	const uint3 jahCell = gl_GlobalInvocationID.xyz + p_regionOrigin.xyz;
+	// THE PASS'S CELL (PHOTON-7 stage 4): an ACTIVE brick's (the feedback's list, 8 groups of 4^3 a brick: group y the
+	// brick, x its octant).
+	const uint jahPacked = jahFbList[gl_WorkGroupID.y];
+	const uint3 jahBrick = uint3( jahPacked & 1023u, ( jahPacked >> 10u ) & 1023u, jahPacked >> 20u );
+	const uint jahSub = gl_WorkGroupID.x;
+	const uint3 jahCell = jahBrick * 8u + uint3( jahSub & 1u, ( jahSub >> 1u ) & 1u, jahSub >> 2u ) * 4u +
+						  gl_LocalInvocationID.xyz;
 	float3 voxelUvwPos = p_invVoxelResolution * (float3( jahCell ) + 0.5f);
 
 	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, jahCell, 0 );
@@ -179,6 +177,8 @@
 	// the accumulating form did.
 	float4 currentLight = OGRE_Load3D( directVoxel, jahCell, 0 );
 	float4 backLight = OGRE_Load3D( directBackVoxel, jahCell, 0 );
+	// what this voxel re-emits of what it gathers (0 where nothing is): the feedback's sensitivity, below
+	float3 jahReemit = float3( 0, 0, 0 );
 
 	if( anyInvocationARB( albedoVal.a > 0 ) )
 	{
@@ -230,31 +230,54 @@
 		}
 		currentLight.xyz += reemit * ( 0.5f * ( vctDiffuse + vctDiffuseBack ) );
 		backLight.xyz += reemit * vctDiffuseBack;
+		jahReemit = reemit;
 	}
 
 	wshort3 voxelCelUvw = wshort3( jahCell );
 	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( currentLight ) );  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
 	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, float4( backLight.xyz, currentLight.w ) );
-	// THE BRICK MASK, word 1 (PHOTON-7 stage 3): on the update's LAST pass, how far this pass moved the voxel's total -
-	// the total it gathered from (the previous iterate, a linear read) against what it writes (the float the store
-	// rounds: within its half-ulp, 1/40 of a code) - the group's most, then one atomic per group. The condition is the
-	// dispatch's (a uniform): the barriers stay in uniform control flow.
-	if( p_brickMark.x != 0u )
+	// THE PASS'S MOVE (PHOTON-7 stage 3's word 1, stage 4's feedback): the total it gathered from (the current one, a
+	// linear read) against what the STORE now holds - read back by this invocation (program order: the store's own
+	// rounding, never a conversion of ours), so a voxel at the float store's fixed point moves by exactly 0. Per
+	// brick the most relative move (the mask, codes), the most absolute move and the sensitivity - the re-emission over
+	// the voxel's own code, per channel (the state) - each the group's most, then one atomic per group. Every invocation
+	// of a group is in one brick and reaches the barriers (the list's bricks are whole).
+	const float3 jahOld = OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz;
+	const float3 jahNew = imageLoad( lightVoxel, int3( jahCell ) ).xyz;
+	const float jahMoved = jahBrickChange( jahOld, jahNew );
+	const float3 jahAbs3 = abs( jahNew - jahOld );
+	float jahAbs = max( max( jahAbs3.x, jahAbs3.y ), jahAbs3.z );
+	if( ( floatBitsToUint( jahAbs ) & 0x7F800000u ) == 0x7F800000u )
+		jahAbs = 1.0e30;
+	const float3 jahCode = 0.01 * max( abs( jahNew ), float3( 5.9604645e-6, 5.9604645e-6, 5.9604645e-6 ) );
+	const float3 jahSens3 = jahReemit / jahCode;
+	float jahSens = max( max( jahSens3.x, jahSens3.y ), jahSens3.z );
+	if( !( jahSens < 1.0e30 ) )
+		jahSens = jahReemit.x + jahReemit.y + jahReemit.z > 0.0 ? 1.0e30 : 0.0;
+	if( gl_LocalInvocationIndex == 0u )
 	{
-		const float jahMoved = jahBrickChange( OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz, currentLight.xyz );
-		if( gl_LocalInvocationIndex == 0u )
-			jahBrickShared = 0u;
-		memoryBarrierShared();
-		barrier();
-		if( jahMoved > 0.0f )
-			atomicMax( jahBrickShared, floatBitsToUint( jahMoved ) );
-		memoryBarrierShared();
-		barrier();
-		if( gl_LocalInvocationIndex == 0u && jahBrickShared != 0u )
-		{
-			const uint3 jahBrick = jahCell >> 3u;
-			atomicMax( jahBrickMask[2u * ( jahBrick.x + p_brickMark.y * ( jahBrick.y + p_brickMark.z * jahBrick.z ) ) + 1u],
-					   jahBrickShared );
-		}
+		jahBrickShared = 0u;
+		jahAbsShared = 0u;
+		jahSensShared = 0u;
+	}
+	memoryBarrierShared();
+	barrier();
+	if( jahMoved > 0.0f )
+		atomicMax( jahBrickShared, floatBitsToUint( jahMoved ) );
+	if( jahAbs > 0.0f )
+		atomicMax( jahAbsShared, floatBitsToUint( jahAbs ) );
+	if( jahSens > 0.0f )
+		atomicMax( jahSensShared, floatBitsToUint( jahSens ) );
+	memoryBarrierShared();
+	barrier();
+	if( gl_LocalInvocationIndex == 0u )
+	{
+		const uint jahIdx = jahBrick.x + p_brickMark.y * ( jahBrick.y + p_brickMark.z * jahBrick.z );
+		if( jahBrickShared != 0u )
+			atomicMax( jahBrickMask[2u * jahIdx + 1u], jahBrickShared );
+		if( jahAbsShared != 0u )
+			atomicMax( jahFbState[8u * jahIdx + 4u], jahAbsShared );
+		if( jahSensShared != 0u )
+			atomicMax( jahFbState[8u * jahIdx + 5u], jahSensShared );
 	}
 @end

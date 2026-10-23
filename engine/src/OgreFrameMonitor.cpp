@@ -1222,6 +1222,10 @@ constexpr ArmDef kArms[] = {
       "A TEST DOOR (PHOTON-7 stage 2's read D1, gi.scroll_slab case D): while set to N, cascade N's directional "
       "volumes - every level - are regenerated whole from its level-0 light as it stands (step 0 and step 1), every "
       "frame, nothing else written: a commit's own levels must already equal them. -1 = none." },
+    { ArmId::GiBounceJacobi, 0.0, 0.0, 1.0,
+      "A MEASURING DOOR (PHOTON-7 stage 4, gi.bounce_series): the bounces' JACOBI REFERENCE - on the frame the arm comes "
+      "on every cascade's total is restarted from its direct term (a whole injection), and every frame while it is set "
+      "EVERY brick runs the feedback's pass (no stop): N frames set = N Jacobi passes from the direct term. 0 = shipped." },
     { ArmId::ShadowCasterCull, 1.0, 0.0, 1.0,
       "THE CASTER CULL BY THE LIGHT'S OWN DEPTH (ENGINE-UPGRADE-U5 stage 4): 1 = shipped, a sun map's Atom "
       "casters are tested against the previous frame's depth pyramid of that map, the rejected tested again "
@@ -1237,9 +1241,6 @@ constexpr ArmDef kArms[] = {
       "against the map's final depth pyramid and counted (world.atomStatus casterPerMap: pbsInstances / "
       "pbsTriangles in the frustum, pbsVisible* the ones not wholly behind the map's depth). Nothing is "
       "drawn differently." },
-    { ArmId::GiRebuildSettle, 1.0, 0.0, 1.0,
-      "The rebuild settle (the chain's owed settle steps after a rebuild). 0 = off: "
-      "gi.chain_converge's paired arm. Was JAHSHAKA_GI_NO_REBUILD_SETTLE (a per-frame read)." },
     { ArmId::GiFieldRays, 0.0, 0.0, 7.0,
       "The irradiance field's rays per depth texel at its next build (1-7; 0 = the shipped count). "
       "gi.field_thin_wall's noise arms. Was JAHSHAKA_GI_FIELD_RAYS (a per-build read)." },

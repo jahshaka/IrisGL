@@ -75,15 +75,22 @@ vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelMetalTex;
 
 vulkan( layout( ogre_s2 ) uniform sampler vctProbeSampler );
 
+// PHOTON-7 stage 4: READ-WRITE - the pass reads back what it wrote (the store's own rounding), so a voxel at the
+// float store's fixed point moves by exactly 0 and its brick can stop (PhotonBrickFeedback_cs.glsl).
 layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
-uniform restrict writeonly image3D lightVoxel;
+uniform restrict image3D lightVoxel;
 // Jahshaka (PHOTON-VOXEL-5): the back side's total, written in place (no reader of this job reads
 // it: the march's level-0 read here takes the sides' mean).
 layout( vulkan( ogre_u1 ) vk_comma rgba16f )
 uniform restrict writeonly image3D backVoxel;
-// PHOTON-7 stage 3, THE BRICK MASK (LightInjection_cs.glsl's buffer, word [1] of a brick): the most the update's LAST pass
-// moved a voxel's total - the solver's residual where it stops - max-reduced per 8^3 brick.
+// PHOTON-7 stage 3, THE BRICK MASK (LightInjection_cs.glsl's buffer, word [1] of a brick): the most this frame's pass
+// moved a voxel's total (relative), max-reduced per 8^3 brick - the feedback's per-brick change (stage 4).
 layout( std430, ogre_U2 ) restrict coherent buffer jahBrickLayout { uint jahBrickMask[]; };
+// PHOTON-7 stage 4, THE FEEDBACK (PhotonBrickFeedback_cs.glsl): the ACTIVE bricks this pass covers (8 groups of 4^3 a
+// brick, an indirect dispatch), and their state - words 4 (the most a voxel's total moved, absolute) and 5 (the brick's
+// sensitivity: its voxels' re-emission over their own code) written here.
+layout( std430, ogre_U3 ) restrict readonly buffer jahFbListLayout { uint jahFbList[]; };
+layout( std430, ogre_U4 ) restrict coherent buffer jahFbStateLayout { uint jahFbState[]; };
 
 layout( local_size_x = @value( threads_per_group_x ),
         local_size_y = @value( threads_per_group_y ),
@@ -108,9 +115,7 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// nine-band SH in world axes.
 	uniform float4 envGainMips;
 	uniform float4 envSh[9];
-	// PHOTON-7 stage 2: THE REGION a pass covers - its first cell (the dispatch covers the region from it).
-	uniform uint4 regionOrigin;
-	// PHOTON-7 stage 3: x = this pass marks the brick mask (the update's last pass), yz = the bricks along x and y.
+	// PHOTON-7 stage 3: yz = the bricks along x and y (the mask's and the state's index).
 	uniform uint4 brickMark;
 vulkan( }; )
 
@@ -121,7 +126,6 @@ vulkan( }; )
 #define p_vctFromPreviousProbeToNext fromPreviousProbeToNext
 #define p_envGainMips envGainMips
 #define p_envSh envSh
-#define p_regionOrigin regionOrigin
 #define p_brickMark brickMark
 
 @insertpiece( HeaderCS )
@@ -138,6 +142,8 @@ float jahBrickChange( float3 a, float3 b )
 	return r;
 }
 shared uint jahBrickShared;
+shared uint jahAbsShared;
+shared uint jahSensShared;
 
 //in uvec3 gl_NumWorkGroups;
 //in uvec3 gl_WorkGroupID;

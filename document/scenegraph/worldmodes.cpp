@@ -44,8 +44,8 @@ int planarBudgetOf(const iris::ScenePtr &s)
 
 /// THE PHOTON TIER TABLE (worldmodes.h's comment is the readable form). Per
 /// tier: technique (GiMode ordinal), quality (GiQuality ordinal), ddgi (0/1),
-/// bounces (the MINIMUM total, 1..4 - PHOTON-5: each cascade adds passes until its measured
-/// bounce series is within 2 % of its limit, up to eight; PhotonComponent::cascadeBounces).
+/// bounces (0/1: ON at every tier - PHOTON-7 stage 4: the voxel store converges the bounces by feedback, so there is no
+/// count of passes to pick; 0 is the direct store alone, a measurement setting).
 /// Owner option (b), 2026-09-09; the fifth column
 /// (dynamic probes) was deleted with the feature by lane R2, 2026-09-12.
 ///
@@ -83,7 +83,7 @@ const PhotonRow kPhotonTable[4] = {
     /* Low    */ { 1, 0, 1, 0 },   // VCT, 2 cascades @ 64^3, the field on, no probes
     /* Medium */ { 1, 1, 1, 0 },   // VCT, the chain at 64^3, DDGI-fed (voxel source)
     /* High   */ { 2, 2, 1, 0 },   // the hybrid (rays where the scene traces, else probes), the chain's High table
-    /* Epic   */ { 2, 3, 3, 0 },   // the Epic row (4x the gather's probes), at least 3 bounces
+    /* Epic   */ { 2, 3, 1, 0 },   // the Epic row (4x the gather's probes)
 };
 int photonFieldColumn(const PhotonRow &r)
 {
@@ -1042,24 +1042,22 @@ QVector<Row> buildRows()
         r.group = QStringLiteral("Global Illumination");
         r.type = RowType::Int;
         r.tierSpace = TierSpace::Photon;
-        r.minValue = 1; r.maxValue = 4;
+        r.minValue = 0; r.maxValue = 1;
         photonColumns(r, 3);
         // GENERATED: "128^3 at High/Epic" named one resolution for a chain
         // whose four cascades are 128, 128, 64 and 64 (render audit A5).
-        r.cost = QStringLiteral("The fewest light bounces, 1-4. The renderer measures how fast each "
-                                "voxel volume's bounces fade and adds passes until what is left is "
-                                "under 2 % of the first bounce (an enclosed room takes more, an open "
-                                "scene one; at most eight); this is the floor under that. Each bounce "
-                                "past the first is another light-propagation pass over the voxel "
-                                "volume on every re-solve — at High and Epic that is a chain at %1 "
-                                "voxels per axis — and the irradiance field is fed from those "
-                                "volumes, so the extra bounces reach the probe-stored diffuse too. "
-                                "Epic's column: %2; every other tier %3.")
-                     .arg(photonTierVoxelPhrase(PhotonTier::High))
-                     .arg(photonBounces(PhotonTier::Epic))
-                     .arg(photonBounces(PhotonTier::Low));
-        r.get = [](const iris::ScenePtr &s) { return qBound(1, s->giNumBounces, 4); };
-        r.set = [](const iris::ScenePtr &s, int v) { s->giNumBounces = qBound(1, v, 4); };
+        r.cost = QStringLiteral("Whether light bounces: 1 (every tier) lets every surface re-emit what it "
+                                "gathers - the lamps', the sky's and every other surface's light - and the "
+                                "renderer converges the whole series in the voxel volume by feedback: a pass "
+                                "a frame over the parts still changing, each stopped once what is left of its "
+                                "series is under 1 %, so an enclosed room and an open scene both reach their "
+                                "limit and there is no count of bounces to pick. The irradiance field is fed "
+                                "from those volumes, so the bounces reach the probe-stored diffuse too. 0 is "
+                                "THE DIRECT STORE ALONE: the voxels hold the lamps' direct light and nothing a "
+                                "surface re-emits (a measurement setting). At %1 voxels per axis (High and Epic).")
+                     .arg(photonTierVoxelPhrase(PhotonTier::High));
+        r.get = [](const iris::ScenePtr &s) { return qBound(0, s->giNumBounces, 1); };
+        r.set = [](const iris::ScenePtr &s, int v) { s->giNumBounces = qBound(0, v, 1); };
         out.append(r);
     }
     // ---- Sky ---------------------------------------------------------------
@@ -1762,9 +1760,7 @@ QString photonTierSentence(PhotonTier t)
         out += photonDdgi(t) ? QStringLiteral("; the irradiance field ON")
                              : QStringLiteral("; no irradiance field");
     }
-    out += QStringLiteral("; %1 light bounce%2")
-               .arg(photonBounces(t))
-               .arg(photonBounces(t) == 1 ? QString() : QStringLiteral("s"));
+    out += photonBounces(t) > 0 ? QStringLiteral("; the light bounces, converged") : QStringLiteral("; no bounce");
 
     // The probe grid is the TECHNIQUE column, not the quality one: only the
     // hybrid (ordinal 2) builds one — and at a RAY tier only where the scene
@@ -1849,7 +1845,7 @@ void photonHave(const iris::ScenePtr &s, int have[kPhotonRowCount])
     have[0] = int(s->giMode);
     have[1] = int(s->giQuality);
     have[2] = s->giDdgi < 0 ? (photonFieldAuto(s) ? 1 : 0) : (s->giDdgi > 0 ? 1 : 0);
-    have[3] = qBound(1, s->giNumBounces, 4);
+    have[3] = qBound(0, s->giNumBounces, 1);
     have[4] = qBound(0, s->giProbeCaptureSize, 1024);
 }
 }   // namespace

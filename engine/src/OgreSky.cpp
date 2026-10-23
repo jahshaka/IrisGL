@@ -2754,10 +2754,8 @@ void OgreScene::snapshotCloudGi(bool fieldRebaked) {
     ++mCloudGiSerial;
     // THE CLOUD LAYER SHADES THE SUN (PHOTON-7 stage 3): its change is the sun's, everywhere - the list's overflow.
     mPhoton.noteRegionOverflow(kGiRegionOverflowSun);
-    // The voxels hold the direct term, so a change re-injects them (the light
-    // tick's path: one injection over the voxels already there, or an owed tick
-    // under a chain); the field re-integrates from them.
-    if (mPhoton.voxelLighting()) refreshGiLighting(false);
+    // (The voxels hold the direct term: the sun's overflow re-injects every cascade's as a delta at the writer point and
+    // every brick resumes the feedback - PHOTON-7 stage 4, relightAndFeedback.)
 }
 
 void OgreScene::bindCloudInjection(Ogre::PhotonVoxelLighting *lighting) {

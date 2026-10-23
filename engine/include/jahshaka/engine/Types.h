@@ -2526,10 +2526,12 @@ struct GiParams {
     /// over `kProbeGridFitMax` (OgreGi.cpp, 64 m). Negative (the default) is the
     /// engine's own; 0 disables the ceiling; anything else replaces it.
     float     testProbeGridFitMax = -1.0f;
-    /// Total light bounces, 0..4 (1 = a single indirect bounce: every surface re-emits the
-    /// lamps' and the sky's light once). 0 = THE DIRECT STORE ALONE (BOUNCES-ZERO-1): the
-    /// voxels hold the lamps' direct light and nothing a surface re-emits of the sky.
-    int       numBounces = 1;
+    /// THE BOUNCES (PHOTON-7 stage 4): on, every surface re-emits what it gathers - the lamps', the sky's and every
+    /// other surface's light - and the voxel store converges to the series' limit by FEEDBACK (a pass a frame over the
+    /// bricks still moving, each stopped once the tail of its series is under a code): no count of bounces exists any
+    /// more. Off = THE DIRECT STORE ALONE (BOUNCES-ZERO-1): the voxels hold the lamps' direct light and nothing a surface
+    /// re-emits of the sky or of another surface.
+    bool      bounces = true;
     /// Hybrid only: reflection-probe counts along each world axis of the GI
     /// bounds (the parallax-corrected cubemap grid). Clamped to 1..8 per axis.
     int       pccProbesX = 3, pccProbesY = 2, pccProbesZ = 3;
@@ -2836,7 +2838,7 @@ struct GiParams {
     /// for the tuning.
     bool operator==(const GiParams &o) const {
         return mode == o.mode && quality == o.quality &&
-               numBounces == o.numBounces && testProbeGridFitMax == o.testProbeGridFitMax &&
+               bounces == o.bounces && testProbeGridFitMax == o.testProbeGridFitMax &&
                pccProbesX == o.pccProbesX && pccProbesY == o.pccProbesY &&
                pccProbesZ == o.pccProbesZ &&
                probeHdr == o.probeHdr && probeShadows == o.probeShadows &&
@@ -4199,8 +4201,9 @@ struct GiChangedRegions {
 /// ONE CASCADE'S BRICK MASK (PHOTON-7 stage 3; Scene::takeGiBrickMask): per 8^3 brick of the cascade's cells, what its
 /// LIGHT PASSES changed, in CODES (one code = 1 % of the voxel's own radiance, per channel; the absolute floor is the
 /// float store's quantum: kGiBrickFloor), the most over the readings landed since the last take - `direct`: the
-/// injection's change of the direct term (exact: the store's own bits compared); `bounce`: how far the update's LAST
-/// pass (the sky's or a bounce's) moved the total, within the store's half-ulp (1/40 of a code). Read back a few
+/// frame's injections' change of the direct term (exact: the store's own bits compared); `bounce`: how far the frame's
+/// FEEDBACK pass moved the total (PHOTON-7 stage 4: the store's own read-back, so a brick at its fixed point reads 0 -
+/// the per-brick change the cards' and the field's staleness read in stage 5). Read back a few
 /// frames late, never waited on. Bricks x fastest, `dims` per axis, at the box corner `origin` the readings were taken
 /// at (a cascade that moved between two readings starts a new mask).
 struct GiBrickMask {
@@ -4639,12 +4642,23 @@ struct GiStatus {
         /// delta injections LIT (wrote: their direct changed) inside the entering slabs (`commitLitSlab`) and outside
         /// them (`commitLitBand`: the changed direct set), read back a few frames late (`commitCounted` = the commits
         /// whose counts landed; a commit of a cascade INSIDE a committed one, re-injected as a delta, counts too); the
-        /// slabs' cells (`commitSlabCells`), the cells the commit's direct term was COMPUTED over (`commitInjectCells`:
-        /// the faces the shift moved, within the cascade's own-cell march), the cells one pass of a commit covers (the
-        /// slab and its bounce reach, `commitRegionCells`) and the passes run (`commitPasses`: the sky's and the
-        /// bounces'). The old commit lit and re-solved the whole cascade, resolution^3 a commit.
+        /// slabs' cells (`commitSlabCells`) and the cells the commit's direct term was COMPUTED over (`commitInjectCells`:
+        /// the faces the shift moved, within the cascade's own-cell march). The old commit lit and re-solved the whole
+        /// cascade, resolution^3 a commit. `deltaMarched` (PHOTON-7 stage 4): the voxels EVERY delta injection of this
+        /// cascade MARCHED, read back - changed or not: its commits', its re-marches inside an outer commit (only the
+        /// voxels whose march reaches the outer's moved faces, stage 2's read D4), its lamps'.
         unsigned long long commitLitSlab = 0, commitLitBand = 0, commitSlabCells = 0, commitInjectCells = 0,
-                           commitRegionCells = 0, commitPasses = 0, commitCounted = 0;
+                           commitCounted = 0, deltaMarched = 0;
+        /// THE FEEDBACK (PHOTON-7 stage 4): the bounces converge by a pass a frame over this cascade's ACTIVE 8^3 bricks -
+        /// the bricks of its newest landed reading still active after its frame (`feedbackActive`), whether it owes work
+        /// (an activation no landed reading answered yet, or active bricks), and cumulatively the frames it ran a pass,
+        /// the bricks those passes ran, the bricks that STOPPED (the tail of their series under a code) and RESUMED (what
+        /// their gather could see moved them a code), the bricks whose pass count reached 255 (a door, never a stop) and the
+        /// readings that landed.
+        unsigned feedbackActive = 0;
+        bool feedbackOwed = false;
+        unsigned long long feedbackPasses = 0, feedbackBricksRan = 0, feedbackStops = 0, feedbackResumes = 0,
+                           feedbackSaturated = 0, feedbackReadings = 0;
         /// THE LAG (PHOTON-7 stage 2): the frames from the frame the camera's step test first owed this cascade a
         /// move to the rebuild (a scroll's commit, or a whole rebuild) that placed it for the camera - the last one
         /// and the most since the chain was built.
@@ -4742,9 +4756,9 @@ struct GiStatus {
         int lightsInRangeMax = 0;
         unsigned long long injectionsOverSlots = 0;
         /// THE BRICK MASK (PHOTON-7 stage 3; GiBrickMask): the cascade's 8^3 bricks; of the LAST landed reading, the
-        /// bricks whose direct term changed by at least one code, whose last pass moved the total by one, and either
-        /// (the ACTIVE bricks); over the cascade's life the light updates that wrote a mask, the readings that landed
-        /// and the updates whose reading was skipped (every read-back slot in flight).
+        /// bricks whose direct term changed by at least one code, whose frame's feedback pass moved the total by one,
+        /// and either; over the cascade's life the frames that wrote a mask, the readings that landed and the frames
+        /// whose reading was skipped (every read-back slot in flight).
         unsigned bricks = 0;
         unsigned bricksDirectLast = 0, bricksBounceLast = 0, bricksActiveLast = 0;
         unsigned long long brickUpdates = 0, brickReadings = 0, brickReadingsSkipped = 0;
@@ -4787,12 +4801,11 @@ struct GiStatus {
     /// Cascade rebuilds SKIPPED because the frame's budget (one per frame) was
     /// already spent. Cumulative; it is the queue pressure reading.
     unsigned long long cascadeDeferrals = 0;
-    /// HOW MANY POST-REBUILD SETTLES this scene has paid (LAMPREST-3): a
-    /// cascade rebuild injects one cascade once, over the radiance it held
-    /// where it used to stand, so the chain owes an at-rest injection
-    /// afterwards — paid on the first frame the rebuild queue is empty, once
-    /// per burst of rebuilds. Cumulative over the scene's life.
-    long long chainSettles = 0;
+    /// THE FEEDBACK'S RESTS (PHOTON-7 stage 4): the frames the chain's feedback stopped owing work - its radiance
+    /// finished moving (cumulative over the scene's life) - and whether it owes work now (a relight, an unanswered
+    /// activation, active bricks: giAtRest waits for it). The post-rebuild settle it replaces (LAMPREST-3) is deleted.
+    unsigned long long feedbackRests = 0;
+    bool feedbackOwed = false;
     /// THE ONE WRITER (PHOTON-WRITER-1). Every write to a voxel volume's light
     /// goes through one engine function, and a volume is injected AT MOST ONCE
     /// per frame. `chainInjectionRefusals` counts the second injections that
@@ -4820,8 +4833,6 @@ struct GiStatus {
     // drained record that carries the scene's GI (an environment frame). Cumulative counts, and the live state.
     unsigned long long schedulerPushes = 0;          ///< configurations applied (a from-scratch answer each)
     unsigned long long schedulerResolves = 0;        ///< re-solves: settles + explicit refreshes
-    unsigned long long schedulerLightTicks = 0;      ///< the cheap light re-injections asked for
-    unsigned long long schedulerLightTicksAtRest = 0;///< ...of them, the at-rest ones (the motion had stopped)
     bool               settlePending = false;        ///< a change waits for the stability window
     unsigned           settleStableFrames = 0;       ///< environment frames it has held still so far
     bool               gestureActive = false;        ///< the drained record's gesture (FrameInputScene::gesture)

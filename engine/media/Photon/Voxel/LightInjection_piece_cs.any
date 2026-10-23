@@ -630,6 +630,10 @@
 	// (word 2: the delta injections themselves - the counter is cumulative, read back without a wait)
 	if( p_injectOrigin.w != 0u && all( equal( gl_GlobalInvocationID.xyz, uint3( 0u, 0u, 0u ) ) ) )
 		atomicAdd( jahCommitCount[2], 1u );
+	// (word 3, PHOTON-7 stage 4: the voxels MARCHED - every invocation of the delta's boxes, changed or not: the work a
+	// delta costs is its marches, the writes are only what changed)
+	if( gl_LocalInvocationIndex == 0u )
+		atomicAdd( jahCommitCount[3], 64u );
 @else
 	// THE DIRECT TERM IT REPLACES, for the brick mask (PHOTON-7 stage 3): read before the writes and read back after them,
 	// the store's own conversion compared (the delta's rule above) - the direct volumes, or the total where the cascade

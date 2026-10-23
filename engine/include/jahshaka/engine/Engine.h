@@ -884,31 +884,13 @@ public:
     /// world is on screen. Default false, so an engine nobody tells is an
     /// engine that behaves exactly as it always did.
     virtual void        setLoading(bool loading) = 0;
-    /// The LIGHT-ONLY refresh (REFLECTIONS_ADOPTION_SPEC.md P2): re-injects the
-    /// scene's lights into the EXISTING voxel volume and leaves the geometry
-    /// alone. Orders of magnitude cheaper than the full call — no
-    /// re-voxelization, no probe re-render — and it is what a light being
-    /// DRAGGED needs: the bounce follows the light live while the expensive
-    /// rebuild waits for the drag to stop.
-    ///
-    /// It is a partial answer on purpose and the caller must know which parts it
-    /// does not update: reflection PROBES capture lighting, so probe reflections
-    /// stay as they were until the next full refresh. Under Instant Radiosity
-    /// there is no cheaper path than the re-trace, so there this IS the
-    /// re-trace. Returns false when nothing could be done (GI off, or nothing
-    /// built yet), so a caller can tell "cheap refresh done" from "no-op".
-    ///
-    /// `inMotion` says whether the thing that moved is STILL MOVING, and it
-    /// buys the drag economy: in motion the injection runs ONE bounce and the
-    /// coarser ray march, because the picture it produces is replaced by the
-    /// next tick a few frames later; at rest it runs the scene's full bounce
-    /// count and the fine march, so the frame the user is left looking at is
-    /// the one the full solve would have produced. A host that drives this on a
-    /// cadence must therefore fire ONE `inMotion = false` call after the motion
-    /// stops — the settle's own re-solve covers the drag path, but a MOVABLE
-    /// lamp (REALTIME_REFLECTIONS_SPEC §3.3, O2) never arms a settle at all,
-    /// and without that last call its room stays lit at one bounce for good.
-    virtual bool        refreshGiLighting(bool inMotion) = 0;
+    /// THE WHOLE RELIGHT (PHOTON-7 stage 4): every voxel cascade's direct term re-injected over the EXISTING voxels as a
+    /// delta (a voxel whose direct did not change keeps every bit) at the next frame's writer point, and every brick of
+    /// the voxel store resumes the bounces' feedback - the store converges to the fixed point of the scene's current
+    /// inputs over the next frames (GiStatus::giAtRest waits for it). No re-voxelisation, no probe re-render. A host
+    /// never needs it for a light: a lamp's change is the changed-region list's, relit over its spheres by the engine.
+    /// Returns false when there is no voxel chain.
+    virtual bool        refreshGiLighting() = 0;
     // What GI actually ACHIEVED, as opposed to what was requested — probe
     // count and whether the probe/VCT bindings are live on this scene. The
     // hybrid can degrade to plain VCT (a missing probe workspace definition);

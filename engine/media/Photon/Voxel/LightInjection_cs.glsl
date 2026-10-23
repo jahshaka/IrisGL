@@ -71,7 +71,7 @@ uniform restrict image3D backVoxel;
 @add( jahInjUav, 1 )
 // PHOTON-7 stage 2, THE WORK LAW'S DOOR: a delta injection counts the voxels it lit, cumulatively - word 0 those inside
 // the scroll's slab (outside the box the scroll kept), word 1 those outside it (the voxels whose direct term changed:
-// the band), word 2 the injections. A UAV buffer after the textures, read back by a routed buffer copy.
+// the band), word 2 the injections, word 3 (stage 4) the voxels it MARCHED. A UAV buffer after the textures, read back by a routed buffer copy.
 @property( jah_inject_delta )
 	layout( std430, ogre_U@value(jahInjUav) ) restrict coherent buffer jahCommitLayout { uint jahCommitCount[]; };
 	@add( jahInjUav, 1 )

@@ -1205,12 +1205,10 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, Node *rec, bool inherited
             if (dynamic_cast<Ogre::Light *>(obj)) {
                 ++mGiLightWriteSerial;
                 staleProbeGrid(GiStaleReason::Light);
-                // ...and a lamp event for the GI scheduler (U0 3c): the lamp rides its -Y adapter, whose parent
-                // is the registered node.
+                // ...and the lamp's region (PHOTON-7 stage 3, listed below): the lamp rides its -Y adapter, whose
+                // parent is the registered node.
                 lampFlipped = true;
                 lampOwner = rec ? rec : registryNode(sn->getParent());
-                if (lampOwner) noteLampChanged(*lampOwner);
-                else mPhoton.noteLampChanged(false);
             }
             else if (dynamic_cast<Ogre::Decal *>(obj)) staleProbeGrid(GiStaleReason::Moved);
         }
@@ -1525,8 +1523,6 @@ void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
     const bool healing = !movable && n.mobilitySoft && n.mobilitySoftRebuilds != mPhoton.giRebuildCount();
     n.mobilitySoft = movable && change == MobilityChange::Soft;
     n.mobilitySoftRebuilds = mPhoton.giRebuildCount();
-    // A LAMP CHANGING CLASS moves between the scheduler's two gates: both hear of it (U0 3c).
-    if (n.light) mPhoton.noteLampsChanged();
     // ...and an item the GI walk has already seen changing class is a FLIP the scheduler adopts (a classification
     // that arrives with the geometry is an arrival, and arrivals arm as they always did).
     if (n.item && n.scan.giKnown) mPhoton.noteMobilityFlipped();
@@ -2038,8 +2034,7 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             if (!n.lightGiKnown || gk != n.lightGiKey) {
                 n.lightGiKey = gk;
                 n.lightGiKnown = true;
-                noteLampChanged(n);
-                listLampChange(n);   // ...and its region: the old sphere and the new (PHOTON-7 stage 3)
+                listLampChange(n);   // its region: the old sphere and the new (PHOTON-7 stage 3)
             }
             if (!n.lightPoseKnown && n.lightNode) {
                 n.lightPos = n.lightNode->_getDerivedPositionUpdated();
@@ -2073,11 +2068,10 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
 
 // THE ONE WAY A NODE'S LIGHT IS DESTROYED (PHOTON-7 stage 3's read F1): removeLight and releaseNode (the mirror deletes a
 // lamp node with removeNode) both come here, so every path that destroys a light LISTS ITS GONE SPHERE (the changed-
-// region list: while the light still is) and is a lamp event for the GI scheduler, like one arriving (U0 3c).
+// region list: while the light still is) - the list is how the GI hears of a lamp (PHOTON-7 stage 4).
 void OgreScene::destroyNodeLight(NodeId id, Node &n) {
     if (!n.light) return;
     listLampChange(n, true);
-    noteLampChanged(n);
     // Untied from every cached shadow map first: a fixed light is dereferenced by its node on every update
     // (releaseShadowLamp).
     if (mEngine) mEngine->releaseShadowLamp(this, n.light);
