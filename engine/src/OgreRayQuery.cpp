@@ -9612,11 +9612,27 @@ void OgreEngine::listRayMovers(const std::vector<OgreScene *> &drawn) {
         };
         std::vector<uint32_t> moved;
         if (gs.movedThisFrame(vaoFrame)) moved = gs.movedSlots();
-        for (uint32_t slot : moved) list(slot);
+        // A SLOT A SWAP-REMOVE RENUMBERED, UNCHANGED (PHOTON-7 stage 4's read F2): the tail's object moved in the index,
+        // not in the world - its entry still holds the world and flags it moved with, and world = prevWorld - so it lists
+        // nothing (the removal's own box is listed by OgreScene::removeItemSlot).
+        const auto compactedOnly = [&](uint32_t slot) {
+            if (!gs.movedThisFrame(vaoFrame) || slot >= gs.slotCount()) return false;
+            const detail::GpuInstance &g = mirror[slot];
+            uint32_t flags;
+            std::memcpy(&flags, &g.boundsMax[3], sizeof(flags));
+            for (const detail::GpuScene::CompactedSlot &c : gs.compactedSlots())
+                if (c.slot == slot && c.flags == flags && std::memcmp(c.world, g.world, sizeof(c.world)) == 0 &&
+                    std::memcmp(g.world, g.prevWorld, sizeof(g.world)) == 0)
+                    return true;
+            return false;
+        };
+        std::vector<uint32_t> listed;
+        for (uint32_t slot : moved)
+            if (!compactedOnly(slot)) { list(slot); listed.push_back(slot); }
         if (const std::vector<uint32_t> *posed = detail::RayQueryTier::posedSlotsOf(s, vaoFrame)) {
-            std::sort(moved.begin(), moved.end());
+            std::sort(listed.begin(), listed.end());
             for (uint32_t slot : *posed)
-                if (!std::binary_search(moved.begin(), moved.end(), slot)) list(slot);   // a moved slot once
+                if (!std::binary_search(listed.begin(), listed.end(), slot)) list(slot);   // a listed slot once
         }
     }
 }

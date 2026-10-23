@@ -197,6 +197,8 @@ void GpuScene::destroy() {
     mMeshIndex.clear();
     mSkinRows.clear();
     mMovedLastFrame.clear();
+    mCompactedPending.clear();
+    mCompactedLastFrame.clear();
     mCopySet.clear();
     mSlotCapacity = mSlotCount = mMeshCapacity = 0u;
 }
@@ -649,6 +651,13 @@ void GpuScene::onSlotMoved(uint32_t from, uint32_t to) {
     // previous pose of the object that DIED in that slot.
     std::memcpy(&mMirror[to], &mMirror[from], sizeof(GpuInstance));
     mBorn[to] = mBorn[from];
+    {
+        CompactedSlot c;
+        c.slot = to;
+        std::memcpy(c.world, mMirror[to].world, sizeof(c.world));
+        std::memcpy(&c.flags, &mMirror[to].boundsMax[3], sizeof(c.flags));
+        mCompactedPending.push_back(c);
+    }
     markStock(to, mBorn[to] ? &mMirror[to] : nullptr);
     mSlotNode[to] = mSlotNode[from];
     mStagedAt[to] = 0u;      // it must be re-staged/copied this update
@@ -716,6 +725,8 @@ void GpuScene::update(const std::vector<uint32_t> &dirtySlots) {
             mCopySet.push_back(slot);
         }
         mMovedLastFrame.assign(dirtySlots.begin(), dirtySlots.end());
+        mCompactedLastFrame.swap(mCompactedPending);
+        mCompactedPending.clear();
         mLastCloseFrame = vaoFrame;
     } else {
         // The frame's second pass: its dirty slots JOIN the set still owed a
@@ -723,6 +734,8 @@ void GpuScene::update(const std::vector<uint32_t> &dirtySlots) {
         // inside one frame would otherwise grow this without limit, so it is
         // collapsed once it passes twice the slot count.
         for (uint32_t slot : dirtySlots) mMovedLastFrame.push_back(slot);
+        mCompactedLastFrame.insert(mCompactedLastFrame.end(), mCompactedPending.begin(), mCompactedPending.end());
+        mCompactedPending.clear();
         if (mMovedLastFrame.size() > size_t(mSlotCapacity) * 2u) {
             std::sort(mMovedLastFrame.begin(), mMovedLastFrame.end());
             mMovedLastFrame.erase(std::unique(mMovedLastFrame.begin(), mMovedLastFrame.end()),

@@ -598,6 +598,15 @@ public:
     /// the last closing update ran in the VaoManager frame `frame`; any other
     /// frame moved nothing.
     const std::vector<uint32_t> &movedSlots() const { return mMovedLastFrame; }
+    /// THE SLOTS A SWAP-REMOVE RENUMBERED in the frame's update (PHOTON-7 stage 4's read F2): the tail's entry moved into a
+    /// freed slot, with its world and flags as it moved - a reader that lists movers skips a slot whose entry still holds
+    /// them (and world = prevWorld): nothing changed in the world, only the index. Valid while `movedThisFrame()` is.
+    struct CompactedSlot {
+        uint32_t slot = 0u;
+        float world[12] = {};
+        uint32_t flags = 0u;
+    };
+    const std::vector<CompactedSlot> &compactedSlots() const { return mCompactedLastFrame; }
     bool movedThisFrame(uint32_t frame) const { return mLastCloseFrame == frame; }
 
     const GpuInstance &entry(uint32_t slot) const { return mMirror[slot]; }
@@ -998,6 +1007,8 @@ private:
     void copySet();
     /// The slots this frame's copy must also close (prevWorld = world).
     std::vector<uint32_t> mMovedLastFrame;
+    /// compactedSlots(): this frame's (until the closing update) and the closed frame's.
+    std::vector<CompactedSlot> mCompactedPending, mCompactedLastFrame;
     /// Slots freed since the last update: cleared in the mirror and owed a copy,
     /// so the device never holds a dead item's entry past `slotCount()`.
     std::vector<uint32_t> mFreedSlots;
