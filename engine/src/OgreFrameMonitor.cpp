@@ -1228,6 +1228,11 @@ constexpr ArmDef kArms[] = {
       "from their direct terms (a whole injection), and every frame while it is set EVERY brick of them runs the "
       "feedback's pass (no stop): F frames set = F Jacobi passes from the direct term; the cascades outside them hold "
       "their state. 0 = shipped." },
+    { ArmId::GiFeedbackCarriedRoute, 0.0, 0.0, 1.0,
+      "A TEST DOOR (PHOTON-7 stage 5's read A2 (i), gi.bounce_series (7)): while set, the feedback's selection never "
+      "passes a brick whose injection moved it this frame - it is carried - and the stopped bricks accumulate the "
+      "selection's carried section alone (the passed bricks' moves unread): a carried brick's injection is then the "
+      "only route to its stopped neighbours. 0 = shipped." },
     { ArmId::ShadowCasterCull, 1.0, 0.0, 1.0,
       "THE CASTER CULL BY THE LIGHT'S OWN DEPTH (ENGINE-UPGRADE-U5 stage 4): 1 = shipped, a sun map's Atom "
       "casters are tested against the previous frame's depth pyramid of that map, the rejected tested again "

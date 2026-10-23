@@ -6788,10 +6788,14 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
     }
     const Ogre::uint32 pool = mJacobiOn ? budget : (floorsSum < budget ? budget - floorsSum : 0u);
     Ogre::PhotonVoxelLighting *chain = mVctCascades.empty() ? nullptr : mVctCascades[0].lighting;
+    // (the test door gi.feedbackCarriedRoute: a brick its injection moved this frame is carried, never passed, and the
+    // stopped bricks accumulate the carried section alone)
+    const bool carriedRoute = mEngine && mEngine->armRegistry().value(ArmId::GiFeedbackCarriedRoute) >= 1.0;
     bool first = true;
     for (size_t i = n; i-- > 0;) {
         if (!ran[i]) continue;
         mVctCascades[i].lighting->setLightFrame(frame);
+        mVctCascades[i].lighting->setCarriedRouteDoor(carriedRoute);
         mVctCascades[i].lighting->feedbackSelect(acts[i], chain, Ogre::uint32(i), first, pool, floorOf[i]);
         first = false;
     }

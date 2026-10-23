@@ -42,7 +42,10 @@
 //       from the total the delta already wrote), read by the cards' accumulation (PHOTON-7 stage 5, JahCardIndirect)
 // THE ARGUMENTS, 16 words: [0..2] the bounce's and the copy's groups (8 x the bricks: group y is the brick), [4..6]
 // the directional levels' (1 x the bricks), [8] the bricks listed (passed) this frame, [9] the bricks active at the
-// selection (passed or carried), [10] the bricks stopped on the operator's bound (r never measured: a door), [12] the
+// selection (passed or carried), [10] the bricks stopped on the operator's bound (r never measured: a door), [11] the
+// CARRIED-AND-INJECTED section's length (SELECT: the active bricks the budget carried whose injection moved them this
+// frame, listed from the list's END - fbList[numBricks - 1 - j] - for ACCUM alone: their move this frame is their
+// injection's [7], which no later pass sees), [12] the
 // bricks active after the frame, [13] stops, [14] resumes, [15] the bricks whose pass count saturated (a door, never a
 // condition).
 // THE CHAIN'S WORDS (U8, the innermost cascade's buffer, bound by every cascade of the chain): [0] the brick-passes left
@@ -88,6 +91,7 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform uint4 fbBoxLo[16];
 	uniform uint4 fbBoxHi[16];
 	// ACCUM: this cascade's box corner (world, xyz) and brick (metres, w); the source's; the source's bricks per axis
+	// (fbSrcDims.w, SELECT and ACCUM: the test door gi.feedbackCarriedRoute)
 	uniform float4 fbSelf;
 	uniform float4 fbSrc;
 	uniform uint4 fbSrcDims;
@@ -111,7 +115,9 @@ vulkan( }; )
 #define FB_R_MEASURED 2048u
 @property( !jah_brick_copy )
 shared uint fbSScan[64];
+shared uint fbSScan2[64];
 shared uint fbSTaken;
+shared uint fbSCarry;
 shared uint fbSBudget;
 shared uint fbSStart;
 shared uint fbSNext;
@@ -167,17 +173,24 @@ void main()
 			fbSStart = numBricks > 0u ? fbChain[1u + fbFlags.z] % numBricks : 0u;
 			fbSNext = fbSStart;
 			fbSTaken = 0u;
+			fbSCarry = 0u;
 		}
 		memoryBarrierShared();
 		barrier();
+		// EVERY brick is scanned (never a break at the budget): an active brick the budget carries whose injection moved
+		// it this frame ([7]) is listed in the CARRIED section (args [11]) - the stopped bricks' accumulation must see
+		// its move this frame or never (stage 4's fix, PHOTON-7 stage 5's read A2 (i)). fbSrcDims.w: the test door
+		// gi.feedbackCarriedRoute - such a brick is never listed in the passed section (and ACCUM reads the carried
+		// section alone: the carried route the only one).
 		for( uint base = 0u; base < numBricks; base += 64u )
 		{
 			const uint taken0 = fbSTaken;
-			if( taken0 >= fbSBudget )
-				break;
+			const uint carry0 = fbSCarry;
 			const uint k = base + lid;
 			const uint idx = ( fbSStart + k ) % numBricks;
-			const bool act = k < numBricks && ( fbState[8u * idx] & 1u ) != 0u;
+			const bool isActive = k < numBricks && ( fbState[8u * idx] & 1u ) != 0u;
+			const bool injected = isActive && fbState[8u * idx + 7u] != 0u;
+			const bool act = isActive && !( fbSrcDims.w != 0u && injected );
 			fbSScan[lid] = act ? 1u : 0u;
 			memoryBarrierShared();
 			barrier();
@@ -192,7 +205,24 @@ void main()
 			}
 			const uint pos = taken0 + fbSScan[lid] - 1u;
 			const uint end = min( fbSBudget, taken0 + fbSScan[63] );
-			if( act && pos < end )
+			const bool listed = act && pos < end;
+			const bool carriedMoved = injected && !listed;
+			fbSScan2[lid] = carriedMoved ? 1u : 0u;
+			memoryBarrierShared();
+			barrier();
+			for( uint off = 1u; off < 64u; off <<= 1u )
+			{
+				const uint v = lid >= off ? fbSScan2[lid - off] : 0u;
+				memoryBarrierShared();
+				barrier();
+				fbSScan2[lid] += v;
+				memoryBarrierShared();
+				barrier();
+			}
+			if( carriedMoved )
+				fbList[numBricks - 1u - ( carry0 + fbSScan2[lid] - 1u )] =
+					fbPack( uint3( idx % fbDims.x, ( idx / fbDims.x ) % fbDims.y, idx / ( fbDims.x * fbDims.y ) ) );
+			if( listed )
 			{
 				fbList[pos] = fbPack( uint3( idx % fbDims.x, ( idx / fbDims.x ) % fbDims.y, idx / ( fbDims.x * fbDims.y ) ) );
 				fbState[8u * idx] |= FB_RAN;
@@ -204,7 +234,10 @@ void main()
 			memoryBarrierShared();
 			barrier();
 			if( lid == 0u )
+			{
 				fbSTaken = end;
+				fbSCarry = carry0 + fbSScan2[63];
+			}
 			memoryBarrierShared();
 			barrier();
 		}
@@ -216,6 +249,7 @@ void main()
 			fbArgs[1] = taken;
 			fbArgs[5] = taken;
 			fbArgs[8] = taken;
+			fbArgs[11] = fbSCarry;
 		}
 		return;
 	}
@@ -331,17 +365,24 @@ void main()
 		const float halfSum = 0.5 * ( fbSelf.w + fbSrc.w );
 		const bool own = fbFlags.w != 0u;
 		const uint count = own ? fbArgs[8] : fbSrcArgs[8];
-		float sum = 0.0;   // codes, over the list in its order
-		for( uint k = 0u; k < count; ++k )
+		const uint carried = own ? fbArgs[11] : fbSrcArgs[11];
+		const uint srcBricks = fbSrcDims.x * fbSrcDims.y * fbSrcDims.z;
+		float sum = 0.0;   // codes, over the list in its order: the passed section, then the carried one
+		for( uint k = 0u; k < count + carried; ++k )
 		{
-			const uint3 o = fbUnpack( own ? fbList[k] : fbSrcList[k] );
+			const bool passed = k < count;
+			if( passed && fbSrcDims.w != 0u )
+				continue;   // (the test door gi.feedbackCarriedRoute: the carried section alone)
+			const uint e = passed ? k : srcBricks - 1u - ( k - count );
+			const uint3 o = fbUnpack( own ? fbList[e] : fbSrcList[e] );
 			const uint oi = o.x + fbSrcDims.x * ( o.y + fbSrcDims.y * o.z );
 			// THE SOURCE'S WHOLE MOVE THIS FRAME: its pass's [4] plus its injection's [7] - the pass gathers from the total
 			// the delta already wrote, so [4] alone never sees a direct term's change, and a voxel's total moved by at most
 			// the sum (PHOTON-7 stage 5's read A2, measured: with [4] alone gi.bounce_series (4)'s stopped walls beside a
 			// lamp accumulated 0.44 codes at most while they rested 2.3 off - no resume once the count reached cascade 0's
 			// lit bricks sooner; with the sum 699 resumed and the worst voxel rests 0.07 codes off the Jacobi).
-			const float m = fbF( own ? fbState[8u * oi + 4u] : fbSrcState[8u * oi + 4u] ) +
+			// (a carried brick ran no pass this frame: its [4] is an older pass's, its move this frame its injection's alone)
+			const float m = ( passed ? fbF( own ? fbState[8u * oi + 4u] : fbSrcState[8u * oi + 4u] ) : 0.0 ) +
 							fbF( own ? fbState[8u * oi + 7u] : fbSrcState[8u * oi + 7u] );
 			if( !( m > 0.0 ) )
 				continue;

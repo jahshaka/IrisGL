@@ -1306,7 +1306,8 @@ namespace Ogre
                                  8.0f * float( mVoxelizer->getVoxelCellSize().x ) };
         const float src4[4] = { float( srcOrigin.x ), float( srcOrigin.y ), float( srcOrigin.z ),
                                 8.0f * float( src->mVoxelizer->getVoxelCellSize().x ) };
-        const uint32 srcDims[4] = { src->mBrickDims[0], src->mBrickDims[1], src->mBrickDims[2], 0u };
+        const uint32 srcDims[4] = { src->mBrickDims[0], src->mBrickDims[1], src->mBrickDims[2],
+                                    ( mode == 5u || mode == 3u ) && mCarriedRouteDoor ? 1u : 0u };
         const int32 shift4[4] = { shift ? shift[0] : 0, shift ? shift[1] : 0, shift ? shift[2] : 0, 0 };
         ShaderParams::Param pDims, pFlags, pLo, pHi, pSelf, pSrc, pSrcDims, pShift;
         pDims.name = "fbDims";

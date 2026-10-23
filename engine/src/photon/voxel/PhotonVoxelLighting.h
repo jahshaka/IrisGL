@@ -203,6 +203,7 @@ namespace Ogre
         FeedbackTicket    mFeedbackReadings[kFeedbackReadingSlots];
         uint32            mFeedbackNextIssue = 0u, mFeedbackNextTake = 0u;
         uint64            mBrickClearFrame = ~0ull;
+        bool              mCarriedRouteDoor = false;
         /// THE HOST'S FRAME (setLightFrame): the frame the CLEAR and the readings' lag are counted in.
         uint64            mLightFrame = 0u;
         bool              mFeedbackOn = true;
@@ -515,6 +516,9 @@ namespace Ogre
         /// THE HOST'S FRAME (PHOTON-7 stage 4's read R2): the engine frame this volume's light work is in - set by the host
         /// before an injection and before the feedback; the once-a-frame CLEAR and the readings' lag count it.
         void setLightFrame( uint64 frame ) { mLightFrame = frame; }
+        /// THE TEST DOOR gi.feedbackCarriedRoute (PHOTON-7 stage 5's read A2 (i)): while set, the selection never passes a
+        /// brick its injection moved this frame and the accumulation reads the selection's carried section alone.
+        void setCarriedRouteDoor( bool on ) { mCarriedRouteDoor = on; }
         /// THE FEEDBACK'S BRICK STATE as it stands (8 words a brick, PhotonBrickFeedback_cs.glsl) and its bricks per axis -
         /// the cards' indirect accumulation reads it (PHOTON-7 stage 5); null before the volume's first light work.
         UavBufferPacked *feedbackBrickState( unsigned dims[3] ) const
