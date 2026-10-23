@@ -1664,8 +1664,11 @@ void main()
 			imageStore( historyCur, ivec3( tc, gEye ), vec4( prev.xyz, 0.0 ) );
 		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );   // the write-back fills it
 		const vec3 hitPos = origin + L * hitT;
-		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, false );
-		if( jahHitAppend( recSlot, false, recPrim, recBary, L, sunVis,
+		// A FAR COPY'S HIT IS RECORDED AS ONE (READ_B finding 1, the gather's rule): the decode reads the coarsest
+		// level's triangle `prim` (bit 27) and the sun leg lifts by the far copy's hand-over - a near-flagged record
+		// shaded triangle `prim` of level 0, another place of the mesh.
+		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, recFar );
+		if( jahHitAppend( recSlot, recFar, recPrim, recBary, L, sunVis,
 						  reflectFootprint( lobeAlpha, hitT ),
 						  1.0, jahHitDestPack( tc, false, gEye ),
 						  world.y, length( hitPos - world ), length( world - thisEye.camPos ) ) )
