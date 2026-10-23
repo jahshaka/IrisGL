@@ -1917,7 +1917,7 @@ public:
 /// its row there.
 #define JAH_ARM_LIST(X) \
     X(ReflectMotion, "reflect.motion") /* the march's object motion + the trace's mover branches */ \
-    X(RaysOriginCut, "rays.originCut") /* every ray job's origin lifts by the drawn cut's error (0: the float bound alone - the negative control of the origin rows) */ \
+    X(RaysOriginCut, "rays.originCut") /* the scale on every view ray job's drawn-surface lift (1 shipped; 0 the float bound alone, 0.5 half: the origin rows' controls) */ \
     X(ReflectSeedOffset, "reflect.seedOffset") /* the lobe draw's frame index offset (a second, independent noise) */ \
     X(ReflectPosed, "reflect.posed") /* the posed (skinned) identification */ \
     X(ReflectAlphaTested, "reflect.alphaTested") /* cut-out geometry traced as cut-out */ \

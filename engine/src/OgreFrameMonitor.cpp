@@ -1052,11 +1052,12 @@ constexpr ArmDef kArms[] = {
       "(REFLECT-MOVERS-1). 0 = the camera path alone: the pre-lane picture. gi.reflect_mover's "
       "paired cost arm. Was the JAH_R5_NO_MOTION environment door (two per-frame reads)." },
     { ArmId::RaysOriginCut, 1.0, 0.0, 1.0,
-      "THE RAY ORIGIN'S DRAWN-CUT TERM (PHOTON-7 stage 6, READ_A findings 2 and W1-W2): 1 = shipped, a ray leaving a "
-      "pixel's drawn surface - the reflection's, the sun contact's, the gather's - starts off it by the point's float "
-      "error plus the drawn cut's error (the view's pixel tolerance x the LOD bias in footprints; the sun contact's one "
-      "footprint of margin with it). 0 = the float bound alone: the negative control of rtreflect.contact and "
-      "gi.sun_contact_acne - a cut that lies inside level 0 starts its rays inside it, and the rows must read red." },
+      "THE RAY ORIGIN'S DRAWN TERM, A SCALE (PHOTON-7 stage 6, READ_A findings 2 and W1-W2, READ_B F3-F5): 1 = shipped, "
+      "a ray leaving a pixel's drawn surface - the reflection's, the sun contact's, the gather's - starts off it by the "
+      "point's float bound plus the drawn surface's bound against level 0 (Types.h rayOriginDrawnFootprints: the "
+      "tolerance x the LOD bias over the view's band, x the bake's drift ratio, at the point's Euclidean distance). The "
+      "origin rows' controls: 0 = the float bound alone, 0.5 = half the term - a drawn surface that lies inside level 0 "
+      "by more than that starts its rays inside it, and the rows must read red." },
     { ArmId::ReflectSeedOffset, 0.0, 0.0, 65535.0,
       "THE LOBE DRAW'S SEED OFFSET (PHOTON-7 stage 6, the walk's noise/signal split): added to the frame index the "
       "reflection's lobe draw and its resolve's re-derivation take - two walks identical but for it carry independent "

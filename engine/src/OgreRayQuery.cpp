@@ -790,6 +790,14 @@ private:
     const ArmRegistry *mArms = nullptr;
     bool arm(ArmId a, bool otherwise) const { return mArms ? mArms->on(a) : otherwise; }
     double armValue(ArmId a) const { return mArms ? mArms->value(a) : 0.0; }
+    /// THE RAY ORIGIN'S DRAWN TERM for a view's ray jobs (READ_B F3; Types.h rayOriginDrawnFootprints, the one law): the
+    /// pixel tolerance x the LOD bias over the view's switch band, x the bake's drift ratio, in sample footprints -
+    /// SCALED by the measuring arm rays.originCut (1 shipped; the origin rows' controls: 0 = the float bound alone,
+    /// 0.5 = half the term).
+    float drawnFootprintsOf(const detail::OgreScene *scene, float lodBand) const {
+        const double k = mArms ? mArms->value(ArmId::RaysOriginCut) : 1.0;
+        return float(k) * rayOriginDrawnFootprints(scene->pixelTolerance() * scene->lodBias(), lodBand);
+    }
     /// THE GATHER'S REST KEY with the measuring arm "gi.hitDirect" in it (FAR-SUN-2): a paired
     /// A/B in one process flips the arm on a still view, and a held view traces nothing.
     unsigned long long gatherRestKeyArmed(const detail::OgreScene *scene) const {
@@ -6036,9 +6044,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // tolerance (the World Mode's atomPixelError, Scene::pixelTolerance) x the LOD bias - what the id pass's cut and
     // the stock thresholds both take - over this view's switch band, x the bake's drift ratio, in sample footprints;
     // rq_reflect.comp turns it into metres at the point's Euclidean distance from its own eye (jah_ray_origin.glsl).
-    pp.knobs2[1] = arm(ArmId::RaysOriginCut, true)
-                       ? rayOriginDrawnFootprints(scene->pixelTolerance() * scene->lodBias(), chainD.lodHysteresis)
-                       : 0.0f;
+    pp.knobs2[1] = drawnFootprintsOf(scene, chainD.lodHysteresis);
     pp.knobs2[2] = skyTex ? 1.0f : 0.0f;
     pp.knobs2[3] = 1.0f / float(kReflectMaxFrames);   // the moving memory (the shaders' 1 / knobs2.w)
     // THE DENOISER SPACE'S EXPOSURE (PHOTON-7 stage 6 commit 6: Lumen's space is on PRE-EXPOSED colour): the multiplier
@@ -7649,10 +7655,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.inputsBusy = scene->photon().gatherInputsBusy();
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
-    in.drawnCutFootprints = arm(ArmId::RaysOriginCut, true)
-                                ? rayOriginDrawnFootprints(scene->pixelTolerance() * scene->lodBias(),
-                                                           view->chainDesc().lodHysteresis)
-                                : 0.0f;
+    in.drawnCutFootprints = drawnFootprintsOf(scene, view->chainDesc().lodHysteresis);
     in.alphaTable = alphaTableOf(scene);
     in.hitTable = hitTableOf(scene);
     {
@@ -8230,10 +8233,7 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     // convex caster's sign (ledger section 1093 F2) is the drift ratio's now: at Epic's 1 px the term is 2.2 footprints
     // on axis, and a start exactly on level 0 is the float bound's. Full resolution whatever the divisor: the error is
     // the view's, in the view's pixels, not this job's texels.
-    pp.knobs[0] = arm(ArmId::RaysOriginCut, true)
-                      ? rayOriginDrawnFootprints(scene->pixelTolerance() * scene->lodBias(),
-                                                 view->chainDesc().lodHysteresis)
-                      : 0.0f;
+    pp.knobs[0] = drawnFootprintsOf(scene, view->chainDesc().lodHysteresis);
     pp.knobs[1] = 0.0f;
     // THE MASK: the shadow CASTERS' near copies (kRayMaskCaster) — a subset of
     // the near field, which is the one field a ray this short lives in (A5b §4:
