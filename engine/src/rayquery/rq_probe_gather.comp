@@ -115,7 +115,6 @@ layout( set = 0, binding = 32 ) uniform sampler3D voxelDirect[kMaxCascades];
 #include "jah_rq_card_bindings.glsl"
 #define JAH_CARD_SLOTS   uint( p.cards.x )
 #define JAH_CARD_RECORDS uint( p.cards.y )
-#define JAH_CARD_FOOTPRINT_TEXELS p.cards.z
 #include "jah_rq_card.glsl"
 
 /// THE HIT'S GEOMETRIC NORMAL (the card pick's facing): the per-slot row table
@@ -429,7 +428,7 @@ void main()
 										!far && hitNormalKnown );
 			if( !decodeAlways )
 				radiance = jahHitRadianceSourced( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
-													  max( tHit * spread, 1e-4 ), false, false, ok, cacheSource );
+													  max( tHit * spread, 1e-4 ), false, ok, cacheSource );
 			source = cacheSource == 1u ? kGatherSrcCard : kGatherSrcVoxel;
 			if( decodeAlways || !ok || !finite3( radiance ) )
 			{

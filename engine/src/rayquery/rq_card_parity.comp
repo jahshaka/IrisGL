@@ -53,7 +53,6 @@ layout( set = 0, binding = 6 ) uniform Counts
 
 #define JAH_CARD_SLOTS cnt.counts.y
 #define JAH_CARD_RECORDS cnt.counts.z
-#define JAH_CARD_FOOTPRINT_TEXELS 1.0
 #include "jah_rq_card.glsl"
 // THE CARD READ'S LOBE INTEGRALS: this harness asks no movers' gate (jahHitIndirectGate stays 1, so the read never
 // cuts the lobe's share and never calls this); defined for the link, it answers no lobe.
@@ -120,7 +119,7 @@ void main()
 	a.pick = uvec4( ( pick.ok ? 1u : 0u ) | ( pick.lit ? 2u : 0u ) | hitFlag, pick.card,
 					uint( pick.texel.x ), uint( pick.texel.y ) );
 	bool ok;
-	a.viewed = vec4( jahCardRadiance( slot, point, facing, view, 0.0, ok ), ok ? 1.0 : 0.0 );
+	a.viewed = vec4( jahCardRadiance( slot, point, facing, view, ok ), ok ? 1.0 : 0.0 );
 	a.radiance = vec4( ok ? JAH_CARD_RADIANCE( pick.texel ) : vec3( 0.0 ), ok ? 1.0 : 0.0 );
 	answers[i] = a;
 }

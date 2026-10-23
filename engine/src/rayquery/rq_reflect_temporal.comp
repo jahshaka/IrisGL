@@ -133,8 +133,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// ---- THE SURFACE CACHE (PHOTON-CARDS-2) ------------------------------
 	/// x = the instance-table entries bound (0 = the scene holds no cache: the
 	/// card read declines every hit and the voxels answer, as before), y = the
-	/// card records bound, z = the footprint gate in card texels
-	/// (Types.h kCardFootprintTexels), w = the per-slot geometry-row entries
+	/// card records bound, z: unused (the card read's footprint gate is deleted,
+	/// PHOTON-7 stage 6), w = the per-slot geometry-row entries
 	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
 	vec4 cards;
 	/// ---- THE HIT RECORD (PHOTON-HIT-SHADE-1) ------------------------------

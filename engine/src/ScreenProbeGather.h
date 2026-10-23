@@ -285,7 +285,6 @@ struct GatherInputs {
     /// five (Indirect, Emissive, ShadowRough, Albedo, Normal), bound at 25-29.
     Ogre::TextureGpu *cardView[SurfaceCache::kViewLayers] = {};
     unsigned cardSlots = 0u, cardRecords = 0u;
-    float cardFootprintTexels = 0.0f;
     /// THE HIT'S GEOMETRIC NORMAL: the per-slot geometry-row table the scene's
     /// TLAS was written with (copied per frame in flight by the gather) and the
     /// GPU scene's rows, already FLUSHED by the tier this frame. Null = none: the

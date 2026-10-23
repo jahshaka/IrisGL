@@ -133,8 +133,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// ---- THE SURFACE CACHE (PHOTON-CARDS-2) ------------------------------
 	/// x = the instance-table entries bound (0 = the scene holds no cache: the
 	/// card read declines every hit and the voxels answer, as before), y = the
-	/// card records bound, z = the footprint gate in card texels
-	/// (Types.h kCardFootprintTexels), w = the per-slot geometry-row entries
+	/// card records bound, z: unused (the card read's footprint gate is deleted,
+	/// PHOTON-7 stage 6), w = the per-slot geometry-row entries
 	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
 	vec4 cards;
 	/// ---- THE HIT RECORD (PHOTON-HIT-SHADE-1) ------------------------------
@@ -332,7 +332,6 @@ layout( set = 0, binding = 49 ) uniform sampler2D ssrVelocity;
 #include "jah_rq_card_bindings.glsl"
 #define JAH_CARD_SLOTS   uint( p.cards.x )
 #define JAH_CARD_RECORDS uint( p.cards.y )
-#define JAH_CARD_FOOTPRINT_TEXELS p.cards.z
 #include "jah_rq_card.glsl"
 
 /// THE HIT'S GEOMETRIC NORMAL (the card pick's facing): the per-slot row table
@@ -1056,8 +1055,7 @@ void main()
 						 ( centre ? 0u : uint( p.knobs.z ) * 2654435761u );
 			if( !decodeAlways )
 				traced = jahHitRadianceSourced( recFar ? 0xFFFFFFFFu : recSlot, origin + L * t, hitN, L,
-												reflectFootprint( lobeAlpha, t ), centre,
-												true, ok, photonSource );
+												reflectFootprint( lobeAlpha, t ), centre, ok, photonSource );
 			record = decodeAlways || !ok || !finite3( traced );
 			// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1, the one law jah_fog_along.glsl):
 			// the hit's light crossed the leg from the hit to the REFLECTING SURFACE — not

@@ -87,6 +87,18 @@ float jahGgxVndfPdf( vec3 N, vec3 V, vec3 L, float alpha )
 	return D * G1 / ( 4.0 * NdotV );
 }
 
+/// A UNIFORM POINT OF THE UNIT DISK (Shirley-Chiu's concentric map): the resolve's and the spatial filter's taps.
+vec2 jahConcentricDisk( vec2 u )
+{
+	const vec2 o = 2.0 * u - 1.0;
+	if( o.x == 0.0 && o.y == 0.0 )
+		return vec2( 0.0 );
+	float r, th;
+	if( abs( o.x ) > abs( o.y ) ) { r = o.x; th = 0.78539816 * ( o.y / o.x ); }
+	else { r = o.y; th = 1.57079633 - 0.78539816 * ( o.x / o.y ); }
+	return r * vec2( cos( th ), sin( th ) );
+}
+
 /// THE LOBE'S FOOTPRINT AT ITS HIT, IN TRACE TEXELS - the lobe's angular width at the hit, ~4 alpha, over the throw t,
 /// against one trace texel's width at the reflected image (the camera's pixel angle over (eye distance + t),
 /// perspective; the image plane's texel, orthographic). 0 = no throw known.

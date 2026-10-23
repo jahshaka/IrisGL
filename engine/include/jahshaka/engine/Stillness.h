@@ -112,6 +112,10 @@ struct StillnessSpec {
     /// at the end. The walk then measures the motion's own resampling of the
     /// converged picture, which the live walk's residual less is the GI's stepping.
     bool        freezeWalk = false;
+    /// ...the arm's value for it: 1 = THE GI FROZEN (no cache work, the gather's and the reflections' histories kept: the
+    /// motion's own resampling); 2 = THE WORLD HELD (no cache work, the gather held, the REFLECTIONS LIVE: the reflection's
+    /// own estimator and denoiser, no hit radiance changing - PHOTON-7 stage 6, rtreflect.walk_world).
+    double      freezeValue = 1.0;
     /// The material classes at a pose (the same encoding as `classes`), for the dump's per-frame .cls.
     std::function<std::vector<unsigned char>(const Vec3 &eye, const Vec3 &target, unsigned w, unsigned h)> classesAt;
     /// THE MATERIAL CLASSES at the stop pose, per pixel of the view (row-major, classW x classH; resampled nearest

@@ -2927,28 +2927,11 @@ enum class GiViewProfile {
 
 /// It is a pure function of the quality dial and the view profile: no scene, no
 /// device, no Ogre.
-/// THE CARD READ'S FOOTPRINT GATE (PHOTON-CARDS-2 fix round, audit F2 — the
-/// lead's decision; the currency SC-2's page mips will select a level on). A
-/// reflection ray's hit reads the surface-cache card only while the sample's
-/// footprint at the hit (2 t alpha / sqrt(N), the spacing between the samples
-/// the temporal mean holds) is at most this many of the card's texels; a wider
-/// footprint reads the voxels, prefiltered at its own mip.
-///
-/// MEASURED (2026-09-23, spikes/photon-cards-2/sweepB): the selftest's fixture B
-/// (the glossy 0.2 floor reflecting the pillars — where the ungated card read
-/// showed its speckle) shot at the Viewport grade with the gate at k = 0 (the
-/// voxel read everywhere) .. infinity; the floor's speckle as the mean
-/// |pixel - its 3x3 median|: 0.532 codes at k = 0, 0.531 / 0.530 / 0.538 at
-/// k = 1 / 2 / 4 (x1.01 — the card read's sharpness in 2,862 / 5,747 / 13,102
-/// pixels, no new speckle), 0.675 at k = 8 (x1.27) and 0.703 ungated (x1.32).
-/// So k = 4, the widest footprint inside the lead's x1.2 bar. (gi.rt_reflect's
-/// 0.3-rough arm, the audit's first recipe, `test_rt_reflect --footprint-sweep`,
-/// never crosses: in a WARM view the temporal mean hides the card's noise
-/// above ~7 texels and the voxel's bias is the larger error there; below 4
-/// texels both follow the near-mirror per-frame sampling. The speckle is a
-/// young-view, SPATIAL property — two consecutive screenshots are identical —
-/// which is why the gate is set on the picture that showed it.)
-constexpr float kCardFootprintTexels = 4.0f;
+/// (THE CARD READ'S FOOTPRINT GATE, kCardFootprintTexels, is DELETED - PHOTON-7 stage 6, law L5: one estimator a
+/// quantity. The reflection read a carded surface's VOXELS wherever its lobe's footprint passed four card texels while the
+/// gather read the card at every footprint - two estimators of one radiance, chosen by the caller. Its reason was a young
+/// view's speckle under the old reflection denoiser; at the gated hits the card read is the nearer to the screen's answer
+/// (photon-glass: 4.00 against the voxel's 4.60 codes, spikes/photon-7/stage6/c1/GATE_SPLIT.txt).)
 
 /// THE GATHER ROW OF THE TIER TABLE (PHOTON-GATHER-1d, the rule T-A): what the
 /// screen-probe gather is at a tier. One row in the engine's one table; the

@@ -1095,10 +1095,6 @@ constexpr ArmDef kArms[] = {
       "measured, as atom.clusterOcclusion is the exactness door): the pyramid mip where a cluster's rectangle spans at "
       "most N texels a side - 8 shipped (<= 81 reads: Bistro law88's hidden share 13.0 -> 11.8 % against 4, +0.014 ms "
       "of the cut's GPU time), 4 the instance test's (<= 25 reads). The instance test stays at 4." },
-    { ArmId::CardFootprint, 4.0, 0.0, 1e12,
-      "The card read's footprint gate in texels (Types.h kCardFootprintTexels = 4): the sweep that "
-      "chose it (test_rt_reflect --footprint-sweep) sets it per arm, 1e12 = the gate open, 0 = shut. "
-      "Was JAHSHAKA_CARD_FOOTPRINT_K (a per-frame read)." },
     { ArmId::FieldScroll, 1.0, 0.0, 1.0,
       "The irradiance field SCROLLS on a cascade-0 step (keeps the probes that stay inside). 0 = the "
       "same snapped window re-placed WHOLE, the behaviour the scroll replaced (gi.field_scroll walks "
@@ -1107,13 +1103,16 @@ constexpr ArmDef kArms[] = {
       "A MEASUREMENT arm (PHOTON-2 J1): a scroll's entered planes integrated in the follow frame, four samples "
       "deep (H3's rule, 16.7 ms GPU on photon-court's crossing), instead of invalidated and faded in one sample "
       "a pass at the budget. 0 = the shipped fade." },
-    { ArmId::GiFreeze, 0.0, 0.0, 1.0,
+    { ArmId::GiFreeze, 0.0, 0.0, 2.0,
       "THE GI FROZEN (PHOTON-2 round 2, M1's measuring arm): no GI cache works - no field, cascade, settle, tick or card "
       "work is planned, no card is captured or relit - and the gather and the reflections keep every history they hold "
       "(no new sample enters - their moving histories AND their rest means: a texel or pixel at rest keeps its rest "
       "mean as it is; a glossy reflection keeps the live estimator's own reprojection, the virtual point's or the "
       "surface's, unclamped). A walk under it measures the motion's own resampling; the walk without it minus that is "
-      "the GI's flicker under motion (the stillness door's moving window). 0 = shipped." },
+      "the GI's flicker under motion (the stillness door's moving window). 2 = THE WORLD HELD (PHOTON-7 stage 6): no GI "
+      "cache works and the gather keeps its histories as under 1, but the REFLECTIONS run live - no hit radiance can "
+      "change, so a walk under it less the frozen walk is the reflection's own estimator and denoiser alone "
+      "(rtreflect.walk_world). 0 = shipped." },
     { ArmId::HitListCap, 0.0, 0.0, 16777216.0,
       "THE OVERFLOW ARM (PHOTON-2 stage 2's tail, a test door): the traces and the hit write-back hold at most this many "
       "hit records a frame, so a fixture FORCES drops whatever the list's own capacity - a dropped record is NO "

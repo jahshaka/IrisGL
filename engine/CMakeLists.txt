@@ -291,8 +291,9 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_state.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_draw.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_denoise.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
-        COMMENT "Compiling the reflection filter/composite compute shader at SPIR-V 1.4"
+        COMMENT "Compiling the reflection's spatial filter compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and the reflection's TEMPORAL pass (PHOTON-2 1b), with the shared reprojection header.
     add_custom_command(

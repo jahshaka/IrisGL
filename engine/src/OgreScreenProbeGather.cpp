@@ -1534,7 +1534,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                             cardViewBound && in.cardRecords > 0u;
     pp.cards[0] = cardsBound ? float(in.cardSlots) : 0.0f;
     pp.cards[1] = cardsBound ? float(in.cardRecords) : 0.0f;
-    pp.cards[2] = in.cardFootprintTexels;
+    pp.cards[2] = 0.0f;   // (the card read's footprint gate is deleted: PHOTON-7 stage 6)
     pp.cards[3] = float(geomSlots);
     // THE HIT RECORD (PHOTON-HIT-SHADE-1): the list the tier bound, the sun ray.
     pp.hitList[0] = float(in.hit.capacity);

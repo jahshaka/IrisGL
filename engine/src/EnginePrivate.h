@@ -1927,10 +1927,9 @@ public:
     X(AtomClusterOcclusion, "atom.clusterOcclusion") /* the cut tests each cluster against depth and pixel centres (0: neither - the exactness A/B door, ATOM-8) */ \
     X(AtomHistoryRebuild, "atom.historyRebuild") /* the occlusion's history pyramid rebuilt after the late pass (0: the late pass's own, built before its draw - the paired arm of its cost, ATOM-8 R6) */ \
     X(AtomClusterFootprint, "atom.clusterFootprint") /* the cluster test's footprint in texels a side (8 shipped; 4 = the instance test's - the measured arm, ATOM-8) */ \
-    X(CardFootprint, "cards.footprintTexels") /* the card read's footprint gate */ \
     X(FieldScroll, "gi.fieldScroll") /* the irradiance field scrolls (0: re-placed whole) */ \
     X(FieldEnterInline, "gi.fieldEnterInline") /* a scroll's entered planes integrated inline, 4 deep (the H3 arm) */ \
-    X(GiFreeze, "gi.freeze") /* the GI frozen: no cache work, every history kept (M1's measuring arm) */ \
+    X(GiFreeze, "gi.freeze") /* the GI frozen: no cache work, every history kept (M1's measuring arm); 2 = the world held, the reflections live */ \
     X(HitListCap, "rq.hitListCap") /* the hit list holds at most N records (0: its demand-sized capacity) - the overflow arm */ \
     X(ReflectRestReference, "reflect.restReference") /* the reflection's 4,096-sample reference at rest, no stop, no filter (R1 (f)'s measuring arm) */ \
     X(DiffuseConeSkip, "photon.diffuseConeSkip") /* the pixel's cone diffuse only where the field's fallback weight is > 0 */ \

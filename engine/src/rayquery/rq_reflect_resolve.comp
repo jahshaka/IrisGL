@@ -121,8 +121,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// ---- THE SURFACE CACHE (PHOTON-CARDS-2) ------------------------------
 	/// x = the instance-table entries bound (0 = the scene holds no cache: the
 	/// card read declines every hit and the voxels answer, as before), y = the
-	/// card records bound, z = the footprint gate in card texels
-	/// (Types.h kCardFootprintTexels), w = the per-slot geometry-row entries
+	/// card records bound, z: unused (the card read's footprint gate is deleted,
+	/// PHOTON-7 stage 6), w = the per-slot geometry-row entries
 	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
 	vec4 cards;
 	/// ---- THE HIT RECORD (PHOTON-HIT-SHADE-1) ------------------------------
@@ -243,18 +243,6 @@ float exposureOf()
 	const float e = p.denoiser.y > 0.5 ? texelFetch( jahExposure, ivec2( 0 ), 0 ).x : p.denoiser.x;
 	return finite1( e ) && e > 0.0 ? e : 1.0;
 }
-/// A UNIFORM POINT OF THE UNIT DISK (Shirley-Chiu's concentric map).
-vec2 concentricDisk( vec2 u )
-{
-	const vec2 o = 2.0 * u - 1.0;
-	if( o.x == 0.0 && o.y == 0.0 )
-		return vec2( 0.0 );
-	float r, th;
-	if( abs( o.x ) > abs( o.y ) ) { r = o.x; th = 0.78539816 * ( o.y / o.x ); }
-	else { r = o.y; th = 1.57079633 - 0.78539816 * ( o.x / o.y ); }
-	return r * vec2( cos( th ), sin( th ) );
-}
-
 /// ONE TRACE TEXEL'S SURFACE, as the trace reconstructed it (its block's centre pixel, read exactly): its point, its
 /// shading normal N, its geometric normal g (the trace's fold plane), the viewer, the lobe.
 struct Surface { bool ok; vec3 world; vec3 N; vec3 g; vec3 V; float alpha; float dist; float eyeDist; };
@@ -346,7 +334,7 @@ void main()
 		{
 			const uint h = jahReflectPcg( seed + uint( k ) * 0x9E3779B9u );
 			const vec2 u = vec2( float( h & 0xFFFFu ), float( h >> 16u ) ) / 65536.0;
-			const ivec2 q = tc + ivec2( round( concentricDisk( u ) * radius ) );
+			const ivec2 q = tc + ivec2( round( jahConcentricDisk( u ) * radius ) );
 			if( q == tc || any( lessThan( q, ivec2( 0 ) ) ) || any( greaterThanEqual( q, traceRes ) ) )
 				continue;
 			const JahReflectState sq = jahStateUnpack( imageLoad( stateCur, ivec3( q, gEye ) ).xy );

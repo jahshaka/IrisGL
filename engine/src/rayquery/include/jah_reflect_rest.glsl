@@ -44,16 +44,6 @@ float jahRestErrorCodes( float rms, float meanLuma, float v, float reference )
 	const float variance = max( rms * rms - meanLuma * meanLuma, 0.0 );
 	return sqrt( variance / v ) / max( kReflectStopRel * reference, 1e-8 );
 }
-/// THE FILTER'S REACH AT REST (P1): the texels a mean of standard error `e` codes must be averaged over for the
-/// filtered answer to fall under HALF a code (n ~ 4 e^2 of them under the filter's soft weights: a reach of ~1.2 e
-/// texels; a stop's e <= 1 keeps ~1 texel - the per-texel noise of a mean under one code shown raw measured 1.06 codes
-/// mean against the reference with 0.6 e), never further than the moving reach - blended in with the hand-over's weight,
-/// so the rest's first frame keeps the moving reach and a stopped texel's (v and its moment frozen) never moves.
-const float kRestReachPerCode = 1.2;
-float jahRestReach( float movingReach, float e, float handOverWeight )
-{
-	return mix( movingReach, min( movingReach, kRestReachPerCode * e ), clamp( handOverWeight, 0.0, 1.0 ) );
-}
 /// THE REST MEAN'S STORE, ROUNDED STOCHASTICALLY TO HALF PRECISION (P1): the running mean M + (s - M) / v lives in an
 /// rgba16f half, and from a few hundred samples on the increment falls under half a unit in the last place - round to
 /// nearest then drops it, and drops it UNEVENLY (a reflection whose samples are mostly a little above the mean and rarely

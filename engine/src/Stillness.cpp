@@ -1039,7 +1039,7 @@ bool StillnessRun::frameDone(std::string &err)
                   "): settle longer before the run";
             return false;
         }
-        m.freezeArmOn = m.setArm("gi.freeze", 1.0);
+        m.freezeArmOn = m.setArm("gi.freeze", m.spec.freezeValue);
         if (!m.freezeArmOn) {
             err = "stillness: freeze - the engine refused the arm gi.freeze";
             return false;

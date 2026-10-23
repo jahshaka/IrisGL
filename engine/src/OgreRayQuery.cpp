@@ -826,11 +826,6 @@ private:
     /// "rayquery.tlasRefit" so it can be measured against the rebuild rather than
     /// assumed better.
     bool preferRefit() const { return arm(ArmId::TlasRefit, false); }
-    /// The card read's footprint gate (Types.h kCardFootprintTexels): the arm
-    /// "cards.footprintTexels" (its default IS the constant), latched per frame.
-    float cardFootprintTexels() const {
-        return mArms ? float(mArms->value(ArmId::CardFootprint)) : kCardFootprintTexels;
-    }
 
     Ogre::VulkanRenderSystem *mRs = nullptr;
     Ogre::VulkanDevice *mDev = nullptr;
@@ -1069,6 +1064,8 @@ private:
         /// the trace bound, its grid, and which of the pair is this frame's mean.
         bool     finishPending = false;
         unsigned finishRing = 0, traceW = 0, traceH = 0, curIdx = 0;
+        /// ...and the full-resolution picture the spatial filter writes every pixel of (PHOTON-7 stage 6 commit 7).
+        unsigned fullW = 0, fullH = 0;
         /// THE REST (PHOTON-2 1e, fix F1; round 2: R1, G1-G6): consecutive recorded frames with the eye basis
         /// bit-identical, the reflection's rest key unchanged (reflectRestKey: the lighting writes and edits its rays
         /// read and the traced set - never a move) and the pass's own parameters unchanged. At rest each texel's frozen
@@ -5163,7 +5160,7 @@ struct ReflectParams {
     float prevFwd2[4] = {};
     /// THE SURFACE CACHE (PHOTON-CARDS-2): x = the instance-table entries bound
     /// (0 = no cache — the card read declines every hit), y = the card records,
-    /// z = the footprint gate in card texels (kCardFootprintTexels), w = the
+    /// z: unused (the footprint gate is deleted, PHOTON-7 stage 6), w = the
     /// per-slot geometry-row entries bound (0 = the hit's normal is the ray's).
     float cards[4] = {};
     /// THE HIT RECORD (PHOTON-HIT-SHADE-1; rq_reflect.comp's hitList, hitSun,
@@ -6062,7 +6059,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.denoiser[0] = chainD.hdr && chainD.tonemapFixed
                          ? chain::fixedExposureColour(chainD.exposureScale, chainD.exposure).r : 1.0f;
     pp.denoiser[1] = exposureTex ? 1.0f : 0.0f;
-    pp.rest[0] = arm(ArmId::GiFreeze, false) ? 1.0f : 0.0f;   // THE GI FREEZE (M1's measuring arm)
+    // THE GI FREEZE (M1's measuring arm): the reflection keeps its histories under 1; under 2 (THE WORLD HELD) the caches
+    // and the gather are held and the reflection runs live - its own estimator measured alone.
+    pp.rest[0] = std::lround(armValue(ArmId::GiFreeze)) == 1 ? 1.0f : 0.0f;
     const bool restReference = arm(ArmId::ReflectRestReference, false);
     pp.rest[1] = restReference ? 1.0f : 0.0f;   // THE REST'S 4,096-SAMPLE REFERENCE (R1 (f)'s measuring arm)
     // The cube's gain, or the flat environment with no cube (jah_rq_hit.glsl's
@@ -6135,7 +6134,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.stereo[2] = photon ? 1.0f : 0.0f;
     pp.cards[0] = cardsBound ? float(cardCache->instanceSlots()) : 0.0f;
     pp.cards[1] = cardsBound ? float(cardCache->cardRecords()) : 0.0f;
-    pp.cards[2] = cardFootprintTexels();   // the arm "cards.footprintTexels"
+    pp.cards[2] = 0.0f;   // (the card read's footprint gate is deleted: PHOTON-7 stage 6, law L5)
     // ---- THE HIT'S GEOMETRIC NORMAL: the per-slot row table (a copy per frame in
     // flight) and the GPU scene's geometry rows, flushed first (a row staged but
     // not uploaded is a zero address - the trap file's GPU SCENE TABLES rule) and
@@ -6761,6 +6760,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     rv.finishRing = ring;
     rv.traceW = traceW;
     rv.traceH = traceH;
+    rv.fullW = fullW;
+    rv.fullH = fullH;
     rv.curIdx = cur;
     rv.held = hold;
     rv.rays = hold ? 0u : traceW * traceH;
@@ -7438,8 +7439,10 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                             &rv.sets[ring], 0, nullptr);
     {
+        // THE SPATIAL FILTER (PHOTON-7 stage 6 commit 7, Lumen's): one thread per FULL-RESOLUTION pixel - every pixel of
+        // the reflection written every frame, the odd remainder included.
         monitor::CacheScope filterRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.filter", mRs, key);
-        vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, rv.layers);   // z = the eye
+        vkCmdDispatch(cmd, (rv.fullW + 7u) / 8u, (rv.fullH + 7u) / 8u, rv.layers);   // z = the eye
     }
     readReflectHistory(rv, cmd);
 }
@@ -7718,7 +7721,6 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
             in.cardSlots = cache->instanceSlots();
             in.cardRecords = cache->cardRecords();
         }
-        in.cardFootprintTexels = cardFootprintTexels();   // the arm "cards.footprintTexels"
     }
     // ...AND THE HIT'S GEOMETRIC NORMAL: the per-slot row table the TLAS was
     // written with and the GPU scene's rows, FLUSHED first (a row staged but not
