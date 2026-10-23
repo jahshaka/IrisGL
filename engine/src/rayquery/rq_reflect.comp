@@ -1487,8 +1487,12 @@ void main()
 	const bool whole = laneCount == gl_SubgroupSize;
 	const uint vStart = vNow;
 	// THE RECORD RUN (the lead's ruling after the S diagnostic): a batching texel may hand up to `allowance` of its
-	// unblended records a frame to the list as ONE contiguous run, in sample order - the write-back folds them into its
-	// rest mean (rq_hit_composite.comp); a record past it, a blended one, or one the list cannot hold ends the batch as
+	// records a frame to the list as ONE contiguous run, in sample order - the write-back folds them into its
+	// rest mean (rq_hit_composite.comp). A BLENDED record rides it too (the lead's ruling after the Both-at-S probe: on a
+	// silhouette in the screen's fade the batch ended at the first one, ~4 folds of 64 a frame): the record carries the
+	// screen's share and the write-back folds the WHOLE sample, vouch x screen + ( 1 - vouch ) x ray, as one (the mean is
+	// linear in its parts, the moments the stop reads are not); the trace writes nothing of it into the texel's sample.
+	// A record past the allowance, or one the list cannot hold, ends the batch as
 	// before. allowance = min( k_active, capacity / batching ) (the host's, p.rest.w): the list's existing capacity is
 	// the count. A texel's run is the records of ONE round of the deal (one reservation): the rounds after it end at a
 	// record.
@@ -1562,7 +1566,7 @@ void main()
 							  ( s.resume || s.record || s.noSample || !finite3( s.traced ) ? 2u : 0u ) |
 							  ( s.centre ? 4u : 0u ) | ( s.vndf ? 8u : 0u ) | ( s.folded ? 16u : 0u ) |
 							  ( s.photonSource << 5u ) |
-							  ( s.record && !s.blend && !s.resume && !s.noSample ? 256u : 0u );   // a run's candidate
+							  ( s.record && !s.resume && !s.noSample ? 256u : 0u );   // a run's candidate
 			const uint mySlots = ahead >= laneCount ? 0u : min( remaining, laneCount - ahead );
 			if( whole )
 			{
@@ -1616,9 +1620,11 @@ void main()
 							const vec3 hitPos = x.origin + s.L * s.hitT;
 							jahHitWrite( li, s.recSlot, s.recFar, s.recPrim, s.recBary, s.L,
 										 s.sunVis,
-										 reflectFootprint( max( x.alpha, 1e-4 ), s.hitT ), -1.0,
+										 reflectFootprint( max( x.alpha, 1e-4 ), s.hitT ),
+										 s.blend ? -( 1.0 - s.blendVouch ) : -1.0,
 										 jahHitDestPack( ownerTc, false, gEye ), x.world.y, length( hitPos - x.world ),
-										 length( x.world - thisEye.camPos ) );
+										 length( x.world - thisEye.camPos ),
+										 s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ) );
 							fit = 1u;
 						}
 						else

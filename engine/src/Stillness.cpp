@@ -432,7 +432,9 @@ struct StillnessRun::Impl {
             {
                 std::string &g = gpuRowsByFrame[r.frame];
                 for (const auto &fm : frameMs) {
-                    if (fm.second < 0.05) continue;
+                    // (a row under 0.05 ms is left out - but the hit write-back on every frame it runs: the rest's
+                    // record runs move the trace's work into it, so its ms are read beside the trace's)
+                    if (fm.second < 0.05 && fm.first != "hit.composite") continue;
                     char b[96];
                     std::snprintf(b, sizeof(b), "%s%s:%.2f", g.empty() ? "" : ",", fm.first.c_str(), fm.second);
                     g += b;

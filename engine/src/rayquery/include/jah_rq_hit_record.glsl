@@ -33,7 +33,7 @@
 //                        (float bits, the trace's: the write-back folds a
 //                        texel's RECORD RUN in the same space), [7] = the run
 //                        records the decode left unshaded (their index lost);
-//                        then kJahHitAuxWords (FOUR) WORDS PER RECORD from word
+//                        then kJahHitAuxWords (SIX) WORDS PER RECORD from word
 //                        kJahHitAuxBase:
 //                        [0] packHalf2x16( the SUN'S VISIBILITY at the hit (a
 //                        shadow ray, jah_rq_sun_ray.glsl — replacing the shadow
@@ -42,14 +42,24 @@
 //                        LOD) ), [1] the write-back weight's float bits (the
 //                        reflection's sample weight — the trace's blend floor and
 //                        its surface-only flag, PHOTON-2 1b; the gather's texel
-//                        re-weight), [2] the ray's
+//                        re-weight; NEGATIVE marks a reflection RUN record,
+//                        its magnitude the RAY'S SHARE of the sample: 1 -
+//                        the screen's vouch, 1 unblended), [2] the ray's
 //                        ORIGIN HEIGHT's float bits (world Y) and [3]
 //                        packHalf2x16( the ray's LENGTH to the hit, the EYE'S
 //                        DISTANCE to the ray's origin ), both in metres and held
 //                        under the half's range — what the write-back fogs a
 //                        reflection's decoded light along (PHOTON-I-1: the
 //                        record, not a full-resolution image, carries them; the
-//                        gather's records write them too and nothing reads them).
+//                        gather's records write them too and nothing reads them),
+//                        [4] packHalf2x16( vouch x the screen's answer's r, g )
+//                        and [5] packHalf2x16( ...its b, vouch x the screen's
+//                        distance ): THE SCREEN'S SHARE of a BLENDED sample
+//                        whose ray rides a rest run (the write-back folds the
+//                        whole sample, screen and ray, as ONE: the moments are
+//                        not linear in the parts); 0 on every other record.
+//                        2 words = 8 B a record: 2.3 MB at the list's capacity
+//                        at 1080p (291,840 records).
 // WHY A BUFFER AND NOT A THIRD IMAGE: the decode is a PBS pixel shader, and its
 // pass textures number into the fork's absolute-index table (NUM_BIND_TEXTURES;
 // the budget per family is OgreFog.cpp's). The read-only buffer slot it takes
@@ -92,7 +102,7 @@ const uint kJahHitDiffuseOnlyBit = 1u << 28u;
 const uint kJahHitDestGather = 0x80000000u;
 /// The first per-record word of `jahHitBuf`, and the words per record.
 const uint kJahHitAuxBase = 8u;
-const uint kJahHitAuxWords = 4u;
+const uint kJahHitAuxWords = 6u;
 /// GpuScene.h GpuInstanceFlag: kGpuMover | kGpuSkinned | kGpuPlanar.
 const uint kJahHitGpuMover = 1u << 2u;
 const uint kJahHitGpuSkinned = 1u << 5u;
@@ -161,9 +171,13 @@ float jahHitSunVisibility( vec3 hitPos, vec3 liftDir, float t, bool far )
 
 /// THE RECORD'S WORDS at list slot i (reserved by the caller, < the capacity). A
 /// NEGATIVE weight marks a reflection FOLD record (rq_reflect.comp's record runs:
-/// its texel's rest mean takes it in the write-back, in its run's order).
+/// its texel's rest mean takes it in the write-back, in its run's order), its
+/// magnitude the ray's share; `screenShare` = the screen's share of that sample
+/// (vouch x the screen's radiance, vouch x its distance; 0 unblended and on every
+/// other record).
 void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
-				  float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance )
+				  float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
+				  vec4 screenShare )
 {
 	const ivec2 at = ivec2( int( i % JAH_HIT_LIST_W ), int( i / JAH_HIT_LIST_W ) );
 	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( far ? kJahHitFarBit : 0u ) |
@@ -176,6 +190,8 @@ void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, f
 	jahHitBuf[aux + 1u] = floatBitsToUint( weight );
 	jahHitBuf[aux + 2u] = floatBitsToUint( originY );
 	jahHitBuf[aux + 3u] = packHalf2x16( clamp( vec2( rayLength, eyeDistance ), vec2( 0.0 ), vec2( 65504.0 ) ) );
+	jahHitBuf[aux + 4u] = packHalf2x16( clamp( screenShare.xy, vec2( 0.0 ), vec2( 65504.0 ) ) );
+	jahHitBuf[aux + 5u] = packHalf2x16( clamp( screenShare.zw, vec2( 0.0 ), vec2( 65504.0 ) ) );
 	imageStore( jahHitDest, at, uvec4( dest, 0u, 0u, 0u ) );
 }
 
@@ -193,7 +209,8 @@ bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float su
 		atomicAdd( jahHitBuf[1], 1u );
 		return false;
 	}
-	jahHitWrite( i, slot, far, prim, bary, dir, sunVis, footprint, weight, dest, originY, rayLength, eyeDistance );
+	jahHitWrite( i, slot, far, prim, bary, dir, sunVis, footprint, weight, dest, originY, rayLength, eyeDistance,
+				 vec4( 0.0 ) );
 	return true;
 }
 

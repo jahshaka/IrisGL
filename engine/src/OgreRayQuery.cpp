@@ -9275,11 +9275,11 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
     if (!instances) return false;
     Ogre::VaoManager *vao = mRs->getVaoManager();
-    // THE LIST'S BUFFER, sized to the list: the eight counter words, then four per
-    // record (jah_rq_hit_record.glsl kJahHitAuxWords). Re-made when the list grows (Ogre's destroy is delayed past every
+    // THE LIST'S BUFFER, sized to the list: the eight counter words, then six per
+    // record (jah_rq_hit_record.glsl kJahHitAuxWords: a blended run record's screen share is words 4-5). Re-made when the list grows (Ogre's destroy is delayed past every
     // frame in flight; every reader re-reads `hv.buf` before it binds).
     {
-        const size_t words = 8u + 4u * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
+        const size_t words = 8u + 6u * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
         // (the list only grows: OgreView::sizeHitList re-makes it in place, larger)
         if (hv.buf && hv.buf->getNumElements() != words) {
             vao->destroyUavBuffer(hv.buf);
