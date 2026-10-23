@@ -199,6 +199,8 @@ layout( set = 0, binding = 4 ) uniform sampler2DArray sceneDepth;
 /// THE SCRATCH (trace texels) - the spatial filter writes the picture over it.
 layout( rgba16f, set = 0, binding = 5 ) uniform writeonly image2DArray ssrReflection;
 layout( rg32ui, set = 0, binding = 9 ) uniform readonly uimage2DArray stateCur;
+/// LAST FRAME'S STATE (the temporal pass' count of this texel's history: the reuse's fade).
+layout( rg32ui, set = 0, binding = 8 ) uniform readonly uimage2DArray statePrev;
 /// THIS FRAME'S SAMPLES (the trace's, the write-back's): rgb = the radiance, w = the hit distance (> 0), 0 = no sample.
 layout( rgba16f, set = 0, binding = 45 ) uniform readonly image2DArray reflectSample;
 /// THE EXPOSURE HISTORY (the chain's measured 1 x 1; a stand-in where p.denoiser.y = 0).
@@ -284,6 +286,9 @@ float foldedPdf( Surface s, vec3 L )
 /// The plane weight's scale (Lumen's r.Lumen.Reflections.BilateralFilter.DepthWeightScale) and the kernel's.
 const float kPlaneWeightScale = 10000.0;
 const float kKernelRadius = 8.0;
+/// THE REUSE'S FADE WITH THE HISTORY (the lead's R4; Lumen's disocclusion law, D = 1 - sat( N / N0 )): the frames of
+/// history over which a texel's neighbours' samples fade out of its resolve.
+const float kReuseFadeFrames = 4.0;
 
 void main()
 {
@@ -327,6 +332,17 @@ void main()
 		sumW += w;
 		minT = own.w;
 	}
+	// THE REUSE FADES WITH THE TEXEL'S HISTORY (PHOTON-7 stage 6, the lead's R4 after REFLECT-MOVING-1; Lumen's
+	// disocclusion law, 1 - sat( N / N0 ), N0 = kReuseFadeFrames): the neighbours' samples are the variance a young history
+	// lacks; once the temporal mean holds N0 frames they add only their bias (the self-normalised ratio's, and the
+	// neighbour's radiance read as this texel's), and THE MOVING ESTIMATE IS THE OWN SAMPLES' - the estimator the rest
+	// takes: one estimator, converging to it continuously (NRD's 1 / ( 1 + N ) never reaches it: five equal neighbours
+	// keep ~28 % at N = 12). N is the texel's own count last frame where its surface is the same (the relative distance
+	// within 10 %: a disocclusion's texel takes the full reuse). The neighbourhood's least hit distance - the virtual
+	// point's reprojection - is kept whatever the fade.
+	const JahReflectState sp = jahStateUnpack( imageLoad( statePrev, ivec3( tc, gEye ) ).xy );
+	const float histN = sp.surfDist > 0.0 && abs( sp.surfDist - st.surfDist ) < 0.1 * st.surfDist ? sp.N : 0.0;
+	const float reuse = 1.0 - clamp( histN / kReuseFadeFrames, 0.0, 1.0 );
 	// THE KERNEL: Lumen's reach on the lobe, in trace texels.
 	const float radius = kKernelRadius * clamp( 8.0 * sqrt( c.alpha ), 0.0, 1.0 ) / float( scale.x );
 	const int samples = scale.x > 1 ? 3 : 5;
@@ -355,6 +371,9 @@ void main()
 			const float wPlane = exp2( -kPlaneWeightScale * planeRel * planeRel );
 			if( wPlane < 1e-3 )
 				continue;
+			minT = min( minT, smp.w );   // (the neighbourhood's least hit distance, whatever the fade)
+			if( !( reuse > 0.0 ) )
+				continue;
 			// ITS DIRECTION, re-derived from its seed and folded about its own geometric plane as the trace folded it (a
 			// VNDF draw: the state says so), and the two true densities.
 			bool qc, qv;
@@ -368,12 +387,11 @@ void main()
 			const float pdfC = foldedPdf( c, Lq );
 			if( !( pdfQ > 0.0 ) || !( pdfC > 0.0 ) )
 				continue;
-			const float w = wPlane * pdfC / pdfQ;
+			const float w = wPlane * pdfC / pdfQ * reuse;
 			if( !finite1( w ) )
 				continue;
 			sum += jahToDenoise( clamp( smp.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) * w;
 			sumW += w;
-			minT = min( minT, smp.w );
 		}
 	}
 	imageStore( ssrReflection, ivec3( tc, gEye ),
