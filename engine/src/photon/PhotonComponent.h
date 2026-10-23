@@ -194,11 +194,11 @@ public:
     /// and the drag settle are decided where they are recorded: each reads what the work
     /// before it left (an injection this frame, a cascade still pending after the rebuild).
     struct FrameWork {
-        enum class Field : unsigned char { None, Refine, Integrate };
+        enum class Field : unsigned char { None, Work };
         Field field = Field::None;
-        bool fieldReplacing = false;          ///< Integrate: a fresh pass (ifd.replace), else ifd.converge
-        bool fieldEntering = false;           ///< Refine: a scroll's entering pass (ifd.enter, J1)
-        Ogre::uint32 fieldBatch = 0u;
+        /// THE FIELD'S GRANT (PHOTON-7 stage 5, 5-4): its integrations this frame (the budget's count, at rest as in
+        /// motion), spent whole across its works (recordField).
+        Ogre::uint32 fieldGrant = 0u;
         Ogre::Vector3 camPos = Ogre::Vector3::ZERO;
         bool cascadeStage = false;             ///< the cascade stage runs (a built chain, no flush owed)
         bool follow = false;                  ///< cascade 0's field follow, paid first
@@ -672,11 +672,10 @@ public:
     /// The walk's inputs from the component's state.
     WalkInputs walkInputs() const { return WalkInputs{ mGi.dragMoverChannel, !mVctCascades.empty() }; }
     /// The environment moved (the sky, the ambient, the fog): every brick of the chain resumes the feedback (the sky
-    /// enters the store in every pass's escape) and the field re-integrates (OgreScene::noteEnvironmentChanged applies
-    /// the environment first).
+    /// enters the store in every pass's escape) and the list's sky overflow restarts every probe of the field (its
+    /// rays escape to it: markFieldFromRegions; OgreScene::noteEnvironmentChanged applies the environment first).
     void noteEnvironmentChanged() {
         mGiFeedbackForceAll = true;   // every brick of every cascade: the sky is in every pass's escape (PHOTON-7 stage 4)
-        if (mIfd) reintegrateFieldAfterInjection();
         noteRegionOverflow(kGiRegionOverflowSky);   // every sky-lit cache changed: the list cannot say where (PHOTON-7 stage 3)
     }
     // --- THE STEPS the scene and the engine call by name (the scene's GI interface forwards to
@@ -995,6 +994,8 @@ private:
     /// frame, so a slow walk still reopens).
     GiEyePose mGiEyes[2];
     unsigned mGiEyeCount = 0u;
+    /// An eye left its reference pose by more than one card texel or one pixel's angle (the one displacement rule).
+    bool eyesLeft(const GiEyePose *ref, unsigned refCount) const;
     GiEyePose mCardDemandRef[2];
     unsigned mCardDemandRefCount = 0u;
     /// The closed region list the cards' plan last took (its engine frame): each is taken once.
@@ -1238,9 +1239,9 @@ private:
     /// The feedback owes work: a relight owed, an activation no landed reading answered, or active bricks.
     bool feedbackOwed() const;
     bool cascadeFeedbackOwed(const VctCascade &c) const;
-    /// The field re-integrates once the chain's radiance has finished moving (the feedback's rest), at a sky change and
-    /// at an outer cascade's commit - never per injection.
-    void reintegrateFieldAfterInjection();
+    /// THE FIELD'S MARKS FROM THE CHANGED-REGION LIST (PHOTON-7 stage 5, 5-4): the last closed list, once.
+    void markFieldFromRegions();
+    unsigned long long mFieldClosedTaken = ~0ull;
     /// Records WHERE the scene changed, for the dirty path above. `box` is the
     /// region the edit touched (a mover's old box united with its new one, or a
     /// vanishing item's last box); nullptr means "somewhere" and marks the whole
@@ -1505,20 +1506,10 @@ private:
     bool mGiCamPosKnown = false;
     /// Consecutive frames the authoritative camera has stood STILL (PHOTON-2 stage 2's round, H2).
     unsigned mGiCamStillFrames = 0u;
-    /// THE FIELD'S REST WINDOW (PHOTON-2 round 2, L2): the rest budget runs only here - opened by a camera stop or by
-    /// an edit after a quiet spell (no input write for kIfdRestQuietFrames), closed when the field's work that came
-    /// in it is done, when the camera moves, or after kIfdRestWindowMax frames: never for ever under animation (a
-    /// mover or a ticking lamp under a still camera keeps the moving budget). The window's age in frames (0 = shut),
-    /// whether the field worked in it, the non-field input key and the frames it has stood still.
-    unsigned mIfdRestWindow = 0u;
-    bool mIfdRestWindowWorked = false;
-    unsigned long long mIfdRestInputKey = 0ull;
-    bool mIfdRestInputKnown = false;
-    unsigned mIfdQuietFrames = 0u;
     /// The integrations the field's last recorded frame dispatched (GiStatus::ifdDispatchedLastFrame) and that frame.
     unsigned mIfdLastUnits = 0u;
     unsigned long long mIfdLastUnitsFrame = 0ull;
-    void stepFieldRestWindow();
+    unsigned mIfdGrantLastFrame = 0u;   ///< the grant the last recorded frame had (GiStatus::ifdGrantLastFrame)
     /// A cascade arm was asked for while no camera was known. The next tracking
     /// update flags the caches dirty, and that frame's own applyPendingGi
     /// builds the chain where the camera actually is.
@@ -1537,11 +1528,7 @@ private:
     /// which also retires the slicing hazard of holding a derived type through
     /// a non-~IrradianceField.
     Ogre::PhotonIrradianceField            *mIfd          = nullptr;
-    /// Convergence bookkeeping. `IrradianceField` counts processed probes
-    /// internally and exposes nothing, so the engine keeps its own count —
-    /// which it needs anyway to know when a re-converge has finished and to
-    /// keep every dispatch a whole multiple of the batch size (the last batch
-    /// of an uneven split is where the zero-work-group abort lives).
+    /// The field's probe count, written only after a successful build (0 = none: the "built" reading).
     Ogre::uint32                      mIfdTotalProbes     = 0;
     /// THE FIELD'S LAST WRITE, as the readback sees it (ENGINE-UPGRADE-2B stage 4): the generation job's integration
     /// count last read back (up to four frames late), and the engine frame it moved on. giAtRest waits the gather's
@@ -1549,7 +1536,6 @@ private:
     /// field's DISPATCHES, counted on the CPU as they are recorded - PHOTON-2 H1.)
     unsigned long long                mIfdIntegrationsSeen = 0;
     unsigned long long                mIfdWriteFrame       = 0;
-    Ogre::uint32                      mIfdProbesDone      = 0;
     Ogre::uint32                      mIfdProbesPerFrame  = 0;
     /// THE VOLUME THE FIELD IS PLACED OVER, as asked for (the field enlarges it
     /// by one probe block per side for itself). Recorded so the scheduler can
@@ -1567,10 +1553,6 @@ private:
     unsigned long long                mIfdFollows = 0;
     /// The probes the last scroll integrated in its step frame (GiStatus::ifdScrollProbes).
     unsigned                          mIfdScrolledProbes = 0;
-    /// THE CHANGE A SCROLL INTERRUPTED (PHOTON-2 J1): its cursor and the probes it still owed, resumed once the
-    /// entered planes' entering passes are done (planField); 0 = none. A reset (a new change) supersedes it.
-    Ogre::uint32                      mIfdResumeCursor = 0u;
-    Ogre::uint32                      mIfdResumeOwed = 0u;
     /// ...and how the follows split: window scrolls (the kept probes stand) and
     /// whole re-placements (a resize or a jump of the whole grid; nothing kept).
     unsigned long long                mIfdScrolls = 0;

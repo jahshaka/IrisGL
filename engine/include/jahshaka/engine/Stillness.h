@@ -146,6 +146,13 @@ struct StillnessFrame {
     unsigned           restFrames = 0, sinceRestart = 0, settleFrames = 0;
     /// THE HOLD WAITED ON THIS FRAME (PHOTON-2 round 2, L7): the gather's rest key moved, or its inputs owed work.
     bool               holdKey = false;
+    /// THE FIELD'S GRANT AND ITS SPEND this frame (PHOTON-7 stage 5, 5-4; GiStatus::ifdGrantLastFrame /
+    /// ifdDispatchedLastFrame, integrations), the restarts and refinements it owes after it, and the voxel store's own
+    /// owed work (GiStatus::chainOwed: the store not at rest).
+    unsigned           ifdGrant = 0, ifdSpent = 0, ifdOwedRestarts = 0, ifdOwedRefines = 0;
+    unsigned long long ifdOwedIntegrations = 0;
+    unsigned long long ifdMarkedByMoves = 0;   ///< the field's probes marked by the accumulation so far (cumulative)
+    bool               storeOwed = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2
     /// L8: a few frames late, so a window's SUM is the reading).
     unsigned long long foliageRule = 0;

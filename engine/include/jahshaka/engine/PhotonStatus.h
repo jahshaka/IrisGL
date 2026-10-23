@@ -53,7 +53,7 @@ struct PhotonFieldStatus {
     /// Probes integrations made, ever (the job's own count: a stopped or converged probe a
     /// refinement skips is not one).
     unsigned long long integrations = 0;
-    /// Probes stopped by the variance stop, by the last reading that no fresh work outdated.
+    /// Probes stopped by the variance stop, by the last reading, less those restarted after it (the per-slot ledger).
     unsigned probesStopped = 0;
     /// The stop's rule: the fewest samples (0: the stop is off) and the precision (the 95 % Student-t interval / mean).
     unsigned stopMinSamples = 0;

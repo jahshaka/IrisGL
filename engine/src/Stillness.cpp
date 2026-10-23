@@ -881,6 +881,13 @@ bool StillnessRun::frameDone(std::string &err)
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
         f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy;
+        f.ifdGrant = pub.gi.ifdGrantLastFrame;
+        f.ifdSpent = pub.gi.ifdDispatchedLastFrame;
+        f.ifdOwedRestarts = pub.gi.ifdOwedRestarts;
+        f.ifdOwedRefines = pub.gi.ifdOwedRefines;
+        f.ifdOwedIntegrations = pub.gi.ifdOwedIntegrations;
+        f.ifdMarkedByMoves = pub.gi.ifdMarkedByMoves;
+        f.storeOwed = pub.gi.chainOwed;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         f.reflRestFrames = pub.rayQuery.reflectRestFrames;
         f.reflRestMovers = pub.rayQuery.reflectRestMoverFrames;
@@ -975,6 +982,13 @@ bool StillnessRun::frameDone(std::string &err)
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
         f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy;
+        f.ifdGrant = pub.gi.ifdGrantLastFrame;
+        f.ifdSpent = pub.gi.ifdDispatchedLastFrame;
+        f.ifdOwedRestarts = pub.gi.ifdOwedRestarts;
+        f.ifdOwedRefines = pub.gi.ifdOwedRefines;
+        f.ifdOwedIntegrations = pub.gi.ifdOwedIntegrations;
+        f.ifdMarkedByMoves = pub.gi.ifdMarkedByMoves;
+        f.storeOwed = pub.gi.chainOwed;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         f.reflRestFrames = pub.rayQuery.reflectRestFrames;
         f.reflRestMovers = pub.rayQuery.reflectRestMoverFrames;
@@ -1177,7 +1191,8 @@ std::string StillnessReport::tsv() const
     o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\tframe_gpu_ms\tframe_ms"
       << "\tclass_px\tclass_restart\tstep_px\tslow_stage\thold_key\tfoliage_rule"
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
-      << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\n";
+      << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms"
+      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -1199,9 +1214,10 @@ std::string StillnessReport::tsv() const
               << "\t" << f.reflRestMovers << "\t" << f.cameraCuts << "\t" << f.reflCuts << "\t"
               << (f.gpuRows.empty() ? "-" : f.gpuRows);
             char clk[160];
-            std::snprintf(clk, sizeof(clk), "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\n", f.periodMs, f.readMs,
+            std::snprintf(clk, sizeof(clk), "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f", f.periodMs, f.readMs,
                           f.gpuSpanMs, f.gpuIdleMs, f.gpuUnattributedMs, f.gpuPassesMs, f.gpuRowsMs);
-            o << clk;
+            o << clk << "\t" << f.ifdGrant << "\t" << f.ifdSpent << "\t" << f.ifdOwedRestarts << "\t" << f.ifdOwedRefines
+              << "\t" << f.ifdOwedIntegrations << "\t" << (f.storeOwed ? 1 : 0) << "\t" << f.ifdMarkedByMoves << "\n";
         }
     return o.str();
 }

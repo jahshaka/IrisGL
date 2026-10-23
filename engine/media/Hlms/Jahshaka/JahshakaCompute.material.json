@@ -321,6 +321,38 @@
 			]
 		},
 
+		"Jahshaka/FieldAccumulate" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahCardIndirect_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"inform_shader_of_texture_size" : false,
+			"inform_shader_of_texture_data_change" : true,
+			"uav_units" : 5,
+			"textures" :
+			[
+				{},
+				{}
+			],
+			"properties" :
+			{
+				"jah_card_sens" : 0,
+				"jah_field_mark" : 1
+			},
+			"params" :
+			[
+				["caMode",      [0,0,0,0], "uint"],
+				["caSelf",      [0,0,0,1], "float"],
+				["caDims",      [1,1,1,1], "uint"],
+				["caInnerLo",   [0,0,0,0], "float"],
+				["caInnerHi",   [0,0,0,0], "float"],
+				["caField",     [0,0,0,0], "uint"],
+				["caSpacing",   [1,1,1,0], "float"],
+				["caField2",    [6,1,0,0], "uint"]
+			]
+		},
+
 		"Jahshaka/CardSensitivity" :
 		{
 			"threads_per_group" : [64, 1, 1],

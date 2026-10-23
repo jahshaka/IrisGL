@@ -14,9 +14,12 @@
 //
 // THE WORK. The generation and integration jobs walk a LIST of probes, stored
 // as up to three disjoint boxes of slots (IrradianceField::scrollWindow: the
-// planes that entered, one box per moved axis; reset(): the whole grid, one
-// box). Box k covers list positions boxLo[k].w .. + its size (all ones in w for
-// an unused box), its slots boxLo[k].xyz + b (mod N) for b inside boxSize[k].
+// planes that entered, one box per moved axis; a build or a re-placement: the
+// whole grid, one box). Box k covers list positions boxLo[k].w .. + its size (all
+// ones in w for an unused box), its slots boxLo[k].xyz + b (mod N) for b inside
+// boxSize[k]. (PHOTON-7 stage 5, 5-4: the generation job's work may instead be an
+// explicit list of slots - the marked probes, the ones below the target - its own
+// buffer, when boxSize[0].w says so.)
 //
 // THIS FILE IS HLMS INPUT (the build wraps it into the piece JahFieldWindow):
 // no character of it may be the Hlms directive mark, comments included.

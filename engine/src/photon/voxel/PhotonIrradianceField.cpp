@@ -127,8 +127,6 @@ namespace Ogre
         mKeepOnChange( 0u ),
         mChangeSamples( 1u ),
         mRotateRays( true ),
-        mRefinesOwed( 0u ),
-        mRefineWhole( true ),
         mFieldOrigin( Vector3::ZERO ),
         mFieldSize( Vector3::ZERO ),
         mVctLighting( 0 ),
@@ -358,11 +356,19 @@ namespace Ogre
         mWindowOffset[0] = mWindowOffset[1] = mWindowOffset[2] = 0u;
         setWholeWork();
         mWorkMode = IntegrateFresh;
-        noteEstimatesReplaced();
-        mRefinesOwed = mTargetSamples - 1u;
-        mRefineWhole = true;
+        // THE LEDGER (PHOTON-7 stage 5, 5-4): every slot empty, nothing owed
+        {
+            const size_t probes = mSettings.getTotalNumProbes();
+            mHeld.assign( probes, 0u );
+            mReplacedFrame.assign( probes, 0u );
+            mStopped.assign( probes, 0u );
+            mOwedRestart.assign( probes, 0u );
+            mOwedRestarts = mOwedRefines = 0u;
+            mStopsReadFrame = 0u;
+        }
         createTextures();
         setIrradianceFieldGenParams();
+        writeProbeRecords();
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::createTextures()
@@ -418,20 +424,24 @@ namespace Ogre
 
         // Jahshaka (ENGINE-UPGRADE-2B stage 4): THE VARIANCE STATE, zeroed (no probe stopped,
         // every moment 0): four counters, a flag per probe, an M2 per interior irradiance
-        // texel, the inputs' stamp per probe (K4; 0 = none: mChangeSerial starts at 1) - the
-        // generation job's JAH_IFD_ layout.
+        // texel - and THE MARKS (PHOTON-7 stage 5, 5-4), four words a probe from a 256-byte
+        // boundary (a storage view's offset: the accumulation binds them alone) - the
+        // generation job's JAH_IFD_ layout. And the work list (U3), the marks' report.
         {
             const size_t probes = mSettings.getTotalNumProbes();
             const size_t res = mSettings.mIrradianceResolution;
-            const size_t words = 4u + probes + probes * res * res + probes;   // ... and a stamp per probe (K4)
+            mMarkStart = uint32( ( 4u + probes + probes * res * res + 63u ) & ~size_t( 63u ) );
+            const size_t words = size_t( mMarkStart ) + 4u * probes;
             vector<uint32>::type zeros( words, 0u );
             mVarianceBuffer = vaoManager->createUavBuffer( words, sizeof( uint32 ), 0, zeros.data(), false );
-            mSlotSerial.assign( probes, 0u );
-            mSerialFrame[mChangeSerial & 255u] = vaoManager->getFrameCount();
             mVarianceTicket.reset();
-            ++mStopEpoch;
-            mProbesStopped = 0u;
             mIntegrations = 0u;
+            mWorkListBuffer = vaoManager->createUavBuffer( probes, sizeof( uint32 ), 0, zeros.data(), false );
+            mMarkReport = vaoManager->createUavBuffer( 1u + probes, sizeof( uint32 ), 0, zeros.data(), false );
+            for( MarkTicket &t : mMarkTickets )
+                t.ticket.reset();
+            mMarkNextIssue = mMarkNextTake = 0u;
+            mMarkRan = false;
         }
 
         if( !mVctLighting )
@@ -480,6 +490,17 @@ namespace Ogre
             vaoManager->destroyUavBuffer( mVarianceBuffer );
             mVarianceBuffer = 0;
         }
+        for( MarkTicket &t : mMarkTickets )
+            t.ticket.reset();
+        for( UavBufferPacked **b : { &mWorkListBuffer, &mMarkReport, &mProbeRecords, &mMarkCluster } )
+        {
+            if( *b )
+            {
+                vaoManager->destroyUavBuffer( *b );
+                *b = 0;
+            }
+        }
+        mMarkClusterCapacity = 0u;
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::setFieldVolume( const Vector3 &fieldOrigin, const Vector3 &fieldSize )
@@ -492,9 +513,6 @@ namespace Ogre
         mWindowOffset[0] = mWindowOffset[1] = mWindowOffset[2] = 0u;
         setWholeWork();
         mWorkMode = IntegrateFresh;
-        noteEstimatesReplaced();
-        mRefinesOwed = mTargetSamples - 1u;
-        mRefineWhole = true;
         invalidateAllProbes();
 
         // The same enlargement initialize() applies, for the same reason (limited
@@ -511,6 +529,7 @@ namespace Ogre
         // re-derived (the voxelizer may have moved too, which is the whole point).
         if( mVctLighting )
             setIrradianceFieldGenParams();
+        writeProbeRecords();
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::bindChainToGenerationJob()
@@ -645,12 +664,10 @@ namespace Ogre
         setWholeWork();
         mNumProbesProcessed = 0u;
         mWorkMode = IntegrateInvalidate;
-        noteEstimatesReplaced();
         update( mWorkTotal );
         setWholeWork();
         mNumProbesProcessed = 0u;
         mWorkMode = IntegrateFresh;
-        noteEstimatesReplaced();
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::beginEnteringWhole()
@@ -671,117 +688,370 @@ namespace Ogre
         update( mWorkTotal );
         mNumProbesProcessed = 0u;
         mWorkMode = mode;
-        noteEstimatesReplaced();
     }
     //-------------------------------------------------------------------------
-    uint32 PhotonIrradianceField::changeCursor() const
+    uint32 PhotonIrradianceField::slotAt( uint32 p ) const
     {
-        if( !changeRemaining() )
-            return 0u;
-        return ( mWorkRotate + mNumProbesProcessed ) % mWorkTotal;
-    }
-    //-------------------------------------------------------------------------
-    uint32 PhotonIrradianceField::changeRemaining() const
-    {
-        const bool inFlight = mWorkWhole && mWorkTotal &&
-                              ( mWorkMode == IntegrateChange || mWorkMode == IntegrateFresh );
-        return inFlight && !isWorkDone() ? mWorkTotal - mNumProbesProcessed : 0u;
-    }
-    //-------------------------------------------------------------------------
-    void PhotonIrradianceField::noteStamps( uint32 listStart, uint32 count )
-    {
-        // The job's rule, slot for slot (jahFieldWorkSlot, the history read): an invalidation stamps 0, a
-        // change skips a slot already stamped with the serial, a fresh or a change integration stamps it.
-        if( mSlotSerial.size() != mSettings.getTotalNumProbes() )
-            return;
+        // A WORK POSITION'S SLOT: the list's entry, or the box it falls in (the job's jahFieldWorkSlot, the same rule).
+        if( mWorkIsList )
+            return mWorkList[p];
         const uint32 nx = mSettings.mNumProbes[0], ny = mSettings.mNumProbes[1], nz = mSettings.mNumProbes[2];
-        for( uint32 p = listStart; p < listStart + count; ++p )
+        uint32 first = 0u, i = 0u;
+        for( ; i + 1u < mNumWorkBoxes; ++i )
         {
-            uint32 first = 0u, i = 0u;
-            for( ; i + 1u < mNumWorkBoxes; ++i )
-            {
-                const ProbeBox &b = mWorkBoxes[i];
-                const uint32 n = b.size[0] * b.size[1] * b.size[2];
-                if( p < first + n )
-                    break;
-                first += n;
-            }
             const ProbeBox &b = mWorkBoxes[i];
-            const uint32 q = p - first;
-            const uint32 x = ( b.lo[0] + q % b.size[0] ) & ( nx - 1u );
-            const uint32 y = ( b.lo[1] + ( q / b.size[0] ) % b.size[1] ) & ( ny - 1u );
-            const uint32 z = ( b.lo[2] + q / ( b.size[0] * b.size[1] ) ) & ( nz - 1u );
-            uint32 &held = mSlotSerial[x + y * nx + z * nx * ny];
-            if( mWorkMode == IntegrateInvalidate )
-                held = 0u;
-            else if( mWorkMode == IntegrateChange && held == mChangeSerial )
-                ++mChangeSkips;
-            else
-                held = mChangeSerial;
+            const uint32 n = b.size[0] * b.size[1] * b.size[2];
+            if( p < first + n )
+                break;
+            first += n;
         }
+        const ProbeBox &b = mWorkBoxes[i];
+        const uint32 q = p - first;
+        const uint32 x = ( b.lo[0] + q % b.size[0] ) & ( nx - 1u );
+        const uint32 y = ( b.lo[1] + ( q / b.size[0] ) % b.size[1] ) & ( ny - 1u );
+        const uint32 z = ( b.lo[2] + q / ( b.size[0] * b.size[1] ) ) & ( nz - 1u );
+        return x + y * nx + z * nx * ny;
     }
     //-------------------------------------------------------------------------
-    void PhotonIrradianceField::lightAgeBySlab( vector<uint32>::type &out ) const
+    void PhotonIrradianceField::noteWork( uint32 listStart, uint32 count )
     {
-        const uint32 nx = mSettings.mNumProbes[0], ny = mSettings.mNumProbes[1], nz = mSettings.mNumProbes[2];
-        out.assign( nz, 0u );
-        if( mSlotSerial.size() != size_t( nx ) * ny * nz || !mRoot )
+        // THE LEDGER, slot for slot as the job treats them (PHOTON-7 stage 5, 5-4): an invalidation empties a slot; a
+        // fresh or change integration replaces its estimate (a change's own sub-passes and K2's deep rule: the samples
+        // the pass leaves), clearing its stop and its restart owed; a refinement adds one sample up to the target (an
+        // entering pass up to its depth) - a stopped probe's group exits instead, which the stop's readback tells.
+        if( mHeld.size() != mSettings.getTotalNumProbes() )
             return;
         const uint32 now = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
-        for( uint32 z = 0u; z < nz; ++z )
+        const bool deep = ( mWorkMode == IntegrateChange || ( mWorkMode == IntegrateFresh && !mEnterDepth ) ) &&
+                          mChangeSamples > 1u;
+        const uint16 replaced = uint16( std::min( mTargetSamples, deep ? mChangeSamples : 1u ) );
+        const uint32 enterTo = mEnterDepth >= 2u ? std::min( mTargetSamples, mEnterDepth ) : 0u;
+        for( uint32 p = listStart; p < listStart + count; ++p )
         {
-            const uint32 local = ( z + nz - mWindowOffset[2] % nz ) % nz;
-            for( uint32 i = 0u; i < nx * ny; ++i )
+            const uint32 slot = slotAt( p );
+            uint16 &held = mHeld[slot];
+            if( mWorkMode == IntegrateRefine )
             {
-                const uint32 held = mSlotSerial[z * nx * ny + i];
-                if( held == mChangeSerial )
-                    continue;
-                // Superseded when the serial after it was issued (the oldest the ring holds, past 255).
-                const uint32 next = mChangeSerial - held > 255u ? mChangeSerial - 255u : held + 1u;
-                out[local] = std::max( out[local], now - mSerialFrame[next & 255u] );
+                if( enterTo )
+                    held = uint16( std::max<uint32>( held, enterTo ) );
+                else if( held > 0u && held < mTargetSamples )
+                    ++held;
+                continue;
             }
+            held = mWorkMode == IntegrateInvalidate ? 0u : replaced;
+            mReplacedFrame[slot] = now;
+            mStopped[slot] = 0u;
+            mOwedRestart[slot] = 0u;
+            if( mWorkMode == IntegrateChange )
+                ++mRestarts;
         }
     }
     //-------------------------------------------------------------------------
-    void PhotonIrradianceField::reset()
+    void PhotonIrradianceField::setWorkList( IntegrationMode mode )
     {
-        const uint32 cursor = changeCursor();
-        ++mChangeSerial;
-        mSerialFrame[mChangeSerial & 255u] = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
-        setWholeWork();
-        mWorkRotate = mWorkTotal ? cursor % mWorkTotal : 0u;
+        mWorkIsList = true;
+        mEnterDepth = 0u;
+        mNumWorkBoxes = 0u;
+        mWorkTotal = uint32( mWorkList.size() );
         mNumProbesProcessed = 0u;
-        mWorkMode = IntegrateChange;
-        noteEstimatesReplaced();
-        mRefinesOwed = mTargetSamples - 1u;
-        mRefineWhole = true;
+        mWorkMode = mode;
+        if( mWorkTotal && mWorkListBuffer )
+            mWorkListBuffer->upload( mWorkList.data(), 0u, mWorkTotal );
     }
     //-------------------------------------------------------------------------
-    void PhotonIrradianceField::resumeChange( uint32 cursor, uint32 remaining )
+    void PhotonIrradianceField::markSlots( const uint32 *slots, size_t count )
     {
-        setWholeWork();
-        if( !mWorkTotal )
+        for( size_t k = 0; k < count; ++k )
+        {
+            const uint32 slot = slots[k];
+            if( slot >= mOwedRestart.size() || !mHeld[slot] || mOwedRestart[slot] )
+                continue;   // (an empty slot is integrated fresh anyway)
+            mOwedRestart[slot] = 1u;
+            ++mOwedRestarts;
+        }
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::markAll()
+    {
+        ++mMarkAlls;
+        for( size_t slot = 0; slot < mOwedRestart.size(); ++slot )
+        {
+            if( !mHeld[slot] || mOwedRestart[slot] )
+                continue;
+            mOwedRestart[slot] = 1u;
+            ++mOwedRestarts;
+        }
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::markBox( const Vector3 &lo, const Vector3 &hi )
+    {
+        for( uint32 slot = 0u; slot < uint32( mOwedRestart.size() ); ++slot )
+        {
+            if( !mHeld[slot] || mOwedRestart[slot] )
+                continue;
+            const Vector3 p = probeWorldPosition( slot );
+            if( p.x < lo.x || p.y < lo.y || p.z < lo.z || p.x > hi.x || p.y > hi.y || p.z > hi.z )
+                continue;
+            mOwedRestart[slot] = 1u;
+            ++mOwedRestarts;
+            ++mMarkedByRegion;
+        }
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::refreshOwed()
+    {
+        uint32 restarts = 0u, refines = 0u;
+        uint64 integrations = 0u;
+        for( size_t slot = 0; slot < mHeld.size(); ++slot )
+        {
+            if( mOwedRestart[slot] )
+            {
+                ++restarts;
+                integrations += std::max( mChangeSamples, 1u ) + ( mTargetSamples > mChangeSamples ? mTargetSamples - mChangeSamples : 0u );
+            }
+            else if( mHeld[slot] > 0u && mHeld[slot] < mTargetSamples && !stoppedTrusted( uint32( slot ) ) )
+            {
+                ++refines;
+                integrations += mTargetSamples - mHeld[slot];
+            }
+        }
+        mOwedRestarts = restarts;
+        mOwedRefines = refines;
+        mOwedIntegrations = integrations;
+    }
+    //-------------------------------------------------------------------------
+    bool PhotonIrradianceField::beginNextWork()
+    {
+        if( !isWorkDone() )
+            return true;   // the current work continues
+        // THE ENTERING PASSES (J1): the same boxes again, one sample deeper, before anything else.
+        if( mEnterDepth )
+        {
+            if( mEnterDepth < mChangeSamples )
+            {
+                ++mEnterDepth;
+                mNumProbesProcessed = 0u;
+                mWorkMode = IntegrateRefine;
+                return true;
+            }
+            mEnterDepth = 0u;
+        }
+        // THE MARKED PROBES, RESTARTED (keep 0, deep), in slot order
+        mWorkList.clear();
+        for( uint32 slot = 0u; slot < uint32( mOwedRestart.size() ); ++slot )
+            if( mOwedRestart[slot] )
+                mWorkList.push_back( slot );
+        if( !mWorkList.empty() )
+        {
+            setWorkList( IntegrateChange );
+            return true;
+        }
+        // ...THEN THE PROBES BELOW THE TARGET THE STOP HAS NOT ENDED, one sample a pass
+        for( uint32 slot = 0u; slot < uint32( mHeld.size() ); ++slot )
+            if( mHeld[slot] > 0u && mHeld[slot] < mTargetSamples && !stoppedTrusted( slot ) )
+                mWorkList.push_back( slot );
+        if( !mWorkList.empty() )
+        {
+            setWorkList( IntegrateRefine );
+            return true;
+        }
+        mWorkIsList = false;
+        return false;
+    }
+    //-------------------------------------------------------------------------
+    Vector3 PhotonIrradianceField::probeWorldPosition( uint32 slot ) const
+    {
+        const uint32 nx = mSettings.mNumProbes[0], ny = mSettings.mNumProbes[1], nz = mSettings.mNumProbes[2];
+        const uint32 s3[3] = { slot % nx, ( slot / nx ) % ny, slot / ( nx * ny ) };
+        const uint32 n3[3] = { nx, ny, nz };
+        const Vector3 spacing = getProbeSpacing();
+        Vector3 p;
+        for( size_t a = 0u; a < 3u; ++a )
+        {
+            const uint32 local = ( s3[a] + n3[a] - mWindowOffset[a] % n3[a] ) & ( n3[a] - 1u );   // jahFieldLocal
+            p[a] = mFieldOrigin[a] + Real( local ) * spacing[a];
+        }
+        return p;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::writeProbeRecords()
+    {
+        // THE ACCUMULATION'S RECEIVERS (JahCardIndirect_cs.glsl's two vec4 a record): each slot's probe, a POINT -
+        // ( its world position, the slot as uint bits ), ( zero half extents ).
+        const uint32 probes = mSettings.getTotalNumProbes();
+        if( !probes )
             return;
-        remaining = std::min( remaining, mWorkTotal );
-        mNumProbesProcessed = mWorkTotal - remaining;
-        // The rotation that puts the cursor `processed` positions into the list.
-        mWorkRotate = ( cursor % mWorkTotal + mWorkTotal - mNumProbesProcessed % mWorkTotal ) % mWorkTotal;
-        mWorkMode = IntegrateChange;
-        noteEstimatesReplaced();
-        // The refinements the change owes after it: the whole grid (reset's), whatever the scroll joined.
-        mRefinesOwed = mTargetSamples - 1u;
-        mRefineWhole = true;
+        VaoManager *vaoManager = mRoot->getRenderSystem()->getVaoManager();
+        vector<float>::type rec( size_t( probes ) * 8u, 0.0f );
+        for( uint32 slot = 0u; slot < probes; ++slot )
+        {
+            const Vector3 p = probeWorldPosition( slot );
+            rec[slot * 8u + 0u] = p.x;
+            rec[slot * 8u + 1u] = p.y;
+            rec[slot * 8u + 2u] = p.z;
+            memcpy( &rec[slot * 8u + 3u], &slot, sizeof( slot ) );
+        }
+        if( !mProbeRecords )
+            mProbeRecords = vaoManager->createUavBuffer( size_t( probes ) * 2u, 16u, 0, rec.data(), false );
+        else
+            mProbeRecords->upload( rec.data(), 0u, size_t( probes ) * 2u );
     }
     //-------------------------------------------------------------------------
-    void PhotonIrradianceField::refine()
+    void PhotonIrradianceField::accumulateMoves( UavBufferPacked *brickState, const uint32 dims[3],
+                                                 const Vector3 &corner, float brickSide, const Vector3 *finerLo,
+                                                 const Vector3 *finerHi, uint64 frame )
     {
-        // OVER WHAT THE EVENT TOUCHED (scrollWindow's band), or the whole grid.
-        if( mRefineWhole )
-            setWholeWork();
-        else
-            setBoxesFromBands( mBandLo, mBandNum );
-        mNumProbesProcessed = 0u;
-        mWorkMode = IntegrateRefine;
+        // THE PROBES' WOULD-MOVE (PHOTON-7 stage 5, 5-4): the cards' job (JahCardIndirect_cs.glsl) with the probes as
+        // its receivers - THE REDUCE (each 4^3 cluster of this cascade's bricks: its largest absolute move and the box
+        // of the bricks that moved), then THE ACCUMULATION (one thread a probe: each cluster's move times the bound of
+        // the share of the probe's sphere it can fill, min( 1, S / ( pi d^2 ) ), times the probe's sensitivity - its
+        // codes per unit of radiance, written by the generation job), listing a probe at a code.
+        if( !brickState || !mVarianceBuffer || !mProbeRecords || !mMarkReport || !mHeld.size() )
+            return;
+        RenderSystem *rs = mRoot->getRenderSystem();
+        HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms();
+        if( !mAccumJob )
+            mAccumJob = hc->findComputeJobNoThrow( "Jahshaka/FieldAccumulate" );
+        if( !mAccumJob || !mDepthVarianceTex )
+            return;
+        const uint32 clusters = ( ( dims[0] + 3u ) / 4u ) * ( ( dims[1] + 3u ) / 4u ) * ( ( dims[2] + 3u ) / 4u );
+        VaoManager *vaoManager = rs->getVaoManager();
+        if( clusters > mMarkClusterCapacity )
+        {
+            if( mMarkCluster )
+                vaoManager->destroyUavBuffer( mMarkCluster );
+            vector<uint32>::type zeros( 2u * clusters, 0u );
+            mMarkCluster = vaoManager->createUavBuffer( 2u * clusters, sizeof( uint32 ), 0, zeros.data(), false );
+            mMarkClusterCapacity = clusters;
+        }
+        const auto bufSlot = []( UavBufferPacked *b, ResourceAccess::ResourceAccess a, size_t offset, size_t bytes )
+        {
+            DescriptorSetUav::BufferSlot slot( DescriptorSetUav::BufferSlot::makeEmpty() );
+            slot.buffer = b;
+            slot.offset = offset;
+            slot.sizeBytes = bytes;
+            slot.access = a;
+            return slot;
+        };
+        const uint32 probes = uint32( mHeld.size() );
+        mAccumJob->_setUavBuffer( 0u, bufSlot( brickState, ResourceAccess::Read, 0u, 0u ) );
+        mAccumJob->_setUavBuffer( 1u, bufSlot( mProbeRecords, ResourceAccess::Read, 0u, 0u ) );
+        mAccumJob->_setUavBuffer( 2u, bufSlot( mVarianceBuffer, ResourceAccess::ReadWrite, size_t( mMarkStart ) * 4u,
+                                               size_t( probes ) * 16u ) );
+        mAccumJob->_setUavBuffer( 3u, bufSlot( mMarkReport, ResourceAccess::ReadWrite, 0u, 0u ) );
+        mAccumJob->_setUavBuffer( 4u, bufSlot( mMarkCluster, ResourceAccess::ReadWrite, 0u, 0u ) );
+        // THE VISIBILITY'S DEPTH MOMENTS (Jahshaka/FieldAccumulate, JahCardIndirect_cs.glsl's field variant)
+        {
+            DescriptorSetTexture2::TextureSlot tex( DescriptorSetTexture2::TextureSlot::makeEmpty() );
+            tex.texture = mDepthVarianceTex;
+            mAccumJob->setTexture( 0u, tex );
+            tex.texture = mIrradianceTex;
+            mAccumJob->setTexture( 1u, tex );
+        }
+        ShaderParams &params = mAccumJob->getShaderParams( "default" );
+        const auto set = [&params]( const char *name, const void *v, bool isFloat )
+        {
+            ShaderParams::Param *p = params.findParameter( name );
+            if( !p )
+                return;
+            if( isFloat )
+                p->setManualValue( static_cast<const float *>( v ), 4u );
+            else
+                p->setManualValue( static_cast<const uint32 *>( v ), 4u );
+        };
+        if( mMarkClearFrame != frame )
+        {
+            mMarkClearFrame = frame;
+            const uint32 mode[4] = { 1u, 0u, probes, 0u };
+            set( "caMode", mode, false );
+            params.setDirty();
+            mAccumJob->setNumThreadGroupsBasedOn( HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u );
+            mAccumJob->setNumThreadGroups( 1u, 1u, 1u );
+            jahshaka::engine::detail::photonDispatch( hc, mAccumJob, rs );
+        }
+        const float self[4] = { corner.x, corner.y, corner.z, brickSide };
+        const uint32 d[4] = { dims[0], dims[1], dims[2], dims[0] * dims[1] * dims[2] };
+        float lo[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, hi[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        if( finerLo && finerHi )
+        {
+            lo[0] = finerLo->x; lo[1] = finerLo->y; lo[2] = finerLo->z; lo[3] = 1.0f;
+            hi[0] = finerHi->x; hi[1] = finerHi->y; hi[2] = finerHi->z;
+        }
+        {
+            // the field: the probes per slot row and plane, the depth tile's interior and the atlas's width; the probe
+            // spacing per axis and the depth's own bound in grid units (the generation job's: cascade 0's diagonal,
+            // 1.414 of its normalised units, along the ray: at most 1.414 x the larger probe count)
+            const uint32 field[4] = { mSettings.mNumProbes[0], mSettings.mNumProbes[0] * mSettings.mNumProbes[1],
+                                      mSettings.mDepthProbeResolution, mDepthVarianceTex->getWidth() };
+            const Vector3 sp = getProbeSpacing();
+            const uint32 nMax = std::max( mSettings.mNumProbes[0], std::max( mSettings.mNumProbes[1], mSettings.mNumProbes[2] ) );
+            const float spacing[4] = { sp.x, sp.y, sp.z, 1.414213562f * float( nMax ) };
+            set( "caField", field, false );
+            set( "caSpacing", spacing, true );
+            const uint32 field2[4] = { mSettings.mIrradianceResolution, mIrradianceTex->getWidth(), 0u, 0u };
+            set( "caField2", field2, false );
+        }
+        const uint32 reduce[4] = { 2u, probes, probes, 0u };
+        set( "caMode", reduce, false );
+        set( "caSelf", self, true );
+        set( "caDims", d, false );
+        set( "caInnerLo", lo, true );
+        set( "caInnerHi", hi, true );
+        params.setDirty();
+        mAccumJob->setNumThreadGroupsBasedOn( HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u );
+        mAccumJob->setNumThreadGroups( ( clusters + 63u ) / 64u, 1u, 1u );
+        jahshaka::engine::detail::photonDispatch( hc, mAccumJob, rs );
+        const uint32 mode[4] = { 0u, probes, probes, 0u };
+        set( "caMode", mode, false );
+        params.setDirty();
+        mAccumJob->setNumThreadGroups( ( probes + 63u ) / 64u, 1u, 1u );
+        jahshaka::engine::detail::photonDispatch( hc, mAccumJob, rs );
+        mMarkRan = true;
+        const DescriptorSetUav::BufferSlot empty = DescriptorSetUav::BufferSlot::makeEmpty();
+        for( uint8 k = 0u; k < 5u; ++k )
+            mAccumJob->_setUavBuffer( k, empty );
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::endMarkFrame( uint64 frame )
+    {
+        if( !mMarkRan || !mMarkReport )
+            return;
+        mMarkRan = false;
+        MarkTicket &t = mMarkTickets[mMarkNextIssue];
+        if( t.ticket )
+            return;   // every slot in flight: a later frame's report answers (the probes stay listed on the GPU)
+        t.ticket = mMarkReport->readRequest( 0u, 1u + mHeld.size(), false );
+        t.frame = frame;
+        mMarkNextIssue = ( mMarkNextIssue + 1u ) % kMarkTickets;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceField::harvestMarks( uint64 frame )
+    {
+        VaoManager *vao = mRoot->getRenderSystem()->getVaoManager();
+        for( ;; )
+        {
+            MarkTicket &t = mMarkTickets[mMarkNextTake];
+            if( !t.ticket )
+                return;
+            // TAKEN AT A FIXED LAG OF HOST FRAMES (the feedback readings' rule): a function of the frames, never of the
+            // GPU's pace.
+            if( frame < t.frame || frame - t.frame <= vao->getDynamicBufferMultiplier() )
+                return;
+            const uint32 *w = static_cast<const uint32 *>( t.ticket->map() );
+            const uint32 n = std::min<uint32>( w[0], uint32( mHeld.size() ) );
+            for( uint32 k = 0u; k < n; ++k )
+            {
+                const uint32 slot = w[1u + k];
+                if( slot >= mOwedRestart.size() || !mHeld[slot] || mOwedRestart[slot] )
+                    continue;
+                mOwedRestart[slot] = 1u;
+                ++mOwedRestarts;
+                ++mMarkedByMoves;
+            }
+            t.ticket->unmap();
+            t.ticket.reset();
+            mMarkNextTake = ( mMarkNextTake + 1u ) % kMarkTickets;
+        }
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::setVarianceStop( uint32 minSamples, float precision, float meanFloor )
@@ -798,72 +1068,34 @@ namespace Ogre
             return;
         // INACCURATE TRACKING (the voxel gather's readout, OgreGpuVoxelGather.cpp): the copy
         // rides the frame's own submission after this frame's integrations, and the ticket is
-        // done once the device finished that frame.
-        mVarianceTicket = mVarianceBuffer->readRequest( 0u, 4u, false );
-        mVarianceTicketEpoch = mStopEpoch;
+        // done once the device finished that frame. The counters and the per-slot stop flags
+        // (PHOTON-7 stage 5, 5-4: a refinement list leaves a stopped probe out).
+        mVarianceTicket = mVarianceBuffer->readRequest( 0u, 4u + mSettings.getTotalNumProbes(), false );
         mVarianceTicketFrame = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::harvestVarianceReadout()
     {
-        // A FIXED LATENCY IN FRAMES, never "when the device happens to finish": the reading drives the early end
-        // and the gather's rest key, and a frame that depended on the GPU's speed would make the picture of a
-        // given frame differ from run to run (the selftest's mover pose did: two hashes from one tip). Taken
-        // exactly when every frame in flight since the request has been waited on - the transfer is done by
-        // then (Ogre fences the frame before reusing its dynamic buffers), so the map never stalls.
+        // A FIXED LATENCY IN FRAMES, never "when the device happens to finish": the reading drives the
+        // refinement lists and the gather's rest key, and a frame that depended on the GPU's speed would make the
+        // picture of a given frame differ from run to run (the selftest's mover pose did: two hashes from one
+        // tip). Taken exactly when every frame in flight since the request has been waited on - the transfer is
+        // done by then (Ogre fences the frame before reusing its dynamic buffers), so the map never stalls.
         if( !mVarianceTicket )
             return;
         VaoManager *vaoManager = mRoot->getRenderSystem()->getVaoManager();
         if( vaoManager->getFrameCount() - mVarianceTicketFrame <= uint32( vaoManager->getDynamicBufferMultiplier() ) )
             return;
         const uint32 *w = static_cast<const uint32 *>( mVarianceTicket->map() );
-        const uint32 stops = w[0], unstops = w[1], integrations = w[2];
+        mIntegrations = w[2];
+        // THE STOPS, trusted for a slot whose estimate was last replaced before the request (stoppedTrusted): a
+        // replacement in the request's frame or after clears the flag the reading may still show.
+        const size_t probes = std::min<size_t>( mStopped.size(), mSettings.getTotalNumProbes() );
+        for( size_t slot = 0; slot < probes; ++slot )
+            mStopped[slot] = w[4u + slot] != 0u ? 1u : 0u;
+        mStopsReadFrame = mVarianceTicketFrame;
         mVarianceTicket->unmap();
         mVarianceTicket.reset();
-        mIntegrations = integrations;
-        // A reading asked for before the last non-refining work counts stops that work cleared.
-        if( mVarianceTicketEpoch == mStopEpoch )
-            mProbesStopped = stops - unstops;
-    }
-    //-------------------------------------------------------------------------
-    void PhotonIrradianceField::noteEstimatesReplaced()
-    {
-        // FROM THE MOMENT THE WORK IS DEFINED, not from its first dispatch: a planner that read
-        // "every probe stopped" between a scroll's (or a change's) definition and its dispatch
-        // would end the very work that clears those stops.
-        ++mStopEpoch;
-        mProbesStopped = 0u;
-    }
-    //-------------------------------------------------------------------------
-    void PhotonIrradianceField::endRefinements()
-    {
-        // Only a REFINEMENT ends early: work that replaces estimates always runs whole - and an
-        // ENTERING pass (J1) is the probes' first samples, not a refinement.
-        if( ( mWorkMode != IntegrateRefine && !isWorkDone() ) || entering() )
-            return;
-        mRefinesOwed = 0u;
-        mNumProbesProcessed = mWorkTotal;
-    }
-    //-------------------------------------------------------------------------
-    bool PhotonIrradianceField::beginOwedRefinement()
-    {
-        // THE ENTERING PASSES (J1): the same boxes again, one sample deeper, before the schedule.
-        if( mEnterDepth && isWorkDone() )
-        {
-            if( mEnterDepth < mChangeSamples )
-            {
-                ++mEnterDepth;
-                mNumProbesProcessed = 0u;
-                mWorkMode = IntegrateRefine;
-                return true;
-            }
-            mEnterDepth = 0u;
-        }
-        if( !isWorkDone() || !mRefinesOwed )
-            return false;
-        --mRefinesOwed;
-        refine();
-        return true;
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::setIntegrationPolicy( uint32 targetSamples, uint32 keepOnChange,
@@ -876,8 +1108,7 @@ namespace Ogre
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::setWholeWork()
     {
-        mWorkRotate = 0u;
-        mWorkWhole = true;
+        mWorkIsList = false;
         mEnterDepth = 0u;
         mNumWorkBoxes = 1u;
         for( size_t i = 0u; i < 3u; ++i )
@@ -895,8 +1126,7 @@ namespace Ogre
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::setBoxesFromBands( const uint32 enteredLo[3], const uint32 enteredNum[3] )
     {
-        mWorkRotate = 0u;
-        mWorkWhole = false;
+        mWorkIsList = false;
         // ONE BOX PER AXIS WITH A BAND, DISJOINT (an integration job convolves a
         // probe's tile in place, so no probe may be integrated twice by one
         // dispatch). Box x takes the x band's planes whole; box y the y band's planes
@@ -959,53 +1189,9 @@ namespace Ogre
             enteredLo[a] = static_cast<uint32>( ( firstLocal + newOffset ) % n );
             enteredNum[a] = static_cast<uint32>( d > 0 ? d : -d );
         }
-        // THE REFINEMENTS THIS SCROLL OWES cover what it touched (ENGINE-UPGRADE-2): the
-        // entered planes — joined to the band an unfinished refinement of an earlier
-        // scroll still owes, when the window kept moving the same way — never the whole
-        // grid, whose kept probes are at the target already. A schedule that cannot be
-        // a band (an unfinished whole-grid one, a reversal, a band around the grid)
-        // stays whole. A pass this scroll interrupts is owed again in full (PHOTON-2 K3:
-        // mRefinesOwed restarts at target - 1 below over the joined band or the grid,
-        // so the probes it had not reached take their sample - and the ones it had reached
-        // are refined again toward the target: a probe's group exits only at the target or
-        // stopped by the variance stop).
-        {
-            const bool pending = mRefinesOwed > 0u || !isWorkDone();
-            if( !pending )
-            {
-                mRefineWhole = false;
-                for( size_t a = 0u; a < 3u; ++a )
-                {
-                    mBandLo[a] = enteredLo[a];
-                    mBandNum[a] = enteredNum[a];
-                }
-            }
-            else if( !mRefineWhole )
-            {
-                for( size_t a = 0u; a < 3u && !mRefineWhole; ++a )
-                {
-                    if( !enteredNum[a] )
-                        continue;
-                    const uint32 n = mSettings.mNumProbes[a];
-                    if( !mBandNum[a] )
-                    {
-                        mBandLo[a] = enteredLo[a];
-                        mBandNum[a] = enteredNum[a];
-                    }
-                    else if( delta[a] > 0 && ( mBandLo[a] + mBandNum[a] ) % n == enteredLo[a] )
-                        mBandNum[a] += enteredNum[a];
-                    else if( delta[a] < 0 && ( enteredLo[a] + enteredNum[a] ) % n == mBandLo[a] )
-                    {
-                        mBandLo[a] = enteredLo[a];
-                        mBandNum[a] += enteredNum[a];
-                    }
-                    else
-                        mRefineWhole = true;
-                    if( mBandNum[a] >= n )
-                        mRefineWhole = true;
-                }
-            }
-        }
+        // (ITS REFINEMENTS ARE THE LEDGER'S, PHOTON-7 stage 5, 5-4: the entered probes are below the target once
+        // their entering passes are done, and beginNextWork refines every such probe - no band to join, no whole
+        // grid owed.)
         // THE WORK: the entered planes, fresh - the first ENTERING pass (J1: one sample a pass, to
         // mChangeSamples, unless the caller integrates them inline: enterInline).
         setBoxesFromBands( enteredLo, enteredNum );
@@ -1014,8 +1200,6 @@ namespace Ogre
         // The entered planes have no history (PHOTON-FIELD-ROTATE-1), and they owe the
         // refinements that bring them to the target.
         mWorkMode = IntegrateFresh;
-        noteEstimatesReplaced();
-        mRefinesOwed = mTargetSamples - 1u;
         // The probe-to-voxel transform reads the (moved) origin.
         if( mVctLighting )
             setIrradianceFieldGenParams();
@@ -1023,28 +1207,19 @@ namespace Ogre
         // drawn by atlas slot, and a scroll moved every probe's slot.
         if( mDebugIfdProbeVisualizer )
             placeDebugVisualizer();
+        // ...and the accumulation's receivers (every slot's probe point: the entered planes' moved)
+        writeProbeRecords();
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::update( uint32 probesPerFrame )
     {
-        // Jahshaka (PHOTON-WRITER-1): the WORK, not the whole grid (the two are the
-        // same after reset()).
+        // Jahshaka (PHOTON-WRITER-1): the WORK, not the whole grid.
         const uint32 totalNumProbes = mWorkTotal;
         if( mNumProbesProcessed >= totalNumProbes )
             return;
 
         probesPerFrame = std::min( totalNumProbes - mNumProbesProcessed, probesPerFrame );
-        // Jahshaka (K1): THE ROTATED LIST - the dispatch's first list position is the probe position
-        // (rotation + progress) mod the total; a range across the list's end is two dispatches.
-        const uint32 listStart = mWorkRotate ? ( mWorkRotate + mNumProbesProcessed ) % totalNumProbes
-                                             : mNumProbesProcessed;
-        if( listStart + probesPerFrame > totalNumProbes )
-        {
-            const uint32 first = totalNumProbes - listStart;
-            update( first );
-            update( probesPerFrame - first );
-            return;
-        }
+        const uint32 listStart = mNumProbesProcessed;
 
         // THIS DISPATCH'S OWN PARAMETER BUFFER (the ring's reason is at its declaration).
         VaoManager *vaoManager = mRoot->getRenderSystem()->getVaoManager();
@@ -1106,6 +1281,9 @@ namespace Ogre
                 if( used )
                     firstPos += b.size[0] * b.size[1] * b.size[2];
             }
+            // (5-4) THE LIST: the work buffer's slots instead of the boxes; and where the marks begin
+            mIfGenParams.boxSize[0].w = mWorkIsList ? 1u : 0u;
+            mIfGenParams.numProbes.w = mMarkStart;
             mIfGenParams.windowOffset.x = mWindowOffset[0];
             mIfGenParams.windowOffset.y = mWindowOffset[1];
             mIfGenParams.windowOffset.z = mWindowOffset[2];
@@ -1113,8 +1291,8 @@ namespace Ogre
             // writes nothing (the dispatch is rounded up to whole rows).
             mIfGenParams.windowOffset.w = listStart + probesPerFrame;
         }
-        if( mWorkMode != IntegrateRefine )
-            noteStamps( listStart, probesPerFrame );
+        if( !mInSubPass )
+            noteWork( listStart, probesPerFrame );
         {
             // Jahshaka (PHOTON-FIELD-ROTATE-1): THE RAY ROTATION IS A FUNCTION OF THE
             // PROBE'S PLACE IN THE WORLD AND ITS OWN SAMPLE INDEX (the job hashes the
@@ -1131,8 +1309,7 @@ namespace Ogre
                 static_cast<uint32>( static_cast<int32>( Math::Floor( mFieldOrigin.y / spacing.y + 0.5f ) ) );
             mIfGenParams.latticeOrigin.z =
                 static_cast<uint32>( static_cast<int32>( Math::Floor( mFieldOrigin.z / spacing.z + 0.5f ) ) );
-            // w: THE INPUTS' SERIAL a fresh or change integration stamps (K4: mChangeSerial).
-            mIfGenParams.latticeOrigin.w = mChangeSerial;
+            mIfGenParams.latticeOrigin.w = 0u;   // (unused)
             mIfGenParams.sweep.x = static_cast<uint32>( mWorkMode );
             // An ENTERING refinement (J1) lifts its probes to mEnterDepth samples and no further.
             mIfGenParams.sweep.y = mEnterDepth >= 2u && mWorkMode == IntegrateRefine
@@ -1143,10 +1320,6 @@ namespace Ogre
             mIfGenParams.varianceStop = float4(
                 Vector4( mStopPrecision, static_cast<Real>( mStopMinSamples ), mStopMeanFloor, 0.0f ) );
         }
-        // Work that is not a refinement replaces estimates and clears their stops: every
-        // reading asked for before its last dispatch is stale.
-        if( mWorkMode != IntegrateRefine )
-            noteEstimatesReplaced();
         mIfGenParams.probesPerRow = numThreadGroupsX;  // There's one probe per group
         *ifGenParams = mIfGenParams;
 
@@ -1163,12 +1336,12 @@ namespace Ogre
         if( ( mWorkMode == IntegrateChange || ( mWorkMode == IntegrateFresh && !mEnterDepth ) ) &&
             mChangeSamples > 1u )
         {
-            // Sub-pass i lifts a probe to i + 1 samples and no further (its target, for the pass): a probe
-            // the first pass skipped (K4: it holds the inputs already, at least as deep) exits at its
-            // history read in every one.
+            // Sub-pass i lifts a probe to i + 1 samples and no further (its target, for the pass); the ledger
+            // counted the pass's samples once (noteWork).
             const IntegrationMode mode = mWorkMode;
             const uint32 target = mTargetSamples;
             const uint32 start = mNumProbesProcessed - probesPerFrame;
+            mInSubPass = true;
             for( uint32 i = 1u; i < mChangeSamples; ++i )
             {
                 mNumProbesProcessed = start;
@@ -1176,6 +1349,7 @@ namespace Ogre
                 mTargetSamples = std::min( target, i + 1u );
                 update( probesPerFrame );
             }
+            mInSubPass = false;
             mTargetSamples = target;
             mWorkMode = mode;
             mNumProbesProcessed = start + probesPerFrame;
@@ -1203,9 +1377,15 @@ namespace Ogre
         variance.buffer = mVarianceBuffer;
         variance.access = ResourceAccess::ReadWrite;
         mGenerationJob->_setUavBuffer( 2, variance );
+        // ...and THE WORK LIST (PHOTON-7 stage 5, 5-4: read when the work is a list; bound always)
+        DescriptorSetUav::BufferSlot work( DescriptorSetUav::BufferSlot::makeEmpty() );
+        work.buffer = mWorkListBuffer;
+        work.access = ResourceAccess::Read;
+        mGenerationJob->_setUavBuffer( 3, work );
         jahshaka::engine::detail::photonDispatch( hlmsCompute, mGenerationJob, renderSystem );
         // The descriptor holds a raw pointer a rebuild destroys: nothing stays bound.
         mGenerationJob->_setUavBuffer( 2, DescriptorSetUav::BufferSlot::makeEmpty() );
+        mGenerationJob->_setUavBuffer( 3, DescriptorSetUav::BufferSlot::makeEmpty() );
         requestVarianceReadout();
         uav.texture = mDepthVarianceTex;
         mDepthMirrorBorderJob->_setUavTexture( 0, uav );

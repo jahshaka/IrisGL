@@ -171,6 +171,9 @@ namespace Ogre
             uint32 numProcessedProbes = 0u;
             uint32 padding0 = 0u;
 
+            // xyz the probe counts; w the variance buffer's word where THE MARKS begin (PHOTON-7 stage 5, 5-4:
+            // four words a probe slot - its sensitivity, the would-move accumulated, the rounding's fraction,
+            // listed - JahCardIndirect_cs.glsl's state with the probe as the receiver).
             uint4 numProbes;
 
             // Jahshaka (PHOTON-WRITER-1): THE WORK, as up to three disjoint boxes of
@@ -178,7 +181,8 @@ namespace Ogre
             // probe count; w = the box's first position in the work list, all ones
             // for an unused box) and their sizes (xyz; w unused). A list position
             // p maps to the box it falls in and from there to a slot. The whole
-            // field is one box at slot 0 with the grid's own size.
+            // field is one box at slot 0 with the grid's own size. PHOTON-7 stage 5 (5-4): boxSize[0].w = 1
+            // makes the work A LIST OF SLOTS instead (the work buffer, U3: list position p is slot list[p]).
             uint4 boxLo[3];
             uint4 boxSize[3];
             // ...and THE WINDOW: the field is a toroidal window over a probe lattice
@@ -239,12 +243,57 @@ namespace Ogre
 
         PhotonIrradianceFieldSettings mSettings;
         /// Number of probes processed so far, as a position in the WORK (the boxes
-        /// below). We process the work across multiple frames.
+        /// below, or the list). We process the work across multiple frames.
         uint32 mNumProbesProcessed;
+        /// Jahshaka (PHOTON-7 stage 5, 5-4): THE WORK AS A LIST of slots (beginNextWork's restarts and refinements),
+        /// uploaded to mWorkListBuffer when it is defined; false = the boxes.
+        bool mWorkIsList = false;
+        vector<uint32>::type mWorkList;
+        UavBufferPacked *mWorkListBuffer = nullptr;
+        void setWorkList( IntegrationMode mode );
+        /// THE PER-SLOT LEDGER (5-4): the samples each slot's estimate holds as the dispatches set them (0: none - an
+        /// invalidated or never integrated tile), the frame of its last estimate-replacing dispatch, its variance stop as
+        /// the last flags' readback found it (trusted only when that readback was asked for after the replacement), and
+        /// a RESTART owed (a mark).
+        vector<uint16>::type mHeld;
+        vector<uint32>::type mReplacedFrame;
+        vector<uint8>::type mStopped;
+        vector<uint8>::type mOwedRestart;
+        uint32 mStopsReadFrame = 0u;   ///< the frame the stopped flags were asked for on
+        uint32 mOwedRestarts = 0u, mOwedRefines = 0u;
+        uint64 mOwedIntegrations = 0u;
+        bool mInSubPass = false;       ///< a change's own deep sub-passes (update): the ledger counts the pass once
+        void noteWork( uint32 listStart, uint32 count );
+        uint32 slotAt( uint32 listPos ) const;
+        bool stoppedTrusted( uint32 slot ) const
+        {
+            return mStopped[slot] != 0u && mStopsReadFrame > mReplacedFrame[slot];
+        }
+        /// THE MARKS (5-4): the variance buffer's word where they begin, the probes' records the accumulation reads
+        /// (two vec4 a slot: the probe's world point and the slot; zeros), the frame's report (a count, then slots) and
+        /// the moved bricks' clusters (the accumulation's reduce) - and the reports in flight.
+        uint32 mMarkStart = 0u;
+        UavBufferPacked *mProbeRecords = nullptr;
+        UavBufferPacked *mMarkReport = nullptr;
+        UavBufferPacked *mMarkCluster = nullptr;
+        uint32 mMarkClusterCapacity = 0u;
+        HlmsComputeJob *mAccumJob = nullptr;
+        uint64 mMarkClearFrame = ~0ull;
+        bool mMarkRan = false;
+        struct MarkTicket
+        {
+            AsyncTicketPtr ticket;
+            uint64 frame = 0ull;
+        };
+        static constexpr uint32 kMarkTickets = 4u;
+        MarkTicket mMarkTickets[kMarkTickets];
+        uint32 mMarkNextIssue = 0u, mMarkNextTake = 0u;
+        uint64 mMarkedByMoves = 0ull, mMarkedByRegion = 0ull, mMarkAlls = 0ull, mRestarts = 0ull;
+        void writeProbeRecords();
 
         /// Jahshaka (PHOTON-WRITER-1): the work the next update() calls walk - up to
-        /// three disjoint boxes of probe slots (reset(): the whole grid; a scroll:
-        /// the planes that entered the window) - and its probe count.
+        /// three disjoint boxes of probe slots (a build or a re-placement: the whole grid; a
+        /// scroll: the planes that entered the window) - and its probe count.
         struct ProbeBox
         {
             uint32 lo[3] = {};
@@ -266,62 +315,29 @@ namespace Ogre
         /// Jahshaka (PHOTON-2 stage 2a): the samples a CHANGE integrates per probe in the
         /// pass that replaces its estimate (setChangeSamples; 1 = upstream's one).
         uint32          mChangeSamples;
-        /// Jahshaka (K1): the whole-grid work list's ROTATION - list position p is probe position
-        /// (p + mWorkRotate) mod the total; a change resumes at its cursor (reset). 0 for a band.
-        uint32          mWorkRotate = 0u;
-        /// Jahshaka (K1): the work is the whole grid (setWholeWork), not a scroll's bands.
-        bool            mWorkWhole = true;
         /// Jahshaka (PHOTON-2 J1): THE ENTERING PASSES - a scroll's entered planes, invalidated in the
         /// follow frame (count 0: no weight in the reader), take one sample a pass at the budget: pass k
         /// (1 = fresh, 2.. = a refinement to k samples) lifts every entered probe to k samples, to
         /// mChangeSamples, and the reader's weight min( samples / mChangeSamples, 1 ) fades them in
         /// over those passes. 0 = no entering work.
         uint32          mEnterDepth = 0u;
-        /// Jahshaka (K4): THE INPUTS' SERIAL - moved by reset() (the inputs changed); a fresh or a
-        /// change integration stamps its probe with it (the job's JAH_IFD_STAMP) and a CHANGE skips a
-        /// probe already stamped (it holds these inputs: a scroll's entered plane, or a probe the
-        /// change reached before the work was re-defined). An invalidation stamps 0.
-        uint32          mChangeSerial = 1u;
-        /// Jahshaka (K1): THE LIGHT AGE LEDGER - the CPU's mirror of the job's stamps (the serial each
-        /// slot's estimate integrates, by the same rule as the job: recorded in dispatch order) and the
-        /// frame each of the last 256 serials was issued: lightAgeBySlab's reading.
-        vector<uint32>::type mSlotSerial;
-        uint32          mSerialFrame[256] = {};
-        /// Jahshaka (K4): the probes a change skipped as holding its inputs already (since the build).
-        uint64          mChangeSkips = 0u;
-        void noteStamps( uint32 listStart, uint32 count );
         uint64          mDispatches = 0u;
         bool            mRotateRays;
-        /// Refinements owed after the current work (every event - a build, a
-        /// re-placement, a scroll, a change - owes mTargetSamples - 1 of them), each
-        /// over WHAT THE EVENT TOUCHED (ENGINE-UPGRADE-2): the whole grid for a build,
-        /// a re-placement or a change; for a scroll the band of entered planes per axis
-        /// (joined over consecutive scrolls the same way while one is unfinished).
-        uint32 mRefinesOwed;
-        bool   mRefineWhole;
         /// Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP. The generation
         /// job keeps a running second moment beside every texel's running mean and stops a
         /// probe whose standard error is inside the precision on every texel (setVarianceStop);
         /// a refinement skips a stopped probe. The state lives on the GPU (mVarianceBuffer: the
-        /// counters, a flag per probe, an M2 per texel); its four counters come back in an
-        /// asynchronous readback, ACCEPTED only when no non-refining work ran since it was asked
-        /// for (mStopEpoch: a fresh, change or invalidating pass clears stops the reading still
-        /// counts).
+        /// counters, a flag per probe, an M2 per texel, the marks); the counters and the flags come
+        /// back in an asynchronous readback (PHOTON-7 stage 5, 5-4: the flags per slot, so a
+        /// refinement list leaves a stopped probe out - the ledger's mStopped).
         UavBufferPacked *mVarianceBuffer = nullptr;
         AsyncTicketPtr   mVarianceTicket;
-        uint32           mVarianceTicketEpoch = 0u;
         uint32           mVarianceTicketFrame = 0u;   ///< the VaoManager frame it was asked for on
-        uint32           mStopEpoch = 0u;
         uint32           mStopMinSamples = 0u;
         float            mStopPrecision = 0.0f;
         float            mStopMeanFloor = 0.0f;
-        uint32           mProbesStopped = 0u;   ///< the last accepted reading (0 after any non-refining work)
         uint64           mIntegrations = 0u;    ///< the job's integrations, ever (the last reading)
         void requestVarianceReadout();
-        /// New work replaces estimates (a fresh, change or invalidating pass): the stops a reading
-        /// counts no longer hold.
-        void noteEstimatesReplaced();
-        uint32 mBandLo[3] = {}, mBandNum[3] = {};
         /// The work boxes for a band of slots per axis (disjoint: see the definition).
         void setBoxesFromBands( const uint32 lo[3], const uint32 num[3] );
         /// Jahshaka (PHOTON-FIELD-ROTATE-1): every probe's sample count to 0 - the
@@ -425,9 +441,6 @@ namespace Ogre
             plus a re-derivation of those params.
 
             The probe COUNTS are settings and are not touched, so the atlases stay valid.
-            The atlases keep the irradiance integrated at the PREVIOUS placement: the
-            caller decides whether to reset() and re-converge progressively over it or to
-            converge the whole field in one update() before the next pass reads it.
         @remarks
             Must not be called before initialize().
         @param fieldOrigin
@@ -472,7 +485,7 @@ namespace Ogre
         const uint32 *getWindowOffset() const { return mWindowOffset; }
         /// The probe spacing (the enlarged volume's size over the probe counts).
         Vector3 getProbeSpacing() const;
-        /// How many probes the current work holds (the whole grid after reset()).
+        /// How many probes the current work holds.
         uint32 getWorkProbeCount() const { return mWorkTotal; }
 
         /** Re-points the field at a PhotonVoxelLighting, and re-binds the generation job to the
@@ -495,53 +508,47 @@ namespace Ogre
         */
         void setVctLighting( PhotonVoxelLighting *vctLighting );
 
-        /// If PhotonVoxelLighting was updated with minor changes (e.g. light position/direction changed,
-        /// number of bounces setting changed) then call this function so update() process it
-        /// again.
-        ///
-        /// If major changes happens to PhotonVoxelLighting, then call initialize() again
-        ///
-        /** Jahshaka (PHOTON-FIELD-ROTATE-1): the whole grid, as a CHANGE (the history
-            keeps at most keepOnChange samples' weight) - THE INPUTS CHANGED: the change's serial
-            moves, so every probe owes the new integration.
-            Jahshaka (PHOTON-2 stage 2's round, the read's K1): A CHANGE THAT CONTINUES. A change
-            restarted at probe 0 by every injection never reached the far end of the work list under
-            a light that ticks faster than a change completes (an animated lamp ticks every 10 frames,
-            a change takes 32 at budget 1: the list's last 69 % kept the old light for ever, a z-seam).
-            The work list is ROTATED: a change that resets one still in flight starts at that one's
-            cursor and wraps round, so every probe takes a light at most one change period old
-            whatever the reset cadence.
+        /** Jahshaka (PHOTON-7 stage 5, 5-4): THE FIELD REFINES ONLY WHAT CHANGED - no whole-grid change exists. A
+            probe is MARKED when what it integrates moved: by the GPU's accumulation (accumulateMoves: each moved brick
+            cluster's absolute move, weighted by the bound of the share of the probe's sphere it can fill, into the
+            probe's own would-move in codes of its darkest irradiance texel - JahCardIndirect_cs.glsl's law with the
+            probe as the receiver; listed at one code, read back a fixed lag later: harvestMarks), or by the caller
+            from the changed-region list (markBox: the probes inside a region; markAll: a change with no box). A
+            marked probe RESTARTS (keep 0, getChangeSamples() deep: B4's rule, for the touched probes only); the
+            rest keep. beginNextWork, once the current work is done, runs the entering passes still owed, then the
+            marked probes as a list, then the probes below the target the variance stop has not ended, refined one
+            sample a pass - and returns false when nothing is owed (the field costs nothing). A list interrupted by
+            the window (a scroll) is never lost: its restarts stay owed and its refinements stay below the target.
         */
-        void reset();
-        /** Jahshaka (K1, K4): THE SAME INPUTS, THE WORK IN FLIGHT CONTINUES - after a scroll's
-            entered planes (scrollWindow, integrated by the caller): the change (or a re-placement's
-            lap) resumes at `cursor` with `remaining` probes still owed, both read before the scroll
-            (changeCursor, changeRemaining). The work list is a list of atlas SLOTS and a kept probe
-            keeps its slot, so the probes it owed are the ones it still owes; an entered plane in that
-            range already holds the inputs (its fresh integration stamped the change's serial) and its
-            group exits at the history read - the scroll's inline work is never thrown away.
+        bool beginNextWork();
+        void markSlots( const uint32 *slots, size_t count );
+        void markAll();
+        void markBox( const Vector3 &lo, const Vector3 &hi );
+        /// Restarts owed and refinements owed (probes below the target, not stopped), as of the last refreshOwed.
+        uint32 getOwedRestarts() const { return mOwedRestarts; }
+        uint32 getOwedRefines() const { return mOwedRefines; }
+        /// The integrations owed, at most: each restart's getChangeSamples(), each refinement's samples to the target
+        /// (the variance stop ends many earlier).
+        uint64 getOwedIntegrations() const { return mOwedIntegrations; }
+        void refreshOwed();
+        /** The accumulation for one cascade that moved this frame: its brick state (PhotonBrickFeedback's eight words
+            a brick: [4] a pass's absolute move, [7] an injection's), its bricks per axis, its box corner (world) and
+            brick side (metres), and the next finer cascade's box (a brick inside it skipped: the rays read that one
+            there), or null. endMarkFrame after the frame's last; harvestMarks once a frame.
         */
-        void resumeChange( uint32 cursor, uint32 remaining );
-        /// Where the whole-grid work IN FLIGHT (a change, or a re-placement's fresh lap) integrates
-        /// next, as a list position (the rotation plus its progress, mod the total); 0 when none is.
-        uint32 changeCursor() const;
-        /// The probes that work still owes; 0 when none is in flight.
-        uint32 changeRemaining() const;
-        /** Jahshaka (K1): THE AGE OF THE LIGHT THE FIELD HOLDS, per z-slab of the window (window-local z,
-            near to far): the largest, over the slab's probes, of the frames since the inputs its estimate
-            integrates were superseded (0 = it holds the current inputs). From the CPU's mirror of the
-            stamps (the job applies the same rule to the same dispatches); saturates past 255 serials.
-        */
-        void lightAgeBySlab( vector<uint32>::type &out ) const;
-        /// Jahshaka (K4): the probes a change skipped as holding its inputs already - a scroll's entered
-        /// plane, a probe the change reached before a follow re-defined its work (the ledger's count).
-        uint64 getChangeSkips() const { return mChangeSkips; }
-
-        /** Jahshaka (PHOTON-FIELD-ROTATE-1): the whole grid again, as a REFINEMENT: every
-            probe below the target sample count takes one more sample under a new ray
-            rotation; a probe at the target costs its work group one texel read.
-        */
-        void refine();
+        void accumulateMoves( UavBufferPacked *brickState, const uint32 dims[3], const Vector3 &corner, float brickSide,
+                              const Vector3 *finerLo, const Vector3 *finerHi, uint64 frame );
+        void endMarkFrame( uint64 frame );
+        void harvestMarks( uint64 frame );
+        /// The probes marked since the build: by the accumulation, by regions, the whole field (markAll calls), and
+        /// the restarts dispatched.
+        uint64 getMarkedByMoves() const { return mMarkedByMoves; }
+        uint64 getMarkedByRegion() const { return mMarkedByRegion; }
+        uint64 getMarkAlls() const { return mMarkAlls; }
+        uint64 getRestarts() const { return mRestarts; }
+        /// A slot's probe, in the world (the window's lattice point: the field's origin plus its local index times the
+        /// spacing).
+        Vector3 probeWorldPosition( uint32 slot ) const;
 
         /** Jahshaka (PHOTON-FIELD-ROTATE-1): the estimator's history rule.
         @param targetSamples
@@ -585,17 +592,6 @@ namespace Ogre
         {
             return mNumProbesProcessed >= mWorkTotal ? 0u : mWorkTotal - mNumProbesProcessed;
         }
-        /** Jahshaka (PHOTON-FIELD-ROTATE-1): THE FIELD'S CONVERGENCE SCHEDULE. Every event
-            that gives probes a new sample - initialize(), setFieldVolume(), scrollWindow(),
-            reset() - owes mTargetSamples - 1 refinements after its own work, over what it
-            touched (a scroll: the entered planes; the rest: the whole grid);
-            once the current work is done this starts the next one (refine()) and returns
-            true, or returns false when none is owed (the field has converged and costs
-            nothing until the next event).
-        */
-        bool beginOwedRefinement();
-        uint32 getRefinesOwed() const { return mRefinesOwed; }
-
         /** Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP. A probe stops
             once it holds at least minSamples samples and, on every texel of its irradiance,
             the 95 % interval of its mean - Student's t( 0.975, n - 1 ) standard errors, the deviation
@@ -607,20 +603,18 @@ namespace Ogre
         uint32 getStopMinSamples() const { return mStopMinSamples; }
         uint32 getTotalNumProbes() const { return mSettings.getTotalNumProbes(); }
         float getStopPrecision() const { return mStopPrecision; }
-        /// Takes a finished readback of the variance counters (call once a frame).
+        /// Takes a finished readback of the variance counters and the per-slot stops (call once a frame).
         void harvestVarianceReadout();
-        /// Probes stopped, by the last accepted reading (a lower bound: the reading lags).
-        uint32 getProbesStopped() const { return mProbesStopped; }
         /// The generation job's probe integrations, ever (the last reading).
         uint64 getIntegrations() const { return mIntegrations; }
-        /// Every probe of the grid stopped: the refinements owed have nothing left to do.
-        bool allProbesStopped() const
+        /// The slots whose variance stop the last reading shows and no later replacement outdated.
+        uint32 getProbesStopped() const
         {
-            return mStopMinSamples && mProbesStopped >= mSettings.getTotalNumProbes();
+            uint32 n = 0u;
+            for( size_t slot = 0; slot < mStopped.size(); ++slot )
+                n += stoppedTrusted( uint32( slot ) ) ? 1u : 0u;
+            return n;
         }
-        /// The field converged early (allProbesStopped): no refinement is owed, the current
-        /// work is done.
-        void endRefinements();
 
         void update( uint32 probesPerFrame = 200u );
 

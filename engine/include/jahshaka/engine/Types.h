@@ -4528,30 +4528,27 @@ struct GiStatus {
     unsigned long long ifdReplacements = 0;
     /// THE FIELD'S ESTIMATOR (PHOTON-FIELD-ROTATE-1): a probe's value is the mean of
     /// its integrations, each under a fresh random rotation of its ray set, until it
-    /// holds `ifdTargetSamples`; every event (a build, a follow, a light change) owes
-    /// the field `ifdTargetSamples - 1` whole-grid refinements after its own pass, run
-    /// at the update budget, and `ifdRefinesOwed` counts the passes not yet
-    /// finished, the running one included (so `ifdRefinesOwed < ifdTargetSamples`
-    /// = every probe holds a sample). 0 = converged: the field costs nothing until
-    /// the next event. A PAUSED field (budget 0) has a target of 1: every event's
-    /// own pass runs inline and nothing is owed after it.
+    /// holds `ifdTargetSamples` or the variance stop ends it. THE FIELD REFINES ONLY WHAT
+    /// CHANGED (PHOTON-7 stage 5, 5-4): a probe is MARKED when what its rays read moved a
+    /// code of its own irradiance (the GPU's accumulation of the bricks' absolute moves -
+    /// `ifdMarkedByMoves` - or a changed region: a slab it stands in - `ifdMarkedByRegion` -
+    /// and an edit, the sky or a change with no box: every probe, `ifdMarkAlls` calls) and
+    /// RESTARTS (keep 0, four samples deep: `ifdRestarts`, cumulative since the build); the
+    /// rest keep. `ifdOwedRestarts` are marked and not restarted yet, `ifdOwedRefines` below
+    /// the target and not stopped, and `ifdWorking` a pass of the field's own window running
+    /// (a build, a re-placement, a scroll's entered planes, their entering passes): all zero
+    /// = converged, the field costs nothing until the next mark. A PAUSED field (budget 0)
+    /// has a target of 1: its restarts run inline and nothing is owed after them.
     unsigned ifdTargetSamples = 0;
-    unsigned ifdRefinesOwed = 0;
-    /// THE AGE OF THE LIGHT THE FIELD HOLDS (PHOTON-2 K1), per z-slab of its window (near to far in the
-    /// field's own z): the largest, over the slab's probes, of the frames since the inputs its estimate
-    /// integrates were superseded by a light change or a settle (0 = every probe holds the current inputs).
-    /// A change reaches every probe within one change period whatever the reset cadence - a slab that
-    /// grows without bound is a field starved under a moving lamp.
-    std::vector<unsigned> ifdLightAgeBySlab;
-    /// The probes a change SKIPPED as holding its inputs already (PHOTON-2 K4) since the field's build: a c0
-    /// follow's entered planes inside the range the change still owed (integrated fresh in the follow frame,
-    /// never re-integrated).
-    unsigned long long ifdChangeSkips = 0;
-    /// THE FIELD'S REST WINDOW (PHOTON-2 L2): its age in frames, 0 = shut (the moving budget); and the probe
-    /// integrations the field's last frame dispatched (its rows' units: the budget's spend, an upper bound of the
-    /// GPU's - a skipped or stopped probe's group exits early).
-    unsigned ifdRestWindow = 0;
+    unsigned ifdOwedRestarts = 0, ifdOwedRefines = 0;
+    unsigned long long ifdOwedIntegrations = 0;   ///< at most: each restart deep and to the target, each refine to it
+    bool ifdWorking = false;
+    unsigned long long ifdMarkedByMoves = 0, ifdMarkedByRegion = 0, ifdMarkAlls = 0, ifdRestarts = 0;
+    /// The probe integrations the field's last recorded frame dispatched (its rows' units: the budget's spend, an
+    /// upper bound of the GPU's - a stopped probe's group exits early), and THE GRANT it had (the field's integrations a
+    /// frame, the same at rest as in motion: 0 = nothing owed).
     unsigned ifdDispatchedLastFrame = 0;
+    unsigned ifdGrantLastFrame = 0;
     /// THE GPU'S OWN COUNT (PHOTON-2 L6): every probe integration the generation job has made since the field's build,
     /// as its last readback found it (four frames late) - differenced over a window, the true integrations a per-
     /// integration price divides by (a skipped or stopped probe's group exits without one).

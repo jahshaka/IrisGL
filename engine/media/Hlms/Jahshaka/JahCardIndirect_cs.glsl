@@ -23,6 +23,19 @@
 // move times it bounds the change - times the card's sensitivity. A card at a code or more is LISTED (the report, read
 // back by the host, which relights its indirect).
 // CLEAR (mode 1): the report's count, once a frame before the first accumulation.
+// THE FIELD'S VARIANT (jah_field_mark, Jahshaka/FieldAccumulate; PHOTON-7 stage 5, 5-4): the receivers are the irradiance
+// field's probes (points: zero half extents; the state is the field's marks, its sensitivity the generation job's), and
+// the bound takes VISIBILITY from the probe's own depth moments (DDGI's own test, the atlas the reader's Chebyshev reads):
+// the cosine-weighted share of the probe's rays that pass the moved box's distance d is at most the one-sided Chebyshev
+// bound sigma^2 / ( sigma^2 + ( d - mu )^2 ) of the depth texel facing the box (d past mu; capped at the depth's own
+// bound - a ray past it may reach anything), over the cosine at the box's edge from that texel (every irradiance texel's
+// share of the box's visible rays is at most that) - so the weight is min( 1, S / ( pi d^2 ), that bound): a sealed
+// room's probes, every ray ending at its walls, are not reached by a neighbour's moves. AND IT COUNTS PER TEXEL: each of
+// the probe's irradiance texels t changes by at most the move x the weight x the largest cosine between t's direction and
+// the box's directions (t's value is the cosine-weighted mean of what its lobe sees: a texel facing away is not moved),
+// over t's OWN code (1 % of its value, read from the atlas) - and the frame adds the largest over t to the probe's one
+// accumulator (a sum of each frame's largest bounds the largest of the per-texel sums: conservative, no state per texel).
+// A dark texel is moved only by what it faces.
 // No at-sign in any comment of this file (the Hlms parser reads them).
 @insertpiece( SetCrossPlatformSettings )
 
@@ -33,6 +46,12 @@
 	layout( std430, ogre_U0 ) restrict readonly buffer csRelightLayout { vec4 csRelights[]; };
 	layout( std430, ogre_U1 ) restrict coherent buffer csSlotLayout { uint csSlot[]; };
 @else
+	@property( jah_field_mark )
+		// the field's depth moments (RG32F: the mean distance and its square, in grid units), one bordered tile a probe,
+		// and its irradiance (RGBA16F: each texel's value, its own code)
+		vulkan_layout( ogre_t0 ) uniform texture2D fieldDepth;
+		vulkan_layout( ogre_t1 ) uniform texture2D fieldIrrad;
+	@end
 	layout( std430, ogre_U0 ) restrict readonly buffer caStateLayout { uint caState[]; };
 	// THE RESIDENT CARDS: two vec4 a card - ( centre.xyz, the slot as uint bits ), ( half extents.xyz, 0 )
 	layout( std430, ogre_U1 ) restrict readonly buffer caCardLayout { vec4 caCards[]; };
@@ -58,6 +77,15 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// the next finer cascade's box (world, xyz; w = 1 when there is one)
 	uniform float4 caInnerLo;
 	uniform float4 caInnerHi;
+@property( jah_field_mark )
+	// the field (jah_field_mark): x the probes per row of slots (numProbes.x), y numProbes.x x numProbes.y, z the depth
+	// tile's interior resolution, w the depth atlas's width; and the probe spacing per axis (metres, xyz) and the depth's
+	// own bound (grid units, w)
+	uniform uint4 caField;
+	uniform float4 caSpacing;
+	// x the irradiance tile's interior resolution, y the irradiance atlas's width
+	uniform uint4 caField2;
+@end
 vulkan( }; )
 
 #define CA_PI 3.14159265358979
@@ -66,6 +94,20 @@ vulkan( }; )
 
 @property( jah_card_sens )
 shared uint csMinBits;
+@end
+
+@property( jah_field_mark )
+// A probe texel's direction (the generation job's jahIfdTexelDir, IrradianceFieldGenFromVct_piece_cs.any: the same
+// octahedral layout)
+vec3 jahFieldTexelDir( uvec2 xy, uint res )
+{
+	vec2 f = ( vec2( xy ) + 0.5 ) * ( 2.0 / float( res ) ) - 1.0;
+	vec3 n = vec3( f.x, f.y, 1.0 - abs( f.x ) - abs( f.y ) );
+	float t = clamp( -n.z, 0.0, 1.0 );
+	n.x += n.x >= 0.0 ? -t : t;
+	n.y += n.y >= 0.0 ? -t : t;
+	return normalize( n );
+}
 @end
 
 void main()
@@ -166,6 +208,27 @@ void main()
 	if( !want )
 		return;
 	float sum = 0.0;   // codes
+@property( jah_field_mark )
+	// THE PROBE'S TEXELS (the head of this file): each irradiance texel's direction and its own code
+	const uint irrRes = min( caField2.x, 8u );
+	const uint nTex = irrRes * irrRes;
+	vec3 texDir[64];
+	float texCode[64], texSum[64];
+	{
+		const uint slotT = floatBitsToUint( c0.w );
+		const uint borderedT = irrRes + 2u;
+		const uvec2 tileT = uvec2( ( slotT * borderedT ) % caField2.y, ( ( slotT * borderedT ) / caField2.y ) * borderedT ) +
+							uvec2( 1u, 1u );
+		for( uint t = 0u; t < nTex; ++t )
+		{
+			const uvec2 xy = uvec2( t % irrRes, t / irrRes );
+			const vec3 v = texelFetch( fieldIrrad, ivec2( tileT + xy ), 0 ).xyz;
+			texCode[t] = 0.01 * max( max( max( v.x, v.y ), v.z ), 5.9604645e-6 );
+			texDir[t] = jahFieldTexelDir( xy, irrRes );
+			texSum[t] = 0.0;
+		}
+	}
+@end
 	for( uint q = 0u; q < clusters; ++q )
 	{
 		const float m = uintBitsToFloat( caCluster[2u * q] );
@@ -180,8 +243,70 @@ void main()
 		const float area = ext.x * ext.y + ext.y * ext.z + ext.z * ext.x;   // the moved box's largest silhouette
 		const vec3 gap = max( abs( centre - ( lo + 0.5 * ext ) ) - ( halfExt + 0.5 * ext ), vec3( 0.0, 0.0, 0.0 ) );
 		const float d2 = dot( gap, gap );
-		sum += sens * m * ( d2 > 0.0 ? min( 1.0, area / ( CA_PI * d2 ) ) : 1.0 );
+		float weight = d2 > 0.0 ? min( 1.0, area / ( CA_PI * d2 ) ) : 1.0;
+@property( jah_field_mark )
+		if( d2 > 0.0 && weight > 0.0 )
+		{
+			// THE VISIBILITY (the head of this file): the depth texel facing the moved box's centre
+			const vec3 toBox = ( lo + 0.5 * ext ) - centre;
+			const float toLen = length( toBox );
+			const vec3 dirB = toBox / max( toLen, 1e-6 );
+			// the depth texel (the generation job's octahedral layout, jahIfdTexelDir's inverse)
+			const uint res = caField.z;
+			vec2 pOct = dirB.xy / ( abs( dirB.x ) + abs( dirB.y ) + abs( dirB.z ) );
+			if( dirB.z < 0.0 )
+				pOct = ( 1.0 - abs( pOct.yx ) ) * vec2( pOct.x >= 0.0 ? 1.0 : -1.0, pOct.y >= 0.0 ? 1.0 : -1.0 );
+			const uvec2 txy = uvec2( min( floor( ( pOct * 0.5 + 0.5 ) * float( res ) ), vec2( float( res - 1u ) ) ) );
+			// ...its own direction (jahIfdTexelDir), and THE LEAST COSINE between it and the box's directions: the box's
+			// angular radius from the probe plus the texel direction's own offset from the box's centre
+			vec2 fT = ( vec2( txy ) + 0.5 ) * ( 2.0 / float( res ) ) - 1.0;
+			vec3 nT = vec3( fT.x, fT.y, 1.0 - abs( fT.x ) - abs( fT.y ) );
+			const float tT = clamp( -nT.z, 0.0, 1.0 );
+			nT.x += nT.x >= 0.0 ? -tT : tT;
+			nT.y += nT.y >= 0.0 ? -tT : tT;
+			nT = normalize( nT );
+			const float rad = 0.5 * length( ext );
+			const float boxAngle = toLen > rad ? asin( clamp( rad / toLen, 0.0, 1.0 ) ) : CA_PI;
+			const float offAngle = acos( clamp( dot( nT, dirB ), -1.0, 1.0 ) );
+			const float edgeCos = cos( min( boxAngle + offAngle, 0.5 * CA_PI ) );
+			if( edgeCos > 1e-3 )
+			{
+				const uint slot = floatBitsToUint( c0.w );
+				const uint bordered = res + 2u;
+				const uvec2 tile = uvec2( ( slot * bordered ) % caField.w, ( ( slot * bordered ) / caField.w ) * bordered ) +
+								   uvec2( 1u, 1u );
+				const vec2 mom = texelFetch( fieldDepth, ivec2( tile + txy ), 0 ).xy;
+				// the nearest point of the box in grid units (the depth's), capped at the depth's bound
+				const float dg = min( length( gap / caSpacing.xyz ), caSpacing.w );
+				const float mu = mom.x, var = max( mom.y - mom.x * mom.x, 0.0 ) + 1e-6;
+				float pass = 1.0;
+				if( dg > mu )
+					pass = var / ( var + ( dg - mu ) * ( dg - mu ) );
+				weight = min( weight, min( 1.0, pass / edgeCos ) );
+			}
+		}
+		// PER TEXEL: the box's nearest direction to each texel's (a probe inside the box: every direction)
+		{
+			const vec3 toBoxT = ( lo + 0.5 * ext ) - centre;
+			const float lenT = length( toBoxT );
+			const vec3 dirT = toBoxT / max( lenT, 1e-6 );
+			const float radT = 0.5 * length( ext );
+			const float angBox = d2 > 0.0 && lenT > radT ? asin( clamp( radT / lenT, 0.0, 1.0 ) ) : CA_PI;
+			for( uint t = 0u; t < nTex; ++t )
+			{
+				const float a = max( acos( clamp( dot( texDir[t], dirT ), -1.0, 1.0 ) ) - angBox, 0.0 );
+				if( a < 0.5 * CA_PI )
+					texSum[t] += m * weight * cos( a ) / texCode[t];
+			}
+		}
+@else
+		sum += sens * m * weight;
+@end
 	}
+@property( jah_field_mark )
+	for( uint t = 0u; t < nTex; ++t )
+		sum = max( sum, texSum[t] );
+@end
 	if( !( sum > 0.0 ) )
 		return;
 	// THE FIXED POINT, ROUNDED ONCE (PhotonBrickFeedback_cs.glsl's rule): the sum in units plus the fraction carried,

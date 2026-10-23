@@ -1428,7 +1428,11 @@ namespace Ogre
     void PhotonVoxelLighting::resetBrickState()
     {
         ensureBrickMask();
+        // (PHOTON-7 stage 5, 5-4: every brick CLEARED - a whole injection's old store words are not this world point's:
+        // PhotonBrickFeedback_cs.glsl's bit 10)
         std::vector<uint32> zeros( size_t( 8u ) * getNumBricks(), 0u );
+        for( size_t b = 0; b < zeros.size(); b += 8u )
+            zeros[b] = 1024u;
         for( UavBufferPacked *b : mBrickState )
             b->upload( zeros.data(), 0u, zeros.size() );
         mVoxelizer->getRenderSystem()->endCopyEncoder();
@@ -1711,6 +1715,21 @@ namespace Ogre
                 {
                     const uint32 h = k & 1u;
                     texSlot.texture = k >= 2u ? cj->mVoxelizer->getPositionVox( h ) : cj->mVoxelizer->getCoverageVox( h );
+                    mLightInjectionJob->setTexture( static_cast<uint8>( 6u + k * chainLength + j ), texSlot );
+                }
+                // (PHOTON-7 stage 5, 5-4) ...and THE DIRECT TERM, both sides - the cleared voxels' move reference
+                // (LightInjection_piece_cs.any): an outer cascade's own (its total and back where it keeps no direct
+                // term); this cascade's entry and the ones inside it are never read, and bound to the coverage (this
+                // cascade's own direct volumes are the dispatch's images).
+                for( uint32 k = 4u; k < 6u; ++k )
+                {
+                    TextureGpu *ref = 0;
+                    if( j > mChainIndex )
+                    {
+                        ref = k == 4u ? ( cj->mLightDirect ? cj->mLightDirect : cj->mLightVoxel[0] )
+                                      : ( cj->mLightDirectBack ? cj->mLightDirectBack : cj->mLightVoxel[cj->backIndex()] );
+                    }
+                    texSlot.texture = ref ? ref : cj->mVoxelizer->getCoverageVox( 0u );
                     mLightInjectionJob->setTexture( static_cast<uint8>( 6u + k * chainLength + j ), texSlot );
                 }
             }

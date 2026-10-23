@@ -59,6 +59,9 @@ uniform restrict image2D irradianceFieldDepth;
 // Jahshaka (ENGINE-UPGRADE-2B stage 4): THE VARIANCE STATE - the counters, the per-probe
 // stopped flags and the per-texel second moments (the piece's JAH_IFD_ layout).
 layout( std430, ogre_U2 ) restrict buffer ifdVarianceLayout { uint ifdVariance[]; };
+// Jahshaka (PHOTON-7 stage 5, 5-4): THE WORK AS A LIST of probe slots (the host's restarts and refinements), read when
+// the work says so (boxSize[0].w).
+layout( std430, ogre_U3 ) restrict readonly buffer ifdWorkLayout { uint ifdWork[]; };
 
 // One work group per probe: every ray's radiance and depth, and its direction.
 shared float4 g_rayColourDepth[@value( num_rays_per_probe )];
@@ -67,6 +70,8 @@ shared float4 g_rayDir[@value( num_rays_per_probe )];
 // z = the samples it held, w unused. And 1 when a texel of it is not at the precision.
 shared float4 g_probeHistory;
 shared uint g_probeUnconverged;
+// (5-4) the darkest channel of the probe's irradiance tile after this integration (float bits): its sensitivity.
+shared uint g_probeMinBits;
 
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),

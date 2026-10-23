@@ -108,6 +108,12 @@ vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainPosP[@value( hlm
 @add( jahInjTex, hlms_num_vct_cascades )
 vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainPosN[@value( hlms_num_vct_cascades )];
 @add( jahInjTex, hlms_num_vct_cascades )
+// PHOTON-7 stage 5 (5-4): every cascade's DIRECT term, both sides (its total and back where it keeps none) - what a
+// reader read at a cleared voxel's world point before, the next cascade out's (the absolute move's reference, below).
+vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainDirect[@value( hlms_num_vct_cascades )];
+@add( jahInjTex, hlms_num_vct_cascades )
+vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainDirectBack[@value( hlms_num_vct_cascades )];
+@add( jahInjTex, hlms_num_vct_cascades )
 
 // JAHSHAKA (CLOUDS-2D-2): THE CLOUD LAYER'S FIELD -- the host binds it at the unit after the chain's geometry
 // (PhotonVoxelLighting::injectionTexUnits) and sets `jah_cloud_shadow` when a 2D cloud layer shades the sun

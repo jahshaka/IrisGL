@@ -17,7 +17,10 @@
 // the choice is a function of the state alone (a scan in index order, never an atomic's order).
 // THE STATE, 8 words a brick (x fastest over the cascade's bricks):
 //   [0] bit 0 active; bits 1..8 the passes since it was (re)activated (saturating at 255); bit 9 PASSED THIS FRAME (the
-//       selection's pick, cleared by POST: an active brick without it was carried)
+//       selection's pick, cleared by POST: an active brick without it was carried); bit 10 CLEARED (PHOTON-7 stage 5,
+//       5-4: the shift brought it in, or a whole injection wrote it - its old store words are not this world point's;
+//       its first pass measures its move against what a reader read there before, the next cascade out's total: the
+//       pass clears it)
 //   [1] its last pass's move (relative: the brick mask's word 1, float bits)
 //   [2] r, its measured contraction (float bits; kept over a stop for the resume test)
 //   [3] the would-move ACCUMULATED since its stop, in FIXED POINT: FB_ACC_ONE units a code (uint, saturating). It
@@ -98,6 +101,7 @@ vulkan( }; )
 // THE SELECTION'S SCRATCH (SELECT, one workgroup of 64): the chunk's prefix sums, the bricks taken so far, the budget,
 // the cursor and the brick after the last one taken.
 #define FB_RAN 512u
+#define FB_CLEARED 1024u
 @property( !jah_brick_copy )
 shared uint fbSScan[64];
 shared uint fbSTaken;
@@ -225,7 +229,7 @@ void main()
 				fbState[s + 3u] = 0u;
 				fbState[s + 6u] = 0u;
 			}
-			flags = 1u;
+			flags = 1u | ( flags & FB_CLEARED );
 		}
 		if( ( flags & 1u ) != 0u )
 			atomicAdd( fbArgs[9], 1u );
@@ -351,7 +355,7 @@ void main()
 		const int3 bl = lo >> 3, bh = hi >> 3;
 		if( any( lessThan( bl, int3( 0 ) ) ) || any( greaterThanEqual( bh, int3( fbDims.xyz ) ) ) )
 		{
-			fbState[s] = 1u;
+			fbState[s] = 1u | FB_CLEARED;
 			for( uint k = 1u; k < 8u; ++k )
 				fbState[s + k] = 0u;
 			return;

@@ -727,8 +727,33 @@
 	// THE BRICK MASK (PHOTON-7 stage 3): the most this voxel's direct term (either side) changed, relative.
 	const float jahDirChange = max( jahBrickChange( dOld.xyz, dNew.xyz ), jahBrickChange( dbOld.xyz, dbNew.xyz ) );
 	// ...and ABSOLUTE (PHOTON-7 stage 5): the most the total moved with it (a delta adds exactly this to the total and
-	// the back), the brick state's word 7 - a non-finite change saturates.
-	const float3 jahAbsDir3 = max( abs( dNew.xyz - dOld.xyz ), abs( dbNew.xyz - dbOld.xyz ) );
+	// the back), the brick state's word 7 - a non-finite change saturates. ITS REFERENCE IS WHAT A READER READ AT THIS
+	// WORLD POINT BEFORE (5-4, the lead's ruling): the old direct term - but a CLEARED voxel (a scroll's slab: outside
+	// the box the shift kept; every voxel of a whole injection, whose store held another placement or nothing) was read
+	// from the next cascade out, so its move is against that cascade's direct there (the outermost's against nothing).
+	float4 jahRefD = dOld, jahRefDb = dbOld;
+@property( jah_inject_delta )
+	const bool jahCleared =
+		!( all( greaterThanEqual( voxelId, p_keepLo.xyz ) ) && all( lessThan( voxelId, p_keepHi.xyz ) ) );
+@else
+	const bool jahCleared = true;
+@end
+	if( jahCleared )
+	{
+		jahRefD = float4( 0.0f, 0.0f, 0.0f, 0.0f );
+		jahRefDb = float4( 0.0f, 0.0f, 0.0f, 0.0f );
+		const uint jahNext = p_chainSelf + 1u;
+		if( jahNext < uint( JAH_INJ_CHAIN ) )
+		{
+			const float3 jahQ = ( voxelAabbCenter - p_chainOrigin[jahNext].xyz ) / p_chainOrigin[jahNext].w;
+			if( all( greaterThanEqual( jahQ, float3( 0.0f, 0.0f, 0.0f ) ) ) && all( lessThan( jahQ, p_chainRes[jahNext].xyz ) ) )
+			{
+				jahRefD = OGRE_Load3D( chainDirect[jahNext], int3( jahQ ), 0 );
+				jahRefDb = OGRE_Load3D( chainDirectBack[jahNext], int3( jahQ ), 0 );
+			}
+		}
+	}
+	const float3 jahAbsDir3 = max( abs( dNew.xyz - jahRefD.xyz ), abs( dbNew.xyz - jahRefDb.xyz ) );
 	float jahAbsDir = max( max( jahAbsDir3.x, jahAbsDir3.y ), jahAbsDir3.z );
 	if( ( floatBitsToUint( jahAbsDir ) & 0x7F800000u ) == 0x7F800000u )
 		jahAbsDir = 1.0e30;

@@ -271,7 +271,28 @@
 	const float3 jahOld = OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz;
 	const float3 jahNew = imageLoad( lightVoxel, int3( jahCell ) ).xyz;
 	const float jahMoved = jahBrickChange( jahOld, jahNew );
-	const float3 jahAbs3 = abs( jahNew - jahOld );
+	// THE ABSOLUTE MOVE'S REFERENCE (PHOTON-7 stage 5, 5-4): what a reader read at this world point before. A CLEARED
+	// voxel (its brick's bit 10 - the shift brought it in, a whole injection wrote it - and its total still its direct
+	// term alone, bit for bit: no pass has reached it) was read from the next cascade out, so its first pass's move is
+	// against that cascade's total there (the outermost's against nothing: no reader read radiance there); the series
+	// (the mask's relative move, the stop) keeps the store's own move. The cards' and the field's accumulation read it.
+	float3 jahRef = jahOld;
+	{
+		const uint jahIdx0 = jahBrick.x + p_brickMark.y * ( jahBrick.y + p_brickMark.z * jahBrick.z );
+		const float3 jahStoredDirect = OGRE_Load3D( directVoxel, jahCell, 0 ).xyz;
+		if( ( jahFbState[8u * jahIdx0] & 1024u ) != 0u &&
+			all( equal( floatBitsToUint( jahOld ), floatBitsToUint( jahStoredDirect ) ) ) )
+		{
+			jahRef = float3( 0.0, 0.0, 0.0 );
+			@property( hlms_num_vct_cascades > 1 )
+				const float3 jahUvw1 = voxelUvwPos * JAH_VOX_FROM_PREV_SCALE( 1 ).xyz + JAH_VOX_FROM_PREV_OFFSET( 1 ).xyz;
+				if( all( greaterThanEqual( jahUvw1, float3( 0.0, 0.0, 0.0 ) ) ) &&
+					all( lessThanEqual( jahUvw1, float3( 1.0, 1.0, 1.0 ) ) ) )
+					jahRef = OGRE_SampleLevel( vctProbes[1], vctProbeSampler, jahUvw1, 0.0 ).xyz;
+			@end
+		}
+	}
+	const float3 jahAbs3 = abs( jahNew - jahRef );
 	float jahAbs = max( max( jahAbs3.x, jahAbs3.y ), jahAbs3.z );
 	if( ( floatBitsToUint( jahAbs ) & 0x7F800000u ) == 0x7F800000u )
 		jahAbs = 1.0e30;

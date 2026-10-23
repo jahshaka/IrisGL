@@ -622,7 +622,7 @@ namespace Ogre
         /// The injection job's texture units before the cloud field's (OgreScene::bindCloudInjection binds that
         /// one at this unit): the albedo, normal, emissive, metal and emissive factor per half, then the chain's
         /// coverage and position per half, four arrays of getChainLength().
-        uint8 injectionTexUnits() const { return static_cast<uint8>( 6u + 4u * getChainLength() ); }
+        uint8 injectionTexUnits() const { return static_cast<uint8>( 6u + 6u * getChainLength() ); }
 
         /** THE CASCADE CHAIN'S PARAMETERS, the one definition every reader of the chain
             takes them from (Jahshaka, PHOTON-READER-1): the pixel shader's pass buffer
