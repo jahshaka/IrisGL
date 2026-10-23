@@ -23,17 +23,29 @@
 ///   [1] its escape opacity, its age in cascade 0's units, the cascade it
 ///       stopped in, its age in that cascade's units
 ///   [2] the RAY HIT's read (jahVoxelSample - what jah_rq_hit.glsl calls) at the
-///       centre of the first texel plane the march reads from c0, at the cone's mip
+///       centre of the first texel plane the march reads from c0, at the cone's mip -
+///       or, with the flag kJahParityAxisRead (PHOTON-7 stage 1's read F2), the
+///       directional read itself (jahVoxelReadAxis) at the cone's posLS, along the
+///       direction's major axis from the half its sign reads, at the cone's lod AS THE
+///       LEVEL (fractional, past the chain's last: the seam clamp's own cases)
 ///   [3] THE MARCH AT ZERO LENGTH: the march at that centre, one plane read whole
 ///       (JAH_MARCH_ONE_STEP) - what the march itself reads there, through its loop
+const uint kJahParityAxisRead = 65536u;
+
 vec4 jahParityAnswer( int cone, int part )
 {
 	vec4 c0 = JAH_PARITY_CONE( 4 * cone + 0 );
 	vec4 c1 = JAH_PARITY_CONE( 4 * cone + 1 );
 	vec4 c2 = JAH_PARITY_CONE( 4 * cone + 2 );
 	vec4 c3 = JAH_PARITY_CONE( 4 * cone + 3 );
-	uint flags = uint( c1.w );
+	const uint rawFlags = uint( c1.w );
+	const uint flags = rawFlags & ~kJahParityAxisRead;
 	int cascade = int( c2.w );
+	if( part == 2 && ( rawFlags & kJahParityAxisRead ) != 0u )
+	{
+		const int axis = jahVoxelAxis( c1.xyz, JAH_VOX_INVRES( cascade ) );
+		return jahVoxelReadAxis( cascade, axis, c0.xyz, c1.xyz[axis] > 0.0, c3.x );
+	}
 	if( part >= 2 )
 	{
 		// THE FIRST PLANE the march reads from c0 (jahConeMarchCascade's own arithmetic,

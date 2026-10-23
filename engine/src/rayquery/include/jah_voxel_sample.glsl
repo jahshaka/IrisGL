@@ -210,13 +210,12 @@ float jahVoxelPos0Filtered( int c, int h, vec3 u, int a, float pORel, float o, f
 	return ( pORel + i0c * o + up ) * invResA;
 }
 
-/// The packed-halves coordinate of an anisotropic read: x folded into the first half (the
-/// sign half is added per axis by the read below) and CLAMPED PER HALF like CLAMP_TO_EDGE on
+/// The packed-halves coordinate of an anisotropic read at ONE level: x folded into the first half
+/// (the sign half is added per axis by the read below) and CLAMPED PER HALF like CLAMP_TO_EDGE on
 /// the half's own texels (PHOTON-7 stage 1, AB A11): the sample's centre stays half a texel
-/// `texelU` (the read's coarser level, in the packed u) inside the half, so a bilinear
-/// footprint never straddles the seam into the OTHER SIGN's texel at the box's far end (a
-/// read at the box's -x face took a quarter of it: gi.directional_seam, 0.75 of the lit
-/// floor). Every read off the seam is bit-identical (a clamp that does not bind).
+/// `texelU` (that level's, in the packed u) inside the half, so a bilinear footprint never
+/// straddles the seam into the OTHER SIGN's texel at the box's far end (a read at the box's -x
+/// face took a quarter of it: gi.directional_seam, 0.75 of the lit floor).
 vec3 jahVoxelAnisoUvw( vec3 posLS, float texelU )
 {
 	vec3 uvw = posLS;
@@ -225,19 +224,47 @@ vec3 jahVoxelAnisoUvw( vec3 posLS, float texelU )
 	return uvw;
 }
 
-/// Cascade c's directional volume for axis b at `posLS`, level `mip`, the texel read by a
-/// reader travelling +b (`positive`) or -b - composited from the faces that look back at it.
-vec4 jahVoxelReadAxis( int c, int b, vec3 posLS, bool positive, float mip )
+/// One sample of cascade c's directional volume for axis b at the packed `u`, level `mip`.
+vec4 jahVoxelAxisSample( int c, int b, vec3 u, float mip )
 {
-	// the packed width is the cascade's resolution (two halves of res / 2 two-cell texels): a level-m texel is
-	// 2^m / res of u - at a fractional level the coarser one's, which the trilinear filter reads too
-	const vec3 anisoUvw = jahVoxelAnisoUvw( posLS, exp2( ceil( mip ) ) * JAH_VOX_INVRES( c ).x );
-	const vec3 u = anisoUvw + vec3( positive ? 0.0 : 0.5, 0.0, 0.0 );
 	if( b == 0 )
 		return JAH_VOX_SAMPLE_X( c, u, mip );
 	if( b == 1 )
 		return JAH_VOX_SAMPLE_Y( c, u, mip );
 	return JAH_VOX_SAMPLE_Z( c, u, mip );
+}
+
+/// Cascade c's directional volume for axis b at `posLS`, level `mip`, the texel read by a
+/// reader travelling +b (`positive`) or -b - composited from the faces that look back at it.
+/// THE PER-HALF CLAMP IS EACH LEVEL'S OWN (stage 1's read F2): a trilinear read blends levels
+/// floor( mip ) and ceil( mip ), and one clamp at the coarser level's half texel pinned the finer
+/// level up to half a coarse texel inside the face (its edge texel never read alone there; at the
+/// chain's next-to-last level the half's x resolution gone). And past the directional chain's
+/// LAST level (each half one texel along the shortest axis) the half texel exceeded a quarter of
+/// u and the clamp's min passed its max - undefined: the second half read the seam's two texels
+/// half and half. So the level is clamped to the chain's last (the sampler clamps it there too);
+/// where no level's clamp binds the read is the one trilinear sample it always was (bit-identical:
+/// every read off the faces), and within a coarse half texel of a face each level is fetched with
+/// its own clamp and the two blended by the level's fraction.
+vec4 jahVoxelReadAxis( int c, int b, vec3 posLS, bool positive, float mip )
+{
+	const vec3 invRes = JAH_VOX_INVRES( c );
+	// the packed width is the cascade's resolution (two halves of res / 2 two-cell texels): a level-m texel is
+	// 2^m / res of u; the chain's last level is the shortest axis's halves at one texel, log2( res_min ) - 1
+	const float lastLevel = max( floor( -log2( max( invRes.x, max( invRes.y, invRes.z ) ) ) - 0.5 ), 0.0 );
+	const float m = clamp( mip, 0.0, lastLevel );
+	const float m0 = floor( m );
+	const float m1 = ceil( m );
+	const float off = positive ? 0.0 : 0.5;
+	const float x = posLS.x * 0.5;
+	const float h1 = 0.5 * exp2( m1 ) * invRes.x;
+	if( x >= h1 && x <= 0.5 - h1 )
+		return jahVoxelAxisSample( c, b, vec3( x + off, posLS.yz ), mip );
+	const vec4 v0 = jahVoxelAxisSample( c, b, jahVoxelAnisoUvw( posLS, exp2( m0 ) * invRes.x ) + vec3( off, 0.0, 0.0 ), m0 );
+	if( m1 == m0 )
+		return v0;
+	const vec4 v1 = jahVoxelAxisSample( c, b, jahVoxelAnisoUvw( posLS, exp2( m1 ) * invRes.x ) + vec3( off, 0.0, 0.0 ), m1 );
+	return mix( v0, v1, m - m0 );
 }
 
 /// THE FIRST PLANE (a cascade's, holding the point the cone has read up to): part of its depth

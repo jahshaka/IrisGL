@@ -9304,7 +9304,11 @@ struct VoxelReaderCone {
     Vec3     dirLS;                  ///< unit direction
     Vec3     biasDirLS;              ///< the hop's bias direction (zero: a point in free space)
     float    tanHalfAngle = 0.577f;  ///< the diffuse cone set's half angle
-    unsigned flags = 0u;             ///< JAH_MARCH_* (1 specular, 2 SDF, 32 one step)
+    unsigned flags = 0u;             ///< JAH_MARCH_* (1 specular, 2 SDF, 32 one step), and kAxisRead
+    /// THE DIRECTIONAL READ ITSELF (PHOTON-7 stage 1's read F2): with this flag the answer's `hitRead` is
+    /// jahVoxelReadAxis at `posLS` along `dirLS`'s major axis (the half its sign reads), `lod` taken AS THE
+    /// LEVEL - fractional and past the chain's last level, the seam clamp's own cases (gi.directional_seam).
+    static constexpr unsigned kAxisRead = 65536u;
     unsigned cascade = 0u;           ///< which cascade the point reads take
     float    lod = 0.0f;             ///< ...at which mip
 };
