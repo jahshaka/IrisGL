@@ -275,17 +275,45 @@ namespace Ogre
     {
         OgreProfileGpuBegin( "Photon scroll commit" );
         mRenderSystem->endRenderPassDescriptor();
-        // THE SLAB'S BUILD IS SUBMITTED BEFORE THE STORE MOVES (measured, PHOTON-7 stage 2): with the slab's last chunks
-        // voxelised earlier in the SAME command buffer, the copy-in below read the scratch half-built and its writes
-        // reached the shift's reads of the slab's texels - the entering slab and the |shift| cells beside it read empty
-        // in every one-frame commit of a 16-cell shift (gi.scroll_slab), although the barrier solver held the scratch's
-        // and the store's records (compute stage, written) and Vulkan synchronization validation reported no hazard on
-        // these dispatches. A submission here (after the chunks, before the shifts) makes every arm exact; one after the
-        // scratch's clear does not. The mechanism inside the pin's compute recording is UNRESOLVED (the report names it);
-        // a commit is one submission per scroll.
-        mRenderSystem->flushCommands();
         TextureGpu *to[kVolumes];
         volumeList( live->liveVolumes(), to );
+        // THE SHIFT WAITS FOR WHAT LAST USED THE STORE (PHOTON-7 stage 2's read D2, confirmed 2026-10-23). The barrier
+        // solver forgets every use at the frame's reset, so the live volumes reach the shift "first seen": oldAccess
+        // Undefined, no source stage - a barrier with TOP and no access, i.e. NO dependency on any earlier work. A shift
+        // that READS the volume it writes then ran unordered: in a ONE-FRAME commit (the slab's chunks voxelised earlier in
+        // the same command buffer) the shifted store lost 186 interior cells (gi.scroll_slab H; a mid-frame submit hid it -
+        // a band-aid that would separate nothing once the GI region records async - and distinct shift and copy jobs per
+        // axis and per texture did not help: the parameters were never shared). Each volume's prior use is given to the
+        // solver as it stands - its current layout, read (a sampled layout) or read-write, by any shader stage - so the
+        // shift's transition is a shader-to-compute barrier with the writes made available: exact with no submit.
+        {
+            BarrierSolver &solver = mRenderSystem->getBarrierSolver();
+            const uint8 anyShaderStage = static_cast<uint8>( ( 1u << GPT_VERTEX_PROGRAM ) | ( 1u << GPT_FRAGMENT_PROGRAM ) |
+                                                             ( 1u << GPT_GEOMETRY_PROGRAM ) | ( 1u << GPT_HULL_PROGRAM ) |
+                                                             ( 1u << GPT_DOMAIN_PROGRAM ) | ( 1u << GPT_COMPUTE_PROGRAM ) );
+            mRenderSystem->endCopyEncoder();   // (a copy's layout is settled first)
+            const auto priorUse = [&]( TextureGpu *t ) {
+                if( !t )
+                    return;
+                const ResourceLayout::Layout layout = t->getCurrentLayout();
+                if( layout == ResourceLayout::Undefined )
+                    return;   // never used: nothing to wait for
+                // the access each layout permits (the solver's own pairs)
+                ResourceAccess::ResourceAccess access = ResourceAccess::ReadWrite;
+                if( layout == ResourceLayout::Texture || layout == ResourceLayout::CopySrc ||
+                    layout == ResourceLayout::RenderTargetReadOnly )
+                    access = ResourceAccess::Read;
+                else if( layout == ResourceLayout::CopyDst || layout == ResourceLayout::ResolveDest )
+                    access = ResourceAccess::Write;
+                const bool shaderLayout = layout == ResourceLayout::Texture || layout == ResourceLayout::Uav ||
+                                          layout == ResourceLayout::RenderTargetReadOnly;
+                solver.assumeTransition( t, layout, access, shaderLayout ? anyShaderStage : uint8( 0u ) );
+            };
+            for( size_t i = 0u; i < kVolumes; ++i )
+                priorUse( to[i] );
+            for( size_t i = 0u; i < numLight; ++i )
+                priorUse( light[i].texture );
+        }
         // THE SHIFT IN PLACE, axis by axis (separable: after the three the store at new cell n is the old n + shift),
         // the geometry's eleven volumes, then the light's.
         size_t shifted = 0u;
