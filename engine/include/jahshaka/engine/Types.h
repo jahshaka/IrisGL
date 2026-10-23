@@ -5076,6 +5076,22 @@ struct RayQueryStatus {
     unsigned long long hitRecords = 0;
     unsigned long long hitDropped = 0;
     unsigned long long hitCapacity = 0;
+    /// THE HIT LIST PER LIVE VIEW (PHOTON-7 stage 0's read R4): the sums above cannot say WHICH view's list held its
+    /// own demand (hitCapacity is the largest view's: beside a desktop view it never shows a stereo list). One entry per
+    /// live view of the scene (the same LIVE rule), in no fixed order: `eyes` (2 = a stereo view, whose two eyes append
+    /// to its ONE list), `eyeWidth` x `eyeHeight` (one eye's target), `firstCapacity` (the list the view's FIRST
+    /// read-back frame held: its creation size, kHitListCreateShare x eyeWidth x eyeHeight x eyes rounded up to whole
+    /// rows), and the newest read-back frame's `capacity` (THAT frame's list - its records and drops were counted
+    /// against it, so a reading after a growth names the grown list), `records` and `dropped`.
+    struct HitListView {
+        unsigned eyes = 1u;
+        unsigned eyeWidth = 0u, eyeHeight = 0u;
+        unsigned long long firstCapacity = 0ull;
+        unsigned long long capacity = 0ull;
+        unsigned long long records = 0ull;
+        unsigned long long dropped = 0ull;
+    };
+    std::vector<HitListView> hitViews;
     int hitDecodeDraws = 0;
     /// Cumulative counters over the scene's life: how many times the top level
     /// was rebuilt, refitted, and how many bottom-level structures were built.

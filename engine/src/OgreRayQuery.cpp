@@ -1478,6 +1478,11 @@ private:
         unsigned long long appended = 0ull, dropped = 0ull;
         uint32_t readFrame = 0u;
         bool everRead = false;
+        /// ...THE PER-VIEW READOUT (RayQueryStatus::hitViews, PHOTON-7 stage 0's read R4): the view's eyes and one
+        /// eye's target (stamped at every prepare), the list the newest read-back frame held and the list the FIRST
+        /// read-back frame held (the creation size; never rewritten).
+        unsigned eyes = 1u, eyeWidth = 0u, eyeHeight = 0u;
+        uint32_t readCapacity = 0u, firstCapacity = 0u;
         /// The largest demand of a retired frame that overflowed its list, not yet taken (takeHitOverflow).
         unsigned long long overflowDemand = 0ull;
         /// THE REFLECTION'S REST COUNT (PHOTON-2 round 2, R1): the trace's tag for this frame (the rest's serial in
@@ -8862,6 +8867,7 @@ void RayQueryTier::readHitCounters(HitView &hv) {
         if (!any || int32_t(pd.frame - newest) > 0) {
             hv.appended = w[0];
             hv.dropped = w[1];
+            hv.readCapacity = pd.listRecords;
             hv.restActive = w[2];
             hv.restActiveTag = pd.restTag;
             newest = pd.frame;
@@ -8870,6 +8876,7 @@ void RayQueryTier::readHitCounters(HitView &hv) {
         pd.live = false;
     }
     if (any) {
+        if (!hv.everRead) hv.firstCapacity = hv.readCapacity;
         hv.readFrame = newest;
         hv.everRead = true;
     }
@@ -8892,6 +8899,10 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     Ogre::Camera *cam = view ? view->camera() : nullptr;
     if (!scene || !cam || !pass || !out.ids) return false;
     hv.scene = scene;
+    // (a stereo view's width() is its eye PAIR's: both eyes append to this one list)
+    hv.eyes = view->stereo() ? 2u : 1u;
+    hv.eyeWidth = view->width() / hv.eyes;
+    hv.eyeHeight = view->height();
     readHitCounters(hv);
     const Ogre::CompositorNode *node = pass->getParentNode();
     if (!node) return false;
@@ -9189,6 +9200,15 @@ void RayQueryTier::hitStatsInto(const OgreScene *scene, RayQueryStatus &st) cons
         st.hitRecords += hv.appended;
         st.hitDropped += hv.dropped;
         st.hitCapacity = std::max<unsigned long long>(st.hitCapacity, hv.capacity);
+        RayQueryStatus::HitListView v;
+        v.eyes = hv.eyes;
+        v.eyeWidth = hv.eyeWidth;
+        v.eyeHeight = hv.eyeHeight;
+        v.firstCapacity = hv.firstCapacity;
+        v.capacity = hv.readCapacity;
+        v.records = hv.appended;
+        v.dropped = hv.dropped;
+        st.hitViews.push_back(v);
     }
     if (atom && scene) st.hitDecodeDraws = int(atom->sceneDecodeCount(scene->sceneManager()));
 }
