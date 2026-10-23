@@ -3053,6 +3053,20 @@ struct GiQualityFacts {
     /// ceiling; the rows are a quarter / an eighth / a sixteenth of it, NOT YET
     /// MEASURED in GPU milliseconds (locked clocks — the lead's measurement).
     unsigned cardIndirectTexels = 32768u;
+    /// THE VOXEL LIGHT'S WORK A FRAME (PHOTON-7 stage 4's hitch fix; L7: a budget is a count): a lamp's or the sun's
+    /// relight of the voxels' direct term and the feedback's bounce passes each spend, every frame, the chain's whole
+    /// work over THIS MANY FRAMES - the relight `chain voxels / lightWorkFrames` voxels, the feedback `chain bricks /
+    /// lightWorkFrames` brick-passes (8^3 bricks), the outermost cascade first (an inner cascade's light rests on the
+    /// outer ones'); what does not fit is carried, in a deterministic order, to the next frame. The physics allows the
+    /// spread: the voxels' direct term feeds only the bounce (the screen's direct light is the forward pass, at once), so
+    /// a lamp's indirect catching up over frames is not a pop, where one frame doing it all is a hitch. MEASURED on Bistro
+    /// Interior at Epic (a 8 -> 12 lamp step, every brick of the four cascades in its 40 m range; 4080 SUPER, clocks
+    /// unlocked): the whole relight 8.94 ms and the whole first pass 11.0 ms in one frame against a 6.93 ms median
+    /// (2.49x); spread, a DENSE brick-pass costs up to ~6 us (1,536 of them read 9.0 ms in one frame) and a relit voxel
+    /// up to ~4.5 ns (cascade 2), so 18 frames - 512 brick-passes (~3 ms) and 262k voxels (~1.2 ms) at Epic - keeps a
+    /// step frame near 1.5x the median. One number for every tier: each pays the same share of its own chain a frame,
+    /// so every tier settles a lamp step in the same frames.
+    unsigned lightWorkFrames = 18u;
     // ---- THE GATHER ROW (PHOTON-GATHER-1d) -----------------------------------
     /// The screen-probe gather at this tier (GiGatherFacts says what and why).
     GiGatherFacts gather;
@@ -4659,6 +4673,9 @@ struct GiStatus {
         bool feedbackOwed = false;
         unsigned long long feedbackPasses = 0, feedbackBricksRan = 0, feedbackStops = 0, feedbackResumes = 0,
                            feedbackSaturated = 0, feedbackReadings = 0;
+        /// ...THE BUDGET'S CARRY (GiQualityFacts::lightWorkFrames): the active bricks the frames' budgets carried to a
+        /// later frame (summed over the readings), and the frames this cascade's owed relight was carried unfinished.
+        unsigned long long feedbackCarried = 0, relightCarried = 0;
         /// THE LAG (PHOTON-7 stage 2): the frames from the frame the camera's step test first owed this cascade a
         /// move to the rebuild (a scroll's commit, or a whole rebuild) that placed it for the camera - the last one
         /// and the most since the chain was built.

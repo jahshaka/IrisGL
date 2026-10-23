@@ -1155,6 +1155,8 @@ GiStatus PhotonComponent::giStatus() const {
             cs.feedbackResumes   = c.fbResumes;
             cs.feedbackSaturated = c.fbSaturated;
             cs.feedbackReadings  = c.fbReadings;
+            cs.feedbackCarried   = c.fbCarried;
+            cs.relightCarried    = c.relightCarried;
             cs.feedbackOwed      = cascadeFeedbackOwed(c);
             // WHAT THIS CASCADE VOXELISED - A READING of the device's own counts,
             // written as the gather wrote the records (ATOM P4b, A5b §3). They
@@ -6382,7 +6384,8 @@ void PhotonComponent::relightAndFeedback() {
         const bool sun = (mRegionOverflowOpen & kGiRegionOverflowSun) != 0u;
         const bool sky = (mRegionOverflowOpen & kGiRegionOverflowSky) != 0u;
         const size_t n = mVctCascades.size();
-        // (1) THE CHANGES THE LIST SAYS, so far this frame
+        // (1) THE CHANGES THE LIST SAYS, so far this frame (a change that grows a cascade's owed relight restarts its
+        //     sweep's count from where its cursor stands: the sweep then goes round the grown box once more)
         for (size_t i = 0; i < n; ++i) {
             VctCascade &c = mVctCascades[i];
             if (!c.lighting || !c.built) continue;
@@ -6391,10 +6394,12 @@ void PhotonComponent::relightAndFeedback() {
                 c.remarchOwedFrame = 0ull;
                 c.relightOwed = true;
                 c.relightWhole = true;
+                c.relightSwept = 0;
             }
             if (sun || mGiRelightAllOwed) {
                 c.relightOwed = true;
                 c.relightWhole = true;
+                c.relightSwept = 0;
             }
             for (const RegionEntry &e : mRegionsOpen) {
                 if (e.kind != GiRegionKind::Lamp || !box.intersects(e.box)) continue;
@@ -6405,44 +6410,78 @@ void PhotonComponent::relightAndFeedback() {
                 if (c.relightOwed) c.relightBox.merge(part);
                 else c.relightBox = part;
                 c.relightOwed = true;
+                c.relightSwept = 0;
             }
         }
         mGiRelightAllOwed = false;
-        // (2) PAID where the latch allows
+        // (2) PAID where the latch allows, UNDER THE FRAME'S COUNT (GiQualityFacts::lightWorkFrames: the chain's voxels
+        //     over that many frames), OUTERMOST FIRST (the feedback's order, below: an inner cascade's light rests on the
+        //     outer ones'): each owed box is relit in slabs of 4-cell planes along z from its cursor, as many planes as
+        //     the count left pays for (at least one slab on a frame nothing else spent it), and the rest carried. A
+        //     voxel's delta reads its old direct term from the store, so a plane relit twice (a grown box re-swept) is
+        //     exact.
+        unsigned long long chainVoxels = 0ull;
+        for (const VctCascade &c : mVctCascades)
+            if (c.lighting && c.built) chainVoxels += (unsigned long long)c.resolution * c.resolution * c.resolution;
+        const unsigned shareFrames = std::max(1u, giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr
+                                                                                          : GiViewProfile::Desktop)
+                                                      .lightWorkFrames);
+        const unsigned long long relightBudget = (chainVoxels + shareFrames - 1u) / shareFrames;
+        unsigned long long relightLeft = relightBudget;
         bool sceneGraphCurrent = false;
-        for (size_t i = 0; i < n; ++i) {
+        for (size_t i = n; i-- > 0;) {
             VctCascade &c = mVctCascades[i];
             if (!c.relightOwed || !c.lighting || !c.built) continue;
+            const auto answered = [&c]() {
+                c.relightOwed = c.relightWhole = false;
+                c.relightBox = Ogre::Aabb::BOX_NULL;
+                c.relightCursor = std::numeric_limits<float>::quiet_NaN();
+                c.relightSwept = 0;
+            };
             if (injectedThisFrame(i)) {
-                if (c.injectedWholeFrame == frame) {   // a whole volume's injection read the lights as they are
-                    c.relightOwed = c.relightWhole = false;
-                    c.relightBox = Ogre::Aabb::BOX_NULL;
-                }
+                if (c.injectedWholeFrame == frame) answered();   // a whole volume's injection read the lights as they are
                 continue;
             }
             Ogre::PhotonCommitLight d;
             d.delta = true;
             for (int a = 0; a < 3; ++a) d.keepHi[a] = Ogre::uint32(c.resolution);
+            // THE OWED CELLS: the box (or the whole volume), aligned to the injection's 4^3 groups
+            const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+            const Ogre::Vector3 corner = box.getMinimum();
+            const float cell = c.cell();
+            const int res = c.resolution;
+            int lo[3] = { 0, 0, 0 }, hi[3] = { res, res, res };
             if (!c.relightWhole) {
-                const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
-                const Ogre::Vector3 corner = box.getMinimum();
-                const float cell = c.cell();
-                const int res = c.resolution;
                 bool empty = false;
                 for (int a = 0; a < 3; ++a) {
                     const int l = std::max(0, int(std::floor((c.relightBox.getMinimum()[a] - corner[a]) / cell)));
                     const int h = std::min(res, int(std::ceil((c.relightBox.getMaximum()[a] - corner[a]) / cell)));
                     if (h <= l) empty = true;
-                    d.injectLo[0][a] = Ogre::uint32(l / 4 * 4);
-                    d.injectHi[0][a] = Ogre::uint32(std::min(res, (h + 3) / 4 * 4));
+                    lo[a] = l / 4 * 4;
+                    hi[a] = std::min(res, (h + 3) / 4 * 4);
                 }
-                d.numInjectBoxes = 1u;
-                if (empty) {
-                    c.relightOwed = false;
-                    c.relightBox = Ogre::Aabb::BOX_NULL;
-                    continue;
-                }
+                if (empty) { answered(); continue; }
             }
+            // THE SLAB THIS FRAME PAYS FOR: from the cursor's plane (the box's first when it stands outside), whole
+            // planes of 4 up to the box's end - the next frame goes on from there (round to the first plane at the end)
+            const unsigned long long area = (unsigned long long)(hi[0] - lo[0]) * (unsigned long long)(hi[1] - lo[1]);
+            const int span = hi[2] - lo[2];
+            int start = std::isfinite(c.relightCursor) ? int(std::lround((c.relightCursor - corner.z) / cell)) : lo[2];
+            start = start / 4 * 4;   // (a scroll moves the planes by even cells: the slab keeps the 4^3 groups)
+            if (start < lo[2] || start >= hi[2]) start = lo[2];
+            int planes = int(std::min<unsigned long long>((unsigned long long)span,
+                                                          area ? relightLeft / area / 4ull * 4ull : 0ull));
+            if (planes <= 0) {
+                if (relightLeft < relightBudget) { ++c.relightCarried; continue; }   // spent by an outer cascade: next frame
+                planes = 4;   // a frame nothing spent always pays one slab: the sweep moves
+            }
+            planes = std::min(planes, span - c.relightSwept);
+            planes = std::max(4, planes / 4 * 4);
+            const int end = std::min(hi[2], start + planes);
+            d.injectLo[0][0] = Ogre::uint32(lo[0]); d.injectHi[0][0] = Ogre::uint32(hi[0]);
+            d.injectLo[0][1] = Ogre::uint32(lo[1]); d.injectHi[0][1] = Ogre::uint32(hi[1]);
+            d.injectLo[0][2] = Ogre::uint32(start); d.injectHi[0][2] = Ogre::uint32(end);
+            d.numInjectBoxes = 1u;
             // A LAMP'S DELTA WAITS FOR ITS SHADER (ASYNC-SHADERS-1), as a scroll's commit does: the delta injection's
             // permutation (asked for at the cascade's first injection) is the background compiler's while it builds -
             // the relight stays owed a frame, never compiled in the frame (shader.async_after_open: a lamp change after an
@@ -6465,9 +6504,16 @@ void PhotonComponent::relightAndFeedback() {
                 row.setUnits(ok ? 1u : 0u);
             }
             if (ok) {
-                c.relightOwed = c.relightWhole = false;
-                c.relightBox = Ogre::Aabb::BOX_NULL;
                 ++c.relights;
+                const unsigned long long spent = area * (unsigned long long)(end - start);
+                relightLeft = spent >= relightLeft ? 0ull : relightLeft - spent;
+                c.relightSwept += end - start;
+                if (c.relightSwept >= span) {
+                    answered();
+                } else {
+                    c.relightCursor = corner.z + float(end >= hi[2] ? lo[2] : end) * cell;
+                    ++c.relightCarried;
+                }
             }
         }
         // THE JACOBI REFERENCE (the measuring door gi.bounceJacobi, set to N): the innermost N cascades (every one when N
@@ -6493,11 +6539,13 @@ void PhotonComponent::relightAndFeedback() {
 void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_t forceInner) {
     const size_t n = mVctCascades.size();
     std::vector<char> ran(n, 0);
+    std::vector<Ogre::PhotonFeedbackActivation> acts(n);
+    // (a) WHO OWES A PASS, outermost first (a cascade inside one that passes owes its accumulation: its cones read it)
     bool outerRan = false;
     for (size_t i = n; i-- > 0;) {
         VctCascade &c = mVctCascades[i];
         if (!c.lighting || !c.built) continue;
-        Ogre::PhotonFeedbackActivation act;
+        Ogre::PhotonFeedbackActivation &act = acts[i];
         act.all = (forceAll && i < forceInner) || c.fbForce;
         if (!act.all) {
             // THE REGIONS THAT MEET IT: a lamp's spheres (its direct changed there; whatever sees those walls changes) and
@@ -6533,15 +6581,47 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
         if (activated) c.fbActivatedFrame = frame;
         const bool owes = activated || outerRan || c.fbActivatedFrame > c.fbLastFrame || c.fbLastActive > 0u;
         if (!owes) continue;
+        ran[i] = 1;
+        outerRan = true;
+    }
+    // (b) THE FRAME'S LISTS UNDER ITS COUNT, OUTERMOST FIRST (GiQualityFacts::lightWorkFrames: the chain's bricks over
+    //     that many frames, a brick-pass each): each selection lists its active bricks from its cursor while the chain's
+    //     budget lasts and carries the rest (PhotonBrickFeedback_cs.glsl SELECT, on the GPU - the host never knows a
+    //     frame's active count). OUTERMOST FIRST because the dependency runs one way: an inner cascade's cones read the
+    //     outer ones past its box and an outer never reads an inner, so an inner converged first against moving outers
+    //     converges again (measured on Bistro Interior's lamp step, cascade 0 first: the brick-passes 28.7k -> 59.8k,
+    //     cascade 0's resumes 2,128 -> 15,568). THE JACOBI DOOR passes its every brick a frame: no budget under it (a
+    //     reference).
+    unsigned long long chainBricks = 0ull;
+    for (const VctCascade &c : mVctCascades)
+        if (c.lighting && c.built) {
+            const unsigned long long b = (unsigned long long)((c.resolution + 7) / 8);
+            chainBricks += b * b * b;
+        }
+    const unsigned shareFrames = std::max(1u, giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr
+                                                                                      : GiViewProfile::Desktop)
+                                                  .lightWorkFrames);
+    const Ogre::uint32 budget = mJacobiOn ? 0xFFFFFFFFu
+                                          : Ogre::uint32(std::min<unsigned long long>(
+                                                (chainBricks + shareFrames - 1u) / shareFrames, 0xFFFFFFFEull));
+    Ogre::PhotonVoxelLighting *chain = mVctCascades.empty() ? nullptr : mVctCascades[0].lighting;
+    bool first = true;
+    for (size_t i = n; i-- > 0;) {
+        if (!ran[i]) continue;
+        mVctCascades[i].lighting->feedbackSelect(acts[i], chain, Ogre::uint32(i), first, budget);
+        first = false;
+    }
+    // (c) THE PASSES, outermost first (a pass reads the CURRENT totals: any order converges to the one fixed point)
+    for (size_t i = n; i-- > 0;) {
+        if (!ran[i]) continue;
+        VctCascade &c = mVctCascades[i];
         mScene.applyCascadeEnvironment(c.lighting);   // the sky the pass's escapes read
         {
             monitor::CacheScope row(CacheKind::Gi, WorkReason::Light, (unsigned long long)i,
                                     kFeedbackRowNames[std::min(i, size_t(7))], mRoot->getRenderSystem());
-            c.lighting->feedbackPass(act);
+            c.lighting->feedbackRun();
         }
         c.fbForce = false;
-        ran[i] = 1;
-        outerRan = true;
         ++c.fbPasses;
     }
     for (size_t i = n; i-- > 0;) {
@@ -6568,6 +6648,7 @@ void PhotonComponent::harvestFeedback() {
             c.fbStops += r.stops;
             c.fbResumes += r.resumes;
             c.fbSaturated += r.saturated;
+            c.fbCarried += r.carried;
             ++c.fbReadings;
         }
     }

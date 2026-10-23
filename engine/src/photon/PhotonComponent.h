@@ -52,6 +52,7 @@
 #include <Math/Simple/OgreAabb.h>
 
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -414,6 +415,14 @@ public:
         /// re-marched whole on the next frame (`relightWhole`), the latch allowing. The frame it was owed in; 0 none.
         unsigned long long remarchOwedFrame = 0ull;
         Ogre::Aabb relightBox = Ogre::Aabb::BOX_NULL;
+        /// THE RELIGHT'S SWEEP (PHOTON-7 stage 4's hitch fix: the voxels a frame relights are the tier's count,
+        /// GiQualityFacts::lightWorkFrames): the owed box is relit in slabs of 4-cell planes along z, one sweep from the
+        /// cursor (`relightCursor`, the world z of the next plane; NaN = the box's first) round the box once
+        /// (`relightSwept` planes so far; a change that grows the owed box restarts the count from the cursor, so a
+        /// continuous drag sweeps round-robin and never starves the far planes), and the frames a relight was carried.
+        float relightCursor = std::numeric_limits<float>::quiet_NaN();
+        int relightSwept = 0;
+        unsigned long long relightCarried = 0;
         unsigned long long relights = 0;
         /// THE FEEDBACK'S BOOKS (PHOTON-7 stage 4; GiStatus::CascadeStatus::feedback*): every brick at its next pass
         /// (`fbForce`: a whole injection, a same-placement rebuild), the frame of the last activation the CPU knows of
@@ -423,7 +432,8 @@ public:
         bool fbForce = false;
         unsigned long long fbActivatedFrame = 0, fbLastFrame = 0;
         unsigned fbLastActive = 0;
-        unsigned long long fbPasses = 0, fbBricksRan = 0, fbStops = 0, fbResumes = 0, fbSaturated = 0, fbReadings = 0;
+        unsigned long long fbPasses = 0, fbBricksRan = 0, fbStops = 0, fbResumes = 0, fbSaturated = 0, fbReadings = 0,
+                           fbCarried = 0;
         float        lastCpuMs = -1.0f;
         /// The camera position this cascade was last BUILT for. The scroll test
         /// quantises BOTH on an absolute world lattice of `step * (1 -

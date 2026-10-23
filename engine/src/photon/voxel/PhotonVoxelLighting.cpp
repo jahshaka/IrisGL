@@ -319,7 +319,7 @@ namespace Ogre
             mBrickReadings[k].ticket.reset();
         for( uint32 k = 0u; k < kFeedbackReadingSlots; ++k )
             mFeedbackReadings[k].ticket.reset();
-        for( UavBufferPacked **b : { &mBrickBuffer, &mBrickState[0], &mBrickState[1], &mBrickList, &mBrickArgs } )
+        for( UavBufferPacked **b : { &mBrickBuffer, &mBrickState[0], &mBrickState[1], &mBrickList, &mBrickArgs, &mFbChain } )
         {
             if( *b )
             {
@@ -1231,7 +1231,8 @@ namespace Ogre
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::dispatchFeedback( uint32 mode, const PhotonVoxelLighting *source,
-                                                const PhotonFeedbackActivation *activation, const int32 *shift )
+                                                const PhotonFeedbackActivation *activation, const int32 *shift,
+                                                const uint32 *select, UavBufferPacked *chain )
     {
         RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
         HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
@@ -1259,6 +1260,16 @@ namespace Ogre
             bufSlot.access = k < 4u ? ResourceAccess::ReadWrite : ResourceAccess::Read;
             job->_setUavBuffer( k, bufSlot );
         }
+        // ...and the chain's budget words (SELECT: the innermost cascade's; any other mode: this volume's own).
+        {
+            UavBufferPacked *words = mode == 5u && chain ? chain : mFbChain;
+            DescriptorSetUav::BufferSlot bufSlot = DescriptorSetUav::BufferSlot::makeEmpty();
+            bufSlot.buffer = words;
+            bufSlot.offset = 0u;
+            bufSlot.sizeBytes = words->getTotalSizeBytes();
+            bufSlot.access = ResourceAccess::ReadWrite;
+            job->_setUavBuffer( 8u, bufSlot );
+        }
         // THE PARAMETERS, written whole per dispatch (PhotonVoxelScroll::copyBox's rule).
         const uint32 dims[4] = { mBrickDims[0], mBrickDims[1], mBrickDims[2], mode };
         uint32 flags[4] = { 0u, 0u, 0u, 0u };
@@ -1277,6 +1288,13 @@ namespace Ogre
         }
         flags[2] = outer ? 1u : 0u;
         flags[3] = mode == 3u && !outer ? 1u : 0u;
+        if( mode == 5u && select )
+        {
+            flags[0] = select[0];   // the frame's first selection: the budget is set first
+            flags[1] = select[1];   // the budget, brick-passes
+            flags[2] = select[2];   // this cascade's place in the chain (its cursor's word)
+            flags[3] = 0u;
+        }
         const PhotonVoxelLighting *src = source ? source : this;
         const Vector3 selfOrigin = mVoxelizer->getVoxelOrigin();
         const Vector3 srcOrigin = src->mVoxelizer->getVoxelOrigin();
@@ -1308,10 +1326,10 @@ namespace Ogre
         for( const ShaderParams::Param *p : { &pDims, &pFlags, &pLo, &pHi, &pSelf, &pSrc, &pSrcDims, &pShift } )
             params.mParams.push_back( *p );
         params.setDirty();
-        // ONE THREAD A BRICK, 64 a group along x.
+        // ONE THREAD A BRICK, 64 a group along x - but SELECT, ONE workgroup (its scan walks the bricks in order).
         const uint32 bricks = mBrickDims[0] * mBrickDims[1] * mBrickDims[2];
         job->setNumThreadGroupsBasedOn( HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u );
-        job->setNumThreadGroups( std::max( 1u, ( bricks + 63u ) / 64u ), 1u, 1u );
+        job->setNumThreadGroups( mode == 5u ? 1u : std::max( 1u, ( bricks + 63u ) / 64u ), 1u, 1u );
         jahshaka::engine::detail::photonDispatch( hlmsCompute, job, renderSystem );
     }
     //-------------------------------------------------------------------------
@@ -1326,10 +1344,19 @@ namespace Ogre
         dispatchFeedback( 0u );   // CLEAR: this frame's mask and arguments
     }
     //-------------------------------------------------------------------------
-    void PhotonVoxelLighting::feedbackPass( const PhotonFeedbackActivation &activation )
+    void PhotonVoxelLighting::feedbackSelect( const PhotonFeedbackActivation &activation, PhotonVoxelLighting *chain,
+                                              uint32 chainIndex, bool first, uint32 budget )
     {
         beginLightFrame();
-        dispatchFeedback( 1u, nullptr, &activation );   // PRE: the activations and the list
+        dispatchFeedback( 1u, nullptr, &activation );   // PRE: the activations
+        PhotonVoxelLighting *owner = chain ? chain : this;
+        owner->ensureBrickMask();
+        const uint32 select[3] = { first ? 1u : 0u, budget, std::min( chainIndex, kFbChainWords - 2u ) };
+        dispatchFeedback( 5u, nullptr, nullptr, nullptr, select, owner->mFbChain );   // SELECT: the list, budgeted
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::feedbackRun()
+    {
         runFeedbackPass();
     }
     //-------------------------------------------------------------------------
@@ -1377,6 +1404,7 @@ namespace Ogre
         out.stops = w[13];
         out.resumes = w[14];
         out.saturated = w[15];
+        out.carried = w[9] > w[8] ? w[9] - w[8] : 0u;
         r.ticket->unmap();
         r.ticket.reset();
         mFeedbackNextTake = ( mFeedbackNextTake + 1u ) % kFeedbackReadingSlots;
@@ -1938,7 +1966,7 @@ namespace Ogre
         for( uint32 k = 0u; k < kFeedbackReadingSlots; ++k )
             mFeedbackReadings[k].ticket.reset();
         mFeedbackNextIssue = mFeedbackNextTake = 0u;
-        for( UavBufferPacked **b : { &mBrickBuffer, &mBrickState[0], &mBrickState[1], &mBrickList, &mBrickArgs } )
+        for( UavBufferPacked **b : { &mBrickBuffer, &mBrickState[0], &mBrickState[1], &mBrickList, &mBrickArgs, &mFbChain } )
         {
             if( *b )
                 vaoManager->destroyUavBuffer( *b );
@@ -1958,6 +1986,10 @@ namespace Ogre
         mBrickList = vaoManager->createUavBuffer( std::max<size_t>( bricks, 1u ), sizeof( uint32 ), 0, zeros.data(), false );
         const uint32 args[16] = { 8u, 0u, 1u, 0u, 1u, 0u, 1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
         mBrickArgs = vaoManager->createUavBuffer( 16u, sizeof( uint32 ), 0, const_cast<uint32 *>( args ), false );
+        {
+            uint32 chainZeros[kFbChainWords] = {};
+            mFbChain = vaoManager->createUavBuffer( kFbChainWords, sizeof( uint32 ), 0, chainZeros, false );
+        }
         mBrickClearFrame = ~0ull;
     }
     //-------------------------------------------------------------------------

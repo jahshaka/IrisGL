@@ -91,6 +91,9 @@ namespace Ogre
     {
         uint64 frame = 0u;
         uint32 ran = 0u, activeAfter = 0u, stops = 0u, resumes = 0u, saturated = 0u;
+        /// ...and the active bricks the frame's budget CARRIED (active at the selection, not passed: PHOTON-7 stage 4's
+        /// hitch fix, GiQualityFacts::feedbackBrickPasses).
+        uint32 carried = 0u;
     };
 
     class PhotonVoxelLighting : public IdObject, public TextureGpuListener
@@ -179,6 +182,11 @@ namespace Ogre
         uint32            mBrickStateCur = 0u;
         UavBufferPacked  *mBrickList = nullptr;
         UavBufferPacked  *mBrickArgs = nullptr;
+        /// THE CHAIN'S BUDGET WORDS (PhotonBrickFeedback_cs.glsl U8: the brick-passes left this frame, each cascade's
+        /// selection cursor): the INNERMOST cascade's is the chain's, every cascade's SELECT binds it; each volume keeps
+        /// one so the slot is always bound to a buffer of its own outside a selection.
+        UavBufferPacked  *mFbChain = nullptr;
+        static constexpr uint32 kFbChainWords = 32u;
         struct FeedbackTicket
         {
             AsyncTicketPtr ticket;
@@ -195,7 +203,8 @@ namespace Ogre
         /// One dispatch of the feedback job in `mode` (PhotonBrickFeedback_cs.glsl), one thread per brick unless the
         /// mode says otherwise; `source` and `activation` for ACCUM and PRE, `shift` for SHIFT.
         void dispatchFeedback( uint32 mode, const PhotonVoxelLighting *source = nullptr,
-                               const PhotonFeedbackActivation *activation = nullptr, const int32 *shift = nullptr );
+                               const PhotonFeedbackActivation *activation = nullptr, const int32 *shift = nullptr,
+                               const uint32 *select = nullptr, UavBufferPacked *chain = nullptr );
         /// The frame's brick mask and arguments, cleared once a frame before the first light work that writes them.
         void beginLightFrame();
 
@@ -464,12 +473,17 @@ namespace Ogre
         void update( SceneManager *sceneManager, uint32 lightMask = 0xffffffff );
 
         /** THE FEEDBACK, ONE FRAME (PHOTON-7 stage 4; PhotonBrickFeedback_cs.glsl). The host calls, per frame, for every
-            cascade that owes it, outermost first: feedbackPass (the activations, the list of active bricks, the bounce
-            pass over them, the copy-back, the directional levels), then - after every cascade's pass - feedbackAccumulate
-            once with this cascade as the source and once per OUTER cascade that ran a pass this frame (what their moves
-            could move this cascade's stopped bricks by), then feedbackEnd (the stop and resume rules, the read-backs).
-            The host has set the environment the pass's escapes read (setEnvironment). */
-        void feedbackPass( const PhotonFeedbackActivation &activation );
+            cascade that owes it: feedbackSelect, INNERMOST FIRST (the activations, then the frame's list of active
+            bricks under the chain's budget - `chain` the innermost cascade, whose buffer holds the budget and every
+            cascade's cursor; `chainIndex` this cascade's place; `first` on the frame's first selection, which sets the
+            budget to `budget` brick-passes), then feedbackRun (the bounce pass over the listed bricks, the copy-back,
+            the directional levels), then - after every cascade's pass - feedbackAccumulate once with this cascade as
+            the source and once per OUTER cascade that ran a pass this frame (what their moves could move this
+            cascade's stopped bricks by), then feedbackEnd (the stop and resume rules, the read-backs). The host has
+            set the environment the pass's escapes read (setEnvironment). */
+        void feedbackSelect( const PhotonFeedbackActivation &activation, PhotonVoxelLighting *chain, uint32 chainIndex,
+                             bool first, uint32 budget );
+        void feedbackRun();
         void feedbackAccumulate( const PhotonVoxelLighting *source );
         void feedbackEnd( uint64 frame );
         /** A SCROLL COMMIT'S STATE (PHOTON-7 stage 4): the store moved so that the new cell n holds the old cell n +
