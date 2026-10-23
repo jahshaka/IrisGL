@@ -233,6 +233,32 @@
 		jahReemit = reemit;
 	}
 
+	// THE STORE MOVES IN WHOLE STEPS (PHOTON-7 stage 4's fix, measured in stage 5): a channel is written only where the
+	// pass's f32 result is AT LEAST ONE STEP of the half-float store from what the store holds (the step at the larger of
+	// the two magnitudes: 2^-10 of the value, a tenth of a code); nearer, the stored value stays. Why: an iteration whose
+	// contraction r exceeds 1/2 rounds into a one-step orbit around its fixed point (r x a step rounds to a step) - the
+	// orbit's f32 move is (1 + r) d with d at most half a step, under one step, so it is held and dies at the first
+	// resume (a resumed brick's target moves r x a step) - where every flip was a move the stopped bricks' resume summed
+	// over every touching brick at weight 1, and they resumed each other for ever (a sealed room after a teleport: 92
+	// bricks of cascade 0 active 1500 frames on). A change of any speed is kept: the target is recomputed from the world
+	// every pass, so a slow change writes once it reaches a step (its lag at most a step; gi.bounce_series' slow fade).
+	// The price: the feedback rests within step / (1 - r) of the fixed point instead of step / (2 (1 - r)). Both sides
+	// held alike (the back's total is written in place).
+	{
+		const float3 jahStored = OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz;
+		const float3 jahStoredBack = imageLoad( backVoxel, int3( jahCell ) ).xyz;
+		const float3 jahFloor = float3( 6.1035156e-5, 6.1035156e-5, 6.1035156e-5 );   // the half float's smallest normal
+		const float3 jahStep = exp2( floor( log2( max( max( abs( currentLight.xyz ), abs( jahStored ) ), jahFloor ) ) ) - 10.0 );
+		const float3 jahStepBack =
+			exp2( floor( log2( max( max( abs( backLight.xyz ), abs( jahStoredBack ) ), jahFloor ) ) ) - 10.0 );
+		for( int k = 0; k < 3; ++k )
+		{
+			if( abs( currentLight[k] - jahStored[k] ) < jahStep[k] )
+				currentLight[k] = jahStored[k];
+			if( abs( backLight[k] - jahStoredBack[k] ) < jahStepBack[k] )
+				backLight[k] = jahStoredBack[k];
+		}
+	}
 	wshort3 voxelCelUvw = wshort3( jahCell );
 	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( currentLight ) );  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
 	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, float4( backLight.xyz, currentLight.w ) );
@@ -242,20 +268,10 @@
 	// brick the most relative move (the mask, codes), the most absolute move and the sensitivity - the re-emission over
 	// the voxel's own code, per channel (the state) - each the group's most, then one atomic per group. Every invocation
 	// of a group is in one brick and reaches the barriers (the list's bricks are whole).
-	// THE ABSOLUTE MOVE - what the stopped bricks' resume accumulates (ACCUM) and the cards' (JahCardIndirect) - LESS
-	// ONE STEP OF THE STORE (PHOTON-7 stage 5, measured): an iteration whose contraction r exceeds 1/2 can round into a
-	// one-step orbit around its fixed point (r x a step rounds to a step), and those flips, summed by the resume's bound
-	// over every touching brick at weight 1, resumed the stopped bricks for ever (a sealed room after a teleport: 92
-	// bricks active 1500 frames on, 162,515 stops and 154,415 resumes, the chain never at rest). A step is the half-float
-	// store's 2^-10 of the value, a tenth of a code: the store's rounding, never a change. The relative move (the stop
-	// rule's, the mask's) keeps the whole difference - the stop rule measures the brick's own series with it.
 	const float3 jahOld = OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz;
 	const float3 jahNew = imageLoad( lightVoxel, int3( jahCell ) ).xyz;
 	const float jahMoved = jahBrickChange( jahOld, jahNew );
-	// one step of the store at the larger of the two (the half float's 10 mantissa bits; its smallest normal below)
-	const float3 jahStep = exp2( floor( log2( max( max( abs( jahNew ), abs( jahOld ) ),
-											 float3( 6.1035156e-5, 6.1035156e-5, 6.1035156e-5 ) ) ) ) - 10.0 );
-	const float3 jahAbs3 = max( abs( jahNew - jahOld ) - jahStep, float3( 0.0, 0.0, 0.0 ) );
+	const float3 jahAbs3 = abs( jahNew - jahOld );
 	float jahAbs = max( max( jahAbs3.x, jahAbs3.y ), jahAbs3.z );
 	if( ( floatBitsToUint( jahAbs ) & 0x7F800000u ) == 0x7F800000u )
 		jahAbs = 1.0e30;

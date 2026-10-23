@@ -79,10 +79,10 @@ vulkan( layout( ogre_s2 ) uniform sampler vctProbeSampler );
 // float store's fixed point moves by exactly 0 and its brick can stop (PhotonBrickFeedback_cs.glsl).
 layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
 uniform restrict image3D lightVoxel;
-// Jahshaka (PHOTON-VOXEL-5): the back side's total, written in place (no reader of this job reads
-// it: the march's level-0 read here takes the sides' mean).
+// Jahshaka (PHOTON-VOXEL-5): the back side's total, written in place (the march's level-0 read here takes the sides'
+// mean); READ too, by the store's whole-step rule (PHOTON-7 stage 4's fix: a channel nearer than a step keeps its value).
 layout( vulkan( ogre_u1 ) vk_comma rgba16f )
-uniform restrict writeonly image3D backVoxel;
+uniform restrict image3D backVoxel;
 // PHOTON-7 stage 3, THE BRICK MASK (LightInjection_cs.glsl's buffer, word [1] of a brick): the most this frame's pass
 // moved a voxel's total (relative), max-reduced per 8^3 brick - the feedback's per-brick change (stage 4).
 layout( std430, ogre_U2 ) restrict coherent buffer jahBrickLayout { uint jahBrickMask[]; };
