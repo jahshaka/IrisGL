@@ -980,8 +980,10 @@ namespace Ogre
         ShaderParams::Param paramVoxelCellSize;
         ShaderParams::Param paramVoxelPixelOrigin;
         ShaderParams::Param paramPixelsToWrite;
+        ShaderParams::Param paramStoreBase;
 
         paramRange.name = "rangeIdx_pad";
+        paramStoreBase.name = "voxelStoreBase";
         paramVoxelOrigin.name = "voxelOrigin";
         paramVoxelCellSize.name = "voxelCellSize";
         paramVoxelPixelOrigin.name = "voxelPixelOrigin";
@@ -1037,6 +1039,9 @@ namespace Ogre
                 paramVoxelPixelOrigin.setManualValue( voxelPixelOrigin, 3u );
                 const uint32 pixelsToWrite[3] = { octant.width, octant.height, octant.depth };
                 paramPixelsToWrite.setManualValue( pixelsToWrite, 3u );
+                const int32 storeBase[4] = { octant.storeBase[0], octant.storeBase[1], octant.storeBase[2],
+                                             int32( octant.storeAxis ) };
+                paramStoreBase.setManualValue( storeBase, 4u );
 
                 ShaderParams &shaderParams = job->getShaderParams( "default" );
                 shaderParams.mParams.clear();
@@ -1045,6 +1050,7 @@ namespace Ogre
                 shaderParams.mParams.push_back( paramVoxelCellSize );
                 shaderParams.mParams.push_back( paramVoxelPixelOrigin );
                 shaderParams.mParams.push_back( paramPixelsToWrite );
+                shaderParams.mParams.push_back( paramStoreBase );
                 shaderParams.setDirty();
 
                 jahshaka::engine::detail::photonDispatch( hlmsCompute, job, mRenderSystem );
@@ -1080,6 +1086,9 @@ namespace Ogre
             octant.width = c.w;
             octant.height = c.h;
             octant.depth = c.d;
+            octant.storeAxis = c.storeAxis;
+            for( int a = 0; a < 3; ++a )
+                octant.storeBase[a] = c.storeBase[a];
             const Vector3 lo = targetOrigin + cell * Vector3( Real( c.x ), Real( c.y ), Real( c.z ) );
             const Vector3 hi = targetOrigin + cell * Vector3( Real( c.x + c.w ), Real( c.y + c.h ),
                                                               Real( c.z + c.d ) );

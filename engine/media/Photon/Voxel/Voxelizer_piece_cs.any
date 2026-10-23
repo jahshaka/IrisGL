@@ -794,7 +794,12 @@
 	// `voxelAccumVal` was the pin's triangle counter and the divisor; it now holds
 	// the voxel's COVERAGE on the merge's fixed-point grid (PHOTON-VOXEL-3), read and
 	// written exactly where upstream read and wrote the count.
-	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz + ushort3( p_voxelPixelOrigin ) );
+	// WHERE IT IS STORED (PHOTON-7 stage 2, p_voxelStoreBase): the cell itself for a whole build, the scroll scratch's
+	// layout for a scroll's chunk - the merge's accumulator below keeps the volume's own cell (voxelCel).
+	const int3 jahStoreCel = int3( gl_GlobalInvocationID.xyz + p_voxelPixelOrigin );
+	const int3 jahStorePerm = p_voxelStoreBase.w == 1 ? jahStoreCel.yxz
+												   : ( p_voxelStoreBase.w == 2 ? jahStoreCel.zxy : jahStoreCel );
+	wshort3 voxelCelUvw = wshort3( jahStorePerm + p_voxelStoreBase.xyz );
 
 	@property( syntax != hlsl || typed_uav_load )
 		uint origAccumWeight = voxelInBounds ? OGRE_imageLoad3D( voxelAccumVal, voxelCelUvw ).x : 0u;

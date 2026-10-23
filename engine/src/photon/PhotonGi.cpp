@@ -4889,9 +4889,9 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
         // reported it per rebuild): giStatus carries only the LAST rebuild's
         // cost, so a burst — a boot's, a teleport's — could not be added up.
     }
-    // THE SCROLL TARGETS, one per volume size (ENGINE-UPGRADE-U5 stage 1) - here, in the arm's
-    // build (a graphics region: they are texture creations), once every cascade's volumes exist.
-    buildScrollTargets();
+    // THE SCROLL SCRATCHES, one per cascade (PHOTON-7 stage 2) - here, in the arm's build (a graphics
+    // region: they are texture creations), once every cascade's volumes exist.
+    buildScrollScratches();
 
     // The head IS cascade 0 — from here on every existing rule in this file
     // (binding, teardown, material generation, status) sees the arm it knows.
@@ -4921,16 +4921,23 @@ Ogre::Vector3 PhotonComponent::placementCam(size_t idx, const Ogre::Vector3 &eye
 }
 
 void PhotonComponent::recentreCascade(VctCascade &c, const Ogre::Vector3 &eyePos) {
-    ++mGiPlacementSerial;
     const Ogre::Vector3 camPos = placementCam(size_t(&c - mVctCascades.data()), eyePos);
     const float cell = c.cell();
-    c.latticeX = jahQuantEven(camPos.x, cell);
-    c.latticeY = jahQuantEven(camPos.y, cell);
-    c.latticeZ = jahQuantEven(camPos.z, cell);
+    const long long lattice[3] = { jahQuantEven(camPos.x, cell), jahQuantEven(camPos.y, cell),
+                                   jahQuantEven(camPos.z, cell) };
+    recentreCascadeAt(c, lattice, camPos);
+}
+
+void PhotonComponent::recentreCascadeAt(VctCascade &c, const long long lattice[3], const Ogre::Vector3 &builtCam) {
+    ++mGiPlacementSerial;
+    const float cell = c.cell();
+    c.latticeX = lattice[0];
+    c.latticeY = lattice[1];
+    c.latticeZ = lattice[2];
     c.centre = Ogre::Vector3(float(double(c.latticeX) * double(cell)),
                              float(double(c.latticeY) * double(cell)),
                              float(double(c.latticeZ) * double(cell)));
-    c.builtCam = camPos;
+    c.builtCam = builtCam;
 #ifndef NDEBUG
     // THE LATTICE THE VOXELISER'S EXACTNESS RESTS ON (ENGINE-UPGRADE-U5 decisions 12.4 and 14.9; the piece's
     // note at its per-lane group-box cull): origin + cell x id is EXACT in a float for every voxel when the
@@ -5414,30 +5421,54 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
     const long long target[3] = { jahQuantEven(camPos.x, cell), jahQuantEven(camPos.y, cell),
                                   jahQuantEven(camPos.z, cell) };
     const long long live[3] = { c.latticeX, c.latticeY, c.latticeZ };
+    long long d[3];
     for (int a = 0; a < 3; ++a) {
-        const long long d = target[a] - live[a];
-        if (d <= -res || d >= res) return false;     // nothing of the live box is kept: a whole rebuild
-        sc.shift[a] = int(d);
-        sc.lattice[a] = target[a];
+        d[a] = target[a] - live[a];
+        if (d[a] <= -res || d[a] >= res) return false;     // nothing of the live box is kept: a whole rebuild
     }
-    sc.cam = camPos;
+    // THE SHIFTS THAT FIT THE SCRATCH (PHOTON-7 stage 2): the scratch holds `layers` layers of the volume's cells
+    // (buildScrollScratches: one step on one axis), and every slab enters along its own axis as |shift| layers. The
+    // axes go by the size of their shift, largest first: the first is cut to the layers when it alone is wider, every
+    // other rides along while its slab fits what is left. An axis left out keeps its lattice AND its builtCam, so its
+    // own step test asks again - a diagonal step is two scrolls; a cut axis is placed at its box's centre, so the
+    // camera is still past its band and the next scroll carries the rest. The layers and every shift are even (Q = 2).
+    const int layers = c.scratch ? int(c.scratch->layers()) : 0;
+    if (layers < 2) return false;
+    int order[3] = { 0, 1, 2 };
+    std::stable_sort(order, order + 3, [&](int x, int y) { return std::llabs(d[x]) > std::llabs(d[y]); });
+    int left = layers;
+    Ogre::Vector3 placedFor = c.builtCam;
+    for (int k = 0; k < 3; ++k) {
+        const int a = order[k];
+        long long sh = d[a];
+        if (k == 0 && std::llabs(sh) > left) sh = sh > 0 ? left : -left;
+        if (std::llabs(sh) > left) sh = 0;
+        left -= int(std::llabs(sh));
+        sc.shift[a] = int(sh);
+        sc.lattice[a] = live[a] + sh;
+        if (sh == d[a]) placedFor[a] = camPos[a];                                         // the whole of it (or none owed)
+        else if (sh != 0) placedFor[a] = float(double(sc.lattice[a]) * double(cell));   // cut: the box's centre
+    }
+    sc.cam = placedFor;
     sc.editMark = c.editLast;
     // THE TARGET BOX'S CORNER, by recentreCascade's arithmetic and the Aabb's (centre - half): the
     // float a whole build at this placement voxelises from.
-    const Ogre::Vector3 centre(float(double(target[0]) * double(cell)), float(double(target[1]) * double(cell)),
-                               float(double(target[2]) * double(cell)));
+    const Ogre::Vector3 centre(float(double(sc.lattice[0]) * double(cell)), float(double(sc.lattice[1]) * double(cell)),
+                               float(double(sc.lattice[2]) * double(cell)));
     const Ogre::Vector3 lo = Ogre::Aabb(centre, Ogre::Vector3(c.halfSize)).getMinimum();
 
     // THE ENTERING REGION, as up to three disjoint slabs of the target's cells: the cells outside
     // the overlap along x (every y, z), then along y inside the overlap's x, then along z inside
-    // both - their union is the target minus the overlap, each cell exactly once.
-    struct Box { int lo[3] = {}, hi[3] = {}; };
+    // both - their union is the target minus the overlap, each cell exactly once. Each slab takes the
+    // scratch's next |shift| layers (PhotonVoxelScroll.h: its own axis first).
+    struct Box { int lo[3] = {}, hi[3] = {}; int axis = 0, layer = 0; };
     int ovLo[3], ovHi[3];
     for (int a = 0; a < 3; ++a) {
         ovLo[a] = sc.shift[a] < 0 ? -sc.shift[a] : 0;
         ovHi[a] = sc.shift[a] > 0 ? res - sc.shift[a] : res;
     }
     std::vector<Box> slabs;
+    int layer = 0;
     for (int a = 0; a < 3; ++a) {
         if (!sc.shift[a]) continue;
         Box b;
@@ -5446,8 +5477,17 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
             else if (k == a) { b.lo[k] = sc.shift[a] > 0 ? ovHi[a] : 0; b.hi[k] = sc.shift[a] > 0 ? res : ovLo[a]; }
             else             { b.lo[k] = 0; b.hi[k] = res; }
         }
+        b.axis = a;
+        b.layer = layer;
+        layer += std::abs(sc.shift[a]);
         slabs.push_back(b);
+        VctCascade::Scroll::Slab sl;
+        for (int k = 0; k < 3; ++k) { sl.lo[k] = Ogre::uint32(b.lo[k]); sl.hi[k] = Ogre::uint32(b.hi[k]); }
+        sl.axis = Ogre::uint32(a);
+        sl.layer = Ogre::uint32(b.layer);
+        sc.slabs.push_back(sl);
     }
+    assert(layer <= layers && "a scroll's slabs fit its scratch");
 
     // THE INSTANCES THE ESTIMATE WALKS: the gather's own predicates that the CPU can read (the GI
     // channel, a live slot, rule 2's size floor), in the target's cell coordinates.
@@ -5550,6 +5590,13 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
             ch.w = Ogre::uint32(cb.hi[0] - cb.lo[0]); ch.h = Ogre::uint32(cb.hi[1] - cb.lo[1]);
             ch.d = Ogre::uint32(cb.hi[2] - cb.lo[2]);
             ch.units = units;
+            // WHERE ITS VOXELS GO: its slab's layout in the scratch - the cell (its slab's axis first, the two others
+            // in increasing order) minus the slab's corner, from the slab's first layer (PhotonVoxelScroll.h).
+            const int pa = b.axis, pb = b.axis == 0 ? 1 : 0, pc = b.axis == 2 ? 1 : 2;
+            ch.storeAxis = Ogre::uint32(b.axis);
+            ch.storeBase[0] = b.layer - b.lo[pa];
+            ch.storeBase[1] = -b.lo[pb];
+            ch.storeBase[2] = -b.lo[pc];
             sc.units += units;
             sc.chunks.push_back(ch);
         };
@@ -5590,8 +5637,8 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
 void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
     VctCascade &c = mVctCascades[idx];
     VctCascade::Scroll &sc = c.scroll;
-    Ogre::PhotonVoxelScroll *target = scrollTarget(c.resolution);
-    if (!sc.active || !target || !c.voxelizer || sc.frame >= sc.frames())
+    Ogre::PhotonVoxelScroll *scratch = c.scratch.get();
+    if (!sc.active || !scratch || !c.voxelizer || sc.frame >= sc.frames())
         OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR, "a scroll step with no scroll in flight",
                     "PhotonComponent::stepScroll");
     if (!commit) {
@@ -5607,9 +5654,10 @@ void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
     const Ogre::Vector3 centre(float(double(sc.lattice[0]) * double(cell)), float(double(sc.lattice[1]) * double(cell)),
                                float(double(sc.lattice[2]) * double(cell)));
     if (!sc.begun) {
+        // THE SCRATCH CLEARED (PHOTON-7 stage 2): the slab's cells start where a whole build's start.
         monitor::CacheScope copy(CacheKind::Gi, WorkReason::Moved, (unsigned long long)idx,
                                  kScrollCopyRowNames[std::min(idx, size_t(7))], mRoot->getRenderSystem());
-        target->begin(c.voxelizer, sc.shift);
+        scratch->begin();
         sc.begun = true;
     }
     const size_t from = sc.frame ? sc.frameEnd[sc.frame - 1u] : 0u, to = sc.frameEnd[sc.frame];
@@ -5620,6 +5668,8 @@ void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
             const VctCascade::Scroll::Chunk &ch = sc.chunks[k];
             Ogre::PhotonVoxelizer::CellBox b;
             b.x = ch.x; b.y = ch.y; b.z = ch.z; b.w = ch.w; b.h = ch.h; b.d = ch.d;
+            b.storeAxis = ch.storeAxis;
+            for (int a = 0; a < 3; ++a) b.storeBase[a] = ch.storeBase[a];
             boxes.push_back(b);
         }
         // THE CHUNKS ARE THE VOXELISER'S OCTANTS for this one gather and build, and the live
@@ -5634,27 +5684,44 @@ void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
         // for the box being built, and the chunks' octants filter it - a whole build's set.
         std::vector<uint32_t> mask;
         gatherFeed(*c.feed, c.voxelizer, cascadeGatherInputs(c, mask, &centre));
-        c.voxelizer->buildChunks(target->volumes());
+        c.voxelizer->buildChunks(scratch->volumes());
     }
     ++sc.frame;
     if (!commit) return;
-    // THE COMMIT: the target into the live volumes and, with no throw in between, the placement to
-    // it - the readers' region and the voxels move together.
-    // A COPY THAT THROWS HALF WAY leaves the live volumes neither box's: the cascade then owes a
-    // WHOLE rebuild (`liveTorn`: nothing of its volume is reusable), never a scroll copying from them.
+    // THE COMMIT (PHOTON-7 stage 2): the live store's geometry and light shifted in place, the scratch's slabs
+    // copied into the far ends and, with no throw in between, the placement to it - the readers' region, the
+    // voxels and their light move together.
+    // A SHIFT THAT THROWS HALF WAY leaves the live volumes neither box's: the cascade then owes a
+    // WHOLE rebuild (`liveTorn`: nothing of its volume is reusable), never a scroll shifting them.
     try {
         const bool fault = mEngine && mEngine->armRegistry().value(ArmId::GiCascadeFaultCommit) == double(idx);
         monitor::CacheScope copy(CacheKind::Gi, WorkReason::Moved, (unsigned long long)idx,
                                  kScrollCopyRowNames[std::min(idx, size_t(7))], mRoot->getRenderSystem());
-        target->commit(c.voxelizer, fault);
+        Ogre::TextureGpu *light[7] = {};
+        bool halfRes[7] = {};
+        const size_t numLight = c.lighting ? c.lighting->scrollLightTextures(light, halfRes) : 0u;
+        Ogre::PhotonVoxelScroll::LightVolume lv[7];
+        for (size_t i = 0; i < numLight; ++i) {
+            lv[i].texture = light[i];
+            lv[i].cellsPerTexel = halfRes[i] ? 2u : 1u;
+            lv[i].packedHalves = halfRes[i];
+        }
+        std::vector<Ogre::PhotonVoxelScroll::Slab> slabs;
+        for (const VctCascade::Scroll::Slab &s : sc.slabs) {
+            Ogre::PhotonVoxelScroll::Slab o;
+            for (int a = 0; a < 3; ++a) { o.lo[a] = s.lo[a]; o.hi[a] = s.hi[a]; }
+            o.axis = s.axis;
+            o.layer = s.layer;
+            slabs.push_back(o);
+        }
+        const Ogre::int32 shift[3] = { sc.shift[0], sc.shift[1], sc.shift[2] };
+        scratch->commit(c.voxelizer, lv, numLight, shift, slabs.data(), slabs.size(), fault);
     } catch (...) {
         c.liveTorn = true;   // outside the placement's revert (recordCascades): only a whole rebuild clears it
         throw;
     }
-    recentreCascade(c, sc.cam);
+    recentreCascadeAt(c, sc.lattice, sc.cam);
     if (committed) *committed = true;
-    assert(c.latticeX == sc.lattice[0] && c.latticeY == sc.lattice[1] && c.latticeZ == sc.lattice[2] &&
-           "a scroll commits at the lattice it was planned for");
     c.voxelizer->finishScroll(Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)));
     // THE CENSUS: one gather over the whole new box, built into nothing, so this cascade's readings
     // (items, attached, levels, triangles, records - GiStatus::CascadeStatus) describe the box as a
@@ -5714,32 +5781,30 @@ void PhotonComponent::noteScrollEdit(const Ogre::Aabb *box) {
     }
 }
 
-Ogre::PhotonVoxelScroll *PhotonComponent::scrollTarget(Ogre::uint32 resolution) const {
-    for (const auto &t : mScrollTargets)
-        if (t && t->resolution() == resolution) return t.get();
-    return nullptr;
-}
+void PhotonComponent::ScrollScratchDelete::operator()(Ogre::PhotonVoxelScroll *scratch) const { delete scratch; }
 
-void PhotonComponent::ScrollLease::operator()(Ogre::PhotonVoxelScroll *target) const {
-    Ogre::PhotonVoxelScroll::release(target);
-}
-
-// THE TARGETS ARE LEASED, NOT BUILT (BUGS-6 stage 3): a chain rebuilt takes back the targets its
-// teardown gave the pool — the same size and formats — and builds a target only for a size the pool
-// has none of (PhotonVoxelScroll.h's note).
-void PhotonComponent::buildScrollTargets() {
-    releaseScrollTargets();
-    for (const VctCascade &c : mVctCascades) {
-        if (!c.voxelizer || scrollTarget(c.resolution)) continue;
-        mScrollTargets.emplace_back(Ogre::PhotonVoxelScroll::acquire(
-            mRoot->getRenderSystem(), mRoot->getHlmsManager(), mRoot->getRenderSystem()->getTextureGpuManager(),
-            c.voxelizer, c.resolution));
+// THE SCROLL SCRATCHES, ONE PER CASCADE (PHOTON-7 stage 2; PhotonVoxelScroll.h): built with the chain's volumes (a
+// graphics region: texture creations), each `layers` layers of the volume's cells - what ONE step on one axis enters:
+// the step plus the cell the even placement adds, rounded up to even (the shift at the step test's firing is at most
+// that: |quantEven(cam) - quantEven(builtCam)| < step + 2 cells, and even), at most the resolution. A scroll carries
+// the shifts that fit (planScroll). Every cascade owns its own, so no scroll waits for another of its size.
+void PhotonComponent::buildScrollScratches() {
+    releaseScrollScratches();
+    for (VctCascade &c : mVctCascades) {
+        if (!c.voxelizer) continue;
+        const Ogre::uint32 layers = std::min<Ogre::uint32>(
+            c.resolution, 2u * Ogre::uint32(std::ceil((double(c.stepCells) + 1.0) * 0.5)));
+        c.scratch.reset(new Ogre::PhotonVoxelScroll(mRoot->getRenderSystem(), mRoot->getHlmsManager(),
+                                                    mRoot->getRenderSystem()->getTextureGpuManager(), c.voxelizer,
+                                                    std::max<Ogre::uint32>(layers, 2u)));
     }
 }
 
-void PhotonComponent::releaseScrollTargets() {
-    for (VctCascade &c : mVctCascades) c.scroll = VctCascade::Scroll();
-    mScrollTargets.clear();   // each back to the pool (ScrollLease)
+void PhotonComponent::releaseScrollScratches() {
+    for (VctCascade &c : mVctCascades) {
+        c.scroll = VctCascade::Scroll();
+        c.scratch.reset();
+    }
 }
 
 void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w) {
@@ -5878,8 +5943,8 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
     // overlap copied, the entering slab voxelised in chunks spread over frames by the per-frame
     // budget, the commit when the last is built - one step of it this frame. Everything else - an
     // edit, a teleport of a whole box or more, the first build - is a whole rebuild in one frame:
-    // a load is a load, and an edit's box is its own. One scroll per volume size at a time (the
-    // size's target holds it): a cascade whose size is busy waits, and the frame goes to the next.
+    // a load is a load, and an edit's box is its own. Every cascade builds its slab in its own
+    // scratch (PHOTON-7 stage 2), so no scroll waits for another.
     // A scroll step waits out a material refresh owed this frame (the store's rows are re-read in
     // the frame's graphics region, after this step), so its chunks never mix two versions of a row.
     // THE PICK IS BY AGE (CASCADE-DRAG-STARVE-1, decision 7, measured by U4: a drag 7.5 m before the
@@ -5907,10 +5972,7 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
             const bool cameraOnly = c.built && !c.jumped && !c.liveTorn &&
                                     c.pendingReason == GiStaleReason::Camera;
             if (cameraOnly) {
-                bool busy = false;
-                for (const VctCascade &o : mVctCascades)
-                    busy = busy || (o.scroll.active && o.resolution == c.resolution);
-                if (busy || mVctMaterialRefreshOwed) continue;
+                if (mVctMaterialRefreshOwed) continue;
                 if (planScroll(i, camPos)) {
                     w.rebuild = int(i);
                     w.scroll = true;
@@ -6249,7 +6311,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
 // always. Returns 0 so it can be the value of a JAH_CATCH.
 size_t PhotonComponent::abandonCascadeChain() {
     ++mGiPlacementSerial;
-    releaseScrollTargets();
+    releaseScrollScratches();
     for (size_t i = mVctCascades.size(); i--; ) {
         delete mVctCascades[i].lighting;  mVctCascades[i].lighting = nullptr;
         delete mVctCascades[i].voxelizer; mVctCascades[i].voxelizer = nullptr;
@@ -7762,7 +7824,7 @@ void PhotonComponent::teardownVct() {
     // not to touch it). After the head, which is the order the arm requires.
     teardownExtraCascades();
     // The scroll targets go back to the pool with the chain that leased them (BUGS-6 stage 3).
-    releaseScrollTargets();
+    releaseScrollScratches();
     // ...and LAST, the one material store they all shared (A5b §2). Its texture pool is
     // bound into the shared compute jobs' descriptors by every dispatch, so it may not
     // die while a voxeliser can still be dispatched — which, after the two lines above,

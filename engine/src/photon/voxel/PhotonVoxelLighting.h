@@ -518,6 +518,13 @@ namespace Ogre
         const float *getEnvironmentSh() const { return mEnvSh; }
 
         TextureGpu **getLightVoxelTextures() { return mLightVoxel; }
+        /** THE SCROLL'S LIGHT (PHOTON-7 stage 2, AB S4): the level-0 textures a scroll's commit shifts in place with the
+            geometry - the total, its back side, the direct term, its back side, and the directional level 0's direct
+            part per axis (half resolution, both signs packed along x: `halfRes` true). The directional volumes are not
+            among them: step 0 rebuilds their level 0 from exactly these; the bounce's target is scratch. Fills `out`
+            and returns 7, or 0 on a lighting that cannot bounce (no direct term to shift).
+        */
+        size_t scrollLightTextures( TextureGpu *out[7], bool halfRes[7] ) const;
         /// JAHSHAKA PATCH: THE DIRECT TERM'S VOLUME (fork ae2ed529f+155a56bf8 (was 0076)'s D term), or null
         /// on a PhotonVoxelLighting that cannot bounce. Read-only, and it exists so a host
         /// can MEASURE the store -- the normalisation's own self-check is "the

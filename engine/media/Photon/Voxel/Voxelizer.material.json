@@ -286,6 +286,28 @@
             }
         },
 
+        "Photon/ScrollShift" :
+        {
+            "threads_per_group" : [8, 8, 1],
+
+            "source" : "PhotonScrollShift_cs",
+            "pieces" : ["CrossPlatformSettings_piece_all"],
+            "inform_shader_of_texture_size" : false,
+            "inform_shader_of_texture_data_change" : true,
+
+            "uav_units" : 1,
+
+            "params_glsl" :
+            [
+                ["volume",                  [0], "int"]
+            ],
+
+            "properties" :
+            {
+                "copy_uint" : 0
+            }
+        },
+
         "VCT/AabbCalculator" :
         {
             "threads_per_group" : [1024, 1, 1],

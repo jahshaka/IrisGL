@@ -130,6 +130,10 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform float3 voxelCellSize;
 	uniform uint3 voxelPixelOrigin;
 	uniform uint3 voxelPixelsToWrite;
+	// PHOTON-7 stage 2: WHERE A VOXEL IS STORED - its cell (voxelPixelOrigin + the lane's id) PERMUTED by w (0: the
+	// volume's own (x, y, z); 1: (y, x, z); 2: (z, x, y)) plus xyz. A whole build stores at the cell (0, 0); a scroll's
+	// chunk stores into the cascade's slab-sized scratch, its slab's axis first (PhotonComponent::planScroll).
+	uniform int4 voxelStoreBase;
 vulkan( }; )
 
 #define p_rangeIdx rangeIdx_pad.x
@@ -137,6 +141,7 @@ vulkan( }; )
 #define p_voxelCellSize voxelCellSize
 #define p_voxelPixelOrigin voxelPixelOrigin
 #define p_voxelPixelsToWrite voxelPixelsToWrite
+#define p_voxelStoreBase voxelStoreBase
 
 //in uvec3 gl_NumWorkGroups;
 //in uvec3 gl_WorkGroupID;

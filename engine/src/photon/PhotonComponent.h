@@ -342,6 +342,8 @@ public:
         static constexpr unsigned kStableFrames = 15u;
         static constexpr unsigned kLightOnlyEveryN = 10u;
     };
+    /// The scroll scratch's deleter (PhotonGi.cpp): the type is complete there only.
+    struct ScrollScratchDelete { void operator()(Ogre::PhotonVoxelScroll *scratch) const; };
     struct VctCascade {
         Ogre::PhotonVoxelizer *voxelizer = nullptr;   ///< owned, except [0]
         Ogre::PhotonVoxelLighting  *lighting  = nullptr;   ///< owned, except [0]
@@ -441,25 +443,35 @@ public:
         /// is absolute, `step()` is the SUPREMUM of the travel between rebuilds,
         /// not the distance between them.
         Ogre::Vector3 builtCam = Ogre::Vector3::ZERO;
-        /// THE SCROLL IN FLIGHT (ENGINE-UPGRADE-U5 stage 1). A camera scroll keeps the voxels the
-        /// new box shares with the old one (copied, shifted, into the size's target,
-        /// Ogre::PhotonVoxelScroll) and voxelises only the ENTERING SLAB, cut into chunks of the
-        /// volume's cells and spread over frames by the per-frame budget (kScrollBudgetMs); the
-        /// target is committed into the live volumes when the last chunk is built, and only then
-        /// does this cascade's placement move. Until then the readers sample the old box, which
-        /// is correct for where it is. `pending` stays raised for the whole flight (GI is not at
-        /// rest while a scroll is owed).
+        /// THE SCROLL IN FLIGHT (ENGINE-UPGRADE-U5 stage 1; PHOTON-7 stage 2). A camera scroll keeps the voxels
+        /// and the light the new box shares with the old one and voxelises only the ENTERING SLAB into this
+        /// cascade's slab-sized `scratch` (Ogre::PhotonVoxelScroll), cut into chunks of the volume's cells and
+        /// spread over frames; at the commit the live store is shifted in place, the slab copied in and only
+        /// then does this cascade's placement move. Until then the readers sample the old box, which is correct
+        /// for where it is. `pending` stays raised for the whole flight (GI is not at rest while a scroll is owed).
         struct Scroll {
-            /// One box of the TARGET volume's cells: [x, x + w) x [y, y + h) x [z, z + d).
-            struct Chunk { Ogre::uint32 x = 0, y = 0, z = 0, w = 0, h = 0, d = 0; double units = 0.0; };
+            /// One box of the TARGET volume's cells: [x, x + w) x [y, y + h) x [z, z + d), stored in the scratch
+            /// at its slab's layout (PhotonVoxelizer::CellBox's storeAxis / storeBase).
+            struct Chunk {
+                Ogre::uint32 x = 0, y = 0, z = 0, w = 0, h = 0, d = 0;
+                double units = 0.0;
+                Ogre::uint32 storeAxis = 0;
+                Ogre::int32 storeBase[3] = { 0, 0, 0 };
+            };
             bool active = false;
-            bool begun = false;          ///< the target holds the overlap (PhotonVoxelScroll::begin)
+            bool begun = false;          ///< the scratch is cleared for this scroll (PhotonVoxelScroll::begin)
             /// An edit reached the target box outside the live one (noteScrollEdit): the chunks
             /// already built may hold the scene before it, so the scroll restarts.
             bool stale = false;
             long long lattice[3] = { 0, 0, 0 };    ///< the target placement, in cells
+            /// The camera the target is placed for, per axis: the camera on a shifted axis (the box's centre where
+            /// the shift was cut to the scratch), the cascade's own builtCam on an axis the scroll leaves.
             Ogre::Vector3 cam = Ogre::Vector3::ZERO;
             int shift[3] = { 0, 0, 0 };             ///< new lattice - old lattice, per axis
+            /// THE ENTERING SLABS (at most three, one per shifted axis): a box of the TARGET volume's cells
+            /// [lo, hi), the axis it enters along and its first layer in the scratch (PhotonVoxelScroll::Slab).
+            struct Slab { Ogre::uint32 lo[3] = { 0, 0, 0 }, hi[3] = { 0, 0, 0 }, axis = 0, layer = 0; };
+            std::vector<Slab> slabs;
             std::vector<Chunk> chunks;
             /// chunks [frameEnd[f - 1], frameEnd[f]) are frame f's (frameEnd[-1] = 0).
             std::vector<size_t> frameEnd;
@@ -492,6 +504,8 @@ public:
         /// a camera standing away re-armed the failing rebuild every other frame.
         bool held = false;
         long long heldAt[3] = { 0, 0, 0 };
+        /// THE SCROLL'S SCRATCH (PHOTON-7 stage 2): `scrollLayers(...)` x res x res, built with the chain.
+        std::unique_ptr<Ogre::PhotonVoxelScroll, ScrollScratchDelete> scratch;
         unsigned long long scrolls = 0;        ///< camera scrolls committed by the slab path
         unsigned long long scrollFrames = 0;   ///< frames spent building scrolls' chunks
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
@@ -1203,15 +1217,15 @@ private:
     /// gathered from the TARGET box's set, filtered by the chunks).
     VoxelGatherInputs cascadeGatherInputs(const VctCascade &c, std::vector<uint32_t> &mask,
                                           const Ogre::Vector3 *centre = nullptr) const;
-    /// THE INCREMENTAL SCROLL (ENGINE-UPGRADE-U5 stage 1; VctCascade::Scroll).
-    /// planScroll: the target placement at `camPos`, the entering slab and its chunks and frames by
-    /// the budget - CPU only. False when the scroll cannot take the slab path (a shift of a whole
-    /// box or more on an axis: a teleport, the whole rebuild's).
+    /// THE INCREMENTAL SCROLL (ENGINE-UPGRADE-U5 stage 1; PHOTON-7 stage 2; VctCascade::Scroll).
+    /// planScroll: the target placement toward `camPos` (the shifts the cascade's scratch holds), the
+    /// entering slabs and their chunks and frames - CPU only. False when the scroll cannot take the slab
+    /// path (a shift of a whole box or more on an axis: a teleport, the whole rebuild's).
     bool planScroll(size_t idx, const Ogre::Vector3 &camPos);
-    /// The next frame's chunks into the target (the overlap copied first, on the first frame);
-    /// with `commit`, then the target into the live volumes and the region moved. Throws.
+    /// The next frame's chunks into the scratch (cleared first, on the first frame); with `commit`,
+    /// then the live store shifted in place, the slabs copied in and the region moved. Throws.
     void stepScroll(size_t idx, bool commit, bool *committed = nullptr);
-    /// The scroll dropped (an edit, a failure, a chain going away): the target is free again.
+    /// The scroll dropped (an edit, a failure, a chain going away): the live store was never touched.
     void abortScroll(size_t idx);
     /// A TORN CASCADE WHOSE WHOLE REBUILD FAILED TWICE (decision 14.8): its live volumes set to empty and
     /// re-injected (the light re-derived from nothing), `tornCleared` set, counted. Bounded either way:
@@ -1222,13 +1236,10 @@ private:
     /// An edit's box (null = everywhere), seen while a scroll is in flight: the target box it
     /// reaches is stale. Called beside every noteGiCascadeDirty.
     void noteScrollEdit(const Ogre::Aabb *box);
-    /// The target of a volume size, or null (none built: the chain has no cascade of that size).
-    Ogre::PhotonVoxelScroll *scrollTarget(Ogre::uint32 resolution) const;
-    /// Leases one target per size the chain holds (PhotonVoxelScroll::acquire: a GRAPHICS region,
-    /// a texture creation when the pool has none of that size and formats).
-    void buildScrollTargets();
-    /// Gives the chain's targets back to the pool (the chain's teardown); a scroll in flight ends.
-    void releaseScrollTargets();
+    /// Builds every cascade's scroll scratch (a GRAPHICS region: texture creations; the chain's build).
+    void buildScrollScratches();
+    /// Destroys them (the chain's teardown); a scroll in flight ends.
+    void releaseScrollScratches();
     /// ONE VOXEL BUILD, fed on the device (ATOM P4b): the gather and the voxeliser's build over
     /// what the gather wrote. In a GRAPHICS region the inputs are prepared first, in order (the
     /// table composed, the materials converted, the partitions); in the COMPUTE region they are
@@ -1250,6 +1261,9 @@ private:
     /// Re-centres one cascade's region on ITS cell lattice around `camPos` and
     /// records the camera it was placed for. Does not voxelise.
     void recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos);
+    /// ...at a lattice the caller decided (a scroll's commit: the shifts it carried, PHOTON-7 stage 2), its
+    /// placement taken from `builtCam`.
+    void recentreCascadeAt(VctCascade &c, const long long lattice[3], const Ogre::Vector3 &builtCam);
     /// The camera cascade `idx` is placed for: `eyePos`, or under a placement pin the pin's (every placement decision
     /// reads it: the step test, the jump guard, a scroll's target and a rebuild's recentre).
     Ogre::Vector3 placementCam(size_t idx, const Ogre::Vector3 &eyePos) const;
@@ -1366,11 +1380,6 @@ private:
     unsigned long long mCascadeScrollAborts = 0;
     unsigned long long mCascadeTornCleared = 0;   ///< GiStatus::cascadeTornCleared
     unsigned long long mMaterialEditSerial = 0;
-    /// THE SCROLL TARGETS, one per volume size the chain holds (ENGINE-UPGRADE-U5 stage 1):
-    /// LEASED from the process's pool with the chain and given back with it (BUGS-6 stage 3 —
-    /// PhotonVoxelScroll.h's note), so a rebuild builds none.
-    struct ScrollLease { void operator()(Ogre::PhotonVoxelScroll *target) const; };
-    std::vector<std::unique_ptr<Ogre::PhotonVoxelScroll, ScrollLease>> mScrollTargets;
     /// One log line per scene for a cascade rebuild that threw (B4).
     bool mCascadeFailureLogged = false;
     /// WHERE THE SCENE CHANGED SINCE THE CHAIN LAST ANSWERED FOR IT (G1) — the

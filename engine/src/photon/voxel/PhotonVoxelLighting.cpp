@@ -1909,6 +1909,20 @@ namespace Ogre
         return false;
     }
     //-------------------------------------------------------------------------
+    size_t PhotonVoxelLighting::scrollLightTextures( TextureGpu *out[7], bool halfRes[7] ) const
+    {
+        if( !mLightDirect || !mLightDirectBack || !mLightDirectDir[0] || !mLightDirectDir[1] || !mLightDirectDir[2] )
+            return 0u;
+        TextureGpu *const list[7] = { mLightVoxel[0], mLightVoxel[backIndex()], mLightDirect,  mLightDirectBack,
+                                      mLightDirectDir[0], mLightDirectDir[1], mLightDirectDir[2] };
+        for( size_t i = 0u; i < 7u; ++i )
+        {
+            out[i] = list[i];
+            halfRes[i] = i >= 4u;
+        }
+        return 7u;
+    }
+    //-------------------------------------------------------------------------
     TextureGpu **PhotonVoxelLighting::getLightVoxelTextures( const size_t cascadeIdx )
     {
         if( cascadeIdx == 0u )

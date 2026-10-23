@@ -1,50 +1,44 @@
-// THE CASCADE SCROLL'S TARGET (ENGINE-UPGRADE-U5 stage 1).
+// THE CASCADE SCROLL'S SCRATCH AND ITS SHIFT (ENGINE-UPGRADE-U5 stage 1; PHOTON-7 stage 2, AB S4/A4/A7).
 //
-// A cascade that scrolls by k cells used to throw its volume away and re-voxelise all of it in one
-// frame (Bistro, Debug: 211-1,595 ms of GPU a scroll, the owner's walking jerk). Upstream scrolls
-// incrementally (VctImageVoxelizer::buildRelative): it keeps the voxels the new box shares with the
-// old one and voxelises only the entering slab. This is that, on our store:
+// A cascade that scrolls by s cells keeps the voxels AND THE LIGHT its new box shares with the old one and voxelises
+// only the entering slab:
 //
-//   1. BEGIN - this target is cleared and the overlap of the live volumes is COPIED into it,
-//      shifted by the scroll (a voxel at new cell n is the old cell n + shift). Every level-0 volume
-//      is copied texel for texel - the surface position too, stored relative to its own cell (PHOTON-7
-//      stage 1) - the bits a whole build at the new place writes.
-//   2. THE ENTERING SLAB, voxelised into this target over as many frames as the per-frame budget
-//      needs (PhotonVoxelizer::buildChunks: the same dispatches, shader and merge as a whole build).
-//   3. COMMIT - this target is copied into the live volumes, the region moves and the mip chains
-//      are regenerated whole. The readers never see a half-built box: until the commit the live
-//      volumes are the old box, correct for where they are, and positions outside it fall to the
-//      outer cascade by the box test as they always did.
+//   1. THE SLAB, BUILT IN A SLAB-SIZED SCRATCH, in chunks over as many frames as the schedule gives it
+//      (PhotonVoxelizer::buildChunks: the same dispatches, shader and merge as a whole build), each voxel stored at
+//      the scratch's layout (below). The readers keep the UNSHIFTED live store the whole time: correct for where it
+//      is, and nothing of it is half-built or cleared - no reader needs a valid box.
+//   2. THE COMMIT, one frame: level 0 of the eleven geometry volumes and of the seven light textures (the total, its
+//      back side, the direct term, its back side, the directional level 0's direct part per axis - two halves packed
+//      along x, half resolution) is moved by -s cells IN PLACE, one dispatch per volume per moved axis
+//      (Photon/ScrollShift: a thread per column walking toward the far end; positions are cell-relative since PHOTON-7
+//      stage 1, so nothing re-resolves), the far end cleared as a whole build clears; the scratch's slabs are copied
+//      into it (Photon/ScrollCopy with the slab's permutation); then the host lights what changed and regenerates the
+//      mips (PhotonComponent::stepScroll, PhotonVoxelizer::finishScroll).
 //
-// WHY A COPY AND NOT A TOROIDAL ADDRESS (the preflight's ruling, the lead's decision 1): the readers
-// construct the voxel address in ten places, every voxel sampler CLAMPs, the directional volumes
-// pack both signs along x, and the plane march reads box-aligned planes at every mip - a wrap would
-// mix the box's opposite edges. The copy changes no reader.
+// THE SCRATCH'S LAYOUT: `layers` x res x res, every slab laid along its first axis - a slab of axis a stores the
+// cell (x, y, z) at (its own axis first, the two others in increasing order) from its first layer (CellBox's
+// storeAxis / storeBase). The scratch holds `layers` layers in all: a scroll carries the shifts that fit
+// (PhotonComponent::planScroll), so a step on one axis is one slab and a diagonal one is two scrolls.
+//
+// WHY A SHIFT AND NOT A TOROIDAL ADDRESS (the preflight's ruling, the lead's decision 1; PHOTON-7: toroidal is not
+// built): the readers construct the voxel address in ten places, every voxel sampler CLAMPs, the directional volumes
+// pack both signs along x, and the plane march reads box-aligned planes at every mip - a wrap would mix the box's
+// opposite edges. The shift changes no reader.
 //
 // WHY ON COMPUTE: an image copy is a transfer command and the GI region records compute only
-// (gi.region_compute_only). One job: Photon/ScrollCopy (any one volume, float or uint). ONE TARGET PER
-// VOLUME SIZE, leased by the cascade chain: a scroll in flight
-// holds it until it commits, and the scheduler starts no second scroll of that size meanwhile.
+// (gi.region_compute_only).
 //
-// THE TARGETS ARE POOLED, PROCESS-WIDE (BUGS-6 stage 3). A target is 11 level-0 volumes and a clone of
-// Photon/ScrollCopy per format, with their pipelines built by the
-// one-texel copies of its construction; nothing in it belongs to one chain (begin and commit are
-// handed the live store). A chain LEASES one per size at its build (acquire: a free target of the
-// same size and formats, or a new one) and gives it back at its teardown (release), so a chain
-// REBUILT - a tier change, a scene open or create, the startup gate's warm worlds - takes the
-// targets it gave back and builds nothing. Measured before: every chain build destroyed and rebuilt
-// them (24 3D textures, 14 clones and their pipelines a build; 14 builds at a cold boot,
-// spikes/bugs-6/REPORT.md). A lease is exclusive: two live chains of one size hold two targets, so
-// the pool's peak is the process's peak of concurrent chains, and releasePool (the engine's
-// teardown) destroys every free one before the compute Hlms dies.
+// ONE SCRATCH PER CASCADE, OWNED BY ITS CHAIN (built with the chain's volumes, a graphics region's work; destroyed
+// with them): every cascade may build its slab at once, so nothing is leased and no scroll waits for another. THE
+// JOBS are process-wide - a clone of Photon/ScrollShift and of Photon/ScrollCopy per volume format, made when a
+// scratch is built (vr.warmup: no shader is compiled on a frame a headset is shown) and destroyed by releasePool at
+// the engine's teardown, before the compute Hlms dies.
 #ifndef JAH_PHOTON_VOXEL_SCROLL_H
 #define JAH_PHOTON_VOXEL_SCROLL_H
 
 #include "photon/voxel/PhotonVoxelizer.h"
 
 #include "OgrePixelFormatGpu.h"
-
-#include <map>
 
 #include "OgreHeaderPrefix.h"
 
@@ -55,54 +49,68 @@ namespace Ogre
     class PhotonVoxelScroll
     {
     public:
-        /// Creates the target's level-0 volumes (a texture creation: a GRAPHICS region's work - the
-        /// chain's build). `like` gives the formats: the target is a copy of a live store.
+        /// ONE SLAB OF A SCROLL: a box of the NEW volume's cells [lo, hi), the axis it enters along and its first
+        /// layer in the scratch.
+        struct Slab
+        {
+            uint32 lo[3] = { 0u, 0u, 0u }, hi[3] = { 0u, 0u, 0u };
+            uint32 axis = 0u;
+            uint32 layer = 0u;
+        };
+        /// A LIGHT TEXTURE THE COMMIT SHIFTS: its level 0 at `cellsPerTexel` volume cells a texel (1, or 2 for the
+        /// directional direct parts), two halves packed along x or not.
+        struct LightVolume
+        {
+            TextureGpu *texture = nullptr;
+            uint32 cellsPerTexel = 1u;
+            bool packedHalves = false;
+        };
+
+        /// Creates the scratch's level-0 volumes (a texture creation: a GRAPHICS region's work - the chain's build),
+        /// `layers` x `like`'s resolution^2, in `like`'s formats, and makes sure every job a scroll dispatches on a
+        /// volume of these formats exists and has dispatched once.
         PhotonVoxelScroll( RenderSystem *renderSystem, HlmsManager *hlmsManager,
-                           TextureGpuManager *textureManager, PhotonVoxelizer *like, uint32 resolution );
+                           TextureGpuManager *textureManager, PhotonVoxelizer *like, uint32 layers );
         ~PhotonVoxelScroll();
 
-        /// THE LEASE (see the header): a free pooled target that matches `like` at `resolution`, or a
-        /// new one. Give it back with release, never delete it.
-        static PhotonVoxelScroll *acquire( RenderSystem *renderSystem, HlmsManager *hlmsManager,
-                                           TextureGpuManager *textureManager, PhotonVoxelizer *like,
-                                           uint32 resolution );
-        /// Back to the pool, whole (its volumes, clones and pipelines kept for the next lease).
-        static void release( PhotonVoxelScroll *target );
-        /// Destroys every free target - before the compute Hlms and the texture manager die.
+        /// Destroys the process-wide jobs - before the compute Hlms dies.
         static void releasePool();
-        /// Targets ever built, process-wide (a lease from the pool builds none).
-        static unsigned long long numBuilt();
-        /// Whether this target serves a chain whose live store is `like` at `resolution`: the size
-        /// and every volume's format and dimensions.
-        bool matches( PhotonVoxelizer *like, uint32 resolution ) const;
 
+        uint32 layers() const { return mLayers; }
         uint32 resolution() const { return mResolution; }
         const PhotonVoxelizer::VolumeSet &volumes() const { return mVolumes; }
-        /// The bytes this target holds, for the VRAM accounting a status reports.
+        /// The bytes this scratch holds, for the VRAM accounting a status reports.
         size_t bytes() const;
 
-        /// THE SCROLL'S FIRST STEP: this target cleared, then the overlap of `live`'s level 0 copied
-        /// into it - a voxel at new cell n from old cell n + shift (shift = new lattice - old lattice,
-        /// per axis, each |shift| < resolution).
-        void begin( PhotonVoxelizer *live, const int32 shift[3] );
-        /// THE COMMIT'S COPY: every level-0 volume of this target into `live`'s, whole. `fault` (the test
-        /// door gi.cascadeFaultCommit) throws after the first half of the copies - a torn live store.
-        void commit( PhotonVoxelizer *live, bool fault = false );
+        /// THE SCROLL'S FIRST STEP: the scratch cleared as a whole build clears (every value zero but the normal's
+        /// 0.5 bias) - the slab's cells keep that until its chunks write them.
+        void begin();
+        /** THE COMMIT: every level-0 volume of `live` and the light textures `light` shifted by -`shift` cells in
+            place (a voxel at new cell n holds old cell n + shift; |shift| < the resolution, even where a light
+            texture holds two cells a texel), the far ends cleared, then the scratch's `slabs` copied in. `fault`
+            (the test door gi.cascadeFaultCommit) throws after the first half of the shifts - a torn live store.
+        */
+        void commit( PhotonVoxelizer *live, const LightVolume *light, size_t numLight, const int32 shift[3],
+                     const Slab *slabs, size_t numSlabs, bool fault = false );
+
+        /// ONE VOLUME'S LEVEL 0 SHIFTED BY -`texels` ALONG `axis` IN PLACE, the far end set to `clear`
+        /// (Photon/ScrollShift; `packedHalves`: two halves along x, each shifted on its own).
+        static void shiftVolume( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *volume,
+                                 uint32 axis, int32 texels, bool packedHalves, const float clear[4] );
+        /// ONE BOX COPIED (Photon/ScrollCopy): `size` texels of `dst` from `dstOrigin`, read from `src` at
+        /// `srcOrigin` + the box's id permuted by `permAxis` (0 the identity; Slab's layout otherwise).
+        static void copyBox( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *src,
+                             TextureGpu *dst, const uint32 srcOrigin[3], const uint32 dstOrigin[3],
+                             const uint32 size[3], uint32 permAxis = 0u );
 
     private:
-        void copyBox( TextureGpu *src, TextureGpu *dst, const uint32 srcOrigin[3],
-                      const uint32 dstOrigin[3], const uint32 size[3] );
-        HlmsComputeJob *copyJob( PixelFormatGpu format );
-
         RenderSystem      *mRenderSystem;
         HlmsManager       *mHlmsManager;
         TextureGpuManager *mTextureManager;
         ComputeTools      *mComputeTools;
         uint32             mResolution;
+        uint32             mLayers;
         PhotonVoxelizer::VolumeSet mVolumes;
-        /// One clone of Photon/ScrollCopy per format (the store qualifier is the bound volume's) - this
-        /// object's, destroyed with it.
-        std::map<PixelFormatGpu, HlmsComputeJob *> mCopyJobs;
         ResourceTransitionArray mResourceTransitions;
     };
 }  // namespace Ogre

@@ -1,4 +1,4 @@
-// THE CASCADE SCROLL'S TARGET (photon/voxel/PhotonVoxelScroll.h has the design).
+// THE CASCADE SCROLL'S SCRATCH AND ITS SHIFT (photon/voxel/PhotonVoxelScroll.h has the design).
 #include "photon/voxel/PhotonVoxelScroll.h"
 
 #include "photon/PhotonDispatch.h"
@@ -16,18 +16,41 @@
 #include "OgreTextureGpu.h"
 #include "OgreTextureGpuManager.h"
 
+#include <map>
+#include <utility>
+
 namespace Ogre
 {
     namespace
     {
         uint32 gScrollCloneId = 0u;
-        /// THE POOL (the header's note): the free targets, the manager they were built against,
-        /// and how many were ever built.
-        std::vector<PhotonVoxelScroll *> gScrollFree;
-        HlmsManager *gScrollPoolManager = nullptr;
-        unsigned long long gScrollBuilt = 0ull;
+        /// THE PROCESS-WIDE JOBS (the header's note): a clone of Photon/ScrollShift (kind 0) and of
+        /// Photon/ScrollCopy (kind 1) per volume format, and the manager they were cloned in.
+        std::map<std::pair<int, PixelFormatGpu>, HlmsComputeJob *> gScrollJobs;
+        HlmsManager *gScrollJobsManager = nullptr;
 
-        /// The live store's volumes, in one fixed order: the copy and the clear walk it.
+        HlmsComputeJob *scrollJob( HlmsManager *hlmsManager, int kind, PixelFormatGpu format )
+        {
+            if( gScrollJobsManager && gScrollJobsManager != hlmsManager )
+                gScrollJobs.clear();   // a second engine in the process: the old one's jobs died with its Hlms
+            gScrollJobsManager = hlmsManager;
+            const auto key = std::make_pair( kind, format );
+            const auto it = gScrollJobs.find( key );
+            if( it != gScrollJobs.end() )
+                return it->second;
+            HlmsCompute *hlmsCompute = hlmsManager->getComputeHlms();
+            HlmsComputeJob *base =
+                hlmsCompute->findComputeJob( kind == 0 ? "Photon/ScrollShift" : "Photon/ScrollCopy" );
+            char tmpBuffer[96];
+            LwString name( LwString::FromEmptyPointer( tmpBuffer, sizeof( tmpBuffer ) ) );
+            name.a( kind == 0 ? "Photon/ScrollShift/" : "Photon/ScrollCopy/", ++gScrollCloneId );
+            HlmsComputeJob *job = base->clone( name.c_str() );
+            job->setProperty( "copy_uint", PixelFormatGpuUtils::isInteger( format ) ? 1 : 0 );
+            gScrollJobs[key] = job;
+            return job;
+        }
+
+        /// The live store's volumes, in one fixed order: the shift, the copy-in and the clear walk it.
         constexpr size_t kVolumes = 11u;
         void volumeList( const PhotonVoxelizer::VolumeSet &v, TextureGpu *out[kVolumes] )
         {
@@ -39,7 +62,7 @@ namespace Ogre
             out[5] = v.coverage[1];
             out[6] = v.position[0];
             out[7] = v.position[1];
-            out[8] = v.metal;   // METAL-BOUNCE-1
+            out[8] = v.metal;     // METAL-BOUNCE-1
             out[9] = v.emit[0];   // JUNCTION-NORMAL-1
             out[10] = v.emit[1];
         }
@@ -47,33 +70,40 @@ namespace Ogre
                                                       "AccumVal",  "CoverageP", "CoverageN",
                                                       "PositionP", "PositionN", "Metal",
                                                       "EmitP",     "EmitN" };
+        /// What a whole build clears each volume to (PhotonVoxelizer::clearVoxels): zero, the normal's 0.5 bias.
+        const float kZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        const float kNormalClear[4] = { 0.5f, 0.5f, 0.5f, 0.0f };
     }  // namespace
 
     PhotonVoxelScroll::PhotonVoxelScroll( RenderSystem *renderSystem, HlmsManager *hlmsManager,
                                           TextureGpuManager *textureManager, PhotonVoxelizer *like,
-                                          uint32 resolution ) :
+                                          uint32 layers ) :
         mRenderSystem( renderSystem ),
         mHlmsManager( hlmsManager ),
         mTextureManager( textureManager ),
         mComputeTools( new ComputeTools( hlmsManager->getComputeHlms() ) ),
-        mResolution( resolution )
+        mResolution( 0u ),
+        mLayers( layers )
     {
         const PhotonVoxelizer::VolumeSet live = like->liveVolumes();
         TextureGpu *src[kVolumes];
         volumeList( live, src );
+        mResolution = src[0] ? src[0]->getWidth() : 0u;
+        OGRE_ASSERT_LOW( mLayers >= 2u && mLayers <= mResolution );
         TextureGpu *dst[kVolumes] = {};
         const uint32 id = ++gScrollCloneId;
         for( size_t i = 0u; i < kVolumes; ++i )
         {
-            OGRE_ASSERT_LOW( src[i] && src[i]->getWidth() == resolution );
-            // LEVEL 0 ONLY: the target is copied into the live volumes, whose chains are then
-            // regenerated (PhotonVoxelizer::finishScroll). A UAV and nothing more, like the live ones.
+            OGRE_ASSERT_LOW( src[i] && src[i]->getWidth() == mResolution &&
+                             src[i]->getHeight() == mResolution && src[i]->getDepth() == mResolution );
+            // LEVEL 0 ONLY, A SLAB'S LAYERS ALONG X: copied into the live volumes at the commit, whose chains are
+            // then regenerated (PhotonVoxelizer::finishScroll). A UAV and nothing more, like the live ones.
             dst[i] = textureManager->createTexture(
-                "PhotonScrollVox/" + StringConverter::toString( id ) + "/" + kVolumeNames[i],
+                "PhotonScrollScratch/" + StringConverter::toString( id ) + "/" + kVolumeNames[i],
                 GpuPageOutStrategy::Discard, TextureFlags::NotTexture | TextureFlags::Uav,
                 TextureTypes::Type3D );
             dst[i]->setPixelFormat( src[i]->getPixelFormat() );
-            dst[i]->setResolution( src[i]->getWidth(), src[i]->getHeight(), src[i]->getDepth() );
+            dst[i]->setResolution( mLayers, mResolution, mResolution );
             dst[i]->setNumMipmaps( 1u );
             dst[i]->scheduleTransitionTo( GpuResidency::Resident );
         }
@@ -89,22 +119,20 @@ namespace Ogre
         mVolumes.emit[0] = dst[9];
         mVolumes.emit[1] = dst[10];
 
-        // THE SCROLL'S JOBS ARE BUILT HERE, AT THE CHAIN'S BUILD (vr.warmup: no shader is compiled on a frame a
-        // headset is shown, and a scroll is what the first head movement does): one texel of every volume copied -
-        // every permutation a scroll and its commit dispatch (a copy per format at this size), into this target,
-        // which every scroll clears before it fills it.
+        // THE SCROLL'S JOBS ARE BUILT HERE, AT THE CHAIN'S BUILD (vr.warmup: no shader is compiled on a frame a headset
+        // is shown, and a scroll is what the first head movement does): every format's shift and copy dispatched once
+        // with nothing to do - a shift of 0 texels and a copy of an empty box, on this scratch's own volumes.
         mRenderSystem->endRenderPassDescriptor();
-        const uint32 zero[3] = { 0u, 0u, 0u }, one[3] = { 1u, 1u, 1u };
+        const uint32 zero[3] = { 0u, 0u, 0u };
         for( size_t i = 0u; i < kVolumes; ++i )
-            copyBox( src[i], dst[i], zero, zero, one );
+        {
+            shiftVolume( mHlmsManager, mRenderSystem, dst[i], 0u, 0, false, kZero );
+            copyBox( mHlmsManager, mRenderSystem, dst[i], dst[i], zero, zero, zero );
+        }
     }
     //-------------------------------------------------------------------------
     PhotonVoxelScroll::~PhotonVoxelScroll()
     {
-        HlmsCompute *hlmsCompute = mHlmsManager->getComputeHlms();
-        for( auto &kv : mCopyJobs )
-            hlmsCompute->destroyComputeJob( kv.second->getName() );
-        mCopyJobs.clear();
         TextureGpu *dst[kVolumes];
         volumeList( mVolumes, dst );
         for( size_t i = 0u; i < kVolumes; ++i )
@@ -115,59 +143,16 @@ namespace Ogre
         mComputeTools = 0;
     }
     //-------------------------------------------------------------------------
-    PhotonVoxelScroll *PhotonVoxelScroll::acquire( RenderSystem *renderSystem, HlmsManager *hlmsManager,
-                                                   TextureGpuManager *textureManager, PhotonVoxelizer *like,
-                                                   uint32 resolution )
-    {
-        if( gScrollPoolManager && gScrollPoolManager != hlmsManager )
-            releasePool();   // a second engine in the process: the old one's targets are not ours
-        gScrollPoolManager = hlmsManager;
-        for( auto it = gScrollFree.begin(); it != gScrollFree.end(); ++it )
-        {
-            if( ( *it )->matches( like, resolution ) )
-            {
-                PhotonVoxelScroll *target = *it;
-                gScrollFree.erase( it );
-                return target;
-            }
-        }
-        ++gScrollBuilt;
-        return new PhotonVoxelScroll( renderSystem, hlmsManager, textureManager, like, resolution );
-    }
-    //-------------------------------------------------------------------------
-    void PhotonVoxelScroll::release( PhotonVoxelScroll *target )
-    {
-        if( target )
-            gScrollFree.push_back( target );
-    }
-    //-------------------------------------------------------------------------
     void PhotonVoxelScroll::releasePool()
     {
-        for( PhotonVoxelScroll *target : gScrollFree )
-            delete target;
-        gScrollFree.clear();
-        gScrollPoolManager = nullptr;
-    }
-    //-------------------------------------------------------------------------
-    unsigned long long PhotonVoxelScroll::numBuilt() { return gScrollBuilt; }
-    //-------------------------------------------------------------------------
-    bool PhotonVoxelScroll::matches( PhotonVoxelizer *like, uint32 resolution ) const
-    {
-        if( !like || resolution != mResolution )
-            return false;
-        const PhotonVoxelizer::VolumeSet live = like->liveVolumes();
-        TextureGpu *src[kVolumes];
-        TextureGpu *dst[kVolumes];
-        volumeList( live, src );
-        volumeList( mVolumes, dst );
-        for( size_t i = 0u; i < kVolumes; ++i )
+        if( gScrollJobsManager )
         {
-            if( !src[i] || !dst[i] || src[i]->getPixelFormat() != dst[i]->getPixelFormat() ||
-                src[i]->getWidth() != dst[i]->getWidth() || src[i]->getHeight() != dst[i]->getHeight() ||
-                src[i]->getDepth() != dst[i]->getDepth() )
-                return false;
+            HlmsCompute *hlmsCompute = gScrollJobsManager->getComputeHlms();
+            for( auto &kv : gScrollJobs )
+                hlmsCompute->destroyComputeJob( kv.second->getName() );
         }
-        return true;
+        gScrollJobs.clear();
+        gScrollJobsManager = nullptr;
     }
     //-------------------------------------------------------------------------
     size_t PhotonVoxelScroll::bytes() const
@@ -181,28 +166,54 @@ namespace Ogre
         return total;
     }
     //-------------------------------------------------------------------------
-    HlmsComputeJob *PhotonVoxelScroll::copyJob( PixelFormatGpu format )
+    void PhotonVoxelScroll::shiftVolume( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *volume,
+                                         uint32 axis, int32 texels, bool packedHalves, const float clear[4] )
     {
-        auto it = mCopyJobs.find( format );
-        if( it != mCopyJobs.end() )
-            return it->second;
-        HlmsCompute *hlmsCompute = mHlmsManager->getComputeHlms();
-        HlmsComputeJob *base = hlmsCompute->findComputeJob( "Photon/ScrollCopy" );
-        char tmpBuffer[96];
-        LwString name( LwString::FromEmptyPointer( tmpBuffer, sizeof( tmpBuffer ) ) );
-        name.a( "Photon/ScrollCopy/", ++gScrollCloneId );
-        HlmsComputeJob *job = base->clone( name.c_str() );
-        job->setProperty( "copy_uint", PixelFormatGpuUtils::isInteger( format ) ? 1 : 0 );
-        mCopyJobs[format] = job;
-        return job;
+        HlmsComputeJob *job = scrollJob( hlmsManager, 0, volume->getPixelFormat() );
+        DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+        uavSlot.texture = volume;
+        uavSlot.pixelFormat = volume->getPixelFormat();
+        uavSlot.access = ResourceAccess::ReadWrite;
+        job->_setUavTexture( 0u, uavSlot );
+        const uint32 dims[3] = { volume->getWidth(), volume->getHeight(), volume->getDepth() };
+        const bool halves = packedHalves && axis == 0u;
+        // THE COLUMNS: the two other axes in increasing order, and the halves of a packed volume along x.
+        const uint32 b = axis == 0u ? 1u : 0u, c = axis == 2u ? 1u : 2u;
+        const uint32 len = halves ? dims[0] / 2u : dims[axis];
+        const uint32 shiftAxis[4] = { axis, uint32( texels ), len, halves ? dims[0] / 2u : 0u };
+        const uint32 columns[4] = { dims[b], dims[c], halves ? 2u : 1u, 0u };
+        const uint32 *tpg = job->getThreadsPerGroup();
+        job->setNumThreadGroups( std::max( 1u, ( columns[0] + tpg[0] - 1u ) / tpg[0] ),
+                                 std::max( 1u, ( columns[1] + tpg[1] - 1u ) / tpg[1] ),
+                                 std::max( 1u, ( columns[2] + tpg[2] - 1u ) / tpg[2] ) );
+        uint32 clearU[4];
+        for( int k = 0; k < 4; ++k )
+            clearU[k] = uint32( clear[k] );
+        ShaderParams::Param pAxis, pColumns, pClearF, pClearU;
+        pAxis.name = "shiftAxis";
+        pColumns.name = "shiftColumns";
+        pClearF.name = "clearF";
+        pClearU.name = "clearU";
+        pAxis.setManualValue( shiftAxis, 4u );
+        pColumns.setManualValue( columns, 4u );
+        pClearF.setManualValue( clear, 4u );
+        pClearU.setManualValue( clearU, 4u );
+        ShaderParams &params = job->getShaderParams( "default" );
+        params.mParams.clear();
+        params.mParams.push_back( pAxis );
+        params.mParams.push_back( pColumns );
+        params.mParams.push_back( pClearF );
+        params.mParams.push_back( pClearU );
+        params.setDirty();
+        jahshaka::engine::detail::photonDispatch( hlmsManager->getComputeHlms(), job, renderSystem );
     }
     //-------------------------------------------------------------------------
-    void PhotonVoxelScroll::copyBox( TextureGpu *src, TextureGpu *dst, const uint32 srcOrigin[3],
-                                     const uint32 dstOrigin[3], const uint32 size[3] )
+    void PhotonVoxelScroll::copyBox( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *src,
+                                     TextureGpu *dst, const uint32 srcOrigin[3], const uint32 dstOrigin[3],
+                                     const uint32 size[3], uint32 permAxis )
     {
-        if( !size[0] || !size[1] || !size[2] )
-            return;
-        HlmsComputeJob *job = copyJob( dst->getPixelFormat() );
+        OGRE_ASSERT_LOW( src->getPixelFormat() == dst->getPixelFormat() );
+        HlmsComputeJob *job = scrollJob( hlmsManager, 1, dst->getPixelFormat() );
         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
         uavSlot.texture = src;
         uavSlot.pixelFormat = src->getPixelFormat();
@@ -213,25 +224,29 @@ namespace Ogre
         uavSlot.access = ResourceAccess::Write;
         job->_setUavTexture( 1u, uavSlot );
         const uint32 *tpg = job->getThreadsPerGroup();
-        job->setNumThreadGroups( ( size[0] + tpg[0] - 1u ) / tpg[0], ( size[1] + tpg[1] - 1u ) / tpg[1],
-                                 ( size[2] + tpg[2] - 1u ) / tpg[2] );
-        ShaderParams::Param pSrc, pDst, pSize;
+        job->setNumThreadGroups( std::max( 1u, ( size[0] + tpg[0] - 1u ) / tpg[0] ),
+                                 std::max( 1u, ( size[1] + tpg[1] - 1u ) / tpg[1] ),
+                                 std::max( 1u, ( size[2] + tpg[2] - 1u ) / tpg[2] ) );
+        ShaderParams::Param pSrc, pDst, pSize, pPerm;
         pSrc.name = "srcOrigin";
         pDst.name = "dstOrigin";
         pSize.name = "copySize";
+        pPerm.name = "permAxis";
         pSrc.setManualValue( srcOrigin, 3u );
         pDst.setManualValue( dstOrigin, 3u );
         pSize.setManualValue( size, 3u );
+        pPerm.setManualValue( permAxis );
         ShaderParams &params = job->getShaderParams( "default" );
         params.mParams.clear();
         params.mParams.push_back( pSrc );
         params.mParams.push_back( pDst );
         params.mParams.push_back( pSize );
+        params.mParams.push_back( pPerm );
         params.setDirty();
-        jahshaka::engine::detail::photonDispatch( mHlmsManager->getComputeHlms(), job, mRenderSystem );
+        jahshaka::engine::detail::photonDispatch( hlmsManager->getComputeHlms(), job, renderSystem );
     }
     //-------------------------------------------------------------------------
-    void PhotonVoxelScroll::begin( PhotonVoxelizer *live, const int32 shift[3] )
+    void PhotonVoxelScroll::begin()
     {
         OgreProfileGpuBegin( "Photon scroll begin" );
         mRenderSystem->endRenderPassDescriptor();
@@ -243,8 +258,6 @@ namespace Ogre
         for( size_t i = 0u; i < kVolumes; ++i )
             mComputeTools->prepareForUavClear( mResourceTransitions, dst[i] );
         mRenderSystem->executeResourceTransition( mResourceTransitions );
-        const float fZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        const float fNormal[4] = { 0.5f, 0.5f, 0.5f, 0.0f };
         const uint32 uZero[4] = { 0u, 0u, 0u, 0u };
         for( size_t i = 0u; i < kVolumes; ++i )
         {
@@ -252,50 +265,70 @@ namespace Ogre
                 jahshaka::engine::detail::photonClearUavUint( mComputeTools, dst[i], uZero );
             else
                 jahshaka::engine::detail::photonClearUavFloat( mComputeTools, dst[i],
-                                                               i == 2u ? fNormal : fZero );
+                                                               i == 2u ? kNormalClear : kZero );
         }
-
-        // THE OVERLAP: new cell n holds old cell n + shift, for every n with both inside the box.
-        uint32 srcOrigin[3], dstOrigin[3], size[3];
-        for( int a = 0; a < 3; ++a )
-        {
-            const int32 s = shift[a];
-            OGRE_ASSERT_LOW( s > -int32( mResolution ) && s < int32( mResolution ) );
-            srcOrigin[a] = s > 0 ? uint32( s ) : 0u;
-            dstOrigin[a] = s < 0 ? uint32( -s ) : 0u;
-            size[a] = mResolution - uint32( s < 0 ? -s : s );
-        }
-        const PhotonVoxelizer::VolumeSet src = live->liveVolumes();
-        TextureGpu *from[kVolumes];
-        volumeList( src, from );
-        // EVERY VOLUME TEXEL FOR TEXEL, the surface positions too: they are stored relative to their OWN cell
-        // (PHOTON-7 stage 1, VoxelMerge_piece_cs.any's THE SURFACE POSITION), so a voxel's bits do not depend on where
-        // the box stands and a moved voxel is the voxel a whole build at the new place writes.
-        for( size_t i = 0u; i < kVolumes; ++i )
-            copyBox( from[i], dst[i], srcOrigin, dstOrigin, size );
         OgreProfileGpuEnd( "Photon scroll begin" );
     }
     //-------------------------------------------------------------------------
-    void PhotonVoxelScroll::commit( PhotonVoxelizer *live, bool fault )
+    void PhotonVoxelScroll::commit( PhotonVoxelizer *live, const LightVolume *light, size_t numLight,
+                                    const int32 shift[3], const Slab *slabs, size_t numSlabs, bool fault )
     {
         OgreProfileGpuBegin( "Photon scroll commit" );
         mRenderSystem->endRenderPassDescriptor();
-        TextureGpu *from[kVolumes], *to[kVolumes];
-        volumeList( mVolumes, from );
+        // THE SLAB'S BUILD IS SUBMITTED BEFORE THE STORE MOVES (measured, PHOTON-7 stage 2): with the slab's last chunks
+        // voxelised earlier in the SAME command buffer, the copy-in below read the scratch half-built and its writes
+        // reached the shift's reads of the slab's texels - the entering slab and the |shift| cells beside it read empty
+        // in every one-frame commit of a 16-cell shift (gi.scroll_slab), although the barrier solver held the scratch's
+        // and the store's records (compute stage, written) and Vulkan synchronization validation reported no hazard on
+        // these dispatches. A submission here (after the chunks, before the shifts) makes every arm exact; one after the
+        // scratch's clear does not. The mechanism inside the pin's compute recording is UNRESOLVED (the report names it);
+        // a commit is one submission per scroll.
+        mRenderSystem->flushCommands();
+        TextureGpu *to[kVolumes];
         volumeList( live->liveVolumes(), to );
-        const uint32 zero[3] = { 0u, 0u, 0u };
-        for( size_t i = 0u; i < kVolumes; ++i )
+        // THE SHIFT IN PLACE, axis by axis (separable: after the three the store at new cell n is the old n + shift),
+        // the geometry's eleven volumes, then the light's.
+        size_t shifted = 0u;
+        const size_t half = ( kVolumes + numLight ) / 2u;
+        for( uint32 a = 0u; a < 3u; ++a )
         {
-            // WHOLE level 0, texel for texel.
-            const uint32 size[3] = { from[i]->getWidth(), from[i]->getHeight(), from[i]->getDepth() };
-            copyBox( from[i], to[i], zero, zero, size );
-            if( fault && i == 4u )
+            if( !shift[a] )
+                continue;
+            OGRE_ASSERT_LOW( shift[a] > -int32( mResolution ) && shift[a] < int32( mResolution ) );
+            for( size_t i = 0u; i < kVolumes + numLight; ++i )
             {
-                OgreProfileGpuEnd( "Photon scroll commit" );
-                OGRE_EXCEPT( Exception::ERR_INTERNAL_ERROR,
-                             "gi.cascadeFaultCommit: forced failure half way through a scroll's commit",
-                             "PhotonVoxelScroll::commit" );
+                if( i < kVolumes )
+                {
+                    shiftVolume( mHlmsManager, mRenderSystem, to[i], a, shift[a], false,
+                                 i == 2u ? kNormalClear : kZero );
+                }
+                else
+                {
+                    const LightVolume &l = light[i - kVolumes];
+                    OGRE_ASSERT_LOW( shift[a] % int32( l.cellsPerTexel ) == 0 );
+                    shiftVolume( mHlmsManager, mRenderSystem, l.texture, a, shift[a] / int32( l.cellsPerTexel ),
+                                 l.packedHalves, kZero );
+                }
+                if( fault && ++shifted == half )
+                {
+                    OgreProfileGpuEnd( "Photon scroll commit" );
+                    OGRE_EXCEPT( Exception::ERR_INTERNAL_ERROR,
+                                 "gi.cascadeFaultCommit: forced failure half way through a scroll's shift",
+                                 "PhotonVoxelScroll::commit" );
+                }
             }
+        }
+        // THE SLABS, from the scratch into the far ends the shift cleared: each from its first layer, in its layout.
+        TextureGpu *from[kVolumes];
+        volumeList( mVolumes, from );
+        for( size_t k = 0u; k < numSlabs; ++k )
+        {
+            const Slab &s = slabs[k];
+            const uint32 size[3] = { s.hi[0] - s.lo[0], s.hi[1] - s.lo[1], s.hi[2] - s.lo[2] };
+            const uint32 srcOrigin[3] = { s.layer, 0u, 0u };
+            OGRE_ASSERT_LOW( s.layer + size[s.axis] <= mLayers );
+            for( size_t i = 0u; i < kVolumes; ++i )
+                copyBox( mHlmsManager, mRenderSystem, from[i], to[i], srcOrigin, s.lo, size, s.axis );
         }
         OgreProfileGpuEnd( "Photon scroll commit" );
     }

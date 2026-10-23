@@ -103,11 +103,15 @@ namespace Ogre
             TextureGpu *position[2] = {};
             TextureGpu *emit[2] = {};   ///< JUNCTION-NORMAL-1: the emissive factor per half-axis
         };
-        /// A box of the volume's cells: [x, x + w) x [y, y + h) x [z, z + d).
+        /// A box of the volume's cells: [x, x + w) x [y, y + h) x [z, z + d) - and where its voxels are STORED
+        /// (PHOTON-7 stage 2): the cell permuted by `storeAxis` (0: (x, y, z); 1: (y, x, z); 2: (z, x, y)) plus
+        /// `storeBase` - the identity for a whole build, the scroll scratch's layout for a scroll's chunk.
         struct CellBox
         {
             uint32 x = 0u, y = 0u, z = 0u;
             uint32 w = 0u, h = 0u, d = 0u;
+            uint32 storeAxis = 0u;
+            int32  storeBase[3] = { 0, 0, 0 };
         };
 
         /** JAHSHAKA (ATOM P4) - ONE (mesh, LOD level, submesh)'s GEOMETRY, AS THE
@@ -285,6 +289,9 @@ namespace Ogre
             uint32 x = 0u, y = 0u, z = 0u;
             uint32 width = 0u, height = 0u, depth = 0u;
             Aabb   region;
+            /// Where its voxels are stored (CellBox's): the identity but for a scroll's chunk.
+            uint32 storeAxis = 0u;
+            int32  storeBase[3] = { 0, 0, 0 };
         };
 
         FastArray<Octant> mOctants;
@@ -388,21 +395,22 @@ namespace Ogre
         /** THE SCROLL'S CHUNKS, AS THIS VOXELISER'S OCTANTS (ENGINE-UPGRADE-U5 stage 1). Every
             octant of the gather and of the dispatches is one box of the TARGET volume's cells, its
             world region `targetOrigin + cell x box` - the new placement's, not the live region the
-            readers sample (that one moves only when the scroll commits). At most eight (the
-            gather's cap). restoreOctants() puts back the whole-volume division of the live region.
+            readers sample (that one moves only when the scroll commits) - stored where the box says
+            (PHOTON-7 stage 2: into the cascade's slab-sized scratch, PhotonVoxelScroll). At most eight
+            (the gather's cap). restoreOctants() puts back the whole-volume division of the live region.
         */
         void setChunkOctants( const CellBox *chunks, size_t count, const Vector3 &targetOrigin );
         void restoreOctants();
-        /** Voxelises the current octants (setChunkOctants) into `target`, through the instance
-            source the gather bound: the shared merge accumulator cleared first (it is scratch of
-            one build), nothing else - the target's cells in the chunks are already clear (the
-            scroll's begin cleared the whole target). Same dispatches, same shader, same merge as
-            build(); the bounds guard writes exactly the chunk's cells.
+        /** Voxelises the current octants (setChunkOctants) into `target` (the scroll's scratch), through
+            the instance source the gather bound: the shared merge accumulator cleared first (it is scratch
+            of one build), nothing else - the scratch is already clear (the scroll's begin cleared it). Same
+            dispatches, same shader, same merge as build(); the bounds guard writes exactly the chunk's
+            cells, each where its box stores it.
         */
         void buildChunks( const VolumeSet &target );
-        /** THE SCROLL COMMITTED: the live volumes now hold the new placement's level 0 (the
-            scroll's copy back), so the region moves to it and every mip chain is regenerated
-            whole - the same chains a whole build ends with.
+        /** THE SCROLL COMMITTED: the live volumes now hold the new placement's level 0 (shifted in
+            place, the slab copied in: PhotonVoxelScroll::commit), so the region moves to it and every
+            mip chain is regenerated whole - the same chains a whole build ends with.
         */
         void finishScroll( const Aabb &newRegion );
     };
