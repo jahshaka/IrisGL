@@ -1057,6 +1057,10 @@ constexpr ArmDef kArms[] = {
       "error plus the drawn cut's error (the view's pixel tolerance x the LOD bias in footprints; the sun contact's one "
       "footprint of margin with it). 0 = the float bound alone: the negative control of rtreflect.contact and "
       "gi.sun_contact_acne - a cut that lies inside level 0 starts its rays inside it, and the rows must read red." },
+    { ArmId::ReflectSeedOffset, 0.0, 0.0, 65535.0,
+      "THE LOBE DRAW'S SEED OFFSET (PHOTON-7 stage 6, the walk's noise/signal split): added to the frame index the "
+      "reflection's lobe draw and its resolve's re-derivation take - two walks identical but for it carry independent "
+      "ray noise and the same signal (var( rA - rB ) / 2 is the noise). 0 = shipped." },
     { ArmId::ReflectPosed, 1.0, 0.0, 1.0,
       "The POSED identification (SKINNED-VELOCITY-1): the trace and the march's velocity take "
       "the posed geometry rows. 0 = the id image alone, the pre-lane motion for a character. "

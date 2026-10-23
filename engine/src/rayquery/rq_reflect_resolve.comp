@@ -184,7 +184,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// THE DENOISER SPACE'S EXPOSURE (PHOTON-7 stage 6 commit 6, jah_reflect_denoise.glsl: Lumen's space is on
 	/// PRE-EXPOSED colour): x = the view's exposure multiplier where it is a constant (a fixed tonemap: the chain's
 	/// cleared 1x1; 1 without a tonemap), y = 1 when the chain's MEASURED history is bound at binding 50 instead (the
-	/// multiplier the tonemapper scaled the last frame by).
+	/// multiplier the tonemapper scaled the last frame by). z = the lobe draw's seed offset (the arm reflect.seedOffset).
 	vec4 denoiser;
 } p;
 
@@ -354,7 +354,7 @@ void main()
 			// ITS DIRECTION, re-derived from its seed and folded about its own geometric plane as the trace folded it (a
 			// VNDF draw: the state says so), and the two true densities.
 			bool qc, qv;
-			vec3 Lq = jahReflectDraw( n.N, n.V, n.alpha, q, frame, -1.0, qc, qv );
+			vec3 Lq = jahReflectDraw( n.N, n.V, n.alpha, q, frame + uint( p.denoiser.z ), -1.0, qc, qv );
 			if( !qv )
 				continue;
 			if( dot( Lq, n.g ) < 0.0 )

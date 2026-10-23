@@ -193,6 +193,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// plane; 0 = no far query).
 	vec4 screen;
 	vec4 screen2;
+	/// x, y: the denoiser space's exposure (the resolve's, the temporal pass'); z = THE LOBE DRAW'S SEED OFFSET (the arm
+	/// reflect.seedOffset, 0 shipped): added to the frame index the draw takes.
+	vec4 denoiser;
 } p;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
@@ -871,7 +874,8 @@ void main()
 													   length( thisEye.rayDown ) / float( traceRes.y ),
 													   thisEye.perspective > 0.5 );
 	bool centre, vndf;
-	vec3 L = jahReflectDraw( worldN, V, alpha, seedPix, uint( p.knobs.z ), centreChance, centre, vndf );
+	vec3 L = jahReflectDraw( worldN, V, alpha, seedPix, uint( p.knobs.z ) + uint( p.denoiser.z ), centreChance, centre,
+							 vndf );
 	// ...AND THE GEOMETRIC PLANE (READ_A W4): a normal-mapped lobe seen at grazing can point below the surface the ray
 	// actually leaves (L above the shaded plane, under the geometric one), and from an origin lifted along the geometric
 	// normal with tMin 0 it would hit its own surface at lift / |L . geomN|. Such a direction is REFLECTED about the

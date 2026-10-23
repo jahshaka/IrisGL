@@ -187,7 +187,7 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// THE DENOISER SPACE'S EXPOSURE (PHOTON-7 stage 6 commit 6, jah_reflect_denoise.glsl: Lumen's space is on
 	/// PRE-EXPOSED colour): x = the view's exposure multiplier where it is a constant (a fixed tonemap: the chain's
 	/// cleared 1x1; 1 without a tonemap), y = 1 when the chain's MEASURED history is bound at binding 50 instead (the
-	/// multiplier the tonemapper scaled the last frame by).
+	/// multiplier the tonemapper scaled the last frame by). z = the lobe draw's seed offset (the arm reflect.seedOffset).
 	vec4 denoiser;
 } p;
 
