@@ -12,8 +12,10 @@
 //   [3] REPORTED: the card is listed stale and waits for its march (no second listing).
 // SENSITIVITY (jah_card_sens): one workgroup a card of the relight list, after the relight - its lit texels' lowest
 // radiance, and on a MARCHED relight (mode bit 1) the accumulator restarts.
-// REDUCE (mode 2): per CLUSTER of 4^3 bricks of a cascade that moved this frame, its bricks' largest move - a pass's
-// absolute move (state word 4) where the brick was passed this frame, an injection's (word 7) - and the box of the bricks
+// REDUCE (mode 2): per CLUSTER of 4^3 bricks of a cascade that moved this frame, its bricks' largest move - a brick's
+// injection's absolute move (state word 7) PLUS its pass's (word 4) where it was passed this frame: the pass gathers
+// from the total the delta already wrote, so a voxel's total moved by at most the sum (PHOTON-7 stage 5's read A2
+// (ii); the larger of the two under-bounded it, the feedback's ACCUM the same) - and the box of the bricks
 // that moved (a brick inside the next finer cascade's box skipped: the cones read that one there). No atomics:
 // deterministic.
 // ACCUMULATE (mode 0): one thread a resident card - each cluster's largest move weighted by a BOUND of the share of the
@@ -177,8 +179,8 @@ void main()
 						continue;
 					const uint b = bb.x + caDims.x * ( bb.y + caDims.y * bb.z );
 					const uint f = caState[8u * b];
-					float m = ( f & CA_RAN ) != 0u ? uintBitsToFloat( caState[8u * b + 4u] ) : 0.0;
-					m = max( m, uintBitsToFloat( caState[8u * b + 7u] ) );
+					const float m = ( ( f & CA_RAN ) != 0u ? uintBitsToFloat( caState[8u * b + 4u] ) : 0.0 ) +
+									uintBitsToFloat( caState[8u * b + 7u] );
 					if( !( m > 0.0 ) )
 						continue;
 					if( caInnerLo.w > 0.5 )
