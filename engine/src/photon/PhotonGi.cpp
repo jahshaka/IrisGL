@@ -1326,6 +1326,7 @@ GiStatus PhotonComponent::giStatus() const {
             cs.scrollFrames = c.scrollFrames;
             cs.scrolling    = c.scroll.active;
             cs.tornCleared  = c.tornCleared;
+            if (c.lighting) cs.shellEnds = c.lighting->getLastShellEnds();
             // WHAT THIS CASCADE VOXELISED - A READING of the device's own counts,
             // written as the gather wrote the records (ATOM P4b, A5b §3). They
             // used to be CPU walks: `items` an AABB test per GI item per rebuild,
@@ -4863,7 +4864,12 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
         c.lighting = new Ogre::PhotonVoxelLighting(Ogre::Id::generateNewId<Ogre::PhotonVoxelLighting>(),
                                            c.voxelizer, table.size() == 1u);
         // ITS PLACE IN THE CHAIN (PHOTON-7 stage 1): the injection marches from it through every cascade outside it.
-        c.lighting->setChainIndex(Ogre::uint32(i));
+        {
+            // ...with every cascade's cell, innermost first (the shells' ends are the world chain's, stage 1's read F1).
+            std::vector<float> cells;
+            for (const VctCascade &o : mVctCascades) cells.push_back(o.cell());
+            c.lighting->setChainIndex(Ogre::uint32(i), cells);
+        }
         // THE BOUNCE VOLUMES AT EVERY BOUNCE COUNT (CONTACT-OCCLUSION-1): the sky's
         // direct term is a bounce-job pass (PhotonVoxelLighting::update's sky pass, fork), so a
         // one-bounce document needs them too — without them a surface lit only by the

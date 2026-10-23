@@ -172,6 +172,11 @@ namespace Ogre
         /// This cascade's place in the scene's chain (0 = the innermost; the cascades outside it are
         /// mExtraCascades): the injection binds the whole chain and marches from this entry outward.
         uint32 mChainIndex = 0u;
+        /// THE CHAIN'S CELLS, innermost first (setChainIndex): what the shells' ends sum - the WORLD's chain's, the
+        /// cascades inside this one included (this lighting holds only those outside it).
+        std::vector<float> mChainCells;
+        /// The shell ends the last update() marched (getLastShellEnds).
+        std::vector<float> mLastShellEnds;
 
         /// The scene's chain is this one cascade (the constructor's; the SDF skip's condition).
         bool  mChainOfOne;
@@ -435,7 +440,17 @@ namespace Ogre
         /// THE INJECTION'S CHAIN (PHOTON-7 stage 1, L1): this cascade's place in the scene's chain, innermost 0
         /// (the chain's builder sets it; a lone cascade is 0). The injection binds the WHOLE chain's geometry - its
         /// cascades inside this one too, never read - so one permutation serves every cascade of a chain length.
-        void setChainIndex( uint32 index ) { mChainIndex = index; }
+        /// THE SHELLS' ENDS (PHOTON-7 stage 1's read F1): D_j = the sum of 8 cells of every cascade up to j, over the
+        /// WORLD's chain - the same numbers at every cascade - so the builder hands in every cascade's cell, innermost
+        /// first (`chainCells`, the chain's length); a cascade's own lighting cannot see the cascades inside it.
+        void setChainIndex( uint32 index, const std::vector<float> &chainCells )
+        {
+            mChainIndex = index;
+            mChainCells = chainCells;
+        }
+        /// The shell ends D_0 .. D_{n-2} (metres from the march's start) the last update() handed its march: a door
+        /// (GiStatus::CascadeStatus::shellEnds) - every cascade of a chain reads the same list.
+        const std::vector<float> &getLastShellEnds() const { return mLastShellEnds; }
         uint32 getChainIndex() const { return mChainIndex; }
         /// The chain's length: the cascades inside this one, this one and those outside it.
         uint32 getChainLength() const { return mChainIndex + 1u + static_cast<uint32>( mExtraCascades.size() ); }

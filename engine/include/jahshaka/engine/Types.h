@@ -4523,6 +4523,11 @@ struct GiStatus {
         /// so its volumes were set to EMPTY and the cascade stood down: missing bounce, never a wrong
         /// one. Cleared by the next rebuild that succeeds (the camera moving, an edit).
         bool  tornCleared = false;
+        /// THE SHELLS' ENDS this cascade's last light injection marched (PHOTON-7 stage 1, L1; its read F1): D_0 ..
+        /// D_{n-2} in metres from the march's start - shell j of a voxel's visibility march runs on cascade j's cells
+        /// over [D_{j-1}, D_j) - the sum of 8 cells of every cascade of the chain up to j, so EVERY cascade of a chain
+        /// reads the same list. Empty before the first injection.
+        std::vector<float> shellEnds;
         /// THE READINGS BELOW ARE THE DEVICE'S OWN COUNTS (ATOM P4b, A5b §3): the
         /// gather that writes the voxeliser's records on the GPU counts as it
         /// writes, into a small readout collected without a stall and read here.
