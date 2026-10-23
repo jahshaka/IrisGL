@@ -223,6 +223,8 @@ struct StillnessRun::Impl {
     std::map<unsigned, FrameRef> byGather;
     unsigned lastGatherMapped = 0u;                   ///< the gather's published frame counter last mapped
     /// The class restarts of the gather frame the readback holds now, into the frame it maps to (once).
+    // (the pictures-only dump keeps the history readback: without it the walk's pictures differ - measured, gi.walk's
+    // second frozen walk on 59 of 60 frames - so its files are skipped, never its readback)
     bool readsHistory() const { return spec.classRestarts || !spec.dumpDir.empty(); }
     /// THE MOVING WINDOW'S DUMP (M1): a file of the dump directory.
     std::string dumpPath(const std::string &suffix) const { return spec.dumpDir + "/" + spec.dumpName + suffix; }
@@ -243,7 +245,7 @@ struct StillnessRun::Impl {
         StillnessFrame &f = fs[it->second.index];
         if (f.classPixels >= 0) return;
         // THE DUMP (M1): the gather's own view distance and surface test of this trail frame.
-        if (!spec.dumpDir.empty() && it->second.trail && g.historyDist.size() == g.historyCount.size()) {
+        if (!spec.dumpDir.empty() && !spec.dumpRgbOnly && it->second.trail && g.historyDist.size() == g.historyCount.size()) {
             const std::string tag = trailTag(it->second.index);
             std::ofstream d(dumpPath(tag + ".dist"), std::ios::binary);
             d.write(reinterpret_cast<const char *>(g.historyDist.data()), std::streamsize(g.historyDist.size() * 4u));
@@ -925,7 +927,7 @@ bool StillnessRun::frameDone(std::string &err)
             }
             std::ofstream o(m.dumpPath(tag + ".rgb"), std::ios::binary);
             o.write(reinterpret_cast<const char *>(rgb.data()), std::streamsize(rgb.size()));
-            if (m.spec.classesAt) {
+            if (m.spec.classesAt && !m.spec.dumpRgbOnly) {
                 const std::vector<unsigned char> cls = m.spec.classesAt(p.eye, p.target, pic.width, pic.height);
                 std::ofstream c(m.dumpPath(tag + ".cls"), std::ios::binary);
                 c.write(reinterpret_cast<const char *>(cls.data()), std::streamsize(cls.size()));

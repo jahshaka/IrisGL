@@ -104,6 +104,10 @@ struct StillnessSpec {
     /// against the frame before reprojected) is computed from, offline. Implies the history readback over the trail.
     std::string dumpDir;
     std::string dumpName;
+    /// ...THE PICTURES ALONE (PHOTON-7 stage 5, the walk's time): only the trail frames' .rgb and the cams file are
+    /// written - no .dist / .flg / .gsize / .cls (a walk compared byte for byte - gi.walk's L1 - reads nothing else). The
+    /// history READBACK stays: without it the pictures differ (measured: 59 of 60 frames of a frozen walk).
+    bool        dumpRgbOnly = false;
     float       fovYDegrees = 45.0f;   ///< the view's vertical field of view (the cams file's)
     /// THE FROZEN WALK (M1's baseline, PHOTON-2 round 4 - the read's P2-1): the run switches the arm "gi.freeze" on
     /// at the script's FIRST WALK FRAME, and only from a CONVERGED state - on the frame before, the gather HELD (its
