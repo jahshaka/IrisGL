@@ -172,9 +172,10 @@ namespace Ogre
         /// scene's lamps, before any bounce -- at every pass. Upstream's bounce job
         /// re-read the running TOTAL and added to it (L_n = L_n-1 + rho * G( L_n-1 )),
         /// which is a binomial series in (1 + rho*G) and never contracts: the first
-        /// bounce's energy is counted again at every later pass. The two textures
-        /// mLightVoxel[0]/mLightBounce ping-pong, so by the second pass the direct
-        /// term is the one being overwritten and cannot be recovered from them.
+        /// bounce's energy is counted again at every later pass. Every pass rebuilds
+        /// the total from D (written into mLightBounce, copied back into
+        /// mLightVoxel[0]), so D cannot be recovered from the total after the
+        /// first pass.
         ///
         /// This is that third volume: mip 0 only (the bounce reads it with a
         /// Load3D at its own voxel, never filtered), same resolution and format as

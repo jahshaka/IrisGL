@@ -194,7 +194,8 @@ public:
         GiStaleReason followReason = GiStaleReason::Camera;
         int rebuild = -1;                     ///< the cascade the GENERAL slot re-voxelises this frame (c1..cN)
         /// ...by its SCROLL (ENGINE-UPGRADE-U5 stage 1): a step of the incremental scroll - the
-        /// entering slab's chunks this frame's budget holds, and the commit when they are the last -
+        /// entering slab's chunks this frame's share of the spread holds (a frame count), and the commit when they
+        /// are the last -
         /// instead of a whole rebuild.
         bool scroll = false;
         /// THE RESERVED SLOT (PHOTON-7 stage 2; PREFLIGHT_1_2 §5.5): cascade 0's work, every frame it owes any - a

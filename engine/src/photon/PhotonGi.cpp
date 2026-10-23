@@ -6289,8 +6289,9 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             continue;
         }
         const bool slotScroll = reserved ? w.scroll0 : w.scroll;
-        // A SCROLL'S CHUNK FRAME (ENGINE-UPGRADE-U5 stage 1): the chunks the budget holds this frame,
-        // built into the target. Nothing the readers sample changes; the frame is spent. The LAST
+        // A SCROLL'S CHUNK FRAME (ENGINE-UPGRADE-U5 stage 1): this frame's share of the slab's chunks (the spread
+        // is a frame COUNT, PHOTON-7 stage 2), built into the scratch. Nothing the readers sample changes; the frame
+        // is spent. The LAST
         // frame of a scroll is its commit and takes the rebuild below, like a whole rebuild.
         if (slotScroll && c.scroll.active && c.scroll.frame + 1u < c.scroll.frames()) {
             const auto t0 = std::chrono::steady_clock::now();
@@ -8125,7 +8126,7 @@ void PhotonComponent::teardownVct() {
     // so the vector's [0] is already dangling and teardownExtraCascades knows
     // not to touch it). After the head, which is the order the arm requires.
     teardownExtraCascades();
-    // The scroll targets go back to the pool with the chain that leased them (BUGS-6 stage 3).
+    // The scroll scratches go with the chain that owns them (one slab-sized scratch per cascade, PHOTON-7 stage 2).
     releaseScrollScratches();
     // ...and LAST, the one material store they all shared (A5b §2). Its texture pool is
     // bound into the shared compute jobs' descriptors by every dispatch, so it may not

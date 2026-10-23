@@ -949,7 +949,7 @@ namespace Ogre
 
         // Jahshaka (PHOTON-VOXEL-5): step 0 exists with a bounce only - the directional level 0
         // is the injection's direct part (mLightDirectDir) plus the bounce's part per half-axis.
-        // Its textures are bound here, per dispatch: the total ping-pongs under it.
+        // Its textures are bound here, per dispatch (the jobs are shared by name between the chain's cascades).
         if( mAnisoGeneratorStep0 )
         {
             TextureGpu *inputs[10] = { mLightVoxel[0],
