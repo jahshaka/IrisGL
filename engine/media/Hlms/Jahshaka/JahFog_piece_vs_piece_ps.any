@@ -96,8 +96,8 @@
 								// scroll), yz = the field's Y and Z probe counts
 								// (upstream's own block carries only Nx and Nx*Ny,
 								// and the visibility threshold needs all three axes),
-								// w = 1 / the samples a whole probe holds (PHOTON-2 J1's
-								// fade-in; it was the std140 pad, written 0)
+								// w the std140 pad, written 0 (PHOTON-7 stage 5, 5-5:
+								// the J1 fade-in it carried is deleted)
 	@end
 	@property( jah_env )
 		@property( !irradiance_field )

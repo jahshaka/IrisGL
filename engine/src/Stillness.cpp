@@ -887,6 +887,15 @@ bool StillnessRun::frameDone(std::string &err)
         f.ifdOwedRefines = pub.gi.ifdOwedRefines;
         f.ifdOwedIntegrations = pub.gi.ifdOwedIntegrations;
         f.ifdMarkedByMoves = pub.gi.ifdMarkedByMoves;
+        f.ifdReadUnheld = pub.gi.ifdReadUnheld;
+        f.ifdFollows = pub.gi.ifdFollows;
+        f.ifdRestartDepth = pub.gi.ifdRestartDepth;
+        f.ifdMarkLag = pub.gi.ifdMarkLag;
+        f.cardsAdmitted = pub.gi.cards.admitted;
+        f.cardsArrivalMark = pub.gi.cards.arrivalMarkNewest;
+        f.cardsFrame = pub.gi.cards.cacheFrame;
+        f.cardsDemandEvery = pub.gi.cards.demandReadEvery;
+        f.cardsDemandLag = pub.gi.cards.demandReadLag;
         f.storeOwed = pub.gi.chainOwed;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         f.reflRestFrames = pub.rayQuery.reflectRestFrames;
@@ -988,6 +997,15 @@ bool StillnessRun::frameDone(std::string &err)
         f.ifdOwedRefines = pub.gi.ifdOwedRefines;
         f.ifdOwedIntegrations = pub.gi.ifdOwedIntegrations;
         f.ifdMarkedByMoves = pub.gi.ifdMarkedByMoves;
+        f.ifdReadUnheld = pub.gi.ifdReadUnheld;
+        f.ifdFollows = pub.gi.ifdFollows;
+        f.ifdRestartDepth = pub.gi.ifdRestartDepth;
+        f.ifdMarkLag = pub.gi.ifdMarkLag;
+        f.cardsAdmitted = pub.gi.cards.admitted;
+        f.cardsArrivalMark = pub.gi.cards.arrivalMarkNewest;
+        f.cardsFrame = pub.gi.cards.cacheFrame;
+        f.cardsDemandEvery = pub.gi.cards.demandReadEvery;
+        f.cardsDemandLag = pub.gi.cards.demandReadLag;
         f.storeOwed = pub.gi.chainOwed;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         f.reflRestFrames = pub.rayQuery.reflectRestFrames;
@@ -1192,7 +1210,7 @@ std::string StillnessReport::tsv() const
       << "\tclass_px\tclass_restart\tstep_px\tslow_stage\thold_key\tfoliage_rule"
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
       << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms"
-      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\n";
+      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -1217,7 +1235,10 @@ std::string StillnessReport::tsv() const
             std::snprintf(clk, sizeof(clk), "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f", f.periodMs, f.readMs,
                           f.gpuSpanMs, f.gpuIdleMs, f.gpuUnattributedMs, f.gpuPassesMs, f.gpuRowsMs);
             o << clk << "\t" << f.ifdGrant << "\t" << f.ifdSpent << "\t" << f.ifdOwedRestarts << "\t" << f.ifdOwedRefines
-              << "\t" << f.ifdOwedIntegrations << "\t" << (f.storeOwed ? 1 : 0) << "\t" << f.ifdMarkedByMoves << "\n";
+              << "\t" << f.ifdOwedIntegrations << "\t" << (f.storeOwed ? 1 : 0) << "\t" << f.ifdMarkedByMoves
+              << "\t" << f.ifdReadUnheld << "\t" << f.ifdFollows << "\t" << f.ifdRestartDepth << "\t" << f.ifdMarkLag
+              << "\t" << f.cardsAdmitted << "\t" << f.cardsArrivalMark << "\t" << f.cardsFrame << "\t" << f.cardsDemandEvery
+              << "\t" << f.cardsDemandLag << "\n";
         }
     return o.str();
 }

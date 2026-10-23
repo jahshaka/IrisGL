@@ -1211,6 +1211,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     //    for ever, and every capture broke the reflection's rest (reflectionReadsKey folds the cache's captures). (And
     //    once the demand closes - a still pose over a still world, CardSceneView::demandChanged - nothing arrives.)
     size_t nextEvict = 0;
+    mArrivalMarkNewest = 0ull;
     for (const Arrival &a : arriving) {
         CardRec c = a.card;
         bool placed = allocRect(c.size, c.atlasX, c.atlasY);
@@ -1255,6 +1256,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         }
         per[idx].push_back(c);
         ++mAdmitted;
+        mArrivalMarkNewest = std::max(mArrivalMarkNewest, a.mark);
         changed = true;
     }
 
@@ -3537,6 +3539,14 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     for (const InstanceRec &i : mInstances) out.instancesResident += i.cardCount ? 1u : 0u;
     out.cardsResident = unsigned(mCards.size());
     out.admitted = mAdmitted;
+    out.cacheFrame = mFrame;
+    out.arrivalMarkNewest = mArrivalMarkNewest;
+    out.demandReadEvery = unsigned(kDemandReadEvery);
+    {
+        Ogre::RenderSystem *rs = Ogre::Root::getSingletonPtr() ? Ogre::Root::getSingleton().getRenderSystem() : nullptr;
+        Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
+        out.demandReadLag = vao ? unsigned(vao->getDynamicBufferMultiplier()) + 1u : 0u;
+    }
     out.evicted = mEvicted;
     out.compactionMoves = mCompactionMoves;
     out.lampTraces = mLampTraces;

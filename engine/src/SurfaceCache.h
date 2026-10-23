@@ -930,6 +930,7 @@ private:
     unsigned long long mDemandFirst[2] = { 0ull, 0ull };
     unsigned mDemandGatherLate = 0u;   // the test door cards.gatherLate
     unsigned long long mAdmitted = 0ull, mEvicted = 0ull, mCompactionMoves = 0ull;
+    unsigned long long mArrivalMarkNewest = 0ull;   ///< the newest face mark among the last update's arrivals
     unsigned long long mDemandHits[4] = { 0ull, 0ull, 0ull, 0ull };
 };
 

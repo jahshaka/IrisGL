@@ -217,7 +217,9 @@
 	// (ENGINE_CACHE_POLICY_SPEC P9). Two numbers the cage loop below needs and
 	// upstream never computes.
 	//
-	//   ifdMaxProbe  the last legal probe index on each axis. Upstream's own
+	//   ifdMinProbe, ifdMaxProbe  the first and the last READ probe index on each axis
+	//                (5-5: 1 and N - 2 - the window's outer planes are its guard
+	//                band, never read; the fade after the loop). Upstream's own
 	//                render params carry only Nx and Nx*Ny, so Y and Z ride
 	//                jahIfd.yz. When they are absent -- the host pushed no
 	//                IFD state, which cannot happen today because the arm writes
@@ -228,10 +230,10 @@
 	float3 ifdProbeCounts = float3( passBuf.irradianceField.numProbesAggregated.x,
 									passBuf.jahIfd.y, passBuf.jahIfd.z );
 	bool  ifdHaveCounts = passBuf.jahIfd.y > 0.5;
-	// THE FADE-IN (PHOTON-2 J1): jahIfd.w = 1 / the samples a probe holds when whole (the field's
-	// change depth) - a probe a scroll entered fades in over its first samples; 0 = no state: upstream's rule.
-	ifdCountFade = passBuf.jahIfd.w > 0.0 ? passBuf.jahIfd.w : 1.0;
-	float3 ifdMaxProbe = ifdHaveCounts ? ifdProbeCounts - float3( 1.0, 1.0, 1.0 )
+	// (an axis of fewer than four probes has no band: all of it is read - a field the host never steps)
+	float3 ifdBand = ifdHaveCounts ? step( float3( 3.5, 3.5, 3.5 ), ifdProbeCounts ) : float3( 0.0, 0.0, 0.0 );
+	float3 ifdMinProbe = ifdBand;
+	float3 ifdMaxProbe = ifdHaveCounts ? ifdProbeCounts - float3( 1.0, 1.0, 1.0 ) - ifdBand
 									   : float3( 1e9, 1e9, 1e9 );
 	// How much of the cage's final weight comes from probes IN FRONT of the
 	// shading surface (P9; the fade after the loop says what it is for).
@@ -261,7 +263,7 @@
 		// the "texture maps on the roof" the owner reported. A clamped cage
 		// EXTRAPOLATES the border probes instead, which is bounded and which
 		// the two fades in the resolve piece then take to zero.
-		probeOrigin = clamp( probeOrigin, float3( 0.0, 0.0, 0.0 ), ifdMaxProbe );
+		probeOrigin = clamp( probeOrigin, ifdMinProbe, ifdMaxProbe );
 @end
 
 // ---- THE CAGE PROBE'S ATLAS TILE: THE WINDOW'S MODULO (PHOTON-WRITER-1) ----
@@ -311,72 +313,35 @@
 	// OURS (P9): HOW MUCH THE FIELD IS TRUSTED AT THIS PIXEL, in [0, 1], and
 	// the two independent ways it can have nothing to say.
 	//
-	// (a) OUTSIDE THE AUTHORED VOLUME.
+	// (a) OUTSIDE THE READ REGION (PHOTON-7 stage 5, 5-5: THE GUARD BAND).
 	//
-	// THE AUTHORED VOLUME, IN GRID SPACE, WITH NO NEW UNIFORM. `initialize()`
-	// enlarges the volume it was given by one probe block per side before it
-	// builds the world->grid transform (OgreIrradianceField.cpp:543-547):
-	//     O' = O - S/N,   S' = S + 2S/N
-	// and the transform maps [O', O'+S'] onto [0, N]
-	// (OgreIrradianceField.cpp:794-800). So the AUTHORED corner O lands at
-	//     ( O - O' ) * N / S' = ( S/N ) * N / ( S ( N+2 ) / N ) = N / ( N+2 )
-	// and the authored box is exactly [ q, N - q ] with q = N / (N+2), per axis,
-	// computable from the probe counts alone. (Checked against a live field:
-	// N_y = 16 over bounds y [-1, 5.25] gives q = 0.889 and the bounds' own
-	// corners measure at grid 0.889 and 15.111.)
+	// THE READ REGION IS THE WINDOW LESS ITS OUTER PLANE. The field's window holds N
+	// probes per axis (the volume it was given enlarged by one probe block per side),
+	// and the host steps it with the eye ONE PLANE AT A TIME: the plane a step enters is
+	// integrated while it is the window's outermost plane, and the next step makes it
+	// read. So no pixel reads the outer planes, local 0 and N - 1: the cage is clamped to
+	// [ 1, N - 2 ] (the probe-origin hook above), and the field is at full confidence on
+	// grid [ 1, N - 2 ] - every cage there is made of read, integrated probes - and says
+	// nothing past it. (The authored box, [ N/(N+2), N - N/(N+2) ], is cascade 0's no
+	// longer: the window steps with the eye.)
 	//
-	// OUTSIDE IT THE FIELD SAYS NOTHING. Not "says something weaker": the
-	// volume is what was voxelised and what the probes integrate, and a surface
-	// far beyond it has no probe on its own side at all -- the cage is clamped,
-	// so it is being handed the border probes' irradiance, which is the leak
-	// this fix exists for.
+	// WHERE THE ROLL-OFF SITS, AND WHY OUTSIDE THE FACE (SQUARE-1, 2026-09-17, measured;
+	// the owner's report was "a square lighting effect around the scene in an empty
+	// scene"). A ramp INSIDE the face handed the pixels in its last half spacing to the
+	// cone term while the field was still fading up - and the cone term is not
+	// continuous where a cascade's box ends (11/255 on the default scene) - a DARK LINE
+	// along the face, one probe spacing wide. So the field is at FULL confidence at the
+	// read region's face and fades to nothing half a probe spacing outside it, over the
+	// clamped border plane's extrapolation (bounded, and monotone as measured then:
+	// 107 -> 110 over that half spacing), a ramp in one direction instead of a notch.
 	//
-	// WHERE THE ROLL-OFF SITS, AND WHY IT MOVED OUTWARD (SQUARE-1, 2026-09-17,
-	// measured; the owner's report was "a square lighting effect around the
-	// scene in an empty scene, not centred on the scene").
-	//
-	// The roll-off used to be half a probe spacing wide and to live INSIDE the
-	// authored box, so the field reached zero AT the face. That is the wrong
-	// side, and the reason is what the field hands over TO. Under a cascade
-	// chain the field rides cascade 0, so the face is also the chain's own hop,
-	// and the cone term is NOT continuous across it: measured on the default
-	// scene (flat floor, straight down from 4 m, Epic, plain grade) the cones
-	// alone read 110/255 outside cascade 0 and 98-100 inside it, an 11/255 step
-	// at the face that has nothing to do with the field. With the ramp inside
-	// the box, every pixel in that last half spacing was handed the INSIDE
-	// cone value while the field was still fading up -- so the profile fell
-	// off the outside value (110) to the inside cone value (101), then climbed
-	// back to the field's 107 over half a spacing. A DARK LINE along the face,
-	// one probe spacing wide, 7-9/255 deep on the coarse axes: the sharpest
-	// feature of the square and the one an eye finds.
-	//
-	// So the ramp now sits OUTSIDE the authored face, over the padding shell
-	// `initialize()` adds: it enlarges the volume by one probe block per side
-	// before building the world->grid transform, so on the LOW faces the
-	// lattice reaches ~0.89-0.97 grid units beyond the authored corner and a
-	// cage taken half a unit outside it is made of real, traced probes with no
-	// clamp active at all. Upstream's padding is ASYMMETRIC (the same asymmetry
-	// the front-weight fade below records): probe N-1 sits ~0.11 units INSIDE
-	// the high authored face, so on that side the outward ramp rides the
-	// clamped border probes -- an extrapolation, but a bounded one that the
-	// ramp is already fading out, and measured below to be monotone.
-	//
-	// The field is therefore at FULL confidence at the face and fades to
-	// nothing half a probe spacing outside it, and the hand-off to the cone
-	// term is a RAMP in one direction instead of a notch: measured
-	// 107 -> 110 monotonically over that half spacing on both the low and the
-	// high face, with the dark line gone.
-	//
-	// IT HIDES THE EDGE; THE ONE READER EQUALISES THE INTEGRALS. The field used
-	// to integrate cascade 0 alone and throw the escape away while the cones
-	// walked the whole chain and took the sky as their escape (4-6/255 apart on
-	// an open floor whatever the ramp did). Since PHOTON-READER-1 both march the
-	// same chain through the same reader and both weight the sky by the same
-	// escape, so what is left between them is the integration (144 rays per
-	// probe against four cones per pixel) and the environment term.
-	float3 ifdQ = ifdProbeCounts / ( ifdProbeCounts + float3( 2.0, 2.0, 2.0 ) );
-	float3 ifdInside = min( ifdGridPos - ifdQ, ( ifdProbeCounts - ifdQ ) - ifdGridPos );
-	// `ifdInside` is the signed distance to the nearest authored face in PROBE
+	// IT HIDES THE EDGE; THE ONE READER EQUALISES THE INTEGRALS. Since PHOTON-READER-1
+	// the field's rays and the pixel's cones march the same chain through the same
+	// reader and weight the sky by the same escape, so what is left between them is the
+	// integration (144 rays per probe against four cones per pixel) and the environment
+	// term.
+	float3 ifdInside = min( ifdGridPos - ifdMinProbe, ifdMaxProbe - ifdGridPos );
+	// `ifdInside` is the signed distance to the nearest face of the read region in PROBE
 	// SPACINGS, positive inside. 1 at the face, 0 one ramp width outside it.
 	const float ifdEdgeRamp = 0.5;			// probe spacings, outside the face
 	float3 ifdAxisFade = saturate( ifdInside * ( 1.0 / ifdEdgeRamp ) + 1.0 );

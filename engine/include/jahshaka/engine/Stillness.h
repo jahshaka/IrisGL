@@ -152,6 +152,12 @@ struct StillnessFrame {
     unsigned           ifdGrant = 0, ifdSpent = 0, ifdOwedRestarts = 0, ifdOwedRefines = 0;
     unsigned long long ifdOwedIntegrations = 0;
     unsigned long long ifdMarkedByMoves = 0;   ///< the field's probes marked by the accumulation so far (cumulative)
+    unsigned ifdReadUnheld = 0;                ///< the field's read region's empty probes this frame (GiStatus::ifdReadUnheld)
+    /// PHOTON-7 stage 5, 5-5 (what a law after a stop attributes a row to): the field's window moves so far (cumulative,
+    /// GiStatus::ifdFollows), its restart depth and marks' lag; the cards admitted so far, the newest face mark of the
+    /// last update's arrivals, the cache's frame, and the demand read-back's period and lag (CardCacheStatus).
+    unsigned long long ifdFollows = 0, cardsAdmitted = 0, cardsArrivalMark = 0, cardsFrame = 0;
+    unsigned ifdRestartDepth = 0, ifdMarkLag = 0, cardsDemandEvery = 0, cardsDemandLag = 0;
     bool               storeOwed = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2
     /// L8: a few frames late, so a window's SUM is the reading).

@@ -201,8 +201,6 @@ public:
         Ogre::uint32 fieldGrant = 0u;
         Ogre::Vector3 camPos = Ogre::Vector3::ZERO;
         bool cascadeStage = false;             ///< the cascade stage runs (a built chain, no flush owed)
-        bool follow = false;                  ///< cascade 0's field follow, paid first
-        GiStaleReason followReason = GiStaleReason::Camera;
         int rebuild = -1;                     ///< the cascade the GENERAL slot re-voxelises this frame (c1..cN)
         /// ...by its SCROLL (ENGINE-UPGRADE-U5 stage 1): a step of the incremental scroll - the
         /// entering slab's chunks this frame's share of the spread holds (a frame count), and the commit when they
@@ -1131,7 +1129,6 @@ private:
     /// THE FIELD'S BATCH, planned and recorded.
     void planField(FrameWork &w);
     void recordField(const FrameWork &w);
-    void oweCascade0FieldFollow(GiStaleReason reason);
     /// Per-axis PROBE COUNTS for a field over `size`, each a power of two
     /// (upstream only ASSERTS that, and the assert is compiled out of our
     /// release engine) and together kIfdTotalProbes. Fitted from the volume's
@@ -1368,22 +1365,20 @@ private:
     unsigned long long mInnerMarchesOwed = 0;
     /// The irradiance field's pass-buffer block (JahIfd_piece_ps.any).
     void          pushIfdState(const Ogre::uint32 numProbes[3]);
-    /// THE FIELD SCROLLS (PHOTON-WRITER-1, FIELD-SCROLL): moves the field's window
-    /// onto cascade 0's new box by whole probe spacings and integrates only the
-    /// planes that entered it (PhotonIrradianceField::scrollWindow). False when the move
-    /// keeps nothing (a jump of the whole grid, or a resize) - the caller then
-    /// re-places and converges the whole field.
-    bool          scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::Vector3 &size,
-                                        GiStaleReason reason);
-    /// THE FIELD FOLLOWS CASCADE 0 (PHOTON_SPEC E1 item 1). Called by the
-    /// cascade scheduler whenever cascade 0 has been re-placed or re-voxelised:
-    /// moves the field's volume onto cascade 0's voxel box (fork 822d538f5 (was 0044)'s
-    /// `setFieldVolume`), re-binds it if that cascade's lighting re-created its
-    /// light voxel textures, and re-integrates — whole when the volume MOVED
-    /// (the atlases describe another place and there is no per-probe validity),
-    /// progressively over the converged atlas when only the voxels changed.
-    /// A no-op with no field, or with the toggle off.
-    void          followCascade0Field(GiStaleReason reason);
+    /// THE FIELD'S WINDOW STEPS WITH THE EYE (PHOTON-7 stage 5, 5-5; decoupled from cascade 0's commits): once a
+    /// frame, before the field's work - a whole probe spacing from the window's centre on an axis, the window SCROLLS
+    /// one plane that way (PhotonIrradianceField::scrollWindow: the planes that stay keep their probes, the entered
+    /// plane is invalidated and integrated fresh in the GUARD BAND, the window's outer plane no reader reads); a jump
+    /// of several spacings scrolls them at once; a jump of the whole grid, or cascade 0's size changed (a tier), is a
+    /// RE-PLACEMENT (placeField). A placement pin holds the window where it says.
+    void          stepFieldWindow(const Ogre::Vector3 &eye);
+    /// THE FIELD RE-PLACED at `origin` (the authored box's corner, on the field's world lattice) over `size`: nothing
+    /// kept (PhotonIrradianceField::setFieldVolume: every probe invalidated, the whole grid integrated fresh at the
+    /// budget - inline when paused).
+    void          placeField(const Ogre::Vector3 &origin, const Ogre::Vector3 &size, GiStaleReason reason);
+    /// The field's authored corner for an eye-centred window over `size`, on the field's WORLD LATTICE (a multiple of
+    /// its probe spacing per axis - so the probes stand at the same world points whatever path led there: L1).
+    Ogre::Vector3 fieldOriginFor(const Ogre::Vector3 &eye, const Ogre::Vector3 &size, const Ogre::uint32 counts[3]) const;
     /// The GI items' world AABBs after the exclude flag and the extent-outlier
     /// trimming: the one place that decides which objects place the probe grid.
     std::vector<Ogre::Aabb> giItemBounds() const;
@@ -1558,9 +1553,8 @@ private:
     /// The field's probe counts, kept because the volume can move without a
     /// rebuild (E1).
     Ogre::uint32                      mIfdProbeCounts[3] = { 0u, 0u, 0u };
-    /// How many times the field has been re-placed onto cascade 0 since the
-    /// last build (GiStatus::ifdFollows) — the counter the follow suite reads,
-    /// and the honest answer to "is the field tracking the chain at all".
+    /// How many times the field's window has moved since the last build (GiStatus::ifdFollows: its steps with the
+    /// eye and its re-placements) - the honest answer to "is the field tracking the eye at all".
     unsigned long long                mIfdFollows = 0;
     /// The probes the last scroll integrated in its step frame (GiStatus::ifdScrollProbes).
     unsigned                          mIfdScrolledProbes = 0;
@@ -1568,34 +1562,6 @@ private:
     /// whole re-placements (a resize or a jump of the whole grid; nothing kept).
     unsigned long long                mIfdScrolls = 0;
     unsigned long long                mIfdReplacements = 0;
-    /// A FIELD FOLLOW OWED TO THE NEXT FRAME, AND WHY IT IS NOT PAID ON THE
-    /// FRAME THAT MOVED THE CASCADE (lane V1-RIG item 2, LATER_OPTIMISATIONS
-    /// L11, measured).
-    ///
-    /// Cascade 0's rebuild and the field's WHOLE re-integration used to land on
-    /// one frame, and at a headset's pixel count that frame is over the 90 Hz
-    /// bar: measured in a Monado session with the eye render forced to Quest
-    /// Pro size (2160x2376 per eye, 10.26 Mpx of stereo target), a Medium walk's
-    /// quiet frame is 5.84 ms of GPU and its step frame 11.72 ms mean / 12.45
-    /// max, twelve of a hundred and sixty frames over 11.1 — one dropped frame
-    /// every five metres of travel (spikes/v1-rig/COST.txt). The two halves are
-    /// 2.43 ms (the cascade) and 3.40 ms (the field) and NEITHER alone crosses
-    /// the bar: split across two frames the same walk peaks at 8.3 and 9.2 ms.
-    ///
-    /// WHAT IT COSTS IN CORRECTNESS: for exactly one frame the field describes
-    /// the place cascade 0 has just left — one step of staleness, 11 ms of it,
-    /// against L11's double-buffered atlas which accepts the same staleness for
-    /// as many frames as a progressive re-integration takes. It is never a
-    /// WRONG PLACE: the field's volume and its atlas move together, so the
-    /// shader reads probes that were integrated where the field says it is.
-    ///
-    /// It also owns the frame's one GI slot, so the frame that pays it rebuilds
-    /// no cascade — which is the whole point — and `updateIrradianceField`
-    /// refuses to run a progressive batch while it is owed: cascade 0's rebuild
-    /// may have re-created the light voxel textures the field's generation job
-    /// binds, and the re-bind is the first thing `followCascade0Field` does.
-    int          mIfdFollowOwed = 0;
-    GiStaleReason mIfdFollowReason = GiStaleReason::Camera;
     /// The chain's SHAPE (its cascade count and steps) no longer matches the
     /// table it should be built from — the driver's profile changed. The dirty
     /// BOX path cannot express it, so the flush builds the chain again.

@@ -260,7 +260,7 @@ namespace Ogre
         vector<uint8>::type mStopped;
         vector<uint8>::type mOwedRestart;
         uint32 mStopsReadFrame = 0u;   ///< the frame the stopped flags were asked for on
-        uint32 mOwedRestarts = 0u, mOwedRefines = 0u;
+        uint32 mOwedRestarts = 0u, mOwedRefines = 0u, mOwedEmpty = 0u;
         uint64 mOwedIntegrations = 0u;
         bool mInSubPass = false;       ///< a change's own deep sub-passes (update): the ledger counts the pass once
         void noteWork( uint32 listStart, uint32 count );
@@ -315,12 +315,6 @@ namespace Ogre
         /// Jahshaka (PHOTON-2 stage 2a): the samples a CHANGE integrates per probe in the
         /// pass that replaces its estimate (setChangeSamples; 1 = upstream's one).
         uint32          mChangeSamples;
-        /// Jahshaka (PHOTON-2 J1): THE ENTERING PASSES - a scroll's entered planes, invalidated in the
-        /// follow frame (count 0: no weight in the reader), take one sample a pass at the budget: pass k
-        /// (1 = fresh, 2.. = a refinement to k samples) lifts every entered probe to k samples, to
-        /// mChangeSamples, and the reader's weight min( samples / mChangeSamples, 1 ) fades them in
-        /// over those passes. 0 = no entering work.
-        uint32          mEnterDepth = 0u;
         uint64          mDispatches = 0u;
         bool            mRotateRays;
         /// Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP. The generation
@@ -405,6 +399,7 @@ namespace Ogre
         void bindChainToGenerationJob();
         /// ...and the chain's parameters, from PhotonVoxelLighting's one definition of them.
         void fillChainParams();
+        void fillProbeTransform();
         /// Jahshaka (PHOTON-ENV-1): the environment of the bound lighting, per dispatch.
         void fillEnvironmentParams();
 
@@ -515,8 +510,9 @@ namespace Ogre
             probe as the receiver; listed at one code, read back a fixed lag later: harvestMarks), or by the caller
             from the changed-region list (markBox: the probes inside a region; markAll: a change with no box). A
             marked probe RESTARTS (keep 0, getChangeSamples() deep: B4's rule, for the touched probes only); the
-            rest keep. beginNextWork, once the current work is done, runs the entering passes still owed, then the
-            marked probes as a list, then the probes below the target the variance stop has not ended, refined one
+            rest keep. beginNextWork, once the current work is done (a build's or a scroll's fresh pass), runs the
+            window's EMPTY probes fresh (a fresh work a step cut short: 5-5), then the marked probes as a list, then
+            the probes below the target the variance stop has not ended, refined one
             sample a pass - and returns false when nothing is owed (the field costs nothing). A list interrupted by
             the window (a scroll) is never lost: its restarts stay owed and its refinements stay below the target.
         */
@@ -524,9 +520,16 @@ namespace Ogre
         void markSlots( const uint32 *slots, size_t count );
         void markAll();
         void markBox( const Vector3 &lo, const Vector3 &hi );
+        /// THE READ REGION'S EMPTY PROBES (PHOTON-7 stage 5, 5-5): the probes of the window less its outer plane (the
+        /// guard band; an axis of fewer than four probes is read whole) that hold no sample - each one a probe a reader
+        /// gives no say (JahIfd_piece_ps.any: a cage weight below whole). 0 while the band keeps up with the eye.
+        uint32 countReadUnheld() const;
         /// Restarts owed and refinements owed (probes below the target, not stopped), as of the last refreshOwed.
         uint32 getOwedRestarts() const { return mOwedRestarts; }
         uint32 getOwedRefines() const { return mOwedRefines; }
+        /// The window's EMPTY probes not in the current work (PHOTON-7 stage 5, 5-5): a fresh work a step cut short (a
+        /// build's, a re-placement's, a step's entered planes) - integrated fresh before anything else is owed.
+        uint32 getOwedEmpty() const { return mOwedEmpty; }
         /// The integrations owed, at most: each restart's getChangeSamples(), each refinement's samples to the target
         /// (the variance stop ends many earlier).
         uint64 getOwedIntegrations() const { return mOwedIntegrations; }
@@ -571,17 +574,16 @@ namespace Ogre
             may then end the probe at once (its minimum is 4).
         */
         void setChangeSamples( uint32 samples ) { mChangeSamples = std::max( 1u, samples ); }
-        /** Jahshaka (PHOTON-2 J1): a scroll's entered planes FADE IN. In the follow frame the caller
-            invalidates them (invalidateWork: count 0, weight 0 in the reader) and their work runs at
-            the budget one sample a pass (the entering passes, mEnterDepth); entering() is true until
-            the last pass (to getChangeSamples() samples) is done. enterInline() instead integrates them
-            getChangeSamples() deep now (a paused budget, which runs no later pass).
+        /** THE ENTERED PLANES (PHOTON-7 stage 5, 5-5): a scroll's entered planes are invalidated in the step frame
+            (invalidateWork: count 0, no say in the reader - never another place's value) and integrated FRESH, as a
+            change is, getChangeSamples() deep, at the budget. They stand in the window's GUARD BAND - its outer plane,
+            which no reader reads (JahIfd_piece_ps.any) - until the next step makes them read, so the reader never meets
+            a probe filling in: the J1/L3 weight fade (one sample a pass, the reader's min( samples / depth, 1 )) is
+            deleted.
         */
         void invalidateWork();
-        /// The whole grid invalidated and its entering passes begun (PHOTON-2 L3: a build fades in).
-        void beginEnteringWhole();
-        void enterInline() { mEnterDepth = 0u; }
-        bool entering() const { return mEnterDepth != 0u && !( isWorkDone() && mEnterDepth >= mChangeSamples ); }
+        /// The whole grid invalidated and its work begun, fresh (a build).
+        void beginWholeFresh();
         uint32 getChangeSamples() const { return mChangeSamples; }
         uint32 getTargetSamples() const { return mTargetSamples; }
         IntegrationMode getWorkMode() const { return mWorkMode; }

@@ -1021,10 +1021,12 @@ GiStatus PhotonComponent::giStatus() const {
         st.ifdReplacements = mIfdReplacements;
         st.ifdTargetSamples = mIfd ? unsigned(mIfd->getTargetSamples()) : 0u;
         if (mIfd) {
+            st.ifdRestartDepth = mIfd->getChangeSamples();
+            st.ifdMarkLag = unsigned(mRoot->getRenderSystem()->getVaoManager()->getDynamicBufferMultiplier()) + 1u;
             st.ifdOwedRestarts = mIfd->getOwedRestarts();
             st.ifdOwedRefines = mIfd->getOwedRefines();
             st.ifdOwedIntegrations = mIfd->getOwedIntegrations();
-            st.ifdWorking = !mIfd->isWorkDone() || mIfd->entering();
+            st.ifdWorking = !mIfd->isWorkDone() || mIfd->getOwedEmpty() > 0u;
             st.ifdMarkedByMoves = mIfd->getMarkedByMoves();
             st.ifdMarkedByRegion = mIfd->getMarkedByRegion();
             st.ifdMarkAlls = mIfd->getMarkAlls();
@@ -1032,6 +1034,7 @@ GiStatus PhotonComponent::giStatus() const {
             st.ifdIntegrations = mIfd->getIntegrations();
             st.ifdDispatchedLastFrame = mIfdLastUnitsFrame + 1u >= giWriterFrame() ? mIfdLastUnits : 0u;
             st.ifdGrantLastFrame = mIfdGrantLastFrame;
+            st.ifdReadUnheld = mIfd->countReadUnheld();
         }
         {
             // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest; giInputsOwed).
@@ -4430,8 +4433,8 @@ bool PhotonComponent::rebuildVct() {
     // code here at all: cascade 0 IS `mVctVoxelizer`/`mVctLighting` by the
     // chain's own rule 5, so `buildIrradianceField` fits its probes to the
     // voxel box the innermost cascade was just built over. What the arm owes on
-    // top of that is the FOLLOWING — `followCascade0Field`, called from
-    // the scheduler whenever cascade 0 is re-placed or re-voxelised.
+    // top of that is its WINDOW - `stepFieldWindow`, once a frame: it steps with
+    // the eye (PHOTON-7 stage 5, 5-5), never with cascade 0's commits.
     //
     // (This is where the arm used to REFUSE the field and say so. The refusal
     // was correct at the pin it was written against: `initialize()` is
@@ -6050,9 +6053,6 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
     const Ogre::Vector3 &camPos = eyeCamPos;
     if (mVctCascades.size() < 1u || !mVctCascades[0].built) return;
     w.cascadeStage = true;
-    // CASCADE 0'S FIELD FOLLOW, when owed, is paid first and spends the frame (recordCascades).
-    w.follow = mIfdFollowOwed != 0;
-    w.followReason = mIfdFollowReason;
     // THE MEASURING DOOR (gi.rebuildCascade, stage 2's measurement): cascade N owes a whole rebuild
     // at its own placement, every frame the arm names it.
     if (mEngine) {
@@ -6223,7 +6223,7 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
             c0Writes = w.reserved0 && (!w.scroll0 || c.scroll.frame + 1u >= c.scroll.frames());
         }
     }
-    if (!w.follow && mVctPendingMaterialSlots.empty()) {
+    if (mVctPendingMaterialSlots.empty()) {
         // The candidates, oldest first (a stable sort keeps the innermost first among equals).
         std::vector<size_t> order;
         for (size_t i = 1; i < mVctCascades.size(); ++i)
@@ -6261,20 +6261,14 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
             break;
         }
     }
-    w.spent = w.follow || w.rebuild >= 0;
+    w.spent = w.rebuild >= 0;
 }
 
 void PhotonComponent::recordCascades(const FrameWork &w) {
     const Ogre::Vector3 &camPos = w.camPos;
-    bool followPaid = false;
-    if (w.follow) {
-        followCascade0Field(w.followReason);
-        mIfdFollowOwed = 0;
-        followPaid = true;
-    }
 
     // ---- 1. WHO MOVED, AND DID ANYTHING JUMP? ------------------------------
-    bool spent = followPaid;          // the GENERAL slot
+    bool spent = false;               // the GENERAL slot
     bool reservedWork = false;        // cascade 0's reserved slot did work this frame
     for (size_t i = 0; i < mVctCascades.size(); ++i) {
         VctCascade &c = mVctCascades[i];
@@ -6383,11 +6377,6 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             // and waits: the next step of the camera re-arms `pending` through
             // the ordinary scroll test, which is also when its box (and so the
             // reason it threw) has actually changed.
-            // A FAILURE THAT KEPT ITS PLACEMENT STILL MOVED CASCADE 0, and the
-            // field must not be left describing the place the chain has left:
-            // its volume follows (the voxels there are current — only the light
-            // injection is missing, which the next rebuild supplies).
-            if (i == 0u && placementCommitted) oweCascade0FieldFollow(reason);
             // (those voxels ARE new and their light is not: the cascade stays pending, and its next rebuild injects it)
             if (!reserved) spent = true;           // the slot paid for it either way
             reservedWork = reservedWork || reserved;
@@ -6437,15 +6426,8 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             c.pendingReason = GiStaleReason::Camera;
             c.editSince = c.editLast = 0;
         }
-        // THE FIELD RIDES CASCADE 0 (E1 item 1), and it follows ON THE NEXT
-        // FRAME, out of that frame's own GI slot (V1-RIG item 2 /
-        // LATER_OPTIMISATIONS L11: the two GPU bursts together are 11.7 ms at a
-        // headset's pixel count and neither alone is over 11.1 — see
-        // `mIfdFollowOwed`). The pixel transform is rebuilt from the field's
-        // volume per pass and the volume moves WITH the atlas, so the one frame
-        // in between reads probes integrated where the field still says it is:
-        // one step of staleness, never a wrong place.
-        if (i == 0u) oweCascade0FieldFollow(reason);
+        // (The field does not follow cascade 0 - its window steps with the eye, PHOTON-7 stage 5, 5-5: its probes
+        // read cascade 0's placement as it stands, per dispatch.)
         if (!reserved) spent = true;
         reservedWork = reservedWork || reserved;
         // THE LAG SERVED: the cascade is placed for the camera (a camera debt still owed starts a new one) - not by a
@@ -7814,15 +7796,18 @@ void PhotonComponent::buildIrradianceField() {
         if (mGi.updateBudget <= 0) targetSamples = 1u;
         settings.mDepthProbeResolution   = kIfdDepthRes;
         settings.mIrradianceResolution   = kIfdIrradRes;
-        // THE VOLUME IS THE VOXEL VOLUME THE FIELD READS FROM: cascade 0's
-        // camera-centred box (the chain's rule 5: cascade 0 IS
-        // mVctVoxelizer/mVctLighting), and the scheduler keeps it there as that
-        // cascade scrolls (followCascade0Field). The outer cascades hold the far
-        // field and hand the ring its bounce (G3); gi.cascades' 20 m pixel is the
-        // bar that says so.
-        const Ogre::Vector3 origin = mVctVoxelizer->getVoxelOrigin();
-        const Ogre::Vector3 size   = mVctVoxelizer->getVoxelSize();
+        // THE VOLUME: cascade 0's SIZE (the chain's rule 5: cascade 0 IS mVctVoxelizer/mVctLighting), CENTRED ON THE
+        // EYE on the field's own world lattice (PHOTON-7 stage 5, 5-5: the window steps with the eye, decoupled from
+        // cascade 0's commits - stepFieldWindow; a probe cascade 0's box does not hold starts its march in the
+        // next cascade). The outer cascades hold the far field and hand the ring its bounce (G3); gi.cascades' 20 m
+        // pixel is the bar that says so.
+        const Ogre::Vector3 size = mVctVoxelizer->getVoxelSize();
         ifdProbeCounts(size, settings.mNumProbes);
+        const Ogre::Vector3 origin =
+            mPlacementPin.on && mPlacementPin.field
+                ? Ogre::Vector3(mPlacementPin.fieldOrigin.x, mPlacementPin.fieldOrigin.y, mPlacementPin.fieldOrigin.z)
+                : fieldOriginFor(mGiCamPosKnown ? mGiCamPos : mVctVoxelizer->getVoxelOrigin() + size * 0.5f, size,
+                                 settings.mNumProbes);
 
         // HOST-SIDE VALIDATION. settings.testValidity() is three OGRE_ASSERT_LOWs
         // and our Ogre is built with them off, so the checks it would have made
@@ -7869,20 +7854,19 @@ void PhotonComponent::buildIrradianceField() {
         mIfdTotalProbes    = total;
         mIfdProbesPerFrame = ifdProbesPerFrame(settings, mGi.updateBudget, total);
 
-        // THE FIELD FADES IN (PHOTON-2 round 2, L3: J1's rule for the build). A freshly created atlas holds whatever
-        // the recycled VRAM held (the stale-VRAM fact, in its texture guise), so before anything reads it every probe
-        // is INVALIDATED - count 0, no weight in the reader, whose pixels fall back as outside the field - and the
-        // probes take their first samples at the budget, one a pass (the entering passes), the reader's weight
-        // min( samples / kIfdChangeSamples, 1 ) fading the field in over them. (It converged inline, four samples deep
-        // since K2: ~93 ms of GPU in one frame on Bistro at 2.84 us an integration - on every GI-arm build: an open, a
-        // tier change, a whole-arm rebuild. "Bound" and "converged" are no longer the same state: giAtRest waits for
-        // the field's passes, which is what every suite and screenshot reads.) A PAUSED field runs no later pass: it
-        // converges inline, one sample (its target), as it always did.
+        // THE BUILD AT THE BUDGET (PHOTON-2 round 2, L3). A freshly created atlas holds whatever the recycled VRAM held
+        // (the stale-VRAM fact, in its texture guise), so before anything reads it every probe is INVALIDATED - count
+        // 0, no say in the reader, whose pixels fall back as outside the field - and the probes are integrated fresh,
+        // kIfdChangeSamples deep, at the budget (5-5: the J1/L3 weight fade deleted - a probe has its say from its
+        // first, deep integration). (It converged inline, four samples deep since K2: ~93 ms of GPU in one frame on
+        // Bistro at 2.84 us an integration - on every GI-arm build. "Bound" and "converged" are not the same state:
+        // giAtRest waits for the field's work, which is what every suite and screenshot reads.) A PAUSED field runs no
+        // later pass: it converges inline, one sample (its target), as it always did.
         if (!mIfdProbesPerFrame) {
             mIfd->update(mIfdTotalProbes);
         } else {
             monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0, "ifd.build", mRoot->getRenderSystem());
-            mIfd->beginEnteringWhole();
+            mIfd->beginWholeFresh();
             work.setUnits(mIfdTotalProbes);
         }
         // The planner runs the entering passes, then the refinements the probes owe (to the target, at the update
@@ -7905,17 +7889,11 @@ void PhotonComponent::pushIfdState(const Ogre::uint32 numProbes[3]) {
     if (mIfd) {
         const Ogre::uint32 *o = mIfd->getWindowOffset();
         st.windowOffsetPacked = float(o[0] + 128u * o[1] + 16384u * o[2]);
-        st.countFade = 1.0f / float(std::max(mIfd->getChangeSamples(), 1u));
     }
     FogHlmsListener::setIfdState(mSceneMgr, st);
 }
 
 void PhotonComponent::teardownIrradianceField() {
-    // THE FOLLOW DEBT DIES WITH THE FIELD (V1-RIG fix round item 4, symmetry
-    // with `teardownVct`): `oweCascade0FieldFollow` refuses to raise one without
-    // a field, so a debt outliving its field could only be paid into the next
-    // one — which converges WHOLE at its build and owes nothing.
-    mIfdFollowOwed = 0;
     mIfdTotalProbes = mIfdProbesPerFrame = 0u;
     mIfdVolumeOrigin = mIfdVolumeSize = Ogre::Vector3::ZERO;
     mIfdProbeCounts[0] = mIfdProbeCounts[1] = mIfdProbeCounts[2] = 0u;
@@ -7937,11 +7915,11 @@ void PhotonComponent::teardownIrradianceField() {
 // THE ONE SETTLE PREDICATE (GiStatus::giAtRest = its negation; the gather's inputsBusy reads it too, PHOTON-2 stage
 // 2's round): the chain's own owed work.
 bool PhotonComponent::giInputsOwed() const {
-    // (the field's: a follow owed, its work running, the marked probes' restarts or the refinements owed - PHOTON-7
-    // stage 5, 5-4: the ledger's; a paused field refines nothing and runs its restarts inline)
+    // (the field's: its work running, the marked probes' restarts or the refinements owed - PHOTON-7 stage 5, 5-4:
+    // the ledger's; a paused field refines nothing and runs its restarts inline)
     const bool fieldBusy = mIfd && mIfdTotalProbes > 0u &&
-                           (mIfdFollowOwed != 0 || !mIfd->isWorkDone() || mIfd->entering() ||
-                            mIfd->getOwedRestarts() > 0u || (mIfdProbesPerFrame > 0u && mIfd->getOwedRefines() > 0u));
+                           (!mIfd->isWorkDone() || mIfd->getOwedEmpty() > 0u || mIfd->getOwedRestarts() > 0u ||
+                            (mIfdProbesPerFrame > 0u && mIfd->getOwedRefines() > 0u));
     return chainWorkOwed() || fieldBusy;
 }
 
@@ -8005,16 +7983,10 @@ void PhotonComponent::planField(FrameWork &w) {
         mIfd->harvestMarks(giWriterFrame());
         markFieldFromRegions();
     } JAH_CATCH(mError, );
-    // A DEFERRED FOLLOW IS OWED: nothing integrates until it is paid
-    // (mIfdFollowOwed). Cascade 0's rebuild last frame may have re-created the
-    // light voxel textures this job binds, and `followCascade0Field` is what
-    // re-binds them — a batch here would integrate from destroyed textures.
-    // It would also integrate at the OLD placement, which the follow is about
-    // to replace.
-    if (mIfdFollowOwed) {
-        mIfd->refreshOwed();
-        return;
-    }
+    // THE WINDOW STEPS WITH THE EYE (5-5) before the frame's work: a step's entered planes are the next work. (The
+    // plan's eye: planFrame set it just before this - the frame work's own camPos is filled after the field's plan.)
+    (void)w;
+    stepFieldWindow(mGiCamPos);
     JAH_TRY {
         // PAUSED (budget 0): nothing refines (the target is one sample), and update() is not called on the
         // budget's path at all - which keeps the zero-work-group abort unreachable; a mark's restarts run inline.
@@ -8075,9 +8047,9 @@ void PhotonComponent::recordField(const FrameWork &w) {
     mIfdGrantLastFrame = w.fieldGrant;
     JAH_TRY {
         // THE GRANT, SPENT WHOLE (PHOTON-7 stage 5, 5-4): each work's batch at its own depth (a restart's or a fresh
-        // integration's probe is kIfdChangeSamples integrations, an entering pass's or a refinement's one), then the
-        // next work the ledger owes, until the grant is spent or nothing is owed. Each batch is its own row:
-        // ifd.converge (restarts), ifd.replace (a fresh pass), ifd.enter (an entering pass), ifd.refine. THE ROWS COUNT
+        // integration's probe is kIfdChangeSamples integrations, a refinement's one), then the next work the ledger
+        // owes, until the grant is spent or nothing is owed. Each batch is its own row: ifd.converge (restarts),
+        // ifd.replace (a fresh pass: a build's, a re-placement's, a step's entered planes), ifd.refine. THE ROWS COUNT
         // INTEGRATIONS (K2; the round-2 read's F6): a refinement's dispatched probe whose group exits at its history read
         // (at the target, or stopped) integrates nothing, so its row is an upper bound; the GPU's own count is
         // GiStatus::ifdIntegrations.
@@ -8085,14 +8057,13 @@ void PhotonComponent::recordField(const FrameWork &w) {
         for (int guard = 0; left > 0u && guard < 16; ++guard) {
             if (!mIfd->beginNextWork()) break;
             const Ogre::PhotonIrradianceField::IntegrationMode mode = mIfd->getWorkMode();
-            const bool entering = mIfd->entering();
-            const bool deep = !entering && (mode == Ogre::PhotonIrradianceField::IntegrateChange ||
-                                            mode == Ogre::PhotonIrradianceField::IntegrateFresh);
+            const bool deep = mode == Ogre::PhotonIrradianceField::IntegrateChange ||
+                              mode == Ogre::PhotonIrradianceField::IntegrateFresh;
             const Ogre::uint32 per = deep ? std::max(mIfd->getChangeSamples(), 1u) : 1u;
             if (left < per) break;   // (the grant's remainder is under one probe of this work)
             const Ogre::uint32 n = std::min(left / per, mIfd->getWorkRemaining());
             if (!n) break;
-            const char *row = mode == Ogre::PhotonIrradianceField::IntegrateRefine ? (entering ? "ifd.enter" : "ifd.refine")
+            const char *row = mode == Ogre::PhotonIrradianceField::IntegrateRefine ? "ifd.refine"
                             : mode == Ogre::PhotonIrradianceField::IntegrateFresh ? "ifd.replace" : "ifd.converge";
             monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, row, mRoot->getRenderSystem());
             mIfd->update(n);
@@ -8105,199 +8076,114 @@ void PhotonComponent::recordField(const FrameWork &w) {
     } JAH_CATCH(mError, );
 }
 
-// THE FIELD FOLLOWS CASCADE 0 (PHOTON_SPEC E1 item 1).
+// THE FIELD'S WINDOW STEPS WITH THE EYE (PHOTON-7 stage 5, 5-5; PHOTON-WRITER-1's toroidal window, FIELD-SCROLL).
 //
-// WHAT MOVES. The probes are a grid in the field's own volume, and every
-// consumer reads that volume LIVE — the pixel transform is rebuilt from it per
-// pass, and the generation job's probe-to-voxel transform is re-derived from it
-// and from the voxel volume.
-// So "the field follows cascade 0" is two numbers (origin, size) plus a
-// re-integration; fork 822d538f5 (was 0044) adds the setter that moves them without
-// destroying the atlases, which is what made the refusal in `rebuildVct`
-// necessary before it.
+// THE LATTICE IS THE WORLD'S. The field's probes stand on a lattice fixed in the world - multiples of its probe
+// spacing (fieldOriginFor) - and the window is a box of N probes per axis over it, its atlas tile a probe's lattice
+// coordinate modulo N: a step of one plane keeps N - 1 planes of probes where they stand, in the world and in the
+// atlas, and hands the leaving plane's tiles to the plane that enters on the far side.
 //
-// WHY THE RE-INTEGRATION IS WHOLE WHEN THE VOLUME MOVED, and progressive when
-// it did not. The atlas has NO per-probe validity: a probe's texels are its
-// irradiance at the place the probe stood when it was last integrated, and the
-// shader reads whichever probe now surrounds the pixel. Re-placing the volume
-// therefore invalidates EVERY probe at once — at the High table cascade 0 steps
-// 5 m with a 10 m box, so half the grid lands where the other half stood and
-// the rest lands on ground the field has never seen. A progressive re-converge
-// would light those pixels with another place's irradiance for as long as the
-// budget takes (8 frames at budget 1) — not a lag, a wrong answer, and one that
-// moves with the camera. So a moved field is converged WHOLE, in the frame that
-// moved it, before anything reads it: the same whole-then-bind rule the build
-// path follows and for the same reason.
+// THE STEP IS THE EYE'S, ONE PLANE AT A TIME. Once a frame, an eye a whole spacing (or more) from the window's centre
+// on an axis moves the window that way: one plane for the walking eye (a frame's travel is a fraction of a spacing),
+// the whole lag at once for a jump (several spacings in a frame), a RE-PLACEMENT for a jump of the whole grid (nothing
+// kept). The hysteresis is the spacing itself: an eye swaying inside a spacing never steps (gi.cascades' sway).
+// Cascade 0's commits do not move it (they moved it by cascade 0's step - several planes - and the frame after paid
+// the follow out of the cascades' own GI slot): a probe cascade 0's box does not hold starts its march in the next
+// cascade (jah_voxel_march.glsl's walk), and cascade 0's commit re-marks it through its entering slab's moves.
 //
-// WHAT IT COSTS, measured (gi.field_follows' monitor rows, RTX 4080S, Debug,
-// the High table): the whole 8,192-probe re-integration is 4.9 ms GPU and
-// 0.05 ms CPU, on a frame whose cascade-0 rebuild is another 1.8 ms GPU /
-// 1.3 ms CPU — worst frame of the walk 2-5 ms. It is not extra work: a
-// progressive re-converge dispatches the SAME 8,192 probes, spread over the
-// budget's frames (1,024 a frame at budget 1). What it buys is that the frame
-// which moved the field is already showing the right answer; measured with the
-// progressive policy forced, the field is never converged at all while the
-// camera keeps walking (the field never converged for the whole 100 m), so every
-// frame of a walk would carry a mixture of two placements. In a uniform scene
-// that mixture is invisible (the lane measured 0.0 % difference on the suite's
-// ground band, both policies); the size of the error is exactly how much the
-// irradiance differs between the place the camera left and the place it is,
-// which is the difference between one room and the next.
-//
-// A re-voxelisation AT THE SAME PLACE is the opposite case and keeps the
-// shipped progressive policy: every probe still stands where it stood, only the
-// radiance it gathers changed, so re-converging over the previous atlas shows
-// slightly stale bounce and never a wrong place — exactly what `refreshGiLighting`
-// does for a light drag.
-// THE DEBT, RAISED (V1-RIG item 2). One follow is owed at a time and owing it
-// twice means nothing: the follow always re-places the field at cascade 0's
-// CURRENT volume, so a second step before the first was paid is answered by the
-// one follow that catches it up — the same reasoning as a cascade's `pending`
-// flag. The REASON kept is the first one, which is the one that caused the move
-// the capture will attribute the work to.
-void PhotonComponent::oweCascade0FieldFollow(GiStaleReason reason) {
-    if (!mIfd || mIfdTotalProbes == 0u) return;   // nothing to follow
-    if (!mIfdFollowOwed) mIfdFollowReason = reason;
-    mIfdFollowOwed = 1;
-}
-
-void PhotonComponent::followCascade0Field(GiStaleReason reason) {
-    // A field whose initialize() threw is a non-null mIfd with no atlases;
-    // mIfdTotalProbes is written only after a successful build, so it is the
-    // "built" reading (setIrradianceFieldGenParams would read a null atlas).
-    if (!mIfd || mIfdTotalProbes == 0u || mVctCascades.empty()) return;
-    const VctCascade &c0 = mVctCascades[0];
-    if (!c0.voxelizer || !c0.lighting) return;
-    JAH_TRY {
-        // THE BINDING FIRST, AND UNCONDITIONALLY (fork 822d538f5 (was 0044)'s second
-        // half). Cascade 0's lighting re-creates its light voxel textures
-        // whenever it is moved to another voxeliser (PhotonVoxelLighting::setVoxelizer;
-        // no path in this file does that since the A5b fix round deleted the
-        // material-edit replacement, but the binding costs nothing to keep
-        // exact) and the field bound those textures once, by pointer, at initialize().
-        // Re-binding costs five descriptor writes on a rebuild frame; deciding
-        // whether it is needed would mean comparing raw pointers that may have
-        // been recycled, which is the defect class fork 1bccc3f93+a98e2b0af (was 0041) exists for.
-        mIfd->setVctLighting(c0.lighting);
-
-        const Ogre::Vector3 origin = c0.voxelizer->getVoxelOrigin();
-        const Ogre::Vector3 size   = c0.voxelizer->getVoxelSize();
-
-        // THE FIELD SCROLLS (PHOTON-WRITER-1, FIELD-SCROLL; LATER_OPTIMISATIONS L11).
-        // A cascade-0 step used to re-place the field and re-integrate ALL of it in
-        // the step frame (8,192 probes at High - the frame a headset drops). The
-        // field is a toroidal window over a probe lattice fixed in the world now:
-        // the step moves the window by whole probe spacings, the planes that stay
-        // inside keep their atlas tiles and their values, and only the planes that
-        // entered are integrated here (scrollIrradianceField). A resize or a jump
-        // of the whole grid keeps nothing and re-places the field as before.
-        if (scrollIrradianceField(origin, size, reason)) return;
-
-        // THE SCROLL REFUSED (a resize, or a jump of the whole grid or more on
-        // an axis - a teleport, a headset re-centred far away): nothing of the
-        // window is kept, so the field is RE-PLACED onto cascade 0's box from
-        // scratch - offset 0 - exactly once; the window's origin is then cascade
-        // 0's own, and the next step scrolls from there.
-        //
-        // A JUMP WITHOUT A HITCH (PHOTON-FIELD-ROTATE-1 part 3). The whole grid used
-        // to be integrated in this frame (8,192 probes: 10.7 ms of GPU at two rays,
-        // 96 % of a VR frame). setFieldVolume makes the work the whole grid with NO
-        // history and INVALIDATES every probe (its count cleared to 0), so the
-        // re-placement is integrated like any other pass: in SLABS of the budget's
-        // probes a frame (ifdProbesPerFrame; the work list's slowest axis, z, so a
-        // slab is whole z-planes), by updateIrradianceField, from the next frame on.
-        // Until a probe's first integration the pixel's reader gives it no weight,
-        // and a cage with no valid probe hands its pixel to the cone term (the
-        // reader's fallback, JahIfd_piece_ps.any) - never the old placement's
-        // values, which describe another place. A PAUSED budget integrates the whole
-        // placement inline (one sample a probe; a paused field refines nothing).
-        // ...at the PINNED origin when a placement pin says so (a measuring door, GiPlacementPin).
-        const Ogre::Vector3 placeAt =
-            mPlacementPin.on && mPlacementPin.field
-                ? Ogre::Vector3(mPlacementPin.fieldOrigin.x, mPlacementPin.fieldOrigin.y, mPlacementPin.fieldOrigin.z)
-                : origin;
-        mIfd->setFieldVolume(placeAt, size);
-        mIfdVolumeOrigin = placeAt;
-        mIfdVolumeSize   = size;
-        ++mIfdFollows;
-        ++mIfdReplacements;
-        pushIfdState(mIfdProbeCounts);                  // the window's offset is 0 again
-        if (!mIfdProbesPerFrame) {
-            {
-                monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
-                                         mRoot->getRenderSystem());
-                mIfd->update(mIfdTotalProbes);
-                work.setUnits(mIfdTotalProbes * mIfd->getChangeSamples());
-            }
-        }
-    } JAH_CATCH(mError, );
-}
-
-bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const Ogre::Vector3 &size,
-                                      GiStaleReason reason) {
-    const float tol = 1e-4f;
-    if (std::fabs(size.x - mIfdVolumeSize.x) > tol || std::fabs(size.y - mIfdVolumeSize.y) > tol ||
-        std::fabs(size.z - mIfdVolumeSize.z) > tol)
-        return false;                                   // a resize keeps nothing
-    // THE MOVE IN WHOLE SPACINGS. The field's window lives on its own lattice
-    // (the spacing of the enlarged volume over the probe counts), so cascade 0's
-    // new box is met to the nearest spacing: the window follows the chain to
-    // within half a spacing, and the lattice under it never moves.
-    const Ogre::Vector3 spacing = mIfd->getProbeSpacing();
-    Ogre::int32 d[3];
-    bool any = false;
+// THE GUARD BAND IS THE WINDOW'S OUTER PLANE (the lead's ruling: the field's existing one-block enlargement, 0 MB).
+// No reader reads the window's outermost plane (JahIfd_piece_ps.any's cage and edge), so a plane a step entered is
+// integrated there - invalidated first (count 0: never another place's value), then fresh and kIfdChangeSamples deep
+// at the budget - before the next step makes it read: the reader never meets a probe filling in, and the J1/L3 weight
+// fade is deleted. (A jump's planes beyond the band are read invalid - no say, the reader's fallback - until they fill.)
+// PRICED by "ifd.follow" (the invalidation) and "ifd.replace" (the entered planes' fresh pass).
+Ogre::Vector3 PhotonComponent::fieldOriginFor(const Ogre::Vector3 &eye, const Ogre::Vector3 &size,
+                                              const Ogre::uint32 counts[3]) const {
+    Ogre::Vector3 o;
     for (int a = 0; a < 3; ++a) {
-        const double moveSp = double(origin[a] - mIfdVolumeOrigin[a]) / double(spacing[a]);
-        d[a] = Ogre::int32(std::lround(moveSp));
-        if (std::llabs((long long)d[a]) >= (long long)mIfdProbeCounts[a]) return false;   // keeps nothing
-        any = any || d[a] != 0;
+        const double n = double(std::max(counts[a], 1u));
+        const double block = double(size[a]) / n;                 // the enlargement, a block a side (setFieldVolume)
+        const double enlarged = double(size[a]) + 2.0 * block;
+        const double spacing = enlarged / n;
+        const double first = std::round((double(eye[a]) - 0.5 * enlarged) / spacing) * spacing;   // probe 0, on the lattice
+        o[a] = float(first + block);
     }
-    // In place (a re-voxelisation where the field already stands): the probes did not move, and what their rays
-    // read changed only where the re-voxelisation's own regions say - an edit, a slab - which the marks take
-    // (PHOTON-7 stage 5, 5-4: the whole re-integration this did is deleted).
-    if (!any) return true;
-    // The arm "gi.fieldScroll" = 0, for MEASUREMENT only: the same snapped window,
-    // re-placed WHOLE (offset 0, every probe integrated in the step frame) — the
-    // behaviour the scroll replaced, on the same lattice, so gi.field_scroll can
-    // walk one path both ways in one process and compare the pictures.
-    if (mEngine && !mEngine->armRegistry().on(ArmId::FieldScroll)) {
-        Ogre::Vector3 target = mIfdVolumeOrigin;
-        for (int a = 0; a < 3; ++a) target[a] += float(d[a]) * spacing[a];
-        mIfd->setFieldVolume(target, size);
-        mIfdVolumeOrigin = target;
-        ++mIfdFollows;
-        ++mIfdReplacements;     // ifdFollows = ifdScrolls + ifdReplacements, this arm included
-        pushIfdState(mIfdProbeCounts);
-        {
-            monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
-                                     mRoot->getRenderSystem());
-            mIfd->update(mIfdTotalProbes);
-            work.setUnits(mIfdTotalProbes * mIfd->getChangeSamples());
-        }
-        return true;
-    }
-    // WORK IN FLIGHT (a mark's restarts, the refinements) IS NEVER LOST TO A SCROLL (PHOTON-7 stage 5, 5-4): its
-    // probes keep their slots, and the ledger still owes them - beginNextWork takes them after the entered planes.
-    mIfd->scrollWindow(d);
-    for (int a = 0; a < 3; ++a) mIfdVolumeOrigin[a] += float(d[a]) * spacing[a];
+    return o;
+}
+
+void PhotonComponent::placeField(const Ogre::Vector3 &origin, const Ogre::Vector3 &size, GiStaleReason reason) {
+    // NOTHING KEPT: setFieldVolume invalidates every probe and makes the work the whole grid, fresh - integrated at the
+    // budget from this frame on (the reader gives a probe no say until its first integration, and a cage with none
+    // falls back); a PAUSED budget integrates it inline (one sample a probe: a paused field refines nothing).
+    mIfd->setFieldVolume(origin, size);
+    mIfdVolumeOrigin = origin;
+    mIfdVolumeSize   = size;
     ++mIfdFollows;
-    ++mIfdScrolls;              // (never counted before PHOTON-FIELD-ROTATE-1: the status read 0)
-    pushIfdState(mIfdProbeCounts);                      // the reader's modulo offset
-    // THE STEP FRAME (PHOTON-2 J1): the entered planes' tiles held the planes that left, so before any pass
-    // reads them they are INVALIDATED - count 0, no weight in the reader, whose pixels there fall back as outside
-    // the window - and FADED IN at the budget: one sample a pass to kIfdChangeSamples (the entering passes,
-    // PhotonIrradianceField::entering), the reader's weight min( samples / kIfdChangeSamples, 1 ) (PhotonIfd_
-    // piece_ps.any, JahIfd's validity share), so the hand-over from the fallback to the field is a four-step fade,
-    // never a step, and the follow frame pays an invalidation. (H3 integrated them four deep inline: 16.7 ms GPU on
-    // each follow frame of photon-court's crossing, 11.3 on Bistro - the arm gi.fieldEnterInline keeps it, to
-    // measure.) A PAUSED field runs no later pass: its planes integrate inline. PRICED by "ifd.follow".
-    const bool inlineEnter = !mIfdProbesPerFrame || (mEngine && mEngine->armRegistry().on(ArmId::FieldEnterInline));
-    {
+    ++mIfdReplacements;
+    pushIfdState(mIfdProbeCounts);                  // the window's offset is 0 again
+    if (!mIfdProbesPerFrame) {
+        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow", mRoot->getRenderSystem());
+        mIfd->update(mIfdTotalProbes);
+        work.setUnits(mIfdTotalProbes * mIfd->getChangeSamples());
+    }
+}
+
+void PhotonComponent::stepFieldWindow(const Ogre::Vector3 &eye) {
+    // A field whose initialize() threw is a non-null mIfd with no atlases; mIfdTotalProbes is written only after a
+    // successful build, so it is the "built" reading.
+    if (!mIfd || mIfdTotalProbes == 0u || mVctCascades.empty() || !mVctCascades[0].voxelizer) return;
+    JAH_TRY {
+        const GiStaleReason reason = GiStaleReason::Camera;
+        const Ogre::Vector3 size = mVctCascades[0].voxelizer->getVoxelSize();   // cascade 0's size: the tier's
+        // ...at the PINNED origin when a placement pin says so (a measuring door, GiPlacementPin): held there.
+        if (mPlacementPin.on && mPlacementPin.field) {
+            const Ogre::Vector3 at(mPlacementPin.fieldOrigin.x, mPlacementPin.fieldOrigin.y, mPlacementPin.fieldOrigin.z);
+            if (at != mIfdVolumeOrigin || size != mIfdVolumeSize) placeField(at, size, reason);
+            return;
+        }
+        const float tol = 1e-4f;
+        if (std::fabs(size.x - mIfdVolumeSize.x) > tol || std::fabs(size.y - mIfdVolumeSize.y) > tol ||
+            std::fabs(size.z - mIfdVolumeSize.z) > tol) {
+            placeField(fieldOriginFor(eye, size, mIfdProbeCounts), size, reason);   // a resize keeps nothing
+            return;
+        }
+        const Ogre::Vector3 spacing = mIfd->getProbeSpacing();
+        const Ogre::Vector3 centre = mIfdVolumeOrigin + mIfdVolumeSize * 0.5f;
+        Ogre::int32 d[3];
+        bool any = false;
+        for (int a = 0; a < 3; ++a) {
+            // a whole spacing from the centre (the hysteresis), the whole lag at once
+            d[a] = Ogre::int32(std::trunc(double(eye[a] - centre[a]) / double(spacing[a])));
+            if (std::llabs((long long)d[a]) >= (long long)mIfdProbeCounts[a]) {   // a jump of the whole grid
+                placeField(fieldOriginFor(eye, size, mIfdProbeCounts), size, reason);
+                return;
+            }
+            any = any || d[a] != 0;
+        }
+        if (!any) return;
+        // The arm "gi.fieldScroll" = 0, for MEASUREMENT only: the same step re-placed WHOLE (every probe integrated
+        // fresh) - the behaviour the scroll replaced, on the same lattice.
+        if (mEngine && !mEngine->armRegistry().on(ArmId::FieldScroll)) {
+            Ogre::Vector3 target = mIfdVolumeOrigin;
+            for (int a = 0; a < 3; ++a) target[a] += float(d[a]) * spacing[a];
+            placeField(target, size, reason);
+            return;
+        }
+        // WORK IN FLIGHT (a mark's restarts, the refinements) IS NEVER LOST TO A STEP (PHOTON-7 stage 5, 5-4): its
+        // probes keep their slots, and the ledger still owes them - beginNextWork takes them after the entered planes.
+        mIfd->scrollWindow(d);
+        for (int a = 0; a < 3; ++a) mIfdVolumeOrigin[a] += float(d[a]) * spacing[a];
+        ++mIfdFollows;
+        ++mIfdScrolls;
+        pushIfdState(mIfdProbeCounts);                      // the reader's modulo offset
+        // THE ENTERED PLANES, invalidated in the step frame (count 0: no say, never another place's value) and
+        // integrated fresh and deep at the budget in the guard band; the arm gi.fieldEnterInline (and a PAUSED field,
+        // which runs no later pass) integrates them now instead, to measure (H3: 16.7 ms GPU on a step frame of
+        // photon-court's crossing).
+        const bool inlineEnter = !mIfdProbesPerFrame || (mEngine && mEngine->armRegistry().on(ArmId::FieldEnterInline));
         const Ogre::uint32 entered = mIfd->getWorkProbeCount();
-        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow",
-                                 mRoot->getRenderSystem());
+        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ifd.follow", mRoot->getRenderSystem());
         if (inlineEnter) {
-            mIfd->enterInline();
             mIfd->update(entered);
             work.setUnits(entered * mIfd->getChangeSamples());
         } else {
@@ -8305,8 +8191,7 @@ bool PhotonComponent::scrollIrradianceField(const Ogre::Vector3 &origin, const O
             work.setUnits(entered);
         }
         mIfdScrolledProbes = entered;
-    }
-    return true;
+    } JAH_CATCH(mError, );
 }
 
 void PhotonComponent::teardownVct() {
@@ -8342,10 +8227,6 @@ void PhotonComponent::teardownVct() {
     mGiRelightAllOwed = false;
     mGiFeedbackForceAll = false;
     mGiFeedbackOwedLast = false;
-    // ...AND IT OWES NO FIELD FOLLOW (V1-RIG item 2): the debt names a field
-    // and a cascade that are about to stop existing, and whatever chain comes
-    // next converges its field WHOLE in `buildIrradianceField`.
-    mIfdFollowOwed = 0;
     // ...NOR A CHAIN-SHAPE REBUILD (fix round item 4). Every path that tears the
     // arm down is followed by a build from the CURRENT table, so a shape debt
     // raised before it is already paid; left set, a teardown reached directly

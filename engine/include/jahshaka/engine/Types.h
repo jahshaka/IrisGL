@@ -4087,6 +4087,13 @@ struct CardCacheStatus {
     /// "cards.demandCount", the readers' hits ( the reflection's that found a card, that found none, the gather's
     /// found, none ).
     unsigned long long admitted = 0ull, evicted = 0ull, compactionMoves = 0ull;
+    /// ...THE ARRIVALS' STAMPS (PHOTON-7 stage 5, 5-5: what a law after a stop attributes a capture to): the cache's own
+    /// frame (`cacheFrame`, the stamps' clock), the newest face mark among its LAST update's arrivals (`arrivalMarkNewest`,
+    /// 0 with none), and the demand read-back's period and lag in those frames (OgreSurfaceCache.cpp's kDemandReadEvery;
+    /// a reading is taken once the frame is past its own by the VaoManager's dynamic buffer multiplier: that + 1) - a face
+    /// a reader marked by frame s arrives by s + demandReadEvery + demandReadLag.
+    unsigned long long cacheFrame = 0ull, arrivalMarkNewest = 0ull;
+    unsigned demandReadEvery = 0u, demandReadLag = 0u;
     /// THE LAMPS' TRACE (PHOTON-7 stage 5, 5-3): the relights whose cards were traced toward their lamps (cumulative)
     /// and the cards traced the last frame.
     unsigned long long lampTraces = 0ull;
@@ -4512,18 +4519,17 @@ struct GiStatus {
     /// per side for its own borders; this is the volume it was given). Equal
     /// corners = no field.
     ///
-    /// It is CASCADE 0's box and it follows that cascade as the camera walks
-    /// (PHOTON_SPEC E1), which is the only way to see, from outside, where the
-    /// leak-free diffuse actually is.
+    /// It is a box of CASCADE 0's size, CENTRED ON THE EYE: its window steps with
+    /// the eye one probe plane at a time (PHOTON-7 stage 5, 5-5), which is the only
+    /// way to see, from outside, where the leak-free diffuse actually is.
     Vec3 ifdMin;
     Vec3 ifdMax;
-    /// How many times the field has followed cascade 0 since the last build
-    /// (ifdScrolls + ifdReplacements, below): 0 on a still camera, one per cascade-0 step while walking. Reset by a build.
+    /// How many times the field's window has moved since the last build (ifdScrolls + ifdReplacements, below): 0 on a
+    /// still camera, one per probe spacing the eye walks (5-5: the window steps with the eye). Reset by a build.
     unsigned long long ifdFollows = 0;
-    /// THE FIELD SCROLLS (PHOTON-WRITER-1): how many probes the LAST follow
-    /// integrated in its step frame — the planes that entered the window, not
-    /// the field (0 before any scroll; a re-placement's whole convergence does
-    /// not count here).
+    /// THE FIELD SCROLLS (PHOTON-WRITER-1): how many probes the LAST step entered -
+    /// the planes that entered the window, not the field (0 before any scroll; a
+    /// re-placement's whole convergence does not count here).
     unsigned ifdScrollProbes = 0;
     /// How the follows split (PHOTON-WRITER-1): `ifdScrolls` moved the window and
     /// kept every probe that stayed in it; `ifdReplacements` re-placed the whole
@@ -4543,10 +4549,14 @@ struct GiStatus {
     /// RESTARTS (keep 0, four samples deep: `ifdRestarts`, cumulative since the build); the
     /// rest keep. `ifdOwedRestarts` are marked and not restarted yet, `ifdOwedRefines` below
     /// the target and not stopped, and `ifdWorking` a pass of the field's own window running
-    /// (a build, a re-placement, a scroll's entered planes, their entering passes): all zero
+    /// (a build, a re-placement, a scroll's entered planes): all zero
     /// = converged, the field costs nothing until the next mark. A PAUSED field (budget 0)
     /// has a target of 1: its restarts run inline and nothing is owed after them.
     unsigned ifdTargetSamples = 0;
+    /// ...a restart's (and a fresh integration's) depth in samples (kIfdChangeSamples), and the marks' read-back lag in
+    /// frames (a reading is taken once the frame is past its own by the VaoManager's dynamic buffer multiplier: that + 1) -
+    /// the constants a law on the field's last write is made of (PHOTON-7 stage 5, 5-5: never a literal in a row).
+    unsigned ifdRestartDepth = 0, ifdMarkLag = 0;
     unsigned ifdOwedRestarts = 0, ifdOwedRefines = 0;
     unsigned long long ifdOwedIntegrations = 0;   ///< at most: each restart deep and to the target, each refine to it
     bool ifdWorking = false;
@@ -4556,6 +4566,10 @@ struct GiStatus {
     /// frame, the same at rest as in motion: 0 = nothing owed).
     unsigned ifdDispatchedLastFrame = 0;
     unsigned ifdGrantLastFrame = 0;
+    /// THE READ REGION'S EMPTY PROBES this frame, after its work (PHOTON-7 stage 5, 5-5): the probes of the window less
+    /// its guard band (its outer plane) that hold no sample - each one a probe a reader gives no say, a cage weight below
+    /// whole. 0 while the band keeps up with the eye (a re-placement, a build or a jump fills in at the budget).
+    unsigned ifdReadUnheld = 0;
     /// THE GPU'S OWN COUNT (PHOTON-2 L6): every probe integration the generation job has made since the field's build,
     /// as its last readback found it (four frames late) - differenced over a window, the true integrations a per-
     /// integration price divides by (a skipped or stopped probe's group exits without one).

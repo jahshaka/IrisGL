@@ -275,20 +275,7 @@ namespace Ogre
         mIfGenParams.numProbes.z = mSettings.mNumProbes[2];
         mIfGenParams.numProbes.w = 0u;
 
-        const PhotonVoxelizerSourceBase *voxelizer = mVctLighting->getVoxelizer();
-        Matrix4 irrProbeToVctTransform;
-        irrProbeToVctTransform.makeTransform(
-            ( mFieldOrigin - voxelizer->getVoxelOrigin() ) / voxelizer->getVoxelSize(),
-            ( mFieldSize / voxelizer->getVoxelSize() ) / mSettings.getNumProbes3f(),
-            Quaternion::IDENTITY );
-        mIfGenParams.irrProbeToVctTransform = irrProbeToVctTransform;
-        {
-            // FIELD-DIR-1 (PHOTON-VOXEL-4): the box's aspect, for the rays' directions.
-            const Vector3 boxSize = voxelizer->getVoxelSize();
-            const Real minSize = std::min( boxSize.x, std::min( boxSize.y, boxSize.z ) );
-            mIfGenParams.worldToVolumeDir =
-                float4( Vector4( minSize / boxSize.x, minSize / boxSize.y, minSize / boxSize.z, 0.0f ) );
-        }
+        fillProbeTransform();
 
         // ONE WORK GROUP PER PROBE (Jahshaka, PHOTON-FIELD-ROTATE-1): its threads march
         // the probe's rays into shared memory, then integrate every texel of the
@@ -610,6 +597,28 @@ namespace Ogre
             mIfGenParams.envSh[i] = float4( Vector4( sh[i * 3u + 0u], sh[i * 3u + 1u], sh[i * 3u + 2u], 0.0f ) );
     }
     //-------------------------------------------------------------------------
+    void PhotonIrradianceField::fillProbeTransform()
+    {
+        // THE PROBES IN CASCADE 0'S NORMALISED SPACE, as cascade 0 stands NOW (PHOTON-7 stage 5, 5-5: the window steps
+        // with the eye and cascade 0 scrolls on its own schedule, so this is re-derived per dispatch with the chain's
+        // params - a probe outside cascade 0's box starts its march in the first cascade that holds it,
+        // jah_voxel_march.glsl's walk).
+        const PhotonVoxelizerSourceBase *voxelizer = mVctLighting->getVoxelizer();
+        Matrix4 irrProbeToVctTransform;
+        irrProbeToVctTransform.makeTransform(
+            ( mFieldOrigin - voxelizer->getVoxelOrigin() ) / voxelizer->getVoxelSize(),
+            ( mFieldSize / voxelizer->getVoxelSize() ) / mSettings.getNumProbes3f(),
+            Quaternion::IDENTITY );
+        mIfGenParams.irrProbeToVctTransform = irrProbeToVctTransform;
+        {
+            // FIELD-DIR-1 (PHOTON-VOXEL-4): the box's aspect, for the rays' directions.
+            const Vector3 boxSize = voxelizer->getVoxelSize();
+            const Real minSize = std::min( boxSize.x, std::min( boxSize.y, boxSize.z ) );
+            mIfGenParams.worldToVolumeDir =
+                float4( Vector4( minSize / boxSize.x, minSize / boxSize.y, minSize / boxSize.z, 0.0f ) );
+        }
+    }
+    //-------------------------------------------------------------------------
     void PhotonIrradianceField::fillChainParams()
     {
         const size_t numCascades = mVctLighting->getNumCascades();
@@ -670,10 +679,9 @@ namespace Ogre
         mWorkMode = IntegrateFresh;
     }
     //-------------------------------------------------------------------------
-    void PhotonIrradianceField::beginEnteringWhole()
+    void PhotonIrradianceField::beginWholeFresh()
     {
-        invalidateAllProbes();   // the whole grid to count 0, then the whole grid fresh from its start
-        mEnterDepth = 1u;
+        invalidateAllProbes();   // the whole grid to count 0, then the whole grid fresh (deep) from its start
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::invalidateWork()
@@ -717,24 +725,20 @@ namespace Ogre
     {
         // THE LEDGER, slot for slot as the job treats them (PHOTON-7 stage 5, 5-4): an invalidation empties a slot; a
         // fresh or change integration replaces its estimate (a change's own sub-passes and K2's deep rule: the samples
-        // the pass leaves), clearing its stop and its restart owed; a refinement adds one sample up to the target (an
-        // entering pass up to its depth) - a stopped probe's group exits instead, which the stop's readback tells.
+        // the pass leaves), clearing its stop and its restart owed; a refinement adds one sample up to the target -
+        // a stopped probe's group exits instead, which the stop's readback tells.
         if( mHeld.size() != mSettings.getTotalNumProbes() )
             return;
         const uint32 now = mRoot->getRenderSystem()->getVaoManager()->getFrameCount();
-        const bool deep = ( mWorkMode == IntegrateChange || ( mWorkMode == IntegrateFresh && !mEnterDepth ) ) &&
-                          mChangeSamples > 1u;
+        const bool deep = ( mWorkMode == IntegrateChange || mWorkMode == IntegrateFresh ) && mChangeSamples > 1u;
         const uint16 replaced = uint16( std::min( mTargetSamples, deep ? mChangeSamples : 1u ) );
-        const uint32 enterTo = mEnterDepth >= 2u ? std::min( mTargetSamples, mEnterDepth ) : 0u;
         for( uint32 p = listStart; p < listStart + count; ++p )
         {
             const uint32 slot = slotAt( p );
             uint16 &held = mHeld[slot];
             if( mWorkMode == IntegrateRefine )
             {
-                if( enterTo )
-                    held = uint16( std::max<uint32>( held, enterTo ) );
-                else if( held > 0u && held < mTargetSamples )
+                if( held > 0u && held < mTargetSamples )
                     ++held;
                 continue;
             }
@@ -750,7 +754,6 @@ namespace Ogre
     void PhotonIrradianceField::setWorkList( IntegrationMode mode )
     {
         mWorkIsList = true;
-        mEnterDepth = 0u;
         mNumWorkBoxes = 0u;
         mWorkTotal = uint32( mWorkList.size() );
         mNumProbesProcessed = 0u;
@@ -798,13 +801,42 @@ namespace Ogre
         }
     }
     //-------------------------------------------------------------------------
+    uint32 PhotonIrradianceField::countReadUnheld() const
+    {
+        const uint32 n[3] = { mSettings.mNumProbes[0], mSettings.mNumProbes[1], mSettings.mNumProbes[2] };
+        if( mHeld.size() != size_t( n[0] ) * n[1] * n[2] )
+            return 0u;
+        uint32 lo[3], hi[3];   // the read region, window-local: [ 1, N - 2 ] (an axis under four probes: all)
+        for( int a = 0; a < 3; ++a )
+        {
+            lo[a] = n[a] >= 4u ? 1u : 0u;
+            hi[a] = n[a] >= 4u ? n[a] - 2u : n[a] - 1u;
+        }
+        uint32 empty = 0u;
+        for( uint32 z = lo[2]; z <= hi[2]; ++z )
+            for( uint32 y = lo[1]; y <= hi[1]; ++y )
+                for( uint32 x = lo[0]; x <= hi[0]; ++x )
+                {
+                    const uint32 sx = ( x + mWindowOffset[0] ) & ( n[0] - 1u );
+                    const uint32 sy = ( y + mWindowOffset[1] ) & ( n[1] - 1u );
+                    const uint32 sz = ( z + mWindowOffset[2] ) & ( n[2] - 1u );
+                    empty += mHeld[sx + n[0] * ( sy + n[1] * sz )] == 0u ? 1u : 0u;
+                }
+        return empty;
+    }
+    //-------------------------------------------------------------------------
     void PhotonIrradianceField::refreshOwed()
     {
-        uint32 restarts = 0u, refines = 0u;
+        uint32 restarts = 0u, refines = 0u, empty = 0u;
         uint64 integrations = 0u;
         for( size_t slot = 0; slot < mHeld.size(); ++slot )
         {
-            if( mOwedRestart[slot] )
+            if( !mHeld[slot] )
+            {
+                ++empty;
+                integrations += std::max( mChangeSamples, 1u ) + ( mTargetSamples > mChangeSamples ? mTargetSamples - mChangeSamples : 0u );
+            }
+            else if( mOwedRestart[slot] )
             {
                 ++restarts;
                 integrations += std::max( mChangeSamples, 1u ) + ( mTargetSamples > mChangeSamples ? mTargetSamples - mChangeSamples : 0u );
@@ -817,24 +849,27 @@ namespace Ogre
         }
         mOwedRestarts = restarts;
         mOwedRefines = refines;
+        // (the current work's own empty probes are its: they are the work, not owed past it)
+        mOwedEmpty = isWorkDone() || ( mWorkMode != IntegrateFresh && mWorkMode != IntegrateInvalidate )
+                         ? empty
+                         : ( empty > getWorkRemaining() ? empty - getWorkRemaining() : 0u );
         mOwedIntegrations = integrations;
     }
     //-------------------------------------------------------------------------
     bool PhotonIrradianceField::beginNextWork()
     {
         if( !isWorkDone() )
-            return true;   // the current work continues
-        // THE ENTERING PASSES (J1): the same boxes again, one sample deeper, before anything else.
-        if( mEnterDepth )
+            return true;   // the current work continues (a build's or a scroll's, fresh and deep, first)
+        // THE EMPTY PROBES, FRESH (5-5): a fresh work a step replaced before it ended (the window's work is the newest
+        // step's entered planes) leaves probes that hold nothing - never lost: integrated fresh, deep, in slot order
+        mWorkList.clear();
+        for( uint32 slot = 0u; slot < uint32( mHeld.size() ); ++slot )
+            if( !mHeld[slot] )
+                mWorkList.push_back( slot );
+        if( !mWorkList.empty() )
         {
-            if( mEnterDepth < mChangeSamples )
-            {
-                ++mEnterDepth;
-                mNumProbesProcessed = 0u;
-                mWorkMode = IntegrateRefine;
-                return true;
-            }
-            mEnterDepth = 0u;
+            setWorkList( IntegrateFresh );
+            return true;
         }
         // THE MARKED PROBES, RESTARTED (keep 0, deep), in slot order
         mWorkList.clear();
@@ -1109,7 +1144,6 @@ namespace Ogre
     void PhotonIrradianceField::setWholeWork()
     {
         mWorkIsList = false;
-        mEnterDepth = 0u;
         mNumWorkBoxes = 1u;
         for( size_t i = 0u; i < 3u; ++i )
         {
@@ -1190,13 +1224,10 @@ namespace Ogre
             enteredNum[a] = static_cast<uint32>( d > 0 ? d : -d );
         }
         // (ITS REFINEMENTS ARE THE LEDGER'S, PHOTON-7 stage 5, 5-4: the entered probes are below the target once
-        // their entering passes are done, and beginNextWork refines every such probe - no band to join, no whole
-        // grid owed.)
-        // THE WORK: the entered planes, fresh - the first ENTERING pass (J1: one sample a pass, to
-        // mChangeSamples, unless the caller integrates them inline: enterInline).
+        // their fresh pass is done, and beginNextWork refines every such probe - no band to join, no whole grid owed.)
+        // THE WORK: the entered planes, fresh and getChangeSamples() deep (5-5: they fill in the guard band, unread).
         setBoxesFromBands( enteredLo, enteredNum );
         mNumProbesProcessed = 0u;
-        mEnterDepth = 1u;
         // The entered planes have no history (PHOTON-FIELD-ROTATE-1), and they owe the
         // refinements that bring them to the target.
         mWorkMode = IntegrateFresh;
@@ -1260,6 +1291,7 @@ namespace Ogre
             bindChainToGenerationJob();
             fillChainParams();
             fillEnvironmentParams();
+            fillProbeTransform();
         }
 
         mIfGenParams.numProcessedProbes = listStart;
@@ -1311,10 +1343,7 @@ namespace Ogre
                 static_cast<uint32>( static_cast<int32>( Math::Floor( mFieldOrigin.z / spacing.z + 0.5f ) ) );
             mIfGenParams.latticeOrigin.w = 0u;   // (unused)
             mIfGenParams.sweep.x = static_cast<uint32>( mWorkMode );
-            // An ENTERING refinement (J1) lifts its probes to mEnterDepth samples and no further.
-            mIfGenParams.sweep.y = mEnterDepth >= 2u && mWorkMode == IntegrateRefine
-                                       ? std::min( mTargetSamples, mEnterDepth )
-                                       : mTargetSamples;
+            mIfGenParams.sweep.y = mTargetSamples;
             mIfGenParams.sweep.z = mKeepOnChange;
             mIfGenParams.sweep.w = mRotateRays ? 1u : 0u;
             mIfGenParams.varianceStop = float4(
@@ -1331,10 +1360,9 @@ namespace Ogre
 
         // Jahshaka (PHOTON-2 stage 2a; its round's K2): A CHANGE'S OR A FRESH INTEGRATION'S BATCH TAKES
         // mChangeSamples INTEGRATIONS NOW (setChangeSamples) - the same probes, refined in place, before the
-        // batch is read: a re-placement, a build, an entering plane and a change alike never leave a
+        // batch is read: a re-placement, a build, an entered plane and a change alike never leave a
         // one-sample probe.
-        if( ( mWorkMode == IntegrateChange || ( mWorkMode == IntegrateFresh && !mEnterDepth ) ) &&
-            mChangeSamples > 1u )
+        if( ( mWorkMode == IntegrateChange || mWorkMode == IntegrateFresh ) && mChangeSamples > 1u )
         {
             // Sub-pass i lifts a probe to i + 1 samples and no further (its target, for the pass); the ledger
             // counted the pass's samples once (noteWork).

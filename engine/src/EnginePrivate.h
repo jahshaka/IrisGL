@@ -3218,9 +3218,6 @@ public:
         /// 16384 z - exact in a float, each below the 128-probe axis cap - for
         /// the reader's JahFieldWindow modulo (JahIfd_piece_ps.any).
         float windowOffsetPacked = 0.0f;
-        /// THE FADE-IN (PHOTON-2 J1): 1 / the samples a probe holds when whole (the field's change depth) - the
-        /// reader's weight is min( samples / that, 1 ). 0 = no field state.
-        float countFade = 0.0f;
     };
     static void     setIfdState(const Ogre::SceneManager *sm, const IfdState &state);
     static IfdState ifdState(const Ogre::SceneManager *sm);
