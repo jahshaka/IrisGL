@@ -1411,17 +1411,14 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                                                  v.restFrames   // a rest mean holds by 4097: < 2^21, exact
                                            : (v.frame & 0xFFFFu));
     pp.knobs[3] = float(in.cascadeCount);
-    // THE RAY'S START, OFF THE SURFACE BY AN EPSILON — never by half a voxel
-    // (the fix round, gi.gather_cards' near-foot chase): the probe measures the
-    // irradiance AT the surface, and a start lifted 4 cm (0.5 x cascade 0's
-    // cell) measured it 4 cm up — the floor in front of a floating panel read
-    // +7 % at its foot and -11 % at 1.6 m, the sign and size of that lift
-    // exactly (spikes/photon-gather-1d). The floor here, 1 mm, and the shader's
-    // 1e-4 of the view distance (well above a float depth's reconstruction
-    // error) keep a ray off its own triangle; a hit's shading owns its own
-    // footprint.
+    // THE RAY'S START: THE ORIGIN LAW (PHOTON-7 stage 6, READ_A W2 - the reflection's and the sun contact's, one law
+    // for every ray: L1/L5) - off the probe's DRAWN surface by the point's float error plus the drawn cut's error, the
+    // view's pixel tolerance x the LOD bias in full-resolution footprints at the probe's distance (this knob; the
+    // shader turns it into metres, rq_probe_gather.comp), tMin 0: the probe sits on Atom's cut or a stock item's LOD
+    // and its rays trace each mesh's level 0. Never half a voxel (the fix round, gi.gather_cards' near-foot chase: a
+    // start lifted 4 cm measured the irradiance 4 cm up - +7 % at a floating panel's foot, -11 % at 1.6 m).
     pp.knobs2[0] = in.tuning.classOff ? 1.0f : 0.0f;   // the class out of the history test (a test door)
-    pp.knobs2[1] = 0.001f;
+    pp.knobs2[1] = std::max(0.0f, in.drawnCutFootprints);
     pp.knobs2[2] = in.sky ? 1.0f : 0.0f;
     pp.knobs2[3] = float(octRes);
     pp.knobs3[0] = float(v.uniformProbes);
@@ -1439,7 +1436,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // just outside it would otherwise be passed by both queries — the ray
         // would see through the object. A coarse hit in that overlap is honest:
         // the near query has already proved no fine surface lies inside it.
-        pp.plane[2] = std::max(pp.knobs2[1], pp.knobs[1] - std::max(0.0f, in.farOverlap));
+        pp.plane[2] = std::max(0.001f, pp.knobs[1] - std::max(0.0f, in.farOverlap));
     }
     pp.plane[0] = kPlaneTolerance;
     pp.plane[1] = kNormalTolerance;

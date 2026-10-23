@@ -230,6 +230,9 @@ struct GatherInputs {
     /// at its instance's scale. The far query starts that far before the near
     /// length.
     float farOverlap = 0.0f;
+    /// THE DRAWN CUT'S ERROR, in full-resolution pixel footprints (PHOTON-7 stage 6, READ_A W2: the origin law): the
+    /// view's pixel tolerance x the LOD bias - the probe sits on the drawn surface while its rays trace level 0.
+    float drawnCutFootprints = 1.0f;
     /// THE ALPHA TABLE's device address (REFLECT-MOVERS-2, jah_rq_alpha.glsl): the
     /// gather's rays test a cut-out's candidates too; 0 = none.
     uint64_t alphaTable = 0u;

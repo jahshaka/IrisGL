@@ -330,15 +330,22 @@ void main()
 		const float reweight = ( max( dLocal.z, 0.0 ) * jahOctSolidAngle( octPoint, float( octRes ) ) ) /
 							   max( centreCos * jahOctSolidAngle( centrePoint, float( octRes ) ), 1e-9 );
 
-		// ...from the EYE that placed the probe (its cell names it, PHOTON-GA-VR).
-		const float bias =
-			max( p.knobs2.y, 1e-4 * jahViewDistanceOf( jahEyeNow( jahEyeOfCell( cell.x ) ), posW.xyz ) );
+		// THE ORIGIN LAW (PHOTON-7 stage 6, READ_A W2 - the reflection's and the sun contact's): the probe sits on the
+		// DRAWN surface and its rays trace each mesh's level 0, so the ray starts off it by the point's float error
+		// plus the drawn cut's error (knobs2.y: the view's pixel tolerance x the LOD bias, in full-resolution pixel
+		// footprints - here at the probe's distance, from the EYE that placed it: its cell names it, PHOTON-GA-VR),
+		// tMin 0. (Along the probe's shading normal: its record carries no other; its hemisphere is the shaded one.)
+		const JahEye placedBy = jahEyeNow( jahEyeOfCell( cell.x ) );
+		const float probeDist = jahViewDistanceOf( placedBy, posW.xyz );
+		const float footprint = length( placedBy.rayDown ) / max( p.resolution.w, 1.0 );
+		const float bias = jahRayFloatBound( posW.xyz, probeDist ) +
+						   p.knobs2.y * footprint * ( placedBy.perspective > 0.5 ? probeDist : 1.0 );
 		const float maxT = p.knobs.y;
 		const float farT = p.knobs3.w;
 		const vec3 origin = posW.xyz + n * bias;
 		// THE NEAR QUERY: the near copies (Types.h kRayMaskNearField).
 		rayQueryEXT rq;
-		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, bias, dir, maxT );
+		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, dir, maxT );
 		JAH_RQ_PROCEED( rq )
 		bool hit = rayQueryGetIntersectionTypeEXT( rq, true ) ==
 				   gl_RayQueryCommittedIntersectionTriangleEXT;

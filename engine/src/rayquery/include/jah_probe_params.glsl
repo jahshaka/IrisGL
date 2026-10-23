@@ -39,9 +39,9 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// w = how many cascades are bound.
 	vec4 knobs;
 	/// x = 1 takes the surface class out of the history test (GatherTuning::classOff, a test door;
-	/// 0 shipped: jah_probe_history.glsl), y = the
-	/// ray start's floor off the surface in world units (an epsilon; the trace
-	/// takes the larger of it and 1e-4 of the probe's view distance), z = 1
+	/// 0 shipped: jah_probe_history.glsl), y = THE DRAWN CUT'S ERROR in
+	/// full-resolution pixel footprints (the view's pixel tolerance x the LOD
+	/// bias: the ray origin's law, rq_probe_gather.comp), z = 1
 	/// when a sky cubemap is bound,
 	/// w = the octahedral map's resolution (rays per probe = w*w).
 	vec4 knobs2;

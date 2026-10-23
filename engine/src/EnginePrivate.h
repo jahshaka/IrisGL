@@ -1920,6 +1920,7 @@ public:
 /// its row there.
 #define JAH_ARM_LIST(X) \
     X(ReflectMotion, "reflect.motion") /* the march's object motion + the trace's mover branches */ \
+    X(RaysOriginCut, "rays.originCut") /* every ray job's origin lifts by the drawn cut's error (0: the float bound alone - the negative control of the origin rows) */ \
     X(ReflectPosed, "reflect.posed") /* the posed (skinned) identification */ \
     X(ReflectAlphaTested, "reflect.alphaTested") /* cut-out geometry traced as cut-out */ \
     X(ReflectEdgeClasses, "reflect.edgeClasses") /* the Hits view's class overlay (0 off, 1, 2) */ \
@@ -4597,6 +4598,7 @@ public:
     TraceSun traceSun() const override;
     GiPlan giPlan() const override;
     bool rayNearLevels(std::vector<int> &levels) const override;
+    bool rayNearAddresses(std::vector<unsigned long long> &addresses) const override;
     void setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) override;
     unsigned vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) const override;
     bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;

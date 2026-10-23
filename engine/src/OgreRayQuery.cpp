@@ -5973,7 +5973,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     {
         const float down = std::sqrt(eyeB[0].rayDown[0] * eyeB[0].rayDown[0] + eyeB[0].rayDown[1] * eyeB[0].rayDown[1] +
                                      eyeB[0].rayDown[2] * eyeB[0].rayDown[2]);
-        pp.knobs2[1] = scene->pixelTolerance() * scene->lodBias() * down / float(fullH);
+        pp.knobs2[1] = arm(ArmId::RaysOriginCut, true)
+                           ? scene->pixelTolerance() * scene->lodBias() * down / float(fullH) : 0.0f;
     }
     pp.knobs2[2] = skyTex ? 1.0f : 0.0f;
     pp.knobs2[3] = kReflectHistoryFloor;
@@ -7521,6 +7522,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.inputsBusy = scene->photon().gatherInputsBusy();
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
+    in.drawnCutFootprints = arm(ArmId::RaysOriginCut, true) ? scene->pixelTolerance() * scene->lodBias() : 0.0f;
     in.alphaTable = alphaTableOf(scene);
     in.hitTable = hitTableOf(scene);
     {
@@ -7697,9 +7699,6 @@ constexpr unsigned kSunContactBindings = 5u;
 /// the adjacent 5 cm step across the range's end): 15.1 codes with no fade,
 /// 7.6 at 10 %, 5.4 at 15 %, 3.3-4.7 at 20 % (the map's own edge: 1.1-1.3).
 constexpr float kSunContactFadeFraction = 0.2f;
-/// THE BIAS RULE's floor, world units: the lift never falls below a millimetre
-/// however close the camera stands (depth reconstruction's own precision).
-constexpr float kSunContactMinBias = 0.001f;
 
 /// The storage format of the visibility texture. R8 is an EXTENDED storage
 /// format (shaderStorageImageExtendedFormats), not a core-mandatory one — so it
@@ -8095,21 +8094,24 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     pp.resolution[1] = float(h);
     pp.resolution[2] = float(fullW);
     pp.resolution[3] = float(fullH);
-    // THE BIAS RULE's lift: THE DRAWN CUT'S ERROR in FULL-RESOLUTION pixel footprints — per unit of view distance for
-    // a perspective camera (the basis is a ray whose forward component is 1), in world units for an orthographic one.
-    // The ray traces the mesh's LEVEL 0 (PHOTON-7 stage 6: ONE RAY LEVEL PER MESH) while the pixel's surface is the
-    // drawn one - Atom's cut, or a stock item's LOD - which lies within the view's pixel tolerance of level 0 (the
-    // cut's law: Scene::pixelTolerance, the World Mode's atomPixelError row, times the LOD bias the id pass and the
-    // stock thresholds both take). A lift of that error starts the ray outside the traced surface for a convex
-    // caster; the second footprint the old rule added was the 2x band's (its near copy could lie two footprints off).
-    // Full resolution whatever the divisor: the error is the view's, in the view's pixels, not this job's texels.
+    // THE ORIGIN LAW's lift (PHOTON-7 stage 6; READ_A W1): THE DRAWN CUT'S ERROR WITH ITS MARGIN, in FULL-RESOLUTION
+    // pixel footprints — per unit of view distance for a perspective camera (the basis is a ray whose forward component
+    // is 1), in world units for an orthographic one; rq_sun_contact.comp adds the point's float error and lifts along
+    // the GEOMETRIC normal. The ray traces the mesh's LEVEL 0 (ONE RAY LEVEL PER MESH) while the pixel's surface is the
+    // drawn one - Atom's cut, or a stock item's LOD - which lies within the view's pixel tolerance of level 0 (the cut's
+    // law: Scene::pixelTolerance, the World Mode's atomPixelError row, times the LOD bias the id pass and the stock
+    // thresholds both take). On a CONVEX caster the cut lies INSIDE level 0, so a lift of the tolerance alone starts
+    // the ray on level 0 at worst: ONE MORE FOOTPRINT is the margin for that sign (the base's second footprint was this
+    // margin, ledger section 1093 F2 - not the 2x band's). Full resolution whatever the divisor: the error is the
+    // view's, in the view's pixels, not this job's texels.
     {
         const float span = std::sqrt(eye.rayRight[0] * eye.rayRight[0] +
                                      eye.rayRight[1] * eye.rayRight[1] +
                                      eye.rayRight[2] * eye.rayRight[2]);
-        pp.knobs[0] = scene->pixelTolerance() * scene->lodBias() * span / float(fullW);
+        pp.knobs[0] = arm(ArmId::RaysOriginCut, true)
+                          ? (scene->pixelTolerance() * scene->lodBias() + 1.0f) * span / float(fullW) : 0.0f;
     }
-    pp.knobs[1] = kSunContactMinBias;
+    pp.knobs[1] = 0.0f;
     // THE MASK: the shadow CASTERS' near copies (kRayMaskCaster) — a subset of
     // the near field, which is the one field a ray this short lives in (A5b §4:
     // one field per ray; the far copies are the coarse levels past the near
@@ -9829,6 +9831,24 @@ bool OgreScene::rayNearLevels(std::vector<int> &levels) const {
     return true;
 }
 
+bool OgreScene::rayNearAddresses(std::vector<unsigned long long> &addresses) const {
+    OgreScene *self = const_cast<OgreScene *>(this);
+    if (self->hostPosts()) { bool r = false; self->requestOnEngine([&] { r = rayNearAddresses(addresses); }); return r; }
+    addresses.clear();
+    TlasReadback rb;
+    std::string err;
+    if (!self->readTlasInstances(rb, err)) return false;
+    constexpr size_t kInstanceBytes = 64u, kReferenceAt = 56u;   // VkAccelerationStructureInstanceKHR
+    if (rb.instances.size() < size_t(rb.slots) * 2u * kInstanceBytes) return false;
+    addresses.assign(rb.slots, 0ull);
+    for (unsigned slot = 0; slot < rb.slots; ++slot) {
+        uint64_t ref = 0u;
+        std::memcpy(&ref, rb.instances.data() + size_t(2u * slot) * kInstanceBytes + kReferenceAt, sizeof(ref));
+        addresses[slot] = ref;
+    }
+    return true;
+}
+
 bool OgreScene::rayReflectionsWanted() const {
     // The project's own World row (world.rayTracing: off / auto / on — owner,
     // ledger §425) resolved against the machine: OgreScene::rayTracingResolved
@@ -9909,6 +9929,10 @@ bool OgreScene::readTlasInstances(TlasReadback &, std::string &err) {
 }
 bool OgreScene::rayNearLevels(std::vector<int> &levels) const {
     levels.clear();
+    return false;
+}
+bool OgreScene::rayNearAddresses(std::vector<unsigned long long> &addresses) const {
+    addresses.clear();
     return false;
 }
 bool PhotonComponent::probeGatherWanted() const { return false; }
