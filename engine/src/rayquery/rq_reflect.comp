@@ -619,7 +619,10 @@ bool screenAnswer( EyeImage e, EyeImage before, vec3 world, vec3 L, vec3 V, ivec
 			arrival = -dot( L, normalize( p.viewAxisX.xyz * hn.x + p.viewAxisY.xyz * hn.y + p.viewAxisZ.xyz * hn.z ) );
 		}
 	}
-	float vouch = jahSsrEnvelope( m, d, toSurface, maxDistance, 0.0 ) * jahSsrFaceFade( arrival );
+	// THE VOUCH (jah_ssr_march.glsl jahSsrVouchRays): the frame's edge, the march's range end, the camera reversal and
+	// the arrival - the terms with a measured reason; the raster envelope's distance and thickness fades are not the one
+	// estimator's (the on-surface test above is its validity).
+	float vouch = jahSsrVouchRays( m, d, toSurface, 0.0 ) * jahSsrFaceFade( arrival );
 	if( !( vouch > coin ) )
 		return false;
 	// THE HIT LAST FRAME: a moving slot's previous pose (the object motion at the hit's texel, in this image), else

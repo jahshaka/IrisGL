@@ -261,6 +261,29 @@ float jahSsrEnvelope( JahSsrMarch m, vec3 rayDir, vec3 toSurface, float maxDista
 	return distFade * edgeFade * camFade * rangeFade * thickFade;
 }
 
+// THE ONE ESTIMATOR'S TRUST in a screen answer (PHOTON-7 stage 6; the lead's ruling after the rest's tail): inside the
+// ray trace a screen answer is the hit surface's own displayed radiance and its VALIDITY is the on-surface test's (a
+// wrong surface is refused at any distance), so the screen's vouch keeps ONLY the terms with a measured reason - where
+// the screen's information ENDS, so the blend with the ray avoids a hard line: THE FRAME'S EDGE (12 % of it), THE END
+// OF THE MARCH'S RANGE (its last kEdgeSteps steps) and THE CAMERA REVERSAL (a ray turning back toward the eye meets,
+// more and more, surfaces the camera's depth does not hold - the information ends there too; measured: with this term
+// deleted rtreflect.mirror_blend read 7 hard steps of the whole screen-ray difference on photon-glass's mirror, with it
+// 0). The raster envelope's other two are not here: the DISTANCE fade (a 25 m linear ramp, the screen-only march's
+// hand-over to the probe - it made the vouch < 1 almost everywhere: 78.9 % of the rays traced both halves and the
+// rest's record rule throttled its batch; deleted, 24.6 %) and the THICKNESS margin (the on-surface test refuses the
+// crossings it faded). The raster march keeps jahSsrEnvelope whole: it is the screen-only estimator, with no ray to hand
+// over to. `toSurface` is the unit view vector at the origin (the march space's), `rayDir` the unit ray.
+float jahSsrVouchRays( JahSsrMarch m, vec3 rayDir, vec3 toSurface, float rangeGrad )
+{
+	const vec2	edge	  = min( m.hitUv, vec2( 1.0 ) - m.hitUv );
+	const float edgeFade  = smoothstep( 0.0, 0.12, min( edge.x, edge.y ) );
+	const float towardEye = clamp( -dot( rayDir, toSurface ), 0.0, 1.0 );
+	const float camFade	  = 1.0 - smoothstep( 0.25, 0.85, towardEye );
+	const float kEdgeSteps = max( 2.0, rangeGrad / m.stepLen );
+	const float rangeLeft  = ( m.range - m.travelled ) / m.stepLen;
+	return edgeFade * camFade * smoothstep( 0.0, kEdgeSteps, rangeLeft );
+}
+
 // THE TRUST (lane SSR-1): the ARRIVAL angle at the surface the ray hit, -dot( ray, the hit's normal ) - a backface or a
 // grazing arrival is a hit the depth buffer cannot vouch for (it records the FRONT of each surface; one texel either
 // way at grazing is a different surface). Nothing at a backface, full at 0.2 (about 11 degrees off the surface).
