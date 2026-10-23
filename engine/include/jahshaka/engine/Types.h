@@ -5141,6 +5141,12 @@ struct RayQueryStatus {
     /// still converging at rest (-1: none read for this rest since it began or a moved instance last crossed it), the
     /// rests it has begun, and the rest frames on which a moved instance's swept box was handed to the trace.
     unsigned reflectRestFrames = 0u;
+    /// THE SOURCES THE REFLECTION TRACED WITH (PHOTON-7 stage 6, the mode label: every reflection row reads the mode it
+    /// RAN from here, prints it and asserts the one it intends - a mode is never assumed): a view's (the last in the
+    /// map's order), a ReflectSources value (0 both, 1 rays, 2 screen) - what the trace ran, not what was asked: a chain
+    /// that builds no screen sources (a stereo chain) runs the rays whatever PostFxDesc::reflectSources says. -1 = none
+    /// traced.
+    int      reflectSources = -1;
     bool     reflectHeld = false;
     int      reflectRestActive = -1;
     /// ...and of them the CAPPED texels (commit 8): stopped at their sample count's 16-bit ceiling rather than by their

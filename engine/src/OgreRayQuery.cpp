@@ -1038,6 +1038,8 @@ private:
         /// a copy per ring slot like the trace's own.
         RawBuffer       motionGeomRowOfSlot[3];
         unsigned        motionFrame = 0;
+        /// THE SOURCES THIS VIEW LAST TRACED WITH (RayQueryStatus::reflectSources).
+        int             sources = -1;
         /// Its GPU time is the monitor row "rq.reflect.motion" (owner = the key).
         /// Frames since a MOVER slot (kGpuMover | kGpuDragMover) last moved in this
         /// view's scene — the trace's departure rule is live only just after one did.
@@ -5778,6 +5780,7 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         // THE REST (R1, G6)
         const ReflectView &rv = kv.second;
         st.reflectRestFrames = rv.restFrames;
+        st.reflectSources = rv.sources;
         st.reflectHeld = rv.held;
         st.reflectRests = rv.restSession;
         st.reflectRestMoverFrames = rv.restMoverCrossings;
@@ -6183,6 +6186,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // continuation, OgreScreenProbeGather.cpp).
     pp.screen[0] = screenTrace ? 1.0f : 0.0f;
     pp.screen[1] = screenTrace && chainD.reflectSources == ReflectSources::Screen ? 1.0f : 0.0f;
+    rv.sources = int(!screenTrace ? ReflectSources::Rays
+                                  : chainD.reflectSources == ReflectSources::Screen ? ReflectSources::Screen
+                                                                                   : ReflectSources::Both);
     pp.screen[2] = chainD.ssrSteps > 0 ? float(std::min(std::max(chainD.ssrSteps, 8), 128))
                                        : (chainD.ssr >= 2 ? 96.0f : 48.0f);
     pp.screen[3] = float(chainD.ssrMarchPhase);

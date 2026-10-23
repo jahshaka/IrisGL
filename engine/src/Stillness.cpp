@@ -907,6 +907,7 @@ bool StillnessRun::frameDone(std::string &err)
         f.reflHeld = pub.rayQuery.reflectHeld;
         f.reflRestActive = pub.rayQuery.reflectRestActive;
         f.reflRestCapped = pub.rayQuery.reflectRestCapped;
+        f.reflSources = pub.rayQuery.reflectSources;
         f.cameraCuts = g.cameraCuts;
         f.reflCuts = pub.rayQuery.reflectCameraCuts;
         Image pic;
@@ -1001,6 +1002,7 @@ bool StillnessRun::frameDone(std::string &err)
         f.reflHeld = pub.rayQuery.reflectHeld;
         f.reflRestActive = pub.rayQuery.reflectRestActive;
         f.reflRestCapped = pub.rayQuery.reflectRestCapped;
+        f.reflSources = pub.rayQuery.reflectSources;
         f.cameraCuts = g.cameraCuts;
         f.reflCuts = pub.rayQuery.reflectCameraCuts;
         f.held = g.running && g.settleFrames && g.restFrames > g.settleFrames;
@@ -1198,7 +1200,8 @@ std::string StillnessReport::tsv() const
     o << "\trest_frames\tsince_restart\tsettle_frames\theld\tgi_rows\tframe_gpu_ms\tframe_ms"
       << "\tclass_px\tclass_restart\tstep_px\tslow_stage\thold_key\tfoliage_rule"
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
-      << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\trefl_rest_capped\n";
+      << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\trefl_rest_capped"
+      << "\trefl_sources\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -1220,9 +1223,10 @@ std::string StillnessReport::tsv() const
               << "\t" << f.reflRestMovers << "\t" << f.cameraCuts << "\t" << f.reflCuts << "\t"
               << (f.gpuRows.empty() ? "-" : f.gpuRows);
             char clk[160];
-            std::snprintf(clk, sizeof(clk), "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%d\n", f.periodMs, f.readMs,
+            std::snprintf(clk, sizeof(clk), "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%d\t", f.periodMs, f.readMs,
                           f.gpuSpanMs, f.gpuIdleMs, f.gpuUnattributedMs, f.gpuPassesMs, f.gpuRowsMs, f.reflRestCapped);
-            o << clk;
+            // (the mode label: the sources' name, "-" where nothing traced)
+            o << clk << (f.reflSources < 0 ? "-" : reflectSourcesName(ReflectSources(f.reflSources))) << "\n";
         }
     return o.str();
 }
