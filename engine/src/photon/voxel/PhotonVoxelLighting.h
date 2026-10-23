@@ -49,6 +49,25 @@ namespace Ogre
     class PhotonVoxelVisualizer;
     struct PhotonShaderVoxelLight;
 
+    /** THE COMMIT'S LIGHT (PHOTON-7 stage 2, AB S4/A7; PREFLIGHT_1_2 W1): what the next update() does at a scroll's
+        commit, after the store and the light were shifted in place.
+        `delta`: the direct term is re-injected AS A DELTA - total += D_new - D_old and back += Db_new - Db_old (the
+        direct terms written whole as always) - so the bounces the shifted total holds are kept and a voxel whose
+        direct did not change keeps every bit; a slab voxel's old terms are the shift's zeros. The voxels written
+        are COUNTED (takeCommitCount): those outside [keepLo, keepHi) (the slab) and those inside (the changed
+        direct set: the band).
+        `region`: the sky pass and the bounce passes run over the cells [regionLo, regionHi) only (the slab and
+        its bounce reach, aligned to 8 cells), each written into the bounce target and copied back, and the
+        directional levels regenerated over what covers the region.
+        Null: a whole injection (every other update). Cleared by the update it shapes. */
+    struct PhotonCommitLight
+    {
+        bool delta = false;
+        uint32 keepLo[3] = { 0u, 0u, 0u }, keepHi[3] = { 0u, 0u, 0u };
+        bool region = false;
+        uint32 regionLo[3] = { 0u, 0u, 0u }, regionHi[3] = { 0u, 0u, 0u };
+    };
+
     class PhotonVoxelLighting : public IdObject, public TextureGpuListener
     {
     public:
@@ -120,6 +139,9 @@ namespace Ogre
         FastArray<HlmsComputeJob *> mAnisoGeneratorStep1;
 
         HlmsComputeJob *mLightVctBounceInject;
+        /// The bounce pass's TARGET (PHOTON-7 stage 2): a pass writes the new total here and the region it covered is
+        /// copied back into mLightVoxel[0] - the textures' identities never change (the old ping-pong swapped them and
+        /// every reader had to be rebound).
         TextureGpu     *mLightBounce;
 
         /// Jahshaka (PHOTON-5 stage 5): THE BOUNCE ENERGY - the light volume's sum after the base
@@ -169,6 +191,21 @@ namespace Ogre
         ShaderParams::Param *mInjectChainSelf = nullptr;
         ShaderParams::Param *mInjectChainOrigin = nullptr;
         ShaderParams::Param *mInjectChainRes = nullptr;
+        /// THE COMMIT'S LIGHT (setCommitLight) while one is set, its counter and its read-back.
+        struct CommitLightState
+        {
+            bool on = false;
+            bool delta = false;
+            uint32 keepLo[3] = { 0u, 0u, 0u }, keepHi[3] = { 0u, 0u, 0u };
+            bool region = false;
+            uint32 regionLo[3] = { 0u, 0u, 0u }, regionHi[3] = { 0u, 0u, 0u };
+        } mCommit;
+        UavBufferPacked *mCommitCountBuf = nullptr;    ///< four words, cumulative (created zeroed)
+        AsyncTicketPtr   mCommitTicket;                ///< the read-back in flight
+        bool             mCommitDownloadOwed = false;  ///< a delta injection ran while a read-back was in flight
+        uint32           mCommitSeen[3] = { 0u, 0u, 0u };   ///< the counter's words at the last landed reading
+        ShaderParams::Param *mInjectKeepLo = nullptr;
+        ShaderParams::Param *mInjectKeepHi = nullptr;
         /// This cascade's place in the scene's chain (0 = the innermost; the cascades outside it are
         /// mExtraCascades): the injection binds the whole chain and marches from this entry outward.
         uint32 mChainIndex = 0u;
@@ -221,6 +258,7 @@ namespace Ogre
         ShaderParams::Param *mBounceFromPreviousProbeToNext;  ///< Used when cascades > 1
         ShaderParams::Param *mBounceEnvGainMips;  ///< Jahshaka (PHOTON-ENV-1): rgb gain / multiplier, w mips
         ShaderParams::Param *mBounceEnvSh;        ///< Jahshaka (PHOTON-ENV-1): nine float4, / multiplier
+        ShaderParams::Param *mBounceRegionOrigin = nullptr;   ///< PHOTON-7 stage 2: a region pass's first cell
         ShaderParams        *mBounceShaderParams;
 
         ResourceTransitionArray mResourceTransitions;
@@ -261,7 +299,6 @@ namespace Ogre
 
         ShaderParams::Param *addLocalBounceShaderParam( const char *name );
 
-        void restoreSwappedTextures();
 
         void addLight( PhotonShaderVoxelLight *RESTRICT_ALIAS vctLight, Light *light, const Vector3 &voxelOrigin );
 
@@ -275,7 +312,9 @@ namespace Ogre
         void setupBounceTextures( bool bSetSamplerRefs = true );
         void setupGlslTextureUnits();
 
-        void generateAnisotropicMips();
+        /// The directional levels from level 0 (step 0 with a bounce, then step 1 per level) - over the cells
+        /// [regionLo, regionHi) of level 0 and what covers them at every coarser level (PHOTON-7 stage 2), or whole.
+        void generateAnisotropicMips( const uint32 *regionLo = nullptr, const uint32 *regionHi = nullptr );
 
         /// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): the pass index is gone with the per-iteration
         /// dampening it fed (upstream's commented-out 1 / ( pi * ( n/2 + 1 ) )).
@@ -289,7 +328,9 @@ namespace Ogre
         /// environment carries light, so the sky is a light like any lamp: a surface it
         /// lights re-emits albedo x its sky irradiance at EVERY bounce count, where it
         /// used to exist only from the second bounce on (and not at all at one).
-        void runBounce( bool envOnly = false );
+        /// PHOTON-7 stage 2: over the cells [regionLo, regionHi) only (aligned to 8 cells), or whole - written into
+        /// mLightBounce and that region copied back into the total.
+        void runBounce( bool envOnly = false, const uint32 *regionLo = nullptr, const uint32 *regionHi = nullptr );
         /// True when the environment setEnvironment was handed carries any light.
         bool hasEnvironmentLight() const;
 
@@ -373,6 +414,17 @@ namespace Ogre
             rayMarchStepScale (a stepped march's wall counter and step length) are gone.
         */
         void update( SceneManager *sceneManager, uint32 numBounces, uint32 lightMask = 0xffffffff );
+
+        /// THE COMMIT'S LIGHT for the next update() (PhotonCommitLight); null a whole injection.
+        void setCommitLight( const PhotonCommitLight *commit );
+        /// THE DELTA INJECTIONS' COUNTS since the last reading that landed (never a wait; the counter on the device is
+        /// cumulative, so no injection's count is lost to a read-back in flight): voxels lit outside the kept box (the
+        /// slab), inside it (the changed direct set) and the injections. False while no new reading landed.
+        bool takeCommitCount( uint32 &litInSlab, uint32 &litOutside, uint32 &injections );
+        /// THE BOUNCE REACH in cells (PHOTON-7 stage 2): how far from a changed voxel a bounce pass of THIS cascade
+        /// gathers it - a cone reads until it hands over at the chain's max level, a footprint of 2^(maxLod + 1)
+        /// cells at most, plus the cell itself; the outermost cascade's cones cross its whole box (0 = whole).
+        uint32 regionReachCells() const;
 
         /// THE INJECTION'S PARTS, NAMED AS THEY ARE RECORDED (PHOTON-7 stage 1, the split rows): a
         /// host that times an injection hands a listener, and update() opens each part before it
@@ -531,6 +583,8 @@ namespace Ogre
         /// direct term is <= the ceiling by construction", and nothing outside this
         /// class could see the volume to check it.
         TextureGpu  *getLightDirectTexture() const { return mLightDirect; }
+        /// ...and the back side's direct term (PHOTON-7 stage 2: the store door's `directBack`).
+        TextureGpu  *getLightDirectBackTexture() const { return mLightDirectBack; }
         TextureGpu **getLightVoxelTextures( const size_t cascadeIdx );
         /// The light volumes a reader binds per cascade: the total (level 0) and its three
         /// directional axes, then the coverage per half-axis (+a, -a; PHOTON-VOXEL-3/-4),

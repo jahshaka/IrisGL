@@ -33,9 +33,12 @@ layout( local_size_x = @value( threads_per_group_x ),
 
 vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform int higherMipHalfWidth;
+	// PHOTON-7 stage 2: the region's first texel of the directional level 0 (a whole pass at 0).
+	uniform uint4 regionOrigin;
 vulkan( }; )
 
 #define p_higherMipHalfWidth higherMipHalfWidth
+#define p_regionOrigin regionOrigin
 
 void main()
 {

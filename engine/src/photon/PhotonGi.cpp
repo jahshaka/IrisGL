@@ -948,7 +948,7 @@ struct InjectionRows final : Ogre::PhotonVoxelLighting::PhaseListener {
 };
 }   // namespace
 
-bool PhotonComponent::injectCascade(size_t i) {
+bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *commit) {
     Ogre::PhotonVoxelLighting *lighting = i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr;
     if (!lighting) return false;
     unsigned long long &stamp = mVctCascades[i].injectedFrame;
@@ -969,8 +969,11 @@ bool PhotonComponent::injectCascade(size_t i) {
     // series it ran (the energies harvestBounceEnergy reads a few frames later), unless a reading
     // is still in flight.
     const Ogre::uint32 passes = cascadeBounces(i);
-    const bool measure = passes >= 2u && !lighting->bounceEnergyInFlight();
+    // (a commit's passes cover a region: they measure no series of the whole volume)
+    const bool measure = passes >= 2u && !lighting->bounceEnergyInFlight() && !commit;
     lighting->setMeasureBounceEnergy(measure);
+    // THE COMMIT'S LIGHT (PHOTON-7 stage 2), for this update only.
+    lighting->setCommitLight(commit);
     {
         InjectionRows rows;
         rows.rs = mRoot->getRenderSystem();
@@ -1016,22 +1019,8 @@ void PhotonComponent::reintegrateFieldAfterInjection() {
     // is converged inline instead. (The mirror only runs this path while
     // the budget is above 0, so this is the belt to that braces.)
     if (mIfd) {
-        // THE FIELD'S BINDING FIRST, AND UNCONDITIONALLY (E1 reader F2,
-        // PHOTON_SPEC §7 E2 (9)). `PhotonVoxelLighting::update` with extra bounces
-        // PING-PONGS its light voxel textures (`runBounce`), and the field
-        // bound whatever was current ONCE, by pointer, at `initialize()`
-        // (fork 822d538f5 (was 0044)). So after an odd number of bounce passes — which
-        // a chain reaches whenever the document asks for an even total (two
-        // total bounces = one pass per cascade) — a light move left the field
-        // integrating from the texture the injection had just stopped
-        // writing. Re-binding is five descriptor writes on a path that has
-        // just run a compute dispatch per bounce; deciding whether it is
-        // needed would mean comparing raw pointers that may have been
-        // recycled (the defect class fork 1bccc3f93+a98e2b0af (was 0041) exists for).
-        //
-        // The head, because the field rides cascade 0 and `mVctLighting`
-        // IS cascade 0's lighting under a chain.
-        if (mVctLighting) mIfd->setVctLighting(mVctLighting);
+        // (The field's binding stays as bound: the light's textures never change identity - PHOTON-7 stage 2 replaced
+        // the bounce's ping-pong swap, and the per-injection rebind it needed, with a copy-back.)
         mIfd->reset();
         mIfdResumeOwed = 0u;   // the new change covers every probe (J1)
         mIfdProbesDone = 0u;
@@ -1327,6 +1316,12 @@ GiStatus PhotonComponent::giStatus() const {
             cs.scrolling    = c.scroll.active;
             cs.tornCleared  = c.tornCleared;
             if (c.lighting) cs.shellEnds = c.lighting->getLastShellEnds();
+            cs.commitLitSlab     = c.commitLitSlab;
+            cs.commitLitBand     = c.commitLitBand;
+            cs.commitSlabCells   = c.commitSlabCells;
+            cs.commitRegionCells = c.commitRegionCells;
+            cs.commitPasses      = c.commitPasses;
+            cs.commitCounted     = c.commitCounted;
             // WHAT THIS CASCADE VOXELISED - A READING of the device's own counts,
             // written as the gather wrote the records (ATOM P4b, A5b §3). They
             // used to be CPU walks: `items` an AABB test per GI item per rebuild,
@@ -1937,6 +1932,10 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
         out.direct.clear();
         if (Ogre::TextureGpu *direct = lighting->getLightDirectTexture())
             if (direct->getResidencyStatus() == Ogre::GpuResidency::Resident && !grab(direct, out.direct)) return false;
+        out.directBack.clear();
+        if (Ogre::TextureGpu *directBack = lighting->getLightDirectBackTexture())
+            if (directBack->getResidencyStatus() == Ogre::GpuResidency::Resident && !grab(directBack, out.directBack))
+                return false;
         // ENGINE-UPGRADE-ASYNC-3 stage 1: the albedo's levels 1..n, the compute chain's proof.
         out.albedoLevels.assign(albedo->getNumMipmaps() > 1u ? albedo->getNumMipmaps() - 1u : 0u,
                                 std::vector<float>());
@@ -4755,6 +4754,19 @@ Ogre::uint32 PhotonComponent::cascadeBounces(size_t idx) const {
     return std::max(minPasses, bouncePassesFor(double(c.bounceContraction), c.bounceFirstPassAdds));
 }
 
+// THE WORK LAW'S DOOR (PHOTON-7 stage 2): every cascade's commit count whose read-back has landed, folded into its
+// cumulative counters (GiStatus::CascadeStatus::commitLit*), never waited on.
+void PhotonComponent::harvestCommitCounts() {
+    for (VctCascade &c : mVctCascades) {
+        if (!c.lighting) continue;
+        Ogre::uint32 inSlab = 0, outside = 0, injections = 0;
+        if (!c.lighting->takeCommitCount(inSlab, outside, injections)) continue;
+        c.commitLitSlab += inSlab;
+        c.commitLitBand += outside;
+        c.commitCounted += injections;
+    }
+}
+
 void PhotonComponent::harvestBounceEnergy() {
     if (mVctCascades.empty() || !mRoot) return;
     Ogre::RenderSystem *rs = mRoot->getRenderSystem();
@@ -5269,10 +5281,53 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
             // here would be a new path, and it is an error rather than a skip:
             // it would leave re-voxelised volumes lit for the old ones.
             c.injectedFrame = ~0ull;
-            if (!injectCascade(idx))
+            // WHAT IS LIT AT A SCROLL'S COMMIT (PHOTON-7 stage 2; PREFLIGHT_1_2 W1 / §5.4): the light was shifted with the
+            // store, so the direct term is re-injected AS A DELTA (total += D_new - D_old: the bounces the shifted total
+            // holds are kept, a voxel whose direct did not change keeps its bits) and the sky and the bounces re-solved
+            // over the slab and its bounce reach only - never the whole cascade (the old commit wrote total = D at every
+            // voxel and re-ran the Jacobi: 9.9 ms of c1's 12.93). A whole rebuild injects whole.
+            Ogre::PhotonCommitLight commitLight;
+            const bool scrollLight = scroll && c.scroll.active;
+            if (scrollLight) {
+                commitLight.delta = true;
+                commitLight.region = true;
+                for (int a = 0; a < 3; ++a) {
+                    commitLight.keepLo[a] = c.scroll.keepLo[a];
+                    commitLight.keepHi[a] = c.scroll.keepHi[a];
+                    commitLight.regionLo[a] = c.scroll.passLo[a];
+                    commitLight.regionHi[a] = c.scroll.passHi[a];
+                }
+            }
+            if (!injectCascade(idx, scrollLight ? &commitLight : nullptr))
                 OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
                             "a rebuilt cascade was refused its injection",
                             "OgreScene::rebuildCascade");
+            if (scrollLight) {
+                // THE COUNTS (the work law's door): the slab's cells and one pass's cells now, the voxels lit when the
+                // read-back lands (harvestCommitCounts).
+                unsigned long long slabCells = 0, regionCells = 1;
+                for (const VctCascade::Scroll::Slab &sl : c.scroll.slabs)
+                    slabCells += (unsigned long long)(sl.hi[0] - sl.lo[0]) * (sl.hi[1] - sl.lo[1]) * (sl.hi[2] - sl.lo[2]);
+                for (int a = 0; a < 3; ++a) regionCells *= (unsigned long long)(c.scroll.passHi[a] - c.scroll.passLo[a]);
+                c.commitSlabCells += slabCells;
+                c.commitRegionCells += regionCells;
+                c.commitPasses += (unsigned long long)cascadeBounces(idx) + (mGi.numBounces > 0 ? 1u : 0u);
+                // ...AND EVERY CASCADE INSIDE IT, AS A DELTA, WITH NO PASS: their shadow marches cross this cascade's
+                // geometry past their own shells, so the band's direct changed where this cascade's store moved (their
+                // bounce through it is stage 4's feedback). This replaces the inner cascades' settle (whole re-solves).
+                for (size_t j = idx; j-- > 0;) {
+                    VctCascade &inner = mVctCascades[j];
+                    if (!inner.lighting || injectedThisFrame(j)) continue;
+                    Ogre::PhotonCommitLight innerLight;
+                    innerLight.delta = true;
+                    innerLight.region = true;   // an empty region: no pass
+                    for (int a = 0; a < 3; ++a) innerLight.keepHi[a] = inner.resolution;
+                    injectCascade(j, &innerLight);
+                }
+                // The field integrates cascade 0's light: an outer commit changed its band (cascade 0's own commit
+                // moves the field and re-integrates it: oweCascade0FieldFollow).
+                if (idx > 0) reintegrateFieldAfterInjection();
+            }
             // ...AND THAT IS THE MOVING TICK'S ANSWER TOO (DRAG-1): the one
             // writer's injection, which is exactly what refreshGiLighting would
             // compute for it, so the next in-motion tick skips it. See the tick.
@@ -5488,6 +5543,27 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
         sc.slabs.push_back(sl);
     }
     assert(layer <= layers && "a scroll's slabs fit its scratch");
+    // THE BOX THE SCROLL KEEPS and THE COMMIT'S PASS REGION (PHOTON-7 stage 2): the slabs' bounding box dilated by the
+    // cascade's bounce reach (PhotonVoxelLighting::regionReachCells: how far a pass of this cascade gathers a changed
+    // voxel), aligned out to 8 cells (the directional levels' blocks) - the whole box for the outermost, whose cones
+    // cross it; empty for a scroll with no slab.
+    for (int a = 0; a < 3; ++a) {
+        sc.keepLo[a] = Ogre::uint32(ovLo[a]);
+        sc.keepHi[a] = Ogre::uint32(ovHi[a]);
+    }
+    {
+        const Ogre::uint32 reach = c.lighting ? c.lighting->regionReachCells() : 0u;
+        int lo[3] = { res, res, res }, hi[3] = { 0, 0, 0 };
+        for (const Box &b : slabs)
+            for (int a = 0; a < 3; ++a) { lo[a] = std::min(lo[a], b.lo[a]); hi[a] = std::max(hi[a], b.hi[a]); }
+        for (int a = 0; a < 3; ++a) {
+            if (slabs.empty()) { sc.passLo[a] = sc.passHi[a] = 0u; continue; }
+            if (reach == 0u) { sc.passLo[a] = 0u; sc.passHi[a] = Ogre::uint32(res); continue; }
+            const int l = std::max(0, lo[a] - int(reach)), h = std::min(res, hi[a] + int(reach));
+            sc.passLo[a] = Ogre::uint32(l / 8 * 8);
+            sc.passHi[a] = Ogre::uint32(std::min(res, (h + 7) / 8 * 8));
+        }
+    }
 
     // THE INSTANCES THE ESTIMATE WALKS: the gather's own predicates that the CPU can read (the GI
     // channel, a live slot, rule 2's size floor), in the target's cell coordinates.
@@ -6157,7 +6233,9 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         if (i == 0u) oweCascade0FieldFollow(reason);
         spent = true;
         rebuilt = true;
-        staleTop = std::max(staleTop, (long long)i - 1);
+        // A SCROLL'S COMMIT OWES NO SETTLE (PHOTON-7 stage 2): the cascades inside it were re-injected as deltas in
+        // its own frame (rebuildCascade) - a settle's whole re-injections would reset their bounces.
+        if (!scrollCommit) staleTop = std::max(staleTop, (long long)i - 1);
     }
     // WHAT THE ARM LIT, KEPT CURRENT (audit B9). `giStatus().boundsMin/Max` is
     // the outermost cascade's box, and that box MOVES — it was written once at
@@ -6231,6 +6309,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
     // Harvested at the writer point, before the tick, so a cascade whose series asks for more
     // passes than it was lit with owes that tick and gets it in this frame.
     harvestBounceEnergy();
+    harvestCommitCounts();
 
     // ---- 2b. THE HOST'S LIGHT TICK, AFTER THE REBUILD (the one writer) ------
     // (PHOTON-WRITER-1; refreshGiLighting says why it is owed rather than run.)

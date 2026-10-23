@@ -42,9 +42,11 @@
 @end
 
 @piece( BodyCS )
-	if( gl_GlobalInvocationID.x >= uint( p_higherMipHalfRes.x ) ||
-		gl_GlobalInvocationID.y >= uint( p_higherMipHalfRes.y ) ||
-		gl_GlobalInvocationID.z >= uint( p_higherMipHalfRes.z ) )
+	// THE PASS'S TEXEL (PHOTON-7 stage 2): a region pass starts at p_regionOrigin (a whole pass at 0).
+	const uint3 jahTexel = gl_GlobalInvocationID.xyz + p_regionOrigin.xyz;
+	if( jahTexel.x >= uint( p_higherMipHalfRes.x ) ||
+		jahTexel.y >= uint( p_higherMipHalfRes.y ) ||
+		jahTexel.z >= uint( p_higherMipHalfRes.z ) )
 	{
 		return;
 	}
@@ -64,11 +66,11 @@
 	float4 samples[8];
 	float4 finalValue;
 
-	wshort3 negAxisDstIUvw = wshort3( gl_GlobalInvocationID.xyz );
+	wshort3 negAxisDstIUvw = wshort3( jahTexel );
 	wshort3 posAxisDstIUvw = negAxisDstIUvw;
 	posAxisDstIUvw.x += p_higherMipHalfRes.x;
 
-	int3 negISourceUvw = int3( gl_GlobalInvocationID.xyz << 1u );
+	int3 negISourceUvw = int3( jahTexel << 1u );
 	int3 posISourceUvw = negISourceUvw;
 	posISourceUvw.x += p_lowerMipHalfWidth;
 

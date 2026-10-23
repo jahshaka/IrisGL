@@ -66,6 +66,7 @@ class ParallaxCorrectedCubemapAuto;
 class PhotonIrradianceField;
 struct PhotonIrradianceFieldSettings;
 class PhotonVoxelLighting;
+struct PhotonCommitLight;
 class PhotonVoxelMaterial;
 class PhotonVoxelizer;
 class PhotonVoxelScroll;
@@ -468,6 +469,11 @@ public:
             /// the shift was cut to the scratch), the cascade's own builtCam on an axis the scroll leaves.
             Ogre::Vector3 cam = Ogre::Vector3::ZERO;
             int shift[3] = { 0, 0, 0 };             ///< new lattice - old lattice, per axis
+            /// THE BOX THE SCROLL KEEPS (the overlap, in the target's cells; the slabs are outside it) and THE COMMIT'S
+            /// PASS REGION: the slabs' bounding box dilated by the cascade's bounce reach, aligned to 8 cells (the
+            /// whole box for the outermost cascade, whose cones cross it).
+            Ogre::uint32 keepLo[3] = { 0, 0, 0 }, keepHi[3] = { 0, 0, 0 };
+            Ogre::uint32 passLo[3] = { 0, 0, 0 }, passHi[3] = { 0, 0, 0 };
             /// THE ENTERING SLABS (at most three, one per shifted axis): a box of the TARGET volume's cells
             /// [lo, hi), the axis it enters along and its first layer in the scratch (PhotonVoxelScroll::Slab).
             struct Slab { Ogre::uint32 lo[3] = { 0, 0, 0 }, hi[3] = { 0, 0, 0 }, axis = 0, layer = 0; };
@@ -506,6 +512,11 @@ public:
         long long heldAt[3] = { 0, 0, 0 };
         /// THE SCROLL'S SCRATCH (PHOTON-7 stage 2): `scrollLayers(...)` x res x res, built with the chain.
         std::unique_ptr<Ogre::PhotonVoxelScroll, ScrollScratchDelete> scratch;
+        /// THE WORK LAW'S DOOR (PHOTON-7 stage 2; GiStatus::CascadeStatus): over every commit, cumulative - the voxels
+        /// the delta injections lit inside the slabs and outside them (the changed direct set; read back), the slabs'
+        /// cells, the cells one pass of the commit covered, the passes, and the commits whose counts landed.
+        unsigned long long commitLitSlab = 0, commitLitBand = 0, commitSlabCells = 0, commitRegionCells = 0,
+                           commitPasses = 0, commitCounted = 0;
         unsigned long long scrolls = 0;        ///< camera scrolls committed by the slab path
         unsigned long long scrollFrames = 0;   ///< frames spent building scrolls' chunks
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
@@ -1145,7 +1156,9 @@ private:
     /// impossible rather than avoided; a refusal is counted
     /// (GiStatus::chainInjectionRefusals) and every caller that can be refused
     /// leaves its work owed rather than dropped.
-    bool injectCascade(size_t i);
+    /// `commit` (PHOTON-7 stage 2): a scroll's commit light - the direct term as a delta, the passes over a region
+    /// (Ogre::PhotonCommitLight); null a whole injection.
+    bool injectCascade(size_t i, const Ogre::PhotonCommitLight *commit = nullptr);
     /// Whether cascade `i` was injected in the
     /// current writer frame.
     bool injectedThisFrame(size_t i) const;
@@ -1287,6 +1300,8 @@ private:
     /// frames old - never a wait): each cascade's r from them, and a chain light tick owed when a
     /// cascade now asks for more passes than its light was injected with (PHOTON-5 stage 5).
     void harvestBounceEnergy();
+    /// The commits' work counts that landed (PHOTON-7 stage 2, the work law's door).
+    void harvestCommitCounts();
     /// A CASCADE REBUILD LEFT THE CHAIN OFF ITS FIXED POINT (LAMPREST-3). A
     /// rebuild injects ONE cascade once, over the radiance it held somewhere
     /// else, and the GI scheduler's cadence never ticks for a camera walk — so the

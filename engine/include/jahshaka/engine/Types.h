@@ -4528,6 +4528,15 @@ struct GiStatus {
         /// over [D_{j-1}, D_j) - the sum of 8 cells of every cascade of the chain up to j, so EVERY cascade of a chain
         /// reads the same list. Empty before the first injection.
         std::vector<float> shellEnds;
+        /// THE WORK LAW'S DOOR (PHOTON-7 stage 2): over every scroll commit of this cascade, cumulative - the voxels its
+        /// delta injections LIT (wrote: their direct changed) inside the entering slabs (`commitLitSlab`) and outside
+        /// them (`commitLitBand`: the changed direct set), read back a few frames late (`commitCounted` = the commits
+        /// whose counts landed; a commit of a cascade INSIDE a committed one, re-injected as a delta, counts too); the
+        /// slabs' cells (`commitSlabCells`), the cells one pass of a commit covers (the slab and its bounce reach,
+        /// `commitRegionCells`) and the passes run (`commitPasses`: the sky's and the bounces'). The old commit lit and
+        /// re-solved the whole cascade, resolution^3 a commit.
+        unsigned long long commitLitSlab = 0, commitLitBand = 0, commitSlabCells = 0, commitRegionCells = 0,
+                           commitPasses = 0, commitCounted = 0;
         /// THE READINGS BELOW ARE THE DEVICE'S OWN COUNTS (ATOM P4b, A5b §3): the
         /// gather that writes the voxeliser's records on the GPU counts as it
         /// writes, into a small readout collected without a stall and read here.
@@ -5636,6 +5645,9 @@ struct GiVoxelVolume {
     /// term and the emissive - what a hit's read takes out of the store (jah_rq_hit.glsl's bounce
     /// share 1 - D / T). Empty where the cascade keeps none (no bounce texture).
     std::vector<float> direct;
+    /// ...AND ITS BACK SIDE (PHOTON-7 stage 2): the back side's direct term, level 0 - what a scroll commit's delta
+    /// replaces in `lightBack`, as `direct` is replaced in `light`. Empty where the cascade keeps none.
+    std::vector<float> directBack;
     /// THE ALBEDO VOLUME'S MIP LEVELS 1..n (ENGINE-UPGRADE-ASYNC-3 stage 1), decoded like `albedo`
     /// (level 0): albedoLevels[L - 1] is level L, max(1, size >> L) per axis, RGBA, x fastest — the
     /// compute chain's proof (each texel the blit's filter of the level below).

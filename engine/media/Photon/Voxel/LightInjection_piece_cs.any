@@ -598,20 +598,46 @@
 	// LEVEL 0 HOLDS THE SIDES' MEAN (a one-sided voxel's light unchanged; the bounce's march reads
 	// it) and the back side beside it (backVoxel, below).
 	float4 injectedVoxel = float4( ( ( front + back ) * 0.5f + emissive ) * c, c );
+	const float4 backVoxelVal = float4( ( back + emissive ) * c, c );
+@property( jah_inject_delta )
+	// THE DELTA (PHOTON-7 stage 2; PREFLIGHT_1_2 W1): at a scroll's commit the direct term REPLACES ITS OLD SELF inside
+	// the total and the back - total += D_new - D_old, back += Db_new - Db_old - so whatever the bounces built over it
+	// is kept, and a voxel whose direct did not change keeps every bit (its total and back are not written). A slab
+	// voxel's old terms are the shift's cleared zeros: its total becomes D_new.
+	// THE TEST IS THE STORE'S OWN CONVERSION: the new terms are written as a whole injection writes them and read back
+	// by this invocation (program order), then compared bit for bit with the old. Never a conversion of our own: on this
+	// driver packHalf2x16 rounds unlike the image store (measured: a quarter of the lit voxels "changed" with nothing
+	// moved), and unpackHalf2x16( packHalf2x16( x ) ) was folded back to x. (The store is float at every scroll tier.)
+	const float4 dOld = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
+	const float4 dbOld = OGRE_imageLoad3D( directBackVoxel, voxelCelUvw );
+	OGRE_imageWrite3D4( directVoxel, voxelCelUvw, jahStoreDirect( injectedVoxel ) );
+	OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, backVoxelVal );
+	const float4 dNew = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
+	const float4 dbNew = OGRE_imageLoad3D( directBackVoxel, voxelCelUvw );
+	if( any( notEqual( floatBitsToUint( dNew ), floatBitsToUint( dOld ) ) ) ||
+		any( notEqual( floatBitsToUint( dbNew ), floatBitsToUint( dbOld ) ) ) )
+	{
+		OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, OGRE_imageLoad3D( lightVoxel, voxelCelUvw ) + ( dNew - dOld ) );
+		OGRE_imageWrite3D4( backVoxel, voxelCelUvw, OGRE_imageLoad3D( backVoxel, voxelCelUvw ) + ( dbNew - dbOld ) );
+		const bool kept = all( greaterThanEqual( voxelId, p_keepLo.xyz ) ) && all( lessThan( voxelId, p_keepHi.xyz ) );
+		atomicAdd( jahCommitCount[kept ? 1u : 0u], 1u );
+	}
+	// (word 2: the delta injections themselves - the counter is cumulative, read back without a wait)
+	if( all( equal( voxelId, int3( 0, 0, 0 ) ) ) )
+		atomicAdd( jahCommitCount[2], 1u );
+@else
 	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( injectedVoxel ) );
 	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): the same value, kept apart as the bounce iteration's
 	// D term. One extra image store; no copy and no second dispatch.
-	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): encoded for ITS OWN format, which is not the total's
-	// any more -- the total may be float and this one is always 8-bit sRGB.
 	@property( vct_keep_direct )
 		OGRE_imageWrite3D4( directVoxel, voxelCelUvw, jahStoreDirect( injectedVoxel ) );
 	@end
 
-	const float4 backVoxelVal = float4( ( back + emissive ) * c, c );
 	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, backVoxelVal );
 	@property( vct_keep_direct )
 		OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, backVoxelVal );
 	@end
+@end
 
 	// THE FUSED STEP 0: the directional level 0 from the block's children per half-axis.
 	const uint li = gl_LocalInvocationIndex;

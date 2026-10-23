@@ -89,7 +89,9 @@
                 ["chainSelf",               [0],        "uint"],
                 ["lightsPerVoxel",          [16],       "uint"],
                 ["chainOrigin",             [0,0,0,1],  "float"],
-                ["chainRes",                [1,1,1,1e30], "float"]
+                ["chainRes",                [1,1,1,1e30], "float"],
+                ["keepLo",                  [0,0,0,0],    "int"],
+                ["keepHi",                  [0,0,0,0],    "int"]
             ],
 
             "params_glsl" :
@@ -125,7 +127,8 @@
 
             "params" :
             [
-                ["higherMipHalfWidth",      [1],    "int"]
+                ["higherMipHalfWidth",      [1],    "int"],
+                ["regionOrigin",      [0, 0, 0, 0],    "uint"]
             ],
 
             "params_glsl" :
@@ -168,7 +171,8 @@
 
             "params" :
             [
-                ["higherMipHalfRes_lowerMipHalfWidth",  [1, 1, 1, 1],   "int"]
+                ["higherMipHalfRes_lowerMipHalfWidth",  [1, 1, 1, 1],   "int"],
+                ["regionOrigin",  [0, 0, 0, 0],   "uint"]
             ],
 
             "params_glsl" :

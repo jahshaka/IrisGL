@@ -154,10 +154,12 @@
 //in uint  gl_LocalInvocationIndex;
 
 @piece( BodyCS )
-	float3 voxelUvwPos = p_invVoxelResolution * (float3( gl_GlobalInvocationID.xyz ) + 0.5f);
+	// THE PASS'S CELL (PHOTON-7 stage 2): a region pass starts at p_regionOrigin (a whole pass at 0).
+	const uint3 jahCell = gl_GlobalInvocationID.xyz + p_regionOrigin.xyz;
+	float3 voxelUvwPos = p_invVoxelResolution * (float3( jahCell ) + 0.5f);
 
-	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, gl_GlobalInvocationID.xyz, 0 );
-	float4 normalVal = OGRE_Load3D( voxelNormalTex, gl_GlobalInvocationID.xyz, 0 );
+	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, jahCell, 0 );
+	float4 normalVal = OGRE_Load3D( voxelNormalTex, jahCell, 0 );
 	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): JACOBI, NOT ACCUMULATION.
 	//
 	// What this pass writes is  new = direct + rho * G( total )  -- the fixed point
@@ -177,8 +179,8 @@
 	// The alpha channel is the voxel's COVERAGE, identical in both volumes (the
 	// injection writes albedoVal.w to each), so reading it here keeps it exactly as
 	// the accumulating form did.
-	float4 currentLight = OGRE_Load3D( directVoxel, gl_GlobalInvocationID.xyz, 0 );
-	float4 backLight = OGRE_Load3D( directBackVoxel, gl_GlobalInvocationID.xyz, 0 );
+	float4 currentLight = OGRE_Load3D( directVoxel, jahCell, 0 );
+	float4 backLight = OGRE_Load3D( directBackVoxel, jahCell, 0 );
 
 	if( anyInvocationARB( albedoVal.a > 0 ) )
 	{
@@ -209,7 +211,7 @@
 		// directional albedo averaged over a uniform incoming hemisphere), at the
 		// voxel's own roughness (the emissive volume's alpha).
 		const float voxelRoughness =
-			OGRE_Load3D( voxelEmissiveTex, gl_GlobalInvocationID.xyz, 0 ).w;
+			OGRE_Load3D( voxelEmissiveTex, jahCell, 0 ).w;
 		// ...times the voxel's opacity c (the albedo's alpha, PHOTON-VOXEL-3): the albedo
 		// is the surfaces' area MEAN, and what the voxel re-emits is premultiplied by
 		// how much of it they fill, exactly like the direct term it is added to.
@@ -220,7 +222,7 @@
 		// white rough metal ~ its reflectance, a dielectric its 4 % layer's share, where the diffuse-only
 		// store had both re-emit 0. Premultiplied by the opacity like the diffuse term.
 		// (The volume holds F0 relative to the dielectric's, Voxelizer_piece_cs.any: F0 kS = 0.04 w + 0.96 rgb.)
-		const float4 metalVal = OGRE_Load3D( voxelMetalTex, gl_GlobalInvocationID.xyz, 0 );
+		const float4 metalVal = OGRE_Load3D( voxelMetalTex, jahCell, 0 );
 		if( metalVal.w > 0.0f )
 		{
 			float sa, sb;
@@ -232,7 +234,7 @@
 		backLight.xyz += reemit * vctDiffuseBack;
 	}
 
-	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz );
+	wshort3 voxelCelUvw = wshort3( jahCell );
 	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( currentLight ) );  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
 	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, float4( backLight.xyz, currentLight.w ) );
 @end

@@ -17,8 +17,15 @@ vulkan_layout( ogre_t2 ) uniform texture3D voxelEmissiveTex;
 
 vulkan( layout( ogre_s0 ) uniform sampler voxelAlbedoSampler );
 
-layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
-uniform restrict writeonly image3D lightVoxel;
+// PHOTON-7 stage 2: AT A SCROLL'S COMMIT THE DIRECT TERM IS RE-INJECTED AS A DELTA (jah_inject_delta): the total, its
+// back side and the direct terms are READ as well (total += D_new - D_old), so they are read-write.
+@property( jah_inject_delta )
+	layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
+	uniform restrict image3D lightVoxel;
+@else
+	layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
+	uniform restrict writeonly image3D lightVoxel;
+@end
 
 // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): the DIRECT term's own volume, written by the same dispatch.
 // The bounce's fixed point is L = D + rho * G( L ) and needs D at every pass; the
@@ -28,8 +35,13 @@ uniform restrict writeonly image3D lightVoxel;
 // binds the slot per injection, because this job is shared by name process-wide.
 @pset( jahInjUav, 1 )
 @property( vct_keep_direct )
-	layout( vulkan( ogre_u1 ) vk_comma @insertpiece(uav1_pf_type) )
-	uniform restrict writeonly image3D directVoxel;
+	@property( jah_inject_delta )
+		layout( vulkan( ogre_u1 ) vk_comma @insertpiece(uav1_pf_type) )
+		uniform restrict image3D directVoxel;
+	@else
+		layout( vulkan( ogre_u1 ) vk_comma @insertpiece(uav1_pf_type) )
+		uniform restrict writeonly image3D directVoxel;
+	@end
 	@add( jahInjUav, 1 )
 @end
 
@@ -40,12 +52,22 @@ uniform restrict writeonly image3D lightVoxel;
 // pass adds its own part in the anisotropic mip step 0); `directBackVoxel` the back side's
 // direct term for the bounce's fixed point. The slots follow u0 and the direct term in this
 // order (VctLighting::update binds them so).
-layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-uniform restrict writeonly image3D backVoxel;
+@property( jah_inject_delta )
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict image3D backVoxel;
+@else
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict writeonly image3D backVoxel;
+@end
 @add( jahInjUav, 1 )
 @property( vct_keep_direct )
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict writeonly image3D directBackVoxel;
+	@property( jah_inject_delta )
+		layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+		uniform restrict image3D directBackVoxel;
+	@else
+		layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+		uniform restrict writeonly image3D directBackVoxel;
+	@end
 	@add( jahInjUav, 1 )
 	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
 	uniform restrict writeonly image3D dirOut0;
@@ -64,6 +86,13 @@ uniform restrict writeonly image3D backVoxel;
 	@add( jahInjUav, 1 )
 	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
 	uniform restrict writeonly image3D dirOut2;
+@end
+@add( jahInjUav, 1 )
+// PHOTON-7 stage 2, THE WORK LAW'S DOOR: a delta injection counts the voxels it lit, cumulatively - word 0 those inside
+// the scroll's slab (outside the box the scroll kept), word 1 those outside it (the voxels whose direct term changed:
+// the band), word 2 the injections. A UAV buffer after the textures, read back by a routed buffer copy.
+@property( jah_inject_delta )
+	layout( std430, ogre_U@value(jahInjUav) ) restrict coherent buffer jahCommitLayout { uint jahCommitCount[]; };
 @end
 
 // Jahshaka (METAL-BOUNCE-1): THE METAL at t3 - the F0 (rgb) and Fresnel-90 weight (alpha) of every surface's
@@ -132,6 +161,10 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform uint chainSelf;
 	// Jahshaka (PHOTON-7 stage 1): THE LIGHTS A VOXEL TAKES - the first this many of the list's one order that reach it.
 	uniform uint lightsPerVoxel;
+	// PHOTON-7 stage 2: the box of cells the scroll KEPT ([keepLo, keepHi): the overlap; its slab is outside it), read by
+	// a delta injection's count (declared in every permutation, so the job's parameter list is one list).
+	uniform int4 keepLo;
+	uniform int4 keepHi;
 	uniform float4 chainOrigin[@value( hlms_num_vct_cascades )];
 	uniform float4 chainRes[@value( hlms_num_vct_cascades )];
 vulkan( }; )
@@ -145,6 +178,8 @@ vulkan( }; )
 #define p_lightsPerVoxel lightsPerVoxel
 #define p_chainOrigin chainOrigin
 #define p_chainRes chainRes
+#define p_keepLo keepLo
+#define p_keepHi keepHi
 #define JAH_INJ_CHAIN @value( hlms_num_vct_cascades )
 
 // Jahshaka (PHOTON-VOXEL-5; the VOXEL-4 audit's F3): THE ONE READER'S RULES for the shadow

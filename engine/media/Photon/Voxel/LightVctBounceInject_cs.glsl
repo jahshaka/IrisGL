@@ -105,6 +105,8 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// gain, w = its mip count; and the nine-band SH in world axes.
 	uniform float4 envGainMips;
 	uniform float4 envSh[9];
+	// PHOTON-7 stage 2: THE REGION a pass covers - its first cell (the dispatch covers the region from it).
+	uniform uint4 regionOrigin;
 vulkan( }; )
 
 #define p_voxelCellSize voxelCellSize
@@ -114,6 +116,7 @@ vulkan( }; )
 #define p_vctFromPreviousProbeToNext fromPreviousProbeToNext
 #define p_envGainMips envGainMips
 #define p_envSh envSh
+#define p_regionOrigin regionOrigin
 
 @insertpiece( HeaderCS )
 
