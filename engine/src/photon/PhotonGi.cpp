@@ -1103,6 +1103,7 @@ GiStatus PhotonComponent::giStatus() const {
             cs.feedbackReadings  = c.fbReadings;
             cs.feedbackCarried   = c.fbCarried;
             cs.relightCarried    = c.relightCarried;
+            cs.relightRounds     = c.relightRounds;
             cs.feedbackOwed      = cascadeFeedbackOwed(c);
             // WHAT THIS CASCADE VOXELISED - A READING of the device's own counts,
             // written as the gather wrote the records (ATOM P4b, A5b §3). They
@@ -6515,33 +6516,44 @@ void PhotonComponent::relightAndFeedback() {
         const bool sun = (mRegionOverflowOpen & kGiRegionOverflowSun) != 0u;
         const bool sky = (mRegionOverflowOpen & kGiRegionOverflowSky) != 0u;
         const size_t n = mVctCascades.size();
-        // (1) THE CHANGES THE LIST SAYS, so far this frame (a change that grows a cascade's owed relight restarts its
-        //     sweep's count from where its cursor stands: the sweep then goes round the grown box once more)
+        // (1) THE CHANGES THE LIST SAYS, so far this frame. A change STARTS a cascade's round when none runs; one that
+        //     arrives DURING a round never restarts it (PHOTON-7 stage 5's read A2: a sustained change - a drag, an
+        //     animated lamp - restarted every round every frame, and a round that never ends starves every voxel past
+        //     its cursor) - what it touches is owed to the next round.
+        const auto owe = [](VctCascade &c, bool whole, const Ogre::Aabb *part) {
+            if (!c.relightOwed) {
+                c.relightOwed = true;
+                c.relightWhole = whole;
+                c.relightBox = part ? *part : Ogre::Aabb::BOX_NULL;
+                c.relightCursor = std::numeric_limits<float>::quiet_NaN();
+                c.relightSwept = 0;
+                return;
+            }
+            if (!c.relightNextOwed) c.relightNextBox = Ogre::Aabb::BOX_NULL;
+            c.relightNextOwed = true;
+            c.relightNextWhole = c.relightNextWhole || whole;
+            if (part) c.relightNextBox.merge(*part);
+        };
         for (size_t i = 0; i < n; ++i) {
             VctCascade &c = mVctCascades[i];
             if (!c.lighting || !c.built) continue;
             const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
             if (c.remarchOwedFrame && c.remarchOwedFrame < frame) {   // an outer whole rebuild after its injection
                 c.remarchOwedFrame = 0ull;
-                c.relightOwed = true;
-                c.relightWhole = true;
-                c.relightSwept = 0;
+                owe(c, true, nullptr);
             }
-            if (sun || mGiRelightAllOwed) {
-                c.relightOwed = true;
-                c.relightWhole = true;
-                c.relightSwept = 0;
-            }
+            if (sun || mGiRelightAllOwed) owe(c, true, nullptr);
             for (const RegionEntry &e : mRegionsOpen) {
                 if (e.kind != GiRegionKind::Lamp || !box.intersects(e.box)) continue;
                 Ogre::Vector3 lo = e.box.getMinimum(), hi = e.box.getMaximum();
                 lo.makeCeil(box.getMinimum());
                 hi.makeFloor(box.getMaximum());
                 const Ogre::Aabb part = Ogre::Aabb::newFromExtents(lo, hi);
-                if (c.relightOwed) c.relightBox.merge(part);
-                else c.relightBox = part;
-                c.relightOwed = true;
-                c.relightSwept = 0;
+                if (c.relightOwed && !c.relightWhole && c.relightSwept == 0 && !std::isfinite(c.relightCursor)) {
+                    c.relightBox.merge(part);   // (a round not begun yet takes the frame's other changes whole)
+                    continue;
+                }
+                owe(c, false, &part);
             }
         }
         mGiRelightAllOwed = false;
@@ -6558,14 +6570,32 @@ void PhotonComponent::relightAndFeedback() {
                                                                                           : GiViewProfile::Desktop)
                                                       .lightWorkFrames);
         const unsigned long long relightBudget = (chainVoxels + shareFrames - 1u) / shareFrames;
-        unsigned long long relightLeft = relightBudget;
+        // THE FLOORS (GiQualityFacts::lightWorkFrames' law): every owed cascade's credit grows by half its own share of
+        // the count a frame; the pool spent outermost first is the count less those floors
+        unsigned long long floors = 0ull;
+        for (VctCascade &c : mVctCascades) {
+            if (!c.lighting || !c.built || !c.relightOwed) {
+                c.relightCredit = 0ull;
+                continue;
+            }
+            const unsigned long long v = (unsigned long long)c.resolution * c.resolution * c.resolution;
+            const unsigned long long floor = chainVoxels ? relightBudget * v / (2ull * chainVoxels) : 0ull;
+            c.relightCredit += floor;
+            floors += floor;
+        }
+        unsigned long long relightLeft = floors < relightBudget ? relightBudget - floors : 0ull;
         bool sceneGraphCurrent = false;
         for (size_t i = n; i-- > 0;) {
             VctCascade &c = mVctCascades[i];
             if (!c.relightOwed || !c.lighting || !c.built) continue;
             const auto answered = [&c]() {
-                c.relightOwed = c.relightWhole = false;
-                c.relightBox = Ogre::Aabb::BOX_NULL;
+                // (the round is done: the next one begins from what the changes during it touched, or none is owed)
+                const bool next = c.relightNextOwed;
+                c.relightOwed = next;
+                c.relightWhole = next && c.relightNextWhole;
+                c.relightBox = next ? c.relightNextBox : Ogre::Aabb::BOX_NULL;
+                c.relightNextOwed = c.relightNextWhole = false;
+                c.relightNextBox = Ogre::Aabb::BOX_NULL;
                 c.relightCursor = std::numeric_limits<float>::quiet_NaN();
                 c.relightSwept = 0;
             };
@@ -6593,21 +6623,21 @@ void PhotonComponent::relightAndFeedback() {
                 }
                 if (empty) { answered(); continue; }
             }
-            // THE SLAB THIS FRAME PAYS FOR: from the cursor's plane (the box's first when it stands outside), whole
-            // planes of 4 up to the box's end - the next frame goes on from there (round to the first plane at the end)
+            // THE SLAB THIS FRAME PAYS FOR: from the cursor - a WORLD z (PHOTON-7 stage 5's read A4: a scroll shifts the
+            // planes by 2 (mod 4) cells, and the old count took the 4-aligned slab's start for the cursor and closed the
+            // round 2 planes short) - in whole planes of 4 (the injection's 4^3 groups: a slab may start up to 2 planes
+            // before the cursor, relit again, exact by the delta) up to the box's end, the next frame on from its end.
+            // The round counts the planes PAST THE CURSOR only. Its credit first, then the pool.
             const unsigned long long area = (unsigned long long)(hi[0] - lo[0]) * (unsigned long long)(hi[1] - lo[1]);
             const int span = hi[2] - lo[2];
-            int start = std::isfinite(c.relightCursor) ? int(std::lround((c.relightCursor - corner.z) / cell)) : lo[2];
-            start = start / 4 * 4;   // (a scroll moves the planes by even cells: the slab keeps the 4^3 groups)
-            if (start < lo[2] || start >= hi[2]) start = lo[2];
-            int planes = int(std::min<unsigned long long>((unsigned long long)span,
-                                                          area ? relightLeft / area / 4ull * 4ull : 0ull));
-            if (planes <= 0) {
-                if (relightLeft < relightBudget) { ++c.relightCarried; continue; }   // spent by an outer cascade: next frame
-                planes = 4;   // a frame nothing spent always pays one slab: the sweep moves
-            }
-            planes = std::min(planes, span - c.relightSwept);
-            planes = std::max(4, planes / 4 * 4);
+            int cursorPlane = std::isfinite(c.relightCursor) ? int(std::lround((c.relightCursor - corner.z) / cell)) : lo[2];
+            if (cursorPlane < lo[2] || cursorPlane >= hi[2]) cursorPlane = lo[2];
+            const int start = std::max(lo[2], cursorPlane / 4 * 4);
+            const unsigned long long avail = c.relightCredit + relightLeft;
+            int planes = int(std::min<unsigned long long>((unsigned long long)(hi[2] - start),
+                                                          area ? avail / area / 4ull * 4ull : 0ull));
+            planes = std::min(planes, (span - c.relightSwept + (cursorPlane - start) + 3) / 4 * 4);
+            if (planes < 4 || !area) { ++c.relightCarried; continue; }   // its credit grows: a later frame pays the slab
             const int end = std::min(hi[2], start + planes);
             d.injectLo[0][0] = Ogre::uint32(lo[0]); d.injectHi[0][0] = Ogre::uint32(hi[0]);
             d.injectLo[0][1] = Ogre::uint32(lo[1]); d.injectHi[0][1] = Ogre::uint32(hi[1]);
@@ -6637,9 +6667,12 @@ void PhotonComponent::relightAndFeedback() {
             if (ok) {
                 ++c.relights;
                 const unsigned long long spent = area * (unsigned long long)(end - start);
-                relightLeft = spent >= relightLeft ? 0ull : relightLeft - spent;
-                c.relightSwept += end - start;
+                const unsigned long long fromCredit = std::min(spent, c.relightCredit);
+                c.relightCredit -= fromCredit;
+                relightLeft -= std::min(relightLeft, spent - fromCredit);
+                c.relightSwept += std::max(0, end - cursorPlane);
                 if (c.relightSwept >= span) {
+                    ++c.relightRounds;
                     answered();
                 } else {
                     c.relightCursor = corner.z + float(end >= hi[2] ? lo[2] : end) * cell;

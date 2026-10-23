@@ -440,8 +440,16 @@ public:
         /// continuous drag sweeps round-robin and never starves the far planes), and the frames a relight was carried.
         float relightCursor = std::numeric_limits<float>::quiet_NaN();
         int relightSwept = 0;
+        /// THE NEXT ROUND (PHOTON-7 stage 5's read A2): a change that arrives during a round never restarts it - what it
+        /// touches is owed to the round after (`relightNext*`); and the relight's FLOOR CREDIT (voxels; GiQualityFacts::
+        /// lightWorkFrames' floor law), accumulated every frame it owes until it pays a slab.
+        bool relightNextOwed = false, relightNextWhole = false;
+        Ogre::Aabb relightNextBox = Ogre::Aabb::BOX_NULL;
+        unsigned long long relightCredit = 0;
         unsigned long long relightCarried = 0;
         unsigned long long relights = 0;
+        /// The relight's sweeps that went round their owed box (a round completed: GiStatus' relightRounds).
+        unsigned long long relightRounds = 0;
         /// THE FEEDBACK'S BOOKS (PHOTON-7 stage 4; GiStatus::CascadeStatus::feedback*): every brick at its next pass
         /// (`fbForce`: a whole injection, a same-placement rebuild), the frame of the last activation the CPU knows of
         /// (an injection, a listed region, a forced pass), the newest landed reading's frame and its bricks still active
