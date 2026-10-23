@@ -3951,6 +3951,17 @@ struct SunContactStatus {
 /// a picture cannot answer about a card — "is this texel's shadow term
 /// occlusion by ANOTHER object" — and how the atlas is read channel by channel
 /// when a capture looks wrong.
+/// ONE RESIDENT CARD'S LIT RADIANCE, WHOLE (PHOTON-7 stage 5's oracle door, Scene::readCardRadiance): the node and its
+/// mesh card's index, the card's side in texels, the cache frames it was last relit (both halves) and last marched (its
+/// indirect half) in, and its radiance texel by texel (rgb, row-major, the atlas's rows: row 0 the card's +v side).
+struct CardRadiance {
+    NodeId node = 0;
+    unsigned card = 0u;
+    unsigned size = 0u;
+    unsigned long long lastRelit = 0ull, lastIndirect = 0ull;
+    std::vector<float> rgb;
+};
+
 struct CardSample {
     bool  ok = false;
     float albedo[3] = { 0, 0, 0 };      ///< kD, i.e. the datablock's diffuse ALREADY divided by pi
@@ -4104,6 +4115,11 @@ struct CardCacheStatus {
     unsigned indirectTexelsLastFrame = 0u;
     unsigned long long indirectRelights = 0ull;
     unsigned long long invalidIndirect = 0ull;
+    /// THE INDIRECT HALF'S STALE SET (PHOTON-7 stage 5, 5-1): the cards the GPU's accumulation listed (the light they
+    /// gather moved a code since their march; read back a fixed lag of frames late), and those a SLAB region met (a
+    /// commit's entering or leaving slab), cumulative; and the frames whose moves could not be measured (the job not
+    /// built yet, or a cascade past the cluster table), each of which listed every card.
+    unsigned long long indirectReported = 0ull, indirectByRegion = 0ull, indirectOverflows = 0ull;
     bool indirectOn = false;
     /// THE RELIGHT'S LIGHTS (P1C-LIGHT-LIST), selected from the scene's one light
     /// list at the last relight: the directional, point and spot lights whose range

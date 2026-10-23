@@ -857,6 +857,7 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
     stamp = frame;
     // (a whole volume's injection - whole, or a delta with no boxes - read every lamp as it stands)
     if (!commit || commit->numInjectBoxes == 0u) c.injectedWholeFrame = frame;
+    if (!commit) c.wholeInjectedFrame = frame;   // every voxel new: every card's indirect (updateSurfaceCacheFrame)
     // THE FEEDBACK OWES THIS FRAME A PASS: the bricks whose direct term changed resume (the mask's word 0), and after a
     // whole injection every brick does.
     if (mGi.bounces) {
@@ -5409,6 +5410,11 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                 OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
                             "a rebuilt cascade was refused its injection",
                             "OgreScene::rebuildCascade");
+            // THE LEAVING SLAB, LISTED (PHOTON-7 stage 5's ruling: stage 3's producer, beside the entering slab the
+            // injection's boxes list): the old box's cells the new one dropped - what stood there is read from the next
+            // cascade out now (a card, a probe there reads another cascade), and no brick of this one says so.
+            for (size_t f = 1; f < movedFaces.size(); f += 2)
+                appendRegion(GiRegionKind::Slab, movedFaces[f], idx < 32u ? 1u << idx : 0u);
             c.lightPlaced = true;
             c.lightPlacement = c.centre;
             // A SAME-PLACEMENT REBUILD RESUMES EVERY BRICK: its voxels changed where the edit was, and an albedo that
@@ -6701,10 +6707,12 @@ void PhotonComponent::relightAndFeedback() {
                 if (mVctCascades[i].lighting && mVctCascades[i].built && !injectedThisFrame(i)) injectCascade(i, nullptr);
         }
         mJacobiOn = jacobi;
-        // (3) THE FEEDBACK
+        // (3) THE FEEDBACK (and with it the cards' indirect accumulation; with no bounces, the injections' alone)
         if (mGi.bounces) {
             if (sky || mGiFeedbackForceAll) runFeedback(true, frame);
             else runFeedback(jacobi, frame, jacobiInner);
+        } else {
+            accumulateCardIndirect(nullptr);
         }
         mGiFeedbackForceAll = false;
     } JAH_CATCH(mError, );
@@ -6805,8 +6813,38 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
         c.lighting->feedbackAccumulate(c.lighting);
         for (size_t s = i + 1; s < n; ++s)
             if (ran[s]) c.lighting->feedbackAccumulate(mVctCascades[s].lighting);
-        c.lighting->feedbackEnd(frame);
     }
+    // THE CARDS' INDIRECT (PHOTON-7 stage 5, 5-1): every cascade that moved this frame - a pass, an injection - adds its
+    // bricks' moves into the resident cards' would-move, BEFORE the stop and resume rules clear the passed bits.
+    accumulateCardIndirect(&ran);
+    for (size_t i = n; i-- > 0;) {
+        if (!ran[i]) continue;
+        mVctCascades[i].lighting->feedbackEnd(frame);
+    }
+}
+
+// THE CARDS' INDIRECT ACCUMULATION (PHOTON-7 stage 5, 5-1; SurfaceCache::accumulateIndirect): each cascade that ran a pass
+// (`ran`, its passed bits and moves current) or was injected this frame (its injections' moves, the brick state's word 7)
+// into every resident card's would-move - the finer cascade's box skipped inside each - then the frame's list read back.
+void PhotonComponent::accumulateCardIndirect(const std::vector<char> *ran) {
+    if (!mSurfaceCache || mVctCascades.empty()) return;
+    const unsigned long long frame = giWriterFrame();
+    monitor::CacheScope row(CacheKind::Gi, WorkReason::Light, 0, "cards.accumulate", mRoot->getRenderSystem());
+    for (size_t i = 0; i < mVctCascades.size(); ++i) {
+        VctCascade &c = mVctCascades[i];
+        if (!c.lighting || !c.built) continue;
+        const bool passed = ran && i < ran->size() && (*ran)[i];
+        if (!passed && c.injectedFrame != frame) continue;
+        unsigned dims[3];
+        Ogre::UavBufferPacked *state = c.lighting->feedbackBrickState(dims);
+        if (!state) continue;
+        const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+        Ogre::Aabb finer;
+        const bool hasFiner = i > 0 && mVctCascades[i - 1].lighting && mVctCascades[i - 1].built;
+        if (hasFiner) finer = Ogre::Aabb(mVctCascades[i - 1].centre, Ogre::Vector3(mVctCascades[i - 1].halfSize));
+        mSurfaceCache->accumulateIndirect(state, dims, box.getMinimum(), 8.0f * c.cell(), hasFiner ? &finer : nullptr, frame);
+    }
+    mSurfaceCache->endIndirectFrame(frame);
 }
 
 // THE FEEDBACK'S READINGS THAT LANDED (never waited on): each cascade's newest count of its bricks still active, its
@@ -8474,7 +8512,7 @@ void PhotonComponent::recreateGiAfterShadowRebuild() {
 }
 
 // THE CARDS' FRAME (the surface cache is Photon's; the scene's facts come through
-// OgreScene::cardLightKey / cardSceneFacts / foldCardEnvironment / cardCandidates).
+// OgreScene::cardSceneFacts / cardCandidates; the stale set from the changed-region list).
 void PhotonComponent::updateSurfaceCache() {
     bool built = false;
     updateSurfaceCacheFrame(built);
@@ -8534,84 +8572,26 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
                                                  : facts.cardBudgetTexels;
     view.radius = mGi.cardResidencyRadius > 0.0f ? mGi.cardResidencyRadius
                                                  : facts.cardResidencyRadius;
-    // THE RADIANCE SIGNATURE (walkCardLights) — not `mGiLightWriteSerial`,
-    // which bumps on every `setLight` push and every pose write: what a card's
-    // LIT radiance depends on, folded from the lights themselves.
-    // THE LIGHT WALK IS ITS OWN MONITOR STAGE (ATOM-CPU-WALKS-1), and it walks
-    // ONLY WHEN AN INPUT CAN HAVE CHANGED (SPEED-CPU, perf audit E4: 0.42 ms of
-    // every still frame at the world's 500 lamps). Everything the two folds
-    // read moves one of four counters first:
-    //   * a lamp's DERIVED pose — any transform write that can move it: the
-    //     document's (the host's write counter: a write on a light or on any
-    //     node with children counts, nodegraph.h) and the engine's own
-    //     (setNodeTransform, a socket rider, mSceneTransformWrites) — together
-    //     transformEpoch();
-    //   * its parameters, shadow key and shown flag — setLight and the
-    //     visibility push bump mGiLightWriteSerial;
-    //   * a lamp leaving — mLightsRemoved; one arriving — setLight again, and
-    //     mLightNodes' size.
-    // A DERIVED pose is read without an update (`_getDerivedPosition`), so a
-    // write lands in it at the frame's updateSceneGraph, AFTER this fold — the
-    // walk therefore runs on the frame the key moves AND the one after, which
-    // reads the pose the write produced. A frame whose key has stood still for
-    // two frames folds exactly what the last walk folded.
-    std::optional<monitor::Stage> lightStage;
-    lightStage.emplace("engine.cards.lights");
-    unsigned long long lightKey[4];
-    mScene.cardLightKey(lightKey);
-    const bool keyMoved = !mCardLightFoldValid ||
-                          std::memcmp(lightKey, mCardLightKey, sizeof lightKey) != 0;
-    if (keyMoved || mCardLightKeyMovedLastFrame) {
-        std::memcpy(mCardLightKey, lightKey, sizeof lightKey);
-        mCardLightFoldValid = true;
-        mCardLightFold = mScene.walkCardLights();
-    }
-    mCardLightKeyMovedLastFrame = keyMoved;
-    unsigned long long radianceSig = mCardLightFold;
-    lightStage.reset();
-    // THE CLOUD SHADOW (CLOUDS-2D-2): the snapshot the voxels are injected
-    // with, and its serial in the radiance signature — a layer change or a
-    // scroll capture relights the resident cards (and recaptures none).
-    radianceSig ^= mScene.cloudGiSerial();
-    radianceSig *= 1099511628211ull;
     mScene.cardSceneFacts(view);   // the footprint rule, the cloud shadow field, the ambient SH
-    view.radianceSerial = radianceSig;
     view.lightBudgetTexels = facts.cardLightTexels;
-    // THE INDIRECT HALF: the chain the pixel's cones march (the cascade-0
-    // PhotonVoxelLighting the pass buffer is filled from), and THE RE-INJECTION
-    // SIGNATURE — folded ONLY from what moves when an injection LANDS, never
-    // from the write-time serials (a light write or a material generation
-    // bumps at the WRITE, and a dragged light re-marched the whole resident set
-    // against voxels that had not moved, every frame): the feedback's rests (PHOTON-7 stage 4), each
-    // cascade's rebuilds and lattice cell, the PhotonVoxelLighting objects themselves,
-    // and the environment the escapes read (below).
+    // THE INDIRECT HALF: the chain the pixel's cones march (the cascade-0 PhotonVoxelLighting the pass buffer is filled
+    // from) and its budget.
     view.vct = mVctLighting;
     view.indirectBudgetTexels = facts.cardIndirectTexels;
-    // ...and THE AMBIENT AT GI OFF (PHOTON-CARDS-5): the scene's SH, the engine's
-    // own SH x gain (applySkyAmbient), in the indirect signature below.
-    {
-        unsigned long long sig = 1469598103934665603ull;
-        const auto foldI = [&sig](unsigned long long v) {
-            sig ^= v;
-            sig *= 1099511628211ull;
-        };
-        foldI(mGiFeedbackRests);   // the feedback came to rest (PHOTON-7 stage 4; C5 until stage 5 deletes it)
-        // ...AND THE ENVIRONMENT THE MARCH'S ESCAPES READ, which is not an
-        // injection at all: noteEnvironmentChanged hands the new sky to every
-        // PhotonVoxelLighting at once (applyVctEnvironment) and the pixel reads it the
-        // same frame, so the card's escape must too. The values
-        // applyCascadeEnvironment hands over, quantised.
-        sig = mScene.foldCardEnvironment(sig);   // the sky's reflection cube, its gains, the ambient SH
-        foldI((unsigned long long)(uintptr_t)mVctLighting);
-        for (const VctCascade &c : mVctCascades) {
-            foldI((unsigned long long)(uintptr_t)c.lighting);
-            foldI(c.rebuilds);
-            foldI((unsigned long long)c.latticeX);
-            foldI((unsigned long long)c.latticeY);
-            foldI((unsigned long long)c.latticeZ);
-        }
-        view.indirectSerial = sig;
+    // THE STALE SET FROM THE CHANGED-REGION LIST (PHOTON-7 stage 5, 5-1; L2: the light-walk fold of every lamp (C4) and the
+    // re-injection signature folding every rest and commit (C5) are DELETED): the frame's LAMP regions stale the direct
+    // half of the cards they meet, its SLAB regions (a commit's entering and leaving slabs) their indirect half; the sun's
+    // overflow (the sun, the cloud sheet) every card's direct, the sky's, a change with no box, or a cascade injected
+    // WHOLE this frame (a new placement: every voxel new) every card's indirect. The rest of the indirect is the GPU's
+    // accumulation (runFeedback: accumulateIndirect).
+    view.frame = giWriterFrame();
+    for (const RegionEntry &e : mRegionsOpen) {
+        if (e.kind == GiRegionKind::Lamp) view.directBoxes.push_back(e.box);
+        else if (e.kind == GiRegionKind::Slab) view.indirectBoxes.push_back(e.box);
     }
+    view.allDirect = (mRegionOverflowOpen & (kGiRegionOverflowSun | kGiRegionOverflowSomewhere)) != 0u;
+    view.allIndirect = (mRegionOverflowOpen & (kGiRegionOverflowSky | kGiRegionOverflowSomewhere)) != 0u;
+    for (const VctCascade &c : mVctCascades) view.allIndirect = view.allIndirect || c.wholeInjectedFrame == view.frame;
 
     // THE CANDIDATE LIST — handed over rather than reached for, and since
     // ATOM-CPU-WALKS-1 NOT A WALK: the change feed files every item that can hold

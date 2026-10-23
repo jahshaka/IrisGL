@@ -82,6 +82,8 @@
 #include <vector>
 
 #include <OgrePixelFormatGpu.h>
+#include <OgreSharedPtr.h>
+#include <Vao/OgreAsyncTicket.h>
 
 namespace Ogre {
 class Camera;
@@ -240,22 +242,25 @@ struct CardSceneView {
     /// the near copy a sun ray hits may lie one footprint off the captured level,
     /// so the still trace's lift is sized by it (kSunLiftFootprints).
     float rayFootprintPerMetre = 0.0f;
-    /// THE RADIANCE SIGNATURE (PHOTON-CARDS-1): every light's pose and shadow key
-    /// plus what only a card's LIT radiance depends on (colour, power, reach,
-    /// cone) — a change
-    /// relights the resident set and recaptures nothing.
-    unsigned long long radianceSerial = 0ull;
+    /// THE STALE SET FROM THE CHANGED-REGION LIST (PHOTON-7 stage 5, 5-1; L2: change drives work, never a serial): the
+    /// frame's LAMP regions (a lamp's old and new spheres: a card whose box meets one has a stale DIRECT half - the
+    /// lamp's light is exact by its range, JahCardLight_cs.glsl), its SLAB regions (a commit's entering and leaving
+    /// slabs: a card in one reads another cascade now, its INDIRECT half is stale - a box sliding over a card leaves the
+    /// store bit-identical, so no brick says so), and the overflow (the sun or the cloud sheet: every card's direct; the
+    /// sky, a change with no box or a cascade injected whole: every card's indirect). The indirect's other changes are
+    /// the GPU's accumulation (accumulateIndirect). `frame` is the engine's (the report's lag is counted in it).
+    std::vector<Ogre::Aabb> directBoxes, indirectBoxes;
+    bool allDirect = false, allIndirect = false;
+    unsigned long long frame = 0ull;
     /// The relight budget, texels a frame (GiQualityFacts::cardLightTexels).
     unsigned lightBudgetTexels = 0u;
     /// THE INDIRECT HALF: the chain the march reads (the scene's cascade-0
     /// PhotonVoxelLighting — the same object the pixel's pass buffer is filled from;
-    /// null when GI is not the voxel arm, and the indirect is then zero), the
-    /// signature that says it re-injected, and its own budget.
+    /// null when GI is not the voxel arm, and the indirect is then zero), and its own budget.
     Ogre::PhotonVoxelLighting *vct = nullptr;
-    unsigned long long indirectSerial = 0ull;
     /// THE CLOUD LAYER'S SHADOW (CLOUDS-2D-2): the field and its mapping the
     /// pixel's direct sun is darkened by (JahCloudShadow's cloudMap / cloudSun),
-    /// null when no layer shades the sun. Its change is in `radianceSerial`.
+    /// null when no layer shades the sun. Its change is the list's sun overflow.
     Ogre::TextureGpu *cloudField = nullptr;
     float cloudMap[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     float cloudSun[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -401,6 +406,17 @@ public:
     /// is first read in).
     void takeLateRelitBoxes(std::vector<Ogre::Aabb> &out) { out.swap(mLateRelitBoxes); mLateRelitBoxes.clear(); }
 
+    /// THE INDIRECT HALF'S ACCUMULATION (PHOTON-7 stage 5, 5-1; JahCardIndirect_cs.glsl): one cascade's moves this
+    /// frame - its passed bricks' (state word 4, the passed bit) and its injections' (word 7) - into every resident card's
+    /// would-move, each weighted by a bound of the share of the card's gather it can fill, the card's sensitivity its
+    /// darkest lit texel's code; a card at a code is listed. Called per cascade that moved (after its pass, before its
+    /// stop and resume rules clear the passed bits), `finer` the next finer cascade's box (its bricks are skipped inside
+    /// it); the frame's first call clears the list. endIndirectFrame reads the list back (a ring, a fixed lag of host
+    /// frames); the cards it names relight their indirect half (planRelights).
+    void accumulateIndirect(Ogre::UavBufferPacked *brickState, const unsigned dims[3], const Ogre::Vector3 &corner,
+                            float brickSide, const Ogre::Aabb *finer, unsigned long long frame);
+    void endIndirectFrame(unsigned long long frame);
+
     /// Everything a host, a monitor or a suite can see.
     void fillStatus(CardCacheStatus &out) const;
     /// THE PHOTON VIEW'S TABLE (PHOTON-VIEW-1): every allocated card of every
@@ -416,6 +432,9 @@ public:
     /// TEST AND TOOL: one card texel, all five layers, through an
     /// AsyncTextureTicket (flushCommands first).
     bool readTexel(NodeId node, unsigned card, float u, float v, CardSample &out) const;
+    /// TEST AND TOOL: every resident card's lit radiance, whole (Scene::readCardRadiance): one download of the Radiance
+    /// layer (flushCommands first), sliced per card.
+    bool readRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame) const;
     /// TEST AND TOOL: what the cache holds AT A WORLD POINT on a surface whose
     /// outward normal is `normal` — the question the ray job's read asks at a
     /// hit (jah_rq_card.glsl, the GPU port), answered here on the CPU as its
@@ -707,7 +726,6 @@ private:
     float mCloudSun[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     /// The scene's SH for the GI-off environment half (CardSceneView::ambientSh).
     float mAmbientSh[27] = {};
-    unsigned long long mIndirectSerial = 0ull;
     bool mIndirectMovingLastFrame = false;
     unsigned mIndirectBudget = 0u;
     unsigned mIndirectLastFrame = 0u, mIndirectTexelsLastFrame = 0u;
@@ -719,8 +737,31 @@ private:
     unsigned mLightsDropped = 0u;
     bool mLightsDroppedLogged = false;
     std::vector<float> mRelightCpu, mLightCpu;
-    unsigned long long mRadianceSerial = 0ull;
     bool mRadianceMovingLastFrame = false;
+    /// THE INDIRECT HALF'S STALE SET (accumulateIndirect): the resident cards' boxes and slots (two vec4 a record, synced
+    /// with the table), the per-slot state (4 words a 16-texel cell of the atlas), the report (its count, then slots),
+    /// its read-backs (a ring at a fixed lag of host frames), the two jobs, the frame the report was cleared in, and the
+    /// slot each card holds (the report's map back).
+    Ogre::UavBufferPacked *mCardBoxBuffer = nullptr;
+    Ogre::UavBufferPacked *mCardSlotState = nullptr;
+    Ogre::UavBufferPacked *mCardReport = nullptr;
+    Ogre::UavBufferPacked *mCardCluster = nullptr;   ///< a cascade's clusters' largest moves (the reduce's output)
+    std::vector<float> mCardBoxCpu;
+    struct ReportTicket {
+        Ogre::AsyncTicketPtr ticket;
+        unsigned long long frame = 0ull;
+    };
+    static constexpr unsigned kReportSlots = 8u;
+    ReportTicket mReportReadings[kReportSlots];
+    unsigned mReportNextIssue = 0u, mReportNextTake = 0u;
+    Ogre::HlmsComputeJob *mAccumJob = nullptr;
+    Ogre::HlmsComputeJob *mSensJob = nullptr;
+    unsigned long long mAccumClearFrame = ~0ull;
+    bool mAccumRan = false;
+    std::vector<int> mSlotCard;
+    unsigned long long mIndirectReported = 0ull, mIndirectByRegion = 0ull, mIndirectOverflows = 0ull;
+    bool ensureIndirectBuffers();
+    void harvestIndirectReports(unsigned long long frame);
     unsigned mLightBudget = 0u;
     unsigned mRelitLastFrame = 0u, mRelitTexelsLastFrame = 0u;
     unsigned long long mRelights = 0ull;

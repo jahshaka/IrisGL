@@ -4463,13 +4463,14 @@ public:
     /// the row goes off, and otherwise spends the tier's texel budget.
     void updateSurfaceCache() { mPhoton.updateSurfaceCache(); }
     /// THE CARDS' SCENE FACTS (the surface cache is Photon's: PhotonComponent::updateSurfaceCache).
-    void cardLightKey(unsigned long long out[4]) const;
     void cardSceneFacts(CardSceneView &view) const;
-    unsigned long long foldCardEnvironment(unsigned long long sig) const;
     void cardCandidates(const Ogre::Vector3 &centre, float radius, CardSceneView &view);   // fills view.candidates
     bool readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = readCardTexel(node, card, u, v, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::readCardTexel"); return mPhoton.readCardTexel(node, card, u, v, out); }
+    bool readCardRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = readCardRadiance(out, cacheFrame); }); return r; }   // a REQUEST (U3 4b)
+        JAH_HOST_CALL("Scene::readCardRadiance"); return mPhoton.readCardRadiance(out, cacheFrame); }
     bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out, NodeId onlyNode = 0) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = readCardAt(world, normal, out, onlyNode); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::readCardAt"); return mPhoton.readCardAt(world, normal, out, onlyNode); }
@@ -6944,9 +6945,7 @@ private:
     /// beginStructureEdit / endStructureEdit: the open depth, and what the edits inside asked of GI
     /// (applied once at the outermost end — applyGiInvalidation).
     int  mStructureEditDepth = 0;
-public:   // (a seam PhotonComponent calls)
-    unsigned long long walkCardLights() const;
-private:
+
     /// A lamp event for the scheduler (setLight, removeLight, a shown flip, a pose that moved, a class flip).
     /// ...AND THE LAMP'S REGION (PHOTON-7 stage 3; OgreGi.cpp): its range sphere as last listed joined with its sphere
     /// now - a light hidden, detached or about to be destroyed (`gone`) has none - into the frame's changed-region

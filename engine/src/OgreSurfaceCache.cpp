@@ -31,6 +31,7 @@
 #include <OgrePixelFormatGpuUtils.h>
 #include <Vao/OgreVaoManager.h>
 #include <Vao/OgreUavBufferPacked.h>
+#include <Vao/OgreAsyncTicket.h>
 #include <Vao/OgreConstBufferPacked.h>
 #include <Compositor/OgreCompositorManager2.h>
 #include <Compositor/OgreCompositorNode.h>
@@ -586,7 +587,17 @@ void SurfaceCache::destroyAll() {
         if (mRelightBuffer) { vao->destroyUavBuffer(mRelightBuffer); mRelightBuffer = nullptr; }
         if (mLightBuffer) { vao->destroyUavBuffer(mLightBuffer); mLightBuffer = nullptr; }
         if (mGiBuffer) { vao->destroyUavBuffer(mGiBuffer); mGiBuffer = nullptr; }
+        for (ReportTicket &t : mReportReadings) t.ticket.reset();
+        mReportNextIssue = mReportNextTake = 0u;
+        if (mCardBoxBuffer) { vao->destroyUavBuffer(mCardBoxBuffer); mCardBoxBuffer = nullptr; }
+        if (mCardSlotState) { vao->destroyUavBuffer(mCardSlotState); mCardSlotState = nullptr; }
+        if (mCardReport) { vao->destroyUavBuffer(mCardReport); mCardReport = nullptr; }
+        if (mCardCluster) { vao->destroyUavBuffer(mCardCluster); mCardCluster = nullptr; }
     }
+    mAccumJob = mSensJob = nullptr;
+    mAccumClearFrame = ~0ull;
+    mAccumRan = false;
+    mSlotCard.clear();
     mCardRecords = 0u;
     mInstanceSlots = 0u;
     mCardBufferCpu.clear();
@@ -1284,28 +1295,38 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
     mCloudField = view.cloudField;
     for (int k = 0; k < 4; ++k) { mCloudMap[k] = view.cloudMap[k]; mCloudSun[k] = view.cloudSun[k]; }
     for (int k = 0; k < 27; ++k) mAmbientSh[k] = view.ambientSh ? view.ambientSh[k] : 0.0f;
-    // THE RADIANCE SIGNATURE: a light write that changed what a card's
-    // DIRECT radiance depends on relights every resident card and recaptures
-    // none. A write that also moved a shadow queued the cards for capture
-    // above, and a queued card is relit after its capture, not before it.
-    if (view.radianceSerial != mRadianceSerial) {
-        for (CardRec &c : mCards) c.relight = true;
-        if (!mRadianceMovingLastFrame) ++mInvalidRadiance;   // one per gesture
-        mRadianceMovingLastFrame = true;
-        mRadianceSerial = view.radianceSerial;
-    } else {
-        mRadianceMovingLastFrame = false;
-    }
-    // THE INDIRECT SIGNATURE: the chain re-injected (a light tick, a settle, a
-    // cascade rebuild, a material generation) — the INDIRECT half of every
-    // resident card is stale, under its own budget; the direct half is not.
-    if (view.indirectSerial != mIndirectSerial) {
-        for (CardRec &c : mCards) c.relightIndirect = true;
-        if (!mIndirectMovingLastFrame) ++mInvalidIndirect;
-        mIndirectMovingLastFrame = true;
-        mIndirectSerial = view.indirectSerial;
-    } else {
-        mIndirectMovingLastFrame = false;
+    // THE STALE SET (PHOTON-7 stage 5, 5-1; L2): a card is relit when what it holds CHANGED - never on a serial of
+    // every light write (C4: every card on any light) or of every re-injection (C5: every card's indirect at every rest
+    // and commit), both deleted. THE DIRECT HALF: a card whose box meets a LAMP region (the lamp's old and new spheres,
+    // exact by its range) or every card on the sun's overflow. THE INDIRECT HALF: a card the GPU's accumulation listed
+    // (the light it gathers moved a code since its march: harvestIndirectReports), one inside a SLAB region (a commit's
+    // entering and leaving slabs - it reads another cascade now), or every card on the sky's overflow, a change with no
+    // box or a cascade injected whole. A card not stale is never relit.
+    {
+        const auto boxOf = [](const CardRec &c) {
+            const float hd = c.halfDepth + captureMargin(c.halfDepth);
+            const Ogre::Vector3 ext(std::fabs(c.u.x) * c.halfU + std::fabs(c.v.x) * c.halfV + std::fabs(c.d.x) * hd,
+                                    std::fabs(c.u.y) * c.halfU + std::fabs(c.v.y) * c.halfV + std::fabs(c.d.y) * hd,
+                                    std::fabs(c.u.z) * c.halfU + std::fabs(c.v.z) * c.halfV + std::fabs(c.d.z) * hd);
+            return Ogre::Aabb(c.centre, ext);
+        };
+        bool direct = view.allDirect, indirect = view.allIndirect;
+        for (CardRec &c : mCards) {
+            bool d = view.allDirect, n = view.allIndirect;
+            if (!d || !n) {
+                const Ogre::Aabb box = boxOf(c);
+                for (size_t k = 0; !d && k < view.directBoxes.size(); ++k) d = box.intersects(view.directBoxes[k]);
+                for (size_t k = 0; !n && k < view.indirectBoxes.size(); ++k) n = box.intersects(view.indirectBoxes[k]);
+            }
+            if (d) { c.relight = true; direct = true; }
+            if (n) { c.relightIndirect = true; indirect = true; ++mIndirectByRegion; }
+        }
+        if (direct && !mRadianceMovingLastFrame) ++mInvalidRadiance;   // one per gesture
+        mRadianceMovingLastFrame = direct;
+        harvestIndirectReports(view.frame);   // the GPU's listed cards (a fixed lag behind their frame)
+        for (const CardRec &c : mCards) indirect = indirect || c.relightIndirect;
+        if (indirect && !mIndirectMovingLastFrame) ++mInvalidIndirect;
+        mIndirectMovingLastFrame = indirect;
     }
     if (!mRadiance) return;
     // The cards captured THIS frame: both halves are stale. Every capture
@@ -1324,11 +1345,16 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
         const bool thisFrame = std::find(mBatch.begin(), mBatch.end(), i) != mBatch.end();
         return thisFrame || (!c.queued && c.lastUpdated);
     };
+    // THE ORDER OF THE STALE SET (PHOTON-7 stage 5, 5-1): oldest first, then the nearest to the viewer, then the index -
+    // lexicographic (a product of frames and metres has no scale: PREFLIGHT_5 W10). It orders; it never decides.
     const auto oldestFirst = [this](std::vector<unsigned> &v, bool indirect) {
         std::sort(v.begin(), v.end(), [this, indirect](unsigned a, unsigned b) {
             const unsigned long long ka = indirect ? mCards[a].lastIndirect : mCards[a].lastRelit;
             const unsigned long long kb = indirect ? mCards[b].lastIndirect : mCards[b].lastRelit;
             if (ka != kb) return ka < kb;
+            const float da = (mCards[a].centre - mViewerPos).squaredLength();
+            const float db = (mCards[b].centre - mViewerPos).squaredLength();
+            if (da != db) return da < db;
             return a < b;
         });
     };
@@ -1702,8 +1728,44 @@ void SurfaceCache::relightCards() {
     // it has and stays owed (c.relight), so the next frame that finds the shader built
     // relights exactly these. With no background service the answer is "ready" and the
     // dispatch compiles as it always did.
-    const bool shaderReady =
+    // THE RELIT CARDS' SENSITIVITY (PHOTON-7 stage 5, 5-1; JahCardIndirect_cs.glsl): one workgroup a card, its lit
+    // texels' lowest radiance - the code its indirect's accumulation counts in - and a MARCHED card's accumulator
+    // restarts (its indirect is fresh). After the relight (its radiance read), in the same frame. THE RELIGHT AND ITS
+    // MEASUREMENT ARE ONE STEP: a card relit with no sensitivity measured would never be listed stale again, so the
+    // relight waits for both jobs built (each bound BEFORE its background compile is asked for: requestAsync builds the
+    // descriptor sets from the bound slots, an empty one a null dereference).
+    if (!mSensJob) mSensJob = hc->findComputeJobNoThrow("Jahshaka/CardSensitivity");
+    const bool sensBound = mSensJob && ensureIndirectBuffers();
+    const unsigned sensTex[2] = { 0u, 1u };
+    if (sensBound) {
+        Ogre::TextureGpu *tex[2] = { mRadiance, mAtlas[unsigned(CardLayer::Depth)] };
+        for (unsigned i : sensTex) {
+            Ogre::DescriptorSetTexture2::TextureSlot slot(Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
+            slot.texture = tex[i];
+            mSensJob->setTexture(Ogre::uint8(i), slot, nullptr, false);
+        }
+        Ogre::DescriptorSetUav::BufferSlot b0(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        b0.buffer = mRelightBuffer;
+        b0.access = Ogre::ResourceAccess::Read;
+        mSensJob->_setUavBuffer(0u, b0);
+        Ogre::DescriptorSetUav::BufferSlot b1(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        b1.buffer = mCardSlotState;
+        b1.access = Ogre::ResourceAccess::ReadWrite;
+        mSensJob->_setUavBuffer(1u, b1);
+        Ogre::ShaderParams &params = mSensJob->getShaderParams("default");
+        if (Ogre::ShaderParams::Param *p = params.findParameter("caMode")) {
+            const Ogre::uint32 mode[4] = { 0u, Ogre::uint32(mRelight.size()), 0u, 0u };
+            p->setManualValue(mode, 4u);
+        }
+        params.setDirty();
+        mSensJob->setNumThreadGroupsBasedOn(Ogre::HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u);
+        mSensJob->setNumThreadGroups(unsigned(mRelight.size()), 1u, 1u);
+    }
+    const bool lightReady =
         !mAsyncShaders || hc->requestAsync(mLightJob) != Ogre::HlmsCompute::AsyncPending;
+    const bool sensReady =
+        sensBound && (!mAsyncShaders || hc->requestAsync(mSensJob) != Ogre::HlmsCompute::AsyncPending);
+    const bool shaderReady = lightReady && sensReady;
     if (shaderReady) {
         // THE RELIGHT'S MONITOR ROW (lane TEST-1, the perf audit's F1): it runs in
         // this workspace's own end callback, after its passes closed, so no pass
@@ -1718,6 +1780,14 @@ void SurfaceCache::relightCards() {
         for (unsigned m : mRelightMode) indirect += m == 1u ? 1u : 0u;
         if (indirect) detail::monitor::noteCacheWork(CacheKind::Gi, WorkReason::Sweep, 0, "cards.indirect", indirect);
         detail::photonDispatch(hc, mLightJob, rs);   // the one door: its barriers, the witness
+    }
+    if (sensBound) {
+        if (shaderReady) detail::photonDispatch(hc, mSensJob, rs);
+        const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
+        mSensJob->_setUavBuffer(0u, empty);
+        mSensJob->_setUavBuffer(1u, empty);
+        for (unsigned i : sensTex)
+            mSensJob->setTexture(Ogre::uint8(i), Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty(), nullptr, false);
     }
     {
         const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
@@ -1762,6 +1832,162 @@ void SurfaceCache::relightCards() {
     mRelightMode.clear();
     mVct = nullptr;
     mLightMs = float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+}
+
+// ---------------------------------------------------------------------------
+// THE INDIRECT HALF'S STALE SET (PHOTON-7 stage 5, 5-1; JahCardIndirect_cs.glsl)
+// ---------------------------------------------------------------------------
+//
+// A card's indirect half is a cone march through the voxel chain (CardLight's mode 1), so it is stale when the voxel
+// light it gathers moved by a code since that march - ACCUMULATED per card in absolute radiance, never decided per frame
+// on the brick mask's relative codes (a dim far brick would over-stale, a slow drift would never fire: PREFLIGHT_5 W6).
+// Each cascade that moved this frame adds, on the GPU, its bricks' moves (a pass's, an injection's) weighted by a bound
+// of their share of the card's gather into every resident card's would-move; the card's sensitivity (its darkest lit
+// texel's code, set at its relight) turns radiance into codes; a card at a code is listed, the list read back at a fixed
+// lag of host frames, and planRelights relights its indirect. The card's march resets its would-move.
+namespace {
+constexpr unsigned kCardSlots = (kCardAtlasSize / kCardMinSize) * (kCardAtlasSize / kCardMinSize);
+constexpr unsigned kReportCapacity = 4096u;
+constexpr unsigned kMaxCardClusters = 4096u;   ///< 4^3 bricks a cluster (two words each): a 512^3 cascade's 16^3
+}   // namespace
+
+bool SurfaceCache::ensureIndirectBuffers() {
+    if (mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster) return true;
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
+    if (!vao) return false;
+    if (!mCardBoxBuffer) {
+        std::vector<float> zeros(size_t(kCardRecordCeiling) * 8u, 0.0f);
+        mCardBoxBuffer = vao->createUavBuffer(size_t(kCardRecordCeiling) * 2u, 16u, 0, zeros.data(), false);
+    }
+    if (!mCardSlotState) {
+        std::vector<Ogre::uint32> zeros(size_t(kCardSlots) * 4u, 0u);
+        mCardSlotState = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
+    }
+    if (!mCardReport) {
+        std::vector<Ogre::uint32> zeros(1u + kReportCapacity, 0u);
+        mCardReport = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
+    }
+    if (!mCardCluster) {
+        std::vector<Ogre::uint32> zeros(2u * kMaxCardClusters, 0u);
+        mCardCluster = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
+    }
+    return mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster;
+}
+
+void SurfaceCache::accumulateIndirect(Ogre::UavBufferPacked *brickState, const unsigned dims[3],
+                                      const Ogre::Vector3 &corner, float brickSide, const Ogre::Aabb *finer,
+                                      unsigned long long frame) {
+    if (!mBuilt || mFrozen || !brickState || !mCardRecords || !ensureIndirectBuffers()) return;
+    Ogre::Root &root = Ogre::Root::getSingleton();
+    Ogre::RenderSystem *rs = root.getRenderSystem();
+    Ogre::HlmsCompute *hc = root.getHlmsManager()->getComputeHlms();
+    if (!mAccumJob) mAccumJob = hc ? hc->findComputeJobNoThrow("Jahshaka/CardAccumulate") : nullptr;
+    if (!mAccumJob) return;
+    const auto bufSlot = [](Ogre::UavBufferPacked *b, Ogre::ResourceAccess::ResourceAccess a) {
+        Ogre::DescriptorSetUav::BufferSlot slot(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        slot.buffer = b;
+        slot.offset = 0;
+        slot.sizeBytes = 0;
+        slot.access = a;
+        return slot;
+    };
+    mAccumJob->_setUavBuffer(0u, bufSlot(brickState, Ogre::ResourceAccess::Read));
+    mAccumJob->_setUavBuffer(1u, bufSlot(mCardBoxBuffer, Ogre::ResourceAccess::Read));
+    mAccumJob->_setUavBuffer(2u, bufSlot(mCardSlotState, Ogre::ResourceAccess::ReadWrite));
+    mAccumJob->_setUavBuffer(3u, bufSlot(mCardReport, Ogre::ResourceAccess::ReadWrite));
+    mAccumJob->_setUavBuffer(4u, bufSlot(mCardCluster, Ogre::ResourceAccess::ReadWrite));
+    Ogre::ShaderParams &params = mAccumJob->getShaderParams("default");
+    const auto set = [&params](const char *name, const void *v, bool isFloat) {
+        Ogre::ShaderParams::Param *p = params.findParameter(name);
+        if (!p) return;
+        if (isFloat) p->setManualValue(static_cast<const float *>(v), 4u);
+        else p->setManualValue(static_cast<const Ogre::uint32 *>(v), 4u);
+    };
+    const bool shaderReady = !mAsyncShaders || hc->requestAsync(mAccumJob) != Ogre::HlmsCompute::AsyncPending;
+    const unsigned clusters = ((dims[0] + 3u) / 4u) * ((dims[1] + 3u) / 4u) * ((dims[2] + 3u) / 4u);
+    const bool clustersOver = clusters > kMaxCardClusters;
+    if (shaderReady) {
+        // THE FRAME'S FIRST: the list starts empty (one thread)
+        if (mAccumClearFrame != frame) {
+            mAccumClearFrame = frame;
+            const Ogre::uint32 mode[4] = { 1u, 0u, kReportCapacity, 0u };
+            set("caMode", mode, false);
+            params.setDirty();
+            mAccumJob->setNumThreadGroupsBasedOn(Ogre::HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u);
+            mAccumJob->setNumThreadGroups(1u, 1u, 1u);
+            detail::photonDispatch(hc, mAccumJob, rs);
+        }
+        const Ogre::uint32 mode[4] = { 0u, mCardRecords, kReportCapacity, 0u };
+        const float self[4] = { corner.x, corner.y, corner.z, brickSide };
+        const Ogre::uint32 d[4] = { dims[0], dims[1], dims[2], dims[0] * dims[1] * dims[2] };
+        float lo[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, hi[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        if (finer) {
+            const Ogre::Vector3 a = finer->getMinimum(), b = finer->getMaximum();
+            lo[0] = a.x; lo[1] = a.y; lo[2] = a.z; lo[3] = 1.0f;
+            hi[0] = b.x; hi[1] = b.y; hi[2] = b.z;
+        }
+        // THE REDUCE (one thread a cluster of 4^3 bricks), then THE ACCUMULATION (one thread a card)
+        if (!clustersOver) {
+            const Ogre::uint32 reduce[4] = { 2u, mCardRecords, kReportCapacity, 0u };
+            set("caMode", reduce, false);
+            set("caSelf", self, true);
+            set("caDims", d, false);
+            set("caInnerLo", lo, true);
+            set("caInnerHi", hi, true);
+            params.setDirty();
+            mAccumJob->setNumThreadGroupsBasedOn(Ogre::HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u);
+            mAccumJob->setNumThreadGroups((clusters + 63u) / 64u, 1u, 1u);
+            detail::photonDispatch(hc, mAccumJob, rs);
+            set("caMode", mode, false);
+            params.setDirty();
+            mAccumJob->setNumThreadGroups((mCardRecords + 63u) / 64u, 1u, 1u);
+            detail::photonDispatch(hc, mAccumJob, rs);
+            mAccumRan = true;
+        }
+    }
+    // A MOVE THAT COULD NOT BE MEASURED (the job not built yet, or a cascade past the cluster table): every card's
+    // indirect is listed - the region list's overflow rule (a stale set never misses a change it cannot bound)
+    if (!shaderReady || clustersOver) {
+        for (CardRec &c : mCards)
+            if (c.indirectValid) c.relightIndirect = true;
+        ++mIndirectOverflows;
+    }
+    const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
+    for (Ogre::uint8 k = 0u; k < 5u; ++k) mAccumJob->_setUavBuffer(k, empty);
+}
+
+void SurfaceCache::endIndirectFrame(unsigned long long frame) {
+    if (!mAccumRan || !mCardReport) return;
+    mAccumRan = false;
+    ReportTicket &r = mReportReadings[mReportNextIssue];
+    if (r.ticket.get()) return;   // every slot in flight: a later frame's list answers (the cards stay listed)
+    r.ticket = mCardReport->readRequest(0u, 1u + kReportCapacity, /*accurateTracking=*/false);
+    r.frame = frame;
+    mReportNextIssue = (mReportNextIssue + 1u) % kReportSlots;
+}
+
+void SurfaceCache::harvestIndirectReports(unsigned long long frame) {
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
+    if (!vao) return;
+    for (;;) {
+        ReportTicket &r = mReportReadings[mReportNextTake];
+        if (!r.ticket.get()) return;
+        // TAKEN AT A FIXED LAG OF HOST FRAMES (the feedback readings' rule): a function of the frames, never of the GPU's pace.
+        if (frame < r.frame || frame - r.frame <= vao->getDynamicBufferMultiplier()) return;
+        const Ogre::uint32 *w = static_cast<const Ogre::uint32 *>(r.ticket->map());
+        const Ogre::uint32 n = std::min<Ogre::uint32>(w[0], kReportCapacity);
+        for (Ogre::uint32 k = 0; k < n; ++k) {
+            const Ogre::uint32 slot = w[1u + k];
+            if (slot >= mSlotCard.size() || mSlotCard[slot] < 0) continue;   // freed since: nothing to relight
+            mCards[size_t(mSlotCard[slot])].relightIndirect = true;
+            ++mIndirectReported;
+        }
+        r.ticket->unmap();
+        r.ticket.reset();
+        mReportNextTake = (mReportNextTake + 1u) % kReportSlots;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2638,6 +2864,24 @@ void SurfaceCache::syncBuffers() {
         std::memcpy(&mCardBufferCpu[size_t(i) * kCardGpuFloats], &rec, sizeof(rec));
     }
     mCardRecords = records;
+    // ...AND THE INDIRECT HALF'S RECORDS (PHOTON-7 stage 5, 5-1; accumulateIndirect): each card's world box and its
+    // atlas SLOT (its corner in 16-texel cells, the per-card state's index), and the slot's card (the report's map back).
+    mCardBoxCpu.assign(size_t(kCardRecordCeiling) * 8u, 0.0f);
+    mSlotCard.assign(size_t(kCardAtlasSize / kCardMinSize) * (kCardAtlasSize / kCardMinSize), -1);
+    for (unsigned i = 0; i < records; ++i) {
+        const CardRec &c = mCards[i];
+        const float hd = c.halfDepth + captureMargin(c.halfDepth);
+        const Ogre::Vector3 ext(std::fabs(c.u.x) * c.halfU + std::fabs(c.v.x) * c.halfV + std::fabs(c.d.x) * hd,
+                                std::fabs(c.u.y) * c.halfU + std::fabs(c.v.y) * c.halfV + std::fabs(c.d.y) * hd,
+                                std::fabs(c.u.z) * c.halfU + std::fabs(c.v.z) * c.halfV + std::fabs(c.d.z) * hd);
+        const unsigned slot = (c.atlasY / kCardMinSize) * (kCardAtlasSize / kCardMinSize) + c.atlasX / kCardMinSize;
+        float *b = &mCardBoxCpu[size_t(i) * 8u];
+        b[0] = c.centre.x; b[1] = c.centre.y; b[2] = c.centre.z;
+        std::memcpy(&b[3], &slot, sizeof(slot));
+        b[4] = ext.x; b[5] = ext.y; b[6] = ext.z;
+        mSlotCard[slot] = int(i);
+    }
+    if (ensureIndirectBuffers()) mCardBoxBuffer->upload(mCardBoxCpu.data(), 0, size_t(kCardRecordCeiling) * 2u);
 
     // THE INSTANCE TABLE, indexed by the item slot. A slot with no cards reads
     // (0, 0) and the shader takes the voxel path it always took — which is why
@@ -2721,7 +2965,7 @@ void SurfaceCache::update(const CardSceneView &view) {
     // normal, depth, emissive and roughness — no light quantity at all. The sun's
     // visibility is traced (traceSun: a sun change re-traces every resident
     // card's still term and captures nothing), and every other light is the
-    // relight's (radianceSerial, planRelights).
+    // relight's (the changed-region list's stale set, planRelights).
 
     // THE QUEUE, IN LUMEN'S ORDER: priority = lastUsed - lastUpdated, drained
     // oldest first. A card that has never been captured has `lastUpdated` 0 and
@@ -2848,6 +3092,9 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.indirectTexelsLastFrame = mIndirectTexelsLastFrame;
     out.indirectRelights = mIndirectRelights;
     out.invalidIndirect = mInvalidIndirect;
+    out.indirectReported = mIndirectReported;
+    out.indirectOverflows = mIndirectOverflows;
+    out.indirectByRegion = mIndirectByRegion;
     out.indirectOn = mIndirectOnLastRelight;
     out.lightMs = mLightMs;
     out.instancesResident = 0u;
@@ -2902,6 +3149,43 @@ bool SurfaceCache::readTexel(NodeId node, unsigned card, float u, float v,
     const InstanceRec &inst = mInstances[it->second];
     if (card >= inst.cardCount) return false;
     return sampleCard(mCards[inst.firstCard + card], u, v, out);
+}
+
+bool SurfaceCache::readRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame) const {
+    out.clear();
+    cacheFrame = mFrame;
+    if (!mBuilt || !mRadiance) return false;
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+    rs->flushCommands();   // the relights that wrote these texels are in the open command buffer
+    Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+    const Ogre::PixelFormatGpu fmt = mRadiance->getPixelFormat();
+    Ogre::AsyncTextureTicket *tk = tm->createAsyncTextureTicket(kCardAtlasSize, kCardAtlasSize, 1u,
+                                                                Ogre::TextureTypes::Type2D, fmt);
+    tk->download(mRadiance, 0, true, nullptr, true);
+    const Ogre::TextureBox box = tk->map(0);
+    for (const InstanceRec &inst : mInstances) {
+        for (unsigned k = 0; k < inst.cardCount; ++k) {
+            const CardRec &c = mCards[inst.firstCard + k];
+            CardRadiance r;
+            r.node = inst.node;
+            r.card = k;
+            r.size = c.size;
+            r.lastRelit = c.lastRelit;
+            r.lastIndirect = c.lastIndirect;
+            r.rgb.resize(size_t(c.size) * c.size * 3u);
+            for (unsigned y = 0; y < c.size; ++y)
+                for (unsigned x = 0; x < c.size; ++x) {
+                    float v[4];
+                    decodeTexel(fmt, box.at(c.atlasX + x, c.atlasY + y, 0), v);
+                    float *o = &r.rgb[(size_t(y) * c.size + x) * 3u];
+                    o[0] = v[0]; o[1] = v[1]; o[2] = v[2];
+                }
+            out.push_back(std::move(r));
+        }
+    }
+    tk->unmap();
+    tm->destroyAsyncTextureTicket(tk);
+    return true;
 }
 
 bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &out) const {

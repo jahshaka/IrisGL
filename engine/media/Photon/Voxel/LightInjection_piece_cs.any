@@ -359,7 +359,10 @@
 	}
 	// THE BRICK MASK'S GROUP MAXIMUM starts at zero (PHOTON-7 stage 3): visible to the group after the step-0 barrier below.
 	if( gl_LocalInvocationIndex == 0u )
+	{
 		jahBrickShared = 0u;
+		jahBrickAbsShared = 0u;
+	}
 	//All lights are offsetted by p_voxelOrigin so that we don't
 	//have to do this calculation per cell
 	// PHOTON-7 stage 2: the cell this invocation lights - its id in the dispatch's region plus the region's first cell.
@@ -678,6 +681,12 @@
 @end
 	// THE BRICK MASK (PHOTON-7 stage 3): the most this voxel's direct term (either side) changed, relative.
 	const float jahDirChange = max( jahBrickChange( dOld.xyz, dNew.xyz ), jahBrickChange( dbOld.xyz, dbNew.xyz ) );
+	// ...and ABSOLUTE (PHOTON-7 stage 5): the most the total moved with it (a delta adds exactly this to the total and
+	// the back), the brick state's word 7 - a non-finite change saturates.
+	const float3 jahAbsDir3 = max( abs( dNew.xyz - dOld.xyz ), abs( dbNew.xyz - dbOld.xyz ) );
+	float jahAbsDir = max( max( jahAbsDir3.x, jahAbsDir3.y ), jahAbsDir3.z );
+	if( ( floatBitsToUint( jahAbsDir ) & 0x7F800000u ) == 0x7F800000u )
+		jahAbsDir = 1.0e30;
 
 	// THE FUSED STEP 0: the directional level 0 from the block's children per half-axis.
 	const uint li = gl_LocalInvocationIndex;
@@ -731,6 +740,8 @@
 	// 4-aligned). A non-negative float's bits order as the float does.
 	if( jahDirChange > 0.0f )
 		atomicMax( jahBrickShared, floatBitsToUint( jahDirChange ) );
+	if( jahAbsDir > 0.0f )
+		atomicMax( jahBrickAbsShared, floatBitsToUint( jahAbsDir ) );
 	memoryBarrierShared();
 	barrier();
 	if( li == 0u && jahBrickShared != 0u )
@@ -738,5 +749,11 @@
 		const uint3 jahBrick = jahInjCell >> 3u;
 		atomicMax( jahBrickMask[2u * ( jahBrick.x + p_brickDims.x * ( jahBrick.y + p_brickDims.y * jahBrick.z ) )],
 				   jahBrickShared );
+	}
+	if( li == 0u && jahBrickAbsShared != 0u )
+	{
+		const uint3 jahBrick = jahInjCell >> 3u;
+		atomicMax( jahFbState[8u * ( jahBrick.x + p_brickDims.x * ( jahBrick.y + p_brickDims.y * jahBrick.z ) ) + 7u],
+				   jahBrickAbsShared );
 	}
 @end

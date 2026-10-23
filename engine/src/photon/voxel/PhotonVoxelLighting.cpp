@@ -1920,7 +1920,7 @@ namespace Ogre
         // without a bounce, into the direct part's own volumes with one (step 0 adds the bounce's
         // part after every bounce). The slots follow u0 in LightInjection_cs.glsl's order.
         const uint8 numUavsNeeded =
-            uint8( 1u + ( mLightDirect ? 1u : 0u ) + ( mLightDirect ? 5u : 4u ) + ( delta ? 1u : 0u ) + 1u );
+            uint8( 1u + ( mLightDirect ? 1u : 0u ) + ( mLightDirect ? 5u : 4u ) + ( delta ? 1u : 0u ) + 2u );
         if( mLightInjectionJob->getNumUavUnits() != numUavsNeeded )
             mLightInjectionJob->setNumUavUnits( numUavsNeeded );
         mLightInjectionJob->setProperty( "vct_keep_direct", mLightDirect ? 1 : 0 );
@@ -1969,6 +1969,10 @@ namespace Ogre
             bufSlot.offset = 0u;
             bufSlot.sizeBytes = mBrickZeros.size() * sizeof( uint32 );
             bufSlot.access = ResourceAccess::ReadWrite;
+            mLightInjectionJob->_setUavBuffer( uavIdx++, bufSlot );
+            // ...and the feedback's brick state (PHOTON-7 stage 5: word 7, the injection's absolute move), the current one
+            bufSlot.buffer = mBrickState[mBrickStateCur];
+            bufSlot.sizeBytes = mBrickState[mBrickStateCur]->getTotalSizeBytes();
             mLightInjectionJob->_setUavBuffer( uavIdx++, bufSlot );
         }
     }

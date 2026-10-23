@@ -1026,6 +1026,13 @@ public:
         out = CardSample();
         return false;
     }
+    /// EVERY RESIDENT CARD'S RADIANCE, WHOLE (PHOTON-7 stage 5's oracle door): one download of the lit atlas, sliced per
+    /// card, with each card's relight frames (`cacheFrame` the cache's frame now). Flushes the commands and blocks.
+    virtual bool readCardRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame) {
+        out.clear();
+        cacheFrame = 0ull;
+        return false;
+    }
     /// Writes every layer of every RESIDENT card to `<prefix>-<layer><n>.png`.
     /// A tool path for reading a capture channel by channel.
     virtual bool dumpCardAtlas(const std::string & /*prefix*/, std::string &err) {

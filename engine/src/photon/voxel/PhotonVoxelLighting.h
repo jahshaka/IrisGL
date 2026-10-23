@@ -505,6 +505,14 @@ namespace Ogre
         /// THE HOST'S FRAME (PHOTON-7 stage 4's read R2): the engine frame this volume's light work is in - set by the host
         /// before an injection and before the feedback; the once-a-frame CLEAR and the readings' lag count it.
         void setLightFrame( uint64 frame ) { mLightFrame = frame; }
+        /// THE FEEDBACK'S BRICK STATE as it stands (8 words a brick, PhotonBrickFeedback_cs.glsl) and its bricks per axis -
+        /// the cards' indirect accumulation reads it (PHOTON-7 stage 5); null before the volume's first light work.
+        UavBufferPacked *feedbackBrickState( unsigned dims[3] ) const
+        {
+            for( int a = 0; a < 3; ++a )
+                dims[a] = mBrickDims[a];
+            return mBrickState[mBrickStateCur];
+        }
 
         /// THE COMMIT'S LIGHT for the next update() (PhotonCommitLight); null a whole injection.
         void setCommitLight( const PhotonCommitLight *commit );

@@ -81,6 +81,11 @@ uniform restrict image3D backVoxel;
 // bits of a relative change (jahBrickChange), max-reduced. Cleared before every update (PhotonVoxelLighting::update), the
 // last UAV.
 layout( std430, ogre_U@value(jahInjUav) ) restrict coherent buffer jahBrickLayout { uint jahBrickMask[]; };
+@add( jahInjUav, 1 )
+// PHOTON-7 stage 5: THE FEEDBACK'S BRICK STATE (8 words a brick, PhotonBrickFeedback_cs.glsl): word 7 takes the most a
+// voxel's total changed in this injection, absolute radiance (atomicMax of the float bits; the frame's CLEAR zeroes it) -
+// the cards' accumulation reads it beside a pass's move.
+layout( std430, ogre_U@value(jahInjUav) ) restrict coherent buffer jahFbStateLayout { uint jahFbState[]; };
 
 // Jahshaka (METAL-BOUNCE-1): THE METAL at t3 - the F0 (rgb) and Fresnel-90 weight (alpha) of every surface's
 // specular lobe, re-emitted by the lobe's directional integral (JahSpecularAlbedo).
@@ -202,6 +207,7 @@ float jahBrickChange( float3 a, float3 b )
 }
 // ...and the work group's most, reduced in shared memory before one atomic per group.
 shared uint jahBrickShared;
+shared uint jahBrickAbsShared;
 
 //in uvec3 gl_NumWorkGroups;
 //in uvec3 gl_WorkGroupID;

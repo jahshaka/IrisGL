@@ -402,6 +402,9 @@ public:
         /// ...and the frame a WHOLE VOLUME's injection last ran (whole, or a delta with no boxes): it read every lamp
         /// as it stands, so a relight owed that frame is answered (relightAndFeedback).
         unsigned long long injectedWholeFrame = ~0ull;
+        /// ...and the frame a WHOLE injection (no delta: a new placement, a first build) last ran: every voxel new, every
+        /// card's indirect stale (PHOTON-7 stage 5, 5-1).
+        unsigned long long wholeInjectedFrame = ~0ull;
         /// ITS LIGHT IS THIS PLACEMENT'S (PHOTON-7 stage 4): a rebuild at the same placement re-injects as a delta (the
         /// light the feedback built is kept); one at a new placement (or a first build) injects whole.
         bool lightPlaced = false;
@@ -891,6 +894,7 @@ public:
     void notePhotonView(const void *view, bool presents, const PhotonViewShape &shape);
     bool readCardTexel(NodeId node, unsigned card, float u, float v,
                        CardSample &out);
+    bool readCardRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame);
     bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
                     NodeId onlyNode = 0);
     bool dumpCardAtlas(const std::string &prefix, std::string &err);
@@ -1206,6 +1210,7 @@ private:
     /// pass over every cascade that owes one (runFeedback: outermost first, then the accumulations and the rules).
     void relightAndFeedback();
     void runFeedback(bool forceAll, unsigned long long frame, size_t forceInner = ~size_t(0));
+    void accumulateCardIndirect(const std::vector<char> *ran);
     /// The feedback's readings that landed (harvest): each cascade's active count and books, and the chain's REST.
     void harvestFeedback();
     /// The feedback owes work: a relight owed, an activation no landed reading answered, or active bricks.
@@ -1776,10 +1781,6 @@ private:
     /// THE CARDS' LIGHT FOLD, kept between frames (SPEED-CPU, perf audit E4):
     /// updateSurfaceCache re-walks the lights only when one of the four counters
     /// it reads moved, this frame or the last (see there).
-    unsigned long long mCardLightKey[4] = {};
-    bool mCardLightFoldValid = false;
-    bool mCardLightKeyMovedLastFrame = false;
-    unsigned long long mCardLightFold = 0;
     /// Whether the last full refresh took the chain's dirty path (G1) rather than
     /// a from-scratch build. Reported by giStatus; cleared by every such build.
     bool mGiReusedLastRefresh = false;

@@ -297,6 +297,58 @@
 			}
 		},
 
+		"Jahshaka/CardAccumulate" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahCardIndirect_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"inform_shader_of_texture_size" : false,
+			"inform_shader_of_texture_data_change" : false,
+			"uav_units" : 5,
+			"properties" :
+			{
+				"jah_card_sens" : 0
+			},
+			"params" :
+			[
+				["caMode",      [0,0,0,0], "uint"],
+				["caSelf",      [0,0,0,1], "float"],
+				["caDims",      [1,1,1,1], "uint"],
+				["caInnerLo",   [0,0,0,0], "float"],
+				["caInnerHi",   [0,0,0,0], "float"]
+			]
+		},
+
+		"Jahshaka/CardSensitivity" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahCardIndirect_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"inform_shader_of_texture_size" : false,
+			"inform_shader_of_texture_data_change" : true,
+			"textures" : [ {}, {} ],
+			"uav_units" : 2,
+			"properties" :
+			{
+				"jah_card_sens" : 1
+			},
+			"params" :
+			[
+				["caMode",      [0,0,0,0], "uint"],
+				["caSelf",      [0,0,0,1], "float"],
+				["caDims",      [1,1,1,1], "uint"],
+				["caInnerLo",   [0,0,0,0], "float"],
+				["caInnerHi",   [0,0,0,0], "float"]
+			],
+			"params_glsl" :
+			[
+				["cardRadiance", [0], "int"],
+				["cardDepth",    [1], "int"]
+			]
+		},
+
 		"Jahshaka/HzbBuild" :
 		{
 			"threads_per_group" : [16, 16, 1],

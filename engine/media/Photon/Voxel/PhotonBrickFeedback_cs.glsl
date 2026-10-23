@@ -28,7 +28,10 @@
 //   [5] the brick's SENSITIVITY: the most of its voxels' re-emission over their own code, codes per unit of radiance
 //       an input moves (float bits; atomicMax by the pass, kept over a stop)
 //   [6] the FRACTION of a unit the last accumulation's rounding left (float bits, in units: carried into the next, so
-//       the fixed point rounds once a brick and never biases - PHOTON-7 stage 4's read R6); [7] unused
+//       the fixed point rounds once a brick and never biases - PHOTON-7 stage 4's read R6)
+//   [7] THIS FRAME'S INJECTIONS' move: the most a voxel's total changed by a direct term's delta, absolute radiance (float
+//       bits; atomicMax by LightInjection, cleared by CLEAR) - the change a pass's move [4] cannot see (a pass gathers
+//       from the total the delta already wrote), read by the cards' accumulation (PHOTON-7 stage 5, JahCardIndirect)
 // THE ARGUMENTS, 16 words: [0..2] the bounce's and the copy's groups (8 x the bricks: group y is the brick), [4..6]
 // the directional levels' (1 x the bricks), [8] the bricks listed (passed) this frame, [9] the bricks active at the
 // selection (passed or carried), [12] the bricks active after the frame, [13] stops, [14] resumes, [15] the bricks whose
@@ -133,6 +136,7 @@ void main()
 		{
 			fbMask[2u * i] = 0u;
 			fbMask[2u * i + 1u] = 0u;
+			fbState[8u * i + 7u] = 0u;
 		}
 		return;
 	}

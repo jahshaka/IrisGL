@@ -2528,71 +2528,8 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
 // PLANS (residency, invalidation, this frame's batch); the capture executes
 // inside Root's frame, after `updateSceneGraph`, as the first workspace in the
 // manager's list (OgreSurfaceCache.cpp, makeWorkspace — the shadow fix).
-// THE RADIANCE SIGNATURE'S LIGHT HALF (updateSurfaceCache): what a card's LIT
-// radiance depends on, EVERY light's pose and shadow key (any lamp may reach a
-// relit card: a superset of the relight's culled list) plus colour, power, reach and cone. A change
-// relights the resident set under the relight's own budget and CAPTURES
-// NOTHING: no light quantity is in a capture (ATOM-S3-CARDCAP — the sun's
-// visibility is traced, SurfaceCache::traceSun, which follows the sun's
-// direction itself). Over `mLightNodes`, the engine's own light index (a hint
-// that is a superset), so this is a handful of quantised folds and not a walk
-// of the node map. (The relight's lights themselves are the scene's one light
-// list, SceneLightList.h, selected by the cache.)
-unsigned long long OgreScene::walkCardLights() const {
-    unsigned long long radianceSig = 1469598103934665603ull;
-    const auto foldInto = [](unsigned long long &sig, unsigned long long v) {
-        sig ^= v;
-        sig *= 1099511628211ull;
-    };
-    const auto quant = [](float f) {
-        // Quantised to a millimetre / a thousandth: float noise below the
-        // tolerance the whole pipeline works to must not relight a card.
-        return (unsigned long long)(long long)std::lround(double(f) * 1000.0);
-    };
-    for (NodeId lid : mLightNodes) {
-        auto lit = mNodes.find(lid);
-        if (lit == mNodes.end() || !lit->second.light) continue;
-        const Node &ln = lit->second;
-        unsigned long long pose[9] = { ln.lightShadowKey, ln.shown ? 1ull : 0ull, 0, 0, 0, 0, 0, 0, 0 };
-        if (ln.node) {
-            const Ogre::Vector3 p = ln.node->_getDerivedPosition();
-            const Ogre::Quaternion q = ln.node->_getDerivedOrientation();
-            pose[2] = quant(p.x); pose[3] = quant(p.y); pose[4] = quant(p.z);
-            pose[5] = quant(q.x); pose[6] = quant(q.y); pose[7] = quant(q.z); pose[8] = quant(q.w);
-        }
-        for (unsigned long long v : pose) foldInto(radianceSig, v);
-    }
-    // ...the colour, the power, the reach and the cone: a colour slider costs
-    // the cache a relight of the resident set (the `Jahshaka/CardLight` job,
-    // under its own budget) and not one capture.
-    for (NodeId lid : mLightNodes) {
-        auto lit = mNodes.find(lid);
-        if (lit == mNodes.end() || !lit->second.light) continue;
-        const Ogre::Light *l = lit->second.light;
-        const Ogre::ColourValue c = l->getDiffuseColour() * l->getPowerScale();
-        const auto foldR = [&radianceSig](float f) {
-            radianceSig ^= (unsigned long long)(long long)std::lround(double(f) * 1000.0);
-            radianceSig *= 1099511628211ull;
-        };
-        foldR(c.r); foldR(c.g); foldR(c.b);
-        foldR(l->getAttenuationRange()); foldR(l->getAttenuationLinear());
-        foldR(l->getAttenuationQuadric());
-        foldR(l->getSpotlightInnerAngle().valueRadians());
-        foldR(l->getSpotlightOuterAngle().valueRadians());
-        foldR(l->getSpotlightFalloff());
-    }
-    return radianceSig;
-}
-
 // THE CARDS' SCENE FACTS (PhotonComponent::updateSurfaceCache, OgreGi.cpp — the cache is Photon's,
-// these are the scene's): the light key, the footprint, the cloud field and the ambient SH, the
-// environment's fold, and the candidates the card feed files.
-void OgreScene::cardLightKey(unsigned long long out[4]) const {
-    out[0] = transformEpoch();
-    out[1] = mGiLightWriteSerial;
-    out[2] = mLightsRemoved;
-    out[3] = (unsigned long long)mLightNodes.size();
-}
+// these are the scene's): the footprint, the cloud field and the ambient SH, and the candidates the card feed files.
 
 void OgreScene::cardSceneFacts(CardSceneView &view) const {
     view.rayFootprintPerMetre = mRayFootprintPerMetre;
@@ -2605,23 +2542,6 @@ void OgreScene::cardSceneFacts(CardSceneView &view) const {
         view.cloudSun[2] = cs.altitude;    view.cloudSun[3] = cs.invMuSun;
     }
     view.ambientSh = mLastAmbientSh;
-}
-
-unsigned long long OgreScene::foldCardEnvironment(unsigned long long sig) const {
-    const auto foldI = [&sig](unsigned long long v) {
-        sig ^= v;
-        sig *= 1099511628211ull;
-    };
-    {
-        const Ogre::TextureGpu *cube =
-            (mReflectionTex && mEnvLightScale > 0.0f) ? mReflectionTex : nullptr;
-        foldI((unsigned long long)(uintptr_t)cube);
-        const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
-        for (float g : gain) foldI((unsigned long long)(long long)std::lround(double(g) * 1e4));
-        for (int k = 0; k < 27; ++k)
-            foldI((unsigned long long)(long long)std::lround(double(mLastAmbientSh[k]) * 1e4));
-    }
-    return sig;
 }
 
 void OgreScene::cardCandidates(const Ogre::Vector3 &centre, float radius, CardSceneView &view) {
@@ -2805,6 +2725,13 @@ bool PhotonComponent::readCardTexel(NodeId node, unsigned card, float u, float v
     out = CardSample();
     if (!mSurfaceCache) return false;
     return mSurfaceCache->readTexel(node, card, u, v, out);
+}
+
+bool PhotonComponent::readCardRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame) {
+    out.clear();
+    cacheFrame = 0ull;
+    if (!mSurfaceCache) return false;
+    return mSurfaceCache->readRadiance(out, cacheFrame);
 }
 
 bool PhotonComponent::readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
