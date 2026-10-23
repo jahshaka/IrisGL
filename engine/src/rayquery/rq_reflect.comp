@@ -1055,13 +1055,15 @@ void main()
 	recBary = vec2( 0.0 );
 	recN = -L;
 	photonSource = 0u;   // 1 card, 2 voxels (jahHitRadianceSourced); 3 the sky; 4 the screen
-	// (1) THE SCREEN TRACE, where the chain runs one: the answer with the probability the screen vouches for it.
-	// A STOCHASTIC lobe's coin is the sample's own, a fresh draw a frame (the temporal mean averages the mixture). THE
-	// LOBE'S CENTRE RAY (the mirror: each frame's sample taken whole) TAKES THE COIN'S EXPECTATION instead (READ_B F2,
-	// the lead's ruling - a fixed coin made every fade a hard seam that moved with the camera): where the screen
-	// vouches fully (vouch 1) its answer alone, where it does not answer the ray alone, and in between BOTH, blended
-	// vouch x screen + (1 - vouch) x ray - what the stochastic texels converge to, with no variance. Screen mode
-	// (p.screen.y) keeps the screen's answer whole wherever it gives one.
+	// (1) THE SCREEN TRACE, where the chain runs one, and THE COIN'S EXPECTATION for EVERY sample (READ_B F2; the lead's
+	// round-3 ruling (i), built after the rest's tail diagnostic): a random choice between the screen's answer and the
+	// ray's, on the screen's vouch, is replaced by its MEAN - where the screen vouches fully (vouch 1) its answer alone,
+	// where it gives none the ray's alone, and in between (the fade band) BOTH, blended vouch x screen + (1 - vouch) x ray.
+	// Rao-Blackwell: an expectation never raises the variance, and where the two disagree it removes v (1 - v) (S - R)^2
+	// from every sample (a fixed coin of one half made every fade a hard seam that moved with the camera; a per-sample
+	// coin left that variance in every rest at a reflected edge - the hold's tail). ONE rule for the mirror's centre ray
+	// and the lobe's draw alike. Screen mode (p.screen.y, the screen-alone measuring arm) keeps its coin: a draw on the
+	// vouch, the centre ray's fixed one half.
 	screenHit = false; screenMoving = false;
 	screenWas = world; screenPos = world;
 	screenRadiance = vec3( 0.0 );
@@ -1069,9 +1071,9 @@ void main()
 	blendVouch = 1.0;   // the screen's share of a centre ray's sample; 1 = the screen's alone
 	if( p.screen.x > 0.5 )
 	{
-		// (the centre ray in Screen mode keeps its fixed one-half: the screen-alone arm is unchanged)
-		const float coin = centre
-			? ( p.screen.y > 0.5 ? 0.5 : 0.0 )
+		// (Screen mode keeps its coin: the screen-alone arm is unchanged)
+		const bool screenAlone = p.screen.y > 0.5;
+		const float coin = !screenAlone ? 0.0 : centre ? 0.5
 			: float( jahReflectPcg( uint( seedPix.x ) * 7919u + uint( seedPix.y ) * 104729u + frame * 15485863u +
 									0x9E3779B9u ) & 0xFFFFFFu ) * ( 1.0 / 16777216.0 );
 		float vouch;
@@ -1083,14 +1085,14 @@ void main()
 			hitT = screenT;
 			traced = screenRadiance;
 			photonSource = 4u;
-			if( centre && p.screen.y < 0.5 )
+			if( !screenAlone )
 				blendVouch = vouch;
 		}
 	}
 	// THE SCREEN ALONE (PostFxDesc::reflectSources Screen): a sample the screen does not answer is NO SAMPLE - no ray
 	// follows it (biased by construction: the measuring arm the agreement row reads Both against Rays beside).
 	noSample = !screenHit && p.screen.y > 0.5;
-	// THE CENTRE RAY'S BLEND: the screen answered with partial trust, so the ray answers the rest.
+	// THE BLEND: the screen answered with partial trust, so the ray answers the rest.
 	blend = screenHit && blendVouch < 1.0;
 	if( ( !screenHit || blend ) && !noSample )
 	{
@@ -1272,8 +1274,8 @@ void main()
 		// THE RECORD: the write-back (rq_hit_composite) writes the decoded radiance and its distance as this frame's
 		// SAMPLE - the radiance arriving one pass later, before the resolve reads it. A record the decode leaves
 		// unshaded, or one a full list dropped (counted), is no sample.
-		// (A BLENDED centre ray's record: the screen's share is written here, the write-back adds the ray's - the
-		// record's weight - or, unshaded, takes the screen's answer whole.)
+		// (A BLENDED sample's record: the screen's share is written here, the write-back adds the ray's - the record's
+		// weight - or, unshaded, takes the screen's answer whole.)
 		imageStore( reflectSample, ivec3( tc, gEye ),
 					blend ? vec4( blendVouch * screenRadiance, blendVouch * screenT ) : vec4( 0.0 ) );
 		const vec3 hitPos = origin + L * hitT;

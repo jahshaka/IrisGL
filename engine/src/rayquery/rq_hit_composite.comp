@@ -49,7 +49,7 @@ layout( rgba16f, set = 0, binding = 4 ) uniform image2D probeAtlas;
 layout( rgba32ui, set = 0, binding = 5 ) uniform readonly uimage2D jahHitIds;
 layout( set = 0, binding = 6 ) uniform sampler3D fogAerial;
 /// THE REFLECTION'S SAMPLE (PHOTON-2 1b): what a shaded record writes (rq_reflect.comp's `reflectSample`).
-/// A BLENDED centre ray's record (weight < 1, rq_reflect.comp's (1)): the trace wrote the screen's share, this job adds
+/// A BLENDED sample's record (weight < 1, rq_reflect.comp's (1)): the trace wrote the screen's share, this job adds
 /// the ray's - so the image is read here too.
 layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray reflectSample;
 #define JAH_FOG_P( k ) p.fog[k]
@@ -110,7 +110,7 @@ void main()
 	const ivec3 at3 = ivec3( xy, int( ( dest >> 30u ) & 1u ) );
 	if( p.list.z < 0.5 || any( greaterThanEqual( at3, imageSize( reflectSample ) ) ) )
 		return;
-	// THE MIRROR'S BLEND (rq_reflect.comp's (1)): a record of weight under 1 is the RAY'S SHARE of a centre ray the
+	// THE BLEND (rq_reflect.comp's (1), every sample): a record of weight under 1 is the RAY'S SHARE of a sample the
 	// screen half vouched for - the trace wrote the screen's share (1 - weight) of the radiance and the distance; this
 	// adds the ray's, or, unshaded, leaves the screen's answer whole (its share renormalised), never a sample short of
 	// one. A whole record (weight 1) is written as it always was.
