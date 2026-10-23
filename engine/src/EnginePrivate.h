@@ -5885,6 +5885,8 @@ private:
     /// code out of every PBS shader again.
     void refreshDecalBindings();
     void releaseNode(NodeId id, Node &n);
+    /// The one teardown of a node's light (removeLight, releaseNode): its gone sphere listed, the lamp event noted.
+    void destroyNodeLight(NodeId id, Node &n);
 
 public:
     /// ADDS this scene's registry sizes into `out` (nodes/meshes/materials/

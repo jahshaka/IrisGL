@@ -2057,30 +2057,35 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
     } JAH_CATCH(mError, false);
 }
 
+// THE ONE WAY A NODE'S LIGHT IS DESTROYED (PHOTON-7 stage 3's read F1): removeLight and releaseNode (the mirror deletes a
+// lamp node with removeNode) both come here, so every path that destroys a light LISTS ITS GONE SPHERE (the changed-
+// region list: while the light still is) and is a lamp event for the GI scheduler, like one arriving (U0 3c).
+void OgreScene::destroyNodeLight(NodeId id, Node &n) {
+    if (!n.light) return;
+    listLampChange(n, true);
+    noteLampChanged(n);
+    // Untied from every cached shadow map first: a fixed light is dereferenced by its node on every update
+    // (releaseShadowLamp).
+    if (mEngine) mEngine->releaseShadowLamp(this, n.light);
+    n.light->detachFromParent();
+    mSceneMgr->destroyLight(n.light);
+    n.light = nullptr;
+    mLightNodes.erase(std::remove(mLightNodes.begin(), mLightNodes.end(), id), mLightNodes.end());
+    ++mLightsRemoved;
+}
+
 bool OgreScene::removeLight(NodeId id) {
     if (postScene([=](OgreScene &s) { return s.removeLight(id); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::removeLight");
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.light) return false;
     JAH_TRY {
-        // THE LAMP'S LAST REGION, while the light still is (PHOTON-7 stage 3): the sphere it lit, listed as gone.
-        listLampChange(it->second, true);
-        // Untied from every cached shadow map first: a fixed light is
-        // dereferenced by its node on every update (releaseShadowLamp).
-        if (mEngine) mEngine->releaseShadowLamp(this, it->second.light);
-        it->second.light->detachFromParent();
-        mSceneMgr->destroyLight(it->second.light);
-        it->second.light = nullptr;
-        mLightNodes.erase(std::remove(mLightNodes.begin(), mLightNodes.end(), id),
-                          mLightNodes.end());
+        destroyNodeLight(id, it->second);
         recountNode(it->second);
-        ++mLightsRemoved;
         // A recreated light starts with no profile and no mask: forget what the
         // dead one carried, or the next setLight would skip re-assigning it.
         it->second.lightProfilePath.clear();
         it->second.lightMaskPath.clear();
-        // A LAMP LEAVING is a lamp event for the GI scheduler, like one arriving (U0 3c).
-        noteLampChanged(it->second);
         it->second.lightGiKnown = it->second.lightPoseKnown = false;
         if (it->second.lightNode) { mSceneMgr->destroySceneNode(it->second.lightNode); it->second.lightNode = nullptr; }
         // A VANISHED LIGHT MUST STOP BOUNCING — and that is a re-INJECTION over
@@ -2401,12 +2406,7 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
                    ++mChangeStats.itemsDestroyed; }
     n.meshRef = 0; n.materialRef = 0;
     // The internal light child must go before the reparent loop below would leak it to root.
-    if (n.light) {
-        if (mEngine) mEngine->releaseShadowLamp(this, n.light);   // see removeLight
-        n.light->detachFromParent(); mSceneMgr->destroyLight(n.light); n.light = nullptr;
-        mLightNodes.erase(std::remove(mLightNodes.begin(), mLightNodes.end(), id), mLightNodes.end());
-        ++mLightsRemoved;
-    }
+    if (n.light) destroyNodeLight(id, n);
     if (n.lightNode) { mSceneMgr->destroySceneNode(n.lightNode); n.lightNode = nullptr; }
     // Same for the decal's internal child. Note releaseDecal only tears the
     // objects down; the SceneManager's atlas bindings are refreshed by the
