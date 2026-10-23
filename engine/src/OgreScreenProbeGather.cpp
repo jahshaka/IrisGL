@@ -1117,6 +1117,11 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
             historyCopied = true;
         }
     }
+    // AN INPUT, NOT A DOOR (PHOTON-7 stage 5, measured): a held frame's copy takes a pending slot and ADVANCES the view's
+    // frame counter below - the sample sequence's key (knobs[2] off the rest) and the packed history's stochastic
+    // rounding's (knobs6[2]) - so the arms gather.historyReadback and the irradiance readback change every later
+    // frame's picture: gi.walk's second frozen walk differed from the first on 59 of 60 frames without it. (On the
+    // leftover list: a held frame's copy must not advance the counter.)
     if (irradianceCopied || historyCopied) {
         View::Pending &pd = v.pending[v.frame % kFramesInFlight];
         pd.frame = mHost.gatherFrameNow();
