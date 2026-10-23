@@ -69,8 +69,20 @@ vec3 jahRestAnswer( vec3 H, bool hasH, vec3 M, float v, float N )
 /// stored mean `M` (linear, the image's) and the moment `m2` (the denoiser-space luma's, the image's), and `res` - what
 /// their stores lost (the denoiser-space mean's rgb, the moment's w), carried into the next fold.
 struct JahRestStats { vec3 M; float m2; vec4 res; };
-/// What a 16-bit store keeps of x.
-float jahHalf1( float x ) { return unpackHalf2x16( packHalf2x16( vec2( x, 0.0 ) ) ).x; }
+/// WHAT A 16-BIT STORE KEEPS OF x, built from the float's bits: the nearest fp16 value (ties to even), as an fp32 the
+/// rgba16f store holds exactly - so the store rounds nothing whatever its own rounding, and the residual below carries
+/// the whole error. MEASURED (PHOTON-7 stage 6, the reference diagnostic): unpackHalf2x16( packHalf2x16( x ) ) did not
+/// reproduce what the store kept - the residual read back ~0 (max 2^-24) and the rest mean drifted DOWN against a
+/// 32-bit mean of the same samples, -4.4 / -13.5 / -27.3 % at v 300 / 1,200 / 4,096. x finite, |x| under 65,520 (the
+/// callers clamp to kMaxRadiance).
+float jahHalf1( float x )
+{
+	const float a = abs( x );
+	if( a < 6.103515625e-05 )   // under fp16's smallest normal (2^-14): its subnormal grid, 2^-24 apart
+		return sign( x ) * roundEven( a * 16777216.0 ) * 5.9604644775390625e-08;
+	const uint u = floatBitsToUint( a );
+	return sign( x ) * uintBitsToFloat( ( u + 0x00000FFFu + ( ( u >> 13u ) & 1u ) ) & 0xFFFFE000u );
+}
 vec3 jahHalf3( vec3 x ) { return vec3( jahHalf1( x.x ), jahHalf1( x.y ), jahHalf1( x.z ) ); }
 /// Whether the frozen half holds the residual: once no reader composes H - past the hand-over, or with no H - for EVERY
 /// texel, by its count alone (a texel's draw can turn from the fixed estimator to the lobe at rest, its throw settling:
@@ -99,7 +111,9 @@ void jahRestFold( inout JahRestStats s, vec3 sampleLin, float vPrev )
 	MD = max( MD, vec3( 0.0 ) );
 	s.M = jahHalf3( clamp( jahFromDenoise( MD ), vec3( 0.0 ), vec3( kMaxRadiance ) ) );
 	s.m2 = jahHalf1( max( q, 0.0 ) );
-	s.res = vec4( MD - jahToDenoise( s.M ), q - s.m2 );
+	// (the residual is itself stored in fp16: rounded the same way, so its own store is exact too - its rounding is
+	// unbiased, the next order, and not carried)
+	s.res = vec4( jahHalf3( MD - jahToDenoise( s.M ) ), jahHalf1( q - s.m2 ) );
 }
 /// THE REST MEAN'S STANDARD ERROR over v samples, in the DENOISER space's luma (the spatial filter's sigma at rest) and
 /// carried to LINEAR luma by the space's slope at the mean (dL / dL_D = 1 / ( 1 - E L_D / 10 )^2). 0 for v < 1.
