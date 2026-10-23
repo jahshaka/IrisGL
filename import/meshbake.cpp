@@ -2189,6 +2189,71 @@ QVector<MeshBake::DagDriftRow> MeshBake::dagDrift(const MeshPtr &mesh)
     return rows;
 }
 
+QVector<MeshBake::ClusterDriftRow> MeshBake::clusterDrift(const MeshPtr &mesh)
+{
+    QVector<ClusterDriftRow> rows;
+    atomdag::MeshView view;
+    std::vector<unsigned> base;
+    if (!dagInput(mesh, &view, &base) || mesh->clusterDag.isEmpty()) return rows;
+    const MeshClusterDag &dag = mesh->clusterDag;
+    Vec3 lo = view.position(base[0]), hi = lo;
+    for (unsigned v : base) {
+        const Vec3 p = view.position(v);
+        lo = Vec3(std::min(lo.x(), p.x()), std::min(lo.y(), p.y()), std::min(lo.z(), p.z()));
+        hi = Vec3(std::max(hi.x(), p.x()), std::max(hi.y(), p.y()), std::max(hi.z(), p.z()));
+    }
+    surface::TriangleGrid baseGrid;
+    baseGrid.build(view.positions, view.posComps, base, lo, hi, drift::gridRes(base.size() / 3));
+    // level 0's facets, by their sorted corners: a cluster facet level 0 has lies ON it (distance 0, never queried)
+    std::vector<std::array<unsigned, 3>> present(base.size() / 3);
+    for (size_t t = 0; t < present.size(); ++t) {
+        std::array<unsigned, 3> f = { base[t * 3], base[t * 3 + 1], base[t * 3 + 2] };
+        std::sort(f.begin(), f.end());
+        present[t] = f;
+    }
+    std::sort(present.begin(), present.end());
+    const auto at = [&](unsigned v) { return view.position(v); };
+    std::vector<int> produced;
+    for (int i = 0; i < dag.clusters.size(); ++i)
+        if (dag.clusters.at(i).refined >= 0) produced.push_back(i);
+    std::vector<float> drift(produced.size(), 0.0f);
+    surface::Queries queries(static_cast<size_t>(bakepool::width()));
+    const bakepool::Range range(produced.size(), 8);
+    bakepool::forRange(range, int(queries.size()), [&](size_t, size_t begin, size_t end, int slot) {
+        surface::TriangleGrid::Query &query = queries[size_t(slot)];
+        for (size_t i = begin; i < end; ++i) {
+            const MeshClusterDag::Cluster &c = dag.clusters.at(produced[i]);
+            float local = 0.0f;
+            for (int t = 0; t < int(c.triangleCount); ++t) {
+                const unsigned ia = dag.vertexOf(c, t, 0), ib = dag.vertexOf(c, t, 1), ic = dag.vertexOf(c, t, 2);
+                std::array<unsigned, 3> f = { ia, ib, ic };
+                std::sort(f.begin(), f.end());
+                if (std::binary_search(present.begin(), present.end(), f)) continue;
+                const Vec3 a = at(ia), b = at(ib), cc = at(ic);
+                const Vec3 pts[10] = { (a + b + cc) * (1.0f / 3.0f), (a + b) * 0.5f, (b + cc) * 0.5f, (cc + a) * 0.5f,
+                                       a, b, cc, (a * 4.0f + b + cc) * (1.0f / 6.0f), (b * 4.0f + cc + a) * (1.0f / 6.0f),
+                                       (cc * 4.0f + a + b) * (1.0f / 6.0f) };
+                for (const Vec3 &q : pts) {
+                    const float d = baseGrid.closest(query, q, nullptr, nullptr, nullptr, local);
+                    if (std::isfinite(d) && d > local) local = d;
+                }
+            }
+            drift[i] = local;
+        }
+    });
+    rows.reserve(int(produced.size()));
+    for (size_t i = 0; i < produced.size(); ++i) {
+        const MeshClusterDag::Cluster &c = dag.clusters.at(produced[i]);
+        ClusterDriftRow row;
+        row.cluster = produced[i];
+        row.depth = int(dag.groups.at(c.refined).depth) + 1;
+        row.drift = drift[i];
+        row.stored = dag.groups.at(c.refined).error;
+        rows.append(row);
+    }
+    return rows;
+}
+
 
 MeshBake::Model MeshBake::buildFromScene(const SceneSource &source, const QString &filePath,
                                          const QString &fingerprint, const QString &extractDir,
