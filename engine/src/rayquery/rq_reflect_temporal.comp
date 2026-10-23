@@ -5,8 +5,11 @@
 // current answer, reconstructed) and the spatial filter (rq_reflect_filter.comp).
 //
 //   THE SPACE: Lumen's denoiser space on pre-exposed colour (jah_reflect_denoise.glsl) - the box, the clamp, the pick
-//   and the blend are all taken there; the history is stored LINEAR (rgb) with the second moment of the denoiser-space
-//   luminance in its alpha (Lumen's SpecularAndSecondMoment), the frame count in the state (Lumen's 5.3 step).
+//   and the blend are all taken there; the history is stored LINEAR (rgb) with the VARIANCE of the denoiser-space
+//   luminance in its alpha - Lumen's SpecularAndSecondMoment CENTRED (PHOTON-7 stage 6, the lead's ruling on the moment's
+//   precision: a raw second moment in the fp16 slot loses the variance to m2 - mean^2's cancellation below ~2 % relative
+//   noise, mean^2 x 2^-11; the variance itself keeps its precision relative to itself, no memory), the frame count in
+//   the state (Lumen's 5.3 step).
 //   THE NEIGHBOURHOOD: 21 taps (a 5 x 5 minus its corners) of the RESOLVED answers, YCoCg, unweighted mean +- 1 sigma
 //   (k = 1), a per-channel AABB. (The linear box of a bilateral 3 x 3 reconstruction and the box's extension to hold
 //   the texel's own raw sample it replaces were PHOTON-2's measured deviations; the paired run on gi.reflect_mover's
@@ -212,8 +215,9 @@ layout( set = 0, binding = 3 ) uniform sampler2DArray gBufShadowRoughness;
 layout( set = 0, binding = 4 ) uniform sampler2DArray sceneDepth;
 /// THE RESOLVE'S SCRATCH (trace texels): rgb = the resolved answer (linear), w = the resolved hit distance, 0 = none.
 layout( rgba16f, set = 0, binding = 5 ) uniform readonly image2DArray ssrReflection;
-/// THE HISTORY: rgb = the mean (linear), alpha = the second moment of its denoiser-space luminance - at rest the REST
-/// half's alpha holds the rest samples' luma root mean square (the stop reads it, PHOTON-2 rev 12 P1). The previous half
+/// THE HISTORY: rgb = the mean (linear), alpha = the VARIANCE of its denoiser-space luminance (centred: the precision is
+/// the variance's own) - at rest the REST half's alpha holds the rest samples' second moment with its store's residual
+/// (jah_reflect_rest.glsl: the stop reads it, exact to the residual's ~2^-22). The previous half
 /// is written at rest on a resume, own texel only (R1). THIS frame's half arrives holding the trace's message: the
 /// surface's own step since last frame (w = 1 on a moving slot).
 layout( rgba16f, set = 0, binding = 6 ) uniform image2DArray historyPrev;
@@ -310,14 +314,15 @@ const int kReach = 2;
 const int kTileSide = 8 + 2 * kReach;
 shared vec4 sTile[kTileSide * kTileSide];
 
-/// ONE HISTORY CANDIDATE, bilinear over the previous trace grid: the denoiser-space mean, its second moment, the frame
+/// ONE HISTORY CANDIDATE, bilinear over the previous trace grid: the denoiser-space mean, its luma's variance, the frame
 /// count and the throw, renormalised over the taps that held an answer (and, for the surface history, passed the
-/// relative depth test).
-struct History { bool ok; vec3 d; float m2; float n; float hitT; };
+/// relative depth test). The taps' mixture's variance is theirs plus their means' spread about the mixture's mean (the
+/// spread in fp32 from the taps' means: what the raw second moment's bilinear carried implicitly).
+struct History { bool ok; vec3 d; float var; float n; float hitT; };
 History historyNone()
 {
 	History h;
-	h.ok = false; h.d = vec3( 0.0 ); h.m2 = 0.0; h.n = 0.0; h.hitT = 0.0;
+	h.ok = false; h.d = vec3( 0.0 ); h.var = 0.0; h.n = 0.0; h.hitT = 0.0;
 	return h;
 }
 History historyAt( vec2 puv, float pz, bool depthTest, float threshold, ivec2 traceRes )
@@ -327,6 +332,7 @@ History historyAt( vec2 puv, float pz, bool depthTest, float threshold, ivec2 tr
 	const ivec2 base = ivec2( floor( at ) );
 	const vec2 f = at - vec2( base );
 	float sumW = 0.0;
+	float sumL = 0.0, sumL2 = 0.0;
 	for( int k = 0; k < 4; ++k )
 	{
 		const ivec2 o = ivec2( k & 1, k >> 1 );
@@ -342,8 +348,12 @@ History historyAt( vec2 puv, float pz, bool depthTest, float threshold, ivec2 tr
 		const vec4 c = imageLoad( historyPrev, ivec3( t, gEye ) );
 		if( !finite3( c.xyz ) || !finite1( c.w ) )
 			continue;
-		h.d += jahToDenoise( clamp( c.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) * w;
-		h.m2 += max( c.w, 0.0 ) * w;
+		const vec3 dk = jahToDenoise( clamp( c.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) );
+		const float lk = jahDenoiseLuma( dk );
+		h.d += dk * w;
+		h.var += max( c.w, 0.0 ) * w;
+		sumL += lk * w;
+		sumL2 += lk * lk * w;
 		h.n += s.N * w;
 		h.hitT += s.hitT * w;
 		sumW += w;
@@ -351,7 +361,9 @@ History historyAt( vec2 puv, float pz, bool depthTest, float threshold, ivec2 tr
 	if( sumW > 0.01 )
 	{
 		h.ok = true;
-		h.d /= sumW; h.m2 /= sumW; h.n /= sumW; h.hitT /= sumW;
+		h.d /= sumW; h.n /= sumW; h.hitT /= sumW;
+		const float lMean = sumL / sumW;
+		h.var = h.var / sumW + max( sumL2 / sumW - lMean * lMean, 0.0 );
 	}
 	return h;
 }
@@ -367,12 +379,12 @@ History historyOfPoint( vec3 point, EyeImage before, bool depthTest, float thres
 	return historyAt( puv, pz, depthTest, threshold, traceRes );
 }
 
-/// THE STORE: the mean (linear) and its second moment into this half, the count and the throw in the state - and, for a
-/// texel RESUMING at rest, into the frozen half too (H = M: its rest restarts from here).
-void storeMean( ivec2 tc, vec3 meanD, float m2, float count, float hitT, bool resumed, JahReflectState st )
+/// THE STORE: the mean (linear) and its luma's variance into this half, the count and the throw in the state - and, for
+/// a texel RESUMING at rest, into the frozen half too (H = M: its rest restarts from here).
+void storeMean( ivec2 tc, vec3 meanD, float var, float count, float hitT, bool resumed, JahReflectState st )
 {
 	const vec4 hist = vec4( clamp( jahFromDenoise( max( meanD, vec3( 0.0 ) ) ), vec3( 0.0 ), vec3( kMaxRadiance ) ),
-							max( m2, 0.0 ) );
+							max( var, 0.0 ) );
 	imageStore( historyCur, ivec3( tc, gEye ), hist );
 	st.N = count;
 	st.hitT = hitT;
@@ -501,7 +513,9 @@ void main()
 			{
 				hs.ok = true;
 				hs.d = jahToDenoise( sofar );
-				hs.m2 = jahDenoiseLuma( hs.d ) * jahDenoiseLuma( hs.d );
+				// (its variance: the rest samples' - the per-sample spread, not the mean's - else none known)
+				const float eR = jahRestErrorD( rs, vPrev );
+				hs.var = vPrev >= 2.0 ? eR * eR * vPrev : 0.0;
 				hs.n = ( hasH ? Hn : 0.0 ) + vPrev;
 				hs.hitT = st.hitT;
 			}
@@ -585,7 +599,7 @@ void main()
 			imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 			return;
 		}
-		storeMean( tc, hs.d, hs.m2, hs.n, hs.hitT, resumed, st );
+		storeMean( tc, hs.d, hs.var, hs.n, hs.hitT, resumed, st );
 		return;
 	}
 	// ---- THE BOX: the 21 resolved taps (Lumen's GetNeighborhood: the centre always, the neighbours by validity) ----
@@ -613,7 +627,7 @@ void main()
 	{
 		// NO HISTORY (a disocclusion, a new surface, a first frame): the current answer, N = 0 (Lumen's) - the spatial
 		// filter widens over it.
-		storeMean( tc, curD, curLuma * curLuma, 0.0, resolved.w, resumed, st );
+		storeMean( tc, curD, 0.0, 0.0, resolved.w, resumed, st );
 		return;
 	}
 	// ---- THE PICK, THE CLAMP AND THE CONFIDENCE (Lumen's step 5) ----
@@ -625,20 +639,26 @@ void main()
 		a = hs.ok && length( centre - hitY ) > length( centre - surfY ) + kHitErrorMargin ? 0.8 : 0.0;
 	const vec3 hY = mix( hitY, surfY, a ), hYc = mix( hitYc, surfYc, a );
 	const float histN = a > 0.5 ? hs.n : hh.n;
-	const float histM2 = mix( hh.m2, hs.m2, a );
+	// (the picked mixture's variance: the two histories' and their means' spread)
+	const float lHit = jahDenoiseLuma( hh.d ), lSurf = jahDenoiseLuma( hs.d );
+	const float histVar = mix( hh.var, hs.var, a ) + a * ( 1.0 - a ) * ( lSurf - lHit ) * ( lSurf - lHit );
 	const float histT = mix( hh.hitT, hs.hitT, a );
 	// THE GI FREEZE (M1's measuring arm, rest.x): the live estimator's own reprojection - picked as live, its clamp never
 	// applied - and nothing else: no sample enters (the motion's own resampling, measured alone). A lobe whose draw is
 	// the centre ray every frame takes its ray as it does live (the old radiance is wrong at the new pose).
 	if( p.rest.x > 0.5 && maxFrames > 1.0 )
 	{
-		storeMean( tc, jahFromYCoCg( hY ), histM2, histN, histT, resumed, st );
+		storeMean( tc, jahFromYCoCg( hY ), histVar, histN, histT, resumed, st );
 		return;
 	}
 	float confidence = clamp( 1.0 - length( abs( hYc - hY ) / max( extent, vec3( kExtentFloor ) ) ), 0.0, 1.0 );
 	confidence = 0.75 * confidence + 0.25;
 	const float frames = min( histN * confidence + 1.0, maxFrames );
 	const float blend = 1.0 / frames;
-	storeMean( tc, mix( jahFromYCoCg( hYc ), curD, blend ), mix( histM2, curLuma * curLuma, blend ), frames,
+	// THE VARIANCE'S UPDATE, centred (the exponential mean's exact identity: with the mean m' = m + b ( x - m ), the
+	// variance s'^2 = ( 1 - b ) ( s^2 + b ( x - m )^2 ) - about the history's kept mean, the clamped one)
+	const float lKept = jahDenoiseLuma( jahFromYCoCg( hYc ) );
+	storeMean( tc, mix( jahFromYCoCg( hYc ), curD, blend ),
+			   ( 1.0 - blend ) * ( histVar + blend * ( curLuma - lKept ) * ( curLuma - lKept ) ), frames,
 			   mix( histT, resolved.w, blend ), resumed, st );
 }

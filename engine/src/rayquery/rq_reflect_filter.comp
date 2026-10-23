@@ -9,7 +9,8 @@
 //   THE CENTRE: the temporal pass' mean at this pixel - its own trace texel at full resolution; at half resolution the
 //   JOINT-BILATERAL UPSAMPLE of the four trace texels around it (bilinear, times the plane weight and the normal weight
 //   of each texel's surface against this pixel's: an edge's texels on the other surface carry nothing) - its count N and
-//   its temporal standard deviation sigma = sqrt( E[ L^2 ] - L^2 ) (the history's second moment, denoiser space). AT REST
+//   its temporal standard deviation sigma = the root of the history's luma variance (stored centred by the temporal
+//   pass, denoiser space). AT REST
 //   the rest's answer composed (the frozen moving mean handed over to the rest mean, jah_reflect_rest.glsl) and sigma
 //   := the REST MEAN'S STANDARD ERROR (the luminance stop tightens as it converges; jahRestReach is deleted).
 //   THE KERNEL: LUMEN'S SUPPORT AND WEIGHTS, ENOUGH TAPS FOR A PIPELINE WITHOUT TSR (the lead's ruling on commit 7):
@@ -303,17 +304,17 @@ Answer answerAt( ivec2 t )
 	const vec4 M = imageLoad( historyCur, ivec3( t, gEye ) );
 	if( p.knobs2.x < 0.5 )
 	{
-		// MOVING: the temporal mean and its second moment (Lumen's SpecularAndSecondMoment).
+		// MOVING: the temporal mean and its luma's variance (Lumen's SpecularAndSecondMoment, centred: the temporal
+		// pass stores the variance itself, its precision its own).
 		if( !finite3( M.xyz ) )
 			return a;
 		a.ok = true;
 		a.d = jahToDenoise( clamp( M.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) );
-		const float l = jahDenoiseLuma( a.d );
-		a.sigma = sqrt( max( M.w - l * l, 0.0 ) );
+		a.sigma = sqrt( max( M.w, 0.0 ) );
 		a.n = sc.N;
 		return a;
 	}
-	// AT REST: the frozen moving history H and the rest mean M composed; sigma from H's second moment handed over to
+	// AT REST: the frozen moving history H and the rest mean M composed; sigma from H's variance handed over to
 	// the rest mean's standard error (the second moment of its samples' denoiser-space luma kept beside it, over its v
 	// samples - both in the denoiser space, commit 8).
 	const vec4 Hr = imageLoad( historyPrev, ivec3( t, gEye ) );
@@ -328,12 +329,7 @@ Answer answerAt( ivec2 t )
 		return a;
 	a.ok = true;
 	a.d = jahToDenoise( clamp( answer, vec3( 0.0 ), vec3( kMaxRadiance ) ) );
-	float sigmaH = 0.0;
-	if( hasH )
-	{
-		const float lh = jahDenoiseLuma( jahToDenoise( clamp( Hr.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) );
-		sigmaH = sqrt( max( Hr.w - lh * lh, 0.0 ) );
-	}
+	const float sigmaH = hasH ? sqrt( max( Hr.w, 0.0 ) ) : 0.0;   // (H's alpha: the moving variance)
 	float se = 0.0;
 	if( v >= 1.0 )
 	{
