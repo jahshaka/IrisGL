@@ -2812,12 +2812,6 @@ struct GiParams {
     /// thing that is actually spent, and they convert to milliseconds through a
     /// number that was measured once.
     int       cardBudgetTexels = 0;
-    /// THE RESIDENCY RADIUS in metres: an instance further than this from the
-    /// camera holds no pages at all. 0 = the tier's own (kCardResidencyRadius).
-    /// Lumen's equivalent is its 200 m "Lumen Scene View Distance"; ours is a
-    /// tier row because the atlas is a fixed 2k at this phase and the radius is
-    /// what keeps it from overflowing.
-    float     cardResidencyRadius = 0.0f;
 
     /// "Is this the same GI configuration I last pushed?" Exact, like every
     /// other change guard here — and load-bearing rather than cosmetic: a GI
@@ -2859,16 +2853,14 @@ struct GiParams {
     }
     /// The values `Scene::setGiTuning` pushes, compared on their own.
     bool giTuningEqual(const GiParams &o) const {
-        return // THE CARD CACHE'S BUDGET AND RADIUS (SURFACE-CACHE phase 2).
-               // They belong in THIS comparison and not in `operator==` for the
-               // same reason the three above do: the residency pass reads them
-               // every frame, so moving either takes effect on the next frame
-               // with nothing torn down — and a host that only pushed on
-               // `operator==` would swallow a radius change entirely, which is
-               // the defect this line exists to prevent.
+        return // THE CARD CACHE'S BUDGET (SURFACE-CACHE phase 2). It belongs in
+               // THIS comparison and not in `operator==` for the same reason the
+               // three above do: the capture pass reads it every frame, so moving
+               // it takes effect on the next frame with nothing torn down — and a
+               // host that only pushed on `operator==` would swallow the change
+               // entirely, which is the defect this line exists to prevent.
                gather == o.gather &&
-               cards == o.cards && cardBudgetTexels == o.cardBudgetTexels &&
-               cardResidencyRadius == o.cardResidencyRadius;
+               cards == o.cards && cardBudgetTexels == o.cardBudgetTexels;
     }
     /// The cascade table, compared only over the entries in USE — a table
     /// beyond `cascadeCount` is not part of the configuration.
@@ -3030,13 +3022,6 @@ struct GiQualityFacts {
     /// under every old sizing; a frame that wants more waits for the next. Cards
     /// run only where the rays run (High and Epic in the World table).
     unsigned cardBudgetTexels = 131072u;  // the batch: 8 cards a frame ~ 0.50 ms
-    /// THE RESIDENCY RADIUS, metres. Beyond it an instance holds no pages. It
-    /// is a tier row because the atlas is a fixed 2k at this phase: 256 pages
-    /// of 128 texels is about forty six-card sets at full size, so the radius
-    /// is what decides which forty. (Lumen's equivalent dial is 200 m at its
-    /// 4k atlas with a page table and streaming; ours has neither yet, and
-    /// pretending otherwise would just overflow the atlas silently.)
-    float    cardResidencyRadius = 30.0f;
     /// THE LIT CARD'S PER-FRAME BUDGET (PHOTON-CARDS-1, SC-1c), in atlas TEXELS
     /// relit a frame by the `Jahshaka/CardLight` job — a second budget beside the
     /// capture's, because a light's colour or intensity changes every card's
@@ -3188,7 +3173,6 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascadeCount = 2;
         f.probeFaceSize   = 128u;
         f.cardBudgetTexels = 98304u;    // 6 cards a frame ~ 0.37 ms (sized 0.4)
-        f.cardResidencyRadius = 15.0f;
         f.cardLightTexels = 65536u;     // 4 pages a frame
         f.cardIndirectTexels = 16384u;  // 1 page a frame
         f.gather.on = false;            // Low keeps the cone diffuse (T-A)
@@ -3207,7 +3191,6 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeHdrDefault     = true;
         f.probeShadowsDefault = true;
         f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 1.0)
-        f.cardResidencyRadius = 60.0f;
         f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
         f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
         f.gather = { true, 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
@@ -3223,7 +3206,6 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cascadeCount = 4;
         f.probeFaceSize   = 256u;
         f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 0.6)
-        f.cardResidencyRadius = 30.0f;
         f.cardLightTexels = 131072u;    // 8 pages a frame
         f.cardIndirectTexels = 32768u;  // 2 pages a frame
         f.gather = { true, 16u, 6u, 4u };   // 36 rays a probe (T-A)
@@ -3956,9 +3938,12 @@ struct SunContactStatus {
 /// indirect half) in, and its radiance texel by texel (rgb, row-major, the atlas's rows: row 0 the card's +v side).
 struct CardRadiance {
     NodeId node = 0;
-    unsigned card = 0u;
+    unsigned card = 0u;     ///< its place in the instance's layout (every card the mesh's list cuts)
+    unsigned bucket = 0u;   ///< its face: the outward axis's largest component, 2 x axis + (negative)
     unsigned size = 0u;
     unsigned long long lastRelit = 0ull, lastIndirect = 0ull;
+    /// The newest cache frame a reader read it (or its admission's, or its capture's).
+    unsigned long long lastRead = 0ull;
     std::vector<float> rgb;
 };
 
@@ -4056,10 +4041,16 @@ struct CardCacheStatus {
     /// what the device can render to (RGB9E5 where it is a colour attachment,
     /// R11G11B10F where it is not) and the choice must be visible.
     std::string emissiveFormat;
-    /// Residency: instances inside the radius holding pages, and their cards.
+    /// Residency: the instances holding pages, and their cards.
     unsigned instancesResident = 0u;
     unsigned cardsResident = 0u;
-    float    residencyRadius = 0.0f;
+    /// RESIDENCY BY THE READERS' DEMAND (PHOTON-7 stage 5, 5-2): the cards admitted (a face a hit marked, a read
+    /// card's re-admission after a move), evicted (unread for the window, an arrival needing the room) and moved by the
+    /// atlas's compaction (each re-captured where it lands), cumulative; and under the measuring arm
+    /// "cards.demandCount", the readers' hits ( the reflection's that found a card, that found none, the gather's
+    /// found, none ).
+    unsigned long long admitted = 0ull, evicted = 0ull, compactionMoves = 0ull;
+    unsigned long long demandHits[4] = { 0ull, 0ull, 0ull, 0ull };
     /// The queue: cards waiting for a capture, and the texel budget a frame
     /// spends on them.
     unsigned queueLength = 0u;

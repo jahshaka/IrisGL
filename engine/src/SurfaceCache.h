@@ -15,12 +15,14 @@
 //     than a page is SPLIT across several; a card smaller than a page is
 //     SUB-ALLOCATED inside one, with the half-texel inset that keeps a filtered
 //     fetch off its neighbour's texels (Lumen's rule).
-//   * RESIDENCY BY DISTANCE: an instance beyond the tier's radius holds no
-//     pages at all, and gives back the pages it held.
+//   * RESIDENCY BY THE READERS' DEMAND (PHOTON-7 stage 5, 5-2): a card is
+//     resident because a ray's hit read it, and a face because a hit there
+//     found no card; the least recently read card is evicted first when an
+//     arrival needs its room (never by distance: the sphere is deleted).
 //   * THE CAPTURE, in THE VIEW'S OWN SceneManager (below).
 //   * INVALIDATION on the three signatures the voxel side already keeps — the
 //     transform epoch, the material generation, the light write serial.
-//   * A PER-FRAME TEXEL BUDGET with Lumen's priority, `lastUsed - lastUpdated`.
+//   * A PER-FRAME TEXEL BUDGET with Lumen's priority, `lastRead - lastUpdated`.
 //   * THE CARD RECT TABLE and its SSBO, indexed by the item slot the TLAS
 //     already carries as `instanceCustomIndex` — the key the reflection
 //     trace's card read (rq_reflect.comp, jah_rq_card.glsl) looks a hit up by.
@@ -78,7 +80,6 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include <OgrePixelFormatGpu.h>
@@ -192,11 +193,19 @@ struct CardRec {
     float halfU = 0.0f, halfV = 0.0f, halfDepth = 0.0f;   ///< world metres
     /// Where it lives in the atlas, in texels, and how big it is.
     unsigned atlasX = 0u, atlasY = 0u, size = 0u;
-    /// Lumen's priority pair. `lastUsed` is bumped by the residency pass every
-    /// frame the card is inside the radius (phase 4 will bump it from the GPU's
-    /// own feedback instead); `lastUpdated` is the frame its capture landed.
-    unsigned long long lastUsed = 0ull;
+    /// ITS PLACE IN ITS INSTANCE'S LAYOUT (every card the mesh's list cuts, resident or not: PHOTON-7 stage 5, 5-2 -
+    /// an instance holds the faces its readers read) and the FACE BUCKET its outward axis falls in (the axis of its
+    /// largest component and its sign, jah_rq_card.glsl's jahCardBucket) - the key a hit that found no card marks.
+    unsigned short index = 0u;
+    unsigned char bucket = 0u;
+    /// Lumen's priority pair. `lastRead` is THE READERS' (the newest frame a ray's hit read the card, from the GPU's
+    /// demand stamps; its admission's frame until then) - `readBy` the same per reader (0 the reflection, 1 the gather:
+    /// each counts its window on its own clock); `lastUpdated` is the frame its capture landed. `since` is the frame it
+    /// took its atlas cell: a stamp older than that is the cell's previous card's.
+    unsigned long long lastRead = 0ull;
+    unsigned long long readBy[2] = { 0ull, 0ull };
     unsigned long long lastUpdated = 0ull;
+    unsigned long long since = 0ull;
     bool queued = false;         ///< waiting for a capture
     /// THE LIT CARD: its radiance is stale (captured since it was relit, or a
     /// light's radiance signature moved), and the frame it was last relit.
@@ -236,7 +245,18 @@ struct CardSceneView {
     /// chain centres on, for the same reason.
     Ogre::Vector3 viewerPos;
     unsigned budgetTexels = 0u;
-    float    radius = 0.0f;
+    /// THE SCENE'S ITEM SLOTS (the TLAS's custom indices): the instance table covers every one, so a hit on an item
+    /// that holds no card can mark the face it wanted (PHOTON-7 stage 5, 5-2).
+    unsigned itemSlots = 0u;
+    /// THE MEASURING ARM "cards.demandCount": the readers count their carded and uncarded hits.
+    bool demandCount = false;
+    /// THE DEMAND IS OPEN (PHOTON-7 stage 5, 5-2): what the readers' rays can hit changed within the last
+    /// SurfaceCache::kDemandSettleFrames - the authoritative camera moved, geometry changed (an Edit, a Mover, a change
+    /// with no box) or the cache was built. Closed, the resident set holds (a moved instance's own cards excepted): at a
+    /// still pose over a still world the demand was sampled for the settle and a later grazing hit is that sampling's
+    /// noise, never new demand - every capture breaks the reflection's rest view-wide (reflectionReadsKey), and a face
+    /// first grazed 500 frames into a still pose broke photon-glass's (gi.walk).
+    bool demandOpen = true;
     /// THE RAY TIER'S FOOTPRINT PER METRE of distance from the viewer (the ray
     /// rule's `sampleFootprintPerspective` at one metre, OgreScene::updateRayLevels):
     /// the near copy a sun ray hits may lie one footprint off the captured level,
@@ -272,12 +292,7 @@ struct CardSceneView {
     /// chain hands the same coefficients over and this is not read.
     const float *ambientSh = nullptr;
 
-    /// REFLECT-FIX-1: the nodes a GESTURE holds off the GI channel right now (the drag
-    /// channel's movers, OgreScene::mDragMovers). A resident instance released because
-    /// it is held is that object's own re-add when the gesture ends (mReturning).
-    std::vector<NodeId> gestureHeld;
-
-    /// ONE CANDIDATE — an item inside the radius that may hold cards. The
+    /// ONE CANDIDATE — an item that may hold cards. The
     /// scene's own predicate decides membership (still-world GI geometry,
     /// shown, with a baked card list); the cache decides residency.
     struct Candidate {
@@ -293,14 +308,12 @@ struct CardSceneView {
         /// the bake owns that number (AT-CARDLOD, see OgreSurfaceCache.cpp).
         const std::vector<float> *lodBounds = nullptr;
         /// ITS WORLD BOX, measured by the scene this frame (the recomputing read:
-        /// the cache plans before the frame's scene-graph update). The radius
-        /// test, the transform signature and the arrivals' sort read it here — it
-        /// used to be measured again for each of them.
+        /// the cache plans before the frame's scene-graph update). The transform
+        /// signature and the arrivals' order read it here.
         Ogre::Aabb box;
     };
-    /// Every item that CAN hold cards in the columns the residency sphere reaches
-    /// (OgreScene::CardFeed) — a superset of the ones inside the radius, and never
-    /// the whole scene (ATOM-CPU-WALKS-1).
+    /// THE ITEMS THE CACHE ASKED FOR (SurfaceCache::takeDemand: its resident instances and the items whose faces the
+    /// readers marked within the window) that CAN hold cards - never the whole scene (ATOM-CPU-WALKS-1).
     std::vector<Candidate> candidates;
 };
 
@@ -396,6 +409,13 @@ public:
     /// invalidation signatures, sorts the queue by Lumen's priority, and
     /// captures until the texel budget is spent.
     void update(const CardSceneView &view);
+    /// THE READERS' DEMAND, TAKEN (PHOTON-7 stage 5, 5-2), before the frame's candidates are asked for: the read-backs
+    /// that landed (a fixed lag of the cache's frames) folded into each card's `lastRead` and the face marks, and the
+    /// item slots the cache wants offered - its resident instances' and every slot a reader marked within the window.
+    void takeDemand(std::vector<uint32_t> &slots);
+    /// THE SETTLE: frames after the last change in what the readers can hit that the demand stays open - two windows
+    /// (the window the persistence rule needs two read-backs inside, and the read-backs' period and lag).
+    static constexpr unsigned kDemandSettleFrames = 120u;
     /// THE GI FREEZE (PHOTON-2 round 2, M1's measuring arm): this frame captures, relights and traces nothing.
     void freezeFrame();
     /// THE CHANGED-REGION LIST'S CARD PRODUCER (PHOTON-7 stage 3): the world box of every instance this frame's plan
@@ -580,10 +600,6 @@ private:
         MaterialId material = 0;    ///< what it WEARS, for the material hook
         bool seen = false;          ///< present in this frame's candidate list
         unsigned firstCard = 0u, cardCount = 0u;
-        float distance = 0.0f;
-        /// The three signatures, as they were when this instance's cards were
-        /// last ALLOCATED (the transform one) or CAPTURED (the other two).
-        unsigned long long transformSig = 0ull;
         /// THE TRANSFORM SIGNATURE, whole: the world box AND the frame the
         /// cards were cut in. A turn leaves the box alone and moves every card.
         Ogre::Vector3 centre;
@@ -609,7 +625,17 @@ private:
     // ---- residency + capture ----------------------------------------------
     void refreshResidency(const CardSceneView &view);
     void releaseInstance(size_t idx);
-    bool buildCardsFor(const CardSceneView::Candidate &cand);
+    /// THE INSTANCE'S LAYOUT: every card its mesh's list cuts, in WORLD space at the candidate's transform (`index` its
+    /// place, `bucket` its face), none allocated.
+    void layoutCards(const CardSceneView::Candidate &cand, std::vector<CardRec> &out) const;
+    /// THE ATLAS MADE TO FIT (5-2's compaction): the least-used sub-cut page whose cards the other pages cutting its
+    /// size can hold is emptied into them (each moved card re-captured where it lands), so a set whose page demand fits
+    /// fits. False when no page can be freed that way.
+    bool compactOnePage(std::vector<std::vector<CardRec>> &cards);
+    /// The demand read-back: issued every kDemandReadEvery frames, taken a fixed lag later; and the head (the frame's
+    /// stamp, the count arm) uploaded every frame.
+    void issueDemandRead();
+    void uploadDemandHead();
     /// Aims batch slot `slot`'s camera at `card` (the pass bound to it runs
     /// later this frame, inside Ogre's own workspace update) and fits the
     /// pass's viewport to the card's texels.
@@ -825,9 +851,6 @@ private:
     std::vector<unsigned long long> mPageSubMask;  ///< which ones (64 slots exactly at kCardMinSize)
     /// Counted once a frame, not once per arrival, and published as-is.
     unsigned mPagesUsed = 0u;
-    /// Raised by `allocRect` the moment it finds no room, so the arrival loop
-    /// stops on the first failure instead of after the next success.
-    bool mAtlasFull = false;
 
     unsigned long long mFrame = 0ull;
     unsigned long long mPhotonGeneration = 0ull;   ///< photonGeneration()
@@ -836,16 +859,30 @@ private:
     unsigned mTexelsLastFrame = 0u;
     float    mCaptureMs = 0.0f;
     float    mWsMs = 0.0f, mCopyMs = 0.0f;
-    float    mRadius = 0.0f;
     unsigned mBudget = 0u;
     unsigned long long mInvalidTransform = 0ull;
-    /// REFLECT-FIX-1: the RESIDENT instances a drag GESTURE took off the GI channel
-    /// (CardSceneView::gestureHeld when they were released) — their return is the
-    /// object's own re-add. Pruned every frame to the nodes still held or offered
-    /// (a deleted, hidden or departed one leaves), erased when the node holds cards
-    /// again, cleared by destroyAll.
-    std::unordered_set<NodeId> mReturning;
     unsigned long long mInvalidMaterial = 0ull;
+    /// THE READERS' DEMAND (PHOTON-7 stage 5, 5-2; jah_rq_card_bindings.glsl's layout after the instance table): the
+    /// scene's item slots (the table covers them all), the count arm, the read-backs in flight (the cache frame each
+    /// was issued in and the table's slot count then), the face marks (per item slot, 8 words: the newest frame a hit
+    /// there found no card, per face bucket), and the counters.
+    unsigned mItemSlots = 0u;
+    bool mDemandCount = false;
+    struct DemandTicket {
+        Ogre::AsyncTicketPtr ticket;
+        unsigned long long frame = 0ull;
+        unsigned slots = 0u;
+    };
+    static constexpr unsigned kDemandSlots = 4u;
+    DemandTicket mDemandReadings[kDemandSlots];
+    unsigned mDemandNextIssue = 0u, mDemandNextTake = 0u;
+    std::vector<unsigned long long> mFaceMarks;   ///< 16 a slot: 8 per reader, the 6 buckets
+    std::vector<unsigned long long> mFacePrev;    ///< ...and each one's mark before (a demand that persists: two)
+    /// THE READERS' CLOCKS: per reader, the newest stamp a read-back held (its window counts in it: a reader at rest
+    /// reads nothing, and nothing it read goes stale while it rests).
+    unsigned long long mDemandNewest[2] = { 0ull, 0ull };
+    unsigned long long mAdmitted = 0ull, mEvicted = 0ull, mCompactionMoves = 0ull;
+    unsigned long long mDemandHits[4] = { 0ull, 0ull, 0ull, 0ull };
 };
 
 }   // namespace engine

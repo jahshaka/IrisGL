@@ -998,7 +998,7 @@ public:
     /// SURFACE-CACHE phase 2 — the card cache's TEST AND TOOL readbacks.
     ///
     /// The cache itself has no verb: it is configured through
-    /// `GiParams::cards` / `cardBudgetTexels` / `cardResidencyRadius` and it
+    /// `GiParams::cards` / `cardBudgetTexels` (its residency is the readers' demand) and it
     /// reports through `GiStatus::cards`, like every other engine cache. What
     /// needs a door of its own is READING a captured texel, because the one
     /// question a picture cannot answer about a card — "is this texel's shadow

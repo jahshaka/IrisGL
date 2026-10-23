@@ -3240,7 +3240,6 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any, bool budgeted) {
                     sc->setGiTuning(g);
                     last.gi->gather = g.gather; last.gi->cards = g.cards;
                     last.gi->cardBudgetTexels = g.cardBudgetTexels;
-                    last.gi->cardResidencyRadius = g.cardResidencyRadius;
                     ++applied;
                 }
                 if (g != *last.gi) { sc->setGlobalIllumination(g); last.gi = g; ++applied; giPushed = true; }

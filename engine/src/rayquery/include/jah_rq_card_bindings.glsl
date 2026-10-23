@@ -16,6 +16,19 @@
 // sun's visibility the read's specular lobe of the sun takes, PHOTON-3), in
 // SurfaceCache::viewLayers' order.
 //
+// THE INSTANCE TABLE CARRIES THE READERS' DEMAND (PHOTON-7 stage 5, 5-2: residency by what the readers read), after
+// its JAH_CARD_SLOTS entries, in uvec4 entries (SurfaceCache::syncBuffers writes the head, the readers the rest):
+//   [S]       ( the frame's stamp, the count flag, 0, 0 ) - the host's, uploaded every frame;
+//   [S + 1]   the hit counts while the flag is set: ( reflection carded, uncarded, gather carded, uncarded );
+//   [S + 2 .. S + 2 + 8192)   per ATLAS CELL (16 texels a side, y x 128 + x) and PER READER (word 2 x cell + reader):
+//                             the stamp of the last frame that reader read the card whose corner is that cell;
+//   [S + 8194 .. S + 8194 + 4S)   per ITEM SLOT, per reader, per face bucket (the hit's facing axis and its sign: word
+//                             16 x slot + 8 x reader + bucket): the stamp of the last frame a hit there found NO card -
+//                             the faces the readers want. Per reader because a reader at REST (the reflection held,
+//                             the gather held) reads nothing: what it read stays wanted on its own clock.
+// A reader defines JAH_CARD_DEMAND (its index: 0 the reflection, 1 the gather) before including jah_rq_card.glsl;
+// the parity harness does not, and writes nothing.
+//
 // Include this file, then define JAH_CARD_SLOTS / JAH_CARD_RECORDS, then
 // include jah_rq_card.glsl.
 
@@ -41,7 +54,7 @@ layout( std430, set = 0, binding = JAH_CARD_BINDING_BASE ) readonly buffer JahCa
 {
 	JahCardRecordGpu jahCards[];
 };
-layout( std430, set = 0, binding = JAH_CARD_BINDING_BASE + 1 ) readonly buffer JahCardInstances
+layout( std430, set = 0, binding = JAH_CARD_BINDING_BASE + 1 ) buffer JahCardInstances
 {
 	uvec4 jahCardInstances[];
 };

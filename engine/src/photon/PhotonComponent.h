@@ -977,6 +977,10 @@ private:
     /// [0] mirrors the scene's mVctVoxelizer/mVctLighting (NOT owned through here).
     std::vector<VctCascade> mVctCascades;
     std::unique_ptr<SurfaceCache> mSurfaceCache;
+    /// The item slots the cache asked to be offered this frame (SurfaceCache::takeDemand, PHOTON-7 stage 5, 5-2).
+    std::vector<uint32_t> mCardSlots;
+    /// The frames since what the card readers' rays can hit last changed (CardSceneView::demandOpen).
+    unsigned mCardDemandQuiet = 0u;
     Ogre::PhotonVoxelMaterial *mVctMaterialStore = nullptr;
     /// Is the view that DRIVES GI a stereo (headset) one? It picks the tier
     /// table's VR column (GiViewProfile, V1-RIG item 4) and is written by the

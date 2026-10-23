@@ -2544,13 +2544,12 @@ void OgreScene::cardSceneFacts(CardSceneView &view) const {
     view.ambientSh = mLastAmbientSh;
 }
 
-void OgreScene::cardCandidates(const Ogre::Vector3 &centre, float radius, CardSceneView &view) {
+void OgreScene::cardCandidates(const std::vector<uint32_t> &slots, CardSceneView &view) {
     std::vector<CardSceneView::Candidate> &out = view.candidates;
-    mCardQuery.clear();
-    mCardFeed.query(centre, radius, mCardQuery);
-    out.reserve(mCardQuery.size());
-    for (const uint32_t slot : mCardQuery) {
-        if (slot >= mItemNodes.size()) continue;
+    view.itemSlots = unsigned(mItemNodes.size());
+    out.reserve(slots.size());
+    for (const uint32_t slot : slots) {
+        if (slot >= mItemNodes.size() || slot >= mCardFeed.filed.size() || !mCardFeed.filed[slot]) continue;
         Node *n = mItemNodes[slot];
         if (!n || !n->item || !n->node || !n->shown) continue;
         if (!(n->item->getVisibilityFlags() & kGiGeometryBit)) continue;
@@ -2602,123 +2601,37 @@ bool OgreScene::cardEligible(const Node &n) const {
     return cards && !cards->empty();
 }
 
-namespace {
-uint64_t cardColumnKey(int ix, int iz) {
-    return (uint64_t(uint32_t(ix)) << 32u) | uint64_t(uint32_t(iz));
-}
-}  // namespace
-
-bool OgreScene::CardFeed::measure(uint32_t slot, const GpuInstance *now, uint64_t &key) const {
-    key = 0ull;
-    if (now && scene && slot < scene->mItemNodes.size() && scene->mItemNodes[slot] &&
-        scene->cardEligible(*scene->mItemNodes[slot])) {
-        const float cx = 0.5f * (now->boundsMin[0] + now->boundsMax[0]);
-        const float cz = 0.5f * (now->boundsMin[2] + now->boundsMax[2]);
-        if (std::isfinite(cx) && std::isfinite(cz)) {
-            key = cardColumnKey(int(std::floor(cx / kColumn)), int(std::floor(cz / kColumn)));
-            return true;
-        }
-    }
-    return false;
+bool OgreScene::CardFeed::measure(uint32_t slot, const GpuInstance *now) const {
+    return now && scene && slot < scene->mItemNodes.size() && scene->mItemNodes[slot] &&
+           scene->cardEligible(*scene->mItemNodes[slot]);
 }
 
 void OgreScene::CardFeed::fileSlotFields(uint32_t slot, const GpuInstance *now, bool want) {
+    (void)now;
     changedAt[slot] = serial;
+    filed[slot] = want ? 1u : 0u;
     if (want) {
         const Node &n = *scene->mItemNodes[slot];
         const Ogre::Mesh *mesh = n.item->getMesh().get();
-        centreOf[slot] = Ogre::Vector3(0.5f * (now->boundsMin[0] + now->boundsMax[0]),
-                                       0.5f * (now->boundsMin[1] + now->boundsMax[1]),
-                                       0.5f * (now->boundsMin[2] + now->boundsMax[2]));
         cardsOf[slot] = scene->meshCardsFor(mesh);
         boundsOf[slot] = scene->lodBoundsFor(mesh);
     }
 }
 
-void OgreScene::CardFeed::fileColumn(uint32_t slot, bool want, uint64_t key) {
-    if (filed[slot] && want && columnOf[slot] == key) return;
-    if (filed[slot]) {
-        // SWAP-REMOVE inside the column; the slot that moved into the hole is told.
-        auto it = columns.find(columnOf[slot]);
-        if (it != columns.end()) {
-            std::vector<uint32_t> &col = it->second;
-            const uint32_t i = at[slot];
-            if (i < col.size() && col[i] == slot) {
-                col[i] = col.back();
-                at[col[i]] = i;
-                col.pop_back();
-            }
-            if (col.empty()) columns.erase(it);
-        }
-        filed[slot] = 0u;
-    }
-    if (want) {
-        std::vector<uint32_t> &col = columns[key];
-        at[slot] = uint32_t(col.size());
-        col.push_back(slot);
-        columnOf[slot] = key;
-        filed[slot] = 1u;
-    }
-}
-
 void OgreScene::CardFeed::gpuSlotChanged(uint32_t slot, const GpuInstance *now) {
     visits.fetch_add(1u, std::memory_order_relaxed);
-    uint64_t key = 0ull;
-    const bool want = measure(slot, now, key);
+    const bool want = measure(slot, now);
     if (slot >= filed.size()) growTo(size_t(slot) + 1u);
     fileSlotFields(slot, now, want);
-    fileColumn(slot, want, key);
 }
 
 bool OgreScene::CardFeed::gpuSlotChangedLane(uint32_t slot, const GpuInstance *now) {
-    // ON A WORKER: the slot's own fields only (this share is the slot's one writer; the arrays were pre-sized —
-    // a slot past them is the replay's, whole); the column map is read, never written, here.
+    // ON A WORKER: the slot's own fields only (this share is the slot's one writer; the arrays were pre-sized — a slot
+    // past them is the replay's, whole).
     if (slot >= filed.size()) return true;
     visits.fetch_add(1u, std::memory_order_relaxed);
-    uint64_t key = 0ull;
-    const bool want = measure(slot, now, key);
-    fileSlotFields(slot, now, want);
-    return (filed[slot] != 0u) != want || (want && columnOf[slot] != key);   // a column move is owed
-}
-
-void OgreScene::CardFeed::gpuSlotChangedOwed(uint32_t slot, const GpuInstance *now) {
-    if (slot >= filed.size()) { gpuSlotChanged(slot, now); return; }
-    uint64_t key = 0ull;
-    const bool want = measure(slot, now, key);
-    fileColumn(slot, want, key);   // the fields were filed by the lane half
-}
-
-void OgreScene::CardFeed::query(const Ogre::Vector3 &centre, float radius, std::vector<uint32_t> &out) const {
-    if (columns.empty() || !(radius >= 0.0f)) return;
-    // THE SPHERE GROWN BY kSlack: a box the table filed a frame ago (a still item
-    // the document moved before this frame) is still found; the columns are only the
-    // index, the filed centre is the test.
-    const float reach = radius + kSlack;
-    const float reach2 = reach * reach;
-    const int x0 = int(std::floor((centre.x - reach) / kColumn)), x1 = int(std::floor((centre.x + reach) / kColumn));
-    const int z0 = int(std::floor((centre.z - reach) / kColumn)), z1 = int(std::floor((centre.z + reach) / kColumn));
-    const auto take = [&](uint64_t key, const std::vector<uint32_t> &col) {
-        const int ix = int(uint32_t(key >> 32u)), iz = int(uint32_t(key & 0xFFFFFFFFu));
-        // The column's nearest point to the centre, in the plane.
-        const float nx = std::max(float(ix) * kColumn, std::min(centre.x, float(ix + 1) * kColumn));
-        const float nz = std::max(float(iz) * kColumn, std::min(centre.z, float(iz + 1) * kColumn));
-        const float dx = nx - centre.x, dz = nz - centre.z;
-        if (dx * dx + dz * dz > reach2) return;
-        for (const uint32_t slot : col)
-            if ((centreOf[slot] - centre).squaredLength() <= reach2) out.push_back(slot);
-    };
-    // Whichever is fewer: the columns the square spans, or the columns that hold
-    // anything (a huge radius must not cost a lookup per empty column).
-    const double spanned = (double(x1) - double(x0) + 1.0) * (double(z1) - double(z0) + 1.0);
-    if (spanned <= double(columns.size())) {
-        for (int ix = x0; ix <= x1; ++ix)
-            for (int iz = z0; iz <= z1; ++iz) {
-                auto it = columns.find(cardColumnKey(ix, iz));
-                if (it != columns.end()) take(it->first, it->second);
-            }
-    } else {
-        for (const auto &kv : columns) take(kv.first, kv.second);
-    }
+    fileSlotFields(slot, now, measure(slot, now));
+    return false;
 }
 
 bool PhotonComponent::readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) {

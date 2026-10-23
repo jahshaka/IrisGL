@@ -116,6 +116,9 @@ layout( set = 0, binding = 32 ) uniform sampler3D voxelDirect[kMaxCascades];
 #define JAH_CARD_SLOTS   uint( p.cards.x )
 #define JAH_CARD_RECORDS uint( p.cards.y )
 #define JAH_CARD_FOOTPRINT_TEXELS p.cards.z
+// A READER (PHOTON-7 stage 5, 5-2): its hits stamp the cards they read and the faces that answered none - the
+// cache's residency (jah_rq_card_bindings.glsl's demand layout); the gather is reader 1 of the counts.
+#define JAH_CARD_DEMAND 1
 #include "jah_rq_card.glsl"
 
 /// THE HIT'S GEOMETRIC NORMAL (the card pick's facing): the per-slot row table

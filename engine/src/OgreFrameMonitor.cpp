@@ -1399,6 +1399,10 @@ constexpr ArmDef kArms[] = {
       "per-texel temporal-mean count (rq_reflect.comp's history w, 0 = no answer yet) copied out after the filter and "
       "decoded once the frame retires into RayQueryStatus::reflectHistoryCount - the stillness door's count histogram "
       "(how young each glossy pixel's mean is after a stop). One image copy a frame while on." },
+    { ArmId::CardDemandCount, 0.0, 0.0, 1.0,
+      "THE CARD READERS' HITS COUNTED (PHOTON-7 stage 5, 5-2's acceptance: photon-glass's uncarded share): 1 = every "
+      "hit the reflection and the gather read a card at counts, as one that found a card or one that found none "
+      "(CardCacheStatus::demandHits). A measuring arm: one atomic a hit while on." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

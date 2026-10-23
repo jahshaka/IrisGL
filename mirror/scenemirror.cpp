@@ -7804,13 +7804,12 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // and the tier's own decides — the same rule the engine states.
         gi.cascadeInstanceCap = qMax(0, mSource->giCascadeInstanceCap);
         gi.dragMoverChannel   = mSource->giDragMoverChannel > 0;
-        // THE SURFACE CACHE's three rows, pushed as they are authored. `cards`
+        // THE SURFACE CACHE's two rows, pushed as they are authored. `cards`
         // is off (0) or auto (-1): the engine's bool is "on wherever the rays
         // run" and the ENGINE resolves it against the rays (a ray's hit reads the
         // card first; a card's sun term is traced), so the mirror decides nothing.
         gi.cards = mSource->giCards != 0;
         gi.cardBudgetTexels = qMax(0, mSource->giCardBudgetTexels);
-        gi.cardResidencyRadius = qMax(0.0f, mSource->giCardRadius);
         gi.cascadeCount = 0;
         for (const iris::Vec3 &row : mSource->giCascadeSet) {
             if (gi.cascadeCount >= jahshaka::engine::kGiTierMaxCascades) break;

@@ -555,13 +555,10 @@ public:
     /// card and a 128-texel card are not the same work; texels rather than
     /// milliseconds, because a wall clock measures nothing in this engine.
     ///
-    /// `giCardRadius` is the residency radius in metres: an instance further
-    /// than this from the camera holds no atlas pages at all. 0 is the tier's.
-    /// The engine's own documentation for all three is GiParams::cards /
-    /// cardBudgetTexels / cardResidencyRadius.
+    /// The engine's own documentation for both is GiParams::cards /
+    /// cardBudgetTexels (residency is the engine's: the faces its rays read).
     int giCards = -1;
     int giCardBudgetTexels = 0;
-    float giCardRadius = 0.0f;
     /// A DRAGGED STILL RIDES THE MOVER CHANNEL FOR THE LENGTH OF THE GESTURE
     /// (MOVER-1) — 1, ON, is the DEFAULT (owner, ledger §844). It changes what
     /// a scene looks like WHILE an object is being dragged (the object stops

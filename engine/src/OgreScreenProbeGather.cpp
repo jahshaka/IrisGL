@@ -1533,8 +1533,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     }
     bool cardViewBound = true;
     for (Ogre::TextureGpu *t : in.cardView) cardViewBound = cardViewBound && t;
-    const bool cardsBound = in.cardTable && in.cardInstances && in.cardDepth && in.cardRadiance &&
-                            cardViewBound && in.cardRecords > 0u;
+    // BOUND WHENEVER THE CACHE IS BUILT, with no card resident too (PHOTON-7 stage 5, 5-2): the hits' demand stamps
+    // are what makes a card resident at all.
+    const bool cardsBound = in.cardTable && in.cardInstances && in.cardDepth && in.cardRadiance && cardViewBound &&
+                            in.cardSlots > 0u;
     pp.cards[0] = cardsBound ? float(in.cardSlots) : 0.0f;
     pp.cards[1] = cardsBound ? float(in.cardRecords) : 0.0f;
     pp.cards[2] = in.cardFootprintTexels;
@@ -1926,8 +1928,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                                          Ogre::ResourceAccess::Read, computeStage);
         // THE CARD READ'S INPUTS (GA-1e), the reflection's transitions: the
         // Radiance layer the CardLight job wrote and the Depth layer the capture
-        // copied into, read as textures; the two tables and the geometry rows,
-        // read as buffers.
+        // copied into, read as textures; the card table and the geometry rows,
+        // read as buffers; the instance table READ AND WRITTEN (its demand stamps, PHOTON-7 stage 5, 5-2).
         if (cardsBound) {
             for (Ogre::TextureGpu *t : { in.cardDepth, in.cardRadiance })
                 solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
@@ -1935,8 +1937,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             for (Ogre::TextureGpu *t : in.cardView)
                 solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                          Ogre::ResourceAccess::Read, computeStage);
-            for (Ogre::UavBufferPacked *b : { in.cardTable, in.cardInstances })
-                solver.resolveTransition(trans, b, Ogre::ResourceAccess::Read, computeStage);
+            solver.resolveTransition(trans, in.cardTable, Ogre::ResourceAccess::Read, computeStage);
+            solver.resolveTransition(trans, in.cardInstances, Ogre::ResourceAccess::ReadWrite, computeStage);
         }
         if (geomSlots)
             solver.resolveTransition(trans, in.geomRows, Ogre::ResourceAccess::Read, computeStage);

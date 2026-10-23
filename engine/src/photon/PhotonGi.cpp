@@ -604,7 +604,6 @@ bool PhotonComponent::setGiTuning(const GiParams &p) {
         // allocate a texture the next frame allocates anyway.
         mGi.cards                = p.cards;
         mGi.cardBudgetTexels     = p.cardBudgetTexels;
-        mGi.cardResidencyRadius  = p.cardResidencyRadius;
         // THE SCREEN-PROBE GATHER'S ROW, for the same reason and with the same
         // nothing-happens-here: `probeGatherWanted()` reads it, the VIEW
         // re-checks its chain shape once a frame (syncReflectListener) and the
@@ -8461,16 +8460,9 @@ void PhotonComponent::teardownGi() {
 // re-captures them a few at a time rather than the placement capturing the
 // whole grid inline.
 bool PhotonComponent::dropGiForShadowRebuild() {
-    // THE SURFACE CACHE IS DROPPED TOO — no longer for a shadow node (its capture
-    // holds none since ATOM-S3-CARDCAP: the sun term is traced) but for its
-    // RESIDENCY: the atlas has no eviction yet (paging is E P2), so the resident
-    // set is first-come at the camera where the cache filled, and a rebuild here
-    // re-derives it at the current camera. Measured on gi.pcc_mirror.ray_tier:
-    // kept alive across the open's shadow-atlas growth, Showroom 2's full atlas held
-    // the open camera's nine instances where a rebuild holds eight, and the
-    // mirror's picture differed by 91/255 across a rays off/on round trip. Delete
-    // this with the eviction.
-    if (mSurfaceCache) mSurfaceCache.reset();
+    // THE SURFACE CACHE IS KEPT (PHOTON-7 stage 5, 5-2): its capture holds no shadow node (the sun term is traced,
+    // ATOM-S3-CARDCAP), and its residency is the readers' demand - a function of what the rays read, not of the camera
+    // where the cache filled - so the drop that re-derived a first-come set is deleted with the first-come set.
     // The shadowed PCC probes hold live CompositorShadowNodes on the probe
     // definition, one workspace each.
     if (!mPcc || !mPccShadowed) return false;
@@ -8570,8 +8562,6 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     view.viewerPos = mGiCamPos;
     view.budgetTexels = mGi.cardBudgetTexels > 0 ? unsigned(mGi.cardBudgetTexels)
                                                  : facts.cardBudgetTexels;
-    view.radius = mGi.cardResidencyRadius > 0.0f ? mGi.cardResidencyRadius
-                                                 : facts.cardResidencyRadius;
     mScene.cardSceneFacts(view);   // the footprint rule, the cloud shadow field, the ambient SH
     view.lightBudgetTexels = facts.cardLightTexels;
     // THE INDIRECT HALF: the chain the pixel's cones march (the cascade-0 PhotonVoxelLighting the pass buffer is filled
@@ -8595,17 +8585,29 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
 
     // THE CANDIDATE LIST — handed over rather than reached for, and since
     // ATOM-CPU-WALKS-1 NOT A WALK: the change feed files every item that can hold
-    // cards (cardEligible, below) by where the table says it is, and the frame
-    // takes the columns the residency sphere reaches. Each offered item's box is
-    // measured NOW (pre-frame, the recomputing read) — the cache's own radius test
-    // and its sort read it from the candidate instead of measuring it again. The
-    // cheap half of the predicate (shown, the GI channel) is re-read here so a hide
-    // this frame is exact; the rest (blend, the card list) changes only through a
-    // re-staged slot (a material edit reaches it through the PBS change log).
-    // THE GESTURE'S HELD NODES (REFLECT-FIX-1): a still the drag channel took off the GI
-    // channel is released by the cache and must come back as itself (mReturning).
-    view.gestureHeld = mDragMovers;
-    mScene.cardCandidates(mGiCamPos, view.radius, view);
+    // cards (cardEligible), and the frame offers THE SLOTS THE CACHE ASKS FOR -
+    // its resident instances and the items whose faces the readers marked
+    // (PHOTON-7 stage 5, 5-2: residency by the readers' demand; the residency
+    // sphere deleted). Each offered item's box is measured NOW (pre-frame, the
+    // recomputing read). The cheap half of the predicate (shown, the GI channel)
+    // is re-read here so a hide this frame is exact; the rest (blend, the card
+    // list) changes only through a re-staged slot (a material edit reaches it
+    // through the PBS change log).
+    view.demandCount = mEngine && mEngine->armRegistry().on(ArmId::CardDemandCount);
+    // THE DEMAND OPEN (CardSceneView::demandOpen): the frames since what the readers' rays can hit last changed - the
+    // camera's pose (bit for bit), geometry (an Edit, a Mover or its shadow, a change with no box), the cache's build.
+    // Lighting is not a change of what is hit (a Lamp, a sky or sun overflow), nor are the caches' own regions.
+    {
+        bool hitChanged = mGiCamStillFrames == 0u || built ||
+                          (mRegionOverflowOpen & kGiRegionOverflowSomewhere) != 0u;
+        for (const RegionEntry &e : mRegionsOpen)
+            hitChanged = hitChanged || e.kind == GiRegionKind::Edit || e.kind == GiRegionKind::Mover ||
+                         e.kind == GiRegionKind::MoverShadow;
+        mCardDemandQuiet = hitChanged ? 0u : std::min(mCardDemandQuiet + 1u, 1u << 20);
+        view.demandOpen = mCardDemandQuiet < SurfaceCache::kDemandSettleFrames;
+    }
+    mSurfaceCache->takeDemand(mCardSlots);
+    mScene.cardCandidates(mCardSlots, view);
     // THE GI FREEZE (M1's measuring arm): no card is captured, relit or traced.
     if (mEngine && mEngine->armRegistry().on(ArmId::GiFreeze)) {
         mSurfaceCache->freezeFrame();

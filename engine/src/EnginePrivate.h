@@ -1999,7 +1999,8 @@ public:
     X(TexturePumpFault, "textures.pumpFault") /* the host's texture wait: 1 never done, 2 and its step throws (a test door, U5 decision 22.5) */ \
     X(AtomDensityJobsMissing, "atom.densityJobsMissing") /* the Density count's compute jobs looked up as missing (a test door, BUGS-1 item 6) */ \
     X(GatherHistoryReadback, "gather.historyReadback") /* the gather's pixel-history COUNT copied to the host (the stillness door, PHOTON-2 stage 0) */ \
-    X(ReflectHistoryReadback, "reflect.historyReadback") /* the reflection history's COUNT copied to the host (the stillness door, PHOTON-2 stage 0) */
+    X(ReflectHistoryReadback, "reflect.historyReadback") /* the reflection history's COUNT copied to the host (the stillness door, PHOTON-2 stage 0) */ \
+    X(CardDemandCount, "cards.demandCount") /* the card readers count their carded and uncarded hits (a measuring arm, PHOTON-7 stage 5) */
 
 enum class ArmId : unsigned {
 #define JAH_ARM_ENUM(e, n) e,
@@ -4464,7 +4465,8 @@ public:
     void updateSurfaceCache() { mPhoton.updateSurfaceCache(); }
     /// THE CARDS' SCENE FACTS (the surface cache is Photon's: PhotonComponent::updateSurfaceCache).
     void cardSceneFacts(CardSceneView &view) const;
-    void cardCandidates(const Ogre::Vector3 &centre, float radius, CardSceneView &view);   // fills view.candidates
+    /// Fills view.candidates with the slots asked for that can hold cards, and view.itemSlots (PHOTON-7 stage 5, 5-2).
+    void cardCandidates(const std::vector<uint32_t> &slots, CardSceneView &view);
     bool readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = readCardTexel(node, card, u, v, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::readCardTexel"); return mPhoton.readCardTexel(node, card, u, v, out); }
@@ -6604,27 +6606,19 @@ private:
     /// THE CARD CANDIDATES, kept by the change feed (ATOM-CPU-WALKS-1). The surface
     /// cache used to be handed EVERY item every frame (a walk of every sub-item's
     /// blend state and the mesh's card list, then a world box recomputed up every
-    /// parent chain, W13: 6.8 ms at 10k); now the items that CAN hold cards — the
-    /// candidate predicate (cardEligible: shown, GI geometry, opaque, a baked card
-    /// list) evaluated when a slot's entry changes — sit in a grid of vertical
-    /// columns by the entry's world-box centre, and a frame asks only the columns
-    /// the residency sphere reaches (query: one column of margin for a box the table
-    /// has not caught up with yet). The per-frame test itself is unchanged and
-    /// exact — the cache still measures each offered item's current box.
+    /// parent chain, W13: 6.8 ms at 10k); now the candidate predicate (cardEligible:
+    /// shown, GI geometry, opaque, a baked card list) is evaluated when a slot's entry
+    /// changes, and a frame offers only THE SLOTS THE CACHE ASKS FOR (its resident
+    /// instances and the items whose faces the readers marked: PHOTON-7 stage 5, 5-2 -
+    /// the residency sphere and the columns it was queried through are deleted). The
+    /// per-frame test itself is unchanged and exact — the cache still measures each
+    /// offered item's current box.
     struct CardFeed final : detail::GpuSceneObserver {
-        static constexpr float kColumn = 16.0f;   ///< metres; a column's side
         OgreScene *scene = nullptr;
-        std::unordered_map<uint64_t, std::vector<uint32_t>> columns;
-        /// Per slot: filed or not, and where (every 64-bit key names a column, so
-        /// "not a candidate" is its own flag, never a key value).
+        /// Per slot: a candidate or not.
         std::vector<unsigned char> filed;
-        std::vector<uint64_t> columnOf;
-        std::vector<uint32_t> at;         ///< per slot, its index in its column
-        /// Per slot, what the filing measured — the box centre the query's distance
-        /// test reads, and the mesh's card list and LOD bounds (a mesh's own facts:
-        /// they cannot change while the item wears the mesh) — so a frame's list
-        /// asks no map per candidate.
-        std::vector<Ogre::Vector3> centreOf;
+        /// Per slot, what the filing measured — the mesh's card list and LOD bounds (a mesh's own facts: they cannot
+        /// change while the item wears the mesh) — so a frame's list asks no map per candidate.
         std::vector<const std::vector<MeshCardDesc> *> cardsOf;
         std::vector<const std::vector<float> *> boundsOf;
         /// Per slot, the list serial (`serial` below) of its last change: a slot
@@ -6636,69 +6630,40 @@ private:
         unsigned long long serial = 1ull;
         std::atomic<unsigned long long> visits{ 0ull };   ///< the slots told (lane halves count from the workers)
         void gpuSlotChanged(uint32_t slot, const detail::GpuInstance *now) override;
-        /// THE LANE HALF (U4 decision 17.1): the slot's own fields (its change stamp, centre, cards and LOD bounds —
-        /// one writer per slot, the arrays pre-sized) inside the compose task; the COLUMN move (a shared map's
-        /// erase and insert, ordered) only when the slot changed column, in the replay.
+        /// THE LANE HALF (U4 decision 17.1): the slot's own fields (its filing, change stamp, cards and LOD bounds —
+        /// one writer per slot, the arrays pre-sized) inside the compose task; nothing is owed to the replay.
         bool hasLaneHalf() const override { return true; }
         const char *gpuObserverName() const override { return "cards"; }
         void gpuSlotsReserve(uint32_t count) override { growTo(count); }
         bool gpuSlotChangedLane(uint32_t slot, const detail::GpuInstance *now) override;
-        void gpuSlotChangedOwed(uint32_t slot, const detail::GpuInstance *now) override;
-        /// The slot's filing, measured (want, the column's key) — the one read both halves share.
-        bool measure(uint32_t slot, const detail::GpuInstance *now, uint64_t &key) const;
+        /// The slot's filing, measured - the one read both halves share.
+        bool measure(uint32_t slot, const detail::GpuInstance *now) const;
         void fileSlotFields(uint32_t slot, const detail::GpuInstance *now, bool want);
-        void fileColumn(uint32_t slot, bool want, uint64_t key);
-        /// THE TABLE, FOLDED into the compose's digest (the identity row, decision 22.6): the columns in key order with
-        /// their slot lists, then per slot its filing, column, index in it and centre.
+        /// THE TABLE, FOLDED into the compose's digest (the identity row, decision 22.6): per slot its filing and, filed,
+        /// its card list and bounds.
         void gpuDigestInto(detail::GpuScene &g) const override {
-            std::vector<uint64_t> keys;
-            keys.reserve(columns.size());
-            for (const auto &kv : columns) keys.push_back(kv.first);
-            std::sort(keys.begin(), keys.end());
-            for (uint64_t k : keys) {
-                const std::vector<uint32_t> &col = columns.at(k);
-                g.digestFold(&k, sizeof(k));
-                if (!col.empty()) g.digestFold(col.data(), col.size() * sizeof(uint32_t));
-            }
             for (size_t s = 0; s < filed.size(); ++s) {
                 g.digestFold(&filed[s], sizeof(filed[s]));
                 if (!filed[s]) continue;
-                g.digestFold(&columnOf[s], sizeof(columnOf[s]));
-                g.digestFold(&at[s], sizeof(at[s]));
-                g.digestFold(&centreOf[s], sizeof(Ogre::Vector3));
+                g.digestFold(&cardsOf[s], sizeof(cardsOf[s]));
+                g.digestFold(&boundsOf[s], sizeof(boundsOf[s]));
             }
         }
         void growTo(size_t count) {
             if (count <= filed.size()) return;
             filed.resize(count, 0u);
-            columnOf.resize(count, 0ull);
-            at.resize(count, 0u);
             changedAt.resize(count, 0ull);
-            centreOf.resize(count, Ogre::Vector3::ZERO);
             cardsOf.resize(count, nullptr);
             boundsOf.resize(count, nullptr);
         }
         void gpuSceneReset() override {
-            columns.clear();
             filed.clear();
-            columnOf.clear();
-            at.clear();
             changedAt.clear();
-            centreOf.clear();
             cardsOf.clear();
             boundsOf.clear();
         }
-        /// The candidate slots whose FILED centre lies within the sphere grown by
-        /// kSlack, from the columns it reaches, in no particular order.
-        void query(const Ogre::Vector3 &centre, float radius, std::vector<uint32_t> &out) const;
-        /// Metres past the radius a filed centre may lie and still be offered: the
-        /// table's box is last frame's for an item the document moved before this
-        /// frame, and one that crossed more than this in one frame arrives a frame
-        /// late (a newborn always does: it is filed by the frame that stages it).
-        static constexpr float kSlack = 4.0f;
     };
     CardFeed mCardFeed;
-    std::vector<uint32_t> mCardQuery;
     /// The candidate predicate, one place (the feed files by it, the frame re-reads
     /// its cheap half).
     bool cardEligible(const Node &n) const;

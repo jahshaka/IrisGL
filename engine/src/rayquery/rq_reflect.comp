@@ -334,6 +334,9 @@ const float kWarmupFrames = 8.0;
 #define JAH_CARD_SLOTS   uint( p.cards.x )
 #define JAH_CARD_RECORDS uint( p.cards.y )
 #define JAH_CARD_FOOTPRINT_TEXELS p.cards.z
+// A READER (PHOTON-7 stage 5, 5-2): its hits stamp the cards they read and the faces that answered none - the
+// cache's residency (jah_rq_card_bindings.glsl's demand layout); the reflection is reader 0 of the counts.
+#define JAH_CARD_DEMAND 0
 #include "jah_rq_card.glsl"
 
 /// THE HIT'S GEOMETRIC NORMAL (the card pick's facing): the per-slot row table

@@ -560,7 +560,9 @@ void SurfaceCache::destroyAll() {
     mInstances.clear();
     mCards.clear();
     mByNode.clear();
-    mReturning.clear();
+    mFaceMarks.clear();
+    mFacePrev.clear();
+    mDemandNewest[0] = mDemandNewest[1] = 0ull;
     mQueue.clear();
     mPageOwner.clear();
     mPageSubSize.clear();
@@ -589,6 +591,8 @@ void SurfaceCache::destroyAll() {
         if (mGiBuffer) { vao->destroyUavBuffer(mGiBuffer); mGiBuffer = nullptr; }
         for (ReportTicket &t : mReportReadings) t.ticket.reset();
         mReportNextIssue = mReportNextTake = 0u;
+        for (DemandTicket &t : mDemandReadings) t.ticket.reset();
+        mDemandNextIssue = mDemandNextTake = 0u;
         if (mCardBoxBuffer) { vao->destroyUavBuffer(mCardBoxBuffer); mCardBoxBuffer = nullptr; }
         if (mCardSlotState) { vao->destroyUavBuffer(mCardSlotState); mCardSlotState = nullptr; }
         if (mCardReport) { vao->destroyUavBuffer(mCardReport); mCardReport = nullptr; }
@@ -653,7 +657,6 @@ bool SurfaceCache::allocRect(unsigned size, unsigned &x, unsigned &y) {
             y = unsigned(p / perSide) * kCardPageSize;
             return true;
         }
-        mAtlasFull = true;
         return false;
     }
     const unsigned slotsPerSide = kCardPageSize / size;
@@ -682,7 +685,6 @@ bool SurfaceCache::allocRect(unsigned size, unsigned &x, unsigned &y) {
         y = unsigned(p / perSide) * kCardPageSize;
         return true;
     }
-    mAtlasFull = true;
     return false;
 }
 
@@ -712,15 +714,68 @@ void SurfaceCache::freeRect(unsigned x, unsigned y, unsigned size) {
 }
 
 // ---------------------------------------------------------------------------
-// Residency
+// Residency — BY THE READERS' DEMAND (PHOTON-7 stage 5, 5-2)
 // ---------------------------------------------------------------------------
+//
+// A CARD IS RESIDENT BECAUSE A READER READ IT. Every reader of a card is a ray's hit (the reflection, the gather:
+// jah_rq_card.glsl), and each hit stamps what it read into the instance table's demand region - the card's atlas cell,
+// or, when no card of the instance answered, the instance's FACE BUCKET it faced (jah_rq_card_bindings.glsl's layout).
+// The stamps come back at a fixed lag of the cache's frames (takeDemand), PER READER (the reflection, the gather): a
+// card's `readBy` is each reader's newest; a face marked within kDemandWindow frames of its reader's clock is WANTED, and
+// its cards (the layout's cards in that bucket) arrive. An arrival that finds no room takes it from the cards no reader
+// has read for a window of its own clock (a reader at rest - the reflection held, the gather held - reads nothing, and
+// what it read stays: measured, photon-glass's reflection at rest from frame ~513 let the gather's faces evict the
+// reflection's, whose re-admission broke the reflection's rest again) - the least recently read first, the
+// smallest on screen (the card's extent over its distance from the viewer: an order, so no pixel angle is needed) the
+// tie-break, then the node and the card's index - and, before it evicts, from the atlas's own fragmentation
+// (compactOnePage). So the faces the readers reach are resident and the faces no reader reaches are not: a sealed
+// room's outer faces hold no page, its pillars do (PREFLIGHT_5 §2: photon-glass's 397 wanted pages of 256 were
+// arrivals nearest-first behind the 7/8 gate; the reachable faces want ~184). DELETED with it: the residency sphere
+// (every instance inside the tier's radius held every card), the 7/8 gate, the gesture bypass (mReturning) and the
+// age that was every card's `lastUsed = mFrame` every frame.
+namespace {
+/// THE ATLAS'S CELLS (16 texels a side): the demand stamps' and the indirect state's key.
+constexpr unsigned kDemandCells = (kCardAtlasSize / kCardMinSize) * (kCardAtlasSize / kCardMinSize);
+/// The demand region's head (the stamp and the count flag; the counts), in uvec4 entries.
+constexpr unsigned kDemandHeadEntries = 2u;
+/// The readers (jah_rq_card.glsl's JAH_CARD_DEMAND: 0 the reflection, 1 the gather).
+constexpr unsigned kDemandReaders = 2u;
+/// Per atlas cell and reader, a stamp: 2 x 16384 words.
+constexpr unsigned kDemandCellEntries = kDemandCells * kDemandReaders / 4u;
+/// Per item slot, the face marks: per reader 6 buckets in 8 words, four entries.
+constexpr unsigned kDemandFaceEntries = 4u;
+/// THE WINDOW: a card read, or a face marked, within this many frames of ITS READER'S CLOCK (the newest stamp that
+/// reader wrote: a reader at rest reads nothing, and nothing it read goes stale while it rests) is wanted (a second at
+/// 60 Hz - the stochastic readers revisit what they read many times within it); a card no reader read for longer may
+/// be evicted.
+constexpr unsigned long long kDemandWindow = 60ull;
+/// The read-back's period (the stamps persist on the GPU: a period only costs latency).
+constexpr unsigned long long kDemandReadEvery = 4ull;
+
+size_t demandEntries(unsigned slots) {
+    return size_t(kDemandHeadEntries) + kDemandCellEntries + size_t(kDemandFaceEntries) * slots;
+}
+unsigned demandCellOf(const CardRec &c) {
+    return (c.atlasY / kCardMinSize) * (kCardAtlasSize / kCardMinSize) + c.atlasX / kCardMinSize;
+}
+/// jah_rq_card.glsl's jahCardBucket, the same rule on the CPU.
+unsigned char bucketOf(const Ogre::Vector3 &n) {
+    const float ax = std::fabs(n.x), ay = std::fabs(n.y), az = std::fabs(n.z);
+    const unsigned axis = (ax >= ay && ax >= az) ? 0u : (ay >= az ? 1u : 2u);
+    return static_cast<unsigned char>(2u * axis + (n[axis] < 0.0f ? 1u : 0u));
+}
+/// THE TIE-BREAK: how big the card is on screen, up to the view's pixel angle (a common factor an order never needs).
+float projectedSize(const CardRec &c, const Ogre::Vector3 &eye) {
+    return 2.0f * std::max(c.halfU, c.halfV) / std::max(0.05f, (c.centre - eye).length());
+}
+}   // namespace
+
 void SurfaceCache::releaseInstance(size_t idx) {
     InstanceRec &inst = mInstances[idx];
     for (unsigned c = 0; c < inst.cardCount; ++c) {
         CardRec &card = mCards[inst.firstCard + c];
         freeRect(card.atlasX, card.atlasY, card.size);
     }
-    mAtlasFull = false;
     mByNode.erase(inst.node);
     // The card block is left in place and the instance marked dead; the
     // compaction below rebuilds both vectors at once, which is O(n) per
@@ -729,27 +784,12 @@ void SurfaceCache::releaseInstance(size_t idx) {
     inst.node = 0;
 }
 
-bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
-    if (!cand.item || !cand.sceneNode || !cand.cards || cand.cards->empty()) return false;
-
+void SurfaceCache::layoutCards(const CardSceneView::Candidate &cand, std::vector<CardRec> &out) const {
+    out.clear();
+    if (!cand.item || !cand.sceneNode || !cand.cards || cand.cards->empty()) return;
     const Ogre::Vector3 pos = cand.sceneNode->_getDerivedPosition();
     const Ogre::Quaternion rot = cand.sceneNode->_getDerivedOrientation();
     const Ogre::Vector3 scale = cand.sceneNode->_getDerivedScale();
-
-    InstanceRec inst;
-    inst.node = cand.node;
-    inst.itemSlot = cand.itemSlot;
-    inst.item = cand.item;
-    inst.material = cand.material;
-    inst.seen = true;
-    inst.firstCard = unsigned(mCards.size());
-    const Ogre::Aabb &box = cand.box;   // measured by the scene this frame
-    inst.centre = box.mCenter;
-    inst.halfSize = box.mHalfSize;
-    inst.rotation = rot;
-    inst.scale = scale;
-
-    unsigned made = 0u;
     for (const MeshCardDesc &c : *cand.cards) {
         const unsigned axis = c.axis < 6u ? c.axis : 0u;
         // THE FRAME, TAKEN INTO THE WORLD. The cards are axis-aligned in MESH
@@ -770,7 +810,8 @@ bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
         if (!(halfU > 0.0f) || !(halfV > 0.0f)) continue;
 
         // THE RESOLUTION, AND THE SPLIT. A card wants `kCardTexelsPerMetre`
-        // along each side; anything over a page is cut into a grid of whole
+        // along each side, WORLD-FIXED (the stored density never moves with the
+        // camera: PREFLIGHT_5 Q1); anything over a page is cut into a grid of whole
         // pages, each capturing its own sub-rectangle at the full page
         // resolution — which is Lumen's split rule and the only reason a 10 m
         // wall reads at 8 cm instead of at its whole width.
@@ -792,7 +833,6 @@ bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
         for (unsigned sv2 = 0; sv2 < splitV; ++sv2) {
             for (unsigned su2 = 0; su2 < splitU; ++su2) {
                 CardRec r;
-                r.instance = unsigned(mInstances.size());
                 r.axis = static_cast<unsigned char>(axis);
                 r.u = uW; r.v = vW; r.d = dW;
                 r.halfU = halfU / float(splitU);
@@ -802,65 +842,151 @@ bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
                            + vW * ((2.0f * sv2 + 1.0f - float(splitV)) * r.halfV);
                 r.size = oneSize;
                 // THE LOD LEVEL IS THE BAKE'S, AND THE BAKE'S ALONE (ATOM
-                // inventory row AT-CARDLOD). It used to be RE-DERIVED here
-                // against the card's real atlas texel, with the baked
-                // `MeshCard::lodLevel` kept as a fallback — one number with two
-                // producers that could disagree, and after ATOM-BAKE-1 they
-                // would have disagreed for a second reason: the bake picks the
-                // level from the MEASURED bound and this site had only the array
-                // it was handed. The rule (`lodLevelForWorldError` over
+                // inventory row AT-CARDLOD): the rule (`lodLevelForWorldError` over
                 // `lodBounds`, with the card's texel as the allowed deviation) is
-                // computed once, at bake time, by `cards::levelForTexel`.
-                //
-                // WHAT THAT COSTS, stated rather than hidden: the bake chooses
-                // for its nominal 128-texel page (`MeshBake::cardCaptureResolution`)
-                // and this atlas may split a card to a different size, so a split
-                // card can draw a level chosen for a slightly coarser texel. The
-                // page size is the atlas's to publish and the bake's to assume,
-                // and `gi.card_capture` asserts the two agree — which is the
-                // check that a re-derivation quietly made impossible.
+                // computed once, at bake time, by `cards::levelForTexel`, for its
+                // nominal 128-texel page (`MeshBake::cardCaptureResolution`); a split
+                // card can draw a level chosen for a slightly coarser texel, and
+                // `gi.card_capture` asserts the page size the two assume agrees.
                 r.lodLevel = c.lodLevel;
-                if (!allocRect(r.size, r.atlasX, r.atlasY)) {
-                    // The atlas is full. Everything allocated so far stands;
-                    // this instance simply holds fewer cards, and the status's
-                    // `pagesUsed` is what says so.
-                    if (made == 0u) return false;
-                    inst.cardCount = made;
-                    mByNode[cand.node] = mInstances.size();
-                    mInstances.push_back(inst);
-                    mTableDirty = true;
-                    ++mPhotonGeneration;
-                    return true;
-                }
+                r.index = static_cast<unsigned short>(out.size());
+                r.bucket = bucketOf(dW);
                 r.queued = true;
-                r.lastUsed = mFrame;
-                r.lastUpdated = 0ull;
-                mCards.push_back(r);
-                ++made;
+                out.push_back(r);
             }
         }
     }
-    if (made == 0u) return false;
-    inst.cardCount = made;
-    mByNode[cand.node] = mInstances.size();
-    mInstances.push_back(inst);
+}
+
+bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards) {
+    const unsigned perSide = kCardAtlasSize / kCardPageSize;
+    // THE PAGE TO EMPTY: the sub-cut page with the fewest cards whose cards the OTHER pages cutting its size have free
+    // slots for (lowest index among equals) - deterministic, and a page freed whole.
+    size_t best = size_t(-1);
+    for (size_t p = 0; p < mPageOwner.size(); ++p) {
+        if (mPageOwner[p] != 2u) continue;
+        const unsigned size = mPageSubSize[p];
+        const unsigned slots = (kCardPageSize / size) * (kCardPageSize / size);
+        unsigned room = 0u;
+        for (size_t q = 0; q < mPageOwner.size(); ++q)
+            if (q != p && mPageOwner[q] == 2u && mPageSubSize[q] == size) room += slots - mPageSubUsed[q];
+        if (room < mPageSubUsed[p]) continue;
+        if (best == size_t(-1) || mPageSubUsed[p] < mPageSubUsed[best]) best = p;
+    }
+    if (best == size_t(-1)) return false;
+    const unsigned x0 = unsigned(best % perSide) * kCardPageSize, y0 = unsigned(best / perSide) * kCardPageSize;
+    // THE MOVE: the page is held out of the allocator (owner 3) while its cards are placed in the others; each moved
+    // card is the same card (its demand, its flags) at a new rect, RE-CAPTURED there - the capture rewrites every layer
+    // of the rect, the relight and the march follow it (planRelights' captured cards), exactly as a newly arrived card.
+    mPageOwner[best] = 3u;
+    for (std::vector<CardRec> &list : cards)
+        for (CardRec &c : list) {
+            if (!c.size || c.atlasX < x0 || c.atlasX >= x0 + kCardPageSize || c.atlasY < y0 ||
+                c.atlasY >= y0 + kCardPageSize)
+                continue;
+            unsigned nx = 0u, ny = 0u;
+            if (!allocRect(c.size, nx, ny)) {   // counted above: cannot fail
+                mPageOwner[best] = 2u;
+                return false;
+            }
+            c.atlasX = nx;
+            c.atlasY = ny;
+            c.since = mFrame;
+            c.queued = true;
+            c.lastUpdated = 0ull;
+            c.indirectValid = false;
+            c.relight = true;
+            c.relightIndirect = true;
+            c.moverTraced = false;
+            ++mCompactionMoves;
+        }
+    mPageOwner[best] = 0u;
+    mPageSubSize[best] = 0u;
+    mPageSubUsed[best] = 0u;
+    mPageSubMask[best] = 0ull;
     mTableDirty = true;
     ++mPhotonGeneration;
     return true;
 }
 
-void SurfaceCache::refreshResidency(const CardSceneView &view) {
-    const float r2 = view.radius * view.radius;
+void SurfaceCache::issueDemandRead() {
+    if (!mInstanceBuffer || mInstanceSlots == 0u || mFrame % kDemandReadEvery != 0ull) return;
+    DemandTicket &t = mDemandReadings[mDemandNextIssue];
+    if (t.ticket.get()) return;   // every slot in flight: the stamps persist, a later read takes them
+    t.ticket = mInstanceBuffer->readRequest(mInstanceSlots, demandEntries(mInstanceSlots),
+                                            /*accurateTracking=*/false);
+    t.frame = mFrame;
+    t.slots = mInstanceSlots;
+    mDemandNextIssue = (mDemandNextIssue + 1u) % kDemandSlots;
+}
 
+void SurfaceCache::takeDemand(std::vector<uint32_t> &slots) {
+    slots.clear();
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
+    // 1. THE READ-BACKS THAT LANDED, at a fixed lag of the cache's frames (the feedback readings' rule: a function of
+    //    the frames, never of the GPU's pace). mSlotCard is the table the stamps were written against (the last
+    //    syncBuffers; residency changes only after this).
+    while (vao) {
+        DemandTicket &t = mDemandReadings[mDemandNextTake];
+        if (!t.ticket.get() || mFrame < t.frame || mFrame - t.frame <= vao->getDynamicBufferMultiplier()) break;
+        const Ogre::uint32 *w = static_cast<const Ogre::uint32 *>(t.ticket->map());
+        for (unsigned k = 0; k < 4u; ++k) mDemandHits[k] = w[4u + k];   // the GPU's counts are cumulative
+        const Ogre::uint32 *cell = w + 4u * kDemandHeadEntries;
+        for (unsigned c = 0; c < kDemandCells; ++c)
+            for (unsigned r = 0; r < kDemandReaders; ++r) {
+                const unsigned long long stamp = cell[kDemandReaders * c + r];
+                if (!stamp) continue;
+                mDemandNewest[r] = std::max(mDemandNewest[r], stamp);
+                if (c >= mSlotCard.size() || mSlotCard[c] < 0 || size_t(mSlotCard[c]) >= mCards.size()) continue;
+                CardRec &card = mCards[size_t(mSlotCard[c])];
+                if (stamp < card.since) continue;   // older: the cell's last card's
+                card.readBy[r] = std::max(card.readBy[r], stamp);
+                card.lastRead = std::max(card.lastRead, stamp);
+            }
+        const Ogre::uint32 *face = cell + 4u * kDemandCellEntries;
+        if (mFaceMarks.size() < size_t(t.slots) * 16u) {
+            mFaceMarks.resize(size_t(t.slots) * 16u, 0ull);
+            mFacePrev.resize(size_t(t.slots) * 16u, 0ull);
+        }
+        for (size_t k = 0; k < size_t(t.slots) * 16u; ++k)
+            if (face[k] > mFaceMarks[k]) {
+                mFacePrev[k] = mFaceMarks[k];
+                mFaceMarks[k] = face[k];
+                const size_t r = (k % 16u) / 8u;
+                mDemandNewest[r] = std::max(mDemandNewest[r], (unsigned long long)face[k]);
+            }
+        t.ticket->unmap();
+        t.ticket.reset();
+        mDemandNextTake = (mDemandNextTake + 1u) % kDemandSlots;
+    }
+    // 2. THE SLOTS TO OFFER: the resident instances', and every slot a face of which was marked within the window.
+    for (const InstanceRec &inst : mInstances)
+        if (inst.cardCount && inst.itemSlot != size_t(-1)) slots.push_back(uint32_t(inst.itemSlot));
+    for (size_t s = 0; s * 16u < mFaceMarks.size(); ++s) {
+        bool wanted = false;
+        for (unsigned r = 0; r < kDemandReaders && !wanted; ++r)
+            for (unsigned b = 0; b < 6u && !wanted; ++b) {
+                const unsigned long long m = mFaceMarks[s * 16u + 8u * r + b];
+                wanted = m && m + kDemandWindow >= mDemandNewest[r];
+            }
+        if (wanted) slots.push_back(uint32_t(s));
+    }
+    std::sort(slots.begin(), slots.end());
+    slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+}
+
+void SurfaceCache::refreshResidency(const CardSceneView &view) {
     // 1. WHAT THE SCENE STILL OFFERS. Membership is decided by the CANDIDATE
     //    LIST the scene hands over, so an item that was destroyed, hidden, made
     //    a mover or re-materialled out of the GI channel simply stops being
     //    offered and its pages come back — no door to remember to knock on.
     for (InstanceRec &inst : mInstances) inst.seen = false;
     bool changed = false;
-    // THE INSTANCES THIS FRAME RE-ALLOCATES BECAUSE THEY MOVED (REFLECT-FIX-1): a
-    // resident object's own re-add, admitted past the fill gate below.
-    std::vector<NodeId> moved;
+    // THE INSTANCES THAT MOVED: released here and re-admitted below as THE SAME FACES (the cards a reader read keep
+    // their place in the layout, their demand and their flags' meaning) at the new transform.
+    struct Kept { unsigned index; unsigned long long readBy[2]; };
+    std::unordered_map<NodeId, std::vector<Kept>> moved;
     for (const CardSceneView::Candidate &cand : view.candidates) {
         auto it = mByNode.find(cand.node);
         if (it == mByNode.end()) continue;
@@ -869,22 +995,13 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         // THE SLOT IS THE SCENE'S, NOT THIS RECORD'S (V2 audit C-1, 2026-09-25):
         // a swap-on-remove renumbers the tail item into the freed slot
         // (OgreGi.cpp's removeItemSlot), and the ray hits address the instance
-        // table by THAT slot (the TLAS custom index). The copy taken when the
-        // record was made went stale, so a renumbered carded item's hits read
-        // no cards and a newcomer on its old slot read another object's. The
-        // candidate carries the node's current slot every frame: follow it,
-        // and re-sync the table when it moved.
+        // table by THAT slot (the TLAS custom index). The candidate carries the
+        // node's current slot every frame: follow it, and re-sync the table when
+        // it moved.
         if (inst.itemSlot != cand.itemSlot) {
             inst.itemSlot = cand.itemSlot;
             mTableDirty = true;
         }
-        const Ogre::Aabb &box = cand.box;
-        inst.distance = (box.mCenter - view.viewerPos).length();
-        // RESIDENCY IS RE-DECIDED EVERY FRAME, in both directions. An instance
-        // the camera has walked away from gives its pages back on the frame it
-        // crosses the radius — leaving `seen` false is how it is released, the
-        // same path a destroyed or hidden object takes.
-        if (inst.distance * inst.distance > r2) continue;
         inst.seen = true;
         // THE TRANSFORM SIGNATURE, AND IT IS NOT THE BOX ALONE. A card's
         // rectangle and its FRAME are in WORLD space and come from the node's
@@ -892,11 +1009,9 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         // ANY turn of a sphere, leaves the world AABB exactly where it was
         // while every card now describes a different face. The box, the
         // orientation and the scale are all part of the signature for that
-        // reason. A moved instance's cards are wrong RECTANGLES rather than
-        // stale pictures, so this is the one invalidation that frees and
-        // re-allocates instead of queueing. The tolerance is the GI item walk's
-        // shape, for its reason: a transform rewritten to the same value must
-        // not read as movement.
+        // reason. The tolerance is the GI item walk's shape, for its reason: a
+        // transform rewritten to the same value must not read as movement.
+        const Ogre::Aabb &box = cand.box;
         const Ogre::Vector3 dc = box.mCenter - inst.centre, dh = box.mHalfSize - inst.halfSize;
         const float tol = 1e-4f * std::max(1.0f, box.mHalfSize.length());
         const Ogre::Quaternion rot = cand.sceneNode ? cand.sceneNode->_getDerivedOrientation()
@@ -912,7 +1027,11 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             rescaled) {
             ++mInvalidTransform;
             inst.seen = false;
-            moved.push_back(cand.node);
+            std::vector<Kept> &keep = moved[cand.node];
+            for (unsigned c = 0; c < inst.cardCount; ++c) {
+                const CardRec &k = mCards[inst.firstCard + c];
+                keep.push_back(Kept{ k.index, { k.readBy[0], k.readBy[1] } });
+            }
             continue;
         }
         // THE MATERIAL THE INSTANCE WEARS, re-read every frame — because the
@@ -921,10 +1040,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         // writes `n.materialRef` and swaps the datablock on the live Item
         // WITHOUT destroying or editing a material, which is the whole point of
         // it — so the only way the cache hears about a preview is by reading
-        // the candidate's material again. Without this a hovered wall keeps the
-        // old preset's albedo in the atlas for ever, an edit to the material it
-        // now wears never reaches it, and an edit to the one it dropped
-        // re-captures it for nothing.
+        // the candidate's material again.
         if (inst.material != cand.material) {
             inst.material = cand.material;
             for (unsigned c = 0; c < inst.cardCount; ++c)
@@ -932,53 +1048,192 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             ++mInvalidMaterial;
         }
     }
-    // ...AND WHO LEFT FOR A GESTURE (REFLECT-FIX-1): a resident instance released
-    // while a drag holds its node off the GI channel (view.gestureHeld) comes back as
-    // itself when the gesture ends. Nothing else enters the set — a hide, a delete, a
-    // camera jump that empties the sphere are departures, and the object comes back a
-    // newcomer — and it is pruned below to the nodes still held or offered.
-    std::vector<NodeId> held(view.gestureHeld);
-    std::sort(held.begin(), held.end());
     for (size_t i = 0; i < mInstances.size(); ++i) {
         if (mInstances[i].cardCount && !mInstances[i].seen) {
-            if (std::binary_search(held.begin(), held.end(), mInstances[i].node))
-                mReturning.insert(mInstances[i].node);
             releaseInstance(i);
             changed = true;
         }
     }
-    bool returningOffered = false;
-    if (!mReturning.empty()) {
-        std::vector<NodeId> offered;
-        offered.reserve(view.candidates.size());
-        for (const CardSceneView::Candidate &cand : view.candidates) offered.push_back(cand.node);
-        std::sort(offered.begin(), offered.end());
-        for (auto it = mReturning.begin(); it != mReturning.end();) {
-            const bool isOffered = std::binary_search(offered.begin(), offered.end(), *it);
-            returningOffered = returningOffered || isOffered;
-            if (isOffered || std::binary_search(held.begin(), held.end(), *it)) ++it;
-            else it = mReturning.erase(it);
+
+    // 2. THE CARDS, PER INSTANCE, while the set changes (flattened back once at the end; a card's `size` 0 = evicted).
+    std::vector<std::vector<CardRec>> per(mInstances.size());
+    for (size_t i = 0; i < mInstances.size(); ++i)
+        for (unsigned c = 0; c < mInstances[i].cardCount; ++c) per[i].push_back(mCards[mInstances[i].firstCard + c]);
+
+    // 3. WHAT THE READERS WANT THAT IS NOT RESIDENT: per offered candidate, the cards of the faces a hit marked within
+    //    the window (and a moved instance's own faces), ordered by the mark (newest first), then the size on screen
+    //    (largest first), the node and the index.
+    struct Arrival {
+        const CardSceneView::Candidate *cand = nullptr;
+        CardRec card;
+        unsigned long long mark = 0ull;
+        float size = 0.0f;
+        bool persistent = false;   // marked in two read-backs within its reader's window (or a moved card's own)
+    };
+    std::vector<Arrival> arriving;
+    std::vector<CardRec> layout;
+    for (const CardSceneView::Candidate &cand : view.candidates) {
+        if (!cand.item || !cand.cards || cand.cards->empty()) continue;
+        auto mv = moved.find(cand.node);
+        unsigned long long marks[2][6] = {};
+        bool twice[6] = {};
+        bool any = mv != moved.end();
+        if (cand.itemSlot != size_t(-1) && (cand.itemSlot + 1u) * 16u <= mFaceMarks.size())
+            for (unsigned r = 0; r < kDemandReaders; ++r)
+                for (unsigned b = 0; b < 6u; ++b) {
+                    const size_t k = cand.itemSlot * 16u + 8u * r + b;
+                    const unsigned long long m = mFaceMarks[k];
+                    if (m && m + kDemandWindow >= mDemandNewest[r]) {
+                        marks[r][b] = m;
+                        any = true;
+                        twice[b] = twice[b] || (mFacePrev[k] && mFacePrev[k] + kDemandWindow >= mDemandNewest[r]);
+                    }
+                }
+        if (!any) continue;
+        // CLOSED (CardSceneView::demandOpen): only a moved instance's own cards come back
+        if (!view.demandOpen && mv == moved.end()) continue;
+        layoutCards(cand, layout);
+        auto it = mByNode.find(cand.node);
+        const std::vector<CardRec> *have = it != mByNode.end() ? &per[it->second] : nullptr;
+        for (const CardRec &c : layout) {
+            if (have && std::any_of(have->begin(), have->end(),
+                                    [&c](const CardRec &h) { return h.size && h.index == c.index; }))
+                continue;
+            // each reader's mark of this face (a moved instance's card: what each reader had read it at, or its clock now)
+            unsigned long long by[2] = { marks[0][c.bucket], marks[1][c.bucket] };
+            bool kept = false;
+            if (mv != moved.end())
+                for (const Kept &k : mv->second)
+                    if (k.index == c.index) {
+                        kept = true;
+                        for (unsigned r = 0; r < kDemandReaders; ++r)
+                            if (k.readBy[r]) by[r] = std::max({ by[r], k.readBy[r], mDemandNewest[r] });
+                    }
+            // (a moved card no reader had read yet - admitted, waiting - comes back all the same)
+            const unsigned long long mark = std::max({ by[0], by[1], kept ? 1ull : 0ull });
+            if (!mark) continue;
+            Arrival a;
+            a.cand = &cand;
+            a.card = c;
+            a.card.readBy[0] = by[0];
+            a.card.readBy[1] = by[1];
+            a.card.lastRead = mark;
+            a.mark = mark;
+            a.persistent = kept || (view.demandOpen && twice[c.bucket]);
+            a.size = projectedSize(c, view.viewerPos);
+            arriving.push_back(a);
         }
     }
+    std::sort(arriving.begin(), arriving.end(), [](const Arrival &a, const Arrival &b) {
+        if (a.mark != b.mark) return a.mark > b.mark;
+        if (a.size != b.size) return a.size > b.size;
+        if (a.cand->node != b.cand->node) return a.cand->node < b.cand->node;
+        return a.card.index < b.card.index;
+    });
 
-    // 2. COMPACTION, when anything left. Cards live in ONE vector with a
-    //    per-instance block, so a departure is answered by rebuilding both
-    //    vectors once rather than by a free list of holes.
+    // 4. THE EVICTABLE: resident cards no reader read for a window, least recently read first, then the smallest on
+    //    screen, the node, the index.
+    struct Evictable {
+        size_t inst = 0, pos = 0;
+        unsigned long long read = 0ull;
+        float size = 0.0f;
+        NodeId node = 0;
+        unsigned index = 0u;
+    };
+    std::vector<Evictable> evictable;
+    for (size_t i = 0; i < per.size(); ++i)
+        for (size_t k = 0; k < per[i].size(); ++k) {
+            const CardRec &c = per[i][k];
+            // FRESH FOR A WINDOW of a reader's clock after that reader's last read, or of the newest clock after its last
+            // capture; one still waiting for its first capture is wanted (an arrival the budget has not reached) and
+            // never evicted.
+            bool fresh = !c.lastUpdated || c.lastUpdated + kDemandWindow >= std::max(mDemandNewest[0], mDemandNewest[1]);
+            for (unsigned r = 0; r < kDemandReaders && !fresh; ++r)
+                fresh = c.readBy[r] && c.readBy[r] + kDemandWindow >= mDemandNewest[r];
+            if (fresh) continue;
+            evictable.push_back(Evictable{ i, k, c.lastRead, projectedSize(c, view.viewerPos), mInstances[i].node,
+                                           c.index });
+        }
+    std::sort(evictable.begin(), evictable.end(), [](const Evictable &a, const Evictable &b) {
+        if (a.read != b.read) return a.read < b.read;
+        if (a.size != b.size) return a.size < b.size;
+        if (a.node != b.node) return a.node < b.node;
+        return a.index < b.index;
+    });
+
+    // 5. THE ARRIVALS, in order. Free room takes any wanted face at its first mark (the fill is the readers' first
+    //    frames). A face that finds none MAKES room - the atlas compacted, then the evictable evicted, until it fits or
+    //    nothing evictable is left - only when its demand PERSISTS: marked in two read-backs within its reader's window
+    //    (or a moved card's own). A face a stochastic reader grazes once in a window displaces nothing - measured on
+    //    photon-glass: the atlas full, the faces its readers reach once in hundreds of frames swapped one for another
+    //    for ever, and every capture broke the reflection's rest (reflectionReadsKey folds the cache's captures). (And
+    //    once the demand closes - a still pose over a still world, CardSceneView::demandOpen - nothing arrives at all.)
+    size_t nextEvict = 0;
+    for (const Arrival &a : arriving) {
+        CardRec c = a.card;
+        bool placed = allocRect(c.size, c.atlasX, c.atlasY);
+        while (!placed && a.persistent) {
+            if (compactOnePage(per)) { placed = allocRect(c.size, c.atlasX, c.atlasY); continue; }
+            if (nextEvict >= evictable.size()) break;
+            const Evictable &e = evictable[nextEvict++];
+            CardRec &gone = per[e.inst][e.pos];
+            freeRect(gone.atlasX, gone.atlasY, gone.size);
+            gone.size = 0u;
+            ++mEvicted;
+            changed = true;
+            placed = allocRect(c.size, c.atlasX, c.atlasY);
+        }
+        if (!placed) continue;
+        c.since = mFrame;
+        c.queued = true;
+        c.lastUpdated = 0ull;
+        auto it = mByNode.find(a.cand->node);
+        size_t idx;
+        if (it == mByNode.end()) {
+            InstanceRec inst;
+            inst.node = a.cand->node;
+            inst.itemSlot = a.cand->itemSlot;
+            inst.item = a.cand->item;
+            inst.material = a.cand->material;
+            inst.seen = true;
+            inst.centre = a.cand->box.mCenter;
+            inst.halfSize = a.cand->box.mHalfSize;
+            inst.rotation = a.cand->sceneNode->_getDerivedOrientation();
+            inst.scale = a.cand->sceneNode->_getDerivedScale();
+            idx = mInstances.size();
+            mInstances.push_back(inst);
+            per.emplace_back();
+            mByNode[a.cand->node] = idx;
+        } else {
+            idx = it->second;
+        }
+        per[idx].push_back(c);
+        ++mAdmitted;
+        changed = true;
+    }
+
+    // 6. THE VECTORS, REBUILT when anything changed: every instance's cards in one block, in layout order, the
+    //    departed and evicted gone (an instance with none left is released: its next marked face brings it back).
     if (changed) {
         std::vector<InstanceRec> keptInst;
         std::vector<CardRec> keptCards;
         keptInst.reserve(mInstances.size());
         keptCards.reserve(mCards.size());
         mByNode.clear();
-        for (InstanceRec &inst : mInstances) {
-            if (!inst.cardCount) continue;
-            const unsigned first = unsigned(keptCards.size());
-            for (unsigned c = 0; c < inst.cardCount; ++c) {
-                CardRec r = mCards[inst.firstCard + c];
+        for (size_t i = 0; i < mInstances.size(); ++i) {
+            InstanceRec &inst = mInstances[i];
+            if (!inst.node) continue;
+            std::vector<CardRec> &list = per[i];
+            list.erase(std::remove_if(list.begin(), list.end(), [](const CardRec &c) { return c.size == 0u; }),
+                       list.end());
+            if (list.empty()) continue;
+            std::sort(list.begin(), list.end(), [](const CardRec &a, const CardRec &b) { return a.index < b.index; });
+            inst.firstCard = unsigned(keptCards.size());
+            inst.cardCount = unsigned(list.size());
+            for (CardRec &r : list) {
                 r.instance = unsigned(keptInst.size());
                 keptCards.push_back(r);
             }
-            inst.firstCard = first;
             mByNode[inst.node] = keptInst.size();
             keptInst.push_back(inst);
         }
@@ -987,71 +1242,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         mTableDirty = true;
         ++mPhotonGeneration;
     }
-
-    // 3. WHAT ARRIVES — the nearest candidates first, so a full atlas holds the
-    //    ones the camera is closest to rather than the ones the scene happened
-    //    to list first. That IS "allocation by distance": the radius decides
-    //    who may hold pages and this order decides who gets them when the atlas
-    //    cannot hold everyone.
-    //    AND A FULL ATLAS COSTS NOTHING TO DISCOVER, which is the difference
-    //    between a cache and a per-frame search. `pagesUsed` is counted ONCE
-    //    here, not once per arrival; the arrival loop stops on the first
-    //    `allocRect` that finds no room (`mAtlasFull`, set by the allocator
-    //    itself) rather than after the next SUCCESS; and a frame that cannot
-    //    place anything does not sort at all. Without this, a scene bigger than
-    //    the atlas re-scanned every unplaceable candidate against all 256 pages
-    //    and re-sorted them, every frame, for ever.
     unsigned pagesUsed = 0u;
-    for (unsigned char o : mPageOwner) pagesUsed += (o != 0u) ? 1u : 0u;
-    mPagesUsed = pagesUsed;
-    // 7/8 FULL: TAKE NO NEW WORK — but a MOVED instance's re-add is not new work
-    // (REFLECT-FIX-1). A move frees its pages and re-allocates (step 1, "frees and
-    // re-allocates"), and the pages it re-allocates from are the ones it freed a
-    // moment ago, free by definition. Gated with everyone else it lost its cards for
-    // good the first time it moved in a room that fills the atlas (the Mirror Room
-    // alone holds 256 pages): its reflection went voxel-shaded and blotchy at rest
-    // (dark fraction 0.31 -> 0.74, still 0.73 at 20 s; spikes/reflect-tear-audit). So
-    // the gate admits exactly those, and still refuses every newcomer.
-    // ...and an instance RETURNING from a gesture (mReturning) is the same object's
-    // re-add (the app's Mirror Room drag: the teapot's cards never came back without
-    // it) — but RANKED BY DISTANCE with the newcomers the gate refuses: it is admitted
-    // only while no nearer newcomer has been turned away this frame, so a far
-    // returning object never takes pages ahead of a nearer one.
-    const bool gateFull = pagesUsed * 8u >= mPageOwner.size() * 7u;
-    if (gateFull && moved.empty() && !returningOffered) return;
-    std::sort(moved.begin(), moved.end());
-
-    std::vector<const CardSceneView::Candidate *> arriving;
-    arriving.reserve(view.candidates.size());
-    for (const CardSceneView::Candidate &cand : view.candidates) {
-        if (!cand.item || !cand.cards || cand.cards->empty()) continue;
-        if (mByNode.find(cand.node) != mByNode.end()) continue;
-        if ((cand.box.mCenter - view.viewerPos).squaredLength() > r2) continue;
-        arriving.push_back(&cand);
-    }
-    if (arriving.empty()) return;
-    const Ogre::Vector3 eye = view.viewerPos;
-    std::sort(arriving.begin(), arriving.end(),
-              [eye](const CardSceneView::Candidate *a, const CardSceneView::Candidate *b) {
-                  const float da = (a->box.mCenter - eye).squaredLength();
-                  const float db = (b->box.mCenter - eye).squaredLength();
-                  if (da != db) return da < db;
-                  return a->node < b->node;
-              });
-    mAtlasFull = false;
-    bool newcomerRefused = false;
-    for (const CardSceneView::Candidate *cand : arriving) {
-        if (gateFull) {
-            const bool isMoved = std::binary_search(moved.begin(), moved.end(), cand->node);
-            const bool isReturning = mReturning.count(cand->node) != 0u;
-            if (!isMoved && !isReturning) { newcomerRefused = true; continue; }
-            if (!isMoved && newcomerRefused) continue;   // a nearer newcomer waits: no bypass
-        }
-        buildCardsFor(*cand);
-        if (mByNode.count(cand->node)) mReturning.erase(cand->node);
-        if (mAtlasFull) break;
-    }
-    pagesUsed = 0u;
     for (unsigned char o : mPageOwner) pagesUsed += (o != 0u) ? 1u : 0u;
     mPagesUsed = pagesUsed;
 }
@@ -2830,10 +3021,17 @@ void SurfaceCache::traceSun() {
 // index IS that slot), so "which cards belong to this hit" is one indexed
 // fetch of `mInstanceBuffer` and no lookup at all.
 void SurfaceCache::syncBuffers() {
-    if (!mTableDirty) return;
-    mTableDirty = false;
     Ogre::VaoManager *vao = Ogre::Root::getSingleton().getRenderSystem()->getVaoManager();
     if (!vao) return;
+    // THE TABLES EXIST FROM THE FIRST FRAME, holding no card (PHOTON-7 stage 5, 5-2): the readers' demand stamps, written
+    // into the instance table, are what makes a card resident at all; the table covers every item slot of the scene.
+    unsigned slotsWanted = std::max(kInstanceSlotsInitial, mInstanceSlots);
+    while (mItemSlots > slotsWanted) slotsWanted *= 2u;
+    if (!mTableDirty && mInstanceBuffer && mCardBuffer && slotsWanted == mInstanceSlots) {
+        uploadDemandHead();
+        return;
+    }
+    mTableDirty = false;
 
     // 20 floats a record = the 80 bytes CardGpuRec declares.
     constexpr size_t kCardGpuFloats = sizeof(CardGpuRec) / sizeof(float);
@@ -2890,14 +3088,20 @@ void SurfaceCache::syncBuffers() {
     for (const InstanceRec &inst : mInstances)
         if (inst.cardCount && inst.itemSlot != size_t(-1))
             maxSlot = std::max(maxSlot, unsigned(inst.itemSlot));
-    unsigned slots = std::max(kInstanceSlotsInitial, mInstanceSlots);
+    unsigned slots = slotsWanted;
     while (maxSlot + 1u > slots) slots *= 2u;
     if (slots != mInstanceSlots && mInstanceBuffer) {
+        // A GROWN TABLE: the demand region after it moves with it, so the read-backs in flight describe the old one
+        // and are dropped (their stamps are re-written by the next frame's hits).
         vao->destroyUavBuffer(mInstanceBuffer);
         mInstanceBuffer = nullptr;
+        for (DemandTicket &t : mDemandReadings) t.ticket.reset();
+        mDemandNextIssue = mDemandNextTake = 0u;
     }
     mInstanceSlots = slots;
-    mInstanceBufferCpu.assign(size_t(slots) * 4u, 0u);
+    // THE TABLE AND, AFTER IT, THE DEMAND REGION (jah_rq_card_bindings.glsl), zeroed at creation and written by the
+    // readers from then on; the host uploads the table's entries and the head only.
+    mInstanceBufferCpu.assign((size_t(slots) + demandEntries(slots)) * 4u, 0u);
     for (const InstanceRec &inst : mInstances) {
         if (!inst.cardCount || inst.itemSlot == size_t(-1)) continue;
         unsigned *e = &mInstanceBufferCpu[size_t(inst.itemSlot) * 4u];
@@ -2911,10 +3115,18 @@ void SurfaceCache::syncBuffers() {
     else
         mCardBuffer->upload(mCardBufferCpu.data(), 0, kCardRecordCeiling);
     if (!mInstanceBuffer)
-        mInstanceBuffer = vao->createUavBuffer(slots, 4u * sizeof(unsigned), 0,
+        mInstanceBuffer = vao->createUavBuffer(size_t(slots) + demandEntries(slots), 4u * sizeof(unsigned), 0,
                                                mInstanceBufferCpu.data(), false);
     else
         mInstanceBuffer->upload(mInstanceBufferCpu.data(), 0, slots);
+    uploadDemandHead();
+}
+
+void SurfaceCache::uploadDemandHead() {
+    if (!mInstanceBuffer) return;
+    // THE FRAME'S STAMP (the cache's frame: every hit of this frame writes it) and the count arm.
+    const Ogre::uint32 head[4] = { Ogre::uint32(mFrame), mDemandCount ? 1u : 0u, 0u, 0u };
+    mInstanceBuffer->upload(head, mInstanceSlots, 1u);
 }
 
 void SurfaceCache::freezeFrame() {
@@ -2954,12 +3166,15 @@ void SurfaceCache::update(const CardSceneView &view) {
     mBudget = view.budgetTexels;
     mLightBudget = view.lightBudgetTexels;
     mIndirectBudget = view.indirectBudgetTexels;
-    mRadius = view.radius;
+    mItemSlots = view.itemSlots;
+    mDemandCount = view.demandCount;
 
     refreshResidency(view);
     // THE GPU TABLES follow the ALLOCATION and not the captures: a re-captured
     // card lands in the same rect, so nothing here moves when the queue drains.
+    // ...and THE DEMAND's head (the frame's stamp) every frame, then its read-back on the period.
     syncBuffers();
+    issueDemandRead();
 
     // NO LIGHT RE-QUEUES A CAPTURE (ATOM-S3-CARDCAP): a capture holds albedo,
     // normal, depth, emissive and roughness — no light quantity at all. The sun's
@@ -2967,18 +3182,15 @@ void SurfaceCache::update(const CardSceneView &view) {
     // card's still term and captures nothing), and every other light is the
     // relight's (the changed-region list's stale set, planRelights).
 
-    // THE QUEUE, IN LUMEN'S ORDER: priority = lastUsed - lastUpdated, drained
-    // oldest first. A card that has never been captured has `lastUpdated` 0 and
-    // therefore the highest priority there is, which is what makes a new
-    // instance's cards arrive before an old one's are refreshed.
+    // THE QUEUE, IN LUMEN'S ORDER: priority = lastRead - lastUpdated (the READERS' last read: PHOTON-7 stage 5, 5-2),
+    // drained highest first. A card that has never been captured has `lastUpdated` 0 and therefore the highest
+    // priority there is, which is what makes a new face's cards arrive before an old one's are refreshed.
     mQueue.clear();
-    for (unsigned i = 0; i < mCards.size(); ++i) {
-        mCards[i].lastUsed = mFrame;
+    for (unsigned i = 0; i < mCards.size(); ++i)
         if (mCards[i].queued) mQueue.push_back(i);
-    }
     std::sort(mQueue.begin(), mQueue.end(), [this](unsigned a, unsigned b) {
-        const unsigned long long pa = mCards[a].lastUsed - mCards[a].lastUpdated;
-        const unsigned long long pb = mCards[b].lastUsed - mCards[b].lastUpdated;
+        const long long pa = (long long)mCards[a].lastRead - (long long)mCards[a].lastUpdated;
+        const long long pb = (long long)mCards[b].lastRead - (long long)mCards[b].lastUpdated;
         if (pa != pb) return pa > pb;
         return a < b;
     });
@@ -3100,7 +3312,10 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.instancesResident = 0u;
     for (const InstanceRec &i : mInstances) out.instancesResident += i.cardCount ? 1u : 0u;
     out.cardsResident = unsigned(mCards.size());
-    out.residencyRadius = mRadius;
+    out.admitted = mAdmitted;
+    out.evicted = mEvicted;
+    out.compactionMoves = mCompactionMoves;
+    for (unsigned k = 0; k < 4u; ++k) out.demandHits[k] = mDemandHits[k];
     out.queueLength = 0u;
     for (const CardRec &c : mCards) out.queueLength += c.queued ? 1u : 0u;
     out.budgetTexels = mBudget;
@@ -3147,8 +3362,11 @@ bool SurfaceCache::readTexel(NodeId node, unsigned card, float u, float v,
     auto it = mByNode.find(node);
     if (it == mByNode.end()) return false;
     const InstanceRec &inst = mInstances[it->second];
-    if (card >= inst.cardCount) return false;
-    return sampleCard(mCards[inst.firstCard + card], u, v, out);
+    // `card` is the card's place in the instance's LAYOUT (PHOTON-7 stage 5, 5-2: an instance holds the faces its
+    // readers read, so its resident block is a subset); false when that card is not resident.
+    for (unsigned k = 0; k < inst.cardCount; ++k)
+        if (mCards[inst.firstCard + k].index == card) return sampleCard(mCards[inst.firstCard + k], u, v, out);
+    return false;
 }
 
 bool SurfaceCache::readRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame) const {
@@ -3168,7 +3386,9 @@ bool SurfaceCache::readRadiance(std::vector<CardRadiance> &out, unsigned long lo
             const CardRec &c = mCards[inst.firstCard + k];
             CardRadiance r;
             r.node = inst.node;
-            r.card = k;
+            r.card = c.index;
+            r.bucket = c.bucket;
+            r.lastRead = c.lastRead;
             r.size = c.size;
             r.lastRelit = c.lastRelit;
             r.lastIndirect = c.lastIndirect;

@@ -145,6 +145,55 @@ JahCardPick jahCardPick( uint slot, vec3 hitPos, vec3 facingDir )
 	return best;
 }
 
+#ifdef JAH_CARD_DEMAND
+/// THE READERS' DEMAND (PHOTON-7 stage 5, 5-2; jah_rq_card_bindings.glsl's layout): the hit's read stamps the card it
+/// read, or - when no card of the instance answered - the instance's face bucket the hit faces, with the frame's stamp
+/// (a plain store of one value: every writer writes the same, so the race is benign, and the read first keeps a hot
+/// card to one store a frame). The host reads them back and makes resident what the readers read.
+uint jahCardBucket( vec3 n )
+{
+	const vec3 a = abs( n );
+	const uint axis = ( a.x >= a.y && a.x >= a.z ) ? 0u : ( a.y >= a.z ? 1u : 2u );
+	return 2u * axis + ( n[axis] < 0.0 ? 1u : 0u );
+}
+void jahCardDemandStamp( uint e, uint k, uint stamp )
+{
+	if( jahCardInstances[e][k] != stamp )
+		jahCardInstances[e][k] = stamp;
+}
+void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
+{
+	const uint S = JAH_CARD_SLOTS;
+	if( S == 0u || slot >= S )
+		return;
+	const uvec4 head = jahCardInstances[S];
+	const uint reader = uint( JAH_CARD_DEMAND );
+	if( pick.ok )
+	{
+		const uvec4 at = jahCards[pick.card].atlas;
+		const uint w = 2u * ( ( at.y >> 4u ) * 128u + ( at.x >> 4u ) ) + reader;
+		jahCardDemandStamp( S + 2u + ( w >> 2u ), w & 3u, head.x );
+	}
+	else
+	{
+		const uint w = 8u * reader + jahCardBucket( facing );
+		jahCardDemandStamp( S + 8194u + 4u * slot + ( w >> 2u ), w & 3u, head.x );
+	}
+	if( head.y != 0u )
+	{
+		const uint w = 2u * uint( JAH_CARD_DEMAND ) + ( pick.ok ? 0u : 1u );
+		if( w == 0u )
+			atomicAdd( jahCardInstances[S + 1u].x, 1u );
+		else if( w == 1u )
+			atomicAdd( jahCardInstances[S + 1u].y, 1u );
+		else if( w == 2u )
+			atomicAdd( jahCardInstances[S + 1u].z, 1u );
+		else
+			atomicAdd( jahCardInstances[S + 1u].w, 1u );
+	}
+}
+#endif
+
 /// THE RADIANCE LEAVING A HIT TOWARDS `viewDir` (unit, from the hit to the
 /// viewer: the reversed ray), FROM ITS CARD. `ok` is false when no card of
 /// the instance describes the point, when the one that does has not had its
@@ -171,6 +220,9 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, floa
 					  out bool ok )
 {
 	const JahCardPick pick = jahCardPick( slot, hitPos, facingDir );
+#ifdef JAH_CARD_DEMAND
+	jahCardDemand( slot, pick, facingDir );
+#endif
 	ok = pick.ok && pick.lit &&
 		 footprint <= float( JAH_CARD_FOOTPRINT_TEXELS ) * jahCards[pick.card].axis.w;
 	if( !ok )

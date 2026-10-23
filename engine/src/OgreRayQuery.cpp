@@ -5816,8 +5816,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (cardCache) cardCache->viewLayers(cardView);
     bool cardViewBound = true;
     for (Ogre::TextureGpu *t : cardView) cardViewBound = cardViewBound && t;
-    const bool cardsBound = cardTable && cardInstances && cardDepth && cardRadiance &&
-                            cardViewBound && cardCache->cardRecords() > 0u;
+    // BOUND WHENEVER THE CACHE IS BUILT, with no card resident too (PHOTON-7 stage 5, 5-2): the hits' demand stamps
+    // are what makes a card resident at all.
+    const bool cardsBound = cardTable && cardInstances && cardDepth && cardRadiance && cardViewBound &&
+                            cardCache->instanceSlots() > 0u;
 
     // ---- PER-VIEW STATE -----------------------------------------------------
     ReflectView &rv = mReflects[key];
@@ -6619,8 +6621,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             for (Ogre::TextureGpu *t : cardView)
                 solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                          Ogre::ResourceAccess::Read, computeStage);
-            for (Ogre::UavBufferPacked *b : { cardTable, cardInstances })
-                solver.resolveTransition(trans, b, Ogre::ResourceAccess::Read, computeStage);
+            // ...the instance table READ AND WRITTEN: the hits' demand stamps (PHOTON-7 stage 5, 5-2).
+            solver.resolveTransition(trans, cardTable, Ogre::ResourceAccess::Read, computeStage);
+            solver.resolveTransition(trans, cardInstances, Ogre::ResourceAccess::ReadWrite, computeStage);
         }
         if (geomSlots)
             solver.resolveTransition(trans, geomRows, Ogre::ResourceAccess::Read, computeStage);
@@ -7590,7 +7593,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         Ogre::UavBufferPacked *instances = cache ? cache->instanceBuffer() : nullptr;
         Ogre::TextureGpu *depthLayer = cache ? cache->depthLayer() : nullptr;
         Ogre::TextureGpu *radianceLayer = cache ? cache->radianceLayer() : nullptr;
-        if (table && instances && depthLayer && radianceLayer && cache->cardRecords() > 0u) {
+        if (table && instances && depthLayer && radianceLayer && cache->instanceSlots() > 0u) {
             in.cardTable = table;
             in.cardInstances = instances;
             in.cardDepth = depthLayer;
