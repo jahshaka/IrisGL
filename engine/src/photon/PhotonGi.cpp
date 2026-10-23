@@ -8620,7 +8620,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
         view.demandChanged = hitChanged;
         view.demandSettleFrames = facts.cardDemandSettleFrames;
     }
-    mSurfaceCache->takeDemand(mCardSlots);
+    mSurfaceCache->takeDemand(mCardSlots, view.demandSettleFrames);
     mScene.cardCandidates(mCardSlots, view);
     // THE GI FREEZE (M1's measuring arm): no card is captured, relit or traced.
     if (mEngine && mEngine->armRegistry().on(ArmId::GiFreeze)) {

@@ -437,7 +437,7 @@ public:
     /// THE READERS' DEMAND, TAKEN (PHOTON-7 stage 5, 5-2), before the frame's candidates are asked for: the read-backs
     /// that landed (a fixed lag of the cache's frames) folded into each card's `lastRead` and the face marks, and the
     /// item slots the cache wants offered - its resident instances' and every slot a reader marked within the window.
-    void takeDemand(std::vector<uint32_t> &slots);
+    void takeDemand(std::vector<uint32_t> &slots, unsigned window);   // window: the settle's S (the demand's window)
     /// THE GI FREEZE (PHOTON-2 round 2, M1's measuring arm): this frame captures, relights and traces nothing.
     void freezeFrame();
     /// THE CHANGED-REGION LIST'S CARD PRODUCER (PHOTON-7 stage 3): the world box of every instance this frame's plan
@@ -919,6 +919,8 @@ private:
     /// by the settle.
     unsigned long long mDemandNewest[2] = { 0ull, 0ull };
     unsigned long long mDemandChangeFrame = 0ull;
+    /// THE DEMAND'S WINDOW in reader frames (takeDemand: the settle's S, GiQualityFacts::cardDemandSettleFrames).
+    unsigned long long mDemandWindow = 10ull;
     unsigned long long mAdmitted = 0ull, mEvicted = 0ull, mCompactionMoves = 0ull;
     unsigned long long mDemandHits[4] = { 0ull, 0ull, 0ull, 0ull };
 };

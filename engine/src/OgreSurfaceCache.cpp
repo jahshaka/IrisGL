@@ -728,7 +728,7 @@ void SurfaceCache::freeRect(unsigned x, unsigned y, unsigned size) {
 // jah_rq_card.glsl), and each hit stamps what it read into the instance table's demand region - the card's atlas cell,
 // or, when no card of the instance answered, the instance's FACE BUCKET it faced (jah_rq_card_bindings.glsl's layout).
 // The stamps come back at a fixed lag of the cache's frames (takeDemand), PER READER (the reflection, the gather): a
-// card's `readBy` is each reader's newest; a face marked within kDemandWindow frames of its reader's clock is WANTED, and
+// card's `readBy` is each reader's newest; a face marked within the WINDOW of its reader's clock is WANTED, and
 // its cards (the layout's cards in that bucket) arrive. An arrival that finds no room takes it from the cards no reader
 // has read for a window of its own clock (a reader at rest - the reflection held, the gather held - reads nothing, and
 // what it read stays: measured, photon-glass's reflection at rest from frame ~513 let the gather's faces evict the
@@ -751,11 +751,6 @@ constexpr unsigned kDemandReaders = 2u;
 constexpr unsigned kDemandCellEntries = kDemandCells * kDemandReaders / 4u;
 /// Per item slot, the face marks: per reader 6 buckets in 8 words, four entries.
 constexpr unsigned kDemandFaceEntries = 4u;
-/// THE WINDOW: a card read, or a face marked, within this many frames of ITS READER'S CLOCK (the newest stamp that
-/// reader wrote: a reader at rest reads nothing, and nothing it read goes stale while it rests) is wanted (a second at
-/// 60 Hz - the stochastic readers revisit what they read many times within it); a card no reader read for longer may
-/// be evicted.
-constexpr unsigned long long kDemandWindow = 60ull;
 /// The read-back's period (the stamps persist on the GPU: a period only costs latency).
 constexpr unsigned long long kDemandReadEvery = 4ull;
 
@@ -928,7 +923,14 @@ void SurfaceCache::issueDemandRead() {
     mDemandNextIssue = (mDemandNextIssue + 1u) % kDemandSlots;
 }
 
-void SurfaceCache::takeDemand(std::vector<uint32_t> &slots) {
+// THE WINDOW (mDemandWindow, PHOTON-7 stage 5's read W2): a card read, or a face marked, within this many frames of ITS
+// READER'S CLOCK (the newest stamp that reader wrote: a reader at rest reads nothing, and nothing it read goes stale while
+// it rests) is wanted; a card no reader read for longer may be evicted. THE LAW is the settle's (GiQualityFacts::
+// cardDemandSettleFrames, S): a face the readers hit lambda_min times a frame is marked twice in different read-backs
+// within S frames at P >= 1 - 1e-3 (its demand persists, `twice`), and a card read lambda_min a frame goes S frames
+// unread with P = e^-S (4.5e-5 at S = 10) - so the window IS S. (The 60 frames it replaced had no law.)
+void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, unsigned window) {
+    mDemandWindow = std::max(1u, window);
     slots.clear();
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
@@ -983,7 +985,7 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots) {
         for (unsigned r = 0; r < kDemandReaders && !wanted; ++r)
             for (unsigned b = 0; b < 6u && !wanted; ++b) {
                 const unsigned long long m = mFaceMarks[s * 16u + 8u * r + b];
-                wanted = m && m + kDemandWindow >= mDemandNewest[r];
+                wanted = m && m + mDemandWindow >= mDemandNewest[r];
             }
         if (wanted) slots.push_back(uint32_t(s));
     }
@@ -1102,10 +1104,10 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                 for (unsigned b = 0; b < 6u; ++b) {
                     const size_t k = cand.itemSlot * 16u + 8u * r + b;
                     const unsigned long long m = mFaceMarks[k];
-                    if (m && m + kDemandWindow >= mDemandNewest[r]) {
+                    if (m && m + mDemandWindow >= mDemandNewest[r]) {
                         marks[r][b] = m;
                         any = true;
-                        twice[b] = twice[b] || (mFacePrev[k] && mFacePrev[k] + kDemandWindow >= mDemandNewest[r]);
+                        twice[b] = twice[b] || (mFacePrev[k] && mFacePrev[k] + mDemandWindow >= mDemandNewest[r]);
                     }
                 }
         if (!any) continue;
@@ -1166,9 +1168,9 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             // FRESH FOR A WINDOW of a reader's clock after that reader's last read, or of the newest clock after its last
             // capture; one still waiting for its first capture is wanted (an arrival the budget has not reached) and
             // never evicted.
-            bool fresh = !c.lastUpdated || c.lastUpdated + kDemandWindow >= std::max(mDemandNewest[0], mDemandNewest[1]);
+            bool fresh = !c.lastUpdated || c.lastUpdated + mDemandWindow >= std::max(mDemandNewest[0], mDemandNewest[1]);
             for (unsigned r = 0; r < kDemandReaders && !fresh; ++r)
-                fresh = c.readBy[r] && c.readBy[r] + kDemandWindow >= mDemandNewest[r];
+                fresh = c.readBy[r] && c.readBy[r] + mDemandWindow >= mDemandNewest[r];
             if (fresh) continue;
             evictable.push_back(Evictable{ i, k, c.lastRead, projectedSize(c, view.viewerPos), mInstances[i].node,
                                            c.index });
