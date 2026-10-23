@@ -179,6 +179,21 @@ void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
 		const uint w = 8u * reader + jahCardBucket( facing );
 		jahCardDemandStamp( S + 8194u + 4u * slot + ( w >> 2u ), w & 3u, head.x );
 	}
+	if( head.y != 0u && pick.ok )
+	{
+		const uvec4 at = jahCards[pick.card].atlas;
+		const uint cell = ( at.y >> 4u ) * 128u + ( at.x >> 4u );
+		const uint e = S + 8194u + 4u * S + ( cell >> 2u );
+		const uint k = cell & 3u;
+		if( k == 0u )
+			atomicAdd( jahCardInstances[e].x, 1u );
+		else if( k == 1u )
+			atomicAdd( jahCardInstances[e].y, 1u );
+		else if( k == 2u )
+			atomicAdd( jahCardInstances[e].z, 1u );
+		else
+			atomicAdd( jahCardInstances[e].w, 1u );
+	}
 	if( head.y != 0u )
 	{
 		const uint w = 2u * uint( JAH_CARD_DEMAND ) + ( pick.ok ? 0u : 1u );

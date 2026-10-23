@@ -3742,8 +3742,11 @@ void PhotonComponent::forwardPlusLightCensus(unsigned &lights, unsigned &budget)
 // the scene graph now (the boxes it reads are the frame's own there), but what these two OWE — a rebuild through the
 // ordinary pending-GI flush — must be owed before that flush runs, in this frame, as before; and the cards' residency
 // centres on this camera before planFrame has run.
-void PhotonComponent::noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo, bool still) {
+void PhotonComponent::noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo, bool still, const GiEyePose *eyes,
+                                   unsigned eyeCount) {
     mGiCamStillFrames = still ? std::min(mGiCamStillFrames + 1u, 1u << 20) : 0u;
+    mGiEyeCount = std::min(eyeCount, 2u);
+    for (unsigned k = 0; k < mGiEyeCount; ++k) mGiEyes[k] = eyes[k];
     // THE VR CASCADE PROFILE FOLLOWS THE DRIVER (V1-RIG item 4). The view that
     // places the chain is the one that reads it, and in a session that is the
     // headset's — five times the pixels for half the frame. A change of driver
@@ -8594,17 +8597,32 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // list) changes only through a re-staged slot (a material edit reaches it
     // through the PBS change log).
     view.demandCount = mEngine && mEngine->armRegistry().on(ArmId::CardDemandCount);
-    // THE DEMAND OPEN (CardSceneView::demandOpen): the frames since what the readers' rays can hit last changed - the
-    // camera's pose (bit for bit), geometry (an Edit, a Mover or its shadow, a change with no box), the cache's build.
-    // Lighting is not a change of what is hit (a Lamp, a sky or sun overflow), nor are the caches' own regions.
+    // THE DEMAND'S CHANGE (CardSceneView::demandChanged): what the readers' rays can hit changed - AN EYE MOVED from the
+    // reference pose (the poses at the last change) by more than one card texel (1/64 m: the residency's own density)
+    // or TURNED by more than one pixel's angle of its projection, per eye (a tracked head never repeats a pose bit for
+    // bit: a pose test would never close in VR), geometry (an Edit, a Mover or its shadow, a change with no box), or
+    // the cache's build. Lighting is not a change of what is hit (a Lamp, a sky or sun overflow), nor are the caches'
+    // own regions. TRAP: the readers sample by direction alone today; if they ever sample by RADIANCE (the
+    // optimisation list's radiance importance sampling), a lighting change moves what they hit and must reopen it.
     {
-        bool hitChanged = mGiCamStillFrames == 0u || built ||
-                          (mRegionOverflowOpen & kGiRegionOverflowSomewhere) != 0u;
+        bool hitChanged = built || (mRegionOverflowOpen & kGiRegionOverflowSomewhere) != 0u ||
+                          mGiEyeCount != mCardDemandRefCount;
+        for (unsigned k = 0; k < mGiEyeCount && !hitChanged; ++k) {
+            const GiEyePose &a = mCardDemandRef[k], &b = mGiEyes[k];
+            const Ogre::Quaternion rel = a.orientation.Inverse() * b.orientation;
+            const float turn = 2.0f * std::acos(std::min(1.0f, std::fabs(rel.w)));
+            hitChanged = (b.position - a.position).length() > 1.0f / 64.0f ||
+                         turn > std::min(a.pixelAngle, b.pixelAngle);
+        }
         for (const RegionEntry &e : mRegionsOpen)
             hitChanged = hitChanged || e.kind == GiRegionKind::Edit || e.kind == GiRegionKind::Mover ||
                          e.kind == GiRegionKind::MoverShadow;
-        mCardDemandQuiet = hitChanged ? 0u : std::min(mCardDemandQuiet + 1u, 1u << 20);
-        view.demandOpen = mCardDemandQuiet < SurfaceCache::kDemandSettleFrames;
+        if (hitChanged) {
+            mCardDemandRefCount = mGiEyeCount;
+            for (unsigned k = 0; k < mGiEyeCount; ++k) mCardDemandRef[k] = mGiEyes[k];
+        }
+        view.demandChanged = hitChanged;
+        view.demandSettleFrames = facts.cardDemandSettleFrames;
     }
     mSurfaceCache->takeDemand(mCardSlots);
     mScene.cardCandidates(mCardSlots, view);

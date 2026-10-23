@@ -563,6 +563,7 @@ void SurfaceCache::destroyAll() {
     mFaceMarks.clear();
     mFacePrev.clear();
     mDemandNewest[0] = mDemandNewest[1] = 0ull;
+    mDemandChangeFrame = 0ull;
     mQueue.clear();
     mPageOwner.clear();
     mPageSubSize.clear();
@@ -753,7 +754,8 @@ constexpr unsigned long long kDemandWindow = 60ull;
 constexpr unsigned long long kDemandReadEvery = 4ull;
 
 size_t demandEntries(unsigned slots) {
-    return size_t(kDemandHeadEntries) + kDemandCellEntries + size_t(kDemandFaceEntries) * slots;
+    // the head, the cells' stamps, the slots' face marks, and the cells' hit counts (the measuring arm's)
+    return size_t(kDemandHeadEntries) + kDemandCellEntries + size_t(kDemandFaceEntries) * slots + kDemandCells / 4u;
 }
 unsigned demandCellOf(const CardRec &c) {
     return (c.atlasY / kCardMinSize) * (kCardAtlasSize / kCardMinSize) + c.atlasX / kCardMinSize;
@@ -956,6 +958,13 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots) {
                 const size_t r = (k % 16u) / 8u;
                 mDemandNewest[r] = std::max(mDemandNewest[r], (unsigned long long)face[k]);
             }
+        // THE HIT COUNTS (the measuring arm cards.demandCount): each resident card's cell's, cumulative
+        if (mDemandCount) {
+            const Ogre::uint32 *hits = face + size_t(t.slots) * 16u;
+            for (unsigned c = 0; c < kDemandCells; ++c)
+                if (c < mSlotCard.size() && mSlotCard[c] >= 0 && size_t(mSlotCard[c]) < mCards.size())
+                    mCards[size_t(mSlotCard[c])].hits = hits[c];
+        }
         t.ticket->unmap();
         t.ticket.reset();
         mDemandNextTake = (mDemandNextTake + 1u) % kDemandSlots;
@@ -1055,6 +1064,10 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         }
     }
 
+    // THE DEMAND OPEN: until a reader's harvested stamp passes the last change by the settle (reading frames).
+    if (view.demandChanged) mDemandChangeFrame = mFrame;
+    const bool demandOpen =
+        std::max(mDemandNewest[0], mDemandNewest[1]) < mDemandChangeFrame + view.demandSettleFrames;
     // 2. THE CARDS, PER INSTANCE, while the set changes (flattened back once at the end; a card's `size` 0 = evicted).
     std::vector<std::vector<CardRec>> per(mInstances.size());
     for (size_t i = 0; i < mInstances.size(); ++i)
@@ -1090,8 +1103,8 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                     }
                 }
         if (!any) continue;
-        // CLOSED (CardSceneView::demandOpen): only a moved instance's own cards come back
-        if (!view.demandOpen && mv == moved.end()) continue;
+        // CLOSED (CardSceneView::demandChanged): only a moved instance's own cards come back
+        if (!demandOpen && mv == moved.end()) continue;
         layoutCards(cand, layout);
         auto it = mByNode.find(cand.node);
         const std::vector<CardRec> *have = it != mByNode.end() ? &per[it->second] : nullptr;
@@ -1119,7 +1132,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             a.card.readBy[1] = by[1];
             a.card.lastRead = mark;
             a.mark = mark;
-            a.persistent = kept || (view.demandOpen && twice[c.bucket]);
+            a.persistent = kept || (demandOpen && twice[c.bucket]);
             a.size = projectedSize(c, view.viewerPos);
             arriving.push_back(a);
         }
@@ -1167,7 +1180,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     //    (or a moved card's own). A face a stochastic reader grazes once in a window displaces nothing - measured on
     //    photon-glass: the atlas full, the faces its readers reach once in hundreds of frames swapped one for another
     //    for ever, and every capture broke the reflection's rest (reflectionReadsKey folds the cache's captures). (And
-    //    once the demand closes - a still pose over a still world, CardSceneView::demandOpen - nothing arrives at all.)
+    //    once the demand closes - a still pose over a still world, CardSceneView::demandChanged - nothing arrives.)
     size_t nextEvict = 0;
     for (const Arrival &a : arriving) {
         CardRec c = a.card;
@@ -3389,6 +3402,7 @@ bool SurfaceCache::readRadiance(std::vector<CardRadiance> &out, unsigned long lo
             r.card = c.index;
             r.bucket = c.bucket;
             r.lastRead = c.lastRead;
+            r.hits = c.hits;
             r.size = c.size;
             r.lastRelit = c.lastRelit;
             r.lastIndirect = c.lastIndirect;

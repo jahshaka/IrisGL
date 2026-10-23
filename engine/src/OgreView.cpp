@@ -2006,7 +2006,25 @@ void OgreView::noteGiCamera() {
         mGiNotePos = pos;
         mGiNoteRot = rot;
         mGiNoteKnown = true;
-        mScene->noteGiCamera(pos, mStereo, still);
+        // ...AND EACH EYE (PHOTON-7 stage 5, 5-2: the cards' demand reads displacement per eye): a stereo view's two from
+        // the rig (their own frusta), else the camera - each with one pixel's angle of its projection.
+        GiEyePose eyes[2];
+        unsigned eyeCount = 0u;
+        const float rows = float(std::max(1u, height()));
+        if (const StereoEyeBasis *se = mStereo ? stereoEyes() : nullptr) {
+            for (unsigned k = 0; k < 2u; ++k) {
+                eyes[k].position = se[k].position;
+                eyes[k].orientation = se[k].orientation;
+                eyes[k].pixelAngle = (std::atan(se[k].tanTop) - std::atan(se[k].tanBottom)) / rows;
+            }
+            eyeCount = 2u;
+        } else {
+            eyes[0].position = pos;
+            eyes[0].orientation = rot;
+            eyes[0].pixelAngle = mCamera->getFOVy().valueRadians() / rows;
+            eyeCount = 1u;
+        }
+        mScene->noteGiCamera(pos, mStereo, still, eyes, eyeCount);
     }
 }
 

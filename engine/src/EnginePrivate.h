@@ -5928,8 +5928,9 @@ public:
     bool iblReadPending() const { return mIblPending; }
     void latchProbeCaptures(bool drawn) { return mPhoton.latchProbeCaptures(drawn); }
     void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) { return mPhoton.updateGiTracking(camPos, driverStereo); }
-    void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo, bool still) {
-        mPhoton.noteGiCamera(camPos, driverStereo, still);
+    void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo, bool still, const GiEyePose *eyes,
+                      unsigned eyeCount) {
+        mPhoton.noteGiCamera(camPos, driverStereo, still, eyes, eyeCount);
     }
     /// THE PCC'S DIRTY-PROBE COLLECTION (U4 decision 14.3; the fork's ParallaxCorrectedCubemapAuto::collectDirtyProbes):
     /// the engine's, once a frame after its probe budget — the PCC's own frameStarted collection is switched off at

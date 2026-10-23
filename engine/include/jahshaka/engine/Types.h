@@ -3022,6 +3022,16 @@ struct GiQualityFacts {
     /// under every old sizing; a frame that wants more waits for the next. Cards
     /// run only where the rays run (High and Epic in the World table).
     unsigned cardBudgetTexels = 131072u;  // the batch: 8 cards a frame ~ 0.50 ms
+    /// THE CARDS' DEMAND SETTLE (PHOTON-7 stage 5, 5-2; SurfaceCache's residency by the readers' demand): the READING
+    /// frames (frames whose readers' stamps the cache has harvested) after the last change in what the rays can hit
+    /// for which new faces may still arrive; then the resident set holds until the next change. THE LAW: a face the
+    /// readers hit lambda times a frame (Poisson) arrives - its demand persisting, to take an unread card's page - once
+    /// two of its hits fall in different read-backs (every 4 frames); in S reading frames P(fewer than two) =
+    /// e^-(lambda S) (1 + lambda S), at most 1e-3 when lambda S >= 9.23. The faces it must catch hold at least ONE HIT A
+    /// FRAME - one pixel's reflection ray, or 1.6 % of one probe's 64 gather rays (2.8 % of Medium's 36): a face hit
+    /// less is read by less than one pixel or one probe's code - so S = 10 at every tier (S >= two read-backs, 8, too).
+    /// (The 120 frames this replaced had no law.)
+    unsigned cardDemandSettleFrames = 10u;
     /// THE LIT CARD'S PER-FRAME BUDGET (PHOTON-CARDS-1, SC-1c), in atlas TEXELS
     /// relit a frame by the `Jahshaka/CardLight` job — a second budget beside the
     /// capture's, because a light's colour or intensity changes every card's
@@ -3942,8 +3952,9 @@ struct CardRadiance {
     unsigned bucket = 0u;   ///< its face: the outward axis's largest component, 2 x axis + (negative)
     unsigned size = 0u;
     unsigned long long lastRelit = 0ull, lastIndirect = 0ull;
-    /// The newest cache frame a reader read it (or its admission's, or its capture's).
-    unsigned long long lastRead = 0ull;
+    /// The newest cache frame a reader read it (or its admission's), and - under the measuring arm cards.demandCount -
+    /// the hits that read its atlas cell, cumulative (a row's read rate).
+    unsigned long long lastRead = 0ull, hits = 0ull;
     std::vector<float> rgb;
 };
 

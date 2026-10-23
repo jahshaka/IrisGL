@@ -48,6 +48,7 @@
 
 #include <OgrePixelFormatGpu.h>
 #include <OgrePrerequisites.h>
+#include <OgreQuaternion.h>
 #include <OgreVector3.h>
 #include <Math/Simple/OgreAabb.h>
 
@@ -87,6 +88,15 @@ class OgreEngine;
 class OgreScene;
 class VoxelFeed;
 struct VoxelReading;
+
+/// ONE EYE OF THE AUTHORITATIVE VIEW AS THE GI SEES IT (PHOTON-7 stage 5, 5-2: the cards' demand reopens on a
+/// displacement from the pose at its last change): where it is, which way it looks, and the angle one pixel of its
+/// projection subtends (radians: the vertical extent over the view's rows).
+struct GiEyePose {
+    Ogre::Vector3    position = Ogre::Vector3::ZERO;
+    Ogre::Quaternion orientation = Ogre::Quaternion::IDENTITY;
+    float            pixelAngle = 0.0f;
+};
 
 // FORWARD+ CUBEMAP-PROBE SLOTS PER CELL — the budget a scene starts with, and
 // the ceiling a probe grid may raise it to.
@@ -836,7 +846,8 @@ public:
     FrameWork planFrame(const Ogre::Vector3 &camPos, bool driverStereo);
     /// The authoritative camera and the driver's profile, at the frame's head (U4 stage 3; planFrame is after the
     /// scene graph): what they owe the pending flush is owed before it runs.
-    void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo, bool still);
+    void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo, bool still, const GiEyePose *eyes,
+                      unsigned eyeCount);
     void recordFrame(const FrameWork &w);
     /// Re-derives the Forward+ clustered depth-slice range from this camera and
     /// the scene's own extent (LIGHTING_FIX fix 8 / F-F1). Rate-limited AND
@@ -979,8 +990,13 @@ private:
     std::unique_ptr<SurfaceCache> mSurfaceCache;
     /// The item slots the cache asked to be offered this frame (SurfaceCache::takeDemand, PHOTON-7 stage 5, 5-2).
     std::vector<uint32_t> mCardSlots;
-    /// The frames since what the card readers' rays can hit last changed (CardSceneView::demandOpen).
-    unsigned mCardDemandQuiet = 0u;
+    /// THE AUTHORITATIVE VIEW'S EYES (noteGiCamera), and the cards' demand's REFERENCE: the eyes' poses at the last
+    /// change in what the rays can hit (CardSceneView::demandChanged - a displacement is measured from it, never per
+    /// frame, so a slow walk still reopens).
+    GiEyePose mGiEyes[2];
+    unsigned mGiEyeCount = 0u;
+    GiEyePose mCardDemandRef[2];
+    unsigned mCardDemandRefCount = 0u;
     Ogre::PhotonVoxelMaterial *mVctMaterialStore = nullptr;
     /// Is the view that DRIVES GI a stereo (headset) one? It picks the tier
     /// table's VR column (GiViewProfile, V1-RIG item 4) and is written by the

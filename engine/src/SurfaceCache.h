@@ -204,6 +204,8 @@ struct CardRec {
     /// took its atlas cell: a stamp older than that is the cell's previous card's.
     unsigned long long lastRead = 0ull;
     unsigned long long readBy[2] = { 0ull, 0ull };
+    /// Under the measuring arm cards.demandCount: the hits that read its cell, cumulative (the cell's, a row's rate).
+    unsigned long long hits = 0ull;
     unsigned long long lastUpdated = 0ull;
     unsigned long long since = 0ull;
     bool queued = false;         ///< waiting for a capture
@@ -250,13 +252,17 @@ struct CardSceneView {
     unsigned itemSlots = 0u;
     /// THE MEASURING ARM "cards.demandCount": the readers count their carded and uncarded hits.
     bool demandCount = false;
-    /// THE DEMAND IS OPEN (PHOTON-7 stage 5, 5-2): what the readers' rays can hit changed within the last
-    /// SurfaceCache::kDemandSettleFrames - the authoritative camera moved, geometry changed (an Edit, a Mover, a change
-    /// with no box) or the cache was built. Closed, the resident set holds (a moved instance's own cards excepted): at a
-    /// still pose over a still world the demand was sampled for the settle and a later grazing hit is that sampling's
-    /// noise, never new demand - every capture breaks the reflection's rest view-wide (reflectionReadsKey), and a face
-    /// first grazed 500 frames into a still pose broke photon-glass's (gi.walk).
-    bool demandOpen = true;
+    /// THE DEMAND'S CHANGE (PHOTON-7 stage 5, 5-2): what the readers' rays can hit changed this frame - an eye moved
+    /// a card texel or turned a pixel's angle from the pose at the last change, geometry changed (an Edit, a Mover, a
+    /// change with no box) or the cache was built (PhotonComponent::updateSurfaceCacheFrame). The demand stays OPEN
+    /// for `demandSettleFrames` READING frames after it (GiQualityFacts::cardDemandSettleFrames: the readers' stamps
+    /// the cache has harvested since the change, so a reader that has not run yet keeps it open); closed, the resident
+    /// set holds (a moved instance's own cards excepted): at a still pose over a still world the demand was sampled for
+    /// the settle and a later grazing hit is that sampling's noise, never new demand - every capture breaks the
+    /// reflection's rest view-wide (reflectionReadsKey), and a face first grazed 500 frames into a still pose broke
+    /// photon-glass's (gi.walk).
+    bool demandChanged = false;
+    unsigned demandSettleFrames = 10u;
     /// THE RAY TIER'S FOOTPRINT PER METRE of distance from the viewer (the ray
     /// rule's `sampleFootprintPerspective` at one metre, OgreScene::updateRayLevels):
     /// the near copy a sun ray hits may lie one footprint off the captured level,
@@ -413,9 +419,6 @@ public:
     /// that landed (a fixed lag of the cache's frames) folded into each card's `lastRead` and the face marks, and the
     /// item slots the cache wants offered - its resident instances' and every slot a reader marked within the window.
     void takeDemand(std::vector<uint32_t> &slots);
-    /// THE SETTLE: frames after the last change in what the readers can hit that the demand stays open - two windows
-    /// (the window the persistence rule needs two read-backs inside, and the read-backs' period and lag).
-    static constexpr unsigned kDemandSettleFrames = 120u;
     /// THE GI FREEZE (PHOTON-2 round 2, M1's measuring arm): this frame captures, relights and traces nothing.
     void freezeFrame();
     /// THE CHANGED-REGION LIST'S CARD PRODUCER (PHOTON-7 stage 3): the world box of every instance this frame's plan
@@ -879,8 +882,11 @@ private:
     std::vector<unsigned long long> mFaceMarks;   ///< 16 a slot: 8 per reader, the 6 buckets
     std::vector<unsigned long long> mFacePrev;    ///< ...and each one's mark before (a demand that persists: two)
     /// THE READERS' CLOCKS: per reader, the newest stamp a read-back held (its window counts in it: a reader at rest
-    /// reads nothing, and nothing it read goes stale while it rests).
+    /// reads nothing, and nothing it read goes stale while it rests); and the cache frame of the last change in what
+    /// the rays can hit (CardSceneView::demandChanged) - the demand is open until a reader's harvested stamp passes it
+    /// by the settle.
     unsigned long long mDemandNewest[2] = { 0ull, 0ull };
+    unsigned long long mDemandChangeFrame = 0ull;
     unsigned long long mAdmitted = 0ull, mEvicted = 0ull, mCompactionMoves = 0ull;
     unsigned long long mDemandHits[4] = { 0ull, 0ull, 0ull, 0ull };
 };
