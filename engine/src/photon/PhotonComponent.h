@@ -1937,8 +1937,8 @@ private:
     /// albedo/emissive maps) changes on a material that GI geometry uses.
     /// A voxel input on a material a GI item wears changed. The bump marks the
     /// shared store's in-place refresh owed (PhotonVoxelMaterial::refreshAll re-reads every
-    /// row and re-copies the texture pool), and the chain re-runs the SAME voxelisers:
-    /// a dirty hit on every cascade. Reported as its
+    /// row and re-copies the texture pool), and the cascades that hold a WEARER re-run their SAME voxelisers over
+    /// its box (mGiMaterialEdits, below; PHOTON-7 stage 3 deleted the whole-chain dirty). Reported as its
     /// own term (the material generation), so the GI scheduler coalesces a
     /// slider drag into one re-voxelize when it stops WITHOUT running the
     /// light re-inject cadence a material cannot need.

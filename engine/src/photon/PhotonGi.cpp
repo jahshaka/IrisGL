@@ -3408,8 +3408,8 @@ bool PhotonComponent::refreshCascadesFast() {
         // WHY this refresh is about to mark what it marks (BOOTVOX-1's
         // diagnosis needed it and nothing reported it): the three inputs of
         // `markDirtyCascadesPending`'s hit test, beside the reason. A refresh
-        // that marks the whole chain for a material generation reads very
-        // differently from one that marks two cascades for a box.
+        // that marks the whole chain ("somewhere") reads very differently from
+        // one that marks two cascades for a material's wearers' boxes.
         const bool dirtyAllNow = mGiCascadeDirtyAll;
         const size_t dirtyBoxes = mGiCascadeDirtyBoxes.size();
         // (THE MOVERS ARE NOT RE-RECORDED HERE, round-2 F4. `walkItems` folds
@@ -3476,8 +3476,9 @@ bool PhotonComponent::refreshCascadesFast() {
 // (PhotonVoxelMaterial copies exactly those two into its texture pool), so voxelising
 // before they are resident stores the wrong albedo — and the engine knows it
 // does: `settleTextureResidency` bumps `mGiMaterialGeneration` when the pixels
-// arrive, and the next refresh gives every cascade a FRESH voxeliser through
-// `refreshCascadesFast`. On the DEFAULT SCENE that fired every single boot: the
+// arrive, and the next refresh re-voxelised every cascade that held a wearer through
+// `refreshCascadesFast` (then a FRESH voxeliser each; the same voxeliser over the wearers' boxes since A5b and
+// PHOTON-7 stage 3). On the DEFAULT SCENE that fired every single boot: the
 // ground's `tile.png` is bound on slot 0 (a voxel input) before it is
 // data-ready, the chain is built from scratch in that same frame, the texture
 // lands one frame later, and all four cascades were re-voxelised one per frame
