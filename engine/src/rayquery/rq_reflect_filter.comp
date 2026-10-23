@@ -334,8 +334,14 @@ Answer answerAt( ivec2 t )
 	if( v >= 1.0 )
 	{
 		// (the rest half's w is the second moment of the samples' denoiser-space luma, commit 8: the SE is in the space)
-		const float lm = jahDenoiseLuma( jahToDenoise( clamp( M.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) );
-		se = sqrt( max( M.w - lm * lm, 0.0 ) / v );
+		// ONE RULE FOR EVERY READ OF A VARIANCE (the lead's ruling after the moment's defects): it is taken from the
+		// residual-carrying moment - the stop's own jahRestErrorD - never from the 16-bit store alone, whose m2 - mean^2
+		// cancels below ~2 % relative noise (here the luminance edge-stop's sigma: it read 0, floored at 0.001).
+		JahRestStats rs;
+		rs.M = M.xyz;
+		rs.m2 = finite1( M.w ) ? M.w : 0.0;
+		rs.res = jahRestHasResidual( v, hasH, N ) && finite3( Hr.xyz ) && finite1( Hr.w ) ? Hr : vec4( 0.0 );
+		se = jahRestErrorD( rs, v );
 	}
 	a.sigma = hasH ? mix( sigmaH, se, jahRestHandOverWeight( v, N ) ) : se;
 	a.n = ( hasH ? Hn : 0.0 ) + v;
