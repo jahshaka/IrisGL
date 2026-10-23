@@ -1240,6 +1240,9 @@ private:
     /// the sun, a sky change, the host's whole relight) re-injected as deltas where the latch allows, then the feedback's
     /// pass over every cascade that owes one (runFeedback: outermost first, then the accumulations and the rules).
     void relightAndFeedback();
+    /// A relight owed to cascade `c` (the whole volume, or `part`): starts its round when none runs, else owed to the next
+    /// round - a change during a round never restarts it (PHOTON-7 stage 5's read A2). Every site that owes a relight.
+    static void oweRelight(VctCascade &c, bool whole, const Ogre::Aabb *part);
     void runFeedback(bool forceAll, unsigned long long frame, size_t forceInner = ~size_t(0));
     void accumulateCardIndirect(const std::vector<char> *ran);
     /// The feedback's readings that landed (harvest): each cascade's active count and books, and the chain's REST.

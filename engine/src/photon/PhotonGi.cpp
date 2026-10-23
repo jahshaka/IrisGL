@@ -5401,10 +5401,9 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                     }
                     if (injectedThisFrame(j)) {
                         if (region) {   // owed by region (the relight path, next frame)
-                            if (!inner.relightOwed) inner.relightBox = Ogre::Aabb::BOX_NULL;
-                            inner.relightOwed = true;
-                            inner.relightSwept = 0;
-                            for (const Ogre::Aabb &w : innerWorld) inner.relightBox.merge(w);
+                            Ogre::Aabb owed = Ogre::Aabb::BOX_NULL;
+                            for (const Ogre::Aabb &w : innerWorld) owed.merge(w);
+                            oweRelight(inner, false, &owed);
                             ++mInnerMarchesOwed;
                         } else {
                             inner.remarchOwedFrame = giWriterFrame();
@@ -5461,14 +5460,14 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                     }
                     // AN INNER CASCADE ALREADY INJECTED THIS FRAME (the one-writer latch: cascade 0's own commit in its
                     // reserved slot, the same frame) OWES ITS RE-MARCH (PHOTON-7 stage 4's read R1): the relight path
-                    // takes it from the next frame - the boxes, or the whole volume after an outermost commit - as the
-                    // whole-rebuild path owes it (remarchOwedFrame). Skipped and owed nothing, the inner cascade kept the
-                    // outer's old visibility for good once the camera stopped. A refused injection owes it the same way.
+                    // takes it from the next frame over the regions the commit's moved faces reach (innerWorld: by region,
+                    // stage 4's read R4), as the whole-rebuild path owes it whole (remarchOwedFrame). Skipped and owed
+                    // nothing, the inner cascade kept the outer's old visibility for good once the camera stopped. A
+                    // refused injection owes it the same way.
                     if (injectedThisFrame(j) || !injectCascade(j, &innerLight)) {
-                        if (!inner.relightOwed) inner.relightBox = Ogre::Aabb::BOX_NULL;
-                        inner.relightOwed = true;
-                        inner.relightSwept = 0;
-                        for (const Ogre::Aabb &w : innerWorld) inner.relightBox.merge(w);
+                        Ogre::Aabb owed = Ogre::Aabb::BOX_NULL;
+                        for (const Ogre::Aabb &w : innerWorld) owed.merge(w);
+                        oweRelight(inner, false, &owed);
                         ++mInnerMarchesOwed;
                     }
                 }
@@ -6510,6 +6509,25 @@ static const char *const kRelightRowNames[8] = { "vct.relight0", "vct.relight1",
 static const char *const kFeedbackRowNames[8] = { "vct.feedback0", "vct.feedback1", "vct.feedback2", "vct.feedback3",
                                                   "vct.feedback4", "vct.feedback5", "vct.feedback6", "vct.feedback7" };
 
+// A RELIGHT OWED (PHOTON-7 stage 5's read A2): a change STARTS a cascade's round when none runs; one that arrives
+// DURING a round never restarts it (a sustained change - a drag, an animated lamp, a walk's outer commits - restarted
+// every round every frame, and a round that never ends starves every voxel past its cursor) - what it touches (`part`,
+// or the whole volume) is owed to the next round. Every site that owes a relight comes here.
+void PhotonComponent::oweRelight(VctCascade &c, bool whole, const Ogre::Aabb *part) {
+    if (!c.relightOwed) {
+        c.relightOwed = true;
+        c.relightWhole = whole;
+        c.relightBox = part ? *part : Ogre::Aabb::BOX_NULL;
+        c.relightCursor = std::numeric_limits<float>::quiet_NaN();
+        c.relightSwept = 0;
+        return;
+    }
+    if (!c.relightNextOwed) c.relightNextBox = Ogre::Aabb::BOX_NULL;
+    c.relightNextOwed = true;
+    c.relightNextWhole = c.relightNextWhole || whole;
+    if (part) c.relightNextBox.merge(*part);
+}
+
 void PhotonComponent::relightAndFeedback() {
     if (mVctCascades.empty() || !mVctCascades[0].built) return;
     JAH_TRY {
@@ -6517,24 +6535,8 @@ void PhotonComponent::relightAndFeedback() {
         const bool sun = (mRegionOverflowOpen & kGiRegionOverflowSun) != 0u;
         const bool sky = (mRegionOverflowOpen & kGiRegionOverflowSky) != 0u;
         const size_t n = mVctCascades.size();
-        // (1) THE CHANGES THE LIST SAYS, so far this frame. A change STARTS a cascade's round when none runs; one that
-        //     arrives DURING a round never restarts it (PHOTON-7 stage 5's read A2: a sustained change - a drag, an
-        //     animated lamp - restarted every round every frame, and a round that never ends starves every voxel past
-        //     its cursor) - what it touches is owed to the next round.
-        const auto owe = [](VctCascade &c, bool whole, const Ogre::Aabb *part) {
-            if (!c.relightOwed) {
-                c.relightOwed = true;
-                c.relightWhole = whole;
-                c.relightBox = part ? *part : Ogre::Aabb::BOX_NULL;
-                c.relightCursor = std::numeric_limits<float>::quiet_NaN();
-                c.relightSwept = 0;
-                return;
-            }
-            if (!c.relightNextOwed) c.relightNextBox = Ogre::Aabb::BOX_NULL;
-            c.relightNextOwed = true;
-            c.relightNextWhole = c.relightNextWhole || whole;
-            if (part) c.relightNextBox.merge(*part);
-        };
+        // (1) THE CHANGES THE LIST SAYS, so far this frame (oweRelight: a change during a round is owed to the next).
+        const auto owe = [](VctCascade &c, bool whole, const Ogre::Aabb *part) { oweRelight(c, whole, part); };
         for (size_t i = 0; i < n; ++i) {
             VctCascade &c = mVctCascades[i];
             if (!c.lighting || !c.built) continue;
