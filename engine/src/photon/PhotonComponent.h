@@ -997,6 +997,8 @@ private:
     unsigned mGiEyeCount = 0u;
     GiEyePose mCardDemandRef[2];
     unsigned mCardDemandRefCount = 0u;
+    /// The closed region list the cards' plan last took (its engine frame): each is taken once.
+    unsigned long long mCardsClosedTaken = ~0ull;
     Ogre::PhotonVoxelMaterial *mVctMaterialStore = nullptr;
     /// Is the view that DRIVES GI a stereo (headset) one? It picks the tier
     /// table's VR column (GiViewProfile, V1-RIG item 4) and is written by the

@@ -8578,13 +8578,30 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // WHOLE this frame (a new placement: every voxel new) every card's indirect. The rest of the indirect is the GPU's
     // accumulation (runFeedback: accumulateIndirect).
     view.frame = giWriterFrame();
-    for (const RegionEntry &e : mRegionsOpen) {
-        if (e.kind == GiRegionKind::Lamp) view.directBoxes.push_back(e.box);
-        else if (e.kind == GiRegionKind::Slab) view.indirectBoxes.push_back(e.box);
+    // THE LIST IS READ WHOLE (PHOTON-7 stage 5, 5-1 fix, measured in 5-3: the movers are listed after this plan - at
+    // the shadow caches' dirties, OgreShadow.cpp listRayMovers - and the sun's and sky's jumps at the close, so a plan
+    // that read only the open list never saw a late producer's region): the LAST CLOSED list, once (its late
+    // producers), and this frame's open one so far (its early ones). A region in both is taken twice: a card staled
+    // twice is relit once.
+    const auto take = [&](GiRegionKind kind, const Ogre::Aabb &box) {
+        if (kind == GiRegionKind::Lamp) view.directBoxes.push_back(box);
+        else if (kind == GiRegionKind::Slab) view.indirectBoxes.push_back(box);
+    };
+    uint32_t overflow = mRegionOverflowOpen;
+    std::vector<GiRegionKind> lateKinds;   // the closed list's kinds (the demand's reopeners read them too)
+    if (mRegionsClosed.available && mRegionsClosed.frame != mCardsClosedTaken) {
+        mCardsClosedTaken = mRegionsClosed.frame;
+        overflow |= mRegionsClosed.overflow;
+        for (const GiChangedRegion &r : mRegionsClosed.regions) {
+            take(r.kind, Ogre::Aabb::newFromExtents(toOgre(r.lo), toOgre(r.hi)));
+            lateKinds.push_back(r.kind);
+        }
     }
-    view.allDirect = (mRegionOverflowOpen & (kGiRegionOverflowSun | kGiRegionOverflowSomewhere)) != 0u;
-    view.allIndirect = (mRegionOverflowOpen & (kGiRegionOverflowSky | kGiRegionOverflowSomewhere)) != 0u;
-    for (const VctCascade &c : mVctCascades) view.allIndirect = view.allIndirect || c.wholeInjectedFrame == view.frame;
+    for (const RegionEntry &e : mRegionsOpen) take(e.kind, e.box);
+    view.allDirect = (overflow & (kGiRegionOverflowSun | kGiRegionOverflowSomewhere)) != 0u;
+    view.allIndirect = (overflow & (kGiRegionOverflowSky | kGiRegionOverflowSomewhere)) != 0u;
+    for (const VctCascade &c : mVctCascades)
+        view.allIndirect = view.allIndirect || c.wholeInjectedFrame == view.frame || c.wholeInjectedFrame + 1u == view.frame;
 
     // THE CANDIDATE LIST — handed over rather than reached for, and since
     // ATOM-CPU-WALKS-1 NOT A WALK: the change feed files every item that can hold
@@ -8605,8 +8622,10 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // own regions. TRAP: the readers sample by direction alone today; if they ever sample by RADIANCE (the
     // optimisation list's radiance importance sampling), a lighting change moves what they hit and must reopen it.
     {
-        bool hitChanged = built || (mRegionOverflowOpen & kGiRegionOverflowSomewhere) != 0u ||
+        bool hitChanged = built || (overflow & kGiRegionOverflowSomewhere) != 0u ||
                           mGiEyeCount != mCardDemandRefCount;
+        for (GiRegionKind k : lateKinds)
+            hitChanged = hitChanged || k == GiRegionKind::Edit || k == GiRegionKind::Mover || k == GiRegionKind::MoverShadow;
         for (unsigned k = 0; k < mGiEyeCount && !hitChanged; ++k) {
             const GiEyePose &a = mCardDemandRef[k], &b = mGiEyes[k];
             const Ogre::Quaternion rel = a.orientation.Inverse() * b.orientation;
