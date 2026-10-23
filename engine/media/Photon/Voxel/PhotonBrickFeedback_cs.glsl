@@ -308,7 +308,7 @@ void main()
 	}
 	if( mode == 3u )
 	{
-		// ACCUM: a stopped brick adds what the source's listed bricks' moves this frame could move it by - each move
+		// ACCUM: a stopped brick adds what the source's listed bricks' moves this frame (pass and injection) could move it by - each move
 		// weighted by a BOUND of the share of the brick's gather it can fill, times its sensitivity (codes per unit of
 		// radiance). THE BOUND (PHOTON-7 stage 4's read R3): a source brick of side a moving by m changes the irradiance a
 		// receiver point gathers by at most m x its projected solid angle / pi; the brick's silhouette from any direction is
@@ -333,7 +333,13 @@ void main()
 		{
 			const uint3 o = fbUnpack( own ? fbList[k] : fbSrcList[k] );
 			const uint oi = o.x + fbSrcDims.x * ( o.y + fbSrcDims.y * o.z );
-			const float m = fbF( own ? fbState[8u * oi + 4u] : fbSrcState[8u * oi + 4u] );
+			// THE SOURCE'S WHOLE MOVE THIS FRAME: its pass's [4] plus its injection's [7] - the pass gathers from the total
+			// the delta already wrote, so [4] alone never sees a direct term's change, and a voxel's total moved by at most
+			// the sum (PHOTON-7 stage 5's read A2, measured: with [4] alone gi.bounce_series (4)'s stopped walls beside a
+			// lamp accumulated 0.44 codes at most while they rested 2.3 off - no resume once the count reached cascade 0's
+			// lit bricks sooner; with the sum 699 resumed and the worst voxel rests 0.07 codes off the Jacobi).
+			const float m = fbF( own ? fbState[8u * oi + 4u] : fbSrcState[8u * oi + 4u] ) +
+							fbF( own ? fbState[8u * oi + 7u] : fbSrcState[8u * oi + 7u] );
 			if( !( m > 0.0 ) )
 				continue;
 			const float3 oLo = fbSrc.xyz + float3( o ) * fbSrc.w;
