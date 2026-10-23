@@ -1597,7 +1597,17 @@ namespace Ogre
 
         {
             const InjectionPhase phase( mPhaseListener, Phase::Mips );
-            generateAnisotropicMips();
+            // THE DIRECTIONAL LEVELS OVER WHAT THE INJECTION CHANGED (PHOTON-7 stage 2): a commit's delta writes inside
+            // its boxes only (the faces its shift moved), so the levels are regenerated over them; else whole. (D's
+            // chain and the total's below stay whole: PhotonMipChain has no region.)
+            const uint32 mipBoxes = delta ? mCommit.light.numInjectBoxes : 0u;
+            if( mipBoxes )
+            {
+                for( uint32 b = 0u; b < mipBoxes; ++b )
+                    generateAnisotropicMips( mCommit.light.injectLo[b], mCommit.light.injectHi[b] );
+            }
+            else
+                generateAnisotropicMips();
 
             // Jahshaka (MOVER-OCCLUSION-1): D's own chain, read by the ray tier's hits.
             if( mLightDirect )
