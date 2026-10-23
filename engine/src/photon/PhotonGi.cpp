@@ -1993,6 +1993,15 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out) {
                                 std::vector<float>());
         for (Ogre::uint8 mip = 1u; mip < albedo->getNumMipmaps(); ++mip)
             if (!grab(albedo, out.albedoLevels[mip - 1u], mip)) return false;
+        // PHOTON-7 stage 2's read D1: the directional volumes, every level.
+        for (size_t a = 0; a < 3u; ++a) {
+            Ogre::TextureGpu *dir = lighting->getLightVoxelTextures()[a + 1u];
+            out.directional[a].clear();
+            if (!dir || dir->getResidencyStatus() != Ogre::GpuResidency::Resident) return false;
+            out.directional[a].assign(dir->getNumMipmaps(), std::vector<float>());
+            for (Ogre::uint8 mip = 0u; mip < dir->getNumMipmaps(); ++mip)
+                if (!grab(dir, out.directional[a][mip], mip)) return false;
+        }
         out.width = int(total->getWidth());
         out.height = int(total->getHeight());
         out.depth = int(total->getDepth());
@@ -4071,6 +4080,14 @@ void PhotonComponent::recordFrame(const FrameWork &w) {
     recordField(w);
     if (w.aborted) return;
     if (w.cascadeStage) recordCascades(w);
+    // THE DIRECTIONAL LEVELS' DOOR (gi.regenerateDirectional; PHOTON-7 stage 2's read D1): cascade N's directional
+    // volumes regenerated WHOLE from its level-0 light as it stands (step 0 and step 1, nothing else written) - what a
+    // commit's own levels must already equal (gi.scroll_slab D).
+    if (mEngine) {
+        const double n = mEngine->armRegistry().value(ArmId::GiRegenerateDirectional);
+        if (n >= 0.0 && size_t(n) < mVctCascades.size() && mVctCascades[size_t(n)].lighting)
+            mVctCascades[size_t(n)].lighting->regenerateDirectional();
+    }
     if (!mPcc || !mGiCamera) return;
     JAH_TRY {
         mGiCamera->setPosition(w.camPos);

@@ -1218,6 +1218,10 @@ constexpr ArmDef kArms[] = {
       "A MEASURING DOOR (ENGINE-UPGRADE-U5 stage 2): while set to N, cascade N owes a whole rebuild "
       "every frame (an edit's, at its own placement) - what a measurement of a whole build's cost "
       "needs on a still scene. -1 = none." },
+    { ArmId::GiRegenerateDirectional, -1.0, -1.0, 7.0,
+      "A TEST DOOR (PHOTON-7 stage 2's read D1, gi.scroll_slab case D): while set to N, cascade N's directional "
+      "volumes - every level - are regenerated whole from its level-0 light as it stands (step 0 and step 1), every "
+      "frame, nothing else written: a commit's own levels must already equal them. -1 = none." },
     { ArmId::ShadowCasterCull, 1.0, 0.0, 1.0,
       "THE CASTER CULL BY THE LIGHT'S OWN DEPTH (ENGINE-UPGRADE-U5 stage 4): 1 = shipped, a sun map's Atom "
       "casters are tested against the previous frame's depth pyramid of that map, the rejected tested again "

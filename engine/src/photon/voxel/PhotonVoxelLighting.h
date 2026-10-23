@@ -433,6 +433,9 @@ namespace Ogre
 
         /// THE COMMIT'S LIGHT for the next update() (PhotonCommitLight); null a whole injection.
         void setCommitLight( const PhotonCommitLight *commit );
+        /** THE DIRECTIONAL LEVELS, WHOLE, FROM THE LEVEL-0 LIGHT AS IT STANDS (PHOTON-7 stage 2's read D1; the test door
+            gi.regenerateDirectional): step 0 (with a bounce) and step 1 over the whole volume - nothing else written. */
+        void regenerateDirectional() { generateAnisotropicMips(); }
         /// Is the delta injection's shader built (never compiled in the frame: a permutation not built is handed to the
         /// background compiler and the answer is false until it is)? Asked when a scroll is planned and at its commit.
         bool commitLightReady();

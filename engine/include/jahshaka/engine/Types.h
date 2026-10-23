@@ -5753,6 +5753,12 @@ struct GiVoxelVolume {
     /// (level 0): albedoLevels[L - 1] is level L, max(1, size >> L) per axis, RGBA, x fastest — the
     /// compute chain's proof (each texel the blit's filter of the level below).
     std::vector<std::vector<float>> albedoLevels;
+    /// THE DIRECTIONAL VOLUMES, EVERY LEVEL (PHOTON-7 stage 2's read D1): directional[a][L] is axis a's (X, Y, Z) level L,
+    /// RGBA decoded like `light`, x fastest, at the texture's own size per level (max(1, size >> L) per axis; level 0 is
+    /// the volume's width - both signs packed along x, a half each - by half its height and depth). What every cone past
+    /// level 0 reads: step 0 composites them from the level-0 light and step 1 builds the levels, so they are a function
+    /// of the level-0 light - gi.scroll_slab D compares a commit's with a whole regeneration (gi.regenerateDirectional).
+    std::vector<std::vector<float>> directional[3];
 };
 
 // ---------------------------------------------------------------------------

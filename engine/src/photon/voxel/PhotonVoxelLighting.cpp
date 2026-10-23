@@ -1597,17 +1597,13 @@ namespace Ogre
 
         {
             const InjectionPhase phase( mPhaseListener, Phase::Mips );
-            // THE DIRECTIONAL LEVELS OVER WHAT THE INJECTION CHANGED (PHOTON-7 stage 2): a commit's delta writes inside
-            // its boxes only (the faces its shift moved), so the levels are regenerated over them; else whole. (D's
-            // chain and the total's below stay whole: PhotonMipChain has no region.)
-            const uint32 mipBoxes = delta ? mCommit.light.numInjectBoxes : 0u;
-            if( mipBoxes )
-            {
-                for( uint32 b = 0u; b < mipBoxes; ++b )
-                    generateAnisotropicMips( mCommit.light.injectLo[b], mCommit.light.injectHi[b] );
-            }
-            else
-                generateAnisotropicMips();
+            // THE DIRECTIONAL LEVELS, WHOLE, AT EVERY INJECTION - A COMMIT'S INCLUDED (PHOTON-7 stage 2's read D1): the
+            // directional volumes are not shifted with the light (scrollLightTextures), so after a commit every texel of
+            // them is the old placement's; step 0 / step 1 regenerate them from the shifted level-0 light over the whole
+            // volume. (Regenerating only over the delta's boxes left the kept interior - 53 % of Epic c0 - holding light
+            // displaced by the step, growing a step a commit: gi.scroll_slab D. The shift-exact form - step 0 shifted in
+            // place with the even s, the levels above regenerated - is the optimisation round's.)
+            generateAnisotropicMips();
 
             // Jahshaka (MOVER-OCCLUSION-1): D's own chain, read by the ray tier's hits.
             if( mLightDirect )
