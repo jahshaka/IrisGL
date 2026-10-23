@@ -2135,6 +2135,20 @@ void PhotonComponent::noteMaterialChanged(MaterialId id, bool voxelInputsChanged
     if (mSurfaceCache) mSurfaceCache->noteMaterialChanged(id);
     bool bumpVoxels = false;
     const bool seen = giMaterialChangeEffect(id, voxelInputsChanged, bumpVoxels);
+    // EVERY WEARER'S BOX IS LISTED (PHOTON-7 stage 3's read F6): a material edit changes how every item wearing it looks
+    // - a ray-only wearer (every mover) and a non-voxel input (a normal map) included, which no dirty path lists. The
+    // GI wearers of an edit that moves a VOXEL are listed by the dirty path at their rebuild (refreshCascadesFast); every
+    // other wearer is listed here, at the edit, so each wearer is listed once. Only under a live chain (the list's
+    // consumers; the load path pushes every material once with nothing built, and must not walk the nodes per push).
+    if (!mVctCascades.empty()) {
+        for (const auto &kv : mScene.nodeRecords()) {
+            const auto &n = kv.second;
+            if (!n.item || n.materialRef != id) continue;
+            const bool giWearer = n.scan.giKnown && (n.item->getVisibilityFlags() & kGiGeometryBit);
+            if (bumpVoxels && giWearer) continue;   // the dirty path's
+            appendRegion(GiRegionKind::Edit, n.item->getWorldAabb());
+        }
+    }
     // A VOXEL INPUT CHANGED AND NO REFRESH COVERS IT (BUGS-1 item 3): the material's row
     // still goes stale — a mover wears it today and is voxelised from that row the moment
     // it turns still. Only with a store (no store, no row).
