@@ -88,6 +88,14 @@
 	/// out of gi.light_is_world). A cascade whose box does not hold the point the march has reached is passed over: the
 	/// next one reads on from it. AN OUTER LOOP OVER THE SHELLS, the DDA inside: the chain's arrays are indexed by the
 	/// loop's own counter, the same for every invocation still marching.
+	/// The PCG integer hash (jah_probe_params.glsl's jahPcg): the area strata's jitter (gi.voxelAreaStrata, below).
+	INLINE uint jahInjectPcg( uint v )
+	{
+		const uint st = v * 747796405u + 2891336453u;
+		const uint wd = ( ( st >> ( ( st >> 28u ) + 4u ) ) ^ st ) * 277803737u;
+		return ( wd >> 22u ) ^ wd;
+	}
+
 	INLINE float jahInjectVisibility( float3 sW, float3 w, float tEnd, int3 ivSelf, int oAxis, float oCoord, float oSign )
 	{
 		// THE INSIDE FRACTION (SUN-INJECTION-RES-1, ENGINE-UPGRADE-U5 stage 5 and decision 22.2). A ray that crosses a
@@ -554,6 +562,43 @@
 						float3 s = voxelAabbCenter;
 						s[a] = pa * p_voxelCellSize[a];
 						visH[q] = jahInjectVisibility( s, marchD, marchEnd, voxelId, a, pa, hs );
+						@property( hlms_lights_area_ltc )
+						// AN AREA LIGHT'S FRACTIONAL VISIBILITY - A MEASURING ARM (gi.voxelAreaStrata, PHOTON-7 stage 5's
+						// 5-3 fix: measured before the voxels change): n x n stratified marches from the half's face over
+						// the rectangle, one a stratum, jittered by the voxel's place, the visibility the ratio
+						// sum( V_i f_i ) / sum( f_i ) of their form-factor weights - the cards' law (rq_card_movers.comp).
+						// 0, shipped: the one march to its centre above.
+						if( isLtc && p_areaStrata > 0u )
+						{
+							const uint an = p_areaStrata;
+							const float3 c0 = lights[lightIdx].points[0].xyz;
+							const float3 eu = lights[lightIdx].points[1].xyz - c0;
+							const float3 ev = lights[lightIdx].points[3].xyz - c0;
+							const float3 emit = -normalize( cross( eu, ev ) );   // it shines down its -Z
+							const uint key = jahInjectPcg( uint( voxelId.x ) ^ jahInjectPcg( uint( voxelId.y ) ^
+										   jahInjectPcg( uint( voxelId.z ) ^ uint( q ) * 7919u ) ) );
+							float sf = 0.0f, svf = 0.0f;
+							for( uint k = 0u; k < an * an; ++k )
+							{
+								const float xu = ( float( k % an ) + float( jahInjectPcg( key + 2u * k ) ) * 2.3283064e-10f ) / float( an );
+								const float xv = ( float( k / an ) + float( jahInjectPcg( key + 2u * k + 1u ) ) * 2.3283064e-10f ) / float( an );
+								const float3 Qs = c0 + eu * xu + ev * xv;
+								const float3 dq = Qs - voxelAabbCenter;
+								const float r2 = dot( dq, dq );
+								if( !( r2 > 0.0f ) )
+									continue;
+								const float3 wq = dq * ( 1.0f / sqrt( r2 ) );
+								const float cl = doubleSidedLtc ? abs( dot( emit, wq ) ) : max( -dot( emit, wq ), 0.0f );
+								const float fq = max( dot( nn, wq ), 0.0f ) * cl / r2;
+								if( !( fq > 0.0f ) )
+									continue;
+								sf += fq;
+								svf += fq * jahInjectVisibility( s, wq, sqrt( r2 ), voxelId, a, pa, hs );
+							}
+							if( sf > 0.0f )
+								visH[q] = svf / sf;
+						}
+						@end
 					}
 					// THE ALBEDO THE SURFACE REALLY HAS FOR THIS LAMP (PHOTON-WRITER-1): the
 					// normalised Disney diffuse's directional albedo at this cosine and roughness.

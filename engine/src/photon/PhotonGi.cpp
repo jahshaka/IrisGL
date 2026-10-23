@@ -3901,6 +3901,12 @@ PhotonComponent::FrameWork PhotonComponent::planFrame(const Ogre::Vector3 &camPo
 // drag settle are decided where they run because each reads what the work before it left
 // (an injection this frame, a cascade still pending after the rebuild).
 void PhotonComponent::recordFrame(const FrameWork &w) {
+    // THE VOXELS' AREA STRATA, a measuring arm (gi.voxelAreaStrata; PHOTON-7 stage 5's 5-3 fix): read by the injections.
+    if (mEngine) {
+        const double an = mEngine->armRegistry().value(ArmId::GiVoxelAreaStrata);
+        for (VctCascade &c : mVctCascades)
+            if (c.lighting) c.lighting->setAreaStrata(an > 0.0 ? Ogre::uint32(an + 0.5) : 0u);
+    }
     recordField(w);
     if (w.aborted) return;
     if (w.cascadeStage) recordCascades(w);
@@ -8567,6 +8573,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
                                                  : facts.cardBudgetTexels;
     mScene.cardSceneFacts(view);   // the footprint rule, the cloud shadow field, the ambient SH
     view.lightBudgetTexels = facts.cardLightTexels;
+    view.areaStrata = facts.cardAreaStrata;
     // THE INDIRECT HALF: the chain the pixel's cones march (the cascade-0 PhotonVoxelLighting the pass buffer is filled
     // from) and its budget.
     view.vct = mVctLighting;

@@ -3034,6 +3034,15 @@ struct GiQualityFacts {
     /// one constant the settle is derived from and its rows bar on (gi.card_residency).
     unsigned cardDemandSettleFrames = 10u;
     float    cardDemandHitFloor = 1.0f;
+    /// THE AREA LIGHTS' VISIBILITY ON THE CARDS (PHOTON-7 stage 5, the 5-3 fix): n x n stratified rays a texel over each
+    /// area light's rectangle, one a stratum, jittered by the texel's world point (never the frame: L8), the visibility
+    /// the RATIO sum( V_i f_i ) / sum( f_i ) of the samples' form-factor weights f_i = cos cos' / r^2 (Heitz et al. 2018)
+    /// times the analytic LTC form factor - the unshadowed energy stays exact, only the visibility is sampled. THE LAW:
+    /// at a straight penumbra edge a texel's visibility errs by at most the weight of the strata the edge cuts - n of
+    /// the n^2 for an edge parallel to a side of the rectangle, 2n - 1 for any - so at even weights 1 / n (n = 8:
+    /// 12.5 %) for the parallel edge, (2n - 1) / n^2 for any (23 %), and zero in mean over the band (the jitter is
+    /// unbiased). n^2 rays a texel an area light (a point or spot lamp takes one).
+    unsigned cardAreaStrata = 8u;
     /// THE LIT CARD'S PER-FRAME BUDGET (PHOTON-CARDS-1, SC-1c), in atlas TEXELS
     /// relit a frame by the `Jahshaka/CardLight` job — a second budget beside the
     /// capture's, because a light's colour or intensity changes every card's
@@ -3187,6 +3196,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardBudgetTexels = 98304u;    // 6 cards a frame ~ 0.37 ms (sized 0.4)
         f.cardLightTexels = 65536u;     // 4 pages a frame
         f.cardIndirectTexels = 16384u;  // 1 page a frame
+        f.cardAreaStrata = 4u;          // 16 rays a texel an area light: 1 / 4 at a parallel edge
         f.gather.on = false;            // Low keeps the cone diffuse (T-A)
         f.probeGridBudgetBytes = 64ull << 20;
         break;
@@ -3220,6 +3230,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 0.6)
         f.cardLightTexels = 131072u;    // 8 pages a frame
         f.cardIndirectTexels = 32768u;  // 2 pages a frame
+        f.cardAreaStrata = 6u;          // 36 rays a texel an area light: 1 / 6 at a parallel edge
         f.gather = { true, 16u, 6u, 4u };   // 36 rays a probe (T-A)
         f.probeGridBudgetBytes = 128ull << 20;
         break;
@@ -4073,10 +4084,20 @@ struct CardCacheStatus {
     /// and the cards traced the last frame.
     unsigned long long lampTraces = 0ull;
     unsigned lampTracedLastFrame = 0u;
-    /// ...the most lamps that reached one relit card (its table holds 16), and the largest share of a card's direct
-    /// past them (the lamps the table could not hold: their visibility one weighted byte), since the cache was built.
+    /// ...the most POINT AND SPOT lamps that reached one relit card (its table holds 16), and the largest share of a
+    /// card's direct past them (the lamps the table could not hold), since the cache was built.
     unsigned cardLampsMax = 0u;
     float lampOverflowShareMax = 0.0f;
+    /// THE FRACTIONAL BYTE (the 5-3 fix): the area lights (never in the table: each one's visibility fractional) and
+    /// the lamps past the table share the SunVis layer's blue, weighted by their shares - exact for ONE such lamp a card.
+    /// The most area lights that reached one relit card since the build, and the resident cards now with two or more
+    /// area lights / with two or more lamps in the byte (area lights and the overflow): where the byte is a mix.
+    unsigned cardAreaLampsMax = 0u;
+    unsigned cardsMultiArea = 0u, cardsSharedFractional = 0u;
+    /// The last lamp trace's rays, at most (its cards' texels x one a point or spot lamp in range of the card and the
+    /// strata's n^2 an area light), and n (GiQualityFacts::cardAreaStrata).
+    unsigned long long lampRaysLastTrace = 0ull;
+    unsigned areaStrata = 0u;
     unsigned long long demandHits[4] = { 0ull, 0ull, 0ull, 0ull };
     /// The queue: cards waiting for a capture, and the texel budget a frame
     /// spends on them.

@@ -427,8 +427,8 @@ void main()
 		float moverVis = r.camPos.w > 0.5 ? imageLoad( cardMoverVis, at ).x : 1.0;
 		// THE LAMPS' TERM (PHOTON-7 stage 5, 5-3): every point, spot and area light's direct times ITS OWN traced
 		// visibility - the bit of its slot in the card's lamp table (its world id, the light record's spotParams.w),
-		// the overflow's weighted byte for a lamp past the table - where the host traced this relight (axisD.w), else
-		// unshadowed.
+		// the fractional byte for an area light and a lamp past the table - where the host traced this relight
+		// (axisD.w), else unshadowed.
 		if( r.axisD.w > 0.5 )
 		{
 			const vec4 was = imageLoad( cardSunVis, at );
@@ -454,14 +454,15 @@ void main()
 			{
 				// AN AREA LIGHT (PHOTON-7 stage 5, 5-3): the pixel's DoAreaLtcLights diffuse at V = N - the LTC form
 				// factor with the identity matrix over its rectangle (a frame built from any direction off the normal:
-				// the identity's integral is rotation-free) - in JahBrdf's range window, by the traced lamp visibility.
+				// the identity's integral is rotation-free) - in JahBrdf's range window, by its FRACTIONAL visibility
+				// (the 5-3 fix: never in the card's table; the fractional byte, the ratio of its rectangle's sampled
+				// visibility, rq_card_movers.comp - exact for one such lamp a card).
 				L = l.position.xyz - P;
 				float d = length( L );
 				if( d > l.attenuation.x || d <= 0.0 )
 					continue;
 				L *= 1.0 / d;
-				const int slot = jahCardLampSlot( r.lampIds, floatBitsToUint( l.spotParams.w ) );
-				const float lampVis = slot >= 0 ? float( ( lampMask >> uint( slot ) ) & 1u ) : lampTex.z;
+				const float lampVis = lampTex.z;
 				const vec3 frameV = abs( Ncone.y ) < 0.9 ? vec3( 0.0, 1.0, 0.0 ) : vec3( 1.0, 0.0, 0.0 );
 				const float ff = LTC_Evaluate( Ncone, frameV, P,
 											   buildFloat3x3( vec3( 1, 0, 0 ), vec3( 0, 1, 0 ), vec3( 0, 0, 1 ) ),

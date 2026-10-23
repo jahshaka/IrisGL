@@ -240,6 +240,7 @@ namespace Ogre
         mShaderParams = &mLightInjectionJob->getShaderParams( "default" );
         mNumLights = mShaderParams->findParameter( "numLights" );
         mLightsPerVoxel = mShaderParams->findParameter( "lightsPerVoxel" );
+        mAreaStrata = mShaderParams->findParameter( "areaStrata" );
         mVoxelCellSize = mShaderParams->findParameter( "voxelCellSize" );
         mInvVoxelResolution = mShaderParams->findParameter( "invVoxelResolution" );
         mInjectHigherMipHalfWidth = mShaderParams->findParameter( "higherMipHalfWidth" );
@@ -1796,6 +1797,8 @@ namespace Ogre
 
         mNumLights->setManualValue( numCollectedLights );
         mLightsPerVoxel->setManualValue( mLightBudget );
+        if( mAreaStrata )
+            mAreaStrata->setManualValue( mAreaStrataValue );
         mVoxelCellSize->setManualValue( voxelCellSize );
         mInvVoxelResolution->setManualValue( invVoxelRes );
         mShaderParams->setDirty();

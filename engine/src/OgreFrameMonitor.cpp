@@ -1255,6 +1255,10 @@ constexpr ArmDef kArms[] = {
     { ArmId::GiFieldStopOff, 0.0, 0.0, 1.0,
       "The irradiance field's per-probe variance stop OFF at its next build: every probe "
       "integrates to the target (the oracle gi.field_variance_stop compares the stop with)." },
+    { ArmId::GiVoxelAreaStrata, 0.0, 0.0, 32.0,
+      "The voxels' area light visibility at the next injections: n x n stratified marches over the rectangle, "
+      "the ratio of their form-factor weights (0 = the shipped one march to its centre). A measuring arm "
+      "(PHOTON-7 stage 5's 5-3 fix: gi.card_lamp_shadow (5), the bounce the centre march leaves)." },
     { ArmId::GiRefuseGeometry, 0.0, 0.0, 1.0,
       "THE REFUSAL HOOK (a test door, gi.voxel_resident case 5): a voxel build runs with NO geometry "
       "source - the state of a device with no buffer device addresses - and must build an empty "

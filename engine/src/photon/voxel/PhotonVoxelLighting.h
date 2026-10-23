@@ -310,6 +310,8 @@ namespace Ogre
         ShaderParams::Param *mNumLights;
         /// Jahshaka (PHOTON-7 stage 1): the injection's per-voxel light count (the first of the order that reach it).
         ShaderParams::Param *mLightsPerVoxel = nullptr;
+        ShaderParams::Param *mAreaStrata = nullptr;   ///< the measuring arm gi.voxelAreaStrata (setAreaStrata)
+        uint32 mAreaStrataValue = 0u;
         /// THE LAST INJECTION'S LIGHTS (P1C-LIGHT-LIST): the selection from the scene's
         /// one light list, and its counts — the lights whose range reaches this
         /// cascade's box, how many took a slot, how many the budget could not hold.
@@ -467,6 +469,10 @@ namespace Ogre
         uint32 getLightsInRangeMax() const { return mLightsInRangeMax; }
         uint64 getInjectionsOverSlots() const { return mInjectionsOverSlots; }
         uint32 getLightCapacity() const { return mLightBudget; }
+        /// PHOTON-7 stage 5's 5-3 fix, a MEASURING ARM (gi.voxelAreaStrata): an area light's visibility at a voxel's
+        /// half-face over n x n stratified marches, the ratio of their form-factor weights (0: one march to its centre,
+        /// shipped). Read at the next injection.
+        void setAreaStrata( uint32 n ) { mAreaStrataValue = n; }
 
         /** THE DIRECT TERM'S INJECTION (PHOTON-7 stage 4: never a bounce - the feedback converges those): whole
             (total := D, a new placement) or, under setCommitLight, a DELTA over its boxes (total += D_new - D_old),

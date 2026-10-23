@@ -210,6 +210,9 @@ struct CardRec {
     /// alpha); carried in the card's GPU record so every reader maps its own lamps to the bits by id.
     unsigned lampIds[16] = {};
     unsigned lampCount = 0u;
+    /// ...and the lamps its last relight took through the FRACTIONAL byte (the SunVis layer's blue: the 5-3 fix): the
+    /// area lights that reach it (never in the table) and the lamps past the table.
+    unsigned areaLampCount = 0u, fractionalCount = 0u;
     /// Under the measuring arm cards.demandCount: the hits that read its cell, cumulative (the cell's, a row's rate).
     unsigned long long hits = 0ull;
     unsigned long long lastUpdated = 0ull;
@@ -286,6 +289,8 @@ struct CardSceneView {
     unsigned long long frame = 0ull;
     /// The relight budget, texels a frame (GiQualityFacts::cardLightTexels).
     unsigned lightBudgetTexels = 0u;
+    /// An area light's strata a side on the cards' lamp trace (GiQualityFacts::cardAreaStrata).
+    unsigned areaStrata = 8u;
     /// THE INDIRECT HALF: the chain the march reads (the scene's cascade-0
     /// PhotonVoxelLighting — the same object the pixel's pass buffer is filled from;
     /// null when GI is not the voxel arm, and the indirect is then zero), and its own budget.
@@ -375,6 +380,8 @@ struct CardMoverTrace {
     float range = 0.0f;
     bool still = false;
     bool lamps = false;
+    /// ...the lamps mode's area light strata a side (n: n^2 rays a texel an area light).
+    unsigned areaStrata = 8u;
 };
 struct CardMoverHooks {
     std::function<bool(CardMoverFrame &)> frame;
@@ -812,6 +819,9 @@ private:
     /// (past its 16), since the cache was built.
     unsigned mCardLampsMax = 0u;
     float mLampOverflowShareMax = 0.0f;
+    unsigned mCardAreaLampsMax = 0u;
+    unsigned long long mLampRaysLastTrace = 0ull;
+    unsigned mAreaStrata = 8u;
     void harvestIndirectReports(unsigned long long frame);
     unsigned mLightBudget = 0u;
     unsigned mRelitLastFrame = 0u, mRelitTexelsLastFrame = 0u;

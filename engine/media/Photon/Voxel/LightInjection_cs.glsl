@@ -153,6 +153,9 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform uint chainSelf;
 	// Jahshaka (PHOTON-7 stage 1): THE LIGHTS A VOXEL TAKES - the first this many of the list's one order that reach it.
 	uniform uint lightsPerVoxel;
+	// PHOTON-7 stage 5's 5-3 fix, a measuring arm (gi.voxelAreaStrata): an area light's visibility over n x n stratified
+	// marches (0: the one march to its centre).
+	uniform uint areaStrata;
 	// PHOTON-7 stage 2: the box of cells the scroll KEPT ([keepLo, keepHi): the overlap; its slab is outside it), read by
 	// a delta injection's count (declared in every permutation, so the job's parameter list is one list).
 	uniform int4 keepLo;
@@ -178,6 +181,7 @@ vulkan( }; )
 #define p_higherMipHalfWidth higherMipHalfWidth
 #define p_chainSelf chainSelf
 #define p_lightsPerVoxel lightsPerVoxel
+#define p_areaStrata areaStrata
 #define p_chainOrigin chainOrigin
 #define p_chainRes chainRes
 #define p_keepLo keepLo

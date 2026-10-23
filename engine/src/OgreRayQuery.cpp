@@ -8386,6 +8386,7 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     CardMoverParams pp{};
     pp.toSun[0] = job.toSun.x; pp.toSun[1] = job.toSun.y; pp.toSun[2] = job.toSun.z;
     pp.toSun[3] = job.range;
+    if (job.lamps) pp.toSun[0] = float(std::max(job.areaStrata, 1u));   // the lamps mode: an area light's strata a side
     // THE LAMPS' RAY meets every shadow caster, still and moving: a lamp's shadow is the whole world's.
     pp.knobs[0] = float(job.lamps ? (kRayMaskStillCaster | kRayMaskMoverCaster)
                                   : job.still ? kRayMaskStillCaster : kRayMaskMoverCaster);

@@ -1764,14 +1764,20 @@ void SurfaceCache::relightCards() {
         std::memcpy(&o[19], &id, sizeof(id));
         ++numLights;
     }
-    // ---- EACH RELIT CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3): the list's lamps (points, spots, areas) that reach the
-    // card's box - the list's own test, in its one world order - the first 16, or when more reach it the 16 with the
-    // largest share of its direct (the lamp's peak channel through its falloff and cosine at the card's centre),
-    // kept in the world order. The bits the trace writes and the relight and the readers read index it. The cards'
-    // GPU records carry it, so a table that changed re-syncs them before the readers run this frame.
+    std::vector<size_t> pointsHere;     // per relit card: its point and spot lamps (the trace's rays, counted below)
+    std::vector<unsigned> areasHere;    // ...and its area lights
+    // ---- EACH RELIT CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3): the list's POINT AND SPOT lamps that reach the card's
+    // box - the list's own test, in its one world order - the first 16, or when more reach it the 16 with the largest
+    // share of its direct (the lamp's peak channel through its falloff and cosine at the card's centre), kept in the
+    // world order. The bits the trace writes and the relight and the readers read index it. The cards' GPU records
+    // carry it, so a table that changed re-syncs them before the readers run this frame. AN AREA LIGHT IS NEVER IN
+    // THE TABLE (the 5-3 fix): its visibility is fractional, sampled over its rectangle, and it takes the fractional
+    // byte with the lamps past the table (counted: the byte is exact for one of them a card).
     {
         bool tableChanged = false;
         std::vector<std::pair<float, unsigned>> reach;   // (share, the light's index in the list)
+        pointsHere.assign(mRelight.size(), 0u);
+        areasHere.assign(mRelight.size(), 0u);
         for (size_t i = 0; i < mRelight.size(); ++i) {
             CardRec &c = mCards[mRelight[i]];
             const float hd = c.halfDepth + captureMargin(c.halfDepth);
@@ -1783,9 +1789,14 @@ void SurfaceCache::relightCards() {
             box.boxMax = c.centre + ext;
             reach.clear();
             double total = 0.0;
+            unsigned areaHere = 0u;
             for (unsigned li = 0; li < numLights; ++li) {
                 const Ogre::Light *l = chosen.lights[li];
                 if (l->getType() == Ogre::Light::LT_DIRECTIONAL || !SceneLightList::reaches(l, box)) continue;
+                if (l->getType() == Ogre::Light::LT_AREA_APPROX || l->getType() == Ogre::Light::LT_AREA_LTC) {
+                    ++areaHere;
+                    continue;
+                }
                 const float *o = &mLightCpu[4u + size_t(li) * kLightFloats];
                 const Ogre::Vector3 toL = Ogre::Vector3(o[0], o[1], o[2]) - c.centre;
                 const float d = std::max(toL.length(), 1e-3f);
@@ -1795,6 +1806,11 @@ void SurfaceCache::relightCards() {
                 total += double(share);
             }
             mCardLampsMax = std::max(mCardLampsMax, unsigned(reach.size()));
+            mCardAreaLampsMax = std::max(mCardAreaLampsMax, areaHere);
+            c.areaLampCount = areaHere;
+            c.fractionalCount = areaHere + (reach.size() > 16u ? unsigned(reach.size()) - 16u : 0u);
+            pointsHere[i] = reach.size();   // (in the table or past it: one ray each)
+            areasHere[i] = areaHere;
             if (reach.size() > 16u) {
                 std::vector<std::pair<float, unsigned>> byShare = reach;
                 std::stable_sort(byShare.begin(), byShare.end(),
@@ -1880,7 +1896,15 @@ void SurfaceCache::relightCards() {
             job.lights = mLightBuffer;
             job.sunVis = mSunVis;
             job.lamps = true;
+            job.areaStrata = mAreaStrata;
             traced = mMoverHooks.trace(job);
+            if (traced) {
+                mLampRaysLastTrace = 0ull;
+                for (size_t i = 0; i < mRelight.size() && i < pointsHere.size(); ++i) {
+                    const unsigned long long s = mCards[mRelight[i]].size;
+                    mLampRaysLastTrace += s * s * (pointsHere[i] + (unsigned long long)areasHere[i] * mAreaStrata * mAreaStrata);
+                }
+            }
         }
         // (only the ray rule's levels not chosen yet is a wait: a trace the device refuses with them chosen - the ray
         // tier logged it - lights the lamps unshadowed for good, never a relight a frame)
@@ -3331,6 +3355,7 @@ void SurfaceCache::update(const CardSceneView &view) {
     mRayFootprintPerMetre = view.rayFootprintPerMetre;
     mBudget = view.budgetTexels;
     mLightBudget = view.lightBudgetTexels;
+    mAreaStrata = std::max(1u, view.areaStrata);
     mIndirectBudget = view.indirectBudgetTexels;
     mItemSlots = view.itemSlots;
     mDemandCount = view.demandCount;
@@ -3485,6 +3510,14 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.lampTracedLastFrame = mLampTracedLastFrame;
     out.cardLampsMax = mCardLampsMax;
     out.lampOverflowShareMax = mLampOverflowShareMax;
+    out.cardAreaLampsMax = mCardAreaLampsMax;
+    out.cardsMultiArea = out.cardsSharedFractional = 0u;
+    for (const CardRec &c : mCards) {
+        out.cardsMultiArea += c.areaLampCount >= 2u ? 1u : 0u;
+        out.cardsSharedFractional += c.fractionalCount >= 2u ? 1u : 0u;
+    }
+    out.lampRaysLastTrace = mLampRaysLastTrace;
+    out.areaStrata = mAreaStrata;
     for (unsigned k = 0; k < 4u; ++k) out.demandHits[k] = mDemandHits[k];
     out.queueLength = 0u;
     for (const CardRec &c : mCards) out.queueLength += c.queued ? 1u : 0u;
