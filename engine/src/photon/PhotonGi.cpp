@@ -6771,12 +6771,26 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
     const Ogre::uint32 budget = mJacobiOn ? 0xFFFFFFFFu
                                           : Ogre::uint32(std::min<unsigned long long>(
                                                 (chainBricks + shareFrames - 1u) / shareFrames, 0xFFFFFFFEull));
+    // THE FLOORS (GiQualityFacts::lightWorkFrames' law, PHOTON-7 stage 5's read A2): every cascade that runs selects up
+    // to half its own share of the count whatever the outer ones took, the pool (the count less the floors) outermost
+    // first - an inner cascade under a sustained change is passed every frame
+    Ogre::uint32 floorsSum = 0u;
+    std::vector<Ogre::uint32> floorOf(n, 0u);
+    for (size_t i = 0; i < n; ++i) {
+        if (!ran[i] || mJacobiOn) continue;
+        const unsigned long long b = (unsigned long long)((mVctCascades[i].resolution + 7) / 8);
+        floorOf[i] = Ogre::uint32(std::max<unsigned long long>(1ull, chainBricks ? (unsigned long long)budget * b * b * b /
+                                                                                     (2ull * chainBricks)
+                                                                                 : 0ull));
+        floorsSum += floorOf[i];
+    }
+    const Ogre::uint32 pool = mJacobiOn ? budget : (floorsSum < budget ? budget - floorsSum : 0u);
     Ogre::PhotonVoxelLighting *chain = mVctCascades.empty() ? nullptr : mVctCascades[0].lighting;
     bool first = true;
     for (size_t i = n; i-- > 0;) {
         if (!ran[i]) continue;
         mVctCascades[i].lighting->setLightFrame(frame);
-        mVctCascades[i].lighting->feedbackSelect(acts[i], chain, Ogre::uint32(i), first, budget);
+        mVctCascades[i].lighting->feedbackSelect(acts[i], chain, Ogre::uint32(i), first, pool, floorOf[i]);
         first = false;
     }
     // (c) THE PASSES, outermost first (a pass reads the CURRENT totals: any order converges to the one fixed point)

@@ -1297,7 +1297,7 @@ namespace Ogre
             flags[0] = select[0];   // the frame's first selection: the budget is set first
             flags[1] = select[1];   // the budget, brick-passes
             flags[2] = select[2];   // this cascade's place in the chain (its cursor's word)
-            flags[3] = 0u;
+            flags[3] = select[3];   // its FLOOR: the passes it selects whatever the pool holds (lightWorkFrames' law)
         }
         const PhotonVoxelLighting *src = source ? source : this;
         const Vector3 selfOrigin = mVoxelizer->getVoxelOrigin();
@@ -1351,13 +1351,13 @@ namespace Ogre
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::feedbackSelect( const PhotonFeedbackActivation &activation, PhotonVoxelLighting *chain,
-                                              uint32 chainIndex, bool first, uint32 budget )
+                                              uint32 chainIndex, bool first, uint32 budget, uint32 floor )
     {
         beginLightFrame();
         dispatchFeedback( 1u, nullptr, &activation );   // PRE: the activations
         PhotonVoxelLighting *owner = chain ? chain : this;
         owner->ensureBrickMask();
-        const uint32 select[3] = { first ? 1u : 0u, budget, std::min( chainIndex, kFbChainWords - 2u ) };
+        const uint32 select[4] = { first ? 1u : 0u, budget, std::min( chainIndex, kFbChainWords - 2u ), floor };
         dispatchFeedback( 5u, nullptr, nullptr, nullptr, select, owner->mFbChain );   // SELECT: the list, budgeted
     }
     //-------------------------------------------------------------------------

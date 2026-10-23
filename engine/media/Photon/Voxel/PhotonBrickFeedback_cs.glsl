@@ -156,11 +156,14 @@ void main()
 		// SELECT (one workgroup): the active bricks in index order from the cursor, the first `budget` of them listed
 		// and marked passed (their pass's two words cleared for its atomicMax), the rest carried; the budget spent.
 		const uint lid = gl_LocalInvocationIndex;
+		// THE BUDGET is this cascade's FLOOR (fbFlags.w: half its share of the count, whatever the cascades before it
+		// took - GiQualityFacts::lightWorkFrames' law) plus the chain's POOL (fbChain[0]: the count less the floors,
+		// spent outermost first); what it takes past its floor leaves the pool.
 		if( lid == 0u )
 		{
 			if( fbFlags.x != 0u )
 				fbChain[0] = fbFlags.y;
-			fbSBudget = fbChain[0];
+			fbSBudget = fbChain[0] + fbFlags.w;
 			fbSStart = numBricks > 0u ? fbChain[1u + fbFlags.z] % numBricks : 0u;
 			fbSNext = fbSStart;
 			fbSTaken = 0u;
@@ -208,7 +211,7 @@ void main()
 		if( lid == 0u )
 		{
 			const uint taken = fbSTaken;
-			fbChain[0] = fbSBudget - taken;
+			fbChain[0] = fbSBudget - max( taken, fbFlags.w );
 			fbChain[1u + fbFlags.z] = fbSNext;
 			fbArgs[1] = taken;
 			fbArgs[5] = taken;

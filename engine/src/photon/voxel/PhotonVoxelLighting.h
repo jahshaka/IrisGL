@@ -488,16 +488,17 @@ namespace Ogre
         void update( SceneManager *sceneManager, uint32 lightMask = 0xffffffff );
 
         /** THE FEEDBACK, ONE FRAME (PHOTON-7 stage 4; PhotonBrickFeedback_cs.glsl). The host calls, per frame, for every
-            cascade that owes it: feedbackSelect, INNERMOST FIRST (the activations, then the frame's list of active
+            cascade that owes it: feedbackSelect, OUTERMOST FIRST (the activations, then the frame's list of active
             bricks under the chain's budget - `chain` the innermost cascade, whose buffer holds the budget and every
             cascade's cursor; `chainIndex` this cascade's place; `first` on the frame's first selection, which sets the
-            budget to `budget` brick-passes), then feedbackRun (the bounce pass over the listed bricks, the copy-back,
+            shared pool to `budget` brick-passes; `floor` the passes this cascade takes whatever the pool holds -
+            GiQualityFacts::lightWorkFrames' floor law), then feedbackRun (the bounce pass over the listed bricks, the copy-back,
             the directional levels), then - after every cascade's pass - feedbackAccumulate once with this cascade as
             the source and once per OUTER cascade that ran a pass this frame (what their moves could move this
             cascade's stopped bricks by), then feedbackEnd (the stop and resume rules, the read-backs). The host has
             set the environment the pass's escapes read (setEnvironment). */
         void feedbackSelect( const PhotonFeedbackActivation &activation, PhotonVoxelLighting *chain, uint32 chainIndex,
-                             bool first, uint32 budget );
+                             bool first, uint32 budget, uint32 floor );
         void feedbackRun();
         void feedbackAccumulate( const PhotonVoxelLighting *source );
         void feedbackEnd( uint64 frame );

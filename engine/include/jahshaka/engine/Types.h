@@ -3071,14 +3071,14 @@ struct GiQualityFacts {
     /// (2.49x); spread, a DENSE brick-pass costs up to ~6 us (1,536 of them read 9.0 ms in one frame) and a relit voxel
     /// up to ~4.5 ns (cascade 2), so 18 frames - 512 brick-passes (~3 ms) and 262k voxels (~1.2 ms) at Epic - keeps a
     /// step frame near 1.5x the median. One number for every tier: each pays the same share of its own chain a frame,
-    /// so every tier settles a lamp step in the same frames. THE RELIGHT'S FLOOR (PHOTON-7 stage 5's read A2: under a
-    /// SUSTAINED change the outermost-first spend gave the outer cascades the whole count every frame and starved the
-    /// inner ones): every cascade that owes a relight takes, every frame, a FLOOR of HALF its own share of the count (its
-    /// voxels over the chain's), accumulated across frames until it pays a 4-plane slab, and only the rest is spent
-    /// outermost first. THE LAW: an owed cascade's floor alone pays its whole volume in 2 x lightWorkFrames frames,
-    /// whatever the rest of the chain owes; and a change that arrives during a relight's round never restarts it - it is
-    /// owed to the next round. (The feedback's brick-passes take the same floor once a stopped brick's resume no longer
-    /// depends on whether it was passed: the read's A2, held.)
+    /// so every tier settles a lamp step in the same frames. THE FLOORS (PHOTON-7 stage 5's read A2: under a SUSTAINED
+    /// change the outermost-first spend gave the outer cascades the whole count every frame and starved the inner ones):
+    /// every cascade that owes work takes, every frame, a FLOOR of HALF its own share of each count - of the relight's,
+    /// its voxels over the chain's, accumulated across frames until it pays a 4-plane slab; of the feedback's
+    /// brick-passes, its bricks over the chain's - and only the rest is spent outermost first. THE LAW: an owed
+    /// cascade's floor alone pays its whole volume (its active bricks) in 2 x lightWorkFrames frames, whatever the rest
+    /// of the chain owes; and a change that arrives during a relight's round never restarts it - it is owed to the next
+    /// round.
     unsigned lightWorkFrames = 18u;
     // ---- THE GATHER ROW (PHOTON-GATHER-1d) -----------------------------------
     /// The screen-probe gather at this tier (GiGatherFacts says what and why).
