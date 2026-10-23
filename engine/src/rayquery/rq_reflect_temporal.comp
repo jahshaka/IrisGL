@@ -199,6 +199,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// cleared 1x1; 1 without a tonemap), y = 1 when the chain's MEASURED history is bound at binding 50 instead (the
 	/// multiplier the tonemapper scaled the last frame by). z = the lobe draw's seed offset (the arm reflect.seedOffset).
 	vec4 denoiser;
+	/// THE DISPLAY'S CODE SLOPE (commit 8's hold): 64 entries (jah_reflect_rest.glsl jahDisplayCodes).
+	vec4 display[16];
 } p;
 
 int gEye = 0;
@@ -231,8 +233,12 @@ layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
 float gExposure = 1.0;
 #define JAH_DENOISE_EXPOSURE gExposure
 #include "jah_reflect_denoise.glsl"
-/// (after the denoiser space: the rest's fold is a denoiser-space mean)
+/// (after the denoiser space: the rest's fold is a denoiser-space mean; its stop reads the display's code)
+#define JAH_DISPLAY_LUT( i ) p.display[( i ) >> 2][( i ) & 3]
 #include "jah_reflect_rest.glsl"
+/// THE REST'S DISPLAYED STANDARD ERROR (commit 8's hold): the filter's, last frame, at this texel's own pixel - display
+/// codes + 1 (0 = not measured).
+layout( r32f, set = 0, binding = 51 ) uniform readonly image2DArray restDisplay;
 #include "jah_reflect_state.glsl"
 #include "jah_reflect_draw.glsl"
 
@@ -473,7 +479,7 @@ void main()
 		JahRestStats rs;
 		rs.M = vPrev > 0.0 && finite3( Mt.xyz ) ? Mt.xyz : H;
 		rs.m2 = vPrev > 0.0 && finite1( Mt.w ) ? Mt.w : 0.0;
-		rs.res = jahRestHasResidual( vPrev, hasH, centreOnly, N ) && finite3( Hr.xyz ) && finite1( Hr.w ) ? Hr : vec4( 0.0 );
+		rs.res = jahRestHasResidual( vPrev, hasH, N ) && finite3( Hr.xyz ) && finite1( Hr.w ) ? Hr : vec4( 0.0 );
 		if( st.resume )
 		{
 			if( !hasSample )
@@ -507,40 +513,26 @@ void main()
 				st.hitT = vPrev > 0.0 && st.hitT > 0.0 ? max( st.hitT + ( s.w - st.hitT ) / v, 1e-3 ) : s.w;
 				st.v = uint( v );
 				imageStore( historyCur, ivec3( tc, gEye ), vec4( rs.M, rs.m2 ) );
-				const bool handOver = hasH && !centreOnly;
-				if( !handOver && hasH )
-					imageStore( historyPrev, ivec3( tc, gEye ), vec4( rs.M, 0.0 ) );   // the plain mean: every reader composes M
-				else if( jahRestHasResidual( v, hasH, centreOnly, N ) )
+				if( jahRestHasResidual( v, hasH, N ) )
 					imageStore( historyPrev, ivec3( tc, gEye ), rs.res );   // the stores' residual (jahRestFold)
+				else if( centreOnly )
+					imageStore( historyPrev, ivec3( tc, gEye ), vec4( rs.M, 0.0 ) );   // the plain mean: every reader composes M
 			}
 			if( !( v >= 1.0 ) )
 				return;   // nothing in the rest mean yet
-			// THE STOP (R1, P1): the rest mean's standard error under a code, counted over consecutive frames once the
-			// hand-over is done (a texel with no hand-over: once kReflectStopFrames samples are in); against the
-			// texel's answer or, for a dark one, its neighbourhood's mean luma (this frame's 21 resolved neighbours),
-			// never under ONE CODE NEAR BLACK - about 3 % of the exposure's white (sRGB's first code, 1/255 / 12.92 of
-			// display white, over the 1 % rule): 0.03 / E (a dark texel's 1 % would otherwise ask finer than a code
-			// and run to its cap).
-			float nbrLuma = 0.0;
-			{
-				float y1 = 0.0, yn = 0.0;
-				const ivec2 r = ivec2( gl_LocalInvocationID.xy ) + ivec2( kReach );
-				for( int dy = -kReach; dy <= kReach; ++dy )
-					for( int dx = -kReach; dx <= kReach; ++dx )
-					{
-						if( abs( dx ) == kReach && abs( dy ) == kReach )
-							continue;
-						const vec4 t = sTile[( r.y + dy ) * kTileSide + r.x + dx];
-						if( t.w <= 0.0 )
-							continue;
-						y1 += jahDenoiseLuma( jahFromDenoise( jahFromYCoCg( t.xyz ) ) );
-						yn += 1.0;
-					}
-				nbrLuma = yn > 0.0 ? y1 / yn : 0.0;
-			}
+			// THE STOP (R1; the lead's levers (i) + (ii)): the standard error OF WHAT IS DISPLAYED at this texel's own
+			// pixel - the filter's fixed rest taps combined - under ONE DISPLAY CODE (the exact slope of the exposure,
+			// the grade, the film curve and the sRGB encode), counted over consecutive frames once the hand-over is done
+			// (a texel with no hand-over: once kReflectStopFrames samples are in). The filter measured it last frame
+			// (restDisplay); where it measured nothing (the first rest frame, a pixel it gave no answer) the texel's own
+			// standard error in display codes stands in - the larger, never the smaller.
 			const bool handOver = hasH && !centreOnly;
 			const vec3 answer = jahRestAnswer( handOver ? H : rs.M, hasH, rs.M, v, N );
-			const float e = jahRestErrorCodes( rs, v, max( max( jahDenoiseLuma( answer ), nbrLuma ), 0.03 / gExposure ) );
+			const float measured = imageLoad( restDisplay, ivec3( tc, gEye ) ).x - 1.0;
+			const float LD = jahDenoiseLuma( jahToDenoise( clamp( answer, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) );
+			const float e = measured >= 0.0 && finite1( measured )
+								? measured
+								: jahDisplayCodes( jahDenoiseLuma( answer ), jahRestErrorD( rs, v ) * jahDenoiseSlopeAt( LD ) );
 			const bool settled = v >= ( handOver ? jahRestHandOverLength( N ) : float( kReflectStopFrames ) );
 			// A CAPPED TEXEL (its count at the field's ceiling) stops as it stands - the defect the trace counts.
 			const bool capped = st.v >= kReflectRestVCap;

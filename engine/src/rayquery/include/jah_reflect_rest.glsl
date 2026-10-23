@@ -17,8 +17,10 @@
 // under half a unit in the last place, and drops it UNEVENLY: 0.71 codes dark at 512 samples, P1) - the residual lives in
 // the FROZEN HALF once the hand-over is done (no reader composes H past 2N: zero bytes, PREFLIGHT_R section 9 W5), and
 // a texel with no moving history keeps it there from its first sample.
-// THE STOP: M goes on accumulating PER TEXEL until ITS STANDARD ERROR - in the denoiser space, sqrt( (E[l^2] -
-// E[l]^2) / v ), carried to the output by the space's slope at the mean - has stayed under one output code for
+// THE STOP (the lead's levers (i) + (ii)): M goes on accumulating PER TEXEL until the standard error OF WHAT IS
+// DISPLAYED at the texel's own pixel - the spatial filter's fixed rest taps combined, sqrt( sum w_i^2 SE_i^2 ) / sum w_i,
+// each SE_i the tap's rest mean's in the denoiser space - IN DISPLAY CODES (the exact slope of the view's exposure,
+// grade, film curve and sRGB encode at the pixel's value: jahDisplayCodes) has stayed under ONE CODE for
 // kReflectStopFrames frames; then the texel STOPS tracing (R1), and the view holds when every texel has stopped. There
 // is NO SAMPLE CAP (K_max 512 deleted): a texel's count saturates only at its 16-bit field, a CAPPED texel - stopped,
 // counted (the hit list's word 3, RayQueryStatus::reflectRestCapped) as the defect reading it is, never a deadline (the
@@ -30,10 +32,6 @@
 const uint kReflectStopFrames = 8u;
 /// The state's v field's ceiling (16 bits, jah_reflect_state.glsl): a texel that reaches it is CAPPED.
 const uint kReflectRestVCap = 65535u;
-/// "Under one output code": a change of the texel's luma within this share of its own (or its neighbourhood's, for a
-/// dark texel) - one sRGB code is 1.1 % (code 200) to 3.7 % (code 50) of linear radiance, so 1 % is under a code at
-/// every tone the eye sees.
-const float kReflectStopRel = 0.01;
 /// THE REST'S SAMPLE SEQUENCE (commit 8): a rest sample's index is the rest sequence's base (knobs.z at rest) plus the
 /// sample's own number v - per SAMPLE, never per frame, so the k samples of a frame's batch and a dropped record's retry
 /// are each the sequence's next, and a held answer is a function of the scene and the eye.
@@ -66,11 +64,13 @@ struct JahRestStats { vec3 M; float m2; vec4 res; };
 /// What a 16-bit store keeps of x.
 float jahHalf1( float x ) { return unpackHalf2x16( packHalf2x16( vec2( x, 0.0 ) ) ).x; }
 vec3 jahHalf3( vec3 x ) { return vec3( jahHalf1( x.x ), jahHalf1( x.y ), jahHalf1( x.z ) ); }
-/// Whether the frozen half holds the residual - free once no reader composes H: past the hand-over, or with no H. A
-/// fixed estimator (`centreOnly`: its samples are all one) keeps M in H instead and needs no residual.
-bool jahRestHasResidual( float v, bool hasH, bool centreOnly, float N )
+/// Whether the frozen half holds the residual: once no reader composes H - past the hand-over, or with no H - for EVERY
+/// texel, by its count alone (a texel's draw can turn from the fixed estimator to the lobe at rest, its throw settling:
+/// the residual's validity may never depend on which it is). Before it, a fixed estimator keeps its plain mean in H
+/// (every reader then composes M) and a lobe keeps H itself.
+bool jahRestHasResidual( float v, bool hasH, float N )
 {
-	return !centreOnly && v >= 1.0 && ( !hasH || v >= jahRestHandOverLength( N ) );
+	return v >= 1.0 && ( !hasH || v >= jahRestHandOverLength( N ) );
 }
 /// ONE SAMPLE INTO THE REST MEAN: the running mean and moment over vPrev + 1 samples in the denoiser space - exactly
 /// from what the stores hold plus what they lost - and the stores' new values and residual.
@@ -93,18 +93,41 @@ void jahRestFold( inout JahRestStats s, vec3 sampleLin, float vPrev )
 	s.m2 = jahHalf1( max( q, 0.0 ) );
 	s.res = vec4( MD - jahToDenoise( s.M ), q - s.m2 );
 }
-/// THE REST MEAN'S STANDARD ERROR in output codes over v samples: in the denoiser space from the statistics, carried to
-/// linear luma by the space's slope at the mean (dL / dL_D = 1 / ( 1 - E L_D / 10 )^2), against one code of `reference`
-/// (kReflectStopRel of a linear luma: the texel's answer, or its neighbourhood's for a dark texel). 0 for v < 1.
-float jahRestErrorCodes( JahRestStats s, float v, float reference )
+/// THE REST MEAN'S STANDARD ERROR over v samples, in the DENOISER space's luma (the spatial filter's sigma at rest) and
+/// carried to LINEAR luma by the space's slope at the mean (dL / dL_D = 1 / ( 1 - E L_D / 10 )^2). 0 for v < 1.
+float jahRestErrorD( JahRestStats s, float v )
 {
 	if( !( v >= 1.0 ) )
 		return 0.0;
 	const float LD = jahDenoiseLuma( jahToDenoise( s.M ) + s.res.xyz );
-	const float variance = max( s.m2 + s.res.w - LD * LD, 0.0 );
-	const float k = 1.0 - LD * ( JAH_DENOISE_EXPOSURE / kDenoiserTonemapRange );
-	return sqrt( variance / v ) / max( k * k, 1e-4 ) / max( kReflectStopRel * reference, 1e-8 );
+	return sqrt( max( s.m2 + s.res.w - LD * LD, 0.0 ) / v );
 }
+float jahDenoiseSlopeAt( float LD )
+{
+	const float k = 1.0 - LD * ( JAH_DENOISE_EXPOSURE / kDenoiserTonemapRange );
+	return 1.0 / max( k * k, 1e-4 );
+}
+#ifdef JAH_DISPLAY_LUT
+/// THE DISPLAY'S CODE (lever (i)): the host's table (ReflectParams::display, OgreRayQuery.cpp fillDisplaySlope) of
+/// d(code) / d(ln x) over the pre-exposed luma x = E L, ln 1e-4 .. ln 100 in 63 steps; below its foot the slope's own
+/// d(code) / dx there (the encode's linear segment). A linear luma L's standard error seL in DISPLAY CODES.
+const float kDisplayLnMin = -9.210340372;
+const float kDisplayLnStep = 0.2192938184;
+float jahDisplayLogSlope( float lnx )
+{
+	const float t = clamp( ( lnx - kDisplayLnMin ) / kDisplayLnStep, 0.0, 63.0 );
+	const int i = min( int( t ), 62 );
+	return mix( JAH_DISPLAY_LUT( i ), JAH_DISPLAY_LUT( i + 1 ), t - float( i ) );
+}
+float jahDisplayCodes( float L, float seL )
+{
+	const float x = JAH_DENOISE_EXPOSURE * max( L, 0.0 );
+	const float xMin = exp( kDisplayLnMin );
+	// d code / dx = (d code / d ln x) / x, at the table's foot for a value under it
+	const float perX = x > xMin ? jahDisplayLogSlope( log( x ) ) / x : JAH_DISPLAY_LUT( 0 ) / xMin;
+	return perX * JAH_DENOISE_EXPOSURE * max( seL, 0.0 );
+}
+#endif   // JAH_DISPLAY_LUT
 #endif   // JAH_REFLECT_DENOISE_GLSL
 
 /// A SEGMENT THROUGH AN AXIS BOX (the slab test): origin o, unit direction d, length t.

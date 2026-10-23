@@ -993,7 +993,7 @@ void main()
 		const vec4 Mt = imageLoad( historyCur, ivec3( tc, gEye ) );
 		rs.M = vNow > 0u && finite3( Mt.xyz ) ? Mt.xyz : ( restHasH ? restHr.xyz : vec3( 0.0 ) );
 		rs.m2 = vNow > 0u && finite1( Mt.w ) ? Mt.w : 0.0;
-		rs.res = jahRestHasResidual( float( vNow ), restHasH, false, restN ) && finite3( restHr.xyz ) &&
+		rs.res = jahRestHasResidual( float( vNow ), restHasH, restN ) && finite3( restHr.xyz ) &&
 						 finite1( restHr.w )
 					 ? restHr
 					 : vec4( 0.0 );
@@ -1220,7 +1220,7 @@ void main()
 	if( folds > 0u )
 	{
 		imageStore( historyCur, ivec3( tc, gEye ), vec4( rs.M, rs.m2 ) );
-		if( jahRestHasResidual( float( vNow ), restHasH, false, restN ) )
+		if( jahRestHasResidual( float( vNow ), restHasH, restN ) )
 			imageStore( historyPrev, ivec3( tc, gEye ), rs.res );
 	}
 	// THE STATE THIS FRAME STORES (jah_reflect_state.glsl): the surface's distance (the texel is live: the temporal pass

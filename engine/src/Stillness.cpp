@@ -216,6 +216,8 @@ struct StillnessRun::Impl {
     std::vector<Queued> queued;
     /// The traced reflection frame -> (window, frame).
     std::map<unsigned, std::pair<int, size_t>> byTraced;
+    /// ...and a DUMPED trail frame's (the walk's own frames: their per-texel history count, `.rhc`, for the lag law).
+    std::map<unsigned, size_t> byTracedTrail;
     /// THE GATHER FRAME -> (window, trail?, frame) (StillnessSpec::classRestarts): each frame the gather recorded.
     struct FrameRef { int window; bool trail; size_t index; };
     std::map<unsigned, FrameRef> byGather;
@@ -498,6 +500,22 @@ struct StillnessRun::Impl {
     void takeReflectHistory(const RayQueryStatus &rq)
     {
         if (rq.reflectHistoryCount.empty() || !rq.reflectHistoryW || !rq.reflectHistoryH) return;
+        // THE DUMP's history count of a walk frame (PHOTON-7 stage 6, the lag law): the trace texel's moving count N,
+        // one byte a texel (N <= 12, the window), its grid in `.rsize` - beside the frame's `.rgb`.
+        if (const auto tt = byTracedTrail.find(rq.reflectHistoryFrame); tt != byTracedTrail.end()) {
+            if (!spec.dumpDir.empty()) {
+                const std::string tag = trailTag(tt->second);
+                std::vector<unsigned char> n(rq.reflectHistoryCount.size());
+                for (size_t i = 0; i < n.size(); ++i)
+                    n[i] = (unsigned char)std::min<unsigned>(rq.reflectHistoryCount[i], 255u);
+                std::ofstream h(dumpPath(tag + ".rhc"), std::ios::binary);
+                h.write(reinterpret_cast<const char *>(n.data()), std::streamsize(n.size()));
+                std::ofstream sz(dumpPath(tag + ".rsize"));
+                sz << rq.reflectHistoryW << " " << rq.reflectHistoryH << "\n";
+            }
+            byTracedTrail.erase(tt);
+            return;
+        }
         const auto it = byTraced.find(rq.reflectHistoryFrame);
         if (it == byTraced.end()) return;
         const int win = it->second.first;
@@ -818,6 +836,9 @@ bool StillnessRun::nextPose(Vec3 &eye, Vec3 &target)
     // count from the first stop to the end. An arm latches at the top of the next frame — this one.
     if (m.readsHistory() && (p.trail || p.part == Impl::Part::Window) && !m.gatherArmOn)
         m.gatherArmOn = m.setArm("gather.historyReadback", 1.0);
+    // (a DUMPED walk reads the reflection's count over its trail too: the dump's `.rhc`, the lag law's N)
+    if (p.trail && !m.spec.dumpDir.empty() && !m.reflectArmOn)
+        m.reflectArmOn = m.setArm("reflect.historyReadback", 1.0);
     if (p.part == Impl::Part::Window && p.index == 0) {
         if (!m.gatherArmOn) m.gatherArmOn = m.setArm("gather.historyReadback", 1.0);
         if (!m.reflectArmOn) m.reflectArmOn = m.setArm("reflect.historyReadback", 1.0);
@@ -869,6 +890,10 @@ bool StillnessRun::frameDone(std::string &err)
         StillnessWindow &w = m.report.windows[size_t(p.window)];
         StillnessFrame &f = w.trail[w.trail.size() - p.index];
         m.mapGatherFrame(g, p.window, true, w.trail.size() - p.index);
+        if (!m.spec.dumpDir.empty() && pub.rayQuery.reflectFrame > m.lastTraced) {
+            m.byTracedTrail[pub.rayQuery.reflectFrame - 1u] = w.trail.size() - p.index;
+            m.lastTraced = pub.rayQuery.reflectFrame;
+        }
         f.engineFrame = engineFrame;
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;

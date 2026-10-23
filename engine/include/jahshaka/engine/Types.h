@@ -6820,6 +6820,39 @@ constexpr float kSpotAreaFraction = 0.025f;
 ///  * vignette: 0..1 of the cos^4 lens falloff, the frame's corner at 45 degrees.
 ///  * film*: Unreal's filmic tonemapper (ACES-based), its five parameters at
 ///    Unreal's defaults. 0.18 always leaves the curve at 0.18.
+/// THE FILM CURVE ON A GREY - Unreal 4.15's FilmToneMap (TonemapCommon.ush) as the fork's FinalToneMapping_ps.glsl
+/// runs it (jahFilmToneMap): on a NEUTRAL input its colour terms (the RRT's glow and red modifier, the desaturations, the
+/// AP0/AP1 round trip) are the identity, so this scalar is the curve a grey sees - linear film input (post-exposure) to
+/// linear display output, before the sRGB encode. THE ONE C++ TRANSCRIPTION: iris::lens::filmCurve calls it (the tonemap
+/// suite holds the GPU to that), and so does the reflection rest's display slope (PHOTON-7 stage 6, the stop's code).
+inline double filmToneGrey(double x, double slopeIn, double toe, double shoulder, double black, double white) {
+    const double slope = slopeIn > 0.01 ? slopeIn : 0.01;
+    const double toeScale = 1.0 + black - toe;
+    const double shoulderScale = 1.0 + white - shoulder;
+    const double inMatch = 0.18, outMatch = 0.18;
+    double toeMatch;
+    if (toe > 0.8) {
+        toeMatch = (1.0 - toe - outMatch) / slope + std::log10(inMatch);
+    } else {
+        const double bt = (outMatch + black) / toeScale - 1.0;
+        toeMatch = std::log10(inMatch) - 0.5 * std::log((1.0 + bt) / (1.0 - bt)) * (toeScale / slope);
+    }
+    const double straightMatch = (1.0 - toe) / slope - toeMatch;
+    const double shoulderMatch = shoulder / slope - straightMatch;
+    const double lc = std::log10(x > 1e-10 ? x : 1e-10);
+    const double straight = slope * (lc + straightMatch);
+    double toeC = -black + (2.0 * toeScale) / (1.0 + std::exp((-2.0 * slope / toeScale) * (lc - toeMatch)));
+    double shC = (1.0 + white) -
+                 (2.0 * shoulderScale) / (1.0 + std::exp((2.0 * slope / shoulderScale) * (lc - shoulderMatch)));
+    toeC = lc < toeMatch ? toeC : straight;
+    shC = lc > shoulderMatch ? shC : straight;
+    double t = (lc - toeMatch) / (shoulderMatch - toeMatch);
+    t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+    if (shoulderMatch < toeMatch) t = 1.0 - t;
+    t = (3.0 - 2.0 * t) * t * t;
+    return toeC + (shC - toeC) * t;
+}
+
 struct ImageGrade {
     float contrast = 1.0f;
     float saturation = 1.0f;

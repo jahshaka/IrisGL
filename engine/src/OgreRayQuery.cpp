@@ -249,7 +249,7 @@ constexpr unsigned kReflectRestMovers = 16u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 51u;
+constexpr unsigned kReflectBindings = 52u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -316,7 +316,13 @@ constexpr unsigned kReflectScreenBinding = kReflectReferenceBinding + 1u;   // t
 /// the tonemapper scaled the last frame by) - the denoiser space is Lumen's on pre-exposed colour
 /// (jah_reflect_denoise.glsl) - or a stand-in where the multiplier is a constant (ReflectParams::denoiser).
 constexpr unsigned kReflectExposureBinding = kReflectScreenBinding + 3u;
-static_assert(kReflectBindings == kReflectExposureBinding + 1u, "the exposure is the reflection set's last binding");
+/// ...and THE REST'S DISPLAYED STANDARD ERROR (51, PHOTON-7 stage 6 commit 8's hold, the lead's levers (i) + (ii)): a
+/// trace texel's own pixel's standard error AS DISPLAYED - the spatial filter's fixed rest taps and weights combined,
+/// in display codes through the exposure, the grade, the film curve and the sRGB encode - written by the filter at
+/// rest (r32f, codes + 1; 0 = not measured) and read by the next frame's temporal pass for the stop. A STATISTIC read
+/// for the stop, never colour fed back.
+constexpr unsigned kReflectDisplayBinding = kReflectExposureBinding + 1u;
+static_assert(kReflectBindings == kReflectDisplayBinding + 1u, "the rest's displayed SE is the reflection set's last binding");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's STATE texel (an unshaded record's distance is
 /// withheld there), the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the ray's direction) and the
@@ -1036,6 +1042,8 @@ private:
         /// THE REST'S REFERENCE (R1 (f)'s arm "reflect.restReference"): rgba32f, the texel's raw rest samples' mean and
         /// count; the trace's size under the arm, 1 x 1 otherwise (`referenceFull`).
         ReflectImage reference;
+        /// THE REST'S DISPLAYED STANDARD ERROR (binding 51, commit 8's hold): r32f a trace texel, codes + 1.
+        ReflectImage display;
         bool referenceFull = false;
         unsigned w = 0, h = 0, layers = 1;
         unsigned frame = 0;              ///< the sample sequence's input
@@ -5223,13 +5231,52 @@ struct ReflectParams {
     /// the view's exposure multiplier where it is a constant (a fixed tonemap: the chain's cleared 1 x 1; 1 with no
     /// tonemap), [1] = 1 when the chain's measured history is bound at binding 50 instead.
     float denoiser[4] = {};
+    /// THE DISPLAY'S CODE SLOPE (commit 8's hold, lever (i)): 64 entries, d(display code) / d(ln x) of a grey at the
+    /// PRE-EXPOSED luma x = E L over ln x in [kDisplayLnMin, kDisplayLnMin + 63 kDisplayLnStep] - through the grade, the
+    /// film curve and the sRGB encode as the view's tonemap pass runs them (jah_reflect_rest.glsl jahDisplayCodes).
+    float display[16][4] = {};
 };
+/// The display slope table's log axis (jah_reflect_rest.glsl's twins): ln 1e-4 .. ln 100 in 63 steps.
+constexpr double kDisplayLnMin = -9.210340371976184;
+constexpr double kDisplayLnStep = 0.21929381838038531;
 
 
 
 /// A MOVED SLOT'S SWEPT BOX (PHOTON-2 round 2, G6): its world bounds this frame joined with last frame's - the same
 /// local box under prevWorld, i.e. this frame's box carried by prevWorld * world^-1 (row-major 3x4 affines; the
 /// carried box is the transformed box's own bounds, a superset). A singular world (a zero scale) joins nothing.
+/// THE DISPLAY CODE OF A GREY at pre-exposed luma x (commit 8's hold, lever (i)): what the view's tonemap pass does
+/// to it (FinalToneMapping_ps.glsl) - the colour correction (contrast as a power about 0.18, the shadows' and highlights'
+/// gains on their luma masks; the saturation and the white balance leave a grey grey), the film curve (Types.h
+/// filmToneGrey) and the exact sRGB encode, in codes; a chain with no tonemap encodes the clamped linear value. (The
+/// bloom adds and the vignette scales by under 1: neither is the texel's, and leaving the vignette out only makes the
+/// stop stricter.)
+double displayCodeGrey(double x, bool tonemap, const ImageGrade &g) {
+    const auto srgb = [](double v) {
+        v = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+        return v <= 0.0031308 ? 12.92 * v : 1.055 * std::pow(v, 1.0 / 2.4) - 0.055;
+    };
+    if (!tonemap) return 255.0 * srgb(x);
+    const auto smooth = [](double a, double b, double v) {
+        const double t = std::min(std::max((v - a) / (b - a), 0.0), 1.0);
+        return t * t * (3.0 - 2.0 * t);
+    };
+    double w = std::max(x, 0.0);
+    const double luma = w;
+    w = std::pow(w / 0.18, std::max(double(g.contrast), 0.0)) * 0.18;
+    w *= std::exp2(double(g.shadows) * (1.0 - smooth(0.0, 0.09, luma)) + double(g.highlights) * smooth(0.5, 1.0, luma));
+    w = std::max(filmToneGrey(w, g.filmSlope, g.filmToe, g.filmShoulder, g.filmBlackClip, g.filmWhiteClip), 0.0);
+    return 255.0 * srgb(w);
+}
+/// THE TABLE (ReflectParams::display): the code's slope against ln x, a central difference of 0.01 in ln x.
+void fillDisplaySlope(float (&out)[16][4], bool tonemap, const ImageGrade &g) {
+    for (int i = 0; i < 64; ++i) {
+        const double l = kDisplayLnMin + kDisplayLnStep * double(i), h = 0.01;
+        out[i >> 2][i & 3] = float((displayCodeGrey(std::exp(l + h), tonemap, g) -
+                                    displayCodeGrey(std::exp(l - h), tonemap, g)) / (2.0 * h));
+    }
+}
+
 void sweptBoundsOf(const detail::GpuInstance &g, float lo[3], float hi[3]) {
     for (int c = 0; c < 3; ++c) { lo[c] = g.boundsMin[c]; hi[c] = g.boundsMax[c]; }
     const float *W = g.world, *P = g.prevWorld;
@@ -5359,6 +5406,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 48 ...the depth it was drawn at
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 49 ...the object motion
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 50 the exposure history (PHOTON-7 stage 6 commit 6)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 51 the rest's displayed SE (commit 8's hold)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -5518,6 +5566,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
     }
     retireImage(rv.sample);
     retireImage(rv.reference);
+    retireImage(rv.display);
     rv.imagesReady = false;
     rv.havePrev = false;
     rv.historyFrames = 0;
@@ -5534,6 +5583,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
         if (!makeStorageImage(w, h, formats[1], rv.state[i], err, layers)) return false;
     }
     if (!makeStorageImage(w, h, formats[0], rv.sample, err, layers)) return false;
+    if (!makeStorageImage(w, h, VK_FORMAT_R32_SFLOAT, rv.display, err, layers)) return false;
     // (the arm toggled re-makes the whole set: a measuring arm, set before the session's measurement)
     if (!makeStorageImage(reference ? w : 1u, reference ? h : 1u, VK_FORMAT_R32G32B32A32_SFLOAT, rv.reference, err,
                           layers))
@@ -5556,9 +5606,10 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
     // clear waits for those stages and makes their writes available before it writes;
     // a freshly made image has no earlier access and the same barrier costs it nothing.
     // The old contents are discarded (UNDEFINED): they are cleared.
-    constexpr int kImages = 6;
+    constexpr int kImages = 7;
     VkImageMemoryBarrier toGeneral[kImages] = {};
-    ReflectImage *imgs[kImages] = { &rv.hist[0], &rv.hist[1], &rv.state[0], &rv.state[1], &rv.sample, &rv.reference };
+    ReflectImage *imgs[kImages] = { &rv.hist[0], &rv.hist[1], &rv.state[0], &rv.state[1], &rv.sample, &rv.reference,
+                                    &rv.display };
     for (int i = 0; i < kImages; ++i) {
         toGeneral[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         toGeneral[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -5604,6 +5655,7 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
     for (int i = 0; i < 2; ++i) { retireImage(rv.hist[i]); retireImage(rv.state[i]); }
     retireImage(rv.sample);
     retireImage(rv.reference);
+    retireImage(rv.display);
     retire(rv.histReadback);
     for (ReflectView::HistPending &p : rv.histPending) p = ReflectView::HistPending();
     rv.histHost.clear();
@@ -6076,6 +6128,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const auto &names = node->getDefinition()->getNameToChannelMap();
         if (names.find(lum) != names.end()) exposureTex = node->getDefinedTexture(lum);
     }
+    fillDisplaySlope(pp.display, chainD.hdr, chainD.image);
     pp.denoiser[0] = chainD.hdr && chainD.tonemapFixed
                          ? chain::fixedExposureColour(chainD.exposureScale, chainD.exposure).r : 1.0f;
     pp.denoiser[1] = exposureTex ? 1.0f : 0.0f;
@@ -6675,6 +6728,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!exposureImg.imageView) { bail("the exposure binding is null"); return; }
     w[kReflectExposureBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[kReflectExposureBinding].pImageInfo = &exposureImg;
+    // THE REST'S DISPLAYED SE (51, commit 8's hold): the filter writes it, the temporal pass reads it.
+    VkDescriptorImageInfo displayImg{};
+    displayImg.imageView = rv.display.view;
+    displayImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!displayImg.imageView) { bail("the rest's displayed-SE binding is null"); return; }
+    w[kReflectDisplayBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[kReflectDisplayBinding].pImageInfo = &displayImg;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
