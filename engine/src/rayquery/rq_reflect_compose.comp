@@ -114,6 +114,9 @@ void main()
 	const bool hasH = finite3( H ) && Hn > 0.0;
 	imageStore( historyPrev, ivec3( tc, eye ),
 				vec4( jahRestAnswer( hasH ? H : vec3( 0.0 ), hasH, M, v, max( p.stereo.w, 1.0 ) ), 0.0 ) );
+	// THE COMPOSED COUNT: the answer's samples, H's and the rest's - packed at the state's 5.3 ceiling, 31.875, which binds
+	// only here and above the moving MaxFrames 12: the first moving frame after the break takes min( N c + 1, 12 ) = 12 for
+	// any confidence c >= 0.345 (READ_A W3: the 6.2 field's 63.75 left 32 frames for c >= 0.49 only).
 	st.N = ( hasH ? Hn : 0.0 ) + v;
 	st.v = 0u;
 	st.stop = 0u;

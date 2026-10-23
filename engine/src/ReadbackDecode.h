@@ -18,7 +18,7 @@ void decodeGatherHistory(const uint32_t *src, unsigned w, unsigned h, unsigned l
                          std::vector<unsigned char> &count, std::vector<unsigned char> &cls,
                          std::vector<float> &dist);
 /// The reflection's STATE TEXEL (rg32ui, jah_reflect_state.glsl): per texel the samples its answer holds - the moving
-/// count N (bits 0-7 of the second word, 6.2 fixed) plus the rest samples v (bits 8-17), whole - where the texel has an
+/// count N (bits 0-7 of the second word, 5.3 fixed) plus the rest samples v (bits 8-23), whole - where the texel has an
 /// answer (its surface distance, the first word's low half, above zero), else 0; the eye layers side by side.
 void decodeReflectHistory(const uint32_t *src, unsigned w, unsigned h, unsigned layers,
                           std::vector<unsigned short> &out);

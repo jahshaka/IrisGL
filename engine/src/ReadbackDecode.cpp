@@ -43,8 +43,9 @@ void decodeReflectHistory(const uint32_t *src, unsigned w, unsigned h, unsigned 
                 // the surface distance's half: positive and non-zero (no sign, an exponent or mantissa bit set)
                 const unsigned dist = row[0] & 0xFFFFu;
                 if (!dist || (dist & 0x8000u)) continue;
-                const unsigned n4 = row[1] & 0xFFu, v = (row[1] >> 8u) & 0x3FFu;
-                dst[x] = (unsigned short)std::min(n4 / 4u + v, 4096u);
+                // N in 5.3 fixed (bits 0-7), v the rest's 16 bits (8-23): jah_reflect_state.glsl's final layout
+                const unsigned n8 = row[1] & 0xFFu, v = (row[1] >> 8u) & 0xFFFFu;
+                dst[x] = (unsigned short)std::min(n8 / 8u + v, 65535u);
             }
         }
 }

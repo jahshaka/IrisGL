@@ -86,6 +86,7 @@
 #include "rayquery/rq_reflect_spv.h"
 #include "rayquery/rq_reflect_filter_spv.h"
 #include "rayquery/rq_reflect_temporal_spv.h"
+#include "rayquery/rq_reflect_resolve_spv.h"
 #include "rayquery/rq_reflect_compose_spv.h"
 #include "rayquery/rq_motion_spv.h"
 #include "rayquery/rq_motion_skin_spv.h"
@@ -218,24 +219,13 @@ struct ScratchArena {
 // this file would be two numbers one edit apart. `kRayReflectFeather` lives in
 // EnginePrivate.h, which both this TU and OgreChain.cpp already include, and its
 // note there says what each half does with it.
-/// THE TEMPORAL MEAN'S FLOOR on 1/n. The mean starts as a true running average
-/// (fastest convergence) and settles into an exponential one at this weight, so
-/// it keeps following a scene whose lighting changes: 1/16 remembers about
-/// sixteen frames, which at 60 Hz is a quarter of a second of lag on a moving
-/// light and converges a roughness-0.3 lobe well inside the sixteen frames the
-/// suite asserts.
-/// 1/32 and not 1/16, MEASURED (the convergence case of gi.rt_reflect): one
-/// ray per pixel per frame is a BINARY estimator at a reflected silhouette —
-/// the ray either finds the bright thing or it does not — so the residual
-/// frame-to-frame movement is the floor times that contrast. At 1/16 the worst
-/// pixel of the fixture still moved 16/255 after sixteen frames; at 1/32 it is
-/// half that and the 99th percentile is inside 2/255. Half a second of lag at
-/// 60 Hz on a light that moves, which is the other side of the same number.
-/// (PHOTON-2 1b/1e: it is the MOVING eye's memory only — the temporal pass's clamp
-/// and confidence shorten it where the light or the reflected thing changed; at rest
-/// each texel hands over to its own rest mean and converges per texel until it stops
-/// (round 2, R1: kReflectRestMaxFrames) — the floor no longer decides convergence.)
-constexpr float kReflectHistoryFloor = 1.0f / 32.0f;
+/// THE MOVING MEMORY: Lumen's MaxFrames (r.Lumen.Reflections.Temporal.MaxFramesAccumulated, 12; PHOTON-7 stage 6 commit 6,
+/// LUMEN_VR_FACTS C7.2) - the temporal pass' window N = min( N c + 1, MaxFrames ), shortened by the clamp's confidence
+/// where the light or the reflected thing changed; one frame for a lobe under a texel (the mirror ramp:
+/// jah_reflect_draw.glsl). PHOTON-2's 32 is deleted with its SIX readers re-derived (PREFLIGHT_R W9): the hit's sample
+/// footprint and the sky's mip (both ~ 1 / sqrt( N ), rq_reflect.comp), the rest's firefly bound and the moving window
+/// (rq_reflect_temporal.comp, through knobs2.w), and the rest's hand-over length (reflectRestLength below: 51 -> 19).
+constexpr unsigned kReflectMaxFrames = 12u;
 /// HOW MANY CASCADES THE HIT SHADING READS — the shader's `kMaxCascades`, and
 /// the two must agree.
 constexpr unsigned kMaxReflectCascades = 4u;
@@ -245,8 +235,8 @@ constexpr unsigned kMaxReflectCascades = 4u;
 constexpr unsigned kReflectRing = 3u;
 /// THE REFLECTION'S REST (PHOTON-2 1e, fix F1): the gather's rule — a rest mean restarted at the first rest frame and
 /// handed over from the moving history over N frames, then the hold. N is the gather's own function of the history's
-/// length (gatherSettleFramesOf: a 5-code step under one code through the 32-frame EMA, 51 frames).
-unsigned reflectRestLength() { return gatherSettleFramesOf(unsigned(std::lround(1.0f / kReflectHistoryFloor))); }
+/// length (gatherSettleFramesOf: a 5-code step under one code through the MaxFrames-12 window, 19 frames).
+unsigned reflectRestLength() { return gatherSettleFramesOf(kReflectMaxFrames); }
 /// THE REST FRAMES' SAMPLE SEQUENCE: the rest frame's index k past every moving frame's (`frame & 0xFFFF`), so the N
 /// samples a held picture averages are the same N at every stop at one pose — the rest mean is a function of the
 /// scene and the eye, never of the path (the gather's rest mean's law, rq_probe_integrate.comp).
@@ -261,7 +251,7 @@ constexpr unsigned kReflectRestMovers = 16u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 50u;
+constexpr unsigned kReflectBindings = 51u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -324,14 +314,17 @@ constexpr unsigned kReflectReferenceBinding = kReflectSampleBinding + 1u;
 /// ...and THE SCREEN TRACE'S PICTURE (47-49, PHOTON-7 stage 6, the one estimator): the chain's previous picture, the
 /// depth it was drawn at and the object motion (rq_reflect.comp's screenAnswer), or 1 x 1 stand-ins with `screen.x` 0.
 constexpr unsigned kReflectScreenBinding = kReflectReferenceBinding + 1u;   // then 48 the depth, 49 the motion
-static_assert(kReflectBindings == kReflectScreenBinding + 3u,
-              "the screen trace's three are the reflection set's last bindings");
+/// ...and THE EXPOSURE (50, PHOTON-7 stage 6 commit 6): the chain's measured exposure history (a 1 x 1, the multiplier
+/// the tonemapper scaled the last frame by) - the denoiser space is Lumen's on pre-exposed colour
+/// (jah_reflect_denoise.glsl) - or a stand-in where the multiplier is a constant (ReflectParams::denoiser).
+constexpr unsigned kReflectExposureBinding = kReflectScreenBinding + 3u;
+static_assert(kReflectBindings == kReflectExposureBinding + 1u, "the exposure is the reflection set's last binding");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's STATE texel (an unshaded record's distance is
 /// withheld there), the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the ray's direction) and the
 /// air's table, the reflection's fog along its ray — and (PHOTON-2 1b) the reflection's raw SAMPLE a shaded record
 /// becomes.
-constexpr unsigned kHitCompositeBindings = 9u;
+constexpr unsigned kHitCompositeBindings = 8u;
 
 /// A storage image this file owns outright — the temporal mean and the distance
 /// beside it. Not an Ogre texture: nothing but this compute pass ever reads or
@@ -1183,6 +1176,10 @@ private:
     /// the same layout and set — the history clamped to this frame's samples, the sample blended in.
     VkPipeline            mTemporalPipeline = VK_NULL_HANDLE;
     VkShaderModule        mTemporalModule = VK_NULL_HANDLE;
+    /// THE RESOLVE (PHOTON-7 stage 6 commit 6, rq_reflect_resolve.comp): between the write-back and the temporal pass,
+    /// each texel's answer reconstructed from its neighbours' samples - same layout and set.
+    VkPipeline            mResolvePipeline = VK_NULL_HANDLE;
+    VkShaderModule        mResolveModule = VK_NULL_HANDLE;
     /// THE BREAK'S COMPOSE (PHOTON-2 round 2, G2; rq_reflect_compose.comp): on the frame a rest breaks, before the
     /// trace, every texel's composed answer into the half the trace reads - same layout and set.
     VkPipeline            mComposePipeline = VK_NULL_HANDLE;
@@ -1507,12 +1504,10 @@ private:
     VkDescriptorPool      mCompPool = VK_NULL_HANDLE;
     bool                  mCompFailed = false;
     /// 1x1 storage stand-ins in GENERAL (a set's every view must be real): the
-    /// list's two formats, the RGBA16F of the reflection's mean and the gather's
-    /// atlas, and the reflection's state-texel format.
-    ReflectImage mHitDummyIds, mHitDummyColour, mHitDummyDest, mHitDummyState;
-    /// The reflection history's stand-in: a SCREEN image (one layer, an array
-    /// view — what the composite declares since LAYERED-STEREO-1). mHitDummyState
-    /// is one too; mHitDummyColour stays the probe atlas's 2D stand-in.
+    /// list's two formats and the RGBA16F of the gather's atlas.
+    ReflectImage mHitDummyIds, mHitDummyColour, mHitDummyDest;
+    /// The reflection sample's stand-in: a SCREEN image (one layer, an array
+    /// view — what the composite declares since LAYERED-STEREO-1); mHitDummyColour stays the probe atlas's 2D stand-in.
     ReflectImage mHitDummyHist;
     bool mHitDummiesReady = false;
     bool mHitDummiesNeedInit = false;
@@ -2299,8 +2294,7 @@ void RayQueryTier::close() {
         dropBuffer(hv.readback);
     }
     mHits.clear();
-    for (ReflectImage *d : { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyState,
-                             &mHitDummyHist }) {
+    for (ReflectImage *d : { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyHist }) {
         if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
         if (d->image) vkDestroyImage(mVk, d->image, nullptr);
         if (d->memory) vkFreeMemory(mVk, d->memory, nullptr);
@@ -2426,6 +2420,8 @@ void RayQueryTier::close() {
     if (mFilterModule) vkDestroyShaderModule(mVk, mFilterModule, nullptr);
     if (mTemporalPipeline) vkDestroyPipeline(mVk, mTemporalPipeline, nullptr);
     if (mTemporalModule) vkDestroyShaderModule(mVk, mTemporalModule, nullptr);
+    if (mResolvePipeline) vkDestroyPipeline(mVk, mResolvePipeline, nullptr);
+    if (mResolveModule) vkDestroyShaderModule(mVk, mResolveModule, nullptr);
     if (mComposePipeline) vkDestroyPipeline(mVk, mComposePipeline, nullptr);
     if (mComposeModule) vkDestroyShaderModule(mVk, mComposeModule, nullptr);
     if (mReflectPipeLayout) vkDestroyPipelineLayout(mVk, mReflectPipeLayout, nullptr);
@@ -2440,6 +2436,7 @@ void RayQueryTier::close() {
     mReflectModule = VK_NULL_HANDLE;
     mFilterPipeline = VK_NULL_HANDLE; mFilterModule = VK_NULL_HANDLE;
     mTemporalPipeline = VK_NULL_HANDLE; mTemporalModule = VK_NULL_HANDLE;
+    mResolvePipeline = VK_NULL_HANDLE; mResolveModule = VK_NULL_HANDLE;
     mComposePipeline = VK_NULL_HANDLE; mComposeModule = VK_NULL_HANDLE;
     mPointSampler = VK_NULL_HANDLE; mLinearSampler = VK_NULL_HANDLE;
     if (mDescPool) vkDestroyDescriptorPool(mVk, mDescPool, nullptr);
@@ -5200,6 +5197,10 @@ struct ReflectParams {
     /// and thickness, the far copies' query from / to (0 = none).
     float screen[4] = {};
     float screen2[4] = {};
+    /// THE DENOISER SPACE'S EXPOSURE (PHOTON-7 stage 6 commit 6; the resolve's and the temporal pass' `denoiser`): [0] =
+    /// the view's exposure multiplier where it is a constant (a fixed tonemap: the chain's cleared 1 x 1; 1 with no
+    /// tonemap), [1] = 1 when the chain's measured history is bound at binding 50 instead.
+    float denoiser[4] = {};
 };
 
 
@@ -5335,6 +5336,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 47 the previous picture (PHOTON-7 stage 6)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 48 ...the depth it was drawn at
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 49 ...the object motion
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 50 the exposure history (PHOTON-7 stage 6 commit 6)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -5428,6 +5430,27 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         tcpi.layout = mReflectPipeLayout;
         if (createComputePipeline(tcpi, &mTemporalPipeline, "reflect temporal") != VK_SUCCESS) {
             err = "rayquery/reflect: vkCreateComputePipelines (temporal) failed";
+            return false;
+        }
+    }
+    {
+        VkShaderModuleCreateInfo rsmi{};
+        rsmi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        rsmi.codeSize = sizeof(krq_reflectResolveSpv);
+        rsmi.pCode = krq_reflectResolveSpv;
+        if (vkCreateShaderModule(mVk, &rsmi, nullptr, &mResolveModule) != VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateShaderModule (resolve) failed";
+            return false;
+        }
+        VkComputePipelineCreateInfo rcpi{};
+        rcpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        rcpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        rcpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        rcpi.stage.module = mResolveModule;
+        rcpi.stage.pName = "main";
+        rcpi.layout = mReflectPipeLayout;
+        if (createComputePipeline(rcpi, &mResolvePipeline, "reflect resolve") != VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateComputePipelines (resolve) failed";
             return false;
         }
     }
@@ -5583,8 +5606,10 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         const float tr = monitor::lastGpuMs("rq.reflect.trace", kv.first);
         const float fi = monitor::lastGpuMs("rq.reflect.filter", kv.first);
         const float te = monitor::lastGpuMs("rq.reflect.temporal", kv.first);
-        if (tr >= 0.0f || fi >= 0.0f || te >= 0.0f)
-            st.reflectMs = std::max(st.reflectMs, std::max(tr, 0.0f) + std::max(te, 0.0f) + std::max(fi, 0.0f));
+        const float re = monitor::lastGpuMs("rq.reflect.resolve", kv.first);
+        if (tr >= 0.0f || fi >= 0.0f || te >= 0.0f || re >= 0.0f)
+            st.reflectMs = std::max(st.reflectMs, std::max(tr, 0.0f) + std::max(re, 0.0f) + std::max(te, 0.0f) +
+                                                      std::max(fi, 0.0f));
         st.reflectMotionMs = std::max(st.reflectMotionMs, monitor::lastGpuMs("rq.reflect.motion", kv.first));
         // THE HISTORY COUNT (PHOTON-2 stage 0): the view that holds a decoded copy (one view per scene in the
         // stillness door's use; with several, the last in the map's order that holds one).
@@ -6024,7 +6049,19 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                            ? scene->pixelTolerance() * scene->lodBias() * down / float(fullH) : 0.0f;
     }
     pp.knobs2[2] = skyTex ? 1.0f : 0.0f;
-    pp.knobs2[3] = kReflectHistoryFloor;
+    pp.knobs2[3] = 1.0f / float(kReflectMaxFrames);   // the moving memory (the shaders' 1 / knobs2.w)
+    // THE DENOISER SPACE'S EXPOSURE (PHOTON-7 stage 6 commit 6: Lumen's space is on PRE-EXPOSED colour): the multiplier
+    // the tonemapper scales the scene by - the chain's measured history (its 1 x 1: last frame's, read on the GPU, never
+    // a readback), the fixed tonemap's constant, or 1 where nothing tonemaps.
+    Ogre::TextureGpu *exposureTex = nullptr;
+    if (chainD.hdr && !chainD.tonemapFixed) {
+        const Ogre::IdString lum(chain::exposureHistoryTextureName());
+        const auto &names = node->getDefinition()->getNameToChannelMap();
+        if (names.find(lum) != names.end()) exposureTex = node->getDefinedTexture(lum);
+    }
+    pp.denoiser[0] = chainD.hdr && chainD.tonemapFixed
+                         ? chain::fixedExposureColour(chainD.exposureScale, chainD.exposure).r : 1.0f;
+    pp.denoiser[1] = exposureTex ? 1.0f : 0.0f;
     pp.rest[0] = arm(ArmId::GiFreeze, false) ? 1.0f : 0.0f;   // THE GI FREEZE (M1's measuring arm)
     const bool restReference = arm(ArmId::ReflectRestReference, false);
     pp.rest[1] = restReference ? 1.0f : 0.0f;   // THE REST'S 4,096-SAMPLE REFERENCE (R1 (f)'s measuring arm)
@@ -6181,10 +6218,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
         std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
     }
-    // THE EDGE-CLASS OVERLAY (REFLECT-EDGE-2's measuring instrument, the arm
-    // "reflect.edgeClasses": gi.reflect_mover --edge alternates its two modes). Only the
-    // Hits photon view shows it; the reflection's own arithmetic never reads it.
-    pp.alpha[2] = mArms ? float(mArms->value(ArmId::ReflectEdgeClasses)) : 0.0f;
     pp.metal[0] = mArms ? float(mArms->value(ArmId::ReflectMetalDecode)) : float(kReflectMetalDecodeRoughness);
     // THE HIT'S OWN SURFACE (FAR-SUN-2): the hit table, the texture pool, the cloud shadow.
     const HitSurfaceInputs hitSurf = hitSurfaceInputsOf(scene);
@@ -6599,6 +6632,15 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             w[kReflectScreenBinding + i].pImageInfo = &screenImgs[i];
         }
     }
+    // THE EXPOSURE (50, PHOTON-7 stage 6 commit 6): the chain's measured history, or the flat stand-in with
+    // `denoiser.y` 0.
+    VkDescriptorImageInfo exposureImg{};
+    exposureImg.sampler = mPointSampler;
+    exposureImg.imageView = exposureTex ? sampledView(exposureTex) : mDummyFlat.view;
+    exposureImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!exposureImg.imageView) { bail("the exposure binding is null"); return; }
+    w[kReflectExposureBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[kReflectExposureBinding].pImageInfo = &exposureImg;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -6644,6 +6686,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             for (Ogre::TextureGpu *t : { prevColourTex, prevDepthTex, velocityTex })
                 solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                          Ogre::ResourceAccess::Read, computeStage);
+        if (exposureTex)
+            solver.resolveTransition(trans, exposureTex, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < voxCount; ++c)
             for (int axis = 0; axis < kRayVoxelKinds; ++axis)
                 if (vox[c][axis])
@@ -7346,10 +7391,27 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &meanReady, 0, nullptr, 0,
                              nullptr);
     }
-    // THE TEMPORAL PASS (PHOTON-2 1b): the carried history clamped to this frame's samples and the sample blended in —
-    // after the write-back (records' samples are complete), before the filter reads the mean's neighbours. A HELD
-    // frame (1e) has no sample: the filter composites the held mean.
+    // THE RESOLVE (PHOTON-7 stage 6 commit 6): each texel's answer reconstructed from its own sample and its neighbours'
+    // - after the write-back (every sample complete), before the temporal pass reads its neighbourhood. THE TEMPORAL
+    // PASS (PHOTON-2 1b; Lumen's since commit 6): the histories reprojected, clamped to the resolved neighbourhood and
+    // blended - before the filter reads the mean's neighbours. A HELD frame (1e) has no sample: the filter composites
+    // the held mean.
     if (!rv.held) {
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mResolvePipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
+                            &rv.sets[ring], 0, nullptr);
+    {
+        monitor::CacheScope resolveRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.resolve", mRs, key);
+        vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, rv.layers);   // z = the eye
+    }
+    {
+        VkMemoryBarrier resolved{};
+        resolved.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        resolved.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        resolved.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                             &resolved, 0, nullptr, 0, nullptr);
+    }
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTemporalPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                             &rv.sets[ring], 0, nullptr);
@@ -8876,7 +8938,6 @@ bool RayQueryTier::ensureHitDummies(std::string &err) {
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32B32A32_UINT, mHitDummyIds, err)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, mHitDummyColour, err)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R32_UINT, mHitDummyDest, err)) return false;
-    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32_UINT, mHitDummyState, err, 1u)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, mHitDummyHist, err, 1u)) return false;
     mHitDummiesReady = true;
     mHitDummiesNeedInit = true;
@@ -8886,10 +8947,9 @@ bool RayQueryTier::ensureHitDummies(std::string &err) {
 void RayQueryTier::initHitDummies(VkCommandBuffer cmd) {
     if (!mHitDummiesNeedInit || !cmd) return;
     mHitDummiesNeedInit = false;
-    VkImageMemoryBarrier b[5] = {};
-    ReflectImage *imgs[5] = { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyState,
-                              &mHitDummyHist };
-    for (int i = 0; i < 5; ++i) {
+    VkImageMemoryBarrier b[4] = {};
+    ReflectImage *imgs[4] = { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyHist };
+    for (int i = 0; i < 4; ++i) {
         b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         b[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         b[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -8901,7 +8961,7 @@ void RayQueryTier::initHitDummies(VkCommandBuffer cmd) {
         b[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     }
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 5, b);
+                         0, 0, nullptr, 0, nullptr, 4, b);
 }
 
 void RayQueryTier::hitStandIns(HitListBinding &out) {
@@ -9273,11 +9333,10 @@ bool RayQueryTier::makeCompositePipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 1 the list's buffer (counters + aux)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 the destinations
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 3 the decoded radiance
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 the reflection's state texel
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 5 the gather's atlas
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 6 the list's records (PHOTON-I-1 fix 5)
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 7 the air's table
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 8 the reflection's raw sample (PHOTON-2 1b)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 the gather's atlas
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 5 the list's records (PHOTON-I-1 fix 5)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 6 the air's table
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 7 the reflection's sample (PHOTON-2 1b; its hit distance in w)
     };
     for (unsigned i = 0; i < kHitCompositeBindings; ++i) {
         b[i].binding = i;
@@ -9352,14 +9411,12 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
             return;
         }
     }
-    // THE DESTINATIONS: the reflection's state texel of THIS frame (the half the
-    // trace wrote) and its sample, the gather's atlas the trace wrote — or stand-ins
+    // THE DESTINATIONS: the reflection's sample of THIS frame and the gather's atlas the trace wrote — or stand-ins
     // with the consumer's flag down (its records, if any, are skipped).
-    VkImageView stateView = mHitDummyState.view, atlasView = mHitDummyColour.view;
+    VkImageView atlasView = mHitDummyColour.view;
     VkImageView sampleView = mHitDummyHist.view;   // the rgba16f stand-in shape
     bool reflectBound = false, gatherBound = false;
     if (auto rit = mReflects.find(key); rit != mReflects.end() && rit->second.finishPending) {
-        stateView = rit->second.state[rit->second.curIdx].view;
         sampleView = rit->second.sample.view;
         reflectBound = true;
     }
@@ -9384,7 +9441,7 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     ub.buffer = hv.params[ring].buffer;
     ub.range = sizeof(CompositeParams);
     const VkDescriptorBufferInfo bufInfo = rawBufferInfo(hv.buf);
-    VkDescriptorImageInfo sampled[2] = {}, storage[2] = {};
+    VkDescriptorImageInfo sampled[2] = {}, storage{};
     Ogre::TextureGpu *const src[2] = { hv.dest, hv.radiance };
     for (int i = 0; i < 2; ++i) {
         sampled[i].sampler = mPointSampler;
@@ -9392,12 +9449,9 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
         sampled[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         if (!sampled[i].imageView) return;
     }
-    const VkImageView dst[2] = { stateView, atlasView };
-    for (int i = 0; i < 2; ++i) {
-        storage[i].imageView = dst[i];
-        storage[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        if (!storage[i].imageView) return;
-    }
+    storage.imageView = atlasView;
+    storage.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!storage.imageView) return;
     VkWriteDescriptorSet w[kHitCompositeBindings] = {};
     for (unsigned i = 0; i < kHitCompositeBindings; ++i) {
         w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -9413,11 +9467,9 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
         w[2 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[2 + i].pImageInfo = &sampled[i];
     }
-    for (int i = 0; i < 2; ++i) {
-        w[4 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        w[4 + i].pImageInfo = &storage[i];
-    }
-    // THE RECORDS (6) and THE AIR'S TABLE (7): the reflection's fog along its ray.
+    w[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[4].pImageInfo = &storage;
+    // THE RECORDS (5) and THE AIR'S TABLE (6): the reflection's fog along its ray.
     VkDescriptorImageInfo idsImg{}, fogImg{};
     {
         Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
@@ -9433,16 +9485,16 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     fogImg.imageView = fogAerial ? sampledView(fogAerial) : mDummyVolume.view;
     fogImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (!fogImg.imageView) return;
-    w[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    w[6].pImageInfo = &idsImg;
-    w[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    w[7].pImageInfo = &fogImg;
+    w[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[5].pImageInfo = &idsImg;
+    w[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[6].pImageInfo = &fogImg;
     VkDescriptorImageInfo sampleImg{};
     sampleImg.imageView = sampleView;
     sampleImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     if (!sampleImg.imageView) return;
-    w[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    w[8].pImageInfo = &sampleImg;
+    w[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[7].pImageInfo = &sampleImg;
     vkUpdateDescriptorSets(mVk, kHitCompositeBindings, w, 0, nullptr);
 
     {

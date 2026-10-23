@@ -227,6 +227,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_fog_along.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_state.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_draw.glsl"
                 "${JAH_RQ_FORK_BRDF}"
                 "${JAH_RQ_SPEC_ALBEDO}"
         COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
@@ -289,6 +290,7 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_state.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_draw.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
         COMMENT "Compiling the reflection filter/composite compute shader at SPIR-V 1.4"
         VERBATIM)
@@ -303,8 +305,25 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_state.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reproject.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_rest.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_draw.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_denoise.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
         COMMENT "Compiling the reflection temporal compute shader at SPIR-V 1.4"
+        VERBATIM)
+    # ...and the reflection's RESOLVE (PHOTON-7 stage 6 commit 6): each texel reconstructed from its neighbours' samples.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                --vn krq_reflectResolveSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_resolve.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_resolve.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_state.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_draw.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_reflect_denoise.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_geometric_normal.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include/jah_rq_finite.glsl"
+        COMMENT "Compiling the reflection resolve compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and THE BREAK'S COMPOSE (PHOTON-2 round 2, G2): the rest's answer composed into the half the trace reads.
     add_custom_command(
@@ -541,6 +560,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_compose_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"

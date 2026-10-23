@@ -1065,10 +1065,6 @@ constexpr ArmDef kArms[] = {
       "Alpha-tested (cut-out) geometry traced as cut-out by the reflection, the gather and the "
       "sun contact (REFLECT-MOVERS-2's alpha table). 0 = every cut-out traced opaque. "
       "gi.rt_alpha_tested's cost arm. Was JAH_R6_NO_ALPHA (a per-frame read)." },
-    { ArmId::ReflectEdgeClasses, 0.0, 0.0, 2.0,
-      "The Hits photon view's history-class overlay (REFLECT-EDGE-2's instrument): 1 = mover "
-      "hit / restart / reflected-image path, 2 = the new count's bins; 0 = off. Nothing but "
-      "that view reads it. gi.reflect_mover --edge. Was JAH_R7_EDGE_CLASSES (a per-frame read)." },
     { ArmId::ReflectMonoEyes, 0.0, 0.0, 1.0,
       "A stereo view's trace reconstructs with the MONO basis (the pre-REFLECT-VR-1 arm, "
       "wrong for one eye by construction): the A/B that proves the per-eye basis. Was "

@@ -1,0 +1,389 @@
+#version 460
+// PHOTON-7 STAGE 6 (commit 6) — THE REFLECTION'S RESOLVE: each trace texel's answer RECONSTRUCTED from its own sample and
+// its neighbours' - Lumen's BRDF-reweighted reconstruction (LumenReflectionResolve.usf's role; ours derived, the formula
+// is not in the facts file: PREFLIGHT_R section 4) - between the hit write-back (every sample complete) and the temporal
+// pass, which reads its neighbourhood and its current answer from it. It writes TRACE texels into `jahSsrReflection` as
+// SCRATCH (rgb = the resolved radiance, linear; w = the resolved hit distance - the nearest contributing hit, Lumen's
+// MinRayHitT: the virtual point the temporal pass' hit history reprojects; 0 = no answer this frame); the spatial filter
+// writes the full-resolution picture over it.
+//
+// THE ESTIMATOR. A neighbour's sample is a ray of ITS lobe; its radiance is reused for this texel weighted by how likely
+// this texel's draw was to give that direction against how likely the neighbour's was - the TRUE densities of the two
+// draws (READ_B Q2): the GGX visible-normal sample FOLDED above the drawn surface's geometric plane g (READ_A W4), so
+//     q( L ) = pv( L ) + pv( R_g L )   (R_g the reflection about the plane; pv the VNDF density, 0 under the shading
+//                                       plane) for L above g, 0 below,
+// the neighbour's taken under its mixture (the centre ray with probability p_j: a VNDF draw's density is (1 - p_j) q_j),
+// self-normalised over the samples kept (this texel's own at 1 / (1 - p)):
+//     out = sum_j w_j D( c_j ) / sum_j w_j,   w_j = plane_j q_p( L_j ) / ( ( 1 - p_j ) q_j( L_j ) )
+// in the denoiser space (jah_reflect_denoise.glsl), converted back. A neighbour's direction is RE-DERIVED from its
+// per-pixel seed and its geometric normal (jah_reflect_draw.glsl, jah_geometric_normal.glsl: the trace's own texts) - no
+// direction is stored. Its CENTRE draws and its MIRROR FALLBACKS are deltas and are never reweighted as densities (the
+// state's centre and delta bits): left out. A texel whose own draw was the centre ray keeps its own sample (the centre
+// ray is its lobe's integral). The kernel is Lumen's spatial reach on the lobe, 8 saturate( 8 r ) pixels, at 5
+// neighbours (full resolution) or 3 (half), placed by the texel's per-frame seed on a concentric disk; the plane
+// weight is the spatial pass' (relative plane distance, Lumen's scale 10000). AT REST the rest mean takes each texel's
+// raw samples (unbiased, PF1B 7c): the resolve hands its own sample through.
+//
+// COMPILED AT BUILD TIME by glslangValidator at --target-env spirv1.4, like the trace beside it; the same descriptor set
+// and the same Params (declared through `denoiser`).
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+const int kMaxCascades = 4;
+layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+
+layout( set = 0, binding = 1 ) uniform Params
+{
+	/// xyz = the camera in world space, w = 1 for a perspective camera and 0
+	/// for an orthographic one (the reconstruction differs — see worldAt()).
+	vec4 camPos;
+	/// The world-space ray basis: worldDir(u,v) = rayTL + rayRight*u + rayDown*v,
+	/// scaled so its component along the camera's forward axis is exactly 1.
+	/// Then `camPos + worldDir * viewDistance` is the surface. Under an
+	/// orthographic camera rayTL/rayRight/rayDown carry the image PLANE instead
+	/// (an offset, not a ray) and `fwd` is the one view direction.
+	vec4 rayTL;
+	vec4 rayRight;
+	vec4 rayDown;
+	vec4 fwd;
+	/// x = A, y = B of Camera::getProjectionParamsAB() (reverse-Z safe),
+	/// z = the far plane (the orthographic depth scale), w = the roughness
+	/// gate's FEATHER half-width (kRayReflectFeather).
+	vec4 projParams;
+	/// xy = the trace resolution in pixels, zw = the full-resolution size of
+	/// jahSsrReflection.
+	vec4 resolution;
+	/// x = the roughness gate — the PROJECT's dial, not a renderer constant:
+	/// above it the probe/field photograph is a good enough integral of a wide
+	/// lobe and a ray is spent for nothing. The transition is FEATHERED over
+	/// projParams.w either side of it. y = the ray's maximum length in
+	/// world units, z = the frame index (the sample sequence's only input),
+	/// w = how many cascades are bound.
+	vec4 knobs;
+	/// x = THE REST FRAME k, 1..N on a frame the view rests (PHOTON-2 1e, fix F1: the gather's rule — a rest mean handed
+	/// over from the frozen moving history, rq_reflect_temporal.comp), 0 while it moves, y = the
+	/// drawn cut's error per unit of view distance (the view's pixel tolerance x the LOD bias x one full-resolution
+	/// pixel; world units under an orthographic camera) - rq_reflect.comp's RAY ORIGIN,
+	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
+	/// weight (the floor on 1/n — how long the temporal mean remembers).
+	vec4 knobs2;
+	/// The colour an escaping ray reads when no sky cubemap is bound.
+	vec4 skyColour;
+	/// The VIEW space's three axes in world space (the camera's orientation as
+	/// a rotation): what turns the G-buffer's view-space normal back into one.
+	vec4 viewAxisX;
+	vec4 viewAxisY;
+	vec4 viewAxisZ;
+	/// Per cascade: xyz = the voxel box's world origin, w = the box's largest
+	/// side in world units (the cell size times the resolution).
+	vec4 voxelOrigin[kMaxCascades];
+	/// Per cascade: xyz = 1 / the voxel box's world size, w = one cell in world
+	/// units (the sample point's bias along the ray).
+	vec4 voxelInvSize[kMaxCascades];
+	/// THE PREVIOUS FRAME'S CAMERA, in exactly the same five numbers as this
+	/// frame's (camPos, rayTL, rayRight, rayDown, fwd). Not a view-projection
+	/// matrix, deliberately: inverting the basis above is the same arithmetic
+	/// forwards and backwards, so the reprojection cannot disagree with the
+	/// reconstruction about a handedness, a y-flip or a depth convention — and
+	/// each of those is a silent half-pixel-to-whole-image error that only shows
+	/// up as a smear while the camera moves.
+	vec4 prevCamPos;
+	vec4 prevRayTL;
+	vec4 prevRayRight;
+	vec4 prevRayDown;
+	vec4 prevFwd;
+	/// ---- THE SECOND EYE (lane REFLECT-VR-1, LAYERED-STEREO-1) ------------
+	/// x = 1 when this target carries TWO EYES, one per LAYER of every screen
+	/// image here (the dispatch's z). Then the five basis vectors above are the
+	/// LEFT eye's and the five below the right eye's, each over its own layer
+	/// as a 0..1 image; with x = 0 the block below is unread and the basis
+	/// above is the one camera's, exactly as before. One dispatch, one
+	/// descriptor set, one history ring: the eye is the layer (gEye).
+	///
+	/// y = THE VIEW'S AGE: how many consecutive frames this history has been
+	/// written (0 on a first frame, a resize, a scene bind): the filter's young-VIEW fade (a two-frame screenshot).
+	/// z = 1 writes THE PHOTON VIEW'S Hits overlay (binding 37, PHOTON-VIEW-1).
+	/// w = THE REST'S LENGTH N (PHOTON-2 fix F1): the frames the rest mean is handed over in, the gather's own
+	/// settleFramesOf(the reflection's 32-frame history) — after which the view holds.
+	vec4 stereo;
+	vec4 camPos2;
+	vec4 rayTL2;
+	vec4 rayRight2;
+	vec4 rayDown2;
+	vec4 fwd2;
+	vec4 prevCamPos2;
+	vec4 prevRayTL2;
+	vec4 prevRayRight2;
+	vec4 prevRayDown2;
+	vec4 prevFwd2;
+	/// ---- THE SURFACE CACHE (PHOTON-CARDS-2) ------------------------------
+	/// x = the instance-table entries bound (0 = the scene holds no cache: the
+	/// card read declines every hit and the voxels answer, as before), y = the
+	/// card records bound, z = the footprint gate in card texels
+	/// (Types.h kCardFootprintTexels), w = the per-slot geometry-row entries
+	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
+	vec4 cards;
+	/// ---- THE HIT RECORD (PHOTON-HIT-SHADE-1) ------------------------------
+	/// hitList: x = the list's capacity in records, y = its grid width, z = the
+	/// GPU scene instance entries bound (the flags a hit reads: mover, rigged),
+	/// w = 1 when the list is bound. hitSun: xyz = towards the sun, w = 1 when the
+	/// pass has one. hitSun2: x = the sun ray's TLAS mask (the casters), y = its
+	/// minimum lift off a hit, z = its length, w = the far copies' lift (unused
+	/// here: a reflection traces the near copies only).
+	vec4 hitList;
+	vec4 hitSun;
+	vec4 hitSun2;
+	/// ---- A MOVING OBJECT (REFLECT-MOVERS-1) --------------------------------
+	/// x = 1 when the VIEW'S ID IMAGE is bound (binding 38, the visibility
+	/// buffer's `jahAtomIds`: which slot drew each pixel) — then a pixel on a
+	/// moving slot reprojects through that slot's two poses (jah_reproject.glsl).
+	/// 0 = no id pass on this chain (a stereo chain, the split off): every
+	/// surface takes the camera path. yz = the id image's size in pixels.
+	/// w = 1 with the lane's hit-motion rules on, 2 when a mover also moved in the
+	/// last two frames (the departure rule's gate), 3 when a POSE moved in the last
+	/// two frames (SKINNED-VELOCITY-1: the pixels no moving Atom item drew are
+	/// identified through the TLAS; the arm "reflect.posed" off keeps it at 2 — the paired
+	/// cost arm); 0 = the arm "reflect.motion" off: the camera-only
+	/// history of before.
+	vec4 motion;
+	/// THE ALPHA TABLE (REFLECT-MOVERS-2, jah_rq_alpha.glsl): xy = its device
+	/// address, float bits (0 = none: the rays stay opaque). z: unused (the edge-class overlay is deleted with the
+	/// moving hit's history, PHOTON-7 stage 6). w = 1: the hit's mover gate runs.
+	vec4 alpha;
+	/// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong's eight
+	/// (jah_fog_along.glsl states them).
+	vec4 fog[8];
+	/// THE METAL HIT'S ROUTE (REFLECT-FIX-1): x = the reflector's perceptual roughness
+	/// below which a hit on a metal is decoded; above it the voxel store answers it.
+	vec4 metal;
+	/// THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): xy = the hit table's device
+	/// address (float bits; 0 = none), z = 1 the texture pool is bound, w = 1 the cloud layer
+	/// shades the sun; then the cloud shadow's map and sun (jah_cloud_shadow.glsl).
+	vec4 hitTable;
+	vec4 cloudMap;
+	vec4 cloudSun;
+	/// THE REST BLOCK (PHOTON-2 round 2): x = 1 = THE GI FREEZE (the arm "gi.freeze", M1's measuring arm: the temporal
+	/// pass keeps every moving history as carried - no new sample, no clamp; a fixed estimator takes its ray;
+	/// rq_reflect_temporal.comp).
+	vec4 rest;
+	/// THE REST BREAKS PER TEXEL FOR MOVERS (PHOTON-2 round 2, G6): x = how many moved instances' SWEPT BOXES follow
+	/// (their bounds this frame and last, joined; at most 16 - more moved breaks the view's rest whole, on the host);
+	/// a resting texel resumes when its ray, its lobe's mean segment or its hit's sun leg crosses one.
+	vec4 restMovers;
+	vec4 restMoverBox[32];   // per box: [2i] = min, [2i + 1] = max (xyz)
+	/// THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6): screen.x = 1 when the SCREEN TRACE runs (the chain's screen
+	/// sources are bound: PostFxDesc::reflectSources Both or Screen, a mono view), y = 1 for THE SCREEN ALONE (Screen: a
+	/// miss is no sample - no ray follows it), z = the march's step count, w = its phase rule (PostFxDesc::ssrMarchPhase);
+	/// screen2.x = the march's length (ssrMaxDistance), y = its thickness (ssrThickness), z = where the FAR COPIES' query
+	/// starts (the near length less the far copies' widest hand-over gap, the gather's rule), w = where it ends (the far
+	/// plane; 0 = no far query).
+	vec4 screen;
+	vec4 screen2;
+	/// THE DENOISER SPACE'S EXPOSURE (PHOTON-7 stage 6 commit 6, jah_reflect_denoise.glsl: Lumen's space is on
+	/// PRE-EXPOSED colour): x = the view's exposure multiplier where it is a constant (a fixed tonemap: the chain's
+	/// cleared 1x1; 1 without a tonemap), y = 1 when the chain's MEASURED history is bound at binding 50 instead (the
+	/// multiplier the tonemapper scaled the last frame by).
+	vec4 denoiser;
+} p;
+
+int gEye = 0;
+layout( set = 0, binding = 2 ) uniform sampler2DArray gBufNormals;
+layout( set = 0, binding = 3 ) uniform sampler2DArray gBufShadowRoughness;
+layout( set = 0, binding = 4 ) uniform sampler2DArray sceneDepth;
+/// THE SCRATCH (trace texels) - the spatial filter writes the picture over it.
+layout( rgba16f, set = 0, binding = 5 ) uniform writeonly image2DArray ssrReflection;
+layout( rg32ui, set = 0, binding = 9 ) uniform readonly uimage2DArray stateCur;
+/// THIS FRAME'S SAMPLES (the trace's, the write-back's): rgb = the radiance, w = the hit distance (> 0), 0 = no sample.
+layout( rgba16f, set = 0, binding = 45 ) uniform readonly image2DArray reflectSample;
+/// THE EXPOSURE HISTORY (the chain's measured 1 x 1; a stand-in where p.denoiser.y = 0).
+layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
+
+#include "jah_rq_finite.glsl"
+#include "jah_reflect_state.glsl"
+#include "jah_reflect_draw.glsl"
+/// THE GEOMETRIC NORMAL (jah_geometric_normal.glsl): the trace's own reconstruction, through this eye.
+struct EyeImage { vec3 camPos; float perspective; vec3 rayTL; vec3 rayRight; vec3 rayDown; vec3 fwd; };
+EyeImage gNormalEye;
+float viewDistance( float rawDepth );
+vec3 worldAt( EyeImage e, vec2 uv, float dist );
+#define JAH_GN_RAW( q ) texelFetch( sceneDepth, ivec3( ( q ), gEye ), 0 ).x
+#define JAH_GN_WORLD( q, raw ) worldAt( gNormalEye, ( vec2( q ) + 0.5 ) / vec2( fullRes ), viewDistance( raw ) )
+#include "jah_geometric_normal.glsl"
+float gExposure = 1.0;
+#define JAH_DENOISE_EXPOSURE gExposure
+#include "jah_reflect_denoise.glsl"
+
+float viewDistance( float rawDepth )
+{
+	if( p.camPos.w < 0.5 )
+		return abs( ( rawDepth - p.projParams.x ) / p.projParams.y );
+	return p.projParams.y / ( rawDepth - p.projParams.x );
+}
+EyeImage eyeNow( int eye )
+{
+	EyeImage e;
+	if( eye == 1 ) { e.camPos = p.camPos2.xyz; e.perspective = p.camPos2.w; e.rayTL = p.rayTL2.xyz;
+					 e.rayRight = p.rayRight2.xyz; e.rayDown = p.rayDown2.xyz; e.fwd = p.fwd2.xyz; }
+	else { e.camPos = p.camPos.xyz; e.perspective = p.camPos.w; e.rayTL = p.rayTL.xyz;
+		   e.rayRight = p.rayRight.xyz; e.rayDown = p.rayDown.xyz; e.fwd = p.fwd.xyz; }
+	return e;
+}
+vec3 worldAt( EyeImage e, vec2 uv, float dist )
+{
+	const vec3 plane = e.rayTL + e.rayRight * uv.x + e.rayDown * uv.y;
+	if( e.perspective < 0.5 )
+		return e.camPos + plane + e.fwd * dist;
+	return e.camPos + plane * dist;
+}
+/// THE EXPOSURE MULTIPLIER the denoiser space is taken at (p.denoiser): the measured history's texel, or the constant.
+float exposureOf()
+{
+	const float e = p.denoiser.y > 0.5 ? texelFetch( jahExposure, ivec2( 0 ), 0 ).x : p.denoiser.x;
+	return finite1( e ) && e > 0.0 ? e : 1.0;
+}
+/// A UNIFORM POINT OF THE UNIT DISK (Shirley-Chiu's concentric map).
+vec2 concentricDisk( vec2 u )
+{
+	const vec2 o = 2.0 * u - 1.0;
+	if( o.x == 0.0 && o.y == 0.0 )
+		return vec2( 0.0 );
+	float r, th;
+	if( abs( o.x ) > abs( o.y ) ) { r = o.x; th = 0.78539816 * ( o.y / o.x ); }
+	else { r = o.y; th = 1.57079633 - 0.78539816 * ( o.x / o.y ); }
+	return r * vec2( cos( th ), sin( th ) );
+}
+
+/// ONE TRACE TEXEL'S SURFACE, as the trace reconstructed it (its block's centre pixel, read exactly): its point, its
+/// shading normal N, its geometric normal g (the trace's fold plane), the viewer, the lobe.
+struct Surface { bool ok; vec3 world; vec3 N; vec3 g; vec3 V; float alpha; float dist; float eyeDist; };
+Surface surfaceAt( ivec2 t, ivec2 scale, ivec2 fullRes, EyeImage e )
+{
+	Surface s;
+	s.ok = false;
+	const ivec2 px = jahTexelPixel( t, scale, fullRes );
+	const float raw = texelFetch( sceneDepth, ivec3( px, gEye ), 0 ).x;
+	vec3 n = texelFetch( gBufNormals, ivec3( px, gEye ), 0 ).xyz * 2.0 - 1.0;
+	if( !( raw > 0.0 && raw < 1.0 ) || dot( n, n ) < 1e-6 )
+		return s;
+	n = normalize( n );
+	s.dist = viewDistance( raw );
+	s.world = worldAt( e, jahTexelUv( t, scale, fullRes ), s.dist );
+	s.N = normalize( p.viewAxisX.xyz * n.x + p.viewAxisY.xyz * n.y + p.viewAxisZ.xyz * n.z );
+	s.V = e.perspective < 0.5 ? -e.fwd : normalize( e.camPos - s.world );
+	s.alpha = max( texelFetch( gBufShadowRoughness, ivec3( px, gEye ), 0 ).y * 0.999 + 0.001, 1e-6 );
+	s.eyeDist = length( s.world - e.camPos );
+	s.ok = dot( s.N, s.V ) > 0.0;
+	gNormalEye = e;
+	s.g = s.ok ? jahGeometricNormal( px, fullRes, raw, s.world, s.N, s.V ) : s.N;
+	return s;
+}
+/// THE FOLDED DRAW'S DENSITY q( L ) at a surface: pv( L ) + pv( R_g L ) above its geometric plane, 0 below.
+float foldedPdf( Surface s, vec3 L )
+{
+	const float a = dot( L, s.g );
+	if( !( a > 0.0 ) )
+		return 0.0;
+	const float alpha = max( s.alpha, 1e-4 );
+	return jahGgxVndfPdf( s.N, s.V, L, alpha ) + jahGgxVndfPdf( s.N, s.V, L - 2.0 * a * s.g, alpha );
+}
+
+/// The plane weight's scale (Lumen's r.Lumen.Reflections.BilateralFilter.DepthWeightScale) and the kernel's.
+const float kPlaneWeightScale = 10000.0;
+const float kKernelRadius = 8.0;
+
+void main()
+{
+	const ivec2 traceRes = ivec2( p.resolution.xy );
+	const ivec2 tc = ivec2( gl_GlobalInvocationID.xy );
+	if( any( greaterThanEqual( tc, traceRes ) ) )
+		return;
+	gEye = int( gl_GlobalInvocationID.z );
+	gExposure = exposureOf();
+	const ivec2 fullRes = ivec2( p.resolution.zw );
+	const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
+	const JahReflectState st = jahStateUnpack( imageLoad( stateCur, ivec3( tc, gEye ) ).xy );
+	const vec4 own = st.surfDist > 0.0 ? imageLoad( reflectSample, ivec3( tc, gEye ) ) : vec4( 0.0 );
+	const bool ownValid = own.w > 0.0 && finite3( own.xyz );
+	// THE TEXEL'S OWN SAMPLE WHOLE: a declined texel (none), the rest (its raw samples), the centre ray.
+	if( !( st.surfDist > 0.0 ) || p.knobs2.x >= 0.5 || st.centre )
+	{
+		imageStore( ssrReflection, ivec3( tc, gEye ), ownValid ? own : vec4( 0.0 ) );
+		return;
+	}
+	const EyeImage e = eyeNow( gEye );
+	const Surface c = surfaceAt( tc, scale, fullRes, e );
+	if( !c.ok )
+	{
+		imageStore( ssrReflection, ivec3( tc, gEye ), ownValid ? own : vec4( 0.0 ) );
+		return;
+	}
+	const bool persp = e.perspective > 0.5;
+	const float texelAngle = length( e.rayDown ) / float( traceRes.y );
+	const uint frame = uint( p.knobs.z );
+	const float pc = jahReflectCentreChance( c.alpha, st.hitT, c.eyeDist, texelAngle, persp );
+	vec3 sum = vec3( 0.0 );
+	float sumW = 0.0;
+	float minT = 3.0e38;
+	// (this texel's own sample counts whatever its direction was: it is its own estimate - the delta bit only keeps a
+	// direction that has no density out of a NEIGHBOUR's ratio)
+	if( ownValid )
+	{
+		const float w = 1.0 / max( 1.0 - pc, 1e-3 );
+		sum += jahToDenoise( clamp( own.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) * w;
+		sumW += w;
+		minT = own.w;
+	}
+	// THE KERNEL: Lumen's reach on the lobe, in trace texels.
+	const float radius = kKernelRadius * clamp( 8.0 * sqrt( c.alpha ), 0.0, 1.0 ) / float( scale.x );
+	const int samples = scale.x > 1 ? 3 : 5;
+	if( radius >= 1.0 )
+	{
+		const uint seed = jahReflectPcg( uint( tc.x ) * 73856093u ^ uint( tc.y ) * 19349663u ^ frame * 83492791u ^
+										 uint( gEye ) * 2654435761u );
+		for( int k = 0; k < samples; ++k )
+		{
+			const uint h = jahReflectPcg( seed + uint( k ) * 0x9E3779B9u );
+			const vec2 u = vec2( float( h & 0xFFFFu ), float( h >> 16u ) ) / 65536.0;
+			const ivec2 q = tc + ivec2( round( concentricDisk( u ) * radius ) );
+			if( q == tc || any( lessThan( q, ivec2( 0 ) ) ) || any( greaterThanEqual( q, traceRes ) ) )
+				continue;
+			const JahReflectState sq = jahStateUnpack( imageLoad( stateCur, ivec3( q, gEye ) ).xy );
+			if( !( sq.surfDist > 0.0 ) || sq.centre || sq.delta )
+				continue;
+			const vec4 smp = imageLoad( reflectSample, ivec3( q, gEye ) );
+			if( !( smp.w > 0.0 ) || !finite3( smp.xyz ) )
+				continue;
+			const Surface n = surfaceAt( q, scale, fullRes, e );
+			if( !n.ok )
+				continue;
+			// THE PLANE WEIGHT: the neighbour's distance off this texel's plane, relative to the depth.
+			const float planeRel = abs( dot( n.world - c.world, c.N ) ) / max( c.dist, 1e-4 );
+			const float wPlane = exp2( -kPlaneWeightScale * planeRel * planeRel );
+			if( wPlane < 1e-3 )
+				continue;
+			// ITS DIRECTION, re-derived from its seed and folded about its own geometric plane as the trace folded it (a
+			// VNDF draw: the state says so), and the two true densities.
+			bool qc, qv;
+			vec3 Lq = jahReflectDraw( n.N, n.V, n.alpha, q, frame, -1.0, qc, qv );
+			if( !qv )
+				continue;
+			if( dot( Lq, n.g ) < 0.0 )
+				Lq -= 2.0 * dot( Lq, n.g ) * n.g;
+			const float pq = jahReflectCentreChance( n.alpha, sq.hitT, n.eyeDist, texelAngle, persp );
+			const float pdfQ = ( 1.0 - pq ) * foldedPdf( n, Lq );
+			const float pdfC = foldedPdf( c, Lq );
+			if( !( pdfQ > 0.0 ) || !( pdfC > 0.0 ) )
+				continue;
+			const float w = wPlane * pdfC / pdfQ;
+			if( !finite1( w ) )
+				continue;
+			sum += jahToDenoise( clamp( smp.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) * w;
+			sumW += w;
+			minT = min( minT, smp.w );
+		}
+	}
+	imageStore( ssrReflection, ivec3( tc, gEye ),
+				sumW > 0.0 ? vec4( jahFromDenoise( sum / sumW ), minT ) : vec4( 0.0 ) );
+}

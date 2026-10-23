@@ -9,19 +9,17 @@
 // scatters that radiance back to where each ray's answer lives, through the SAME
 // arithmetic a card- or voxel-lit hit takes:
 //
-//   * THE REFLECTION: the texel's SAMPLE of this frame (PHOTON-2 1b). The trace
-//     wrote the texel's history CARRIED (the previous radiance; its seeded count,
-//     this frame's distances and estimator in the state texel, jah_reflect_state.glsl)
-//     and left the sample empty; here the decoded radiance becomes that sample
-//     (w = 1). The temporal pass (rq_reflect_temporal.comp) runs after this and
-//     blends it like a traced one.
+//   * THE REFLECTION: the texel's SAMPLE of this frame (PHOTON-2 1b; PHOTON-7 stage 6:
+//     rgb = the radiance, w = the hit's distance). The trace left the sample empty;
+//     here the decoded radiance becomes that sample - the resolve and the temporal
+//     pass, after this, take it like a traced one.
 //   * THE GATHER: the ray's atlas texel, radiance x the texel re-weight from the
 //     record (rq_probe_gather.comp's `reweight`), its distance kept.
 //
 // A record the decode could not shade (w = 0: a material HlmsAtom serves no twin
 // for, a stale slot) takes the dropped record's answer: the reflection's sample
-// stays empty (its history kept) and this frame's distance is withheld where it
-// carried none (the state's noHistory); the gather's ray stays at zero radiance.
+// stays empty (no sample: the resolve and the temporal pass keep the texel's
+// history); the gather's ray stays at zero radiance.
 //
 // ONE THREAD PER RECORD SLOT, records [0, min( count, capacity )). Every record owns
 // its destination texel (a texel traces one ray per frame), so nothing races.
@@ -45,16 +43,13 @@ layout( set = 0, binding = 0 ) uniform Params
 layout( std430, set = 0, binding = 1 ) readonly buffer JahHitBuf { uint jahHitBuf[]; };
 layout( set = 0, binding = 2 ) uniform usampler2D jahHitDest;
 layout( set = 0, binding = 3 ) uniform sampler2D jahHitRadiance;
-/// THE REFLECTION'S STATE TEXEL (jah_reflect_state.glsl): an unshaded record's distance is withheld here.
-layout( rg32ui, set = 0, binding = 4 ) uniform uimage2DArray stateCur;
-layout( rgba16f, set = 0, binding = 5 ) uniform image2D probeAtlas;
+layout( rgba16f, set = 0, binding = 4 ) uniform image2D probeAtlas;
 /// The list's records (the ray's direction, jah_rq_hit_record.glsl) and the air's
 /// table — the reflection's fog along its ray (PHOTON-I-1 fix 5).
-layout( rgba32ui, set = 0, binding = 6 ) uniform readonly uimage2D jahHitIds;
-layout( set = 0, binding = 7 ) uniform sampler3D fogAerial;
+layout( rgba32ui, set = 0, binding = 5 ) uniform readonly uimage2D jahHitIds;
+layout( set = 0, binding = 6 ) uniform sampler3D fogAerial;
 /// THE REFLECTION'S SAMPLE (PHOTON-2 1b): what a shaded record writes (rq_reflect.comp's `reflectSample`).
-layout( rgba16f, set = 0, binding = 8 ) uniform writeonly image2DArray reflectSample;
-#include "jah_reflect_state.glsl"
+layout( rgba16f, set = 0, binding = 7 ) uniform writeonly image2DArray reflectSample;
 #define JAH_FOG_P( k ) p.fog[k]
 #define JAH_FOG_AERIAL( uvw ) textureLod( fogAerial, uvw, 0.0 )
 #define JAH_FOG_HAS_AIR
@@ -111,8 +106,7 @@ void main()
 	// THE EYE'S LAYER (bit 30, LAYERED-STEREO-1): the reflection's history is an
 	// array with one layer per eye.
 	const ivec3 at3 = ivec3( xy, int( ( dest >> 30u ) & 1u ) );
-	if( p.list.z < 0.5 || any( greaterThanEqual( at3, imageSize( stateCur ) ) ) ||
-		any( greaterThanEqual( at3, imageSize( reflectSample ) ) ) )
+	if( p.list.z < 0.5 || any( greaterThanEqual( at3, imageSize( reflectSample ) ) ) )
 		return;
 	if( shaded )
 	{
@@ -124,15 +118,6 @@ void main()
 		const float originY = uintBitsToFloat( jahHitBuf[aux + 2u] );
 		const vec2 lengths = unpackHalf2x16( jahHitBuf[aux + 3u] );
 		const vec3 fogged = jahFogAlong( radiance, originY, dir, lengths.x, lengths.y );
-		imageStore( reflectSample, at3, vec4( fogged, 1.0 ) );
-	}
-	else
-	{
-		JahReflectState st = jahStateUnpack( imageLoad( stateCur, at3 ).xy );
-		if( st.noHistory )
-		{
-			st.surfDist = 0.0;
-			imageStore( stateCur, at3, uvec4( jahStatePack( st ), 0u, 0u ) );
-		}
+		imageStore( reflectSample, at3, vec4( fogged, max( lengths.x, 1e-3 ) ) );
 	}
 }

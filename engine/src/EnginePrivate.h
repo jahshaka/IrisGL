@@ -1920,7 +1920,6 @@ public:
     X(RaysOriginCut, "rays.originCut") /* every ray job's origin lifts by the drawn cut's error (0: the float bound alone - the negative control of the origin rows) */ \
     X(ReflectPosed, "reflect.posed") /* the posed (skinned) identification */ \
     X(ReflectAlphaTested, "reflect.alphaTested") /* cut-out geometry traced as cut-out */ \
-    X(ReflectEdgeClasses, "reflect.edgeClasses") /* the Hits view's class overlay (0 off, 1, 2) */ \
     X(ReflectMonoEyes, "reflect.monoEyes") /* a stereo trace with the mono basis */ \
     X(TlasRefit, "rayquery.tlasRefit") /* refit the TLAS instead of rebuilding it */ \
     X(GatherTemporal, "gather.temporal") /* the screen-probe gather's pixel history */ \

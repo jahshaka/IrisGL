@@ -6,7 +6,7 @@
 // (jah_reflect_state.glsl): H's moving count N, carried into the rest half, and v = the rest samples M holds - a frame
 // that gave the texel no sample adds none (G1). The answer is COMPOSED AT THE READ (G2):
 //   O = lerp( H, M, w( v ) ),  w( v ) = 1 - ( 1 - v / 2N )^2 for v < 2N, then 1
-// (N = the gather's settle of the 32-frame history, 51) - the hand-over drains the motion lag at fix F1's starting
+// (N = the gather's settle of the moving history's MaxFrames 12, 19: PHOTON-7 stage 6) - the hand-over drains the motion lag at fix F1's starting
 // rate (w'( 0 ) = 1 / N) and EASES OUT over 2N samples: the answer's per-frame change, (M - H) w'( v ) + (s - M) w( v )
 // / v, then FALLS from the first rest frame on (the linear v / N held its noise term at (s - M) / N, flat for 51 frames
 // - measured on photon-glass: 0.055 -> 0.060 codes, rising under the filter's shrinking reach), and the held answer is
@@ -133,20 +133,6 @@ vec3 jahRestAnswer( vec3 H, bool hasH, vec3 M, float v, float N )
 		return mix( H, M, jahRestHandOverWeight( v, N ) );
 	return M;
 }
-
-/// THE LOBE'S FOOTPRINT AT ITS HIT, IN TRACE TEXELS (G5: the one variable at the fixed cut) - the lobe's angular width
-/// at the hit, ~4 alpha, over the throw t, against one trace texel's width at the reflected image (the camera's pixel
-/// angle over (eye distance + t), perspective; the image plane's texel, orthographic). Under 1 the lobe lands inside
-/// one texel: the centre ray is the integral (the fixed estimator). 0 = no throw known.
-float jahReflectFootprint( float lobeAlpha, float throwT, float eyeDist, float texelAngle, bool perspective )
-{
-	if( !( throwT > 0.0 ) )
-		return 0.0;
-	const float texelAtImage = perspective ? texelAngle * ( eyeDist + throwT ) : texelAngle;
-	return 4.0 * lobeAlpha * throwT / max( texelAtImage, 1e-9 );
-}
-/// The fixed decision with its HYSTERESIS BAND (G5): a texel at the cut cannot flip on its own frozen mean length.
-const float kFixedEnter = 0.8, kFixedLeave = 1.25;
 
 /// A SEGMENT THROUGH AN AXIS BOX (the slab test): origin o, unit direction d, length t.
 bool jahSegmentHitsBox( vec3 o, vec3 d, float t, vec3 lo, vec3 hi )

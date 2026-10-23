@@ -3,24 +3,28 @@
 // write theirs, the history's race), replacing the rg32f distance pair whose mantissas carried the rest's stop count
 // and the mean's mover age, the five flags summed into the sample's fp16 w and the count in the history's w (AB E13,
 // S6). Every field is an integer field of an integer word: nothing is read back through a float's rounding.
+// THE FINAL LAYOUT (commit 6: Lumen's denoiser - its N step and ceiling, the rest's sequence index; the mover age and
+// the estimator flags deleted with the moving hit's history and the six patch rules):
 //
 //   .x  [ 0:15] surfDist  fp16 - the surface's view distance the texel's answer is for; 0 = NO ANSWER this frame
-//                                 (the filter's "written this frame" test, the reprojection's 5 % test)
-//       [16:31] hitT      fp16 - the mean ray length (the distance the rays in the mean travelled; the virtual point)
-//   .y  [ 0: 7] N         6.2 fixed - the moving history's sample count (0 .. 63.75, step 0.25)
-//       [ 8:17] v         the rest samples the texel's rest mean holds (0 .. 1023)
-//       [18:21] stop      consecutive rest frames the rest mean's standard error stayed under a code (0 .. 15)
-//       [22:26] moverAge  frames since a ray of the texel last hit a mover, saturating at 31, stored INVERTED so a
-//                         cleared texel reads "never"
-//       [27]    resume    this frame the texel RESUMES at rest (a moved instance crossed its ray, or its estimator
-//                         switched)
-//       [28]    fixed     this frame's estimator is the lobe's centre (the lobe under one texel at its hit)
-//       [29]    surfaceOnly  only the SURFACE history may be used this frame (a moving reflector, a moving hit, a
-//                         history found through the moving hit's reflected image)
-//       [30]    ownMoving the reflector itself moved this frame
-//       [31]    noHistory the texel carried no history into this frame (its blend is 1)
-// The per-frame bits (27-31) are the trace's message to the passes after it in the same frame (the hit write-back, the
-// temporal pass, the filter); the trace's next frame reads them back as the texel's LAST estimator.
+//                                 (the trace declined the texel, or the temporal pass found neither a sample nor a history)
+//       [16:31] hitT      fp16 - the THROW: the temporal mean of the resolved hit distance (the lobe's footprint at its
+//                                 hit, so the centre ray's chance; the stopped texel's resume segment). Between the trace
+//                                 and the temporal pass of one frame it holds the throw THIS frame's draw used (the resolve
+//                                 re-derives a neighbour's chance from it).
+//   .y  [ 0: 7] N         5.3 fixed - the frames in the moving mean (Lumen's NumFramesAccumulated: step 0.125, ceiling
+//                         31.875 - above the moving MaxFrames 12, so the ceiling binds only a composed rest answer
+//                         (W3): its first moving frame takes min( N c + 1, 12 ) = 12 for any confidence c >= 0.345)
+//       [ 8:23] v         the rest samples the texel's rest mean holds - the rest SEQUENCE index (0 .. 65535)
+//       [24:27] stop      consecutive rest frames the rest mean's standard error stayed under a code (0 .. 15; the texel
+//                         has STOPPED at kReflectStopFrames)
+//       [28]    resume    this frame the texel RESUMES at rest (a moved instance crossed its ray)
+//       [29]    folded    this frame's VNDF draw was FOLDED above the drawn surface's geometric plane (READ_A W4): its
+//                         density is p( L ) + p( R L ), not the VNDF's - the resolve weighs it so (READ_B Q2)
+//       [30]    centre    this frame's draw was the lobe's CENTRE RAY (the mirror ramp's, jah_reflect_draw.glsl)
+//       [31]    delta     this frame's direction is the MIRROR FALLBACK (a lobe sample that left the shading plane takes
+//                         the mirror direction): a delta, never reweighted as a density - out of a neighbour's resolve
+// All four bits are the trace's message to the passes after it in the same frame.
 #ifndef JAH_REFLECT_STATE_GLSL
 #define JAH_REFLECT_STATE_GLSL
 
@@ -31,18 +35,15 @@ struct JahReflectState
 	float N;
 	uint  v;
 	uint  stop;
-	uint  moverAge;
 	bool  resume;
-	bool  fixedEstimator;
-	bool  surfaceOnly;
-	bool  ownMoving;
-	bool  noHistory;
+	bool  folded;
+	bool  centre;
+	bool  delta;
 };
 
-const float kJahStateMaxN = 63.75;
-const uint  kJahStateMaxV = 1023u;
+const float kJahStateMaxN = 31.875;
+const uint  kJahStateMaxV = 65535u;
 const uint  kJahStateMaxStop = 15u;
-const uint  kJahStateMaxAge = 31u;
 /// The largest distance the fp16 fields hold below their infinity.
 const float kJahStateMaxDist = 65000.0;
 
@@ -54,12 +55,10 @@ JahReflectState jahStateNone()
 	s.N = 0.0;
 	s.v = 0u;
 	s.stop = 0u;
-	s.moverAge = kJahStateMaxAge;
 	s.resume = false;
-	s.fixedEstimator = false;
-	s.surfaceOnly = false;
-	s.ownMoving = false;
-	s.noHistory = false;
+	s.folded = false;
+	s.centre = false;
+	s.delta = false;
 	return s;
 }
 
@@ -69,15 +68,13 @@ JahReflectState jahStateUnpack( uvec2 w )
 	const vec2 d = unpackHalf2x16( w.x );
 	s.surfDist = d.x;
 	s.hitT = d.y;
-	s.N = float( w.y & 0xFFu ) * 0.25;
-	s.v = ( w.y >> 8u ) & 0x3FFu;
-	s.stop = ( w.y >> 18u ) & 0xFu;
-	s.moverAge = kJahStateMaxAge - ( ( w.y >> 22u ) & 0x1Fu );
-	s.resume = ( w.y & ( 1u << 27u ) ) != 0u;
-	s.fixedEstimator = ( w.y & ( 1u << 28u ) ) != 0u;
-	s.surfaceOnly = ( w.y & ( 1u << 29u ) ) != 0u;
-	s.ownMoving = ( w.y & ( 1u << 30u ) ) != 0u;
-	s.noHistory = ( w.y & ( 1u << 31u ) ) != 0u;
+	s.N = float( w.y & 0xFFu ) * 0.125;
+	s.v = ( w.y >> 8u ) & 0xFFFFu;
+	s.stop = ( w.y >> 24u ) & 0xFu;
+	s.resume = ( w.y & ( 1u << 28u ) ) != 0u;
+	s.folded = ( w.y & ( 1u << 29u ) ) != 0u;
+	s.centre = ( w.y & ( 1u << 30u ) ) != 0u;
+	s.delta = ( w.y & ( 1u << 31u ) ) != 0u;
 	return s;
 }
 
@@ -85,11 +82,10 @@ uvec2 jahStatePack( JahReflectState s )
 {
 	uvec2 w;
 	w.x = packHalf2x16( vec2( clamp( s.surfDist, 0.0, kJahStateMaxDist ), clamp( s.hitT, 0.0, kJahStateMaxDist ) ) );
-	const uint n = uint( clamp( s.N, 0.0, kJahStateMaxN ) * 4.0 + 0.5 );
-	w.y = n | ( min( s.v, kJahStateMaxV ) << 8u ) | ( min( s.stop, kJahStateMaxStop ) << 18u ) |
-		  ( ( kJahStateMaxAge - min( s.moverAge, kJahStateMaxAge ) ) << 22u ) | ( s.resume ? 1u << 27u : 0u ) |
-		  ( s.fixedEstimator ? 1u << 28u : 0u ) | ( s.surfaceOnly ? 1u << 29u : 0u ) |
-		  ( s.ownMoving ? 1u << 30u : 0u ) | ( s.noHistory ? 1u << 31u : 0u );
+	const uint n = uint( clamp( s.N, 0.0, kJahStateMaxN ) * 8.0 + 0.5 );
+	w.y = n | ( min( s.v, kJahStateMaxV ) << 8u ) | ( min( s.stop, kJahStateMaxStop ) << 24u ) |
+		  ( s.resume ? 1u << 28u : 0u ) | ( s.folded ? 1u << 29u : 0u ) | ( s.centre ? 1u << 30u : 0u ) |
+		  ( s.delta ? 1u << 31u : 0u );
 	return w;
 }
 

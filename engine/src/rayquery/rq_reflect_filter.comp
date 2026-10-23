@@ -196,11 +196,12 @@ layout( set = 0, binding = 14 ) uniform samplerCube skyCube;
 
 /// The same ceiling the trace and the SSR loop hold their radiance to, and the NaN tests: the one copy.
 #include "jah_rq_finite.glsl"
-/// THE G-BUFFER'S FLOOR (rq_reflect.comp's kMirrorPackAlpha): a roughness-0 mirror, always the fixed estimator.
-const float kMirrorPackAlpha = 0.0011;
-/// How many frames a glossy lobe warms up over before its answer is shown
-/// (rq_reflect.comp's kWarmupFrames).
-const float kWarmupFrames = 8.0;
+/// THE MIRROR RAMP (the G-buffer's floor, the lobe's footprint at its hit): jah_reflect_draw.glsl.
+#include "jah_reflect_draw.glsl"
+/// THE YOUNG VIEW'S FADE (a graded screenshot's view lives about two frames): a traced reflection is shown whole once
+/// the VIEW has this many frames of history - a fact about the view, not about a texel (PHOTON-7 stage 6: the texel
+/// count's warm-up fades, DRAG-1's, are deleted with Lumen's N = 0).
+const float kYoungViewFrames = 8.0;
 /// THE KERNEL'S REACH. radius = kFilterScale * sqrt(alpha) = kFilterScale times
 /// the PERCEPTUAL roughness, capped at kMaxRadius — so it saturates at
 /// perceptual 0.30 and everything rougher than that shares the widest kernel. A
@@ -225,43 +226,26 @@ const int   kMaxRadius = 3;
 /// whose gradient is zero and whose only spread is the depth buffer's own
 /// precision.
 const float kDepthSigma = 3.0;
-/// A HISTORY THAT HAS JUST RESTARTED (REFLECT-MOVERS-1, the brief's disocclusion
-/// step). In a WARM view every restart — a surface revealed from behind a moving
-/// object, a surface that moved, a turn onto new floor — is seeded at exactly
-/// kWarmupFrames and counted from there (rq_reflect.comp's DRAG-1 seed), so a
-/// count within kFreshFrames of kWarmupFrames + 1 is a mean of that many real
-/// samples and no more: one noisy ray standing in for an integral. Such a texel
-/// widens its kernel to ceil( kFreshRadius x (1 - k / kFreshFrames) ) trace texels
-/// k frames after the restart — 3 for the first three frames, 2 for the next
-/// three, 1 for the last two — the same depth and normal
-/// weights, so never across a silhouette — shrinking back to the lobe's own as
-/// its samples arrive (the SVGF step that stands in for a history it does not
-/// have). A MIRROR is still never filtered: its one sample is exact. A YOUNG
-/// view is left alone (its pixels count up from one — the screenshot's fade).
-const float kFreshFrames = 8.0;
-const int   kFreshRadius = 3;
 const float kDepthFloorRel = 0.002;
 const float kNormalPower = 32.0;
 
 #include "jah_reflect_rest.glsl"
 #include "jah_reflect_state.glsl"
-/// THE ANSWER AT A TEXEL (PHOTON-2 round 2, G2): moving, the mean `historyCur` holds with its count; AT REST (knobs2.x
-/// >= 1, the hold included) the frozen history and the rest mean composed - lerp( H, M, w( v ) ), jah_reflect_rest.glsl
-/// - with the count the warm-up reads: H's (or the warm seed for a texel with none, in a warm view: G3) plus the rest
-/// samples.
+/// THE ANSWER AT A TEXEL (PHOTON-2 round 2, G2): moving, the mean `historyCur` holds (w = 1: the state's surface
+/// distance says the texel answered); AT REST (knobs2.x >= 1, the hold included) the frozen history and the rest mean
+/// composed - lerp( H, M, w( v ) ), jah_reflect_rest.glsl - w = 1 where either holds anything.
 vec4 answerAt( ivec2 t )
 {
 	const vec3 M = imageLoad( historyCur, ivec3( t, gEye ) ).xyz;
 	const JahReflectState sc = jahStateUnpack( imageLoad( stateCur, ivec3( t, gEye ) ).xy );
 	if( p.knobs2.x < 0.5 )
-		return vec4( M, sc.N );
+		return vec4( M, sc.surfDist > 0.0 ? 1.0 : 0.0 );
 	const vec3 Hr = imageLoad( historyPrev, ivec3( t, gEye ) ).xyz;
 	const float Hn = jahStateUnpack( imageLoad( statePrev, ivec3( t, gEye ) ).xy ).N;
 	const bool hasH = finite3( Hr ) && Hn > 0.0;
 	const vec3 H = hasH ? Hr : vec3( 0.0 );
 	const float v = float( sc.v );
-	const float base = hasH ? Hn : ( p.stereo.y >= kWarmupFrames ? kWarmupFrames : 0.0 );
-	return vec4( jahRestAnswer( H, hasH, M, v, max( p.stereo.w, 1.0 ) ), base + v );
+	return vec4( jahRestAnswer( H, hasH, M, v, max( p.stereo.w, 1.0 ) ), hasH || v > 0.0 ? 1.0 : 0.0 );
 }
 
 float viewDistance( float rawDepth )
@@ -284,14 +268,14 @@ vec3 normalAt( ivec2 t, ivec2 scale, ivec2 fullRes )
 /// THE TAPS' NEIGHBOURHOOD, ONCE PER GROUP (SPEED-GPU, audit MA-10). A tap reads four
 /// things at its texel - the written-this-frame flag, the temporal mean, the depth and the
 /// normal - and the 8 x 8 texels of a group share a 14 x 14 neighbourhood at the kernel's
-/// widest reach (kTileReach, the larger of kMaxRadius and kFreshRadius - 3): 49 taps a pixel of
+/// widest reach (kTileReach = kMaxRadius, 3): 49 taps a pixel of
 /// global reads became
 /// 196 x 4 per group, every tap then reading this tile. Each entry holds EXACTLY what the tap
 /// computed from its own fetches (the same calls at the same coordinates), and the taps keep
 /// their order and their arithmetic, so the filtered mean is the same bits. A group none of
 /// whose texels filters (mirrors, declined texels, the sky) loads nothing, and a group loads only
 /// as far as its widest kernel reaches.
-const int kTileReach = kMaxRadius > kFreshRadius ? kMaxRadius : kFreshRadius;
+const int kTileReach = kMaxRadius;
 const int kTileSide = 8 + 2 * kTileReach;
 // 24 bytes an entry (the group's shared memory is its occupancy): the mean as the four halves it
 // was stored as (an rgba16f texel - exact both ways), and the written-this-frame flag folded into
@@ -358,7 +342,6 @@ void main()
 		texelLive = false;				// this texel has no answer to filter or composite
 
 	vec3 mean = clamp( centre.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
-	float count = centre.w;
 
 	// ---- THE FILTER ---------------------------------------------------------
 	// A MIRROR SKIPS IT ENTIRELY, and not as an optimisation: blurring a mirror
@@ -374,32 +357,21 @@ void main()
 	// THE REACH, CONTINUOUS (fix F4): the tent below weighs a tap 1 - |d| / (reach + 1), so a reach rising from 0
 	// fades the neighbours in from weight 0 — the loop's integer bound is only the reach's ceiling.
 	float reach = min( float( kMaxRadius ), kFilterScale * sqrt( max( lobeAlpha, 0.0 ) ) / texelsPerPixel );
-	bool fresh = false;
-	{
-		const float sinceRestart = count - ( kWarmupFrames + 1.0 );
-		fresh = p.motion.w > 0.5 && p.stereo.y >= kWarmupFrames + kFreshFrames + 1.0 && sinceRestart >= 0.0 &&
-				sinceRestart < kFreshFrames;
-		if( fresh )
-			reach = max( reach, ceil( float( kFreshRadius ) * ( 1.0 - sinceRestart / kFreshFrames ) ) );
-	}
-	// THE FIXED ESTIMATOR (the trace's flag in this texel's state - kept by a stopped texel - or the G-buffer's floor) is
-	// never filtered.
-	const bool sampled = texelLive && imageLoad( reflectSample, ivec3( tc, gEye ) ).w > 0.0;
-	const bool fixedTexel = lobeAlpha <= kMirrorPackAlpha || ( texelLive && own.fixedEstimator );
-	// ONE VARIABLE AT THE CUT (PHOTON-2 round 2, G5): the reach is continuous in the lobe's footprint at its hit (the
-	// trace's own jahReflectFootprint, from this texel's mean length) and ZERO at the cut - it rises from footprint 1 to
-	// 2 - so the filter never steps from 0 to the lobe's reach where the estimator turns fixed.
+	// THE G-BUFFER'S FLOOR (a roughness-0 mirror: the centre ray at every throw) is never filtered.
+	const bool mirrorTexel = lobeAlpha <= kMirrorPackAlpha;
+	// ONE VARIABLE AT THE RAMP (PHOTON-2 round 2, G5; the mirror ramp since PHOTON-7 stage 6): the reach is continuous in
+	// the lobe's footprint at its hit (jahReflectFootprint, from this texel's throw) and ZERO where the draw is the
+	// centre ray - it rises from footprint 1 to 2 - so the filter never steps where the estimator's mixture does.
+	float centreChance = mirrorTexel ? 1.0 : 0.0;
 	if( texelLive )
 	{
 		const float throwT = own.hitT > 0.0 ? own.hitT : 0.0;
-		const float footprint = jahReflectFootprint( lobeAlpha, throwT, viewDistance( rawDepth ),
-													 length( p.rayDown.xyz ) / float( traceRes.y ), p.camPos.w > 0.5 );
+		const float texelAngle = length( p.rayDown.xyz ) / float( traceRes.y );
+		const float footprint = jahReflectFootprint( lobeAlpha, throwT, viewDistance( rawDepth ), texelAngle,
+													 p.camPos.w > 0.5 );
 		if( throwT > 0.0 )
 			reach *= smoothstep( 1.0, 2.0, footprint );
-		// ...AND A FIXED TEXEL WHOSE RECORD WENT UNSHADED IS SKIPPED, not filtered (no sample this frame, moving: the
-		// estimator its footprint names is the centre ray, which this frame did not deliver).
-		if( p.knobs2.x < 0.5 && !sampled && throwT > 0.0 && footprint < kFixedEnter )
-			texelLive = false;
+		centreChance = jahReflectCentreChance( lobeAlpha, throwT, viewDistance( rawDepth ), texelAngle, p.camPos.w > 0.5 );
 		// AT REST THE REACH FOLLOWS THE REST MEAN'S VARIANCE (R1, P1: its second moment) - the texels its standard error
 		// needs to fall under a code, never further than the moving reach - blended in with the hand-over's weight (the
 		// rest's first frame keeps the moving reach: shrunk DURING the hand-over it raised the filtered picture's
@@ -436,7 +408,7 @@ void main()
 	if( referenceShown )
 		reach = 0.0;
 	const int radius = int( ceil( reach ) );
-	const bool filters = texelLive && reach > 0.0 && !fixedTexel;
+	const bool filters = texelLive && reach > 0.0 && !mirrorTexel;
 
 	// THE TILE (above): loaded by the whole group, only when some texel of it filters.
 	if( gl_LocalInvocationIndex == 0u )
@@ -506,7 +478,6 @@ void main()
 		}
 		vec3  sum = mean;
 		float sumW = 1.0;
-		float sumCount = count;
 		for( int dy = -radius; dy <= radius; ++dy )
 		{
 			for( int dx = -radius; dx <= radius; ++dx )
@@ -555,17 +526,15 @@ void main()
 					continue;
 				sum += h.xyz * w;
 				sumW += w;
-				// The WARM-UP reads the neighbourhood too: a pixel whose own
-				// history is young but whose neighbours are converged is, after
-				// this filter, holding a converged answer.
-				sumCount += h.w * w;
 			}
 		}
 		mean = sum / sumW;
-		count = sumCount / sumW;
 	}
-	if( !texelLive || !finite3( mean ) )
+	// EVERY PIXEL OF THE BLOCK IS WRITTEN (PHOTON-7 stage 6): the resolve's scratch occupies `jahSsrReflection`'s trace
+	// texels until this pass, so a texel with no answer writes no reflection (w = 0: the probe's) over it.
+	if( any( greaterThanEqual( tc, traceRes ) ) )
 		return;
+	const bool answered = texelLive && finite3( mean );
 
 	// ---- THE WRITE, per full-resolution texel of this block ------------------
 	// Every texel decides for ITSELF whether the ray answers for it: its own
@@ -582,14 +551,15 @@ void main()
 				continue;
 			const vec2 fuv = ( vec2( fc ) + 0.5 ) / vec2( fullRes );
 			const float fd = texture( sceneDepth, vec3( fuv, float( gEye ) )).x;
-			if( fd <= 0.0 || fd >= 1.0 )
-				continue;
 			// PERCEPTUAL again, from the same 0043 packing (see the decode above):
 			// this texel's own gate, in the same units as the dial.
 			const float fr = sqrt( max( texture( gBufShadowRoughness, vec3( fuv, float( gEye ) )).y * 0.999 + 0.001,
 										1e-6 ) );
-			if( fr > roughGate + feather )
+			if( !answered || fd <= 0.0 || fd >= 1.0 || fr > roughGate + feather )
+			{
+				imageStore( ssrReflection, ivec3( fc, gEye ), vec4( 0.0 ) );
 				continue;
+			}
 			// THE FEATHER (owner, ledger §426). Full confidence up to
 			// `cutoff - feather`, none at `cutoff + feather`, smooth between —
 			// and what the ray gives up the probe takes through the SAME
@@ -597,30 +567,16 @@ void main()
 			// crossfades instead of stepping.
 			float gate =
 				1.0 - smoothstep( roughGate - feather, roughGate + feather, fr );
-			// THE RAY FADES IN AS THE MEAN CONVERGES (second reader, M2). A
-			// GRADED SCREENSHOT's view lives about two frames, so a glossy
-			// traced reflection in a user's shot would be one or two samples of
-			// a lobe — visible noise in a picture that is supposed to be the
-			// editor's own. Weighting the trace's confidence by how much of the
-			// integral it actually holds hands those pixels back to the probe,
-			// which is today's picture: noise-free, deterministic, and the
-			// worst case is "the shot looks like the renderer without rays".
-			//
-			// It is the SAME physics as the blend above, so it is the same
-			// term: a MIRROR has no variance and needs no warm-up (one sample
-			// is the whole integral), and the warm-up's length grows with the
-			// lobe. A live viewport passes it within a few frames and is
-			// unaffected; a two-frame view never reaches it on a glossy
-			// surface, which is the point.
-			// FROM THE PACKING FLOOR (third reader, item 3): 0.001 is the
-			// sharpest alpha the G-buffer can hold, so it IS a mirror and must
-			// warm up instantly rather than to 97.2 %. A FIXED ESTIMATOR (fix F4)
-			// is one ray, the whole integral: no warm-up either.
-			const float warm = max( fixedTexel ? 1.0 : 0.0, min( count * ( 1.0 / kWarmupFrames ), 1.0 ) );
-			gate *= warm;
-			if( gate <= 0.0 )
-				continue;
-			imageStore( ssrReflection, ivec3( fc, gEye ), vec4( mean, gate ) );
+			// THE YOUNG VIEW FADES THE RAY IN (second reader, M2): a GRADED SCREENSHOT's view lives about two frames,
+			// so a glossy traced reflection in a user's shot would be one or two samples of a lobe — visible noise in a
+			// picture that is supposed to be the editor's own. A view younger than kYoungViewFrames hands those pixels
+			// back to the probe in proportion (noise-free, deterministic: "the shot looks like the renderer without
+			// rays"); the lobe's centre ray is its whole integral and is shown at once. A fact about the VIEW: a
+			// live viewport is past it within a few frames, and no texel's own history fades it (DRAG-1's warm seed,
+			// the count's warm-up and its fresh widening are deleted with Lumen's N = 0).
+			const float young = min( ( p.stereo.y + 1.0 ) / kYoungViewFrames, 1.0 );
+			gate *= mix( young, 1.0, centreChance );
+			imageStore( ssrReflection, ivec3( fc, gEye ), gate > 0.0 ? vec4( mean, gate ) : vec4( 0.0 ) );
 		}
 	}
 }
