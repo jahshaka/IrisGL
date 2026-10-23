@@ -27,9 +27,12 @@
 //   jahHitBuf[] (uint)   [0] = records appended (may pass the capacity), [1] =
 //                        records DROPPED because the list was full (a stat, never
 //                        a crash), [2] = the reflection's active resting texels,
-//                        [3] = its CAPPED texels, [4] = the WORK of its rest
-//                        rays (ray queries and their alpha candidates, plus the
-//                        screen march's steps), [5] = those rays, [6..7] unused;
+//                        [3] = its CAPPED texels, [4] = its BATCHING texels
+//                        (the rest's tail budget), [5] = the exposure its
+//                        denoiser space ran at and [6] its hand-over length N
+//                        (float bits, the trace's: the write-back folds a
+//                        texel's RECORD RUN in the same space), [7] = the run
+//                        records the decode left unshaded (their index lost);
 //                        then kJahHitAuxWords (FOUR) WORDS PER RECORD from word
 //                        kJahHitAuxBase:
 //                        [0] packHalf2x16( the SUN'S VISIBILITY at the hit (a
@@ -156,6 +159,26 @@ float jahHitSunVisibility( vec3 hitPos, vec3 liftDir, float t, bool far )
 					  JAH_HIT_SUN_MASK, JAH_HIT_SUN_RANGE, JAH_HIT_SUN_RANGE );
 }
 
+/// THE RECORD'S WORDS at list slot i (reserved by the caller, < the capacity). A
+/// NEGATIVE weight marks a reflection FOLD record (rq_reflect.comp's record runs:
+/// its texel's rest mean takes it in the write-back, in its run's order).
+void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
+				  float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance )
+{
+	const ivec2 at = ivec2( int( i % JAH_HIT_LIST_W ), int( i / JAH_HIT_LIST_W ) );
+	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( far ? kJahHitFarBit : 0u ) |
+						   ( ( dest & kJahHitDestGather ) != 0u ? kJahHitDiffuseOnlyBit : 0u );
+	imageStore( jahHitIds, at,
+				uvec4( slotLevel, prim, packUnorm2x16( clamp( bary, vec2( 0.0 ), vec2( 1.0 ) ) ),
+					   packSnorm2x16( jahOctEncode( dir ) ) ) );
+	const uint aux = kJahHitAuxBase + kJahHitAuxWords * i;
+	jahHitBuf[aux] = packHalf2x16( vec2( sunVis, footprint ) );
+	jahHitBuf[aux + 1u] = floatBitsToUint( weight );
+	jahHitBuf[aux + 2u] = floatBitsToUint( originY );
+	jahHitBuf[aux + 3u] = packHalf2x16( clamp( vec2( rayLength, eyeDistance ), vec2( 0.0 ), vec2( 65504.0 ) ) );
+	imageStore( jahHitDest, at, uvec4( dest, 0u, 0u, 0u ) );
+}
+
 /// Appends one record. False when the list is full (the record is dropped and
 /// counted) or not bound this dispatch — the caller then treats the hit as the
 /// write-back's "unshaded" case.
@@ -170,18 +193,7 @@ bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float su
 		atomicAdd( jahHitBuf[1], 1u );
 		return false;
 	}
-	const ivec2 at = ivec2( int( i % JAH_HIT_LIST_W ), int( i / JAH_HIT_LIST_W ) );
-	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( far ? kJahHitFarBit : 0u ) |
-						   ( ( dest & kJahHitDestGather ) != 0u ? kJahHitDiffuseOnlyBit : 0u );
-	imageStore( jahHitIds, at,
-				uvec4( slotLevel, prim, packUnorm2x16( clamp( bary, vec2( 0.0 ), vec2( 1.0 ) ) ),
-					   packSnorm2x16( jahOctEncode( dir ) ) ) );
-	const uint aux = kJahHitAuxBase + kJahHitAuxWords * i;
-	jahHitBuf[aux] = packHalf2x16( vec2( sunVis, footprint ) );
-	jahHitBuf[aux + 1u] = floatBitsToUint( weight );
-	jahHitBuf[aux + 2u] = floatBitsToUint( originY );
-	jahHitBuf[aux + 3u] = packHalf2x16( clamp( vec2( rayLength, eyeDistance ), vec2( 0.0 ), vec2( 65504.0 ) ) );
-	imageStore( jahHitDest, at, uvec4( dest, 0u, 0u, 0u ) );
+	jahHitWrite( i, slot, far, prim, bary, dir, sunVis, footprint, weight, dest, originY, rayLength, eyeDistance );
 	return true;
 }
 

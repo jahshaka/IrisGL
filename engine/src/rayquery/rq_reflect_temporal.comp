@@ -180,7 +180,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// pass keeps every moving history as carried - no new sample, no clamp; a fixed estimator takes its ray;
 	/// rq_reflect_temporal.comp).
 	/// z = THE REST'S RAYS A FRAME a texel still converging traces (the trace's batch at rest): its share of the view's
-	/// rest count (OgreRayQuery.cpp kReflectRestRaysCap's note - k at the rest's start, up to 64 as texels stop).
+	/// rest count (OgreRayQuery.cpp kReflectRestRaysCap's note - k at the rest's start, up to 64 in the tail);
+	/// w = THE RECORD ALLOWANCE a batching texel's record run may take of the list this frame (rq_reflect.comp's record
+	/// runs: min( k_active, capacity / batching ); 0 = a record ends the batch).
 	vec4 rest;
 	/// THE REST BREAKS PER TEXEL FOR MOVERS (PHOTON-2 round 2, G6): x = how many moved instances' SWEPT BOXES follow
 	/// (their bounds this frame and last, joined; at most 16 - more moved breaks the view's rest whole, on the host);
@@ -237,9 +239,11 @@ float gExposure = 1.0;
 /// (after the denoiser space: the rest's fold is a denoiser-space mean; its stop reads the display's code)
 #define JAH_DISPLAY_LUT( i ) p.display[( i ) >> 2][( i ) & 3]
 #include "jah_reflect_rest.glsl"
-/// THE REST'S STOP SHARE (jah_reflect_rest.glsl's stop): the filter's, last frame, at this texel's own pixel - its share
-/// of the one-code display budget in codes + 1 (0 = not measured).
-layout( r32f, set = 0, binding = 51 ) uniform readonly image2DArray restShare;
+/// THE REST'S STOP SHARE (jah_reflect_rest.glsl's stop): the filter's, last frame - the MIN over the pixels that read
+/// this texel of each one's share, a denoiser-space standard error (a float's bits; all ones = no pixel measured it).
+/// Read here, then reset to all ones for this frame's filter.
+layout( r32ui, set = 0, binding = 51 ) uniform uimage2DArray restShare;
+uint gShareRaw = 0xFFFFFFFFu;
 #include "jah_reflect_state.glsl"
 #include "jah_reflect_draw.glsl"
 
@@ -387,6 +391,12 @@ void main()
 {
 	const ivec2 traceRes = ivec2( p.resolution.xy );
 	const ivec2 tc = ivec2( gl_GlobalInvocationID.xy );
+	// THE STOP SHARE, read and reset for this frame's filter (every texel, before any early return).
+	if( all( lessThan( tc, traceRes ) ) )
+	{
+		gShareRaw = imageLoad( restShare, ivec3( tc, int( gl_GlobalInvocationID.z ) ) ).x;
+		imageStore( restShare, ivec3( tc, int( gl_GlobalInvocationID.z ) ), uvec4( 0xFFFFFFFFu ) );
+	}
 	gEye = int( gl_GlobalInvocationID.z );
 	gExposure = exposureOf();
 	const ivec2 fullRes = ivec2( p.resolution.zw );
@@ -521,17 +531,20 @@ void main()
 			}
 			if( !( v >= 1.0 ) )
 				return;   // nothing in the rest mean yet
-			// THE STOP (R1; jah_reflect_rest.glsl): the texel's OWN rest mean's standard error in DISPLAY CODES (the
-			// exact slope of the exposure, the grade, the film curve and the sRGB encode) within its share of the
-			// one-code budget, counted over consecutive frames once the hand-over is done (a texel with no hand-over:
-			// once kReflectStopFrames samples are in). The filter measured the share last frame (restShare); where it
-			// measured nothing (the first rest frame, a pixel it gave no answer) the share is the whole code.
+			// THE STOP (R1; jah_reflect_rest.glsl): the texel's OWN rest mean's standard error (the denoiser space's)
+			// within its share - the strictest over the pixels that read it of each one's slice of the one-code display
+			// budget - counted over consecutive frames once the hand-over is done (a texel with no hand-over: once
+			// kReflectStopFrames samples are in). The filter measured the share last frame (restShare); where no pixel
+			// measured it (the first rest frame, a texel no pixel reads with a variance) the share is one code at its
+			// own value.
 			const bool handOver = hasH && !centreOnly;
 			const vec3 answer = jahRestAnswer( handOver ? H : rs.M, hasH, rs.M, v, N );
-			const float measured = imageLoad( restShare, ivec3( tc, gEye ) ).x - 1.0;
-			const float share = measured > 0.0 && finite1( measured ) ? measured : 1.0;
+			// (no pixel measured it: the whole code at its own value)
 			const float LD = jahDenoiseLuma( jahToDenoise( clamp( answer, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) );
-			const float e = jahDisplayCodes( jahDenoiseLuma( answer ), jahRestErrorD( rs, v ) * jahDenoiseSlopeAt( LD ) );
+			const float share = gShareRaw != 0xFFFFFFFFu
+									? uintBitsToFloat( gShareRaw )
+									: 1.0 / max( jahDisplayCodes( jahDenoiseLuma( answer ), jahDenoiseSlopeAt( LD ) ), 1e-12 );
+			const float e = jahRestErrorD( rs, v );
 			const bool settled = v >= ( handOver ? jahRestHandOverLength( N ) : float( kReflectStopFrames ) );
 			// A CAPPED TEXEL (its count at the field's ceiling) stops as it stands - the defect the trace counts.
 			const bool capped = st.v >= kReflectRestVCap;

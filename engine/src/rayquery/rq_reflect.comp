@@ -40,10 +40,6 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
-/// THE WORK A SAMPLE COSTS (the rest's budget, OgreRayQuery.cpp kReflectRestRaysCap's note): every ray query and each
-/// of its alpha candidates (jah_rq_alpha.glsl's JAH_RQ_COUNT), plus the screen march's steps - counts, never clocks.
-uint gWork = 0u;
-#define JAH_RQ_COUNT ++gWork
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -190,7 +186,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// pass keeps every moving history as carried - no new sample, no clamp; a fixed estimator takes its ray;
 	/// rq_reflect_temporal.comp).
 	/// z = THE REST'S RAYS A FRAME a texel still converging traces (the trace's batch at rest): its share of the view's
-	/// rest count (OgreRayQuery.cpp kReflectRestRaysCap's note - k at the rest's start, up to 64 as texels stop).
+	/// rest count (OgreRayQuery.cpp kReflectRestRaysCap's note - k at the rest's start, up to 64 in the tail);
+	/// w = THE RECORD ALLOWANCE a batching texel's record run may take of the list this frame (rq_reflect.comp's record
+	/// runs: min( k_active, capacity / batching ); 0 = a record ends the batch).
 	vec4 rest;
 	/// THE REST BREAKS PER TEXEL FOR MOVERS (PHOTON-2 round 2, G6): x = how many moved instances' SWEPT BOXES follow
 	/// (their bounds this frame and last, joined; at most 16 - more moved breaks the view's rest whole, on the host);
@@ -582,7 +580,6 @@ bool screenAnswer( EyeImage e, EyeImage before, vec3 world, vec3 L, vec3 V, ivec
 	const float maxDistance = p.screen2.x;
 	const JahSsrMarch m = jahSsrMarch( viewToTex, o, d, maxDistance, p.screen2.y, p.screen.z,
 									   jahSsrJitter( vec2( px ), p.screen.w ), p.screen.w );
-	gWork += uint( ceil( m.travelled / max( m.stepLen, 1e-6 ) ) ) + ( m.hit > 0.0 ? 5u : 0u );   // its steps (+ the bisection's)
 	if( m.hit <= 0.0 )
 		return false;
 	// THE CROSSING ITSELF (jahSsrSecant): this trace answers the crossing's own point - one estimator, its hit is the
@@ -776,6 +773,7 @@ struct JahReflectSample
 	vec3 L, traced, recN, screenRadiance;
 	vec2 recBary;
 	float hitT, sampleT, screenT, blendVouch;
+	float sunVis;   // a record's: the sun's visibility at its hit (the list's word; one call site, here)
 	uint recSlot, recPrim, recGeom, photonSource;
 	bool ok, record, recFar, slotHit, screenHit, noSample, blend, centre, vndf, folded, resume;
 };
@@ -791,6 +789,7 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.sampleT = o.hitT;
 	o.screenT = 0.0;
 	o.blendVouch = 1.0;
+	o.sunVis = 1.0;
 	o.recSlot = 0u; o.recPrim = 0u; o.recGeom = 0u; o.photonSource = 0u;
 	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false; o.screenHit = false; o.noSample = false;
 	o.blend = false; o.centre = false; o.vndf = false; o.folded = false; o.resume = false;
@@ -1023,6 +1022,9 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	o.recSlot = recSlot; o.recPrim = recPrim; o.recGeom = recGeom; o.photonSource = photonSource;
 	o.ok = ok; o.record = record; o.recFar = recFar; o.slotHit = slotHit; o.screenHit = screenHit;
 	o.noSample = noSample; o.blend = blend; o.centre = centre; o.vndf = vndf; o.folded = folded; o.resume = resume;
+	// A RECORD'S SUN (the list's word, the write-back's direct light at the hit): a FAR copy's hit is recorded as one
+	// (READ_B finding 1, the gather's rule) and its sun leg lifts by the far copy's hand-over.
+	o.sunVis = record ? jahHitSunVisibility( origin + L * hitT, recN, hitT, recFar ) : 1.0;
 }
 
 // THE TEXEL'S FRAME, FINISHED (main, once per live texel, inside the rest's deal): the batch's folds stored, the state,
@@ -1030,7 +1032,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf, bool ownMoving, float lobeAlpha,
 					EyeImage thisEye, bool atRest, bool restInPlace, bool restBatch, uint batchRays,
 					JahReflectState inPlace, uint restStop, float throwT, JahRestStats rs, bool restHasH, float restN,
-					uint vNow, uint folds, float restT, JahReflectSample s )
+					uint vNow, uint folds, uint consumed, float restT, JahReflectSample s )
 {
 	bool resume;
 	resume = s.resume;
@@ -1082,7 +1084,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		atomicAdd( jahHitBuf[2], 1u );
 	// A BATCH THAT RAN ITS COUNT (every ray folded above): no sample for the temporal pass, which makes the frame's stop
 	// test on the rest mean as it now stands.
-	if( restBatch && !resume && !record && folds == batchRays )
+	if( restBatch && !resume && !record && consumed == batchRays )
 	{
 		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );
 		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
@@ -1113,7 +1115,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		// A FAR COPY'S HIT IS RECORDED AS ONE (READ_B finding 1, the gather's rule): the decode reads the coarsest
 		// level's triangle `prim` (bit 27) and the sun leg lifts by the far copy's hand-over - a near-flagged record
 		// shaded triangle `prim` of level 0, another place of the mesh.
-		const float sunVis = jahHitSunVisibility( hitPos, recN, hitT, recFar );
+		const float sunVis = s.sunVis;   // (reflectSampleAt's: the sun leg at the hit)
 		const bool appended = jahHitAppend( recSlot, recFar, recPrim, recBary, L, sunVis, reflectFootprint( lobeAlpha, hitT ),
 											blend ? 1.0 - blendVouch : 1.0, jahHitDestPack( tc, false, gEye ), world.y,
 											length( hitPos - world ), length( world - thisEye.camPos ) );
@@ -1373,6 +1375,12 @@ void main()
 	JahRestStats rs;
 	bool restHasH = false;
 	const float restN = max( p.stereo.w, 1.0 );
+	// (the space the rest folds in, for the write-back's fold of the record runs: one invocation writes it)
+	if( JAH_HIT_ON && all( equal( gl_GlobalInvocationID, uvec3( 0u ) ) ) )
+	{
+		jahHitBuf[5] = floatBitsToUint( gExposure );
+		jahHitBuf[6] = floatBitsToUint( restN );
+	}
 	vec4 restHr = vec4( 0.0 );
 	if( restBatch )
 	{
@@ -1424,7 +1432,14 @@ void main()
 	// subgroups the workgroup does not fill) by walking its lanes - the same deal, the same order.
 	const bool whole = laneCount == gl_SubgroupSize;
 	const uint vStart = vNow;
-	uint restWork = 0u, restRays = 0u;
+	// THE RECORD RUN (the lead's ruling after the S diagnostic): a batching texel may hand up to `allowance` of its
+	// unblended records a frame to the list as ONE contiguous run, in sample order - the write-back folds them into its
+	// rest mean (rq_hit_composite.comp); a record past it, a blended one, or one the list cannot hold ends the batch as
+	// before. allowance = min( k_active, capacity / batching ) (the host's, p.rest.w): the list's existing capacity is
+	// the count. A texel's run is the records of ONE round of the deal (one reservation): the rounds after it end at a
+	// record.
+	const uint allowance = uint( p.rest.w );
+	uint runUsed = 0u;                               // this texel's records in its run this frame
 	uint dealt = 0u;                                 // this texel's samples dealt so far
 	uint remaining = restBatch ? batchRays : 0u;     // ...and still to deal
 	while( subgroupAny( remaining > 0u || phase == 1u ) )
@@ -1479,38 +1494,105 @@ void main()
 		const bool mine = !job && phase == 1u;
 		JahReflectSample s = jahReflectSampleNone( x );
 		s.resume = mine && resume;
-		gWork = 0u;
 		if( job || ( mine && !batchFull ) )
 			reflectSampleAt( x, thisEye, before, fullRes, atRest,
 							 job ? uint( p.knobs.z ) + first + index
-								 : atRest ? uint( p.knobs.z ) + vNow : uint( p.knobs.z ),
+								 : atRest ? uint( p.knobs.z ) + vNow + runUsed : uint( p.knobs.z ),
 							 s );
-		if( job )
-		{
-			restWork += gWork;   // the rest's dealt rays and their work, this lane's share (the budget's reading)
-			++restRays;
-		}
+
 		// THE ANSWERS BACK, in the deal's order (each texel's run of slots: its sequence order).
 		if( total > 0u )
 		{
 			const uint bits = ( job ? 1u : 0u ) |
 							  ( s.resume || s.record || s.noSample || !finite3( s.traced ) ? 2u : 0u ) |
 							  ( s.centre ? 4u : 0u ) | ( s.vndf ? 8u : 0u ) | ( s.folded ? 16u : 0u ) |
-							  ( s.photonSource << 5u );
+							  ( s.photonSource << 5u ) |
+							  ( s.record && !s.blend && !s.resume && !s.noSample ? 256u : 0u );   // a run's candidate
 			const uint mySlots = ahead >= laneCount ? 0u : min( remaining, laneCount - ahead );
 			if( whole )
 			{
 				const uint most = subgroupMax( mySlots );
+				// (1) THE CLASSES, in order (no fold yet: a run record that does not fit must end the batch before the
+				// samples behind it): a fold, a RUN record (within the allowance, in the texel's first round with
+				// records), or the batch's END
+				uint runMask = 0u, endAt = mySlots;
+				{
+					uint consumedHere = vNow + runUsed;
+					uint runHere = 0u;
+					const bool window = runUsed == 0u;
+					for( uint i = 0u; i < most; ++i )
+					{
+						const uint qBits = subgroupShuffle( bits, min( ahead + i, gl_SubgroupSize - 1u ) );
+						if( i < mySlots && i < endAt && !batchEnded )
+						{
+							if( consumedHere >= kReflectRestVCap )
+								endAt = i;
+							else if( ( qBits & 2u ) == 0u )
+								++consumedHere;
+							else if( ( qBits & 256u ) != 0u && window && runHere < allowance )
+							{
+								runMask |= 1u << i;
+								++runHere;
+								++consumedHere;
+							}
+							else
+								endAt = i;
+						}
+					}
+				}
+				// (2) THE RUN RESERVED, one atomic a subgroup: lane order is each texel's sample order, so a texel's run
+				// is contiguous; a record past the capacity is not written (and ends its texel's batch below).
+				const ivec2 ownerTc = ivec2( subgroupShuffle( uvec2( tc ), owner ) );
+				const bool runRec = job && ( ( subgroupShuffle( runMask, owner ) >> index ) & 1u ) != 0u;
+				const uvec4 runBallot = subgroupBallot( runRec );
+				const uint runCount = subgroupBallotBitCount( runBallot );
+				uint fit = 0u;   // 1 written, 2 not
+				if( runCount > 0u )
+				{
+					uint runBase = 0u;
+					if( subgroupElect() )
+						runBase = atomicAdd( jahHitBuf[0], runCount );
+					runBase = subgroupBroadcastFirst( runBase );
+					if( runRec )
+					{
+						const uint li = runBase + subgroupBallotExclusiveBitCount( runBallot );
+						if( li < JAH_HIT_CAPACITY )
+						{
+							const vec3 hitPos = x.origin + s.L * s.hitT;
+							jahHitWrite( li, s.recSlot, s.recFar, s.recPrim, s.recBary, s.L,
+										 s.sunVis,
+										 reflectFootprint( max( x.alpha, 1e-4 ), s.hitT ), -1.0,
+										 jahHitDestPack( ownerTc, false, gEye ), x.world.y, length( hitPos - x.world ),
+										 length( x.world - thisEye.camPos ) );
+							fit = 1u;
+						}
+						else
+						{
+							atomicAdd( jahHitBuf[1], 1u );
+							fit = 2u;
+						}
+					}
+				}
+				// (3) THE FOLDS, in order: the caches' answers here; a written run record counted (its fold is the
+				// write-back's); the END - a record past the run, one not written, or no evidence.
 				for( uint i = 0u; i < most; ++i )
 				{
 					const uint from = min( ahead + i, gl_SubgroupSize - 1u );
 					const uint qBits = subgroupShuffle( bits, from );
 					const vec3 qTraced = subgroupShuffle( s.traced, from );
 					const float qT = subgroupShuffle( s.sampleT, from );
+					const uint qFit = subgroupShuffle( fit, from );
 					if( i < mySlots && !batchEnded )
 					{
-						if( ( qBits & 2u ) != 0u || vNow >= kReflectRestVCap )
+						if( i >= endAt )
 							batchEnded = true;
+						else if( ( runMask & ( 1u << i ) ) != 0u )
+						{
+							if( qFit == 1u )
+								++runUsed;
+							else
+								batchEnded = true;
+						}
 						else
 						{
 							jahRestFold( rs, qTraced, float( vNow ) );
@@ -1566,19 +1648,17 @@ void main()
 				s.photonSource = lastBits >> 5u;
 			}
 			reflectFinish( tc, dist, world, origin, prevSurf, ownMoving, lobeAlpha, thisEye, atRest, restInPlace,
-						   restBatch, batchRays, inPlace, restStop, throwT, rs, restHasH, restN, vNow, folds, restT, s );
+						   restBatch, batchRays, inPlace, restStop, throwT, rs, restHasH, restN, vNow, folds,
+						   folds + runUsed, restT, s );
 			phase = 2u;
 		}
 	}
-	// THE REST'S WORK THIS FRAME (the budget's reading, read back with the active count): the subgroup's sums, one
-	// atomic each.
-	if( JAH_HIT_ON && subgroupAny( restRays > 0u ) )
+	// THE REST'S BATCHING TEXELS THIS FRAME (the tail budget's reading, OgreRayQuery.cpp kReflectRestRaysCap's note;
+	// read back with the active count): the subgroup's sum, one atomic.
+	if( JAH_HIT_ON && subgroupAny( restBatch ) )
 	{
-		const uint w = subgroupAdd( restWork ), r = subgroupAdd( restRays );
+		const uint b = subgroupAdd( restBatch ? 1u : 0u );
 		if( subgroupElect() )
-		{
-			atomicAdd( jahHitBuf[4], w );
-			atomicAdd( jahHitBuf[5], r );
-		}
+			atomicAdd( jahHitBuf[4], b );
 	}
 }

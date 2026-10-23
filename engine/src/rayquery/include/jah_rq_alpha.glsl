@@ -118,17 +118,10 @@ bool jahAlphaSolid( uint slot, uint instanceId, uint geom, uint prim, vec2 bary 
 
 /// THE LOOP every ray query runs in place of `while( rayQueryProceedEXT( q ) ) {}`:
 /// a triangle candidate (only an alpha-tested instance makes one) is confirmed
-/// where its mask is solid. JAH_RQ_COUNT counts the query and each candidate - the
-/// work a host that defines it measures (the reflection's rest budget); nothing
-/// elsewhere.
-#ifndef JAH_RQ_COUNT
-#define JAH_RQ_COUNT
-#endif
+/// where its mask is solid.
 #define JAH_RQ_PROCEED( q )                                                                       \
-	JAH_RQ_COUNT;                                                                                 \
 	while( rayQueryProceedEXT( q ) )                                                              \
 	{                                                                                             \
-		JAH_RQ_COUNT;                                                                             \
 		if( rayQueryGetIntersectionTypeEXT( q, false ) == gl_RayQueryCandidateIntersectionTriangleEXT && \
 			jahAlphaSolid( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, false ) ),       \
 						   uint( rayQueryGetIntersectionInstanceIdEXT( q, false ) ),                \

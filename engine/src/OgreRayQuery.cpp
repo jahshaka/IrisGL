@@ -243,19 +243,20 @@ unsigned reflectRestLength() { return gatherSettleFramesOf(kReflectMaxFrames); }
 /// every stop at one pose - the rest mean is a function of the scene and the eye, never of the path (the gather's rest
 /// mean's law, rq_probe_integrate.comp). The reference arm's value 2 offsets it by 0x8000 (+ a 16-bit v: < 2^18, exact).
 constexpr unsigned kReflectRestSequence = 0x10000u;
-/// THE REST'S WORK A FRAME, A BUDGET PER VIEW (L7; the lead's rulings after the hold's tail): the rest's first batching
-/// frame costs GiQualityFacts::reflectRestRays (k) rays a resting texel, and its WORK - the GPU's own count of its rest
-/// rays' ray queries and alpha candidates plus the screen march's steps (rq_reflect.comp gWork; counts, never clocks:
-/// L7, L8) - is the rest's BUDGET; each frame the texels still converging share it, k_active = min(kReflectRestRaysCap,
-/// budget / (active x the work a rest ray cost)), the active count and the work a ray from the same read-back (a fixed
-/// kFramesInFlight behind: deterministic). So a rest frame never does more counted work than its first, less as texels
-/// stop. WHY WORK, NOT RAYS (measured, photon-glass): with the count in rays the scattered phase (~11,700 edge texels at
-/// k 64) traced the first frame's rays at 3.3x its cost a ray (3.5 ms against 1.04) - the converging texels' rays are the
-/// long ones. The trace DEALS a subgroup's samples one per lane (rq_reflect.comp, the rest's spread lanes), so the cost
-/// follows the work: as a serial loop per thread a few scattered texels made every warp run the whole share. The cap is
-/// DERIVED: the worst texel measured needed v (SE / 1)^2 = 24.3k samples, ~2.5k of them in by rest frame 100, so >= 44 a
-/// frame over the remaining 500 - 64, the next power of two.
+/// THE REST'S TAIL BUDGET, A COUNT PER VIEW (L7; the lead's rulings after the hold's tail): the rest's first batching
+/// frame traces k = GiQualityFacts::reflectRestRays rays a batching texel - its COUNT, k x the texels batching then -
+/// and each frame after k_active = max(k, min(kReflectRestRaysCap, count / (kReflectRestTailDivisor x batching))), the
+/// batching texels from the newest read-back (a fixed kFramesInFlight behind: deterministic). So the rays a frame are
+/// at most max(k x batching, count / 8): the scattered tail traces at most an EIGHTH of the first frame's rays. WHY NOT
+/// THE WHOLE COUNT (measured, photon-glass): concentrated on the scattered edge texels the first frame's rays cost 3.3-
+/// 4.4x as much a ray (3.5 ms against 1.04 at k 64) - the hardware's BVH traversal, which no count the shader can make
+/// sees (a work count of ray queries and march steps read 24 a ray there against 29 at the first frame). The divisor
+/// is DERIVED: an eighth of the rays at even 8x the cost a ray stays under the first frame's ms (the peak measured
+/// 4.4x: a 1.8x margin). The trace DEALS a subgroup's samples one per lane (rq_reflect.comp, the rest's spread lanes),
+/// so the cost follows the rays. The cap is DERIVED: the worst texel measured needed v (SE / 1)^2 = 24.3k samples,
+/// ~2.5k of them in by rest frame 100, so >= 44 a frame over the remaining 500 - 64, the next power of two.
 constexpr unsigned kReflectRestRaysCap = 64u;
+constexpr unsigned kReflectRestTailDivisor = 8u;
 /// THE MOVED INSTANCES A REST FOLLOWS PER TEXEL (G6, rq_reflect.comp's restMoverBox): more moved in one frame breaks
 /// the view's rest whole.
 constexpr unsigned kReflectRestMovers = 16u;
@@ -330,18 +331,19 @@ constexpr unsigned kReflectScreenBinding = kReflectReferenceBinding + 1u;   // t
 /// (jah_reflect_denoise.glsl) - or a stand-in where the multiplier is a constant (ReflectParams::denoiser).
 constexpr unsigned kReflectExposureBinding = kReflectScreenBinding + 3u;
 /// ...and THE REST'S STOP SHARE (51, PHOTON-7 stage 6; jah_reflect_rest.glsl's stop): a trace texel's share of the
-/// one-code display budget at its own pixel, W / sqrt( Q ) codes over the spatial filter's rest taps - written by the
-/// filter at rest (r32f, codes + 1; 0 = not measured) and read by the next frame's temporal pass, which stops the
-/// texel when its own standard error in display codes is within it. A STATISTIC read for the stop, never colour fed
-/// back.
+/// one-code display budget - the MIN over the pixels that read it of each one's (r32ui, a positive float's bits, by
+/// the filter's atomic min at rest; all ones = no pixel measured it) - read and reset by the next frame's temporal
+/// pass, which stops the texel when its own standard error is within it. A STATISTIC read for the stop, never colour
+/// fed back.
 constexpr unsigned kReflectShareBinding = kReflectExposureBinding + 1u;
 static_assert(kReflectBindings == kReflectShareBinding + 1u, "the rest's stop share is the reflection set's last binding");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's STATE texel (an unshaded record's distance is
 /// withheld there), the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the ray's direction) and the
 /// air's table, the reflection's fog along its ray — and (PHOTON-2 1b) the reflection's raw SAMPLE a shaded record
-/// becomes.
-constexpr unsigned kHitCompositeBindings = 8u;
+/// becomes — and (PHOTON-7 stage 6, the record runs) the rest's in-place halves a run folds into: the history this
+/// frame and last, the state this frame and last.
+constexpr unsigned kHitCompositeBindings = 12u;
 
 /// A storage image this file owns outright — the temporal mean and the distance
 /// beside it. Not an Ogre texture: nothing but this compute pass ever reads or
@@ -1055,7 +1057,7 @@ private:
         /// THE REST'S REFERENCE (R1 (f)'s arm "reflect.restReference"): rgba32f, the texel's raw rest samples' mean and
         /// count; the trace's size under the arm, 1 x 1 otherwise (`referenceFull`).
         ReflectImage reference;
-        /// THE REST'S STOP SHARE (binding 51): r32f a trace texel, codes + 1.
+        /// THE REST'S STOP SHARE (binding 51): r32ui a trace texel, a float's bits.
         ReflectImage share;
         bool referenceFull = false;
         unsigned w = 0, h = 0, layers = 1;
@@ -1098,7 +1100,7 @@ private:
         /// THE FRAME BETWEEN ITS TWO HALVES (trace -> finishReflect): the ring slot
         /// the trace bound, its grid, and which of the pair is this frame's mean.
         bool     finishPending = false;
-        unsigned finishRing = 0, traceW = 0, traceH = 0, curIdx = 0;
+        unsigned finishRing = 0, traceW = 0, traceH = 0, curIdx = 0, prevIdx = 1;   ///< (the trace's halves this frame)
         /// ...and the full-resolution picture the spatial filter writes every pixel of (PHOTON-7 stage 6 commit 7).
         unsigned fullW = 0, fullH = 0;
         /// THE REST (PHOTON-2 1e, fix F1; round 2: R1, G1-G6): consecutive recorded frames with the eye basis
@@ -1118,9 +1120,9 @@ private:
         /// The rest's serial (one a rest begun), the rest frame a moved instance last crossed it (0: none), and the
         /// latch "a rest frame since then counted no active texel" (the hit list's third counter word, read late).
         unsigned restSession = 0u, restMoverFrame = 0u;
-        /// THE REST'S WORK BUDGET (kReflectRestRaysCap's note): the rest's first batching frame's counted work, from its
-        /// read-back (0 until it arrives: the first frames run k a texel).
-        unsigned long long restWorkBudget = 0ull;
+        /// THE REST'S RAY COUNT (kReflectRestRaysCap's note): k x the texels batching at the rest's first batching
+        /// frame, from its read-back (0 until it arrives: the first frames run k a texel).
+        unsigned long long restRayCount = 0ull;
         bool restAllStopped = false;
         unsigned restMoverCrossings = 0u;   ///< rest frames a moved instance's box was handed to the trace (status)
         unsigned cameraCuts = 0u;           ///< camera cuts detected (N3: each one the histories cleared)
@@ -1493,7 +1495,7 @@ private:
         uint32_t decodeFrame = 0xFFFFFFFFu;
         VkDescriptorSet sets[kReflectRing] = {};
         RawBuffer params[kReflectRing];
-        /// The buffer's counter words (jah_rq_hit_record.glsl: six of its eight), copied per frame into a host ring
+        /// The buffer's counter words (jah_rq_hit_record.glsl: five of its eight), copied per frame into a host ring
         /// and read once the frame retired (never a wait).
         RawBuffer readback;
         /// ...with the records that frame's LIST held (its rows x width, never the overflow arm's cap: the list's own
@@ -1516,9 +1518,8 @@ private:
         /// ...and that frame's CAPPED texels (counter word 3, commit 8): stopped at their count's 16-bit ceiling, not by
         /// their standard error - the rest's defect reading.
         uint32_t restCapped = 0u;
-        /// ...and the WORK of its rest rays and those rays (counter words 4 and 5: the rest's budget,
-        /// kReflectRestRaysCap's note).
-        uint32_t restWork = 0u, restRays = 0u;
+        /// ...and its BATCHING texels (counter word 4: the rest's tail budget, kReflectRestRaysCap's note).
+        uint32_t restBatching = 0u;
         /// Armed for the decode pass: the SceneManager whose draws are shown, and
         /// the camera whose auto aspect is held off for the pass (the decode's
         /// target is the list, not a picture — F7).
@@ -1551,6 +1552,8 @@ private:
     /// The reflection sample's stand-in: a SCREEN image (one layer, an array
     /// view — what the composite declares since LAYERED-STEREO-1); mHitDummyColour stays the probe atlas's 2D stand-in.
     ReflectImage mHitDummyHist;
+    /// ...and the reflection state's (rg32ui, one layer, an array view): the record runs' fold (binding 10-11).
+    ReflectImage mHitDummyState;
     bool mHitDummiesReady = false;
     bool mHitDummiesNeedInit = false;
     // ---- THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) ----------------
@@ -2357,7 +2360,7 @@ void RayQueryTier::close() {
         dropBuffer(hv.readback);
     }
     mHits.clear();
-    for (ReflectImage *d : { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyHist }) {
+    for (ReflectImage *d : { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyHist, &mHitDummyState }) {
         if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
         if (d->image) vkDestroyImage(mVk, d->image, nullptr);
         if (d->memory) vkFreeMemory(mVk, d->memory, nullptr);
@@ -5619,7 +5622,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
         if (!makeStorageImage(w, h, formats[1], rv.state[i], err, layers)) return false;
     }
     if (!makeStorageImage(w, h, formats[0], rv.sample, err, layers)) return false;
-    if (!makeStorageImage(w, h, VK_FORMAT_R32_SFLOAT, rv.share, err, layers)) return false;
+    if (!makeStorageImage(w, h, VK_FORMAT_R32_UINT, rv.share, err, layers)) return false;   // the stop share: a float's bits, atomic min
     // (the arm toggled re-makes the whole set: a measuring arm, set before the session's measurement)
     if (!makeStorageImage(reference ? w : 1u, reference ? h : 1u, VK_FORMAT_R32G32B32A32_SFLOAT, rv.reference, err,
                           layers))
@@ -6458,24 +6461,27 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             (restHits->restActiveTag >> 20u) == (rv.restSession & 0xFFFu) &&
             (restHits->restActiveTag & 0xFFFFFu) > rv.restMoverFrame && restHits->restActive == 0u)
             rv.restAllStopped = true;
-        // THE REST'S WORK, SHARED (kReflectRestRaysCap's note): the budget fixed from this rest's first read-back that
-        // counted rest rays (its first batching frame: k a texel), then k_active = budget / (active x work a ray) from
-        // the newest read-back - integer, one read-back behind; a texel resumed by a moved instance joins the active
-        // count and the share falls.
+        // THE REST'S TAIL BUDGET (kReflectRestRaysCap's note): the count fixed from this rest's first read-back that
+        // counted batching texels, then k_active from the newest read-back's batching count - integer, one read-back
+        // behind; a texel resumed by a moved instance joins the batching count and the share falls.
         {
             const unsigned kBase = std::max(1u, giQualityFacts(scene->giParams().quality).reflectRestRays);
-            if (rv.restFrames <= 1u) rv.restWorkBudget = 0ull;
+            if (rv.restFrames <= 1u) rv.restRayCount = 0ull;
             unsigned share = kBase;
             if (rv.restFrames > 0u && restHits && restHits->restActiveTag != 0u &&
-                (restHits->restActiveTag >> 20u) == (rv.restSession & 0xFFFu) && restHits->restActive > 0u &&
-                restHits->restRays > 0u && restHits->restWork > 0u) {
-                if (rv.restWorkBudget == 0ull) rv.restWorkBudget = restHits->restWork;
-                // budget / (active x work / rays) = budget x rays / (active x work)
-                const unsigned long long k = rv.restWorkBudget * restHits->restRays /
-                                             ((unsigned long long)restHits->restActive * restHits->restWork);
-                share = unsigned(std::min<unsigned long long>(kReflectRestRaysCap, std::max<unsigned long long>(1ull, k)));
+                (restHits->restActiveTag >> 20u) == (rv.restSession & 0xFFFu) && restHits->restBatching > 0u) {
+                if (rv.restRayCount == 0ull) rv.restRayCount = (unsigned long long)kBase * restHits->restBatching;
+                const unsigned long long k =
+                    rv.restRayCount / ((unsigned long long)kReflectRestTailDivisor * restHits->restBatching);
+                share = unsigned(std::max<unsigned long long>(kBase, std::min<unsigned long long>(kReflectRestRaysCap, k)));
             }
             pp.rest[2] = float(share);
+            // THE RECORD ALLOWANCE (the record runs, rq_reflect.comp): the list's capacity shared by the texels batching
+            // - min( k_active, capacity / batching ) a texel - none until the first read-back counted them.
+            unsigned allowance = 0u;
+            if (rv.restRayCount != 0ull && restHits && restHits->restBatching > 0u)
+                allowance = std::min(share, unsigned(restHits->capacity / restHits->restBatching));
+            pp.rest[3] = float(allowance);
         }
         // THE HOLD: every texel has stopped (its standard error under a code - a capped texel stops too, counted as the
         // defect it is: RayQueryStatus::reflectRestCapped). No frame count holds a rest (K_max 512 deleted, commit 8).
@@ -6915,6 +6921,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     rv.fullW = fullW;
     rv.fullH = fullH;
     rv.curIdx = cur;
+    rv.prevIdx = prev;
     rv.held = hold;
     rv.rays = hold ? 0u : traceW * traceH;
     if (!hold) ++rv.frame;
@@ -9081,6 +9088,7 @@ bool RayQueryTier::ensureHitDummies(std::string &err) {
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, mHitDummyColour, err)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R32_UINT, mHitDummyDest, err)) return false;
     if (!makeStorageImage(1u, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, mHitDummyHist, err, 1u)) return false;
+    if (!makeStorageImage(1u, 1u, VK_FORMAT_R32G32_UINT, mHitDummyState, err, 1u)) return false;
     mHitDummiesReady = true;
     mHitDummiesNeedInit = true;
     return true;
@@ -9089,9 +9097,9 @@ bool RayQueryTier::ensureHitDummies(std::string &err) {
 void RayQueryTier::initHitDummies(VkCommandBuffer cmd) {
     if (!mHitDummiesNeedInit || !cmd) return;
     mHitDummiesNeedInit = false;
-    VkImageMemoryBarrier b[4] = {};
-    ReflectImage *imgs[4] = { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyHist };
-    for (int i = 0; i < 4; ++i) {
+    VkImageMemoryBarrier b[5] = {};
+    ReflectImage *imgs[5] = { &mHitDummyIds, &mHitDummyColour, &mHitDummyDest, &mHitDummyHist, &mHitDummyState };
+    for (int i = 0; i < 5; ++i) {
         b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         b[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         b[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -9103,7 +9111,7 @@ void RayQueryTier::initHitDummies(VkCommandBuffer cmd) {
         b[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     }
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 4, b);
+                         0, 0, nullptr, 0, nullptr, 5, b);
 }
 
 void RayQueryTier::hitStandIns(HitListBinding &out) {
@@ -9131,8 +9139,7 @@ void RayQueryTier::readHitCounters(HitView &hv) {
             hv.dropped = w[1];
             hv.restActive = w[2];
             hv.restCapped = w[3];
-            hv.restWork = w[4];
-            hv.restRays = w[5];
+            hv.restBatching = w[4];
             hv.restActiveTag = pd.restTag;
             newest = pd.frame;
             any = true;
@@ -9485,6 +9492,10 @@ bool RayQueryTier::makeCompositePipeline(std::string &err) {
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 5 the list's records (PHOTON-I-1 fix 5)
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 6 the air's table
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 7 the reflection's sample (PHOTON-2 1b; its hit distance in w)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 8 the reflection's history, this frame's half (the rest mean M)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 9 ...and last frame's (the frozen H, the residual)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 10 the reflection's state, this frame
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 11 ...and last frame
     };
     for (unsigned i = 0; i < kHitCompositeBindings; ++i) {
         b[i].binding = i;
@@ -9563,9 +9574,14 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     // with the consumer's flag down (its records, if any, are skipped).
     VkImageView atlasView = mHitDummyColour.view;
     VkImageView sampleView = mHitDummyHist.view;   // the rgba16f stand-in shape
+    VkImageView histViews[2] = { mHitDummyHist.view, mHitDummyHist.view };
+    VkImageView stateViews[2] = { mHitDummyState.view, mHitDummyState.view };
     bool reflectBound = false, gatherBound = false;
     if (auto rit = mReflects.find(key); rit != mReflects.end() && rit->second.finishPending) {
-        sampleView = rit->second.sample.view;
+        const ReflectView &rv = rit->second;
+        sampleView = rv.sample.view;
+        histViews[0] = rv.hist[rv.curIdx].view;  histViews[1] = rv.hist[rv.prevIdx].view;
+        stateViews[0] = rv.state[rv.curIdx].view; stateViews[1] = rv.state[rv.prevIdx].view;
         reflectBound = true;
     }
     if (mGather) {
@@ -9643,6 +9659,16 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     if (!sampleImg.imageView) return;
     w[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[7].pImageInfo = &sampleImg;
+    // THE REST'S IN-PLACE HALVES (8-11): the record runs' fold - the halves the trace bound this frame
+    VkDescriptorImageInfo restImg[4] = {};
+    const VkImageView restViews[4] = { histViews[0], histViews[1], stateViews[0], stateViews[1] };
+    for (int i = 0; i < 4; ++i) {
+        restImg[i].imageView = restViews[i];
+        restImg[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        if (!restImg[i].imageView) return;
+        w[8 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[8 + i].pImageInfo = &restImg[i];
+    }
     vkUpdateDescriptorSets(mVk, kHitCompositeBindings, w, 0, nullptr);
 
     {
@@ -9703,9 +9729,9 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
         region.srcOffset = bufInfo.offset;
         region.dstOffset = VkDeviceSize(hv.frame % kFramesInFlight) * 32u;
         // appended, dropped, the reflection's active resting texels, its CAPPED texels (word 3: the copy stopped at 12
-        // bytes, so RayQueryStatus::reflectRestCapped read a word no frame wrote - 0 - until PHOTON-7 stage 6), its
-        // rest rays' work and those rays
-        region.size = 24u;
+        // bytes, so RayQueryStatus::reflectRestCapped read a word no frame wrote - 0 - until PHOTON-7 stage 6) and its
+        // batching texels
+        region.size = 20u;
         vkCmdCopyBuffer(cmd, bufInfo.buffer, hv.readback.buffer, 1, &region);
         VkMemoryBarrier h{};
         h.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;

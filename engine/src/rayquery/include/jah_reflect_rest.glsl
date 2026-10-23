@@ -18,15 +18,17 @@
 // the FROZEN HALF once the hand-over is done (no reader composes H past 2N: zero bytes, PREFLIGHT_R section 9 W5), and
 // a texel with no moving history keeps it there from its first sample.
 // THE STOP (the lead's levers (i) + (ii), and the share rule after the SE floor's diagnostic): M goes on accumulating
-// PER TEXEL until ITS OWN rest mean's standard error, IN DISPLAY CODES (the exact slope of the view's exposure, grade,
-// film curve and sRGB encode at the pixel's value: jahDisplayCodes), is within ITS SHARE of the one-code display budget
-// for kReflectStopFrames frames - SE_t <= 1 code x W / sqrt( Q ) at its own pixel, W = 1 + sum w_i the spatial filter's
-// rest taps' weights (the centre at 1), Q = 1 + sum w_i^2 over the taps whose answer has a variance (a centre ray's has
-// none and needs no share): sqrt( n_eff ), the filter's effective tap count there. When every tap meets its own share
-// the displayed variance sum w_i^2 SE_i^2 / W^2 <= 1 code^2 (exact where the neighbours' n_eff and display slope match
-// the pixel's, as on a smooth surface), and NO TEXEL WAITS ON ANOTHER: the rule (ii) it replaces stopped a texel on its
-// pixel's combined SE, and a texel whose stopped neighbours kept a 4-7 code SE (their own share met against wide
-// filters) never could - measured on photon-glass, its own SE 0.09 codes at v 35,901 under a displayed 1.18.
+// PER TEXEL until ITS OWN rest mean's standard error (the denoiser space's, the space the filter combines its taps in)
+// is within ITS SHARE for kReflectStopFrames frames. A pixel p's displayed SE is sqrt( sum w_i^2 SE_i^2 ) / W_p carried
+// to display codes by its slope (the denoiser space's to linear luma, then jahDisplayCodes: the exact slope of the
+// view's exposure, grade, film curve and sRGB encode at its value), over the filter's fixed rest taps (W_p = the
+// centre's 1 + sum w_i; Q_p = sum of the squared weights of those whose answer has a variance - a centre ray's has
+// none): it is under ONE CODE when every such tap's SE is under W_p / sqrt( Q_p ) codes - sqrt( n_eff ), >= 1 as
+// ( sum w )^2 >= sum w^2. A texel feeds several pixels, so its share is the MIN over the pixels that read it (the
+// filter's atomic min, binding 51): then EVERY pixel's displayed SE is under one code whatever its neighbours' n_eff
+// and slopes, and NO TEXEL WAITS ON ANOTHER (the rule (ii) it replaces stopped a texel on its pixel's combined SE, and
+// one whose stopped neighbours kept a 4-7 code SE never could: measured on photon-glass, its own SE 0.09 codes at
+// v 35,901 under a displayed 1.18).
 // Then the texel STOPS tracing (R1), and the view holds when every texel has stopped. There
 // is NO SAMPLE CAP (K_max 512 deleted): a texel's count saturates only at its 16-bit field, a CAPPED texel - stopped,
 // counted (the hit list's word 3, RayQueryStatus::reflectRestCapped) as the defect reading it is, never a deadline (the

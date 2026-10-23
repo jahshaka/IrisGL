@@ -171,7 +171,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// pass keeps every moving history as carried - no new sample, no clamp; a fixed estimator takes its ray;
 	/// rq_reflect_temporal.comp).
 	/// z = THE REST'S RAYS A FRAME a texel still converging traces (the trace's batch at rest): its share of the view's
-	/// rest count (OgreRayQuery.cpp kReflectRestRaysCap's note - k at the rest's start, up to 64 as texels stop).
+	/// rest count (OgreRayQuery.cpp kReflectRestRaysCap's note - k at the rest's start, up to 64 in the tail);
+	/// w = THE RECORD ALLOWANCE a batching texel's record run may take of the list this frame (rq_reflect.comp's record
+	/// runs: min( k_active, capacity / batching ); 0 = a record ends the batch).
 	vec4 rest;
 	/// THE REST BREAKS PER TEXEL FOR MOVERS (PHOTON-2 round 2, G6): x = how many moved instances' SWEPT BOXES follow
 	/// (their bounds this frame and last, joined; at most 16 - more moved breaks the view's rest whole, on the host);
@@ -209,16 +211,20 @@ layout( rgba32f, set = 0, binding = 46 ) uniform readonly image2DArray restRefer
 /// THE EXPOSURE HISTORY (the chain's measured 1 x 1; a stand-in where p.denoiser.y = 0).
 layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
 
-/// THE REST'S STOP SHARE (jah_reflect_rest.glsl's stop): written here at rest, at each trace texel's own pixel, for the
-/// next frame's stop - its share of the one-code display budget, W / sqrt( Q ) codes, + 1 (0 = not measured). A
-/// statistic, never colour fed back.
-layout( r32f, set = 0, binding = 51 ) uniform writeonly image2DArray restShare;
+/// THE REST'S STOP SHARE (jah_reflect_rest.glsl's stop): at rest every pixel lowers, to its own share, the share of
+/// each trace texel among its fixed rest taps that carries a variance - the denoiser-space standard error the texel
+/// may keep for THIS pixel's displayed SE to stay under one code - by an atomic MIN of the float's bits (positive
+/// floats order as their bits); the temporal pass read and reset it (all ones: no pixel measured the texel) before
+/// this pass. A statistic, never colour fed back.
+layout( r32ui, set = 0, binding = 51 ) uniform uimage2DArray restShare;
 
 #include "jah_rq_finite.glsl"
 #include "jah_reflect_draw.glsl"
 float gExposure = 1.0;
 #define JAH_DENOISE_EXPOSURE gExposure
 #include "jah_reflect_denoise.glsl"
+/// (after the denoiser space: the stop's share is carried through the display's code)
+#define JAH_DISPLAY_LUT( i ) p.display[( i ) >> 2][( i ) & 3]
 #include "jah_reflect_rest.glsl"
 #include "jah_reflect_state.glsl"
 
@@ -392,19 +398,19 @@ void main()
 	const float feather = p.projParams.w;
 	const float alpha = max( texelFetch( gBufShadowRoughness, ivec3( px, gEye ), 0 ).y * 0.999 + 0.001, 1e-6 );
 	const float r = sqrt( alpha );
-	// THIS PIXEL IS ITS TRACE TEXEL'S OWN (the one the texel was traced from): it reports the share the stop reads.
 	const ivec2 own = min( px / scale, traceRes - 1 );
-	const bool ownPixel = all( equal( px, jahTexelPixel( own, scale, fullRes ) ) );
 	if( !c.ok || r > roughGate + feather )
 	{
 		imageStore( ssrReflection, ivec3( px, gEye ), vec4( 0.0 ) );
-		if( ownPixel )
-			imageStore( restShare, ivec3( own, gEye ), vec4( 0.0 ) );   // not measured
 		return;
 	}
 	// ---- THE CENTRE: the pixel's own trace texel (full resolution), or the joint-bilateral upsample (half) ----
 	vec3 cd = vec3( 0.0 );
 	float sigma = 0.0, n = 0.0, sumW = 0.0;
+	// (the centre's texels and weights, for the stop's share: at most the upsample's four)
+	ivec2 shareT[4];
+	float shareW[4];
+	int shareN = 0;
 	{
 		const vec2 at = ( vec2( px ) + 0.5 ) / vec2( scale ) - 0.5;   // this pixel in trace-texel coordinates
 		const ivec2 base = scale.x > 1 ? ivec2( floor( at ) ) : own;
@@ -435,6 +441,12 @@ void main()
 			sigma += a23.y * w;
 			n += pt.w * w;
 			sumW += w;
+			if( a23.y > 0.0 )
+			{
+				shareT[shareN] = li + tile0;
+				shareW[shareN] = w;
+				++shareN;
+			}
 		}
 		if( sumW > 0.0 )
 		{
@@ -456,8 +468,6 @@ void main()
 	if( !( sumW > 0.0 ) || !finite3( cd ) )
 	{
 		imageStore( ssrReflection, ivec3( px, gEye ), vec4( 0.0 ) );   // no answer here: the probe's
-		if( ownPixel )
-			imageStore( restShare, ivec3( own, gEye ), vec4( 0.0 ) );   // not measured
 		return;
 	}
 	const JahReflectState os = jahStateUnpack( imageLoad( stateCur, ivec3( own, gEye ) ).xy );
@@ -470,15 +480,20 @@ void main()
 	const float cl = jahDenoiseLuma( cd );
 	vec3 sum = tm( cd, D );
 	float wsum = 1.0;
-	// THE STOP SHARE at rest (jah_reflect_rest.glsl): Q = the centre's weight squared (1) and every tap's whose answer
-	// has a variance; the share W / sqrt( Q ) below.
-	float shareQ = 1.0;
+	// THE STOP SHARE at rest (jah_reflect_rest.glsl): Q = the squared normalised weight of every centre texel and
+	// every tap whose answer has a variance (the displayed mean is ( centre + sum w_i x_i ) / W); the share below.
+	float shareQ = 0.0;
+	for( int k = 0; k < shareN; ++k )
+		shareQ += ( shareW[k] / sumW ) * ( shareW[k] / sumW );
+	const bool shareAtRest = p.knobs2.x >= 0.5 && !referenceShown;
+	uint shareTaps = 0u;   // the disk's taps that carry a variance (bit i: tap i)
+	float turn = 0.0;
 	if( !referenceShown && radius > 1.0 )
 	{
 		const float halfAngle = clamp( ( atan( 3.0 * r * r ) + 0.01 ) * mix( 1.0, 4.0, D ), 0.01, 1.5707963 );
 		// the disk's turn: a hash of the PIXEL - never of the frame
-		const float turn = float( jahReflectPcg( uint( px.x ) * 73856093u ^ uint( px.y ) * 19349663u ^
-												 uint( gEye ) * 83492791u ) & 0xFFFFu ) * ( 6.2831853 / 65536.0 );
+		turn = float( jahReflectPcg( uint( px.x ) * 73856093u ^ uint( px.y ) * 19349663u ^
+									 uint( gEye ) * 83492791u ) & 0xFFFFu ) * ( 6.2831853 / 65536.0 );
 		for( int i = 0; i < kTaps; ++i )
 		{
 			const float a = float( i ) * kGoldenAngle + turn;
@@ -506,15 +521,37 @@ void main()
 			sum += tm( xd, D ) * w;
 			wsum += w;
 			if( a23.y > 0.0 )
+			{
 				shareQ += w * w;
+				shareTaps |= 1u << uint( i );
+			}
 		}
 	}
 	const vec3 outRgb = clamp( jahFromDenoise( invTm( sum / wsum, D ) ), vec3( 0.0 ), vec3( kMaxRadiance ) );
-	// ...reported at rest, at the texel's own pixel: its share of the one-code budget, sqrt( n_eff ) codes.
-	if( ownPixel )
+	// ...THIS PIXEL'S SHARE, to every texel it reads with a variance: W / sqrt( Q ) display codes at this pixel - its
+	// sqrt( n_eff ), never under one code since ( sum w )^2 >= sum w^2 - in the DENOISER space the taps are combined in
+	// (this pixel's slope from the denoiser space to linear luma, then the display's at its value). Each texel keeps the
+	// MIN over the pixels that read it, so every pixel's displayed SE stays under one code whatever its neighbours'
+	// n_eff and slopes (the lead's exact form).
+	if( shareAtRest && shareQ > 0.0 )
 	{
-		const float share = p.knobs2.x >= 0.5 && !referenceShown ? wsum / sqrt( shareQ ) : -1.0;
-		imageStore( restShare, ivec3( own, gEye ), vec4( finite1( share ) && share > 0.0 ? share + 1.0 : 0.0 ) );
+		const float perD = jahDisplayCodes( jahDenoiseLuma( outRgb ), jahDenoiseSlopeAt( jahDenoiseLuma( sum / wsum ) ) );
+		const float shareD = wsum / sqrt( shareQ ) / perD;
+		if( finite1( shareD ) && shareD > 0.0 )
+		{
+			const uint bits = floatBitsToUint( shareD );
+			for( int k = 0; k < shareN; ++k )
+				imageAtomicMin( restShare, ivec3( shareT[k], gEye ), bits );
+			for( int i = 0; i < kTaps; ++i )
+				if( ( shareTaps & ( 1u << uint( i ) ) ) != 0u )
+				{
+					// (the tap's texel again, from its index: the disk above)
+					const float a = float( i ) * kGoldenAngle + turn;
+					const vec2 off = radius * sqrt( ( float( i ) + 0.5 ) / float( kTaps ) ) * vec2( cos( a ), sin( a ) );
+					const ivec2 q = ivec2( floor( vec2( px ) + off + 0.5 ) );
+					imageAtomicMin( restShare, ivec3( min( q / scale, traceRes - 1 ), gEye ), bits );
+				}
+		}
 	}
 	// ---- THE WRITE: the feather (owner, ledger section 426) and the young VIEW's fade ----
 	float gate = 1.0 - smoothstep( roughGate - feather, roughGate + feather, r );
