@@ -185,6 +185,10 @@ struct CardRec {
     unsigned instance = 0u;      ///< index into SurfaceCache::mInstances
     unsigned char axis = 0u;
     unsigned char lodLevel = 0u;
+    /// THE CAPTURED LEVEL'S MEASURED BOUND, world metres (READ_A finding 3): the mesh's baked two-sided distance of
+    /// `lodLevel` from level 0 (MeshData::lodBounds; 0 at level 0) times the instance's largest axis scale - how far
+    /// the surface this card captured may lie from the level-0 surface every sun ray traces (sunLiftOf).
+    float levelBound = 0.0f;
     Ogre::Vector3 centre;        ///< the card box's centre, world
     Ogre::Vector3 u, v, d;       ///< the world axis frame (d = outward)
     float halfU = 0.0f, halfV = 0.0f, halfDepth = 0.0f;   ///< world metres

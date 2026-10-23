@@ -809,6 +809,13 @@ bool SurfaceCache::buildCardsFor(const CardSceneView::Candidate &cand) {
                 // and `gi.card_capture` asserts the two agree — which is the
                 // check that a re-derivation quietly made impossible.
                 r.lodLevel = c.lodLevel;
+                // ...AND THAT LEVEL'S MEASURED BOUND in the world (READ_A finding 3: the still trace's lift reads it).
+                r.levelBound = 0.0f;
+                if (c.lodLevel > 0u && cand.lodBounds && size_t(c.lodLevel) <= cand.lodBounds->size()) {
+                    const float b = (*cand.lodBounds)[size_t(c.lodLevel) - 1u];
+                    const float sMax = std::max(std::fabs(scale.x), std::max(std::fabs(scale.y), std::fabs(scale.z)));
+                    if (std::isfinite(b) && b > 0.0f) r.levelBound = b * sMax;
+                }
                 if (!allocRect(r.size, r.atlasX, r.atlasY)) {
                     // The atlas is full. Everything allocated so far stands;
                     // this instance simply holds fewer cards, and the status's
@@ -1792,14 +1799,15 @@ namespace {
 /// lift: a card's footprint is grown by its own still-trace lift plus one texel
 /// (cardFootprint's `margin`, sunLiftOf) — the ray starts that far off the card.
 constexpr float kFootprintMargin = 0.05f;
-/// THE STILL TRACE'S LIFT, in card texels (rq_card_movers.comp's head): the origin moves off the receiver along its
-/// normal by this many of the card's texel, plus the Depth layer's R16F quantum at the card's far end. The near copy a
-/// sun ray hits is the mesh's LEVEL 0 (PHOTON-7 stage 6: ONE RAY LEVEL PER MESH) and the card is captured at the
-/// bake's level for its texel (cards::levelForTexel: that level's measured bound is under the nominal page's texel),
-/// so the traced surface lies within about one texel of the captured one; the second texel is the margin the split
-/// card's finer texel needs (a level chosen for the nominal page, gi.card_capture). The ray tier's footprint at the
-/// card that this lift also cleared (a coarser near level re-fitted per view) is gone with the level.
-constexpr float kSunLiftTexels = 2.0f;
+/// THE STILL TRACE'S LIFT (rq_card_movers.comp's head; READ_A finding 3): the origin moves off the receiver along its
+/// normal by THE CAPTURED LEVEL'S MEASURED BOUND (CardRec::levelBound: the surface the card captured lies within it of
+/// level 0, which every sun ray traces - PHOTON-7 stage 6, ONE RAY LEVEL PER MESH), plus ONE TEXEL (the texel's own
+/// reconstruction: its depth and normal are a texel's average) and the Depth layer's R16F quantum at the card's far
+/// end. Derived, never a texel count: the bake picks the level for its NOMINAL 128-texel page while a split card's
+/// texel is that page's / the split (up to kCardMaxSplit 4), so a fixed "2 texels" let a convex card wider than 4 m
+/// start its sun rays inside level 0 (self-shadowed texels). The ray tier's footprint at the card that the old lift
+/// also cleared (a coarser near level re-fitted per view) is gone with the level.
+constexpr float kSunLiftTexels = 1.0f;
 /// A ray's length: the sun is at infinity; a mover beyond the residency radius
 /// casts onto no resident card anyway.
 constexpr float kMoverRayRange = 10000.0f;
@@ -2029,7 +2037,7 @@ float SurfaceCache::sunLiftOf(const CardRec &c) const {
     const float texel = 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size));
     // R16F keeps 11 bits: the depth quantum at the card's far end.
     const float depthQuantum = (2.0f * c.halfDepth + 2.0f * captureMargin(c.halfDepth)) / 1024.0f;
-    return kSunLiftTexels * texel + depthQuantum;
+    return c.levelBound + kSunLiftTexels * texel + depthQuantum;
 }
 
 void SurfaceCache::traceSun() {
