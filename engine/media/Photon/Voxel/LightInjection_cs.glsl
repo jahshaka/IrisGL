@@ -82,7 +82,7 @@ uniform restrict image3D backVoxel;
 // last UAV.
 layout( std430, ogre_U@value(jahInjUav) ) restrict coherent buffer jahBrickLayout { uint jahBrickMask[]; };
 @add( jahInjUav, 1 )
-// PHOTON-7 stage 5: THE FEEDBACK'S BRICK STATE (8 words a brick, PhotonBrickFeedback_cs.glsl): word 7 takes the most a
+// PHOTON-7 stage 5: THE FEEDBACK'S BRICK STATE (10 words a brick, PhotonBrickFeedback_cs.glsl's FB_W; word 9 its moved flux): word 7 takes the most a
 // voxel's total changed in this injection, absolute radiance (atomicMax of the float bits; the frame's CLEAR zeroes it) -
 // the cards' accumulation reads it beside a pass's move.
 layout( std430, ogre_U@value(jahInjUav) ) restrict coherent buffer jahFbStateLayout { uint jahFbState[]; };
@@ -218,6 +218,7 @@ float jahBrickChange( float3 a, float3 b )
 // ...and the work group's most, reduced in shared memory before one atomic per group.
 shared uint jahBrickShared;
 shared uint jahBrickAbsShared;
+shared uint jahBrickFluxShared;
 
 //in uvec3 gl_NumWorkGroups;
 //in uvec3 gl_WorkGroupID;

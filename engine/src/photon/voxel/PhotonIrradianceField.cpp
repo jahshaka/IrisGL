@@ -955,8 +955,8 @@ namespace Ogre
         {
             if( mMarkCluster )
                 vaoManager->destroyUavBuffer( mMarkCluster );
-            vector<uint32>::type zeros( 2u * clusters, 0u );
-            mMarkCluster = vaoManager->createUavBuffer( 2u * clusters, sizeof( uint32 ), 0, zeros.data(), false );
+            vector<uint32>::type zeros( 3u * clusters, 0u );   // (three words a cluster: JahCardIndirect_cs.glsl's REDUCE)
+            mMarkCluster = vaoManager->createUavBuffer( 3u * clusters, sizeof( uint32 ), 0, zeros.data(), false );
             mMarkClusterCapacity = clusters;
         }
         const auto bufSlot = []( UavBufferPacked *b, ResourceAccess::ResourceAccess a, size_t offset, size_t bytes )

@@ -15,9 +15,15 @@
 // REDUCE (mode 2): per CLUSTER of 4^3 bricks of a cascade that moved this frame, its bricks' largest move - a brick's
 // injection's absolute move (state word 7) PLUS its pass's (word 4) where it was passed this frame: the pass gathers
 // from the total the delta already wrote, so a voxel's total moved by at most the sum (PHOTON-7 stage 5's read A2
-// (ii); the larger of the two under-bounded it, the feedback's ACCUM the same) - and the box of the bricks
-// that moved (a brick inside the next finer cascade's box skipped: the cones read that one there). No atomics:
-// deterministic.
+// (ii); the larger of the two under-bounded it, the feedback's ACCUM the same) - the box of the bricks that moved, and
+// THE MOVED FLUX: the sum of the bricks' moved flux, the sum over their voxels of |move| x a^2 (PhotonBrickFeedback_cs.glsl's
+// words 8 and 9, fixed point; a brick's bit 31 - a non-finite move - makes the cluster's flux unbounded), a brick inside
+// the next finer cascade's box skipped (the cones read that one there). No atomics: deterministic. THE BOUND per cluster
+// is the smaller of the largest move over the moved box's share, m min( 1, S / ( pi d^2 ) ) (and, for a probe, over the
+// depth moments' P), and THE FLUX's, flux sqrt(3) / ( pi d^2 ): a voxel (a cube of side a) seen from any point subtends
+// at most sqrt(3) a^2 / d_v^2 (its largest silhouette; the limit is reached only far off along a diagonal) and d_v >= d -
+// the physics written as the bound (PHOTON-7 stage 5: the largest move over the whole box was the field's slack (b), 22x
+// for a small lamp - the max against the mean of the moves, not the box's geometry: a sub-box changed no restart).
 // ACCUMULATE (mode 0): one thread a resident card - each cluster's largest move weighted by a BOUND of the share of the
 // card's gather the moved bricks can fill, min( 1, S / ( pi d^2 ) ): S the moved box's largest silhouette (a box of sides
 // x, y, z shows at most xy + yz + zx), d the card box's nearest distance to it (1 for boxes that touch; occlusion
@@ -59,8 +65,9 @@
 	layout( std430, ogre_U1 ) restrict readonly buffer caCardLayout { vec4 caCards[]; };
 	layout( std430, ogre_U2 ) restrict coherent buffer caSlotLayout { uint caSlot[]; };
 	layout( std430, ogre_U3 ) restrict coherent buffer caReportLayout { uint caReport[]; };
-	// THE CLUSTERS, the reduce's output: two words each - the largest move (float bits) and the moved bricks' box inside
-	// the cluster (lo xyz, hi xyz: 3 bits each, bricks, hi exclusive)
+	// THE CLUSTERS, the reduce's output: three words each - the largest move (float bits), the moved bricks' box inside
+	// the cluster (lo xyz, hi xyz: 3 bits each, bricks, hi exclusive) and the moved flux (float bits, radiance x m^2;
+	// +inf: unbounded)
 	layout( std430, ogre_U4 ) restrict coherent buffer caClusterLayout { uint caCluster[]; };
 @end
 
@@ -168,7 +175,8 @@ void main()
 		if( q >= clusters )
 			return;
 		const uvec3 cq = uvec3( q % cd.x, ( q / cd.x ) % cd.y, q / ( cd.x * cd.y ) );
-		float most = 0.0;
+		float most = 0.0, fluxUnits = 0.0;
+		bool fluxOpen = false;
 		uvec3 mlo = uvec3( 4u, 4u, 4u ), mhi = uvec3( 0u, 0u, 0u );
 		for( uint z = 0u; z < 4u; ++z )
 			for( uint y = 0u; y < 4u; ++y )
@@ -178,9 +186,10 @@ void main()
 					if( any( greaterThanEqual( bb, caDims.xyz ) ) )
 						continue;
 					const uint b = bb.x + caDims.x * ( bb.y + caDims.y * bb.z );
-					const uint f = caState[8u * b];
-					const float m = ( ( f & CA_RAN ) != 0u ? uintBitsToFloat( caState[8u * b + 4u] ) : 0.0 ) +
-									uintBitsToFloat( caState[8u * b + 7u] );
+					const uint f = caState[10u * b];
+					const bool ran = ( f & CA_RAN ) != 0u;
+					const float m = ( ran ? uintBitsToFloat( caState[10u * b + 4u] ) : 0.0 ) +
+									uintBitsToFloat( caState[10u * b + 7u] );
 					if( !( m > 0.0 ) )
 						continue;
 					if( caInnerLo.w > 0.5 )
@@ -192,11 +201,20 @@ void main()
 					most = max( most, m );
 					mlo = min( mlo, uvec3( x, y, z ) );
 					mhi = max( mhi, uvec3( x, y, z ) + 1u );
+					const uint fp = ran ? caState[10u * b + 8u] : 0u, fi = caState[10u * b + 9u];
+					fluxOpen = fluxOpen || ( ( fp | fi ) & 0x80000000u ) != 0u;
+					fluxUnits += float( fp & 0x7FFFFFFFu ) + float( fi & 0x7FFFFFFFu );
 				}
-		caCluster[2u * q] = floatBitsToUint( most );
-		caCluster[2u * q + 1u] = most > 0.0 ? ( mlo.x | ( mlo.y << 3u ) | ( mlo.z << 6u ) | ( mhi.x << 9u ) |
+		caCluster[3u * q] = floatBitsToUint( most );
+		caCluster[3u * q + 1u] = most > 0.0 ? ( mlo.x | ( mlo.y << 3u ) | ( mlo.z << 6u ) | ( mhi.x << 9u ) |
 												( mhi.y << 12u ) | ( mhi.z << 15u ) )
 											: 0u;
+		// the flux in radiance x m^2: the words' unit (1/64 of radiance) times a voxel's face (an eighth of a brick, squared),
+		// rounded up by 2^-16 (the float sum of at most 128 words and the products round to nearest: under 2^-16 together);
+		// unbounded where a brick marked a non-finite move
+		const float vox = side * 0.125;
+		caCluster[3u * q + 2u] = fluxOpen ? 0x7F800000u
+										  : floatBitsToUint( fluxUnits * ( 1.0 / 64.0 ) * vox * vox * ( 1.0 + 1.0 / 65536.0 ) );
 		return;
 	}
 	const uint k = gl_GlobalInvocationID.x;
@@ -233,10 +251,11 @@ void main()
 @end
 	for( uint q = 0u; q < clusters; ++q )
 	{
-		const float m = uintBitsToFloat( caCluster[2u * q] );
+		const float m = uintBitsToFloat( caCluster[3u * q] );
 		if( !( m > 0.0 ) )
 			continue;
-		const uint bx = caCluster[2u * q + 1u];
+		const uint bx = caCluster[3u * q + 1u];
+		const float flux = uintBitsToFloat( caCluster[3u * q + 2u] );
 		const uvec3 mlo = uvec3( bx & 7u, ( bx >> 3u ) & 7u, ( bx >> 6u ) & 7u );
 		const uvec3 mhi = uvec3( ( bx >> 9u ) & 7u, ( bx >> 12u ) & 7u, ( bx >> 15u ) & 7u );
 		const uvec3 cq = uvec3( q % cd.x, ( q / cd.x ) % cd.y, q / ( cd.x * cd.y ) );
@@ -287,6 +306,9 @@ void main()
 				weight = min( weight, min( 1.0, pass / edgeCos ) );
 			}
 		}
+		// THE CLUSTER'S AMOUNT: the smaller of its largest move over its share (the visibility in it, for a probe) and its
+		// flux's bound (the head of this file)
+		const float amount = d2 > 0.0 ? min( m * weight, flux * ( 1.7320509 / ( CA_PI * d2 ) ) ) : m * weight;
 		// PER TEXEL: the box's nearest direction to each texel's (a probe inside the box: every direction)
 		{
 			const vec3 toBoxT = ( lo + 0.5 * ext ) - centre;
@@ -298,11 +320,12 @@ void main()
 			{
 				const float a = max( acos( clamp( dot( texDir[t], dirT ), -1.0, 1.0 ) ) - angBox, 0.0 );
 				if( a < 0.5 * CA_PI )
-					texSum[t] += m * weight * cos( a ) / texCode[t];
+					texSum[t] += amount * cos( a ) / texCode[t];
 			}
 		}
 @else
-		sum += sens * m * weight;
+		// (the cluster's amount, as the field's: the smaller of the largest move over its share and its flux's bound)
+		sum += sens * ( d2 > 0.0 ? min( m * weight, flux * ( 1.7320509 / ( CA_PI * d2 ) ) ) : m * weight );
 @end
 	}
 @property( jah_field_mark )

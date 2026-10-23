@@ -370,6 +370,7 @@
 	{
 		jahBrickShared = 0u;
 		jahBrickAbsShared = 0u;
+		jahBrickFluxShared = 0u;
 	}
 	//All lights are offsetted by p_voxelOrigin so that we don't
 	//have to do this calculation per cell
@@ -811,7 +812,16 @@
 	if( jahDirChange > 0.0f )
 		atomicMax( jahBrickShared, floatBitsToUint( jahDirChange ) );
 	if( jahAbsDir > 0.0f )
+	{
 		atomicMax( jahBrickAbsShared, floatBitsToUint( jahAbsDir ) );
+		// THE MOVED FLUX (PhotonBrickFeedback_cs.glsl's word 9): this voxel's move in its fixed point - 1/64 of radiance,
+		// rounded UP (a bound); a move past the half store's largest finite value (only a non-finite one) sets bit 31: no
+		// flux bound for the brick this frame
+		if( jahAbsDir <= 65504.0f )
+			atomicAdd( jahBrickFluxShared, uint( ceil( jahAbsDir * 64.0f ) ) );
+		else
+			atomicOr( jahBrickFluxShared, 0x80000000u );
+	}
 	memoryBarrierShared();
 	barrier();
 	if( li == 0u && jahBrickShared != 0u )
@@ -823,7 +833,14 @@
 	if( li == 0u && jahBrickAbsShared != 0u )
 	{
 		const uint3 jahBrick = jahInjCell >> 3u;
-		atomicMax( jahFbState[8u * ( jahBrick.x + p_brickDims.x * ( jahBrick.y + p_brickDims.y * jahBrick.z ) ) + 7u],
+		atomicMax( jahFbState[10u * ( jahBrick.x + p_brickDims.x * ( jahBrick.y + p_brickDims.y * jahBrick.z ) ) + 7u],
 				   jahBrickAbsShared );
+		// (the group's flux: the finite part an add - a brick's cells are injected once a frame, so its sum stays under
+		// 2^31 - and the non-finite mark an or)
+		const uint jahFluxWord = 10u * ( jahBrick.x + p_brickDims.x * ( jahBrick.y + p_brickDims.y * jahBrick.z ) ) + 9u;
+		if( ( jahBrickFluxShared & 0x7FFFFFFFu ) != 0u )
+			atomicAdd( jahFbState[jahFluxWord], jahBrickFluxShared & 0x7FFFFFFFu );
+		if( ( jahBrickFluxShared & 0x80000000u ) != 0u )
+			atomicOr( jahFbState[jahFluxWord], 0x80000000u );
 	}
 @end

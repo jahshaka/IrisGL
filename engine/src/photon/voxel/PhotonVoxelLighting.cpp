@@ -1432,8 +1432,8 @@ namespace Ogre
         ensureBrickMask();
         // (PHOTON-7 stage 5, 5-4: every brick CLEARED - a whole injection's old store words are not this world point's:
         // PhotonBrickFeedback_cs.glsl's bit 10)
-        std::vector<uint32> zeros( size_t( 8u ) * getNumBricks(), 0u );
-        for( size_t b = 0; b < zeros.size(); b += 8u )
+        std::vector<uint32> zeros( size_t( kFbWords ) * getNumBricks(), 0u );
+        for( size_t b = 0; b < zeros.size(); b += kFbWords )
             zeros[b] = 1024u;
         for( UavBufferPacked *b : mBrickState )
             b->upload( zeros.data(), 0u, zeros.size() );
@@ -2027,7 +2027,7 @@ namespace Ogre
         mBrickBuffer = vaoManager->createUavBuffer( mBrickZeros.size(), sizeof( uint32 ), 0, mBrickZeros.data(), false );
         // THE FEEDBACK'S BUFFERS (PHOTON-7 stage 4), created zeroed: every brick inactive with no sensitivity (a new
         // volume's first injection activates them all: the host's whole activation), an empty list, empty arguments.
-        std::vector<uint32> zeros( size_t( 8u ) * bricks, 0u );
+        std::vector<uint32> zeros( size_t( kFbWords ) * bricks, 0u );
         for( uint32 k = 0u; k < 2u; ++k )
             mBrickState[k] = vaoManager->createUavBuffer( zeros.size(), sizeof( uint32 ), 0, zeros.data(), false );
         mBrickStateCur = 0u;

@@ -177,7 +177,7 @@ namespace Ogre
         /// every reader had to be rebound).
         TextureGpu     *mLightBounce;
 
-        /// THE FEEDBACK (PHOTON-7 stage 4; PhotonBrickFeedback_cs.glsl): the bricks' solver state (8 words a brick, two
+        /// THE FEEDBACK (PHOTON-7 stage 4; PhotonBrickFeedback_cs.glsl): the bricks' solver state (kFbWords a brick, two
         /// buffers - a scroll commit's SHIFT reads one and writes the other), the frame's list of ACTIVE bricks, the
         /// indirect arguments and counts (16 words), their read-backs (a ring, never waited on), the two jobs (shared by
         /// name, their bindings asserted per dispatch) and the frame the mask and the arguments were last cleared in.
@@ -192,6 +192,8 @@ namespace Ogre
         /// one so the slot is always bound to a buffer of its own outside a selection.
         UavBufferPacked  *mFbChain = nullptr;
         static constexpr uint32 kFbChainWords = 32u;
+        /// The feedback's state words a brick (PhotonBrickFeedback_cs.glsl's FB_W: [0] .. [9]; every reader strides by it).
+        static constexpr uint32 kFbWords = 10u;
         struct FeedbackTicket
         {
             AsyncTicketPtr ticket;
@@ -519,7 +521,7 @@ namespace Ogre
         /// THE TEST DOOR gi.feedbackCarriedRoute (PHOTON-7 stage 5's read A2 (i)): while set, the selection never passes a
         /// brick its injection moved this frame and the accumulation reads the selection's carried section alone.
         void setCarriedRouteDoor( bool on ) { mCarriedRouteDoor = on; }
-        /// THE FEEDBACK'S BRICK STATE as it stands (8 words a brick, PhotonBrickFeedback_cs.glsl) and its bricks per axis -
+        /// THE FEEDBACK'S BRICK STATE as it stands (kFbWords a brick, PhotonBrickFeedback_cs.glsl) and its bricks per axis -
         /// the cards' indirect accumulation reads it (PHOTON-7 stage 5); null before the volume's first light work.
         UavBufferPacked *feedbackBrickState( unsigned dims[3] ) const
         {

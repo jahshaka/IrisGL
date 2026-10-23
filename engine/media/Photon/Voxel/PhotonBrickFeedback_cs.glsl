@@ -17,7 +17,7 @@
 // carried section for ACCUM) and taken first by its cascade's next selection, which starts where the last one stopped
 // (a rotating cursor over the bricks' index): every active brick is passed once in ceil(active / its share) frames, and
 // the choice is a function of the state alone (a scan in index order, never an atomic's order).
-// THE STATE, 8 words a brick (x fastest over the cascade's bricks):
+// THE STATE, FB_W = 10 words a brick (x fastest over the cascade's bricks):
 //   [0] bit 0 active; bits 1..8 the passes since it was (re)activated (saturating at 255); bit 9 PASSED THIS FRAME (the
 //       selection's pick, cleared by POST: an active brick without it was carried); bit 10 CLEARED (PHOTON-7 stage 5,
 //       5-4: the shift brought it in, or a whole injection wrote it - its old store words are not this world point's;
@@ -42,6 +42,14 @@
 //   [7] THIS FRAME'S INJECTIONS' move: the most a voxel's total changed by a direct term's delta, absolute radiance (float
 //       bits; atomicMax by LightInjection, cleared by CLEAR) - the change a pass's move [4] cannot see (a pass gathers
 //       from the total the delta already wrote), read by the cards' accumulation (PHOTON-7 stage 5, JahCardIndirect)
+//   [8] this frame's pass's MOVED FLUX and [9] its injections' (PHOTON-7 stage 5: the field slack's cause (b), the
+//       largest move spread over the moved box): the sum over the brick's voxels of the move [4] / [7] takes the most of,
+//       in FIXED POINT - 1/64 of radiance a voxel, each voxel rounded UP; times a voxel's face a^2 it is the flux the
+//       cards' and the field's accumulation bound by (JahCardIndirect_cs.glsl). atomicAdd by the pass / LightInjection
+//       (integers: the sum is the same in any order), cleared with [4] (SELECT) / [7] (CLEAR). It cannot overflow: a
+//       voxel's move is at most the half store's largest finite value, 65504 = 4192256 units, and a brick's 512 voxels
+//       are passed (injected) once a frame - under 2^31. Bit 31 marks a move past that (only a non-finite one): no flux
+//       bound for the brick, its largest move [4] / [7] alone.
 // THE ARGUMENTS, 16 words: [0..2] the bounce's and the copy's groups (8 x the bricks: group y is the brick), [4..6]
 // the directional levels' (1 x the bricks), [8] the bricks listed (passed) this frame, [9] the bricks active at the
 // selection (passed or carried), [10] the bricks stopped on the operator's bound (r never measured: a door), [11] the
@@ -114,6 +122,8 @@ vulkan( }; )
 // the cursor and the brick after the last one taken.
 #define FB_RAN 512u
 #define FB_CLEARED 1024u
+// THE STATE'S WORDS A BRICK (the header's [0] .. [9]; every reader of the state strides by it)
+#define FB_W 10u
 #define FB_R_MEASURED 2048u
 @property( !jah_brick_copy )
 shared uint fbSScan[64];
@@ -155,7 +165,8 @@ void main()
 		{
 			fbMask[2u * i] = 0u;
 			fbMask[2u * i + 1u] = 0u;
-			fbState[8u * i + 7u] = 0u;
+			fbState[FB_W * i + 7u] = 0u;
+			fbState[FB_W * i + 9u] = 0u;
 		}
 		return;
 	}
@@ -190,8 +201,8 @@ void main()
 			const uint carry0 = fbSCarry;
 			const uint k = base + lid;
 			const uint idx = ( fbSStart + k ) % numBricks;
-			const bool isActive = k < numBricks && ( fbState[8u * idx] & 1u ) != 0u;
-			const bool injected = isActive && fbState[8u * idx + 7u] != 0u;
+			const bool isActive = k < numBricks && ( fbState[FB_W * idx] & 1u ) != 0u;
+			const bool injected = isActive && fbState[FB_W * idx + 7u] != 0u;
 			const bool act = isActive && !( fbSrcDims.w != 0u && injected );
 			fbSScan[lid] = act ? 1u : 0u;
 			memoryBarrierShared();
@@ -227,9 +238,10 @@ void main()
 			if( listed )
 			{
 				fbList[pos] = fbPack( uint3( idx % fbDims.x, ( idx / fbDims.x ) % fbDims.y, idx / ( fbDims.x * fbDims.y ) ) );
-				fbState[8u * idx] |= FB_RAN;
-				fbState[8u * idx + 4u] = 0u;
-				fbState[8u * idx + 5u] = 0u;
+				fbState[FB_W * idx] |= FB_RAN;
+				fbState[FB_W * idx + 4u] = 0u;
+				fbState[FB_W * idx + 5u] = 0u;
+				fbState[FB_W * idx + 8u] = 0u;
 				if( pos + 1u == end )
 					fbSNext = ( idx + 1u ) % numBricks;
 			}
@@ -258,7 +270,7 @@ void main()
 	if( i >= numBricks )
 		return;
 	const uint3 b = uint3( i % fbDims.x, ( i / fbDims.x ) % fbDims.y, i / ( fbDims.x * fbDims.y ) );
-	const uint s = 8u * i;
+	const uint s = FB_W * i;
 	uint flags = fbState[s];
 	if( mode == 1u )
 	{
@@ -384,8 +396,8 @@ void main()
 			// lamp accumulated 0.44 codes at most while they rested 2.3 off - no resume once the count reached cascade 0's
 			// lit bricks sooner; with the sum 699 resumed and the worst voxel rests 0.07 codes off the Jacobi).
 			// (a carried brick ran no pass this frame: its [4] is an older pass's, its move this frame its injection's alone)
-			const float m = ( passed ? fbF( own ? fbState[8u * oi + 4u] : fbSrcState[8u * oi + 4u] ) : 0.0 ) +
-							fbF( own ? fbState[8u * oi + 7u] : fbSrcState[8u * oi + 7u] );
+			const float m = ( passed ? fbF( own ? fbState[FB_W * oi + 4u] : fbSrcState[FB_W * oi + 4u] ) : 0.0 ) +
+							fbF( own ? fbState[FB_W * oi + 7u] : fbSrcState[FB_W * oi + 7u] );
 			if( !( m > 0.0 ) )
 				continue;
 			const float3 oLo = fbSrc.xyz + float3( o ) * fbSrc.w;
@@ -426,7 +438,7 @@ void main()
 		if( any( lessThan( bl, int3( 0 ) ) ) || any( greaterThanEqual( bh, int3( fbDims.xyz ) ) ) )
 		{
 			fbState[s] = 1u | FB_CLEARED;
-			for( uint k = 1u; k < 8u; ++k )
+			for( uint k = 1u; k < FB_W; ++k )
 				fbState[s + k] = 0u;
 			return;
 		}
@@ -437,7 +449,7 @@ void main()
 			for( int y = bl.y; y <= bh.y; ++y )
 				for( int x = bl.x; x <= bh.x; ++x )
 				{
-					const uint oi = 8u * ( uint( x ) + fbDims.x * ( uint( y ) + fbDims.y * uint( z ) ) );
+					const uint oi = FB_W * ( uint( x ) + fbDims.x * ( uint( y ) + fbDims.y * uint( z ) ) );
 					const uint f = fbOldState[oi];
 					anyActive |= f & 1u;
 					anyMeasured |= f & FB_R_MEASURED;
@@ -455,6 +467,8 @@ void main()
 		fbState[s + 5u] = fbU( sn );
 		fbState[s + 6u] = 0u;
 		fbState[s + 7u] = 0u;
+		fbState[s + 8u] = 0u;
+		fbState[s + 9u] = 0u;
 		return;
 	}
 @end

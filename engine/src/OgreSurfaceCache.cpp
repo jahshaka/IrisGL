@@ -2249,7 +2249,7 @@ void SurfaceCache::relightCards() {
 namespace {
 constexpr unsigned kCardSlots = (kCardAtlasSize / kCardMinSize) * (kCardAtlasSize / kCardMinSize);
 constexpr unsigned kReportCapacity = 4096u;
-constexpr unsigned kMaxCardClusters = 4096u;   ///< 4^3 bricks a cluster (two words each): a 512^3 cascade's 16^3
+constexpr unsigned kMaxCardClusters = 4096u;   ///< 4^3 bricks a cluster (three words each): a 512^3 cascade's 16^3
 }   // namespace
 
 Ogre::UavBufferPacked *SurfaceCache::ensureLightBuffer() {
@@ -2279,7 +2279,7 @@ bool SurfaceCache::ensureIndirectBuffers() {
         mCardReport = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
     }
     if (!mCardCluster) {
-        std::vector<Ogre::uint32> zeros(2u * kMaxCardClusters, 0u);
+        std::vector<Ogre::uint32> zeros(3u * kMaxCardClusters, 0u);
         mCardCluster = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
     }
     return mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster;

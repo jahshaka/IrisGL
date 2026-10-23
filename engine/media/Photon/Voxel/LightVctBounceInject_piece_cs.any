@@ -280,7 +280,7 @@
 	{
 		const uint jahIdx0 = jahBrick.x + p_brickMark.y * ( jahBrick.y + p_brickMark.z * jahBrick.z );
 		const float3 jahStoredDirect = OGRE_Load3D( directVoxel, jahCell, 0 ).xyz;
-		if( ( jahFbState[8u * jahIdx0] & 1024u ) != 0u &&
+		if( ( jahFbState[10u * jahIdx0] & 1024u ) != 0u &&
 			all( equal( floatBitsToUint( jahOld ), floatBitsToUint( jahStoredDirect ) ) ) )
 		{
 			jahRef = float3( 0.0, 0.0, 0.0 );
@@ -311,13 +311,23 @@
 		jahAbsShared = 0u;
 		jahSensShared = 0u;
 		jahPriorShared = 0u;
+		jahFluxShared = 0u;
 	}
 	memoryBarrierShared();
 	barrier();
 	if( jahMoved > 0.0f )
 		atomicMax( jahBrickShared, floatBitsToUint( jahMoved ) );
 	if( jahAbs > 0.0f )
+	{
 		atomicMax( jahAbsShared, floatBitsToUint( jahAbs ) );
+		// THE MOVED FLUX (PhotonBrickFeedback_cs.glsl's word 8): this voxel's move in its fixed point - 1/64 of radiance,
+		// rounded UP (a bound); a move past the half store's largest finite value (only a non-finite one) sets bit 31: no
+		// flux bound for the brick this frame
+		if( jahAbs <= 65504.0f )
+			atomicAdd( jahFluxShared, uint( ceil( jahAbs * 64.0f ) ) );
+		else
+			atomicOr( jahFluxShared, 0x80000000u );
+	}
 	if( jahSens > 0.0f )
 		atomicMax( jahSensShared, floatBitsToUint( jahSens ) );
 	if( jahPrior > 0.0f )
@@ -330,10 +340,16 @@
 		if( jahBrickShared != 0u )
 			atomicMax( jahBrickMask[2u * jahIdx + 1u], jahBrickShared );
 		if( jahAbsShared != 0u )
-			atomicMax( jahFbState[8u * jahIdx + 4u], jahAbsShared );
+			atomicMax( jahFbState[10u * jahIdx + 4u], jahAbsShared );
+		// (the group's flux: its finite part an add - a brick's whole pass sums under 2^31, so never into bit 31 - and
+		// the non-finite mark an or: integer atomics, the sum independent of their order)
+		if( ( jahFluxShared & 0x7FFFFFFFu ) != 0u )
+			atomicAdd( jahFbState[10u * jahIdx + 8u], jahFluxShared & 0x7FFFFFFFu );
+		if( ( jahFluxShared & 0x80000000u ) != 0u )
+			atomicOr( jahFbState[10u * jahIdx + 8u], 0x80000000u );
 		if( jahSensShared != 0u )
-			atomicMax( jahFbState[8u * jahIdx + 5u], jahSensShared );
-		if( jahPriorShared != 0u && ( jahFbState[8u * jahIdx] & 2048u ) == 0u )
-			atomicMax( jahFbState[8u * jahIdx + 2u], jahPriorShared );
+			atomicMax( jahFbState[10u * jahIdx + 5u], jahSensShared );
+		if( jahPriorShared != 0u && ( jahFbState[10u * jahIdx] & 2048u ) == 0u )
+			atomicMax( jahFbState[10u * jahIdx + 2u], jahPriorShared );
 	}
 @end

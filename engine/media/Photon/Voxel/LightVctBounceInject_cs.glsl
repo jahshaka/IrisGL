@@ -145,6 +145,7 @@ shared uint jahBrickShared;
 shared uint jahAbsShared;
 shared uint jahSensShared;
 shared uint jahPriorShared;
+shared uint jahFluxShared;
 
 //in uvec3 gl_NumWorkGroups;
 //in uvec3 gl_WorkGroupID;
