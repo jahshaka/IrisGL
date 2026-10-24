@@ -190,23 +190,6 @@ public:
     QString iesProfilePath;
     float   iesNormalisation;
 
-    /**
-     * Area light: mask/gobo image bound to this light — the LIBRARY asset's
-     * guid (empty = none) plus the host-resolved absolute path (runtime only,
-     * like iesProfilePath).
-     *
-     * Honoured by the fast approximation only: the `accurate` (LTC) path has no
-     * mask term and silently ignores the texture.
-     */
-    QString lightTextureGuid;
-    QString lightTexturePath;
-
-    /**
-     * Area light: physically accurate mode (linearly transformed cosines)
-     * instead of the cheaper approximation. Slower; no textured-light support.
-     */
-    bool accurate;
-
     //editor-specific
     QSharedPointer<Texture2D> icon;
     float iconSize;

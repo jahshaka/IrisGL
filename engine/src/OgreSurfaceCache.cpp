@@ -1754,7 +1754,7 @@ void SurfaceCache::relightCards() {
         const Ogre::Light::LightTypes type = l->getType();
         float *o = &mLightCpu[4u + size_t(numLights) * kLightFloats];
         const Ogre::ColourValue c = l->getDiffuseColour() * l->getPowerScale();
-        const bool area = type == Ogre::Light::LT_AREA_APPROX || type == Ogre::Light::LT_AREA_LTC;
+        const bool area = type == Ogre::Light::LT_AREA_LTC;   // every area light is LTC (PHOTON-7 7-0)
         if (type == Ogre::Light::LT_DIRECTIONAL) {
             const Ogre::Vector3 toLight = -l->getDerivedDirection();
             o[0] = toLight.x; o[1] = toLight.y; o[2] = toLight.z; o[3] = 0.0f;
@@ -1822,7 +1822,7 @@ void SurfaceCache::relightCards() {
             for (unsigned li = 0; li < numLights; ++li) {
                 const Ogre::Light *l = chosen.lights[li];
                 if (l->getType() == Ogre::Light::LT_DIRECTIONAL || !SceneLightList::reaches(l, box)) continue;
-                if (l->getType() == Ogre::Light::LT_AREA_APPROX || l->getType() == Ogre::Light::LT_AREA_LTC) {
+                if (l->getType() == Ogre::Light::LT_AREA_LTC) {
                     ++areaHere;
                     continue;
                 }

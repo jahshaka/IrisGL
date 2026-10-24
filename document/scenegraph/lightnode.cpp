@@ -126,12 +126,6 @@ PropertyRows LightNode::getProperties()
     boolProp->value = doubleSided;
     props.add(std::move(boolProp));
 
-    boolProp = std::make_unique<BoolProperty>();
-    boolProp->displayName = "Accurate";
-    boolProp->name = "accurate";
-    boolProp->value = accurate;
-    props.add(std::move(boolProp));
-
     return props;
 }
 
@@ -163,13 +157,11 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return getShadowMapResolution();
     if(valueName == "doubleSided")
         return doubleSided;
-    if(valueName == "accurate")
-        return accurate;
     if(valueName == "forwardShadingPriority")
         return forwardShadingPriority;
     if(valueName == "followsAtmosphere")
         return followsAtmosphere;
-    // The two asset BINDINGS are reflected read-only-ish: the guid is the
+    // The asset BINDING (the IES profile) is reflected read-only-ish: the guid is the
     // document's state, the resolved path and the normalisation are the host's
     // (they come from the asset store, which irisgl cannot reach).
     if(valueName == "iesProfile")
@@ -178,10 +170,6 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return iesProfilePath;
     if(valueName == "iesNormalisation")
         return iesNormalisation;
-    if(valueName == "lightTexture")
-        return lightTextureGuid;
-    if(valueName == "lightTexturePath")
-        return lightTexturePath;
     if(valueName == "iconSize")
         return iconSize;
 
@@ -204,7 +192,6 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "shadowMapType")     { setShadowMapType(static_cast<ShadowMapType>(value.toInt())); return markedParams(); }
     if (valueName == "shadowMapResolution"){ setShadowMapResolution(value.toInt()); return markedParams(); }
     if (valueName == "doubleSided")       { doubleSided = value.toBool();        return markedParams(); }
-    if (valueName == "accurate")          { accurate = value.toBool();           return markedParams(); }
     if (valueName == "forwardShadingPriority") { forwardShadingPriority = qMax(0, value.toInt()); return markedParams(); }
     // The sun's direct light is tinted by the atmosphere at its own elevation
     // (lightnode.h). A LIGHT change, so the shadow and probe caches see it
@@ -213,8 +200,6 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "iesProfile")        { iesProfileGuid = value.toString();   return markedParams(); }
     if (valueName == "iesProfilePath")    { iesProfilePath = value.toString();   return markedParams(); }
     if (valueName == "iesNormalisation")  { iesNormalisation = value.toFloat();  return markedParams(); }
-    if (valueName == "lightTexture")      { lightTextureGuid = value.toString(); return markedParams(); }
-    if (valueName == "lightTexturePath")  { lightTexturePath = value.toString(); return markedParams(); }
     if (valueName == "iconSize")          { iconSize = value.toFloat();          return markedParams(); }
 
     return SceneNode::setPropertyValue(valueName, value);
@@ -265,7 +250,6 @@ LightNode::LightNode()
     rectWidth = 1.0f;
     rectHeight = 1.0f;
     doubleSided = false;
-    accurate = false;
 
     // 0 = the sun. A light created on its own is the first directional a
     // caller can possibly have; the auto-slot (Scene::nextForwardShadingPriority)
@@ -295,14 +279,11 @@ SceneNodePtr LightNode::createDuplicate()
 	light->rectWidth = this->rectWidth;
 	light->rectHeight = this->rectHeight;
 	light->doubleSided = this->doubleSided;
-	light->accurate = this->accurate;
 	light->forwardShadingPriority = this->forwardShadingPriority;
 	light->followsAtmosphere = this->followsAtmosphere;
 	light->iesProfileGuid = this->iesProfileGuid;
 	light->iesProfilePath = this->iesProfilePath;
 	light->iesNormalisation = this->iesNormalisation;
-	light->lightTextureGuid = this->lightTextureGuid;
-	light->lightTexturePath = this->lightTexturePath;
 	light->shadowMap = this->shadowMap;
 	light->icon = this->icon;
 	light->iconSize = this->iconSize;

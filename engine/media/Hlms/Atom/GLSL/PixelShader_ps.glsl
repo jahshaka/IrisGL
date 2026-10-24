@@ -63,7 +63,6 @@ layout(std140) uniform;
 @end
 
 @insertpiece( DeclPlanarReflTextures )
-@insertpiece( DeclAreaApproxTextures )
 @insertpiece( DeclLightProfilesTexture )
 @insertpiece( DeclBlueNoiseTexture )
 

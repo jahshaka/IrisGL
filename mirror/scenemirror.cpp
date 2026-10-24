@@ -5513,12 +5513,10 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
     d.rectWidth = light->rectWidth;
     d.rectHeight = light->rectHeight;
     d.doubleSided = light->doubleSided;
-    d.accurate = light->accurate;
-    // Asset bindings travel as resolved absolute paths — the engine has no
+    // The asset binding travels as a resolved absolute path — the engine has no
     // database. The backend decides what each light type can actually honour
-    // (profiles: spot always, point only unshadowed; masks: approx only).
+    // (profiles: spot always, point only unshadowed).
     d.iesProfilePath = light->iesProfilePath.toStdString();
-    d.texturePath    = light->lightTexturePath.toStdString();
     // Area lights never cast shadows (Ogre-Next limitation; the engine enforces
     // it too — this keeps the mirror's shadow-filter bookkeeping honest).
     d.castShadows = light->lightType != iris::LightType::Area &&

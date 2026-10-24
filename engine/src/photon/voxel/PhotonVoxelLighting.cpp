@@ -365,13 +365,12 @@ namespace Ogre
         const Light::LightTypes srcType = light->getType();
         const bool punctual = srcType == Light::LT_POINT || srcType == Light::LT_SPOTLIGHT;
         // An AREA light carries its range too: the injection windows its LTC form
-        // factor to it exactly as the pixel windows the area approximation (IMAGE-1).
-        const bool ranged = punctual || srcType == Light::LT_AREA_APPROX || srcType == Light::LT_AREA_LTC;
+        // factor to it exactly as the pixel's LTC loop does (jahLightWindow, IMAGE-1).
+        // Every area light is LTC (PHOTON-7 7-0: the approximation is deleted).
+        const bool ranged = punctual || srcType == Light::LT_AREA_LTC;
         vctLight->diffuse[3] = ranged ? static_cast<float>( light->getAttenuationRange() ) : 0.0f;
 
-        Light::LightTypes lightType = srcType;
-        if( lightType == Light::LT_AREA_APPROX )
-            lightType = Light::LT_AREA_LTC;
+        const Light::LightTypes lightType = srcType;
 
         Vector4 light4dVec = light->getAs4DVector();
         if( lightType != Light::LT_DIRECTIONAL )

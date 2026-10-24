@@ -1836,10 +1836,11 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
         case LightType::Point:       L->setType(Ogre::Light::LT_POINT); break;
         case LightType::Spot:        L->setType(Ogre::Light::LT_SPOTLIGHT); break;
         // Area lights emit down the light's -Z, exactly like spot/directional,
-        // so the -Y child-node convention below already orients them.
-        case LightType::Area:
-            L->setType(d.accurate ? Ogre::Light::LT_AREA_LTC : Ogre::Light::LT_AREA_APPROX);
-            break;
+        // so the -Y child-node convention below already orients them. EVERY
+        // area light is LTC (PHOTON-7 stage 7-0, L5: the voxels, the cards and
+        // the rays all evaluate the rectangle's LTC form factor, so the pixel
+        // does too — the approximation and its mask are deleted).
+        case LightType::Area:  L->setType(Ogre::Light::LT_AREA_LTC); break;
         }
         L->setDiffuseColour(toOgre(d.colour));
         L->setSpecularColour(toOgre(d.colour));
@@ -1868,7 +1869,7 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             L->setRectSize(Ogre::Vector2(std::max(d.rectWidth, 0.01f), std::max(d.rectHeight, 0.01f)));
             L->setDoubleSided(d.doubleSided);
             // HlmsPbs only pays for area lights in scenes that contain one
-            // (the LightsAreaApprox/Ltc shader properties are gated on the
+            // (the LightsAreaLtc shader property is gated on the
             // live light list), but the LTC/BRDF lookup textures must be
             // resident before an area light is drawn. Loading them reserves
             // a texture slot in every pass, so do it lazily, once, here —
@@ -1893,13 +1894,14 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             // THE ONE FALLOFF (IMAGE-1): inverse square from a source of radius
             // rSrc, windowed to zero at the authored range R — the fork's
             // JahBrdf `jahLightAttenuation`, which every consumer of a light's
-            // falloff calls (the pixel, Forward+, the area approximation, the
-            // surface cache's cards, Atom's hit decode, Photon's voxels). The
+            // falloff calls (the pixel, Forward+, the surface cache's cards,
+            // Atom's hit decode, Photon's voxels). The
             // shader reads the attenuation vector as (R, rSrc, -, 1/R): Ogre's
             // range keeps its meaning (the Forward+ cut-off, the shadow far
             // plane, every reach box), its "linear" slot carries the source
-            // radius and nothing reads the other two. An area light's source is
-            // a disc of its rectangle's area (AreaLights_piece_ps.any).
+            // radius and nothing reads the other two. An area light's slot
+            // carries a disc of its rectangle's area; the LTC loops read only
+            // the window (AreaLights_LTC_piece_ps.any's jahLightWindow).
             const float r = std::max(d.range, 0.01f);
             const float src =
                 d.type == LightType::Area
@@ -1939,20 +1941,15 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
                                  std::max(d.spotFalloff, 0.0f));
         }
 
-        // IES profile and area-light mask: assigned ONLY when the requested path
-        // actually changed. This function runs for every light on every mirror
-        // sync (60 Hz); LightProfiles::build() recreates and re-uploads a GPU
-        // texture, and a mask costs a decode + resize + mip chain + upload.
+        // IES profile: assigned ONLY when the requested path actually changed.
+        // This function runs for every light on every mirror sync (60 Hz), and
+        // LightProfiles::build() recreates and re-uploads a GPU texture.
         //
-        // Honesty about what the renderer does with these — the host UI says the
-        // same thing, because there is no engine signal for either:
-        //   * a profile shapes SPOT lights always, POINT lights only while they
-        //     cast no shadows (a shadow-casting point light is shaded from the
-        //     pass buffer, whose point loop has no profile term), and never
-        //     directional or area lights;
-        //   * a mask applies to the area-light APPROXIMATION only — LTC
-        //     ("accurate") ignores it — so accurate mode drops it here rather
-        //     than leaving a stale slice bound.
+        // Honesty about what the renderer does with it — the host UI says the
+        // same thing, because there is no engine signal: a profile shapes SPOT
+        // lights always, POINT lights only while they cast no shadows (a
+        // shadow-casting point light is shaded from the pass buffer, whose
+        // point loop has no profile term), and never directional or area lights.
         {
             const bool profileApplies =
                 d.type == LightType::Spot ||
@@ -1968,14 +1965,6 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
                     // retried (and re-logged) every single frame.
                     n.lightProfilePath = wantProfile;
                 }
-            }
-
-            const bool maskApplies = d.type == LightType::Area && !d.accurate;
-            const std::string wantMask = maskApplies ? d.texturePath : std::string();
-            if (wantMask != n.lightMaskPath) {
-                std::string err;
-                if (!lightextras::assignAreaMask(mRoot, L, wantMask, err)) mError = err;
-                n.lightMaskPath = wantMask;
             }
         }
         // THE LAMP-MAP CACHE'S PARAMETER INPUT (ENGINE_CACHE_POLICY_SPEC P3 item
@@ -2029,7 +2018,7 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             };
             gfold(int(d.type)); gfold(d.colour.r); gfold(d.colour.g); gfold(d.colour.b); gfold(d.intensity);
             gfold(d.range); gfold(d.spotAngleDegrees); gfold(d.spotSoftness); gfold(d.spotFalloff);
-            gfold(d.rectWidth); gfold(d.rectHeight); gfold(d.doubleSided); gfold(d.accurate);
+            gfold(d.rectWidth); gfold(d.rectHeight); gfold(d.doubleSided);
             for (char c : d.iesProfilePath) gfold(c);
             if (!n.lightGiKnown || gk != n.lightGiKey) {
                 n.lightGiKey = gk;
@@ -2052,9 +2041,8 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             fold(int(d.type)); fold(d.colour.r); fold(d.colour.g); fold(d.colour.b);
             fold(d.intensity); fold(d.range); fold(d.spotAngleDegrees); fold(d.spotSoftness);
             fold(d.spotFalloff); fold(d.castShadows); fold(d.rectWidth); fold(d.rectHeight);
-            fold(d.doubleSided); fold(d.accurate); fold(d.lightMask);
+            fold(d.doubleSided); fold(d.lightMask);
             foldBits(d.iesProfilePath.data(), d.iesProfilePath.size());
-            foldBits(d.texturePath.data(), d.texturePath.size());
             if (k == 0ull) k = 1ull;                             // 0 means "never pushed"
             if (k != n.lightProbeKey) {
                 n.lightProbeKey = k;
@@ -2090,10 +2078,9 @@ bool OgreScene::removeLight(NodeId id) {
     JAH_TRY {
         destroyNodeLight(id, it->second);
         recountNode(it->second);
-        // A recreated light starts with no profile and no mask: forget what the
-        // dead one carried, or the next setLight would skip re-assigning it.
+        // A recreated light starts with no profile: forget what the dead one
+        // carried, or the next setLight would skip re-assigning it.
         it->second.lightProfilePath.clear();
-        it->second.lightMaskPath.clear();
         it->second.lightGiKnown = it->second.lightPoseKnown = false;
         if (it->second.lightNode) { mSceneMgr->destroySceneNode(it->second.lightNode); it->second.lightNode = nullptr; }
         // A VANISHED LIGHT MUST STOP BOUNCING — and that is a re-INJECTION over

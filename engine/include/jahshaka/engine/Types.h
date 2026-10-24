@@ -1997,11 +1997,12 @@ struct LightDesc {
     float     spotFalloff = 1.0f;
     bool      castShadows = true;          // ignored for Area (backend cannot shadow them)
     // Area lights only: a rectangle spanning the node's local X (width) and
-    // Z (height), emitting down -Y like every other light type here.
+    // Z (height), emitting down -Y like every other light type here. Every
+    // area light is LTC on every path (the pixel, the voxels, the cards, the
+    // rays): the fast approximation and its mask are deleted (PHOTON-7 7-0).
     float     rectWidth = 1.0f;
     float     rectHeight = 1.0f;
     bool      doubleSided = false;         // emit from both faces
-    bool      accurate = false;            // physically accurate (LTC) instead of fast approx
 
     /// Absolute path to an IES photometric profile (.ies); empty = none.
     ///
@@ -2019,22 +2020,13 @@ struct LightDesc {
     /// falloff and not the brightness.
     std::string iesProfilePath;
 
-    /// Absolute path to an area-light mask/gobo image; empty = none.
-    ///
-    /// Honoured ONLY by the fast approximation (`accurate == false`): the LTC
-    /// path has no mask term and silently ignores the texture. Every mask in
-    /// the process shares ONE fixed-size pooled texture array — the backend
-    /// rescales whatever image it is given to the pool's resolution and
-    /// generates the full mip chain the diffuse term needs.
-    std::string texturePath;
-
     /// LIGHTING CHANNELS, light side (Scene::setNodeLightMask is the object
     /// side). This light lights an object when `lightMask & object mask` is
     /// non-zero; both default to all-ones, so out of the box every light lights
     /// every object. All 32 bits are the host's — the engine reserves none.
     ///
     /// It filters DIRECT light only, from every path (directional, shadow
-    /// casting, Forward+ clustered, area approx and area LTC). It does NOT
+    /// casting, Forward+ clustered, area LTC). It does NOT
     /// filter shadow CASTING (a masked-off object still renders into this
     /// light's shadow map) and it does NOT filter this light's GI bounce.
     /// Scene::setNodeLightMask carries the full contract, and
@@ -2074,8 +2066,8 @@ struct LightDesc {
                spotSoftness == o.spotSoftness && spotFalloff == o.spotFalloff &&
                castShadows == o.castShadows &&
                rectWidth == o.rectWidth && rectHeight == o.rectHeight &&
-               doubleSided == o.doubleSided && accurate == o.accurate &&
-               iesProfilePath == o.iesProfilePath && texturePath == o.texturePath &&
+               doubleSided == o.doubleSided &&
+               iesProfilePath == o.iesProfilePath &&
                lightMask == o.lightMask &&
                forwardShadingPriority == o.forwardShadingPriority &&
                primaryDirectional == o.primaryDirectional;

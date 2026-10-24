@@ -25,7 +25,7 @@ bool isPointSpot(Ogre::Light::LightTypes t) {
     return t == Ogre::Light::LT_POINT || t == Ogre::Light::LT_SPOTLIGHT;
 }
 bool isArea(Ogre::Light::LightTypes t) {
-    return t == Ogre::Light::LT_AREA_APPROX || t == Ogre::Light::LT_AREA_LTC;
+    return t == Ogre::Light::LT_AREA_LTC;   // every area light is LTC (PHOTON-7 7-0: the approximation is deleted)
 }
 }   // namespace
 

@@ -6935,8 +6935,8 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
             float L[kHitLightWords] = {};
             const Ogre::Light::LightTypes srcType = light->getType();
             const bool punctual = srcType == Ogre::Light::LT_POINT || srcType == Ogre::Light::LT_SPOTLIGHT;
-            const bool area = srcType == Ogre::Light::LT_AREA_APPROX || srcType == Ogre::Light::LT_AREA_LTC;
-            const Ogre::Light::LightTypes type = area ? Ogre::Light::LT_AREA_LTC : srcType;
+            const bool area = srcType == Ogre::Light::LT_AREA_LTC;   // every area light is LTC (PHOTON-7 7-0)
+            const Ogre::Light::LightTypes type = srcType;
             const Ogre::Vector4 p4 = light->getAs4DVector();   // directional: -dir, w 0
             L[0] = float(p4.x); L[1] = float(p4.y); L[2] = float(p4.z); L[3] = float(type);
             const Ogre::ColourValue d = light->getDiffuseColour() * light->getPowerScale();

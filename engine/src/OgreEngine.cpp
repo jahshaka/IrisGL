@@ -4379,7 +4379,7 @@ void OgreEngine::ensureHlms() {
 //                         Photon volumes are no host's at all (OWN-GI-1: the
 //                         listener binds them, PhotonPassBinding, and reads the
 //                         cone count from PBS itself)
-//   OgreLights.cpp        setAreaLightForwardSettings, setAreaLightMasks,
+//   OgreLights.cpp        setAreaLightForwardSettings (the approximation's budget 0),
 //                         setLightProfilesTexture, loadLtcMatrix
 //   OgreShadow.cpp        setShadowSettings (the PCF kernel)
 //
@@ -4428,8 +4428,6 @@ void tellEveryHlms(Ogre::HlmsManager *manager, bool force) {
         if (host->getEsmK() != pbs->getEsmK()) host->setEsmK(pbs->getEsmK());
         if (host->getIrradianceVolume() != pbs->getIrradianceVolume())
             host->setIrradianceVolume(pbs->getIrradianceVolume());
-        if (host->getAreaLightMasks() != pbs->getAreaLightMasks())
-            host->setAreaLightMasks(pbs->getAreaLightMasks());
         if (host->getLightProfilesTexture() != pbs->getLightProfilesTexture())
             host->setLightProfilesTexture(pbs->getLightProfilesTexture());
         // NOT the PCC, the planar mirrors or the IBL chain length: those are the
