@@ -2567,12 +2567,15 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             ar->mProfilingId = "Jahshaka screen area visibility resolve";
             ar->mIdentifier = kScreenAreaVisResolvePassIdentifier;
         }
-        // THE OPAQUE PASSES READ ONLY SCREEN-SPACE GI (PHOTON-7 stage 7, 7-5; L4). On a GATHER chain the screen
-        // decode and the opaque pass shade from the four Photon screen products alone (the gather's diffuse and its
-        // rough specular, the reflection, the sun contact) and the area lights' visibility - the world caches (the
+        // THE OPAQUE PASSES READ ONLY SCREEN-SPACE GI (PHOTON-7 stage 7, 7-5 and 7-6; L4). On a GATHER chain the
+        // screen decode and the opaque pass shade from the four Photon screen products alone (the gather's diffuse and
+        // its rough specular, the reflection, the sun contact) and the area lights' visibility - the world caches (the
         // voxel cascades, the irradiance field) are not theirs to bind (PhotonPassBinding::passReadsGi: no
         // mJahReadsGi, nothing prepared): the gather IS the diffuse and the integrate composes the field where no
-        // probe answered (7-2). A BLENDED fragment has no screen product (no probe sits on it: the prepass holds
+        // probe answered (7-2). On a NO-RAY chain the screen integrate and the area visibility's two passes (above)
+        // write the same products from the world caches (7-6: the field's diffuse and the cones' beyond it, the
+        // cone's specular, the visibility through the voxel chain's shadow march), so the opaque passes bind none
+        // there either. A BLENDED fragment has no screen product (no probe sits on it: the prepass holds
         // opaque surfaces only), so the blended queues leave the opaque pass for their OWN pass right after it,
         // "Jahshaka blended", which reads the world caches as the refractives pass does (the field's irradiance and
         // the cone, Lumen's translucency reading its own volume) - the spec's "blended and refractive fragments" rule.

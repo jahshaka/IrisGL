@@ -1702,6 +1702,12 @@ QString photonTierSentence(PhotonTier t)
                .arg(gather.stride);
     out += photonDdgi(t) ? QStringLiteral(", the irradiance field its fallback")
                          : QStringLiteral(", no irradiance field");
+    // ...AND WHERE RAYS DO NOT RUN (PHOTON-7 stage 7, 7-6): the screen integrate writes the same products from the world
+    // caches - the field's diffuse (the cones' beyond its window), the cone's specular, the area lights' visibility
+    // through the voxel chain's shadow march
+    out += photonDdgi(t) ? QStringLiteral(" (without rays, the field's diffuse and the voxel cones' beyond it, from the "
+                                          "screen integrate)")
+                         : QStringLiteral(" (without rays, the voxel cones' diffuse, from the screen integrate)");
     // ...AND IN A HEADSET (PHOTON-GA-VR): the tier table's VR column, read,
     // never assumed — the same gather, or its own density.
     const jahshaka::engine::GiGatherFacts vr = photonVrGather(t);
