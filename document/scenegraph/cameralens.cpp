@@ -10,6 +10,7 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "document/scenegraph/cameralens.h"
+#include "jahshaka/engine/Types.h"   // filmToneGrey: the one C++ transcription of the film curve
 
 #include <algorithm>
 #include <cmath>
@@ -228,33 +229,9 @@ namespace {
 /// FinalToneMapping_ps.glsl's jahFilmToneMap.
 double filmChannel(double x, const FilmParams &p)
 {
-    const double slope = std::max(double(p.slope), 0.01);
-    const double toe = p.toe, shoulder = p.shoulder;
-    const double black = p.blackClip, white = p.whiteClip;
-    const double toeScale = 1.0 + black - toe;
-    const double shoulderScale = 1.0 + white - shoulder;
-    const double inMatch = 0.18, outMatch = 0.18;
-    double toeMatch;
-    if (toe > 0.8) {
-        toeMatch = (1.0 - toe - outMatch) / slope + std::log10(inMatch);
-    } else {
-        const double bt = (outMatch + black) / toeScale - 1.0;
-        toeMatch = std::log10(inMatch) - 0.5 * std::log((1.0 + bt) / (1.0 - bt)) * (toeScale / slope);
-    }
-    const double straightMatch = (1.0 - toe) / slope - toeMatch;
-    const double shoulderMatch = shoulder / slope - straightMatch;
-    const double lc = std::log10(std::max(x, 1e-10));
-    const double straight = slope * (lc + straightMatch);
-    double toeC = -black + (2.0 * toeScale) / (1.0 + std::exp((-2.0 * slope / toeScale) * (lc - toeMatch)));
-    double shC = (1.0 + white) -
-                 (2.0 * shoulderScale) / (1.0 + std::exp((2.0 * slope / shoulderScale) * (lc - shoulderMatch)));
-    toeC = lc < toeMatch ? toeC : straight;
-    shC = lc > shoulderMatch ? shC : straight;
-    double t = (lc - toeMatch) / (shoulderMatch - toeMatch);
-    t = std::min(std::max(t, 0.0), 1.0);
-    if (shoulderMatch < toeMatch) t = 1.0 - t;
-    t = (3.0 - 2.0 * t) * t * t;
-    return toeC + (shC - toeC) * t;
+    // THE ONE C++ TRANSCRIPTION of the scalar curve is the engine's (jahshaka/engine/Types.h filmToneGrey): the
+    // reflection rest's display slope reads the same arithmetic.
+    return jahshaka::engine::filmToneGrey(x, p.slope, p.toe, p.shoulder, p.blackClip, p.whiteClip);
 }
 
 void mul3(const double m[9], const double v[3], double o[3])

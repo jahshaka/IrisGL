@@ -630,13 +630,6 @@ void OgreScene::unindexItemNode(Node &n) {
         } else {
             mGpuScene.onSlotFreed(uint32_t(i));
         }
-        // THE RAY LEVEL IS KEYED BY SLOT and the slots have just been
-        // renumbered (ATOM P3's AT-A8r), so both ends of the swap are cleared:
-        // whatever lands in either is evaluated afresh instead of inheriting
-        // the distance band of the object that used to be there. (The band
-        // cannot travel with the object: nothing here indexes by object.)
-        forgetRayLevel(uint32_t(i));
-        forgetRayLevel(uint32_t(mItemNodes.size()));
     }
     mGpuScene.setSlotCount(uint32_t(mItemNodes.size()));
 }

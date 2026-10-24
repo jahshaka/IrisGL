@@ -854,6 +854,13 @@ void SurfaceCache::layoutCards(const CardSceneView::Candidate &cand, std::vector
                 r.lodLevel = c.lodLevel;
                 r.index = static_cast<unsigned short>(out.size());
                 r.bucket = bucketOf(dW);
+                // ...AND THAT LEVEL'S MEASURED BOUND in the world (READ_A finding 3: the still trace's lift reads it).
+                r.levelBound = 0.0f;
+                if (c.lodLevel > 0u && cand.lodBounds && size_t(c.lodLevel) <= cand.lodBounds->size()) {
+                    const float b = (*cand.lodBounds)[size_t(c.lodLevel) - 1u];
+                    const float sMax = std::max(std::fabs(scale.x), std::max(std::fabs(scale.y), std::fabs(scale.z)));
+                    if (std::isfinite(b) && b > 0.0f) r.levelBound = b * sMax;
+                }
                 r.queued = true;
                 out.push_back(r);
             }
@@ -1910,21 +1917,20 @@ void SurfaceCache::relightCards() {
     // ---- THE LAMPS' VISIBILITY (PHOTON-7 stage 5, 5-3): every relit card's texels traced toward the list's point and
     // spot lights (rq_card_movers.comp's lamps mode, from the lifted point the still sun trace uses), into the SunVis
     // layer's green, before the relight multiplies its lamps by it. A card the trace could not reach this frame (the
-    // scene's structure not built yet, its lift's footprint not chosen, a refused dispatch) is lit unshadowed by its
+    // scene's structure not built yet, a refused dispatch) is lit unshadowed by its
     // lamps, flagged in its record's float 19 - never by a visibility another frame wrote - and its direct half STAYS
     // STALE (relit again the next frame, until a trace lands: measured, gi.leak_room's carded far wall kept the outside
     // lamp's unshadowed red of its first relight - before the ray rule chose its levels - for as long as the lamp held
     // still) - for as long as the ray tier can trace at all (PHOTON-7 stage 5's read W4: keyed on the tier's presence,
-    // CardMoverHooks::present, never on the footprint alone, which a later residency change may stop setting).
+    // CardMoverHooks::present).
     bool lampsUntraced = false;
     {
         unsigned lamps = 0u;
         for (unsigned i = 0; i < numLights; ++i) lamps += mLightCpu[4u + size_t(i) * kLightFloats + 3u] > 0.5f ? 1u : 0u;
         bool traced = false;
-        // (the lift - sunLiftOf, the still trace's - is sized by the ray rule's footprint: before it is chosen the trace
-        // waits, as for a structure)
-        const bool liftKnown = mRayFootprintPerMetre > 0.0f;
-        if (lamps && liftKnown && mMoverHooks.trace) {
+        // (the lift - sunLiftOf, the still trace's - is WORLD-FIXED: the card's level bound, its texel and its depth
+        // quantum, no viewer term (L1); nothing to wait for but the structure)
+        if (lamps && mMoverHooks.trace) {
             mLampCpu.assign(mRelight.size() * kRelightFloats, 0.0f);
             for (size_t i = 0; i < mRelight.size(); ++i) {
                 std::memcpy(&mLampCpu[i * kRelightFloats], &mRelightCpu[i * kRelightFloats], kRelightFloats * sizeof(float));
@@ -1950,7 +1956,7 @@ void SurfaceCache::relightCards() {
                 }
             }
         }
-        // (a wait while the ray tier can trace - its structure or the lift's footprint not there yet; a tier that
+        // (a wait while the ray tier can trace - its structure not there yet; a tier that
         // cannot trace at all - closed, its pipeline refused and logged - lights the lamps unshadowed for good, never a
         // relight a frame)
         lampsUntraced = lamps && !traced && mMoverHooks.present && mMoverHooks.present();
@@ -2457,13 +2463,17 @@ namespace {
 /// lift: a card's footprint is grown by its own still-trace lift plus one texel
 /// (cardFootprint's `margin`, sunLiftOf) — the ray starts that far off the card.
 constexpr float kFootprintMargin = 0.05f;
-/// THE STILL TRACE'S LIFT, in footprints (rq_card_movers.comp's head): the origin
-/// moves off the receiver along its normal by this many of the larger of the
-/// card's texel and the ray tier's footprint at the card (the near copy it may hit
-/// lies up to one footprint off the captured level — the sun-contact job's rule,
-/// kSunContactLiftFootprints), plus the Depth layer's R16F quantum at the card's
-/// far end.
-constexpr float kSunLiftFootprints = 2.0f;
+/// THE STILL TRACE'S LIFT (rq_card_movers.comp's head; READ_A finding 3, READ_B finding 3 - the ORIGIN LAW every ray job
+/// keeps, Types.h rayOriginLevelLift): the origin moves off the receiver along the captured surface's GEOMETRIC normal by
+/// THE CAPTURED LEVEL'S BOUND against level 0 (CardRec::levelBound, the stored bound, times the bake's drift ratio
+/// kLevelDriftOverBound: the surface the card captured lies within it of level 0, which every sun ray traces -
+/// PHOTON-7 stage 6, ONE RAY LEVEL PER MESH), plus ONE TEXEL (the texel's own reconstruction: its depth and normal
+/// are a texel's average) and the Depth layer's R16F quantum at the card's far end; the shader adds the point's
+/// float bound. Derived, never a texel count: the bake picks the level for its NOMINAL 128-texel page while a split card's
+/// texel is that page's / the split (up to kCardMaxSplit 4), so a fixed "2 texels" let a convex card wider than 4 m
+/// start its sun rays inside level 0 (self-shadowed texels). The ray tier's footprint at the card that the old lift
+/// also cleared (a coarser near level re-fitted per view) is gone with the level.
+constexpr float kSunLiftTexels = 1.0f;
 /// A ray's length: the sun is at infinity; a mover beyond the residency radius
 /// casts onto no resident card anyway.
 constexpr float kMoverRayRange = 10000.0f;
@@ -2531,9 +2541,9 @@ bool shades(const Footprint &caster, const Footprint &card) {
 // A card wider than kGridMaxCells cells (a floor's card) or not finite is not
 // filed: every query visits it (`wide`). A query whose rectangle is inverted or
 // not finite (a degenerate box) cannot be placed on the grid: it visits every
-// card. The grid is BUILT PER CALL: a card's footprint carries its sun lift,
-// which reads the viewer's distance (sunLiftOf) — a grid cached across calls would
-// go stale with the camera.
+// card. The grid is BUILT PER CALL (the cards a call asks about change call to
+// call); a card's footprint carries its sun lift, which is world-fixed (sunLiftOf:
+// the card's level bound, its texel and its depth quantum - no viewer term).
 constexpr int kGridMaxSide = 256;      ///< cells a side, at most
 constexpr unsigned kGridMaxCells = 64u; ///< a card spanning more cells than this is `wide`
 bool finiteRect(const Footprint &f) {
@@ -2691,11 +2701,9 @@ const Ogre::Light *SurfaceCache::cardSun() const {
 
 float SurfaceCache::sunLiftOf(const CardRec &c) const {
     const float texel = 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size));
-    const float dist = (c.centre - mViewerPos).length();
-    const float rayFootprint = mRayFootprintPerMetre * dist;
     // R16F keeps 11 bits: the depth quantum at the card's far end.
     const float depthQuantum = (2.0f * c.halfDepth + 2.0f * captureMargin(c.halfDepth)) / 1024.0f;
-    return kSunLiftFootprints * std::max(texel, rayFootprint) + depthQuantum;
+    return rayOriginLevelLift(c.levelBound) + kSunLiftTexels * texel + depthQuantum;
 }
 
 void SurfaceCache::traceSun() {
@@ -2999,11 +3007,7 @@ void SurfaceCache::traceSun() {
             job.toSun = toSun;   // ZERO without a sun: every texel lit
             job.range = kMoverRayRange;
             job.still = true;
-            // THE LIFT NEEDS THE RAY RULE'S FOOTPRINT: before the ray tier has
-            // chosen its levels once (a scene's first frames, rays just turned on)
-            // the near copy's error is not known — the trace waits, as it waits
-            // for a structure.
-            if (mRayFootprintPerMetre > 0.0f && mMoverHooks.trace && mMoverHooks.trace(job)) {
+            if (mMoverHooks.trace && mMoverHooks.trace(job)) {
                 for (unsigned idx : still) {
                     CardRec &c = mCards[idx];
                     c.stillPending = false;
@@ -3401,7 +3405,6 @@ void SurfaceCache::update(const CardSceneView &view) {
     mLampTracedLastFrame = 0u;
     mStillTexelsLastFrame = 0u;
     mViewerPos = view.viewerPos;
-    mRayFootprintPerMetre = view.rayFootprintPerMetre;
     mBudget = view.budgetTexels;
     mLightBudget = view.lightBudgetTexels;
     mAreaStrata = std::max(1u, view.areaStrata);

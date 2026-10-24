@@ -189,7 +189,9 @@ struct HitListBinding {
     bool sun = false;
     float toSun[3] = { 0.0f, 1.0f, 0.0f };
     uint32_t sunMask = 0u;
-    float sunRange = 0.0f, lift = 0.0f, farLift = 0.0f;
+    /// farLift: a FAR copy's hit's sun-leg surface term (farOverlap, the drift law's gap); a near hit has
+    /// none (it is ON level 0) - the one origin law, jah_ray_origin.glsl.
+    float sunRange = 0.0f, farLift = 0.0f;
 };
 
 struct GatherInputs {
@@ -244,6 +246,13 @@ struct GatherInputs {
     /// at its instance's scale. The far query starts that far before the near
     /// length.
     float farOverlap = 0.0f;
+    /// THE DRAWN SURFACE'S BOUND against level 0, in full-resolution sample footprints (PHOTON-7 stage 6, READ_A W2,
+    /// READ_B F3: the origin law, Types.h rayOriginDrawnFootprints) - the probe sits on the drawn surface while its
+    /// rays trace level 0. The host sets it every frame; 0 is the rays.originCut control.
+    float drawnCutFootprints = rayOriginDrawnFootprints(kLodBudgetPixels, 0.0f);
+    /// THE DEPTH-REBUILT POINT'S TERM (READ_B F5 (b), jah_ray_origin.glsl jahDepthPointError): the rasteriser's
+    /// sub-pixel snap in pixels, found at the placement with the probe's depth; 0 = the term off (rays.originPoint 0).
+    float pointSnapPx = float(1.4142135623730951 / 512.0);
     /// THE ALPHA TABLE's device address (REFLECT-MOVERS-2, jah_rq_alpha.glsl): the
     /// gather's rays test a cut-out's candidates too; 0 = none.
     uint64_t alphaTable = 0u;
@@ -311,7 +320,6 @@ struct GatherInputs {
     /// five (Indirect, Emissive, ShadowRough, Albedo, Normal), bound at 25-29.
     Ogre::TextureGpu *cardView[SurfaceCache::kViewLayers] = {};
     unsigned cardSlots = 0u, cardRecords = 0u;
-    float cardFootprintTexels = 0.0f;
     /// THE HIT'S GEOMETRIC NORMAL: the per-slot geometry-row table the scene's
     /// TLAS was written with (copied per frame in flight by the gather) and the
     /// GPU scene's rows, already FLUSHED by the tier this frame. Null = none: the

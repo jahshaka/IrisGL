@@ -518,11 +518,14 @@ struct MeshData {
     // (the VAO is matched on {opType, indexBufferVbo, indexType, vertexBuffers},
     // so a per-level vertex remap would break the auto-instancing merge).
     //
-    // `lodBounds[i]` is level i+1's MEASURED TWO-SIDED DISTANCE from level 0, as
-    // a LENGTH IN MESH UNITS: a sampled Hausdorff estimate taken at bake time
-    // with the sampling-gap margin applied (ATOM P1's AT-A5 — before it, what
-    // stood here was the simplifier's own quadric relabelled as a bound, and it
-    // was not one). Monotonically non-decreasing. It is the currency of the whole
+    // `lodBounds[i]` is level i+1's BOUND, a LENGTH IN MESH UNITS: the largest
+    // STORED error among its clusters (document/assets/mesh.h) - each the DAG's
+    // max(children, this step) over a step's measured deviation from its INPUT
+    // (import/atomdag/measure.h), NOT a distance from level 0: the level's drift
+    // from level 0 is within kLevelDriftOverBound times it (the bake's ship law,
+    // atom2.one_step_drift_bound), which is what a consumer needing a distance
+    // from level 0 multiplies by (the ray origin, below). Monotonically
+    // non-decreasing. It is the currency of the whole
     // program, and every consumer spends it the same way — by stating the
     // world-space deviation IT can afford and taking the coarsest level below it:
     //   * the VIEW turns a PIXEL budget into that deviation at its own live
@@ -646,16 +649,52 @@ struct MeshData {
 /// savings arrive only once the object is 4 px across would not be a tolerance.
 constexpr float kLodBudgetPixels = 1.0f;
 
-/// THE RAY TIER'S TOLERANCE, in ray footprints (ATOM P3's AT-A8r). ONE, and the
-/// reason it is not the eye's half or double: a ray is cast through a pixel, so
-/// its footprint IS that pixel's, and a deviation under one footprint cannot
-/// change which surface the ray finds. The tier that spends it is the ray
-/// tier's NEAR copy of every instance (ATOM-FARBLAS-1): its bottom-level
-/// structure is built from the level this rule leaves in `GpuInstance.ids.w`.
-constexpr float kRayFootprintTolerance = 1.0f;
+// THE RAY TIER'S NEAR COPY IS LEVEL 0 (PHOTON-7 stage 6, ONE RAY LEVEL PER MESH): every ray - the gather's, the sun
+// contact's, the cards' sun, the reflections' - traces the authored triangles near, so a contact meets its
+// reflection and the traced geometry is a function of the world, never of where a camera stands (law L1). The 2x
+// distance band that re-fitted a coarser level per view (one footprint of tolerance) is deleted; measured on Bistro
+// Exterior at the owner's pose: 211.8 MB of bottom levels against the band's 138.5 MB (1.53x), 0 refits on a walk.
+
+// THE RAY ORIGIN - ONE LAW FOR EVERY RAY THAT LEAVES A SURFACE (PHOTON-7 stage 6, READ_B finding 3; the GLSL half is
+// src/rayquery/include/jah_ray_origin.glsl). A ray traces level 0 (above) while the surface it starts on is the one the
+// VIEW DREW (Atom's cut, a stock item's level: the reflection, the gather's probes, the sun contact) or a CARD CAPTURED
+// (the bake's level for its texel: the card sun), so with tMin 0 the origin is lifted along that surface's GEOMETRIC
+// normal by the point's own error (its float bound; a card texel's reconstruction) plus THE SURFACE'S BOUND AGAINST
+// LEVEL 0, measured the way the LOD rule measures it:
+//   * A VIEW'S PIXEL: the tolerance (Scene::pixelTolerance x the LOD bias - what the id pass's cut and the stock
+//     thresholds both take) x one sample's footprint per metre (sampleFootprintPerspective at 1 m: |rayDown| / H) x the
+//     point's EUCLIDEAN distance from the eye. The strategy (OgreMesh.cpp) and the cut (JahClusterCut.glsl) both judge
+//     an object at its bounding sphere's nearest distance |centre - eye| - radius, and every point of the object is at
+//     least that far; the forward depth the old lifts used is 1.24x short at a 16:9 45-degree frame's side edge and
+//     1.31x at its corner. A STOCK level is HELD down to (1 - band) of its threshold on a watched view
+//     (OgreLodStrategyPrivate.inl: finer only once the value falls under threshold - band), so the bound is over
+//     (1 - band); Atom's cut has no band (OgreAtomIdPass.cpp, D4) and lies inside the same bound.
+//   * A CARD: its captured level's bound in world units (CardRec::levelBound).
+// THE BOUND IS THE STORED ERROR x kLevelDriftOverBound. What the LOD rule spends is the bake's STORED error, Nanite's
+// max(children, this step) over each step's measured deviation from its INPUT (import/atomdag/measure.h), not a
+// distance from level 0: the uniform cut's drift from level 0 measured 1.154x its stored error on the rough sheet and
+// 1.117x on the curved shell (atom2.one_step_drift_bound's fixtures, 2026-10-23), and the bake's SHIP law is that it
+// stays within 2x at every depth. That law is this constant; the row asserts it (tests/meshbake/atom2_rows.h).
+// At Epic's 1 px the view's term is 2.2 footprints on axis (the sun contact's tolerance + 1 was 2, and its "+1"
+// margin for a convex caster's sign is this term now - the float bound covers a start exactly on level 0).
+constexpr float kLevelDriftOverBound = 2.0f;
+
+/// The view's drawn-surface term, in sample FOOTPRINTS at the point's Euclidean distance (the shaders multiply by
+/// |rayDown| / H and the distance - jahViewDrawnBound): `tolerance` = pixel tolerance x LOD bias, `lodBand` = the
+/// view's switch band (ChainDesc::lodHysteresis: 0 on a capture, jahLodHysteresis on a watched view).
+inline float rayOriginDrawnFootprints(float tolerance, float lodBand) {
+    if (!(tolerance > 0.0f)) return 0.0f;
+    const float band = (lodBand > 0.0f && lodBand < 1.0f) ? lodBand : 0.0f;
+    return kLevelDriftOverBound * tolerance / (1.0f - band);
+}
+
+/// A captured level's term (the card sun): its stored bound in world units, as a bound against level 0.
+inline float rayOriginLevelLift(float levelBoundWorld) {
+    return levelBoundWorld > 0.0f ? kLevelDriftOverBound * levelBoundWorld : 0.0f;
+}
 
 /// THE RAY INSTANCE MASK (ATOM-FARBLAS-1, A5b §4). ONE top-level structure holds
-/// every traced object TWICE: a NEAR copy over the level the ray rule chose,
+/// every traced object TWICE: a NEAR copy over the mesh's level 0,
 /// carrying the per-consumer bits (audit C-15) plus `kRayMaskNear`, and a FAR
 /// copy over the mesh's coarsest level carrying `kRayMaskFar` ALONE. A launch
 /// names what it may hit with its cull mask, so the split costs a bit, not a
@@ -2889,28 +2928,11 @@ enum class GiViewProfile {
 
 /// It is a pure function of the quality dial and the view profile: no scene, no
 /// device, no Ogre.
-/// THE CARD READ'S FOOTPRINT GATE (PHOTON-CARDS-2 fix round, audit F2 — the
-/// lead's decision; the currency SC-2's page mips will select a level on). A
-/// reflection ray's hit reads the surface-cache card only while the sample's
-/// footprint at the hit (2 t alpha / sqrt(N), the spacing between the samples
-/// the temporal mean holds) is at most this many of the card's texels; a wider
-/// footprint reads the voxels, prefiltered at its own mip.
-///
-/// MEASURED (2026-09-23, spikes/photon-cards-2/sweepB): the selftest's fixture B
-/// (the glossy 0.2 floor reflecting the pillars — where the ungated card read
-/// showed its speckle) shot at the Viewport grade with the gate at k = 0 (the
-/// voxel read everywhere) .. infinity; the floor's speckle as the mean
-/// |pixel - its 3x3 median|: 0.532 codes at k = 0, 0.531 / 0.530 / 0.538 at
-/// k = 1 / 2 / 4 (x1.01 — the card read's sharpness in 2,862 / 5,747 / 13,102
-/// pixels, no new speckle), 0.675 at k = 8 (x1.27) and 0.703 ungated (x1.32).
-/// So k = 4, the widest footprint inside the lead's x1.2 bar. (gi.rt_reflect's
-/// 0.3-rough arm, the audit's first recipe, `test_rt_reflect --footprint-sweep`,
-/// never crosses: in a WARM view the temporal mean hides the card's noise
-/// above ~7 texels and the voxel's bias is the larger error there; below 4
-/// texels both follow the near-mirror per-frame sampling. The speckle is a
-/// young-view, SPATIAL property — two consecutive screenshots are identical —
-/// which is why the gate is set on the picture that showed it.)
-constexpr float kCardFootprintTexels = 4.0f;
+/// (THE CARD READ'S FOOTPRINT GATE, kCardFootprintTexels, is DELETED - PHOTON-7 stage 6, law L5: one estimator a
+/// quantity. The reflection read a carded surface's VOXELS wherever its lobe's footprint passed four card texels while the
+/// gather read the card at every footprint - two estimators of one radiance, chosen by the caller. Its reason was a young
+/// view's speckle under the old reflection denoiser; at the gated hits the card read is the nearer to the screen's answer
+/// (photon-glass: 4.00 against the voxel's 4.60 codes, spikes/photon-7/stage6/c1/GATE_SPLIT.txt).)
 
 /// THE GATHER ROW OF THE TIER TABLE (PHOTON-GATHER-1d, the rule T-A): what the
 /// screen-probe gather is at a tier. One row in the engine's one table; the
@@ -3079,6 +3101,11 @@ struct GiQualityFacts {
     /// reads "traced" (worldmodes). The values are the SSR row's own High/Epic
     /// columns, so the shipped pictures do not move.
     int  reflectTrace = 0;
+    /// THE REST'S RAYS A FRAME (PHOTON-7 stage 6 commit 8, PREFLIGHT_R section 3): at rest a texel still converging
+    /// traces this many of its rest sequence's samples a frame (the batch: up to the first that needs a record) - the
+    /// rest converges in about (2N + its measured samples) / k + 8 frames, then holds. 4 where the rays are the
+    /// reflection (the preflight's simulated stop: ~100 frames on photon-glass against the deleted K_max's 513), 1 else.
+    unsigned reflectRestRays = 1u;
     /// THE IRRADIANCE FIELD, what `GiParams::ddgi`'s Auto resolves to: ON at every
     /// quality (owner option (b), 2026-09-09 — the field is the one diffuse arm
     /// that is right in open and sealed scenes alike). The Studio tier table's
@@ -3194,6 +3221,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.gather = { 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
+        f.reflectRestRays = 4u;
         f.probeGridBudgetBytes = quality == GiQuality::Epic ? (1024ull << 20) : (512ull << 20);
         break;
     default:   // Medium: the same reach as High, at its own resolution
@@ -5395,11 +5423,16 @@ struct RayQueryStatus {
     float reflectMotionMs = -1.0f;
     /// THE REFLECTION HISTORY'S COUNT (PHOTON-2 stage 0; the arm "reflect.historyReadback") — an INSTRUMENT:
     /// per texel of the trace's grid, row-major (reflectHistoryW x reflectHistoryH, the eye layers side by side),
-    /// the temporal mean's sample count rq_reflect.comp wrote (its history w; 0 = no answer yet, capped at 4096)
+    /// the temporal mean's sample count (its state texel's N + v, whole; 0 = no answer this frame, capped at 4096)
     /// on traced frame `reflectHistoryFrame` of the view. Empty with the arm off and until a frame traced under it
     /// has retired. `reflectFrame` is the view's traced-frame counter NOW (the frame just traced is one below it),
     /// so a caller that steps frames knows which copy is which frame.
     std::vector<unsigned short> reflectHistoryCount;
+    /// ...and THE MOVING SE (PHOTON-7 stage 6, the lag law's instrument), on the same grid and frame: each texel's moving
+    /// mean's standard error in DISPLAY CODES (its luma variance over its frame count, through the denoiser space's
+    /// slope and the display table) as the temporal pass left it on its last moving frame; empty where the copy is not
+    /// there (the arm off, a frame before its size).
+    std::vector<float> reflectHistorySe;
     unsigned reflectHistoryW = 0u, reflectHistoryH = 0u;
     unsigned reflectHistoryFrame = 0u;
     unsigned reflectFrame = 0u;
@@ -5408,8 +5441,17 @@ struct RayQueryStatus {
     /// still converging at rest (-1: none read for this rest since it began or a moved instance last crossed it), the
     /// rests it has begun, and the rest frames on which a moved instance's swept box was handed to the trace.
     unsigned reflectRestFrames = 0u;
+    /// THE SOURCES THE REFLECTION TRACED WITH (PHOTON-7 stage 6, the mode label: every reflection row reads the mode it
+    /// RAN from here, prints it and asserts the one it intends - a mode is never assumed): a view's (the last in the
+    /// map's order), a ReflectSources value (0 both, 1 rays, 2 screen) - what the trace ran, not what was asked: a chain
+    /// that builds no screen sources (a stereo chain) runs the rays whatever PostFxDesc::reflectSources says. -1 = none
+    /// traced.
+    int      reflectSources = -1;
     bool     reflectHeld = false;
     int      reflectRestActive = -1;
+    /// ...and of them the CAPPED texels (commit 8): stopped at their sample count's 16-bit ceiling rather than by their
+    /// standard error - the rest's defect reading (0 on a healthy rest; -1: none read, as reflectRestActive).
+    int      reflectRestCapped = -1;
     unsigned reflectRests = 0u;
     unsigned reflectRestMoverFrames = 0u;
     /// THE CAMERA CUTS a reflection view detected (N3, the gather's rule) - each one its histories cleared.
@@ -6426,7 +6468,7 @@ struct VrConfig {
     /// one measurement, nothing written to the project.
     ///
     /// The SOURCE is not a choice here: a stereo chain never marches in screen
-    /// space (see `PostFxDesc::ssrScreenMarch`), so this row buys RAY-TRACED
+    /// space (see `PostFxDesc::reflectSources`), so this row buys RAY-TRACED
     /// reflections on a ray-capable machine and NOTHING AT ALL on one without —
     /// `chain::build` declines to build the reflection stage when neither source
     /// can write it, so a machine with no ray queries does not even pay the
@@ -7092,6 +7134,39 @@ constexpr float kSpotAreaFraction = 0.025f;
 ///  * vignette: 0..1 of the cos^4 lens falloff, the frame's corner at 45 degrees.
 ///  * film*: Unreal's filmic tonemapper (ACES-based), its five parameters at
 ///    Unreal's defaults. 0.18 always leaves the curve at 0.18.
+/// THE FILM CURVE ON A GREY - Unreal 4.15's FilmToneMap (TonemapCommon.ush) as the fork's FinalToneMapping_ps.glsl
+/// runs it (jahFilmToneMap): on a NEUTRAL input its colour terms (the RRT's glow and red modifier, the desaturations, the
+/// AP0/AP1 round trip) are the identity, so this scalar is the curve a grey sees - linear film input (post-exposure) to
+/// linear display output, before the sRGB encode. THE ONE C++ TRANSCRIPTION: iris::lens::filmCurve calls it (the tonemap
+/// suite holds the GPU to that), and so does the reflection rest's display slope (PHOTON-7 stage 6, the stop's code).
+inline double filmToneGrey(double x, double slopeIn, double toe, double shoulder, double black, double white) {
+    const double slope = slopeIn > 0.01 ? slopeIn : 0.01;
+    const double toeScale = 1.0 + black - toe;
+    const double shoulderScale = 1.0 + white - shoulder;
+    const double inMatch = 0.18, outMatch = 0.18;
+    double toeMatch;
+    if (toe > 0.8) {
+        toeMatch = (1.0 - toe - outMatch) / slope + std::log10(inMatch);
+    } else {
+        const double bt = (outMatch + black) / toeScale - 1.0;
+        toeMatch = std::log10(inMatch) - 0.5 * std::log((1.0 + bt) / (1.0 - bt)) * (toeScale / slope);
+    }
+    const double straightMatch = (1.0 - toe) / slope - toeMatch;
+    const double shoulderMatch = shoulder / slope - straightMatch;
+    const double lc = std::log10(x > 1e-10 ? x : 1e-10);
+    const double straight = slope * (lc + straightMatch);
+    double toeC = -black + (2.0 * toeScale) / (1.0 + std::exp((-2.0 * slope / toeScale) * (lc - toeMatch)));
+    double shC = (1.0 + white) -
+                 (2.0 * shoulderScale) / (1.0 + std::exp((2.0 * slope / shoulderScale) * (lc - shoulderMatch)));
+    toeC = lc < toeMatch ? toeC : straight;
+    shC = lc > shoulderMatch ? shC : straight;
+    double t = (lc - toeMatch) / (shoulderMatch - toeMatch);
+    t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+    if (shoulderMatch < toeMatch) t = 1.0 - t;
+    t = (3.0 - 2.0 * t) * t * t;
+    return toeC + (shC - toeC) * t;
+}
+
 struct ImageGrade {
     float contrast = 1.0f;
     float saturation = 1.0f;
@@ -7115,6 +7190,22 @@ struct ImageGrade {
     }
     bool operator!=(const ImageGrade &o) const { return !(*this == o); }
 };
+
+/// WHERE A REFLECTION'S ANSWER MAY COME FROM (PHOTON-7 stage 6, REFLECT-MODE-1's engine half): the screen trace (this
+/// view's own previous picture, through the depth buffer) and the rays (the world, through the acceleration structure).
+///  * Both   - ON A RAY CHAIN the ONE ESTIMATOR: per pixel one direction, the screen trace first, the ray for whatever
+///             the screen cannot vouch for (rq_reflect.comp). On a chain without rays: the screen-space march.
+///  * Rays   - the rays alone: no screen source is built (no previous picture, no march). On a chain without rays:
+///             no reflection stage at all (the probe and the sky answer).
+///  * Screen - the screen alone: on a ray chain the trace's misses are NO SAMPLE (no ray follows them - biased by
+///             construction: a measuring arm); on a chain without rays the march, as Both.
+/// A STEREO chain builds no screen source whatever this says (its passes are per layer and the previous picture is not):
+/// it is Rays there by construction.
+enum class ReflectSources { Both, Rays, Screen };
+/// The sources' names ("both", "rays", "screen") - the spelling every reader prints and parses.
+inline const char *reflectSourcesName(ReflectSources s) {
+    return s == ReflectSources::Rays ? "rays" : s == ReflectSources::Screen ? "screen" : "both";
+}
 
 /// The post-processing chain for a View (POST_CHAIN_SPEC.md).
 ///
@@ -7263,25 +7354,13 @@ struct PostFxDesc {
     /// lean on translucent panes should leave SSR off until the prepass learns
     /// a visibility split.
     int   ssr = 0;
-    /// DOES THE SCREEN-SPACE MARCH CONTRIBUTE (lane REFLECT-VR-1)?
-    ///
-    /// The `ssr` row above selects TWO things that used to be one: the
-    /// reflection's RESOLUTION (half or full) and its SOURCES (the screen-space
-    /// march, plus the rays where the machine can trace them). This flag turns
-    /// the first source off and leaves the row meaning the resolution alone —
-    /// the reflection is then whatever the rays answer, and every pixel they
-    /// decline keeps the probe/sky answer it has today.
-    ///
-    /// WHO SETS IT FALSE, AND WHY IT IS NOT A QUALITY DIAL: the march's passes
-    /// (its prepass history, its resolve, its colour history) are not per layer
-    /// in the layered stereo chain, which draws each eye into its own layer.
-    /// The rays are: a ray is traced in the world from the eye that owns its
-    /// pixel, per layer (LAYERED-STEREO-1). So the VR session asks
-    /// for this, and `chain::build` ENFORCES it for any stereo chain whatever a
-    /// host asked (OgreChain.cpp) — the flag exists so that a MONO view of the
-    /// same picture (the per-eye control `vrEyeScreenshot` renders) can be
-    /// asked for the same answer, which is what makes the two comparable.
-    bool  ssrScreenMarch = true;
+    /// WHERE THE REFLECTION'S ANSWER COMES FROM (PHOTON-7 stage 6; ReflectSources above). The `ssr` row above selects the
+    /// reflection's RESOLUTION (half or full); this, its SOURCES. Both is the one estimator on a ray chain. A GRAPH
+    /// field: the screen sources (the previous picture, its depth, the object motion, the helpers' mask) and, on a chain
+    /// without rays, the march are built only for Both and Screen - and never on a STEREO chain, which `chain::build`
+    /// ENFORCES whatever a host asked (the VR session asks for Rays: applyVrViewPolicy). A MONO view of the same picture
+    /// (the per-eye control `vrEyeScreenshot` renders) is asked for Rays to be comparable.
+    ReflectSources reflectSources = ReflectSources::Both;
     /// How far a reflection ray may travel, in world units. Beyond this the
     /// march gives up and the pixel falls back to the probe/sky reflection.
     /// Scene-scale dependent: the default suits a room, not a landscape.
@@ -7507,7 +7586,7 @@ struct PostFxDesc {
                ssaoScale == o.ssaoScale && ssaoPower == o.ssaoPower &&
                ssaoRadius == o.ssaoRadius && ditherOff == o.ditherOff &&
                smaaPreset == o.smaaPreset &&
-               ssr == o.ssr && ssrScreenMarch == o.ssrScreenMarch &&
+               ssr == o.ssr && reflectSources == o.reflectSources &&
                ssrMaxDistance == o.ssrMaxDistance && ssrSteps == o.ssrSteps &&
                ssrMarchPhase == o.ssrMarchPhase &&
                ssrThickness == o.ssrThickness &&
@@ -7556,10 +7635,10 @@ struct PostFxDesc {
 ///     half-resolution SSAO targets, the SMAA lookup tables' passes, the
 ///     pyramid's compute), and a layered chain refuses a pass that reads a
 ///     layered texture into a single-layer target (chain::applyStereo).
-///   * ssrScreenMarch — the march's G-buffer passes are not per layer;
-///     `chain::build` enforces it for any stereo chain whatever a host asked;
-///     this is the place that asks. The RAYS are the stereo answer and run per
-///     layer.
+///   * reflectSources Rays — the screen sources (the previous picture and the
+///     march's passes) are not per layer; `chain::build` enforces it for any
+///     stereo chain whatever a host asked; this is the place that asks. The RAYS
+///     are the stereo answer and run per layer.
 ///   * refractions, distortion — screen-space READS of a scene copy at an
 ///     offset, whose copy and composite passes are not per layer (and the pin's
 ///     refraction piece has no multiview arm, fork F4's stated limitation).
@@ -7578,7 +7657,7 @@ inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
     fx.bloom          = false;
     fx.ssao           = false;
     fx.smaaPreset     = -1;
-    fx.ssrScreenMarch = false;
+    fx.reflectSources = ReflectSources::Rays;
     fx.hzb            = false;
     fx.hzbFarthest    = true;
     fx.refractions    = false;
@@ -8910,16 +8989,6 @@ struct GpuSceneStatus {
     unsigned long long aabbReads = 0;  ///< world AABBs the scan asked Ogre for, ever
     double   lastCopyMs = 0.0;         ///< CPU cost of the last update's staging + copies
     double   lastScanMicros = 0.0;     ///< ...of the last TIMED scan (0 when never timed)
-    // ---- THE RAY LEVEL's own cost (ATOM P3, AT-A8r) ------------------------
-    /// Slots whose ray level was RE-EVALUATED, ever: the 2x distance band was
-    /// left and the rule was asked again.
-    unsigned long long rayLevelEvals = 0;
-    /// ...of those, the ones whose ANSWER CHANGED — one BLAS refit each, and
-    /// the number the hysteresis exists to keep small.
-    unsigned long long rayLevelRefits = 0;
-    /// Walks of the ray-level pass (one per frame in which the camera or the
-    /// scene moved; a still frame runs none).
-    unsigned long long rayLevelWalks = 0;
     /// THE CHANGE FEED's notifications, ever (ATOM-CPU-WALKS-1): slot changes told to
     /// the consumers that derive from the table (the split's words, the ray tier's
     /// traced set, the card candidates) — each one is that many visits for each. A
@@ -9563,10 +9632,6 @@ struct GpuSceneEntry {
     unsigned flags = 0u;
     NodeId   nodeId = 0u;      ///< the slot's node (the GPU holds Ogre's key for it; read back to the node's id)
     unsigned lightMask = 0u;
-    /// THE RAY LEVEL (`GpuInstance.ids.w`, ATOM P3's AT-A8r): the mesh level
-    /// this instance's NEAR bottom-level structure is built from at its
-    /// current distance. 0 until a camera has been seen.
-    unsigned rayLevel = 0u;
     /// THE PBS MATERIAL WORD (`GpuInstance.raster.x`, ATOM-S3-PARITY): {pool : 16 |
     /// slot : 16} of the item's material in the PBS const-buffer pool — what the
     /// visibility-buffer decode indexes materials with. 0xFFFFFFFF when the item's

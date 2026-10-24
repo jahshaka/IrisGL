@@ -1578,36 +1578,9 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         for (OgreScene *s : drawn) s->sweepCullTwins();
         drainPbsChanges();
         for (OgreScene *s : drawn) s->composeGpuSceneFrame();
-        // THE RAY LEVEL (ATOM P3's AT-A8r), immediately after the table it
-        // writes into and before the ray tier that will one day read it. The
-        // eye and the projection come from the FIRST ENABLED VIEW that draws
-        // this scene — the same set `scenesFeedingEnabledViews` built, in the
-        // same order — because the rule's sample is a ray cast through that
-        // view's pixel. A scene drawn by several views takes the first; the
-        // level is a build-time choice with a 2x band around it, not a
-        // per-view one, and a second view's answer would differ only where the
-        // band already tolerates the difference.
-        for (OgreScene *s : drawn) {
-            for (auto &v : mViews) {
-                if (!v || !v->isEnabled() || v->boundOgreScene() != s) continue;   // the engine's binding, never the host's record
-                Ogre::Camera *cam = v->camera();
-                // CONTINUE, not break: a scene whose FIRST enabled view is
-                // orthographic (a preview, a card capture) still has a
-                // perspective one behind it, and breaking here would leave the
-                // whole scene's ray levels unevaluated for ever.
-                if (!cam || cam->getProjectionType() != Ogre::PT_PERSPECTIVE) continue;
-                // THE VIEW'S HEIGHT, not the camera's last viewport: an
-                // offscreen camera reports NO viewport between passes (measured
-                // 2026-09-22 — it is what made this pass silently never run),
-                // and the height the currency wants is the target's.
-                const float h = float(v->height());
-                s->updateRayLevels(cam->getDerivedPosition(),
-                                   float(cam->getProjectionMatrix()[1][1]), h);
-                break;
-            }
-        }
-        // THE FRAME'S ONE COMMIT: the composed slots and the ray-level patches, in one
-        // staging map, into the frame's copy — before the ray tier reads it.
+        // THE FRAME'S ONE COMMIT: the composed slots in one staging map, into the frame's
+        // copy — before the ray tier reads it. (The ray level each slot's near copy is
+        // built from is level 0, fixed: PHOTON-7 stage 6 deleted the per-view rule.)
         for (OgreScene *s : drawn) s->commitGpuSceneFrame();
         // THE CUT-OUTS' MASKS (ENGINE-POLISH-ATOM-1 stage 3): every drawn scene's table after its commit (the flags
         // word it reads is this frame's), the masks it asks for made on the device, then ONE edge for every address

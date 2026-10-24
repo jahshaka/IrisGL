@@ -60,9 +60,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 toSun;
 	/// xy = this job's texel grid, zw = the full target it covers.
 	vec4 resolution;
-	/// THE BIAS RULE (see main): x = the LIFT per unit of view distance
-	/// (perspective) or in world units (orthographic), y = its floor
-	/// in world units, z = the TLAS cull mask, w = the texel DIVISOR (1 = one
+	/// THE ORIGIN LAW (see main): x = the drawn surface's bound in sample
+	/// footprints (Types.h rayOriginDrawnFootprints), y = the point term's
+	/// sub-pixel snap in pixels (jahDepthPointError; 0 = off), z = the TLAS cull mask, w = the texel DIVISOR (1 = one
 	/// ray per pixel, 2 = one per 2x2 block; the grid is the target's size over
 	/// it, rounded UP, so every pixel's iFragCoord / divisor has a texel).
 	vec4 knobs;
@@ -95,6 +95,14 @@ vec3 worldAt( vec2 uv, float dist )
 		return p.camPos.xyz + plane + p.fwd.xyz * dist;		// an offset, not a ray
 	return p.camPos.xyz + plane * dist;
 }
+
+/// THE GEOMETRIC NORMAL AT A PIXEL (READ_A W1): the reflection's own text (jah_geometric_normal.glsl) - the lift runs
+/// along the surface the depth buffer drew, never along a normal map's tilt (which shrinks its geometric component).
+#include "jah_rq_finite.glsl"
+#define JAH_GN_RAW( q ) texelFetch( sceneDepth, ( q ), 0 ).x
+#define JAH_GN_WORLD( q, raw ) worldAt( ( vec2( q ) + 0.5 ) / vec2( fullRes ), viewDistance( raw ) )
+#include "jah_geometric_normal.glsl"
+#include "jah_ray_origin.glsl"
 
 void main()
 {
@@ -132,24 +140,25 @@ void main()
 		{
 			const float dist = viewDistance( rawDepth );
 			const vec3 world = worldAt( uv, dist );
-			// THE BIAS RULE, for a ray that reads no voxel: the origin is lifted
-			// along the normal by TWO full-resolution pixel footprints at its own
-			// depth (knobs.x, OgreRayQuery.cpp kSunContactLiftFootprints) and
-			// tMin is zero. One footprint is the ray tier's own TOLERANCE
-			// (Types.h kRayFootprintTolerance: the near copy it traces may lie a
-			// footprint off the drawn surface, the level the ray rule chose
-			// being coarser than the drawn one) — a lift of exactly that has no
-			// margin, and a curved caster under a grazing sun starts rays under
-			// its own triangles; the second footprint is the margin (measured
-			// on the sphere lattice of gi.sun_contact). The reflection's rule
-			// (half a voxel cell, tMin = the bias) clears the VOXEL grid's
-			// quantisation, which a geometry-only question never reads, and at
-			// a contact it would miss every occluder closer than the bias. The
-			// lift moves the origin off the receiver, never along the floor, so
-			// the gap beside a caster still closes to the job's own texel.
-			const float footprint = p.camPos.w < 0.5 ? p.knobs.x : p.knobs.x * dist;
-			const float bias = max( footprint, p.knobs.y );
-			const vec3 origin = world + worldN * bias;
+			// THE ORIGIN LAW (PHOTON-7 stage 6, READ_A W1, READ_B F3 - the one law of every ray job,
+			// jah_ray_origin.glsl): the origin is lifted off the pixel's DRAWN surface along its GEOMETRIC normal by
+			// the point's float bound and the drawn surface's bound against level 0 at the point's Euclidean
+			// distance (knobs.x: Types.h rayOriginDrawnFootprints) - the ray traces each mesh's level 0 while the
+			// pixel shows the drawn cut (Atom's, or a stock item's LOD, held over its band). tMin is zero; the lift
+			// moves the origin off the receiver, never along the floor, so the gap beside a caster closes to the
+			// job's own texel.
+			// The point's own error beyond the float bound: the depth's quantum and the sub-pixel snap (knobs.y).
+			const vec3 V = p.camPos.w < 0.5 ? -p.fwd.xyz : normalize( p.camPos.xyz - world );
+			const vec3 geomN = jahGeometricNormal( pix, fullRes, rawDepth, world, worldN, V );
+			const bool perspective = p.camPos.w > 0.5;
+			const float pixelSize = length( p.rayDown.xyz ) / float( fullRes.y ) * ( perspective ? dist : 1.0 );
+			const float pointError = jahDepthPointError( rawDepth, dist, p.projParams.y, perspective,
+														 perspective ? ( world - p.camPos.xyz ) / dist : p.fwd.xyz,
+														 p.fwd.xyz, geomN, pixelSize, p.knobs.y );
+			const vec3 origin = jahRayOrigin( world, geomN, dist,
+											  pointError + jahViewDrawnBound( p.knobs.x, world, p.camPos.xyz,
+																			  p.rayDown.xyz, float( fullRes.y ),
+																			  perspective ) );
 			// THE FADE (the finisher of the range): the answer goes from the
 			// ray's to the map's over the last projParams.w of the range, so
 			// where a long low-sun shadow outruns the range the ray's exact edge

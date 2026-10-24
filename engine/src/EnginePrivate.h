@@ -361,10 +361,6 @@ public:
     /// piece (a pass with no `hlms_screen_pos_int` has no `iFragCoord`, one
     /// with no `needs_env_brdf` has no `envColourD`), which loses the frame.
     void passPosExecute(Ogre::CompositorPass *pass) override;
-    /// THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1): in front of the SSR
-    /// resolve (kSsrResolvePassIdentifier), BEFORE the pass analyses its barriers,
-    /// so the velocity the job writes as a UAV is transitioned to the resolve's read.
-    void passEarlyPreExecute(Ogre::CompositorPass *pass) override;
     /// THE OPAQUE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) shades with the prepass
     /// too, in front of the opaque pass: the ray jobs finish in front of IT, and its
     /// pass-scoped registrations stand until the opaque pass is over — one window
@@ -1182,10 +1178,6 @@ constexpr Ogre::uint32 kHitDecodePassIdentifier = 25002u;
 /// them; the ray tier's finishes its jobs in front of the first one that shades with
 /// the prepass. Stamped on exactly those passes.
 constexpr Ogre::uint32 kScreenDecodePassIdentifier = 25003u;
-/// THE SCREEN MARCH'S RESOLVE (REFLECT-MOVERS-1): the ray tier writes the object
-/// motion the resolve reads (`jahSsrVelocity`, rq_motion.comp) in this pass' early
-/// pre-execute. Stamped on exactly that pass.
-constexpr Ogre::uint32 kSsrResolvePassIdentifier = 25004u;
 /// THE NO-RAY ROUTE'S SCREEN INTEGRATE (PHOTON-7 stage 7, 7-6; ChainDesc::screenIntegrate): the compute pass between
 /// the prepass and the opaque passes - its job's parameters and world caches are bound in the view's screen-GI listener
 /// (OgreScreenIntegrate.cpp), which also registers the pass's three targets for the opaque passes. Stamped on exactly
@@ -1316,13 +1308,10 @@ struct ChainDesc {
     bool  displayEncode = false;
     int   smaaPreset = -1;          ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
-    /// Does the screen-space MARCH contribute (PostFxDesc::ssrScreenMarch)?
-    /// False leaves the `ssr` row meaning the reflection's RESOLUTION alone and
-    /// the rays its only source — the shape a STEREO chain is forced into, and
-    /// the shape a mono control of one eye must be asked for to be comparable.
-    /// A GRAPH change: the march's two textures and three quad passes are not
-    /// built at all, and `jahSsrReflection` is CLEARED instead of resolved into.
-    bool  ssrScreenMarch = true;
+    /// WHERE THE REFLECTION'S ANSWER COMES FROM (PostFxDesc::reflectSources): Both, Rays or Screen. A GRAPH field:
+    /// rasterMarch() and screenSources() below read it (with the stereo shape and the rays) for which passes and
+    /// textures exist.
+    ReflectSources reflectSources = ReflectSources::Both;
     float ssrMaxDistance = 25.0f;   ///< ray length, world units
     int   ssrSteps = 0;             ///< 0 = the row's 48/96 (PostFxDesc::ssrSteps)
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
@@ -1578,6 +1567,14 @@ struct ChainDesc {
     /// ...the prepass a TRACE reads (the SSR stage, the gather, the sun contact) - the hit decode's condition: the
     /// no-ray producer's prepass appends no hit.
     bool tracedPrepass() const;
+    /// THE SCREEN SOURCES (PHOTON-7 stage 6): does the chain carry this view's previous picture, the depth it was drawn
+    /// at, the editor helpers' mask and the object motion - the screen trace's inputs (the one estimator on a ray chain,
+    /// rq_reflect.comp) and the raster march's? The SSR stage, reflectSources Both or Screen, never STEREO (the copies
+    /// are not per layer). `build` declares them on this answer and the ray tier binds them on it.
+    bool screenSources() const;
+    /// THE RASTER MARCH (the no-ray chain's screen-space reflection: JahSsrRayMarch + JahSsrResolve): the screen
+    /// sources on a chain that traces NO rays. A ray chain answers its screen hits in the trace itself.
+    bool rasterMarch() const;
     /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
     /// are uniforms — changing one must never rebuild a workspace.
     static bool sameShape(const ChainDesc &a, const ChainDesc &b);
@@ -2104,9 +2101,13 @@ private:
 /// its row there.
 #define JAH_ARM_LIST(X) \
     X(ReflectMotion, "reflect.motion") /* the march's object motion + the trace's mover branches */ \
+    X(RaysOriginCut, "rays.originCut") /* the scale on every view ray job's drawn-surface lift (1 shipped; 0 the float bound alone, 0.5 half: the origin rows' controls) */ \
+    X(RaysOriginPoint, "rays.originPoint") /* every view ray job's lift carries the depth-rebuilt point's own error - its depth quantum and the rasteriser's sub-pixel snap (0: the float bound alone - the float-only control) */ \
+    X(ReflectSeedOffset, "reflect.seedOffset") /* the lobe draw's frame index offset (a second, independent noise) */ \
+    X(ReflectFlatHits, "reflect.flatHits") /* every reflection ray's hit answered by a constant of its instance (the estimator and denoiser measured alone) */ \
+    X(ReflectWindow, "reflect.window") /* the moving window MaxFrames N (0 = shipped kReflectMaxFrames) and every reader of it */ \
     X(ReflectPosed, "reflect.posed") /* the posed (skinned) identification */ \
     X(ReflectAlphaTested, "reflect.alphaTested") /* cut-out geometry traced as cut-out */ \
-    X(ReflectEdgeClasses, "reflect.edgeClasses") /* the Hits view's class overlay (0 off, 1, 2) */ \
     X(ReflectMonoEyes, "reflect.monoEyes") /* a stereo trace with the mono basis */ \
     X(TlasRefit, "rayquery.tlasRefit") /* refit the TLAS instead of rebuilding it */ \
     X(GatherTemporal, "gather.temporal") /* the screen-probe gather's pixel history */ \
@@ -2114,10 +2115,9 @@ private:
     X(AtomClusterOcclusion, "atom.clusterOcclusion") /* the cut tests each cluster against depth and pixel centres (0: neither - the exactness A/B door, ATOM-8) */ \
     X(AtomHistoryRebuild, "atom.historyRebuild") /* the occlusion's history pyramid rebuilt after the late pass (0: the late pass's own, built before its draw - the paired arm of its cost, ATOM-8 R6) */ \
     X(AtomClusterFootprint, "atom.clusterFootprint") /* the cluster test's footprint in texels a side (8 shipped; 4 = the instance test's - the measured arm, ATOM-8) */ \
-    X(CardFootprint, "cards.footprintTexels") /* the card read's footprint gate */ \
     X(FieldScroll, "gi.fieldScroll") /* the irradiance field scrolls (0: re-placed whole) */ \
     X(FieldEnterInline, "gi.fieldEnterInline") /* a scroll's entered planes integrated inline, 4 deep (the H3 arm) */ \
-    X(GiFreeze, "gi.freeze") /* the GI frozen: no cache work, every history kept (M1's measuring arm) */ \
+    X(GiFreeze, "gi.freeze") /* the GI frozen: no cache work, every history kept (M1's measuring arm); 2 = the world held, the reflections live */ \
     X(HitListCap, "rq.hitListCap") /* the hit list holds at most N records (0: its demand-sized capacity) - the overflow arm */ \
     X(ReflectRestReference, "reflect.restReference") /* the reflection's 4,096-sample reference at rest, no stop, no filter (R1 (f)'s measuring arm) */ \
     X(GatherDecodeHits, "gather.decodeHits") /* every gather hit a record (the decode route), never the caches */ \
@@ -4724,9 +4724,6 @@ public:
     bool mAsyncShaders = false;
     /// IBL convolutions deferred because a permutation was building (ASYNC-SHADERS-1).
     unsigned long long mIblDeferrals = 0;
-    /// The ray rule's footprint per metre of distance, as updateRayLevels last
-    /// computed it (the surface cache's still-trace lift, CardSceneView).
-    float mRayFootprintPerMetre = 0.0f;
     bool probeGatherWanted() const { return mPhoton.probeGatherWanted(); }
     /// The scene's GI is on (a voxel mode): a non-gathering view's opaque passes then take the screen integrate's
     /// products (ChainDesc::screenIntegrate, PHOTON-7 7-6).
@@ -4834,6 +4831,8 @@ public:
     GpuWalk gpuWalk() const override;
     TraceSun traceSun() const override;
     GiPlan giPlan() const override;
+    bool rayNearLevels(std::vector<int> &levels) const override;
+    bool rayNearAddresses(std::vector<unsigned long long> &addresses) const override;
     void setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) override;
     unsigned vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) const override;
     bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;
@@ -6641,7 +6640,8 @@ public:
     /// The node's slot is re-composed by the next compose (no-op for a node with no Item).
     void markGpuNodeDirty(uint32_t node);
     /// What the ray structures are current against: the caster epoch (a transform, a
-    /// pose, a caster input) plus the ray levels' refits.
+    /// pose, a caster input) - the ray tier's read-only view of it. (A near copy's level
+    /// never changes since PHOTON-7 stage 6: level 0, so no refit enters it.)
     unsigned long long rayStructureEpoch() const;
     /// PHOTON (photon/PhotonComponent.h): the GI's products, read through its interface.
     const PhotonComponent &photon() const { return mPhoton; }
@@ -6727,21 +6727,6 @@ private:
     /// tables it reads are owned by; a consumer that wants two culls of one
     /// scene in a frame is stage 3's problem and gets a second instance.
     detail::GpuCull mGpuCull;
-    // --- THE RAY LEVEL (ATOM P3's AT-A8r; OgreGpuScene.cpp) ----------------
-    /// The level each slot's bottom-level structure should be built from, and
-    /// the DISTANCE that answer was computed at (-1 = never). The second array
-    /// is the hysteresis: the rule is asked again only when the live distance
-    /// leaves the 2x band around the recorded one. Both are indexed by item
-    /// slot and both are cleared for a slot the index frees or renumbers, so a
-    /// recycled slot never inherits the dead object's band.
-    std::vector<uint32_t> mRayLevel;
-    std::vector<float>    mRayEvalDistance;
-    Ogre::Vector3 mRayEye = Ogre::Vector3::ZERO;
-    bool mRayEyeValid = false;
-    unsigned long long mRayLevelScanSeen = 0ull;   ///< the scan count the last walk saw
-    unsigned long long mRayLevelEvals = 0ull;
-    unsigned long long mRayLevelRefits = 0ull;
-    unsigned long long mRayLevelWalks = 0ull;
     /// THE ONE PLACE the per-item predicates are computed (GpuInstanceFlag).
     Ogre::uint32 gpuFlagsFor(const Node &n) const;
     /// THE RENDER-QUEUE SPLIT'S ONE DECISION (ATOM S3-DRAW, OgreAtomDraw.cpp):
@@ -6904,24 +6889,6 @@ public:
         for (Node *n : mItemNodes)
             if (n) markGpuSlotDirty(*n);
     }
-    /// THE RAY LEVEL'S PASS (ATOM P3's AT-A8r). Called once per frame per drawn
-    /// scene with the eye and the projection of the view that draws it; runs
-    /// nothing when neither the camera nor the table moved.
-    void updateRayLevels(const Ogre::Vector3 &eye, float projScaleY, float viewportHeight);
-    /// How many times the rule has CHANGED a slot's level, ever. The ray tier
-    /// adds it to its movement epoch (a still scene whose camera crossed a band
-    /// owes one instance write: the near copy's BLAS changed).
-    unsigned long long rayLevelRefits() const { return mRayLevelRefits; }
-    /// THE RULE'S LEVEL FOR A SLOT, as the walk left it THIS frame. The ray
-    /// tier's writer reads this and NOT `GpuInstance::ids[3]`: the walk runs
-    /// after the table's scan, so the mirror's copy of the word is restaged only
-    /// by the NEXT frame's scan — and a writer reading it would build the TLAS
-    /// with the previous level on exactly the frame the epoch said it changed,
-    /// then skip the following (still) frame (ATOM-FARBLAS-1 audit F1). `ids.w`
-    /// stays in the table for the device-side instance writer A3 §1.3 owes.
-    uint32_t rayLevelOf(uint32_t slot) const {
-        return slot < mRayLevel.size() ? mRayLevel[slot] : 0u;
-    }
     /// ATOM P3's CULL, run once over this scene's table (OgreGpuCull.cpp). `hzb`
     /// null (or a request with hzbLevels 0) is the frustum-only mode.
     /// The recording half of runGpuCull: the request uploaded and the jobs
@@ -6955,9 +6922,6 @@ public:
     bool runGpuCull(const GpuCullRequest &req, Ogre::TextureGpu *hzb, bool readBack,
                     GpuCullResult &out);
 private:
-    /// A slot left the index or was renumbered: its ray-level band is no longer
-    /// about the object that now lives there.
-    void forgetRayLevel(uint32_t slot);
     void composeGpuInstance(const Node &n, const Ogre::Matrix4 &world, bool graphIsCurrent,
                             detail::GpuInstance &out) const;
     /// THE COMPOSER, SPLIT FOR THE WORKERS (ENGINE-UPGRADE-U4 stage 4): the lane half READS only (the node, its Item,

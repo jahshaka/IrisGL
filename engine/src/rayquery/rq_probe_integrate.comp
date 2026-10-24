@@ -220,7 +220,7 @@ float roundingDither( ivec2 localPix, uint salt )
 /// channel's mantissa could round to 512.
 uint packRgbShared( vec3 c, float u )
 {
-	c = clamp( c, vec3( 0.0 ), vec3( 1024.0 ) );
+	c = clamp( c, vec3( 0.0 ), vec3( kMaxRadiance ) );
 	const float maxc = max( c.r, max( c.g, c.b ) );
 	if( !( maxc >= 1.0 / 16777216.0 ) )
 		return 0u;
@@ -510,7 +510,7 @@ vec3 roughLobeNow( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW[5
 		return diffuse;
 	const vec3 lobe = p.roughLevels.w > 1.5 ? probeLobeBrute( N, V, roughness, tapIdx, tapW, nTap, floorW, diffuse )
 											: probeLobe( N, V, roughness, tapIdx, tapW, nTap, floorW, diffuse );
-	return clamp( lobe, vec3( 0.0 ), vec3( 1024.0 ) );
+	return clamp( lobe, vec3( 0.0 ), vec3( kMaxRadiance ) );
 }
 /// THE ROUGH SPECULAR'S TEXEL: rgb the lobe (this frame's, or its mean) handed over to the diffuse, w the gate.
 vec4 roughTexel( vec3 lobe, vec3 diffuse, float roughness )
@@ -620,7 +620,7 @@ void main()
 			const vec4 h = vec4( unpackRgbShared( texel.x ), float( texel.y >> 26u ) / 63.0 );
 			if( finite3( h.xyz ) && finite1( h.w ) )
 			{
-				prev = clamp( h, vec4( 0.0 ), vec4( 1024.0, 1024.0, 1024.0, 1.0 ) );
+				prev = clamp( h, vec4( 0.0 ), vec4( vec3( kMaxRadiance ), 1.0 ) );
 				prevCount = wasCount;
 			}
 		}
@@ -826,7 +826,7 @@ void main()
 	}
 	vec4 answer = vec4( 0.0 );
 	if( wsum >= weightFloor )
-		answer = vec4( clamp( sum / wsum, vec3( 0.0 ), vec3( 1024.0 ) ), 1.0 );
+		answer = vec4( clamp( sum / wsum, vec3( 0.0 ), vec3( kMaxRadiance ) ), 1.0 );
 	// THE FIELD, COMPOSED (7-2): the eye's direction for its sample point's bias
 	const bool composeField = p.fieldWin.w > 0.5;
 	const vec3 toEyeField = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
@@ -926,7 +926,7 @@ void main()
 	// the coverage, so a fraction hands that share to the fallback).
 	vec4 outV = vec4( 0.0 );
 	if( mean.w > 1e-3 )
-		outV = vec4( clamp( mean.xyz / mean.w, vec3( 0.0 ), vec3( 1024.0 ) ), mean.w );
+		outV = vec4( clamp( mean.xyz / mean.w, vec3( 0.0 ), vec3( kMaxRadiance ) ), mean.w );
 	// THE FIELD, COMPOSED AFTER THE MEAN (7-2): the answered frames' irradiance at their share (the premultiplied mean,
 	// as the pass took it: rgb x w) plus the field's fallback for the rest; w 1
 	if( composeField )
@@ -958,7 +958,7 @@ void main()
 			const vec3 restAnswer = rest.w < -0.5 ? prevLobe : rest.xyz;
 			meanLobe = mix( mix( prevLobe, restAnswer, blend ), restAnswer, restHandover );
 		}
-		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( 1024.0 ) ) : vec3( 0.0 );
+		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
 		imageStore( roughHistoryCur, at,
 					uvec4( packRgbShared( meanLobe, roundingDither( ivec2( lx, pix.y ), 4u ) ), 0u, 0u, 0u ) );
 		imageStore( roughSpec, at, roughTexel( meanLobe, diffuseOut, roughness ) );

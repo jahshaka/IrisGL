@@ -188,6 +188,10 @@ struct CardRec {
     unsigned instance = 0u;      ///< index into SurfaceCache::mInstances
     unsigned char axis = 0u;
     unsigned char lodLevel = 0u;
+    /// THE CAPTURED LEVEL'S MEASURED BOUND, world metres (READ_A finding 3): the mesh's baked two-sided distance of
+    /// `lodLevel` from level 0 (MeshData::lodBounds; 0 at level 0) times the instance's largest axis scale - how far
+    /// the surface this card captured may lie from the level-0 surface every sun ray traces (sunLiftOf).
+    float levelBound = 0.0f;
     Ogre::Vector3 centre;        ///< the card box's centre, world
     Ogre::Vector3 u, v, d;       ///< the world axis frame (d = outward)
     float halfU = 0.0f, halfV = 0.0f, halfDepth = 0.0f;   ///< world metres
@@ -273,11 +277,6 @@ struct CardSceneView {
     /// photon-glass's (gi.walk).
     bool demandChanged = false;
     unsigned demandSettleFrames = 10u;
-    /// THE RAY TIER'S FOOTPRINT PER METRE of distance from the viewer (the ray
-    /// rule's `sampleFootprintPerspective` at one metre, OgreScene::updateRayLevels):
-    /// the near copy a sun ray hits may lie one footprint off the captured level,
-    /// so the still trace's lift is sized by it (kSunLiftFootprints).
-    float rayFootprintPerMetre = 0.0f;
     /// THE STALE SET FROM THE CHANGED-REGION LIST (PHOTON-7 stage 5, 5-1; L2: change drives work, never a serial): the
     /// frame's LAMP regions (a lamp's old and new spheres: a card whose box meets one has a stale DIRECT half - the
     /// lamp's light is exact by its range, JahCardLight_cs.glsl), its SLAB regions (a commit's entering and leaving
@@ -678,7 +677,7 @@ private:
     /// their sun-projected footprints reach) — records both traces and hands the
     /// traced and the retired cards to the relight.
     void traceSun();
-    /// The still trace's lift for `card` (kSunLiftFootprints; CardSample::sunLift).
+    /// The still trace's lift for `card` (kSunLiftTexels; CardSample::sunLift).
     float sunLiftOf(const CardRec &card) const;
     /// The first visible shadow-casting directional light of the scene's one light
     /// list (SceneLightList.h; the relight's sun, the traces' direction), or null.
@@ -750,7 +749,6 @@ private:
     bool mStillSunKnown = false;
     bool mSunMovingLastFrame = false;
     std::vector<float> mStillCpu;
-    float mRayFootprintPerMetre = 0.0f;
     float mStillCpuMs = 0.0f;   ///< the still trace's CPU this frame (in captureMs with a batch)
     TraceSunCost mTraceSunCost;
     CardSunGrid mSunGrid;

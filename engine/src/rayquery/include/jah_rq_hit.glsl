@@ -97,8 +97,6 @@
 #define JAH_ENV_SH_C8 vec3( 0.0 )
 #include "jah_environment.glsl"
 
-const float kMaxRadiance = 1024.0;
-
 #ifndef JAH_HIT_GATE_DECLARED
 #define JAH_HIT_GATE_DECLARED
 /// THE STORE'S NON-DIRECT SHARE AT A HIT, AS SEEN PAST THE MOVERS (MOVER-OCCLUSION-1):

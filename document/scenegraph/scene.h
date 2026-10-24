@@ -836,6 +836,16 @@ public:
     /// reflection may cost, and this says how the march decides — a question
     /// the tier table has no opinion about (world.postFx, not world.override).
     int   ssrMarch;
+    /// WHERE THE RAY TIER'S REFLECTION COMES FROM (REFLECT-MODE-1, owner ledger section 1801; PHOTON-7 stage 6): 0 BOTH
+    /// - the one estimator, the screen trace answering what it can vouch for and the rays the rest - 1 RAYS - the rays
+    /// alone - 2 SCREEN - the screen trace alone, its misses no sample (the agreement measurement's arm). Read only
+    /// where the scene traces its reflections (Photon on, a ray tier, rays on the machine); a stereo view runs Rays
+    /// whatever it says (the screen sources are not per eye). A per-project dial with no tier column
+    /// (world.reflections), like ssrMarch.
+    int   reflectionSources;
+    /// ...AND THE TRACE'S RESOLUTION (owner section 1804): 0 AUTO - the tier's own (High one ray per 2x2 pixels, Epic
+    /// every pixel: GiQualityFacts::reflectTrace) - 1 FULL, 2 HALF.
+    int   reflectionResolution;
     /// THE REFLECTION ROUGHNESS CUTOFF, in PERCENT (5..100, default 40) —
     /// PHOTON_SPEC §7 R5, owner ledger §426. Above this roughness a reflection
     /// is a wide lobe, the probe's own prefiltered photograph is a good enough

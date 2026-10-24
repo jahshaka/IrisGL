@@ -456,6 +456,46 @@ QVector<Row> buildRows()
         out.append(r);
     }
     {
+        // THE RAY TIER'S REFLECTION SOURCES (REFLECT-MODE-1, owner ledger section 1801; PHOTON-7 stage 6). A
+        // TierSpace::None row, beside Screen-Space Reflections: where a reflection comes from is the project's choice,
+        // never a tier's - world.reflections writes the same field.
+        Row r;
+        r.id = QStringLiteral("reflectionSources");
+        r.label = QStringLiteral("Reflection Sources");
+        r.group = QStringLiteral("Reflections");
+        r.type = RowType::Enum;
+        r.tierSpace = TierSpace::None;
+        r.options = { { QStringLiteral("both"), QStringLiteral("Screen + Rays"), 0 },
+                      { QStringLiteral("rays"), QStringLiteral("Rays"), 1 },
+                      { QStringLiteral("screen"), QStringLiteral("Screen"), 2 } };
+        r.cost = QStringLiteral("Where the RAY TIER's reflection comes from (High and Epic, where this machine "
+                                "traces rays). SCREEN + RAYS (the default) answers each reflected ray from the "
+                                "last frame's picture where the screen can vouch for it and traces a ray for the "
+                                "rest, blended across the screen's fade. RAYS traces every one. SCREEN answers from "
+                                "the screen alone - what is off screen reflects nothing. A VR view always runs Rays.");
+        r.get = [](const iris::ScenePtr &s) { return qBound(0, s->reflectionSources, 2); };
+        r.set = [](const iris::ScenePtr &s, int v) { s->reflectionSources = qBound(0, v, 2); };
+        out.append(r);
+    }
+    {
+        // ...AND THE TRACE'S RESOLUTION (owner section 1804): Auto is the tier's own column.
+        Row r;
+        r.id = QStringLiteral("reflectionResolution");
+        r.label = QStringLiteral("Reflection Resolution");
+        r.group = QStringLiteral("Reflections");
+        r.type = RowType::Enum;
+        r.tierSpace = TierSpace::None;
+        r.options = { { QStringLiteral("auto"), QStringLiteral("Auto"), 0 },
+                      { QStringLiteral("full"), QStringLiteral("Full"), 1 },
+                      { QStringLiteral("half"), QStringLiteral("Half"), 2 } };
+        r.cost = QStringLiteral("The ray tier's reflection resolution. AUTO (the default) is the tier's: High one "
+                                "ray per 2x2 pixels, Epic every pixel. FULL traces every pixel at any ray tier (four "
+                                "times High's rays); HALF one per 2x2 block at Epic too.");
+        r.get = [](const iris::ScenePtr &s) { return qBound(0, s->reflectionResolution, 2); };
+        r.set = [](const iris::ScenePtr &s, int v) { s->reflectionResolution = qBound(0, v, 2); };
+        out.append(r);
+    }
+    {
         // THE SURFACE CACHE (PHOTON-CARDS-2): a reflection ray's hit reads the
         // hit surface's card first, so the cache is worth its capture exactly
         // where the ray tier runs — and the ray tier rides the SSR row above
@@ -1465,7 +1505,8 @@ const QStringList &postFxRowIds()
         QStringLiteral("hdr"), QStringLiteral("exposureMode"),
         QStringLiteral("exposureMetering"), QStringLiteral("bloom"),
         QStringLiteral("ssao"),
-        QStringLiteral("smaa"), QStringLiteral("ssr"), QStringLiteral("refractions"),
+        QStringLiteral("smaa"), QStringLiteral("ssr"), QStringLiteral("reflectionSources"),
+        QStringLiteral("reflectionResolution"), QStringLiteral("refractions"),
         QStringLiteral("distortion"),
     };
     return ids;

@@ -2525,7 +2525,6 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
 // these are the scene's): the footprint, the cloud field and the ambient SH, and the candidates the card feed files.
 
 void OgreScene::cardSceneFacts(CardSceneView &view) const {
-    view.rayFootprintPerMetre = mRayFootprintPerMetre;
     if (mCloudGiState.field) {
         const FogHlmsListener::CloudShadowState &cs = mCloudGiState;
         view.cloudField = cs.field;

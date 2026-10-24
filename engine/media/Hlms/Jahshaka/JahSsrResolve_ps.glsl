@@ -165,8 +165,9 @@ out vec4 fragColour;
 // below the format's own ceiling: far above anything a scene legitimately
 // reflects, far below the overflow that turns the history into +Inf. A
 // reflection clamped here is still white after any exposure the tonemapper
-// arrives at, so the ceiling costs no picture and buys a bounded loop.
-const float kSsrMaxRadiance = 1024.0;
+// arrives at, so the ceiling costs no picture and buys a bounded loop. The one
+// copy (kMaxRadiance), staged raw from the ray jobs' header.
+#include "JahRqFinite.glsl"
 
 /// One history tap, with its own verdict attached: .xyz is a radiance this
 /// shader can do arithmetic on, and .w is 1 only when the texel really was
@@ -193,34 +194,10 @@ const float kSsrMaxRadiance = 1024.0;
 #include "JahHeightFog.glsl"
 #include "JahFogAlong.glsl"
 
-/// THE SCREEN HIT, RE-FOGGED (PHOTON-I-1: one fog law on every reflection path).
-/// The history holds the hit as the EYE saw it — the fog law along the eye's ray
-/// to the hit (upstream's distance block, then jahFogMedia) — and the reflection
-/// must carry it as the mirror's virtual eye sees it: the law along the ray from
-/// the reflecting surface to the hit, the height fog's start spent by the eye's
-/// leg (jahFogAlong). The eye's law is affine in the surface's radiance but for
-/// the breakthrough's luminance, so it is undone by its affine pair (the law at 0
-/// and at 1) and one correction step through the law itself; a channel the eye's
-/// medium all but hid (transmittance under 1e-3) carries what the screen holds.
-vec3 jahSsrRefog( vec3 screen, vec3 surface, vec3 hit )
-{
-	if( JAH_FOG_P( 3 ).w < 0.5 && JAH_FOG_P( 7 ).w < 0.5 )
-		return screen;
-	const vec3 toHit = hit - eyePos.xyz;
-	const float le = length( toHit );
-	const vec3 dirE = toHit / max( le, 1e-6 );
-	const vec3 s0 = jahFogAlong( vec3( 0.0 ), eyePos.y, dirE, le, 0.0 );
-	const vec3 t1 = jahFogAlong( vec3( 1.0 ), eyePos.y, dirE, le, 0.0 ) - s0;
-	const bvec3 seen = greaterThan( t1, vec3( 1e-3 ) );
-	vec3 c = mix( screen, ( screen - s0 ) / max( t1, vec3( 1e-3 ) ), vec3( seen ) );
-	c = max( c, vec3( 0.0 ) );
-	c = max( c + mix( vec3( 0.0 ), ( screen - jahFogAlong( c, eyePos.y, dirE, le, 0.0 ) ) /
-										  max( t1, vec3( 1e-3 ) ), vec3( seen ) ),
-			 vec3( 0.0 ) );
-	const vec3 leg = hit - surface;
-	const float l1 = length( leg );
-	return jahFogAlong( c, surface.y, leg / max( l1, 1e-6 ), l1, length( surface - eyePos.xyz ) );
-}
+/// THE SCREEN HIT, RE-FOGGED (PHOTON-I-1: one fog law on every reflection path): jahSsrRefog, the screen trace's own
+/// text (JahSsrMarch.glsl, staged from the ray tier's jah_ssr_march.glsl - the trace answers a screen hit with it too),
+/// from this view's eye.
+#include "JahSsrMarch.glsl"
 
 /// The shot's image point (u, v, depth) in world space.
 vec3 jahSsrWorldAt( vec2 shotUv, float depth )
@@ -264,11 +241,11 @@ vec4 ssrHistorySanitize( vec3 c )
 	// FALSE for a NaN, so `all(...)` is false for a NaN in any channel and
 	// false for an Inf, and a value that passes both really is finite and in
 	// range. A pixel that passes comes out untouched, bit for bit.
-	if( all( lessThanEqual( abs( c ), vec3( kSsrMaxRadiance ) ) ) )
+	if( all( lessThanEqual( abs( c ), vec3( kMaxRadiance ) ) ) )
 		return vec4( c, 1.0 );							// the ordinary texel, untouched
 	if( all( lessThan( abs( c ), vec3( 3.0e38 ) ) ) )
-		// clamp, not min: a channel BELOW -kSsrMaxRadiance must come back too.
-		return vec4( clamp( c, vec3( -kSsrMaxRadiance ), vec3( kSsrMaxRadiance ) ), 0.0 );
+		// clamp, not min: a channel BELOW -kMaxRadiance must come back too.
+		return vec4( clamp( c, vec3( -kMaxRadiance ), vec3( kMaxRadiance ) ), 0.0 );
 	// NOT A COLOUR AT ALL, and it contributes NOTHING — neither to this pixel
 	// (.w says so, and the caller takes the neighbourhood instead) nor to the
 	// neighbourhood mean. MEASURED, because the alternative is tempting and
@@ -810,7 +787,8 @@ void main()
 		const vec2 shotUv = ( inPs.uv0 - shotInset.xy ) / max( vec2( 1.0 ) - shotInset.zw, vec2( 1e-6 ) );
 		const ivec2 here = min( ivec2( inPs.uv0 * prevFrameRes.xy ), ivec2( prevFrameRes.xy ) - ivec2( 1 ) );
 		const float hereDepth = texelFetch( vkSampler2D( depthTexture, pointSampler ), here, 0 ).x;
-		reflected = jahSsrRefog( reflected, jahSsrWorldAt( shotUv, hereDepth ), jahSsrWorldAt( ray.xy, hitDepth ) );
+		reflected = jahSsrRefog( reflected, eyePos.xyz, jahSsrWorldAt( shotUv, hereDepth ),
+								 jahSsrWorldAt( ray.xy, hitDepth ) );
 	}
 	fragColour = vec4( reflected, weight * historyFade );
 }

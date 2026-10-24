@@ -1,4 +1,4 @@
-// IS THIS A NUMBER? — the one copy (GATHER-1a).
+// IS THIS A NUMBER, AND THE ONE CEILING — the one copy of each (GATHER-1a; PHOTON-7 stage 6, D12).
 //
 // `x == x` IS NOT A NaN TEST IN THIS TREE (CLAUDE.md, lane HDR-1, measured on
 // NVIDIA 595.84): the compiler folds a self-equality to true, so fork feab041c6 (was 0034)'s
@@ -13,5 +13,22 @@
 
 bool finite1( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
 bool finite3( vec3 v ) { return finite1( v.x ) && finite1( v.y ) && finite1( v.z ); }
+
+// THE RADIANCE CEILING every ray job, the screen reflection's raster passes and the gather hold a radiance to before it
+// enters a history, an atlas or a mean: a finite value brighter than this is held AT it (clamp, never min, so a channel
+// below its negative comes back too). One number, here; the raster SSR passes include the raw copy of this file
+// (JahRqFinite.glsl, staged by engine/CMakeLists.txt), so no shader carries a literal of its own.
+const float kMaxRadiance = 1024.0;
+
+// THE FLOAT ERROR OF A POINT (PHOTON-7 stage 6, AB E15: the ray origin's first term): a point reconstructed from a
+// depth buffer, or a hit a ray query returned, lies within a few units in the last place of its largest coordinate (and
+// of the distance it was carried along) of the surface it names - the depth's own quantum, the reconstruction's three
+// multiply-adds, the traced triangle's transform. kRayFloatUlps of them: the bound a ray's start is lifted by so it never
+// begins on the wrong side of the surface it leaves.
+const float kRayFloatUlps = 4.0;
+float jahRayFloatBound( vec3 p, float carried )
+{
+	return kRayFloatUlps * 1.1920929e-7 * ( max( max( abs( p.x ), abs( p.y ) ), abs( p.z ) ) + abs( carried ) );
+}
 
 #endif   // JAH_RQ_FINITE_GLSL

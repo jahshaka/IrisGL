@@ -256,7 +256,7 @@ if(JAH_RAY_QUERY_OK)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h.d"
-        COMMENT "Compiling the reflection filter/composite compute shader at SPIR-V 1.4"
+        COMMENT "Compiling the reflection's spatial filter compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and the reflection's TEMPORAL pass (PHOTON-2 1b), with the shared reprojection header.
     add_custom_command(
@@ -268,6 +268,17 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_temporal.comp"
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h.d"
         COMMENT "Compiling the reflection temporal compute shader at SPIR-V 1.4"
+        VERBATIM)
+    # ...and the reflection's RESOLVE (PHOTON-7 stage 6 commit 6): each texel reconstructed from its neighbours' samples.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h.d" --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                --vn krq_reflectResolveSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_resolve.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_resolve.comp"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h.d"
+        COMMENT "Compiling the reflection resolve compute shader at SPIR-V 1.4"
         VERBATIM)
     # ...and THE BREAK'S COMPOSE (PHOTON-2 round 2, G2): the rest's answer composed into the half the trace reads.
     add_custom_command(
@@ -493,6 +504,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_compose_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
@@ -830,6 +842,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_reproject.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_area_vis_law.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_half_stochastic.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_ssr_march.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
 set(JAH_WRAP_HLMS_PIECE "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake")
@@ -943,6 +956,19 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DRAW=1
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahFogAlong.glsl
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_fog_along.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE ONE RADIANCE CEILING AND THE NaN TESTS (PHOTON-7 stage 6, D12): the ray jobs include the file through
+    # glslang, the screen reflection's raster history copy and resolve include this raw copy.
+    COMMAND ${CMAKE_COMMAND} -DRAW=1
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahRqFinite.glsl
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE SCREEN TRACE'S CORE (PHOTON-7 stage 6, the one estimator): the march along a reflected ray through the depth
+    # buffer and its fades, pure functions - the ray tier's trace includes the file through glslang, the no-ray chain's
+    # raster march and its resolve (the fog law on a screen hit) include this raw copy.
+    COMMAND ${CMAKE_COMMAND} -DRAW=1
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahSsrMarch.glsl
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_ssr_march.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # A CARD READ FROM A DIRECTION (PHOTON-CARDS-5): the relight writes the mean
     # light direction the ray jobs' card read restores the lobe's view term with.

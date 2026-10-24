@@ -153,10 +153,11 @@ constexpr unsigned kRoughSpecLevels = 3u;
 constexpr float kRoughSpecDiffuseFrom = 0.6f;
 constexpr float kRoughSpecDiffuseAt = 0.8f;
 
-/// One probe's record: ten vec4s — position, normal, the irradiance at its own
-/// normal and the SH9 (27 floats in seven vec4s; see JahProbeRecord in the
-/// shaders). PHOTON-GATHER-1b grew it from three vec4s.
-constexpr unsigned kRecordBytes = 160u;
+/// One probe's record: eleven vec4s — position, normal, the irradiance at its own
+/// normal, the SH9 (27 floats in seven vec4s) and the drawn surface's geometric
+/// normal its rays lift along (READ_B F3); see JahProbeRecord in the shaders.
+/// PHOTON-GATHER-1b grew it from three vec4s.
+constexpr unsigned kRecordBytes = 176u;
 /// THE WEIGHT FLOOR under which a pixel's plane-weighted probes are not an
 /// answer (w = 0: the fallback owns the pixel). A pixel whose ONLY agreeing probe
 /// is a corner cell's at a sixteenth of the bilinear weight still clears it; one
@@ -1503,6 +1504,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.projParams[0] = in.projA;
     pp.projParams[1] = in.projB;
     pp.projParams[2] = in.farClip;
+    pp.projParams[3] = std::max(0.0f, in.pointSnapPx);   // the ray origin's point term (the placement's)
     pp.resolution[0] = float(v.gridW);
     pp.resolution[1] = float(v.gridH);
     pp.resolution[2] = float(in.width);
@@ -1533,17 +1535,14 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                                                  v.restFrames   // a rest mean holds by 4097: < 2^21, exact
                                            : (v.frame & 0xFFFFu));
     pp.knobs[3] = float(in.cascadeCount);
-    // THE RAY'S START, OFF THE SURFACE BY AN EPSILON — never by half a voxel
-    // (the fix round, gi.gather_cards' near-foot chase): the probe measures the
-    // irradiance AT the surface, and a start lifted 4 cm (0.5 x cascade 0's
-    // cell) measured it 4 cm up — the floor in front of a floating panel read
-    // +7 % at its foot and -11 % at 1.6 m, the sign and size of that lift
-    // exactly (spikes/photon-gather-1d). The floor here, 1 mm, and the shader's
-    // 1e-4 of the view distance (well above a float depth's reconstruction
-    // error) keep a ray off its own triangle; a hit's shading owns its own
-    // footprint.
+    // THE RAY'S START: THE ORIGIN LAW (PHOTON-7 stage 6, READ_A W2, READ_B F3 - one law for every ray, Types.h
+    // rayOriginDrawnFootprints / jah_ray_origin.glsl) - off the probe's DRAWN surface along its geometric normal by the
+    // point's float bound plus the drawn surface's bound against level 0 in full-resolution footprints at the probe's
+    // Euclidean distance (this knob; the shader turns it into metres), tMin 0: the probe sits on Atom's cut or a stock
+    // item's LOD and its rays trace each mesh's level 0. Never half a voxel (the fix round, gi.gather_cards' near-foot chase: a
+    // start lifted 4 cm measured the irradiance 4 cm up - +7 % at a floating panel's foot, -11 % at 1.6 m).
     pp.knobs2[0] = in.tuning.classOff ? 1.0f : 0.0f;   // the class out of the history test (a test door)
-    pp.knobs2[1] = 0.001f;
+    pp.knobs2[1] = std::max(0.0f, in.drawnCutFootprints);
     pp.knobs2[2] = in.sky ? 1.0f : 0.0f;
     pp.knobs2[3] = float(octRes);
     pp.knobs3[0] = float(v.uniformProbes);
@@ -1561,7 +1560,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // just outside it would otherwise be passed by both queries — the ray
         // would see through the object. A coarse hit in that overlap is honest:
         // the near query has already proved no fine surface lies inside it.
-        pp.plane[2] = std::max(pp.knobs2[1], pp.knobs[1] - std::max(0.0f, in.farOverlap));
+        pp.plane[2] = std::max(0.001f, pp.knobs[1] - std::max(0.0f, in.farOverlap));
     }
     pp.plane[0] = kPlaneTolerance;
     pp.plane[1] = kNormalTolerance;
@@ -1661,7 +1660,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                             in.cardSlots > 0u;
     pp.cards[0] = cardsBound ? float(in.cardSlots) : 0.0f;
     pp.cards[1] = cardsBound ? float(in.cardRecords) : 0.0f;
-    pp.cards[2] = in.cardFootprintTexels;
+    pp.cards[2] = 0.0f;   // (the card read's footprint gate is deleted: PHOTON-7 stage 6)
     pp.cards[3] = float(geomSlots);
     // THE HIT RECORD (PHOTON-HIT-SHADE-1): the list the tier bound, the sun ray.
     pp.hitList[0] = float(in.hit.capacity);
@@ -1673,9 +1672,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.hitSun[2] = in.hit.toSun[2];
     pp.hitSun[3] = in.hit.sun ? 1.0f : 0.0f;
     pp.hitSun2[0] = float(in.hit.sunMask);
-    pp.hitSun2[1] = in.hit.lift;
+    pp.hitSun2[1] = 0.0f;   // unused: a near hit's surface term is 0 (the one origin law)
     pp.hitSun2[2] = in.hit.sunRange;
-    pp.hitSun2[3] = std::max(in.hit.farLift, in.farOverlap);
+    pp.hitSun2[3] = in.hit.farLift;   // farOverlap (the drift law's gap): a far copy's hit
     {
         const uint32_t hlo = uint32_t(in.hitTable & 0xFFFFFFFFu), hhi = uint32_t(in.hitTable >> 32u);
         std::memcpy(&pp.hitTable[0], &hlo, sizeof(hlo));

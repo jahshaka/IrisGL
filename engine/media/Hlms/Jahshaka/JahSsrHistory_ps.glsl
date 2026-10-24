@@ -35,9 +35,10 @@ in block
 vulkan_layout( location = 0 )
 out vec4 fragColour;
 
-// The same ceiling JahSsrResolve_ps.glsl uses, and for the same reason: about
-// twelve stops above white, six below the half-float format's own ceiling.
-const float kSsrMaxRadiance = 1024.0;
+// The same ceiling JahSsrResolve_ps.glsl and every ray job use, and for the same
+// reason: about twelve stops above white, six below the half-float format's own
+// ceiling. The one copy (kMaxRadiance), staged raw from the ray jobs' header.
+#include "JahRqFinite.glsl"
 
 void main()
 {
@@ -50,14 +51,14 @@ void main()
 	// for a NaN in any channel, false for an Inf.
 	//
 	// A finite value too bright to be useful is held at the ceiling — clamp,
-	// not min, so a channel below -kSsrMaxRadiance comes back too — and a
+	// not min, so a channel below -kMaxRadiance comes back too — and a
 	// NON-FINITE one is stored as zero, so the resolve's neighbourhood filter
 	// sees "nothing here" rather than a manufactured white. (Measured: the
 	// ceiling-as-white spelling removes the same black holes and replaces them
 	// with white sparkle over 20 % of the viewport — SMOKE-ENGINE-1.)
-	if( !all( lessThanEqual( abs( c.xyz ), vec3( kSsrMaxRadiance ) ) ) )
+	if( !all( lessThanEqual( abs( c.xyz ), vec3( kMaxRadiance ) ) ) )
 		c.xyz = all( lessThan( abs( c.xyz ), vec3( 3.0e38 ) ) )
-					? clamp( c.xyz, vec3( -kSsrMaxRadiance ), vec3( kSsrMaxRadiance ) )
+					? clamp( c.xyz, vec3( -kMaxRadiance ), vec3( kMaxRadiance ) )
 					: vec3( 0.0 );
 	fragColour = c;
 }

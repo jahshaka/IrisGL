@@ -72,6 +72,7 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 #define JAH_PROBE_PARAMS_BINDING 1
 #include "jah_probe_params.glsl"
+#include "jah_ray_origin.glsl"
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 layout( std430, set = 0, binding = 2 ) readonly buffer Records { JahProbeRecord r[]; } records;
@@ -118,7 +119,6 @@ layout( set = 0, binding = 37 ) uniform sampler3D voxelDirectBack[kMaxCascades];
 #include "jah_rq_card_bindings.glsl"
 #define JAH_CARD_SLOTS   uint( p.cards.x )
 #define JAH_CARD_RECORDS uint( p.cards.y )
-#define JAH_CARD_FOOTPRINT_TEXELS p.cards.z
 // A READER (PHOTON-7 stage 5, 5-2): its hits stamp the cards they read and the faces that answered none - the
 // cache's residency (jah_rq_card_bindings.glsl's demand layout); the gather is reader 1 of the counts.
 #define JAH_CARD_DEMAND 1
@@ -150,7 +150,6 @@ layout( std430, set = 0, binding = 22 ) buffer JahHitBuf { uint jahHitBuf[]; };
 #define JAH_HIT_SUN         p.hitSun
 #define JAH_HIT_SUN_MASK    uint( p.hitSun2.x )
 #define JAH_HIT_SUN_RANGE   p.hitSun2.z
-#define JAH_HIT_LIFT        p.hitSun2.y
 #define JAH_HIT_FAR_LIFT    p.hitSun2.w
 #define JAH_ALPHA_TABLE     floatBitsToUint( p.alpha.xy )
 #include "jah_rq_sun_ray.glsl"
@@ -336,15 +335,24 @@ void main()
 		const float reweight = ( max( dLocal.z, 0.0 ) * jahOctSolidAngle( octPoint, float( octRes ) ) ) /
 							   max( centreCos * jahOctSolidAngle( centrePoint, float( octRes ) ), 1e-9 );
 
-		// ...from the EYE that placed the probe (its cell names it, PHOTON-GA-VR).
-		const float bias =
-			max( p.knobs2.y, 1e-4 * jahViewDistanceOf( jahEyeNow( jahEyeOfCell( cell.x ) ), posW.xyz ) );
+		// THE ORIGIN LAW (PHOTON-7 stage 6, READ_A W2, READ_B F3 - the one law of every ray job, jah_ray_origin.glsl):
+		// the probe sits on the DRAWN surface and its rays trace each mesh's level 0, so the ray starts off it along
+		// the drawn surface's GEOMETRIC normal (geomW, found at the placement; the hemisphere stays the shaded one) by
+		// the point's float bound plus the drawn surface's bound against level 0 (knobs2.y: Types.h
+		// rayOriginDrawnFootprints) at the probe's Euclidean distance from the EYE that placed it (its cell names it,
+		// PHOTON-GA-VR), tMin 0.
+		const JahEye placedBy = jahEyeNow( jahEyeOfCell( cell.x ) );
+		const float probeDist = jahViewDistanceOf( placedBy, posW.xyz );
 		const float maxT = p.knobs.y;
 		const float farT = p.knobs3.w;
-		const vec3 origin = posW.xyz + n * bias;
+		const vec4 geomW = records.r[probe].geomW;   // the geometric normal, and the point's own error (placement's)
+		const vec3 origin = jahRayOrigin( posW.xyz, geomW.xyz, probeDist,
+										  geomW.w + jahViewDrawnBound( p.knobs2.y, posW.xyz, placedBy.camPos,
+																	   placedBy.rayDown, p.resolution.w,
+																	   placedBy.perspective > 0.5 ) );
 		// THE NEAR QUERY: the near copies (Types.h kRayMaskNearField).
 		rayQueryEXT rq;
-		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, bias, dir, maxT );
+		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, dir, maxT );
 		JAH_RQ_PROCEED( rq )
 		bool hit = rayQueryGetIntersectionTypeEXT( rq, true ) ==
 				   gl_RayQueryCommittedIntersectionTriangleEXT;
@@ -428,14 +436,14 @@ void main()
 										!far && hitNormalKnown );
 			if( !decodeAlways )
 				radiance = jahHitRadianceSourced( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
-													  max( tHit * spread, 1e-4 ), false, false, ok, cacheSource );
+													  max( tHit * spread, 1e-4 ), false, ok, cacheSource );
 			source = cacheSource == 1u ? kGatherSrcCard : kGatherSrcVoxel;
 			if( decodeAlways || !ok || !finite3( radiance ) )
 			{
 				const vec3 hitPos = origin + dir * tHit;
 				const float sunVis = jahHitSunVisibility( hitPos, hitN, tHit, far );
 				const ivec2 dest = block + texel;
-				recorded = jahHitAppend( hitSlot, far ? 0u : jahHitNearLevel( hitSlot ), far, hitPrim,
+				recorded = jahHitAppend( hitSlot, far, hitPrim,
 										 hitBary, dir, sunVis, max( tHit * spread, 1e-4 ), reweight,
 										 jahHitDestPack( dest, true, 0 ), origin.y, tHit, 0.0 );
 				// THE COMPOSITE writes the radiance; a DROPPED record (the list was

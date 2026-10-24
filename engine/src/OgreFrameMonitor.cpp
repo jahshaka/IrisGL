@@ -1051,6 +1051,34 @@ constexpr ArmDef kArms[] = {
       "The screen march's object-motion job and the reflection trace's mover branches "
       "(REFLECT-MOVERS-1). 0 = the camera path alone: the pre-lane picture. gi.reflect_mover's "
       "paired cost arm. Was the JAH_R5_NO_MOTION environment door (two per-frame reads)." },
+    { ArmId::RaysOriginCut, 1.0, 0.0, 1.0,
+      "THE RAY ORIGIN'S DRAWN TERM, A SCALE (PHOTON-7 stage 6, READ_A findings 2 and W1-W2, READ_B F3-F5): 1 = shipped, "
+      "a ray leaving a pixel's drawn surface - the reflection's, the sun contact's, the gather's - starts off it by the "
+      "point's float bound plus the drawn surface's bound against level 0 (Types.h rayOriginDrawnFootprints: the "
+      "tolerance x the LOD bias over the view's band, x the bake's drift ratio, at the point's Euclidean distance). The "
+      "origin rows' controls: 0 = the float bound alone, 0.5 = half the term - a drawn surface that lies inside level 0 "
+      "by more than that starts its rays inside it, and the rows must read red." },
+    { ArmId::RaysOriginPoint, 1.0, 0.0, 1.0,
+      "THE DEPTH-REBUILT POINT'S OWN ERROR IN THE RAY ORIGIN (PHOTON-7 stage 6, READ_B F5 finding (b); the lead's "
+      "round-7 derivation, jah_ray_origin.glsl jahDepthPointError): 1 = shipped, a ray leaving a point rebuilt from "
+      "the depth buffer - the reflection's, the sun contact's, the gather's probes' - is lifted by the depth format's "
+      "quantum through the inverse projection and the rasteriser's sub-pixel snap, both along the surface's normal, "
+      "besides the float bound. 0 = the float bound alone: with rays.originCut 0 the float-only control on a flat "
+      "level-0 floor (rtreflect.contact), which must read red there and green with this on." },
+    { ArmId::ReflectSeedOffset, 0.0, 0.0, 65535.0,
+      "THE LOBE DRAW'S SEED OFFSET (PHOTON-7 stage 6, the walk's noise/signal split): added to the frame index the "
+      "reflection's lobe draw and its resolve's re-derivation take - two walks identical but for it carry independent "
+      "ray noise and the same signal (var( rA - rB ) / 2 is the noise). 0 = shipped." },
+    { ArmId::ReflectFlatHits, 0.0, 0.0, 1.0,
+      "THE HITS FLATTENED (PHOTON-7 stage 6, the lead's attribution arm (H), a measuring arm): 1 = every reflection "
+      "ray's hit answered by a constant of its instance (0.2 + 0.6 x the slot's golden-ratio fraction), no cache read, "
+      "no footprint or mip, no fog, no record - the reflection's estimator and denoiser measured alone (the hit caches "
+      "owned ~half the glossy noise map and a third of the lag law). 0 = shipped." },
+    { ArmId::ReflectWindow, 0.0, 0.0, 64.0,
+      "THE MOVING WINDOW (PHOTON-7 stage 6, the lead's window measurement, a measuring arm): the reflection's "
+      "MaxFrames N while moving - and with it every reader of N, the hit's footprint and the sky's mip (1 / sqrt N), "
+      "the rest's hand-over length (gatherSettleFramesOf N) and the temporal pass' window. 0 = shipped "
+      "(kReflectMaxFrames, Lumen's 12)." },
     { ArmId::ReflectPosed, 1.0, 0.0, 1.0,
       "The POSED identification (SKINNED-VELOCITY-1): the trace and the march's velocity take "
       "the posed geometry rows. 0 = the id image alone, the pre-lane motion for a character. "
@@ -1059,10 +1087,6 @@ constexpr ArmDef kArms[] = {
       "Alpha-tested (cut-out) geometry traced as cut-out by the reflection, the gather and the "
       "sun contact (REFLECT-MOVERS-2's alpha table). 0 = every cut-out traced opaque. "
       "gi.rt_alpha_tested's cost arm. Was JAH_R6_NO_ALPHA (a per-frame read)." },
-    { ArmId::ReflectEdgeClasses, 0.0, 0.0, 2.0,
-      "The Hits photon view's history-class overlay (REFLECT-EDGE-2's instrument): 1 = mover "
-      "hit / restart / reflected-image path, 2 = the new count's bins; 0 = off. Nothing but "
-      "that view reads it. gi.reflect_mover --edge. Was JAH_R7_EDGE_CLASSES (a per-frame read)." },
     { ArmId::ReflectMonoEyes, 0.0, 0.0, 1.0,
       "A stereo view's trace reconstructs with the MONO basis (the pre-REFLECT-VR-1 arm, "
       "wrong for one eye by construction): the A/B that proves the per-eye basis. Was "
@@ -1093,10 +1117,6 @@ constexpr ArmDef kArms[] = {
       "measured, as atom.clusterOcclusion is the exactness door): the pyramid mip where a cluster's rectangle spans at "
       "most N texels a side - 8 shipped (<= 81 reads: Bistro law88's hidden share 13.0 -> 11.8 % against 4, +0.014 ms "
       "of the cut's GPU time), 4 the instance test's (<= 25 reads). The instance test stays at 4." },
-    { ArmId::CardFootprint, 4.0, 0.0, 1e12,
-      "The card read's footprint gate in texels (Types.h kCardFootprintTexels = 4): the sweep that "
-      "chose it (test_rt_reflect --footprint-sweep) sets it per arm, 1e12 = the gate open, 0 = shut. "
-      "Was JAHSHAKA_CARD_FOOTPRINT_K (a per-frame read)." },
     { ArmId::FieldScroll, 1.0, 0.0, 1.0,
       "The irradiance field SCROLLS on a cascade-0 step (keeps the probes that stay inside). 0 = the "
       "same snapped window re-placed WHOLE, the behaviour the scroll replaced (gi.field_scroll walks "
@@ -1105,13 +1125,16 @@ constexpr ArmDef kArms[] = {
       "A MEASUREMENT arm (PHOTON-2 J1): a scroll's entered planes integrated in the follow frame, four samples "
       "deep (H3's rule, 16.7 ms GPU on photon-court's crossing), instead of invalidated and faded in one sample "
       "a pass at the budget. 0 = the shipped fade." },
-    { ArmId::GiFreeze, 0.0, 0.0, 1.0,
+    { ArmId::GiFreeze, 0.0, 0.0, 2.0,
       "THE GI FROZEN (PHOTON-2 round 2, M1's measuring arm): no GI cache works - no field, cascade, settle, tick or card "
       "work is planned, no card is captured or relit - and the gather and the reflections keep every history they hold "
       "(no new sample enters - their moving histories AND their rest means: a texel or pixel at rest keeps its rest "
       "mean as it is; a glossy reflection keeps the live estimator's own reprojection, the virtual point's or the "
       "surface's, unclamped). A walk under it measures the motion's own resampling; the walk without it minus that is "
-      "the GI's flicker under motion (the stillness door's moving window). 0 = shipped." },
+      "the GI's flicker under motion (the stillness door's moving window). 2 = THE WORLD HELD (PHOTON-7 stage 6): no GI "
+      "cache works and the gather keeps its histories as under 1, but the REFLECTIONS run live - no hit radiance can "
+      "change, so a walk under it less the frozen walk is the reflection's own estimator and denoiser alone "
+      "(rtreflect.walk_world). 0 = shipped." },
     { ArmId::HitListCap, 0.0, 0.0, 16777216.0,
       "THE OVERFLOW ARM (PHOTON-2 stage 2's tail, a test door): the traces and the hit write-back hold at most this many "
       "hit records a frame, so a fixture FORCES drops whatever the list's own capacity - a dropped record is NO "
@@ -1441,7 +1464,9 @@ constexpr ArmDef kArms[] = {
       "THE REFLECTION HISTORY'S COUNT TO THE HOST (PHOTON-2 stage 0, an instrument): every traced frame's "
       "per-texel temporal-mean count (rq_reflect.comp's history w, 0 = no answer yet) copied out after the filter and "
       "decoded once the frame retires into RayQueryStatus::reflectHistoryCount - the stillness door's count histogram "
-      "(how young each glossy pixel's mean is after a stop). One image copy a frame while on." },
+      "(how young each glossy pixel's mean is after a stop) - and the moving mean's standard error in display codes, "
+      "RayQueryStatus::reflectHistorySe (the lag law's SE_walk, PHOTON-7 stage 6). One image and one buffer copy a frame "
+      "while on." },
     { ArmId::CardDemandCount, 0.0, 0.0, 1.0,
       "THE CARD READERS' HITS COUNTED (PHOTON-7 stage 5, 5-2's acceptance: photon-glass's uncarded share): 1 = every "
       "hit the reflection and the gather read a card at counts, as one that found a card or one that found none "

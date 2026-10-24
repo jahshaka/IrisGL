@@ -1,7 +1,8 @@
 // THE fp16 RUNNING STATISTIC'S STORE, ROUNDED STOCHASTICALLY (PHOTON_2_SPEC R1: EVERY fp16 running statistic is) - one
-// text for the reflection's rest means and moment (jah_reflect_rest.glsl), the gather's diffuse and rough specular rest
-// means (rq_probe_integrate.comp) and the area visibility's sums and rest means (jah_area_vis_law.glsl, both producers:
-// the ray tier through glslang, the no-ray route's Jahshaka/ScreenAreaVis as the piece JahHalfStochastic).
+// text for the gather's diffuse and rough specular rest means (rq_probe_integrate.comp) and the area visibility's sums
+// and rest means (jah_area_vis_law.glsl, both producers: the ray tier through glslang, the no-ray route's
+// Jahshaka/ScreenAreaVis as the piece JahHalfStochastic). (The reflection's rest keeps its own statistics since
+// PHOTON-7 stage 6: jah_reflect_rest.glsl's fold and its compensated sum after the hand-over.)
 #ifndef JAH_HALF_STOCHASTIC_GLSL
 #define JAH_HALF_STOCHASTIC_GLSL
 

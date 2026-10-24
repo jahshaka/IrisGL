@@ -5,8 +5,9 @@
 // lerp( H, M, w( v ) )); the trace reprojects its history from ONE half, at another texel than its own, so the
 // composition cannot happen there - this pass writes it at each texel's own place (no texel reads another's), and the
 // moving rules resume from the answer that was on screen, never from H or M alone.
-// The set and the Params are the trace's (declared here up to `stereo`); binding 6 is the half that held M (now the
-// trace's `historyPrev`), binding 7 the half that held H.
+// The set and the Params are the trace's (declared here up to `denoiser`); binding 6 is the half that held M (now the
+// trace's `historyPrev`), binding 7 the half that held H; binding 8 the M half's state (jah_reflect_state.glsl: the rest
+// samples v), which takes the composed count - a moving history's - and binding 9 the H half's (its count).
 #extension GL_GOOGLE_include_directive : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
@@ -42,7 +43,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 knobs;
 	/// x = THE REST FRAME k, 1..N on a frame the view rests (PHOTON-2 1e, fix F1: the gather's rule — a rest mean handed
 	/// over from the frozen moving history, rq_reflect_temporal.comp), 0 while it moves, y = the
-	/// surface bias in world units (a ray starts this far off its own surface),
+	/// drawn cut's error per unit of view distance (the view's pixel tolerance x the LOD bias x one full-resolution
+	/// pixel; world units under an orthographic camera) - rq_reflect.comp's RAY ORIGIN,
 	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
 	/// weight (the floor on 1/n — how long the temporal mean remembers).
 	vec4 knobs2;
@@ -79,17 +81,50 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// above is the one camera's, exactly as before. One dispatch, one
 	/// descriptor set, one history ring: the eye is the layer (gEye).
 	vec4 stereo;
+	// (the trace's, between: this pass reads `denoiser` - the exposure the rest's moments were folded at)
+	vec4 camPos2;
+	vec4 rayTL2;
+	vec4 rayRight2;
+	vec4 rayDown2;
+	vec4 fwd2;
+	vec4 prevCamPos2;
+	vec4 prevRayTL2;
+	vec4 prevRayRight2;
+	vec4 prevRayDown2;
+	vec4 prevFwd2;
+	vec4 cards;
+	vec4 hitList;
+	vec4 hitSun;
+	vec4 hitSun2;
+	vec4 motion;
+	vec4 alpha;
+	vec4 fog[8];
+	vec4 metal;
+	vec4 hitTable;
+	vec4 cloudMap;
+	vec4 cloudSun;
+	vec4 rest;
+	vec4 restMovers;
+	vec4 restMoverBox[32];   // per box: [2i] = min, [2i + 1] = max (xyz)
+	vec4 screen;
+	vec4 screen2;
+	vec4 denoiser;
 } p;
+/// THE DENOISER SPACE'S EXPOSURE (the trace's binding 50 and its rule, rq_reflect.comp exposureOf).
+layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
+float gExposure = 1.0;
+#define JAH_DENOISE_EXPOSURE gExposure
 
 layout( rgba16f, set = 0, binding = 6 ) uniform image2DArray historyPrev;
 layout( rgba16f, set = 0, binding = 7 ) uniform readonly image2DArray historyCur;
-layout( rg32f, set = 0, binding = 8 ) uniform readonly image2DArray historyDistPrev;
+layout( rg32ui, set = 0, binding = 8 ) uniform uimage2DArray statePrev;
+layout( rg32ui, set = 0, binding = 9 ) uniform readonly uimage2DArray stateCur;
 
+// NaN AND INF BY THEIR BITS (trap 5: x == x is folded away): the one copy (and kMaxRadiance, the rest's fold reads it).
+#include "jah_rq_finite.glsl"
+#include "jah_reflect_denoise.glsl"
 #include "jah_reflect_rest.glsl"
-
-// NaN AND INF BY THEIR BITS (trap 5: x == x is folded away).
-bool finite1( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
-bool finite3( vec3 v ) { return finite1( v.x ) && finite1( v.y ) && finite1( v.z ); }
+#include "jah_reflect_state.glsl"
 
 void main()
 {
@@ -98,14 +133,42 @@ void main()
 	const int eye = int( gl_GlobalInvocationID.z );
 	if( any( greaterThanEqual( tc, traceRes ) ) )
 		return;
-	if( !( imageLoad( historyDistPrev, ivec3( tc, eye ) ).x > 0.0 ) )
+	JahReflectState st = jahStateUnpack( imageLoad( statePrev, ivec3( tc, eye ) ).xy );
+	if( !( st.surfDist > 0.0 ) )
 		return;   // no answer here (the texel was declined at rest): the trace finds none either
-	const vec4 M = imageLoad( historyPrev, ivec3( tc, eye ) );
-	const vec4 H = imageLoad( historyCur, ivec3( tc, eye ) );
-	if( !( M.w > 0.0 ) || !finite3( M.xyz ) )
+	const vec4 Mr = imageLoad( historyPrev, ivec3( tc, eye ) );
+	const vec4 Hr = imageLoad( historyCur, ivec3( tc, eye ) );
+	const vec3 M = Mr.xyz;
+	const vec3 H = Hr.xyz;
+	const float v = float( st.v );
+	const float Hn = jahStateUnpack( imageLoad( stateCur, ivec3( tc, eye ) ).xy ).N;
+	// (the composed answer's count: H's plus the rest samples; a texel holding neither has no answer to compose)
+	if( !( Hn + v > 0.0 ) || !finite3( M ) )
 		return;
-	const vec4 Hs = finite3( H.xyz ) ? H : vec4( 0.0 );
-	const float v = jahRestSamples( Hs, M );
+	const bool hasH = finite3( H ) && Hn > 0.0;
+	const float N = max( p.stereo.w, 1.0 );
+	// THE COMPOSED ANSWER'S VARIANCE (the moving history's alpha, centred - rq_reflect_temporal.comp): the per-sample
+	// spread the moving rules resume from - the rest samples' (their second moment and its residual, in the space they
+	// were folded in) once two are in, else the frozen moving history's own (its alpha is a variance), else none. It was
+	// 0 - a raw moment of 0 against the mean's square: the moving variance read 0 for the walk's first tens of frames.
+	gExposure = p.denoiser.y > 0.5 ? texelFetch( jahExposure, ivec2( 0 ), 0 ).x : p.denoiser.x;
+	float var = hasH ? max( Hr.w, 0.0 ) : 0.0;
+	if( v >= 2.0 && finite1( Mr.w ) )
+	{
+		JahRestStats rs;
+		rs.M = M;
+		rs.m2 = Mr.w;
+		rs.res = jahRestHasResidual( v, hasH, N ) && finite3( Hr.xyz ) && finite1( Hr.w ) ? Hr : vec4( 0.0 );
+		const float e = jahRestErrorD( rs, v );
+		var = e * e * v;
+	}
 	imageStore( historyPrev, ivec3( tc, eye ),
-				vec4( jahRestAnswer( Hs, M, max( p.stereo.w, 1.0 ) ), min( max( Hs.w, 0.0 ) + v, 4096.0 ) ) );
+				vec4( jahRestAnswer( hasH ? H : vec3( 0.0 ), hasH, M, v, N ), var ) );
+	// THE COMPOSED COUNT: the answer's samples, H's and the rest's - packed at the state's 5.3 ceiling, 31.875, which binds
+	// only here and above the moving MaxFrames 12: the first moving frame after the break takes min( N c + 1, 12 ) = 12 for
+	// any confidence c >= 0.345 (READ_A W3: the 6.2 field's 63.75 left 32 frames for c >= 0.49 only).
+	st.N = ( hasH ? Hn : 0.0 ) + v;
+	st.v = 0u;
+	st.stop = 0u;
+	imageStore( statePrev, ivec3( tc, eye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 }

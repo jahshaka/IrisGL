@@ -609,13 +609,11 @@ Ogre::CompositorPassQuadDef *addDisplayEncodeQuad(Ogre::CompositorNodeDef *n, co
     return q;
 }
 
-/// DOES THIS CHAIN SHAPE CARRY THE SCREEN-SPACE MARCH? One predicate, read by
-/// `build` (which passes and textures exist) and by the per-frame update (whose
-/// material parameters to push) — two answers that must never disagree, and did
-/// not have a shared name until lane REFLECT-VR-1 gave the stereo case one.
-/// @see PostFxDesc::ssrScreenMarch for why a stereo chain never marches.
+/// DOES THIS CHAIN SHAPE CARRY THE RASTER MARCH? One predicate (ChainDesc::rasterMarch), read by `build` (which
+/// passes and textures exist) and by the per-frame update (whose material parameters to push) — two answers that must
+/// never disagree. @see PostFxDesc::reflectSources for why a stereo chain never marches.
 bool marchesInScreenSpace(const ChainDesc &d) {
-    return d.ssr > 0 && d.ssrScreenMarch && !d.stereo;
+    return d.rasterMarch();
 }
 
 /// DOES THIS CHAIN BUILD THE BLOOM LADDER? Read by `build` (the textures and the
@@ -648,6 +646,14 @@ bool ChainDesc::anyEffect() const {
     // target it downloads exists only in the chain's shape.
     return hdr || ssao || smaaPreset >= 0 || ssr > 0 || probeGather || screenIntegrate || sunContact || refractions ||
            distortion || hzb || !looks.empty() || hdrReadback;
+}
+
+bool ChainDesc::screenSources() const {
+    return ssr > 0 && reflectSources != ReflectSources::Rays && !stereo;
+}
+
+bool ChainDesc::rasterMarch() const {
+    return screenSources() && !rayReflect;
 }
 
 bool ChainDesc::prepass() const {
@@ -684,7 +690,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.letterbox == b.letterbox &&
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
-           a.ssrScreenMarch == b.ssrScreenMarch &&
+           a.reflectSources == b.reflectSources &&
            a.rayReflect == b.rayReflect && a.hitDecode == b.hitDecode &&
            // (hitListRows is NOT shape: the view resizes the list in place, OgreView::sizeHitList)
            a.atomDraw == b.atomDraw && a.atomOcclusion == b.atomOcclusion &&
@@ -1827,20 +1833,19 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6). Named
     // once here because half the shape below reads it.
     //
-    // TWO NAMES SINCE LANE REFLECT-VR-1, because the row selects two things.
-    // `ssrMarch` is the SCREEN-SPACE MARCH — the prepass' G-buffers walked in
-    // texture space against the previous frame's colour. `ssr` is the whole
-    // reflection STAGE: the prepass, its two G-buffers and the texture HlmsPbs
-    // composites (`jahSsrReflection`), which the rays write into just as the
-    // march's resolve does.
+    // THREE NAMES (lane REFLECT-VR-1; PHOTON-7 stage 6's one estimator). `screen` is the SCREEN SOURCES — this view's
+    // previous picture, the depth it was drawn at, the helpers' mask and the object motion — which the ray tier's trace
+    // reads for its screen trace (rq_reflect.comp) and the raster march's resolve reads. `ssrMarch` is the RASTER MARCH
+    // — the prepass' G-buffers walked in texture space by a quad, then resolved by another — and it runs only on a
+    // chain that traces NO rays: a ray chain answers its screen hits in the trace, one estimator, so it builds neither
+    // quad nor the march's ray buffer. `ssr` is the whole reflection STAGE: the prepass, its two G-buffers and the
+    // texture HlmsPbs composites (`jahSsrReflection`), which the rays or the resolve write.
     //
-    // A STEREO CHAIN NEVER MARCHES, whatever a host asked for, and it is
-    // structural rather than a default: the target carries two eyes side by
-    // side, and every term of a screen-space march (the neighbourhood it walks,
-    // the one camera it reconstructs through, the colour history it reprojects)
-    // is wrong across that seam in a way no threshold repairs. The rays are
-    // traced in the WORLD from the eye that owns the pixel, so they are the
-    // stereo answer — see PostFxDesc::ssrScreenMarch.
+    // A STEREO CHAIN HAS NO SCREEN SOURCE, whatever a host asked for, and it is structural rather than a default: the
+    // copies and the march's passes are not per layer, and every term of a screen-space trace (the neighbourhood it
+    // walks, the colour history it reprojects) belongs to one picture. The rays are traced in the WORLD from the eye
+    // that owns the pixel, so they are the stereo answer — see PostFxDesc::reflectSources.
+    const bool screen = desc.screenSources();
     const bool ssrMarch = marchesInScreenSpace(desc);
     // ...AND WITHOUT THE MARCH THE STAGE IS ONLY WORTH BUILDING FOR THE RAYS.
     // The prepass is a second full scene traversal; spending it to declare a
@@ -2085,9 +2090,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // wrote this frame is Undefined to the barrier solver.
         //
         // Its format follows the scene target's so the copy at the end of the
-        // frame is an exact one. THE MARCH IS ITS ONLY READER — a rays-only
-        // chain reflects the WORLD, not the last frame's picture of it.
-        // THE MARCH'S OBJECT MOTION (REFLECT-MOVERS-1): per pixel, where a MOVING
+        // frame is an exact one. ITS READERS ARE THE SCREEN TRACE (a ray chain's
+        // trace) AND THE RASTER MARCH'S RESOLVE — a rays-only chain reflects the
+        // WORLD, not the last frame's picture of it, and builds none of these.
+        // THE OBJECT MOTION (REFLECT-MOVERS-1): per pixel, where a MOVING
         // slot's surface point would sit in this image at its previous pose — a
         // delta in the target's uv and the depth value, w = 1 — written by the ray
         // tier (rq_motion.comp) from the id image and the GPU scene's prevWorld;
@@ -2095,37 +2101,37 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // chain whose job does not run reads exactly the resolve it always did.
         //
         // FULL SIZE ONLY WHERE THE JOB RUNS (the ray tier and the id pass): 8 bytes a
-        // pixel — 16.6 MB at 1920x1080 — per march chain. Every other march chain
-        // (no rays, the split off) declares it 1x1: the resolve binds a texture it
-        // reads as "the camera path" everywhere, clamping its fetch into the texture.
-        if (ssrMarch) {
+        // pixel — 16.6 MB at 1920x1080 — per screen-traced chain. Every other chain
+        // with screen sources (no rays, the split off) declares it 1x1: its reader
+        // binds a texture it reads as "the camera path" everywhere, clamping its fetch.
+        if (screen) {
             const bool velocityJob = desc.rayReflect && desc.atomDraw;
             auto *td = velocityJob ? addTex(n, kSsrVelocity, Ogre::PFG_RGBA16_FLOAT)
                                    : addTex(n, kSsrVelocity, Ogre::PFG_RGBA16_FLOAT, 1u, 1u);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
             if (velocityJob) td->textureFlags |= Ogre::TextureFlags::Uav;
         }
-        if (ssrMarch) {
+        if (screen) {
             auto *td = addTex(n, kSsrPrev,
                               floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
         // ...AND THE DEPTH THAT PICTURE WAS DRAWN AT (REFLECT-FIX-1), copied beside the
         // colour: the resolve's surface test (JahSsrResolve_ps.glsl, "THE SAME
-        // SURFACE"). 4 bytes a pixel — 8.3 MB at 1920x1080 — per march chain. A
+        // SURFACE", and the trace's). 4 bytes a pixel — 8.3 MB at 1920x1080 — per chain. A
         // COLOUR texture holding the depth value, not a depth texture: a depth-format
         // node texture read by the resolve was MEASURED to put the frame's Atom items a
         // frame late (the dragged box drawn at its previous pose — gi.reflect_uncover's
         // direct-box check), and a float colour copy reads the same number.
-        if (ssrMarch) {
+        if (screen) {
             auto *td = addTex(n, kSsrPrevDepth, Ogre::PFG_R32_FLOAT);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
         // ...AND WHERE AN EDITOR HELPER SHOWS IN THAT PICTURE (REFLECT-FIX-1): the helpers
         // alone, drawn over the scene's depth into a mask the depth copy reads (any
         // channel or coverage > 0). RGBA because a helper's colour can be any channel
-        // and its alpha is what a black one leaves. 4 bytes a pixel per march chain.
-        if (ssrMarch) {
+        // and its alpha is what a black one leaves. 4 bytes a pixel per chain.
+        if (screen) {
             addTex(n, kSsrHelperMask, Ogre::PFG_RGBA8_UNORM);
             Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kSsrHelperMaskRtv);
             Ogre::RenderTargetViewEntry colour0;
@@ -2350,9 +2356,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 
     if (prepass) {
         // The colour history, seeded ONCE. Without this the first frame's
-        // resolve samples an Undefined texture; with it, the first frame simply
-        // reflects black and the second is correct.
-        if (ssrMarch) {
+        // screen trace (or resolve) samples an Undefined texture; with it, the
+        // first frame simply finds no screen answer and the second is correct.
+        if (screen) {
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrev);
             t->setNumPasses(1);
             auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
@@ -2362,8 +2368,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
         // ...and its depth, seeded once with -1, a value no depth buffer holds
         // (REFLECT-FIX-1): no first-frame texel matches a surface, so the first frame's
-        // march hands every pixel to the fallback.
-        if (ssrMarch) {
+        // screen trace hands every pixel to the ray (the march's, to the fallback).
+        if (screen) {
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrevDepth);
             t->setNumPasses(1);
             auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
@@ -2371,28 +2377,25 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             c->setAllClearColours(Ogre::ColourValue(-1.0f, -1.0f, -1.0f, -1.0f));
             c->mProfilingId = "Jahshaka SSR history depth seed";
         }
-        // WITHOUT THE MARCH, SOMETHING STILL HAS TO WRITE THE REFLECTION
+        // WITHOUT THE RASTER MARCH, SOMETHING STILL HAS TO WRITE THE REFLECTION
         // TEXTURE EVERY FRAME, and it is a clear (lane REFLECT-VR-1). The
         // resolve is what wrote every texel of `jahSsrReflection` in a marching
         // chain — including the texels where it found nothing, as a zero
-        // confidence — and the ray trace deliberately writes only the pixels it
-        // ANSWERS (its whole fallback contract is "leave the rest holding what
-        // the resolve wrote"). With no resolve, "the rest" would be an
-        // undefined texture composited at an undefined weight: a discardable
-        // texture nothing wrote this frame is Undefined to the barrier solver,
-        // and HlmsPbs would lerp the probe answer towards recycled VRAM.
+        // confidence — and the ray tier's filter writes only the texels the trace
+        // ANSWERED. Without the clear "the rest" would be an undefined texture
+        // composited at an undefined weight: a discardable texture nothing wrote
+        // this frame is Undefined to the barrier solver, and HlmsPbs would lerp
+        // the probe answer towards recycled VRAM.
         //
-        // Zero is the exact value the contract wants: `w = 0` is "no screen
-        // answer here", which is what the filter's composite reads as "the ray
-        // keeps all of its own weight" and what HlmsPbs reads as "leave the
-        // probe/sky answer alone". One full-target clear of an RGBA16F — at a
-        // Quest Pro's two eyes, 82 MB of writes, about a sixth of a
-        // millisecond — against a march, a resolve and a history copy.
+        // Zero is the exact value the contract wants: `w = 0` is what HlmsPbs
+        // reads as "leave the probe/sky answer alone". One full-target clear of
+        // an RGBA16F — at a Quest Pro's two eyes, 82 MB of writes, about a sixth
+        // of a millisecond.
         //
         // ...and a GATHER-ONLY chain (the SSR row off, GATHER-1a) declares no
         // reflection texture at all, so there is nothing to clear: `ssr` here
         // and not `prepass`.
-        else if (ssr) {
+        if (ssr && !ssrMarch) {
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrReflection);
             t->setNumPasses(1);
             auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
@@ -2457,19 +2460,20 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             q->mFrustumCorners = Ogre::CompositorPassQuadDef::VIEW_SPACE_CORNERS_NORMALIZED_LH;
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
         }
-        // THE RESOLVE, always full resolution — HlmsPbs fetches this one at the
-        // fragment's own pixel.
-        if (ssrMarch) {
+        // THE OBJECT MOTION'S CLEAR (w = 0: "the camera path"), every frame, in front of
+        // its job (the ray tier's rq_motion.comp, recorded ahead of the trace in the
+        // photon trace pass) and of its readers (the trace's screen hits; the resolve).
+        if (screen) {
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrVelocity);
             t->setNumPasses(1);
             auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
             c->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f));
             c->mProfilingId = "Jahshaka SSR velocity clear";
         }
+        // THE RESOLVE, always full resolution — HlmsPbs fetches this one at the
+        // fragment's own pixel.
         if (ssrMarch) {
             auto *q = addQuad(n, kSsrReflection, "Jahshaka/SsrResolve", "Jahshaka SSR resolve");
-            // the ray tier's object-motion job runs in front of it (kSsrResolvePassIdentifier)
-            q->mIdentifier = kSsrResolvePassIdentifier;
             q->addQuadTextureSource(4, kSsrVelocity);
             q->addQuadTextureSource(0, kSsrRays);
             q->addQuadTextureSource(1, kSsrShadowRough);
@@ -2827,11 +2831,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // HDR luminance reduction averages one in). Bounding what is WRITTEN is the
     // half of that the resolve's own guard cannot do.
     //
-    // ONLY THE MARCH HAS A HISTORY (lane REFLECT-VR-1): the rays' own temporal
-    // mean lives in the trace's ping-ponged storage images, not in a copy of
-    // the frame, so a rays-only chain neither declares this texture nor copies
-    // into it.
-    if (ssrMarch) {
+    // ONLY THE SCREEN SOURCES' CHAIN HAS IT (lane REFLECT-VR-1; PHOTON-7 stage 6): the
+    // screen trace and the raster march read it; a rays-only chain's temporal mean
+    // lives in the trace's ping-ponged storage images, so it neither declares this
+    // texture nor copies into it.
+    if (screen) {
         auto *q = addQuad(n, kSsrPrev, "Jahshaka/SsrHistory", "Jahshaka SSR history");
         q->addQuadTextureSource(0, sceneResult);
         q->mStoreActionColour[0] = Ogre::StoreAction::Store;

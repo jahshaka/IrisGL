@@ -30,7 +30,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	vec4 rayDown;
 	vec4 fwd;
 	/// x = A, y = B of Camera::getProjectionParamsAB() (reverse-Z safe),
-	/// z = the far clip.
+	/// z = the far clip, w = the ray origin's point term: the rasteriser's sub-pixel snap in pixels
+	/// (jah_ray_origin.glsl jahDepthPointError; 0 = the term off, rays.originPoint 0).
 	vec4 projParams;
 	/// xy = the PROBE GRID in probes, zw = the full-resolution target size.
 	vec4 resolution;
@@ -39,9 +40,9 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// w = how many cascades are bound.
 	vec4 knobs;
 	/// x = 1 takes the surface class out of the history test (GatherTuning::classOff, a test door;
-	/// 0 shipped: jah_probe_history.glsl), y = the
-	/// ray start's floor off the surface in world units (an epsilon; the trace
-	/// takes the larger of it and 1e-4 of the probe's view distance), z = 1
+	/// 0 shipped: jah_probe_history.glsl), y = THE DRAWN SURFACE'S BOUND in
+	/// full-resolution sample footprints (Types.h rayOriginDrawnFootprints: the
+	/// ray origin's law, jah_ray_origin.glsl), z = 1
 	/// when a sky cubemap is bound,
 	/// w = the octahedral map's resolution (rays per probe = w*w).
 	vec4 knobs2;
@@ -101,8 +102,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// THE SURFACE CACHE THE HITS READ FIRST (PHOTON-GATHER-1d, GA-1e — the
 	/// reflection's `p.cards`, word for word): x = the instance-table entries
 	/// bound (0 = the scene holds no cache: every hit reads the voxels), y = the
-	/// card records bound, z = the footprint gate in card texels
-	/// (Types.h kCardFootprintTexels), w = the per-slot geometry-row entries
+	/// card records bound, z: unused (the card read's footprint gate is deleted,
+	/// PHOTON-7 stage 6), w = the per-slot geometry-row entries
 	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
 	/// Read by the trace alone.
 	vec4 cards;
@@ -118,7 +119,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// hitList: x = the list's capacity, y = its grid width, z = the GPU scene
 	/// instance entries bound, w = 1 when the list is bound. hitSun: xyz = towards
 	/// the sun, w = 1 when the pass has one. hitSun2: x = the sun ray's TLAS mask,
-	/// y = its minimum lift, z = its length, w = the far copies' lift (farOverlap).
+	/// y unused (a near hit is ON level 0: its sun leg's surface term is 0, the one origin law), z = its length,
+	/// w = a FAR copy's hit's surface term (farOverlap: the drift law's coarse-vs-fine gap).
 	vec4 hitList;
 	vec4 hitSun;
 	vec4 hitSun2;
@@ -283,6 +285,11 @@ struct JahProbeRecord
 	/// the normal n. Coefficient k, channel c lives at flat float 3k + c of the
 	/// seven vec4s (27 floats; the 28th is unused).
 	vec4 sh[7];
+	/// xyz = THE DRAWN SURFACE'S GEOMETRIC NORMAL at the probe (jah_geometric_normal.glsl at its placement; the shading
+	/// normal where the depth has no plane through the pixel): the direction its rays' origin is lifted along
+	/// (jah_ray_origin.glsl, READ_B F3) - the hemisphere stays the shaded one, normalW. w = the point's own error
+	/// beyond its float bound (jahDepthPointError at the placement: the depth's quantum and the sub-pixel snap).
+	vec4 geomW;
 };
 
 /// THE NINE REAL SPHERICAL HARMONICS L0..L2 at a unit direction, in the

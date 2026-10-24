@@ -7543,7 +7543,17 @@ void SceneMirror::buildViewPostFx(FrameInputView &part, View *view, bool record,
             const GiQualityFacts facts = giQualityFacts(q);
             const bool traced = mSource->ssrMode > 0 && photonOn && facts.rayReflections &&
                                 mTarget && mTarget->rayTracingResolvedFor(docRayTracing());
-            fx.ssr = traced ? facts.reflectTrace : mSource->ssrMode;
+            // ...AT THE DOCUMENT'S RESOLUTION (REFLECT-MODE-1): Auto the tier's, else the row's full (2) or half (1).
+            const int resolution = qBound(0, mSource->reflectionResolution, 2);
+            fx.ssr = !traced ? mSource->ssrMode : resolution == 1 ? 2 : resolution == 2 ? 1 : facts.reflectTrace;
+        }
+        // THE SOURCES (REFLECT-MODE-1): the one estimator, the rays or the screen alone. On a chain without rays Both and
+        // Screen are the screen march and Rays is none (PostFxDesc::reflectSources); a stereo view drops the screen
+        // sources itself.
+        {
+            const int sources = qBound(0, mSource->reflectionSources, 2);
+            fx.reflectSources = sources == 1 ? ReflectSources::Rays : sources == 2 ? ReflectSources::Screen
+                                                                     : ReflectSources::Both;
         }
         fx.ssrMarchPhase  = qBound(0, mSource->ssrMarch, 2);
         // Percent in the document, a fraction in the renderer — one conversion,

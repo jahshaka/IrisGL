@@ -206,20 +206,20 @@ struct StillnessRun::Impl {
     Image prev;                                       ///< the previous frame's picture (inside a window)
     Image trailPrev;                                  ///< ...and inside a move's trail
     std::vector<unsigned char> trailPrevChange;       ///< ...and its per-pixel change from the one before (J1's steps)
-    unsigned long long lastRefits = 0;                ///< GpuSceneStatus::rayLevelRefits after the last frame
     unsigned long long lastKeyMoves = 0;              ///< GatherStatus::keyMoves after the last frame (L7)
     unsigned long long lastFoliageRule = 0;           ///< GatherStatus::foliageRuleAccepts after the last frame (L8)
-    bool refitsSeen = false;
     unsigned picW = 0, picH = 0;
     std::vector<unsigned char> classAt;               ///< per picture pixel: its class (0 = unclassified)
     /// A window frame's per-pixel change, held until the window's mask is known (the history count arrives a few
     /// frames after the stop).
-    struct Queued { int window = 0; size_t frame = 0; std::vector<unsigned char> change; };
+    struct Queued { int window = -1; size_t frame = 0; std::vector<unsigned char> change; };
     std::vector<Queued> queued;
     /// The traced reflection frame -> (window, frame).
     std::map<unsigned, std::pair<int, size_t>> byTraced;
+    /// ...and a DUMPED trail frame's (the walk's own frames: their per-texel history count, `.rhc`, for the lag law).
+    std::map<unsigned, size_t> byTracedTrail;
     /// THE GATHER FRAME -> (window, trail?, frame) (StillnessSpec::classRestarts): each frame the gather recorded.
-    struct FrameRef { int window = 0; bool trail = false; size_t index = 0; };
+    struct FrameRef { int window = -1; bool trail = false; size_t index = 0; };
     std::map<unsigned, FrameRef> byGather;
     unsigned lastGatherMapped = 0u;                   ///< the gather's published frame counter last mapped
     /// The class restarts of the gather frame the readback holds now, into the frame it maps to (once).
@@ -434,7 +434,9 @@ struct StillnessRun::Impl {
             {
                 std::string &g = gpuRowsByFrame[r.frame];
                 for (const auto &fm : frameMs) {
-                    if (fm.second < 0.05) continue;
+                    // (a row under 0.05 ms is left out - but the hit write-back on every frame it runs: the rest's
+                    // record runs move the trace's work into it, so its ms are read beside the trace's)
+                    if (fm.second < 0.05 && fm.first != "hit.composite") continue;
                     char b[96];
                     std::snprintf(b, sizeof(b), "%s%s:%.2f", g.empty() ? "" : ",", fm.first.c_str(), fm.second);
                     g += b;
@@ -502,6 +504,28 @@ struct StillnessRun::Impl {
     void takeReflectHistory(const RayQueryStatus &rq)
     {
         if (rq.reflectHistoryCount.empty() || !rq.reflectHistoryW || !rq.reflectHistoryH) return;
+        // THE DUMP's history count of a walk frame (PHOTON-7 stage 6, the lag law): the trace texel's moving count N,
+        // one byte a texel (N <= 12, the window), its grid in `.rsize` - beside the frame's `.rgb`.
+        if (const auto tt = byTracedTrail.find(rq.reflectHistoryFrame); tt != byTracedTrail.end()) {
+            if (!spec.dumpDir.empty()) {
+                const std::string tag = trailTag(tt->second);
+                std::vector<unsigned char> n(rq.reflectHistoryCount.size());
+                for (size_t i = 0; i < n.size(); ++i)
+                    n[i] = (unsigned char)std::min<unsigned>(rq.reflectHistoryCount[i], 255u);
+                std::ofstream h(dumpPath(tag + ".rhc"), std::ios::binary);
+                h.write(reinterpret_cast<const char *>(n.data()), std::streamsize(n.size()));
+                std::ofstream sz(dumpPath(tag + ".rsize"));
+                sz << rq.reflectHistoryW << " " << rq.reflectHistoryH << "\n";
+                // ...and its moving SE in display codes (the lag law's SE_walk: float32 a texel, the same grid)
+                if (rq.reflectHistorySe.size() == rq.reflectHistoryCount.size()) {
+                    std::ofstream se(dumpPath(tag + ".rse"), std::ios::binary);
+                    se.write(reinterpret_cast<const char *>(rq.reflectHistorySe.data()),
+                             std::streamsize(rq.reflectHistorySe.size() * sizeof(float)));
+                }
+            }
+            byTracedTrail.erase(tt);
+            return;
+        }
         const auto it = byTraced.find(rq.reflectHistoryFrame);
         if (it == byTraced.end()) return;
         const int win = it->second.first;
@@ -822,6 +846,9 @@ bool StillnessRun::nextPose(Vec3 &eye, Vec3 &target)
     // count from the first stop to the end. An arm latches at the top of the next frame — this one.
     if (m.readsHistory() && (p.trail || p.part == Impl::Part::Window) && !m.gatherArmOn)
         m.gatherArmOn = m.setArm("gather.historyReadback", 1.0);
+    // (a DUMPED walk reads the reflection's count over its trail too: the dump's `.rhc`, the lag law's N)
+    if (p.trail && !m.spec.dumpDir.empty() && !m.reflectArmOn)
+        m.reflectArmOn = m.setArm("reflect.historyReadback", 1.0);
     if (p.part == Impl::Part::Window && p.index == 0) {
         if (!m.gatherArmOn) m.gatherArmOn = m.setArm("gather.historyReadback", 1.0);
         if (!m.reflectArmOn) m.reflectArmOn = m.setArm("reflect.historyReadback", 1.0);
@@ -866,19 +893,18 @@ bool StillnessRun::frameDone(std::string &err)
     const GatherStatus &g = pub.gi.gather;
 
     if (p.part != Impl::Part::Window && p.window >= 0) m.moveFrames[size_t(p.window)].push_back(engineFrame);
-    const unsigned long long refitsNow = pub.gpuScene.rayLevelRefits;
     // THE HOLD'S REASONS, this frame (L7): the rest key moved since the last frame, or the inputs owed work. Read
     // before the trail and window parts write the frame; the key's count is taken once, below them.
-    const unsigned refits = m.refitsSeen ? unsigned(refitsNow - m.lastRefits) : 0u;
-    m.lastRefits = refitsNow;
-    m.refitsSeen = true;
     // THE MOVE'S TRAIL (1d): every pixel, the change from the frame before (none on its first frame).
     if (p.trail) {
         StillnessWindow &w = m.report.windows[size_t(p.window)];
         StillnessFrame &f = w.trail[w.trail.size() - p.index];
         m.mapGatherFrame(g, p.window, true, w.trail.size() - p.index);
+        if (!m.spec.dumpDir.empty() && pub.rayQuery.reflectFrame > m.lastTraced) {
+            m.byTracedTrail[pub.rayQuery.reflectFrame - 1u] = w.trail.size() - p.index;
+            m.lastTraced = pub.rayQuery.reflectFrame;
+        }
         f.engineFrame = engineFrame;
-        f.rayLevelRefits = refits;
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
@@ -904,6 +930,8 @@ bool StillnessRun::frameDone(std::string &err)
         f.reflRestMovers = pub.rayQuery.reflectRestMoverFrames;
         f.reflHeld = pub.rayQuery.reflectHeld;
         f.reflRestActive = pub.rayQuery.reflectRestActive;
+        f.reflRestCapped = pub.rayQuery.reflectRestCapped;
+        f.reflSources = pub.rayQuery.reflectSources;
         f.cameraCuts = g.cameraCuts;
         f.reflCuts = pub.rayQuery.reflectCameraCuts;
         Image pic;
@@ -988,7 +1016,6 @@ bool StillnessRun::frameDone(std::string &err)
         StillnessFrame &f = w.frames[p.index];
         m.mapGatherFrame(g, p.window, false, p.index);
         f.engineFrame = engineFrame;
-        f.rayLevelRefits = refits;
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
@@ -1014,6 +1041,8 @@ bool StillnessRun::frameDone(std::string &err)
         f.reflRestMovers = pub.rayQuery.reflectRestMoverFrames;
         f.reflHeld = pub.rayQuery.reflectHeld;
         f.reflRestActive = pub.rayQuery.reflectRestActive;
+        f.reflRestCapped = pub.rayQuery.reflectRestCapped;
+        f.reflSources = pub.rayQuery.reflectSources;
         f.cameraCuts = g.cameraCuts;
         f.reflCuts = pub.rayQuery.reflectCameraCuts;
         f.held = g.running && g.settleFrames && g.restFrames > g.settleFrames;
@@ -1081,7 +1110,7 @@ bool StillnessRun::frameDone(std::string &err)
                   "): settle longer before the run";
             return false;
         }
-        m.freezeArmOn = m.setArm("gi.freeze", 1.0);
+        m.freezeArmOn = m.setArm("gi.freeze", m.spec.freezeValue);
         if (!m.freezeArmOn) {
             err = "stillness: freeze - the engine refused the arm gi.freeze";
             return false;
@@ -1208,10 +1237,11 @@ std::string StillnessReport::tsv() const
     for (const std::string &n : names)
         o << "\t" << n << "_px\t" << n << "_max\t" << n << "_mean\t" << n << "_changed\t" << n << "_refl_none\t" << n
           << "_refl_le9\t" << n << "_refl_le17\t" << n << "_refl_le33\t" << n << "_refl_gt33";
-    o << "\trest_frames\tsince_restart\tsettle_frames\theld\tray_level_refits\tgi_rows\tframe_gpu_ms\tframe_ms"
+    o << "\trest_frames\tsince_restart\tsettle_frames\theld\tgi_rows\tframe_gpu_ms\tframe_ms"
       << "\tclass_px\tclass_restart\tstep_px\tslow_stage\thold_key\tfoliage_rule"
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
-      << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms"
+      << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\trefl_rest_capped"
+      << "\trefl_sources"
       << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
@@ -1225,7 +1255,7 @@ std::string StillnessReport::tsv() const
                 for (int b : c.reflectBins) o << "\t" << b;
             }
             o << "\t" << f.restFrames << "\t" << f.sinceRestart << "\t" << f.settleFrames << "\t" << (f.held ? 1 : 0)
-              << "\t" << f.rayLevelRefits << "\t" << (f.giRows.empty() ? "-" : f.giRows);
+              << "\t" << (f.giRows.empty() ? "-" : f.giRows);
             char ms[64];
             std::snprintf(ms, sizeof(ms), "\t%.3f\t%.3f\t%d\t%d\t%d\t", f.frameGpuMs, f.frameMs, f.classPixels,
                           f.classRestarts, f.stepPixels);
@@ -1234,9 +1264,11 @@ std::string StillnessReport::tsv() const
               << "\t" << f.reflRestMovers << "\t" << f.cameraCuts << "\t" << f.reflCuts << "\t"
               << (f.gpuRows.empty() ? "-" : f.gpuRows);
             char clk[160];
-            std::snprintf(clk, sizeof(clk), "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f", f.periodMs, f.readMs,
-                          f.gpuSpanMs, f.gpuIdleMs, f.gpuUnattributedMs, f.gpuPassesMs, f.gpuRowsMs);
-            o << clk << "\t" << f.ifdGrant << "\t" << f.ifdSpent << "\t" << f.ifdOwedRestarts << "\t" << f.ifdOwedRefines
+            std::snprintf(clk, sizeof(clk), "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%d\t", f.periodMs, f.readMs,
+                          f.gpuSpanMs, f.gpuIdleMs, f.gpuUnattributedMs, f.gpuPassesMs, f.gpuRowsMs, f.reflRestCapped);
+            // (the mode label: the sources' name, "-" where nothing traced)
+            o << clk << (f.reflSources < 0 ? "-" : reflectSourcesName(ReflectSources(f.reflSources)));
+            o << "\t" << f.ifdGrant << "\t" << f.ifdSpent << "\t" << f.ifdOwedRestarts << "\t" << f.ifdOwedRefines
               << "\t" << f.ifdOwedIntegrations << "\t" << (f.storeOwed ? 1 : 0) << "\t" << f.ifdMarkedByMoves
               << "\t" << f.ifdReadUnheld << "\t" << f.ifdFollows << "\t" << f.ifdRestartDepth << "\t" << f.ifdMarkLag
               << "\t" << f.cardsAdmitted << "\t" << f.cardsArrivalMark << "\t" << f.cardsFrame << "\t" << f.cardsDemandEvery

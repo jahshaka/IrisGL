@@ -1,90 +1,48 @@
-// THE REFLECTION'S REST, PER TEXEL (PHOTON-2 round 2: R1 + G1-G6) - one text for the trace, the temporal pass, the
-// filter and the break's compose pass.
+// THE REFLECTION'S REST, PER TEXEL (PHOTON-2 round 2: R1 + G1-G6; PHOTON-7 stage 6 commit 8, PREFLIGHT_R section 3) -
+// one text for the trace, the temporal pass, the filter and the break's compose pass.
 //
 // AT REST the moving history H stays FROZEN in the half the trace reads (`historyPrev`) and the other half
-// (`historyCur`) holds the REST MEAN M of the texel's own rest samples, rgb = M, w = H.w + v (v = the rest samples
-// it holds - a frame that gave the texel no sample adds none: G1). The answer is COMPOSED AT THE READ (G2):
+// (`historyCur`) holds the REST MEAN M of the texel's own rest samples (rgb = M, w = its second moment); the counts are
+// the state texel's (jah_reflect_state.glsl): H's moving count N, carried into the rest half, and v = the rest samples
+// M holds - a frame that gave the texel no sample adds none (G1). The answer is COMPOSED AT THE READ (G2):
 //   O = lerp( H, M, w( v ) ),  w( v ) = 1 - ( 1 - v / 2N )^2 for v < 2N, then 1
-// (N = the gather's settle of the 32-frame history, 51) - the hand-over drains the motion lag at fix F1's starting
-// rate (w'( 0 ) = 1 / N) and EASES OUT over 2N samples: the answer's per-frame change, (M - H) w'( v ) + (s - M) w( v )
-// / v, then FALLS from the first rest frame on (the linear v / N held its noise term at (s - M) / N, flat for 51 frames
-// - measured on photon-glass: 0.055 -> 0.060 codes, rising under the filter's shrinking reach), and the held answer is
-// M alone, the path drained. A texel with no moving history, or a fixed estimator, takes M from its first rest sample.
-// M is a running mean (M + (s - M) / v), so its fp16 error does not accumulate (the in-place O + (s - H) / N of fix
-// F1 held texels up to 1.4 % off: the fix round's read #6).
-// After the hand-over M goes on accumulating PER TEXEL until ITS STANDARD ERROR - sqrt( (E[l^2] - E[l]^2) / v ), the
-// luma's second moment kept beside M (`restMoment`, R16F, its root mean square: PHOTON-2 rev 12, P1) - has stayed under
-// one output code for kReflectStopFrames frames - then the texel STOPS tracing (R1); the view holds when every texel has
-// stopped or at kReflectRestMax rest frames. (The stop on the per-frame change could not see a heavy tail: one rare
-// bright sample froze into a texel that stopped near 110 samples - round 2's (f) blotches.) The stop's count rides
-// the four low mantissa bits of the texel's distance (historyDist .x - a relative error of 2^-19 on a length only
-// compared at 5 %).
+// (N = the gather's settle of the moving history's MaxFrames 12, 19) - the hand-over drains the motion lag at fix F1's
+// starting rate (w'( 0 ) = 1 / N) and EASES OUT over 2N samples; the held answer is M alone. A texel with no moving
+// history, or a fixed estimator, takes M from its first rest sample.
+// M IS A MEAN IN THE DENOISER SPACE (commit 8: the moving mean is one - Lumen's D( c ) = c / ( 1 + E L / 10 ) - so a
+// linear rest mean stepped by the Jensen gap when the hand-over ended), stored as its linear image D^-1( M ) like the
+// moving history; its w the second moment of the samples' denoiser-space luma (the moving history's alpha, the same
+// quantity). THE STORES ARE ERROR-FED (jahRestFold): what a 16-bit store loses of the running mean and of the moment is
+// carried into the next fold, so neither drifts however many samples it takes (round to nearest drops an increment
+// under half a unit in the last place, and drops it UNEVENLY: 0.71 codes dark at 512 samples, P1) - the residual lives in
+// the FROZEN HALF once the hand-over is done (no reader composes H past 2N: zero bytes, PREFLIGHT_R section 9 W5), and
+// a texel with no moving history keeps it there from its first sample.
+// THE STOP (the lead's levers (i) + (ii), and the share rule after the SE floor's diagnostic): M goes on accumulating
+// PER TEXEL until ITS OWN rest mean's standard error (the denoiser space's, the space the filter combines its taps in)
+// is within ITS SHARE for kReflectStopFrames frames. A pixel p's displayed SE is sqrt( sum w_i^2 SE_i^2 ) / W_p carried
+// to display codes by its slope (the denoiser space's to linear luma, then jahDisplayCodes: the exact slope of the
+// view's exposure, grade, film curve and sRGB encode at its value), over the filter's fixed rest taps (W_p = the
+// centre's 1 + sum w_i; Q_p = sum of the squared weights of those whose answer has a variance - a centre ray's has
+// none): it is under ONE CODE when every such tap's SE is under W_p / sqrt( Q_p ) codes - sqrt( n_eff ), >= 1 as
+// ( sum w )^2 >= sum w^2. A texel feeds several pixels, so its share is the MIN over the pixels that read it (the
+// filter's atomic min, binding 51): then EVERY pixel's displayed SE is under one code whatever its neighbours' n_eff
+// and slopes, and NO TEXEL WAITS ON ANOTHER (the rule (ii) it replaces stopped a texel on its pixel's combined SE, and
+// one whose stopped neighbours kept a 4-7 code SE never could: measured on photon-glass, its own SE 0.09 codes at
+// v 35,901 under a displayed 1.18).
+// Then the texel STOPS tracing (R1), and the view holds when every texel has stopped. There
+// is NO SAMPLE CAP (K_max 512 deleted): a texel's count saturates only at its 16-bit field, a CAPPED texel - stopped,
+// counted (the hit list's word 3, RayQueryStatus::reflectRestCapped) as the defect reading it is, never a deadline (the
+// denoiser bound's guarantee, sigma^2 <= mu (10 - mu), needs 10^4 (10 - mu) / mu samples: 42 s to 38 min at four a
+// frame - PREFLIGHT_R section 3).
 #ifndef JAH_REFLECT_REST_GLSL
 #define JAH_REFLECT_REST_GLSL
 
-const float kReflectRestMax = 512.0;
 const uint kReflectStopFrames = 8u;
-/// "Under one output code": a change of the texel's luma within this share of its own (or its neighbourhood's, for a
-/// dark texel) - one sRGB code is 1.1 % (code 200) to 3.7 % (code 50) of linear radiance, so 1 % is under a code at
-/// every tone the eye sees.
-const float kReflectStopRel = 0.01;
-
-uint jahRestStop( float distX )
-{
-	return distX > 0.0 ? ( floatBitsToUint( distX ) & 15u ) : 0u;
-}
-float jahPackRestStop( float dist, uint n )
-{
-	if( !( dist > 0.0 ) )
-		return dist;
-	return uintBitsToFloat( ( floatBitsToUint( dist ) & ~15u ) | min( n, 15u ) );
-}
-/// The luma the rest's second moment is kept for (the temporal pass' own weights).
-float jahRestLuma( vec3 c )
-{
-	return dot( c, vec3( 0.25, 0.5, 0.25 ) );
-}
-/// THE REST MEAN'S STANDARD ERROR in output codes (P1): the luma variance from the kept root mean square `rms` and the
-/// mean's luma, over v samples, against one code of `reference` (kReflectStopRel of the texel's luma, or its
-/// neighbourhood's for a dark texel). 0 for v < 1.
-float jahRestErrorCodes( float rms, float meanLuma, float v, float reference )
-{
-	if( !( v >= 1.0 ) )
-		return 0.0;
-	const float variance = max( rms * rms - meanLuma * meanLuma, 0.0 );
-	return sqrt( variance / v ) / max( kReflectStopRel * reference, 1e-8 );
-}
-/// THE FILTER'S REACH AT REST (P1): the texels a mean of standard error `e` codes must be averaged over for the
-/// filtered answer to fall under HALF a code (n ~ 4 e^2 of them under the filter's soft weights: a reach of ~1.2 e
-/// texels; a stop's e <= 1 keeps ~1 texel - the per-texel noise of a mean under one code shown raw measured 1.06 codes
-/// mean against the reference with 0.6 e), never further than the moving reach - blended in with the hand-over's weight,
-/// so the rest's first frame keeps the moving reach and a stopped texel's (v and its moment frozen) never moves.
-const float kRestReachPerCode = 1.2;
-float jahRestReach( float movingReach, float e, float handOverWeight )
-{
-	return mix( movingReach, min( movingReach, kRestReachPerCode * e ), clamp( handOverWeight, 0.0, 1.0 ) );
-}
-/// THE REST MEAN'S STORE, ROUNDED STOCHASTICALLY TO HALF PRECISION (P1): jah_half_stochastic.glsl (jahRestHash,
-/// jahHalfStochastic, jahRestStoreMean) - one text for every fp16 running statistic's store (PHOTON_2_SPEC R1).
-#include "jah_half_stochastic.glsl"
-/// THE SECOND MOMENT'S STORE, STOCHASTICALLY ROUNDED TOO (PHOTON-2 1b P1; the rule: EVERY fp16 running statistic is): the
-/// root mean square of the luma, rms' = sqrt( rms^2 + (l^2 - rms^2) / v ), makes nearly the same small step every frame
-/// for a skewed texel - round to nearest rounds it the SAME way each time, the moment drifts, rms^2 - M^2 reads the
-/// variance LOW and the standard-error stop fired at about half the samples (the round-4 read simulated it: 5 % rare
-/// bright samples stopped at v 167 with a true standard error of 1.31 codes; stochastic rounding stops at 323 / 0.97, the
-/// exact moment's 315 / 0.96). A fourth draw of the same hash (the texel, the eye, the rest frame).
-float jahRestStoreMoment( float rms, ivec2 tc, int eye, float restFrame )
-{
-	uint s = jahRestHash( uint( tc.x ) * 73856093u ^ uint( tc.y ) * 19349663u ^ uint( eye ) * 83492791u ^
-						  uint( restFrame ) * 2654435761u );
-	s = jahRestHash( s + 3u );
-	return jahHalfStochastic( rms, float( s >> 8u ) * ( 1.0 / 16777216.0 ) );
-}
-/// The rest samples a texel holds: its M half's count over its frozen history's.
-float jahRestSamples( vec4 H, vec4 M )
-{
-	return max( M.w - max( H.w, 0.0 ), 0.0 );
-}
+/// The state's v field's ceiling (16 bits, jah_reflect_state.glsl): a texel that reaches it is CAPPED.
+const uint kReflectRestVCap = 65535u;
+/// THE REST'S SAMPLE SEQUENCE (commit 8): a rest sample's index is the rest sequence's base (knobs.z at rest) plus the
+/// sample's own number v - per SAMPLE, never per frame, so the k samples of a frame's batch and a dropped record's retry
+/// are each the sequence's next, and a held answer is a function of the scene and the eye.
 /// THE HAND-OVER'S LENGTH in rest samples (2N) and its eased weight.
 float jahRestHandOverLength( float N )
 {
@@ -95,48 +53,104 @@ float jahRestHandOverWeight( float v, float N )
 	const float x = 1.0 - min( v / jahRestHandOverLength( N ), 1.0 );
 	return 1.0 - x * x;
 }
-/// THE COMPOSED ANSWER (G2): the hand-over from the frozen history to the rest mean, the rest mean after it.
-vec3 jahRestAnswer( vec4 H, vec4 M, float N )
+/// THE COMPOSED ANSWER (G2): the hand-over from the frozen history H (`hasH`: the texel carried one) to the rest mean
+/// M of v samples, the rest mean after it.
+vec3 jahRestAnswer( vec3 H, bool hasH, vec3 M, float v, float N )
 {
-	const float v = jahRestSamples( H, M );
 	if( v <= 0.0 )
-		return H.xyz;
-	if( H.w > 0.0 && v < jahRestHandOverLength( N ) )
-		return mix( H.xyz, M.xyz, jahRestHandOverWeight( v, N ) );
-	return M.xyz;
+		return H;
+	if( hasH && v < jahRestHandOverLength( N ) )
+		return mix( H, M, jahRestHandOverWeight( v, N ) );
+	return M;
 }
 
-/// THE SAMPLE'S FLAGS (reflectSample .w): the trace's blend floor (0 < f <= 1) + 2 surface history only + 4 a warm
-/// restart + 8 a fixed estimator + 16 a texel that RESUMES at rest (G6: a moved instance crossed its ray, or its
-/// estimator switched). w = 0: no sample this frame.
-struct JahReflectFlags { float floorBlend; bool surfaceOnly; bool warmRestart; bool fixedEstimator; bool resume; };
-JahReflectFlags jahReflectFlags( float w )
+#ifdef JAH_REFLECT_DENOISE_GLSL
+/// THE REST'S RUNNING STATISTICS (commit 8; the includer has jah_reflect_denoise.glsl and its exposure first): the
+/// stored mean `M` (linear, the image's) and the moment `m2` (the denoiser-space luma's, the image's), and `res` - what
+/// their stores lost (the denoiser-space mean's rgb, the moment's w), carried into the next fold.
+struct JahRestStats { vec3 M; float m2; vec4 res; };
+/// WHAT A 16-BIT STORE KEEPS OF x, built from the float's bits: the nearest fp16 value (ties to even), as an fp32 the
+/// rgba16f store holds exactly - so the store rounds nothing whatever its own rounding, and the residual below carries
+/// the whole error. MEASURED (PHOTON-7 stage 6, the reference diagnostic): unpackHalf2x16( packHalf2x16( x ) ) did not
+/// reproduce what the store kept - the residual read back ~0 (max 2^-24) and the rest mean drifted DOWN against a
+/// 32-bit mean of the same samples, -4.4 / -13.5 / -27.3 % at v 300 / 1,200 / 4,096. x finite, |x| under 65,520 (the
+/// callers clamp to kMaxRadiance).
+float jahHalf1( float x )
 {
-	JahReflectFlags f;
-	f.resume = w > 15.5;
-	w -= f.resume ? 16.0 : 0.0;
-	f.fixedEstimator = w > 7.5;
-	w -= f.fixedEstimator ? 8.0 : 0.0;
-	f.warmRestart = w > 3.5;
-	w -= f.warmRestart ? 4.0 : 0.0;
-	f.surfaceOnly = w > 1.5;
-	f.floorBlend = clamp( f.surfaceOnly ? w - 2.0 : w, 0.0, 1.0 );
-	return f;
+	const float a = abs( x );
+	if( a < 6.103515625e-05 )   // under fp16's smallest normal (2^-14): its subnormal grid, 2^-24 apart
+		return sign( x ) * roundEven( a * 16777216.0 ) * 5.9604644775390625e-08;
+	const uint u = floatBitsToUint( a );
+	return sign( x ) * uintBitsToFloat( ( u + 0x00000FFFu + ( ( u >> 13u ) & 1u ) ) & 0xFFFFE000u );
 }
-
-/// THE LOBE'S FOOTPRINT AT ITS HIT, IN TRACE TEXELS (G5: the one variable at the fixed cut) - the lobe's angular width
-/// at the hit, ~4 alpha, over the throw t, against one trace texel's width at the reflected image (the camera's pixel
-/// angle over (eye distance + t), perspective; the image plane's texel, orthographic). Under 1 the lobe lands inside
-/// one texel: the centre ray is the integral (the fixed estimator). 0 = no throw known.
-float jahReflectFootprint( float lobeAlpha, float throwT, float eyeDist, float texelAngle, bool perspective )
+vec3 jahHalf3( vec3 x ) { return vec3( jahHalf1( x.x ), jahHalf1( x.y ), jahHalf1( x.z ) ); }
+/// Whether the frozen half holds the residual: once no reader composes H - past the hand-over, or with no H - for EVERY
+/// texel, by its count alone (a texel's draw can turn from the fixed estimator to the lobe at rest, its throw settling:
+/// the residual's validity may never depend on which it is). Before it, a fixed estimator keeps its plain mean in H
+/// (every reader then composes M) and a lobe keeps H itself.
+bool jahRestHasResidual( float v, bool hasH, float N )
 {
-	if( !( throwT > 0.0 ) )
+	return v >= 1.0 && ( !hasH || v >= jahRestHandOverLength( N ) );
+}
+/// ONE SAMPLE INTO THE REST MEAN: the running mean and moment over vPrev + 1 samples in the denoiser space - exactly
+/// from what the stores hold plus what they lost - and the stores' new values and residual.
+void jahRestFold( inout JahRestStats s, vec3 sampleLin, float vPrev )
+{
+	const float v = vPrev + 1.0;
+	const vec3 sD = jahToDenoise( clamp( sampleLin, vec3( 0.0 ), vec3( kMaxRadiance ) ) );
+	const float sL = jahDenoiseLuma( sD );
+	vec3 MD = sD;
+	float q = sL * sL;
+	if( vPrev > 0.0 )
+	{
+		MD = jahToDenoise( s.M ) + s.res.xyz;
+		q = s.m2 + s.res.w;
+		MD += ( sD - MD ) / v;
+		q += ( sL * sL - q ) / v;
+	}
+	MD = max( MD, vec3( 0.0 ) );
+	s.M = jahHalf3( clamp( jahFromDenoise( MD ), vec3( 0.0 ), vec3( kMaxRadiance ) ) );
+	s.m2 = jahHalf1( max( q, 0.0 ) );
+	// (the residual is itself stored in fp16: rounded the same way, so its own store is exact too - its rounding is
+	// unbiased, the next order, and not carried)
+	s.res = vec4( jahHalf3( MD - jahToDenoise( s.M ) ), jahHalf1( q - s.m2 ) );
+}
+/// THE REST MEAN'S STANDARD ERROR over v samples, in the DENOISER space's luma (the spatial filter's sigma at rest) and
+/// carried to LINEAR luma by the space's slope at the mean (dL / dL_D = 1 / ( 1 - E L_D / 10 )^2). 0 for v < 1.
+float jahRestErrorD( JahRestStats s, float v )
+{
+	if( !( v >= 1.0 ) )
 		return 0.0;
-	const float texelAtImage = perspective ? texelAngle * ( eyeDist + throwT ) : texelAngle;
-	return 4.0 * lobeAlpha * throwT / max( texelAtImage, 1e-9 );
+	const float LD = jahDenoiseLuma( jahToDenoise( s.M ) + s.res.xyz );
+	return sqrt( max( s.m2 + s.res.w - LD * LD, 0.0 ) / v );
 }
-/// The fixed decision with its HYSTERESIS BAND (G5): a texel at the cut cannot flip on its own frozen mean length.
-const float kFixedEnter = 0.8, kFixedLeave = 1.25;
+float jahDenoiseSlopeAt( float LD )
+{
+	const float k = 1.0 - LD * ( JAH_DENOISE_EXPOSURE / kDenoiserTonemapRange );
+	return 1.0 / max( k * k, 1e-4 );
+}
+#ifdef JAH_DISPLAY_LUT
+/// THE DISPLAY'S CODE (lever (i)): the host's table (ReflectParams::display, OgreRayQuery.cpp fillDisplaySlope) of
+/// d(code) / d(ln x) over the pre-exposed luma x = E L, ln 1e-4 .. ln 100 in 63 steps; below its foot the slope's own
+/// d(code) / dx there (the encode's linear segment). A linear luma L's standard error seL in DISPLAY CODES.
+const float kDisplayLnMin = -9.210340372;
+const float kDisplayLnStep = 0.2192938184;
+float jahDisplayLogSlope( float lnx )
+{
+	const float t = clamp( ( lnx - kDisplayLnMin ) / kDisplayLnStep, 0.0, 63.0 );
+	const int i = min( int( t ), 62 );
+	return mix( JAH_DISPLAY_LUT( i ), JAH_DISPLAY_LUT( i + 1 ), t - float( i ) );
+}
+float jahDisplayCodes( float L, float seL )
+{
+	const float x = JAH_DENOISE_EXPOSURE * max( L, 0.0 );
+	const float xMin = exp( kDisplayLnMin );
+	// d code / dx = (d code / d ln x) / x, at the table's foot for a value under it
+	const float perX = x > xMin ? jahDisplayLogSlope( log( x ) ) / x : JAH_DISPLAY_LUT( 0 ) / xMin;
+	return perX * JAH_DENOISE_EXPOSURE * max( seL, 0.0 );
+}
+#endif   // JAH_DISPLAY_LUT
+#endif   // JAH_REFLECT_DENOISE_GLSL
 
 /// A SEGMENT THROUGH AN AXIS BOX (the slab test): origin o, unit direction d, length t.
 bool jahSegmentHitsBox( vec3 o, vec3 d, float t, vec3 lo, vec3 hi )
