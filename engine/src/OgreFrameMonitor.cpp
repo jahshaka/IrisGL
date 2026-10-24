@@ -1409,6 +1409,11 @@ constexpr ArmDef kArms[] = {
       "integrate and the area visibility's two passes read their inputs as missing and STAND DOWN - every listener-bound "
       "slot its own stand-in, one group over an idle block that writes nothing, the products the last ones written. "
       "0 = shipped." },
+    { ArmId::GiScreenShaderCold, 0.0, 0.0, 1.0,
+      "THE NO-RAY SCREEN PASSES' SHADERS COLD (PHOTON-7 stage 7's read, F2; a test door, gi.screen_bind): each time it "
+      "comes on, the screen integrate's and the area visibility's two jobs take a permutation never built (a property "
+      "no text reads, a new value) - in a view that compiles in the background their dispatches wait for the compiler, "
+      "as for any new permutation. 0 = shipped." },
     { ArmId::GatherRoughQuadrature, 0.0, 0.0, 2.0,
       "THE ROUGH SPECULAR'S QUADRATURE DOOR (PHOTON-7 stage 7, 7-3; gi.rough_lobe_quadrature): the split sum's own error. "
       "1 or 2 = the prefiltered image holds one more layer (switching the door re-makes the view's targets), the probes' FILTERED "

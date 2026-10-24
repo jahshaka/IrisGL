@@ -2542,6 +2542,18 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // products: the prepass's depth, normals and roughness in, the three screen products out. Its job's world caches
         // and parameters are the view's screen-GI listener's (OgreScreenIntegrate.cpp), set in the pass's pre-execute.
         if (desc.screenIntegrate) {
+            // ...ITS TARGETS SEEDED ONCE, ZERO, when the chain makes them (the stage 7 read's F2): a dispatch deferred
+            // while the integrate's permutation builds in the background writes nothing, and the opaque passes read its
+            // targets as they are - no indirect light for those frames, never undefined VRAM (a NaN there poisons the
+            // exposure meter, trap 5)
+            for (const char *seed : { kScreenGiIrradiance, kScreenGiSpecular, kScreenGiConeHit }) {
+                Ogre::CompositorTargetDef *st = n->addTargetPass(seed);
+                st->setNumPasses(1);
+                auto *c = static_cast<Ogre::CompositorPassClearDef *>(st->addPass(Ogre::PASS_CLEAR));
+                c->mNumInitialPasses = 1;
+                c->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f));
+                c->mProfilingId = "Jahshaka screen integrate seed";
+            }
             Ogre::CompositorTargetDef *ct = n->addTargetPass("");
             ct->setNumPasses(1);
             auto *c = static_cast<Ogre::CompositorPassComputeDef *>(ct->addPass(Ogre::PASS_COMPUTE));

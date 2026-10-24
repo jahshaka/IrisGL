@@ -2030,6 +2030,16 @@ private:
     bool ownPass(const Ogre::CompositorPass *pass) const;
     /// The test door gi.screenBindMissing (the passes read their inputs as missing).
     bool bindMissing() const;
+    /// DOES THIS PASS'S DISPATCH RUN THIS FRAME (the read's F2)? A pass of a workspace that compiles in the background
+    /// (CompositorWorkspace::setAsyncShaderCompile) is deferred while its job's permutation builds (the fork's
+    /// HlmsCompute::dispatch): nothing written, so nothing it writes may be registered or aged. The job's permutation is
+    /// set before the question (requestAsync asks about the permutation a dispatch would select).
+    bool dispatchRuns(const Ogre::CompositorPass *pass, Ogre::HlmsComputeJob *job);
+    /// The test door gi.screenShaderCold: while on, the three jobs take a permutation never built (a property no text
+    /// reads, a new value each time the door comes on) - a real background compile.
+    void coldKey(Ogre::HlmsComputeJob *job);
+    Ogre::int32 mColdKey = 0;
+    bool mColdOn = false;
     Ogre::UavBufferPacked *mParams = nullptr, *mParamsIdle = nullptr;
     // ---- the area visibility (OgreAreaVis.cpp) ----
     void bindAreaVis(Ogre::CompositorPassCompute *pass);
@@ -2046,7 +2056,12 @@ private:
     Ogre::TextureGpu *mAreaStandIn[4] = {};
     Ogre::UavBufferPacked *mAreaParams = nullptr, *mAreaChain = nullptr, *mAreaIdle = nullptr;
     unsigned mAreaW = 0u, mAreaH = 0u, mAreaFullW = 0u, mAreaFullH = 0u;
-    bool mAreaFresh = false, mAreaRan = false, mAreaDispatched = false;
+    /// mAreaRan: traced or held this frame (the status's `running`); mAreaRead: the opaque passes read the product this
+    /// frame (traced, held, or the last one written while the trace's shaders build or its inputs are missing).
+    bool mAreaFresh = false, mAreaRan = false, mAreaRead = false, mAreaDispatched = false;
+    /// The resolve ran this frame / has ever written the product since its images were made (F2: nothing registered
+    /// for a dispatch that never ran).
+    bool mAreaResolved = false, mAreaVisWritten = false;
     unsigned long long mAreaMarches = 0ull, mAreaVramBytes = 0ull;
     std::string mAreaReason;
     /// THE READBACK (the arm area.visReadback): a ring of tickets over the product, decoded once a transfer is done.
@@ -2174,6 +2189,7 @@ private:
     X(GiScreenIntegrateOff, "gi.screenIntegrateOff") /* a no-ray chain shades with the pixel's own cones (7-6's A/B: the voxel route) */ \
     X(AreaVisReadback, "area.visReadback") /* the pixel's area light visibility copied to the host (ScenePublished::areaVis, a test door; 7-A) */ \
     X(GiScreenBindMissing, "gi.screenBindMissing") /* the no-ray screen passes read their inputs as missing: they stand down (a test door, gi.screen_bind) */ \
+    X(GiScreenShaderCold, "gi.screenShaderCold") /* each time it comes on, the no-ray screen passes' jobs take a permutation never built: a background compile (a test door, gi.screen_bind) */ \
     X(GatherRoughQuadrature, "gather.roughQuadrature") /* the rough specular's quadrature door: 1 the filtered map kept beside the levels, 2 the lobe by brute force over it (7-3) */ \
     X(ShadowReceiverBoxesOff, "shadow.receiverBoxesOff") /* the receiver grid without the stock route's boxes (the fixture's negative control, U5 decision 22.3) */ \
     X(TexturePumpFault, "textures.pumpFault") /* the host's texture wait: 1 never done, 2 and its step throws (a test door, U5 decision 22.5) */ \

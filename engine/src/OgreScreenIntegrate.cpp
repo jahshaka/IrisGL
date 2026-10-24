@@ -20,6 +20,7 @@
 #include "photon/voxel/PhotonVoxelizer.h"
 
 #include <Compositor/OgreCompositorNode.h>
+#include <Compositor/OgreCompositorWorkspace.h>
 #include <Compositor/Pass/OgreCompositorPass.h>
 #include <Compositor/Pass/PassCompute/OgreCompositorPassCompute.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
@@ -137,9 +138,11 @@ void ScreenGiListener::passPreExecute(Ogre::CompositorPass *pass) {
     bind.roughSpec = node->getDefinedTexture(Ogre::IdString(kScreenGiSpecular));
     bind.coneHit = node->getDefinedTexture(Ogre::IdString(kScreenGiConeHit));
     // (the view's own passes, and the frame capture's - the same frame, camera and size: it takes the view's product,
-    // never a history of its own; a product of another size is no answer for these pixels)
+    // never a history of its own; a product of another size is no answer for these pixels; and a product no resolve
+    // has written - its shaders still building - is never registered, F2)
     const Ogre::TextureGpu *drawn = pass->getAnyTargetTexture();
-    const bool area = mAreaRan && mAreaVis && drawn && drawn->getWidth() == mAreaFullW && drawn->getHeight() == mAreaFullH;
+    const bool area = mAreaRead && mAreaVis && mAreaVisWritten && drawn && drawn->getWidth() == mAreaFullW &&
+                      drawn->getHeight() == mAreaFullH;
     // THE PRODUCTS' LAYOUTS, through Ogre's own solver, before the pass reads them (the gather's and the ray tier's
     // rule: the compute passes left them written as UAVs; the pass samples them from its fragment stage - the listener's
     // registration is invisible to the compositor's own barrier analysis)
@@ -170,13 +173,31 @@ void ScreenGiListener::passPosExecute(Ogre::CompositorPass *pass) {
     if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
     if (OgreScene *scene = mView->ogreScene()) {
         FogHlmsListener::setProbeGather(scene->sceneManager(), FogHlmsListener::ProbeGatherBind());
-        if (mAreaRan && mAreaVis) FogHlmsListener::setAreaVis(scene->sceneManager(), nullptr);
+        if (mAreaRead && mAreaVis && mAreaVisWritten) FogHlmsListener::setAreaVis(scene->sceneManager(), nullptr);
     }
 }
 
 bool ScreenGiListener::ownPass(const Ogre::CompositorPass *pass) const {
     const Ogre::CompositorNode *node = pass ? pass->getParentNode() : nullptr;
     return node && mView && node->getWorkspace() == mView->workspace();
+}
+
+bool ScreenGiListener::dispatchRuns(const Ogre::CompositorPass *pass, Ogre::HlmsComputeJob *job) {
+    const Ogre::CompositorNode *node = pass ? pass->getParentNode() : nullptr;
+    const Ogre::CompositorWorkspace *ws = node ? node->getWorkspace() : nullptr;
+    if (!job || !ws || !ws->getAsyncShaderCompile()) return true;   // a blocking workspace builds it in the frame
+    Ogre::HlmsCompute *hc = Ogre::Root::getSingleton().getHlmsManager()->getComputeHlms();
+    // (the surface cache's rule, OgreSurfaceCache.cpp's relight: AsyncFailed throws in the dispatch, as upstream)
+    return !hc || hc->requestAsync(job) != Ogre::HlmsCompute::AsyncPending;
+}
+
+void ScreenGiListener::coldKey(Ogre::HlmsComputeJob *job) {
+    static Ogre::int32 sSerial = 0;
+    const bool on = mView && mView->mEngine && mView->mEngine->armRegistry().on(ArmId::GiScreenShaderCold);
+    if (on && !mColdOn) mColdKey = ++sSerial;
+    mColdOn = on;
+    const Ogre::int32 want = on ? mColdKey : 0;
+    if (job->getProperty("jah_cold") != want) job->setProperty("jah_cold", want);
 }
 
 bool ScreenGiListener::bindMissing() const {
@@ -357,6 +378,9 @@ void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {
     prop("jah_si_fog", fogOn ? 1 : 0);
     prop("jah_si_air", fogOn && aerial ? 1 : 0);
     prop("jah_si_sdf", numCascades && vct->shouldEnableSpecularSdfQuality() ? 1 : 0);
+    // (a dispatch deferred while this permutation builds writes nothing: the opaque passes read the targets' last
+    // answer - cleared to zero when the chain made them, OgreChain.cpp - never undefined VRAM; F2)
+    coldKey(job);
 
     // ---- THE TEXTURES after the pass's own three (0 depth, 1 normals, 2 roughness) ----
     constexpr unsigned kOwn = 3u;
