@@ -371,6 +371,7 @@ void FrameMonitor::retirePending(bool all) {
         // encloses its shadow node's). NEGATIVE stays negative: a pass with no
         // sample is "not measured", never zero.
         const auto top = [](const std::vector<char> &v, size_t i) { return i < v.size() && v[i]; };
+        for (size_t i = 0; i < pf.rec.cacheWork.size(); ++i) pf.rec.cacheWork[i].topLevel = top(pf.cacheTop, i);
         for (size_t i = 0; i < pf.rec.passes.size(); ++i) {
             const FramePass &p = pf.rec.passes[i];
             if (p.gpuMs >= 0.0f && top(pf.passTop, i)) {

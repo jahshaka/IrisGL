@@ -8642,6 +8642,10 @@ struct CacheWork {
     /// so they are absent from `MonitorRecord::gpuMs` (which stays the sum of the
     /// frame's passes — the invariant a suite asserts) and appear only here.
     float      gpuMs = -1.0f;
+    /// A TOP-LEVEL row (its timestamp pair inside no pass's and no other row's), as FramePass::topLevel: a row
+    /// dispatched inside a compositor pass (the reflection's filter in its resolve pass) is inside that pass's time,
+    /// so a frame's GPU is the TOP-LEVEL passes and rows summed (`jahlab monitor`, PHOTON-7).
+    bool       topLevel = false;
 };
 
 /// One stage of the frame, exclusive of its children.
