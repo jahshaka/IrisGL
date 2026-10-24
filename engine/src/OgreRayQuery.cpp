@@ -7567,6 +7567,29 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         std::memcpy(in.cloudSun, hs.cloudSun, sizeof(hs.cloudSun));
     }
     in.movers = rayMoversOf(scene);
+    // THE IRRADIANCE FIELD, THE FALLBACK OF THE PIXELS NO PROBE ANSWERS (PHOTON-7 stage 7, 7-2): the field the scene's
+    // passes are bound to (SceneGiBinding), composed by the integrate after its temporal mean - its atlases, its render
+    // block for an identity view (world to grid), its window and counts; and the environment's SH, its own fallback,
+    // with the pass buffer's signs (PhotonVct_piece_ps.any's JAH_ENV_SH_C0 .. C8: C2 .. C5 negated)
+    in.fieldCompose = !arm(ArmId::GatherFieldInPass, false);
+    in.noAnswer = arm(ArmId::GatherNoAnswer, false);
+    {
+        const SceneGiBinding *gb = sceneGiBindingOf(scene->sceneManager());
+        Ogre::PhotonIrradianceField *ifd = gb ? gb->ifd : nullptr;
+        if (ifd && ifd->getIrradianceTex() && ifd->getDepthVarianceTex()) {
+            in.fieldIrradiance = ifd->getIrradianceTex();
+            in.fieldDepth = ifd->getDepthVarianceTex();
+            ifd->fillConstBufferData(Ogre::Matrix4::IDENTITY, in.field);
+            const Ogre::uint32 *o = ifd->getWindowOffset();
+            in.fieldWin[0] = float(o[0] + 128u * o[1] + 16384u * o[2]);
+            in.fieldWin[1] = float(ifd->getSettings().mNumProbes[1]);
+            in.fieldWin[2] = float(ifd->getSettings().mNumProbes[2]);
+            const float *sh = scene->sceneManager()->getSphericalHarmonics();
+            static const float kSign[9] = { 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f };
+            for (int k = 0; k < 9; ++k)
+                for (int c = 0; c < 3; ++c) in.envSh[k][c] = sh ? kSign[k] * sh[3 * k + c] : 0.0f;
+        }
+    }
 
     // ---- the voxel cache the hits are shaded from (the reflection's rule) ---
     const auto takeVolume = [&](Ogre::PhotonVoxelLighting *lighting, Ogre::PhotonVoxelizer *voxelizer) {

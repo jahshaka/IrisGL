@@ -17,13 +17,18 @@
 // distance to the PLANE (and by normal agreement) rather than by distance in
 // pixels is what keeps a bounce on the side of a silhouette it belongs to —
 // "leaks confined to the plane", the property the whole probe shape exists for.
-// A pixel whose weights sum below the floor (p.knobs4.y) gets NO answer (w = 0)
-// and keeps the fallback — the irradiance field's cage where one is bound
-// (the fork commit for fork b6c409c1f (was 0086)'s hook), the environment where none is.
+// A pixel whose weights sum below the floor (p.knobs4.y) gets NO answer and takes
+// the FALLBACK — the irradiance field's cage where one is bound, and where the
+// field's confidence fades the environment's diffuse — composed HERE, after the
+// temporal mean (PHOTON-7 stage 7, 7-2: the opaque passes read only screen
+// products, L4; the field's reader is one text, jah_field_read.glsl).
 //
 // THE OUTPUT is `jahProbeIrradiance`: rgb = E/pi at the pixel's normal (what
-// `envColourD` is — the trace's header), w = 1 where probes answered and 0
-// where none did. A pixel gets exactly ONE diffuse-GI term in every regime.
+// `envColourD` is — the trace's header): the answered frames' mean at their share
+// plus the fallback's for the rest, and w = 1, so the shading pass's own cage
+// declines. With no field bound (or under the arm gather.fieldInPass) rgb is the
+// answered mean and w its coverage, as before 7-2. A pixel gets exactly ONE
+// diffuse-GI term in every regime.
 //
 // DETERMINISM: the five taps are read and summed in ONE FIXED ORDER.
 //
@@ -123,6 +128,33 @@ layout( rgba16f, set = 0, binding = 8 ) uniform writeonly image2DArray photonOve
 /// THE FRAME'S COUNTER (the placement's buffer, zeroed at the frame's head): word 1 counts the pixels whose history only
 /// the foliage rule accepted (PHOTON-2 L8, K5's guard; read back with the placement's word 0).
 layout( std430, set = 0, binding = 9 ) buffer GatherCounter { uint words[]; } gatherCounter;
+/// THE IRRADIANCE FIELD (PHOTON-7 stage 7, 7-2; bindings 10, 11): the fallback of the pixels no probe answers is the
+/// field's cage - jah_field_read.glsl, the one text the PBS pixel's reader runs too - and where its confidence fades the
+/// environment's diffuse, composed into this texture AFTER the temporal mean (the history stays the gather's one
+/// estimator): out = the history's premultiplied mean + ( 1 - its coverage ) x the fallback, w = 1, and the shading
+/// pass's own cage declines (JahIfd_piece_ps.any's gate reads 1 - w). p.fieldWin.w 0: no field bound (or the arm
+/// gather.fieldInPass): the coverage as w, the fallback the pass's.
+layout( set = 0, binding = 10 ) uniform sampler2D fieldIrradiance;
+layout( set = 0, binding = 11 ) uniform sampler2D fieldDepth;
+#define JAH_FIELD_IRRAD( uv ) textureLod( fieldIrradiance, uv, 0.0 )
+#define JAH_FIELD_DEPTH( uv ) textureLod( fieldDepth, uv, 0.0 ).xy
+// (the environment's SH alone: no cube is read here)
+#define JAH_ENV_CUBE_ON false
+#define JAH_ENV_SAMPLE( d, l ) vec3( 0.0 )
+#define JAH_ENV_MIPS 1.0
+#define JAH_ENV_GAIN vec3( 0.0 )
+#define JAH_ENV_SH_C0 p.envSh[0].xyz
+#define JAH_ENV_SH_C1 p.envSh[1].xyz
+#define JAH_ENV_SH_C2 p.envSh[2].xyz
+#define JAH_ENV_SH_C3 p.envSh[3].xyz
+#define JAH_ENV_SH_C4 p.envSh[4].xyz
+#define JAH_ENV_SH_C5 p.envSh[5].xyz
+#define JAH_ENV_SH_C6 p.envSh[6].xyz
+#define JAH_ENV_SH_C7 p.envSh[7].xyz
+#define JAH_ENV_SH_C8 p.envSh[8].xyz
+#include "jah_environment.glsl"
+#include "jah_field_window.glsl"
+#include "jah_field_read.glsl"
 
 #include "jah_reproject.glsl"
 #include "jah_probe_history.glsl"
@@ -238,6 +270,26 @@ vec4 photonDisc( ivec2 pix, int lx, ivec2 cell, ivec2 cellOff, ivec2 gridEye, iv
 			}
 		}
 	return outC;
+}
+
+/// THE FALLBACK OF A PIXEL NO PROBE ANSWERS (7-2): the field's cage at the pixel's point and normal (grid space through
+/// the field's world-to-grid rows), plus the environment's diffuse where the field's confidence fades - exactly what the
+/// shading pass's reader gives a pixel on a gather pass when no probe answered (PhotonIfd_piece_ps.any, its blend
+/// fade 1). The eye's direction for the sample point's bias: towards the camera, or the view's axis orthographic.
+vec3 fieldFallback( vec3 worldPos, vec3 worldNormal, vec3 toEye )
+{
+	const vec3 gridPos = vec3( dot( p.fieldRow0, vec4( worldPos, 1.0 ) ), dot( p.fieldRow1, vec4( worldPos, 1.0 ) ),
+							   dot( p.fieldRow2, vec4( worldPos, 1.0 ) ) );
+	const vec3 gridNormal = normalize( vec3( dot( p.fieldRow0.xyz, worldNormal ), dot( p.fieldRow1.xyz, worldNormal ),
+											 dot( p.fieldRow2.xyz, worldNormal ) ) );
+	const vec3 gridView = vec3( dot( p.fieldRow0.xyz, toEye ), dot( p.fieldRow1.xyz, toEye ),
+								dot( p.fieldRow2.xyz, toEye ) );
+	const uint packed = uint( p.fieldWin.x + 0.5 );
+	const JahFieldAnswer a = jahFieldRead( gridPos, gridNormal, gridView,
+										   vec3( p.fieldProbes.x, p.fieldWin.y, p.fieldWin.z ),
+										   uvec3( packed & 127u, ( packed >> 7u ) & 127u, ( packed >> 14u ) & 127u ),
+										   p.fieldProbes.xy, p.fieldDepthAtlas, p.fieldIrradAtlas, true );
+	return a.irradiance + jahEnvIrradiance( worldNormal ) * ( 1.0 - a.confidence );
 }
 
 void main()
@@ -568,10 +620,18 @@ void main()
 	vec4 answer = vec4( 0.0 );
 	if( wsum >= weightFloor )
 		answer = vec4( clamp( sum / wsum, vec3( 0.0 ), vec3( 1024.0 ) ), 1.0 );
+	// THE FIELD, COMPOSED (7-2): the eye's direction for its sample point's bias
+	const bool composeField = p.fieldWin.w > 0.5;
+	const vec3 toEyeField = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
 	if( !temporal )
 	{
 		// THE MEASUREMENT LEVER (the arm "gather.temporal"): this frame's
 		// estimate alone, and no history is read or written.
+		if( composeField )
+			answer = vec4( answer.xyz * answer.w +
+							   ( answer.w < 1.0 ? fieldFallback( pixelWorld, pixelNormal, toEyeField ) * ( 1.0 - answer.w )
+												: vec3( 0.0 ) ),
+						   1.0 );
 		imageStore( probeIrradiance, at, answer );
 		return;
 	}
@@ -638,6 +698,15 @@ void main()
 	vec4 outV = vec4( 0.0 );
 	if( mean.w > 1e-3 )
 		outV = vec4( clamp( mean.xyz / mean.w, vec3( 0.0 ), vec3( 1024.0 ) ), mean.w );
+	// THE FIELD, COMPOSED AFTER THE MEAN (7-2): the answered frames' irradiance at their share (the premultiplied mean,
+	// as the pass took it: rgb x w) plus the field's fallback for the rest; w 1, so the pass's cage declines
+	if( composeField )
+	{
+		const float cover = clamp( outV.w, 0.0, 1.0 );
+		outV = vec4( outV.xyz * cover +
+						 ( cover < 1.0 ? fieldFallback( pixelWorld, pixelNormal, toEyeField ) * ( 1.0 - cover ) : vec3( 0.0 ) ),
+					 1.0 );
+	}
 	// THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument; p.stereo.z):
 	// magenta where the reprojected history held fewer than N frames.
 	if( p.stereo.z > 0.5 )

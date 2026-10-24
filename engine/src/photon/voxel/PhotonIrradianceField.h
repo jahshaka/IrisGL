@@ -615,6 +615,8 @@ namespace Ogre
 
         size_t getConstBufferSize() const;
         void fillConstBufferData( const Matrix4 &viewMatrix, float *RESTRICT_ALIAS passBufferPtr ) const;
+        /// The field's settings (its probe counts: the screen-probe gather's integrate reads the field too, 7-2).
+        const PhotonIrradianceFieldSettings &getSettings() const { return mSettings; }
 
         /**
         @param mode

@@ -122,10 +122,11 @@ static_assert(kTraceRaysBinding == kTraceDirectBinding + 1u && kTraceOverlayBind
               "the direct volume follows the card read's view-term layers, the instrument's two follow it");
 /// The filter's four: params, records, the raw atlas and the eye's depth (its taps' depth walk, PHOTON-2 stage 2's tail).
 constexpr unsigned kFilterBindings = 4u;
-/// The integrate's nine: params, records, normals, depth, the irradiance, the
-/// history's two halves (one packed texel each, PHOTON-GA-VR), the rest mean and
-/// the photon view's overlay (PHOTON-VIEW-1).
-constexpr unsigned kIntegrateBindings = 10u;
+/// The integrate's twelve: params, records, normals, depth, the irradiance, the
+/// history's two halves (one packed texel each, PHOTON-GA-VR), the rest mean,
+/// the photon view's overlay (PHOTON-VIEW-1), the frame's counter, and the
+/// irradiance field's two atlases (10, 11: the fallback it composes, PHOTON-7 7-2).
+constexpr unsigned kIntegrateBindings = 12u;
 /// THE PACKED HISTORY TEXEL (PHOTON-GA-VR): rg32ui, 8 bytes a pixel for each half
 /// of the ping-pong — the shared-exponent mean and the geometry word.
 constexpr unsigned kHistoryTexelBytes = 8u;
@@ -133,8 +134,8 @@ constexpr unsigned kHistoryTexelBytes = 8u;
 /// the irradiance, the history's two halves, the rest mean and the photon overlay
 /// — bindings 4..8; then the frame's counter buffer (9, PHOTON-2 L8: the foliage rule's own accepts).
 constexpr unsigned kIntegrateStorageImages = 5u;
-static_assert(kIntegrateBindings == 5u + kIntegrateStorageImages,
-              "the integrate set: four inputs, five storage images, the counter");
+static_assert(kIntegrateBindings == 7u + kIntegrateStorageImages,
+              "the integrate set: four inputs, five storage images, the counter, the field's two atlases");
 
 /// One probe's record: ten vec4s — position, normal, the irradiance at its own
 /// normal and the SH9 (27 floats in seven vec4s; see JahProbeRecord in the
@@ -210,7 +211,14 @@ struct GatherParams {
     float hitTable[4] = {};
     float cloudMap[4] = {};
     float cloudSun[4] = {};
+    /// THE IRRADIANCE FIELD, the integrate's fallback (PHOTON-7 stage 7, 7-2; jah_probe_params.glsl): its render
+    /// block for an identity view (24 floats: three world-to-grid rows, the probe strides, the two atlases), the
+    /// window word and counts (w = 1: bound and composed), and the environment's SH (C0 .. C8 in xyz, world axes).
+    float field[24] = {};
+    float fieldWin[4] = {};
+    float envSh[9][4] = {};
 };
+static_assert(sizeof(GatherParams) % 16u == 0u, "the params block is whole vec4s (std140)");
 
 /// THE PIXEL HISTORY'S BLEND FLOOR (PHOTON-GATHER-1c item 1): the smallest
 /// weight a new frame takes once the running mean has that many frames in it —
@@ -416,6 +424,8 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 7 the rest mean (PHOTON-GATHER-1d)
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 8 the photon overlay (PHOTON-VIEW-1)
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 9 the frame's counter (word 1: L8)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 10 the irradiance field's irradiance atlas (7-2)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 11 ...and its depth atlas
         };
         if (!makeLayout(kIntegrateBindings, t, nullptr, mIntegrateLayout, "integrate")) return false;
     }
@@ -1473,7 +1483,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // PHOTON-GATHER-1b: the SH bands the integrate evaluates (9 unless the
     // measurement arm asks for 4), the weight floor, the filter on or off.
     pp.knobs4[0] = in.tuning.shBands == 4u ? 4.0f : 9.0f;
-    pp.knobs4[1] = kWeightFloor;
+    pp.knobs4[1] = in.noAnswer ? 3.0e38f : kWeightFloor;   // (the measuring door gather.noAnswer: no probe answers)
     pp.knobs4[2] = in.tuning.filterOff ? 0.0f : float(filterRadiusOf(in.tuning));
     pp.knobs4[3] = in.photonOverlay && !in.photonOverlayGatherHits ? 1.0f : 0.0f;   // THE PHOTON VIEW's discs (PHOTON-VIEW-1)
     // THE GATHER-HITS RECORDS (FAR-SUN-1): one uvec4 per ray of every uniform probe, made on
@@ -1570,6 +1580,16 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         pp.hitTable[3] = in.cloudField ? 1.0f : 0.0f;
         std::memcpy(pp.cloudMap, in.cloudMap, sizeof(pp.cloudMap));
         std::memcpy(pp.cloudSun, in.cloudSun, sizeof(pp.cloudSun));
+        // THE IRRADIANCE FIELD, composed by the integrate (PHOTON-7 stage 7, 7-2; jah_probe_params.glsl): the block,
+        // the window and counts, w = 1 bound and composed (the arm gather.fieldInPass: 0, the pass's route)
+        const bool field = in.fieldIrradiance && in.fieldDepth;
+        std::memcpy(pp.field, in.field, sizeof(pp.field));
+        pp.fieldWin[0] = in.fieldWin[0];
+        pp.fieldWin[1] = in.fieldWin[1];
+        pp.fieldWin[2] = in.fieldWin[2];
+        pp.fieldWin[3] = field && in.fieldCompose ? 1.0f : 0.0f;
+        for (int k = 0; k < 9; ++k)
+            for (int c = 0; c < 3; ++c) pp.envSh[k][c] = in.envSh[k][c];
         const uint32_t lo = uint32_t(in.alphaTable & 0xFFFFFFFFu), hi = uint32_t(in.alphaTable >> 32u);
         std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
         std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
@@ -1900,6 +1920,18 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[8].pImageInfo = &photon;
         w[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[9].pBufferInfo = &counterInfo;
+        // THE IRRADIANCE FIELD'S TWO ATLASES (10, 11; 7-2), bilinear and clamped as the pass reads them - or the flat
+        // stand-in where no field is bound (the shader reads none: fieldWin.w 0)
+        VkDescriptorImageInfo fieldImgs[2] = {};
+        Ogre::TextureGpu *fieldTex[2] = { in.fieldIrradiance, in.fieldDepth };
+        for (unsigned k = 0; k < 2u; ++k) {
+            fieldImgs[k].sampler = mHost.gatherLinearSampler();
+            fieldImgs[k].imageView = in.fieldIrradiance && in.fieldDepth ? sampledView(fieldTex[k]) : dummyFlat;
+            fieldImgs[k].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            if (!fieldImgs[k].imageView) return;
+            w[10 + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[10 + k].pImageInfo = &fieldImgs[k];
+        }
         vkUpdateDescriptorSets(mHost.gatherDevice(), kIntegrateBindings, w, 0, nullptr);
     }
 
@@ -1929,6 +1961,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         if (in.sky)
             solver.resolveTransition(trans, in.sky, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
+        // THE IRRADIANCE FIELD'S ATLASES (7-2), sampled by the integrate (the field writes them at the frame's head)
+        if (in.fieldIrradiance && in.fieldDepth)
+            for (Ogre::TextureGpu *t : { in.fieldIrradiance, in.fieldDepth })
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
         // THE HIT'S OWN SURFACE (FAR-SUN-2): the texture pool and the cloud field, sampled.
         for (Ogre::TextureGpu *t : { in.hitPool, in.cloudField })
             if (t)

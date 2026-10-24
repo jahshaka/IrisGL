@@ -1395,6 +1395,13 @@ constexpr ArmDef kArms[] = {
     { ArmId::GatherIrradianceReadback, 0.0, 0.0, 1.0,
       "THE GATHER'S E/PI TO THE HOST (an instrument): GatherTuning::readback for every scene - the verb "
       "world.gatherIrradiance reads it. One image copy a frame while on." },
+    { ArmId::GatherFieldInPass, 0.0, 0.0, 1.0,
+      "THE FIELD'S FALLBACK IN THE SHADING PASS (PHOTON-7 stage 7, 7-2's A/B; gi.field_in_integrate): the integrate "
+      "writes its coverage as w and leaves the irradiance field's cage to the pass, the route before 7-2 - deleted "
+      "with the pass's field binding at 7-5." },
+    { ArmId::GatherNoAnswer, 0.0, 0.0, 1.0,
+      "NO PROBE ANSWERS (a measuring door; gi.field_in_integrate): the integrate's weight floor at its largest, so "
+      "every pixel takes the fallback alone - the irradiance field where one is bound." },
     { ArmId::ShadowReceiverBoxesOff, 0.0, 0.0, 1.0,
       "THE RECEIVER GRID WITHOUT THE STOCK ROUTE'S BOXES (ENGINE-UPGRADE-U5 decision 22.3): 1 = the sun maps' receiver "
       "grid takes the view's id depth only - an alpha-tested, blended or skinned receiver is no receiver, and the "

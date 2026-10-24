@@ -167,6 +167,22 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	vec4 hitTable;
 	vec4 cloudMap;
 	vec4 cloudSun;
+	/// THE IRRADIANCE FIELD, THE FALLBACK OF THE PIXELS NO PROBE ANSWERS (PHOTON-7 stage 7, 7-2;
+	/// rq_probe_integrate.comp, jah_field_read.glsl): its render block as PhotonIrradianceField::
+	/// fillConstBufferData writes it for an IDENTITY view - three rows WORLD to grid, then ( Nx, Nx * Ny, -, - ), the
+	/// depth atlas ( the bordered tile, the width, 1 / width, 1 / height ) and the irradiance atlas the same - and
+	/// fieldWin: x the window's first slot packed x + 128 y + 16384 z, y / z the probe counts on Y and Z, w = 1 the
+	/// field is bound and composed (0: the integrate leaves the fallback to the pass, w = the coverage).
+	vec4 fieldRow0;
+	vec4 fieldRow1;
+	vec4 fieldRow2;
+	vec4 fieldProbes;
+	vec4 fieldDepthAtlas;
+	vec4 fieldIrradAtlas;
+	vec4 fieldWin;
+	/// ...and the FIELD'S OWN FALLBACK where its confidence fades: the environment's diffuse - the scene's ambient SH
+	/// (world axes, jah_environment.glsl's C0 .. C8 in xyz, the pass buffer's signs applied by the host).
+	vec4 envSh[9];
 } p;
 
 /// ONE EYE'S IMAGE — rq_reflect.comp's `EyeImage`: where the eye is and the

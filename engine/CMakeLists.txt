@@ -793,6 +793,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_field_read.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_cloud_shadow.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_atmosphere.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_height_fog.glsl"
@@ -865,6 +866,12 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahFieldWindow
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahFieldWindow_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_field_window.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE IRRADIANCE FIELD'S CAGE (PHOTON-7 stage 7, 7-2): one text for the PBS pixel's reader
+    # (PhotonIfd_piece_ps.any) and the screen-probe gather's integrate (through glslang).
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahFieldRead
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahFieldRead_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_field_read.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE CLOUD LAYER'S SHADOW (CLOUDS-2D-1/-2D-2): one transmittance, read by the
     # pixel (JahFog), the voxel light injection and the card relight.

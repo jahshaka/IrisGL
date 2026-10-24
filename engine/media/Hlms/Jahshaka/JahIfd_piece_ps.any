@@ -11,25 +11,11 @@
 // So the scalar is OURS, applied at the last line of upstream's own piece, and
 // it rides the pass buffer (a const-buffer write, never a shader rebuild) so
 // the author can turn the dial without a recompile.
-// WHY FIVE HOOK PIECES AND NOT A COPY OF UPSTREAM'S. This file used to
-// UNDEFINE upstream's `applyIrradianceField` and define it again with the whole
-// body copied verbatim, because the terms below are not a post-multiply: the
-// sample point moves before the cage is derived, the cage's probe indices have
-// to be clamped, two quantities are accumulated per probe, and the field's
-// answer is scaled and then complemented. There was no hook for any of it, and
-// a duplicated body is a liability exactly once -- at a pin bump, silently --
-// so it was guarded by a configure-time sha256 of upstream's file that FAILED
-// the build when upstream moved.
-//
-// fork b6c409c1f (was 0058) puts the five insertion points into upstream's own piece
-// (prologue / probe-origin / per-probe / resolve / post), which is what this
-// file uses now. The copy and the hash tripwire are gone with it: ours is a set
-// of PIECES again, upstream's body is upstream's, and a pin bump either applies
-// the patch or refuses it out loud. The patch also carries the two fixes the
-// copy had folded into the body -- the division guard on a probe that lands
-// exactly under the shaded pixel, and the comment-promised clamp becoming a
-// hook because the per-axis probe counts a clamp needs are not in upstream's
-// render params.
+// THE CAGE IS ONE TEXT (PHOTON-7 stage 7, 7-2): the clamp, the sample point's bias, the window's slot, the front share
+// and the confidence that were this file's five hooks into the pixel's cage are jah_field_read.glsl's (the piece
+// JahFieldRead), the cage the PBS piece (PhotonIfd_piece_ps.any, an owned copy of upstream's) and the screen-probe
+// gather's integrate both read. What this file keeps is the HOST'S part: the gate (a pixel another estimator answered
+// takes no cage), what a declined cage owes, and the fallback where the field's confidence fades.
 //
 // CAUTION, the same one JahFog and JahVct carry, and this file cost the lane a
 // full test run by ignoring it: the Hlms parser does NOT respect // comments —
@@ -70,13 +56,12 @@
 // Chebyshev visibility test cannot rescue either case, and that was MEASURED
 // rather than assumed (the note in the loop).
 //
-// WHAT THIS FILE DOES ABOUT IT, in three parts, none of which costs a sample:
+// WHAT IS DONE ABOUT IT, in three parts, none of which costs a sample (the first two in jah_field_read.glsl):
 //   * the CLAMP the comment promises;
 //   * a CONFIDENCE in [0, 1] that is 1 wherever the field has something to say
-//     and 0 where it does not -- zero outside the AUTHORED volume (the box the
-//     host handed initialize(), recoverable from the probe counts alone), and
-//     zero on a surface with no probe on its own side;
-//   * a FALLBACK, so that "the field says nothing" means "what this pixel had
+//     and 0 where it does not -- zero outside the read region (the window less
+//     its guard band), and zero on a surface with no probe on its own side;
+//   * a FALLBACK (this file), so that "the field says nothing" means "what this pixel had
 //     before a field was ever bound" rather than "black": the voxel-cone
 //     ambient term that binding a field deletes.
 // Inside the field the confidence is exactly 1 and every frame is what it was:
@@ -132,303 +117,14 @@
 @end
 @end
 
-@piece( custom_ps_ifdCagePrologue )
-	// THE FOURTH THING THAT IS NOT UPSTREAM'S: THE SURFACE BIAS (ENGINE-6 item
-	// 1; PHOTON-S2 FINDINGS §5 item 2 and §7 item 1, recorded in
-	// SPECS/OGRE_UPSTREAM_ISSUES.md as "IrradianceField: three visibility
-	// findings").
-	//
-	// THE DEFECT, upstream's: the cage is looked up AT THE SHADED POINT. A
-	// point lying ON a surface is, to a probe on the other side of that
-	// surface, at very nearly the distance the depth atlas recorded for the
-	// surface itself -- so the Chebyshev test is evaluated on its own knife
-	// edge, where the stored variance decides the answer. With
-	// `mNumRaysPerPixel = 1` (our setting, and upstream's own default in the
-	// sample) the depth moments come from ONE ray per texel convolved by the
-	// integration job, so that variance is small and the test is very nearly a
-	// hard step: a wall's two faces are a texel apart in it. That is the
-	// standard DDGI leak pair, and the paper's own answer is not a better test
-	// but a MOVED SAMPLE POINT -- shift the lookup off the surface, along the
-	// normal and towards the eye, by a fraction of a probe spacing. The wall's
-	// far side then sits a real distance behind the sample and the Chebyshev
-	// test has something to bite on.
-	//
-	// THE UNITS ARE PROBE SPACINGS, which is why this is applied HERE, in grid
-	// space, and not in metres in view space: one unit of ifdGridPos is one
-	// probe spacing ON THAT AXIS, so an anisotropic field (32x8x32 is what our
-	// fit gives a room) biases by more metres along its sparse axis, which is
-	// exactly where its depth texels are coarsest. A metre-valued bias would
-	// need the spacing to convert and would be wrong on two axes out of three.
-	//
-	// THE TWO CONSTANTS are the DDGI paper's own MIXTURE -- 0.2 along the
-	// normal to 0.8 towards the eye (Majercik et al. 2019 §4.2; RTXGI ships
-	// the same shape as probeNormalBias/probeViewBias) -- at a QUARTER of the
-	// paper's magnitude: it writes `( 0.2 n + 0.8 w_o ) * 0.75` spacings,
-	// this is the same vector times 0.25. The view half dominates because a
-	// grazing view is the case that leaks: the shading point is then nearly IN
-	// the surface as the probe sees it, whatever the normal does.
-	//
-	// WHY A QUARTER, measured in this lane on the PHOTON-S2 leak room
-	// (0.5/0.2/0.1/0.05 m walls, one lamp outside) against gi.ddgi_edge's
-	// legitimate red bounce and the brightness of a floor 5 m from any wall.
-	// The bias trades one against the other MONOTONICALLY, because lifting a
-	// probe's false self-occlusion and lifting its true occlusion are the same
-	// operation:
-	//
-	//    view bias | 0.10 m wall leak | 0.05 m wall leak | open floor
-	//       0.00   |      0.0520      |      0.0807      |   +3/255
-	//       0.20   |      0.0436      |      0.0694      |  +13/255
-	//       0.60   |      0.0415      |      0.0641      |  +22/255
-	//     (today)  |      0.0536      |      0.0829      |     --
-	//
-	// The knee is at 0.20: it takes 87 % of the leak the full paper value
-	// takes, for little more than half of the interior brightening -- and that
-	// brightening is a change to every shipped DDGI picture, not a test
-	// number. The normal half is scaled with it to keep the paper's ratio.
-	const float ifdNormalBias = 0.05;   // probe spacings
-	const float ifdViewBias   = 0.20;   // probe spacings
-	// The direction TOWARDS the eye: inPs.pos is a VIEW-space position, so the
-	// eye is the origin. Normalised in view space and then rotated into grid
-	// space (transformDir3 is the rotation half of the same transform), which
-	// makes it a direction in probe spacings -- deliberately NOT re-normalised
-	// afterwards, so an anisotropic grid biases per axis as described above.
-	float3 ifdViewDirGrid = transformDir3( normalize( -inPs.pos.xyz ), //
-										   passBuf.irradianceField.viewToIrradianceFieldRow0,
-										   passBuf.irradianceField.viewToIrradianceFieldRow1,
-										   passBuf.irradianceField.viewToIrradianceFieldRow2 );
-	// THE BIAS'S SHARE ALONG THE NORMAL IS CONSTANT (FIELD-EDGE-1, measured). Applied as
-	// the paper writes it, the view half's component along the normal is ifdViewBias x
-	// (v.n): it shrinks with the distance from the eye on any surface not facing it, so
-	// across an open floor the lookup point sank through the probe lattice - the cage's
-	// layers changed with the distance from the eye, and where the point crossed a layer
-	// that layer's probes lay in its own tangent plane (weight 0) while the layer under
-	// the floor was behind: the field faded to black along a ring (0.861 at 4 m from a
-	// 3 m eye, gi.field_edge). The normal share is now the head-on value, nb + vb (0.25
-	// spacings), everywhere: the lookup point stands a fixed height above the surface, so
-	// one cage serves the whole floor, and a probe layer closer to the surface than that
-	// (inside or hugging the surface's own voxel row, which reads low - 0.97 for a layer
-	// one cell up) is behind the lookup point and has no say. The view half keeps only its
-	// TANGENTIAL share - the part that moves a grazing lookup towards the eye, which is
-	// what the leak pair needed (a wall seen edge-on).
-	const float3 ifdViewTangent = ifdViewDirGrid - ifdSpaceNormal * dot( ifdViewDirGrid, ifdSpaceNormal );
-	ifdGridPos += ifdSpaceNormal * ( ifdNormalBias + ifdViewBias ) + ifdViewTangent * ifdViewBias;
-
-	// OURS, AND THE THIRD THING THAT IS NOT UPSTREAM'S: THE FIELD'S EDGE
-	// (ENGINE_CACHE_POLICY_SPEC P9). Two numbers the cage loop below needs and
-	// upstream never computes.
-	//
-	//   ifdMinProbe, ifdMaxProbe  the first and the last READ probe index on each axis
-	//                (5-5: 1 and N - 2 - the window's outer planes are its guard
-	//                band, never read; the fade after the loop). Upstream's own
-	//                render params carry only Nx and Nx*Ny, so Y and Z ride
-	//                jahIfd.yz. When they are absent -- the host pushed no
-	//                IFD state, which cannot happen today because the arm writes
-	//                the state before it binds -- the bound is set beyond any
-	//                real grid, and every line below reduces to upstream's
-	//                behaviour exactly.
-	//   (the fade that uses them is after the loop, with its derivation)
-	float3 ifdProbeCounts = float3( passBuf.irradianceField.numProbesAggregated.x,
-									passBuf.jahIfd.y, passBuf.jahIfd.z );
-	bool  ifdHaveCounts = passBuf.jahIfd.y > 0.5;
-	// (an axis of fewer than four probes has no band: all of it is read - a field the host never steps)
-	float3 ifdBand = ifdHaveCounts ? step( float3( 3.5, 3.5, 3.5 ), ifdProbeCounts ) : float3( 0.0, 0.0, 0.0 );
-	float3 ifdMinProbe = ifdBand;
-	float3 ifdMaxProbe = ifdHaveCounts ? ifdProbeCounts - float3( 1.0, 1.0, 1.0 ) - ifdBand
-									   : float3( 1e9, 1e9, 1e9 );
-	// How much of the cage's final weight comes from probes IN FRONT of the
-	// shading surface (P9; the fade after the loop says what it is for).
-	float ifdFrontWeight = 0;
-	// ...and the share the front probes' TRILINEAR weights alone would give it, before
-	// visibility (FIELD-EDGE-1): the denominator of the crush fade (c) below.
-	float ifdFrontTrilinear = 0;
-	// THE FIELD'S WINDOW (PHOTON-WRITER-1): the atlas slot of the window's first
-	// probe per axis, packed x + 128 y + 16384 z in jahIfd.x by the host
-	// (OgreScene::pushIfdState). The cage below is built in window coordinates;
-	// the hook after the clamp maps each probe to its tile (JahFieldWindow).
-	uint ifdWindowPacked = uint( passBuf.jahIfd.x + 0.5 );
-	uint3 ifdWindowOffset = uint3( ifdWindowPacked & 127u, ( ifdWindowPacked >> 7u ) & 127u,
-								   ( ifdWindowPacked >> 14u ) & 127u );
-@end
-
-// ---- THE CAGE'S PROBE INDICES, CLAMPED TO THE GRID ---------------------
-@piece( custom_ps_ifdCageProbeOrigin )
-		// THE CLAMP UPSTREAM'S COMMENT PROMISES AND UPSTREAM CANNOT PERFORM: the
-		// per-axis probe counts it needs are not in the render params (only Nx and
-		// Nx*Ny are), which is why fork b6c409c1f (was 0058) makes this a hook rather than a
-		// fix in place. The world->grid map has no clamp either
-		// (OgreIrradianceField.cpp:794-812). Without it a pixel outside the
-		// field indexes past the grid and getProbeIdx's flat index WRAPS into
-		// another row -- in the Grand Showroom 2 the roof's upper cage corner
-		// landed on the FLOOR layer with 77% of the trilinear weight, which is
-		// the "texture maps on the roof" the owner reported. A clamped cage
-		// EXTRAPOLATES the border probes instead, which is bounded and which
-		// the two fades in the resolve piece then take to zero.
-		probeOrigin = clamp( probeOrigin, ifdMinProbe, ifdMaxProbe );
-@end
-
-// ---- THE CAGE PROBE'S ATLAS TILE: THE WINDOW'S MODULO (PHOTON-WRITER-1) ----
-@piece( custom_ps_ifdCageProbeSlot )
-		if( ifdHaveCounts )
-		{
-			ifdProbeSlot = float3( jahFieldSlot( uint3( probeOrigin ), ifdWindowOffset,
-												 uint3( ifdProbeCounts ) ) );
-		}
-@end
-
-// ---- WHAT WE ACCUMULATE PER CAGE PROBE ---------------------------------
-@piece( custom_ps_ifdCageProbe )
-		// A SECOND READING OF UPSTREAM'S OWN FRONT/BACK TEST, for the front-side
-		// share of the cage's weight (P9; the fade that uses it is in the resolve
-		// piece). The +0.5 is what separates
-		// BEHIND from COPLANAR: a probe exactly in the shading surface -- which
-		// is the normal case for a flat field, e.g. the default scene's 64x2x64
-		// field puts a probe layer exactly in the ground plane -- has dot 0 and
-		// is not behind anything, so it reads 0.5 and keeps its say, while a
-		// probe genuinely under the surface reads 0 (the x200 makes even a
-		// 1 cm offset saturate).
-		// Recomputed here rather than carried out of upstream's weight line, which
-		// is upstream's and stays upstream's: the same expression on the same
-		// normalised `dir` the weight was built from, so the same value.
-		float ifdFrontSide = saturate( dot( dir, ifdSpaceNormal ) * 200.0 + 0.5 );
-		ifdFrontWeight += weight * ifdFrontSide;
-		ifdFrontTrilinear += trilinear.x * trilinear.y * trilinear.z * ifdFrontSide;
-
-		// WHY THERE IS NO VISIBILITY TERM OF OURS HERE, and it was measured
-		// rather than assumed (the lead's question, P9). The Chebyshev weight
-		// cannot carry the edge case on its own for two reasons. First,
-		// arithmetic: the sum is divided by sumIfdWeight below, so crushing ALL
-		// eight weights does not remove the contribution -- it renormalises the
-		// same eight probes and the leak survives at full strength. Second, and
-		// the reason a cage-visibility fraction was tried and then deleted: in
-		// the suite's sealed box the trilinear-weighted Chebyshev fraction of a
-		// roof pixel whose ENTIRE cage is embedded in the ceiling slab measures
-		// above 0.999 -- the depth atlas reports those probes as unoccluded, so
-		// no threshold on it can separate them from an interior floor. The
-		// probes that answer such a pixel are inside geometry; recognising them
-		// is probe classification (RTXGI-style), which this lane does not do.
-@end
-
-// ---- HOW MUCH THE FIELD IS TRUSTED, AND THE SCALE IT IS GIVEN ----------
+// ---- WHAT A DECLINED CAGE OWES, AND THE CAGE ITSELF ------------------------
+//
+// THE CAGE IS ONE TEXT (PHOTON-7 stage 7, 7-2): the sample point's bias (ENGINE-6 item 1), the cage clamped to the read
+// region (the guard band, 5-5), the window's slot (PHOTON-WRITER-1), the front share and the three fades (P9,
+// FIELD-EDGE-1, J1) that were this file's five hooks are jah_field_read.glsl's, read by the PBS piece
+// (PhotonIfd_piece_ps.any) and by the screen-probe gather's integrate alike. What stays here is the HOST'S: the gate
+// above, what a declined cage owes, and the fallback below.
 @piece( custom_ps_ifdCageResolve )
-	// OURS (P9): HOW MUCH THE FIELD IS TRUSTED AT THIS PIXEL, in [0, 1], and
-	// the two independent ways it can have nothing to say.
-	//
-	// (a) OUTSIDE THE READ REGION (PHOTON-7 stage 5, 5-5: THE GUARD BAND).
-	//
-	// THE READ REGION IS THE WINDOW LESS ITS OUTER PLANE. The field's window holds N
-	// probes per axis (the volume it was given enlarged by one probe block per side),
-	// and the host steps it with the eye ONE PLANE AT A TIME: the plane a step enters is
-	// integrated while it is the window's outermost plane, and the next step makes it
-	// read. So no pixel reads the outer planes, local 0 and N - 1: the cage is clamped to
-	// [ 1, N - 2 ] (the probe-origin hook above), and the field is at full confidence on
-	// grid [ 1, N - 2 ] - every cage there is made of read, integrated probes - and says
-	// nothing past it. (The authored box, [ N/(N+2), N - N/(N+2) ], is cascade 0's no
-	// longer: the window steps with the eye.)
-	//
-	// WHERE THE ROLL-OFF SITS, AND WHY OUTSIDE THE FACE (SQUARE-1, 2026-09-17, measured;
-	// the owner's report was "a square lighting effect around the scene in an empty
-	// scene"). A ramp INSIDE the face handed the pixels in its last half spacing to the
-	// cone term while the field was still fading up - and the cone term is not
-	// continuous where a cascade's box ends (11/255 on the default scene) - a DARK LINE
-	// along the face, one probe spacing wide. So the field is at FULL confidence at the
-	// read region's face and fades to nothing half a probe spacing outside it, over the
-	// clamped border plane's extrapolation (bounded, and monotone as measured then:
-	// 107 -> 110 over that half spacing), a ramp in one direction instead of a notch.
-	//
-	// IT HIDES THE EDGE; THE ONE READER EQUALISES THE INTEGRALS. Since PHOTON-READER-1
-	// the field's rays and the pixel's cones march the same chain through the same
-	// reader and weight the sky by the same escape, so what is left between them is the
-	// integration (144 rays per probe against four cones per pixel) and the environment
-	// term.
-	float3 ifdInside = min( ifdGridPos - ifdMinProbe, ifdMaxProbe - ifdGridPos );
-	// `ifdInside` is the signed distance to the nearest face of the read region in PROBE
-	// SPACINGS, positive inside. 1 at the face, 0 one ramp width outside it.
-	const float ifdEdgeRamp = 0.5;			// probe spacings, outside the face
-	float3 ifdAxisFade = saturate( ifdInside * ( 1.0 / ifdEdgeRamp ) + 1.0 );
-	float ifdEdgeFade = ifdAxisFade.x * ifdAxisFade.y * ifdAxisFade.z;
-	ifdEdgeFade = ifdEdgeFade * ifdEdgeFade * ( 3.0 - 2.0 * ifdEdgeFade );
-	// (b) NO PROBE IN FRONT OF ME. The fade above is about the field's BOX; this
-	// one is about the last probe LAYER, and it is what the owner's report
-	// needed. Ogre places probe i at fieldOrigin + i * fieldSize / N over a box
-	// that was padded symmetrically, so the lattice reaches one probe block
-	// BELOW the authored volume and stops a fraction of a block INSIDE its top
-	// (upstream asymmetry; in the Grand Showroom 2 the topmost probe layer sits
-	// at y 7.731, which is 2 cm under the roof's outer face and INSIDE the 0.5 m
-	// ceiling slab). A pixel on that roof therefore has a perfectly legal cage
-	// in which EVERY probe is behind the surface and inside the slab, and the
-	// field hands it the inside of the building. `ifdFrontWeight` is the share
-	// of the normalised weight that comes from probes on the surface's own
-	// side; when it is zero there is no probe lighting this surface at all and
-	// the field has nothing to say. It is exactly zero for the roof case and
-	// well clear of the knee everywhere else, because upstream's own weights
-	// already favour a front probe 6:1 (1.2 against the 0.2 floor) and a
-	// coplanar probe counts as half -- an interior floor a centimetre above a
-	// probe plane measures 0.06, and one lying exactly ON a probe layer 0.5.
-	// This is NOT probe classification: it does not detect a probe inside
-	// geometry, it detects a SURFACE with no probe in front of it.
-	const float ifdFrontLo = 0.005;
-	const float ifdFrontHi = 0.05;
-	// THE DIVISOR CAN BE ZERO, and the guard has to be SCALE-FREE or it changes a
-	// shipped picture (the lead's read of GATHER-1a). This ratio is a SHARE --
-	// how much of the cage's weight comes from probes in front of the surface --
-	// and both terms carry the same crushed scale: a fully crushed cage sums to
-	// about 1e-17 (upstream's own 1e-6 weight floor, cubed by the trilinear
-	// product and divided by the 0.04 crush threshold), and its front share is
-	// crushed by exactly as much, so the RATIO is still 1 and the field fades to
-	// nothing deliberately. Flooring the DENOMINATOR at 1e-6 instead makes that
-	// ratio 1e-11, the confidence 0 and the fallback 1 -- the full cone diffuse
-	// or a flat ambient, leaking in exactly where this term exists to stop it,
-	// at every tier, with the gather nowhere in the frame. So: a zero divisor is
-	// "no front share to compute", which is a share of ONE (the cage said
-	// nothing; the clamp above it is what decides), and any non-zero divisor is
-	// used as it stands however small it is.
-	float ifdFrontFade = smoothstep( ifdFrontLo, ifdFrontHi,
-									 sumIfdWeight > 0.0 ? ifdFrontWeight / sumIfdWeight : 1.0 );
-	// The counts are absent only in a state the host cannot produce (the GI arm
-	// writes them before it binds the field); there, the box fade is skipped.
-	float ifdConfidence = min( ifdHaveCounts ? ifdEdgeFade : 1.0, ifdFrontFade );
-	// ...TIMES THE CAGE'S VALID SHARE (PHOTON-2 J1): the weight its probes hold over the weight they would
-	// hold whole - 1 exactly in a field whose probes are whole (the two sums are the same numbers added in
-	// the same order), less where a scroll's entered probes are still fading in, so the pixel hands over
-	// from the fallback to the field as they fill, never in one step.
-	ifdConfidence *= sumIfdWeight > 0.0 ? sumIfdValidWeight / sumIfdWeight : 1.0;
-
-	// (c) OURS, AND THE SECOND HALF OF ENGINE-6 ITEM 1: NO PROBE OF THIS CAGE
-	// CAN SEE ME.
-	//
-	// THE DEFECT, upstream's, and the one the cage loop's own note above
-	// records as arithmetic: the sum below is NORMALISED by `sumIfdWeight`, so
-	// crushing every probe of a cage does not remove its contribution -- it
-	// renormalises the same eight crushed probes and hands the pixel the full
-	// leak back. The Chebyshev test can say "none of these probes can see
-	// you"; the division then throws that answer away. (PHOTON-S2 measured the
-	// consequence from the other side: a distance field that crushes MORE
-	// sharply bought 4-24 % of the leak, because the renormalisation gives it
-	// back.)
-	//
-	// WHAT THE NUMBER MEANS (FIELD-EDGE-1). The fade reads the cage's weight AS A SHARE
-	// OF WHAT ITS FRONT PROBES' TRILINEAR WEIGHTS ALONE WOULD GIVE - the visibility the
-	// Chebyshev test left them: about 1 for a cage that sees the surface, ~1e-17 for a
-	// fully crushed one (upstream's 1e-6 floor, cubed by the crush), and nothing a
-	// legitimate cage can produce in between at the knee, which is why the knee may sit
-	// three orders of magnitude below 1: it is a guard against a division, not a dial
-	// on the picture. (It used to read the RAW sum, on the assumption - upstream's,
-	// whose `+ 0.2` floor on every probe PHOTON-WRITER-1 deleted - that an uncrushed
-	// cage sums to at least 0.2. Without the floor a cage whose front layer's trilinear
-	// weight is small sums to as little as that weight, and the raw-sum fade took the
-	// field to black where the lookup point sat near the layer behind the surface.)
-	//
-	// WHAT IT FADES TO: nothing, deliberately -- not to the VCT ambient
-	// fallback below. `ifdConfidence` means "this pixel is outside the field's
-	// reach", and there the ambient a no-field build gave the pixel is the
-	// right answer. THIS says "the field can see this pixel and reports that
-	// nothing lights it from here", which is a real answer; substituting an
-	// unoccluded ambient for it would re-open the leak in a different colour.
-	const float ifdWeightLo = 0.0005;
-	const float ifdWeightHi = 0.0050;
-	float ifdWeightFade = smoothstep( ifdWeightLo, ifdWeightHi,
-									  ifdFrontTrilinear > 0.0 ? sumIfdWeight / ifdFrontTrilinear : sumIfdWeight );
-
 @property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 	// ...AND WHERE THE CAGE WAS DECLINED, THE FIELD OWES NOTHING EITHER. Both
 	// terms of the post hook below are the field's own fallbacks -- what a pixel
@@ -442,20 +138,6 @@
 @property( jah_env_diffuse_only )
 	ifdConfidence = 1.0;
 @end
-
-	// THE SCALE UPSTREAM'S COMPOSITE LINE APPLIES (fork b6c409c1f (was 0058)). Upstream
-	// writes
-	//     pixelData.envColourD.xyz += ifdIrradiance * ( ifdIrradianceScale / sumIfdWeight );
-	// with the scale at one, and we set it to the confidence and the weight fade
-	// above -- the field's own answer, with no dial (the intensity trim is
-	// DELETED with its pass-buffer float, PHOTON-GATHER-1d: a physical answer
-	// needs none, and at a ray tier the field is not the diffuse). Inside the field every factor is
-	// exactly 1 and the line is bit-for-bit upstream's.
-	//
-	// The field's atlas holds the mean of the voxels' radiance (RGBA16_FLOAT since PHOTON-ENV-1) and the sky an
-	// escaping ray reads as it is - the voxels hold radiance (PHOTON-7 stage 1: the decode multiplier D_max / pi that
-	// this line and the cones' undid is deleted with the per-box normalisation it undid).
-	ifdIrradianceScale = float3( ifdConfidence * ifdWeightFade );
 @end
 
 // ---- THE TERMS THAT COMPLEMENT THE FIELD -------------------------------
