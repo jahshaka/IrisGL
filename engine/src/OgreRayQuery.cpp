@@ -8329,7 +8329,8 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
     if (!scene || !cam) return;
     // THE FORWARD LTC SET - none: OFF IS FREE AND CLEAN (the view gives its images back and binds nothing)
     const std::vector<const Ogre::Light *> lights = forwardLtcLights(scene->sceneManager());
-    if (lights.empty() || !scene->rayTracingResolved()) {
+    // (the measuring arm area.visOff: the visibility's price, its paired A/B - nothing traced, nothing bound)
+    if (lights.empty() || !scene->rayTracingResolved() || arm(ArmId::AreaVisOff, false)) {
         forgetAreaVis(key);
         return;
     }

@@ -1404,6 +1404,10 @@ constexpr ArmDef kArms[] = {
       "1 = every frame the ray tier copies its jahAreaVis (RG32_UINT: x the forward LTC light i's diffuse visible share in "
       "byte i, y its specular share) "
       "into a host ring, ScenePublished::areaVis.vis the latest retired frame's. 0 = shipped (nothing copied)." },
+    { ArmId::AreaVisOff, 0.0, 0.0, 1.0,
+      "THE PIXEL'S AREA LIGHT VISIBILITY OFF (PHOTON-7 stage 7; a measuring arm, its paired GPU A/B on gi.walk_area): 1 = "
+      "neither producer traces it (the ray tier's trace and resolve, the no-ray route's two passes stand in) and every "
+      "forward LTC light reaches the pixel UNSHADOWED - the price the visibility costs, never a picture. 0 = shipped." },
     { ArmId::GatherRoughQuadrature, 0.0, 0.0, 2.0,
       "THE ROUGH SPECULAR'S QUADRATURE DOOR (PHOTON-7 stage 7, 7-3; gi.rough_lobe_quadrature): the split sum's own error. "
       "1 or 2 = the prefiltered image holds one more layer (switching the door re-makes the view's targets), the probes' FILTERED "
