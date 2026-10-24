@@ -38,8 +38,17 @@
 		// the cone's hit, back along this pixel's reflection (view space, metres)
 		float3 vctSpecPosVS = inPs.pos + float3( pixelData.reflDir ) * OGRE_LoadScreen2D( jahConeHit, iFragCoord, 0 ).x;
 	@end
+	// THE FOOTPRINT'S ROUGHNESS (PHOTON-7 stage 7's read, F4): the fork's geometric specular anti-aliasing widens a
+	// normal-mapped surface's alpha (pixelData.roughness) and the G-buffer carries the widened one - the integrate
+	// decides its lobe from it, so this read decides from the same value, never the material's unwidened one (a
+	// widened lobe over tan 1 was written as the rough one and read as a narrow cone's: the sky's cube through walls)
+	@property( perceptual_roughness )
+		const float jahFootprintRoughness = sqrt( float( pixelData.roughness ) );
+	@else
+		const float jahFootprintRoughness = float( pixelData.roughness );
+	@end
 	// THE ROUGH LOBE'S RULE, the cone's own (jahSpecularCone): a lobe wider than tan 1 is read as an occlusion query
-	const float jahConeRoughness = ( float( pixelData.perceptualRoughness ) - 0.02f ) * 1.020408163f;
+	const float jahConeRoughness = ( jahFootprintRoughness - 0.02f ) * 1.020408163f;
 	const bool jahConeRoughLobe = max( 0.0f, tan( jahConeRoughness * 0.5f * 3.141592654f * 0.99f ) ) > 1.0f;
 	const float vctRoughOcclusion = jahConeRoughLobe ? 1.0f - jahConeTexel.w : 0.0f;
 	@property( use_envprobe_map && !use_parallax_correct_cubemaps )
@@ -49,8 +58,8 @@
 		// not stop (the voxel route's jahEnvS exactly)
 		const float3 jahEnvS = jahEnvLobe( jahViewToWorldDir( jahEnvDominantDir(
 											   float3( pixelData.normal ), float3( pixelData.reflDir ),
-											   float( pixelData.perceptualRoughness * pixelData.perceptualRoughness ) ) ),
-										   float( pixelData.perceptualRoughness ) ) * jahConeTexel.w;
+											   jahFootprintRoughness * jahFootprintRoughness ) ),
+										   jahFootprintRoughness ) * jahConeTexel.w;
 	@end
 	float4 vctSpecular = float4( jahConeTexel.xyz + jahEnvS, 1.0f );
 	pixelData.envColourS.xyz += midf3_c( vctSpecular.xyz );
