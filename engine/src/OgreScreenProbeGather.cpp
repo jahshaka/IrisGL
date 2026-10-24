@@ -45,6 +45,7 @@
 #ifdef JAH_RAY_QUERY
 
 #include "EnginePrivate.h"
+#include "GpuCheckpoints.h"
 
 #include <OgreRenderSystem.h>
 #include <OgreTextureGpuManager.h>
@@ -2015,6 +2016,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlacePipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlacePipeLayout, 0, 1,
                                 &v.placeSets[ring], 0, nullptr);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, (v.gridW + 7u) / 8u, (v.gridH + 7u) / 8u, 1u);
         // ...AND THE SECOND PASS: the cells that asked for a second probe, ranked in a
         // fixed order, the first `cap` of them given one (rq_probe_place.comp's header).
@@ -2030,6 +2032,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlaceSelectPipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlaceSelectPipeLayout, 0, 1,
                                 &v.placeSets[ring], 0, nullptr);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, (v.gridW + 7u) / 8u, (v.gridH + 7u) / 8u, 1u);
     }
     {
@@ -2072,6 +2075,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // ONE WORKGROUP PER PROBE — the trace's 64 threads ARE its 64 rays — and
     // the COUNT is the GPU's own (fork 1bccc3f93+a98e2b0af (was 0032)'s shape: a count nobody on the CPU
     // can know without a round trip).
+    JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
     vkCmdDispatchIndirect(cmd, v.args, 0);
     traceWork.close();
     // ---- THE FRAME'S FIRST HALF ENDS HERE (PHOTON-HIT-SHADE-1): the trace has
@@ -2130,6 +2134,7 @@ void ScreenProbeGather::finish(const void *key) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeLayout, 0, 1,
                             &v.filterSets[ring], 0, nullptr);
+    JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
     vkCmdDispatchIndirect(cmd, v.args, 0);
     filterWork.close();
     computeToCompute();
@@ -2140,6 +2145,7 @@ void ScreenProbeGather::finish(const void *key) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mIntegratePipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mIntegratePipeLayout, 0, 1,
                             &v.integrateSets[ring], 0, nullptr);
+    JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
     vkCmdDispatch(cmd, (in.width + 7u) / 8u, (in.height + 7u) / 8u, v.layers);   // z = the eye
     integrateWork.close();
     // ...AND THE INTEGRATE'S OWN COUNTER WORD (PHOTON-2 L8: the histories accepted only by the foliage rule) into the

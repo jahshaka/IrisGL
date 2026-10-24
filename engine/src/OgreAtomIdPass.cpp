@@ -40,6 +40,7 @@
 // two-sided range and a third pipeline that culls nothing: both faces rasterised, the
 // nearer one kept by the depth test (a closed mesh's back faces never win it).
 #include "EnginePrivate.h"
+#include "GpuCheckpoints.h"
 #include "AtomPass.h"
 #include "GpuCull.h"
 #include "GpuScene.h"
@@ -1015,6 +1016,7 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         atomBufferOf(cull.draws(), drawBuf, drawOff);
         atomBufferOf(cull.count(), countBuf, countOff);
         const uint32_t maxDraws = std::min(cull.capacity(), gs->slotCount());
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         D->ids.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff, maxDraws,
                                      GpuCull::kDrawWords * sizeof(uint32_t));
         // THE OTHER RANGES (ATOM-TWO-SIDED-1; ENGINE-POLISH-ATOM-1 stage 3): 1 the survivors flagged
@@ -1027,6 +1029,7 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
         for (unsigned rg = 1u; rg < GpuCull::kRanges; ++rg) {
             if (!scene->atom().hasIdRange(rg)) continue;
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, D->ids.pipeline[rangePipe[rg]]);
+            JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
             D->ids.drawIndexedIndirectCount(
                 cmd, drawBuf, drawOff + VkDeviceSize(cull.rangeFirst(rg)) * GpuCull::kDrawWords * sizeof(uint32_t),
                 countBuf, countOff + GpuCull::rangeCountOffsetBytes(rg), maxDraws,
@@ -1058,6 +1061,7 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
             for (unsigned rg = 0u; rg < GpuCull::kRanges; ++rg) {
                 if (rg != 0u && !scene->atom().hasIdRange(rg)) continue;
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, D->ids.pipeline[clusterPipe[rg]]);
+                JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
                 D->ids.drawIndexedIndirectCount(
                     cmd, cdBuf, cdOff + VkDeviceSize(rg) * stride * GpuCull::kDrawWords * sizeof(uint32_t), countBuf,
                     countOff + GpuCull::clusterRangeCountOffsetBytes(rg), stride, GpuCull::kDrawWords * sizeof(uint32_t));

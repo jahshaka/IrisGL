@@ -43,6 +43,7 @@
 // GREATER_OR_EQUAL under reverse-Z with writes, depth CLAMP where the shadow camera
 // asks for it (a directional light's maps, OgreCompositorShadowNode.cpp).
 #include "EnginePrivate.h"
+#include "GpuCheckpoints.h"
 #include "AtomPass.h"
 #include "GpuCull.h"
 #include "GpuScene.h"
@@ -1397,11 +1398,13 @@ void recordCasterPass(AtomPassContext &ctx) {
             atomBufferOf(list.draws(), drawBuf, drawOff);
             atomBufferOf(list.count(), countBuf, countOff);
             const uint32_t maxDraws = std::min(list.capacity(), gs.slotCount());
+            JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
             C.drawIndexedIndirectCount(cmd, drawBuf, drawOff, countBuf, countOff, maxDraws,
                                         GpuCull::kDrawWords * sizeof(uint32_t));
             for (unsigned rg = 1u; rg < GpuCull::kRanges; ++rg) {
                 if (!rangePipeline[rg]) continue;
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rangePipeline[rg]);
+                JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
                 C.drawIndexedIndirectCount(
                     cmd, drawBuf, drawOff + VkDeviceSize(list.rangeFirst(rg)) * GpuCull::kDrawWords * sizeof(uint32_t),
                     countBuf, countOff + GpuCull::rangeCountOffsetBytes(rg), maxDraws,

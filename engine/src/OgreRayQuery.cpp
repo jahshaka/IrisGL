@@ -54,6 +54,7 @@
 #include "AtomPass.h"
 #include "ReadbackDecode.h"
 #include "EnginePrivate.h"
+#include "GpuCheckpoints.h"
 #include "SceneLightList.h"
 #include "photon/voxel/PhotonVoxelMaterial.h"
 #include "photon/voxel/PhotonSpecularAlbedo.h"
@@ -3188,6 +3189,7 @@ bool RayQueryTier::dispatchTlasWrite(OgreScene *scene, SceneAs &sa, VkCommandBuf
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTwPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTwPipeLayout, 0, 1, &sa.tlasSets[ring], 0,
                             nullptr);
+    JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
     vkCmdDispatch(cmd, (slots + kTlasThreadsPerGroup - 1u) / kTlasThreadsPerGroup, 1u, 1u);
     // THE JOB -> THE BUILD: the instances are an acceleration-structure input read
     // through a device address.
@@ -4734,6 +4736,7 @@ bool RayQueryTier::traceBlocking(OgreScene *scene, const std::vector<float> &ray
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeLayout, 0, 1, &set, 0,
                             nullptr);
+    JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
     vkCmdDispatch(cmd, uint32_t((count + 63u) / 64u), 1, 1);
     // THE HIT BUFFER IS READ BY THE HOST as soon as the fence signals, and a
     // fence does not make a shader's writes visible to the CPU by itself
@@ -5055,6 +5058,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCardParityPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCardParityPipeLayout, 0, 1, &set,
                             0, nullptr);
+    JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
     vkCmdDispatch(cmd, uint32_t((n + 63u) / 64u), 1, 1);
     VkMemoryBarrier toHost{};
     toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -6645,6 +6649,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mComposePipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1, &rv.sets[ring], 0,
                                 nullptr);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, eyeLayers);
         VkMemoryBarrier composed{};
         composed.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -6658,6 +6663,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                                 &rv.sets[ring], 0, nullptr);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, eyeLayers);   // z = the eye
         // The overlay holds this frame's picture from here; the photon listener takes it
         // to the texture layout in front of its composite.
@@ -7268,6 +7274,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionPipeLayout, 0, 1,
                             &rv.motionSets[ring], 0, nullptr);
+    JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
     vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
     if (skinSa) {
         // THE POSED PIXELS, after the rigid ones: the two write disjoint pixels (the
@@ -7279,6 +7286,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                              &waw, 0, nullptr, 0, nullptr);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionSkinPipeline);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
     }
     motionJob.close();
@@ -7315,6 +7323,7 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
                             &rv.sets[ring], 0, nullptr);
     {
         monitor::CacheScope temporalRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.temporal", mRs, key);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, rv.layers);   // z = the eye
     }
     {
@@ -7337,6 +7346,7 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
                             &rv.sets[ring], 0, nullptr);
     {
         monitor::CacheScope filterRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.filter", mRs, key);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, rv.layers);   // z = the eye
     }
     readReflectHistory(rv, cmd);
@@ -8235,6 +8245,7 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mSunPipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mSunPipeLayout, 0, 1,
                                 &sv.sets[ring], 0, nullptr);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
     }
 
@@ -8533,6 +8544,7 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCmPipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCmPipeLayout, 0, 1,
                                 &cv.sets[ring], 0, nullptr);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, kCardPageSize / 8u, kCardPageSize / 8u, count);
     }
     ++cv.frame;
@@ -9491,6 +9503,7 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     {
         const uint32_t groups = std::max(1u, (hv.capacity + 63u) / 64u);
         const uint32_t gx = std::min(groups, 65535u);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, gx, (groups + gx - 1u) / gx, 1u);
     }
     {

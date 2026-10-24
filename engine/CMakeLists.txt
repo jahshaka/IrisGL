@@ -37,6 +37,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreClips.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSockets.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFrameMonitor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGpuCheckpoints.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Stillness.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ReadbackDecode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp

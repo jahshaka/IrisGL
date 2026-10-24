@@ -4,6 +4,7 @@
 // engine/src/ is the only directory that includes Ogre; the shared declarations
 // live in EnginePrivate.h, which documents the invariants this backend rests on.
 #include "EnginePrivate.h"
+#include "GpuCheckpoints.h"
 #include "photon/voxel/PhotonMipChain.h"
 #include "photon/voxel/PhotonVoxelLighting.h"
 #include "photon/voxel/PhotonVoxelScroll.h"
@@ -117,6 +118,8 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
 #if JAH_RAY_QUERY
     Ogre::VulkanDevice::msRayQueryAllowed = mRayTracingWanted;
 #endif
+    // THE GPU CHECKPOINTS (GpuCheckpoints.h): JAHSHAKA_GPU_CHECKPOINTS=1 asks the device for the marks, before it exists
+    detail::gpuCheckpointsConfigure();
     // Process-wide static, read by Mesh::prepareForShadowMapping at mesh-build
     // time (POST_CHAIN_SPEC.md §11). Setting it before Root exists is fine — it
     // is a plain static, not engine state.
@@ -1790,6 +1793,7 @@ void OgreEngine::latchDeviceLost() {
         "does not recreate a lost device. Look for an 'NVRM: Xid' line in the system "
         "log at this time (journalctl -k | grep -i xid).",
         Ogre::LML_CRITICAL);
+    detail::gpuCheckpointsDump();   // JAHSHAKA_GPU_CHECKPOINTS=1: the dispatch the GPU never finished, named
 }
 
 // A VULKAN OOM INSIDE A FRAME'S WORK IS TERMINAL (lane FORK-OOM-1, 2026-09-27).
@@ -3993,6 +3997,7 @@ void OgreEngine::teardown() {
     // teardown, holding the closures the two releases just emptied.
     if (mRoot) { try { AtomPassProvider::uninstall(mRoot->getCompositorManager2()); } catch (...) {} }
     if (mRoot) { try { detail::PhotonPassBinding::uninstallPassListener(mRoot->getCompositorManager2()); } catch (...) {} }
+    if (mRoot) { try { detail::gpuCheckpointsUninstallPassListener(mRoot->getCompositorManager2()); } catch (...) {} }
     // AFTER every scene (each of which removed its own render-queue listener in
     // OgreScene::destroy) and BEFORE Root: ~OverlaySystem deletes the
     // FontManager, whose Font::unloadResource destroys the HlmsUnlit datablock
@@ -4152,6 +4157,7 @@ void OgreEngine::ensureHlms() {
     }
     AtomPassProvider::install(mRoot->getCompositorManager2());
     detail::PhotonPassBinding::installPassListener(mRoot->getCompositorManager2());   // the GI readers (ASYNC-3)
+    detail::gpuCheckpointsInstallPassListener(mRoot->getCompositorManager2());   // (nothing unless the marks are on)
     registerAtomIdPass();
     registerAtomCasterPass();
     // Ambient is SPHERICAL HARMONICS, always and everywhere (Scene::setAmbientSh;
