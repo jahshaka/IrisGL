@@ -51,13 +51,12 @@
 // OgreSurfaceCache.cpp sunLiftOf: the texel's own reconstruction - one card texel
 // and the depth layer's quantum - plus the captured level's bound against level 0,
 // the near copy traced, times the bake's drift ratio), tMin zero. The movers' mode
-// lifts nothing: a receiver is never a mover (movers carry no cards). THE LAMPS' MODE TAKES THE SAME CLEARANCE ALONG ITS
-// RAY, never along the normal (the 5-3 fix, measured): a lamp is at a finite distance, so an origin lifted along N sees
-// the occluder from a point the surface does not - the edge moves by the lift's parallax, every lamp's - and an area
-// light's penumbra came out shadowed by -6.4 codes in mean across its band (gi.card_lamp_shadow (4)). Each ray starts
-// on its own segment at the lift's height, lift / cos from the texel (the same clearance from the receiver's near
-// copy), so the segment tested is the texel's own; a grazing ray's start may pass its lamp (unshadowed, at a cosine
-// that weighs it next to nothing).
+// lifts nothing: a receiver is never a mover (movers carry no cards). THE LAMPS' MODE TAKES THE SAME LAW (the merge's
+// one form, PHOTON-7 stage 6 into 7): the same lift along the same geometric normal, and each ray - a lamp's point or
+// an area light's stratum, at a FINITE distance - AIMED FROM THE LIFTED START at its point (jah_area_strata.glsl's
+// jahAreaRayOrigin), so the segment tested ends on the light: the lift's parallax is the start's alone and vanishes at
+// the light (stage 5's normal lift kept its direction and moved the whole segment: -6.4 codes across a penumbra), and
+// no start runs along a grazing ray past an occluder (stage 5's lift / cos did: unbounded at grazing).
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -184,7 +183,12 @@ void main()
 			const vec2 f = ( vec2( t ) + 0.5 ) / float( size );
 			const vec3 P = r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) +
 						   r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) - r.axisD.xyz * depth;
-			const float lift = r.rect.w;   // the clearance, taken along each ray (the head of this file)
+			// THE CLEARANCE AND ITS NORMAL (the ray origin's one law, the still mode's - the head of this file): the
+			// captured surface's GEOMETRIC normal, the lift the point's float bound plus the record's (rect.w); every
+			// ray starts there and is AIMED FROM THERE at its lamp's point (jahAreaRayOrigin)
+			gnCard = r;
+			const vec3 Ng = jahGeometricNormal( ivec2( t ), ivec2( int( size ) ), depth, P, N, r.axisD.xyz );
+			const float lift = jahRayFloatBound( P, depth ) + r.rect.w;
 			for( uint i = 0u; i < lampCount.x; ++i )
 			{
 				const CardLightRec l = lamps[i];
@@ -223,7 +227,7 @@ void main()
 					{
 						float vq, unusedCl;
 						vec3 unusedDir;
-						const float f = jahAreaStratum( P, N, Ncone, lift, c0, eu, ev, emit, twoSided, n, k, key,
+						const float f = jahAreaStratum( P, Ng, Ncone, lift, c0, eu, ev, emit, twoSided, n, k, key,
 														uint( p.knobs.x ), kLampEnd, vq, unusedDir, unusedCl );
 						if( !( f > 0.0 ) )
 							continue;
@@ -246,14 +250,16 @@ void main()
 				if( !( w > 0.0 ) )
 					continue;   // lights nothing here: its bit stays set
 				float v = 1.0;
-				const float start = jahAreaRayStart( N, L, lift );
-				const vec3 origin = P + L * start;
-				const float reach = d - start - max( l.attenuation.y, 0.0 ) - kLampEnd;
+				const vec3 origin = jahAreaRayOrigin( P, Ng, L, lift );
+				const vec3 toLampO = l.position.xyz - origin;
+				const float dO = length( toLampO );
+				const vec3 Lo = dO > 0.0 ? toLampO / dO : L;
+				const float reach = dO - max( l.attenuation.y, 0.0 ) - kLampEnd;
 				if( reach > 0.0 )
 				{
 					rayQueryEXT rq;
 					rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
-										   uint( p.knobs.x ), origin, 0.0, L, reach );
+										   uint( p.knobs.x ), origin, 0.0, Lo, reach );
 					JAH_RQ_PROCEED( rq )
 					if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 						v = 0.0;

@@ -8866,12 +8866,11 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
     AreaVisParams pp{};
     EyeBasisF eye;
     const unsigned n = std::max(giQualityFacts(scene->giParams().quality).cardAreaStrata, 1u);
-    // THE CLEARANCE: the sun contact's bias rule as stage 7 took it (two full-resolution footprints, the millimetre
-    // floor) - stage 6 replaced that rule for the sun contact with the one ray-origin law (jah_ray_origin.glsl); the
-    // area visibility takes the one form at the merge's item 1, this commit carries stage 7's numbers through
-    constexpr float kAreaVisLiftFootprints = 2.0f, kAreaVisMinLift = 0.001f;
+    // THE CLEARANCE: the ray origin's one law, as the sun contact takes it (rq_area_vis.comp's jahAreaLiftRays): the
+    // drawn surface's footprints (knobs.x) and the depth-rebuilt point's sub-pixel snap (knobs.y)
     areaVisFrame(av.st, pp, lights, cam, view->chainDesc(), w, h, fullW, fullH, n, gatherRestKeyArmed(scene),
-                 av.imagesNeedClear, kAreaVisLiftFootprints, kAreaVisMinLift, float(kAreaVisMask), eye);
+                 av.imagesNeedClear, drawnFootprintsOf(scene, view->chainDesc().lodHysteresis), pointSnapKnob(),
+                 float(kAreaVisMask), eye);
     const bool readback = arm(ArmId::AreaVisReadback, false);
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     if (!av.st.held) {

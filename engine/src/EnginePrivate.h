@@ -1986,11 +1986,12 @@ struct AreaVisState {
 /// ONE FRAME OF IT: the lights packed in HlmsPbs's order, the camera, whether the view is at rest (the camera bit for
 /// bit, the scene's rest key `restKey`, the light set) and so whether it HOLDS (past n^2 rest frames: nothing is
 /// dispatched - `freshImages` never holds), and - not holding - every member of `pp` but the ray tier's alpha table:
-/// the clearance (`liftFootprints` full-resolution footprints at the point's depth, floored at `liftFloor`), the
-/// mask word `mask`, the strata n (`strata`), the sequence and the rest. Returns whether the view holds.
+/// the clearance's two terms, the producer's (`liftA`, `liftB`: the ray tier's drawn footprints and sub-pixel snap -
+/// the ray origin's one law; the no-ray route's 0 and the voxel cell), the mask word `mask`, the strata n (`strata`),
+/// the sequence and the rest. Returns whether the view holds.
 bool areaVisFrame(AreaVisState &st, AreaVisParams &pp, const std::vector<const Ogre::Light *> &lights,
                   const Ogre::Camera *cam, const ChainDesc &cd, unsigned w, unsigned h, unsigned fullW, unsigned fullH,
-                  unsigned strata, unsigned long long restKey, bool freshImages, float liftFootprints, float liftFloor,
+                  unsigned strata, unsigned long long restKey, bool freshImages, float liftA, float liftB,
                   float mask, CameraImageF &eye);
 /// ...and after its dispatches: the camera kept, the pair flipped, the age and the frame advanced.
 void areaVisAdvance(AreaVisState &st, const CameraImageF &eye);

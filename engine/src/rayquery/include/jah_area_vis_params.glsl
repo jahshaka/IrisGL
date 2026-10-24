@@ -44,8 +44,9 @@ JAH_AREA_VIS_PARAMS_BLOCK AreaVisParams
 	vec4 viewAxisZ;
 	/// xy = the trace grid, zw = the full target.
 	vec4 resolution;
-	/// x = the clearance per unit of view distance (perspective; world units orthographic), y = its floor, z = the
-	/// TLAS mask (the shadow casters), w = the trace's divisor (pixels a texel on each axis).
+	/// x, y = the clearance's terms, the producer's (the ray tier's drawn footprints and sub-pixel snap - the ray
+	/// origin's one law; the no-ray route's 0 and the voxel cell), z = the TLAS mask (the shadow casters), w = the
+	/// trace's divisor (pixels a texel on each axis).
 	vec4 knobs;
 	/// x = n (the strata a side), y = the stratum sequence's frame (the rest frame's own index at rest), z = the history
 	/// blend's floor (1 / n^2), w = the view's age (0: the previous images hold nothing - never read).

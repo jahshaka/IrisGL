@@ -99,10 +99,13 @@ void jahAreaVisTrace( ivec2 tc )
 	const vec3 N = normalize( p.viewAxisX.xyz * normalVS.x + p.viewAxisY.xyz * normalVS.y + p.viewAxisZ.xyz * normalVS.z );
 	const float dist = jahAreaViewDistance( rawDepth );
 	const vec3 P = jahAreaWorldAt( uv, dist );
-	// THE CLEARANCE (the producer's: the ray tier's two full-resolution footprints at the point's depth, the floor a
-	// millimetre, taken along each ray - jahAreaRayStart; the no-ray route's the voxel march's own start bias, a cell
-	// of cascade 0, taken along the NORMAL - JAH_AREA_LIFT_ALONG_NORMAL, below)
-	const float lift = max( p.camPos.w < 0.5 ? p.knobs.x : p.knobs.x * dist, p.knobs.y );
+	// THE CLEARANCE AND THE NORMAL IT IS TAKEN ALONG - THE PRODUCER'S, under the ray origin's one law (jah_ray_origin.glsl;
+	// the start jahAreaRayOrigin: the lift along the normal, each ray aimed from there at its stratum's point): the ray
+	// tier's the pixel's own error bounds along its GEOMETRIC normal, the sun contact's (the float bound, the depth-
+	// rebuilt point's error, the drawn surface's bound against level 0); the no-ray route's the voxel march's own start
+	// bias, a cell of cascade 0 along the shaded normal (the cones' jahConeStart; F6, gi.area_contact)
+	vec3 liftN = N;
+	const float lift = JAH_AREA_LIFT( pix, rawDepth, P, N, dist, liftN );
 
 	// ---- THIS FRAME'S SAMPLE: one stratum of each light ------------------------------------------------------------
 	const uint n = clamp( uint( p.strata.x + 0.5 ), 1u, kAreaStrataMax );
@@ -124,26 +127,11 @@ void jahAreaVisTrace( ivec2 tc )
 		const float dc2 = dot( centre - P, centre - P );
 		if( dc2 > p.light[i].eu.w * p.light[i].eu.w )
 			continue;   // past the light's range: it lights nothing here (the pass's window is zero)
-		vec3 wq, originQ;
+		vec3 wq, originQ, wv;
 		float clr2, reachQ;
-		const float f = jahAreaStratumAt( P, N, N, lift, c0, eu, ev, p.light[i].emit.xyz, p.light[i].c0.w != 0.0, n, k,
-										  key, kAreaLampEnd, wq, clr2, originQ, reachQ );
-		vec3 wv = wq;
-#ifdef JAH_AREA_LIFT_ALONG_NORMAL
-		// THE NO-RAY ROUTE'S START, the cones' convention (jahConeStart): a cell along the NORMAL, the march from there
-		// to the stratum's own point. Along the ray (a cell over the cosine: 2 cells at 60 degrees, ~6 at 80) a grazing
-		// ray started past a wall standing at the point's foot, and an area light behind the wall reached the floor
-		// along its base (PHOTON-7 stage 7's read, F6; gi.area_contact). The stratum's weights stay the receiver's.
-		if( f > 0.0 )
-		{
-			const vec3 Q = P + wq * ( reachQ + jahAreaRayStart( N, wq, lift ) + kAreaLampEnd );
-			originQ = P + N * lift;
-			const vec3 dq = Q - originQ;
-			const float dl = length( dq );
-			wv = dq / max( dl, 1e-6 );
-			reachQ = dl - kAreaLampEnd;
-		}
-#endif
+		// (the weights the receiver's - N; the start along liftN, the ray aimed from it at the stratum's point - wv)
+		const float f = jahAreaStratumAt( P, liftN, N, lift, c0, eu, ev, p.light[i].emit.xyz, p.light[i].c0.w != 0.0, n,
+										  k, key, kAreaLampEnd, wq, clr2, originQ, wv, reachQ );
 		const float V = f > 0.0 && reachQ > 0.0 ? JAH_AREA_VISIBLE( originQ, wv, reachQ ) : 1.0;
 		sampleS[i] = f * V * dc2;
 		sampleU[i] = f * dc2;

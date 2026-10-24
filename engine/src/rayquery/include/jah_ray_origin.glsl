@@ -68,6 +68,15 @@ float jahDepthPointError( float raw, float dist, float projB, bool perspective, 
 /// THE ORIGIN: the point `surface` lifted along `geomN` (its surface's geometric normal, on the side the ray leaves
 /// into) by its float bound (`carried` = the distance it was reconstructed along) plus `surfaceBound` (the point's
 /// reconstruction beyond float + the surface's bound against level 0, metres). The caller traces from it with tMin 0.
+/// ONE FORM, AT EVERY RAY (decided at the photon-7r merge on rtreflect.contact, gi.sun_contact_acne and
+/// gi.card_lamp_shadow under both forms; spikes/photon-7/merge): the lift is ALONG THE NORMAL, never along the ray's own
+/// segment (lift / cos: unbounded at grazing - a start past an occluder, an L9 path; measured worse on the contact's
+/// edges and crease and the area light's card penumbra, and red on gi.area_contact). Its cases:
+///   a DIRECTION (the sun, a reflection, a gather or a hit's ray): traced from the origin along it;
+///   a POINT (a lamp, an area light's stratum - a finite distance): the ray AIMED FROM THE ORIGIN at the point, so the
+///     segment tested ends on the light and the lift's parallax vanishes there (jah_area_strata.glsl's
+///     jahAreaRayOrigin writes this case once more: that include is also an Hlms piece, which cannot include this file);
+///   (stage 10 adds a VOXEL SIDE's rays as a third case of this function, never a second law).
 vec3 jahRayOrigin( vec3 surface, vec3 geomN, float carried, float surfaceBound )
 {
 	return surface + geomN * ( jahRayFloatBound( surface, carried ) + surfaceBound );

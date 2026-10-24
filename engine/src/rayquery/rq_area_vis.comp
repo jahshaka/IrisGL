@@ -92,6 +92,29 @@ float jahAreaRayVisible( vec3 originQ, vec3 wq, float reachQ )
 		imageStore( restU2, tc, U2 );                                                                                  \
 	}
 #define JAH_AREA_VISIBLE( originQ, wq, reachQ ) jahAreaRayVisible( originQ, wq, reachQ )
+// THE CLEARANCE AND ITS NORMAL (the ray origin's one law, jah_ray_origin.glsl - the sun contact's terms, rq_sun_contact.comp):
+// the pixel's GEOMETRIC normal (jah_geometric_normal.glsl), its lift the point's float bound, the depth-rebuilt point's
+// error (knobs.y: the sub-pixel snap) and the drawn surface's bound against level 0 at its distance (knobs.x: the drawn
+// footprints)
+#include "jah_rq_finite.glsl"
+#define JAH_GN_RAW( q ) texelFetch( sceneDepth, ( q ), 0 ).x
+#define JAH_GN_WORLD( q, raw ) jahAreaWorldAt( ( vec2( q ) + 0.5 ) / vec2( fullRes ), jahAreaViewDistance( raw ) )
+#include "jah_geometric_normal.glsl"
+#include "jah_ray_origin.glsl"
+float jahAreaLiftRays( ivec2 pix, float raw, vec3 P, vec3 N, float dist, out vec3 geomN )
+{
+	const ivec2 fullRes = ivec2( p.resolution.zw );
+	const bool perspective = p.camPos.w > 0.5;
+	const vec3 V = perspective ? normalize( p.camPos.xyz - P ) : -p.fwd.xyz;
+	geomN = jahGeometricNormal( pix, fullRes, raw, P, N, V );
+	const float pixelSize = length( p.rayDown.xyz ) / float( fullRes.y ) * ( perspective ? dist : 1.0 );
+	const float pointError = jahDepthPointError( raw, dist, p.projParams.y, perspective,
+												 perspective ? ( P - p.camPos.xyz ) / max( dist, 1e-6 ) : p.fwd.xyz,
+												 p.fwd.xyz, geomN, pixelSize, p.knobs.y );
+	return jahRayFloatBound( P, dist ) + pointError +
+		   jahViewDrawnBound( p.knobs.x, P, p.camPos.xyz, p.rayDown.xyz, float( fullRes.y ), perspective );
+}
+#define JAH_AREA_LIFT( pix, raw, P, N, dist, liftN ) jahAreaLiftRays( pix, raw, P, N, dist, liftN )
 #include "jah_half_stochastic.glsl"
 #include "jah_area_vis_law.glsl"
 

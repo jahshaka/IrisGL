@@ -62,7 +62,7 @@ std::vector<const Ogre::Light *> forwardLtcLights(const Ogre::SceneManager *sm) 
 
 bool areaVisFrame(AreaVisState &st, AreaVisParams &pp, const std::vector<const Ogre::Light *> &lights,
                   const Ogre::Camera *cam, const ChainDesc &cd, unsigned w, unsigned h, unsigned fullW, unsigned fullH,
-                  unsigned strata, unsigned long long restKey, bool freshImages, float liftFootprints, float liftFloor,
+                  unsigned strata, unsigned long long restKey, bool freshImages, float liftA, float liftB,
                   float mask, CameraImageF &eye) {
     // ---- THE LIGHTS, in HlmsPbs's order, and the rest's test ----------------
     std::vector<float> lightKey;
@@ -124,13 +124,11 @@ bool areaVisFrame(AreaVisState &st, AreaVisParams &pp, const std::vector<const O
     pp.resolution[1] = float(h);
     pp.resolution[2] = float(fullW);
     pp.resolution[3] = float(fullH);
-    {
-        // THE CLEARANCE: `liftFootprints` full-resolution footprints at the point's depth, floored at `liftFloor`
-        const float span = std::sqrt(eye.rayRight[0] * eye.rayRight[0] + eye.rayRight[1] * eye.rayRight[1] +
-                                     eye.rayRight[2] * eye.rayRight[2]);
-        pp.knobs[0] = liftFootprints * span / float(fullW);
-    }
-    pp.knobs[1] = liftFloor;
+    // THE CLEARANCE'S TERMS, the producer's (jah_area_vis_law.glsl's JAH_AREA_LIFT): the ray tier's drawn footprints and
+    // the depth-rebuilt point's sub-pixel snap (the ray origin's one law, jah_ray_origin.glsl); the no-ray route's 0 and
+    // the voxel march's cell
+    pp.knobs[0] = liftA;
+    pp.knobs[1] = liftB;
     pp.knobs[2] = mask;
     pp.knobs[3] = float(kAreaVisDivisor);
     pp.strata[0] = float(n);
