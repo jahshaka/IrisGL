@@ -1885,6 +1885,11 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             // drops the rest — a scene's second area light renders nothing
             // until this runs. Same lazy arm point, same reasoning.
             lightextras::armAreaLightBudgets(mRoot);
+            // ...AND EVERY PBS-FAMILY HOST HEARS IT NOW (PHOTON-7 stage 7, found by 7-6's no-ray arms): the relay runs
+            // once a frame at a host's first read (tellEveryHlms), so a light set after this frame's relay left Atom's
+            // host with the area light in its pass and no LTC matrix - the Atom twin's permutation compiled that frame
+            // read an undeclared ltcMatrix and failed (gi.card_lamp_shadow_area's first frames, three permutations).
+            tellEveryHlms(mRoot->getHlmsManager(), true);
         }
         // HlmsPbs divides the diffuse by pi (the Lambert BRDF), so a light of
         // intensity I is handed to it as I * pi: a sun of intensity I then lights
