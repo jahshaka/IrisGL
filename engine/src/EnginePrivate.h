@@ -2019,18 +2019,22 @@ public:
     OgreView *mView = nullptr;
 private:
     void bindJob(Ogre::CompositorPassCompute *pass);
-    /// THE STAND-DOWN (PHOTON-7 stage 7): a pass whose inputs are missing WRITES NOTHING, and the shared job holds no
-    /// binding of another view's (a texture that view may have destroyed or resized since): every slot this listener
-    /// binds set to its own stand-in, the parameters an idle block, one group that reads a 0 x 0 target and returns.
+    /// THE STAND-DOWN (PHOTON-7 stage 7): a pass whose inputs are missing - or the frame capture's, for the area
+    /// visibility - WRITES NOTHING, and the shared job holds no binding of another view's (a texture that view may have
+    /// destroyed or resized since): every slot this listener binds set to its own stand-in, the parameters an idle
+    /// block, one group that reads a 0 x 0 target and returns.
     void standDownIntegrate(Ogre::HlmsComputeJob *job);
     void standDownArea(Ogre::HlmsComputeJob *job, bool resolve);
+    /// Is this pass the view's own workspace's (false: the frame capture's - it takes the view's area product, never
+    /// its history)?
+    bool ownPass(const Ogre::CompositorPass *pass) const;
     /// The test door gi.screenBindMissing (the passes read their inputs as missing).
     bool bindMissing() const;
     Ogre::UavBufferPacked *mParams = nullptr, *mParamsIdle = nullptr;
     // ---- the area visibility (OgreAreaVis.cpp) ----
     void bindAreaVis(Ogre::CompositorPassCompute *pass);
     void bindAreaVisResolve(Ogre::CompositorPassCompute *pass);
-    void afterAreaVisResolve();
+    void afterAreaVisResolve(const Ogre::CompositorPass *pass);
     void dropAreaVis();
     AreaVisState mAreaState;
     CameraImageF mAreaEye;

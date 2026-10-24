@@ -258,6 +258,15 @@ void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
     Ogre::HlmsCompute *hc = Ogre::Root::getSingleton().getHlmsManager()->getComputeHlms();
     Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow(Ogre::IdString(kScreenAreaVisJob)) : nullptr;
     if (!job) return;
+    // THE FRAME CAPTURE'S PASS (OgreView::ensureCaptureWorkspace: the view's chain a second time, the same frame, camera
+    // and size, after the view's own workspace): it TAKES the view's product of this frame and keeps no history of its
+    // own. Its trace ran on the view's history - a second rest frame on that frame (another stratum, the pair flipped
+    // twice) and its resolve wrote the view's product - so the live picture after a screenshot was not the one it would
+    // have been (gi.screen_bind (2)); at another size it remade the view's images, the history restarted.
+    if (!ownPass(pass)) {
+        standDownArea(job, false);
+        return;
+    }
     mAreaDispatched = false;
     mAreaMarches = 0ull;
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
@@ -392,8 +401,8 @@ void ScreenGiListener::bindAreaVisResolve(Ogre::CompositorPassCompute *pass) {
     const Ogre::CompositorNode *node = pass ? pass->getParentNode() : nullptr;
     Ogre::TextureGpu *depth = node ? node->getDefinedTexture(Ogre::IdString(kSceneDepthTexture)) : nullptr;
     Ogre::TextureGpu *normals = node ? node->getDefinedTexture(Ogre::IdString("jahGBufNormals")) : nullptr;
-    // (a trace that stood down, or its inputs missing: nothing to resolve)
-    if (!mAreaDispatched || bindMissing() || !depth || !normals) {
+    // (the capture's pass, a trace that stood down, or its inputs missing: nothing to resolve)
+    if (!ownPass(pass) || !mAreaDispatched || bindMissing() || !depth || !normals) {
         standDownArea(job, true);
         return;
     }
@@ -408,7 +417,8 @@ void ScreenGiListener::bindAreaVisResolve(Ogre::CompositorPassCompute *pass) {
     bindBuffer(job, 1u, mAreaParams);
 }
 
-void ScreenGiListener::afterAreaVisResolve() {
+void ScreenGiListener::afterAreaVisResolve(const Ogre::CompositorPass *pass) {
+    if (!ownPass(pass)) return;   // the capture's: it advanced nothing
     if (mAreaDispatched) {
         areaVisAdvance(mAreaState, mAreaEye);
         mAreaFresh = false;

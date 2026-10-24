@@ -136,7 +136,10 @@ void ScreenGiListener::passPreExecute(Ogre::CompositorPass *pass) {
     bind.irradiance = node->getDefinedTexture(Ogre::IdString(kScreenGiIrradiance));
     bind.roughSpec = node->getDefinedTexture(Ogre::IdString(kScreenGiSpecular));
     bind.coneHit = node->getDefinedTexture(Ogre::IdString(kScreenGiConeHit));
-    const bool area = mAreaRan && mAreaVis;
+    // (the view's own passes, and the frame capture's - the same frame, camera and size: it takes the view's product,
+    // never a history of its own; a product of another size is no answer for these pixels)
+    const Ogre::TextureGpu *drawn = pass->getAnyTargetTexture();
+    const bool area = mAreaRan && mAreaVis && drawn && drawn->getWidth() == mAreaFullW && drawn->getHeight() == mAreaFullH;
     // THE PRODUCTS' LAYOUTS, through Ogre's own solver, before the pass reads them (the gather's and the ray tier's
     // rule: the compute passes left them written as UAVs; the pass samples them from its fragment stage - the listener's
     // registration is invisible to the compositor's own barrier analysis)
@@ -159,7 +162,7 @@ void ScreenGiListener::passPreExecute(Ogre::CompositorPass *pass) {
 void ScreenGiListener::passPosExecute(Ogre::CompositorPass *pass) {
     if (!pass || !mView) return;
     if (pass->getType() == Ogre::PASS_COMPUTE) {
-        if (pass->getDefinition()->mIdentifier == kScreenAreaVisResolvePassIdentifier) afterAreaVisResolve();
+        if (pass->getDefinition()->mIdentifier == kScreenAreaVisResolvePassIdentifier) afterAreaVisResolve(pass);
         return;
     }
     if (pass->getType() != Ogre::PASS_SCENE) return;
@@ -169,6 +172,11 @@ void ScreenGiListener::passPosExecute(Ogre::CompositorPass *pass) {
         FogHlmsListener::setProbeGather(scene->sceneManager(), FogHlmsListener::ProbeGatherBind());
         if (mAreaRan && mAreaVis) FogHlmsListener::setAreaVis(scene->sceneManager(), nullptr);
     }
+}
+
+bool ScreenGiListener::ownPass(const Ogre::CompositorPass *pass) const {
+    const Ogre::CompositorNode *node = pass ? pass->getParentNode() : nullptr;
+    return node && mView && node->getWorkspace() == mView->workspace();
 }
 
 bool ScreenGiListener::bindMissing() const {
