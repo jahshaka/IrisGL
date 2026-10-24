@@ -65,10 +65,18 @@ class View;
 /// the observer, per channel, relative to the trip it makes at the zenith (the transmittance table's own integral:
 /// the same three species, the same coefficients, the same ray), times the earth's occlusion of the disc across the
 /// astronomical sunset band. Exactly (1,1,1) at noon — the user's picked colour IS the noon colour — falling, blue
-/// first, as the sun goes down; white when `air.on` is false (no realistic sky). Pure: the game thread calls it with
-/// the scene's published air (Scene::published().atmosphere) while it builds the next record, never a frame late and
-/// never a read of the engine. `toSun` need not be unit length.
+/// first, as the sun goes down; white when `air.on` is false (no realistic sky). Pure: never a read of the engine.
+/// `toSun` need not be unit length. A host building a record tints its sun by THE AIR THAT RECORD SETS
+/// (atmosphereAirOf, below): the published air is the last frame's, so a record that changes the sky and tints by it
+/// lights the new sky with the old sun for a frame (PHOTON-7 stage 7: the sun's colour then landed a frame after the
+/// sky, a second change - every card relit behind the first - that the screen gather's rough lobe showed as a
+/// one-frame dip on a metal sphere, scripting.e2e.sky_swap_transient's repro arm).
 Colour atmosphereSunTint(const PublishedFrame::Atmosphere &air, const Vec3 &toSun);
+/// THE AIR A REALISTIC SKY DESCRIBES (PHOTON-7 stage 7): the model the engine builds its tables from for `sky` (the
+/// one mapping - the engine's own setSky takes its model from it) at the observer's altitude `observerKm` (the
+/// engine's, Scene::published().atmosphere.observerKm: it follows the eye, a continuous input) - atmosphereSunTint's
+/// input for the record that SETS this sky. `on` is true: the caller asks it of a realistic sky only.
+PublishedFrame::Atmosphere atmosphereAirOf(const AtmosphereSky &sky, float observerKm);
 
 /// A renderable scene. Views draw it; several Views may share one, or each may own one.
 /// Owned by the Engine: destroy with Engine::destroyScene().

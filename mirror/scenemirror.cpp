@@ -5466,10 +5466,21 @@ Colour SceneMirror::atmosphereTintFor(const iris::LightNode *light,
     const iris::Vec3 travel = const_cast<iris::LightNode *>(light)->getLightDir();
     if (travel.lengthSquared() < 1e-12f) return white;
     const iris::Vec3 toSun = -travel.normalized();
-    // The ENGINE's air decides whether there is an atmosphere to ask at all (the published `on`: white for every other
-    // sky), and the tint is the boundary's STATELESS function of it (ENGINE-UPGRADE-U3 F-A) — the air as the last frame
-    // left it, which is what the record being built here is drawn under.
-    return jahshaka::engine::atmosphereSunTint(mTarget->published().atmosphere, Vec3(toSun.x(), toSun.y(), toSun.z()));
+    // THE AIR THIS RECORD SETS (PHOTON-7 stage 7): the document's sky - the one buildSky pushes in this very record -
+    // through the engine's one mapping (atmosphereAirOf), at the engine's observer (the published one: it follows the
+    // eye). Not the published air: that is the last frame's, so a record that changed the sky lit it with the old
+    // sun and the tint landed a frame later - a second change behind the first (every card relit; the metal sphere's
+    // rough lobe dipped a frame, scripting.e2e.sky_swap_transient). White for every other sky. The tint is the
+    // boundary's STATELESS function of the air (ENGINE-UPGRADE-U3 F-A).
+    if (!mSource || mSource->skyType != iris::SkyType::REALISTIC) return white;
+    const iris::SkyRealistic &r = mSource->skyRealistic;
+    jahshaka::engine::AtmosphereSky sky;   // the dials buildSky's realistic case pushes (the planet's at their defaults)
+    sky.sunHaze = r.sunHaze;
+    sky.rayleighScale = r.rayleighScale;
+    sky.ozone = r.ozone;
+    sky.groundAlbedo = r.groundAlbedo;
+    const auto air = jahshaka::engine::atmosphereAirOf(sky, mTarget->published().atmosphere.observerKm);
+    return jahshaka::engine::atmosphereSunTint(air, Vec3(toSun.x(), toSun.y(), toSun.z()));
 }
 
 LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun, bool sunKnown,

@@ -1356,11 +1356,13 @@ public:
         float exposureGain = 1.0f);
     /// THE SUN'S TINT (SUN_FOLLOWS_ATMOSPHERE, lane ENGINE-7 item 6): what the
     /// air does to this light's colour at its own elevation, asked of the
-    /// renderer's own sky model (Scene::atmosphereSunTint). White unless
-    /// `light` IS the scene's sun, the sun's "Follows Atmosphere" is on, and
-    /// the scene's sky is the analytic atmosphere — the engine answers the last
-    /// of those itself. ONE value feeds the light and the sun DISC, so the two
-    /// can never disagree about what colour the sun is.
+    /// renderer's own sky model (atmosphereSunTint) for THE AIR THIS RECORD
+    /// SETS (atmosphereAirOf of the document's sky - never the last frame's
+    /// published air, which lagged a sky change by a frame: PHOTON-7 stage 7).
+    /// White unless `light` IS the scene's sun, the sun's "Follows Atmosphere"
+    /// is on, and the scene's sky is the analytic atmosphere. ONE value feeds
+    /// the light and the sun DISC, so the two can never disagree about what
+    /// colour the sun is.
     jahshaka::engine::Colour atmosphereTintFor(const iris::LightNode *light,
                                                const iris::LightNode *sun) const;
     /// Re-pushes the SUN's light description when its atmosphere tint moved.

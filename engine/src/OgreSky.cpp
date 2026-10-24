@@ -397,6 +397,19 @@ bool OgreScene::applySkyCubemap(const TextureId faces[6]) {
     } JAH_CATCH(mError, false);
 }
 
+// THE MODEL A SKY DESCRIBES, its dials clamped - the ONE mapping (the tables' setModel, applySkyAtmosphere below, and
+// the host's tint through atmosphereAirOf for the record that sets the sky).
+static AtmosphereModel atmosphereModelOf(const AtmosphereSky &sky) {
+    AtmosphereModel m;
+    m.mieScale = std::max(0.0f, sky.sunHaze);
+    m.rayleighScale = std::max(0.0f, sky.rayleighScale);
+    m.ozone = sky.ozone;
+    m.groundAlbedo = std::max(0.0f, std::min(1.0f, sky.groundAlbedo));
+    m.planetRadiusKm = std::max(1.0f, sky.planetRadiusKm);
+    m.atmosphereHeightKm = std::max(1.0f, sky.atmosphereHeightKm);
+    return m;
+}
+
 // ---------------------------------------------------------------------------
 // THE PLANET'S ATMOSPHERE (SKY-ATMOSPHERE-1)
 // ---------------------------------------------------------------------------
@@ -425,14 +438,7 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
             destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), mSkyOwnedTex);
             mSkyOwnedTex = nullptr;
         }
-        AtmosphereModel m;
-        m.mieScale = std::max(0.0f, sky.sunHaze);
-        m.rayleighScale = std::max(0.0f, sky.rayleighScale);
-        m.ozone = sky.ozone;
-        m.groundAlbedo = std::max(0.0f, std::min(1.0f, sky.groundAlbedo));
-        m.planetRadiusKm = std::max(1.0f, sky.planetRadiusKm);
-        m.atmosphereHeightKm = std::max(1.0f, sky.atmosphereHeightKm);
-        mAtmosphere->setModel(m);
+        mAtmosphere->setModel(atmosphereModelOf(sky));
         mAtmosphere->setSun(Ogre::Vector3(sky.sunDir[0], sky.sunDir[1], sky.sunDir[2]), sky.hasSun);
         mAtmosphere->setSunIlluminance(
             Ogre::Vector3(sky.sunIlluminance.r, sky.sunIlluminance.g, sky.sunIlluminance.b));
@@ -473,6 +479,19 @@ namespace jahshaka { namespace engine {
 
 // THE STATELESS HALF (ENGINE-UPGRADE-U3 F-A; Engine.h states the contract). The same integral the sky is drawn with,
 // over the published model and observer: what the scene's getter computed, with nothing of the scene read.
+PublishedFrame::Atmosphere atmosphereAirOf(const AtmosphereSky &sky, float observerKm) {
+    const detail::AtmosphereModel m = detail::atmosphereModelOf(sky);
+    PublishedFrame::Atmosphere air;
+    air.on = true;
+    air.rayleighScale = m.rayleighScale;
+    air.mieScale = m.mieScale;
+    air.ozone = m.ozone;
+    air.planetRadiusKm = m.planetRadiusKm;
+    air.atmosphereHeightKm = m.atmosphereHeightKm;
+    air.observerKm = observerKm;
+    return air;
+}
+
 Colour atmosphereSunTint(const PublishedFrame::Atmosphere &air, const Vec3 &toSunIn) {
     const Colour white(1.0f, 1.0f, 1.0f, 1.0f);
     if (!air.on) return white;
