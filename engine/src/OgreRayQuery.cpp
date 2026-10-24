@@ -5413,9 +5413,6 @@ struct ReflectParams {
     /// pass fills (last frame's count, in the other, decides the path), [1] the tail's rays a frame (the rest's count /
     /// kReflectRestTailDivisor), [2] L, [3] 1 when the compact pass is dispatched this frame.
     float compact[4] = {};
-    /// THE MOVING RAYS (GiQualityFacts::reflectMoveRays; rq_reflect.comp's moving batch): [0] the rays a glossy texel
-    /// traces a frame while the view moves (1 at rest: the rest's batch is its own).
-    float moving[4] = {};
 };
 /// The display slope table's log axis (jah_reflect_rest.glsl's twins): ln 1e-4 .. ln 100 in 63 steps.
 constexpr double kDisplayLnMin = -9.210340371976184;
@@ -6642,8 +6639,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // the tile pass lists this frame's converging texels in the half it flips to, and the compact pass takes them when
     // last frame's list (the other half) fit.
     const bool compactArmed = !hold && eyeLayers == 1u && rv.restFrames >= 2u && !restReference;
-    pp.moving[0] = rv.restFrames == 0u ? float(giQualityFacts(scene->giParams().quality).reflectRestRays > 1u ? 2u : 1u)
-                                       : 1.0f;
     if (!hold) rv.compactHalf ^= 1u;
     pp.compact[0] = float(rv.compactHalf);
     pp.compact[1] = float(rv.restRayCount / kReflectRestTailDivisor);
