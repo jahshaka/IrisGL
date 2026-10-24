@@ -124,6 +124,7 @@ layout( rgba8, set = 0, binding = 8 ) uniform image2D sunVis;
 const float kLampEnd = 0.05;
 // THE AREA LIGHT'S STRATA (PHOTON-7 stage 7, 7-A): one text with the pixel's trace - the key, the one origin function,
 // a stratum's form factor and ray.
+#define JAH_AREA_STRATA_RAY 1   // the stratum seen by one ray (jahAreaStratum)
 #include "jah_area_strata.glsl"
 /// THE RELIGHT'S DIFFUSE SHAPE (JahCardLight_cs.glsl's jahCardDiffuse, the same text - BRDF_Default's diffuse at
 /// V = N, times NdotL): the weight a lamp's visibility takes in the byte is its share of the relight's own sum.

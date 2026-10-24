@@ -27,9 +27,11 @@
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsComputeJob.h>
 #include <OgreHlmsManager.h>
+#include <OgreRenderSystem.h>
 #include <OgreRoot.h>
 #include <OgreSceneManager.h>
 #include <OgreTextureGpu.h>
+#include <OgreTextureGpuManager.h>
 #include <Vao/OgreUavBufferPacked.h>
 #include <Vao/OgreVaoManager.h>
 
@@ -82,21 +84,34 @@ void expandCameraImageToTarget(CameraImageF &e, const ChainDesc &cd, unsigned fu
 }
 
 ScreenGiListener::~ScreenGiListener() {
-    if (mParams) {
-        Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
-        if (rs && rs->getVaoManager()) rs->getVaoManager()->destroyUavBuffer(mParams);
-        mParams = nullptr;
+    dropAreaVis();
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
+    Ogre::TextureGpuManager *tm = rs ? rs->getTextureGpuManager() : nullptr;
+    for (Ogre::TextureGpu *&t : mAreaStandIn) {
+        if (t && tm) tm->destroyTexture(t);
+        t = nullptr;
+    }
+    for (Ogre::UavBufferPacked **b : { &mParams, &mAreaParams, &mAreaChain, &mAreaIdle }) {
+        if (*b && vao) vao->destroyUavBuffer(*b);
+        *b = nullptr;
     }
 }
 
 void ScreenGiListener::passEarlyPreExecute(Ogre::CompositorPass *pass) {
     if (!pass || !mView || pass->getType() != Ogre::PASS_COMPUTE) return;
-    if (pass->getDefinition()->mIdentifier != kScreenIntegratePassIdentifier) return;
-    bindJob(static_cast<Ogre::CompositorPassCompute *>(pass));
+    const Ogre::uint32 id = pass->getDefinition()->mIdentifier;
+    if (id == kScreenIntegratePassIdentifier)
+        bindJob(static_cast<Ogre::CompositorPassCompute *>(pass));
+    else if (id == kScreenAreaVisPassIdentifier)
+        bindAreaVis(static_cast<Ogre::CompositorPassCompute *>(pass));
+    else if (id == kScreenAreaVisResolvePassIdentifier)
+        bindAreaVisResolve(static_cast<Ogre::CompositorPassCompute *>(pass));
 }
 
 void ScreenGiListener::passPreExecute(Ogre::CompositorPass *pass) {
-    if (!pass || !mView || pass->getType() != Ogre::PASS_SCENE) return;
+    if (!pass || !mView) return;
+    if (pass->getType() != Ogre::PASS_SCENE) return;
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
     if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
     OgreScene *scene = mView->ogreScene();
@@ -106,16 +121,39 @@ void ScreenGiListener::passPreExecute(Ogre::CompositorPass *pass) {
     bind.irradiance = node->getDefinedTexture(Ogre::IdString(kScreenGiIrradiance));
     bind.roughSpec = node->getDefinedTexture(Ogre::IdString(kScreenGiSpecular));
     bind.coneHit = node->getDefinedTexture(Ogre::IdString(kScreenGiConeHit));
+    const bool area = mAreaRan && mAreaVis;
+    // THE PRODUCTS' LAYOUTS, through Ogre's own solver, before the pass reads them (the gather's and the ray tier's
+    // rule: the compute passes left them written as UAVs; the pass samples them from its fragment stage - the listener's
+    // registration is invisible to the compositor's own barrier analysis)
+    {
+        Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+        Ogre::BarrierSolver &solver = rs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        for (Ogre::TextureGpu *t : { bind.irradiance, bind.roughSpec, bind.coneHit, area ? mAreaVis : nullptr })
+            if (t)
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                         1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        rs->executeResourceTransition(trans);
+    }
     if (bind.irradiance && bind.roughSpec && bind.coneHit)
         FogHlmsListener::setProbeGather(scene->sceneManager(), bind);
+    // ...and THE AREA LIGHTS' VISIBILITY (OgreAreaVis.cpp), while it traces or holds
+    if (area) FogHlmsListener::setAreaVis(scene->sceneManager(), mAreaVis);
 }
 
 void ScreenGiListener::passPosExecute(Ogre::CompositorPass *pass) {
-    if (!pass || !mView || pass->getType() != Ogre::PASS_SCENE) return;
+    if (!pass || !mView) return;
+    if (pass->getType() == Ogre::PASS_COMPUTE) {
+        if (pass->getDefinition()->mIdentifier == kScreenAreaVisResolvePassIdentifier) afterAreaVisResolve();
+        return;
+    }
+    if (pass->getType() != Ogre::PASS_SCENE) return;
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
     if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
-    if (OgreScene *scene = mView->ogreScene())
+    if (OgreScene *scene = mView->ogreScene()) {
         FogHlmsListener::setProbeGather(scene->sceneManager(), FogHlmsListener::ProbeGatherBind());
+        if (mAreaRan && mAreaVis) FogHlmsListener::setAreaVis(scene->sceneManager(), nullptr);
+    }
 }
 
 void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {

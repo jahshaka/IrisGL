@@ -1197,6 +1197,15 @@ constexpr const char *kScreenIntegrateJob = "Jahshaka/ScreenIntegrate";
 constexpr const char *kScreenGiIrradiance = "jahScreenIrradiance";
 constexpr const char *kScreenGiSpecular = "jahScreenSpecular";
 constexpr const char *kScreenGiConeHit = "jahScreenConeHit";
+/// THE NO-RAY ROUTE'S AREA LIGHT VISIBILITY (PHOTON-7 stage 7, 7-6; OgreAreaVis.cpp): its two compute passes right
+/// after the screen integrate - the trace (one stratum of each forward LTC light a half-resolution texel a frame, seen
+/// through the voxel chain's shadow march) and the resolve (the joint-bilateral upsample into `jahAreaVis`) - whose jobs
+/// the view's screen-GI listener binds whole in their early pre-execute (its images exist only while an LTC light is in
+/// the forward set). Stamped on exactly those passes.
+constexpr Ogre::uint32 kScreenAreaVisPassIdentifier = 25006u;
+constexpr Ogre::uint32 kScreenAreaVisResolvePassIdentifier = 25007u;
+constexpr const char *kScreenAreaVisJob = "Jahshaka/ScreenAreaVis";
+constexpr const char *kScreenAreaVisResolveJob = "Jahshaka/ScreenAreaVisResolve";
 /// THE HIT LIST (PHOTON-7 stage 0, the clean form of PHOTON-2's demand-sized list; ChainDesc::hitDecode,
 /// OgreView::sizeHitList). Its records are a LIST, not a picture: kHitListWidth records a row (a layout choice, fixed).
 /// It is CREATED at kHitListCreateShare x W x H x the eyes records (the old fixed list's capacity for the target, which
@@ -1927,20 +1936,114 @@ CameraImageF cameraImage(bool ortho, const Ogre::Vector3 &pos, const Ogre::Quate
 /// ...widened from a letterbox's shot to the whole target (the bars hold cleared depth: every job declines them).
 void expandCameraImageToTarget(CameraImageF &e, const ChainDesc &cd, unsigned fullW, unsigned fullH);
 
+// ---- THE PIXEL'S AREA LIGHT VISIBILITY, BOTH PRODUCERS' ONE HOST TEXT (PHOTON-7 stage 7: 7-A's, shared at 7-6;
+// OgreAreaVis.cpp) - the ray tier (OgreRayQuery.cpp) and the no-ray route (the listener below) take the forward LTC
+// set, the parameter block, the view's history and rest state and its frame's numbers from here; only the images, the
+// jobs and the visibility differ.
+/// The parameter block, member for member jah_area_vis_params.glsl's (every member a vec4: std140 and std430 alike).
+struct AreaVisLightParams {
+    float c0[4] = {};
+    float eu[4] = {};
+    float ev[4] = {};
+    float emit[4] = {};
+};
+struct AreaVisParams {
+    float camPos[4] = {};
+    float rayTL[4] = {};
+    float rayRight[4] = {};
+    float rayDown[4] = {};
+    float fwd[4] = {};
+    float prevCamPos[4] = {};
+    float prevRayTL[4] = {};
+    float prevRayRight[4] = {};
+    float prevRayDown[4] = {};
+    float prevFwd[4] = {};
+    float projParams[4] = {};
+    float viewAxisX[4] = {};
+    float viewAxisY[4] = {};
+    float viewAxisZ[4] = {};
+    float resolution[4] = {};
+    float knobs[4] = {};
+    float strata[4] = {};
+    float rest[4] = {};
+    float alpha[4] = {};
+    float lights[4] = {};
+    AreaVisLightParams light[4];
+};
+static_assert(sizeof(AreaVisParams) % 16u == 0u, "the area visibility's block is whole vec4s");
+/// The trace's grid: one texel a 2 x 2 block (the spec's half resolution), both producers.
+constexpr unsigned kAreaVisDivisor = 2u;
+/// THE FORWARD LTC SET as HlmsPbs takes it for the pass (OgreHlms.cpp's light gathering, OgreHlmsPbs.cpp's
+/// fillBuffersFor walk): the scene manager's global light list's LT_AREA_LTC lights in its order, the first
+/// kAreaLtcLimit - so channel i of the product is the light the LTC loop reads at index i.
+std::vector<const Ogre::Light *> forwardLtcLights(const Ogre::SceneManager *sm);
+/// A VIEW'S AREA VISIBILITY STATE (either producer's): the history's age and ping-pong, the rest, the previous camera
+/// (the five numbers) and the light set it traced.
+struct AreaVisState {
+    unsigned frame = 0u, flip = 0u, age = 0u, restFrames = 0u, lights = 0u, strata = 0u;
+    unsigned long long restKey = 0ull;
+    float prev[5][4] = {};
+    std::vector<float> lightKey;
+    bool held = false;
+};
+/// ONE FRAME OF IT: the lights packed in HlmsPbs's order, the camera, whether the view is at rest (the camera bit for
+/// bit, the scene's rest key `restKey`, the light set) and so whether it HOLDS (past n^2 rest frames: nothing is
+/// dispatched - `freshImages` never holds), and - not holding - every member of `pp` but the ray tier's alpha table:
+/// the clearance (`liftFootprints` full-resolution footprints at the point's depth, floored at `liftFloor`), the
+/// mask word `mask`, the strata n (`strata`), the sequence and the rest. Returns whether the view holds.
+bool areaVisFrame(AreaVisState &st, AreaVisParams &pp, const std::vector<const Ogre::Light *> &lights,
+                  const Ogre::Camera *cam, const ChainDesc &cd, unsigned w, unsigned h, unsigned fullW, unsigned fullH,
+                  unsigned strata, unsigned long long restKey, bool freshImages, float liftFootprints, float liftFloor,
+                  float mask, CameraImageF &eye);
+/// ...and after its dispatches: the camera kept, the pair flipped, the age and the frame advanced.
+void areaVisAdvance(AreaVisState &st, const CameraImageF &eye);
+/// The ray tier's views' part of a scene's area visibility status (OgreRayQuery.cpp; nothing where the tier is compiled
+/// out) - OgreScene::areaVisStatus adds the no-ray route's (OgreAreaVis.cpp).
+void rayTierAreaVisStatsInto(const OgreEngine *engine, const OgreScene *scene, AreaVisStatus &st);
+
 /// THE NO-RAY ROUTE'S SCREEN INTEGRATE, a view's half (PHOTON-7 stage 7, 7-6; OgreScreenIntegrate.cpp): binds the
 /// compute pass's world caches and parameters in its early pre-execute, and registers its three targets with the Hlms
 /// listener around every PrePassUse pass of the view (pass-scoped, as the gather's). One per view, through
 /// OgreView::addWorkspaceListener (the capture's workspace rides it too).
+/// ...AND THE ROUTE'S AREA LIGHT VISIBILITY (7-6; OgreAreaVis.cpp): binds its two passes' jobs whole (the images its
+/// own, made while an LTC light is in the forward set, given back when none is) and registers `jahAreaVis` beside the
+/// three targets.
 class ScreenGiListener final : public Ogre::CompositorWorkspaceListener {
 public:
     ~ScreenGiListener();
     void passEarlyPreExecute(Ogre::CompositorPass *pass) override;
     void passPreExecute(Ogre::CompositorPass *pass) override;
     void passPosExecute(Ogre::CompositorPass *pass) override;
+    /// The route's area visibility as the scene publishes it (ScenePublished::areaVis; the ray tier's when it ran).
+    void areaVisStatsInto(const OgreScene *scene, AreaVisStatus &st) const;
     OgreView *mView = nullptr;
 private:
     void bindJob(Ogre::CompositorPassCompute *pass);
     Ogre::UavBufferPacked *mParams = nullptr;
+    // ---- the area visibility (OgreAreaVis.cpp) ----
+    void bindAreaVis(Ogre::CompositorPassCompute *pass);
+    void bindAreaVisResolve(Ogre::CompositorPassCompute *pass);
+    void afterAreaVisResolve();
+    void dropAreaVis();
+    AreaVisState mAreaState;
+    CameraImageF mAreaEye;
+    /// The images: the sums' pairs (a set a word of four halves: S U, S2 U2), the surface words' pair, the rest means -
+    /// at the trace's size - and the product; and the 1 x 1 stand-ins the passes bind while no LTC light is in view.
+    Ogre::TextureGpu *mAreaSU[2] = {}, *mAreaS2U2[2] = {}, *mAreaG[2] = {}, *mAreaRestSU = nullptr,
+                     *mAreaRestS2U2 = nullptr, *mAreaVis = nullptr;
+    Ogre::TextureGpu *mAreaStandIn[3] = {};
+    Ogre::UavBufferPacked *mAreaParams = nullptr, *mAreaChain = nullptr, *mAreaIdle = nullptr;
+    unsigned mAreaW = 0u, mAreaH = 0u, mAreaFullW = 0u, mAreaFullH = 0u;
+    bool mAreaFresh = false, mAreaRan = false, mAreaDispatched = false;
+    unsigned long long mAreaMarches = 0ull, mAreaVramBytes = 0ull;
+    std::string mAreaReason;
+    /// THE READBACK (the arm area.visReadback): a ring of tickets over the product, decoded once a transfer is done.
+    static constexpr unsigned kAreaReadbacks = 4u;
+    Ogre::AsyncTextureTicket *mAreaTickets[kAreaReadbacks] = {};
+    bool mAreaTicketLive[kAreaReadbacks] = {};
+    unsigned mAreaTicketNext = 0u;
+    std::vector<unsigned char> mAreaVisHost;
+    unsigned mAreaVisHostW = 0u, mAreaVisHostH = 0u;
 };
 
 // ---------------------------------------------------------------------------
@@ -7339,6 +7442,8 @@ public:
     /// Called only by the VR session, on the View it owns.
     void setStereo(bool on, const std::string &cullCamera);
     bool stereo() const { return mStereo; }
+    /// The no-ray route's screen-GI listener (PHOTON-7 stage 7, 7-6; null where the chain gathers or draws nothing).
+    const ScreenGiListener *screenGiListener() const { return mScreenGiListener.get(); }
     /// THE ONE-SESSION REFLECTION OVERRIDE (lane EYE-GRADE-1). The SSR row a
     /// stereo view renders with is the PROJECT's — the mirror pushes it here
     /// like it does into the desktop's view — and this is `vr.begin({

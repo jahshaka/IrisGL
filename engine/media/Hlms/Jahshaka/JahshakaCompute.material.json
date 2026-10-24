@@ -319,6 +319,31 @@
 				"jah_si_sdf" : 0
 			}
 		},
+		"Jahshaka/ScreenAreaVis" :
+		{
+			"threads_per_group" : [8, 8, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahScreenAreaVis_cs",
+			"thread_groups_based_on_uav" : { "slot" : 0, "divisor" : [1, 1, 1] },
+			"textures" : [{}, {}, {}, {}, {}, {}],
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahAreaVisParams_piece_all.any", "JahAreaStrata_piece_all.any", "JahReproject_piece_all.any", "JahAreaVisLaw_piece_all.any", "JahVoxelSample_piece_all.any", "LightInjection_piece_cs.any"],
+			"inform_shader_of_texture_size" : false,
+			"inform_shader_of_texture_data_change" : true,
+			"uav_units" : 7,
+			"properties" : { "hlms_num_vct_cascades" : 0 }
+		},
+		"Jahshaka/ScreenAreaVisResolve" :
+		{
+			"threads_per_group" : [8, 8, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahScreenAreaVisResolve_cs",
+			"thread_groups_based_on_uav" : { "slot" : 0, "divisor" : [1, 1, 1] },
+			"textures" : [{}, {}, {}, {}, {}],
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahAreaVisParams_piece_all.any", "JahAreaVisLaw_piece_all.any"],
+			"inform_shader_of_texture_size" : false,
+			"inform_shader_of_texture_data_change" : true,
+			"uav_units" : 2
+		},
 
 		"Jahshaka/CardAccumulate" :
 		{

@@ -1402,16 +1402,16 @@ private:
         /// The product the pixel reads (an Ogre texture: it reaches HlmsPbs through the listener).
         Ogre::TextureGpu *vis = nullptr;
         unsigned w = 0, h = 0, fullW = 0, fullH = 0, divisor = 2;
-        unsigned frame = 0, flip = 0, age = 0, restFrames = 0;
-        unsigned long long restKey = 0ull;
-        /// The previous frame's camera (the five numbers) and the light set it traced (the rest's test).
-        float prev[5][4] = {};
-        std::vector<float> lightKey;
+        /// The history's age and ping-pong, the rest, the previous camera and the light set (both producers' one
+        /// state: EnginePrivate.h's AreaVisState).
+        AreaVisState st;
         const Ogre::SceneManager *sceneMgr = nullptr;
         OgreScene *scene = nullptr;
-        bool ran = false, held = false, finishPending = false, bound = false;
+        bool ran = false, finishPending = false, bound = false;
         uint32_t boundFrame = 0xFFFFFFFFu;
-        unsigned lights = 0, strata = 0;
+        /// The frame it last ran (a view the tier no longer records - rays switched off, the chain gone to the no-ray
+        /// route - is not reported: the scene's status is its current producer's).
+        uint32_t ranFrame = 0u;
         unsigned long long rays = 0ull, vramBytes = 0ull;
         float cpuMs = -1.0f;
         std::string reason;
@@ -8107,57 +8107,13 @@ void RayQueryTier::sunContactStatsInto(const OgreScene *scene, SunContactStatus 
 // multiplies light i's LTC diffuse and specular by.
 namespace {
 
-/// The parameter block, std140, mirroring jah_area_vis_params.glsl member for member.
-struct AreaVisLightParams {
-    float c0[4] = {};
-    float eu[4] = {};
-    float ev[4] = {};
-    float emit[4] = {};
-};
-struct AreaVisParams {
-    float camPos[4] = {};
-    float rayTL[4] = {};
-    float rayRight[4] = {};
-    float rayDown[4] = {};
-    float fwd[4] = {};
-    float prevCamPos[4] = {};
-    float prevRayTL[4] = {};
-    float prevRayRight[4] = {};
-    float prevRayDown[4] = {};
-    float prevFwd[4] = {};
-    float projParams[4] = {};
-    float viewAxisX[4] = {};
-    float viewAxisY[4] = {};
-    float viewAxisZ[4] = {};
-    float resolution[4] = {};
-    float knobs[4] = {};
-    float strata[4] = {};
-    float rest[4] = {};
-    float alpha[4] = {};
-    float lights[4] = {};
-    AreaVisLightParams light[4];
-};
-static_assert(sizeof(AreaVisParams) % 16u == 0u, "the area visibility's block is whole vec4s (std140)");
+/// (The parameter block, AreaVisParams, is both producers' one text: EnginePrivate.h.)
 constexpr unsigned kAreaVisBindings = 19u;
 constexpr unsigned kAreaResolveBindings = 9u;
-/// The trace's grid: one texel a 2 x 2 block (the spec's half resolution).
-constexpr unsigned kAreaVisDivisor = 2u;
 /// What the area rays are tested against: every shadow caster, still and moving (the cards' lamps mode's mask).
 constexpr unsigned kAreaVisMask = kRayMaskStillCaster | kRayMaskMoverCaster;
 
-/// THE FORWARD LTC SET as HlmsPbs takes it for the pass (OgreHlms.cpp's light gathering, OgreHlmsPbs.cpp's
-/// fillBuffersFor walk): the scene manager's global light list's LT_AREA_LTC lights in its order, the first
-/// kAreaLtcLimit - so channel i of the product is the light the LTC loop reads at index i.
-std::vector<const Ogre::Light *> forwardLtcLights(const Ogre::SceneManager *sm) {
-    std::vector<const Ogre::Light *> out;
-    if (!sm) return out;
-    for (const Ogre::Light *l : sm->getGlobalLightList().lights) {
-        if (!l || l->getType() != Ogre::Light::LT_AREA_LTC) continue;
-        out.push_back(l);
-        if (out.size() >= size_t(detail::lightextras::kAreaLtcLimit)) break;
-    }
-    return out;
-}
+/// (THE FORWARD LTC SET, forwardLtcLights, is both producers' one text: OgreAreaVis.cpp.)
 
 }   // namespace
 
@@ -8290,7 +8246,7 @@ void RayQueryTier::dropAreaVis(AreaVisView &av) {
     }
     retireTexture(av.vis);
     av.w = av.h = 0;
-    av.age = 0;
+    av.st.age = 0;
     av.bound = false;
 }
 
@@ -8331,19 +8287,20 @@ void RayQueryTier::areaVisStatsInto(const OgreScene *scene, AreaVisStatus &st) c
     for (const auto &kv : mAreaVis) {
         const AreaVisView &av = kv.second;
         if (av.scene != scene) continue;
-        if (!av.ran) {
+        if (!av.ran || av.ranFrame + 1u < frameNow()) {
+            if (av.ran) continue;   // a view the tier stopped recording: not this scene's producer now
             if (st.reason.empty()) st.reason = av.reason;
             continue;
         }
         st.running = true;
-        st.lights = av.lights;
-        st.strata = av.strata;
+        st.lights = av.st.lights;
+        st.strata = av.st.strata;
         st.traceW = av.w;
         st.traceH = av.h;
         st.targetW = av.fullW;
         st.targetH = av.fullH;
-        st.restFrames = av.restFrames;
-        st.held = av.held;
+        st.restFrames = av.st.restFrames;
+        st.held = av.st.held;
         st.rays += av.rays;
         st.vramBytes += av.vramBytes;
         st.traceMs = std::max(st.traceMs, monitor::lastGpuMs("area.vis", kv.first));
@@ -8359,11 +8316,11 @@ void RayQueryTier::areaVisStatsInto(const OgreScene *scene, AreaVisStatus &st) c
     if (!st.running && mAreaFailed) st.reason = mAreaFailReason;
 }
 
-AreaVisStatus OgreScene::areaVisStatus() const {
-    AreaVisStatus st;
-    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->areaVisStatsInto(this, st);
-    return st;
+void rayTierAreaVisStatsInto(const OgreEngine *engine, const OgreScene *scene, AreaVisStatus &st) {
+    if (engine && engine->mRayTier) engine->mRayTier->areaVisStatsInto(scene, st);
 }
+
+
 
 void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass) {
     if (!isOpen() || !view || !pass) return;
@@ -8453,56 +8410,24 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
         av.fullH = fullH;
         av.divisor = divisor;
         av.imagesNeedClear = true;
-        av.age = 0;
-        av.restFrames = 0;
+        av.st.age = 0;
+        av.st.restFrames = 0;
         // the two sets' sums' pairs (8 x 8 B), the surface words' pair (2 x 16 B), the rest means (4 x 8 B), the product
         // (8 B a pixel)
         av.vramBytes = (unsigned long long)w * h * (8u * 8u + 2u * 16u + 4u * 8u) + (unsigned long long)fullW * fullH * 8u;
     }
 
-    // ---- THE LIGHTS, in HlmsPbs's order, and the rest's test ----------------
+    // ---- THE FRAME: the lights in HlmsPbs's order, the camera, the rest (both producers' one text) ----
     AreaVisParams pp{};
-    std::vector<float> lightKey;
-    for (size_t i = 0; i < lights.size() && i < 4u; ++i) {
-        const Ogre::Light *l = lights[i];
-        Ogre::Vector3 corner[4];
-        detail::lightextras::areaLightCorners(l, corner);
-        const Ogre::Vector3 eu = corner[1] - corner[0], ev = corner[3] - corner[0];
-        const Ogre::Vector3 emit = l->getDerivedDirection();
-        put3(pp.light[i].c0, corner[0], l->getDoubleSided() ? 1.0f : 0.0f);
-        put3(pp.light[i].eu, eu, l->getAttenuationRange());
-        put3(pp.light[i].ev, ev, 0.0f);
-        put3(pp.light[i].emit, emit, 0.0f);
-        for (const float *v : { pp.light[i].c0, pp.light[i].eu, pp.light[i].ev, pp.light[i].emit })
-            lightKey.insert(lightKey.end(), v, v + 4);
-    }
-    av.lights = unsigned(std::min<size_t>(lights.size(), 4u));
-    pp.lights[0] = float(av.lights);
-
-    // ---- THE CAMERA, and whether the view is at rest -----------------------
-    const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
-    const Ogre::Quaternion q = cam->getDerivedOrientation();
-    Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
-    cam->getFrustumExtents(fl, fr, ft, fb, ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
-    EyeBasisF eye = eyeBasis(ortho, cam->getDerivedPosition(), q, float(fl), float(fr), float(ft), float(fb));
-    expandEyeToTarget(eye, view->chainDesc(), fullW, fullH);
-    const float *now[5] = { eye.camPos, eye.rayTL, eye.rayRight, eye.rayDown, eye.fwd };
-    bool sameCamera = av.age > 0u;
-    for (int k = 0; k < 5 && sameCamera; ++k) sameCamera = std::memcmp(av.prev[k], now[k], sizeof(av.prev[k])) == 0;
-    const unsigned long long restKey = gatherRestKeyArmed(scene);
-    const bool still = sameCamera && restKey == av.restKey && lightKey == av.lightKey;
-    av.restKey = restKey;
-    if (lightKey != av.lightKey) av.age = 0u;   // a light added, removed or moved: the sums are another set's
-    av.lightKey = lightKey;
+    EyeBasisF eye;
     const unsigned n = std::max(giQualityFacts(scene->giParams().quality).cardAreaStrata, 1u);
-    av.strata = n;
-    av.restFrames = still ? std::min(av.restFrames + 1u, 1u << 20) : 0u;
-    // THE HOLD: past n^2 rest frames the rest mean is every stratum once - nothing is dispatched
-    av.held = still && av.restFrames > n * n && !av.imagesNeedClear;
+    // THE CLEARANCE: the sun contact's bias rule (two full-resolution footprints, the millimetre floor)
+    areaVisFrame(av.st, pp, lights, cam, view->chainDesc(), w, h, fullW, fullH, n, gatherRestKeyArmed(scene),
+                 av.imagesNeedClear, kSunContactLiftFootprints, kSunContactMinBias, float(kAreaVisMask), eye);
     const bool readback = arm(ArmId::AreaVisReadback, false);
     VkCommandBuffer cmd = VK_NULL_HANDLE;
-    if (!av.held) {
-        const unsigned ring = av.frame % kReflectRing;
+    if (!av.st.held) {
+        const unsigned ring = av.st.frame % kReflectRing;
         if (!av.params[ring].buffer &&
             !makeBuffer(sizeof(AreaVisParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, av.params[ring], err)) {
             decline("the parameter buffer could not be made");
@@ -8521,43 +8446,6 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
                 return;
             }
         }
-        memcpy(pp.camPos, eye.camPos, sizeof(pp.camPos));
-        memcpy(pp.rayTL, eye.rayTL, sizeof(pp.rayTL));
-        memcpy(pp.rayRight, eye.rayRight, sizeof(pp.rayRight));
-        memcpy(pp.rayDown, eye.rayDown, sizeof(pp.rayDown));
-        memcpy(pp.fwd, eye.fwd, sizeof(pp.fwd));
-        memcpy(pp.prevCamPos, av.age ? av.prev[0] : eye.camPos, sizeof(pp.prevCamPos));
-        memcpy(pp.prevRayTL, av.age ? av.prev[1] : eye.rayTL, sizeof(pp.prevRayTL));
-        memcpy(pp.prevRayRight, av.age ? av.prev[2] : eye.rayRight, sizeof(pp.prevRayRight));
-        memcpy(pp.prevRayDown, av.age ? av.prev[3] : eye.rayDown, sizeof(pp.prevRayDown));
-        memcpy(pp.prevFwd, av.age ? av.prev[4] : eye.fwd, sizeof(pp.prevFwd));
-        const Ogre::Vector2 projAB = cam->getProjectionParamsAB();
-        pp.projParams[0] = projAB.x;
-        pp.projParams[1] = projAB.y;
-        pp.projParams[2] = cam->getFarClipDistance();
-        put3(pp.viewAxisX, q * Ogre::Vector3::UNIT_X, 0.0f);
-        put3(pp.viewAxisY, q * Ogre::Vector3::UNIT_Y, 0.0f);
-        put3(pp.viewAxisZ, -(q * Ogre::Vector3::NEGATIVE_UNIT_Z), 0.0f);
-        pp.resolution[0] = float(w);
-        pp.resolution[1] = float(h);
-        pp.resolution[2] = float(fullW);
-        pp.resolution[3] = float(fullH);
-        {
-            // THE CLEARANCE: the sun contact's bias rule (two full-resolution footprints, the millimetre floor)
-            const float span = std::sqrt(eye.rayRight[0] * eye.rayRight[0] + eye.rayRight[1] * eye.rayRight[1] +
-                                         eye.rayRight[2] * eye.rayRight[2]);
-            pp.knobs[0] = kSunContactLiftFootprints * span / float(fullW);
-        }
-        pp.knobs[1] = kSunContactMinBias;
-        pp.knobs[2] = float(kAreaVisMask);
-        pp.knobs[3] = float(divisor);
-        pp.strata[0] = float(n);
-        // the stratum sequence: the view's frame, and at rest the rest frame's own index (every stratum once by n^2)
-        pp.strata[1] = float(av.restFrames ? av.restFrames - 1u : (av.frame & 0xFFFFu));
-        pp.strata[2] = 1.0f / float(n * n);
-        pp.strata[3] = float(std::min(av.age, 65535u));
-        pp.rest[0] = float(av.restFrames);
-        pp.rest[1] = float(n * n);
         {
             const uint64_t a = alphaTableOf(scene);
             const uint32_t lo = uint32_t(a & 0xFFFFFFFFu), hi = uint32_t(a >> 32u);
@@ -8604,7 +8492,7 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
             decline("an image view could not be made");
             return;
         }
-        const unsigned cur = av.flip & 1u, prev = cur ^ 1u;
+        const unsigned cur = av.st.flip & 1u, prev = cur ^ 1u;
         const auto storage = [](const ReflectImage &img) {
             VkDescriptorImageInfo i{};
             i.imageView = img.view;
@@ -8717,7 +8605,7 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
         // ---- THE TWO DISPATCHES -------------------------------------------------
         {
             detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0, "area.vis", mRs, key);
-            work.setUnits(w * h * av.lights / 1000u);
+            work.setUnits(w * h * av.st.lights / 1000u);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mAreaPipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mAreaPipeLayout, 0, 1, &av.traceSets[ring], 0,
                                     nullptr);
@@ -8741,11 +8629,8 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
             JAH_GPU_CHECKPOINT(cmd);
             vkCmdDispatch(cmd, (fullW + 7u) / 8u, (fullH + 7u) / 8u, 1u);
         }
-        for (int k = 0; k < 5; ++k) std::memcpy(av.prev[k], now[k], sizeof(av.prev[k]));
-        av.flip ^= 1u;
-        ++av.age;
-        ++av.frame;
-        av.rays = (unsigned long long)w * h * av.lights;
+        areaVisAdvance(av.st, eye);
+        av.rays = (unsigned long long)w * h * av.st.lights;
     }
     // ---- THE READBACK (a test door): the product into this frame's host slot, the slot written a ring ago decoded
     if (readback) {
@@ -8797,6 +8682,7 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
     // THE REGISTRATION IS THE SECOND HALF'S (finishAreaVis, in front of the opaque pass).
     av.finishPending = true;
     av.ran = true;
+    av.ranFrame = frameNow();
     av.reason.clear();
     av.cpuMs = float(msSince(cpuStart));
 }
@@ -10875,7 +10761,7 @@ void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus()
 void PhotonComponent::setSunContact(const SunContactDesc &d) { mSunContact = d; }
 bool PhotonComponent::sunContactWanted() const { return false; }
 SunContactStatus OgreScene::sunContactStatus() const { return SunContactStatus(); }
-AreaVisStatus OgreScene::areaVisStatus() const { return AreaVisStatus(); }
+void rayTierAreaVisStatsInto(const OgreEngine *, const OgreScene *, AreaVisStatus &) {}
 bool OgreScene::rayReflectionsWanted() const { return false; }
 void OgreView::dropReflectState() {}
 void OgreView::retirePhotonOverlay() {

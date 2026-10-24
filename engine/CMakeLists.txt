@@ -72,6 +72,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreScreenProbeGather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSurfaceCache.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreScreenIntegrate.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreAreaVis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/SceneLightList.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/SceneLightList.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVrSession.cpp
@@ -824,6 +825,10 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_height_fog.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_fog_along.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_area_vis_params.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_area_strata.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_reproject.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_area_vis_law.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
 set(JAH_WRAP_HLMS_PIECE "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake")
@@ -943,6 +948,25 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahCardView
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahCardView_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE PIXEL'S AREA LIGHT VISIBILITY'S LAW (PHOTON-7 stage 7, 7-6): one text for the ray tier's two jobs (through
+    # glslang) and the no-ray route's Jahshaka/ScreenAreaVis and its resolve - the parameters, the strata's geometry,
+    # the reprojection and the law itself, four pieces.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahAreaVisParams
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahAreaVisParams_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_area_vis_params.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahAreaStrata
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahAreaStrata_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_area_strata.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahReproject
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahReproject_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_reproject.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahAreaVisLaw
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahAreaVisLaw_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_area_vis_law.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # engine.voxel_reader_parity (tests/compute): the harness body as a piece
     # for its compute half, and its fragment half as a plain GLSL program built

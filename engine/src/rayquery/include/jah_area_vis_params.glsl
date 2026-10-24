@@ -1,6 +1,8 @@
-// THE PIXEL'S AREA LIGHT VISIBILITY'S PARAMETERS (PHOTON-7 stage 7, 7-A) - one block for its two jobs (rq_area_vis.comp
-// the trace, rq_area_vis_resolve.comp the upsample), std140, mirrored member for member by OgreRayQuery.cpp's
-// AreaVisParams. Every member a vec4.
+// THE PIXEL'S AREA LIGHT VISIBILITY'S PARAMETERS (PHOTON-7 stage 7, 7-A) - one block for its two jobs on both
+// producers (the ray tier's rq_area_vis.comp / rq_area_vis_resolve.comp, a uniform block; the no-ray route's
+// Jahshaka/ScreenAreaVis and its resolve, 7-6, a read-only storage block: the includer defines
+// JAH_AREA_VIS_PARAMS_BLOCK first), mirrored member for member by AreaVisShared.h's AreaVisParams. Every member a vec4
+// (std140 and std430 lay them out alike).
 #ifndef JAH_AREA_VIS_PARAMS_GLSL
 #define JAH_AREA_VIS_PARAMS_GLSL
 
@@ -17,7 +19,10 @@ struct JahAreaVisLight
 	vec4 emit;
 };
 
-layout( set = 0, binding = JAH_AREA_VIS_PARAMS_BINDING ) uniform AreaVisParams
+#ifndef JAH_AREA_VIS_PARAMS_BLOCK
+#define JAH_AREA_VIS_PARAMS_BLOCK layout( set = 0, binding = JAH_AREA_VIS_PARAMS_BINDING ) uniform
+#endif
+JAH_AREA_VIS_PARAMS_BLOCK AreaVisParams
 {
 	/// THE CAMERA'S IMAGE (rq_sun_contact.comp's five numbers: camPos.w 1 perspective / 0 orthographic; the image ray
 	/// rayTL + rayRight u + rayDown v over the whole target, its component along fwd 1), and the previous frame's.

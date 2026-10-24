@@ -10,30 +10,9 @@
 // text): the ratio of the light's visible form factor over n x n strata of its rectangle, S = sum( V f ) over
 // U = sum( f ) (Heitz et al. 2018), which the shading pass multiplies the analytic LTC terms by (the fork's hook
 // custom_ps_areaLtcVisibility) - the unshadowed energy exact, only the visibility sampled.
-//
-// ONE STRATUM A FRAME a light a texel (the trace grid is the target over p.knobs.w, rounded up; a texel's ray leaves
-// the top-left pixel of its block - a real surface the prepass drew, the sun contact's rule), the stratum advancing on
-// the view's sequence (p.strata.y: the frame, the rest frame's own index at rest) offset by the receiver's own hash so
-// neighbouring texels sample different strata; the jitter inside a stratum is the receiver's (the cards' key). The two
-// sums are averaged OVER TIME SEPARATELY - the ratio of the means, never the mean of the ratios - per light in the
-// channels of two rgba16f images (light i in channel i: the pass's forward LTC set, at most four, in HlmsPbs's own
-// order - the host replicates its walk), each sample scaled by the squared distance to the light's centre (the ratio
-// is scale-free; the scale keeps a far light's sums inside fp16's normal range).
-// THE HISTORY: the previous frame's texel at the point's reprojection through the previous camera, accepted on THE
-// SAME SURFACE only (its own point, rebuilt through the previous camera from its pixel and stored distance, on this
-// point's plane with an agreeing normal: jahAreaSameSurface, the gather's plane test); a count-in-history blend (1/n while
-// young) floored at 1 / n^2 (the mean of about one full set of strata). Off the previous picture, behind its camera,
-// on another surface, a restart: this frame's sample whole.
-// THE REST LAW (the gather's, word for word - R2): at rest (p.rest.x = the rest frame k >= 1) a TRUE MEAN of the rest
-// frames' samples, restarted at the first (never seeded from the history), handed over from the moving history
-// linearly over N = n^2 frames (p.rest.y), at k = N exactly the mean of every stratum once - after which the host holds:
-// nothing is dispatched and the visibility stays what it is.
-// TWO RATIOS (the spec's glossy-lobe rule, measured: gi.card_lamp_shadow (8) read 4.6 codes of a 0.3-rough metal's
-// unoccluded specular between the diffuse-weighted visible fraction and the specular-weighted one - over a code): the
-// DIFFUSE set's weight is the stratum's form factor (what the LTC diffuse integrates), the SPECULAR set's the GGX lobe
-// at the pixel's own view and roughness, D G2 / ( 4 N.V ) times the emitter's cosine over r^2 (what the LTC specular
-// integrates; F leaves the ratio), scaled by alpha^2 to keep a sharp lobe's peak inside fp16, its roughness floored at
-// perceptual 0.1. Both over the same strata and the same rays; the resolve hands both to the pass.
+// THE LAW IS jah_area_vis_law.glsl's (one text with the no-ray route's Jahshaka/ScreenAreaVis, 7-6): this job binds
+// it - a stratum seen by ONE RAY against the TLAS (jahAreaStratum's ray, under the shadow casters' mask), its images
+// the ray tier's (two rgba16f sums a set, ping-ponged, the surface words, the rest means).
 // THE SPATIAL HALF - the joint-bilateral upsample to the full target and the ratios - is job 2 (rq_area_vis_resolve.comp).
 // MONO ONLY (the sun contact's rule: a stereo view declines, its area lights unshadowed - a leftover, named).
 
@@ -73,144 +52,49 @@ layout( set = 0, binding = 18 ) uniform sampler2D gBufShadowRoughness;
 #include "jah_area_strata.glsl"
 #include "jah_reproject.glsl"
 
-/// A light's ray stops this far short of its rectangle: its own emitter is not its shadow (the cards' kLampEnd).
-const float kLampEnd = 0.05;
-/// The count the history saturates at (the blend reads it only up to its floor's 1 / n^2).
-const uint kCountMax = 4096u;
+/// A STRATUM SEEN BY ONE RAY: from its start along its direction for its reach against every shadow caster (0 or 1)
+float jahAreaRayVisible( vec3 originQ, vec3 wq, float reachQ )
+{
+	rayQueryEXT rqa;
+	rayQueryInitializeEXT( rqa, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ), uint( p.knobs.z ), originQ,
+						   0.0, wq, reachQ );
+	JAH_RQ_PROCEED( rqa )
+	return rayQueryGetIntersectionTypeEXT( rqa, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ? 0.0 : 1.0;
+}
+#define JAH_AREA_DEPTH( pix ) texelFetch( sceneDepth, pix, 0 ).x
+#define JAH_AREA_NORMAL( pix ) texelFetch( gBufNormals, pix, 0 ).xyz
+#define JAH_AREA_ALPHA( pix ) texelFetch( gBufShadowRoughness, pix, 0 ).y
+#define JAH_AREA_PREV_S( pc ) imageLoad( histSPrev, pc )
+#define JAH_AREA_PREV_U( pc ) imageLoad( histUPrev, pc )
+#define JAH_AREA_PREV_S2( pc ) imageLoad( histS2Prev, pc )
+#define JAH_AREA_PREV_U2( pc ) imageLoad( histU2Prev, pc )
+#define JAH_AREA_PREV_G( pc ) imageLoad( histGPrev, pc )
+#define JAH_AREA_STORE_CUR( tc, S, U, S2, U2, G )                                                                       \
+	{                                                                                                                  \
+		imageStore( histSCur, tc, S );                                                                                 \
+		imageStore( histUCur, tc, U );                                                                                 \
+		imageStore( histS2Cur, tc, S2 );                                                                               \
+		imageStore( histU2Cur, tc, U2 );                                                                               \
+		imageStore( histGCur, tc, G );                                                                                 \
+	}
+#define JAH_AREA_REST_LOAD( tc, S, U, S2, U2 )                                                                          \
+	{                                                                                                                  \
+		S = imageLoad( restS, tc );                                                                                    \
+		U = imageLoad( restU, tc );                                                                                    \
+		S2 = imageLoad( restS2, tc );                                                                                  \
+		U2 = imageLoad( restU2, tc );                                                                                  \
+	}
+#define JAH_AREA_REST_STORE( tc, S, U, S2, U2 )                                                                         \
+	{                                                                                                                  \
+		imageStore( restS, tc, S );                                                                                    \
+		imageStore( restU, tc, U );                                                                                    \
+		imageStore( restS2, tc, S2 );                                                                                  \
+		imageStore( restU2, tc, U2 );                                                                                  \
+	}
+#define JAH_AREA_VISIBLE( originQ, wq, reachQ ) jahAreaRayVisible( originQ, wq, reachQ )
+#include "jah_area_vis_law.glsl"
 
 void main()
 {
-	const ivec2 traceRes = ivec2( p.resolution.xy );
-	const ivec2 tc = ivec2( gl_GlobalInvocationID.xy );
-	if( any( greaterThanEqual( tc, traceRes ) ) )
-		return;
-	const ivec2 fullRes = ivec2( p.resolution.zw );
-	const int divisor = max( int( p.knobs.w ), 1 );
-	const ivec2 pix = min( tc * divisor, fullRes - 1 );
-	const vec2 uv = ( vec2( pix ) + 0.5 ) / vec2( fullRes );
-
-	const float rawDepth = texelFetch( sceneDepth, pix, 0 ).x;
-	vec3 normalVS = texelFetch( gBufNormals, pix, 0 ).xyz * 2.0 - 1.0;
-	if( !( rawDepth > 0.0 && rawDepth < 1.0 && dot( normalVS, normalVS ) > 1e-6 ) )
-	{
-		// no surface: no sum, no history (a zero surface word fails every test)
-		imageStore( histSCur, tc, vec4( 0.0 ) );
-		imageStore( histUCur, tc, vec4( 0.0 ) );
-		imageStore( histS2Cur, tc, vec4( 0.0 ) );
-		imageStore( histU2Cur, tc, vec4( 0.0 ) );
-		imageStore( histGCur, tc, uvec4( 0u ) );
-		if( p.rest.x >= 1.0 )
-		{
-			imageStore( restS, tc, vec4( 0.0 ) );
-			imageStore( restU, tc, vec4( 0.0 ) );
-			imageStore( restS2, tc, vec4( 0.0 ) );
-			imageStore( restU2, tc, vec4( 0.0 ) );
-		}
-		return;
-	}
-	normalVS = normalize( normalVS );
-	const vec3 N = normalize( p.viewAxisX.xyz * normalVS.x + p.viewAxisY.xyz * normalVS.y + p.viewAxisZ.xyz * normalVS.z );
-	const float dist = jahAreaViewDistance( rawDepth );
-	const vec3 P = jahAreaWorldAt( uv, dist );
-	// THE CLEARANCE (the sun contact's bias rule: two full-resolution footprints at the point's depth, the floor a
-	// millimetre), taken along each ray (jahAreaRayStart)
-	const float lift = max( p.camPos.w < 0.5 ? p.knobs.x : p.knobs.x * dist, p.knobs.y );
-
-	// ---- THIS FRAME'S SAMPLE: one stratum of each light ------------------------------------------------------------
-	const uint n = max( uint( p.strata.x + 0.5 ), 1u );
-	const uint key = jahAreaStrataKey( P );
-	const uint k = ( uint( p.strata.y ) + jahAreaPcg( key ^ 0x9E3779B9u ) ) % ( n * n );
-	vec4 sampleS = vec4( 0.0 ), sampleU = vec4( 0.0 ), sampleS2 = vec4( 0.0 ), sampleU2 = vec4( 0.0 );
-	// the specular set's lobe: the pixel's view and roughness (floored at perceptual 0.1: alpha 0.01)
-	const float alpha = max( texelFetch( gBufShadowRoughness, pix, 0 ).y * 0.999 + 0.001, 0.01 );
-	const float a2 = alpha * alpha;
-	const vec3 Vw = p.camPos.w < 0.5 ? -p.fwd.xyz : normalize( p.camPos.xyz - P );
-	const float NoV = max( dot( N, Vw ), 1e-4 );
-	const int count = clamp( int( p.lights.x + 0.5 ), 0, kAreaVisLights );
-	for( int i = 0; i < kAreaVisLights; ++i )
-	{
-		if( i >= count )
-			break;
-		const vec3 c0 = p.light[i].c0.xyz, eu = p.light[i].eu.xyz, ev = p.light[i].ev.xyz;
-		const vec3 centre = c0 + 0.5 * ( eu + ev );
-		const float dc2 = dot( centre - P, centre - P );
-		if( dc2 > p.light[i].eu.w * p.light[i].eu.w )
-			continue;   // past the light's range: it lights nothing here (the pass's window is zero)
-		float V, clr2;
-		vec3 wq;
-		const float f = jahAreaStratum( P, N, N, lift, c0, eu, ev, p.light[i].emit.xyz, p.light[i].c0.w != 0.0, n, k,
-										key, uint( p.knobs.z ), kLampEnd, V, wq, clr2 );
-		sampleS[i] = f * V * dc2;
-		sampleU[i] = f * dc2;
-		if( f > 0.0 )
-		{
-			// the GGX lobe's weight of the stratum (the head): D G2 / ( 4 N.V ) x cl / r^2, times alpha^2
-			const float NoL = max( dot( N, wq ), 1e-4 );
-			const vec3 hv = normalize( Vw + wq );
-			const float NoH = max( dot( N, hv ), 0.0 );
-			const float dd = NoH * NoH * ( a2 - 1.0 ) + 1.0;
-			const float Da2 = a2 * a2 / ( 3.14159265 * dd * dd );
-			const float G2 = 2.0 * NoL * NoV /
-							 ( NoV * sqrt( a2 + ( 1.0 - a2 ) * NoL * NoL ) + NoL * sqrt( a2 + ( 1.0 - a2 ) * NoV * NoV ) );
-			const float w2 = Da2 * G2 / ( 4.0 * NoV ) * clr2 * dc2;
-			sampleS2[i] = w2 * V;
-			sampleU2[i] = w2;
-		}
-	}
-
-	// ---- THE HISTORY ------------------------------------------------------------------------------------------------
-	vec4 prevS = vec4( 0.0 ), prevU = vec4( 0.0 ), prevS2 = vec4( 0.0 ), prevU2 = vec4( 0.0 );
-	uint prevCount = 0u;
-	if( p.strata.w >= 1.0 )
-	{
-		vec2 was;
-		float z;
-		if( jahReproject( P, p.prevCamPos.xyz, p.prevCamPos.w, p.prevRayTL.xyz, p.prevRayRight.xyz, p.prevRayDown.xyz,
-						  p.prevFwd.xyz, was, z ) == 0 )
-		{
-			const ivec2 pc = clamp( ivec2( was * vec2( traceRes ) ), ivec2( 0 ), traceRes - 1 );
-			const uvec4 g = imageLoad( histGPrev, pc );
-			const float wasDist = uintBitsToFloat( g.x );
-			// the texel's own point: its pixel (the block's top-left) through the previous camera at its distance
-			const vec2 wasUv = ( vec2( min( pc * divisor, fullRes - 1 ) ) + 0.5 ) / vec2( fullRes );
-			if( g.y > 0u && wasDist > 0.0 &&
-				jahAreaSameSurface( jahAreaPrevWorldAt( wasUv, wasDist ), jahAreaUnpackNormal( g.z ), P, N, dist ) > 0.5 )
-			{
-				prevS = imageLoad( histSPrev, pc );
-				prevU = imageLoad( histUPrev, pc );
-				prevS2 = imageLoad( histS2Prev, pc );
-				prevU2 = imageLoad( histU2Prev, pc );
-				prevCount = g.y;
-			}
-		}
-	}
-	const float blend = prevCount > 0u ? max( 1.0 / ( float( prevCount ) + 1.0 ), p.strata.z ) : 1.0;
-	vec4 meanS = mix( prevS, sampleS, blend ), meanU = mix( prevU, sampleU, blend );
-	vec4 meanS2 = mix( prevS2, sampleS2, blend ), meanU2 = mix( prevU2, sampleU2, blend );
-	// ---- AT REST, THE REST MEAN (R2) ---------------------------------------------------------------------------------
-	const float restK = p.rest.x;
-	if( restK >= 1.0 )
-	{
-		// (the first rest frame takes its sample whole, never the stored mean: R2)
-		const bool first = restK < 1.5;
-		const vec4 rS = first ? sampleS : mix( imageLoad( restS, tc ), sampleS, 1.0 / restK );
-		const vec4 rU = first ? sampleU : mix( imageLoad( restU, tc ), sampleU, 1.0 / restK );
-		const vec4 rS2 = first ? sampleS2 : mix( imageLoad( restS2, tc ), sampleS2, 1.0 / restK );
-		const vec4 rU2 = first ? sampleU2 : mix( imageLoad( restU2, tc ), sampleU2, 1.0 / restK );
-		imageStore( restS, tc, rS );
-		imageStore( restU, tc, rU );
-		imageStore( restS2, tc, rS2 );
-		imageStore( restU2, tc, rU2 );
-		const float h = clamp( ( restK - 1.0 ) / max( p.rest.y - 1.0, 1.0 ), 0.0, 1.0 );
-		meanS = mix( mix( prevS, rS, blend ), rS, h );
-		meanU = mix( mix( prevU, rU, blend ), rU, h );
-		meanS2 = mix( mix( prevS2, rS2, blend ), rS2, h );
-		meanU2 = mix( mix( prevU2, rU2, blend ), rU2, h );
-	}
-	imageStore( histSCur, tc, meanS );
-	imageStore( histUCur, tc, meanU );
-	imageStore( histS2Cur, tc, meanS2 );
-	imageStore( histU2Cur, tc, meanU2 );
-	imageStore( histGCur, tc,
-				uvec4( floatBitsToUint( dist ), min( prevCount + 1u, kCountMax ), jahAreaPackNormal( N ), 0u ) );
+	jahAreaVisTrace( ivec2( gl_GlobalInvocationID.xy ) );
 }

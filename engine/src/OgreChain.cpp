@@ -2554,6 +2554,18 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             c->addUavSource(0, kScreenGiIrradiance, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
             c->addUavSource(1, kScreenGiSpecular, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
             c->addUavSource(2, kScreenGiConeHit, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
+            // ...AND THE ROUTE'S AREA LIGHT VISIBILITY (7-6; OgreAreaVis.cpp): the trace and the resolve, their jobs
+            // bound whole by the listener (the images its own, made only while an LTC light is in the forward set)
+            Ogre::CompositorTargetDef *at = n->addTargetPass("");
+            at->setNumPasses(2);
+            auto *av = static_cast<Ogre::CompositorPassComputeDef *>(at->addPass(Ogre::PASS_COMPUTE));
+            av->mJobName = kScreenAreaVisJob;
+            av->mProfilingId = "Jahshaka screen area visibility";
+            av->mIdentifier = kScreenAreaVisPassIdentifier;
+            auto *ar = static_cast<Ogre::CompositorPassComputeDef *>(at->addPass(Ogre::PASS_COMPUTE));
+            ar->mJobName = kScreenAreaVisResolveJob;
+            ar->mProfilingId = "Jahshaka screen area visibility resolve";
+            ar->mIdentifier = kScreenAreaVisResolvePassIdentifier;
         }
         // THE OPAQUE PASSES READ ONLY SCREEN-SPACE GI (PHOTON-7 stage 7, 7-5; L4). On a GATHER chain the screen
         // decode and the opaque pass shade from the four Photon screen products alone (the gather's diffuse and its

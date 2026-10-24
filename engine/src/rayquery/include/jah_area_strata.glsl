@@ -15,7 +15,13 @@
 // codes across a penumbra); each ray starts on its own segment at the lift's height, lift / cos from the receiver. A
 // MERGE ITEM (the lead, 2026-10-23): photon-7r's one law (jah_ray_origin.glsl, P + geomN x bound) is the rival form -
 // at the merge one body survives here, and every reader of this include takes it.
-// Needs of the includer: `tlas` (accelerationStructureEXT), jahAlphaRayFlags() and JAH_RQ_PROCEED (jah_rq_alpha.glsl).
+// THE STRATUM'S GEOMETRY (jahAreaStratumAt: its point, form factor, ray start and reach) is plain GLSL, read by every
+// producer - the ray tier through glslang, the no-ray route's screen job (Jahshaka/ScreenAreaVis, PHOTON-7 stage 7,
+// 7-6) as the Hlms piece JahAreaStrata - and its VISIBILITY is the producer's: the ray below (jahAreaStratum, compiled
+// only for an includer that defines JAH_AREA_STRATA_RAY - glslang predefines every extension's macro it SUPPORTS, so
+// GL_EXT_ray_query cannot tell), the voxel chain's march on the no-ray route.
+// Needs of the ray's includer: `tlas` (accelerationStructureEXT), jahAlphaRayFlags() and JAH_RQ_PROCEED
+// (jah_rq_alpha.glsl).
 #ifndef JAH_AREA_STRATA_GLSL
 #define JAH_AREA_STRATA_GLSL
 
@@ -41,15 +47,18 @@ float jahAreaRayStart( vec3 N, vec3 w, float lift )
 }
 
 /// STRATUM k (0 .. n^2 - 1) of the rectangle as the receiver P (normal N; Ncos the normal its cosine is taken against)
-/// sees it: returns the stratum's form factor f (0 - it lights nothing here: no ray), and, where f > 0, its visibility
-/// V (0 or 1) by one ray against the TLAS under `mask`, the direction to its sample point and the emitter's cosine over
-/// the squared distance (a reader that weighs the stratum by another lobe - the pixel's specular - takes them).
-float jahAreaStratum( vec3 P, vec3 N, vec3 Ncos, float lift, vec3 c0, vec3 eu, vec3 ev, vec3 emit, bool twoSided, uint n,
-					  uint k, uint key, uint mask, float lampEnd, out float V, out vec3 dirQ, out float clOverR2 )
+/// sees it - ITS GEOMETRY: returns the stratum's form factor f (0 - it lights nothing here: no ray), and, where f > 0,
+/// the direction to its sample point, the emitter's cosine over the squared distance (a reader that weighs the stratum
+/// by another lobe - the pixel's specular - takes them) and the visibility ray's start and reach (the start on the
+/// ray's own segment at the lift's height; the reach stops `lampEnd` short of the light: <= 0, nothing to test, V = 1).
+float jahAreaStratumAt( vec3 P, vec3 N, vec3 Ncos, float lift, vec3 c0, vec3 eu, vec3 ev, vec3 emit, bool twoSided,
+						uint n, uint k, uint key, float lampEnd, out vec3 dirQ, out float clOverR2, out vec3 originQ,
+						out float reachQ )
 {
-	V = 0.0;
 	dirQ = vec3( 0.0, 0.0, 1.0 );
 	clOverR2 = 0.0;
+	originQ = P;
+	reachQ = 0.0;
 	const float xu = ( float( k % n ) + float( jahAreaPcg( key + 2u * k ) ) * 2.3283064e-10 ) / float( n );
 	const float xv = ( float( k / n ) + float( jahAreaPcg( key + 2u * k + 1u ) ) * 2.3283064e-10 ) / float( n );
 	const vec3 Q = c0 + eu * xu + ev * xv;
@@ -66,8 +75,24 @@ float jahAreaStratum( vec3 P, vec3 N, vec3 Ncos, float lift, vec3 c0, vec3 eu, v
 	dirQ = wq;
 	clOverR2 = cl / r2;
 	const float startQ = jahAreaRayStart( N, wq, lift );
-	const vec3 originQ = P + wq * startQ;
-	const float reachQ = sqrt( r2 ) - startQ - lampEnd;
+	originQ = P + wq * startQ;
+	reachQ = sqrt( r2 ) - startQ - lampEnd;
+	return f;
+}
+
+#ifdef JAH_AREA_STRATA_RAY
+/// ...AND ITS VISIBILITY BY ONE RAY (the ray tier's readers): V (0 or 1) against the TLAS under `mask`.
+float jahAreaStratum( vec3 P, vec3 N, vec3 Ncos, float lift, vec3 c0, vec3 eu, vec3 ev, vec3 emit, bool twoSided, uint n,
+					  uint k, uint key, uint mask, float lampEnd, out float V, out vec3 dirQ, out float clOverR2 )
+{
+	V = 0.0;
+	vec3 originQ;
+	float reachQ;
+	const float f = jahAreaStratumAt( P, N, Ncos, lift, c0, eu, ev, emit, twoSided, n, k, key, lampEnd, dirQ, clOverR2,
+									  originQ, reachQ );
+	if( !( f > 0.0 ) )
+		return 0.0;
+	const vec3 wq = dirQ;
 	V = 1.0;
 	if( reachQ > 0.0 )
 	{
@@ -80,5 +105,6 @@ float jahAreaStratum( vec3 P, vec3 N, vec3 Ncos, float lift, vec3 c0, vec3 eu, v
 	}
 	return f;
 }
+#endif
 
 #endif

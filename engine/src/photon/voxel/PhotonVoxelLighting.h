@@ -650,6 +650,18 @@ namespace Ogre
         uint32 getChainIndex() const { return mChainIndex; }
         /// The chain's length: the cascades inside this one, this one and those outside it.
         uint32 getChainLength() const { return mChainIndex + 1u + static_cast<uint32>( mExtraCascades.size() ); }
+        /// Entry j of the chain (j <= this cascade's index: this one - an inner entry is bound, never marched).
+        const PhotonVoxelLighting *getChainCascade( uint32 j ) const
+        {
+            return j <= mChainIndex ? this : mExtraCascades[size_t( j - mChainIndex - 1u )];
+        }
+        /// THE CHAIN THE SHADOW MARCH RUNS THROUGH, from THIS cascade as the march's own entry (LightInjection_cs.glsl's
+        /// chainOrigin / chainRes; PHOTON-7 stage 1, L1): per entry j its box corner relative to this cascade's
+        /// (metres; w its cell) and its resolution (xyz) with the world distance its shell ends at (w: D_j, the sum of
+        /// 8 cells of every cascade of the WORLD's chain up to j; the last entry's past any march). Both arrays hold
+        /// 4 x getChainLength() floats. The injection's and the no-ray area visibility's one text (PHOTON-7 stage 7,
+        /// 7-6: the screen job marches from cascade 0).
+        void chainMarchParams( float *chainOrigin, float *chainRes ) const;
         /// The injection job's texture units before the cloud field's (OgreScene::bindCloudInjection binds that
         /// one at this unit): the albedo, normal, emissive, metal and emissive factor per half, then the chain's
         /// coverage and position per half and its direct pair (front, back), six arrays of getChainLength().

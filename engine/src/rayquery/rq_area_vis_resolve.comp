@@ -2,15 +2,9 @@
 #extension GL_GOOGLE_include_directive : require
 
 // THE PIXEL'S AREA LIGHT VISIBILITY, JOB 2 OF 2: THE RESOLVE (PHOTON-7 stage 7, 7-A; rq_area_vis.comp is job 1). One
-// thread a FULL-RESOLUTION pixel: the trace's two temporal sums S and U of the 3 x 3 trace texels around it, weighed
-// by a tent over the trace grid (one texel's reach) times THE SAME SURFACE (the texel's own point and normal - rebuilt
-// from its pixel and stored distance - against the pixel's plane: jahAreaSameSurface, the gather's plane test; a
-// joint-bilateral upsample - a penumbra never bleeds across a silhouette), filtered
-// SEPARATELY and only then divided (Heitz et al. 2018: the ratio of the filtered sums, never the filter of the ratio) -
-// for both sets, the diffuse-weighted and the specular-weighted (the trace's head): `jahAreaVis` (RG32_UINT) holds in
-// x the diffuse visibility of light i in byte i (unorm8, packUnorm4x8) and in y the specular's. A light with no weight
-// here (out of its range, no texel on this surface, no surface) reads 1 - the LTC term unchanged, which is then exactly
-// zero or upstream's.
+// thread a FULL-RESOLUTION pixel: the joint-bilateral upsample of the trace's two sums and their ratio into `jahAreaVis`
+// (RG32_UINT: x the diffuse visibility of light i in byte i, y the specular's) - jah_area_vis_law.glsl's
+// jahAreaVisResolve, one text with the no-ray route's Jahshaka/ScreenAreaVisResolve (7-6); this job binds it.
 // THE PASS'S READ: the fork's hook in DoAreaLtcLights (custom_ps_areaLtcVisibility, JahAreaVis_piece_ps.any).
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
@@ -27,57 +21,17 @@ layout( set = 0, binding = 6 ) uniform sampler2D gBufNormals;
 layout( rgba16f, set = 0, binding = 7 ) uniform readonly image2D histS2;
 layout( rgba16f, set = 0, binding = 8 ) uniform readonly image2D histU2;
 
+#define JAH_AREA_DEPTH( pix ) texelFetch( sceneDepth, pix, 0 ).x
+#define JAH_AREA_NORMAL( pix ) texelFetch( gBufNormals, pix, 0 ).xyz
+#define JAH_AREA_CUR_S( t ) imageLoad( histS, t )
+#define JAH_AREA_CUR_U( t ) imageLoad( histU, t )
+#define JAH_AREA_CUR_S2( t ) imageLoad( histS2, t )
+#define JAH_AREA_CUR_U2( t ) imageLoad( histU2, t )
+#define JAH_AREA_CUR_G( t ) imageLoad( histG, t )
+#define JAH_AREA_STORE_VIS( pix, words ) imageStore( areaVis, pix, uvec4( words, 0u, 0u ) )
+#include "jah_area_vis_law.glsl"
+
 void main()
 {
-	const ivec2 fullRes = ivec2( p.resolution.zw );
-	const ivec2 pix = ivec2( gl_GlobalInvocationID.xy );
-	if( any( greaterThanEqual( pix, fullRes ) ) )
-		return;
-	const float rawDepth = texelFetch( sceneDepth, pix, 0 ).x;
-	vec3 normalVS = texelFetch( gBufNormals, pix, 0 ).xyz * 2.0 - 1.0;
-	if( !( rawDepth > 0.0 && rawDepth < 1.0 && dot( normalVS, normalVS ) > 1e-6 ) )
-	{
-		imageStore( areaVis, pix, uvec4( packUnorm4x8( vec4( 1.0 ) ), packUnorm4x8( vec4( 1.0 ) ), 0u, 0u ) );
-		return;
-	}
-	normalVS = normalize( normalVS );
-	const vec3 Np = normalize( p.viewAxisX.xyz * normalVS.x + p.viewAxisY.xyz * normalVS.y + p.viewAxisZ.xyz * normalVS.z );
-	const float dist = jahAreaViewDistance( rawDepth );
-	const vec3 Pp = jahAreaWorldAt( ( vec2( pix ) + 0.5 ) / vec2( fullRes ), dist );
-	const ivec2 traceRes = ivec2( p.resolution.xy );
-	const float divisor = max( p.knobs.w, 1.0 );
-	// the pixel's position on the trace grid (a texel's ray left its block's top-left pixel)
-	const vec2 g = ( vec2( pix ) + 0.5 ) / divisor - 0.5 / divisor;
-	const ivec2 c = ivec2( floor( g + 0.5 ) );
-	vec4 S = vec4( 0.0 ), U = vec4( 0.0 ), S2 = vec4( 0.0 ), U2 = vec4( 0.0 );
-	for( int dy = -1; dy <= 1; ++dy )
-		for( int dx = -1; dx <= 1; ++dx )
-		{
-			const ivec2 t = c + ivec2( dx, dy );
-			if( any( lessThan( t, ivec2( 0 ) ) ) || any( greaterThanEqual( t, traceRes ) ) )
-				continue;
-			const uvec4 gw = imageLoad( histG, t );
-			const float td = uintBitsToFloat( gw.x );
-			if( gw.y == 0u || !( td > 0.0 ) )
-				continue;
-			const vec2 tUv = ( vec2( min( t * int( divisor ), fullRes - 1 ) ) + 0.5 ) / vec2( fullRes );
-			const float same = jahAreaSameSurface( jahAreaWorldAt( tUv, td ), jahAreaUnpackNormal( gw.z ), Pp, Np, dist );
-			const vec2 o = abs( vec2( t ) - g );
-			const float w = max( 1.5 - o.x, 0.0 ) * max( 1.5 - o.y, 0.0 ) * same;
-			if( !( w > 0.0 ) )
-				continue;
-			S += imageLoad( histS, t ) * w;
-			U += imageLoad( histU, t ) * w;
-			S2 += imageLoad( histS2, t ) * w;
-			U2 += imageLoad( histU2, t ) * w;
-		}
-	vec4 vis = vec4( 1.0 ), visS = vec4( 1.0 );
-	for( int i = 0; i < kAreaVisLights; ++i )
-	{
-		if( U[i] > 0.0 )
-			vis[i] = clamp( S[i] / U[i], 0.0, 1.0 );
-		if( U2[i] > 0.0 )
-			visS[i] = clamp( S2[i] / U2[i], 0.0, 1.0 );
-	}
-	imageStore( areaVis, pix, uvec4( packUnorm4x8( vis ), packUnorm4x8( visS ), 0u, 0u ) );
+	jahAreaVisResolve( ivec2( gl_GlobalInvocationID.xy ) );
 }

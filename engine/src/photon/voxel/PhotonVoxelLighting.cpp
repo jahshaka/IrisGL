@@ -1693,6 +1693,34 @@ namespace Ogre
     //-------------------------------------------------------------------------
     bool PhotonVoxelLighting::getAllowMultipleBounces() const { return mLightBounce != 0; }
     //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::chainMarchParams( float *chainOrigin, float *chainRes ) const
+    {
+        const uint32 chainLength = getChainLength();
+        const Vector3 selfOrigin = mVoxelizer->getVoxelOrigin();
+        // THE SHELLS: D_j, the sum of 8 cells of every cascade of the WORLD's chain up to j, from the march's start -
+        // the chain's own cells (setChainIndex), never this cascade's for the entries inside it (stage 1's read F1:
+        // Epic c1 marched 2.5 / 6.25 m for 1.875 / 5.625, c2 11.25 for 5.625).
+        OGRE_ASSERT_LOW( mChainCells.size() == chainLength );
+        double shellEnd = 0.0;
+        for( uint32 j = 0u; j < chainLength && j < c_maxCascades; ++j )
+        {
+            const PhotonVoxelLighting *cj = getChainCascade( j );
+            const Vector3 cell = cj->mVoxelizer->getVoxelCellSize();
+            const Vector3 res = cj->mVoxelizer->getVoxelResolution();
+            // (an inner entry is this cascade's own: bound and described, never marched)
+            const Vector3 rel = cj->mVoxelizer->getVoxelOrigin() - selfOrigin;
+            chainOrigin[4u * j + 0u] = static_cast<float>( rel.x );
+            chainOrigin[4u * j + 1u] = static_cast<float>( rel.y );
+            chainOrigin[4u * j + 2u] = static_cast<float>( rel.z );
+            chainOrigin[4u * j + 3u] = static_cast<float>( cell.x );
+            chainRes[4u * j + 0u] = static_cast<float>( res.x );
+            chainRes[4u * j + 1u] = static_cast<float>( res.y );
+            chainRes[4u * j + 2u] = static_cast<float>( res.z );
+            shellEnd += 8.0 * double( j < mChainCells.size() ? mChainCells[j] : cell.x );
+            chainRes[4u * j + 3u] = j + 1u < chainLength ? static_cast<float>( shellEnd ) : 1e30f;
+        }
+    }
+    //-------------------------------------------------------------------------
     void PhotonVoxelLighting::update( SceneManager *sceneManager, uint32 _lightMask )
     {
         checkTextures();
@@ -1749,32 +1777,13 @@ namespace Ogre
         float chainRes[4u * c_maxCascades] = {};
         {
             OGRE_ASSERT_LOW( chainLength <= c_maxCascades );
-            const Vector3 selfOrigin = mVoxelizer->getVoxelOrigin();
-            // THE SHELLS: D_j, the sum of 8 cells of every cascade of the WORLD's chain up to j, from the march's start -
-            // the chain's own cells (setChainIndex), never this cascade's for the entries inside it (stage 1's read F1:
-            // Epic c1 marched 2.5 / 6.25 m for 1.875 / 5.625, c2 11.25 for 5.625).
-            OGRE_ASSERT_LOW( mChainCells.size() == chainLength );
-            double shellEnd = 0.0;
+            chainMarchParams( chainOrigin, chainRes );
             mLastShellEnds.clear();
+            for( uint32 j = 0u; j + 1u < chainLength && j < c_maxCascades; ++j )
+                mLastShellEnds.push_back( chainRes[4u * j + 3u] );
             for( uint32 j = 0u; j < chainLength && j < c_maxCascades; ++j )
             {
-                const PhotonVoxelLighting *cj =
-                    j <= mChainIndex ? this : mExtraCascades[size_t( j - mChainIndex - 1u )];
-                const Vector3 cell = cj->mVoxelizer->getVoxelCellSize();
-                const Vector3 res = cj->mVoxelizer->getVoxelResolution();
-                // (an inner entry is this cascade's own: bound and described, never marched)
-                const Vector3 rel = cj->mVoxelizer->getVoxelOrigin() - selfOrigin;
-                chainOrigin[4u * j + 0u] = static_cast<float>( rel.x );
-                chainOrigin[4u * j + 1u] = static_cast<float>( rel.y );
-                chainOrigin[4u * j + 2u] = static_cast<float>( rel.z );
-                chainOrigin[4u * j + 3u] = static_cast<float>( cell.x );
-                chainRes[4u * j + 0u] = static_cast<float>( res.x );
-                chainRes[4u * j + 1u] = static_cast<float>( res.y );
-                chainRes[4u * j + 2u] = static_cast<float>( res.z );
-                shellEnd += 8.0 * double( j < mChainCells.size() ? mChainCells[j] : cell.x );
-                chainRes[4u * j + 3u] = j + 1u < chainLength ? static_cast<float>( shellEnd ) : 1e30f;
-                if( j + 1u < chainLength )
-                    mLastShellEnds.push_back( static_cast<float>( shellEnd ) );
+                const PhotonVoxelLighting *cj = getChainCascade( j );
                 for( uint32 k = 0u; k < 4u; ++k )
                 {
                     const uint32 h = k & 1u;
