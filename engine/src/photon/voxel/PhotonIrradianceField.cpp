@@ -1014,16 +1014,18 @@ namespace Ogre
         }
         {
             // the field: the probes per slot row and plane, the depth tile's interior and the atlas's width; the probe
-            // spacing per axis and the depth's own bound in grid units (the generation job's: cascade 0's diagonal,
-            // 1.414 of its normalised units, along the ray: at most 1.414 x the larger probe count)
+            // spacing per axis and the depth's own bound in cascade 0's normalised units (the generation job's: its
+            // diagonal, 1.414) - the shader takes a texel's bound in grid units as 1.414 x |d| . numProbes, the
+            // generation job's own per-direction product (stage 5's read B2: never 1.414 x the largest count)
             const uint32 field[4] = { mSettings.mNumProbes[0], mSettings.mNumProbes[0] * mSettings.mNumProbes[1],
                                       mSettings.mDepthProbeResolution, mDepthVarianceTex->getWidth() };
             const Vector3 sp = getProbeSpacing();
-            const uint32 nMax = std::max( mSettings.mNumProbes[0], std::max( mSettings.mNumProbes[1], mSettings.mNumProbes[2] ) );
-            const float spacing[4] = { sp.x, sp.y, sp.z, 1.414213562f * float( nMax ) };
+            const float spacing[4] = { sp.x, sp.y, sp.z, 1.414213562f };
             set( "caField", field, false );
             set( "caSpacing", spacing, true );
-            const uint32 field2[4] = { mSettings.mIrradianceResolution, mIrradianceTex->getWidth(), 0u, 0u };
+            // ...and the irradiance tile's interior and atlas width; the probes along z (x and y are caField's)
+            const uint32 field2[4] = { mSettings.mIrradianceResolution, mIrradianceTex->getWidth(),
+                                       mSettings.mNumProbes[2], 0u };
             set( "caField2", field2, false );
         }
         const uint32 reduce[4] = { 2u, probes, probes, 0u };

@@ -35,8 +35,8 @@
 // field's probes (points: zero half extents; the state is the field's marks, its sensitivity the generation job's), and
 // the bound takes VISIBILITY from the probe's own depth moments (DDGI's own test, the atlas the reader's Chebyshev reads):
 // the cosine-weighted share of the probe's rays that pass the moved box's distance d is at most the one-sided Chebyshev
-// bound sigma^2 / ( sigma^2 + ( d - mu )^2 ) of the depth texel facing the box (d past mu; capped at the depth's own
-// bound - a ray past it may reach anything), over the cosine at the box's edge from that texel (every irradiance texel's
+// bound sigma^2 / ( sigma^2 + ( d - mu )^2 ) of the depth texel facing the box (d past mu; capped at that TEXEL'S own
+// stored bound - a ray past it may reach anything), over the cosine at the box's edge from that texel (every irradiance texel's
 // share of the box's visible rays is at most that) - so the weight is min( 1, S / ( pi d^2 ), that bound): a sealed
 // room's probes, every ray ending at its walls, are not reached by a neighbour's moves. AND IT COUNTS PER TEXEL: each of
 // the probe's irradiance texels t changes by at most the move x the weight x the largest cosine between t's direction and
@@ -89,10 +89,10 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 @property( jah_field_mark )
 	// the field (jah_field_mark): x the probes per row of slots (numProbes.x), y numProbes.x x numProbes.y, z the depth
 	// tile's interior resolution, w the depth atlas's width; and the probe spacing per axis (metres, xyz) and the depth's
-	// own bound (grid units, w)
+	// own bound in cascade 0's normalised units (w, 1.414: a texel's bound in grid units is w x |d| . numProbes)
 	uniform uint4 caField;
 	uniform float4 caSpacing;
-	// x the irradiance tile's interior resolution, y the irradiance atlas's width
+	// x the irradiance tile's interior resolution, y the irradiance atlas's width, z numProbes.z
 	uniform uint4 caField2;
 @end
 vulkan( }; )
@@ -297,8 +297,14 @@ void main()
 				const uvec2 tile = uvec2( ( slot * bordered ) % caField.w, ( ( slot * bordered ) / caField.w ) * bordered ) +
 								   uvec2( 1u, 1u );
 				const vec2 mom = texelFetch( fieldDepth, ivec2( tile + txy ), 0 ).xy;
-				// the nearest point of the box in grid units (the depth's), capped at the depth's bound
-				const float dg = min( length( gap / caSpacing.xyz ), caSpacing.w );
+				// the nearest point of the box in grid units (the depth's), capped at THIS TEXEL'S stored bound: the
+				// generation job bounds a ray's depth at cascade 0's diagonal along ITS direction, 1.414 x |d| . numProbes
+				// (IrradianceFieldGenFromVct), so on a 32 x 16 x 16 field the bound along y or z is 22.6 grid units, not
+				// the largest count's 45.3 - a box past the texel's own bound reads at the bound, never as hidden behind
+				// it (stage 5's read B2)
+				const vec3 numProbesF = vec3( float( caField.x ), float( caField.y / caField.x ), float( caField2.z ) );
+				const float capT = caSpacing.w * dot( abs( nT ), numProbesF );
+				const float dg = min( length( gap / caSpacing.xyz ), capT );
 				const float mu = mom.x, var = max( mom.y - mom.x * mom.x, 0.0 ) + 1e-6;
 				float pass = 1.0;
 				if( dg > mu )
