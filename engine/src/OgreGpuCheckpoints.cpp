@@ -18,6 +18,7 @@
 #include <OgreLogManager.h>
 #include <OgreRoot.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -125,11 +126,30 @@ void dumpQueue(const char *which, VkQueue q) {
     for (const VkCheckpointDataNV &c : data) {
         const Mark *m = static_cast<const Mark *>(c.pCheckpointMarker);
         const char *nm = m && m->name ? m->name : "?";
-        if (const char *slash = std::strrchr(nm, '/')) nm = slash + 1;   // a site's path: its file name
+        if (std::strstr(nm, ".cpp:"))   // a raw site's __FILE__:line - its file name (a job's name keeps its slashes)
+            if (const char *slash = std::strrchr(nm, '/')) nm = slash + 1;
         std::snprintf(line, sizeof(line), "  %s (0x%x): '%s' frame %llu mark %llu", stageName(c.stage), unsigned(c.stage),
                       nm, m ? m->frame : 0ull, m ? m->seq : 0ull);
         Ogre::LogManager::getSingleton().logMessage(line, Ogre::LML_CRITICAL);
         std::fprintf(stderr, "%s\n", line);
+    }
+    // ...AND THE MARKS AROUND THE NEWEST ONE REACHED, in the CPU's recording order (the frame's dispatch order): the
+    // hung dispatch with its neighbours
+    unsigned long long newest = 0ull;
+    for (const VkCheckpointDataNV &c : data)
+        if (const Mark *m = static_cast<const Mark *>(c.pCheckpointMarker)) newest = std::max(newest, m->seq);
+    if (!data.empty()) {
+        const unsigned long long last = gSeq.load();
+        for (unsigned long long q = newest > 12ull ? newest - 12ull : 0ull; q < std::min(last, newest + 7ull); ++q) {
+            const Mark &m = gRing[q % kRing];
+            if (m.seq != q) continue;   // (overwritten: the ring moved on)
+            const char *nm = m.name ? m.name : "?";
+            if (std::strstr(nm, ".cpp:"))
+                if (const char *slash = std::strrchr(nm, '/')) nm = slash + 1;
+            std::snprintf(line, sizeof(line), "    %s mark %llu frame %llu: '%s'", q == newest ? "->" : "  ", q, m.frame, nm);
+            Ogre::LogManager::getSingleton().logMessage(line, Ogre::LML_CRITICAL);
+            std::fprintf(stderr, "%s\n", line);
+        }
     }
 }
 
