@@ -60,7 +60,7 @@
 @piece( applyIrradianceVolumes )
 	float4 jahProbeGathered = OGRE_LoadScreen2D( jahProbeIrradiance, iFragCoord, 0 ).xyzw;
 	pixelData.envColourD += midf3_c( jahProbeGathered.xyz ) * midf_c( jahProbeGathered.w );
-	@property( jah_rough_spec )
+	@property( jah_rough_spec && !jah_screen_cone )
 		// THE ROUGH SPECULAR (PHOTON-7 stage 7, 7-3): the radiance along this pixel's GGX lobe read from the probes'
 		// prefiltered maps, handed over to E/pi by the roughness (rq_probe_integrate.comp), at its GATE's share (w: 0
 		// where the view's traced reflection owns the lobe). The pass binds no cone (7-5); the material's cube takes
@@ -77,7 +77,9 @@
 // gate's complement: the share the traced reflection owns, whose own warm-up hands over to the cube as before. Its hook
 // (jahGlobalEnvVisibility, empty wherever no GI piece defines it; the cone's own definition needs the cone, which this
 // pass does not bind) under the same six terms as the read above.
-@property( jah_rough_spec && jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
+// (On the no-ray route the texture holds the cone's specular instead - JahScreenCone_piece_ps.any composes it and
+// defines this hook from the rough lobe's occlusion.)
+@property( jah_rough_spec && !jah_screen_cone && jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 	@piece( jahGlobalEnvVisibility )* midf_c( 1.0f - jahRoughSpecTexel.w )@end
 @end
 

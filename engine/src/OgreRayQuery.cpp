@@ -1001,13 +1001,8 @@ private:
     /// where the camera is (w = 1 perspective, 0 orthographic) and the world
     /// basis of its 0..1 image. A MONO view has one; a stereo view has two, each
     /// spanning its own HALF of the target.
-    struct EyeBasisF {
-        float camPos[4] = { 0, 0, 0, 1 };
-        float rayTL[4] = { 0, 0, 0, 0 };
-        float rayRight[4] = { 0, 0, 0, 0 };
-        float rayDown[4] = { 0, 0, 0, 0 };
-        float fwd[4] = { 0, 0, 0, 0 };
-    };
+    /// The camera's image (detail::CameraImageF: one text with the no-ray screen integrate's).
+    using EyeBasisF = CameraImageF;
 
     struct ReflectView {
         /// THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1, rq_motion.comp): its
@@ -5728,31 +5723,12 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
 RayQueryTier::EyeBasisF RayQueryTier::eyeBasis(bool ortho, const Ogre::Vector3 &pos,
                                                const Ogre::Quaternion &rot, float el, float er,
                                                float et, float eb) {
-    EyeBasisF e;
-    const Ogre::Vector3 f = rot * Ogre::Vector3::NEGATIVE_UNIT_Z;
-    const Ogre::Vector3 r = rot * Ogre::Vector3::UNIT_X;
-    const Ogre::Vector3 u = rot * Ogre::Vector3::UNIT_Y;
-    put3(e.camPos, pos, ortho ? 0.0f : 1.0f);
-    put3(e.rayTL, r * el + u * et + (ortho ? Ogre::Vector3::ZERO : f), 0.0f);
-    put3(e.rayRight, r * (er - el), 0.0f);
-    put3(e.rayDown, u * (eb - et), 0.0f);
-    put3(e.fwd, f, 0.0f);
-    return e;
+    return cameraImage(ortho, pos, rot, el, er, et, eb);
 }
 
-// A target uv t is the shot's (t - x0) / w, hence rayTL' = rayTL - rayRight x0/w
-// - rayDown y0/h, rayRight' = rayRight / w, rayDown' = rayDown / h. The bars
-// hold cleared depth and every job declines them before any ray.
 void RayQueryTier::expandEyeToTarget(EyeBasisF &e, const ChainDesc &cd, unsigned fullW,
                                      unsigned fullH) {
-    if (!cd.letterbox || !fullH) return;
-    float shot[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
-    chain::letterboxRect(cd.letterboxAspect, float(fullW) / float(fullH), shot);
-    for (int k = 0; k < 3; ++k) {
-        e.rayTL[k] -= e.rayRight[k] * shot[0] / shot[2] + e.rayDown[k] * shot[1] / shot[3];
-        e.rayRight[k] /= shot[2];
-        e.rayDown[k] /= shot[3];
-    }
+    expandCameraImageToTarget(e, cd, fullW, fullH);
 }
 
 void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,

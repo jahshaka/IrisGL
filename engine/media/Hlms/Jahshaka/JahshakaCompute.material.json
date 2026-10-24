@@ -298,6 +298,28 @@
 			}
 		},
 
+		"Jahshaka/ScreenIntegrate" :
+		{
+			"threads_per_group" : [8, 8, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahScreenIntegrate_cs",
+			"thread_groups_based_on_uav" : { "slot" : 0, "divisor" : [1, 1, 1] },
+			"textures" : [ {}, {}, {} ],
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahEnvironment_piece_all.any", "JahVoxelCones_piece_all.any", "JahFieldWindow_piece_all.any", "JahFieldRead_piece_all.any", "JahAtmosphere_piece_all.any", "JahHeightFog_piece_all.any", "JahFogAlong_piece_all.any"],
+			"inform_shader_of_texture_size" : false,
+			"inform_shader_of_texture_data_change" : true,
+			"uav_units" : 4,
+			"properties" :
+			{
+				"hlms_num_vct_cascades" : 0,
+				"jah_env" : 0,
+				"jah_si_field" : 0,
+				"jah_si_air" : 0,
+				"jah_si_fog" : 0,
+				"jah_si_sdf" : 0
+			}
+		},
+
 		"Jahshaka/CardAccumulate" :
 		{
 			"threads_per_group" : [64, 1, 1],

@@ -500,11 +500,12 @@ PhotonBindingStatus photonBindingStatus() {
 std::vector<PhotonPassBindingRecord> photonPassBindings() { return detail::PhotonPassBinding::passRecords(); }
 void resetPhotonPassBindings() { detail::PhotonPassBinding::resetPassRecords(); }
 const std::vector<std::string> &photonScreenProducts() {
-    // L4's five, by the register names the pieces declare them at (and the door lists): the diffuse (the gather's
-    // irradiance), the rough specular, the reflection, the sun contact, the area lights' visibility.
-    static const std::vector<std::string> kFive = { "jahProbeIrradiance", "jahRoughSpec", "ssrTexture", "jahSunVis",
-                                                    "jahAreaVis" };
-    return kFive;
+    // L4's six, by the register names the pieces declare them at (and the door lists): the diffuse (the gather's
+    // irradiance, or the no-ray screen integrate's), the rough specular (or the no-ray route's cone specular), the
+    // no-ray route's cone hit (7-6), the reflection, the sun contact, the area lights' visibility.
+    static const std::vector<std::string> kSix = { "jahProbeIrradiance", "jahRoughSpec", "jahConeHit", "ssrTexture",
+                                                   "jahSunVis", "jahAreaVis" };
+    return kSix;
 }
 
 void setPhotonRegionBracketCheck(bool on) {

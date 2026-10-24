@@ -1261,6 +1261,8 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
             // change, the camera is recreated on setScene), so the listener is
             // re-synced rather than hooked up once.
             v->syncGlobalsListener();
+            // ...and the no-ray route's screen integrate (PHOTON-7 7-6), on the chain's shape
+            v->syncScreenGiListener();
             // ...and the reflection trace's hook (PHOTON_SPEC §7 R5), for the
             // third time and the third reason: the chain rebuilds when the SSR
             // row or the machine's answer changes, the scene's voxel arm is
@@ -1549,6 +1551,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                     for (auto &v : mViews) {
                         v->syncPlanarListener();
                         v->syncGlobalsListener();
+                        v->syncScreenGiListener();
                         v->syncReflectListener();
                         v->syncAtomDraw();
                         v->syncPhotonView();

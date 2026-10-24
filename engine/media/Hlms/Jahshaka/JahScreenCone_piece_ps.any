@@ -1,0 +1,62 @@
+#include "/media/matias/Datos/SyntaxHighlightingMisc.h"
+
+// THE NO-RAY ROUTE'S CONE SPECULAR, FROM THE SCREEN (PHOTON-7 stage 7, 7-6; L4 on every chain).
+//
+// On a chain that does not gather (no ray device, the project's ray row off, a Live or undeclared offscreen view) the
+// opaque passes bind no voxel volume: the screen integrate (Jahshaka/ScreenIntegrate, JahScreenIntegrate_cs.glsl)
+// marched each pixel's cones from the prepass and wrote the SAME screen products a gathering chain reads - the diffuse
+// into jahProbeIrradiance (read by JahProbeGather_piece_ps.any's diffuse read, as on a gathering chain) and the cone's
+// SPECULAR into jahRoughSpec (rgb: the voxels' share - the narrow lobe's march colour, the rough lobe's stopped share;
+// w: the share of the lobe the voxels did not stop, the escape's) beside jahConeHit (the cone's hit distance along the
+// reflection, metres). This file rebuilds from them, in the pixel, exactly the three things the cone handed the rest of
+// the shader on the voxel route (PhotonVct_piece_ps.any's computeVctProbe):
+//   vctSpecular   the voxels' share plus the environment's escape share at the surface's own roughness (zero for a
+//                 material whose own cube lights the unoccluded share, CubemapGlobal - the voxel route's rule), and the
+//                 coverage 1 (the voxel route's blend is one everywhere);
+//   vctRoughOcclusion  the rough lobe's stopped share (1 - w where the lobe is wider than tan 1, else 0) - the cube's
+//                 visibility hook below;
+//   vctSpecPosVS  the cone's hit, back along the pixel's reflection - the parallax-corrected probes' hybrid weight
+//                 (the fork's forwardPlusDoCubemaps, under the pass property jah_screen_cone, runs UNCHANGED).
+// The pass property jah_screen_cone is set by the Hlms listener with the screen products' registration (OgreFog.cpp);
+// the guard is the gather read's six terms (JahProbeGather_piece_ps.any says why each).
+// No at-sign in any comment of this file (the Hlms parser reads them).
+
+@property( jah_screen_cone && jah_rough_spec && jah_cone_hit && jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
+
+// The hybrid's weight before the declarations (a pure function, where the voxel route's DeclVctFuncs puts it); the
+// environment's binding AFTER them (it reads the pass's jahEnvCube), where the voxel route's DeclVctTextures puts it.
+@piece( DeclVctFuncs )
+	@insertpiece( JahPccVctBlendFunc )
+@end
+@piece( DeclVctTextures )
+	@insertpiece( JahPhotonEnvBinding )
+@end
+
+@piece( applyVoxelConeTracing )
+	float4 jahConeTexel = OGRE_LoadScreen2D( jahRoughSpec, iFragCoord, 0 ).xyzw;
+	@property( use_parallax_correct_cubemaps )
+		// the cone's hit, back along this pixel's reflection (view space, metres)
+		float3 vctSpecPosVS = inPs.pos + float3( pixelData.reflDir ) * OGRE_LoadScreen2D( jahConeHit, iFragCoord, 0 ).x;
+	@end
+	// THE ROUGH LOBE'S RULE, the cone's own (jahSpecularCone): a lobe wider than tan 1 is read as an occlusion query
+	const float jahConeRoughness = ( float( pixelData.perceptualRoughness ) - 0.02f ) * 1.020408163f;
+	const bool jahConeRoughLobe = max( 0.0f, tan( jahConeRoughness * 0.5f * 3.141592654f * 0.99f ) ) > 1.0f;
+	const float vctRoughOcclusion = jahConeRoughLobe ? 1.0f - jahConeTexel.w : 0.0f;
+	@property( use_envprobe_map && !use_parallax_correct_cubemaps )
+		const float3 jahEnvS = float3( 0.0f, 0.0f, 0.0f );
+	@else
+		// the escape's share: the prefiltered lobe along its dominant direction, weighted by the share the voxels did
+		// not stop (the voxel route's jahEnvS exactly)
+		const float3 jahEnvS = jahEnvLobe( jahViewToWorldDir( jahEnvDominantDir(
+											   float3( pixelData.normal ), float3( pixelData.reflDir ),
+											   float( pixelData.perceptualRoughness * pixelData.perceptualRoughness ) ) ),
+										   float( pixelData.perceptualRoughness ) ) * jahConeTexel.w;
+	@end
+	float4 vctSpecular = float4( jahConeTexel.xyz + jahEnvS, 1.0f );
+	pixelData.envColourS.xyz += midf3_c( vctSpecular.xyz );
+@end
+
+// THE CUBE LIGHTS ONLY WHAT THE ROUGH LOBE LET THROUGH (the voxel route's hook, PhotonVct_piece_ps.any)
+@piece( jahGlobalEnvVisibility )* midf_c( 1.0f - vctRoughOcclusion )@end
+
+@end

@@ -70,6 +70,7 @@ constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_env",          "jahEnvCube" },
     { "jah_probe_gather", "jahProbeIrradiance" },
     { "jah_rough_spec",   "jahRoughSpec" },
+    { "jah_cone_hit",     "jahConeHit" },
     { "jah_cloud_shadow", "jahCloudField" },
     { "jah_sun_contact",  "jahSunVis" },
     { "jah_area_vis",     "jahAreaVis" },
@@ -132,6 +133,7 @@ const Ogre::IdString &extraSlotProperty(size_t i) {
         Ogre::IdString(kExtraPassSlots[4].property),
         Ogre::IdString(kExtraPassSlots[5].property),
         Ogre::IdString(kExtraPassSlots[6].property),
+        Ogre::IdString(kExtraPassSlots[7].property),
     };
     return ids[i];
 }
@@ -354,14 +356,15 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
                 Ogre::CbShaderBuffer(Ogre::PixelShader, Ogre::uint16(pb.specAlbedoSlot), table, 0, 0);
     }
     // kExtraPassSlots' order: the sky's environment, GATHER-0's irradiance and
-    // its rough specular (7-3), the cloud field, the sun contact visibility, the area lights' visibility (7-A), the
-    // atmosphere's volume.
+    // its rough specular (7-3), the no-ray route's cone hit (7-6), the cloud field, the sun contact visibility, the area
+    // lights' visibility (7-A), the atmosphere's volume.
     // Each pair was set together in preparePassHash with its property, or not
     // at all.
     const struct { Ogre::TextureGpu *tex; const Ogre::HlmsSamplerblock *sampler; } bound[] = {
         { pb.skyCube, pb.skySampler },
         { pb.probeGather, pb.probeGatherSampler },
         { pb.roughSpec, pb.probeGatherSampler },
+        { pb.coneHit, pb.probeGatherSampler },
         { pb.cloudField, pb.cloudSampler },
         { pb.sunVis, pb.sunVisSampler },
         { pb.areaVis, pb.areaVisSampler },
@@ -507,8 +510,10 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
         static const Ogre::IdString kCubemapsAuto("hlms_enable_cubemaps_auto");
         static const Ogre::IdString kVctCascades("jah_vct_cascades");
         const SkyEnvState sky = skyEnv(sceneManager);
+        // ...and the no-ray route's screen-cone pass (7-6): its pixel composes the cone's escape share from it
         const bool reader = hlms->_getProperty(Ogre::Hlms::kNoTid, kCubemapsAuto) != 0 ||
-                            hlms->_getProperty(Ogre::Hlms::kNoTid, kVctCascades) > 0;
+                            hlms->_getProperty(Ogre::Hlms::kNoTid, kVctCascades) > 0 ||
+                            (rec && rec->probeGather.irradiance && rec->probeGather.coneHit);
         if (sky.cube && reader) {
             const Ogre::HlmsSamplerblock *envSampler =
                 acquireSampler(hlms->getHlmsManager(), true);
@@ -530,6 +535,7 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     pb.probeGather = nullptr;
     pb.probeGatherSampler = nullptr;
     pb.roughSpec = nullptr;
+    pb.coneHit = nullptr;
     if (rec && rec->probeGather.irradiance) {
         Ogre::TextureGpu *gather = rec->probeGather.irradiance;
         if (gather) {
@@ -556,6 +562,14 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
                 if (rec->probeGather.roughSpec) {
                     pb.roughSpec = rec->probeGather.roughSpec;
                     hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_rough_spec", 1);
+                }
+                // ...OR THE NO-RAY ROUTE'S PRODUCTS (PHOTON-7 7-6, the screen integrate): the same diffuse texture,
+                // the cone's specular in the rough specular's slot and its hit distance - JahScreenCone_piece_ps.any
+                // composes them where the voxel route's cone stood (jah_screen_cone)
+                if (rec->probeGather.coneHit && rec->probeGather.roughSpec) {
+                    pb.coneHit = rec->probeGather.coneHit;
+                    hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_cone_hit", 1);
+                    hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_screen_cone", 1);
                 }
             }
         }
@@ -632,6 +646,7 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
         size_t n = 0;
         if (pb.probeGather) screen[n++] = "jahProbeIrradiance";
         if (pb.roughSpec) screen[n++] = "jahRoughSpec";
+        if (pb.coneHit) screen[n++] = "jahConeHit";
         if (hlms->_getProperty(Ogre::Hlms::kNoTid, kUseSsr) != 0) screen[n++] = "ssrTexture";
         if (pb.sunVis) screen[n++] = "jahSunVis";
         if (pb.areaVis) screen[n++] = "jahAreaVis";

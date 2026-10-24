@@ -646,13 +646,17 @@ bool ChainDesc::anyEffect() const {
     // the description has to be on for that to be true.
     // ...and so is a RADIANCE READBACK (HDR-READBACK-1): the float scene
     // target it downloads exists only in the chain's shape.
-    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || probeGather || sunContact || refractions ||
+    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || probeGather || screenIntegrate || sunContact || refractions ||
            distortion || hzb || !looks.empty() || hdrReadback;
 }
 
 bool ChainDesc::prepass() const {
     // The SSR stage runs for the march or for the rays; the TRAVERSAL runs for it,
     // for the gather and for the sun contact (build's `prepass`, the one text).
+    return tracedPrepass() || screenIntegrate;
+}
+
+bool ChainDesc::tracedPrepass() const {
     const bool ssrStage = ssr > 0 && (chain::marchesInScreenSpace(*this) || rayReflect);
     return ssrStage || probeGather || sunContact;
 }
@@ -690,6 +694,10 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            // already runs (the SSR row, or the other one) is not a new graph —
            // it used to rebuild the whole workspace, dropping every history.
            a.prepass() == b.prepass() &&
+           // ...but WHO PRODUCES THE OPAQUE PASSES' GI IS (PHOTON-7 7-5 / 7-6): a gathering chain's and the no-ray
+           // producer's opaque passes bind no world cache and draw the blended queues in a pass of their own, and the
+           // no-ray producer adds its compute pass and targets.
+           a.probeGather == b.probeGather && a.screenIntegrate == b.screenIntegrate &&
            a.refractions == b.refractions && a.hdrReadback == b.hdrReadback &&
            a.displayEncode == b.displayEncode &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
@@ -2000,6 +2008,18 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         syncRtvDepth(n, kGBufNormals, td);
     }
 
+    // THE NO-RAY ROUTE'S SCREEN PRODUCTS (PHOTON-7 stage 7, 7-6): the screen integrate's three targets at the scene's
+    // size - the diffuse E/pi, the cone's specular and its hit distance - written by its compute pass (UAVs) and read by
+    // the opaque passes as the gather's are.
+    if (desc.screenIntegrate) {
+        for (const auto &t : { std::make_pair(kScreenGiIrradiance, Ogre::PFG_RGBA16_FLOAT),
+                               std::make_pair(kScreenGiSpecular, Ogre::PFG_RGBA16_FLOAT),
+                               std::make_pair(kScreenGiConeHit, Ogre::PFG_R16_FLOAT) }) {
+            auto *td = addTex(n, t.first, t.second);
+            td->textureFlags = Ogre::TextureFlags::Uav | Ogre::TextureFlags::RenderToTexture;
+        }
+    }
+
     if (prepass) {
         // The prepass' SECOND G-buffer: HlmsPbs writes the shadow term in x and
         // roughness in y, packed as (r - 0.02) * 1.02040816. RG16_UNORM is the
@@ -2518,6 +2538,23 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
                 addPhotonPass(n, sceneTarget, PhotonComponent::kTracePass, "Jahshaka photon trace");
             addPhotonPass(n, sceneTarget, PhotonComponent::kResolvePass, "Jahshaka photon resolve");
         }
+        // THE NO-RAY ROUTE'S SCREEN INTEGRATE (PHOTON-7 stage 7, 7-6), in front of the first pass that reads its
+        // products: the prepass's depth, normals and roughness in, the three screen products out. Its job's world caches
+        // and parameters are the view's screen-GI listener's (OgreScreenIntegrate.cpp), set in the pass's pre-execute.
+        if (desc.screenIntegrate) {
+            Ogre::CompositorTargetDef *ct = n->addTargetPass("");
+            ct->setNumPasses(1);
+            auto *c = static_cast<Ogre::CompositorPassComputeDef *>(ct->addPass(Ogre::PASS_COMPUTE));
+            c->mJobName = kScreenIntegrateJob;
+            c->mProfilingId = "Jahshaka screen integrate";
+            c->mIdentifier = kScreenIntegratePassIdentifier;
+            c->addTextureSource(0, kDepth);
+            c->addTextureSource(1, kGBufNormals);
+            c->addTextureSource(2, kSsrShadowRough);
+            c->addUavSource(0, kScreenGiIrradiance, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
+            c->addUavSource(1, kScreenGiSpecular, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
+            c->addUavSource(2, kScreenGiConeHit, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
+        }
         // THE OPAQUE PASSES READ ONLY SCREEN-SPACE GI (PHOTON-7 stage 7, 7-5; L4). On a GATHER chain the screen
         // decode and the opaque pass shade from the four Photon screen products alone (the gather's diffuse and its
         // rough specular, the reflection, the sun contact) and the area lights' visibility - the world caches (the
@@ -2527,7 +2564,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // opaque surfaces only), so the blended queues leave the opaque pass for their OWN pass right after it,
         // "Jahshaka blended", which reads the world caches as the refractives pass does (the field's irradiance and
         // the cone, Lumen's translucency reading its own volume) - the spec's "blended and refractive fragments" rule.
-        const bool screenGi = desc.probeGather;
+        const bool screenGi = desc.screenGi();
         // THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) in front: it classifies unless
         // the prepass's decode pass already did this frame.
         Ogre::CompositorPassSceneDef *decode =

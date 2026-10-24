@@ -176,6 +176,11 @@
 		@property( jah_rough_spec )
 			vulkan_layout( ogre_t@value(jahRoughSpec) ) uniform OGRE_ScreenTexture2D jahRoughSpec;
 		@end
+		// THE NO-RAY ROUTE'S CONE HIT (PHOTON-7 7-6): R16F, the cone specular's hit distance along the reflection, metres
+		// (JahScreenCone_piece_ps.any: the parallax-corrected probes' hybrid weight)
+		@property( jah_cone_hit )
+			vulkan_layout( ogre_t@value(jahConeHit) ) uniform OGRE_ScreenTexture2D jahConeHit;
+		@end
 	@end
 	// THE CLOUD FIELD (CLOUDS-2D-1): the layer's vertical optical depth, one
 	// tile of it, wrapping. Declared wherever the pass claimed its slot; read

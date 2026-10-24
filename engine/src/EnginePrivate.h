@@ -133,6 +133,7 @@
 namespace Ogre { class HlmsCompute; class PhotonVoxelMaterial;   // A5b §2: the one store a chain shares
                  class CompositorPassSceneDef; class CompositorPassClearDef;
                  class CompositorPassQuadDef; class CompositorPassDef;
+                 class CompositorPassCompute;   // the no-ray screen integrate's listener (PHOTON-7 7-6)
                  // Bone attachments (AVATAR_RIG_PERF_SPEC §4): a Node record
                  // holds a TagPoint*, and only OgreSockets.cpp does anything
                  // with one.
@@ -1185,6 +1186,17 @@ constexpr Ogre::uint32 kScreenDecodePassIdentifier = 25003u;
 /// motion the resolve reads (`jahSsrVelocity`, rq_motion.comp) in this pass' early
 /// pre-execute. Stamped on exactly that pass.
 constexpr Ogre::uint32 kSsrResolvePassIdentifier = 25004u;
+/// THE NO-RAY ROUTE'S SCREEN INTEGRATE (PHOTON-7 stage 7, 7-6; ChainDesc::screenIntegrate): the compute pass between
+/// the prepass and the opaque passes - its job's parameters and world caches are bound in the view's screen-GI listener
+/// (OgreScreenIntegrate.cpp), which also registers the pass's three targets for the opaque passes. Stamped on exactly
+/// that pass.
+constexpr Ogre::uint32 kScreenIntegratePassIdentifier = 25005u;
+/// ...its job and its three targets (the node's names; the pixel binds them as jahProbeIrradiance, jahRoughSpec and
+/// jahConeHit through the Hlms listener's registration).
+constexpr const char *kScreenIntegrateJob = "Jahshaka/ScreenIntegrate";
+constexpr const char *kScreenGiIrradiance = "jahScreenIrradiance";
+constexpr const char *kScreenGiSpecular = "jahScreenSpecular";
+constexpr const char *kScreenGiConeHit = "jahScreenConeHit";
 /// THE HIT LIST (PHOTON-7 stage 0, the clean form of PHOTON-2's demand-sized list; ChainDesc::hitDecode,
 /// OgreView::sizeHitList). Its records are a LIST, not a picture: kHitListWidth records a row (a layout choice, fixed).
 /// It is CREATED at kHitListCreateShare x W x H x the eyes records (the old fixed list's capacity for the target, which
@@ -1344,6 +1356,16 @@ struct ChainDesc {
     /// does not). Set by the VIEW from the scene's resolved row, exactly as
     /// `rayReflect` is.
     bool  probeGather = false;
+    /// THE NO-RAY ROUTE'S SCREEN INTEGRATE (PHOTON-7 stage 7, 7-6; L4 on every chain): a view whose scene's GI is on and
+    /// which does NOT gather - no ray device, the project's ray row off, a Live or undeclared offscreen view - carries
+    /// the prepass and the compute pass "Jahshaka screen integrate" (Jahshaka/ScreenIntegrate) between it and the
+    /// opaque passes, which writes the SAME screen products the gather does - the diffuse (the irradiance field and its
+    /// fallbacks, the cones beyond it) and the cone's specular with its hit distance - so the opaque passes bind no world
+    /// cache on any chain. GRAPH SHAPE (the opaque passes' range and binding flag, the producer and its targets). Mono
+    /// only: a stereo view keeps the pixel's own cones (stage 9's).
+    bool  screenIntegrate = false;
+    /// The opaque passes read the screen products (a gathering chain or the no-ray producer's).
+    bool screenGi() const { return probeGather || screenIntegrate; }
     /// HARD SUN CONTACT SHADOWS (PHOTON P5, RY-R3), here for the gather's
     /// reason exactly: the contact job starts each ray from the PREPASS' depth
     /// and normals and the pixel reads its answer back in the `PrePassUse`
@@ -1542,8 +1564,11 @@ struct ChainDesc {
     bool anyEffect() const;
     /// Does the chain carry the depth/normal PREPASS (the SSR stage's march or
     /// rays, the gather, the sun contact)? `build` builds it on this answer and
-    /// `sameShape` compares it in place of the rows that ask for it.
+    /// `sameShape` compares it in place of the rows that ask for it. ...or the no-ray producer (screenIntegrate).
     bool prepass() const;
+    /// ...the prepass a TRACE reads (the SSR stage, the gather, the sun contact) - the hit decode's condition: the
+    /// no-ray producer's prepass appends no hit.
+    bool tracedPrepass() const;
     /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
     /// are uniforms — changing one must never rebuild a workspace.
     static bool sameShape(const ChainDesc &a, const ChainDesc &b);
@@ -1887,6 +1912,37 @@ public:
 };
 }   // namespace chain
 
+/// THE CAMERA'S IMAGE as every screen job reads it (rq_sun_contact.comp's five numbers): the eye (w 1 perspective, 0
+/// orthographic), the image ray at the target's top-left, its steps across and down the whole target, and the view axis
+/// - the ray tier's (RayQueryTier::eyeBasis) and the no-ray screen integrate's one text (OgreScreenIntegrate.cpp).
+struct CameraImageF {
+    float camPos[4] = { 0, 0, 0, 1 };
+    float rayTL[4] = { 0, 0, 0, 0 };
+    float rayRight[4] = { 0, 0, 0, 0 };
+    float rayDown[4] = { 0, 0, 0, 0 };
+    float fwd[4] = { 0, 0, 0, 0 };
+};
+CameraImageF cameraImage(bool ortho, const Ogre::Vector3 &pos, const Ogre::Quaternion &rot, float el, float er,
+                         float et, float eb);
+/// ...widened from a letterbox's shot to the whole target (the bars hold cleared depth: every job declines them).
+void expandCameraImageToTarget(CameraImageF &e, const ChainDesc &cd, unsigned fullW, unsigned fullH);
+
+/// THE NO-RAY ROUTE'S SCREEN INTEGRATE, a view's half (PHOTON-7 stage 7, 7-6; OgreScreenIntegrate.cpp): binds the
+/// compute pass's world caches and parameters in its early pre-execute, and registers its three targets with the Hlms
+/// listener around every PrePassUse pass of the view (pass-scoped, as the gather's). One per view, through
+/// OgreView::addWorkspaceListener (the capture's workspace rides it too).
+class ScreenGiListener final : public Ogre::CompositorWorkspaceListener {
+public:
+    ~ScreenGiListener();
+    void passEarlyPreExecute(Ogre::CompositorPass *pass) override;
+    void passPreExecute(Ogre::CompositorPass *pass) override;
+    void passPosExecute(Ogre::CompositorPass *pass) override;
+    OgreView *mView = nullptr;
+private:
+    void bindJob(Ogre::CompositorPassCompute *pass);
+    Ogre::UavBufferPacked *mParams = nullptr;
+};
+
 // ---------------------------------------------------------------------------
 // THE RENDER-LOOP MONITOR — engine half (SPECS/RENDER_LOOP_MONITOR_SPEC.md;
 // impl in OgreFrameMonitor.cpp)
@@ -2000,6 +2056,7 @@ public:
     X(GatherJitter, "gather.jitter") /* the probes' jitter: 0 shipped (the grid's one offset a frame), 1 off (the centre) */ \
     X(GatherFilterOff, "gather.filterOff") /* the probe-space filter off (the measuring arm, decision 20) */ \
     X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */ \
+    X(GiScreenIntegrateOff, "gi.screenIntegrateOff") /* a no-ray chain shades with the pixel's own cones (7-6's A/B: the voxel route) */ \
     X(AreaVisReadback, "area.visReadback") /* the pixel's area light visibility copied to the host (ScenePublished::areaVis, a test door; 7-A) */ \
     X(GatherRoughQuadrature, "gather.roughQuadrature") /* the rough specular's quadrature door: 1 the filtered map kept beside the levels, 2 the lobe by brute force over it (7-3) */ \
     X(ShadowReceiverBoxesOff, "shadow.receiverBoxesOff") /* the receiver grid without the stock route's boxes (the fixture's negative control, U5 decision 22.3) */ \
@@ -3328,6 +3385,9 @@ public:
     struct ProbeGatherBind {
         Ogre::TextureGpu *irradiance = nullptr;
         Ogre::TextureGpu *roughSpec = nullptr;
+        /// THE NO-RAY ROUTE (PHOTON-7 7-6): the screen integrate's cone-hit distance - non-null says roughSpec holds
+        /// the CONE's specular (JahScreenCone_piece_ps.any), not the probes' lobe
+        Ogre::TextureGpu *coneHit = nullptr;
     };
     static void setProbeGather(const Ogre::SceneManager *sm, const ProbeGatherBind &bind);
     static ProbeGatherBind probeGather(const Ogre::SceneManager *sm);
@@ -3408,6 +3468,7 @@ private:
         Ogre::TextureGpu             *probeGather = nullptr;
         const Ogre::HlmsSamplerblock *probeGatherSampler = nullptr;
         Ogre::TextureGpu             *roughSpec = nullptr;            // PHOTON-7 7-3 (the gather's sampler)
+        Ogre::TextureGpu             *coneHit = nullptr;              // PHOTON-7 7-6 (the gather's sampler)
         Ogre::TextureGpu             *cloudField = nullptr;           // CLOUDS-2D-1
         const Ogre::HlmsSamplerblock *cloudSampler = nullptr;
         Ogre::TextureGpu             *sunVis = nullptr;               // PHOTON-RAYS-1
@@ -4542,6 +4603,9 @@ public:
     /// computed it (the surface cache's still-trace lift, CardSceneView).
     float mRayFootprintPerMetre = 0.0f;
     bool probeGatherWanted() const { return mPhoton.probeGatherWanted(); }
+    /// The scene's GI is on (a voxel mode): a non-gathering view's opaque passes then take the screen integrate's
+    /// products (ChainDesc::screenIntegrate, PHOTON-7 7-6).
+    bool screenIntegrateWanted() const { return mPhoton.giParams().mode != GiMode::Off; }
     bool probeGridByRays() const { return mPhoton.probeGridByRays(); }
     bool probeGridWanted() const { return mPhoton.probeGridWanted(); }
     unsigned long long probeShadowBytes() const { return mPhoton.probeShadowBytes(); }
@@ -7651,6 +7715,8 @@ public:
     /// view with no chain cost exactly nothing. Same idempotent once-a-frame
     /// contract as syncPlanarListener, and registered through the same seam.
     void syncGlobalsListener();
+    /// ...and the no-ray screen integrate's (ScreenGiListener), the same arming rule on ChainDesc::screenIntegrate.
+    void syncScreenGiListener();
     /// Arms or disarms this view's RAY-TRACED REFLECTION listener (PHOTON_SPEC
     /// §7 R5). Armed while the view is enabled, has a scene and a camera, and
     /// its chain carries `rayReflect` — which is the SSR row being on AND the
@@ -7873,6 +7939,8 @@ private:
     /// (CAMERA_LENS_SPEC §4). Null on a passthrough view — every thumbnail,
     /// preview and pixel suite, by construction.
     std::unique_ptr<chain::ViewGlobalsListener> mGlobalsListener;
+    /// THE NO-RAY ROUTE'S SCREEN INTEGRATE (ChainDesc::screenIntegrate, PHOTON-7 7-6): armed while the chain carries it.
+    std::unique_ptr<ScreenGiListener> mScreenGiListener;
     /// Owned; registered the same way while this view's chain traces
     /// reflections (PHOTON_SPEC §7 R5). Null everywhere else — on a machine
     /// without ray queries, with the preference off, or on any view whose chain
@@ -7976,6 +8044,10 @@ private:
     bool                       mChainPrepass = false;
     /// ...and ChainDesc::hitDecode (PHOTON-HIT-SHADE-1): the hit list + its pass.
     bool                       mChainHitDecode = false;
+    /// ...and who produces the opaque passes' GI (ChainDesc::probeGather / screenIntegrate, PHOTON-7 7-5 / 7-6):
+    /// re-checked once a frame with the scene's other shape terms (sceneShapeMoved).
+    bool                       mChainProbeGather = false;
+    bool                       mChainScreenIntegrate = false;
     /// THE HIT LIST'S SIZE (sizeHitList, kHitListWidth): the rows the list holds (0 until the first sizeHitList reads the
     /// built list; a graph is built at max(this, hitListCreateRows())). Never decreases.
     unsigned                   mHitListRows = 0u;

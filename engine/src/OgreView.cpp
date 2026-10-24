@@ -96,6 +96,8 @@ void OgreView::buildChain() {
     mChainAtomDraw = chainDesc().atomDraw;
     mChainAtomOcclusion = chainDesc().atomOcclusion;
     mChainSsao = chainDesc().ssao;
+    mChainProbeGather = chainDesc().probeGather;
+    mChainScreenIntegrate = chainDesc().screenIntegrate;
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -220,6 +222,12 @@ ChainDesc OgreView::chainDesc() const {
             "gather and takes the field's diffuse");
     }
     d.probeGather    = wantsGather && contractAllows;
+    // ...AND WHERE IT DOES NOT, THE NO-RAY ROUTE'S SCREEN INTEGRATE (PHOTON-7 stage 7, 7-6): the same screen products
+    // from the irradiance field and the cones, so a view's opaque passes read no world cache whatever the machine, the
+    // ray row or the offscreen contract. Above the early-out for the gather's reason (it is how a surface is lit).
+    // Mono only (a stereo view keeps the pixel's own cones: stage 9's).
+    d.screenIntegrate = !d.probeGather && !mStereo && mScene && mScene->screenIntegrateWanted() &&
+                        !(mEngine && mEngine->armRegistry().on(ArmId::GiScreenIntegrateOff));
     // THE offscreen guarantee, in ONE place (POST_CHAIN_SPEC.md §7.3): an
     // offscreen view never gets the post chain, whatever the host pushed.
     // Thumbnails, material previews, the asset viewer, the avatar preview and
@@ -234,7 +242,7 @@ ChainDesc OgreView::chainDesc() const {
         // it, so no existing offscreen view changes shape.
         d.refractions = mPostFx.refractions;
         // THE HIT DECODE (PHOTON-HIT-SHADE-1): the prepass' own rule, below.
-        d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
+        d.hitDecode = d.tracedPrepass() && mScene && mScene->rayTracingResolved();
         d.hitListRows = std::max(mHitListRows, hitListCreateRows());   // the list's rows (sizeHitList), not graph shape
         d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
         finishAtomOcclusion(d);
@@ -350,7 +358,7 @@ ChainDesc OgreView::chainDesc() const {
     // chain carries the prepass and this scene's rays are live — the ray jobs'
     // hits that no cache can shade are decoded — and NOT tied to which row
     // traces, so toggling the gather where the prepass runs is no new graph.
-    d.hitDecode = d.prepass() && mScene && mScene->rayTracingResolved();
+    d.hitDecode = d.tracedPrepass() && mScene && mScene->rayTracingResolved();
     // ...its rows are the view's list as it grew, at least its creation size (sizeHitList): not graph shape, so a
     // rebuilt graph keeps them.
     d.hitListRows = std::max(mHitListRows, hitListCreateRows());
@@ -373,7 +381,10 @@ ChainDesc OgreView::chainDesc() const {
 bool OgreView::sceneShapeMoved() const {
     const ChainDesc d = chainDesc();
     return mChainAtomDraw != d.atomDraw || mChainAtomOcclusion != d.atomOcclusion ||
-           mChainSsao != d.ssao;
+           mChainSsao != d.ssao ||
+           // ...and WHO PRODUCES THE OPAQUE PASSES' GI (PHOTON-7 7-5 / 7-6: graph shape): the gather (the scene's ray
+           // answer and the view's contract) or the no-ray screen integrate (the scene's GI mode)
+           mChainProbeGather != d.probeGather || mChainScreenIntegrate != d.screenIntegrate;
 }
 
 /// THE ID PASS'S OCCLUSION (ChainDesc::atomOcclusion), decided LAST — after every rule
@@ -1252,6 +1263,24 @@ void OgreView::syncGlobalsListener() {
     mGlobalsListener->mView = this;
 }
 
+void OgreView::syncScreenGiListener() {
+    // THE NO-RAY ROUTE'S SCREEN INTEGRATE (PHOTON-7 7-6): armed while the chain carries its compute pass, through the
+    // seam so it survives every rebuild (the capture's workspace takes it too: its chain carries the pass as well).
+    const bool wanted = drawing() && mScene && mCamera && chainDesc().screenIntegrate;
+    if (!wanted) {
+        if (mScreenGiListener) {
+            removeWorkspaceListener(mScreenGiListener.get());
+            mScreenGiListener.reset();
+        }
+        return;
+    }
+    if (!mScreenGiListener) {
+        mScreenGiListener.reset(new ScreenGiListener());
+        addWorkspaceListener(mScreenGiListener.get());
+    }
+    mScreenGiListener->mView = this;
+}
+
 void OgreView::addWorkspaceListener(Ogre::CompositorWorkspaceListener *l) {
     if (!l) return;
     if (std::find(mWorkspaceListeners.begin(), mWorkspaceListeners.end(), l) !=
@@ -1614,6 +1643,8 @@ void OgreView::rebuildDetachedWorkspaceDef() {
     mChainAtomDraw = chainDesc().atomDraw;
     mChainAtomOcclusion = chainDesc().atomOcclusion;
     mChainSsao = chainDesc().ssao;
+    mChainProbeGather = chainDesc().probeGather;
+    mChainScreenIntegrate = chainDesc().screenIntegrate;
 }
 
 bool OgreView::dropWorkspaceForShadowRebuild() {
