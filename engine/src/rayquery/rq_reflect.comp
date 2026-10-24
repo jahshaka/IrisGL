@@ -213,6 +213,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// frame's count, in the other half, decides the path), y = the tail's rays a frame (the rest's count / 8), z = L,
 	/// w = 1 when the compact pass runs this frame.
 	vec4 compact;
+	/// THE MOVING RAYS (OgreRayQuery.cpp ReflectParams::moving): x = the rays a glossy texel traces a frame while the view
+	/// moves (the moving batch, below).
+	vec4 moving;
 } p;
 /// THE COMPACT PASS (this module with constant 0 true): one subgroup a listed texel - its first lane the texel, the
 /// others its workers - instead of the 8 x 8 tile.
@@ -1061,7 +1064,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf, bool ownMoving, float lobeAlpha,
 					EyeImage thisEye, bool atRest, bool restInPlace, bool restBatch, uint batchRays,
 					JahReflectState inPlace, uint restStop, float throwT, JahRestStats rs, bool restHasH, float restN,
-					uint vNow, uint folds, uint consumed, float restT, JahReflectSample s )
+					uint vNow, uint folds, uint consumed, float restT, bool moveBatch, vec4 moveShare,
+					JahReflectSample s )
 {
 	bool resume;
 	resume = s.resume;
@@ -1113,6 +1117,23 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		atomicAdd( jahHitBuf[2], 1u );
 	// A BATCH THAT RAN ITS COUNT (every ray folded above): no sample for the temporal pass, which makes the frame's stop
 	// test on the rest mean as it now stands.
+	// A MOVING BATCH (rq_reflect.comp's moving rays): the sample is the kept rays' mean - the caches' answers and a
+	// blended record's screen share, over the kept count; a kept record's ray adds its share in the write-back (a sample
+	// of a record alone: none here, the write-back's whole). No one direction: the delta bit keeps it out of every
+	// neighbour's resolve.
+	if( moveBatch )
+	{
+		st.centre = false;
+		st.folded = false;
+		st.delta = true;
+		imageStore( reflectSample, ivec3( tc, gEye ),
+					moveShare.w > 0.0 && finite3( moveShare.xyz )
+						? vec4( clamp( moveShare.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), moveShare.w ) : vec4( 0.0 ) );
+		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
+		photonHit( tc, consumed == 0u ? kPhotonDropped : photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel :
+					   photonSource == 4u ? kPhotonScreen : kPhotonSky );
+		return;
+	}
 	if( restBatch && !resume && !record && consumed == batchRays )
 	{
 		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );
@@ -1427,10 +1448,21 @@ void main()
 	// The batch's rays are DEALT across the subgroup's lanes (below), its folds made in this order all the same.
 	const bool restBatch = live && restInPlace && !resume && p.rest.x < 0.5 && p.rest.y < 0.5 && centreChance < 1.0 &&
 						   p.rest.z > 1.5;
+	// THE MOVING BATCH (REFLECT-MOVING-1, the lead's ruling after R4: the spatial reuse fades with the history, so its
+	// variance is paid back with samples): while the view moves, a texel whose draw is a lobe sample (the mirror's centre
+	// ray is deterministic: it keeps one) traces p.moving.x INDEPENDENT rays - the frame's draw, then draws from the
+	// frame's index in the upper half (a stream no other frame takes) - dealt like a rest batch, and its sample is their
+	// MEAN over the rays it KEEPS: the caches' answers folded here, at most one record (the write-back's frame-sample path
+	// adds its share; one record a texel: one writer of its sample), a blended record's screen share added here. A second
+	// record, or a ray with no evidence, ends the batch and is left out - the mean's count is the kept rays', never the
+	// dealt ones (a dropped ray never darkens it). Such a sample has no one direction: the delta bit keeps it out of every
+	// neighbour's resolve.
+	const uint moveRays = !atRest ? uint( p.moving.x ) : 1u;
+	const bool moveBatch = live && !atRest && centreChance < 1.0 && moveRays > 1u && p.screen.y < 0.5;
 	// THE BATCH: the tile pass's k (the rest's first frame's), the compact pass's the tail's rays a frame shared by the
 	// listed texels, k = min( 64, ( count / 8 ) / listed ) - each texel's samples over its own warp's lanes.
 	const uint compactK = kCompactPass ? clamp( uint( p.compact.y ) / max( compactN, 1u ), 1u, 64u ) : 0u;
-	const uint batchRays = restBatch ? ( kCompactPass ? compactK : uint( p.rest.z ) ) : 1u;
+	const uint batchRays = restBatch ? ( kCompactPass ? compactK : uint( p.rest.z ) ) : moveBatch ? moveRays : 1u;
 	uint vNow = restInPlace ? inPlace.v : 0u;   // the samples the rest mean holds
 	float restT = restInPlace ? inPlace.hitT : throwT;   // the rest's mean length
 	uint folds = 0u;
@@ -1486,7 +1518,7 @@ void main()
 	bool batchEnded = false, batchFull = false;
 	uint lastBits = 0u;   // the last folded sample's draw and source (a full batch's state and photon class)
 	// THE TEXEL'S PHASE: 0 its batch is being dealt, 1 its own sample (or a full batch's finish) is due, 2 done
-	uint phase = !live ? 2u : restBatch ? 0u : 1u;
+	uint phase = !live ? 2u : restBatch || moveBatch ? 0u : 1u;
 	const uvec4 lanes = subgroupBallot( true );
 	const uint laneCount = subgroupBallotBitCount( lanes );
 	const uint rank = subgroupBallotExclusiveBitCount( lanes );
@@ -1504,11 +1536,13 @@ void main()
 	// before. allowance = min( k_active, capacity / batching ) (the host's, p.rest.w): the list's existing capacity is
 	// the count. A texel's run is the records of ONE round of the deal (one reservation): the rounds after it end at a
 	// record.
-	const uint allowance = kCompactPass ? min( batchRays, JAH_HIT_CAPACITY / max( compactN, 1u ) )
-									   : min( uint( p.rest.w ), batchRays );
+	const uint allowance = !atRest ? 1u   // (moving: one record a texel - its sample's one writer in the write-back)
+						   : kCompactPass ? min( batchRays, JAH_HIT_CAPACITY / max( compactN, 1u ) )
+										  : min( uint( p.rest.w ), batchRays );
+	vec4 moveSum = vec4( 0.0 );   // the moving batch's kept answers: radiance and distance (a blended record's screen share)
 	uint runUsed = 0u;                               // this texel's records in its run this frame
 	uint dealt = 0u;                                 // this texel's samples dealt so far
-	uint remaining = restBatch ? batchRays : 0u;     // ...and still to deal
+	uint remaining = restBatch || moveBatch ? batchRays : 0u;     // ...and still to deal
 	while( subgroupAny( remaining > 0u || phase == 1u ) )
 	{
 		// THE DEAL: slot `rank` of this round is the sample `index` of the texel whose run of slots holds it.
@@ -1563,7 +1597,9 @@ void main()
 		s.resume = mine && resume;
 		if( job || ( mine && !batchFull ) )
 			reflectSampleAt( x, thisEye, before, fullRes, atRest,
-							 job ? uint( p.knobs.z ) + first + index
+							 job ? ( atRest ? uint( p.knobs.z ) + first + index
+											: first + index == 0u ? uint( p.knobs.z )
+																 : ( uint( p.knobs.z ) | 0x80000000u ) + first + index - 1u )
 								 : atRest ? uint( p.knobs.z ) + vNow + runUsed : uint( p.knobs.z ),
 							 s );
 
@@ -1611,6 +1647,8 @@ void main()
 				// is contiguous; a record past the capacity is not written (and ends its texel's batch below).
 				const ivec2 ownerTc = ivec2( subgroupShuffle( uvec2( tc ), owner ) );
 				const bool runRec = job && ( ( subgroupShuffle( runMask, owner ) >> index ) & 1u ) != 0u;
+				// (a moving batch's kept rays: its slots before its end - the mean's count its record's share is of)
+				const uint keptOwner = max( subgroupShuffle( min( mySlots, endAt ), owner ), 1u );
 				const uvec4 runBallot = subgroupBallot( runRec );
 				const uint runCount = subgroupBallotBitCount( runBallot );
 				uint fit = 0u;   // 1 written, 2 not
@@ -1629,10 +1667,11 @@ void main()
 							jahHitWrite( li, s.recSlot, s.recFar, s.recPrim, s.recBary, s.L,
 										 s.sunVis,
 										 reflectFootprint( max( x.alpha, 1e-4 ), s.hitT ),
-										 s.blend ? -( 1.0 - s.blendVouch ) : -1.0,
+										 atRest ? ( s.blend ? -( 1.0 - s.blendVouch ) : -1.0 )
+												: ( s.blend ? 1.0 - s.blendVouch : 1.0 ) / float( keptOwner ),
 										 jahHitDestPack( ownerTc, false, gEye ), x.world.y, length( hitPos - x.world ),
 										 length( x.world - thisEye.camPos ),
-										 s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ) );
+										 atRest && s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ) );
 							fit = 1u;
 						}
 						else
@@ -1651,6 +1690,8 @@ void main()
 					const vec3 qTraced = subgroupShuffle( s.traced, from );
 					const float qT = subgroupShuffle( s.sampleT, from );
 					const uint qFit = subgroupShuffle( fit, from );
+					const vec4 qScreen = subgroupShuffle( s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT )
+																   : vec4( 0.0 ), from );
 					if( i < mySlots && !batchEnded )
 					{
 						if( i >= endAt )
@@ -1658,16 +1699,25 @@ void main()
 						else if( ( runMask & ( 1u << i ) ) != 0u )
 						{
 							if( qFit == 1u )
+							{
 								++runUsed;
+								if( !atRest )
+									moveSum += qScreen;   // (a moving record's screen share: the ray's is the write-back's)
+							}
 							else
 								batchEnded = true;
 						}
 						else
 						{
-							jahRestFold( rs, qTraced, float( vNow ) );
-							++vNow;
+							if( atRest )
+							{
+								jahRestFold( rs, qTraced, float( vNow ) );
+								++vNow;
+								restT = vNow > 1u && restT > 0.0 ? max( restT + ( qT - restT ) / float( vNow ), 1e-3 ) : qT;
+							}
+							else
+								moveSum += vec4( qTraced, qT );
 							++folds;
-							restT = vNow > 1u && restT > 0.0 ? max( restT + ( qT - restT ) / float( vNow ), 1e-3 ) : qT;
 							lastBits = qBits;
 						}
 					}
@@ -1690,10 +1740,15 @@ void main()
 							batchEnded = true;
 						else
 						{
-							jahRestFold( rs, qTraced, float( vNow ) );
-							++vNow;
+							if( atRest )
+							{
+								jahRestFold( rs, qTraced, float( vNow ) );
+								++vNow;
+								restT = vNow > 1u && restT > 0.0 ? max( restT + ( qT - restT ) / float( vNow ), 1e-3 ) : qT;
+							}
+							else
+								moveSum += vec4( qTraced, qT );
 							++folds;
-							restT = vNow > 1u && restT > 0.0 ? max( restT + ( qT - restT ) / float( vNow ), 1e-3 ) : qT;
 							lastBits = qBits;
 						}
 					}
@@ -1704,7 +1759,7 @@ void main()
 			if( phase == 0u && remaining == 0u )
 			{
 				phase = 1u;   // the batch is done: its ending sample re-traced, or (folded whole) its finish, next
-				batchFull = !batchEnded;
+				batchFull = !batchEnded || moveBatch;   // (a moving batch re-traces nothing: its end is left out)
 			}
 		}
 		if( mine )
@@ -1718,7 +1773,7 @@ void main()
 			}
 			reflectFinish( tc, dist, world, origin, prevSurf, ownMoving, lobeAlpha, thisEye, atRest, restInPlace,
 						   restBatch, batchRays, inPlace, restStop, throwT, rs, restHasH, restN, vNow, folds,
-						   folds + runUsed, restT, s );
+						   folds + runUsed, restT, moveBatch, moveSum / float( max( folds + runUsed, 1u ) ), s );
 			phase = 2u;
 		}
 	}
