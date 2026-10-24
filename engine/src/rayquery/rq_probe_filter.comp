@@ -71,11 +71,13 @@
 //    The 64 partial sums are reduced by a FIXED-ORDER shared-memory tree —
 //    never an atomic or a subgroup op, whose order is the scheduler's.
 //
-// WHAT IT WRITES: the record's SH and its E/pi at the probe's own normal. The
-// filtered map lives only in this workgroup's registers — nothing reads it
-// after the projection (the pixel history is in irradiance space, and the
-// importance sampler that would have read last frame's map was measured and
-// refused, PHOTON-GATHER-1c), so it is never stored.
+// WHAT IT WRITES: the record's SH and its E/pi at the probe's own normal, AND THE
+// FILTERED MAP ITSELF (PHOTON-7 stage 7, 7-3): every sampled texel's filtered
+// radiance into the probe's block of `filteredAtlas` (R11G11B10, the raw atlas'
+// addressing), which the integrate's ROUGH SPECULAR reads along its GGX draws
+// (rq_probe_integrate.comp; Lumen's ScreenProbeRadiance). A texel with no sample
+// stores zero - its probe is NO SAMPLE as a whole (irradiance.w -1, below) and no
+// reader takes it.
 #extension GL_GOOGLE_include_directive : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
@@ -87,6 +89,8 @@ layout( std430, set = 0, binding = 1 ) buffer Records { JahProbeRecord r[]; } re
 layout( rgba16f, set = 0, binding = 2 ) uniform readonly image2D probeAtlas;
 /// THE EYE'S DEPTH (PHOTON-2 stage 2's tail): the 3 x 3 taps' depth walk (jah_probe_seen.glsl).
 layout( set = 0, binding = 3 ) uniform sampler2DArray sceneDepth;
+/// THE FILTERED MAP, STORED (PHOTON-7 stage 7, 7-3): the rough specular's radiance (the header).
+layout( r11f_g11f_b10f, set = 0, binding = 4 ) uniform writeonly image2D filteredAtlas;
 #include "jah_reproject.glsl"
 #include "jah_probe_seen.glsl"
 
@@ -295,6 +299,9 @@ void main()
 			}
 		}
 		filtered = sampled ? sum / wsum : vec3( 0.0 );
+		// THE STORED MAP (7-3): the format holds no sign and no NaN - a texel that is not finite stores zero
+		imageStore( filteredAtlas, block + texel,
+					vec4( finite3( filtered ) ? clamp( filtered, vec3( 0.0 ), vec3( 1024.0 ) ) : vec3( 0.0 ), 0.0 ) );
 	}
 
 	// ---- THE SH PROJECTION, one texel per lane -------------------------------

@@ -54,7 +54,7 @@ FogHlmsListener::SceneBinds *FogHlmsListener::bindsOf(const Ogre::SceneManager *
 
 namespace {
 // THE EXTRA PASS TEXTURES, IN THEIR ONE FIXED ORDER (the sky's environment,
-// then the gather's irradiance, then the cloud field — CLOUDS-2D-1 — then the
+// then the gather's irradiance and its rough specular — PHOTON-7 stage 7, 7-3 —, then the cloud field — CLOUDS-2D-1 — then the
 // sun contact visibility — PHOTON-RAYS-1 — then the atmosphere's
 // aerial-perspective volume — SKY-ATMOSPHERE-1). Three
 // places must agree about it: the count (getNumExtraPassTextures), the
@@ -69,6 +69,7 @@ struct ExtraPassSlot {
 constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_env",          "jahEnvCube" },
     { "jah_probe_gather", "jahProbeIrradiance" },
+    { "jah_rough_spec",   "jahRoughSpec" },
     { "jah_cloud_shadow", "jahCloudField" },
     { "jah_sun_contact",  "jahSunVis" },
     { "jah_atmo_ap",      "jahAtmoAerial" },
@@ -128,6 +129,7 @@ const Ogre::IdString &extraSlotProperty(size_t i) {
         Ogre::IdString(kExtraPassSlots[2].property),
         Ogre::IdString(kExtraPassSlots[3].property),
         Ogre::IdString(kExtraPassSlots[4].property),
+        Ogre::IdString(kExtraPassSlots[5].property),
     };
     return ids[i];
 }
@@ -232,6 +234,7 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
     // go undeclared, and every guard that reads a property follows it.
     // Cache-safe: derived from properties already in the merged set.
     static const Ogre::IdString kProbeGather("jah_probe_gather");
+    static const Ogre::IdString kRoughSpec("jah_rough_spec");
     static const Ogre::IdString kEnvDiffuseOnly("jah_env_diffuse_only");
     static const Ogre::IdString kShadowCaster("hlms_shadowcaster");
     const bool blended = hlms->_getProperty(tid, Ogre::IdString("hlms_alphablend")) != 0 &&
@@ -271,10 +274,23 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
             hlms->_setProperty(tid, kProbeGather, 0);
             hlms->_setProperty(tid, kEnvDiffuseOnly, 1);
         }
+        // ...AND ITS ROUGH SPECULAR (7-3): the texel under a blended fragment is the opaque surface's lobe. Withdrawn:
+        // the fragment keeps the cone's specular and its material cube (it has no screen product - the spec's
+        // "blended and refractive fragments" rule).
+        hlms->_setProperty(tid, kRoughSpec, 0);
     }
     static const Ogre::IdString kIrradianceField("irradiance_field");
     static const Ogre::IdString kVctNumProbes("vct_num_probes");
     static const Ogre::IdString kVctDisableDiffuse("vct_disable_diffuse");
+    static const Ogre::IdString kVctDisableSpecular("vct_disable_specular");
+    // WHERE THE GATHER'S ROUGH SPECULAR IS THE ENVIRONMENT TERM, THE CONE'S IS NOT (PHOTON-7 stage 7, 7-3): the probes'
+    // filtered radiance along the pixel's GGX lobe and the cone march along it estimate ONE integral, so on a pass that
+    // reads `jahRoughSpec` the cone's specular - its march, its escape's sky share, the rough lobe's voxel share and
+    // the hook that weighted the material's cube - is compiled out (HlmsPbs's own `vct_disable_specular`, the property
+    // a PCC capture sets), and the material's environment cube with it (JahProbeGather_piece_ps.any empties
+    // CubemapGlobal: the probes' escaping rays carry the sky once). Cache-safe: derived from a property just set.
+    if (hlms->_getProperty(tid, kRoughSpec) && !hlms->_getProperty(tid, kShadowCaster))
+        hlms->_setProperty(tid, kVctDisableSpecular, 1);
     {
         // WHERE THE GATHER ANSWERS, THE CONES DO NOT (GATHER-0; the tier's fact
         // since PHOTON-GATHER-1d: a pass gathers exactly on a gather tier). The
@@ -374,13 +390,14 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
             *commandBuffer->addCommand<Ogre::CbShaderBuffer>() =
                 Ogre::CbShaderBuffer(Ogre::PixelShader, Ogre::uint16(pb.specAlbedoSlot), table, 0, 0);
     }
-    // kExtraPassSlots' order: the sky's environment, GATHER-0's irradiance,
-    // the cloud field, the sun contact visibility, the atmosphere's volume.
+    // kExtraPassSlots' order: the sky's environment, GATHER-0's irradiance and
+    // its rough specular (7-3), the cloud field, the sun contact visibility, the atmosphere's volume.
     // Each pair was set together in preparePassHash with its property, or not
     // at all.
     const struct { Ogre::TextureGpu *tex; const Ogre::HlmsSamplerblock *sampler; } bound[] = {
         { pb.skyCube, pb.skySampler },
         { pb.probeGather, pb.probeGatherSampler },
+        { pb.roughSpec, pb.probeGatherSampler },
         { pb.cloudField, pb.cloudSampler },
         { pb.sunVis, pb.sunVisSampler },
         { pb.atmoAerial, pb.atmoSampler },
@@ -411,9 +428,9 @@ FogHlmsListener::SkyEnvState FogHlmsListener::skyEnv(const Ogre::SceneManager *s
     return b ? b->skyEnv : SkyEnvState();
 }
 
-// GATHER-0 — the screen-probe gather spike's registration (see the header).
-void FogHlmsListener::setProbeGather(const Ogre::SceneManager *sm, Ogre::TextureGpu *irradiance) {
-    if (SceneBinds *b = bindsOf(sm)) b->probeGather = irradiance;
+// GATHER-0 — the screen-probe gather's registration, its two products (see the header).
+void FogHlmsListener::setProbeGather(const Ogre::SceneManager *sm, const ProbeGatherBind &bind) {
+    if (SceneBinds *b = bindsOf(sm)) b->probeGather = bind.irradiance ? bind : ProbeGatherBind();
 }
 
 // PHOTON-RAYS-1 — the sun contact job's registration (see the header).
@@ -433,9 +450,9 @@ void FogHlmsListener::setConeSkipArms(bool diffuseSkip, bool specularSkip) {
     sDiffuseConeSkip = diffuseSkip;
     sSpecularConeSkip = specularSkip;
 }
-Ogre::TextureGpu *FogHlmsListener::probeGather(const Ogre::SceneManager *sm) {
+FogHlmsListener::ProbeGatherBind FogHlmsListener::probeGather(const Ogre::SceneManager *sm) {
     const SceneBinds *b = bindsOf(sm);
-    return b ? b->probeGather : nullptr;
+    return b ? b->probeGather : ProbeGatherBind();
 }
 
 void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
@@ -543,8 +560,9 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // colour pass and nothing else changes anywhere.
     pb.probeGather = nullptr;
     pb.probeGatherSampler = nullptr;
-    if (rec && rec->probeGather) {
-        Ogre::TextureGpu *gather = rec->probeGather;
+    pb.roughSpec = nullptr;
+    if (rec && rec->probeGather.irradiance) {
+        Ogre::TextureGpu *gather = rec->probeGather.irradiance;
         if (gather) {
             // A POINT sampler: the piece reads the texel under the fragment,
             // never between two of them.
@@ -565,6 +583,11 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
                 pb.probeGatherSampler = gatherSampler;
                 pb.probeGather = gather;
                 hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_probe_gather", 1);
+                // ...AND ITS ROUGH SPECULAR (PHOTON-7 stage 7, 7-3), the same point sampler: the pass's envColourS
+                if (rec->probeGather.roughSpec) {
+                    pb.roughSpec = rec->probeGather.roughSpec;
+                    hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_rough_spec", 1);
+                }
             }
         }
     }
@@ -618,13 +641,14 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
         hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_photon_view", Ogre::int32(rec->photonIsolation));
     // THE OPAQUE PASSES' DOOR (PHOTON-7 7-1, L4): what this colour pass binds of Photon - the world caches (the
     // volumes' own preparation above) and the SCREEN products, by the names photonScreenProducts() lists: the
-    // gather's diffuse, the reflection (HlmsPbs's SSR texture: the prepass's reflection, which the ray tier writes)
-    // and the sun contact.
+    // gather's diffuse and its rough specular (7-3), the reflection (HlmsPbs's SSR texture: the prepass's reflection,
+    // which the ray tier writes) and the sun contact.
     if (hlms && !casterPass) {
         static const Ogre::IdString kUseSsr("hlms_use_ssr");
         const char *screen[8];
         size_t n = 0;
         if (pb.probeGather) screen[n++] = "jahProbeIrradiance";
+        if (pb.roughSpec) screen[n++] = "jahRoughSpec";
         if (hlms->_getProperty(Ogre::Hlms::kNoTid, kUseSsr) != 0) screen[n++] = "ssrTexture";
         if (pb.sunVis) screen[n++] = "jahSunVis";
         PhotonPassBinding::notePass(sceneManager, hlms, screen, n);

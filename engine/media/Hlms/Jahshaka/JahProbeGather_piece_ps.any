@@ -72,7 +72,24 @@
 @piece( applyIrradianceVolumes )
 	float4 jahProbeGathered = OGRE_LoadScreen2D( jahProbeIrradiance, iFragCoord, 0 ).xyzw;
 	pixelData.envColourD += midf3_c( jahProbeGathered.xyz ) * midf_c( jahProbeGathered.w );
+	@property( jah_rough_spec )
+		// THE ROUGH SPECULAR (PHOTON-7 stage 7, 7-3): the radiance along this pixel's GGX lobe from the probes' own
+		// filtered radiance, handed over to E/pi by the roughness (rq_probe_integrate.comp) - the environment term
+		// whole: the cone's specular is compiled out of this pass (vct_disable_specular, the listener) and the
+		// material's cube emptied below; the fork's SSR composite after it hands the reflection's confidence over.
+		pixelData.envColourS += midf3_c( OGRE_LoadScreen2D( jahRoughSpec, iFragCoord, 0 ).xyz );
+	@end
 @end
+@end
+
+// THE SKY ARRIVES ONCE (PHOTON-7 stage 7, 7-3). On a pass that reads the rough specular, the probes' escaping rays
+// already carried the sky into the lobe (rq_probe_gather.comp reads the environment on a miss, occluded where the
+// scene stops it), so HlmsPbs's CubemapGlobal - the material's cube sampled along the lobe with nothing in the way - is
+// a second copy of it: emptied here, under the same six terms as the read above (its cubemaps_as_diffuse_gi half too:
+// the gather is the pass's one diffuse route).
+@property( jah_rough_spec && jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
+	@undefpiece( CubemapGlobal )
+	@piece( CubemapGlobal )@end
 @end
 
 @property( jah_env_diffuse_only && vct_num_probes && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )

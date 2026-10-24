@@ -30,6 +30,22 @@
 // answered mean and w its coverage, as before 7-2. A pixel gets exactly ONE
 // diffuse-GI term in every regime.
 //
+// THE SECOND OUTPUT, `jahRoughSpec` (PHOTON-7 stage 7, 7-3; Lumen's rough
+// reflections): the radiance arriving along the pixel's GGX lobe, read from the
+// PROBES' OWN FILTERED RADIANCE (rq_probe_filter.comp stores it) - four visible-
+// normal draws a frame on the gather's sequence, the roughness clamped from below
+// to p.rough.x, each draw looked up in the pixel's bilinear probes (the diffuse's
+// own taps and plane weights; a draw under a probe's horizon leaves that probe out
+// and the rest renormalise), then handed over to the diffuse E/pi between the
+// perceptual roughnesses p.rough.y and p.rough.z (Lumen's DiffuseLerp: the cosine
+// lobe is the widest lobe). What the shading pass's envColourS is: the cone's
+// specular and the material's environment cube are compiled out of a pass that
+// reads it (the sky arrives once, through the probes' escaping rays), and a ray
+// reflection's confidence takes over from it (the fork's SSR composite). Its own
+// history (one shared-exponent word, read at the diffuse history's texel: one
+// surface validation for both, one blend) and its own rest mean (the diffuse's
+// rest law, R2 and the freeze, word for word).
+//
 // DETERMINISM: the five taps are read and summed in ONE FIXED ORDER.
 //
 // THE PIXEL HISTORY (PHOTON-GATHER-1c item 1; C2 design section 2). The answer
@@ -138,6 +154,16 @@ layout( set = 0, binding = 10 ) uniform sampler2D fieldIrradiance;
 layout( set = 0, binding = 11 ) uniform sampler2D fieldDepth;
 #define JAH_FIELD_IRRAD( uv ) textureLod( fieldIrradiance, uv, 0.0 )
 #define JAH_FIELD_DEPTH( uv ) textureLod( fieldDepth, uv, 0.0 ).xy
+/// THE ROUGH SPECULAR (PHOTON-7 stage 7, 7-3; bindings 12 - 17 - the header's second output): the prepass's shadow /
+/// roughness G-buffer (.y the GGX alpha, fork 16d8e29d4's packing over [0.001, 1]: rq_reflect.comp's decode), the
+/// filter's stored radiance (bilinear inside each probe's block), the output, its history pair (one shared-exponent
+/// word a pixel, at the diffuse history's texel) and its rest mean (a 1 x 1 stand-in under stereo, as the diffuse's).
+layout( set = 0, binding = 12 ) uniform sampler2DArray gBufShadowRoughness;
+layout( set = 0, binding = 13 ) uniform sampler2D filteredAtlas;
+layout( rgba16f, set = 0, binding = 14 ) uniform writeonly image2DArray roughSpec;
+layout( r32ui, set = 0, binding = 15 ) uniform readonly uimage2DArray roughHistoryPrev;
+layout( r32ui, set = 0, binding = 16 ) uniform writeonly uimage2DArray roughHistoryCur;
+layout( rgba16f, set = 0, binding = 17 ) uniform image2DArray roughRest;
 // (the environment's SH alone: no cube is read here)
 #define JAH_ENV_CUBE_ON false
 #define JAH_ENV_SAMPLE( d, l ) vec3( 0.0 )
@@ -159,6 +185,7 @@ layout( set = 0, binding = 11 ) uniform sampler2D fieldDepth;
 #include "jah_reproject.glsl"
 #include "jah_probe_history.glsl"
 #include "jah_probe_seen.glsl"
+#include "jah_ggx_vndf.glsl"
 
 /// THE ROUNDING'S NUMBER on [0,1): a pure function of (the pixel IN ITS EYE'S
 /// OWN IMAGE, the view's ADVANCING frame counter p.knobs6.z, which quantity) —
@@ -292,6 +319,148 @@ vec3 fieldFallback( vec3 worldPos, vec3 worldNormal, vec3 toEye )
 	return a.irradiance + jahEnvIrradiance( worldNormal ) * ( 1.0 - a.confidence );
 }
 
+/// THE BILINEAR READ'S TAPS (GATHER-1a; one text for the diffuse's own read and the rough specular's lobe, 7-3): the
+/// four uniform probes whose cells bracket the pixel (the bracket's weights; a cell off the grid clamps onto the border
+/// cell), then the pixel's own cell's ADAPTIVE TWIN at that cell's bilinear share - it exists because the cell holds a
+/// surface its uniform probe is not on - each weighed by THE PLANE TEST and kept only where the probe is SEEN FROM THE
+/// PIXEL ALONG ITS SURFACE (no light through a wall: a floor that runs on under a thin partition is one plane on both
+/// sides), in that ONE FIXED ORDER. `starved`: a probe with a positive share had no sample this frame (its ray records
+/// dropped by a full hit list, rq_probe_filter.comp's irradiance.w -1).
+int bilinearTaps( ivec2 c0, vec2 f, ivec2 cell, uint index, ivec2 cellOff, ivec2 gridEye, ivec2 grid, vec3 pixelWorld,
+				  vec3 pixelNormal, float pixelDist, vec2 local, JahEye thisEye, int eye, vec2 eyeSize,
+				  out uint tapIdx[5], out float tapW[5], out bool starved )
+{
+	int n = 0;
+	starved = false;
+	for( int t = 0; t < 5; ++t )
+	{
+		tapIdx[t] = 0u;
+		tapW[t] = 0.0;
+	}
+	float ownCellWeight = 0.0;
+	for( int k = 0; k < 4; ++k )
+	{
+		const ivec2 o = ivec2( k & 1, k >> 1 );
+		const ivec2 c = clamp( c0 + o, ivec2( 0 ), gridEye - 1 ) + cellOff;
+		const float wb = ( o.x == 1 ? f.x : 1.0 - f.x ) * ( o.y == 1 ? f.y : 1.0 - f.y );
+		if( c == cell )
+			ownCellWeight += wb;
+		const uint probeIndex = uint( c.y * grid.x + c.x );
+		const vec4 posW = records.r[probeIndex].posW;
+		starved = starved || ( posW.w > 0.5 && wb > 0.0 && records.r[probeIndex].irradiance.w < -0.5 );
+		if( posW.w < 0.5 || records.r[probeIndex].irradiance.w < 0.5 || wb <= 0.0 )
+			continue;
+		const float w = wb * jahPlaneWeight( posW.xyz, records.r[probeIndex].normalW.xyz, pixelWorld,
+											 pixelNormal, pixelDist );
+		if( w <= 0.0 || !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
+			continue;
+		tapIdx[n] = probeIndex;
+		tapW[n] = w;
+		++n;
+	}
+	const float link = records.r[index].normalW.w;
+	if( link > 0.5 && ownCellWeight > 0.0 )
+	{
+		const uint twin = uint( link ) - 1u;
+		const vec4 posW = records.r[twin].posW;
+		starved = starved || ( posW.w > 0.5 && records.r[twin].irradiance.w < -0.5 );
+		if( posW.w > 0.5 && records.r[twin].irradiance.w > 0.5 )
+		{
+			const float w = ownCellWeight * jahPlaneWeight( posW.xyz, records.r[twin].normalW.xyz,
+															pixelWorld, pixelNormal, pixelDist );
+			if( w > 0.0 && seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
+			{
+				tapIdx[n] = twin;
+				tapW[n] = w;
+				++n;
+			}
+		}
+	}
+	return n;
+}
+
+/// The rough specular's draws keyed apart from every other stream of the gather (jahSample2's index).
+const uint kRoughDrawSalt = 16384u;
+
+/// ONE DRAW OF THE LOBE (7-3): the radiance arriving along world direction d at the pixel, from its taps' FILTERED
+/// MAPS - each probe's map is a hemisphere in its own tangent frame (rq_probe_filter.comp's; T / B per tap, given), so
+/// d is re-expressed there and looked up bilinearly inside the probe's block (the sample point clamped half a texel in
+/// from the block's edge, which is the hemisphere's horizon: the filter never stores below it). A probe whose
+/// hemisphere does not hold d (under its horizon) says nothing and the others renormalise; none holds it - the pixel's
+/// own diffuse E/pi stands for the draw (the widest lobe's answer).
+vec3 lobeDraw( vec3 d, uint tapIdx[5], float tapW[5], vec3 tapT[5], vec3 tapB[5], int nTap, vec3 diffuse )
+{
+	const float octRes = clamp( p.knobs2.w, 1.0, float( kOctResMax ) );
+	const int cols = max( int( p.knobs3.z ), 1 );
+	const vec2 atlasSize = vec2( textureSize( filteredAtlas, 0 ) );
+	vec3 acc = vec3( 0.0 );
+	float wacc = 0.0;
+	for( int t = 0; t < nTap; ++t )
+	{
+		const uint pi = tapIdx[t];
+		const vec3 n = records.r[pi].normalW.xyz;
+		const vec3 l = vec3( dot( d, tapT[t] ), dot( d, tapB[t] ), dot( d, n ) );
+		if( l.z <= 0.0 )
+			continue;
+		const vec2 block = vec2( float( int( pi ) % cols ), float( int( pi ) / cols ) ) * float( kOctResMax );
+		const vec2 at = clamp( jahOctUv( l ) * octRes, vec2( 0.5 ), vec2( octRes - 0.5 ) );
+		const vec3 L = textureLod( filteredAtlas, ( block + at ) / atlasSize, 0.0 ).xyz;
+		if( !finite3( L ) )
+			continue;
+		acc += L * tapW[t];
+		wacc += tapW[t];
+	}
+	return wacc > 0.0 ? acc / wacc : diffuse;
+}
+
+/// THE LOBE THIS FRAME (7-3; the header's second output): FOUR GGX VISIBLE-NORMAL DRAWS at the pixel's roughness
+/// clamped from below to p.rough.x (a mirror's lobe at the probes' resolution), stratified over the draw's unit square
+/// (one jittered draw a quadrant) on the gather's own sequence (p.knobs.z: the frame, the rest frame's index at rest -
+/// so the rest mean is the same draws whatever came before it), each reflected about its half vector and read by
+/// lobeDraw; a draw that leaves the surface's hemisphere is dropped and the rest renormalise (all four gone - a grazing
+/// view - the mirror direction stands for them). Taps under the weight floor: the pixel's diffuse E/pi.
+vec3 roughLobe( vec3 N, vec3 V, float roughness, ivec2 seedPix, uint tapIdx[5], float tapW[5], int nTap, float floorW,
+				vec3 diffuse )
+{
+	float tapSum = 0.0;
+	vec3 tapT[5], tapB[5];
+	for( int t = 0; t < 5; ++t )
+	{
+		tapT[t] = vec3( 1.0, 0.0, 0.0 );
+		tapB[t] = vec3( 0.0, 1.0, 0.0 );
+	}
+	for( int t = 0; t < nTap; ++t )
+	{
+		tapSum += tapW[t];
+		jahTangentFrame( records.r[tapIdx[t]].normalW.xyz, tapT[t], tapB[t] );
+	}
+	if( tapSum < floorW )
+		return diffuse;
+	vec3 T, B;
+	jahTangentFrame( N, T, B );
+	vec3 Ve = vec3( dot( V, T ), dot( V, B ), dot( V, N ) );
+	Ve.z = max( Ve.z, 1e-4 );
+	Ve = normalize( Ve );
+	const float rc = max( roughness, p.rough.x );
+	const float alpha = rc * rc;
+	vec3 sum = vec3( 0.0 );
+	int draws = 0;
+	for( int s = 0; s < 4; ++s )
+	{
+		const vec2 u = ( vec2( float( s & 1 ), float( s >> 1 ) ) +
+						 jahSample2( seedPix, kRoughDrawSalt + uint( s ), uint( p.knobs.z ) ) ) * 0.5;
+		const vec3 h = jahGgxVndf( Ve, alpha, u );
+		const vec3 l = reflect( -Ve, h );
+		if( l.z <= 0.0 )
+			continue;
+		sum += lobeDraw( T * l.x + B * l.y + N * l.z, tapIdx, tapW, tapT, tapB, nTap, diffuse );
+		++draws;
+	}
+	if( draws == 0 )
+		return lobeDraw( reflect( -V, N ), tapIdx, tapW, tapT, tapB, nTap, diffuse );
+	return sum / float( draws );
+}
+
 void main()
 {
 	const ivec2 full = ivec2( p.resolution.zw );
@@ -356,11 +525,16 @@ void main()
 		// and nothing should: it has no hemisphere. Its history is "no surface"
 		// (a zero word fails every distance test).
 		imageStore( probeIrradiance, at, vec4( 0.0 ) );
+		imageStore( roughSpec, at, vec4( 0.0 ) );
 		if( temporal )
 		{
 			imageStore( historyCur, at, uvec4( 0u ) );
+			imageStore( roughHistoryCur, at, uvec4( 0u ) );
 			if( p.knobs6.x >= 1.0 )
+			{
 				imageStore( restMean, at, vec4( 0.0 ) );
+				imageStore( roughRest, at, vec4( 0.0 ) );
+			}
 		}
 		return;
 	}
@@ -368,6 +542,7 @@ void main()
 	// ---- THE PIXEL HISTORY (see the header) ---------------------------------
 	vec4 prev = vec4( 0.0 );
 	uint prevCount = 0u;
+	ivec2 histAt = ivec2( 0 );   // the previous texel read (the rough specular's history half is read there too)
 	if( temporal && p.knobs5.x >= 1.0 )
 	{
 		// THROUGH THIS EYE'S PREVIOUS CAMERA, onto this eye's own half of the
@@ -380,7 +555,7 @@ void main()
 		const vec3 toEye = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
 		const float NoV = dot( pixelNormal, toEye );
 		if( jahHistoryAt( pixelWorld, pixelFoliage, NoV, roundingDither( ivec2( lx, pix.y ), 3u ), eye, texel,
-						  wasCount ) )
+						  wasCount, histAt ) )
 		{
 			if( gFoliageRuleOnly )
 				atomicAdd( gatherCounter.words[1], 1u );
@@ -425,7 +600,6 @@ void main()
 
 	vec3 sum = vec3( 0.0 );
 	float wsum = 0.0;
-	float ownCellWeight = 0.0;
 	// THE DEPTH WALK ON EVERY READ (PHOTON-2 stage 2's tail; 1.6 B4, DEEP_AUDIT photon-diffuse F13): no LIGHT THROUGH
 	// A WALL on any read of a neighbouring probe - the bilinear four, the twin and both silhouette steps as the wide
 	// young read always did (jah_probe_seen.glsl). A wall thinner than one probe stride on screen (0.1 m at 30 m is
@@ -437,6 +611,12 @@ void main()
 	// (below: it keeps its history, as a reflection texel with no sample keeps what it holds), never the fallback's
 	// share a geometric "no answer" hands on.
 	bool starved = false;
+	// THE BILINEAR TAPS (bilinearTaps): the diffuse's own read when the history is old enough, and the rough specular's
+	// lobe always (a young pixel's diffuse reads the wide neighbourhood below, its lobe these)
+	uint tapIdx[5];
+	float tapW[5];
+	int nTap = 0;
+	bool tapsRead = false;
 	if( reach > 1.0 )
 	{
 		// THE WIDE READ: every cell whose centre lies within `reach` cells of the
@@ -496,46 +676,15 @@ void main()
 			}
 	}
 	else
-	for( int k = 0; k < 4; ++k )
 	{
-		const ivec2 o = ivec2( k & 1, k >> 1 );
-		const ivec2 c = clamp( c0 + o, ivec2( 0 ), gridEye - 1 ) + cellOff;
-		const float wb = ( o.x == 1 ? f.x : 1.0 - f.x ) * ( o.y == 1 ? f.y : 1.0 - f.y );
-		if( c == cell )
-			ownCellWeight += wb;
-		const uint probeIndex = uint( c.y * grid.x + c.x );
-		const vec4 posW = records.r[probeIndex].posW;
-		starved = starved || ( posW.w > 0.5 && wb > 0.0 && records.r[probeIndex].irradiance.w < -0.5 );
-		if( posW.w < 0.5 || records.r[probeIndex].irradiance.w < 0.5 || wb <= 0.0 )
-			continue;
-		const float w = wb * jahPlaneWeight( posW.xyz, records.r[probeIndex].normalW.xyz, pixelWorld,
-											 pixelNormal, pixelDist );
-		if( w <= 0.0 || !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
-			continue;
-		sum += shEvalAt( probeIndex, pixelNormal, bands ) * w;
-		wsum += w;
-	}
-	// ...AND THE PIXEL'S OWN CELL'S ADAPTIVE TWIN, at that cell's bilinear share:
-	// it exists because the cell holds a surface its uniform probe is not on.
-	// (The wide read took every cell's twin at its tent weight already.)
-	if( reach <= 1.0 )
-	{
-		const float link = records.r[index].normalW.w;
-		if( link > 0.5 && ownCellWeight > 0.0 )
+		// THE BILINEAR FOUR AND THE OWN CELL'S TWIN (bilinearTaps), summed in its one fixed order
+		nTap = bilinearTaps( c0, f, cell, index, cellOff, gridEye, grid, pixelWorld, pixelNormal, pixelDist, local,
+							 thisEye, eye, eyeSize, tapIdx, tapW, starved );
+		tapsRead = true;
+		for( int t = 0; t < nTap; ++t )
 		{
-			const uint twin = uint( link ) - 1u;
-			const vec4 posW = records.r[twin].posW;
-			starved = starved || ( posW.w > 0.5 && records.r[twin].irradiance.w < -0.5 );
-			if( posW.w > 0.5 && records.r[twin].irradiance.w > 0.5 )
-			{
-				const float w = ownCellWeight * jahPlaneWeight( posW.xyz, records.r[twin].normalW.xyz,
-																pixelWorld, pixelNormal, pixelDist );
-				if( w > 0.0 && seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
-				{
-					sum += shEvalAt( twin, pixelNormal, bands ) * w;
-					wsum += w;
-				}
-			}
+			sum += shEvalAt( tapIdx[t], pixelNormal, bands ) * tapW[t];
+			wsum += tapW[t];
 		}
 	}
 	// ---- THE SILHOUETTE RULE (GA-EDGE, the fix round) --------------------------
@@ -623,6 +772,18 @@ void main()
 	// THE FIELD, COMPOSED (7-2): the eye's direction for its sample point's bias
 	const bool composeField = p.fieldWin.w > 0.5;
 	const vec3 toEyeField = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
+	// THE ROUGH SPECULAR'S HAND-OVER (7-3): the pixel's perceptual roughness (the G-buffer's alpha, decoded as the
+	// reflection decodes it) against p.rough.y .. z - 0 the lobe alone, 1 the diffuse E/pi alone (no draw is made)
+	const float roughness =
+		sqrt( max( texture( gBufShadowRoughness, uv ).y * 0.999 + 0.001, 1e-6 ) );
+	const float toDiffuse = clamp( ( roughness - p.rough.y ) / max( p.rough.z - p.rough.y, 1e-4 ), 0.0, 1.0 );
+	// a young pixel's diffuse read the wide neighbourhood: its lobe reads the bilinear taps
+	if( toDiffuse < 1.0 && !tapsRead )
+	{
+		bool tapStarved;
+		nTap = bilinearTaps( c0, f, cell, index, cellOff, gridEye, grid, pixelWorld, pixelNormal, pixelDist, local,
+							 thisEye, eye, eyeSize, tapIdx, tapW, tapStarved );
+	}
 	if( !temporal )
 	{
 		// THE MEASUREMENT LEVER (the arm "gather.temporal"): this frame's
@@ -633,6 +794,11 @@ void main()
 												: vec3( 0.0 ) ),
 						   1.0 );
 		imageStore( probeIrradiance, at, answer );
+		const vec3 diffuseNow = answer.xyz * answer.w;
+		const vec3 lobeNow = toDiffuse < 1.0 ? roughLobe( pixelNormal, toEyeField, roughness, ivec2( lx, pix.y ), tapIdx,
+														   tapW, nTap, weightFloor, diffuseNow )
+											 : diffuseNow;
+		imageStore( roughSpec, at, vec4( mix( lobeNow, diffuseNow, toDiffuse ), 1.0 ) );
 		return;
 	}
 
@@ -670,6 +836,9 @@ void main()
 	// steps exactly as a settling one, Bistro's first rest frame jumped 0.18 -> 0.26 at k / N) and reaches 1 at k = N,
 	// where the answer is still the rest mean exactly.
 	const float restK = p.knobs6.x;
+	// (the rest's law, held for the rough specular's rest below: whether this frame's sample enters, and the hand-over)
+	bool restTakes = false;
+	float restHandover = 0.0;
 	if( restK >= 1.0 )
 	{
 		// NO SAMPLE THIS FRAME: the rest mean takes none, and is never SEEDED from the history (PHOTON-2 1b H2: the EMA is
@@ -678,14 +847,14 @@ void main()
 		// the history; the later samples weigh 1 / k of the rest frame - a starved frame is a full list's, rare.)
 		// ...and UNDER THE GI FREEZE (stereo.w, PHOTON-2 1b W4) a pixel with a history takes no rest sample either: it keeps
 		// its history (the rest mean holds none yet) or its rest mean as it is - no new sample enters anywhere.
-		const bool restTakes = !noSample && !( p.stereo.w > 0.5 && prevCount > 0u );
+		restTakes = !noSample && !( p.stereo.w > 0.5 && prevCount > 0u );
 		const vec4 stored = restK < 1.5 ? vec4( 0.0, 0.0, 0.0, -1.0 ) : imageLoad( restMean, at );
 		const bool empty = stored.w < -0.5;
 		const vec4 rest = !restTakes ? stored : empty ? sample1 : mix( stored, sample1, 1.0 / restK );
 		imageStore( restMean, at, rest );
 		const vec4 restAnswer = rest.w < -0.5 ? prev : rest;
-		mean = mix( mix( prev, restAnswer, blend ), restAnswer,
-					clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 ) );
+		restHandover = clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 );
+		mean = mix( mix( prev, restAnswer, blend ), restAnswer, restHandover );
 	}
 	imageStore( historyCur, at,
 				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
@@ -706,6 +875,35 @@ void main()
 		outV = vec4( outV.xyz * cover +
 						 ( cover < 1.0 ? fieldFallback( pixelWorld, pixelNormal, toEyeField ) * ( 1.0 - cover ) : vec3( 0.0 ) ),
 					 1.0 );
+	}
+	// ---- THE ROUGH SPECULAR (7-3; the header's second output) -----------------
+	// This frame's lobe (its fallback the pixel's diffuse E/pi as the shading pass takes it: the composed answer, or
+	// the answered share where the pass composes the field itself), through the diffuse's own blend - the same surface
+	// test (the history half read at the texel the diffuse accepted), the same count, the freeze and a starved frame
+	// keeping it - and at rest the diffuse's rest law word for word (R2: never seeded from the history, no sample under
+	// the freeze, the same hand-over); then handed over to the diffuse by the roughness.
+	{
+		const vec3 diffuseOut = outV.xyz * outV.w;
+		const vec3 lobe = toDiffuse < 1.0 ? roughLobe( pixelNormal, toEyeField, roughness, ivec2( lx, pix.y ), tapIdx,
+														tapW, nTap, weightFloor, diffuseOut )
+										  : diffuseOut;
+		const vec3 prevLobe =
+			prevCount > 0u ? unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( histAt, eye ) ).x ) : vec3( 0.0 );
+		vec3 meanLobe = mix( prevLobe, lobe, blend );
+		if( restK >= 1.0 )
+		{
+			const vec4 stored = restK < 1.5 ? vec4( 0.0, 0.0, 0.0, -1.0 ) : imageLoad( roughRest, at );
+			const vec4 rest = !restTakes ? stored
+							  : stored.w < -0.5 ? vec4( lobe, 1.0 )
+												: mix( stored, vec4( lobe, 1.0 ), 1.0 / restK );
+			imageStore( roughRest, at, rest );
+			const vec3 restAnswer = rest.w < -0.5 ? prevLobe : rest.xyz;
+			meanLobe = mix( mix( prevLobe, restAnswer, blend ), restAnswer, restHandover );
+		}
+		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( 1024.0 ) ) : vec3( 0.0 );
+		imageStore( roughHistoryCur, at, uvec4( packRgbShared( meanLobe, roundingDither( ivec2( lx, pix.y ), 4u ) ), 0u,
+												  0u, 0u ) );
+		imageStore( roughSpec, at, vec4( mix( meanLobe, diffuseOut, toDiffuse ), 1.0 ) );
 	}
 	// THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument; p.stereo.z):
 	// magenta where the reprojected history held fewer than N frames.

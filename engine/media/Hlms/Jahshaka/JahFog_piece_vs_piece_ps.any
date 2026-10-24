@@ -173,6 +173,9 @@
 	// same six terms and the reason for each.
 	@property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 		vulkan_layout( ogre_t@value(jahProbeIrradiance) ) uniform OGRE_ScreenTexture2D jahProbeIrradiance;
+		@property( jah_rough_spec )
+			vulkan_layout( ogre_t@value(jahRoughSpec) ) uniform OGRE_ScreenTexture2D jahRoughSpec;
+		@end
 	@end
 	// THE CLOUD FIELD (CLOUDS-2D-1): the layer's vertical optical depth, one
 	// tile of it, wrapping. Declared wherever the pass claimed its slot; read

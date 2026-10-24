@@ -1377,7 +1377,7 @@ private:
     std::unordered_map<const ReflectPassListener *, SunContactView> mSunContacts;
     struct SuspendedBindings {
         const Ogre::SceneManager *gatherSm = nullptr;
-        Ogre::TextureGpu *gather = nullptr;
+        FogHlmsListener::ProbeGatherBind gather;
         bool sun = false;
     };
     std::unordered_map<const ReflectPassListener *, SuspendedBindings> mSuspended;
@@ -1994,8 +1994,11 @@ bool RayQueryTier::makeStorageImage(unsigned w, unsigned h, VkFormat fmt, Reflec
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     // TRANSFER_SRC (FAR-SUN-1): an instrument may copy one out (the gather's atlas for the
-    // gather-hits readback); usage alone moves no byte of any picture.
-    ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    // gather-hits readback); SAMPLED (PHOTON-7 stage 7, 7-3): a reader may filter one (the gather's
+    // stored filtered map, read bilinearly by the integrate's rough specular); usage alone moves no
+    // byte of any picture.
+    ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (vkCreateImage(mVk, &ici, nullptr, &out.image) != VK_SUCCESS) {
@@ -7488,12 +7491,21 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     if (!normalTex || !depthTex) return;
     if (!depthTex->getWidth() || !depthTex->getHeight()) return;
 
+    // ...and the prepass's shadow / roughness pair (PHOTON-7 stage 7, 7-3: the rough specular's roughness), the
+    // reflection's own read of it - every prepass chain declares it (OgreChain.cpp, the prepass block)
+    Ogre::TextureGpu *shadowRoughTex = nullptr;
+    try {
+        shadowRoughTex = node->getDefinedTexture(Ogre::IdString("jahSsrShadowRough"));
+    } catch (Ogre::Exception &) { return; }
+    if (!shadowRoughTex) return;
+
     GatherInputs in;
     in.scene = scene;
     in.sceneMgr = scene->sceneManager();
     in.tlas = sa.tlas;
     in.normals = normalTex;
     in.depth = depthTex;
+    in.shadowRough = shadowRoughTex;
     in.width = depthTex->getWidth();
     in.height = depthTex->getHeight();
     // THE PHOTON VIEW'S ScreenProbes (PHOTON-VIEW-1): the view's overlay, written
@@ -7895,7 +7907,7 @@ void RayQueryTier::suspendPassBindings(const ReflectPassListener *key, const Ogr
     if (sm) {
         s.gatherSm = sm;
         s.gather = FogHlmsListener::probeGather(sm);
-        if (s.gather) FogHlmsListener::setProbeGather(sm, nullptr);
+        if (s.gather.irradiance) FogHlmsListener::setProbeGather(sm, FogHlmsListener::ProbeGatherBind());
     }
     auto it = mSunContacts.find(key);
     if (it != mSunContacts.end() && it->second.bound && it->second.sceneMgr) {
@@ -7909,7 +7921,7 @@ void RayQueryTier::resumePassBindings(const ReflectPassListener *key) {
     if (st == mSuspended.end()) return;
     const SuspendedBindings s = st->second;
     mSuspended.erase(st);
-    if (s.gather && s.gatherSm) FogHlmsListener::setProbeGather(s.gatherSm, s.gather);
+    if (s.gather.irradiance && s.gatherSm) FogHlmsListener::setProbeGather(s.gatherSm, s.gather);
     auto it = mSunContacts.find(key);
     if (s.sun && it != mSunContacts.end() && it->second.bound && it->second.sceneMgr && it->second.vis)
         FogHlmsListener::setSunContact(it->second.sceneMgr, it->second.vis, it->second.divisor);

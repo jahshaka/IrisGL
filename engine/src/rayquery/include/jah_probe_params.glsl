@@ -183,6 +183,11 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// ...and the FIELD'S OWN FALLBACK where its confidence fades: the environment's diffuse - the scene's ambient SH
 	/// (world axes, jah_environment.glsl's C0 .. C8 in xyz, the pass buffer's signs applied by the host).
 	vec4 envSh[9];
+	/// THE ROUGH SPECULAR (PHOTON-7 stage 7, 7-3; rq_probe_integrate.comp, Lumen's rough reflections): x = 1 the
+	/// integrate writes it (bindings 12 - 17: the prepass's roughness, the filter's stored radiance, the output, its
+	/// history pair and its rest mean), y = the roughness the lobe is clamped to from below (perceptual), z / w = the
+	/// perceptual roughness where the lobe starts handing over to the diffuse and where the diffuse owns it.
+	vec4 rough;
 } p;
 
 /// ONE EYE'S IMAGE — rq_reflect.comp's `EyeImage`: where the eye is and the

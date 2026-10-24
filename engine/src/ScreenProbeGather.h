@@ -194,9 +194,11 @@ struct GatherInputs {
     Ogre::SceneManager *sceneMgr = nullptr;
     VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
 
-    /// The prepass' G-buffers, by the names the chain declares them under.
+    /// The prepass' G-buffers, by the names the chain declares them under: the normals, the depth, and the shadow /
+    /// roughness pair (`jahSsrShadowRough`: the rough specular's roughness, PHOTON-7 stage 7, 7-3).
     Ogre::TextureGpu *normals = nullptr;
     Ogre::TextureGpu *depth = nullptr;
+    Ogre::TextureGpu *shadowRough = nullptr;
     /// The scene's captured environment cube, or null.
     Ogre::TextureGpu *sky = nullptr;
     float skyColour[3] = { 0.0f, 0.0f, 0.0f };
@@ -457,6 +459,21 @@ private:
         VkImage restMean = VK_NULL_HANDLE;
         VkDeviceMemory restMeanMemory = VK_NULL_HANDLE;
         VkImageView restMeanView = VK_NULL_HANDLE;
+        /// THE FILTERED MAP, STORED (PHOTON-7 stage 7, 7-3): the filter's radiance per probe texel at the raw atlas'
+        /// addressing, R11G11B10 - what the integrate's rough specular reads along its GGX draws (rq_probe_filter.comp).
+        VkImage filtered = VK_NULL_HANDLE;
+        VkDeviceMemory filteredMemory = VK_NULL_HANDLE;
+        VkImageView filteredView = VK_NULL_HANDLE;
+        /// THE ROUGH SPECULAR'S HISTORY (7-3), full resolution, ping-ponged with the diffuse's pair (the same flip): ONE
+        /// r32ui word a pixel, the lobe's mean as a shared-exponent word - validated by the diffuse's texel at the same
+        /// coordinate (rq_probe_integrate.comp).
+        VkImage roughHistory[2] = {};
+        VkDeviceMemory roughHistoryMemory[2] = {};
+        VkImageView roughHistoryView[2] = {};
+        /// ...and its REST MEAN (rgba16f; a 1 x 1 stand-in for a stereo view, as the diffuse's).
+        VkImage roughRest = VK_NULL_HANDLE;
+        VkDeviceMemory roughRestMemory = VK_NULL_HANDLE;
+        VkImageView roughRestView = VK_NULL_HANDLE;
         /// The history's EMA floor in frames, as the last frame ran it.
         unsigned historyFramesLast = 10u;
         /// Ogre's frame number of the last frame this view recorded — which of
@@ -480,6 +497,8 @@ private:
         float prevCamPos2[4] = {}, prevRayTL2[4] = {}, prevRayRight2[4] = {},
               prevRayDown2[4] = {}, prevFwd2[4] = {};
         Ogre::TextureGpu *irradiance = nullptr;
+        /// THE ROUGH SPECULAR (7-3), `jahRoughSpec`: an Ogre texture for the same reason as the irradiance.
+        Ogre::TextureGpu *roughSpec = nullptr;
 
         const detail::OgreScene *scene = nullptr;
         Ogre::SceneManager *sceneMgr = nullptr;
