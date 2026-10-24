@@ -96,6 +96,13 @@
 		return ( wd >> 22u ) ^ wd;
 	}
 
+	/// A NON-FINITE value, by its bits (trap 5: a comparison is no NaN test under the compiler's fast math).
+	INLINE bool jahInjNonFinite( float x ) { return ( floatBitsToUint( x ) & 0x7F800000u ) == 0x7F800000u; }
+	INLINE bool jahInjNonFinite4( float4 v )
+	{
+		return jahInjNonFinite( v.x ) || jahInjNonFinite( v.y ) || jahInjNonFinite( v.z ) || jahInjNonFinite( v.w );
+	}
+
 	INLINE float jahInjectVisibility( float3 sW, float3 w, float tEnd, int3 ivSelf, int oAxis, float oCoord, float oSign )
 	{
 		// THE INSIDE FRACTION (SUN-INJECTION-RES-1, ENGINE-UPGRADE-U5 stage 5 and decision 22.2). A ray that crosses a
@@ -116,15 +123,27 @@
 		// (nothing entered). Two open faces back to back: (1 - c)^2. T and f carry from shell to shell.
 		float T = 1.0f, fIn = 0.0f;
 		float tCur = 0.0f;
+		// (a ray not whole - a non-finite start, direction or end - meets no chain: nothing it could cross is known)
+		if( jahInjNonFinite( sW.x ) || jahInjNonFinite( sW.y ) || jahInjNonFinite( sW.z ) || jahInjNonFinite( w.x ) ||
+			jahInjNonFinite( w.y ) || jahInjNonFinite( w.z ) || jahInjNonFinite( tEnd ) )
+			return T;
 		for( uint j = p_chainSelf; j < uint( JAH_INJ_CHAIN ) && T > 0.0f && tCur < tEnd; ++j )
 		{
+			// A CHAIN ENTRY NOT WHOLE (a non-finite origin, cell or shell end, or a cell not positive: its bits) is NO
+			// CHAIN for the ray from here - the march ends, never a step count no exit bounds (PHOTON-7 stage 5: a
+			// non-finite parameter defeats every exit of the DDA below)
+			if( jahInjNonFinite4( p_chainOrigin[j] ) || jahInjNonFinite4( p_chainRes[j] ) ||
+				floatBitsToInt( p_chainOrigin[j].w ) <= 0 )
+				break;
 			const float cellJ = p_chainOrigin[j].w;
 			// THIS SHELL'S END: the first cell plane of the next cascade crossed past D_j, or the lamp
 			float tShell = tEnd;
 			if( j + 1u < uint( JAH_INJ_CHAIN ) && p_chainRes[j].w < tShell )
 			{
 				const float dJ = p_chainRes[j].w;
-				const float cellN = p_chainOrigin[j + 1u].w;
+				const float cellN = jahInjNonFinite( p_chainOrigin[j + 1u].w ) || floatBitsToInt( p_chainOrigin[j + 1u].w ) <= 0
+										? cellJ   // (the next entry not whole: this shell ends on its own lattice)
+										: p_chainOrigin[j + 1u].w;
 				const float3 qN = ( sW + w * dJ - p_chainOrigin[j + 1u].xyz ) / cellN;
 				for( int a = 0; a < 3; ++a )
 				{
