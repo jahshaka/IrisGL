@@ -5473,13 +5473,10 @@ Colour SceneMirror::atmosphereTintFor(const iris::LightNode *light,
     // rough lobe dipped a frame, scripting.e2e.sky_swap_transient). White for every other sky. The tint is the
     // boundary's STATELESS function of the air (ENGINE-UPGRADE-U3 F-A).
     if (!mSource || mSource->skyType != iris::SkyType::REALISTIC) return white;
-    const iris::SkyRealistic &r = mSource->skyRealistic;
-    jahshaka::engine::AtmosphereSky sky;   // the dials buildSky's realistic case pushes (the planet's at their defaults)
-    sky.sunHaze = r.sunHaze;
-    sky.rayleighScale = r.rayleighScale;
-    sky.ozone = r.ozone;
-    sky.groundAlbedo = r.groundAlbedo;
-    const auto air = jahshaka::engine::atmosphereAirOf(sky, mTarget->published().atmosphere.observerKm);
+    const SkySource src = skySourceOf(*mSource);
+    if (src.kind != SkySource::Kind::Realistic) return white;
+    // (the atmosphere buildSky's realistic case pushes in this record: atmosphereOf, one function)
+    const auto air = jahshaka::engine::atmosphereAirOf(atmosphereOf(src), mTarget->published().atmosphere.observerKm);
     return jahshaka::engine::atmosphereSunTint(air, Vec3(toSun.x(), toSun.y(), toSun.z()));
 }
 
@@ -7975,6 +7972,23 @@ bool SceneMirror::SkySource::operator==(const SkySource &o) const
     return false;
 }
 
+jahshaka::engine::AtmosphereSky SceneMirror::atmosphereOf(const SkySource &src)
+{
+    AtmosphereSky a;   // the planet's at its defaults
+    a.sunHaze = src.sunHaze;
+    a.aerialScale = src.aerialScale;
+    a.skyBrightness = src.skyBrightness;
+    a.groundAlbedo = src.groundAlbedo;
+    a.rayleighScale = src.rayleighScale;
+    a.ozone = src.ozone;
+    a.hasSun = src.hasSun;
+    a.sunDir[0] = src.sunDir.x();
+    a.sunDir[1] = src.sunDir.y();
+    a.sunDir[2] = src.sunDir.z();
+    a.sunIlluminance = Colour(src.sunIlluminance.x(), src.sunIlluminance.y(), src.sunIlluminance.z(), 1.0f);
+    return a;
+}
+
 /// The document's sky fields, read into the value buildSky compares. A skyless
 /// scene (or a textured one with no texture loaded) reads as Kind::None — which
 /// is also the initial state. A SINGLE_COLOR sky is Kind::Color and a real sky
@@ -8118,19 +8132,7 @@ void SceneMirror::buildSky(FrameInputScene &scene, std::optional<Colour> &backgr
             // dials, the sun's direction and its illuminance; the engine builds
             // its tables and draws the sky from them.
             mSkyDesc.mode = SkyMode::Atmosphere;
-            AtmosphereSky &a = mSkyDesc.atmosphere;
-            a.sunHaze = src.sunHaze;
-            a.aerialScale = src.aerialScale;
-            a.skyBrightness = src.skyBrightness;
-            a.groundAlbedo = src.groundAlbedo;
-            a.rayleighScale = src.rayleighScale;
-            a.ozone = src.ozone;
-            a.hasSun = src.hasSun;
-            a.sunDir[0] = src.sunDir.x();
-            a.sunDir[1] = src.sunDir.y();
-            a.sunDir[2] = src.sunDir.z();
-            a.sunIlluminance = Colour(src.sunIlluminance.x(), src.sunIlluminance.y(),
-                                      src.sunIlluminance.z(), 1.0f);
+            mSkyDesc.atmosphere = atmosphereOf(src);
             break;
         }
         case SkySource::Kind::Color: {

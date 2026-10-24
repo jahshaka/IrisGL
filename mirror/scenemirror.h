@@ -1918,6 +1918,10 @@ private:
     };
     /// Reads the document's sky fields into the value above.
     static SkySource skySourceOf(const iris::Scene &scene);
+    /// THE ATMOSPHERE A REALISTIC SKY SOURCE DESCRIBES - its dials, the sun's direction and illuminance: ONE function,
+    /// the one buildSky pushes and the sun's tint maps (atmosphereTintFor), so a dial added to the sky reaches the tint
+    /// by construction (PHOTON-7 stage 7's read, C5: the tint re-listed four of the dials).
+    static jahshaka::engine::AtmosphereSky atmosphereOf(const SkySource &src);
     SkySource mSkySource;
     /// The sky description the engine holds (Scene::setSky is idempotent, so
     /// buildSky pushes this every frame and lets the boundary drop it). Built
