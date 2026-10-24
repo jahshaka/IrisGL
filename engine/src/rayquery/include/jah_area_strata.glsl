@@ -33,6 +33,10 @@ uint jahAreaPcg( uint v )
 	return ( w >> 22u ) ^ w;
 }
 
+/// THE STRATA A SIDE, BOUNDED WHERE A SHADER READS THEM (the loop law: a bound read from a buffer is clamped in the
+/// shader): the largest any tier asks (GiQualityFacts::cardAreaStrata, Types.h: 8 - Low 4, Medium 6).
+const uint kAreaStrataMax = 8u;
+
 /// THE STRATA'S KEY: a function of the receiver's world point alone.
 uint jahAreaStrataKey( vec3 P )
 {

@@ -105,7 +105,7 @@ void jahAreaVisTrace( ivec2 tc )
 	const float lift = max( p.camPos.w < 0.5 ? p.knobs.x : p.knobs.x * dist, p.knobs.y );
 
 	// ---- THIS FRAME'S SAMPLE: one stratum of each light ------------------------------------------------------------
-	const uint n = max( uint( p.strata.x + 0.5 ), 1u );
+	const uint n = clamp( uint( p.strata.x + 0.5 ), 1u, kAreaStrataMax );
 	const uint key = jahAreaStrataKey( P );
 	const uint k = ( uint( p.strata.y ) + jahAreaPcg( key ^ 0x9E3779B9u ) ) % ( n * n );
 	vec4 sampleS = vec4( 0.0 ), sampleU = vec4( 0.0 ), sampleS2 = vec4( 0.0 ), sampleU2 = vec4( 0.0 );

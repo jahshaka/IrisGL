@@ -193,7 +193,7 @@ void main()
 				if( area )
 				{
 					// THE AREA LIGHT'S FRACTIONAL VISIBILITY (the head of this file)
-					const uint n = max( uint( p.toSun.x + 0.5 ), 1u );
+					const uint n = clamp( uint( p.toSun.x + 0.5 ), 1u, kAreaStrataMax );   // an n^2 loop: bounded
 					const vec3 c0 = l.points[0].xyz, eu = l.points[1].xyz - c0, ev = l.points[3].xyz - c0;
 					const vec3 emit = l.spotDirection.xyz;   // the light shines down its -Z: the record's direction
 					const bool twoSided = l.points[0].w != 0.0;
