@@ -1396,10 +1396,15 @@ constexpr ArmDef kArms[] = {
       "into a host ring, ScenePublished::areaVis.vis the latest retired frame's. 0 = shipped (nothing copied)." },
     { ArmId::GiScreenBindMissing, 0.0, 0.0, 1.0,
       "THE NO-RAY SCREEN PASSES WITH THEIR INPUTS MISSING (PHOTON-7 stage 7; a test door, gi.screen_bind): 1 = the screen "
-      "integrate and the area visibility's two passes read their inputs as missing and STAND DOWN - every listener-bound "
-      "slot its own stand-in, one group over an idle block that writes nothing, the products the last ones written - "
+      "integrate and the area visibility's two passes read their inputs as missing and STAND DOWN - their shared jobs "
+      "marked stood down (the fork's HlmsComputeJob::setStoodDown: nothing bound, transitioned or dispatched), the "
+      "products the last ones written - "
       "and the ray tier's gather declines its frame as for a missing input (the last gather registered, F3). "
       "0 = shipped." },
+    { ArmId::GiScreenZeroUnmarked, 0.0, 0.0, 1.0,
+      "THE ZERO-GROUP GUARD'S NEGATIVE CONTROL (PHOTON-7 stage 7, the fork's stand-down; a test door, gi.screen_bind): "
+      "1 = the screen integrate's job is set to dispatch no group WITHOUT the stood-down mark - the fork's BUGS-6 guard "
+      "(HlmsCompute::dispatch) must throw, the frame's error naming it. 0 = shipped." },
     { ArmId::GiScreenShaderCold, 0.0, 0.0, 1.0,
       "THE NO-RAY SCREEN PASSES' SHADERS COLD (PHOTON-7 stage 7's read, F2; a test door, gi.screen_bind): each time it "
       "comes on, the screen integrate's and the area visibility's two jobs take a permutation never built (a property "

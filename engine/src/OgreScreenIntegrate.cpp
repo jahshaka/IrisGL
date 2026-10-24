@@ -103,12 +103,7 @@ ScreenGiListener::~ScreenGiListener() {
     dropAreaVis();
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
-    Ogre::TextureGpuManager *tm = rs ? rs->getTextureGpuManager() : nullptr;
-    for (Ogre::TextureGpu *&t : mAreaStandIn) {
-        if (t && tm) tm->destroyTexture(t);
-        t = nullptr;
-    }
-    for (Ogre::UavBufferPacked **b : { &mParams, &mParamsIdle, &mAreaParams, &mAreaChain, &mAreaIdle }) {
+    for (Ogre::UavBufferPacked **b : { &mParams, &mAreaParams, &mAreaChain }) {
         if (*b && vao) vao->destroyUavBuffer(*b);
         *b = nullptr;
     }
@@ -200,41 +195,12 @@ void ScreenGiListener::coldKey(Ogre::HlmsComputeJob *job) {
     if (job->getProperty("jah_cold") != want) job->setProperty("jah_cold", want);
 }
 
-bool ScreenGiListener::bindMissing() const {
-    return mView && mView->mEngine && mView->mEngine->armRegistry().on(ArmId::GiScreenBindMissing);
+void ScreenGiListener::standDown(Ogre::HlmsComputeJob *job) {
+    job->setStoodDown(true);
 }
 
-// THE STAND-DOWN (PHOTON-7 stage 7, the lead's fix): the job is the SHARED one, so a bind that returned early left the
-// last view's bindings in it - that view's volumes and parameters, which it may have destroyed or resized since - and
-// the pass dispatched over them across its whole target (gi.screen_bind (1), measured before the fix: Ogre's barrier
-// solver threw on another view's texture, "from Undefined to a read-only layout", and the frame was lost for every
-// view). Now every slot this listener binds holds a stand-in - the permutation with no chain, no environment, no field
-// and no fog (the pass's own three textures and targets are the pass's), the parameters an idle block - and the pass
-// runs ONE group, which reads the block's 0 x 0 target and returns (the fork's HlmsCompute::dispatch refuses a
-// dispatch of no group, BUGS-6's guard). The products stay the last ones written.
-void ScreenGiListener::standDownIntegrate(Ogre::HlmsComputeJob *job) {
-    const auto prop = [job](const char *name, Ogre::int32 v) {
-        if (job->getProperty(name) != v) job->setProperty(name, v);
-    };
-    for (const char *p : { "hlms_num_vct_cascades", "jah_env", "jah_si_field", "jah_si_fog", "jah_si_air", "jah_si_sdf" })
-        prop(p, 0);
-    if (job->getNumTexUnits() != 3u) job->setNumTexUnits(3u);
-    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
-    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
-    if (!mParamsIdle && vao) {
-        const float zero[kScreenGiFloats] = {};
-        mParamsIdle = vao->createUavBuffer(kScreenGiVec4, 16u, 0, const_cast<float *>(zero), false);
-    }
-    if (mParamsIdle) {
-        Ogre::DescriptorSetUav::BufferSlot buf(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
-        buf.buffer = mParamsIdle;
-        buf.offset = 0;
-        buf.sizeBytes = 0;
-        buf.access = Ogre::ResourceAccess::Read;
-        job->_setUavBuffer(3u, buf);
-    }
-    job->setNumThreadGroupsBasedOn(Ogre::HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u);
-    job->setNumThreadGroups(1u, 1u, 1u);
+bool ScreenGiListener::bindMissing() const {
+    return mView && mView->mEngine && mView->mEngine->armRegistry().on(ArmId::GiScreenBindMissing);
 }
 
 void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {
@@ -249,12 +215,23 @@ void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
     if (!job) return;
+    // THE STAND-DOWN (PHOTON-7 stage 7, the lead's fix): the job is the SHARED one, so a bind that returned early left
+    // the last view's bindings in it - that view's volumes and parameters, which it may have destroyed or resized since
+    // - and the pass dispatched over them (gi.screen_bind (1), measured before the fix: Ogre's barrier solver threw on
+    // another view's texture, "from Undefined to a read-only layout", and the frame was lost for every view). A pass
+    // without its inputs now runs nothing (EnginePrivate.h's standDown: the fork's stood-down job); the products stay
+    // the last ones written.
     if (bindMissing() || !scene || !cam || !target || !vao) {
-        standDownIntegrate(job);
+        standDown(job);
         return;
     }
-    // (a pass that stood down ran one group: this one's follow its first target again)
+    job->setStoodDown(false);
+    // (the groups follow the first target; the door gi.screenZeroUnmarked sets none, unmarked - BUGS-6's guard throws)
     job->setNumThreadGroupsBasedOn(Ogre::HlmsComputeJob::ThreadGroupsBasedOnUav, 0u, 1u, 1u, 1u);
+    if (mView->mEngine && mView->mEngine->armRegistry().on(ArmId::GiScreenZeroUnmarked)) {
+        job->setNumThreadGroupsBasedOn(Ogre::HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u);
+        job->setNumThreadGroups(0u, 0u, 0u);
+    }
     float g[kScreenGiFloats] = {};
     float *at = g;
     const auto vec4 = [&at](const float v[4]) {

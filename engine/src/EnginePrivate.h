@@ -2020,11 +2020,11 @@ public:
 private:
     void bindJob(Ogre::CompositorPassCompute *pass);
     /// THE STAND-DOWN (PHOTON-7 stage 7): a pass whose inputs are missing - or the frame capture's, for the area
-    /// visibility - WRITES NOTHING, and the shared job holds no binding of another view's (a texture that view may have
-    /// destroyed or resized since): every slot this listener binds set to its own stand-in, the parameters an idle
-    /// block, one group that reads a 0 x 0 target and returns.
-    void standDownIntegrate(Ogre::HlmsComputeJob *job);
-    void standDownArea(Ogre::HlmsComputeJob *job, bool resolve);
+    /// visibility, or a held or deferred trace - RUNS NOTHING: its shared job is marked stood down (the fork's
+    /// HlmsComputeJob::setStoodDown), so the pass sets no binding, analyses and transitions no resource and dispatches
+    /// nothing - the job's slots may hold another view's resources, since destroyed or resized. Every pass that runs
+    /// marks it back (setStoodDown(false)) before it binds.
+    static void standDown(Ogre::HlmsComputeJob *job);
     /// Is this pass the view's own workspace's (false: the frame capture's - it takes the view's area product, never
     /// its history)?
     bool ownPass(const Ogre::CompositorPass *pass) const;
@@ -2040,7 +2040,7 @@ private:
     void coldKey(Ogre::HlmsComputeJob *job);
     Ogre::int32 mColdKey = 0;
     bool mColdOn = false;
-    Ogre::UavBufferPacked *mParams = nullptr, *mParamsIdle = nullptr;
+    Ogre::UavBufferPacked *mParams = nullptr;
     // ---- the area visibility (OgreAreaVis.cpp) ----
     void bindAreaVis(Ogre::CompositorPassCompute *pass);
     void bindAreaVisResolve(Ogre::CompositorPassCompute *pass);
@@ -2049,12 +2049,10 @@ private:
     AreaVisState mAreaState;
     CameraImageF mAreaEye;
     /// The images: the sums' pairs (a set a word of four halves: S U, S2 U2), the surface words' pair, the rest means -
-    /// at the trace's size - and the product; and the 1 x 1 stand-ins a standing-down pass binds ([0] RGBA32_UINT
-    /// storage, [1] RG32_UINT storage, [2] RGBA32_UINT sampled, [3] RGBA8 sampled - the float slots').
+    /// at the trace's size - and the product.
     Ogre::TextureGpu *mAreaSU[2] = {}, *mAreaS2U2[2] = {}, *mAreaG[2] = {}, *mAreaRestSU = nullptr,
                      *mAreaRestS2U2 = nullptr, *mAreaVis = nullptr;
-    Ogre::TextureGpu *mAreaStandIn[4] = {};
-    Ogre::UavBufferPacked *mAreaParams = nullptr, *mAreaChain = nullptr, *mAreaIdle = nullptr;
+    Ogre::UavBufferPacked *mAreaParams = nullptr, *mAreaChain = nullptr;
     unsigned mAreaW = 0u, mAreaH = 0u, mAreaFullW = 0u, mAreaFullH = 0u;
     /// mAreaRan: traced or held this frame (the status's `running`); mAreaRead: the opaque passes read the product this
     /// frame (traced, held, or the last one written while the trace's shaders build or its inputs are missing).
@@ -2187,6 +2185,7 @@ private:
     X(GiScreenIntegrateOff, "gi.screenIntegrateOff") /* a no-ray chain shades with the pixel's own cones (7-6's A/B: the voxel route) */ \
     X(AreaVisReadback, "area.visReadback") /* the pixel's area light visibility copied to the host (ScenePublished::areaVis, a test door; 7-A) */ \
     X(GiScreenBindMissing, "gi.screenBindMissing") /* the no-ray screen passes read their inputs as missing: they stand down (a test door, gi.screen_bind) */ \
+    X(GiScreenZeroUnmarked, "gi.screenZeroUnmarked") /* the screen integrate dispatches no group WITHOUT the stood-down mark: the fork's BUGS-6 guard throws (a test door, gi.screen_bind) */ \
     X(GiScreenShaderCold, "gi.screenShaderCold") /* each time it comes on, the no-ray screen passes' jobs take a permutation never built: a background compile (a test door, gi.screen_bind) */ \
     X(GatherRoughQuadrature, "gather.roughQuadrature") /* the rough specular's quadrature door: 1 the filtered map kept beside the levels, 2 the lobe by brute force over it (7-3) */ \
     X(ShadowReceiverBoxesOff, "shadow.receiverBoxesOff") /* the receiver grid without the stock route's boxes (the fixture's negative control, U5 decision 22.3) */ \

@@ -214,47 +214,6 @@ void ScreenGiListener::dropAreaVis() {
     mAreaVisHostW = mAreaVisHostH = 0u;
 }
 
-// THE STAND-DOWN (EnginePrivate.h's ScreenGiListener: the shared job's slots each this listener's stand-in, nothing
-// dispatched): the trace's six textures (three float, three uint), five storage images, the idle parameters and a
-// zero chain; the resolve's five textures, its product and the idle parameters. The stand-ins are made once a listener.
-void ScreenGiListener::standDownArea(Ogre::HlmsComputeJob *job, bool resolve) {
-    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
-    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
-    Ogre::TextureGpuManager *tm = rs ? rs->getTextureGpuManager() : nullptr;
-    if (tm) {
-        if (!mAreaStandIn[0]) mAreaStandIn[0] = makeAreaImage(tm, 1u, 1u, Ogre::PFG_RGBA32_UINT);
-        if (!mAreaStandIn[1]) mAreaStandIn[1] = makeAreaImage(tm, 1u, 1u, Ogre::PFG_RG32_UINT);
-        if (!mAreaStandIn[2]) mAreaStandIn[2] = makeAreaImage(tm, 1u, 1u, Ogre::PFG_RGBA32_UINT);
-        if (!mAreaStandIn[3]) mAreaStandIn[3] = makeAreaImage(tm, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
-    }
-    if (vao && !mAreaIdle) {
-        const AreaVisParams idle{};
-        mAreaIdle = vao->createUavBuffer(sizeof(AreaVisParams) / 16u, 16u, 0, const_cast<AreaVisParams *>(&idle), false);
-    }
-    if (vao && !mAreaChain) {
-        const float zero[4u * kAreaChainVec4] = {};
-        mAreaChain = vao->createUavBuffer(kAreaChainVec4, 16u, 0, const_cast<float *>(zero), false);
-    }
-    // (the groups follow the first storage image, a 1 x 1 stand-in: ONE group, which reads the idle block's 0 x 0 grid
-    // and returns - the fork's HlmsCompute::dispatch refuses a dispatch of no group, BUGS-6's guard)
-    if (!mAreaStandIn[0] || !mAreaStandIn[1] || !mAreaStandIn[2] || !mAreaStandIn[3] || !mAreaIdle || !mAreaChain) return;
-    if (resolve) {
-        if (job->getNumTexUnits() != 5u) job->setNumTexUnits(5u);
-        for (Ogre::uint8 u = 0u; u < 2u; ++u) bindTexture(job, u, mAreaStandIn[3]);
-        for (Ogre::uint8 u = 2u; u < 5u; ++u) bindTexture(job, u, mAreaStandIn[2]);
-        bindUav(job, 0u, mAreaStandIn[1], Ogre::ResourceAccess::Write);
-        bindBuffer(job, 1u, mAreaIdle);
-        return;
-    }
-    if (job->getProperty("hlms_num_vct_cascades") != 0) job->setProperty("hlms_num_vct_cascades", 0);
-    if (job->getNumTexUnits() != 6u) job->setNumTexUnits(6u);
-    for (Ogre::uint8 u = 0u; u < 3u; ++u) bindTexture(job, u, mAreaStandIn[3]);
-    for (Ogre::uint8 u = 3u; u < 6u; ++u) bindTexture(job, u, mAreaStandIn[2]);
-    for (Ogre::uint8 u = 0u; u < 5u; ++u) bindUav(job, u, mAreaStandIn[0], Ogre::ResourceAccess::ReadWrite);
-    bindBuffer(job, 5u, mAreaIdle);
-    bindBuffer(job, 6u, mAreaChain);
-}
-
 void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
     Ogre::HlmsCompute *hc = Ogre::Root::getSingleton().getHlmsManager()->getComputeHlms();
     Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow(Ogre::IdString(kScreenAreaVisJob)) : nullptr;
@@ -265,7 +224,7 @@ void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
     // twice) and its resolve wrote the view's product - so the live picture after a screenshot was not the one it would
     // have been (gi.screen_bind (2)); at another size it remade the view's images, the history restarted.
     if (!ownPass(pass)) {
-        standDownArea(job, false);
+        standDown(job);
         return;
     }
     mAreaDispatched = false;
@@ -282,28 +241,27 @@ void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
     if (bindMissing() || !vao || !tm || !scene || !cam || !depth || !normals || !rough) {
         // (the history untouched, and the opaque passes read the last product as the integrate's: a frame without its
         // inputs is no frame of unshadowed area lights - a flash)
-        standDownArea(job, false);
+        standDown(job);
         return;
     }
     mAreaRan = false;
     mAreaRead = false;
-    const auto standIn = [&]() { standDownArea(job, false); };
     // THE FORWARD LTC SET - none: OFF IS FREE AND CLEAN (the images given back, nothing registered)
     const std::vector<const Ogre::Light *> lights = forwardLtcLights(scene->sceneManager());
     if (lights.empty()) {
         if (mAreaVis) dropAreaVis();
         mAreaReason.clear();
-        standIn();
+        standDown(job);
         return;
     }
     // MONO ONLY (the ray tier's rule): a two-eye target is never traced as one image - its area lights unshadowed
     if (mView->stereo()) {
         mAreaReason = "a stereo view (mono only: stage 9's stereo item)";
-        standIn();
+        standDown(job);
         return;
     }
     const unsigned fullW = depth->getWidth(), fullH = depth->getHeight();
-    if (!fullW || !fullH) { standIn(); return; }
+    if (!fullW || !fullH) { standDown(job); return; }
     const unsigned w = (fullW + kAreaVisDivisor - 1u) / kAreaVisDivisor, h = (fullH + kAreaVisDivisor - 1u) / kAreaVisDivisor;
     // ---- THE IMAGES, remade on a resize (a new set: the history restarts, age 0) ----
     if (!mAreaVis || mAreaW != w || mAreaH != h || mAreaFullW != fullW || mAreaFullH != fullH) {
@@ -345,7 +303,7 @@ void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
     mAreaRan = true;
     mAreaRead = true;
     mAreaReason.clear();
-    if (held) { standIn(); return; }
+    if (held) { standDown(job); return; }
 
     // ---- THE PARAMETERS and THE CHAIN the march runs through ----
     if (!mAreaParams)
@@ -371,6 +329,7 @@ void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
             mAreaChain->upload(c, 0, kAreaChainVec4);
     }
     // ---- THE PERMUTATION and THE BINDINGS ----
+    job->setStoodDown(false);
     if (job->getProperty("hlms_num_vct_cascades") != Ogre::int32(numCascades))
         job->setProperty("hlms_num_vct_cascades", Ogre::int32(numCascades));
     const Ogre::uint8 units = Ogre::uint8(6u + 4u * numCascades);
@@ -411,7 +370,7 @@ void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
         mAreaRan = false;
         mAreaRead = mAreaVisWritten;
         mAreaReason = "its shaders build in the background";
-        standIn();
+        standDown(job);
         return;
     }
     mAreaDispatched = true;
@@ -428,9 +387,10 @@ void ScreenGiListener::bindAreaVisResolve(Ogre::CompositorPassCompute *pass) {
     mAreaResolved = false;
     // (the capture's pass, a trace that stood down, or its inputs missing: nothing to resolve)
     if (!ownPass(pass) || !mAreaDispatched || bindMissing() || !depth || !normals) {
-        standDownArea(job, true);
+        standDown(job);
         return;
     }
+    job->setStoodDown(false);
     if (job->getNumTexUnits() != 5u) job->setNumTexUnits(5u);
     coldKey(job);
     bindTexture(job, 0u, depth);
