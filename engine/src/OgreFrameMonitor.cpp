@@ -1404,6 +1404,11 @@ constexpr ArmDef kArms[] = {
       "1 = every frame the ray tier copies its jahAreaVis (RG32_UINT: x the forward LTC light i's diffuse visible share in "
       "byte i, y its specular share) "
       "into a host ring, ScenePublished::areaVis.vis the latest retired frame's. 0 = shipped (nothing copied)." },
+    { ArmId::GiScreenBindMissing, 0.0, 0.0, 1.0,
+      "THE NO-RAY SCREEN PASSES WITH THEIR INPUTS MISSING (PHOTON-7 stage 7; a test door, gi.screen_bind): 1 = the screen "
+      "integrate and the area visibility's two passes read their inputs as missing and STAND DOWN - every listener-bound "
+      "slot its own stand-in, one group over an idle block that writes nothing, the products the last ones written. "
+      "0 = shipped." },
     { ArmId::GatherRoughQuadrature, 0.0, 0.0, 2.0,
       "THE ROUGH SPECULAR'S QUADRATURE DOOR (PHOTON-7 stage 7, 7-3; gi.rough_lobe_quadrature): the split sum's own error. "
       "1 or 2 = the prefiltered image holds one more layer (switching the door re-makes the view's targets), the probes' FILTERED "

@@ -84,6 +84,21 @@ void expandCameraImageToTarget(CameraImageF &e, const ChainDesc &cd, unsigned fu
 }
 
 ScreenGiListener::~ScreenGiListener() {
+    // THE SHARED JOBS FORGET THIS LISTENER'S BUFFERS (Ogre's job drops a deleted TEXTURE from its slots - a
+    // TextureGpuListener - and keeps a deleted buffer's pointer): the parameters' and the chain's slots emptied, so no
+    // job holds a pointer this destructor frees; the next pass of any view sets every slot again before it dispatches
+    if (Ogre::HlmsManager *hm = Ogre::Root::getSingletonPtr() ? Ogre::Root::getSingleton().getHlmsManager() : nullptr)
+        if (Ogre::HlmsCompute *hc = hm->getComputeHlms()) {
+            const Ogre::DescriptorSetUav::BufferSlot none(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+            const auto forget = [&](const char *name, std::initializer_list<Ogre::uint8> slots) {
+                Ogre::HlmsComputeJob *job = hc->findComputeJobNoThrow(Ogre::IdString(name));
+                for (Ogre::uint8 u : slots)
+                    if (job && u < job->getNumUavUnits()) job->_setUavBuffer(u, none);
+            };
+            forget(kScreenIntegrateJob, { 3u });
+            forget(kScreenAreaVisJob, { 5u, 6u });
+            forget(kScreenAreaVisResolveJob, { 1u });
+        }
     dropAreaVis();
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
@@ -92,7 +107,7 @@ ScreenGiListener::~ScreenGiListener() {
         if (t && tm) tm->destroyTexture(t);
         t = nullptr;
     }
-    for (Ogre::UavBufferPacked **b : { &mParams, &mAreaParams, &mAreaChain, &mAreaIdle }) {
+    for (Ogre::UavBufferPacked **b : { &mParams, &mParamsIdle, &mAreaParams, &mAreaChain, &mAreaIdle }) {
         if (*b && vao) vao->destroyUavBuffer(*b);
         *b = nullptr;
     }
@@ -156,6 +171,43 @@ void ScreenGiListener::passPosExecute(Ogre::CompositorPass *pass) {
     }
 }
 
+bool ScreenGiListener::bindMissing() const {
+    return mView && mView->mEngine && mView->mEngine->armRegistry().on(ArmId::GiScreenBindMissing);
+}
+
+// THE STAND-DOWN (PHOTON-7 stage 7, the lead's fix): the job is the SHARED one, so a bind that returned early left the
+// last view's bindings in it - that view's volumes and parameters, which it may have destroyed or resized since - and
+// the pass dispatched over them across its whole target (gi.screen_bind (1), measured before the fix: Ogre's barrier
+// solver threw on another view's texture, "from Undefined to a read-only layout", and the frame was lost for every
+// view). Now every slot this listener binds holds a stand-in - the permutation with no chain, no environment, no field
+// and no fog (the pass's own three textures and targets are the pass's), the parameters an idle block - and the pass
+// runs ONE group, which reads the block's 0 x 0 target and returns (the fork's HlmsCompute::dispatch refuses a
+// dispatch of no group, BUGS-6's guard). The products stay the last ones written.
+void ScreenGiListener::standDownIntegrate(Ogre::HlmsComputeJob *job) {
+    const auto prop = [job](const char *name, Ogre::int32 v) {
+        if (job->getProperty(name) != v) job->setProperty(name, v);
+    };
+    for (const char *p : { "hlms_num_vct_cascades", "jah_env", "jah_si_field", "jah_si_fog", "jah_si_air", "jah_si_sdf" })
+        prop(p, 0);
+    if (job->getNumTexUnits() != 3u) job->setNumTexUnits(3u);
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
+    if (!mParamsIdle && vao) {
+        const float zero[kScreenGiFloats] = {};
+        mParamsIdle = vao->createUavBuffer(kScreenGiVec4, 16u, 0, const_cast<float *>(zero), false);
+    }
+    if (mParamsIdle) {
+        Ogre::DescriptorSetUav::BufferSlot buf(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        buf.buffer = mParamsIdle;
+        buf.offset = 0;
+        buf.sizeBytes = 0;
+        buf.access = Ogre::ResourceAccess::Read;
+        job->_setUavBuffer(3u, buf);
+    }
+    job->setNumThreadGroupsBasedOn(Ogre::HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u);
+    job->setNumThreadGroups(1u, 1u, 1u);
+}
+
 void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {
     // THE PASS'S JOB IS THE SHARED ONE (CompositorPassCompute finds it by name, uncloned): every binding is set here,
     // in front of its dispatch
@@ -167,7 +219,13 @@ void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {
     Ogre::TextureGpu *target = node ? node->getDefinedTexture(Ogre::IdString(kScreenGiIrradiance)) : nullptr;
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
-    if (!job || !scene || !cam || !target || !vao) return;
+    if (!job) return;
+    if (bindMissing() || !scene || !cam || !target || !vao) {
+        standDownIntegrate(job);
+        return;
+    }
+    // (a pass that stood down ran one group: this one's follow its first target again)
+    job->setNumThreadGroupsBasedOn(Ogre::HlmsComputeJob::ThreadGroupsBasedOnUav, 0u, 1u, 1u, 1u);
     float g[kScreenGiFloats] = {};
     float *at = g;
     const auto vec4 = [&at](const float v[4]) {

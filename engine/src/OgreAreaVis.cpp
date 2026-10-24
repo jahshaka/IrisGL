@@ -213,52 +213,70 @@ void ScreenGiListener::dropAreaVis() {
     mAreaVisHostW = mAreaVisHostH = 0u;
 }
 
+// THE STAND-DOWN (EnginePrivate.h's ScreenGiListener: the shared job's slots each this listener's stand-in, nothing
+// dispatched): the trace's six textures (three float, three uint), five storage images, the idle parameters and a
+// zero chain; the resolve's five textures, its product and the idle parameters. The stand-ins are made once a listener.
+void ScreenGiListener::standDownArea(Ogre::HlmsComputeJob *job, bool resolve) {
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
+    Ogre::TextureGpuManager *tm = rs ? rs->getTextureGpuManager() : nullptr;
+    if (tm) {
+        if (!mAreaStandIn[0]) mAreaStandIn[0] = makeAreaImage(tm, 1u, 1u, Ogre::PFG_RGBA32_UINT);
+        if (!mAreaStandIn[1]) mAreaStandIn[1] = makeAreaImage(tm, 1u, 1u, Ogre::PFG_RG32_UINT);
+        if (!mAreaStandIn[2]) mAreaStandIn[2] = makeAreaImage(tm, 1u, 1u, Ogre::PFG_RGBA32_UINT);
+        if (!mAreaStandIn[3]) mAreaStandIn[3] = makeAreaImage(tm, 1u, 1u, Ogre::PFG_RGBA8_UNORM);
+    }
+    if (vao && !mAreaIdle) {
+        const AreaVisParams idle{};
+        mAreaIdle = vao->createUavBuffer(sizeof(AreaVisParams) / 16u, 16u, 0, const_cast<AreaVisParams *>(&idle), false);
+    }
+    if (vao && !mAreaChain) {
+        const float zero[4u * kAreaChainVec4] = {};
+        mAreaChain = vao->createUavBuffer(kAreaChainVec4, 16u, 0, const_cast<float *>(zero), false);
+    }
+    // (the groups follow the first storage image, a 1 x 1 stand-in: ONE group, which reads the idle block's 0 x 0 grid
+    // and returns - the fork's HlmsCompute::dispatch refuses a dispatch of no group, BUGS-6's guard)
+    if (!mAreaStandIn[0] || !mAreaStandIn[1] || !mAreaStandIn[2] || !mAreaStandIn[3] || !mAreaIdle || !mAreaChain) return;
+    if (resolve) {
+        if (job->getNumTexUnits() != 5u) job->setNumTexUnits(5u);
+        for (Ogre::uint8 u = 0u; u < 2u; ++u) bindTexture(job, u, mAreaStandIn[3]);
+        for (Ogre::uint8 u = 2u; u < 5u; ++u) bindTexture(job, u, mAreaStandIn[2]);
+        bindUav(job, 0u, mAreaStandIn[1], Ogre::ResourceAccess::Write);
+        bindBuffer(job, 1u, mAreaIdle);
+        return;
+    }
+    if (job->getProperty("hlms_num_vct_cascades") != 0) job->setProperty("hlms_num_vct_cascades", 0);
+    if (job->getNumTexUnits() != 6u) job->setNumTexUnits(6u);
+    for (Ogre::uint8 u = 0u; u < 3u; ++u) bindTexture(job, u, mAreaStandIn[3]);
+    for (Ogre::uint8 u = 3u; u < 6u; ++u) bindTexture(job, u, mAreaStandIn[2]);
+    for (Ogre::uint8 u = 0u; u < 5u; ++u) bindUav(job, u, mAreaStandIn[0], Ogre::ResourceAccess::ReadWrite);
+    bindBuffer(job, 5u, mAreaIdle);
+    bindBuffer(job, 6u, mAreaChain);
+}
+
 void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
-    mAreaRan = false;
-    mAreaDispatched = false;
-    mAreaMarches = 0ull;
     Ogre::HlmsCompute *hc = Ogre::Root::getSingleton().getHlmsManager()->getComputeHlms();
     Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow(Ogre::IdString(kScreenAreaVisJob)) : nullptr;
+    if (!job) return;
+    mAreaDispatched = false;
+    mAreaMarches = 0ull;
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
     Ogre::TextureGpuManager *tm = rs ? rs->getTextureGpuManager() : nullptr;
     OgreScene *scene = mView->ogreScene();
     Ogre::Camera *cam = mView->camera();
     const Ogre::CompositorNode *node = pass ? pass->getParentNode() : nullptr;
-    if (!job || !vao || !tm || !scene || !cam || !node) return;
-    Ogre::TextureGpu *depth = node->getDefinedTexture(Ogre::IdString(kSceneDepthTexture));
-    Ogre::TextureGpu *normals = node->getDefinedTexture(Ogre::IdString("jahGBufNormals"));
-    Ogre::TextureGpu *rough = node->getDefinedTexture(Ogre::IdString("jahSsrShadowRough"));
-    if (!depth || !normals || !rough) return;
-    // THE STAND-INS (1 x 1, made once): what the passes bind while nothing is traced - the jobs run over one group and
-    // write nothing (their parameters' grid is 0 x 0), the product the opaque passes read stays the last one traced
-    // ([0] the trace's five storage images, [1] the resolve's product, [2] every sampled read: never one texture both
-    // sampled and written in one dispatch)
-    if (!mAreaStandIn[0]) mAreaStandIn[0] = makeAreaImage(tm, 1u, 1u, Ogre::PFG_RGBA32_UINT);
-    if (!mAreaStandIn[1]) mAreaStandIn[1] = makeAreaImage(tm, 1u, 1u, Ogre::PFG_RG32_UINT);
-    if (!mAreaStandIn[2]) mAreaStandIn[2] = makeAreaImage(tm, 1u, 1u, Ogre::PFG_RGBA32_UINT);
-    if (!mAreaIdle) {
-        const AreaVisParams idle{};
-        mAreaIdle = vao->createUavBuffer(sizeof(AreaVisParams) / 16u, 16u, 0, const_cast<AreaVisParams *>(&idle), false);
+    Ogre::TextureGpu *depth = node ? node->getDefinedTexture(Ogre::IdString(kSceneDepthTexture)) : nullptr;
+    Ogre::TextureGpu *normals = node ? node->getDefinedTexture(Ogre::IdString("jahGBufNormals")) : nullptr;
+    Ogre::TextureGpu *rough = node ? node->getDefinedTexture(Ogre::IdString("jahSsrShadowRough")) : nullptr;
+    if (bindMissing() || !vao || !tm || !scene || !cam || !depth || !normals || !rough) {
+        // (the history untouched, and the opaque passes read the last product as the integrate's: a frame without its
+        // inputs is no frame of unshadowed area lights - a flash)
+        standDownArea(job, false);
+        return;
     }
-    if (!mAreaChain) {
-        const float zero[4u * kAreaChainVec4] = {};
-        mAreaChain = vao->createUavBuffer(kAreaChainVec4, 16u, 0, const_cast<float *>(zero), false);
-    }
-    const auto standIn = [&]() {
-        const auto prop = [job](const char *name, Ogre::int32 v) {
-            if (job->getProperty(name) != v) job->setProperty(name, v);
-        };
-        prop("hlms_num_vct_cascades", 0);
-        if (job->getNumTexUnits() != 6u) job->setNumTexUnits(6u);
-        bindTexture(job, 0u, depth);
-        bindTexture(job, 1u, normals);
-        bindTexture(job, 2u, rough);
-        for (Ogre::uint8 u = 3u; u < 6u; ++u) bindTexture(job, u, mAreaStandIn[2]);
-        for (Ogre::uint8 u = 0u; u < 5u; ++u) bindUav(job, u, mAreaStandIn[0], Ogre::ResourceAccess::ReadWrite);
-        bindBuffer(job, 5u, mAreaIdle);
-        bindBuffer(job, 6u, mAreaChain);
-    };
+    mAreaRan = false;
+    const auto standIn = [&]() { standDownArea(job, false); };
     // THE FORWARD LTC SET - none: OFF IS FREE AND CLEAN (the images given back, nothing registered)
     const std::vector<const Ogre::Light *> lights = forwardLtcLights(scene->sceneManager());
     if (lights.empty()) {
@@ -329,7 +347,10 @@ void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
             put3(c + 68u, Ogre::Vector3(1.0f / r.x, 1.0f / r.y, 1.0f / r.z), 0.0f);
             c[72] = float(numCascades);
         }
-        mAreaChain->upload(c, 0, kAreaChainVec4);
+        if (!mAreaChain)
+            mAreaChain = vao->createUavBuffer(kAreaChainVec4, 16u, 0, c, false);
+        else
+            mAreaChain->upload(c, 0, kAreaChainVec4);
     }
     // ---- THE PERMUTATION and THE BINDINGS ----
     if (job->getProperty("hlms_num_vct_cascades") != Ogre::int32(numCascades))
@@ -367,20 +388,18 @@ void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
 void ScreenGiListener::bindAreaVisResolve(Ogre::CompositorPassCompute *pass) {
     Ogre::HlmsCompute *hc = Ogre::Root::getSingleton().getHlmsManager()->getComputeHlms();
     Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow(Ogre::IdString(kScreenAreaVisResolveJob)) : nullptr;
+    if (!job) return;
     const Ogre::CompositorNode *node = pass ? pass->getParentNode() : nullptr;
-    if (!job || !node || !mAreaStandIn[0] || !mAreaStandIn[1] || !mAreaStandIn[2] || !mAreaIdle) return;
-    Ogre::TextureGpu *depth = node->getDefinedTexture(Ogre::IdString(kSceneDepthTexture));
-    Ogre::TextureGpu *normals = node->getDefinedTexture(Ogre::IdString("jahGBufNormals"));
-    if (!depth || !normals) return;
+    Ogre::TextureGpu *depth = node ? node->getDefinedTexture(Ogre::IdString(kSceneDepthTexture)) : nullptr;
+    Ogre::TextureGpu *normals = node ? node->getDefinedTexture(Ogre::IdString("jahGBufNormals")) : nullptr;
+    // (a trace that stood down, or its inputs missing: nothing to resolve)
+    if (!mAreaDispatched || bindMissing() || !depth || !normals) {
+        standDownArea(job, true);
+        return;
+    }
     if (job->getNumTexUnits() != 5u) job->setNumTexUnits(5u);
     bindTexture(job, 0u, depth);
     bindTexture(job, 1u, normals);
-    if (!mAreaDispatched) {
-        for (Ogre::uint8 u = 2u; u < 5u; ++u) bindTexture(job, u, mAreaStandIn[2]);
-        bindUav(job, 0u, mAreaStandIn[1], Ogre::ResourceAccess::Write);
-        bindBuffer(job, 1u, mAreaIdle);
-        return;
-    }
     const unsigned cur = mAreaState.flip & 1u;
     bindTexture(job, 2u, mAreaSU[cur]);
     bindTexture(job, 3u, mAreaS2U2[cur]);
