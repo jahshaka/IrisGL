@@ -48,8 +48,9 @@
 //       cards' and the field's accumulation bound by (JahCardIndirect_cs.glsl). atomicAdd by the pass / LightInjection
 //       (integers: the sum is the same in any order), cleared with [4] (SELECT) / [7] (CLEAR). It cannot overflow: a
 //       voxel's move is at most the half store's largest finite value, 65504 = 4192256 units, and a brick's 512 voxels
-//       are passed (injected) once a frame - under 2^31. Bit 31 marks a move past that (only a non-finite one): no flux
-//       bound for the brick, its largest move [4] / [7] alone.
+//       are passed (injected) once a frame - under 2^31. Bit 31 marks a move past that - a non-finite one, OR a finite f32
+//       move over 65504 (the move is taken in f32 before the half store: a voxel beside a strong lamp): no flux bound
+//       for the brick, its largest move [4] / [7] alone (conservative).
 // THE ARGUMENTS, 16 words: [0..2] the bounce's and the copy's groups (8 x the bricks: group y is the brick), [4..6]
 // the directional levels' (1 x the bricks), [8] the bricks listed (passed) this frame, [9] the bricks active at the
 // selection (passed or carried), [10] the bricks stopped on the operator's bound (r never measured: a door), [11] the

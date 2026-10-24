@@ -321,8 +321,8 @@
 	{
 		atomicMax( jahAbsShared, floatBitsToUint( jahAbs ) );
 		// THE MOVED FLUX (PhotonBrickFeedback_cs.glsl's word 8): this voxel's move in its fixed point - 1/64 of radiance,
-		// rounded UP (a bound); a move past the half store's largest finite value (only a non-finite one) sets bit 31: no
-		// flux bound for the brick this frame
+		// rounded UP (a bound); a move past the half store's largest finite value - a non-finite one, or a finite f32 move
+		// over 65504 (taken before the half store) - sets bit 31: no flux bound for the brick this frame (conservative)
 		if( jahAbs <= 65504.0f )
 			atomicAdd( jahFluxShared, uint( ceil( jahAbs * 64.0f ) ) );
 		else
