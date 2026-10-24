@@ -1662,7 +1662,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         pp.fieldWin[0] = in.fieldWin[0];
         pp.fieldWin[1] = in.fieldWin[1];
         pp.fieldWin[2] = in.fieldWin[2];
-        pp.fieldWin[3] = field && in.fieldCompose ? 1.0f : 0.0f;
+        // (2: the arm gather.fieldInPass - the pass composes the diffuse's field, the rough specular's stand-in here)
+        pp.fieldWin[3] = field ? (in.fieldCompose ? 1.0f : 2.0f) : 0.0f;
         for (int k = 0; k < 9; ++k)
             for (int c = 0; c < 3; ++c) pp.envSh[k][c] = in.envSh[k][c];
     // THE ROUGH SPECULAR (7-3): the gate against the view's traced reflection, DiffuseLerp's two ends, the levels

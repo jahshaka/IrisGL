@@ -159,7 +159,8 @@ layout( std430, set = 0, binding = 9 ) buffer GatherCounter { uint words[]; } ga
 /// field's cage - jah_field_read.glsl, the one text the PBS pixel's reader runs too - and where its confidence fades the
 /// environment's diffuse, composed into this texture AFTER the temporal mean (the history stays the gather's one
 /// estimator): out = the history's premultiplied mean + ( 1 - its coverage ) x the fallback, w = 1, and the shading
-/// pass's own cage declines (JahIfd_piece_ps.any's gate reads 1 - w). p.fieldWin.w 0: no field bound (or the arm
+/// pass's own cage declines (JahIfd_piece_ps.any's gate reads 1 - w). p.fieldWin.w 2: the arm gather.fieldInPass (the
+/// pass composes the diffuse's field; the rough specular's stand-in still takes it here). p.fieldWin.w 0: no field bound (or the arm
 /// gather.fieldInPass): the coverage as w, the fallback the pass's.
 layout( set = 0, binding = 10 ) uniform sampler2D fieldIrradiance;
 layout( set = 0, binding = 11 ) uniform sampler2D fieldDepth;
@@ -828,7 +829,10 @@ void main()
 	if( wsum >= weightFloor )
 		answer = vec4( clamp( sum / wsum, vec3( 0.0 ), vec3( 1024.0 ) ), 1.0 );
 	// THE FIELD, COMPOSED (7-2): the eye's direction for its sample point's bias
-	const bool composeField = p.fieldWin.w > 0.5;
+	const bool composeField = p.fieldWin.w > 0.5 && p.fieldWin.w < 1.5;
+	// (the field BOUND - composed here, or by the shading pass under the arm gather.fieldInPass, w 2: the rough
+	// specular's stand-in for the diffuse is the composed one either way, so that arm moves the diffuse alone)
+	const bool fieldBound = p.fieldWin.w > 0.5;
 	const vec3 toEyeField = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
 	// THE ROUGH SPECULAR (7-3): the pixel's perceptual roughness (the G-buffer's alpha, decoded as the reflection
 	// decodes it); a young pixel's diffuse read the wide neighbourhood - its lobe reads the bilinear taps
@@ -851,7 +855,10 @@ void main()
 												: vec3( 0.0 ) ),
 						   1.0 );
 		imageStore( probeIrradiance, at, answer );
-		const vec3 diffuseNow = answer.xyz * answer.w;
+		const vec3 diffuseNow =
+			fieldBound && !composeField && answer.w < 1.0
+				? answer.xyz * answer.w + fieldFallback( pixelWorld, pixelNormal, toEyeField ) * ( 1.0 - answer.w )
+				: answer.xyz * answer.w;
 		imageStore( roughSpec, at,
 					roughTexel( roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor,
 											  diffuseNow ),
@@ -934,11 +941,15 @@ void main()
 					 1.0 );
 	}
 	// ---- THE ROUGH SPECULAR (7-3; the header's second output) -----------------
-	// This frame's lobe (its fallback the pixel's diffuse E/pi as the shading pass takes it: the composed answer, or
-	// the answered share where the pass composes the field itself) through the diffuse's own blend, and at rest the
-	// diffuse's rest law word for word; then the hand-over to the diffuse and the gate.
+	// This frame's lobe (its fallback the pixel's diffuse E/pi as the shading pass takes it: the composed answer, the
+	// field's share composed here too where the pass composes the diffuse's) through the diffuse's own blend, and at
+	// rest the diffuse's rest law word for word; then the hand-over to the diffuse and the gate.
 	{
-		const vec3 diffuseOut = outV.xyz * outV.w;
+		const float coverOut = clamp( outV.w, 0.0, 1.0 );
+		const vec3 diffuseOut =
+			fieldBound && !composeField && coverOut < 1.0
+				? outV.xyz * coverOut + fieldFallback( pixelWorld, pixelNormal, toEyeField ) * ( 1.0 - coverOut )
+				: outV.xyz * outV.w;
 		const vec3 lobe = roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor, diffuseOut );
 		const vec3 prevLobe =
 			prevCount > 0u ? unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( histAt, eye ) ).x ) : vec3( 0.0 );
