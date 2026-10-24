@@ -260,10 +260,7 @@ void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
         bindBuffer(job, 6u, mAreaChain);
     };
     // THE FORWARD LTC SET - none: OFF IS FREE AND CLEAN (the images given back, nothing registered)
-    // (the measuring arm area.visOff: the visibility's price, its paired A/B - nothing traced, nothing bound)
-    const bool off = mView->mEngine && mView->mEngine->armRegistry().on(ArmId::AreaVisOff);
-    const std::vector<const Ogre::Light *> lights =
-        off ? std::vector<const Ogre::Light *>() : forwardLtcLights(scene->sceneManager());
+    const std::vector<const Ogre::Light *> lights = forwardLtcLights(scene->sceneManager());
     if (lights.empty()) {
         if (mAreaVis) dropAreaVis();
         mAreaReason.clear();
