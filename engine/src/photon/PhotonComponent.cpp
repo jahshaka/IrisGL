@@ -497,6 +497,16 @@ PhotonBindingStatus photonBindingStatus() {
     return s;
 }
 
+std::vector<PhotonPassBindingRecord> photonPassBindings() { return detail::PhotonPassBinding::passRecords(); }
+void resetPhotonPassBindings() { detail::PhotonPassBinding::resetPassRecords(); }
+const std::vector<std::string> &photonScreenProducts() {
+    // L4's five, by the register names the pieces declare them at (and the door lists): the diffuse (the gather's
+    // irradiance), the rough specular, the reflection, the sun contact, the area lights' visibility.
+    static const std::vector<std::string> kFive = { "jahProbeIrradiance", "jahRoughSpec", "ssrTexture", "jahSunVis",
+                                                    "jahAreaVis" };
+    return kFive;
+}
+
 void setPhotonRegionBracketCheck(bool on) {
     using namespace detail;
     if (on == gRegionCheck) return;

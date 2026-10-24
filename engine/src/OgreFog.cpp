@@ -616,6 +616,19 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // generated shader is the one it was.
     if (rec && rec->photonIsolation > 0)
         hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_photon_view", Ogre::int32(rec->photonIsolation));
+    // THE OPAQUE PASSES' DOOR (PHOTON-7 7-1, L4): what this colour pass binds of Photon - the world caches (the
+    // volumes' own preparation above) and the SCREEN products, by the names photonScreenProducts() lists: the
+    // gather's diffuse, the reflection (HlmsPbs's SSR texture: the prepass's reflection, which the ray tier writes)
+    // and the sun contact.
+    if (hlms && !casterPass) {
+        static const Ogre::IdString kUseSsr("hlms_use_ssr");
+        const char *screen[8];
+        size_t n = 0;
+        if (pb.probeGather) screen[n++] = "jahProbeIrradiance";
+        if (hlms->_getProperty(Ogre::Hlms::kNoTid, kUseSsr) != 0) screen[n++] = "ssrTexture";
+        if (pb.sunVis) screen[n++] = "jahSunVis";
+        PhotonPassBinding::notePass(sceneManager, hlms, screen, n);
+    }
     if (casterPass || !shadowNode || !hlms) return;
     // ONLY WHERE AN ASSIGNMENT CHANGED (clean-2 lane, 2026-09-13). A node can
     // only ENTER the broken state when setLightFixedToShadowMap is called on

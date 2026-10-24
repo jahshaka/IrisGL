@@ -39,7 +39,10 @@
 #include <OgreHlmsCommon.h>
 #include <OgreResourceTransition.h>
 
+#include "jahshaka/engine/PhotonStatus.h"
+
 #include <cstddef>
+#include <vector>
 
 namespace Ogre {
 class CompositorManager2;
@@ -100,6 +103,15 @@ struct PhotonPassBinding {
     /// photonBindingStatus's counts (PhotonStatus.h).
     static unsigned long long readerPrepares();
     static unsigned long long nonReaderPrepares();
+
+    /// THE OPAQUE PASSES' DOOR (PHOTON-7 7-1, PhotonStatus.h photonPassBindings): the colour pass `hlms` just
+    /// prepared, recorded under the compositor pass's profiling id - the world caches this host binds (from its own
+    /// preparation above) and the SCREEN products the listener bound (`screen`, by register name). Called by the
+    /// listener at the end of its colour preparation; render thread only, the store under a lock.
+    static void notePass(const Ogre::SceneManager *sceneManager, const Ogre::Hlms *hlms,
+                         const char *const *screen, size_t numScreen);
+    static std::vector<PhotonPassBindingRecord> passRecords();
+    static void resetPassRecords();
 };
 
 }}}   // namespace jahshaka::engine::detail

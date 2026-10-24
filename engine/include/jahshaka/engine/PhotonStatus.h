@@ -4,6 +4,9 @@
 #ifndef JAHSHAKA_ENGINE_PHOTONSTATUS_H
 #define JAHSHAKA_ENGINE_PHOTONSTATUS_H
 
+#include <string>
+#include <vector>
+
 namespace jahshaka {
 namespace engine {
 
@@ -43,6 +46,31 @@ struct PhotonBindingStatus {
     unsigned long long nonReaderPrepares = 0;
 };
 PhotonBindingStatus photonBindingStatus();
+
+/// THE OPAQUE PASSES' PHOTON BINDINGS (PHOTON-7 stage 7, 7-1; L4: the opaque passes read ONLY screen-space products,
+/// all made before them; the world caches feed the traces only). One record per (pass, host) the listener prepared:
+/// every Photon texture the pass binds, by the register name its pieces declare it at. The WORLD CACHES are listed per
+/// register family with their count (`vctProbes x4` - the voxel cascades' ten light volumes a cascade; `ifdColour`,
+/// `ifdDepth` - the irradiance field); the SCREEN PRODUCTS by their one name (photonScreenProducts()). A pass whose
+/// scene has no Photon binding at all lists nothing. Process-wide, written on the render thread at each colour pass's
+/// preparation (the newest preparation of a pass replaces its record), read under a lock.
+struct PhotonPassBindingRecord {
+    /// The compositor pass's profiling id ("Jahshaka opaque", "Jahshaka atom decode", "Jahshaka refractives",
+    /// "Jahshaka hit decode", ...): the chain names every pass it builds.
+    std::string pass;
+    /// The Hlms host that prepared it: "HlmsPbs" or "HlmsAtom".
+    std::string host;
+    /// Root's frame number at that preparation.
+    unsigned long long frame = 0;
+    /// Every Photon texture bound, in binding order.
+    std::vector<std::string> bound;
+};
+std::vector<PhotonPassBindingRecord> photonPassBindings();
+/// Forget every record (a row reads the frames after it).
+void resetPhotonPassBindings();
+/// L4's allowed list: the five SCREEN products an opaque pass may read (the diffuse, the rough specular, the
+/// reflection, the sun contact, the area lights' visibility), by the names photonPassBindings() lists them under.
+const std::vector<std::string> &photonScreenProducts();
 
 class Scene;
 /// THE IRRADIANCE FIELD'S VARIANCE STOP (ENGINE-UPGRADE-2B stage 4): the generation job's own

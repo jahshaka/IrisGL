@@ -32,6 +32,7 @@
 #include <OgreSceneManager.h>
 
 #include <limits>
+#include <mutex>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -79,6 +80,20 @@ struct HostBinds {
     Ogre::PhotonIrradianceField *ifd = nullptr;
 };
 HostBinds sHost[Ogre::HLMS_MAX];   // render thread only
+
+/// The voxel cascades' light-volume registers, in the order the voxel lighting lists them: the total (level 0), the
+/// three directional axes, the coverage per half-axis, the surface position per half, then level 0's back side and
+/// the voxeliser's normal. propertiesMerged numbers them; the door names them.
+const char *const kVolumeRegisters[] = { "vctProbes",    "vctProbeX",    "vctProbeY",    "vctProbeZ",
+                                         "vctProbeCovP", "vctProbeCovN", "vctProbePosP", "vctProbePosN",
+                                         "vctProbeBack", "vctProbeNrm" };
+static_assert(sizeof(kVolumeRegisters) / sizeof(kVolumeRegisters[0]) ==
+                  size_t(Ogre::PhotonVoxelLighting::kVolumesPerCascade),
+              "one register name per light volume the voxel lighting lists");
+
+/// THE OPAQUE PASSES' DOOR (7-1): one record per (pass, host), the newest preparation's.
+std::mutex sPassRecordsLock;
+std::vector<PhotonPassBindingRecord> sPassRecords;
 
 /// The field's sampler: the block HlmsPbs bound it with (its mDecalsSamplerblock —
 /// upstream's own `TODO_irradianceField_samplerblock`), built from the same
@@ -232,18 +247,9 @@ void PhotonPassBinding::propertiesMerged(Ogre::Hlms *hlms, size_t tid, Ogre::int
             (hlms->_getProperty(tid, kNormal) && hlms->_getProperty(tid, kTangent)) ||
             hlms->_getProperty(tid, kQTangent);
         hlms->_setProperty(tid, kNormalMap, normalMapCanBeSupported);
-        // The volumes' registers, in the order the voxel lighting lists them: the
-        // total (level 0), the three directional axes, the coverage per half-axis,
-        // the surface position per half, then level 0's back side and the
-        // voxeliser's normal.
-        static const char *const names[] = { "vctProbes",    "vctProbeX",    "vctProbeY",
-                                             "vctProbeZ",    "vctProbeCovP", "vctProbeCovN",
-                                             "vctProbePosP", "vctProbePosN", "vctProbeBack",
-                                             "vctProbeNrm" };
-        static_assert(sizeof(names) / sizeof(names[0]) == size_t(kVolumesPerCascade),
-                      "one register name per light volume the voxel lighting lists");
+        // The volumes' registers, in the order the voxel lighting lists them (kVolumeRegisters).
         for (Ogre::int32 i = 0; i < kVolumesPerCascade; ++i) {
-            hlms->_setTextureReg(tid, Ogre::PixelShader, names[i], slot);
+            hlms->_setTextureReg(tid, Ogre::PixelShader, kVolumeRegisters[i], slot);
             slot += cascades;
         }
     }
@@ -366,6 +372,50 @@ void PhotonPassBinding::forget(const void *volume) {
         if (hb.vct == volume) hb.vct = nullptr;
         if (hb.ifd == volume) hb.ifd = nullptr;
     }
+}
+
+void PhotonPassBinding::notePass(const Ogre::SceneManager *sceneManager, const Ogre::Hlms *hlms,
+                                 const char *const *screen, size_t numScreen) {
+    if (!sceneManager || !hlms) return;
+    const Ogre::CompositorPass *current = sceneManager->getCurrentCompositorPass();
+    const Ogre::CompositorPassDef *def = current ? current->getDefinition() : nullptr;
+    if (!def || def->mProfilingId.empty()) return;   // only the chain's named passes
+    const HostBinds &hb = sHost[hlms->getType()];
+    const bool atom = hlms->getType() != Ogre::HLMS_PBS;
+    std::vector<std::string> bound;
+    if (hb.vct) {
+        const std::string count = " x" + std::to_string(hb.vct->getNumCascades());
+        for (const char *reg : kVolumeRegisters) bound.push_back(reg + count);
+    }
+    if (hb.ifd) {
+        bound.push_back("ifdColour");
+        bound.push_back("ifdDepth");
+    }
+    for (size_t i = 0; i < numScreen; ++i) bound.push_back(screen[i]);
+    const unsigned long long frame = Ogre::Root::getSingleton().getNextFrameNumber();
+    std::lock_guard<std::mutex> lock(sPassRecordsLock);
+    for (PhotonPassBindingRecord &r : sPassRecords)
+        if (r.pass == def->mProfilingId && (r.host == "HlmsAtom") == atom) {
+            r.frame = frame;
+            r.bound.swap(bound);
+            return;
+        }
+    PhotonPassBindingRecord r;
+    r.pass = def->mProfilingId;
+    r.host = atom ? "HlmsAtom" : "HlmsPbs";
+    r.frame = frame;
+    r.bound.swap(bound);
+    sPassRecords.push_back(std::move(r));
+}
+
+std::vector<PhotonPassBindingRecord> PhotonPassBinding::passRecords() {
+    std::lock_guard<std::mutex> lock(sPassRecordsLock);
+    return sPassRecords;
+}
+
+void PhotonPassBinding::resetPassRecords() {
+    std::lock_guard<std::mutex> lock(sPassRecordsLock);
+    sPassRecords.clear();
 }
 
 void PhotonPassBinding::releaseSamplers() {
