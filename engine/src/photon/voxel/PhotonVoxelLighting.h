@@ -631,7 +631,7 @@ namespace Ogre
         uint32 getChainLength() const { return mChainIndex + 1u + static_cast<uint32>( mExtraCascades.size() ); }
         /// The injection job's texture units before the cloud field's (OgreScene::bindCloudInjection binds that
         /// one at this unit): the albedo, normal, emissive, metal and emissive factor per half, then the chain's
-        /// coverage and position per half, four arrays of getChainLength().
+        /// coverage and position per half and its direct pair (front, back), six arrays of getChainLength().
         uint8 injectionTexUnits() const { return static_cast<uint8>( 6u + 6u * getChainLength() ); }
 
         /** THE CASCADE CHAIN'S PARAMETERS, the one definition every reader of the chain

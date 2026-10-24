@@ -2770,9 +2770,10 @@ void OgreScene::bindCloudInjection(Ogre::PhotonVoxelLighting *lighting) {
         // CHANGE-GUARDED: setNumTexUnits invalidates the PSO hash whatever it is
         // told, and a scene without a layer leaves the job at the lighting's own units
         // (PhotonVoxelLighting::injectionTexUnits: the albedo, normal, emissive, metal and
-        // emissive factor per half, then the chain's coverage and position per half -
-        // PHOTON-7 stage 1 - and the property 0); the field is the unit after them.
-        const Ogre::uint8 base = lighting ? lighting->injectionTexUnits() : Ogre::uint8(10u);
+        // emissive factor per half, then the chain's coverage and position per half and its
+        // direct pair - six arrays of the chain's length - and the property 0); the field is the
+        // unit after them. With no lighting, a chain of one: 6 + 6.
+        const Ogre::uint8 base = lighting ? lighting->injectionTexUnits() : Ogre::uint8(12u);
         const Ogre::uint8 units = Ogre::uint8(base + (on ? 1u : 0u));
         if (job->getNumTexUnits() != units) job->setNumTexUnits(units);
         if (job->getProperty("jah_cloud_shadow") != (on ? 1 : 0))

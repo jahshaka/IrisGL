@@ -522,8 +522,8 @@ namespace Ogre
         /// (the variance stop ends many earlier).
         uint64 getOwedIntegrations() const { return mOwedIntegrations; }
         void refreshOwed();
-        /** The accumulation for one cascade that moved this frame: its brick state (PhotonBrickFeedback's eight words
-            a brick: [4] a pass's absolute move, [7] an injection's), its bricks per axis, its box corner (world) and
+        /** The accumulation for one cascade that moved this frame: its brick state (PhotonBrickFeedback's ten words
+            a brick: [4] a pass's absolute move, [7] an injection's, [8] and [9] their moved flux), its bricks per axis, its box corner (world) and
             brick side (metres), and the next finer cascade's box with ITS WORLD SHELL'S END (metres, D_(j-1) - a probe's
             ray reads this cascade inside the finer box from that distance on: a brick inside it is skipped only for a
             probe inside the finer box closer than that to the whole moved box; stage 5's read W1), or null.
