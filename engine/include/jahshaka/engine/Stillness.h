@@ -166,6 +166,10 @@ struct StillnessFrame {
     /// last update's arrivals, the cache's frame, and the demand read-back's period and lag (CardCacheStatus).
     unsigned long long ifdFollows = 0, cardsAdmitted = 0, cardsArrivalMark = 0, cardsFrame = 0;
     unsigned ifdRestartDepth = 0, ifdMarkLag = 0, cardsDemandEvery = 0, cardsDemandLag = 0;
+    /// ...and the cards' budgets a frame from the tier table (GiQualityFacts::cardBudgetTexels, cardIndirectTexels, as
+    /// CardCacheStatus publishes them) and the page's side: what a law follows an arrival's cards through - its captures
+    /// at the capture budget, their indirect at the indirect budget (the photon-7r merge's judge, owed_rows.py).
+    unsigned cardsBudgetTexels = 0, cardsIndirectTexels = 0, cardsPageSize = 0;
     bool               storeOwed = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2
     /// L8: a few frames late, so a window's SUM is the reading).
