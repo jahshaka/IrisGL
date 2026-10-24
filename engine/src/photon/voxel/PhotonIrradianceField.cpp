@@ -427,8 +427,10 @@ namespace Ogre
             mMarkReport = vaoManager->createUavBuffer( 1u + probes, sizeof( uint32 ), 0, zeros.data(), false );
             for( MarkTicket &t : mMarkTickets )
                 t.ticket.reset();
+            mMarkTickets.assign( size_t( vaoManager->getDynamicBufferMultiplier() ) + 2u, MarkTicket() );
             mMarkNextIssue = mMarkNextTake = 0u;
             mMarkRan = false;
+            mMarkKeepReport = false;
         }
 
         if( !mVctLighting )
@@ -994,7 +996,8 @@ namespace Ogre
             else
                 p->setManualValue( static_cast<const uint32 *>( v ), 4u );
         };
-        if( mMarkClearFrame != frame )
+        // (a report a full ring could not ticket is KEPT: not cleared, the next ticket reads it with this frame's)
+        if( mMarkClearFrame != frame && !mMarkKeepReport )
         {
             mMarkClearFrame = frame;
             const uint32 mode[4] = { 1u, 0u, probes, 0u };
@@ -1051,21 +1054,26 @@ namespace Ogre
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::endMarkFrame( uint64 frame )
     {
-        if( !mMarkRan || !mMarkReport )
+        if( !mMarkReport || mMarkTickets.empty() || ( !mMarkRan && !mMarkKeepReport ) )
             return;
         mMarkRan = false;
         MarkTicket &t = mMarkTickets[mMarkNextIssue];
         if( t.ticket )
-            return;   // every slot in flight: a later frame's report answers (the probes stay listed on the GPU)
+        {
+            // EVERY SLOT IN FLIGHT: the report is KEPT for the next ticket (the ring's comment, PhotonIrradianceField.h)
+            mMarkKeepReport = true;
+            return;
+        }
         t.ticket = mMarkReport->readRequest( 0u, 1u + mHeld.size(), false );
         t.frame = frame;
-        mMarkNextIssue = ( mMarkNextIssue + 1u ) % kMarkTickets;
+        mMarkNextIssue = ( mMarkNextIssue + 1u ) % uint32( mMarkTickets.size() );
+        mMarkKeepReport = false;
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::harvestMarks( uint64 frame )
     {
         VaoManager *vao = mRoot->getRenderSystem()->getVaoManager();
-        for( ;; )
+        for( ; !mMarkTickets.empty(); )
         {
             MarkTicket &t = mMarkTickets[mMarkNextTake];
             if( !t.ticket )
@@ -1087,7 +1095,7 @@ namespace Ogre
             }
             t.ticket->unmap();
             t.ticket.reset();
-            mMarkNextTake = ( mMarkNextTake + 1u ) % kMarkTickets;
+            mMarkNextTake = ( mMarkNextTake + 1u ) % uint32( mMarkTickets.size() );
         }
     }
     //-------------------------------------------------------------------------

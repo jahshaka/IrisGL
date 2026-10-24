@@ -285,9 +285,15 @@ namespace Ogre
             AsyncTicketPtr ticket;
             uint64 frame = 0ull;
         };
-        static constexpr uint32 kMarkTickets = 4u;
-        MarkTicket mMarkTickets[kMarkTickets];
+        /// THE MARKS' READ-BACK RING (stage 5's read B3): a ticket a frame, each taken at a fixed lag of the dynamic
+        /// buffer multiplier's frames, so the ring is sized from the multiplier with SLACK (multiplier + 2 at the
+        /// report's creation: the lag's frames, the frame that takes, one spare). A frame that finds every slot in
+        /// flight anyway issues no ticket and KEEPS its report: the next accumulation does not clear it (each probe
+        /// is listed once, so the report holds at most every probe) and the next ticket reads both frames' listings -
+        /// never a frame's marks dropped (the next CLEAR would wipe them while their REPORTED words block a re-listing).
+        vector<MarkTicket>::type mMarkTickets;
         uint32 mMarkNextIssue = 0u, mMarkNextTake = 0u;
+        bool mMarkKeepReport = false;
         uint64 mMarkedByMoves = 0ull, mMarkedByRegion = 0ull, mMarkAlls = 0ull, mRestarts = 0ull;
         void writeProbeRecords();
 
