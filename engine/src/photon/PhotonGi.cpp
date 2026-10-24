@@ -1109,6 +1109,8 @@ GiStatus PhotonComponent::giStatus() const {
             cs.feedbackCarried   = c.fbCarried;
             cs.relightCarried    = c.relightCarried;
             cs.relightRounds     = c.relightRounds;
+            cs.relightVoxels     = c.relightVoxels;
+            cs.relightSlab       = c.relightSlab;
             cs.feedbackOwed      = cascadeFeedbackOwed(c);
             // WHAT THIS CASCADE VOXELISED - A READING of the device's own counts,
             // written as the gather wrote the records (ATOM P4b, A5b §3). They
@@ -1157,6 +1159,7 @@ GiStatus PhotonComponent::giStatus() const {
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
         st.cascadeScrollAborts  = mCascadeScrollAborts;
         st.cascadeCommitShaderWaits = mCommitShaderWaits;
+        st.relightCount = mRelightCount;
         st.cascadeTornCleared   = mCascadeTornCleared;
         st.chainInjectionRefusals   = mGiInjectionRefusals;
         st.chainInjectionsPeakFrame = mGiInjectionsPeak;
@@ -6557,19 +6560,26 @@ void PhotonComponent::relightAndFeedback() {
                                                       .lightWorkFrames);
         const unsigned long long relightBudget = (chainVoxels + shareFrames - 1u) / shareFrames;
         // THE FLOORS (GiQualityFacts::lightWorkFrames' law): every owed cascade's credit grows by half its own share of
-        // the count a frame; the pool spent outermost first is the count less those floors
+        // the count on a frame it can PAY (below: never while its delta shader builds, never on a refused injection -
+        // stage 5's read B1: a credit banked over a 40-frame shader wait relit the whole chain in one frame), up to ONE
+        // 4-plane slab of its owed box or one floor, the larger; the pool spent outermost first is the count less those
+        // floors
         unsigned long long floors = 0ull;
-        for (VctCascade &c : mVctCascades) {
+        unsigned long long floorOf[8] = { 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull };
+        for (size_t i = 0; i < mVctCascades.size(); ++i) {
+            VctCascade &c = mVctCascades[i];
             if (!c.lighting || !c.built || !c.relightOwed) {
                 c.relightCredit = 0ull;
                 continue;
             }
             const unsigned long long v = (unsigned long long)c.resolution * c.resolution * c.resolution;
             const unsigned long long floor = chainVoxels ? relightBudget * v / (2ull * chainVoxels) : 0ull;
-            c.relightCredit += floor;
+            if (i < 8u) floorOf[i] = floor;
             floors += floor;
         }
         unsigned long long relightLeft = floors < relightBudget ? relightBudget - floors : 0ull;
+        mRelightCount = relightBudget;
+        const bool shaderHold = mEngine && mEngine->armRegistry().on(ArmId::GiRelightShaderHold);
         bool sceneGraphCurrent = false;
         for (size_t i = n; i-- > 0;) {
             VctCascade &c = mVctCascades[i];
@@ -6619,22 +6629,35 @@ void PhotonComponent::relightAndFeedback() {
             int cursorPlane = std::isfinite(c.relightCursor) ? int(std::lround((c.relightCursor - corner.z) / cell)) : lo[2];
             if (cursorPlane < lo[2] || cursorPlane >= hi[2]) cursorPlane = lo[2];
             const int start = std::max(lo[2], cursorPlane / 4 * 4);
-            const unsigned long long avail = c.relightCredit + relightLeft;
+            // A LAMP'S DELTA WAITS FOR ITS SHADER (ASYNC-SHADERS-1), as a scroll's commit does: the delta injection's
+            // permutation (asked for at the cascade's first injection) is the background compiler's while it builds -
+            // the relight stays owed a frame, never compiled in the frame (shader.async_after_open: a lamp change after an
+            // open compiled VCT/LightInjection on the UI thread, 673 ms). Such a frame cannot pay: its floor accrues
+            // nothing (the test door gi.relightShaderHold holds every cascade there).
+            const bool shaderWaits = (commitShaderAsync() && !c.lighting->commitLightReady()) || shaderHold;
+            // THE CREDIT THIS FRAME: the floor added on a frame that can pay, capped at one 4-plane slab of the owed box
+            // or one floor, the larger (a frame always spends its own floor; nothing banks past it)
+            const unsigned long long floorHere = i < 8u ? floorOf[i] : 0ull;
+            const unsigned long long cap = std::max(4ull * area, floorHere);
+            const unsigned long long credit =
+                shaderWaits ? std::min(c.relightCredit, cap) : std::min(c.relightCredit + floorHere, cap);
+            c.relightSlab = cap;
+            const unsigned long long avail = credit + relightLeft;
             int planes = int(std::min<unsigned long long>((unsigned long long)(hi[2] - start),
                                                           area ? avail / area / 4ull * 4ull : 0ull));
             planes = std::min(planes, (span - c.relightSwept + (cursorPlane - start) + 3) / 4 * 4);
-            if (planes < 4 || !area) { ++c.relightCarried; continue; }   // its credit grows: a later frame pays the slab
+            if (planes < 4 || !area) {   // its credit grows (capped): a later frame pays the slab
+                c.relightCredit = credit;
+                ++c.relightCarried;
+                continue;
+            }
             const int end = std::min(hi[2], start + planes);
             d.injectLo[0][0] = Ogre::uint32(lo[0]); d.injectHi[0][0] = Ogre::uint32(hi[0]);
             d.injectLo[0][1] = Ogre::uint32(lo[1]); d.injectHi[0][1] = Ogre::uint32(hi[1]);
             d.injectLo[0][2] = Ogre::uint32(start); d.injectHi[0][2] = Ogre::uint32(end);
             d.numInjectBoxes = 1u;
-            // A LAMP'S DELTA WAITS FOR ITS SHADER (ASYNC-SHADERS-1), as a scroll's commit does: the delta injection's
-            // permutation (asked for at the cascade's first injection) is the background compiler's while it builds -
-            // the relight stays owed a frame, never compiled in the frame (shader.async_after_open: a lamp change after an
-            // open compiled VCT/LightInjection on the UI thread, 673 ms).
-            if (commitShaderAsync() && !c.lighting->commitLightReady()) {
-                ++mCommitShaderWaits;
+            if (shaderWaits) {
+                if (!shaderHold) ++mCommitShaderWaits;
                 continue;
             }
             if (!sceneGraphCurrent) {
@@ -6650,11 +6673,12 @@ void PhotonComponent::relightAndFeedback() {
                 mInjectingRelight = false;
                 row.setUnits(ok ? 1u : 0u);
             }
-            if (ok) {
+            if (ok) {   // (a refused injection keeps the credit it had: the frame paid nothing, so it accrued nothing)
                 ++c.relights;
                 const unsigned long long spent = area * (unsigned long long)(end - start);
-                const unsigned long long fromCredit = std::min(spent, c.relightCredit);
-                c.relightCredit -= fromCredit;
+                const unsigned long long fromCredit = std::min(spent, credit);
+                c.relightCredit = credit - fromCredit;
+                c.relightVoxels += spent;
                 relightLeft -= std::min(relightLeft, spent - fromCredit);
                 c.relightSwept += std::max(0, end - cursorPlane);
                 if (c.relightSwept >= span) {

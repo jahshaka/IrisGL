@@ -4749,6 +4749,10 @@ struct GiStatus {
         unsigned long long feedbackCarried = 0, relightCarried = 0;
         /// ...and the relight's rounds completed: its sweep went round the owed box once (cumulative).
         unsigned long long relightRounds = 0;
+        /// ...THE RELIGHT'S SPEND (stage 5's read B1): the voxels the spread relit (cumulative), and the cap of its
+        /// floor credit at its last owed frame - one 4-plane slab of the owed box or one floor, the larger (a frame
+        /// relights at most its credit plus the frame's pool, under GiStatus::relightCount).
+        unsigned long long relightVoxels = 0, relightSlab = 0;
         /// THE LAG (PHOTON-7 stage 2): the frames from the frame the camera's step test first owed this cascade a
         /// move to the rebuild (a scroll's commit, or a whole rebuild) that placed it for the camera - the last one
         /// and the most since the chain was built.
@@ -4939,6 +4943,10 @@ struct GiStatus {
     /// never compiled in the commit's frame of an ASYNCHRONOUS scene - View::setAsyncShaders - on a frame that owes no
     /// complete picture; 0 in every other scene, which compiles it in its frame: the selftest asserts it, read D3).
     unsigned long long cascadeCommitShaderWaits = 0;
+    /// THE RELIGHT'S COUNT A FRAME (GiQualityFacts::lightWorkFrames: the chain's voxels over that many frames) at the
+    /// last owed frame: the pool plus the owed cascades' floors (stage 5's read B1; CascadeStatus::relightSlab caps a
+    /// cascade's banked floor credit).
+    unsigned long long relightCount = 0;
     /// Torn cascades stood down with their volumes cleared (decision 14.8; CascadeStatus::tornCleared).
     unsigned long long cascadeTornCleared = 0;
     /// THE SCREEN-PROBE GATHER's own reading (see GatherStatus). `on` false is

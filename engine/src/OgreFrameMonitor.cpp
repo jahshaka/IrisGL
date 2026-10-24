@@ -1264,6 +1264,10 @@ constexpr ArmDef kArms[] = {
       "THE MARK RING'S KEEP PATH (a test door, stage 5's read B3; gi.field_oracle (1)): the field's mark "
       "ring reads FULL on every other frame, so that frame's report is kept for the next ticket - the "
       "marks must still arrive (the old drop lost them)." },
+    { ArmId::GiRelightShaderHold, 0.0, 0.0, 1.0,
+      "THE RELIGHT CREDIT'S TEST DOOR (stage 5's read B1; gi.relight_credit): while set, every cascade's owed relight "
+      "waits as it does while its delta shader builds - a frame that cannot pay, where its floor credit must not "
+      "bank. Off, the first paying frame relights at most its credit's cap plus the frame's pool." },
     { ArmId::GiVoxelAreaStrata, 0.0, 0.0, 32.0,
       "The voxels' area light visibility at the next injections: n x n stratified marches over the rectangle, "
       "the ratio of their form-factor weights (0 = the shipped one march to its centre). A measuring arm "

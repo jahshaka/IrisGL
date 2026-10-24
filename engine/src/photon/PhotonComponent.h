@@ -444,6 +444,9 @@ public:
         bool relightNextOwed = false, relightNextWhole = false;
         Ogre::Aabb relightNextBox = Ogre::Aabb::BOX_NULL;
         unsigned long long relightCredit = 0;
+        /// the voxels the spread relit (cumulative) and the credit's cap at the last owed frame: one 4-plane slab of the
+        /// owed box or one floor, the larger (GiStatus::CascadeStatus, stage 5's read B1)
+        unsigned long long relightVoxels = 0, relightSlab = 0;
         unsigned long long relightCarried = 0;
         unsigned long long relights = 0;
         /// The relight's sweeps that went round their owed box (a round completed: GiStatus' relightRounds).
@@ -1350,6 +1353,7 @@ private:
     void harvestCommitCounts();
     /// The frames a scroll's commit waited for its delta injection's shader (built in the background).
     unsigned long long mCommitShaderWaits = 0;
+    unsigned long long mRelightCount = 0;   ///< the relight's count at the last owed frame (GiStatus::relightCount)
     /// THE FEEDBACK'S CHAIN STATE (PHOTON-7 stage 4): a whole relight owed (refreshGiLighting), every brick of every
     /// cascade owed a pass (a sky change), the feedback owed at the last harvest, its RESTS (the frames it stopped owing:
     /// the chain's radiance finished moving - folded into the lighting serial and the cards' indirect signature, C5,
