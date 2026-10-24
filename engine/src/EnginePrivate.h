@@ -2002,6 +2002,7 @@ public:
     X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */ \
     X(GatherFieldInPass, "gather.fieldInPass") /* the field's fallback left to the shading pass (7-2's A/B: the old route; until 7-5) */ \
     X(GatherNoAnswer, "gather.noAnswer") /* no probe answers any pixel (the weight floor at its largest: the fallback alone) */ \
+    X(GatherRoughQuadrature, "gather.roughQuadrature") /* the rough specular's quadrature door: 1 the filtered map kept beside the levels, 2 the lobe by brute force over it (7-3) */ \
     X(ShadowReceiverBoxesOff, "shadow.receiverBoxesOff") /* the receiver grid without the stock route's boxes (the fixture's negative control, U5 decision 22.3) */ \
     X(TexturePumpFault, "textures.pumpFault") /* the host's texture wait: 1 never done, 2 and its step throws (a test door, U5 decision 22.5) */ \
     X(AtomDensityJobsMissing, "atom.densityJobsMissing") /* the Density count's compute jobs looked up as missing (a test door, BUGS-1 item 6) */ \
@@ -3322,8 +3323,15 @@ public:
     /// listener registers it in the PrePassUse pass's passPreExecute and takes
     /// it away in that pass's passPosExecute (OgreRayQuery.cpp), so no other
     /// pass — another view's, a mirror's, a probe capture's — ever sees it.
-    static void setProbeGather(const Ogre::SceneManager *sm, Ogre::TextureGpu *irradiance);
-    static Ogre::TextureGpu *probeGather(const Ogre::SceneManager *sm);
+    /// THE TWO SCREEN PRODUCTS (PHOTON-7 stage 7, 7-3): the irradiance and the ROUGH SPECULAR (`jahRoughSpec`, the
+    /// pass property `jah_rough_spec`: the pass's envColourS, its cone specular and its material cube compiled out),
+    /// registered together - the gather writes both every frame it writes either.
+    struct ProbeGatherBind {
+        Ogre::TextureGpu *irradiance = nullptr;
+        Ogre::TextureGpu *roughSpec = nullptr;
+    };
+    static void setProbeGather(const Ogre::SceneManager *sm, const ProbeGatherBind &bind);
+    static ProbeGatherBind probeGather(const Ogre::SceneManager *sm);
 
     /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1) — the gather's route, word for
     /// word: the ray tier registers the visibility texture it has just written
@@ -3395,6 +3403,7 @@ private:
         const Ogre::HlmsSamplerblock *skySampler = nullptr;
         Ogre::TextureGpu             *probeGather = nullptr;
         const Ogre::HlmsSamplerblock *probeGatherSampler = nullptr;
+        Ogre::TextureGpu             *roughSpec = nullptr;            // PHOTON-7 7-3 (the gather's sampler)
         Ogre::TextureGpu             *cloudField = nullptr;           // CLOUDS-2D-1
         const Ogre::HlmsSamplerblock *cloudSampler = nullptr;
         Ogre::TextureGpu             *sunVis = nullptr;               // PHOTON-RAYS-1
@@ -3420,7 +3429,7 @@ public:
     /// Every field's default is what a lookup used to answer for a manager that had none.
     struct SceneBinds {
         SkyEnvState      skyEnv;
-        Ogre::TextureGpu *probeGather = nullptr;   ///< GATHER-0 (the pass's copy: PassBinds::probeGather)
+        ProbeGatherBind  probeGather;              ///< GATHER-0, 7-3 (the pass's copies: PassBinds::probeGather, roughSpec)
         SunContactBind   sunContact;               ///< PHOTON-RAYS-1 (the pass's copy: PassBinds::sunVis)
         int              photonIsolation = 0;      ///< PHOTON-VIEW-1: 1 diffuse, 2 specular, 0 none
         CloudShadowState cloudShadow;              ///< CLOUDS-2D-1 (the pass's copy: PassBinds::cloudField)
@@ -3433,7 +3442,7 @@ public:
     static SceneBinds *bindsOf(const Ogre::SceneManager *sm);
     /// A scene's PASS-SCOPED registrations (the gather's, the sun contact's), cleared — the
     /// frame's backstop (OgreEngine::updateRayQuery, every scene).
-    static void clearPassScoped(SceneBinds &b) { b.probeGather = nullptr; b.sunContact = SunContactBind(); }
+    static void clearPassScoped(SceneBinds &b) { b.probeGather = ProbeGatherBind(); b.sunContact = SunContactBind(); }
 private:
     static const Ogre::HlmsSamplerblock *sCloudSampler;                // render thread only
     static Ogre::HlmsManager            *sSamplerMgr;                  // render thread only

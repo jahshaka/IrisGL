@@ -67,11 +67,14 @@ bool jahGatherSameSurface( float wasDist, bool wasFoliage, float dist, bool foli
 /// (jahGatherSameSurface: the jittered relative depth over NoV and the class). knobs5.w = 1 is
 /// the test door that turns the test off (GatherTuning::historyValidationOff; never shipped).
 /// False = no usable history (a first frame, off the previous image, behind its camera, another
-/// surface, an empty texel).
-bool jahHistoryAt( vec3 world, bool foliage, float NoV, float noise, int eye, out uvec2 texel, out uint count )
+/// surface, an empty texel). `at`: the texel it read (the rough specular's history half is read there too,
+/// rq_probe_integrate.comp: one validation for both).
+bool jahHistoryAt( vec3 world, bool foliage, float NoV, float noise, int eye, out uvec2 texel, out uint count,
+				   out ivec2 at )
 {
 	texel = uvec2( 0u );
 	count = 0u;
+	at = ivec2( 0 );
 	vec2 was;
 	float z;
 	const JahEye before = jahEyeBefore( eye );
@@ -91,6 +94,7 @@ bool jahHistoryAt( vec3 world, bool foliage, float NoV, float noise, int eye, ou
 		return false;
 	texel = t;
 	count = wasCount;
+	at = pc;
 	return true;
 }
 

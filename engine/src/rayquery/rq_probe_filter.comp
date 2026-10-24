@@ -71,11 +71,25 @@
 //    The 64 partial sums are reduced by a FIXED-ORDER shared-memory tree —
 //    never an atomic or a subgroup op, whose order is the scheduler's.
 //
-// WHAT IT WRITES: the record's SH and its E/pi at the probe's own normal. The
-// filtered map lives only in this workgroup's registers — nothing reads it
-// after the projection (the pixel history is in irradiance space, and the
-// importance sampler that would have read last frame's map was measured and
-// refused, PHOTON-GATHER-1c), so it is never stored.
+// 3. THE PREFILTERED MAPS (PHOTON-7 stage 7, 7-3; the lead's ruling B: THE SPLIT
+//    SUM ON THE PROBES). The filtered map convolved with the GGX lobe at
+//    p.roughLevels' roughnesses, texel by texel, under the split sum's own
+//    assumption n = v = r (the convolution HlmsPbs's environment cube holds in
+//    its mips): output texel o, direction d_o, takes
+//        P(d_o) = SUM_t L_t D(h) (d_o . d_t) dOmega_t / SUM_t D(h) (d_o . d_t) dOmega_t,
+//    h the half vector of d_o and d_t - the importance sampler's weight NoL over
+//    a pdf of D / 4 with v = n, written as a quadrature over the map's own
+//    texels (D's constant alpha^2 / pi cancels in the ratio, so the weight is
+//    NoL / ( NoH^2 ( alpha^2 - 1 ) + 1 )^2 with NoH^2 = ( 1 + d_o . d_t ) / 2).
+//    The hemisphere holds no texel below the probe's horizon: a lobe near it is
+//    renormalised over the texels it has. A texel with no sample weighs nothing
+//    (its probe is NO SAMPLE as a whole, below, and no reader takes it). The
+//    integrate's ROUGH SPECULAR reads these maps along the lobe's dominant
+//    direction (rq_probe_integrate.comp). R11G11B10, one layer a level, at the
+//    raw atlas' addressing.
+//
+// WHAT IT WRITES: the record's SH and its E/pi at the probe's own normal, and the
+// prefiltered maps.
 #extension GL_GOOGLE_include_directive : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
@@ -87,6 +101,8 @@ layout( std430, set = 0, binding = 1 ) buffer Records { JahProbeRecord r[]; } re
 layout( rgba16f, set = 0, binding = 2 ) uniform readonly image2D probeAtlas;
 /// THE EYE'S DEPTH (PHOTON-2 stage 2's tail): the 3 x 3 taps' depth walk (jah_probe_seen.glsl).
 layout( set = 0, binding = 3 ) uniform sampler2DArray sceneDepth;
+/// THE PREFILTERED MAPS (PHOTON-7 stage 7, 7-3; the header's job 3): one layer a roughness level.
+layout( r11f_g11f_b10f, set = 0, binding = 4 ) uniform writeonly image2DArray prefilteredAtlas;
 #include "jah_reproject.glsl"
 #include "jah_probe_seen.glsl"
 
@@ -112,6 +128,12 @@ shared vec4 gTapN[16];
 shared vec3 gTapP[16];
 /// THE PROBE'S TEXELS WITH NO SAMPLE this frame (PHOTON-2 stage 2's tail): any makes the whole probe NO SAMPLE.
 shared uint gUnsampled;
+/// THE FILTERED MAP, SHARED for the prefilter (7-3): a texel's radiance and its solid angle (0 = no sample), and its
+/// world direction.
+shared vec4 gTexL[64];
+shared vec3 gTexD[64];
+/// The most roughness levels the prefilter writes (the image's layers; p.roughLevels.z).
+const int kRoughLevelsMax = 3;
 
 /// THE PARALLAX TEST (ENGINE-POLISH-PHOTON-2 stage 3; Lumen's spatial filter): a neighbour's ray in
 /// direction d from its position q hit at distance t, so its sample is the radiance leaving the point
@@ -295,6 +317,53 @@ void main()
 			}
 		}
 		filtered = sampled ? sum / wsum : vec3( 0.0 );
+	}
+
+	// ---- THE PREFILTERED MAPS (7-3; the header's job 3) ----------------------
+	gTexL[lane] = ( sampled && finite3( filtered ) ) ? vec4( clamp( filtered, vec3( 0.0 ), vec3( 1024.0 ) ), solidAngle )
+													 : vec4( 0.0 );
+	gTexD[lane] = dirW;
+	barrier();
+	if( onSurface && lane < rays )
+	{
+		const int levels = clamp( int( p.roughLevels.z + 0.5 ), 1, kRoughLevelsMax );
+		float a2[kRoughLevelsMax];
+		vec3 acc[kRoughLevelsMax];
+		float wacc[kRoughLevelsMax];
+		for( int k = 0; k < kRoughLevelsMax; ++k )
+		{
+			const float r = p.roughLevels.x + p.roughLevels.y * float( k );
+			a2[k] = r * r * r * r;   // alpha = r^2 (perceptual roughness), alpha^2 = r^4
+			acc[k] = vec3( 0.0 );
+			wacc[k] = 0.0;
+		}
+		for( uint t = 0u; t < rays; ++t )
+		{
+			const vec4 Lt = gTexL[t];
+			const float c = dot( dirW, gTexD[t] );
+			if( !( Lt.w > 0.0 ) || c <= 0.0 )
+				continue;
+			const float noh2 = 0.5 + 0.5 * c;
+			for( int k = 0; k < kRoughLevelsMax; ++k )
+			{
+				if( k >= levels )
+					break;
+				const float den = noh2 * ( a2[k] - 1.0 ) + 1.0;
+				const float w = c * Lt.w / ( den * den );
+				acc[k] += Lt.xyz * w;
+				wacc[k] += w;
+			}
+		}
+		for( int k = 0; k < kRoughLevelsMax; ++k )
+		{
+			if( k >= levels )
+				break;
+			const vec3 v = wacc[k] > 0.0 ? acc[k] / wacc[k] : vec3( 0.0 );
+			imageStore( prefilteredAtlas, ivec3( block + texel, k ), vec4( finite3( v ) ? v : vec3( 0.0 ), 0.0 ) );
+		}
+		// THE QUADRATURE DOOR (a test door, p.roughLevels.w >= 1): the filtered map itself, in the layer after the levels
+		if( p.roughLevels.w > 0.5 )
+			imageStore( prefilteredAtlas, ivec3( block + texel, levels ), vec4( gTexL[lane].xyz, 0.0 ) );
 	}
 
 	// ---- THE SH PROJECTION, one texel per lane -------------------------------

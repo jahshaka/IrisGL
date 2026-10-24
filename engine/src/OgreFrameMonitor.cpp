@@ -1402,6 +1402,12 @@ constexpr ArmDef kArms[] = {
     { ArmId::GatherNoAnswer, 0.0, 0.0, 1.0,
       "NO PROBE ANSWERS (a measuring door; gi.field_in_integrate): the integrate's weight floor at its largest, so "
       "every pixel takes the fallback alone - the irradiance field where one is bound." },
+    { ArmId::GatherRoughQuadrature, 0.0, 0.0, 2.0,
+      "THE ROUGH SPECULAR'S QUADRATURE DOOR (PHOTON-7 stage 7, 7-3; gi.rough_lobe_quadrature): the split sum's own error. "
+      "1 or 2 = the prefiltered image holds one more layer (switching the door re-makes the view's targets), the probes' FILTERED "
+      "map itself; 1 = the shipped read (the levels along the dominant direction), 2 = the lobe by BRUTE FORCE over "
+      "that map - every texel of every tap weighed by the GGX BRDF at the pixel's own view (D G2 / 4 NoV, the texel's "
+      "solid angle). 0 = shipped (no extra layer)." },
     { ArmId::ShadowReceiverBoxesOff, 0.0, 0.0, 1.0,
       "THE RECEIVER GRID WITHOUT THE STOCK ROUTE'S BOXES (ENGINE-UPGRADE-U5 decision 22.3): 1 = the sun maps' receiver "
       "grid takes the view's id depth only - an alpha-tested, blended or skinned receiver is no receiver, and the "

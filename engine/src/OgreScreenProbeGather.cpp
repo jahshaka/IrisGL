@@ -120,22 +120,35 @@ static_assert(kTraceRaysBinding == kTraceDirectBinding + 1u && kTraceOverlayBind
                   kTraceBindings == kTraceCloudBinding + 1u &&
                   kTraceDirectBinding == kTraceCardViewBinding + SurfaceCache::kViewLayers,
               "the direct volume follows the card read's view-term layers, the instrument's two follow it");
-/// The filter's four: params, records, the raw atlas and the eye's depth (its taps' depth walk, PHOTON-2 stage 2's tail).
-constexpr unsigned kFilterBindings = 4u;
-/// The integrate's twelve: params, records, normals, depth, the irradiance, the
+/// The filter's five: params, records, the raw atlas, the eye's depth (its taps' depth walk, PHOTON-2 stage 2's tail)
+/// and the prefiltered maps it stores (PHOTON-7 stage 7, 7-3: the rough specular's source).
+constexpr unsigned kFilterBindings = 5u;
+/// The integrate's eighteen: params, records, normals, depth, the irradiance, the
 /// history's two halves (one packed texel each, PHOTON-GA-VR), the rest mean,
-/// the photon view's overlay (PHOTON-VIEW-1), the frame's counter, and the
-/// irradiance field's two atlases (10, 11: the fallback it composes, PHOTON-7 7-2).
-constexpr unsigned kIntegrateBindings = 12u;
+/// the photon view's overlay (PHOTON-VIEW-1), the frame's counter, the
+/// irradiance field's two atlases (10, 11: the fallback it composes, PHOTON-7 7-2),
+/// and THE ROUGH SPECULAR's six (12 - 17, 7-3): the prepass's shadow / roughness,
+/// the prefiltered maps, the output, the lobe's history pair and its rest mean.
+constexpr unsigned kIntegrateBindings = 18u;
 /// THE PACKED HISTORY TEXEL (PHOTON-GA-VR): rg32ui, 8 bytes a pixel for each half
 /// of the ping-pong — the shared-exponent mean and the geometry word.
 constexpr unsigned kHistoryTexelBytes = 8u;
-/// The integrate set's STORAGE IMAGES (the pool's arithmetic below counts them):
-/// the irradiance, the history's two halves, the rest mean and the photon overlay
-/// — bindings 4..8; then the frame's counter buffer (9, PHOTON-2 L8: the foliage rule's own accepts).
-constexpr unsigned kIntegrateStorageImages = 5u;
-static_assert(kIntegrateBindings == 7u + kIntegrateStorageImages,
-              "the integrate set: four inputs, five storage images, the counter, the field's two atlases");
+/// The integrate set's STORAGE IMAGES: the irradiance, the history's two halves, the rest mean and the photon overlay
+/// — bindings 4..8; then the frame's counter buffer (9, PHOTON-2 L8: the foliage rule's own accepts); and the rough
+/// specular's output, the lobe's history pair and its rest mean (14 - 17, 7-3).
+constexpr unsigned kIntegrateStorageImages = 9u;
+static_assert(kIntegrateBindings == 9u + kIntegrateStorageImages,
+              "the integrate set: four inputs, nine storage images, the counter, the field's two atlases, the "
+              "roughness and the prefiltered maps");
+/// THE ROUGH SPECULAR'S LEVELS (PHOTON-7 stage 7, 7-3, the lead's ruling B; rq_probe_filter.comp's job 3): the probes'
+/// maps prefiltered at perceptual roughness 0.3, 0.5 and 0.7 (a lobe sharper than 0.3 reads the first level: the 8 x 8
+/// hemisphere resolves no sharper one), and DiffuseLerp's two ends (Lumen's) - from 0.6 the lobe hands over linearly
+/// to the diffuse E/pi, which owns it from 0.8.
+constexpr float kRoughSpecFirstLevel = 0.3f;
+constexpr float kRoughSpecLevelStep = 0.2f;
+constexpr unsigned kRoughSpecLevels = 3u;
+constexpr float kRoughSpecDiffuseFrom = 0.6f;
+constexpr float kRoughSpecDiffuseAt = 0.8f;
 
 /// One probe's record: ten vec4s — position, normal, the irradiance at its own
 /// normal and the SH9 (27 floats in seven vec4s; see JahProbeRecord in the
@@ -217,6 +230,10 @@ struct GatherParams {
     float field[24] = {};
     float fieldWin[4] = {};
     float envSh[9][4] = {};
+    /// THE ROUGH SPECULAR (PHOTON-7 stage 7, 7-3; jah_probe_params.glsl): the gate's top and ramp, DiffuseLerp's two
+    /// ends; the prefiltered levels (the first, the step, the count).
+    float rough[4] = {};
+    float roughLevels[4] = {};
 };
 static_assert(sizeof(GatherParams) % 16u == 0u, "the params block is whole vec4s (std140)");
 
@@ -409,6 +426,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 1 records
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 2 the raw atlas
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 3 depth (the taps' depth walk)
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 the prefiltered maps (7-3)
         };
         if (!makeLayout(kFilterBindings, t, nullptr, mFilterLayout, "filter")) return false;
     }
@@ -426,6 +444,12 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 9 the frame's counter (word 1: L8)
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 10 the irradiance field's irradiance atlas (7-2)
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 11 ...and its depth atlas
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 12 the prepass's shadow / roughness (7-3)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 13 the prefiltered maps (linear)
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 14 the rough specular
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 15 the lobe's last frame's history
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 16 ...this frame's
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 17 ...its rest mean
         };
         if (!makeLayout(kIntegrateBindings, t, nullptr, mIntegrateLayout, "integrate")) return false;
     }
@@ -495,7 +519,8 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
 bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned stride,
                                       unsigned octRes, unsigned adaptiveCap, std::string &err) {
     if (v.targetsReady && v.w == in.width && v.h == in.height && v.stride == stride &&
-        v.octRes == octRes && v.adaptiveCap == adaptiveCap && v.stereo == in.stereo)
+        v.octRes == octRes && v.adaptiveCap == adaptiveCap && v.stereo == in.stereo &&
+        v.prefilteredLayers == kRoughSpecLevels + (in.roughQuadrature ? 1u : 0u))   // (the quadrature door's layer)
         return true;
     // OUTSIDE ANY ENCODER FIRST (PHOTON-GATHER-1d, found by the validation
     // selftest once the gather ran by default): this runs in the scene pass's
@@ -544,6 +569,13 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     if (!mHost.gatherMakeImage(v.atlasW, v.atlasH, 0u, VK_FORMAT_R16G16B16A16_SFLOAT, v.atlas,
                                v.atlasMemory, v.atlasView, err))
         return false;
+    // THE PREFILTERED MAPS (PHOTON-7 stage 7, 7-3): the atlas' shape, a layer a roughness level, R11G11B10 (Lumen's
+    // probe radiance format: a radiance needs no sign and no alpha) - the rough specular's source.
+    // (one more layer under the quadrature door - the filtered map itself; the door switched re-makes the targets)
+    v.prefilteredLayers = kRoughSpecLevels + (in.roughQuadrature ? 1u : 0u);
+    if (!mHost.gatherMakeImage(v.atlasW, v.atlasH, v.prefilteredLayers, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+                               v.prefiltered, v.prefilteredMemory, v.prefilteredView, err))
+        return false;
     if (!mHost.gatherMakeBuffer(VkDeviceSize(total) * kRecordBytes,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                 false, v.records,
@@ -566,6 +598,15 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     const unsigned restW = in.stereo ? 1u : in.width, restH = in.stereo ? 1u : in.height;
     if (!mHost.gatherMakeImage(restW, restH, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, v.restMean,
                                v.restMeanMemory, v.restMeanView, err))
+        return false;
+    // THE LOBE'S HISTORY PAIR AND REST MEAN (7-3): one shared-exponent word a pixel each half, and the rest mean the
+    // diffuse's shape (the stereo stand-in the same).
+    for (unsigned k = 0; k < 2u; ++k)
+        if (!mHost.gatherMakeImage(in.width, in.height, v.layers, VK_FORMAT_R32_UINT, v.roughHistory[k],
+                                   v.roughHistoryMemory[k], v.roughHistoryView[k], err))
+            return false;
+    if (!mHost.gatherMakeImage(restW, restH, 1u, VK_FORMAT_R16G16B16A16_SFLOAT, v.roughRest, v.roughRestMemory,
+                               v.roughRestView, err))
         return false;
     // THE COUNTER: the demand (one word, read back) and then each eye's row's count
     // of the cells asking for a second probe — what the placement's select pass ranks
@@ -610,14 +651,28 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     // RESIDENT FOR GOOD, never per frame — the 0071 lesson.
     t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
     v.irradiance = t;
+    // THE ROUGH SPECULAR (7-3), `jahRoughSpec`: the irradiance's twin - a UAV the integrate writes and the shading pass
+    // reads at its own fragment (JahProbeGather_piece_ps.any), one layer per eye.
+    Ogre::TextureGpu *r = tm->createTexture("JahRoughSpec/" + std::to_string(sSerial), Ogre::GpuPageOutStrategy::Discard,
+                                            Ogre::TextureFlags::Uav,
+                                            in.stereo ? Ogre::TextureTypes::Type2DArray : Ogre::TextureTypes::Type2D);
+    r->setResolution(in.width, in.height, v.layers);
+    r->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
+    r->setNumMipmaps(1u);
+    r->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    v.roughSpec = r;
 
     // The atlas, the records, the irradiance target (8 bytes a pixel), the
     // pixel history's two packed halves (8 bytes a pixel each) and the rest mean
-    // (8 bytes a pixel; none under stereo).
+    // (8 bytes a pixel; none under stereo) - and THE ROUGH SPECULAR's (7-3): the
+    // prefiltered maps (4 bytes an atlas texel a level), the output (8 bytes a pixel), the lobe's history pair (4
+    // bytes a pixel each) and its rest mean (8; none under stereo).
     const unsigned long long pixels = (unsigned long long)in.width * in.height * v.layers;
     v.historyBytes = pixels * 2ull * kHistoryTexelBytes;
     v.vramBytes = 1ull * v.atlasW * v.atlasH * 8ull + (unsigned long long)total * kRecordBytes +
-                  pixels * 8ull + v.historyBytes + (unsigned long long)restW * restH * 8ull;
+                  pixels * 8ull + v.historyBytes + (unsigned long long)restW * restH * 8ull +
+                  1ull * v.atlasW * v.atlasH * 4ull * v.prefilteredLayers + pixels * 8ull + pixels * 2ull * 4ull +
+                  (unsigned long long)restW * restH * 8ull;
     v.targetsReady = true;
     v.atlasNeedsClear = true;
     v.age = 0u;
@@ -653,6 +708,20 @@ void ScreenProbeGather::drop(View &v) {
     v.restMean = VK_NULL_HANDLE;
     v.restMeanMemory = VK_NULL_HANDLE;
     v.restMeanView = VK_NULL_HANDLE;
+    for (unsigned k = 0; k < 2u; ++k) {
+        mHost.gatherRetireImage(v.roughHistory[k], v.roughHistoryMemory[k], v.roughHistoryView[k]);
+        v.roughHistory[k] = VK_NULL_HANDLE;
+        v.roughHistoryMemory[k] = VK_NULL_HANDLE;
+        v.roughHistoryView[k] = VK_NULL_HANDLE;
+    }
+    mHost.gatherRetireImage(v.roughRest, v.roughRestMemory, v.roughRestView);
+    v.roughRest = VK_NULL_HANDLE;
+    v.roughRestMemory = VK_NULL_HANDLE;
+    v.roughRestView = VK_NULL_HANDLE;
+    mHost.gatherRetireImage(v.prefiltered, v.prefilteredMemory, v.prefilteredView);
+    v.prefiltered = VK_NULL_HANDLE;
+    v.prefilteredMemory = VK_NULL_HANDLE;
+    v.prefilteredView = VK_NULL_HANDLE;
     v.restFrames = 0u;
     v.sinceRestart = 0u;
     v.age = 0u;
@@ -695,6 +764,8 @@ void ScreenProbeGather::drop(View &v) {
     v.atlasView = VK_NULL_HANDLE;
     if (v.irradiance) mHost.gatherRetireTexture(v.irradiance);
     v.irradiance = nullptr;
+    if (v.roughSpec) mHost.gatherRetireTexture(v.roughSpec);
+    v.roughSpec = nullptr;
     v.targetsReady = false;
     v.atlasNeedsClear = false;
     // ...AND THE IN-FLIGHT RECORDS GO WITH THE BUFFERS THEY NAME. A resize frees
@@ -836,9 +907,10 @@ void ScreenProbeGather::clearAtlas(View &v, VkCommandBuffer cmd) {
     // surface", which every distance test rejects — though nothing reads them
     // before the view's age says so).
     // ...and the rest mean (PHOTON-GATHER-1d), which the integrate binds on every
-    // frame and writes only at rest.
-    constexpr int kImages = 4;
-    const VkImage images[kImages] = { v.atlas, v.history[0], v.history[1], v.restMean };
+    // frame and writes only at rest; and the rough specular's prefiltered maps, history pair and rest mean (7-3).
+    constexpr int kImages = 8;
+    const VkImage images[kImages] = { v.atlas,       v.history[0],      v.history[1],      v.restMean,
+                                      v.prefiltered, v.roughHistory[0], v.roughHistory[1], v.roughRest };
     VkImageMemoryBarrier b[kImages] = {};
     for (int i = 0; i < kImages; ++i) {
         b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -868,7 +940,7 @@ void ScreenProbeGather::clearAtlas(View &v, VkCommandBuffer cmd) {
 void ScreenProbeGather::releaseBinding(const void *key) {
     auto it = mViews.find(key);
     if (it == mViews.end() || !it->second.sceneMgr) return;
-    detail::FogHlmsListener::setProbeGather(it->second.sceneMgr, nullptr);
+    detail::FogHlmsListener::setProbeGather(it->second.sceneMgr, detail::FogHlmsListener::ProbeGatherBind());
 }
 
 bool ScreenProbeGather::rebindThisFrame(const void *key) {
@@ -876,7 +948,7 @@ bool ScreenProbeGather::rebindThisFrame(const void *key) {
     if (it == mViews.end()) return false;
     const View &v = it->second;
     if (!v.sceneMgr || !v.irradiance || v.recordedFrame != mHost.gatherFrameNow()) return false;
-    detail::FogHlmsListener::setProbeGather(v.sceneMgr, v.irradiance);
+    detail::FogHlmsListener::setProbeGather(v.sceneMgr, { v.irradiance, v.roughSpec });
     return true;
 }
 
@@ -886,7 +958,8 @@ void ScreenProbeGather::forget(const void *key) {
     // ...AND THE SHADER'S REGISTRATION WITH IT: this view's irradiance texture
     // is about to be retired, and the Hlms listener holds a raw pointer to it
     // keyed by the scene's manager (GATHER-0's D1).
-    if (it->second.sceneMgr) detail::FogHlmsListener::setProbeGather(it->second.sceneMgr, nullptr);
+    if (it->second.sceneMgr)
+        detail::FogHlmsListener::setProbeGather(it->second.sceneMgr, detail::FogHlmsListener::ProbeGatherBind());
     drop(it->second);
     mViews.erase(it);
     detail::monitor::forgetGpuOwner(key);
@@ -896,7 +969,7 @@ void ScreenProbeGather::close() {
     VkDevice dev = mHost.gatherDevice();
     for (auto &kv : mViews) {
         if (kv.second.sceneMgr)
-            detail::FogHlmsListener::setProbeGather(kv.second.sceneMgr, nullptr);
+            detail::FogHlmsListener::setProbeGather(kv.second.sceneMgr, detail::FogHlmsListener::ProbeGatherBind());
         // NOT `drop()` HERE, AND THE DIFFERENCE IS A USE-AFTER-FREE (the lead's
         // read). `drop` RETIRES a view's descriptor sets into the host's bin,
         // which frees them later with `vkFreeDescriptorSets(pool, …)` — and the
@@ -1150,16 +1223,18 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
         Ogre::ResourceTransitionArray trans;
         solver.resolveTransition(trans, v.irradiance, Ogre::ResourceLayout::Texture,
                                  Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        solver.resolveTransition(trans, v.roughSpec, Ogre::ResourceLayout::Texture,
+                                 Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
         rs->executeResourceTransition(trans);
     }
-    detail::FogHlmsListener::setProbeGather(in.sceneMgr, v.irradiance);
+    detail::FogHlmsListener::setProbeGather(in.sceneMgr, { v.irradiance, v.roughSpec });
     ++v.age;
     v.lastTemporal = temporal;
     v.recordedFrame = mHost.gatherFrameNow();
 }
 
 void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
-    if (mFailed || !in.scene || !in.sceneMgr || !in.tlas || !in.normals || !in.depth) return;
+    if (mFailed || !in.scene || !in.sceneMgr || !in.tlas || !in.normals || !in.depth || !in.shadowRough) return;
     if (!in.width || !in.height) return;
     const auto cpuStart = Clock::now();
 
@@ -1590,6 +1665,17 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         pp.fieldWin[3] = field && in.fieldCompose ? 1.0f : 0.0f;
         for (int k = 0; k < 9; ++k)
             for (int c = 0; c < 3; ++c) pp.envSh[k][c] = in.envSh[k][c];
+    // THE ROUGH SPECULAR (7-3): the gate against the view's traced reflection, DiffuseLerp's two ends, the levels
+    pp.rough[0] = in.roughGateFull;
+    pp.rough[1] = in.roughGateRamp;
+    pp.rough[2] = kRoughSpecDiffuseFrom;
+    pp.rough[3] = kRoughSpecDiffuseAt;
+    pp.roughLevels[0] = kRoughSpecFirstLevel;
+    pp.roughLevels[1] = kRoughSpecLevelStep;
+    pp.roughLevels[2] = float(kRoughSpecLevels);
+    // THE QUADRATURE DOOR (a test door): the filtered map kept in the layer after the levels (only where the targets
+    // were made with it), 2 = the brute-force read over it
+    pp.roughLevels[3] = v.prefilteredLayers > kRoughSpecLevels ? float(std::min(in.roughQuadrature, 2u)) : 0.0f;
         const uint32_t lo = uint32_t(in.alphaTable & 0xFFFFFFFFu), hi = uint32_t(in.alphaTable >> 32u);
         std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
         std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
@@ -1656,7 +1742,12 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     depth.sampler = mHost.gatherPointSampler();
     depth.imageView = mHost.gatherLayerView(in.depth, false);
     depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (!normals.imageView || !depth.imageView) return;
+    // THE PREPASS'S SHADOW / ROUGHNESS (7-3: the rough specular's roughness, point-sampled as the reflection reads it)
+    VkDescriptorImageInfo shadowRough{};
+    shadowRough.sampler = mHost.gatherPointSampler();
+    shadowRough.imageView = mHost.gatherLayerView(in.shadowRough, false);
+    shadowRough.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!normals.imageView || !depth.imageView || !shadowRough.imageView) return;
 
     {   // the placement set
         VkWriteDescriptorSet w[kPlaceBindings] = {};
@@ -1855,9 +1946,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     }
 
     {   // the filter set
-        VkDescriptorImageInfo filterRaw{};
+        VkDescriptorImageInfo filterRaw{}, filterStored{};
         filterRaw.imageView = v.atlasView;
         filterRaw.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        filterStored.imageView = v.prefilteredView;
+        filterStored.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         VkWriteDescriptorSet w[kFilterBindings] = {};
         for (unsigned i = 0; i < kFilterBindings; ++i) {
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1873,6 +1966,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[2].pImageInfo = &filterRaw;
         w[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[3].pImageInfo = &depth;
+        w[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[4].pImageInfo = &filterStored;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kFilterBindings, w, 0, nullptr);
     }
 
@@ -1932,6 +2027,36 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             w[10 + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             w[10 + k].pImageInfo = &fieldImgs[k];
         }
+        // THE ROUGH SPECULAR (12 - 17, 7-3): the roughness, the prefiltered maps through the linear sampler (in the
+        // GENERAL layout its storage writes leave it in), the output's storage view, the lobe's history pair (this
+        // frame's flip) and its rest mean
+        w[12].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[12].pImageInfo = &shadowRough;
+        VkDescriptorImageInfo filteredRead{};
+        filteredRead.sampler = mHost.gatherLinearSampler();
+        filteredRead.imageView = v.prefilteredView;
+        filteredRead.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        w[13].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[13].pImageInfo = &filteredRead;
+        VkDescriptorImageInfo roughOut{};
+        roughOut.imageView = mHost.gatherLayerView(v.roughSpec, true);
+        roughOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        if (!roughOut.imageView) return;
+        w[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[14].pImageInfo = &roughOut;
+        VkDescriptorImageInfo roughHist[2] = {};
+        const VkImageView roughHistViews[2] = { v.roughHistoryView[prev], v.roughHistoryView[cur] };
+        for (unsigned k = 0; k < 2u; ++k) {
+            roughHist[k].imageView = roughHistViews[k];
+            roughHist[k].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            w[15 + k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            w[15 + k].pImageInfo = &roughHist[k];
+        }
+        VkDescriptorImageInfo roughRest{};
+        roughRest.imageView = v.roughRestView;
+        roughRest.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        w[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[17].pImageInfo = &roughRest;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kIntegrateBindings, w, 0, nullptr);
     }
 
@@ -1946,10 +2071,12 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         Ogre::ResourceTransitionArray trans;
         solver.resolveTransition(trans, v.irradiance, Ogre::ResourceLayout::Uav,
                                  Ogre::ResourceAccess::ReadWrite, computeStage);
+        solver.resolveTransition(trans, v.roughSpec, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Write,
+                                 computeStage);
         if (in.photonOverlay)
             solver.resolveTransition(trans, in.photonOverlay, Ogre::ResourceLayout::Uav,
                                      Ogre::ResourceAccess::Write, computeStage);
-        for (Ogre::TextureGpu *t : { in.normals, in.depth })
+        for (Ogre::TextureGpu *t : { in.normals, in.depth, in.shadowRough })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < in.cascadeCount; ++c)
@@ -2367,13 +2494,15 @@ void ScreenProbeGather::finish(const void *key) {
         Ogre::ResourceTransitionArray trans;
         solver.resolveTransition(trans, v.irradiance, Ogre::ResourceLayout::Texture,
                                  Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        solver.resolveTransition(trans, v.roughSpec, Ogre::ResourceLayout::Texture,
+                                 Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
         rs->executeResourceTransition(trans);
     }
     // THE PROPERTY AND THE TEXTURE ARE SET TOGETHER OR NOT AT ALL — the same
     // rule the sky's env slot states: a slot claimed by getNumExtraPassTextures
     // and left unbound is an undefined descriptor. The registration is
     // PASS-SCOPED and `releaseBinding` takes it away when the pass ends.
-    detail::FogHlmsListener::setProbeGather(in.sceneMgr, v.irradiance);
+    detail::FogHlmsListener::setProbeGather(in.sceneMgr, { v.irradiance, v.roughSpec });
     // ...AND THIS FRAME BECOMES THE PREVIOUS ONE: its camera, its half of each
     // pair, one more frame of age.
     std::memcpy(v.prevCamPos, in.camPos, sizeof(v.prevCamPos));

@@ -194,9 +194,20 @@ struct GatherInputs {
     Ogre::SceneManager *sceneMgr = nullptr;
     VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
 
-    /// The prepass' G-buffers, by the names the chain declares them under.
+    /// The prepass' G-buffers, by the names the chain declares them under: the normals, the depth, and the shadow /
+    /// roughness pair (`jahSsrShadowRough`: the rough specular's roughness, PHOTON-7 stage 7, 7-3).
     Ogre::TextureGpu *normals = nullptr;
     Ogre::TextureGpu *depth = nullptr;
+    Ogre::TextureGpu *shadowRough = nullptr;
+    /// THE ROUGH SPECULAR'S GATE (PHOTON-7 stage 7, 7-3), in perceptual roughness: the view's TRACED REFLECTION's
+    /// cutoff less its feather - where the probes' lobe is the environment term whole (below it the reflection owns
+    /// the lobe and its warm-up hands over to the material's cube) - and the gate's ramp below it; a view with no
+    /// traced reflection: -1, the lobe everywhere.
+    float roughGateFull = -1.0f;
+    float roughGateRamp = 0.1f;
+    /// THE QUADRATURE DOOR gather.roughQuadrature (7-3; a test door): 1 the filtered map kept beside the levels and the
+    /// shipped read, 2 the lobe by brute force over it.
+    unsigned roughQuadrature = 0u;
     /// The scene's captured environment cube, or null.
     Ogre::TextureGpu *sky = nullptr;
     float skyColour[3] = { 0.0f, 0.0f, 0.0f };
@@ -457,6 +468,21 @@ private:
         VkImage restMean = VK_NULL_HANDLE;
         VkDeviceMemory restMeanMemory = VK_NULL_HANDLE;
         VkImageView restMeanView = VK_NULL_HANDLE;
+        /// THE PREFILTERED MAPS (PHOTON-7 stage 7, 7-3; the split sum on the probes): the filtered map convolved with
+        /// the GGX lobe at each of kRoughSpecLevels roughnesses, one layer a level, at the raw atlas' addressing,
+        /// R11G11B10 - what the integrate's rough specular reads (rq_probe_filter.comp's job 3).
+        VkImage prefiltered = VK_NULL_HANDLE;
+        VkDeviceMemory prefilteredMemory = VK_NULL_HANDLE;
+        VkImageView prefilteredView = VK_NULL_HANDLE;
+        /// THE ROUGH SPECULAR'S HISTORY (7-3), full resolution, ping-ponged with the diffuse's pair (the same flip): ONE
+        /// r32ui word a pixel, the lobe's mean as a shared-exponent word - validated by the diffuse's texel at the same
+        /// coordinate (rq_probe_integrate.comp) - and its REST MEAN (rgba16f; a 1 x 1 stand-in for a stereo view).
+        VkImage roughHistory[2] = {};
+        VkDeviceMemory roughHistoryMemory[2] = {};
+        VkImageView roughHistoryView[2] = {};
+        VkImage roughRest = VK_NULL_HANDLE;
+        VkDeviceMemory roughRestMemory = VK_NULL_HANDLE;
+        VkImageView roughRestView = VK_NULL_HANDLE;
         /// The history's EMA floor in frames, as the last frame ran it.
         unsigned historyFramesLast = 10u;
         /// Ogre's frame number of the last frame this view recorded — which of
@@ -480,6 +506,11 @@ private:
         float prevCamPos2[4] = {}, prevRayTL2[4] = {}, prevRayRight2[4] = {},
               prevRayDown2[4] = {}, prevFwd2[4] = {};
         Ogre::TextureGpu *irradiance = nullptr;
+        /// THE ROUGH SPECULAR (7-3), `jahRoughSpec`: an Ogre texture for the same reason as the irradiance.
+        Ogre::TextureGpu *roughSpec = nullptr;
+        /// The prefiltered image's layers as made: the levels, and one more under the quadrature door (the filtered
+        /// map itself).
+        unsigned prefilteredLayers = 0u;
 
         const detail::OgreScene *scene = nullptr;
         Ogre::SceneManager *sceneMgr = nullptr;

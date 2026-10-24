@@ -30,6 +30,33 @@
 // answered mean and w its coverage, as before 7-2. A pixel gets exactly ONE
 // diffuse-GI term in every regime.
 //
+// THE SECOND OUTPUT, `jahRoughSpec` (PHOTON-7 stage 7, 7-3; Lumen's rough
+// reflections, the lead's ruling B): THE SPLIT SUM ON THE PROBES. The filter
+// stores each probe's filtered radiance PREFILTERED by the GGX lobe at three
+// roughnesses (p.roughLevels; rq_probe_filter.comp) - the convolution HlmsPbs's
+// environment cube holds in its mips, on the probes' own hemispheres - and a
+// pixel reads its bilinear probes (the diffuse's own taps and plane weights) along
+// the lobe's DOMINANT direction (jahEnvDominantDir, the same fit at every
+// environment reader), the two levels around its roughness lerped (below the
+// first, the first: the 8 x 8 map resolves no sharper lobe). A probe whose
+// hemisphere does not hold the direction says nothing and the rest renormalise;
+// none holds it - the pixel's diffuse E/pi. A DETERMINISTIC READ OF THE PROBES -
+// no draw: what noise it carries is the probes' own (each frame's trace), which
+// only time removes, so the lobe takes THE DIFFUSE'S OWN HISTORY AND REST LAW
+// (Lumen's RoughSpecularIndirect rides the diffuse's temporal pass): one shared-
+// exponent word a pixel, read at the texel the diffuse's history accepted (one
+// surface validation, one blend, the freeze and a starved frame keeping it), and
+// at rest its own rest mean (R2: never seeded from the history, no sample under the
+// freeze, the same hand-over). Then THE HAND-OVER TO THE DIFFUSE between the
+// perceptual roughnesses p.rough.z and p.rough.w (Lumen's DiffuseLerp: the cosine
+// lobe is the widest lobe). THE GATE (w): where the view's TRACED REFLECTION owns the lobe - below
+// p.rough.x (its cutoff less its feather, the fork's SSR composite replacing the
+// environment term at its confidence) - the reflection's own warm-up hands over to
+// the material's cube as before, so w ramps from 0 at p.rough.x - p.rough.y to 1
+// at p.rough.x (p.rough.x < 0: no traced reflection, w 1 everywhere). What the
+// shading pass takes: envColourS += rgb x w, the cube x (1 - w); the cone's
+// specular is compiled out of a pass that reads it (the sky arrives once).
+//
 // DETERMINISM: the five taps are read and summed in ONE FIXED ORDER.
 //
 // THE PIXEL HISTORY (PHOTON-GATHER-1c item 1; C2 design section 2). The answer
@@ -138,6 +165,17 @@ layout( set = 0, binding = 10 ) uniform sampler2D fieldIrradiance;
 layout( set = 0, binding = 11 ) uniform sampler2D fieldDepth;
 #define JAH_FIELD_IRRAD( uv ) textureLod( fieldIrradiance, uv, 0.0 )
 #define JAH_FIELD_DEPTH( uv ) textureLod( fieldDepth, uv, 0.0 ).xy
+/// THE ROUGH SPECULAR (PHOTON-7 stage 7, 7-3; bindings 12 - 14 - the header's second output): the prepass's shadow /
+/// roughness G-buffer (.y the GGX alpha, fork 16d8e29d4's packing over [0.001, 1]: rq_reflect.comp's decode), the
+/// filter's PREFILTERED maps (one layer a roughness level, bilinear inside each probe's block) and the output.
+layout( set = 0, binding = 12 ) uniform sampler2DArray gBufShadowRoughness;
+layout( set = 0, binding = 13 ) uniform sampler2DArray prefilteredAtlas;
+layout( rgba16f, set = 0, binding = 14 ) uniform writeonly image2DArray roughSpec;
+/// ...the lobe's history pair (one shared-exponent word a pixel, at the diffuse history's texel) and its rest mean (a
+/// 1 x 1 stand-in under stereo, as the diffuse's).
+layout( r32ui, set = 0, binding = 15 ) uniform readonly uimage2DArray roughHistoryPrev;
+layout( r32ui, set = 0, binding = 16 ) uniform writeonly uimage2DArray roughHistoryCur;
+layout( rgba16f, set = 0, binding = 17 ) uniform image2DArray roughRest;
 // (the environment's SH alone: no cube is read here)
 #define JAH_ENV_CUBE_ON false
 #define JAH_ENV_SAMPLE( d, l ) vec3( 0.0 )
@@ -292,6 +330,195 @@ vec3 fieldFallback( vec3 worldPos, vec3 worldNormal, vec3 toEye )
 	return a.irradiance + jahEnvIrradiance( worldNormal ) * ( 1.0 - a.confidence );
 }
 
+/// THE BILINEAR READ'S TAPS (GATHER-1a; one text for the diffuse's own read and the rough specular's lobe, 7-3): the
+/// four uniform probes whose cells bracket the pixel (the bracket's weights; a cell off the grid clamps onto the border
+/// cell), then the pixel's own cell's ADAPTIVE TWIN at that cell's bilinear share - it exists because the cell holds a
+/// surface its uniform probe is not on - each weighed by THE PLANE TEST and kept only where the probe is SEEN FROM THE
+/// PIXEL ALONG ITS SURFACE (no light through a wall: a floor that runs on under a thin partition is one plane on both
+/// sides), in that ONE FIXED ORDER. `starved`: a probe with a positive share had no sample this frame (its ray records
+/// dropped by a full hit list, rq_probe_filter.comp's irradiance.w -1).
+int bilinearTaps( ivec2 c0, vec2 f, ivec2 cell, uint index, ivec2 cellOff, ivec2 gridEye, ivec2 grid, vec3 pixelWorld,
+				  vec3 pixelNormal, float pixelDist, vec2 local, JahEye thisEye, int eye, vec2 eyeSize,
+				  out uint tapIdx[5], out float tapW[5], out bool starved )
+{
+	int n = 0;
+	starved = false;
+	for( int t = 0; t < 5; ++t )
+	{
+		tapIdx[t] = 0u;
+		tapW[t] = 0.0;
+	}
+	float ownCellWeight = 0.0;
+	for( int k = 0; k < 4; ++k )
+	{
+		const ivec2 o = ivec2( k & 1, k >> 1 );
+		const ivec2 c = clamp( c0 + o, ivec2( 0 ), gridEye - 1 ) + cellOff;
+		const float wb = ( o.x == 1 ? f.x : 1.0 - f.x ) * ( o.y == 1 ? f.y : 1.0 - f.y );
+		if( c == cell )
+			ownCellWeight += wb;
+		const uint probeIndex = uint( c.y * grid.x + c.x );
+		const vec4 posW = records.r[probeIndex].posW;
+		starved = starved || ( posW.w > 0.5 && wb > 0.0 && records.r[probeIndex].irradiance.w < -0.5 );
+		if( posW.w < 0.5 || records.r[probeIndex].irradiance.w < 0.5 || wb <= 0.0 )
+			continue;
+		const float w = wb * jahPlaneWeight( posW.xyz, records.r[probeIndex].normalW.xyz, pixelWorld,
+											 pixelNormal, pixelDist );
+		if( w <= 0.0 || !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
+			continue;
+		tapIdx[n] = probeIndex;
+		tapW[n] = w;
+		++n;
+	}
+	const float link = records.r[index].normalW.w;
+	if( link > 0.5 && ownCellWeight > 0.0 )
+	{
+		const uint twin = uint( link ) - 1u;
+		const vec4 posW = records.r[twin].posW;
+		starved = starved || ( posW.w > 0.5 && records.r[twin].irradiance.w < -0.5 );
+		if( posW.w > 0.5 && records.r[twin].irradiance.w > 0.5 )
+		{
+			const float w = ownCellWeight * jahPlaneWeight( posW.xyz, records.r[twin].normalW.xyz,
+															pixelWorld, pixelNormal, pixelDist );
+			if( w > 0.0 && seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
+			{
+				tapIdx[n] = twin;
+				tapW[n] = w;
+				++n;
+			}
+		}
+	}
+	return n;
+}
+
+/// THE LOBE FROM THE PREFILTERED PROBES (7-3; the header's second output): along the lobe's dominant direction d, each
+/// tap's prefiltered map - a hemisphere in the probe's own tangent frame (rq_probe_filter.comp's), so d is re-expressed
+/// there and read bilinearly inside the probe's block (the sample point clamped half a texel in from the block's edge,
+/// which is the hemisphere's horizon) at the two roughness levels around the pixel's, lerped. A probe whose hemisphere
+/// does not hold d says nothing and the others renormalise; none holds it, or the taps sum under the weight floor - the
+/// pixel's diffuse E/pi.
+vec3 probeLobe( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW[5], int nTap, float floorW, vec3 diffuse )
+{
+	float tapSum = 0.0;
+	for( int t = 0; t < nTap; ++t )
+		tapSum += tapW[t];
+	if( tapSum < floorW )
+		return diffuse;
+	const vec3 d = jahEnvDominantDir( N, reflect( -V, N ), roughness * roughness );
+	const float levels = max( p.roughLevels.z, 2.0 );
+	const float lv = clamp( ( roughness - p.roughLevels.x ) / max( p.roughLevels.y, 1e-4 ), 0.0, levels - 1.0 );
+	const float k0 = min( floor( lv ), levels - 2.0 );
+	const float fk = lv - k0;
+	const float octRes = clamp( p.knobs2.w, 1.0, float( kOctResMax ) );
+	const int cols = max( int( p.knobs3.z ), 1 );
+	const vec2 atlasSize = vec2( textureSize( prefilteredAtlas, 0 ).xy );
+	vec3 acc = vec3( 0.0 );
+	float wacc = 0.0;
+	for( int t = 0; t < nTap; ++t )
+	{
+		const uint pi = tapIdx[t];
+		const vec3 n = records.r[pi].normalW.xyz;
+		vec3 T, B;
+		jahTangentFrame( n, T, B );
+		const vec3 l = vec3( dot( d, T ), dot( d, B ), dot( d, n ) );
+		if( l.z <= 0.0 )
+			continue;
+		const vec2 block = vec2( float( int( pi ) % cols ), float( int( pi ) / cols ) ) * float( kOctResMax );
+		const vec2 at = ( block + clamp( jahOctUv( l ) * octRes, vec2( 0.5 ), vec2( octRes - 0.5 ) ) ) / atlasSize;
+		const vec3 L = mix( textureLod( prefilteredAtlas, vec3( at, k0 ), 0.0 ).xyz,
+							textureLod( prefilteredAtlas, vec3( at, k0 + 1.0 ), 0.0 ).xyz, fk );
+		if( !finite3( L ) )
+			continue;
+		acc += L * tapW[t];
+		wacc += tapW[t];
+	}
+	return wacc > 0.0 ? acc / wacc : diffuse;
+}
+
+/// THE ROUGH SPECULAR'S GATE (7-3): 0 where the view's traced reflection owns the lobe (below p.rough.x - p.rough.y:
+/// nothing is read), 1 from p.rough.x up (p.rough.x < 0: no traced reflection, 1 everywhere).
+float roughGate( float roughness )
+{
+	return p.rough.x < 0.0 ? 1.0 : smoothstep( p.rough.x - max( p.rough.y, 1e-4 ), p.rough.x, roughness );
+}
+/// ...and its hand-over to the diffuse E/pi (p.rough.z .. w): 0 the lobe alone, 1 the diffuse alone.
+float roughToDiffuse( float roughness )
+{
+	return clamp( ( roughness - p.rough.z ) / max( p.rough.w - p.rough.z, 1e-4 ), 0.0, 1.0 );
+}
+/// THE QUADRATURE DOOR'S BRUTE FORCE (a test door, p.roughLevels.w 2; gi.rough_lobe_quadrature): the same taps, each
+/// probe's FILTERED map (the layer after the levels) integrated texel by texel against the GGX BRDF at the pixel's own
+/// view - D G2 / ( 4 NoV ) times the texel's solid angle (the radiance the split sum's DFG term multiplies is the
+/// BRDF-weighted mean, so the weights are normalised) - the split sum's own error is the shipped read against this.
+vec3 probeLobeBrute( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW[5], int nTap, float floorW, vec3 diffuse )
+{
+	float tapSum = 0.0;
+	for( int t = 0; t < nTap; ++t )
+		tapSum += tapW[t];
+	if( tapSum < floorW )
+		return diffuse;
+	const float rc = max( roughness, p.roughLevels.x );
+	const float a = rc * rc, a2 = a * a;
+	const float NoV = max( dot( N, V ), 1e-4 );
+	const int octRes = int( clamp( p.knobs2.w, 1.0, float( kOctResMax ) ) );
+	const int cols = max( int( p.knobs3.z ), 1 );
+	const float layer = max( p.roughLevels.z, 2.0 );
+	vec3 acc = vec3( 0.0 );
+	float wacc = 0.0;
+	for( int t = 0; t < nTap; ++t )
+	{
+		const uint pi = tapIdx[t];
+		const vec3 n = records.r[pi].normalW.xyz;
+		vec3 T, B;
+		jahTangentFrame( n, T, B );
+		const ivec2 block = ivec2( int( pi ) % cols, int( pi ) / cols ) * kOctResMax;
+		vec3 accT = vec3( 0.0 );
+		float wT = 0.0;
+		for( int k = 0; k < octRes * octRes; ++k )
+		{
+			const ivec2 tex = ivec2( k % octRes, k / octRes );
+			const vec3 o = jahOctPoint( ( vec2( tex ) + 0.5 ) / float( octRes ) );
+			const vec3 dl = o / max( length( o ), 1e-6 );
+			const vec3 l = normalize( T * dl.x + B * dl.y + n * dl.z );
+			const float NoL = dot( N, l );
+			if( NoL <= 0.0 )
+				continue;
+			const vec3 h = normalize( V + l );
+			const float NoH = max( dot( N, h ), 0.0 );
+			const float dd = NoH * NoH * ( a2 - 1.0 ) + 1.0;
+			const float D = a2 / ( 3.14159265 * dd * dd );
+			const float G2 = 2.0 * NoL * NoV /
+							 ( NoV * sqrt( a2 + ( 1.0 - a2 ) * NoL * NoL ) + NoL * sqrt( a2 + ( 1.0 - a2 ) * NoV * NoV ) );
+			const float w = D * G2 / ( 4.0 * NoV ) * jahOctSolidAngle( o, float( octRes ) );
+			const vec3 L = texelFetch( prefilteredAtlas, ivec3( block + tex, int( layer ) ), 0 ).xyz;
+			if( !( w > 0.0 ) || !finite3( L ) )
+				continue;
+			accT += L * w;
+			wT += w;
+		}
+		if( !( wT > 0.0 ) )
+			continue;
+		acc += accT / wT * tapW[t];
+		wacc += tapW[t];
+	}
+	return wacc > 0.0 ? acc / wacc : diffuse;
+}
+
+/// THIS FRAME'S LOBE where it is read (the gate open, the diffuse not owning it), the diffuse E/pi elsewhere.
+vec3 roughLobeNow( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW[5], int nTap, float floorW, vec3 diffuse )
+{
+	if( !( roughGate( roughness ) > 0.0 ) || roughToDiffuse( roughness ) >= 1.0 )
+		return diffuse;
+	const vec3 lobe = p.roughLevels.w > 1.5 ? probeLobeBrute( N, V, roughness, tapIdx, tapW, nTap, floorW, diffuse )
+											: probeLobe( N, V, roughness, tapIdx, tapW, nTap, floorW, diffuse );
+	return clamp( lobe, vec3( 0.0 ), vec3( 1024.0 ) );
+}
+/// THE ROUGH SPECULAR'S TEXEL: rgb the lobe (this frame's, or its mean) handed over to the diffuse, w the gate.
+vec4 roughTexel( vec3 lobe, vec3 diffuse, float roughness )
+{
+	const float gate = roughGate( roughness );
+	return gate > 0.0 ? vec4( mix( lobe, diffuse, roughToDiffuse( roughness ) ), gate ) : vec4( 0.0 );
+}
+
 void main()
 {
 	const ivec2 full = ivec2( p.resolution.zw );
@@ -356,11 +583,16 @@ void main()
 		// and nothing should: it has no hemisphere. Its history is "no surface"
 		// (a zero word fails every distance test).
 		imageStore( probeIrradiance, at, vec4( 0.0 ) );
+		imageStore( roughSpec, at, vec4( 0.0 ) );
 		if( temporal )
 		{
 			imageStore( historyCur, at, uvec4( 0u ) );
+			imageStore( roughHistoryCur, at, uvec4( 0u ) );
 			if( p.knobs6.x >= 1.0 )
+			{
 				imageStore( restMean, at, vec4( 0.0 ) );
+				imageStore( roughRest, at, vec4( 0.0 ) );
+			}
 		}
 		return;
 	}
@@ -368,6 +600,7 @@ void main()
 	// ---- THE PIXEL HISTORY (see the header) ---------------------------------
 	vec4 prev = vec4( 0.0 );
 	uint prevCount = 0u;
+	ivec2 histAt = ivec2( 0 );   // the previous texel read (the rough specular's history half is read there too)
 	if( temporal && p.knobs5.x >= 1.0 )
 	{
 		// THROUGH THIS EYE'S PREVIOUS CAMERA, onto this eye's own half of the
@@ -380,7 +613,7 @@ void main()
 		const vec3 toEye = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
 		const float NoV = dot( pixelNormal, toEye );
 		if( jahHistoryAt( pixelWorld, pixelFoliage, NoV, roundingDither( ivec2( lx, pix.y ), 3u ), eye, texel,
-						  wasCount ) )
+						  wasCount, histAt ) )
 		{
 			if( gFoliageRuleOnly )
 				atomicAdd( gatherCounter.words[1], 1u );
@@ -425,7 +658,6 @@ void main()
 
 	vec3 sum = vec3( 0.0 );
 	float wsum = 0.0;
-	float ownCellWeight = 0.0;
 	// THE DEPTH WALK ON EVERY READ (PHOTON-2 stage 2's tail; 1.6 B4, DEEP_AUDIT photon-diffuse F13): no LIGHT THROUGH
 	// A WALL on any read of a neighbouring probe - the bilinear four, the twin and both silhouette steps as the wide
 	// young read always did (jah_probe_seen.glsl). A wall thinner than one probe stride on screen (0.1 m at 30 m is
@@ -437,6 +669,12 @@ void main()
 	// (below: it keeps its history, as a reflection texel with no sample keeps what it holds), never the fallback's
 	// share a geometric "no answer" hands on.
 	bool starved = false;
+	// THE BILINEAR TAPS (bilinearTaps): the diffuse's own read when the history is old enough, and the rough specular's
+	// lobe always (a young pixel's diffuse reads the wide neighbourhood below, its lobe these)
+	uint tapIdx[5];
+	float tapW[5];
+	int nTap = 0;
+	bool tapsRead = false;
 	if( reach > 1.0 )
 	{
 		// THE WIDE READ: every cell whose centre lies within `reach` cells of the
@@ -496,46 +734,15 @@ void main()
 			}
 	}
 	else
-	for( int k = 0; k < 4; ++k )
 	{
-		const ivec2 o = ivec2( k & 1, k >> 1 );
-		const ivec2 c = clamp( c0 + o, ivec2( 0 ), gridEye - 1 ) + cellOff;
-		const float wb = ( o.x == 1 ? f.x : 1.0 - f.x ) * ( o.y == 1 ? f.y : 1.0 - f.y );
-		if( c == cell )
-			ownCellWeight += wb;
-		const uint probeIndex = uint( c.y * grid.x + c.x );
-		const vec4 posW = records.r[probeIndex].posW;
-		starved = starved || ( posW.w > 0.5 && wb > 0.0 && records.r[probeIndex].irradiance.w < -0.5 );
-		if( posW.w < 0.5 || records.r[probeIndex].irradiance.w < 0.5 || wb <= 0.0 )
-			continue;
-		const float w = wb * jahPlaneWeight( posW.xyz, records.r[probeIndex].normalW.xyz, pixelWorld,
-											 pixelNormal, pixelDist );
-		if( w <= 0.0 || !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
-			continue;
-		sum += shEvalAt( probeIndex, pixelNormal, bands ) * w;
-		wsum += w;
-	}
-	// ...AND THE PIXEL'S OWN CELL'S ADAPTIVE TWIN, at that cell's bilinear share:
-	// it exists because the cell holds a surface its uniform probe is not on.
-	// (The wide read took every cell's twin at its tent weight already.)
-	if( reach <= 1.0 )
-	{
-		const float link = records.r[index].normalW.w;
-		if( link > 0.5 && ownCellWeight > 0.0 )
+		// THE BILINEAR FOUR AND THE OWN CELL'S TWIN (bilinearTaps), summed in its one fixed order
+		nTap = bilinearTaps( c0, f, cell, index, cellOff, gridEye, grid, pixelWorld, pixelNormal, pixelDist, local,
+							 thisEye, eye, eyeSize, tapIdx, tapW, starved );
+		tapsRead = true;
+		for( int t = 0; t < nTap; ++t )
 		{
-			const uint twin = uint( link ) - 1u;
-			const vec4 posW = records.r[twin].posW;
-			starved = starved || ( posW.w > 0.5 && records.r[twin].irradiance.w < -0.5 );
-			if( posW.w > 0.5 && records.r[twin].irradiance.w > 0.5 )
-			{
-				const float w = ownCellWeight * jahPlaneWeight( posW.xyz, records.r[twin].normalW.xyz,
-																pixelWorld, pixelNormal, pixelDist );
-				if( w > 0.0 && seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
-				{
-					sum += shEvalAt( twin, pixelNormal, bands ) * w;
-					wsum += w;
-				}
-			}
+			sum += shEvalAt( tapIdx[t], pixelNormal, bands ) * tapW[t];
+			wsum += tapW[t];
 		}
 	}
 	// ---- THE SILHOUETTE RULE (GA-EDGE, the fix round) --------------------------
@@ -623,6 +830,17 @@ void main()
 	// THE FIELD, COMPOSED (7-2): the eye's direction for its sample point's bias
 	const bool composeField = p.fieldWin.w > 0.5;
 	const vec3 toEyeField = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
+	// THE ROUGH SPECULAR (7-3): the pixel's perceptual roughness (the G-buffer's alpha, decoded as the reflection
+	// decodes it); a young pixel's diffuse read the wide neighbourhood - its lobe reads the bilinear taps
+	const float roughness =
+		sqrt( max( texture( gBufShadowRoughness, uv ).y * 0.999 + 0.001, 1e-6 ) );
+	const bool lobeRead = ( p.rough.x < 0.0 || roughness > p.rough.x - max( p.rough.y, 1e-4 ) ) && roughness < p.rough.w;
+	if( lobeRead && !tapsRead )
+	{
+		bool tapStarved;
+		nTap = bilinearTaps( c0, f, cell, index, cellOff, gridEye, grid, pixelWorld, pixelNormal, pixelDist, local,
+							 thisEye, eye, eyeSize, tapIdx, tapW, tapStarved );
+	}
 	if( !temporal )
 	{
 		// THE MEASUREMENT LEVER (the arm "gather.temporal"): this frame's
@@ -633,6 +851,11 @@ void main()
 												: vec3( 0.0 ) ),
 						   1.0 );
 		imageStore( probeIrradiance, at, answer );
+		const vec3 diffuseNow = answer.xyz * answer.w;
+		imageStore( roughSpec, at,
+					roughTexel( roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor,
+											  diffuseNow ),
+								diffuseNow, roughness ) );
 		return;
 	}
 
@@ -670,6 +893,9 @@ void main()
 	// steps exactly as a settling one, Bistro's first rest frame jumped 0.18 -> 0.26 at k / N) and reaches 1 at k = N,
 	// where the answer is still the rest mean exactly.
 	const float restK = p.knobs6.x;
+	// (the rest's law, held for the rough specular's rest below: whether this frame's sample enters, and the hand-over)
+	bool restTakes = false;
+	float restHandover = 0.0;
 	if( restK >= 1.0 )
 	{
 		// NO SAMPLE THIS FRAME: the rest mean takes none, and is never SEEDED from the history (PHOTON-2 1b H2: the EMA is
@@ -678,14 +904,14 @@ void main()
 		// the history; the later samples weigh 1 / k of the rest frame - a starved frame is a full list's, rare.)
 		// ...and UNDER THE GI FREEZE (stereo.w, PHOTON-2 1b W4) a pixel with a history takes no rest sample either: it keeps
 		// its history (the rest mean holds none yet) or its rest mean as it is - no new sample enters anywhere.
-		const bool restTakes = !noSample && !( p.stereo.w > 0.5 && prevCount > 0u );
+		restTakes = !noSample && !( p.stereo.w > 0.5 && prevCount > 0u );
 		const vec4 stored = restK < 1.5 ? vec4( 0.0, 0.0, 0.0, -1.0 ) : imageLoad( restMean, at );
 		const bool empty = stored.w < -0.5;
 		const vec4 rest = !restTakes ? stored : empty ? sample1 : mix( stored, sample1, 1.0 / restK );
 		imageStore( restMean, at, rest );
 		const vec4 restAnswer = rest.w < -0.5 ? prev : rest;
-		mean = mix( mix( prev, restAnswer, blend ), restAnswer,
-					clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 ) );
+		restHandover = clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 );
+		mean = mix( mix( prev, restAnswer, blend ), restAnswer, restHandover );
 	}
 	imageStore( historyCur, at,
 				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
@@ -706,6 +932,31 @@ void main()
 		outV = vec4( outV.xyz * cover +
 						 ( cover < 1.0 ? fieldFallback( pixelWorld, pixelNormal, toEyeField ) * ( 1.0 - cover ) : vec3( 0.0 ) ),
 					 1.0 );
+	}
+	// ---- THE ROUGH SPECULAR (7-3; the header's second output) -----------------
+	// This frame's lobe (its fallback the pixel's diffuse E/pi as the shading pass takes it: the composed answer, or
+	// the answered share where the pass composes the field itself) through the diffuse's own blend, and at rest the
+	// diffuse's rest law word for word; then the hand-over to the diffuse and the gate.
+	{
+		const vec3 diffuseOut = outV.xyz * outV.w;
+		const vec3 lobe = roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor, diffuseOut );
+		const vec3 prevLobe =
+			prevCount > 0u ? unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( histAt, eye ) ).x ) : vec3( 0.0 );
+		vec3 meanLobe = mix( prevLobe, lobe, blend );
+		if( restK >= 1.0 )
+		{
+			const vec4 stored = restK < 1.5 ? vec4( 0.0, 0.0, 0.0, -1.0 ) : imageLoad( roughRest, at );
+			const vec4 rest = !restTakes ? stored
+							  : stored.w < -0.5 ? vec4( lobe, 1.0 )
+												: mix( stored, vec4( lobe, 1.0 ), 1.0 / restK );
+			imageStore( roughRest, at, rest );
+			const vec3 restAnswer = rest.w < -0.5 ? prevLobe : rest.xyz;
+			meanLobe = mix( mix( prevLobe, restAnswer, blend ), restAnswer, restHandover );
+		}
+		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( 1024.0 ) ) : vec3( 0.0 );
+		imageStore( roughHistoryCur, at,
+					uvec4( packRgbShared( meanLobe, roundingDither( ivec2( lx, pix.y ), 4u ) ), 0u, 0u, 0u ) );
+		imageStore( roughSpec, at, roughTexel( meanLobe, diffuseOut, roughness ) );
 	}
 	// THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument; p.stereo.z):
 	// magenta where the reprojected history held fewer than N frames.

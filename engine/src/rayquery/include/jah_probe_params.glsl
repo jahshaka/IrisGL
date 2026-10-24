@@ -183,6 +183,16 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// ...and the FIELD'S OWN FALLBACK where its confidence fades: the environment's diffuse - the scene's ambient SH
 	/// (world axes, jah_environment.glsl's C0 .. C8 in xyz, the pass buffer's signs applied by the host).
 	vec4 envSh[9];
+	/// THE ROUGH SPECULAR (PHOTON-7 stage 7, 7-3; rq_probe_integrate.comp's second output, the split sum on the probes),
+	/// in perceptual roughness: x = THE GATE's top - the view's traced reflection's cutoff less its feather, where the
+	/// probes' lobe is the environment term whole (< 0: no traced reflection, the lobe everywhere) - and y the gate's
+	/// ramp below it; z / w = where the lobe starts handing over to the diffuse E/pi and where the diffuse owns it.
+	vec4 rough;
+	/// THE PREFILTERED MAPS' LEVELS (rq_probe_filter.comp writes them, the integrate reads them): x = the first level's
+	/// perceptual roughness, y = the step between levels, z = how many levels, w = THE QUADRATURE DOOR (a test door,
+	/// gather.roughQuadrature): >= 1 the filtered map itself is stored in the layer after the levels, 2 the integrate
+	/// reads the lobe by brute force over it (the split sum's own error, gi.rough_lobe_quadrature); 0 shipped.
+	vec4 roughLevels;
 } p;
 
 /// ONE EYE'S IMAGE — rq_reflect.comp's `EyeImage`: where the eye is and the
