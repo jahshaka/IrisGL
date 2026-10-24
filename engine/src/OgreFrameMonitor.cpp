@@ -1407,7 +1407,8 @@ constexpr ArmDef kArms[] = {
     { ArmId::GiScreenBindMissing, 0.0, 0.0, 1.0,
       "THE NO-RAY SCREEN PASSES WITH THEIR INPUTS MISSING (PHOTON-7 stage 7; a test door, gi.screen_bind): 1 = the screen "
       "integrate and the area visibility's two passes read their inputs as missing and STAND DOWN - every listener-bound "
-      "slot its own stand-in, one group over an idle block that writes nothing, the products the last ones written. "
+      "slot its own stand-in, one group over an idle block that writes nothing, the products the last ones written - "
+      "and the ray tier's gather declines its frame as for a missing input (the last gather registered, F3). "
       "0 = shipped." },
     { ArmId::GiScreenShaderCold, 0.0, 0.0, 1.0,
       "THE NO-RAY SCREEN PASSES' SHADERS COLD (PHOTON-7 stage 7's read, F2; a test door, gi.screen_bind): each time it "

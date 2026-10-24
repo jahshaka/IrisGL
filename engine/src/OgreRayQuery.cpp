@@ -7531,6 +7531,9 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         if (mGather && mGather->holds(key)) mGather->forget(key);
         return;
     }
+    // (the test door gi.screenBindMissing: the frame declines as for a missing input - resolveRayJobs registers the
+    // last gather, F3)
+    if (arm(ArmId::GiScreenBindMissing, false)) return;
     SceneAs *saP = asOf(scene);
     if (!saP) return;
     SceneAs &sa = *saP;
@@ -9972,7 +9975,13 @@ void RayQueryTier::resolveRayJobs(const ReflectPassListener *key, OgreView *view
     if (hv.live) recordHitComposite(key);
     hv.live = false;
     finishReflect(key);
-    if (mGather) mGather->finish(key);
+    if (mGather) {
+        mGather->finish(key);
+        // A DECLINED FRAME OF A GATHERING CHAIN draws the last gather (F3): the pass's ambient is compiled out by the
+        // chain's flag, and a pass with no diffuse product would draw no indirect light for the frame
+        const Ogre::TextureGpu *t = next->getAnyTargetTexture();
+        if (view->chainDesc().probeGather && t) mGather->holdLast(key, t->getWidth(), t->getHeight(), t->getNumSlices());
+    }
     finishSunContact(key);
     finishAreaVis(key);
 }

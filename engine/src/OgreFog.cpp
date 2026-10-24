@@ -28,6 +28,8 @@
 #include "photon/voxel/PhotonIrradianceField.h"
 #include "photon/voxel/PhotonVoxelLighting.h"
 #include <CommandBuffer/OgreCbShaderBuffer.h>
+#include <Compositor/Pass/OgreCompositorPass.h>
+#include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <OgreRootLayout.h>
 #include <CommandBuffer/OgreCbTexture.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
@@ -536,6 +538,18 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     pb.probeGatherSampler = nullptr;
     pb.roughSpec = nullptr;
     pb.coneHit = nullptr;
+    // THE CHAIN'S SCREEN-GI FLAG (PHOTON-7 stage 7's read, F3): a colour pass that shades with the prepass and reads
+    // no world cache (OgreChain.cpp: mJahReadsGi false on a screen-GI chain's opaque pass and its decode, L4) compiles
+    // upstream's ambient out whether or not a producer registered this frame (JahProbeGather_piece_ps.any). From the
+    // registration alone, a frame the gather declined (no TLAS, a stereo view without its eyes, a missing prepass
+    // texture, failed pipelines) drew the sky's SH on every pixel, unoccluded, through walls (L9).
+    if (hlms && !casterPass && sceneManager) {
+        const Ogre::CompositorPass *current = sceneManager->getCurrentCompositorPass();
+        const Ogre::CompositorPassDef *def = current ? current->getDefinition() : nullptr;
+        if (def && def->getType() == Ogre::PASS_SCENE && !def->mJahReadsGi &&
+            static_cast<const Ogre::CompositorPassSceneDef *>(def)->mPrePassMode == Ogre::PrePassUse)
+            hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_screen_gi_pass", 1);
+    }
     if (rec && rec->probeGather.irradiance) {
         Ogre::TextureGpu *gather = rec->probeGather.irradiance;
         if (gather) {

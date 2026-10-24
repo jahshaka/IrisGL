@@ -89,8 +89,10 @@
 // its specular). A pass that reads the gather binds no world cache (7-5: the gather is its diffuse, the integrate composes
 // the field and the field's own environment fallback where no probe answered, 7-2), so the gate is gone with the cone and
 // the SH would add the sky's irradiance, unoccluded, on top of the gather that already carries it (its rays escape to the
-// sky). On a pass that reads the gather the piece is compiled out whole: one diffuse term a pixel.
-@property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
+// sky). On a pass that reads the gather the piece is compiled out whole: one diffuse term a pixel - and on EVERY pass of
+// a screen-GI chain (jah_screen_gi_pass, the chain's own flag: OgreFog.cpp), whether or not a producer registered this
+// frame: a frame the gather declined drew the sky's SH unoccluded, through walls (PHOTON-7 stage 7's read, F3).
+@property( (jah_probe_gather || jah_screen_gi_pass) && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 	@undefpiece( DoAmbientLighting )
 @end
 

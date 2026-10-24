@@ -375,6 +375,11 @@ public:
     /// frame already produced — re-registered, nothing recorded, no history stepped.
     /// False when the view recorded nothing this frame.
     bool rebindThisFrame(const void *key);
+    /// A FRAME THE VIEW'S GATHER DECLINED (PHOTON-7 stage 7's read, F3: no TLAS, a missing prepass texture, the
+    /// pipelines failed): the LAST irradiance and rough specular it produced are registered for the pass - the
+    /// target's size and layers, nothing recorded, no history stepped. False when it has none of that shape or
+    /// recorded this frame.
+    bool holdLast(const void *key, unsigned w, unsigned h, unsigned layers);
     /// A view's listener is going away, or its scene has disarmed.
     void forget(const void *key);
     /// The last frame's numbers for a scene.

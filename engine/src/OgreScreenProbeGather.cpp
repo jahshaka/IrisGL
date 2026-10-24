@@ -957,6 +957,26 @@ bool ScreenProbeGather::rebindThisFrame(const void *key) {
     return true;
 }
 
+bool ScreenProbeGather::holdLast(const void *key, unsigned w, unsigned h, unsigned layers) {
+    auto it = mViews.find(key);
+    if (it == mViews.end()) return false;
+    View &v = it->second;
+    if (!v.sceneMgr || !v.irradiance || !v.roughSpec || !v.age || v.recordedFrame == mHost.gatherFrameNow()) return false;
+    if (v.w != w || v.h != h || v.layers != layers) return false;
+    Ogre::RenderSystem *rs = mHost.gatherRenderSystem();
+    {
+        Ogre::BarrierSolver &solver = rs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, v.irradiance, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        solver.resolveTransition(trans, v.roughSpec, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        rs->executeResourceTransition(trans);
+    }
+    detail::FogHlmsListener::setProbeGather(v.sceneMgr, { v.irradiance, v.roughSpec });
+    return true;
+}
+
 void ScreenProbeGather::forget(const void *key) {
     auto it = mViews.find(key);
     if (it == mViews.end()) return;
