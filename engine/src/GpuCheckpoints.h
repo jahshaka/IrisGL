@@ -3,7 +3,8 @@
 // (the fork's HlmsCompute::msJahDispatchHook) and every compositor pass marks the command stream
 // (VK_NV_device_diagnostic_checkpoints, requested at the device by the fork's
 // VulkanDevice::msDiagnosticCheckpointsAllowed); after a device loss the last mark each queue's pipeline reached is
-// logged - the dispatch the GPU never finished, named. Off (the default): nothing is requested, nothing marked.
+// logged, with the ring's marks around it. THE HUNG DISPATCH IS THE ONE RIGHT AFTER THE BOTTOM_OF_PIPE MARK (a mark
+// precedes its dispatch: everything before the bottom mark retired). Off (the default): nothing requested or marked.
 // A private header of the engine's Vulkan TUs (no Ogre type; a command buffer travels as a void *).
 #ifndef JAHSHAKA_ENGINE_GPUCHECKPOINTS_H
 #define JAHSHAKA_ENGINE_GPUCHECKPOINTS_H

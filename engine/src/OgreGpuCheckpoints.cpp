@@ -1,8 +1,10 @@
 // THE GPU CHECKPOINTS (GpuCheckpoints.h). Why: a warm launch lost the device (Xid 109, CTX SWITCH TIMEOUT) on ONE
 // dispatch of one frame, and no CPU-side door can name a single hung dispatch - the fence wait that would see it
 // returns DEVICE_LOST. VK_NV_device_diagnostic_checkpoints keeps, per queue, the last mark each pipeline stage
-// reached; read after the loss, the mark at the top of the pipe past the last one at its bottom is the dispatch that
-// never finished.
+// reached. A mark PRECEDES its dispatch; BOTTOM_OF_PIPE holds the last mark whose preceding work has ALL RETIRED and
+// TOP_OF_PIPE the last mark the front end processed - so THE HUNG DISPATCH IS THE ONE RIGHT AFTER THE BOTTOM_OF_PIPE
+// MARK, named by that mark (the work between it and the TOP mark was issued and never retired; a dispatch after the
+// TOP mark waits behind its barrier).
 #include "GpuCheckpoints.h"
 
 #include "OgreVulkanDevice.h"
