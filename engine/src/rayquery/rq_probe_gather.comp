@@ -97,6 +97,9 @@ layout( set = 0, binding = 24 ) uniform sampler3D voxelNrm[kMaxCascades];
 // hit keeps when a mover occludes the rest (jah_rq_hit.glsl).
 layout( set = 0, binding = 32 ) uniform sampler3D voxelDirect[kMaxCascades];
 #define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
+// ...and its BACK side (37, PHOTON-7 stage 7: the direct store holds the two sides; the hit's share reads their mean)
+layout( set = 0, binding = 37 ) uniform sampler3D voxelDirectBack[kMaxCascades];
+#define JAH_VOX_SAMPLE_DIRECT_BACK( c, u, l ) textureLod( voxelDirectBack[c], u, l )
 
 #define JAH_VOX_COUNT       int( p.knobs.w )
 #define JAH_VOX_ORIGIN( c )  p.voxelOrigin[c]

@@ -32,9 +32,11 @@ namespace Ogre
             uint32 width = 0u, height = 0u, depth = 0u;
             uint8 level = 0u;
             bool cellRelative = false;   ///< level 1 of a cell-relative position volume (generate's note)
+            bool meanOfSides = false;    ///< level 1 of a two-sided light store, from its sides' mean (generate's note)
             bool operator<( const Key &o ) const
             {
                 if( cellRelative != o.cellRelative ) return cellRelative < o.cellRelative;
+                if( meanOfSides != o.meanOfSides ) return meanOfSides < o.meanOfSides;
                 if( format != o.format ) return format < o.format;
                 if( width != o.width ) return width < o.width;
                 if( height != o.height ) return height < o.height;
@@ -46,13 +48,13 @@ namespace Ogre
         std::map<Key, HlmsComputeJob *> gPool;
 
         HlmsComputeJob *pooledJob( HlmsManager *hlmsManager, const TextureGpu *texture, uint8 level,
-                                   bool cellRelative )
+                                   bool cellRelative, bool meanOfSides )
         {
             if( gPoolManager && gPoolManager != hlmsManager )
                 PhotonMipChain::releasePool();
             gPoolManager = hlmsManager;
             const Key key = { texture->getPixelFormat(), texture->getWidth(), texture->getHeight(),
-                              texture->getDepth(), level, cellRelative };
+                              texture->getDepth(), level, cellRelative, meanOfSides };
             auto it = gPool.find( key );
             if( it != gPool.end() )
                 return it->second;
@@ -76,6 +78,13 @@ namespace Ogre
                 job->setNumTexUnits( 2u );
                 job->setProperty( "jah_cell_relative", 1 );
             }
+            else if( meanOfSides )
+            {
+                // THE SIDES' MEAN (PhotonMipDown_cs.glsl's jah_mean_of_sides): the other side at slot 1, filtered
+                // with the same sampler
+                job->setNumTexUnits( 2u );
+                job->setProperty( "jah_mean_of_sides", 1 );
+            }
             gPool[key] = job;
             ++gMipJobs;
             return job;
@@ -98,7 +107,7 @@ namespace Ogre
     }
 
     void PhotonMipChain::generate( HlmsManager *hlmsManager, RenderSystem *renderSystem,
-                                   TextureGpu *texture, TextureGpu *cellRelativeCoverage )
+                                   TextureGpu *texture, TextureGpu *cellRelativeCoverage, TextureGpu *meanWith )
     {
         if( !texture || texture->getNumMipmaps() <= 1u )
             return;
@@ -108,7 +117,8 @@ namespace Ogre
         for( uint8 level = 1u; level < numMips; ++level )
         {
             const bool cellRelative = cellRelativeCoverage && level == 1u;
-            HlmsComputeJob *job = pooledJob( hlmsManager, texture, level, cellRelative );
+            const bool meanOfSides = !cellRelative && meanWith && level == 1u;
+            HlmsComputeJob *job = pooledJob( hlmsManager, texture, level, cellRelative, meanOfSides );
 
             DescriptorSetTexture2::TextureSlot texSlot( DescriptorSetTexture2::TextureSlot::makeEmpty() );
             texSlot.texture = texture;
@@ -118,6 +128,11 @@ namespace Ogre
             if( cellRelative )
             {
                 texSlot.texture = cellRelativeCoverage;   // its level 0, the O each child is premultiplied by
+                job->setTexture( 1, texSlot );
+            }
+            else if( meanOfSides )
+            {
+                texSlot.texture = meanWith;   // the other side's level 0
                 job->setTexture( 1, texSlot );
             }
 

@@ -69,7 +69,7 @@
 #define JAH_VOX_SAMPLE_POSN( c, u, l ) textureLod( voxelPosN[c], u, l )
 // LEVEL 0 PER SIDE (PHOTON-VOXEL-5): the back side and the voxeliser's normal, `voxelBack` /
 // `voxelNrm`.
-#define JAH_VOX_HAS_BACK 1
+#define JAH_VOX_PER_SIDE 1
 #define JAH_VOX_SAMPLE_BACK( c, u, l ) textureLod( voxelBack[c], u, l )
 #define JAH_VOX_SAMPLE_NRM( c, u, l ) textureLod( voxelNrm[c], u, l )
 #endif
@@ -212,8 +212,9 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 			// at level 0 (T = D where nothing bounced), while their mip chains are not built
 			// alike - a share read at a coarser level was 2 % of the lit floor's light on shaded
 			// faces with no bounce in the store (spikes/far-sun-2/NOTES.md section 10).
-			const vec4 tIso = JAH_VOX_SAMPLE_ISO( c, lsPick, 0.0 );
-			const vec4 dIso = JAH_VOX_SAMPLE_DIRECT( c, lsPick, 0.0 );
+			// THE SIDES' MEANS (PHOTON-7 stage 7: the store and the direct store hold the two sides).
+			const vec4 tIso = 0.5 * ( JAH_VOX_SAMPLE_ISO( c, lsPick, 0.0 ) + JAH_VOX_SAMPLE_BACK( c, lsPick, 0.0 ) );
+			const vec4 dIso = 0.5 * ( JAH_VOX_SAMPLE_DIRECT( c, lsPick, 0.0 ) + JAH_VOX_SAMPLE_DIRECT_BACK( c, lsPick, 0.0 ) );
 			// ( T - D ) / T, NOT 1 - D / T: at an EMPTY texel (T = D = 0 - the texel picked along
 			// the ray holds nothing and the read's light came through the kernel's other axes) the
 			// share is 0, not 1 (1 handed the whole read back as bounce: 0.02 of the lit floor on
@@ -228,7 +229,12 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 		// rest by the mover visibility jahHitRadianceSourced traced (1 = no mover: exact).
 		if( jahHitIndirectGate < 1.0 )
 		{
-			const vec4 d = JAH_VOX_SAMPLE_DIRECT( c, lsPick, lod );
+			// D's chain is built from the two sides' mean (PhotonMipChain's mean-of-sides first level): level 0 is read as
+			// that mean explicitly, and a read between level 0 and 1 blends the two as the sampler would
+			const vec4 d0 = 0.5 * ( JAH_VOX_SAMPLE_DIRECT( c, lsPick, 0.0 ) + JAH_VOX_SAMPLE_DIRECT_BACK( c, lsPick, 0.0 ) );
+			const vec4 d = lod <= 0.0 ? d0
+							: ( lod < 1.0 ? mix( d0, JAH_VOX_SAMPLE_DIRECT( c, lsPick, 1.0 ), lod )
+										  : JAH_VOX_SAMPLE_DIRECT( c, lsPick, lod ) );
 			const vec3 dRad = d.w > 1e-4 ? d.xyz / d.w : vec3( 0.0 );
 			rad -= ( 1.0 - jahHitIndirectGate ) * max( rad - dRad, vec3( 0.0 ) );
 		}

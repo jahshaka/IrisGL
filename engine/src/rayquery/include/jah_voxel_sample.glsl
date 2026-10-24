@@ -18,10 +18,11 @@
 // HOW A CALLER BINDS IT. The shader's bindings are its own; this file reads the
 // volumes through macros the caller defines before it:
 //
-//     JAH_VOX_SAMPLE_ISO(c,u,l)  vec4: cascade c's total at uvw u - level 0 (the mean of a
-//                                voxel's two sides), the only level a light read takes
-//                                from it (its coarse levels exist only for the specular
-//                                SDF skip, jah_voxel_march.glsl)
+//     JAH_VOX_SAMPLE_ISO(c,u,l)  vec4: cascade c's FRONT side at uvw u (PHOTON-7 stage 7: the
+//                                store holds the two SIDES; the total is their mean, taken at
+//                                the read) - level 0 the only level a light read takes from it
+//                                (its coarse levels exist only for the specular SDF skip, which
+//                                reads their opacity w alone, jah_voxel_march.glsl)
 //     JAH_VOX_SAMPLE_X(c,u,l)    vec4: the X-axis directional volume (both
 //     JAH_VOX_SAMPLE_Y(c,u,l)    signs packed side by side along u.x, so u.x
 //     JAH_VOX_SAMPLE_Z(c,u,l)    runs over [0, 1) and the halves are 0.5 apart) - every
@@ -35,14 +36,20 @@
 //                                every placement), every coarser level p absolute in the cascade's
 //                                normalised space; the readers below add a level-0 texel's cell
 //     JAH_VOX_INVRES(c)          vec3: 1 / cascade c's resolution, per axis
-//     JAH_VOX_HAS_BACK           0 or 1, a PREPROCESSOR constant (PHOTON-VOXEL-5): the level-0
-//                                BACK side and the voxeliser's normal are bound (the bounce job
-//                                reads the sides' mean and binds neither):
-//     JAH_VOX_SAMPLE_BACK(c,u,l) vec4: level 0's back side (premultiplied like the isotropic
-//                                volume, which holds the two sides' MEAN - the front is twice
-//                                the mean minus the back); VctLighting::backIndex()
+//     JAH_VOX_SAMPLE_BACK(c,u,l) vec4: level 0's BACK side (premultiplied like the front, the same
+//                                opacity w); VctLighting::backIndex(). Bound by EVERY reader.
+//     JAH_VOX_PER_SIDE           0 or 1, a PREPROCESSOR constant (PHOTON-VOXEL-5): 1, a level-0 read
+//                                takes the SIDE its travel meets (the normal below is bound); 0, it
+//                                takes the sides' MEAN (the bounce's gather, whose isotropic read the
+//                                per-side physics leaves to VOXEL-LEAK-1)
 //     JAH_VOX_SAMPLE_NRM(c,u,l)  vec4: the voxeliser's normal (xyz biased, the canonical normal of a
 //                                two-sided voxel: the front is the side it points to); normalIndex()
+//                                - bound where JAH_VOX_PER_SIDE is 1
+// WHY THE SIDES ARE STORED AND THE MEAN DERIVED (PHOTON-7 stage 7, gi.field_oracle (1)): a side derived as
+// twice the stored mean minus the stored back, both half floats, cancels catastrophically where it is dim
+// beside a bright other side (its absolute precision ~2^-10 of the mean): a lamp step's rest read the
+// derived fronts up to 9 codes apart between two paths to the same world (50 in cascade 1) with every
+// stored value within a code. A mean of two positives never amplifies a relative error.
 //
 // THE VOLUME'S DIRECTIONAL READ IS THE ONLY RULE HERE — ONE RULE AT EVERY MIP AND EVERY TIER
 // (PHOTON-VOXEL-3; PHOTON-MARCH-1): a step takes the opacity of what it crosses, per axis,
@@ -59,8 +66,8 @@
 #ifndef JAH_VOXEL_SAMPLE_GLSL
 #define JAH_VOXEL_SAMPLE_GLSL
 
-#ifndef JAH_VOX_HAS_BACK
-#define JAH_VOX_HAS_BACK 0
+#ifndef JAH_VOX_PER_SIDE
+#define JAH_VOX_PER_SIDE 0
 #endif
 
 /// THE LEVEL A READ TAKES FOR A FOOTPRINT 2^lod CELLS WIDE: the level whose TRILINEAR
@@ -338,25 +345,26 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 	}
 	else
 	{
-		// LEVEL 0 (the only level a light read takes from the total; `mip` is 0 here)
+		// LEVEL 0 (the only level a light read takes from the sides; `mip` is 0 here): the front and the back,
+		// stored (the header's why)
 		vec4 s = JAH_VOX_SAMPLE_ISO( c, posLS, 0.0 );
-#if JAH_VOX_HAS_BACK
+		const vec4 bk = JAH_VOX_SAMPLE_BACK( c, posLS, 0.0 );
+#if JAH_VOX_PER_SIDE
 		// LEVEL 0 PER SIDE (PHOTON-VOXEL-5): a voxel holding both faces of a slab thinner than the
-		// cell keeps two lights - the isotropic volume their mean, the back beside it - and the
-		// travel meets the side its canonical normal FACES (BUGS-1 item 4: the sign of n . -dir,
-		// the whole normal against the whole direction; the normal's component along the travel's
-		// dominant axis alone read a +y normal met along x as the MEAN): facing the travel the
-		// front (twice the mean minus the back), facing away the back. A one-sided voxel's back IS
-		// its light, so either answer is its light. The normal is read filtered like the light
-		// (the canonical normal of a two-sided voxel agrees between neighbours: VoxelMerge_piece_cs.any).
+		// cell keeps two lights, and the travel meets the side its canonical normal FACES (BUGS-1 item
+		// 4: the sign of n . -dir, the whole normal against the whole direction; the normal's component
+		// along the travel's dominant axis alone read a +y normal met along x as the MEAN): facing the
+		// travel the front, facing away the back, edge-on their mean. A one-sided voxel holds its light
+		// on both sides, so every answer is its light. The normal is read filtered like the light (the
+		// canonical normal of a two-sided voxel agrees between neighbours: VoxelMerge_piece_cs.any).
+		// Three fetches and selects, no branch (a dependent fetch would cost every plane of every march).
 		{
-			const vec4 bk = JAH_VOX_SAMPLE_BACK( c, posLS, 0.0 );
 			const float along = dot( JAH_VOX_SAMPLE_NRM( c, posLS, 0.0 ).xyz * 2.0 - 1.0, -dir );
-			if( along < 0.0 )
-				s.xyz = bk.xyz;
-			else if( along > 0.0 )
-				s.xyz = max( 2.0 * s.xyz - bk.xyz, vec3( 0.0 ) );
+			s.xyz = along < 0.0 ? bk.xyz : ( along > 0.0 ? s.xyz : 0.5 * ( s.xyz + bk.xyz ) );
 		}
+#else
+		// THE SIDES' MEAN (the bounce's isotropic gather)
+		s.xyz = 0.5 * ( s.xyz + bk.xyz );
 #endif
 		// a ray takes both halves (any face it crosses stops it), a cone the one looking back
 		const float oBack = jahVoxelCov( c, ha, posLS, 0.0 )[axis];

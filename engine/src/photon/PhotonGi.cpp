@@ -1369,24 +1369,39 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
             double    sum = 0.0;
             long long lit = 0, atMax = 0, aboveOne = 0, count = 0;
         };
-        const auto walk = [&](Ogre::TextureGpu *tex, Walk &w) -> bool {
+        // (PHOTON-7 stage 7: a light store holds two sides; `other`, when given, is the second and every texel the
+        // walk counts is their mean - the total a reader takes)
+        const auto walk = [&](Ogre::TextureGpu *tex, Walk &w, Ogre::TextureGpu *other = nullptr) -> bool {
             const Ogre::PixelFormatGpu fmt = tex->getPixelFormat();
             const bool isHalf = (fmt == Ogre::PFG_RGBA16_FLOAT);
             const bool isByte = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB || fmt == Ogre::PFG_RGBA8_UNORM);
             if (!isHalf && !isByte) return false;
             const bool decodeSrgb = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB);
+            if (other && (other->getPixelFormat() != fmt || other->getWidth() != tex->getWidth() ||
+                          other->getHeight() != tex->getHeight() || other->getDepth() != tex->getDepth() || !isHalf))
+                return false;
             Ogre::AsyncTextureTicket *ticket = tm->createAsyncTextureTicket(
                 tex->getWidth(), tex->getHeight(), tex->getDepth(),
                 Ogre::TextureTypes::Type3D, fmt);
+            Ogre::AsyncTextureTicket *ticketOther =
+                other ? tm->createAsyncTextureTicket(tex->getWidth(), tex->getHeight(), tex->getDepth(),
+                                                     Ogre::TextureTypes::Type3D, fmt)
+                      : nullptr;
             bool ok = false;
             // A plain try here, not JAH_CATCH: the macro RETURNS, and the
             // ticket below it must be destroyed on every path.
             try {
                 ticket->download(tex, 0u, true);
                 const Ogre::TextureBox box = ticket->map(0);
+                Ogre::TextureBox boxOther;
+                if (ticketOther) {
+                    ticketOther->download(other, 0u, true);
+                    boxOther = ticketOther->map(0);
+                }
                 for (Ogre::uint32 z = 0; z < tex->getDepth(); ++z) {
                     for (Ogre::uint32 y = 0; y < tex->getHeight(); ++y) {
                         const void *row = box.at(0, y, z);
+                        const void *rowOther = ticketOther ? boxOther.at(0, y, z) : nullptr;
                         for (Ogre::uint32 x = 0; x < tex->getWidth(); ++x) {
                             float c[3];
                             bool top = false;
@@ -1394,6 +1409,11 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
                                 const Ogre::uint16 *p =
                                     reinterpret_cast<const Ogre::uint16 *>(row) + size_t(x) * 4u;
                                 for (int i = 0; i < 3; ++i) c[i] = Ogre::Bitwise::halfToFloat(p[i]);
+                                if (rowOther) {
+                                    const Ogre::uint16 *q =
+                                        reinterpret_cast<const Ogre::uint16 *>(rowOther) + size_t(x) * 4u;
+                                    for (int i = 0; i < 3; ++i) c[i] = 0.5f * (c[i] + Ogre::Bitwise::halfToFloat(q[i]));
+                                }
                             } else {
                                 const Ogre::uint8 *p =
                                     reinterpret_cast<const Ogre::uint8 *>(row) + size_t(x) * 4u;
@@ -1421,15 +1441,17 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
                     }
                 }
                 ticket->unmap();
+                if (ticketOther) ticketOther->unmap();
                 ok = true;
             } catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
               catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
             tm->destroyAsyncTextureTicket(ticket);
+            if (ticketOther) tm->destroyAsyncTextureTicket(ticketOther);
             return ok;
         };
 
         Walk wt;
-        if (!walk(total, wt)) return st;
+        if (!walk(total, wt, lighting->getLightVoxelTextures()[lighting->backIndex()])) return st;
         st.available = true;
         st.width  = int(total->getWidth());
         st.height = int(total->getHeight());
@@ -1530,7 +1552,7 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
         // (was 0076)'s D term). Its peak is the normalisation's own self-check.
         if (Ogre::TextureGpu *direct = lighting->getLightDirectTexture()) {
             Walk wd;
-            if (walk(direct, wd)) {
+            if (walk(direct, wd, lighting->getLightDirectBackTexture())) {   // (its two sides' mean)
                 st.peakDirect = wd.peak;
                 st.directAtMax = wd.atMax;
             }
@@ -1679,8 +1701,19 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, bool lig
             for (int k = 0; k < 3; ++k) { out.origin[k] = o[size_t(k)]; out.cell[k] = c[size_t(k)]; }
             out.available = true;
         };
-        if (!grab(total, out.light)) return false;
-        if (lightOnly) {   // Scene::giVoxelLight: the total alone
+        // THE TWO SIDES, THE TOTAL THEIR MEAN (PHOTON-7 stage 7: the store holds the front and the back): `lightFront`
+        // and `lightBack` as stored, `light` derived exactly as a reader takes it
+        {
+            Ogre::TextureGpu *backTex = lighting->getLightVoxelTextures()[lighting->backIndex()];
+            std::vector<float> backVals;
+            if (!backTex || !grab(total, out.lightFront) || !grab(backTex, backVals) ||
+                backVals.size() != out.lightFront.size())
+                return false;
+            out.light.resize(out.lightFront.size());
+            for (size_t i = 0; i < out.light.size(); ++i) out.light[i] = 0.5f * (out.lightFront[i] + backVals[i]);
+            out.lightBack = std::move(backVals);
+        }
+        if (lightOnly) {   // Scene::giVoxelLight: the total alone (and the two sides it came from)
             placement();
             return true;
         }
@@ -1688,13 +1721,11 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, bool lig
             !grab(coverage[1], out.coverageN) || !grab(position[0], out.positionP) ||
             !grab(position[1], out.positionN))
             return false;
-        // PHOTON-VOXEL-5: level 0's back side and the voxelizer's normal (every tier).
-        out.lightBack.clear();
+        // PHOTON-VOXEL-5: the voxelizer's normal (every tier; level 0's back side was taken with the front, above).
         out.normal.clear();
         {
-            Ogre::TextureGpu *back = lighting->getLightVoxelTextures()[lighting->backIndex()];
             Ogre::TextureGpu *nrm = voxelizer->getNormalVox();
-            if (!back || !nrm || !grab(back, out.lightBack) || !grab(nrm, out.normal)) return false;
+            if (!nrm || !grab(nrm, out.normal)) return false;
         }
         // ENGINE-UPGRADE-U5 (decision 11 g): the emissive, and the build's raw integers.
         if (!grab(voxelizer->getEmissiveVox(), out.emissive)) return false;
@@ -6791,6 +6822,21 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
     }
     const Ogre::uint32 pool = mJacobiOn ? budget : (floorsSum < budget ? budget - floorsSum : 0u);
     Ogre::PhotonVoxelLighting *chain = mVctCascades.empty() ? nullptr : mVctCascades[0].lighting;
+    // THE CHAIN'S BACK SCRATCH (PHOTON-7 stage 7, PhotonVoxelLighting::ensureBackScratch): a cascade's pass lists at most its
+    // floor and the pool - the frame's count - and never more than its own bricks, so rows for the smaller of the count and
+    // the largest cascade's bricks hold every list (the Jacobi door's unbudgeted pass: a whole cascade). Before the
+    // selections: the texture never changes between a frame's dispatches.
+    if (chain) {
+        unsigned long long largest = 0ull;
+        for (const VctCascade &c : mVctCascades)
+            if (c.lighting && c.built) {
+                const unsigned long long b = (unsigned long long)((c.resolution + 7) / 8);
+                largest = std::max(largest, b * b * b);
+            }
+        JAH_TRY {
+            chain->ensureBackScratch(Ogre::uint32(std::min<unsigned long long>(budget, largest)));
+        } JAH_CATCH(mError, );
+    }
     // (the test door gi.feedbackCarriedRoute: a brick its injection moved this frame is carried, never passed, and the
     // stopped bricks accumulate the carried section alone)
     const bool carriedRoute = mEngine && mEngine->armRegistry().value(ArmId::GiFeedbackCarriedRoute) >= 1.0;

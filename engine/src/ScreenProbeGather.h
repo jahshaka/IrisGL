@@ -94,6 +94,9 @@ inline bool isCameraCut(const float *prevPos, const float *prevRight, const floa
 /// HOW MANY CASCADES THE HIT SHADING READS — the shaders' `kMaxCascades`, and
 /// the two must agree.
 constexpr unsigned kGatherMaxCascades = 4u;
+/// The volumes per cascade the trace binds (the reflection's kRayVoxelKinds' order): the front, X, Y, Z, coverage +/-,
+/// position +/-, the back, the normal, the direct term's front and its back (PHOTON-7 stage 7).
+constexpr unsigned kGatherVoxelKinds = 12u;
 /// The octahedral probe map is at most 8x8, because one ray is one thread of
 /// the trace's 8x8 workgroup (the shaders' `kOctResMax`).
 constexpr unsigned kGatherOctResMax = 8u;
@@ -216,7 +219,8 @@ struct GatherInputs {
     /// 1..3 the directional chains, 4/5 the coverage per half-axis (+a, -a), 6/7 the
     /// surface position per half (by name, RQ-COV-SLOT-1 / PHOTON-VOXEL-4), 8 level 0's back
     /// side and 9 the voxelizer's normal (PHOTON-VOXEL-5).
-    Ogre::TextureGpu *voxel[kGatherMaxCascades][11] = {};   // ...[10] the direct term (MOVER-OCCLUSION-1)
+    // ...[10] the direct term's front (MOVER-OCCLUSION-1), [11] its back (PHOTON-7 stage 7: the stores hold two sides)
+    Ogre::TextureGpu *voxel[kGatherMaxCascades][kGatherVoxelKinds] = {};
     float voxelOrigin[kGatherMaxCascades][3] = {};
     float voxelSize[kGatherMaxCascades][3] = {};
     float voxelCell[kGatherMaxCascades] = {};

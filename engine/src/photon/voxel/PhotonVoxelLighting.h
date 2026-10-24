@@ -139,8 +139,9 @@ namespace Ogre
         ///
         /// Jahshaka (PHOTON-VOXEL-5): two more follow - mLightVoxel[8],
         /// level 0's BACK side (owned; backIndex()), and mLightVoxel[9], the voxelizer's NORMAL
-        /// (not owned; normalIndex()): level 0 holds the MEAN of a voxel's two sides
-        /// (mLightVoxel[0]) and its back, and the normal says which side a half-axis's faces look
+        /// (not owned; normalIndex()): level 0 holds a voxel's two SIDES - its front (mLightVoxel[0]; PHOTON-7 stage 7,
+        /// which stopped deriving a side from a stored mean) and its back - the total their mean taken at the read,
+        /// and the normal says which side a half-axis's faces look
         /// to. The directional volumes' level 0 is composited by the light injection itself from
         /// each voxel's light PER HALF-AXIS (the fused step 0).
         TextureGpu             *mLightVoxel[10];
@@ -176,6 +177,15 @@ namespace Ogre
         /// copied back into mLightVoxel[0] - the textures' identities never change (the old ping-pong swapped them and
         /// every reader had to be rebound).
         TextureGpu     *mLightBounce;
+        /// PHOTON-7 stage 7: THE BACK SIDE'S BOUNCE SCRATCH, owned by the chain's INNERMOST cascade and shared by the
+        /// chain (each cascade's bounce and its copy-back run in turn): a 2D RGBA16F image, 512 texels wide (a brick's
+        /// voxels, x + 8 y + 64 z) and one row per brick a cascade's pass can list - the frame's brick-pass count
+        /// (GiQualityFacts::lightWorkFrames' budget), at most a cascade's own bricks (ensureBackScratch). The back cannot
+        /// be written in place: the bounce's gather reads the backs (the sides' mean).
+        TextureGpu     *mBackScratch = nullptr;
+        uint32          mBackScratchBricks = 0u;
+        /// the chain's innermost cascade, as the frame's selection named it (feedbackSelect): its scratch is the one bound
+        PhotonVoxelLighting *mFeedbackChain = nullptr;
 
         /// THE FEEDBACK (PHOTON-7 stage 4; PhotonBrickFeedback_cs.glsl): the bricks' solver state (kFbWords a brick, two
         /// buffers - a scroll commit's SHIFT reads one and writes the other), the frame's list of ACTIVE bricks, the
@@ -503,6 +513,17 @@ namespace Ogre
         void feedbackSelect( const PhotonFeedbackActivation &activation, PhotonVoxelLighting *chain, uint32 chainIndex,
                              bool first, uint32 budget, uint32 floor );
         void feedbackRun();
+        /// THE CHAIN'S BACK SCRATCH (PHOTON-7 stage 7; on the innermost cascade): rows for at least `bricks` listed bricks
+        /// (the host's frame count, at most the largest cascade's bricks), created or grown once a frame BEFORE the
+        /// selections - never resized between a cascade's dispatches.
+        void ensureBackScratch( uint32 bricks );
+        /// the scratch this cascade's pass writes: the chain's (its innermost cascade's)
+        TextureGpu *backScratch() const
+        {
+            return mFeedbackChain && mFeedbackChain->mBackScratch ? mFeedbackChain->mBackScratch : mBackScratch;
+        }
+        /// its rows (a test door's reading: the memory stated)
+        uint32 backScratchBricks() const { return mBackScratchBricks; }
         void feedbackAccumulate( const PhotonVoxelLighting *source );
         void feedbackEnd( uint64 frame );
         /** A SCROLL COMMIT'S STATE (PHOTON-7 stage 4): the store moved so that the new cell n holds the old cell n +

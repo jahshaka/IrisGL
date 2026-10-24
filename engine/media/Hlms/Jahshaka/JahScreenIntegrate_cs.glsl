@@ -162,7 +162,7 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_VOX_SAMPLE_X( c, u, l ) textureLod( sampler3D( vctProbeX[c], vSmp ), u, l )
 	#define JAH_VOX_SAMPLE_Y( c, u, l ) textureLod( sampler3D( vctProbeY[c], vSmp ), u, l )
 	#define JAH_VOX_SAMPLE_Z( c, u, l ) textureLod( sampler3D( vctProbeZ[c], vSmp ), u, l )
-	#define JAH_VOX_HAS_BACK 1
+	#define JAH_VOX_PER_SIDE 1
 	#define JAH_VOX_SAMPLE_BACK( c, u, l ) textureLod( sampler3D( vctProbeBack[c], vSmp ), u, l )
 	#define JAH_VOX_SAMPLE_NRM( c, u, l ) textureLod( sampler3D( vctProbeNrm[c], vSmp ), u, l )
 	#define JAH_VOX_INVRES( c ) p.chainInvRes[c].xyz

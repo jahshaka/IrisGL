@@ -264,7 +264,7 @@ constexpr unsigned kReflectRestMovers = 16u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 48u;
+constexpr unsigned kReflectBindings = 49u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -286,9 +286,9 @@ constexpr unsigned kReflectHitBinding = 25u;
 /// level-0 read takes the side of a two-sided voxel its ray meets.
 constexpr unsigned kReflectSideBinding = 29u;
 constexpr unsigned kReflectSideKinds = 2u;
-/// The volumes per cascade the ray programs bind: iso, X, Y, Z, coverage +/-, position +/-,
-/// back, normal (PHOTON-VOXEL-5), the direct term (MOVER-OCCLUSION-1).
-constexpr int kRayVoxelKinds = 11;
+/// The volumes per cascade the ray programs bind: the front (PHOTON-7 stage 7: the store holds the two sides), X, Y, Z,
+/// coverage +/-, position +/-, back, normal (PHOTON-VOXEL-5), the direct term's front (MOVER-OCCLUSION-1) and its back.
+constexpr int kRayVoxelKinds = 12;
 /// ...then THE CARD READ'S VIEW TERM (PHOTON-CARDS-5): the surface cache's
 /// Indirect, Flat, ShadowRough, Albedo, Normal and Specular layers and the sun's visibility (PHOTON-3) (31-37,
 /// jah_rq_card_bindings.glsl at JAH_CARD_VIEW_BINDING_BASE 31) — the read
@@ -326,8 +326,11 @@ constexpr unsigned kReflectReferenceBinding = kReflectSampleBinding + 1u;
 /// ...and THE REST'S SECOND MOMENT (47, PHOTON-2 rev 12, P1): R16F, the root mean square of the luma of each texel's
 /// rest samples - the standard error the rest's stop and the filter's reach at rest read (2 bytes a trace texel).
 constexpr unsigned kReflectMomentBinding = kReflectReferenceBinding + 1u;
-static_assert(kReflectBindings == kReflectMomentBinding + 1u,
-              "the rest's second moment is the reflection set's last binding");
+/// ...and THE DIRECT TERM's BACK side per cascade (48, PHOTON-7 stage 7: the direct store holds the two sides, and the
+/// hit's share and its mover gate read their mean - jah_rq_hit.glsl).
+constexpr unsigned kReflectDirectBackBinding = kReflectMomentBinding + 1u;
+static_assert(kReflectBindings == kReflectDirectBackBinding + 1u,
+              "the direct term's back side is the reflection set's last binding");
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's mean and
 /// distance, the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the
@@ -5439,6 +5442,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 45 this frame's raw sample (PHOTON-2 1b)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 46 the rest's reference (PHOTON-2 round 2, R1 (f))
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 47 the rest's second moment (PHOTON-2 rev 12, P1)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 48 voxelDirectBack[] (PHOTON-7 stage 7)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -5457,7 +5461,7 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
             ((i >= 10u && i <= 13u) ||
              (i >= kReflectCovBinding && i < kReflectCovBinding + kReflectSplitKinds) ||
              (i >= kReflectSideBinding && i < kReflectSideBinding + kReflectSideKinds) ||
-             i == kReflectDirectBinding)
+             i == kReflectDirectBinding || i == kReflectDirectBackBinding)
                 ? kMaxReflectCascades : 1u;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
@@ -5851,8 +5855,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         }
         vox[voxCount][8] = tex[lighting->backIndex()];
         vox[voxCount][9] = tex[lighting->normalIndex()];
-        // MOVER-OCCLUSION-1: the direct term's volume, or the total (no share to gate).
+        // MOVER-OCCLUSION-1: the direct term's volume, or the light store (no share to gate) - its front and its back
         vox[voxCount][10] = lighting->getLightDirectTexture() ? lighting->getLightDirectTexture() : tex[0];
+        vox[voxCount][11] = lighting->getLightDirectBackTexture() ? lighting->getLightDirectBackTexture()
+                                                                   : tex[lighting->backIndex()];
         voxOrigin[voxCount] = voxelizer->getVoxelOrigin();
         voxSize[voxCount]   = voxelizer->getVoxelSize();
         voxCell[voxCount]   = voxelizer->getVoxelCellSize();
@@ -6569,6 +6575,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     w[kReflectDirectBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[kReflectDirectBinding].descriptorCount = kMaxReflectCascades;
     w[kReflectDirectBinding].pImageInfo = volumes[10];
+    w[kReflectDirectBackBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[kReflectDirectBackBinding].descriptorCount = kMaxReflectCascades;
+    w[kReflectDirectBackBinding].pImageInfo = volumes[11];
     // THE AIR'S TABLE (39): the passes', or the volume stand-in while they read none.
     VkDescriptorImageInfo fogImg{};
     fogImg.sampler = mLinearSampler;
@@ -7706,6 +7715,8 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         in.voxel[c][8] = tex[lighting->backIndex()];
         in.voxel[c][9] = tex[lighting->normalIndex()];
         in.voxel[c][10] = lighting->getLightDirectTexture() ? lighting->getLightDirectTexture() : tex[0];
+        in.voxel[c][11] = lighting->getLightDirectBackTexture() ? lighting->getLightDirectBackTexture()
+                                                                 : tex[lighting->backIndex()];
         const Ogre::Vector3 og = voxelizer->getVoxelOrigin();
         const Ogre::Vector3 sz = voxelizer->getVoxelSize();
         const Ogre::Vector3 cl = voxelizer->getVoxelCellSize();

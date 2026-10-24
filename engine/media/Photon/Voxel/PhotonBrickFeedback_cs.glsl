@@ -71,7 +71,14 @@
 	uniform restrict readonly image3D fbFrom;
 	layout( vulkan( ogre_u1 ) vk_comma @insertpiece(uav1_pf_type) )
 	uniform restrict writeonly image3D fbTo;
-	layout( std430, ogre_U2 ) restrict readonly buffer fbListLayout { uint fbList[]; };
+	// PHOTON-7 stage 7: THE BACK SIDE'S NEW VALUE, from the chain's compact scratch (the bounce pass's u1: one row a
+	// listed brick, its list slot - one texel a voxel, x + 8 y + 64 z) onto the back over the same bricks. (The images
+	// take the slots before the list: the job's root layout keeps each kind of UAV contiguous.)
+	layout( vulkan( ogre_u2 ) vk_comma rgba16f )
+	uniform restrict readonly image2D fbBackScratch;
+	layout( vulkan( ogre_u3 ) vk_comma rgba16f )
+	uniform restrict writeonly image3D fbBackTo;
+	layout( std430, ogre_U4 ) restrict readonly buffer fbListLayout { uint fbList[]; };
 @else
 	layout( std430, ogre_U0 ) restrict coherent buffer fbStateLayout { uint fbState[]; };
 	layout( std430, ogre_U1 ) restrict coherent buffer fbMaskLayout { uint fbMask[]; };
@@ -150,6 +157,9 @@ void main()
 	const uint sub = gl_WorkGroupID.x;
 	const uint3 cell = brick * 8u + uint3( sub & 1u, ( sub >> 1u ) & 1u, sub >> 2u ) * 4u + gl_LocalInvocationID.xyz;
 	imageStore( fbTo, int3( cell ), imageLoad( fbFrom, int3( cell ) ) );
+	imageStore( fbBackTo, int3( cell ),
+				imageLoad( fbBackScratch, int2( int( ( cell.x & 7u ) + 8u * ( cell.y & 7u ) + 64u * ( cell.z & 7u ) ),
+												int( gl_WorkGroupID.y ) ) ) );
 @else
 	const uint mode = fbDims.w;
 	const uint numBricks = fbDims.x * fbDims.y * fbDims.z;

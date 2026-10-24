@@ -11,6 +11,7 @@
 	#define JAH_VOX_SAMPLE_X( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
 	#define JAH_VOX_SAMPLE_Y( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
 	#define JAH_VOX_SAMPLE_Z( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
+	#define JAH_VOX_SAMPLE_BACK( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
 	#define JAH_VOX_SAMPLE_COVP( c, u, l ) OGRE_SampleLevel( chainCovP[c], voxelAlbedoSampler, u, l )
 	#define JAH_VOX_SAMPLE_COVN( c, u, l ) OGRE_SampleLevel( chainCovN[c], voxelAlbedoSampler, u, l )
 	#define JAH_VOX_SAMPLE_POSP( c, u, l ) OGRE_SampleLevel( chainPosP[c], voxelAlbedoSampler, u, l )
@@ -674,21 +675,24 @@
 			}
 		}
 	}
-	// a one-sided voxel's two sides are its one light
+	// a one-sided voxel's two sides are its one light (today's isotropic semantics, kept: the per-side physics of a
+	// one-sided wall is VOXEL-LEAK-1's)
 	if( !twoSided )
 		back = front;
 
 	const float3 emissive = emissiveVal.xyz;
 	wshort3 voxelCelUvw = wshort3( jahInjCell );
-	// LEVEL 0 HOLDS THE SIDES' MEAN (a one-sided voxel's light unchanged; the bounce's march reads
-	// it) and the back side beside it (backVoxel, below).
-	float4 injectedVoxel = float4( ( ( front + back ) * 0.5f + emissive ) * c, c );
+	// LEVEL 0 HOLDS THE TWO SIDES (PHOTON-7 stage 7): the FRONT here (lightVoxel and its direct copy) and the back
+	// beside it (backVoxel, below) - their mean is taken at the read, never a side derived from a stored mean
+	// (jah_voxel_sample.glsl says why). A one-sided voxel writes its one light to both.
+	float4 injectedVoxel = float4( ( front + emissive ) * c, c );
 	const float4 backVoxelVal = float4( ( back + emissive ) * c, c );
 @property( jah_inject_delta )
 	// THE DELTA (PHOTON-7 stage 2; PREFLIGHT_1_2 W1): at a scroll's commit the direct term REPLACES ITS OLD SELF inside
-	// the total and the back - total += D_new - D_old, back += Db_new - Db_old - so whatever the bounces built over it
-	// is kept, and a voxel whose direct did not change keeps every bit (its total and back are not written). A slab
-	// voxel's old terms are the shift's cleared zeros: its total becomes D_new.
+	// each side - front += Df_new - Df_old, back += Db_new - Db_old, each against ITS OWN store's read-back (never one
+	// side's delta derived from the other: the fp16 trap, DOCS/traps/ENGINE.md) - so whatever the bounces built over it
+	// is kept, and a voxel whose direct did not change keeps every bit (neither side is written). A slab voxel's old
+	// terms are the shift's cleared zeros: each side becomes its D_new.
 	// THE TEST IS THE STORE'S OWN CONVERSION: the new terms are written as a whole injection writes them and read back
 	// by this invocation (program order), then compared bit for bit with the old. Never a conversion of our own: on this
 	// driver packHalf2x16 rounds unlike the image store (measured: a quarter of the lit voxels "changed" with nothing
@@ -716,8 +720,8 @@
 		atomicAdd( jahCommitCount[3], 64u );
 @else
 	// THE DIRECT TERM IT REPLACES, for the brick mask (PHOTON-7 stage 3): read before the writes and read back after them,
-	// the store's own conversion compared (the delta's rule above) - the direct volumes, or the total where the cascade
-	// keeps none (no bounce: the total IS the direct term).
+	// the store's own conversion compared (the delta's rule above) - the direct volumes, or the light store's two sides
+	// where the cascade keeps none (no bounce: each side IS its direct term).
 	@property( vct_keep_direct )
 		const float4 dOld = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
 		const float4 dbOld = OGRE_imageLoad3D( directBackVoxel, voxelCelUvw );
@@ -746,8 +750,8 @@
 @end
 	// THE BRICK MASK (PHOTON-7 stage 3): the most this voxel's direct term (either side) changed, relative.
 	const float jahDirChange = max( jahBrickChange( dOld.xyz, dNew.xyz ), jahBrickChange( dbOld.xyz, dbNew.xyz ) );
-	// ...and ABSOLUTE (PHOTON-7 stage 5): the most the total moved with it (a delta adds exactly this to the total and
-	// the back), the brick state's word 7 - a non-finite change saturates. ITS REFERENCE IS WHAT A READER READ AT THIS
+	// ...and ABSOLUTE (PHOTON-7 stage 5): the most either side moved with it (a delta adds exactly this to each side),
+	// the brick state's word 7 - a non-finite change saturates. ITS REFERENCE IS WHAT A READER READ AT THIS
 	// WORLD POINT BEFORE (5-4, the lead's ruling): the old direct term - but a CLEARED voxel (a scroll's slab: outside
 	// the box the shift kept; every voxel of a whole injection, whose store held another placement or nothing) was read
 	// from the next cascade out, so its move is against that cascade's direct there (the outermost's against nothing).

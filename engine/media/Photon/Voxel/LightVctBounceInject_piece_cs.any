@@ -19,6 +19,9 @@
 	#define JAH_VOX_MAX_CASCADES @value( hlms_num_vct_cascades )
 	#define JAH_VOX_COUNT @value( hlms_num_vct_cascades )
 	#define JAH_VOX_SAMPLE_ISO( c, u, l ) OGRE_SampleLevel( vctProbes[c], vctProbeSampler, u, l )
+	// PHOTON-7 stage 7: the BACK side (the store holds the two sides): this job's level-0 read takes their mean
+	// (JAH_VOX_PER_SIDE 0, jah_voxel_sample.glsl's default)
+	#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], vctProbeSampler, u, l )
 	// Jahshaka (PHOTON-VOXEL-3): the PER-AXIS COVERAGE, VctLighting's last light-volume
 	// entry - the march's mip-0 read takes the opacity along its ray from it.
 	#define JAH_VOX_SAMPLE_COVP( c, u, l ) OGRE_SampleLevel( vctProbeCovP[c], vctProbeSampler, u, l )
@@ -188,8 +191,8 @@
 
 		// A TWO-SIDED VOXEL GATHERS BOTH HEMISPHERES (PHOTON-VOXEL-5): its front (the canonical
 		// normal's side, VoxelMerge) and its back are two surfaces, each lit by what IT faces - a
-		// roof's top by the sky, its underside by the room. The total keeps their mean, the back
-		// its own (the front is twice the mean minus it).
+		// roof's top by the sky, its underside by the room. Each side keeps its own (PHOTON-7 stage 7:
+		// the store holds both, the mean taken at the read).
 		// ONE call site in a loop over the sides, not two: the gather is the whole cone march,
 		// inlined per call (a second call doubled the job's compile time).
 		float3 gathered[2];
@@ -228,7 +231,9 @@
 			const float3 specF0 = metalVal.www * 0.04f + metalVal.xyz * 0.96f;
 			reemit += ( specF0 * sa + metalVal.w * sb ) * p_iterationDampening * albedoVal.w;
 		}
-		currentLight.xyz += reemit * ( 0.5f * ( vctDiffuse + vctDiffuseBack ) );
+		// each side its own fixed point: L_front = D_front + rho G_front, L_back = D_back + rho G_back (a one-sided
+		// voxel's two are one: its back gathered as its front, its direct the same on both sides)
+		currentLight.xyz += reemit * vctDiffuse;
 		backLight.xyz += reemit * vctDiffuseBack;
 		jahReemit = reemit;
 	}
@@ -243,10 +248,12 @@
 	// bricks of cascade 0 active 1500 frames on). A change of any speed is kept: the target is recomputed from the world
 	// every pass, so a slow change writes once it reaches a step (its lag at most a step; gi.bounce_series' slow fade).
 	// The price: the feedback rests within step / (1 - r) of the fixed point instead of step / (2 (1 - r)). Both sides
-	// held alike (the back's total is written in place).
+	// held alike, EACH AGAINST ITS OWN STORED VALUE (PHOTON-7 stage 7: the two sides are both stored).
+	float3 jahBackOld;   // the back as the store held it before this pass (THE PASS'S MOVE, below, takes its move too)
 	{
 		const float3 jahStored = OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz;
-		const float3 jahStoredBack = imageLoad( backVoxel, int3( jahCell ) ).xyz;
+		const float3 jahStoredBack = OGRE_Load3D( vctProbeBack[0], jahCell, 0 ).xyz;
+		jahBackOld = jahStoredBack;
 		const float3 jahFloor = float3( 6.1035156e-5, 6.1035156e-5, 6.1035156e-5 );   // the half float's smallest normal
 		const float3 jahStep = exp2( floor( log2( max( max( abs( currentLight.xyz ), abs( jahStored ) ), jahFloor ) ) ) - 10.0 );
 		const float3 jahStepBack =
@@ -261,7 +268,10 @@
 	}
 	wshort3 voxelCelUvw = wshort3( jahCell );
 	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( currentLight ) );  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
-	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, float4( backLight.xyz, currentLight.w ) );
+	// the back into the chain's compact scratch at this brick's list slot (the declaration says why)
+	const int2 jahScratchAt = int2( int( ( jahCell.x & 7u ) + 8u * ( jahCell.y & 7u ) + 64u * ( jahCell.z & 7u ) ),
+									int( gl_WorkGroupID.y ) );
+	imageStore( backScratch, jahScratchAt, float4( backLight.xyz, currentLight.w ) );
 	// THE PASS'S MOVE (PHOTON-7 stage 3's word 1, stage 4's feedback): the total it gathered from (the current one, a
 	// linear read) against what the STORE now holds - read back by this invocation (program order: the store's own
 	// rounding, never a conversion of ours), so a voxel at the float store's fixed point moves by exactly 0. Per
@@ -270,13 +280,18 @@
 	// of a group is in one brick and reaches the barriers (the list's bricks are whole).
 	const float3 jahOld = OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz;
 	const float3 jahNew = imageLoad( lightVoxel, int3( jahCell ) ).xyz;
-	const float jahMoved = jahBrickChange( jahOld, jahNew );
+	// ...and the back, read back from the scratch in program order (the store's own rounding): the series and the stop
+	// take EITHER side's move (PHOTON-7 stage 7: both sides are stored and read; a brick stopped on its front alone
+	// would rest with its back still moving)
+	const float3 jahBackNew = imageLoad( backScratch, jahScratchAt ).xyz;
+	const float jahMoved = max( jahBrickChange( jahOld, jahNew ), jahBrickChange( jahBackOld, jahBackNew ) );
 	// THE ABSOLUTE MOVE'S REFERENCE (PHOTON-7 stage 5, 5-4): what a reader read at this world point before. A CLEARED
 	// voxel (its brick's bit 10 - the shift brought it in, a whole injection wrote it - and its total still its direct
 	// term alone, bit for bit: no pass has reached it) was read from the next cascade out, so its first pass's move is
 	// against that cascade's total there (the outermost's against nothing: no reader read radiance there); the series
 	// (the mask's relative move, the stop) keeps the store's own move. The cards' and the field's accumulation read it.
 	float3 jahRef = jahOld;
+	float3 jahRefBack = jahBackOld;
 	{
 		const uint jahIdx0 = jahBrick.x + p_brickMark.y * ( jahBrick.y + p_brickMark.z * jahBrick.z );
 		const float3 jahStoredDirect = OGRE_Load3D( directVoxel, jahCell, 0 ).xyz;
@@ -284,15 +299,23 @@
 			all( equal( floatBitsToUint( jahOld ), floatBitsToUint( jahStoredDirect ) ) ) )
 		{
 			jahRef = float3( 0.0, 0.0, 0.0 );
+			jahRefBack = float3( 0.0, 0.0, 0.0 );
 			@property( hlms_num_vct_cascades > 1 )
 				const float3 jahUvw1 = voxelUvwPos * JAH_VOX_FROM_PREV_SCALE( 1 ).xyz + JAH_VOX_FROM_PREV_OFFSET( 1 ).xyz;
 				if( all( greaterThanEqual( jahUvw1, float3( 0.0, 0.0, 0.0 ) ) ) &&
 					all( lessThanEqual( jahUvw1, float3( 1.0, 1.0, 1.0 ) ) ) )
+				{
 					jahRef = OGRE_SampleLevel( vctProbes[1], vctProbeSampler, jahUvw1, 0.0 ).xyz;
+					jahRefBack = OGRE_SampleLevel( vctProbeBack[1], vctProbeSampler, jahUvw1, 0.0 ).xyz;
+				}
 			@end
 		}
 	}
-	const float3 jahAbs3 = abs( jahNew - jahRef );
+	// THE ABSOLUTE MOVE IS EITHER SIDE'S (PHOTON-7 stage 7): a reader reads the side its travel meets, so what a reader
+	// read moved by the larger of the two sides' moves - the front (the target, read back) and the back (the scratch,
+	// read back above). Measured on the front alone, a wall voxel whose canonical normal looks out of a room moved its
+	// BACK under a lamp step inside and nothing was reported.
+	const float3 jahAbs3 = max( abs( jahNew - jahRef ), abs( jahBackNew - jahRefBack ) );
 	float jahAbs = max( max( jahAbs3.x, jahAbs3.y ), jahAbs3.z );
 	if( ( floatBitsToUint( jahAbs ) & 0x7F800000u ) == 0x7F800000u )
 		jahAbs = 1.0e30;

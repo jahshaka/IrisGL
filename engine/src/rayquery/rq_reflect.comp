@@ -290,6 +290,9 @@ layout( set = 0, binding = 30 ) uniform sampler3D voxelNrm[kMaxCascades];
 // hit keeps when a mover occludes the rest (jah_rq_hit.glsl) — the set's last binding.
 layout( set = 0, binding = 40 ) uniform sampler3D voxelDirect[kMaxCascades];
 #define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
+// ...and its BACK side (48, PHOTON-7 stage 7: the direct store holds the two sides; the hit's share reads their mean)
+layout( set = 0, binding = 48 ) uniform sampler3D voxelDirectBack[kMaxCascades];
+#define JAH_VOX_SAMPLE_DIRECT_BACK( c, u, l ) textureLod( voxelDirectBack[c], u, l )
 /// THE AIR'S TABLE (PHOTON-I-1 fix 5): the aerial-perspective volume the colour
 /// passes read, or a stand-in while they read none — the set's last binding.
 layout( set = 0, binding = 41 ) uniform sampler3D fogAerial;

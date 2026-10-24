@@ -21,6 +21,9 @@ vulkan( layout( ogre_s0 ) uniform sampler srcSampler );
 @property( jah_cell_relative )
 	vulkan_layout( ogre_t1 ) uniform texture3D srcCoverage;
 @end
+@property( jah_mean_of_sides )
+	vulkan_layout( ogre_t1 ) uniform texture3D srcOtherSide;
+@end
 
 layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
 uniform restrict writeonly image3D dstLevel;
@@ -51,6 +54,13 @@ void main()
 	imageStore( dstLevel, iuvw, acc * 0.125 );
 @else
 	vec3 uvw = ( vec3( iuvw ) + 0.5 ) / vec3( dstSize );
-	imageStore( dstLevel, iuvw, OGRE_SampleLevel( srcLevel, srcSampler, uvw, 0.0 ) );
+	@property( jah_mean_of_sides )
+		// LEVEL 1 OF A TWO-SIDED LIGHT STORE (PHOTON-7 stage 7): the two sides' mean, filtered alike
+		imageStore( dstLevel, iuvw,
+					0.5 * ( OGRE_SampleLevel( srcLevel, srcSampler, uvw, 0.0 ) +
+							OGRE_SampleLevel( srcOtherSide, srcSampler, uvw, 0.0 ) ) );
+	@else
+		imageStore( dstLevel, iuvw, OGRE_SampleLevel( srcLevel, srcSampler, uvw, 0.0 ) );
+	@end
 @end
 }

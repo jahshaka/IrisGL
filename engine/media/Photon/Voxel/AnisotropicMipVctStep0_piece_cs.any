@@ -24,9 +24,10 @@
 	// injection composites the directional level 0 itself, from each voxel's light PER HALF-AXIS
 	// (LightInjection_piece_cs.any, the fused step 0); with a bounce it writes the DIRECT part of
 	// it into its own volumes (`dirDirect0..2`) and this pass, after every bounce, adds the
-	// bounce's: per child and half the side's total minus the side's direct term - the front
-	// (twice the total's mean minus the back) or the back, the side the half's faces look to
-	// through the canonical normal - composited with the same pairs and the same coverages. The
+	// bounce's: per child and half the side's light minus the side's direct term - the front or
+	// the back, each STORED (PHOTON-7 stage 7: never twice a stored mean minus the back, which
+	// cancelled on a dim side), the side the half's faces look to through the canonical normal -
+	// composited with the same pairs and the same coverages. The
 	// composite is linear in the colours for given coverages, so the sum is the composite of the
 	// sums; the opacity is the coverages' composite, as the injection's.
 	JAH_DIR_OFFSETS;
@@ -57,19 +58,19 @@
 	for( int n = 0; n < 8; ++n )
 	{
 		const int3 uvw = iSourceUvw + jahDirOffsets[n];
-		const float4 total = OGRE_Load3D( inLightTotal, uvw, 0 );
+		const float4 front = OGRE_Load3D( inLightFront, uvw, 0 );
 		const float4 back = OGRE_Load3D( inLightBack, uvw, 0 );
-		const float4 dTotal = OGRE_Load3D( inDirectTotal, uvw, 0 );
+		const float4 dFront = OGRE_Load3D( inDirectFront, uvw, 0 );
 		const float4 dBack = OGRE_Load3D( inDirectBack, uvw, 0 );
 		const float4 nrm = OGRE_Load3D( inNormal, uvw, 0 );
 		coveragesP[n] = OGRE_Load3D( inCoveragePTex, uvw, 0 ).xyz;
 		coveragesN[n] = OGRE_Load3D( inCoverageNTex, uvw, 0 ).xyz;
 		nrms[n] = nrm.xyz * 2.0f - 1.0f;
 		twoSided[n] = nrm.w > 0.0f;
-		const float c = total.w;
+		const float c = front.w;
 		const float invC = c > 0.0f ? 1.0f / c : 0.0f;
 		bounceB[n] = max( back.xyz - dBack.xyz, float3( 0, 0, 0 ) ) * invC;
-		bounceF[n] = max( ( 2.0f * total.xyz - back.xyz ) - ( 2.0f * dTotal.xyz - dBack.xyz ), float3( 0, 0, 0 ) ) * invC;
+		bounceF[n] = max( front.xyz - dFront.xyz, float3( 0, 0, 0 ) ) * invC;
 	}
 
 	wshort3 outIUvw;

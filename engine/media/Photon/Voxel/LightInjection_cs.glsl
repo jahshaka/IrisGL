@@ -37,7 +37,7 @@ uniform restrict image3D lightVoxel;
 @end
 
 // Jahshaka (PHOTON-VOXEL-5): THE ANISOTROPIC TIERS' SIDES AND HALVES. `backVoxel` is level 0's
-// BACK side (the front is 2 x the total minus it: the total holds the sides' mean);
+// BACK side (PHOTON-7 stage 7: `lightVoxel` holds the FRONT - the store keeps both sides, their mean the total);
 // `dirOut0..2` the directional volumes' level 0 per axis, composited here from each voxel's
 // light PER HALF-AXIS - or, with a bounce, the direct part of it (`vct_keep_direct`: the bounce
 // pass adds its own part in the anisotropic mip step 0); `directBackVoxel` the back side's

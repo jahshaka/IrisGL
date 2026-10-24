@@ -102,7 +102,7 @@ constexpr unsigned kPlaceBindings = 6u;
 /// the voxelizer's normal (23, 24: PHOTON-VOXEL-5); then the card read's VIEW
 /// TERM's seven (25-31, PHOTON-CARDS-5 + the Specular layer, ENGINE-POLISH-PHOTON-1, + the sun's visibility,
 /// PHOTON-3: jah_rq_card_bindings.glsl at JAH_CARD_VIEW_BINDING_BASE 25).
-constexpr unsigned kTraceBindings = 37u;
+constexpr unsigned kTraceBindings = 38u;
 constexpr unsigned kTraceSideBinding = 23u;
 constexpr unsigned kTraceCardViewBinding = 25u;
 /// ...and THE DIRECT TERM's volume per cascade (32, MOVER-OCCLUSION-1: jah_rq_hit.glsl).
@@ -115,9 +115,12 @@ constexpr unsigned kTraceOverlayBinding = 34u;
 /// pool (35) and the cloud layer's field (36).
 constexpr unsigned kTracePoolBinding = 35u;
 constexpr unsigned kTraceCloudBinding = 36u;
+/// ...and THE DIRECT TERM's BACK side per cascade (37, PHOTON-7 stage 7: the direct store holds the two sides, and the
+/// hit's share and its mover gate read their mean - jah_rq_hit.glsl).
+constexpr unsigned kTraceDirectBackBinding = 37u;
 static_assert(kTraceRaysBinding == kTraceDirectBinding + 1u && kTraceOverlayBinding == kTraceRaysBinding + 1u &&
                   kTracePoolBinding == kTraceOverlayBinding + 1u && kTraceCloudBinding == kTracePoolBinding + 1u &&
-                  kTraceBindings == kTraceCloudBinding + 1u &&
+                  kTraceDirectBackBinding == kTraceCloudBinding + 1u && kTraceBindings == kTraceDirectBackBinding + 1u &&
                   kTraceDirectBinding == kTraceCardViewBinding + SurfaceCache::kViewLayers,
               "the direct volume follows the card read's view-term layers, the instrument's two follow it");
 /// The filter's five: params, records, the raw atlas, the eye's depth (its taps' depth walk, PHOTON-2 stage 2's tail)
@@ -409,6 +412,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 34 the photon overlay (GatherHits)
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 35 the texture pool (FAR-SUN-2)
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 36 the cloud field (FAR-SUN-2)
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 37 voxelDirectBack[] (PHOTON-7 stage 7)
         };
         const unsigned c[kTraceBindings] = { 1u, 1u, 1u, 1u, kGatherMaxCascades,
                                              kGatherMaxCascades, kGatherMaxCascades,
@@ -417,7 +421,8 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
                                              kGatherMaxCascades, kGatherMaxCascades,
                                              1u, 1u, 1u, 1u,
                                              kGatherMaxCascades, kGatherMaxCascades,
-                                             1u, 1u, 1u, 1u, 1u, 1u, 1u, kGatherMaxCascades, 1u, 1u, 1u, 1u };
+                                             1u, 1u, 1u, 1u, 1u, 1u, 1u, kGatherMaxCascades, 1u, 1u, 1u, 1u,
+                                             kGatherMaxCascades };
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp
@@ -1783,8 +1788,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     VkDescriptorImageInfo atlasStore{};
     atlasStore.imageView = v.atlasView;
     atlasStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkDescriptorImageInfo volumes[11][kGatherMaxCascades] = {}, sky{};
-    for (int axis = 0; axis < 11; ++axis)
+    VkDescriptorImageInfo volumes[kGatherVoxelKinds][kGatherMaxCascades] = {}, sky{};
+    for (int axis = 0; axis < int(kGatherVoxelKinds); ++axis)
         for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
             const unsigned src =
                 c < in.cascadeCount ? c : (in.cascadeCount ? in.cascadeCount - 1u : 0u);
@@ -1915,6 +1920,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[kTraceDirectBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[kTraceDirectBinding].descriptorCount = kGatherMaxCascades;
         w[kTraceDirectBinding].pImageInfo = volumes[10];
+        w[kTraceDirectBackBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[kTraceDirectBackBinding].descriptorCount = kGatherMaxCascades;
+        w[kTraceDirectBackBinding].pImageInfo = volumes[11];
         // THE GATHER-HITS INSTRUMENT (31, 32; FAR-SUN-1): the view's records under the arm, or the
         // stand-in (never written: p.hits.x = 0); the photon overlay under the GatherHits view, or
         // the irradiance target's own storage view (never written: p.hits.y = 0) — the integrate's
@@ -2084,7 +2092,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         for (unsigned c = 0; c < in.cascadeCount; ++c)
-            for (int axis = 0; axis < 11; ++axis)
+            for (int axis = 0; axis < int(kGatherVoxelKinds); ++axis)
                 if (in.voxel[c][axis])
                     solver.resolveTransition(trans, in.voxel[c][axis],
                                              Ogre::ResourceLayout::Texture,

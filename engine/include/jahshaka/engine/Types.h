@@ -5873,11 +5873,12 @@ struct GiVoxelVolume {
     std::vector<float> albedo;
     std::vector<float> coverageP, coverageN;
     std::vector<float> positionP, positionN;
-    /// LEVEL 0 PER SIDE (PHOTON-VOXEL-5), every tier: `light`
-    /// holds the MEAN of a voxel's two sides and `lightBack` its BACK (premultiplied the same way;
-    /// the front = 2 light - lightBack), `normal` the voxeliser's (rgb biased 0.5 + 0.5 n, a = 1 for
-    /// a two-sided voxel, whose normal is canonical: the front is the side it points to). The
-    /// faces looking +a take the front where n_a > 0, the back where n_a < 0.
+    /// LEVEL 0 PER SIDE (PHOTON-VOXEL-5), every tier: the store holds a voxel's two SIDES (PHOTON-7 stage 7) -
+    /// `lightFront` and `lightBack` as stored (premultiplied the same way), `light` their MEAN (derived here exactly as a
+    /// reader takes it) - and `normal` the voxeliser's (rgb biased 0.5 + 0.5 n, a = 1 for a two-sided voxel, whose normal
+    /// is canonical: the front is the side it points to). The faces looking +a take the front where n_a > 0, the back
+    /// where n_a < 0. (giVoxelLight fills `light`, `lightFront` and `lightBack`.)
+    std::vector<float> lightFront;
     std::vector<float> lightBack;
     std::vector<float> normal;
     /// THE REST OF THE VOXELISER'S LEVEL 0 (ENGINE-UPGRADE-U5, the reader's decision 11 g): the emissive

@@ -33,8 +33,11 @@ namespace Ogre
         /// that O - level 1 is then the mean of the children's O x p, p absolute in the box's [0, 1]
         /// (each child's cell index restored), so every coarser level is the coverage-weighted mean
         /// position the readers filter, as before.
+        /// `meanWith` (PHOTON-7 stage 7): `texture` is one SIDE of a two-sided light store (the front) and this is the
+        /// other (the back) - level 1 is then built from the two sides' MEAN at level 0, so every coarser level is the
+        /// total's chain (a reader of a coarse level reads the mean; level 0 holds the sides, read as such).
         static void generate( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *texture,
-                              TextureGpu *cellRelativeCoverage = nullptr );
+                              TextureGpu *cellRelativeCoverage = nullptr, TextureGpu *meanWith = nullptr );
         /// Destroys the pooled jobs - before the compute Hlms dies (the engine's teardown).
         static void releasePool();
         /// Dispatches made and jobs ever pooled, process-wide (the region row reads them).

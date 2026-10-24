@@ -90,7 +90,7 @@
 	#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], probeSampler, u, l )
 	#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], probeSampler, u, l )
 	// Jahshaka (PHOTON-VOXEL-5): level 0 read per side (jah_voxel_sample.glsl).
-	#define JAH_VOX_HAS_BACK 1
+	#define JAH_VOX_PER_SIDE 1
 	#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], probeSampler, u, l )
 	#define JAH_VOX_SAMPLE_NRM( c, u, l ) OGRE_SampleLevel( vctProbeNrm[c], probeSampler, u, l )
 	#define JAH_VOX_INVRES( c ) p.vctInvResMaxLod[c].xyz

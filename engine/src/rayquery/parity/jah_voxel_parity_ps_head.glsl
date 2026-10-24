@@ -87,7 +87,7 @@ out vec4 fragColour;
 #define JAH_VOX_SAMPLE_COVN( c, u, l ) JAH_PARITY_PICK( vCovN, c, u, l )
 #define JAH_VOX_SAMPLE_POSP( c, u, l ) JAH_PARITY_PICK( vPosP, c, u, l )
 #define JAH_VOX_SAMPLE_POSN( c, u, l ) JAH_PARITY_PICK( vPosN, c, u, l )
-#define JAH_VOX_HAS_BACK 1
+#define JAH_VOX_PER_SIDE 1
 #define JAH_VOX_SAMPLE_BACK( c, u, l ) JAH_PARITY_PICK( vBack, c, u, l )
 #define JAH_VOX_SAMPLE_NRM( c, u, l ) JAH_PARITY_PICK( vNrm, c, u, l )
 #define JAH_VOX_INVRES( c ) chainInvRes[c].xyz

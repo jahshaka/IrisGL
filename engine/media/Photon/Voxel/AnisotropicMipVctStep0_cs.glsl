@@ -3,11 +3,11 @@
 #define OGRE_imageWrite3D4( outImage, iuv, value ) imageStore( outImage, int3( iuv ), value )
 
 // Jahshaka (PHOTON-VOXEL-5): the bounce's part of the directional level 0 (AnisotropicMipVctStep0_
-// piece_cs.any) - the level-0 totals (the sides' mean and the back), their direct terms, the
+// piece_cs.any) - the level-0 sides (the front and the back, PHOTON-7 stage 7), their direct terms, the
 // normal (its side), the coverage per half, and the injection's composited direct part per axis.
-vulkan_layout( ogre_t0 ) uniform texture3D inLightTotal;
+vulkan_layout( ogre_t0 ) uniform texture3D inLightFront;
 vulkan_layout( ogre_t1 ) uniform texture3D inLightBack;
-vulkan_layout( ogre_t2 ) uniform texture3D inDirectTotal;
+vulkan_layout( ogre_t2 ) uniform texture3D inDirectFront;
 vulkan_layout( ogre_t3 ) uniform texture3D inDirectBack;
 vulkan_layout( ogre_t4 ) uniform texture3D inNormal;
 vulkan_layout( ogre_t5 ) uniform texture3D inCoveragePTex;

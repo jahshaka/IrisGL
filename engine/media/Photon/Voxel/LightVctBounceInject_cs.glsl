@@ -39,6 +39,10 @@ vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosP[@value(
 @add( vctTexUnit, hlms_num_vct_cascades )
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosN[@value( hlms_num_vct_cascades )];
 @add( vctTexUnit, hlms_num_vct_cascades )
+// PHOTON-7 stage 7: every cascade's BACK SIDE, after the surface position (VctLighting::setupBounceTextures' order): the
+// store holds the two sides (vctProbes the front) and the march's level-0 read here takes their MEAN.
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeBack[@value( hlms_num_vct_cascades )];
+@add( vctTexUnit, hlms_num_vct_cascades )
 
 // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): THE DIRECT TERM, at the unit after every probe array (the
 // same order VctLighting::setupBounceTextures binds them in). It is read with a
@@ -79,10 +83,13 @@ vulkan( layout( ogre_s2 ) uniform sampler vctProbeSampler );
 // float store's fixed point moves by exactly 0 and its brick can stop (PhotonBrickFeedback_cs.glsl).
 layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
 uniform restrict image3D lightVoxel;
-// Jahshaka (PHOTON-VOXEL-5): the back side's total, written in place (the march's level-0 read here takes the sides'
-// mean); READ too, by the store's whole-step rule (PHOTON-7 stage 4's fix: a channel nearer than a step keeps its value).
+// PHOTON-7 stage 7: THE BACK SIDE'S NEW VALUE, into the chain's COMPACT SCRATCH (PhotonVoxelLighting::ensureBackScratch:
+// one row a listed brick - this group's list slot - and one texel a voxel of it, x + 8 y + 64 z): never in place, since
+// this pass's own gather reads the back (the sides' mean) and a neighbour's back rewritten in the same dispatch would be
+// a race. The copy-back moves it over the listed bricks with the front's (PhotonBrickFeedback_cs.glsl). READ too: the
+// pass reads back what it wrote (the store's own rounding: an image of the store's format, never a packed buffer).
 layout( vulkan( ogre_u1 ) vk_comma rgba16f )
-uniform restrict image3D backVoxel;
+uniform restrict image2D backScratch;
 // PHOTON-7 stage 3, THE BRICK MASK (LightInjection_cs.glsl's buffer, word [1] of a brick): the most this frame's pass
 // moved a voxel's total (relative), max-reduced per 8^3 brick - the feedback's per-brick change (stage 4).
 layout( std430, ogre_U2 ) restrict coherent buffer jahBrickLayout { uint jahBrickMask[]; };
