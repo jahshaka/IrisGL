@@ -76,10 +76,19 @@ float jahVoxelKernelMip( float lod, float texelCells )
 
 /// THE DOMINANT AXIS of a direction in a cascade's normalised space: the axis whose texel
 /// planes the ray crosses most often per unit length (the plane march, jah_voxel_march.glsl).
+/// A TIE IS DECIDED, NEVER ROUNDED (PHOTON-7 stage 7, 7-6; L8): two axes within 1e-4 of the larger
+/// crossing rate are a tie, and the tie goes to the lower axis. A 45-degree cone ties exactly - every
+/// diffuse cone of an axis-aligned surface - and a frame built through a float rotation (the pixel's,
+/// its normal taken view -> cubemap) lands a few ulps either side of it, so a plain comparison flipped
+/// the march's stepping axis per pixel between two answers up to ~15 % apart in the voxels' share
+/// (measured: gi.screen_integrate's A/B, spikes/photon-7/stage7/7-6/README.txt). The march's answer
+/// still JUMPS at the tie (its two axes integrate differently: VOXEL-LEAK-1's continuous march); this
+/// only makes which side a surface takes a function of its geometry, not of the rounding.
 int jahVoxelAxis( vec3 dir, vec3 invRes )
 {
 	const vec3 perLen = abs( dir ) / invRes;
-	return perLen.x >= perLen.y ? ( perLen.x >= perLen.z ? 0 : 2 ) : ( perLen.y >= perLen.z ? 1 : 2 );
+	const float tie = 1e-4 * max( perLen.x, max( perLen.y, perLen.z ) );
+	return perLen.x + tie >= perLen.y ? ( perLen.x + tie >= perLen.z ? 0 : 2 ) : ( perLen.y + tie >= perLen.z ? 1 : 2 );
 }
 
 /// THE ONE READ RULE, AT EVERY LEVEL (PHOTON-VOXEL-3, PHOTON-VOXEL-4): A PLANE TAKES THE
