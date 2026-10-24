@@ -29,8 +29,9 @@
 // 32 words (eight vec4):
 //   0 position (directional: the direction TOWARDS the light), w = the type (0 directional,
 //     1 point, 2 spot, 5 area); 1 the diffuse colour x power, w = the range (0: none);
-//   2 a spot's direction (-z), w = a point/spot's source radius; 3 a spot's (1 / (cos inner -
-//     cos outer), cos outer, falloff), w = 1 for a two-sided area light; 4-7 an area light's corners.
+//   2 a spot's or an area light's direction (-z: an area light's emitting side), w = a point/spot's source radius;
+//     3 a spot's (1 / (cos inner - cos outer), cos outer, falloff), w = 1 for a two-sided area light; 4-7 an area
+//     light's corners.
 // A row is 16 words: bgDiffuse, the colour the albedo map multiplies (the metallic workflow's base, the
 // specular workflows' diffuse) and the transparency, the emissive and the metalness (vec4 each), the
 // albedo and emissive pool slices (16 bits each, one word), the specular weight, the roughness's float
@@ -50,6 +51,16 @@
 #ifndef JAH_RQ_HIT_DIRECT_GLSL
 #define JAH_RQ_HIT_DIRECT_GLSL
 #include "jah_ray_origin.glsl"
+// THE AREA LIGHT'S VISIBILITY AT A HIT (PHOTON-7, 7-H at the photon-7r merge; L9): the strata law every area-light
+// reader takes (jah_area_strata.glsl - the cards, the pixel): the rectangle cut into kHitAreaStrata x kHitAreaStrata
+// strata jittered by the hit point's world key, their form factors f computed (no ray), and ONE stratum's ray a sample:
+// the stratum drawn with probability f_k / sum f by the sample's sequence (jahHitAreaSeq, the includer's - the
+// reflection's draw index, the gather's ray seed), its visibility V_k taken whole - so its expectation is the ratio
+// sum( V f ) / sum( f ) the other readers converge to, and an UNOCCLUDED light reads exactly 1 (no noise where nothing
+// shadows). The centre ray it replaces saw a light through any gap at its centre and lost it behind anything there.
+#include "jah_area_strata.glsl"
+const uint kHitAreaStrata = 4u;
+uint jahHitAreaSeq = 0u;
 
 #include "jah_fork_brdf.glsl"
 
@@ -293,8 +304,46 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 		}
 		if( !( cosL > 0.0 ) )
 			continue;
-		const float vis = type == 0 ? jahSunRay( origin, L, JAH_HIT_SUN_MASK, JAH_HIT_SUN_RANGE, JAH_HIT_SUN_RANGE )
-									: jahSunRay( origin, L, JAH_HIT_SUN_MASK, max( dist - lift, 0.0 ), max( dist - lift, 0.0 ) );
+		float vis;
+		if( type == 5 )
+		{
+			// THE STRATA (the head of this file): the corners' rectangle, its emitting side the light's -Z
+			const vec3 c0 = uintBitsToFloat( uvec3( T.u[o + 16u], T.u[o + 17u], T.u[o + 18u] ) );
+			const vec3 eu = uintBitsToFloat( uvec3( T.u[o + 20u], T.u[o + 21u], T.u[o + 22u] ) ) - c0;
+			const vec3 ev = uintBitsToFloat( uvec3( T.u[o + 28u], T.u[o + 29u], T.u[o + 30u] ) ) - c0;
+			const uint n = kHitAreaStrata, key = jahAreaStrataKey( P );
+			const bool twoSided = v3.w > 0.5;
+			float f[kHitAreaStrata * kHitAreaStrata];
+			float sumF = 0.0;
+			vec3 dq, oq, rq;
+			float clr2, reach;
+			for( uint k = 0u; k < n * n; ++k )
+			{
+				f[k] = jahAreaStratumAt( P, N, N, lift, c0, eu, ev, v2.xyz, twoSided, n, k, key, kAreaLampEnd, dq, clr2,
+										 oq, rq, reach );
+				sumF += f[k];
+			}
+			vis = 0.0;
+			if( sumF > 0.0 )
+			{
+				float u = float( jahAreaPcg( jahHitAreaSeq ^ jahAreaPcg( key ) ) ) * 2.3283064e-10 * sumF;
+				uint pick = 0u;
+				for( ; pick + 1u < n * n; ++pick )
+				{
+					if( f[pick] > 0.0 && u < f[pick] )
+						break;
+					u -= f[pick];
+				}
+				while( !( f[pick] > 0.0 ) && pick > 0u )   // (a rounding walk past the last stratum that lights)
+					--pick;
+				jahAreaStratumAt( P, N, N, lift, c0, eu, ev, v2.xyz, twoSided, n, pick, key, kAreaLampEnd, dq, clr2, oq,
+								  rq, reach );
+				vis = reach > 0.0 ? jahSunRay( oq, rq, JAH_HIT_SUN_MASK, reach, reach ) : 1.0;
+			}
+		}
+		else
+			vis = type == 0 ? jahSunRay( origin, L, JAH_HIT_SUN_MASK, JAH_HIT_SUN_RANGE, JAH_HIT_SUN_RANGE )
+							: jahSunRay( origin, L, JAH_HIT_SUN_MASK, max( dist - lift, 0.0 ), max( dist - lift, 0.0 ) );
 		if( !( vis > 0.0 ) )
 			continue;
 		// THE DIFFUSE LOBE TOWARD V: BRDF_Default's normalised Disney lobe at ( L, V ). An AREA light (type 5) has no

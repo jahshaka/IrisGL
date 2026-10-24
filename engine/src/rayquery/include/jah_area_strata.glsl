@@ -36,6 +36,9 @@ uint jahAreaPcg( uint v )
 /// shader): the largest any tier asks (GiQualityFacts::cardAreaStrata, Types.h: 8 - Low 4, Medium 6).
 const uint kAreaStrataMax = 8u;
 
+/// A stratum's ray stops this far short of the light's rectangle: its own emitter is not its shadow (every reader's).
+const float kAreaLampEnd = 0.05;
+
 /// THE STRATA'S KEY: a function of the receiver's world point alone.
 uint jahAreaStrataKey( vec3 P )
 {

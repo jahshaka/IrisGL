@@ -434,6 +434,7 @@ void main()
 			// reverse) and reads the store whole.
 			jahHitSurf = JahHitSurface( hitSlot, hitGeom, hitPrim, hitBary, hitToWorld, tHit, far,
 										!far && hitNormalKnown );
+			jahHitAreaSeq = jahHitSeed;   // an area light's stratum there (jah_rq_hit_direct.glsl, 7-H)
 			if( !decodeAlways )
 				radiance = jahHitRadianceSourced( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
 													  max( tHit * spread, 1e-4 ), false, ok, cacheSource );

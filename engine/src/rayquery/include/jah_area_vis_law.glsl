@@ -51,8 +51,6 @@
 #ifndef JAH_AREA_VIS_LAW_GLSL
 #define JAH_AREA_VIS_LAW_GLSL
 
-/// A light's visibility stops this far short of its rectangle: its own emitter is not its shadow (the cards' kLampEnd).
-const float kAreaLampEnd = 0.05;
 /// The count the history saturates at (the blend reads it only up to its floor's 1 / n^2).
 const uint kAreaCountMax = 4096u;
 

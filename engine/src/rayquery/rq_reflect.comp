@@ -969,6 +969,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			// THE HIT, for its direct light at the hit (FAR-SUN-2, jah_rq_hit_direct.glsl).
 			jahHitSurf = JahHitSurface( recSlot, recGeom, recPrim, recBary, hitToWorld, t, recFar,
 										!recFar && hitNormalKnown );
+			// ...and the sample's draw for an area light's stratum there (jah_rq_hit_direct.glsl, 7-H)
+			jahHitAreaSeq = jahAreaPcg( frame + uint( p.denoiser.z ) ) ^ seedPix.x * 73856093u ^ seedPix.y * 19349663u;
 			// ONE RULE FOR EVERY HIT (BUGS-1 item 2): the card, else the store with the direct
 			// light at the hit (jahHitRadianceSourced) — a metal's card holds its lobe since
 			// PHOTON-1 stage 3, so a metal is no exception. Only a SHARP reflector's metal hit

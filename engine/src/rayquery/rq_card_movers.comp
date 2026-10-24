@@ -228,7 +228,7 @@ void main()
 						float vq, unusedCl;
 						vec3 unusedDir;
 						const float f = jahAreaStratum( P, Ng, Ncone, lift, c0, eu, ev, emit, twoSided, n, k, key,
-														uint( p.knobs.x ), kLampEnd, vq, unusedDir, unusedCl );
+														uint( p.knobs.x ), kAreaLampEnd, vq, unusedDir, unusedCl );
 						if( !( f > 0.0 ) )
 							continue;
 						sf += f;

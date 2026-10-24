@@ -7412,10 +7412,12 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
             if (srcType == Ogre::Light::LT_DIRECTIONAL && cardSun && light == cardSun) L[11] = 1.0f;
             L[15] = light->getDoubleSided() ? 1.0f : 0.0f;
             if (area) {
-                const Ogre::Vector3 c(p4.x, p4.y, p4.z);
-                const Ogre::Vector2 half = light->getDerivedRectSize() * 0.5f;
-                const Ogre::Vector3 x = q.xAxis() * half.x, y = q.yAxis() * half.y;
-                const Ogre::Vector3 r[4] = { c - x - y, c + x - y, c + x + y, c - x + y };
+                // the rectangle every area-light reader takes (lightextras::areaLightCorners, the pixel's and the
+                // cards') and its emitting side (the light's direction: the strata law's `emit`, 7-H)
+                const Ogre::Vector3 emit = light->getDerivedDirection();
+                L[8] = float(emit.x); L[9] = float(emit.y); L[10] = float(emit.z);
+                Ogre::Vector3 r[4];
+                lightextras::areaLightCorners(light, r);
                 for (int k = 0; k < 4; ++k) {
                     L[16 + 4 * k] = float(r[k].x); L[17 + 4 * k] = float(r[k].y); L[18 + 4 * k] = float(r[k].z);
                 }
