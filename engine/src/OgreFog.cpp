@@ -45,8 +45,6 @@ FogHlmsListener::PassBinds FogHlmsListener::sPass[Ogre::HLMS_MAX];          // r
 Ogre::HlmsManager            *FogHlmsListener::sSamplerMgr     = nullptr;     // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sEnvSampler     = nullptr;     // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sGatherSampler  = nullptr;     // render thread only
-bool FogHlmsListener::sDiffuseConeSkip  = true;                               // render thread only
-bool FogHlmsListener::sSpecularConeSkip = true;                               // render thread only
 const Ogre::HlmsSamplerblock *FogHlmsListener::sCloudSampler = nullptr;       // render thread only
 
 FogHlmsListener::SceneBinds *FogHlmsListener::bindsOf(const Ogre::SceneManager *sm) {
@@ -420,10 +418,6 @@ void FogHlmsListener::setAreaVis(const Ogre::SceneManager *sm, Ogre::TextureGpu 
 void FogHlmsListener::setPhotonIsolation(const Ogre::SceneManager *sm, int mode) {
     if (SceneBinds *b = bindsOf(sm)) b->photonIsolation = mode <= 0 ? 0 : mode;
 }
-void FogHlmsListener::setConeSkipArms(bool diffuseSkip, bool specularSkip) {
-    sDiffuseConeSkip = diffuseSkip;
-    sSpecularConeSkip = specularSkip;
-}
 FogHlmsListener::ProbeGatherBind FogHlmsListener::probeGather(const Ogre::SceneManager *sm) {
     const SceneBinds *b = bindsOf(sm);
     return b ? b->probeGather : ProbeGatherBind();
@@ -448,14 +442,6 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             hlms->_getProperty(Ogre::Hlms::kNoTid, Ogre::IdString("num_pass_const_buffers"));
         pb.specAlbedoSlot = int(numPass) + 1;
         hlms->_setProperty(Ogre::Hlms::kNoTid, kSpecAlbedoCb, pb.specAlbedoSlot);
-    }
-    // THE CONE SKIPS' ARMS (SPEED-GPU): a skip switched OFF is a permutation that marches
-    // everywhere, the cost before the skip; the shipped arms set nothing (JahIfd_piece_ps.any
-    // and PhotonVct_piece_ps.any read the two properties).
-    if (hlms && !casterPass &&
-        hlms->_getProperty(Ogre::Hlms::kNoTid, Ogre::IdString("jah_vct_cascades")) > 0) {
-        if (!sDiffuseConeSkip) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_cones_always", 1);
-        if (!sSpecularConeSkip) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_spec_cone_always", 1);
     }
     // THE PLANET'S ATMOSPHERE'S VOLUME (SKY-ATMOSPHERE-1), first and
     // unconditionally for a colour pass: its PROPERTY is also the

@@ -452,7 +452,7 @@
 	// loads are one), w = 1 where the screen march or the ray tier answered the whole lobe.
 	// NOT under a clear coat with parallax-corrected probes: there the cone's hit position
 	// also weighs the coat's own PCC term, which the composite does not replace.
-	@property( hlms_use_ssr && hlms_screen_pos_int && !jah_spec_cone_always && ( !clear_coat || !use_parallax_correct_cubemaps ) )
+	@property( hlms_use_ssr && hlms_screen_pos_int && ( !clear_coat || !use_parallax_correct_cubemaps ) )
 		const bool jahSpecAnswered = OGRE_LoadScreen2D( ssrTexture, iFragCoord, 0 ).w >= 1.0f;
 	@else
 		const bool jahSpecAnswered = false;

@@ -1123,16 +1123,6 @@ constexpr ArmDef kArms[] = {
       "for 4,096 rest frames - no texel stops, the view holds after them - and the filter composites that mean "
       "unfiltered (reach 0): the per-texel integral the held picture is compared against; 2 = the same over a disjoint "
       "rest sequence (two references measure the reference's own noise). 0 = shipped (the image is 1 x 1)." },
-    { ArmId::DiffuseConeSkip, 1.0, 0.0, 1.0,
-      "The pixel's four-cone diffuse is marched only where the irradiance field's fallback weight "
-      "(1 - confidence) is above zero - the only pixels it reaches (SPEED-GPU, audit PH-2). 0 = "
-      "marched in every pixel of a chain with a field, the cost before the skip; the picture is "
-      "the same bytes (gi.cone_skip)." },
-    { ArmId::SpecularConeSkip, 1.0, 0.0, 1.0,
-      "The pixel's specular cone is marched only where the screen/ray reflection's confidence w "
-      "is below 1 - the composite replaces the whole environment term where it is 1 (SPEED-GPU, "
-      "audit PH-1 / S1). 0 = marched in every pixel, the cost before the skip; the picture is the "
-      "same bytes (gi.cone_skip)." },
     { ArmId::GatherDecodeHits, 0.0, 0.0, 1.0,
       "EVERY screen-probe gather hit is a hit RECORD shaded by the visibility-buffer decode, "
       "never read from the cards or the voxels (SPECKLE-FIX-1). The route-agreement instrument: "

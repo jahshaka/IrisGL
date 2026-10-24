@@ -1049,8 +1049,6 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         // THE MEASUREMENT ARMS (lane TEST-1) take what was set since the last frame:
         // one value of each for the whole of this one.
         mArms.latch();
-        FogHlmsListener::setConeSkipArms(mArms.on(ArmId::DiffuseConeSkip),
-                                         mArms.on(ArmId::SpecularConeSkip));
         // THE MISFIT COUNTER'S NEGATIVE CONTROL (stage 5's read W5; the arm shader.forceParamsMisfit): each time the arm
         // comes on, the fork refuses the next compute dispatch as a misfit (HlmsCompute::_jahForceParamsMisfits)
         {

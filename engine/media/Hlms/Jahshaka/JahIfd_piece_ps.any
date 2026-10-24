@@ -150,13 +150,8 @@
 	// cone marches per pixel used to be multiplied by it - most of the screen. The weight
 	// is known before the march now, so the march runs where it is read and nowhere else:
 	// the same arithmetic in the same order where it runs, and an add of nothing where it
-	// does not (the arm photon.diffuseConeSkip = 0 marches everywhere; gi.cone_skip holds
-	// the two to the same bytes).
-@property( jah_cones_always )
-	if( true )
-@else
+	// does not.
 	if( ifdFallbackAmbient > 0.0 )
-@end
 	{
 		float3 jahConeBiasLS;
 		float4 jahConeOriginLS;

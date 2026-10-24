@@ -2122,8 +2122,6 @@ private:
     X(GiFreeze, "gi.freeze") /* the GI frozen: no cache work, every history kept (M1's measuring arm) */ \
     X(HitListCap, "rq.hitListCap") /* the hit list holds at most N records (0: its demand-sized capacity) - the overflow arm */ \
     X(ReflectRestReference, "reflect.restReference") /* the reflection's 4,096-sample reference at rest, no stop, no filter (R1 (f)'s measuring arm) */ \
-    X(DiffuseConeSkip, "photon.diffuseConeSkip") /* the pixel's cone diffuse only where the field's fallback weight is > 0 */ \
-    X(SpecularConeSkip, "photon.specularConeSkip") /* the pixel's specular cone only where the reflection's w < 1 */ \
     X(GatherDecodeHits, "gather.decodeHits") /* every gather hit a record (the decode route), never the caches */ \
     X(GatherOctRes, "gather.octRes") /* the probe map's resolution (rays = octRes^2; 0 = the tier's) */ \
     X(GatherStride, "gather.stride") /* the probe stride in pixels (0 = the tier's) */ \
@@ -3550,13 +3548,6 @@ public:
     /// shader. 0 takes it away.
     static void setPhotonIsolation(const Ogre::SceneManager *sm, int mode);
 
-    /// THE CONE SKIPS' MEASUREMENT ARMS (SPEED-GPU), latched by the engine at the top of
-    /// every frame (ArmId::DiffuseConeSkip / SpecularConeSkip). A skip that is OFF sets
-    /// its pass property (`jah_cones_always` / `jah_spec_cone_always`), which takes part
-    /// in the pass hash: the arm selects a permutation, never a runtime branch, and the
-    /// shipped permutation (both on) sets nothing.
-    static void setConeSkipArms(bool diffuseSkip, bool specularSkip);
-
     /// One extra PASS texture — the sky cube — for a colour pass that asked for
     /// it in preparePassHash. Read from the PROPERTIES, never from the state,
     /// because this may be called from any thread and must be a pure function
@@ -3617,7 +3608,6 @@ private:
     /// The contact job's registration: the texture and its divisor (the pass's
     /// copy is PassBinds::sunVis; the divisor becomes the property's value).
     struct SunContactBind { Ogre::TextureGpu *tex = nullptr; unsigned divisor = 1u; };
-    static bool sDiffuseConeSkip, sSpecularConeSkip;                    // render thread
 public:
     /// THE SCENE'S PASS RECORD (ENGINE-UPGRADE-2B stage 2): what one scene's passes bind beyond
     /// the GI binding — the sky's environment, the gather's and the sun contact's registrations
