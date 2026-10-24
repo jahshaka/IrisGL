@@ -906,7 +906,6 @@ QVector<Row> buildRows()
             QStringList gatherTiers;
             for (PhotonTier t : { PhotonTier::Low, PhotonTier::Medium, PhotonTier::High,
                                   PhotonTier::Epic }) {
-                if (!photonGather(t).on) continue;
                 QString n = photonTierName(t);
                 n[0] = n[0].toUpper();
                 gatherTiers << n;
@@ -932,50 +931,6 @@ QVector<Row> buildRows()
             return s->giDdgi > 0 ? 1 : 0;
         };
         r.set = [](const iris::ScenePtr &s, int v) { s->giDdgi = v ? 1 : 0; };
-        out.append(r);
-    }
-    // THE SCREEN-PROBE GATHER (D4-PHOTON-TIERS; PHOTON-GATHER-1d, PHOTON-GA-VR): a
-    // row of its own at last. Every tier's column is AUTO = THE TIER'S, resolved
-    // by the engine's table (giQualityFacts' gather row, its VR column included
-    // — which only the renderer can resolve, since only it knows a headset is
-    // driving), so the text is generated from that table and never hand-copied.
-    {
-        Row r;
-        r.id = QStringLiteral("giGather");
-        r.label = QStringLiteral("Photon Screen-Probe Gather");
-        r.group = QStringLiteral("Global Illumination");
-        r.type = RowType::Enum;
-        r.options = { { QStringLiteral("off"),  QStringLiteral("Off"),  0 },
-                      { QStringLiteral("auto"), QStringLiteral("Auto"), -1 },
-                      { QStringLiteral("on"),   QStringLiteral("On"),   1 } };
-        r.tier[0] = -1; r.tier[1] = -1; r.tier[2] = -1; r.tier[3] = -1;
-        r.costAt = [](bool sceneTracesRays) {
-            QStringList on, off;
-            for (PhotonTier t : { PhotonTier::Low, PhotonTier::Medium, PhotonTier::High,
-                                  PhotonTier::Epic }) {
-                const jahshaka::engine::GiGatherFacts g = photonGather(t);
-                QString n = photonTierName(t);
-                n[0] = n[0].toUpper();
-                if (!g.on) { off << n; continue; }
-                on << QStringLiteral("%1 %2 rays a probe, a probe per %3x%3 pixels")
-                          .arg(n).arg(g.octRes * g.octRes).arg(g.stride);
-            }
-            // (every tier gathers since PHOTON-7 7-4: the "off at" clause only while a tier's row says off)
-            const QString offAt = off.isEmpty() ? QString()
-                                                : QStringLiteral("; off at ") + off.join(QStringLiteral(", "));
-            return QStringLiteral("The diffuse GI traced by hardware rays, once per probe cell, "
-                                  "instead of once per pixel by six voxel cones: a ray is stopped "
-                                  "by a triangle where a cone is stopped by a voxel. Auto is the "
-                                  "tier's: %1%2. A headset gathers the same row per eye. "
-                                  "Where it runs it IS the diffuse and the irradiance field is its "
-                                  "fallback.%3")
-                .arg(on.join(QStringLiteral("; ")), offAt,
-                     sceneTracesRays ? QString()
-                                     : QStringLiteral(" This machine or scene traces no rays, so "
-                                                      "the row does nothing here."));
-        };
-        r.get = [](const iris::ScenePtr &s) { return s ? qBound(-1, s->giGather, 1) : -1; };
-        r.set = [](const iris::ScenePtr &s, int v) { if (s) s->giGather = qBound(-1, v, 1); };
         out.append(r);
     }
     // EPIC'S TWO COLUMNS (owner option (b), 2026-09-09): what makes the top
@@ -1741,28 +1696,21 @@ QString photonTierSentence(PhotonTier t)
     // screen-probe gather IS the diffuse and the field its fallback; below it the
     // field (and the cones) are the diffuse.
     const jahshaka::engine::GiGatherFacts gather = photonGather(t);
-    if (gather.on) {
-        out += QStringLiteral("; the diffuse from the screen-probe gather where rays run "
-                              "(%1 rays a probe, a probe per %2x%2 px)")
-                   .arg(gather.octRes * gather.octRes)
-                   .arg(gather.stride);
-        out += photonDdgi(t) ? QStringLiteral(", the irradiance field its fallback")
-                             : QStringLiteral(", no irradiance field");
-        // ...AND IN A HEADSET (PHOTON-GA-VR): the tier table's VR column, read,
-        // never assumed — the same gather, or its own density, or the field.
-        const jahshaka::engine::GiGatherFacts vr = photonVrGather(t);
-        if (!vr.on)
-            out += QStringLiteral(" (in a headset the irradiance field and the cones instead)");
-        else if (vr.stride != gather.stride || vr.octRes != gather.octRes)
-            out += QStringLiteral(" (in a headset a probe per %1x%1 px, %2 rays)")
-                       .arg(vr.stride)
-                       .arg(vr.octRes * vr.octRes);
-        else
-            out += QStringLiteral(" (in a headset too, per eye)");
-    } else {
-        out += photonDdgi(t) ? QStringLiteral("; the irradiance field ON")
-                             : QStringLiteral("; no irradiance field");
-    }
+    out += QStringLiteral("; the diffuse from the screen-probe gather where rays run "
+                          "(%1 rays a probe, a probe per %2x%2 px)")
+               .arg(gather.octRes * gather.octRes)
+               .arg(gather.stride);
+    out += photonDdgi(t) ? QStringLiteral(", the irradiance field its fallback")
+                         : QStringLiteral(", no irradiance field");
+    // ...AND IN A HEADSET (PHOTON-GA-VR): the tier table's VR column, read,
+    // never assumed — the same gather, or its own density.
+    const jahshaka::engine::GiGatherFacts vr = photonVrGather(t);
+    if (vr.stride != gather.stride || vr.octRes != gather.octRes)
+        out += QStringLiteral(" (in a headset a probe per %1x%1 px, %2 rays)")
+                   .arg(vr.stride)
+                   .arg(vr.octRes * vr.octRes);
+    else
+        out += QStringLiteral(" (in a headset too, per eye)");
     out += photonBounces(t) > 0 ? QStringLiteral("; the light bounces, converged") : QStringLiteral("; no bounce");
 
     // The probe grid is the TECHNIQUE column, not the quality one: only the

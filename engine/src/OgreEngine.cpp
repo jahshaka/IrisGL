@@ -3250,7 +3250,7 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any, bool budgeted) {
             } else {
                 if (!g.giTuningEqual(*last.gi)) {
                     sc->setGiTuning(g);
-                    last.gi->gather = g.gather; last.gi->cards = g.cards;
+                    last.gi->cards = g.cards;
                     last.gi->cardBudgetTexels = g.cardBudgetTexels;
                     ++applied;
                 }

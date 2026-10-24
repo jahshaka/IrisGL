@@ -583,12 +583,6 @@ bool PhotonComponent::setGiTuning(const GiParams &p) {
         // allocate a texture the next frame allocates anyway.
         mGi.cards                = p.cards;
         mGi.cardBudgetTexels     = p.cardBudgetTexels;
-        // THE SCREEN-PROBE GATHER'S ROW, for the same reason and with the same
-        // nothing-happens-here: `probeGatherWanted()` reads it, the VIEW
-        // re-checks its chain shape once a frame (syncReflectListener) and the
-        // Component allocates on the first frame it is on and gives everything
-        // back on the first frame it is off. Not one voxel is re-injected.
-        mGi.gather               = p.gather;
         // THE RAY MARCH IS NOT A CONSTANT — it is read by the light INJECTION, so
         // moving it changes nothing at all until something else happens to
         // re-inject, and this file's own header calls a silently ignored slider

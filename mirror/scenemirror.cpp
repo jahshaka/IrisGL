@@ -7829,11 +7829,6 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // rebuilt sometimes and not others would be worse than one that always
         // does (recorded as a P2 tuning item, with the panel).
         gi.ddgi = toggle(mSource->giDdgi);
-        // THE SCREEN-PROBE GATHER's row, the same tri-state travel. It is GRAPH
-        // SHAPE on the engine's side (a gathering view carries the SSR prepass
-        // whether or not its SSR row asked for one — `ChainDesc::probeGather`),
-        // so it rides the change debounce with the rest of the configuration.
-        gi.gather = toggle(mSource->giGather);
         // THE CONFIGURATION RIDES THE RECORD (U0 3a), and WHEN THE GI ANSWERS A CHANGE IS THE ENGINE'S (U0 3c): the
         // debounce that stood here — two engine signatures read every sync, three light hashes, a stability window
         // and a re-inject cadence driven from the host — is the engine's one GI scheduler now (OgreScene::planGi),

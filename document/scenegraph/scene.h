@@ -621,21 +621,6 @@ public:
     /// (D4-PHOTON-TIERS).
     /// Only meaningful in the VCT modes: the field is fed by the voxel volume.
     int giDdgi = -1;
-    /// THE SCREEN-PROBE GATHER (SPECS/SCREEN_PROBE_GATHER_SPEC.md). The diffuse
-    /// GI estimated once per 16x16 pixels by 64 hardware rays instead of once
-    /// per pixel by six voxel cones: a ray is stopped by a TRIANGLE where a cone
-    /// is stopped by a VOXEL, and a rectangular emitter over a plane says which
-    /// is right — the gather reads 0.98-1.01 of the closed-form irradiance where
-    /// the cones read 0.65-0.72 (gi.gather_reference).
-    ///
-    /// 0 = off, 1 = on, -1 = AUTO = THE TIER'S (PHOTON-GATHER-1d): the engine's
-    /// tier table resolves it — on at every tier (PHOTON-7 stage 7, 7-4: Low at a
-    /// probe per 32 x 32 px), in a headset too. It traces wherever the machine can and falls back silently where
-    /// it cannot, exactly as the project's ray row does — a machine with no ray
-    /// query, or a project whose ray row is Off, keeps the no-rays picture and
-    /// this row does nothing. Only meaningful in the VCT modes: a gather ray's
-    /// HIT is lit from the hit surface's card or the voxel cascades.
-    int giGather = -1;
     /// WHERE THE FIELD'S PROBES GET THEIR LIGHT (GI_UNIFIED_SPEC.md P3 "A2"):
     /// RAYON — the user-facing quality tier for realtime global illumination
     /// (GI_UNIFIED_SPEC.md §2 / P2). 0 Low, 1 Medium, 2 High, 3 Epic.

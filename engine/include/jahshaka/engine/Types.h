@@ -2746,35 +2746,10 @@ struct GiParams {
     /// asserts by rendering it under both rules.
     bool      dragMoverChannel = false;
 
-    /// THE SCREEN-PROBE GATHER (SPECS/SCREEN_PROBE_GATHER_SPEC.md). The diffuse
-    /// GI estimated once per 16x16 pixels by 64 hardware rays instead of once
-    /// per pixel by six voxel cones -- a ray is stopped by a TRIANGLE where a
-    /// cone is stopped by a VOXEL, which is the whole argument (measured: 18 to
-    /// 59 % less light through a thin wall, spikes/gather-0).
-    ///
-    /// `Auto` IS THE TIER'S (PHOTON-GATHER-1d, the rule T-A): the tier table's
-    /// gather row (`giQualityFacts(...).gather`) — ON at every tier (Medium at 36
-    /// rays, Low at a probe per 32 x 32 px: PHOTON-7 7-4), the VR column the same (PHOTON-GA-VR) — under a GI mode that is on,
-    /// wherever the machine traces. `On` turns it on wherever the machine traces;
-    /// `Off` keeps the cones and the field. The same machine rule the reflections
-    /// take: no ray-query device, or a project whose ray row is Off, keeps the
-    /// no-rays picture (the field and the cones) and this row does nothing.
-    /// Where the gather runs it IS the diffuse: the cone diffuse is compiled out
-    /// and the irradiance field stays only as the fallback cage for a pixel no
-    /// probe answered.
-    ///
-    /// It is GRAPH SHAPE as well as a switch: the probes read their surface
-    /// from the SSR prepass' depth and normals, so a view whose row is on
-    /// carries that prepass whether or not the SSR row asked for one
-    /// (`ChainDesc::probeGather`) -- and the VIEW re-checks that shape once a
-    /// frame, which is why this row is in `giTuningEqual` and NOT in
-    /// `operator==`, exactly like the card cache's row beside it. Nothing about
-    /// the GI CONFIGURATION changes when it moves: no volume is re-voxelised,
-    /// no probe is re-integrated, no atlas is rebuilt. Putting it in the
-    /// configuration comparison tore the whole cascade chain down and built it
-    /// again to turn a compute dispatch on -- which also made every A/B arm of
-    /// every suite compare ACROSS a GI rebuild (the lead's read).
-    GiToggle  gather = GiToggle::Auto;
+    // THE SCREEN-PROBE GATHER HAS NO ROW (PHOTON-7 stage 7, 7-5; "never turn core stages off"): wherever the
+    // machine traces and the GI mode is on it IS the diffuse of every view that presents (and of a still picture),
+    // at the tier table's density (giQualityFacts(...).gather) - no toggle turns it off, because on a ray chain
+    // nothing else produces the diffuse the opaque passes read (they bind no world cache).
     // ---- SURFACE-CACHE phase 2: the card cache's three knobs ---------------
     //
     // WHY THEY LIVE ON GiParams AND NOT ON A STRUCT OF THEIR OWN: the cache is
@@ -2851,7 +2826,6 @@ struct GiParams {
                // it takes effect on the next frame with nothing torn down — and a
                // host that only pushed on `operator==` would swallow the change
                // entirely, which is the defect this line exists to prevent.
-               gather == o.gather &&
                cards == o.cards && cardBudgetTexels == o.cardBudgetTexels;
     }
     /// The cascade table, compared only over the entries in USE — a table
@@ -2973,9 +2947,6 @@ constexpr float kCardFootprintTexels = 4.0f;
 /// VRAM: 280 MB a headset view at 16 px a probe (the history 164 MB), 381 MB at
 /// Epic's 8 — a stereo view holds no rest mean (it never rests).
 struct GiGatherFacts {
-    /// What `GiParams::gather = GiToggle::Auto` resolves to (under a GI mode
-    /// that is on, on a machine that traces).
-    bool     on = false;
     /// Pixels per probe on both axes.
     unsigned stride = 16u;
     /// The octahedral map's resolution: the probe traces octRes^2 rays, one per
@@ -3202,7 +3173,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardLightTexels = 65536u;     // 4 pages a frame
         f.cardIndirectTexels = 16384u;  // 1 page a frame
         f.cardAreaStrata = 4u;          // 16 rays a texel an area light: 1 / 4 at a parallel edge
-        f.gather = { true, 32u, 8u, 4u };   // 64 rays a probe, a probe per 32x32 (7-4: Lumen High's density)
+        f.gather = { 32u, 8u, 4u };   // 64 rays a probe, a probe per 32x32 (7-4: Lumen High's density)
         f.probeGridBudgetBytes = 64ull << 20;
         break;
     case GiQuality::High:
@@ -3220,7 +3191,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 1.0)
         f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
         f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
-        f.gather = { true, 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
+        f.gather = { 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
         f.probeGridBudgetBytes = quality == GiQuality::Epic ? (1024ull << 20) : (512ull << 20);
@@ -3236,14 +3207,14 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardLightTexels = 131072u;    // 8 pages a frame
         f.cardIndirectTexels = 32768u;  // 2 pages a frame
         f.cardAreaStrata = 6u;          // 36 rays a texel an area light: 1 / 6 at a parallel edge
-        f.gather = { true, 16u, 6u, 4u };   // 36 rays a probe (T-A)
+        f.gather = { 16u, 6u, 4u };   // 36 rays a probe (T-A)
         f.probeGridBudgetBytes = 128ull << 20;
         break;
     }
     // ---- THE EPIC TIER'S GATHER: FOUR TIMES THE PROBES -----------------------
     // Keyed on the TIER, never on the view's SSR row (GA-TIERROW): the SSR row
     // is the reflections' own and stays what it is.
-    if (quality == GiQuality::Epic && f.gather.on) f.gather.stride = 8u;
+    if (quality == GiQuality::Epic) f.gather.stride = 8u;
     // ---- THE VR COLUMN (GiViewProfile, above) ------------------------------
     // ONE transform over the desktop rows, so the two columns cannot drift: the
     // middle cascade goes and the outermost steps twice as far. `stepCells` on

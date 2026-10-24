@@ -10554,26 +10554,13 @@ void OgreEngine::listRayMovers(const std::vector<OgreScene *> &drawn) {
 }
 
 // ---------------------------------------------------------------------------
-/// IS THE SCREEN-PROBE GATHER ON FOR THIS SCENE? The project's row resolved
-/// against the TIER TABLE and the machine (PHOTON-GATHER-1d, the rule T-A), the
-/// same shape `rayReflectionsWanted` has: the row says what the scene asks for,
-/// the table says what `Auto` means at this tier — on at every tier (PHOTON-7
-/// stage 7, 7-4: Low at a probe per 32 x 32 px), the VR column the same
-/// (`giQualityFacts(...).gather.on`) — and only
-/// under a GI mode that is on (there is no diffuse GI to estimate otherwise);
-/// the machine answers whether it can trace at all.
+/// IS THE SCREEN-PROBE GATHER ON FOR THIS SCENE? Wherever the machine traces and
+/// the GI mode is on (there is no diffuse GI to estimate otherwise): at every tier
+/// and in a headset alike (PHOTON-7 stage 7, 7-4), and with no row to turn it off
+/// (7-5: on a ray chain it is the only producer of the diffuse the opaque passes
+/// read). The machine answers whether it can trace at all.
 bool PhotonComponent::probeGatherWanted() const {
-    switch (mGi.gather) {
-    case GiToggle::Off: return false;
-    case GiToggle::On:  break;
-    default:
-        if (mGi.mode == GiMode::Off) return false;
-        if (!giQualityFacts(mGi.quality,
-                            mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
-                 .gather.on)
-            return false;
-        break;
-    }
+    if (mGi.mode == GiMode::Off) return false;
     return mScene.rayTracingResolved();
 }
 

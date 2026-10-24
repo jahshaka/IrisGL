@@ -337,11 +337,11 @@ int photonBounces(PhotonTier t);
 /// one, which is the owner's 2026-09-13 Q4 decision.
 int photonProbeSize(PhotonTier t);
 /// THE GATHER COLUMN (PHOTON-GATHER-1d): the screen-probe gather at this tier —
-/// on/off, the probe stride, the octahedral resolution, the adaptive cap — as a
+/// the probe stride, the octahedral resolution, the adaptive cap — as a
 /// PROJECTION of the engine's tier table (`giQualityFacts(...).gather`, the
-/// quality column and the Epic tier), never a copy: High and Epic on (8 px a
-/// probe at Epic), Medium on at 36 rays, Low off. What it resolves to still
-/// needs a machine that traces; the document row `giGather` = auto follows it.
+/// quality column and the Epic tier), never a copy: on at every tier wherever
+/// the machine traces (no row turns it off, PHOTON-7 7-5): 32 px a probe at Low,
+/// 16 at Medium (36 rays) and High, 8 at Epic.
 jahshaka::engine::GiGatherFacts photonGather(PhotonTier t);
 /// ...and its VR COLUMN (PHOTON-GA-VR): the gather a HEADSET gets at this tier —
 /// the same projection through `GiViewProfile::Vr`.
