@@ -1268,6 +1268,10 @@ constexpr ArmDef kArms[] = {
       "THE RELIGHT CREDIT'S TEST DOOR (stage 5's read B1; gi.relight_credit): while set, every cascade's owed relight "
       "waits as it does while its delta shader builds - a frame that cannot pay, where its floor credit must not "
       "bank. Off, the first paying frame relights at most its credit's cap plus the frame's pool." },
+    { ArmId::ShaderForceParamsMisfit, 0.0, 0.0, 1.0,
+      "THE MISFIT COUNTER'S NEGATIVE CONTROL (stage 5's read W5; shader.async_after_open): each time the arm comes on, "
+      "the next compute dispatch is refused and counted as a parameters misfit (app.asyncShaders().paramsMisfits) - "
+      "the fork's door HlmsCompute::_jahForceParamsMisfits; the refused job dispatches the next frame." },
     { ArmId::GiVoxelAreaStrata, 0.0, 0.0, 32.0,
       "The voxels' area light visibility at the next injections: n x n stratified marches over the rectangle, "
       "the ratio of their form-factor weights (0 = the shipped one march to its centre). A measuring arm "
