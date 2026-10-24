@@ -1008,7 +1008,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     bool changed = false;
     // THE INSTANCES THAT MOVED: released here and re-admitted below as THE SAME FACES (the cards a reader read keep
     // their place in the layout, their demand and their flags' meaning) at the new transform.
-    struct Kept { unsigned index; unsigned long long readBy[2]; };
+    struct Kept { unsigned index = 0u; unsigned long long readBy[2] = {0ull, 0ull}; };
     std::unordered_map<NodeId, std::vector<Kept>> moved;
     for (const CardSceneView::Candidate &cand : view.candidates) {
         auto it = mByNode.find(cand.node);
