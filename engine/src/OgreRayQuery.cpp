@@ -7534,7 +7534,12 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
     if (!scene || !cam) return;
-    if (!scene->probeGatherWanted()) {
+    // ...AND ONLY FOR A VIEW WHOSE CHAIN GATHERS (ChainDesc::probeGather: the scene's answer AND the view's offscreen
+    // contract - a Live or undeclared offscreen view takes the field's answer). Recorded for any view with the prepass,
+    // the gather bound its texture into a chain that is not a gathering chain - whose opaque pass reads the world
+    // caches - and the pass read two diffuse terms and two speculars (measured, PHOTON-7 7-5: a 0.35-rough metal on
+    // gi.rt_reflect_asan's undeclared view at 2.19x the reflection's reference, a blended pane in a live view +29 %).
+    if (!scene->probeGatherWanted() || !view->chainDesc().probeGather) {
         // OFF IS FREE, and it also has to be CLEAN: a view that was gathering
         // and stopped must give its atlases back and stop binding its texture
         // to the shader.
