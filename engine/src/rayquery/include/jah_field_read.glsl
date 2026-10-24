@@ -19,8 +19,6 @@
 //   windowOffset the slot of the window's first probe per axis (jah_field_window.glsl)
 //   numProbesAggregated  ( Nx, Nx * Ny ), the flat index's strides
 //   depthAtlas / irradAtlas  ( the bordered tile resolution, the atlas width, 1 / width, 1 / height )
-//   cage         false: the cage is declined (the host's gate) - no fetch, no answer; the confidence is then the read
-//                region's edge fade alone (what the gate owes the pixel is the consumer's to say)
 //
 // THE ANSWER: `irradiance` is what the pixel ADDS to its diffuse (the cage's normalised sum times the confidence and
 // the weight fade - upstream's composite line, ifdIrradiance x scale / sumValidWeight, or zero), and `confidence` the
@@ -76,7 +74,7 @@ vec2 jahFieldAtlasXY( vec3 dir, uint probeIdx, vec4 atlas )
 }
 
 JahFieldAnswer jahFieldRead( vec3 gridPos, vec3 gridNormal, vec3 gridViewDir, vec3 counts, uvec3 windowOffset,
-							 vec2 numProbesAggregated, vec4 depthAtlas, vec4 irradAtlas, bool cage )
+							 vec2 numProbesAggregated, vec4 depthAtlas, vec4 irradAtlas )
 {
 	// ---- THE SAMPLE POINT (ENGINE-6 item 1; FIELD-EDGE-1): off the surface, in probe spacings -------------------
 	// The cage looked up AT the shaded point evaluates the Chebyshev test on its own knife edge (a wall's two faces a
@@ -109,7 +107,6 @@ JahFieldAnswer jahFieldRead( vec3 gridPos, vec3 gridNormal, vec3 gridViewDir, ve
 	// (PHOTON-FIELD-ROTATE-1) the weight of the probes that HOLD a value: the composite divides by it
 	float sumIfdValidWeight = 0.0;
 
-	if( cage )
 	{
 		for( int i = 0; i < 8; ++i )
 		{
@@ -209,7 +206,7 @@ JahFieldAnswer jahFieldRead( vec3 gridPos, vec3 gridNormal, vec3 gridViewDir, ve
 	answer.confidence = ifdConfidence;
 	// THE COMPOSITE (upstream's line, the scale the confidence and the weight fade - every factor exactly 1 inside a
 	// whole field): under the cage's own condition, sumIfdValidWeight being its divisor
-	if( cage && sumIfdValidWeight > 0.0 )
+	if( sumIfdValidWeight > 0.0 )
 	{
 		const vec3 ifdIrradianceScale = vec3( ifdConfidence * ifdWeightFade );
 		answer.irradiance = ifdIrradiance * ( ifdIrradianceScale / sumIfdValidWeight );

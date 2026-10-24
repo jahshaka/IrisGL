@@ -172,8 +172,7 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// fillConstBufferData writes it for an IDENTITY view - three rows WORLD to grid, then ( Nx, Nx * Ny, -, - ), the
 	/// depth atlas ( the bordered tile, the width, 1 / width, 1 / height ) and the irradiance atlas the same - and
 	/// fieldWin: x the window's first slot packed x + 128 y + 16384 z, y / z the probe counts on Y and Z, w = 1 the
-	/// field is bound and composed (2: bound, the arm gather.fieldInPass - the pass composes the diffuse's fallback, the
-	/// integrate's w is the coverage, and the rough specular's stand-in for the diffuse composes it; 0: none bound).
+	/// field is bound and composed (0: none bound).
 	vec4 fieldRow0;
 	vec4 fieldRow1;
 	vec4 fieldRow2;

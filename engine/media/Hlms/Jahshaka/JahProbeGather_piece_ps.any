@@ -7,10 +7,10 @@
 // probe into `jahProbeIrradiance`; what arrives here is the MEAN RADIANCE over
 // the cosine-weighted hemisphere, which is exactly what `envColourD` is (the
 // BRDF multiplies it by kD and by pi, 200.BRDFs_piece_ps.any:305). So the
-// whole pixel side is an add, and the weight is the probe's own coverage: 1
-// where a probe answered, 0 where none did — and where none did the pixel
-// keeps whatever the irradiance field or the cones already gave it, which is
-// the fallback rule of the spec's section 2 item 8 in its simplest form.
+// whole pixel side is an add, and the weight is the texel's own coverage - 1
+// at every pixel since PHOTON-7 7-2: the integrate composes the irradiance
+// field (and the field's own environment fallback) where no probe answered,
+// after its temporal mean, so the texture IS the pixel's diffuse GI.
 //
 // WHY THIS PIECE IS `applyIrradianceVolumes`. It is upstream's own insertion
 // point immediately after the environment cubemaps and before the ambient
@@ -20,9 +20,10 @@
 // defined only under the `irradiance_volumes` property, which is never set).
 // Taking it costs no patch. The read itself is final since phase 2
 // (PHOTON-GATHER-1b): the integrate writes E/pi at the pixel's normal, and the
-// irradiance field's cage stands down where a probe answered through the fork
-// commit for fork b6c409c1f (was 0086)'s hook; a blended fragment never reads it (the
-// listener withdraws the property per renderable, GA-GLASS).
+// pass that reads it binds no world cache (PHOTON-7 7-5): no cone, no field
+// cage. A blended fragment never reads it: the chain draws the blended queues in
+// their own pass after the opaque one ("Jahshaka blended", OgreChain.cpp), with
+// the world caches the refractives pass reads.
 //
 // THE GUARD IS SIX TERMS AND EVERY ONE OF THEM EARNS ITS PLACE, two of them
 // because a missing one does not draw the wrong picture, it LOSES THE FRAME
@@ -49,24 +50,11 @@
 //   !irradiance_volumes   a second definition of one piece is a parse error,
 //                         and this file must not be the one that finds out.
 //
-// THE ACCOUNTING RULE (PHOTON-GATHER-1d, where the gather became the diffuse at
-// every ray tier). A pixel gets exactly ONE diffuse-GI term:
-//   * a pixel a probe answered: the gather's, here — the cone diffuse is
-//     compiled out on a gather pass (the listener's `vct_disable_diffuse`), and
-//     the irradiance field's cage declines it (JahIfd_piece_ps.any, the fork's
-//     cage gate, fork b6c409c1f (was 0086)'s hook);
-//   * a pixel no probe answered: the FIELD's cage — the field is the fallback
-//     and nothing else at a ray tier — and where the field's own confidence
-//     fades, the field's fallback (the environment, JahIfd's post hook). The
-//     escape-ambient closed form this piece used to add for such a pixel with no
-//     field bound is GONE: a gather tier binds the field (the tier table's
-//     `ddgi` column is on at every tier), so that second copy of the field's
-//     fallback answered only a configuration no tier ships;
-//   * a BLENDED fragment (the listener's `jah_env_diffuse_only`, GA-GLASS + F2):
-//     the ENVIRONMENT term alone — ONE-ENV's irradiance at the fragment's own
-//     normal (`jahEnvIrradiance`). It has no probe of its own (a probe sits on
-//     the surface the prepass drew), and it takes neither the cones nor the
-//     field's cage (declined in JahIfd_piece_ps.any under the same property).
+// THE ACCOUNTING RULE (PHOTON-GATHER-1d; PHOTON-7 7-2 and 7-5). A pixel gets
+// exactly ONE diffuse-GI term, the gather's, here: its texel holds the probes'
+// answer, or the irradiance field's where no probe answered (composed in the
+// integrate), and the pass binds neither the cones nor the field, and compiles
+// upstream's ambient out (below).
 
 @property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 @piece( applyIrradianceVolumes )
@@ -75,9 +63,8 @@
 	@property( jah_rough_spec )
 		// THE ROUGH SPECULAR (PHOTON-7 stage 7, 7-3): the radiance along this pixel's GGX lobe read from the probes'
 		// prefiltered maps, handed over to E/pi by the roughness (rq_probe_integrate.comp), at its GATE's share (w: 0
-		// where the view's traced reflection owns the lobe). The cone's specular is compiled out of this pass
-		// (vct_disable_specular, the listener); the material's cube takes the gate's complement below; the fork's SSR
-		// composite after both hands the reflection's confidence over.
+		// where the view's traced reflection owns the lobe). The pass binds no cone (7-5); the material's cube takes
+		// the gate's complement below; the fork's SSR composite after both hands the reflection's confidence over.
 		float4 jahRoughSpecTexel = OGRE_LoadScreen2D( jahRoughSpec, iFragCoord, 0 ).xyzw;
 		pixelData.envColourS += midf3_c( jahRoughSpecTexel.xyz ) * midf_c( jahRoughSpecTexel.w );
 	@end
@@ -88,20 +75,21 @@
 // already carried the sky into it (rq_probe_gather.comp reads the environment on a miss, occluded where the scene stops
 // it), so HlmsPbs's CubemapGlobal - the material's cube sampled along the lobe with nothing in the way - lights only the
 // gate's complement: the share the traced reflection owns, whose own warm-up hands over to the cube as before. Its hook
-// (jahGlobalEnvVisibility, empty wherever no GI piece defines it; the cone's definition is compiled out with the cone's
-// specular on this pass) under the same six terms as the read above.
+// (jahGlobalEnvVisibility, empty wherever no GI piece defines it; the cone's own definition needs the cone, which this
+// pass does not bind) under the same six terms as the read above.
 @property( jah_rough_spec && jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 	@piece( jahGlobalEnvVisibility )* midf_c( 1.0f - jahRoughSpecTexel.w )@end
 @end
 
-@property( jah_env_diffuse_only && vct_num_probes && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
-@piece( applyIrradianceVolumes )
-	// THE TRANSLUCENT SURFACE'S DIFFUSE GI: the environment's diffuse lookup for
-	// this normal (the SH, the cosine convolution of the sky —
-	// jah_environment.glsl), in radiance.
-	pixelData.envColourD.xyz += midf3_c(
-		jahEnvIrradiance( jahViewToWorldDir( float3( pixelData.normal ) ) ) );
-@end
+// THE AMBIENT IS NOT A SECOND DIFFUSE (PHOTON-7 stage 7, 7-5; PREFLIGHT_7 E8). Upstream's ambient (DoAmbientLighting: the
+// sky's SH at the normal, AmbientLighting_piece_ps.any) has ONE gate on a Photon pass - "outside every voxel volume",
+// vctSpecular.w == 0 - and the bound cone closes it everywhere (computeVctProbe writes the coverage w = 1 with or without
+// its specular). A pass that reads the gather binds no world cache (7-5: the gather is its diffuse, the integrate composes
+// the field and the field's own environment fallback where no probe answered, 7-2), so the gate is gone with the cone and
+// the SH would add the sky's irradiance, unoccluded, on top of the gather that already carries it (its rays escape to the
+// sky). On a pass that reads the gather the piece is compiled out whole: one diffuse term a pixel.
+@property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
+	@undefpiece( DoAmbientLighting )
 @end
 
 // F2's SECOND HALF (PHOTON-GATHER-1d): A BLENDED FRAGMENT IS NOT PART OF THE

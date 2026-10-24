@@ -1382,7 +1382,8 @@ private:
     // The sun contact's shape, twice over: in front of the hit decode, the TRACE (rq_area_vis.comp: one stratum of
     // each of the pass's forward LTC lights a half-resolution texel a frame, the ratio's two sums averaged over time)
     // and the RESOLVE (rq_area_vis_resolve.comp: the joint-bilateral upsample and the ratio) into a full-resolution
-    // RGBA8 Ogre texture `jahAreaVis`, which finishAreaVis registers for the opaque pass (OgreFog.cpp's slot,
+    // RG32_UINT Ogre texture `jahAreaVis` (x the diffuse ratio of light i in byte i, y the specular's), which
+    // finishAreaVis registers for the opaque pass (OgreFog.cpp's slot,
     // JahAreaVis_piece_ps.any in the fork's LTC hook). Allocated only while an LTC light is in the forward set.
 public:
     void recordAreaVis(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
@@ -7673,8 +7674,6 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     // passes are bound to (SceneGiBinding), composed by the integrate after its temporal mean - its atlases, its render
     // block for an identity view (world to grid), its window and counts; and the environment's SH, its own fallback,
     // with the pass buffer's signs (PhotonVct_piece_ps.any's JAH_ENV_SH_C0 .. C8: C2 .. C5 negated)
-    in.fieldCompose = !arm(ArmId::GatherFieldInPass, false);
-    in.noAnswer = arm(ArmId::GatherNoAnswer, false);
     in.roughQuadrature = unsigned(std::max(0.0, armValue(ArmId::GatherRoughQuadrature)) + 0.5);
     {
         const SceneGiBinding *gb = sceneGiBindingOf(scene->sceneManager());
@@ -8096,7 +8095,8 @@ void RayQueryTier::sunContactStatsInto(const OgreScene *scene, SunContactStatus 
 // pixel takes the cards' law (jah_area_strata.glsl, one text): rq_area_vis.comp traces one stratum of each of the
 // pass's forward LTC lights a half-resolution texel a frame and averages the ratio's two sums over time (with the
 // gather's rest law), rq_area_vis_resolve.comp upsamples them joint-bilaterally and takes the ratio into `jahAreaVis`
-// (RGBA8, light i in channel i), which the fork's hook in DoAreaLtcLights multiplies light i's LTC terms by.
+// (RG32_UINT: light i's diffuse ratio in byte i of x, its specular's in y), which the fork's hook in DoAreaLtcLights
+// multiplies light i's LTC diffuse and specular by.
 namespace {
 
 /// The parameter block, std140, mirroring jah_area_vis_params.glsl member for member.

@@ -2518,13 +2518,25 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
                 addPhotonPass(n, sceneTarget, PhotonComponent::kTracePass, "Jahshaka photon trace");
             addPhotonPass(n, sceneTarget, PhotonComponent::kResolvePass, "Jahshaka photon resolve");
         }
+        // THE OPAQUE PASSES READ ONLY SCREEN-SPACE GI (PHOTON-7 stage 7, 7-5; L4). On a GATHER chain the screen
+        // decode and the opaque pass shade from the four Photon screen products alone (the gather's diffuse and its
+        // rough specular, the reflection, the sun contact) and the area lights' visibility - the world caches (the
+        // voxel cascades, the irradiance field) are not theirs to bind (PhotonPassBinding::passReadsGi: no
+        // mJahReadsGi, nothing prepared): the gather IS the diffuse and the integrate composes the field where no
+        // probe answered (7-2). A BLENDED fragment has no screen product (no probe sits on it: the prepass holds
+        // opaque surfaces only), so the blended queues leave the opaque pass for their OWN pass right after it,
+        // "Jahshaka blended", which reads the world caches as the refractives pass does (the field's irradiance and
+        // the cone, Lumen's translucency reading its own volume) - the spec's "blended and refractive fragments" rule.
+        const bool screenGi = desc.probeGather;
         // THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) in front: it classifies unless
         // the prepass's decode pass already did this frame.
         Ogre::CompositorPassSceneDef *decode =
             desc.atomDraw ? addAtomDecodePass(n, sceneTarget, !prepass, false, "Jahshaka atom decode") : nullptr;
+        if (decode && screenGi) decode->mJahReadsGi = false;   // L4 (above; PhotonPassBinding::passReadsGi)
         Ogre::CompositorTargetDef *t = n->addTargetPass(sceneTarget);
-        t->setNumPasses(1);
+        t->setNumPasses(screenGi ? 2 : 1);
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+        if (screenGi) p->mJahReadsGi = false;   // L4 (above; PhotonPassBinding::passReadsGi)
         p->mShadowNode = desc.shadows ? Ogre::IdString(OgreView::kShadowNodeName) : Ogre::IdString();
         p->setAllClearColours(toOgre(desc.background));
         p->setAllLoadActions(Ogre::LoadAction::Clear);
@@ -2585,12 +2597,36 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         p->mFirstRQ = 0u;
         // Stop before the refractive queue only when there IS a refraction pass
         // to pick those items up; otherwise they render here, as plain glass.
-        p->mLastRQ  = desc.refractions ? kRefractiveRenderQueue : kOverlayRenderQueue;
+        const Ogre::uint8 sceneLastRq = desc.refractions ? kRefractiveRenderQueue : kOverlayRenderQueue;
+        // ...and before the BLENDED queues on a gather chain: they are the next pass's (above).
+        p->mLastRQ  = screenGi ? kBlendedRenderQueue : sceneLastRq;
         p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
         p->mProfilingId = "Jahshaka opaque";
         // THE PASS THAT UPDATES THE MIRRORS — see the other chain shape above.
         p->mIdentifier = planar::kPlanarUpdatePassIdentifier;
         if (decode) finishAtomDecodePass(handlesOut, decode, p);
+        if (screenGi) {
+            // THE BLENDED PASS: the queues [kBlendedRenderQueue, the opaque pass's old end) - the blended surfaces
+            // (14) and the scene's particles (15) - on the same target, in the same order they drew in the opaque
+            // pass, against the same depth, read-only as there (the prepass wrote it; a blended fragment writes
+            // none), the shadow node reused. It is not a PrePassUse pass, so the ray tier's pass-scoped screen
+            // products are already withdrawn (ReflectPassListener::passPosExecute after the opaque pass) and none
+            // of the prepass's properties reach its shaders.
+            auto *b = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+            b->mShadowNode = p->mShadowNode;
+            b->mShadowNodeRecalculation = Ogre::SHADOW_NODE_REUSE;
+            b->setAllLoadActions(Ogre::LoadAction::Load);
+            if (desc.letterbox) inset(handlesOut, b);
+            b->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            b->mStoreActionDepth = p->mStoreActionDepth;
+            b->mStoreActionStencil = Ogre::StoreAction::DontCare;
+            b->mReadOnlyDepth = true;
+            b->mReadOnlyStencil = true;
+            b->mFirstRQ = kBlendedRenderQueue;
+            b->mLastRQ = sceneLastRq;
+            b->mIncludeOverlays = false;   // see kIncludeOverlaysNote
+            b->mProfilingId = "Jahshaka blended";
+        }
     }
 
     // ---- THE HZB, right after the opaque pass (NANITE_SPEC §4.3) ------------

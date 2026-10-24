@@ -2000,8 +2000,6 @@ public:
     X(GatherJitter, "gather.jitter") /* the probes' jitter: 0 shipped (the grid's one offset a frame), 1 off (the centre) */ \
     X(GatherFilterOff, "gather.filterOff") /* the probe-space filter off (the measuring arm, decision 20) */ \
     X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */ \
-    X(GatherFieldInPass, "gather.fieldInPass") /* the field's fallback left to the shading pass (7-2's A/B: the old route; until 7-5) */ \
-    X(GatherNoAnswer, "gather.noAnswer") /* no probe answers any pixel (the weight floor at its largest: the fallback alone) */ \
     X(AreaVisReadback, "area.visReadback") /* the pixel's area light visibility copied to the host (ScenePublished::areaVis, a test door; 7-A) */ \
     X(GatherRoughQuadrature, "gather.roughQuadrature") /* the rough specular's quadrature door: 1 the filtered map kept beside the levels, 2 the lobe by brute force over it (7-3) */ \
     X(ShadowReceiverBoxesOff, "shadow.receiverBoxesOff") /* the receiver grid without the stock route's boxes (the fixture's negative control, U5 decision 22.3) */ \

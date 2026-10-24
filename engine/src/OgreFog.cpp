@@ -228,16 +228,15 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
                         hlms->_setTextureReg(tid, Ogre::PixelShader, kExtraPassSlots[i].reg, slot++);
         }
     }
-    // A BLENDED FRAGMENT IS NOT THE SURFACE THE PREPASS DREW, and three pass
-    // properties describe that surface (PHOTON-GATHER-1b GA-GLASS; 1d F2). All
-    // three are withdrawn per renderable here, AFTER HlmsPbs numbered the texture
-    // registers (notifyPropertiesMergedPreGenerationStep runs before this hook):
-    // the slots stay bound and numbered — nothing behind them moves — and simply
-    // go undeclared, and every guard that reads a property follows it.
-    // Cache-safe: derived from properties already in the merged set.
-    static const Ogre::IdString kProbeGather("jah_probe_gather");
-    static const Ogre::IdString kRoughSpec("jah_rough_spec");
-    static const Ogre::IdString kEnvDiffuseOnly("jah_env_diffuse_only");
+    // A BLENDED FRAGMENT IS NOT THE SURFACE THE PREPASS DREW (PHOTON-GATHER-1b GA-GLASS; 1d F2): the pass properties
+    // that describe that surface are withdrawn per renderable here, AFTER HlmsPbs numbered the texture registers
+    // (notifyPropertiesMergedPreGenerationStep runs before this hook): the slots stay bound and numbered - nothing
+    // behind them moves - and simply go undeclared, and every guard that reads a property follows it. Cache-safe:
+    // derived from properties already in the merged set. ON A GATHER CHAIN no blended fragment reaches a pass that
+    // reads the screen products - the chain draws them in their own pass after the opaque one (OgreChain.cpp, "Jahshaka
+    // blended", PHOTON-7 7-5) - so what is withdrawn here is what a PrePassUse pass of the OTHER chains binds: the
+    // prepass itself and the ray tier's area visibility (a chain with the prepass and rays but no gather: a live
+    // offscreen view).
     static const Ogre::IdString kShadowCaster("hlms_shadowcaster");
     const bool blended = hlms->_getProperty(tid, Ogre::IdString("hlms_alphablend")) != 0 &&
                          !hlms->_getProperty(tid, kShadowCaster);
@@ -261,25 +260,6 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
             hlms->_setProperty(tid, kUsePrePass, 0);
             hlms->_setProperty(tid, kUseSsr, 0);
         }
-        // GA-GLASS — THE GATHER: the probe texel under a blended fragment is the
-        // opaque surface's irradiance (measured: a Glass slab 1.9/255, a Blend
-        // slab 18.6/255 on the gather's toggle, gi.gather_glass). Withdrawn — and
-        // THE TRANSLUCENT SURFACE'S DIFFUSE GI IS DECIDED (PHOTON-GATHER-1d): the
-        // ENVIRONMENT TERM ONLY — ONE-ENV's irradiance at the fragment's own
-        // normal, `jah_env_diffuse_only` (JahProbeGather_piece_ps.any). A blended
-        // fragment reads no gather (it has no probe of its own: a probe sits on
-        // the surface the prepass drew), no cones (they are compiled out on a
-        // gather tier, below) and no field cage (JahIfd_piece_ps.any declines it
-        // under the same property): what lights a translucent surface from the
-        // scene is its direct light, what it transmits is the refraction's.
-        if (hlms->_getProperty(tid, kProbeGather)) {
-            hlms->_setProperty(tid, kProbeGather, 0);
-            hlms->_setProperty(tid, kEnvDiffuseOnly, 1);
-        }
-        // ...AND ITS ROUGH SPECULAR (7-3): the texel under a blended fragment is the opaque surface's lobe. Withdrawn:
-        // the fragment keeps the cone's specular and its material cube (it has no screen product - the spec's
-        // "blended and refractive fragments" rule).
-        hlms->_setProperty(tid, kRoughSpec, 0);
         // ...AND THE AREA LIGHTS' VISIBILITY (7-A): the opaque surface's behind the fragment - withdrawn, the
         // fragment's area lights unshadowed as upstream draws them.
         static const Ogre::IdString kAreaVis("jah_area_vis");
@@ -288,30 +268,6 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
     static const Ogre::IdString kIrradianceField("irradiance_field");
     static const Ogre::IdString kVctNumProbes("vct_num_probes");
     static const Ogre::IdString kVctDisableDiffuse("vct_disable_diffuse");
-    static const Ogre::IdString kVctDisableSpecular("vct_disable_specular");
-    // WHERE THE GATHER'S ROUGH SPECULAR IS THE ENVIRONMENT TERM, THE CONE'S IS NOT (PHOTON-7 stage 7, 7-3): the probes'
-    // filtered radiance along the pixel's GGX lobe and the cone march along it estimate ONE integral, so on a pass that
-    // reads `jahRoughSpec` the cone's specular - its march, its escape's sky share, the rough lobe's voxel share and
-    // the hook that weighted the material's cube - is compiled out (HlmsPbs's own `vct_disable_specular`, the property
-    // a PCC capture sets), and the material's environment cube lights only the gate's complement, the share the traced
-    // reflection owns (JahProbeGather_piece_ps.any's jahGlobalEnvVisibility: the probes' escaping rays carry the sky
-    // once). Cache-safe: derived from a property just set.
-    if (hlms->_getProperty(tid, kRoughSpec) && !hlms->_getProperty(tid, kShadowCaster))
-        hlms->_setProperty(tid, kVctDisableSpecular, 1);
-    {
-        // WHERE THE GATHER ANSWERS, THE CONES DO NOT (GATHER-0; the tier's fact
-        // since PHOTON-GATHER-1d: a pass gathers exactly on a gather tier). The
-        // four cone marches per pixel and the probe's 64 rays estimate the SAME
-        // integral; adding them is that integral twice. So on a gather pass the
-        // cone diffuse is compiled out of every renderable — the gathering ones
-        // and the translucent ones above alike (every tier gathers where rays run,
-        // PHOTON-7 7-4). Cache-safe: derived from the properties just set.
-        if ((hlms->_getProperty(tid, kProbeGather) || hlms->_getProperty(tid, kEnvDiffuseOnly)) &&
-            !hlms->_getProperty(tid, kShadowCaster)) {
-            hlms->_setProperty(tid, kVctDisableDiffuse, 1);
-            return;
-        }
-    }
     if (!hlms->_getProperty(tid, kIrradianceField)) return;
     if (hlms->_getProperty(tid, kVctNumProbes) <= 1) return;
     hlms->_setProperty(tid, kVctDisableDiffuse, 0);

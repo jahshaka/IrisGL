@@ -83,11 +83,6 @@
 										   passBuf.irradianceField.viewToIrradianceFieldRow1,
 										   passBuf.irradianceField.viewToIrradianceFieldRow2 );
 
-	// A HOST PIECE MAY DECLINE THE WHOLE CAGE FOR THIS PIXEL (a pixel whose diffuse GI another estimator answered - the
-	// screen-probe gather): no fetch is paid. Left at one, the cage runs.
-	float ifdCageEnabled = 1.0;
-	@insertpiece( custom_ps_ifdCageGate )
-
 	// THE FIELD'S PROBE COUNTS AND ITS WINDOW (jahIfd: x the window's first slot packed x + 128 y + 16384 z, y and z
 	// the counts upstream's render params do not carry - OgreScene::pushIfdState; absent counts reduce the cage to
 	// upstream's behaviour)
@@ -100,13 +95,10 @@
 		float4( passBuf.irradianceField.depthBorderedRes, passBuf.irradianceField.depthFullWidth,
 				passBuf.irradianceField.depthInvFullResolution ),
 		float4( passBuf.irradianceField.irradBorderedRes, passBuf.irradianceField.irradFullWidth,
-				passBuf.irradianceField.irradInvFullResolution ),
-		ifdCageEnabled != 0.0 );
+				passBuf.irradianceField.irradInvFullResolution ) );
 	pixelData.envColourD.xyz += ifdAnswer.irradiance;
-	// HOW MUCH OF THE PIXEL THE FIELD ANSWERED, for the host's two hooks: what a declined cage owes (resolve), and the
-	// fallback that takes the rest (post)
+	// HOW MUCH OF THE PIXEL THE FIELD ANSWERED, for the host's hook: the fallback that takes the rest
 	float ifdConfidence = ifdAnswer.confidence;
-	@insertpiece( custom_ps_ifdCageResolve )
 	@insertpiece( custom_ps_ifdCagePost )
 @end
 }

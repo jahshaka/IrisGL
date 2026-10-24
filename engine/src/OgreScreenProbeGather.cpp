@@ -1558,7 +1558,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // PHOTON-GATHER-1b: the SH bands the integrate evaluates (9 unless the
     // measurement arm asks for 4), the weight floor, the filter on or off.
     pp.knobs4[0] = in.tuning.shBands == 4u ? 4.0f : 9.0f;
-    pp.knobs4[1] = in.noAnswer ? 3.0e38f : kWeightFloor;   // (the measuring door gather.noAnswer: no probe answers)
+    pp.knobs4[1] = kWeightFloor;
     pp.knobs4[2] = in.tuning.filterOff ? 0.0f : float(filterRadiusOf(in.tuning));
     pp.knobs4[3] = in.photonOverlay && !in.photonOverlayGatherHits ? 1.0f : 0.0f;   // THE PHOTON VIEW's discs (PHOTON-VIEW-1)
     // THE GATHER-HITS RECORDS (FAR-SUN-1): one uvec4 per ray of every uniform probe, made on
@@ -1656,14 +1656,13 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         std::memcpy(pp.cloudMap, in.cloudMap, sizeof(pp.cloudMap));
         std::memcpy(pp.cloudSun, in.cloudSun, sizeof(pp.cloudSun));
         // THE IRRADIANCE FIELD, composed by the integrate (PHOTON-7 stage 7, 7-2; jah_probe_params.glsl): the block,
-        // the window and counts, w = 1 bound and composed (the arm gather.fieldInPass: 0, the pass's route)
+        // the window and counts, w = 1 bound and composed
         const bool field = in.fieldIrradiance && in.fieldDepth;
         std::memcpy(pp.field, in.field, sizeof(pp.field));
         pp.fieldWin[0] = in.fieldWin[0];
         pp.fieldWin[1] = in.fieldWin[1];
         pp.fieldWin[2] = in.fieldWin[2];
-        // (2: the arm gather.fieldInPass - the pass composes the diffuse's field, the rough specular's stand-in here)
-        pp.fieldWin[3] = field ? (in.fieldCompose ? 1.0f : 2.0f) : 0.0f;
+        pp.fieldWin[3] = field ? 1.0f : 0.0f;
         for (int k = 0; k < 9; ++k)
             for (int c = 0; c < 3; ++c) pp.envSh[k][c] = in.envSh[k][c];
     // THE ROUGH SPECULAR (7-3): the gate against the view's traced reflection, DiffuseLerp's two ends, the levels

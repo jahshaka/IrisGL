@@ -254,19 +254,15 @@ struct GatherInputs {
     /// MOVER-OCCLUSION-1: a ray-traced mover exists (the hit's mover gate runs).
     bool movers = false;
     /// THE IRRADIANCE FIELD, THE FALLBACK OF THE PIXELS NO PROBE ANSWERS (PHOTON-7 stage 7, 7-2): composed into the
-    /// gather's texture after its temporal mean (rq_probe_integrate.comp), so the texture's w is 1 and the pass's own
-    /// cage declines (JahIfd_piece_ps.any's gate). Its two atlases (null = no field: the pixels no probe answers keep no
-    /// diffuse, as the pass's own route gave them), its render block for an identity view (PhotonIrradianceField::
-    /// fillConstBufferData), the window word and the Y / Z counts; and the environment's SH, the field's own fallback
-    /// (world axes, C0 .. C8). `fieldCompose` false = the measuring arm gather.fieldInPass: the pass's route.
+    /// gather's texture after its temporal mean (rq_probe_integrate.comp), so the texture's w is 1 (the pass that reads
+    /// it binds no field, 7-5). Its two atlases (null = no field: the pixels no probe answers keep no diffuse), its
+    /// render block for an identity view (PhotonIrradianceField::fillConstBufferData), the window word and the Y / Z
+    /// counts; and the environment's SH, the field's own fallback (world axes, C0 .. C8).
     Ogre::TextureGpu *fieldIrradiance = nullptr;
     Ogre::TextureGpu *fieldDepth = nullptr;
     float field[24] = {};
     float fieldWin[3] = {};
     float envSh[9][3] = {};
-    bool fieldCompose = true;
-    /// THE MEASURING DOOR gather.noAnswer: no probe answers any pixel (the weight floor at its largest).
-    bool noAnswer = false;
 
     unsigned width = 0u, height = 0u;
 
