@@ -217,4 +217,49 @@ vec3 jahSkyShareFine( vec3 posLS, vec4 origin, mat3 basis )
 	return sky * 0.0625;
 }
 
+/// THE SPECULAR CONE AT A SURFACE POINT (PHOTON-7 stage 7, 7-6: ONE text for the pixel's passes that still bind the
+/// voxels - the blended and refractive ones, PhotonVct_piece_ps.any - and the no-ray route's screen integrate,
+/// Jahshaka/ScreenIntegrate). The march of the reflection's lobe; the caller composes it (the fog law on the voxels'
+/// share, the environment's share, the rough lobe's two shares - PhotonVct_piece_ps.any says the rules).
+///   `posLS` the diffuse set's start (jahConeStart) and `biasDirLS` its unit normal, cascade 0's normalised space;
+///   `origin` the set's origin plane (jahConeOrigin); `reflVecLS` the unit reflection in the same space;
+///   `reflDir` / `normal` the reflection and the normal in ONE space of the caller's (their cosine is what is read);
+///   `perceptualRoughness` the surface's; `flags` JAH_MARCH_SDF or 0 (JAH_MARCH_SPECULAR is always set).
+/// A LOBE WIDER THAN 45 DEGREES IS NOT A CONE (PHOTON-VOXEL-3): at tan > 1 the march is the occlusion query of the lobe
+/// (capped at tan 1, started at the diffuse start: no mirror image to slide), `roughLobe` says so, and `specAlpha` is
+/// then the above-horizon share's visibility (BISTRO-FIXES-3); otherwise it is the lobe's escape.
+struct JahSpecularCone
+{
+	JahConeResult march;
+	float specAlpha;
+	bool roughLobe;
+	float below;
+};
+JahSpecularCone jahSpecularCone( vec3 posLS, vec3 biasDirLS, vec4 origin, vec3 reflVecLS, vec3 reflDir, vec3 normal,
+								 float perceptualRoughness, uint flags )
+{
+	JahSpecularCone s;
+	// 1 / (1 - 0.02) = 1.020408163
+	const float vctRoughness = ( perceptualRoughness - 0.02 ) * 1.020408163;
+	const float specConeAngleTan = max( 0.0, tan( vctRoughness * 0.5 * 3.141592654 * 0.99 ) );
+	s.roughLobe = specConeAngleTan > 1.0;
+	// the lobe's share below the surface is stopped by it (jahConeBelow)
+	vec4 specOrigin = origin;
+	specOrigin.w = jahConeBelow( normalize( reflDir ), normalize( normal ), min( specConeAngleTan, 1.0 ) );
+	s.below = specOrigin.w;
+	// ...and it starts ON the reflection, one cell above the surface, aged by the stretch it skipped
+	vec4 start = jahSpecularConeStart( posLS - biasDirLS * JAH_VOX_INVRES( 0 ), reflVecLS, biasDirLS );
+	if( s.roughLobe )
+		start = vec4( posLS, 0.0 );
+	s.march = jahConeMarchAged( start.xyz, reflVecLS, min( specConeAngleTan, 1.0 ), specOrigin,
+								JAH_MARCH_SPECULAR | flags, start.w );
+	s.specAlpha = 1.0 - min( 1.0, s.march.alpha / 0.95 );
+	if( s.roughLobe )
+	{
+		const float above = clamp( ( s.march.alpha - s.below ) / max( 1.0 - s.below, 1e-4 ), 0.0, 1.0 );
+		s.specAlpha = 1.0 - min( 1.0, above / 0.95 );
+	}
+	return s;
+}
+
 #endif   // JAH_VOXEL_CONES_GLSL

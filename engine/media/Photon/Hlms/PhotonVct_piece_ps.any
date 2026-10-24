@@ -343,58 +343,27 @@
 		else
 		{
 			float3 reflVecLS = toVctProbeSpaceDir( pixelData.reflDir, probeParams );
-			// 1 / (1 - 0.02) = 1.020408163
-			float vctRoughness = (pixelData.perceptualRoughness - 0.02f) * 1.020408163f;
-			float specConeAngleTan = max( 0.0f, tan( vctRoughness * 0.5f * M_PI * 0.99f ) );
-			// A LOBE WIDER THAN 45 DEGREES IS NOT A CONE (PHOTON-VOXEL-3). At tan > 1 a
-			// cone's footprint at its first sample reaches behind its own origin (radius
-			// tan x distance > distance): at roughness 0.9 (tan 5.7) the leak room's
-			// specular cone read the lamp outside through a 0.5 m wall. Such a lobe is
-			// read in two shares. THE SKY'S: the prefiltered lobe (jahEnvLobe - exactly
-			// what PBS reads outside every volume, the split-sum) times the share the
-			// voxels did not stop; THE STOPPED ONE: what this march stopped on - its own
-			// colour at the same occlusion, handed out in outRoughVoxel and added by
-			// applyVctRoughSpecular (BISTRO-FIXES-3; the diffuse set's voxel light stood
-			// for it before and was the wrong integral). The occlusion comes from this
-			// march CAPPED AT TAN 1 - a query along the reflection - in outRoughOcclusion.
-			const bool jahRoughLobe = specConeAngleTan > 1.0f;
-			// the lobe's share below the surface is stopped by it (jahConeBelow)
-			float4 jahSpecOrigin = jahOrigin;
-			jahSpecOrigin.w = jahConeBelow( normalize( pixelData.reflDir ), normalize( pixelData.normal ), min( specConeAngleTan, 1.0f ) );
-			// ...and it starts ON the reflection, one cell above the surface, aged by the stretch
-			// it skipped (jahSpecularConeStart: the parallel line one cell along the normal slid
-			// the mirror image by that cell)
-			float4 jahSpecStart = jahSpecularConeStart( posLS - biasDirLS * JAH_VOX_INVRES( 0 ),
-														reflVecLS, biasDirLS );
-			// A LOBE WIDER THAN tan 1 has no image to slide: its march is the occlusion query of
-			// a lobe spread over most of the hemisphere, and it keeps the diffuse set's start (on
-			// the reflection, the sealed room's rough walls let 3 more codes of sky through the
-			// reader's lattice residual: gi.sealed_room_chain_target, eye at the centre 3 -> 6).
-			if( jahRoughLobe )
-				jahSpecStart = float4( posLS, 0.0f );
-			JahConeResult irrLight = jahConeMarchAged( jahSpecStart.xyz, reflVecLS, min( specConeAngleTan, 1.0f ), jahSpecOrigin,
+			// THE MARCH IS ONE TEXT (PHOTON-7 stage 7, 7-6): jahSpecularCone (jah_voxel_cones.glsl, the piece
+			// JahVoxelCones) - the lobe's aperture, A LOBE WIDER THAN 45 DEGREES IS NOT A CONE (PHOTON-VOXEL-3: at tan > 1
+			// it is read in two shares, THE SKY'S - the prefiltered lobe times the share the voxels did not stop - and THE
+			// STOPPED ONE, what this march stopped on, handed out in outRoughVoxel and added by applyVctRoughSpecular,
+			// BISTRO-FIXES-3; the occlusion comes from this march CAPPED AT TAN 1 in outRoughOcclusion), the start on the
+			// reflection one cell above the surface aged by the stretch it skipped (jahSpecularConeStart), the share below
+			// the surface (jahConeBelow), and the rough lobe's above-horizon visibility. The screen integrate of the
+			// no-ray route runs the same function.
+			const JahSpecularCone jahSpec = jahSpecularCone( posLS, biasDirLS, jahOrigin, reflVecLS,
+															 float3( pixelData.reflDir ), float3( pixelData.normal ),
+															 float( pixelData.perceptualRoughness ),
 			@property( vct_enable_specular_sdf_quality )
-												   JAH_MARCH_SPECULAR | JAH_MARCH_SDF, jahSpecStart.w );
+															 JAH_MARCH_SDF );
 			@else
-												   JAH_MARCH_SPECULAR, jahSpecStart.w );
+															 0u );
 			@end
-
-			float specAlpha = ( 1.0f - min( 1.0f, irrLight.alpha / 0.95f ) );
-			// THE ROUGH LOBE'S VISIBILITY IS ITS ABOVE-HORIZON SHARE'S (BISTRO-FIXES-3). The
-			// march starts its composite with the share of the cone below the surface
-			// (jahConeBelow, jahSpecOrigin.w), so a grazing query is half stopped by its own
-			// surface. The split-sum the sky's and the voxels' shares are weighted by already
-			// holds that loss (the BRDF's masking: no light arrives from below the horizon), so
-			// read as occlusion it removed the open sky a second time - a rough open street
-			// seen at a grazing angle lost about half its sky reflection. Of the share above
-			// the surface, the voxels stopped (alpha - below) / (1 - below) (the composite is
-			// front to back, the below share first); THAT is the visibility both shares take.
-			if( jahRoughLobe )
-			{
-				const float jahBelow = jahSpecOrigin.w;
-				const float jahAbove = saturate( ( irrLight.alpha - jahBelow ) / max( 1.0f - jahBelow, 1e-4f ) );
-				specAlpha = 1.0f - min( 1.0f, jahAbove / 0.95f );
-			}
+			const bool jahRoughLobe = jahSpec.roughLobe;
+			float4 jahSpecOrigin = jahOrigin;
+			jahSpecOrigin.w = jahSpec.below;
+			JahConeResult irrLight = jahSpec.march;
+			float specAlpha = jahSpec.specAlpha;
 
 			// THE FOG LAW ON THE VOXELS' SHARE (PHOTON-I-1: one law on every reflection
 			// path, jah_fog_along.glsl). The light the cone gathered crossed the medium
