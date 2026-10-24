@@ -8327,6 +8327,15 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
     if (!scene || !cam) return;
+    // ...AND NEVER FOR A CHAIN OF THE NO-RAY ROUTE (ChainDesc::screenIntegrate: a chain that does not gather - a Live
+    // or undeclared offscreen view of a ray scene - whose ScreenGiListener traces the area visibility through the
+    // voxel chain): ONE PRODUCER A VIEW (the 7-5 recordGather rule). Recorded here too, both traced and registered
+    // every frame for the one view, the passes read whichever registered last (measured, gi.screen_bind (4): twice
+    // the producer's residency).
+    if (view->chainDesc().screenIntegrate) {
+        forgetAreaVis(key);
+        return;
+    }
     // THE FORWARD LTC SET - none: OFF IS FREE AND CLEAN (the view gives its images back and binds nothing)
     const std::vector<const Ogre::Light *> lights = forwardLtcLights(scene->sceneManager());
     if (lights.empty() || !scene->rayTracingResolved()) {
