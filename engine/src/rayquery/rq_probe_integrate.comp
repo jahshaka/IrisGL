@@ -193,6 +193,8 @@ layout( rgba16f, set = 0, binding = 17 ) uniform image2DArray roughRest;
 #include "jah_field_read.glsl"
 
 #include "jah_reproject.glsl"
+// THE REST MEANS' STORE (PHOTON_2_SPEC R1: every fp16 running statistic is stored stochastically rounded)
+#include "jah_half_stochastic.glsl"
 #include "jah_probe_history.glsl"
 #include "jah_probe_seen.glsl"
 
@@ -905,7 +907,10 @@ void main()
 		restTakes = !noSample && !( p.stereo.w > 0.5 && prevCount > 0u );
 		const vec4 stored = restK < 1.5 ? vec4( 0.0, 0.0, 0.0, -1.0 ) : imageLoad( restMean, at );
 		const bool empty = stored.w < -0.5;
-		const vec4 rest = !restTakes ? stored : empty ? sample1 : mix( stored, sample1, 1.0 / restK );
+		vec4 rest = !restTakes ? stored : empty ? sample1 : mix( stored, sample1, 1.0 / restK );
+		// (stored through the half's stochastic rounding: round to nearest drops the increment under half an ulp, and
+		// drops it unevenly - the stage 7 read's F5; w, the count's sentinel, is exact)
+		if( restTakes ) rest.xyz = jahRestStoreMean( rest.xyz, pix, eye, restK );
 		imageStore( restMean, at, rest );
 		const vec4 restAnswer = rest.w < -0.5 ? prev : rest;
 		restHandover = clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 );
@@ -944,9 +949,11 @@ void main()
 		if( restK >= 1.0 )
 		{
 			const vec4 stored = restK < 1.5 ? vec4( 0.0, 0.0, 0.0, -1.0 ) : imageLoad( roughRest, at );
-			const vec4 rest = !restTakes ? stored
+			vec4 rest = !restTakes ? stored
 							  : stored.w < -0.5 ? vec4( lobe, 1.0 )
 												: mix( stored, vec4( lobe, 1.0 ), 1.0 / restK );
+			// (the diffuse rest mean's stochastic store, its own draws: R1, F5)
+			if( restTakes ) rest.xyz = jahRestStoreMean( rest.xyz, pix, eye + 2, restK );
 			imageStore( roughRest, at, rest );
 			const vec3 restAnswer = rest.w < -0.5 ? prevLobe : rest.xyz;
 			meanLobe = mix( mix( prevLobe, restAnswer, blend ), restAnswer, restHandover );

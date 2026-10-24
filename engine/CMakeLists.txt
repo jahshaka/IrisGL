@@ -829,6 +829,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_area_strata.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_reproject.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_area_vis_law.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_half_stochastic.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
 set(JAH_WRAP_HLMS_PIECE "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WrapHlmsPiece.cmake")
@@ -967,6 +968,11 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahAreaVisLaw
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahAreaVisLaw_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_area_vis_law.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # ...and the fp16 statistic's stochastic store (PHOTON_2_SPEC R1), the law's and the ray jobs' one text
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahHalfStochastic
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahHalfStochastic_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_half_stochastic.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # engine.voxel_reader_parity (tests/compute): the harness body as a piece
     # for its compute half, and its fragment half as a plain GLSL program built

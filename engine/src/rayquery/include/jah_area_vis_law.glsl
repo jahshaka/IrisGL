@@ -57,6 +57,24 @@ const float kAreaLampEnd = 0.05;
 const uint kAreaCountMax = 4096u;
 
 #ifdef JAH_AREA_VISIBLE
+/// THE STORE, ROUNDED STOCHASTICALLY TO HALF PRECISION (PHOTON_2_SPEC R1: EVERY fp16 running statistic is,
+/// jah_half_stochastic.glsl): the four sums' history and their four rest means live in halves (the ray tier's rgba16f,
+/// the no-ray route's packed pairs), and an EMA at its floor 1 / n^2 rounded to nearest stalls within n^2 / 2 half-ulps
+/// of its mean (8 ulps at n 4, 18 at Medium's n 6: ~0.4 - 1.8 %; the stage 7 read's F5). The draw a hash of the texel,
+/// the frame's stratum index and the statistic.
+vec4 jahAreaStoreHalf( vec4 v, ivec2 tc, uint which )
+{
+	uint s = jahRestHash( uint( tc.x ) * 73856093u ^ uint( tc.y ) * 19349663u ^ uint( p.strata.y ) * 2654435761u ^
+						  which * 83492791u );
+	vec4 r;
+	for( int c = 0; c < 4; ++c )
+	{
+		s = jahRestHash( s + uint( c ) );
+		r[c] = jahHalfStochastic( v[c], float( s >> 8u ) * ( 1.0 / 16777216.0 ) );
+	}
+	return r;
+}
+
 void jahAreaVisTrace( ivec2 tc )
 {
 	const ivec2 traceRes = ivec2( p.resolution.xy );
@@ -190,6 +208,10 @@ void jahAreaVisTrace( ivec2 tc )
 			rS2 = mix( oS2, sampleS2, 1.0 / restK );
 			rU2 = mix( oU2, sampleU2, 1.0 / restK );
 		}
+		rS = jahAreaStoreHalf( rS, tc, 4u );
+		rU = jahAreaStoreHalf( rU, tc, 5u );
+		rS2 = jahAreaStoreHalf( rS2, tc, 6u );
+		rU2 = jahAreaStoreHalf( rU2, tc, 7u );
 		JAH_AREA_REST_STORE( tc, rS, rU, rS2, rU2 );
 		const float h = clamp( ( restK - 1.0 ) / max( p.rest.y - 1.0, 1.0 ), 0.0, 1.0 );
 		meanS = mix( mix( prevS, rS, blend ), rS, h );
@@ -197,6 +219,10 @@ void jahAreaVisTrace( ivec2 tc )
 		meanS2 = mix( mix( prevS2, rS2, blend ), rS2, h );
 		meanU2 = mix( mix( prevU2, rU2, blend ), rU2, h );
 	}
+	meanS = jahAreaStoreHalf( meanS, tc, 0u );
+	meanU = jahAreaStoreHalf( meanU, tc, 1u );
+	meanS2 = jahAreaStoreHalf( meanS2, tc, 2u );
+	meanU2 = jahAreaStoreHalf( meanU2, tc, 3u );
 	JAH_AREA_STORE_CUR( tc, meanS, meanU, meanS2, meanU2,
 						uvec4( floatBitsToUint( dist ), min( prevCount + 1u, kAreaCountMax ), jahAreaPackNormal( N ), 0u ) );
 }

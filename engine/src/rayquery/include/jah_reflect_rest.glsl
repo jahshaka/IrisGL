@@ -64,52 +64,9 @@ float jahRestReach( float movingReach, float e, float handOverWeight )
 {
 	return mix( movingReach, min( movingReach, kRestReachPerCode * e ), clamp( handOverWeight, 0.0, 1.0 ) );
 }
-/// THE REST MEAN'S STORE, ROUNDED STOCHASTICALLY TO HALF PRECISION (P1): the running mean M + (s - M) / v lives in an
-/// rgba16f half, and from a few hundred samples on the increment falls under half a unit in the last place - round to
-/// nearest then drops it, and drops it UNEVENLY (a reflection whose samples are mostly a little above the mean and rarely
-/// far below loses only the small ones): measured on photon-glass, every texel running to 512 samples held 0.71 codes
-/// dark of the 4,096-sample reference over 24 % of the glossy pixels. Rounding up with the probability of the remainder
-/// keeps the stored mean unbiased (its noise: a random walk of ~0.3 ulp a step - 7 ulp, 0.35 %, at 512). The draw is a
-/// hash of the texel and the rest frame: the held answer stays a function of the scene and the eye.
-uint jahRestHash( uint x )
-{
-	x ^= x >> 16u;
-	x *= 0x7feb352du;
-	x ^= x >> 15u;
-	x *= 0x846ca68bu;
-	x ^= x >> 16u;
-	return x;
-}
-float jahHalfStochastic( float x, float u )
-{
-	if( !( x > 0.0 ) )
-		return x;
-	const uint bits = packHalf2x16( vec2( x, 0.0 ) ) & 0xFFFFu;
-	const float h = unpackHalf2x16( bits ).x;
-	if( x > h && bits < 0x7BFFu )
-	{
-		const float up = unpackHalf2x16( bits + 1u ).x;
-		return u < ( x - h ) / ( up - h ) ? up : h;
-	}
-	if( x < h && bits > 0u )
-	{
-		const float down = unpackHalf2x16( bits - 1u ).x;
-		return u < ( h - x ) / ( h - down ) ? down : h;
-	}
-	return h;
-}
-vec3 jahRestStoreMean( vec3 m, ivec2 tc, int eye, float restFrame )
-{
-	uint s = jahRestHash( uint( tc.x ) * 73856093u ^ uint( tc.y ) * 19349663u ^ uint( eye ) * 83492791u ^
-						  uint( restFrame ) * 2654435761u );
-	vec3 r;
-	for( int c = 0; c < 3; ++c )
-	{
-		s = jahRestHash( s + uint( c ) );
-		r[c] = jahHalfStochastic( m[c], float( s >> 8u ) * ( 1.0 / 16777216.0 ) );
-	}
-	return r;
-}
+/// THE REST MEAN'S STORE, ROUNDED STOCHASTICALLY TO HALF PRECISION (P1): jah_half_stochastic.glsl (jahRestHash,
+/// jahHalfStochastic, jahRestStoreMean) - one text for every fp16 running statistic's store (PHOTON_2_SPEC R1).
+#include "jah_half_stochastic.glsl"
 /// THE SECOND MOMENT'S STORE, STOCHASTICALLY ROUNDED TOO (PHOTON-2 1b P1; the rule: EVERY fp16 running statistic is): the
 /// root mean square of the luma, rms' = sqrt( rms^2 + (l^2 - rms^2) / v ), makes nearly the same small step every frame
 /// for a skewed texel - round to nearest rounds it the SAME way each time, the moment drifts, rms^2 - M^2 reads the

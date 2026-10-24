@@ -92,6 +92,7 @@ float jahAreaRayVisible( vec3 originQ, vec3 wq, float reachQ )
 		imageStore( restU2, tc, U2 );                                                                                  \
 	}
 #define JAH_AREA_VISIBLE( originQ, wq, reachQ ) jahAreaRayVisible( originQ, wq, reachQ )
+#include "jah_half_stochastic.glsl"
 #include "jah_area_vis_law.glsl"
 
 void main()
