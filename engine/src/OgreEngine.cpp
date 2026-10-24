@@ -3519,6 +3519,8 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     mShaderCache.backgroundCompiles(background, foreground);
     out.compiledInBackground = background;
     out.compiledInForeground = foreground;
+    if (const Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms())
+        out.paramsMisfits = hc->getJahParamsMisfits();
     return out;
 }
 
