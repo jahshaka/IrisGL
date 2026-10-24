@@ -3943,6 +3943,38 @@ struct SunContactStatus {
     std::string reason;
 };
 
+/// THE PIXEL'S AREA LIGHT VISIBILITY (PHOTON-7 stage 7, 7-A; ScenePublished::areaVis): the ray tier's trace of each
+/// forward LTC light's visible share of its form factor - the ratio over n x n strata of its rectangle, the cards' law
+/// (one text, jah_area_strata.glsl), diffuse-weighted and specular-weighted - into the screen product `jahAreaVis` the
+/// shading pass multiplies the light's LTC diffuse and specular by (the fork's hook in DoAreaLtcLights). Mono views only
+/// (a stereo view declines: its area lights unshadowed).
+struct AreaVisStatus {
+    /// A view of the scene traced it (or held it) on its last frame.
+    bool running = false;
+    /// The forward LTC lights it traced (HlmsPbs's order, at most four) and the strata a side (the tier's
+    /// GiQualityFacts::cardAreaStrata: the cards' n).
+    unsigned lights = 0u, strata = 0u;
+    /// The trace grid and the target it covers.
+    unsigned traceW = 0u, traceH = 0u, targetW = 0u, targetH = 0u;
+    /// Consecutive rest frames; past n^2 of them the view HOLDS (nothing dispatched, the visibility as it is).
+    unsigned restFrames = 0u;
+    bool held = false;
+    unsigned long long rays = 0ull;
+    /// GPU milliseconds of the trace and the resolve (the monitor's rows "area.vis" and "area.resolve": -1 outside a
+    /// capture) and the CPU cost of recording them.
+    float traceMs = -1.0f, resolveMs = -1.0f, cpuMs = -1.0f;
+    /// The view's resident VRAM: the two sums' ping-pong and their rest means at the trace's size, the surface words,
+    /// the full-resolution RGBA8 product.
+    unsigned long long vramBytes = 0ull;
+    /// Why it is not running, empty when nothing declined (no LTC light in the forward set is the free case).
+    std::string reason;
+    /// THE READBACK (a test door, the arm area.visReadback): a recent retired frame's `jahAreaVis`, row-major, EIGHT bytes
+    /// a pixel - bytes 0-3 the diffuse-weighted visibility of lights 0-3 (unorm8), bytes 4-7 the specular-weighted - the
+    /// target's size; empty without the arm.
+    std::vector<unsigned char> vis;
+    unsigned visW = 0u, visH = 0u;
+};
+
 // ---- SURFACE-CACHE phase 2: the capture cache's status and its knobs -------
 //
 // THE STATE THE CACHE PUBLISHES. SURFACE-CACHE-0's `SurfaceCardSpikeDesc` /
@@ -9030,6 +9062,7 @@ struct PublishedFrame {
     AtmosphereStatus     atmosphereStatus;
     RayQueryStatus       rayQuery;
     SunContactStatus     sunContact;
+    AreaVisStatus        areaVis;   ///< PHOTON-7 7-A: the pixel's area light visibility
     int                  activePlanarReflectors = 0;
     bool                 atomViewPaintable = false;
     /// THE ATOM CUT'S HIDDEN SHARE as the frame closed it (ATOM-8 stage 0; AtomDrawStatus::hiddenValid's figure, read

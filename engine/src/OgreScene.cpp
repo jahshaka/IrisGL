@@ -817,6 +817,7 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     back.atmosphereStatus = atmosphereStatus();
     back.rayQuery = rayQueryStatus();
     back.sunContact = sunContactStatus();
+    back.areaVis = areaVisStatus();
     back.activePlanarReflectors = activePlanarReflectors();
     back.mobility = mMobilityCounts;
     back.mobility.mobilityRebuilds = mMobilityRebuilds;

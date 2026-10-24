@@ -1402,6 +1402,10 @@ constexpr ArmDef kArms[] = {
     { ArmId::GatherNoAnswer, 0.0, 0.0, 1.0,
       "NO PROBE ANSWERS (a measuring door; gi.field_in_integrate): the integrate's weight floor at its largest, so "
       "every pixel takes the fallback alone - the irradiance field where one is bound." },
+    { ArmId::AreaVisReadback, 0.0, 0.0, 1.0,
+      "THE PIXEL'S AREA LIGHT VISIBILITY READ BACK (PHOTON-7 stage 7, 7-A; a test door, gi.card_lamp_shadow's pixel arms): "
+      "1 = every frame the ray tier copies its jahAreaVis (RGBA8, channel i the forward LTC light i's visible share) "
+      "into a host ring, ScenePublished::areaVis.vis the latest retired frame's. 0 = shipped (nothing copied)." },
     { ArmId::GatherRoughQuadrature, 0.0, 0.0, 2.0,
       "THE ROUGH SPECULAR'S QUADRATURE DOOR (PHOTON-7 stage 7, 7-3; gi.rough_lobe_quadrature): the split sum's own error. "
       "1 or 2 = the prefiltered image holds one more layer (switching the door re-makes the view's targets), the probes' FILTERED "

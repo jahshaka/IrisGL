@@ -1,0 +1,26 @@
+#include "/media/matias/Datos/SyntaxHighlightingMisc.h"
+
+// PHOTON-7 stage 7, 7-A - THE AREA LIGHTS' VISIBILITY, THE PIXEL'S READ.
+//
+// Ogre-Next draws an LTC area light with no shadow (it has no area shadow maps), so a pixel's area direct passed
+// through walls while the voxels and the cards shadowed it. The ray tier traces, per pixel, each forward LTC light's
+// visible share of its form factor - the ratio over n x n strata of its rectangle, the cards' law, one text
+// (rq_area_vis.comp, jah_area_strata.glsl) - into `jahAreaVis`, light i in byte i in HlmsPbs's own order of the
+// pass's LTC set, TWO RATIOS: x the diffuse-weighted visible fraction, y the specular-weighted (the GGX lobe at the
+// pixel's view and roughness); this piece fills the fork's hook after the light's range window, multiplying the LTC
+// diffuse of light i by the first and its specular by the second. The unshadowed energy stays the analytic LTC
+// term's; only the visibility is sampled.
+//
+// THE GUARD is the declaration's (JahFog_piece_vs_piece_ps.any), and one more term: never in the hit decode (a hit has
+// no screen pixel - the hits' area visibility is 7-H's, after the photon-7r merge). A blended fragment never reads it
+// (the listener withdraws the property per renderable: the texel is the opaque surface's behind it).
+@property( jah_area_vis && hlms_screen_pos_int && !hlms_prepass && !hlms_shadowcaster && !atom_hit_mode )
+@piece( custom_ps_areaLtcVisibility )
+	{
+		const uvec2 jahAreaVisWords = texelFetch( jahAreaVis, ivec2( iFragCoord.xy ), 0 ).xy;
+		const int jahAreaLight = min( i, 3 );
+		ltcDiffuse *= midf_c( unpackUnorm4x8( jahAreaVisWords.x )[jahAreaLight] );
+		ltcSpecular *= midf_c( unpackUnorm4x8( jahAreaVisWords.y )[jahAreaLight] );
+	}
+@end
+@end

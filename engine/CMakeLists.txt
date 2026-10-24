@@ -351,6 +351,28 @@ if(JAH_RAY_QUERY_OK)
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h.d"
         COMMENT "Compiling the sun contact shadow job at SPIR-V 1.4"
         VERBATIM)
+    # THE PIXEL'S AREA LIGHT VISIBILITY (PHOTON-7 stage 7, 7-A): the trace (one stratum of each forward LTC light a
+    # texel a frame, the two ratio sums' temporal means) and the resolve (the joint-bilateral upsample and the ratio).
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_area_vis_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_area_vis_spv.h.d" --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
+                --vn krq_areaVisSpv -o "${JAH_RQ_GEN_DIR}/rq_area_vis_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_area_vis.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_area_vis.comp"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_area_vis_spv.h.d"
+        COMMENT "Compiling the area light visibility trace at SPIR-V 1.4"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_area_vis_resolve_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_area_vis_resolve_spv.h.d" --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
+                --vn krq_areaVisResolveSpv -o "${JAH_RQ_GEN_DIR}/rq_area_vis_resolve_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_area_vis_resolve.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_area_vis_resolve.comp"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_area_vis_resolve_spv.h.d"
+        COMMENT "Compiling the area light visibility resolve at SPIR-V 1.4"
+        VERBATIM)
     # THE HIT WRITE-BACK (PHOTON-HIT-SHADE-1): the decoded radiance of every hit
     # record, scattered back into the reflection's mean and the gather's atlas.
     add_custom_command(
@@ -461,6 +483,8 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/atom_caster_masked_frag_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_area_vis_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_area_vis_resolve_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"

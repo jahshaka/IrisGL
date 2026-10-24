@@ -92,6 +92,8 @@
 #include "rayquery/rq_motion_skin_spv.h"
 #include "rayquery/rq_card_parity_spv.h"
 #include "rayquery/rq_sun_contact_spv.h"
+#include "rayquery/rq_area_vis_spv.h"
+#include "rayquery/rq_area_vis_resolve_spv.h"
 #include "rayquery/rq_hit_composite_spv.h"
 #include "rayquery/rq_card_movers_spv.h"
 #include "rayquery/rq_tlas_write_spv.h"
@@ -1375,10 +1377,67 @@ private:
     bool makeSunContactPipeline(std::string &err);
     void dropSunContact(SunContactView &sv);
     std::unordered_map<const ReflectPassListener *, SunContactView> mSunContacts;
+
+    // ---- THE PIXEL'S AREA LIGHT VISIBILITY (PHOTON-7 stage 7, 7-A) ---------
+    // The sun contact's shape, twice over: in front of the hit decode, the TRACE (rq_area_vis.comp: one stratum of
+    // each of the pass's forward LTC lights a half-resolution texel a frame, the ratio's two sums averaged over time)
+    // and the RESOLVE (rq_area_vis_resolve.comp: the joint-bilateral upsample and the ratio) into a full-resolution
+    // RGBA8 Ogre texture `jahAreaVis`, which finishAreaVis registers for the opaque pass (OgreFog.cpp's slot,
+    // JahAreaVis_piece_ps.any in the fork's LTC hook). Allocated only while an LTC light is in the forward set.
+public:
+    void recordAreaVis(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
+    void finishAreaVis(const ReflectPassListener *key);
+    void releaseAreaVisBinding(const ReflectPassListener *key);
+    void forgetAreaVis(const ReflectPassListener *key);
+    void areaVisStatsInto(const OgreScene *scene, AreaVisStatus &st) const;
+private:
+    static constexpr unsigned kAreaVisReadbacks = 4u;   // > kFramesInFlight: the slot read is retired
+    struct AreaVisView {
+        VkDescriptorSet traceSets[kReflectRing] = {};
+        VkDescriptorSet resolveSets[kReflectRing] = {};
+        RawBuffer       params[kReflectRing];
+        /// The two ratio sets' sums (diffuse S U, specular S2 U2): their history pairs, the surface words' pair, the
+        /// rest means - raw images at the trace's size.
+        ReflectImage histS[2], histU[2], histS2[2], histU2[2], histG[2], restS, restU, restS2, restU2;
+        bool imagesNeedClear = false;
+        /// The product the pixel reads (an Ogre texture: it reaches HlmsPbs through the listener).
+        Ogre::TextureGpu *vis = nullptr;
+        unsigned w = 0, h = 0, fullW = 0, fullH = 0, divisor = 2;
+        unsigned frame = 0, flip = 0, age = 0, restFrames = 0;
+        unsigned long long restKey = 0ull;
+        /// The previous frame's camera (the five numbers) and the light set it traced (the rest's test).
+        float prev[5][4] = {};
+        std::vector<float> lightKey;
+        const Ogre::SceneManager *sceneMgr = nullptr;
+        OgreScene *scene = nullptr;
+        bool ran = false, held = false, finishPending = false, bound = false;
+        uint32_t boundFrame = 0xFFFFFFFFu;
+        unsigned lights = 0, strata = 0;
+        unsigned long long rays = 0ull, vramBytes = 0ull;
+        float cpuMs = -1.0f;
+        std::string reason;
+        /// THE READBACK (the arm area.visReadback): a host ring of the product, decoded once the slot retired.
+        RawBuffer readback[kAreaVisReadbacks];
+        uint32_t readbackFrame[kAreaVisReadbacks] = {};
+        bool readbackLive[kAreaVisReadbacks] = {};
+        std::vector<unsigned char> visHost;
+        unsigned visHostW = 0, visHostH = 0;
+    };
+    bool makeAreaVisPipelines(std::string &err);
+    void dropAreaVis(AreaVisView &av);
+    std::unordered_map<const ReflectPassListener *, AreaVisView> mAreaVis;
+    VkDescriptorSetLayout mAreaSetLayout = VK_NULL_HANDLE, mAreaResolveSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mAreaPipeLayout = VK_NULL_HANDLE, mAreaResolvePipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mAreaPipeline = VK_NULL_HANDLE, mAreaResolvePipeline = VK_NULL_HANDLE;
+    VkShaderModule        mAreaModule = VK_NULL_HANDLE, mAreaResolveModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mAreaPool = VK_NULL_HANDLE;
+    bool                  mAreaFailed = false;
+    std::string           mAreaFailReason;
     struct SuspendedBindings {
         const Ogre::SceneManager *gatherSm = nullptr;
         FogHlmsListener::ProbeGatherBind gather;
         bool sun = false;
+        bool area = false;   // PHOTON-7 7-A: the area visibility's registration
     };
     std::unordered_map<const ReflectPassListener *, SuspendedBindings> mSuspended;
     VkDescriptorSetLayout mSunSetLayout = VK_NULL_HANDLE;
@@ -2340,6 +2399,12 @@ void RayQueryTier::close() {
         dropSunContact(kv.second);
     }
     mSunContacts.clear();   // each one's registration went with it (dropSunContact)
+    // THE AREA VISIBILITY's views (PHOTON-7 7-A): the sun contact's rule, word for word.
+    for (auto &kv : mAreaVis) {
+        for (unsigned i = 0; i < kReflectRing; ++i) kv.second.traceSets[i] = kv.second.resolveSets[i] = VK_NULL_HANDLE;
+        dropAreaVis(kv.second);
+    }
+    mAreaVis.clear();
     // THE GATHER'S SHADER REGISTRATION DIES WITH THE TEXTURES IT NAMES
     // (GATHER-0's D1, kept): `ScreenProbeGather::close` frees every atlas and
     // takes every registration away, because `FogHlmsListener`'s map is a plain
@@ -2395,6 +2460,20 @@ void RayQueryTier::close() {
     if (mSunPipeLayout) vkDestroyPipelineLayout(mVk, mSunPipeLayout, nullptr);
     if (mSunSetLayout) vkDestroyDescriptorSetLayout(mVk, mSunSetLayout, nullptr);
     if (mSunSampler) vkDestroySampler(mVk, mSunSampler, nullptr);
+    if (mAreaPool) vkDestroyDescriptorPool(mVk, mAreaPool, nullptr);
+    for (VkPipeline pl : { mAreaPipeline, mAreaResolvePipeline })
+        if (pl) vkDestroyPipeline(mVk, pl, nullptr);
+    for (VkShaderModule m : { mAreaModule, mAreaResolveModule })
+        if (m) vkDestroyShaderModule(mVk, m, nullptr);
+    for (VkPipelineLayout pl : { mAreaPipeLayout, mAreaResolvePipeLayout })
+        if (pl) vkDestroyPipelineLayout(mVk, pl, nullptr);
+    for (VkDescriptorSetLayout l : { mAreaSetLayout, mAreaResolveSetLayout })
+        if (l) vkDestroyDescriptorSetLayout(mVk, l, nullptr);
+    mAreaPool = VK_NULL_HANDLE;
+    mAreaPipeline = mAreaResolvePipeline = VK_NULL_HANDLE;
+    mAreaModule = mAreaResolveModule = VK_NULL_HANDLE;
+    mAreaPipeLayout = mAreaResolvePipeLayout = VK_NULL_HANDLE;
+    mAreaSetLayout = mAreaResolveSetLayout = VK_NULL_HANDLE;
     mSunPool = VK_NULL_HANDLE; mSunPipeline = VK_NULL_HANDLE; mSunModule = VK_NULL_HANDLE;
     mSunPipeLayout = VK_NULL_HANDLE; mSunSetLayout = VK_NULL_HANDLE;
     mSunSampler = VK_NULL_HANDLE;
@@ -7926,6 +8005,11 @@ void RayQueryTier::suspendPassBindings(const ReflectPassListener *key, const Ogr
         s.sun = true;
         FogHlmsListener::setSunContact(it->second.sceneMgr, nullptr, 1u);
     }
+    auto av = mAreaVis.find(key);
+    if (av != mAreaVis.end() && av->second.bound && av->second.sceneMgr) {
+        s.area = true;
+        FogHlmsListener::setAreaVis(av->second.sceneMgr, nullptr);
+    }
 }
 
 void RayQueryTier::resumePassBindings(const ReflectPassListener *key) {
@@ -7937,6 +8021,9 @@ void RayQueryTier::resumePassBindings(const ReflectPassListener *key) {
     auto it = mSunContacts.find(key);
     if (s.sun && it != mSunContacts.end() && it->second.bound && it->second.sceneMgr && it->second.vis)
         FogHlmsListener::setSunContact(it->second.sceneMgr, it->second.vis, it->second.divisor);
+    auto av = mAreaVis.find(key);
+    if (s.area && av != mAreaVis.end() && av->second.bound && av->second.sceneMgr && av->second.vis)
+        FogHlmsListener::setAreaVis(av->second.sceneMgr, av->second.vis);
 }
 
 void RayQueryTier::bindCapturePass(const ReflectPassListener *key, OgreView *view,
@@ -7968,6 +8055,9 @@ void RayQueryTier::bindCapturePass(const ReflectPassListener *key, OgreView *vie
     if (it != mSunContacts.end() && it->second.vis && it->second.sceneMgr &&
         it->second.boundFrame == frameNow())
         FogHlmsListener::setSunContact(it->second.sceneMgr, it->second.vis, it->second.divisor);
+    auto av = mAreaVis.find(key);
+    if (av != mAreaVis.end() && av->second.vis && av->second.sceneMgr && av->second.boundFrame == frameNow())
+        FogHlmsListener::setAreaVis(av->second.sceneMgr, av->second.vis);
 }
 
 void RayQueryTier::releaseCapturePass(const ReflectPassListener *key) {
@@ -7975,6 +8065,7 @@ void RayQueryTier::releaseCapturePass(const ReflectPassListener *key) {
     auto it = mSunContacts.find(key);
     if (it != mSunContacts.end() && it->second.sceneMgr)
         FogHlmsListener::setSunContact(it->second.sceneMgr, nullptr, 1u);
+    releaseAreaVisBinding(key);
 }
 
 void RayQueryTier::sunContactStatsInto(const OgreScene *scene, SunContactStatus &st) const {
@@ -7997,6 +8088,709 @@ void RayQueryTier::sunContactStatsInto(const OgreScene *scene, SunContactStatus 
         st.reason.clear();
     }
     if (!st.running && mSunFailed) st.reason = mSunFailReason;
+}
+
+// ---------------------------------------------------------------------------
+// THE PIXEL'S AREA LIGHT VISIBILITY — the tier's half (PHOTON-7 stage 7, 7-A; SPECS/PHOTON_7_SPEC.md "AREA LIGHTS, ONE
+// LAW ON EVERY PATH" (a)). Ogre-Next draws an LTC area light with no shadow; the cards and the voxels shadowed it. The
+// pixel takes the cards' law (jah_area_strata.glsl, one text): rq_area_vis.comp traces one stratum of each of the
+// pass's forward LTC lights a half-resolution texel a frame and averages the ratio's two sums over time (with the
+// gather's rest law), rq_area_vis_resolve.comp upsamples them joint-bilaterally and takes the ratio into `jahAreaVis`
+// (RGBA8, light i in channel i), which the fork's hook in DoAreaLtcLights multiplies light i's LTC terms by.
+namespace {
+
+/// The parameter block, std140, mirroring jah_area_vis_params.glsl member for member.
+struct AreaVisLightParams {
+    float c0[4] = {};
+    float eu[4] = {};
+    float ev[4] = {};
+    float emit[4] = {};
+};
+struct AreaVisParams {
+    float camPos[4] = {};
+    float rayTL[4] = {};
+    float rayRight[4] = {};
+    float rayDown[4] = {};
+    float fwd[4] = {};
+    float prevCamPos[4] = {};
+    float prevRayTL[4] = {};
+    float prevRayRight[4] = {};
+    float prevRayDown[4] = {};
+    float prevFwd[4] = {};
+    float projParams[4] = {};
+    float viewAxisX[4] = {};
+    float viewAxisY[4] = {};
+    float viewAxisZ[4] = {};
+    float resolution[4] = {};
+    float knobs[4] = {};
+    float strata[4] = {};
+    float rest[4] = {};
+    float alpha[4] = {};
+    float lights[4] = {};
+    AreaVisLightParams light[4];
+};
+static_assert(sizeof(AreaVisParams) % 16u == 0u, "the area visibility's block is whole vec4s (std140)");
+constexpr unsigned kAreaVisBindings = 19u;
+constexpr unsigned kAreaResolveBindings = 9u;
+/// The trace's grid: one texel a 2 x 2 block (the spec's half resolution).
+constexpr unsigned kAreaVisDivisor = 2u;
+/// What the area rays are tested against: every shadow caster, still and moving (the cards' lamps mode's mask).
+constexpr unsigned kAreaVisMask = kRayMaskStillCaster | kRayMaskMoverCaster;
+
+/// THE FORWARD LTC SET as HlmsPbs takes it for the pass (OgreHlms.cpp's light gathering, OgreHlmsPbs.cpp's
+/// fillBuffersFor walk): the scene manager's global light list's LT_AREA_LTC lights in its order, the first
+/// kAreaLtcLimit - so channel i of the product is the light the LTC loop reads at index i.
+std::vector<const Ogre::Light *> forwardLtcLights(const Ogre::SceneManager *sm) {
+    std::vector<const Ogre::Light *> out;
+    if (!sm) return out;
+    for (const Ogre::Light *l : sm->getGlobalLightList().lights) {
+        if (!l || l->getType() != Ogre::Light::LT_AREA_LTC) continue;
+        out.push_back(l);
+        if (out.size() >= size_t(detail::lightextras::kAreaLtcLimit)) break;
+    }
+    return out;
+}
+
+}   // namespace
+
+bool RayQueryTier::makeAreaVisPipelines(std::string &err) {
+    const auto layoutOf = [&](const VkDescriptorType *types, unsigned count, VkDescriptorSetLayout &out,
+                              DescriptorPoolPlan &plan, const char *what) {
+        std::vector<VkDescriptorSetLayoutBinding> b(count);
+        for (unsigned i = 0; i < count; ++i) {
+            b[i] = VkDescriptorSetLayoutBinding{};
+            b[i].binding = i;
+            b[i].descriptorType = types[i];
+            b[i].descriptorCount = 1;
+            b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        return plan.makeLayout(mVk, b.data(), count, kMaxTimedScenes * kReflectRing, out, err, what);
+    };
+    const auto pipelineOf = [&](VkDescriptorSetLayout set, const uint32_t *spv, size_t bytes, VkPipelineLayout &pl,
+                                VkShaderModule &module, VkPipeline &pipeline, const char *what) {
+        VkPipelineLayoutCreateInfo pli{};
+        pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pli.setLayoutCount = 1;
+        pli.pSetLayouts = &set;
+        if (vkCreatePipelineLayout(mVk, &pli, nullptr, &pl) != VK_SUCCESS) {
+            err = "vkCreatePipelineLayout failed";
+            return false;
+        }
+        VkShaderModuleCreateInfo smi{};
+        smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smi.codeSize = bytes;
+        smi.pCode = spv;
+        if (vkCreateShaderModule(mVk, &smi, nullptr, &module) != VK_SUCCESS) {
+            err = "vkCreateShaderModule failed (the build-time SPIR-V is not loadable)";
+            return false;
+        }
+        VkComputePipelineCreateInfo cpi{};
+        cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpi.stage.module = module;
+        cpi.stage.pName = "main";
+        cpi.layout = pl;
+        if (createComputePipeline(cpi, &pipeline, what) != VK_SUCCESS) {
+            err = "vkCreateComputePipelines failed";
+            return false;
+        }
+        return true;
+    };
+    DescriptorPoolPlan plan;
+    const VkDescriptorType traceTypes[kAreaVisBindings] = {
+        VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 0 tlas
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 1 params
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 2 gBufNormals
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 3 sceneDepth
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 4 histS prev
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 5 histU prev
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 6 histG prev
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 7 histS cur
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 8 histU cur
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 9 histG cur
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 10 restS
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 11 restU
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 12 histS2 prev (the specular set)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 13 histU2 prev
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 14 histS2 cur
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 15 histU2 cur
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 16 restS2
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 17 restU2
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 18 the prepass's shadow / roughness
+    };
+    const VkDescriptorType resolveTypes[kAreaResolveBindings] = {
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 0 params
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 1 sceneDepth
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 2 histS (this frame's)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 3 histU
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 4 histG
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 5 areaVis
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 6 gBufNormals (the pixel's plane)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 7 histS2 (the specular set)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 8 histU2
+    };
+    if (!layoutOf(traceTypes, kAreaVisBindings, mAreaSetLayout, plan, "rayquery/area-vis") ||
+        !layoutOf(resolveTypes, kAreaResolveBindings, mAreaResolveSetLayout, plan, "rayquery/area-vis-resolve"))
+        return false;
+    if (!pipelineOf(mAreaSetLayout, krq_areaVisSpv, sizeof(krq_areaVisSpv), mAreaPipeLayout, mAreaModule,
+                    mAreaPipeline, "area visibility") ||
+        !pipelineOf(mAreaResolveSetLayout, krq_areaVisResolveSpv, sizeof(krq_areaVisResolveSpv), mAreaResolvePipeLayout,
+                    mAreaResolveModule, mAreaResolvePipeline, "area visibility resolve"))
+        return false;
+    if (!plan.create(mVk, "rayquery/area-vis", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mAreaPool, err))
+        return false;
+    // (the sun contact's POINT sampler reads the depth and the normal at exactly one texel: made by its pipeline)
+    if (!mSunSampler) {
+        VkSamplerCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.maxLod = VK_LOD_CLAMP_NONE;
+        if (vkCreateSampler(mVk, &si, nullptr, &mSunSampler) != VK_SUCCESS) {
+            err = "vkCreateSampler failed";
+            return false;
+        }
+    }
+    return true;
+}
+
+void RayQueryTier::dropAreaVis(AreaVisView &av) {
+    // THE REGISTRATION FIRST: the listener holds a raw pointer to the texture about to be retired.
+    if (av.sceneMgr) FogHlmsListener::setAreaVis(av.sceneMgr, nullptr);
+    for (unsigned i = 0; i < kReflectRing; ++i) {
+        retireSet(av.traceSets[i], mAreaPool);
+        retireSet(av.resolveSets[i], mAreaPool);
+        av.traceSets[i] = av.resolveSets[i] = VK_NULL_HANDLE;
+        retire(av.params[i]);
+    }
+    for (unsigned k = 0; k < 2u; ++k) {
+        retireImage(av.histS[k]);
+        retireImage(av.histU[k]);
+        retireImage(av.histS2[k]);
+        retireImage(av.histU2[k]);
+        retireImage(av.histG[k]);
+    }
+    retireImage(av.restS);
+    retireImage(av.restU);
+    retireImage(av.restS2);
+    retireImage(av.restU2);
+    for (unsigned k = 0; k < kAreaVisReadbacks; ++k) {
+        retire(av.readback[k]);
+        av.readbackLive[k] = false;
+    }
+    retireTexture(av.vis);
+    av.w = av.h = 0;
+    av.age = 0;
+    av.bound = false;
+}
+
+void RayQueryTier::forgetAreaVis(const ReflectPassListener *key) {
+    auto it = mAreaVis.find(key);
+    if (it == mAreaVis.end()) return;
+    dropAreaVis(it->second);
+    mAreaVis.erase(it);
+}
+
+void RayQueryTier::finishAreaVis(const ReflectPassListener *key) {
+    auto it = mAreaVis.find(key);
+    if (it == mAreaVis.end() || !it->second.finishPending) return;
+    AreaVisView &av = it->second;
+    av.finishPending = false;
+    if (!av.vis) return;
+    {
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, av.vis, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        mRs->executeResourceTransition(trans);
+    }
+    // THE PROPERTY AND THE TEXTURE TOGETHER, PASS-SCOPED: taken away by releaseAreaVisBinding when the pass ends.
+    FogHlmsListener::setAreaVis(av.sceneMgr, av.vis);
+    av.bound = true;
+    av.boundFrame = frameNow();
+}
+
+void RayQueryTier::releaseAreaVisBinding(const ReflectPassListener *key) {
+    auto it = mAreaVis.find(key);
+    if (it == mAreaVis.end() || !it->second.sceneMgr) return;
+    FogHlmsListener::setAreaVis(it->second.sceneMgr, nullptr);
+    it->second.bound = false;
+}
+
+void RayQueryTier::areaVisStatsInto(const OgreScene *scene, AreaVisStatus &st) const {
+    for (const auto &kv : mAreaVis) {
+        const AreaVisView &av = kv.second;
+        if (av.scene != scene) continue;
+        if (!av.ran) {
+            if (st.reason.empty()) st.reason = av.reason;
+            continue;
+        }
+        st.running = true;
+        st.lights = av.lights;
+        st.strata = av.strata;
+        st.traceW = av.w;
+        st.traceH = av.h;
+        st.targetW = av.fullW;
+        st.targetH = av.fullH;
+        st.restFrames = av.restFrames;
+        st.held = av.held;
+        st.rays += av.rays;
+        st.vramBytes += av.vramBytes;
+        st.traceMs = std::max(st.traceMs, monitor::lastGpuMs("area.vis", kv.first));
+        st.resolveMs = std::max(st.resolveMs, monitor::lastGpuMs("area.resolve", kv.first));
+        if (av.cpuMs > st.cpuMs) st.cpuMs = av.cpuMs;
+        if (!av.visHost.empty()) {
+            st.vis = av.visHost;
+            st.visW = av.visHostW;
+            st.visH = av.visHostH;
+        }
+        st.reason.clear();
+    }
+    if (!st.running && mAreaFailed) st.reason = mAreaFailReason;
+}
+
+AreaVisStatus OgreScene::areaVisStatus() const {
+    AreaVisStatus st;
+    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->areaVisStatsInto(this, st);
+    return st;
+}
+
+void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass) {
+    if (!isOpen() || !view || !pass) return;
+    OgreScene *scene = view->ogreScene();
+    Ogre::Camera *cam = view->camera();
+    if (!scene || !cam) return;
+    // THE FORWARD LTC SET - none: OFF IS FREE AND CLEAN (the view gives its images back and binds nothing)
+    const std::vector<const Ogre::Light *> lights = forwardLtcLights(scene->sceneManager());
+    if (lights.empty() || !scene->rayTracingResolved()) {
+        forgetAreaVis(key);
+        return;
+    }
+    const auto cpuStart = Clock::now();
+    AreaVisView &av = mAreaVis[key];
+    av.scene = scene;
+    av.sceneMgr = scene->sceneManager();
+    av.ran = false;
+    av.rays = 0;
+    const auto decline = [&av](const char *why) { av.reason = why; };
+    SceneAs *saP = asOf(scene);
+    if (!saP) { decline("the scene has no ray structures yet"); return; }
+    SceneAs &sa = *saP;
+    if (!sa.tlas || !sa.st.enabled || sa.instanceCount == 0u) {
+        decline("the scene's top-level structure is empty");
+        return;
+    }
+    // MONO ONLY (the sun contact's rule): a two-eye target is never traced as one image - its area lights unshadowed.
+    if (view->stereo()) { decline("a stereo view (mono only: a leftover)"); return; }
+    if (mAreaFailed) { decline("the area visibility pipelines are unavailable on this device"); return; }
+    if (!mAreaPipeline) {
+        std::string err;
+        if (!makeAreaVisPipelines(err)) {
+            mAreaFailed = true;
+            mAreaFailReason = "area visibility off: " + err;
+            Ogre::LogManager::getSingleton().logMessage("Jahshaka: " + mAreaFailReason + " (area lights unshadowed)");
+            decline("the area visibility pipelines are unavailable on this device");
+            return;
+        }
+    }
+    // ---- THE CHAIN'S TEXTURES (the sun contact's two) ---------------------
+    Ogre::TextureGpu *normalTex = nullptr, *depthTex = nullptr, *roughTex = nullptr;
+    const Ogre::CompositorNode *node = pass->getParentNode();
+    if (!node) return;
+    try {
+        normalTex = node->getDefinedTexture(Ogre::IdString("jahGBufNormals"));
+        depthTex = node->getDefinedTexture(Ogre::IdString("jahDepth"));
+        roughTex = node->getDefinedTexture(Ogre::IdString("jahSsrShadowRough"));
+    } catch (Ogre::Exception &) { decline("the chain carries no prepass"); return; }
+    if (!normalTex || !depthTex || !roughTex) { decline("the chain carries no prepass"); return; }
+    const unsigned fullW = depthTex->getWidth(), fullH = depthTex->getHeight();
+    if (!fullW || !fullH) return;
+    const unsigned divisor = kAreaVisDivisor;
+    const unsigned w = (fullW + divisor - 1u) / divisor, h = (fullH + divisor - 1u) / divisor;
+
+    // ---- THE IMAGES, remade on a resize -----------------------------------
+    std::string err;
+    if (!av.vis || av.w != w || av.h != h || av.fullW != fullW || av.fullH != fullH) {
+        dropAreaVis(av);
+        for (unsigned k = 0; k < 2u; ++k)
+            if (!makeStorageImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, av.histS[k], err) ||
+                !makeStorageImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, av.histU[k], err) ||
+                !makeStorageImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, av.histS2[k], err) ||
+                !makeStorageImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, av.histU2[k], err) ||
+                !makeStorageImage(w, h, VK_FORMAT_R32G32B32A32_UINT, av.histG[k], err)) {
+                decline("the history images could not be made");
+                return;
+            }
+        if (!makeStorageImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, av.restS, err) ||
+            !makeStorageImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, av.restU, err) ||
+            !makeStorageImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, av.restS2, err) ||
+            !makeStorageImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, av.restU2, err)) {
+            decline("the rest images could not be made");
+            return;
+        }
+        Ogre::TextureGpuManager *tm = mRs->getTextureGpuManager();
+        static unsigned sSerial = 0u;
+        Ogre::TextureGpu *t = tm->createTexture("JahAreaVis/" + std::to_string(++sSerial), Ogre::GpuPageOutStrategy::Discard,
+                                                Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
+        t->setResolution(fullW, fullH, 1u);
+        t->setPixelFormat(Ogre::PFG_RG32_UINT);   // x the diffuse ratios, y the specular (four unorm8 each)
+        t->setNumMipmaps(1u);
+        t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+        av.vis = t;
+        av.w = w;
+        av.h = h;
+        av.fullW = fullW;
+        av.fullH = fullH;
+        av.divisor = divisor;
+        av.imagesNeedClear = true;
+        av.age = 0;
+        av.restFrames = 0;
+        // the two sets' sums' pairs (8 x 8 B), the surface words' pair (2 x 16 B), the rest means (4 x 8 B), the product
+        // (8 B a pixel)
+        av.vramBytes = (unsigned long long)w * h * (8u * 8u + 2u * 16u + 4u * 8u) + (unsigned long long)fullW * fullH * 8u;
+    }
+
+    // ---- THE LIGHTS, in HlmsPbs's order, and the rest's test ----------------
+    AreaVisParams pp{};
+    std::vector<float> lightKey;
+    for (size_t i = 0; i < lights.size() && i < 4u; ++i) {
+        const Ogre::Light *l = lights[i];
+        Ogre::Vector3 corner[4];
+        detail::lightextras::areaLightCorners(l, corner);
+        const Ogre::Vector3 eu = corner[1] - corner[0], ev = corner[3] - corner[0];
+        const Ogre::Vector3 emit = l->getDerivedDirection();
+        put3(pp.light[i].c0, corner[0], l->getDoubleSided() ? 1.0f : 0.0f);
+        put3(pp.light[i].eu, eu, l->getAttenuationRange());
+        put3(pp.light[i].ev, ev, 0.0f);
+        put3(pp.light[i].emit, emit, 0.0f);
+        for (const float *v : { pp.light[i].c0, pp.light[i].eu, pp.light[i].ev, pp.light[i].emit })
+            lightKey.insert(lightKey.end(), v, v + 4);
+    }
+    av.lights = unsigned(std::min<size_t>(lights.size(), 4u));
+    pp.lights[0] = float(av.lights);
+
+    // ---- THE CAMERA, and whether the view is at rest -----------------------
+    const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
+    const Ogre::Quaternion q = cam->getDerivedOrientation();
+    Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
+    cam->getFrustumExtents(fl, fr, ft, fb, ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
+    EyeBasisF eye = eyeBasis(ortho, cam->getDerivedPosition(), q, float(fl), float(fr), float(ft), float(fb));
+    expandEyeToTarget(eye, view->chainDesc(), fullW, fullH);
+    const float *now[5] = { eye.camPos, eye.rayTL, eye.rayRight, eye.rayDown, eye.fwd };
+    bool sameCamera = av.age > 0u;
+    for (int k = 0; k < 5 && sameCamera; ++k) sameCamera = std::memcmp(av.prev[k], now[k], sizeof(av.prev[k])) == 0;
+    const unsigned long long restKey = gatherRestKeyArmed(scene);
+    const bool still = sameCamera && restKey == av.restKey && lightKey == av.lightKey;
+    av.restKey = restKey;
+    if (lightKey != av.lightKey) av.age = 0u;   // a light added, removed or moved: the sums are another set's
+    av.lightKey = lightKey;
+    const unsigned n = std::max(giQualityFacts(scene->giParams().quality).cardAreaStrata, 1u);
+    av.strata = n;
+    av.restFrames = still ? std::min(av.restFrames + 1u, 1u << 20) : 0u;
+    // THE HOLD: past n^2 rest frames the rest mean is every stratum once - nothing is dispatched
+    av.held = still && av.restFrames > n * n && !av.imagesNeedClear;
+    const bool readback = arm(ArmId::AreaVisReadback, false);
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (!av.held) {
+        const unsigned ring = av.frame % kReflectRing;
+        if (!av.params[ring].buffer &&
+            !makeBuffer(sizeof(AreaVisParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, av.params[ring], err)) {
+            decline("the parameter buffer could not be made");
+            return;
+        }
+        for (VkDescriptorSet *set : { &av.traceSets[ring], &av.resolveSets[ring] }) {
+            if (*set) continue;
+            VkDescriptorSetAllocateInfo dai{};
+            dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            dai.descriptorPool = mAreaPool;
+            dai.descriptorSetCount = 1;
+            dai.pSetLayouts = set == &av.traceSets[ring] ? &mAreaSetLayout : &mAreaResolveSetLayout;
+            if (vkAllocateDescriptorSets(mVk, &dai, set) != VK_SUCCESS) {
+                *set = VK_NULL_HANDLE;
+                decline("no descriptor set");
+                return;
+            }
+        }
+        memcpy(pp.camPos, eye.camPos, sizeof(pp.camPos));
+        memcpy(pp.rayTL, eye.rayTL, sizeof(pp.rayTL));
+        memcpy(pp.rayRight, eye.rayRight, sizeof(pp.rayRight));
+        memcpy(pp.rayDown, eye.rayDown, sizeof(pp.rayDown));
+        memcpy(pp.fwd, eye.fwd, sizeof(pp.fwd));
+        memcpy(pp.prevCamPos, av.age ? av.prev[0] : eye.camPos, sizeof(pp.prevCamPos));
+        memcpy(pp.prevRayTL, av.age ? av.prev[1] : eye.rayTL, sizeof(pp.prevRayTL));
+        memcpy(pp.prevRayRight, av.age ? av.prev[2] : eye.rayRight, sizeof(pp.prevRayRight));
+        memcpy(pp.prevRayDown, av.age ? av.prev[3] : eye.rayDown, sizeof(pp.prevRayDown));
+        memcpy(pp.prevFwd, av.age ? av.prev[4] : eye.fwd, sizeof(pp.prevFwd));
+        const Ogre::Vector2 projAB = cam->getProjectionParamsAB();
+        pp.projParams[0] = projAB.x;
+        pp.projParams[1] = projAB.y;
+        pp.projParams[2] = cam->getFarClipDistance();
+        put3(pp.viewAxisX, q * Ogre::Vector3::UNIT_X, 0.0f);
+        put3(pp.viewAxisY, q * Ogre::Vector3::UNIT_Y, 0.0f);
+        put3(pp.viewAxisZ, -(q * Ogre::Vector3::NEGATIVE_UNIT_Z), 0.0f);
+        pp.resolution[0] = float(w);
+        pp.resolution[1] = float(h);
+        pp.resolution[2] = float(fullW);
+        pp.resolution[3] = float(fullH);
+        {
+            // THE CLEARANCE: the sun contact's bias rule (two full-resolution footprints, the millimetre floor)
+            const float span = std::sqrt(eye.rayRight[0] * eye.rayRight[0] + eye.rayRight[1] * eye.rayRight[1] +
+                                         eye.rayRight[2] * eye.rayRight[2]);
+            pp.knobs[0] = kSunContactLiftFootprints * span / float(fullW);
+        }
+        pp.knobs[1] = kSunContactMinBias;
+        pp.knobs[2] = float(kAreaVisMask);
+        pp.knobs[3] = float(divisor);
+        pp.strata[0] = float(n);
+        // the stratum sequence: the view's frame, and at rest the rest frame's own index (every stratum once by n^2)
+        pp.strata[1] = float(av.restFrames ? av.restFrames - 1u : (av.frame & 0xFFFFu));
+        pp.strata[2] = 1.0f / float(n * n);
+        pp.strata[3] = float(std::min(av.age, 65535u));
+        pp.rest[0] = float(av.restFrames);
+        pp.rest[1] = float(n * n);
+        {
+            const uint64_t a = alphaTableOf(scene);
+            const uint32_t lo = uint32_t(a & 0xFFFFFFFFu), hi = uint32_t(a >> 32u);
+            std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
+            std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
+        }
+        memcpy(av.params[ring].mapped, &pp, sizeof(pp));
+
+        // ---- THE DESCRIPTOR SETS ---------------------------------------------
+        const auto sampledView = [this](Ogre::TextureGpu *t) {
+            Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+            slot.texture = t;
+            VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+            retireView(v);
+            return v;
+        };
+        VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
+        asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+        asWrite.accelerationStructureCount = 1;
+        asWrite.pAccelerationStructures = &sa.tlas;
+        VkDescriptorBufferInfo ub{};
+        ub.buffer = av.params[ring].buffer;
+        ub.range = sizeof(AreaVisParams);
+        VkDescriptorImageInfo normals{}, depth{}, store{}, rough{};
+        normals.sampler = mSunSampler;
+        normals.imageView = sampledView(normalTex);
+        normals.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        rough.sampler = mSunSampler;
+        rough.imageView = sampledView(roughTex);
+        rough.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        depth.sampler = mSunSampler;
+        depth.imageView = sampledView(depthTex);
+        depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        {
+            Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+            slot.texture = av.vis;
+            slot.access = Ogre::ResourceAccess::Write;
+            slot.pixelFormat = av.vis->getPixelFormat();
+            store.imageView = static_cast<Ogre::VulkanTextureGpu *>(av.vis)->createView(slot, false);
+            retireView(store.imageView);
+            store.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        }
+        if (!normals.imageView || !depth.imageView || !store.imageView || !rough.imageView) {
+            decline("an image view could not be made");
+            return;
+        }
+        const unsigned cur = av.flip & 1u, prev = cur ^ 1u;
+        const auto storage = [](const ReflectImage &img) {
+            VkDescriptorImageInfo i{};
+            i.imageView = img.view;
+            i.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            return i;
+        };
+        const VkDescriptorImageInfo traceImgs[14] = { storage(av.histS[prev]),  storage(av.histU[prev]),
+                                                      storage(av.histG[prev]),  storage(av.histS[cur]),
+                                                      storage(av.histU[cur]),   storage(av.histG[cur]),
+                                                      storage(av.restS),        storage(av.restU),
+                                                      storage(av.histS2[prev]), storage(av.histU2[prev]),
+                                                      storage(av.histS2[cur]),  storage(av.histU2[cur]),
+                                                      storage(av.restS2),       storage(av.restU2) };
+        VkWriteDescriptorSet tw[kAreaVisBindings] = {};
+        for (unsigned i = 0; i < kAreaVisBindings; ++i) {
+            tw[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            tw[i].dstSet = av.traceSets[ring];
+            tw[i].dstBinding = i;
+            tw[i].descriptorCount = 1;
+        }
+        tw[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        tw[0].pNext = &asWrite;
+        tw[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        tw[1].pBufferInfo = &ub;
+        tw[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        tw[2].pImageInfo = &normals;
+        tw[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        tw[3].pImageInfo = &depth;
+        for (unsigned i = 0; i < 14u; ++i) {
+            tw[4 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            tw[4 + i].pImageInfo = &traceImgs[i];
+        }
+        tw[18].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        tw[18].pImageInfo = &rough;
+        vkUpdateDescriptorSets(mVk, kAreaVisBindings, tw, 0, nullptr);
+        const VkDescriptorImageInfo resolveImgs[5] = { storage(av.histS[cur]), storage(av.histU[cur]),
+                                                       storage(av.histG[cur]), storage(av.histS2[cur]),
+                                                       storage(av.histU2[cur]) };
+        VkWriteDescriptorSet rw[kAreaResolveBindings] = {};
+        for (unsigned i = 0; i < kAreaResolveBindings; ++i) {
+            rw[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            rw[i].dstSet = av.resolveSets[ring];
+            rw[i].dstBinding = i;
+            rw[i].descriptorCount = 1;
+        }
+        rw[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        rw[0].pBufferInfo = &ub;
+        rw[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        rw[1].pImageInfo = &depth;
+        for (unsigned i = 0; i < 3u; ++i) {
+            rw[2 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            rw[2 + i].pImageInfo = &resolveImgs[i];
+        }
+        rw[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        rw[5].pImageInfo = &store;
+        rw[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        rw[6].pImageInfo = &normals;
+        for (unsigned i = 0; i < 2u; ++i) {
+            rw[7 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            rw[7 + i].pImageInfo = &resolveImgs[3 + i];
+        }
+        vkUpdateDescriptorSets(mVk, kAreaResolveBindings, rw, 0, nullptr);
+
+        // ---- THE LAYOUTS, through Ogre's own solver, before the command buffer is taken -------------------
+        {
+            const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+            Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+            Ogre::ResourceTransitionArray trans;
+            solver.resolveTransition(trans, av.vis, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Write,
+                                     computeStage);
+            for (Ogre::TextureGpu *t : { normalTex, depthTex, roughTex })
+                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                         computeStage);
+            mRs->executeResourceTransition(trans);
+        }
+        cmd = frameCmd();
+        if (!cmd) { decline("no command buffer"); return; }
+        // THE RAW IMAGES' FIRST USE: UNDEFINED -> GENERAL and zeroed (a zero surface word is "no history")
+        if (av.imagesNeedClear) {
+            av.imagesNeedClear = false;
+            constexpr int kImgs = 14;
+            const VkImage imgs[kImgs] = { av.histS[0].image,  av.histS[1].image,  av.histU[0].image,  av.histU[1].image,
+                                          av.histS2[0].image, av.histS2[1].image, av.histU2[0].image, av.histU2[1].image,
+                                          av.histG[0].image,  av.histG[1].image,  av.restS.image,     av.restU.image,
+                                          av.restS2.image,    av.restU2.image };
+            VkImageMemoryBarrier b[kImgs] = {};
+            for (int i = 0; i < kImgs; ++i) {
+                b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                b[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                b[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                b[i].srcQueueFamilyIndex = b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b[i].image = imgs[i];
+                b[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                b[i].subresourceRange.levelCount = 1;
+                b[i].subresourceRange.layerCount = 1;
+                b[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            }
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                                 0, nullptr, kImgs, b);
+            VkClearColorValue zero{};
+            for (int i = 0; i < kImgs; ++i)
+                vkCmdClearColorImage(cmd, imgs[i], VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &b[i].subresourceRange);
+            VkMemoryBarrier m{};
+            m.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            m.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            m.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &m, 0,
+                                 nullptr, 0, nullptr);
+        }
+        // ---- THE TWO DISPATCHES -------------------------------------------------
+        {
+            detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0, "area.vis", mRs, key);
+            work.setUnits(w * h * av.lights / 1000u);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mAreaPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mAreaPipeLayout, 0, 1, &av.traceSets[ring], 0,
+                                    nullptr);
+            JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
+            vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
+        }
+        {
+            VkMemoryBarrier m{};
+            m.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            m.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            m.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &m,
+                                 0, nullptr, 0, nullptr);
+        }
+        {
+            detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0, "area.resolve", mRs, key);
+            work.setUnits(fullW * fullH / 1000u);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mAreaResolvePipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mAreaResolvePipeLayout, 0, 1,
+                                    &av.resolveSets[ring], 0, nullptr);
+            JAH_GPU_CHECKPOINT(cmd);
+            vkCmdDispatch(cmd, (fullW + 7u) / 8u, (fullH + 7u) / 8u, 1u);
+        }
+        for (int k = 0; k < 5; ++k) std::memcpy(av.prev[k], now[k], sizeof(av.prev[k]));
+        av.flip ^= 1u;
+        ++av.age;
+        ++av.frame;
+        av.rays = (unsigned long long)w * h * av.lights;
+    }
+    // ---- THE READBACK (a test door): the product into this frame's host slot, the slot written a ring ago decoded
+    if (readback) {
+        const uint32_t nowF = frameNow();
+        const unsigned slot = nowF % kAreaVisReadbacks;
+        const unsigned old = (nowF + 1u) % kAreaVisReadbacks;   // written kAreaVisReadbacks - 1 frames ago: retired
+        if (av.readbackLive[old] && av.readback[old].mapped) {
+            av.visHost.assign(static_cast<const unsigned char *>(av.readback[old].mapped),
+                              static_cast<const unsigned char *>(av.readback[old].mapped) + size_t(fullW) * fullH * 8u);
+            av.visHostW = fullW;
+            av.visHostH = fullH;
+        }
+        if (!av.readback[slot].buffer &&
+            !makeBuffer(VkDeviceSize(fullW) * fullH * 8u, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false,
+                        av.readback[slot], err))
+            av.readback[slot] = RawBuffer();
+        if (!cmd) cmd = frameCmd();
+        if (cmd && av.readback[slot].buffer) {
+            {
+                Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+                Ogre::ResourceTransitionArray trans;
+                solver.resolveTransition(trans, av.vis, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Read,
+                                         1u << Ogre::GPT_COMPUTE_PROGRAM);
+                mRs->executeResourceTransition(trans);
+            }
+            cmd = frameCmd();
+            VkMemoryBarrier toCopy{};
+            toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toCopy, 0, nullptr, 0, nullptr);
+            VkBufferImageCopy region{};
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = 1;
+            region.imageExtent = { fullW, fullH, 1u };
+            vkCmdCopyImageToBuffer(cmd, static_cast<Ogre::VulkanTextureGpu *>(av.vis)->getFinalTextureName(),
+                                   VK_IMAGE_LAYOUT_GENERAL, av.readback[slot].buffer, 1, &region);
+            VkMemoryBarrier toHost{};
+            toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr,
+                                 0, nullptr);
+            av.readbackLive[slot] = true;
+            av.readbackFrame[slot] = nowF;
+        }
+    }
+    // THE REGISTRATION IS THE SECOND HALF'S (finishAreaVis, in front of the opaque pass).
+    av.finishPending = true;
+    av.ran = true;
+    av.reason.clear();
+    av.cpuMs = float(msSince(cpuStart));
 }
 
 void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *view,
@@ -8653,6 +9447,7 @@ ReflectPassListener::~ReflectPassListener() {
         mView->mEngine->mRayTier->forgetReflect(this);
         mView->mEngine->mRayTier->forgetGather(this);
         mView->mEngine->mRayTier->forgetSunContact(this);
+        mView->mEngine->mRayTier->forgetAreaVis(this);
         mView->mEngine->mRayTier->forgetHits(this);
     } catch (Ogre::Exception &e) {
         Ogre::LogManager::getSingleton().logMessage(
@@ -8665,6 +9460,7 @@ ReflectPassListener::~ReflectPassListener() {
         try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetGather(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetSunContact(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetAreaVis(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetHits(this); } catch (...) {}
     } catch (...) {
         Ogre::LogManager::getSingleton().logMessage(
@@ -8673,6 +9469,7 @@ ReflectPassListener::~ReflectPassListener() {
         try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetGather(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetSunContact(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetAreaVis(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetHits(this); } catch (...) {}
     }
 }
@@ -8752,6 +9549,7 @@ void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
     mRayJobsFinished = false;
     mView->mEngine->mRayTier->releaseGatherBinding(this);
     mView->mEngine->mRayTier->releaseSunContactBinding(this);
+    mView->mEngine->mRayTier->releaseAreaVisBinding(this);
 }
 
 /// THE PHOTON VIEW'S OVERLAY (PHOTON-VIEW-1) goes through the tier's retire
@@ -8783,6 +9581,7 @@ void OgreView::dropReflectState() {
     mEngine->mRayTier->forgetReflect(mReflectListener.get());
     mEngine->mRayTier->forgetGather(mReflectListener.get());
     mEngine->mRayTier->forgetSunContact(mReflectListener.get());
+    mEngine->mRayTier->forgetAreaVis(mReflectListener.get());
     mEngine->mRayTier->forgetHits(mReflectListener.get());
 }
 
@@ -9254,6 +10053,7 @@ void RayQueryTier::traceRayJobs(const ReflectPassListener *key, OgreView *view, 
     // the same pass: it reads the camera before the next pass re-aspects anything,
     // and its registration waits for photon_resolve.
     recordSunContact(key, view, next);
+    recordAreaVis(key, view, next);
     if (view->chainDesc().rayReflect) recordReflect(key, view, next, hit);
     recordGather(key, view, next, hit);
 }
@@ -9271,6 +10071,7 @@ void RayQueryTier::resolveRayJobs(const ReflectPassListener *key, OgreView *view
     finishReflect(key);
     if (mGather) mGather->finish(key);
     finishSunContact(key);
+    finishAreaVis(key);
 }
 
 /// THE PASS IT SERVES: the pass after `pass` in its node — false when there is nothing
@@ -10079,6 +10880,7 @@ void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus()
 void PhotonComponent::setSunContact(const SunContactDesc &d) { mSunContact = d; }
 bool PhotonComponent::sunContactWanted() const { return false; }
 SunContactStatus OgreScene::sunContactStatus() const { return SunContactStatus(); }
+AreaVisStatus OgreScene::areaVisStatus() const { return AreaVisStatus(); }
 bool OgreScene::rayReflectionsWanted() const { return false; }
 void OgreView::dropReflectState() {}
 void OgreView::retirePhotonOverlay() {

@@ -72,6 +72,7 @@ constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_rough_spec",   "jahRoughSpec" },
     { "jah_cloud_shadow", "jahCloudField" },
     { "jah_sun_contact",  "jahSunVis" },
+    { "jah_area_vis",     "jahAreaVis" },
     { "jah_atmo_ap",      "jahAtmoAerial" },
 };
 constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPassSlots[0]);
@@ -130,6 +131,7 @@ const Ogre::IdString &extraSlotProperty(size_t i) {
         Ogre::IdString(kExtraPassSlots[3].property),
         Ogre::IdString(kExtraPassSlots[4].property),
         Ogre::IdString(kExtraPassSlots[5].property),
+        Ogre::IdString(kExtraPassSlots[6].property),
     };
     return ids[i];
 }
@@ -278,6 +280,10 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
         // the fragment keeps the cone's specular and its material cube (it has no screen product - the spec's
         // "blended and refractive fragments" rule).
         hlms->_setProperty(tid, kRoughSpec, 0);
+        // ...AND THE AREA LIGHTS' VISIBILITY (7-A): the opaque surface's behind the fragment - withdrawn, the
+        // fragment's area lights unshadowed as upstream draws them.
+        static const Ogre::IdString kAreaVis("jah_area_vis");
+        hlms->_setProperty(tid, kAreaVis, 0);
     }
     static const Ogre::IdString kIrradianceField("irradiance_field");
     static const Ogre::IdString kVctNumProbes("vct_num_probes");
@@ -392,7 +398,8 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
                 Ogre::CbShaderBuffer(Ogre::PixelShader, Ogre::uint16(pb.specAlbedoSlot), table, 0, 0);
     }
     // kExtraPassSlots' order: the sky's environment, GATHER-0's irradiance and
-    // its rough specular (7-3), the cloud field, the sun contact visibility, the atmosphere's volume.
+    // its rough specular (7-3), the cloud field, the sun contact visibility, the area lights' visibility (7-A), the
+    // atmosphere's volume.
     // Each pair was set together in preparePassHash with its property, or not
     // at all.
     const struct { Ogre::TextureGpu *tex; const Ogre::HlmsSamplerblock *sampler; } bound[] = {
@@ -401,6 +408,7 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
         { pb.roughSpec, pb.probeGatherSampler },
         { pb.cloudField, pb.cloudSampler },
         { pb.sunVis, pb.sunVisSampler },
+        { pb.areaVis, pb.areaVisSampler },
         { pb.atmoAerial, pb.atmoSampler },
     };
     static_assert(sizeof(bound) / sizeof(bound[0]) == kNumExtraPassSlots,
@@ -442,6 +450,10 @@ void FogHlmsListener::setSunContact(const Ogre::SceneManager *sm, Ogre::TextureG
     if (!visibility) { b->sunContact = SunContactBind(); return; }
     b->sunContact.tex = visibility;
     b->sunContact.divisor = divisor ? divisor : 1u;
+}
+// PHOTON-7 7-A — the pixel's area light visibility, pass-scoped like the sun contact's registration.
+void FogHlmsListener::setAreaVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility) {
+    if (SceneBinds *b = bindsOf(sm)) b->areaVis = visibility;
 }
 // PHOTON-VIEW-1 — the view's isolation, pass-scoped like the gather's registration.
 void FogHlmsListener::setPhotonIsolation(const Ogre::SceneManager *sm, int mode) {
@@ -632,6 +644,20 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             }
         }
     }
+    // THE AREA LIGHTS' VISIBILITY (PHOTON-7 stage 7, 7-A) - the sun contact's three decisions, pass-scoped the same way
+    // (the ray tier registers the texture in front of the opaque pass and takes it away when that pass ends): the
+    // texture HlmsPbs's LTC loop multiplies light i's terms by (channel i; JahAreaVis_piece_ps.any fills the fork's
+    // hook). Null in every scene with no forward LTC light: one pointer test per colour pass.
+    pb.areaVis = nullptr;
+    pb.areaVisSampler = nullptr;
+    if (rec && rec->areaVis) {
+        const Ogre::HlmsSamplerblock *point = acquireSampler(hlms->getHlmsManager(), false);
+        if (point) {
+            pb.areaVis = rec->areaVis;
+            pb.areaVisSampler = point;
+            hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_area_vis", 1);
+        }
+    }
     // THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): a pass property whose VALUE is
     // the mode (1 the indirect diffuse alone, 2 the specular environment alone),
     // read by JahPhotonView_piece_ps.any. Empty in every scene whose view is not
@@ -652,6 +678,7 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
         if (pb.roughSpec) screen[n++] = "jahRoughSpec";
         if (hlms->_getProperty(Ogre::Hlms::kNoTid, kUseSsr) != 0) screen[n++] = "ssrTexture";
         if (pb.sunVis) screen[n++] = "jahSunVis";
+        if (pb.areaVis) screen[n++] = "jahAreaVis";
         PhotonPassBinding::notePass(sceneManager, hlms, screen, n);
     }
     if (casterPass || !shadowNode || !hlms) return;

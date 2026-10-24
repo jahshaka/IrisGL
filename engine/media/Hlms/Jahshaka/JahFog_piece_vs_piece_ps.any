@@ -158,7 +158,7 @@
 // the piece is this one. The gather's register is claimed beside the sky's in
 // FogHlmsListener::propertiesMergedPreGenerationStep, in the fixed order
 // getNumExtraPassTextures states.
-@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact || jah_atmo_ap || jah_height_fog || hlms_fog )
+@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact || jah_area_vis || jah_atmo_ap || jah_height_fog || hlms_fog )
 @piece( custom_ps_uniformDeclaration )
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(jahEnvCube) ) midf_tex uniform textureCube jahEnvCube;
@@ -193,6 +193,13 @@
 	// JahSunContact_piece_ps.any with a texel fetch, so no sampler is declared.
 	@property( jah_sun_contact )
 		vulkan_layout( ogre_t@value(jahSunVis) ) uniform texture2D jahSunVis;
+	@end
+	// THE AREA LIGHTS' VISIBILITY (PHOTON-7 stage 7, 7-A): RG32_UINT at the target's size, x the diffuse-weighted
+	// visible share of the pass's forward LTC light i in byte i, y the specular-weighted; read by
+	// JahAreaVis_piece_ps.any with a texel fetch (no sampler), under this guard and one more term (never in the hit
+	// decode). Mono views only.
+	@property( jah_area_vis && hlms_screen_pos_int && !hlms_prepass && !hlms_shadowcaster )
+		vulkan_layout( ogre_t@value(jahAreaVis) ) uniform utexture2D jahAreaVis;
 	@end
 	// THE PLANET'S ATMOSPHERE'S AERIAL-PERSPECTIVE VOLUME (SKY-ATMOSPHERE-1),
 	// ONE pass texture (OgreFog.cpp: the pass-texture budget per family):

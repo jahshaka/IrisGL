@@ -2002,6 +2002,7 @@ public:
     X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */ \
     X(GatherFieldInPass, "gather.fieldInPass") /* the field's fallback left to the shading pass (7-2's A/B: the old route; until 7-5) */ \
     X(GatherNoAnswer, "gather.noAnswer") /* no probe answers any pixel (the weight floor at its largest: the fallback alone) */ \
+    X(AreaVisReadback, "area.visReadback") /* the pixel's area light visibility copied to the host (ScenePublished::areaVis, a test door; 7-A) */ \
     X(GatherRoughQuadrature, "gather.roughQuadrature") /* the rough specular's quadrature door: 1 the filtered map kept beside the levels, 2 the lobe by brute force over it (7-3) */ \
     X(ShadowReceiverBoxesOff, "shadow.receiverBoxesOff") /* the receiver grid without the stock route's boxes (the fixture's negative control, U5 decision 22.3) */ \
     X(TexturePumpFault, "textures.pumpFault") /* the host's texture wait: 1 never done, 2 and its step throws (a test door, U5 decision 22.5) */ \
@@ -3342,6 +3343,11 @@ public:
     /// the divisor), the fourth extra slot and one binding.
     static void setSunContact(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility,
                               unsigned divisor);
+    /// THE AREA LIGHTS' VISIBILITY (PHOTON-7 stage 7, 7-A) - the sun contact's route: the ray tier registers the
+    /// full-resolution RGBA8 `jahAreaVis` (channel i the visible share of the pass's forward LTC light i) in front of
+    /// the opaque pass and takes it away as that pass ends; the listener's pass property `jah_area_vis`, its slot and
+    /// its binding follow. Null = none.
+    static void setAreaVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility);
 
     /// THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): Diffuse (1) or Reflections (2)
     /// for the pass being executed, registered by the view's photon listener in
@@ -3408,6 +3414,8 @@ private:
         const Ogre::HlmsSamplerblock *cloudSampler = nullptr;
         Ogre::TextureGpu             *sunVis = nullptr;               // PHOTON-RAYS-1
         const Ogre::HlmsSamplerblock *sunVisSampler = nullptr;
+        Ogre::TextureGpu             *areaVis = nullptr;              // PHOTON-7 7-A
+        const Ogre::HlmsSamplerblock *areaVisSampler = nullptr;
         Ogre::TextureGpu             *atmoAerial = nullptr;             // SKY-ATMOSPHERE-1
         const Ogre::HlmsSamplerblock *atmoSampler = nullptr;
         /// PHOTON-3: the constant-buffer slot of the specular lobe's albedo table
@@ -3431,6 +3439,7 @@ public:
         SkyEnvState      skyEnv;
         ProbeGatherBind  probeGather;              ///< GATHER-0, 7-3 (the pass's copies: PassBinds::probeGather, roughSpec)
         SunContactBind   sunContact;               ///< PHOTON-RAYS-1 (the pass's copy: PassBinds::sunVis)
+        Ogre::TextureGpu *areaVis = nullptr;       ///< PHOTON-7 7-A (the pass's copy: PassBinds::areaVis)
         int              photonIsolation = 0;      ///< PHOTON-VIEW-1: 1 diffuse, 2 specular, 0 none
         CloudShadowState cloudShadow;              ///< CLOUDS-2D-1 (the pass's copy: PassBinds::cloudField)
         AtmoBind         atmo;                     ///< SKY-ATMOSPHERE-1 (PassBinds::atmoAerial)
@@ -3442,7 +3451,11 @@ public:
     static SceneBinds *bindsOf(const Ogre::SceneManager *sm);
     /// A scene's PASS-SCOPED registrations (the gather's, the sun contact's), cleared — the
     /// frame's backstop (OgreEngine::updateRayQuery, every scene).
-    static void clearPassScoped(SceneBinds &b) { b.probeGather = ProbeGatherBind(); b.sunContact = SunContactBind(); }
+    static void clearPassScoped(SceneBinds &b) {
+        b.probeGather = ProbeGatherBind();
+        b.sunContact = SunContactBind();
+        b.areaVis = nullptr;
+    }
 private:
     static const Ogre::HlmsSamplerblock *sCloudSampler;                // render thread only
     static Ogre::HlmsManager            *sSamplerMgr;                  // render thread only
@@ -3567,6 +3580,20 @@ namespace lightextras {
 /// (PHOTON-7 7-0, L5): the approximation's budget is 0, so HlmsPbs never draws
 /// one, and the area mask (which only the approximation sampled) is deleted.
 constexpr Ogre::uint16 kAreaLtcLimit    = 4u;
+
+/// AN AREA LIGHT'S RECTANGLE IN WORLD SPACE (PHOTON-7 stage 7, 7-A: ONE TEXT for the cards' lamps, OgreSurfaceCache,
+/// and the pixel's area visibility, OgreRayQuery - as HlmsPbs and the voxel injection build it): the node's x and y
+/// axes times the light's half extents, the corners counter-clockwise from -x -y.
+inline void areaLightCorners(const Ogre::Light *l, Ogre::Vector3 out[4]) {
+    const Ogre::Vector3 p = l->getParentNode()->_getDerivedPosition();
+    const Ogre::Vector2 half = l->getDerivedRectSize() * 0.5f;
+    const Ogre::Quaternion q = l->getParentNode()->_getDerivedOrientation();
+    const Ogre::Vector3 xA = q.xAxis() * half.x, yA = q.yAxis() * half.y;
+    out[0] = p - xA - yA;
+    out[1] = p + xA - yA;
+    out[2] = p + xA + yA;
+    out[3] = p - xA + yA;
+}
 
 /// Assigns the IES profile at `path` to `light` (empty path = unset). Loads and
 /// atlas-builds the profile the first time a path is seen, and NEVER rebuilds
@@ -4550,6 +4577,7 @@ public:
         JAH_HOST_CALL("Scene::setSunContact"); return mPhoton.setSunContact(d); }
     SunContactDesc sunContact() const override { return mPhoton.sunContact(); }
     SunContactStatus sunContactStatus() const;
+    AreaVisStatus areaVisStatus() const;
     bool sunContactWanted() const { return mPhoton.sunContactWanted(); }
     // --- THE GPU SCENE (A3_GPU_SCENE_SLICE_DESIGN.md; GpuScene.h) -----------
     /// Brings the device-side instance and mesh tables up to date for this

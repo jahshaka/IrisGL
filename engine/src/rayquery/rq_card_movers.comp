@@ -122,14 +122,9 @@ layout( std430, set = 0, binding = 7 ) readonly buffer Lamps
 layout( rgba8, set = 0, binding = 8 ) uniform image2D sunVis;
 /// A lamp's ray stops this far short of its source (beyond its source radius): its own bulb is not its shadow.
 const float kLampEnd = 0.05;
-/// The PCG integer hash (jah_probe_params.glsl's jahPcg, the gather's): the area strata's jitter, a function of the
-/// texel's world point and the stratum alone.
-uint jahCardPcg( uint v )
-{
-	const uint s = v * 747796405u + 2891336453u;
-	const uint w = ( ( s >> ( ( s >> 28u ) + 4u ) ) ^ s ) * 277803737u;
-	return ( w >> 22u ) ^ w;
-}
+// THE AREA LIGHT'S STRATA (PHOTON-7 stage 7, 7-A): one text with the pixel's trace - the key, the one origin function,
+// a stratum's form factor and ray.
+#include "jah_area_strata.glsl"
 /// THE RELIGHT'S DIFFUSE SHAPE (JahCardLight_cs.glsl's jahCardDiffuse, the same text - BRDF_Default's diffuse at
 /// V = N, times NdotL): the weight a lamp's visibility takes in the byte is its share of the relight's own sum.
 float jahCardLampShape( vec3 N, vec3 L, float perceptualRoughness )
@@ -201,38 +196,17 @@ void main()
 					const vec3 c0 = l.points[0].xyz, eu = l.points[1].xyz - c0, ev = l.points[3].xyz - c0;
 					const vec3 emit = l.spotDirection.xyz;   // the light shines down its -Z: the record's direction
 					const bool twoSided = l.points[0].w != 0.0;
-					const uint key = jahCardPcg( floatBitsToUint( P.x ) ^
-												 jahCardPcg( floatBitsToUint( P.y ) ^ jahCardPcg( floatBitsToUint( P.z ) ) ) );
+					const uint key = jahAreaStrataKey( P );
 					float sf = 0.0, svf = 0.0;
 					for( uint k = 0u; k < n * n; ++k )
 					{
-						const float xu = ( float( k % n ) + float( jahCardPcg( key + 2u * k ) ) * 2.3283064e-10 ) / float( n );
-						const float xv = ( float( k / n ) + float( jahCardPcg( key + 2u * k + 1u ) ) * 2.3283064e-10 ) / float( n );
-						const vec3 Q = c0 + eu * xu + ev * xv;
-						const vec3 dq = Q - P;
-						const float r2 = dot( dq, dq );
-						if( !( r2 > 0.0 ) )
-							continue;
-						const vec3 wq = dq * inversesqrt( r2 );
-						const float cr = max( dot( Ncone, wq ), 0.0 );
-						const float cl = twoSided ? abs( dot( emit, wq ) ) : max( -dot( emit, wq ), 0.0 );
-						const float f = cr * cl / r2;
+						float vq, unusedCl;
+						vec3 unusedDir;
+						const float f = jahAreaStratum( P, N, Ncone, lift, c0, eu, ev, emit, twoSided, n, k, key,
+														uint( p.knobs.x ), kLampEnd, vq, unusedDir, unusedCl );
 						if( !( f > 0.0 ) )
 							continue;
 						sf += f;
-						const float startQ = lift / max( dot( N, wq ), 1e-4 );
-						const vec3 originQ = P + wq * startQ;
-						const float reachQ = sqrt( r2 ) - startQ - kLampEnd;
-						float vq = 1.0;
-						if( reachQ > 0.0 )
-						{
-							rayQueryEXT rqa;
-							rayQueryInitializeEXT( rqa, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
-												   uint( p.knobs.x ), originQ, 0.0, wq, reachQ );
-							JAH_RQ_PROCEED( rqa )
-							if( rayQueryGetIntersectionTypeEXT( rqa, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
-								vq = 0.0;
-						}
 						svf += f * vq;
 					}
 					// its share: the samples' own form factor ( sum f ) A / ( n^2 pi ), in the range window
@@ -251,7 +225,7 @@ void main()
 				if( !( w > 0.0 ) )
 					continue;   // lights nothing here: its bit stays set
 				float v = 1.0;
-				const float start = lift / max( dot( N, L ), 1e-4 );
+				const float start = jahAreaRayStart( N, L, lift );
 				const vec3 origin = P + L * start;
 				const float reach = d - start - max( l.attenuation.y, 0.0 ) - kLampEnd;
 				if( reach > 0.0 )

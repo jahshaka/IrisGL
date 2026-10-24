@@ -1763,12 +1763,9 @@ void SurfaceCache::relightCards() {
             o[0] = p.x; o[1] = p.y; o[2] = p.z;
             o[3] = area ? 3.0f : type == Ogre::Light::LT_POINT ? 1.0f : 2.0f;
             if (area) {
-                // THE RECTANGLE, as HlmsPbs and the voxel injection build it (PhotonVoxelLighting.cpp): the node's x and
-                // y axes times the light's half extents, the corners counter-clockwise from -x -y.
-                const Ogre::Vector2 half = l->getDerivedRectSize() * 0.5f;
-                const Ogre::Quaternion q = l->getParentNode()->_getDerivedOrientation();
-                const Ogre::Vector3 xA = q.xAxis() * half.x, yA = q.yAxis() * half.y;
-                const Ogre::Vector3 corner[4] = { p - xA - yA, p + xA - yA, p + xA + yA, p - xA + yA };
+                // THE RECTANGLE (lightextras::areaLightCorners: one text with the pixel's area visibility)
+                Ogre::Vector3 corner[4];
+                detail::lightextras::areaLightCorners(l, corner);
                 for (unsigned k = 0; k < 4u; ++k) {
                     o[20u + 4u * k] = corner[k].x;
                     o[21u + 4u * k] = corner[k].y;
