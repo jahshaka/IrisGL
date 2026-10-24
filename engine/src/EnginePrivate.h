@@ -1969,6 +1969,7 @@ public:
     X(GiFieldSamples, "gi.fieldSamples") /* the field's sample target (0 = shipped) */ \
     X(GiFieldStatic, "gi.fieldStatic") /* the field's rays NOT rotated per frame */ \
     X(GiFieldStopOff, "gi.fieldStopOff") /* the field's per-probe variance stop off (every probe to the target) */ \
+    X(GiFieldMarkRingFull, "gi.fieldMarkRingFull") /* the field's mark ring held FULL on every other frame (the keep path's test door) */ \
     X(GiVoxelAreaStrata, "gi.voxelAreaStrata") /* the voxels' area light visibility over n x n ratio marches (0: one to its centre; a measuring arm) */ \
     X(GiRefuseGeometry, "gi.refuseGeometry") /* a voxel build with no geometry source (the refused device) */ \
     X(AtomDiscriminate, "atom.discriminate") /* the decode's failure colour codes (1), the chart (2) */ \

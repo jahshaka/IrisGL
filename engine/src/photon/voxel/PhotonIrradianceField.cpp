@@ -1059,9 +1059,11 @@ namespace Ogre
             return;
         mMarkRan = false;
         MarkTicket &t = mMarkTickets[mMarkNextIssue];
-        if( t.ticket )
+        if( t.ticket || ( mMarkRingHold && ( frame & 1u ) ) )
         {
             // EVERY SLOT IN FLIGHT: the report is KEPT for the next ticket (the ring's comment, PhotonIrradianceField.h)
+            if( !mMarkKeepReport )
+                ++mReportsKept;
             mMarkKeepReport = true;
             return;
         }

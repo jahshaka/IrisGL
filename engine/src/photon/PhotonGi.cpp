@@ -1028,6 +1028,7 @@ GiStatus PhotonComponent::giStatus() const {
             st.ifdOwedIntegrations = mIfd->getOwedIntegrations();
             st.ifdWorking = !mIfd->isWorkDone() || mIfd->getOwedEmpty() > 0u;
             st.ifdMarkedByMoves = mIfd->getMarkedByMoves();
+            st.ifdReportsKept = mIfd->getReportsKept();
             st.ifdMarkedByRegion = mIfd->getMarkedByRegion();
             st.ifdMarkAlls = mIfd->getMarkAlls();
             st.ifdRestarts = mIfd->getRestarts();
@@ -7985,6 +7986,7 @@ void PhotonComponent::planField(FrameWork &w) {
             mIfdWriteFrame = giWriterFrame();
         }
         mIfd->harvestMarks(giWriterFrame());
+        mIfd->setMarkRingHold(mEngine && mEngine->armRegistry().on(ArmId::GiFieldMarkRingFull));
         markFieldFromRegions();
     } JAH_CATCH(mError, );
     // THE WINDOW STEPS WITH THE EYE (5-5) before the frame's work: a step's entered planes are the next work. (The

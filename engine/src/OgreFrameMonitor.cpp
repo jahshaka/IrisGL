@@ -1260,6 +1260,10 @@ constexpr ArmDef kArms[] = {
     { ArmId::GiFieldStopOff, 0.0, 0.0, 1.0,
       "The irradiance field's per-probe variance stop OFF at its next build: every probe "
       "integrates to the target (the oracle gi.field_variance_stop compares the stop with)." },
+    { ArmId::GiFieldMarkRingFull, 0.0, 0.0, 1.0,
+      "THE MARK RING'S KEEP PATH (a test door, stage 5's read B3; gi.field_oracle (1)): the field's mark "
+      "ring reads FULL on every other frame, so that frame's report is kept for the next ticket - the "
+      "marks must still arrive (the old drop lost them)." },
     { ArmId::GiVoxelAreaStrata, 0.0, 0.0, 32.0,
       "The voxels' area light visibility at the next injections: n x n stratified marches over the rectangle, "
       "the ratio of their form-factor weights (0 = the shipped one march to its centre). A measuring arm "

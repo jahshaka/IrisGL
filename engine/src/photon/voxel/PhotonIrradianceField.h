@@ -294,6 +294,8 @@ namespace Ogre
         vector<MarkTicket>::type mMarkTickets;
         uint32 mMarkNextIssue = 0u, mMarkNextTake = 0u;
         bool mMarkKeepReport = false;
+        bool mMarkRingHold = false;   ///< the test door (setMarkRingHold)
+        uint64 mReportsKept = 0ull;   ///< the reports a full ring kept (GiStatus::ifdReportsKept)
         uint64 mMarkedByMoves = 0ull, mMarkedByRegion = 0ull, mMarkAlls = 0ull, mRestarts = 0ull;
         void writeProbeRecords();
 
@@ -550,10 +552,13 @@ namespace Ogre
         void accumulateMoves( UavBufferPacked *brickState, const uint32 dims[3], const Vector3 &corner, float brickSide,
                               const Vector3 *finerLo, const Vector3 *finerHi, float finerShellEnd, uint64 frame );
         void endMarkFrame( uint64 frame );
+        /// THE KEEP PATH'S TEST DOOR (the arm gi.fieldMarkRingFull): the ring reads full on every other frame.
+        void setMarkRingHold( bool hold ) { mMarkRingHold = hold; }
         void harvestMarks( uint64 frame );
         /// The probes marked since the build: by the accumulation, by regions, the whole field (markAll calls), and
         /// the restarts dispatched.
         uint64 getMarkedByMoves() const { return mMarkedByMoves; }
+        uint64 getReportsKept() const { return mReportsKept; }
         uint64 getMarkedByRegion() const { return mMarkedByRegion; }
         uint64 getMarkAlls() const { return mMarkAlls; }
         uint64 getRestarts() const { return mRestarts; }

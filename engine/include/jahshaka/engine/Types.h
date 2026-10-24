@@ -4553,6 +4553,9 @@ struct GiStatus {
     unsigned long long ifdOwedIntegrations = 0;   ///< at most: each restart deep and to the target, each refine to it
     bool ifdWorking = false;
     unsigned long long ifdMarkedByMoves = 0, ifdMarkedByRegion = 0, ifdMarkAlls = 0, ifdRestarts = 0;
+    /// The marks' reports a FULL read-back ring could not ticket, KEPT for the next ticket (never dropped; stage 5's read
+    /// B3), cumulative: 0 in the shipped ring (the multiplier + 2), non-zero under the test door gi.fieldMarkRingFull.
+    unsigned long long ifdReportsKept = 0;
     /// The probe integrations the field's last recorded frame dispatched (its rows' units: the budget's spend, an
     /// upper bound of the GPU's - a stopped probe's group exits early), and THE GRANT it had (the field's integrations a
     /// frame, the same at rest as in motion: 0 = nothing owed).
