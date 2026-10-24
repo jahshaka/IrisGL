@@ -26,8 +26,9 @@
 //                             16 x slot + 8 x reader + bucket): the stamp of the last frame a hit there found NO card -
 //                             the faces the readers want. Per reader because a reader at REST (the reflection held,
 //                             the gather held) reads nothing: what it read stays wanted on its own clock;
-//   [S + 8194 + 4S .. + 4096)   per ATLAS CELL, the HITS that read its card while the count flag is set (cumulative:
-//                             the measuring arm cards.demandCount - a row's read rate per card).
+//   [S + 8194 + 4S .. + 4S)   per ITEM SLOT, per reader, per face bucket (the marks' layout), the HITS on that face
+//                             while the count flag is set - every read, its card's or none's (cumulative: the measuring
+//                             arm cards.demandCount - a row's read rate per face, the settle law's lambda).
 // A reader defines JAH_CARD_DEMAND (its index: 0 the reflection, 1 the gather) before including jah_rq_card.glsl;
 // the parity harness does not, and writes nothing.
 //

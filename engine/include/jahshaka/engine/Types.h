@@ -3973,10 +3973,22 @@ struct CardRadiance {
     unsigned bucket = 0u;   ///< its face: the outward axis's largest component, 2 x axis + (negative)
     unsigned size = 0u;
     unsigned long long lastRelit = 0ull, lastIndirect = 0ull;
-    /// The newest cache frame a reader read it (or its admission's), and - under the measuring arm cards.demandCount -
-    /// the hits that read its atlas cell, cumulative (a row's read rate).
-    unsigned long long lastRead = 0ull, hits = 0ull;
+    /// The newest cache frame a reader read it (or its admission's).
+    unsigned long long lastRead = 0ull;
     std::vector<float> rgb;
+};
+
+/// ONE FACE'S DEMAND (PHOTON-7 stage 7, Scene::readCardFaceDemand; the measuring arm cards.demandCount): an item's face
+/// bucket (2 x axis + (negative), the hit's facing), every READ of it by each reader (0 the reflection, 1 the gather) -
+/// its card's or, none resident, the hit that marked it - cumulative since the arm was set (the settle law's lambda,
+/// GiQualityFacts::cardDemandHitFloor, is this count's rate), each reader's newest harvested no-card mark, and the
+/// cards of the face resident now. Listed while the arm is on, for every face that was read, marked or is resident.
+struct CardFaceDemand {
+    NodeId node = 0;
+    unsigned bucket = 0u;
+    unsigned long long hits[2] = { 0ull, 0ull };
+    unsigned long long mark[2] = { 0ull, 0ull };
+    unsigned resident = 0u;
 };
 
 struct CardSample {

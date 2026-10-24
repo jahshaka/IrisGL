@@ -755,8 +755,8 @@ constexpr unsigned kDemandFaceEntries = 4u;
 constexpr unsigned long long kDemandReadEvery = 4ull;
 
 size_t demandEntries(unsigned slots) {
-    // the head, the cells' stamps, the slots' face marks, and the cells' hit counts (the measuring arm's)
-    return size_t(kDemandHeadEntries) + kDemandCellEntries + size_t(kDemandFaceEntries) * slots + kDemandCells / 4u;
+    // the head, the cells' stamps, the slots' face marks, and the slots' face hits (the measuring arm's, the marks' layout)
+    return size_t(kDemandHeadEntries) + kDemandCellEntries + 2u * size_t(kDemandFaceEntries) * slots;
 }
 unsigned demandCellOf(const CardRec &c) {
     return (c.atlasY / kCardMinSize) * (kCardAtlasSize / kCardMinSize) + c.atlasX / kCardMinSize;
@@ -972,12 +972,18 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, const CardSceneView 
                 mFacePrev[k] = mFaceMarks[k];
                 mFaceMarks[k] = face[k];
             }
-        // THE HIT COUNTS (the measuring arm cards.demandCount): each resident card's cell's, cumulative
+        // THE FACES' HITS (the measuring arm cards.demandCount): every read of a face, resident or not - the GPU's
+        // counts are cumulative per buffer, so the host adds each word's move (a grown table's new buffer starts at 0)
         if (mDemandCount) {
             const Ogre::uint32 *hits = face + size_t(t.slots) * 16u;
-            for (unsigned c = 0; c < kDemandCells; ++c)
-                if (c < mSlotCard.size() && mSlotCard[c] >= 0 && size_t(mSlotCard[c]) < mCards.size())
-                    mCards[size_t(mSlotCard[c])].hits = hits[c];
+            if (mFaceHits.size() < size_t(t.slots) * 16u) {
+                mFaceHits.resize(size_t(t.slots) * 16u, 0ull);
+                mFaceHitsGpu.resize(size_t(t.slots) * 16u, 0u);
+            }
+            for (size_t k = 0; k < size_t(t.slots) * 16u; ++k) {
+                mFaceHits[k] += hits[k] >= mFaceHitsGpu[k] ? hits[k] - mFaceHitsGpu[k] : hits[k];
+                mFaceHitsGpu[k] = hits[k];
+            }
         }
         t.ticket->unmap();
         t.ticket.reset();
@@ -1006,6 +1012,13 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     //    offered and its pages come back — no door to remember to knock on.
     for (InstanceRec &inst : mInstances) inst.seen = false;
     bool changed = false;
+    // THE MEASURING ARM's faces' identity (cards.demandCount alone): the node at each item slot, the candidates'
+    if (mDemandCount)
+        for (const CardSceneView::Candidate &cand : view.candidates)
+            if (cand.itemSlot != size_t(-1)) {
+                if (mSlotNode.size() <= cand.itemSlot) mSlotNode.resize(cand.itemSlot + 1u, 0);
+                mSlotNode[cand.itemSlot] = cand.node;
+            }
     // THE INSTANCES THAT MOVED: released here and re-admitted below as THE SAME FACES (the cards a reader read keep
     // their place in the layout, their demand and their flags' meaning) at the new transform.
     struct Kept { unsigned index = 0u; unsigned long long readBy[2] = {0ull, 0ull}; };
@@ -3636,7 +3649,6 @@ bool SurfaceCache::readRadiance(std::vector<CardRadiance> &out, unsigned long lo
             r.card = c.index;
             r.bucket = c.bucket;
             r.lastRead = c.lastRead;
-            r.hits = c.hits;
             r.size = c.size;
             r.lastRelit = c.lastRelit;
             r.lastIndirect = c.lastIndirect;
@@ -3653,6 +3665,31 @@ bool SurfaceCache::readRadiance(std::vector<CardRadiance> &out, unsigned long lo
     }
     tk->unmap();
     tm->destroyAsyncTextureTicket(tk);
+    return true;
+}
+
+bool SurfaceCache::readFaceDemand(std::vector<CardFaceDemand> &out, unsigned long long &cacheFrame) const {
+    out.clear();
+    cacheFrame = mFrame;
+    if (!mBuilt) return false;
+    for (size_t s = 0; s < mSlotNode.size(); ++s) {
+        if (!mSlotNode[s]) continue;
+        auto it = mByNode.find(mSlotNode[s]);
+        const InstanceRec *inst = it != mByNode.end() ? &mInstances[it->second] : nullptr;
+        for (unsigned b = 0; b < 6u; ++b) {
+            CardFaceDemand d;
+            d.node = mSlotNode[s];
+            d.bucket = b;
+            for (unsigned r = 0; r < kDemandReaders; ++r) {
+                const size_t k = s * 16u + 8u * r + b;
+                d.hits[r] = k < mFaceHits.size() ? mFaceHits[k] : 0ull;
+                d.mark[r] = k < mFaceMarks.size() ? mFaceMarks[k] : 0ull;
+            }
+            if (inst)
+                for (unsigned c = 0; c < inst->cardCount; ++c) d.resident += mCards[inst->firstCard + c].bucket == b ? 1u : 0u;
+            if (d.hits[0] || d.hits[1] || d.mark[0] || d.mark[1] || d.resident) out.push_back(d);
+        }
+    }
     return true;
 }
 

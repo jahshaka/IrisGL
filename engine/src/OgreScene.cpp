@@ -2635,6 +2635,13 @@ bool PhotonComponent::readCardRadiance(std::vector<CardRadiance> &out, unsigned 
     return mSurfaceCache->readRadiance(out, cacheFrame);
 }
 
+bool PhotonComponent::readCardFaceDemand(std::vector<CardFaceDemand> &out, unsigned long long &cacheFrame) {
+    out.clear();
+    cacheFrame = 0ull;
+    if (!mSurfaceCache) return false;
+    return mSurfaceCache->readFaceDemand(out, cacheFrame);
+}
+
 bool PhotonComponent::readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
                            NodeId onlyNode) {
     out = CardSample();

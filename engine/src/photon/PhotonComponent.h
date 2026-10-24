@@ -914,6 +914,7 @@ public:
     bool readCardTexel(NodeId node, unsigned card, float u, float v,
                        CardSample &out);
     bool readCardRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame);
+    bool readCardFaceDemand(std::vector<CardFaceDemand> &out, unsigned long long &cacheFrame);
     bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out,
                     NodeId onlyNode = 0);
     bool dumpCardAtlas(const std::string &prefix, std::string &err);

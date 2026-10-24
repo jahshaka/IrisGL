@@ -213,8 +213,6 @@ struct CardRec {
     /// ...and the lamps its last relight took through the FRACTIONAL byte (the SunVis layer's blue: the 5-3 fix): the
     /// area lights that reach it (never in the table) and the lamps past the table.
     unsigned areaLampCount = 0u, fractionalCount = 0u;
-    /// Under the measuring arm cards.demandCount: the hits that read its cell, cumulative (the cell's, a row's rate).
-    unsigned long long hits = 0ull;
     unsigned long long lastUpdated = 0ull;
     unsigned long long since = 0ull;
     bool queued = false;         ///< waiting for a capture
@@ -482,6 +480,8 @@ public:
     /// TEST AND TOOL: every resident card's lit radiance, whole (Scene::readCardRadiance): one download of the Radiance
     /// layer (flushCommands first), sliced per card.
     bool readRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame) const;
+    /// TEST AND TOOL: every face's demand under the measuring arm cards.demandCount (Scene::readCardFaceDemand).
+    bool readFaceDemand(std::vector<CardFaceDemand> &out, unsigned long long &cacheFrame) const;
     /// TEST AND TOOL: what the cache holds AT A WORLD POINT on a surface whose
     /// outward normal is `normal` — the question the ray job's read asks at a
     /// hit (jah_rq_card.glsl, the GPU port), answered here on the CPU as its
@@ -918,6 +918,11 @@ private:
     unsigned mDemandNextIssue = 0u, mDemandNextTake = 0u;
     std::vector<unsigned long long> mFaceMarks;   ///< 16 a slot: 8 per reader, the 6 buckets
     std::vector<unsigned long long> mFacePrev;    ///< ...and each one's mark before (a demand that persists: two)
+    /// THE MEASURING ARM cards.demandCount: each face's hits (the marks' layout), cumulative - and the GPU's last word,
+    /// whose moves they add; and the node at each item slot (the candidates', the faces' identity while none is resident)
+    std::vector<unsigned long long> mFaceHits;
+    std::vector<unsigned> mFaceHitsGpu;
+    std::vector<NodeId> mSlotNode;
     /// THE READERS' CLOCKS: per reader, the newest stamp a read-back held (its window counts in it: a reader at rest
     /// reads nothing, and nothing it read goes stale while it rests); and the cache frame of the last change in what
     /// the rays can hit (CardSceneView::demandChanged) - the demand is open until a reader's harvested stamp passes it

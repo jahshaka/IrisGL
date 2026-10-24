@@ -179,12 +179,12 @@ void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
 		const uint w = 8u * reader + jahCardBucket( facing );
 		jahCardDemandStamp( S + 8194u + 4u * slot + ( w >> 2u ), w & 3u, head.x );
 	}
-	if( head.y != 0u && pick.ok )
+	if( head.y != 0u )
 	{
-		const uvec4 at = jahCards[pick.card].atlas;
-		const uint cell = ( at.y >> 4u ) * 128u + ( at.x >> 4u );
-		const uint e = S + 8194u + 4u * S + ( cell >> 2u );
-		const uint k = cell & 3u;
+		// THE FACE'S HITS (the measuring arm): EVERY read of the face, its card's or none's - the settle law's lambda
+		const uint w = 8u * reader + jahCardBucket( facing );
+		const uint e = S + 8194u + 4u * S + 4u * slot + ( w >> 2u );
+		const uint k = w & 3u;
 		if( k == 0u )
 			atomicAdd( jahCardInstances[e].x, 1u );
 		else if( k == 1u )

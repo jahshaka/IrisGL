@@ -4552,6 +4552,9 @@ public:
     bool readCardRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = readCardRadiance(out, cacheFrame); }); return r; }   // a REQUEST (U3 4b)
         JAH_HOST_CALL("Scene::readCardRadiance"); return mPhoton.readCardRadiance(out, cacheFrame); }
+    bool readCardFaceDemand(std::vector<CardFaceDemand> &out, unsigned long long &cacheFrame) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = readCardFaceDemand(out, cacheFrame); }); return r; }   // a REQUEST (U3 4b)
+        JAH_HOST_CALL("Scene::readCardFaceDemand"); return mPhoton.readCardFaceDemand(out, cacheFrame); }
     bool readCardAt(const Vec3 &world, const Vec3 &normal, CardSample &out, NodeId onlyNode = 0) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = readCardAt(world, normal, out, onlyNode); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::readCardAt"); return mPhoton.readCardAt(world, normal, out, onlyNode); }

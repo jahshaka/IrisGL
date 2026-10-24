@@ -1033,6 +1033,14 @@ public:
         cacheFrame = 0ull;
         return false;
     }
+    /// EVERY FACE'S DEMAND (PHOTON-7 stage 7; Types.h's CardFaceDemand): under the measuring arm cards.demandCount, each
+    /// face the readers read, resident or not - the read rate the residency's settle law is stated in (`cacheFrame` the
+    /// cache's frame now). Empty with the arm off.
+    virtual bool readCardFaceDemand(std::vector<CardFaceDemand> &out, unsigned long long &cacheFrame) {
+        out.clear();
+        cacheFrame = 0ull;
+        return false;
+    }
     /// Writes every layer of every RESIDENT card to `<prefix>-<layer><n>.png`.
     /// A tool path for reading a capture channel by channel.
     virtual bool dumpCardAtlas(const std::string & /*prefix*/, std::string &err) {
