@@ -7676,6 +7676,22 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     // with the pass buffer's signs (PhotonVct_piece_ps.any's JAH_ENV_SH_C0 .. C8: C2 .. C5 negated)
     in.roughQuadrature = unsigned(std::max(0.0, armValue(ArmId::GatherRoughQuadrature)) + 0.5);
     {
+        // THE VIEW'S CHAIN KEY (L2: a settings change restarts what it changes): the rough gate's two numbers (the
+        // view's reflection cutoff) and the quadrature door, by their bits
+        unsigned long long key = 1469598103934665603ull;
+        const auto fold = [&key](unsigned long long v) {
+            key ^= v;
+            key *= 1099511628211ull;
+        };
+        unsigned bits = 0u;
+        std::memcpy(&bits, &in.roughGateFull, sizeof bits);
+        fold(bits);
+        std::memcpy(&bits, &in.roughGateRamp, sizeof bits);
+        fold(bits);
+        fold(in.roughQuadrature);
+        in.chainKey = key;
+    }
+    {
         const SceneGiBinding *gb = sceneGiBindingOf(scene->sceneManager());
         Ogre::PhotonIrradianceField *ifd = gb ? gb->ifd : nullptr;
         if (ifd && ifd->getIrradianceTex() && ifd->getDepthVarianceTex()) {

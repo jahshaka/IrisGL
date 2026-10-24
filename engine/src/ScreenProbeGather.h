@@ -289,6 +289,11 @@ struct GatherInputs {
     /// follows it. It decides the SETTLED term (GatherStatus::settled), never the
     /// hold, which keeps `restKey`.
     unsigned long long restartKey = 0ull;
+    /// THE VIEW'S CHAIN PARAMETERS THE ESTIMATE DEPENDS ON (PHOTON-7 stage 7, L2: a settings change is a change): the
+    /// rough specular's gate against the view's traced reflection (roughGateFull / roughGateRamp, from its chain's
+    /// reflection cutoff) and the quadrature door. A move RESTARTS the view's settle and breaks its rest and hold (the
+    /// held texel was gated by the old cutoff) - folded beside the scene's keys, never into them (it is the view's).
+    unsigned long long chainKey = 0ull;
 
     /// THE SURFACE CACHE THE HITS READ FIRST (PHOTON-GATHER-1d, GA-1e) — the
     /// scene's two tables and two atlas layers, bound as the reflection trace
@@ -458,6 +463,7 @@ private:
         /// `settled` is this >= N; the hold above is the stronger rest.
         unsigned sinceRestart = 0u;
         unsigned long long restartKey = 0ull;
+        unsigned long long chainKey = 0ull;   // GatherInputs::chainKey, the frame before
         /// THE REST MEAN, full resolution (rq_probe_integrate.comp): a true mean
         /// of the rest frames, premultiplied by coverage. One image — at rest a
         /// pixel reads and writes only itself.

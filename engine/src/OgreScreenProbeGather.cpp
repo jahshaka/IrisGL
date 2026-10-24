@@ -1408,7 +1408,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // keeps the view SETTLING - its EMA takes the inputs' change at its rate and no rest mean starts - so the
         // rest mean and the hold come only once every input has finished, and nothing lands on a held picture.
         const bool still = temporal && !in.tuning.restOff && !in.stereo && sameCamera &&
-                           in.restKey == v.restKey && !in.inputsBusy && photon == v.photonLast && !in.hitsReadback;
+                           in.restKey == v.restKey && in.chainKey == v.chainKey && !in.inputsBusy &&
+                           photon == v.photonLast && !in.hitsReadback;
         v.photonLast = photon;
         if (in.restKey != v.restKey) ++v.keyMoves;
         v.inputsBusyLast = in.inputsBusy;
@@ -1416,8 +1417,11 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // THE SETTLE: a restart zeroes it (the view's birth or an estimator change
         // is age 0; the scene's restart key moving is the rest), any other frame
         // — moving camera, moving geometry, held — counts one.
-        const bool restart = v.age == 0u || in.restartKey != v.restartKey;
+        // ...and the VIEW'S chain parameters moving (GatherInputs::chainKey: the reflection's cutoff the rough gate
+        // reads) are a restart too - a settings change restarts what it changes.
+        const bool restart = v.age == 0u || in.restartKey != v.restartKey || in.chainKey != v.chainKey;
         v.restartKey = in.restartKey;
+        v.chainKey = in.chainKey;
         v.sinceRestart = restart ? 0u : std::min(v.sinceRestart + 1u, 1u << 20);
         v.restFrames = still ? std::min(v.restFrames + 1u, 1u << 20) : 0u;
         v.historyFramesLast = historyFramesOf(in.tuning);
