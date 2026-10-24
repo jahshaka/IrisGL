@@ -6843,12 +6843,16 @@ void PhotonComponent::accumulateCardIndirect(const std::vector<char> *ran) {
         if (mSurfaceCache)
             mSurfaceCache->accumulateIndirect(state, dims, box.getMinimum(), 8.0f * c.cell(), hasFiner ? &finer : nullptr,
                                               frame);
-        // ...AND THE FIELD'S PROBES (PHOTON-7 stage 5, 5-4): the same moves, the probes as the receivers
+        // ...AND THE FIELD'S PROBES (PHOTON-7 stage 5, 5-4): the same moves, the probes as the receivers - a probe's ray
+        // reads this cascade inside the finer box from the finer cascade's WORLD SHELL'S END on (D_(i-1) = the sum of
+        // eight cells of every cascade up to i - 1, jah_voxel_march.glsl; stage 5's read W1)
         if (field) {
             const Ogre::Vector3 lo = finer.getMinimum(), hi = finer.getMaximum();
+            float finerShellEnd = 0.0f;
+            for (size_t k = 0; k < i; ++k) finerShellEnd += 8.0f * mVctCascades[k].cell();
             JAH_TRY {
                 mIfd->accumulateMoves(state, dims, box.getMinimum(), 8.0f * c.cell(), hasFiner ? &lo : nullptr,
-                                      hasFiner ? &hi : nullptr, frame);
+                                      hasFiner ? &hi : nullptr, finerShellEnd, frame);
             } JAH_CATCH(mError, );
         }
     }

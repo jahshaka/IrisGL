@@ -2249,7 +2249,7 @@ void SurfaceCache::relightCards() {
 namespace {
 constexpr unsigned kCardSlots = (kCardAtlasSize / kCardMinSize) * (kCardAtlasSize / kCardMinSize);
 constexpr unsigned kReportCapacity = 4096u;
-constexpr unsigned kMaxCardClusters = 4096u;   ///< 4^3 bricks a cluster (three words each): a 512^3 cascade's 16^3
+constexpr unsigned kMaxCardClusters = 4096u;   ///< 4^3 bricks a cluster (two records of three words): a 512^3 cascade's 16^3
 }   // namespace
 
 Ogre::UavBufferPacked *SurfaceCache::ensureLightBuffer() {
@@ -2279,7 +2279,7 @@ bool SurfaceCache::ensureIndirectBuffers() {
         mCardReport = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
     }
     if (!mCardCluster) {
-        std::vector<Ogre::uint32> zeros(3u * kMaxCardClusters, 0u);
+        std::vector<Ogre::uint32> zeros(6u * kMaxCardClusters, 0u);
         mCardCluster = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
     }
     return mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster;
@@ -2331,11 +2331,15 @@ void SurfaceCache::accumulateIndirect(Ogre::UavBufferPacked *brickState, const u
         const Ogre::uint32 mode[4] = { 0u, mCardRecords, kReportCapacity, 0u };
         const float self[4] = { corner.x, corner.y, corner.z, brickSide };
         const Ogre::uint32 d[4] = { dims[0], dims[1], dims[2], dims[0] * dims[1] * dims[2] };
+        // THE NEXT FINER BOX AND THE DISTANCE PAST WHICH A CARD READS THIS CASCADE INSIDE IT (hi[3], stage 5's read
+        // W1): 0 - a card's diffuse cones hand over by their footprint (the hand-over mip 1, within ~1.7 cells of the
+        // finer cascade: jah_voxel_march.glsl), so they read this cascade inside the finer box almost from the start and
+        // a card skips none of its bricks
         float lo[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, hi[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         if (finer) {
             const Ogre::Vector3 a = finer->getMinimum(), b = finer->getMaximum();
             lo[0] = a.x; lo[1] = a.y; lo[2] = a.z; lo[3] = 1.0f;
-            hi[0] = b.x; hi[1] = b.y; hi[2] = b.z;
+            hi[0] = b.x; hi[1] = b.y; hi[2] = b.z; hi[3] = 0.0f;
         }
         // THE REDUCE (one thread a cluster of 4^3 bricks), then THE ACCUMULATION (one thread a card)
         if (!clustersOver) {

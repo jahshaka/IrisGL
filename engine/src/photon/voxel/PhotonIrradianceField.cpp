@@ -936,7 +936,7 @@ namespace Ogre
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::accumulateMoves( UavBufferPacked *brickState, const uint32 dims[3],
                                                  const Vector3 &corner, float brickSide, const Vector3 *finerLo,
-                                                 const Vector3 *finerHi, uint64 frame )
+                                                 const Vector3 *finerHi, float finerShellEnd, uint64 frame )
     {
         // THE PROBES' WOULD-MOVE (PHOTON-7 stage 5, 5-4): the cards' job (JahCardIndirect_cs.glsl) with the probes as
         // its receivers - THE REDUCE (each 4^3 cluster of this cascade's bricks: its largest absolute move and the box
@@ -957,8 +957,9 @@ namespace Ogre
         {
             if( mMarkCluster )
                 vaoManager->destroyUavBuffer( mMarkCluster );
-            vector<uint32>::type zeros( 3u * clusters, 0u );   // (three words a cluster: JahCardIndirect_cs.glsl's REDUCE)
-            mMarkCluster = vaoManager->createUavBuffer( 3u * clusters, sizeof( uint32 ), 0, zeros.data(), false );
+            // (two records of three words a cluster: JahCardIndirect_cs.glsl's REDUCE)
+            vector<uint32>::type zeros( 6u * clusters, 0u );
+            mMarkCluster = vaoManager->createUavBuffer( 6u * clusters, sizeof( uint32 ), 0, zeros.data(), false );
             mMarkClusterCapacity = clusters;
         }
         const auto bufSlot = []( UavBufferPacked *b, ResourceAccess::ResourceAccess a, size_t offset, size_t bytes )
@@ -1013,7 +1014,7 @@ namespace Ogre
         if( finerLo && finerHi )
         {
             lo[0] = finerLo->x; lo[1] = finerLo->y; lo[2] = finerLo->z; lo[3] = 1.0f;
-            hi[0] = finerHi->x; hi[1] = finerHi->y; hi[2] = finerHi->z;
+            hi[0] = finerHi->x; hi[1] = finerHi->y; hi[2] = finerHi->z; hi[3] = finerShellEnd;
         }
         {
             // the field: the probes per slot row and plane, the depth tile's interior and the atlas's width; the probe

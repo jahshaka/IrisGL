@@ -542,11 +542,13 @@ namespace Ogre
         void refreshOwed();
         /** The accumulation for one cascade that moved this frame: its brick state (PhotonBrickFeedback's eight words
             a brick: [4] a pass's absolute move, [7] an injection's), its bricks per axis, its box corner (world) and
-            brick side (metres), and the next finer cascade's box (a brick inside it skipped: the rays read that one
-            there), or null. endMarkFrame after the frame's last; harvestMarks once a frame.
+            brick side (metres), and the next finer cascade's box with ITS WORLD SHELL'S END (metres, D_(j-1) - a probe's
+            ray reads this cascade inside the finer box from that distance on: a brick inside it is skipped only for a
+            probe inside the finer box closer than that to the whole moved box; stage 5's read W1), or null.
+            endMarkFrame after the frame's last; harvestMarks once a frame.
         */
         void accumulateMoves( UavBufferPacked *brickState, const uint32 dims[3], const Vector3 &corner, float brickSide,
-                              const Vector3 *finerLo, const Vector3 *finerHi, uint64 frame );
+                              const Vector3 *finerLo, const Vector3 *finerHi, float finerShellEnd, uint64 frame );
         void endMarkFrame( uint64 frame );
         void harvestMarks( uint64 frame );
         /// The probes marked since the build: by the accumulation, by regions, the whole field (markAll calls), and

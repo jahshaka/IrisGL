@@ -17,8 +17,12 @@
 // from the total the delta already wrote, so a voxel's total moved by at most the sum (PHOTON-7 stage 5's read A2
 // (ii); the larger of the two under-bounded it, the feedback's ACCUM the same) - the box of the bricks that moved, and
 // THE MOVED FLUX: the sum of the bricks' moved flux, the sum over their voxels of |move| x a^2 (PhotonBrickFeedback_cs.glsl's
-// words 8 and 9, fixed point; a brick's bit 31 - a non-finite move - makes the cluster's flux unbounded), a brick inside
-// the next finer cascade's box skipped (the cones read that one there). No atomics: deterministic. THE BOUND per cluster
+// words 8 and 9, fixed point; a brick's bit 31 - a non-finite move - makes the cluster's flux unbounded), in TWO RECORDS:
+// the bricks not wholly inside the next finer cascade's box, and those inside it (stage 5's read W1: since the world
+// shells a reader reads THIS cascade inside the finer box too - a probe's ray past the finer cascade's shell end, a
+// diffuse cone past its footprint's hand-over - so an inner brick is skipped only for a receiver every point of whose
+// box lies within the finer cascade's shell end of the whole record: caInnerHi.w, the host's per reader; 0 for the
+// cards, whose diffuse cones hand over within ~1.7 finer cells). No atomics: deterministic. THE BOUND per cluster
 // is the smaller of the largest move over the moved box's share, m min( 1, S / ( pi d^2 ) ) (and, for a probe, over the
 // depth moments' P), and THE FLUX's, flux sqrt(3) / ( pi d^2 ): a voxel (a cube of side a) seen from any point subtends
 // at most sqrt(3) a^2 / d_v^2 (its largest silhouette; the limit is reached only far off along a diagonal) and d_v >= d -
@@ -65,9 +69,9 @@
 	layout( std430, ogre_U1 ) restrict readonly buffer caCardLayout { vec4 caCards[]; };
 	layout( std430, ogre_U2 ) restrict coherent buffer caSlotLayout { uint caSlot[]; };
 	layout( std430, ogre_U3 ) restrict coherent buffer caReportLayout { uint caReport[]; };
-	// THE CLUSTERS, the reduce's output: three words each - the largest move (float bits), the moved bricks' box inside
-	// the cluster (lo xyz, hi xyz: 3 bits each, bricks, hi exclusive) and the moved flux (float bits, radiance x m^2;
-	// +inf: unbounded)
+	// THE CLUSTERS, the reduce's output: two records of three words each (outside the next finer cascade's box, then
+	// inside it) - the largest move (float bits), the moved bricks' box inside the cluster (lo xyz, hi xyz: 3 bits each,
+	// bricks, hi exclusive) and the moved flux (float bits, radiance x m^2; +inf: unbounded)
 	layout( std430, ogre_U4 ) restrict coherent buffer caClusterLayout { uint caCluster[]; };
 @end
 
@@ -83,7 +87,8 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform float4 caSelf;
 	// its bricks per axis (xyz) and their count (w)
 	uniform uint4 caDims;
-	// the next finer cascade's box (world, xyz; w = 1 when there is one)
+	// the next finer cascade's box (world, xyz; caInnerLo.w = 1 when there is one) and caInnerHi.w the distance from a
+	// receiver past which its reads use THIS cascade inside that box (metres; the finer cascade's shell end)
 	uniform float4 caInnerLo;
 	uniform float4 caInnerHi;
 @property( jah_field_mark )
@@ -175,9 +180,11 @@ void main()
 		if( q >= clusters )
 			return;
 		const uvec3 cq = uvec3( q % cd.x, ( q / cd.x ) % cd.y, q / ( cd.x * cd.y ) );
-		float most = 0.0, fluxUnits = 0.0;
-		bool fluxOpen = false;
-		uvec3 mlo = uvec3( 4u, 4u, 4u ), mhi = uvec3( 0u, 0u, 0u );
+		// TWO RECORDS a cluster (stage 5's read W1): [0] the bricks NOT wholly inside the next finer cascade's box, [1]
+		// those inside it - read by a receiver only from the inner cascade's shell on (ACCUMULATE's distance test)
+		float most[2] = { 0.0, 0.0 }, fluxUnits[2] = { 0.0, 0.0 };
+		bool fluxOpen[2] = { false, false };
+		uvec3 mlo[2] = { uvec3( 4u, 4u, 4u ), uvec3( 4u, 4u, 4u ) }, mhi[2] = { uvec3( 0u, 0u, 0u ), uvec3( 0u, 0u, 0u ) };
 		for( uint z = 0u; z < 4u; ++z )
 			for( uint y = 0u; y < 4u; ++y )
 				for( uint x = 0u; x < 4u; ++x )
@@ -192,29 +199,35 @@ void main()
 									uintBitsToFloat( caState[10u * b + 7u] );
 					if( !( m > 0.0 ) )
 						continue;
+					uint r = 0u;
 					if( caInnerLo.w > 0.5 )
 					{
 						const vec3 lo = caSelf.xyz + vec3( bb ) * side;
 						if( all( greaterThanEqual( lo, caInnerLo.xyz ) ) && all( lessThanEqual( lo + side, caInnerHi.xyz ) ) )
-							continue;
+							r = 1u;
 					}
-					most = max( most, m );
-					mlo = min( mlo, uvec3( x, y, z ) );
-					mhi = max( mhi, uvec3( x, y, z ) + 1u );
+					most[r] = max( most[r], m );
+					mlo[r] = min( mlo[r], uvec3( x, y, z ) );
+					mhi[r] = max( mhi[r], uvec3( x, y, z ) + 1u );
 					const uint fp = ran ? caState[10u * b + 8u] : 0u, fi = caState[10u * b + 9u];
-					fluxOpen = fluxOpen || ( ( fp | fi ) & 0x80000000u ) != 0u;
-					fluxUnits += float( fp & 0x7FFFFFFFu ) + float( fi & 0x7FFFFFFFu );
+					fluxOpen[r] = fluxOpen[r] || ( ( fp | fi ) & 0x80000000u ) != 0u;
+					fluxUnits[r] += float( fp & 0x7FFFFFFFu ) + float( fi & 0x7FFFFFFFu );
 				}
-		caCluster[3u * q] = floatBitsToUint( most );
-		caCluster[3u * q + 1u] = most > 0.0 ? ( mlo.x | ( mlo.y << 3u ) | ( mlo.z << 6u ) | ( mhi.x << 9u ) |
-												( mhi.y << 12u ) | ( mhi.z << 15u ) )
-											: 0u;
 		// the flux in radiance x m^2: the words' unit (1/64 of radiance) times a voxel's face (an eighth of a brick, squared),
 		// rounded up by 2^-16 (the float sum of at most 128 words and the products round to nearest: under 2^-16 together);
 		// unbounded where a brick marked a non-finite move
 		const float vox = side * 0.125;
-		caCluster[3u * q + 2u] = fluxOpen ? 0x7F800000u
-										  : floatBitsToUint( fluxUnits * ( 1.0 / 64.0 ) * vox * vox * ( 1.0 + 1.0 / 65536.0 ) );
+		for( uint r = 0u; r < 2u; ++r )
+		{
+			caCluster[6u * q + 3u * r] = floatBitsToUint( most[r] );
+			caCluster[6u * q + 3u * r + 1u] =
+				most[r] > 0.0 ? ( mlo[r].x | ( mlo[r].y << 3u ) | ( mlo[r].z << 6u ) | ( mhi[r].x << 9u ) |
+								  ( mhi[r].y << 12u ) | ( mhi[r].z << 15u ) )
+							  : 0u;
+			caCluster[6u * q + 3u * r + 2u] =
+				fluxOpen[r] ? 0x7F800000u
+							: floatBitsToUint( fluxUnits[r] * ( 1.0 / 64.0 ) * vox * vox * ( 1.0 + 1.0 / 65536.0 ) );
+		}
 		return;
 	}
 	const uint k = gl_GlobalInvocationID.x;
@@ -249,18 +262,29 @@ void main()
 		}
 	}
 @end
-	for( uint q = 0u; q < clusters; ++q )
+	for( uint qr = 0u; qr < 2u * clusters; ++qr )
 	{
-		const float m = uintBitsToFloat( caCluster[3u * q] );
+		const uint q = qr >> 1u, rec = qr & 1u;
+		const float m = uintBitsToFloat( caCluster[6u * q + 3u * rec] );
 		if( !( m > 0.0 ) )
 			continue;
-		const uint bx = caCluster[3u * q + 1u];
-		const float flux = uintBitsToFloat( caCluster[3u * q + 2u] );
+		const uint bx = caCluster[6u * q + 3u * rec + 1u];
+		const float flux = uintBitsToFloat( caCluster[6u * q + 3u * rec + 2u] );
 		const uvec3 mlo = uvec3( bx & 7u, ( bx >> 3u ) & 7u, ( bx >> 6u ) & 7u );
 		const uvec3 mhi = uvec3( ( bx >> 9u ) & 7u, ( bx >> 12u ) & 7u, ( bx >> 15u ) & 7u );
 		const uvec3 cq = uvec3( q % cd.x, ( q / cd.x ) % cd.y, q / ( cd.x * cd.y ) );
 		const vec3 lo = caSelf.xyz + vec3( cq * 4u + mlo ) * side;
 		const vec3 ext = vec3( mhi - mlo ) * side;
+		// THE INNER RECORD (the bricks inside the next finer cascade's box) reaches the receiver only where its reads
+		// use THIS cascade there: from the finer cascade's shell end on (caInnerHi.w, metres from the receiver - the
+		// narrow rays' world shell D_(j-1), jah_voxel_march.glsl). Skipped only for a receiver whose box lies inside the
+		// finer box (a march starting outside it starts in a coarser cascade and reads this one at any distance; the
+		// boxes are convex, so the segment to the record stays inside) and when the record's box lies wholly within
+		// that distance of every point of the receiver's box.
+		if( rec == 1u && all( greaterThanEqual( centre - halfExt, caInnerLo.xyz ) ) &&
+			all( lessThanEqual( centre + halfExt, caInnerHi.xyz ) ) &&
+			length( abs( centre - ( lo + 0.5 * ext ) ) + halfExt + 0.5 * ext ) < caInnerHi.w )
+			continue;
 		const float area = ext.x * ext.y + ext.y * ext.z + ext.z * ext.x;   // the moved box's largest silhouette
 		const vec3 gap = max( abs( centre - ( lo + 0.5 * ext ) ) - ( halfExt + 0.5 * ext ), vec3( 0.0, 0.0, 0.0 ) );
 		const float d2 = dot( gap, gap );
