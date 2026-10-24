@@ -3935,7 +3935,7 @@ struct AreaVisStatus {
     /// capture) and the CPU cost of recording them.
     float traceMs = -1.0f, resolveMs = -1.0f, cpuMs = -1.0f;
     /// The view's resident VRAM: the two sums' ping-pong and their rest means at the trace's size, the surface words,
-    /// the full-resolution RGBA8 product.
+    /// the full-resolution RG32_UINT product (eight bytes a pixel).
     unsigned long long vramBytes = 0ull;
     /// Why it is not running, empty when nothing declined (no LTC light in the forward set is the free case).
     std::string reason;

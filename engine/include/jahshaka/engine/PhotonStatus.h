@@ -68,8 +68,9 @@ struct PhotonPassBindingRecord {
 std::vector<PhotonPassBindingRecord> photonPassBindings();
 /// Forget every record (a row reads the frames after it).
 void resetPhotonPassBindings();
-/// L4's allowed list: the five SCREEN products an opaque pass may read (the diffuse, the rough specular, the
-/// reflection, the sun contact, the area lights' visibility), by the names photonPassBindings() lists them under.
+/// L4's allowed list: the six SCREEN products an opaque pass may read (the diffuse, the rough specular, the no-ray
+/// route's cone hit, the reflection, the sun contact, the area lights' visibility), by the names photonPassBindings()
+/// lists them under.
 const std::vector<std::string> &photonScreenProducts();
 
 class Scene;

@@ -3531,10 +3531,11 @@ public:
     /// the divisor), the fourth extra slot and one binding.
     static void setSunContact(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility,
                               unsigned divisor);
-    /// THE AREA LIGHTS' VISIBILITY (PHOTON-7 stage 7, 7-A) - the sun contact's route: the ray tier registers the
-    /// full-resolution RGBA8 `jahAreaVis` (channel i the visible share of the pass's forward LTC light i) in front of
-    /// the opaque pass and takes it away as that pass ends; the listener's pass property `jah_area_vis`, its slot and
-    /// its binding follow. Null = none.
+    /// THE AREA LIGHTS' VISIBILITY (PHOTON-7 stage 7, 7-A) - the sun contact's route: the producer (the ray tier, or
+    /// the no-ray route's screen-GI listener) registers the full-resolution RG32_UINT `jahAreaVis` (x the diffuse-
+    /// weighted visible share of the pass's forward LTC light i in byte i, y the specular-weighted) in front of the
+    /// opaque pass and takes it away as that pass ends; the listener's pass property `jah_area_vis`, its slot and its
+    /// binding follow. Null = none.
     static void setAreaVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility);
 
     /// THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): Diffuse (1) or Reflections (2)
