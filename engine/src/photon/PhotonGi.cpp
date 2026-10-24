@@ -4443,10 +4443,12 @@ bool PhotonComponent::rebuildVct() {
     // (This is where the arm used to REFUSE the field and say so. The refusal
     // was correct at the pin it was written against: `initialize()` is
     // upstream's only placement API and it re-creates the atlases, so a field
-    // on a scrolling cascade was either wrong or black. fork 822d538f5 (was 0044) adds
-    // the two hooks that were missing — `setFieldVolume` and `setVctLighting` —
-    // and the refusal, and the measured cost it quoted (plain cone diffuse
-    // leaking 0.97 of the light through a 0.5 m wall), are history.)
+    // on a scrolling cascade was either wrong or black. fork 822d538f5 (was 0044) added
+    // the placement hook that was missing (`setFieldVolume`; its re-binding twin
+    // setVctLighting is deleted, stage 5's read B4: no caller since the field's
+    // window stopped following cascade 0) - and the refusal, and the measured cost
+    // it quoted (plain cone diffuse leaking 0.97 of the light through a 0.5 m
+    // wall), are history.)
     // ...AND THE FIELD IS THE LAST STAGE, for the same reason (§2 A). When the
     // probe stages are staged it rides behind them; when the scene has no probe
     // grid at all it is a stage of its own, because a cold field is 45 ms of

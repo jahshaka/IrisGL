@@ -491,26 +491,6 @@ namespace Ogre
         /// How many probes the current work holds.
         uint32 getWorkProbeCount() const { return mWorkTotal; }
 
-        /** Re-points the field at a PhotonVoxelLighting, and re-binds the generation job to the
-            light voxel textures that object owns RIGHT NOW.
-
-            PhotonVoxelLighting re-creates its light voxel textures whenever its voxelizer's
-            textures change — on a LostResidency/Deleted notification (checkTextures()),
-            and, since PhotonVoxelLighting::setVoxelizer() exists, whenever it is moved to a
-            replacement voxelizer. The PhotonIrradianceField bound those textures ONCE, in
-            initialize(), by pointer: after any such re-creation its generation job holds
-            pointers to destroyed textures and the next update() integrates from freed
-            GPU memory (or from whatever the allocator has since handed the address to).
-            There is no notification from PhotonVoxelLighting to its readers, so this is the hook
-            that answers it; passing the SAME PhotonVoxelLighting is meaningful and re-binds.
-
-            Cheaper than initialize() and it keeps the atlases: nothing about the field's
-            geometry has changed, only where its rays read radiance from.
-        @remarks
-            Must not be called before initialize() — it is a no-op then.
-        */
-        void setVctLighting( PhotonVoxelLighting *vctLighting );
-
         /** Jahshaka (PHOTON-7 stage 5, 5-4): THE FIELD REFINES ONLY WHAT CHANGED - no whole-grid change exists. A
             probe is MARKED when what it integrates moved: by the GPU's accumulation (accumulateMoves: each moved brick
             cluster's absolute move, weighted by the bound of the share of the probe's sphere it can fill, into the

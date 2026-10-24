@@ -645,24 +645,6 @@ namespace Ogre
         }
     }
     //-------------------------------------------------------------------------
-    void PhotonIrradianceField::setVctLighting( PhotonVoxelLighting *vctLighting )
-    {
-        if( !vctLighting || !mGenerationJob )
-            return;
-
-        mVctLighting = vctLighting;
-
-        // The bindings createTextures() made, re-made against the textures the lighting
-        // owns now. Everything else it created (the atlases, the directions buffer, the
-        // integration taps, the workspace) describes the FIELD and is unaffected.
-        bindChainToGenerationJob();
-
-        // The generation params carry the voxel volume's placement and the cone start
-        // bias derived from its resolution: both belong to the lighting that was just
-        // bound.
-        setIrradianceFieldGenParams();
-    }
-    //-------------------------------------------------------------------------
     void PhotonIrradianceField::invalidateAllProbes()
     {
         if( !mIrradianceTex || !mVctLighting || !mGenerationJob )
