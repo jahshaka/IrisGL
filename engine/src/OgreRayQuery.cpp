@@ -9732,8 +9732,9 @@ void OgreEngine::listRayMovers(const std::vector<OgreScene *> &drawn) {
 /// IS THE SCREEN-PROBE GATHER ON FOR THIS SCENE? The project's row resolved
 /// against the TIER TABLE and the machine (PHOTON-GATHER-1d, the rule T-A), the
 /// same shape `rayReflectionsWanted` has: the row says what the scene asks for,
-/// the table says what `Auto` means at this tier — on at High, Epic and Medium,
-/// off at Low, the VR column the same (`giQualityFacts(...).gather.on`) — and only
+/// the table says what `Auto` means at this tier — on at every tier (PHOTON-7
+/// stage 7, 7-4: Low at a probe per 32 x 32 px), the VR column the same
+/// (`giQualityFacts(...).gather.on`) — and only
 /// under a GI mode that is on (there is no diffuse GI to estimate otherwise);
 /// the machine answers whether it can trace at all.
 bool PhotonComponent::probeGatherWanted() const {

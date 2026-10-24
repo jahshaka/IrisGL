@@ -960,13 +960,16 @@ QVector<Row> buildRows()
                 on << QStringLiteral("%1 %2 rays a probe, a probe per %3x%3 pixels")
                           .arg(n).arg(g.octRes * g.octRes).arg(g.stride);
             }
+            // (every tier gathers since PHOTON-7 7-4: the "off at" clause only while a tier's row says off)
+            const QString offAt = off.isEmpty() ? QString()
+                                                : QStringLiteral("; off at ") + off.join(QStringLiteral(", "));
             return QStringLiteral("The diffuse GI traced by hardware rays, once per probe cell, "
                                   "instead of once per pixel by six voxel cones: a ray is stopped "
                                   "by a triangle where a cone is stopped by a voxel. Auto is the "
-                                  "tier's: %1; off at %2. A headset gathers the same row per eye. "
+                                  "tier's: %1%2. A headset gathers the same row per eye. "
                                   "Where it runs it IS the diffuse and the irradiance field is its "
                                   "fallback.%3")
-                .arg(on.join(QStringLiteral("; ")), off.join(QStringLiteral(", ")),
+                .arg(on.join(QStringLiteral("; ")), offAt,
                      sceneTracesRays ? QString()
                                      : QStringLiteral(" This machine or scene traces no rays, so "
                                                       "the row does nothing here."));

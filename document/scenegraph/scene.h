@@ -629,8 +629,8 @@ public:
     /// the cones read 0.65-0.72 (gi.gather_reference).
     ///
     /// 0 = off, 1 = on, -1 = AUTO = THE TIER'S (PHOTON-GATHER-1d): the engine's
-    /// tier table resolves it — on at High, Epic and Medium, off at Low and in a
-    /// headset. It traces wherever the machine can and falls back silently where
+    /// tier table resolves it — on at every tier (PHOTON-7 stage 7, 7-4: Low at a
+    /// probe per 32 x 32 px), in a headset too. It traces wherever the machine can and falls back silently where
     /// it cannot, exactly as the project's ray row does — a machine with no ray
     /// query, or a project whose ray row is Off, keeps the no-rays picture and
     /// this row does nothing. Only meaningful in the VCT modes: a gather ray's

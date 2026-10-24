@@ -281,8 +281,8 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
         // four cone marches per pixel and the probe's 64 rays estimate the SAME
         // integral; adding them is that integral twice. So on a gather pass the
         // cone diffuse is compiled out of every renderable — the gathering ones
-        // and the translucent ones above alike — and the cones' diffuse remains
-        // Low's alone. Cache-safe: derived from the properties just set.
+        // and the translucent ones above alike (every tier gathers where rays run,
+        // PHOTON-7 7-4). Cache-safe: derived from the properties just set.
         if ((hlms->_getProperty(tid, kProbeGather) || hlms->_getProperty(tid, kEnvDiffuseOnly)) &&
             !hlms->_getProperty(tid, kShadowCaster)) {
             hlms->_setProperty(tid, kVctDisableDiffuse, 1);

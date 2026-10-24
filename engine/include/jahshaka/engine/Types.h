@@ -2753,8 +2753,8 @@ struct GiParams {
     /// 59 % less light through a thin wall, spikes/gather-0).
     ///
     /// `Auto` IS THE TIER'S (PHOTON-GATHER-1d, the rule T-A): the tier table's
-    /// gather row (`giQualityFacts(...).gather`) — ON at High, Epic and Medium
-    /// (36 rays), OFF at Low, the VR column the same (PHOTON-GA-VR) — under a GI mode that is on,
+    /// gather row (`giQualityFacts(...).gather`) — ON at every tier (Medium at 36
+    /// rays, Low at a probe per 32 x 32 px: PHOTON-7 7-4), the VR column the same (PHOTON-GA-VR) — under a GI mode that is on,
     /// wherever the machine traces. `On` turns it on wherever the machine traces;
     /// `Off` keeps the cones and the field. The same machine rule the reflections
     /// take: no ray-query device, or a project whose ray row is Off, keeps the
@@ -2942,13 +2942,19 @@ constexpr float kCardFootprintTexels = 4.0f;
 /// screen-probe gather is at a tier. One row in the engine's one table; the
 /// Studio's tier column is a projection of it (`world.tierTable()`).
 ///
-/// THE RULE: High and Epic ON, Medium ON at 36 rays, Low OFF — the cone
-/// diffuse stays Low's alone. Why the numbers are these (GATHER-0/1a measured,
-/// spikes/gather-1a): PROBE COUNT fills this GPU and rays per probe do not, so
-/// the tiers differ in probe density and map resolution, not in a ray budget —
-/// 16 pixels a probe at Medium and High, 8 at Epic (four times the probes: the
-/// whole block 0.135 ms at High, 0.43 ms at Epic at 1080p); an 8x8 octahedral
-/// map (64 rays) at High and Epic, 6x6 (36) at Medium; the adaptive second
+/// THE RULE: ON AT EVERY TIER (PHOTON-7 stage 7, 7-4: one diffuse route wherever
+/// rays run - the opaque pass reads only screen products, L4) - Low at a probe per
+/// 32 x 32 pixels with 64 rays a probe, 0.063 rays a pixel at 1080p (2,040
+/// probes: Lumen High's uniform density, its DownsampleFactor 32), Medium at 16
+/// with 36, High at 16 with 64, Epic at 8 with 64. Why the numbers are these
+/// (GATHER-0/1a measured, spikes/gather-1a): PROBE COUNT fills this GPU and rays
+/// per probe do not, so the tiers differ in probe density and map resolution,
+/// not in a ray budget — 16 pixels a probe at Medium and High, 8 at Epic (four
+/// times the probes: the whole block 0.135 ms at High, 0.43 ms at Epic at 1080p);
+/// Low's coarser grid keeps the 8x8 map, because 6x6 at 32 would idle 28 of the
+/// trace's 64-thread workgroup (rays per probe are one workgroup, probe count is
+/// what fills the card); an 8x8 octahedral map (64 rays) at Low, High and Epic,
+/// 6x6 (36) at Medium; the adaptive second
 /// probes capped at a quarter of the grid (Lumen's budget is a fixed
 /// allocation of the same order, and a flat scene spends none of it).
 ///
@@ -3196,7 +3202,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardLightTexels = 65536u;     // 4 pages a frame
         f.cardIndirectTexels = 16384u;  // 1 page a frame
         f.cardAreaStrata = 4u;          // 16 rays a texel an area light: 1 / 4 at a parallel edge
-        f.gather.on = false;            // Low keeps the cone diffuse (T-A)
+        f.gather = { true, 32u, 8u, 4u };   // 64 rays a probe, a probe per 32x32 (7-4: Lumen High's density)
         f.probeGridBudgetBytes = 64ull << 20;
         break;
     case GiQuality::High:
