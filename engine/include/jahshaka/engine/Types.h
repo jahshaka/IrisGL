@@ -4536,8 +4536,9 @@ struct GiStatus {
     /// holds `ifdTargetSamples` or the variance stop ends it. THE FIELD REFINES ONLY WHAT
     /// CHANGED (PHOTON-7 stage 5, 5-4): a probe is MARKED when what its rays read moved a
     /// code of its own irradiance (the GPU's accumulation of the bricks' absolute moves -
-    /// `ifdMarkedByMoves` - or a changed region: a slab it stands in - `ifdMarkedByRegion` -
-    /// and an edit, the sky or a change with no box: every probe, `ifdMarkAlls` calls) and
+    /// `ifdMarkedByMoves` - or an EDIT's box it stands in - `ifdMarkedByRegion`; the sky or
+    /// a change with no box marks every probe, `ifdMarkAlls` calls; a SLAB marks nothing, its
+    /// moves do - the lead's ruling, PhotonGi.cpp markFieldFromRegions) and
     /// RESTARTS (keep 0, four samples deep: `ifdRestarts`, cumulative since the build); the
     /// rest keep. `ifdOwedRestarts` are marked and not restarted yet, `ifdOwedRefines` below
     /// the target and not stopped, and `ifdWorking` a pass of the field's own window running
