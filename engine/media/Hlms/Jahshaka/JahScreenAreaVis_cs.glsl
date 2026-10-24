@@ -128,6 +128,8 @@ float jahAreaVoxelVisible( vec3 originQ, vec3 wq, float reachQ )
 		imageStore( restS2U2, tc, jahAreaPackSums( S2, U2 ) );                                                         \
 	}
 #define JAH_AREA_VISIBLE( originQ, wq, reachQ ) jahAreaVoxelVisible( originQ, wq, reachQ )
+// (the march's clearance a cell along the normal, the cones' convention: jah_area_vis_law.glsl)
+#define JAH_AREA_LIFT_ALONG_NORMAL 1
 @insertpiece( JahAreaVisLaw )
 
 void main()
