@@ -8561,6 +8561,12 @@ struct FramePass {
     /// A TOP-LEVEL row (not nested in another pass's timestamp pair: a shadow node's passes are their
     /// scene pass's children) — the rows whose gpuMs add up to the frame's.
     bool        topLevel = false;
+    /// ITS OWN TIME (PHOTON-7's naming step): gpuMs less its DIRECT children's (the passes and rows whose pairs it
+    /// encloses) - the work no child names; NEGATIVE when unmeasured. `selfSubmitted`: the render system SUBMITTED inside
+    /// the row's own stretches (outside its children), so its own time holds the GPU's wait for the CPU (a bubble) - not
+    /// unnamed GPU work. CacheWork carries the same two.
+    float       selfGpuMs = -1.0f;
+    bool        selfSubmitted = false;
     /// THE PASS READS THE GI (ENGINE-UPGRADE-ASYNC-3 stage 2; the engine's passReadsGi: a scene pass that
     /// is not a caster pass, or a custom pass, whose definition is not marked as sampling none). The
     /// frame's first and last such row bound the async compute window.
@@ -8646,6 +8652,9 @@ struct CacheWork {
     /// dispatched inside a compositor pass (the reflection's filter in its resolve pass) is inside that pass's time,
     /// so a frame's GPU is the TOP-LEVEL passes and rows summed (`jahlab monitor`, PHOTON-7).
     bool       topLevel = false;
+    /// ...and its own time and whether it submitted inside it (FramePass::selfGpuMs, selfSubmitted).
+    float      selfGpuMs = -1.0f;
+    bool       selfSubmitted = false;
 };
 
 /// One stage of the frame, exclusive of its children.
@@ -9284,6 +9293,10 @@ struct MonitorRecord {
     /// its bubble in its own time. NEGATIVE when unmeasured or a gap's sample was lost.
     float       gpuIdleMs = -1.0f;
     float       unattributedGpuMs = -1.0f;
+    /// THE WIDEST UNNAMED GAP (PHOTON-7's naming step) and where it lies: "<the row before>|<the row after>" (`frame`
+    /// at either end of the frame's pair) - so a coverage hole names its neighbours. Negative / empty when none.
+    float       widestGapMs = -1.0f;
+    std::string widestGap;
     /// GPU timing MARKS this frame issued that the render system's query pool
     /// had no room for (a pass or a dispatch with no GPU time because of it,
     /// never because it cost nothing). Non-zero means THIS frame's GPU numbers

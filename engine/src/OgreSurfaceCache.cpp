@@ -1447,9 +1447,12 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
         }
     }
     // THE CAPTURE'S MONITOR ROW (PHOTON-2 stage 0, the stillness door's (ii)): the cards this batch copied into the
-    // atlas — each a step of the radiance its hits read once relit. Its GPU time is the card workspace's own pass
-    // rows (the copies are six small transfers a card), so the row carries the count and no time of its own.
-    detail::monitor::noteCacheWork(CacheKind::Gi, WorkReason::Added, 0, "cards.capture", unsigned(mBatch.size()));
+    // atlas — each a step of the radiance its hits read once relit. The card workspace's passes are rows of their own
+    // (JahCardCapture); the COPIES below run after them, outside every pass, so this row times them (PHOTON-7's naming
+    // step: 0.1-0.2 ms a burst was a gap no row named) and carries the count.
+    detail::monitor::CacheScope captureRow(CacheKind::Gi, WorkReason::Added, 0, "cards.capture",
+                                           Ogre::Root::getSingleton().getRenderSystem(), this);
+    captureRow.setUnits(unsigned(mBatch.size()));
     // ...AND INTO THE ATLAS, after the whole batch: six small copies a card,
     // from its own slice of the scratch (the reason the scratch exists at all
     // is in SurfaceCache.h — this pin's render-pass clear is whole-target).
@@ -1485,6 +1488,7 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
     // closing inside that very barrier then overwrites the solver's record with GENERAL, and
     // the next reader transitions a SHADER_READ image "from GENERAL".
     if (!mBatch.empty()) Ogre::Root::getSingleton().getRenderSystem()->endCopyEncoder();
+    captureRow.close();
     const auto tC = std::chrono::steady_clock::now();
     mWsMs = float(std::chrono::duration<double, std::milli>(tB - mBatchStart).count());
     mCopyMs = float(std::chrono::duration<double, std::milli>(tC - tB).count());
@@ -3416,8 +3420,14 @@ void SurfaceCache::update(const CardSceneView &view) {
     // THE GPU TABLES follow the ALLOCATION and not the captures: a re-captured
     // card lands in the same rect, so nothing here moves when the queue drains.
     // ...and THE DEMAND's head (the frame's stamp) every frame, then its read-back on the period.
-    syncBuffers();
-    issueDemandRead();
+    // ONE ROW (PHOTON-7's naming step): the tables' uploads and the read-back are GPU copies before the capture that no
+    // pass holds - cards.tables times them.
+    {
+        detail::monitor::CacheScope tables(CacheKind::Gi, WorkReason::None, 0, "cards.tables",
+                                           Ogre::Root::getSingleton().getRenderSystem(), this);
+        syncBuffers();
+        issueDemandRead();
+    }
 
     // NO LIGHT RE-QUEUES A CAPTURE (ATOM-S3-CARDCAP): a capture holds albedo,
     // normal, depth, emissive and roughness — no light quantity at all. The sun's

@@ -177,20 +177,45 @@ void notePhotonDispatch() {
 unsigned long long photonDispatchesInRegion() { return gPhotonInRegion; }
 unsigned long long photonDispatchesOutsideRegion() { return gPhotonOutsideRegion; }
 
+// A DISPATCH NO ROW NAMES IS NAMED HERE (PHOTON-7's naming step): directly inside an aggregate row (gi.step, its
+// innermost open row) the door files a row of its own - the job's name, its barriers inside it - so the GI step's GPU
+// time is its children's, whole (the monitor's selfGpuMs of gi.step reads ~0). Inside a named row (vct.scroll0 ...) the
+// dispatch is that row's and files nothing more.
 void photonDispatch(Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job, Ogre::RenderSystem *rs) {
-    Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
-    job->analyzeBarriers(rt);
-    rs->executeResourceTransition(rt);
-    notePhotonDispatch();
-    hc->dispatch(job, 0, 0);
+    const auto run = [&]() {
+        Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
+        job->analyzeBarriers(rt);
+        rs->executeResourceTransition(rt);
+        notePhotonDispatch();
+        hc->dispatch(job, 0, 0);
+    };
+    if (monitor::innermostRowIsAggregate()) {
+        const std::string name = job->getNameStr();   // (getNameStr returns a copy: the row keeps a pointer until it closes)
+        monitor::CacheScope row(CacheKind::Gi, WorkReason::None, 0ull, name.c_str(), rs);
+        run();
+        return;
+    }
+    run();
 }
 
 void photonClearUavFloat(Ogre::ComputeTools *tools, Ogre::TextureGpu *tex, const float value[4]) {
     notePhotonDispatch();
+    if (monitor::innermostRowIsAggregate()) {
+        monitor::CacheScope row(CacheKind::Gi, WorkReason::None, 0ull, "gi.clear.float",
+                                Ogre::Root::getSingleton().getRenderSystem());
+        tools->clearUavFloat(tex, value);
+        return;
+    }
     tools->clearUavFloat(tex, value);
 }
 void photonClearUavUint(Ogre::ComputeTools *tools, Ogre::TextureGpu *tex, const unsigned value[4]) {
     notePhotonDispatch();
+    if (monitor::innermostRowIsAggregate()) {
+        monitor::CacheScope row(CacheKind::Gi, WorkReason::None, 0ull, "gi.clear.uint",
+                                Ogre::Root::getSingleton().getRenderSystem());
+        tools->clearUavUint(tex, value);
+        return;
+    }
     tools->clearUavUint(tex, value);
 }
 
@@ -248,6 +273,7 @@ bool PhotonComponent::updatePassOwed() const {
 void PhotonComponent::recordUpdatePass() {
     GiRegion region(RegionKind::Graphics);   // the cards' work (this frame's capture): graphics, in order
     if (!mSurfaceCache) return;
+    monitor::markInnermostRowAggregate();   // the pass's own row: a dispatch no child row names files its own
     mSurfaceCache->setSunGridParity(mEngine && mEngine->armRegistry().on(ArmId::CardsSunGridParity));
     mSurfaceCache->setNullMove(mEngine && mEngine->armRegistry().on(ArmId::CardsNullMove));
     mSurfaceCache->photonUpdate();

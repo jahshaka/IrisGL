@@ -3925,6 +3925,7 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
     // ITS GPU SPAN, one monitor row (ENGINE-UPGRADE-ASYNC-3 stage 2: THE JOB the window is measured
     // against; nothing is constructed while the monitor is off - CacheScope's own rule).
     monitor::CacheScope stepRow(CacheKind::Gi, WorkReason::None, 0ull, "gi.step", mRoot->getRenderSystem(), this);
+    stepRow.markAggregate();   // its dispatches no child row names file their own (photonDispatch)
     harvest();     // before any of this frame's GI work is recorded
     // THE GI FREEZE (M1's measuring arm, "gi.freeze"): no cache work is planned - the field, the cascades, the settle,
     // the ticks stand as they are.

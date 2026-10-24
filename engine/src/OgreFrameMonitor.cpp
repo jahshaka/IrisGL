@@ -323,9 +323,15 @@ void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
             if (where.kind == SampleKind::Gap) pf.gapLost = true;
         } else if (where.kind == SampleKind::Gap) {
             const auto sp = mGapSpanned.find(sampleId);
-            float &acc = (sp != mGapSpanned.end() && sp->second) ? rec.gpuIdleMs : rec.unattributedGpuMs;
+            const bool spanned = sp != mGapSpanned.end() && sp->second;
+            float &acc = spanned ? rec.gpuIdleMs : rec.unattributedGpuMs;
             if (acc < 0.0f) acc = 0.0f;
             acc += ms;
+            if (!spanned && ms > rec.widestGapMs) {
+                rec.widestGapMs = ms;
+                const auto w = mGapWhere.find(sampleId);
+                rec.widestGap = w != mGapWhere.end() ? w->second : std::string("?");
+            }
         } else if (where.kind == SampleKind::Frame) {
             rec.frameGpuMs = ms;
         } else if (where.kind == SampleKind::Cache) {
@@ -372,6 +378,37 @@ void FrameMonitor::retirePending(bool all) {
         // sample is "not measured", never zero.
         const auto top = [](const std::vector<char> &v, size_t i) { return i < v.size() && v[i]; };
         for (size_t i = 0; i < pf.rec.cacheWork.size(); ++i) pf.rec.cacheWork[i].topLevel = top(pf.cacheTop, i);
+        // EACH ROW'S OWN TIME (PHOTON-7's naming step): its GPU time less its direct children's, and whether its own
+        // stretches crossed a submission (a bubble, not unnamed work)
+        {
+            std::unordered_map<unsigned, double> childMs;
+            const auto addChild = [&](unsigned id, float ms) {
+                if (!id || ms < 0.0f) return;
+                const auto p = mRowParent.find(id);
+                if (p != mRowParent.end() && p->second) childMs[p->second] += double(ms);
+            };
+            for (size_t i = 0; i < pf.rec.passes.size() && i < pf.passSampleIds.size(); ++i)
+                addChild(pf.passSampleIds[i], pf.rec.passes[i].gpuMs);
+            for (size_t i = 0; i < pf.rec.cacheWork.size() && i < pf.cacheSampleIds.size(); ++i)
+                addChild(pf.cacheSampleIds[i], pf.rec.cacheWork[i].gpuMs);
+            const auto own = [&](unsigned id, float ms, float &self, bool &submitted) {
+                if (!id) return;
+                if (ms >= 0.0f) {
+                    const auto c = childMs.find(id);
+                    self = float(double(ms) - (c != childMs.end() ? c->second : 0.0));
+                }
+                const auto s = mRowSubmitted.find(id);
+                submitted = s != mRowSubmitted.end() && s->second;
+            };
+            for (size_t i = 0; i < pf.rec.passes.size() && i < pf.passSampleIds.size(); ++i)
+                own(pf.passSampleIds[i], pf.rec.passes[i].gpuMs, pf.rec.passes[i].selfGpuMs,
+                    pf.rec.passes[i].selfSubmitted);
+            for (size_t i = 0; i < pf.rec.cacheWork.size() && i < pf.cacheSampleIds.size(); ++i)
+                own(pf.cacheSampleIds[i], pf.rec.cacheWork[i].gpuMs, pf.rec.cacheWork[i].selfGpuMs,
+                    pf.rec.cacheWork[i].selfSubmitted);
+            for (unsigned id : pf.passSampleIds) { mRowParent.erase(id); mRowSubmitted.erase(id); }
+            for (unsigned id : pf.cacheSampleIds) { mRowParent.erase(id); mRowSubmitted.erase(id); }
+        }
         for (size_t i = 0; i < pf.rec.passes.size(); ++i) {
             const FramePass &p = pf.rec.passes[i];
             if (p.gpuMs >= 0.0f && top(pf.passTop, i)) {
@@ -396,7 +433,7 @@ void FrameMonitor::retirePending(bool all) {
         for (unsigned id : pf.passSampleIds) mGpuSampleIndex.erase(id);
         for (unsigned id : pf.cacheSampleIds) { mGpuSampleIndex.erase(id); mSampleKeys.erase(id); }
         if (pf.frameSampleId) mGpuSampleIndex.erase(pf.frameSampleId);
-        for (unsigned id : pf.gapIds) { mGpuSampleIndex.erase(id); mGapSpanned.erase(id); }
+        for (unsigned id : pf.gapIds) { mGpuSampleIndex.erase(id); mGapSpanned.erase(id); mGapWhere.erase(id); }
         push(std::move(pf.rec));
         // Every surviving frame moved down one slot.
         for (auto &kv : mGpuSampleIndex)
@@ -479,17 +516,31 @@ unsigned FrameMonitor::beginRowSample(Ogre::RenderSystem *rs, const std::string 
     if (!mGpu || !rs) return 0u;
     const unsigned id = nextGpuSampleId();
     if (!id) return 0u;
-    if (mOpenRowSamples == 0u) closeGap();   // the stretch with no row ends here
+    if (mOpenRowSamples == 0u) closeGap(name);   // the stretch with no row ends here
     unsigned hash = id;
     try { rs->beginGPUSampleProfile(name, &hash); } catch (...) { if (mOpenRowSamples == 0u) openGap(); return 0u; }
     top = mFrameSampleOpen && mOpenRowSamples == 0u;
     ++mOpenRowSamples;
+    // THE NESTING (PHOTON-7's naming step): the parent's own stretch ends here - a submission inside it marks it
+    const std::uintptr_t tag = queueSubmissionTag(rs);
+    if (!mRowStack.empty() && tag != mRowStack.back().tag) mRowStack.back().submitted = true;
+    mRowParent[id] = mRowStack.empty() ? 0u : mRowStack.back().id;
+    mRowStack.push_back({ id, tag, false });
     return id;
 }
 void FrameMonitor::endRowSample(Ogre::RenderSystem *rs, const std::string &name) {
     if (!rs) return;
     try { rs->endGPUSampleProfile(name); } catch (...) {}
     if (mOpenRowSamples) --mOpenRowSamples;
+    if (mOpenRowSamples == 0u) mLastRowName = name;
+    if (!mRowStack.empty()) {
+        OpenRow r = mRowStack.back();
+        mRowStack.pop_back();
+        const std::uintptr_t tag = queueSubmissionTag(rs);
+        if (tag != r.tag) r.submitted = true;
+        mRowSubmitted[r.id] = r.submitted;
+        if (!mRowStack.empty()) mRowStack.back().tag = tag;   // the parent's own stretch resumes
+    }
     if (mOpenRowSamples == 0u) openGap();   // ...and the next one begins
 }
 
@@ -517,18 +568,21 @@ void FrameMonitor::openGap() {
     mGapId = id;
     mGapCmd = queueSubmissionTag(mFrameRs);
 }
-void FrameMonitor::closeGap() {
+void FrameMonitor::closeGap() { closeGap("frame"); }
+void FrameMonitor::closeGap(const std::string &next) {
     if (!mGapOpen) return;
     mGapOpen = false;
     try { mFrameRs->endGPUSampleProfile("gap"); } catch (...) { return; }
     const std::uintptr_t now = queueSubmissionTag(mFrameRs);
     mGapSpanned[mGapId] = now != mGapCmd || now == 0u;
+    mGapWhere[mGapId] = mLastRowName + "|" + next;
     mFrameGaps.push_back(mGapId);
 }
 void FrameMonitor::openFrameSample(Ogre::RenderSystem *rs) {
     if (!mGpu || !rs || mFrameSampleOpen) return;
     // The fork cleared its sample stack at the turnover; ours must agree.
     mOpenRowSamples = 0u;
+    mRowStack.clear();
     const unsigned id = nextGpuSampleId();
     if (!id) return;
     unsigned hash = id;
@@ -539,6 +593,7 @@ void FrameMonitor::openFrameSample(Ogre::RenderSystem *rs) {
     mFrameOwned = false;
     mFrameGaps.clear();
     mGapOpen = false;
+    mLastRowName = "frame";
     openGap();
 }
 void FrameMonitor::closeFrameSample() {
@@ -573,7 +628,7 @@ void FrameMonitor::closeFrameSample() {
             ++owner->outstanding;
         }
     } else {
-        for (unsigned g : mFrameGaps) mGapSpanned.erase(g);
+        for (unsigned g : mFrameGaps) { mGapSpanned.erase(g); mGapWhere.erase(g); }
     }
     mFrameGaps.clear();
     mFrameSampleId = 0u;
@@ -846,6 +901,20 @@ CacheScope::CacheScope(CacheKind cache, WorkReason reason, unsigned long long id
 
 CacheScope::~CacheScope() { close(); }
 
+void CacheScope::markAggregate() {
+    if (!mArmed || !gMonitor || !mGpuSampleId) return;
+    for (auto it = gMonitor->mRowStack.rbegin(); it != gMonitor->mRowStack.rend(); ++it)
+        if (it->id == mGpuSampleId) { it->aggregate = true; return; }
+}
+
+void markInnermostRowAggregate() {
+    if (gMonitor && !gMonitor->mRowStack.empty()) gMonitor->mRowStack.back().aggregate = true;
+}
+
+bool innermostRowIsAggregate() {
+    return gMonitor && !gMonitor->mRowStack.empty() && gMonitor->mRowStack.back().aggregate;
+}
+
 void CacheScope::close() {
     if (!mArmed || !gMonitor) return;
     mArmed = false;                       // idempotent: the destructor follows
@@ -853,13 +922,19 @@ void CacheScope::close() {
         // OPENED BEFORE A TURNOVER: the fork cleared its stack there, so an end
         // now would pop a sample of this frame. Filed untimed.
         gMonitor->mSampleKeys.erase(mGpuSampleId);
+        gMonitor->mRowParent.erase(mGpuSampleId);
+        gMonitor->mRowSubmitted.erase(mGpuSampleId);
         mRs = nullptr;
         mGpuSampleId = 0u;
     }
     if (mRs) gMonitor->endRowSample(mRs, mDetail ? mDetail : "cache");
     if (mCancelled) {
         // The sample is written and will be answered; nobody files it.
-        if (mGpuSampleId) gMonitor->mSampleKeys.erase(mGpuSampleId);
+        if (mGpuSampleId) {
+            gMonitor->mSampleKeys.erase(mGpuSampleId);
+            gMonitor->mRowParent.erase(mGpuSampleId);
+            gMonitor->mRowSubmitted.erase(mGpuSampleId);
+        }
         return;
     }
     CacheWork w;

@@ -2447,6 +2447,11 @@ public:
     std::uintptr_t mGapCmd = 0u;
     std::vector<unsigned> mFrameGaps;
     std::unordered_map<unsigned, bool> mGapSpanned;
+    /// Each gap's neighbours (MonitorRecord::widestGap): the row whose end opened it, and at its close the row whose
+    /// begin closed it. Erased with mGapSpanned.
+    std::string mLastRowName = "frame";
+    std::unordered_map<unsigned, std::string> mGapWhere;
+    void closeGap(const std::string &next);
     /// The record that owns the open frame pair (its `frame` number), set by endFrame.
     unsigned long long mFrameOwner = 0ull;
     bool     mFrameOwned = false;
@@ -2472,6 +2477,13 @@ public:
     /// pair is TOP-LEVEL: its time is inside the frame's and inside nobody
     /// else's, so the top-level rows are what the pair is compared with.
     unsigned mOpenRowSamples = 0u;
+    /// THE ROWS' NESTING (PHOTON-7's naming step): the open rows innermost last, each with the submission tag its own
+    /// stretch began at; a row's parent sample (0 = none) and whether its own stretches crossed a submission - read at
+    /// the retire into FramePass / CacheWork selfGpuMs and selfSubmitted.
+    struct OpenRow { unsigned id = 0u; std::uintptr_t tag = 0u; bool submitted = false; bool aggregate = false; };
+    std::vector<OpenRow> mRowStack;
+    std::unordered_map<unsigned, unsigned> mRowParent;
+    std::unordered_map<unsigned, bool> mRowSubmitted;
     /// Opens a row's sample on `rs` (0 = not sampling); `top` = was it top-level.
     unsigned beginRowSample(Ogre::RenderSystem *rs, const std::string &name, bool &top);
     /// Closes the innermost row sample (the fork's stack is LIFO, like ours).
@@ -2674,6 +2686,10 @@ public:
     /// Abandons the row entirely — for a path that decided to do nothing after
     /// all (an early return that built no work).
     void cancel() { mCancelled = true; }
+    /// AN AGGREGATE ROW (PHOTON-7's naming step: gi.step): it only encloses others, so a dispatch through the Photon
+    /// door while it is the innermost open row files a row of its own, by its job's name (photonDispatch) - its time
+    /// is never left unnamed inside the aggregate's.
+    void markAggregate();
     /// Files the row NOW rather than at the end of the enclosing block, for a
     /// scope whose work ends in the middle of a long function. Idempotent; the
     /// destructor does nothing afterwards.
@@ -2722,6 +2738,12 @@ private:
 /// outside one — owner decision D3), the job has not run since it started, or its
 /// answer has not come back yet. The ONE way a status readout reads a GPU time.
 float lastGpuMs(const char *detail, const void *owner);
+/// True while the innermost open monitor row is an AGGREGATE (CacheScope::markAggregate) - the Photon door then names
+/// its dispatch with a row of its own. False with the monitor off.
+bool innermostRowIsAggregate();
+/// Marks the innermost open row an AGGREGATE (CacheScope::markAggregate) - for a compositor pass's own recorder
+/// (photon_update), whose row the pass listener opened. Nothing with the monitor off.
+void markInnermostRowAggregate();
 /// Drops `owner`'s readings — called where the owner dies, so a new object at the
 /// same address never reads its predecessor's time.
 void forgetGpuOwner(const void *owner);
