@@ -927,6 +927,7 @@ bool StillnessRun::frameDone(std::string &err)
         f.cardsBudgetTexels = pub.gi.cards.budgetTexels;
         f.cardsIndirectTexels = pub.gi.cards.indirectBudgetTexels;
         f.cardsPageSize = pub.gi.cards.pageSize;
+        f.cardsSettleFrames = m.spec.cardsSettleFrames;
         f.storeOwed = pub.gi.chainOwed;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         f.reflRestFrames = pub.rayQuery.reflectRestFrames;
@@ -1041,6 +1042,7 @@ bool StillnessRun::frameDone(std::string &err)
         f.cardsBudgetTexels = pub.gi.cards.budgetTexels;
         f.cardsIndirectTexels = pub.gi.cards.indirectBudgetTexels;
         f.cardsPageSize = pub.gi.cards.pageSize;
+        f.cardsSettleFrames = m.spec.cardsSettleFrames;
         f.storeOwed = pub.gi.chainOwed;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         f.reflRestFrames = pub.rayQuery.reflectRestFrames;
@@ -1248,7 +1250,7 @@ std::string StillnessReport::tsv() const
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
       << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\trefl_rest_capped"
       << "\trefl_sources"
-      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\n";
+      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -1279,7 +1281,7 @@ std::string StillnessReport::tsv() const
               << "\t" << f.ifdReadUnheld << "\t" << f.ifdFollows << "\t" << f.ifdRestartDepth << "\t" << f.ifdMarkLag
               << "\t" << f.cardsAdmitted << "\t" << f.cardsArrivalMark << "\t" << f.cardsFrame << "\t" << f.cardsDemandEvery
               << "\t" << f.cardsDemandLag << "\t" << f.cardsBudgetTexels << "\t" << f.cardsIndirectTexels << "\t"
-              << f.cardsPageSize << "\n";
+              << f.cardsPageSize << "\t" << f.cardsSettleFrames << "\n";
         }
     return o.str();
 }

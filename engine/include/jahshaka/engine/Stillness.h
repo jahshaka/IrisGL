@@ -83,6 +83,10 @@ bool stillnessFinalPose(const std::vector<StillnessMove> &moves, Vec3 &eye, Vec3
 struct StillnessSpec {
     std::string script;            ///< the move (the grammar above)
     unsigned    frames = 120;      ///< the window: frames measured after the stop
+    /// THE CARDS' DEMAND SETTLE S of the scene's tier (GiQualityFacts::cardDemandSettleFrames), written into every
+    /// frame's record for a law after a stop (stage 5's rule (a): a reader's stamp within S of the change is
+    /// legitimate demand). The host that set the tier passes it; 0 = not known (the record says 0).
+    unsigned    cardsSettleFrames = 0;
     bool        path = false;      ///< + the teleport window and the walk-vs-teleport comparison
     /// THE MOVE'S TRAIL (PHOTON-2 1d): the last `moveTrail` frames before each stop measured too — every pixel (the
     /// eye moves, so no surface is "the same"), the change from the frame before, the GI rows and the ray levels the
@@ -170,6 +174,9 @@ struct StillnessFrame {
     /// CardCacheStatus publishes them) and the page's side: what a law follows an arrival's cards through - its captures
     /// at the capture budget, their indirect at the indirect budget (the photon-7r merge's judge, owed_rows.py).
     unsigned cardsBudgetTexels = 0, cardsIndirectTexels = 0, cardsPageSize = 0;
+    /// ...and the demand's settle S (GiQualityFacts::cardDemandSettleFrames, the spec's: the host that set the tier
+    /// passes it) - a reader's stamp within S of the last change admits legitimately (stage 5's rule (a)).
+    unsigned cardsSettleFrames = 0;
     bool               storeOwed = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2
     /// L8: a few frames late, so a window's SUM is the reading).
