@@ -50,6 +50,7 @@
 
 #ifdef JAH_RAY_QUERY
 #    include <vulkan/vulkan.h>
+#    include <OgreResourceTransition.h>   // the hit set's transitions (hitSetTransitions)
 #endif
 
 namespace Ogre {
@@ -194,10 +195,112 @@ struct HitListBinding {
     float sunRange = 0.0f, farLift = 0.0f;
 };
 
+/// THE HIT SET (PHOTON-7 stage 10, 10-2a; the lead's ruling: ONE function writes it, never a copy a job): every input
+/// the hit read takes - jahHitRadianceStore (jah_rq_hit_radiance.glsl) and its halves: the card read (jah_rq_card.glsl,
+/// the tables and the layers), the voxel read (jah_rq_hit.glsl, every cascade's twelve volumes), the hit's geometric
+/// normal (jah_rq_geom.glsl), the record a hit no cache shades appends (jah_rq_hit_record.glsl), the hit's own surface
+/// (jah_rq_hit_direct.glsl) - and the TLAS the rays trace. THE TIER COLLECTS IT (RayQueryTier::hitSetOf: the scene's
+/// cascades, its environment, its surface cache, its GPU scene's rows, its hit table and surface), each ray job that
+/// reads hits - the reflection (rq_reflect.comp), the gather (rq_probe_gather.comp), the cards' gather - lays it out
+/// (hitSetLayout), writes it (HitSetWrite) and orders it (hitSetTransitions) at ITS OWN binding numbers (HitSetSlots).
+struct HitSetSources {
+    VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
+    /// The cascade chain's light volumes: [cascade][kind], the kinds in kGatherVoxelKinds' order - 0 the total
+    /// (level 0), 1..3 the directional chains, 4/5 the coverage per half-axis (+a, -a), 6/7 the surface position per
+    /// half (RQ-COV-SLOT-1 / PHOTON-VOXEL-4), 8 level 0's back side, 9 the voxelizer's normal (PHOTON-VOXEL-5), 10 the
+    /// direct term's front (MOVER-OCCLUSION-1), 11 its back (PHOTON-7 stage 7: the stores hold two sides). Innermost
+    /// first; past `cascadeCount` the slots bind the last cascade's (a shader indexes kGatherMaxCascades).
+    Ogre::TextureGpu *voxel[kGatherMaxCascades][kGatherVoxelKinds] = {};
+    float voxelOrigin[kGatherMaxCascades][3] = {};
+    float voxelSize[kGatherMaxCascades][3] = {};
+    /// ...each cascade's cell, its largest side (metres).
+    float voxelCell[kGatherMaxCascades] = {};
+    unsigned cascadeCount = 0u;
+    /// THE ONE ENVIRONMENT (PHOTON-ENV-1, OgreScene::rayEnvironment): the Sky Light's cube (null: the flat colour).
+    Ogre::TextureGpu *sky = nullptr;
+    float skyColour[3] = { 0.0f, 0.0f, 0.0f };
+    /// THE SURFACE CACHE THE HITS READ FIRST (PHOTON-CARDS-2, GA-1e): the card table, the instance table, the Depth
+    /// and Radiance layers and the view term's seven (SurfaceCache::viewLayers) - all set or all null (the stand-ins
+    /// with zero slots: every hit reads the voxels). Bound whenever the cache is built with an instance slot, no card
+    /// resident too (PHOTON-7 stage 5, 5-2: the hits' demand stamps are what makes a card resident).
+    Ogre::UavBufferPacked *cardTable = nullptr;
+    Ogre::UavBufferPacked *cardInstances = nullptr;
+    Ogre::TextureGpu *cardDepth = nullptr;
+    Ogre::TextureGpu *cardRadiance = nullptr;
+    Ogre::TextureGpu *cardView[SurfaceCache::kViewLayers] = {};
+    unsigned cardSlots = 0u, cardRecords = 0u;
+    bool cardsBound() const { return cardSlots > 0u; }
+    /// THE HIT'S GEOMETRIC NORMAL: the per-slot geometry-row table the scene's TLAS was written with (a job copies it
+    /// per frame in flight into its own buffer) and the GPU scene's rows, FLUSHED by the tier this frame (a row staged
+    /// but not uploaded is a zero address: the trap file's GPU SCENE TABLES rule). Null = none: the card pick faces
+    /// the reversed ray.
+    const std::vector<uint32_t> *geomRowOfSlot = nullptr;
+    Ogre::UavBufferPacked *geomRows = nullptr;
+    /// THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): the hit table's device address (0 = none: the hit
+    /// reads the store whole), the voxeliser's texture pool the rows sample and the cloud layer's shadow (field, map,
+    /// sun; null = none).
+    uint64_t hitTable = 0u;
+    Ogre::TextureGpu *hitPool = nullptr;
+    Ogre::TextureGpu *cloudField = nullptr;
+    float cloudMap[4] = {};
+    float cloudSun[4] = {};
+    /// THE ALPHA TABLE's device address (REFLECT-MOVERS-2, jah_rq_alpha.glsl): a cut-out's candidates; 0 = none.
+    uint64_t alphaTable = 0u;
+    /// MOVER-OCCLUSION-1: a ray-traced mover exists (the hit's mover gate runs where a job asks for it).
+    bool movers = false;
+    /// THE HIT LIST (PHOTON-HIT-SHADE-1): where a hit no cache can shade is appended for the decode - the job's own
+    /// (the reflection's and the gather's); `on` false binds the stand-ins and appends nothing.
+    HitListBinding hit;
+};
+
+/// WHERE A JOB'S SET HOLDS THE HIT SET: the binding of each input (its shader's layout). Every one is bound.
+struct HitSetSlots {
+    uint32_t tlas = 0u;
+    uint32_t voxel[kGatherVoxelKinds] = {};   ///< an array of kGatherMaxCascades each
+    uint32_t sky = 0u;
+    uint32_t card[4] = {};                    ///< the card table, the instance table, the Depth layer, the Radiance layer
+    uint32_t cardView = 0u;                   ///< the first of SurfaceCache::kViewLayers consecutive bindings
+    uint32_t geom[2] = {};                    ///< the per-slot row table, the GPU scene's rows
+    uint32_t hit[4] = {};                     ///< the GPU scene's instances, the list's records, its destinations, its buffer
+    uint32_t pool = 0u, cloud = 0u;
+};
+/// The hit set's bindings: the TLAS, the volumes, the sky, the card read's four and its view term's, the geometric
+/// normal's two, the record's four, the hit surface's two.
+constexpr unsigned kHitSetBindings = 1u + kGatherVoxelKinds + 1u + 4u + SurfaceCache::kViewLayers + 2u + 4u + 2u;
+
+/// THE HIT SET's LAYOUT: its bindings' types and counts written into `b`, indexed by binding (the caller's own
+/// bindings are its own).
+void hitSetLayout(const HitSetSlots &slots, VkDescriptorSetLayoutBinding *b);
+
+/// THE HIT SET's WRITE: the descriptor infos live in this object until the caller's vkUpdateDescriptorSets.
+class HitSetWrite {
+public:
+    /// Writes the hit set's kHitSetBindings entries of `w` (indexed by binding; sType, dstSet, dstBinding, type, count
+    /// and info), every one valid - the tier's stand-ins where a source is absent. `rowOfSlot` = the job's own copy of
+    /// the per-slot row table for this frame in flight, or null (the stand-in). False with `err` where a view could
+    /// not be made: the job declines its frame.
+    bool write(GatherHost &host, VkDescriptorSet set, const HitSetSlots &slots, const HitSetSources &src,
+               VkBuffer rowOfSlot, VkWriteDescriptorSet *w, std::string &err);
+
+private:
+    VkWriteDescriptorSetAccelerationStructureKHR mAs{};
+    VkDescriptorImageInfo mVolumes[kGatherVoxelKinds][kGatherMaxCascades] = {};
+    VkDescriptorImageInfo mSky{}, mCardImgs[2] = {}, mCardView[SurfaceCache::kViewLayers] = {}, mHitImgs[2] = {};
+    VkDescriptorImageInfo mPool{}, mCloud{};
+    VkDescriptorBufferInfo mCardBufs[2] = {}, mGeomBufs[2] = {}, mHitBufs[2] = {};
+};
+
+/// THE HIT SET's ORDER: every input it reads resolved for a compute read (the card instance table read AND written:
+/// the hits' demand stamps), into the caller's transitions before its command buffer is taken.
+void hitSetTransitions(Ogre::BarrierSolver &solver, Ogre::ResourceTransitionArray &trans, const HitSetSources &src);
+
 struct GatherInputs {
     const detail::OgreScene *scene = nullptr;
     Ogre::SceneManager *sceneMgr = nullptr;
-    VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
+    /// THE HIT SET (the TLAS, the cascades, the sky, the surface cache, the geometric normal, the hit's own surface,
+    /// the alpha table, the movers' flag and the hit list): the tier's one collection (RayQueryTier::hitSetOf), bound
+    /// by the trace through the one writer (HitSetWrite).
+    HitSetSources hits;
 
     /// The prepass' G-buffers, by the names the chain declares them under: the normals, the depth, and the shadow /
     /// roughness pair (`jahSsrShadowRough`: the rough specular's roughness, PHOTON-7 stage 7, 7-3).
@@ -213,20 +316,6 @@ struct GatherInputs {
     /// THE QUADRATURE DOOR gather.roughQuadrature (7-3; a test door): 1 the filtered map kept beside the levels and the
     /// shipped read, 2 the lobe by brute force over it.
     unsigned roughQuadrature = 0u;
-    /// The scene's captured environment cube, or null.
-    Ogre::TextureGpu *sky = nullptr;
-    float skyColour[3] = { 0.0f, 0.0f, 0.0f };
-
-    /// The cascade chain's light volumes: [cascade][slot], slot 0 the total (level 0),
-    /// 1..3 the directional chains, 4/5 the coverage per half-axis (+a, -a), 6/7 the
-    /// surface position per half (by name, RQ-COV-SLOT-1 / PHOTON-VOXEL-4), 8 level 0's back
-    /// side and 9 the voxelizer's normal (PHOTON-VOXEL-5).
-    // ...[10] the direct term's front (MOVER-OCCLUSION-1), [11] its back (PHOTON-7 stage 7: the stores hold two sides)
-    Ogre::TextureGpu *voxel[kGatherMaxCascades][kGatherVoxelKinds] = {};
-    float voxelOrigin[kGatherMaxCascades][3] = {};
-    float voxelSize[kGatherMaxCascades][3] = {};
-    float voxelCell[kGatherMaxCascades] = {};
-    unsigned cascadeCount = 0u;
 
     /// The camera's basis, in the five vectors the shaders reconstruct with.
     /// Under STEREO these are the LEFT eye's, over its own layer as a 0..1 image.
@@ -253,19 +342,6 @@ struct GatherInputs {
     /// THE DEPTH-REBUILT POINT'S TERM (READ_B F5 (b), jah_ray_origin.glsl jahDepthPointError): the rasteriser's
     /// sub-pixel snap in pixels, found at the placement with the probe's depth; 0 = the term off (rays.originPoint 0).
     float pointSnapPx = float(1.4142135623730951 / 512.0);
-    /// THE ALPHA TABLE's device address (REFLECT-MOVERS-2, jah_rq_alpha.glsl): the
-    /// gather's rays test a cut-out's candidates too; 0 = none.
-    uint64_t alphaTable = 0u;
-    /// THE HIT TABLE (FAR-SUN-2, jah_rq_hit_direct.glsl): a voxel-answered hit's lights and
-    /// material rows (0 = none: the hit reads the store whole), the voxeliser's texture pool
-    /// the rows sample, and the cloud layer's shadow (field + map + sun; null = none).
-    uint64_t hitTable = 0u;
-    Ogre::TextureGpu *hitPool = nullptr;
-    Ogre::TextureGpu *cloudField = nullptr;
-    float cloudMap[4] = {};
-    float cloudSun[4] = {};
-    /// MOVER-OCCLUSION-1: a ray-traced mover exists (the hit's mover gate runs).
-    bool movers = false;
     /// THE IRRADIANCE FIELD, THE FALLBACK OF THE PIXELS NO PROBE ANSWERS (PHOTON-7 stage 7, 7-2): composed into the
     /// gather's texture after its temporal mean (rq_probe_integrate.comp), so the texture's w is 1 (the pass that reads
     /// it binds no field, 7-5). Its two atlases (null = no field: the pixels no probe answers keep no diffuse), its
@@ -308,27 +384,6 @@ struct GatherInputs {
     /// held texel was gated by the old cutoff) - folded beside the scene's keys, never into them (it is the view's).
     unsigned long long chainKey = 0ull;
 
-    /// THE SURFACE CACHE THE HITS READ FIRST (PHOTON-GATHER-1d, GA-1e) — the
-    /// scene's two tables and two atlas layers, bound as the reflection trace
-    /// binds them, or all null (the stand-ins are bound and every hit reads the
-    /// voxels). `cardSlots` / `cardRecords` are what the shader may index.
-    Ogre::UavBufferPacked *cardTable = nullptr;
-    Ogre::UavBufferPacked *cardInstances = nullptr;
-    Ogre::TextureGpu *cardDepth = nullptr;
-    Ogre::TextureGpu *cardRadiance = nullptr;
-    /// ...and the card read's VIEW TERM (PHOTON-CARDS-5): SurfaceCache::viewLayers'
-    /// five (Indirect, Emissive, ShadowRough, Albedo, Normal), bound at 25-29.
-    Ogre::TextureGpu *cardView[SurfaceCache::kViewLayers] = {};
-    unsigned cardSlots = 0u, cardRecords = 0u;
-    /// THE HIT'S GEOMETRIC NORMAL: the per-slot geometry-row table the scene's
-    /// TLAS was written with (copied per frame in flight by the gather) and the
-    /// GPU scene's rows, already FLUSHED by the tier this frame. Null = none: the
-    /// card pick faces the reversed ray.
-    const std::vector<uint32_t> *geomRowOfSlot = nullptr;
-    Ogre::UavBufferPacked *geomRows = nullptr;
-    /// THE HIT LIST (PHOTON-HIT-SHADE-1): where a hit no cache can shade is
-    /// appended for the decode.
-    HitListBinding hit;
     /// THE PHOTON VIEW'S ScreenProbes OVERLAY (PHOTON-VIEW-1): the view's overlay
     /// texture (RGBA16F, the target's size) the integrate writes its probe discs
     /// into, or null (the view is not ScreenProbes: nothing is written).

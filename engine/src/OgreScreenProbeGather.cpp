@@ -123,6 +123,23 @@ static_assert(kTraceRaysBinding == kTraceDirectBinding + 1u && kTraceOverlayBind
                   kTraceDirectBackBinding == kTraceCloudBinding + 1u && kTraceBindings == kTraceDirectBackBinding + 1u &&
                   kTraceDirectBinding == kTraceCardViewBinding + SurfaceCache::kViewLayers,
               "the direct volume follows the card read's view-term layers, the instrument's two follow it");
+/// THE HIT SET's PLACE IN THE TRACE SET (HitSetSlots, the one writer): the TLAS (0), the volumes by kind (4-7, 15-18,
+/// 23-24, 32, 37), the sky (8), the card read's four (9-12) and its view term (25-31), the geometric normal (13, 14), the
+/// record (19-22), the hit's own surface (35, 36). The trace's own: the params (1), the records (2), the atlas (3), the
+/// instrument's two (33, 34).
+constexpr HitSetSlots kTraceHitSlots = {
+    0u,
+    { 4u, 5u, 6u, 7u, 15u, 16u, 17u, 18u, kTraceSideBinding, kTraceSideBinding + 1u, kTraceDirectBinding,
+      kTraceDirectBackBinding },
+    8u,
+    { 9u, 10u, 11u, 12u },
+    kTraceCardViewBinding,
+    { 13u, 14u },
+    { 19u, 20u, 21u, 22u },
+    kTracePoolBinding,
+    kTraceCloudBinding,
+};
+static_assert(kTraceBindings == kHitSetBindings + 5u, "the trace set is the hit set and its own five");
 /// The filter's five: params, records, the raw atlas, the eye's depth (its taps' depth walk, PHOTON-2 stage 2's tail)
 /// and the prefiltered maps it stores (PHOTON-7 stage 7, 7-3: the rough specular's source).
 constexpr unsigned kFilterBindings = 5u;
@@ -371,59 +388,20 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
         };
         if (!makeLayout(kPlaceBindings, t, nullptr, mPlaceLayout, "place")) return false;
     }
-    {   // rq_probe_gather.comp
-        const VkDescriptorType t[kTraceBindings] = {
-            VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 0 tlas
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 1 params
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 2 records
-            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 3 atlas
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 4 voxelIso[]
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 5 voxelX[]
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 6 voxelY[]
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 7 voxelZ[]
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 8 sky cube
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 9 the card table
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 10 the card instance table
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 11 the card Depth layer
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 12 the card Radiance layer
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 13 the per-slot geometry row
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 14 the GPU scene's geometry rows
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 15 voxelCovP[] (RQ-COV-SLOT-1)
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 16 voxelCovN[]
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 17 voxelPosP[] (PHOTON-VOXEL-4)
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 18 voxelPosN[]
-            // THE HIT RECORD (PHOTON-HIT-SHADE-1): the instance table, the list's
-            // two images, its buffer (the counters and each record's aux).
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 19 the GPU scene's instances
-            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 20 the hit list's records
-            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 21 ...its destinations
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 22 ...its buffer
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 23 voxelBack[] (PHOTON-VOXEL-5)
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 24 voxelNrm[]
-            // THE CARD READ'S VIEW TERM (PHOTON-CARDS-5).
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 25 the card Indirect layer
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 26 ...Flat (ENGINE-POLISH-PHOTON-1)
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 27 ...ShadowRough
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 28 ...Albedo
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 29 ...Normal
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 30 ...Specular (ENGINE-POLISH-PHOTON-1)
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 31 ...the sun's visibility (PHOTON-3)
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 32 voxelDirect[] (MOVER-OCCLUSION-1)
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 33 the per-ray records (FAR-SUN-1)
-            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 34 the photon overlay (GatherHits)
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 35 the texture pool (FAR-SUN-2)
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 36 the cloud field (FAR-SUN-2)
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 37 voxelDirectBack[] (PHOTON-7 stage 7)
-        };
-        const unsigned c[kTraceBindings] = { 1u, 1u, 1u, 1u, kGatherMaxCascades,
-                                             kGatherMaxCascades, kGatherMaxCascades,
-                                             kGatherMaxCascades, 1u, 1u, 1u, 1u, 1u, 1u, 1u,
-                                             kGatherMaxCascades, kGatherMaxCascades,
-                                             kGatherMaxCascades, kGatherMaxCascades,
-                                             1u, 1u, 1u, 1u,
-                                             kGatherMaxCascades, kGatherMaxCascades,
-                                             1u, 1u, 1u, 1u, 1u, 1u, 1u, kGatherMaxCascades, 1u, 1u, 1u, 1u,
-                                             kGatherMaxCascades };
+    {   // rq_probe_gather.comp: its own five, the hit set (kTraceHitSlots) laid out by its one function
+        VkDescriptorSetLayoutBinding hb[kTraceBindings] = {};
+        hitSetLayout(kTraceHitSlots, hb);
+        VkDescriptorType t[kTraceBindings] = {};
+        unsigned c[kTraceBindings] = {};
+        for (unsigned i = 0; i < kTraceBindings; ++i) {
+            t[i] = hb[i].descriptorType;
+            c[i] = hb[i].descriptorCount ? hb[i].descriptorCount : 1u;
+        }
+        t[1] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;               // 1 params
+        t[2] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;               // 2 records
+        t[3] = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;                // 3 atlas
+        t[kTraceRaysBinding] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;   // the per-ray records (FAR-SUN-1)
+        t[kTraceOverlayBinding] = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; // the photon overlay (GatherHits)
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp
@@ -1260,7 +1238,7 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
 }
 
 void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
-    if (mFailed || !in.scene || !in.sceneMgr || !in.tlas || !in.normals || !in.depth || !in.shadowRough) return;
+    if (mFailed || !in.scene || !in.sceneMgr || !in.hits.tlas || !in.normals || !in.depth || !in.shadowRough) return;
     if (!in.width || !in.height) return;
     const auto cpuStart = Clock::now();
 
@@ -1519,8 +1497,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // copies from here to the far plane (knobs3.w below, ATOM-FARBLAS-1).
     {
         float diagonal = 0.0f;
-        if (in.cascadeCount) {
-            const float *s = in.voxelSize[in.cascadeCount - 1u];
+        if (in.hits.cascadeCount) {
+            const float *s = in.hits.voxelSize[in.hits.cascadeCount - 1u];
             diagonal = std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
         }
         const float derived = detail::photonRayReach(diagonal, in.farClip);
@@ -1534,7 +1512,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                       : float(v.restFrames ? kRestSequenceBase + std::min(in.tuning.restSeed, 255u) * 4096u +
                                                  v.restFrames   // a rest mean holds by 4097: < 2^21, exact
                                            : (v.frame & 0xFFFFu));
-    pp.knobs[3] = float(in.cascadeCount);
+    pp.knobs[3] = float(in.hits.cascadeCount);
     // THE RAY'S START: THE ORIGIN LAW (PHOTON-7 stage 6, READ_A W2, READ_B F3 - one law for every ray, Types.h
     // rayOriginDrawnFootprints / jah_ray_origin.glsl) - off the probe's DRAWN surface along its geometric normal by the
     // point's float bound plus the drawn surface's bound against level 0 in full-resolution footprints at the probe's
@@ -1543,7 +1521,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // start lifted 4 cm measured the irradiance 4 cm up - +7 % at a floating panel's foot, -11 % at 1.6 m).
     pp.knobs2[0] = in.tuning.classOff ? 1.0f : 0.0f;   // the class out of the history test (a test door)
     pp.knobs2[1] = std::max(0.0f, in.drawnCutFootprints);
-    pp.knobs2[2] = in.sky ? 1.0f : 0.0f;
+    pp.knobs2[2] = in.hits.sky ? 1.0f : 0.0f;
     pp.knobs2[3] = float(octRes);
     pp.knobs3[0] = float(v.uniformProbes);
     pp.knobs3[1] = float(adaptiveCap);
@@ -1567,21 +1545,21 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // w: 0 the grid's one offset a frame (every cell's probe at it; the integrate's bilinear on the shifted grid),
     // 1 the centre (jitterOff)
     pp.plane[3] = in.tuning.jitterOff ? 1.0f : 0.0f;
-    for (int i = 0; i < 3; ++i) pp.skyColour[i] = std::max(0.0f, in.skyColour[i]);
+    for (int i = 0; i < 3; ++i) pp.skyColour[i] = std::max(0.0f, in.hits.skyColour[i]);
     for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
-        const unsigned src = c < in.cascadeCount ? c : (in.cascadeCount ? in.cascadeCount - 1u : 0u);
-        const bool have = in.cascadeCount != 0u;
-        const float sx = have ? in.voxelSize[src][0] : 1.0f;
-        const float sy = have ? in.voxelSize[src][1] : 1.0f;
-        const float sz = have ? in.voxelSize[src][2] : 1.0f;
-        pp.voxelOrigin[c][0] = have ? in.voxelOrigin[src][0] : 0.0f;
-        pp.voxelOrigin[c][1] = have ? in.voxelOrigin[src][1] : 0.0f;
-        pp.voxelOrigin[c][2] = have ? in.voxelOrigin[src][2] : 0.0f;
+        const unsigned src = c < in.hits.cascadeCount ? c : (in.hits.cascadeCount ? in.hits.cascadeCount - 1u : 0u);
+        const bool have = in.hits.cascadeCount != 0u;
+        const float sx = have ? in.hits.voxelSize[src][0] : 1.0f;
+        const float sy = have ? in.hits.voxelSize[src][1] : 1.0f;
+        const float sz = have ? in.hits.voxelSize[src][2] : 1.0f;
+        pp.voxelOrigin[c][0] = have ? in.hits.voxelOrigin[src][0] : 0.0f;
+        pp.voxelOrigin[c][1] = have ? in.hits.voxelOrigin[src][1] : 0.0f;
+        pp.voxelOrigin[c][2] = have ? in.hits.voxelOrigin[src][2] : 0.0f;
         pp.voxelOrigin[c][3] = 0.0f;   // padding (the per-cascade multiplier, deleted: the voxels hold radiance)
         pp.voxelInvSize[c][0] = sx > 0.0f ? 1.0f / sx : 0.0f;
         pp.voxelInvSize[c][1] = sy > 0.0f ? 1.0f / sy : 0.0f;
         pp.voxelInvSize[c][2] = sz > 0.0f ? 1.0f / sz : 0.0f;
-        pp.voxelInvSize[c][3] = have ? in.voxelCell[src] : 1.0f;
+        pp.voxelInvSize[c][3] = have ? in.hits.voxelCell[src] : 1.0f;
     }
     // PHOTON-GATHER-1b: the SH bands the integrate evaluates (9 unless the
     // measurement arm asks for 4), the weight floor, the filter on or off.
@@ -1630,8 +1608,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // frame). No cache or no rows: zero slots, and the shader never indexes the
     // stand-ins bound in their place.
     uint32_t geomSlots = 0u;
-    if (in.geomRows && in.geomRowOfSlot && !in.geomRowOfSlot->empty()) {
-        const VkDeviceSize want = VkDeviceSize(in.geomRowOfSlot->size()) * sizeof(uint32_t);
+    if (in.hits.geomRows && in.hits.geomRowOfSlot && !in.hits.geomRowOfSlot->empty()) {
+        const VkDeviceSize want = VkDeviceSize(in.hits.geomRowOfSlot->size()) * sizeof(uint32_t);
         if (v.geomRowOfSlot[ring] && v.geomRowOfSlotBytes[ring] < want) {
             mHost.gatherRetireBuffer(v.geomRowOfSlot[ring], v.geomRowOfSlotMemory[ring]);
             v.geomRowOfSlot[ring] = VK_NULL_HANDLE;
@@ -1648,41 +1626,38 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                 v.geomRowOfSlotBytes[ring] = bytes;
         }
         if (v.geomRowOfSlot[ring] && v.geomRowOfSlotMapped[ring]) {
-            std::memcpy(v.geomRowOfSlotMapped[ring], in.geomRowOfSlot->data(), size_t(want));
-            geomSlots = uint32_t(in.geomRowOfSlot->size());
+            std::memcpy(v.geomRowOfSlotMapped[ring], in.hits.geomRowOfSlot->data(), size_t(want));
+            geomSlots = uint32_t(in.hits.geomRowOfSlot->size());
         }
     }
-    bool cardViewBound = true;
-    for (Ogre::TextureGpu *t : in.cardView) cardViewBound = cardViewBound && t;
     // BOUND WHENEVER THE CACHE IS BUILT, with no card resident too (PHOTON-7 stage 5, 5-2): the hits' demand stamps
-    // are what makes a card resident at all.
-    const bool cardsBound = in.cardTable && in.cardInstances && in.cardDepth && in.cardRadiance && cardViewBound &&
-                            in.cardSlots > 0u;
-    pp.cards[0] = cardsBound ? float(in.cardSlots) : 0.0f;
-    pp.cards[1] = cardsBound ? float(in.cardRecords) : 0.0f;
+    // are what makes a card resident at all (HitSetSources: slots only where every table and layer is there).
+    const bool cardsBound = in.hits.cardsBound();
+    pp.cards[0] = cardsBound ? float(in.hits.cardSlots) : 0.0f;
+    pp.cards[1] = cardsBound ? float(in.hits.cardRecords) : 0.0f;
     pp.cards[2] = 0.0f;   // (the card read's footprint gate is deleted: PHOTON-7 stage 6)
     pp.cards[3] = float(geomSlots);
     // THE HIT RECORD (PHOTON-HIT-SHADE-1): the list the tier bound, the sun ray.
-    pp.hitList[0] = float(in.hit.capacity);
-    pp.hitList[1] = float(in.hit.width);
-    pp.hitList[2] = float(in.hit.instanceEntries);
-    pp.hitList[3] = in.hit.on ? 1.0f : 0.0f;
-    pp.hitSun[0] = in.hit.toSun[0];
-    pp.hitSun[1] = in.hit.toSun[1];
-    pp.hitSun[2] = in.hit.toSun[2];
-    pp.hitSun[3] = in.hit.sun ? 1.0f : 0.0f;
-    pp.hitSun2[0] = float(in.hit.sunMask);
+    pp.hitList[0] = float(in.hits.hit.capacity);
+    pp.hitList[1] = float(in.hits.hit.width);
+    pp.hitList[2] = float(in.hits.hit.instanceEntries);
+    pp.hitList[3] = in.hits.hit.on ? 1.0f : 0.0f;
+    pp.hitSun[0] = in.hits.hit.toSun[0];
+    pp.hitSun[1] = in.hits.hit.toSun[1];
+    pp.hitSun[2] = in.hits.hit.toSun[2];
+    pp.hitSun[3] = in.hits.hit.sun ? 1.0f : 0.0f;
+    pp.hitSun2[0] = float(in.hits.hit.sunMask);
     pp.hitSun2[1] = 0.0f;   // unused: a near hit's surface term is 0 (the one origin law)
-    pp.hitSun2[2] = in.hit.sunRange;
-    pp.hitSun2[3] = in.hit.farLift;   // farOverlap (the drift law's gap): a far copy's hit
+    pp.hitSun2[2] = in.hits.hit.sunRange;
+    pp.hitSun2[3] = in.hits.hit.farLift;   // farOverlap (the drift law's gap): a far copy's hit
     {
-        const uint32_t hlo = uint32_t(in.hitTable & 0xFFFFFFFFu), hhi = uint32_t(in.hitTable >> 32u);
+        const uint32_t hlo = uint32_t(in.hits.hitTable & 0xFFFFFFFFu), hhi = uint32_t(in.hits.hitTable >> 32u);
         std::memcpy(&pp.hitTable[0], &hlo, sizeof(hlo));
         std::memcpy(&pp.hitTable[1], &hhi, sizeof(hhi));
-        pp.hitTable[2] = in.hitPool ? 1.0f : 0.0f;
-        pp.hitTable[3] = in.cloudField ? 1.0f : 0.0f;
-        std::memcpy(pp.cloudMap, in.cloudMap, sizeof(pp.cloudMap));
-        std::memcpy(pp.cloudSun, in.cloudSun, sizeof(pp.cloudSun));
+        pp.hitTable[2] = in.hits.hitPool ? 1.0f : 0.0f;
+        pp.hitTable[3] = in.hits.cloudField ? 1.0f : 0.0f;
+        std::memcpy(pp.cloudMap, in.hits.cloudMap, sizeof(pp.cloudMap));
+        std::memcpy(pp.cloudSun, in.hits.cloudSun, sizeof(pp.cloudSun));
         // THE IRRADIANCE FIELD, composed by the integrate (PHOTON-7 stage 7, 7-2; jah_probe_params.glsl): the block,
         // the window and counts, w = 1 bound and composed
         const bool field = in.fieldIrradiance && in.fieldDepth;
@@ -1704,12 +1679,12 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // THE QUADRATURE DOOR (a test door): the filtered map kept in the layer after the levels (only where the targets
     // were made with it), 2 = the brute-force read over it
     pp.roughLevels[3] = v.prefilteredLayers > kRoughSpecLevels ? float(std::min(in.roughQuadrature, 2u)) : 0.0f;
-        const uint32_t lo = uint32_t(in.alphaTable & 0xFFFFFFFFu), hi = uint32_t(in.alphaTable >> 32u);
+        const uint32_t lo = uint32_t(in.hits.alphaTable & 0xFFFFFFFFu), hi = uint32_t(in.hits.alphaTable >> 32u);
         std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
         std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
     }
     pp.alpha[2] = mHost.gatherDecodeHitsArm() ? 1.0f : 0.0f;   // the arm "gather.decodeHits"
-    pp.alpha[3] = in.movers ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
+    pp.alpha[3] = in.hits.movers ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
     // THE SECOND EYE (PHOTON-GA-VR): the shape, and the right eye's basis now and
     // before (written, never read, with one eye).
     pp.stereo[0] = v.stereo ? 1.0f : 0.0f;
@@ -1800,36 +1775,17 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         vkUpdateDescriptorSets(mHost.gatherDevice(), kPlaceBindings, w, 0, nullptr);
     }
 
-    VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
-    asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
-    asWrite.accelerationStructureCount = 1;
-    asWrite.pAccelerationStructures = &in.tlas;
     VkDescriptorImageInfo atlasStore{};
     atlasStore.imageView = v.atlasView;
     atlasStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkDescriptorImageInfo volumes[kGatherVoxelKinds][kGatherMaxCascades] = {}, sky{};
-    for (int axis = 0; axis < int(kGatherVoxelKinds); ++axis)
-        for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
-            const unsigned src =
-                c < in.cascadeCount ? c : (in.cascadeCount ? in.cascadeCount - 1u : 0u);
-            Ogre::TextureGpu *t = in.cascadeCount ? in.voxel[src][axis] : nullptr;
-            volumes[axis][c].sampler = mHost.gatherLinearSampler();
-            volumes[axis][c].imageView = t ? sampledView(t) : dummyVolume;
-            volumes[axis][c].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            if (!volumes[axis][c].imageView) return;
-        }
-    sky.sampler = mHost.gatherLinearSampler();
-    sky.imageView = in.sky ? sampledView(in.sky) : dummyCube;
-    sky.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (!sky.imageView) return;
     // THE IRRADIANCE TARGET'S STORAGE VIEW, made once a frame and bound twice: the integrate writes
-    // it, and the trace's binding 32 stands it in for the photon overlay (never written there)
+    // it, and the trace's overlay binding stands it in for the photon overlay (never written there)
     // - one view, not a second one created and retired every traced frame.
     VkDescriptorImageInfo irradianceStore{};
     irradianceStore.imageView = mHost.gatherLayerView(v.irradiance, true);
     irradianceStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     if (!irradianceStore.imageView) return;
-    {   // the trace set
+    {   // the trace set: its own six, then THE HIT SET (the one writer, HitSetWrite: kTraceHitSlots)
         VkWriteDescriptorSet w[kTraceBindings] = {};
         for (unsigned i = 0; i < kTraceBindings; ++i) {
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1837,112 +1793,18 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             w[i].dstBinding = i;
             w[i].descriptorCount = 1;
         }
-        w[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        w[0].pNext = &asWrite;
         w[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         w[1].pBufferInfo = &paramsInfo;
         w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[2].pBufferInfo = &recordsInfo;
         w[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[3].pImageInfo = &atlasStore;
-        for (int axis = 0; axis < 4; ++axis) {
-            w[4 + axis].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            w[4 + axis].descriptorCount = kGatherMaxCascades;
-            w[4 + axis].pImageInfo = volumes[axis];
-        }
-        w[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w[8].pImageInfo = &sky;
-        // THE CARD READ'S FOUR (9-12) — the cache's own or the stand-ins, the
-        // reflection trace's rule — and THE GEOMETRIC NORMAL'S TWO (13, 14).
-        const auto bufferInfo = [](Ogre::UavBufferPacked *b) {
-            VkDescriptorBufferInfo info{};
-            auto *bi = static_cast<Ogre::VulkanBufferInterface *>(b->getBufferInterface());
-            info.buffer = bi->getVboName();
-            info.offset = VkDeviceSize(b->_getFinalBufferStart()) * b->getBytesPerElement();
-            info.range = b->getTotalSizeBytes();
-            return info;
-        };
-        VkDescriptorBufferInfo stand{};
-        stand.buffer = dummyStorage;
-        stand.range = VK_WHOLE_SIZE;
-        VkDescriptorBufferInfo cardBufs[2] = { stand, stand };
-        VkDescriptorImageInfo cardImgs[2] = {};
-        if (cardsBound) {
-            cardBufs[0] = bufferInfo(in.cardTable);
-            cardBufs[1] = bufferInfo(in.cardInstances);
-        }
-        Ogre::TextureGpu *const layers[2] = { in.cardDepth, in.cardRadiance };
-        for (int i = 0; i < 2; ++i) {
-            cardImgs[i].sampler = mHost.gatherPointSampler();
-            cardImgs[i].imageView = cardsBound ? sampledView(layers[i]) : dummyFlat;
-            cardImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            if (!cardImgs[i].imageView || !cardBufs[i].buffer) return;
-        }
-        VkDescriptorBufferInfo geomBufs[2] = { stand, stand };
-        if (geomSlots) {
-            geomBufs[0].buffer = v.geomRowOfSlot[ring];
-            geomBufs[0].offset = 0;
-            geomBufs[0].range = VK_WHOLE_SIZE;
-            geomBufs[1] = bufferInfo(in.geomRows);
-        }
-        for (int i = 0; i < 2; ++i) {
-            w[9 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            w[9 + i].pBufferInfo = &cardBufs[i];
-            w[11 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            w[11 + i].pImageInfo = &cardImgs[i];
-            w[13 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            w[13 + i].pBufferInfo = &geomBufs[i];
-        }
-        for (unsigned k = 0; k < 4u; ++k) {   // coverage +/-, position +/- (15-18)
-            w[15 + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            w[15 + k].descriptorCount = kGatherMaxCascades;
-            w[15 + k].pImageInfo = volumes[4 + k];
-        }
-        for (unsigned k = 0; k < 2u; ++k) {   // PHOTON-VOXEL-5: level 0's back, the normal (23, 24)
-            w[kTraceSideBinding + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            w[kTraceSideBinding + k].descriptorCount = kGatherMaxCascades;
-            w[kTraceSideBinding + k].pImageInfo = volumes[8 + k];
-        }
-        // THE HIT RECORD (19-22): the tier's list or its stand-ins — every view
-        // real, whatever `on` says (a null view in a set is undefined).
-        VkDescriptorBufferInfo hitBufs[2] = {};
-        hitBufs[0].buffer = in.hit.instances ? in.hit.instances : dummyStorage;
-        hitBufs[0].offset = in.hit.instances ? in.hit.instancesOffset : 0u;
-        hitBufs[0].range = in.hit.instances ? in.hit.instancesRange : VK_WHOLE_SIZE;
-        hitBufs[1].buffer = in.hit.buf ? in.hit.buf : dummyStorage;
-        hitBufs[1].offset = in.hit.buf ? in.hit.bufOffset : 0u;
-        hitBufs[1].range = in.hit.buf ? in.hit.bufRange : VK_WHOLE_SIZE;
-        VkDescriptorImageInfo hitImgs[2] = {};
-        const VkImageView hitViews[2] = { in.hit.ids, in.hit.dest };
-        for (int i = 0; i < 2; ++i) {
-            if (!hitViews[i]) return;
-            hitImgs[i].imageView = hitViews[i];
-            hitImgs[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-            w[20 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            w[20 + i].pImageInfo = &hitImgs[i];
-        }
-        w[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w[19].pBufferInfo = &hitBufs[0];
-        w[22].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w[22].pBufferInfo = &hitBufs[1];
-        // THE CARD READ'S VIEW TERM (25-29, PHOTON-CARDS-5): the cache's five
-        // or the flat stand-in, the card read's rule.
-        VkDescriptorImageInfo cardViewImgs[SurfaceCache::kViewLayers] = {};
-        for (unsigned i = 0; i < SurfaceCache::kViewLayers; ++i) {
-            cardViewImgs[i].sampler = mHost.gatherPointSampler();
-            cardViewImgs[i].imageView = cardsBound ? sampledView(in.cardView[i]) : dummyFlat;
-            cardViewImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            if (!cardViewImgs[i].imageView) return;
-            w[kTraceCardViewBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            w[kTraceCardViewBinding + i].pImageInfo = &cardViewImgs[i];
-        }
-        w[kTraceDirectBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w[kTraceDirectBinding].descriptorCount = kGatherMaxCascades;
-        w[kTraceDirectBinding].pImageInfo = volumes[10];
-        w[kTraceDirectBackBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w[kTraceDirectBackBinding].descriptorCount = kGatherMaxCascades;
-        w[kTraceDirectBackBinding].pImageInfo = volumes[11];
-        // THE GATHER-HITS INSTRUMENT (31, 32; FAR-SUN-1): the view's records under the arm, or the
+        HitSetWrite hitSet;
+        std::string herr;
+        if (!hitSet.write(mHost, v.traceSets[ring], kTraceHitSlots, in.hits, geomSlots ? v.geomRowOfSlot[ring] : VK_NULL_HANDLE,
+                          w, herr))
+            return;
+        // THE GATHER-HITS INSTRUMENT (FAR-SUN-1): the view's records under the arm, or the
         // stand-in (never written: p.hits.x = 0); the photon overlay under the GatherHits view, or
         // the irradiance target's own storage view (never written: p.hits.y = 0) — the integrate's
         // binding-8 rule.
@@ -1959,20 +1821,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         if (!hitsOverlay.imageView) return;
         w[kTraceOverlayBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[kTraceOverlayBinding].pImageInfo = &hitsOverlay;
-        // THE HIT'S OWN SURFACE (33, 34; FAR-SUN-2): the voxeliser's texture pool and the cloud
-        // field, or the stand-ins (never read: p.hitTable.z / .w = 0).
-        VkDescriptorImageInfo poolImg{}, cloudImg{};
-        poolImg.sampler = mHost.gatherWrapSampler();
-        poolImg.imageView = in.hitPool ? sampledView(in.hitPool) : mHost.gatherDummyFlatArray();
-        poolImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        cloudImg.sampler = mHost.gatherWrapSampler();
-        cloudImg.imageView = in.cloudField ? sampledView(in.cloudField) : dummyFlat;
-        cloudImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        if (!poolImg.imageView || !cloudImg.imageView || !poolImg.sampler) return;
-        w[kTracePoolBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w[kTracePoolBinding].pImageInfo = &poolImg;
-        w[kTraceCloudBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w[kTraceCloudBinding].pImageInfo = &cloudImg;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kTraceBindings, w, 0, nullptr);
     }
 
@@ -2110,41 +1958,13 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         for (Ogre::TextureGpu *t : { in.normals, in.depth, in.shadowRough })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
-        for (unsigned c = 0; c < in.cascadeCount; ++c)
-            for (int axis = 0; axis < int(kGatherVoxelKinds); ++axis)
-                if (in.voxel[c][axis])
-                    solver.resolveTransition(trans, in.voxel[c][axis],
-                                             Ogre::ResourceLayout::Texture,
-                                             Ogre::ResourceAccess::Read, computeStage);
-        if (in.sky)
-            solver.resolveTransition(trans, in.sky, Ogre::ResourceLayout::Texture,
-                                     Ogre::ResourceAccess::Read, computeStage);
+        // THE HIT SET (the one order: hitSetTransitions)
+        hitSetTransitions(solver, trans, in.hits);
         // THE IRRADIANCE FIELD'S ATLASES (7-2), sampled by the integrate (the field writes them at the frame's head)
         if (in.fieldIrradiance && in.fieldDepth)
             for (Ogre::TextureGpu *t : { in.fieldIrradiance, in.fieldDepth })
                 solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                          Ogre::ResourceAccess::Read, computeStage);
-        // THE HIT'S OWN SURFACE (FAR-SUN-2): the texture pool and the cloud field, sampled.
-        for (Ogre::TextureGpu *t : { in.hitPool, in.cloudField })
-            if (t)
-                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
-                                         Ogre::ResourceAccess::Read, computeStage);
-        // THE CARD READ'S INPUTS (GA-1e), the reflection's transitions: the
-        // Radiance layer the CardLight job wrote and the Depth layer the capture
-        // copied into, read as textures; the card table and the geometry rows,
-        // read as buffers; the instance table READ AND WRITTEN (its demand stamps, PHOTON-7 stage 5, 5-2).
-        if (cardsBound) {
-            for (Ogre::TextureGpu *t : { in.cardDepth, in.cardRadiance })
-                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
-                                         Ogre::ResourceAccess::Read, computeStage);
-            for (Ogre::TextureGpu *t : in.cardView)
-                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
-                                         Ogre::ResourceAccess::Read, computeStage);
-            solver.resolveTransition(trans, in.cardTable, Ogre::ResourceAccess::Read, computeStage);
-            solver.resolveTransition(trans, in.cardInstances, Ogre::ResourceAccess::ReadWrite, computeStage);
-        }
-        if (geomSlots)
-            solver.resolveTransition(trans, in.geomRows, Ogre::ResourceAccess::Read, computeStage);
         rs->executeResourceTransition(trans);
     }
 
