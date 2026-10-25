@@ -727,6 +727,12 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
         // and the scan rows' "the walk ran" — U4 stage 3 made them cached after the scene graph.)
         if (gi) ++mGiWalk.aabbReads;
         const Ogre::Aabb a = fresh ? item->getWorldAabbUpdated() : item->getWorldAabb();
+        // ...and the transform that box was read through (current either way: the updated read above walked the
+        // parent chain, the cached one follows updateSceneGraph), with the item's local box - a move INSIDE the box
+        // (localBoxCornersMoved) is a move too.
+        const Ogre::Node *xnode = item->getParentNode();
+        const Ogre::Matrix4 xf = xnode ? xnode->_getFullTransform() : Ogre::Matrix4::IDENTITY;
+        const Ogre::Aabb local = item->getLocalAabb();
         // Read once per item, both halves use them (each is an SoA read, and
         // this loop is the per-frame cost the whole walk is measured by).
         const Ogre::uint32 flags = item->getVisibilityFlags();
@@ -749,6 +755,23 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
         // bit-identical, so one shared snapshot thrashed and BOTH halves took
         // the long path every frame. Each half's own record is the comparison,
         // and each is a handful of float compares.)
+        // THE GI HALF's MOVE TEST, its record `rec` (the voxel box or the probe-only box) and the transform beside it.
+        // THE QUANTUM BOUNDS THE WORK WHILE AN ITEM MOVES; REST IS EXACT (PHOTON-7 stage 10, the lead's (b); L2: coming
+        // to rest off the record is a change the voxels never saw). Moved by the quantum (the box test, or the corners
+        // inside the box) = a move. Off the record by less (past float noise) = read again by the NEXT walk (named:
+        // the walk visits only what was named, and a still item is never named again) - and if it has not changed
+        // since this walk saw it, it CAME TO REST off its record: a move, once (a nudge under the box quantum, the
+        // last degrees of a turn, a body jittering until Bullet sleeps it - each marked once, when it stops).
+        const auto giMove = [&](const Ogre::Aabb &rec) -> bool {
+            if (PhotonComponent::giAabbMoved(rec, a) || PhotonComponent::giPoseMoved(local, n.scan.giXform, xf, rec, a))
+                return true;
+            bool settled = false;
+            if (PhotonComponent::giPastNoise(local, rec, n.scan.giXform, a, xf)) {
+                settled = !PhotonComponent::giPastNoise(local, n.scan.giSeenBox, n.scan.giSeenXform, a, xf);
+                if (!settled) nameFor(n, kNameGi);
+            }
+            return settled;
+        };
         if (gi) {
             // A PROMOTED DRAG MOVER FIRST (MOVER-1). It carries kMovableBit and
             // no kGiGeometryBit, so without this branch it would fall into the
@@ -760,6 +783,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
             // the drag stopped and what to re-voxelise once at the end.
             if (n.dragMover) {
                 if (PhotonComponent::giAabbMoved(n.scan.giBox, a)) n.scan.giBox = a;
+                n.scan.giXform = xf;   // the demotion re-voxelises its rest box whatever turned inside it
             } else if (!(flags & kGiGeometryBit)) {
                 // PROBE-ONLY geometry (P7): unlit, captured by the probe faces,
                 // never voxelized. Same quantized test, its own record, and a
@@ -769,15 +793,18 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                     if (!n.scan.probeKnown) {
                         n.scan.probeKnown = true;
                         n.scan.probeBox = a;
+                        n.scan.giXform = xf;
                         if (!firstGi) mGiWalk.probeOnlyChanged = true;
-                    } else if (PhotonComponent::giAabbMoved(n.scan.probeBox, a)) {
+                    } else if (giMove(n.scan.probeBox)) {
                         n.scan.probeBox = a;
+                        n.scan.giXform = xf;
                         mGiWalk.probeOnlyChanged = true;
                     }
                 }
             } else if (!n.scan.giKnown) {
                 n.scan.giKnown = true;
                 n.scan.giBox = a;
+                n.scan.giXform = xf;
                 // An ARRIVAL, after the first scan (which sees every item for
                 // the first time and is not news): the probes must capture it (P1).
                 if (!firstGi) mGiWalk.itemsAppeared = true;
@@ -799,7 +826,8 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                     mGiWalk.cascadeDirty.push_back(a);
                     if (rootParity) mGiWalk.itemDirty.push_back(a);
                 }
-            } else if (PhotonComponent::giAabbMoved(n.scan.giBox, a)) {
+            } else if (giMove(n.scan.giBox)) {
+                // (A TURN INSIDE THE BOX is a move: the old pose and the new are both inside the union below.)
                 Ogre::Aabb moved = n.scan.giBox;
                 moved.merge(a);
                 // IS THIS A GESTURE? (MOVER-1.) THE RECORD SAYS (U0 3c): an object the user's gesture moves — the
@@ -827,6 +855,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                     // DRAG-1), and the object's DEPARTURE from the capture set
                     // is answered once, at the demotion, with reason Mobility.
                     n.scan.giBox = a;
+                    n.scan.giXform = xf;
                     n.dragMover = true;
                     mGiWalk.promoted.push_back(n.selfId);
                     applyNodeVisibilityFlags(n);
@@ -852,8 +881,11 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                         }
                     }
                     n.scan.giBox = a;
+                    n.scan.giXform = xf;
                 }
             }
+            n.scan.giSeenBox = a;     // what this walk saw (giMove's "has not changed since")
+            n.scan.giSeenXform = xf;
         }
         if (shadow) {
             ++mCasterWalkItems;
@@ -876,7 +908,9 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                         r.shadowChannels != channels) {
                         Ogre::Aabb both = r.shadowBox; both.merge(a);
                         mShadowChanges.push_back({ both, channels | r.shadowChannels });
-                    } else if (r.shadowPose != pose || deforms || n.shadowShapeDirty) {
+                    } else if (r.shadowPose != pose || deforms || n.shadowShapeDirty ||
+                               localBoxCornersMoved(local, r.shadowXform, xf, shadowMoveEpsilon(a))) {
+                        // (the last: a turn inside the same box - an L turned 180 degrees about its box's centre)
                         mShadowChanges.push_back({ a, channels });
                     }
                 }
@@ -889,6 +923,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
             r.shadowItem = present ? item : nullptr;
             r.shadowBox = present ? a : Ogre::Aabb();
             r.shadowPose = pose;
+            r.shadowXform = xf;
             r.shadowChannels = channels;
         }
     }

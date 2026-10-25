@@ -4368,6 +4368,16 @@ bool PhotonComponent::giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &af
     return false;
 }
 
+bool PhotonComponent::giPoseMoved(const Ogre::Aabb &local, const Ogre::Matrix4 &before, const Ogre::Matrix4 &after,
+                                  const Ogre::Aabb &boxBefore, const Ogre::Aabb &boxAfter) {
+    return localBoxCornersMoved(local, before, after, std::max(giAabbQuantum(boxBefore), giAabbQuantum(boxAfter)));
+}
+
+bool PhotonComponent::giPastNoise(const Ogre::Aabb &local, const Ogre::Aabb &recBox, const Ogre::Matrix4 &recXform,
+                                  const Ogre::Aabb &box, const Ogre::Matrix4 &xform) {
+    return boxMovedForShadows(recBox, box) || localBoxCornersMoved(local, recXform, xform, shadowMoveEpsilon(box));
+}
+
 
 // TRUE WHEN THE ARM WAS ACTUALLY (RE)BUILT, and that is a contract a caller
 // depends on (the lead's fix-round item 1): `applyPendingGi` clears

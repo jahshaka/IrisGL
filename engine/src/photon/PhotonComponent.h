@@ -889,6 +889,14 @@ public:
     /// the probe round-robin can never disagree about what moved.
     static float giAabbQuantum(const Ogre::Aabb &a);
     static bool  giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after);
+    /// ...and "did the object move INSIDE its box by at least that quantum?" (localBoxCornersMoved: the item's local
+    /// box carried by the recorded and the current world transform) - a rotation the box test cannot see.
+    static bool  giPoseMoved(const Ogre::Aabb &local, const Ogre::Matrix4 &before, const Ogre::Matrix4 &after,
+                             const Ogre::Aabb &boxBefore, const Ogre::Aabb &boxAfter);
+    /// ...and "is it off that record at all?" - past float noise (the caster half's micro-metre test, on the box and on
+    /// the corners): REST IS EXACT (walkItems: an item that came to rest off its record is marked once).
+    static bool  giPastNoise(const Ogre::Aabb &local, const Ogre::Aabb &recBox, const Ogre::Matrix4 &recXform,
+                             const Ogre::Aabb &box, const Ogre::Matrix4 &xform);
     /// Deletes every GI object. Safe to call twice; must run BEFORE the
     /// SceneManager dies (probe workspaces, GI camera).
     void teardownGi();

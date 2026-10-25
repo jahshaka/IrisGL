@@ -757,12 +757,35 @@ inline Ogre::uint32 allShadowCasterChannels() {
 /// measurement: the same transforms give the same floats frame after frame,
 /// so anything above a micro-metre of float noise is a real move — a physics
 /// body settling IS moving its shadow.
+inline Ogre::Real shadowMoveEpsilon(const Ogre::Aabb &a) {
+    return Ogre::Real(1e-5) * std::max(Ogre::Real(1), a.mHalfSize.length());
+}
 inline bool boxMovedForShadows(const Ogre::Aabb &a, const Ogre::Aabb &b) {
     const Ogre::Vector3 dc = a.mCenter - b.mCenter;
     const Ogre::Vector3 dh = a.mHalfSize - b.mHalfSize;
-    const Ogre::Real eps = Ogre::Real(1e-5) * std::max(Ogre::Real(1), a.mHalfSize.length());
+    const Ogre::Real eps = shadowMoveEpsilon(a);
     return std::abs(dc.x) > eps || std::abs(dc.y) > eps || std::abs(dc.z) > eps ||
            std::abs(dh.x) > eps || std::abs(dh.y) > eps || std::abs(dh.z) > eps;
+}
+/// "DID THE OBJECT MOVE INSIDE ITS BOX?" - the box tests' blind spot (PHOTON-7 stage 10, 2026-10-25): an affine change
+/// that leaves the world AABB where it was moves the object without moving its box - a cube turning through 45 degrees
+/// (its half-size is cos t + sin t, flat there: a yaw past 35 degrees moved it under the GI walk's quantum, so the voxels
+/// held a 2 m cube at 35 degrees while it stood at 59, at rest and for ever - gi.cascades_asan case 12), a typed 30 -> 40
+/// degree turn of the same cube (4.2 cm, under its 4.4 cm quantum), an L turned 180 degrees about its box's centre (the
+/// same box to the float, a different shadow). EXACT for any affine change: every point of the object lies in its LOCAL
+/// box, a point's displacement between the two world transforms is affine in the point, and the largest component of
+/// an affine function over a box is taken at a corner - so the eight corners carried by the recorded and the current
+/// transform bound every point's move. True when one corner moved `quantum` or more on an axis.
+inline bool localBoxCornersMoved(const Ogre::Aabb &local, const Ogre::Matrix4 &before, const Ogre::Matrix4 &after,
+                                 Ogre::Real quantum) {
+    if (before == after) return false;
+    const Ogre::Vector3 c = local.mCenter, h = local.mHalfSize;
+    for (int k = 0; k < 8; ++k) {
+        const Ogre::Vector3 p(c.x + ((k & 1) ? h.x : -h.x), c.y + ((k & 2) ? h.y : -h.y), c.z + ((k & 4) ? h.z : -h.z));
+        const Ogre::Vector3 d = after.transformAffine(p) - before.transformAffine(p);
+        if (std::abs(d.x) >= quantum || std::abs(d.y) >= quantum || std::abs(d.z) >= quantum) return true;
+    }
+    return false;
 }
 /// THE NEAR PLANE OF EVERY POINT/SPOT SHADOW CAMERA. Unset, Ogre falls back to
 /// the VIEWER's near clip (Light::_deriveShadowNearClipDistance), so the same
@@ -5206,6 +5229,14 @@ private:
         /// maps, so a walk is a vector of pointers and no lookups.
         struct ScanRec {
             Ogre::Aabb          giBox, probeBox, shadowBox, decalBox;
+            /// The world transform each half's box was recorded at (localBoxCornersMoved: a move inside the box) - the
+            /// GI half's (its voxel and its probe-only branches are one item's, never both) and the caster half's, each
+            /// its own read for the reason the boxes are (the two walks read the transform two different ways).
+            Ogre::Matrix4       giXform = Ogre::Matrix4::IDENTITY, shadowXform = Ogre::Matrix4::IDENTITY;
+            /// WHAT THE LAST GI WALK SAW (REST IS EXACT, walkItems): an item off its record by less than the quantum is
+            /// read again by the next walk, and marked once if it has not changed since this one (it came to rest).
+            Ogre::Aabb          giSeenBox;
+            Ogre::Matrix4       giSeenXform = Ogre::Matrix4::IDENTITY;
             const Ogre::Item   *shadowItem = nullptr;
             unsigned long long  shadowPose = 0;
             Ogre::uint32        shadowChannels = 0;
