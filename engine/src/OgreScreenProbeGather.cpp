@@ -196,12 +196,9 @@ struct GatherParams {
     float knobs2[4] = {};
     float knobs3[4] = {};
     float plane[4] = {};
-    float skyColour[4] = {};
     float viewAxisX[4] = {};
     float viewAxisY[4] = {};
     float viewAxisZ[4] = {};
-    float voxelOrigin[kGatherMaxCascades][4] = {};
-    float voxelInvSize[kGatherMaxCascades][4] = {};
     float knobs4[4] = {};
     float prevCamPos[4] = {};
     float prevRayTL[4] = {};
@@ -209,13 +206,9 @@ struct GatherParams {
     float prevRayDown[4] = {};
     float prevFwd[4] = {};
     float knobs5[4] = {};
-    float cards[4] = {};
     float knobs6[4] = {};
     /// THE HIT RECORD (PHOTON-HIT-SHADE-1; jah_probe_params.glsl's hitList,
     /// hitSun, hitSun2).
-    float hitList[4] = {};
-    float hitSun[4] = {};
-    float hitSun2[4] = {};
     /// THE SECOND EYE (PHOTON-GA-VR; jah_probe_params.glsl's `stereo` block):
     /// x = 1 stereo, y = one eye's probe columns (zw unused); then the right
     /// eye's five vectors, now and the previous frame's.
@@ -242,9 +235,6 @@ struct GatherParams {
     /// THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): x, y = the hit table's
     /// address (float bits; 0 = none), z = 1 when the texture pool is bound, w = 1 when the
     /// cloud layer shades the sun; then the cloud shadow's map and sun (jah_cloud_shadow.glsl).
-    float hitTable[4] = {};
-    float cloudMap[4] = {};
-    float cloudSun[4] = {};
     /// THE IRRADIANCE FIELD, the integrate's fallback (PHOTON-7 stage 7, 7-2; jah_probe_params.glsl): its render
     /// block for an identity view (24 floats: three world-to-grid rows, the probe strides, the two atlases), the
     /// window word and counts (w = 1: bound and composed), and the environment's SH (C0 .. C8 in xyz, world axes).
@@ -255,6 +245,8 @@ struct GatherParams {
     /// ends; the prefiltered levels (the first, the step, the count).
     float rough[4] = {};
     float roughLevels[4] = {};
+    /// THE HIT SET'S UNIFORMS (PHOTON-7 stage 10, 10-2: hitSetParams; jah_probe_params.glsl's last member)
+    HitSetParams hit;
 };
 static_assert(sizeof(GatherParams) % 16u == 0u, "the params block is whole vec4s (std140)");
 
@@ -1512,7 +1504,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                       : float(v.restFrames ? kRestSequenceBase + std::min(in.tuning.restSeed, 255u) * 4096u +
                                                  v.restFrames   // a rest mean holds by 4097: < 2^21, exact
                                            : (v.frame & 0xFFFFu));
-    pp.knobs[3] = float(in.hits.cascadeCount);
     // THE RAY'S START: THE ORIGIN LAW (PHOTON-7 stage 6, READ_A W2, READ_B F3 - one law for every ray, Types.h
     // rayOriginDrawnFootprints / jah_ray_origin.glsl) - off the probe's DRAWN surface along its geometric normal by the
     // point's float bound plus the drawn surface's bound against level 0 in full-resolution footprints at the probe's
@@ -1521,7 +1512,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // start lifted 4 cm measured the irradiance 4 cm up - +7 % at a floating panel's foot, -11 % at 1.6 m).
     pp.knobs2[0] = in.tuning.classOff ? 1.0f : 0.0f;   // the class out of the history test (a test door)
     pp.knobs2[1] = std::max(0.0f, in.drawnCutFootprints);
-    pp.knobs2[2] = in.hits.sky ? 1.0f : 0.0f;
     pp.knobs2[3] = float(octRes);
     pp.knobs3[0] = float(v.uniformProbes);
     pp.knobs3[1] = float(adaptiveCap);
@@ -1545,22 +1535,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // w: 0 the grid's one offset a frame (every cell's probe at it; the integrate's bilinear on the shifted grid),
     // 1 the centre (jitterOff)
     pp.plane[3] = in.tuning.jitterOff ? 1.0f : 0.0f;
-    for (int i = 0; i < 3; ++i) pp.skyColour[i] = std::max(0.0f, in.hits.skyColour[i]);
-    for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
-        const unsigned src = c < in.hits.cascadeCount ? c : (in.hits.cascadeCount ? in.hits.cascadeCount - 1u : 0u);
-        const bool have = in.hits.cascadeCount != 0u;
-        const float sx = have ? in.hits.voxelSize[src][0] : 1.0f;
-        const float sy = have ? in.hits.voxelSize[src][1] : 1.0f;
-        const float sz = have ? in.hits.voxelSize[src][2] : 1.0f;
-        pp.voxelOrigin[c][0] = have ? in.hits.voxelOrigin[src][0] : 0.0f;
-        pp.voxelOrigin[c][1] = have ? in.hits.voxelOrigin[src][1] : 0.0f;
-        pp.voxelOrigin[c][2] = have ? in.hits.voxelOrigin[src][2] : 0.0f;
-        pp.voxelOrigin[c][3] = 0.0f;   // padding (the per-cascade multiplier, deleted: the voxels hold radiance)
-        pp.voxelInvSize[c][0] = sx > 0.0f ? 1.0f / sx : 0.0f;
-        pp.voxelInvSize[c][1] = sy > 0.0f ? 1.0f / sy : 0.0f;
-        pp.voxelInvSize[c][2] = sz > 0.0f ? 1.0f / sz : 0.0f;
-        pp.voxelInvSize[c][3] = have ? in.hits.voxelCell[src] : 1.0f;
-    }
     // PHOTON-GATHER-1b: the SH bands the integrate evaluates (9 unless the
     // measurement arm asks for 4), the weight floor, the filter on or off.
     pp.knobs4[0] = in.tuning.shBands == 4u ? 4.0f : 9.0f;
@@ -1630,34 +1604,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             geomSlots = uint32_t(in.hits.geomRowOfSlot->size());
         }
     }
-    // BOUND WHENEVER THE CACHE IS BUILT, with no card resident too (PHOTON-7 stage 5, 5-2): the hits' demand stamps
-    // are what makes a card resident at all (HitSetSources: slots only where every table and layer is there).
-    const bool cardsBound = in.hits.cardsBound();
-    pp.cards[0] = cardsBound ? float(in.hits.cardSlots) : 0.0f;
-    pp.cards[1] = cardsBound ? float(in.hits.cardRecords) : 0.0f;
-    pp.cards[2] = 0.0f;   // (the card read's footprint gate is deleted: PHOTON-7 stage 6)
-    pp.cards[3] = float(geomSlots);
-    // THE HIT RECORD (PHOTON-HIT-SHADE-1): the list the tier bound, the sun ray.
-    pp.hitList[0] = float(in.hits.hit.capacity);
-    pp.hitList[1] = float(in.hits.hit.width);
-    pp.hitList[2] = float(in.hits.hit.instanceEntries);
-    pp.hitList[3] = in.hits.hit.on ? 1.0f : 0.0f;
-    pp.hitSun[0] = in.hits.hit.toSun[0];
-    pp.hitSun[1] = in.hits.hit.toSun[1];
-    pp.hitSun[2] = in.hits.hit.toSun[2];
-    pp.hitSun[3] = in.hits.hit.sun ? 1.0f : 0.0f;
-    pp.hitSun2[0] = float(in.hits.hit.sunMask);
-    pp.hitSun2[1] = 0.0f;   // unused: a near hit's surface term is 0 (the one origin law)
-    pp.hitSun2[2] = in.hits.hit.sunRange;
-    pp.hitSun2[3] = in.hits.hit.farLift;   // farOverlap (the drift law's gap): a far copy's hit
+    // THE HIT SET'S UNIFORMS (the one function: the cascades, the sky, the cards' counts, the geometric normal's rows,
+    // the hit list and its sun ray, the tables, the hit's own surface)
+    hitSetParams(in.hits, geomSlots, pp.hit);
     {
-        const uint32_t hlo = uint32_t(in.hits.hitTable & 0xFFFFFFFFu), hhi = uint32_t(in.hits.hitTable >> 32u);
-        std::memcpy(&pp.hitTable[0], &hlo, sizeof(hlo));
-        std::memcpy(&pp.hitTable[1], &hhi, sizeof(hhi));
-        pp.hitTable[2] = in.hits.hitPool ? 1.0f : 0.0f;
-        pp.hitTable[3] = in.hits.cloudField ? 1.0f : 0.0f;
-        std::memcpy(pp.cloudMap, in.hits.cloudMap, sizeof(pp.cloudMap));
-        std::memcpy(pp.cloudSun, in.hits.cloudSun, sizeof(pp.cloudSun));
         // THE IRRADIANCE FIELD, composed by the integrate (PHOTON-7 stage 7, 7-2; jah_probe_params.glsl): the block,
         // the window and counts, w = 1 bound and composed
         const bool field = in.fieldIrradiance && in.fieldDepth;
@@ -1679,12 +1629,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // THE QUADRATURE DOOR (a test door): the filtered map kept in the layer after the levels (only where the targets
     // were made with it), 2 = the brute-force read over it
     pp.roughLevels[3] = v.prefilteredLayers > kRoughSpecLevels ? float(std::min(in.roughQuadrature, 2u)) : 0.0f;
-        const uint32_t lo = uint32_t(in.hits.alphaTable & 0xFFFFFFFFu), hi = uint32_t(in.hits.alphaTable >> 32u);
-        std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
-        std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
     }
     pp.alpha[2] = mHost.gatherDecodeHitsArm() ? 1.0f : 0.0f;   // the arm "gather.decodeHits"
-    pp.alpha[3] = in.hits.movers ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
     // THE SECOND EYE (PHOTON-GA-VR): the shape, and the right eye's basis now and
     // before (written, never read, with one eye).
     pp.stereo[0] = v.stereo ? 1.0f : 0.0f;

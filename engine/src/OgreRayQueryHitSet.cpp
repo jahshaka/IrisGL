@@ -6,6 +6,9 @@
 
 #include "ScreenProbeGather.h"
 
+#include <algorithm>
+#include <cstring>
+
 #include <OgreDescriptorSetTexture.h>
 #include <OgreGpuProgram.h>
 #include <OgreDescriptorSetUav.h>
@@ -177,6 +180,48 @@ bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots
     entry(s.pool, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1u).pImageInfo = &mPool;
     entry(s.cloud, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1u).pImageInfo = &mCloud;
     return true;
+}
+
+void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &out) {
+    out = HitSetParams();
+    // THE CASCADES, every slot a shader indexes: past the chain's length the last cascade's (none: the unit box)
+    const unsigned n = src.cascadeCount;
+    for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
+        const unsigned from = c < n ? c : (n ? n - 1u : 0u);
+        for (int k = 0; k < 3; ++k) {
+            out.voxelOrigin[c][k] = n ? src.voxelOrigin[from][k] : 0.0f;
+            const float size = n ? src.voxelSize[from][k] : 1.0f;
+            out.voxelInvSize[c][k] = size > 0.0f ? 1.0f / size : 0.0f;
+        }
+        out.voxelInvSize[c][3] = n ? src.voxelCell[from] : 1.0f;
+    }
+    out.counts[0] = float(n);
+    out.counts[1] = src.sky ? 1.0f : 0.0f;
+    out.counts[2] = float(geomSlots);
+    out.counts[3] = src.movers ? 1.0f : 0.0f;
+    // the cube's gain, or the flat environment with no cube (jah_rq_hit.glsl's JAH_SKY_COLOUR contract)
+    for (int i = 0; i < 3; ++i) out.skyColour[i] = std::max(0.0f, src.skyColour[i]);
+    out.cards[0] = src.cardsBound() ? float(src.cardSlots) : 0.0f;
+    out.cards[1] = src.cardsBound() ? float(src.cardRecords) : 0.0f;
+    // THE HIT RECORD (PHOTON-HIT-SHADE-1): the job's list and the sun ray of its hits
+    out.hitList[0] = float(src.hit.capacity);
+    out.hitList[1] = float(src.hit.width);
+    out.hitList[2] = float(src.hit.instanceEntries);
+    out.hitList[3] = src.hit.on ? 1.0f : 0.0f;
+    for (int i = 0; i < 3; ++i) out.hitSun[i] = src.hit.toSun[i];
+    out.hitSun[3] = src.hit.sun ? 1.0f : 0.0f;
+    out.hitSun2[0] = float(src.hit.sunMask);
+    out.hitSun2[1] = 0.0f;   // unused: a near hit's surface term is 0 (the one origin law)
+    out.hitSun2[2] = src.hit.sunRange;
+    out.hitSun2[3] = src.hit.farLift;
+    // the two tables' device addresses, bit-copied
+    const uint32_t a[4] = { uint32_t(src.alphaTable & 0xFFFFFFFFu), uint32_t(src.alphaTable >> 32u),
+                            uint32_t(src.hitTable & 0xFFFFFFFFu), uint32_t(src.hitTable >> 32u) };
+    std::memcpy(out.tables, a, sizeof(a));
+    out.surface[0] = src.hitPool ? 1.0f : 0.0f;
+    out.surface[1] = src.cloudField ? 1.0f : 0.0f;
+    std::memcpy(out.cloudMap, src.cloudMap, sizeof(out.cloudMap));
+    std::memcpy(out.cloudSun, src.cloudSun, sizeof(out.cloudSun));
 }
 
 void hitSetTransitions(Ogre::BarrierSolver &solver, Ogre::ResourceTransitionArray &trans, const HitSetSources &src) {

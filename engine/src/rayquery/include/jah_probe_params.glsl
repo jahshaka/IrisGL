@@ -20,6 +20,8 @@ const int kMaxCascades = 4;
 const int kOctResMax = 8;
 #include "jah_atlas_sample.glsl"   // kAtlasNoSample
 
+#define JAH_HIT_PARAMS p.hit
+#include "jah_rq_hit_params.glsl"
 layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 {
 	/// xyz = the camera in world space, w = 1 perspective / 0 orthographic.
@@ -62,15 +64,12 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// cell's centre; 0 = the grid's one jitter offset a frame (every cell's probe at it).
 	vec4 plane;
 	/// The colour an escaping ray reads when no sky cubemap is bound.
-	vec4 skyColour;
 	/// The VIEW space's three axes in world space.
 	vec4 viewAxisX;
 	vec4 viewAxisY;
 	vec4 viewAxisZ;
 	/// Per cascade: xyz = the voxel box's world origin, w padding (the voxels hold radiance).
-	vec4 voxelOrigin[kMaxCascades];
 	/// Per cascade: xyz = 1 / the box's world size, w = one cell in world units.
-	vec4 voxelInvSize[kMaxCascades];
 	/// PHOTON-GATHER-1b. x = the SH bands the integrate evaluates (9 = L0..L2,
 	/// 4 = L0..L1: the measurement arm, GatherTuning::shBands), y = the weight
 	/// floor under which a pixel is left to the fallback (w = 0), z = the filter in probe
@@ -106,7 +105,6 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// PHOTON-7 stage 6), w = the per-slot geometry-row entries
 	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
 	/// Read by the trace alone.
-	vec4 cards;
 	/// THE REST MEAN (PHOTON-GATHER-1d, rq_probe_integrate.comp): x = the rest
 	/// frame k (0 = the camera, the lighting or the scene moved this frame — not
 	/// at rest; k >= 1 = the k-th consecutive frame at rest), y = K, the rest
@@ -121,9 +119,6 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// the sun, w = 1 when the pass has one. hitSun2: x = the sun ray's TLAS mask,
 	/// y unused (a near hit is ON level 0: its sun leg's surface term is 0, the one origin law), z = its length,
 	/// w = a FAR copy's hit's surface term (farOverlap: the drift law's coarse-vs-fine gap).
-	vec4 hitList;
-	vec4 hitSun;
-	vec4 hitSun2;
 	/// THE SECOND EYE (PHOTON-GA-VR, LAYERED-STEREO-1). x = 1 when the target
 	/// carries TWO EYES, one per LAYER of every full-resolution image here (the
 	/// dispatch's z, or a probe cell's eye); then the camera's five vectors above
@@ -166,9 +161,6 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): xy = the hit table's device
 	/// address (float bits; 0 = none), z = 1 the texture pool is bound, w = 1 the cloud layer
 	/// shades the sun; then the cloud shadow's map and sun (jah_cloud_shadow.glsl).
-	vec4 hitTable;
-	vec4 cloudMap;
-	vec4 cloudSun;
 	/// THE IRRADIANCE FIELD, THE FALLBACK OF THE PIXELS NO PROBE ANSWERS (PHOTON-7 stage 7, 7-2;
 	/// rq_probe_integrate.comp, jah_field_read.glsl): its render block as PhotonIrradianceField::
 	/// fillConstBufferData writes it for an IDENTITY view - three rows WORLD to grid, then ( Nx, Nx * Ny, -, - ), the
@@ -195,6 +187,8 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// gather.roughQuadrature): >= 1 the filtered map itself is stored in the layer after the levels, 2 the integrate
 	/// reads the lobe by brute force over it (the split sum's own error, gi.rough_lobe_quadrature); 0 shipped.
 	vec4 roughLevels;
+	// THE HIT SET'S UNIFORMS (PHOTON-7 stage 10, 10-2: the one text, jah_rq_hit_params.glsl)
+	JahHitParams hit;
 } p;
 
 /// ONE EYE'S IMAGE — rq_reflect.comp's `EyeImage`: where the eye is and the

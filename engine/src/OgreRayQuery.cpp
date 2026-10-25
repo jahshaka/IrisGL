@@ -5381,7 +5381,7 @@ bool OgreEngine::cardReadParity(Scene *scene, const std::vector<CardReadQuery> &
 
 namespace {
 
-/// The parameter block, std140, mirroring rq_reflect.comp's `Params` member for
+/// The parameter block, std140, mirroring jah_reflect_params.glsl's `Params` member for
 /// member. A mismatch here is silent and total, so the order is the shader's
 /// order and nothing is reordered for packing (every member is a vec4 or an
 /// array of them, which std140 lays out identically to C).
@@ -5395,12 +5395,9 @@ struct ReflectParams {
     float resolution[4] = {};
     float knobs[4] = {};
     float knobs2[4] = {};
-    float skyColour[4] = {};
     float viewAxisX[4] = {};
     float viewAxisY[4] = {};
     float viewAxisZ[4] = {};
-    float voxelOrigin[kMaxReflectCascades][4] = {};
-    float voxelInvSize[kMaxReflectCascades][4] = {};
     float prevCamPos[4] = {};
     float prevRayTL[4] = {};
     float prevRayRight[4] = {};
@@ -5423,31 +5420,17 @@ struct ReflectParams {
     float prevRayRight2[4] = {};
     float prevRayDown2[4] = {};
     float prevFwd2[4] = {};
-    /// THE SURFACE CACHE (PHOTON-CARDS-2): x = the instance-table entries bound
-    /// (0 = no cache — the card read declines every hit), y = the card records,
-    /// z: unused (the footprint gate is deleted, PHOTON-7 stage 6), w = the
-    /// per-slot geometry-row entries bound (0 = the hit's normal is the ray's).
-    float cards[4] = {};
-    /// THE HIT RECORD (PHOTON-HIT-SHADE-1; rq_reflect.comp's hitList, hitSun,
-    /// hitSun2).
-    float hitList[4] = {};
-    float hitSun[4] = {};
-    float hitSun2[4] = {};
     /// A MOVING OBJECT (REFLECT-MOVERS-1; rq_reflect.comp's `motion`): x = 1 when
     /// the view's id image is bound at binding 38, yz = its size.
     float motion[4] = {};
-    /// THE ALPHA TABLE (REFLECT-MOVERS-2): xy = its device address, bit-copied.
+    /// z = THE RAY ORIGIN'S POINT TERM (jah_ray_origin.glsl); xyw unused (the alpha table and the movers' flag are the hit
+    /// set's: `hit`).
     float alpha[4] = {};
     /// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong.
     float fog[8][4] = {};
     /// THE METAL HIT'S ROUTE (REFLECT-FIX-1): x = the reflector's perceptual roughness
     /// below which a hit on a metal is decoded (the arm "reflect.metalDecode").
     float metal[4] = {};
-    /// THE HIT'S OWN SURFACE (FAR-SUN-2; rq_reflect.comp's hitTable, cloudMap, cloudSun): the
-    /// gather's three (OgreScreenProbeGather.cpp's GatherParams), the same meaning.
-    float hitTable[4] = {};
-    float cloudMap[4] = {};
-    float cloudSun[4] = {};
     /// THE REST BLOCK (PHOTON-2 round 2): [0] = 1 = the GI freeze (the arm "gi.freeze": M1's measuring arm).
     float rest[4] = {};
     /// THE MOVED INSTANCES' SWEPT BOXES (G6): [0] = how many follow (<= kReflectRestMovers); box i = [2i] min,
@@ -5471,6 +5454,8 @@ struct ReflectParams {
     /// pass fills (last frame's count, in the other, decides the path), [1] the tail's rays a frame (the rest's count /
     /// kReflectRestTailDivisor), [2] L, [3] 1 when the compact pass is dispatched this frame.
     float compact[4] = {};
+    /// THE HIT SET'S UNIFORMS (PHOTON-7 stage 10, 10-2: hitSetParams; jah_reflect_params.glsl's last member)
+    HitSetParams hit;
 };
 /// The display slope table's log axis (jah_reflect_rest.glsl's twins): ln 1e-4 .. ln 100 in 63 steps.
 constexpr double kDisplayLnMin = -9.210340371976184;
@@ -6297,7 +6282,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                  : 0.0f,
         cam->getFarClipDistance());
     pp.knobs[2] = float(rv.frame & 0xFFFFu);
-    pp.knobs[3] = float(voxCount);
     // THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6): the screen trace (its march: the chain's length, thickness, steps
     // and phase rule - the raster march's own numbers, PostFxDesc::ssr*), the screen alone, and the FAR COPIES' query
     // for an escape (from the near length less the far copies' widest hand-over gap to the far plane: the gather's
@@ -6322,7 +6306,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // the stock thresholds both take - over this view's switch band, x the bake's drift ratio, in sample footprints;
     // rq_reflect.comp turns it into metres at the point's Euclidean distance from its own eye (jah_ray_origin.glsl).
     pp.knobs2[1] = drawnFootprintsOf(scene, chainD.lodHysteresis);
-    pp.knobs2[2] = hs.sky ? 1.0f : 0.0f;
     // THE MOVING WINDOW (kReflectMaxFrames; the measuring arm reflect.window N, every reader with it)
     const unsigned reflectWindow = std::lround(armValue(ArmId::ReflectWindow)) > 0
                                        ? unsigned(std::lround(armValue(ArmId::ReflectWindow))) : kReflectMaxFrames;
@@ -6350,25 +6333,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.rest[1] = restReference ? 1.0f : 0.0f;   // THE REST'S 4,096-SAMPLE REFERENCE (R1 (f)'s measuring arm)
     // THE REST'S RAYS A FRAME (commit 8: the trace's batch at rest, GiQualityFacts::reflectRestRays)
     pp.rest[2] = float(std::max(1u, giQualityFacts(scene->giParams().quality).reflectRestRays));
-    // The cube's gain, or the flat environment with no cube (jah_rq_hit.glsl's
-    // JAH_SKY_COLOUR contract).
-    for (int i = 0; i < 3; ++i) pp.skyColour[i] = hs.skyColour[i];
-    for (unsigned c = 0; c < kMaxReflectCascades; ++c) {
-        const unsigned src = c < voxCount ? c : (voxCount ? voxCount - 1u : 0u);
-        const Ogre::Vector3 sz = voxCount ? Ogre::Vector3(hs.voxelSize[src][0], hs.voxelSize[src][1], hs.voxelSize[src][2])
-                                          : Ogre::Vector3(1.0f);
-        const Ogre::Vector3 og = voxCount
-                                     ? Ogre::Vector3(hs.voxelOrigin[src][0], hs.voxelOrigin[src][1], hs.voxelOrigin[src][2])
-                                     : Ogre::Vector3::ZERO;
-        pp.voxelOrigin[c][0] = og.x; pp.voxelOrigin[c][1] = og.y; pp.voxelOrigin[c][2] = og.z;
-        // `.w` is padding: it held the cascade's radiance multiplier (DRAG-1), which undid the per-box
-        // normalisation PHOTON-7 stage 1 deleted - the voxels hold radiance.
-        pp.voxelOrigin[c][3] = 0.0f;
-        pp.voxelInvSize[c][0] = sz.x > 0.0f ? 1.0f / sz.x : 0.0f;
-        pp.voxelInvSize[c][1] = sz.y > 0.0f ? 1.0f / sz.y : 0.0f;
-        pp.voxelInvSize[c][2] = sz.z > 0.0f ? 1.0f / sz.z : 0.0f;
-        pp.voxelInvSize[c][3] = voxCount ? hs.voxelCell[src] : 1.0f;
-    }
     // NO PREVIOUS FRAME — OR A DIFFERENT SHAPE OF ONE. A zero forward makes
     // every reprojection's `z` zero, which the shader rejects, so the first
     // frame after a resize, a scene bind or a workspace rebuild starts its mean
@@ -6416,9 +6380,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                    photon->getNumSlices() != eyeLayers))
         photon = nullptr;
     pp.stereo[2] = photon ? 1.0f : 0.0f;
-    pp.cards[0] = cardsBound ? float(hs.cardSlots) : 0.0f;
-    pp.cards[1] = cardsBound ? float(hs.cardRecords) : 0.0f;
-    pp.cards[2] = 0.0f;   // (the card read's footprint gate is deleted: PHOTON-7 stage 6, law L5)
     // ---- THE HIT'S GEOMETRIC NORMAL: the per-slot row table (a copy per frame in flight) of the hit set's rows (the
     // GPU scene's, flushed by hitSetOf).
     detail::GpuScene &gpuScn = scene->gpuScene();
@@ -6434,20 +6395,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         else
             std::memcpy(rb.mapped, sa.geomRowOfSlot.data(), size_t(want));
     }
-    pp.cards[3] = float(geomSlots);
-    // THE HIT RECORD (PHOTON-HIT-SHADE-1): the list the decode shades, the sun ray.
-    pp.hitList[0] = float(hit.capacity);
-    pp.hitList[1] = float(hit.width);
-    pp.hitList[2] = float(hit.instanceEntries);
-    pp.hitList[3] = hit.on ? 1.0f : 0.0f;
-    pp.hitSun[0] = hit.toSun[0];
-    pp.hitSun[1] = hit.toSun[1];
-    pp.hitSun[2] = hit.toSun[2];
-    pp.hitSun[3] = hit.sun ? 1.0f : 0.0f;
-    pp.hitSun2[0] = float(hit.sunMask);
-    pp.hitSun2[1] = 0.0f;   // unused: a near hit's surface term is 0
-    pp.hitSun2[2] = hit.sunRange;
-    pp.hitSun2[3] = hit.farLift;
+    // THE HIT SET'S UNIFORMS (the one function: the cascades, the sky, the cards' counts, the geometric normal's rows,
+    // the hit list and its sun ray, the tables, the hit's own surface)
+    hitSetParams(hs, geomSlots, pp.hit);
     // THE ARM THAT RE-MEASURES THE CLAIM (the shape of "reflect.monoEyes" beside it):
     // the arm "reflect.motion" = 0 switches EVERY branch of REFLECT-MOVERS-1 off at once —
     // the id image withheld (a surface's own motion), motion.w = 0 (a hit's motion,
@@ -6491,25 +6441,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                    : (posedOn && rv.framesSincePoseMoved <= 2u) ? 3.0f
                    : rv.framesSinceMoverMoved <= 2u ? 2.0f
                                                     : 1.0f;
-    {
-        const uint64_t a = hs.alphaTable;
-        const uint32_t lo = uint32_t(a & 0xFFFFFFFFu), hi = uint32_t(a >> 32u);
-        std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
-        std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
-    }
     pp.metal[0] = mArms ? float(mArms->value(ArmId::ReflectMetalDecode)) : float(kReflectMetalDecodeRoughness);
-    // THE HIT'S OWN SURFACE (FAR-SUN-2): the hit table, the texture pool, the cloud shadow.
-    {
-        const uint64_t a = hs.hitTable;
-        const uint32_t lo = uint32_t(a & 0xFFFFFFFFu), hi = uint32_t(a >> 32u);
-        std::memcpy(&pp.hitTable[0], &lo, sizeof(lo));
-        std::memcpy(&pp.hitTable[1], &hi, sizeof(hi));
-        pp.hitTable[2] = hs.hitPool ? 1.0f : 0.0f;
-        pp.hitTable[3] = hs.cloudField ? 1.0f : 0.0f;
-        std::memcpy(pp.cloudMap, hs.cloudMap, sizeof(pp.cloudMap));
-        std::memcpy(pp.cloudSun, hs.cloudSun, sizeof(pp.cloudSun));
-    }
-    pp.alpha[3] = hs.movers ? 1.0f : 0.0f;   // MOVER-OCCLUSION-1: the hit's mover gate runs
     pp.alpha[2] = pointSnapKnob();   // the ray origin's depth-rebuilt point term (READ_B F5 (b))
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
@@ -6577,20 +6509,20 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const auto foldF = [&](float v) { foldBytes(&v, sizeof(v)); };
         fold4(pp.projParams);
         fold4(pp.resolution);
-        foldF(pp.knobs[0]); foldF(pp.knobs[1]); foldF(pp.knobs[3]);
-        foldF(pp.knobs2[1]); foldF(pp.knobs2[2]); foldF(pp.knobs2[3]);
-        fold4(pp.skyColour);
+        foldF(pp.knobs[0]); foldF(pp.knobs[1]);
+        foldF(pp.knobs2[1]); foldF(pp.knobs2[3]);
         fold4(pp.viewAxisX); fold4(pp.viewAxisY); fold4(pp.viewAxisZ);
-        foldBytes(pp.voxelOrigin, sizeof(pp.voxelOrigin));
-        foldBytes(pp.voxelInvSize, sizeof(pp.voxelInvSize));
         foldF(pp.stereo[0]); foldF(pp.stereo[2]); foldF(pp.stereo[3]);
-        fold4(pp.cards);
-        foldF(pp.hitList[1]); foldF(pp.hitList[2]); foldF(pp.hitList[3]);
-        fold4(pp.hitSun); fold4(pp.hitSun2);
+        {
+            // THE HIT SET'S UNIFORMS, all but the list's capacity (as before: the list grows under a rest)
+            HitSetParams h = pp.hit;
+            h.hitList[0] = 0.0f;
+            foldBytes(&h, sizeof(h));
+        }
         foldF(pp.motion[0]); foldF(pp.motion[1]); foldF(pp.motion[2]);
         fold4(pp.alpha);
         foldBytes(pp.fog, sizeof(pp.fog));
-        fold4(pp.metal); fold4(pp.hitTable); fold4(pp.cloudMap); fold4(pp.cloudSun);
+        fold4(pp.metal);
         // (the rest block's freeze and reference arms; NOT its ray count, rest.z - the rest's own budget, which moves
         // inside a rest by design - nor rest.w, unused)
         foldF(pp.rest[0]); foldF(pp.rest[1]);
@@ -9644,18 +9576,9 @@ void OgreScene::cardMoverTimes(float &traceMs, float &stillMs) {
 // the cache's Gather layer, before the relight that reads it.
 namespace {
 struct CardGatherParams {
-    float voxelOrigin[kGatherMaxCascades][4] = {};
-    float voxelInvSize[kGatherMaxCascades][4] = {};
-    float knobs[4] = {};
-    float knobs2[4] = {};
-    float skyColour[4] = {};
-    float cards[4] = {};
-    float hitList[4] = {};
-    float alpha[4] = {};
-    float hitTable[4] = {};
-    float cloudMap[4] = {};
-    float cloudSun[4] = {};
-    float hitSun[4] = {};
+    HitSetParams hit;      ///< THE HIT SET'S UNIFORMS (hitSetParams; rq_card_gather.comp's first member)
+    float knobs[4] = {};   ///< the rays a texel, the reach, -, the ray mask
+    float knobs2[4] = {};  ///< -, the records
 };
 /// The job's own five (the params, the records, the Gather layer, the counts; the read lists at 37) and the hit set at 0
 /// and 5..36.
@@ -9836,45 +9759,18 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
             std::memcpy(rb.mapped, hs.geomRowOfSlot->data(), size_t(want));
     }
 
-    // ---- THE PARAMETERS
+    // ---- THE PARAMETERS: the hit set's (the one function), then this job's - the hit's own sun rays against the
+    // still casters to the cards' sun range, no mover gate (rq_card_gather.comp's mask law)
     CardGatherParams pp{};
-    for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
-        const unsigned src = c < hs.cascadeCount ? c : (hs.cascadeCount ? hs.cascadeCount - 1u : 0u);
-        const bool have = hs.cascadeCount != 0u;
-        for (int k = 0; k < 3; ++k) {
-            pp.voxelOrigin[c][k] = have ? hs.voxelOrigin[src][k] : 0.0f;
-            const float sz = have ? hs.voxelSize[src][k] : 1.0f;
-            pp.voxelInvSize[c][k] = sz > 0.0f ? 1.0f / sz : 0.0f;
-        }
-        pp.voxelInvSize[c][3] = have ? hs.voxelCell[src] : 1.0f;
-    }
+    hitSetParams(hs, geomSlots, pp.hit);
+    pp.hit.hitSun2[0] = float(kRayMaskStillCaster);
+    pp.hit.hitSun2[2] = kCardGatherSunRange;
+    pp.hit.hitSun2[3] = 0.0f;
+    pp.hit.counts[3] = 0.0f;
     pp.knobs[0] = float(std::max(job.rays, 1u));
     pp.knobs[1] = std::max(job.reach, 0.0f);
-    pp.knobs[2] = float(hs.cascadeCount);
     pp.knobs[3] = float(kRayMaskStill);   // the still world (rq_card_gather.comp's mask law)
-    pp.knobs2[0] = hs.sky ? 1.0f : 0.0f;
     pp.knobs2[1] = float(count);
-    pp.knobs2[2] = float(kRayMaskStillCaster);
-    pp.knobs2[3] = kCardGatherSunRange;
-    for (int i = 0; i < 3; ++i) pp.skyColour[i] = std::max(0.0f, hs.skyColour[i]);
-    pp.cards[0] = float(hs.cardSlots);
-    pp.cards[1] = float(hs.cardRecords);
-    pp.cards[3] = float(geomSlots);
-    pp.hitList[2] = float(hs.hit.instanceEntries);   // the instance table's entries; the list itself is off (w 0)
-    {
-        const uint32_t lo = uint32_t(hs.alphaTable & 0xFFFFFFFFu), hi = uint32_t(hs.alphaTable >> 32u);
-        std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
-        std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
-    }
-    {
-        const uint32_t lo = uint32_t(hs.hitTable & 0xFFFFFFFFu), hi = uint32_t(hs.hitTable >> 32u);
-        std::memcpy(&pp.hitTable[0], &lo, sizeof(lo));
-        std::memcpy(&pp.hitTable[1], &hi, sizeof(hi));
-        pp.hitTable[2] = hs.hitPool ? 1.0f : 0.0f;
-        pp.hitTable[3] = hs.cloudField ? 1.0f : 0.0f;
-        std::memcpy(pp.cloudMap, hs.cloudMap, sizeof(pp.cloudMap));
-        std::memcpy(pp.cloudSun, hs.cloudSun, sizeof(pp.cloudSun));
-    }
     std::memcpy(v.params[ring].mapped, &pp, sizeof(pp));
     std::memcpy(v.records[ring].mapped, job.records, size_t(count) * kCardGatherRecordFloats * sizeof(float));
 

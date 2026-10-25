@@ -47,173 +47,10 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 /// the engine's tier table; the C++ side binds the innermost `count` and
 /// repeats the last one into the unused slots (a descriptor array may not have
 /// holes).
-const int kMaxCascades = 4;
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 
-layout( set = 0, binding = 1 ) uniform Params
-{
-	/// xyz = the camera in world space, w = 1 for a perspective camera and 0
-	/// for an orthographic one (the reconstruction differs — see worldAt()).
-	vec4 camPos;
-	/// The world-space ray basis: worldDir(u,v) = rayTL + rayRight*u + rayDown*v,
-	/// scaled so its component along the camera's forward axis is exactly 1.
-	/// Then `camPos + worldDir * viewDistance` is the surface. Under an
-	/// orthographic camera rayTL/rayRight/rayDown carry the image PLANE instead
-	/// (an offset, not a ray) and `fwd` is the one view direction.
-	vec4 rayTL;
-	vec4 rayRight;
-	vec4 rayDown;
-	vec4 fwd;
-	/// x = A, y = B of Camera::getProjectionParamsAB() (reverse-Z safe),
-	/// z = the far plane (the orthographic depth scale), w = the roughness
-	/// gate's FEATHER half-width (kRayReflectFeather).
-	vec4 projParams;
-	/// xy = the trace resolution in pixels, zw = the full-resolution size of
-	/// jahSsrReflection.
-	vec4 resolution;
-	/// x = the roughness gate — the PROJECT's dial, not a renderer constant:
-	/// above it the probe/field photograph is a good enough integral of a wide
-	/// lobe and a ray is spent for nothing. The transition is FEATHERED over
-	/// projParams.w either side of it. y = the ray's maximum length in
-	/// world units, z = the frame index (the sample sequence's only input),
-	/// w = how many cascades are bound.
-	vec4 knobs;
-	/// x = THE REST FRAME k, 1..N on a frame the view rests (PHOTON-2 1e, fix F1: the gather's rule — a rest mean handed
-	/// over from the frozen moving history, rq_reflect_temporal.comp), 0 while it moves, y = the
-	/// drawn surface's bound in sample footprints (Types.h rayOriginDrawnFootprints) - the RAY ORIGIN's
-	/// (jah_ray_origin.glsl, at the point's Euclidean distance from its eye),
-	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
-	/// weight (the floor on 1/n — how long the temporal mean remembers).
-	vec4 knobs2;
-	/// The colour an escaping ray reads when no sky cubemap is bound.
-	vec4 skyColour;
-	/// The VIEW space's three axes in world space (the camera's orientation as
-	/// a rotation): what turns the G-buffer's view-space normal back into one.
-	vec4 viewAxisX;
-	vec4 viewAxisY;
-	vec4 viewAxisZ;
-	/// Per cascade: xyz = the voxel box's world origin, w = the box's largest
-	/// side in world units (the cell size times the resolution).
-	vec4 voxelOrigin[kMaxCascades];
-	/// Per cascade: xyz = 1 / the voxel box's world size, w = one cell in world
-	/// units (the sample point's bias along the ray).
-	vec4 voxelInvSize[kMaxCascades];
-	/// THE PREVIOUS FRAME'S CAMERA, in exactly the same five numbers as this
-	/// frame's (camPos, rayTL, rayRight, rayDown, fwd). Not a view-projection
-	/// matrix, deliberately: inverting the basis above is the same arithmetic
-	/// forwards and backwards, so the reprojection cannot disagree with the
-	/// reconstruction about a handedness, a y-flip or a depth convention — and
-	/// each of those is a silent half-pixel-to-whole-image error that only shows
-	/// up as a smear while the camera moves.
-	vec4 prevCamPos;
-	vec4 prevRayTL;
-	vec4 prevRayRight;
-	vec4 prevRayDown;
-	vec4 prevFwd;
-	/// ---- THE SECOND EYE (lane REFLECT-VR-1, LAYERED-STEREO-1) ------------
-	/// x = 1 when this target carries TWO EYES, one per LAYER of every screen
-	/// image here (the dispatch's z). Then the five basis vectors above are the
-	/// LEFT eye's and the five below the right eye's, each over its own layer
-	/// as a 0..1 image; with x = 0 the block below is unread and the basis
-	/// above is the one camera's, exactly as before. One dispatch, one
-	/// descriptor set, one history ring: the eye is the layer (gEye).
-	///
-	/// y = THE VIEW'S AGE: how many consecutive frames this history has been
-	/// written (0 on a first frame, a resize, a scene bind): the filter's young-VIEW fade (a two-frame screenshot).
-	/// z = 1 writes THE PHOTON VIEW'S Hits overlay (binding 37, PHOTON-VIEW-1).
-	/// w = THE REST'S LENGTH N (PHOTON-2 fix F1): the frames the rest mean is handed over in, the gather's own
-	/// settleFramesOf(the reflection's 32-frame history) — after which the view holds.
-	vec4 stereo;
-	vec4 camPos2;
-	vec4 rayTL2;
-	vec4 rayRight2;
-	vec4 rayDown2;
-	vec4 fwd2;
-	vec4 prevCamPos2;
-	vec4 prevRayTL2;
-	vec4 prevRayRight2;
-	vec4 prevRayDown2;
-	vec4 prevFwd2;
-	/// ---- THE SURFACE CACHE (PHOTON-CARDS-2) ------------------------------
-	/// x = the instance-table entries bound (0 = the scene holds no cache: the
-	/// card read declines every hit and the voxels answer, as before), y = the
-	/// card records bound, z: unused (the card read's footprint gate is deleted,
-	/// PHOTON-7 stage 6), w = the per-slot geometry-row entries
-	/// bound (the hit's geometric normal; 0 = none — the reversed ray faces).
-	vec4 cards;
-	/// ---- THE HIT RECORD (PHOTON-HIT-SHADE-1) ------------------------------
-	/// hitList: x = the list's capacity in records, y = its grid width, z = the
-	/// GPU scene instance entries bound (the flags a hit reads: mover, rigged),
-	/// w = 1 when the list is bound. hitSun: xyz = towards the sun, w = 1 when the
-	/// pass has one. hitSun2: x = the sun ray's TLAS mask (the casters), y unused
-	/// (a near hit is ON level 0: its sun leg's surface term is 0, the one origin law), z = its length, w = a FAR
-	/// copy's hit's surface term (the traced set's widest coarse-vs-fine gap under the drift law, farOverlap).
-	vec4 hitList;
-	vec4 hitSun;
-	vec4 hitSun2;
-	/// ---- A MOVING OBJECT (REFLECT-MOVERS-1) --------------------------------
-	/// x = 1 when the VIEW'S ID IMAGE is bound (binding 38, the visibility
-	/// buffer's `jahAtomIds`: which slot drew each pixel) — then a pixel on a
-	/// moving slot reprojects through that slot's two poses (jah_reproject.glsl).
-	/// 0 = no id pass on this chain (a stereo chain, the split off): every
-	/// surface takes the camera path. yz = the id image's size in pixels.
-	/// w = 1 with the lane's hit-motion rules on, 2 when a mover also moved in the
-	/// last two frames (the departure rule's gate), 3 when a POSE moved in the last
-	/// two frames (SKINNED-VELOCITY-1: the pixels no moving Atom item drew are
-	/// identified through the TLAS; the arm "reflect.posed" off keeps it at 2 — the paired
-	/// cost arm); 0 = the arm "reflect.motion" off: the camera-only
-	/// history of before.
-	vec4 motion;
-	/// THE ALPHA TABLE (REFLECT-MOVERS-2, jah_rq_alpha.glsl): xy = its device
-	/// address, float bits (0 = none: the rays stay opaque). z = THE RAY ORIGIN'S POINT TERM: the rasteriser's
-	/// sub-pixel snap in pixels (jah_ray_origin.glsl jahDepthPointError; 0 = the term off, rays.originPoint 0).
-	/// w = 1: the hit's mover gate runs.
-	vec4 alpha;
-	/// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong's eight
-	/// (jah_fog_along.glsl states them).
-	vec4 fog[8];
-	/// THE METAL HIT'S ROUTE (REFLECT-FIX-1): x = the reflector's perceptual roughness
-	/// below which a hit on a metal is decoded; above it the voxel store answers it.
-	vec4 metal;
-	/// THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): xy = the hit table's device
-	/// address (float bits; 0 = none), z = 1 the texture pool is bound, w = 1 the cloud layer
-	/// shades the sun; then the cloud shadow's map and sun (jah_cloud_shadow.glsl).
-	vec4 hitTable;
-	vec4 cloudMap;
-	vec4 cloudSun;
-	/// THE REST BLOCK (PHOTON-2 round 2): x = 1 = THE GI FREEZE (the arm "gi.freeze", M1's measuring arm: the temporal
-	/// pass keeps every moving history as carried - no new sample, no clamp; a fixed estimator takes its ray;
-	/// rq_reflect_temporal.comp).
-	/// z = THE REST'S RAYS A FRAME a texel still converging traces (the trace's batch at rest): its share of the view's
-	/// rest count (OgreRayQuery.cpp kReflectRestRaysCap's note - k at the rest's start, up to 64 in the tail);
-	/// w = THE RECORD ALLOWANCE a batching texel's record run may take of the list this frame (rq_reflect.comp's record
-	/// runs: min( k_active, capacity / batching ); 0 = a record ends the batch).
-	vec4 rest;
-	/// THE REST BREAKS PER TEXEL FOR MOVERS (PHOTON-2 round 2, G6): x = how many moved instances' SWEPT BOXES follow
-	/// (their bounds this frame and last, joined; at most 16 - more moved breaks the view's rest whole, on the host);
-	/// a resting texel resumes when its ray, its lobe's mean segment or its hit's sun leg crosses one.
-	vec4 restMovers;
-	vec4 restMoverBox[32];   // per box: [2i] = min, [2i + 1] = max (xyz)
-	/// THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6): screen.x = 1 when the SCREEN TRACE runs (the chain's screen
-	/// sources are bound: PostFxDesc::reflectSources Both or Screen, a mono view), y = 1 for THE SCREEN ALONE (Screen: a
-	/// miss is no sample - no ray follows it), z = the march's step count, w = its phase rule (PostFxDesc::ssrMarchPhase);
-	/// screen2.x = the march's length (ssrMaxDistance), y = its thickness (ssrThickness), z = where the FAR COPIES' query
-	/// starts (the near length less the far copies' widest hand-over gap, the gather's rule), w = where it ends (the far
-	/// plane; 0 = no far query).
-	vec4 screen;
-	vec4 screen2;
-	/// x, y: the denoiser space's exposure (the resolve's, the temporal pass'); z = THE LOBE DRAW'S SEED OFFSET (the arm
-	/// reflect.seedOffset, 0 shipped): added to the frame index the draw takes; w = 1 under the measuring arm
-	/// reflect.flatHits (every hit answered by a constant of its instance).
-	vec4 denoiser;
-	/// (the filter's display table, beside: this pass reads none of it)
-	vec4 display[16];
-	/// THE REST'S COMPACT PATH (OgreRayQuery.cpp kReflectCompactTexels): x = the half of the list this frame fills (last
-	/// frame's count, in the other half, decides the path), y = the tail's rays a frame (the rest's count / 8), z = L,
-	/// w = 1 when the compact pass runs this frame.
-	vec4 compact;
-} p;
+#include "jah_reflect_params.glsl"
 /// THE COMPACT PASS (this module with constant 0 true): one subgroup a listed texel - its first lane the texel, the
 /// others its workers - instead of the 8 x 8 tile.
 layout( constant_id = 0 ) const bool kCompactPass = false;
@@ -346,11 +183,6 @@ layout( set = 0, binding = 49 ) uniform sampler2D ssrVelocity;
 /// below, so nothing about the descriptor set moved when the functions did
 /// (GATHER-1a; the gather traces the same cache and two consumers of one cache
 /// that can disagree about what a voxel MEANS is a defect waiting to happen).
-#define JAH_VOX_COUNT       int( p.knobs.w )
-#define JAH_VOX_ORIGIN( c )  p.voxelOrigin[c]
-#define JAH_VOX_INVSIZE( c ) p.voxelInvSize[c]
-#define JAH_SKY_ON          ( p.knobs2.z > 0.5 )
-#define JAH_SKY_COLOUR      p.skyColour.xyz
 #include "jah_rq_hit.glsl"
 
 /// THE SURFACE CACHE the hits read FIRST (PHOTON-CARDS-2, SC-1d): the card
@@ -359,8 +191,6 @@ layout( set = 0, binding = 49 ) uniform sampler2D ssrVelocity;
 // ...and the view term's five after the job's last binding (PHOTON-CARDS-5).
 #define JAH_CARD_VIEW_BINDING_BASE 31
 #include "jah_rq_card_bindings.glsl"
-#define JAH_CARD_SLOTS   uint( p.cards.x )
-#define JAH_CARD_RECORDS uint( p.cards.y )
 // A READER (PHOTON-7 stage 5, 5-2): its hits stamp the cards they read and the faces that answered none - the
 // cache's residency (jah_rq_card_bindings.glsl's demand layout); the reflection is reader 0 of the counts.
 #define JAH_CARD_DEMAND 0
@@ -371,7 +201,6 @@ layout( set = 0, binding = 49 ) uniform sampler2D ssrVelocity;
 /// (binding 20, three uvec4 lanes a row).
 layout( std430, set = 0, binding = 19 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
 layout( std430, set = 0, binding = 20 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
-#define JAH_GEOM_SLOTS uint( p.cards.w )
 #define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
 #define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
 #include "jah_rq_geom.glsl"
@@ -418,16 +247,7 @@ void photonHit( ivec2 tc, vec4 c )
 		for( int x = lo.x; x < hi.x; ++x )
 			imageStore( photonOverlay, ivec3( ivec2( x, y ), gEye ), c );
 }
-#define JAH_HIT_ON          ( p.hitList.w > 0.5 )
-#define JAH_HIT_CAPACITY    uint( p.hitList.x )
-#define JAH_HIT_LIST_W      max( uint( p.hitList.y ), 1u )
-#define JAH_HIT_INSTANCES   uint( p.hitList.z )
 #define JAH_HIT_INSTANCE( s, k ) jahHitInstances[( s ) * 10u + ( k )]
-#define JAH_HIT_SUN         p.hitSun
-#define JAH_HIT_SUN_MASK    uint( p.hitSun2.x )
-#define JAH_HIT_SUN_RANGE   p.hitSun2.z
-#define JAH_HIT_FAR_LIFT    p.hitSun2.w
-#define JAH_ALPHA_TABLE     floatBitsToUint( p.alpha.xy )
 #include "jah_rq_sun_ray.glsl"
 #include "jah_rq_hit_record.glsl"
 #define JAH_SKIN_INSTANCE( s, k ) JAH_HIT_INSTANCE( s, k )
@@ -721,12 +541,6 @@ bool screenAnswer( EyeImage e, EyeImage before, vec3 world, vec3 L, vec3 V, ivec
 // texture pool (binding 42) and the cloud layer's field (43).
 layout( set = 0, binding = 43 ) uniform sampler2DArray jahHitPool;
 layout( set = 0, binding = 44 ) uniform sampler2D jahHitCloud;
-#define JAH_HIT_TABLE       floatBitsToUint( p.hitTable.xy )
-#define JAH_HIT_POOL_ON     ( p.hitTable.z > 0.5 )
-#define JAH_HIT_CLOUD_ON    ( p.hitTable.w > 0.5 )
-#define JAH_HIT_CLOUD_MAP   p.cloudMap
-#define JAH_HIT_CLOUD_SUN   p.cloudSun
-#define JAH_HIT_MOVERS_ON ( p.alpha.w > 0.5 )
 #include "jah_rq_hit_radiance.glsl"
 // THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl, ENGINE-POLISH-PHOTON-1): the store's table, through the hit table.
 void jahCardLobeHemi( float r, out float a, out float b )
@@ -1044,7 +858,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		const float meanT = x.meanT;
 		resume = hitMoving || restSegmentMoved( origin, L, t ) ||
 				 ( meanT > 0.0 && restSegmentMoved( origin, reflect( -V, worldN ), meanT ) ) ||
-				 ( hitT < maxT && p.hitSun.w > 0.5 && restSegmentMoved( origin + L * hitT, p.hitSun.xyz, p.hitSun2.z ) );
+				 ( hitT < maxT && p.hit.hitSun.w > 0.5 && restSegmentMoved( origin + L * hitT, p.hit.hitSun.xyz, p.hit.hitSun2.z ) );
 	}
 	o.L = L; o.traced = traced; o.recN = recN; o.screenRadiance = screenRadiance; o.recBary = recBary;
 	o.hitT = hitT; o.sampleT = sampleT; o.screenT = screenT; o.blendVouch = blendVouch;

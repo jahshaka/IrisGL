@@ -48,20 +48,13 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 const int kMaxCascades = 4;
 
+#define JAH_HIT_PARAMS p.hit
+#include "jah_rq_hit_params.glsl"
 layout( std140, set = 0, binding = 1 ) uniform Params
 {
-	vec4 voxelOrigin[kMaxCascades];
-	vec4 voxelInvSize[kMaxCascades];   // xyz = 1 / the box's size, w = the cell (its largest side)
-	vec4 knobs;		// x = the rays a texel N, y = the reach (metres), z = the cascades bound, w = the ray mask
-	vec4 knobs2;	// x = the sky cube on, y = the records, z = the hit's sun-ray mask, w = its length
-	vec4 skyColour;
-	vec4 cards;		// x = the card slots, y = the card records, w = the per-slot geometry rows
-	vec4 hitList;	// the hit list's shape (off: nothing is appended)
-	vec4 alpha;		// xy = the alpha table's address (float bits)
-	vec4 hitTable;	// xy = the hit table's address (float bits), z = the texture pool bound, w = the cloud field
-	vec4 cloudMap;
-	vec4 cloudSun;
-	vec4 hitSun;	// (the record's sun: the list is off)
+	JahHitParams hit;   // THE HIT SET'S UNIFORMS (the one text: the cascades, the sky, the cards' counts, the tables)
+	vec4 knobs;			// x = the rays a texel N, y = the reach (metres), w = the ray mask
+	vec4 knobs2;		// y = the records
 } p;
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
@@ -111,24 +104,16 @@ layout( set = 0, binding = 16 ) uniform sampler3D voxelDirectBack[kMaxCascades];
 #define JAH_VOX_SAMPLE_DIRECT_BACK( c, u, l ) textureLod( voxelDirectBack[c], u, l )
 layout( set = 0, binding = 17 ) uniform samplerCube skyCube;
 
-#define JAH_VOX_COUNT       int( p.knobs.z )
-#define JAH_VOX_ORIGIN( c )  p.voxelOrigin[c]
-#define JAH_VOX_INVSIZE( c ) p.voxelInvSize[c]
-#define JAH_SKY_ON          ( p.knobs2.x > 0.5 )
-#define JAH_SKY_COLOUR      p.skyColour.xyz
 #include "jah_rq_hit.glsl"
 
 #define JAH_CARD_BINDING_BASE 18
 #define JAH_CARD_VIEW_BINDING_BASE 22
 #include "jah_rq_card_bindings.glsl"
-#define JAH_CARD_SLOTS   uint( p.cards.x )
-#define JAH_CARD_RECORDS uint( p.cards.y )
 // (NOT a reader: the cache's own gather stamps no demand - a card is resident for what the views read)
 #include "jah_rq_card.glsl"
 
 layout( std430, set = 0, binding = 29 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
 layout( std430, set = 0, binding = 30 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
-#define JAH_GEOM_SLOTS uint( p.cards.w )
 #define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
 #define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
 #include "jah_rq_geom.glsl"
@@ -137,27 +122,12 @@ layout( std430, set = 0, binding = 31 ) readonly buffer JahHitInstances { uvec4 
 layout( rgba32ui, set = 0, binding = 32 ) uniform writeonly uimage2D jahHitIds;
 layout( r32ui, set = 0, binding = 33 ) uniform writeonly uimage2D jahHitDest;
 layout( std430, set = 0, binding = 34 ) buffer JahHitBuf { uint jahHitBuf[]; };
-#define JAH_HIT_ON          ( p.hitList.w > 0.5 )
-#define JAH_HIT_CAPACITY    uint( p.hitList.x )
-#define JAH_HIT_LIST_W      max( uint( p.hitList.y ), 1u )
-#define JAH_HIT_INSTANCES   uint( p.hitList.z )
 #define JAH_HIT_INSTANCE( s, k ) jahHitInstances[( s ) * 10u + ( k )]
-#define JAH_HIT_SUN         p.hitSun
-#define JAH_HIT_SUN_MASK    uint( p.knobs2.z )
-#define JAH_HIT_SUN_RANGE   p.knobs2.w
-#define JAH_HIT_FAR_LIFT    0.0
-#define JAH_ALPHA_TABLE     floatBitsToUint( p.alpha.xy )
 #include "jah_rq_sun_ray.glsl"
 #include "jah_rq_hit_record.glsl"
 layout( set = 0, binding = 35 ) uniform sampler2DArray jahHitPool;
 layout( set = 0, binding = 36 ) uniform sampler2D jahHitCloud;
-#define JAH_HIT_TABLE       floatBitsToUint( p.hitTable.xy )
-#define JAH_HIT_POOL_ON     ( p.hitTable.z > 0.5 )
-#define JAH_HIT_CLOUD_ON    ( p.hitTable.w > 0.5 )
-#define JAH_HIT_CLOUD_MAP   p.cloudMap
-#define JAH_HIT_CLOUD_SUN   p.cloudSun
 // A CACHE RAY TRACES NO MOVER (the mask's law above): the hit's mover gate never runs.
-#define JAH_HIT_MOVERS_ON false
 // AN IRRADIANCE ESTIMATOR READS A HIT'S SPECULAR LOBE BY ITS INTEGRAL (the gather's rule, PHOTON-3: a few stochastic rays
 // cannot sample a polished hit's near-delta lobe; jah_rq_hit_direct.glsl's header).
 #define JAH_HIT_LOBE_INTEGRAL

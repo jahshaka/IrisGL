@@ -253,6 +253,27 @@ struct HitSetSources {
     HitListBinding hit;
 };
 
+/// THE HIT SET'S UNIFORMS (PHOTON-7 stage 10, 10-2; the lead's ruling: one text, the bindings' rule) - the C++ mirror of
+/// rayquery/include/jah_rq_hit_params.glsl's JahHitParams (std140, vec4s), one member of every hit-reading job's
+/// uniform block, filled by the one function hitSetParams.
+struct HitSetParams {
+    float voxelOrigin[kGatherMaxCascades][4] = {};
+    float voxelInvSize[kGatherMaxCascades][4] = {};
+    float counts[4] = {};      ///< the cascades, the sky cube on, the per-slot geometry rows, a ray-traced mover exists
+    float skyColour[4] = {};
+    float cards[4] = {};       ///< the card slots, the card records
+    float hitList[4] = {};     ///< the list's capacity, width, instance entries, on
+    float hitSun[4] = {};      ///< toward the sun, a sun
+    float hitSun2[4] = {};     ///< the hit's sun-ray mask, 0, its length, a far copy's lift
+    float tables[4] = {};      ///< the alpha table's address, the hit table's (float bits)
+    float surface[4] = {};     ///< the texture pool bound, the cloud field bound
+    float cloudMap[4] = {};
+    float cloudSun[4] = {};
+};
+static_assert(sizeof(HitSetParams) == 18u * 16u, "JahHitParams is eighteen vec4s");
+/// Fills `out` from the hit set; `geomSlots` = the per-slot row entries the job's own copy holds this frame (0: none).
+void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &out);
+
 /// WHERE A JOB'S SET HOLDS THE HIT SET: the binding of each input (its shader's layout). Every one is bound.
 struct HitSetSlots {
     uint32_t tlas = 0u;
