@@ -395,8 +395,10 @@ void FrameMonitor::retirePending(bool all) {
             const auto own = [&](unsigned id, float ms, float &self, bool &submitted) {
                 if (!id) return;
                 if (ms >= 0.0f) {
+                    // (never below 0: the children's pairs lie inside the row's, so a negative is the timestamps'
+                    // rounding - and a negative reads "unmeasured")
                     const auto c = childMs.find(id);
-                    self = float(double(ms) - (c != childMs.end() ? c->second : 0.0));
+                    self = float(std::max(0.0, double(ms) - (c != childMs.end() ? c->second : 0.0)));
                 }
                 const auto s = mRowSubmitted.find(id);
                 submitted = s != mRowSubmitted.end() && s->second;
