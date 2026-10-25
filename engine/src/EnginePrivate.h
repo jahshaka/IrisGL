@@ -2483,10 +2483,22 @@ public:
     struct OpenRow {
         unsigned id = 0u; std::uintptr_t tag = 0u; bool submitted = false; bool aggregate = false;
         bool childSubmitted = false;   ///< a row inside it submitted (CacheScope::submittedInside)
+        unsigned long long stagingAt = 0ull;   ///< the staging's submissions when its own stretch began
+        bool staging = false;                  ///< ...and the upload staging submitted inside its own stretches
     };
     std::vector<OpenRow> mRowStack;
     std::unordered_map<unsigned, unsigned> mRowParent;
     std::unordered_map<unsigned, bool> mRowSubmitted;
+    std::unordered_map<unsigned, bool> mRowStaging;
+    /// THE UPLOAD STAGING's COUNTERS (the fork's VulkanStagingBuffer::msJahCounters, JahStagingCounters): asked once per
+    /// capture; the frame's deltas go to the record at the frame's close (noteStaging), and a row's own stretch reads
+    /// the submissions (fence flushes + the waits that submitted).
+    const Ogre::uint64 *mStaging = nullptr;
+    bool mStagingAsked = false;
+    Ogre::uint64 mStagingLast[6] = {};
+    const Ogre::uint64 *mQueue = nullptr;   ///< the graphics queue's counters (JahQueueCounters)
+    Ogre::uint64 mQueueLast[4] = {};
+    unsigned long long stagingSubmits(Ogre::RenderSystem *rs);
     /// Opens a row's sample on `rs` (0 = not sampling); `top` = was it top-level.
     unsigned beginRowSample(Ogre::RenderSystem *rs, const std::string &name, bool &top);
     /// Closes the innermost row sample (the fork's stack is LIFO, like ours).
@@ -2573,6 +2585,8 @@ public:
     /// the newest record in the holding queue (the call is made at the head of
     /// the next frame, after its beginFrame) — and adds them to the total.
     void noteGpuMarksDropped(unsigned n);
+    /// The upload staging's events since the last frame close, filed on the frame that just closed.
+    void noteStaging(Ogre::RenderSystem *rs);
     unsigned long long eventsDropped() const { return mEventsDropped; }
     float lastOverheadMs() const { return mLastOverheadMs; }
     void addOverhead(double ms) { mOverheadMs += ms; }

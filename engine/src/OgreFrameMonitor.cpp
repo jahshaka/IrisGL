@@ -353,6 +353,42 @@ void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
     mGpuSampleIndex.erase(it);
 }
 
+unsigned long long FrameMonitor::stagingSubmits(Ogre::RenderSystem *rs) {
+    if (!mStagingAsked && rs) {
+        mStagingAsked = true;
+        try { rs->getCustomAttribute("JahStagingCounters", &mStaging); } catch (...) { mStaging = nullptr; }
+        if (mStaging) for (int i = 0; i < 6; ++i) mStagingLast[i] = mStaging[i];
+        try { rs->getCustomAttribute("JahQueueCounters", &mQueue); } catch (...) { mQueue = nullptr; }
+        if (mQueue) for (int i = 0; i < 4; ++i) mQueueLast[i] = mQueue[i];
+    }
+    return mStaging ? (unsigned long long)(mStaging[0] + mStaging[3]) : 0ull;   // fence flushes + waits that submitted
+}
+
+void FrameMonitor::noteStaging(Ogre::RenderSystem *rs) {
+    (void)stagingSubmits(rs);
+    Ogre::uint64 q[4] = {};
+    if (mQueue)
+        for (int i = 0; i < 4; ++i) { q[i] = mQueue[i] - mQueueLast[i]; mQueueLast[i] = mQueue[i]; }
+    if (!mPending.empty() && mQueue) {
+        MonitorRecord &r = mPending.back().rec;
+        r.queueFlushes += unsigned(q[0]);
+        r.queueFencedFlushes += unsigned(q[1]);
+        r.queueSelfDrains += unsigned(q[2]);
+        r.queueSelfDrainMs += float(double(q[3]) * 1e-6);
+    }
+    if (!mStaging) return;
+    Ogre::uint64 d[6];
+    for (int i = 0; i < 6; ++i) { d[i] = mStaging[i] - mStagingLast[i]; mStagingLast[i] = mStaging[i]; }
+    if (mPending.empty()) return;   // (no frame waiting: GPU sampling off - the counts are not the record's)
+    MonitorRecord &r = mPending.back().rec;
+    r.stagingFlushes += unsigned(d[0]);
+    r.stagingWraps += unsigned(d[1]);
+    r.stagingWaits += unsigned(d[2]);
+    r.stagingWaitSubmits += unsigned(d[3]);
+    r.stagingWaitMs += float(double(d[4]) * 1e-6);
+    r.stagingBytes += (unsigned long long)d[5];
+}
+
 void FrameMonitor::noteGpuMarksDropped(unsigned n) {
     if (!n) return;
     mGpuMarksDropped += n;
@@ -392,7 +428,11 @@ void FrameMonitor::retirePending(bool all) {
                 addChild(pf.passSampleIds[i], pf.rec.passes[i].gpuMs);
             for (size_t i = 0; i < pf.rec.cacheWork.size() && i < pf.cacheSampleIds.size(); ++i)
                 addChild(pf.cacheSampleIds[i], pf.rec.cacheWork[i].gpuMs);
-            const auto own = [&](unsigned id, float ms, float &self, bool &measured, bool &submitted) {
+            const auto own = [&](unsigned id, float ms, float &self, bool &measured, bool &submitted, bool &staging) {
+                if (id) {
+                    const auto sg = mRowStaging.find(id);
+                    staging = sg != mRowStaging.end() && sg->second;
+                }
                 if (!id) return;
                 if (ms >= 0.0f) {
                     // The children's pairs lie inside the row's: a negative within the rounding (kSelfEpsilonMs) is 0;
@@ -408,12 +448,13 @@ void FrameMonitor::retirePending(bool all) {
             };
             for (size_t i = 0; i < pf.rec.passes.size() && i < pf.passSampleIds.size(); ++i)
                 own(pf.passSampleIds[i], pf.rec.passes[i].gpuMs, pf.rec.passes[i].selfGpuMs,
-                    pf.rec.passes[i].selfMeasured, pf.rec.passes[i].selfSubmitted);
+                    pf.rec.passes[i].selfMeasured, pf.rec.passes[i].selfSubmitted, pf.rec.passes[i].selfStaging);
             for (size_t i = 0; i < pf.rec.cacheWork.size() && i < pf.cacheSampleIds.size(); ++i)
                 own(pf.cacheSampleIds[i], pf.rec.cacheWork[i].gpuMs, pf.rec.cacheWork[i].selfGpuMs,
-                    pf.rec.cacheWork[i].selfMeasured, pf.rec.cacheWork[i].selfSubmitted);
-            for (unsigned id : pf.passSampleIds) { mRowParent.erase(id); mRowSubmitted.erase(id); }
-            for (unsigned id : pf.cacheSampleIds) { mRowParent.erase(id); mRowSubmitted.erase(id); }
+                    pf.rec.cacheWork[i].selfMeasured, pf.rec.cacheWork[i].selfSubmitted,
+                    pf.rec.cacheWork[i].selfStaging);
+            for (unsigned id : pf.passSampleIds) { mRowParent.erase(id); mRowSubmitted.erase(id); mRowStaging.erase(id); }
+            for (unsigned id : pf.cacheSampleIds) { mRowParent.erase(id); mRowSubmitted.erase(id); mRowStaging.erase(id); }
         }
         for (size_t i = 0; i < pf.rec.passes.size(); ++i) {
             const FramePass &p = pf.rec.passes[i];
@@ -528,10 +569,17 @@ unsigned FrameMonitor::beginRowSample(Ogre::RenderSystem *rs, const std::string 
     top = mFrameSampleOpen && mOpenRowSamples == 0u;
     ++mOpenRowSamples;
     // THE NESTING (PHOTON-7's naming step): the parent's own stretch ends here - a submission inside it marks it
+    // (and the upload staging's, by its counters: the cause)
     const std::uintptr_t tag = queueSubmissionTag(rs);
+    const unsigned long long st = stagingSubmits(rs);
     if (!mRowStack.empty() && tag != mRowStack.back().tag) mRowStack.back().submitted = true;
+    if (!mRowStack.empty() && st != mRowStack.back().stagingAt) mRowStack.back().staging = true;
     mRowParent[id] = mRowStack.empty() ? 0u : mRowStack.back().id;
-    mRowStack.push_back({ id, tag, false });
+    OpenRow open;
+    open.id = id;
+    open.tag = tag;
+    open.stagingAt = st;
+    mRowStack.push_back(open);
     return id;
 }
 void FrameMonitor::endRowSample(Ogre::RenderSystem *rs, const std::string &name) {
@@ -543,10 +591,14 @@ void FrameMonitor::endRowSample(Ogre::RenderSystem *rs, const std::string &name)
         OpenRow r = mRowStack.back();
         mRowStack.pop_back();
         const std::uintptr_t tag = queueSubmissionTag(rs);
+        const unsigned long long st = stagingSubmits(rs);
         if (tag != r.tag) r.submitted = true;
+        if (st != r.stagingAt) r.staging = true;
         mRowSubmitted[r.id] = r.submitted;
+        mRowStaging[r.id] = r.staging;
         if (!mRowStack.empty()) {
             mRowStack.back().tag = tag;   // the parent's own stretch resumes
+            mRowStack.back().stagingAt = st;
             if (r.submitted || r.childSubmitted) mRowStack.back().childSubmitted = true;
         }
     }
@@ -952,6 +1004,7 @@ void CacheScope::close() {
         gMonitor->mSampleKeys.erase(mGpuSampleId);
         gMonitor->mRowParent.erase(mGpuSampleId);
         gMonitor->mRowSubmitted.erase(mGpuSampleId);
+        gMonitor->mRowStaging.erase(mGpuSampleId);
         mRs = nullptr;
         mGpuSampleId = 0u;
     }
@@ -962,6 +1015,7 @@ void CacheScope::close() {
             gMonitor->mSampleKeys.erase(mGpuSampleId);
             gMonitor->mRowParent.erase(mGpuSampleId);
             gMonitor->mRowSubmitted.erase(mGpuSampleId);
+            gMonitor->mRowStaging.erase(mGpuSampleId);
         }
         return;
     }
@@ -2024,6 +2078,7 @@ void OgreEngine::gpuFrameBegin() {
         Ogre::uint32 dropped = 0u;
         rs->getCustomAttribute("JahGpuSamplesTruncated", &dropped);
         mMonitor->noteGpuMarksDropped(unsigned(dropped));
+        mMonitor->noteStaging(rs);
         std::vector<std::pair<Ogre::uint32, float>> results;
         rs->getCustomAttribute("JahGpuSampleResults", &results);
         for (const auto &r : results) mMonitor->noteGpuSample(unsigned(r.first), r.second);

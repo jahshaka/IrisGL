@@ -8571,6 +8571,9 @@ struct FramePass {
     float       selfGpuMs = 0.0f;
     bool        selfMeasured = false;
     bool        selfSubmitted = false;
+    /// ...and the UPLOAD STAGING submitted inside its own stretches (a staging buffer fenced or waited: MonitorRecord's
+    /// staging counts) - the submission's cause, not only its place.
+    bool        selfStaging = false;
     /// THE PASS READS THE GI (ENGINE-UPGRADE-ASYNC-3 stage 2; the engine's passReadsGi: a scene pass that
     /// is not a caster pass, or a custom pass, whose definition is not marked as sampling none). The
     /// frame's first and last such row bound the async compute window.
@@ -8660,6 +8663,7 @@ struct CacheWork {
     float      selfGpuMs = 0.0f;
     bool       selfMeasured = false;
     bool       selfSubmitted = false;
+    bool       selfStaging = false;   ///< (FramePass::selfStaging)
 };
 
 /// One stage of the frame, exclusive of its children.
@@ -9308,6 +9312,18 @@ struct MonitorRecord {
     /// are incomplete. Per frame, so a capture that drains every 250 ms still
     /// sees every frame that dropped one (POST-C-FIXES-1).
     unsigned    gpuMarksDropped = 0;
+    /// THE UPLOAD STAGING's EVENTS this frame (PHOTON-7's walk hitch; the fork's VulkanStagingBuffer counters, read at
+    /// the frame's close): the submissions that fenced an upload region (`stagingFlushes`: the unfenced bytes past the
+    /// buffer's quarter, or a ring wrap), the wraps, the CPU's waits on the GPU for a region (`stagingWaits`; those that
+    /// submitted first; their ms) and the bytes mapped for upload. Zero when the render system has none.
+    unsigned    stagingFlushes = 0, stagingWraps = 0, stagingWaits = 0, stagingWaitSubmits = 0;
+    float       stagingWaitMs = 0.0f;
+    unsigned long long stagingBytes = 0ull;
+    /// ...and THE GRAPHICS QUEUE's mid-frame submissions (the fork's VulkanQueue counters): the FlushOnly submissions,
+    /// those that parked a fence on the frame slot being recorded, and the SELF-DRAINS - the command buffer opened after
+    /// one waiting that slot's fences, i.e. the CPU waiting on the frame's own submitted work - with their ms.
+    unsigned    queueFlushes = 0, queueFencedFlushes = 0, queueSelfDrains = 0;
+    float       queueSelfDrainMs = 0.0f;
     /// What the monitor itself cost this frame, so analysis can subtract it.
     float       overheadMs = 0.0f;
 };
