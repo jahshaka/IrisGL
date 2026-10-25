@@ -302,10 +302,13 @@ void main()
 		// ones too: WHICH cards it holds is an atomic's order - its move times min( 1, S / ( pi d^2 ) ), S its box's
 		// largest silhouette, d the gap between the two boxes (occlusion ignored): a cosine-weighted mean's share of a box
 		// is at most its solid angle over pi, so the sum bounds the change of every texel's integral, never misses a move
-		// and is the same in every process (the cards in the host's order)
+		// and is the same in every process (the cards in the host's order). CAPPED BY THE LARGEST MOVE: a texel's gather is
+		// a MEAN of its rays, its card shares sum to at most 1, so no texel moves by more than the largest move among the
+		// cards - the sum alone, every touching card's move whole, has a gain of the touching cards' count and kept a
+		// crowded room relisting (gi.card_residency (4): never at rest in B)
 		if( overflowed )
 		{
-			float bound = 0.0;
+			float bound = 0.0, most = 0.0;
 			for( uint j = 0u; j < caMode.y; ++j )
 			{
 				const vec4 a0 = caCards[2u * j], a1 = caCards[2u * j + 1u];
@@ -320,10 +323,11 @@ void main()
 				const vec3 gap = max( abs( centre - a0.xyz ) - ( halfExt + a1.xyz ), vec3( 0.0, 0.0, 0.0 ) );
 				const float d2 = dot( gap, gap );
 				bound += m * ( d2 > 0.0 ? min( 1.0, area / ( CA_PI * d2 ) ) : 1.0 );
+				most = max( most, m );
 			}
 			if( bound > 0.0 )
 				reportBits |= 0x80000000u;
-			sum += sens * bound;
+			sum += sens * min( bound, most );
 		}
 		else
 		{
