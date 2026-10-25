@@ -498,8 +498,12 @@ public:
     /// rest has traced its rest mean's N frames under the rest key - its rest sample sequence done, the frame it would
     /// hold. A view that cannot rest (stereo, the rest off, no temporal history) has no rest sequence and waits on
     /// nothing; no view, nothing to wait for.
-    /// `restFrames`: the completed rest's length so far (the least over those views; 0 with none that can rest).
-    bool restDemandComplete(const detail::OgreScene *scene, unsigned long long restKey, unsigned &restFrames) const;
+    /// `restFrames`: the completed rest's length so far (the least over those views; 0 with none that can rest);
+    /// `restLength`: the rest sequence's N (the longest over those views; the default tuning's with none).
+    bool restDemandComplete(const detail::OgreScene *scene, unsigned long long restKey, unsigned &restFrames,
+                            unsigned &restLength) const;
+    /// The rest sequence's N at the shipped tuning (the cards' readers' demand length where no gather runs).
+    static unsigned shippedRestLength();
     void statsInto(const detail::OgreScene *scene, unsigned long long restKey,
                    unsigned long long restartKey, GatherStatus &out) const;
     /// Is anything at all held for this key?

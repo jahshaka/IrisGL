@@ -1016,9 +1016,14 @@ void ScreenProbeGather::close() {
     mPlaceLayout = mTraceLayout = mFilterLayout = mIntegrateLayout = VK_NULL_HANDLE;
 }
 
+unsigned ScreenProbeGather::shippedRestLength() {
+    return restLengthOf(GatherTuning(), historyFramesOf(GatherTuning()));
+}
+
 bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsigned long long restKey,
-                                           unsigned &restFrames) const {
+                                           unsigned &restFrames, unsigned &restLength) const {
     restFrames = 0u;
+    restLength = shippedRestLength();
     const View *latest = nullptr;
     for (const auto &kv : mViews) {
         const View &v = kv.second;
@@ -1030,8 +1035,10 @@ bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsig
         const View &o = kv.second;
         if (o.scene != scene || !o.targetsReady || o.recordedFrame != latest->recordedFrame || !o.restableLast) continue;
         const unsigned rest = o.restKey == restKey ? o.restFrames : 0u;
+        const unsigned n = restLengthOf(o.tuningLast, o.historyFramesLast);
         restFrames = restFrames ? std::min(restFrames, rest) : rest;
-        if (rest < restLengthOf(o.tuningLast, o.historyFramesLast)) return false;
+        restLength = std::max(restLength, n);
+        if (rest < n) return false;
     }
     return true;
 }

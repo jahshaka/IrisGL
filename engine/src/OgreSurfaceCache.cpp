@@ -47,7 +47,6 @@
 #include <memory>
 #include <cmath>
 #include <cstdlib>
-#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -1395,9 +1394,6 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         changed = true;
     }
 
-    if (decide && std::getenv("P7_CARDTRACE"))   // ARM (to revert)
-        std::fprintf(stderr, "DECISION frame %llu change %llu restStart %llu %llu drained-total %llu arrivals %zu admitted-total %llu cards %zu\n",
-                     mFrame, mDemandChangeFrame, mRestStart[0], mRestStart[1], mRestDrained, arriving.size(), mAdmitted, mCards.size());
     // 6. THE VECTORS, REBUILT when anything changed: every instance's cards in one block, in layout order, the
     //    departed and evicted gone (an instance with none left is released: its next marked face brings it back).
     if (changed) {
@@ -1746,28 +1742,13 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
                 for (size_t k = 0; !d && k < view.directBoxes.size(); ++k) d = box.intersects(view.directBoxes[k]);
                 for (size_t k = 0; !n && k < view.indirectBoxes.size(); ++k) n = box.intersects(view.indirectBoxes[k]);
             }
-            if ((d || n) && !regionRoot) {
-                regionRoot = 1ull << rootBit('r', mFrame);
-                if (std::getenv("P7_CARDTRACE"))   // ARM (to revert)
-                    std::fprintf(stderr, "ROOT-R frame %llu region: allDirect %d allIndirect %d direct boxes %zu indirect boxes %zu (d %d n %d)\n",
-                                 mFrame, int(view.allDirect), int(view.allIndirect), view.directBoxes.size(),
-                                 view.indirectBoxes.size(), int(d), int(n));
-            }
+            if ((d || n) && !regionRoot) regionRoot = 1ull << rootBit('r', mFrame);
             if (d) { c.relight = true; direct = true; c.roots |= regionRoot; }
             if (n) { c.relightIndirect = true; indirect = true; ++mIndirectByRegion; c.roots |= regionRoot; }
         }
         if (direct && !mRadianceMovingLastFrame) ++mInvalidRadiance;   // one per gesture
         mRadianceMovingLastFrame = direct;
-        const unsigned long long dbgReg = mIndirectByRegion, dbgRep = mIndirectReported, dbgC = mIndirectByCards,
-                                 dbgB = mIndirectByBound;   // ARM (to revert): P7_CARDTRACE
         harvestIndirectReports(view.frame);   // the GPU's listed cards (a fixed lag behind their frame)
-        if (std::getenv("P7_CARDTRACE")) {
-            unsigned stale = 0u;
-            for (const CardRec &c : mCards) stale += c.relightIndirect ? 1u : 0u;
-            std::fprintf(stderr, "CARDTRACE frame %llu cards %zu region+%llu (allInd %d, boxes %zu) reported+%llu (byCards %llu byBound %llu) stale %u batch %zu\n",
-                         view.frame, mCards.size(), mIndirectByRegion - dbgReg, int(view.allIndirect), view.indirectBoxes.size(),
-                         mIndirectReported - dbgRep, mIndirectByCards - dbgC, mIndirectByBound - dbgB, stale, mBatch.size());
-        }
         for (const CardRec &c : mCards) indirect = indirect || c.relightIndirect;
         if (indirect && !mIndirectMovingLastFrame) ++mInvalidIndirect;
         mIndirectMovingLastFrame = indirect;
@@ -1888,16 +1869,11 @@ void SurfaceCache::relightCards() {
     for (size_t ri = 0; ri < mRelight.size(); ++ri) {
         const unsigned idx = mRelight[ri];
         CardRec &c = mCards[idx];
-        if (!c.roots && std::getenv("P7_CARDTRACE"))   // ARM (to revert)
-            std::fprintf(stderr, "UNROOTED frame %llu card %u mode %u relight %d ind %d valid %d still %d mover %d traced %d lastRelit %llu lastInd %llu since %llu upd %llu\n",
-                         mPlanFrame, idx, unsigned(ri < mRelightMode.size() ? mRelightMode[ri] : 9u), int(c.relight), int(c.relightIndirect),
-                         int(c.indirectValid), int(c.stillPending), int(c.moverPending), int(c.moverTraced), c.lastRelit,
-                         c.lastIndirect, c.since, c.lastUpdated);
         if (!c.roots) c.roots = 1ull << rootBit('r', mFrame);
         mPlanRoots |= c.roots;
         mPlanRound = std::max(mPlanRound, c.round);
     }
-    mFrameRoots[mFrame % 128u] = FrameRoots{ mFrame, mPlanRoots, mPlanRound };
+    mFrameRoots[mFrame % 512u] = FrameRoots{ mFrame, mPlanRoots, mPlanRound };
     if (mRelight.empty() || !mRadiance) { mVct = nullptr; return; }
     const auto t0 = std::chrono::steady_clock::now();
     Ogre::Root &root = Ogre::Root::getSingleton();
@@ -2783,20 +2759,14 @@ void SurfaceCache::harvestIndirectReports(unsigned long long frame) {
                                          to = r.cacheFrame;
                 unsigned long long roots = 0ull;
                 unsigned round = 0u;
-                for (unsigned long long f = to; f >= from && f > 0ull && to - f < 128ull; --f) {
-                    const FrameRoots &fr = mFrameRoots[f % 128u];
+                for (unsigned long long f = to; f >= from && f > 0ull && to - f < 512ull; --f) {
+                    const FrameRoots &fr = mFrameRoots[f % 512u];
                     if (fr.frame != f) continue;
                     roots |= fr.roots;
                     round = std::max(round, fr.round);
                 }
                 // (moves older than the ring: named by its horizon, 'h' at the oldest frame it holds - they are older)
-                if (to > from + 127ull) roots |= 1ull << rootBit('h', to - 127ull);
-                if (!roots && std::getenv("P7_CARDTRACE")) {   // ARM (to revert)
-                    std::fprintf(stderr, "HARVEST0 slot %u from %llu to %llu frames:", slot, from, to);
-                    for (unsigned long long f = to; f >= from && f > 0ull && to - f < 12ull; --f)
-                        std::fprintf(stderr, " %llu:%llu/%llx", f, mFrameRoots[f % 128u].frame, mFrameRoots[f % 128u].roots);
-                    std::fprintf(stderr, "\n");
-                }
+                if (to > from + 511ull) roots |= 1ull << rootBit('h', to - 511ull);
                 listed.roots |= roots;
                 listed.round = std::max(listed.round, round + 1u);
             }
@@ -3651,6 +3621,12 @@ void SurfaceCache::traceSun() {
 // TLAS instance's `instanceCustomIndex` (it reads the GPU scene's table, whose
 // index IS that slot), so "which cards belong to this hit" is one indexed
 // fetch of `mInstanceBuffer` and no lookup at all.
+bool SurfaceCache::tablesCurrent() const {
+    unsigned slotsWanted = std::max(kInstanceSlotsInitial, mInstanceSlots);
+    while (mItemSlots > slotsWanted) slotsWanted *= 2u;
+    return !mTableDirty && mInstanceBuffer && mCardBuffer && slotsWanted == mInstanceSlots;
+}
+
 bool SurfaceCache::syncBuffers() {
     Ogre::VaoManager *vao = Ogre::Root::getSingleton().getRenderSystem()->getVaoManager();
     if (!vao) return false;
@@ -3658,7 +3634,7 @@ bool SurfaceCache::syncBuffers() {
     // into the instance table, are what makes a card resident at all; the table covers every item slot of the scene.
     unsigned slotsWanted = std::max(kInstanceSlotsInitial, mInstanceSlots);
     while (mItemSlots > slotsWanted) slotsWanted *= 2u;
-    if (!mTableDirty && mInstanceBuffer && mCardBuffer && slotsWanted == mInstanceSlots) {
+    if (tablesCurrent()) {
         uploadDemandHead();
         return false;
     }
@@ -3817,11 +3793,17 @@ void SurfaceCache::update(const CardSceneView &view) {
     // ONE ROW (PHOTON-7's naming step): the tables' uploads are GPU copies before the capture that no pass holds -
     // cards.tables times them, filed when the tables were written or the uploads submitted (the frame's demand stamp
     // and the periodic read-back are the at-rest constants: a still frame files no card row, the stillness door's law).
-    {
+    // THE ROW IS THE TABLES' WRITE ALONE (PHOTON-7 stage 10, R3): the frame's demand stamp and the read-back's request are
+    // the at-rest constants and file no row - now and then they submit the staging blocks, and inside the row that filed
+    // a card row at rest with no table written (gi.hold_after_stop (1)'s room walk: a "cards.tables:0" 109 frames after
+    // the stop; photon-glass 63 frames into its hold).
+    if (tablesCurrent()) {
+        uploadDemandHead();
+    } else {
         detail::monitor::PhaseScope tables("cards.tables", Ogre::Root::getSingleton().getRenderSystem());
         if (syncBuffers()) tables.noteWork();
-        issueDemandRead();
     }
+    issueDemandRead();
 
     // NO LIGHT RE-QUEUES A CAPTURE (ATOM-S3-CARDCAP): a capture holds albedo,
     // normal, depth, emissive and roughness — no light quantity at all. The sun's

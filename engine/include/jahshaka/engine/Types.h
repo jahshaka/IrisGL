@@ -3044,11 +3044,11 @@ struct GiQualityFacts {
     /// land, inside this budget, and a light write relights the resident set
     /// over as many frames as it takes.
     unsigned cardLightTexels = 131072u;
-    /// THE INDIRECT HALF'S BUDGET, texels a frame: the voxel march (the four-cone
-    /// set over the chain, the sky on the sixteen-cone quadrature) per texel, spent when a card is captured and when the
-    /// chain re-injects. Lumen's own indirect budget, 512 square, is the
-    /// ceiling; the rows are a quarter / an eighth / a sixteenth of it, NOT YET
-    /// MEASURED in GPU milliseconds (locked clocks — the lead's measurement).
+    /// THE INDIRECT HALF'S BUDGET, texels a frame (L7: a COUNT PER TIER): the cards' indirect gather (the TLAS rays at the
+    /// ray tier, the voxel rays elsewhere) spent on a card's capture, its listing by a move and a region. THE RULE
+    /// (PHOTON-7 stage 10, R3): the smallest count whose card-to-card rounds converge a lamp step inside 120 frames, priced
+    /// in the card frame's ms from the monitor (the tier rows say the measurement); Lumen's own indirect budget, 512
+    /// square, is the ceiling.
     unsigned cardIndirectTexels = 32768u;
     /// THE INDIRECT HALF'S RAYS A TEXEL (PHOTON-7 stage 10, 10-1; L9): the card's indirect is gathered by this many
     /// fixed, world-keyed, cosine-distributed occupancy rays through the voxel chain (jah_voxel_ray.glsl) - a hit reads
@@ -3224,7 +3224,12 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeShadowsDefault = true;
         f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 1.0)
         f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
-        f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
+        // 8 pages a frame (PHOTON-7 stage 10, R3, the lead's L7 ruling: the smallest count whose card-to-card rounds
+        // converge a lamp step inside 120 frames - photon-room's 8 -> 12 at High: 4 pages held at 201, 8 at 119, 12 and
+        // more at 101 (the field's own); the card frame at 8 pages 3.48 ms, +0.75 over 4's 2.73 - almost all of it the
+        // TLAS gather's ~2.5 ns a ray, the relight's own ~0.15 ms. Epic the same: 6 held at 142, 8 at 119, 3.55 ms. Medium
+        // and Low hold the step at 114 and 98 at any count: no card-to-card rounds there)
+        f.cardIndirectTexels = 131072u;
         f.gather = { 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns

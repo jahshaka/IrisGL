@@ -7908,20 +7908,26 @@ void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) co
 }
 
 /// THE CARDS' VIEW READERS' REST DEMAND COMPLETE (PHOTON-7 stage 10, R3 (b), the lead's ruling): every reader of the
-/// scene's cards that can rest has finished its rest sample sequence - the gather its rest mean's N frames, the
-/// reflection every texel stopped (or held). The surface cache takes its rest's ONE residency decision then (the demand
-/// it drains and admits on is the whole rest's), and the readers' hold waits on that decision's work (the cache's queue
-/// and relights are their inputs). As of the readers' last record (the cache plans before they record: a frame late).
+/// scene's cards that can rest has traced the first N frames of its rest - the SAME N for both readers, the gather's rest
+/// sequence (16 at the shipped history): those N frames of the deterministic rest sequence are the demand; a reflection
+/// texel's continuation to its stop is variance reduction on faces already demanded (a face it first reaches after N
+/// has a rate under 1/N a frame - a band face). The surface cache takes its rest's ONE residency decision then, and the
+/// readers' hold waits on that decision's work (the cache's queue and relights are their inputs) - the reflection's
+/// long rest runs once, after it (photon-glass: 246 frames to stop every texel, run twice when the decision waited for
+/// it). As of the readers' last record (the cache plans before they record: a frame late).
 bool RayQueryTier::cardReadersRestComplete(const OgreScene *scene, unsigned restFrames[2]) const {
     // (the readers by the demand's index: 0 the reflection, 1 the gather - each one's rest length so far, the least
     // over its views; 0 where none can rest)
     restFrames[0] = restFrames[1] = 0u;
-    bool complete = !mGather || mGather->restDemandComplete(scene, gatherRestKeyArmed(scene), restFrames[1]);
+    unsigned n = 0u;
+    bool complete = true;
+    if (mGather) complete = mGather->restDemandComplete(scene, gatherRestKeyArmed(scene), restFrames[1], n);
+    else n = ScreenProbeGather::shippedRestLength();
     for (const auto &kv : mReflects) {
         const ReflectView &rv = kv.second;
         if (rv.scene != scene || !rv.restableLast) continue;
         restFrames[0] = restFrames[0] ? std::min(restFrames[0], rv.restFrames) : rv.restFrames;
-        if (!rv.held && !rv.restAllStopped) complete = false;
+        if (!rv.held && rv.restFrames < n) complete = false;
     }
     return complete;
 }

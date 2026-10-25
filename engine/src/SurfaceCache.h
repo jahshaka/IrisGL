@@ -733,6 +733,8 @@ private:
     /// True when the TABLES were written (the allocation changed); false when only the frame's demand stamp was (the
     /// at-rest constant) - the monitor's cards.tables rows file on the first (PHOTON-7's naming step).
     bool syncBuffers();
+    /// The tables need no write this frame (nothing dirty, the slots covered): syncBuffers would only stamp the demand.
+    bool tablesCurrent() const;
 
     Ogre::SceneManager *mSceneMgr = nullptr;
     bool mBuilt = false;
@@ -814,7 +816,7 @@ private:
     unsigned mRootNext = 0u;
     unsigned rootBit(char kind, unsigned long long frame);
     struct FrameRoots { unsigned long long frame = ~0ull, roots = 0ull; unsigned round = 0u; };
-    FrameRoots mFrameRoots[128];
+    FrameRoots mFrameRoots[512];
     unsigned long long mPlanRoots = 0ull;
     unsigned mPlanRound = 0u;
     bool mGatherByRays = false;
