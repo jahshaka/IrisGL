@@ -258,6 +258,21 @@
 	// every pass, so a slow change writes once it reaches a step (its lag at most a step; gi.bounce_series' slow fade).
 	// The price: the feedback rests within step / (1 - r) of the fixed point instead of step / (2 (1 - r)). Both sides
 	// held alike, EACH AGAINST ITS OWN STORED VALUE (PHOTON-7 stage 7: the two sides are both stored).
+	// THE ROUNDING ORBIT (PHOTON-7 stage 10, the lead's ruling on the TLAS route): round-to-nearest cannot bring a
+	// contraction r closer to its fixed point than 0.5 / (1 - r) store steps, and it can leave it ORBITING there - the
+	// Jacobi of two surfaces that read each other has an eigenvalue -r beside +r, a period-2 mode the rounding keeps at
+	// up to that amplitude (measured on the TLAS route: 1-412 steps at the subnormal floor, period 2, gi.card_residency
+	// (7)). r here is the brick's MEASURED contraction (its word 2 once bit 11 is set - the pass never writes it then,
+	// so every group of the brick reads one value), never above this voxel's OPERATOR BOUND (what it re-emits of what it
+	// gathers: no bounce here gains more - inside an orbit the measured ratio reads ~1, which no contraction is); the
+	// operator bound alone before a measurement. Two rules take it: THE WRITE HOLD (a), and THE SCHEDULER's no-move (ii)
+	// below.
+	const uint jahIdxR = jahBrick.x + p_brickMark.y * ( jahBrick.y + p_brickMark.z * jahBrick.z );
+	const float jahOperator = min( max( max( jahReemit.x, jahReemit.y ), jahReemit.z ), 0.999 );
+	const float jahRho = ( jahFbState[10u * jahIdxR] & 2048u ) != 0u
+							 ? min( clamp( uintBitsToFloat( jahFbState[10u * jahIdxR + 2u] ), 0.0, 0.999 ), jahOperator )
+							 : jahOperator;
+	const float jahOrbitSteps = 0.5 / ( 1.0 - jahRho );
 	float3 jahBackOld;   // the back as the store held it before this pass (THE PASS'S MOVE, below, takes its move too)
 	{
 		const float3 jahStored = OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz;
@@ -267,11 +282,18 @@
 		const float3 jahStep = exp2( floor( log2( max( max( abs( currentLight.xyz ), abs( jahStored ) ), jahFloor ) ) ) - 10.0 );
 		const float3 jahStepBack =
 			exp2( floor( log2( max( max( abs( backLight.xyz ), abs( jahStoredBack ) ), jahFloor ) ) ) - 10.0 );
+		// (a) THE WRITE HOLD: max( 1, 0.5 / (1 - r) ) steps, CAPPED at 0.8 of a code at the value's own level (a code: 1 %
+		// of the value over the store's floor kGiBrickFloor) - never over a code anywhere; at the floor, where a code IS
+		// one step, the hold stays the one step and the scheduler's rule (ii) takes the orbit
+		const float3 jahCodeF = 0.01 * max( max( abs( currentLight.xyz ), abs( jahStored ) ), float3( 5.9604645e-6 ) );
+		const float3 jahCodeB = 0.01 * max( max( abs( backLight.xyz ), abs( jahStoredBack ) ), float3( 5.9604645e-6 ) );
+		const float3 jahHoldF = jahStep * max( float3( 1.0 ), min( float3( jahOrbitSteps ), 0.8 * jahCodeF / jahStep ) );
+		const float3 jahHoldB = jahStepBack * max( float3( 1.0 ), min( float3( jahOrbitSteps ), 0.8 * jahCodeB / jahStepBack ) );
 		for( int k = 0; k < 3; ++k )
 		{
-			if( abs( currentLight[k] - jahStored[k] ) < jahStep[k] )
+			if( abs( currentLight[k] - jahStored[k] ) < jahHoldF[k] )
 				currentLight[k] = jahStored[k];
-			if( abs( backLight[k] - jahStoredBack[k] ) < jahStepBack[k] )
+			if( abs( backLight[k] - jahStoredBack[k] ) < jahHoldB[k] )
 				backLight[k] = jahStoredBack[k];
 		}
 	}
@@ -288,11 +310,32 @@
 	// the voxel's own code, per channel (the state) - each the group's most, then one atomic per group. Every invocation
 	// of a group is in one brick and reaches the barriers (the list's bricks are whole).
 	const float3 jahOld = OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz;
-	const float3 jahNew = imageLoad( lightVoxel, int3( jahCell ) ).xyz;
+	const float3 jahNewStored = imageLoad( lightVoxel, int3( jahCell ) ).xyz;
 	// ...and the back, read back from the scratch in program order (the store's own rounding): the series and the stop
 	// take EITHER side's move (PHOTON-7 stage 7: both sides are stored and read; a brick stopped on its front alone
 	// would rest with its back still moving)
-	const float3 jahBackNew = imageLoad( backScratch, jahScratchAt ).xyz;
+	const float3 jahBackNewStored = imageLoad( backScratch, jahScratchAt ).xyz;
+	// (ii) THE SCHEDULER's NO-MOVE (the lead's ruling): a channel's move within max( the hold, 0.5 / (1 - r) ) steps at
+	// its own level is NO MOVE for the stop, the resume and every accumulation that reads the moves - the store may hold
+	// it (it is written), but nothing is told: the brick stops, its move resumes nobody, and with nothing recomputing it
+	// an orbit ends. This is the store's ACHIEVABLE QUANTUM under the iteration (round-to-nearest cannot do better), not
+	// a loosened bar: about 1.5e-7 radiance at the floor at r 0.8 (2.5 steps of 2^-24); in the normal range 0.5 / (1 - r)
+	// steps of 2^-10 of the value. The rows' floor comparisons take their tolerance from it.
+	float3 jahNew = jahNewStored;
+	float3 jahBackNew = jahBackNewStored;
+	{
+		const float3 jahFloorS = float3( 6.1035156e-5, 6.1035156e-5, 6.1035156e-5 );
+		const float3 jahStepN = exp2( floor( log2( max( max( abs( jahNew ), abs( jahOld ) ), jahFloorS ) ) ) - 10.0 );
+		const float3 jahStepNB =
+			exp2( floor( log2( max( max( abs( jahBackNew ), abs( jahBackOld ) ), jahFloorS ) ) ) - 10.0 );
+		for( int k = 0; k < 3; ++k )
+		{
+			if( abs( jahNew[k] - jahOld[k] ) <= jahOrbitSteps * jahStepN[k] )
+				jahNew[k] = jahOld[k];
+			if( abs( jahBackNew[k] - jahBackOld[k] ) <= jahOrbitSteps * jahStepNB[k] )
+				jahBackNew[k] = jahBackOld[k];
+		}
+	}
 	const float jahMoved = max( jahBrickChange( jahOld, jahNew ), jahBrickChange( jahBackOld, jahBackNew ) );
 	// THE ABSOLUTE MOVE'S REFERENCE (PHOTON-7 stage 5, 5-4): what a reader read at this world point before. A CLEARED
 	// voxel (its brick's bit 10 - the shift brought it in, a whole injection wrote it - and its total still its direct

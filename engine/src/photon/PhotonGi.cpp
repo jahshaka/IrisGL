@@ -42,7 +42,9 @@
 #include <OgrePixelFormatGpuUtils.h>
 #include <OgreMesh2.h>
 #include <OgreSubMesh2.h>
+#include <Vao/OgreAsyncTicket.h>
 #include <Vao/OgreIndexBufferPacked.h>
+#include <Vao/OgreUavBufferPacked.h>
 #include <Vao/OgreVertexArrayObject.h>
 
 namespace jahshaka { namespace engine { namespace detail {
@@ -1639,6 +1641,38 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
 
 // ONE CASCADE'S VOXELS, WHOLE (PHOTON-VOXEL-3) — Engine.h. The same blocking
 // contract as giVoxelStats: flush, then a synchronous download of mip 0.
+// THE FEEDBACK'S BRICK STATE (Scene::giFeedbackBricks): the state buffer read back whole, stalling (a law's instrument).
+bool PhotonComponent::giFeedbackBricks(int cascadeIdx, GiFeedbackBricks &out) {
+    out = GiFeedbackBricks();
+    JAH_TRY {
+        if (cascadeIdx < 0 || size_t(cascadeIdx) >= mVctCascades.size()) return false;
+        const VctCascade &c = mVctCascades[size_t(cascadeIdx)];
+        if (!c.lighting || !c.built) return false;
+        unsigned dims[3] = { 0u, 0u, 0u };
+        Ogre::UavBufferPacked *state = c.lighting->feedbackBrickState(dims);
+        const size_t bricks = size_t(dims[0]) * dims[1] * dims[2];
+        constexpr size_t kWords = 10u;   // PhotonBrickFeedback_cs.glsl's FB_W
+        if (!state || !bricks || state->getNumElements() < bricks * kWords) return false;
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        rs->flushCommands();
+        Ogre::AsyncTicketPtr ticket = state->readRequest(0u, bricks * kWords, false);
+        const Ogre::uint32 *w = static_cast<const Ogre::uint32 *>(ticket->map());
+        out.flags.resize(bricks);
+        out.r.resize(bricks);
+        out.lastMove.resize(bricks);
+        for (size_t b = 0; b < bricks; ++b) {
+            out.flags[b] = w[kWords * b];
+            std::memcpy(&out.lastMove[b], &w[kWords * b + 1u], sizeof(float));
+            std::memcpy(&out.r[b], &w[kWords * b + 2u], sizeof(float));
+        }
+        ticket->unmap();
+        for (int a = 0; a < 3; ++a) out.dims[a] = dims[a];
+        out.available = true;
+        return true;
+    } JAH_CATCH(mError, false);
+    return false;
+}
+
 bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, bool lightOnly) {
     out = GiVoxelVolume();
     JAH_TRY {
