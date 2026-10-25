@@ -229,6 +229,8 @@ struct CardRec {
     /// re-injected), present at all in the cached layer, and when last marched.
     bool relightIndirect = false;
     bool indirectValid = false;
+    /// THE e = 0 COUNTER PER CARD (PHOTON-7 stage 10): the sky rays of its last TLAS gather, as read back (-1 none yet).
+    long long gatherSky = -1;
     unsigned long long lastIndirect = 0ull;
     /// THE MOVERS' TERM (PHOTON-CARDS-4): the card's rect in the mover-visibility
     /// layer holds a trace the relight must multiply in (`moverTraced`), and the
@@ -395,12 +397,16 @@ struct CardMoverTrace {
 /// size). The ray tier's answer: TRACED (the relight reads the layer), WAIT (the scene traces, its structure is not
 /// there this frame: the cards' indirect stays owed - never the voxel rays at the ray tier) or NO_RAYS (the scene does
 /// not trace: the relight's own voxel rays are the estimator, the no-ray route).
+/// THE READ LISTS' BLOCK (10-2c): a card slot's 1 + 2 x 32 words (rq_card_gather.comp kCardReadsBlock).
+constexpr unsigned kCardReadsBlock = 65u;
 struct CardGatherTrace {
     const float *records = nullptr;
     unsigned count = 0u;
     unsigned rays = 16u;
     float reach = 0.0f;
     Ogre::TextureGpu *gather = nullptr;
+    /// ...and THE READ LISTS (10-2c): the cards each gathered card's rays read, its blocks zeroed and rewritten.
+    Ogre::UavBufferPacked *reads = nullptr;
 };
 enum class CardGatherResult : unsigned { Traced, Wait, NoRays };
 
@@ -411,6 +417,8 @@ struct CardMoverHooks {
     /// scene's).
     std::function<CardGatherResult(const CardGatherTrace &)> gather;
     std::function<void(CardCacheStatus::GatherCounts &)> gatherCounts;
+    /// ...and each gathered card's own sky rays since the last call (its atlas slot, the count: the e = 0 counter per card)
+    std::function<void(std::vector<std::pair<unsigned, unsigned>> &)> gatherSky;
     /// The ray tier can trace the cards at all (open, its pipeline not refused): a refused trace while it can WAITS.
     std::function<bool()> present;
     /// The ray tier's two traces' last GPU milliseconds — the movers' and the
@@ -764,6 +772,8 @@ private:
     bool ensureGatherLayer();
     std::vector<float> mGatherCpu;
     unsigned long long mGatherWaits = 0ull;
+    /// the indirect listings card to card (10-2c), and those an overflowed read list's geometric bound took part in
+    unsigned long long mIndirectByCards = 0ull, mIndirectByBound = 0ull;
     bool mGatherByRays = false;
     CardMoverHooks mMoverHooks;
     /// Each mover's footprint box as last traced (its OLD footprint when it
@@ -834,6 +844,20 @@ private:
     Ogre::UavBufferPacked *mCardSlotState = nullptr;
     Ogre::UavBufferPacked *mCardReport = nullptr;
     Ogre::UavBufferPacked *mCardCluster = nullptr;   ///< a cascade's clusters' largest moves (the reduce's output)
+    /// THE CARD-TO-CARD RE-LISTING (PHOTON-7 stage 10, 10-2c): per atlas slot the largest change of the card's radiance
+    /// at this frame's relight and the frame's largest past the last slot (JahCardLight_cs.glsl writes them, the
+    /// accumulation's mode 3 reads them, its mode 4 clears them: a move is one frame's) - and, at the ray tier, THE READ
+    /// LISTS: per slot the cards its last TLAS gather read and the largest share of a texel's rays each answered
+    /// (rq_card_gather.comp's blocks of kCardReadsBlock words).
+    Ogre::UavBufferPacked *mCardMoves = nullptr;
+    Ogre::UavBufferPacked *mCardReads = nullptr;
+    /// THE FRAME the plan ran in (CardSceneView::frame): the accumulation's report is cleared once a frame by it.
+    unsigned long long mPlanFrame = 0ull;
+    /// this frame's captures, kept from the plan for the relight (the arrivals: the accumulation's mode 3 takes eight)
+    std::vector<unsigned> mFreshCards;
+    static_assert(kCaptureBatch <= 8u, "the card-to-card accumulation takes a frame's arrivals eight at most");
+    /// The card-to-card accumulation could not run (its job building): every card's indirect listed (the overflow rule).
+    void cardToCardMoves(bool shaderReadyRelight);
     std::vector<float> mCardBoxCpu;
     struct ReportTicket {
         Ogre::AsyncTicketPtr ticket;

@@ -607,6 +607,8 @@ void SurfaceCache::destroyAll() {
         if (mCardSlotState) { vao->destroyUavBuffer(mCardSlotState); mCardSlotState = nullptr; }
         if (mCardReport) { vao->destroyUavBuffer(mCardReport); mCardReport = nullptr; }
         if (mCardCluster) { vao->destroyUavBuffer(mCardCluster); mCardCluster = nullptr; }
+        if (mCardMoves) { vao->destroyUavBuffer(mCardMoves); mCardMoves = nullptr; }
+        if (mCardReads) { vao->destroyUavBuffer(mCardReads); mCardReads = nullptr; }
     }
     mAccumJob = mSensJob = nullptr;
     mAccumClearFrame = ~0ull;
@@ -660,7 +662,14 @@ bool SurfaceCache::ensureGatherLayer() {
     mGather->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
     mGather->setNumMipmaps(1u);
     mGather->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
-    return true;
+    // ...and THE READ LISTS (10-2c): every slot's block zero (no card read yet)
+    if (!mCardReads) {
+        Ogre::VaoManager *vao = rs->getVaoManager();
+        constexpr size_t slots = size_t(kCardAtlasSize / kCardMinSize) * (kCardAtlasSize / kCardMinSize);
+        std::vector<Ogre::uint32> zeros(slots * kCardReadsBlock, 0u);
+        mCardReads = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
+    }
+    return mCardReads != nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -1596,6 +1605,17 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
     mRelight.clear();
     mRelightMode.clear();
     mVct = view.vct;
+    mPlanFrame = view.frame;
+    // this frame's captures (the batch is cleared before the relight: the relight's arrivals, 10-2c)
+    mFreshCards.assign(mBatch.begin(), mBatch.end());
+    // THE e = 0 COUNTER PER CARD (10-2a): every gathered card's sky rays the ray tier read back since the last plan
+    if (mMoverHooks.gatherSky) {
+        std::vector<std::pair<unsigned, unsigned>> sky;
+        mMoverHooks.gatherSky(sky);
+        for (const std::pair<unsigned, unsigned> &e : sky)
+            if (e.first < mSlotCard.size() && mSlotCard[e.first] >= 0)
+                mCards[size_t(mSlotCard[e.first])].gatherSky = (long long)e.second;
+    }
     mIndirectRays = view.indirectRays;
     mRayLastShell = view.rayLastShell;
     mCloudField = view.cloudField;
@@ -1748,6 +1768,8 @@ void SurfaceCache::relightCards() {
     Ogre::HlmsCompute *hc = root.getHlmsManager()->getComputeHlms();
     if (!mLightJob) mLightJob = hc ? hc->findComputeJobNoThrow("Jahshaka/CardLight") : nullptr;
     if (!mLightJob) { mRelight.clear(); mVct = nullptr; return; }
+    // (the moves the relight writes - 10-2c - and the stale set's buffers)
+    if (!ensureIndirectBuffers()) { mRelight.clear(); mVct = nullptr; return; }
     Ogre::VaoManager *vao = rs->getVaoManager();
 
     // ---- THE RELIGHT LIST: each card's capture frame, as the job unprojects it.
@@ -1757,7 +1779,9 @@ void SurfaceCache::relightCards() {
         float *r = &mRelightCpu[i * kRelightFloats];
         const Ogre::Vector3 cam = c.centre + c.d * (c.halfDepth + captureMargin(c.halfDepth));
         r[0] = float(c.atlasX); r[1] = float(c.atlasY); r[2] = float(c.size);
-        r[3] = float(mRelightMode[i]);
+        // (mode bit 8: captured this frame - the card-to-card re-listing's arrival, 10-2c)
+        const bool captured = std::find(mFreshCards.begin(), mFreshCards.end(), mRelight[i]) != mFreshCards.end();
+        r[3] = float(mRelightMode[i] | (captured ? 8u : 0u));
         r[4] = cam.x; r[5] = cam.y; r[6] = cam.z;
         // THE MOVERS' TERM IS MULTIPLIED IN where the card carries a trace.
         r[7] = c.moverTraced ? 1.0f : 0.0f;
@@ -2087,15 +2111,18 @@ void SurfaceCache::relightCards() {
             job.rays = std::max(mIndirectRays, 1u);
             job.reach = mRayLastShell;
             job.gather = mGather;
+            job.reads = mCardReads;
             const CardGatherResult res = mMoverHooks.gather(job);
             if (res == CardGatherResult::Traced) {
-                for (size_t i : marched) mRelightCpu[i * kRelightFloats + 3u] = float(1u | 4u);
+                for (size_t i : marched)
+                    mRelightCpu[i * kRelightFloats + 3u] = float(unsigned(mRelightCpu[i * kRelightFloats + 3u]) | 4u);
                 mGatherByRays = true;
             } else if (res == CardGatherResult::Wait) {
                 // the direct half alone (its cached indirect, or none yet); the card stays owed (relightIndirect)
                 for (size_t i : marched) {
                     mRelightMode[i] = mCards[mRelight[i]].indirectValid ? 0u : 2u;
-                    mRelightCpu[i * kRelightFloats + 3u] = float(mRelightMode[i]);
+                    mRelightCpu[i * kRelightFloats + 3u] =
+                        float(mRelightMode[i] | (unsigned(mRelightCpu[i * kRelightFloats + 3u]) & 8u));
                 }
                 ++mGatherWaits;
             } else {
@@ -2116,7 +2143,7 @@ void SurfaceCache::relightCards() {
     const bool gatherBound = mGather != nullptr;
     if (mLightJob->getProperty("jah_card_gather") != (gatherBound ? 1 : 0))
         mLightJob->setProperty("jah_card_gather", gatherBound ? 1 : 0);
-    mLightJob->setNumUavUnits(gatherBound ? 11u : 10u);
+    mLightJob->setNumUavUnits(gatherBound ? 12u : 11u);
     // THE STORE'S ROUNDING follows the layer's format (jahCardRound): the
     // pre-scale is R11G11B10F's, and the RGBA16F fallback stores unrounded.
     {
@@ -2186,46 +2213,50 @@ void SurfaceCache::relightCards() {
     };
     mLightJob->_setUavBuffer(0u, bufSlot(mRelightBuffer, Ogre::ResourceAccess::Read));
     mLightJob->_setUavBuffer(1u, bufSlot(mLightBuffer, Ogre::ResourceAccess::Read));
+    // THE CARDS' MOVES (10-2c): every relit card's largest radiance change this frame, written
+    mLightJob->_setUavBuffer(3u, bufSlot(mCardMoves, Ogre::ResourceAccess::ReadWrite));
     {
         Ogre::DescriptorSetUav::TextureSlot uav(Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        // (read too: the move against what the card held, 10-2c)
         uav.texture = mRadiance;
-        uav.access = Ogre::ResourceAccess::Write;
+        uav.access = Ogre::ResourceAccess::ReadWrite;
         uav.pixelFormat = mRadiance->getPixelFormat();
-        mLightJob->_setUavTexture(3u, uav);
+        mLightJob->_setUavTexture(4u, uav);
         uav.texture = mIndirect;
         uav.access = Ogre::ResourceAccess::ReadWrite;
         uav.pixelFormat = mIndirect->getPixelFormat();
-        mLightJob->_setUavTexture(4u, uav);
+        mLightJob->_setUavTexture(5u, uav);
         uav.texture = mMoverVis;
         uav.access = Ogre::ResourceAccess::Read;
         uav.pixelFormat = mMoverVis->getPixelFormat();
-        mLightJob->_setUavTexture(5u, uav);
+        mLightJob->_setUavTexture(6u, uav);
         // The Albedo and Normal layers: read, and their alpha written (JahCardView).
         uav.texture = mAtlas[unsigned(CardLayer::Albedo)];
         uav.access = Ogre::ResourceAccess::ReadWrite;
         uav.pixelFormat = uav.texture->getPixelFormat();
-        mLightJob->_setUavTexture(6u, uav);
+        mLightJob->_setUavTexture(7u, uav);
         uav.texture = mAtlas[unsigned(CardLayer::Normal)];
         uav.pixelFormat = uav.texture->getPixelFormat();
-        mLightJob->_setUavTexture(7u, uav);
+        mLightJob->_setUavTexture(8u, uav);
         // THE FLAT TERM (ENGINE-POLISH-PHOTON-1 stage 3): the emissive and the specular lobe's
         // re-emission, written.
         uav.texture = mFlat;
         uav.access = Ogre::ResourceAccess::Write;
         uav.pixelFormat = mFlat->getPixelFormat();
-        mLightJob->_setUavTexture(8u, uav);
+        mLightJob->_setUavTexture(9u, uav);
         // THE SUN'S VISIBILITY AT THE TEXEL (PHOTON-3 stage 2), written - and the lamps' (its green, PHOTON-7 stage
         // 5, 5-3), read and kept.
         uav.texture = mSunVis;
         uav.access = Ogre::ResourceAccess::ReadWrite;
         uav.pixelFormat = mSunVis->getPixelFormat();
-        mLightJob->_setUavTexture(9u, uav);
-        // THE GATHER LAYER (10-2a): the TLAS gather's irradiance, read
+        mLightJob->_setUavTexture(10u, uav);
+        // THE GATHER LAYER (10-2a): the TLAS gather's irradiance, read - and its a, the texels' reported radiance
+        // (10-2c), read and written
         if (gatherBound) {
             uav.texture = mGather;
-            uav.access = Ogre::ResourceAccess::Read;
+            uav.access = Ogre::ResourceAccess::ReadWrite;
             uav.pixelFormat = mGather->getPixelFormat();
-            mLightJob->_setUavTexture(10u, uav);
+            mLightJob->_setUavTexture(11u, uav);
         }
     }
     mLightJob->_setUavBuffer(2u, bufSlot(mGiBuffer, Ogre::ResourceAccess::Read));
@@ -2302,19 +2333,19 @@ void SurfaceCache::relightCards() {
         for (unsigned i : sensTex)
             mSensJob->setTexture(Ogre::uint8(i), Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty(), nullptr, false);
     }
+    // THE CARD-TO-CARD RE-LISTING (10-2c): the relight's moves into the cards that read the moved ones - after the
+    // sensitivity, which restarts a marched card's accumulator (a card gathered this frame read the radiance of BEFORE
+    // this relight: what moved in it is still its to gather) - then the moves cleared
+    if (shaderReady) cardToCardMoves(true);
     {
         const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
         mLightJob->_setUavBuffer(0u, empty);
         mLightJob->_setUavBuffer(1u, empty);
         mLightJob->_setUavBuffer(2u, empty);
-        mLightJob->_setUavTexture(3u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
-        mLightJob->_setUavTexture(4u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
-        mLightJob->_setUavTexture(5u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
-        mLightJob->_setUavTexture(6u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
-        mLightJob->_setUavTexture(7u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
-        mLightJob->_setUavTexture(8u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
-        mLightJob->_setUavTexture(9u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
-        if (gatherBound) mLightJob->_setUavTexture(10u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        mLightJob->_setUavBuffer(3u, empty);
+        for (Ogre::uint8 k = 4u; k <= 10u; ++k)
+            mLightJob->_setUavTexture(k, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        if (gatherBound) mLightJob->_setUavTexture(11u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->setConstBuffer(0u, nullptr);
         mLightJob->setNumTexUnits(0u);
     }
@@ -2361,6 +2392,9 @@ void SurfaceCache::relightCards() {
 // lag of host frames, and planRelights relights its indirect. The card's march resets its would-move.
 namespace {
 constexpr unsigned kCardSlots = (kCardAtlasSize / kCardMinSize) * (kCardAtlasSize / kCardMinSize);
+// (the card-to-card shaders' constants: JahCardLight_cs.glsl's and JahCardIndirect_cs.glsl's 16384 slots, the frame's
+// largest move at the last; rq_card_gather.comp's and JahCardIndirect_cs.glsl's 65-word blocks of 32 entries)
+static_assert(kCardSlots == 16384u, "the card-to-card shaders index 16384 slots");
 constexpr unsigned kReportCapacity = 4096u;
 constexpr unsigned kMaxCardClusters = 4096u;   ///< 4^3 bricks a cluster (two records of three words): a 512^3 cascade's 16^3
 }   // namespace
@@ -2374,8 +2408,79 @@ Ogre::UavBufferPacked *SurfaceCache::ensureLightBuffer() {
     return mLightBuffer;
 }
 
+void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
+    if (!shaderReadyRelight || !ensureIndirectBuffers()) return;
+    Ogre::Root &root = Ogre::Root::getSingleton();
+    Ogre::RenderSystem *rs = root.getRenderSystem();
+    Ogre::HlmsCompute *hc = root.getHlmsManager()->getComputeHlms();
+    if (!mAccumJob) mAccumJob = hc ? hc->findComputeJobNoThrow("Jahshaka/CardAccumulate") : nullptr;
+    if (!mAccumJob) return;
+    // AT THE RAY TIER a card reads other cards (its TLAS gather); elsewhere it reads the voxels alone and its readers'
+    // lists do not exist - the moves are cleared all the same
+    const bool cardsRead = mGather && mCardReads && mCardRecords;
+    const auto bufSlot = [](Ogre::UavBufferPacked *b, Ogre::ResourceAccess::ResourceAccess a) {
+        Ogre::DescriptorSetUav::BufferSlot slot(Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
+        slot.buffer = b;
+        slot.access = a;
+        return slot;
+    };
+    mAccumJob->_setUavBuffer(0u, bufSlot(cardsRead ? mCardReads : mCardBoxBuffer, Ogre::ResourceAccess::Read));
+    mAccumJob->_setUavBuffer(1u, bufSlot(mCardBoxBuffer, Ogre::ResourceAccess::Read));
+    mAccumJob->_setUavBuffer(2u, bufSlot(mCardSlotState, Ogre::ResourceAccess::ReadWrite));
+    mAccumJob->_setUavBuffer(3u, bufSlot(mCardReport, Ogre::ResourceAccess::ReadWrite));
+    mAccumJob->_setUavBuffer(4u, bufSlot(mCardMoves, Ogre::ResourceAccess::ReadWrite));
+    Ogre::ShaderParams &params = mAccumJob->getShaderParams("default");
+    const auto setMode = [&params](const Ogre::uint32 mode[4]) {
+        if (Ogre::ShaderParams::Param *p = params.findParameter("caMode")) p->setManualValue(mode, 4u);
+        params.setDirty();
+    };
+    const bool ready = !mAsyncShaders || hc->requestAsync(mAccumJob) != Ogre::HlmsCompute::AsyncPending;
+    if (ready) {
+        mAccumJob->setNumThreadGroupsBasedOn(Ogre::HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u);
+        if (cardsRead) {
+            // the frame's report starts empty once (the voxels' accumulation keeps the same rule)
+            if (mAccumClearFrame != mPlanFrame) {
+                mAccumClearFrame = mPlanFrame;
+                const Ogre::uint32 clear[4] = { 1u, 0u, kReportCapacity, 0u };
+                setMode(clear);
+                mAccumJob->setNumThreadGroups(1u, 1u, 1u);
+                detail::photonDispatch(hc, mAccumJob, rs);
+            }
+            const Ogre::uint32 mode[4] = { 3u, mCardRecords, kReportCapacity, 0u };
+            setMode(mode);
+            // THE ARRIVALS: this frame's captures (at most the batch's eight) by their records, four in caDims and four
+            // as caSelf's bits (0xFFFFFFFF: none)
+            {
+                Ogre::uint32 fresh[8];
+                for (unsigned f = 0; f < 8u; ++f)
+                    fresh[f] = f < mFreshCards.size() ? Ogre::uint32(mFreshCards[f]) : 0xFFFFFFFFu;
+                float freshBits[4];
+                std::memcpy(freshBits, &fresh[4], sizeof(freshBits));
+                if (Ogre::ShaderParams::Param *p = params.findParameter("caDims")) p->setManualValue(fresh, 4u);
+                if (Ogre::ShaderParams::Param *p = params.findParameter("caSelf")) p->setManualValue(freshBits, 4u);
+                params.setDirty();
+            }
+            mAccumJob->setNumThreadGroups((mCardRecords + 63u) / 64u, 1u, 1u);
+            detail::photonDispatch(hc, mAccumJob, rs);
+            mAccumRan = true;
+        }
+        const Ogre::uint32 clearMoves[4] = { 4u, kCardSlots, 0u, 0u };
+        setMode(clearMoves);
+        mAccumJob->setNumThreadGroups((kCardSlots + 63u) / 64u, 1u, 1u);
+        detail::photonDispatch(hc, mAccumJob, rs);
+    } else if (cardsRead) {
+        // A MOVE THAT COULD NOT BE MEASURED (the job building): every card's indirect is listed (the overflow rule)
+        for (CardRec &c : mCards)
+            if (c.indirectValid) c.relightIndirect = true;
+        ++mIndirectOverflows;
+    }
+    const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
+    for (Ogre::uint8 k = 0u; k < 5u; ++k) mAccumJob->_setUavBuffer(k, empty);
+    if (cardsRead && ready) endIndirectFrame(mPlanFrame);
+}
+
 bool SurfaceCache::ensureIndirectBuffers() {
-    if (mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster) return true;
+    if (mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster && mCardMoves) return true;
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
     if (!vao) return false;
@@ -2396,7 +2501,11 @@ bool SurfaceCache::ensureIndirectBuffers() {
         std::vector<Ogre::uint32> zeros(6u * kMaxCardClusters, 0u);
         mCardCluster = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
     }
-    return mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster;
+    if (!mCardMoves) {
+        std::vector<Ogre::uint32> zeros(size_t(kCardSlots), 0u);
+        mCardMoves = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
+    }
+    return mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster && mCardMoves;
 }
 
 void SurfaceCache::accumulateIndirect(Ogre::UavBufferPacked *brickState, const unsigned dims[3],
@@ -2507,10 +2616,13 @@ void SurfaceCache::harvestIndirectReports(unsigned long long frame) {
         const Ogre::uint32 *w = static_cast<const Ogre::uint32 *>(r.ticket->map());
         const Ogre::uint32 n = std::min<Ogre::uint32>(w[0], kReportCapacity);
         for (Ogre::uint32 k = 0; k < n; ++k) {
-            const Ogre::uint32 slot = w[1u + k];
+            // (bit 30: listed card to card, bit 31: the overflowed list's geometric bound took part - 10-2c)
+            const Ogre::uint32 word = w[1u + k], slot = word & 0x3FFFFFFFu;
             if (slot >= mSlotCard.size() || mSlotCard[slot] < 0) continue;   // freed since: nothing to relight
             mCards[size_t(mSlotCard[slot])].relightIndirect = true;
             ++mIndirectReported;
+            if (word & 0x40000000u) ++mIndirectByCards;
+            if (word & 0x80000000u) ++mIndirectByBound;
         }
         r.ticket->unmap();
         r.ticket.reset();
@@ -3691,6 +3803,8 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.lampRaysLastTrace = mLampRaysLastTrace;
     if (mMoverHooks.gatherCounts) mMoverHooks.gatherCounts(out.gather);
     out.gatherWaits = mGatherWaits;
+    out.indirectByCards = mIndirectByCards;
+    out.indirectByBound = mIndirectByBound;
     out.gatherByRays = mGatherByRays;
     out.areaStrata = mAreaStrata;
     for (unsigned k = 0; k < 4u; ++k) out.demandHits[k] = mDemandHits[k];
@@ -3899,6 +4013,7 @@ bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &
     }
     out.lampCount = rec.lampCount;
     for (unsigned k = 0; k < 16u; ++k) out.lampIds[k] = rec.lampIds[k];
+    out.gatherSky = rec.gatherSky;
     // ...and THE GATHER LAYER (PHOTON-7 stage 10, 10-2a): the TLAS gather's irradiance and the texel's escaped share.
     if (mGather) {
         Ogre::AsyncTextureTicket *tk = tm->createAsyncTextureTicket(

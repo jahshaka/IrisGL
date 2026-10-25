@@ -35,6 +35,16 @@
 // move times it bounds the change - times the card's sensitivity. A card at a code or more is LISTED (the report, read
 // back by the host, which relights its indirect).
 // CLEAR (mode 1): the report's count, once a frame before the first accumulation.
+// CARD TO CARD (mode 3; PHOTON-7 stage 10, 10-2c - at the ray tier a card's indirect is gathered by TLAS rays that read
+// OTHER CARDS, rq_card_gather.comp): one thread a resident card - each card its last gather READ (its block of the
+// read lists: the read card's slot and the largest share of one texel's rays it answered) times that card's MOVE this
+// frame (the relight's largest change of its radiance, JahCardLight_cs.glsl) bounds the change of every texel of the
+// reader (a texel's gather is the mean of its rays: a read card moved by m moves it by at most m times its share), times
+// the reader's sensitivity, into its would-move - the same accumulator and the same listing as the voxels' moves. A
+// block that overflowed (more cards read than it holds) takes the frame's largest move whole. The Jacobi iteration of
+// the cards' bounces, stopped by the code: a card relists while what it read moved a code of it. A list that overflowed
+// takes every other moved card through the geometric bound (below).
+// CLEAR THE MOVES (mode 4): every slot's move, after mode 3 read them (a move is one frame's).
 // THE FIELD'S VARIANT (jah_field_mark, Jahshaka/FieldAccumulate; PHOTON-7 stage 5, 5-4): the receivers are the irradiance
 // field's probes (points: zero half extents; the state is the field's marks, its sensitivity the generation job's), and
 // the bound takes VISIBILITY from the probe's own depth moments (DDGI's own test, the atlas the reader's Chebyshev reads):
@@ -66,6 +76,7 @@
 	@end
 	layout( std430, ogre_U0 ) restrict readonly buffer caStateLayout { uint caState[]; };
 	// THE RESIDENT CARDS: two vec4 a card - ( centre.xyz, the slot as uint bits ), ( half extents.xyz, 0 )
+	// (MODE 3 binds THE READ LISTS at U0 - rq_card_gather.comp's blocks - and THE MOVES at U4)
 	layout( std430, ogre_U1 ) restrict readonly buffer caCardLayout { vec4 caCards[]; };
 	layout( std430, ogre_U2 ) restrict coherent buffer caSlotLayout { uint caSlot[]; };
 	layout( std430, ogre_U3 ) restrict coherent buffer caReportLayout { uint caReport[]; };
@@ -170,6 +181,13 @@ void main()
 			caReport[0] = 0u;
 		return;
 	}
+	if( caMode.x == 4u )
+	{
+		// THE MOVES CLEARED (mode 4): every slot (caMode.y = the slots)
+		if( gl_GlobalInvocationID.x < caMode.y )
+			caCluster[gl_GlobalInvocationID.x] = 0u;
+		return;
+	}
 	// THE CLUSTERS: 4^3 bricks each, per axis ceil( bricks / 4 )
 	const uvec3 cd = ( caDims.xyz + 3u ) / 4u;
 	const uint clusters = cd.x * cd.y * cd.z;
@@ -241,6 +259,94 @@ void main()
 	if( !want )
 		return;
 	float sum = 0.0;   // codes
+	uint reportBits = 0u;   // a listing's origin in its report word (bit 30: card to card; bit 31: the bound took part)
+@property( jah_field_mark )
+@else
+	if( caMode.x == 3u )
+	{
+		// CARD TO CARD (mode 3, the head of this file): the reader's block (1 + 2 x 32 words) of the read lists at U0 -
+		// each card it read, its exact share times its move
+		reportBits = 0x40000000u;
+		const uint slotB = floatBitsToUint( c0.w );
+		const uint base = slotB * 65u;
+		for( uint e = 0u; e < 32u; ++e )
+		{
+			const uint key = caState[base + 1u + 2u * e];
+			if( key == 0u || key > 16384u )
+				continue;
+			const float m = uintBitsToFloat( caCluster[key - 1u] );
+			if( !( m > 0.0 ) )
+				continue;
+			sum += sens * m * ( float( caState[base + 2u + 2u * e] ) * ( 1.0 / 65535.0 ) );
+		}
+		// AN OVERFLOWED LIST (the lead's ruling: the GEOMETRIC BOUND, the voxels' own): every moved card the list does
+		// not hold, its move times min( 1, S / ( pi d^2 ) ) - S its box's largest silhouette, d the gap between the two
+		// boxes (occlusion ignored): a cosine-weighted mean's share of a box is at most its solid angle over pi, so the
+		// sum bounds the change of every texel's integral and never misses a move
+		if( ( caState[base] & 1u ) != 0u )
+		{
+			float bound = 0.0;
+			for( uint j = 0u; j < caMode.y; ++j )
+			{
+				const vec4 a0 = caCards[2u * j], a1 = caCards[2u * j + 1u];
+				const uint slotA = floatBitsToUint( a0.w );
+				if( slotA >= 16384u )
+					continue;
+				const float m = uintBitsToFloat( caCluster[slotA] );
+				if( !( m > 0.0 ) )
+					continue;
+				bool listed = false;
+				for( uint e = 0u; e < 32u && !listed; ++e )
+					listed = caState[base + 1u + 2u * e] == slotA + 1u;
+				if( listed )
+					continue;
+				const vec3 ext = 2.0 * a1.xyz;
+				const float area = ext.x * ext.y + ext.y * ext.z + ext.z * ext.x;
+				const vec3 gap = max( abs( centre - a0.xyz ) - ( halfExt + a1.xyz ), vec3( 0.0, 0.0, 0.0 ) );
+				const float d2 = dot( gap, gap );
+				bound += m * ( d2 > 0.0 ? min( 1.0, area / ( CA_PI * d2 ) ) : 1.0 );
+			}
+			if( bound > 0.0 )
+				reportBits |= 0x80000000u;
+			sum += sens * bound;
+		}
+		else
+		{
+			// THE ARRIVALS: a card captured this frame (up to the batch's eight, their records in caDims and caSelf's
+			// bits) - what read its instance before read the voxels there, and no list holds it - its brightest reported
+			// radiance through the same geometric bound, for every reader whose list does not hold it
+			float bound = 0.0;
+			for( uint f = 0u; f < 8u; ++f )
+			{
+				const uint j = f < 4u ? caDims[f] : floatBitsToUint( caSelf[f - 4u] );
+				if( j >= caMode.y )
+					continue;
+				const vec4 a0 = caCards[2u * j], a1 = caCards[2u * j + 1u];
+				const uint slotA = floatBitsToUint( a0.w );
+				if( slotA >= 16384u )
+					continue;
+				const float m = uintBitsToFloat( caCluster[slotA] );
+				if( !( m > 0.0 ) )
+					continue;
+				bool listed = false;
+				for( uint e = 0u; e < 32u && !listed; ++e )
+					listed = caState[base + 1u + 2u * e] == slotA + 1u;
+				if( listed )
+					continue;
+				const vec3 ext = 2.0 * a1.xyz;
+				const float area = ext.x * ext.y + ext.y * ext.z + ext.z * ext.x;
+				const vec3 gap = max( abs( centre - a0.xyz ) - ( halfExt + a1.xyz ), vec3( 0.0, 0.0, 0.0 ) );
+				const float d2 = dot( gap, gap );
+				bound += m * ( d2 > 0.0 ? min( 1.0, area / ( CA_PI * d2 ) ) : 1.0 );
+			}
+			if( bound > 0.0 )
+				reportBits |= 0x80000000u;
+			sum += sens * bound;
+		}
+	}
+	else
+	{
+@end
 @property( jah_field_mark )
 	// THE PROBE'S TEXELS (the head of this file): each irradiance texel's direction and its own code
 	const uint irrRes = min( caField2.x, 8u );
@@ -359,6 +465,10 @@ void main()
 @end
 	}
 @property( jah_field_mark )
+@else
+	}   // (mode 0's clusters)
+@end
+@property( jah_field_mark )
 	for( uint t = 0u; t < nTex; ++t )
 		sum = max( sum, texSum[t] );
 @end
@@ -387,7 +497,7 @@ void main()
 		const uint at = atomicAdd( caReport[0], 1u );
 		if( at < caMode.z )
 		{
-			caReport[1u + at] = s >> 2u;
+			caReport[1u + at] = ( s >> 2u ) | reportBits;
 			caSlot[s + 3u] = 1u;
 		}
 	}

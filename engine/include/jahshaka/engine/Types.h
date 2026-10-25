@@ -4078,9 +4078,12 @@ struct CardSample {
     float worldNormal[3] = { 0, 0, 0 };
     float sunLift = 0.0f;
     /// THE GATHER LAYER AT THE TEXEL (PHOTON-7 stage 10, 10-2a; rq_card_gather.comp): its last TLAS gather's
-    /// envColourD (rgb) and the share of its rays that escaped to the sky (a: the texel's e - 0 inside a watertight
-    /// room). All 0 where the ray tier never gathered (no layer, or the texel not gathered yet).
+    /// envColourD (rgb) and the radiance it last REPORTED (a: the card-to-card re-listing's reference, 10-2c). All 0
+    /// where the ray tier never gathered (no layer).
     float gather[4] = { 0, 0, 0, 0 };
+    /// ...and THE e = 0 COUNTER of the answering card: its last TLAS gather's rays that escaped to the sky (-1: none
+    /// read back yet) - 0 for every card inside a watertight room.
+    long long gatherSky = -1;
 };
 
 /// ONE QUESTION FOR THE RAY JOB'S CARD READ (Engine::cardReadParity): a world
@@ -4178,9 +4181,15 @@ struct CardCacheStatus {
     struct GatherCounts {
         unsigned long long dispatches = 0ull, rays = 0ull, card = 0ull, voxel = 0ull, backFaces = 0ull,
                            noSample = 0ull, sky = 0ull, texels = 0ull, emptyTexels = 0ull;
+        /// ...and the texels whose reads overflowed their card's read list (10-2c: the card then takes the frame's
+        /// largest move whole)
+        unsigned long long readsOverflowed = 0ull;
     } gather;
     unsigned long long gatherWaits = 0ull;
     bool gatherByRays = false;
+    /// THE CARD-TO-CARD RE-LISTING (10-2c): the indirect listings a moved card read by the listed one made, and those an
+    /// overflowed read list's geometric bound took part in (both inside indirectReported).
+    unsigned long long indirectByCards = 0ull, indirectByBound = 0ull;
     unsigned long long demandHits[4] = { 0ull, 0ull, 0ull, 0ull };
     /// The queue: cards waiting for a capture, and the texel budget a frame
     /// spends on them.

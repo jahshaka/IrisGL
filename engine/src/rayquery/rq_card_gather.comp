@@ -78,11 +78,21 @@ struct CardRec
 	uvec4 lampIds[4];
 };
 layout( std430, set = 0, binding = 2 ) readonly buffer Cards { CardRec cards[]; };
-/// THE GATHER LAYER: rgb = the texel's envColourD (the mean radiance over its cosine hemisphere), a = the share of its
-/// rays that escaped to the sky - the texel's e, 0 inside a watertight room (CardSample::gather, gi.sealed_sky (6)).
-layout( rgba16f, set = 0, binding = 3 ) uniform writeonly image2D cardGather;
-/// THE COUNTS: rays, card hits, cascade hits, back faces, no sample, the sky, texels gathered, texels with no sample.
-layout( std430, set = 0, binding = 4 ) buffer Counts { uint counts[8]; };
+/// THE GATHER LAYER: rgb = the texel's envColourD (the mean radiance over its cosine hemisphere); a = the relight's
+/// REPORTED radiance (10-2c, JahCardLight_cs.glsl: the card-to-card re-listing's reference), kept as it is here.
+layout( rgba16f, set = 0, binding = 3 ) uniform image2D cardGather;
+/// THE COUNTS: rays, card hits, cascade hits, back faces, no sample, the sky, texels gathered, texels with no sample,
+/// texels whose reads overflowed their card's block (10-2c) - and from word 9 each record's own sky rays (the e = 0
+/// counter per card: CardSample::gatherSky, gi.sealed_sky (6)).
+layout( std430, set = 0, binding = 4 ) buffer Counts { uint counts[]; };
+/// THE CARDS EACH CARD'S RAYS READ (the card-to-card re-listing, 10-2c; Jahshaka/CardAccumulate's mode 3 reads it): per
+/// atlas SLOT of a reader (the card's corner in 16-texel cells, y x 128 + x) a block of 1 + 2 K words - [0] the
+/// overflow flag (more than K cards read: the accumulation then takes the frame's largest move), then K entries of (the
+/// read card's slot + 1, the largest share of a texel's rays it answered, 65535 = all). The ray tier zeroes the blocks
+/// of this dispatch's cards before it (their reads are this gather's), so a block is the card's LAST gather's.
+layout( std430, set = 0, binding = 37 ) buffer CardReads { uint cardReads[]; };
+const uint kCardReadsK = 32u;
+const uint kCardReadsBlock = 1u + 2u * kCardReadsK;
 
 // ---- THE HIT SET (ScreenProbeGather.h HitSetSources; RayQueryTier::gatherCards' kCardGatherHitSlots) ----------------
 layout( set = 0, binding = 5 ) uniform sampler3D voxelIso[kMaxCascades];
@@ -183,7 +193,7 @@ CardRec gnCard;
 #include "jah_geometric_normal.glsl"
 
 const uint kCountRays = 0u, kCountCard = 1u, kCountVoxel = 2u, kCountBack = 3u, kCountNoSample = 4u, kCountSky = 5u,
-		   kCountTexels = 6u, kCountEmpty = 7u;
+		   kCountTexels = 6u, kCountEmpty = 7u, kCountReadsOver = 8u;
 
 void main()
 {
@@ -195,7 +205,7 @@ void main()
 	const float depth = inCard ? texelFetch( jahCardDepthLayer, at, 0 ).x : 0.0;
 	const int n = max( int( p.knobs.x ), 1 );
 
-	uint c[8] = uint[8]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
+	uint c[9] = uint[9]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
 	vec4 answer = vec4( 0.0 );
 	if( inCard && depth > 0.0 )
 	{
@@ -214,6 +224,12 @@ void main()
 		const float spread = sqrt( 2.0 / float( n ) );
 		vec3 sum = vec3( 0.0 );
 		float taken = 0.0;
+		// the cards this texel's rays read: their slots and how many of its rays each answered (16 cards at most: one
+		// more is the block's overflow)
+		uint readSlot[16];
+		uint readRays[16];
+		uint reads = 0u;
+		bool readsOver = false;
 		for( int i = 0; i < n; ++i )
 		{
 			const vec3 dir = normalize( basis * jahRayCosineDir( i, n ) );
@@ -261,20 +277,74 @@ void main()
 			sum += radiance;
 			taken += 1.0;
 			++c[source == 1u ? kCountCard : kCountVoxel];
+			if( source == 1u && jahCardPicked < JAH_CARD_RECORDS )
+			{
+				const uvec4 atlas = jahCards[jahCardPicked].atlas;
+				const uint readS = ( atlas.y >> 4u ) * 128u + ( atlas.x >> 4u );
+				uint k = 0u;
+				while( k < reads && readSlot[k] != readS )
+					++k;
+				if( k == reads && reads < 16u )
+				{
+					readSlot[k] = readS;
+					readRays[k] = 0u;
+					++reads;
+				}
+				if( k < reads )
+					++readRays[k];
+				else
+					readsOver = true;
+			}
+		}
+		// THE TEXEL'S READS INTO ITS CARD'S BLOCK (the head of this file): each read card's share of the texel's samples,
+		// the block's largest kept (a card's largest texel share bounds every texel's change by its move)
+		if( reads > 0u && taken > 0.0 )
+		{
+			const uint base = ( ( uint( r.rect.y ) >> 4u ) * 128u + ( uint( r.rect.x ) >> 4u ) ) * kCardReadsBlock;
+			bool over = readsOver;
+			for( uint k = 0u; k < reads; ++k )
+			{
+				const uint key = readSlot[k] + 1u;
+				const uint share = uint( ceil( min( float( readRays[k] ) / taken, 1.0 ) * 65535.0 ) );
+				uint h = ( readSlot[k] * 2654435761u ) % kCardReadsK;
+				bool kept = false;
+				for( uint probe = 0u; probe < kCardReadsK && !kept; ++probe )
+				{
+					const uint e = base + 1u + 2u * ( ( h + probe ) % kCardReadsK );
+					const uint was = atomicCompSwap( cardReads[e], 0u, key );
+					if( was == 0u || was == key )
+					{
+						atomicMax( cardReads[e + 1u], share );
+						kept = true;
+					}
+				}
+				over = over || !kept;
+			}
+			if( over )
+			{
+				atomicOr( cardReads[base], 1u );
+				++c[kCountReadsOver];
+			}
 		}
 		++c[kCountTexels];
 		if( !( taken > 0.0 ) )
 			++c[kCountEmpty];
 		answer = vec4( taken > 0.0 ? min( sum * ( 1.0 / taken ), vec3( kMaxRadiance ) ) : vec3( 0.0 ),
-					   float( c[kCountSky] ) / float( n ) );
+					   0.0 );
 	}
 	if( inCard )
-		imageStore( cardGather, at, answer );
+		imageStore( cardGather, at, vec4( answer.xyz, imageLoad( cardGather, at ).w ) );
 	// THE COUNTS, one atomic a subgroup a count (every lane reaches here: no lane returned early)
-	for( uint k = 0u; k < 8u; ++k )
+	for( uint k = 0u; k < 9u; ++k )
 	{
 		const uint s = subgroupAdd( c[k] );
 		if( subgroupElect() && s != 0u )
 			atomicAdd( counts[k], s );
+	}
+	{
+		// ...and this record's sky rays (a workgroup is one record's)
+		const uint s = subgroupAdd( c[kCountSky] );
+		if( subgroupElect() && s != 0u )
+			atomicAdd( counts[9u + gl_WorkGroupID.z], s );
 	}
 }

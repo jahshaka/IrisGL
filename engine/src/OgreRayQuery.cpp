@@ -1701,6 +1701,8 @@ public:
     CardGatherResult gatherCards(OgreScene *scene, const CardGatherTrace &job);
     /// The life of the scene's counts, every retired dispatch's folded in (CardCacheStatus::gather).
     void cardGatherCounts(OgreScene *scene, CardCacheStatus::GatherCounts &out);
+    /// ...and each gathered card's own sky rays (its atlas slot, the count), every retired dispatch's since the last call.
+    void cardGatherSky(OgreScene *scene, std::vector<std::pair<unsigned, unsigned>> &out);
     void forgetCardGather(OgreScene *scene);
 
 private:
@@ -1713,6 +1715,10 @@ private:
         RawBuffer       counts[kReflectRing];
         uint32_t        countsFrame[kReflectRing] = {};
         bool            countsPending[kReflectRing] = {};
+        /// each pending dispatch's records' atlas slots (their per-record sky counts' owners)
+        std::vector<uint32_t> countsSlots[kReflectRing];
+        /// the per-card sky counts folded since the cache last drained them: (slot, sky rays)
+        std::vector<std::pair<unsigned, unsigned>> skyDrain;
         unsigned frame = 0;
         CardCacheStatus::GatherCounts total;
     };
@@ -1725,6 +1731,8 @@ private:
     VkShaderModule        mCgModule = VK_NULL_HANDLE;
     VkDescriptorPool      mCgPool = VK_NULL_HANDLE;
     bool                  mCgFailed = false;
+    /// a read-list block of zeros, the source of the copy that clears this dispatch's cards' blocks (10-2c)
+    RawBuffer             mCgZeroBlock;
     /// THE INSTANCE JOB (ATOM-CPU-WALKS-1, rq_tlas_write.comp): its pipeline and the
     /// pool its per-scene ring of sets comes from (kTlasWriteSets, from the layout's
     /// own constants).
@@ -2618,6 +2626,7 @@ void RayQueryTier::close() {
             dropBuffer(kv.second.counts[i]);
         }
     mCardGather.clear();
+    dropBuffer(mCgZeroBlock);
     if (mCgPool) vkDestroyDescriptorPool(mVk, mCgPool, nullptr);
     if (mCgPipeline) vkDestroyPipeline(mVk, mCgPipeline, nullptr);
     if (mCgModule) vkDestroyShaderModule(mVk, mCgModule, nullptr);
@@ -9648,8 +9657,11 @@ struct CardGatherParams {
     float cloudSun[4] = {};
     float hitSun[4] = {};
 };
-/// The job's own four (the params, the records, the Gather layer, the counts) and the hit set at 0 and 5..36.
-constexpr unsigned kCardGatherBindings = 37u;
+/// The job's own five (the params, the records, the Gather layer, the counts; the read lists at 37) and the hit set at 0
+/// and 5..36.
+constexpr unsigned kCardGatherBindings = 38u;
+/// THE READ LISTS' BLOCK (10-2c; rq_card_gather.comp kCardReadsBlock, SurfaceCache::kCardReadsBlock): 1 + 2 x 32 words.
+constexpr unsigned kCardGatherReadsBlock = 65u;
 constexpr HitSetSlots kCardGatherHitSlots = {
     0u,
     { 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u },
@@ -9661,11 +9673,14 @@ constexpr HitSetSlots kCardGatherHitSlots = {
     35u,
     36u,
 };
-static_assert(kCardGatherBindings == kHitSetBindings + 4u, "the cards' gather set is the hit set and its own four");
+static_assert(kCardGatherBindings == kHitSetBindings + 5u, "the cards' gather set is the hit set and its own five");
+static_assert(kCardGatherReadsBlock == kCardReadsBlock, "one read-list block");
 /// The records ring's capacity: the relight list's (kMaxRelights).
 constexpr unsigned kCardGatherMaxRecords = 1024u;
 constexpr unsigned kCardGatherRecordFloats = 36u;
-constexpr unsigned kCardGatherCounts = 8u;
+constexpr unsigned kCardGatherCounts = 9u;
+/// ...then each record's own sky rays (the e = 0 counter per card), one word a record
+constexpr unsigned kCardGatherCountWords = kCardGatherCounts + kCardGatherMaxRecords;
 /// THE HIT'S SUN RAY at a voxel-answered hit (jah_rq_hit_direct.glsl): the still casters alone (a cache holds no mover:
 /// the mask's law, rq_card_gather.comp's head) to the cards' own sun range (OgreSurfaceCache.cpp kMoverRayRange).
 constexpr float kCardGatherSunRange = 10000.0f;
@@ -9687,6 +9702,10 @@ bool RayQueryTier::makeCardGatherPipeline(std::string &err) {
         b[1u + i].descriptorCount = 1u;
         b[1u + i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
+    b[37].binding = 37u;   // the read lists (10-2c)
+    b[37].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    b[37].descriptorCount = 1u;
+    b[37].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     DescriptorPoolPlan plan;
     if (!plan.makeLayout(mVk, b, kCardGatherBindings, kMaxTimedScenes * kReflectRing, mCgSetLayout, err,
                          "rayquery/card-gather"))
@@ -9734,6 +9753,11 @@ void RayQueryTier::foldCardGatherCounts(CardGatherView &v) {
         v.total.sky += w[5];
         v.total.texels += w[6];
         v.total.emptyTexels += w[7];
+        v.total.readsOverflowed += w[8];
+        for (size_t k = 0; k < v.countsSlots[i].size(); ++k)
+            v.skyDrain.emplace_back(v.countsSlots[i][k], w[kCardGatherCounts + k]);
+        if (v.skyDrain.size() > 8u * kCardGatherMaxRecords)   // nobody drains (no cache asking): the newest kept
+            v.skyDrain.erase(v.skyDrain.begin(), v.skyDrain.end() - 4u * kCardGatherMaxRecords);
         ++v.total.dispatches;
         v.countsPending[i] = false;
     }
@@ -9742,7 +9766,7 @@ void RayQueryTier::foldCardGatherCounts(CardGatherView &v) {
 CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTrace &job) {
     // THE TIER: a scene that does not trace (the project's rays off, or no device) gathers by the voxel rays.
     if (!isOpen() || !scene || !scene->rayTracingResolved() || mCgFailed) return CardGatherResult::NoRays;
-    if (!job.count || !job.records || !job.gather) return CardGatherResult::Wait;
+    if (!job.count || !job.records || !job.gather || !job.reads) return CardGatherResult::Wait;
     // ...and one that traces but whose structure is not there this frame waits (never the voxel rays here).
     SceneAs *saP = asOf(scene);
     if (!saP || !saP->tlas || !saP->st.enabled || saP->instanceCount == 0u) return CardGatherResult::Wait;
@@ -9768,7 +9792,7 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
         (!v.records[ring].buffer &&
          !makeBuffer(recBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, v.records[ring], err)) ||
         (!v.counts[ring].buffer &&
-         !makeBuffer(kCardGatherCounts * sizeof(uint32_t),
+         !makeBuffer(kCardGatherCountWords * sizeof(uint32_t),
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false,
                      v.counts[ring], err)))
         return CardGatherResult::Wait;
@@ -9866,12 +9890,12 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
     rb.buffer = v.records[ring].buffer;
     rb.range = recBytes;
     cb.buffer = v.counts[ring].buffer;
-    cb.range = kCardGatherCounts * sizeof(uint32_t);
+    cb.range = kCardGatherCountWords * sizeof(uint32_t);
     VkDescriptorImageInfo store{};
     {
         Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
         slot.texture = job.gather;
-        slot.access = Ogre::ResourceAccess::Write;
+        slot.access = Ogre::ResourceAccess::ReadWrite;
         slot.pixelFormat = job.gather->getPixelFormat();
         store.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.gather)->createView(slot, false);
         retireView(store.imageView);
@@ -9891,7 +9915,22 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
     own(2u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &rb;
     own(3u, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &store;
     own(4u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &cb;
+    VkDescriptorBufferInfo readsInfo{};
+    {
+        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(job.reads->getBufferInterface());
+        readsInfo.buffer = bi->getVboName();
+        readsInfo.offset = VkDeviceSize(job.reads->_getFinalBufferStart()) * job.reads->getBytesPerElement();
+        readsInfo.range = job.reads->getTotalSizeBytes();
+    }
+    own(37u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &readsInfo;
     vkUpdateDescriptorSets(mVk, kCardGatherBindings, w, 0, nullptr);
+    // THE ZERO BLOCK the read lists' clear copies from (once)
+    if (!mCgZeroBlock.buffer) {
+        if (!makeBuffer(VkDeviceSize(kCardGatherReadsBlock) * sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true,
+                        false, mCgZeroBlock, err))
+            return CardGatherResult::Wait;
+        std::memset(mCgZeroBlock.mapped, 0, size_t(kCardGatherReadsBlock) * sizeof(uint32_t));
+    }
 
     // ---- THE LAYOUTS through Ogre's solver, before the command buffer is taken (the movers job's rule: the capture's
     // copy encoder closes first): the hit set read, the Gather layer written - the relight that follows reads it as a
@@ -9902,9 +9941,10 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
         Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
         Ogre::ResourceTransitionArray trans;
         hitSetTransitions(solver, trans, hs);
-        solver.resolveTransition(trans, job.gather, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Write,
+        solver.resolveTransition(trans, job.gather, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::ReadWrite,
                                  computeStage);
         if (instances) solver.resolveTransition(trans, instances, Ogre::ResourceAccess::Read, computeStage);
+        solver.resolveTransition(trans, job.reads, Ogre::ResourceAccess::ReadWrite, computeStage);
         mRs->executeResourceTransition(trans);
     }
     VkCommandBuffer cmd = frameCmd();
@@ -9912,8 +9952,28 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
     clearDummyImages(cmd);
     initHitDummies(cmd);
     {
+        // THE READ LISTS of this dispatch's cards cleared (10-2c: a block is the card's last gather's), in one copy of the
+        // zero block to every card's slot - after every earlier reader and writer of the lists (last frame's
+        // accumulation, its gather)
+        VkMemoryBarrier pre{};
+        pre.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        pre.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        pre.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &pre, 0,
+                             nullptr, 0, nullptr);
+        std::vector<VkBufferCopy> regions(count);
+        const float *rec = job.records;
+        for (unsigned k = 0; k < count; ++k) {
+            const unsigned ax = unsigned(rec[k * kCardGatherRecordFloats + 0u]);
+            const unsigned ay = unsigned(rec[k * kCardGatherRecordFloats + 1u]);
+            const unsigned slot = (ay >> 4u) * 128u + (ax >> 4u);
+            regions[k].srcOffset = 0u;
+            regions[k].dstOffset = readsInfo.offset + VkDeviceSize(slot) * kCardGatherReadsBlock * sizeof(uint32_t);
+            regions[k].size = VkDeviceSize(kCardGatherReadsBlock) * sizeof(uint32_t);
+        }
+        vkCmdCopyBuffer(cmd, mCgZeroBlock.buffer, readsInfo.buffer, count, regions.data());
         // THE COUNTS, zeroed for this dispatch (every earlier reader of the slot retired: countsPending)
-        vkCmdFillBuffer(cmd, v.counts[ring].buffer, 0, kCardGatherCounts * sizeof(uint32_t), 0u);
+        vkCmdFillBuffer(cmd, v.counts[ring].buffer, 0, kCardGatherCountWords * sizeof(uint32_t), 0u);
         VkMemoryBarrier fb{};
         fb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         fb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -9940,6 +10000,10 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
     }
     v.countsFrame[ring] = frameNow();
     v.countsPending[ring] = true;
+    v.countsSlots[ring].resize(count);
+    for (unsigned k = 0; k < count; ++k)
+        v.countsSlots[ring][k] = (unsigned(job.records[k * kCardGatherRecordFloats + 1u]) >> 4u) * 128u +
+                                 (unsigned(job.records[k * kCardGatherRecordFloats + 0u]) >> 4u);
     ++v.frame;
     return CardGatherResult::Traced;
 }
@@ -9950,6 +10014,14 @@ void RayQueryTier::cardGatherCounts(OgreScene *scene, CardCacheStatus::GatherCou
     if (it == mCardGather.end()) return;
     foldCardGatherCounts(it->second);
     out = it->second.total;
+}
+
+void RayQueryTier::cardGatherSky(OgreScene *scene, std::vector<std::pair<unsigned, unsigned>> &out) {
+    out.clear();
+    auto it = mCardGather.find(scene);
+    if (it == mCardGather.end()) return;
+    foldCardGatherCounts(it->second);
+    out.swap(it->second.skyDrain);
 }
 
 void RayQueryTier::forgetCardGather(OgreScene *scene) {
@@ -9971,6 +10043,10 @@ CardGatherResult OgreScene::gatherCards(const CardGatherTrace &job) {
 void OgreScene::cardGatherCounts(CardCacheStatus::GatherCounts &out) const {
     out = CardCacheStatus::GatherCounts();
     if (mEngine && mEngine->mRayTier) mEngine->mRayTier->cardGatherCounts(const_cast<OgreScene *>(this), out);
+}
+void OgreScene::cardGatherSky(std::vector<std::pair<unsigned, unsigned>> &out) {
+    out.clear();
+    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->cardGatherSky(this, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -11485,6 +11561,7 @@ bool PhotonComponent::probeGatherWanted() const { return false; }
 bool OgreScene::traceCardMovers(const CardMoverTrace &) { return false; }
 CardGatherResult OgreScene::gatherCards(const CardGatherTrace &) { return CardGatherResult::NoRays; }
 void OgreScene::cardGatherCounts(CardCacheStatus::GatherCounts &out) const { out = CardCacheStatus::GatherCounts(); }
+void OgreScene::cardGatherSky(std::vector<std::pair<unsigned, unsigned>> &out) { out.clear(); }
 bool OgreScene::cardTracePresent() const { return false; }
 void OgreScene::cardMoverTimes(float &, float &) {}
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }

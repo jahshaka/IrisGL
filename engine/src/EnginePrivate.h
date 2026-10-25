@@ -4757,6 +4757,7 @@ public:
     /// the Gather layer, and its counts (CardCacheStatus::gather).
     CardGatherResult gatherCards(const CardGatherTrace &job);
     void cardGatherCounts(CardCacheStatus::GatherCounts &out) const;
+    void cardGatherSky(std::vector<std::pair<unsigned, unsigned>> &out);
     /// The ray tier can trace the cards at all: open, its card-trace pipeline not refused (a scene whose structure is not
     /// built yet is still a trace that WAITS - SurfaceCache's lamps stay stale for it, never lit unshadowed for good).
     bool cardTracePresent() const;

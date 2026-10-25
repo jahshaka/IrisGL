@@ -225,6 +225,10 @@ void jahCardLobeHemi( float r, out float a, out float b );
 vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis, vec4 lampBits,
 						uvec4 lampIds[4] );
 
+/// THE CARD THE LAST READ ANSWERED FROM (its record in the card table; 0xFFFFFFFF none): the cards' TLAS gather records
+/// which cards each texel's rays read (rq_card_gather.comp: the card-to-card re-listing, PHOTON-7 stage 10).
+uint jahCardPicked = 0xFFFFFFFFu;
+
 vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out bool ok )
 {
 	const JahCardPick pick = jahCardPick( slot, hitPos, facingDir );
@@ -232,6 +236,7 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 	jahCardDemand( slot, pick, facingDir );
 #endif
 	ok = pick.ok && pick.lit;
+	jahCardPicked = ok ? pick.card : 0xFFFFFFFFu;
 	if( !ok )
 		return vec3( 0.0 );
 	// THE VIEW TERM (jah_card_view.glsl): the stored normal in the card's own

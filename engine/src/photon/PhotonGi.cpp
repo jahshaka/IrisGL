@@ -8518,6 +8518,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
         // ...and THE CARDS' INDIRECT BY TLAS RAYS (PHOTON-7 stage 10, 10-2a) and its counts.
         hooks.gather = [this](const CardGatherTrace &t) { return mScene.gatherCards(t); };
         hooks.gatherCounts = [this](CardCacheStatus::GatherCounts &c) { mScene.cardGatherCounts(c); };
+        hooks.gatherSky = [this](std::vector<std::pair<unsigned, unsigned>> &s) { mScene.cardGatherSky(s); };
         hooks.present = [this]() { return mScene.cardTracePresent(); };
         hooks.readTimes = [this](float &a, float &b) { mScene.cardMoverTimes(a, b); };
         mSurfaceCache->setMoverHooks(hooks);

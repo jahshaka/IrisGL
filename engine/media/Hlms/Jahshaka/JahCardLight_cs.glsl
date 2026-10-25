@@ -201,39 +201,40 @@ layout( std430, ogre_U1 ) readonly restrict buffer lightLayout
 
 // (The UAV slots: the three buffers first, then the two images — the root
 // layout wants each kind contiguous.)
-layout( vulkan( ogre_u3 ) vk_comma @insertpiece( uav3_pf_type ) )
-uniform restrict writeonly image2D cardRadiance;
 layout( vulkan( ogre_u4 ) vk_comma @insertpiece( uav4_pf_type ) )
+uniform restrict image2D cardRadiance;
+layout( vulkan( ogre_u5 ) vk_comma @insertpiece( uav5_pf_type ) )
 uniform restrict image2D cardIndirect;
 // THE MOVERS' VISIBILITY (PHOTON-CARDS-4): the ray tier's trace of the sun
 // against the shadow-casting movers (rq_card_movers.comp), read where the card
 // carries one (camPos.w = 1). The captured term holds the still world only.
-layout( vulkan( ogre_u5 ) vk_comma @insertpiece( uav5_pf_type ) )
+layout( vulkan( ogre_u6 ) vk_comma @insertpiece( uav6_pf_type ) )
 uniform restrict readonly image2D cardMoverVis;
 // THE ALBEDO AND NORMAL LAYERS (PHOTON-CARDS-5): read here as the capture copied
 // them, and their ALPHA (which no reader used: the capture writes 1) rewritten
 // with the texels' mean light direction, octahedral (JahCardView) — the card
 // read restores the diffuse lobe's view term from it.
-layout( vulkan( ogre_u6 ) vk_comma @insertpiece( uav6_pf_type ) )
-uniform restrict image2D cardAlbedo;
 layout( vulkan( ogre_u7 ) vk_comma @insertpiece( uav7_pf_type ) )
+uniform restrict image2D cardAlbedo;
+layout( vulkan( ogre_u8 ) vk_comma @insertpiece( uav8_pf_type ) )
 uniform restrict image2D cardNormal;
 // THE FLAT TERM (ENGINE-POLISH-PHOTON-1 stage 3): the emissive plus the specular lobe's
 // re-emission, the part of the radiance the read adds outside the diffuse view restore.
-layout( vulkan( ogre_u8 ) vk_comma @insertpiece( uav8_pf_type ) )
+layout( vulkan( ogre_u9 ) vk_comma @insertpiece( uav9_pf_type ) )
 uniform restrict writeonly image2D cardFlat;
 // THE SUN'S VISIBILITY AT THE TEXEL (PHOTON-3 stage 2): the still world's traced term times the movers' and
 // the cloud sheet's - what the read's specular lobe of the sun is weighted by - in red; THE LAMPS' (PHOTON-7 stage 5,
 // 5-3) in green, blue and alpha: traced before this job (rq_card_movers.comp's lamps mode), read here, kept.
-layout( vulkan( ogre_u9 ) vk_comma @insertpiece( uav9_pf_type ) )
+layout( vulkan( ogre_u10 ) vk_comma @insertpiece( uav10_pf_type ) )
 uniform restrict image2D cardSunVis;
 @property( jah_card_gather )
 // THE INDIRECT HALF BY TLAS RAYS (PHOTON-7 stage 10, 10-2a): at the ray tier the cards this relight re-gathers were
 // traced through the scene's TLAS before this job, in the same frame (rq_card_gather.comp: the same N fixed rays, the
 // hits read through the cards and the cascades, a back face 0, a miss the sky's), into this layer - rgb the texel's
-// envColourD - which mode bit 4 reads in place of the voxel rays below.
-layout( vulkan( ogre_u10 ) vk_comma @insertpiece( uav10_pf_type ) )
-uniform restrict readonly image2D cardGather;
+// envColourD - which mode bit 4 reads in place of the voxel rays below; its a the texel's reported radiance (the move's
+// reference, the end of main).
+layout( vulkan( ogre_u11 ) vk_comma @insertpiece( uav11_pf_type ) )
+uniform restrict image2D cardGather;
 @end
 
 // THE LOBE'S INTEGRALS (PhotonSpecularAlbedo.h's table, the store's own floats: the job's one
@@ -260,6 +261,12 @@ struct CardGiParams
 	vec4 cloudSun;			// ...and the sun's throw xz, the altitude, 1 / mu_s
 };
 layout( std430, ogre_U2 ) readonly restrict buffer giLayout { CardGiParams gp; };
+// THE CARDS' MOVES (PHOTON-7 stage 10, 10-2c: the card-to-card re-listing): per atlas slot the largest change of any
+// channel of a relit card's REPORTED radiance this frame (float bits: a non-negative float's bits order as the float
+// does) - what the cards that read it gathered from moved by
+// (Jahshaka/CardAccumulate's mode 3, after this job; its mode 4 clears them). Tested before the atomic: a texel moves the
+// word only past the running largest.
+layout( std430, ogre_U3 ) restrict buffer movesLayout { uint cardMoves[]; };
 
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
@@ -588,4 +595,36 @@ void main()
 	imageStore( cardFlat, at, vec4( jahCardRound( flatTerm ), 1.0 ) );
 	imageStore( cardSunVis, at, vec4( sunVis, lampTex.yzw ) );
 	imageStore( cardRadiance, at, vec4( jahCardRound( radiance ), 1.0 ) );
+@property( jah_card_gather )
+	{
+		// THE MOVE (10-2c, the lead's ruling: "more than its quantum" accumulated from the LAST REPORTED value, never frame
+		// to frame): the texel's stored radiance (the store's own conversion read back), its largest channel against the
+		// value it last REPORTED (the Gather layer's a) - reported when they differ by more than one step of the store
+		// there (the largest channel's own mantissa: a rounding to nearest flips by one step at most, so the report's
+		// hysteresis is the store's step and a slow fade reports once it has accumulated past it). A report sets the
+		// reference and moves the card's word by the accumulated difference; no report moves nothing.
+		const vec3 now = imageLoad( cardRadiance, at ).xyz;
+		const float S = max( max( now.x, now.y ), now.z );
+		const vec4 g = imageLoad( cardGather, at );
+		const bool refOk = ( floatBitsToUint( g.w ) & 0x7F800000u ) != 0x7F800000u && g.w >= 0.0;
+		const float d = refOk ? abs( S - g.w ) : 3.0e38;
+	@property( jah_card_round_r11g11b10 )
+		const float bits = ( now.z >= now.x && now.z >= now.y ) ? 5.0 : 6.0;
+	@else
+		const float bits = 10.0;
+	@end
+		const float quantum = exp2( floor( log2( max( max( S, refOk ? g.w : 0.0 ), 6.1035156e-5 ) ) ) - bits );
+		// A CARD CAPTURED THIS FRAME (mode bit 8) reports its radiance whole: its readers read the voxels there before it
+		// (the accumulation's arrivals, through the geometric bound)
+		const bool fresh = ( mode & 8u ) != 0u;
+		if( fresh || d > quantum )
+		{
+			imageStore( cardGather, at, vec4( g.xyz, S ) );
+			const uint mb = min( floatBitsToUint( fresh ? S : d ), 0x7F7FFFFFu );
+			const uint slot = ( uint( r.rect.y ) >> 4u ) * 128u + ( uint( r.rect.x ) >> 4u );
+			if( mb > cardMoves[slot] )
+				atomicMax( cardMoves[slot], mb );
+		}
+	}
+@end
 }
