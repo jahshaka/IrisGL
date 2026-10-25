@@ -1247,7 +1247,8 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             if (have && std::any_of(have->begin(), have->end(),
                                     [&c](const CardRec &h) { return h.size && h.index == c.index; }))
                 continue;
-            const bool held = view.forcedCardMode && cand.node == view.forcedCardNode && c.index == view.forcedCardIndex;
+            const bool held = view.forcedCardMode && cand.node == view.forcedCardNode &&
+                              (c.index == view.forcedCardIndex || view.forcedCardIndex == 63u);   // (63: every card of it)
             if (held && view.forcedCardMode < 0) continue;   // held absent
             if (held) {   // held resident: arrives now, persistent
                 Arrival a;
@@ -1340,7 +1341,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     bool drained = false, forcedLeft = false;
     const auto heldCard = [&](size_t inst, const CardRec &c) {
         return view.forcedCardMode && inst < mInstances.size() && mInstances[inst].node == view.forcedCardNode &&
-               c.index == view.forcedCardIndex;
+               (c.index == view.forcedCardIndex || view.forcedCardIndex == 63u);
     };
     if (view.forcedCardMode < 0)
         for (size_t i = 0; i < per.size(); ++i)

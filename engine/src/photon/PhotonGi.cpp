@@ -818,9 +818,11 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
         // the world's shell end of THIS cascade: eight cells of every cascade up to it (jah_voxel_ray.glsl)
         float shellEnd = 0.0f;
         for (size_t k = 0; k <= i && k < mVctCascades.size(); ++k) shellEnd += 8.0f * mVctCascades[k].cell();
-        lighting->setCacheRays(rayLastShellMetres(),
-                               giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
-                                   .voxelBounceRays,
+        unsigned bounceRays =
+            giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop).voxelBounceRays;
+        if (mEngine && mEngine->armRegistry().on(ArmId::GiTruthRays))   // THE TRUTH DOOR (gi.card_truth): the estimators' high-sample limit
+            bounceRays = unsigned(std::max(1.0, mEngine->armRegistry().value(ArmId::GiTruthRays)));
+        lighting->setCacheRays(rayLastShellMetres(), bounceRays,
                                mVctCascades.empty() ? 0.0f : mVctCascades.front().cell(), shellEnd, i == 0);
     }
     // THE SIDES' GATHER BY TLAS RAYS (PHOTON-7 stage 10, 10-2b): the ray tier traces a pass's listed bricks first; the
@@ -8646,6 +8648,8 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     view.vct = mVctLighting;
     view.indirectBudgetTexels = facts.cardIndirectTexels;
     view.indirectRays = facts.cardIndirectRays;
+    if (mEngine && mEngine->armRegistry().on(ArmId::GiTruthRays))   // THE TRUTH DOOR (gi.card_truth): the estimators' high-sample limit
+        view.indirectRays = unsigned(std::max(1.0, mEngine->armRegistry().value(ArmId::GiTruthRays)));
     view.rayLastShell = rayLastShellMetres();
     // THE STALE SET FROM THE CHANGED-REGION LIST (PHOTON-7 stage 5, 5-1; L2: the light-walk fold of every lamp (C4) and the
     // re-injection signature folding every rest and commit (C5) are DELETED): the frame's LAMP regions stale the direct
