@@ -494,6 +494,12 @@ public:
     /// frame saw another restart key has not begun the settle its picture owes
     /// (a light write between two frames), and one that saw another rest key has
     /// not begun its rest.
+    /// THE REST'S DEMAND COMPLETE (PHOTON-7 stage 10, R3 (b)): every view of `scene` that drew the latest frame and CAN
+    /// rest has traced its rest mean's N frames under the rest key - its rest sample sequence done, the frame it would
+    /// hold. A view that cannot rest (stereo, the rest off, no temporal history) has no rest sequence and waits on
+    /// nothing; no view, nothing to wait for.
+    /// `restFrames`: the completed rest's length so far (the least over those views; 0 with none that can rest).
+    bool restDemandComplete(const detail::OgreScene *scene, unsigned long long restKey, unsigned &restFrames) const;
     void statsInto(const detail::OgreScene *scene, unsigned long long restKey,
                    unsigned long long restartKey, GatherStatus &out) const;
     /// Is anything at all held for this key?
@@ -617,6 +623,9 @@ private:
         GatherTuning tuningLast;
         /// What the last recorded frame ran with (GatherStatus).
         bool lastTemporal = false;
+        /// The view CAN rest (temporal, not stereo, the rest not off: its still predicate's standing half), at its last
+        /// record - restDemandComplete waits only on a view that can.
+        bool restableLast = false;
         /// THE PREVIOUS FRAME'S CAMERA, in the five vectors the shaders invert
         /// (the left eye's under stereo), and the right eye's beside it.
         float prevCamPos[4] = {}, prevRayTL[4] = {}, prevRayRight[4] = {}, prevRayDown[4] = {},

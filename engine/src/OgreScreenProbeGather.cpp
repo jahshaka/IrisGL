@@ -1016,6 +1016,26 @@ void ScreenProbeGather::close() {
     mPlaceLayout = mTraceLayout = mFilterLayout = mIntegrateLayout = VK_NULL_HANDLE;
 }
 
+bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsigned long long restKey,
+                                           unsigned &restFrames) const {
+    restFrames = 0u;
+    const View *latest = nullptr;
+    for (const auto &kv : mViews) {
+        const View &v = kv.second;
+        if (v.scene != scene || !v.targetsReady) continue;
+        if (!latest || int32_t(v.recordedFrame - latest->recordedFrame) > 0) latest = &v;
+    }
+    if (!latest) return true;
+    for (const auto &kv : mViews) {
+        const View &o = kv.second;
+        if (o.scene != scene || !o.targetsReady || o.recordedFrame != latest->recordedFrame || !o.restableLast) continue;
+        const unsigned rest = o.restKey == restKey ? o.restFrames : 0u;
+        restFrames = restFrames ? std::min(restFrames, rest) : rest;
+        if (rest < restLengthOf(o.tuningLast, o.historyFramesLast)) return false;
+    }
+    return true;
+}
+
 void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long long restKey,
                                   unsigned long long restartKey, GatherStatus &out) const {
     out.error = mLastError;
@@ -1407,6 +1427,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                            in.restKey == v.restKey && in.chainKey == v.chainKey && !in.inputsBusy &&
                            photon == v.photonLast && !in.hitsReadback;
         v.photonLast = photon;
+        v.restableLast = temporal && !in.tuning.restOff && !in.stereo;
         if (in.restKey != v.restKey) ++v.keyMoves;
         v.inputsBusyLast = in.inputsBusy;
         v.restKey = in.restKey;

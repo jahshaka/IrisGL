@@ -4231,9 +4231,22 @@ struct CardCacheStatus {
     /// THE CARD-TO-CARD RE-LISTING (10-2c): the indirect listings a moved card read by the listed one made, and those an
     /// overflowed read list's geometric bound took part in (both inside indirectReported).
     unsigned long long indirectByCards = 0ull, indirectByBound = 0ull;
-    /// THE REST'S DRAIN (10-2d): cards removed once the demand window closed because no view reader read them at the pose
-    /// (inside `evicted`).
-    unsigned long long restDrained = 0ull;
+    /// THE REST'S DRAIN (10-2d): cards removed because no view reader read them at the pose (inside `evicted`) - at the
+    /// rest's one decision (R3 (b)), counted in `restDecisions` (one a demand change, at most).
+    unsigned long long restDrained = 0ull, restDecisions = 0ull;
+    /// ...and the window's one drain a change (R3, the lead's Q2: the cards no reader read in the S-frame window leave
+    /// once when it closes), counted when it drained a card.
+    unsigned long long windowDrains = 0ull;
+    /// THE ROOTS OF THE LAST PLAN'S WORK (PHOTON-7 stage 10, R3 (c): each round names its parent move): the moves the
+    /// frame's relights trace to - `kind` 'a' a demand arrival, 'd' the rest's one decision, 'w' the window's one drain
+    /// (its re-march of every resident card when one left), 'v' the voxel store's move
+    /// (a card listed by the bricks it reads), 'h' moves older than the root ring (born at its horizon: older still), 'r'
+    /// a region, an overflow, a material or a relight no root named - each by the cache frame it was born at, and the
+    /// deepest round
+    /// among them (0: a root's own captures; n: listed card to card by a round n - 1 move).
+    struct WorkRoot { char kind = 0; unsigned long long frame = 0ull; };
+    std::vector<WorkRoot> workRoots;
+    unsigned workRound = 0u;
     unsigned long long demandHits[4] = { 0ull, 0ull, 0ull, 0ull };
     /// The queue: cards waiting for a capture, and the texel budget a frame
     /// spends on them.

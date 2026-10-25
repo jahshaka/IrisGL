@@ -8645,6 +8645,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // from) and its budget.
     view.vct = mVctLighting;
     view.indirectBudgetTexels = facts.cardIndirectTexels;
+    if (const char *ip = std::getenv("P7_INDPAGES")) view.indirectBudgetTexels = unsigned(std::atoi(ip)) * 16384u;   // ARM (to revert): the pricing knob
     view.indirectRays = facts.cardIndirectRays;
     view.rayLastShell = rayLastShellMetres();
     // THE STALE SET FROM THE CHANGED-REGION LIST (PHOTON-7 stage 5, 5-1; L2: the light-walk fold of every lamp (C4) and the
@@ -8729,6 +8730,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
         }
         view.demandChanged = hitChanged;
         view.demandSettleFrames = facts.cardDemandSettleFrames;
+        view.readersRestComplete = mScene.cardReadersRestComplete(view.readerRestFrames);
     }
     mSurfaceCache->takeDemand(mCardSlots, view);
     mScene.cardCandidates(mCardSlots, view);

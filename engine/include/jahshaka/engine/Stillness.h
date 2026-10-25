@@ -177,6 +177,12 @@ struct StillnessFrame {
     /// ...and the demand's settle S (GiQualityFacts::cardDemandSettleFrames, the spec's: the host that set the tier
     /// passes it) - a reader's stamp within S of the last change admits legitimately (stage 5's rule (a)).
     unsigned cardsSettleFrames = 0;
+    /// THE ROOTS OF THE FRAME'S CARD WORK (PHOTON-7 stage 10, R3 (c): each round names its parent move;
+    /// CardCacheStatus::workRoots): "<kind><cache frame>" joined by ';' ("-" none), the deepest round, the cache's rest
+    /// decisions so far (R3 (b): one a demand change, at most) and its window drains (one a change, at most).
+    std::string cardsRoots;
+    unsigned    cardsRound = 0;
+    unsigned long long cardsDecisions = 0, cardsWindowDrains = 0;
     bool               storeOwed = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2
     /// L8: a few frames late, so a window's SUM is the reading).
