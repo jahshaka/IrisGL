@@ -1119,6 +1119,9 @@ public:
     /// (`width`/`height`/`depth`, `origin`, `cell`, `available`); every other member left empty. For a law that reads the light of several cascades and arms (the
     /// whole door decodes a dozen volumes and every directional level).
     virtual bool giVoxelLight(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
+    /// THE FEEDBACK'S BRICK STATE of one cascade as it stands (GiFeedbackBricks; a stalling readback - a law's instrument:
+    /// the store's rounding orbits against their bricks' bounds). False without a built cascade there.
+    virtual bool giFeedbackBricks(int cascade, GiFeedbackBricks &out) { (void)cascade; out = GiFeedbackBricks(); return false; }
     /// THE CHANGED-REGION LIST AS IT LAST CLOSED (PHOTON-7 stage 3; Types.h GiChangedRegions) - the CPU copy of the
     /// one buffer the consumers bind, no GPU read. False before a list has closed (no frame has drawn the scene).
     virtual bool giChangedRegions(GiChangedRegions &out) { out = GiChangedRegions(); return false; }

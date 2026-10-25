@@ -5957,6 +5957,17 @@ struct GiVoxelStats {
 /// of the coverage rule: a voxel's colour integrates to the surface area inside
 /// it, so a wall's column of voxels is summed and composited against the wall
 /// as authored, which no aggregate can do. Blocks exactly like giVoxelStats.
+/// THE FEEDBACK'S BRICK STATE, read back for a law (PHOTON-7 stage 10, the orbit's census - Scene::giFeedbackBricks): per
+/// brick of a cascade (x fastest over `dims`), its flags word (bit 0 active, bit 11 its contraction MEASURED), its `r`
+/// (the measured contraction once bit 11 is set, the operator's bound before) and its last pass's relative move.
+struct GiFeedbackBricks {
+    bool available = false;
+    unsigned dims[3] = { 0u, 0u, 0u };
+    std::vector<unsigned> flags;
+    std::vector<float> r;
+    std::vector<float> lastMove;
+};
+
 struct GiVoxelVolume {
     bool available = false;
     int  width = 0, height = 0, depth = 0;

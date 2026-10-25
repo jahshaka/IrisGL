@@ -4620,6 +4620,9 @@ public:
     bool giVoxelLight(int cascade, GiVoxelVolume &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelLight(cascade, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::giVoxelLight"); return mPhoton.giVoxelVolume(cascade, out, true); }
+    bool giFeedbackBricks(int cascade, GiFeedbackBricks &out) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giFeedbackBricks(cascade, out); }); return r; }
+        JAH_HOST_CALL("Scene::giFeedbackBricks"); return mPhoton.giFeedbackBricks(cascade, out); }
     bool giChangedRegions(GiChangedRegions &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giChangedRegions(out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::giChangedRegions"); out = mPhoton.changedRegions(); return out.available; }

@@ -711,6 +711,7 @@ public:
     GiVoxelStats giVoxelStats(int cascade);
     bool giFieldAtlas(GiFieldAtlas &out);
     bool giVoxelVolume(int cascade, GiVoxelVolume &out, bool lightOnly = false);
+    bool giFeedbackBricks(int cascade, GiFeedbackBricks &out);
     /// AT A RAY TIER THE PROBE GRID IS NOT BUILT (PHOTON-F12-PCC; OgreGi.cpp).
     /// `probeGridByRays` is the rule — the tier's facts say its reflections
     /// are traced (GiQualityFacts::rayReflections) AND this scene traces on
