@@ -121,8 +121,11 @@ vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float epsC0, iv
 			sum += r.radiance;
 			taken += 1.0;
 		}
-		else if( r.exitReason == kJahRayEscaped )
+		else if( r.exitReason == kJahRayEscaped || r.exitReason == kJahRayOutside )
 		{
+			// (OUTSIDE: no cascade held the ray - the chain knows nothing of that world, and the diffuse takes what GI
+			// off takes there, the sky over the bin: gi.cascades 4 and 5 - a pixel beyond a one-cascade chain, a
+			// teleport's window before the chain is rebuilt around the eye - read black, 0.06 x the ambient)
 			sum += jahEnvCone( JAH_CONES_TO_WORLD( d ), binTan );
 			taken += 1.0;
 		}

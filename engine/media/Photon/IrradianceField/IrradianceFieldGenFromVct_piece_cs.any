@@ -356,7 +356,8 @@
 		// room's last 1.76 % of sky). A probe is a point in free space: no surface, no own cell.
 		const JahVoxelRayResult ray = jahVoxelRay( posLS + startBias, dirLS, float3( 0, 0, 0 ), float3( 0, 0, 0 ), 0.0,
 												   int4( 0, 0, 0, 0 ), 0.0, p.worldToVolumeDir.w, true );
-		const bool sampled = ray.exitReason != kJahRayExhausted;
+		// (a ray no cascade held - OUTSIDE - is no sample here: a probe beyond the chain is not the chain's to answer)
+		const bool sampled = ray.exitReason == kJahRayHit || ray.exitReason == kJahRayEscaped;
 		const float3 sky = ray.exitReason == kJahRayEscaped ? jahEnvCone( dir, p.coneAngleTan ) : float3( 0, 0, 0 );
 		// THE DEPTH STAYS CASCADE-0-LOCAL AND IS MEASURED FROM THE PROBE: the march's
 		// age converted back into cascade 0's normalised units, plus the start bias's

@@ -63,7 +63,8 @@
 // THE EXIT IS EARNED (the spec's "THE MISS IS EARNED"; Lumen's closed-box leak is a ray that ran out of distance and
 // read the sky): the result says HOW the ray ended - a HIT; ESCAPED, the ray left the last cascade (its world shell,
 // or its box in the band) and only then is it the sky's; EXHAUSTED, it ran out of steps or met a value that is not a
-// number, and it is NO SAMPLE, never sky. (The DDA visits at most res.x + res.y + res.z + 3 cells of a box, so a
+// number, and it is NO SAMPLE, never sky; OUTSIDE, no cascade held its start - the chain knows nothing there, and the
+// caller says what that is (the diffuse: GI off's answer, the sky over the ray's bin; the field's probes: no sample). (The DDA visits at most res.x + res.y + res.z + 3 cells of a box, so a
 // finite ray never exhausts: the reason exists so that no caller can read a broken ray as an escape.)
 //
 // THE AT-SIGN RULE: this file becomes Hlms input (the piece JahVoxelRay), so no character of it may be the Hlms
@@ -86,6 +87,7 @@
 const uint kJahRayExhausted = 0u;	///< out of steps, or not a number: NO SAMPLE
 const uint kJahRayHit = 1u;			///< an occupied cell (not the origin's own)
 const uint kJahRayEscaped = 2u;		///< it left the last cascade: the sky's
+const uint kJahRayOutside = 3u;		///< no cascade held its start: the chain says nothing of its world (the caller's)
 
 struct JahVoxelRayResult
 {
@@ -364,8 +366,10 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 		}
 		if( last )
 		{
-			// out of the last cascade (its world shell, or its box in the band): the sky's - if any cascade held the ray
-			r.exitReason = entered ? kJahRayEscaped : kJahRayExhausted;
+			// out of the last cascade (its world shell, or its box in the band): the sky's - if any cascade held the ray;
+			// a ray NO cascade held is OUTSIDE the chain's world (a pixel beyond a short chain, the eye in a teleport's
+			// window before the chain is rebuilt around it): the caller's to answer, never a hit or an escape it earned
+			r.exitReason = entered ? kJahRayEscaped : kJahRayOutside;
 			r.cascade = j;
 			return r;
 		}
