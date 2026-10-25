@@ -3885,9 +3885,15 @@ void PhotonComponent::recordFrame(const FrameWork &w) {
         for (VctCascade &c : mVctCascades)
             if (c.lighting) c.lighting->setAreaStrata(an > 0.0 ? Ogre::uint32(an + 0.5) : 0u);
     }
-    recordField(w);
+    {
+        monitor::PhaseScope phase("gi.field", mRoot->getRenderSystem());
+        recordField(w);
+    }
     if (w.aborted) return;
-    if (w.cascadeStage) recordCascades(w);
+    if (w.cascadeStage) {
+        monitor::PhaseScope phase("gi.cascades", mRoot->getRenderSystem());
+        recordCascades(w);
+    }
     // THE DIRECTIONAL LEVELS' DOOR (gi.regenerateDirectional; PHOTON-7 stage 2's read D1): cascade N's directional
     // volumes regenerated WHOLE from its level-0 light as it stands (step 0 and step 1, nothing else written) - what a
     // commit's own levels must already equal (gi.scroll_slab D).
@@ -3897,6 +3903,7 @@ void PhotonComponent::recordFrame(const FrameWork &w) {
             mVctCascades[size_t(n)].lighting->regenerateDirectional();
     }
     if (!mPcc || !mGiCamera) return;
+    monitor::PhaseScope phase("gi.probes", mRoot->getRenderSystem());
     JAH_TRY {
         mGiCamera->setPosition(w.camPos);
         mPcc->setUpdatedTrackedDataFromCamera(mGiCamera);
@@ -3926,13 +3933,24 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
     // against; nothing is constructed while the monitor is off - CacheScope's own rule).
     monitor::CacheScope stepRow(CacheKind::Gi, WorkReason::None, 0ull, "gi.step", mRoot->getRenderSystem(), this);
     stepRow.markAggregate();   // its dispatches no child row names file their own (photonDispatch)
-    harvest();     // before any of this frame's GI work is recorded
+    // ITS PHASES ARE ROWS (PHOTON-7's naming step: gi.harvest, gi.plan, gi.field, gi.cascades, gi.probes), each filed
+    // only when it dispatched or submitted - so a submission's bubble is placed, never gi.step's own time.
+    {
+        monitor::PhaseScope phase("gi.harvest", mRoot->getRenderSystem());
+        harvest();     // before any of this frame's GI work is recorded
+    }
     // THE GI FREEZE (M1's measuring arm, "gi.freeze"): no cache work is planned - the field, the cascades, the settle,
     // the ticks stand as they are.
     if (mEngine && mEngine->armRegistry().on(ArmId::GiFreeze)) return;
-    recordFrame(planFrame(camPos, driverStereo));
-    // A STILL FRAME FILES NO GI ROW (gi.coalesce): the row exists only when the step dispatched.
-    if (!computeRegionDispatched()) stepRow.cancel();
+    FrameWork work;
+    {
+        monitor::PhaseScope phase("gi.plan", mRoot->getRenderSystem());
+        work = planFrame(camPos, driverStereo);
+    }
+    recordFrame(work);
+    // A STILL FRAME FILES NO GI ROW (gi.coalesce): the row exists only when the step dispatched (or submitted: a
+    // bubble its phases place).
+    if (!computeRegionDispatched() && !stepRow.submittedInside()) stepRow.cancel();
 }
 
 // THE FRAME'S RESULTS, HARVESTED: the voxel feeds' device readouts that have landed (the

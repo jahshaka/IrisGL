@@ -1505,7 +1505,13 @@ void SurfaceCache::photonUpdate() {
     // footprint reaches — after the copies (the trace reads the new Depth and
     // Normal) and before the relight that multiplies it in. The batch's STILL sun
     // term is part of its capture: its CPU is in captureMs.
-    traceSun();
+    // ITS PHASES ARE ROWS (PHOTON-7's naming step: cards.sun, cards.light, cards.tables.pass), each filed only when it
+    // dispatched or submitted - the update pass's own time is left to none.
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+    {
+        detail::monitor::PhaseScope phase("cards.sun", rs);
+        traceSun();
+    }
     if (mBatchCopied) {
         mBatchCopied = false;
         mCaptureMs += mStillCpuMs;
@@ -1516,7 +1522,11 @@ void SurfaceCache::photonUpdate() {
     // frame, before anything could read them — and the table carries their flags
     // (captured; indirect stale or marched) before the ray read, later in this
     // frame, looks.
-    relightCards();
+    {
+        detail::monitor::PhaseScope phase("cards.light", rs);
+        relightCards();
+    }
+    detail::monitor::PhaseScope phase("cards.tables.pass", rs);   // (the plan's own sync is cards.tables)
     syncBuffers();
 }
 

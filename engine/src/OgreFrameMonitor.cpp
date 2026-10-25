@@ -29,6 +29,7 @@
 // record from the host's thread), and finished records leave through the ring, the one locked structure.
 #include "EnginePrivate.h"
 #include "photon/voxel/PhotonPassBinding.h"
+#include "photon/PhotonDispatch.h"
 #include "OgreVulkanRenderSystem.h"
 #include "OgreVulkanDevice.h"
 #include "OgreVulkanQueue.h"
@@ -539,7 +540,10 @@ void FrameMonitor::endRowSample(Ogre::RenderSystem *rs, const std::string &name)
         const std::uintptr_t tag = queueSubmissionTag(rs);
         if (tag != r.tag) r.submitted = true;
         mRowSubmitted[r.id] = r.submitted;
-        if (!mRowStack.empty()) mRowStack.back().tag = tag;   // the parent's own stretch resumes
+        if (!mRowStack.empty()) {
+            mRowStack.back().tag = tag;   // the parent's own stretch resumes
+            if (r.submitted || r.childSubmitted) mRowStack.back().childSubmitted = true;
+        }
     }
     if (mOpenRowSamples == 0u) openGap();   // ...and the next one begins
 }
@@ -909,6 +913,24 @@ void CacheScope::markAggregate() {
 
 void markInnermostRowAggregate() {
     if (gMonitor && !gMonitor->mRowStack.empty()) gMonitor->mRowStack.back().aggregate = true;
+}
+
+bool CacheScope::submittedInside() const {
+    if (!mArmed || !gMonitor || !mGpuSampleId) return false;
+    for (auto it = gMonitor->mRowStack.rbegin(); it != gMonitor->mRowStack.rend(); ++it)
+        if (it->id == mGpuSampleId)
+            return it->submitted || it->childSubmitted || (mRs && queueSubmissionTag(mRs) != it->tag);
+    return false;
+}
+
+PhaseScope::PhaseScope(const char *detail, Ogre::RenderSystem *rs)
+    : mRow(CacheKind::Gi, WorkReason::None, 0ull, detail, rs),
+      mDispatchesAt(photonDispatchesInRegion() + photonDispatchesOutsideRegion()) {
+    mRow.markAggregate();
+}
+PhaseScope::~PhaseScope() {
+    if (photonDispatchesInRegion() + photonDispatchesOutsideRegion() == mDispatchesAt && !mRow.submittedInside())
+        mRow.cancel();
 }
 
 bool innermostRowIsAggregate() {

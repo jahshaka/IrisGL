@@ -2480,7 +2480,10 @@ public:
     /// THE ROWS' NESTING (PHOTON-7's naming step): the open rows innermost last, each with the submission tag its own
     /// stretch began at; a row's parent sample (0 = none) and whether its own stretches crossed a submission - read at
     /// the retire into FramePass / CacheWork selfGpuMs and selfSubmitted.
-    struct OpenRow { unsigned id = 0u; std::uintptr_t tag = 0u; bool submitted = false; bool aggregate = false; };
+    struct OpenRow {
+        unsigned id = 0u; std::uintptr_t tag = 0u; bool submitted = false; bool aggregate = false;
+        bool childSubmitted = false;   ///< a row inside it submitted (CacheScope::submittedInside)
+    };
     std::vector<OpenRow> mRowStack;
     std::unordered_map<unsigned, unsigned> mRowParent;
     std::unordered_map<unsigned, bool> mRowSubmitted;
@@ -2690,6 +2693,9 @@ public:
     /// door while it is the innermost open row files a row of its own, by its job's name (photonDispatch) - its time
     /// is never left unnamed inside the aggregate's.
     void markAggregate();
+    /// Whether the render system SUBMITTED anywhere inside the row so far (its own stretches or a child's) - asked
+    /// before the close by a row that files only when work happened (PhaseScope, gi.step). False with the monitor off.
+    bool submittedInside() const;
     /// Files the row NOW rather than at the end of the enclosing block, for a
     /// scope whose work ends in the middle of a long function. Idempotent; the
     /// destructor does nothing afterwards.
@@ -2744,6 +2750,21 @@ bool innermostRowIsAggregate();
 /// Marks the innermost open row an AGGREGATE (CacheScope::markAggregate) - for a compositor pass's own recorder
 /// (photon_update), whose row the pass listener opened. Nothing with the monitor off.
 void markInnermostRowAggregate();
+
+/// A PHASE OF AN AGGREGATE (PHOTON-7's naming step): an aggregate row (CacheScope::markAggregate) over one stretch of
+/// the GI step or of the cards' update pass, so no stretch of either is left to the aggregate's own time. FILED ONLY
+/// WHEN WORK HAPPENED INSIDE IT - a Photon dispatch, or a submission (its time then holds the GPU's wait for the CPU,
+/// placed) - so a still frame files none. Nothing with the monitor off.
+class PhaseScope {
+public:
+    PhaseScope(const char *detail, Ogre::RenderSystem *rs);
+    ~PhaseScope();
+    PhaseScope(const PhaseScope &) = delete;
+    PhaseScope &operator=(const PhaseScope &) = delete;
+private:
+    CacheScope mRow;
+    unsigned long long mDispatchesAt = 0ull;
+};
 /// Drops `owner`'s readings — called where the owner dies, so a new object at the
 /// same address never reads its predecessor's time.
 void forgetGpuOwner(const void *owner);
