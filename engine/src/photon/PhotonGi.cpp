@@ -5093,13 +5093,17 @@ static const char *const kScrollCopyRowNames[8] = { "vct.scrollCopy0", "vct.scro
 // re-marched). A voxel of inner cascade j marches its lights on fixed world shells: cascade k's level-0 cells for the
 // distances [D_{k-1}, D_k), the OUTERMOST's from D_{n-2} to its box's exit, then the sun unoccluded or the lamp. So a change
 // of cascade idx's cells inside a world box F reaches:
-//   - idx not the outermost: the voxels within D_idx of F (its shell's end; plus a cell of idx and of the next, the march's
-//     last sample) - F grown by that reach;
-//   - the OUTERMOST, toward the SUN (direction u): the voxels p with p + t u in F for some t >= 0 - F swept against u, the
-//     t-range where the swept box meets cascade j's box (per axis), its two ends' boxes' hull; toward a LAMP at q of range R:
-//     the voxels p within R whose segment to q crosses F - the cone from q through F beyond it, inside the frustum between
-//     F and its copy scaled about q by R / (q's nearest distance to F) (every such point is q + s (f - q), s <= R / |f - q|),
-//     a lamp inside F its range's box; an area light its range's box (its rectangle is not a point).
+//   - idx not the outermost, an INNER cascade j: the voxels within D_idx of F (its shell's end; plus a cell of idx and of the
+//     next, the march's last sample) - F grown by that reach;
+//   - the OUTERMOST (any j), and EVERY cascade's OWN commit (j == idx; PHOTON-7's walk hitch: the light-blind band computed
+//     3-29x a slab, 99.86-100 % of it unchanged), PER LIGHT: toward the SUN (direction u) the voxels p with p + t u in F for
+//     some 0 <= t <= the march's reach (the outermost: to its exit) - F swept against u, the t-range where the swept box
+//     meets cascade j's box (per axis), its two ends' boxes' hull; toward a LAMP at q of range R: the voxels p within R
+//     whose segment to q crosses F - the cone from q through F beyond it, inside the frustum between F and its copy scaled
+//     about q by min(R, |f - q| + reach) / (q's nearest distance to F) (every such point is q + s (f - q), s <= R / |f - q|,
+//     and its march meets F within the reach), a lamp inside F its range's box; an area light its range's box (its
+//     rectangle is not a point). An own commit's regions are cut to F grown by the reach (its march reads its own cells no
+//     farther).
 // Every region grows by a cell of idx and of j (the march's samples and the voxel's own extent), is cut to j's box and
 // aligned to the injection's 4^3 groups; past the injection's box count the regions fold into their union (a bound). The
 // injection marches each group once (LightInjection's union).
@@ -5111,10 +5115,15 @@ bool PhotonComponent::innerRemarchRegion(size_t idx, size_t j, const std::vector
     const Ogre::Aabb ib(inner.centre, Ogre::Vector3(inner.halfSize));
     const Ogre::Vector3 bLo = ib.getMinimum(), bHi = ib.getMaximum();
     std::vector<std::pair<Ogre::Vector3, Ogre::Vector3>> regions;   // world (lo, hi)
+    // THE MARCH's REACH in cascade idx's cells: its shell's end plus a cell of idx and of the next (the outermost: its exit)
+    double reach = std::numeric_limits<double>::infinity();
     if (!outermost) {
-        double reach = 0.0;
+        reach = 0.0;
         for (size_t k = 0; k <= idx; ++k) reach += 8.0 * double(mVctCascades[k].cell());
         reach += double(outer.cell()) + double(mVctCascades[idx + 1].cell());
+    }
+    const bool bounded = std::isfinite(reach);
+    if (!outermost && j != idx) {
         for (const Ogre::Aabb &f : changed)
             regions.push_back({ f.getMinimum() - Ogre::Vector3(float(reach)), f.getMaximum() + Ogre::Vector3(float(reach)) });
     } else {
@@ -5127,6 +5136,14 @@ bool PhotonComponent::innerRemarchRegion(size_t idx, size_t j, const std::vector
             const Ogre::Light::LightTypes type = l->getType();
             for (const Ogre::Aabb &f : changed) {
                 const Ogre::Vector3 fLo = f.getMinimum(), fHi = f.getMaximum();
+                // AN OWN COMMIT's region stops at F grown by the reach (its march reads its own cells no farther)
+                const auto push = [&](Ogre::Vector3 lo, Ogre::Vector3 hi) {
+                    if (bounded) {
+                        lo.makeCeil(fLo - Ogre::Vector3(float(reach)));
+                        hi.makeFloor(fHi + Ogre::Vector3(float(reach)));
+                    }
+                    regions.push_back({ lo, hi });
+                };
                 if (type == Ogre::Light::LT_DIRECTIONAL) {
                     const Ogre::Vector3 u = -l->getDerivedDirection().normalisedCopy();
                     double t0 = 0.0, t1 = std::numeric_limits<double>::infinity();
@@ -5142,12 +5159,13 @@ bool PhotonComponent::innerRemarchRegion(size_t idx, size_t j, const std::vector
                         t0 = std::max(t0, std::min(ta, tb));
                         t1 = std::min(t1, std::max(ta, tb));
                     }
+                    if (bounded) t1 = std::min(t1, reach);   // (an own commit: its march meets F within the reach)
                     if (!meets || t0 > t1) continue;
                     const Ogre::Vector3 s0 = u * float(t0), s1 = u * float(t1);
                     Ogre::Vector3 lo = fLo - s0, hi = fHi - s0;
                     lo.makeFloor(fLo - s1);
                     hi.makeCeil(fHi - s1);
-                    regions.push_back({ lo, hi });
+                    push(lo, hi);
                 } else {
                     const Ogre::Vector3 q = l->getParentNode() ? l->getParentNode()->_getDerivedPosition() : Ogre::Vector3::ZERO;
                     const float R = l->getAttenuationRange();
@@ -5159,14 +5177,15 @@ bool PhotonComponent::innerRemarchRegion(size_t idx, size_t j, const std::vector
                     near.makeFloor(fHi);
                     const float dMin = (near - q).length();
                     if (type != Ogre::Light::LT_POINT && type != Ogre::Light::LT_SPOTLIGHT) {
-                        regions.push_back({ rLo, rHi });   // an area light: its range
+                        push(rLo, rHi);   // an area light: its range
                         continue;
                     }
                     if (!(dMin > 1e-4f)) {
-                        regions.push_back({ rLo, rHi });   // the lamp inside the change
+                        push(rLo, rHi);   // the lamp inside the change
                         continue;
                     }
-                    const float k = std::max(1.0f, R / dMin);
+                    float k = std::max(1.0f, R / dMin);
+                    if (bounded) k = std::max(1.0f, std::min(k, float((double(dMin) + reach) / double(dMin))));
                     Ogre::Vector3 lo = fLo, hi = fHi;
                     lo.makeFloor(q + (fLo - q) * k);
                     lo.makeFloor(q + (fHi - q) * k);
@@ -5174,7 +5193,7 @@ bool PhotonComponent::innerRemarchRegion(size_t idx, size_t j, const std::vector
                     hi.makeCeil(q + (fHi - q) * k);
                     lo.makeCeil(rLo);
                     hi.makeFloor(rHi);
-                    regions.push_back({ lo, hi });
+                    push(lo, hi);
                 }
             }
         }
@@ -5362,54 +5381,26 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                 }
             }
             if (scrollLight) {
-                // THE CELLS WHOSE DIRECT CAN CHANGE (the injection's boxes): a voxel's visibility march reads this
-                // cascade's own cells out to its shell end D_idx (the chain's sum of 8 cells per cascade) plus the next
-                // cascade's first cell, and nothing inside it - so only the voxels that close to a face the shift moved
-                // see another march: the slab's side (the slab and the kept cells next to it) and the TRAILING face
-                // (measured in gi.scroll_slab G: the whole band of a one-axis step sat in the trailing face's first two
-                // cells). The OUTERMOST marches its own cells to its exit (PHOTON-7 stage 4's read R4): its voxels whose
-                // march meets a moved face toward a light - the faces swept against each light (innerRemarchRegion) -
-                // and its entering slabs.
-                if (idx + 1 >= mVctCascades.size()) {
-                    std::vector<Ogre::Aabb> ownWorld;
-                    innerRemarchRegion(idx, idx, movedFaces, commitLight, ownWorld);
-                    for (const VctCascade::Scroll::Slab &sl : c.scroll.slabs) {
-                        if (commitLight.numInjectBoxes >= Ogre::PhotonCommitLight::kMaxInjectBoxes) {
-                            commitLight.numInjectBoxes = 0u;   // past the count: the whole volume (a bound)
-                            break;
-                        }
-                        const Ogre::uint32 n = commitLight.numInjectBoxes++;
-                        for (int a = 0; a < 3; ++a) {
-                            commitLight.injectLo[n][a] = sl.lo[a] / 4u * 4u;
-                            commitLight.injectHi[n][a] = std::min(Ogre::uint32(c.resolution), (sl.hi[a] + 3u) / 4u * 4u);
-                        }
+                // THE CELLS WHOSE DIRECT CAN CHANGE (the injection's boxes): the entering slabs (new cells), and the kept
+                // voxels whose visibility march TOWARD A LIGHT meets a face the shift moved (the slab, or the trailing face
+                // whose cells left the box) - the faces swept against each light (innerRemarchRegion), within the march's
+                // reach in this cascade's own cells (its shell end D_idx plus a cell of it and the next; the OUTERMOST to
+                // its exit, PHOTON-7 stage 4's read R4). Every cascade, since PHOTON-7's walk hitch: the light-blind band
+                // that stood here (both faces grown by the reach across the whole cascade, every moved axis) computed 3-29x
+                // a slab of which 99.86-100 % ended unchanged (spikes/photon-7/hitch/README.txt, 2). Its few changed
+                // voxels (a kept voxel's march reading another cascade's cells: the placement's dependence, L1 - stage
+                // 10's) are in the sweep by construction: their march met a moved face.
+                std::vector<Ogre::Aabb> ownWorld;
+                innerRemarchRegion(idx, idx, movedFaces, commitLight, ownWorld);
+                for (const VctCascade::Scroll::Slab &sl : c.scroll.slabs) {
+                    if (commitLight.numInjectBoxes >= Ogre::PhotonCommitLight::kMaxInjectBoxes) {
+                        commitLight.numInjectBoxes = 0u;   // past the count: the whole volume (a bound)
+                        break;
                     }
-                } else {
-                    double shellEnd = 0.0;
-                    for (size_t k = 0; k <= idx; ++k) shellEnd += 8.0 * double(mVctCascades[k].cell());
-                    shellEnd += double(mVctCascades[idx + 1].cell());
-                    const int res = c.resolution;
-                    const int reach = int(std::ceil(shellEnd / double(c.cell()))) + 1;
-                    const auto box = [&](int axis, int lo, int hi) {
-                        Ogre::uint32 &n = commitLight.numInjectBoxes;
-                        if (n >= Ogre::PhotonCommitLight::kMaxInjectBoxes) return;
-                        for (int a = 0; a < 3; ++a) {
-                            const int l = a == axis ? std::max(0, lo) : 0, h = a == axis ? std::min(res, hi) : res;
-                            commitLight.injectLo[n][a] = Ogre::uint32(l / 4 * 4);
-                            commitLight.injectHi[n][a] = Ogre::uint32(std::min(res, (h + 3) / 4 * 4));
-                        }
-                        ++n;
-                    };
+                    const Ogre::uint32 n = commitLight.numInjectBoxes++;
                     for (int a = 0; a < 3; ++a) {
-                        if (c.scroll.shift[a] == 0) continue;
-                        const int kLo = int(c.scroll.keepLo[a]), kHi = int(c.scroll.keepHi[a]);
-                        if (kHi < res) {   // the slab at the far end, the trailing face at 0
-                            box(a, kHi - reach, res);
-                            box(a, 0, reach);
-                        } else {           // the slab at 0, the trailing face at the far end
-                            box(a, 0, kLo + reach);
-                            box(a, res - reach, res);
-                        }
+                        commitLight.injectLo[n][a] = sl.lo[a] / 4u * 4u;
+                        commitLight.injectHi[n][a] = std::min(Ogre::uint32(c.resolution), (sl.hi[a] + 3u) / 4u * 4u);
                     }
                 }
             }
