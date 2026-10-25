@@ -10119,6 +10119,12 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
         hs.hit.instanceEntries = gs.slotCount();
     }
     hitSetOf(scene, sa, hs);
+    // THE VOXEL STORE ONLY (PHOTON-7 stage 10, the lead's R1): the cards read the voxels, so a voxel side that read a card
+    // closed a CARD <-> VOXEL loop - every relight moved the voxels that read it, every voxel move relit the cards - that
+    // never went quiet in a card-dense room (gi.card_residency (4): cascade 0's 263 bricks active, its resumes ~ its stops,
+    // the cards relit 3-4 a frame for good), and made the chain a function of which cards are resident. One order: the
+    // voxels read the voxels; the cards read the cards and the voxels. (e at the ray tier is the voxels' read: unchanged.)
+    hs.withoutCards();
     if (cascade >= hs.cascadeCount) return wait();
     uint32_t geomSlots = hs.geomRows && hs.geomRowOfSlot ? uint32_t(hs.geomRowOfSlot->size()) : 0u;
     if (geomSlots) {
