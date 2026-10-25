@@ -2753,17 +2753,20 @@ void markInnermostRowAggregate();
 
 /// A PHASE OF AN AGGREGATE (PHOTON-7's naming step): an aggregate row (CacheScope::markAggregate) over one stretch of
 /// the GI step or of the cards' update pass, so no stretch of either is left to the aggregate's own time. FILED ONLY
-/// WHEN WORK HAPPENED INSIDE IT - a Photon dispatch, or a submission (its time then holds the GPU's wait for the CPU,
-/// placed) - so a still frame files none. Nothing with the monitor off.
+/// WHEN WORK HAPPENED INSIDE IT - a Photon dispatch, work its owner notes (noteWork: an upload, a copy), or a submission
+/// (its time then holds the GPU's wait for the CPU, placed) - so a still frame files none. Nothing with the monitor off.
 class PhaseScope {
 public:
     PhaseScope(const char *detail, Ogre::RenderSystem *rs);
     ~PhaseScope();
     PhaseScope(const PhaseScope &) = delete;
     PhaseScope &operator=(const PhaseScope &) = delete;
+    /// The phase did GPU work no dispatch counts (a buffer upload, a copy): it files.
+    void noteWork() { mWorked = true; }
 private:
     CacheScope mRow;
     unsigned long long mDispatchesAt = 0ull;
+    bool mWorked = false;
 };
 /// Drops `owner`'s readings — called where the owner dies, so a new object at the
 /// same address never reads its predecessor's time.

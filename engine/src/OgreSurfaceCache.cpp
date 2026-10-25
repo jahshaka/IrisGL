@@ -1527,7 +1527,7 @@ void SurfaceCache::photonUpdate() {
         relightCards();
     }
     detail::monitor::PhaseScope phase("cards.tables.pass", rs);   // (the plan's own sync is cards.tables)
-    syncBuffers();
+    if (syncBuffers()) phase.noteWork();
 }
 
 
@@ -3275,16 +3275,16 @@ void SurfaceCache::traceSun() {
 // TLAS instance's `instanceCustomIndex` (it reads the GPU scene's table, whose
 // index IS that slot), so "which cards belong to this hit" is one indexed
 // fetch of `mInstanceBuffer` and no lookup at all.
-void SurfaceCache::syncBuffers() {
+bool SurfaceCache::syncBuffers() {
     Ogre::VaoManager *vao = Ogre::Root::getSingleton().getRenderSystem()->getVaoManager();
-    if (!vao) return;
+    if (!vao) return false;
     // THE TABLES EXIST FROM THE FIRST FRAME, holding no card (PHOTON-7 stage 5, 5-2): the readers' demand stamps, written
     // into the instance table, are what makes a card resident at all; the table covers every item slot of the scene.
     unsigned slotsWanted = std::max(kInstanceSlotsInitial, mInstanceSlots);
     while (mItemSlots > slotsWanted) slotsWanted *= 2u;
     if (!mTableDirty && mInstanceBuffer && mCardBuffer && slotsWanted == mInstanceSlots) {
         uploadDemandHead();
-        return;
+        return false;
     }
     mTableDirty = false;
 
@@ -3376,6 +3376,7 @@ void SurfaceCache::syncBuffers() {
     else
         mInstanceBuffer->upload(mInstanceBufferCpu.data(), 0, slots);
     uploadDemandHead();
+    return true;
 }
 
 void SurfaceCache::uploadDemandHead() {
@@ -3430,12 +3431,12 @@ void SurfaceCache::update(const CardSceneView &view) {
     // THE GPU TABLES follow the ALLOCATION and not the captures: a re-captured
     // card lands in the same rect, so nothing here moves when the queue drains.
     // ...and THE DEMAND's head (the frame's stamp) every frame, then its read-back on the period.
-    // ONE ROW (PHOTON-7's naming step): the tables' uploads and the read-back are GPU copies before the capture that no
-    // pass holds - cards.tables times them.
+    // ONE ROW (PHOTON-7's naming step): the tables' uploads are GPU copies before the capture that no pass holds -
+    // cards.tables times them, filed when the tables were written or the uploads submitted (the frame's demand stamp
+    // and the periodic read-back are the at-rest constants: a still frame files no card row, the stillness door's law).
     {
-        detail::monitor::CacheScope tables(CacheKind::Gi, WorkReason::None, 0, "cards.tables",
-                                           Ogre::Root::getSingleton().getRenderSystem(), this);
-        syncBuffers();
+        detail::monitor::PhaseScope tables("cards.tables", Ogre::Root::getSingleton().getRenderSystem());
+        if (syncBuffers()) tables.noteWork();
         issueDemandRead();
     }
 

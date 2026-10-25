@@ -934,7 +934,8 @@ PhaseScope::PhaseScope(const char *detail, Ogre::RenderSystem *rs)
     mRow.markAggregate();
 }
 PhaseScope::~PhaseScope() {
-    if (photonDispatchesInRegion() + photonDispatchesOutsideRegion() == mDispatchesAt && !mRow.submittedInside())
+    if (photonDispatchesInRegion() + photonDispatchesOutsideRegion() == mDispatchesAt && !mWorked &&
+        !mRow.submittedInside())
         mRow.cancel();
 }
 

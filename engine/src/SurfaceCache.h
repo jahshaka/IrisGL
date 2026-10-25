@@ -684,7 +684,9 @@ private:
     const Ogre::Light *cardSun() const;
     /// Rebuilds the two GPU tables from `mCards` / `mInstances` and uploads
     /// them. Called only when the ALLOCATION changed — never per capture.
-    void syncBuffers();
+    /// True when the TABLES were written (the allocation changed); false when only the frame's demand stamp was (the
+    /// at-rest constant) - the monitor's cards.tables rows file on the first (PHOTON-7's naming step).
+    bool syncBuffers();
 
     Ogre::SceneManager *mSceneMgr = nullptr;
     bool mBuilt = false;
