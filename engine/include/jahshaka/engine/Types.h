@@ -3420,6 +3420,46 @@ inline float giCascadeGuaranteedRadius(const GiParams::GiCascadeDesc &c)
     return c.halfSize - c.stepCells * cell - cell;
 }
 
+/// THE HIT READ'S LEVEL (PHOTON-7 stage 10, 10-2e; the lead's ruling): a TLAS hit reads cascade c only within its
+/// LEVEL RADIUS of the GI camera (max-norm) - its guaranteed radius (above: covered by its box at every placement it can
+/// reach) less a MARGIN of M of its cells, the bounce's reach (an edge difference spreads inward attenuated by albedo per
+/// bounce) - blending out over the hand-over band below it; the outermost by its box. M is MEASURED: the fewest cells at
+/// which gi.field_oracle_shells (6b) - two placements at the reachable extremes, the bounce on - and gi.card_residency
+/// (3) - walk = teleport - both read within a code (the measuring door gi.hitLevelMargin sets it; -1 = this default).
+/// THE PRICE per level: the usable range lost, step + cell + M cells off the half size.
+constexpr float kGiHitLevelMarginCells = 2.0f;   // MEASURED (10-2e): the fewest cells within a code - see below
+/// THE PLACEMENT QUANTUM (PHOTON-7 stage 10, 10-2e; the lead's ruling - the clipmap law): a cascade's centre sits on a
+/// lattice of Q = 2^K of its cells and its re-centre step IS Q, so every mip level a reader touches up to K stays
+/// WORLD-ANCHORED at every placement the cascade can reach (a level's texel is 2^L cells; the directional volumes'
+/// level 0 is two). Q is the largest power of two not above the derived step plus one cell (High's 33 -> 32, 15 -> 16,
+/// 8 -> 8): the step within a cell of the rule's. Each cascade is anchored on its OWN lattice, which is all a reader of
+/// that cascade needs - the cell ratios between cascades (c1 -> c2 is 3x at High) need no alignment across them.
+inline float giPlacementQuantumCells(float stepCells)
+{
+    float q = 2.0f;
+    while (q * 2.0f <= stepCells + 1.0f) q *= 2.0f;
+    return q;
+}
+/// ...and the coarsest level a hit reads in a cascade of that quantum: K = log2 Q (a footprint past it hands to the
+/// next cascade out).
+inline float giPlacementLevelK(float quantumCells) { return std::floor(std::log2(std::max(quantumCells, 1.0f)) + 0.5f); }
+constexpr float kGiHitLevelBandCells = 6.0f;
+inline float giHitLevelMarginCells(double armValue) { return armValue >= 0.0 ? float(armValue) : kGiHitLevelMarginCells; }
+/// THE STEP TEST'S BAND (PhotonGi.cpp's planCascades): a cascade re-centres once the camera is more than (0.5 + h) of
+/// its step off its lattice centre on an axis - so the furthest a reachable placement holds the camera off-centre.
+constexpr float kGiStepHysteresis = 0.1f;
+/// THE LEVEL RADIUS: the half size less the furthest a REACHABLE placement holds the camera off-centre ((0.5 + h) of the
+/// step: the lattice's step test), a cell and the margin - a point inside it is inside every box this cascade can stand
+/// at for this camera. MEASURED at the placement lattice (gi.field_oracle_shells (6b), the camera at the band's edge -
+/// 0.59 of a step off one centre - and gi.card_residency (3), walk = teleport): M = 0 cells, the store 1.6 codes apart
+/// (57 channels over one); M = 2, 4, 8: 0.000, and (3) within 0.12 / 0.07 / 0.24 codes - so M = 2 (the bounce's reach
+/// past the reachable boxes' common interior: an edge difference spreading two cells in, under a code past them).
+inline float giHitLevelRadius(const GiParams::GiCascadeDesc &c, float marginCells)
+{
+    const float cell = giCascadeCell(c);
+    return c.halfSize - (0.5f + kGiStepHysteresis) * c.stepCells * cell - cell - marginCells * cell;
+}
+
 /// THE WALKING PACE a scroll is sized for: 1.4 m/s at the engine's fixed 1/60 s frame.
 inline constexpr float kGiWalkMetresPerFrame = 1.4f / 60.0f;
 /// THE FASTEST CAMERA A SCROLL'S SCRATCH IS SIZED FOR (PHOTON-7 stage 2): 0.25 m a frame (15 m/s, a fly). A cascade's
@@ -3432,8 +3472,9 @@ inline constexpr float kGiFlyMetresPerFrame = 0.25f;
 /// may spread its entering slab over before the frame that commits it - as long as the walker stays inside the radius
 /// the cascade must guarantee: its MOTION SLACK (guaranteed - required radius) walked at 1.4 m/s, less the commit's
 /// frame - and the chunk frames and the commit's within one STEP at that pace (the next step must not arrive before
-/// the commit). At least one. Epic / High 3 / 7 / 31 / 641, Medium 9 / 20 / 31 / 641, Low 9 / 213 (gi.scroll_lag
-/// prints them from each tier's resolved chain). It replaces a per-frame millisecond budget (16 ms, a clock): the
+/// the commit). At least one. At the step a cascade places by (its placement quantum, giPlacementQuantumCells):
+/// Epic / High 6 / 13 / 11 / 641, Medium 3 / 7 / 11 / 641, Low 3 / 213 (gi.scroll_lag prints them from each tier's
+/// resolved chain; at the derived steps before 10-2e they were 3 / 7 / 31 / 641, 9 / 20 / 31 / 641, 9 / 213). It replaces a per-frame millisecond budget (16 ms, a clock): the
 /// spread is a function of the table and the walk, never of the card.
 inline int giCascadeScrollFrames(const GiParams::GiCascadeDesc &c)
 {
@@ -4777,6 +4818,10 @@ struct GiStatus {
         /// assertable form (gi.cascades cases 16a and 16b, and
         /// scripting.e2e.world_modes over both columns).
         float guaranteedRadius = 0.0f;
+        /// THE HIT READ'S LEVEL RADIUS (10-2e, giHitLevelRadius): a TLAS hit reads this cascade within it of the GI
+        /// camera (max-norm); the guaranteed radius less GiStatus::hitLevelMarginCells of its cells (the outermost reads
+        /// by its box).
+        float hitLevelRadius = 0.0f;
         /// The world-space centre it is currently built at (quantised to its
         /// own lattice, so it is NOT the camera position).
         Vec3  centre;

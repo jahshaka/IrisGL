@@ -1094,6 +1094,8 @@ GiStatus PhotonComponent::giStatus() const {
             shape.resolution = int(c.resolution);
             shape.stepCells  = c.stepCells;
             cs.guaranteedRadius = giCascadeGuaranteedRadius(shape);
+            cs.hitLevelRadius = giHitLevelRadius(
+                shape, giHitLevelMarginCells(mEngine ? mEngine->armRegistry().value(ArmId::GiHitLevelMargin) : -1.0));
             cs.centre     = toV(c.centre);
             cs.builtCam   = toV(c.builtCam);
             cs.rebuilds   = c.rebuilds;
@@ -4751,16 +4753,17 @@ static inline long long jahQuantAxis(float pos, float size) {
     return (long long)std::floor(double(pos) / double(size));
 }
 
-// THE PLACEMENT QUANTUM, Q = 2 (PHOTON-7 stage 1; AB A10, PF34 §2): a cascade's centre is the camera ROUNDED to the
-// nearest EVEN multiple of its cell - the cell index returned is even. The directional volumes' level 0 is composited
-// from 2 x 2 x 2 blocks of voxels (LightInjection_piece_cs.any's fused step 0), and with the box's corner an even cell
-// (the centre even, the half-size res / 2 cells, res a multiple of 4) every block sits on the same WORLD lattice at
-// every placement: a one-cell move no longer re-blocks the whole directional store (<= 3/255, ENGINE.md). ONE quantiser
-// for the three sites that must agree: recentreCascade, planScroll's target and the jump guard. The offset it leaves the
-// camera at is <= one cell on each axis (it was [0, 1) cell with the floor), so the near-field guarantee's `- cell`
-// (giCascadeGuaranteedRadius) covers it unchanged.
-static inline long long jahQuantEven(float pos, float cell) {
-    return 2ll * (long long)std::floor(double(pos) / (2.0 * double(cell)) + 0.5);
+// THE PLACEMENT QUANTUM, Q = 2^K (PHOTON-7 stage 10, 10-2e; the lead's ruling, the clipmap law - was Q = 2 since stage
+// 1): a cascade's centre is the camera ROUNDED to the nearest multiple of Q of its cells (its step, a power of two:
+// giPlacementQuantumCells) - the cell index returned is a multiple of Q. With the box's corner a multiple of Q (the
+// half-size res / 2 cells, res a multiple of Q) every level up to K - a level-L texel is 2^L cells, the directional
+// volumes' level 0 two - sits on the same WORLD lattice at every placement: a hit, a cone or the field reading a coarse
+// level reads the same texel whichever placement holds it (the 33-cell step re-blocked level 4 between two reachable
+// placements: gi.field_oracle_shells (6b), a floor read 0 against 6.4e-3). ONE quantiser for the sites that must
+// agree: recentreCascade, placedForCamera, planScroll's target and the jump guard.
+static inline long long jahQuantPlacement(float pos, float cell, float quantumCells) {
+    const double q = std::max(2.0, double(quantumCells));
+    return (long long)q * (long long)std::floor(double(pos) / (q * double(cell)) + 0.5);
 }
 
 // THE WORK LAW'S DOOR (PHOTON-7 stage 2): every cascade's commit count whose read-back has landed, folded into its
@@ -4803,7 +4806,8 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
         VctCascade &c = mVctCascades[i];
         c.halfSize   = table[i].halfSize;
         c.resolution = Ogre::uint32(table[i].resolution);
-        c.stepCells  = table[i].stepCells;
+        // THE STEP IS THE PLACEMENT QUANTUM (10-2e: giPlacementQuantumCells - a power of two, the clipmap law)
+        c.stepCells  = giPlacementQuantumCells(table[i].stepCells);
         // `correctAreaLightShadows` on the INNERMOST cascade only, which is the
         // upstream's own recommendation (its VctCascadeSetting, not in our fork): it is a
         // per-cascade memory and time cost and the near field is the only place
@@ -4913,8 +4917,8 @@ Ogre::Vector3 PhotonComponent::placementCam(size_t idx, const Ogre::Vector3 &eye
 void PhotonComponent::recentreCascade(VctCascade &c, const Ogre::Vector3 &eyePos) {
     const Ogre::Vector3 camPos = placementCam(size_t(&c - mVctCascades.data()), eyePos);
     const float cell = c.cell();
-    const long long lattice[3] = { jahQuantEven(camPos.x, cell), jahQuantEven(camPos.y, cell),
-                                   jahQuantEven(camPos.z, cell) };
+    const long long lattice[3] = { jahQuantPlacement(camPos.x, cell, c.stepCells), jahQuantPlacement(camPos.y, cell, c.stepCells),
+                                   jahQuantPlacement(camPos.z, cell, c.stepCells) };
     recentreCascadeAt(c, lattice, camPos);
 }
 
@@ -5688,7 +5692,7 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
 //
 // It is deliberately not a velocity or a time rule: the distance is the physics
 // (how far the volume is from describing where the camera is), a clock is not.
-static const float kStepHysteresis = 0.1f;
+static const float kStepHysteresis = kGiStepHysteresis;   // (Types.h: the level radius reads it)
 
 // THE INCREMENTAL SCROLL'S SPREAD (PHOTON-7 stage 2; PREFLIGHT_1_2 §5.6): a scroll's entering slab is cut into chunks
 // and the chunks into A COUNT of frames - giCascadeScrollFrames: the cascade's motion slack walked at 1.4 m/s, the
@@ -5720,8 +5724,9 @@ bool PhotonComponent::placedForCamera(size_t idx, const Ogre::Vector3 &eyePos) c
     const float cell = c.cell();
     if (!(cell > 0.0f)) return false;
     const Ogre::Vector3 camPos = placementCam(idx, eyePos);
-    return jahQuantEven(camPos.x, cell) == c.latticeX && jahQuantEven(camPos.y, cell) == c.latticeY &&
-           jahQuantEven(camPos.z, cell) == c.latticeZ;
+    return jahQuantPlacement(camPos.x, cell, c.stepCells) == c.latticeX &&
+           jahQuantPlacement(camPos.y, cell, c.stepCells) == c.latticeY &&
+           jahQuantPlacement(camPos.z, cell, c.stepCells) == c.latticeZ;
 }
 
 bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
@@ -5732,8 +5737,9 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
     const int res = int(c.resolution);
     if (cell <= 0.0f || res <= 0) return false;
     VctCascade::Scroll sc;
-    const long long target[3] = { jahQuantEven(camPos.x, cell), jahQuantEven(camPos.y, cell),
-                                  jahQuantEven(camPos.z, cell) };
+    const long long target[3] = { jahQuantPlacement(camPos.x, cell, c.stepCells),
+                                  jahQuantPlacement(camPos.y, cell, c.stepCells),
+                                  jahQuantPlacement(camPos.z, cell, c.stepCells) };
     const long long live[3] = { c.latticeX, c.latticeY, c.latticeZ };
     long long d[3];
     for (int a = 0; a < 3; ++a) {
@@ -5747,9 +5753,16 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
     // own step test asks again - a diagonal step is two scrolls; a CUT axis is placed at its box's centre and the
     // scroll marked `cut`: its commit leaves the cascade owed and the next scroll carries the rest (the remainder is
     // under the step test's band - a step past the layers by a cell or two - so the test alone never asked again:
-    // gi.light_is_world's pinned scroll stopped two cells short of its pin). The layers and every shift are even (Q = 2).
+    // gi.light_is_world's pinned scroll stopped two cells short of its pin).
+    // EVERY SHIFT IS A WHOLE QUANTUM (10-2e, the placement lattice): the target and the live box both stand on the
+    // lattice, so every axis's shift is a multiple of Q - and a CUT is cut to the whole quanta the layers hold (the
+    // scratch holds a step and more, so at least one). Cut to the layers themselves, a cut left the cascade off its
+    // lattice until the remainder landed: its coarse levels off the world-anchored grid the hit reads assume, and a
+    // placement no whole build at its camera reproduces (gi.scroll_slab E1: origin -4.375 against -5.000).
     const int layers = c.scratch ? int(c.scratch->layers()) : 0;
-    if (layers < 2) return false;
+    const long long q = std::max(2LL, (long long)c.stepCells);
+    const int wholeQuanta = int((layers / q) * q);
+    if (wholeQuanta < 2) return false;
     int order[3] = { 0, 1, 2 };
     std::stable_sort(order, order + 3, [&](int x, int y) { return std::llabs(d[x]) > std::llabs(d[y]); });
     int left = layers;
@@ -5757,7 +5770,7 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
     for (int k = 0; k < 3; ++k) {
         const int a = order[k];
         long long sh = d[a];
-        if (k == 0 && std::llabs(sh) > left) sh = sh > 0 ? left : -left;
+        if (k == 0 && std::llabs(sh) > left) sh = sh > 0 ? wholeQuanta : -wholeQuanta;
         if (std::llabs(sh) > left) sh = 0;
         left -= int(std::llabs(sh));
         sc.shift[a] = int(sh);
@@ -6201,23 +6214,19 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
         if (cell <= 0.0f || step <= 0.0f) continue;
         // (the camera this cascade is placed for: the eye, or its pin - placementCam)
         const Ogre::Vector3 camPos = placementCam(size_t(&c - mVctCascades.data()), eyeCamPos);
-        // THE HYSTERETIC STEP TEST (kStepHysteresis, above): the planes are
-        // `lattice` apart and the camera must be `band` past the one it left.
+        // THE HYSTERETIC STEP TEST ON THE PLACEMENT LATTICE (10-2e): the centre is a lattice point (Q = the step), and
+        // the cascade re-centres once the camera is more than half a step PLUS the band (kStepHysteresis) off it on an
+        // axis - so no placement holds the camera further off-centre than (0.5 + h) step, under the step the near-field
+        // guarantee assumes (giCascadeGuaranteedRadius), and a camera swaying across the midpoint between two lattice
+        // points cannot thrash it (the band). (`lattice` stays the stood-down test's cell, below.)
         const float lattice = step * (1.0f - kStepHysteresis);
-        const float band    = step * kStepHysteresis;
         bool moved = false;
         {
-            const float cam[3]   = { camPos.x, camPos.y, camPos.z };
-            const float built[3] = { c.builtCam.x, c.builtCam.y, c.builtCam.z };
-            for (int a = 0; a < 3 && !moved; ++a) {
-                const long long kb = jahQuantAxis(built[a], lattice);
-                if (jahQuantAxis(cam[a], lattice) == kb) continue;
-                const double lo = double(kb) * double(lattice);
-                const double hi = lo + double(lattice);
-                if (double(cam[a]) < lo - double(band) ||
-                    double(cam[a]) >= hi + double(band))
-                    moved = true;
-            }
+            const float cam[3]    = { camPos.x, camPos.y, camPos.z };
+            const float centre[3] = { c.centre.x, c.centre.y, c.centre.z };
+            const double reach = (0.5 + double(kStepHysteresis)) * double(step);
+            for (int a = 0; a < 3 && !moved; ++a)
+                moved = std::fabs(double(cam[a]) - double(centre[a])) > reach;
         }
         // THE TWO DIRTY_ALL GUARDS (Godot's, and S1 §4.4's three GPU losses are
         // why they are a prerequisite rather than an improvement).
@@ -6236,9 +6245,9 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
         // budget like any other) - so it is COUNTED (`cascadeDirtyMajority`): the
         // walking speed at which the copy stops saving anything.
         const long long diff[3] = {
-            std::llabs(jahQuantEven(camPos.x, cell) - jahQuantEven(c.builtCam.x, cell)),
-            std::llabs(jahQuantEven(camPos.y, cell) - jahQuantEven(c.builtCam.y, cell)),
-            std::llabs(jahQuantEven(camPos.z, cell) - jahQuantEven(c.builtCam.z, cell)) };
+            std::llabs(jahQuantPlacement(camPos.x, cell, c.stepCells) - jahQuantPlacement(c.builtCam.x, cell, c.stepCells)),
+            std::llabs(jahQuantPlacement(camPos.y, cell, c.stepCells) - jahQuantPlacement(c.builtCam.y, cell, c.stepCells)),
+            std::llabs(jahQuantPlacement(camPos.z, cell, c.stepCells) - jahQuantPlacement(c.builtCam.z, cell, c.stepCells)) };
         const long long res = (long long)c.resolution;
         const bool jumped = diff[0] >= res || diff[1] >= res || diff[2] >= res;
         double reusable = 1.0;

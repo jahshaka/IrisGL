@@ -53,7 +53,14 @@ void PhotonComponent::registerPasses(AtomPassProvider *provider) {
 void PhotonComponent::volumes(std::vector<Volume> &out) const {
     out.clear();
     for (const VctCascade &c : mVctCascades)
-        if (c.built) out.push_back(Volume{ c.lighting, c.voxelizer });
+        if (c.built) {
+            Volume v{ c.lighting, c.voxelizer };
+            v.shape.halfSize = c.halfSize;
+            v.shape.resolution = int(c.resolution);
+            v.shape.stepCells = c.stepCells;
+            v.cell = c.cell();
+            out.push_back(v);
+        }
 }
 
 PhotonComponent::PhotonComponent(OgreScene &scene, Ogre::Root *const &root,

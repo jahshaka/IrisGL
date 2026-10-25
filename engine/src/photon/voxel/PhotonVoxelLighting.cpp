@@ -1405,10 +1405,16 @@ namespace Ogre
                     boxHi[4u * b + a] = activation->hi[b][a];
                 }
         }
-        // (ACCUM's skip of the source's bricks inside this cascade's box holds for a COARSER source alone: inside its own
-        // box a cascade never reads an outer one. A FINER source - the TLAS route's, whose hits read the finest cascade
-        // at their point (10-2b) - is read inside this box: every brick of it counts.)
-        flags[2] = outer && source->mVoxelizer->getVoxelCellSize().x > mVoxelizer->getVoxelCellSize().x ? 1u : 0u;
+        // (ACCUM's skip of the source's bricks inside this cascade's box holds for a COARSER source on the VOXEL-RAY
+        // route alone: there, inside its own box a cascade never reads an outer one. On the TLAS route a hit reads its
+        // level by its distance to the camera (10-2e) - a coarser cascade inside this box past this one's level radius,
+        // a finer one inside its own - so the rule the skip rests on is false there and every brick of every source
+        // counts. MEASURED with the skip kept on the TLAS route: gi.field_oracle_shells (6b) unchanged - the skip is off for
+        // the rule, not for a number.)
+        flags[2] = outer && mSideRoute != 1 &&
+                           source->mVoxelizer->getVoxelCellSize().x > mVoxelizer->getVoxelCellSize().x
+                       ? 1u
+                       : 0u;
         flags[3] = mode == 3u && !outer ? 1u : 0u;
         if( mode == 5u && select )
         {
