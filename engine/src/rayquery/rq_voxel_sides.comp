@@ -1,0 +1,222 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// THE VOXEL SIDES' GATHER BY TLAS RAYS (PHOTON-7 stage 10, 10-2b; the lead's ruling: TLAS rays over the GPU brick list
+// by indirect dispatch - e = 0 at the ray tier, which closes c2 / c3's coarse-cell mixing).
+//
+// WHAT IT IS: the bounce's per-side gather (LightVctBounceInject_piece_cs.any's jahBounceRays: the side's diffuse GI, the
+// cosine-weighted mean radiance over its hemisphere as the mean of N fixed cosine-distributed rays - the one set,
+// jah_ray_set.glsl) traced through the scene's TLAS instead of the voxel chain, for every voxel of the bricks the
+// feedback LISTED this pass (its list and its indirect arguments: 8 groups of 4^3 a brick, group y the list slot, x the
+// octant - the bounce's own dispatch shape), into the chain's SIDE-GATHER scratch the bounce then reads (its property
+// jah_vct_tlas) - per listed slot, per voxel (x + 8 y + 64 z inside the brick), per side, two packHalf2x16 words.
+// THE SIDE'S START, the bounce's: along the axis the side's normal is dominant on, the voxel's faces looking that way
+// (that half's surface position over its coverage), the cell's centre across it - in world metres, lifted along the
+// side's normal by the voxel side's surface bound, the finest cascade's cell (the ONE origin law's third case,
+// jah_ray_origin.glsl: the store keeps a cell's surfaces as one mean position). A TWO-SIDED voxel gathers both
+// hemispheres (its back the normal reversed); a one-sided voxel's back is the inside of a solid and gathers nothing.
+// A RAY'S ANSWER, the world caches' law (rq_card_gather.comp's head): a front face reads jahHitRadianceStore (the card
+// first, the cascades where none answers - never Sourced), a back face of a one-sided surface 0, a hit nothing shades no
+// sample, a miss out to the reach the sky over the ray's bin. The still world alone (kRayMaskStill, until 8-M).
+// THE COUNTS: the cards' gather's nine (rays, a card, a cascade, a back face, no sample, the sky, the sides gathered,
+// sides with no sample, 0) a dispatch, read back (GiStatus::voxelSides) - inside a watertight room the sky stays 0.
+
+layout( local_size_x = 4, local_size_y = 4, local_size_z = 4 ) in;
+
+const int kMaxCascades = 4;
+
+#define JAH_HIT_PARAMS p.hit
+#include "jah_rq_hit_params.glsl"
+layout( std140, set = 0, binding = 1 ) uniform Params
+{
+	JahHitParams hit;   // THE HIT SET'S UNIFORMS (the one text)
+	vec4 knobs;		// x = the rays a side N, y = the reach (metres), z = the start's lift (the finest cell, metres), w = the mask
+	uvec4 cascade;	// x = this cascade's place in the hit set's chain, yz = its bricks along x and y
+} p;
+
+layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+/// THE FEEDBACK'S LIST (PhotonBrickFeedback_cs.glsl): the bricks this pass covers, packed x | y << 10 | z << 20.
+layout( std430, set = 0, binding = 2 ) readonly buffer FbList { uint jahFbList[]; };
+/// THE SIDE-GATHER SCRATCH (the head of this file).
+layout( std430, set = 0, binding = 3 ) writeonly buffer SideGather { uint jahSideGather[]; };
+layout( std430, set = 0, binding = 4 ) buffer Counts { uint counts[]; };
+
+// ---- THE HIT SET (ScreenProbeGather.h HitSetSources; RayQueryTier::gatherCards' kCardGatherHitSlots) ----------------
+layout( set = 0, binding = 5 ) uniform sampler3D voxelIso[kMaxCascades];
+layout( set = 0, binding = 6 ) uniform sampler3D voxelX[kMaxCascades];
+layout( set = 0, binding = 7 ) uniform sampler3D voxelY[kMaxCascades];
+layout( set = 0, binding = 8 ) uniform sampler3D voxelZ[kMaxCascades];
+layout( set = 0, binding = 9 ) uniform sampler3D voxelCovP[kMaxCascades];
+layout( set = 0, binding = 10 ) uniform sampler3D voxelCovN[kMaxCascades];
+layout( set = 0, binding = 11 ) uniform sampler3D voxelPosP[kMaxCascades];
+layout( set = 0, binding = 12 ) uniform sampler3D voxelPosN[kMaxCascades];
+layout( set = 0, binding = 13 ) uniform sampler3D voxelBack[kMaxCascades];
+layout( set = 0, binding = 14 ) uniform sampler3D voxelNrm[kMaxCascades];
+layout( set = 0, binding = 15 ) uniform sampler3D voxelDirect[kMaxCascades];
+#define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
+layout( set = 0, binding = 16 ) uniform sampler3D voxelDirectBack[kMaxCascades];
+#define JAH_VOX_SAMPLE_DIRECT_BACK( c, u, l ) textureLod( voxelDirectBack[c], u, l )
+layout( set = 0, binding = 17 ) uniform samplerCube skyCube;
+
+#include "jah_rq_hit.glsl"
+
+#define JAH_CARD_BINDING_BASE 18
+#define JAH_CARD_VIEW_BINDING_BASE 22
+#include "jah_rq_card_bindings.glsl"
+// (NOT a reader: the cache's own gather stamps no demand - a card is resident for what the views read)
+#include "jah_rq_card.glsl"
+
+layout( std430, set = 0, binding = 29 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
+layout( std430, set = 0, binding = 30 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
+#define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
+#define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
+#include "jah_rq_geom.glsl"
+
+layout( std430, set = 0, binding = 31 ) readonly buffer JahHitInstances { uvec4 jahHitInstances[]; };
+layout( rgba32ui, set = 0, binding = 32 ) uniform writeonly uimage2D jahHitIds;
+layout( r32ui, set = 0, binding = 33 ) uniform writeonly uimage2D jahHitDest;
+layout( std430, set = 0, binding = 34 ) buffer JahHitBuf { uint jahHitBuf[]; };
+#define JAH_HIT_INSTANCE( s, k ) jahHitInstances[( s ) * 10u + ( k )]
+#include "jah_rq_sun_ray.glsl"
+#include "jah_rq_hit_record.glsl"
+layout( set = 0, binding = 35 ) uniform sampler2DArray jahHitPool;
+layout( set = 0, binding = 36 ) uniform sampler2D jahHitCloud;
+// A CACHE RAY TRACES NO MOVER (the mask's law above): the hit's mover gate never runs.
+// AN IRRADIANCE ESTIMATOR READS A HIT'S SPECULAR LOBE BY ITS INTEGRAL (the gather's rule, PHOTON-3: a few stochastic rays
+// cannot sample a polished hit's near-delta lobe; jah_rq_hit_direct.glsl's header).
+#define JAH_HIT_LOBE_INTEGRAL
+#include "jah_rq_hit_radiance.glsl"
+// THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl): the store's table, through the hit table.
+void jahCardLobeHemi( float r, out float a, out float b )
+{
+	a = 0.0;
+	b = 0.0;
+	const uvec2 t = JAH_HIT_TABLE;
+	if( ( t.x | t.y ) != 0u )
+		jahSpecularAlbedoHemi( r, a, b );
+}
+
+// THE RAY SET AND ITS FRAME (the voxel ray's own text)
+#include "jah_ray_set.glsl"
+
+const uint kCountRays = 0u, kCountCard = 1u, kCountVoxel = 2u, kCountBack = 3u, kCountNoSample = 4u, kCountSky = 5u,
+		   kCountTexels = 6u, kCountEmpty = 7u;
+
+/// THE SIDE'S GATHER (the head of this file): the mean of the N rays' answers from world point P along the side's
+/// world normal n; `sky` counts the misses.
+vec3 jahSideGatherTlas( vec3 P, vec3 n, inout uint c[9] )
+{
+	const int rays = max( int( p.knobs.x ), 1 );
+	const vec3 origin = jahRayOrigin( P, n, 0.0, p.knobs.z );
+	const mat3 basis = jahConeBasisWorld( n );
+	const float binCos = 1.0 - 1.0 / float( rays );
+	const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
+	const float spread = sqrt( 2.0 / float( rays ) );
+	vec3 sum = vec3( 0.0 );
+	float taken = 0.0;
+	for( int i = 0; i < rays; ++i )
+	{
+		const vec3 dir = normalize( basis * jahRayCosineDir( i, rays ) );
+		++c[kCountRays];
+		rayQueryEXT rq;
+		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), uint( p.knobs.w ), origin, 0.0, dir,
+							   p.knobs.y );
+		JAH_RQ_PROCEED( rq )
+		if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+		{
+			sum += jahEnvCone( dir, binTan );
+			taken += 1.0;
+			++c[kCountSky];
+			continue;
+		}
+		const float tHit = rayQueryGetIntersectionTEXT( rq, true );
+		const uint slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+		const uint prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
+		const uint geomIdx = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
+		const vec2 bary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
+		const mat4x3 toWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
+		vec3 wound;
+		const bool known = jahHitWoundNormal( slot, geomIdx, prim, toWorld, wound );
+		if( known && dot( wound, dir ) > 0.0 && ( jahHitFlags( slot ) & kJahHitGpuTwoSided ) == 0u )
+		{
+			taken += 1.0;
+			++c[kCountBack];
+			continue;
+		}
+		const vec3 hitN = known ? ( dot( wound, dir ) > 0.0 ? -wound : wound ) : -dir;
+		jahHitSurf = JahHitSurface( slot, geomIdx, prim, bary, toWorld, tHit, false, known );
+		jahHitSeed = 0u;
+		jahHitAreaSeq = floatBitsToUint( P.x ) * 73856093u ^ floatBitsToUint( P.z ) * 19349663u ^ uint( i ) * 83492791u;
+		bool ok = false;
+		uint source = 0u;
+		const vec3 radiance = jahHitRadianceStore( slot, origin + dir * tHit, hitN, dir, max( tHit * spread, 1e-4 ), false,
+												   ok, source );
+		if( !ok || !finite3( radiance ) )
+		{
+			++c[kCountNoSample];
+			continue;
+		}
+		sum += radiance;
+		taken += 1.0;
+		++c[source == 1u ? kCountCard : kCountVoxel];
+	}
+	++c[kCountTexels];
+	if( !( taken > 0.0 ) )
+		++c[kCountEmpty];
+	return taken > 0.0 ? min( sum * ( 1.0 / taken ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
+}
+
+void main()
+{
+	const uint packed = jahFbList[gl_WorkGroupID.y];
+	const uvec3 brick = uvec3( packed & 1023u, ( packed >> 10u ) & 1023u, packed >> 20u );
+	const uint sub = gl_WorkGroupID.x;
+	const uvec3 cell = brick * 8u + uvec3( sub & 1u, ( sub >> 1u ) & 1u, sub >> 2u ) * 4u + gl_LocalInvocationID.xyz;
+	const uvec3 inBrick = cell - brick * 8u;
+	const uint base = ( gl_WorkGroupID.y * 512u + inBrick.x + 8u * inBrick.y + 64u * inBrick.z ) * 4u;
+	const int cc = int( p.cascade.x );
+	uint c[9] = uint[9]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
+	vec3 gathered[2] = vec3[2]( vec3( 0.0 ), vec3( 0.0 ) );
+	const ivec3 ic = ivec3( cell );
+	const float coverage = texelFetch( voxelIso[cc], ic, 0 ).w;
+	if( coverage > 0.0 )
+	{
+		const vec4 normalVal = texelFetch( voxelNrm[cc], ic, 0 );
+		const bool twoSided = normalVal.a > 0.0;
+		const vec3 n0 = normalize( normalVal.xyz * 2.0 - 1.0 );
+		const vec3 invSize = p.hit.voxelInvSize[cc].xyz;
+		const vec3 invRes = invSize * p.hit.voxelInvSize[cc].w;   // 1 / the resolution per axis
+		for( int side = 0; side < ( twoSided ? 2 : 1 ); ++side )
+		{
+			const vec3 nWorld = side == 0 ? n0 : -n0;
+			// the side's surface along its dominant axis (in this cascade's normalised space), the cell's centre across
+			const vec3 normalLS = nWorld * invSize;
+			const vec3 an = abs( normalLS );
+			const int a = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
+			vec3 surfaceLS = ( vec3( cell ) + 0.5 ) * invRes;
+			const bool plus = normalLS[a] > 0.0;
+			const float o = ( plus ? texelFetch( voxelCovP[cc], ic, 0 ) : texelFetch( voxelCovN[cc], ic, 0 ) )[a];
+			const float pO = ( plus ? texelFetch( voxelPosP[cc], ic, 0 ) : texelFetch( voxelPosN[cc], ic, 0 ) )[a];
+			if( o > 0.0 )
+				surfaceLS[a] = ( float( cell[a] ) + clamp( pO / o, 0.0, 1.0 ) ) * invRes[a];
+			const vec3 P = p.hit.voxelOrigin[cc].xyz + surfaceLS / invSize;
+			gathered[side] = jahSideGatherTlas( P, nWorld, c );
+		}
+	}
+	for( int side = 0; side < 2; ++side )
+	{
+		jahSideGather[base + 2u * uint( side )] = packHalf2x16( gathered[side].xy );
+		jahSideGather[base + 2u * uint( side ) + 1u] = packHalf2x16( vec2( gathered[side].z, 0.0 ) );
+	}
+	for( uint k = 0u; k < 9u; ++k )
+	{
+		const uint s = subgroupAdd( c[k] );
+		if( subgroupElect() && s != 0u )
+			atomicAdd( counts[k], s );
+	}
+}

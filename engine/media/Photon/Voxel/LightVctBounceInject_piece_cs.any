@@ -201,7 +201,17 @@
 		gathered[1] = float3( 0, 0, 0 );
 		for( int side = 0; side < ( twoSided ? 2 : 1 ); ++side )
 		{
+		@property( jah_vct_tlas )
+			// AT THE RAY TIER the side's gather is the TLAS's (PHOTON-7 stage 10, 10-2b; rq_voxel_sides.comp): its slot's
+			// voxel, its side
+			const uint3 jahIn = jahCell - jahBrick * 8u;
+			const uint jahW = ( ( gl_WorkGroupID.y * 512u + jahIn.x + 8u * jahIn.y + 64u * jahIn.z ) * 2u + uint( side ) ) * 2u;
+			const float2 jahRg = unpackHalf2x16( jahSideGather[jahW] );
+			const float2 jahB = unpackHalf2x16( jahSideGather[jahW + 1u] );
+			gathered[side] = float3( jahRg.x, jahRg.y, jahB.x );
+		@else
 			gathered[side] = jahBounceRays( voxelUvwPos, int3( jahCell ), side == 0 ? normalVal.xyz : -normalVal.xyz );
+		@end
 		}
 		const float3 vctDiffuse = gathered[0];
 		const float3 vctDiffuseBack = gathered[1];

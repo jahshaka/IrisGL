@@ -37,6 +37,7 @@ THE SOFTWARE.
 #include "Vao/OgreAsyncTicket.h"
 
 #include <algorithm>
+#include <functional>
 #include <vector>
 
 #include "SceneLightList.h"
@@ -45,6 +46,23 @@ THE SOFTWARE.
 
 namespace Ogre
 {
+    class PhotonVoxelLighting;
+    class UavBufferPacked;
+    /// THE SIDES' TLAS GATHER'S JOB (PHOTON-7 stage 10, 10-2b; rayquery/rq_voxel_sides.comp): a cascade's pass - its
+    /// list and indirect arguments (8 groups of 4^3 a listed brick), its bricks along x and y, the chain's scratch - and
+    /// the rays (the count, the reach in metres, the start's lift: the finest cascade's cell in metres).
+    struct PhotonVoxelSideTrace
+    {
+        const PhotonVoxelLighting *lighting = nullptr;
+        UavBufferPacked *list = nullptr;
+        UavBufferPacked *args = nullptr;
+        UavBufferPacked *scratch = nullptr;
+        uint32 brickDims[3] = { 0u, 0u, 0u };
+        uint32 rays = 16u;
+        float reach = 0.0f;
+        float lift = 0.0f;
+    };
+
     class PhotonVoxelizerSourceBase;
     class PhotonVoxelVisualizer;
     struct PhotonShaderVoxelLight;
@@ -184,6 +202,11 @@ namespace Ogre
         /// be written in place: the bounce's gather reads the backs (the sides' mean).
         TextureGpu     *mBackScratch = nullptr;
         uint32          mBackScratchBricks = 0u;
+        /// THE SIDES' TLAS GATHER (PHOTON-7 stage 10, 10-2b): the chain's scratch (on its innermost cascade, the back
+        /// scratch's rows: 512 voxels x 2 sides x two packHalf2x16 words a listed brick) and the ray tier's trace.
+        UavBufferPacked *mSideGather = nullptr;
+        uint32           mSideGatherBricks = 0u;
+        std::function<int( const PhotonVoxelSideTrace & )> mSideTracer;
         /// the chain's innermost cascade, as the frame's selection named it (feedbackSelect): its scratch is the one bound
         PhotonVoxelLighting *mFeedbackChain = nullptr;
 
@@ -478,6 +501,18 @@ namespace Ogre
             mCacheRayFirstShell = firstShellMetres;
         }
         bool getFeedbackOn() const { return mFeedbackOn; }
+        /// THE SIDES' GATHER BY TLAS RAYS (PHOTON-7 stage 10, 10-2b): the ray tier's trace of a pass's listed bricks
+        /// (PhotonVoxelSideTrace) before its bounce, which then reads the scratch in place of its voxel rays. The answer:
+        /// 1 traced, 0 the scene does not trace (the voxel rays: the no-ray route), 2 the scene traces but its structure
+        /// is not there (the voxel rays this pass, counted by the tracer).
+        void setSideTracer( std::function<int( const PhotonVoxelSideTrace & )> tracer ) { mSideTracer = std::move( tracer ); }
+        /// the chain's side-gather scratch for at least `bricks` listed bricks (the back scratch's count; grown once a
+        /// frame BEFORE the selections, on the innermost cascade)
+        void ensureSideGather( uint32 bricks );
+        UavBufferPacked *sideGather() const
+        {
+            return mFeedbackChain && mFeedbackChain->mSideGather ? mFeedbackChain->mSideGather : mSideGather;
+        }
 
         /// THE LIGHT SLOTS (P1C-LIGHT-LIST): the const buffer and LightInjection_piece_cs's
         /// array (vct_light_budget) hold kLightSlots lights in every cascade.

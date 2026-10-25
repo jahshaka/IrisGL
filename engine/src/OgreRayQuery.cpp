@@ -98,6 +98,7 @@
 #include "rayquery/rq_hit_composite_spv.h"
 #include "rayquery/rq_card_movers_spv.h"
 #include "rayquery/rq_card_gather_spv.h"
+#include "rayquery/rq_voxel_sides_spv.h"
 #include "rayquery/rq_tlas_write_spv.h"
 // THE SCREEN-PROBE GATHER — a Component of ours (GATHER-1a). Its three compute
 // jobs, its atlases and its pipelines live in OgreScreenProbeGather.cpp; this
@@ -1733,6 +1734,36 @@ private:
     bool                  mCgFailed = false;
     /// a read-list block of zeros, the source of the copy that clears this dispatch's cards' blocks (10-2c)
     RawBuffer             mCgZeroBlock;
+    // ---- THE VOXEL SIDES' GATHER BY TLAS RAYS (PHOTON-7 stage 10, 10-2b; rq_voxel_sides.comp) ----------------------
+    // One dispatch per cascade pass at the ray tier, recorded from PhotonVoxelLighting::runFeedbackPass BEFORE the
+    // bounce that reads its scratch, over the pass's own list by its indirect arguments.
+public:
+    int gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSideTrace &job, unsigned cascade);
+    void voxelSideCounts(OgreScene *scene, GiStatus::VoxelSideCounts &out);
+    void forgetVoxelSides(OgreScene *scene);
+
+private:
+    /// a scene's ring of call slots (a frame records one call a cascade pass: kVoxelSideRing covers its frames in flight)
+    static constexpr unsigned kVoxelSideRing = 96u;
+    struct VoxelSideView {
+        VkDescriptorSet sets[kVoxelSideRing] = {};
+        RawBuffer       params[kVoxelSideRing];
+        RawBuffer       rowOfSlot[kVoxelSideRing];
+        RawBuffer       counts[kVoxelSideRing];
+        uint32_t        countsFrame[kVoxelSideRing] = {};
+        bool            countsPending[kVoxelSideRing] = {};
+        unsigned call = 0;
+        GiStatus::VoxelSideCounts total;
+    };
+    bool makeVoxelSidePipeline(std::string &err);
+    void foldVoxelSideCounts(VoxelSideView &v);
+    std::unordered_map<const OgreScene *, VoxelSideView> mVoxelSides;
+    VkDescriptorSetLayout mVsSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mVsPipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mVsPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mVsModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mVsPool = VK_NULL_HANDLE;
+    bool                  mVsFailed = false;
     /// THE INSTANCE JOB (ATOM-CPU-WALKS-1, rq_tlas_write.comp): its pipeline and the
     /// pool its per-scene ring of sets comes from (kTlasWriteSets, from the layout's
     /// own constants).
@@ -2627,6 +2658,21 @@ void RayQueryTier::close() {
         }
     mCardGather.clear();
     dropBuffer(mCgZeroBlock);
+    // THE VOXEL SIDES' GATHER's state (10-2b): sets dropped with the pool.
+    for (auto &kv : mVoxelSides)
+        for (unsigned i = 0; i < kVoxelSideRing; ++i) {
+            dropBuffer(kv.second.params[i]);
+            dropBuffer(kv.second.rowOfSlot[i]);
+            dropBuffer(kv.second.counts[i]);
+        }
+    mVoxelSides.clear();
+    if (mVsPool) vkDestroyDescriptorPool(mVk, mVsPool, nullptr);
+    if (mVsPipeline) vkDestroyPipeline(mVk, mVsPipeline, nullptr);
+    if (mVsModule) vkDestroyShaderModule(mVk, mVsModule, nullptr);
+    if (mVsPipeLayout) vkDestroyPipelineLayout(mVk, mVsPipeLayout, nullptr);
+    if (mVsSetLayout) vkDestroyDescriptorSetLayout(mVk, mVsSetLayout, nullptr);
+    mVsPool = VK_NULL_HANDLE; mVsPipeline = VK_NULL_HANDLE; mVsModule = VK_NULL_HANDLE;
+    mVsPipeLayout = VK_NULL_HANDLE; mVsSetLayout = VK_NULL_HANDLE;
     if (mCgPool) vkDestroyDescriptorPool(mVk, mCgPool, nullptr);
     if (mCgPipeline) vkDestroyPipeline(mVk, mCgPipeline, nullptr);
     if (mCgModule) vkDestroyShaderModule(mVk, mCgModule, nullptr);
@@ -2772,6 +2818,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     scene->rayStructuresSlot().reset();
     forgetCardMovers(scene);
     forgetCardGather(scene);
+    forgetVoxelSides(scene);
 }
 
 // ---------------------------------------------------------------------------
@@ -9933,6 +9980,289 @@ void RayQueryTier::forgetCardGather(OgreScene *scene) {
     mCardGather.erase(it);
 }
 
+// ---------------------------------------------------------------------------
+// THE VOXEL SIDES' GATHER BY TLAS RAYS (PHOTON-7 stage 10, 10-2b) - the ray tier's half. A cascade's feedback pass hands
+// over its list and its indirect arguments (PhotonVoxelLighting::runFeedbackPass); this records N fixed rays a voxel side
+// of the listed bricks against the still world (rq_voxel_sides.comp), the hits read through the hit set, into the chain's
+// side-gather scratch, before the bounce that reads it.
+namespace {
+struct VoxelSideParams {
+    HitSetParams hit;          ///< THE HIT SET'S UNIFORMS (hitSetParams)
+    float knobs[4] = {};       ///< the rays a side, the reach, the start's lift, the ray mask
+    uint32_t cascade[4] = {};  ///< the cascade's place in the hit set's chain, its bricks along x and y
+};
+/// The job's own four (the params, the list, the scratch, the counts) and the hit set at 0 and 5..36 (the cards'
+/// gather's slots).
+constexpr unsigned kVoxelSideBindings = 37u;
+static_assert(kVoxelSideBindings == kHitSetBindings + 4u, "the sides' gather set is the hit set and its own four");
+constexpr unsigned kVoxelSideCounts = 9u;
+}   // namespace
+
+bool RayQueryTier::makeVoxelSidePipeline(std::string &err) {
+    if (!ensureSamplers(err)) return false;
+    VkDescriptorSetLayoutBinding b[kVoxelSideBindings] = {};
+    hitSetLayout(kCardGatherHitSlots, b);
+    const VkDescriptorType own[4] = {
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,   // 1 params
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,   // 2 the feedback's list
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,   // 3 the side-gather scratch
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,   // 4 the counts
+    };
+    for (unsigned i = 0; i < 4u; ++i) {
+        b[1u + i].binding = 1u + i;
+        b[1u + i].descriptorType = own[i];
+        b[1u + i].descriptorCount = 1u;
+        b[1u + i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    DescriptorPoolPlan plan;
+    if (!plan.makeLayout(mVk, b, kVoxelSideBindings, kMaxTimedScenes * kVoxelSideRing, mVsSetLayout, err,
+                         "rayquery/voxel-sides"))
+        return false;
+    VkPipelineLayoutCreateInfo pli{};
+    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &mVsSetLayout;
+    if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mVsPipeLayout) != VK_SUCCESS) {
+        err = "vkCreatePipelineLayout failed";
+        return false;
+    }
+    VkShaderModuleCreateInfo smi{};
+    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize = sizeof(krq_voxelSidesSpv);
+    smi.pCode = krq_voxelSidesSpv;
+    if (vkCreateShaderModule(mVk, &smi, nullptr, &mVsModule) != VK_SUCCESS) {
+        err = "vkCreateShaderModule failed (the build-time SPIR-V is not loadable)";
+        return false;
+    }
+    VkComputePipelineCreateInfo cpi{};
+    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = mVsModule;
+    cpi.stage.pName = "main";
+    cpi.layout = mVsPipeLayout;
+    if (createComputePipeline(cpi, &mVsPipeline, "voxel sides") != VK_SUCCESS) {
+        err = "vkCreateComputePipelines failed";
+        return false;
+    }
+    return plan.create(mVk, "rayquery/voxel-sides", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mVsPool, err);
+}
+
+void RayQueryTier::foldVoxelSideCounts(VoxelSideView &v) {
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    for (unsigned i = 0; i < kVoxelSideRing; ++i) {
+        if (!v.countsPending[i] || !v.counts[i].mapped || uint32_t(now - v.countsFrame[i]) < inFlight) continue;
+        const uint32_t *w = static_cast<const uint32_t *>(v.counts[i].mapped);
+        v.total.rays += w[0];
+        v.total.card += w[1];
+        v.total.voxel += w[2];
+        v.total.backFaces += w[3];
+        v.total.noSample += w[4];
+        v.total.sky += w[5];
+        v.total.sides += w[6];
+        v.total.emptySides += w[7];
+        ++v.total.dispatches;
+        v.countsPending[i] = false;
+    }
+}
+
+int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSideTrace &job, unsigned cascade) {
+    // THE TIER: a scene that does not trace keeps the voxel rays (the no-ray route); one whose structure is not there
+    // this pass WAITS (the voxel rays this pass, counted)
+    if (!isOpen() || !scene || !scene->rayTracingResolved() || mVsFailed) return 0;
+    VoxelSideView &v = mVoxelSides[scene];
+    const auto wait = [&v]() { ++v.total.waits; return 2; };
+    if (!job.list || !job.args || !job.scratch) return wait();
+    SceneAs *saP = asOf(scene);
+    if (!saP || !saP->tlas || !saP->st.enabled || saP->instanceCount == 0u) return wait();
+    SceneAs &sa = *saP;
+    if (!mVsPipeline) {
+        std::string err;
+        if (!makeVoxelSidePipeline(err)) {
+            mVsFailed = true;
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: the voxel sides' TLAS gather is off: " + err + " (the bounce gathers by the voxel rays)");
+            return 0;
+        }
+    }
+    foldVoxelSideCounts(v);
+    const unsigned slot = v.call % kVoxelSideRing;
+    if (v.countsPending[slot]) return wait();   // a call slot still in flight (more passes a frame than the ring holds)
+    std::string err;
+    if ((!v.params[slot].buffer &&
+         !makeBuffer(sizeof(VoxelSideParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, v.params[slot], err)) ||
+        (!v.counts[slot].buffer &&
+         !makeBuffer(kVoxelSideCounts * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     true, false, v.counts[slot], err)))
+        return wait();
+    if (!v.sets[slot]) {
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mVsPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &mVsSetLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, &v.sets[slot]) != VK_SUCCESS) {
+            v.sets[slot] = VK_NULL_HANDLE;
+            return wait();
+        }
+    }
+    // ---- THE HIT SET (the one collection; no hit list, the GPU scene's instance table: the cards' gather's rule)
+    HitSetSources hs;
+    hitStandIns(hs.hit);
+    detail::GpuScene &gs = scene->gpuScene();
+    Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
+    if (instances) {
+        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(instances->getBufferInterface());
+        hs.hit.instances = bi->getVboName();
+        hs.hit.instancesOffset = VkDeviceSize(instances->_getFinalBufferStart()) * instances->getBytesPerElement();
+        hs.hit.instancesRange = instances->getTotalSizeBytes();
+        hs.hit.instanceEntries = gs.slotCount();
+    }
+    hitSetOf(scene, sa, hs);
+    if (cascade >= hs.cascadeCount) return wait();
+    uint32_t geomSlots = hs.geomRows && hs.geomRowOfSlot ? uint32_t(hs.geomRowOfSlot->size()) : 0u;
+    if (geomSlots) {
+        RawBuffer &rb = v.rowOfSlot[slot];
+        const VkDeviceSize want = VkDeviceSize(geomSlots) * sizeof(uint32_t);
+        if (rb.buffer && rb.size < want) retire(rb);
+        if (!rb.buffer && !makeBuffer(std::max<VkDeviceSize>(want, 1024u), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
+                                      false, rb, err))
+            geomSlots = 0u;
+        else
+            std::memcpy(rb.mapped, hs.geomRowOfSlot->data(), size_t(want));
+    }
+    // ---- THE PARAMETERS: the hit set's, then this job's - the hit's own sun rays against the still casters, no mover
+    // gate (rq_voxel_sides.comp's mask law, the cards' gather's)
+    VoxelSideParams pp{};
+    hitSetParams(hs, geomSlots, pp.hit);
+    pp.hit.hitSun2[0] = float(kRayMaskStillCaster);
+    pp.hit.hitSun2[2] = kCardGatherSunRange;
+    pp.hit.hitSun2[3] = 0.0f;
+    pp.hit.counts[3] = 0.0f;
+    pp.knobs[0] = float(std::max(job.rays, 1u));
+    pp.knobs[1] = std::max(job.reach, 0.0f);
+    pp.knobs[2] = std::max(job.lift, 0.0f);
+    pp.knobs[3] = float(kRayMaskStill);
+    pp.cascade[0] = cascade;
+    pp.cascade[1] = job.brickDims[0];
+    pp.cascade[2] = job.brickDims[1];
+    std::memcpy(v.params[slot].mapped, &pp, sizeof(pp));
+
+    // ---- THE SET: the job's own four, then the hit set through its one writer
+    VkWriteDescriptorSet w[kVoxelSideBindings] = {};
+    HitSetWrite hitSet;
+    if (!hitSet.write(*this, v.sets[slot], kCardGatherHitSlots, hs, geomSlots ? v.rowOfSlot[slot].buffer : VK_NULL_HANDLE,
+                      w, err))
+        return wait();
+    const auto bufInfo = [](Ogre::UavBufferPacked *b) {
+        VkDescriptorBufferInfo info{};
+        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(b->getBufferInterface());
+        info.buffer = bi->getVboName();
+        info.offset = VkDeviceSize(b->_getFinalBufferStart()) * b->getBytesPerElement();
+        info.range = b->getTotalSizeBytes();
+        return info;
+    };
+    VkDescriptorBufferInfo ub{}, lb = bufInfo(job.list), sb = bufInfo(job.scratch), cb{};
+    const VkDescriptorBufferInfo ab = bufInfo(job.args);
+    ub.buffer = v.params[slot].buffer;
+    ub.range = sizeof(VoxelSideParams);
+    cb.buffer = v.counts[slot].buffer;
+    cb.range = kVoxelSideCounts * sizeof(uint32_t);
+    const auto own = [&](uint32_t binding, VkDescriptorType type) -> VkWriteDescriptorSet & {
+        VkWriteDescriptorSet &e = w[binding];
+        e.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        e.dstSet = v.sets[slot];
+        e.dstBinding = binding;
+        e.descriptorCount = 1;
+        e.descriptorType = type;
+        return e;
+    };
+    own(1u, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).pBufferInfo = &ub;
+    own(2u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &lb;
+    own(3u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &sb;
+    own(4u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &cb;
+    vkUpdateDescriptorSets(mVk, kVoxelSideBindings, w, 0, nullptr);
+
+    // ---- THE LAYOUTS through Ogre's solver, before the command buffer is taken: the hit set read, the list and the
+    // arguments read, the scratch written (the bounce that follows reads it, ordered by its own barrier analysis)
+    {
+        mDev->_jahRecordQueue().endAllEncoders();
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        hitSetTransitions(solver, trans, hs);
+        if (instances) solver.resolveTransition(trans, instances, Ogre::ResourceAccess::Read, computeStage);
+        solver.resolveTransition(trans, job.list, Ogre::ResourceAccess::Read, computeStage);
+        solver.resolveTransition(trans, job.args, Ogre::ResourceAccess::Read, computeStage);
+        solver.resolveTransition(trans, job.scratch, Ogre::ResourceAccess::Write, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return wait();
+    clearDummyImages(cmd);
+    initHitDummies(cmd);
+    {
+        // THE COUNTS, zeroed; and THE ARGUMENTS the select wrote visible to the indirect read (the solver orders the
+        // compute reads; the indirect stage is this dispatch's own)
+        vkCmdFillBuffer(cmd, v.counts[slot].buffer, 0, kVoxelSideCounts * sizeof(uint32_t), 0u);
+        VkMemoryBarrier fb{};
+        fb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        fb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        fb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1, &fb, 0,
+                             nullptr, 0, nullptr);
+    }
+    {
+        detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "voxel.sides", mRs, scene);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mVsPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mVsPipeLayout, 0, 1, &v.sets[slot], 0, nullptr);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
+        vkCmdDispatchIndirect(cmd, ab.buffer, ab.offset);
+    }
+    {
+        VkMemoryBarrier hb{};
+        hb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        hb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &hb, 0, nullptr, 0,
+                             nullptr);
+    }
+    v.countsFrame[slot] = frameNow();
+    v.countsPending[slot] = true;
+    ++v.call;
+    return 1;
+}
+
+void RayQueryTier::voxelSideCounts(OgreScene *scene, GiStatus::VoxelSideCounts &out) {
+    out = GiStatus::VoxelSideCounts();
+    auto it = mVoxelSides.find(scene);
+    if (it == mVoxelSides.end()) return;
+    foldVoxelSideCounts(it->second);
+    out = it->second.total;
+}
+
+void RayQueryTier::forgetVoxelSides(OgreScene *scene) {
+    auto it = mVoxelSides.find(scene);
+    if (it == mVoxelSides.end()) return;
+    for (unsigned i = 0; i < kVoxelSideRing; ++i) {
+        retireSet(it->second.sets[i], mVsPool);
+        retire(it->second.params[i]);
+        retire(it->second.rowOfSlot[i]);
+        retire(it->second.counts[i]);
+    }
+    mVoxelSides.erase(it);
+}
+
+int OgreScene::gatherVoxelSides(const Ogre::PhotonVoxelSideTrace &job, unsigned cascade) {
+    return mEngine && mEngine->mRayTier ? mEngine->mRayTier->gatherVoxelSides(this, job, cascade) : 0;
+}
+void OgreScene::voxelSideCounts(GiStatus::VoxelSideCounts &out) const {
+    out = GiStatus::VoxelSideCounts();
+    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->voxelSideCounts(const_cast<OgreScene *>(this), out);
+}
+
 CardGatherResult OgreScene::gatherCards(const CardGatherTrace &job) {
     return mEngine && mEngine->mRayTier ? mEngine->mRayTier->gatherCards(this, job) : CardGatherResult::NoRays;
 }
@@ -11456,6 +11786,8 @@ bool OgreScene::rayNearAddresses(std::vector<unsigned long long> &addresses) con
 bool PhotonComponent::probeGatherWanted() const { return false; }
 bool OgreScene::traceCardMovers(const CardMoverTrace &) { return false; }
 CardGatherResult OgreScene::gatherCards(const CardGatherTrace &) { return CardGatherResult::NoRays; }
+int OgreScene::gatherVoxelSides(const Ogre::PhotonVoxelSideTrace &, unsigned) { return 0; }
+void OgreScene::voxelSideCounts(GiStatus::VoxelSideCounts &out) const { out = GiStatus::VoxelSideCounts(); }
 void OgreScene::cardGatherCounts(CardCacheStatus::GatherCounts &out) const { out = CardCacheStatus::GatherCounts(); }
 void OgreScene::cardGatherSky(std::vector<std::pair<unsigned, unsigned>> &out) { out.clear(); }
 bool OgreScene::cardTracePresent() const { return false; }

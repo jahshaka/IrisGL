@@ -415,6 +415,20 @@ if(JAH_RAY_QUERY_OK)
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h.d"
         COMMENT "Compiling the card mover-shadow job at SPIR-V 1.4"
         VERBATIM)
+    # THE VOXEL SIDES' GATHER BY TLAS RAYS (PHOTON-7 stage 10, 10-2b): N fixed rays a side of the bricks a feedback pass
+    # listed, by its indirect arguments, into the chain's side-gather scratch the bounce reads.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_voxel_sides_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_voxel_sides_spv.h.d" --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}" "-I${JAH_RQ_GEN_DIR}"
+                --vn krq_voxelSidesSpv -o "${JAH_RQ_GEN_DIR}/rq_voxel_sides_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_voxel_sides.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_voxel_sides.comp"
+                "${JAH_RQ_FORK_BRDF}"
+                "${JAH_RQ_SPEC_ALBEDO}"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_voxel_sides_spv.h.d"
+        COMMENT "Compiling the voxel sides' TLAS gather at SPIR-V 1.4"
+        VERBATIM)
     # THE CARDS' INDIRECT BY TLAS RAYS (PHOTON-7 stage 10, 10-2a): N fixed rays a texel of the cards the relight
     # re-gathers, their hits read through the hit set, into the cache's Gather layer.
     add_custom_command(
@@ -519,6 +533,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_gather_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_voxel_sides_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"

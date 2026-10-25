@@ -339,6 +339,12 @@ namespace Ogre
             mBackScratch = nullptr;
             mBackScratchBricks = 0u;
         }
+        if( mSideGather )
+        {
+            vaoManager->destroyUavBuffer( mSideGather );
+            mSideGather = nullptr;
+            mSideGatherBricks = 0u;
+        }
 
         if( !mVoxelizerListenersRemoved )
         {
@@ -1255,6 +1261,42 @@ namespace Ogre
             mLightVctBounceInject->_setUavTexture( 1, uavSlot );
         }
 
+        // THE SIDES' GATHER BY TLAS RAYS (PHOTON-7 stage 10, 10-2b): at the ray tier the listed bricks' sides are traced
+        // through the TLAS first (rq_voxel_sides.comp, the same list and arguments), and the bounce reads them (U5) in
+        // place of its voxel rays; elsewhere (or the tracer declining) the voxel rays
+        {
+            bool traced = false;
+            UavBufferPacked *scratch = sideGather();
+            if( mSideTracer && scratch )
+            {
+                PhotonVoxelSideTrace job;
+                job.lighting = this;
+                job.list = mBrickList;
+                job.args = mBrickArgs;
+                job.scratch = scratch;
+                job.brickDims[0] = mBrickDims[0];
+                job.brickDims[1] = mBrickDims[1];
+                job.brickDims[2] = mBrickDims[2];
+                job.rays = std::max( mCacheRays, 1u );
+                job.reach = mCacheRayShell;
+                job.lift = mCacheRayBias;
+                traced = mSideTracer( job ) == 1;
+            }
+            const int32 want = traced ? 1 : 0;
+            if( mLightVctBounceInject->getProperty( "jah_vct_tlas" ) != want )
+                mLightVctBounceInject->setProperty( "jah_vct_tlas", want );
+            mLightVctBounceInject->setNumUavUnits( traced ? 6u : 5u );
+            if( traced )
+            {
+                DescriptorSetUav::BufferSlot bufSlot = DescriptorSetUav::BufferSlot::makeEmpty();
+                bufSlot.offset = 0u;
+                bufSlot.access = ResourceAccess::Read;
+                bufSlot.buffer = scratch;
+                bufSlot.sizeBytes = scratch->getTotalSizeBytes();
+                mLightVctBounceInject->_setUavBuffer( 5u, bufSlot );
+            }
+        }
+
         // THE ACTIVE BRICKS: the arguments' words 0..2 (8 x the bricks the PRE mode listed).
         HlmsCompute *hlmsCompute = mVoxelizer->getHlmsManager()->getComputeHlms();
         mLightVctBounceInject->setIndirectDispatchBuffer( mBrickArgs, 0u );
@@ -1433,6 +1475,20 @@ namespace Ogre
     void PhotonVoxelLighting::feedbackRun()
     {
         runFeedbackPass();
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::ensureSideGather( uint32 bricks )
+    {
+        // THE CHAIN'S SIDE-GATHER SCRATCH (PHOTON-7 stage 10, 10-2b): the back scratch's rows, 2048 words a listed brick
+        // (512 voxels x 2 sides x two packHalf2x16 words); grown, never shrunk, before the selections
+        bricks = std::max( bricks, 1u );
+        if( mSideGather && mSideGatherBricks >= bricks )
+            return;
+        VaoManager *vaoManager = mVoxelizer->getRenderSystem()->getVaoManager();
+        if( mSideGather )
+            vaoManager->destroyUavBuffer( mSideGather );
+        mSideGather = vaoManager->createUavBuffer( size_t( bricks ) * 2048u, sizeof( uint32 ), 0, nullptr, false );
+        mSideGatherBricks = bricks;
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::ensureBackScratch( uint32 bricks )

@@ -102,6 +102,12 @@ layout( std430, ogre_U2 ) restrict coherent buffer jahBrickLayout { uint jahBric
 // sensitivity: its voxels' re-emission over their own code) written here.
 layout( std430, ogre_U3 ) restrict readonly buffer jahFbListLayout { uint jahFbList[]; };
 layout( std430, ogre_U4 ) restrict coherent buffer jahFbStateLayout { uint jahFbState[]; };
+@property( jah_vct_tlas )
+// PHOTON-7 stage 10, 10-2b: THE SIDES' GATHER BY TLAS RAYS (rayquery/rq_voxel_sides.comp, dispatched before this job over the
+// same list): per listed brick slot, per voxel of it (x + 8 y + 64 z), per side, the gathered radiance as two
+// packHalf2x16 words - read at the ray tier in place of the voxel rays.
+layout( std430, ogre_U5 ) restrict readonly buffer jahSideGatherLayout { uint jahSideGather[]; };
+@end
 
 layout( local_size_x = @value( threads_per_group_x ),
         local_size_y = @value( threads_per_group_y ),

@@ -821,6 +821,18 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
                                    .voxelBounceRays,
                                mVctCascades.empty() ? 0.0f : mVctCascades.front().cell(), shellEnd, i == 0);
     }
+    // THE SIDES' GATHER BY TLAS RAYS (PHOTON-7 stage 10, 10-2b): the ray tier traces a pass's listed bricks first; the
+    // cascade's place in the hit set's chain is found from the lighting (PhotonComponent::volumes' order, innermost first)
+    lighting->setSideTracer([this](const Ogre::PhotonVoxelSideTrace &t) {
+        unsigned index = 0u, k = 0u;
+        bool found = false;
+        for (const VctCascade &c : mVctCascades) {
+            if (!c.lighting || !c.built) continue;
+            if (c.lighting == t.lighting) { index = k; found = true; break; }
+            ++k;
+        }
+        return found ? mScene.gatherVoxelSides(t, index) : 0;
+    });
     lighting->setLightFrame(frame);
     // A WHOLE INJECTION (a first build, a jump, a new placement) WRITES THE TOTAL FROM ITS DIRECT TERM: the volume's
     // light starts there and every brick resumes the feedback; a DELTA keeps what the feedback built (setCommitLight).
@@ -916,6 +928,7 @@ GiStatus PhotonComponent::giStatus() const {
     // and leaves the struct's zeroed defaults when there is no cache, which is
     // every scene with the card row off.
     if (mSurfaceCache) mSurfaceCache->fillStatus(st.cards);
+    mScene.voxelSideCounts(st.voxelSides);   // (10-2b: the ray tier's counts; zero elsewhere)
     // THE CHANGED-REGION LIST as it last closed (PHOTON-7 stage 3): counters the component holds, no Ogre object.
     st.regionFrame = mRegionsClosed.frame;
     st.regionCount = unsigned(mRegionsClosed.regions.size());
@@ -6869,6 +6882,9 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
             }
         JAH_TRY {
             chain->ensureBackScratch(Ogre::uint32(std::min<unsigned long long>(budget, largest)));
+            // ...and at the ray tier THE SIDES' GATHER SCRATCH of the same rows (10-2b: 8 KB a listed brick)
+            if (mScene.rayTracingResolved())
+                chain->ensureSideGather(Ogre::uint32(std::min<unsigned long long>(budget, largest)));
         } JAH_CATCH(mError, );
     }
     // (the test door gi.feedbackCarriedRoute: a brick its injection moved this frame is carried, never passed, and the

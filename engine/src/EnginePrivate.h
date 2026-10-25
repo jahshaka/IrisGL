@@ -130,7 +130,7 @@
 // clear pass that owns the inset's background colour (chain::PipHandles).
 // Forward-declared rather than included so the pass-def headers stay where they
 // belong — inside the .cpp files that build passes.
-namespace Ogre { class HlmsCompute; class PhotonVoxelMaterial;   // A5b §2: the one store a chain shares
+namespace Ogre { class HlmsCompute; class PhotonVoxelMaterial; struct PhotonVoxelSideTrace;   // A5b §2: the one store a chain shares
                  class CompositorPassSceneDef; class CompositorPassClearDef;
                  class CompositorPassQuadDef; class CompositorPassDef;
                  class CompositorPassCompute;   // the no-ray screen integrate's listener (PHOTON-7 7-6)
@@ -4758,6 +4758,10 @@ public:
     CardGatherResult gatherCards(const CardGatherTrace &job);
     void cardGatherCounts(CardCacheStatus::GatherCounts &out) const;
     void cardGatherSky(std::vector<std::pair<unsigned, unsigned>> &out);
+    /// THE VOXEL SIDES' GATHER BY TLAS RAYS (PHOTON-7 stage 10, 10-2b): a cascade pass's listed bricks traced (1), the
+    /// scene not tracing (0) or its structure not there (2) - PhotonVoxelLighting::setSideTracer's answer - and the counts.
+    int gatherVoxelSides(const Ogre::PhotonVoxelSideTrace &job, unsigned cascade);
+    void voxelSideCounts(GiStatus::VoxelSideCounts &out) const;
     /// The ray tier can trace the cards at all: open, its card-trace pipeline not refused (a scene whose structure is not
     /// built yet is still a trace that WAITS - SurfaceCache's lamps stay stale for it, never lit unshadowed for good).
     bool cardTracePresent() const;
