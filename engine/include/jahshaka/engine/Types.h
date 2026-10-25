@@ -3677,6 +3677,9 @@ constexpr float kGatherSettleCodes = 5.0f;
 struct GiPlacementPin {
     bool on = false;
     std::vector<Vec3> cascadeBuiltCam;
+    /// A CASCADE LEFT FREE (PHOTON-7 stage 10-0's P2: the outer cascade pinned alone): cascade i follows the eye when
+    /// `cascadeFree[i]` is set, whatever `cascadeBuiltCam` holds for it - a pin is no longer a PREFIX of the chain only.
+    std::vector<unsigned char> cascadeFree;
     bool field = false;
     Vec3 fieldOrigin;
 };

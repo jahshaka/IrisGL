@@ -4827,7 +4827,8 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
 // target, a rebuild's recentre), never the pin for one and the eye for another (PHOTON-7 stage 1, PREFLIGHT_1_2 W2: the
 // scroll aimed at the eye while its commit recentred at the pin - an assert in Debug, the store misplaced in Release).
 Ogre::Vector3 PhotonComponent::placementCam(size_t idx, const Ogre::Vector3 &eyePos) const {
-    if (mPlacementPin.on && idx < mVctCascades.size() && idx < mPlacementPin.cascadeBuiltCam.size()) {
+    if (mPlacementPin.on && idx < mVctCascades.size() && idx < mPlacementPin.cascadeBuiltCam.size() &&
+        !(idx < mPlacementPin.cascadeFree.size() && mPlacementPin.cascadeFree[idx])) {   // (a cascade left free: the eye)
         const Vec3 &p = mPlacementPin.cascadeBuiltCam[idx];
         return Ogre::Vector3(p.x, p.y, p.z);
     }
