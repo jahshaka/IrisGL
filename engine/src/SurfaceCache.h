@@ -389,9 +389,28 @@ struct CardMoverTrace {
     /// ...the lamps mode's area light strata a side (n: n^2 rays a texel an area light).
     unsigned areaStrata = 8u;
 };
+/// THE CARDS' INDIRECT BY TLAS RAYS (PHOTON-7 stage 10, 10-2a; rq_card_gather.comp): the cards the relight re-gathers
+/// this frame (`count` records of the relight's 36 floats, the still trace's lift in float 3), the rays a texel and the
+/// reach (the outermost cascade's guaranteed radius: a miss there is the sky's), into `gather` (RGBA16F, the atlas's
+/// size). The ray tier's answer: TRACED (the relight reads the layer), WAIT (the scene traces, its structure is not
+/// there this frame: the cards' indirect stays owed - never the voxel rays at the ray tier) or NO_RAYS (the scene does
+/// not trace: the relight's own voxel rays are the estimator, the no-ray route).
+struct CardGatherTrace {
+    const float *records = nullptr;
+    unsigned count = 0u;
+    unsigned rays = 16u;
+    float reach = 0.0f;
+    Ogre::TextureGpu *gather = nullptr;
+};
+enum class CardGatherResult : unsigned { Traced, Wait, NoRays };
+
 struct CardMoverHooks {
     std::function<bool(CardMoverFrame &)> frame;
     std::function<bool(const CardMoverTrace &)> trace;
+    /// THE CARDS' TLAS GATHER (CardGatherTrace) and its counts as the ray tier last read them back (the life of the
+    /// scene's).
+    std::function<CardGatherResult(const CardGatherTrace &)> gather;
+    std::function<void(CardCacheStatus::GatherCounts &)> gatherCounts;
     /// The ray tier can trace the cards at all (open, its pipeline not refused): a refused trace while it can WAITS.
     std::function<bool()> present;
     /// The ray tier's two traces' last GPU milliseconds — the movers' and the
@@ -738,6 +757,14 @@ private:
     /// ray tier's trace (rq_card_movers.comp), read by the relight where the card
     /// is `moverTraced`. +4 MB at 2048 square.
     Ogre::TextureGpu *mMoverVis = nullptr;
+    /// THE GATHER LAYER (PHOTON-7 stage 10, 10-2a): the cards' indirect irradiance by TLAS rays (rq_card_gather.comp),
+    /// RGBA16F at the atlas's size, made the first time the ray tier gathers (none at the no-ray route: +32 MB there
+    /// only) and read by the relight's mode bit 4.
+    Ogre::TextureGpu *mGather = nullptr;
+    bool ensureGatherLayer();
+    std::vector<float> mGatherCpu;
+    unsigned long long mGatherWaits = 0ull;
+    bool mGatherByRays = false;
     CardMoverHooks mMoverHooks;
     /// Each mover's footprint box as last traced (its OLD footprint when it
     /// moves), by node.

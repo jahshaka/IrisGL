@@ -43,12 +43,12 @@ uvec2 jahGeomAddressPlus( uvec2 a, uint bytes )
 	return uvec2( lo, a.y + ( lo < a.x ? 1u : 0u ) );
 }
 
-/// The hit triangle's geometric normal in WORLD space, turned to face the ray's
-/// origin (against `dir`). False when the slot has no geometry row.
-bool jahHitGeometricNormal( uint slot, uint geometryIndex, uint primitive, mat4x3 objectToWorld,
-							vec3 dir, out vec3 n )
+/// The hit triangle's WOUND normal in WORLD space - cross( w1 - w0, w2 - w0 ) of its transformed corners, the side the
+/// rasteriser draws as the front (Ogre's counter-clockwise front faces, after the instance's transform: a mirrored
+/// instance's world winding is the one its pixels are culled by) - unturned. False when the slot has no geometry row.
+bool jahHitWoundNormal( uint slot, uint geometryIndex, uint primitive, mat4x3 objectToWorld, out vec3 n )
 {
-	n = -dir;
+	n = vec3( 0.0, 0.0, 1.0 );
 	if( slot >= JAH_GEOM_SLOTS )
 		return false;
 	uint row = JAH_GEOM_ROW_OF( slot );
@@ -72,6 +72,19 @@ bool jahHitGeometricNormal( uint slot, uint geometryIndex, uint primitive, mat4x
 	if( !( len > 1e-12 ) )
 		return false;
 	n = c / len;
+	return true;
+}
+
+/// The hit triangle's geometric normal in WORLD space, turned to face the ray's
+/// origin (against `dir`). False when the slot has no geometry row.
+bool jahHitGeometricNormal( uint slot, uint geometryIndex, uint primitive, mat4x3 objectToWorld,
+							vec3 dir, out vec3 n )
+{
+	if( !jahHitWoundNormal( slot, geometryIndex, primitive, objectToWorld, n ) )
+	{
+		n = -dir;
+		return false;
+	}
 	if( dot( n, dir ) > 0.0 )
 		n = -n;
 	return true;

@@ -97,6 +97,7 @@
 #include "rayquery/rq_area_vis_resolve_spv.h"
 #include "rayquery/rq_hit_composite_spv.h"
 #include "rayquery/rq_card_movers_spv.h"
+#include "rayquery/rq_card_gather_spv.h"
 #include "rayquery/rq_tlas_write_spv.h"
 // THE SCREEN-PROBE GATHER — a Component of ours (GATHER-1a). Its three compute
 // jobs, its atlases and its pipelines live in OgreScreenProbeGather.cpp; this
@@ -1693,6 +1694,37 @@ private:
     VkPipeline            mCmPipeline = VK_NULL_HANDLE;
     VkShaderModule        mCmModule = VK_NULL_HANDLE;
     VkDescriptorPool      mCmPool = VK_NULL_HANDLE;
+    // ---- THE CARDS' INDIRECT BY TLAS RAYS (PHOTON-7 stage 10, 10-2a; rq_card_gather.comp) ----------------------
+    // One dispatch per scene per relight that re-gathers a card's indirect, recorded from the surface cache's
+    // photonUpdate BEFORE the relight that reads the Gather layer, against the TLAS built this frame (updateScene).
+public:
+    CardGatherResult gatherCards(OgreScene *scene, const CardGatherTrace &job);
+    /// The life of the scene's counts, every retired dispatch's folded in (CardCacheStatus::gather).
+    void cardGatherCounts(OgreScene *scene, CardCacheStatus::GatherCounts &out);
+    void forgetCardGather(OgreScene *scene);
+
+private:
+    struct CardGatherView {
+        VkDescriptorSet sets[kReflectRing] = {};
+        RawBuffer       params[kReflectRing];
+        RawBuffer       records[kReflectRing];
+        RawBuffer       rowOfSlot[kReflectRing];
+        /// the dispatch's eight counts (host-visible: the shader's atomics land in it), read once its frame retired
+        RawBuffer       counts[kReflectRing];
+        uint32_t        countsFrame[kReflectRing] = {};
+        bool            countsPending[kReflectRing] = {};
+        unsigned frame = 0;
+        CardCacheStatus::GatherCounts total;
+    };
+    bool makeCardGatherPipeline(std::string &err);
+    void foldCardGatherCounts(CardGatherView &v);
+    std::unordered_map<const OgreScene *, CardGatherView> mCardGather;
+    VkDescriptorSetLayout mCgSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mCgPipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mCgPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mCgModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mCgPool = VK_NULL_HANDLE;
+    bool                  mCgFailed = false;
     /// THE INSTANCE JOB (ATOM-CPU-WALKS-1, rq_tlas_write.comp): its pipeline and the
     /// pool its per-scene ring of sets comes from (kTlasWriteSets, from the layout's
     /// own constants).
@@ -2577,6 +2609,22 @@ void RayQueryTier::close() {
         views->clear();
     }
     if (mCmPool) vkDestroyDescriptorPool(mVk, mCmPool, nullptr);
+    // THE CARDS' TLAS GATHER's state: sets dropped with the pool.
+    for (auto &kv : mCardGather)
+        for (unsigned i = 0; i < kReflectRing; ++i) {
+            dropBuffer(kv.second.params[i]);
+            dropBuffer(kv.second.records[i]);
+            dropBuffer(kv.second.rowOfSlot[i]);
+            dropBuffer(kv.second.counts[i]);
+        }
+    mCardGather.clear();
+    if (mCgPool) vkDestroyDescriptorPool(mVk, mCgPool, nullptr);
+    if (mCgPipeline) vkDestroyPipeline(mVk, mCgPipeline, nullptr);
+    if (mCgModule) vkDestroyShaderModule(mVk, mCgModule, nullptr);
+    if (mCgPipeLayout) vkDestroyPipelineLayout(mVk, mCgPipeLayout, nullptr);
+    if (mCgSetLayout) vkDestroyDescriptorSetLayout(mVk, mCgSetLayout, nullptr);
+    mCgPool = VK_NULL_HANDLE; mCgPipeline = VK_NULL_HANDLE; mCgModule = VK_NULL_HANDLE;
+    mCgPipeLayout = VK_NULL_HANDLE; mCgSetLayout = VK_NULL_HANDLE;
     if (mTwPool) vkDestroyDescriptorPool(mVk, mTwPool, nullptr);
     if (mTwPipeline) vkDestroyPipeline(mVk, mTwPipeline, nullptr);
     if (mTwPipeLayout) vkDestroyPipelineLayout(mVk, mTwPipeLayout, nullptr);
@@ -2714,6 +2762,7 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     detail::monitor::forgetGpuOwner(&sa);
     scene->rayStructuresSlot().reset();
     forgetCardMovers(scene);
+    forgetCardGather(scene);
 }
 
 // ---------------------------------------------------------------------------
@@ -9580,6 +9629,351 @@ void OgreScene::cardMoverTimes(float &traceMs, float &stillMs) {
 }
 
 // ---------------------------------------------------------------------------
+// THE CARDS' INDIRECT BY TLAS RAYS (PHOTON-7 stage 10, 10-2a) — the ray tier's half. The surface cache hands over the
+// cards its relight re-gathers this frame (OgreSurfaceCache.cpp relightCards) in the relight's record layout; this
+// records N fixed rays a texel against the still world (rq_card_gather.comp), the hits read through the hit set, into
+// the cache's Gather layer, before the relight that reads it.
+namespace {
+struct CardGatherParams {
+    float voxelOrigin[kGatherMaxCascades][4] = {};
+    float voxelInvSize[kGatherMaxCascades][4] = {};
+    float knobs[4] = {};
+    float knobs2[4] = {};
+    float skyColour[4] = {};
+    float cards[4] = {};
+    float hitList[4] = {};
+    float alpha[4] = {};
+    float hitTable[4] = {};
+    float cloudMap[4] = {};
+    float cloudSun[4] = {};
+    float hitSun[4] = {};
+};
+/// The job's own four (the params, the records, the Gather layer, the counts) and the hit set at 0 and 5..36.
+constexpr unsigned kCardGatherBindings = 37u;
+constexpr HitSetSlots kCardGatherHitSlots = {
+    0u,
+    { 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u },
+    17u,
+    { 18u, 19u, 20u, 21u },
+    22u,
+    { 29u, 30u },
+    { 31u, 32u, 33u, 34u },
+    35u,
+    36u,
+};
+static_assert(kCardGatherBindings == kHitSetBindings + 4u, "the cards' gather set is the hit set and its own four");
+/// The records ring's capacity: the relight list's (kMaxRelights).
+constexpr unsigned kCardGatherMaxRecords = 1024u;
+constexpr unsigned kCardGatherRecordFloats = 36u;
+constexpr unsigned kCardGatherCounts = 8u;
+/// THE HIT'S SUN RAY at a voxel-answered hit (jah_rq_hit_direct.glsl): the still casters alone (a cache holds no mover:
+/// the mask's law, rq_card_gather.comp's head) to the cards' own sun range (OgreSurfaceCache.cpp kMoverRayRange).
+constexpr float kCardGatherSunRange = 10000.0f;
+}   // namespace
+
+bool RayQueryTier::makeCardGatherPipeline(std::string &err) {
+    if (!ensureSamplers(err)) return false;
+    VkDescriptorSetLayoutBinding b[kCardGatherBindings] = {};
+    hitSetLayout(kCardGatherHitSlots, b);
+    const VkDescriptorType own[4] = {
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,   // 1 params
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,   // 2 the card records
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,    // 3 the Gather layer
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,   // 4 the counts
+    };
+    for (unsigned i = 0; i < 4u; ++i) {
+        b[1u + i].binding = 1u + i;
+        b[1u + i].descriptorType = own[i];
+        b[1u + i].descriptorCount = 1u;
+        b[1u + i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    DescriptorPoolPlan plan;
+    if (!plan.makeLayout(mVk, b, kCardGatherBindings, kMaxTimedScenes * kReflectRing, mCgSetLayout, err,
+                         "rayquery/card-gather"))
+        return false;
+    VkPipelineLayoutCreateInfo pli{};
+    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &mCgSetLayout;
+    if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mCgPipeLayout) != VK_SUCCESS) {
+        err = "vkCreatePipelineLayout failed";
+        return false;
+    }
+    VkShaderModuleCreateInfo smi{};
+    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize = sizeof(krq_cardGatherSpv);
+    smi.pCode = krq_cardGatherSpv;
+    if (vkCreateShaderModule(mVk, &smi, nullptr, &mCgModule) != VK_SUCCESS) {
+        err = "vkCreateShaderModule failed (the build-time SPIR-V is not loadable)";
+        return false;
+    }
+    VkComputePipelineCreateInfo cpi{};
+    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = mCgModule;
+    cpi.stage.pName = "main";
+    cpi.layout = mCgPipeLayout;
+    if (createComputePipeline(cpi, &mCgPipeline, "card gather") != VK_SUCCESS) {
+        err = "vkCreateComputePipelines failed";
+        return false;
+    }
+    return plan.create(mVk, "rayquery/card-gather", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mCgPool, err);
+}
+
+void RayQueryTier::foldCardGatherCounts(CardGatherView &v) {
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    for (unsigned i = 0; i < kReflectRing; ++i) {
+        if (!v.countsPending[i] || !v.counts[i].mapped || uint32_t(now - v.countsFrame[i]) < inFlight) continue;
+        const uint32_t *w = static_cast<const uint32_t *>(v.counts[i].mapped);
+        v.total.rays += w[0];
+        v.total.card += w[1];
+        v.total.voxel += w[2];
+        v.total.backFaces += w[3];
+        v.total.noSample += w[4];
+        v.total.sky += w[5];
+        v.total.texels += w[6];
+        v.total.emptyTexels += w[7];
+        ++v.total.dispatches;
+        v.countsPending[i] = false;
+    }
+}
+
+CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTrace &job) {
+    // THE TIER: a scene that does not trace (the project's rays off, or no device) gathers by the voxel rays.
+    if (!isOpen() || !scene || !scene->rayTracingResolved() || mCgFailed) return CardGatherResult::NoRays;
+    if (!job.count || !job.records || !job.gather) return CardGatherResult::Wait;
+    // ...and one that traces but whose structure is not there this frame waits (never the voxel rays here).
+    SceneAs *saP = asOf(scene);
+    if (!saP || !saP->tlas || !saP->st.enabled || saP->instanceCount == 0u) return CardGatherResult::Wait;
+    SceneAs &sa = *saP;
+    if (!mCgPipeline) {
+        std::string err;
+        if (!makeCardGatherPipeline(err)) {
+            mCgFailed = true;
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: the cards' TLAS gather is off: " + err + " (the cards gather by the voxel rays)");
+            return CardGatherResult::NoRays;
+        }
+    }
+    CardGatherView &v = mCardGather[scene];
+    foldCardGatherCounts(v);
+    const unsigned count = std::min(job.count, kCardGatherMaxRecords);
+    const unsigned ring = v.frame % kReflectRing;
+    std::string err;
+    if (v.countsPending[ring]) return CardGatherResult::Wait;   // its counts not read yet (a frame not retired)
+    const VkDeviceSize recBytes = VkDeviceSize(kCardGatherMaxRecords) * kCardGatherRecordFloats * sizeof(float);
+    if ((!v.params[ring].buffer &&
+         !makeBuffer(sizeof(CardGatherParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, v.params[ring], err)) ||
+        (!v.records[ring].buffer &&
+         !makeBuffer(recBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, v.records[ring], err)) ||
+        (!v.counts[ring].buffer &&
+         !makeBuffer(kCardGatherCounts * sizeof(uint32_t),
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false,
+                     v.counts[ring], err)))
+        return CardGatherResult::Wait;
+    if (!v.sets[ring]) {
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mCgPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &mCgSetLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, &v.sets[ring]) != VK_SUCCESS) {
+            v.sets[ring] = VK_NULL_HANDLE;
+            return CardGatherResult::Wait;
+        }
+    }
+
+    // ---- THE HIT SET (the one collection) with no hit list (a cache ray appends nothing) but the GPU scene's
+    // instance table (the hit's flags - the back-face rule's two-sided bit - and its material, jah_rq_hit_direct.glsl).
+    HitSetSources hs;
+    hitStandIns(hs.hit);
+    detail::GpuScene &gs = scene->gpuScene();
+    Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
+    if (instances) {
+        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(instances->getBufferInterface());
+        hs.hit.instances = bi->getVboName();
+        hs.hit.instancesOffset = VkDeviceSize(instances->_getFinalBufferStart()) * instances->getBytesPerElement();
+        hs.hit.instancesRange = instances->getTotalSizeBytes();
+        hs.hit.instanceEntries = gs.slotCount();
+    }
+    hitSetOf(scene, sa, hs);
+    if (!hs.cardsBound()) return CardGatherResult::Wait;   // the texels' own layers are the cache's: bound with it
+    // the per-slot geometry rows, this ring's copy
+    uint32_t geomSlots = hs.geomRows && hs.geomRowOfSlot ? uint32_t(hs.geomRowOfSlot->size()) : 0u;
+    if (geomSlots) {
+        RawBuffer &rb = v.rowOfSlot[ring];
+        const VkDeviceSize want = VkDeviceSize(geomSlots) * sizeof(uint32_t);
+        if (rb.buffer && rb.size < want) retire(rb);
+        if (!rb.buffer && !makeBuffer(std::max<VkDeviceSize>(want, 1024u), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
+                                      false, rb, err))
+            geomSlots = 0u;
+        else
+            std::memcpy(rb.mapped, hs.geomRowOfSlot->data(), size_t(want));
+    }
+
+    // ---- THE PARAMETERS
+    CardGatherParams pp{};
+    for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
+        const unsigned src = c < hs.cascadeCount ? c : (hs.cascadeCount ? hs.cascadeCount - 1u : 0u);
+        const bool have = hs.cascadeCount != 0u;
+        for (int k = 0; k < 3; ++k) {
+            pp.voxelOrigin[c][k] = have ? hs.voxelOrigin[src][k] : 0.0f;
+            const float sz = have ? hs.voxelSize[src][k] : 1.0f;
+            pp.voxelInvSize[c][k] = sz > 0.0f ? 1.0f / sz : 0.0f;
+        }
+        pp.voxelInvSize[c][3] = have ? hs.voxelCell[src] : 1.0f;
+    }
+    pp.knobs[0] = float(std::max(job.rays, 1u));
+    pp.knobs[1] = std::max(job.reach, 0.0f);
+    pp.knobs[2] = float(hs.cascadeCount);
+    pp.knobs[3] = float(kRayMaskStill);   // the still world (rq_card_gather.comp's mask law)
+    pp.knobs2[0] = hs.sky ? 1.0f : 0.0f;
+    pp.knobs2[1] = float(count);
+    pp.knobs2[2] = float(kRayMaskStillCaster);
+    pp.knobs2[3] = kCardGatherSunRange;
+    for (int i = 0; i < 3; ++i) pp.skyColour[i] = std::max(0.0f, hs.skyColour[i]);
+    pp.cards[0] = float(hs.cardSlots);
+    pp.cards[1] = float(hs.cardRecords);
+    pp.cards[3] = float(geomSlots);
+    pp.hitList[2] = float(hs.hit.instanceEntries);   // the instance table's entries; the list itself is off (w 0)
+    {
+        const uint32_t lo = uint32_t(hs.alphaTable & 0xFFFFFFFFu), hi = uint32_t(hs.alphaTable >> 32u);
+        std::memcpy(&pp.alpha[0], &lo, sizeof(lo));
+        std::memcpy(&pp.alpha[1], &hi, sizeof(hi));
+    }
+    {
+        const uint32_t lo = uint32_t(hs.hitTable & 0xFFFFFFFFu), hi = uint32_t(hs.hitTable >> 32u);
+        std::memcpy(&pp.hitTable[0], &lo, sizeof(lo));
+        std::memcpy(&pp.hitTable[1], &hi, sizeof(hi));
+        pp.hitTable[2] = hs.hitPool ? 1.0f : 0.0f;
+        pp.hitTable[3] = hs.cloudField ? 1.0f : 0.0f;
+        std::memcpy(pp.cloudMap, hs.cloudMap, sizeof(pp.cloudMap));
+        std::memcpy(pp.cloudSun, hs.cloudSun, sizeof(pp.cloudSun));
+    }
+    std::memcpy(v.params[ring].mapped, &pp, sizeof(pp));
+    std::memcpy(v.records[ring].mapped, job.records, size_t(count) * kCardGatherRecordFloats * sizeof(float));
+
+    // ---- THE SET: the job's own four, then the hit set through its one writer
+    VkWriteDescriptorSet w[kCardGatherBindings] = {};
+    HitSetWrite hitSet;
+    if (!hitSet.write(*this, v.sets[ring], kCardGatherHitSlots, hs, geomSlots ? v.rowOfSlot[ring].buffer : VK_NULL_HANDLE,
+                      w, err))
+        return CardGatherResult::Wait;
+    VkDescriptorBufferInfo ub{}, rb{}, cb{};
+    ub.buffer = v.params[ring].buffer;
+    ub.range = sizeof(CardGatherParams);
+    rb.buffer = v.records[ring].buffer;
+    rb.range = recBytes;
+    cb.buffer = v.counts[ring].buffer;
+    cb.range = kCardGatherCounts * sizeof(uint32_t);
+    VkDescriptorImageInfo store{};
+    {
+        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = job.gather;
+        slot.access = Ogre::ResourceAccess::Write;
+        slot.pixelFormat = job.gather->getPixelFormat();
+        store.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.gather)->createView(slot, false);
+        retireView(store.imageView);
+        store.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    if (!store.imageView) return CardGatherResult::Wait;
+    const auto own = [&](uint32_t binding, VkDescriptorType type) -> VkWriteDescriptorSet & {
+        VkWriteDescriptorSet &e = w[binding];
+        e.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        e.dstSet = v.sets[ring];
+        e.dstBinding = binding;
+        e.descriptorCount = 1;
+        e.descriptorType = type;
+        return e;
+    };
+    own(1u, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).pBufferInfo = &ub;
+    own(2u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &rb;
+    own(3u, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &store;
+    own(4u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &cb;
+    vkUpdateDescriptorSets(mVk, kCardGatherBindings, w, 0, nullptr);
+
+    // ---- THE LAYOUTS through Ogre's solver, before the command buffer is taken (the movers job's rule: the capture's
+    // copy encoder closes first): the hit set read, the Gather layer written - the relight that follows reads it as a
+    // UAV, ordered after this write by its own barrier analysis.
+    {
+        mDev->_jahRecordQueue().endAllEncoders();
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        hitSetTransitions(solver, trans, hs);
+        solver.resolveTransition(trans, job.gather, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Write,
+                                 computeStage);
+        if (instances) solver.resolveTransition(trans, instances, Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return CardGatherResult::Wait;
+    clearDummyImages(cmd);
+    initHitDummies(cmd);
+    {
+        // THE COUNTS, zeroed for this dispatch (every earlier reader of the slot retired: countsPending)
+        vkCmdFillBuffer(cmd, v.counts[ring].buffer, 0, kCardGatherCounts * sizeof(uint32_t), 0u);
+        VkMemoryBarrier fb{};
+        fb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        fb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        fb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fb, 0,
+                             nullptr, 0, nullptr);
+    }
+    {
+        detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "cards.gather", mRs, scene);
+        work.setUnits(count);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCgPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCgPipeLayout, 0, 1, &v.sets[ring], 0, nullptr);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
+        vkCmdDispatch(cmd, kCardPageSize / 8u, kCardPageSize / 8u, count);
+    }
+    {
+        // ...and the counts visible to the host once the frame retires (foldCardGatherCounts reads them then)
+        VkMemoryBarrier hb{};
+        hb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        hb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0,
+                             nullptr, 0, nullptr);
+    }
+    v.countsFrame[ring] = frameNow();
+    v.countsPending[ring] = true;
+    ++v.frame;
+    return CardGatherResult::Traced;
+}
+
+void RayQueryTier::cardGatherCounts(OgreScene *scene, CardCacheStatus::GatherCounts &out) {
+    out = CardCacheStatus::GatherCounts();
+    auto it = mCardGather.find(scene);
+    if (it == mCardGather.end()) return;
+    foldCardGatherCounts(it->second);
+    out = it->second.total;
+}
+
+void RayQueryTier::forgetCardGather(OgreScene *scene) {
+    auto it = mCardGather.find(scene);
+    if (it == mCardGather.end()) return;
+    for (unsigned i = 0; i < kReflectRing; ++i) {
+        retireSet(it->second.sets[i], mCgPool);
+        retire(it->second.params[i]);
+        retire(it->second.records[i]);
+        retire(it->second.rowOfSlot[i]);
+        retire(it->second.counts[i]);
+    }
+    mCardGather.erase(it);
+}
+
+CardGatherResult OgreScene::gatherCards(const CardGatherTrace &job) {
+    return mEngine && mEngine->mRayTier ? mEngine->mRayTier->gatherCards(this, job) : CardGatherResult::NoRays;
+}
+void OgreScene::cardGatherCounts(CardCacheStatus::GatherCounts &out) const {
+    out = CardCacheStatus::GatherCounts();
+    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->cardGatherCounts(const_cast<OgreScene *>(this), out);
+}
+
+// ---------------------------------------------------------------------------
 /// A DESTRUCTOR MAY NOT THROW — it is implicitly `noexcept`, so an exception
 /// leaving it is `std::terminate`, and this one submits to the GPU (lane VR-3b,
 /// 2026-09-17; the owner's WiVRn smoke died exactly here). The chain was:
@@ -11089,6 +11483,8 @@ bool OgreScene::rayNearAddresses(std::vector<unsigned long long> &addresses) con
 }
 bool PhotonComponent::probeGatherWanted() const { return false; }
 bool OgreScene::traceCardMovers(const CardMoverTrace &) { return false; }
+CardGatherResult OgreScene::gatherCards(const CardGatherTrace &) { return CardGatherResult::NoRays; }
+void OgreScene::cardGatherCounts(CardCacheStatus::GatherCounts &out) const { out = CardCacheStatus::GatherCounts(); }
 bool OgreScene::cardTracePresent() const { return false; }
 void OgreScene::cardMoverTimes(float &, float &) {}
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }

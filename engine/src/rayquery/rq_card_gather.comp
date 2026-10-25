@@ -1,0 +1,280 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// THE CARDS' INDIRECT GATHERED BY TLAS RAYS (PHOTON-7 stage 10, 10-2a; L9: no light passes a wall; L5: one estimator).
+//
+// WHAT IT IS: the card relight's diffuse GI - envColourD, the cosine-weighted mean radiance over the texel's hemisphere
+// - as the mean of N fixed cosine-distributed rays, the one set (jah_ray_set.glsl: jahRayCosineDir in the frame
+// jahConeBasisWorld lifts it in, the voxel ray's own directions), traced through the scene's TLAS instead of the voxel
+// chain: at the ray tier the TLAS is the tracer, and inside a watertight room nothing escapes (e = 0 exactly; the voxel
+// chain's coarse cells mixed the two sides of a wall thinner than their cell - c2/c3's leak, card_residency (3)).
+// One workgroup row of a card a z-slice (the relight's record layout, the movers job's dispatch), one thread a texel,
+// written into the cache's GATHER layer, which the relight (JahCardLight_cs.glsl, its mode bit 4) reads as the
+// texel's irradiance in place of its voxel rays. ITS OWN PASS, BEFORE THE RELIGHT IN THE SAME FRAME (the lead's
+// ruling): no lag, and nothing of the gather's held state gates a cache's relight (L2).
+//
+// A RAY'S ANSWER, the world caches' law (the spec's stage 10 design; Lumen's radiosity):
+//   * a HIT on a FRONT face (the triangle's wound normal against the ray) reads the hit through jahHitRadianceStore
+//     (jah_rq_hit_radiance.glsl): the hit instance's card first, the cascades where no card answers (the hit's own
+//     direct light computed at the hit, the store's bounce beside it) - never jahHitRadianceSourced (its mover rays
+//     would write mover occlusion into a cache);
+//   * a hit on a BACK face - a one-sided surface seen from behind (the TLAS disables facing culls: the ray stops on
+//     it) - is 0: the inside of a closed shell holds no light of its outside;
+//   * a hit neither the card nor a cascade can shade is NO SAMPLE (the mean is over the rays that are);
+//   * a MISS out to the reach (the outermost cascade's guaranteed radius, the voxel ray's last world shell) is the sky
+//     over the ray's bin (a cone of the bin's solid angle 2 pi / N: jahEnvCone, the voxel ray's escape) - the sky
+//     enters ONLY at an earned miss.
+// THE MASK: the still world alone (kRayMaskStill, until stage 8's 8-M): no brick fires when a mover moves, and the
+// gate's card half counts a mover's occlusion where a reader asks for it. Its own sun rays at a voxel-answered hit
+// take the still casters (kRayMaskStillCaster) for the same reason.
+//
+// THE COUNTS (the e = 0 counter, the lead's 10-2a): per dispatch, the rays traced and each one's answer - a card, a
+// cascade, a back face, no sample, the sky - and the texels gathered, summed per subgroup into the job's counter
+// buffer (one atomic a subgroup a count), read back by the ray tier a fixed number of frames later
+// (CardCacheStatus::gather).
+//
+// THE TEXEL'S POINT, NORMAL AND RAY ORIGIN are the relight's and the movers job's to the bit: the capture camera's
+// position, the ortho window on axisU / axisV, the depth back along axisD (JahCardLight_cs.glsl main); the shading
+// normal decoded from the card's view space, snapped to the card's plane within the 8-bit format's quantum; the ONE
+// origin law (jah_ray_origin.glsl): the point lifted along the captured surface's GEOMETRIC normal by its float bound
+// plus the record's lift (rect.w: the still sun trace's, OgreSurfaceCache.cpp sunLiftOf), tMin 0.
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+const int kMaxCascades = 4;
+
+layout( std140, set = 0, binding = 1 ) uniform Params
+{
+	vec4 voxelOrigin[kMaxCascades];
+	vec4 voxelInvSize[kMaxCascades];   // xyz = 1 / the box's size, w = the cell (its largest side)
+	vec4 knobs;		// x = the rays a texel N, y = the reach (metres), z = the cascades bound, w = the ray mask
+	vec4 knobs2;	// x = the sky cube on, y = the records, z = the hit's sun-ray mask, w = its length
+	vec4 skyColour;
+	vec4 cards;		// x = the card slots, y = the card records, w = the per-slot geometry rows
+	vec4 hitList;	// the hit list's shape (off: nothing is appended)
+	vec4 alpha;		// xy = the alpha table's address (float bits)
+	vec4 hitTable;	// xy = the hit table's address (float bits), z = the texture pool bound, w = the cloud field
+	vec4 cloudMap;
+	vec4 cloudSun;
+	vec4 hitSun;	// (the record's sun: the list is off)
+} p;
+
+layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+
+// ONE CARD, the relight's record layout (OgreSurfaceCache.cpp relightCards): rect = (atlasX, atlasY, size, the lift in
+// metres); camPos; axisU.xyz / axisV.xyz with the ortho window's width / height in .w; axisD; the lamp table (unread).
+struct CardRec
+{
+	vec4 rect;
+	vec4 camPos;
+	vec4 axisU;
+	vec4 axisV;
+	vec4 axisD;
+	uvec4 lampIds[4];
+};
+layout( std430, set = 0, binding = 2 ) readonly buffer Cards { CardRec cards[]; };
+/// THE GATHER LAYER: rgb = the texel's envColourD (the mean radiance over its cosine hemisphere), a = the share of its
+/// rays that escaped to the sky - the texel's e, 0 inside a watertight room (CardSample::gather, gi.sealed_sky (6)).
+layout( rgba16f, set = 0, binding = 3 ) uniform writeonly image2D cardGather;
+/// THE COUNTS: rays, card hits, cascade hits, back faces, no sample, the sky, texels gathered, texels with no sample.
+layout( std430, set = 0, binding = 4 ) buffer Counts { uint counts[8]; };
+
+// ---- THE HIT SET (ScreenProbeGather.h HitSetSources; RayQueryTier::gatherCards' kCardGatherHitSlots) ----------------
+layout( set = 0, binding = 5 ) uniform sampler3D voxelIso[kMaxCascades];
+layout( set = 0, binding = 6 ) uniform sampler3D voxelX[kMaxCascades];
+layout( set = 0, binding = 7 ) uniform sampler3D voxelY[kMaxCascades];
+layout( set = 0, binding = 8 ) uniform sampler3D voxelZ[kMaxCascades];
+layout( set = 0, binding = 9 ) uniform sampler3D voxelCovP[kMaxCascades];
+layout( set = 0, binding = 10 ) uniform sampler3D voxelCovN[kMaxCascades];
+layout( set = 0, binding = 11 ) uniform sampler3D voxelPosP[kMaxCascades];
+layout( set = 0, binding = 12 ) uniform sampler3D voxelPosN[kMaxCascades];
+layout( set = 0, binding = 13 ) uniform sampler3D voxelBack[kMaxCascades];
+layout( set = 0, binding = 14 ) uniform sampler3D voxelNrm[kMaxCascades];
+layout( set = 0, binding = 15 ) uniform sampler3D voxelDirect[kMaxCascades];
+#define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
+layout( set = 0, binding = 16 ) uniform sampler3D voxelDirectBack[kMaxCascades];
+#define JAH_VOX_SAMPLE_DIRECT_BACK( c, u, l ) textureLod( voxelDirectBack[c], u, l )
+layout( set = 0, binding = 17 ) uniform samplerCube skyCube;
+
+#define JAH_VOX_COUNT       int( p.knobs.z )
+#define JAH_VOX_ORIGIN( c )  p.voxelOrigin[c]
+#define JAH_VOX_INVSIZE( c ) p.voxelInvSize[c]
+#define JAH_SKY_ON          ( p.knobs2.x > 0.5 )
+#define JAH_SKY_COLOUR      p.skyColour.xyz
+#include "jah_rq_hit.glsl"
+
+#define JAH_CARD_BINDING_BASE 18
+#define JAH_CARD_VIEW_BINDING_BASE 22
+#include "jah_rq_card_bindings.glsl"
+#define JAH_CARD_SLOTS   uint( p.cards.x )
+#define JAH_CARD_RECORDS uint( p.cards.y )
+// (NOT a reader: the cache's own gather stamps no demand - a card is resident for what the views read)
+#include "jah_rq_card.glsl"
+
+layout( std430, set = 0, binding = 29 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
+layout( std430, set = 0, binding = 30 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
+#define JAH_GEOM_SLOTS uint( p.cards.w )
+#define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
+#define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
+#include "jah_rq_geom.glsl"
+
+layout( std430, set = 0, binding = 31 ) readonly buffer JahHitInstances { uvec4 jahHitInstances[]; };
+layout( rgba32ui, set = 0, binding = 32 ) uniform writeonly uimage2D jahHitIds;
+layout( r32ui, set = 0, binding = 33 ) uniform writeonly uimage2D jahHitDest;
+layout( std430, set = 0, binding = 34 ) buffer JahHitBuf { uint jahHitBuf[]; };
+#define JAH_HIT_ON          ( p.hitList.w > 0.5 )
+#define JAH_HIT_CAPACITY    uint( p.hitList.x )
+#define JAH_HIT_LIST_W      max( uint( p.hitList.y ), 1u )
+#define JAH_HIT_INSTANCES   uint( p.hitList.z )
+#define JAH_HIT_INSTANCE( s, k ) jahHitInstances[( s ) * 10u + ( k )]
+#define JAH_HIT_SUN         p.hitSun
+#define JAH_HIT_SUN_MASK    uint( p.knobs2.z )
+#define JAH_HIT_SUN_RANGE   p.knobs2.w
+#define JAH_HIT_FAR_LIFT    0.0
+#define JAH_ALPHA_TABLE     floatBitsToUint( p.alpha.xy )
+#include "jah_rq_sun_ray.glsl"
+#include "jah_rq_hit_record.glsl"
+layout( set = 0, binding = 35 ) uniform sampler2DArray jahHitPool;
+layout( set = 0, binding = 36 ) uniform sampler2D jahHitCloud;
+#define JAH_HIT_TABLE       floatBitsToUint( p.hitTable.xy )
+#define JAH_HIT_POOL_ON     ( p.hitTable.z > 0.5 )
+#define JAH_HIT_CLOUD_ON    ( p.hitTable.w > 0.5 )
+#define JAH_HIT_CLOUD_MAP   p.cloudMap
+#define JAH_HIT_CLOUD_SUN   p.cloudSun
+// A CACHE RAY TRACES NO MOVER (the mask's law above): the hit's mover gate never runs.
+#define JAH_HIT_MOVERS_ON false
+// AN IRRADIANCE ESTIMATOR READS A HIT'S SPECULAR LOBE BY ITS INTEGRAL (the gather's rule, PHOTON-3: a few stochastic rays
+// cannot sample a polished hit's near-delta lobe; jah_rq_hit_direct.glsl's header).
+#define JAH_HIT_LOBE_INTEGRAL
+#include "jah_rq_hit_radiance.glsl"
+// THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl): the store's table, through the hit table.
+void jahCardLobeHemi( float r, out float a, out float b )
+{
+	a = 0.0;
+	b = 0.0;
+	const uvec2 t = JAH_HIT_TABLE;
+	if( ( t.x | t.y ) != 0u )
+		jahSpecularAlbedoHemi( r, a, b );
+}
+
+// THE RAY SET AND ITS FRAME (the voxel ray's own text)
+#include "jah_ray_set.glsl"
+
+/// THE CARD TEXEL'S WORLD POINT at depth `depth` (the relight's reconstruction).
+vec3 cardPoint( CardRec r, ivec2 t, float depth )
+{
+	const vec2 f = ( vec2( t ) + 0.5 ) / max( r.rect.z, 1.0 );
+	return r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) + r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) -
+		   r.axisD.xyz * depth;
+}
+
+/// THE CAPTURED SURFACE'S GEOMETRIC NORMAL (the movers job's, jah_geometric_normal.glsl over the card's block of the
+/// Depth layer: R16F metres from the capture's near plane, 0 = nothing captured).
+CardRec gnCard;
+#define JAH_GN_RAW( q ) texelFetch( jahCardDepthLayer, ivec2( gnCard.rect.xy ) + ( q ), 0 ).x
+#define JAH_GN_WORLD( q, raw ) cardPoint( gnCard, ( q ), ( raw ) )
+#define JAH_GN_DRAWN( raw ) ( ( raw ) > 0.0 )
+#define JAH_GN_MANTISSA_BITS 10.0
+#include "jah_geometric_normal.glsl"
+
+const uint kCountRays = 0u, kCountCard = 1u, kCountVoxel = 2u, kCountBack = 3u, kCountNoSample = 4u, kCountSky = 5u,
+		   kCountTexels = 6u, kCountEmpty = 7u;
+
+void main()
+{
+	const CardRec r = cards[gl_WorkGroupID.z];
+	const uint size = uint( r.rect.z );
+	const uvec2 t = gl_GlobalInvocationID.xy;
+	const bool inCard = t.x < size && t.y < size;
+	const ivec2 at = ivec2( uint( r.rect.x ) + t.x, uint( r.rect.y ) + t.y );
+	const float depth = inCard ? texelFetch( jahCardDepthLayer, at, 0 ).x : 0.0;
+	const int n = max( int( p.knobs.x ), 1 );
+
+	uint c[8] = uint[8]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
+	vec4 answer = vec4( 0.0 );
+	if( inCard && depth > 0.0 )
+	{
+		const vec3 nV = JAH_CARD_NORMAL( at ).xyz * 2.0 - 1.0;
+		const vec3 N = normalize( r.axisU.xyz * nV.x + r.axisV.xyz * nV.y + r.axisD.xyz * nV.z );
+		const vec3 planeN = normalize( r.axisD.xyz );
+		const vec3 Ncone = dot( N, planeN ) > 0.99985 ? planeN : N;
+		const vec3 P = cardPoint( r, ivec2( t ), depth );
+		gnCard = r;
+		const vec3 Ng = jahGeometricNormal( ivec2( t ), ivec2( int( size ) ), depth, P, N, r.axisD.xyz );
+		const vec3 origin = jahRayOrigin( P, Ng, depth, r.rect.w );
+		const mat3 basis = jahConeBasisWorld( Ncone );
+		// the bin's cone (the voxel ray's escape): a solid angle 2 pi / N
+		const float binCos = 1.0 - 1.0 / float( n );
+		const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
+		const float spread = sqrt( 2.0 / float( n ) );
+		vec3 sum = vec3( 0.0 );
+		float taken = 0.0;
+		for( int i = 0; i < n; ++i )
+		{
+			const vec3 dir = normalize( basis * jahRayCosineDir( i, n ) );
+			++c[kCountRays];
+			rayQueryEXT rq;
+			rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), uint( p.knobs.w ), origin, 0.0,
+								   dir, p.knobs.y );
+			JAH_RQ_PROCEED( rq )
+			if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+			{
+				sum += jahEnvCone( dir, binTan );
+				taken += 1.0;
+				++c[kCountSky];
+				continue;
+			}
+			const float tHit = rayQueryGetIntersectionTEXT( rq, true );
+			const uint slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+			const uint prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
+			const uint geomIdx = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
+			const vec2 bary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
+			const mat4x3 toWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
+			vec3 wound;
+			const bool known = jahHitWoundNormal( slot, geomIdx, prim, toWorld, wound );
+			// A BACK FACE: the wound normal along the ray, on a surface its material draws one-sided (GpuScene.h
+			// kGpuTwoSided: a CULL_NONE macroblock draws both faces, and both are its surface)
+			if( known && dot( wound, dir ) > 0.0 && ( jahHitFlags( slot ) & kJahHitGpuTwoSided ) == 0u )
+			{
+				taken += 1.0;
+				++c[kCountBack];
+				continue;
+			}
+			const vec3 hitN = known ? ( dot( wound, dir ) > 0.0 ? -wound : wound ) : -dir;
+			jahHitSurf = JahHitSurface( slot, geomIdx, prim, bary, toWorld, tHit, false, known );
+			jahHitSeed = 0u;
+			jahHitAreaSeq = ( uint( at.x ) * 73856093u ) ^ ( uint( at.y ) * 19349663u ) ^ ( uint( i ) * 83492791u );
+			bool ok = false;
+			uint source = 0u;
+			const vec3 radiance = jahHitRadianceStore( slot, origin + dir * tHit, hitN, dir, max( tHit * spread, 1e-4 ),
+													   false, ok, source );
+			if( !ok || !finite3( radiance ) )
+			{
+				++c[kCountNoSample];
+				continue;
+			}
+			sum += radiance;
+			taken += 1.0;
+			++c[source == 1u ? kCountCard : kCountVoxel];
+		}
+		++c[kCountTexels];
+		if( !( taken > 0.0 ) )
+			++c[kCountEmpty];
+		answer = vec4( taken > 0.0 ? min( sum * ( 1.0 / taken ), vec3( kMaxRadiance ) ) : vec3( 0.0 ),
+					   float( c[kCountSky] ) / float( n ) );
+	}
+	if( inCard )
+		imageStore( cardGather, at, answer );
+	// THE COUNTS, one atomic a subgroup a count (every lane reaches here: no lane returned early)
+	for( uint k = 0u; k < 8u; ++k )
+	{
+		const uint s = subgroupAdd( c[k] );
+		if( subgroupElect() && s != 0u )
+			atomicAdd( counts[k], s );
+	}
+}

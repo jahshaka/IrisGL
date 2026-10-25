@@ -151,6 +151,8 @@ namespace jahshaka { namespace engine {
 /// definition.
 class SurfaceCache;
 struct CardMoverTrace;
+struct CardGatherTrace;
+enum class CardGatherResult : unsigned;
 struct CardMoverFrame;
 struct CardSceneView;
 // The backend's own namespace: these types and helpers are shared between the
@@ -4751,6 +4753,10 @@ public:
     bool asyncShaders() const { return mAsyncShaders; }
     bool cardMoverFrame(CardMoverFrame &out) { return mPhoton.cardMoverFrame(out); }
     bool traceCardMovers(const CardMoverTrace &job);
+    /// THE CARDS' INDIRECT BY TLAS RAYS (PHOTON-7 stage 10, 10-2a): the ray tier's gather of the relight's cards into
+    /// the Gather layer, and its counts (CardCacheStatus::gather).
+    CardGatherResult gatherCards(const CardGatherTrace &job);
+    void cardGatherCounts(CardCacheStatus::GatherCounts &out) const;
     /// The ray tier can trace the cards at all: open, its card-trace pipeline not refused (a scene whose structure is not
     /// built yet is still a trace that WAITS - SurfaceCache's lamps stay stale for it, never lit unshadowed for good).
     bool cardTracePresent() const;

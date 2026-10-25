@@ -109,6 +109,9 @@ const uint kJahHitGpuSkinned = 1u << 5u;
 const uint kJahHitGpuPlanar = 1u << 10u;
 /// GpuScene.h kGpuMetal (REFLECT-FIX-1).
 const uint kJahHitGpuMetal = 1u << 12u;
+/// GpuScene.h kGpuTwoSided (a CULL_NONE macroblock: both faces are the surface) - a cache ray's back-face rule
+/// (rq_card_gather.comp).
+const uint kJahHitGpuTwoSided = 1u << 11u;
 
 uint jahHitFlags( uint slot )
 {

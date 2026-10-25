@@ -17,7 +17,10 @@
 // rays' gather and is cached in its own layer (`cardIndirect`), recomputed only when
 // the card asks for it (mode bit 1: a fresh capture, or the chain re-injected)
 // and otherwise read back (mode 0) — or zero (mode bit 2: a card captured
-// this frame whose march did not fit the indirect budget yet).
+// this frame whose march did not fit the indirect budget yet). AT THE RAY TIER
+// (mode bit 4, PHOTON-7 stage 10, 10-2a) the gather is the TLAS's, traced before
+// this job into the Gather layer (rq_card_gather.comp): the voxel rays are the
+// no-ray route's estimator.
 //
 // DIRECT = the sum over the scene's lights of HlmsPbs's own BRDF_Default
 // diffuse lobe — jahDisneyDiffuse, the fork's JahBrdf piece
@@ -224,6 +227,14 @@ uniform restrict writeonly image2D cardFlat;
 // 5-3) in green, blue and alpha: traced before this job (rq_card_movers.comp's lamps mode), read here, kept.
 layout( vulkan( ogre_u9 ) vk_comma @insertpiece( uav9_pf_type ) )
 uniform restrict image2D cardSunVis;
+@property( jah_card_gather )
+// THE INDIRECT HALF BY TLAS RAYS (PHOTON-7 stage 10, 10-2a): at the ray tier the cards this relight re-gathers were
+// traced through the scene's TLAS before this job, in the same frame (rq_card_gather.comp: the same N fixed rays, the
+// hits read through the cards and the cascades, a back face 0, a miss the sky's), into this layer - rgb the texel's
+// envColourD - which mode bit 4 reads in place of the voxel rays below.
+layout( vulkan( ogre_u10 ) vk_comma @insertpiece( uav10_pf_type ) )
+uniform restrict readonly image2D cardGather;
+@end
 
 // THE LOBE'S INTEGRALS (PhotonSpecularAlbedo.h's table, the store's own floats: the job's one
 // constant buffer, SurfaceCache's mSpecAlbedoBuffer).
@@ -543,8 +554,12 @@ void main()
 		{
 @property( hlms_num_vct_cascades )
 			// BRDF_EnvMap's envColourD (the voxels' share plus the environment's share;
-			// the header says why).
+			// the header says why) - the TLAS gather's at the ray tier (mode bit 4).
+	@property( jah_card_gather )
+			const vec3 irradiance = ( mode & 4u ) != 0u ? imageLoad( cardGather, at ).xyz : jahCardEnvColourD( P, Ncone );
+	@else
 			const vec3 irradiance = jahCardEnvColourD( P, Ncone );
+	@end
 @else
 			// GI OFF (PHOTON-CARDS-5): the pixel's envColourD is the SH irradiance
 			// at its normal — the sky's SH x the Sky Light's gain, the engine's own

@@ -642,7 +642,25 @@ void SurfaceCache::destroyAll() {
         if (mFlat) { tm->destroyTexture(mFlat); mFlat = nullptr; }
         if (mSunVis) { tm->destroyTexture(mSunVis); mSunVis = nullptr; }
         if (mMoverVis) { tm->destroyTexture(mMoverVis); mMoverVis = nullptr; }
+        if (mGather) { tm->destroyTexture(mGather); mGather = nullptr; }
     }
+}
+
+bool SurfaceCache::ensureGatherLayer() {
+    if (mGather) return true;
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+    Ogre::TextureGpuManager *tm = rs ? rs->getTextureGpuManager() : nullptr;
+    if (!tm || !tm->checkSupport(Ogre::PFG_RGBA16_FLOAT, Ogre::TextureTypes::Type2D, Ogre::TextureFlags::Uav))
+        return false;
+    // Written by the ray tier's rq_card_gather.comp and read by the relight, nothing else: a UAV, never a render
+    // target or a copy destination, resident from here (the lit layers' rule).
+    mGather = tm->createTexture(processUniqueName("cardGather"), Ogre::GpuPageOutStrategy::Discard,
+                                Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
+    mGather->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
+    mGather->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
+    mGather->setNumMipmaps(1u);
+    mGather->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2045,12 +2063,60 @@ void SurfaceCache::relightCards() {
     else
         mGiBuffer->upload(mGiCpu.data(), 0, kGiParamFloats / 4u);
 
+    // ---- THE INDIRECT HALF BY TLAS RAYS (PHOTON-7 stage 10, 10-2a; rq_card_gather.comp): at the ray tier the cards
+    // this relight re-gathers (mode 1) are traced through the scene's TLAS - their own pass, BEFORE the relight in the
+    // same frame (no lag; nothing of a view's held state gates it, L2) - into the Gather layer, which the relight reads
+    // in place of its voxel rays (mode bit 4). A scene that does not trace gathers by the voxel rays (the no-ray
+    // route); a scene that traces but whose structure is not there this frame WAITS: the cards' indirect stays owed and
+    // their direct half is relit alone (never the voxel rays at the ray tier: one estimator a tier, L5). GI off (no
+    // chain) keeps the environment's SH.
+    if (numCascades && mMoverHooks.gather) {
+        std::vector<size_t> marched;
+        for (size_t i = 0; i < mRelight.size(); ++i)
+            if (mRelightMode[i] == 1u) marched.push_back(i);
+        if (!marched.empty() && ensureGatherLayer()) {
+            mGatherCpu.assign(marched.size() * kRelightFloats, 0.0f);
+            for (size_t k = 0; k < marched.size(); ++k) {
+                std::memcpy(&mGatherCpu[k * kRelightFloats], &mRelightCpu[marched[k] * kRelightFloats],
+                            kRelightFloats * sizeof(float));
+                mGatherCpu[k * kRelightFloats + 3u] = sunLiftOf(mCards[mRelight[marched[k]]]);   // the still trace's lift
+            }
+            CardGatherTrace job;
+            job.records = mGatherCpu.data();
+            job.count = unsigned(marched.size());
+            job.rays = std::max(mIndirectRays, 1u);
+            job.reach = mRayLastShell;
+            job.gather = mGather;
+            const CardGatherResult res = mMoverHooks.gather(job);
+            if (res == CardGatherResult::Traced) {
+                for (size_t i : marched) mRelightCpu[i * kRelightFloats + 3u] = float(1u | 4u);
+                mGatherByRays = true;
+            } else if (res == CardGatherResult::Wait) {
+                // the direct half alone (its cached indirect, or none yet); the card stays owed (relightIndirect)
+                for (size_t i : marched) {
+                    mRelightMode[i] = mCards[mRelight[i]].indirectValid ? 0u : 2u;
+                    mRelightCpu[i * kRelightFloats + 3u] = float(mRelightMode[i]);
+                }
+                ++mGatherWaits;
+            } else {
+                mGatherByRays = false;
+            }
+            if (res != CardGatherResult::NoRays)
+                mRelightBuffer->upload(mRelightCpu.data(), 0, mRelight.size() * kRelightFloats / 4u);
+        }
+    }
+
     // ---- THE DISPATCH: the job is shared process-wide by name, so every
     // binding is set here and released after the dispatch is recorded.
     if (mLightJob->getProperty("hlms_num_vct_cascades") != Ogre::int32(numCascades))
         mLightJob->setProperty("hlms_num_vct_cascades", Ogre::int32(numCascades));
     if (mLightJob->getProperty("jah_env") != (envCube ? 1 : 0))
         mLightJob->setProperty("jah_env", envCube ? 1 : 0);
+    // THE GATHER LAYER (10-2a): bound wherever the ray tier made it (its UAV 10, read by the mode bit 4)
+    const bool gatherBound = mGather != nullptr;
+    if (mLightJob->getProperty("jah_card_gather") != (gatherBound ? 1 : 0))
+        mLightJob->setProperty("jah_card_gather", gatherBound ? 1 : 0);
+    mLightJob->setNumUavUnits(gatherBound ? 11u : 10u);
     // THE STORE'S ROUNDING follows the layer's format (jahCardRound): the
     // pre-scale is R11G11B10F's, and the RGBA16F fallback stores unrounded.
     {
@@ -2154,6 +2220,13 @@ void SurfaceCache::relightCards() {
         uav.access = Ogre::ResourceAccess::ReadWrite;
         uav.pixelFormat = mSunVis->getPixelFormat();
         mLightJob->_setUavTexture(9u, uav);
+        // THE GATHER LAYER (10-2a): the TLAS gather's irradiance, read
+        if (gatherBound) {
+            uav.texture = mGather;
+            uav.access = Ogre::ResourceAccess::Read;
+            uav.pixelFormat = mGather->getPixelFormat();
+            mLightJob->_setUavTexture(10u, uav);
+        }
     }
     mLightJob->_setUavBuffer(2u, bufSlot(mGiBuffer, Ogre::ResourceAccess::Read));
     // ...and the lobe's integrals: the engine's one table (PhotonSpecularAlbedoBuffer.h), the
@@ -2241,6 +2314,7 @@ void SurfaceCache::relightCards() {
         mLightJob->_setUavTexture(7u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->_setUavTexture(8u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->_setUavTexture(9u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        if (gatherBound) mLightJob->_setUavTexture(10u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->setConstBuffer(0u, nullptr);
         mLightJob->setNumTexUnits(0u);
     }
@@ -3615,6 +3689,9 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
         out.cardsSharedFractional += c.fractionalCount >= 2u ? 1u : 0u;
     }
     out.lampRaysLastTrace = mLampRaysLastTrace;
+    if (mMoverHooks.gatherCounts) mMoverHooks.gatherCounts(out.gather);
+    out.gatherWaits = mGatherWaits;
+    out.gatherByRays = mGatherByRays;
     out.areaStrata = mAreaStrata;
     for (unsigned k = 0; k < 4u; ++k) out.demandHits[k] = mDemandHits[k];
     out.queueLength = 0u;
@@ -3822,6 +3899,18 @@ bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &
     }
     out.lampCount = rec.lampCount;
     for (unsigned k = 0; k < 16u; ++k) out.lampIds[k] = rec.lampIds[k];
+    // ...and THE GATHER LAYER (PHOTON-7 stage 10, 10-2a): the TLAS gather's irradiance and the texel's escaped share.
+    if (mGather) {
+        Ogre::AsyncTextureTicket *tk = tm->createAsyncTextureTicket(
+            1u, 1u, 1u, Ogre::TextureTypes::Type2D, mGather->getPixelFormat());
+        Ogre::TextureBox src = mGather->getEmptyBox(0);
+        src.x = tx; src.y = ty; src.width = 1u; src.height = 1u;
+        tk->download(mGather, 0, true, &src, true);
+        const Ogre::TextureBox box = tk->map(0);
+        decodeTexel(mGather->getPixelFormat(), box.at(0, 0, 0), out.gather);
+        tk->unmap();
+        tm->destroyAsyncTextureTicket(tk);
+    }
     // THE INDIRECT LAYER (ENGINE-POLISH-PHOTON-1 stage 3): the diffuse half where the channel has a
     // diffuse albedo, the specular lobe's share where it has none (JahCardLight_cs.glsl).
     const float *spec = vals[unsigned(CardLayer::Specular)];

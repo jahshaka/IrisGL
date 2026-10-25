@@ -376,20 +376,6 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 	return r;
 }
 
-/// THE WORLD CACHES' DIRECTIONS (the spec's "N fixed, world-keyed, cosine-distributed rays"): direction `i` of `n` in
-/// the frame whose third axis is the normal (jah_voxel_cones.glsl's jahConeBasis: a function of the WORLD normal alone) -
-/// a Vogel spiral on the unit disc (radius sqrt((i + 1/2) / n), the golden angle between neighbours: equal areas, so
-/// equal projected solid angles once lifted onto the hemisphere, Malley's method). ONE SET FOR EVERY SURFACE POINT,
-/// never turned per texel or voxel: a cache is READ - by a reflection, by the gather's hits - texel by texel, and a set
-/// turned by a world key per texel stored the set's own sampling noise into the cache, a speckle of codes the readers
-/// show (rtreflect.contact: the crease's floor rows 91-98 a row apart, 36 columns over its law); the one set is smooth
-/// across a surface, deterministic, and a function of the world (a cache's rest, "replace at once", walk = teleport).
-vec3 jahRayCosineDir( int i, int n )
-{
-	const float u = ( float( i ) + 0.5 ) / float( n );
-	const float rr = sqrt( u );
-	const float phi = 6.2831853 * fract( float( i ) * 0.38196601 );
-	return vec3( rr * cos( phi ), rr * sin( phi ), sqrt( max( 1.0 - u, 0.0 ) ) );
-}
+// (THE WORLD CACHES' DIRECTIONS - jahRayCosineDir - are jah_ray_set.glsl's, with the frame they are lifted in.)
 
 #endif   // JAH_VOXEL_RAY_GLSL

@@ -4077,6 +4077,10 @@ struct CardSample {
     float position[3] = { 0, 0, 0 };
     float worldNormal[3] = { 0, 0, 0 };
     float sunLift = 0.0f;
+    /// THE GATHER LAYER AT THE TEXEL (PHOTON-7 stage 10, 10-2a; rq_card_gather.comp): its last TLAS gather's
+    /// envColourD (rgb) and the share of its rays that escaped to the sky (a: the texel's e - 0 inside a watertight
+    /// room). All 0 where the ray tier never gathered (no layer, or the texel not gathered yet).
+    float gather[4] = { 0, 0, 0, 0 };
 };
 
 /// ONE QUESTION FOR THE RAY JOB'S CARD READ (Engine::cardReadParity): a world
@@ -4163,6 +4167,20 @@ struct CardCacheStatus {
     /// strata's n^2 an area light), and n (GiQualityFacts::cardAreaStrata).
     unsigned long long lampRaysLastTrace = 0ull;
     unsigned areaStrata = 0u;
+    /// THE INDIRECT HALF BY TLAS RAYS (PHOTON-7 stage 10, 10-2a; rq_card_gather.comp): at the ray tier the relight's
+    /// diffuse GI is gathered by the TLAS, its own pass before the relight, into the cache's Gather layer. `gather` is
+    /// the life of the cache's counts, read back by the ray tier a fixed number of frames after each dispatch: the
+    /// dispatches, the rays traced and what answered each - a card, a cascade, a back face (0), no sample (neither
+    /// could shade the hit), the sky (a miss out to the reach) - and the texels gathered, those with no sample at all.
+    /// THE e = 0 COUNTER: inside a watertight room `sky` stays 0 (the sealed box, gi.sealed_sky law (6)).
+    /// `gatherWaits` = relights whose indirect waited for the ray tier's structure (re-listed: never the voxel rays at
+    /// the ray tier); `gatherByRays` = the last relight that gathered read the TLAS (false: the voxel chain's rays).
+    struct GatherCounts {
+        unsigned long long dispatches = 0ull, rays = 0ull, card = 0ull, voxel = 0ull, backFaces = 0ull,
+                           noSample = 0ull, sky = 0ull, texels = 0ull, emptyTexels = 0ull;
+    } gather;
+    unsigned long long gatherWaits = 0ull;
+    bool gatherByRays = false;
     unsigned long long demandHits[4] = { 0ull, 0ull, 0ull, 0ull };
     /// The queue: cards waiting for a capture, and the texel budget a frame
     /// spends on them.

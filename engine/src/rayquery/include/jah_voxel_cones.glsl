@@ -40,60 +40,8 @@
 #ifndef JAH_VOXEL_CONES_GLSL
 #define JAH_VOXEL_CONES_GLSL
 
-/// THE CONE FRAME IS A FUNCTION OF THE NORMAL AND OF NOTHING ELSE (fork change
-/// 0083). An orthonormal frame whose third axis is `n`, by Frisvad's method
-/// (JGT 2012) — continuous over the whole sphere but for ONE direction, where
-/// the branch hands back a fixed frame instead of dividing by zero.
-///
-/// `n` is in a CAMERA-INDEPENDENT space — the cubemap frame (world with z
-/// negated, the frame HlmsPbs's invViewMatCubemap takes a view direction to) —
-/// because a frame is only worth building once it cannot turn with the head.
-///
-/// AND IT IS BUILT ABOUT THAT SPACE'S OWN AXES, a decision measured rather than
-/// argued: Frisvad's special direction is the antipode of (0,0,1), and a fixed
-/// pre-rotation (onto a body diagonal, which no axis-aligned surface has) turns
-/// the cones of every axis-aligned surface to odd angles, where each sample
-/// is a three-way blend of the anisotropic volumes, and the bounce comes out
-/// dimmer — gi.field_follows' red-wall bounce read 0.0174 with the axes and
-/// 0.0105 with the body diagonal. The price: the special direction is a world
-/// axis, where a surface within a hair of it takes the fixed frame while its
-/// neighbours take a rapidly turning one. "The frame is axis-aligned for axis
-/// normals" and "the reference direction is an axis" are the same statement.
-///
-/// The two frames this replaced were both unstable against an anisotropic
-/// voxel field (the diffuse set is not azimuthally symmetric, so turning the
-/// frame about the normal reads different axis volumes): the material's
-/// per-vertex TANGENT frame (a kink along every quad's diagonal) and the screen
-/// derivative fallback.
-mat3 jahConeBasis( vec3 n )
-{
-	vec3 t;
-	vec3 b;
-	if( n.z < -0.9999999 )
-	{
-		t = vec3( 0.0, -1.0, 0.0 );
-		b = vec3( -1.0, 0.0, 0.0 );
-	}
-	else
-	{
-		float a = 1.0 / ( 1.0 + n.z );
-		float c = -n.x * n.y * a;
-		t = vec3( 1.0 - n.x * n.x * a, c, -n.x );
-		b = vec3( c, 1.0 - n.y * n.y * a, -n.y );
-	}
-	return mat3( t, b, n );
-}
-
-/// The same frame for a WORLD normal, returned in world axes: built in the
-/// cubemap frame (z negated) exactly as the pixel builds it, and brought back
-/// by negating z again (exact in floating point, so a compute job's cone
-/// directions are the pixel's to the bit, before the pixel's view rotation).
-mat3 jahConeBasisWorld( vec3 nWorld )
-{
-	mat3 c = jahConeBasis( vec3( nWorld.x, nWorld.y, -nWorld.z ) );
-	return mat3( vec3( c[0].x, c[0].y, -c[0].z ), vec3( c[1].x, c[1].y, -c[1].z ),
-				 vec3( c[2].x, c[2].y, -c[2].z ) );
-}
+// (THE CONE FRAME - jahConeBasis, jahConeBasisWorld - is jah_ray_set.glsl's: the world caches' ray set and every cone
+// set share it; the piece JahVoxelRay carries it, inserted before this one.)
 
 /// THE START BIAS: ONE CELL ALONG THE NORMAL, WHICHEVER WAY THE SURFACE FACES
 /// (fork change 0070). `normalLS` is the normal in cascade 0's normalised
