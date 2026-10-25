@@ -10,9 +10,10 @@
 // EVERY DIRECTION. What that costs is over-occlusion where a coarse cell is partly empty (a 1.875 m cell is as solid as
 // its smallest object); what it buys is that no ray passes a wall at any angle in any cascade.
 //
-// THE HIT READS THE SIDE FACING THE RAY (the two-sided store, PHOTON-7 stage 7): the front where the voxel's canonical
-// normal faces against the ray, the back where it faces along it, their mean edge-on - each un-premultiplied by the
-// opacity (what the surface emits, not how much of the cell it fills). A one-sided voxel's back stores 0 (stage 10's
+// THE HIT READS THE SIDE FACING THE RAY (the two-sided store, PHOTON-7 stage 7): the side of the voxel's surfaces the
+// ray's entry point lies on (the front where it is on the side the canonical normal points to, the back behind it; by
+// the travel only in a cell with no face on that axis) - each un-premultiplied by the opacity (what the surface emits,
+// not how much of the cell it fills). A one-sided voxel's back stores 0 (stage 10's
 // one-sided write): a ray reaching a solid's face from behind is inside the solid, and reads nothing.
 //
 // THE SURFACE THE RAY LEFT IS NEVER ITS OCCLUDER - THE TANGENT PLANE (the march's origin plane, made exact for a ray):
@@ -29,8 +30,13 @@
 // surface's coordinate, or behind it: a corner's diagonal normal made a whole wall's inner plane "the origin", and a
 // 0.4 m slab within a 0.47 m cell hid its far face - gi.sealed_sky, the sky through the room's walls.)
 // THE OWN CELL (`ownCell`: a voxel side's gather, the bounce): never read - it holds the side's own light and its
-// other side's - and a face in front inside it blocks the ray there (radiance 0: a surface nearer than a cell, a contact
-// or a cavity this cascade cannot resolve, is dark, never the voxel's other side read through itself).
+// other side's - and a face in front inside it that the ray CROSSES blocks the ray there (radiance 0: a surface nearer
+// than a cell, a contact or a cavity this cascade cannot resolve, is dark, never the voxel's other side read through
+// itself). THE START CELL - the cell the ray starts in, a cell off its surface - takes a face only where the ray crosses
+// its stored plane inside the cell too: a floor texel within a cell of a wall standing on it starts INSIDE the wall's
+// cell, and occupancy alone stopped every ray there, the ones leaving the wall included, each reading the wall's side
+// facing it - its back, 0 (rtreflect.contact: the crease's floor row read 9 of the rows' 73-78, a dark line along it).
+// Every cell after it is occupancy, from every direction.
 // THE SHELLS (the cone march's and LightInjection's jahInjectVisibility's, PHOTON-7 stages 1 and 5): cascade j reads
 // the ray over the distances [D_(j-1), D_j) from the start, D_j the sum of eight cells of every cascade up to j, and
 // hands over ON THE FIRST CELL PLANE OF CASCADE j + 1 PAST D_j (the next cascade enters its first cell at a face; a
@@ -79,9 +85,12 @@ struct JahVoxelRayResult
 };
 
 /// DOES AN OCCUPIED CELL HOLD A FACE IN FRONT OF THE TANGENT PLANE (the header)? Cell `iv` of cascade `c` at its
-/// centre `uvw`; `sJ` the surface point and `epsJ` the start bias in this cascade's normalised space, `nLS` the unit
-/// normal (`invRes` this cascade's cell, per axis).
-bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, vec3 sJ, vec3 nLS, float epsJ, vec3 invRes )
+/// centre `uvw`; `surface` whether the ray left one - `sJ` the surface point and `epsJ` the start bias in this
+/// cascade's normalised space, `nLS` the unit normal (`invRes` this cascade's cell, per axis). With `crossing` (THE
+/// START CELL and the own cell, the header) a face counts only where the ray CROSSES its plane inside the cell: from
+/// `pJ` along `dS` (this cascade's normalised units per cascade 0's), between `tIn` and `tOut`.
+bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nLS, float epsJ, vec3 invRes,
+					   bool crossing, vec3 pJ, vec3 dS, float tIn, float tOut )
 {
 	const vec3 an = abs( nLS );
 	const int dom = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
@@ -100,13 +109,24 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, vec3 sJ, vec3 nLS, float epsJ,
 				continue;
 			any = true;
 			// level 0 stores O x f, f the faces' place IN THE CELL (jah_voxel_sample.glsl, jahVoxelPos0Centred)
+			const float qb = ( float( iv[b] ) + clamp( pos[h][b] / o, 0.0, 1.0 ) ) * invRes[b];
+			if( crossing )
+			{
+				if( dS[b] == 0.0 )
+					continue;
+				const float tx = ( qb - pJ[b] ) / dS[b];
+				if( !( tx >= tIn && tx <= tOut ) )
+					continue;
+			}
+			if( !surface )
+				return true;
 			vec3 q = b == dom ? centre : front;
-			q[b] = ( float( iv[b] ) + clamp( pos[h][b] / o, 0.0, 1.0 ) ) * invRes[b] - sJ[b];
+			q[b] = qb - sJ[b];
 			if( dot( q, nLS ) > epsJ )
 				return true;
 		}
 	}
-	return !any;	// (occupied with no coverage read: a hit - never a leak on a quantum)
+	return !any && !crossing;	// (occupied with no coverage read: a hit - never a leak on a quantum)
 }
 
 /// THE RAY from `posLS0` (cascade 0's normalised space; a cache's caller starts it `epsC0` off its surface) along the
@@ -196,6 +216,7 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 				tDel[a] = 1.0 / abs( dq[a] );
 				tStop = min( tStop, ( ( dq[a] > 0.0 ? res[a] : 0.0 ) - qS[a] ) / dq[a] );
 			}
+			const bool firstDda = !entered;
 			entered = true;
 			float tIn = tCur;
 			bool through = false;
@@ -206,7 +227,13 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 				const vec3 uvw = ( vec3( iv ) + 0.5 ) * invRes;
 				const vec4 iso = JAH_VOX_SAMPLE_ISO( j, uvw, 0.0 );
 				const bool own = j == 0 && ownCell.w > 0 && all( equal( iv, ownCell.xyz ) );
-				const bool front = iso.w > 0.0 && ( !surface || jahVoxelRayFront( j, uvw, iv, surfJ, nLS, epsC0 * s0j, invRes ) );
+				// THE START CELL AND THE OWN CELL take a face only where the ray crosses it (the header)
+				const bool crossing = own || ( firstDda && it == 0 );
+				const float tCell = min( min( min( tMax.x, tMax.y ), tMax.z ), tStop );
+				const bool front = iso.w > 0.0 &&
+								   ( ( !surface && !crossing ) ||
+									 jahVoxelRayFront( j, uvw, iv, surface, surfJ, nLS, epsC0 * s0j, invRes, crossing, posJ,
+													   dirLS * s0j, tIn, tCell ) );
 				if( front && own )
 				{
 					// a face in front inside the side's own cell: blocked there, dark (the header)
@@ -217,9 +244,32 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 				}
 				if( front )
 				{
-					// THE SIDE FACING THE RAY (the header), un-premultiplied
+					// THE SIDE FACING THE RAY (the header), un-premultiplied: BY WHERE THE RAY IS - the side of the voxel's
+					// surfaces its entry point lies on, along the canonical normal's dominant axis (their coverage-weighted
+					// plane: a slab's mid-plane, a single face itself) - and by its travel only where the cell holds no
+					// face on that axis. (By its travel alone, a ray grazing a wall's cell column on its unlit side and
+					// leaving the wall read the wall's lit side through it: gi.voxel_ray_wall (3).)
 					const vec4 bk = JAH_VOX_SAMPLE_BACK( j, uvw, 0.0 );
-					const float along = dot( JAH_VOX_SAMPLE_NRM( j, uvw, 0.0 ).xyz * 2.0 - 1.0, -dirLS );
+					const vec3 nv = JAH_VOX_SAMPLE_NRM( j, uvw, 0.0 ).xyz * 2.0 - 1.0;
+					float along = dot( nv, -dirLS );
+					{
+						const vec3 anv = abs( nv );
+						const int na = anv.x >= anv.y ? ( anv.x >= anv.z ? 0 : 2 ) : ( anv.y >= anv.z ? 1 : 2 );
+						const float oP = JAH_VOX_SAMPLE_COVP( j, uvw, 0.0 )[na];
+						const float oN = JAH_VOX_SAMPLE_COVN( j, uvw, 0.0 )[na];
+						if( oP + oN > 0.0 )
+						{
+							const float pP = oP > 0.0 ? JAH_VOX_SAMPLE_POSP( j, uvw, 0.0 )[na] / oP : 0.0;
+							const float pN = oN > 0.0 ? JAH_VOX_SAMPLE_POSN( j, uvw, 0.0 )[na] / oN : 0.0;
+							const float m = ( float( iv[na] ) +
+											  ( oP * clamp( pP, 0.0, 1.0 ) + oN * clamp( pN, 0.0, 1.0 ) ) / ( oP + oN ) ) *
+											invRes[na];
+							const float e = posJ[na] + dirLS[na] * s0j * tIn;
+							const float side = ( e - m ) * ( nv[na] >= 0.0 ? 1.0 : -1.0 );
+							if( side != 0.0 )
+								along = side;
+						}
+					}
 					const vec3 side = along < 0.0 ? bk.xyz : ( along > 0.0 ? iso.xyz : 0.5 * ( iso.xyz + bk.xyz ) );
 					r.radiance = side * ( 1.0 / iso.w );
 					r.exitReason = finite3( r.radiance ) ? kJahRayHit : kJahRayExhausted;
