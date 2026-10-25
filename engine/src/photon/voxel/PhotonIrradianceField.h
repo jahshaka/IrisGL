@@ -327,6 +327,8 @@ namespace Ogre
         /// Jahshaka (PHOTON-2 stage 2a): the samples a CHANGE integrates per probe in the
         /// pass that replaces its estimate (setChangeSamples; 1 = upstream's one).
         uint32          mChangeSamples;
+        /// THE PROBE RAYS' LAST WORLD SHELL, metres (PHOTON-7 stage 10, 10-1; setRayLastShell).
+        float           mRayLastShell = 0.0f;
         uint64          mDispatches = 0u;
         bool            mRotateRays;
         /// Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP. The generation
@@ -571,6 +573,10 @@ namespace Ogre
             may then end the probe at once (its minimum is 4).
         */
         void setChangeSamples( uint32 samples ) { mChangeSamples = std::max( 1u, samples ); }
+        /** THE PROBE RAYS (PHOTON-7 stage 10, 10-1): occupancy rays through the chain (jah_voxel_ray.glsl), the last
+            cascade read to this world shell (metres: the outermost cascade's guaranteed radius,
+            PhotonComponent::rayLastShellMetres) - an escape is the sky's, an exhausted ray no sample. */
+        void setRayLastShell( float metres ) { mRayLastShell = metres; }
         /** THE ENTERED PLANES (PHOTON-7 stage 5, 5-5): a scroll's entered planes are invalidated in the step frame
             (invalidateWork: count 0, no say in the reader - never another place's value) and integrated FRESH, as a
             change is, getChangeSamples() deep, at the budget. They stand in the window's GUARD BAND - its outer plane,

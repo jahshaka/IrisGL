@@ -617,8 +617,10 @@ namespace Ogre
             // FIELD-DIR-1 (PHOTON-VOXEL-4): the box's aspect, for the rays' directions.
             const Vector3 boxSize = voxelizer->getVoxelSize();
             const Real minSize = std::min( boxSize.x, std::min( boxSize.y, boxSize.z ) );
+            // ...and in w the probe rays' last world shell in cascade 0's normalised units (PHOTON-7 stage 10, 10-1)
             mIfGenParams.worldToVolumeDir =
-                float4( Vector4( minSize / boxSize.x, minSize / boxSize.y, minSize / boxSize.z, 0.0f ) );
+                float4( Vector4( minSize / boxSize.x, minSize / boxSize.y, minSize / boxSize.z,
+                                 boxSize.x > 0.0f ? mRayLastShell / boxSize.x : 0.0f ) );
         }
     }
     //-------------------------------------------------------------------------

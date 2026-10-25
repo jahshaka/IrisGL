@@ -43,7 +43,8 @@
 		uint4 latticeOrigin;
 		uint4 sweep;
 		// Jahshaka (PHOTON-VOXEL-4, FIELD-DIR-1): a world direction to cascade 0's
-		// normalised space, per axis (all ones in a cube: no transform).
+		// normalised space, per axis (all ones in a cube: no transform); w (PHOTON-7 stage
+		// 10, 10-1) the probe rays' last world shell, cascade 0's normalised units.
 		float4 worldToVolumeDir;
 		// Jahshaka (ENGINE-UPGRADE-2B stage 4): THE PER-PROBE VARIANCE STOP - x = the
 		// precision e (a probe stops once t SE <= e times its mean on every texel, t the 95 %
@@ -64,18 +65,12 @@
 		float3 center;
 	};
 
-	// THE PROBE RAY IS A CONE OF THE ONE VOXEL RADIANCE READER (Jahshaka,
-	// PHOTON-READER-1; render audit F7). This job used to carry a THIRD march:
-	// cascade 0 only (`while( dist < 1.414 && alpha < 0.95 )` in cascade 0's unit
-	// box, the outer cascades never read), no cone age (the footprint restarted
-	// from the bias), and the escape it computed thrown away - so inside a hall the
-	// field integrated cascade 0's bounce alone while the pixel's cones walked the
-	// chain, and the pixel blended two integrals of two radiance fields. Each ray
-	// is now `jahConeMarch` over the WHOLE chain with the pixel's rules
-	// (jah_voxel_sample.glsl + jah_voxel_march.glsl, wrapped by Jahshaka's build
-	// into the pieces JahVoxelSample / JahVoxelMarch, named in this job's piece
-	// list). A probe is a point in free space: no surface bias at the start or at a
-	// hop, and the hop's step back is measured along the ray.
+	// THE PROBE RAY IS THE WORLD CACHES' OCCUPANCY RAY (PHOTON-7 stage 10, 10-1;
+	// jah_voxel_ray.glsl, the piece JahVoxelRay named in this job's piece list) over
+	// the WHOLE chain on the world shells - the cards' and the bounce's one ray. (It
+	// was the pixel's aperture-0 cone march, PHOTON-READER-1, and before that a third
+	// march of cascade 0 alone.) A probe is a point in free space: no surface, no own
+	// cell, its start one cell of cascade 0 along the ray.
 	#define JAH_VOX_MAX_CASCADES @value( hlms_num_vct_cascades )
 	#define JAH_VOX_COUNT @value( hlms_num_vct_cascades )
 	#define JAH_VOX_SAMPLE_ISO( c, u, l ) OGRE_SampleLevel( vctProbes[c], probeSampler, u, l )
@@ -99,6 +94,7 @@
 	#define JAH_VOX_FROM_PREV_OFFSET( c ) p.vctFromPrev[( (c) - 1 ) * 2 + 1]
 	@insertpiece( JahVoxelSample )
 	@insertpiece( JahVoxelMarch )
+	@insertpiece( JahVoxelRay )
 
 	// THE ONE ENVIRONMENT (Jahshaka, PHOTON-ENV-1; jah_environment.glsl, wrapped
 	// into the piece JahEnvironment): the cube at the unit after every volume
@@ -350,33 +346,18 @@
 		// truth, the sealed room 1 / 1 / 3 codes, gi.leak_room's thin walls within
 		// 0.004 of each other at 0 and 1 - nothing overrules the pixel's geometry.
 		float3 startBias = dirLS * JAH_VOX_INVRES( 0 );
-		// A RAY, NOT A CONE (Jahshaka, PHOTON-WRITER-1): aperture ZERO, so the march
-		// crosses the voxels at the store's own resolution (its diameter floor is one
-		// cell of the cascade it is in). A cone's composite transmittance is not the
-		// radiance along a ray: its footprint grows into geometry the axis never meets,
-		// so it OVER-OCCLUDES, most where the footprint lies along a surface - the
-		// grazing directions over a floor, where a low sun's sky is brightest. Measured
-		// on the two target rows (the chain's field over an open floor, and the low
-		// sun's cascade-0 face): the bin's own cone (tan 0.1686) 0.530 of the analytic
-		// sky / a 2.56-2.70x face step; upstream's tan 0.0437 0.662 / 1.67-1.77x; a ray
-		// 0.729 / 1.18-1.31x (with the reader's backface rule 0.927 / 1.08-1.19x). The
-		// bin's cone stays where it IS the right estimate: the environment, below.
-		JahConeResult ray = jahConeMarch( posLS + startBias, dirLS, 0.0, kJahVoxelNoOrigin, 0u );
-		// THE SKY IS PART OF THE PROBE'S IRRADIANCE (Jahshaka, PHOTON-ENV-1). The share
-		// of this ray the voxels did not stop - one minus min( 1, opacity / 0.95 ), the
-		// same escape the pixel's cones weight theirs by - sees the ONE ENVIRONMENT in
-		// the ray's direction prefiltered over the ray's own BIN (the cone of solid
-		// angle 4 pi / N, coneAngleTan - IrradianceField derives it from the ray
-		// count). THE OPACITY IS THE RAY'S OWN COMPOSITE, NOT THE MARCH'S OCCUPANCY
-		// ESTIMATE, and that is physics: the occupancy estimate exists for a cone that
-		// STARTS ON A SURFACE. A probe ray starts in free space and CROSSES what it
-		// meets, and for a ray crossing a wall the directional composite IS the
-		// transmittance - measured on gi.ddgi_ambient's sealed room (PHOTON-READER-1):
-		// the occupancy estimate let 11/255 of sky through the walls, the composite
-		// 1/255. The march reads the direction in the volume's space (dirLS), the
-		// environment reads the world direction.
-		const float escape = 1.0 - min( 1.0, ray.alpha / 0.95 );
-		const float3 sky = escape * jahEnvCone( dir, p.coneAngleTan );
+		// THE PROBE'S RAY IS THE CACHES' OCCUPANCY RAY (PHOTON-7 stage 10, 10-1; L9: jah_voxel_ray.glsl): a cell
+		// holding any geometry stops it from every direction, its hit reads the side facing the ray, and the sky
+		// enters only at an EARNED MISS - the ray left the last cascade (its world shell, worldToVolumeDir.w, or its
+		// box in the band) - over the ray's own BIN (the cone of solid angle 4 pi / N, coneAngleTan); an EXHAUSTED
+		// ray is no sample (its direction zeroed: the texels' cosine weights skip it). It was the aperture-0 plane
+		// march with the sky on its escape, one minus min( 1, opacity / 0.95 ) - a composite of coverage, which a wall
+		// covering part of a cell's face let the rest through (10-0's P3: the field's probe rays carried the sealed
+		// room's last 1.76 % of sky). A probe is a point in free space: no surface, no own cell.
+		const JahVoxelRayResult ray = jahVoxelRay( posLS + startBias, dirLS, float3( 0, 0, 0 ), float3( 0, 0, 0 ), 0.0,
+												   int4( 0, 0, 0, 0 ), 0.0, p.worldToVolumeDir.w );
+		const bool sampled = ray.exitReason != kJahRayExhausted;
+		const float3 sky = ray.exitReason == kJahRayEscaped ? jahEnvCone( dir, p.coneAngleTan ) : float3( 0, 0, 0 );
 		// THE DEPTH STAYS CASCADE-0-LOCAL AND IS MEASURED FROM THE PROBE: the march's
 		// age converted back into cascade 0's normalised units, plus the start bias's
 		// own length - and BOUNDED at cascade 0's diagonal, 1.414, the old march's own
@@ -387,14 +368,15 @@
 		// on the BITS, a self-compare folds to true on this compiler): a NaN or Inf
 		// radiance would poison the probe's running mean until the next change, so it
 		// counts as black (the environment's inputs are refused at the host too).
-		float3 rayColour = ray.colour + sky;
+		float3 rayColour = ray.radiance + sky;
 		uint3 rayBits = floatBitsToUint( rayColour ) & uint3( 0x7FFFFFFFu, 0x7FFFFFFFu, 0x7FFFFFFFu );
 		if( rayBits.x >= 0x7F800000u || rayBits.y >= 0x7F800000u || rayBits.z >= 0x7F800000u )
 			rayColour = float3( 0, 0, 0 );
+		// (a hit's distance is where it entered the cell it hit; a miss reads the bound)
+		const float rayDepthC0 = ray.exitReason == kJahRayHit ? ray.tC0 + length( startBias ) : 1.414213562;
 		g_rayColourDepth[r] = float4( rayColour,
-									  min( ray.travelledC0 + length( startBias ), 1.414213562 ) *
-										  dot( abs( dirLS ), float3( p.numProbes.xyz ) ) );
-		g_rayDir[r] = float4( dir, 0.0 );
+									  min( rayDepthC0, 1.414213562 ) * dot( abs( dirLS ), float3( p.numProbes.xyz ) ) );
+		g_rayDir[r] = float4( sampled ? dir : float3( 0, 0, 0 ), 0.0 );
 	}
 	__sharedOnlyBarrier;
 

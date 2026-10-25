@@ -7944,6 +7944,7 @@ void PhotonComponent::buildIrradianceField() {
         if (!mIfd) mIfd = new Ogre::PhotonIrradianceField(mRoot, mSceneMgr);
         mIfd->setIntegrationPolicy(targetSamples, kIfdKeepOnChange, rotateRays);
         mIfd->setChangeSamples(std::min(kIfdChangeSamples, targetSamples));
+        mIfd->setRayLastShell(rayLastShellMetres());
         mIfd->setVarianceStop(arms && arms->on(ArmId::GiFieldStopOff) ? 0u : kIfdStopMinSamples,
                               kIfdStopPrecision, kIfdStopMeanFloor);
         mIfd->initialize(settings, origin, size, mVctLighting);
