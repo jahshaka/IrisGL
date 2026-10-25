@@ -135,7 +135,8 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     // blob written here would be offered verbatim to a real Vulkan device on
     // the next launch. Silently off, not an error: the caller's config is a
     // reasonable thing to reuse between a windowed and a headless run.
-    mShaderCache.configure(cfg.headless ? std::string() : cfg.shaderCacheDir, mMediaDir, cfg.shaderCacheMaxBytes);
+    mShaderCache.configure(cfg.headless ? std::string() : cfg.shaderCacheDir, cfg.shaderCacheSeedDir, mMediaDir,
+                           cfg.shaderCacheMaxBytes);
     // The TEXTURE cache (THREADING_ADOPTION_SPEC.md P2 items 6-7) rides the same
     // directory and the same headless rule, with its own manifest and its own
     // key (I-5: a resolution and a channel count are properties of a FILE, so

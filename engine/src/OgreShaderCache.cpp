@@ -413,11 +413,17 @@ ShaderCache::~ShaderCache() {
 }
 
 // ---------------------------------------------------------------------------
-void ShaderCache::configure(const std::string &dir, const std::string &mediaDir, unsigned long long maxBytes) {
+void ShaderCache::configure(const std::string &dir, const std::string &seedDir, const std::string &mediaDir,
+                            unsigned long long maxBytes) {
     mMaxBytes = maxBytes;
     mDir = dir;
     mMediaDir = mediaDir;
     mEnabled = !dir.empty();
+    // THE SEED RIDES THE CACHE (rule 8): a cache that is off reads nothing, the seed included.
+    mSeedDir = mEnabled ? seedDir : std::string();
+    while (mSeedDir.size() > 1 && mSeedDir.back() == '/') mSeedDir.pop_back();
+    mSeedState = "off";
+    mSeedEntries = 0;
     if (!mEnabled) return;
     while (!mDir.empty() && mDir.back() == '/') mDir.pop_back();
 
@@ -597,7 +603,19 @@ void ShaderCache::releaseLock() {
 // Each file carries the hex of its LAYER's key (see configure): readManifest
 // hands every entry back and the caller keeps the ones whose key is current.
 bool ShaderCache::readManifest(std::vector<Entry> &filesOut, bool adopt) const {
-    std::ifstream f(path(kManifest));
+    long long saved = 0;
+    unsigned shaders = 0;
+    if (!readManifestAt(mDir, filesOut, &saved, &shaders)) return false;
+    if (adopt) {
+        const_cast<ShaderCache *>(this)->mLastSavedUnixMs = saved;
+        const_cast<ShaderCache *>(this)->mExpectedShaders = shaders;
+    }
+    return true;
+}
+
+bool ShaderCache::readManifestAt(const std::string &dir, std::vector<Entry> &filesOut, long long *savedOut,
+                                 unsigned *shadersOut) {
+    std::ifstream f(dir + "/" + kManifest);
     if (!f) return false;
     std::string line;
     bool header = false;
@@ -622,10 +640,8 @@ bool ShaderCache::readManifest(std::vector<Entry> &filesOut, bool adopt) const {
         }
     }
     if (!header) return false;
-    if (adopt) {
-        const_cast<ShaderCache *>(this)->mLastSavedUnixMs = saved;
-        const_cast<ShaderCache *>(this)->mExpectedShaders = shaders;
-    }
+    if (savedOut) *savedOut = saved;
+    if (shadersOut) *shadersOut = shaders;
     return true;
 }
 
@@ -640,15 +656,17 @@ bool ShaderCache::writeManifest(const std::vector<Entry> &files, unsigned shader
     return writeAtomic(mDir, kManifest, s.data(), s.size());
 }
 
-bool ShaderCache::readVerified(const Entry &e, std::vector<char> &out) const {
-    if (!readWholeFile(path(e.name), out)) return false;
+bool ShaderCache::readVerified(const Entry &e, std::vector<char> &out) const { return readVerifiedAt(mDir, e, out); }
+
+bool ShaderCache::readVerifiedAt(const std::string &dir, const Entry &e, std::vector<char> &out) {
+    if (!readWholeFile(dir + "/" + e.name, out)) return false;
     if (out.size() != e.bytes) {
-        logLine(e.name + ": length " + std::to_string(out.size()) + " != manifest " +
+        logLine(dir + "/" + e.name + ": length " + std::to_string(out.size()) + " != manifest " +
                 std::to_string(e.bytes));
         return false;
     }
     if (hex128(out.data(), out.size()) != e.hash) {
-        logLine(e.name + ": checksum mismatch");
+        logLine(dir + "/" + e.name + ": checksum mismatch");
         return false;
     }
     return true;
@@ -726,6 +744,77 @@ bool ShaderCache::clear() {
 }
 
 // ---------------------------------------------------------------------------
+// THE SEED (rule 8, EnginePrivate.h; COLD-BOOT-1 S1). A build carries the microcode layer a warm run of it saved
+// (scripts/shadercache/make-seed.sh) — the layer whose key names only the PRODUCER (the fork, glslang, the build
+// type, the render system) and nothing of the device, so it is valid on any GPU (upstream's own answer for a first
+// boot: OgreGpuProgramManager.h, "Vulkan: Yes (even created on PC and bundled into Android)"). A launch whose
+// directory holds no microcode layer valid at this build's key reads it here, in the microcode slot of upstream's
+// order, before any shader compiles. It is the directory's own format — a manifest whose `file microcode.cache …`
+// line is the one read (any other line is ignored) — so the same parser, the same key rule and the same checksum
+// stand guard over it. READ-ONLY BY CONSTRUCTION: nothing here opens it for writing, and the wipe, the lock and the
+// saves all name mDir alone. The session's map begins as the seed, so the directory's first saved microcode layer
+// holds the seed's entries and every later launch reads that one instead.
+bool ShaderCache::readSeed(std::vector<char> &out) {
+    out.clear();
+    mSeedEntries = 0;
+    if (mSeedDir.empty()) { mSeedState = "off"; return false; }
+    struct stat st {};
+    if (::stat((mSeedDir + "/" + kManifest).c_str(), &st) != 0) { mSeedState = "absent"; return false; }
+    std::vector<Entry> files;
+    if (!readManifestAt(mSeedDir, files, nullptr, nullptr)) {
+        mSeedState = "corrupt";
+        logLine("seed " + mSeedDir + ": its manifest is malformed or of another cache format — not read");
+        return false;
+    }
+    const Entry *micro = nullptr;
+    for (const Entry &e : files)
+        if (layerOf(e.name) == Layer::Microcode) micro = &e;
+    if (!micro) {
+        mSeedState = "corrupt";
+        logLine("seed " + mSeedDir + ": its manifest names no microcode.cache — not read");
+        return false;
+    }
+    // A KEY MISMATCH IS A MISS: the seed was made by another producer, so not one of its blobs is read.
+    if (micro->key != layerKeyFor(micro->name)) {
+        mSeedState = "stale";
+        logLine("seed " + mSeedDir + ": made at another microcode key (another fork commit, glslang, build type or "
+                "render system) — not read; every shader this launch needs compiles");
+        return false;
+    }
+    if (!readVerifiedAt(mSeedDir, *micro, out)) {
+        out.clear();
+        mSeedState = "corrupt";
+        logLine("seed " + mSeedDir + ": its microcode.cache failed verification — not read");
+        return false;
+    }
+    return true;
+}
+
+void ShaderCache::loadSeed() {
+    std::vector<char> bytes;
+    if (!readSeed(bytes)) return;
+    try {
+        Ogre::DataStreamPtr s(OGRE_NEW Ogre::MemoryDataStream(mSeedDir + "/microcode.cache", bytes.data(),
+                                                              bytes.size(), false, true));
+        Ogre::GpuProgramManager::getSingleton().loadMicrocodeCache(s);
+    } catch (const Ogre::Exception &e) {
+        // Whatever the map took before the throw is verified bytes under content keys: a partial hit, never wrong.
+        mSeedState = "rejected";
+        logLine("seed " + mSeedDir + ": the microcode load failed (" + e.getDescription() + ")");
+        return;
+    }
+    // The count is the file's first uint32 (load()'s note below): trusted only because the checksum passed.
+    Ogre::uint32 n = 0;
+    if (bytes.size() >= sizeof(n)) std::memcpy(&n, bytes.data(), sizeof(n));
+    mSeedEntries = n;
+    mSeedState = "loaded";
+    mMicrocodeLoaded = true;
+    mMicrocodeAtLoad = n;
+    logLine("seed " + mSeedDir + ": " + std::to_string(n) +
+            " microcode entries loaded (the directory had no microcode layer at this build's key)");
+}
+
+// ---------------------------------------------------------------------------
 void ShaderCache::load(Ogre::Root *root) {
     // THE TEMPLATE CHECKSUMS, HASHED AT BOOT (FRAME-MONITOR-DOOR-1 stage 4): Hlms::getTemplateChecksum reads and hashes
     // every template and piece file (0.18-0.75 ms per Hlms measured) and the fork caches it per code-cache generation;
@@ -780,7 +869,7 @@ void ShaderCache::load(Ogre::Root *root) {
     Ogre::GpuProgramManager::getSingleton().setSaveMicrocodesToCache(true);
 
     std::vector<Entry> files;
-    if (!readManifest(files)) { if (mayWipe()) wipe(); return; }
+    if (!readManifest(files)) { if (mayWipe()) wipe(); loadSeed(); return; }
 
     // A LAYER WHOSE KEY MOVED IS DROPPED ALONE (CS-1): its file is not read and
     // — by the writer, the only process that may delete — removed now; the
@@ -805,6 +894,7 @@ void ShaderCache::load(Ogre::Root *root) {
         if (!readVerified(e, bytes)) {
             if (mayWipe()) wipe();
             logLine("verification failed — starting cold");
+            loadSeed();   // the seed is not the directory's: its own checks decide it
             return;
         }
         if      (e.name == "pipeline.cache")  pipeline.swap(bytes);
@@ -866,6 +956,10 @@ void ShaderCache::load(Ogre::Root *root) {
                 std::memcpy(&n, microcode.data(), sizeof(n));
                 mMicrocodeAtLoad = n;
             }
+            mSeedState = mSeedDir.empty() ? "off" : "unused";
+        } else {
+            // No microcode layer at this key in the directory: the seed's, in the same slot (rule 8).
+            loadSeed();
         }
         if (!hlms.empty()) {
             Ogre::HlmsManager *hm = root->getHlmsManager();
@@ -904,14 +998,18 @@ void ShaderCache::load(Ogre::Root *root) {
         // canonical wiring catches them exactly like this.
         logLine(std::string("load failed (") + e.getDescription() + ") — starting cold");
         if (mayWipe()) wipe();
-        mPipelineLoaded = mMicrocodeLoaded = false;
+        // THE SEED STILL STANDS: the wipe took the directory, not the seed, and a seed already in the map stays.
+        const bool seeded = mSeedState == "loaded";
+        mPipelineLoaded = false;
+        mMicrocodeLoaded = seeded;
         mPipelineReason = "rejected";
         mHlmsLoaded = 0;
+        if (!seeded) loadSeed();
         return;
     }
     logLine("loaded: pipeline=" + std::string(mPipelineLoaded ? "yes" : "no") +
             " microcode=" + std::to_string(mMicrocodeAtLoad) + " entries" +
-            " hlms=" + std::to_string(mHlmsLoaded));
+            " hlms=" + std::to_string(mHlmsLoaded) + " seed=" + mSeedState);
 }
 
 // ---------------------------------------------------------------------------
@@ -1336,6 +1434,9 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
     s.microcodeLoaded = mMicrocodeLoaded;
     s.hlmsCachesLoaded = mHlmsLoaded;
     s.microcodeEntries = static_cast<unsigned>(mMicrocodeAtLoad);
+    s.seedDir = mSeedDir;
+    s.seedState = mSeedState;
+    s.seedEntries = mSeedEntries;
     s.compiledThisRun = mCounter ? mCounter->compiled.load() : 0u;
     s.loadedThisRun   = mCounter ? mCounter->fromCache.load() : 0u;
     s.expectedShaders = mExpectedShaders;

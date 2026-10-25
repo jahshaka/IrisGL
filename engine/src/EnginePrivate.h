@@ -2812,13 +2812,19 @@ TextureCache &textureCache();
 //      compile, mirroring Samples/2.0/Common/src/GraphicsSystem.cpp:626-692.
 //   6. Size cap with a generation reset — the microcode map never evicts.
 //   7. A load failure is never fatal. Log, clear, continue cold.
+//   8. THE SEED (COLD-BOOT-1 S1) is a read-only fallback for the microcode layer
+//      alone: read when the directory has no valid microcode layer, in that
+//      layer's slot of rule 5's order, under the same key and checksum rules;
+//      never written, locked or wiped. The directory's own layer, once a session
+//      saves one, holds the seed's entries too (the map it saves began as the seed).
 class ShaderCache {
 public:
     /// Resolves the directory and computes the fingerprint. No I/O beyond
     /// hashing the staged Hlms media tree. An empty `dir` leaves the cache off
     /// (but the compile COUNTERS still run — the startup progress display and
     /// the tests need them whether or not anything is persisted).
-    void configure(const std::string &dir, const std::string &mediaDir,
+    /// `seedDir`: EngineConfig::shaderCacheSeedDir (empty = no seed; ignored when `dir` is empty).
+    void configure(const std::string &dir, const std::string &seedDir, const std::string &mediaDir,
                    unsigned long long maxBytes = 256ull * 1024ull * 1024ull);
 
     /// Starts counting compiles. Call as soon as the log exists (i.e. right
@@ -2981,12 +2987,21 @@ private:
     /// thread reads the manifest only to carry entries forward and passes
     /// false: `mExpectedShaders` belongs to the caller's thread.
     bool  readManifest(std::vector<Entry> &filesOut, bool adopt = true) const;
+    /// The same parser on ANY directory's manifest (the seed's), adopting nothing.
+    static bool readManifestAt(const std::string &dir, std::vector<Entry> &filesOut, long long *saved,
+                               unsigned *shaders);
     /// `shaders` is passed rather than read from mExpectedShaders: the writer
     /// thread calls this, and the member belongs to the caller's thread.
     bool  writeManifest(const std::vector<Entry> &files, unsigned shaders) const;
     /// Reads `name`, checks it against the manifest entry, and returns the bytes.
     /// Empty on any mismatch — the caller then wipes.
     bool  readVerified(const Entry &e, std::vector<char> &out) const;
+    static bool readVerifiedAt(const std::string &dir, const Entry &e, std::vector<char> &out);
+    /// THE SEED'S MICROCODE, read and verified (rule 8): true with the bytes when the seed holds a microcode layer
+    /// at this build's key; sets mSeedState either way. Never throws, never writes into the seed's directory.
+    bool  readSeed(std::vector<char> &out);
+    /// ...and handed to Ogre's microcode cache (rule 5's microcode slot). Never throws, never wipes.
+    void  loadSeed();
     void  wipe() const;
     /// May THIS run delete the cache directory? Only the writer may
     /// (SHADERCACHE-LOCK-1) — see the definition.
@@ -2996,6 +3011,10 @@ private:
     std::string path(const std::string &name) const;
 
     std::string mDir, mFingerprint, mMediaDir;
+    /// The seed (rule 8): its directory, what the load did with it, and the entries it held.
+    std::string mSeedDir;
+    std::string mSeedState = "off";
+    unsigned    mSeedEntries = 0;
     unsigned long long mMaxBytes = 256ull * 1024ull * 1024ull;   ///< EngineConfig::shaderCacheMaxBytes
     /// ONE KEY PER LAYER (SPEED-CPU, perf audit CS-1): pipeline, microcode,
     /// Hlms — see configure(). `mFingerprint` is the three composed, for the

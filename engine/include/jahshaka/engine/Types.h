@@ -6418,6 +6418,15 @@ struct EngineConfig {
     /// 220 MB / 1,686 shaders on one tree's night), so their helper raises it (enginetesthelpers.h): a
     /// cap meant for the app must never wipe the fixtures' union.
     unsigned long long shaderCacheMaxBytes = 256ull * 1024ull * 1024ull;
+    /// THE SHIPPED MICROCODE SEED (COLD-BOOT-1 S1): a directory a BUILD carries — `cache-manifest.txt` naming one
+    /// `microcode.cache` in the cache's own format — read as a READ-ONLY FALLBACK under shaderCacheDir. When the
+    /// cache directory holds no microcode layer valid at this build's microcode key, the seed's is loaded instead,
+    /// before any shader compiles, so a first launch serves its SPIR-V from it and glslang runs only for a miss.
+    /// The engine never writes, locks or wipes it; a seed made at another microcode key (another fork commit,
+    /// glslang, build type or render system) is not read at all — a miss, never a wrong blob. The layer it seeds is the
+    /// one whose key ignores the GPU and the driver, so a seed made on one machine is valid on any other (upstream:
+    /// OgreGpuProgramManager.h, "Vulkan: Yes"). EMPTY = no seed; ignored when shaderCacheDir is empty.
+    std::string shaderCacheSeedDir;
 };
 
 /// The device the engine is actually running on (SESSION_LOG_SPEC §4).
@@ -6510,8 +6519,20 @@ struct ShaderCacheStats {
     ///                     no-ops (OgreVulkanDevice.cpp), and every launch on
     ///                     such a device pays full PSO creation
     std::string pipelineCacheReason = "absent";
-    bool     microcodeLoaded = false;       ///< SPIR-V microcode map read back
+    bool     microcodeLoaded = false;       ///< SPIR-V microcode map read back (the directory's layer or the seed's)
     unsigned microcodeEntries = 0;          ///< entries in the live microcode map
+    /// THE SEED (EngineConfig::shaderCacheSeedDir), resolved whether or not it exists; empty = no seed.
+    std::string seedDir;
+    /// What the load did with the seed:
+    ///   "off"      no seed configured (or the cache is off)
+    ///   "unused"   the directory's own microcode layer loaded; the seed was not read
+    ///   "absent"   no manifest in the seed directory
+    ///   "loaded"   the microcode map came from the seed (seedEntries entries)
+    ///   "stale"    its microcode key is not this build's — not read, a miss
+    ///   "corrupt"  a malformed manifest, no microcode line, or a length/checksum mismatch — not read
+    ///   "rejected" Ogre threw while reading it
+    std::string seedState = "off";
+    unsigned    seedEntries = 0;            ///< entries the seed's map held, when "loaded"
     unsigned hlmsCachesLoaded = 0;          ///< Hlms disk caches applied (0..2: PBS, Unlit)
 
     // ---- shader accounting for THIS process ----
