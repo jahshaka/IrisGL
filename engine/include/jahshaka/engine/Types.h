@@ -9702,8 +9702,14 @@ struct VoxelReaderCone {
     /// jahVoxelReadAxis at `posLS` along `dirLS`'s major axis (the half its sign reads), `lod` taken AS THE
     /// LEVEL - fractional and past the chain's last level, the seam clamp's own cases (gi.directional_seam).
     static constexpr unsigned kAxisRead = 65536u;
+    /// THE OCCUPANCY RAY (PHOTON-7 stage 10, 10-1; jah_voxel_ray.glsl): with this flag the answer is the ray the world
+    /// caches gather by, from `posLS` along `dirLS` (its origin plane from `biasDirLS`; zero: a ray in free space) to
+    /// `rayLastShell` - `march` = its hit's radiance and its exit (0 exhausted, 1 hit, 2 escaped), `escape` = its
+    /// distance (cascade 0's units), the cascade it ended in, the cells it read; `hitRead` / `marchRead` zero.
+    static constexpr unsigned kRay = 131072u;
     unsigned cascade = 0u;           ///< which cascade the point reads take
     float    lod = 0.0f;             ///< ...at which mip
+    float    rayLastShell = 0.0f;    ///< kRay: the last cascade's world shell, cascade 0's units (0: its box alone)
 };
 
 /// Every answer the reader gives for one cone, as raw floats (compared bit for

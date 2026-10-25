@@ -183,6 +183,7 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
             c[8] = k.biasDirLS.x; c[9] = k.biasDirLS.y; c[10] = k.biasDirLS.z;
             c[11] = float(std::min(k.cascade, numCascades - 1u));
             c[12] = k.lod;
+            c[13] = k.rayLastShell;
         }
         params.counts[0] = float(cones.size());
         params.counts[1] = float(numCascades);

@@ -6,7 +6,7 @@
 			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [4, 1, 1],
 			"source" : "JahVoxelReaderParity_cs",
-			"pieces" : ["CrossPlatformSettings_piece_all", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahVoxelParity_piece_all.any"],
+			"pieces" : ["CrossPlatformSettings_piece_all", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahVoxelRay_piece_all.any", "JahVoxelParity_piece_all.any"],
 			"uav_units" : 2,
 			"properties" :
 			{

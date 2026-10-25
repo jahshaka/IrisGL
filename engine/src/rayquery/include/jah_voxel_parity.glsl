@@ -5,7 +5,7 @@
 // the two reader files, and asserts the answers are identical to the bit.
 //
 // THE CALLER BINDS the reader's macros (jah_voxel_sample.glsl,
-// jah_voxel_march.glsl) and one more:
+// jah_voxel_march.glsl, jah_voxel_ray.glsl) and one more:
 //
 //     JAH_PARITY_CONE(i)   vec4: the i-th of four float4s per cone -
 //                          (posLS, tanHalfAngle), (dirLS, flags),
@@ -31,6 +31,12 @@
 ///   [3] THE MARCH AT ZERO LENGTH: the march at that centre, one plane read whole
 ///       (JAH_MARCH_ONE_STEP) - what the march itself reads there, through its loop
 const uint kJahParityAxisRead = 65536u;
+/// ...or, with the flag kJahParityRay (PHOTON-7 stage 10, 10-1), THE OCCUPANCY RAY (jah_voxel_ray.glsl) from posLS
+/// along dirLS, its origin plane from biasDirLS (zero: a ray in free space), its last world shell the fourth float4's
+/// y (cascade 0's units; 0: the last box alone):
+///   [0] its hit's radiance and its exit reason (kJahRay*), [1] its distance (cascade 0's units), the cascade it ended
+///   in, the cells it read; [2], [3] zero.
+const uint kJahParityRay = 131072u;
 
 vec4 jahParityAnswer( int cone, int part )
 {
@@ -41,6 +47,15 @@ vec4 jahParityAnswer( int cone, int part )
 	const uint rawFlags = uint( c1.w );
 	const uint flags = rawFlags & ~kJahParityAxisRead;
 	int cascade = int( c2.w );
+	if( ( rawFlags & kJahParityRay ) != 0u )
+	{
+		const JahVoxelRayResult ray = jahVoxelRay( c0.xyz, c1.xyz, jahConeOrigin( c0.xyz, c2.xyz ), c3.y );
+		if( part == 0 )
+			return vec4( ray.radiance, float( ray.exitReason ) );
+		if( part == 1 )
+			return vec4( ray.tC0, float( ray.cascade ), float( ray.steps ), 0.0 );
+		return vec4( 0.0, 0.0, 0.0, 0.0 );
+	}
 	if( part == 2 && ( rawFlags & kJahParityAxisRead ) != 0u )
 	{
 		const int axis = jahVoxelAxis( c1.xyz, JAH_VOX_INVRES( cascade ) );

@@ -74,6 +74,7 @@ layout( local_size_x = @value( threads_per_group_x ),
 
 @insertpiece( JahVoxelSample )
 @insertpiece( JahVoxelMarch )
+@insertpiece( JahVoxelRay )
 @insertpiece( JahVoxelParity )
 
 void main()

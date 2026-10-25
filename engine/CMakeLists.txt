@@ -828,6 +828,7 @@ set(JAH_VOXEL_READER_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include")
 set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_cones.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_atom_id.glsl"
@@ -879,6 +880,12 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelMarch
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelMarch_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE OCCUPANCY RAY (PHOTON-7 stage 10, 10-1): the ray the world caches gather by - the card relight, the bounce,
+    # the field's probe rays - inserted after JahVoxelSample by the consumers that trace it.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelRay
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelRay_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE ONE DIFFUSE CONE INTEGRATOR (PHOTON-CARDS-2): the cone frame, the cone
     # sets, the start bias and the escape weight - read by the pixel shader's
@@ -1016,8 +1023,9 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
             -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
             -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl
             -DIN3=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl
-            -DIN4=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl
-            -DIN5=${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl
+            -DIN4=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl
+            -DIN5=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl
+            -DIN6=${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMMON_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Common"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HDR_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/HDR"
