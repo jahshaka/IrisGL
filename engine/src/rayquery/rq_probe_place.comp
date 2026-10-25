@@ -28,9 +28,9 @@
 //      cell it crosses.
 //
 // WHICH CELLS GET THEIR SECOND PROBE IS DECIDED IN A FIXED ORDER, NEVER BY AN ATOMIC
-// (PHOTON-VIEW-NOISE-1, 2026-10-03). The budget (`cap`, a quarter of the grid) binds
-// whenever more cells fail than it allows — a small view (a screenshot's 160 x 90 is
-// 60 cells and a cap of 15), a busy one. While the winners were the first `cap` cells
+// (PHOTON-VIEW-NOISE-1, 2026-10-03). The budget (`cap`, half the grid; the grid at Low)
+// binds whenever more cells fail than it allows — a busy view (Bistro asks 0.45-0.49 of
+// its cells at High). While the winners were the first `cap` cells
 // to reach an atomic counter, WHICH cells got a probe was the scheduler's choice: two
 // shots of one still scene differed by up to 14 codes over a whole cell (photon.view's
 // "noise", 780 px of 14,400; bit-identical 13 times out of 13 with the cap lifted). So
