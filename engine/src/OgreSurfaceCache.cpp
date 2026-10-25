@@ -333,20 +333,20 @@ bool SurfaceCache::makeAtlas(std::string &err) {
 
     // THE SIXTH LAYER, RADIANCE (PHOTON-CARDS-1, SC-1c): what a hit will read.
     // Written by the `Jahshaka/CardLight` compute job and by nothing else, so it
-    // is a UAV — never a render target, never a copy destination. R11G11B10F is
-    // four bytes of unsigned HDR (radiance is never negative) when the device
-    // can STORE to it from a compute job; RGBA16F otherwise, and the status
-    // says which. +16 MB at 2048 square.
-    mRadianceFormatName = "R11G11B10F";
+    // is a UAV — never a render target, never a copy destination. RGBA16F (below: 32 MB at 2048 square); the Indirect
+    // and Flat layers are R11G11B10F - four bytes of unsigned HDR - when the device can STORE to it from a compute job,
+    // RGBA16F otherwise.
+    mRadianceFormatName = "RGBA16F";
     Ogre::PixelFormatGpu radFmt = Ogre::PFG_R11G11B10_FLOAT;
-    if (!tm->checkSupport(radFmt, Ogre::TextureTypes::Type2D, Ogre::TextureFlags::Uav)) {
-        radFmt = Ogre::PFG_RGBA16_FLOAT;
-        mRadianceFormatName = "RGBA16F";
-    }
+    if (!tm->checkSupport(radFmt, Ogre::TextureTypes::Type2D, Ogre::TextureFlags::Uav)) radFmt = Ogre::PFG_RGBA16_FLOAT;
+    // THE RADIANCE ITSELF IS RGBA16F (PHOTON-7 stage 10, 10-2d; the lead's ruling, +16 MB - the spec's memory list): a
+    // store whose quantum (R11G11B10F's 1.6 % step) is over the display code cannot hold laws stated within a code,
+    // and every reader of it - a reflection's hit, the gather's, another card's - inherits the step (gi.card_residency
+    // (2): the walk's and the teleport's read sets differed through it). The two halves beside it keep radFmt.
     mRadiance = tm->createTexture(processUniqueName("cardRadiance"), Ogre::GpuPageOutStrategy::Discard,
                                   Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
     mRadiance->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
-    mRadiance->setPixelFormat(radFmt);
+    mRadiance->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
     mRadiance->setNumMipmaps(1u);
     mRadiance->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
     // ...and THE CACHED INDIRECT HALF, the march's answer per texel (Lumen's
@@ -1182,8 +1182,15 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                     }
                 }
         if (!any) continue;
-        // CLOSED (CardSceneView::demandChanged): only a moved instance's own cards come back
-        if (!demandOpen && mv == moved.end()) continue;
+        // CLOSED (CardSceneView::demandChanged): a moved instance's own cards come back - and (PHOTON-7 stage 10, 10-2d) a
+        // face the readers marked AT THIS POSE (since the demand's last change) takes FREE room, never displacing one:
+        // what the drain below freed at rest goes to the pose's own demand, so the resident set at rest is the pose's
+        if (!demandOpen && mv == moved.end()) {
+            bool here = false;
+            for (unsigned r = 0; r < kDemandReaders && !here; ++r)
+                for (unsigned b = 0; b < 6u && !here; ++b) here = marks[r][b] > mDemandChangeFrame;
+            if (!here) continue;
+        }
         layoutCards(cand, layout);
         auto it = mByNode.find(cand.node);
         const std::vector<CardRec> *have = it != mByNode.end() ? &per[it->second] : nullptr;
@@ -1204,6 +1211,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             // (a moved card no reader had read yet - admitted, waiting - comes back all the same)
             const unsigned long long mark = std::max({ by[0], by[1], kept ? 1ull : 0ull });
             if (!mark) continue;
+            if (!demandOpen && !kept && mark <= mDemandChangeFrame) continue;   // (closed: the pose's marks alone)
             Arrival a;
             a.cand = &cand;
             a.card = c;
@@ -1252,6 +1260,27 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         if (a.node != b.node) return a.node < b.node;
         return a.index < b.index;
     });
+
+    // 4b. AT REST, THE POSE'S DEMAND ALONE (PHOTON-7 stage 10, 10-2d; the lead's ruling - residency is path-independent
+    //     at rest): once the demand window closes, a captured card NO VIEW READER read since the demand's last change
+    //     (the gather, the reflection, the pixel at THIS pose - the cache's own gather is no demand: its reads
+    //     self-sustain and fill the atlas, measured) LEAVES, even with free room. Since cards read cards, an answer
+    //     depends on which cards are resident, and a walk kept the cards it read on its way while there was room (the
+    //     walk 264, the teleport 248: gi.card_residency (6) RED, 93.5 codes with the placement pinned); the drain and
+    //     the closed admission of the pose's own marks (step 3) give both paths the pose's set. No thrash while moving:
+    //     it acts only once the window closed.
+    if (!demandOpen && !view.demandChanged) {
+        for (std::vector<CardRec> &list : per)
+            for (CardRec &c : list) {
+                if (!c.size || !c.lastUpdated) continue;   // (one waiting for its capture arrived at this pose)
+                if (std::max(c.readBy[0], c.readBy[1]) > mDemandChangeFrame) continue;
+                freeRect(c.atlasX, c.atlasY, c.size);
+                c.size = 0u;
+                ++mEvicted;
+                ++mRestDrained;
+                changed = true;
+            }
+    }
 
     // 5. THE ARRIVALS, in order. Free room takes any wanted face at its first mark (the fill is the readers' first
     //    frames). A face that finds none MAKES room - the atlas compacted, then the evictable evicted, until it fits or
@@ -2147,7 +2176,8 @@ void SurfaceCache::relightCards() {
     // THE STORE'S ROUNDING follows the layer's format (jahCardRound): the
     // pre-scale is R11G11B10F's, and the RGBA16F fallback stores unrounded.
     {
-        const Ogre::int32 round = mRadiance->getPixelFormat() == Ogre::PFG_R11G11B10_FLOAT ? 1 : 0;
+        // (the Indirect and Flat layers': the radiance is RGBA16F, rounded to nearest by the store itself)
+        const Ogre::int32 round = mIndirect->getPixelFormat() == Ogre::PFG_R11G11B10_FLOAT ? 1 : 0;
         if (mLightJob->getProperty("jah_card_round_r11g11b10") != round)
             mLightJob->setProperty("jah_card_round_r11g11b10", round);
     }
@@ -3804,6 +3834,7 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     if (mMoverHooks.gatherCounts) mMoverHooks.gatherCounts(out.gather);
     out.gatherWaits = mGatherWaits;
     out.indirectByCards = mIndirectByCards;
+    out.restDrained = mRestDrained;
     out.indirectByBound = mIndirectByBound;
     out.gatherByRays = mGatherByRays;
     out.areaStrata = mAreaStrata;

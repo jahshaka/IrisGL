@@ -594,7 +594,8 @@ void main()
 		imageStore( cardIndirect, at, vec4( jahCardRound( cached ), 1.0 ) );
 	imageStore( cardFlat, at, vec4( jahCardRound( flatTerm ), 1.0 ) );
 	imageStore( cardSunVis, at, vec4( sunVis, lampTex.yzw ) );
-	imageStore( cardRadiance, at, vec4( jahCardRound( radiance ), 1.0 ) );
+	// (RGBA16F, 10-2d: the store rounds to nearest itself - jahCardRound is the R11G11B10F layers')
+	imageStore( cardRadiance, at, vec4( radiance, 1.0 ) );
 @property( jah_card_gather )
 	{
 		// THE MOVE (10-2c, the lead's ruling: "more than its quantum" accumulated from the LAST REPORTED value, never frame
@@ -608,11 +609,7 @@ void main()
 		const vec4 g = imageLoad( cardGather, at );
 		const bool refOk = ( floatBitsToUint( g.w ) & 0x7F800000u ) != 0x7F800000u && g.w >= 0.0;
 		const float d = refOk ? abs( S - g.w ) : 3.0e38;
-	@property( jah_card_round_r11g11b10 )
-		const float bits = ( now.z >= now.x && now.z >= now.y ) ? 5.0 : 6.0;
-	@else
-		const float bits = 10.0;
-	@end
+		const float bits = 10.0;   // the RGBA16F radiance store's mantissa (10-2d)
 		const float quantum = exp2( floor( log2( max( max( S, refOk ? g.w : 0.0 ), 6.1035156e-5 ) ) ) - bits );
 		// A CARD CAPTURED THIS FRAME (mode bit 8) reports its radiance whole: its readers read the voxels there before it
 		// (the accumulation's arrivals, through the geometric bound)

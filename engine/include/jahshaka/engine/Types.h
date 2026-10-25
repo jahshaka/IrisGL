@@ -4190,6 +4190,9 @@ struct CardCacheStatus {
     /// THE CARD-TO-CARD RE-LISTING (10-2c): the indirect listings a moved card read by the listed one made, and those an
     /// overflowed read list's geometric bound took part in (both inside indirectReported).
     unsigned long long indirectByCards = 0ull, indirectByBound = 0ull;
+    /// THE REST'S DRAIN (10-2d): cards removed once the demand window closed because no view reader read them at the pose
+    /// (inside `evicted`).
+    unsigned long long restDrained = 0ull;
     unsigned long long demandHits[4] = { 0ull, 0ull, 0ull, 0ull };
     /// The queue: cards waiting for a capture, and the texel budget a frame
     /// spends on them.

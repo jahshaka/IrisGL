@@ -774,6 +774,8 @@ private:
     unsigned long long mGatherWaits = 0ull;
     /// the indirect listings card to card (10-2c), and those an overflowed read list's geometric bound took part in
     unsigned long long mIndirectByCards = 0ull, mIndirectByBound = 0ull;
+    /// the cards the rest's drain removed (10-2d: read by no view reader at the pose once the window closed)
+    unsigned long long mRestDrained = 0ull;
     bool mGatherByRays = false;
     CardMoverHooks mMoverHooks;
     /// Each mover's footprint box as last traced (its OLD footprint when it
