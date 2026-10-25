@@ -7419,7 +7419,7 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
     }
     {
         Ogre::Vector3 cam;
-        out.levelOn = scene->photon().giCameraPos(cam);
+        out.levelOn = scene->photon().giCameraPos(cam) && !std::getenv("P7_NOLEVEL");   // ARM (to revert)
         out.levelCam[0] = cam.x; out.levelCam[1] = cam.y; out.levelCam[2] = cam.z;
     }
     // ---- THE ONE ENVIRONMENT (PHOTON-ENV-1): the Sky Light's cube and gain, or the flat environment when there is no

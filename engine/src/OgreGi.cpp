@@ -6,6 +6,7 @@
 // (applyChangeSet, noteSceneTransformWrite) and the seams the component calls on nodes
 // (probeSeesItem, underGesture, demoteDragMover, the probe-grid exclusion flag, the
 // binding's arms, the structure edit's close).
+#include <unordered_map>
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"       // bindSceneGi's declaration (every PBS-family host calls it)
 #include "photon/voxel/PhotonPassBinding.h"
@@ -799,7 +800,15 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                     mGiWalk.cascadeDirty.push_back(a);
                     if (rootParity) mGiWalk.itemDirty.push_back(a);
                 }
-            } else if (PhotonComponent::giAabbMoved(n.scan.giBox, a)) {
+            } else if (PhotonComponent::giAabbMoved(n.scan.giBox, a) || [&]() {   // ARM (to revert): P7_POSEMARK
+                           if (!std::getenv("P7_POSEMARK") || !item->getParentNode()) return false;
+                           static std::unordered_map<NodeId, Ogre::Quaternion> seen;
+                           const Ogre::Quaternion q = item->getParentNode()->_getDerivedOrientationUpdated();
+                           auto it = seen.find(n.selfId);
+                           const bool rot = it != seen.end() && !(it->second == q);
+                           seen[n.selfId] = q;
+                           return rot;
+                       }()) {
                 Ogre::Aabb moved = n.scan.giBox;
                 moved.merge(a);
                 // IS THIS A GESTURE? (MOVER-1.) THE RECORD SAYS (U0 3c): an object the user's gesture moves — the

@@ -3101,6 +3101,8 @@ size_t PhotonComponent::markDirtyCascadesPending(GiStaleReason why) {
         if (!c.editSince) c.editSince = frame;
         c.editLast = frame;
         ++marked;
+        if (std::getenv("P7_TRACE"))   // ARM (to revert): the cadence trace
+            std::fprintf(stderr, "MARK frame %llu c%zu editSince %llu\n", frame, size_t(&c - mVctCascades.data()), c.editSince);
     }
     clearCascadeDirty();
     return marked;
@@ -4752,7 +4754,7 @@ static inline long long jahQuantAxis(float pos, float size) {
 // placements: gi.field_oracle_shells (6b), a floor read 0 against 6.4e-3). ONE quantiser for the sites that must
 // agree: recentreCascade, placedForCamera, planScroll's target and the jump guard.
 static inline long long jahQuantPlacement(float pos, float cell, float quantumCells) {
-    const double q = std::max(2.0, double(quantumCells));
+    const double q = std::getenv("P7_OLDQ") ? 2.0 : std::max(2.0, double(quantumCells));   // ARM
     return (long long)q * (long long)std::floor(double(pos) / (q * double(cell)) + 0.5);
 }
 
@@ -4797,7 +4799,7 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
         c.halfSize   = table[i].halfSize;
         c.resolution = Ogre::uint32(table[i].resolution);
         // THE STEP IS THE PLACEMENT QUANTUM (10-2e: giPlacementQuantumCells - a power of two, the clipmap law)
-        c.stepCells  = giPlacementQuantumCells(table[i].stepCells);
+        c.stepCells  = std::getenv("P7_OLDQ") ? table[i].stepCells : giPlacementQuantumCells(table[i].stepCells);   // ARM
         // `correctAreaLightShadows` on the INNERMOST cascade only, which is the
         // upstream's own recommendation (its VctCascadeSetting, not in our fork): it is a
         // per-cascade memory and time cost and the near field is the only place
@@ -6210,6 +6212,18 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
             const double reach = (0.5 + double(kStepHysteresis)) * double(step);
             for (int a = 0; a < 3 && !moved; ++a)
                 moved = std::fabs(double(cam[a]) - double(centre[a])) > reach;
+            if (std::getenv("P7_OLDQ")) {   // ARM: the old builtCam-relative test
+                moved = false;
+                const float built[3] = { c.builtCam.x, c.builtCam.y, c.builtCam.z };
+                const float band = step * kStepHysteresis;
+                for (int a = 0; a < 3 && !moved; ++a) {
+                    const long long kb = jahQuantAxis(built[a], lattice);
+                    if (jahQuantAxis(cam[a], lattice) == kb) continue;
+                    const double lo = double(kb) * double(lattice);
+                    const double hi = lo + double(lattice);
+                    if (double(cam[a]) < lo - double(band) || double(cam[a]) >= hi + double(band)) moved = true;
+                }
+            }
         }
         // THE TWO DIRTY_ALL GUARDS (Godot's, and S1 §4.4's three GPU losses are
         // why they are a prerequisite rather than an improvement).
@@ -6339,6 +6353,26 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
             c0Writes = w.reserved0 && (!w.scroll0 || c.scroll.frame + 1u >= c.scroll.frames());
         }
     }
+    // ARM (to revert, P7_INSTEP): cascade 0's edit rebuild takes cascade 1's in the SAME frame
+    if (std::getenv("P7_TRACE") && mVctCascades.size() > 1u) {
+        static int dbgN = 0;
+        if (dbgN < 100000 && (mVctCascades[0].pending || mVctCascades[1].pending)) {
+            ++dbgN;
+            std::fprintf(stderr, "INSTEP frame %llu r0 %d s0 %d mat %zu | c0 p%d why%d es%llu | c1 p%d why%d es%llu sc%d\n",
+                         giWriterFrame(), int(w.reserved0), int(w.scroll0), mVctPendingMaterialSlots.size(),
+                         int(mVctCascades[0].pending), int(mVctCascades[0].pendingReason), mVctCascades[0].editSince,
+                         int(mVctCascades[1].pending), int(mVctCascades[1].pendingReason), mVctCascades[1].editSince,
+                         int(mVctCascades[1].scroll.active));
+        }
+    }
+    if (std::getenv("P7_INSTEP") && w.reserved0 && !w.scroll0 && mVctCascades.size() > 1u && mVctPendingMaterialSlots.empty()) {
+        const VctCascade &c1 = mVctCascades[1];
+        if (c1.pending && c1.editSince != giWriterFrame() && !c1.scroll.active && c1.pendingReason != GiStaleReason::Camera) {
+            w.rebuild = 1;
+            w.spent = true;
+            return;
+        }
+    }
     if (mVctPendingMaterialSlots.empty()) {
         // The candidates, oldest first (a stable sort keeps the innermost first among equals).
         std::vector<size_t> order;
@@ -6349,6 +6383,10 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
         });
         for (size_t i : order) {
             VctCascade &c = mVctCascades[i];
+            // ARM (to revert, P7_INSTEP): cascade 1's edit waits for cascade 0's frame
+            if (std::getenv("P7_INSTEP") && i == 1u && !w.reserved0 && mVctCascades[0].pending &&
+                mVctCascades[0].pendingReason != GiStaleReason::Camera && c.pendingReason != GiStaleReason::Camera)
+                continue;
             if (c.scroll.active) {
                 if (mVctMaterialRefreshOwed) continue;
                 if (c0Writes && c.scroll.frame + 1u >= c.scroll.frames()) continue;   // its commit waits a frame
@@ -6544,6 +6582,9 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         }
         // (The field does not follow cascade 0 - its window steps with the eye, PHOTON-7 stage 5, 5-5: its probes
         // read cascade 0's placement as it stands, per dispatch.)
+        if (std::getenv("P7_TRACE"))   // ARM (to revert): the cadence trace
+            std::fprintf(stderr, "REBUILT frame %llu c%zu res %d scroll %d owed %d editLast %llu\n", giWriterFrame(), i,
+                         int(reserved), int(slotScroll), int(c.pending), c.editLast);
         if (!reserved) spent = true;
         reservedWork = reservedWork || reserved;
         // THE LAG SERVED: the cascade is placed for the camera (a camera debt still owed starts a new one) - not by a
