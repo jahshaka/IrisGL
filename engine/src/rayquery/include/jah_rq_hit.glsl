@@ -257,6 +257,12 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 		// blending out over the band below it; the outermost by its box (nothing further out to hand to). So two
 		// placements the engine can reach - a walk and a teleport to one pose - read the same level from the same
 		// cells (the grid is world-anchored), where the box rule read the finest box holding the point.
+		// The footprint's lod in this cascade's cells (`invSize.w` is the cell in world
+		// units); the read maps it to its own level (jahVoxelKernelMip).
+		const float texel = max( invSize.w, 1e-6 );
+		float lod = 0.0;
+		if( !mirror )
+			lod = jahVoxelFootprintLod( footprint, texel );
 		float wLevel = -1.0;
 		if( JAH_VOX_LEVEL_ON && c < count - 1 )
 		{
@@ -264,15 +270,17 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 			const float d = max( max( dv.x, dv.y ), dv.z );
 			const vec4 lv = JAH_VOX_LEVEL( c );
 			wLevel = mirror ? ( d <= lv.x ? 1.0 : 0.0 ) : clamp( ( lv.x - d ) / max( lv.y, 1e-6 ), 0.0, 1.0 );
+			// THE FOOTPRINT'S LEVEL TOO (the clipmap law): this cascade's levels up to K = log2 of its placement
+			// quantum are world-anchored, so a footprint fades out of it between K - 1 and K (its reads then touch
+			// levels under K) and the next one out answers past it
+			if( !mirror )
+			{
+				wLevel *= clamp( lv.z - lod, 0.0, 1.0 );
+				lod = min( lod, max( lv.z - 1.0, 0.0 ) + 1.0 );
+			}
 			if( !( wLevel > 0.0 ) )
 				continue;				// past this cascade's level: the next one out answers
 		}
-		// The footprint's lod in this cascade's cells (`invSize.w` is the cell in world
-		// units); the read maps it to its own level (jahVoxelKernelMip).
-		const float texel = max( invSize.w, 1e-6 );
-		float lod = 0.0;
-		if( !mirror )
-			lod = jahVoxelFootprintLod( footprint, texel );
 		// THE HIT READS THE TEXEL ITS SURFACE WAS VOXELISED INTO (PHOTON-VOXEL-5 item (iv)).
 		// Along the ray's dominant axis the surface lies in one of the two texels either side
 		// of the hit - the voxels are half-open, so a face ON a texel plane belongs to the

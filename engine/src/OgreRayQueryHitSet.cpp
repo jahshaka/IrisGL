@@ -204,6 +204,7 @@ void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &ou
         const unsigned from = c < n ? c : (n ? n - 1u : 0u);
         out.level[c][0] = n ? src.levelRadius[from] : 0.0f;
         out.level[c][1] = n ? src.levelBand[from] : 0.0f;
+        out.level[c][2] = n ? src.levelMaxLod[from] : 0.0f;
     }
     out.counts[1] = src.sky ? 1.0f : 0.0f;
     out.counts[2] = float(geomSlots);

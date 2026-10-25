@@ -223,6 +223,9 @@ struct HitSetSources {
     float levelCam[3] = {};
     float levelRadius[kGatherMaxCascades] = {};
     float levelBand[kGatherMaxCascades] = {};
+    /// ...and the coarsest footprint level it answers, K (its placement quantum's: giPlacementLevelK - every level up to
+    /// it world-anchored); a footprint past it hands to the next one out
+    float levelMaxLod[kGatherMaxCascades] = {};
     bool levelOn = false;
     /// THE ONE ENVIRONMENT (PHOTON-ENV-1, OgreScene::rayEnvironment): the Sky Light's cube (null: the flat colour).
     Ogre::TextureGpu *sky = nullptr;
@@ -288,7 +291,7 @@ struct HitSetParams {
     float cloudMap[4] = {};
     float cloudSun[4] = {};
     float levelCam[4] = {};                          ///< the GI camera (xyz), the level rule on (w)
-    float level[kGatherMaxCascades][4] = {};         ///< per cascade: its level radius, its band (metres)
+    float level[kGatherMaxCascades][4] = {};         ///< per cascade: its level radius, its band (metres), its K
 };
 static_assert(sizeof(HitSetParams) == 23u * 16u, "JahHitParams is twenty-three vec4s");
 /// Fills `out` from the hit set; `geomSlots` = the per-slot row entries the job's own copy holds this frame (0: none).

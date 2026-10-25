@@ -3427,12 +3427,37 @@ inline float giCascadeGuaranteedRadius(const GiParams::GiCascadeDesc &c)
 /// which gi.field_oracle_shells (6b) - two placements at the reachable extremes, the bounce on - and gi.card_residency
 /// (3) - walk = teleport - both read within a code (the measuring door gi.hitLevelMargin sets it; -1 = this default).
 /// THE PRICE per level: the usable range lost, step + cell + M cells off the half size.
-constexpr float kGiHitLevelMarginCells = 8.0f;
+constexpr float kGiHitLevelMarginCells = 2.0f;   // MEASURED (10-2e): the fewest cells within a code - see below
+/// THE PLACEMENT QUANTUM (PHOTON-7 stage 10, 10-2e; the lead's ruling - the clipmap law): a cascade's centre sits on a
+/// lattice of Q = 2^K of its cells and its re-centre step IS Q, so every mip level a reader touches up to K stays
+/// WORLD-ANCHORED at every placement the cascade can reach (a level's texel is 2^L cells; the directional volumes'
+/// level 0 is two). Q is the largest power of two not above the derived step plus one cell (High's 33 -> 32, 15 -> 16,
+/// 8 -> 8): the step within a cell of the rule's. Each cascade is anchored on its OWN lattice, which is all a reader of
+/// that cascade needs - the cell ratios between cascades (c1 -> c2 is 3x at High) need no alignment across them.
+inline float giPlacementQuantumCells(float stepCells)
+{
+    float q = 2.0f;
+    while (q * 2.0f <= stepCells + 1.0f) q *= 2.0f;
+    return q;
+}
+/// ...and the coarsest level a hit reads in a cascade of that quantum: K = log2 Q (a footprint past it hands to the
+/// next cascade out).
+inline float giPlacementLevelK(float quantumCells) { return std::floor(std::log2(std::max(quantumCells, 1.0f)) + 0.5f); }
 constexpr float kGiHitLevelBandCells = 6.0f;
 inline float giHitLevelMarginCells(double armValue) { return armValue >= 0.0 ? float(armValue) : kGiHitLevelMarginCells; }
+/// THE STEP TEST'S BAND (PhotonGi.cpp's planCascades): a cascade re-centres once the camera is more than (0.5 + h) of
+/// its step off its lattice centre on an axis - so the furthest a reachable placement holds the camera off-centre.
+constexpr float kGiStepHysteresis = 0.1f;
+/// THE LEVEL RADIUS: the half size less the furthest a REACHABLE placement holds the camera off-centre ((0.5 + h) of the
+/// step: the lattice's step test), a cell and the margin - a point inside it is inside every box this cascade can stand
+/// at for this camera. MEASURED at the placement lattice (gi.field_oracle_shells (6b), the camera at the band's edge -
+/// 0.59 of a step off one centre - and gi.card_residency (3), walk = teleport): M = 0 cells, the store 1.6 codes apart
+/// (57 channels over one); M = 2, 4, 8: 0.000, and (3) within 0.12 / 0.07 / 0.24 codes - so M = 2 (the bounce's reach
+/// past the reachable boxes' common interior: an edge difference spreading two cells in, under a code past them).
 inline float giHitLevelRadius(const GiParams::GiCascadeDesc &c, float marginCells)
 {
-    return giCascadeGuaranteedRadius(c) - marginCells * giCascadeCell(c);
+    const float cell = giCascadeCell(c);
+    return c.halfSize - (0.5f + kGiStepHysteresis) * c.stepCells * cell - cell - marginCells * cell;
 }
 
 /// THE WALKING PACE a scroll is sized for: 1.4 m/s at the engine's fixed 1/60 s frame.

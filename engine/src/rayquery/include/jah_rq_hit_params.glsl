@@ -33,7 +33,8 @@ struct JahHitParams
 	vec4 cloudMap;          // the cloud layer's 1 / tile, strength, scroll x, z
 	vec4 cloudSun;          // ...its sun throw x, z, altitude, 1 / mu_s
 	vec4 levelCam;          // THE LEVEL BY THE CAMERA (10-2e): the GI camera (xyz), the rule on (w)
-	vec4 level[4];          // ...per cascade: x its level radius, y its hand-over band (metres, max-norm from the camera)
+	vec4 level[4];          // ...per cascade: x its level radius, y its hand-over band (metres, max-norm from the camera),
+	                        // z its coarsest footprint level K (its placement quantum's)
 };
 
 #define JAH_VOX_COUNT        int( JAH_HIT_PARAMS.counts.x )

@@ -7413,6 +7413,7 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
             const float marginCells = giHitLevelMarginCells(mArms ? mArms->value(ArmId::GiHitLevelMargin) : -1.0);
             out.levelRadius[c] = giHitLevelRadius(v.shape, marginCells);
             out.levelBand[c] = kGiHitLevelBandCells * v.cell;
+            out.levelMaxLod[c] = giPlacementLevelK(v.shape.stepCells);
         }
         ++out.cascadeCount;
     }
