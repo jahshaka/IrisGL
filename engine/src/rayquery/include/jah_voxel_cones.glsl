@@ -140,21 +140,22 @@ vec4 jahSpecularConeStart( vec3 surfaceLS, vec3 dirLS, vec3 biasDirLS )
 /// THE DIFFUSE GI AT A SURFACE POINT, GATHERED BY RAYS (PHOTON-7 stage 10, 10-1; L5: ONE estimator; L9: no light
 /// passes a wall) - the world caches' (the card relight, the bounce's voxel sides) and the pixel's where it reads no
 /// field (the no-ray route's screen integrate; the blended and refractive passes): the cosine-weighted mean radiance over
-/// the hemisphere as the mean of `rays` fixed cosine-distributed occupancy rays (jah_voxel_ray.glsl) turned by `turn`
-/// about the normal. A HIT reads the side of the voxel facing the ray; an ESCAPE (out of the last cascade: its world
-/// shell `lastShellC0`, or its box in the band) the sky over the ray's bin (a cone of the bin's solid angle, 2 pi / N);
+/// the hemisphere as the mean of `rays` fixed cosine-distributed occupancy rays (jah_voxel_ray.glsl's one set). A HIT
+/// reads the side of the voxel facing the ray; an ESCAPE (out of the last cascade: its world shell `lastShellC0`, or its
+/// box in the band) the sky over the ray's bin (a cone of the bin's solid angle, 2 pi / N);
 /// an EXHAUSTED ray is no sample (the mean is over the rays that are). The sky enters ONLY at an earned miss.
 /// `surfLS` the surface point and `nLS` its unit normal (cascade 0's normalised space), `basis` the frame whose third
 /// axis is the normal (the caller's space: JAH_CONES_TO_LS / _TO_WORLD take its directions to the volume and the
 /// world), `epsC0` the start's offset along the normal (cascade 0's units), `ownCell` the voxel side's own cell
-/// (w 0: none), `firstShellC0` its chain's first world shell end (0: the finest cascade's own).
+/// (w 0: none), `firstShellC0` its chain's first world shell end (0: the finest cascade's own), `planeTest0` whether the
+/// chain's first cascade is the finest (its planar cells take the plane test: jah_voxel_ray.glsl).
 /// THE PIXEL'S RAYS (the no-ray route's screen integrate and the passes where no field answers): one count for both, so
 /// the two routes are one integral (gi.screen_integrate). A pixel is recomputed every frame, so it traces fewer than a
-/// cache texel, at a fixed turn (smooth across a surface; a per-pixel key would be noise).
+/// cache texel.
 const int kJahPixelDiffuseRays = 8;
 
-vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float turn, float epsC0, ivec4 ownCell,
-					float firstShellC0, float lastShellC0 )
+vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float epsC0, ivec4 ownCell,
+					float firstShellC0, float lastShellC0, bool planeTest0 )
 {
 	const int n = max( rays, 1 );
 	const vec3 startLS = surfLS + nLS * epsC0;
@@ -164,9 +165,9 @@ vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float turn, flo
 	float taken = 0.0;
 	for( int i = 0; i < n; ++i )
 	{
-		const vec3 d = basis * jahRayCosineDir( i, n, turn );
+		const vec3 d = basis * jahRayCosineDir( i, n );
 		const JahVoxelRayResult r =
-			jahVoxelRay( startLS, JAH_CONES_TO_LS( d ), surfLS, nLS, epsC0, ownCell, firstShellC0, lastShellC0 );
+			jahVoxelRay( startLS, JAH_CONES_TO_LS( d ), surfLS, nLS, epsC0, ownCell, firstShellC0, lastShellC0, planeTest0 );
 		if( r.exitReason == kJahRayHit )
 		{
 			sum += r.radiance;

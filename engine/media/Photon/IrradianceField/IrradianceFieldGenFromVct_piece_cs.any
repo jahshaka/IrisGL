@@ -355,7 +355,7 @@
 		// covering part of a cell's face let the rest through (10-0's P3: the field's probe rays carried the sealed
 		// room's last 1.76 % of sky). A probe is a point in free space: no surface, no own cell.
 		const JahVoxelRayResult ray = jahVoxelRay( posLS + startBias, dirLS, float3( 0, 0, 0 ), float3( 0, 0, 0 ), 0.0,
-												   int4( 0, 0, 0, 0 ), 0.0, p.worldToVolumeDir.w );
+												   int4( 0, 0, 0, 0 ), 0.0, p.worldToVolumeDir.w, true );
 		const bool sampled = ray.exitReason != kJahRayExhausted;
 		const float3 sky = ray.exitReason == kJahRayEscaped ? jahEnvCone( dir, p.coneAngleTan ) : float3( 0, 0, 0 );
 		// THE DEPTH STAYS CASCADE-0-LOCAL AND IS MEASURED FROM THE PROBE: the march's

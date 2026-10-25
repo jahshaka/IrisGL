@@ -93,7 +93,7 @@
 
 	/// THE BOUNCE GATHERED AT ONE SIDE OF A VOXEL, BY RAYS (PHOTON-7 stage 10, 10-1; L9: no light passes a wall) - the
 	/// card relight's estimator, ONE TEXT of it (jah_voxel_cones.glsl's jahRayDiffuse): the cosine-weighted mean
-	/// radiance over the side's hemisphere as the mean of N fixed, world-keyed, cosine-distributed occupancy rays
+	/// radiance over the side's hemisphere as the mean of N fixed cosine-distributed occupancy rays
 	/// (jah_voxel_ray.glsl), N = p_rayCounts.x. A HIT reads the side of the voxel facing the ray; an ESCAPE (out of the
 	/// last cascade: its world shell p_rayParams.w, or its box in the band) the sky over the ray's bin; an EXHAUSTED ray
 	/// is no sample. THE SIDE STARTS FROM ITS OWN SURFACE (the preflight's M4: the voxel's centre put a thin wall's two
@@ -101,9 +101,9 @@
 	/// dominant on, where the voxel's faces looking that way lie (the surface position of that half), the cell's
 	/// centre across it - then the finest cell off along the normal; the surface's tangent plane and the voxel's own
 	/// cell are the ray's (jah_voxel_ray.glsl).
-	/// `cellLS` the voxel's centre (this cascade's normalised space), `nWorld` the side's unit world normal, `turn` its
-	/// world key's (jahRayWorldTurn). The result is radiance, the store's units.
-	INLINE float3 jahBounceRays( float3 cellLS, int3 cell, float3 nWorld, float turn )
+	/// `cellLS` the voxel's centre (this cascade's normalised space), `nWorld` the side's unit world normal. The result
+	/// is radiance, the store's units.
+	INLINE float3 jahBounceRays( float3 cellLS, int3 cell, float3 nWorld )
 	{
 		const float3 normalLS = jahConeBiasDir( nWorld * ( p_invVoxelResolution / p_voxelCellSize ) );
 		const float3 an = abs( normalLS );
@@ -120,8 +120,8 @@
 		// own cell, which would jump a slab thinner than it (the roof's top 0.4 m above a contact face in a 0.47 m cell:
 		// gi.sealed_sky)
 		const float eps = p_rayCounts.y;
-		return jahRayDiffuse( surfaceLS, normalLS, jahConeBasisWorld( nWorld ), int( p_rayCounts.x ), turn, eps,
-							  int4( cell, 1 ), p_rayCounts.z, p_rayParams.w );
+		return jahRayDiffuse( surfaceLS, normalLS, jahConeBasisWorld( nWorld ), int( p_rayCounts.x ), eps,
+							  int4( cell, 1 ), p_rayCounts.z, p_rayParams.w, p_rayCounts.w > 0.5 );
 	}
 
 	@insertpiece( DeclSRgbFuncs )
@@ -196,16 +196,12 @@
 		// one-sided write: it stores 0, LightInjection) and gathers nothing.
 		// ONE call site in a loop over the sides, not two: the gather is the whole ray set, inlined per
 		// call (a second call doubled the job's compile time).
-		// THE WORLD KEY: the voxel's centre in the world (its lattice cell: the same at every placement of
-		// the box), and the side.
-		const float3 jahKeyPoint = p_rayParams.xyz + ( float3( jahCell ) + 0.5f ) * p_voxelCellSize;
 		float3 gathered[2];
 		gathered[0] = float3( 0, 0, 0 );
 		gathered[1] = float3( 0, 0, 0 );
 		for( int side = 0; side < ( twoSided ? 2 : 1 ); ++side )
 		{
-			gathered[side] = jahBounceRays( voxelUvwPos, int3( jahCell ), side == 0 ? normalVal.xyz : -normalVal.xyz,
-											jahRayWorldTurn( jahKeyPoint, uint( side ) + 1u ) );
+			gathered[side] = jahBounceRays( voxelUvwPos, int3( jahCell ), side == 0 ? normalVal.xyz : -normalVal.xyz );
 		}
 		const float3 vctDiffuse = gathered[0];
 		const float3 vctDiffuseBack = gathered[1];

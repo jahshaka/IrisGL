@@ -196,8 +196,8 @@
 		const float3 biasDirLS = jahConeBiasDir( jahCubeToVctProbeSpaceDir( TBN[2], probeParams ) );
 		const float eps = JAH_VOX_INVRES( 0 ).x;
 		const float3 surfLS = posLS - biasDirLS * eps;
-		outDiffuse.xyz += jahRayDiffuse( surfLS, biasDirLS, TBN, kJahPixelDiffuseRays, 0.0, eps, int4( 0, 0, 0, 0 ), 0.0,
-										 probeParams.rayLastShell ) * probeParams.blendFade;
+		outDiffuse.xyz += jahRayDiffuse( surfLS, biasDirLS, TBN, kJahPixelDiffuseRays, eps, int4( 0, 0, 0, 0 ), 0.0,
+										 probeParams.rayLastShell, true ) * probeParams.blendFade;
 	}
 	@end
 

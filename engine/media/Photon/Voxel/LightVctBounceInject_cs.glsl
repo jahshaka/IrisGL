@@ -130,7 +130,8 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform uint4 brickMark;
 	// PHOTON-7 stage 10, 10-1: THE CACHE RAYS - xyz this cascade's volume origin (world: a voxel's world key), w the
 	// last world shell (this cascade's normalised units); and x the rays a side, y the start bias (the finest cascade's
-	// cell, in this cascade's normalised units), z this cascade's own world shell end D (the same units)
+	// cell, in this cascade's normalised units), z this cascade's own world shell end D (the same units), w 1 when this
+	// cascade is the finest (its planar cells take the ray's plane test)
 	uniform float4 rayParams;
 	uniform float4 rayCounts;
 vulkan( }; )

@@ -819,7 +819,7 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
         lighting->setCacheRays(rayLastShellMetres(),
                                giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
                                    .voxelBounceRays,
-                               mVctCascades.empty() ? 0.0f : mVctCascades.front().cell(), shellEnd);
+                               mVctCascades.empty() ? 0.0f : mVctCascades.front().cell(), shellEnd, i == 0);
     }
     lighting->setLightFrame(frame);
     // A WHOLE INJECTION (a first build, a jump, a new placement) WRITES THE TOTAL FROM ITS DIRECT TERM: the volume's

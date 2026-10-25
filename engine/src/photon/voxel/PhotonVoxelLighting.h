@@ -223,6 +223,7 @@ namespace Ogre
         float             mCacheRayShell = 0.0f;
         float             mCacheRayBias = 0.0f;
         float             mCacheRayFirstShell = 0.0f;
+        bool              mCacheRayFinest = true;
         uint32            mCacheRays = 16u;
         /// One dispatch of the feedback job in `mode` (PhotonBrickFeedback_cs.glsl), one thread per brick unless the
         /// mode says otherwise; `source` and `activation` for ACCUM and PRE, `shift` for SHIFT.
@@ -468,8 +469,9 @@ namespace Ogre
         /// guaranteed radius: PhotonComponent::rayLastShellMetres), each started `biasMetres` off its surface (the
         /// finest cascade's cell, at every cascade), this cascade's own rays reading it to the WORLD's shell end
         /// `firstShellMetres` (the sum of eight cells of every cascade up to this one).
-        void setCacheRays( float lastShellMetres, uint32 rays, float biasMetres, float firstShellMetres )
+        void setCacheRays( float lastShellMetres, uint32 rays, float biasMetres, float firstShellMetres, bool finest )
         {
+            mCacheRayFinest = finest;
             mCacheRayShell = lastShellMetres;
             mCacheRays = rays;
             mCacheRayBias = biasMetres;

@@ -311,21 +311,21 @@ layout( local_size_x = @value( threads_per_group_x ),
 
 	// THE TEXEL'S DIFFUSE GI at world point P with normal N, GATHERED BY RAYS (PHOTON-7 stage 10, 10-1; L9: no light
 	// passes a wall): envColourD - the cosine-weighted mean radiance over the hemisphere - as the mean of N fixed,
-	// world-keyed, cosine-distributed occupancy rays through the chain (jah_voxel_cones.glsl's jahRayDiffuse, the one
+	// cosine-distributed occupancy rays through the chain (jah_voxel_cones.glsl's jahRayDiffuse, the one
 	// text the bounce and the pixel run too), N = counts.z. A HIT reads
 	// the side of the voxel facing the ray; an ESCAPE (out of the last cascade: its world shell, counts.y, or its box in
 	// the band) reads the sky over the ray's bin (a cone of the bin's solid angle, 2 pi / N); an EXHAUSTED ray is no
 	// sample (the mean is over the rays that are). The sky enters ONLY at an earned miss: the four-cone set's escape
 	// and the sixteen-cone sky share (jahSkyShareFine) it replaces let the sky through a sealed room's walls (10-0's
-	// P1: the gather's peak 16.26 % of an open roof). The key is the texel's WORLD point, so a texel relit at any
-	// placement, after a walk or a teleport, traces the same rays.
+	// P1: the gather's peak 16.26 % of an open roof). The set is the world normal's own (jahRayCosineDir), so a texel
+	// relit at any placement, after a walk or a teleport, traces the same rays.
 	vec3 jahCardEnvColourD( vec3 P, vec3 N )
 	{
 		const vec3 surfLS = ( P - gp.volumeOrigin.xyz ) * gp.volumeInvSize.xyz;
 		const vec3 biasDirLS = jahConeBiasDir( N * gp.volumeInvSize.xyz );
 		// one cell of cascade 0 off the surface (the chain's cascades are cubes: one cell length), the one integrator
-		return jahRayDiffuse( surfLS, biasDirLS, jahConeBasisWorld( N ), int( gp.counts.z ), jahRayWorldTurn( P, 0u ),
-							  JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0, gp.counts.y );
+		return jahRayDiffuse( surfLS, biasDirLS, jahConeBasisWorld( N ), int( gp.counts.z ),
+							  JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0, gp.counts.y, true );
 	}
 @end
 

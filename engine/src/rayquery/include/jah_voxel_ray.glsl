@@ -7,7 +7,7 @@
 // 0.44 of a ray aimed at its middle at normal incidence and 0.19-0.59 of one at 0-85 degrees (gi.voxel_ray_wall, red on
 // the base; 10-0's P5 found the store marks every such cell). THIS RAY READS OCCUPANCY (the lead's ruling on P5,
 // 2026-10-25): a cell the store marks occupied (the light volume's opacity c > 0, any geometry in it) is a hit FROM
-// EVERY DIRECTION. What that costs is over-occlusion where a coarse cell is partly empty (a 1.875 m cell is as solid as
+// EVERY DIRECTION - but a PLANAR cell (its faces on one axis: the plane test, below), which a ray crossing its plane hits. What that costs is over-occlusion where a coarse cell is partly empty (a 1.875 m cell is as solid as
 // its smallest object); what it buys is that no ray passes a wall at any angle in any cascade.
 //
 // THE HIT READS THE SIDE FACING THE RAY (the two-sided store, PHOTON-7 stage 7): the side of the voxel's surfaces the
@@ -36,7 +36,19 @@
 // its stored plane inside the cell too: a floor texel within a cell of a wall standing on it starts INSIDE the wall's
 // cell, and occupancy alone stopped every ray there, the ones leaving the wall included, each reading the wall's side
 // facing it - its back, 0 (rtreflect.contact: the crease's floor row read 9 of the rows' 73-78, a dark line along it).
-// Every cell after it is occupancy, from every direction.
+// THE PLANE TEST (the lead's ruling on 10-1's crease): A CELL WHOSE FACES ALL LIE ON ONE AXIS - a floor, a wall, a slab's
+// two faces - is planar, and a planar surface blocks a ray exactly where the ray crosses it: the cell is a hit only
+// where the ray crosses one of its STORED planes (the surface position of each half) inside the cell. A ray grazing
+// above a floor inside the floor's own cell row is not occluded (rtreflect.contact: the block's bottom texel row's
+// rays stayed in the floor's 7.8 cm row and hit it, the crease's first floor row 2.07 codes dark), and nothing that
+// passes through a solid can avoid crossing its plane, so it cannot leak; a face that covers part of the cell is
+// taken as covering it all (over-occlusion, never a leak). Every other cell - a corner, an edge, clutter, faces on two
+// or three axes, a wall's end - is occupancy, a hit from every direction. THE FINEST CASCADE ONLY (`planeTest0`: the
+// chain's first cascade is cascade 0): a half's stored plane is the coverage-weighted MEAN of its faces, and a coarse
+// cell's half holds several - the 0.47 m cell under a room's wall holds the room's floor and the sky-lit ground outside,
+// one plane between them, and a grazing ray slipped between the real faces under the mean (measured with the test in
+// every cascade: gi.sealed_sky 3-4 % of the roof through the walls). At 7.8 cm one face is the case, and the crease lies
+// there.
 // THE SHELLS (the cone march's and LightInjection's jahInjectVisibility's, PHOTON-7 stages 1 and 5): cascade j reads
 // the ray over the distances [D_(j-1), D_j) from the start, D_j the sum of eight cells of every cascade up to j, and
 // hands over ON THE FIRST CELL PLANE OF CASCADE j + 1 PAST D_j (the next cascade enters its first cell at a face; a
@@ -84,22 +96,78 @@ struct JahVoxelRayResult
 	int steps;			///< the cells it read - its price
 };
 
-/// DOES AN OCCUPIED CELL HOLD A FACE IN FRONT OF THE TANGENT PLANE (the header)? Cell `iv` of cascade `c` at its
-/// centre `uvw`; `surface` whether the ray left one - `sJ` the surface point and `epsJ` the start bias in this
-/// cascade's normalised space, `nLS` the unit normal (`invRes` this cascade's cell, per axis). With `crossing` (THE
-/// START CELL and the own cell, the header) a face counts only where the ray CROSSES its plane inside the cell: from
-/// `pJ` along `dS` (this cascade's normalised units per cascade 0's), between `tIn` and `tOut`.
+/// DOES AN OCCUPIED CELL STOP THE RAY (the header)? Cell `iv` of cascade `c` at its centre `uvw`; `surface` whether the
+/// ray left one - `sJ` the surface point and `epsJ` the start bias in this cascade's normalised space, `nLS` the unit
+/// normal (`invRes` this cascade's cell, per axis); the ray's segment in the cell from `pJ` along `dS` (this cascade's
+/// normalised units per cascade 0's) between `tIn` and `tOut`. Only the faces IN FRONT of the tangent plane count.
+///   A PLANAR CELL (its faces on one axis, and `planar` - the finest cascade - or `crossing`): it stops the ray where the
+///   segment reaches THE SOLID its stored planes bound - behind a single face (its half's coverage-weighted plane; the
+///   side it does not look to), between a slab's two faces, outside two faces looking at each other - so a ray grazing in
+///   front of a floor in the floor's own cell row passes, and a ray that met a surface's relief above its mean plane is
+///   still caught before it leaves the solid.
+///   THE START CELL and THE OWN CELL holding faces on several axes (`crossing`): a face where the segment CROSSES its plane.
+///   ANY OTHER CELL: occupancy - stopped from every direction.
 bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nLS, float epsJ, vec3 invRes,
-					   bool crossing, vec3 pJ, vec3 dS, float tIn, float tOut )
+					   bool crossing, bool planar, vec3 pJ, vec3 dS, float tIn, float tOut )
 {
 	const vec3 an = abs( nLS );
 	const int dom = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
 	const vec4 cov[2] = vec4[2]( JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ), JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 ) );
 	const vec4 pos[2] = vec4[2]( JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 ), JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 ) );
-	// the cell's centre, and its corner most in front of the plane, relative to the surface point
+	// the cell's centre, and its corner most in front of the tangent plane, relative to the surface point
 	const vec3 centre = uvw - sJ;
 	const vec3 front = centre + 0.5 * invRes * sign( nLS );
-	bool any = false;
+	int axes = 0, axis = 0;
+	for( int b = 0; b < 3; ++b )
+	{
+		if( cov[0][b] + cov[1][b] > 0.0 )
+		{
+			++axes;
+			axis = b;
+		}
+	}
+	if( axes == 0 )
+		return !crossing;	// (occupied with no coverage read: a hit - never a leak on a quantum)
+	// each half's plane on an axis, and whether that face is in front of the tangent plane
+	const bool planeCell = axes == 1 && ( planar || crossing );
+	float qh[2];
+	bool live[2];
+	for( int h = 0; h < 2; ++h )
+	{
+		const int b = planeCell ? axis : 0;
+		const float o = cov[h][b];
+		qh[h] = o > 0.0 ? ( float( iv[b] ) + clamp( pos[h][b] / o, 0.0, 1.0 ) ) * invRes[b] : 0.0;
+		bool inFront = o > 0.0;
+		if( inFront && surface )
+		{
+			vec3 q = b == dom ? centre : front;
+			q[b] = qh[h] - sJ[b];
+			inFront = dot( q, nLS ) > epsJ;
+		}
+		live[h] = inFront;
+	}
+	if( planeCell )
+	{
+		// THE SOLID THE PLANES BOUND, against the segment's extent along the axis (a thousandth of a cell of slack: a
+		// face ON a cell plane - a floor at y = 0 on a lattice of 7.8 cm - is reached where the ray enters or leaves)
+		const int b = axis;
+		const float slack = 1e-3 * invRes[b];
+		const float a0 = pJ[b] + dS[b] * tIn, a1 = pJ[b] + dS[b] * tOut;
+		const float lo = min( a0, a1 ) - slack, hi = max( a0, a1 ) + slack;
+		// (the P half looks +axis: its solid is below its plane; the N half's above)
+		if( live[0] && live[1] )
+		{
+			if( qh[1] <= qh[0] )
+				return hi >= qh[1] && lo <= qh[0];	// a slab between them
+			return lo <= qh[0] || hi >= qh[1];		// two faces looking at each other: the solid outside
+		}
+		if( live[0] )
+			return lo <= qh[0];
+		if( live[1] )
+			return hi >= qh[1];
+		return false;	// every face the surface's own
+	}
+	// several axes: occupancy, or (the start and own cells) the faces the segment crosses - in front of the plane
 	for( int h = 0; h < 2; ++h )
 	{
 		for( int b = 0; b < 3; ++b )
@@ -107,15 +175,14 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nL
 			const float o = cov[h][b];
 			if( !( o > 0.0 ) )
 				continue;
-			any = true;
-			// level 0 stores O x f, f the faces' place IN THE CELL (jah_voxel_sample.glsl, jahVoxelPos0Centred)
 			const float qb = ( float( iv[b] ) + clamp( pos[h][b] / o, 0.0, 1.0 ) ) * invRes[b];
 			if( crossing )
 			{
 				if( dS[b] == 0.0 )
 					continue;
 				const float tx = ( qb - pJ[b] ) / dS[b];
-				if( !( tx >= tIn && tx <= tOut ) )
+				const float slack = 1e-3 * invRes[b] / abs( dS[b] );
+				if( !( tx >= tIn - slack && tx <= tOut + slack ) )
 					continue;
 			}
 			if( !surface )
@@ -126,7 +193,7 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nL
 				return true;
 		}
 	}
-	return !any && !crossing;	// (occupied with no coverage read: a hit - never a leak on a quantum)
+	return false;
 }
 
 /// THE RAY from `posLS0` (cascade 0's normalised space; a cache's caller starts it `epsC0` off its surface) along the
@@ -136,7 +203,7 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nL
 /// less: its eight cells - the finest cascade's own D) and the last cascade's world shell `lastShellC0` (cascade 0's
 /// normalised units from the start; 0 or less: its box alone).
 JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, float epsC0, ivec4 ownCell,
-							   float firstShellC0, float lastShellC0 )
+							   float firstShellC0, float lastShellC0, bool planeTest0 )
 {
 	JahVoxelRayResult r;
 	r.radiance = vec3( 0.0, 0.0, 0.0 );
@@ -230,10 +297,9 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 				// THE START CELL AND THE OWN CELL take a face only where the ray crosses it (the header)
 				const bool crossing = own || ( firstDda && it == 0 );
 				const float tCell = min( min( min( tMax.x, tMax.y ), tMax.z ), tStop );
-				const bool front = iso.w > 0.0 &&
-								   ( ( !surface && !crossing ) ||
-									 jahVoxelRayFront( j, uvw, iv, surface, surfJ, nLS, epsC0 * s0j, invRes, crossing, posJ,
-													   dirLS * s0j, tIn, tCell ) );
+				const bool front = iso.w > 0.0 && jahVoxelRayFront( j, uvw, iv, surface, surfJ, nLS, epsC0 * s0j, invRes,
+																	   crossing, planeTest0 && j == 0, posJ, dirLS * s0j,
+																	   tIn, tCell );
 				if( front && own )
 				{
 					// a face in front inside the side's own cell: blocked there, dark (the header)
@@ -311,28 +377,19 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 }
 
 /// THE WORLD CACHES' DIRECTIONS (the spec's "N fixed, world-keyed, cosine-distributed rays"): direction `i` of `n` in
-/// the frame whose third axis is the normal - a Vogel spiral on the unit disc (radius sqrt((i + 1/2) / n), the golden
-/// angle between neighbours: equal areas, so equal projected solid angles once lifted onto the hemisphere, Malley's
-/// method) turned about the normal by `turn` in [0, 1) of a revolution (the caller's world key: deterministic per
-/// texel or voxel side, so a cache's rest and "replace at once" hold, and neighbours decorrelate).
-vec3 jahRayCosineDir( int i, int n, float turn )
+/// the frame whose third axis is the normal (jah_voxel_cones.glsl's jahConeBasis: a function of the WORLD normal alone) -
+/// a Vogel spiral on the unit disc (radius sqrt((i + 1/2) / n), the golden angle between neighbours: equal areas, so
+/// equal projected solid angles once lifted onto the hemisphere, Malley's method). ONE SET FOR EVERY SURFACE POINT,
+/// never turned per texel or voxel: a cache is READ - by a reflection, by the gather's hits - texel by texel, and a set
+/// turned by a world key per texel stored the set's own sampling noise into the cache, a speckle of codes the readers
+/// show (rtreflect.contact: the crease's floor rows 91-98 a row apart, 36 columns over its law); the one set is smooth
+/// across a surface, deterministic, and a function of the world (a cache's rest, "replace at once", walk = teleport).
+vec3 jahRayCosineDir( int i, int n )
 {
 	const float u = ( float( i ) + 0.5 ) / float( n );
 	const float rr = sqrt( u );
-	const float phi = 6.2831853 * fract( float( i ) * 0.38196601 + turn );
+	const float phi = 6.2831853 * fract( float( i ) * 0.38196601 );
 	return vec3( rr * cos( phi ), rr * sin( phi ), sqrt( max( 1.0 - u, 0.0 ) ) );
-}
-
-/// THE WORLD KEY's turn from a world point: its bits at a fixed quantum (1/1024 of a metre-scale unit the caller picks)
-/// hashed (PCG) to [0, 1) - the same point, the same turn, at any placement of any box.
-float jahRayWorldTurn( vec3 keyPoint, uint salt )
-{
-	const ivec3 q = ivec3( floor( keyPoint * 1024.0 ) );
-	uint h = uint( q.x ) * 73856093u ^ uint( q.y ) * 19349663u ^ uint( q.z ) * 83492791u ^ salt * 2654435761u;
-	h = h * 747796405u + 2891336453u;
-	h = ( ( h >> ( ( h >> 28u ) + 4u ) ) ^ h ) * 277803737u;
-	h = ( h >> 22u ) ^ h;
-	return float( h >> 8u ) * ( 1.0 / 16777216.0 );
 }
 
 #endif   // JAH_VOXEL_RAY_GLSL

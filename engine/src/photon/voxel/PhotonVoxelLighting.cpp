@@ -1215,7 +1215,8 @@ namespace Ogre
             mBounceRayParams->setManualValue( rayParams, 4u );
             const float rayCounts[4] = { float( std::max( mCacheRays, 1u ) ),
                                          size.x > 0.0f ? mCacheRayBias / size.x : 0.0f,
-                                         size.x > 0.0f ? mCacheRayFirstShell / size.x : 0.0f, 0.0f };
+                                         size.x > 0.0f ? mCacheRayFirstShell / size.x : 0.0f,
+                                         mCacheRayFinest ? 1.0f : 0.0f };
             mBounceRayCounts->setManualValue( rayCounts, 4u );
         }
 

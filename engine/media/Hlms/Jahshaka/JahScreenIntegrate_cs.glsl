@@ -267,8 +267,8 @@ void main()
 		// UNDER A CASCADE CHAIN THE FALLBACK IS THE CHAIN'S OWN BOUNCE (PHOTON_SPEC 13 G3): the rays, traced only
 		// where the field's confidence leaves them a weight (SPEED-GPU, audit PH-2)
 		if( fallback > 0.0 )
-			diffuse += jahRayDiffuse( surfLS, biasDirLS, basis, kJahPixelDiffuseRays, 0.0, JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0,
-									  p.counts.w ) * fallback;
+			diffuse += jahRayDiffuse( surfLS, biasDirLS, basis, kJahPixelDiffuseRays, JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0,
+									  p.counts.w, true ) * fallback;
 	@else
 		// ...UNDER A SINGLE VOLUME, the environment's diffuse (what an unoccluded surface had before the field)
 		if( fallback > 0.0 )
@@ -277,8 +277,8 @@ void main()
 	}
 @else
 	@property( hlms_num_vct_cascades )
-		diffuse = jahRayDiffuse( surfLS, biasDirLS, basis, kJahPixelDiffuseRays, 0.0, JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0,
-								 p.counts.w );
+		diffuse = jahRayDiffuse( surfLS, biasDirLS, basis, kJahPixelDiffuseRays, JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0,
+								 p.counts.w, true );
 	@else
 		// NO VOLUME BUILT YET (the chain's first frames): the environment's diffuse
 		diffuse = jahEnvIrradiance( N );

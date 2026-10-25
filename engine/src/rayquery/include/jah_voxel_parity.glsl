@@ -50,7 +50,8 @@ vec4 jahParityAnswer( int cone, int part )
 	if( ( rawFlags & kJahParityRay ) != 0u )
 	{
 		const float eps = JAH_VOX_INVRES( 0 ).x;
-		const JahVoxelRayResult ray = jahVoxelRay( c0.xyz, c1.xyz, c0.xyz - c2.xyz * eps, c2.xyz, eps, ivec4( 0 ), 0.0, c3.y );
+		const JahVoxelRayResult ray = jahVoxelRay( c0.xyz, c1.xyz, c0.xyz - c2.xyz * eps, c2.xyz, eps, ivec4( 0 ), 0.0, c3.y,
+												   true );
 		if( part == 0 )
 			return vec4( ray.radiance, float( ray.exitReason ) );
 		if( part == 1 )
